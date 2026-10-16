@@ -162,12 +162,15 @@
       (rev acc)
       (ps_lines (add i 1) names (push (ps_slot_line (proc_slot i) names) acc))))
 
-(def ps_slot_line ((pid int) (names (list (list int)))) (list int)
-  (if (le pid 0)
-      (nil int)
+; The line of the process slot s holds, if it holds one still.
+(def ps_slot_line ((s Slot) (names (list (list int)))) (list int)
+  (match s
+    ((SlotHeld pid)
       (match (proc_info pid)
         ((None) (nil int))
-        ((Some info) (ps_line pid info names)))))
+        ((Some info) (ps_line pid info names))))
+    ((SlotUnused) (nil int))
+    ((NoSlot) (nil int))))
 
 (def help_text () (list int)
   "  ls              the files of the initramfs; programs are in /bin\n  ps              the processes running, and what each is doing\n  run NAME [ARG ...] [&]\n                  run /bin/NAME, or the program at NAME if it holds a /,\n                  with ARGs in place of its own; & leaves it running, and\n                  Ctrl-C ends one that is not\n  wait PID        wait for a process to exit; Ctrl-C stops waiting\n  kill PID        end a process, unless it is a driver\n  sleep MS        sleep for MS milliseconds\n  echo WORDS      print WORDS\n  exit [STATUS]   stop the system\n")
@@ -230,9 +233,11 @@
 ; A line from the console, whose process is tty. A Ctrl-C while it is
 ; typed shows the prompt again; the request for the line still stands.
 (def read_console ((console int) (port int) (tty int)) Read
-  (if (not (eq (port_send console (request port "r")) 0))
-      (HungUp)
-      (await_line port tty)))
+  (match (port_send console (request port "r"))
+    ((Sent) (await_line port tty))
+    ((SendNoPort) (HungUp))
+    ((SendFull) (HungUp))
+    ((SendTooBig) (HungUp))))
 
 (def await_line ((port int) (tty int)) Read
   (match (next_event port)
@@ -244,10 +249,16 @@
 ; The pid of the terminal at console, which answers p at once, watched on
 ; port, so that its exit says the terminal has gone; or -1.
 (def terminal_pid ((console int) (port int)) int
-  (if (not (eq (port_send console (request port "p")) 0))
-      -1
+  (match (port_send console (request port "p"))
+    ((Sent)
       (let pid (answered_by port)
-        (if (eq (proc_watch pid port) 0) pid -1))))
+        (match (proc_watch pid port)
+          ((Watched) pid)
+          ((WatchNoProc) -1)
+          ((WatchFull) -1))))
+    ((SendNoPort) -1)
+    ((SendFull) -1)
+    ((SendTooBig) -1)))
 
 ; Who sends tty to port: what comes before it, a Ctrl-C, is dropped.
 (def answered_by ((port int)) int
@@ -281,16 +292,18 @@
 ; until its input ends or the terminal's process exits.
 (def shell () int
   (let name (tty_name (args))
-    (let console (name_wait name 10000000000)
-      (if (lt console 0)
-          (let w (write_err (append "sh: no terminal " (append name "\n"))) 1)
-          (let t (tty_set console)
+    (match (name_wait name 10000000000)
+      ((NotFound) (let w (write_err (append "sh: no terminal " (append name "\n"))) 1))
+      ((Found console)
+        (match (tty_set console)
+          ((TtyNoPort) (let w (write_err (append "sh: terminal " (append name " is gone\n"))) 1))
+          ((TtySet)
             (let port (port_new)
               (let i (port_send console (request port "i"))
                 (let tty (terminal_pid console port)
                   (let m (say (motd))
                     (let w (say (banner))
-                      (repl console port tty (entry_paths))))))))))))
+                      (repl console port tty (entry_paths)))))))))))))
 
 (def repl ((console int) (reply int) (tty int) (names (list (list int)))) int
   (let p (say (prompt))
@@ -316,18 +329,20 @@
     ((CmdRun what argv bg) (let w (run_module reply what argv bg names) (repl console reply tty names)))))
 
 (def wait_for ((port int) (pid int)) (list int)
-  (if (not (eq (proc_watch pid port) 0))
-      (append "sh: no process " (append (digits pid) "\n"))
+  (match (proc_watch pid port)
+    ((Watched)
       (match (await_exit port pid false)
         ((WaitStopped) (append "[pid " (append (digits pid) " still running]\n")))
-        ((WaitedExit st) (append "[pid " (append (digits pid) (append " exited with " (append (digits st) "]\n"))))))))
+        ((WaitedExit st) (append "[pid " (append (digits pid) (append " exited with " (append (digits st) "]\n")))))))
+    ((WatchNoProc) (append "sh: no process " (append (digits pid) "\n")))
+    ((WatchFull) (append "sh: cannot wait for pid " (append (digits pid) ": too many ports watch it\n")))))
 
-(def killed ((pid int) (r int)) (list int)
-  (if (eq r 0)
-      (nil int)
-      (if (eq r (err_denied))
-          (append "sh: pid " (append (digits pid) " is a driver\n"))
-          (append "sh: no process " (append (digits pid) "\n")))))
+; What to say once kill has answered r.
+(def killed ((pid int) (r Kill)) (list int)
+  (match r
+    ((Killed) (nil int))
+    ((KillDenied) (append "sh: pid " (append (digits pid) " is a driver\n")))
+    ((KillNoProc) (append "sh: no process " (append (digits pid) "\n")))))
 
 ; What to say of a word that is not a command: if a program has that
 ; name, how to run it.
@@ -340,22 +355,41 @@
   (let e (program_entry what paths)
     (if (lt e 0)
         (say (append "sh: no program " (append (program_path what) "\n")))
-        (let pid (if (is_empty argv) (spawn_entry e) (spawn_entry_with e argv))
-          (if (lt pid 0)
-              (say (cannot_start (program_path what) pid))
-              (if bg
-                  (say (started_line pid))
-                  (say (exited_line pid (foreground port pid)))))))))
+        (match (if (is_empty argv) (spawn_entry e) (spawn_entry_with e argv))
+          ((Spawned pid)
+            (if bg
+                (say (started_line pid))
+                (say (exited_line pid (foreground port pid)))))
+          ((SpawnNoEntry) (say (cannot_start (program_path what) (SpawnNoEntry))))
+          ((SpawnNotProgram) (say (cannot_start (program_path what) (SpawnNotProgram))))
+          ((SpawnTooBig) (say (cannot_start (program_path what) (SpawnTooBig))))
+          ((SpawnNoRoom) (say (cannot_start (program_path what) (SpawnNoRoom))))))))
 
-(def cannot_start ((path (list int)) (code int)) (list int)
-  (if (eq code (err_denied))
-      (append "sh: " (append path " is not a program\n"))
-      (append "sh: cannot start " (append path (append ": " (append (digits code) "\n"))))))
+; What to say of path not started, as spawning it answered s.
+(def cannot_start ((path (list int)) (s Spawn)) (list int)
+  (match s
+    ((SpawnNotProgram) (append "sh: " (append path " is not a program\n")))
+    ((Spawned pid) (nil int))
+    ((SpawnNoEntry) (cannot_start_why path s))
+    ((SpawnTooBig) (cannot_start_why path s))
+    ((SpawnNoRoom) (cannot_start_why path s))))
 
-; Waits for pid, which a Ctrl-C ends.
+; The same, saying why as spawn_why does.
+(def cannot_start_why ((path (list int)) (s Spawn)) (list int)
+  (append "sh: cannot start " (append path (append ": " (append (spawn_why s) "\n")))))
+
+; Waits for pid, which a Ctrl-C ends, and gives its status. Unwatched, as
+; when too many ports watch it, it is waited for without Ctrl-C; gone,
+; its status is unknown, and taken as 1.
 (def foreground ((port int) (pid int)) int
-  (if (eq (proc_watch pid port) 0)
+  (match (proc_watch pid port)
+    ((Watched)
       (match (await_exit port pid true)
         ((WaitedExit st) st)
-        ((WaitStopped) (killed_status)))
-      (wait_pid pid)))
+        ((WaitStopped) (killed_status))))
+    ((WatchFull) (reaped_status (wait_pid pid)))
+    ((WatchNoProc) (reaped_status (wait_pid pid)))))
+
+; The status wait_pid gave, or 1 if there was no process to wait for.
+(def reaped_status ((r Reaped)) int
+  (match r ((Reaped st) st) ((WaitNoProc) 1)))

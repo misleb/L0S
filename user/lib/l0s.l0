@@ -1,8 +1,14 @@
 ; l0s.l0 -- the kernel's own calls, for programs built with --target proc
 ; to run under l0s. Link it, and common/abi.l0, common/initramfs.l0, and
 ; common/queue.l0, into every user program.
-; Under any other host there is no kernel to call: the calls give -3, and
-; receiving gives (RecvFailed).
+; A call that can fail returns a type of its own, whose constructors are
+; every answer the kernel can give it, so a match on one handles them all;
+; each type's X_of reads the kernel's word as one.
+; Under any other host there is no kernel to call: the kernel's word is
+; -3, which a call reads as its err_full answer if it has one, and
+; otherwise as the first failure its type lists, but wait_pid as a
+; status of -3 and tty_get as the kernel's own terminal; receiving gives
+; (RecvFailed).
 
 (def l0s_yield () int (supervisor_call (call_yield) 0 0 0))
 (def l0s_pid () int (supervisor_call (call_pid) 0 0 0))
@@ -10,10 +16,29 @@
 ; A new port, which only this process may receive on.
 (def port_new () int (supervisor_call (call_port_new) 0 0 0))
 
-; Sends payload to port: 0, or err_no_port, err_full, or err_too_big.
-(def port_send ((port int) (payload (list int))) int
+; What port_send did: sent; or not, as there is no such port, its queue
+; is full, or the payload is over max_message.
+(data Sending (Sent) (SendNoPort) (SendFull) (SendTooBig))
+
+(def sending_of ((code int)) Sending
+  (if (eq code 0)
+      (Sent)
+      (if (eq code (err_full))
+          (SendFull)
+          (if (eq code (err_too_big)) (SendTooBig) (SendNoPort)))))
+
+; Why port_send did not send, as a reason; empty if it did.
+(def sending_why ((s Sending)) (list int)
+  (match s
+    ((Sent) "")
+    ((SendNoPort) "no such port")
+    ((SendFull) "its queue is full")
+    ((SendTooBig) "the message is too big")))
+
+; Sends payload to port.
+(def port_send ((port int) (payload (list int))) Sending
   (let b (bytes_from_list payload)
-    (supervisor_send (call_send) port b 0 (bytes_len b))))
+    (sending_of (supervisor_send (call_send) port b 0 (bytes_len b)))))
 
 ; A message received: the pid that sent it, 0 for the kernel, and its
 ; payload; or (RecvFailed) if port is not this process's.
@@ -32,89 +57,257 @@
       (RecvFailed)
       (Message (le_u32 b 0) (bytes_range b (header_len) (bytes_len b)))))
 
-; Registers port under name: 0, err_no_port if port is not this
-; process's, or err_taken.
-(def name_register ((port int) (name (list int))) int
-  (let b (bytes_from_list name)
-    (supervisor_send (call_register) port b 0 (bytes_len b))))
+; What name_register did: registered the name; or not, as the port is not
+; this process's, the name is someone's already, or it is over 256 bytes.
+(data Registration (Registered) (RegisterNoPort) (RegisterTaken) (RegisterTooLong))
 
-; The port registered as name, or err_no_port.
-(def name_lookup ((name (list int))) int
+(def registration_of ((code int)) Registration
+  (if (eq code 0)
+      (Registered)
+      (if (eq code (err_taken))
+          (RegisterTaken)
+          (if (eq code (err_too_big)) (RegisterTooLong) (RegisterNoPort)))))
+
+; Why name_register did not register the name, as a reason; empty if it
+; did.
+(def registration_why ((r Registration)) (list int)
+  (match r
+    ((Registered) "")
+    ((RegisterNoPort) "the port is not this process's")
+    ((RegisterTaken) "the name is taken")
+    ((RegisterTooLong) "the name is over 256 bytes")))
+
+; Registers port under name.
+(def name_register ((port int) (name (list int))) Registration
+  (let b (bytes_from_list name)
+    (registration_of (supervisor_send (call_register) port b 0 (bytes_len b)))))
+
+; The port a name is registered as, or that none is: no name over 256
+; bytes ever is.
+(data Lookup (Found int) (NotFound))
+
+(def lookup_of ((code int)) Lookup
+  (if (ge code 0) (Found code) (NotFound)))
+
+; The port registered as name.
+(def name_lookup ((name (list int))) Lookup (lookup_of (lookup_code name)))
+
+; The kernel's word for name: its port, or a negative code.
+(def lookup_code ((name (list int))) int
   (let b (bytes_from_list name)
     (supervisor_send (call_lookup) 0 b 0 (bytes_len b))))
 
-; The port registered as name, yielding until it is, at most tries times;
-; err_no_port if it never was.
-(def name_await ((name (list int)) (tries int)) int
-  (let port (name_lookup name)
-    (if (if (ge port 0) true (le tries 0))
-        port
-        (let y (l0s_yield) (name_await name (sub tries 1))))))
+; The port registered as name, yielding until it is, at most tries times.
+(def name_await ((name (list int)) (tries int)) Lookup
+  (match (name_lookup name)
+    ((Found port) (Found port))
+    ((NotFound)
+      (if (le tries 0)
+          (NotFound)
+          (let y (l0s_yield) (name_await name (sub tries 1)))))))
+
+; What spawn_entry did: started the program, as the process with this
+; pid; or not, as there is no such entry, it is not a program, it is over
+; the 4 MB of a process's image or the arguments over max_message bytes
+; encoded, or no process can be made: every slot is live, or memory has
+; run out.
+(data Spawn (Spawned int) (SpawnNoEntry) (SpawnNotProgram) (SpawnTooBig) (SpawnNoRoom))
+
+(def spawn_of ((code int)) Spawn
+  (if (gt code 0)
+      (Spawned code)
+      (if (eq code (err_denied))
+          (SpawnNotProgram)
+          (if (eq code (err_too_big))
+              (SpawnTooBig)
+              (if (eq code (err_fault)) (SpawnNoRoom) (SpawnNoEntry))))))
+
+; Why spawn_entry did not start the program, as a reason; empty if it did.
+(def spawn_why ((s Spawn)) (list int)
+  (match s
+    ((Spawned pid) "")
+    ((SpawnNoEntry) "no such program")
+    ((SpawnNotProgram) "not a program")
+    ((SpawnTooBig) "too big")
+    ((SpawnNoRoom) "no room for another process")))
 
 ; Starts the program that is entry e of the initramfs, with the arguments
-; the inittab gives it: its pid, or err_no_port if there is no entry e,
-; err_denied if it is not a program, err_fault if no process can be made.
-(def spawn_entry ((e int)) int (supervisor_call (call_spawn) e 0 0))
+; the inittab gives it.
+(def spawn_entry ((e int)) Spawn (spawn_of (supervisor_call (call_spawn) e 0 0)))
 
-; The same, with args in place of the inittab's; or err_too_big if they
-; are over max_message bytes encoded.
-(def spawn_entry_with ((e int) (args (list (list int)))) int
+; The same, with args in place of the inittab's.
+(def spawn_entry_with ((e int) (args (list (list int)))) Spawn
   (let b (bytes_from_list (encode_args args))
-    (supervisor_send (call_spawn_args) e b 0 (bytes_len b))))
+    (spawn_of (supervisor_send (call_spawn_args) e b 0 (bytes_len b)))))
 
-; Waits for pid to exit: its status, or err_no_port.
-(def wait_pid ((pid int)) int (supervisor_call (call_wait) pid 0 0))
+; What wait_pid waited for: the process's exit status; or that there is
+; no such process. The kernel's word for that, err_no_port, is a status
+; too, so a process that exits with -1 reads as (WaitNoProc).
+(data Reaped (Reaped int) (WaitNoProc))
+
+(def reaped_of ((code int)) Reaped
+  (if (eq code (err_no_port)) (WaitNoProc) (Reaped code)))
+
+; Waits for pid to exit.
+(def wait_pid ((pid int)) Reaped (reaped_of (supervisor_call (call_wait) pid 0 0)))
 
 ; Waits until clock_ns reaches t.
 (def sleep_until ((t int)) int (supervisor_call (call_sleep_until) t 0 0))
 
 (def sleep_ns ((ns int)) int (sleep_until (add (clock_ns) ns)))
 
+; What irq_bind did: bound the interrupt; or not, as the board has no
+; such interrupt, this program may not drive devices or irq is below 1,
+; the port is not this process's, or another has bound it already.
+(data IrqBinding (IrqBound) (IrqAbsent) (IrqDenied) (IrqNoPort) (IrqTaken))
+
+(def irq_binding_of ((code int)) IrqBinding
+  (if (eq code 0)
+      (IrqBound)
+      (if (eq code (err_denied))
+          (IrqDenied)
+          (if (eq code (err_no_port))
+              (IrqNoPort)
+              (if (eq code (err_taken)) (IrqTaken) (IrqAbsent))))))
+
+; Why irq_bind did not bind the interrupt, as a reason; empty if it did.
+(def irq_binding_why ((b IrqBinding)) (list int)
+  (match b
+    ((IrqBound) "")
+    ((IrqAbsent) "the board has no such interrupt")
+    ((IrqDenied) "this program may not drive devices")
+    ((IrqNoPort) "the port is not this process's")
+    ((IrqTaken) "another process has bound it")))
+
 ; Has each interrupt irq sent to port, from pid 0, as irq_notice says.
 ; Only a program the inittab names in a dev line may.
-(def irq_bind ((irq int) (port int)) int (supervisor_call (call_irq_bind) irq port 0))
+(def irq_bind ((irq int) (port int)) IrqBinding
+  (irq_binding_of (supervisor_call (call_irq_bind) irq port 0)))
+
+; What irq_ack did: ended the interrupt; or not, as it is not this
+; process's, or has not happened since it was last ended.
+(data IrqAck (IrqAcked) (IrqNotPending))
+
+(def irq_ack_of ((code int)) IrqAck
+  (if (eq code 0) (IrqAcked) (IrqNotPending)))
 
 ; Ends interrupt irq, once its device no longer raises it.
-(def irq_ack ((irq int)) int (supervisor_call (call_irq_ack) irq 0 0))
+(def irq_ack ((irq int)) IrqAck (irq_ack_of (supervisor_call (call_irq_ack) irq 0 0)))
+
+; What dma_alloc gave: the address of the first page; or nothing, as
+; this program may not drive devices, n is below 1 or over dma_limit, or
+; memory has run out.
+(data DmaAlloc (DmaPages int) (DmaDenied) (DmaTooMany) (DmaNoRoom))
+
+(def dma_alloc_of ((code int)) DmaAlloc
+  (if (ge code 0)
+      (DmaPages code)
+      (if (eq code (err_too_big))
+          (DmaTooMany)
+          (if (eq code (err_fault)) (DmaNoRoom) (DmaDenied)))))
+
+; Why dma_alloc gave no pages, as a reason; empty if it did.
+(def dma_alloc_why ((a DmaAlloc)) (list int)
+  (match a
+    ((DmaPages va) "")
+    ((DmaDenied) "this program may not drive devices")
+    ((DmaTooMany) "too many pages")
+    ((DmaNoRoom) "memory has run out")))
 
 ; n zeroed pages of memory a device can read and write itself, by DMA,
-; at consecutive addresses of this process: the first one's address, or
-; err_denied if the program may not drive devices, err_too_big for n
-; below 1 or over dma_limit, err_fault if memory has run out. Only a
-; program the inittab names in a dev line may. They last until the
-; system stops.
-(def dma_alloc ((n int)) int (supervisor_call (call_dma_alloc) n 0 0))
+; at consecutive addresses of this process. Only a program the inittab
+; names in a dev line may. They last until the system stops.
+(def dma_alloc ((n int)) DmaAlloc (dma_alloc_of (supervisor_call (call_dma_alloc) n 0 0)))
+
+; Where a device reaches a DMA page; or nothing, as this program may not
+; drive devices, or no DMA page of its holds the address.
+(data DmaWhere (DmaAddress int) (DmaAddressDenied) (NotDma))
+
+(def dma_where_of ((code int)) DmaWhere
+  (if (ge code 0)
+      (DmaAddress code)
+      (if (eq code (err_no_port)) (NotDma) (DmaAddressDenied))))
 
 ; Where a device reaches the DMA page holding va, to write into its
 ; registers: page aligned, and not the address this process reaches it
 ; at. Pages next to each other here need not be next to each other
-; there. err_no_port if no DMA page holds va.
-(def dma_address ((va int)) int (supervisor_call (call_dma_address) va 0 0))
+; there.
+(def dma_address ((va int)) DmaWhere (dma_where_of (supervisor_call (call_dma_address) va 0 0)))
+
+; What shm_alloc gave: the address of the first page; or nothing, as
+; memory has run out, or n is below 1 or over dma_limit.
+(data ShmAlloc (ShmPages int) (ShmNoRoom) (ShmTooMany))
+
+(def shm_alloc_of ((code int)) ShmAlloc
+  (if (ge code 0)
+      (ShmPages code)
+      (if (eq code (err_too_big)) (ShmTooMany) (ShmNoRoom))))
 
 ; n zeroed pages of memory to share with other processes, at consecutive
-; addresses of this one: the first one's address, or err_too_big for n
-; below 1 or over dma_limit, err_fault if memory has run out. Any
-; process may. dma_open reaches them, as it does DMA pages.
-(def shm_alloc ((n int)) int (supervisor_call (call_shm_alloc) n 0 0))
+; addresses of this one. Any process may. dma_open reaches them, as it
+; does DMA pages.
+(def shm_alloc ((n int)) ShmAlloc (shm_alloc_of (supervisor_call (call_shm_alloc) n 0 0)))
+
+; What shm_share did: mapped the pages into the other process, at this
+; address there, to tell it; or not, as there is no such process, n is
+; below 1 or over dma_limit, or the pages are not this process's or the
+; other has no room for them.
+(data ShmShare (ShmShared int) (ShmShareNoProc) (ShmShareTooMany) (ShmShareFailed))
+
+(def shm_share_of ((code int)) ShmShare
+  (if (ge code 0)
+      (ShmShared code)
+      (if (eq code (err_too_big))
+          (ShmShareTooMany)
+          (if (eq code (err_fault)) (ShmShareFailed) (ShmShareNoProc)))))
+
+; Why shm_share did not map the pages, as a reason; empty if it did.
+(def shm_share_why ((s ShmShare)) (list int)
+  (match s
+    ((ShmShared there) "")
+    ((ShmShareNoProc) "no such process")
+    ((ShmShareTooMany) "too many pages")
+    ((ShmShareFailed) "the pages are not this process's, or there is no room for them")))
 
 ; This process's n shared or DMA pages from va mapped into pid's too, the
-; same memory: the address pid reaches them at, to tell it, or
-; err_no_port if there is no such process, err_fault if they are not
-; this process's or pid has no room.
-(def shm_share ((va int) (n int) (pid int)) int (supervisor_call (call_shm_share) va n pid))
+; same memory.
+(def shm_share ((va int) (n int) (pid int)) ShmShare
+  (shm_share_of (supervisor_call (call_shm_share) va n pid)))
+
+; What shm_unmap did: gave the pages up; or not, as they are not this
+; process's, or n is below 1 or over dma_limit.
+(data ShmUnmap (ShmUnmapped) (ShmUnmapNotYours) (ShmUnmapTooMany))
+
+(def shm_unmap_of ((code int)) ShmUnmap
+  (if (eq code 0)
+      (ShmUnmapped)
+      (if (eq code (err_too_big)) (ShmUnmapTooMany) (ShmUnmapNotYours))))
 
 ; This process's n shared or DMA pages from va given up: unmapped, and
-; their memory freed once no process maps it. 0, or err_too_big for n
-; below 1 or over dma_limit, err_fault if they are not this process's.
-; Touching them afterwards ends the process, and a region over them
-; (dma_open) must not be used again.
-(def shm_unmap ((va int) (n int)) int (supervisor_call (call_shm_unmap) va n 0))
+; their memory freed once no process maps it. Touching them afterwards
+; ends the process, and a region over them (dma_open) must not be used
+; again.
+(def shm_unmap ((va int) (n int)) ShmUnmap (shm_unmap_of (supervisor_call (call_shm_unmap) va n 0)))
+
+; What shm_revoke did: took back this many of the other process's
+; mappings; or not, as there is no such process, it is this one or drives
+; devices, n is below 1 or over dma_limit, or the pages are not this
+; process's.
+(data ShmRevoke (ShmRevoked int) (ShmRevokeNoProc) (ShmRevokeDenied) (ShmRevokeTooMany) (ShmRevokeNotYours))
+
+(def shm_revoke_of ((code int)) ShmRevoke
+  (if (ge code 0)
+      (ShmRevoked code)
+      (if (eq code (err_denied))
+          (ShmRevokeDenied)
+          (if (eq code (err_too_big))
+              (ShmRevokeTooMany)
+              (if (eq code (err_fault)) (ShmRevokeNotYours) (ShmRevokeNoProc))))))
 
 ; This process's n shared pages from va taken back from pid, which may
-; have been given them by shm_share: how many of pid's mappings went, or
-; err_denied if pid is this process or drives devices, err_no_port if
-; there is no such process, err_fault if they are not this process's.
-(def shm_revoke ((va int) (n int) (pid int)) int (supervisor_call (call_shm_revoke) va n pid))
+; have been given them by shm_share.
+(def shm_revoke ((va int) (n int) (pid int)) ShmRevoke
+  (shm_revoke_of (supervisor_call (call_shm_revoke) va n pid)))
 
 ; The n pages dma_alloc gave at va, to read and write with device_read32
 ; and the rest, at offsets from va.
@@ -144,14 +337,31 @@
   (let path (entry_path_of e)
     (if (is_empty path) (rev acc) (entry_paths_from (add e 1) (cons path acc)))))
 
-; Ends pid, any process but this one, with killed_status: 0, or
-; err_no_port if there is no such process, err_denied if it is a driver,
-; a program with a dev line.
-(def proc_kill ((pid int)) int (supervisor_call (call_kill) pid 0 0))
+; What proc_kill did: ended the process; or not, as there is no such
+; process, or it is a driver, a program with a dev line.
+(data Kill (Killed) (KillNoProc) (KillDenied))
+
+(def kill_of ((code int)) Kill
+  (if (eq code 0)
+      (Killed)
+      (if (eq code (err_denied)) (KillDenied) (KillNoProc))))
+
+; Ends pid, any process but this one, with killed_status.
+(def proc_kill ((pid int)) Kill (kill_of (supervisor_call (call_kill) pid 0 0)))
+
+; What proc_watch did: has the port told; or not, as there is no such
+; process or the port is not this process's, or watch_limit ports watch
+; it already.
+(data Watch (Watched) (WatchNoProc) (WatchFull))
+
+(def watch_of ((code int)) Watch
+  (if (eq code 0)
+      (Watched)
+      (if (eq code (err_full)) (WatchFull) (WatchNoProc))))
 
 ; Has the kernel send port, which must be this process's, an exit notice
 ; when pid exits, or at once if it has.
-(def proc_watch ((pid int) (port int)) int (supervisor_call (call_watch) pid port 0))
+(def proc_watch ((pid int) (port int)) Watch (watch_of (supervisor_call (call_watch) pid port 0)))
 
 ; What proc_info says of a process: its state, one of state_running to
 ; state_exited; its parent's pid; the entry of its program; and a detail,
@@ -165,9 +375,16 @@
 (def proc_info ((pid int)) (Option ProcInfo)
   (proc_info_of (supervisor_receive (call_proc_info) pid (proc_record_len))))
 
-; The pid slot i of the process table holds, live or exited, or last
-; held; 0 if it has held none; -1 if there is no slot i.
-(def proc_slot ((i int)) int (supervisor_call (call_proc_slot) i 0 0))
+; What a slot of the process table holds: the pid it holds, live or
+; exited, or last held; that it has held none; or that there is no such
+; slot.
+(data Slot (SlotHeld int) (SlotUnused) (NoSlot))
+
+(def slot_of_code ((code int)) Slot
+  (if (gt code 0) (SlotHeld code) (if (eq code 0) (SlotUnused) (NoSlot))))
+
+; Slot i of the process table, 1 to max_procs.
+(def proc_slot ((i int)) Slot (slot_of_code (supervisor_call (call_proc_slot) i 0 0)))
 
 (def proc_info_of ((b bytes)) (Option ProcInfo)
   (if (lt (bytes_len b) (proc_record_len))
@@ -193,9 +410,8 @@
 
 ; -------------------------------------------------------------- console
 
-; The console driver's port, or a negative number if no console is
-; running: err_no_port under l0s, -3 with no kernel at all.
-(def console_port () int (name_lookup "console"))
+; The console driver's port, or none if no console is running.
+(def console_port () Lookup (name_lookup "console"))
 
 ; A line typed at the console, with its newline, or empty once input has
 ; ended. With a terminal (tty_get), that is standard input, which the
@@ -205,44 +421,61 @@
 ; exits, so a program that reads many lines makes one and calls
 ; console_line_on.
 (def console_line () (list int)
-  (if (gt (tty_get) 0)
-      (read_line)
-      (let console (console_port)
-        (if (lt console 0) (read_line) (console_line_on console (port_new))))))
+  (match (tty_get)
+    ((Terminal port) (read_line))
+    ((KernelTerminal)
+      (match (console_port)
+        ((Found console) (console_line_on console (port_new)))
+        ((NotFound) (read_line))))))
 
 ; ------------------------------------------------------------ terminals
 
+; What tty_set did: made the port the terminal; or not, as there is no
+; such port.
+(data TtyChange (TtySet) (TtyNoPort))
+
+(def tty_change_of ((code int)) TtyChange
+  (if (eq code 0) (TtySet) (TtyNoPort)))
+
 ; Makes port, a terminal as user/lib/tty.l0 says, this process's standard
 ; input, output, and error, and those of every process it starts from now
-; on: 0, or err_no_port if there is no such port. 0 for port gives back
-; the kernel's own: the serial line, and the inittab's stdin file.
-(def tty_set ((port int)) int (supervisor_call (call_tty_set) port 0 0))
+; on. 0 for port gives back the kernel's own: the serial line, and the
+; inittab's stdin file.
+(def tty_set ((port int)) TtyChange (tty_change_of (supervisor_call (call_tty_set) port 0 0)))
 
-; This process's terminal's port, or 0 for the kernel's own; -3 with no
-; kernel at all.
-(def tty_get () int (supervisor_call (call_tty_get) 0 0 0))
+; A process's terminal: a port, or the kernel's own.
+(data Terminal (Terminal int) (KernelTerminal))
+
+(def terminal_of ((code int)) Terminal
+  (if (gt code 0) (Terminal code) (KernelTerminal)))
+
+; This process's terminal.
+(def tty_get () Terminal (terminal_of (supervisor_call (call_tty_get) 0 0 0)))
 
 ; A line from the console driver at console, its reply sent to port,
 ; which must be this process's.
 (def console_line_on ((console int) (port int)) (list int)
-  (if (not (eq (port_send console (request port "r")) 0))
-      (nil int)
+  (match (port_send console (request port "r"))
+    ((Sent)
       (match (port_receive port)
         ((Message from payload) payload)
-        ((RecvFailed) (nil int)))))
+        ((RecvFailed) (nil int))))
+    ((SendNoPort) (nil int))
+    ((SendFull) (nil int))
+    ((SendTooBig) (nil int))))
 
 ; The port registered as name, waiting up to ns nanoseconds for a server
-; to register it, sleeping 10 ms between lookups; or err_no_port if it
-; never does, and -3 at once with no kernel at all.
-(def name_wait ((name (list int)) (ns int)) int
+; to register it, sleeping 10 ms between lookups; or none if it never
+; does, at once with no kernel at all.
+(def name_wait ((name (list int)) (ns int)) Lookup
   (name_wait_until name (add (clock_ns) ns)))
 
-(def name_wait_until ((name (list int)) (deadline int)) int
-  (let port (name_lookup name)
-    (if (if (ge port 0) true (eq port -3))
-        port
+(def name_wait_until ((name (list int)) (deadline int)) Lookup
+  (let code (lookup_code name)
+    (if (if (ge code 0) true (eq code -3))
+        (lookup_of code)
         (if (gt (clock_ns) deadline)
-            port
+            (NotFound)
             (let s (sleep_ns 10000000) (name_wait_until name deadline))))))
 
 ; ------------------------------------------------------------- keyboard
@@ -267,21 +500,30 @@
           ((None KeyEvent))))
     ((RecvFailed) ((None KeyEvent)))))
 
+; What asking a driver for its events did: it is sending them; or not, as
+; there is no such driver within 5 seconds, or it is gone, or it did not
+; agree.
+(data Listen (Listening) (NoDriver) (ListenRefused))
+
 ; Asks the keyboard driver to send port, which must be this process's,
-; every key event from now on: 0, or a negative code if there is no
-; keyboard driver within 5 seconds, or it did not agree.
-(def keyboard_listen ((port int)) int (input_listen "keyboard" port))
+; every key event from now on.
+(def keyboard_listen ((port int)) Listen (input_listen "keyboard" port))
 
 ; The same, of the driver registered as name.
-(def input_listen ((name (list int)) (port int)) int
-  (let drv (name_wait name 5000000000)
-    (if (lt drv 0)
-        drv
-        (if (not (eq (port_send drv (request port "listen")) 0))
-            (err_no_port)
-            (match (port_receive port)
-              ((Message from payload) (if (eq payload "ok") 0 (err_denied)))
-              ((RecvFailed) (err_no_port)))))))
+(def input_listen ((name (list int)) (port int)) Listen
+  (match (name_wait name 5000000000)
+    ((NotFound) (NoDriver))
+    ((Found drv)
+      (match (port_send drv (request port "listen"))
+        ((Sent) (listen_answer (port_receive port)))
+        ((SendNoPort) (NoDriver))
+        ((SendFull) (NoDriver))
+        ((SendTooBig) (NoDriver))))))
+
+(def listen_answer ((m Message)) Listen
+  (match m
+    ((Message from payload) (if (eq payload "ok") (Listening) (ListenRefused)))
+    ((RecvFailed) (NoDriver))))
 
 ; ------------------------------------------------------------- pointer
 
@@ -353,7 +595,7 @@
 
 ; Asks the pointer driver for every pointer event, as keyboard_listen does
 ; the keyboard's.
-(def pointer_listen ((port int)) int (input_listen "pointer" port))
+(def pointer_listen ((port int)) Listen (input_listen "pointer" port))
 
 ; ------------------------------------------------------------- requests
 

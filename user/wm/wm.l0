@@ -301,11 +301,18 @@
     (let k (listen_pid "keyboard" port)
       (let p (listen_pid "pointer" port)
         (let c (clock_listen port k p)
-          (if (not (eq (name_register port "compositor") 0))
-              (complain "cannot register as compositor")
+          (match (name_register port "compositor")
+            ((Registered)
               (let v2 (with_drivers v k p c)
                 (let b (draw_bar v2)
-                  (serve v2 port)))))))))
+                  (serve v2 port))))
+            ((RegisterNoPort) (unregistered (RegisterNoPort)))
+            ((RegisterTaken) (unregistered (RegisterTaken)))
+            ((RegisterTooLong) (unregistered (RegisterTooLong)))))))))
+
+; Fails, as name_register answered r.
+(def unregistered ((r Registration)) int
+  (complain (append "cannot register as compositor: " (registration_why r))))
 
 ; The clock's pid, and the time its reply gave; or -1 and -1, if no clock
 ; registers within clock_wait_ns.
@@ -319,12 +326,14 @@
 ; kp's and pp's, so those that come before the clock's reply are dropped:
 ; nothing else can send to port until it is registered.
 (def clock_listen ((port int) (kp int) (pp int)) Clocked
-  (let c (name_wait "clock" (clock_wait_ns))
-    (if (lt c 0)
-        (Clocked -1 -1)
-        (if (not (eq (port_send c (request port "listen")) 0))
-            (Clocked -1 -1)
-            (clock_reply port kp pp)))))
+  (match (name_wait "clock" (clock_wait_ns))
+    ((NotFound) (Clocked -1 -1))
+    ((Found c)
+      (match (port_send c (request port "listen"))
+        ((Sent) (clock_reply port kp pp))
+        ((SendNoPort) (Clocked -1 -1))
+        ((SendFull) (Clocked -1 -1))
+        ((SendTooBig) (Clocked -1 -1))))))
 
 (def clock_reply ((port int) (kp int) (pp int)) Clocked
   (match (port_receive port)
@@ -346,14 +355,17 @@
 ; The pid of the driver registered as name, once it agrees to send port
 ; its events; or -1.
 (def listen_pid ((name (list int)) (port int)) int
-  (let drv (name_wait name 5000000000)
-    (if (lt drv 0)
-        -1
-        (if (not (eq (port_send drv (request port "listen")) 0))
-            -1
-            (match (port_receive port)
-              ((Message from payload) (if (eq payload "ok") from -1))
-              ((RecvFailed) -1))))))
+  (match (name_wait name 5000000000)
+    ((NotFound) -1)
+    ((Found drv)
+      (match (port_send drv (request port "listen"))
+        ((Sent)
+          (match (port_receive port)
+            ((Message from payload) (if (eq payload "ok") from -1))
+            ((RecvFailed) -1)))
+        ((SendNoPort) -1)
+        ((SendFull) -1)
+        ((SendTooBig) -1)))))
 
 ; --------------------------------------------------------------- serving
 
@@ -460,6 +472,21 @@
                     (titled_window v from (nth ns 3) cw ch (nth ns 2) title)))))))))
 
 (def titled_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int))) Answered
+  (match (watch_client v from)
+    ((Watched) (watched_window v from port cw ch cva title))
+    ((WatchNoProc) (refused v "the client has gone"))
+    ((WatchFull) (refused v "too many ports watch the client"))))
+
+; Has from's exit, a client's, told to wm's port, so that its windows
+; close when it does.
+(def watch_client ((v Wm) (from int)) Watch
+  (match (wm_port v)
+    ((Found port) (proc_watch from port))
+    ((NotFound) (WatchNoProc))))
+
+; A window for from, whose exit is watched: its title bar made, then the
+; rest.
+(def watched_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int))) Answered
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
       (match (ui_buffer (outer_w cw) (title_h))
@@ -487,9 +514,8 @@
                 (match (cascade n cw ch w h)
                   ((Placed z x y top)
                     (let win (Win n port from x y cw ch 0 title tc cva tva fc fva)
-                      (let watch (proc_watch from (wm_port v))
-                        (let f (refocused ws (cons win ws))
-                          (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))))))))
+                      (let f (refocused ws (cons win ws))
+                        (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n)))))))))))))))
 
 ; The windows in front before and after, told if they changed: the one
 ; that was, that it is not, and the one that is, that it is.
@@ -498,12 +524,22 @@
     (let a (if (is_empty after) -1 (win_id (head after)))
       (if (eq a b)
           0
-          (let s (if (lt b 0) 0 (port_send (win_port (head before)) (focus_notice false)))
-            (if (lt a 0) 0 (port_send (win_port (head after)) (focus_notice true))))))))
+          (let s (if (lt b 0) 0 (tell_win (win_port (head before)) (focus_notice false)))
+            (if (lt a 0) 0 (tell_win (win_port (head after)) (focus_notice true))))))))
+
+; Sends a window's client a notice. What came of it does not matter: a
+; client that has gone has its windows closed by its exit notice, and one
+; whose queue is full misses the notice, as a slow one must.
+(def tell_win ((port int) (notice (list int))) int
+  (match (port_send port notice)
+    ((Sent) 0)
+    ((SendNoPort) 0)
+    ((SendFull) 0)
+    ((SendTooBig) 0)))
 
 ; The port wm serves on: where exit notices go. Kept nowhere, so found
 ; again: it is the one registered as compositor.
-(def wm_port ((v Wm)) int (name_lookup "compositor"))
+(def wm_port ((v Wm)) Lookup (name_lookup "compositor"))
 
 ; The screen after the window front changed: every title bar drawn as
 ; front or not, the layers sent, and the window's id as the reply.
@@ -745,7 +781,7 @@
           (let target (pointer_target ws drag x y grab)
             (let tid (match target ((None) -1) ((Some t) (win_id t)))
               (let l (if (if (ge over 0) (not (eq over tid)) false) (told_left ws over) 0)
-                (let s (match target ((None) 0) ((Some t) (port_send (win_port t) (pointer_notice (relative t x y b)))))
+                (let s (match target ((None) 0) ((Some t) (tell_win (win_port t) (pointer_notice (relative t x y b)))))
                   (Wm d w h desk font bg ws n (Ptr x y b tid (if (eq b 0) -1 (if (eq was 0) tid grab))) drag kp pp bar))))))))))
 
 (def pointer_target ((ws (list Win)) (drag Drag) (x int) (y int) (grab int)) (Option Win)
@@ -779,7 +815,7 @@
             (let y (scaled py h)
               (match (pointer_target ws drag x y (ptr_grab ptr))
                 ((None) v)
-                ((Some t) (let s (port_send (win_port t) (wheel_notice (wheel_relative t x y ev))) v))))))))))
+                ((Some t) (let s (tell_win (win_port t) (wheel_notice (wheel_relative t x y ev))) v))))))))))
 
 (def ptr_grab ((p Ptr)) int (match p ((Ptr x y b over grab) grab)))
 
@@ -790,7 +826,7 @@
       (match (relative w x y 0) ((PointerEvent rx ry b) (WheelEvent rx ry dx dy))))))
 
 (def told_left ((ws (list Win)) (id int)) int
-  (match (find_win ws id) ((None) 0) ((Some w) (port_send (win_port w) (leave_notice)))))
+  (match (find_win ws id) ((None) 0) ((Some w) (tell_win (win_port w) (leave_notice)))))
 
 ; What the left button's change, from was to now, does at x, y.
 (def moved ((v Wm) (x int) (y int) (was int) (now int)) Wm
@@ -827,9 +863,14 @@
 ; its windows, as any client's does. If it cannot be killed, a driver,
 ; or has already gone, the window is closed here.
 (def close_pressed ((v Wm) (win Win)) Wm
-  (if (eq (proc_kill (win_pid win)) 0)
-      v
-      (match (closed v (win_id win)) ((Answered v2 r) v2))))
+  (match (proc_kill (win_pid win))
+    ((Killed) v)
+    ((KillDenied) (closed_here v win))
+    ((KillNoProc) (closed_here v win))))
+
+; v with win closed by wm itself, its client not to be killed.
+(def closed_here ((v Wm) (win Win)) Wm
+  (match (closed v (win_id win)) ((Answered v2 r) v2)))
 
 ; The screen after a press brought a window in front, unless it was.
 (def fronted ((v Wm) (already bool)) Wm

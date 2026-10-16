@@ -11,7 +11,9 @@ alwaysApply: false
 
 The `l0s-testing` skill has the detail; load it before writing tests.
 
-- Under `l0 test` there is no kernel: calls give -3 and receives fail. Test
+- Under `l0 test` there is no kernel: the kernel's word is -3, which each
+  call's typed answer reads as its first failure (or `SendFull`, as -3 is
+  err_full), and receives fail. Test
   pure functions, and that each program's entry point returns 1 there,
   commented `; Under an operating system there is no X.`
 - Compare structures by rendering them as text (`check_str`), so a failure

@@ -29,11 +29,11 @@
 (data Compositor (Compositor int int int) (NoCompositor (list int)))
 
 (def compositor_open () Compositor
-  (let c (name_wait "compositor" 10000000000)
-    (if (lt c 0)
-        (NoCompositor "no compositor; is wm running?")
-        (match (compositor_reply (Compositor c (port_new) 0) "hello")
-          ((Replied c2 r) (if (eq r "compositor") c2 (NoCompositor (append "the compositor said " r))))))))
+  (match (name_wait "compositor" 10000000000)
+    ((NotFound) (NoCompositor "no compositor; is wm running?"))
+    ((Found c)
+      (match (compositor_reply (Compositor c (port_new) 0) "hello")
+        ((Replied c2 r) (if (eq r "compositor") c2 (NoCompositor (append "the compositor said " r))))))))
 
 ; The reply to body, and the compositor with its pid, which the reply
 ; comes from.
@@ -43,11 +43,14 @@
   (match c
     ((NoCompositor why) (Replied c (append "error: " why)))
     ((Compositor port rp pid)
-      (if (not (eq (port_send port (request rp body)) 0))
-          (Replied c "error: the compositor did not take the request")
+      (match (port_send port (request rp body))
+        ((Sent)
           (match (port_receive rp)
             ((Message from payload) (Replied (Compositor port rp from) payload))
-            ((RecvFailed) (Replied c "error: no reply from the compositor")))))))
+            ((RecvFailed) (Replied c "error: no reply from the compositor"))))
+        ((SendNoPort) (Replied c "error: the compositor is gone"))
+        ((SendFull) (Replied c "error: the compositor did not take the request: its queue is full"))
+        ((SendTooBig) (Replied c "error: the request is too big for the compositor"))))))
 
 (def compositor_ask ((c Compositor) (body (list int))) (list int)
   (match (compositor_reply c body) ((Replied c2 r) r)))
@@ -70,10 +73,16 @@
 (data Opened (WindowOpened int) (WindowFailed (list int)))
 
 (def window_open ((c Compositor) (w int) (h int) (va int) (n int) (port int) (title (list int))) Opened
-  (let there (shm_share va n (compositor_pid c))
-    (if (lt there 0)
-        (WindowFailed (append "cannot share a buffer with the compositor: " (digits there)))
-        (window_opened (compositor_ask c (window_request w h there port title))))))
+  (match (shm_share va n (compositor_pid c))
+    ((ShmShared there) (window_opened (compositor_ask c (window_request w h there port title))))
+    ((ShmShareNoProc) (window_unshared (ShmShareNoProc)))
+    ((ShmShareTooMany) (window_unshared (ShmShareTooMany)))
+    ((ShmShareFailed) (window_unshared (ShmShareFailed)))))
+
+; Why a window's buffer could not be given to the compositor, as
+; shm_share says.
+(def window_unshared ((s ShmShare)) Opened
+  (WindowFailed (append "cannot share a buffer with the compositor: " (shm_share_why s))))
 
 (def window_request ((w int) (h int) (va int) (port int) (title (list int))) (list int)
   (append (spaced (cons "window" (numbered (cons w (cons h (cons va (cons port (nil int))))))))

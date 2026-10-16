@@ -32,10 +32,16 @@
     ((DeviceFailed fault why) (complain (append "no clock: " why)))
     ((DeviceOpened d)
       (let port (port_new)
-        (let b (irq_bind (rtc_irq) port)
-          (if (not (eq b 0))
-              (complain (append "cannot bind interrupt 34: " (digits b)))
-              (alarm d port)))))))
+        (match (irq_bind (rtc_irq) port)
+          ((IrqBound) (alarm d port))
+          ((IrqAbsent) (unbound (IrqAbsent)))
+          ((IrqDenied) (unbound (IrqDenied)))
+          ((IrqNoPort) (unbound (IrqNoPort)))
+          ((IrqTaken) (unbound (IrqTaken))))))))
+
+; Fails, as irq_bind answered b.
+(def unbound ((b IrqBinding)) int
+  (complain (append "cannot bind interrupt 34: " (irq_binding_why b))))
 
 (def alarm ((d IoDevice) (port int)) int
   (let t0 (device_read32 d (reg_data))
@@ -53,7 +59,9 @@
           (let c (device_write32 d (reg_clear) 1)
             (let a (irq_ack (rtc_irq))
               (let w (write_str (alarm_lines t0 t1))
-                (if (eq a 0) 0 (complain "irq_ack refused")))))))))
+                (match a
+                  ((IrqAcked) 0)
+                  ((IrqNotPending) (complain "irq_ack refused: the interrupt is not pending"))))))))))
 
 ; --------------------------------------------------------------- serving
 
@@ -71,9 +79,15 @@
     ((DeviceFailed fault why) (complain (append "no clock: " why)))
     ((DeviceOpened d)
       (let port (port_new)
-        (if (not (eq (name_register port "clock") 0))
-            (complain "cannot register as clock")
-            (clock_serve d port (next_minute (device_read32 d (reg_data))) (nil int)))))))
+        (match (name_register port "clock")
+          ((Registered) (clock_serve d port (next_minute (device_read32 d (reg_data))) (nil int)))
+          ((RegisterNoPort) (unregistered (RegisterNoPort)))
+          ((RegisterTaken) (unregistered (RegisterTaken)))
+          ((RegisterTooLong) (unregistered (RegisterTooLong))))))))
+
+; Fails, as name_register answered r.
+(def unregistered ((r Registration)) int
+  (complain (append "cannot register as clock: " (registration_why r))))
 
 ; Every request waiting answered, then the listeners told the time if a
 ; minute has begun, then a nap: due is when the next minute begins, and
@@ -92,13 +106,24 @@
   (let reply (request_reply payload)
     (let body (request_body payload)
       (let s (port_send reply (if (clock_request body) (time_notice t) "error: no such request"))
-        (if (if (eq body "listen") (eq s 0) false) (cons reply ls) ls)))))
+        (if (eq body "listen") (still_told s reply ls) ls)))))
+
+; ls with port kept as a listener, or not, as sending it its last notice
+; went: a full queue loses that notice but keeps the listener, which is
+; there and slow; a port that is gone is dropped.
+(def still_told ((s Sending) (port int) (ls (list int))) (list int)
+  (match s
+    ((Sent) (cons port ls))
+    ((SendFull) (cons port ls))
+    ((SendNoPort) ls)
+    ((SendTooBig) ls)))
 
 (def clock_request ((body (list int))) bool
   (any_eq body (split_spaces "listen time")))
 
-; Each port of ls sent notice; those that took it, kept, onto acc.
+; Each port of ls sent notice; those still there, as still_told says,
+; kept, onto acc.
 (def told ((ls (list int)) (notice (list int)) (acc (list int))) (list int)
   (if (is_empty ls)
       acc
-      (told (tail ls) notice (if (eq (port_send (head ls) notice) 0) (cons (head ls) acc) acc))))
+      (told (tail ls) notice (still_told (port_send (head ls) notice) (head ls) acc))))

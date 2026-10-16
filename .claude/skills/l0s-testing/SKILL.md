@@ -31,8 +31,13 @@ The `l0-code` skill has the test syntax: `(def test_NAME () int ...)`, the
 `expect_NAME` for runtime errors. In L0S:
 
 - **There is no kernel under `l0 test`.** Every `supervisor_call` gives -3,
-  every receive `RecvFailed`, `name_wait` -3 at once, and opening a device
-  fails. So test the pure functions, and test that each program's entry point
+  which each wrapper reads as its -3 answer if it has one (`port_send`
+  `SendFull`) and otherwise as its type's first failure (`name_wait`
+  `NotFound` at once, `proc_kill` `KillNoProc`); every receive gives
+  `RecvFailed`, and opening a device fails. To test what a program does
+  with each answer, pass it the constructors themselves, as
+  `procmon_test.l0`'s `kill_text` tests do; `l0s_test.l0` pins each
+  `X_of` against the kernel's codes. So test the pure functions, and test that each program's entry point
   gives up cleanly. Every program has one such test, always commented the
   same way:
 

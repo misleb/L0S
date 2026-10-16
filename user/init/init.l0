@@ -14,13 +14,23 @@
 (def jobs_of ((argv (list (list int)))) (list Job)
   (if (is_empty argv) (nil Job) (cons (job_of (head argv)) (jobs_of (tail argv)))))
 
-(def started_line ((name (list int)) (pid int)) (list int)
-  (if (lt pid 0)
-      (append "init: " (append name (append " did not start: " (append (digits pid) "\n"))))
-      (append "init: " (append name (append " is pid " (append (digits pid) "\n"))))))
+; What init says of starting name: its pid, or why it did not start.
+(def started_line ((name (list int)) (s Spawn)) (list int)
+  (match s
+    ((Spawned pid) (append "init: " (append name (append " is pid " (append (digits pid) "\n")))))
+    ((SpawnNoEntry) (not_started name s))
+    ((SpawnNotProgram) (not_started name s))
+    ((SpawnTooBig) (not_started name s))
+    ((SpawnNoRoom) (not_started name s))))
 
-(def exited_line ((pid int) (status int)) (list int)
-  (append "init: pid " (append (digits pid) (append " exited with " (append (digits status) "\n")))))
+(def not_started ((name (list int)) (s Spawn)) (list int)
+  (append "init: " (append name (append " did not start: " (append (spawn_why s) "\n")))))
+
+; What init says once it has waited for pid.
+(def exited_line ((pid int) (r Reaped)) (list int)
+  (match r
+    ((Reaped status) (append "init: pid " (append (digits pid) (append " exited with " (append (digits status) "\n")))))
+    ((WaitNoProc) (append "init: pid " (append (digits pid) " is gone\n")))))
 
 ; Writes s and delivers it at once, so what init says appears when it
 ; says it, not when it exits.
@@ -29,8 +39,8 @@
     (let f (file_flush (IoFile 1))
       0)))
 
-; A started job: its pid, and whether to wait for it.
-(data Started (Started int bool))
+; A started job: how starting it went, and whether to wait for it.
+(data Started (Started Spawn bool))
 
 (def start_all ((jobs (list Job)) (paths (list (list int))) (acc (list Started))) (list Started)
   (if (is_empty jobs)
@@ -38,9 +48,9 @@
       (match (head jobs)
         ((Job name wait)
           (let e (program_entry name paths)
-            (let pid (if (lt e 0) (err_no_port) (spawn_entry e))
-              (let w (say (started_line name pid))
-                (start_all (tail jobs) paths (cons (Started pid wait) acc)))))))))
+            (let s (if (lt e 0) (SpawnNoEntry) (spawn_entry e))
+              (let w (say (started_line name s))
+                (start_all (tail jobs) paths (cons (Started s wait) acc)))))))))
 
 ; Waits for each started job to be waited for, and returns how many
 ; failed, a job that did not start among them.
@@ -48,14 +58,18 @@
   (if (is_empty ss)
       bad
       (match (head ss)
-        ((Started pid wait)
-          (if (lt pid 0)
-              (wait_all (tail ss) (add bad 1))
+        ((Started s wait)
+          (match s
+            ((Spawned pid)
               (if wait
-                  (let st (wait_pid pid)
-                    (let w (say (exited_line pid st))
-                      (wait_all (tail ss) (if (eq st 0) bad (add bad 1)))))
-                  (wait_all (tail ss) bad)))))))
+                  (let r (wait_pid pid)
+                    (let w (say (exited_line pid r))
+                      (wait_all (tail ss) (if (eq r (Reaped 0)) bad (add bad 1)))))
+                  (wait_all (tail ss) bad)))
+            ((SpawnNoEntry) (wait_all (tail ss) (add bad 1)))
+            ((SpawnNotProgram) (wait_all (tail ss) (add bad 1)))
+            ((SpawnTooBig) (wait_all (tail ss) (add bad 1)))
+            ((SpawnNoRoom) (wait_all (tail ss) (add bad 1))))))))
 
 (def init () int
   (let bad (wait_all (start_all (jobs_of (args)) (entry_paths) (nil Started)) 0)

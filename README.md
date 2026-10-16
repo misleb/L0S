@@ -684,35 +684,50 @@ The kernel answers these itself. The initramfs is a read-only file system:
 
 An *entry* is an index into the initramfs's entries, numbered from 0.
 
-| # | Wrapper | Result |
-|---|---|---|
-| 256 | `l0s_yield` | 0, after the others have run |
-| 257 | `l0s_pid` | the caller's pid |
-| 258 | `port_new` | a new port, which only the caller may receive on |
-| 259 | `port_send port payload` | 0, or -1 no such port, -3 its queue (32) is full, -4 over 4096 bytes |
-| 260 | `port_receive port` | waits; `(Message sender payload)`, where sender 0 is the kernel |
-| 261 | `port_try_receive port` | the same, or `(RecvFailed)` at once if no message is waiting |
-| 262 | `name_register port name` | 0, or -1 not your port, -2 the name is taken |
-| 263 | `name_lookup name` | a port, or -1 (`name_await` retries with yields) |
-| 264 | `spawn_entry e` | a pid, or -1 no entry e, -6 not a program, -4 an image over 4 MB, -5 out of address spaces |
-| 265 | `wait_pid pid` | waits; the pid's exit status, or -1 |
-| 266 | `sleep_until t`, `sleep_ns n` | 0, once `clock_ns` reaches t |
-| 267 | `irq_bind irq port` | 0, or -6 no `dev` line for the program, -1 not your port, -2 already bound. After this, each interrupt sends the message `irq_notice irq` to the port |
-| 268 | `irq_ack irq` | 0, ending the interrupt once the driver has quieted its device; -1 if it is not yours or not taken |
-| 269 | `entry_path_of e` | the entry's path, with a final `/` for a directory, or empty if there is no entry e. `entry_paths` lists them all, and `program_entry` finds a program by name |
-| 270 | `proc_kill pid` | 0, ending pid with status 130, any process but the caller; -6 if pid's program has a `dev` line, -1 if there is no such process or it is the caller. Ending pid 1 stops the system with status 130 |
-| 271 | `proc_watch pid port` | 0, and the kernel sends `exit_notice pid status` to the caller's port when pid exits, or at once if it has. -1 if there is no such pid, or the port is not the caller's. `exit_of` reads the notice |
-| 272 | `spawn_entry_with e args` | as `spawn_entry`, but the process gets args (sent as `encode_args` writes them) in place of the inittab's; -5 if they are not well formed, -4 over 4096 bytes |
-| 273 | `proc_info pid` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, and a detail (the port or pid it waits on, or an exited process's status); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). To list every process, ask `proc_slot` for each slot's pid |
-| 274 | `dma_alloc n` | the address of n zeroed pages a device can reach, at the caller's next device pages; -6 no `dev` line, -4 n below 1 or over 4096, -5 out of frames or device pages. They last until the system stops |
-| 275 | `dma_address va` | where a device reaches the caller's DMA page holding va, page aligned; -1 if no DMA page holds va, -6 no `dev` line |
-| 276 | `tty_set port` | 0, making port, a terminal, the caller's standard input, output and error, and those of every process it starts from then on; 0 gives back the kernel's own; -1 if there is no such port |
-| 277 | `tty_get` | the caller's terminal's port, or 0 for the kernel's own |
-| 278 | `shm_alloc n` | the address of n zeroed pages to share, at the caller's next device pages, for any process; -4 n below 1 or over 4096, -5 out of frames or device pages. They are freed once every process that maps them has ended, unless one of those drives devices |
-| 279 | `shm_share va n pid` | where pid sees the caller's n shared or DMA pages from va, now mapped into pid's next device pages too, the same frames; -1 no such pid, -4 n below 1 or over 4096, -5 pages that are not the caller's, or pid out of device pages |
-| 280 | `proc_slot i` | the pid slot i of the process table holds, live or exited, or last held; 0 if it has held none; -1 for no slot i, outside 1 to 255 |
-| 281 | `shm_unmap va n` | 0, the caller's n shared or DMA pages from va unmapped, each frame freed once no process maps it; -4 n below 1 or over 4096, -5 pages that are not the caller's, when none is unmapped |
-| 282 | `shm_revoke va n pid` | how many mappings pid had of the caller's n shared or DMA pages from va, all now unmapped; -1 no such pid, -6 pid is the caller or drives devices, -4 n below 1 or over 4096, -5 pages that are not the caller's |
+The kernel answers each call with a word, as the table's Result says. A
+wrapper that can fail reads that word as a type of its own, whose
+constructors are every answer the call can have, so a `match` on what it
+returns must handle each of them: `port_send` gives a `Sending`, one of
+`(Sent)`, `(SendNoPort)`, `(SendFull)` and `(SendTooBig)`. Each type has
+an `X_of` that reads the word (`sending_of`), and some a `X_why` that
+says a failure in words (`sending_why`, `spawn_why`). With no kernel
+beneath, as under `l0 test`, every word is -3, which a wrapper reads as
+its -3 answer if it has one (`SendFull`, `WatchFull`, `IrqAbsent`) and
+otherwise as its type's first failure.
+
+| # | Wrapper | Returns | Result |
+|---|---|---|---|
+| 256 | `l0s_yield` | `int` | 0, after the others have run |
+| 257 | `l0s_pid` | `int` | the caller's pid |
+| 258 | `port_new` | `int` | a new port, which only the caller may receive on |
+| 259 | `port_send port payload` | `Sending`: `Sent`, `SendNoPort`, `SendFull`, `SendTooBig` | 0, or -1 no such port, -3 its queue (32) is full, -4 over 4096 bytes |
+| 260 | `port_receive port` | `Message`: `Message`, `RecvFailed` | waits; `(Message sender payload)`, where sender 0 is the kernel |
+| 261 | `port_try_receive port` | `Message` | the same, or `(RecvFailed)` at once if no message is waiting |
+| 262 | `name_register port name` | `Registration`: `Registered`, `RegisterNoPort`, `RegisterTaken`, `RegisterTooLong` | 0, or -1 not your port, -2 the name is taken, -4 a name over 256 bytes |
+| 263 | `name_lookup name` | `Lookup`: `Found`, `NotFound` | a port, or -1 (`name_await` retries with yields, `name_wait` with sleeps) |
+| 264 | `spawn_entry e` | `Spawn`: `Spawned`, `SpawnNoEntry`, `SpawnNotProgram`, `SpawnTooBig`, `SpawnNoRoom` | a pid, or -1 no entry e, -6 not a program, -4 an image over 4 MB, -5 out of address spaces |
+| 265 | `wait_pid pid` | `Reaped`: `Reaped`, `WaitNoProc` | waits; the pid's exit status, or -1, which a status of -1 reads as too |
+| 266 | `sleep_until t`, `sleep_ns n` | `int` | 0, once `clock_ns` reaches t |
+| 267 | `irq_bind irq port` | `IrqBinding`: `IrqBound`, `IrqAbsent`, `IrqDenied`, `IrqNoPort`, `IrqTaken` | 0, or -6 no `dev` line for the program, -1 not your port, -2 already bound, -3 no such interrupt on the board. After this, each interrupt sends the message `irq_notice irq` to the port |
+| 268 | `irq_ack irq` | `IrqAck`: `IrqAcked`, `IrqNotPending` | 0, ending the interrupt once the driver has quieted its device; -1 if it is not yours or not taken |
+| 269 | `entry_path_of e` | `(list int)` | the entry's path, with a final `/` for a directory, or empty if there is no entry e. `entry_paths` lists them all, and `program_entry` finds a program by name |
+| 270 | `proc_kill pid` | `Kill`: `Killed`, `KillNoProc`, `KillDenied` | 0, ending pid with status 130, any process but the caller; -6 if pid's program has a `dev` line, -1 if there is no such process or it is the caller. Ending pid 1 stops the system with status 130 |
+| 271 | `proc_watch pid port` | `Watch`: `Watched`, `WatchNoProc`, `WatchFull` | 0, and the kernel sends `exit_notice pid status` to the caller's port when pid exits, or at once if it has. -1 if there is no such pid, or the port is not the caller's; -3 if 32 ports watch pid already. `exit_of` reads the notice |
+| 272 | `spawn_entry_with e args` | `Spawn` | as `spawn_entry`, but the process gets args (sent as `encode_args` writes them) in place of the inittab's; -5 if they are not well formed, -4 over 4096 bytes |
+| 273 | `proc_info pid` | `(Option ProcInfo)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, and a detail (the port or pid it waits on, or an exited process's status); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). To list every process, ask `proc_slot` for each slot's pid |
+| 274 | `dma_alloc n` | `DmaAlloc`: `DmaPages`, `DmaDenied`, `DmaTooMany`, `DmaNoRoom` | the address of n zeroed pages a device can reach, at the caller's next device pages; -6 no `dev` line, -4 n below 1 or over 4096, -5 out of frames or device pages. They last until the system stops |
+| 275 | `dma_address va` | `DmaWhere`: `DmaAddress`, `DmaAddressDenied`, `NotDma` | where a device reaches the caller's DMA page holding va, page aligned; -1 if no DMA page holds va, -6 no `dev` line |
+| 276 | `tty_set port` | `TtyChange`: `TtySet`, `TtyNoPort` | 0, making port, a terminal, the caller's standard input, output and error, and those of every process it starts from then on; 0 gives back the kernel's own; -1 if there is no such port |
+| 277 | `tty_get` | `Terminal`: `Terminal`, `KernelTerminal` | the caller's terminal's port, or 0 for the kernel's own |
+| 278 | `shm_alloc n` | `ShmAlloc`: `ShmPages`, `ShmNoRoom`, `ShmTooMany` | the address of n zeroed pages to share, at the caller's next device pages, for any process; -4 n below 1 or over 4096, -5 out of frames or device pages. They are freed once every process that maps them has ended, unless one of those drives devices |
+| 279 | `shm_share va n pid` | `ShmShare`: `ShmShared`, `ShmShareNoProc`, `ShmShareTooMany`, `ShmShareFailed` | where pid sees the caller's n shared or DMA pages from va, now mapped into pid's next device pages too, the same frames; -1 no such pid, -4 n below 1 or over 4096, -5 pages that are not the caller's, or pid out of device pages |
+| 280 | `proc_slot i` | `Slot`: `SlotHeld`, `SlotUnused`, `NoSlot` | the pid slot i of the process table holds, live or exited, or last held; 0 if it has held none; -1 for no slot i, outside 1 to 255 |
+| 281 | `shm_unmap va n` | `ShmUnmap`: `ShmUnmapped`, `ShmUnmapNotYours`, `ShmUnmapTooMany` | 0, the caller's n shared or DMA pages from va unmapped, each frame freed once no process maps it; -4 n below 1 or over 4096, -5 pages that are not the caller's, when none is unmapped |
+| 282 | `shm_revoke va n pid` | `ShmRevoke`: `ShmRevoked`, `ShmRevokeNoProc`, `ShmRevokeDenied`, `ShmRevokeTooMany`, `ShmRevokeNotYours` | how many mappings pid had of the caller's n shared or DMA pages from va, all now unmapped; -1 no such pid, -6 pid is the caller or drives devices, -4 n below 1 or over 4096, -5 pages that are not the caller's |
+
+Listening to a driver, `keyboard_listen`, `pointer_listen` and
+`input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
+`ListenRefused`.
 
 IPC is asynchronous. A send copies the payload into the port's queue and
 returns at once. A receive blocks until there is a message, and is given the
@@ -940,4 +955,7 @@ fault, pass a bad buffer, and wait on nothing.
 - Instruction-cache maintenance after loading an image is left to the board's
   host file. This is fine under QEMU.
 - A failed receive reports no reason. `supervisor_receive` gives no bytes
-  when the kernel's word is negative (spec §6.15).
+  when the kernel's word is negative (spec §6.15), so `RecvFailed` stands
+  for every failure, and for no message yet.
+- `wait_pid`'s word is a status or -1 for no such process, so a process
+  that exits with -1 reads as `WaitNoProc`.

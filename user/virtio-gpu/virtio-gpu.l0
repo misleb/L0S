@@ -554,24 +554,40 @@
 ; many requests it has made.
 (data Gpu (Gpu IoDevice int IoDevice (array int) int))
 
-(def with_queue ((d IoDevice) (t int) (va int)) int
-  (if (lt va 0)
-      (complain (append "no memory for the queue: " (digits va)))
+(def with_queue ((d IoDevice) (t int) (a DmaAlloc)) int
+  (match a
+    ((DmaPages va)
       (match (dma_open va (queue_pages))
         ((DeviceFailed fault why) (complain (append "cannot reach the queue: " why)))
-        ((DeviceOpened q) (with_cursor_queue (Gpu d t q (page_addresses va (queue_pages)) 0) (dma_alloc 2))))))
+        ((DeviceOpened q)
+          (match (page_addresses va (queue_pages))
+            ((None) (complain "the device cannot reach the queue"))
+            ((Some addrs) (with_cursor_queue (Gpu d t q addrs 0) (dma_alloc 2)))))))
+    ((DmaDenied) (no_dma "the queue" (DmaDenied)))
+    ((DmaTooMany) (no_dma "the queue" (DmaTooMany)))
+    ((DmaNoRoom) (no_dma "the queue" (DmaNoRoom)))))
+
+; Fails, as dma_alloc answered a for what.
+(def no_dma ((what (list int)) (a DmaAlloc)) int
+  (complain (append "no memory for " (append what (append ": " (dma_alloc_why a))))))
 
 ; The cursor queue, queue 1, in one page, as the control queue's first
 ; but of 16, with its request at 1024; and the zero page after it, black
 ; for what no layer covers.
 (data Curq (Curq IoDevice int int))
 
-(def with_cursor_queue ((g Gpu) (va int)) int
-  (if (lt va 0)
-      (complain (append "no memory for the cursor queue: " (digits va)))
+(def with_cursor_queue ((g Gpu) (a DmaAlloc)) int
+  (match a
+    ((DmaPages va)
       (match (dma_open va 1)
         ((DeviceFailed fault why) (complain (append "cannot reach the cursor queue: " why)))
-        ((DeviceOpened cq) (ready_queues g (Curq cq (dma_address va) 0) (dma_address (add va (page_size))))))))
+        ((DeviceOpened cq)
+          (match (page_addresses va 2)
+            ((None) (complain "the device cannot reach the cursor queue"))
+            ((Some at) (ready_queues g (Curq cq (array_get at 0) 0) (array_get at 1)))))))
+    ((DmaDenied) (no_dma "the cursor queue" (DmaDenied)))
+    ((DmaTooMany) (no_dma "the cursor queue" (DmaTooMany)))
+    ((DmaNoRoom) (no_dma "the cursor queue" (DmaNoRoom)))))
 
 (def ready_queues ((g Gpu) (c Curq) (zero int)) int
   (match g
@@ -632,24 +648,24 @@
   (match g ((Gpu d t q addrs n) (device_read32 q (add (resp_off) off)))))
 
 ; Sends req, and goes on with the driver if the answer is want.
-(data Sent (Sent Gpu) (NotSent (list int)))
+(data Commanded (Commanded Gpu) (NotCommanded (list int)))
 
-(def send ((g Gpu) (what (list int)) (req (list int)) (want int)) Sent
+(def send ((g Gpu) (what (list int)) (req (list int)) (want int)) Commanded
   (sent_as what (submit g req 24) want))
 
-(def sent_as ((what (list int)) (a Answer) (want int)) Sent
+(def sent_as ((what (list int)) (a Answer) (want int)) Commanded
   (match a
-    ((NoAnswer why) (NotSent why))
+    ((NoAnswer why) (NotCommanded why))
     ((Answer type g2)
       (if (eq type want)
-          (Sent g2)
-          (NotSent (append what (append " answered 0x" (hex_digits type 4))))))))
+          (Commanded g2)
+          (NotCommanded (append what (append " answered 0x" (hex_digits type 4))))))))
 
 ; attach_backing's request for runs, n of them, sent: written into the
 ; queue's memory as it goes, four words a run, as attach_backing lays
 ; them out, rather than made as a list of bytes first, which for a
 ; screen of 2500 runs is 40 KB, and then written a byte at a time.
-(def send_attach ((g Gpu) (id int) (runs (list Run)) (n int)) Sent
+(def send_attach ((g Gpu) (id int) (runs (list Run)) (n int)) Commanded
   (match g
     ((Gpu d t q addrs k)
       (let hd (put_bytes q (req_off) (append (header (cmd_resource_attach_backing)) (append (u32_le id) (u32_le n))))
@@ -713,19 +729,19 @@
 ; over and over.
 (def create ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
   (match (send g "resource_create_2d" (resource_create_2d (screen_res) (format_b8g8r8x8) w h) (resp_ok_nodata))
-    ((NotSent why) (complain why))
-    ((Sent g2)
+    ((NotCommanded why) (complain why))
+    ((Commanded g2)
       (match (send g2 "attach_backing" (attach_backing (screen_res) (backing_runs w h (nil Layer) ((MapEmpty int Buffer)) zero)) (resp_ok_nodata))
-        ((NotSent why) (complain why))
-        ((Sent g3) (scanned_out g3 c zero w h))))))
+        ((NotCommanded why) (complain why))
+        ((Commanded g3) (scanned_out g3 c zero w h))))))
 
 (def scanned_out ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
   (match (send g "set_scanout" (set_scanout w h) (resp_ok_nodata))
-    ((NotSent why) (complain why))
-    ((Sent g2)
+    ((NotCommanded why) (complain why))
+    ((Commanded g2)
       (match (present g2 w h (Box 0 0 w h))
-        ((NotSent why) (complain why))
-        ((Sent g3) (start_serving (Drv g3 c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))))))
+        ((NotCommanded why) (complain why))
+        ((Commanded g3) (start_serving (Drv g3 c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))))))
 
 ; The pointer: whether its image is set, where it is, its hot spot, and
 ; the buffer its image is, -1 for none.
@@ -743,9 +759,15 @@
 ; them: ok, display W H cursor, or error: WHY.
 (def start_serving ((v Drv)) int
   (let port (port_new)
-    (if (not (eq (name_register port "display") 0))
-        (complain "cannot register as display")
-        (serve v port))))
+    (match (name_register port "display")
+      ((Registered) (serve v port))
+      ((RegisterNoPort) (unregistered (RegisterNoPort)))
+      ((RegisterTaken) (unregistered (RegisterTaken)))
+      ((RegisterTooLong) (unregistered (RegisterTooLong))))))
+
+; Fails, as name_register answered r.
+(def unregistered ((r Registration)) int
+  (complain (append "cannot register as display: " (registration_why r))))
 
 (def serve ((v Drv) (port int)) int
   (match (port_receive port)
@@ -814,10 +836,9 @@
   (if (if (lt bw 1) true (lt bh 1))
       (failed v "a buffer has no pixels")
       (let n (div (add (mul (mul bw bh) 4) (sub (page_size) 1)) (page_size))
-        (let addrs (page_addresses va n)
-          (if (lt (array_get addrs (sub n 1)) 0)
-              (failed v "the buffer is not shared with the display")
-              (put_buffer v id (Buffer bw bh addrs va (square))))))))
+        (match (page_addresses va n)
+          ((None) (failed v "the buffer is not shared with the display"))
+          ((Some addrs) (put_buffer v id (Buffer bw bh addrs va (square))))))))
 
 ; The driver with buffer b as id: the screen rebuilt if it shows id, since
 ; its backing reads the old one's pages, or its corners have changed.
@@ -901,12 +922,12 @@
         (let n (length runs)
           (if (gt n (max_runs))
               (failed v "the screen is in too many pieces")
-              (match (if attached (send g "detach_backing" (detach_backing (screen_res)) (resp_ok_nodata)) (Sent g))
-                ((NotSent why) (failed v why))
-                ((Sent g2)
+              (match (if attached (send g "detach_backing" (detach_backing (screen_res)) (resp_ok_nodata)) (Commanded g))
+                ((NotCommanded why) (failed v why))
+                ((Commanded g2)
                   (match (send_attach g2 (screen_res) runs n)
-                    ((NotSent why) (failed (Drv g2 c w h bufs layers false cur zero none) why))
-                    ((Sent g3) (shown_boxes (Drv g3 c w h nbufs ls true cur zero rows2) dmg)))))))))))
+                    ((NotCommanded why) (failed (Drv g2 c w h bufs layers false cur zero none) why))
+                    ((Commanded g3) (shown_boxes (Drv g3 c w h nbufs ls true cur zero rows2) dmg)))))))))))
 
 ; damage ID X Y W H ...: each rectangle of its buffer shown wherever it
 ; is on the screen, boxes that overlap shown as one; nothing shown if a
@@ -939,18 +960,18 @@
       (match v
         ((Drv g c w h bufs layers attached cur zero rows)
           (match (present g w h (head boxes))
-            ((NotSent why) (failed v why))
-            ((Sent g2) (shown_boxes (Drv g2 c w h bufs layers attached cur zero rows) (tail boxes))))))))
+            ((NotCommanded why) (failed v why))
+            ((Commanded g2) (shown_boxes (Drv g2 c w h bufs layers attached cur zero rows) (tail boxes))))))))
 
 ; Has the device copy part of the screen's backing and show it.
-(def present ((g Gpu) (w int) (h int) (d Damage)) Sent
+(def present ((g Gpu) (w int) (h int) (d Damage)) Commanded
   (match (clip_damage d w h)
-    ((NoDamage) (Sent g))
+    ((NoDamage) (Commanded g))
     ((Box x0 y0 x1 y1)
       (match (send g "transfer_to_host_2d"
                    (transfer_to_host_2d_at (screen_res) x0 y0 (sub x1 x0) (sub y1 y0) (mul (add (mul y0 w) x0) 4)) (resp_ok_nodata))
-        ((NotSent why) (NotSent why))
-        ((Sent g2) (send g2 "resource_flush" (resource_flush_at x0 y0 (sub x1 x0) (sub y1 y0)) (resp_ok_nodata)))))))
+        ((NotCommanded why) (NotCommanded why))
+        ((Commanded g2) (send g2 "resource_flush" (resource_flush_at x0 y0 (sub x1 x0) (sub y1 y0)) (resp_ok_nodata)))))))
 
 ; ---------------------------------------------------------------- pointer
 
@@ -974,15 +995,15 @@
         ((Drv g c w h bufs layers attached old zero rows)
           (match (if set (send g "detach_backing" (detach_backing (cursor_res)) (resp_ok_nodata))
                          (send g "resource_create_2d" (resource_create_2d (cursor_res) (format_b8g8r8a8) (cursor_size) (cursor_size)) (resp_ok_nodata)))
-            ((NotSent why) (failed v why))
-            ((Sent g2)
+            ((NotCommanded why) (failed v why))
+            ((Commanded g2)
               (match (send g2 "attach_backing" (attach_backing (cursor_res) (coalesce (array_list addrs 0 (nil int)))) (resp_ok_nodata))
-                ((NotSent why) (failed v why))
-                ((Sent g3)
+                ((NotCommanded why) (failed v why))
+                ((Commanded g3)
                   (match (send g3 "transfer_to_host_2d"
                                (transfer_to_host_2d_at (cursor_res) 0 0 (cursor_size) (cursor_size) 0) (resp_ok_nodata))
-                    ((NotSent why) (failed v why))
-                    ((Sent g4)
+                    ((NotCommanded why) (failed v why))
+                    ((Commanded g4)
                       (ok (Drv g4 (cursor_send g4 c (cursor_cmd (cmd_update_cursor) px py hx hy))
                                w h bufs layers attached (Cursor true px py hx hy id) zero rows)))))))))))))
 

@@ -264,12 +264,23 @@
                       (complain "the event queue is too small")
                       (with_queue d t (dma_alloc 1) r))))))))
 
-(def with_queue ((d IoDevice) (t int) (va int) (r Role)) int
-  (if (lt va 0)
-      (complain (append "no memory for the queue: " (digits va)))
+(def with_queue ((d IoDevice) (t int) (a DmaAlloc) (r Role)) int
+  (match a
+    ((DmaPages va)
       (match (dma_open va 1)
         ((DeviceFailed fault why) (complain (append "cannot reach the queue: " why)))
-        ((DeviceOpened q) (fill_queue d t q (dma_address va) r)))))
+        ((DeviceOpened q)
+          (match (dma_address va)
+            ((DmaAddress addr) (fill_queue d t q addr r))
+            ((DmaAddressDenied) (complain "the device cannot reach the queue: this program may not drive devices"))
+            ((NotDma) (complain "the device cannot reach the queue: it is not DMA memory"))))))
+    ((DmaDenied) (no_dma (DmaDenied)))
+    ((DmaTooMany) (no_dma (DmaTooMany)))
+    ((DmaNoRoom) (no_dma (DmaNoRoom)))))
+
+; Fails, as dma_alloc answered a.
+(def no_dma ((a DmaAlloc)) int
+  (complain (append "no memory for the queue: " (dma_alloc_why a))))
 
 ; Gives the device every buffer, then serves the role's name.
 (def fill_queue ((d IoDevice) (t int) (q IoDevice) (addr int) (r Role)) int
@@ -293,12 +304,28 @@
   (match k
     ((Kbd d t q avail used kind ls)
       (let port (port_new)
-        (if (not (eq (name_register port name) 0))
-            (complain (append "cannot register as " name))
-            (let b (irq_bind (transport_irq t) port)
-              (if (not (eq b 0))
-                  (complain (append "cannot bind interrupt " (append (digits (transport_irq t)) (append ": " (digits b)))))
-                  (serve k port))))))))
+        (match (name_register port name)
+          ((Registered) (bound k port (irq_bind (transport_irq t) port)))
+          ((RegisterNoPort) (unregistered name (RegisterNoPort)))
+          ((RegisterTaken) (unregistered name (RegisterTaken)))
+          ((RegisterTooLong) (unregistered name (RegisterTooLong))))))))
+
+; Fails, as name_register answered r.
+(def unregistered ((name (list int)) (r Registration)) int
+  (complain (append "cannot register as " (append name (append ": " (registration_why r))))))
+
+; The driver, registered on port, once irq_bind has answered b.
+(def bound ((k Kbd) (port int) (b IrqBinding)) int
+  (match b
+    ((IrqBound) (serve k port))
+    ((IrqAbsent) (unbound k (IrqAbsent)))
+    ((IrqDenied) (unbound k (IrqDenied)))
+    ((IrqNoPort) (unbound k (IrqNoPort)))
+    ((IrqTaken) (unbound k (IrqTaken)))))
+
+; Fails, as irq_bind answered b.
+(def unbound ((k Kbd) (b IrqBinding)) int
+  (complain (append "cannot bind interrupt " (append (digits (kbd_irq k)) (append ": " (irq_binding_why b))))))
 
 (def serve ((k Kbd) (port int)) int
   (match (port_receive port)
@@ -413,5 +440,9 @@
 (def tell ((ls (list int)) (payload (list int)) (kept (list int))) (list int)
   (if (is_empty ls)
       (rev kept)
-      (let s (port_send (head ls) payload)
-        (tell (tail ls) payload (if (eq s (err_no_port)) kept (cons (head ls) kept))))))
+      (tell (tail ls) payload
+            (match (port_send (head ls) payload)
+              ((Sent) (cons (head ls) kept))
+              ((SendFull) (cons (head ls) kept))
+              ((SendNoPort) kept)
+              ((SendTooBig) kept)))))

@@ -105,15 +105,26 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
 3. `kernel/kernel.l0`: `do_NAME`, and its arm in `dispatch`. Check every
    argument against the kernel's own records before it reaches a builtin
    that can fail: nothing a process passes may crash the kernel.
-4. `user/lib/l0s.l0`: the wrapper over `supervisor_call`.
+4. `user/lib/l0s.l0`: the wrapper over `supervisor_call`. If the call can
+   fail, it returns a type of its own with a constructor for each answer
+   (`(data Kill (Killed) (KillNoProc) (KillDenied))`), read from the
+   kernel's word by a pure `X_of` that `l0s_test.l0` tests code by code;
+   constructor names are global, so prefix them with the call's.
 5. `kernel/kernel_virt_test.l0`: tests through `asm.l0`'s `call_words`, run
    by `make test-virt`; include refusals.
 6. The README's table of the kernel's own calls.
 
 ## Patterns to copy
 
+- **A call's answer is matched**, every constructor of it: `port_send`
+  gives a `Sending`, `name_register` a `Registration`, `spawn_entry` a
+  `Spawn`, and so on (the README's table of calls lists them all). Handle
+  each arm; for a failure's message use its `X_why` (`sending_why`,
+  `registration_why`, `spawn_why`, `irq_binding_why`, `dma_alloc_why`,
+  `shm_share_why`). Only a send whose answer truly does not matter is
+  dropped with `let`, and then say why (`tell_win` in `user/wm/wm.l0`).
 - **A server** (`user/echo/echo.l0`): `port_new`, `name_register port
-  "name"` (non-zero: taken), then a loop on `port_receive`. A request is
+  "name"` (`Registered`, or why not), then a loop on `port_receive`. A request is
   `(request REPLY BODY)`: read it with `request_reply` and `request_body`,
   answer with `port_send (request_reply payload) reply`. Replies are `ok`,
   `error: WHY`, or the request's own answer. Clients find a server with
@@ -121,8 +132,9 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
 - **Listening to a driver** (`user/virtio-input/virtio-input.l0`, server
   side; `input_listen` in `l0s.l0` and `listen_pid` / `clock_listen` in
   `wm.l0`, client side): a `listen` request adds the reply port to the
-  driver's list, which it then sends each event. Drop a listener whose send
-  fails (`told` in `user/rtc/rtc.l0`).
+  driver's list, which it then sends each event. Drop a listener whose
+  port is gone (`SendNoPort`), and keep one whose queue is full
+  (`still_told` in `user/rtc/rtc.l0`, `tell` in virtio-input).
 - **Waiting for a message or a time.** A receive cannot time out. Either a
   device interrupt arrives as a message (`irq_bind`), or the loop polls with
   `port_try_receive` and `sleep_ns` (`rtc clock`, `procmon`).

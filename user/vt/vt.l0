@@ -163,29 +163,52 @@
 (def windowed ((c Compositor) (font (array int)) (t Term) (canvas Canvas) (va int) (n int)) int
   (let name (vt_name (args))
     (let port (port_new)
-      (if (not (eq (name_register port name) 0))
-          (complain (append "cannot register as " name))
-          (match (window_open c (canvas_w canvas) (canvas_h canvas) va n port name)
-            ((WindowFailed why) (complain why))
-            ((WindowOpened id)
-              (let sh (shell_started name port)
-                (if (lt sh 0)
-                    (let x (window_close c id) (complain (cannot_shell sh)))
-                    (serve port sh (shown_v (Vt c id canvas font t (console_new)) (nil int)))))))))))
+      (match (name_register port name)
+        ((Registered) (registered c font t canvas va n name port))
+        ((RegisterNoPort) (unregistered name (RegisterNoPort)))
+        ((RegisterTaken) (unregistered name (RegisterTaken)))
+        ((RegisterTooLong) (unregistered name (RegisterTooLong)))))))
 
-; sh NAME started, and watched on port: its pid, or why not, negative:
-; -1 for no /bin/sh, or what spawning or watching it gave.
-(def shell_started ((name (list int)) (port int)) int
+; Fails, as name_register answered r.
+(def unregistered ((name (list int)) (r Registration)) int
+  (complain (append "cannot register as " (append name (append ": " (registration_why r))))))
+
+; The terminal, registered as name on port: its window opened and its
+; shell started.
+(def registered ((c Compositor) (font (array int)) (t Term) (canvas Canvas) (va int) (n int) (name (list int)) (port int)) int
+  (match (window_open c (canvas_w canvas) (canvas_h canvas) va n port name)
+    ((WindowFailed why) (complain why))
+    ((WindowOpened id)
+      (match (shell_started name port)
+        ((NoShell why) (let x (window_close c id) (complain why)))
+        ((ShellRunning sh) (serve port sh (shown_v (Vt c id canvas font t (console_new)) (nil int))))))))
+
+; What starting the shell came to: its pid, watched; or why not.
+(data Shell (ShellRunning int) (NoShell (list int)))
+
+; sh NAME started, and watched on port.
+(def shell_started ((name (list int)) (port int)) Shell
   (let e (program_entry "sh" (entry_paths))
     (if (lt e 0)
-        -1
-        (let pid (spawn_entry_with e (cons name (nil (list int))))
-          (if (lt pid 0)
-              pid
-              (let w (proc_watch pid port) (if (lt w 0) w pid)))))))
+        (NoShell "no /bin/sh to run")
+        (match (spawn_entry_with e (cons name (nil (list int))))
+          ((Spawned pid) (shell_watched pid (proc_watch pid port)))
+          ((SpawnNoEntry) (NoShell (cannot_shell (SpawnNoEntry))))
+          ((SpawnNotProgram) (NoShell (cannot_shell (SpawnNotProgram))))
+          ((SpawnTooBig) (NoShell (cannot_shell (SpawnTooBig))))
+          ((SpawnNoRoom) (NoShell (cannot_shell (SpawnNoRoom))))))))
 
-(def cannot_shell ((code int)) (list int)
-  (if (eq code -1) "no /bin/sh to run" (append "cannot start /bin/sh: " (digits code))))
+; The shell, pid, as watching it went: a shell that is not watched would
+; never be known to have exited.
+(def shell_watched ((pid int) (w Watch)) Shell
+  (match w
+    ((Watched) (ShellRunning pid))
+    ((WatchNoProc) (NoShell "cannot watch /bin/sh: it is gone"))
+    ((WatchFull) (NoShell "cannot watch /bin/sh: too many ports watch it"))))
+
+; Why the shell did not start, as spawning it answered s.
+(def cannot_shell ((s Spawn)) (list int)
+  (append "cannot start /bin/sh: " (spawn_why s)))
 
 ; Serves the terminal until sh, its shell, exits: then closes the window,
 ; and gives the shell's status.
