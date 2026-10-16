@@ -19,7 +19,12 @@ messages.
 make demo                                 # boot to the shell on this terminal, and type at it
 make all                                  # type check, host tests, board tests, end-to-end
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
+make -s doc Q=port_send                   # the libraries' documentation, as l0 doc gives the standard library's
 ```
+
+Agents working on L0S: see the L0S block at the end of
+[AGENTS.md](AGENTS.md), the skills in [.claude/skills](.claude/skills) and
+the rules in [.claude/rules](.claude/rules).
 
 Requirements:
 - `l0`, and Docker running. Board images are linked in l0's container.
@@ -606,8 +611,8 @@ addresses, as a driver cannot be killed either. Either way, a process
 that touches a page it no longer has is ended, as for any device page
 with nothing mapped.
 
-When a window closes, the display driver and `wm` both give up its two
-buffers, the content's and the title bar's: the driver once the screen
+When a window closes, the display driver and `wm` both give up its three
+buffers, the content's, the title bar's and the frame's: the driver once the screen
 no longer shows them, on `forget`, and `wm` after that. So a closed
 window's memory is freed once its `vt` has ended too.
 
@@ -717,6 +722,7 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round` and `button`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
+| `procmon` | the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 
 The libraries in `user/lib/` are linked into every program
@@ -740,7 +746,7 @@ Makefile's `LIBS_` lists:
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), and the toolkit's gallery (`tests/widgets.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), and the process monitor (`tests/procmon.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -873,15 +879,17 @@ fault, pass a bad buffer, and wait on nothing.
   typed session ends cleanly.
 - A window's terminal has no scrollback, and draws only what is written:
   it keeps no copy of its text.
-- Windows cannot be resized. `wm` opens a region for each window's title
-  bar, and the proc runtime closes none and keeps at most 64 open, so
-  `wm` can open only so many windows over its life, closed ones
-  included. The close button kills its client at
+- Windows cannot be resized. `wm` opens two regions for each window,
+  its title bar's and its frame's, and the proc runtime closes none and
+  keeps at most 64 open, so `wm` can open only so many windows over its
+  life, closed ones included. The close button kills its client at
   once: the client is not asked first, and cannot refuse. The pointer has
   one button that does anything, the left.
-- The display driver rebuilds the whole screen's backing, a run list of
-  some thousands of entries, for every raise, move or scroll. A drag is
-  held to 20 rebuilds a second for that reason.
+- The display driver attaches a whole new backing, a run list of some
+  thousands of entries, for every raise, move or scroll, though it builds
+  again only the rows that changed. A rebuild takes about 15 ms with two
+  windows on QEMU, so a drag shows a few dozen positions a second, not
+  every one.
 - Interrupts the kernel enables stay enabled (L0 cannot disable one). If a
   driver exits while its device keeps the interrupt raised, the kernel ends
   each one as it comes.

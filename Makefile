@@ -10,6 +10,8 @@
 #                    the splash shows in QEMU's window
 #   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
 #   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
+#   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
+#                    L0's: every name, or Q a name, a file's stem, or text
 #
 # Images for the board are linked in Docker, as l0 does when L0_VIRT_LD
 # is unset.
@@ -60,9 +62,15 @@ LIBS_procmon    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 
 PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio-input keys vt wm windows widgets procmon
 MKSPLASH := tools/mksplash/mksplash.l0
+L0SDOC   := tools/l0sdoc/l0sdoc.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 
-.PHONY: all check test test-virt e2e images initramfs screen-initramfs boot demo clean sample
+# Every library, which make doc reads the documentation of.
+DOC_SRCS := common/abi.l0 common/initramfs.l0 common/queue.l0 $(filter-out $(COMMON) common/queue.l0,$(KERNEL)) \
+            user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0 \
+            $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(UI_CORE) $(UI_WINDOW)
+
+.PHONY: all check test test-virt e2e images initramfs screen-initramfs boot demo clean sample doc
 
 all: check test test-virt e2e
 
@@ -70,6 +78,7 @@ check:
 	$(L0) check $(KERNEL) kernel/main.l0
 	$(foreach p,$(PROGRAMS),$(L0) check $(ULIB) $(LIBS_$(p)) user/$(p)/$(p).l0 user/$(p)/main.l0 && ) true
 	$(L0) check $(MKSPLASH) tools/mksplash/main.l0
+	$(L0) check $(L0SDOC) tools/l0sdoc/main.l0
 
 # An archive bsdtar makes, of bin/x, "hi", mode 0755: what the host tests
 # of initramfs.l0 and of cat read.
@@ -98,6 +107,7 @@ test: sample
 	$(L0) test $(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0
 	$(foreach p,$(PROGRAMS),$(L0) test $(ULIB) $(LIBS_$(p)) user/$(p)/$(p).l0 user/$(p)/$(p)_test.l0 && ) true
 	$(L0) test $(MKSPLASH) tools/mksplash/mksplash_test.l0
+	$(L0) test $(L0SDOC) tools/l0sdoc/l0sdoc_test.l0
 
 test-virt:
 	$(L0) test --target virt $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
@@ -118,6 +128,12 @@ images: $(BUILD)/kernel.img $(IMAGES)
 
 $(BUILD)/splash.ppm: $(MKSPLASH) tools/mksplash/main.l0 | $(BUILD)
 	$(L0) run $(MKSPLASH) tools/mksplash/main.l0 > $@.tmp && mv $@.tmp $@
+
+$(BUILD)/l0sdoc: $(L0SDOC) tools/l0sdoc/main.l0 | $(BUILD)
+	$(L0) build $(L0SDOC) tools/l0sdoc/main.l0 -o $@
+
+doc: $(BUILD)/l0sdoc
+	@$(BUILD)/l0sdoc "$(Q)" $(DOC_SRCS)
 
 # demo/etc, the splash, and the console font, staged together as the
 # archive's /etc.

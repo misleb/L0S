@@ -150,3 +150,22 @@ nesting more than about four levels deep.
 
 The `l0-code` skill covers both in detail, along with the syntax that differs
 from what other languages would lead you to expect.
+
+<!-- L0S begin: everything above is l0 init's; restore this block from git if l0 init replaces the file -->
+## L0S
+
+This project is L0S, a microkernel and its programs, in L0. Its own
+guidance, which `l0 init` never touches, is in `.claude/` (Cursor sees the
+same files through symlinks in `.cursor/`):
+
+- **Skills**: `l0s-dev` (where everything is, how to add a program, library,
+  request or system call, the pitfalls), `l0s-testing` (what to run when,
+  writing tests, the screen tests, debugging on the board), `l0s-ui` (the
+  toolkit, the compositor, the display). Load the one that fits first.
+- **Rules**: `.claude/rules/`, `l0s.md` always, the others by path.
+- **Lookup**: `make -s doc [Q=NAME|FILE|TEXT]` is `l0 doc` for L0S's own
+  libraries.
+- **Done** means `make check` and `make test` pass, plus `make e2e` for
+  anything that boots, draws or takes input, and `make test-virt` for the
+  kernel.
+<!-- L0S end -->
