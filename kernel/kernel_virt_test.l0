@@ -1,0 +1,932 @@
+; kernel_virt_test.l0 -- the kernel run on the board, with threads of a
+; few instructions each: l0 test --target virt. Each test runs the
+; kernel's own boot on an initramfs, built by asm.l0's raw_initramfs, and
+; checks the status pid 1 exits with.
+
+(def test_exit_status () int
+  (check_int "exit 7" (boot_words 0 (cons (movz 0 7) (exit_x0))) 7))
+
+; A store to the heap faults, and the kernel maps a zeroed page there.
+(def test_heap_on_demand () int
+  (check_int "stored and loaded"
+    (boot_words 0 (cons (movz_hi 1 49216) (cons (movz 0 9) (cons (str_x0_x1) (cons (movz 0 0) (cons (ldr_x0_x1) (exit_x0)))))))
+    9))
+
+(def test_stack_on_demand () int
+  (check_int "pushed" (boot_words 0 (cons (push_x0) (cons (movz 0 5) (exit_x0)))) 5))
+
+; A load below the user range: the kernel kills the thread, and status 139.
+(def test_fault_kills () int
+  (check_int "killed" (boot_words 0 (cons (movz 1 16) (cons (ldr_x0_x1) (exit_x0)))) 139))
+
+(def test_bad_buffer () int
+  (check_int "write from 0x10"
+    (boot_words 0 (cons (movz 0 1) (cons (movz 1 16) (cons (movz 2 5) (append (call_words 2) (exit_x0))))))
+    -5))
+
+(def test_device_buffer () int
+  (check_int "write from a device page"
+    (boot_words 0 (cons (movz 0 1) (cons (movz_hi 1 59392) (cons (movz 2 1) (append (call_words 2) (exit_x0))))))
+    -5))
+
+(def test_write_other_stream () int
+  (check_int "stream 7"
+    (boot_words 0 (cons (movz 0 7) (cons (movz_hi 1 49152) (cons (movz 2 1) (append (call_words 2) (exit_x0))))))
+    -5))
+
+(def test_write_nothing () int
+  (check_int "zero bytes"
+    (boot_words 0 (cons (movz 0 1) (cons (movz_hi 1 49152) (cons (movz 2 0) (append (call_words 2) (exit_x0))))))
+    0))
+
+(def test_unknown_call () int
+  (check_int "call 99" (boot_words 0 (append (call_words 99) (exit_x0))) -5))
+
+(def test_open_no_files () int
+  (check_int "open to read" (boot_words 0 (cons (movz 2 1) (append (call_words 4) (exit_x0)))) -3))
+
+; The PL031's registers, 0x09010000, mapped above 0xE8000000.
+(def region_words () (list int)
+  (cons (movz_hi 0 2305) (cons (movz 1 4096) (append (call_words 10) (exit_x0)))))
+
+(def test_region_denied () int
+  (check_int "nodev" (boot_words 0 (region_words)) -3))
+
+(def test_region_dev () int
+  (check_int "dev" (boot_words (flag_dev) (region_words)) (stack_top)))
+
+; --------------------------------------------------------------------- DMA
+
+; dma_alloc of n pages, then words, with the first page's address in x19.
+(def dma_words ((n int) (ws (list int))) (list int)
+  (cons (movz 0 n) (append (call_words (call_dma_alloc)) (cons (mov_x19_x0) ws))))
+
+(def test_dma_denied () int
+  (check_int "nodev" (boot_words 0 (dma_words 1 (cons (mov_x0_x19) (exit_x0)))) (err_denied)))
+
+(def test_dma_alloc () int
+  (check_int "at the first device page" (boot_words (flag_dev) (dma_words 2 (cons (mov_x0_x19) (exit_x0)))) (stack_top)))
+
+(def test_dma_alloc_none () int
+  (check_int "0 pages" (boot_words (flag_dev) (dma_words 0 (cons (mov_x0_x19) (exit_x0)))) (err_too_big)))
+
+; The address of the page x19 plus off, which is below 4096 twice over.
+(def dma_address_words ((off int)) (list int)
+  (cons (add_imm 0 19 (div off 2)) (cons (add_imm 0 0 (sub off (div off 2)))
+    (append (call_words (call_dma_address)) (exit_x0)))))
+
+(def in_frame_pool ((a int)) int
+  (add (check_int "page aligned" (mod a 4096) 0)
+       (check_true "in the frame pool" (if (ge a 2550136832) (lt a 2952790016) false))))   ; 0x98000000, 0xB0000000
+
+(def test_dma_address () int
+  (in_frame_pool (boot_words (flag_dev) (dma_words 2 (dma_address_words 16)))))
+
+(def test_dma_address_per_page () int
+  (let a (boot_words (flag_dev) (dma_words 2 (dma_address_words 0)))
+    (let b (boot_words (flag_dev) (dma_words 2 (dma_address_words 4096)))
+      (add (in_frame_pool b) (check_true "another frame" (not (eq a b)))))))
+
+(def test_dma_address_heap () int
+  (check_int "not DMA"
+    (boot_words (flag_dev) (cons (movz_hi 0 49216) (append (call_words (call_dma_address)) (exit_x0))))   ; 0xC0400000
+    (err_no_port)))
+
+(def test_dma_address_past () int
+  (check_int "past the pages" (boot_words (flag_dev) (dma_words 1 (dma_address_words 4096))) (err_no_port)))
+
+; The region call over len bytes from x19.
+(def dma_region_words ((len int)) (list int)
+  (cons (mov_x0_x19) (cons (movz 1 len) (append (call_words 10) (exit_x0)))))
+
+(def test_dma_region () int
+  (check_int "where it is" (boot_words (flag_dev) (dma_words 2 (dma_region_words 8192))) (stack_top)))
+
+(def test_dma_region_past () int
+  (check_int "one page too many" (boot_words (flag_dev) (dma_words 1 (dma_region_words 8192))) -3))
+
+(def test_dma_region_none () int
+  (check_int "no DMA pages"
+    (boot_words (flag_dev) (cons (movz_hi 0 59392) (cons (movz 1 4096) (append (call_words 10) (exit_x0)))))   ; 0xE8000000
+    -3))
+
+; ----------------------------------------------------------- shared memory
+
+; shm_alloc of n pages, then words, with the first page's address in x19.
+(def shm_words ((n int) (ws (list int))) (list int)
+  (cons (movz 0 n) (append (call_words (call_shm_alloc)) (cons (mov_x19_x0) ws))))
+
+(def test_shm_alloc_nodev () int
+  (check_int "any process" (boot_words 0 (shm_words 1 (cons (mov_x0_x19) (exit_x0)))) (stack_top)))
+
+; shm_share of x19's n pages with pid, then the answer as the status.
+(def share_words ((n int) (pid int)) (list int)
+  (cons (mov_x0_x19) (cons (movz 1 n) (cons (movz 2 pid) (append (call_words (call_shm_share)) (exit_x0))))))
+
+(def test_shm_share_self () int
+  (check_int "a second view, at the next device page"
+    (boot_words 0 (shm_words 1 (share_words 1 1))) (add (stack_top) 4096)))
+
+(def test_shm_share_no_pid () int
+  (check_int "no pid 9" (boot_words 0 (shm_words 1 (share_words 1 9))) (err_no_port)))
+
+(def test_shm_share_not_mine () int
+  (check_int "two pages, one shared memory" (boot_words 0 (shm_words 1 (share_words 2 1))) (err_fault)))
+
+(def test_shm_share_none () int
+  (check_int "0 pages" (boot_words 0 (shm_words 1 (share_words 0 1))) (err_too_big)))
+
+; pid 1 stores 7 in its shared page, shares it with pid 2, and waits for
+; it; pid 2 loads its first device page, the same memory, and exits with
+; what it holds.
+(def sharer () (list int)
+  (shm_words 1 (cons (movz 0 7) (cons (mov_x1_x19) (cons (str_x0_x1) (share_and_wait))))))
+
+(def share_and_wait () (list int)
+  (cons (mov_x0_x19) (cons (movz 1 1) (cons (movz 2 2)
+    (append (call_words (call_shm_share)) (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0))))))))
+
+(def reader () (list int)
+  (cons (movz_hi 1 59392) (cons (ldr_x0_x1) (exit_x0))))   ; 0xE8000000
+
+(def test_shm_shared_between () int
+  (check_int "pid 2 read what pid 1 wrote"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (code (sharer)))
+                               (cons (Raw (flag_boot) (code (reader))) (nil Raw)))))
+    7))
+
+; ---------------------------------------------------------------- terminals
+
+(def test_tty_get_none () int
+  (check_int "the kernel's own" (boot_words 0 (append (call_words (call_tty_get)) (exit_x0))) 0))
+
+(def test_tty_set_missing () int
+  (check_int "no port 99" (boot_words 0 (cons (movz 0 99) (append (call_words (call_tty_set)) (exit_x0)))) (err_no_port)))
+
+; A new port as the thread's own terminal, in x19, then words.
+(def own_tty_words ((ws (list int))) (list int)
+  (append (call_words (call_port_new))
+    (cons (mov_x19_x0) (append (call_words (call_tty_set)) ws))))
+
+(def test_tty_get_set () int
+  (check_int "its port" (boot_words 0 (own_tty_words (append (call_words (call_tty_get)) (exit_x0)))) 1))
+
+; Two bytes of the image written to standard output.
+(def write_two () (list int)
+  (cons (movz 0 1) (cons (movz_hi 1 49152) (cons (movz 2 2) (call_words 2)))))
+
+(def test_tty_write () int
+  (check_int "two written" (boot_words 0 (own_tty_words (append (write_two) (exit_x0)))) 2))
+
+; What the terminal gets: the writer's pid, then reply port 0, w, and the
+; two bytes.
+(def test_tty_write_message () int
+  (check_int "4 and 7 bytes"
+    (boot_words 0 (own_tty_words (append (write_two)
+      (cons (mov_x0_x19) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_try_receive)) (exit_x0))))))))
+    11))
+
+; Reading standard input waits for the terminal's line: here nothing can
+; send one, so the kernel finds the deadlock.
+(def test_tty_read_waits () int
+  (check_int "deadlock"
+    (boot_words 0 (own_tty_words (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words 1) (exit_x0)))))))
+    124))
+
+(def test_pid () int
+  (check_int "pid 1" (boot_words 0 (append (call_words (call_pid)) (exit_x0))) 1))
+
+; Sends 8 bytes of its own code to its own port, and receives them into
+; the heap: the header's 4 bytes and the 8.
+(def test_send_to_self () int
+  (check_int "received"
+    (boot_words 0
+      (append (call_words (call_port_new))
+        (cons (mov_x19_x0) (cons (movz_hi 1 49152) (cons (movz 2 8)
+          (append (call_words (call_send))
+            (cons (mov_x0_x19) (cons (movz_hi 1 49216) (cons (movz 2 64)
+              (append (call_words (call_receive)) (exit_x0)))))))))))
+    12))
+
+(def test_too_small () int
+  (check_int "max below the message"
+    (boot_words 0
+      (append (call_words (call_port_new))
+        (cons (mov_x19_x0) (cons (movz_hi 1 49152) (cons (movz 2 8)
+          (append (call_words (call_send))
+            (cons (mov_x0_x19) (cons (movz_hi 1 49216) (cons (movz 2 6)
+              (append (call_words (call_receive)) (exit_x0)))))))))))
+    (err_too_big)))
+
+(def test_try_receive_empty () int
+  (check_int "nothing waiting"
+    (boot_words 0
+      (append (call_words (call_port_new))
+        (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_try_receive)) (exit_x0))))))
+    (err_taken)))
+
+(def test_receive_not_owner () int
+  (check_int "no port 5"
+    (boot_words 0 (cons (movz 0 5) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_receive)) (exit_x0))))))
+    (err_no_port)))
+
+(def test_send_too_big () int
+  (check_int "4097 bytes"
+    (boot_words 0 (cons (movz 0 1) (cons (movz_hi 1 49152) (cons (movz 2 4097) (append (call_words (call_send)) (exit_x0))))))
+    (err_too_big)))
+
+; Waits on its own port with nothing that could send to it.
+(def test_deadlock () int
+  (check_int "deadlock"
+    (boot_words 0 (append (call_words (call_port_new)) (cons (movz 2 8) (append (call_words (call_receive)) (cons (b_self) (nil int))))))
+    124))
+
+; Module 1 spins for ever; pid 1 yields to it, and gets the processor back
+; only because the timer takes it from the spinner.
+(def test_preemption () int
+  (check_int "back after the spinner"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (code (cons (movz 0 1) (append (call_words (call_spawn))
+                                                     (append (call_words (call_yield))
+                                                       (cons (movz 0 3) (exit_x0)))))))
+                      (cons (Raw 0 (code (cons (b_self) (nil int)))) (nil Raw)))))
+    3))
+
+(def test_wait_child () int
+  (check_int "child's status"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (code (cons (movz 0 1) (append (call_words (call_spawn))
+                                                     (append (call_words (call_wait)) (exit_x0))))))
+                      (cons (Raw 0 (code (cons (movz 0 42) (exit_x0)))) (nil Raw)))))
+    42))
+
+(def test_spawn_bad_index () int
+  (check_int "module 7" (boot_words 0 (cons (movz 0 7) (append (call_words (call_spawn)) (exit_x0)))) (err_no_port)))
+
+(def test_wait_self () int
+  (check_int "pid 1 waits on itself" (boot_words 0 (cons (movz 0 1) (append (call_words (call_wait)) (exit_x0)))) (err_no_port)))
+
+(def test_sleep_in_past () int
+  (check_int "at once" (boot_words 0 (cons (movz 0 1) (append (call_words (call_sleep_until)) (exit_x0)))) 0))
+
+; Entry 0's path is /bin/raw0: 9 bytes, copied to the heap.
+(def test_module_name () int
+  (check_int "/bin/raw0"
+    (boot_words 0 (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_module_name)) (exit_x0))))))
+    9))
+
+(def test_module_name_missing () int
+  (check_int "no module 4"
+    (boot_words 0 (cons (movz 0 4) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_module_name)) (exit_x0))))))
+    (err_no_port)))
+
+(def test_module_name_too_small () int
+  (check_int "max 2"
+    (boot_words 0 (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 2) (append (call_words (call_module_name)) (exit_x0))))))
+    (err_too_big)))
+
+(def test_irq_bind_denied () int
+  (check_int "nodev"
+    (boot_words 0 (append (call_words (call_port_new)) (cons (mov_x19_x0) (cons (movz 0 34) (cons (mov_x1_x19) (append (call_words (call_irq_bind)) (exit_x0)))))))
+    (err_denied)))
+
+(def test_irq_ack_unbound () int
+  (check_int "not bound" (boot_words (flag_dev) (cons (movz 0 34) (append (call_words (call_irq_ack)) (exit_x0)))) (err_no_port)))
+
+; ------------------------------------------------------------------- fuzz
+
+; Nothing a thread puts in its registers can make the kernel fail: a
+; thread that makes hundreds of calls with random words, below, inside,
+; and above the user range, negative and huge, still reaches its exit.
+; Calls that wait, or end the thread, are left out, and writes go to
+; standard error.
+
+(def fuzz_calls () (list int)
+  (numbers (split_spaces "1 2 4 5 6 7 8 9 10 11 99 256 257 258 259 261 262 263 267 268 269 270 271 272 273 274 275 276 277 278 279 300")))
+
+(def numbers ((ws (list (list int)))) (list int)
+  (if (is_empty ws) (nil int) (cons (int_prefix (head ws) 0) (numbers (tail ws)))))
+
+(def fuzz_reg ((s int) (d int)) int
+  (let kind (rand_below s 4)
+    (let v (rand_below (rand_next s) 65536)
+      (if (eq kind 0) (movz d v)
+      (if (eq kind 1) (movz_hi d v)
+      (if (eq kind 2) (movn d v)
+      (fuzz_special (rand_next s) d)))))))
+
+; Words that land where the kernel must decide: the devices' bases, the
+; edges of the user range, and small counts and interrupt numbers.
+(def fuzz_special ((s int) (d int)) int
+  (let i (rand_below s 13)
+    (if (lt i 7)
+        (movz_hi d (list_at (numbers (split_spaces "2304 2305 2560 49152 49216 59392 65535")) i))
+        (movz d (list_at (numbers (split_spaces "0 1 2 8 34 4096")) (sub i 7))))))
+
+; One call's instructions, reversed onto acc.
+(def fuzz_call ((s int) (acc (list int))) (list int)
+  (let n (list_at (fuzz_calls) (rand_below s (length (fuzz_calls))))
+    (let x0 (if (eq n 2) (movz 0 2) (fuzz_reg (rand_next s) 0))
+      (let x1 (fuzz_reg (rand_next (rand_next (rand_next s))) 1)
+        (let x2 (fuzz_reg (rand_next (rand_next (rand_next (rand_next (rand_next s))))) 2)
+          (cons (svc) (cons (movz 8 n) (cons x2 (cons x1 (cons x0 acc))))))))))
+
+(def fuzz_code ((s int) (n int) (acc (list int))) (list int)
+  (if (eq n 0)
+      (rev_onto acc (cons (movz 0 0) (exit_x0)))
+      (fuzz_code (rand_next (rand_next (rand_next (rand_next (rand_next (rand_next (rand_next s)))))))
+                 (sub n 1) (fuzz_call s acc))))
+
+(def test_fuzz_a () int
+  (check_int "survived" (boot_words 0 (fuzz_code 1 300 (nil int))) 0))
+
+(def test_fuzz_b () int
+  (check_int "survived" (boot_words 0 (fuzz_code 77 300 (nil int))) 0))
+
+(def test_fuzz_c () int
+  (check_int "survived" (boot_words 0 (fuzz_code 4242 300 (nil int))) 0))
+
+; The same for a module that may drive devices, so the region and
+; interrupt calls get past their first check.
+(def test_fuzz_dev () int
+  (check_int "survived" (boot_words (flag_dev) (fuzz_code 9 300 (nil int))) 0))
+
+; A message sent to a process that is already ready must not put it on
+; the ready queue twice: if it were, the second turn would resume it while
+; it waits on its port, with a stale x0. Here pid 2 makes port 1 and
+; yields; pid 1 sends to it while it is ready, then waits for it. Pid 2
+; takes the message and waits again, for ever, so pid 1 never wakes.
+(def test_ready_once () int
+  (check_int "deadlock, not a stale resume"
+    (boot (raw_initramfs
+            (cons (Raw (flag_boot)
+                    (code (cons (movz 0 1) (append (call_words (call_spawn))
+                            (cons (mov_x19_x0) (append (call_words (call_yield))
+                              (cons (movz 0 1) (cons (movz_hi 1 49152) (cons (movz 2 8) (append (call_words (call_send))
+                                (cons (mov_x0_x19) (append (call_words (call_wait)) (exit_x0)))))))))))))
+              (cons (Raw 0
+                      (code (append (call_words (call_port_new)) (append (call_words (call_yield))
+                              (cons (movz 0 1) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_receive))
+                                (cons (movz 0 1) (append (call_words (call_receive)) (exit_x0)))))))))))
+                    (nil Raw)))))
+    124))
+
+; ------------------------------------------------------------ jobs
+
+(def spinner () Raw (Raw 0 (code (cons (b_self) (nil int)))))
+
+(def exits_with ((n int)) Raw (Raw 0 (code (cons (movz 0 n) (exit_x0)))))
+
+(def first ((ws (list int))) Raw (Raw (flag_boot) (code ws)))
+
+(def boot_mods ((mods (list Raw))) int (boot (raw_initramfs mods)))
+
+; Spawns module 1, a spinner, as pid 2, kills it, and exits with what
+; waiting for it gives.
+(def test_kill_child () int
+  (check_int "killed"
+    (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn))
+                       (cons (movz 0 2) (append (call_words (call_kill))
+                         (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0))))))))
+               (cons (spinner) (nil Raw))))
+    (killed_status)))
+
+(def test_kill_answers_zero () int
+  (check_int "kill's result"
+    (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn))
+                       (cons (movz 0 2) (append (call_words (call_kill)) (exit_x0))))))
+               (cons (spinner) (nil Raw))))
+    0))
+
+; Pid 1 spawns module 1 as pid 2 and module 2 as pid 3, then exits with
+; what waiting for pid w gives.
+(def spawn_two_wait ((w int) (two Raw)) int
+  (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn))
+                     (cons (movz 0 2) (append (call_words (call_spawn))
+                       (cons (movz 0 w) (append (call_words (call_wait)) (exit_x0))))))))
+             (cons two (cons (sibling_killer) (nil Raw))))))
+
+; Kills pid 2, and exits with the result.
+(def sibling_killer () Raw
+  (Raw 0 (code (cons (movz 0 2) (append (call_words (call_kill)) (exit_x0))))))
+
+; Pid 3 kills pid 2, its sibling, not its child.
+(def test_kill_sibling () int
+  (add (check_int "kill's result" (spawn_two_wait 3 (spinner)) 0)
+       (check_int "the sibling's status" (spawn_two_wait 2 (spinner)) (killed_status))))
+
+; Pid 2 kills pid 1, its parent, which stops the system with pid 1's
+; status.
+(def test_kill_pid_one () int
+  (check_int "the system's status"
+    (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn))
+                       (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0))))))
+               (cons (Raw 0 (code (cons (movz 0 1) (append (call_words (call_kill)) (exit_x0))))) (nil Raw))))
+    (killed_status)))
+
+; A driver, a program with a dev line, cannot be killed.
+(def test_kill_driver () int
+  (check_int "denied" (spawn_two_wait 3 (Raw (flag_dev) (code (cons (b_self) (nil int))))) (err_denied)))
+
+(def test_kill_self () int
+  (check_int "pid 1 is not its own child"
+    (boot_words 0 (cons (movz 0 1) (append (call_words (call_kill)) (exit_x0))))
+    (err_no_port)))
+
+;; Short sequences, so the tests below read as steps.
+(def spawn_words ((m int)) (list int) (cons (movz 0 m) (call_words (call_spawn))))
+(def watch_words ((pid int) (port int)) (list int) (cons (movz 0 pid) (cons (movz 1 port) (call_words (call_watch)))))
+
+; Receives on port into the heap, with call n, and exits with the count.
+(def receive_exit ((n int) (port int)) (list int)
+  (cons (movz 0 port) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words n) (exit_x0))))))
+
+; Watches pid 2 on port 1 before it runs, and receives its notice: the
+; header and 12 bytes.
+(def test_watch_exit () int
+  (check_int "notice"
+    (boot_mods (cons (first (append (spawn_words 1)
+                              (append (call_words (call_port_new))
+                                (append (watch_words 2 1) (receive_exit (call_receive) 1)))))
+               (cons (exits_with 7) (nil Raw))))
+    16))
+
+; The same, watching after it has exited: the notice comes at once.
+(def test_watch_dead () int
+  (check_int "notice"
+    (boot_mods (cons (first (append (spawn_words 1)
+                              (append (call_words (call_yield))
+                                (append (call_words (call_port_new))
+                                  (append (watch_words 2 1) (receive_exit (call_try_receive) 1))))))
+               (cons (exits_with 7) (nil Raw))))
+    16))
+
+(def test_watch_foreign_port () int
+  (check_int "port 9 is no one's"
+    (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn))
+                       (cons (movz 0 2) (cons (movz 1 9) (append (call_words (call_watch)) (exit_x0)))))))
+               (cons (spinner) (nil Raw))))
+    (err_no_port)))
+
+; ------------------------------------------------------- spawn_args
+
+; Exits with how many arguments it was given.
+(def arg_counter () Raw (Raw 0 (code (append (call_words (sys_arg_count)) (exit_x0)))))
+
+; Spawns module m with the len bytes stored right after its ten words of
+; code, waits for it, and exits with its status.
+(def spawn_args_words ((m int) (len int)) (list int)
+  (cons (movz 0 m) (cons (movz_hi 1 49152) (cons (add_imm 1 1 40) (cons (movz 2 len)
+    (append (call_words (call_spawn_args)) (append (call_words (call_wait)) (exit_x0))))))))
+
+(def spawner ((m int) (extra (list int)) (len int)) Raw
+  (Raw (flag_boot) (append (code (spawn_args_words m len)) extra)))
+
+; The same, but exits with what spawn_args gave, for a spawn that fails:
+; eight words of code.
+(def spawn_try_words ((m int) (len int)) (list int)
+  (cons (movz 0 m) (cons (movz_hi 1 49152) (cons (add_imm 1 1 32) (cons (movz 2 len)
+    (append (call_words (call_spawn_args)) (exit_x0)))))))
+
+(def spawn_tryer ((m int) (extra (list int)) (len int)) Raw
+  (Raw (flag_boot) (append (code (spawn_try_words m len)) extra)))
+
+(def test_spawn_args () int
+  (check_int "two arguments"
+    (boot_mods (cons (spawner 1 (encode_args (split_spaces "a bc")) (length (encode_args (split_spaces "a bc"))))
+                     (cons (arg_counter) (nil Raw))))
+    2))
+
+(def test_spawn_args_none () int
+  (check_int "no arguments"
+    (boot_mods (cons (spawner 1 (encode_args (nil (list int))) 4) (cons (arg_counter) (nil Raw))))
+    0))
+
+(def test_spawn_args_malformed () int
+  (check_int "argc 2, one argument"
+    (boot_mods (cons (spawn_tryer 1 (append (u32_le 2) (append (u32_le 1) "a")) 9) (cons (arg_counter) (nil Raw))))
+    (err_fault)))
+
+(def test_spawn_args_too_big () int
+  (check_int "4097 bytes"
+    (boot_mods (cons (spawn_tryer 1 (encode_args (nil (list int))) 4097) (cons (arg_counter) (nil Raw))))
+    (err_too_big)))
+
+(def test_spawn_args_no_module () int
+  (check_int "module 9"
+    (boot_mods (cons (spawn_tryer 9 (encode_args (nil (list int))) 4) (cons (arg_counter) (nil Raw))))
+    (err_no_port)))
+
+(def test_spawn_args_bad_buffer () int
+  (check_int "from below the user range"
+    (boot_words 0 (cons (movz 0 0) (cons (movz 1 16) (cons (movz 2 4) (append (call_words (call_spawn_args)) (exit_x0))))))
+    (err_fault)))
+
+; Plain spawn still gives a program the inittab's arguments for it: none,
+; for a raw program.
+(def test_spawn_keeps_inittab_args () int
+  (check_int "the inittab's"
+    (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn)) (append (call_words (call_wait)) (exit_x0)))))
+                     (cons (arg_counter) (nil Raw))))
+    0))
+
+; -------------------------------------------------------- proc_info
+
+; Asks for pid's record into the heap, with room for max, then exits with
+; the count, or with the record's first or second 8 bytes, as load says.
+(def info_words ((pid int) (max int) (load (list int))) (list int)
+  (cons (movz 0 pid) (cons (movz_hi 1 49216) (cons (movz 2 max)
+    (append (call_words (call_proc_info)) (append load (exit_x0)))))))
+
+(def first_words () (list int) (cons (ldr_x0_x1) (nil int)))
+(def second_words () (list int) (cons (ldr_x0_x1_8) (nil int)))
+
+; Two u32s as the 8 bytes a load gives: low, then high.
+(def words ((low int) (high int)) int (bit_or low (bit_shl high 32)))
+
+(def test_info_length () int
+  (check_int "16 bytes" (boot_words 0 (info_words 1 64 (nil int))) (proc_record_len)))
+
+(def test_info_self () int
+  (check_int "running, from the kernel" (boot_words 0 (info_words 1 64 (first_words))) (words (state_running) 0)))
+
+(def test_info_ready () int
+  (check_int "ready, from pid 1"
+    (boot_mods (cons (first (append (spawn_words 1) (info_words 2 64 (first_words))))
+                     (cons (spinner) (nil Raw))))
+    (words (state_ready) 1)))
+
+; Pid 2 waits on port 1; pid 1 yields to let it, then asks.
+(def receiver () Raw
+  (Raw 0 (code (append (call_words (call_port_new)) (cons (movz 2 8) (append (call_words (call_receive)) (exit_x0)))))))
+
+(def test_info_receiving () int
+  (check_int "receiving"
+    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (first_words)))))
+                     (cons (receiver) (nil Raw))))
+    (words (state_receiving) 1)))
+
+(def test_info_receiving_detail () int
+  (check_int "module 1, on port 1"
+    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (second_words)))))
+                     (cons (receiver) (nil Raw))))
+    (words 1 1)))
+
+(def test_info_exited () int
+  (check_int "exited"
+    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (first_words)))))
+                     (cons (exits_with 7) (nil Raw))))
+    (words (state_exited) 0)))
+
+(def test_info_exited_status () int
+  (check_int "no module, status 7"
+    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (second_words)))))
+                     (cons (exits_with 7) (nil Raw))))
+    (words 4294967295 7)))
+
+(def test_info_unused () int
+  (check_int "pid 9" (boot_words 0 (info_words 9 64 (nil int))) (err_no_port)))
+
+(def test_info_too_small () int
+  (check_int "max 8" (boot_words 0 (info_words 1 8 (nil int))) (err_too_big)))
+
+; ------------------------------------------------------------- files
+
+; A program of these instructions, padded to 1024 bytes, then data: the
+; paths it opens, which data_words puts the address of in a register.
+(def with_data ((ws (list int)) (d (list int))) (list int)
+  (append (pad_to 1024 (code ws)) d))
+
+(def pad_to ((n int) (s (list int))) (list int)
+  (append s (zeros (sub n (length s)))))
+
+; xd = the address of byte at of the data.
+(def data_words ((d int) (at int)) (list int)
+  (cons (movz_hi d 49152) (cons (add_imm d d (add 1024 at)) (nil int))))
+
+; Opens the len bytes of path at data byte at, with mode: x0 is the stream.
+(def open_words ((at int) (len int) (mode int)) (list int)
+  (append (data_words 0 at) (cons (movz 1 len) (cons (movz 2 mode) (call_words (sys_open))))))
+
+; Reads up to 64 bytes of stream x19 into the heap: x0 is the count.
+(def read_x19 () (list int)
+  (cons (mov_x0_x19) (cons (movz_hi 1 49216) (cons (movz 2 64) (call_words (sys_read))))))
+
+; An initramfs of one program, these instructions with this data, and a
+; directory /etc holding /etc/motd, "hello\n": entries 0, 1, 2, and the
+; inittab 3.
+(def files_boot ((ws (list int)) (d (list int)) (more (list int))) int
+  (boot (raw_initramfs_with (cons (Raw (flag_boot) (with_data ws d)) (nil Raw))
+                            (cons (RawFile "etc" 16877 "") (cons (RawFile "etc/motd" 33188 "hello\n") (nil RawFile)))
+                            more)))
+
+(def test_open () int
+  (check_int "stream 3" (files_boot (append (open_words 0 9 1) (exit_x0)) "/etc/motd" "") 3))
+
+(def test_open_relative () int
+  (check_int "from the root" (files_boot (append (open_words 0 8 1) (exit_x0)) "etc/motd" "") 3))
+
+(def test_read () int
+  (check_int "6 bytes"
+    (files_boot (append (open_words 0 9 1) (cons (mov_x19_x0) (append (read_x19) (exit_x0)))) "/etc/motd" "")
+    6))
+
+(def test_read_to_end () int
+  (check_int "then 0"
+    (files_boot (append (open_words 0 9 1) (cons (mov_x19_x0) (append (read_x19) (append (read_x19) (exit_x0)))))
+                "/etc/motd" "")
+    0))
+
+(def test_read_not_open () int
+  (check_int "stream 9"
+    (files_boot (cons (movz 19 9) (append (read_x19) (exit_x0))) "" "")
+    -5))
+
+(def test_open_missing () int
+  (check_int "-3" (files_boot (append (open_words 0 9 1) (exit_x0)) "/etc/nope" "") -3))
+
+(def test_open_directory () int
+  (check_int "-8" (files_boot (append (open_words 0 4 1) (exit_x0)) "/etc" "") -8))
+
+(def test_open_to_write () int
+  (check_int "read-only: -4" (files_boot (append (open_words 0 9 2) (exit_x0)) "/etc/motd" "") -4))
+
+(def test_open_to_write_no_directory () int
+  (check_int "-9" (files_boot (append (open_words 0 8 3) (exit_x0)) "/nodir/x" "") -9))
+
+(def test_open_bad_path () int
+  (check_int "from 0x10"
+    (files_boot (cons (movz 0 16) (cons (movz 1 4) (cons (movz 2 1) (append (call_words (sys_open)) (exit_x0))))) "" "")
+    -5))
+
+(def test_close () int
+  (check_int "0"
+    (files_boot (append (open_words 0 9 1) (append (call_words (sys_close)) (exit_x0))) "/etc/motd" "")
+    0))
+
+(def test_close_twice () int
+  (check_int "-5"
+    (files_boot (append (open_words 0 9 1)
+                  (cons (mov_x19_x0) (append (call_words (sys_close)) (cons (mov_x0_x19) (append (call_words (sys_close)) (exit_x0))))))
+                "/etc/motd" "")
+    -5))
+
+(def repeat_words ((n int) (ws (list int))) (list int)
+  (if (eq n 0) (nil int) (append ws (repeat_words (sub n 1) ws))))
+
+(def test_open_limit () int
+  (check_int "the 17th"
+    (files_boot (append (repeat_words 17 (open_words 0 9 1)) (exit_x0)) "/etc/motd" "")
+    -5))
+
+(def test_open_limit_last_fits () int
+  (check_int "the 16th, stream 18"
+    (files_boot (append (repeat_words 16 (open_words 0 9 1)) (exit_x0)) "/etc/motd" "")
+    18))
+
+; x0 and x1 the path at data byte at, of len bytes, then call n.
+(def path_call ((at int) (len int) (n int)) (list int)
+  (append (data_words 0 at) (cons (movz 1 len) (append (call_words n) (exit_x0)))))
+
+(def test_rename () int
+  (add (check_int "an existing file" (files_boot (path_call 0 9 (sys_rename)) "/etc/motd" "") -4)
+       (check_int "a missing file" (files_boot (path_call 0 9 (sys_rename)) "/etc/nope" "") -3)))
+
+(def test_remove () int
+  (add (check_int "an existing file" (files_boot (path_call 0 9 (sys_remove)) "/etc/motd" "") -4)
+       (check_int "a directory" (files_boot (path_call 0 4 (sys_remove)) "/etc" "") -8)))
+
+(def test_stdin () int
+  (check_int "the inittab's stdin"
+    (files_boot (cons (movz 19 0) (append (read_x19) (exit_x0))) "" "stdin /etc/motd\n")
+    6))
+
+(def test_stdin_none () int
+  (check_int "empty"
+    (files_boot (cons (movz 19 0) (append (read_x19) (exit_x0))) "" "")
+    0))
+
+(def test_spawn_not_a_program () int
+  (add (check_int "a text file" (files_boot (cons (movz 0 2) (append (call_words (call_spawn)) (exit_x0))) "" "") (err_denied))
+       (check_int "a directory" (files_boot (cons (movz 0 1) (append (call_words (call_spawn)) (exit_x0))) "" "") (err_denied))))
+
+; ----------------------------------------------------------------- freeing
+
+; Spawns module m and waits for it, n times over, then exits with the
+; last one's status.
+(def spawn_wait_times ((n int) (m int)) (list int)
+  (append (repeat_words n (cons (movz 0 m) (append (call_words (call_spawn)) (call_words (call_wait)))))
+          (exit_x0)))
+
+; Stores 7 at the start of each of n heap pages, from 0xC0400000, then
+; words.
+(def touch_words ((n int) (ws (list int))) (list int)
+  (cons (movz 0 7) (cons (movz_hi 1 49216) (cons (movz 2 n)
+    (cons (str_x0_x1) (cons (add_imm_hi 1 1 1) (cons (subs_imm 2 2 1) (cons (cbnz 2 -3) ws))))))))
+
+(def toucher ((n int)) Raw (Raw 0 (code (touch_words n (cons (movz 0 0) (exit_x0))))))
+
+; The same, with a shared page too, so that its space maps something
+; above the stack and is given up when it ends, its frames freed.
+(def shm_toucher ((n int)) Raw
+  (Raw 0 (code (touch_words n (cons (movz 0 1) (append (call_words (call_shm_alloc)) (cons (movz 0 0) (exit_x0))))))))
+
+; Exits with the sum of the first word of each of n heap pages.
+(def summer ((n int)) Raw
+  (Raw 0 (code (cons (movz 3 0) (cons (movz_hi 1 49216) (cons (movz 2 n)
+    (cons (ldr_x0_x1) (cons (add_reg 3 3 0) (cons (add_imm_hi 1 1 1) (cons (subs_imm 2 2 1) (cons (cbnz 2 -4)
+      (cons (mov_reg 0 3) (exit_x0)))))))))))))
+
+; Module 1 runs, then module 2, and pid 1 exits with module 2's status.
+(def one_then_two () Raw
+  (first (append (repeat_words 1 (cons (movz 0 1) (append (call_words (call_spawn)) (call_words (call_wait)))))
+                 (spawn_wait_times 1 2))))
+
+; A process that runs after another has ended may be given the frames the
+; first one freed, but zeroed: nothing the first one stored is left.
+(def test_freed_frames_zeroed () int
+  (check_int "sum of 8 pages"
+    (boot_mods (cons (one_then_two) (cons (toucher 8) (cons (summer 8) (nil Raw)))))
+    0))
+
+; The same when the first one shared a page too, so its frames are freed
+; by way of the count of shared mappings.
+(def test_freed_shared_zeroed () int
+  (check_int "sum of 8 pages"
+    (boot_mods (cons (one_then_two) (cons (shm_toucher 8) (cons (summer 8) (nil Raw)))))
+    0))
+
+; Seven processes of 64 MB each, one after another: 114,688 frames, more
+; than the board's 98,304, so each must be given what the one before it
+; freed.
+(def test_freed_heap_suffices () int
+  (check_int "the last one's status"
+    (boot_mods (cons (first (spawn_wait_times 7 1)) (cons (toucher 16384) (nil Raw))))
+    0))
+
+; Shares 16 MB, the most one call gives, four times over, and exits with
+; where the last is.
+(def shm_hog () Raw
+  (Raw 0 (code (append (repeat_words 4 (cons (movz 0 4096) (call_words (call_shm_alloc)))) (exit_x0)))))
+
+; What the tests of seven 64 MB processes rely on: one process that holds
+; as much at once, 64 MB of heap and 368 MB shared, 110,592 frames, runs out of
+; them, though not of device pages, of which there are 384 MB.
+(def test_frames_run_out () int
+  (check_int "the last 16 MB"
+    (boot_words 0 (touch_words 16384 (append (repeat_words 23 (cons (movz 0 4096) (call_words (call_shm_alloc)))) (exit_x0))))
+    (err_fault)))
+
+(def test_device_pages_suffice () int
+  (check_int "368 MB of device pages"
+    (boot_words 0 (append (repeat_words 23 (cons (movz 0 4096) (call_words (call_shm_alloc)))) (exit_x0)))
+    (add (stack_top) (mul 22 16777216))))
+
+; The same with shared frames: seven processes that share 64 MB each.
+(def test_freed_shared_suffices () int
+  (check_int "the last one's last 16 MB"
+    (boot_mods (cons (first (spawn_wait_times 7 1)) (cons (shm_hog) (nil Raw))))
+    (add (stack_top) (mul 3 16777216))))
+
+; Spaces are given back: 300 processes in a row that each share a page,
+; more than the board's 255 spaces, all run, and the last is pid 303.
+; Before L0 could free a space, the 255th was refused.
+(def shm_child () Raw
+  (Raw 0 (code (cons (movz 0 1) (append (call_words (call_shm_alloc)) (cons (movz 0 0) (exit_x0)))))))
+
+(def test_spaces_given_back () int
+  (check_int "the 300th pid"
+    (boot_mods (cons (first (spawn_wait_loop 300 1 (cons (mov_reg 0 20) (exit_x0)))) (cons (shm_child) (nil Raw))))
+    303))
+
+; A shared frame outlives the process it was shared with: pid 2 maps pid
+; 1's page and exits, and pid 1 still reads its 7 there. Freeing the frame
+; at pid 2's end would stop the kernel with frame still mapped.
+(def share_wait_reload () (list int)
+  (cons (mov_x0_x19) (cons (movz 1 1) (cons (movz 2 2)
+    (append (call_words (call_shm_share)) (cons (movz 0 2) (append (call_words (call_wait))
+      (cons (mov_x1_x19) (cons (ldr_x0_x1) (exit_x0))))))))))
+
+(def test_shared_frame_outlives_sharer () int
+  (check_int "pid 1's page after pid 2 ended"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (code (shm_words 1 (cons (movz 0 7) (cons (mov_x1_x19) (cons (str_x0_x1) (share_wait_reload)))))))
+                               (cons (Raw (flag_boot) (code (reader))) (nil Raw)))))
+    7))
+
+; ------------------------------------------------------------ taking back
+
+; shm_unmap of x19's n pages, then words.
+(def unmap_words ((n int) (ws (list int))) (list int)
+  (cons (mov_x0_x19) (cons (movz 1 n) (append (call_words (call_shm_unmap)) ws))))
+
+; shm_revoke of x19's n pages from pid, then words.
+(def revoke_words ((n int) (pid int) (ws (list int))) (list int)
+  (cons (mov_x0_x19) (cons (movz 1 n) (cons (movz 2 pid) (append (call_words (call_shm_revoke)) ws)))))
+
+(def test_shm_unmap () int
+  (check_int "given up" (boot_words 0 (shm_words 2 (unmap_words 2 (exit_x0)))) 0))
+
+; Touching a page given up ends the process, as touching any device page
+; nothing is mapped at does.
+(def test_shm_unmap_then_touch () int
+  (check_int "killed"
+    (boot_words 0 (shm_words 1 (unmap_words 1 (cons (mov_x1_x19) (cons (ldr_x0_x1) (exit_x0))))))
+    139))
+
+(def test_shm_unmap_refused () int
+  (add (check_int "not its pages"
+         (boot_words 0 (cons (movz_hi 0 59392) (cons (movz 1 1) (append (call_words (call_shm_unmap)) (exit_x0)))))
+         (err_fault))
+       (check_int "no pages" (boot_words 0 (shm_words 1 (unmap_words 0 (exit_x0)))) (err_too_big))))
+
+; One process shares 16 MB and gives it up, 30 times over: 480 MB, more
+; than the board's frames and than its 384 MB of device pages, so both
+; the memory and the pages must come back each time. The last 16 MB is
+; where the first was.
+(def test_shm_unmap_frees_memory () int
+  (check_int "the 30th 16 MB"
+    (boot_words 0 (append (repeat_words 30 (shm_words 4096 (unmap_words 4096 (nil int)))) (cons (mov_x0_x19) (exit_x0))))
+    (stack_top)))
+
+; Pid 1 shares a page with pid 2, then takes it back.
+(def sharing_revoker ((pid int) (ws (list int))) Raw
+  (Raw (flag_boot) (code (shm_words 1 (cons (movz 0 7) (cons (mov_x1_x19) (cons (str_x0_x1)
+    (cons (mov_x0_x19) (cons (movz 1 1) (cons (movz 2 2) (append (call_words (call_shm_share))
+      (revoke_words 1 pid ws))))))))))))
+
+(def spinner_at_boot ((flags int)) Raw (Raw (bit_or flags (flag_boot)) (code (cons (b_self) (nil int)))))
+
+(def test_shm_revoke () int
+  (check_int "pid 2's one mapping"
+    (boot (raw_initramfs (cons (sharing_revoker 2 (exit_x0)) (cons (spinner_at_boot 0) (nil Raw)))))
+    1))
+
+; Pid 2, which reads the page once pid 1 waits, finds it gone, and is
+; ended for touching it: what test_shm_shared_between reads as 7.
+(def test_shm_revoke_takes_back () int
+  (check_int "pid 2's status"
+    (boot (raw_initramfs (cons (sharing_revoker 2 (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0))))
+                               (cons (Raw (flag_boot) (code (reader))) (nil Raw)))))
+    139))
+
+(def test_shm_revoke_refused () int
+  (add (check_int "a driver"
+         (boot (raw_initramfs (cons (sharing_revoker 2 (exit_x0)) (cons (spinner_at_boot (flag_dev)) (nil Raw)))))
+         (err_denied))
+       (add (check_int "itself"
+              (boot (raw_initramfs (cons (sharing_revoker 1 (exit_x0)) (cons (spinner_at_boot 0) (nil Raw)))))
+              (err_denied))
+            (check_int "no such pid"
+              (boot (raw_initramfs (cons (sharing_revoker 9 (exit_x0)) (cons (spinner_at_boot 0) (nil Raw)))))
+              (err_no_port)))))
+
+; ------------------------------------------------------------------- pids
+
+; Spawns module m and waits for it, n times over, the last pid in x20,
+; then words.
+(def spawn_wait_loop ((n int) (m int) (ws (list int))) (list int)
+  (cons (movz 19 n)
+    (cons (movz 0 m) (append (call_words (call_spawn))
+      (cons (mov_reg 20 0) (append (call_words (call_wait))
+        (cons (subs_imm 19 19 1) (cons (cbnz 19 -7) ws))))))))
+
+; 300 processes, one after another: more than the table's 255 slots, so
+; slots are reused, and the last one still runs and exits with 42.
+(def test_more_than_255 () int
+  (check_int "the last one's status"
+    (boot_mods (cons (first (spawn_wait_loop 300 1 (exit_x0))) (cons (exits_with 42) (nil Raw))))
+    42))
+
+; Children 1 to 254 take slots 2 to 255, as pids 2 to 255; then slot 2
+; again, as pid 258, and so on: the 300th is pid 303, in slot 47.
+(def test_reused_slot_new_pid () int
+  (check_int "the 300th pid"
+    (boot_mods (cons (first (spawn_wait_loop 300 1 (cons (mov_reg 0 20) (exit_x0)))) (cons (exits_with 0) (nil Raw))))
+    303))
+
+(def test_proc_slot () int
+  (check_int "slot 2, given twice"
+    (boot_mods (cons (first (spawn_wait_loop 255 1 (cons (movz 0 2) (append (call_words (call_proc_slot)) (exit_x0)))))
+                     (cons (exits_with 0) (nil Raw))))
+    258))
+
+(def test_proc_slot_bad () int
+  (add (check_int "slot 0" (boot_words 0 (cons (movz 0 0) (append (call_words (call_proc_slot)) (exit_x0)))) (err_no_port))
+       (check_int "never given" (boot_words 0 (cons (movz 0 9) (append (call_words (call_proc_slot)) (exit_x0)))) 0)))
+
+; Once its slot is given again, an old pid names nothing: waiting for pid
+; 2 after 255 children is refused, not a wait for pid 258.
+(def test_old_pid_names_nothing () int
+  (check_int "wait for pid 2"
+    (boot_mods (cons (first (spawn_wait_loop 255 1 (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0)))))
+                     (cons (exits_with 0) (nil Raw))))
+    (err_no_port)))
+
+; A status no one has asked for outlasts those that were: pid 1 starts
+; pid 2, which exits with 7, then 300 more, each waited for; their slots
+; are given again and again, but pid 2's is not, so waiting for it still
+; gives 7.
+(def test_untold_status_kept () int
+  (check_int "pid 2's status"
+    (boot_mods (cons (first (cons (movz 0 2) (append (call_words (call_spawn))
+                              (spawn_wait_loop 300 1 (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0)))))))
+                     (cons (exits_with 0) (cons (exits_with 7) (nil Raw)))))
+    7))

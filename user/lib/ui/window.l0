@@ -1,0 +1,207 @@
+; window.l0 -- a toolkit program's window: opened with the compositor,
+; user/wm, its events read, and what it shows drawn. Linked with the
+; compositor's protocol, user/lib/wm.l0.
+;
+; A program's loop, its own view and update in between:
+;
+;   (match (ui_open TITLE W H) ...)                  once
+;   message  = (port_receive (ui_win_port win))
+;   event    = (ui_event_of win message)
+;   routed   = (ui_route win event)                  the window, and the
+;                                                    action set off, or ""
+;   state    = update state action event
+;   win      = (ui_present win (view state))
+;
+; ui_route does what GTK does with the pointer and keys: the pointer over
+; a target is shown, a press shows it pressed, and its release over the
+; same target sets off its action; Tab moves the keyboard's focus to the
+; next target, and Enter or Space sets off the one it is on.
+;
+; ui_present lays the view out, and paints only the parts that differ from
+; what it painted last, telling the compositor of each.
+
+; The window: the compositor, its id there, the canvas it is drawn in,
+; the port its events come to, the font, the widgets' state, the nodes
+; painted last, and the pointer's buttons as last told.
+(data UiWin (UiWin Compositor int Canvas int (array int) UiState (list UiNode) int))
+
+(data UiOpened (UiOpenedWin UiWin) (UiOpenFailed (list int)))
+
+(def ui_win_port ((w UiWin)) int (match w ((UiWin c id cv port font st ns b) port)))
+(def ui_win_state ((w UiWin)) UiState (match w ((UiWin c id cv port font st ns b) st)))
+(def ui_win_nodes ((w UiWin)) (list UiNode) (match w ((UiWin c id cv port font st ns b) ns)))
+
+(def ui_win_with ((w UiWin) (st UiState) (b int)) UiWin
+  (match w ((UiWin c id cv port font old ns ob) (UiWin c id cv port font st ns b))))
+
+; A window w by h titled title, in front, painted nothing yet.
+(def ui_open ((title (list int)) (w int) (h int)) UiOpened
+  (match (compositor_open)
+    ((NoCompositor why) (UiOpenFailed why))
+    ((Compositor cport rp pid)
+      (let font (load_font (font_path))
+        (if (eq (array_len font) 0)
+            (UiOpenFailed "no font")
+            (match (ui_buffer w h)
+              ((UiNoBuf why) (UiOpenFailed why))
+              ((UiBuf va n canvas)
+                (let port (port_new)
+                  (match (window_open (Compositor cport rp pid) w h va n port title)
+                    ((WindowFailed why) (UiOpenFailed why))
+                    ((WindowOpened id)
+                      (UiOpenedWin (UiWin (Compositor cport rp pid) id canvas port font (ui_state_new (ui_style)) (nil UiNode) 0))))))))))))
+
+(def ui_close ((w UiWin)) int
+  (match w ((UiWin c id cv port font st ns b) (let x (window_close c id) 0))))
+
+; --------------------------------------------------------------- events
+
+(data UiEvent
+  (UiKey KeyEvent)
+  (UiPress int int int)          ; x, y in the window, and the buttons now down
+  (UiRelease int int int)
+  (UiMotion int int int)
+  (UiLeave)                      ; the pointer has gone from the window
+  (UiFocus bool)                 ; the window has come to the front, or gone from it
+  (UiExit int int)               ; a process watched has exited: its pid, its status
+  (UiOther int (list int)))      ; anything else: who sent it, and what
+
+; What a message to the window's port is.
+(def ui_event_of ((w UiWin) (m Message)) UiEvent
+  (match w
+    ((UiWin c id cv port font st ns held)
+      (match m
+        ((RecvFailed) (UiOther -1 ""))
+        ((Message from payload)
+          (if (if (eq from (compositor_pid c)) (gt from 0) false)
+              (ui_from_wm m held from payload)
+              (match (exit_of m)
+                ((Exited pid status) (UiExit pid status))
+                ((NotExit) (UiOther from payload)))))))))
+
+(def ui_from_wm ((m Message) (held int) (from int) (payload (list int))) UiEvent
+  (match (key_event_of m)
+    ((Some k) (UiKey k))
+    ((None)
+      (match (pointer_event_of m)
+        ((Some p)
+          (match p
+            ((PointerEvent x y b)
+              (if (if (eq held 0) (not (eq b 0)) false)
+                  (UiPress x y b)
+                  (if (if (not (eq held 0)) (eq b 0) false) (UiRelease x y b) (UiMotion x y b))))))
+        ((None)
+          (if (is_leave_notice m)
+              (UiLeave)
+              (match (focus_notice_of m)
+                ((Some front) (UiFocus front))
+                ((None) (UiOther from payload)))))))))
+
+; Linux's codes for the keys that move and use the focus.
+(def ui_key_tab () int 15)
+(def ui_key_enter () int 28)
+(def ui_key_space () int 57)
+(def ui_key_esc () int 1)
+
+; The window after an event, and the action it set off, or "".
+(data UiRouted (UiRouted UiWin (list int)))
+
+(def ui_route ((w UiWin) (ev UiEvent)) UiRouted
+  (let st (ui_win_state w)
+    (let ns (ui_win_nodes w)
+      (match w
+        ((UiWin c id cv port font old nodes held)
+          (match ev
+            ((UiMotion x y b) (UiRouted (ui_win_with w (ui_st_hovering st (ui_hit ns x y)) b) ""))
+            ((UiPress x y b)
+              (let t (ui_hit ns x y)
+                (UiRouted (ui_win_with w (ui_st_focusing (ui_st_pressing (ui_st_hovering st t) t) "") b) "")))
+            ((UiRelease x y b)
+              (let t (ui_hit ns x y)
+                (let p (ui_st_pressed st)
+                  (UiRouted (ui_win_with w (ui_st_pressing (ui_st_hovering st t) "") b)
+                            (if (if (is_empty p) false (eq p t)) p "")))))
+            ((UiLeave) (UiRouted (ui_win_with w (ui_st_hovering st "") held) ""))
+            ((UiFocus front) (UiRouted (ui_win_with w (ui_st_backdropped st (not front)) held) ""))
+            ((UiKey k) (ui_keyed w k))
+            ((UiExit pid status) (UiRouted w ""))
+            ((UiOther from payload) (UiRouted w ""))))))))
+
+(def ui_keyed ((w UiWin) (k KeyEvent)) UiRouted
+  (let st (ui_win_state w)
+    (match k
+      ((KeyEvent code value ch)
+        (if (eq value 0)
+            (UiRouted w "")
+            (if (eq code (ui_key_tab))
+                (UiRouted (ui_win_with w (ui_st_focusing st (ui_focus_next (ui_win_nodes w) (ui_st_focus st))) (ui_win_held w)) "")
+                (if (eq code (ui_key_esc))
+                    (UiRouted (ui_win_with w (ui_st_focusing st "") (ui_win_held w)) "")
+                    (if (if (any_eq code (cons (ui_key_enter) (cons (ui_key_space) (nil int)))) (not (is_empty (ui_st_focus st))) false)
+                        (UiRouted w (ui_st_focus st))
+                        (UiRouted w "")))))))))
+
+(def ui_win_held ((w UiWin)) int (match w ((UiWin c id cv port font st ns b) b)))
+
+; ------------------------------------------------------------- painting
+
+; The window showing widget: laid out, and where that differs from what
+; was painted last, painted and its damage told.
+(def ui_present ((w UiWin) (widget UiWidget)) UiWin
+  (match w
+    ((UiWin c id canvas port font st old held)
+      (let ns (ui_layout_window widget (canvas_w canvas) (canvas_h canvas) st)
+        (let boxes (ui_changed old ns (UiRect 0 0 (canvas_w canvas) (canvas_h canvas)))
+          (let p (ui_repaint c id canvas font ns boxes)
+            (UiWin c id canvas port font st ns held)))))))
+
+; Each box painted, then all of them told in one damage request.
+(def ui_repaint ((c Compositor) (id int) (canvas Canvas) (font (array int)) (ns (list UiNode)) (boxes (list UiRect))) int
+  (let p (ui_paint_boxes canvas font ns boxes)
+    (let d (window_damage_many c id (ui_win_rects boxes (nil WinRect))) 0)))
+
+(def ui_paint_boxes ((canvas Canvas) (font (array int)) (ns (list UiNode)) (boxes (list UiRect))) int
+  (if (is_empty boxes)
+      0
+      (let p (ui_paint_nodes canvas font (head boxes) ns)
+        (ui_paint_boxes canvas font ns (tail boxes)))))
+
+(def ui_win_rects ((rs (list UiRect)) (acc (list WinRect))) (list WinRect)
+  (if (is_empty rs) (rev acc) (match (head rs) ((UiRect x y w h) (ui_win_rects (tail rs) (cons (WinRect x y w h) acc))))))
+
+; Where new differs from old: each node that is not the same, where it
+; was and where it is, merged where they overlap; all of full if the two
+; do not have the same parts; none if they are the same.
+(def ui_changed ((old (list UiNode)) (new (list UiNode)) (full UiRect)) (list UiRect)
+  (if (not (eq (length old) (length new)))
+      (cons full (nil UiRect))
+      (let rs (ui_merged (ui_differing old new (nil UiRect)) (nil UiRect))
+        (if (gt (length rs) (ui_max_boxes)) (cons (ui_union_all rs (UiRect 0 0 0 0)) (nil UiRect)) rs))))
+
+; More boxes than this are painted as one.
+(def ui_max_boxes () int 8)
+
+(def ui_differing ((old (list UiNode)) (new (list UiNode)) (acc (list UiRect))) (list UiRect)
+  (if (if (is_empty old) true (is_empty new))
+      (rev acc)
+      (if (eq (head old) (head new))
+          (ui_differing (tail old) (tail new) acc)
+          (ui_differing (tail old) (tail new) (cons (ui_node_rect (head new)) (cons (ui_node_rect (head old)) acc))))))
+
+; rs with each that overlaps one before it joined to it.
+(def ui_merged ((rs (list UiRect)) (acc (list UiRect))) (list UiRect)
+  (if (is_empty rs)
+      (rev acc)
+      (if (ui_rect_empty (head rs))
+          (ui_merged (tail rs) acc)
+          (ui_merged (tail rs) (ui_merge_into acc (head rs) (nil UiRect))))))
+
+(def ui_merge_into ((acc (list UiRect)) (r UiRect) (seen (list UiRect))) (list UiRect)
+  (if (is_empty acc)
+      (cons r seen)
+      (if (ui_rect_overlaps (head acc) r)
+          (rev_onto seen (cons (ui_rect_union (head acc) r) (tail acc)))
+          (ui_merge_into (tail acc) r (cons (head acc) seen)))))
+
+(def ui_union_all ((rs (list UiRect)) (acc UiRect)) UiRect
+  (if (is_empty rs) acc (ui_union_all (tail rs) (ui_rect_union acc (head rs)))))

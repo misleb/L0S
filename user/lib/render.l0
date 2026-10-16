@@ -1,0 +1,683 @@
+; render.l0 -- drawing into a canvas, a buffer of 4-byte pixels, b, g, r,
+; then unused: shapes, the 8 by 16 font, PPM images, and the commands that
+; say what to draw. Shared by the compositor, wm, its clients, such as vt,
+; and the display drivers. Linked into the programs that draw, by the
+; Makefile's LIBS_ lists, not into every program.
+
+; ------------------------------------------------------------------- PPM
+
+; A binary PPM's width, height, and where its pixels start; or why not.
+(data Ppm (Ppm int int int) (PpmBad (list int)))
+
+(def parse_ppm ((b bytes)) Ppm
+  (if (not (if (has b 0 2) (if (eq (bytes_get b 0) 80) (eq (bytes_get b 1) 54) false) false))   ; "P6"
+      (PpmBad "not a binary PPM: no P6")
+      (ppm_fields b 2 (nil int))))
+
+; The header's numbers from i, collected until there are three.
+(def ppm_fields ((b bytes) (i int) (got (list int))) Ppm
+  (if (eq (length got) 3)
+      (ppm_checked b i (rev got))
+      (let j (skip_blank b i)
+        (if (not (if (has b j 1) (is_digit (bytes_get b j)) false))
+            (PpmBad "PPM header cut short")
+            (let k (digits_end b j)
+              (ppm_fields b k (cons (int_prefix (bytes_range b j k) 0) got)))))))
+
+; Past spaces, newlines, tabs, and comments from # to the end of a line.
+(def skip_blank ((b bytes) (i int)) int
+  (if (not (has b i 1))
+      i
+      (if (is_space (bytes_get b i))
+          (skip_blank b (add i 1))
+          (if (eq (bytes_get b i) 35) (skip_blank b (line_end b i)) i))))
+
+(def line_end ((b bytes) (i int)) int
+  (if (not (has b i 1)) i (if (eq (bytes_get b i) 10) (add i 1) (line_end b (add i 1)))))
+
+(def digits_end ((b bytes) (i int)) int
+  (if (if (has b i 1) (is_digit (bytes_get b i)) false) (digits_end b (add i 1)) i))
+
+; One whitespace byte ends the header; then width * height pixels of 3.
+(def ppm_checked ((b bytes) (i int) (nums (list int))) Ppm
+  (let w (head nums)
+    (let h (head (tail nums))
+      (if (not (eq (head (tail (tail nums))) 255))
+          (PpmBad "PPM maxval is not 255")
+          (if (if (lt w 1) true (lt h 1))
+              (PpmBad "PPM has no pixels")
+              (if (not (has b (add i 1) (mul (mul w h) 3)))
+                  (PpmBad "PPM pixels cut short")
+                  (Ppm w h (add i 1))))))))
+
+; The pixel at x, y of an image w wide whose pixels start at off, as the
+; scanout keeps one: b, then g, then r, least significant first.
+(def pixel_at ((b bytes) (off int) (w int) (x int) (y int)) int
+  (let i (add off (mul (add (mul y w) x) 3))
+    (bit_or (bytes_get b (add i 2))
+            (bit_or (bit_shl (bytes_get b (add i 1)) 8) (bit_shl (bytes_get b i) 16)))))
+
+; ------------------------------------------------------------- placement
+
+; Where an image goes on a screen, centered, cut to fit: the screen's x
+; and y it starts at, the image's x and y it starts from, and how many
+; columns and rows are copied.
+(data Place (Place int int int int int int))
+
+(def placement ((sw int) (sh int) (iw int) (ih int)) Place
+  (Place (half_gap sw iw) (half_gap sh ih) (half_gap iw sw) (half_gap ih sh) (min sw iw) (min sh ih)))
+
+; Half of how much bigger a is than b, or 0.
+(def half_gap ((a int) (b int)) int (if (gt a b) (div (sub a b) 2) 0))
+
+; ------------------------------------------------------------ background
+
+; What restore puts back, the image splash last drew: its bytes, width,
+; height, where its pixels start, and how bright it was drawn, in percent.
+; None if it could not be read, and the screen is black then.
+(data Background (Background bytes int int int int) (NoBackground))
+
+(data BgLoad (BgOk Background) (BgBad (list int)))
+
+(def load_background ((path (list int)) (percent int)) BgLoad
+  (match (open_in path)
+    ((IoFailed fault why) (BgBad (append path (append ": " why))))
+    ((IoOpened f)
+      (match (file_read_all f)
+        ((IoReadFailed code) (BgBad (append path (append ": " (io_error code)))))
+        ((IoBytes b)
+          (let c (file_close f)
+            (match (parse_ppm b)
+              ((PpmBad why) (BgBad (append path (append ": " why))))
+              ((Ppm iw ih off) (BgOk (Background b iw ih off percent))))))))))
+
+; The color c, each channel percent of itself.
+(def dim ((c int) (percent int)) int
+  (if (ge percent 100)
+      c
+      (rgb_of (div (mul (bit_and (bit_shr c 16) 255) percent) 100)
+              (div (mul (bit_and (bit_shr c 8) 255) percent) 100)
+              (div (mul (bit_and c 255) percent) 100))))
+
+(def rgb_of ((r int) (g int) (b int)) int
+  (bit_or (bit_shl r 16) (bit_or (bit_shl g 8) b)))
+
+; The background's pixel at x, y of a screen w by h: the image's, where
+; placement puts it, and its corner's color around it, at its brightness.
+(def background_at ((bg Background) (w int) (h int) (x int) (y int)) int
+  (match bg
+    ((NoBackground) 0)
+    ((Background b iw ih off percent)
+      (match (placement w h iw ih)
+        ((Place dx dy sx sy cw ch)
+          (if (if (if (ge x dx) (lt x (add dx cw)) false) (if (ge y dy) (lt y (add dy ch)) false) false)
+              (dim (pixel_at b off iw (add sx (sub x dx)) (add sy (sub y dy))) percent)
+              (dim (pixel_at b off iw 0 0) percent)))))))
+
+; The whole screen as the background has it.
+(def paint_background ((f Canvas) (bg Background)) int
+  (match f
+    ((Canvas fb w h top)
+      (match bg
+        ((NoBackground) (fill fb 0 0 (mul w h)))
+        ((Background b iw ih off percent)
+          (let k (fill fb (dim (pixel_at b off iw 0 0) percent) 0 (mul w h))
+            (blit f b off iw percent (placement w h iw ih) 0)))))))
+
+; The background put back over columns x0 up to x1 of rows y up to y1,
+; already cut to the screen.
+(def restore_rows ((f Canvas) (bg Background) (x0 int) (x1 int) (y int) (y1 int)) int
+  (if (ge y y1)
+      0
+      (let r (restore_row f bg x0 x1 y)
+        (restore_rows f bg x0 x1 (add y 1) y1))))
+
+(def restore_row ((f Canvas) (bg Background) (x int) (x1 int) (y int)) int
+  (if (ge x x1)
+      0
+      (let p (put f x y (background_at bg (canvas_w f) (canvas_h f) x y))
+        (restore_row f bg (add x 1) x1 y))))
+
+; ------------------------------------------------------------------ font
+
+; The font: glyphs 8 wide and 16 tall for codes 32 to 126, as
+; fonts/l0s-8x16.txt draws them, kept as a row's 8 bits each, the
+; leftmost the highest, glyph by glyph. Empty if it could not be read.
+(def font_path () (list int) "/etc/font.txt")
+(def glyph_w () int 8)
+(def glyph_h () int 16)
+(def first_glyph () int 32)
+(def glyph_count () int 95)
+
+(def load_font ((path (list int))) (array int)
+  (match (open_in path)
+    ((IoFailed fault why) (no_font (append path (append ": " why))))
+    ((IoOpened f)
+      (match (file_read_all f)
+        ((IoReadFailed code) (no_font (append path (append ": " (io_error code)))))
+        ((IoBytes b)
+          (let c (file_close f)
+            (match (parse_font (bytes_to_list b))
+              ((Err why) (no_font (append path (append ": " why))))
+              ((Ok rows) rows))))))))
+
+; No font, having said why on standard error.
+(def no_font ((why (list int))) (array int)
+  (let w (write_err (append why "; no text\n")) (array_new 0 0)))
+
+(def font_bad ((why (list int))) (Result (array int) (list int))
+  ((Err (array int) (list int)) why))
+
+; A font file's text as font_rows: lines starting with ; are comments, and
+; a glyph is "@ CODE" then 16 rows of 8 of # and ., every code from 32
+; to 126 once.
+(def parse_font ((text (list int))) (Result (array int) (list int))
+  (font_lines (lines_of text (nil int) (nil (list int)))
+              (array_new (mul (glyph_count) (glyph_h)) 0) (array_new (glyph_count) false)))
+
+; text cut at each newline, the last line kept if it has no newline.
+(def lines_of ((text (list int)) (line (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty text)
+      (rev (if (is_empty line) acc (cons (rev line) acc)))
+      (if (eq (head text) 10)
+          (lines_of (tail text) (nil int) (cons (rev line) acc))
+          (lines_of (tail text) (cons (head text) line) acc))))
+
+(def font_lines ((ls (list (list int))) (rows (array int)) (seen (array bool))) (Result (array int) (list int))
+  (if (is_empty ls)
+      (font_done rows seen 0)
+      (let l (head ls)
+        (if (if (is_empty l) true (eq (head l) 59))      ; ;
+            (font_lines (tail ls) rows seen)
+            (if (not (starts_with l "@ "))
+                (font_bad (append "not a glyph's header: " l))
+                (font_header (tail ls) rows seen (drop_n l 2)))))))
+
+(def font_header ((ls (list (list int))) (rows (array int)) (seen (array bool)) (code_text (list int))) (Result (array int) (list int))
+  (let code (if (if (is_empty code_text) false (all_digits code_text)) (int_prefix code_text 0) -1)
+    (if (if (lt code (first_glyph)) true (ge code (add (first_glyph) (glyph_count))))
+        (font_bad (append "no glyph " code_text))
+        (let was (array_get seen (sub code (first_glyph)))
+          (if was
+              (font_bad (append "glyph " (append (digits code) " twice")))
+              (font_glyph ls rows (array_set seen (sub code (first_glyph)) true) code 0))))))
+
+(def font_glyph ((ls (list (list int))) (rows (array int)) (seen (array bool)) (code int) (r int)) (Result (array int) (list int))
+  (if (eq r (glyph_h))
+      (font_lines ls rows seen)
+      (if (is_empty ls)
+          (font_bad (append "glyph " (append (digits code) " cut short")))
+          (let v (row_bits (head ls) 0 0)
+            (if (lt v 0)
+                (font_bad (append "glyph " (append (digits code) (append ", row " (append (digits r) " is not 8 of # and .")))))
+                (font_glyph (tail ls) (array_set rows (add (mul (sub code (first_glyph)) (glyph_h)) r) v) seen code (add r 1)))))))
+
+; A row's 8 of # and . as bits, the first the highest; or -1.
+(def row_bits ((l (list int)) (n int) (acc int)) int
+  (if (is_empty l)
+      (if (eq n (glyph_w)) acc -1)
+      (if (ge n (glyph_w))
+          -1
+          (if (eq (head l) 35)
+              (row_bits (tail l) (add n 1) (bit_or (bit_shl acc 1) 1))
+              (if (eq (head l) 46) (row_bits (tail l) (add n 1) (bit_shl acc 1)) -1)))))
+
+(def font_done ((rows (array int)) (seen (array bool)) (i int)) (Result (array int) (list int))
+  (if (eq i (glyph_count))
+      ((Ok (array int) (list int)) rows)
+      (if (array_get seen i)
+          (font_done rows seen (add i 1))
+          (font_bad (append "no glyph " (digits (add i (first_glyph))))))))
+
+; Row r of glyph code's bits.
+(def glyph_row ((font (array int)) (code int) (r int)) int
+  (array_get font (add (mul (sub code (first_glyph)) (glyph_h)) r)))
+
+; Draws glyph code with its top left at x, y: its lit pixels only, so what
+; is under the others shows through.
+(def draw_glyph ((f Canvas) (font (array int)) (x int) (y int) (code int) (c int) (r int)) int
+  (if (eq r (glyph_h))
+      0
+      (let d (glyph_bits f x (add y r) (glyph_row font code r) c 0)
+        (draw_glyph f font x y code c (add r 1)))))
+
+(def glyph_bits ((f Canvas) (x int) (y int) (bits int) (c int) (col int)) int
+  (if (eq col (glyph_w))
+      0
+      (let p (if (eq (bit_and (bit_shr bits (sub 7 col)) 1) 1) (plot f (add x col) y c) 0)
+        (glyph_bits f x y bits c (add col 1)))))
+
+; The code glyph code draws: itself, or ? for one the font lacks.
+(def drawable ((code int)) int
+  (if (if (lt code (first_glyph)) true (ge code (add (first_glyph) (glyph_count)))) 63 code))
+
+; Characters cs from x, y, one cell each, with each cell first filled
+; with bg, unless bg is negative, so what is under shows through.
+(def draw_text ((f Canvas) (font (array int)) (x int) (y int) (fg int) (bg int) (cs (list int))) int
+  (if (is_empty cs)
+      0
+      (let b (if (ge bg 0) (fill_rect f x y (glyph_w) (glyph_h) bg) 0)
+        (let g (draw_glyph f font x y (drawable (head cs)) fg 0)
+          (draw_text f font (add x (glyph_w)) y fg bg (tail cs))))))
+
+; ---------------------------------------------------------------- damage
+
+; Where the frame has changed since it was last shown: columns x0 up to x1
+; of rows y0 up to y1; or nowhere.
+(data Damage (Box int int int int) (NoDamage))
+
+(def union ((a Damage) (b Damage)) Damage
+  (match a
+    ((NoDamage) b)
+    ((Box ax0 ay0 ax1 ay1)
+      (match b
+        ((NoDamage) a)
+        ((Box bx0 by0 bx1 by1) (Box (min ax0 bx0) (min ay0 by0) (max ax1 bx1) (max ay1 by1)))))))
+
+; d cut to a screen w by h.
+(def clip_damage ((d Damage) (w int) (h int)) Damage
+  (match d
+    ((NoDamage) d)
+    ((Box x0 y0 x1 y1)
+      (let cx0 (max x0 0)
+        (let cy0 (max y0 0)
+          (let cx1 (min x1 w)
+            (let cy1 (min y1 h)
+              (if (if (ge cx0 cx1) true (ge cy0 cy1)) (NoDamage) (Box cx0 cy0 cx1 cy1)))))))))
+
+; The words of a request cut at each ;, into its commands.
+(def split_commands ((words (list (list int)))) (list (list (list int)))
+  (split_at_semis words (nil (list int)) (nil (list (list int)))))
+
+(def split_at_semis ((ws (list (list int))) (cmd (list (list int))) (acc (list (list (list int))))) (list (list (list int)))
+  (if (is_empty ws)
+      (rev (cons (rev cmd) acc))
+      (if (eq (head ws) ";")
+          (split_at_semis (tail ws) (nil (list int)) (cons (rev cmd) acc))
+          (split_at_semis (tail ws) (cons (head ws) cmd) acc))))
+
+
+; ------------------------------------------------------------- commands
+
+(data Command
+  (CmdLine int int int int int)        ; x0, y0, x1, y1, color
+  (CmdCircle int int int int)          ; cx, cy, r, color
+  (CmdDisc int int int int)            ; cx, cy, r, color
+  (CmdRect int int int int int)        ; x, y, w, h, color
+  (CmdFill int int int int int)        ; x, y, w, h, color
+  (CmdClear int)                       ; color
+  (CmdChar int int int int)            ; x, y, code, color
+  (CmdText int int int int (list int)) ; x, y, color, background or -1 for none, the characters
+  (CmdScroll int int)                  ; rows, the new rows' color
+  (CmdRestore int int int int)         ; x, y, w, h
+  (CmdSplash int)                      ; brightness, in percent
+  (CmdSize)
+  (CmdFont))
+
+(def bad ((why (list int))) (Result Command (list int))
+  ((Err Command (list int)) why))
+
+(def good ((cmd Command)) (Result Command (list int))
+  ((Ok Command (list int)) cmd))
+
+; The shapes, and how many numbers each takes before its color.
+(def shape_ops () (list (list int)) (split_spaces "line circle disc rect fill char"))
+(def shape_arity ((op (list int))) int
+  (let i (index_of op (shape_ops))
+    (if (lt i 0) -1 (nth (cons 4 (cons 3 (cons 3 (cons 4 (cons 4 (cons 3 (nil int))))))) i))))
+
+(def (nth T) ((xs (list T)) (i int)) T
+  (if (eq i 0) (head xs) (nth (tail xs) (sub i 1))))
+
+(def parse_command ((words (list (list int)))) (Result Command (list int))
+  (if (is_empty words)
+      (bad "no command")
+      (parse_op (head words) (tail words))))
+
+(def parse_op ((op (list int)) (rest (list (list int)))) (Result Command (list int))
+  (if (eq op "clear") (parse_clear rest)
+  (if (eq op "splash") (parse_splash rest)
+  (if (eq op "restore") (parse_restore rest)
+  (if (eq op "text") (parse_text rest)
+  (if (eq op "scroll") (parse_scroll rest)
+  (if (any_eq op (split_spaces "size font"))
+      (if (is_empty rest) (good (if (eq op "size") (CmdSize) (CmdFont))) (bad (append op " takes nothing")))
+      (if (lt (shape_arity op) 0)
+          (bad (append "no command " op))
+          (parse_shape op rest (shape_arity op))))))))))
+
+; text X Y COLOR BACKGROUND HEX: the characters whose bytes HEX spells, two
+; hex digits each, from X, Y, each cell filled with BACKGROUND first,
+; unless it is none.
+(def parse_text ((rest (list (list int)))) (Result Command (list int))
+  (if (not (eq (length rest) 5))
+      (bad "text takes X Y COLOR BACKGROUND HEX")
+      (match (parse_ints rest 2 (nil int))
+        ((None) (bad (append "text's numbers must be from -" (append (digits (coord_limit))
+                  (append " to " (digits (coord_limit)))))))
+        ((Some xy)
+          (match (parse_color (nth rest 2))
+            ((None) (bad (append "no color " (nth rest 2))))
+            ((Some fg)
+              (match (if (eq (nth rest 3) "none") (Some -1) (parse_color (nth rest 3)))
+                ((None) (bad (append "no color " (nth rest 3))))
+                ((Some bg)
+                  (match (unhex (nth rest 4) (nil int))
+                    ((None) (bad "text's characters must be pairs of hex digits"))
+                    ((Some cs) (good (CmdText (nth xy 0) (nth xy 1) fg bg cs))))))))))))
+
+; The bytes s spells, two hex digits each, or none.
+(def unhex ((s (list int)) (acc (list int))) (Option (list int))
+  (if (is_empty s)
+      (Some (rev acc))
+      (if (is_empty (tail s))
+          ((None (list int)))
+          (let hi (hex_val (head s))
+            (let lo (hex_val (head (tail s)))
+              (if (if (lt hi 0) true (lt lo 0))
+                  ((None (list int)))
+                  (unhex (tail (tail s)) (cons (bit_or (bit_shl hi 4) lo) acc))))))))
+
+; scroll DY [COLOR]: the screen moved up DY rows, the new rows at the
+; bottom COLOR, black unless given.
+(def parse_scroll ((rest (list (list int)))) (Result Command (list int))
+  (if (if (is_empty rest) true (gt (length rest) 2))
+      (bad "scroll takes a number of rows and a color")
+      (match (parse_int (head rest))
+        ((None) (bad "scroll's rows must be from 0 to 10000"))
+        ((Some dy)
+          (if (lt dy 0)
+              (bad "scroll's rows must be from 0 to 10000")
+              (if (is_empty (tail rest))
+                  (good (CmdScroll dy 0))
+                  (match (parse_color (head (tail rest)))
+                    ((None) (bad (append "no color " (head (tail rest)))))
+                    ((Some c) (good (CmdScroll dy c))))))))))
+
+; splash [PERCENT]: the image at that brightness, 100 unless given.
+(def parse_splash ((rest (list (list int)))) (Result Command (list int))
+  (if (is_empty rest)
+      (good (CmdSplash 100))
+      (if (not (is_empty (tail rest)))
+          (bad "splash takes a brightness at most")
+          (match (parse_int (head rest))
+            ((None) (bad "splash's brightness must be from 0 to 100"))
+            ((Some p) (if (if (lt p 0) true (gt p 100))
+                          (bad "splash's brightness must be from 0 to 100")
+                          (good (CmdSplash p))))))))
+
+; restore X Y W H: four numbers and no color, since it puts back the
+; background's own.
+(def parse_restore ((rest (list (list int)))) (Result Command (list int))
+  (if (not (eq (length rest) 4))
+      (bad "restore takes 4 numbers")
+      (match (parse_ints rest 4 (nil int))
+        ((None) (bad (append "restore's numbers must be from -" (append (digits (coord_limit))
+                  (append " to " (digits (coord_limit)))))))
+        ((Some ns) (good (CmdRestore (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)))))))
+
+(def parse_clear ((rest (list (list int)))) (Result Command (list int))
+  (if (is_empty rest)
+      (good (CmdClear 0))
+      (if (is_empty (tail rest))
+          (match (parse_color (head rest))
+            ((None) (bad (append "no color " (head rest))))
+            ((Some c) (good (CmdClear c))))
+          (bad "clear takes a color at most"))))
+
+(def parse_shape ((op (list int)) (rest (list (list int))) (n int)) (Result Command (list int))
+  (let given (length rest)
+    (if (if (lt given n) true (gt given (add n 1)))
+        (bad (append op (append " takes " (append (digits n) " numbers and a color"))))
+        (match (parse_ints rest n (nil int))
+          ((None) (bad (append op (append "'s numbers must be from -" (append (digits (coord_limit))
+                    (append " to " (digits (coord_limit))))))))
+          ((Some nums) (with_color op nums (if (eq given n) "white" (nth rest n))))))))
+
+(def with_color ((op (list int)) (nums (list int)) (cw (list int))) (Result Command (list int))
+  (match (parse_color cw)
+    ((None) (bad (append "no color " cw)))
+    ((Some c) (shape_of op nums c))))
+
+(def shape_of ((op (list int)) (ns (list int)) (c int)) (Result Command (list int))
+  (if (eq op "line") (good (CmdLine (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) c))
+  (if (eq op "rect") (good (CmdRect (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) c))
+  (if (eq op "fill") (good (CmdFill (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) c))
+  (if (eq op "char") (char_of ns c)
+  (round_of op ns c))))))
+
+(def char_of ((ns (list int)) (c int)) (Result Command (list int))
+  (let code (nth ns 2)
+    (if (if (lt code (first_glyph)) true (ge code (add (first_glyph) (glyph_count))))
+        (bad "char's code must be from 32 to 126")
+        (good (CmdChar (nth ns 0) (nth ns 1) code c)))))
+
+(def round_of ((op (list int)) (ns (list int)) (c int)) (Result Command (list int))
+  (if (lt (nth ns 2) 0)
+      (bad (append op "'s radius must not be negative"))
+      (if (eq op "circle")
+          (good (CmdCircle (nth ns 0) (nth ns 1) (nth ns 2) c))
+          (good (CmdDisc (nth ns 0) (nth ns 1) (nth ns 2) c)))))
+
+; Numbers are bounded, so that no shape is too big to draw.
+(def coord_limit () int 10000)
+
+; The first n words as numbers, or none if one is not a number in range.
+(def parse_ints ((ws (list (list int))) (n int) (acc (list int))) (Option (list int))
+  (if (eq n 0)
+      (Some (rev acc))
+      (match (parse_int (head ws))
+        ((None) ((None (list int))))
+        ((Some v) (parse_ints (tail ws) (sub n 1) (cons v acc))))))
+
+; A decimal number with an optional -, within coord_limit.
+(def parse_int ((w (list int))) (Option int)
+  (if (if (is_empty w) false (eq (head w) 45))
+      (match (parse_nat (tail w)) ((None) ((None int))) ((Some v) (Some (neg v))))
+      (parse_nat w)))
+
+(def parse_nat ((w (list int))) (Option int)
+  (if (if (is_empty w) true (if (gt (length w) 5) true (not (all_digits w))))
+      ((None int))
+      (let v (int_prefix w 0)
+        (if (gt v (coord_limit)) ((None int)) (Some v)))))
+
+(def all_digits ((w (list int))) bool
+  (if (is_empty w) true (if (is_digit (head w)) (all_digits (tail w)) false)))
+
+; A color, by name or as six hex digits RRGGBB, as the frame keeps it.
+(def color_names () (list (list int))
+  (split_spaces "white black red green blue yellow cyan magenta amber gray"))
+
+(def color_values () (list int)
+  (cons 16777215 (cons 0 (cons 16711680 (cons 65280 (cons 255 (cons 16776960
+    (cons 65535 (cons 16711935 (cons 15779920 (cons 8421504 (nil int))))))))))))
+
+(def parse_color ((w (list int))) (Option int)
+  (let i (index_of w (color_names))
+    (if (ge i 0)
+        (Some (nth (color_values) i))
+        (if (eq (length w) 6) (hex_of w 0) ((None int))))))
+
+(def hex_of ((w (list int)) (acc int)) (Option int)
+  (if (is_empty w)
+      (Some acc)
+      (let d (hex_val (head w))
+        (if (lt d 0) ((None int)) (hex_of (tail w) (bit_or (bit_shl acc 4) d))))))
+
+; --------------------------------------------------------------- shapes
+
+(data Point (Point int int))
+
+(def sign ((v int)) int (if (lt v 0) -1 (if (gt v 0) 1 0)))
+(def abs_of ((v int)) int (if (lt v 0) (neg v) v))
+
+; The points of a line from x0, y0 to x1, y1, both ends included:
+; Bresenham's, in any direction.
+(def line_points ((x0 int) (y0 int) (x1 int) (y1 int)) (list Point)
+  (let dx (abs_of (sub x1 x0))
+    (let dy (neg (abs_of (sub y1 y0)))
+      (rev (line_onto x0 y0 x1 y1 dx dy (sign (sub x1 x0)) (sign (sub y1 y0)) (add dx dy) (nil Point))))))
+
+(def line_onto ((x int) (y int) (x1 int) (y1 int) (dx int) (dy int) (sx int) (sy int) (err int) (acc (list Point))) (list Point)
+  (let a (cons (Point x y) acc)
+    (if (if (eq x x1) (eq y y1) false)
+        a
+        (let e2 (mul 2 err)
+          (let ex (if (ge e2 dy) (add err dy) err)
+            (let nx (if (ge e2 dy) (add x sx) x)
+              (if (le e2 dx)
+                  (line_onto nx (add y sy) x1 y1 dx dy sx sy (add ex dx) a)
+                  (line_onto nx y x1 y1 dx dy sx sy ex a))))))))
+
+; The points of a circle's outline: the midpoint algorithm, an eighth
+; at a time, mirrored.
+(def circle_points ((cx int) (cy int) (r int)) (list Point)
+  (circle_onto cx cy r 0 (sub 1 r) (nil Point)))
+
+(def circle_onto ((cx int) (cy int) (x int) (y int) (d int) (acc (list Point))) (list Point)
+  (if (lt x y)
+      acc
+      (let a (octants cx cy x y acc)
+        (if (lt d 0)
+            (circle_onto cx cy x (add y 1) (add d (add (mul 2 (add y 1)) 1)) a)
+            (circle_onto cx cy (sub x 1) (add y 1) (add d (add (mul 2 (sub (add y 1) (sub x 1))) 1)) a)))))
+
+(def octants ((cx int) (cy int) (x int) (y int) (acc (list Point))) (list Point)
+  (cons (Point (add cx x) (add cy y)) (cons (Point (add cx y) (add cy x))
+  (cons (Point (sub cx y) (add cy x)) (cons (Point (sub cx x) (add cy y))
+  (cons (Point (sub cx x) (sub cy y)) (cons (Point (sub cx y) (sub cy x))
+  (cons (Point (add cx y) (sub cy x)) (cons (Point (add cx x) (sub cy y)) acc)))))))))
+
+; The greatest integer whose square is at most n, n not negative.
+(def isqrt ((n int)) int
+  (if (lt n 2) n (isqrt_from n n)))
+
+(def isqrt_from ((n int) (x int)) int
+  (if (le (mul x x) n) x (isqrt_from n (div (add x (div n x)) 2))))
+
+; Columns x0 to x1 of a row w wide, cut to the row; or none of it.
+(data Span (Span int int) (NoSpan))
+
+(def clip_span ((x0 int) (x1 int) (w int)) Span
+  (let lo (max x0 0)
+    (let hi (min x1 (sub w 1))
+      (if (gt lo hi) (NoSpan) (Span lo hi)))))
+
+; ------------------------------------------------------------ the canvas
+
+; How many pages hold a w by h buffer of 4-byte pixels.
+(def buffer_pages ((w int) (h int)) int
+  (div (add (mul (mul w h) 4) (sub (page_size) 1)) (page_size)))
+
+; A canvas, as a ring of rows: the region over its pixels, its width and
+; height, and the row of it its top row is. Scrolling moves top, not
+; pixels; whoever shows the canvas reads its rows from top, in order.
+(data Canvas (Canvas IoDevice int int int))
+
+(def canvas_w ((f Canvas)) int (match f ((Canvas fb w h top) w)))
+(def canvas_h ((f Canvas)) int (match f ((Canvas fb w h top) h)))
+(def canvas_top ((f Canvas)) int (match f ((Canvas fb w h top) top)))
+
+; Which of the frame's rows the screen's row y is.
+(def row_at ((top int) (h int) (y int)) int (mod (add y top) h))
+
+; The index of the screen's pixel 0, y in the frame.
+(def row_start ((f Canvas) (y int)) int
+  (match f ((Canvas fb w h top) (mul (row_at top h y) w))))
+
+; Pixels i up to n of the frame, by index, all color.
+(def canvas_fill ((f Canvas) (c int) (i int) (n int)) int
+  (match f ((Canvas fb w h top) (fill fb c i n))))
+
+(def put ((f Canvas) (x int) (y int) (c int)) int
+  (match f ((Canvas fb w h top) (device_write32 fb (mul (add (row_start f y) x) 4) c))))
+
+; The frame after scrolling dy rows up: the top dy rows gone, and dy rows
+; of color new at the bottom.
+(def scrolled ((f Canvas) (dy int) (c int)) Canvas
+  (match f
+    ((Canvas fb w h top)
+      (let f2 (Canvas fb w h (row_at top h dy))
+        (let k (fill_rows f2 0 (sub w 1) (sub h dy) h c) f2)))))
+
+; ---------------------------------------------------------- drawing shapes
+
+(def plot ((f Canvas) (x int) (y int) (c int)) int
+  (if (if (lt x 0) true (if (ge x (canvas_w f)) true (if (lt y 0) true (ge y (canvas_h f)))))
+      0
+      (put f x y c)))
+
+(def plot_all ((f Canvas) (ps (list Point)) (c int)) int
+  (if (is_empty ps)
+      0
+      (match (head ps)
+        ((Point x y) (let p (plot f x y c) (plot_all f (tail ps) c))))))
+
+; Columns x0 to x1 of row y, those on the screen.
+(def span ((f Canvas) (y int) (x0 int) (x1 int) (c int)) int
+  (if (if (lt y 0) true (ge y (canvas_h f)))
+      0
+      (match (clip_span x0 x1 (canvas_w f))
+        ((NoSpan) 0)
+        ((Span lo hi) (canvas_fill f c (add (row_start f y) lo) (add (row_start f y) (add hi 1)))))))
+
+; Rows dy from -r to r of a filled circle.
+(def disc ((f Canvas) (cx int) (cy int) (r int) (c int) (dy int)) int
+  (if (gt dy r)
+      0
+      (let hw (isqrt (sub (mul r r) (mul dy dy)))
+        (let s (span f (add cy dy) (sub cx hw) (add cx hw) c)
+          (disc f cx cy r c (add dy 1))))))
+
+(def fill_rect ((f Canvas) (x int) (y int) (rw int) (rh int) (c int)) int
+  (if (if (lt rw 1) true (lt rh 1))
+      0
+      (fill_rows f x (add x (sub rw 1)) (max y 0) (min (add y rh) (canvas_h f)) c)))
+
+(def fill_rows ((f Canvas) (x0 int) (x1 int) (y int) (end int) (c int)) int
+  (if (ge y end)
+      0
+      (let s (span f y x0 x1 c) (fill_rows f x0 x1 (add y 1) end c))))
+
+(def outline ((f Canvas) (x int) (y int) (rw int) (rh int) (c int)) int
+  (if (if (lt rw 1) true (lt rh 1))
+      0
+      (let x1 (add x (sub rw 1))
+        (let y1 (add y (sub rh 1))
+          (let a (plot_all f (line_points x y x1 y) c)
+            (let b (plot_all f (line_points x y1 x1 y1) c)
+              (let l (plot_all f (line_points x y x y1) c)
+                (plot_all f (line_points x1 y x1 y1) c))))))))
+
+; ---------------------------------------------------------------- drawing
+
+; Pixels i up to n of the region fb, by index, all color: one alone first
+; if i is odd, since a 64-bit write must be 8-aligned, then two at a time,
+; then one.
+(def fill ((fb IoDevice) (color int) (i int) (n int)) int
+  (if (ge i n)
+      0
+      (if (if (eq (mod i 2) 1) true (ge (add i 1) n))
+          (let w (device_write32 fb (mul i 4) color) (fill fb color (add i 1) n))
+          (let w (device_write64 fb (mul i 4) (bit_or color (bit_shl color 32)))
+            (fill fb color (add i 2) n)))))
+
+; Rows r on of the image's part that place copies, into the frame, at
+; percent of their brightness.
+(def blit ((f Canvas) (b bytes) (off int) (iw int) (percent int) (p Place) (r int)) int
+  (match p
+    ((Place dx dy sx sy cw ch)
+      (if (ge r ch)
+          0
+          (match f
+            ((Canvas fb w h top)
+              (let row (blit_row fb (mul (add (row_start f (add dy r)) dx) 4) b off iw percent sx (add sy r) 0 cw)
+                (blit f b off iw percent p (add r 1)))))))))
+
+; Columns c up to cw of image row y from column sx, to the frame from at.
+(def blit_row ((fb IoDevice) (at int) (b bytes) (off int) (iw int) (percent int) (sx int) (y int) (c int) (cw int)) int
+  (if (ge c cw)
+      0
+      (let w (device_write32 fb (add at (mul c 4)) (dim (pixel_at b off iw (add sx c) y) percent))
+        (blit_row fb at b off iw percent sx y (add c 1) cw))))

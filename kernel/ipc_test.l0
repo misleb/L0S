@@ -1,0 +1,102 @@
+(def msg ((from int) (s (list int))) Msg
+  (Msg from (bytes_from_list s)))
+
+(def with_port ((owner int)) NewPort
+  (ipc_port_new (ipc_new) owner))
+
+(def test_port_new () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (add (check_int "first port" port 1)
+           (add (check_int "owner" (ipc_owner ipc port) 3)
+                (check_int "no such" (ipc_owner ipc 9) -1))))))
+
+(def test_ports_numbered_apart () int
+  (match (with_port 3)
+    ((NewPort a ipc)
+      (match (ipc_port_new ipc 4)
+        ((NewPort b ipc2) (check_int "second" b 2))))))
+
+(def payload ((m (Option Msg))) (list int)
+  (match m
+    ((Some x) (match x ((Msg from b) (append (digits from) (append ":" (bytes_to_list b))))))
+    ((None) "none")))
+
+(def sent ((s Sent)) Ipc
+  (match s ((Sent ipc) ipc) ((SendFailed code ipc) ipc)))
+
+(def test_fifo_order () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (let i2 (sent (ipc_enqueue (sent (ipc_enqueue ipc port (msg 5 "a"))) port (msg 6 "b")))
+        (add (check_str "oldest" (payload (ipc_peek i2 port)) "5:a")
+             (check_str "then" (payload (ipc_peek (ipc_drop i2 port) port)) "6:b"))))))
+
+(def test_empty_peek () int
+  (match (with_port 3)
+    ((NewPort port ipc) (check_str "empty" (payload (ipc_peek ipc port)) "none"))))
+
+(def send_code ((s Sent)) int
+  (match s ((Sent ipc) 0) ((SendFailed code ipc) code)))
+
+(def test_send_no_port () int
+  (check_int "no port" (send_code (ipc_enqueue (ipc_new) 4 (msg 1 "x"))) (err_no_port)))
+
+(def fill ((ipc Ipc) (port int) (n int)) Ipc
+  (if (eq n 0) ipc (fill (sent (ipc_enqueue ipc port (msg 1 "x"))) port (sub n 1))))
+
+(def test_queue_full () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (check_int "full" (send_code (ipc_enqueue (fill ipc port (queue_limit)) port (msg 1 "y"))) (err_full)))))
+
+(def reg_code ((r Registered)) int (match r ((Registered code ipc) code)))
+(def reg_ipc ((r Registered)) Ipc (match r ((Registered code ipc) ipc)))
+
+(def test_register_lookup () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (let r (ipc_register ipc 3 port "echo")
+        (add (check_int "registered" (reg_code r) 0)
+             (add (check_int "found" (ipc_lookup (reg_ipc r) "echo") port)
+                  (check_int "missing" (ipc_lookup (reg_ipc r) "other") (err_no_port))))))))
+
+(def test_register_rules () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (let r (ipc_register ipc 3 port "echo")
+        (add (check_int "not the owner" (reg_code (ipc_register ipc 4 port "x")) (err_no_port))
+             (check_int "taken" (reg_code (ipc_register (reg_ipc r) 3 port "echo")) (err_taken)))))))
+
+(def test_forget () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (match (ipc_port_new (reg_ipc (ipc_register ipc 3 port "echo")) 4)
+        ((NewPort other i2)
+          (let i3 (ipc_forget i2 3)
+            (add (check_int "port gone" (ipc_owner i3 port) -1)
+                 (add (check_int "name gone" (ipc_lookup i3 "echo") (err_no_port))
+                      (check_int "other kept" (ipc_owner i3 other) 4)))))))))
+
+(def unblocked ((u Unblocked)) (list int)
+  (match u ((Unblocked pids ipc) (nums pids))))
+
+(def nums ((ns (list int))) (list int)
+  (if (is_empty ns) "" (append (digits (head ns)) (append " " (nums (tail ns))))))
+
+(def test_block_and_unblock () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (let i2 (ipc_block (ipc_block (ipc_block ipc port 5) port 6) port 5)
+        (match (ipc_unblock_all i2 port)
+          ((Unblocked pids i3)
+            (add (check_str "oldest first, once each" (nums pids) "5 6 ")
+                 (check_str "none left" (unblocked (ipc_unblock_all i3 port)) ""))))))))
+
+(def test_block_no_port () int
+  (check_str "nothing" (unblocked (ipc_unblock_all (ipc_block (ipc_new) 9 5) 9)) ""))
+
+(def test_blocked_by () int
+  (match (with_port 3)
+    ((NewPort port ipc)
+      (check_str "blocked on 3's port" (nums (ipc_blocked_by (ipc_block ipc port 7) 3)) "7 "))))

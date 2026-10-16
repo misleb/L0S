@@ -1,0 +1,107 @@
+; draw_cmd.l0 -- the desktop's drawing commands, as the toolkit has them:
+; render.l0's (parse_command), with the colors of Adwaita's palette by
+; name, and the toolkit's own shapes. draw parses a command with
+; ui_parse_draw before it sends it, so a mistake is told without asking
+; the compositor; the compositor parses it again, and draws it.
+;
+;   round X Y W H R [COLOR]    a filled rectangle, its corners of radius R,
+;                              their edges mixed with what is under them
+;   button X Y KIND LABEL ...  a button as Adwaita draws one, at its
+;                              natural size: KIND is regular, flat,
+;                              suggested, or destructive
+
+(data UiDraw
+  (UiDrawBasic Command)
+  (UiDrawRound int int int int int int)                 ; x, y, w, h, radius, color
+  (UiDrawButton int int UiButtonKind (list int)))       ; x, y, kind, label
+
+(def ui_draw_bad ((why (list int))) (Result UiDraw (list int)) ((Err UiDraw (list int)) why))
+(def ui_draw_good ((d UiDraw)) (Result UiDraw (list int)) ((Ok UiDraw (list int)) d))
+
+; The words with each of the palette's names as its RRGGBB.
+(def ui_named_colors ((ws (list (list int))) (acc (list (list int)))) (list (list int))
+  (if (is_empty ws)
+      (rev acc)
+      (ui_named_colors (tail ws)
+        (cons (match (ui_color_named (head ws)) ((None) (head ws)) ((Some c) (hex_digits c 6))) acc))))
+
+(def ui_parse_draw ((words (list (list int)))) (Result UiDraw (list int))
+  (let ws (ui_named_colors words (nil (list int)))
+    (if (is_empty ws)
+        (ui_draw_basic ws)
+        (if (eq (head ws) "round")
+            (ui_parse_round (tail ws))
+            (if (eq (head ws) "button") (ui_parse_button (tail ws)) (ui_draw_basic ws))))))
+
+(def ui_draw_basic ((ws (list (list int)))) (Result UiDraw (list int))
+  (match (parse_command ws)
+    ((Err why) (ui_draw_bad why))
+    ((Ok cmd) (ui_draw_good (UiDrawBasic cmd)))))
+
+(def ui_parse_round ((rest (list (list int)))) (Result UiDraw (list int))
+  (if (if (lt (length rest) 5) true (gt (length rest) 6))
+      (ui_draw_bad "round takes 5 numbers and a color")
+      (match (parse_ints rest 5 (nil int))
+        ((None) (ui_draw_bad (append "round's numbers must be from -" (append (digits (coord_limit))
+                  (append " to " (digits (coord_limit)))))))
+        ((Some ns)
+          (if (lt (nth ns 4) 0)
+              (ui_draw_bad "round's radius must not be negative")
+              (let cw (if (eq (length rest) 5) "white" (nth rest 5))
+                (match (parse_color cw)
+                  ((None) (ui_draw_bad (append "no color " cw)))
+                  ((Some c) (ui_draw_good (UiDrawRound (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4) c))))))))))
+
+(def ui_button_kinds () (list (list int)) (split_spaces "regular flat suggested destructive"))
+
+(def ui_kind_named ((w (list int))) UiButtonKind
+  (if (eq w "flat") (UiBtnFlat)
+  (if (eq w "suggested") (UiBtnSuggested)
+  (if (eq w "destructive") (UiBtnDestructive)
+  (UiBtnRegular)))))
+
+(def ui_parse_button ((rest (list (list int)))) (Result UiDraw (list int))
+  (if (lt (length rest) 4)
+      (ui_draw_bad "button takes X Y KIND LABEL")
+      (match (parse_ints rest 2 (nil int))
+        ((None) (ui_draw_bad (append "button's numbers must be from -" (append (digits (coord_limit))
+                  (append " to " (digits (coord_limit)))))))
+        ((Some xy)
+          (if (not (any_eq (nth rest 2) (ui_button_kinds)))
+              (ui_draw_bad (append "no kind of button " (nth rest 2)))
+              (ui_draw_good (UiDrawButton (nth xy 0) (nth xy 1) (ui_kind_named (nth rest 2)) (ui_spaced (ui_drop rest 3)))))))))
+
+(def ui_spaced ((ws (list (list int)))) (list int)
+  (if (is_empty ws) "" (if (is_empty (tail ws)) (head ws) (append (head ws) (append " " (ui_spaced (tail ws)))))))
+
+; What a toolkit command paints: the ops, every corner mixed with what is
+; already there.
+(def ui_draw_ops ((d UiDraw)) (list UiPaint)
+  (match d
+    ((UiDrawBasic cmd) (nil UiPaint))
+    ((UiDrawRound x y w h r c) (cons (UiPRound (UiRect x y w h) r c -1) (nil UiPaint)))
+    ((UiDrawButton x y k label)
+      (let s (ui_button_size "" label k)
+        (let st (ui_state_new (ui_style))
+          (ui_under_read (ui_nodes_ops (ui_layout (UiButton "draw" "" label k true) (UiRect x y (ui_sw s) (ui_sh s))
+                                                  st (ui_window_bg (ui_style)))
+                                       (nil UiPaint))
+                         (nil UiPaint)))))))
+
+(def ui_nodes_ops ((ns (list UiNode)) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty ns) acc (match (head ns) ((UiNode r ops a f) (ui_nodes_ops (tail ns) (append acc ops))))))
+
+(def ui_under_read ((ops (list UiPaint)) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty ops)
+      (rev acc)
+      (ui_under_read (tail ops)
+        (cons (match (head ops)
+                ((UiPRound r rad c u) (UiPRound r rad c -1))
+                ((UiPFill r c) (head ops))
+                ((UiPText r s a c b sc) (head ops))
+                ((UiPIcon x y n c sc) (head ops)))
+              acc))))
+
+; A toolkit command done on c, where it is on it.
+(def ui_draw_exec ((c Canvas) (font (array int)) (d UiDraw)) int
+  (ui_paint c font (UiRect 0 0 (canvas_w c) (canvas_h c)) (ui_draw_ops d)))

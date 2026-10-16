@@ -1,0 +1,96 @@
+(def parsed_init ((text (list int))) Init
+  (match (parse_inittab text)
+    ((Ok i) i)
+    ((Err why) (Init (nil Start) (cons why (nil (list int))) (nil ArgsFor) ((None (list int)))))))
+
+(def init_error ((text (list int))) (list int)
+  (match (parse_inittab text)
+    ((Ok i) "accepted")
+    ((Err why) why)))
+
+(def start_paths ((i Init)) (list (list int))
+  (match i ((Init starts devs argss input) (start_paths_of starts))))
+
+(def start_paths_of ((ss (list Start))) (list (list int))
+  (if (is_empty ss) (nil (list int)) (match (head ss) ((Start p a) (cons p (start_paths_of (tail ss)))))))
+
+(def devs_of ((i Init)) (list (list int))
+  (match i ((Init starts devs argss input) devs)))
+
+(def test_starts_in_order () int
+  (check_strs "order" (start_paths (parsed_init "start /bin/sh\nstart /bin/uart\n")) (split_spaces "/bin/sh /bin/uart")))
+
+(def test_start_args () int
+  (match (parsed_init "start /bin/hello a b\n")
+    ((Init starts devs argss input)
+      (match (head starts)
+        ((Start p args)
+          (match args
+            ((Some a) (check_strs "given" a (split_spaces "a b")))
+            ((None) (fail_because "args" "none"))))))))
+
+(def test_start_no_args () int
+  (match (parsed_init "start /bin/sh\n")
+    ((Init starts devs argss input)
+      (match (head starts)
+        ((Start p args) (match args ((Some a) (fail_because "args" "some")) ((None) (pass "none"))))))))
+
+(def test_dev_and_paths_normalised () int
+  (check_strs "devs" (devs_of (parsed_init "dev /bin/uart\ndev bin/rtc\n")) (split_spaces "/bin/uart /bin/rtc")))
+
+(def test_comments_and_blanks () int
+  (check_strs "skipped" (start_paths (parsed_init "# the shell\n\n   \nstart /bin/sh\r\n")) (split_spaces "/bin/sh")))
+
+(def test_stdin () int
+  (match (parsed_init "stdin /etc/input\n")
+    ((Init starts devs argss input)
+      (match input ((Some p) (check_str "path" p "/etc/input")) ((None) (fail_because "stdin" "none"))))))
+
+(def test_bad_lines () int
+  (add (check_str "unknown" (init_error "start /bin/sh\nboot /bin/x\n") "inittab line 2: no directive boot")
+       (add (check_str "no path" (init_error "dev\n") "inittab line 1: dev needs a path")
+            (check_str "extra" (init_error "stdin /a /b\n") "inittab line 1: stdin takes only a path"))))
+
+; ---------------------------------------------------------------- resolving
+
+; Entries 0 /bin/sh and 1 /bin/rtc are programs, 2 /etc/input text.
+(def archive () (list int)
+  (append (newc_entry "bin/sh" 33261 "SH")
+    (append (newc_entry "bin/rtc" 33261 "RTC")
+      (append (newc_entry "etc/input" 33188 "typed\n") (newc_trailer)))))
+
+(def entries () (array Entry)
+  (match (parse_initramfs (bytes_from_list (archive)))
+    ((Ok es) es)
+    ((Err why) (array_new 0 (Entry why 0 0 0)))))
+
+(def resolved ((text (list int))) (Result Config (list int))
+  (match (parse_inittab text)
+    ((Ok i) (resolve_init i (entries)))
+    ((Err why) ((Err Config (list int)) why))))
+
+(def resolve_error ((text (list int))) (list int)
+  (match (resolved text) ((Ok c) "accepted") ((Err why) why)))
+
+(def test_resolve () int
+  (match (resolved "start /bin/sh\ndev /bin/rtc\nargs /bin/rtc 5\nstdin /etc/input\n")
+    ((Err why) (fail_because "resolve" why))
+    ((Ok c)
+      (match c
+        ((Config launches devs defaults input)
+          (add (check_int "launches" (length launches) 1)
+               (add (check_bool "rtc may drive devices" (array_get devs 1) true)
+                    (add (check_bool "sh may not" (array_get devs 0) false)
+                         (add (check_strs "rtc's arguments" (array_get defaults 1) (split_spaces "5"))
+                              (check_int "stdin entry" input 2))))))))))
+
+(def test_resolve_refuses () int
+  (add (check_str "missing" (resolve_error "start /bin/nope\n") "inittab: start /bin/nope: not a program in the initramfs")
+       (add (check_str "not a program" (resolve_error "start /etc/input\n") "inittab: start /etc/input: not a program in the initramfs")
+            (add (check_str "nothing" (resolve_error "dev /bin/rtc\n") "inittab: nothing to start")
+                 (check_str "stdin" (resolve_error "start /bin/sh\nstdin /etc/nope\n") "inittab: stdin /etc/nope: not a file in the initramfs")))))
+
+(def test_resolve_no_stdin () int
+  (match (resolved "start /bin/sh\n")
+    ((Err why) (fail_because "resolve" why))
+    ((Ok c) (match c ((Config launches devs defaults input) (check_int "none" input -1))))))

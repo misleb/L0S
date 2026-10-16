@@ -1,0 +1,103 @@
+; asm.l0 -- just enough aarch64 to write the threads the kernel's tests
+; run: each function is one instruction's 32-bit word, and code lays the
+; words out as an image's bytes. Linked only into tests.
+
+(def movz ((d int) (imm int)) int              ; movz xd, #imm
+  (bit_or 3531603968 (bit_or (bit_shl (bit_and imm 65535) 5) d)))          ; 0xD2800000
+
+(def movz_hi ((d int) (imm int)) int           ; movz xd, #imm, lsl 16
+  (bit_or 3533701120 (bit_or (bit_shl (bit_and imm 65535) 5) d)))          ; 0xD2A00000
+
+(def movn ((d int) (imm int)) int              ; movn xd, #imm: the bits of imm turned over
+  (bit_or 2457862144 (bit_or (bit_shl (bit_and imm 65535) 5) d)))          ; 0x92800000
+
+(def add_imm ((d int) (n int) (imm int)) int   ; add xd, xn, #imm, for imm below 4096
+  (bit_or 2432696320 (bit_or (bit_shl (bit_and imm 4095) 10) (bit_or (bit_shl n 5) d))))  ; 0x91000000
+
+(def add_imm_hi ((d int) (n int) (imm int)) int   ; add xd, xn, #imm, lsl 12: imm pages
+  (bit_or 2436890624 (bit_or (bit_shl (bit_and imm 4095) 10) (bit_or (bit_shl n 5) d))))  ; 0x91400000
+
+(def subs_imm ((d int) (n int) (imm int)) int  ; subs xd, xn, #imm, for imm below 4096
+  (bit_or 4043309056 (bit_or (bit_shl (bit_and imm 4095) 10) (bit_or (bit_shl n 5) d))))  ; 0xF1000000
+
+(def add_reg ((d int) (n int) (m int)) int     ; add xd, xn, xm
+  (bit_or 2332033024 (bit_or (bit_shl m 16) (bit_or (bit_shl n 5) d))))   ; 0x8B000000
+
+(def mov_reg ((d int) (m int)) int             ; mov xd, xm
+  (bit_or 2852127712 (bit_or (bit_shl m 16) d)))                           ; 0xAA0003E0
+
+(def cbnz ((t int) (off int)) int              ; cbnz xt, off instructions from here
+  (bit_or 3036676096 (bit_or (bit_shl (bit_and off 524287) 5) t)))         ; 0xB5000000
+
+(def svc () int 3556769793)                    ; svc #0, 0xD4000001
+(def b_self () int 335544320)                  ; b ., 0x14000000
+(def ldr_x0_x1 () int 4181721120)              ; ldr x0, [x1], 0xF9400020
+(def ldr_x0_x1_8 () int 4181722144)            ; ldr x0, [x1, #8], 0xF9400420
+(def str_x0_x1 () int 4177526816)              ; str x0, [x1], 0xF9000020
+(def push_x0 () int 4162785248)                ; str x0, [sp, #-16]!, 0xF81F0FE0
+(def mov_x19_x0 () int 2852127731)             ; mov x19, x0, 0xAA0003F3
+(def mov_x0_x19 () int 2853372896)             ; mov x0, x19, 0xAA1303E0
+(def mov_x1_x19 () int 2853372897)             ; mov x1, x19, 0xAA1303E1
+
+; A call: x8 is n, then svc.
+(def call_words ((n int)) (list int)
+  (cons (movz 8 n) (cons (svc) (nil int))))
+
+; Exits with whatever x0 holds.
+(def exit_x0 () (list int) (call_words (sys_exit)))
+
+; The instructions as an image, each least significant byte first.
+(def code ((ws (list int))) (list int)
+  (if (is_empty ws) (nil int) (append (u32_le (head ws)) (code (tail ws)))))
+
+; A program for an initramfs: flags, and its image.
+(data Raw (Raw int (list int)))
+
+(def flag_dev () int 1)              ; dev in the inittab
+(def flag_boot () int 2)             ; start in the inittab
+
+; An initramfs whose programs are these: program i at /bin/rawi, entry
+; i, mode 0755 (33261), and an /etc/inittab that starts the ones flagged
+; boot, in order, and lets the ones flagged dev drive devices.
+(def raw_initramfs ((mods (list Raw))) bytes
+  (raw_initramfs_with mods (nil RawFile) ""))
+
+; A file besides the programs: its name in the archive, mode, and
+; contents.
+(data RawFile (RawFile (list int) int (list int)))
+
+; The same, with files after the programs, before /etc/inittab, so the
+; programs keep their entries; and more lines at the inittab's end.
+(def raw_initramfs_with ((mods (list Raw)) (files (list RawFile)) (more (list int))) bytes
+  (bytes_from_list
+    (append (raw_programs mods 0)
+      (append (raw_files files)
+        (append (newc_entry "etc/inittab" 33188 (append (raw_inittab mods 0 (nil int)) more))
+          (newc_trailer))))))
+
+(def raw_name ((i int)) (list int) (append "bin/raw" (digits i)))
+
+(def raw_programs ((mods (list Raw)) (i int)) (list int)
+  (if (is_empty mods)
+      (nil int)
+      (match (head mods)
+        ((Raw flags img) (append (newc_entry (raw_name i) 33261 img) (raw_programs (tail mods) (add i 1)))))))
+
+(def raw_files ((files (list RawFile))) (list int)
+  (if (is_empty files)
+      (nil int)
+      (match (head files)
+        ((RawFile name mode contents) (append (newc_entry name mode contents) (raw_files (tail files)))))))
+
+(def raw_inittab ((mods (list Raw)) (i int) (acc (list int))) (list int)
+  (if (is_empty mods)
+      (rev acc)
+      (match (head mods)
+        ((Raw flags img)
+          (let a (if (eq (bit_and flags (flag_boot)) 0) acc (push (append "start /" (append (raw_name i) "\n")) acc))
+            (raw_inittab (tail mods) (add i 1)
+                         (if (eq (bit_and flags (flag_dev)) 0) a (push (append "dev /" (append (raw_name i) "\n")) a))))))))
+
+; Boots one program, started at boot, of these instructions.
+(def boot_words ((flags int) (ws (list int))) int
+  (boot (raw_initramfs (cons (Raw (bit_or flags (flag_boot)) (code ws)) (nil Raw)))))

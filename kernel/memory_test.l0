@@ -1,0 +1,174 @@
+(def area_code ((a Area)) int
+  (match a ((AreaImage) 0) ((AreaHeap) 1) ((AreaStack) 2) ((AreaDevice) 3) ((AreaOutside) 4)))
+
+(def test_areas () int
+  (add (check_int "below" (area_code (area_of 4096)) 4)
+       (add (check_int "entry" (area_code (area_of (user_base))) 0)
+            (add (check_int "heap" (area_code (area_of (image_limit))) 1)
+                 (add (check_int "stack top byte" (area_code (area_of (sub (stack_top) 1))) 2)
+                      (add (check_int "device" (area_code (area_of (stack_top))) 3)
+                           (check_int "above" (area_code (area_of (user_limit))) 4)))))))
+
+(def test_page_of () int
+  (add (check_int "aligned" (page_of 8192) 8192)
+       (check_int "inside" (page_of 12287) 8192)))
+
+(def test_demand_perm () int
+  (add (check_int "bss" (demand_perm (add (user_base) 40960)) 3)
+       (add (check_int "heap" (demand_perm (image_limit)) 1)
+            (check_int "device" (demand_perm (stack_top)) -1))))
+
+(def test_range_pages () int
+  (add (check_int "none" (length (range_pages (user_base) 0)) 0)
+       (add (check_int "one" (length (range_pages (user_base) 4096)) 1)
+            (check_int "straddles" (length (range_pages (add (user_base) 4095) 2)) 2))))
+
+(def mapped_first () (Map int int)
+  (map_put ((MapEmpty int int)) (user_base) 7))
+
+(def test_plan_mapped () int
+  (match (range_plan (mapped_first) (add (user_base) 10) 100)
+    ((PlanMap ps) (check_int "nothing to map" (length ps) 0))
+    ((PlanBad) (fail_because "plan" "refused"))))
+
+(def test_plan_demand () int
+  (match (range_plan (mapped_first) (add (user_base) 4000) 200)
+    ((PlanMap ps) (check_str "second page" (map_show ps) (map_show (cons (add (user_base) 4096) (nil int)))))
+    ((PlanBad) (fail_because "plan" "refused"))))
+
+(def map_show ((ps (list int))) (list int)
+  (if (is_empty ps) "" (append (hex_digits (head ps) 0) (append " " (map_show (tail ps))))))
+
+(def test_plan_refuses () int
+  (add (check_true "below user range" (is_bad (range_plan (mapped_first) 4096 10)))
+       (add (check_true "device page" (is_bad (range_plan (mapped_first) (stack_top) 1)))
+            (add (check_true "past the end" (is_bad (range_plan (mapped_first) (sub (user_limit) 2) 4)))
+                 (check_true "negative count" (is_bad (range_plan (mapped_first) (user_base) -1)))))))
+
+(def test_plan_huge () int
+  (check_true "wraps nothing" (is_bad (range_plan (mapped_first) (user_base) 9223372036854775807))))
+
+(def is_bad ((p Plan)) bool
+  (match p ((PlanMap ps) false) ((PlanBad) true)))
+
+(def test_region_plan () int
+  (match (region_plan (stack_top) 151060496 4)        ; 0x09010010
+    ((RegionAt va next addr)
+      (add (check_int "va" va (stack_top))
+           (add (check_int "next" next (add (stack_top) 4096))
+                (check_int "addr" addr (add (stack_top) 16)))))
+    ((RegionRefused code) (fail_because "region" (digits code)))))
+
+(def test_region_straddles () int
+  (match (region_plan (stack_top) 4095 2)
+    ((RegionAt va next addr) (check_int "two pages" (sub next va) 8192))
+    ((RegionRefused code) (fail_because "region" (digits code)))))
+
+(def test_region_refused () int
+  (add (check_int "empty" (refused (region_plan (stack_top) 0 0)) -3)
+       (add (check_int "negative base" (refused (region_plan (stack_top) -4096 16)) -3)
+            (check_int "out of room" (refused (region_plan (sub (user_limit) 4096) 0 8192)) -5))))
+
+(def test_dma_plan () int
+  (match (dma_plan (stack_top) 3)
+    ((DmaAt va after)
+      (add (check_int "va" va (stack_top))
+           (check_int "after" after (add (stack_top) 12288))))
+    ((DmaRefused code) (fail_because "dma" (digits code)))))
+
+(def dma_refused ((p DmaPlan)) int
+  (match p ((DmaAt va after) 0) ((DmaRefused code) code)))
+
+(def test_dma_plan_refused () int
+  (add (check_int "none" (dma_refused (dma_plan (stack_top) 0)) -4)
+       (add (check_int "over the limit" (dma_refused (dma_plan (stack_top) 4097)) -4)
+            (add (check_int "at the limit" (dma_refused (dma_plan (stack_top) 4096)) 0)
+                 (check_int "out of room" (dma_refused (dma_plan (sub (user_limit) 4096) 2)) -5)))))
+
+(def refused ((p RegionPlan)) int
+  (match p ((RegionAt va next addr) 0) ((RegionRefused code) code)))
+
+; ----------------------------------------------------------------- freeing
+
+; A heap page, a stack page, and two device pages of a process.
+(def heap_page () int (image_limit))
+(def stack_page () int (sub (stack_top) 4096))
+(def dev_page ((i int)) int (add (stack_top) (mul i 4096)))
+
+(def pages_of ((vas (list int)) (fs (list int)) (m (Map int int))) (Map int int)
+  (if (is_empty vas) m (pages_of (tail vas) (tail fs) (map_put m (head vas) (head fs)))))
+
+(def private_pages () (Map int int)
+  (pages_of (cons (user_base) (cons (heap_page) (cons (stack_page) (nil int))))
+            (cons 10 (cons 11 (cons 12 (nil int)))) ((MapEmpty int int))))
+
+; private_pages, and frames 20 and 21 at device pages.
+(def device_pages () (Map int int)
+  (map_put (map_put (private_pages) (dev_page 0) 20) (dev_page 1) 21))
+
+(def map_digits ((ns (list int))) (list (list int))
+  (if (is_empty ns) (nil (list int)) (cons (digits (head ns)) (map_digits (tail ns)))))
+
+; The frames a release frees, in order, as digits.
+(def freed ((r Released)) (list (list int))
+  (match r ((Released m fs) (map_digits (sort fs)))))
+
+(def left ((r Released)) Mem
+  (match r ((Released m fs) m)))
+
+(def test_mem_share_counts () int
+  (add (check_int "never mapped" (mem_count (mem_new) 20) 0)
+       (check_int "twice" (mem_count (mem_share (mem_share (mem_new) 20) 20) 20) 2)))
+
+; A process's own frames are freed at once.
+(def test_release_private () int
+  (check_strs "image, heap, stack" (freed (mem_release (mem_new) (private_pages) false))
+              (cons "10" (cons "11" (cons "12" (nil (list int)))))))
+
+; A shared frame is freed once no live process maps it: 21, mapped once,
+; but not 20, which another process maps too.
+(def shared_twice () Mem
+  (mem_share (mem_share (mem_share (mem_new) 20) 21) 20))
+
+(def test_release_shared () int
+  (let r (mem_release (shared_twice) (device_pages) false)
+    (add (check_strs "freed" (freed r) (cons "10" (cons "11" (cons "12" (cons "21" (nil (list int)))))))
+         (add (check_int "20 mapped once more" (mem_count (left r) 20) 1)
+              (check_int "21 counted no more" (mem_count (left r) 21) 0)))))
+
+(def test_release_last_sharer () int
+  (let r (mem_release (mem_share (mem_new) 20) (map_put ((MapEmpty int int)) (dev_page 0) 20) false)
+    (add (check_strs "freed" (freed r) (cons "20" (nil (list int))))
+         (check_int "counted no more" (mem_count (left r) 20) 0))))
+
+; A frame mapped twice in one process, as shm_share to itself maps it,
+; counts both.
+(def test_release_shared_with_itself () int
+  (let pages (map_put (map_put ((MapEmpty int int)) (dev_page 0) 20) (dev_page 1) 20)
+    (check_strs "freed once" (freed (mem_release (mem_share (mem_share (mem_new) 20) 20) pages false))
+                (cons "20" (nil (list int))))))
+
+; A driver's frames at its device pages are never freed, and stay
+; counted, so no later release frees them either: its device may still
+; read and write them.
+(def test_release_driver () int
+  (let r (mem_release (shared_twice) (device_pages) true)
+    (add (check_strs "only its own" (freed r) (cons "10" (cons "11" (cons "12" (nil (list int))))))
+         (add (check_int "20 still counted" (mem_count (left r) 20) 2)
+              (check_int "21 still counted" (mem_count (left r) 21) 1)))))
+
+; A driver and another process map 21; the driver ends first, then the
+; other.
+(def test_release_after_driver () int
+  (let r (mem_release (left (mem_release (mem_share (shared_twice) 21) (device_pages) true))
+                      (map_put ((MapEmpty int int)) (dev_page 0) 21) false)
+    (add (check_int "21 not freed" (length (freed r)) 0)
+         (check_int "the driver's mapping still counted" (mem_count (left r) 21) 1))))
+
+(def test_unshare_not_last () int
+  (match (mem_unshare (mem_share (mem_share (mem_new) 20) 20) 20)
+    ((Unshared m last) (add (check_bool "not the last" last false) (check_int "one left" (mem_count m 20) 1)))))
+
+(def test_unshare_last () int
+  (match (mem_unshare (mem_share (mem_new) 20) 20)
+    ((Unshared m last) (add (check_bool "the last" last true) (check_int "counted no more" (mem_count m 20) 0)))))

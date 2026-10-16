@@ -1,0 +1,108 @@
+(def test_message_of () int
+  (match (message_of (bytes_from_list (append (u32_le 7) "hi")))
+    ((Message from payload) (add (check_int "sender" from 7) (check_str "payload" payload "hi")))
+    ((RecvFailed) (fail_because "message" "failed"))))
+
+(def test_message_too_short () int
+  (match (message_of (bytes_from_list "ab"))
+    ((Message from payload) (fail_because "short" "accepted"))
+    ((RecvFailed) (pass "short"))))
+
+(def test_irq_notice () int
+  (add (check_bool "notice" (is_irq_notice (Message 0 (irq_notice 34)) 34) true)
+       (add (check_bool "other irq" (is_irq_notice (Message 0 (irq_notice 33)) 34) false)
+            (check_bool "not the kernel" (is_irq_notice (Message 5 (irq_notice 34)) 34) false))))
+
+(def test_request () int
+  (let r (request 70000 "ping")
+    (add (check_int "reply" (request_reply r) 70000)
+         (add (check_str "body" (request_body r) "ping")
+              (check_int "short" (request_reply "ab") -1)))))
+
+; No kernel beneath l0 test: every call says so.
+(def test_no_kernel () int
+  (add (check_int "pid" (l0s_pid) -3)
+       (match (port_receive 1)
+         ((Message from payload) (fail_because "receive" "got one"))
+         ((RecvFailed) (pass "receive")))))
+
+; No console under l0 test either: console_line reads standard input,
+; which l0 test leaves empty.
+(def test_console_line_without_console () int
+  (add (check_int "no console" (console_port) -3)
+       (check_str "standard input" (console_line) "")))
+
+(def test_proc_info_of () int
+  (match (proc_info_of (bytes_from_list (proc_record (state_receiving) 1 3 2)))
+    ((Some info)
+      (match info
+        ((ProcInfo st parent m detail)
+          (add (check_int "state" st (state_receiving))
+               (add (check_int "parent" parent 1)
+                    (add (check_int "module" m 3) (check_int "port" detail 2)))))))
+    ((None) (fail_because "record" "refused"))))
+
+(def test_proc_info_exited () int
+  (match (proc_info_of (bytes_from_list (proc_record (state_exited) 0 -1 -5)))
+    ((Some info)
+      (match info
+        ((ProcInfo st parent m detail) (add (check_int "no module" m -1) (check_int "status" detail -5)))))
+    ((None) (fail_because "record" "refused"))))
+
+(def test_proc_info_none () int
+  (add (match (proc_info_of (bytes_from_list "short")) ((Some i) (fail_because "short" "accepted")) ((None) (pass "short")))
+       (match (proc_info 1) ((Some i) (fail_because "no kernel" "a record")) ((None) (pass "no kernel")))))
+
+(def test_exit_of () int
+  (match (exit_of (Message 0 (exit_notice 4 -5)))
+    ((Exited pid status) (add (check_int "pid" pid 4) (check_int "status" status -5)))
+    ((NotExit) (fail_because "exit" "not a notice"))))
+
+(def test_not_exit () int
+  (add (match (exit_of (Message 3 (exit_notice 4 0))) ((Exited p s) (fail_because "from 3" "a notice")) ((NotExit) (pass "from 3")))
+       (match (exit_of (Message 0 (irq_notice 33))) ((Exited p s) (fail_because "irq" "a notice")) ((NotExit) (pass "irq")))))
+
+(def test_key_event_round_trip () int
+  (match (key_event_of (Message 4 (key_notice (KeyEvent 30 1 97))))
+    ((Some ev)
+      (match ev
+        ((KeyEvent code value ch)
+          (add (check_int "code" code 30) (add (check_int "pressed" value 1) (check_int "a" ch 97))))))
+    ((None) (fail_because "event" "refused"))))
+
+(def test_key_event_refused () int
+  (add (match (key_event_of (Message 4 "key")) ((Some ev) (fail_because "short" "accepted")) ((None) (pass "short")))
+       (add (match (key_event_of (Message 4 (append "kez" (drop_n (key_notice (KeyEvent 1 1 27)) 3))))
+              ((Some ev) (fail_because "prefix" "accepted")) ((None) (pass "prefix")))
+            (match (key_event_of (RecvFailed)) ((Some ev) (fail_because "nothing" "accepted")) ((None) (pass "nothing"))))))
+
+; Without a kernel there is nothing to wait for.
+(def test_name_wait_no_kernel () int
+  (add (check_int "at once" (name_wait "keyboard" 5000000000) -3)
+       (check_int "no keyboard" (keyboard_listen 1) -3)))
+
+(def test_pointer_event_round_trip () int
+  (match (pointer_event_of (Message 5 (pointer_notice (PointerEvent 16000 32767 1))))
+    ((Some ev)
+      (match ev
+        ((PointerEvent x y b) (add (check_int "x" x 16000) (add (check_int "y" y 32767) (check_int "left" b 1))))))
+    ((None) (fail_because "event" "refused"))))
+
+; Relative to a window, left of it and above it while a button is held.
+(def test_pointer_event_negative () int
+  (match (pointer_event_of (Message 5 (pointer_notice (PointerEvent -3 -40 1))))
+    ((Some ev) (match ev ((PointerEvent x y b) (add (check_int "x" x -3) (check_int "y" y -40)))))
+    ((None) (fail_because "event" "refused"))))
+
+(def test_leave_notice () int
+  (add (check_bool "left" (is_leave_notice (Message 5 (leave_notice))) true)
+       (check_bool "a key is not" (is_leave_notice (Message 5 (key_notice (KeyEvent 1 1 27)))) false)))
+
+(def test_focus_notice () int
+  (add (check_bool "in front" (eq (focus_notice_of (Message 5 (focus_notice true))) (Some true)) true)
+       (add (check_bool "gone from it" (eq (focus_notice_of (Message 5 (focus_notice false))) (Some false)) true)
+            (check_bool "not one" (eq (focus_notice_of (Message 5 (leave_notice))) ((None bool))) true))))
+
+(def test_pointer_not_a_key () int
+  (add (match (pointer_event_of (Message 5 (key_notice (KeyEvent 1 1 27)))) ((Some ev) (fail_because "key" "accepted")) ((None) (pass "key")))
+       (match (key_event_of (Message 5 (pointer_notice (PointerEvent 1 2 0)))) ((Some ev) (fail_because "pointer" "accepted")) ((None) (pass "pointer")))))

@@ -1,0 +1,155 @@
+# L0S -- build, test, and boot the microkernel and its programs.
+#
+#   make test        host tests of everything: l0 test on this machine
+#   make test-virt   the kernel's tests on QEMU's virt board
+#   make e2e         every case of tests/e2e booted under the kernel
+#   make all         all three, after type checking
+#   make initramfs   build/initramfs.cpio: every program, demo/etc, and
+#                    the splash screen as /etc/splash.ppm
+#   make demo        boot it to the shell, on this terminal: type help;
+#                    the splash shows in QEMU's window
+#   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
+#   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
+#
+# Images for the board are linked in Docker, as l0 does when L0_VIRT_LD
+# is unset.
+
+L0     ?= l0
+BUILD  := build
+
+# The installed toolchain's compiler and runtimes, so that images are
+# rebuilt when l0 is updated, and take its runtime's changes.
+L0LIB     := $(dir $(shell $(L0) spec --path))
+L0_VIRTRT := $(L0LIB)l0c $(wildcard $(L0LIB)virt/*.bc)
+L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc/*.bc)
+
+# The splash screen the gpu driver shows, and where QEMU shows it: cocoa
+# is macOS's window; gtk or sdl elsewhere, none for no window.
+SPLASH       ?= $(BUILD)/splash.ppm
+QEMU_DISPLAY ?= cocoa
+DEVICES      := -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
+
+COMMON := common/abi.l0 common/initramfs.l0
+KERNEL := $(COMMON) common/queue.l0 kernel/memory.l0 kernel/ipc.l0 kernel/inittab.l0 \
+          kernel/sched.l0 kernel/pids.l0 kernel/syscall.l0 kernel/process.l0 kernel/kernel.l0
+ULIB   := common/abi.l0 common/initramfs.l0 common/queue.l0 user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0
+
+# Libraries only some programs link, as LIBS_NAME: drawing, which would
+# otherwise clash with the shell's own commands.
+RENDER  := user/lib/render.l0
+DISPLAY := user/lib/display.l0
+WMLIB   := user/lib/wm.l0
+CLOCK   := user/lib/clock.l0
+
+# The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
+# commands, which need only render.l0; and its client windows, which need
+# the compositor's protocol too.
+UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
+             user/lib/ui/grid.l0 user/lib/ui/draw_cmd.l0
+UI_WINDOW := user/lib/ui/window.l0
+UI_TESTS  := theme icons paint widget grid draw_cmd
+
+LIBS_virtio-gpu := $(RENDER)
+LIBS_rtc        := $(CLOCK)
+LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
+LIBS_vt         := $(RENDER) $(WMLIB) $(UI_CORE)
+LIBS_draw       := $(RENDER) $(UI_CORE)
+LIBS_windows    := $(WMLIB)
+LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_procmon    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+
+PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio-input keys vt wm windows widgets procmon
+MKSPLASH := tools/mksplash/mksplash.l0
+IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
+
+.PHONY: all check test test-virt e2e images initramfs screen-initramfs boot demo clean sample
+
+all: check test test-virt e2e
+
+check:
+	$(L0) check $(KERNEL) kernel/main.l0
+	$(foreach p,$(PROGRAMS),$(L0) check $(ULIB) $(LIBS_$(p)) user/$(p)/$(p).l0 user/$(p)/main.l0 && ) true
+	$(L0) check $(MKSPLASH) tools/mksplash/main.l0
+
+# An archive bsdtar makes, of bin/x, "hi", mode 0755: what the host tests
+# of initramfs.l0 and of cat read.
+sample:
+	rm -rf $(BUILD)/sample && mkdir -p $(BUILD)/sample/bin
+	printf hi > $(BUILD)/sample/bin/x && chmod 755 $(BUILD)/sample/bin/x
+	cd $(BUILD)/sample && find . | LC_ALL=C sort | bsdtar -n --format newc -cf ../sample.cpio -T -
+
+test: sample
+	$(L0) test common/abi.l0 common/abi_test.l0
+	$(L0) test $(COMMON) common/initramfs_test.l0
+	$(L0) test common/abi.l0 common/queue.l0 common/queue_test.l0
+	$(L0) test common/abi.l0 kernel/memory.l0 kernel/memory_test.l0
+	$(L0) test common/abi.l0 common/queue.l0 kernel/ipc.l0 kernel/ipc_test.l0
+	$(L0) test $(COMMON) kernel/inittab.l0 kernel/inittab_test.l0
+	$(L0) test common/abi.l0 kernel/sched.l0 kernel/sched_test.l0
+	$(L0) test common/abi.l0 kernel/pids.l0 kernel/pids_test.l0
+	$(L0) test common/abi.l0 kernel/syscall.l0 kernel/syscall_test.l0
+	$(L0) test $(KERNEL) kernel/asm.l0 kernel/kernel_test.l0
+	$(L0) test $(ULIB) user/lib/l0s_test.l0
+	$(L0) test $(ULIB) user/lib/virtio_test.l0
+	$(L0) test $(ULIB) user/lib/tty_test.l0
+	$(L0) test $(ULIB) $(RENDER) user/lib/render_test.l0
+	$(L0) test $(ULIB) $(CLOCK) user/lib/clock_test.l0
+	$(foreach t,$(UI_TESTS),$(L0) test $(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0 && ) true
+	$(L0) test $(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0
+	$(foreach p,$(PROGRAMS),$(L0) test $(ULIB) $(LIBS_$(p)) user/$(p)/$(p).l0 user/$(p)/$(p)_test.l0 && ) true
+	$(L0) test $(MKSPLASH) tools/mksplash/mksplash_test.l0
+
+test-virt:
+	$(L0) test --target virt $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
+
+$(BUILD) $(BUILD)/bin:
+	mkdir -p $@
+
+$(BUILD)/kernel.img: $(KERNEL) kernel/main.l0 $(L0_VIRTRT) | $(BUILD)
+	$(L0) build --target virt $(KERNEL) kernel/main.l0 -o $@
+
+define PROGRAM_RULE
+$(BUILD)/bin/$(1).img: user/$(1)/$(1).l0 user/$(1)/main.l0 $(ULIB) $(LIBS_$(1)) $(L0_PROCRT) | $(BUILD)/bin
+	$(L0) build --target proc $(ULIB) $(LIBS_$(1)) user/$(1)/$(1).l0 user/$(1)/main.l0 -o $$@
+endef
+$(foreach p,$(PROGRAMS),$(eval $(call PROGRAM_RULE,$(p))))
+
+images: $(BUILD)/kernel.img $(IMAGES)
+
+$(BUILD)/splash.ppm: $(MKSPLASH) tools/mksplash/main.l0 | $(BUILD)
+	$(L0) run $(MKSPLASH) tools/mksplash/main.l0 > $@.tmp && mv $@.tmp $@
+
+# demo/etc, the splash, and the console font, staged together as the
+# archive's /etc.
+FONT := fonts/l0s-8x16.txt
+
+initramfs: images $(SPLASH) $(FONT)
+	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc && cp $(SPLASH) $(BUILD)/etc/splash.ppm
+	cp $(FONT) $(BUILD)/etc/font.txt
+	tools/mkinitramfs $(BUILD)/initramfs.cpio $(BUILD)/etc $(IMAGES)
+
+# What the screen and keyboard tests boot: tests/screen/etc, with the
+# splash and font as the demo has them, but no vt.
+screen-initramfs: images $(SPLASH) $(FONT)
+	rm -rf $(BUILD)/screen-etc && cp -R tests/screen/etc $(BUILD)/screen-etc
+	cp $(SPLASH) $(BUILD)/screen-etc/splash.ppm && cp $(FONT) $(BUILD)/screen-etc/font.txt
+	tools/mkinitramfs $(BUILD)/screen.cpio $(BUILD)/screen-etc $(IMAGES)
+
+e2e: images initramfs screen-initramfs
+	tests/e2e.sh
+	tests/gpu-screen.sh
+	tests/keyboard.sh
+	tests/vt.sh
+	tests/widgets.sh
+	tests/procmon.sh
+
+boot: images
+	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(IMAGES)
+	L0_QEMU_ARGS="$(DEVICES)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
+
+demo: initramfs
+	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
+
+clean:
+	rm -rf $(BUILD)

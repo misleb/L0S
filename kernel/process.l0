@@ -1,0 +1,435 @@
+; process.l0 -- a process: its address space, its registers, the frames
+; mapped into it, and what it waits for. The functions here make and map
+; and copy, and check first, so nothing a process asks for can make the
+; kernel fail at run time.
+
+; What a process is doing when it is not running.
+(data State
+  (Ready)                      ; it may run
+  (Receiving int int int)      ; waiting on a port: port, buf, max
+  (Waiting int)                ; waiting for a pid to exit
+  (Sleeping)                   ; waiting for its time, on the sleepers list
+  (Blocked int)                ; waiting for room on its terminal's port, to make its call again
+  (ReadingTty int int int))    ; waiting for a line from its terminal: the reply port, buf, n
+
+; A file a process has open: its entry in the initramfs, and how far it
+; has read.
+(data Open (Open int int))
+
+; Every file a process has open, by stream, and the next stream to give.
+(data Files (Files (Map int Open) int))
+
+; A process's terminal: the port its standard input, output, and error
+; go to, 0 for the kernel's own, the serial line and the inittab's stdin;
+; the port its terminal's lines come back on, 0 until it first reads;
+; and the rest of a line it read but had no room for.
+(data Tty (Tty int int bytes))
+
+(def tty_none () Tty (Tty 0 0 (bytes_from_list (nil int))))
+
+; What a process is doing, the pid that spawned it, 0 for the kernel,
+; the ports to tell when it exits, its arguments, its open files, and its
+; terminal.
+(data Life (Life State int (list int) (list (list int)) Files Tty))
+
+; pid, entry index of its program, space, context, page -> frame for
+; every frame mapped, the next free device page, and its life.
+(data Proc (Proc int int int (array int) (Map int int) int Life))
+
+(def proc_pid ((p Proc)) int (match p ((Proc pid m s c pages dev st) pid)))
+(def proc_module ((p Proc)) int (match p ((Proc pid m s c pages dev st) m)))
+(def proc_space ((p Proc)) int (match p ((Proc pid m s c pages dev st) s)))
+(def proc_state ((p Proc)) State
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) st)))))
+
+(def proc_parent ((p Proc)) int
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) parent)))))
+
+(def proc_watchers ((p Proc)) (list int)
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) ws)))))
+
+(def proc_args ((p Proc)) (list (list int))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) args)))))
+
+; p, with port told when it exits.
+(def proc_watch ((p Proc) (port int)) Proc
+  (match p
+    ((Proc pid m s c pages dev life)
+      (match life ((Life st parent ws args fs tty) (Proc pid m s c pages dev (Life st parent (cons port ws) args fs tty)))))))
+
+; ------------------------------------------------------------- terminal
+
+(def proc_tty ((p Proc)) Tty
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) tty)))))
+
+(def proc_set_tty ((p Proc) (tty Tty)) Proc
+  (match p
+    ((Proc pid m s c pages dev life)
+      (match life ((Life st parent ws args fs old) (Proc pid m s c pages dev (Life st parent ws args fs tty)))))))
+
+; The port p's terminal is, 0 for the kernel's own.
+(def proc_tty_port ((p Proc)) int (match (proc_tty p) ((Tty port reply rest) port)))
+
+; p, to make the call it trapped with again when it next runs: its pc
+; back on the svc.
+(def proc_rewind ((p Proc)) Proc
+  (match p ((Proc pid m s c pages dev st) (Proc pid m s (array_set c 32 (sub (array_get c 32) 4)) pages dev st))))
+
+; ------------------------------------------------------------ open files
+
+(def files_none () Files (Files ((MapEmpty int Open)) 3))
+
+(def proc_files ((p Proc)) Files
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) fs)))))
+
+(def proc_set_files ((p Proc) (fs Files)) Proc
+  (match p
+    ((Proc pid m s c pages dev life)
+      (match life ((Life st parent ws args old tty) (Proc pid m s c pages dev (Life st parent ws args fs tty)))))))
+
+; p with entry e open on a new stream, and the stream; or -5, open_limit
+; files being open already.
+(data Opened (Opened Proc int))
+
+(def proc_open ((p Proc) (e int)) Opened
+  (match (proc_files p)
+    ((Files open next)
+      (if (ge (map_size open) (open_limit))
+          (Opened p -5)
+          (Opened (proc_set_files p (Files (map_put open next (Open e 0)) (add next 1))) next)))))
+
+; The file p has open on stream s, if it has one.
+(def proc_open_file ((p Proc) (s int)) (Option Open)
+  (match (proc_files p) ((Files open next) (map_get open s))))
+
+; p, having read stream s up to offset.
+(def proc_seek ((p Proc) (s int) (e int) (offset int)) Proc
+  (match (proc_files p)
+    ((Files open next) (proc_set_files p (Files (map_put open s (Open e offset)) next)))))
+
+; p without stream s, and whether it had it open.
+(data ClosedFile (ClosedFile Proc bool))
+
+(def proc_close ((p Proc) (s int)) ClosedFile
+  (match (proc_files p)
+    ((Files open next)
+      (if (map_has open s)
+          (ClosedFile (proc_set_files p (Files (map_remove open s) next)) true)
+          (ClosedFile p false)))))
+
+; p's record for proc_info: running, if it is the process asking.
+(def proc_info_record ((p Proc) (running bool)) (list int)
+  (let st (proc_state p)
+    (proc_record (if running (state_running) (state_code st)) (proc_parent p) (proc_module p)
+                 (if running 0 (state_detail st)))))
+
+(def state_code ((s State)) int
+  (match s
+    ((Ready) (state_ready))
+    ((Receiving port buf max) (state_receiving))
+    ((Waiting pid) (state_waiting))
+    ((Sleeping) (state_sleeping))
+    ((Blocked port) (state_writing))
+    ((ReadingTty reply buf n) (state_reading))))
+
+; What a state waits on: a port, a pid, or nothing. A terminal read's is
+; the port its line comes back on.
+(def state_detail ((s State)) int
+  (match s
+    ((Ready) 0)
+    ((Receiving port buf max) port)
+    ((Waiting pid) pid)
+    ((Sleeping) 0)
+    ((Blocked port) port)
+    ((ReadingTty reply buf n) reply)))
+
+; p answering its call with v in x0.
+(def proc_answer ((p Proc) (v int)) Proc
+  (match p ((Proc pid m s c pages dev st) (Proc pid m s (answer c v) pages dev st))))
+
+(def proc_set_state ((p Proc) (st State)) Proc
+  (match p
+    ((Proc pid m s c pages dev life)
+      (match life ((Life old parent ws args fs tty) (Proc pid m s c pages dev (Life st parent ws args fs tty)))))))
+
+; A word of p's registers.
+(def proc_reg ((p Proc) (i int)) int
+  (match p ((Proc pid m s c pages dev st) (array_get c i))))
+
+; ---------------------------------------------------------------- creating
+
+(data Created (Created Proc) (CreateFailed))
+
+; A new process pid, spawned by parent, running module index m with
+; args, whose image is the bytes of input from start up to end, mapped at
+; user_base, ready to run from it, its terminal the port tty. If the host
+; runs out part way, what was made is freed.
+(def proc_create ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (input bytes) (start int) (end int)) Created
+  (let s (space_new)
+    (if (lt s 0)
+        (CreateFailed)
+        (match (load_image s input start end 0 ((MapEmpty int int)))
+          ((ImageLoaded pages)
+            (Created (Proc pid m s (user_context (user_base) (stack_top)) pages (stack_top)
+                           (Life (Ready) parent (nil int) args (files_none)
+                                 (match (tty_none) ((Tty none reply rest) (Tty tty reply rest)))))))
+          ((ImageFailed pages)
+            (let f (free_space s (map_values pages)) (CreateFailed)))))))
+
+(data Load (ImageLoaded (Map int int)) (ImageFailed (Map int int)))
+
+(def load_image ((s int) (input bytes) (start int) (end int) (off int) (pages (Map int int))) Load
+  (if (ge (add start off) end)
+      (ImageLoaded pages)
+      (let va (add (user_base) off)
+        (let f (map_frame s va 3)
+          (if (lt f 0)
+              (ImageFailed pages)
+              (let w (space_write s va input (add start off) (min end (add start (add off (page_size)))))
+                (load_image s input start end (add off (page_size)) (map_put pages va f))))))))
+
+; A fresh zeroed frame mapped at page va of space s with perm, and its
+; number, or a negative code if the host has none left, or no memory for
+; the tables the mapping needs, when the frame is freed again.
+(def map_frame ((s int) (va int) (perm int)) int
+  (let f (frame_new)
+    (if (lt f 0)
+        f
+        (let r (space_map s va f perm)
+          (if (lt r 0) (let g (frame_free f) r) f)))))
+
+; Space s given back, and then each of fs, which s alone mapped.
+(def free_space ((s int) (fs (list int))) int
+  (let r (space_free s) (free_frames fs)))
+
+(def free_frames ((fs (list int))) int
+  (if (is_empty fs) 0 (let r (frame_free (head fs)) (free_frames (tail fs)))))
+
+; mem once p has ended, which drove devices if dev: its space given back,
+; and every frame of it no other space maps.
+(def proc_release ((mem Mem) (p Proc) (dev bool)) Mem
+  (match p
+    ((Proc pid m s c pages next st)
+      (match (mem_release mem pages dev)
+        ((Released m2 fs) (let f (free_space s fs) m2))))))
+
+; --------------------------------------------------------------- touching
+
+(data Paged (Paged Proc) (PageRefused Proc))
+
+; p with a zeroed frame at the page holding va, if a page may be mapped
+; there on demand and the host has a frame for it.
+(def proc_demand ((p Proc) (va int)) Paged
+  (match p
+    ((Proc pid m s c pages dev st)
+      (let page (page_of va)
+        (if (if (map_has pages page) true (lt (demand_perm page) 0))
+            (PageRefused (Proc pid m s c pages dev st))
+            (let f (map_frame s page (demand_perm page))
+              (if (lt f 0)
+                  (PageRefused (Proc pid m s c pages dev st))
+                  (Paged (Proc pid m s c (map_put pages page f) dev st)))))))))
+
+; p with every page of the n bytes from va mapped, so the kernel can copy
+; them, or refused if any may not be.
+(def proc_prepare ((p Proc) (va int) (n int)) Paged
+  (match p
+    ((Proc pid m s c pages dev st)
+      (match (range_plan pages va n)
+        ((PlanBad) (PageRefused (Proc pid m s c pages dev st)))
+        ((PlanMap todo) (demand_all (Proc pid m s c pages dev st) todo))))))
+
+(def demand_all ((p Proc) (todo (list int))) Paged
+  (if (is_empty todo)
+      (Paged p)
+      (match (proc_demand p (head todo))
+        ((Paged q) (demand_all q (tail todo)))
+        ((PageRefused q) (PageRefused q)))))
+
+; --------------------------------------------------------------- copying
+
+(data CopiedOut (CopiedOut Proc bytes) (CopyOutBad Proc))
+
+; The n bytes of p from va, if p may give them.
+(def proc_copy_out ((p Proc) (va int) (n int)) CopiedOut
+  (match (proc_prepare p va n)
+    ((PageRefused q) (CopyOutBad q))
+    ((Paged q) (CopiedOut q (space_read (proc_space q) va n)))))
+
+(data CopiedIn (CopiedIn Proc) (CopyInBad Proc))
+
+; p with bytes i up to j of b copied to va, if p may take them there.
+(def proc_copy_in ((p Proc) (va int) (b bytes) (i int) (j int)) CopiedIn
+  (match (proc_prepare p va (sub j i))
+    ((PageRefused q) (CopyInBad q))
+    ((Paged q) (let w (space_write (proc_space q) va b i j) (CopiedIn q)))))
+
+; ---------------------------------------------------------------- devices
+
+; p with the device range of the region call mapped, answered with where
+; p reaches it, or with the code that says why not.
+(def proc_region ((p Proc) (base int) (len int)) Proc
+  (match p
+    ((Proc pid m s c pages dev st)
+      (match (region_plan dev base len)
+        ((RegionRefused code) (Proc pid m s (answer c code) pages dev st))
+        ((RegionAt va next addr)
+          (let r (space_map_device s va base len)
+            (if (eq r 0)
+                (Proc pid m s (answer c addr) pages next st)
+                (Proc pid m s (answer c r) pages dev st))))))))
+
+; -------------------------------------------------------------------- DMA
+
+; Memory a device reads and writes itself is frames, mapped at device
+; pages, above the stack, where nothing else is kept in pages: so a page
+; there that pages holds is a DMA page.
+(def is_dma_page ((pages (Map int int)) (page int)) bool
+  (if (in_device_area page) (map_has pages page) false))
+
+; p with n zeroed frames mapped at its next free device pages, answered
+; with the first page's address, or with the code that says why not. A
+; frame mapped before they ran out stays mapped until p ends.
+(data Allocated (Allocated Mem Proc))
+
+(def proc_dma_alloc ((mem Mem) (p Proc) (n int)) Allocated
+  (match p
+    ((Proc pid m s c pages dev st)
+      (match (dma_plan dev n)
+        ((DmaRefused code) (Allocated mem (Proc pid m s (answer c code) pages dev st)))
+        ((DmaAt va after) (dma_map_pages mem (Proc pid m s c pages after st) va va after))))))
+
+(def dma_map_pages ((mem Mem) (p Proc) (first int) (va int) (after int)) Allocated
+  (if (ge va after)
+      (Allocated mem (proc_answer p first))
+      (match p
+        ((Proc pid m s c pages dev st)
+          (let f (map_frame s va 1)
+            (if (lt f 0)
+                (Allocated mem (Proc pid m s (answer c (err_fault)) pages dev st))
+                (dma_map_pages (mem_share mem f) (Proc pid m s c (map_put pages va f) dev st)
+                               first (add va (page_size)) after)))))))
+
+; The frames of p's n DMA pages from page va, oldest first, or none if
+; one is not a DMA page of p's.
+(def dma_frames ((p Proc) (va int) (n int) (acc (list int))) (Option (list int))
+  (if (eq n 0)
+      (Some (rev acc))
+      (match p
+        ((Proc pid m s c pages dev st)
+          (if (not (is_dma_page pages va))
+              ((None (list int)))
+              (match (map_get pages va)
+                ((Some f) (dma_frames p (add va (page_size)) (sub n 1) (cons f acc)))
+                ((None) ((None (list int))))))))))
+
+; q with frames mapped at its next free device pages, read-write, for
+; memory another process shares with it: where q reaches the first; or
+; the code that says why not.
+(data Shared (Shared Mem Proc int) (ShareRefused Mem Proc int))
+
+(def proc_map_shared ((mem Mem) (q Proc) (fs (list int))) Shared
+  (match q
+    ((Proc pid m s c pages dev st)
+      (match (dma_plan dev (length fs))
+        ((DmaRefused code) (ShareRefused mem q (if (eq code (err_too_big)) (err_too_big) (err_fault))))
+        ((DmaAt va after) (map_shared mem (Proc pid m s c pages after st) va va fs))))))
+
+(def map_shared ((mem Mem) (q Proc) (first int) (va int) (fs (list int))) Shared
+  (if (is_empty fs)
+      (Shared mem q first)
+      (match q
+        ((Proc pid m s c pages dev st)
+          (if (lt (space_map s va (head fs) 1) 0)
+              (ShareRefused mem q (err_fault))
+              (map_shared (mem_share mem (head fs)) (Proc pid m s c (map_put pages va (head fs)) dev st)
+                          first (add va (page_size)) (tail fs)))))))
+
+; ------------------------------------------------------------ taking back
+
+; p without its DMA or shared page at va, frame f: unmapped, and f freed
+; if no other mapping of it is left. Only frames at device pages are
+; ever shared, so only those are taken back while a process runs.
+(data Unmapped (Unmapped Mem Proc))
+
+(def unmap_shared ((mem Mem) (p Proc) (va int) (f int)) Unmapped
+  (match p
+    ((Proc pid m s c pages dev st)
+      (let u (space_unmap s va)
+        (match (mem_unshare mem f)
+          ((Unshared m2 last)
+            (let g (if last (frame_free f) 0)
+              (Unmapped m2 (Proc pid m s c (map_remove pages va) dev st)))))))))
+
+; p without its n DMA or shared pages from page va, which dma_frames has
+; found are all p's. If they were the last p's device pages were given
+; to, its next free device page is va again, so a process that maps and
+; unmaps in turn reuses the same pages rather than running out.
+(def proc_unmap ((mem Mem) (p Proc) (va int) (n int)) Unmapped
+  (match (unmap_range mem p va n)
+    ((Unmapped m2 q)
+      (match q
+        ((Proc pid m s c pages dev st)
+          (Unmapped m2 (Proc pid m s c pages (if (eq dev (add va (mul n (page_size)))) va dev) st)))))))
+
+(def unmap_range ((mem Mem) (p Proc) (va int) (n int)) Unmapped
+  (if (eq n 0)
+      (Unmapped mem p)
+      (match (map_get (proc_pages p) va)
+        ((None) (unmap_range mem p (add va (page_size)) (sub n 1)))
+        ((Some f)
+          (match (unmap_shared mem p va f)
+            ((Unmapped m2 q) (unmap_range m2 q (add va (page_size)) (sub n 1))))))))
+
+(def proc_pages ((p Proc)) (Map int int) (match p ((Proc pid m s c pages dev st) pages)))
+
+; q without every mapping it has, at its device pages, of the frames fs,
+; and how many there were.
+(data Revoked (Revoked Mem Proc int))
+
+(def proc_revoke ((mem Mem) (q Proc) (fs (list int))) Revoked
+  (revoke_pages mem q (set_of fs ((MapEmpty int bool))) (map_keys (proc_pages q)) 0))
+
+(def set_of ((fs (list int)) (acc (Map int bool))) (Map int bool)
+  (if (is_empty fs) acc (set_of (tail fs) (map_put acc (head fs) true))))
+
+(def revoke_pages ((mem Mem) (q Proc) (fs (Map int bool)) (vas (list int)) (n int)) Revoked
+  (if (is_empty vas)
+      (Revoked mem q n)
+      (let va (head vas)
+        (match (map_get (proc_pages q) va)
+          ((None) (revoke_pages mem q fs (tail vas) n))
+          ((Some f)
+            (if (if (in_device_area va) (map_has fs f) false)
+                (match (unmap_shared mem q va f)
+                  ((Unmapped m2 q2) (revoke_pages m2 q2 fs (tail vas) (add n 1))))
+                (revoke_pages mem q fs (tail vas) n)))))))
+
+; p answered with where a device reaches the DMA page holding va, or
+; err_no_port if it has none there.
+(def proc_dma_address ((p Proc) (va int)) Proc
+  (match p
+    ((Proc pid m s c pages dev st)
+      (let page (page_of va)
+        (if (not (is_dma_page pages page))
+            (Proc pid m s (answer c (err_no_port)) pages dev st)
+            (match (map_get pages page)
+              ((Some f) (Proc pid m s (answer c (frame_address f)) pages dev st))
+              ((None) (Proc pid m s (answer c (err_no_port)) pages dev st))))))))
+
+; p answering the region call for len bytes from base, in its device
+; area: base itself, where it reaches them already, if every page of them
+; is a DMA page, and -3 as for any range no device holds otherwise.
+(def proc_dma_region ((p Proc) (base int) (len int)) Proc
+  (if (if (lt len 1) true (gt len 4294967296))
+      (proc_answer p -3)
+      (match p
+        ((Proc pid m s c pages dev st)
+          (if (all_dma pages (page_of base) (page_of (add base (sub len 1))))
+              (Proc pid m s (answer c base) pages dev st)
+              (Proc pid m s (answer c -3) pages dev st))))))
+
+(def all_dma ((pages (Map int int)) (page int) (last int)) bool
+  (if (gt page last)
+      true
+      (if (is_dma_page pages page) (all_dma pages (add page (page_size)) last) false)))

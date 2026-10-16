@@ -1,0 +1,196 @@
+; abi.l0 -- what the kernel and its processes agree on: the numbers of the
+; kernel's own calls, the words they return, where things are in a
+; process's address space, and how a message is laid out. Linked into the
+; kernel and into every user program.
+
+; --------------------------------------------------------- the kernel's calls
+
+; Calls 1 to 10 are the process ABI of spec section 10.3, which every L0
+; program built with --target proc makes. The kernel's own start at 256.
+(def sys_read () int 1)
+(def sys_write () int 2)
+(def sys_exit () int 3)
+(def sys_open () int 4)
+(def sys_close () int 5)
+(def sys_rename () int 6)
+(def sys_remove () int 7)
+(def sys_arg_count () int 8)
+(def sys_arg () int 9)
+(def sys_region () int 10)
+
+(def call_yield () int 256)          ; () -> 0
+(def call_pid () int 257)            ; () -> the caller's pid
+(def call_port_new () int 258)       ; () -> a port the caller owns
+(def call_send () int 259)           ; send: port, bytes -> 0 or an error
+(def call_receive () int 260)        ; receive: port, max -> [sender][payload], waiting
+(def call_try_receive () int 261)    ; receive: port, max -> the same, or nothing at once
+(def call_register () int 262)       ; send: port, name -> 0 or an error
+(def call_lookup () int 263)         ; send: 0, name -> a port or an error
+(def call_spawn () int 264)          ; module index -> a pid or an error
+(def call_wait () int 265)           ; pid -> its exit status, waiting
+(def call_sleep_until () int 266)    ; t in clock_ns -> 0, waiting until then
+(def call_irq_bind () int 267)       ; irq, port -> 0 or an error
+(def call_irq_ack () int 268)        ; irq -> 0 or an error
+(def call_module_name () int 269)    ; receive: module index, max -> its name, or nothing
+(def call_kill () int 270)           ; pid -> 0 or an error; any but a dev program
+(def call_watch () int 271)          ; pid, port -> 0 or an error; port told when pid exits
+(def call_spawn_args () int 272)     ; send: module index, encode_args -> a pid or an error
+(def call_proc_info () int 273)      ; receive: pid, max -> its proc_record, or nothing
+(def call_dma_alloc () int 274)      ; n pages -> the address of n zeroed pages a device can reach
+(def call_dma_address () int 275)    ; va -> where a device reaches the DMA page holding va
+(def call_tty_set () int 276)        ; port -> 0 or an error; the caller's terminal, and its children's
+(def call_tty_get () int 277)        ; () -> the caller's terminal's port, 0 for the kernel's own
+(def call_shm_alloc () int 278)      ; n pages -> the address of n zeroed pages, to share; any process may
+(def call_shm_share () int 279)      ; va, n, pid -> where pid sees the caller's n pages from va, the same memory
+(def call_proc_slot () int 280)      ; slot -> the pid it holds or last held, 0 for none yet
+(def call_shm_unmap () int 281)      ; va, n -> 0; the caller's n shared or DMA pages from va given up
+(def call_shm_revoke () int 282)     ; va, n, pid -> how many of pid's mappings of the caller's n pages from va were taken back
+
+; The most pages one dma_alloc gives: 16 MB.
+(def dma_limit () int 4096)
+
+; ------------------------------------------------------------ processes
+
+; What proc_info says a process is doing: the first word of its record.
+(def state_running () int 1)         ; it made the call: only one runs at a time
+(def state_ready () int 2)
+(def state_receiving () int 3)       ; detail: the port
+(def state_waiting () int 4)         ; detail: the pid it waits for
+(def state_sleeping () int 5)
+(def state_exited () int 6)          ; detail: the status; parent and module unknown, 0 and -1
+(def state_writing () int 7)         ; detail: its terminal's port, full
+(def state_reading () int 8)         ; detail: the port its terminal's line comes back on
+
+; A process's record, as proc_info gives it: state, parent, module index,
+; and a detail as the state says, each a u32.
+(def proc_record ((state int) (parent int) (module int) (detail int)) (list int)
+  (append (u32_le state) (append (u32_le parent) (append (u32_le module) (u32_le detail)))))
+
+(def proc_record_len () int 16)
+
+; ------------------------------------------------------------------ errors
+
+; What the kernel's own calls return when they fail. They are the kernel's
+; to define (spec section 6.15), so they are not section 6.3's codes.
+(def err_no_port () int -1)          ; no such port, name, pid, or module; or not yours
+(def err_taken () int -2)            ; a name or interrupt already bound; or no message yet
+(def err_full () int -3)             ; the port's queue is full
+(def err_too_big () int -4)          ; the message is over max_message, or over max
+(def err_fault () int -5)            ; a buffer the caller may not use; or out of resources
+(def err_denied () int -6)           ; the module may not drive devices
+
+; ------------------------------------------------------------------ limits
+
+(def max_message () int 4096)        ; payload bytes in one message
+(def header_len () int 4)            ; the sender's pid, before the payload
+(def queue_limit () int 32)          ; messages waiting on one port
+(def max_procs () int 255)           ; slots of the process table, each reused, with a new pid each time
+(def slice_ns () int 10000000)       ; 10 ms of running before preemption
+(def killed_status () int 130)       ; the status of a process killed, as by SIGINT
+(def watch_limit () int 32)          ; ports watching one process
+(def open_limit () int 16)           ; files one process has open at once
+(def path_limit () int 1024)         ; bytes in a path open, rename, or remove is given
+(def io_chunk () int 65536)          ; bytes one read or write moves at most
+
+; -------------------------------------------------------- the address space
+
+; As spec section 10.3 lays out a process.
+(def page_size () int 4096)
+(def user_base () int 3221225472)    ; 0xC0000000: the image, and the entry point
+(def image_limit () int 3225419776)  ; 0xC0400000: 4 MB of image and bss
+(def heap_limit () int 3623878656)   ; 0xD8000000: heap below, stack above
+(def stack_top () int 3892314112)    ; 0xE8000000: the initial sp
+(def user_limit () int 4294967296)   ; 0x100000000: the end of the user range
+
+; ---------------------------------------------------------------- encoding
+
+; The low 32 bits of n, least significant byte first.
+(def u32_le ((n int)) (list int)
+  (cons (bit_and n 255)
+        (cons (bit_and (bit_shr n 8) 255)
+              (cons (bit_and (bit_shr n 16) 255)
+                    (cons (bit_and (bit_shr n 24) 255) (nil int))))))
+
+; The u32 at byte i of b, least significant byte first. The caller has
+; checked that four bytes are there.
+(def le_u32 ((b bytes) (i int)) int
+  (bit_or (bytes_get b i)
+          (bit_or (bit_shl (bytes_get b (add i 1)) 8)
+                  (bit_or (bit_shl (bytes_get b (add i 2)) 16)
+                          (bit_shl (bytes_get b (add i 3)) 24)))))
+
+; The bytes of b from i up to j, as a list.
+(def bytes_range ((b bytes) (i int) (j int)) (list int)
+  (bytes_range_onto b i j (nil int)))
+
+(def bytes_range_onto ((b bytes) (i int) (j int) (acc (list int))) (list int)
+  (if (le j i)
+      acc
+      (bytes_range_onto b i (sub j 1) (cons (bytes_get b (sub j 1)) acc))))
+
+; The kernel's notice that pid exited with status, as the payload of a
+; message from pid 0 to each port watching it.
+(def exit_notice ((pid int) (status int)) (list int)
+  (append "exit" (append (u32_le pid) (u32_le status))))
+
+; The low 32 bits of n as a signed number, as u32_le keeps a status.
+(def s32 ((n int)) int
+  (let low (bit_and n 4294967295)
+    (if (ge low 2147483648) (sub low 4294967296) low)))
+
+; The kernel's notice that interrupt n happened, as the payload of a
+; message from pid 0.
+(def irq_notice ((n int)) (list int)
+  (append "irq" (u32_le n)))
+
+; Whether b has n bytes from i.
+(def has ((b bytes) (i int) (n int)) bool
+  (le (add i n) (bytes_len b)))
+
+; ------------------------------------------------------------ arguments
+
+; Arguments as spawn_args passes them: argc, then each argument's length
+; and bytes, every number a u32.
+(def encode_args ((args (list (list int)))) (list int)
+  (rev (push_args args (push (u32_le (length args)) (nil int)))))
+
+(def push_args ((args (list (list int))) (acc (list int))) (list int)
+  (if (is_empty args)
+      acc
+      (let a (push (u32_le (length (head args))) acc)
+        (push_args (tail args) (push (head args) a)))))
+
+; The arguments b holds, all of it, as encode_args writes them; or none,
+; if b is anything else.
+(def decode_args ((b bytes)) (Option (list (list int)))
+  (if (not (has b 0 4))
+      ((None (list (list int))))
+      (match (parse_args b (le_u32 b 0) 4 (nil (list int)))
+        ((ArgsOk args end) (if (eq end (bytes_len b)) (Some args) ((None (list (list int))))))
+        ((ArgsBad why) ((None (list (list int))))))))
+
+(data ArgsParse (ArgsOk (list (list int)) int) (ArgsBad (list int)))
+
+; The n arguments in b from i, and where they end.
+(def parse_args ((b bytes) (n int) (i int) (acc (list (list int)))) ArgsParse
+  (if (eq n 0)
+      (ArgsOk (rev acc) i)
+      (if (not (has b i 4))
+          (ArgsBad "arguments cut short")
+          (let len (le_u32 b i)
+            (if (not (has b (add i 4) len))
+                (ArgsBad "arguments cut short")
+                (parse_args b (sub n 1) (add i (add 4 len))
+                            (cons (bytes_range b (add i 4) (add i (add 4 len))) acc)))))))
+
+; ------------------------------------------------------------------ arrays
+
+; The elements of xs as an array, of any type; fill is never seen, but
+; says what an element is when xs is empty.
+(def (array_from T) ((xs (list T)) (fill T)) (array T)
+  (array_fill (array_new (length xs) fill) xs 0))
+
+(def (array_fill T) ((a (array T)) (xs (list T)) (i int)) (array T)
+  (if (is_empty xs)
+      a
+      (array_fill (array_set a i (head xs)) (tail xs) (add i 1))))

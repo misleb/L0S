@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# qemu-boot.sh INITRAMFS [KERNEL] -- boots the kernel on QEMU's virt board
+# with INITRAMFS as its standard input, as l0 boot does, but with the board's
+# serial line on this terminal in both directions, so that what is typed
+# reaches the PL011, and the console driver. l0 boot instead gives QEMU
+# no input at all. Exits with the kernel's status.
+#
+# Ctrl-C is a key like any other, sent to the board, where the console
+# driver tells the shell; QEMU's own signal handling of it is off. To
+# quit QEMU itself, type Ctrl-A then x.
+#
+# The board has a virtio-gpu, a virtio keyboard, and a virtio tablet, on
+# modern transports as l0 boot gives them, for the virtio-gpu and
+# virtio-input drivers. QEMU_DISPLAY says where the screen is shown, and
+# so where keys are typed and the pointer moved: none, the default, shows
+# it nowhere; cocoa is a window on macOS.
+# The PL031 real-time clock counts local time, not UTC, so that the
+# desktop's top bar, which shows it as it is, agrees with this machine's.
+# QEMU_MONITOR, none unless set, is where QEMU's monitor listens, such as
+# unix:PATH,server=on,wait=off for tests/gpu-screen.sh's screendump; and
+# QEMU_QMP, unset unless given, where its QMP does, for the tests that
+# move the pointer with input-send-event.
+#
+# This copies how l0's virt_boot loads a program's standard input: its
+# bytes at 0x50000000 and their count in the word below, which is what the
+# board's runtime reads. If l0 changes that, change this with it.
+set -eu
+initramfs=$1
+kernel=${2:-build/kernel.img}
+qemu=${L0_QEMU:-qemu-system-aarch64}
+display=${QEMU_DISPLAY:-none}
+monitor=${QEMU_MONITOR:-none}
+qmp=()
+if [ -n "${QEMU_QMP:-}" ]; then qmp=(-qmp "$QEMU_QMP"); fi
+len=$(wc -c < "$initramfs" | tr -d ' ')
+exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
+  -rtc base=localtime \
+  -global virtio-mmio.force-legacy=false \
+  -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device \
+  -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \
+  -device loader,addr=0x4FFFFFF8,data="$len",data-len=8 \
+  -device loader,file="$initramfs",addr=0x50000000,force-raw=on \
+  -kernel "$kernel"

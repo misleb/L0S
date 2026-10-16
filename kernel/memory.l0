@@ -1,0 +1,163 @@
+; memory.l0 -- what each address of a process is for, and so what the
+; kernel may map there. Pure: it decides, and process.l0 maps.
+
+(data Area (AreaImage) (AreaHeap) (AreaStack) (AreaDevice) (AreaOutside))
+
+(def area_of ((va int)) Area
+  (if (lt va (user_base))
+      (AreaOutside)
+      (if (lt va (image_limit))
+          (AreaImage)
+          (if (lt va (heap_limit))
+              (AreaHeap)
+              (if (lt va (stack_top))
+                  (AreaStack)
+                  (if (lt va (user_limit)) (AreaDevice) (AreaOutside)))))))
+
+; Whether va is above the stack, where only devices and DMA pages are.
+(def in_device_area ((va int)) bool
+  (if (ge va (stack_top)) (lt va (user_limit)) false))
+
+(def page_of ((va int)) int
+  (bit_and va (bit_xor (sub (page_size) 1) -1)))
+
+; The permissions of a zeroed page the kernel maps at va when it is first
+; touched, or -1 if nothing is mapped there on demand. The image's 4 MB
+; are readable, writable, and executable, since a raw image does not say
+; where its code ends; the heap and stack only readable and writable.
+(def demand_perm ((va int)) int
+  (match (area_of va)
+    ((AreaImage) 3)
+    ((AreaHeap) 1)
+    ((AreaStack) 1)
+    ((AreaDevice) -1)
+    ((AreaOutside) -1)))
+
+; The pages that hold the n bytes from va, lowest first; none when n is 0.
+(def range_pages ((va int) (n int)) (list int)
+  (if (le n 0)
+      (nil int)
+      (pages_down (page_of (add va (sub n 1))) (page_of va) (nil int))))
+
+(def pages_down ((p int) (first int) (acc (list int))) (list int)
+  (if (lt p first)
+      acc
+      (pages_down (sub p (page_size)) first (cons p acc))))
+
+; What the kernel must do before copying the n bytes from va of a process
+; whose frames are pages: map the pages listed, which are not mapped yet
+; and may be mapped on demand; or refuse, because some byte is outside the
+; user range, on a device, or nowhere a page may be mapped.
+(data Plan (PlanMap (list int)) (PlanBad))
+
+(def range_plan ((pages (Map int int)) (va int) (n int)) Plan
+  (if (lt n 0)
+      (PlanBad)
+      (if (eq n 0)
+          (PlanMap (nil int))
+          (if (if (lt va (user_base)) true (gt n (sub (user_limit) va)))
+              (PlanBad)
+              (plan_pages pages (range_pages va n) (nil int))))))
+
+(def plan_pages ((pages (Map int int)) (ps (list int)) (acc (list int))) Plan
+  (if (is_empty ps)
+      (PlanMap (rev acc))
+      (if (map_has pages (head ps))
+          (plan_pages pages (tail ps) acc)
+          (if (lt (demand_perm (head ps)) 0)
+              (PlanBad)
+              (plan_pages pages (tail ps) (cons (head ps) acc))))))
+
+; Where the region system call maps the len bytes of device memory from
+; base, given that the next free device page is at next: at va, through
+; the page before after, and the process reaches base at addr. Or the
+; call's result when it maps nothing: -3 for a range no device could
+; hold, -5 when the process's device pages have run out.
+(data RegionPlan (RegionAt int int int) (RegionRefused int))
+
+(def region_plan ((next int) (base int) (len int)) RegionPlan
+  (if (if (lt len 1) true (if (lt base 0) true (if (gt len 4294967296) true (gt base 281474976710656))))
+      (RegionRefused -3)
+      (let span (add (sub (page_of (add base (sub len 1))) (page_of base)) (page_size))
+        (if (gt (add next span) (user_limit))
+            (RegionRefused -5)
+            (RegionAt next (add next span) (add next (sub base (page_of base))))))))
+
+; Where the dma_alloc call maps n pages of memory a device can reach,
+; given that the next free device page is at next: at va, through the
+; page before after. Or the call's result when it maps nothing:
+; err_too_big for fewer than one page or more than dma_limit, err_fault
+; when the process's device pages have run out.
+(data DmaPlan (DmaAt int int) (DmaRefused int))
+
+(def dma_plan ((next int) (n int)) DmaPlan
+  (if (if (lt n 1) true (gt n (dma_limit)))
+      (DmaRefused (err_too_big))
+      (let after (add next (mul n (page_size)))
+        (if (gt after (user_limit))
+            (DmaRefused (err_fault))
+            (DmaAt next after)))))
+
+; ----------------------------------------------------------------- freeing
+
+; When a process ends, the kernel frees its space (spec section 6.13's
+; space_free), and then every frame of it no space maps any more
+; (frame_free). A frame of its image, heap, or stack is its alone, so it
+; is freed at once. A frame at its device pages, DMA or shared, may be
+; mapped by other processes too, so it is freed once the last of them has
+; ended, the kernel counting each mapping, since frame_free of a frame
+; still mapped is a runtime error. A driver's frames at its device pages
+; are never freed: its device may still read and write them, and only a
+; driver could stop it.
+
+; For each frame mapped at device pages, how many mappings of it live
+; processes have, a driver's counting for good.
+(data Mem (Mem (Map int int)))
+
+(def mem_new () Mem (Mem ((MapEmpty int int))))
+
+(def mem_count ((m Mem) (f int)) int
+  (match m ((Mem counts) (match (map_get counts f) ((Some n) n) ((None) 0)))))
+
+; m with one more mapping of f at a live process's device pages.
+(def mem_share ((m Mem) (f int)) Mem
+  (let n (mem_count m f)
+    (match m ((Mem counts) (Mem (map_put counts f (add n 1)))))))
+
+; What a process's end leaves to do: m without its mappings, and the
+; frames to free once its space is.
+(data Released (Released Mem (list int)))
+
+; For a process whose frames are pages, which drove devices if dev.
+(def mem_release ((m Mem) (pages (Map int int)) (dev bool)) Released
+  (release_pages m pages (map_keys pages) dev (nil int)))
+
+(def release_pages ((m Mem) (pages (Map int int)) (vas (list int)) (dev bool) (acc (list int))) Released
+  (if (is_empty vas)
+      (Released m acc)
+      (match (map_get pages (head vas))
+        ((None) (release_pages m pages (tail vas) dev acc))
+        ((Some f)
+          (if (not (in_device_area (head vas)))
+              (release_pages m pages (tail vas) dev (cons f acc))
+              (if dev
+                  (release_pages m pages (tail vas) dev acc)
+                  (release_shared m pages (tail vas) f acc)))))))
+
+; The same, one mapping of shared frame f fewer, and f to free if it was
+; the last.
+(def release_shared ((m Mem) (pages (Map int int)) (vas (list int)) (f int) (acc (list int))) Released
+  (match (mem_unshare m f)
+    ((Unshared m2 last) (release_pages m2 pages vas false (if last (cons f acc) acc)))))
+
+; m with one mapping of shared frame f fewer, as when a process unmaps it
+; or has it taken back, and whether it was the last, so f is to be freed.
+(data Unshared (Unshared Mem bool))
+
+(def mem_unshare ((m Mem) (f int)) Unshared
+  (let n (mem_count m f)
+    (match m
+      ((Mem counts)
+        (if (gt n 1)
+            (Unshared (Mem (map_put counts f (sub n 1))) false)
+            (Unshared (Mem (map_remove counts f)) true))))))

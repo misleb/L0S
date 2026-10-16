@@ -1,0 +1,162 @@
+; initramfs.l0 -- the initramfs: a cpio archive in the "newc" format, as
+; Linux's is, and as bsdtar --format newc writes one. The kernel reads it
+; on its standard input and keeps it whole; its files are the programs it
+; runs and the files processes read.
+;
+; Each entry is a header of 110 bytes, "070701" and then thirteen fields
+; of eight hexadecimal digits; the entry's name, with a NUL, padded to a
+; multiple of 4 bytes from the header's start; and its contents, padded
+; the same way. The entry named TRAILER!!! ends the archive; whatever
+; follows it, such as the zeros bsdtar pads with, is not read.
+
+; An entry: its path, made absolute; its mode, the file's type and
+; permissions as stat gives them; and where its contents lie in the
+; archive's bytes, from start up to end.
+(data Entry (Entry (list int) int int int))
+
+(def entry_path ((e Entry)) (list int) (match e ((Entry p m s x) p)))
+(def entry_mode ((e Entry)) int (match e ((Entry p m s x) m)))
+(def entry_start ((e Entry)) int (match e ((Entry p m s x) s)))
+(def entry_end ((e Entry)) int (match e ((Entry p m s x) x)))
+(def entry_size ((e Entry)) int (sub (entry_end e) (entry_start e)))
+
+; The type of file, from the mode's top bits: 0170000.
+(def mode_type ((mode int)) int (bit_and mode 61440))
+(def type_file () int 32768)        ; 0100000, a regular file
+(def type_dir () int 16384)         ; 0040000, a directory
+
+(def entry_is_file ((e Entry)) bool (eq (mode_type (entry_mode e)) (type_file)))
+(def entry_is_dir ((e Entry)) bool (eq (mode_type (entry_mode e)) (type_dir)))
+
+; Whether e is a program the kernel may start: a regular file that anyone,
+; its owner, or its group may execute, 0111.
+(def entry_is_exec ((e Entry)) bool
+  (if (entry_is_file e) (not (eq (bit_and (entry_mode e) 73) 0)) false))
+
+; The index of the entry at path, or -1.
+(def entry_index ((entries (array Entry)) (path (list int))) int
+  (entry_index_from entries path 0))
+
+(def entry_index_from ((entries (array Entry)) (path (list int)) (i int)) int
+  (if (ge i (array_len entries))
+      -1
+      (if (eq (entry_path (array_get entries i)) path) i (entry_index_from entries path (add i 1)))))
+
+; The last part of a path: "sh" for "/bin/sh".
+(def base_name ((path (list int))) (list int)
+  (base_name_from path path))
+
+(def base_name_from ((s (list int)) (best (list int))) (list int)
+  (if (is_empty s)
+      best
+      (base_name_from (tail s) (if (eq (head s) 47) (tail s) best))))
+
+; ------------------------------------------------------------------ paths
+
+; A path as the archive names it, made absolute: "./bin/sh", "bin/sh",
+; and "/bin/sh" are all "/bin/sh"; "." and "" are "/"; a final / goes.
+(def normal_path ((name (list int))) (list int)
+  (let rel (drop_slashes (drop_dot name))
+    (if (is_empty rel) "/" (cons 47 (drop_final_slashes rel)))))
+
+(def drop_dot ((s (list int))) (list int)
+  (if (is_empty s)
+      s
+      (if (eq (head s) 46)
+          (if (is_empty (tail s)) (tail s) (if (eq (head (tail s)) 47) (tail s) s))
+          s)))
+
+(def drop_slashes ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head s) 47) (drop_slashes (tail s)) s)))
+
+(def drop_final_slashes ((s (list int))) (list int)
+  (rev (drop_slashes (rev s))))
+
+; ---------------------------------------------------------------- reading
+
+(def newc_magic () (list int) "070701")
+(def trailer_name () (list int) "TRAILER!!!")
+(def header_size () int 110)
+
+; The first multiple of 4 at or after n.
+(def align4 ((n int)) int (bit_and (add n 3) (bit_xor 3 -1)))
+
+; The entries of the archive at the start of b, in order, or why it is
+; not one.
+(def parse_initramfs ((b bytes)) (Result (array Entry) (list int))
+  (if (not (has b 0 6))
+      ((Err (array Entry) (list int)) "initramfs: too short")
+      (if (not (eq (bytes_range b 0 6) (newc_magic)))
+          ((Err (array Entry) (list int)) "initramfs: no 070701 magic; not a newc cpio archive")
+          (parse_entries b 0 (nil Entry)))))
+
+(data EntryParse (EntryOk Entry int) (EntryEnd) (EntryBad (list int)))
+
+(def parse_entries ((b bytes) (i int) (acc (list Entry))) (Result (array Entry) (list int))
+  (match (parse_entry b i)
+    ((EntryEnd) ((Ok (array Entry) (list int)) (array_from (rev acc) (Entry "/" 0 0 0))))
+    ((EntryOk e next) (parse_entries b next (cons e acc)))
+    ((EntryBad why) ((Err (array Entry) (list int)) (append "initramfs: " (append why (append " at byte " (digits i))))))))
+
+(def parse_entry ((b bytes) (i int)) EntryParse
+  (if (not (has b i (header_size)))
+      (EntryBad "header cut short, and no TRAILER!!! before it")
+      (if (not (eq (bytes_range b i (add i 6)) (newc_magic)))
+          (EntryBad "no 070701 magic")
+          (parse_fields b i (hex_field b i 1) (hex_field b i 6) (hex_field b i 11)))))
+
+; Field k of the header at i, 0 to 12, or -1 if it is not eight
+; hexadecimal digits.
+(def hex_field ((b bytes) (i int) (k int)) int
+  (hex_word b (add i (add 6 (mul 8 k))) 8 0))
+
+(def hex_word ((b bytes) (i int) (n int) (acc int)) int
+  (if (eq n 0)
+      acc
+      (let d (hex_val (bytes_get b i))
+        (if (lt d 0) -1 (hex_word b (add i 1) (sub n 1) (add (mul acc 16) d))))))
+
+(def parse_fields ((b bytes) (i int) (mode int) (size int) (namesize int)) EntryParse
+  (if (if (lt mode 0) true (if (lt size 0) true (lt namesize 1)))
+      (EntryBad "header field not hexadecimal")
+      (let name_at (add i (header_size))
+        (if (not (has b name_at namesize))
+            (EntryBad "name cut short")
+            (let name (bytes_range b name_at (add name_at (sub namesize 1)))
+              (let start (align4 (add name_at namesize))
+                (if (eq name (trailer_name))
+                    (EntryEnd)
+                    (if (not (has b start size))
+                        (EntryBad (append "contents cut short: " name))
+                        (EntryOk (Entry (normal_path name) mode start (add start size))
+                                 (align4 (add start size)))))))))))
+
+; ---------------------------------------------------------------- writing
+
+; One entry of a newc archive, its name as given and its contents
+; padded: what bsdtar would write for it, with every field it does not
+; need 0. For tests and for building an initramfs in L0.
+(def newc_entry ((name (list int)) (mode int) (contents (list int))) (list int)
+  (let header (newc_header mode (length contents) (add (length name) 1))
+    (let named (append header (append name (cons 0 (nil int))))
+      (let padded (pad4 named)
+        (append padded (pad4 contents))))))
+
+(def newc_header ((mode int) (size int) (namesize int)) (list int)
+  (append (newc_magic)
+    (append (hex8 0) (append (hex8 mode) (append (hex8 0) (append (hex8 0) (append (hex8 1)
+      (append (hex8 0) (append (hex8 size)
+        (append (hex8 0) (append (hex8 0) (append (hex8 0) (append (hex8 0)
+          (append (hex8 namesize) (hex8 0)))))))))))))))
+
+(def hex8 ((n int)) (list int) (hex_digits n 8))
+
+(def pad4 ((s (list int))) (list int)
+  (append s (zeros (sub (align4 (length s)) (length s)))))
+
+(def zeros ((n int)) (list int)
+  (if (le n 0) (nil int) (cons 0 (zeros (sub n 1)))))
+
+; The entry that ends an archive.
+(def newc_trailer () (list int)
+  (newc_entry (trailer_name) 0 (nil int)))

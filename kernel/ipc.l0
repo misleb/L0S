@@ -1,0 +1,168 @@
+; ipc.l0 -- ports, their queues of messages, and the names they are
+; registered under. Pure: the kernel copies messages in and out of
+; processes, and this decides what is where.
+
+; A message: the pid that sent it, 0 for the kernel, and its payload.
+(data Msg (Msg int bytes))
+
+; A port: the pid that owns it, the only one that may receive on it, the
+; messages waiting, oldest first, and the pids waiting for room in its
+; queue, to write to it as a terminal.
+(data Port (Port int (Queue Msg) (list int)))
+
+; Every live port by number, every name's port, and the next number.
+(data Ipc (Ipc (Map int Port) (Map (list int) int) int))
+
+(def ipc_new () Ipc
+  (Ipc ((MapEmpty int Port)) ((MapEmpty (list int) int)) 1))
+
+(data NewPort (NewPort int Ipc))
+
+(def ipc_port_new ((ipc Ipc) (owner int)) NewPort
+  (match ipc
+    ((Ipc ports names next)
+      (NewPort next (Ipc (map_put ports next (Port owner (Queue (nil Msg) (nil Msg)) (nil int))) names (add next 1))))))
+
+; The pid owning port, or -1 if there is no such port.
+(def ipc_owner ((ipc Ipc) (port int)) int
+  (match ipc
+    ((Ipc ports names next)
+      (match (map_get ports port)
+        ((Some p) (match p ((Port owner q bs) owner)))
+        ((None) -1)))))
+
+; ipc with msg added to port's queue: (Sent ipc), or (SendFailed code ipc)
+; with ipc as it was, code err_no_port or err_full.
+(data Sent (Sent Ipc) (SendFailed int Ipc))
+
+(def ipc_enqueue ((ipc Ipc) (port int) (msg Msg)) Sent
+  (match ipc
+    ((Ipc ports names next)
+      (match (map_get ports port)
+        ((None) (SendFailed (err_no_port) (Ipc ports names next)))
+        ((Some p)
+          (match p
+            ((Port owner q bs)
+              (if (ge (queue_size q) (queue_limit))
+                  (SendFailed (err_full) (Ipc ports names next))
+                  (Sent (Ipc (map_put ports port (Port owner (queue_push q msg) bs)) names next))))))))))
+
+; The oldest message waiting on port, if there is one.
+(def ipc_peek ((ipc Ipc) (port int)) (Option Msg)
+  (match ipc
+    ((Ipc ports names next)
+      (match (map_get ports port)
+        ((None) ((None Msg)))
+        ((Some p)
+          (match p
+            ((Port owner q bs)
+              (match (queue_pop q)
+                ((Popped m rest) (Some m))
+                ((PopEmpty) ((None Msg)))))))))))
+
+; ipc without the oldest message waiting on port.
+(def ipc_drop ((ipc Ipc) (port int)) Ipc
+  (match ipc
+    ((Ipc ports names next)
+      (match (map_get ports port)
+        ((None) (Ipc ports names next))
+        ((Some p)
+          (match p
+            ((Port owner q bs)
+              (match (queue_pop q)
+                ((Popped m rest) (Ipc (map_put ports port (Port owner rest bs)) names next))
+                ((PopEmpty) (Ipc ports names next))))))))))
+
+; ipc with pid waiting for room in port's queue; as it was if there is no
+; such port.
+(def ipc_block ((ipc Ipc) (port int) (pid int)) Ipc
+  (match ipc
+    ((Ipc ports names next)
+      (match (map_get ports port)
+        ((None) (Ipc ports names next))
+        ((Some p)
+          (match p
+            ((Port owner q bs)
+              (Ipc (map_put ports port (Port owner q (if (any_eq pid bs) bs (cons pid bs)))) names next))))))))
+
+; The pids waiting for room in port's queue, oldest first, and ipc with
+; none waiting.
+(data Unblocked (Unblocked (list int) Ipc))
+
+(def ipc_unblock_all ((ipc Ipc) (port int)) Unblocked
+  (match ipc
+    ((Ipc ports names next)
+      (match (map_get ports port)
+        ((None) (Unblocked (nil int) (Ipc ports names next)))
+        ((Some p)
+          (match p
+            ((Port owner q bs)
+              (if (is_empty bs)
+                  (Unblocked bs (Ipc ports names next))
+                  (Unblocked (rev bs) (Ipc (map_put ports port (Port owner q (nil int))) names next))))))))))
+
+; The ports pid owns.
+(def ipc_owned ((ipc Ipc) (pid int)) (list int)
+  (match ipc ((Ipc ports names next) (owned_by ports (map_keys ports) pid (nil int)))))
+
+; The pids waiting for room on any port pid owns.
+(def ipc_blocked_by ((ipc Ipc) (pid int)) (list int)
+  (match ipc
+    ((Ipc ports names next) (blocked_on ports (owned_by ports (map_keys ports) pid (nil int)) (nil int)))))
+
+(def blocked_on ((ports (Map int Port)) (keys (list int)) (acc (list int))) (list int)
+  (if (is_empty keys)
+      acc
+      (blocked_on ports (tail keys)
+                  (match (map_get ports (head keys))
+                    ((Some p) (match p ((Port owner q bs) (append bs acc))))
+                    ((None) acc)))))
+
+; Registering name for port on behalf of pid: the call's result, and ipc
+; after it.
+(data Registered (Registered int Ipc))
+
+(def ipc_register ((ipc Ipc) (pid int) (port int) (name (list int))) Registered
+  (if (not (eq (ipc_owner ipc port) pid))
+      (Registered (err_no_port) ipc)
+      (match ipc
+        ((Ipc ports names next)
+          (if (map_has names name)
+              (Registered (err_taken) (Ipc ports names next))
+              (Registered 0 (Ipc ports (map_put names name port) next)))))))
+
+; The port registered as name, or err_no_port.
+(def ipc_lookup ((ipc Ipc) (name (list int))) int
+  (match ipc
+    ((Ipc ports names next)
+      (match (map_get names name)
+        ((Some port) port)
+        ((None) (err_no_port))))))
+
+; ipc without pid's ports, their messages, and the names they had.
+(def ipc_forget ((ipc Ipc) (pid int)) Ipc
+  (match ipc
+    ((Ipc ports names next)
+      (let dead (owned_by ports (map_keys ports) pid (nil int))
+        (Ipc (remove_ports ports dead) (remove_names names (map_keys names) dead) next)))))
+
+(def owned_by ((ports (Map int Port)) (keys (list int)) (pid int) (acc (list int))) (list int)
+  (if (is_empty keys)
+      acc
+      (owned_by ports (tail keys) pid
+                (match (map_get ports (head keys))
+                  ((Some p) (match p ((Port owner q bs) (if (eq owner pid) (cons (head keys) acc) acc))))
+                  ((None) acc)))))
+
+(def remove_ports ((ports (Map int Port)) (dead (list int))) (Map int Port)
+  (if (is_empty dead)
+      ports
+      (remove_ports (map_remove ports (head dead)) (tail dead))))
+
+(def remove_names ((names (Map (list int) int)) (keys (list (list int))) (dead (list int))) (Map (list int) int)
+  (if (is_empty keys)
+      names
+      (remove_names (match (map_get names (head keys))
+                      ((Some port) (if (any_eq port dead) (map_remove names (head keys)) names))
+                      ((None) names))
+                    (tail keys) dead)))

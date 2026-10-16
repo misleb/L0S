@@ -1,0 +1,147 @@
+; display.l0 -- the display protocol, as a client of it sends it: the
+; driver interface between the compositor, user/wm, and whatever drives
+; the display hardware, user/virtio-gpu here. A driver for other hardware
+; serves the same requests on the port it registers as display, so the
+; compositor never knows which it has.
+;
+;   info                    display W H cursor, the screen's size, and
+;                           cursor if the driver moves a pointer itself
+;   buffer ID W H VA        a buffer of W by H pixels, 4 bytes each (b,
+;                           g, r, and unused, or alpha for a cursor),
+;                           row after row, at VA in the driver, which the
+;                           client shared there with shm_share
+;   forget ID               the buffer dropped, and the driver's mapping
+;                           of it given up; refused while it is in the
+;                           layers or is the cursor
+;   layers ID X Y TOP ...   the screen, bottom first: each buffer at X, Y,
+;                           its rows read from row TOP on, as a ring, so
+;                           a client scrolls one by changing TOP
+;   damage ID X Y W H ...   each rectangle of its buffer changed: shown
+;                           wherever it is on the screen, all of them
+;                           together, those that overlap as one
+;   shape ID TL TR BL BR    the buffer's corners rounded, top left, top
+;                           right, bottom left, bottom right, each radius
+;                           in pixels from 0, square, to half its width
+;                           and height; the layer beneath shows where a
+;                           corner is cut. A new buffer is square
+;   cursor ID HX HY         the pointer's image, a 64 by 64 buffer, and
+;                           its hot spot
+;   move X Y                the pointer's hot spot at X, Y
+;
+; Each is a request (l0s.l0), its words separated by spaces; the reply is
+; ok, or display W H cursor for info, or error: WHY. Linked into the
+; programs that talk to a display, by the Makefile's LIBS_ lists.
+
+; The display, as a client holds it: its port, a port for its replies,
+; and the driver's pid, for sharing buffers with it.
+(data Display (Display int int int) (NoDisplay (list int)))
+
+; What info says: the screen's width and height, and whether the driver
+; has a cursor of its own.
+(data DisplayInfo (DisplayInfo int int bool))
+
+; The display, once its driver has registered, within 5 seconds; or why
+; not.
+(def display_open () Display
+  (let d (name_wait "display" 5000000000)
+    (if (lt d 0)
+        (NoDisplay "no display; is a display driver running?")
+        (Display d (port_new) 0))))
+
+; The reply to body, and the display with the driver's pid, which the
+; reply comes from.
+(data Reply (Reply Display (list int)))
+
+(def display_ask ((d Display) (body (list int))) Reply
+  (match d
+    ((NoDisplay why) (Reply d (append "error: " why)))
+    ((Display port rp pid)
+      (if (not (eq (port_send port (request rp body)) 0))
+          (Reply d "error: the display did not take the request")
+          (match (port_receive rp)
+            ((Message from payload) (Reply (Display port rp from) payload))
+            ((RecvFailed) (Reply d "error: no reply from the display")))))))
+
+; The reply, as an error's reason, or empty for ok.
+(def reply_error ((r (list int))) (list int)
+  (if (eq r "ok") "" (if (starts_with r "error: ") (drop_n r 7) (append "the display said " r))))
+
+(def words_of ((ws (list (list int)))) (list int)
+  (if (is_empty ws) "" (if (is_empty (tail ws)) (head ws) (append (head ws) (append " " (words_of (tail ws)))))))
+
+(def nums_words ((ns (list int))) (list (list int))
+  (if (is_empty ns) (nil (list int)) (cons (digits (head ns)) (nums_words (tail ns)))))
+
+; op and its numbers as a request's body.
+(def request_of ((op (list int)) (ns (list int))) (list int)
+  (words_of (cons op (nums_words ns))))
+
+; info's answer, and the display with the driver's pid.
+(data Info (Info Display DisplayInfo) (NoInfo (list int)))
+
+(def display_info ((d Display)) Info
+  (match (display_ask d "info")
+    ((Reply d2 r)
+      (let ws (split_spaces r)
+        (if (if (ge (length ws) 3) (eq (head ws) "display") false)
+            (Info d2 (DisplayInfo (int_prefix (head (tail ws)) 0) (int_prefix (head (tail (tail ws))) 0)
+                                  (any_eq "cursor" ws)))
+            (NoInfo (reply_error r)))))))
+
+; The pid the driver runs as, 0 before its first reply.
+(def display_pid ((d Display)) int
+  (match d ((Display port rp pid) pid) ((NoDisplay why) 0)))
+
+; Buffer id, w by h, this process's n pages from va, shared with the
+; driver and given to it: empty, or why not.
+(def display_buffer ((d Display) (id int) (w int) (h int) (va int) (n int)) (list int)
+  (let there (shm_share va n (display_pid d))
+    (if (lt there 0)
+        (append "cannot share a buffer with the display: " (digits there))
+        (match (display_ask d (request_of "buffer" (cons id (cons w (cons h (cons there (nil int)))))))
+          ((Reply d2 r) (reply_error r))))))
+
+(def display_forget ((d Display) (id int)) (list int)
+  (match (display_ask d (request_of "forget" (cons id (nil int)))) ((Reply d2 r) (reply_error r))))
+
+; A layer: a buffer's id, where it goes, and its top row.
+(data Placed (Placed int int int int))
+
+(def placed_nums ((ls (list Placed))) (list int)
+  (if (is_empty ls)
+      (nil int)
+      (match (head ls)
+        ((Placed id x y top) (cons id (cons x (cons y (cons top (placed_nums (tail ls))))))))))
+
+(def display_layers ((d Display) (ls (list Placed))) (list int)
+  (match (display_ask d (request_of "layers" (placed_nums ls))) ((Reply d2 r) (reply_error r))))
+
+(def display_damage ((d Display) (id int) (x int) (y int) (w int) (h int)) (list int)
+  (match (display_ask d (request_of "damage" (cons id (cons x (cons y (cons w (cons h (nil int))))))))
+    ((Reply d2 r) (reply_error r))))
+
+; A rectangle of a buffer that changed: the buffer's id, then x, y, w, h.
+(data Dirty (Dirty int int int int int))
+
+(def dirty_nums ((ds (list Dirty)) (acc (list int))) (list int)
+  (if (is_empty ds)
+      (rev acc)
+      (match (head ds)
+        ((Dirty id x y w h) (dirty_nums (tail ds) (cons h (cons w (cons y (cons x (cons id acc))))))))))
+
+; Every rectangle in ds, of any buffers, in one damage request; nothing to
+; send for none.
+(def display_damage_many ((d Display) (ds (list Dirty))) (list int)
+  (if (is_empty ds)
+      ""
+      (match (display_ask d (request_of "damage" (dirty_nums ds (nil int)))) ((Reply d2 r) (reply_error r)))))
+
+(def display_shape ((d Display) (id int) (tl int) (tr int) (bl int) (br int)) (list int)
+  (match (display_ask d (request_of "shape" (cons id (cons tl (cons tr (cons bl (cons br (nil int))))))))
+    ((Reply d2 r) (reply_error r))))
+
+(def display_cursor ((d Display) (id int) (hx int) (hy int)) (list int)
+  (match (display_ask d (request_of "cursor" (cons id (cons hx (cons hy (nil int)))))) ((Reply d2 r) (reply_error r))))
+
+(def display_move ((d Display) (x int) (y int)) (list int)
+  (match (display_ask d (request_of "move" (cons x (cons y (nil int))))) ((Reply d2 r) (reply_error r))))

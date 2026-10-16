@@ -1,0 +1,361 @@
+; sh.l0 -- the shell: reads commands from a terminal, a line at a time,
+; and runs the initramfs's programs by name: run hello runs /bin/hello,
+; and run /bin/hello the same. Its terminal is console, the serial line's,
+; or the one its argument names, such as vt, the display's: sh vt. That
+; terminal is its standard input, output, and error, and those of every
+; program it runs. As pid 1, exit stops the system. At its start it shows
+; /etc/motd, if there is one.
+;
+; A program runs only through run: a word that is not one of the shell's
+; commands is an error, never a program, so no program can be mistaken
+; for a command or a command for a program.
+
+(data Command
+  (CmdEnd)                          ; input has ended
+  (CmdNothing)                      ; an empty line
+  (CmdHelp)
+  (CmdList)
+  (CmdPs)
+  (CmdRun (list int) (list (list int)) bool)   ; run: a program by name or path, its
+                                               ; arguments, and whether in the background
+  (CmdUnknown (list int))           ; not a command
+  (CmdWait int)
+  (CmdKill int)
+  (CmdSleep int)
+  (CmdEcho (list (list int)))
+  (CmdExit int)
+  (CmdBad (list int)))              ; what to say about it
+
+(def parse_command ((line (list int))) Command
+  (if (is_empty line)
+      (CmdEnd)
+      (let words (split_spaces (strip_cr (take_line line)))
+        (if (is_empty words)
+            (CmdNothing)
+            (parse_words (head words) (tail words))))))
+
+(def strip_cr ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head (rev s)) 13) (rev (tail (rev s))) s)))
+
+(def parse_words ((w (list int)) (rest (list (list int)))) Command
+  (if (eq w "run")
+      (parse_run rest)
+      (if (eq (head (rev (cons w rest))) "&")
+          (CmdBad "only run NAME & runs in the background")
+          (parse_builtin w rest))))
+
+; run NAME [ARG ...] [&]: the arguments, if any, in place of the ones the
+; inittab gives the program; & last leaves it running.
+(def parse_run ((rest (list (list int)))) Command
+  (if (is_empty rest)
+      (CmdBad "run what?")
+      (if (eq (head (rev rest)) "&")
+          (parse_run_words (rev (tail (rev rest))) true)
+          (parse_run_words rest false))))
+
+(def parse_run_words ((words (list (list int))) (bg bool)) Command
+  (if (is_empty words)
+      (CmdBad "run what?")
+      (CmdRun (head words) (tail words) bg)))
+
+(def parse_builtin ((w (list int)) (rest (list (list int)))) Command
+  (if (any_eq w (split_spaces "help ?")) (CmdHelp)
+  (if (eq w "ls") (CmdList)
+  (if (eq w "ps") (CmdPs)
+  (if (eq w "echo") (CmdEcho rest)
+  (if (eq w "exit") (CmdExit (if (is_empty rest) 0 (int_prefix (head rest) 0)))
+  (parse_numeric w rest)))))))
+
+(def parse_numeric ((w (list int)) (rest (list (list int)))) Command
+  (if (any_eq w (split_spaces "wait kill sleep"))
+      (if (if (is_empty rest) true (not (is_number (head rest))))
+          (CmdBad (append w " takes a number"))
+          (numeric w (int_prefix (head rest) 0)))
+      (CmdUnknown w)))
+
+(def numeric ((w (list int)) (n int)) Command
+  (if (eq w "wait") (CmdWait n) (if (eq w "kill") (CmdKill n) (CmdSleep n))))
+
+(def is_number ((s (list int))) bool
+  (if (is_empty s) false (is_empty (skip_digits s))))
+
+; ---------------------------------------------------------------- files
+
+; The files of the initramfs, each on a line, in order of path; the
+; directories, whose paths end with /, left out.
+(def listing ((paths (list (list int)))) (list int)
+  (listing_of (sort (files_only paths (nil (list int)))) (nil int)))
+
+(def files_only ((paths (list (list int))) (acc (list (list int)))) (list (list int))
+  (if (is_empty paths)
+      (rev acc)
+      (files_only (tail paths) (if (is_dir_path (head paths)) acc (cons (head paths) acc)))))
+
+(def is_dir_path ((path (list int))) bool
+  (if (is_empty path) true (eq (head (rev path)) 47)))
+
+(def listing_of ((paths (list (list int))) (acc (list int))) (list int)
+  (if (is_empty paths)
+      (rev acc)
+      (listing_of (tail paths) (push "\n" (push (head paths) (push "  " acc))))))
+
+; The message of the day, from /etc/motd, or nothing if there is none.
+(def motd () (list int)
+  (match (open_in "/etc/motd")
+    ((IoFailed fault why) (nil int))
+    ((IoOpened f)
+      (let text (read_all_of f (nil int))
+        (let c (file_close f) text)))))
+
+(def read_all_of ((f IoFile) (acc (list int))) (list int)
+  (let line (file_read_line f)
+    (if (is_empty line) (rev acc) (read_all_of f (push line acc)))))
+
+; ----------------------------------------------------------- processes
+
+(def ps_header () (list int) "  PID  PARENT  PROGRAM       STATE\n")
+
+; The line ps shows for pid, or nothing for one that has exited.
+(def ps_line ((pid int) (info ProcInfo) (paths (list (list int)))) (list int)
+  (match info
+    ((ProcInfo st parent m detail)
+      (if (eq st (state_exited))
+          (nil int)
+          (let a (push (pad_left (digits pid) 5) (nil int))
+            (let b (push (pad_left (digits parent) 8) a)
+              (let c (push "  " b)
+                (let d (push (pad_right (name_of m paths) 12) c)
+                  (rev (push "\n" (push (state_text st detail) (push "  " d))))))))))))
+
+; The name of entry m's program: "sh" for "/bin/sh".
+(def name_of ((m int) (paths (list (list int)))) (list int)
+  (if (if (lt m 0) true (ge m (length paths))) "?" (base_name (list_at paths m))))
+
+(def (list_at T) ((xs (list T)) (i int)) T
+  (if (eq i 0) (head xs) (list_at (tail xs) (sub i 1))))
+
+(def state_text ((st int) (detail int)) (list int)
+  (if (eq st (state_running)) "running"
+  (if (eq st (state_ready)) "ready"
+  (if (eq st (state_receiving)) (append "waiting for a message on port " (digits detail))
+  (if (eq st (state_waiting)) (append "waiting for pid " (digits detail))
+  (if (eq st (state_sleeping)) "sleeping"
+  (terminal_state_text st detail)))))))
+
+(def terminal_state_text ((st int) (detail int)) (list int)
+  (if (eq st (state_writing)) (append "writing to port " (digits detail))
+  (if (eq st (state_reading)) (append "reading a line, to port " (digits detail))
+  (append "state " (digits st)))))
+
+(def pad_left ((s (list int)) (w int)) (list int)
+  (if (ge (length s) w) s (pad_left (cons 32 s) w)))
+
+(def pad_right ((s (list int)) (w int)) (list int)
+  (if (ge (length s) w) s (append s (spaces (sub w (length s))))))
+
+(def spaces ((n int)) (list int)
+  (if (le n 0) (nil int) (cons 32 (spaces (sub n 1)))))
+
+; Every process's line, from slot i of the process table on.
+(def ps_lines ((i int) (names (list (list int))) (acc (list int))) (list int)
+  (if (gt i (max_procs))
+      (rev acc)
+      (ps_lines (add i 1) names (push (ps_slot_line (proc_slot i) names) acc))))
+
+(def ps_slot_line ((pid int) (names (list (list int)))) (list int)
+  (if (le pid 0)
+      (nil int)
+      (match (proc_info pid)
+        ((None) (nil int))
+        ((Some info) (ps_line pid info names)))))
+
+(def help_text () (list int)
+  "  ls              the files of the initramfs; programs are in /bin\n  ps              the processes running, and what each is doing\n  run NAME [ARG ...] [&]\n                  run /bin/NAME, or the program at NAME if it holds a /,\n                  with ARGs in place of its own; & leaves it running, and\n                  Ctrl-C ends one that is not\n  wait PID        wait for a process to exit; Ctrl-C stops waiting\n  kill PID        end a process, unless it is a driver\n  sleep MS        sleep for MS milliseconds\n  echo WORDS      print WORDS\n  exit [STATUS]   stop the system\n")
+
+(def banner () (list int)
+  "L0S shell, on an L0 microkernel. Type help for the commands.\n")
+
+(def prompt () (list int) "l0s> ")
+
+(def exited_line ((pid int) (status int)) (list int)
+  (if (eq status 0)
+      (nil int)
+      (if (eq status (killed_status))
+          (append "[pid " (append (digits pid) " interrupted]\n"))
+          (append "[pid " (append (digits pid) (append " exited with " (append (digits status) "]\n")))))))
+
+(def started_line ((pid int)) (list int)
+  (append "[pid " (append (digits pid) " running]\n")))
+
+(def unspaced ((ws (list (list int)))) (list int)
+  (if (is_empty ws)
+      (nil int)
+      (if (is_empty (tail ws)) (head ws) (append (head ws) (append " " (unspaced (tail ws)))))))
+
+; ------------------------------------------------------------ the shell
+
+; Writes s and delivers it at once, since a prompt must show before the
+; shell waits for its answer.
+(def say ((s (list int))) int
+  (let w (write_str s)
+    (let f (file_flush (IoFile 1))
+      0)))
+
+; What arrives on the shell's port: a line from the console, with its
+; newline, or empty at the end; a Ctrl-C; a process's exit; or anything
+; else.
+(data Event (ELine (list int)) (EInterrupt) (EExit int int) (EOther))
+
+(def event_of ((m Message)) Event
+  (match (exit_of m)
+    ((Exited pid status) (EExit pid status))
+    ((NotExit)
+      (match m
+        ((RecvFailed) (ELine (nil int)))
+        ((Message from payload)
+          (if (eq from 0)
+              (EOther)
+              (if (eq payload (cons 3 (nil int))) (EInterrupt) (ELine payload))))))))
+
+(def next_event ((port int)) Event
+  (event_of (port_receive port)))
+
+; What reading the console gave: a line, with its newline, or empty at
+; the end; or that the terminal has gone, its process exited.
+(data Read (ReadLine (list int)) (HungUp))
+
+; The status of a shell whose terminal has gone, as by SIGHUP.
+(def hangup_status () int 129)
+
+; A line from the console, whose process is tty. A Ctrl-C while it is
+; typed shows the prompt again; the request for the line still stands.
+(def read_console ((console int) (port int) (tty int)) Read
+  (if (not (eq (port_send console (request port "r")) 0))
+      (HungUp)
+      (await_line port tty)))
+
+(def await_line ((port int) (tty int)) Read
+  (match (next_event port)
+    ((ELine line) (ReadLine line))
+    ((EInterrupt) (let p (say (prompt)) (await_line port tty)))
+    ((EExit pid status) (if (eq pid tty) (HungUp) (await_line port tty)))
+    ((EOther) (await_line port tty))))
+
+; The pid of the terminal at console, which answers p at once, watched on
+; port, so that its exit says the terminal has gone; or -1.
+(def terminal_pid ((console int) (port int)) int
+  (if (not (eq (port_send console (request port "p")) 0))
+      -1
+      (let pid (answered_by port)
+        (if (eq (proc_watch pid port) 0) pid -1))))
+
+; Who sends tty to port: what comes before it, a Ctrl-C, is dropped.
+(def answered_by ((port int)) int
+  (match (port_receive port)
+    ((RecvFailed) -1)
+    ((Message from payload) (if (if (gt from 0) (eq payload "tty") false) from (answered_by port)))))
+
+; How waiting for a process ended: it exited with a status, or a Ctrl-C
+; stopped the wait.
+(data Waited (WaitedExit int) (WaitStopped))
+
+; Waits on port for pid to exit. With kill, a Ctrl-C ends it, and its exit
+; is still waited for; without, a Ctrl-C stops the wait.
+(def await_exit ((port int) (pid int) (kill bool)) Waited
+  (match (next_event port)
+    ((EExit p status) (if (eq p pid) (WaitedExit status) (await_exit port pid kill)))
+    ((EInterrupt)
+      (if kill
+          (let k (proc_kill pid) (await_exit port pid kill))
+          (WaitStopped)))
+    ((ELine line) (await_exit port pid kill))
+    ((EOther) (await_exit port pid kill))))
+
+; The terminal the shell runs on: the one named by its argument, console,
+; the serial line's, unless given, such as vt, the display's.
+(def tty_name ((argv (list (list int)))) (list int)
+  (if (is_empty argv) "console" (head argv)))
+
+; Finds its terminal and makes it its standard input, output, and error,
+; and so those of every program it runs, then reads commands from it,
+; until its input ends or the terminal's process exits.
+(def shell () int
+  (let name (tty_name (args))
+    (let console (name_wait name 10000000000)
+      (if (lt console 0)
+          (let w (write_err (append "sh: no terminal " (append name "\n"))) 1)
+          (let t (tty_set console)
+            (let port (port_new)
+              (let i (port_send console (request port "i"))
+                (let tty (terminal_pid console port)
+                  (let m (say (motd))
+                    (let w (say (banner))
+                      (repl console port tty (entry_paths))))))))))))
+
+(def repl ((console int) (reply int) (tty int) (names (list (list int)))) int
+  (let p (say (prompt))
+    (match (read_console console reply tty)
+      ((HungUp) (hangup_status))
+      ((ReadLine line) (obey console reply tty names (parse_command line))))))
+
+; Does cmd, then reads the next, or gives the status to exit with.
+(def obey ((console int) (reply int) (tty int) (names (list (list int))) (cmd Command)) int
+  (match cmd
+    ((CmdEnd) (let w (say "\n") 0))
+    ((CmdExit status) status)
+    ((CmdNothing) (repl console reply tty names))
+    ((CmdHelp) (let w (say (help_text)) (repl console reply tty names)))
+    ((CmdList) (let w (say (listing names)) (repl console reply tty names)))
+    ((CmdPs) (let w (say (append (ps_header) (ps_lines 1 names (nil int)))) (repl console reply tty names)))
+    ((CmdEcho ws) (let w (say (append (unspaced ws) "\n")) (repl console reply tty names)))
+    ((CmdSleep ms) (let s (sleep_ns (mul ms 1000000)) (repl console reply tty names)))
+    ((CmdWait pid) (let w (say (wait_for reply pid)) (repl console reply tty names)))
+    ((CmdKill pid) (let w (say (killed pid (proc_kill pid))) (repl console reply tty names)))
+    ((CmdBad why) (let w (say (append "sh: " (append why "\n"))) (repl console reply tty names)))
+    ((CmdUnknown what) (let w (say (unknown_line what names)) (repl console reply tty names)))
+    ((CmdRun what argv bg) (let w (run_module reply what argv bg names) (repl console reply tty names)))))
+
+(def wait_for ((port int) (pid int)) (list int)
+  (if (not (eq (proc_watch pid port) 0))
+      (append "sh: no process " (append (digits pid) "\n"))
+      (match (await_exit port pid false)
+        ((WaitStopped) (append "[pid " (append (digits pid) " still running]\n")))
+        ((WaitedExit st) (append "[pid " (append (digits pid) (append " exited with " (append (digits st) "]\n"))))))))
+
+(def killed ((pid int) (r int)) (list int)
+  (if (eq r 0)
+      (nil int)
+      (if (eq r (err_denied))
+          (append "sh: pid " (append (digits pid) " is a driver\n"))
+          (append "sh: no process " (append (digits pid) "\n")))))
+
+; What to say of a word that is not a command: if a program has that
+; name, how to run it.
+(def unknown_line ((what (list int)) (paths (list (list int)))) (list int)
+  (if (lt (program_entry what paths) 0)
+      (append "sh: no command " (append what "\n"))
+      (append "sh: no command " (append what (append "; to run the program, type run " (append what "\n"))))))
+
+(def run_module ((port int) (what (list int)) (argv (list (list int))) (bg bool) (paths (list (list int)))) int
+  (let e (program_entry what paths)
+    (if (lt e 0)
+        (say (append "sh: no program " (append (program_path what) "\n")))
+        (let pid (if (is_empty argv) (spawn_entry e) (spawn_entry_with e argv))
+          (if (lt pid 0)
+              (say (cannot_start (program_path what) pid))
+              (if bg
+                  (say (started_line pid))
+                  (say (exited_line pid (foreground port pid)))))))))
+
+(def cannot_start ((path (list int)) (code int)) (list int)
+  (if (eq code (err_denied))
+      (append "sh: " (append path " is not a program\n"))
+      (append "sh: cannot start " (append path (append ": " (append (digits code) "\n"))))))
+
+; Waits for pid, which a Ctrl-C ends.
+(def foreground ((port int) (pid int)) int
+  (if (eq (proc_watch pid port) 0)
+      (match (await_exit port pid true)
+        ((WaitedExit st) st)
+        ((WaitStopped) (killed_status)))
+      (wait_pid pid)))

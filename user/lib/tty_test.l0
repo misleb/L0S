@@ -1,0 +1,171 @@
+(def typed ((s (list int))) Fed
+  (feed_all (console_new) s (nil int)))
+
+(def echo_of ((f Fed)) (list int) (match f ((Fed c e) e)))
+(def console_of ((f Fed)) Console (match f ((Fed c e) c)))
+
+; The lines a reader on port 9 would be given, one per waiting reader.
+(def lines_for ((c Console) (readers int)) (list (list int))
+  (match (deliveries (add_readers c readers))
+    ((Delivered c2 ds) (delivery_lines ds))))
+
+(def add_readers ((c Console) (n int)) Console
+  (if (eq n 0) c (add_readers (add_reader c 9) (sub n 1))))
+
+(def delivery_lines ((ds (list Delivery))) (list (list int))
+  (if (is_empty ds) (nil (list int)) (match (head ds) ((Delivery p l) (cons l (delivery_lines (tail ds)))))))
+
+(def test_echo () int
+  (check_str "echoed" (echo_of (typed "ls\r")) "ls\n"))
+
+(def test_line () int
+  (check_strs "a line" (lines_for (console_of (typed "ls\r")) 1) (cons "ls\n" (nil (list int)))))
+
+(def test_unfinished_line () int
+  (check_int "nothing yet" (length (lines_for (console_of (typed "ls")) 1)) 0))
+
+(def test_backspace () int
+  (let f (typed "helx\x7flo\r")
+    (add (check_strs "edited" (lines_for (console_of f) 1) (cons "hello\n" (nil (list int))))
+         (check_str "rubbed out" (echo_of f) "helx\x08 \x08lo\n"))))
+
+(def test_backspace_at_start () int
+  (check_str "nothing to erase" (echo_of (typed "\x7fa")) "a"))
+
+(def test_kill_line () int
+  (let f (typed "oops\x15ok\n")
+    (add (check_strs "erased" (lines_for (console_of f) 1) (cons "ok\n" (nil (list int))))
+         (check_str "echo" (echo_of f) "oops\x08 \x08\x08 \x08\x08 \x08\x08 \x08ok\n"))))
+
+(def test_arrow_keys_dropped () int
+  (check_strs "no [A" (lines_for (console_of (typed "a\x1b[Ab\x1b[1;5Cc\r")) 1) (cons "abc\n" (nil (list int)))))
+
+(def test_control_bytes_dropped () int
+  (check_str "tab dropped" (echo_of (typed "a\tb")) "ab"))
+
+(def test_two_lines_two_readers () int
+  (check_strs "in order" (lines_for (console_of (typed "one\rtwo\r")) 2) (cons "one\n" (cons "two\n" (nil (list int))))))
+
+(def test_lines_wait_for_readers () int
+  (match (deliveries (console_of (typed "one\rtwo\r")))
+    ((Delivered c ds)
+      (add (check_int "no reader, nothing sent" (length ds) 0)
+           (check_strs "kept" (lines_for c 1) (cons "one\n" (nil (list int))))))))
+
+(def test_readers_wait_for_lines () int
+  (match (deliveries (add_reader (console_new) 9))
+    ((Delivered c ds)
+      (add (check_int "nothing typed" (length ds) 0)
+           (check_strs "then typed" (lines_for (console_of (feed_all c "x\r" (nil int))) 0) (cons "x\n" (nil (list int))))))))
+
+(def test_end_of_input () int
+  (check_strs "ctrl-d" (lines_for (console_of (typed "\x04")) 2) (cons "" (cons "" (nil (list int))))))
+
+(def test_ctrl_d_mid_line () int
+  (check_int "ignored" (length (lines_for (console_of (typed "ab\x04")) 1)) 0))
+
+; ------------------------------------------------------------- Ctrl-C
+
+(def delivered_to ((c Console)) (list int)
+  (match (deliveries c)
+    ((Delivered c2 ds) (ports_of ds))))
+
+(def ports_of ((ds (list Delivery))) (list int)
+  (if (is_empty ds) (nil int) (match (head ds) ((Delivery p l) (cons p (ports_of (tail ds)))))))
+
+(def test_ctrl_c_echo () int
+  (check_str "echo" (echo_of (typed "ab\x03")) "ab^C\n"))
+
+(def test_ctrl_c_drops_line () int
+  (check_strs "only the next line" (lines_for (console_of (typed "ab\x03cd\r")) 1) (cons "cd\n" (nil (list int)))))
+
+(def test_ctrl_c_told () int
+  (match (deliveries (tell_interrupts (console_of (typed "\x03")) 5))
+    ((Delivered c ds)
+      (match (head ds)
+        ((Delivery port msg)
+          (add (check_int "to the port that asked" port 5)
+               (check_str "a lone 3" msg (interrupt_message))))))))
+
+(def test_ctrl_c_told_once () int
+  (match (deliveries (tell_interrupts (console_of (typed "\x03\x03")) 5))
+    ((Delivered c ds)
+      (add (check_int "one notice for both" (length ds) 1)
+           (check_int "then none" (length (delivered_to c)) 0)))))
+
+(def test_ctrl_c_untold () int
+  (check_int "no port asked" (length (delivered_to (console_of (typed "\x03")))) 0))
+
+(def test_ctrl_c_flushes_unread () int
+  (check_str "the unread line is dropped; only the interrupt goes"
+    (show_ports (delivered_to (add_reader (tell_interrupts (console_of (typed "x\r\x03")) 5) 9)))
+    "5 "))
+
+(def test_line_after_ctrl_c () int
+  (check_strs "kept" (lines_for (console_of (typed "x\r\x03y\r")) 1) (cons "y\n" (nil (list int)))))
+
+(def show_ports ((ps (list int))) (list int)
+  (if (is_empty ps) "" (append (digits (head ps)) (append " " (show_ports (tail ps))))))
+
+(def asked ((t TtyAsked)) Console
+  (match t ((TtyAsk c) c) ((TtyWrite bs) (console_new)) ((TtyAnswer to body) (console_new))))
+
+(def test_pid_request () int
+  (add (match (tty_request (console_new) (request 7 "p"))
+         ((TtyAnswer to body) (add (check_int "to the reply port" to 7) (check_str "the answer" body "tty")))
+         ((TtyAsk c) (fail_because "p" "no answer"))
+         ((TtyWrite bs) (fail_because "p" "a write")))
+       (match (tty_request (console_new) (request 0 "p"))
+         ((TtyAnswer to body) (fail_because "p to 0" "an answer"))
+         ((TtyAsk c) (pass "p to 0, ignored"))
+         ((TtyWrite bs) (fail_because "p to 0" "a write")))))
+
+(def test_requests () int
+  (add (check_int "r adds a reader" (length (delivered_to (asked (tty_request (console_of (typed "x\r")) (request 7 "r"))))) 1)
+       (check_str "i asks for Ctrl-C" (show_ports (delivered_to (asked (tty_request (console_of (typed "\x03")) (request 7 "i"))))) "7 ")))
+
+(def test_write_request () int
+  (match (tty_request (console_new) (request 0 "whello\n"))
+    ((TtyWrite bs) (check_str "the bytes" bs "hello\n"))
+    ((TtyAsk c) (fail_because "w" "not a write"))
+    ((TtyAnswer to body) (fail_because "w" "an answer"))))
+
+(def test_w_with_a_reply_port () int
+  (match (tty_request (console_new) (request 7 "whello"))
+    ((TtyWrite bs) (fail_because "w to 7" "a write"))
+    ((TtyAsk c) (pass "w to 7"))
+    ((TtyAnswer to body) (fail_because "w to 7" "an answer"))))
+
+; ------------------------------------------------------ one at a time
+
+(def test_next_delivery () int
+  (match (next_delivery (add_reader (add_reader (console_of (typed "a\rb\r")) 7) 8))
+    ((Idle c) (fail_because "next" "nothing to send"))
+    ((Send c d)
+      (match d
+        ((Delivery port line)
+          (add (check_int "the oldest reader" port 7)
+               (add (check_str "the oldest line" line "a\n")
+                    (check_str "the rest for later" (show_ports (delivered_to c)) "8 "))))))))
+
+(def test_next_idle () int
+  (match (next_delivery (console_of (typed "a\r")))
+    ((Idle c) (pass "no reader"))
+    ((Send c d) (fail_because "no reader" "sent"))))
+
+; Reader 7 has gone: its line goes back, and to reader 8 instead.
+(def test_unread () int
+  (match (next_delivery (add_reader (add_reader (console_of (typed "a\r")) 7) 8))
+    ((Idle c) (fail_because "next" "nothing to send"))
+    ((Send c d)
+      (check_strs "the next reader's" (lines_for (unread c "a\n") 0) (cons "a\n" (nil (list int)))))))
+
+(def test_unread_first () int
+  (check_strs "before newer lines"
+    (lines_for (unread (console_of (typed "b\r")) "a\n") 2)
+    (cons "a\n" (cons "b\n" (nil (list int))))))
+
+(def test_is_line () int
+  (add (check_bool "a line" (is_line "x\n") true)
+       (add (check_bool "the end" (is_line "") false)
+            (check_bool "Ctrl-C" (is_line (interrupt_message)) false))))

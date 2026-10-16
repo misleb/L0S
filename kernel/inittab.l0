@@ -1,0 +1,138 @@
+; inittab.l0 -- /etc/inittab, the initramfs's boot configuration: what to
+; start, what may drive devices, default arguments, and standard input.
+; One directive a line; blank lines and lines starting with # are skipped.
+;
+;   start PATH [ARG ...]   start PATH when the kernel starts, in order: the
+;                          first is pid 1; with ARGs, given those
+;   dev PATH               PATH may map devices and bind interrupts,
+;                          whoever starts it
+;   args PATH ARG ...      PATH's arguments when started without any
+;   stdin PATH             the file every process reads as standard input
+;
+; Pure: parse_inittab reads the text, and resolve_init checks it against
+; the initramfs's entries.
+
+(def inittab_path () (list int) "/etc/inittab")
+
+; A start line: the path, and its arguments if it gave any.
+(data Start (Start (list int) (Option (list (list int)))))
+
+; An args line.
+(data ArgsFor (ArgsFor (list int) (list (list int))))
+
+; Every start, dev path, args line, and the stdin path, if any.
+(data Init (Init (list Start) (list (list int)) (list ArgsFor) (Option (list int))))
+
+(def init_empty () Init
+  (Init (nil Start) (nil (list int)) (nil ArgsFor) ((None (list int)))))
+
+(def parse_inittab ((text (list int))) (Result Init (list int))
+  (parse_init_lines text 1 (init_empty)))
+
+(def parse_init_lines ((text (list int)) (n int) (acc Init)) (Result Init (list int))
+  (if (is_empty text)
+      ((Ok Init (list int)) (init_in_order acc))
+      (match (parse_directive (split_spaces (strip_cr (take_line text))) acc)
+        ((Ok next) (parse_init_lines (drop_line text) (add n 1) next))
+        ((Err why) ((Err Init (list int)) (append "inittab line " (append (digits n) (append ": " why))))))))
+
+(def strip_cr ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head (rev s)) 13) (rev (tail (rev s))) s)))
+
+; The lists were built backwards.
+(def init_in_order ((i Init)) Init
+  (match i ((Init starts devs argss input) (Init (rev starts) (rev devs) (rev argss) input))))
+
+(def parse_directive ((words (list (list int))) (acc Init)) (Result Init (list int))
+  (if (is_empty words)
+      ((Ok Init (list int)) acc)
+      (if (starts_with (head words) "#")
+          ((Ok Init (list int)) acc)
+          (if (is_empty (tail words))
+              ((Err Init (list int)) (append (head words) " needs a path"))
+              (directive (head words) (normal_path (head (tail words))) (tail (tail words)) acc)))))
+
+(def directive ((w (list int)) (path (list int)) (rest (list (list int))) (acc Init)) (Result Init (list int))
+  (match acc
+    ((Init starts devs argss input)
+      (if (eq w "start")
+          ((Ok Init (list int)) (Init (cons (Start path (if (is_empty rest) ((None (list (list int)))) (Some rest))) starts) devs argss input))
+          (if (eq w "dev")
+              (no_more w rest (Init starts (cons path devs) argss input))
+              (if (eq w "args")
+                  ((Ok Init (list int)) (Init starts devs (cons (ArgsFor path rest) argss) input))
+                  (if (eq w "stdin")
+                      (no_more w rest (Init starts devs argss (Some path)))
+                      ((Err Init (list int)) (append "no directive " w)))))))))
+
+(def no_more ((w (list int)) (rest (list (list int))) (i Init)) (Result Init (list int))
+  (if (is_empty rest)
+      ((Ok Init (list int)) i)
+      ((Err Init (list int)) (append w " takes only a path"))))
+
+; ---------------------------------------------------------------- resolving
+
+; A process to start at boot: its entry, and its arguments if given.
+(data Launch (Launch int (Option (list (list int)))))
+
+; The inittab checked against the entries: what to start, in order; for
+; each entry, whether it may drive devices and its default arguments; and
+; the stdin entry, or -1.
+(data Config (Config (list Launch) (array bool) (array (list (list int))) int))
+
+(def resolve_init ((i Init) (es (array Entry))) (Result Config (list int))
+  (match i
+    ((Init starts devs argss input)
+      (match (resolve_starts starts es (nil Launch))
+        ((Err why) ((Err Config (list int)) why))
+        ((Ok launches) (resolve_rest launches devs argss input es))))))
+
+(def resolve_starts ((ss (list Start)) (es (array Entry)) (acc (list Launch))) (Result (list Launch) (list int))
+  (if (is_empty ss)
+      (if (is_empty acc)
+          ((Err (list Launch) (list int)) "inittab: nothing to start")
+          ((Ok (list Launch) (list int)) (rev acc)))
+      (match (head ss)
+        ((Start path args)
+          (let e (entry_index es path)
+            (if (if (lt e 0) true (not (entry_is_exec (array_get es e))))
+                ((Err (list Launch) (list int)) (append "inittab: start " (append path ": not a program in the initramfs")))
+                (resolve_starts (tail ss) es (cons (Launch e args) acc))))))))
+
+(def resolve_rest ((launches (list Launch)) (devs (list (list int))) (argss (list ArgsFor)) (input (Option (list int))) (es (array Entry))) (Result Config (list int))
+  (match (dev_flags devs es (array_new (array_len es) false))
+    ((Err why) ((Err Config (list int)) why))
+    ((Ok flags)
+      (match (default_args argss es (array_new (array_len es) (nil (list int))))
+        ((Err why) ((Err Config (list int)) why))
+        ((Ok defaults)
+          (match (stdin_entry input es)
+            ((Err why) ((Err Config (list int)) why))
+            ((Ok s) ((Ok Config (list int)) (Config launches flags defaults s)))))))))
+
+(def dev_flags ((devs (list (list int))) (es (array Entry)) (flags (array bool))) (Result (array bool) (list int))
+  (if (is_empty devs)
+      ((Ok (array bool) (list int)) flags)
+      (let e (entry_index es (head devs))
+        (if (lt e 0)
+            ((Err (array bool) (list int)) (append "inittab: dev " (append (head devs) ": not in the initramfs")))
+            (dev_flags (tail devs) es (array_set flags e true))))))
+
+(def default_args ((argss (list ArgsFor)) (es (array Entry)) (defaults (array (list (list int))))) (Result (array (list (list int))) (list int))
+  (if (is_empty argss)
+      ((Ok (array (list (list int))) (list int)) defaults)
+      (match (head argss)
+        ((ArgsFor path args)
+          (let e (entry_index es path)
+            (if (lt e 0)
+                ((Err (array (list (list int))) (list int)) (append "inittab: args " (append path ": not in the initramfs")))
+                (default_args (tail argss) es (array_set defaults e args))))))))
+
+(def stdin_entry ((input (Option (list int))) (es (array Entry))) (Result int (list int))
+  (match input
+    ((None) ((Ok int (list int)) -1))
+    ((Some path)
+      (let e (entry_index es path)
+        (if (if (lt e 0) true (not (entry_is_file (array_get es e))))
+            ((Err int (list int)) (append "inittab: stdin " (append path ": not a file in the initramfs")))
+            ((Ok int (list int)) e))))))

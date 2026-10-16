@@ -1,0 +1,285 @@
+; grid.l0 -- a data grid, as GTK's GtkColumnView with libadwaita's look:
+; rows of cells under a header of column titles, on a view's ground. A
+; sortable column's title sorts by it when pressed, and again the other
+; way; a row is selected by pressing it, and with the arrow keys, Home,
+; End, Page Up, and Page Down. When there are more rows than fit, an
+; overlay scrollbar says where those shown are.
+;
+; Its actions are named from a prefix the program gives, as PREFIX.sort.N
+; for column N's title, and PREFIX.select.KEY for the row whose key is
+; KEY; ui_grid_action makes the grid's next state from one. Cells are
+; widgets of their own: text, numbers, level bars, statuses, and an icon
+; with text, each with the key it sorts by.
+
+; A column: its title, its width, or 0 to share the room left over, how
+; its cells and title are aligned, and whether it sorts.
+(data UiColumn (UiColumn (list int) int UiAlign bool))
+
+(data UiCell
+  (UiCellText (list int))
+  (UiCellNum int (list int))            ; a number, and what follows it, such as " MiB"
+  (UiCellLevel int)                     ; a level bar, in percent
+  (UiCellStatus UiTone (list int))      ; a status's dot and text
+  (UiCellIcon (list int) (list int)))   ; an icon's name, and text
+
+; A row: its key, which names it in actions and in the selection, and its
+; cells, a column each.
+(data UiRow (UiRow (list int) (list UiCell)))
+
+; Which column the rows are sorted by, -1 for none, and whether
+; descending; the selected row's key, "" for none; and the first row
+; shown.
+(data UiGridState (UiGridState int bool (list int) int))
+
+(def ui_grid_state_new () UiGridState (UiGridState -1 false "" 0))
+
+(def ui_gs_selected ((s UiGridState)) (list int) (match s ((UiGridState c d k f) k)))
+
+; A grid to show: its actions' prefix, its columns, its rows, and its
+; state.
+(data UiGridView (UiGridView (list int) (list UiColumn) (list UiRow) UiGridState))
+
+(def ui_cell_pad () int 9)
+
+; -------------------------------------------------------------- sorting
+
+(data UiSortKey (UiKeyNum int) (UiKeyText (list int)))
+
+(def ui_cell_key ((c UiCell)) UiSortKey
+  (match c
+    ((UiCellText s) (UiKeyText s))
+    ((UiCellNum n s) (UiKeyNum n))
+    ((UiCellLevel p) (UiKeyNum p))
+    ((UiCellStatus t s) (UiKeyText s))
+    ((UiCellIcon i s) (UiKeyText s))))
+
+(def (ui_nth T) ((xs (list T)) (i int) (none T)) T
+  (if (is_empty xs) none (if (eq i 0) (head xs) (ui_nth (tail xs) (sub i 1) none))))
+
+(def ui_row_key ((r UiRow)) (list int) (match r ((UiRow k cs) k)))
+
+; A row with what it sorts by first, then its key, so that rows alike in
+; the column keep one order.
+(data UiSortRow (UiSortRow UiSortKey (list int) UiRow))
+
+; The rows in the order the state says: as given, or sorted by the
+; column, ascending or descending.
+(def ui_grid_shown ((rows (list UiRow)) (s UiGridState)) (list UiRow)
+  (match s
+    ((UiGridState col desc sel first)
+      (if (lt col 0)
+          rows
+          (let sorted (ui_sort_unkeyed (sort (ui_sort_keyed rows col (nil UiSortRow))) (nil UiRow))
+            (if desc (rev sorted) sorted))))))
+
+(def ui_sort_keyed ((rows (list UiRow)) (col int) (acc (list UiSortRow))) (list UiSortRow)
+  (if (is_empty rows)
+      acc
+      (match (head rows)
+        ((UiRow k cs)
+          (ui_sort_keyed (tail rows) col (cons (UiSortRow (ui_cell_key (ui_nth cs col (UiCellText ""))) k (head rows)) acc))))))
+
+(def ui_sort_unkeyed ((rs (list UiSortRow)) (acc (list UiRow))) (list UiRow)
+  (if (is_empty rs) (rev acc) (match (head rs) ((UiSortRow key k r) (ui_sort_unkeyed (tail rs) (cons r acc))))))
+
+; -------------------------------------------------------------- actions
+
+; The grid's state after action, one of its own or not.
+(def ui_grid_action ((s UiGridState) (prefix (list int)) (action (list int))) UiGridState
+  (let sort_p (append prefix ".sort.")
+    (let sel_p (append prefix ".select.")
+      (match s
+        ((UiGridState col desc sel first)
+          (if (starts_with action sort_p)
+              (let n (int_prefix (drop_n action (length sort_p)) 0)
+                (if (eq n col) (UiGridState col (not desc) sel first) (UiGridState n false sel first)))
+              (if (starts_with action sel_p)
+                  (UiGridState col desc (drop_n action (length sel_p)) first)
+                  s)))))))
+
+; Linux's codes for the keys that move the selection.
+(def ui_key_up () int 103)
+(def ui_key_down () int 108)
+(def ui_key_page_up () int 104)
+(def ui_key_page_down () int 109)
+(def ui_key_home () int 102)
+(def ui_key_end () int 107)
+
+; The state after a key: the selection moved, among the rows as shown,
+; page rows at a time for Page Up and Page Down. A key that does not move
+; it leaves it.
+(def ui_grid_key ((g UiGridView) (code int) (page int)) UiGridState
+  (match g
+    ((UiGridView prefix cols rows s)
+      (let shown (ui_grid_shown rows s)
+        (let n (length shown)
+          (match s
+            ((UiGridState col desc sel first)
+              (let i (ui_index_of_key shown sel 0)
+                (let j (ui_moved i n code page)
+                  (if (if (lt j 0) true (eq n 0))
+                      s
+                      (UiGridState col desc (ui_row_key (ui_nth shown j (UiRow "" (nil UiCell)))) first)))))))))))
+
+(def ui_index_of_key ((rows (list UiRow)) (k (list int)) (i int)) int
+  (if (is_empty rows) -1 (if (eq (ui_row_key (head rows)) k) i (ui_index_of_key (tail rows) k (add i 1)))))
+
+; Where the selection goes from i, -1 for none, among n: -1 if the key
+; is not one that moves it.
+(def ui_moved ((i int) (n int) (code int) (page int)) int
+  (let last (sub n 1)
+    (if (eq code (ui_key_down)) (if (lt i 0) 0 (min last (add i 1)))
+    (if (eq code (ui_key_up)) (if (lt i 0) 0 (max 0 (sub i 1)))
+    (if (eq code (ui_key_home)) 0
+    (if (eq code (ui_key_end)) last
+    (if (eq code (ui_key_page_down)) (min last (max 0 (add i page)))
+    (if (eq code (ui_key_page_up)) (max 0 (sub i page))
+    -1))))))))
+
+; The first row shown, of n, visible at a time: as the state asks, moved
+; so that the selected row, at sel, is in view, and never past the end.
+(def ui_grid_first ((first int) (sel int) (n int) (visible int)) int
+  (let f (if (lt sel 0) first (if (lt sel first) sel (if (ge sel (add first visible)) (add (sub sel visible) 1) first)))
+    (max 0 (min f (max 0 (sub n visible))))))
+
+; ---------------------------------------------------------------- sizes
+
+; Each column's width across total: its own, or a share of what is left,
+; at least 40.
+(def ui_grid_widths ((cols (list UiColumn)) (total int)) (list int)
+  (let fixed (ui_fixed_sum cols 0)
+    (let n (ui_flex_count cols 0)
+      (ui_widths_onto cols (max (mul 40 n) (sub total fixed)) n 0 (nil int)))))
+
+(def ui_fixed_sum ((cols (list UiColumn)) (acc int)) int
+  (if (is_empty cols) acc (match (head cols) ((UiColumn t w a s) (ui_fixed_sum (tail cols) (add acc w))))))
+
+(def ui_flex_count ((cols (list UiColumn)) (acc int)) int
+  (if (is_empty cols) acc (match (head cols) ((UiColumn t w a s) (ui_flex_count (tail cols) (if (eq w 0) (add acc 1) acc))))))
+
+(def ui_widths_onto ((cols (list UiColumn)) (left int) (n int) (seen int) (acc (list int))) (list int)
+  (if (is_empty cols)
+      (rev acc)
+      (match (head cols)
+        ((UiColumn t w a s)
+          (if (eq w 0)
+              (ui_widths_onto (tail cols) left n (add seen 1) (cons (ui_share left n seen) acc))
+              (ui_widths_onto (tail cols) left n seen (cons w acc)))))))
+
+(def ui_grid_measure ((g UiGridView)) UiSize
+  (match g
+    ((UiGridView prefix cols rows s)
+      (UiSize (add (ui_fixed_sum cols 0) (mul 80 (ui_flex_count cols 0)))
+              (add (ui_grid_header_h) (mul (ui_row_h) 4))))))
+
+; How many rows fit in a grid h tall, whole ones only.
+(def ui_grid_visible ((h int)) int (max 0 (div (sub h (ui_grid_header_h)) (ui_row_h))))
+
+; --------------------------------------------------------------- layout
+
+; The grid in r: its ground, its header, the rows that fit, and the
+; scrollbar if not all do.
+(def ui_grid_lay ((g UiGridView) (r UiRect) (st UiState) (acc (list UiNode))) (list UiNode)
+  (match g
+    ((UiGridView prefix cols rows s)
+      (let style (ui_st_style st)
+        (let gbg (ui_view_bg style)
+          (let ws (ui_grid_widths cols (ui_rw r))
+            (let shown (ui_grid_shown rows s)
+              (let n (length shown)
+                (let vis (ui_grid_visible (ui_rh r))
+                  (match s
+                    ((UiGridState col desc sel first)
+                      (let f (ui_grid_first first (ui_index_of_key shown sel 0) n vis)
+                        (let a0 (ui_leaf r (cons (UiPFill r gbg) (nil UiPaint)) acc)
+                          (let a1 (ui_header_cells prefix cols ws col desc (ui_rx r) (ui_ry r) 0 st gbg a0)
+                            (let a2 (ui_leaf r (cons (UiPFill (UiRect (ui_rx r) (sub (add (ui_ry r) (ui_grid_header_h)) 1) (ui_rw r) 1)
+                                                              (ui_border style gbg)) (nil UiPaint)) a1)
+                              (let a3 (ui_grid_rows prefix cols ws (ui_drop shown f) sel (ui_rx r) (ui_rw r)
+                                                    (add (ui_ry r) (ui_grid_header_h)) vis st gbg a2)
+                                (ui_scrollbar r n vis f style gbg a3)))))))))))))))))
+
+(def (ui_drop T) ((xs (list T)) (n int)) (list T)
+  (if (if (le n 0) true (is_empty xs)) xs (ui_drop (tail xs) (sub n 1))))
+
+; The header's cells: each title, bold and dimmed, a sorted column's with
+; its arrow at its end, and a line between each and the next. A sortable
+; one is a target, and shows the pointer over it.
+(def ui_header_cells ((prefix (list int)) (cols (list UiColumn)) (ws (list int)) (col int) (desc bool)
+                      (x int) (y int) (i int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
+  (if (if (is_empty cols) true (is_empty ws))
+      acc
+      (match (head cols)
+        ((UiColumn title w align sortable)
+          (let cw (head ws)
+            (let action (if sortable (append prefix (append ".sort." (digits i))) "")
+              (let hover (if sortable (eq (ui_st_hover st) action) false)
+                (let bg (if hover (ui_hover_bg (ui_st_style st) gbg) gbg)
+                  (let cr (UiRect x y cw (sub (ui_grid_header_h) 1))
+                    (let node (UiNode cr (ui_header_ops cr title align (eq col i) desc (is_empty (tail cols)) st gbg bg) action false)
+                      (ui_header_cells prefix (tail cols) (tail ws) col desc (add x cw) y (add i 1) st gbg (cons node acc))))))))))))
+
+(def ui_header_ops ((cr UiRect) (title (list int)) (align UiAlign) (sorted bool) (desc bool) (last bool)
+                    (st UiState) (gbg int) (bg int)) (list UiPaint)
+  (let dim (ui_dim_fg (ui_st_style st) bg)
+    (let room (sub (ui_rw cr) (add (mul 2 (ui_cell_pad)) (if sorted (add (ui_icon_size) 4) 0)))
+      (let tr (UiRect (add (ui_rx cr) (ui_cell_pad)) (ui_ry cr) (max 0 room) (ui_rh cr))
+        (let ops (cons (UiPFill cr bg) (cons (UiPText tr title align dim true 1) (nil UiPaint)))
+          (let ops2 (if sorted
+                        (append ops (cons (UiPIcon (sub (add (ui_rx cr) (ui_rw cr)) (add (ui_cell_pad) (ui_icon_size)))
+                                                   (ui_aligned (ui_ry cr) (ui_rh cr) (ui_icon_size) (UiCenter))
+                                                   (if desc "pan-down" "pan-up") dim 1) (nil UiPaint)))
+                        ops)
+            (if last
+                ops2
+                (append ops2 (cons (UiPFill (UiRect (sub (add (ui_rx cr) (ui_rw cr)) 1) (add (ui_ry cr) 8) 1 (sub (ui_rh cr) 16))
+                                            (ui_border (ui_st_style st) gbg)) (nil UiPaint))))))))))
+
+; The rows that fit, from y: each a target selecting it, its ground the
+; selection's tint or the pointer's, then its cells.
+(def ui_grid_rows ((prefix (list int)) (cols (list UiColumn)) (ws (list int)) (rows (list UiRow)) (sel (list int))
+                   (x int) (w int) (y int) (left int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
+  (if (if (le left 0) true (is_empty rows))
+      acc
+      (match (head rows)
+        ((UiRow k cells)
+          (let action (append prefix (append ".select." k))
+            (let bg (if (eq k sel) (ui_selected_bg gbg) (if (eq (ui_st_hover st) action) (ui_hover_bg (ui_st_style st) gbg) gbg))
+              (let rr (UiRect x y w (ui_row_h))
+                (let node (UiNode rr (cons (UiPFill rr bg) (ui_cells_ops cols ws cells x y st bg (nil UiPaint))) action false)
+                  (ui_grid_rows prefix cols ws (tail rows) sel x w (add y (ui_row_h)) (sub left 1) st gbg (cons node acc))))))))))
+
+(def ui_cells_ops ((cols (list UiColumn)) (ws (list int)) (cells (list UiCell)) (x int) (y int) (st UiState) (bg int) (acc (list UiPaint))) (list UiPaint)
+  (if (if (is_empty cols) true (if (is_empty ws) true (is_empty cells)))
+      acc
+      (match (head cols)
+        ((UiColumn title w align sortable)
+          (let cr (UiRect (add x (ui_cell_pad)) y (max 0 (sub (head ws) (mul 2 (ui_cell_pad)))) (ui_row_h))
+            (ui_cells_ops (tail cols) (tail ws) (tail cells) (add x (head ws)) y st bg
+                          (append acc (ui_cell_ops (head cells) cr align st bg))))))))
+
+; One cell's ops in cr.
+(def ui_cell_ops ((c UiCell) (cr UiRect) (align UiAlign) (st UiState) (bg int)) (list UiPaint)
+  (let fg (ui_fg (ui_st_style st))
+    (match c
+      ((UiCellText s) (cons (UiPText cr s align fg false 1) (nil UiPaint)))
+      ((UiCellNum n suffix) (cons (UiPText cr (append (digits n) suffix) align fg false 1) (nil UiPaint)))
+      ((UiCellLevel p) (ui_level_ops cr p st bg))
+      ((UiCellStatus tone s) (ui_status_ops cr tone s st bg))
+      ((UiCellIcon icon s)
+        (cons (UiPIcon (ui_rx cr) (ui_aligned (ui_ry cr) (ui_rh cr) (ui_icon_size) (UiCenter)) icon fg 1)
+              (cons (UiPText (UiRect (add (ui_rx cr) (add (ui_icon_size) (ui_space_s))) (ui_ry cr)
+                                     (max 0 (sub (ui_rw cr) (add (ui_icon_size) (ui_space_s)))) (ui_rh cr)) s (UiStart) fg false 1)
+                    (nil UiPaint)))))))
+
+; The overlay scrollbar's slider, along the right of the rows, when n
+; rows are more than the vis that fit.
+(def ui_scrollbar ((r UiRect) (n int) (vis int) (first int) (style UiStyle) (gbg int) (acc (list UiNode))) (list UiNode)
+  (if (if (le n vis) true (le vis 0))
+      acc
+      (let top (add (ui_ry r) (ui_grid_header_h))
+        (let track (mul vis (ui_row_h))
+          (let sh (max 24 (div (mul track vis) n))
+            (let sy (add top (div (mul (sub track sh) first) (sub n vis)))
+              (let sr (UiRect (sub (add (ui_rx r) (ui_rw r)) 9) (add sy 2) 6 (sub sh 4))
+                (ui_leaf sr (cons (UiPRound sr 3 (ui_mix (ui_fg style) gbg 40) -1) (nil UiPaint)) acc))))))))

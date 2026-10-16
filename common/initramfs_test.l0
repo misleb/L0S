@@ -1,0 +1,132 @@
+; Modes, in decimal: 0100755 is 33261, 0100644 is 33188, 040755 is 16877.
+
+(def test_normal_path () int
+  (add (check_str "dot slash" (normal_path "./bin/sh") "/bin/sh")
+       (add (check_str "relative" (normal_path "bin/sh") "/bin/sh")
+            (add (check_str "absolute" (normal_path "/bin/sh") "/bin/sh")
+                 (add (check_str "dot" (normal_path ".") "/")
+                      (check_str "final slash" (normal_path "bin/") "/bin"))))))
+
+(def test_normal_path_dotfile () int
+  (check_str "a name starting with a dot" (normal_path ".profile") "/.profile"))
+
+; An archive as bsdtar would write one: a program, a directory, a text
+; file, and the trailer.
+(def sample () (list int)
+  (append (newc_entry "bin/sh" 33261 "CODE")
+    (append (newc_entry "./etc" 16877 "")
+      (append (newc_entry "./etc/motd" 33188 "hi\n")
+        (newc_trailer)))))
+
+(def parsed_entries ((archive (list int))) (array Entry)
+  (match (parse_initramfs (bytes_from_list archive))
+    ((Ok es) es)
+    ((Err why) (array_new 0 (Entry why 0 0 0)))))
+
+(def contents_of ((archive (list int)) (e Entry)) (list int)
+  (bytes_range (bytes_from_list archive) (entry_start e) (entry_end e)))
+
+(def test_round_trip () int
+  (let es (parsed_entries (sample))
+    (add (check_int "three entries" (array_len es) 3)
+         (add (check_str "first path" (entry_path (array_get es 0)) "/bin/sh")
+              (check_str "its contents" (contents_of (sample) (array_get es 0)) "CODE")))))
+
+(def test_round_trip_padded () int
+  (let es (parsed_entries (sample))
+    (add (check_str "path after a padded entry" (entry_path (array_get es 2)) "/etc/motd")
+         (check_str "contents" (contents_of (sample) (array_get es 2)) "hi\n"))))
+
+(def test_kinds () int
+  (let es (parsed_entries (sample))
+    (add (check_bool "program" (entry_is_exec (array_get es 0)) true)
+         (add (check_bool "directory" (entry_is_dir (array_get es 1)) true)
+              (add (check_bool "a directory is not a program" (entry_is_exec (array_get es 1)) false)
+                   (check_bool "text is not a program" (entry_is_exec (array_get es 2)) false))))))
+
+(def test_entry_index () int
+  (let es (parsed_entries (sample))
+    (add (check_int "found" (entry_index es "/etc/motd") 2)
+         (check_int "missing" (entry_index es "/etc/nope") -1))))
+
+(def test_base_name () int
+  (add (check_str "program" (base_name "/bin/sh") "sh")
+       (check_str "root" (base_name "/") "")))
+
+(def test_padding_after_trailer () int
+  (check_int "ignored" (array_len (parsed_entries (append (sample) (zeros 512)))) 3))
+
+(def test_no_magic () int
+  (match (parse_initramfs (bytes_from_list "L0SB...."))
+    ((Ok es) (fail_because "magic" "accepted"))
+    ((Err why) (check_str "why" why "initramfs: no 070701 magic; not a newc cpio archive"))))
+
+(def test_no_trailer () int
+  (match (parse_initramfs (bytes_from_list (newc_entry "bin/sh" 33261 "CODE")))
+    ((Ok es) (fail_because "no trailer" "accepted"))
+    ((Err why) (check_true "cut short" (starts_with why "initramfs: header cut short")))))
+
+; Every archive cut short before its trailer's name ends is refused,
+; without a runtime error. The trailer's own padding, its last 3 bytes
+; here, need not be there: nothing after the trailer is read.
+(def test_every_prefix_refused () int
+  (prefixes_refused (bytes_from_list (sample)) 0 (sub (length (sample)) 3)))
+
+(def test_trailer_padding_optional () int
+  (check_int "accepted" (array_len (parsed_entries (drop_last 3 (sample)))) 3))
+
+(def drop_last ((n int) (s (list int))) (list int)
+  (rev (drop_n (rev s) n)))
+
+(def prefixes_refused ((b bytes) (n int) (end int)) int
+  (if (ge n end)
+      0
+      (match (parse_initramfs (bytes_from_list (bytes_range b 0 n)))
+        ((Ok es) (fail_because (append "prefix " (digits n)) "accepted"))
+        ((Err why) (prefixes_refused b (add n 1) end)))))
+
+; Random bytes after a good magic never make the parser fail at run time.
+(def test_random_never_crashes () int
+  (random_parses 11 300))
+
+(def random_parses ((seed int) (n int)) int
+  (if (eq n 0)
+      (pass "random")
+      (let junk (rand_bytes seed (rand_below (rand_next seed) 300))
+        (let r (parse_initramfs (bytes_from_list (append "070701" junk)))
+          (random_parses (rand_next (rand_next seed)) (sub n 1))))))
+
+; Random hex digits make headers that parse further before failing.
+(def test_random_hex_never_crashes () int
+  (random_hex_parses 5 300))
+
+(def random_hex_parses ((seed int) (n int)) int
+  (if (eq n 0)
+      (pass "random hex")
+      (let junk (hexes (rand_bytes seed (rand_below (rand_next seed) 300)))
+        (let r (parse_initramfs (bytes_from_list (append "070701" junk)))
+          (random_hex_parses (rand_next (rand_next seed)) (sub n 1))))))
+
+(def hexes ((bs (list int))) (list int)
+  (if (is_empty bs) (nil int) (cons (head (drop_n "0123456789abcdef" (mod (head bs) 16))) (hexes (tail bs)))))
+
+; An archive bsdtar made, as the Makefile makes it before l0 test runs:
+; build/sample.cpio, of a directory holding bin/x, "hi", mode 0755.
+(def test_bsdtar_archive () int
+  (match (open_in "build/sample.cpio")
+    ((IoFailed fault why) (fail_because "build/sample.cpio" why))
+    ((IoOpened f)
+      (match (file_read_all f)
+        ((IoReadFailed code) (fail_because "read" (io_error code)))
+        ((IoBytes b) (let c (file_close f) (check_bsdtar b)))))))
+
+(def check_bsdtar ((b bytes)) int
+  (match (parse_initramfs b)
+    ((Err why) (fail_because "parse" why))
+    ((Ok es)
+      (let i (entry_index es "/bin/x")
+        (if (lt i 0)
+            (fail_because "/bin/x" "missing")
+            (add (check_str "contents" (bytes_range b (entry_start (array_get es i)) (entry_end (array_get es i))) "hi")
+                 (add (check_bool "a program" (entry_is_exec (array_get es i)) true)
+                      (check_bool "/bin a directory" (entry_is_dir (array_get es (entry_index es "/bin"))) true))))))))
