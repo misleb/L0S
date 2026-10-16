@@ -6,8 +6,8 @@ import struct
 import unittest
 import zlib
 
-from board import (BoardError, axis, crop, key_combo, parse_combo, parse_ppm,
-                   parse_ps, parse_windows, png, reply_of)
+from board import (BoardError, axis, button, crop, key_combo, parse_combo, parse_ppm,
+                   parse_ps, parse_windows, png, reply_of, wheel)
 
 
 class Keys(unittest.TestCase):
@@ -46,6 +46,14 @@ class Tablet(unittest.TestCase):
     def test_off_the_screen_is_its_edge(self):
         self.assertEqual(axis(-5, 800), 0)
         self.assertEqual(axis(5000, 800), 32767)
+
+    def test_wheel_down(self):
+        self.assertEqual(wheel(0, 1), button(True, "wheel-down") + button(False, "wheel-down"))
+
+    def test_wheel_up_and_left(self):
+        up = button(True, "wheel-up") + button(False, "wheel-up")
+        left = button(True, "wheel-left") + button(False, "wheel-left")
+        self.assertEqual(wheel(-1, -2), up + up + left)
 
 
 def ppm(w, h, rgb):

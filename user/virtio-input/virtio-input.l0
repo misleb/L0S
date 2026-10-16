@@ -8,8 +8,10 @@
 ;                           (l0s.l0) with the character it types on a US
 ;                           keyboard; serves keyboard, for keyboard_listen
 ;   virtio-input tablet     the Tablet: the pointer's place and buttons, as
-;                           a PointerEvent, once each report is complete;
-;                           serves pointer, for pointer_listen
+;                           a PointerEvent, once each report is complete,
+;                           after the scroll wheel's turn in it, if it
+;                           turned, as a WheelEvent; serves pointer, for
+;                           pointer_listen
 ;
 ; Both reach the device when QEMU's window has the focus; the terminal
 ; stays the console's.
@@ -162,33 +164,53 @@
 (data Role (Role (list int) (list int) Kind))
 
 ; What the driver keeps of what it has been told: the modifiers held, for
-; a keyboard; where the pointer is and the buttons down, for a tablet.
-(data Kind (Keys int) (Tablet int int int))
+; a keyboard; where the pointer is, the buttons down, and the wheel's
+; steps across and down since the last report, for a tablet.
+(data Kind (Keys int) (Tablet int int int int int))
 
 (def role_of ((argv (list (list int)))) Role
   (if (any_eq "tablet" argv)
-      (Role "Tablet" "pointer" (Tablet 0 0 0))
+      (Role "Tablet" "pointer" (Tablet 0 0 0 0 0))
       (Role "Keyboard" "keyboard" (Keys 0))))
 
 (def ev_syn () int 0)
+(def ev_rel () int 2)
 (def ev_abs () int 3)
 (def btn_left () int 272)
 
+; Linux's relative axes of a wheel, as QEMU's tablet reports its wheel:
+; REL_HWHEEL positive to the right, REL_WHEEL positive turned away from
+; you, which scrolls up.
+(def rel_hwheel () int 6)
+(def rel_wheel () int 8)
+
 ; A tablet's state after an event: an axis moved, a button pressed or
-; released; and whether the event completes a report, at EV_SYN, so a
-; PointerEvent is due.
+; released, the wheel turned; and whether the event completes a report,
+; at EV_SYN, so a PointerEvent is due, and a WheelEvent if the wheel
+; turned.
 (data Pointed (Pointed Kind bool))
 
 (def pointed ((k Kind) (type int) (code int) (value int)) Pointed
   (match k
     ((Keys mods) (Pointed k false))
-    ((Tablet x y buttons)
+    ((Tablet x y buttons dx dy)
       (if (eq type (ev_syn)) (Pointed k true)
       (if (eq type (ev_abs))
-          (Pointed (if (eq code 0) (Tablet value y buttons) (if (eq code 1) (Tablet x value buttons) k)) false)
+          (Pointed (if (eq code 0) (Tablet value y buttons dx dy) (if (eq code 1) (Tablet x value buttons dx dy) k)) false)
+      (if (eq type (ev_rel)) (Pointed (wheeled k code (s32 value)) false)
       (if (if (eq type (ev_key)) (if (ge code (btn_left)) (lt code (add (btn_left) 3)) false) false)
-          (Pointed (Tablet x y (with_mod buttons (bit_shl 1 (sub code (btn_left))) (not (eq value 0)))) false)
-          (Pointed k false)))))))
+          (Pointed (Tablet x y (with_mod buttons (bit_shl 1 (sub code (btn_left))) (not (eq value 0))) dx dy) false)
+          (Pointed k false))))))))
+
+; A tablet's state with the wheel turned by value on axis code, as a
+; WheelEvent counts: down and right positive.
+(def wheeled ((k Kind) (code int) (value int)) Kind
+  (match k
+    ((Keys mods) k)
+    ((Tablet x y buttons dx dy)
+      (if (eq code (rel_wheel)) (Tablet x y buttons dx (sub dy value))
+      (if (eq code (rel_hwheel)) (Tablet x y buttons (add dx value) dy)
+      k)))))
 
 ; ---------------------------------------------------------------- the queue
 
@@ -336,7 +358,8 @@
 
 ; An event, for a keyboard a key told to every listener with the
 ; modifiers after it, and for a tablet kept until EV_SYN completes the
-; report, then told; anything else is passed over.
+; report, then told, with the wheel's turn if it turned; anything else
+; is passed over.
 (def handled ((k Kbd) (ev InputEvent)) Kbd
   (match ev
     ((InputEvent type code value)
@@ -348,15 +371,42 @@
                   k
                   (Kbd d t q avail used (Keys (mods_after mods code value))
                        (tell ls (key_notice (KeyEvent code value (event_char mods code value))) (nil int)))))
-            ((Tablet x y buttons)
+            ((Tablet x y buttons dx dy)
               (match (pointed kind type code value)
                 ((Pointed kind2 report)
-                  (Kbd d t q avail used kind2 (if report (tell ls (pointer_of kind2) (nil int)) ls)))))))))))
+                  (if report
+                      (Kbd d t q avail used (unturned kind2) (told_report ls kind2))
+                      (Kbd d t q avail used kind2 ls)))))))))))
+
+; Each listener told of a report: the wheel's turn, if it turned, then
+; where the pointer is. The turn comes first, so that what it scrolls has
+; scrolled when the pointer is next placed, and shows what is under it
+; now. The listeners still there.
+(def told_report ((ls (list int)) (k Kind)) (list int)
+  (let ls2 (match (wheel_of k)
+             ((None) ls)
+             ((Some n) (tell ls n (nil int))))
+    (tell ls2 (pointer_of k) (nil int))))
 
 (def pointer_of ((k Kind)) (list int)
   (match k
     ((Keys mods) (pointer_notice (PointerEvent 0 0 0)))
-    ((Tablet x y buttons) (pointer_notice (PointerEvent x y buttons)))))
+    ((Tablet x y buttons dx dy) (pointer_notice (PointerEvent x y buttons)))))
+
+; The wheel notice of a report, if the wheel turned in it.
+(def wheel_of ((k Kind)) (Option (list int))
+  (match k
+    ((Keys mods) ((None (list int))))
+    ((Tablet x y buttons dx dy)
+      (if (if (eq dx 0) (eq dy 0) false)
+          ((None (list int)))
+          (Some (wheel_notice (WheelEvent x y dx dy)))))))
+
+; A tablet's state once a report is told: the wheel's turn counted from 0.
+(def unturned ((k Kind)) Kind
+  (match k
+    ((Keys mods) k)
+    ((Tablet x y buttons dx dy) (Tablet x y buttons 0 0))))
 
 ; Sends payload to each port, keeping those still there: a full queue
 ; loses the event, but a port that has gone goes from the list.

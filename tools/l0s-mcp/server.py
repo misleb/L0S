@@ -22,7 +22,7 @@ a command that returns to the prompt (a program reading its input,
 Ctrl-C, output of background jobs). The screen is 1280x800; screenshot
 shows it, pixels gives exact colors. type_keys and press_keys go to the
 virtio keyboard, so to the front window, not the serial line; click,
-drag and move drive the virtio tablet. Everything the serial line shows
+drag, move and scroll (the wheel) drive the virtio tablet. Everything the serial line shows
 is also saved in build/mcp/serial.out."""
 
 mcp = MCPServer("l0s", instructions=INSTRUCTIONS)
@@ -167,6 +167,15 @@ def click(x: int, y: int, button: str = "left") -> str:
     """Moves the pointer to x, y and clicks: left, right or middle."""
     board.click(x, y, button)
     return f"clicked {button} at {x}, {y}"
+
+
+@tool
+def scroll(x: int, y: int, dy: int = 1, dx: int = 0) -> str:
+    """Moves the pointer to x, y and turns the scroll wheel dy steps:
+    positive down, toward the end of what is shown, negative up; dx
+    steps right, or left if negative."""
+    board.scroll(x, y, dy, dx)
+    return f"scrolled {dy} down, {dx} right at {x}, {y}"
 
 
 @tool

@@ -15,24 +15,38 @@
 ; ui_route does what GTK does with the pointer and keys: the pointer over
 ; a target is shown, a press shows it pressed, and its release over the
 ; same target sets off its action; Tab moves the keyboard's focus to the
-; next target, and Enter or Space sets off the one it is on.
+; next target, and Enter or Space sets off the one it is on. It also
+; scrolls what widget.l0 calls a scroller: the wheel over its area or its
+; scrollbar, a press on the scrollbar's strip, and a drag of its slider
+; set off NAME.scrollto.N at once, as GTK's scrolled window moves.
 ;
 ; ui_present lays the view out, and paints only the parts that differ from
 ; what it painted last, telling the compositor of each.
 
 ; The window: the compositor, its id there, the canvas it is drawn in,
 ; the port its events come to, the font, the widgets' state, the nodes
-; painted last, and the pointer's buttons as last told.
-(data UiWin (UiWin Compositor int Canvas int (array int) UiState (list UiNode) int))
+; painted last, the pointer's buttons as last told, and, while a
+; scrollbar's slider is dragged, how far below its top the pointer
+; holds it.
+(data UiWin (UiWin Compositor int Canvas int (array int) UiState (list UiNode) int int))
 
 (data UiOpened (UiOpenedWin UiWin) (UiOpenFailed (list int)))
 
-(def ui_win_port ((w UiWin)) int (match w ((UiWin c id cv port font st ns b) port)))
-(def ui_win_state ((w UiWin)) UiState (match w ((UiWin c id cv port font st ns b) st)))
-(def ui_win_nodes ((w UiWin)) (list UiNode) (match w ((UiWin c id cv port font st ns b) ns)))
+(def ui_win_port ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g) port)))
+(def ui_win_state ((w UiWin)) UiState (match w ((UiWin c id cv port font st ns b g) st)))
+(def ui_win_nodes ((w UiWin)) (list UiNode) (match w ((UiWin c id cv port font st ns b g) ns)))
 
 (def ui_win_with ((w UiWin) (st UiState) (b int)) UiWin
-  (match w ((UiWin c id cv port font old ns ob) (UiWin c id cv port font st ns b))))
+  (match w ((UiWin c id cv port font old ns ob g) (UiWin c id cv port font st ns b g))))
+
+(def ui_win_grab ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g) g)))
+
+(def ui_win_grabbing ((w UiWin) (g int)) UiWin
+  (match w ((UiWin c id cv port font st ns b old) (UiWin c id cv port font st ns b g))))
+
+; Where the scroller called name is scrolled in the window as last
+; painted, for keys that keep a selection in view (ui_grid_key).
+(def ui_win_scroller ((w UiWin) (name (list int))) UiScroller (ui_scroller_of (ui_win_nodes w) name))
 
 ; A window w by h titled title, in front, painted nothing yet.
 (def ui_open ((title (list int)) (w int) (h int)) UiOpened
@@ -49,10 +63,10 @@
                   (match (window_open (Compositor cport rp pid) w h va n port title)
                     ((WindowFailed why) (UiOpenFailed why))
                     ((WindowOpened id)
-                      (UiOpenedWin (UiWin (Compositor cport rp pid) id canvas port font (ui_state_new (ui_style)) (nil UiNode) 0))))))))))))
+                      (UiOpenedWin (UiWin (Compositor cport rp pid) id canvas port font (ui_state_new (ui_style)) (nil UiNode) 0 0))))))))))))
 
 (def ui_close ((w UiWin)) int
-  (match w ((UiWin c id cv port font st ns b) (let x (window_close c id) 0))))
+  (match w ((UiWin c id cv port font st ns b g) (let x (window_close c id) 0))))
 
 ; --------------------------------------------------------------- events
 
@@ -63,13 +77,14 @@
   (UiMotion int int int)
   (UiLeave)                      ; the pointer has gone from the window
   (UiFocus bool)                 ; the window has come to the front, or gone from it
+  (UiScroll int int int int)     ; the wheel turned at x, y: its steps across, and down
   (UiExit int int)               ; a process watched has exited: its pid, its status
   (UiOther int (list int)))      ; anything else: who sent it, and what
 
 ; What a message to the window's port is.
 (def ui_event_of ((w UiWin) (m Message)) UiEvent
   (match w
-    ((UiWin c id cv port font st ns held)
+    ((UiWin c id cv port font st ns held g)
       (match m
         ((RecvFailed) (UiOther -1 ""))
         ((Message from payload)
@@ -91,11 +106,16 @@
                   (UiPress x y b)
                   (if (if (not (eq held 0)) (eq b 0) false) (UiRelease x y b) (UiMotion x y b))))))
         ((None)
-          (if (is_leave_notice m)
-              (UiLeave)
-              (match (focus_notice_of m)
-                ((Some front) (UiFocus front))
-                ((None) (UiOther from payload)))))))))
+          (match (wheel_event_of m)
+            ((Some e) (match e ((WheelEvent x y dx dy) (UiScroll x y dx dy))))
+            ((None) (ui_notice_of m from payload))))))))
+
+(def ui_notice_of ((m Message) (from int) (payload (list int))) UiEvent
+  (if (is_leave_notice m)
+      (UiLeave)
+      (match (focus_notice_of m)
+        ((Some front) (UiFocus front))
+        ((None) (UiOther from payload)))))
 
 ; Linux's codes for the keys that move and use the focus.
 (def ui_key_tab () int 15)
@@ -110,12 +130,11 @@
   (let st (ui_win_state w)
     (let ns (ui_win_nodes w)
       (match w
-        ((UiWin c id cv port font old nodes held)
+        ((UiWin c id cv port font old nodes held g)
           (match ev
-            ((UiMotion x y b) (UiRouted (ui_win_with w (ui_st_hovering st (ui_hit ns x y)) b) ""))
-            ((UiPress x y b)
-              (let t (ui_hit ns x y)
-                (UiRouted (ui_win_with w (ui_st_focusing (ui_st_pressing (ui_st_hovering st t) t) "") b) "")))
+            ((UiMotion x y b) (ui_motion_routed w st x y b))
+            ((UiPress x y b) (ui_press_routed w st x y b))
+            ((UiScroll x y dx dy) (ui_wheel_routed w x y dy))
             ((UiRelease x y b)
               (let t (ui_hit ns x y)
                 (let p (ui_st_pressed st)
@@ -126,6 +145,63 @@
             ((UiKey k) (ui_keyed w k))
             ((UiExit pid status) (UiRouted w ""))
             ((UiOther from payload) (UiRouted w ""))))))))
+
+; A motion: the pointer shown over its target, and while a scrollbar's
+; slider is held, its scroller scrolled to keep the slider under the
+; pointer where it was taken.
+(def ui_motion_routed ((w UiWin) (st UiState) (x int) (y int) (b int)) UiRouted
+  (let w2 (ui_win_with w (ui_st_hovering st (ui_hit (ui_win_nodes w) x y)) b)
+    (if (eq b 0)
+        (UiRouted w2 "")
+        (match (ui_scroll_of (ui_st_pressed st))
+          ((UiScrollBar name f m sp sl) (UiRouted w2 (ui_slid_to (ui_win_nodes w) name (sub y (ui_win_grab w)))))
+          ((UiScrollArea name f m s) (UiRouted w2 ""))
+          ((UiNoScroll) (UiRouted w2 ""))))))
+
+; A press: its target shown pressed, and the focus gone, as GTK's does.
+; On a scrollbar's slider, the slider is taken where it was pressed; on
+; its strip off the slider, the slider is brought there, its middle under
+; the pointer, and taken by its middle.
+(def ui_press_routed ((w UiWin) (st UiState) (x int) (y int) (b int)) UiRouted
+  (let ns (ui_win_nodes w)
+    (let t (ui_hit ns x y)
+      (let w2 (ui_win_with w (ui_st_focusing (ui_st_pressing (ui_st_hovering st t) t) "") b)
+        (match (ui_scroll_of t)
+          ((UiScrollBar name f m sp sl)
+            (match (ui_scrollbar_named ns name)
+              ((None) (UiRouted w2 ""))
+              ((Some n)
+                (let top (ui_slider_top (ui_ry (ui_node_rect n)) f m sp)
+                  (if (if (ge y top) (lt y (add top sl)) false)
+                      (UiRouted (ui_win_grabbing w2 (sub y top)) "")
+                      (UiRouted (ui_win_grabbing w2 (div sl 2)) (ui_slid_to ns name (sub y (div sl 2)))))))))
+          ((UiScrollArea name f m s) (UiRouted w2 ""))
+          ((UiNoScroll) (UiRouted w2 "")))))))
+
+; The action that scrolls the scroller called name so that its slider's
+; top is at top, as near as a whole row goes; "" if it is there already.
+(def ui_slid_to ((ns (list UiNode)) (name (list int)) (top int)) (list int)
+  (match (ui_scrollbar_named ns name)
+    ((None) "")
+    ((Some n)
+      (match (ui_scroll_of (ui_node_action n))
+        ((UiScrollBar nm f m sp sl)
+          (let to (ui_slider_first top (ui_ry (ui_node_rect n)) m sp)
+            (if (eq to f) "" (ui_scrollto_action name to))))
+        ((UiScrollArea nm f m s) "")
+        ((UiNoScroll) "")))))
+
+; The wheel turned dy steps at x, y: the scroller there scrolled, if one
+; is and it can go that way.
+(def ui_wheel_routed ((w UiWin) (x int) (y int) (dy int)) UiRouted
+  (UiRouted w
+    (match (ui_scroll_hit (ui_win_nodes w) x y)
+      ((UiScrollArea name f m s) (ui_wheeled_to name f m dy))
+      ((UiScrollBar name f m sp sl) (ui_wheeled_to name f m dy))
+      ((UiNoScroll) ""))))
+
+(def ui_wheeled_to ((name (list int)) (f int) (m int) (dy int)) (list int)
+  (let to (ui_wheel_first f m dy) (if (eq to f) "" (ui_scrollto_action name to))))
 
 (def ui_keyed ((w UiWin) (k KeyEvent)) UiRouted
   (let st (ui_win_state w)
@@ -141,7 +217,7 @@
                         (UiRouted w (ui_st_focus st))
                         (UiRouted w "")))))))))
 
-(def ui_win_held ((w UiWin)) int (match w ((UiWin c id cv port font st ns b) b)))
+(def ui_win_held ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g) b)))
 
 ; ------------------------------------------------------------- painting
 
@@ -149,11 +225,11 @@
 ; was painted last, painted and its damage told.
 (def ui_present ((w UiWin) (widget UiWidget)) UiWin
   (match w
-    ((UiWin c id canvas port font st old held)
+    ((UiWin c id canvas port font st old held g)
       (let ns (ui_layout_window widget (canvas_w canvas) (canvas_h canvas) st)
         (let boxes (ui_changed old ns (UiRect 0 0 (canvas_w canvas) (canvas_h canvas)))
           (let p (ui_repaint c id canvas font ns boxes)
-            (UiWin c id canvas port font st ns held)))))))
+            (UiWin c id canvas port font st ns held g)))))))
 
 ; Each box painted, then all of them told in one damage request.
 (def ui_repaint ((c Compositor) (id int) (canvas Canvas) (font (array int)) (ns (list UiNode)) (boxes (list UiRect))) int

@@ -16,6 +16,12 @@
 #      the accent's tint, and End Process its own red
 #   6. a click on End Process: the row gone, End Process faded again, and
 #      ps at the shell listing no nap
+#   7. after six more naps, thirteen rows, more than the ten that fit: the
+#      overlay scrollbar's slider, at the top
+#   8. a step of the wheel, through QMP, over the rows: three rows
+#      scrolled, as far as they go, the slider at the end
+#   9. the pointer on the scrollbar's strip: the slider wider and darker
+#  10. the slider dragged back up: at the top again
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
@@ -53,6 +59,9 @@ at() {
   echo "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$(axis "$1" 1280)}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$(axis "$2" 800)}}"
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
+# A step of the wheel, wheel-down or wheel-up: QEMU's tablet reports the
+# press as REL_WHEEL.
+wheel() { echo "{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"$1\"}},{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"$1\"}}"; }
 click() {
   events "$(at "$1" "$2")"; sleep 1
   events "$(button true)"; sleep 1
@@ -164,3 +173,32 @@ listing=$(tail -c +$from "$out")
 echo "$listing" | grep -q "PID  PARENT" || fail "ps listed nothing; it showed:"
 if echo "$listing" | grep -q " nap "; then fail "ps still lists nap; it showed:"; fi
 echo "ok - procmon: ps lists no nap"
+
+# Thirteen rows, ten shown from y 79 to 379: the slider is ten thirteenths
+# of the 300, 230 long, so it travels 70. At the top it is from 81 to 307,
+# 2 in from each end of its 230, and at the end, three rows on, from 151
+# to 377. At rest it is 6 wide, 3 in from the grid's right edge at 640,
+# from x 631, the text at 40% on white, adadad; with the pointer on its
+# strip, 8 wide, from 629, at 60%, 848484.
+for n in 1 2 3 4 5 6; do printf 'run nap 600000 &\n' >&3; sleep 1; done
+gx=$((cx + 633)); wide=$((cx + 630))
+slider="173 173 173"; slider_hot="132 132 132"
+shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $white"
+
+# The pointer in the middle of the fifth row, on its empty detail: the
+# row under it is tinted, 4% of the text on white, 247, before the
+# wheel turns and after, though another row is under it then.
+hovered="247 247 247"
+events "$(at $((cx + 500)) $(($(row 5) + 15)))"; sleep 1
+events "$(wheel wheel-down)"; sleep 1
+shows "a step of the wheel scrolled to the end, the row now under the pointer tinted" \
+  "$gx $((cy + 100)) $white" "$gx $((cy + 360)) $slider" "$((cx + 500)) $(($(row 5) + 15)) $hovered" "$((cx + 500)) $(($(row 2) + 15)) $white"
+
+events "$(at $gx $((cy + 360)))"; sleep 1
+shows "the pointer on the strip: the slider wide and dark" "$wide $((cy + 360)) $slider_hot"
+
+events "$(button true)"; sleep 1
+events "$(at $gx $((cy + 230)))"; sleep 1
+events "$(at $gx $((cy + 100)))"; sleep 1
+events "$(button false)"; sleep 1
+shows "the slider dragged back to the top" "$gx $((cy + 100)) $slider_hot" "$gx $((cy + 360)) $white"

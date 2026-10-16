@@ -107,11 +107,15 @@ Their helpers, copied in each script:
 | `windows` / `window` | types `run windows` and reads the front and back windows' title, x, y, width, height |
 | `typekeys "text"` | types on the virtio keyboard with `sendkey`, then Enter |
 | `events EV...`, `at X Y`, `button true\|false` | the tablet through QMP's `input-send-event`; `at` scales screen pixels to the tablet's 0..32767 |
+| `wheel wheel-down\|wheel-up` | a step of the scroll wheel, an `input-send-event` button that QEMU's tablet reports as `REL_WHEEL` (`procmon.sh`) |
 
 - **Colors they pin**: active header bar and border `235 235 235`, backdrop
   `250 250 250`, the terminal's ground `30 30 30`, its ink and cursor white,
-  the toolkit's selected row `205 224 248`. A change to the theme breaks
-  them on purpose: update them in the same change.
+  the toolkit's selected row `205 224 248`, a hovered row `247 247 247`, and
+  the scrollbar's slider `173 173 173`, `132 132 132` under the pointer. A
+  change to the theme breaks them on purpose: update them in the same change.
+- **The pointer's place rounds** through the tablet's axes: `at X Y` can land
+  a pixel above or left of Y. Aim at a row's middle, not its edge.
 - **Geometry they assume**: the top bar is 32 rows, header bars 46, a
   window's content starts `edge` (2) pixels in from its left, and `windows`
   gives the content's size. Pick check points away from rounded corners, text
@@ -127,7 +131,7 @@ why one fails, use the `l0s` MCP server's tools (`tools/l0s-mcp`, set up by
 a scratch script. `boot` (`demo`, `screen`, or an `etc` directory), then
 `shell` for commands at the serial shell, `ps` and `windows` parsed,
 `screenshot` and `pixels` for the screen, `type_keys`/`press_keys` for the
-keyboard and `click`/`drag`/`move` for the tablet. It does not build:
+keyboard and `click`/`drag`/`move`/`scroll` for the tablet and its wheel. It does not build:
 `make initramfs` (or `screen-initramfs`) first, and boot again after.
 The windows' shells come up after the serial shell's prompt, so look at
 the screen before typing into a window. It is for exploring; what must

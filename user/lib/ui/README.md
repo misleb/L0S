@@ -12,10 +12,10 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends on nothing. | `@window_bg_color`, `@accent_bg_color`, … |
 | `icons.l0` | 16×16 symbolic icons, kept as `#`/`.` art: window-close, pan-down, pan-up, view-refresh, open-menu, system-search. | `*-symbolic` icons |
 | `paint.l0` | `UiRect`; the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon); `ui_paint` runs them on a canvas, clipped. Also `ui_buffer` for shm buffers and Adwaita's arrow cursor. | GSK render nodes |
-| `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`. | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage` |
-| `grid.l0` | A data grid: columns, typed cells (text, number, level, status, icon), sorting by column, selection, keyboard movement, overlay scrollbar. | `GtkColumnView` |
+| `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
+| `grid.l0` | A data grid: columns, typed cells (text, number, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. | `GtkColumnView`, `GtkScrolledWindow` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round` and `button`. Used by `draw` to check a command and by `wm` to draw it. | — |
-| `window.l0` | A client window: `ui_open`, `ui_event_of`, `ui_route` (hover, press, click on release, Tab focus, Enter/Space), `ui_present` (repaints only what changed). Needs `user/lib/wm.l0`. | `GtkWindow`, event controllers |
+| `window.l0` | A client window: `ui_open`, `ui_event_of`, `ui_route` (hover, press, click on release, Tab focus, Enter/Space, the wheel and scrollbar drags), `ui_present` (repaints only what changed), `ui_win_scroller`. Needs `user/lib/wm.l0`. | `GtkWindow`, event controllers |
 
 The Makefile links either `UI_CORE` (every file but `window.l0`; needs only
 `render.l0`) or `UI_CORE` plus `UI_WINDOW` (`window.l0`; needs
@@ -45,6 +45,26 @@ and its loop is:
 ```
 
 `user/widgets/widgets.l0` is that loop in full, with a toolbar and a data grid.
+
+### Scrolling
+
+A widget that scrolls, the grid so far, is a **scroller**. Its layout
+keeps how it is scrolled in two nodes' actions, as a `GtkAdjustment`
+would hold it: its area, `NAME.scroll.FIRST.MOST.SHOWN`, and its
+scrollbar's strip, `NAME.scrollbar.FIRST.MOST.SPAN.SLIDER`. `ui_route`
+reads them to scroll it with no help from the program. The wheel over
+either, a press on the strip off the slider, and a drag of the slider set
+off `NAME.scrollto.N` at once, which `ui_grid_action` turns into row N
+first. The keys that move the selection scroll it into view from where
+the grid is shown, so the program passes the window's scroller:
+
+```
+(ui_grid_key view code (ui_win_scroller w2 "procs"))
+```
+
+The layout no longer keeps the selection in view on its own, so the wheel
+can scroll it away, as in GTK. A step of the wheel is three rows
+(`ui_wheel_rows`).
 
 Every name is `ui_…` and every type or constructor `Ui…`. All files given
 to `l0` are one namespace, and a duplicate is a compile error.
@@ -77,7 +97,9 @@ to `l0` are one namespace, and a duplicate is a compile error.
   shadows.
 - One bitmap font and one size of icon. Icons and text scale by whole
   numbers.
-- No scroll wheel yet. The grid scrolls to keep its selection in view.
+- Scrolling is by whole rows: the wheel's steps are counted, not its
+  speed, and there is no kinetic scrolling. The wheel across, which the
+  driver reports, scrolls nothing yet.
 
 ## The display layer
 
@@ -110,5 +132,4 @@ Two Wayland-style changes to the display layer (`user/lib/display.l0`,
 6. **Client-side decorations**: a `csd` window flag and `move ID`
    (`xdg_toplevel.move`), so programs draw their own header bars.
 
-Outside the display layer: wheel events from virtio-input, and modifier
-state in `KeyEvent` (for Shift-Tab).
+Outside the display layer: modifier state in `KeyEvent` (for Shift-Tab).

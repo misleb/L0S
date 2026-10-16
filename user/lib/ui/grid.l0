@@ -2,14 +2,20 @@
 ; rows of cells under a header of column titles, on a view's ground. A
 ; sortable column's title sorts by it when pressed, and again the other
 ; way; a row is selected by pressing it, and with the arrow keys, Home,
-; End, Page Up, and Page Down. When there are more rows than fit, an
-; overlay scrollbar says where those shown are.
+; End, Page Up, and Page Down, which scroll it into view. When there are
+; more rows than fit, the wheel scrolls them, three rows a step, and an
+; overlay scrollbar says where those shown are; its slider can be
+; dragged, and a press on its strip off the slider brings the slider
+; there, as GTK's does.
 ;
 ; Its actions are named from a prefix the program gives, as PREFIX.sort.N
-; for column N's title, and PREFIX.select.KEY for the row whose key is
-; KEY; ui_grid_action makes the grid's next state from one. Cells are
-; widgets of their own: text, numbers, level bars, statuses, and an icon
-; with text, each with the key it sorts by.
+; for column N's title, PREFIX.select.KEY for the row whose key is KEY,
+; and PREFIX.scrollto.N, from window.l0, for row N to be the first
+; shown; ui_grid_action makes the grid's next state from one. Its rows'
+; area and its scrollbar are a scroller's nodes, as widget.l0 names
+; them, PREFIX.scroll and PREFIX.scrollbar. Cells are widgets of their
+; own: text, numbers, level bars, statuses, and an icon with text, each
+; with the key it sorts by.
 
 ; A column: its title, its width, or 0 to share the room left over, how
 ; its cells and title are aligned, and whether it sorts.
@@ -28,7 +34,8 @@
 
 ; Which column the rows are sorted by, -1 for none, and whether
 ; descending; the selected row's key, "" for none; and the first row
-; shown.
+; shown, as scrolling and the keys left it; the layout shows it, or the
+; last that can be first if it is past that.
 (data UiGridState (UiGridState int bool (list int) int))
 
 (def ui_grid_state_new () UiGridState (UiGridState -1 false "" 0))
@@ -88,14 +95,17 @@
 (def ui_grid_action ((s UiGridState) (prefix (list int)) (action (list int))) UiGridState
   (let sort_p (append prefix ".sort.")
     (let sel_p (append prefix ".select.")
-      (match s
-        ((UiGridState col desc sel first)
-          (if (starts_with action sort_p)
-              (let n (int_prefix (drop_n action (length sort_p)) 0)
-                (if (eq n col) (UiGridState col (not desc) sel first) (UiGridState n false sel first)))
-              (if (starts_with action sel_p)
-                  (UiGridState col desc (drop_n action (length sel_p)) first)
-                  s)))))))
+      (let to_p (append prefix ".scrollto.")
+        (match s
+          ((UiGridState col desc sel first)
+            (if (starts_with action sort_p)
+                (let n (int_prefix (drop_n action (length sort_p)) 0)
+                  (if (eq n col) (UiGridState col (not desc) sel first) (UiGridState n false sel first)))
+                (if (starts_with action sel_p)
+                    (UiGridState col desc (drop_n action (length sel_p)) first)
+                    (if (starts_with action to_p)
+                        (UiGridState col desc sel (int_prefix (drop_n action (length to_p)) 0))
+                        s)))))))))
 
 ; Linux's codes for the keys that move the selection.
 (def ui_key_up () int 103)
@@ -106,20 +116,24 @@
 (def ui_key_end () int 107)
 
 ; The state after a key: the selection moved, among the rows as shown,
-; page rows at a time for Page Up and Page Down. A key that does not move
-; it leaves it.
-(def ui_grid_key ((g UiGridView) (code int) (page int)) UiGridState
+; a page at a time for Page Up and Page Down, a row fewer than show, and
+; scrolled from where sc says the grid is just enough to show it. A key
+; that does not move it leaves it. Before the grid is laid out, sc is
+; ui_no_scroller, and a page is a row.
+(def ui_grid_key ((g UiGridView) (code int) (sc UiScroller)) UiGridState
   (match g
     ((UiGridView prefix cols rows s)
       (let shown (ui_grid_shown rows s)
         (let n (length shown)
-          (match s
-            ((UiGridState col desc sel first)
-              (let i (ui_index_of_key shown sel 0)
-                (let j (ui_moved i n code page)
-                  (if (if (lt j 0) true (eq n 0))
-                      s
-                      (UiGridState col desc (ui_row_key (ui_nth shown j (UiRow "" (nil UiCell)))) first)))))))))))
+          (match sc
+            ((UiScroller at most vis)
+              (match s
+                ((UiGridState col desc sel first)
+                  (let j (ui_moved (ui_index_of_key shown sel 0) n code (max 1 (sub vis 1)))
+                    (if (if (lt j 0) true (eq n 0))
+                        s
+                        (UiGridState col desc (ui_row_key (ui_nth shown j (UiRow "" (nil UiCell))))
+                                     (if (gt vis 0) (ui_grid_first at j n vis) first)))))))))))))
 
 (def ui_index_of_key ((rows (list UiRow)) (k (list int)) (i int)) int
   (if (is_empty rows) -1 (if (eq (ui_row_key (head rows)) k) i (ui_index_of_key (tail rows) k (add i 1)))))
@@ -177,8 +191,9 @@
 
 ; --------------------------------------------------------------- layout
 
-; The grid in r: its ground, its header, the rows that fit, and the
-; scrollbar if not all do.
+; The grid in r: its ground, its header, the area the wheel scrolls, the
+; rows that fit from the first the state asks for, and the scrollbar if
+; not all fit.
 (def ui_grid_lay ((g UiGridView) (r UiRect) (st UiState) (acc (list UiNode))) (list UiNode)
   (match g
     ((UiGridView prefix cols rows s)
@@ -190,14 +205,23 @@
                 (let vis (ui_grid_visible (ui_rh r))
                   (match s
                     ((UiGridState col desc sel first)
-                      (let f (ui_grid_first first (ui_index_of_key shown sel 0) n vis)
+                      (let f (ui_grid_first first -1 n vis)
                         (let a0 (ui_leaf r (cons (UiPFill r gbg) (nil UiPaint)) acc)
                           (let a1 (ui_header_cells prefix cols ws col desc (ui_rx r) (ui_ry r) 0 st gbg a0)
                             (let a2 (ui_leaf r (cons (UiPFill (UiRect (ui_rx r) (sub (add (ui_ry r) (ui_grid_header_h)) 1) (ui_rw r) 1)
                                                               (ui_border style gbg)) (nil UiPaint)) a1)
                               (let a3 (ui_grid_rows prefix cols ws (ui_drop shown f) sel (ui_rx r) (ui_rw r)
-                                                    (add (ui_ry r) (ui_grid_header_h)) vis st gbg a2)
-                                (ui_scrollbar r n vis f style gbg a3)))))))))))))))))
+                                                    (add (ui_ry r) (ui_grid_header_h)) vis st gbg (ui_scroll_area prefix r n vis f a2))
+                                (ui_scrollbar prefix r n vis f st gbg a3)))))))))))))))))
+
+; The node of the area under the header that the wheel scrolls, beneath
+; the rows, so that they still take presses; none if no row fits.
+(def ui_scroll_area ((prefix (list int)) (r UiRect) (n int) (vis int) (first int) (acc (list UiNode))) (list UiNode)
+  (if (le vis 0)
+      acc
+      (cons (UiNode (UiRect (ui_rx r) (add (ui_ry r) (ui_grid_header_h)) (ui_rw r) (sub (ui_rh r) (ui_grid_header_h)))
+                    (nil UiPaint) (ui_scroll_area_action prefix first (max 0 (sub n vis)) vis) false)
+            acc)))
 
 (def (ui_drop T) ((xs (list T)) (n int)) (list T)
   (if (if (le n 0) true (is_empty xs)) xs (ui_drop (tail xs) (sub n 1))))
@@ -272,14 +296,29 @@
                                      (max 0 (sub (ui_rw cr) (add (ui_icon_size) (ui_space_s)))) (ui_rh cr)) s (UiStart) fg false 1)
                     (nil UiPaint)))))))
 
-; The overlay scrollbar's slider, along the right of the rows, when n
-; rows are more than the vis that fit.
-(def ui_scrollbar ((r UiRect) (n int) (vis int) (first int) (style UiStyle) (gbg int) (acc (list UiNode))) (list UiNode)
+; The overlay scrollbar, when n rows are more than the vis that fit: a
+; strip along the right of the rows, on top of them, that takes the
+; pointer, and in it the slider, as long as the share of the rows shown
+; and as far down as first is of the most it can be. It is wider and
+; darker while the pointer is over the strip or drags it.
+(def ui_scrollbar ((prefix (list int)) (r UiRect) (n int) (vis int) (first int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
   (if (if (le n vis) true (le vis 0))
       acc
       (let top (add (ui_ry r) (ui_grid_header_h))
         (let track (mul vis (ui_row_h))
-          (let sh (max 24 (div (mul track vis) n))
-            (let sy (add top (div (mul (sub track sh) first) (sub n vis)))
-              (let sr (UiRect (sub (add (ui_rx r) (ui_rw r)) 9) (add sy 2) 6 (sub sh 4))
-                (ui_leaf sr (cons (UiPRound sr 3 (ui_mix (ui_fg style) gbg 40) -1) (nil UiPaint)) acc))))))))
+          (let sh (max (ui_slider_min) (div (mul track vis) n))
+            (let most (sub n vis)
+              (let span (sub track sh)
+                (let right (add (ui_rx r) (ui_rw r))
+                  (let active (ui_scrollbar_active prefix st)
+                    (let sw (if active (ui_slider_wide) (ui_slider_w))
+                      (let sr (UiRect (sub right (add (ui_slider_margin) sw)) (add (ui_slider_top top first most span) 2) sw (sub sh 4))
+                        (cons (UiNode (UiRect (sub right (ui_scrollbar_hit_w)) top (ui_scrollbar_hit_w) track)
+                                      (cons (UiPRound sr (div sw 2) (ui_slider_fg (ui_st_style st) gbg active) -1) (nil UiPaint))
+                                      (ui_scrollbar_action prefix first most span sh) false)
+                              acc))))))))))))
+
+; Whether the pointer is over the grid's scrollbar, or drags its slider.
+(def ui_scrollbar_active ((prefix (list int)) (st UiState)) bool
+  (let p (append prefix ".scrollbar.")
+    (if (starts_with (ui_st_hover st) p) true (starts_with (ui_st_pressed st) p))))

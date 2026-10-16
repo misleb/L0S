@@ -285,7 +285,7 @@ and does not build: run `make initramfs` or `make screen-initramfs` first.
 | `ps`, `windows` | `ps` and `run windows` at the serial shell, parsed |
 | `screenshot`, `pixels` | the screen, or part of it, as a PNG, by QMP's `screendump`; the exact colors of pixels |
 | `type_keys`, `press_keys` | text, or combinations such as `ctrl-c`, on the virtio keyboard, so to the front window |
-| `move`, `click`, `drag` | the virtio tablet, in screen pixels |
+| `move`, `click`, `drag`, `scroll` | the virtio tablet, in screen pixels, and its scroll wheel |
 
 Everything the serial line shows is also kept in `build/mcp/serial.out`.
 
@@ -451,6 +451,10 @@ Input:
   where x and y may be negative. When the pointer leaves a window, its
   client gets a leave notice (`leave_notice` in
   [user/lib/l0s.l0](user/lib/l0s.l0)).
+- **The scroll wheel** goes, as a `WheelEvent` relative to the window, to
+  the window the pointer would go to: the one whose content it is over,
+  or the one holding it since a press. It counts steps, down and right
+  positive, three rows a step in the toolkit's grid.
 - **The front window changing** is told to both clients with a focus
   notice (`focus_notice`), so a client can draw itself in the backdrop.
 - **A left press on the close button**, the round button at a title
@@ -740,12 +744,12 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 | `nap` | sleeps for N ms and checks that the time passed |
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, and builds its backing from the layers' buffers, so the host composes the screen. It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts |
-| `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons. With no such device on the board it says so on stderr and exits 0 |
+| `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, and serves `compositor`. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round` and `button`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
-| `procmon` | the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
+| `procmon` | the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 
 The libraries in `user/lib/` are linked into every program
@@ -754,7 +758,7 @@ Makefile's `LIBS_` lists:
 
 | Library | What it holds | Linked into |
 |---|---|---|
-| [l0s.l0](user/lib/l0s.l0) | the call wrappers; requests; `KeyEvent`, `PointerEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register | every program |
+| [l0s.l0](user/lib/l0s.l0) | the call wrappers; requests; `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register | every program |
 | [tty.l0](user/lib/tty.l0) | a terminal's line editing and protocol | every program |
 | [virtio.l0](user/lib/virtio.l0) | the transports' registers, finding a device by ID, negotiating, setting up a queue, and descriptors | every program |
 | [render.l0](user/lib/render.l0) | drawing into a buffer of pixels: shapes, the font, PPM images, the wallpaper, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets` |
@@ -863,6 +867,21 @@ are from `run windows` at the serial shell. Then:
 - a click on the second row, through QMP: the press and release go
   through `wm` to the window, and the row is tinted with the accent and
   End Process turns red.
+
+[tests/procmon.sh](tests/procmon.sh) boots the screen initramfs, types
+`run procmon &`, and learns where the monitor's window is. Then, by
+screendump:
+- its header bar, its toolbar, the grid's header, End Process faded, and
+  its own row, the seventh, with no eighth;
+- after `run nap 600000 &`, nap's row, read again with nothing pressed;
+- a click on it, selecting it, then on End Process, which ends it: its
+  row gone, and `ps` listing no `nap`;
+- after six more naps, thirteen rows, more than the ten that fit, and
+  the overlay scrollbar's slider at the top;
+- a step of the scroll wheel, through QMP, over the rows: scrolled to the
+  end, the slider there, and the row now under the pointer tinted;
+- the pointer on the scrollbar's strip: the slider wider and darker;
+  then the slider dragged back up, and the rows at the top again.
 
 Every boot is killed after a minute by [tools/deadline](tools/deadline),
 since macOS has no `timeout`. `tests/e2e.sh` also builds three raw programs

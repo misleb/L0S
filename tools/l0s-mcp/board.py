@@ -107,6 +107,18 @@ def button(down, which="left"):
     return [{"type": "btn", "data": {"down": down, "button": which}}]
 
 
+def wheel(dx, dy):
+    """The input events of turning the wheel dy steps down, toward the end
+    of what is shown, and dx right; negative is up and left. QEMU's tablet
+    reports each press of a wheel button as a step of REL_WHEEL or
+    REL_HWHEEL."""
+    steps = []
+    for n, plus, minus in ((dy, "wheel-down", "wheel-up"), (dx, "wheel-right", "wheel-left")):
+        for _ in range(abs(n)):
+            steps += button(True, plus if n > 0 else minus) + button(False, plus if n > 0 else minus)
+    return steps
+
+
 # Pictures ---------------------------------------------------------------
 
 def parse_ppm(data):
@@ -555,6 +567,14 @@ class Board:
         self.move(x, y)
         self.events(button(True, which))
         self.events(button(False, which))
+
+    def scroll(self, x, y, dy, dx=0):
+        """Turns the wheel with the pointer at x, y, a step at a time."""
+        self.move(x, y)
+        for i in range(abs(dy)):
+            self.events(wheel(0, 1 if dy > 0 else -1))
+        for i in range(abs(dx)):
+            self.events(wheel(1 if dx > 0 else -1, 0))
 
     def drag(self, x0, y0, x1, y1, steps=8, which="left"):
         self.move(x0, y0)

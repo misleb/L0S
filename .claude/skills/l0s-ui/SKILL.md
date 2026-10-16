@@ -66,7 +66,15 @@ display. This is the working summary, with the rules.
   `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`). `ui_layout widget rect
   state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them;
   `ui_hit nodes x y` gives the action under a point.
-- **`grid.l0`**: the data grid, typed cells, sorting, selection, keys.
+- **`grid.l0`**: the data grid, typed cells, sorting, selection, keys,
+  the wheel, and an overlay scrollbar whose slider drags.
+- **Scrollers** (`widget.l0`): a widget that scrolls keeps how it is
+  scrolled in its nodes' actions, `NAME.scroll.FIRST.MOST.SHOWN` for its
+  area and `NAME.scrollbar.FIRST.MOST.SPAN.SLIDER` for its scrollbar's
+  strip, since the view cannot write state. `ui_route` reads them for the
+  wheel and drags and sets off `NAME.scrollto.N`; keys that move a
+  selection take `ui_win_scroller w NAME` to scroll it into view. The
+  layout does not keep a selection in view by itself.
 - **Actions, not callbacks.** L0 has no function values, so a widget that
   does something carries an action name, as GActions are named:
   `"app.refresh"`, `"procs.sort.2"`, `"procs.select.6"`, `"win.close"`.
@@ -86,7 +94,8 @@ from `user/widgets/widgets.l0`:
 ```
 
 Events are `UiKey`, `UiPress`, `UiRelease`, `UiMotion` (window coordinates),
-`UiLeave`, `UiFocus front`, `UiExit pid status` and `UiOther`. A window that
+`UiLeave`, `UiFocus front`, `UiScroll x y dx dy` (the wheel, in steps, down
+and right positive), `UiExit pid status` and `UiOther`. A window that
 must also refresh on a timer polls instead (`user/procmon/procmon.l0`: a
 `port_try_receive`, and an idle branch that sleeps). Linking a window needs
 `UI_CORE`, `UI_WINDOW` and `WMLIB` (`LIBS_widgets`).
@@ -131,7 +140,11 @@ driver composes them.
   to the content, to the window whose content it is in, or to the one a press
   in its content grabbed until every button is up, with a leave notice when
   it goes. A title bar press raises and starts a drag; the close button kills
-  the client (`close_pressed`); the frame and content raise.
+  the client (`close_pressed`); the frame and content raise. The wheel
+  (`wheeled`) goes to the window the pointer would. The tablet's driver
+  sends a report's `WheelEvent` before its `PointerEvent`, so a client has
+  scrolled before the pointer's next place is hit-tested, and the hover
+  shows what is under the pointer now.
 - **Drags** move the window on every event but rebuild the screen only once
   `drag_ns` (20 ms) has passed since the last rebuild *ended*. Timing from
   its start made every queued event rebuild once more, and the window fell
