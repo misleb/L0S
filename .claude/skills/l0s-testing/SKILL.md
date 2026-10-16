@@ -119,6 +119,20 @@ Their helpers, copied in each script:
   to show what is beneath.
 - `vt.sh` relies on pids from the demo's inittab (`vt=$((6 + ...))`).
 
+## Trying things on a running board: the l0s MCP server
+
+To look at a change before writing a screen test for it, or to find out
+why one fails, use the `l0s` MCP server's tools (`tools/l0s-mcp`, set up by
+`make mcp`, run by `.mcp.json`) rather than copying the helpers above into
+a scratch script. `boot` (`demo`, `screen`, or an `etc` directory), then
+`shell` for commands at the serial shell, `ps` and `windows` parsed,
+`screenshot` and `pixels` for the screen, `type_keys`/`press_keys` for the
+keyboard and `click`/`drag`/`move` for the tablet. It does not build:
+`make initramfs` (or `screen-initramfs`) first, and boot again after.
+The windows' shells come up after the serial shell's prompt, so look at
+the screen before typing into a window. It is for exploring; what must
+keep working still goes in a test.
+
 ## Timing or debugging on the board
 
 - **Print from a process**: `write_err`, then `file_flush (IoFile 2)`.

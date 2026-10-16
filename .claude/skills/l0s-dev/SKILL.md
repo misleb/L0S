@@ -34,7 +34,7 @@ the `;` comment block directly above each form, so write yours that way
 | `user/lib/` | linked into programs: `l0s.l0` (call wrappers, `request`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `tty.l0`, `virtio.l0` in every program; `render.l0`, `display.l0`, `wm.l0`, `clock.l0` and `ui/` only where a `LIBS_` list says |
 | `user/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`). Becomes `/bin/NAME` |
 | `demo/etc/` | the demo's `inittab`, `motd`; `tests/screen/etc/` the screen tests' |
-| `tools/` | `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets), `mkinitramfs`, `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`) |
+| `tools/` | `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets), `mkinitramfs`, `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 

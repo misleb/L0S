@@ -12,6 +12,9 @@
 #   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
 #                    L0's: every name, or Q a name, a file's stem, or text
+#   make mcp         build/mcp/venv, the Python with the MCP SDK that
+#                    .mcp.json runs tools/l0s-mcp in: the MCP server
+#                    that boots and drives L0S for agents
 #
 # Images for the board are linked in Docker, as l0 does when L0_VIRT_LD
 # is unset.
@@ -70,7 +73,7 @@ DOC_SRCS := common/abi.l0 common/initramfs.l0 common/queue.l0 $(filter-out $(COM
             user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0 \
             $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(UI_CORE) $(UI_WINDOW)
 
-.PHONY: all check test test-virt e2e images initramfs screen-initramfs boot demo clean sample doc
+.PHONY: all check test test-virt e2e images initramfs screen-initramfs boot demo clean sample doc mcp
 
 all: check test test-virt e2e
 
@@ -108,6 +111,7 @@ test: sample
 	$(foreach p,$(PROGRAMS),$(L0) test $(ULIB) $(LIBS_$(p)) user/$(p)/$(p).l0 user/$(p)/$(p)_test.l0 && ) true
 	$(L0) test $(MKSPLASH) tools/mksplash/mksplash_test.l0
 	$(L0) test $(L0SDOC) tools/l0sdoc/l0sdoc_test.l0
+	python3 tools/l0s-mcp/test_board.py
 
 test-virt:
 	$(L0) test --target virt $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
@@ -134,6 +138,15 @@ $(BUILD)/l0sdoc: $(L0SDOC) tools/l0sdoc/main.l0 | $(BUILD)
 
 doc: $(BUILD)/l0sdoc
 	@$(BUILD)/l0sdoc "$(Q)" $(DOC_SRCS)
+
+# The MCP server's Python, with the SDK its requirements name.
+MCP_VENV := $(BUILD)/mcp/venv
+$(MCP_VENV)/.installed: tools/l0s-mcp/requirements.txt
+	python3 -m venv $(MCP_VENV)
+	$(MCP_VENV)/bin/pip install -q -r tools/l0s-mcp/requirements.txt
+	touch $@
+
+mcp: $(MCP_VENV)/.installed
 
 # demo/etc, the splash, and the console font, staged together as the
 # archive's /etc.

@@ -266,6 +266,29 @@ with `L0_QEMU_ARGS`. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
 QMP on sockets, as the screen tests do, to type keys, move the pointer,
 and dump the screen.
 
+### Driving L0S from an agent
+
+[tools/l0s-mcp](tools/l0s-mcp) is an MCP server that boots L0S through
+`tools/qemu-boot.sh` and drives it as the screen tests do, for an agent
+to debug and test a running system. It runs on this machine, not on the
+board, so it outlives a kernel that panics or hangs and can boot again.
+`make mcp` makes its Python, `build/mcp/venv`, with the MCP SDK; the
+project's [.mcp.json](.mcp.json) runs it. It boots one board at a time
+and does not build: run `make initramfs` or `make screen-initramfs` first.
+
+| Tool | Does |
+|---|---|
+| `boot` | boots `demo`, `screen`, a `.cpio`, or an `etc` directory packed with every program in `build/bin`, and waits for the serial shell's prompt |
+| `shutdown`, `status` | stops the board, by `exit` or by killing QEMU; whether it runs, its exit status, QEMU's stderr |
+| `shell` | types a command at the serial shell and returns what it printed before the next prompt |
+| `serial_send`, `serial_read` | types anything at the serial line, Ctrl-C included; what it showed since last read, waiting for a pattern |
+| `ps`, `windows` | `ps` and `run windows` at the serial shell, parsed |
+| `screenshot`, `pixels` | the screen, or part of it, as a PNG, by QMP's `screendump`; the exact colors of pixels |
+| `type_keys`, `press_keys` | text, or combinations such as `ctrl-c`, on the virtio keyboard, so to the front window |
+| `move`, `click`, `drag` | the virtio tablet, in screen pixels |
+
+Everything the serial line shows is also kept in `build/mcp/serial.out`.
+
 ### Terminals
 
 A terminal is a port that edits typed keys into lines and writes what it is
@@ -744,7 +767,7 @@ Makefile's `LIBS_` lists:
 
 | Command | What it runs |
 |---|---|
-| `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive |
+| `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), and the process monitor (`tests/procmon.sh`) |
 
