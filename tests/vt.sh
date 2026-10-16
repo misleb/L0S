@@ -178,8 +178,9 @@ typekeys "echo hi"
 # h's stem, column 1, its middle, on row 8: the text's color.
 shows "echo hi typed and answered in $f_title" "$((f_x + edge + 1)) $((f_y + bar + 8 * 16 + 8)) $ink"
 
-# vt1 and vt2 are pids 7 and 8, as the inittab starts them, and each
-# starts its own shell, which ps shows as its child.
+# vt1 and vt2 are pids 7 and 8: the inittab starts them in that order,
+# and each names itself first thing. Each starts its own shell, which ps
+# shows as its child.
 vt=$((6 + ${f_title#vt}))
 typekeys "run nap 30000 &"
 sleep 2

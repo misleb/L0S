@@ -73,7 +73,7 @@ output and error are its. The demo's [inittab](demo/etc/inittab) starts:
 | 4 | `virtio-input keyboard` | the keyboard driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 5 | `virtio-input tablet` | the pointer's driver. It serves `pointer`, telling `wm` where the pointer is and what its buttons do |
 | 6 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 7, 8 | `vt vt1`, `vt vt2` | the windows' terminals. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 7, 8 | `vt`, `vt` | the windows' terminals, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
 | 9 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
 | 10, 11 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not the inittab, in whichever order the two get there. A shell's `exit` ends its `vt` too, and closes its window |
 
@@ -302,8 +302,8 @@ and says what a terminal takes, each a request (`request` in `l0s.l0`):
 | `request REPLY "p"` | sends REPLY `tty` at once, so REPLY learns the terminal's pid, the sender, to watch |
 | `request 0 ("w" ++ BYTES)` | writes BYTES; no reply |
 
-`uart` is one, as `console`, and each `vt` another, as the name it is
-given: `vt1` and `vt2` in the demo.
+`uart` is one, as `console`, and each `vt` another, as the first of
+`vt1`, `vt2`, and so on that is free: `vt1` and `vt2` in the demo.
 
 A process's terminal is its standard input, output and error. `sh TTY`
 finds the terminal named TTY, `console` unless given, sets it as its own
@@ -749,7 +749,7 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 |---|---|
 | `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; lists files, runs programs by name or path, on its terminal, and waits for them, with Ctrl-C for the foreground job; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
-| `vt` | a terminal in a window, `vt [NAME] [COLS ROWS]`, 80×24 unless given. It registers as NAME, `vt` unless given, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font, in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
+| `vt` | a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font, in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
 | `cat` | writes the files its arguments name, through the ordinary `open_in`; reports each it can't read, and exits 1 if any |
 | `hello` | prints its pid and arguments, and answers a line: typed at its terminal, with `console_line` |
 | `init` | starts the programs its arguments name (`NAME&` runs one in the background), waits for the rest, and reports each one's status |

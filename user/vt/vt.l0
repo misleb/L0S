@@ -4,12 +4,13 @@
 ; buffer in the font's 8 by 16 cells, light on a dark ground, scrolling up
 ; a line at the bottom.
 ;
-;   vt [NAME] [COLS ROWS]   NAME, vt unless given, is both its title and
-;                           the terminal's name. 80 by 24 cells unless
-;                           given
+;   vt [COLS ROWS]          80 by 24 cells unless given
 ;
-; It registers as NAME, a terminal as user/lib/tty.l0 says, the same as
-; uart's console: "r" for a line, "i" for Ctrl-C notices, "w" to write.
+; It names itself, as it starts, the first of vt1, vt2, and so on that no
+; one has registered, and registers as NAME, which is also its title: a
+; terminal as user/lib/tty.l0 says, the same as uart's console: "r" for
+; a line, "i" for Ctrl-C notices, "w" to write. It registers before
+; anything else, so vts the inittab starts take their names in order.
 ; Once its window is open it starts its own shell, sh NAME, on it, and
 ; when the shell exits, closes the window and exits with its status.
 ; Its buffer is memory it shares with the compositor, which never copies
@@ -131,25 +132,56 @@
 (def complain ((why (list int))) int
   (let w (write_err (append "vt: " (append why "\n"))) 1))
 
-(def vt_name ((argv (list (list int)))) (list int)
-  (if (is_empty argv) "vt" (head argv)))
+; The name of terminal i: vt1 for 1.
+(def vt_name ((i int)) (list int) (append "vt" (digits i)))
 
-; The columns and rows the arguments after the name give, or 80 by 24.
+; The most names vt tries: as many as there can be processes.
+(def vt_names () int (max_procs))
+
+; What naming the terminal came to: the name it registered as, or why it
+; has none.
+(data VtName (VtNamed (list int)) (VtUnnamed (list int)))
+
+; port registered as the first free name from vt_name i on: one taken
+; means the next is tried, up to vt_names of them.
+(def vt_register ((port int) (i int)) VtName
+  (match (name_register port (vt_name i))
+    ((Registered) (VtNamed (vt_name i)))
+    ((RegisterTaken)
+      (if (ge i (vt_names))
+          (VtUnnamed (append "every name from vt1 to " (append (vt_name i) " is taken")))
+          (vt_register port (add i 1))))
+    ((RegisterNoPort) (VtUnnamed (vt_unregistered (RegisterNoPort))))
+    ((RegisterTooLong) (VtUnnamed (vt_unregistered (RegisterTooLong))))))
+
+; Why vt could not register, as name_register answered r.
+(def vt_unregistered ((r Registration)) (list int)
+  (append "cannot register: " (registration_why r)))
+
+; The columns and rows the arguments give, or 80 by 24.
 (def vt_cells ((argv (list (list int)))) Term
-  (if (lt (length argv) 3)
+  (if (lt (length argv) 2)
       (Term 0 0 80 24)
-      (Term 0 0 (max 8 (min 158 (int_prefix (head (tail argv)) 0)))
-                (max 2 (min 46 (int_prefix (head (tail (tail argv))) 0))))))
+      (Term 0 0 (max 8 (min 158 (int_prefix (head argv) 0)))
+                (max 2 (min 46 (int_prefix (head (tail argv)) 0))))))
 
 (def vt () int
+  (let port (port_new)
+    (match (vt_register port 1)
+      ((VtUnnamed why) (complain why))
+      ((VtNamed name) (named name port)))))
+
+; The terminal, registered as name on port: its font loaded, and its
+; window made.
+(def named ((name (list int)) (port int)) int
   (let font (load_font (font_path))
     (if (eq (array_len font) 0)
         (complain "no font")
         (match (compositor_open)
           ((NoCompositor why) (let w (write_err (append "vt: " (append why "\n"))) 0))
-          ((Compositor port rp pid) (with_buffer (Compositor port rp pid) font (vt_cells (args))))))))
+          ((Compositor cp rp pid) (with_buffer (Compositor cp rp pid) font (vt_cells (args)) name port))))))
 
-(def with_buffer ((c Compositor) (font (array int)) (t Term)) int
+(def with_buffer ((c Compositor) (font (array int)) (t Term) (name (list int)) (port int)) int
   (match t
     ((Term col row cols rows)
       (let w (mul cols (cell_w))
@@ -158,20 +190,7 @@
             ((UiNoBuf why) (complain (append "no memory for the window: " why)))
             ((UiBuf va n canvas)
               (let k (fill_rect canvas 0 0 w h (ground))
-                (windowed c font t canvas va n)))))))))
-
-(def windowed ((c Compositor) (font (array int)) (t Term) (canvas Canvas) (va int) (n int)) int
-  (let name (vt_name (args))
-    (let port (port_new)
-      (match (name_register port name)
-        ((Registered) (registered c font t canvas va n name port))
-        ((RegisterNoPort) (unregistered name (RegisterNoPort)))
-        ((RegisterTaken) (unregistered name (RegisterTaken)))
-        ((RegisterTooLong) (unregistered name (RegisterTooLong)))))))
-
-; Fails, as name_register answered r.
-(def unregistered ((name (list int)) (r Registration)) int
-  (complain (append "cannot register as " (append name (append ": " (registration_why r))))))
+                (registered c font t canvas va n name port)))))))))
 
 ; The terminal, registered as name on port: its window opened and its
 ; shell started.
