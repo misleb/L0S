@@ -1,0 +1,123 @@
+; mounts.l0 -- the mount table: where each path's files are. The first
+; mount is always the initramfs, at /, which the kernel answers for
+; itself; after it, each volume a file server mounted, at /Volumes/LABEL,
+; whose calls the kernel sends that server's port. Pure: ipc.l0 keeps the
+; table beside the names, so a server's mounts go with its ports.
+;
+; /Volumes itself is a directory that is always there, holding only the
+; volumes: nothing can be made in it, only in a volume.
+
+; A mount: the initramfs at /, or a server's volume, its label and port.
+(data Mount (MountRoot) (MountServer (list int) int))
+
+; The table at boot: the initramfs alone.
+(def mounts_new () (list Mount) (cons (MountRoot) (nil Mount)))
+
+; Where the volumes are mounted.
+(def volumes_dir () (list int) "/Volumes")
+
+; Where m is mounted.
+(def mount_path ((m Mount)) (list int)
+  (match m
+    ((MountRoot) "/")
+    ((MountServer label port) (append (volumes_dir) (cons 47 label)))))
+
+; The port m's calls go to, 0 for the kernel's own.
+(def mount_port ((m Mount)) int
+  (match m ((MountRoot) 0) ((MountServer label port) port)))
+
+; Whether s may label a volume: 1 to 15 letters, digits, - and _.
+(def mount_label_ok ((s (list int))) bool
+  (if (if (is_empty s) true (gt (length s) 15)) false (label_chars s)))
+
+(def label_chars ((s (list int))) bool
+  (if (is_empty s)
+      true
+      (let c (head s)
+        (if (if (is_lower c) true (if (is_upper c) true (if (is_digit c) true (any_eq c "-_"))))
+            (label_chars (tail s))
+            false))))
+
+; ----------------------------------------------------------------- where
+
+; Where an absolute path's file is: the initramfs's; /Volumes itself; a
+; mounted volume's, and its server's port; or in no volume, either
+; straight in /Volumes (true), where nothing can be made, or in a volume
+; that is not mounted (false).
+(data Where (InRoot) (InVolumes) (InServer int) (InNothing bool))
+
+(def mount_where ((ms (list Mount)) (path (list int))) Where
+  (if (eq path (volumes_dir))
+      (InVolumes)
+      (if (not (starts_with path "/Volumes/"))
+          (InRoot)
+          (let rest (drop_n path 9)
+            (let label (up_to_slash rest)
+              (let port (mount_port_of ms label)
+                (if (gt port 0)
+                    (InServer port)
+                    (InNothing (eq (length label) (length rest))))))))))
+
+; s up to its first /.
+(def up_to_slash ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head s) 47) (nil int) (cons (head s) (up_to_slash (tail s))))))
+
+; The port the volume label is mounted from, or 0.
+(def mount_port_of ((ms (list Mount)) (label (list int))) int
+  (if (is_empty ms)
+      0
+      (match (head ms)
+        ((MountRoot) (mount_port_of (tail ms) label))
+        ((MountServer l port) (if (eq l label) port (mount_port_of (tail ms) label))))))
+
+; Where a rename from a to b goes: 0 to the kernel, both being in the
+; initramfs; a server's port, both being in its volumes; or the answer, a
+; code. From nowhere is -3, and from /Volumes itself -4; to /Volumes is
+; -8, a directory; to straight in /Volumes -4, where nothing is made, and
+; to a volume not mounted -9; and between the initramfs and a volume, or
+; two servers, -10, another file system.
+(def rename_route ((a Where) (b Where)) int
+  (match a
+    ((InNothing direct) -3)
+    ((InVolumes) -4)
+    ((InRoot) (rename_to b 0))
+    ((InServer port) (rename_to b port))))
+
+(def rename_to ((b Where) (from int)) int
+  (match b
+    ((InVolumes) -8)
+    ((InNothing direct) (if direct -4 -9))
+    ((InRoot) (if (eq from 0) 0 -10))
+    ((InServer port) (if (eq port from) port -10))))
+
+; ------------------------------------------------------------- changing
+
+; The table with a volume mounted, or why not: err_taken if its label is
+; mounted already, err_fault if it is no label.
+(data MountAdd (MountAdded (list Mount)) (MountRefused int))
+
+(def mount_add ((ms (list Mount)) (label (list int)) (port int)) MountAdd
+  (if (not (mount_label_ok label))
+      (MountRefused (err_fault))
+      (if (gt (mount_port_of ms label) 0)
+          (MountRefused (err_taken))
+          (MountAdded (append ms (cons (MountServer label port) (nil Mount)))))))
+
+; The table without the volumes of the ports in dead.
+(def mounts_without ((ms (list Mount)) (dead (list int))) (list Mount)
+  (if (is_empty ms)
+      ms
+      (match (head ms)
+        ((MountRoot) (cons (head ms) (mounts_without (tail ms) dead)))
+        ((MountServer label port)
+          (if (any_eq port dead) (mounts_without (tail ms) dead) (cons (head ms) (mounts_without (tail ms) dead)))))))
+
+; Mount i of the table, 0 the initramfs, if there is one.
+(def mounts_at ((ms (list Mount)) (i int)) (Option Mount)
+  (if (if (lt i 0) true (is_empty ms))
+      ((None Mount))
+      (if (eq i 0) (Some (head ms)) (mounts_at (tail ms) (sub i 1)))))
+
+; A mount as mount_at gives it: its port, a u32, then where it is.
+(def mount_record ((m Mount)) (list int)
+  (append (u32_le (mount_port m)) (mount_path m)))

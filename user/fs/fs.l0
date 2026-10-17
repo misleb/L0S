@@ -1,0 +1,604 @@
+; fs.l0 -- the file server. It reads the disk's partition table, mounts
+; each volume of L0S's file system on it (user/lib/l0fs.l0) at
+; /Volumes/LABEL, all from one port, and serves the fs protocol
+; (user/lib/fs.l0) there: the kernel's requests for every process's
+; calls on those files, and list, df and format from programs. It also
+; registers the port as fs, once every volume is mounted.
+;
+; Each volume's metadata is kept in memory and written back, after the
+; data, whenever it changes. A handle is the pid that opened it, which
+; fs watches, dropping its handles when it exits. The disk is reached
+; through a Store, which in tests is memory instead.
+
+; why said on standard error, and a failure.
+(def complain ((why (list int))) int
+  (let w (write_err (append "fs: " (append why "\n"))) 1))
+
+; why said, and no failure: there is nothing to serve.
+(def nothing_to_serve ((why (list int))) int
+  (let w (write_err (append "fs: " (append why "\n"))) 0))
+
+; -------------------------------------------------------------- the store
+
+; Where the sectors are: the disk, through a buffer of a cluster shared
+; with its driver; or memory, by sector, for tests.
+(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int))))
+
+; Sectors read, and the store after; or why not.
+(data Got (Got Store (list int)) (GotNot Store (list int)))
+
+; count sectors from sector, at most a cluster's.
+(def store_read ((s Store) (sector int) (count int)) Got
+  (match s
+    ((StoreMem m) (Got s (mem_sectors m sector count (nil int))))
+    ((StoreDisk d b)
+      (let why (disk_read d b sector count)
+        (if (is_empty why)
+            (Got s (disk_get b (mul count (vol_sector_size))))
+            (GotNot s why))))))
+
+; Sectors count to 1 from sector of m, onto acc: those never written are
+; zeros.
+(def mem_sectors ((m (Map int (list int))) (sector int) (count int) (acc (list int))) (list int)
+  (if (le count 0)
+      acc
+      (mem_sectors m sector (sub count 1)
+                   (append (match (map_get m (add sector (sub count 1)))
+                             ((Some bs) bs)
+                             ((None) (vol_zeros (vol_sector_size))))
+                           acc))))
+
+; Every one of count sectors from sector, a cluster's at a time.
+(def store_read_all ((s Store) (sector int) (count int)) Got
+  (store_read_from s sector count (nil int)))
+
+(def store_read_from ((s Store) (sector int) (count int) (acc (list int))) Got
+  (if (le count 0)
+      (Got s (rev acc))
+      (let k (min count (vol_cluster_sectors))
+        (match (store_read s sector k)
+          ((GotNot s2 why) (GotNot s2 why))
+          ((Got s2 bs) (store_read_from s2 (add sector k) (sub count k) (rev_onto bs acc)))))))
+
+; The store after a write, or why it failed.
+(data Put (Put Store) (PutNot Store (list int)))
+
+; bs, whole sectors, at most a cluster's, written from sector.
+(def store_write ((s Store) (sector int) (bs (list int))) Put
+  (match s
+    ((StoreMem m) (Put (StoreMem (mem_put m sector bs))))
+    ((StoreDisk d b)
+      (let p (disk_put b bs)
+        (let why (disk_write d b sector (div (length bs) (vol_sector_size)))
+          (if (is_empty why) (Put s) (PutNot s why)))))))
+
+(def mem_put ((m (Map int (list int))) (sector int) (bs (list int))) (Map int (list int))
+  (if (is_empty bs)
+      m
+      (mem_put (map_put m sector (first_of bs (vol_sector_size))) (add sector 1) (drop_n bs (vol_sector_size)))))
+
+; bs, whole sectors, written from sector, a cluster's at a time.
+(def store_write_all ((s Store) (sector int) (bs (list int))) Put
+  (if (is_empty bs)
+      (Put s)
+      (match (store_write s sector (first_of bs (vol_cluster_size)))
+        ((PutNot s2 why) (PutNot s2 why))
+        ((Put s2) (store_write_all s2 (add sector (vol_cluster_sectors)) (drop_n bs (vol_cluster_size)))))))
+
+; The first n of xs, or all of them if there are fewer.
+(def first_of ((xs (list int)) (n int)) (list int)
+  (rev (first_onto xs n (nil int))))
+
+(def first_onto ((xs (list int)) (n int) (acc (list int))) (list int)
+  (if (if (le n 0) true (is_empty xs)) acc (first_onto (tail xs) (sub n 1) (cons (head xs) acc))))
+
+; ---------------------------------------------------------------- the state
+
+; A volume served: the sector its partition starts at, and the volume.
+(data FsVol (FsVol int Vol))
+
+; An open file: the pid that opened it, its volume and directory entry,
+; where it has read or written to, and its mode, 1 to 3 as open's.
+(data Handle (Handle int int int int int))
+
+; The server: its store, its port, its volumes, the open files by handle,
+; the next handle to give, and the pids it watches.
+(data Fs (Fs Store int (array FsVol) (Map int Handle) int (list int)))
+
+; A server of vols on port, with nothing open.
+(def fs_new ((s Store) (port int) (vols (array FsVol))) Fs
+  (Fs s port vols ((MapEmpty int Handle)) 1 (nil int)))
+
+; Its volumes and handles; volume vi, and the sector its partition
+; starts at.
+(def fs_vols ((f Fs)) (array FsVol) (match f ((Fs s port vols hs next ws) vols)))
+(def fs_handles ((f Fs)) (Map int Handle) (match f ((Fs s port vols hs next ws) hs)))
+
+(def fs_vol ((f Fs) (vi int)) Vol (match (array_get (fs_vols f) vi) ((FsVol start v) v)))
+(def fs_start ((f Fs) (vi int)) int (match (array_get (fs_vols f) vi) ((FsVol start v) start)))
+
+; f with another store, or other handles.
+(def with_store ((f Fs) (s2 Store)) Fs
+  (match f ((Fs s port vols hs next ws) (Fs s2 port vols hs next ws))))
+
+(def with_handles ((f Fs) (h2 (Map int Handle))) Fs
+  (match f ((Fs s port vols hs next ws) (Fs s port vols h2 next ws))))
+
+; f with v as volume vi, in memory only.
+(def with_vol ((f Fs) (vi int) (v Vol)) Fs
+  (match f ((Fs s port vols hs next ws) (Fs s port (array_set vols vi (FsVol (fs_start f vi) v)) hs next ws))))
+
+; f with handle h open, from pid, on entry ei of volume vi; and h. pid is
+; watched from its first open, so its handles go when it exits.
+(data Opened (Opened Fs int))
+
+(def open_handle ((f Fs) (pid int) (vi int) (ei int) (mode int)) Opened
+  (match f
+    ((Fs s port vols hs next ws)
+      (let ws2 (if (any_eq pid ws) ws (watched pid port ws))
+        (Opened (Fs s port vols (map_put hs next (Handle pid vi ei 0 mode)) (add next 1) ws2) next)))))
+
+; ws, with pid if it can be watched.
+(def watched ((pid int) (port int) (ws (list int))) (list int)
+  (match (proc_watch pid port)
+    ((Watched) (cons pid ws))
+    ((WatchNoProc) ws)
+    ((WatchFull) ws)))
+
+; Handle h, if pid opened it.
+(def handle_of ((f Fs) (pid int) (h int)) (Option Handle)
+  (match (map_get (fs_handles f) h)
+    ((None) ((None Handle)))
+    ((Some x) (match x ((Handle p vi ei off mode) (if (eq p pid) (Some x) ((None Handle))))))))
+
+; Whether any handle is open on entry ei of volume vi; or, ei -1, on any
+; of vi's.
+(def is_open ((f Fs) (vi int) (ei int)) bool
+  (any_open (map_values (fs_handles f)) vi ei))
+
+(def any_open ((hs (list Handle)) (vi int) (ei int)) bool
+  (if (is_empty hs)
+      false
+      (match (head hs)
+        ((Handle p v e off mode)
+          (if (if (eq v vi) (if (eq ei -1) true (eq e ei)) false) true (any_open (tail hs) vi ei))))))
+
+; f without pid's handles, pid having exited.
+(def forget_pid ((f Fs) (pid int)) Fs
+  (match f
+    ((Fs s port vols hs next ws)
+      (Fs s port vols (drop_handles hs (map_keys hs) pid) next (drop_int ws pid)))))
+
+(def drop_handles ((hs (Map int Handle)) (keys (list int)) (pid int)) (Map int Handle)
+  (if (is_empty keys)
+      hs
+      (drop_handles (match (map_get hs (head keys))
+                      ((Some x) (match x ((Handle p vi ei off mode) (if (eq p pid) (map_remove hs (head keys)) hs))))
+                      ((None) hs))
+                    (tail keys) pid)))
+
+(def drop_int ((xs (list int)) (x int)) (list int)
+  (if (is_empty xs) xs (if (eq (head xs) x) (drop_int (tail xs) x) (cons (head xs) (drop_int (tail xs) x)))))
+
+; f with volume vi's metadata v written to the disk and kept; or as it
+; was, and -5, if the write failed.
+(data Committed (Committed Fs) (CommitFailed Fs))
+
+(def commit ((f Fs) (vi int) (v Vol)) Committed
+  (match (store_write_all (match f ((Fs s port vols hs next ws) s)) (fs_start f vi) (vol_meta v))
+    ((Put s2) (Committed (with_vol (with_store f s2) vi v)))
+    ((PutNot s2 why) (CommitFailed (with_store f s2)))))
+
+; ---------------------------------------------------------------- paths
+
+; Where a path is: a file's name in volume vi, volume vi itself, or
+; nothing of fs's, and the code that says so.
+(data Target (TFile int (list int)) (TVolume int) (TNone int))
+
+; The target path names, writing or not: nothing past /Volumes/LABEL is a
+; volume of fs's, -3 or, to write, -9; nor a name with a / in it.
+(def target ((f Fs) (path (list int)) (writing bool)) Target
+  (let missing (if writing -9 -3)
+    (if (not (starts_with path "/Volumes/"))
+        (TNone missing)
+        (let rest (drop_n path 9)
+          (let label (up_to_slash rest)
+            (let vi (vol_index (fs_vols f) label 0)
+              (if (lt vi 0)
+                  (TNone missing)
+                  (let name (drop_n rest (add (length label) 1))
+                    (if (is_empty name)
+                        (TVolume vi)
+                        (if (any_eq 47 name) (TNone missing) (TFile vi name)))))))))))
+
+(def up_to_slash ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head s) 47) (nil int) (cons (head s) (up_to_slash (tail s))))))
+
+; The volume of vols labelled label, from i, or -1.
+(def vol_index ((vols (array FsVol)) (label (list int)) (i int)) int
+  (if (ge i (array_len vols))
+      -1
+      (match (array_get vols i)
+        ((FsVol start v) (if (eq (vol_label v) label) i (vol_index vols label (add i 1)))))))
+
+; ------------------------------------------------------------- answering
+
+; f after a request, and its reply: the word and the bytes after it.
+(data Answered (Answered Fs int (list int)))
+
+(def word ((f Fs) (w int)) Answered (Answered f w (nil int)))
+
+; What the request body from pid asks done.
+(def obey ((f Fs) (pid int) (body (list int))) Answered
+  (let op (up_to_space body)
+    (let rest (drop_n body (add (length op) 1))
+      (if (eq op "write")
+          (obey_write f pid rest)
+          (obey_words f pid op (split_spaces rest))))))
+
+(def up_to_space ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head s) 32) (nil int) (cons (head s) (up_to_space (tail s))))))
+
+; write H BYTES: the handle, then every byte after its space.
+(def obey_write ((f Fs) (pid int) (rest (list int))) Answered
+  (let h (up_to_space rest)
+    (if (not (is_number h))
+        (word f -5)
+        (do_write f pid (int_prefix h 0) (drop_n rest (add (length h) 1))))))
+
+(def obey_words ((f Fs) (pid int) (op (list int)) (ws (list (list int)))) Answered
+  (let n (length ws)
+    (if (if (eq op "open") (eq n 2) false) (obey_open f pid (head ws) (head (tail ws)))
+    (if (if (eq op "read") (eq n 2) false) (obey_read f pid (head ws) (head (tail ws)))
+    (if (if (eq op "close") (eq n 1) false) (obey_close f pid (head ws))
+    (if (if (eq op "rename") (eq n 2) false) (do_rename f (head ws) (head (tail ws)))
+    (obey_volumes f op ws)))))))
+
+(def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
+  (if (not (eq (length ws) 1))
+      (word f -5)
+      (if (eq op "remove") (do_remove f (head ws))
+      (if (eq op "list") (do_list f (head ws))
+      (if (eq op "df") (do_df f (head ws))
+      (if (eq op "format") (do_format f (head ws))
+      (word f -5)))))))
+
+; Whether w is a decimal number: digits, at least one.
+(def is_number ((w (list int))) bool
+  (if (is_empty w) false (is_empty (skip_digits w))))
+
+(def obey_open ((f Fs) (pid int) (mode (list int)) (path (list int))) Answered
+  (let m (if (is_number mode) (int_prefix mode 0) 0)
+    (if (not (any_eq m (cons 1 (cons 2 (cons 3 (nil int))))))
+        (word f -5)
+        (do_open f pid m path))))
+
+(def obey_read ((f Fs) (pid int) (h (list int)) (n (list int))) Answered
+  (if (if (is_number h) (is_number n) false)
+      (do_read f pid (int_prefix h 0) (int_prefix n 0))
+      (word f -5)))
+
+(def obey_close ((f Fs) (pid int) (h (list int))) Answered
+  (if (not (is_number h))
+      (word f -5)
+      (match (handle_of f pid (int_prefix h 0))
+        ((None) (word f -5))
+        ((Some x) (word (with_handles f (map_remove (fs_handles f) (int_prefix h 0))) 0)))))
+
+; ------------------------------------------------------------------ open
+
+; path opened by pid in mode m: to read, a file there; to write, it
+; emptied (2) or kept (3), and made if it is not there.
+(def do_open ((f Fs) (pid int) (m int) (path (list int))) Answered
+  (match (target f path (not (eq m 1)))
+    ((TNone code) (word f code))
+    ((TVolume vi) (word f -8))
+    ((TFile vi name)
+      (if (eq m 1)
+          (open_read f pid vi (vol_find (fs_vol f vi) name))
+          (open_write f pid vi name m)))))
+
+(def open_read ((f Fs) (pid int) (vi int) (ei int)) Answered
+  (if (lt ei 0)
+      (word f -3)
+      (match (open_handle f pid vi ei 1) ((Opened f2 h) (word f2 h)))))
+
+; A name the volume cannot hold, or a full directory, is -5.
+(def open_write ((f Fs) (pid int) (vi int) (name (list int)) (m int)) Answered
+  (let v (fs_vol f vi)
+    (let ei (vol_find v name)
+      (if (ge ei 0)
+          (opened_write (if (eq m 2) (commit f vi (vol_truncate v ei)) (Committed f)) pid vi ei m)
+          (if (not (vol_name_ok name))
+              (word f -5)
+              (let free (vol_free_entry v)
+                (if (lt free 0)
+                    (word f -5)
+                    (opened_write (commit f vi (vol_create v free name)) pid vi free m))))))))
+
+(def opened_write ((c Committed) (pid int) (vi int) (ei int) (m int)) Answered
+  (match c
+    ((CommitFailed f) (word f -5))
+    ((Committed f) (match (open_handle f pid vi ei m) ((Opened f2 h) (word f2 h))))))
+
+; ------------------------------------------------------------------ read
+
+; At most n bytes of handle h, pid's, from where it is: those of one
+; cluster, read from as few sectors as hold them.
+(def do_read ((f Fs) (pid int) (h int) (n int)) Answered
+  (match (handle_of f pid h)
+    ((None) (word f -5))
+    ((Some x)
+      (match x
+        ((Handle p vi ei off mode)
+          (if (not (eq mode 1))
+              (word f -5)
+              (match (vol_read_span (fs_vol f vi) ei off (min n (sub (max_message) 4)))
+                ((None) (word f 0))
+                ((Some span) (read_span f h x span)))))))))
+
+(def read_span ((f Fs) (h int) (x Handle) (span VolSpan)) Answered
+  (match x
+    ((Handle p vi ei off mode)
+      (match span
+        ((VolSpan c at k)
+          (let s0 (div at (vol_sector_size))
+            (let count (add (sub (div (add at (sub k 1)) (vol_sector_size)) s0) 1)
+              (match (store_read (match f ((Fs s port vols hs next ws) s))
+                                 (add (vol_cluster_sector (fs_start f vi) c) s0) count)
+                ((GotNot s2 why) (word (with_store f s2) -5))
+                ((Got s2 bs)
+                  (Answered (with_handles (with_store f s2) (map_put (fs_handles f) h (Handle p vi ei (add off k) mode)))
+                            k
+                            (first_of (drop_n bs (sub at (mul s0 (vol_sector_size)))) k)))))))))))
+
+; ----------------------------------------------------------------- write
+
+; data written to handle h, pid's: from where it is, or for mode 3 at
+; the file's end; all of it, or -6 if the volume has no room.
+(def do_write ((f Fs) (pid int) (h int) (bs (list int))) Answered
+  (match (handle_of f pid h)
+    ((None) (word f -5))
+    ((Some x)
+      (match x
+        ((Handle p vi ei off mode)
+          (if (eq mode 1)
+              (word f -5)
+              (match (vol_entry (fs_vol f vi) ei)
+                ((VolNone) (word f -5))
+                ((VolFile name size first)
+                  (let at (if (eq mode 3) size (min off size))
+                    (match (vol_write (fs_vol f vi) ei at (length bs))
+                      ((VolNoSpace) (word f -6))
+                      ((VolWrote v2 spans fresh) (written f h x at size bs v2 spans fresh))))))))))))
+
+; The spans written, then the metadata; the handle moved past the bytes.
+(def written ((f Fs) (h int) (x Handle) (at int) (size int) (bs (list int)) (v2 Vol) (spans (list VolSpan)) (fresh (list int))) Answered
+  (match x
+    ((Handle p vi ei off mode)
+      (match (write_spans (match f ((Fs s port vols hs next ws) s)) (fs_start f vi) spans bs fresh at size)
+        ((PutNot s2 why) (word (with_store f s2) -5))
+        ((Put s2)
+          (match (commit (with_store f s2) vi v2)
+            ((CommitFailed f2) (word f2 -5))
+            ((Committed f2)
+              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at (length bs)) mode))) (length bs)))))))))
+
+; Each span of data written, the bytes of the file from at. A span's
+; sectors are read first only where they hold the file's bytes that
+; stay: before it in its first sector, or after it in its last, within
+; the old size; never in a cluster just taken.
+(def write_spans ((s Store) (start int) (spans (list VolSpan)) (bs (list int)) (fresh (list int)) (at int) (size int)) Put
+  (if (is_empty spans)
+      (Put s)
+      (match (head spans)
+        ((VolSpan c off k)
+          (match (write_span s start c off (first_of bs k) (any_eq c fresh) (lt (add at k) size))
+            ((PutNot s2 why) (PutNot s2 why))
+            ((Put s2) (write_spans s2 start (tail spans) (drop_n bs k) fresh (add at k) size)))))))
+
+(def write_span ((s Store) (start int) (c int) (off int) (piece (list int)) (fresh bool) (more bool)) Put
+  (let ss (vol_sector_size)
+    (let s0 (div off ss)
+      (let end (add off (length piece))
+        (let count (add (sub (div (sub end 1) ss) s0) 1)
+          (let sector (add (vol_cluster_sector start c) s0)
+            (let keep (if fresh false (if (not (eq (mod off ss) 0)) true (if more (not (eq (mod end ss) 0)) false)))
+              (match (if keep (store_read s sector count) (Got s (vol_zeros (mul count ss))))
+                ((GotNot s2 why) (PutNot s2 why))
+                ((Got s2 old) (store_write s2 sector (splice old (sub off (mul s0 ss)) piece)))))))))))
+
+; old with piece in place of its bytes from i.
+(def splice ((old (list int)) (i int) (piece (list int))) (list int)
+  (append (first_of old i) (append piece (drop_n old (add i (length piece))))))
+
+; ----------------------------------------------------- rename and remove
+
+; The file at a named b, in one volume: one there already replaced,
+; unless it is open.
+(def do_rename ((f Fs) (a (list int)) (b (list int))) Answered
+  (match (target f a false)
+    ((TNone code) (word f code))
+    ((TVolume vi) (word f -5))
+    ((TFile vi name)
+      (let ei (vol_find (fs_vol f vi) name)
+        (if (lt ei 0)
+            (word f -3)
+            (match (target f b true)
+              ((TNone code) (word f code))
+              ((TVolume wi) (word f -8))
+              ((TFile wi to)
+                (if (not (eq wi vi))
+                    (word f -10)
+                    (renamed f vi ei to)))))))))
+
+(def renamed ((f Fs) (vi int) (ei int) (to (list int))) Answered
+  (let v (fs_vol f vi)
+    (let old (vol_find v to)
+      (if (not (vol_name_ok to))
+          (word f -5)
+          (if (eq old ei)
+              (word f 0)
+              (if (if (ge old 0) (is_open f vi old) false)
+                  (word f -4)
+                  (match (commit f vi (vol_rename (if (ge old 0) (vol_remove v old) v) ei to))
+                    ((CommitFailed f2) (word f2 -5))
+                    ((Committed f2) (word f2 0)))))))))
+
+; The file at path gone, unless it is open.
+(def do_remove ((f Fs) (path (list int))) Answered
+  (match (target f path false)
+    ((TNone code) (word f code))
+    ((TVolume vi) (word f -8))
+    ((TFile vi name)
+      (let ei (vol_find (fs_vol f vi) name)
+        (if (lt ei 0)
+            (word f -3)
+            (if (is_open f vi ei)
+                (word f -4)
+                (match (commit f vi (vol_remove (fs_vol f vi) ei))
+                  ((CommitFailed f2) (word f2 -5))
+                  ((Committed f2) (word f2 0)))))))))
+
+; --------------------------------------------------------------- volumes
+
+; The volume path names, or -3 if it is no volume of fs's.
+(def volume_at ((f Fs) (path (list int))) int
+  (match (target f path false) ((TVolume vi) vi) ((TFile vi name) -3) ((TNone code) -3)))
+
+(def do_list ((f Fs) (path (list int))) Answered
+  (let vi (volume_at f path)
+    (if (lt vi 0)
+        (word f -3)
+        (let files (vol_files (fs_vol f vi))
+          (Answered f (length files) (fs_listing (stats_of files)))))))
+
+(def stats_of ((es (list VolEntry))) (list FsStat)
+  (if (is_empty es)
+      (nil FsStat)
+      (match (head es)
+        ((VolFile name size first) (cons (FsStat name size) (stats_of (tail es))))
+        ((VolNone) (stats_of (tail es))))))
+
+(def do_df ((f Fs) (path (list int))) Answered
+  (let vi (volume_at f path)
+    (if (lt vi 0)
+        (word f -3)
+        (let v (fs_vol f vi)
+          (let l (vol_layout_of v)
+            (Answered f 0 (fs_space_text (match l ((VolLayout n c t d) n))
+                                         (sub (vol_clusters l) (vol_first_data l))
+                                         (vol_free_count (vol_table v))
+                                         (vol_file_count v))))))))
+
+; The volume emptied, unless a file on it is open.
+(def do_format ((f Fs) (path (list int))) Answered
+  (let vi (volume_at f path)
+    (if (lt vi 0)
+        (word f -3)
+        (if (is_open f vi -1)
+            (word f -4)
+            (match (commit f vi (vol_format (fs_vol f vi)))
+              ((CommitFailed f2) (word f2 -5))
+              ((Committed f2) (word f2 0)))))))
+
+; ---------------------------------------------------------------- serving
+
+; Every message on the port: a request answered to its reply port, if it
+; has one, or an exit notice, its pid's handles dropped.
+(def serve ((f Fs) (port int)) int
+  (match (port_receive port)
+    ((RecvFailed) (complain "cannot receive"))
+    ((Message from payload)
+      (match (exit_of (Message from payload))
+        ((Exited pid status) (serve (forget_pid f pid) port))
+        ((NotExit)
+          (if (eq from 0)
+              (serve f port)
+              (match (obey f from (request_body payload))
+                ((Answered f2 w bs) (let s (reply (request_reply payload) w bs) (serve f2 port))))))))))
+
+; The reply sent, unless the request asked none; a client that has gone
+; needs none, so whether it was sent does not matter.
+(def reply ((port int) (w int) (bs (list int))) int
+  (if (le port 0)
+      0
+      (match (port_send port (fs_reply_bytes w bs))
+        ((Sent) 0) ((SendNoPort) 0) ((SendFull) 0) ((SendTooBig) 0))))
+
+; ---------------------------------------------------------------- starting
+
+; The server: the disk, its volumes found and mounted, and served.
+(def fs () int
+  (match (disk_open)
+    ((NoDisk why) (nothing_to_serve why))
+    ((Disk port rp pid n) (fs_on (Disk port rp pid n) (disk_buffer (Disk port rp pid n) (vol_cluster_sectors))))))
+
+(def fs_on ((d Disk) (b DiskBuf)) int
+  (match b
+    ((NoDiskBuf why) (complain why))
+    ((DiskBuf va n there r)
+      (let s (StoreDisk d b)
+        (match (store_read s 0 1)
+          ((GotNot s2 why) (complain why))
+          ((Got s2 bs)
+            (let parts (mbr_volumes (mbr_decode (bytes_from_list bs)))
+              (if (is_empty parts)
+                  (nothing_to_serve "no volumes on the disk; tools/mkdisk makes a disk with two")
+                  (found (load_vols s2 parts (nil FsVol)))))))))))
+
+; The volumes of parts, each a partition, onto acc; one that cannot be
+; read is said why, and left.
+(data Loaded (Loaded Store (list FsVol)))
+
+(def load_vols ((s Store) (parts (list VolPart)) (acc (list FsVol))) Loaded
+  (if (is_empty parts)
+      (Loaded s (rev acc))
+      (match (head parts)
+        ((VolPart ty start count)
+          (match (store_read s start 1)
+            ((GotNot s2 why) (load_vols s2 (tail parts) (cons_not acc start why)))
+            ((Got s2 bs)
+              (match (vol_super_of (bytes_from_list bs))
+                ((VolNotSuper why) (load_vols s2 (tail parts) (cons_not acc start why)))
+                ((VolSuper label l) (load_meta s2 (tail parts) acc start count label l)))))))))
+
+(def load_meta ((s Store) (parts (list VolPart)) (acc (list FsVol)) (start int) (count int) (label (list int)) (l VolLayout)) Loaded
+  (if (gt (match l ((VolLayout n c t d) n)) count)
+      (load_vols s parts (cons_not acc start "a volume larger than its partition"))
+      (match (store_read_all s start (vol_meta_sectors l))
+        ((GotNot s2 why) (load_vols s2 parts (cons_not acc start why)))
+        ((Got s2 bs)
+          (match (vol_of label l (bytes_from_list bs))
+            ((VolBad why) (load_vols s2 parts (cons_not acc start why)))
+            ((VolGot v) (load_vols s2 parts (cons (FsVol start v) acc))))))))
+
+; acc, having said why the partition at start is not served.
+(def cons_not ((acc (list FsVol)) (start int) (why (list int))) (list FsVol)
+  (let w (write_err (append "fs: the partition at sector " (append (digits start) (append ": " (append why "\n")))))
+    acc))
+
+(def found ((loaded Loaded)) int
+  (match loaded
+    ((Loaded s vols)
+      (if (is_empty vols)
+          (nothing_to_serve "no volume on the disk can be served")
+          (let port (port_new)
+            (let m (mount_all port vols)
+              (match (name_register port "fs")
+                ((Registered) (serve (fs_new s port (array_from vols (head vols))) port))
+                ((RegisterNoPort) (complain (registration_why (RegisterNoPort))))
+                ((RegisterTaken) (complain "fs is registered already"))
+                ((RegisterTooLong) (complain (registration_why (RegisterTooLong)))))))))))
+
+; Each volume mounted from port; one that cannot be is said why.
+(def mount_all ((port int) (vols (list FsVol))) int
+  (if (is_empty vols)
+      0
+      (match (head vols)
+        ((FsVol start v)
+          (match (fs_mount (vol_label v) port)
+            ((Mounted) (mount_all port (tail vols)))
+            ((MountNoPort) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountNoPort))))) (mount_all port (tail vols))))
+            ((MountTaken) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountTaken))))) (mount_all port (tail vols))))
+            ((MountBadLabel) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountBadLabel))))) (mount_all port (tail vols)))))))))

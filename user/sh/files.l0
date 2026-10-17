@@ -1,0 +1,291 @@
+; files.l0 -- the shell's commands on files, as busybox has them: ls,
+; cat, write, append, cp, mv, rm, df and format. They make the ordinary
+; file calls, so they work on the initramfs, which refuses every change,
+; and on the volumes under /Volumes, whose calls the kernel sends their
+; file server; ls, df and format ask a volume's server themselves
+; (user/lib/fs.l0), since no call lists a directory. Linked into sh.
+
+; Whether w is one of these commands.
+(def is_file_command ((w (list int))) bool
+  (any_eq w (split_spaces "ls cat write append cp mv rm df format")))
+
+; What the command op, with args, says once it is done: its output, and
+; a line for each complaint.
+(def file_command ((op (list int)) (args (list (list int))) (names (list (list int)))) (list int)
+  (if (eq op "ls") (ls_text args names)
+  (if (eq op "cat") (cat_all args)
+  (if (eq op "write") (write_words op args false)
+  (if (eq op "append") (write_words op args true)
+  (file_command_more op args))))))
+
+(def file_command_more ((op (list int)) (args (list (list int)))) (list int)
+  (if (eq op "cp") (two_paths op args)
+  (if (eq op "mv") (two_paths op args)
+  (if (eq op "rm") (rm_all args)
+  (if (eq op "df") (df_text args)
+  (format_text args))))))
+
+; A complaint about path, a line: sh: OP: PATH: WHY.
+(def complaint ((op (list int)) (path (list int)) (why (list int))) (list int)
+  (append "sh: " (append op (append ": " (append path (append ": " (append why "\n")))))))
+
+; How op is used, as a complaint.
+(def usage_of ((op (list int))) (list int)
+  (append "sh: usage: " (append op (append " " (append (usage_words op) "\n")))))
+
+(def usage_words ((op (list int))) (list int)
+  (if (any_eq op (split_spaces "cat rm")) "FILE..."
+  (if (any_eq op (split_spaces "write append")) "FILE WORDS..."
+  (if (any_eq op (split_spaces "cp mv")) "FROM TO"
+  (if (eq op "format") "VOLUME"
+  "")))))
+
+; ---------------------------------------------------------------------- ls
+
+; ls: with no path, every file of the initramfs, then of each volume;
+; else what each path is, a directory's names or a file's path.
+(def ls_text ((args (list (list int))) (names (list (list int)))) (list int)
+  (if (is_empty args)
+      (append (listing names) (volumes_listing (fs_volumes)))
+      (ls_each args names (nil int))))
+
+(def ls_each ((args (list (list int))) (names (list (list int))) (acc (list int))) (list int)
+  (if (is_empty args)
+      (rev acc)
+      (ls_each (tail args) names (push (ls_one (normal_path (head args)) names) acc))))
+
+; Each volume's files, by path, a line each.
+(def volumes_listing ((vols (list (list int)))) (list int)
+  (if (is_empty vols)
+      ""
+      (append (match (fs_list (head vols))
+                ((FsFiles files) (indented (paths_in (head vols) files)))
+                ((FsListRefused code) (complaint "ls" (head vols) (io_error code))))
+              (volumes_listing (tail vols)))))
+
+; The files' paths, in dir.
+(def paths_in ((dir (list int)) (files (list FsStat))) (list (list int))
+  (if (is_empty files)
+      (nil (list int))
+      (match (head files) ((FsStat name size) (cons (append dir (cons 47 name)) (paths_in dir (tail files)))))))
+
+(def stat_names ((files (list FsStat))) (list (list int))
+  (if (is_empty files)
+      (nil (list int))
+      (match (head files) ((FsStat name size) (cons name (stat_names (tail files)))))))
+
+; Each of ws on a line of its own, indented as ls lists.
+(def indented ((ws (list (list int)))) (list int)
+  (rev (indented_onto ws (nil int))))
+
+(def indented_onto ((ws (list (list int))) (acc (list int))) (list int)
+  (if (is_empty ws) acc (indented_onto (tail ws) (push "\n" (push (head ws) (push "  " acc))))))
+
+; What path is: /Volumes, a volume, a file on one, or the initramfs's.
+(def ls_one ((path (list int)) (names (list (list int)))) (list int)
+  (if (eq path "/Volumes")
+      (indented (labels_of (fs_volumes)))
+      (let vol (fs_volume_of path)
+        (if (is_empty vol)
+            (ls_root path names)
+            (match (fs_list vol)
+              ((FsListRefused code) (complaint "ls" path (io_error code)))
+              ((FsFiles files)
+                (if (eq path vol)
+                    (indented (stat_names files))
+                    (if (any_eq (base_name path) (stat_names files))
+                        (indented (cons path (nil (list int))))
+                        (complaint "ls" path (io_error -3))))))))))
+
+; Each volume's label, as a directory in /Volumes.
+(def labels_of ((vols (list (list int)))) (list (list int))
+  (if (is_empty vols) (nil (list int)) (cons (append (base_name (head vols)) "/") (labels_of (tail vols)))))
+
+; A path of the initramfs: a file, or a directory's names, and in / the
+; volumes' directory too.
+(def ls_root ((path (list int)) (names (list (list int)))) (list int)
+  (if (any_eq path names)
+      (indented (cons path (nil (list int))))
+      (let kids (dir_children names path)
+        (if (eq path "/")
+            (indented (sort (cons "Volumes/" kids)))
+            (if (if (is_empty kids) (not (any_eq (append path "/") names)) false)
+                (complaint "ls" path (io_error -3))
+                (indented kids))))))
+
+; The names in directory dir among the initramfs's paths, sorted, each
+; directory's with a final /.
+(def dir_children ((names (list (list int))) (dir (list int))) (list (list int))
+  (sort (children_of names (if (eq dir "/") "/" (append dir "/")) (nil (list int)))))
+
+(def children_of ((names (list (list int))) (prefix (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty names)
+      acc
+      (let r (drop_n (head names) (length prefix))
+        (children_of (tail names) prefix
+                     (if (if (starts_with (head names) prefix) (is_child r) false) (cons r acc) acc)))))
+
+; Whether r, a path after its directory, names something in it: not
+; empty, and holding no / but a final one.
+(def is_child ((r (list int))) bool
+  (if (is_empty r)
+      false
+      (if (eq (head r) 47)
+          false
+          (let inner (if (eq (head (rev r)) 47) (tail (rev r)) (rev r))
+            (not (any_eq 47 inner))))))
+
+; --------------------------------------------------------------------- cat
+
+(def cat_all ((args (list (list int)))) (list int)
+  (if (is_empty args) (usage_of "cat") (rev (cat_onto args (nil int)))))
+
+(def cat_onto ((args (list (list int))) (acc (list int))) (list int)
+  (if (is_empty args) acc (cat_onto (tail args) (push (cat_one (head args)) acc))))
+
+; The bytes of the file at path, or why they cannot be read.
+(def cat_one ((path (list int))) (list int)
+  (match (read_file path)
+    ((FileBytes b) (bytes_to_list b))
+    ((FileNot why) (complaint "cat" path why))))
+
+; A file read whole, or why it could not be.
+(data FileRead (FileBytes bytes) (FileNot (list int)))
+
+(def read_file ((path (list int))) FileRead
+  (match (open_in path)
+    ((IoFailed fault why) (FileNot why))
+    ((IoOpened f)
+      (match (file_read_all f)
+        ((IoReadFailed code) (let c (file_close f) (FileNot (io_error code))))
+        ((IoBytes b) (let c (file_close f) (FileBytes b)))))))
+
+; ------------------------------------------------------------ write, append
+
+; write FILE WORDS..., the words spaced and a newline after them, as the
+; file's contents, or added to its end.
+(def write_words ((op (list int)) (args (list (list int))) (appending bool)) (list int)
+  (if (is_empty args)
+      (usage_of op)
+      (let text (if (is_empty (tail args)) "" (append (spaced (tail args)) "\n"))
+        (put_text op (head args) (bytes_from_list text) appending))))
+
+; The words, a space between each two.
+(def spaced ((ws (list (list int)))) (list int)
+  (if (is_empty ws) "" (if (is_empty (tail ws)) (head ws) (append (head ws) (append " " (spaced (tail ws)))))))
+
+; b written to the file at path, anew or at its end: nothing, or why not.
+(def put_text ((op (list int)) (path (list int)) (b bytes) (appending bool)) (list int)
+  (match (if appending (open_appending path) (open_out path))
+    ((IoFailed fault why) (complaint op path why))
+    ((IoOpened f) (closed op path f (file_write_bytes f b 0 (bytes_len b))))))
+
+; f, at path, closed once w is written, and anything lost said.
+(def closed ((op (list int)) (path (list int)) (f IoFile) (w int)) (list int)
+  (match (file_close f)
+    ((Done) "")
+    ((NotDone fault why) (complaint op path why))))
+
+; ------------------------------------------------------------------ cp, mv
+
+(def two_paths ((op (list int)) (args (list (list int)))) (list int)
+  (if (not (eq (length args) 2))
+      (usage_of op)
+      (if (eq op "cp")
+          (copy_file (head args) (head (tail args)))
+          (move_file (head args) (head (tail args)) false))))
+
+; The file at from copied to to, or into to if it is a directory.
+(def copy_file ((from (list int)) (to (list int))) (list int)
+  (match (read_file from)
+    ((FileNot why) (complaint "cp" from why))
+    ((FileBytes b) (copy_to from to b true))))
+
+(def copy_to ((from (list int)) (to (list int)) (b bytes) (into bool)) (list int)
+  (match (open_out to)
+    ((IoFailed fault why)
+      (if (if into (eq fault (CreateIsDirectory)) false)
+          (copy_to from (inside to from) b false)
+          (complaint "cp" to why)))
+    ((IoOpened f) (closed "cp" to f (file_write_bytes f b 0 (bytes_len b))))))
+
+; The path of from's name in directory dir.
+(def inside ((dir (list int)) (from (list int))) (list int)
+  (append dir (cons 47 (base_name from))))
+
+; The file at from renamed to, or moved into to if it is a directory;
+; from one file system to another, copied and then removed.
+(def move_file ((from (list int)) (to (list int)) (inner bool)) (list int)
+  (match (rename_file from to)
+    ((Done) "")
+    ((NotDone fault why)
+      (if (if (not inner) (eq fault (RenameIsDirectory)) false)
+          (move_file from (inside to from) true)
+          (if (eq fault (RenameCrossDevice))
+              (let c (copy_file from to)
+                (if (is_empty c) (removed "mv" from) c))
+              (complaint "mv" from why))))))
+
+; ---------------------------------------------------------------------- rm
+
+(def rm_all ((args (list (list int)))) (list int)
+  (if (is_empty args) (usage_of "rm") (rev (rm_onto args (nil int)))))
+
+(def rm_onto ((args (list (list int))) (acc (list int))) (list int)
+  (if (is_empty args) acc (rm_onto (tail args) (push (removed "rm" (head args)) acc))))
+
+; The file at path removed: nothing, or why not.
+(def removed ((op (list int)) (path (list int))) (list int)
+  (match (remove_file path)
+    ((Done) "")
+    ((NotDone fault why) (complaint op path why))))
+
+; ---------------------------------------------------------------------- df
+
+; df: each volume's size, the room its files take and what is free, in
+; kilobytes of its clusters, and how many files it has.
+(def df_text ((args (list (list int)))) (list int)
+  (if (not (is_empty args))
+      "sh: usage: df\n"
+      (let vols (fs_volumes)
+        (if (is_empty vols)
+            "sh: df: no volumes are mounted\n"
+            (append (df_row "VOLUME" "SIZE" "USED" "FREE" "FILES") (df_lines vols))))))
+
+(def df_lines ((vols (list (list int)))) (list int)
+  (if (is_empty vols)
+      ""
+      (append (match (fs_df (head vols))
+                ((FsSpace sectors clusters free files) (df_line (head vols) clusters free files))
+                ((FsSpaceRefused code) (complaint "df" (head vols) (io_error code))))
+              (df_lines (tail vols)))))
+
+; A volume's line: clusters of data, free, of 4 KB each.
+(def df_line ((vol (list int)) (clusters int) (free int) (files int)) (list int)
+  (df_row vol (kilobytes clusters) (kilobytes (sub clusters free)) (kilobytes free) (digits files)))
+
+(def kilobytes ((clusters int)) (list int)
+  (append (digits (mul clusters 4)) "K"))
+
+(def df_row ((a (list int)) (b (list int)) (c (list int)) (d (list int)) (e (list int))) (list int)
+  (append "  " (append (pad_right a 16) (append (pad_left b 8) (append (pad_left c 8) (append (pad_left d 8) (append (pad_left e 7) "\n")))))))
+
+; ------------------------------------------------------------------ format
+
+; format VOLUME: the volume, /Volumes/LABEL or its label, emptied.
+(def format_text ((args (list (list int)))) (list int)
+  (if (not (eq (length args) 1))
+      (usage_of "format")
+      (let vol (volume_named (head args))
+        (if (not (eq (fs_volume_of vol) vol))
+            (complaint "format" (head args) "not a volume")
+            (formatted vol (fs_format vol))))))
+
+; The volume w names: a path, or a label.
+(def volume_named ((w (list int))) (list int)
+  (if (starts_with w "/") (normal_path w) (append "/Volumes/" w)))
+
+(def formatted ((vol (list int)) (code int)) (list int)
+  (if (eq code 0)
+      ""
+      (complaint "format" vol (if (eq code -4) "a file on it is open" (if (eq code -3) "no such volume" (io_error code))))))

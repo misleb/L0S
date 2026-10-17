@@ -1,0 +1,172 @@
+; mkfs.l0 -- writes a disk image with L0S's file system on it
+; (user/lib/l0fs.l0): an MBR, then each volume given, empty, zeros
+; everywhere else.
+;
+;   mkfs OUT SECTORS LABEL:START:COUNT...
+;
+; Each volume is a partition of type 0x4C from sector START, COUNT
+; sectors, named LABEL; at most four, inside the disk, past sector 0, and
+; none overlapping. tools/mkdisk runs it for the demo's disk and the
+; tests'. A host program, linking common/abi.l0 and user/lib/l0fs.l0.
+
+(def usage () (list int)
+  "usage: mkfs OUT SECTORS LABEL:START:COUNT...\n")
+
+(def complain ((why (list int))) int
+  (let w (write_err (append "mkfs: " (append why "\n"))) 1))
+
+; ---------------------------------------------------------------- the plan
+
+; A volume to make: its label, first sector and sectors.
+(data MkVol (MkVol (list int) int int))
+
+; What the arguments ask for: the disk's sectors and its volumes; or why
+; they ask nothing.
+(data MkPlan (MkPlan int (list MkVol)) (MkBad (list int)))
+
+; The plan of the arguments after OUT.
+(def plan_of ((sectors (list int)) (vols (list (list int)))) MkPlan
+  (if (not (is_number sectors))
+      (MkBad "the disk's sectors are a number")
+      (plan_vols (int_prefix sectors 0) vols (nil MkVol))))
+
+(def plan_vols ((n int) (ws (list (list int))) (acc (list MkVol))) MkPlan
+  (if (is_empty ws)
+      (plan_checked n (rev acc))
+      (match (vol_arg (head ws))
+        ((Some v) (plan_vols n (tail ws) (cons v acc)))
+        ((None) (MkBad (append "not LABEL:START:COUNT: " (head ws)))))))
+
+; LABEL:START:COUNT, with numbers where they go.
+(def vol_arg ((w (list int))) (Option MkVol)
+  (let parts (split_colons w (nil int) (nil (list int)))
+    (if (not (eq (length parts) 3))
+        ((None MkVol))
+        (let start (head (tail parts))
+          (let count (head (tail (tail parts)))
+            (if (if (is_number start) (is_number count) false)
+                (Some (MkVol (head parts) (int_prefix start 0) (int_prefix count 0)))
+                ((None MkVol))))))))
+
+; The fields of w between colons.
+(def split_colons ((w (list int)) (cur (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty w)
+      (rev (cons (rev cur) acc))
+      (if (eq (head w) 58)
+          (split_colons (tail w) (nil int) (cons (rev cur) acc))
+          (split_colons (tail w) (cons (head w) cur) acc))))
+
+; Whether w is a decimal number: digits, at least one.
+(def is_number ((w (list int))) bool
+  (if (is_empty w) false (is_empty (skip_digits w))))
+
+; The plan, if every volume fits: one to four, each with a good label
+; used once and room for data, inside the disk past sector 0, none on
+; another.
+(def plan_checked ((n int) (vols (list MkVol))) MkPlan
+  (if (is_empty vols)
+      (MkBad "no volume")
+      (if (gt (length vols) 4)
+          (MkBad "at most four volumes")
+          (let why (vols_why n vols (nil MkVol))
+            (if (is_empty why) (MkPlan n vols) (MkBad why))))))
+
+; Why the first of vols cannot be made, given those before, or empty.
+(def vols_why ((n int) (vols (list MkVol)) (before (list MkVol))) (list int)
+  (if (is_empty vols)
+      ""
+      (let why (vol_why n (head vols) before)
+        (if (is_empty why) (vols_why n (tail vols) (cons (head vols) before)) why))))
+
+(def vol_why ((n int) (v MkVol) (before (list MkVol))) (list int)
+  (match v
+    ((MkVol label start count)
+      (if (not (vol_label_ok label))
+          (append "a label is 1 to 15 letters, digits, - and _: " label)
+          (if (label_used label before)
+              (append "a label used twice: " label)
+              (if (if (lt start 1) true (gt (add start count) n))
+                  (append label " is not inside the disk, past sector 0")
+                  (if (not (vol_layout_ok (vol_layout count)))
+                      (append label " is too small for a volume")
+                      (if (overlaps start count before)
+                          (append label " overlaps another volume")
+                          ""))))))))
+
+(def label_used ((label (list int)) (vols (list MkVol))) bool
+  (if (is_empty vols)
+      false
+      (match (head vols) ((MkVol l s c) (if (eq l label) true (label_used label (tail vols)))))))
+
+(def overlaps ((start int) (count int) (vols (list MkVol))) bool
+  (if (is_empty vols)
+      false
+      (match (head vols)
+        ((MkVol l s c)
+          (if (if (lt start (add s c)) (lt s (add start count)) false) true (overlaps start count (tail vols)))))))
+
+; -------------------------------------------------------------- the image
+
+; Bytes to write at an offset of the image.
+(data Piece (Piece int (list int)))
+
+; What the image holds besides zeros: the MBR, and each volume's
+; metadata, by offset.
+(def pieces ((vols (list MkVol))) (list Piece)
+  (sort (cons (Piece 0 (mbr_encode (parts_of vols))) (metas vols))))
+
+(def parts_of ((vols (list MkVol))) (list VolPart)
+  (if (is_empty vols)
+      (nil VolPart)
+      (match (head vols) ((MkVol l s c) (cons (VolPart (vol_part_type) s c) (parts_of (tail vols)))))))
+
+(def metas ((vols (list MkVol))) (list Piece)
+  (if (is_empty vols)
+      (nil Piece)
+      (match (head vols)
+        ((MkVol l s c) (cons (Piece (mul s (vol_sector_size)) (vol_meta (vol_new l (vol_layout c)))) (metas (tail vols)))))))
+
+; A cluster of zeros, written as many times as the gaps need.
+(def zero_block () bytes (bytes_from_list (vol_zeros 4096)))
+
+; The image of size bytes written to f: each piece at its offset, zeros
+; between and after, from at.
+(def write_image ((f IoFile) (ps (list Piece)) (at int) (size int) (zs bytes)) int
+  (if (is_empty ps)
+      (write_zeros f (sub size at) zs)
+      (match (head ps)
+        ((Piece off b)
+          (let z (write_zeros f (sub off at) zs)
+            (let w (file_write_bytes f (bytes_from_list b) 0 (length b))
+              (write_image f (tail ps) (add off (length b)) size zs)))))))
+
+; n zeros written to f.
+(def write_zeros ((f IoFile) (n int) (zs bytes)) int
+  (if (le n 0)
+      0
+      (let k (min n (bytes_len zs))
+        (let w (file_write_bytes f zs 0 k)
+          (write_zeros f (sub n k) zs)))))
+
+; ----------------------------------------------------------------- running
+
+; The tool: the image argv asks for, written; 0, or 1 and why not.
+(def mkfs ((argv (list (list int)))) int
+  (if (lt (length argv) 3)
+      (complain (drop_last (usage)))
+      (match (plan_of (head (tail argv)) (tail (tail argv)))
+        ((MkBad why) (complain why))
+        ((MkPlan n vols) (made (head argv) n vols)))))
+
+(def made ((out (list int)) (n int) (vols (list MkVol))) int
+  (match (open_out out)
+    ((IoFailed fault why) (complain (append out (append ": " why))))
+    ((IoOpened f)
+      (let w (write_image f (pieces vols) 0 (mul n (vol_sector_size)) (zero_block))
+        (match (file_close f)
+          ((Done) 0)
+          ((NotDone fault why) (complain (append out (append ": " why)))))))))
+
+; s without its last character.
+(def drop_last ((s (list int))) (list int)
+  (rev (tail (rev s))))

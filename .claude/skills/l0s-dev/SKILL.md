@@ -29,12 +29,12 @@ the `;` comment block directly above each form, so write yours that way
 
 | Path | What |
 |---|---|
-| `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `process.l0`, `memory.l0`, `ipc.l0`, `sched.l0`, `pids.l0`, `inittab.l0` are its parts. `asm.l0` hand-assembles threads for board tests |
+| `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `process.l0`, `memory.l0`, `mounts.l0` (the mount table: the initramfs at `/`, volumes at `/Volumes/LABEL`), `ipc.l0`, `sched.l0`, `pids.l0`, `inittab.l0` are its parts. File calls on a volume go to its server as fs-protocol requests (`ask_fs`, the `AwaitingFs` state). `asm.l0` hand-assembles threads for board tests |
 | `common/` | shared by kernel and programs: `abi.l0` (call numbers `call_*`, error codes, limits, little-endian helpers), `initramfs.l0` (the cpio archive), `queue.l0` |
-| `user/lib/` | linked into programs: `l0s.l0` (call wrappers, `request`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `tty.l0`, `virtio.l0` (registers, queues, descriptors, `virtq_wait`) in every program; `render.l0`, `display.l0`, `wm.l0`, `clock.l0`, `disk.l0` and `ui/` only where a `LIBS_` list says |
+| `user/lib/` | linked into programs: `l0s.l0` (call wrappers, `request`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `tty.l0`, `virtio.l0` (registers, queues, descriptors, `virtq_wait`) in every program; `render.l0`, `display.l0`, `wm.l0`, `clock.l0`, `disk.l0`, `l0fs.l0` (the on-disk format, pure), `fs.l0` (the fs protocol) and `ui/` only where a `LIBS_` list says |
 | `user/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`). Becomes `/bin/NAME` |
 | `demo/etc/` | the demo's `inittab`, `motd`; `tests/screen/etc/` the screen tests' |
-| `tools/` | `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
+| `tools/` | `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, partitioned and formatted by `mkfs/`, an L0 host tool), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 

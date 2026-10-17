@@ -708,6 +708,103 @@
   (add (check_int "a text file" (files_boot (cons (movz 0 2) (append (call_words (call_spawn)) (exit_x0))) "" "") (err_denied))
        (check_int "a directory" (files_boot (cons (movz 0 1) (append (call_words (call_spawn)) (exit_x0))) "" "") (err_denied))))
 
+; ----------------------------------------------------------------- volumes
+
+; A new port in x19, the len bytes at data byte at mounted from it as a
+; volume's label, then ws.
+(def mount_words ((at int) (len int) (ws (list int))) (list int)
+  (append (call_words (call_port_new))
+    (cons (mov_x19_x0) (append (data_words 1 at) (cons (movz 2 len) (append (call_words (call_fs_mount)) ws))))))
+
+; Mounts the label at data byte at, of len bytes, from port n.
+(def mount_from ((n int) (at int) (len int)) (list int)
+  (cons (movz 0 n) (append (data_words 1 at) (cons (movz 2 len) (append (call_words (call_fs_mount)) (exit_x0))))))
+
+(def test_mount () int
+  (check_int "mounted" (files_boot (mount_words 0 4 (exit_x0)) "data" "") 0))
+
+(def test_mount_not_yours () int
+  (check_int "port 5" (files_boot (mount_from 5 0 4) "data" "") (err_no_port)))
+
+(def test_mount_bad_label () int
+  (add (check_int "a slash" (files_boot (mount_words 0 3 (exit_x0)) "a/b" "") (err_fault))
+       (add (check_int "empty" (files_boot (mount_words 0 0 (exit_x0)) "" "") (err_fault))
+            (check_int "16 bytes" (files_boot (mount_words 0 16 (exit_x0)) "abcdefghijklmnop" "") (err_fault)))))
+
+(def test_mount_taken () int
+  (check_int "data twice"
+    (files_boot (mount_words 0 4 (cons (mov_x0_x19) (append (data_words 1 0) (cons (movz 2 4) (append (call_words (call_fs_mount)) (exit_x0))))))
+                "data" "")
+    (err_taken)))
+
+; Mount i's record copied to the heap, max bytes at most: its length.
+(def mount_at_words ((i int) (max int)) (list int)
+  (cons (movz 0 i) (cons (movz_hi 1 49216) (cons (movz 2 max) (append (call_words (call_mount_at)) (exit_x0))))))
+
+(def test_mount_at () int
+  (add (check_int "the initramfs: a port and /" (files_boot (mount_at_words 0 64) "" "") 5)
+       (check_int "data: a port and /Volumes/data" (files_boot (mount_words 0 4 (mount_at_words 1 64)) "data" "") 17)))
+
+(def test_mount_at_refused () int
+  (add (check_int "no mount 1" (files_boot (mount_at_words 1 64) "" "") (err_no_port))
+       (check_int "max 4" (files_boot (mount_at_words 0 4) "" "") (err_too_big))))
+
+(def test_open_volumes_dir () int
+  (check_int "a directory" (files_boot (append (open_words 0 8 1) (exit_x0)) "/Volumes" "") -8))
+
+(def test_open_unmounted () int
+  (add (check_int "to read" (files_boot (append (open_words 0 15 1) (exit_x0)) "/Volumes/data/a" "") -3)
+       (add (check_int "to write" (files_boot (append (open_words 0 15 2) (exit_x0)) "/Volumes/data/a" "") -9)
+            (check_int "in /Volumes" (files_boot (append (open_words 0 10 3) (exit_x0)) "/Volumes/a" "") -4))))
+
+(def test_remove_unmounted () int
+  (check_int "no such file" (files_boot (path_call 0 15 (sys_remove)) "/Volumes/data/a" "") -3))
+
+; A process that opens a file of a volume it mounted itself waits for its
+; own answer, which it can never give.
+(def test_open_routed_waits () int
+  (check_int "deadlock"
+    (files_boot (mount_words 0 4 (append (open_words 8 15 1) (exit_x0))) (append (pad_to 8 "data") "/Volumes/data/a") "")
+    124))
+
+; pid 1 mounts data and receives the request pid 2's open makes, then
+; exits with its length: the sender's pid, the reply port, and open 1
+; /Volumes/data/a.
+(def test_open_routed_request () int
+  (check_int "30 bytes"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (exit_x0))) "data"))
+                               (cons (Raw (flag_boot) (with_data (append (open_words 0 15 1) (exit_x0)) "/Volumes/data/a")) (nil Raw)))))
+    30))
+
+; Receives on x19's port into the heap, then ws.
+(def receive_words ((ws (list int))) (list int)
+  (cons (mov_x0_x19) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_receive)) ws)))))
+
+; The server, pid 1, answers handle 7, the u32 at its data byte 8, to the
+; reply port the request names, then waits for pid 2 and exits with its
+; status: the new stream, 3.
+(def test_open_routed () int
+  (check_int "stream 3"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (answer_words 8))) (append (pad_to 8 "data") (u32_le 7))))
+                               (cons (Raw (flag_boot) (with_data (append (open_words 0 15 1) (exit_x0)) "/Volumes/data/a")) (nil Raw)))))
+    3))
+
+; The 4 bytes at data byte at sent to the reply port of the request in
+; the heap, then pid 2 waited for, and its status the exit's.
+(def answer_words ((at int)) (list int)
+  (cons (movz_hi 1 49216) (cons (ldr_w0_x1_4)
+    (append (data_words 1 at) (cons (movz 2 4) (append (call_words (call_send))
+      (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0)))))))))
+
+; pid 1 yields, so pid 2 mounts data first, then opens a file of it; pid
+; 2 takes the request and exits without answering, and pid 1's open is
+; answered -5.
+(def test_open_server_gone () int
+  (check_int "-5"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (append (call_words (call_yield)) (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a"))
+                               (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (cons (movz 0 0) (exit_x0)))) "data")) (nil Raw)))))
+    -5))
+
 ; ----------------------------------------------------------------- freeing
 
 ; Spawns module m and waits for it, n times over, then exits with the

@@ -168,7 +168,7 @@
 
 (def is_ready ((s State)) bool
   (match s ((Ready) true) ((Receiving port buf max) false) ((Waiting pid) false) ((Sleeping) false)
-           ((Blocked port) false) ((ReadingTty reply buf n) false)))
+           ((Blocked port) false) ((ReadingTty reply buf n) false) ((AwaitingFs server reply op buf n) false)))
 
 ; pid, if it is blocked for room on a port, made ready to make its call
 ; again: its pc is back on the svc, so it has no answer.
@@ -183,7 +183,8 @@
             ((Receiving port buf max) (restore k2 p))
             ((Waiting on) (restore k2 p))
             ((Sleeping) (restore k2 p))
-            ((ReadingTty reply buf n) (restore k2 p))))
+            ((ReadingTty reply buf n) (restore k2 p))
+            ((AwaitingFs server reply op buf n) (restore k2 p))))
         ((Free) (put_slot k2 pid (Free)))
         ((Dead st) (put_slot k2 pid (Dead st)))))))
 
@@ -277,6 +278,8 @@
           (restore k q)))
     ((ReadingTty reply buf n)
       (if (eq reply port) (tty_line_in k q port buf n) (restore k q)))
+    ((AwaitingFs server reply op buf n)
+      (if (eq reply port) (fs_reply_in k q server reply op buf n) (restore k q)))
     ((Ready) (restore k q))
     ((Waiting pid) (restore k q))
     ((Sleeping) (restore k q))
@@ -407,23 +410,25 @@
         ((KSent k2 code) (tell_exit k2 (tail ports) pid status)))))
 
 ; k without pid's ports, and so with every process blocked for room on
-; one of them made ready, to write to the kernel's own instead, and every
-; process reading a line from one of them given the end of input.
+; one of them made ready, to write to the kernel's own instead, every
+; process reading a line from one of them given the end of input, and
+; every process waiting for one of them as a file server answered -5.
 (def k_forget ((k Kernel) (pid int)) Kernel
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem)
       (let gone (ipc_owned ipc pid)
         (let k2 (unblock_all (Kernel slots ready (ipc_forget ipc pid) ss irqs boot next mem) (ipc_blocked_by ipc pid))
-          (if (is_empty gone) k2 (end_tty_reads k2 gone 1)))))))
+          (if (is_empty gone) k2 (end_reads k2 gone 1)))))))
 
 ; Each process from slot i on reading from a terminal whose port is among
-; gone, its read answered as the end of input.
-(def end_tty_reads ((k Kernel) (gone (list int)) (i int)) Kernel
+; gone, its read answered as the end of input; and each waiting for a
+; file server whose port is among them, answered -5.
+(def end_reads ((k Kernel) (gone (list int)) (i int)) Kernel
   (if (gt i (max_procs))
       k
-      (end_tty_reads (end_tty_read k gone (k_pid_at k i)) gone (add i 1))))
+      (end_reads (end_read k gone (k_pid_at k i)) gone (add i 1))))
 
-(def end_tty_read ((k Kernel) (gone (list int)) (pid int)) Kernel
+(def end_read ((k Kernel) (gone (list int)) (pid int)) Kernel
   (match (take_slot k pid)
     ((TakenSlot k2 s)
       (match s
@@ -432,6 +437,10 @@
             ((ReadingTty reply buf n)
               (if (any_eq (proc_tty_port q) gone)
                   (park k2 (proc_set_state (proc_answer q 0) (Ready)))
+                  (restore k2 q)))
+            ((AwaitingFs server reply op buf n)
+              (if (any_eq server gone)
+                  (park (with_ipc k2 (ipc_close (k_ipc k2) pid reply)) (proc_set_state (proc_answer (fs_closing q op buf) -5) (Ready)))
                   (restore k2 q)))
             ((Ready) (restore k2 q))
             ((Receiving port buf max) (restore k2 q))
@@ -488,7 +497,8 @@
     ((Receiving port buf max) (restore k q))
     ((Sleeping) (restore k q))
     ((Blocked port) (restore k q))
-    ((ReadingTty reply buf n) (restore k q))))
+    ((ReadingTty reply buf n) (restore k q))
+    ((AwaitingFs server reply op buf n) (restore k q))))
 
 ; p ended by the kernel, for why, as a fault ends a process on Unix.
 (def kill ((k Kernel) (p Proc) (why (list int))) Step
@@ -601,7 +611,7 @@
     ((CExit st) (exit_proc k p st))
     ((COpen path len mode) (do_open k p path len mode))
     ((CClose s) (do_close k p s))
-    ((CRename from flen to tlen) (do_rename k p from flen))
+    ((CRename from flen to tlen) (do_rename k p from flen to tlen))
     ((CRemove path len) (do_remove k p path len))
     ((CArgCount) (resume_with k p (length (proc_args p))))
     ((CArg i buf n) (do_arg k p i buf n))
@@ -625,6 +635,8 @@
     ((CProcSlot i) (do_proc_slot k p i))
     ((CShmUnmap va n) (do_shm_unmap k p va n))
     ((CShmRevoke va n pid) (do_shm_revoke k p va n pid))
+    ((CMount port buf len) (do_mount k p port buf len))
+    ((CMountAt i buf max) (do_mount_at k p i buf max))
     ((CWait pid) (do_wait k p pid))
     ((CSleepUntil t) (do_sleep k p t))
     ((CIrqBind irq port) (do_irq_bind k p irq port))
@@ -638,8 +650,8 @@
 
 ; Stream 0 is the inittab's stdin file, read from where any process last
 ; read it to; streams from 3 are files p opened, each read from where p
-; last read it to. The answer is how many bytes were copied to buf, 0 at
-; the end, or -5.
+; last read it to, a volume's by asking its server. The answer is how
+; many bytes were copied to buf, 0 at the end, or -5.
 (def do_read ((k Kernel) (p Proc) (s int) (buf int) (n int)) Step
   (if (lt n 0)
       (resume_with k p -5)
@@ -647,7 +659,10 @@
           (if (eq (proc_tty_port p) 0) (read_stdin k p buf n) (read_tty k p buf n))
           (match (proc_open_file p s)
             ((None) (resume_with k p -5))
-            ((Some f) (match f ((Open e offset) (read_open k p s e offset buf n))))))))
+            ((Some f)
+              (match f
+                ((Open e offset) (read_open k p s e offset buf n))
+                ((OpenRemote port h) (read_remote k p port h buf n))))))))
 
 (def read_stdin ((k Kernel) (p Proc) (buf int) (n int)) Step
   (match k
@@ -685,21 +700,34 @@
         ((CopyOutBad q) (PathBad q))
         ((CopiedOut q b) (PathGot q (normal_path (bytes_to_list b)))))))
 
-; Opens the file at path. To read, mode 1: a new stream, or -3 if there is
-; no such file, -8 if it is a directory, -5 if p has open_limit open. To
-; write, modes 2 and 3: never, since the initramfs is read-only, so -8 for
-; a directory, -4 where the directory it would be in exists, and -9
-; where it does not.
+; Opens the file at path, by where the mount table puts it: the
+; initramfs's (open_root), a volume's, whose server is asked, or none.
+; /Volumes is a directory, -8; in it there is nothing to read, -3, and
+; nothing can be made, -4; and in a volume not mounted, -3 or -9.
 (def do_open ((k Kernel) (p Proc) (buf int) (len int) (mode int)) Step
   (match (path_from p buf len)
     ((PathBad q) (resume_with k q -5))
     ((PathGot q path)
-      (let e (entry_index (k_entries k) path)
-        (if (eq mode 1)
-            (open_to_read k q e)
-            (resume_with k q (if (if (ge e 0) (entry_is_dir (k_entry k e)) false)
-                                 -8
-                                 (if (has_dir k (parent_path path)) -4 -9))))))))
+      (if (not (any_eq mode (cons 1 (cons 2 (cons 3 (nil int))))))
+          (resume_with k q -5)
+          (match (mount_where (ipc_mounts (k_ipc k)) path)
+            ((InRoot) (open_root k q path mode))
+            ((InVolumes) (resume_with k q -8))
+            ((InNothing direct) (resume_with k q (if (eq mode 1) -3 (if direct -4 -9))))
+            ((InServer port) (open_remote k q port path mode)))))))
+
+; Opens the initramfs's file at path. To read, mode 1: a new stream, or -3
+; if there is no such file, -8 if it is a directory, -5 if p has
+; open_limit open. To write, modes 2 and 3: never, since the initramfs is
+; read-only, so -8 for a directory, -4 where the directory it would be in
+; exists, and -9 where it does not.
+(def open_root ((k Kernel) (q Proc) (path (list int)) (mode int)) Step
+  (let e (entry_index (k_entries k) path)
+    (if (eq mode 1)
+        (open_to_read k q e)
+        (resume_with k q (if (if (ge e 0) (entry_is_dir (k_entry k e)) false)
+                             -8
+                             (if (has_dir k (parent_path path)) -4 -9))))))
 
 (def open_to_read ((k Kernel) (p Proc) (e int)) Step
   (if (lt e 0)
@@ -727,32 +755,193 @@
 (def drop_to_slash ((s (list int))) (list int)
   (if (is_empty s) s (if (eq (head s) 47) s (drop_to_slash (tail s)))))
 
+; Closes stream s: 0, or -5 if it is not open; a volume's file is closed
+; by its server too, whose answer is the call's, and the stream goes once
+; the server has answered, or gone.
 (def do_close ((k Kernel) (p Proc) (s int)) Step
-  (match (proc_close p s)
-    ((ClosedFile q was) (resume_with k q (if was 0 -5)))))
+  (match (proc_open_file p s)
+    ((None) (resume_with k p -5))
+    ((Some f)
+      (match f
+        ((Open e offset) (match (proc_close p s) ((ClosedFile q was) (resume_with k q 0))))
+        ((OpenRemote port h) (ask_fs k p port (fs_op_close) s 0 (append "close " (digits h))))))))
 
-; Nothing in the initramfs can be renamed or removed: -3 if there is no
-; file by the name, -8 for removing a directory, and otherwise -4.
-(def do_rename ((k Kernel) (p Proc) (buf int) (len int)) Step
-  (match (path_from p buf len)
+; Renames the file at from to to: within the initramfs, never; within a
+; volume, by its server; between the two, or two volumes, -10; and as
+; rename_route says for /Volumes and what is in no volume.
+(def do_rename ((k Kernel) (p Proc) (from int) (flen int) (to int) (tlen int)) Step
+  (match (path_from p from flen)
     ((PathBad q) (resume_with k q -5))
-    ((PathGot q path) (resume_with k q (if (lt (entry_index (k_entries k) path) 0) -3 -4)))))
+    ((PathGot q a)
+      (match (path_from q to tlen)
+        ((PathBad r) (resume_with k r -5))
+        ((PathGot r b)
+          (let ms (ipc_mounts (k_ipc k))
+            (let route (rename_route (mount_where ms a) (mount_where ms b))
+              (if (lt route 0)
+                  (resume_with k r route)
+                  (if (eq route 0)
+                      (resume_with k r (if (lt (entry_index (k_entries k) a) 0) -3 -4))
+                      (ask_fs k r route (fs_op_word) 0 0 (append "rename " (append a (cons 32 b)))))))))))))
 
+; Removes the file at path: nothing in the initramfs can be, -3 if there
+; is no file by the name, -8 for a directory, and otherwise -4; a
+; volume's, by its server.
 (def do_remove ((k Kernel) (p Proc) (buf int) (len int)) Step
   (match (path_from p buf len)
     ((PathBad q) (resume_with k q -5))
     ((PathGot q path)
-      (let e (entry_index (k_entries k) path)
-        (resume_with k q (if (lt e 0) -3 (if (entry_is_dir (k_entry k e)) -8 -4)))))))
+      (match (mount_where (ipc_mounts (k_ipc k)) path)
+        ((InRoot)
+          (let e (entry_index (k_entries k) path)
+            (resume_with k q (if (lt e 0) -3 (if (entry_is_dir (k_entry k e)) -8 -4)))))
+        ((InVolumes) (resume_with k q -8))
+        ((InNothing direct) (resume_with k q -3))
+        ((InServer port) (ask_fs k q port (fs_op_word) 0 0 (append "remove " path)))))))
 
 ; Standard output and error go to p's terminal, or are the kernel's own
-; if it has none, or its terminal has gone.
+; if it has none, or its terminal has gone. Streams from 3 are written
+; only if they are a volume's file, by its server.
 (def do_write ((k Kernel) (p Proc) (s int) (buf int) (n int)) Step
-  (if (if (not (any_eq s (cons 1 (cons 2 (nil int))))) true (lt n 0))
+  (if (lt n 0)
       (resume_with k p -5)
-      (if (if (eq (proc_tty_port p) 0) true (lt (ipc_owner (k_ipc k) (proc_tty_port p)) 1))
-          (write_own k p s buf n)
-          (if (eq n 0) (resume_with k p 0) (write_tty k p (proc_tty_port p) buf n)))))
+      (if (not (any_eq s (cons 1 (cons 2 (nil int)))))
+          (write_stream k p s buf n)
+          (if (if (eq (proc_tty_port p) 0) true (lt (ipc_owner (k_ipc k) (proc_tty_port p)) 1))
+              (write_own k p s buf n)
+              (if (eq n 0) (resume_with k p 0) (write_tty k p (proc_tty_port p) buf n))))))
+
+(def write_stream ((k Kernel) (p Proc) (s int) (buf int) (n int)) Step
+  (match (proc_open_file p s)
+    ((None) (resume_with k p -5))
+    ((Some f)
+      (match f
+        ((Open e offset) (resume_with k p -5))
+        ((OpenRemote port h) (write_remote k p port h buf n))))))
+
+; ---------------------------------------------------------------- volumes
+
+; A volume's files are its server's, which the kernel asks on a
+; process's behalf with the fs protocol's requests (user/lib/fs.l0), sent
+; as from the process, so the server knows whose handles they are. Each
+; reply begins with a word, s32, then the bytes of a read; the process
+; waits for it on a port made for that one reply.
+
+; What a process waiting for a file server does with its answer: opens a
+; stream on the handle, takes a read's bytes, takes a write's count,
+; closes the stream its buf names, or takes the word.
+(def fs_op_open () int 1)
+(def fs_op_read () int 2)
+(def fs_op_write () int 3)
+(def fs_op_close () int 4)
+(def fs_op_word () int 5)
+
+; The most bytes a read reply carries: a message, less its word.
+(def fs_chunk () int (sub (max_message) 4))
+
+; body sent to the server at port as p's request, its reply to a port
+; made for it, and p waiting for the reply, to do op with it, buf and n;
+; if the server's queue is full, p blocked until there is room, to make
+; its call again; or -5 if the server has gone.
+(def ask_fs ((k Kernel) (p Proc) (server int) (op int) (buf int) (n int) (body (list int))) Step
+  (match (ipc_port_new (k_ipc k) (proc_pid p))
+    ((NewPort r i2)
+      (match (k_send (with_ipc k i2) server (Msg (proc_pid p) (bytes_from_list (request_to r body))))
+        ((KSent k2 code)
+          (if (eq code 0)
+              (Park k2 (proc_set_state p (AwaitingFs server r op buf n)))
+              (let k3 (with_ipc k2 (ipc_close (k_ipc k2) (proc_pid p) r))
+                (if (eq code (err_full)) (block_on k3 p server) (resume_with k3 p -5)))))))))
+
+; A volume's file opened: a stream, once its server says, or -5 if p has
+; open_limit open already.
+(def open_remote ((k Kernel) (p Proc) (server int) (path (list int)) (mode int)) Step
+  (if (proc_files_full p)
+      (resume_with k p -5)
+      (ask_fs k p server (fs_op_open) 0 0 (append "open " (append (digits mode) (cons 32 path))))))
+
+; At most n bytes of handle h read into buf, as the server gives them.
+(def read_remote ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
+  (if (eq n 0)
+      (resume_with k p 0)
+      (ask_fs k p server (fs_op_read) buf n
+              (append "read " (append (digits h) (cons 32 (digits (min n (fs_chunk)))))))))
+
+; As much of the n bytes at buf as a request holds written to handle h.
+(def write_remote ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
+  (if (eq n 0)
+      (resume_with k p 0)
+      (let prefix (append "write " (append (digits h) " "))
+        (let cnt (min n (sub (sub (max_message) 4) (length prefix)))
+          (match (proc_copy_out p buf cnt)
+            ((CopyOutBad q) (resume_with k q -5))
+            ((CopiedOut q b) (ask_fs k q server (fs_op_write) 0 cnt (append prefix (bytes_to_list b)))))))))
+
+; q, waiting for the server at server, given its reply on reply now that
+; one has come: from the server's owner, or else dropped and q left
+; waiting, since anyone may send to any port.
+(def fs_reply_in ((k Kernel) (q Proc) (server int) (reply int) (op int) (buf int) (n int)) Kernel
+  (match (ipc_peek (k_ipc k) reply)
+    ((None) (restore k q))
+    ((Some m)
+      (match m
+        ((Msg from payload)
+          (if (not (eq from (ipc_owner (k_ipc k) server)))
+              (restore (with_ipc k (ipc_drop (k_ipc k) reply)) q)
+              (park (with_ipc k (ipc_close (k_ipc k) (proc_pid q) reply))
+                    (proc_set_state (fs_answered q server op buf n payload) (Ready)))))))))
+
+; q answered as the server's reply b says, for op: -5 if it is not one.
+; A close's stream goes whatever the answer.
+(def fs_answered ((q0 Proc) (server int) (op int) (buf int) (n int) (b bytes)) Proc
+  (let q (fs_closing q0 op buf)
+    (if (lt (bytes_len b) 4)
+        (proc_answer q -5)
+        (fs_worded q server op buf n b (s32 (le_u32 b 0))))))
+
+; q, without stream s if op is a close.
+(def fs_closing ((q Proc) (op int) (s int)) Proc
+  (if (eq op (fs_op_close)) (match (proc_close q s) ((ClosedFile r was) r)) q))
+
+; q answered for op, the reply b's word being w.
+(def fs_worded ((q Proc) (server int) (op int) (buf int) (n int) (b bytes) (w int)) Proc
+  (if (lt w 0)
+      (proc_answer q (if (lt w -10) -5 w))
+      (if (eq op (fs_op_open))
+          (match (proc_open_remote q server w) ((Opened r s) (proc_answer r s)))
+          (if (eq op (fs_op_read))
+              (fs_read_in q buf n w b)
+              (if (eq op (fs_op_write))
+                  (proc_answer q (if (if (lt w 1) true (gt w n)) -5 w))
+                  (proc_answer q w))))))
+
+; q given the w bytes of a read's reply b after its word, at most n, at
+; buf: how many, or -5 if q may not take them there.
+(def fs_read_in ((q Proc) (buf int) (n int) (w int) (b bytes)) Proc
+  (let cnt (min w (min n (sub (bytes_len b) 4)))
+    (match (proc_copy_in q buf b 4 (add 4 cnt))
+      ((CopyInBad r) (proc_answer r -5))
+      ((CopiedIn r) (proc_answer r cnt)))))
+
+; The volume label, the len bytes at buf, mounted from port, p's, at
+; /Volumes/LABEL: 0, or err_no_port if port is not p's, err_taken if
+; label is mounted already, err_fault if it is no label or p may not
+; give it.
+(def do_mount ((k Kernel) (p Proc) (port int) (buf int) (len int)) Step
+  (if (if (lt len 1) true (gt len 15))
+      (resume_with k p (err_fault))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (resume_with k q (err_fault)))
+        ((CopiedOut q b)
+          (match (ipc_mount (k_ipc k) (proc_pid q) port (bytes_to_list b))
+            ((Registered code i2) (resume_with (with_ipc k i2) q code)))))))
+
+; Mount i's record copied to buf, if it fits in max: its length, or
+; err_no_port if there is no mount i, err_too_big if it does not fit.
+(def do_mount_at ((k Kernel) (p Proc) (i int) (buf int) (max int)) Step
+  (match (mounts_at (ipc_mounts (k_ipc k)) i)
+    ((None) (resume_with k p (err_no_port)))
+    ((Some m) (give_record k p (mount_record m) buf max))))
 
 (def write_own ((k Kernel) (p Proc) (s int) (buf int) (n int)) Step
   (let cnt (min n (io_chunk))

@@ -75,8 +75,9 @@ output and error are its. The demo's [inittab](demo/etc/inittab) starts:
 | 6 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
 | 7, 8 | `vt`, `vt` | the windows' terminals, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
 | 9 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
-| 10 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `run disk` |
-| 11, 12 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not the inittab, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
+| 10 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
+| 11 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
+| 12, 13 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not the inittab, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -102,7 +103,7 @@ Each shell shows [/etc/motd](demo/etc/motd), then its prompt:
 
 ```
 Welcome to L0S, booted from an initramfs.
-Programs are in /bin; try ls, run hello, run cat /etc/inittab, ps.
+Programs are in /bin, the disk's files in /Volumes; try ls, df, run hello, ps.
 Two more shells run in windows in QEMU's: click one, and type there.
 Drag a window by its title bar; run windows lists them; try run widgets &.
 Draw on the desktop: run draw circle 640 400 300 cyan; run draw for more.
@@ -117,6 +118,7 @@ l0s> ls
   /etc/inittab
   /etc/motd
   /etc/splash.ppm
+  /Volumes/data/notes
 l0s> run echo &
 [pid 3 running]
 l0s> run ping
@@ -135,11 +137,41 @@ one running in the background:
 - Only a final `&` means the background. An `&` anywhere else is passed
   along as an argument.
 
-Any other word must be one of the shell's own commands (`help`, `ls`, `ps`,
-`wait`, `kill`, `sleep`, `echo`, `exit`), so a program can never be
-mistaken for a command. Here `echo` is both a command and a program: the
-command prints, and `run echo &` starts the server. A bare program name gets
-a hint: `sh: no command hello; to run the program, type run hello`.
+Any other word must be one of the shell's own commands (`help`, `ps`,
+`wait`, `kill`, `sleep`, `echo`, `exit`, and those on files below), so a
+program can never be mistaken for a command. Here `echo` is both a
+command and a program: the command prints, and `run echo &` starts the
+server; `cat` is too. A bare program name gets a hint: `sh: no command
+hello; to run the program, type run hello`.
+
+The commands on files are the shell's own, as busybox's are. They make
+the ordinary file calls, so they work on any file: the initramfs's,
+which refuse every change (`permission denied`), and the disk's, under
+[/Volumes](#volumes):
+
+| Command | Does |
+|---|---|
+| `ls [PATH ...]` | with no path, every file of the initramfs, then of each volume; else each directory's names (`/`, `/bin`, `/Volumes`, `/Volumes/data`), a directory's with a final `/`, or a file's path |
+| `cat FILE ...` | shows the files |
+| `write FILE WORDS ...` | makes FILE hold the words, spaced, and a newline |
+| `append FILE WORDS ...` | adds that line to FILE's end, making it if need be |
+| `cp FROM TO` | copies a file; into TO if it is a directory |
+| `mv FROM TO` | renames a file, or moves it into TO if it is a directory; between file systems, as from one volume to another, it copies and then removes |
+| `rm FILE ...` | removes the files |
+| `df` | each volume's size, the room its files take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
+| `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open |
+
+```
+l0s> write /Volumes/data/notes hello disk
+l0s> append /Volumes/data/notes and again
+l0s> cat /Volumes/data/notes
+hello disk
+and again
+l0s> df
+  VOLUME              SIZE    USED    FREE  FILES
+  /Volumes/data       760K      4K    756K      1
+  /Volumes/scratch    252K      0K    252K      0
+```
 
 Things to try:
 - `run hello one two`, and `run ping 5` once `run echo &` has started the
@@ -154,22 +186,25 @@ Things to try:
     PID  PARENT  PROGRAM       STATE
       1       0  sh            running
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 9
-      4       0  virtio-input  waiting for a message on port 7
+      3       0  virtio-gpu    waiting for a message on port 10
+      4       0  virtio-input  waiting for a message on port 9
       5       0  virtio-input  waiting for a message on port 2
-      6       0  wm            waiting for a message on port 11
+      6       0  wm            waiting for a message on port 13
       7       0  vt            waiting for a message on port 3
       8       0  vt            waiting for a message on port 4
       9       0  rtc           sleeping
      10       0  virtio-blk    waiting for a message on port 6
-     11       7  sh            waiting for a message on port 14
-     12       8  sh            waiting for a message on port 15
+     11       0  fs            waiting for a message on port 11
+     12       7  sh            waiting for a message on port 16
+     13       8  sh            waiting for a message on port 17
   ```
 
   It lists the processes that have not exited. The shell asking is always
   `running`, since `ps` runs inside it. A process writing to a terminal
-  whose queue is full shows `writing to port N`, and one reading its
-  standard input from a terminal `reading a line, to port N`.
+  whose queue is full shows `writing to port N`, one reading its
+  standard input from a terminal `reading a line, to port N`, and one
+  whose call on a file of a volume its server has yet to answer
+  `waiting for the file server on port N`.
 - `run rtc`, a driver taking an interrupt.
 - `run windows`, to list the windows, front first, and where the pointer
   is. Each line gives a window's id, title, x, y, width and height, and
@@ -266,8 +301,11 @@ the same change there. It also attaches the virtio-gpu, the virtio
 keyboard and the virtio tablet, on modern transports, as `l0 boot` does
 with `L0_QEMU_ARGS`, and, if `QEMU_DISK` names a raw image, a virtio-blk
 on it. The demo's disk is `build/disk.img`, 1 MB, which
-[tools/mkdisk](tools/mkdisk) makes once, so what is written to it stays
-from one boot to the next; `make clean` resets it. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
+[tools/mkdisk](tools/mkdisk) makes once, with two empty volumes on it,
+so what is written to it stays from one boot to the next; `make clean`
+resets it. A `build/disk.img` made before the file system was, holding
+raw sectors only, has no volumes, and `fs` says so: remove it, and
+`make demo` makes a new one. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
 QMP on sockets, as the screen tests do, to type keys, move the pointer,
 and dump the screen.
 
@@ -494,8 +532,8 @@ and draws only the new row.
 
 `virtio-blk` ([user/virtio-blk](user/virtio-blk/virtio-blk.l0)) drives
 QEMU's virtio-blk: the demo's `build/disk.img`, 2048 sectors of 512
-bytes. It serves `disk`, raw sectors with no file system on them yet,
-to clients through **the disk protocol**
+bytes. It serves `disk`, raw sectors, to clients, `fs` above all,
+through **the disk protocol**
 ([user/lib/disk.l0](user/lib/disk.l0)). As with the display, no sector
 travels in a message. A client shares a buffer of its own pages with the
 driver (`shm_share`), and the device reads or writes those pages itself,
@@ -516,7 +554,105 @@ with the driver, or the device's own failure.
 
 `run disk info`, `run disk read SECTOR [COUNT]` (shown as `hexdump -C`
 shows bytes) and `run disk write SECTOR WORDS...` use it from a shell.
-`tools/mkdisk` makes a fresh disk's sector 0 begin `L0S disk`.
+Sectors 1 to 7 of a disk `tools/mkdisk` makes belong to no volume, so a
+`disk write` there harms no file.
+
+### Volumes
+
+A disk holds **volumes**, each a partition of it with a file system of
+L0S's own, L0FS ([user/lib/l0fs.l0](user/lib/l0fs.l0)), and a label.
+`fs` mounts each at `/Volumes/LABEL`, as macOS mounts disks, and the
+kernel sends every call on a file there to it, so every program reads
+and writes them with the ordinary `open_in`, `open_out` and the rest:
+`run cat /Volumes/data/notes` works as `run cat /etc/motd` does.
+
+The disk, as [tools/mkdisk](tools/mkdisk) makes it with
+[tools/mkfs](tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS
+LABEL:START:COUNT...`, a host program, built into `build/mkfs`):
+
+| Sectors | What |
+|---|---|
+| 0 | an MBR, its four entries at 446, `55 AA` at 510: here two partitions of type `0x4C` |
+| 1–7 | nothing |
+| 8–1535 | the volume `data`, 1528 sectors: 190 clusters of data, 760 KB |
+| 1536–2047 | the volume `scratch`, 512 sectors: 63 clusters, 252 KB |
+
+A volume, its sectors counted from its partition's first, in clusters of
+8 sectors, 4 KB:
+
+| Where | What |
+|---|---|
+| sector 0 | the superblock: `L0FS`, version 1, the label (1 to 15 letters, digits, `-`, `_`) in 16 bytes from 8, then u32s from 24: its sectors, clusters, the table's first sector and sectors, the directory's, the first cluster of data, and the entries |
+| sector 1 on | the cluster table, a u16 a cluster, a sector for each 256: 0 free, `FFFF` a file's last, `FFFE` the metadata's, else the file's next cluster, so each file is a chain, as in FAT |
+| the next 6 sectors | the directory, flat: 48 entries of 64 bytes, a name of 1 to 55 printable bytes with no space or `/`, NUL padded in 56, the size at 56, the first cluster at 60 (0 for an empty file), and 1 at 62 if the entry is in use |
+| from the first cluster after these | the files' data |
+
+The superblock, table and directory, rounded up to whole clusters, are
+the metadata: for these volumes cluster 0, one 8-sector read. A volume
+holds at most 65534 clusters, so 256 MB. `fs` checks all of it, the
+layout against the size, every mark of the table and every file's chain
+against its size, before it serves a volume, so a damaged disk is
+refused rather than followed.
+
+**The mount table** ([kernel/mounts.l0](kernel/mounts.l0)) is a list
+whose first mount is the initramfs at `/`, which the kernel answers for
+itself; after it come the volumes, each at `/Volumes/LABEL` from the
+port of the server that mounted it with `fs_mount`. They go when that
+port does. `/Volumes` itself is always there, a directory holding only
+the volumes: nothing can be made in it, only in one of them. The kernel
+takes a path, made absolute, to where it is mounted:
+
+- the initramfs: answered as [Calls 1–10](#calls-110-the-process-abi-of-spec-103) say;
+- `/Volumes`: a directory, -8; straight in it, nothing there, -3, and
+  nothing can be made, -4; in a volume not mounted, -3, or -9 to write;
+- a volume: its server is sent the call as a request of the fs protocol,
+  below, *from the calling process*, and the process waits for the reply
+  on a port the kernel makes for it, which goes once the reply has come.
+  ps shows it `waiting for the file server on port N`. A rename between
+  two mounts is -10, another file system, as is one between the
+  initramfs and a volume. A file opened is a stream of the process's
+  like any other, which holds the server's handle. If the server's queue
+  is full, the process waits for room and calls again; if the server
+  goes, every process waiting for it is answered -5, and so is any later
+  call on its files. Only the server's own reply is taken: anything else
+  sent to the reply port is dropped.
+
+**The fs protocol** ([user/lib/fs.l0](user/lib/fs.l0)) is what a file
+server serves on the port it mounts from. The kernel sends the first
+six; programs send `list`, `df` and `format` themselves, to the port
+`mount_at` gives, as `ls`, `df` and `format` in the shell do.
+
+| Request | Reply |
+|---|---|
+| `open MODE PATH` | MODE 1 to read, 2 to write anew, 3 to add to the end, making the file if it is not there: a handle |
+| `read H N` | at most N bytes of handle H from where it is, those of one cluster: the count, then the bytes; 0 at the end |
+| `write H BYTES` | BYTES written to H, at its end for mode 3: how many, all of them, or -6 if the volume has no room |
+| `close H` | 0 |
+| `rename FROM TO` | 0, a file named TO replaced, unless it is open, -4; both in one volume, else -10 |
+| `remove PATH` | 0, unless the file is open, -4 |
+| `list VOLUME` | how many files, then a line `NAME SIZE` for each, by name |
+| `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files |
+| `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open |
+
+Each is a request (`request` in `l0s.l0`), its words separated by
+spaces; a PATH is whole, `/Volumes/LABEL/NAME`, and a VOLUME
+`/Volumes/LABEL`, so one port serves every volume. The reply is a word,
+a little-endian s32, then any bytes: a count, a handle, or a negative
+code, as spec §6.3's I/O builtins give them (-3 no such file, -4 denied,
+-5 any other failure, -6 no space, -8 a directory, -9 no such
+directory, -10 another file system). A handle is the pid that opened
+it, the sender, so a process can use only its own.
+
+**`fs`** ([user/fs](user/fs/fs.l0)) opens the disk with a buffer of a
+cluster, reads the partition table, checks and loads each volume's
+metadata, mounts each by its label from one port, and then registers
+that port as `fs`, so that a program can wait for every volume with
+`name_wait`. It keeps the metadata in memory and writes it back after
+the data whenever it changes. It reads only the sectors a read needs,
+and reads a sector before a write only where the write keeps some of
+its bytes. It watches each process that opens a file, and drops its
+handles when it exits. With no disk, or no volume on it, it says so and
+exits 0.
 
 ## How it boots
 
@@ -553,7 +689,7 @@ exits; the kernel then exits with pid 1's status.
 
 Device authority comes only from `dev` lines. The demo grants it to `uart`,
 `rtc`, `virtio-gpu`, `virtio-input` and `virtio-blk`, so the shell can start `rtc`
-without having it itself. `wm` and `vt` have none: they reach only
+without having it itself. `wm`, `vt` and `fs` have none: they reach only
 memory they share.
 
 ## The kernel
@@ -588,7 +724,8 @@ with random registers.
 | `common/queue.l0` | a FIFO queue of any type, shared with user programs |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
 | `kernel/memory.l0` | what each address is for; which pages to map before a copy; where device regions and DMA pages go; which frames to free when a process ends |
-| `kernel/ipc.l0` | ports, their message queues, and names |
+| `kernel/mounts.l0` | the mount table: the initramfs at `/` and the volumes at `/Volumes/LABEL`, where a path's file is, and where a rename goes |
+| `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
 | `kernel/syscall.l0` | a trapped context decoded into a `Call` |
@@ -702,15 +839,18 @@ back in `x0`. From L0, use the wrappers in `user/lib/l0s.l0`.
 
 ### Calls 1–10: the process ABI of spec §10.3
 
-The kernel answers these itself. The initramfs is a read-only file system:
+The kernel answers these itself for the initramfs, a read-only file
+system, and for a file of a volume under `/Volumes` sends them to the
+volume's file server, as [Volumes](#volumes) says, its answer the
+call's:
 
 | Call | What the kernel does |
 |---|---|
-| open | to read: a new stream (3 and up), or -3 no such file, -8 a directory, -5 if the process has 16 open. To write: -8 a directory, -4 where the directory exists, -9 where it does not. A relative path is taken from `/` |
-| read | stream 0 reads a line from the process's terminal, if it has one (see Terminals), and otherwise the inittab's `stdin` file, with one cursor for everyone. Other streams read the file opened on them, from where the process left off, 0 at the end |
-| close | 0, or -5 for a stream that isn't open |
-| rename, remove | -3 if there's no such file; otherwise -4 (-8 to remove a directory) |
-| write | streams 1 and 2 go to the process's terminal, if it has one, at most 4091 bytes per call, waiting while its queue is full; otherwise to the kernel's stdout and stderr, at most 64 KiB per call |
+| open | modes 1 to 3, else -5. In the initramfs, to read: a new stream (3 and up), or -3 no such file, -8 a directory, -5 if the process has 16 open. To write: -8 a directory, -4 where the directory exists, -9 where it does not. In a volume: a new stream, once its server opens the file. A relative path is taken from `/` |
+| read | stream 0 reads a line from the process's terminal, if it has one (see Terminals), and otherwise the inittab's `stdin` file, with one cursor for everyone. Other streams read the file opened on them, from where the process left off, 0 at the end; a volume's at most 4092 bytes a call |
+| close | 0, or -5 for a stream that isn't open; a volume's file is closed by its server too |
+| rename, remove | in the initramfs, -3 if there's no such file; otherwise -4 (-8 to remove a directory). In a volume, as its server says; between two file systems, -10 |
+| write | streams 1 and 2 go to the process's terminal, if it has one, at most 4091 bytes per call, waiting while its queue is full; otherwise to the kernel's stdout and stderr, at most 64 KiB per call. A stream open on a volume's file is written by its server, a message's worth a call; any other is -5 |
 | exit | the process ends with that status |
 | arg_count, arg | the process's arguments: those it was spawned with by `spawn_entry_with`, or else the inittab's `args` for it |
 | region | maps device registers for programs with a `dev` line, so `open_device` works, or for a range of the caller's DMA pages, returns where they are; -3 for any other |
@@ -759,6 +899,8 @@ otherwise as its type's first failure.
 | 280 | `proc_slot i` | `Slot`: `SlotHeld`, `SlotUnused`, `NoSlot` | the pid slot i of the process table holds, live or exited, or last held; 0 if it has held none; -1 for no slot i, outside 1 to 255 |
 | 281 | `shm_unmap va n` | `ShmUnmap`: `ShmUnmapped`, `ShmUnmapNotYours`, `ShmUnmapTooMany` | 0, the caller's n shared or DMA pages from va unmapped, each frame freed once no process maps it; -4 n below 1 or over 4096, -5 pages that are not the caller's, when none is unmapped |
 | 282 | `shm_revoke va n pid` | `ShmRevoke`: `ShmRevoked`, `ShmRevokeNoProc`, `ShmRevokeDenied`, `ShmRevokeTooMany`, `ShmRevokeNotYours` | how many mappings pid had of the caller's n shared or DMA pages from va, all now unmapped; -1 no such pid, -6 pid is the caller or drives devices, -4 n below 1 or over 4096, -5 pages that are not the caller's |
+| 283 | `fs_mount label port` | `Mounting`: `Mounted`, `MountNoPort`, `MountTaken`, `MountBadLabel` | 0, the caller's volume label mounted at `/Volumes/LABEL` from port, whose server is sent every call on a file there (see [Volumes](#volumes)) until the port goes; -1 not the caller's port, -2 the label is mounted already, -5 no label (1 to 15 letters, digits, `-`, `_`) |
+| 284 | `mount_at i`, `mount_list` | `(Option MountInfo)` | mount i of the table, from 0, the initramfs at `/`: where it is and the port of its server, 0 for the kernel's own; none past the last. `mount_list` gives them all |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -782,10 +924,10 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 
 | Program | What it does |
 |---|---|
-| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; lists files, runs programs by name or path, on its terminal, and waits for them, with Ctrl-C for the foreground job; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
+| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `df` and `format`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font, in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
-| `cat` | writes the files its arguments name, through the ordinary `open_in`; reports each it can't read, and exits 1 if any |
+| `cat` | writes the files its arguments name, through the ordinary `open_in`, the initramfs's or a volume's; reports each it can't read, and exits 1 if any |
 | `hello` | prints its pid and arguments, and answers a line: typed at its terminal, with `console_line` |
 | `init` | starts the programs its arguments name (`NAME&` runs one in the background), waits for the rest, and reports each one's status |
 | `echo` | a server: registers as `echo` and sends every request's body back |
@@ -797,6 +939,7 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
+| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL` and serves the fs protocol for them, the kernel's requests for every program's file calls there and `list`, `df` and `format`; then registers as `fs`. With no disk, or no volume on it, it says so on stderr and exits 0 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, and serves `compositor`. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round` and `button`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
@@ -810,14 +953,16 @@ Makefile's `LIBS_` lists:
 
 | Library | What it holds | Linked into |
 |---|---|---|
-| [l0s.l0](user/lib/l0s.l0) | the call wrappers; requests; `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register | every program |
+| [l0s.l0](user/lib/l0s.l0) | the call wrappers; requests; `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount` and the mount table | every program |
 | [tty.l0](user/lib/tty.l0) | a terminal's line editing and protocol | every program |
 | [virtio.l0](user/lib/virtio.l0) | the transports' registers, finding a device by ID, negotiating, setting up a queue, descriptors, and waiting for the device to use a request (`virtq_wait`) | every program |
 | [render.l0](user/lib/render.l0) | drawing into a buffer of pixels: shapes, the font, PPM images, the wallpaper, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets` |
 | [display.l0](user/lib/display.l0) | the display protocol, as a client sends it | `wm` |
 | [wm.l0](user/lib/wm.l0) | the compositor protocol, as a client sends it | `vt`, `windows`, `widgets` |
 | [clock.l0](user/lib/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm` |
-| [disk.l0](user/lib/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk` |
+| [disk.l0](user/lib/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs` |
+| [l0fs.l0](user/lib/l0fs.l0) | the file system on a disk, as bytes: the MBR, a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `tools/mkfs` |
+| [fs.l0](user/lib/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives | `fs`, `sh` |
 | [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets` (both) |
 
 ## Tests
@@ -825,7 +970,7 @@ Makefile's `LIBS_` lists:
 | Command | What it runs |
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
-| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts and the file calls a volume's server answers, its request, its answer, and its going, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), and the process monitor (`tests/procmon.sh`) |
 
 Each case of `tests/e2e/` is a directory:
@@ -839,7 +984,7 @@ Each case of `tests/e2e/` is a directory:
   `tools/mkdisk` for each run.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Ten cases type a session through
+`etc`, boots it, and compares. Eleven cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -863,13 +1008,22 @@ Ctrl-C as a person would:
   serving: it found its device, set up its queue, and bound its
   interrupt;
 - `virtio-blk`, on a disk of its own, has `disk` show the disk's size
-  and its first sector as `tools/mkdisk` made it, write a sector and
-  read it back, read the last sector, and be refused one past it.
+  and its first sector as `tools/mkdisk` made it, the partition table,
+  write a sector and read it back, read the last sector, and be refused
+  one past it;
+- `fs`, on a disk of its own, starts the file server and has the shell
+  show `df` and `ls /Volumes`; `write` a file and `cat` it back, `append`
+  to it and read it with `run cat`, a program, so through the kernel;
+  `cp` it into the other volume, `mv` it within a volume and across
+  volumes, `ls` everything, `rm` it; be refused a `write` to the
+  initramfs; `cp` a file of the initramfs to a volume; and `format` a
+  volume, `ls` showing it empty.
 
 `files` reads the initramfs through `cat`. `virtio-gpu_nodev` and
 `virtio-blk_nodev` start a driver with no `dev` line, which is refused
-the device, and `virtio-blk_nodisk` the disk's driver on a board with no
-disk, which is no failure. `garbage`
+the device, `virtio-blk_nodisk` the disk's driver on a board with no
+disk, and `fs_nodisk` the file server there, neither of which is a
+failure. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
 shows, a virtio keyboard, and a virtio tablet; only a case with a `disk`
@@ -965,12 +1119,22 @@ fault, pass a bad buffer, and wait on nothing.
   MB of them though its memory is freed.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
-- **The file system is the initramfs, read-only.** Nothing can be written,
-  renamed or removed. Directories can't be listed except through
-  `entry_paths`, which lists everything. There is no current directory, so
-  a relative path is taken from `/`. A writable file server could later
-  take these calls over IPC. The disk (see [The disk](#the-disk)) holds
-  raw sectors only, with no file system on it yet.
+- **The initramfs is read-only.** Nothing in it can be written, renamed
+  or removed. There is no current directory, so a relative path is taken
+  from `/`. No call lists a directory: the initramfs's are `entry_paths`,
+  which lists everything, and a volume's its server's `list`.
+- **The volumes are small and simple** (see [Volumes](#volumes)). Each
+  has one flat directory of at most 48 files, with names of at most 55
+  bytes and no spaces, and no subdirectories, permissions or times; at
+  most 65534 clusters of 4 KB; and a disk at most the MBR's four. One
+  file server, `fs`, serves the first disk's volumes, one request at a
+  time, and a read moves at most a cluster. A write is as safe as the
+  order it is made in, its data and then the metadata, and no more: a
+  crash between the two loses the write's changes to the file's size
+  and chain, and the disk's own cache is never flushed. A file open
+  cannot be removed or renamed over, where Unix would let it go once
+  closed. Any process may mount a label no one has, as any may register
+  a name, and nothing unmounts a volume but its server's port going.
 - **The disk is one virtio-blk, one request at a time.** `virtio-blk`
   drives the first disk on the board, polls for each request rather than
   taking the interrupt, and moves at most 128 sectors a request. It

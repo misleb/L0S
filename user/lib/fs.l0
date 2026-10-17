@@ -1,0 +1,161 @@
+; fs.l0 -- the fs protocol: what a file server, user/fs here, serves on
+; the port it mounts its volumes from (fs_mount in l0s.l0). The kernel
+; sends the first six for every call a process makes on a file under
+; /Volumes/LABEL, as from that process; a program sends the last three
+; itself, to the port mount_at gives.
+;
+;   open MODE PATH     opens PATH, 1 to read, 2 to write it anew, 3 to
+;                      add to its end: a handle
+;   read H N           at most N bytes of handle H, from where it is: the
+;                      count, then the bytes; 0 at the end
+;   write H BYTES      BYTES written to H: how many
+;   close H            0
+;   rename FROM TO     0; both in one volume
+;   remove PATH        0
+;   list VOLUME        how many files, then NAME SIZE\n for each, by name
+;   df VOLUME          0, then SECTORS CLUSTERS FREE FILES: the volume's
+;                      sectors, its clusters of data, those free, and
+;                      how many files it has
+;   format VOLUME      0, and the volume empty
+;
+; Each is a request (l0s.l0), its words separated by spaces, a PATH and a
+; VOLUME whole, /Volumes/LABEL/NAME and /Volumes/LABEL. The reply is a
+; word, s32, then any bytes: a count or a handle, or a negative code as
+; spec section 6.3's I/O builtins give them (-3 no such file, -4 denied,
+; -5 any other failure, -6 no space, -8 a directory, -9 no such
+; directory, -10 another file system). Handles are the sender's, so a
+; process can use only those it opened. Linked into user/fs and sh.
+
+; A reply: its word, and the bytes after it.
+(data FsReply (FsReply int (list int)))
+
+; A reply as it is sent.
+(def fs_reply_bytes ((word int) (rest (list int))) (list int)
+  (append (u32_le word) rest))
+
+; A reply as it came, or -5 if it is too short to be one.
+(def fs_reply_of ((b (list int))) FsReply
+  (let bs (bytes_from_list b)
+    (if (lt (bytes_len bs) 4)
+        (FsReply -5 (nil int))
+        (FsReply (s32 (le_u32 bs 0)) (bytes_range bs 4 (bytes_len bs))))))
+
+; The reply to body, sent to port with its reply to rp; -5 if none came.
+(def fs_ask ((port int) (rp int) (body (list int))) FsReply
+  (match (port_send port (request rp body))
+    ((Sent)
+      (match (port_receive rp)
+        ((Message from payload) (fs_reply_of payload))
+        ((RecvFailed) (FsReply -5 (nil int)))))
+    ((SendNoPort) (FsReply -5 (nil int)))
+    ((SendFull) (FsReply -5 (nil int)))
+    ((SendTooBig) (FsReply -5 (nil int)))))
+
+; ----------------------------------------------------------------- paths
+
+; The volume a path is in, /Volumes/LABEL, or empty if it is in none.
+(def fs_volume_of ((path (list int))) (list int)
+  (if (not (starts_with path "/Volumes/"))
+      ""
+      (let label (fs_label_part (drop_n path 9))
+        (if (is_empty label) "" (append "/Volumes/" label)))))
+
+(def fs_label_part ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head s) 47) (nil int) (cons (head s) (fs_label_part (tail s))))))
+
+; The port the volume at path, /Volumes/LABEL, is served from, by the
+; kernel's mount table, or 0 if it is not mounted.
+(def fs_port_of ((volume (list int))) int
+  (fs_port_in (mount_list) volume))
+
+(def fs_port_in ((ms (list MountInfo)) (volume (list int))) int
+  (if (is_empty ms)
+      0
+      (match (head ms) ((MountInfo path port) (if (eq path volume) port (fs_port_in (tail ms) volume))))))
+
+; The volumes mounted, /Volumes/LABEL each, in the table's order.
+(def fs_volumes () (list (list int))
+  (fs_volumes_in (mount_list)))
+
+(def fs_volumes_in ((ms (list MountInfo))) (list (list int))
+  (if (is_empty ms)
+      (nil (list int))
+      (match (head ms)
+        ((MountInfo path port)
+          (if (eq port 0) (fs_volumes_in (tail ms)) (cons path (fs_volumes_in (tail ms))))))))
+
+; --------------------------------------------------------------- volumes
+
+; A file a volume lists: its name and size.
+(data FsStat (FsStat (list int) int))
+
+; What list said: the files, or the code it refused with.
+(data FsListing (FsFiles (list FsStat)) (FsListRefused int))
+
+; The files of the volume at /Volumes/LABEL.
+(def fs_list ((volume (list int))) FsListing
+  (let port (fs_port_of volume)
+    (if (eq port 0)
+        (FsListRefused -3)
+        (match (fs_ask port (port_new) (append "list " volume))
+          ((FsReply w rest) (if (lt w 0) (FsListRefused w) (FsFiles (fs_stats_of rest))))))))
+
+; A list reply's lines as files.
+(def fs_stats_of ((s (list int))) (list FsStat)
+  (rev (fs_stats_onto (fs_lines s (nil int) (nil (list int))) (nil FsStat))))
+
+(def fs_stats_onto ((ls (list (list int))) (acc (list FsStat))) (list FsStat)
+  (if (is_empty ls)
+      acc
+      (let ws (split_spaces (head ls))
+        (fs_stats_onto (tail ls)
+                       (if (eq (length ws) 2) (cons (FsStat (head ws) (int_prefix (head (tail ws)) 0)) acc) acc)))))
+
+; The lines of s, without their newlines.
+(def fs_lines ((s (list int)) (cur (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty s)
+      (rev (if (is_empty cur) acc (cons (rev cur) acc)))
+      (if (eq (head s) 10)
+          (fs_lines (tail s) (nil int) (cons (rev cur) acc))
+          (fs_lines (tail s) (cons (head s) cur) acc))))
+
+; The files as a list reply's bytes: NAME SIZE, a line each.
+(def fs_listing ((fs (list FsStat))) (list int)
+  (rev (fs_listing_onto fs (nil int))))
+
+(def fs_listing_onto ((fs (list FsStat)) (acc (list int))) (list int)
+  (if (is_empty fs)
+      acc
+      (match (head fs)
+        ((FsStat name size) (fs_listing_onto (tail fs) (push "\n" (push (digits size) (push " " (push name acc)))))))))
+
+; What df said of a volume: its sectors, clusters of data, those free,
+; and files; or the code it refused with.
+(data FsSpace (FsSpace int int int int) (FsSpaceRefused int))
+
+; The space of the volume at /Volumes/LABEL.
+(def fs_df ((volume (list int))) FsSpace
+  (let port (fs_port_of volume)
+    (if (eq port 0)
+        (FsSpaceRefused -3)
+        (match (fs_ask port (port_new) (append "df " volume))
+          ((FsReply w rest) (if (lt w 0) (FsSpaceRefused w) (fs_space_of rest)))))))
+
+; A df reply's words as a volume's space.
+(def fs_space_of ((s (list int))) FsSpace
+  (let ws (split_spaces s)
+    (if (not (eq (length ws) 4))
+        (FsSpaceRefused -5)
+        (FsSpace (int_prefix (head ws) 0) (int_prefix (head (tail ws)) 0)
+                 (int_prefix (head (tail (tail ws))) 0) (int_prefix (head (tail (tail (tail ws)))) 0)))))
+
+; A volume's space as df's reply bytes.
+(def fs_space_text ((sectors int) (clusters int) (free int) (files int)) (list int)
+  (append (digits sectors) (append " " (append (digits clusters) (append " " (append (digits free) (append " " (digits files))))))))
+
+; The volume at /Volumes/LABEL emptied: 0, or the code it refused with.
+(def fs_format ((volume (list int))) int
+  (let port (fs_port_of volume)
+    (if (eq port 0)
+        -3
+        (match (fs_ask port (port_new) (append "format " volume)) ((FsReply w rest) w)))))
