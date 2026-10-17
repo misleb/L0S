@@ -1,16 +1,20 @@
 ; mkfs.l0 -- writes a disk image with L0S's file system on it
-; (user/lib/l0fs.l0): an MBR, then each volume given, empty, zeros
-; everywhere else.
+; (user/lib/l0fs.l0): a GPT (user/lib/gpt.l0), then each volume given,
+; empty, zeros everywhere else.
 ;
-;   mkfs OUT SECTORS LABEL:START:COUNT...
+;   mkfs OUT SECTORS MS LABEL:START:COUNT...
 ;
-; Each volume is a partition of type 0x4C from sector START, COUNT
-; sectors, named LABEL; at most four, inside the disk, past sector 0, and
-; none overlapping. tools/mkdisk runs it for the demo's disk and the
-; tests'. A host program, linking common/abi.l0 and user/lib/l0fs.l0.
+; Each volume is a partition of L0FS's type from sector START, COUNT
+; sectors, named LABEL, as its volume is; at most 128, inside the disk's
+; usable sectors, 34 to SECTORS - 34, and none overlapping. The
+; disk and each partition get a UUID of version 7 (user/lib/uuid.l0) of
+; MS, the Unix time in milliseconds, which the caller gives, since a host
+; program has no other: tools/mkdisk runs it for the demo's disk and the
+; tests', with date's. A host program, linking common/abi.l0, uuid.l0,
+; crc32.l0, gpt.l0 and l0fs.l0.
 
 (def usage () (list int)
-  "usage: mkfs OUT SECTORS LABEL:START:COUNT...\n")
+  "usage: mkfs OUT SECTORS MS LABEL:START:COUNT...\n")
 
 (def complain ((why (list int))) int
   (let w (write_err (append "mkfs: " (append why "\n"))) 1))
@@ -60,14 +64,14 @@
 (def is_number ((w (list int))) bool
   (if (is_empty w) false (is_empty (skip_digits w))))
 
-; The plan, if every volume fits: one to four, each with a good label
-; used once and room for data, inside the disk past sector 0, none on
-; another.
+; The plan, if every volume fits: one to the GPT's 128, each with a good
+; label used once and room for data, inside the disk's usable sectors,
+; none on another.
 (def plan_checked ((n int) (vols (list MkVol))) MkPlan
   (if (is_empty vols)
       (MkBad "no volume")
-      (if (gt (length vols) 4)
-          (MkBad "at most four volumes")
+      (if (gt (length vols) (gpt_entry_count))
+          (MkBad "at most 128 volumes")
           (let why (vols_why n vols (nil MkVol))
             (if (is_empty why) (MkPlan n vols) (MkBad why))))))
 
@@ -85,8 +89,8 @@
           (append "a label is 1 to 15 letters, digits, - and _: " label)
           (if (label_used label before)
               (append "a label used twice: " label)
-              (if (if (lt start 1) true (gt (add start count) n))
-                  (append label " is not inside the disk, past sector 0")
+              (if (if (lt start (gpt_first_usable)) true (gt (add start count) (add (gpt_last_usable n) 1)))
+                  (append label (append " is not inside the disk's usable sectors, 34 to " (digits (gpt_last_usable n))))
                   (if (not (vol_layout_ok (vol_layout count)))
                       (append label " is too small for a volume")
                       (if (overlaps start count before)
@@ -110,15 +114,28 @@
 ; Bytes to write at an offset of the image.
 (data Piece (Piece int (list int)))
 
-; What the image holds besides zeros: the MBR, and each volume's
-; metadata, by offset.
-(def pieces ((vols (list MkVol))) (list Piece)
-  (sort (cons (Piece 0 (mbr_encode (parts_of vols))) (metas vols))))
+; What an n-sector image holds besides zeros: the GPT, which disk heads,
+; and each volume's metadata, by offset.
+(def pieces ((n int) (disk Uuid) (ids (list Uuid)) (vols (list MkVol))) (list Piece)
+  (sort (append (gpt_bytes (gpt_pieces n (GptDisk disk (parts_of vols ids)))) (metas vols))))
 
-(def parts_of ((vols (list MkVol))) (list VolPart)
-  (if (is_empty vols)
-      (nil VolPart)
-      (match (head vols) ((MkVol l s c) (cons (VolPart (vol_part_type) s c) (parts_of (tail vols)))))))
+; The GPT's pieces, at their offsets.
+(def gpt_bytes ((ps (list GptPiece))) (list Piece)
+  (if (is_empty ps)
+      (nil Piece)
+      (match (head ps) ((GptPiece sector b) (cons (Piece (mul sector (vol_sector_size)) b) (gpt_bytes (tail ps)))))))
+
+; Each volume as a partition, with the UUID of its place in ids, and its
+; label for its name.
+(def parts_of ((vols (list MkVol)) (ids (list Uuid))) (list GptPart)
+  (if (if (is_empty vols) true (is_empty ids))
+      (nil GptPart)
+      (match (head vols)
+        ((MkVol l s c) (cons (GptPart (gpt_l0fs_type) (head ids) s c l) (parts_of (tail vols) (tail ids)))))))
+
+; n UUIDs of version 7 of time ms, their noise from seed, seed + 1 and on.
+(def uuids ((ms int) (seed int) (n int)) (list Uuid)
+  (if (le n 0) (nil Uuid) (cons (uuid_v7 ms (uuid_noise seed 10)) (uuids ms (add seed 1) (sub n 1)))))
 
 (def metas ((vols (list MkVol))) (list Piece)
   (if (is_empty vols)
@@ -152,20 +169,28 @@
 
 ; The tool: the image argv asks for, written; 0, or 1 and why not.
 (def mkfs ((argv (list (list int)))) int
-  (if (lt (length argv) 3)
+  (if (lt (length argv) 4)
       (complain (drop_last (usage)))
-      (match (plan_of (head (tail argv)) (tail (tail argv)))
-        ((MkBad why) (complain why))
-        ((MkPlan n vols) (made (head argv) n vols)))))
+      (let ms (head (tail (tail argv)))
+        (if (not (is_number ms))
+            (complain "the time is a number of milliseconds")
+            (match (plan_of (head (tail argv)) (tail (tail (tail argv))))
+              ((MkBad why) (complain why))
+              ((MkPlan n vols) (made (head argv) n (int_prefix ms 0) vols)))))))
 
-(def made ((out (list int)) (n int) (vols (list MkVol))) int
-  (match (open_out out)
-    ((IoFailed fault why) (complain (append out (append ": " why))))
-    ((IoOpened f)
-      (let w (write_image f (pieces vols) 0 (mul n (vol_sector_size)) (zero_block))
-        (match (file_close f)
-          ((Done) 0)
-          ((NotDone fault why) (complain (append out (append ": " why)))))))))
+; The image written to out: its UUIDs' noise seeded from the clock.
+(def made ((out (list int)) (n int) (ms int) (vols (list MkVol))) int
+  (let ids (uuids ms (clock_ns) (add 1 (length vols)))
+    (match (open_out out)
+      ((IoFailed fault why) (complain (append out (append ": " why))))
+      ((IoOpened f) (written out f (pieces n (head ids) (tail ids) vols) n)))))
+
+; The pieces of an n-sector image written to f, and f closed.
+(def written ((out (list int)) (f IoFile) (ps (list Piece)) (n int)) int
+  (let w (write_image f ps 0 (mul n (vol_sector_size)) (zero_block))
+    (match (file_close f)
+      ((Done) 0)
+      ((NotDone fault why) (complain (append out (append ": " why)))))))
 
 ; s without its last character.
 (def drop_last ((s (list int))) (list int)

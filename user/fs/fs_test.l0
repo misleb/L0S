@@ -2,9 +2,10 @@
 ; request answers, and what it leaves on the disk.
 
 ; data, sectors 8 to 1535, and scratch, 1536 to 2047, as tools/mkdisk
-; makes them, empty, on a store of memory; the port 7.
+; made them before the disk had a GPT, empty, on a store of memory of
+; 2048 sectors; the port 7.
 (def two () Fs
-  (fs_new (StoreMem ((MapEmpty int (list int)))) 7
+  (fs_new (StoreMem ((MapEmpty int (list int))) 2048) 7
           (array_from (cons (FsVol 8 (vol_new "data" (vol_layout 1528)))
                             (cons (FsVol 1536 (vol_new "scratch" (vol_layout 512))) (nil FsVol)))
                       (FsVol 0 (vol_new "x" (vol_layout 16))))))
@@ -82,7 +83,7 @@
 ; count sectors of f's store from sector.
 (def sectors ((f Fs) (sector int) (count int)) (list int)
   (match f
-    ((Fs s port vols hs next ws)
+    ((Fs s port vols hs next ws cp)
       (match (store_read_all s sector count) ((Got s2 bs) bs) ((GotNot s2 why) why)))))
 
 ; ---------------------------------------------------- refusals and opens
@@ -261,23 +262,30 @@
 
 ; Volumes as tools/mkdisk makes them, empty, and another in scratch's
 ; place.
-(def data_vol () FsVol (FsVol 8 (vol_new "data" (vol_layout 1528))))
-(def scratch_vol () FsVol (FsVol 1536 (vol_new "scratch" (vol_layout 512))))
-(def other_vol () FsVol (FsVol 1536 (vol_new "other" (vol_layout 512))))
+(def data_vol () FsVol (FsVol 40 (vol_new "data" (vol_layout 1496))))
+(def scratch_vol () FsVol (FsVol 1536 (vol_new "scratch" (vol_layout 479))))
+(def other_vol () FsVol (FsVol 1536 (vol_new "other" (vol_layout 479))))
 
 (def vols2 ((a FsVol) (b FsVol)) (list FsVol) (cons a (cons b (nil FsVol))))
 
-; A disk in memory with vols on it: sector 0 the partition table, each
-; volume's metadata where its partition starts.
+; A 2048-sector disk in memory with vols on it: a GPT of their
+; partitions, each volume's metadata where its partition starts.
 (def disk_with ((vols (list FsVol))) Store
-  (metas_on (put_at (StoreMem ((MapEmpty int (list int)))) 0 (mbr_encode (parts_of vols))) vols))
+  (metas_on (table_on (StoreMem ((MapEmpty int (list int))) 2048) (GptDisk (test_uuid 0) (parts_of vols 1))) vols))
 
-(def parts_of ((vols (list FsVol))) (list VolPart)
+(def table_on ((s Store) (d GptDisk)) Store
+  (match (write_table s d) ((Put s2) s2) ((PutNot s2 why) s2)))
+
+; A UUID of version 7 for the tests, the same each run.
+(def test_uuid ((n int)) Uuid (uuid_v7 1760000000000 (uuid_noise n 10)))
+
+(def parts_of ((vols (list FsVol)) (n int)) (list GptPart)
   (if (is_empty vols)
-      (nil VolPart)
+      (nil GptPart)
       (match (head vols)
         ((FsVol start v)
-          (cons (VolPart (vol_part_type) start (match (vol_layout_of v) ((VolLayout n c t d) n))) (parts_of (tail vols)))))))
+          (cons (GptPart (gpt_l0fs_type) (test_uuid n) start (match (vol_layout_of v) ((VolLayout s c t d) s)) (vol_label v))
+                (parts_of (tail vols) (add n 1)))))))
 
 (def metas_on ((s Store) (vols (list FsVol))) Store
   (if (is_empty vols) s (match (head vols) ((FsVol start v) (metas_on (put_at s start (vol_meta v)) (tail vols))))))
@@ -314,7 +322,7 @@
 (def test_rescan_more () int
   (let r (rescan (serving (cons (data_vol) (nil FsVol)) (vols2 (data_vol) (scratch_vol))))
     (add (check_str "scratch new" (rescan_text r) "2:data\nscratch\n|scratch")
-         (check_str "served" (answer_text (obey (rescanned_fs r) 5 "df /Volumes/scratch")) "0:512 63 63 0"))))
+         (check_str "served" (answer_text (obey (rescanned_fs r) 5 "df /Volumes/scratch")) "0:479 58 58 0"))))
 
 ; A volume that has gone is answered as no volume of fs's.
 (def test_rescan_gone () int
@@ -354,10 +362,94 @@
     (add (check_str "nothing yet" (answer_text (obey f 5 "list /Volumes/data")) "-3:")
          (check_str "both new" (rescan_text (rescan f)) "2:data\nscratch\n|data,scratch"))))
 
+; ------------------------------------------------------------ partitions
+
+; A server of both volumes, on a disk that has them.
+(def demo_fs () Fs (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (scratch_vol))))
+
+; A server of nothing, on a blank disk of 2048 sectors.
+(def blank_fs () Fs (fs_new (StoreMem ((MapEmpty int (list int))) 2048) 7 (vols_array (nil FsVol))))
+
+; The bytes of an answer.
+(def answer_bytes ((a Answered)) (list int) (match a ((Answered f w bs) bs)))
+(def answer_word ((a Answered)) int (match a ((Answered f w bs) w)))
+
+; The table on f's disk, as text: each partition's name, first sector
+; and sectors.
+(def table_text ((f Fs)) (list int)
+  (match (read_table (fs_store f))
+    ((NoTable s why) (append "none: " why))
+    ((BadTable s why) (append "bad: " why))
+    ((Table s d) (gpt_parts_text (gpt_parts d)))))
+
+(def gpt_parts_text ((ps (list GptPart))) (list int)
+  (if (is_empty ps) "" (append (gpt_part_text (head ps)) (gpt_parts_text (tail ps)))))
+
+(def gpt_part_text ((p GptPart)) (list int)
+  (match p
+    ((GptPart t u s c n) (append "[" (append n (append "] " (append (digits s) (append "+" (append (digits c) " ")))))))))
+
+; The 6 free sectors before data: a partition there, and its UUID, of
+; version 7, in the answer.
+(def test_partition () int
+  (let a (obey (demo_fs) 5 "partition 6")
+    (add (check_int "made" (answer_word a) 0)
+         (add (check_bool "its UUID" (match (uuid_of_text (answer_bytes a)) ((Some u) (eq (uuid_version u) 7)) ((None) false)) true)
+              (check_str "in the table, after the two" (table_text (after a)) "[data] 40+1496 [scratch] 1536+479 [] 34+6 ")))))
+
+(def test_partition_refused () int
+  (add (check_str "no room" (answer_text (obey (demo_fs) 5 "partition 7")) "-6:no free stretch is that long")
+       (add (check_str "on data" (answer_text (obey (demo_fs) 5 "partition 4 100")) "-6:those sectors are not free")
+            (check_str "not a number" (answer_text (obey (demo_fs) 5 "partition six")) "-5:"))))
+
+; A blank disk gets a table, then the partition where asked.
+(def test_partition_blank () int
+  (let a (obey (blank_fs) 5 "partition 1000 100")
+    (add (check_int "made" (answer_word a) 0)
+         (check_str "a table of one" (table_text (after a)) "[] 100+1000 "))))
+
+; A partition made, then a volume on it, by its UUID: served, and named.
+(def test_mkfs () int
+  (let a (obey (blank_fs) 5 "partition 1000")
+    (let b (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " new")))
+      (add (check_str "made" (answer_text b) "0:new")
+           (add (check_str "named" (table_text (after b)) "[new] 34+1000 ")
+                (check_str "served" (answer_text (obey (after b) 5 "df /Volumes/new")) "0:1000 124 124 0"))))))
+
+; Made by its UUID, it is found again by a rescan, as at the start.
+(def test_mkfs_found () int
+  (let a (obey (blank_fs) 5 "partition 500")
+    (let b (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " kept")))
+      (check_str "rescanned" (rescan_text (rescan (after b))) "1:kept\n|"))))
+
+; mkfs of uuid and label on f, as text.
+(def mkfs_text ((f Fs) (uuid (list int)) (label (list int))) (list int)
+  (answer_text (obey f 5 (append "mkfs " (append uuid (append " " label))))))
+
+(def test_mkfs_refused () int
+  (let a (obey (demo_fs) 5 "partition 6")
+    (let f (after a)
+      (let u (answer_bytes a)
+        (add (check_str "not a UUID" (mkfs_text f "12" "x") "-5:not a UUID")
+             (add (check_str "no such partition" (mkfs_text f (uuid_text (test_uuid 99)) "x") "-3:no partition has that UUID")
+                  (add (check_str "data's, served" (mkfs_text f (uuid_text (test_uuid 1)) "x") "-4:its volume is served; format empties it")
+                       (add (check_str "a label served" (mkfs_text f u "data") "-4:that label is served already")
+                            (add (check_str "a bad label" (mkfs_text f u "a.b") "-5:a label is 1 to 15 letters, digits, - and _")
+                                 (check_str "too small" (mkfs_text f u "tiny") "-6:the partition is too small for a volume"))))))))))
+
+; A header with GPT's signature and nothing else right.
+(def bad_header () (list int) (append "EFI PART" (vol_zeros 504)))
+
+; A table damaged, both copies, is never written over.
+(def test_partition_bad_table () int
+  (let f (blank_fs)
+    (let s (put_at (put_at (fs_store f) 1 (bad_header)) 2047 (bad_header))
+      (check_str "refused" (answer_text (obey (with_store f s) 5 "partition 10")) "-5:a GPT header of another size"))))
+
 ; With no volumes fs goes on to serve, rather than giving up with 0; under
 ; an operating system there is no kernel to register it with, so it fails.
 (def test_serves_none () int
-  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int)))) (nil FsVol))) 1))
+  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int))) 2048) (nil FsVol))) 1))
 
 ; Under an operating system there is no disk.
 (def test_no_disk () int

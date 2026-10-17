@@ -1,0 +1,112 @@
+(def u ((s (list int))) Uuid (match (uuid_of_text s) ((Some x) x) ((None) (uuid_nil))))
+
+(def disk_id () Uuid (u "0199c82c-c07b-7123-8456-0123456789ab"))
+(def data_id () Uuid (u "0199c82c-c07b-7aaa-8bbb-cccccccccccc"))
+(def scratch_id () Uuid (u "0199c82c-c07c-7ddd-8eee-ffffffffffff"))
+
+; The demo's disk: 2048 sectors, data from 40, scratch from 1536 to the
+; last usable sector, 2014.
+(def demo () GptDisk
+  (GptDisk (disk_id)
+    (cons (GptPart (gpt_l0fs_type) (data_id) 40 1496 "data")
+          (cons (GptPart (gpt_l0fs_type) (scratch_id) 1536 479 "scratch") (nil GptPart)))))
+
+(def piece_at ((ps (list GptPiece)) (sector int)) bytes
+  (if (is_empty ps)
+      (bytes_from_list (nil int))
+      (match (head ps) ((GptPiece s b) (if (eq s sector) (bytes_from_list b) (piece_at (tail ps) sector))))))
+
+(def pieces () (list GptPiece) (gpt_pieces 2048 (demo)))
+
+(def read_back ((header bytes) (entries bytes)) GptRead
+  (gpt_disk_of (gpt_header_of header) entries))
+
+(def part_text ((p GptPart)) (list int)
+  (match p
+    ((GptPart ty id s c name)
+      (append name (append " " (append (digits s) (append "+" (append (digits c) (append " " (uuid_text id))))))))))
+
+(def disk_text ((r GptRead)) (list int)
+  (match r
+    ((GptBad why) (append "bad: " why))
+    ((GptGot d) (match d ((GptDisk id ps) (append (uuid_text id) (append "; " (parts_text ps))))))))
+
+(def parts_text ((ps (list GptPart))) (list int)
+  (if (is_empty ps) "" (append (part_text (head ps)) (append "; " (parts_text (tail ps))))))
+
+; ------------------------------------------------------------- the image
+
+(def test_pieces () int
+  (add (check_int "five" (length (pieces)) 5)
+       (add (check_int "the entries, 32 sectors" (bytes_len (piece_at (pieces) 2)) 16384)
+            (check_int "a header a sector" (bytes_len (piece_at (pieces) 2047)) 512))))
+
+; One partition of type EE from sector 1 over the 2047 after it.
+(def test_protective_mbr () int
+  (let b (piece_at (pieces) 0)
+    (add (check_int "its type" (bytes_get b 450) 238)
+         (add (check_int "from sector 1" (le_u32 b 454) 1)
+              (add (check_int "over the rest" (le_u32 b 458) 2047)
+                   (check_int "55 AA" (le_u32 b 508) (mul 43605 65536)))))))
+
+(def test_round_trip () int
+  (check_str "the disk and its partitions"
+    (disk_text (read_back (piece_at (pieces) 1) (piece_at (pieces) 2)))
+    "0199c82c-c07b-7123-8456-0123456789ab; data 40+1496 0199c82c-c07b-7aaa-8bbb-cccccccccccc; scratch 1536+479 0199c82c-c07c-7ddd-8eee-ffffffffffff; "))
+
+; The backup: at the last sector, its entries from 2015, the same table.
+(def test_backup () int
+  (let h (piece_at (pieces) 2047)
+    (add (check_int "it is at 2047" (le_u32 h 24) 2047)
+         (add (check_int "the other at 1" (le_u32 h 32) 1)
+              (add (check_int "its entries from 2015" (le_u32 h 72) 2015)
+                   (check_str "the same table" (disk_text (read_back h (piece_at (pieces) 2015)))
+                              (disk_text (read_back (piece_at (pieces) 1) (piece_at (pieces) 2)))))))))
+
+(def test_header_fields () int
+  (let h (piece_at (pieces) 1)
+    (add (check_int "first usable" (le_u32 h 40) 34)
+         (add (check_int "last usable" (le_u32 h 48) 2014)
+              (check_int "128 entries" (le_u32 h 80) 128)))))
+
+; ------------------------------------------------------------- refusals
+
+(def flipped ((b bytes) (i int)) bytes
+  (bytes_from_list (flip_at (bytes_to_list b) i 0)))
+
+(def flip_at ((xs (list int)) (i int) (k int)) (list int)
+  (if (is_empty xs) xs (cons (if (eq k i) (bit_xor (head xs) 1) (head xs)) (flip_at (tail xs) i (add k 1)))))
+
+(def test_refused () int
+  (add (check_str "no table" (disk_text (read_back (bytes_from_list (gpt_zeros 512)) (piece_at (pieces) 2))) "bad: no GPT on the disk")
+       (add (check_str "a header changed" (disk_text (read_back (flipped (piece_at (pieces) 1) 40) (piece_at (pieces) 2)))
+                       "bad: the GPT header's CRC-32 is wrong")
+            (check_str "an entry changed" (disk_text (read_back (piece_at (pieces) 1) (flipped (piece_at (pieces) 2) 100)))
+                       "bad: the GPT entries' CRC-32 is wrong"))))
+
+; ---------------------------------------------------------------- placing
+
+(def rooms_text ((rs (list GptRoom))) (list int)
+  (if (is_empty rs) "" (match (head rs) ((GptRoom s c) (append (digits s) (append "+" (append (digits c) (append " " (rooms_text (tail rs))))))))))
+
+(def test_free () int
+  (add (check_str "the demo's, before data" (rooms_text (gpt_free 2048 (gpt_parts (demo)))) "34+6 ")
+       (check_str "an empty disk's usable sectors" (rooms_text (gpt_free 2048 (nil GptPart))) "34+1981 ")))
+
+(def place_text ((p GptPlace)) (list int)
+  (match p ((GptAt s) (digits s)) ((GptNoRoom why) why)))
+
+(def test_place () int
+  (add (check_str "the first stretch it fits" (place_text (gpt_place 2048 (gpt_parts (demo)) 6 -1)) "34")
+       (add (check_str "too long" (place_text (gpt_place 2048 (gpt_parts (demo)) 7 -1)) "no free stretch is that long")
+            (add (check_str "where asked" (place_text (gpt_place 2048 (nil GptPart) 100 500)) "500")
+                 (add (check_str "on another" (place_text (gpt_place 2048 (gpt_parts (demo)) 4 100)) "those sectors are not free")
+                      (check_str "none" (place_text (gpt_place 2048 (nil GptPart) 0 -1)) "a partition has at least a sector"))))))
+
+(def test_part_of () int
+  (add (check_bool "found" (eq (gpt_part_of (gpt_parts (demo)) (scratch_id))
+                               (Some (GptPart (gpt_l0fs_type) (scratch_id) 1536 479 "scratch"))) true)
+       (check_bool "not" (eq (gpt_part_of (gpt_parts (demo)) (disk_id)) ((None GptPart))) true)))
+
+(def test_l0fs_type () int
+  (check_str "L0FS in its first field" (uuid_text (gpt_l0fs_type)) "4c304653-0001-4000-8000-4c30534c3046"))

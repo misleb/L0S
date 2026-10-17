@@ -52,6 +52,12 @@ DISKLIB := user/lib/disk.l0
 L0FS    := user/lib/l0fs.l0
 FSLIB   := user/lib/fs.l0
 
+# The partition table, GPT, and the UUIDs and CRC-32 it needs.
+UUIDLIB := user/lib/uuid.l0
+CRC32   := user/lib/crc32.l0
+GPTLIB  := user/lib/gpt.l0
+PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB)
+
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
 # commands, which need only render.l0; and its client windows, which need
 # the compositor's protocol too.
@@ -69,21 +75,21 @@ LIBS_windows    := $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
-LIBS_fs         := $(DISKLIB) $(L0FS) $(FSLIB)
-LIBS_sh         := $(FSLIB) user/sh/files.l0
-LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(L0FS) $(FSLIB)
+LIBS_fs         := $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(CLOCK)
+LIBS_sh         := $(UUIDLIB) $(FSLIB) user/sh/files.l0
+LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB)
 
 PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio-input keys vt wm windows widgets procmon \
             virtio-blk disk fs disks
 MKSPLASH := tools/mksplash/mksplash.l0
 L0SDOC   := tools/l0sdoc/l0sdoc.l0
-MKFS     := common/abi.l0 $(L0FS) tools/mkfs/mkfs.l0
+MKFS     := common/abi.l0 $(PARTS) $(L0FS) tools/mkfs/mkfs.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 
 # Every library, which make doc reads the documentation of.
 DOC_SRCS := common/abi.l0 common/initramfs.l0 common/queue.l0 $(filter-out $(COMMON) common/queue.l0,$(KERNEL)) \
             user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0 \
-            $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(DISKLIB) $(L0FS) $(FSLIB) $(UI_CORE) $(UI_WINDOW)
+            $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(UI_CORE) $(UI_WINDOW)
 
 .PHONY: all check test test-virt e2e images initramfs screen-initramfs disks-initramfs boot demo clean sample doc mcp
 
@@ -122,7 +128,10 @@ test: sample
 	$(L0) test $(ULIB) $(CLOCK) user/lib/clock_test.l0
 	$(L0) test $(ULIB) $(DISKLIB) user/lib/disk_test.l0
 	$(L0) test common/abi.l0 $(L0FS) user/lib/l0fs_test.l0
-	$(L0) test $(ULIB) $(FSLIB) user/lib/fs_test.l0
+	$(L0) test common/abi.l0 $(UUIDLIB) user/lib/uuid_test.l0
+	$(L0) test $(CRC32) user/lib/crc32_test.l0
+	$(L0) test common/abi.l0 $(PARTS) user/lib/gpt_test.l0
+	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/fs_test.l0
 	$(L0) test $(ULIB) $(LIBS_sh) user/sh/sh.l0 user/sh/files_test.l0
 	$(foreach t,$(UI_TESTS),$(L0) test $(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0 && ) true
 	$(L0) test $(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0
@@ -202,6 +211,7 @@ e2e: images initramfs screen-initramfs disks-initramfs
 	tests/widgets.sh
 	tests/procmon.sh
 	tests/disks.sh
+	tests/partitions.sh
 
 boot: images $(DISK)
 	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(IMAGES)

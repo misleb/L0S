@@ -21,12 +21,13 @@
 (data DkContent (DkVolume (list int) int int int) (DkUnmounted (list int)) (DkUnknown (list int)))
 
 ; A part of the disk: a partition, its number in the table from 1, first
-; sector, sectors, type, and what it holds; or free space, its first
-; sector and sectors.
-(data DkSeg (DkPart int int int int DkContent) (DkFree int int))
+; sector, sectors, its entry in the table, and what it holds; or free
+; space, its first sector and sectors.
+(data DkSeg (DkPart int int int GptPart DkContent) (DkFree int int))
 
-; The drive: its sectors and its parts in order; or why there is none.
-(data DkDrive (DkDrive int (list DkSeg)) (DkNoDrive (list int)))
+; The drive: its sectors, whether it has a partition table, and its parts
+; in order; or why there is none.
+(data DkDrive (DkDrive int bool (list DkSeg)) (DkNoDrive (list int)))
 
 ; A dialog over the window: none, or asking whether to format a label.
 (data DkDialog (DkNoDialog) (DkConfirm (list int)))
@@ -51,31 +52,32 @@
 ; ------------------------------------------------------------------ parts
 
 ; A partition as the table has it, with its number, to sort by start.
-(data DkAt (DkAt int int VolPart))
+(data DkAt (DkAt int int GptPart))
 
 ; The parts of a disk of sectors whose table lists parts, each with what
 ; contents says it holds, in order: free space wherever no partition is,
-; from sector 1, past the table, to the end.
-(def dk_segments ((sectors int) (parts (list VolPart)) (contents (list DkContent))) (list DkSeg)
-  (dk_segs_from (sort (dk_numbered parts 1 (nil DkAt))) contents parts 1 sectors (nil DkSeg)))
+; in the sectors the GPT leaves partitions, past the table and before
+; its backup.
+(def dk_segments ((sectors int) (parts (list GptPart)) (contents (list DkContent))) (list DkSeg)
+  (dk_segs_from (sort (dk_numbered parts 1 (nil DkAt))) contents (gpt_first_usable) (add (gpt_last_usable sectors) 1) (nil DkSeg)))
 
 ; Each partition with its number, from n, onto acc.
-(def dk_numbered ((parts (list VolPart)) (n int) (acc (list DkAt))) (list DkAt)
+(def dk_numbered ((parts (list GptPart)) (n int) (acc (list DkAt))) (list DkAt)
   (if (is_empty parts)
       acc
-      (match (head parts) ((VolPart ty start count) (dk_numbered (tail parts) (add n 1) (cons (DkAt start n (head parts)) acc))))))
+      (dk_numbered (tail parts) (add n 1) (cons (DkAt (gpt_part_start (head parts)) n (head parts)) acc))))
 
-; The parts from sector at on, of the partitions ats, sorted, onto acc.
-(def dk_segs_from ((ats (list DkAt)) (contents (list DkContent)) (parts (list VolPart)) (at int) (sectors int) (acc (list DkSeg))) (list DkSeg)
+; The parts from sector at on, to end, of the partitions ats, sorted,
+; onto acc.
+(def dk_segs_from ((ats (list DkAt)) (contents (list DkContent)) (at int) (end int) (acc (list DkSeg))) (list DkSeg)
   (if (is_empty ats)
-      (rev (if (lt at sectors) (cons (DkFree at (sub sectors at)) acc) acc))
+      (rev (if (lt at end) (cons (DkFree at (sub end at)) acc) acc))
       (match (head ats)
         ((DkAt start n p)
-          (match p
-            ((VolPart ty st count)
-              (let gap (if (gt start at) (cons (DkFree at (sub start at)) acc) acc)
-                (dk_segs_from (tail ats) contents parts (max at (add start count)) sectors
-                              (cons (DkPart n start count ty (dk_nth contents (sub n 1))) gap)))))))))
+          (let count (gpt_part_sectors p)
+            (let gap (if (gt start at) (cons (DkFree at (sub start at)) acc) acc)
+              (dk_segs_from (tail ats) contents (max at (add start count)) end
+                            (cons (DkPart n start count p (dk_nth contents (sub n 1))) gap))))))))
 
 ; What partition i, from 0, holds; unknown if it was not read.
 (def dk_nth ((cs (list DkContent)) (i int)) DkContent
@@ -125,8 +127,8 @@
   (if (lt n 10) (append "00" (digits n)) (if (lt n 100) (append "0" (digits n)) (digits n))))
 
 ; What a partition's type is called.
-(def dk_type_text ((ty int)) (list int)
-  (if (eq ty (vol_part_type)) "L0S (0x4C)" (append "0x" (hex_digits ty 2))))
+(def dk_type_text ((ty Uuid)) (list int)
+  (if (eq ty (gpt_l0fs_type)) "L0FS" (uuid_text ty)))
 
 ; The bytes of sectors.
 (def dk_bytes ((sectors int)) int (mul sectors (dk_sector)))
@@ -178,7 +180,7 @@
 (def dk_first_key ((d DkDrive)) (list int)
   (match d
     ((DkNoDrive why) "")
-    ((DkDrive n segs) (dk_first_part segs (if (is_empty segs) "" (dk_key (head segs)))))))
+    ((DkDrive n gpt segs) (dk_first_part segs (if (is_empty segs) "" (dk_key (head segs)))))))
 
 ; The key of the first partition among segs, or fallback.
 (def dk_first_part ((segs (list DkSeg)) (fallback (list int))) (list int)
@@ -190,7 +192,7 @@
 
 ; The drive's parts, none if there is no drive; and the selected key.
 (def dk_segs ((m Disks)) (list DkSeg)
-  (match m ((Disks d sel dlg st) (match d ((DkDrive n segs) segs) ((DkNoDrive why) (nil DkSeg))))))
+  (match m ((Disks d sel dlg st) (match d ((DkDrive n gpt segs) segs) ((DkNoDrive why) (nil DkSeg))))))
 
 (def dk_selected ((m Disks)) (list int) (match m ((Disks d sel dlg st) sel)))
 
@@ -280,7 +282,7 @@
 (def dk_side_rows ((d DkDrive)) (list UiSideRow)
   (match d
     ((DkNoDrive why) (nil UiSideRow))
-    ((DkDrive n segs) (cons (UiSideRow "0" "drive-harddisk" (dk_drive_title n) "virtio-blk") (nil UiSideRow)))))
+    ((DkDrive n gpt segs) (cons (UiSideRow "0" "drive-harddisk" (dk_drive_title n) "virtio-blk") (nil UiSideRow)))))
 
 ; A drive's name, as GNOME Disks makes one: its size, and Disk.
 (def dk_drive_title ((sectors int)) (list int) (append (dk_size_text (dk_bytes sectors)) " Disk"))
@@ -293,11 +295,11 @@
     ((Disks d sel dlg st)
       (match d
         ((DkNoDrive why) (UiStatusPage "drive-harddisk" "No Disks" why))
-        ((DkDrive n segs)
+        ((DkDrive n gpt segs)
           (UiPad (ui_space_l) (ui_space_l)
             (UiBox (UiV) (ui_space_m)
               (cons (dk_heading n)
-              (cons (UiProps (dk_drive_props n segs))
+              (cons (UiProps (dk_drive_props n gpt))
               (cons (UiLabel "Volumes" (UiHeading) (UiStart))
               (cons (UiSegmentBar (dk_vols) (dk_ui_segments segs (nil UiSegment)) sel (ui_segbar_h))
               (cons (UiBox (UiH) (ui_space_s)
@@ -314,18 +316,12 @@
           (cons (UiExpand (UiSpace 0 0))
                 (cons (UiButton "app.refresh" "view-refresh" "Refresh" (UiBtnFlat) true) (nil UiWidget))))))
 
-; The drive's properties.
-(def dk_drive_props ((n int) (segs (list DkSeg))) (list UiProp)
+; The drive's properties: its partitioning, a GPT if it has a table.
+(def dk_drive_props ((n int) (gpt bool)) (list UiProp)
   (cons (UiProp "Model" (dk_value "virtio-blk disk"))
         (cons (UiProp "Size" (dk_value (dk_size_long (dk_bytes n))))
-              (cons (UiProp "Partitioning" (dk_value (if (dk_has_part segs) "Master Boot Record" "None")))
+              (cons (UiProp "Partitioning" (dk_value (if gpt "GUID Partition Table" "None")))
                     (nil UiProp)))))
-
-; Whether any part is a partition.
-(def dk_has_part ((segs (list DkSeg))) bool
-  (if (is_empty segs)
-      false
-      (match (head segs) ((DkPart n s c t x) true) ((DkFree s c) (dk_has_part (tail segs))))))
 
 ; A property's value: text.
 (def dk_value ((s (list int))) UiWidget (UiLabel s (UiBody) (UiStart)))
@@ -355,9 +351,10 @@
           (cons (UiProp "Size" (dk_value (dk_size_long (dk_bytes count))))
                 (append (dk_usage_props c)
                         (cons (UiProp "Contents" (dk_value (dk_contents_text c)))
-                              (cons (UiProp "Partition Type" (dk_value (dk_type_text ty)))
-                                    (cons (UiProp "Device" (dk_value (append "Partition " (digits n))))
-                                          (cons (UiProp "Location" (dk_value (dk_location start count))) (nil UiProp))))))))))))
+                              (cons (UiProp "Partition Type" (dk_value (dk_type_text (gpt_part_type ty))))
+                                    (cons (UiProp "Partition UUID" (dk_value (uuid_text (gpt_part_uuid ty))))
+                                          (cons (UiProp "Device" (dk_value (append "Partition " (digits n))))
+                                                (cons (UiProp "Location" (dk_value (dk_location start count))) (nil UiProp)))))))))))))
 
 ; How full a mounted volume is, and its files; nothing for any other.
 (def dk_usage_props ((c DkContent)) (list UiProp)
@@ -389,41 +386,53 @@
   (match (disk_open)
     ((NoDisk why) (DkNoIo why))
     ((Disk port rp pid n)
-      (match (disk_buffer (Disk port rp pid n) 1)
+      (match (disk_buffer (Disk port rp pid n) (gpt_entry_sectors))
         ((NoDiskBuf why) (DkNoIo why))
         ((DiskBuf va pages there r) (DkIo (Disk port rp pid n) (DiskBuf va pages there r) (port_new)))))))
 
-; The drive as it is now: its table read, and each partition's first
-; sector, and asked how full it is if it is a volume.
+; The drive as it is now: its GPT read, and each partition's first
+; sector, and asked how full it is if it is a volume. A disk with no
+; table, or a bad one, is all free space.
 (def dk_read ((io DkIo)) DkDrive
   (match io
     ((DkNoIo why) (DkNoDrive why))
     ((DkIo d b rp)
-      (match (dk_sector_bytes d b 0)
-        ((DkBytesNot why) (DkNoDrive why))
-        ((DkBytes bs)
-          (let parts (mbr_decode (bytes_from_list bs))
-            (DkDrive (disk_sectors d) (dk_segments (disk_sectors d) parts (dk_contents d b rp parts (nil DkContent))))))))))
+      (match (dk_table d b)
+        ((GptBad why) (DkDrive (disk_sectors d) false (dk_segments (disk_sectors d) (nil GptPart) (nil DkContent))))
+        ((GptGot t)
+          (let parts (gpt_parts t)
+            (DkDrive (disk_sectors d) true (dk_segments (disk_sectors d) parts (dk_contents d b rp parts (nil DkContent))))))))))
 
-; A sector read, or why not.
+; The disk's GPT, from its header at sector 1 and the entries it names.
+(def dk_table ((d Disk) (b DiskBuf)) GptRead
+  (match (dk_sectors_bytes d b 1 1)
+    ((DkBytesNot why) (GptBad why))
+    ((DkBytes hb)
+      (match (gpt_header_of (bytes_from_list hb))
+        ((GptNone) (GptBad "no partition table"))
+        ((GptNotHeader why) (GptBad why))
+        ((GptHeader du at count ecrc)
+          (match (dk_sectors_bytes d b at (div (mul count (gpt_entry_size)) (dk_sector)))
+            ((DkBytesNot why) (GptBad why))
+            ((DkBytes es) (gpt_disk_of (GptHeader du at count ecrc) (bytes_from_list es)))))))))
+
+; Sectors read, or why not.
 (data DkSectorBytes (DkBytes (list int)) (DkBytesNot (list int)))
 
-; sector, read through b.
-(def dk_sector_bytes ((d Disk) (b DiskBuf) (sector int)) DkSectorBytes
-  (let why (disk_read d b sector 1)
-    (if (is_empty why) (DkBytes (disk_get b (dk_sector))) (DkBytesNot why))))
+; count sectors from sector, read through b.
+(def dk_sectors_bytes ((d Disk) (b DiskBuf) (sector int) (count int)) DkSectorBytes
+  (let why (disk_read d b sector count)
+    (if (is_empty why) (DkBytes (disk_get b (mul count (dk_sector)))) (DkBytesNot why))))
 
 ; What each partition of parts holds, onto acc.
-(def dk_contents ((d Disk) (b DiskBuf) (rp int) (parts (list VolPart)) (acc (list DkContent))) (list DkContent)
+(def dk_contents ((d Disk) (b DiskBuf) (rp int) (parts (list GptPart)) (acc (list DkContent))) (list DkContent)
   (if (is_empty parts)
       (rev acc)
-      (match (head parts)
-        ((VolPart ty start count)
-          (dk_contents d b rp (tail parts)
-            (cons (match (dk_sector_bytes d b start)
-                    ((DkBytesNot why) (DkUnknown why))
-                    ((DkBytes bs) (dk_content_of bs (dk_space rp bs))))
-                  acc))))))
+      (dk_contents d b rp (tail parts)
+        (cons (match (dk_sectors_bytes d b (gpt_part_start (head parts)) 1)
+                ((DkBytesNot why) (DkUnknown why))
+                ((DkBytes bs) (dk_content_of bs (dk_space rp bs))))
+              acc))))
 
 ; How full the volume whose first sector is bs is, by df, if it is one.
 (def dk_space ((rp int) (bs (list int))) FsSpace

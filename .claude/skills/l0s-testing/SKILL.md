@@ -101,9 +101,12 @@ These boot with QEMU's monitor and QMP on Unix sockets and check pixels of a
 image exists: `make initramfs` for `vt.sh` (the demo), and
 `make screen-initramfs` for `gpu-screen.sh`, `keyboard.sh`, `widgets.sh` and
 `procmon.sh` (the demo without the terminals, `tests/screen/etc`), and
-`make disks-initramfs` for `disks.sh` (that with the disk's driver and
-file server, `tests/disks/etc`, on a fresh `tools/mkdisk` disk it makes
-itself and passes as `QEMU_DISK`).
+`make disks-initramfs` for `disks.sh` and `partitions.sh` (that with
+the clock and the disk's driver and file server, `tests/disks/etc`, on a
+disk each makes itself, from `tools/mkdisk` or `build/mkfs`, and passes
+as `QEMU_DISK`). `partitions.sh` checks only the serial line, and reads
+a UUID the board makes from it to type it back, since an e2e case's
+`typed` input cannot hold what is made as it runs.
 
 Their helpers, copied in each script:
 

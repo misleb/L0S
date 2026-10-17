@@ -1,0 +1,290 @@
+; gpt.l0 -- the GUID partition table, as UEFI defines it, as bytes: a
+; disk's partitions, each with a type, a UUID of its own that nothing
+; changes, its sectors and a name. Pure: it encodes a table, decodes and
+; checks one, and finds where a new partition can go.
+;
+;   sector 0          a protective MBR, one partition of type EE over the
+;                     whole disk, so that what knows only MBRs leaves it be
+;   sector 1          the header: EFI PART, where the tables are, the
+;                     disk's UUID, and the CRC-32 of itself and its entries
+;   sectors 2-33      128 entries of 128 bytes: the type's UUID, the
+;                     partition's, its first and last sectors, attributes,
+;                     and a name of 36 UTF-16 characters
+;   sectors 34..N-34  the partitions
+;   sectors N-33..    the same entries again, and the header's backup, in
+;                     the disk's last sector
+;
+; UUIDs are kept in GPT's order (uuid.l0's uuid_guid_bytes). Linked with
+; common/abi.l0, user/lib/uuid.l0 and user/lib/crc32.l0.
+
+; A sector's bytes; the table's entries, each's bytes, and the sectors
+; they take; and the longest name.
+(def gpt_sector () int 512)
+(def gpt_entry_count () int 128)
+(def gpt_entry_size () int 128)
+(def gpt_entry_sectors () int 32)      ; 128 entries of 128 bytes
+(def gpt_name_max () int 36)
+
+; The first sector a partition may use, past the table; and the last,
+; before the backup.
+(def gpt_first_usable () int 34)
+(def gpt_last_usable ((n int)) int (sub n 34))
+
+; The type of a partition holding an L0FS volume: L0FS, 0x4C30 4653, in
+; its first field.
+(def gpt_l0fs_type () Uuid
+  (Uuid (cons 76 (cons 48 (cons 70 (cons 83 (cons 0 (cons 1 (cons 64 (cons 0
+        (cons 128 (cons 0 (cons 76 (cons 48 (cons 83 (cons 76 (cons 48 (cons 70 (nil int)))))))))))))))))))
+
+; A partition: its type, its own UUID, its first sector and its sectors,
+; and its name.
+(data GptPart (GptPart Uuid Uuid int int (list int)))
+
+; A disk's table: its UUID, and its partitions.
+(data GptDisk (GptDisk Uuid (list GptPart)))
+
+; A partition's UUID, first sector, sectors, type and name; a disk's
+; partitions.
+(def gpt_part_uuid ((p GptPart)) Uuid (match p ((GptPart t u s c n) u)))
+(def gpt_part_start ((p GptPart)) int (match p ((GptPart t u s c n) s)))
+(def gpt_part_sectors ((p GptPart)) int (match p ((GptPart t u s c n) c)))
+(def gpt_part_type ((p GptPart)) Uuid (match p ((GptPart t u s c n) t)))
+(def gpt_part_name ((p GptPart)) (list int) (match p ((GptPart t u s c n) n)))
+
+(def gpt_parts ((d GptDisk)) (list GptPart) (match d ((GptDisk u ps) ps)))
+
+; ---------------------------------------------------------------- encoding
+
+; n zeros, onto acc.
+(def gpt_zeros ((n int)) (list int) (gpt_zeros_onto n (nil int)))
+
+(def gpt_zeros_onto ((n int) (acc (list int))) (list int)
+  (if (le n 0) acc (gpt_zeros_onto (sub n 1) (cons 0 acc))))
+
+; v in 8 bytes, the least significant first.
+(def gpt_u64 ((v int)) (list int) (append (u32_le v) (u32_le (bit_shr v 32))))
+
+; Sector 0 of an n-sector disk: no boot code, one partition, type EE,
+; from sector 1 over the rest, as far as 32 bits count; then 55 AA.
+(def gpt_protective_mbr ((n int)) (list int)
+  (append (gpt_zeros 446)
+    (append (cons 0 (cons 0 (cons 2 (cons 0 (cons 238 (cons 255 (cons 255 (cons 255 (nil int)))))))))
+      (append (u32_le 1)
+        (append (u32_le (min (sub n 1) 4294967295))
+          (append (gpt_zeros 48) (cons 85 (cons 170 (nil int)))))))))
+
+; One entry: the type's UUID, the partition's, its first and last
+; sectors, no attributes, its name in UTF-16, the rest zeros.
+(def gpt_entry ((p GptPart)) (list int)
+  (match p
+    ((GptPart ty u start count name)
+      (append (uuid_guid_bytes ty)
+        (append (uuid_guid_bytes u)
+          (append (gpt_u64 start)
+            (append (gpt_u64 (sub (add start count) 1))
+              (append (gpt_zeros 8) (gpt_name_bytes name)))))))))
+
+; A name as 36 UTF-16 characters, each byte a character, zeros after.
+(def gpt_name_bytes ((name (list int))) (list int)
+  (gpt_name_onto name (gpt_name_max) (nil int)))
+
+; left more characters of s, each and a 0 byte, zeros once s ends,
+; onto acc.
+(def gpt_name_onto ((s (list int)) (left int) (acc (list int))) (list int)
+  (if (eq left 0)
+      (rev acc)
+      (if (is_empty s)
+          (gpt_name_onto s (sub left 1) (cons 0 (cons 0 acc)))
+          (gpt_name_onto (tail s) (sub left 1) (cons 0 (cons (head s) acc))))))
+
+; Every entry, those of the partitions first, empty ones after: 16384
+; bytes.
+(def gpt_entries_bytes ((parts (list GptPart))) (list int)
+  (gpt_entries_onto parts (gpt_entry_count) (nil (list int))))
+
+; left more entries, onto acc, then all of them joined.
+(def gpt_entries_onto ((parts (list GptPart)) (left int) (acc (list (list int)))) (list int)
+  (if (eq left 0)
+      (gpt_concat (rev acc))
+      (if (is_empty parts)
+          (gpt_entries_onto parts (sub left 1) (cons (gpt_zeros (gpt_entry_size)) acc))
+          (gpt_entries_onto (tail parts) (sub left 1) (cons (gpt_entry (head parts)) acc)))))
+
+; The lists one after another.
+(def gpt_concat ((xss (list (list int)))) (list int)
+  (if (is_empty xss) (nil int) (append (head xss) (gpt_concat (tail xss)))))
+
+; A header of an n-sector disk at sector at, the other copy at other, its
+; entries from sector entries, whose CRC-32 is ecrc: 92 bytes, its own
+; CRC-32 at 16, reckoned with that field 0, and zeros to the sector's end.
+(def gpt_header ((n int) (disk Uuid) (at int) (other int) (entries int) (ecrc int)) (list int)
+  (let h (gpt_header_fields n disk at other entries ecrc 0)
+    (append (gpt_header_fields n disk at other entries ecrc (crc32_list h)) (gpt_zeros (sub (gpt_sector) 92)))))
+
+; The header's 92 bytes, its CRC-32 hcrc.
+(def gpt_header_fields ((n int) (disk Uuid) (at int) (other int) (entries int) (ecrc int) (hcrc int)) (list int)
+  (append "EFI PART"
+    (append (cons 0 (cons 0 (cons 1 (cons 0 (nil int)))))
+      (append (u32_le 92)
+        (append (u32_le hcrc)
+          (append (u32_le 0)
+            (append (gpt_u64 at)
+              (append (gpt_u64 other)
+                (append (gpt_u64 (gpt_first_usable))
+                  (append (gpt_u64 (gpt_last_usable n))
+                    (append (uuid_guid_bytes disk)
+                      (append (gpt_u64 entries)
+                        (append (u32_le (gpt_entry_count))
+                          (append (u32_le (gpt_entry_size)) (u32_le ecrc)))))))))))))))
+
+; Bytes to write from a sector.
+(data GptPiece (GptPiece int (list int)))
+
+; Everything a table of disk on n sectors writes, by sector: the
+; protective MBR, the header and its entries, and their backups.
+(def gpt_pieces ((n int) (d GptDisk)) (list GptPiece)
+  (match d
+    ((GptDisk u parts)
+      (let es (gpt_entries_bytes parts)
+        (let ecrc (crc32_list es)
+          (let back (sub n 33)
+            (cons (GptPiece 0 (gpt_protective_mbr n))
+            (cons (GptPiece 1 (gpt_header n u 1 (sub n 1) 2 ecrc))
+            (cons (GptPiece 2 es)
+            (cons (GptPiece back es)
+            (cons (GptPiece (sub n 1) (gpt_header n u (sub n 1) 1 back ecrc)) (nil GptPiece))))))))))))
+
+; ---------------------------------------------------------------- decoding
+
+; What a header says: the disk's UUID, its entries' first sector, how
+; many there are and their CRC-32; that there is no GPT at all, no
+; signature where its header goes; or why the header there is bad.
+(data GptHeader (GptHeader Uuid int int int) (GptNone) (GptNotHeader (list int)))
+
+; The header sector b holds, if its signature, revision, size and CRC-32
+; are a GPT header's, and its entries are 128 bytes each.
+(def gpt_header_of ((b bytes)) GptHeader
+  (if (lt (bytes_len b) 92)
+      (GptNotHeader "too short for a GPT header")
+      (if (not (eq (gpt_bytes_at b 0 8) "EFI PART"))
+          (GptNone)
+          (if (not (eq (le_u32 b 12) 92))
+              (GptNotHeader "a GPT header of another size")
+              (if (not (eq (le_u32 b 16) (crc32_list (append (gpt_bytes_at b 0 16) (append (u32_le 0) (gpt_bytes_at b 20 72))))))
+                  (GptNotHeader "the GPT header's CRC-32 is wrong")
+                  (if (not (eq (le_u32 b 84) (gpt_entry_size)))
+                      (GptNotHeader "GPT entries of another size")
+                      (GptHeader (uuid_of_guid b 56) (le_u32 b 72) (min (le_u32 b 80) (gpt_entry_count)) (le_u32 b 88))))))))
+
+; The n bytes of b from i, as a list.
+(def gpt_bytes_at ((b bytes) (i int) (n int)) (list int)
+  (gpt_bytes_onto b (add i n) i (nil int)))
+
+(def gpt_bytes_onto ((b bytes) (j int) (i int) (acc (list int))) (list int)
+  (if (le j i) acc (gpt_bytes_onto b (sub j 1) i (cons (bytes_get b (sub j 1)) acc))))
+
+; What reading a table found: the disk; or why it is not one.
+(data GptRead (GptGot GptDisk) (GptBad (list int)))
+
+; The table h heads, its entries' sectors being es, if their CRC-32 is
+; the header's: every partition, in the order of the entries, an entry
+; with no type being none.
+(def gpt_disk_of ((h GptHeader) (es bytes)) GptRead
+  (match h
+    ((GptNone) (GptBad "no GPT on the disk"))
+    ((GptNotHeader why) (GptBad why))
+    ((GptHeader disk at count ecrc)
+      (if (lt (bytes_len es) (mul count (gpt_entry_size)))
+          (GptBad "the GPT entries are cut short")
+          (if (not (eq (crc32 es 0 (mul count (gpt_entry_size))) ecrc))
+              (GptBad "the GPT entries' CRC-32 is wrong")
+              (GptGot (GptDisk disk (gpt_read_entries es (sub count 1) (nil GptPart)))))))))
+
+; Entries 0 to i of es that have a type, onto acc.
+(def gpt_read_entries ((es bytes) (i int) (acc (list GptPart))) (list GptPart)
+  (if (lt i 0)
+      acc
+      (let at (mul i (gpt_entry_size))
+        (let ty (uuid_of_guid es at)
+          (gpt_read_entries es (sub i 1)
+            (if (uuid_is_nil ty)
+                acc
+                (let first (gpt_u64_at es (add at 32))
+                  (cons (GptPart ty (uuid_of_guid es (add at 16)) first (add 1 (sub (gpt_u64_at es (add at 40)) first))
+                                 (gpt_name_of es (add at 56) 0 (nil int)))
+                        acc))))))))
+
+; The 8 bytes of b from i as a number, the least significant first.
+(def gpt_u64_at ((b bytes) (i int)) int
+  (bit_or (le_u32 b i) (bit_shl (le_u32 b (add i 4)) 32)))
+
+; A name, the low byte of each UTF-16 character up to the first 0.
+(def gpt_name_of ((b bytes) (at int) (k int) (acc (list int))) (list int)
+  (if (ge k (gpt_name_max))
+      (rev acc)
+      (let c (bytes_get b (add at (mul k 2)))
+        (if (eq c 0) (rev acc) (gpt_name_of b at (add k 1) (cons c acc))))))
+
+; ---------------------------------------------------------------- placing
+
+; Room for a partition: its first sector and its sectors.
+(data GptRoom (GptRoom int int))
+
+; The free stretches of an n-sector disk, between its partitions, in its
+; usable sectors, in order.
+(def gpt_free ((n int) (parts (list GptPart))) (list GptRoom)
+  (gpt_free_from (sort (gpt_spans parts (nil GptRoom))) (gpt_first_usable) (add (gpt_last_usable n) 1) (nil GptRoom)))
+
+; The sectors each partition takes, onto acc.
+(def gpt_spans ((parts (list GptPart)) (acc (list GptRoom))) (list GptRoom)
+  (if (is_empty parts)
+      acc
+      (match (head parts) ((GptPart t u s c nm) (gpt_spans (tail parts) (cons (GptRoom s c) acc))))))
+
+; The free stretches from at to end, between spans, sorted, onto acc.
+(def gpt_free_from ((spans (list GptRoom)) (at int) (end int) (acc (list GptRoom))) (list GptRoom)
+  (if (is_empty spans)
+      (rev (if (lt at end) (cons (GptRoom at (sub end at)) acc) acc))
+      (match (head spans)
+        ((GptRoom s c)
+          (gpt_free_from (tail spans) (max at (add s c)) end
+                         (if (gt s at) (cons (GptRoom at (sub (min s end) at)) acc) acc))))))
+
+; Where a partition of count sectors goes on an n-sector disk with parts:
+; from start, if start is given (not -1) and the sectors from it are
+; free; else the first free stretch it fits in. Or why it cannot go.
+(data GptPlace (GptAt int) (GptNoRoom (list int)))
+
+; The place of a partition of count sectors, from start or -1.
+(def gpt_place ((n int) (parts (list GptPart)) (count int) (start int)) GptPlace
+  (if (lt count 1)
+      (GptNoRoom "a partition has at least a sector")
+      (if (ge (length parts) (gpt_entry_count))
+          (GptNoRoom "the table's 128 entries are all used")
+          (gpt_place_in (gpt_free n parts) count start))))
+
+; The first of rooms the partition fits, as gpt_place asks.
+(def gpt_place_in ((rooms (list GptRoom)) (count int) (start int)) GptPlace
+  (if (is_empty rooms)
+      (GptNoRoom (if (lt start 0) "no free stretch is that long" "those sectors are not free"))
+      (match (head rooms)
+        ((GptRoom s c)
+          (if (lt start 0)
+              (if (ge c count) (GptAt s) (gpt_place_in (tail rooms) count start))
+              (if (if (ge start s) (le (add start count) (add s c)) false)
+                  (GptAt start)
+                  (gpt_place_in (tail rooms) count start)))))))
+
+; The partitions of parts whose type is ty, in order.
+(def gpt_typed ((parts (list GptPart)) (ty Uuid)) (list GptPart)
+  (if (is_empty parts)
+      (nil GptPart)
+      (if (eq (gpt_part_type (head parts)) ty)
+          (cons (head parts) (gpt_typed (tail parts) ty))
+          (gpt_typed (tail parts) ty))))
+
+; The partition whose own UUID is u, if one is.
+(def gpt_part_of ((parts (list GptPart)) (u Uuid)) (Option GptPart)
+  (if (is_empty parts)
+      ((None GptPart))
+      (if (eq (gpt_part_uuid (head parts)) u) (Some (head parts)) (gpt_part_of (tail parts) u))))

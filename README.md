@@ -161,6 +161,8 @@ which refuse every change (`permission denied`), and the disk's, under
 | `rm FILE ...` | removes the files |
 | `df` | each volume's size, the room its files take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
 | `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open |
+| `partition SECTORS [START]` | a new partition of SECTORS in the disk's GPT, from START or where it first fits, and says its UUID (see [Volumes](#volumes)) |
+| `mkfs UUID LABEL` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL` |
 
 ```
 l0s> write /Volumes/data/notes hello disk
@@ -170,8 +172,8 @@ hello disk
 and again
 l0s> df
   VOLUME              SIZE    USED    FREE  FILES
-  /Volumes/data       760K      4K    756K      1
-  /Volumes/scratch    252K      0K    252K      0
+  /Volumes/data       744K      4K    740K      1
+  /Volumes/scratch    232K      0K    232K      0
 ```
 
 Things to try:
@@ -568,15 +570,59 @@ and writes them with the ordinary `open_in`, `open_out` and the rest:
 `run cat /Volumes/data/notes` works as `run cat /etc/motd` does.
 
 The disk, as [tools/mkdisk](tools/mkdisk) makes it with
-[tools/mkfs](tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS
-LABEL:START:COUNT...`, a host program, built into `build/mkfs`):
+[tools/mkfs](tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS MS
+LABEL:START:COUNT...`, a host program, built into `build/mkfs`; MS is
+the Unix time in milliseconds, which mkdisk gives it from `date`, since
+a host program has no clock that is a date):
 
 | Sectors | What |
 |---|---|
-| 0 | an MBR, its four entries at 446, `55 AA` at 510: here two partitions of type `0x4C` |
-| 1–7 | nothing |
-| 8–1535 | the volume `data`, 1528 sectors: 190 clusters of data, 760 KB |
-| 1536–2047 | the volume `scratch`, 512 sectors: 63 clusters, 252 KB |
+| 0 | a protective MBR, one partition of type `EE` over the whole disk, so that what knows only MBRs leaves it be |
+| 1–33 | the GPT: its header, and 128 entries of 128 bytes (below) |
+| 34–39 | nothing |
+| 40–1535 | the volume `data`, 1496 sectors: 186 clusters of data, 744 KB |
+| 1536–2014 | the volume `scratch`, 479 sectors: 58 clusters, 232 KB |
+| 2015–2047 | the GPT's backup: its entries, and its header in the last sector |
+
+A `build/disk.img` made before the disk had a GPT has an MBR, which
+nothing reads now: `fs` finds no table on it. `rm build/disk.img`, or
+`make clean`, and the next `make demo` makes a disk of GPT.
+
+**Partitions.** A disk's partitions are in a **GPT**, UEFI's GUID partition table
+([user/lib/gpt.l0](user/lib/gpt.l0)), so each has a **UUID** of its
+own, which it is given when it is made and keeps: a request names a
+partition by it, not by where it is, which another partition made or
+removed could change, nor by the label of its volume, which a format
+could. The disk has one too. An entry holds the partition's type's
+UUID, its own, its first and last sectors, and a name of 36 characters,
+its volume's label for one `mkfs` or `tools/mkfs` made. L0FS's type is
+`4c304653-0001-4000-8000-4c30534c3046`, `L0FS` in its first field. The
+header and its entries are checked by CRC-32
+([user/lib/crc32.l0](user/lib/crc32.l0)), and copied in the disk's last
+33 sectors, which `fs` reads if the first copy is bad; it writes both,
+and never over a table it found bad.
+
+The UUIDs are of **version 7** ([user/lib/uuid.l0](user/lib/uuid.l0),
+RFC 9562): the time in Unix milliseconds in their first 48 bits, so they
+sort in the order they were made, then noise. `fs` asks `rtc clock` the
+time, and the board's clock keeps this machine's local time, not UTC
+(see [The desktop](#the-desktop)); with no clock, the time is 0. L0S
+has no source of randomness, so the noise is splitmix64's, seeded from
+the clock: it tells apart UUIDs made apart, but can be guessed.
+
+```
+l0s> partition 400
+01a1474e-dca3-7a16-8dac-ed4ff93e46f2
+l0s> mkfs 01a1474e-dca3-7a16-8dac-ed4ff93e46f2 made
+l0s> ls /Volumes
+  data/
+  made/
+  scratch/
+```
+
+On the demo's disk, whose only room is the 6 sectors before data, that
+`partition 400` is refused; [tests/partitions.sh](tests/partitions.sh)'s
+disk has room.
 
 A volume, its sectors counted from its partition's first, in clusters of
 8 sectors, 4 KB:
@@ -622,10 +668,11 @@ takes a path, made absolute, to where it is mounted:
 server serves on the port it mounts from. The kernel sends the first
 six; programs send `list`, `df` and `format` themselves, to the port
 `mount_at` gives, as `ls`, `df` and `format` in the shell do, and
-`rescan` to the port registered as `fs`. `fs_df_on`, `fs_format_on`
-and `fs_rescan_on` take a reply port the program keeps, for one that
-asks again and again; `fs_df` and `fs_format` make one each call, which
-never goes.
+`rescan`, `partition` and `mkfs` to the port registered as `fs`.
+`fs_df_on`, `fs_format_on`, `fs_rescan_on`, `fs_partition_on` and
+`fs_mkfs_on` take a reply port the program keeps, for one that asks
+again and again; `fs_df` and `fs_format` make one each call, which
+never goes. A refusal's word may be followed by why, in words.
 
 | Request | Reply |
 |---|---|
@@ -638,7 +685,9 @@ never goes.
 | `list VOLUME` | how many files, then a line `NAME SIZE` for each, by name |
 | `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files |
 | `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open |
-| `rescan` | the partition table and every volume read again, as at the start, and served in place of those before, each new label mounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open. A label that has gone stays mounted, there being no unmount, and is answered as a volume not served: -3, or -9 to write |
+| `rescan` | the partition table and every volume read again, as at the start, and served in place of those before, each new label mounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open; -5 if the table is bad. A label that has gone stays mounted, there being no unmount, and is answered as a volume not served: -3, or -9 to write |
+| `partition COUNT [START]` | a new partition of COUNT sectors in the GPT, both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad. A disk with no table gets one |
+| `mkfs UUID LABEL` | a new, empty volume labelled LABEL on the partition with that UUID, the partition named LABEL, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, -6 if the partition is too small |
 
 Each is a request (`request` in `l0s.l0`), its words separated by
 spaces; a PATH is whole, `/Volumes/LABEL/NAME`, and a VOLUME
@@ -650,7 +699,8 @@ directory, -10 another file system). A handle is the pid that opened
 it, the sender, so a process can use only its own.
 
 **`fs`** ([user/fs](user/fs/fs.l0)) opens the disk with a buffer of a
-cluster, reads the partition table, checks and loads each volume's
+cluster, reads the GPT, checks and loads the volume on each partition of
+L0FS's type, its
 metadata, mounts each by its label from one port, and then registers
 that port as `fs`, so that a program can wait for every volume with
 `name_wait`. It keeps the metadata in memory and writes it back after
@@ -658,9 +708,13 @@ the data whenever it changes. It reads only the sectors a read needs,
 and reads a sector before a write only where the write keeps some of
 its bytes. It watches each process that opens a file, and drops its
 handles when it exits. A `rescan` does the reading again, so a volume
-made or changed on the disk since is served without a reboot. A disk
-with no volume on it, or none that can be served, is no reason to stop:
-`fs` says so, registers, and serves nothing until a rescan finds some.
+made or changed on the disk since is served without a reboot.
+`partition` and `mkfs` make partitions and volumes on the running
+system, `fs` being the disk's only writer: a volume `mkfs` makes is
+served at once, after those served before, so open files keep theirs. A
+disk with no volume on it, or none that can be served, or no table at
+all, is no reason to stop: `fs` says so, registers, and serves nothing
+until `mkfs` makes a volume or a rescan finds some.
 With no disk at all, where nothing could ever be made, it says so and
 exits 0.
 
@@ -949,12 +1003,12 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL` and serves the fs protocol for them, the kernel's requests for every program's file calls there and `list`, `df`, `format` and `rescan`; then registers as `fs`, though the disk has no volume yet. With no disk it says so on stderr and exits 0 |
+| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL` and serves the fs protocol for them, the kernel's requests for every program's file calls there and `list`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, and serves `compositor`. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round` and `button`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
-| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type and sectors. It reads the partition table and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again; Format Volume..., for a mounted volume, asks in a dialog, then has `fs` `format` it. With no disk it shows a status page |
+| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again; Format Volume..., for a mounted volume, asks in a dialog, then has `fs` `format` it. With no disk it shows a status page |
 | `procmon` | the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 
@@ -972,8 +1026,11 @@ Makefile's `LIBS_` lists:
 | [wm.l0](user/lib/wm.l0) | the compositor protocol, as a client sends it | `vt`, `windows`, `widgets` |
 | [clock.l0](user/lib/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm` |
 | [disk.l0](user/lib/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs` |
-| [l0fs.l0](user/lib/l0fs.l0) | the file system on a disk, as bytes: the MBR, a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `tools/mkfs` |
-| [fs.l0](user/lib/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh` |
+| [uuid.l0](user/lib/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `sh`, `disks`, `tools/mkfs` |
+| [crc32.l0](user/lib/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
+| [gpt.l0](user/lib/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
+| [l0fs.l0](user/lib/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `disks`, `tools/mkfs` |
+| [fs.l0](user/lib/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh`, `disks` |
 | [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, panes (a sidebar, a segment bar, property rows, an alert dialog), the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
 
 ## Tests
@@ -982,7 +1039,7 @@ Makefile's `LIBS_` lists:
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts and the file calls a volume's server answers, its request, its answer, and its going, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), and Disks (`tests/disks.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -1019,9 +1076,9 @@ Ctrl-C as a person would:
   serving: it found its device, set up its queue, and bound its
   interrupt;
 - `virtio-blk`, on a disk of its own, has `disk` show the disk's size
-  and its first sector as `tools/mkdisk` made it, the partition table,
-  write a sector and read it back, read the last sector, and be refused
-  one past it;
+  and its first sector as `tools/mkdisk` made it, the GPT's protective
+  MBR, write a sector and read it back, read the last sector a partition
+  may use, and be refused one past the disk's end;
 - `fs`, on a disk of its own, starts the file server and has the shell
   show `df` and `ls /Volumes`; `write` a file and `cat` it back, `append`
   to it and read it with `run cat`, a program, so through the kernel;
@@ -1123,6 +1180,15 @@ is. Then, by screendump:
 - Format Volume... again, and the dialog's Format: then `ls
   /Volumes/data` at the serial shell lists no file.
 
+[tests/partitions.sh](tests/partitions.sh) boots the same, with `rtc
+clock`, on a disk `build/mkfs` makes with room between its volumes, and
+at the serial shell: `partition 400`, which says a UUID of version 7
+that begins with the clock's time; `mkfs` of that UUID, whose volume is
+listed in `/Volumes`, holds a file written to it, and is counted by
+`df`; a second `mkfs` of it, refused; and, booted again on the same
+disk, the volume mounted at once, its file there, and the UUID still
+naming its partition.
+
 Every boot is killed after a minute by [tools/deadline](tools/deadline),
 since macOS has no `timeout`. `tests/e2e.sh` also builds three raw programs
 of a few aarch64 instructions each, for what L0 code cannot do on purpose:
@@ -1151,7 +1217,7 @@ fault, pass a bad buffer, and wait on nothing.
 - **The volumes are small and simple** (see [Volumes](#volumes)). Each
   has one flat directory of at most 48 files, with names of at most 55
   bytes and no spaces, and no subdirectories, permissions or times; at
-  most 65534 clusters of 4 KB; and a disk at most the MBR's four. One
+  most 65534 clusters of 4 KB; and a disk at most the GPT's 128. One
   file server, `fs`, serves the first disk's volumes, one request at a
   time, and a read moves at most a cluster. A write is as safe as the
   order it is made in, its data and then the metadata, and no more: a
@@ -1161,7 +1227,14 @@ fault, pass a bad buffer, and wait on nothing.
   closed. Any process may mount a label no one has, as any may register
   a name, and nothing unmounts a volume but its server's port going:
 a label that a `rescan` no longer finds stays mounted, answered -3,
-and a rescan is refused while any file is open.
+and a rescan is refused while any file is open. Nothing removes or
+resizes a partition.
+- **A UUID's noise can be guessed, and its time is local.** There is no
+  source of randomness, so the noise of a version 7 UUID is a mixer's,
+  seeded from the clock; and the board's clock, `rtc clock`, keeps this
+  machine's local time, not UTC, so a UUID's time is off by its zone, 0
+  where no clock runs. They are unique on one machine, not proof against
+  a forger.
 - **The disk is one virtio-blk, one request at a time.** `virtio-blk`
   drives the first disk on the board, polls for each request rather than
   taking the interrupt, and moves at most 128 sectors a request. It
@@ -1169,8 +1242,8 @@ and a rescan is refused while any file is open.
   never learns a disk is read-only, whose writes the device then fails.
 - **Disks shows the one disk, and changes it only two ways.** It can
   format a mounted volume, keeping its label and size, and have `fs`
-  rescan; it cannot partition, resize, relabel or make a new volume, nor
-  format a partition `fs` does not serve. Its window is a fixed 880 by
+  rescan; it cannot yet partition or make a new volume, which the
+  shell's `partition` and `mkfs` do, nor resize or relabel. Its window is a fixed 880 by
   520, as every window is, and it reads the disk only when it opens and
   when asked.
 - Images are copied from the archive into fresh frames for every process

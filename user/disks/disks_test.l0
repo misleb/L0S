@@ -1,13 +1,19 @@
-; The demo's disk, as tools/mkdisk makes it: 2048 sectors, data at 8 for
-; 1528, scratch at 1536 for 512; data mounted with 190 clusters, 160 of
-; them free, and 2 files; scratch not mounted.
-(def demo_parts () (list VolPart)
-  (cons (VolPart 76 8 1528) (cons (VolPart 76 1536 512) (nil VolPart))))
+; The demo's disk, as tools/mkdisk makes it: 2048 sectors, a GPT, data
+; at 40 for 1496, scratch at 1536 for 479, to the last usable sector;
+; data mounted with 190 clusters, 160 of them free, and 2 files; scratch
+; not mounted.
+(def demo_parts () (list GptPart)
+  (cons (gp 1 40 1496 "data") (cons (gp 2 1536 479 "scratch") (nil GptPart))))
+
+; A partition of L0FS's type from start, of count sectors, its UUID of
+; version 7 the same each run.
+(def gp ((n int) (start int) (count int) (name (list int))) GptPart
+  (GptPart (gpt_l0fs_type) (uuid_v7 1760000000000 (uuid_noise n 10)) start count name))
 
 (def demo_contents () (list DkContent)
   (cons (DkVolume "data" 190 160 2) (cons (DkUnmounted "scratch") (nil DkContent))))
 
-(def demo_drive () DkDrive (DkDrive 2048 (dk_segments 2048 (demo_parts) (demo_contents))))
+(def demo_drive () DkDrive (DkDrive 2048 true (dk_segments 2048 (demo_parts) (demo_contents))))
 
 (def demo () Disks (dk_new (demo_drive)))
 
@@ -21,23 +27,25 @@
 
 ; ----------------------------------------------------------------- parts
 
-; Sector 0 is the table; 1 to 7 are no partition's.
+; Sectors 0 to 33 are the table; 34 to 39 are no partition's; the last
+; 33, the backup, are not shown.
 (def test_demo_segments () int
   (check_str "the gap, then the two" (segs_text (dk_segments 2048 (demo_parts) (demo_contents)))
-             "free 1+7, 1 8+1528, 2 1536+512, "))
+             "free 34+6, 1 40+1496, 2 1536+479, "))
 
-; Out of order in the table, with room between and after them.
+; Out of order in the table, with room between and after them, to the
+; last usable sector of 1000, 966.
 (def test_gaps () int
   (check_str "sorted, with every gap"
-    (segs_text (dk_segments 1000 (cons (VolPart 76 500 100) (cons (VolPart 76 1 99) (nil VolPart))) (nil DkContent)))
-    "2 1+99, free 100+400, 1 500+100, free 600+400, "))
+    (segs_text (dk_segments 1000 (cons (gp 1 500 100 "a") (cons (gp 2 34 66 "b") (nil GptPart))) (nil DkContent)))
+    "2 34+66, free 100+400, 1 500+100, free 600+367, "))
 
 (def test_empty_disk () int
-  (check_str "all free" (segs_text (dk_segments 2048 (nil VolPart) (nil DkContent))) "free 1+2047, "))
+  (check_str "all free" (segs_text (dk_segments 2048 (nil GptPart) (nil DkContent))) "free 34+1981, "))
 
 (def test_keys () int
-  (add (check_str "a partition" (dk_key (DkPart 2 1536 512 76 (DkUnmounted "s"))) "2")
-       (check_str "free space" (dk_key (DkFree 1 7)) "free.1")))
+  (add (check_str "a partition" (dk_key (DkPart 2 1536 479 (gp 2 1536 479 "s") (DkUnmounted "s"))) "2")
+       (check_str "free space" (dk_key (DkFree 34 6)) "free.34")))
 
 ; A sector that is no volume's.
 (def test_content_unknown () int
@@ -70,14 +78,15 @@
             (check_str "small" (dk_size_long 512) "512 bytes"))))
 
 (def test_titles () int
-  (add (check_str "a volume" (dk_seg_title (DkPart 1 8 1528 76 (DkVolume "data" 190 160 2))) "data")
-       (add (check_str "unknown" (dk_seg_title (DkPart 3 8 10 131 (DkUnknown "no"))) "Partition 3")
-            (add (check_str "its line" (dk_seg_line (DkPart 1 8 1528 76 (DkVolume "data" 190 160 2))) "782.3 kB L0FS")
-                 (check_str "free" (dk_seg_line (DkFree 1 7)) "3.6 kB")))))
+  (add (check_str "a volume" (dk_seg_title (DkPart 1 40 1496 (gp 1 40 1496 "data") (DkVolume "data" 190 160 2))) "data")
+       (add (check_str "unknown" (dk_seg_title (DkPart 3 40 10 (gp 3 40 10 "") (DkUnknown "no"))) "Partition 3")
+            (add (check_str "its line" (dk_seg_line (DkPart 1 40 1496 (gp 1 40 1496 "data") (DkVolume "data" 190 160 2))) "766.0 kB L0FS")
+                 (check_str "free" (dk_seg_line (DkFree 34 6)) "3.1 kB")))))
 
+; L0FS's type by its name; any other's by its UUID.
 (def test_types () int
-  (add (check_str "L0S's" (dk_type_text 76) "L0S (0x4C)")
-       (check_str "another" (dk_type_text 131) "0x83")))
+  (add (check_str "L0FS's" (dk_type_text (gpt_l0fs_type)) "L0FS")
+       (check_str "another" (dk_type_text (uuid_nil)) "00000000-0000-0000-0000-000000000000")))
 
 ; 30 clusters of 4096 used, 160 free.
 (def test_usage () int
@@ -91,7 +100,7 @@
 
 (def test_first_selected () int
   (add (check_str "the first volume, past the gap" (dk_selected (demo)) "1")
-       (check_str "free space if that is all" (dk_selected (dk_new (DkDrive 10 (dk_segments 10 (nil VolPart) (nil DkContent))))) "free.1")))
+       (check_str "free space if that is all" (dk_selected (dk_new (DkDrive 2048 false (dk_segments 2048 (nil GptPart) (nil DkContent))))) "free.34")))
 
 (def none () UiEvent (UiLeave))
 
@@ -99,7 +108,7 @@
 
 (def test_select () int
   (add (check_str "clicked" (dk_selected (dk_update (demo) "vols.select.2" (none))) "2")
-       (add (check_str "left" (dk_selected (dk_update (demo) "" (key (ui_key_left)))) "free.1")
+       (add (check_str "left" (dk_selected (dk_update (demo) "" (key (ui_key_left)))) "free.34")
             (check_str "right" (dk_selected (dk_update (demo) "" (key (ui_key_right)))) "2"))))
 
 (def dialog_of ((m Disks)) (list int)
@@ -116,13 +125,13 @@
 (def test_formattable () int
   (add (check_str "data" (dk_formattable (demo)) "data")
        (add (check_str "scratch, not mounted" (dk_formattable (dk_update (demo) "vols.select.2" (none))) "")
-            (add (check_str "free space" (dk_formattable (dk_update (demo) "vols.select.free.1" (none))) "")
+            (add (check_str "free space" (dk_formattable (dk_update (demo) "vols.select.free.34" (none))) "")
                  (check_str "no dialog for it" (dialog_of (dk_update (dk_update (demo) "vols.select.2" (none)) "app.format" (none))) "none")))))
 
 (def test_rescanned_keeps () int
   (add (check_str "still there" (dk_selected (dk_rescanned (dk_update (demo) "vols.select.2" (none)) (demo_drive) "ok")) "2")
        (check_str "gone: the first" (dk_selected (dk_rescanned (dk_update (demo) "vols.select.2" (none))
-                                                              (DkDrive 2048 (dk_segments 2048 (nil VolPart) (nil DkContent))) "ok")) "free.1")))
+                                                              (DkDrive 2048 false (dk_segments 2048 (nil GptPart) (nil DkContent))) "ok")) "free.34")))
 
 ; ------------------------------------------------------------------- view
 
@@ -150,24 +159,29 @@
   (let t (texts (laid (demo)))
     (add (check_bool "its title" (has_text t "1.0 MB Disk|") true)
          (add (check_bool "its size" (has_text t "1.0 MB (1,048,576 bytes)|") true)
-              (check_bool "its table" (has_text t "Master Boot Record|") true)))))
+              (check_bool "its table" (has_text t "Partitioning|GUID Partition Table|") true)))))
+
+(def test_view_no_table () int
+  (check_bool "none" (has_text (texts (laid (dk_new (DkDrive 2048 false (dk_segments 2048 (nil GptPart) (nil DkContent))))))
+                               "Partitioning|None|") true))
 
 (def test_view_volume () int
   (let t (texts (laid (demo)))
     (add (check_bool "contents" (has_text t "L0FS version 1 - Mounted at /Volumes/data|") true)
          (add (check_bool "usage" (has_text t "122.9 kB used, 655.4 kB free|") true)
-              (add (check_bool "type" (has_text t "L0S (0x4C)|") true)
-                   (check_bool "where" (has_text t "Sectors 8-1535|") true))))))
+              (add (check_bool "type" (has_text t "Partition Type|L0FS|") true)
+                   (add (check_bool "its UUID" (has_text t (append "Partition UUID|" (append (uuid_text (gpt_part_uuid (gp 1 40 1496 "data"))) "|"))) true)
+                        (check_bool "where" (has_text t "Sectors 40-1535|") true)))))))
 
 (def test_view_targets () int
   (let ns (laid (demo))
     (add (check_bool "the drive" (has_target ns "side.select.0") true)
-         (add (check_bool "each part" (has_target ns "vols.select.free.1") true)
+         (add (check_bool "each part" (has_target ns "vols.select.free.34") true)
               (add (check_bool "refresh" (has_target ns "app.refresh") true)
                    (check_bool "format, for data" (has_target ns "app.format") true))))))
 
 (def test_view_format_insensitive () int
-  (check_bool "not for free space" (has_target (laid (dk_update (demo) "vols.select.free.1" (none))) "app.format") false))
+  (check_bool "not for free space" (has_target (laid (dk_update (demo) "vols.select.free.34" (none))) "app.format") false))
 
 (def test_view_dialog () int
   (let ns (laid (dk_update (demo) "app.format" (none)))
