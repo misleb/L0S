@@ -257,6 +257,108 @@
 (def test_format_open () int
   (check_str "a file open" (answers (reqs2 "open 2 /Volumes/data/a" "format /Volumes/data")) "1:|-4:"))
 
+; ---------------------------------------------------------------- rescan
+
+; Volumes as tools/mkdisk makes them, empty, and another in scratch's
+; place.
+(def data_vol () FsVol (FsVol 8 (vol_new "data" (vol_layout 1528))))
+(def scratch_vol () FsVol (FsVol 1536 (vol_new "scratch" (vol_layout 512))))
+(def other_vol () FsVol (FsVol 1536 (vol_new "other" (vol_layout 512))))
+
+(def vols2 ((a FsVol) (b FsVol)) (list FsVol) (cons a (cons b (nil FsVol))))
+
+; A disk in memory with vols on it: sector 0 the partition table, each
+; volume's metadata where its partition starts.
+(def disk_with ((vols (list FsVol))) Store
+  (metas_on (put_at (StoreMem ((MapEmpty int (list int)))) 0 (mbr_encode (parts_of vols))) vols))
+
+(def parts_of ((vols (list FsVol))) (list VolPart)
+  (if (is_empty vols)
+      (nil VolPart)
+      (match (head vols)
+        ((FsVol start v)
+          (cons (VolPart (vol_part_type) start (match (vol_layout_of v) ((VolLayout n c t d) n))) (parts_of (tail vols)))))))
+
+(def metas_on ((s Store) (vols (list FsVol))) Store
+  (if (is_empty vols) s (match (head vols) ((FsVol start v) (metas_on (put_at s start (vol_meta v)) (tail vols))))))
+
+(def put_at ((s Store) (sector int) (bs (list int))) Store
+  (match (store_write_all s sector bs) ((Put s2) s2) ((PutNot s2 why) s2)))
+
+; A server of vols, on a disk that has ondisk.
+(def serving ((vols (list FsVol)) (ondisk (list FsVol))) Fs
+  (fs_new (disk_with ondisk) 7 (array_from vols (data_vol))))
+
+; A rescan as text: its answer, a bar, the labels to mount, comma
+; separated.
+(def rescan_text ((r Rescanned)) (list int)
+  (match r ((Rescanned a labels) (append (answer_text a) (append "|" (join_commas labels))))))
+
+(def join_commas ((ls (list (list int)))) (list int)
+  (if (is_empty ls) "" (if (is_empty (tail ls)) (head ls) (append (head ls) (append "," (join_commas (tail ls)))))))
+
+(def rescanned_fs ((r Rescanned)) Fs (match r ((Rescanned a labels) (after a))))
+
+; The same volumes: both served, nothing new to mount.
+(def test_rescan_same () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (check_str "two, none new" (rescan_text (rescan (serving both both))) "2:data\nscratch\n|")))
+
+; A volume in scratch's place is new; data is not.
+(def test_rescan_new () int
+  (check_str "other new"
+             (rescan_text (rescan (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (other_vol)))))
+             "2:data\nother\n|other"))
+
+; From one volume to two: the second is new, and served.
+(def test_rescan_more () int
+  (let r (rescan (serving (cons (data_vol) (nil FsVol)) (vols2 (data_vol) (scratch_vol))))
+    (add (check_str "scratch new" (rescan_text r) "2:data\nscratch\n|scratch")
+         (check_str "served" (answer_text (obey (rescanned_fs r) 5 "df /Volumes/scratch")) "0:512 63 63 0"))))
+
+; A volume that has gone is answered as no volume of fs's.
+(def test_rescan_gone () int
+  (let f (rescanned_fs (rescan (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (other_vol)))))
+    (check_str "scratch gone, other there"
+               (ran_text (run f (reqs3 "list /Volumes/scratch" "open 2 /Volumes/scratch/a" "list /Volumes/other")))
+               "-3:|-9:|0:")))
+
+; No partitions at all: no volume served.
+(def test_rescan_empty () int
+  (let r (rescan (serving (vols2 (data_vol) (scratch_vol)) (nil FsVol)))
+    (add (check_str "none" (rescan_text r) "0:|")
+         (check_str "data gone" (answer_text (obey (rescanned_fs r) 5 "list /Volumes/data")) "-3:"))))
+
+; What a rescan serves is what is on the disk: a file written and
+; closed is there after it.
+(def test_rescan_reads_disk () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (let f (ran_fs (run (serving both both) (written_notes)))
+      (check_str "the file" (ran_text (run (rescanned_fs (rescan f)) (reqs2 "open 1 /Volumes/data/notes" "read 2 100")))
+                 "2:|10:hello disk"))))
+
+; Refused while a file is open, served once it is closed.
+(def test_rescan_open () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (add (check_str "open" (ran_text (run (serving both both) (reqs2 "open 2 /Volumes/data/a" "rescan"))) "1:|-4:")
+         (check_str "closed" (ran_text (run (serving both both) (reqs3 "open 2 /Volumes/data/a" "close 1" "rescan")))
+                    "1:|0:|2:data\nscratch\n"))))
+
+(def test_rescan_words () int
+  (check_str "takes none" (answers (reqs1 "rescan /Volumes/data")) "-5:"))
+
+; A server of no volumes, as one that started on a disk with none, finds
+; both once they are made, and mounts both.
+(def test_rescan_from_none () int
+  (let f (fs_new (disk_with (vols2 (data_vol) (scratch_vol))) 7 (vols_array (nil FsVol)))
+    (add (check_str "nothing yet" (answer_text (obey f 5 "list /Volumes/data")) "-3:")
+         (check_str "both new" (rescan_text (rescan f)) "2:data\nscratch\n|data,scratch"))))
+
+; With no volumes fs goes on to serve, rather than giving up with 0; under
+; an operating system there is no kernel to register it with, so it fails.
+(def test_serves_none () int
+  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int)))) (nil FsVol))) 1))
+
 ; Under an operating system there is no disk.
 (def test_no_disk () int
   (check_int "nothing to serve" (fs) 0))

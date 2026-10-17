@@ -63,11 +63,23 @@ display. This is the working summary, with the rules.
   icons (`window-close`, `view-refresh`...).
 - **`widget.l0`**: a `UiWidget` tree (`UiLabel`, `UiButton`, `UiBox`,
   `UiExpand`, `UiPad`, `UiSeparator`, `UiHeaderBar`, `UiView`, `UiLevel`,
-  `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`). `ui_layout widget rect
+  `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`, and `panes.l0`'s
+  `UiSidebar`, `UiSegmentBar`, `UiProps`, `UiModal`). `ui_layout widget rect
   state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them;
   `ui_hit nodes x y` gives the action under a point.
 - **`grid.l0`**: the data grid, typed cells, sorting, selection, keys,
   the wheel, and an overlay scrollbar whose slider drags.
+- **`panes.l0`**: what a window of panes needs:
+  `UiSidebar` (rows of an icon, title and line on the sidebar's ground),
+  `UiSegmentBar` (a whole in parts by weight, `ui_shares`, each part
+  `UiSegPlain` or `UiSegMuted`; any height, showing a title and a line,
+  the title alone, or no text, as a usage bar; prefix `""` for a bar
+  nothing in is chosen; Left and Right with `ui_segbar_key`), `UiProps`
+  (a dimmed name, then any widget), and
+  `UiModal` with `ui_alert` (a card over the window, everything beneath
+  mixed with black by `ui_scrim` and no longer a target). Rows and parts
+  carry `PREFIX.select.KEY`; `ui_select_key` reads it back. `user/disks`
+  uses them all.
 - **Scrollers** (`widget.l0`): a widget that scrolls keeps how it is
   scrolled in its nodes' actions, `NAME.scroll.FIRST.MOST.SHOWN` for its
   area and `NAME.scrollbar.FIRST.MOST.SPAN.SLIDER` for its scrollbar's

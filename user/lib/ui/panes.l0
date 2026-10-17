@@ -1,0 +1,309 @@
+; panes.l0 -- the widgets a window of panes needs: a sidebar of rows to
+; choose between, libadwaita's navigation sidebar; a segment bar, a whole
+; split into parts each as wide as its share of it, which may be chosen
+; between, as GNOME Disks shows a drive's volumes or GNOME's Usage the
+; parts of a disk; rows of properties, a dimmed name before each value;
+; and an alert dialog over the window, which dims what is beneath it and
+; takes every press until it is answered. Their UiWidget constructors are
+; in widget.l0: UiSidebar, UiSegmentBar, UiProps, UiModal.
+;
+; A sidebar's row and a bar's part each carry an action, PREFIX.select.KEY,
+; as the grid's rows do; ui_select_key reads the key back.
+
+; A sidebar's row: its key, its icon, its title, and a line under it.
+(data UiSideRow (UiSideRow (list int) (list int) (list int) (list int)))
+
+; How a part of a segment bar is drawn: plain, on the view's ground; or
+; muted, on the window's, its text dimmed, as for what is empty or
+; unused. The selected part is in the accent either way.
+(data UiSegStyle (UiSegPlain) (UiSegMuted))
+
+; A part of a segment bar: its key, its weight, how much of the whole it
+; is, its title, a line under it, and its style.
+(data UiSegment (UiSegment (list int) int (list int) (list int) UiSegStyle))
+
+; A property: its name, and what it is, any widget.
+(data UiProp (UiProp (list int) UiWidget))
+
+; The key action selects, if it is PREFIX.select.KEY; else "".
+(def ui_select_key ((prefix (list int)) (action (list int))) (list int)
+  (let p (append prefix ".select.")
+    (if (starts_with action p) (drop_n action (length p)) "")))
+
+; The action that selects key.
+(def ui_select_action ((prefix (list int)) (key (list int))) (list int)
+  (append prefix (append ".select." key)))
+
+; ---------------------------------------------------------------- sidebar
+
+; A sidebar's size: its width, by its rows and 6 above and below them.
+(def ui_sidebar_size ((w int) (rows (list UiSideRow))) UiSize
+  (UiSize w (add (mul (length rows) (ui_side_row_h)) (mul 2 (ui_space_s)))))
+
+; A sidebar in r: its ground over all of r, and its rows from the top, 6
+; in from its edges, the selected one rounded in a darker ground, the one
+; the pointer is over in a lighter.
+(def ui_sidebar_lay ((rows (list UiSideRow)) (prefix (list int)) (sel (list int)) (r UiRect) (st UiState) (acc (list UiNode))) (list UiNode)
+  (let sbg (ui_sidebar_bg (ui_st_style st))
+    (ui_side_rows rows prefix sel (add (ui_rx r) (ui_space_s)) (add (ui_ry r) (ui_space_s))
+                  (max 0 (sub (ui_rw r) (mul 2 (ui_space_s)))) st sbg
+                  (ui_leaf r (cons (UiPFill r sbg) (nil UiPaint)) acc))))
+
+; Each row from y down, w wide, onto acc.
+(def ui_side_rows ((rows (list UiSideRow)) (prefix (list int)) (sel (list int)) (x int) (y int) (w int)
+                   (st UiState) (sbg int) (acc (list UiNode))) (list UiNode)
+  (if (is_empty rows)
+      acc
+      (match (head rows)
+        ((UiSideRow key icon title sub)
+          (let action (ui_select_action prefix key)
+            (let rr (UiRect x y w (ui_side_row_h))
+              (ui_side_rows (tail rows) prefix sel x (add y (ui_side_row_h)) w st sbg
+                            (cons (UiNode rr (ui_side_row_ops rr icon title sub (eq key sel) (eq (ui_st_hover st) action) st sbg) action false)
+                                  acc))))))))
+
+; A row: its ground if selected or under the pointer; its icon, twice
+; the size, 8 in; its title, bold, and its line, dimmed, after it.
+(def ui_side_row_ops ((rr UiRect) (icon (list int)) (title (list int)) (sub (list int)) (selected bool) (hover bool)
+                      (st UiState) (sbg int)) (list UiPaint)
+  (let s (ui_st_style st)
+    (let bg (if selected (ui_sidebar_selected_bg s) (if hover (ui_hover_bg s sbg) sbg))
+      (let tx (add (ui_rx rr) (add 8 (add 32 (ui_space_m))))
+        (let tw (max 0 (sub (add (ui_rx rr) (ui_rw rr)) (add tx 8)))
+          (let ground (if (eq bg sbg) (nil UiPaint) (cons (UiPRound rr (ui_button_radius) bg sbg) (nil UiPaint)))
+            (append ground
+                    (cons (UiPIcon (add (ui_rx rr) 8) (add (ui_ry rr) 8) icon (ui_fg s) 2)
+                          (cons (UiPText (UiRect tx (add (ui_ry rr) 8) tw (ui_char_h)) title (UiStart) (ui_fg s) true 1)
+                                (cons (UiPText (UiRect tx (add (ui_ry rr) 24) tw (ui_char_h)) sub (UiStart) (ui_dim_fg s bg) false 1)
+                                      (nil UiPaint)))))))))))
+
+; ------------------------------------------------------------ segment bars
+
+; How wide each of a bar's parts is, by weight, in total pixels: each at
+; least minw, if there is room for that, and the rest shared by weight,
+; the last taking what rounding leaves, so that they fill total exactly.
+; With no weight at all, they share alike.
+(def ui_shares ((weights (list int)) (total int) (minw int)) (list int)
+  (let n (length weights)
+    (if (eq n 0)
+        (nil int)
+        (let base (if (le (mul n minw) total) minw (div total n))
+          (let extra (sub total (mul n base))
+            (let sum (ui_sum weights 0)
+              (ui_shares_onto weights base extra sum total (nil int))))))))
+
+; The weights' sum, a negative one taken as 0.
+(def ui_sum ((xs (list int)) (acc int)) int
+  (if (is_empty xs) acc (ui_sum (tail xs) (add acc (max 0 (head xs))))))
+
+; Each part's width, of left still to give, onto acc.
+(def ui_shares_onto ((ws (list int)) (base int) (extra int) (sum int) (left int) (acc (list int))) (list int)
+  (if (is_empty (tail ws))
+      (rev (cons left acc))
+      (let n (add 1 (length (tail ws)))
+        (let w (add base (if (le sum 0) (div extra n) (div (mul extra (max 0 (head ws))) sum)))
+          (ui_shares_onto (tail ws) base extra sum (sub left w) (cons w acc))))))
+
+; The room between two parts of the bar.
+(def ui_segment_gap () int 2)
+
+; A bar's size: each part at its least, and the frame around them, h
+; high.
+(def ui_segbar_size ((segs (list UiSegment)) (h int)) UiSize
+  (UiSize (add (mul (length segs) (add (ui_segment_min_w) (ui_segment_gap))) (mul 2 (ui_space_s))) h))
+
+; A segment bar h high across r: a frame, and in it each part as wide as
+; its share, 2 apart, edged, on its style's ground; the selected in the
+; accent. Its title and its line are in its middle, as many of them as
+; fit: both in a bar of ui_segbar_h, the title alone in a lower one, and
+; neither in a bar too low for a line, which is a usage bar. With prefix
+; "" no part can be selected, and none is a target.
+(def ui_segbar_lay ((prefix (list int)) (segs (list UiSegment)) (sel (list int)) (h int) (r UiRect) (st UiState) (bg int) (acc (list UiNode))) (list UiNode)
+  (let s (ui_st_style st)
+    (let fr (UiRect (ui_rx r) (ui_ry r) (ui_rw r) (min h (ui_rh r)))
+      (let vbg (ui_view_bg s)
+        (let frame (ui_leaf fr (cons (UiPRound fr (ui_button_radius) (ui_border s bg) bg)
+                                     (cons (UiPRound (ui_rect_inset fr 1) (sub (ui_button_radius) 1) vbg (ui_border s bg)) (nil UiPaint))) acc)
+          (let inner (ui_rect_inset fr (ui_segbar_inset (ui_rh fr)))
+            (let n (length segs)
+              (let ws (ui_shares (ui_weights segs (nil int)) (max 0 (sub (ui_rw inner) (mul (max 0 (sub n 1)) (ui_segment_gap)))) (ui_segment_min_w))
+                (ui_segments prefix segs ws (if (is_empty prefix) "" sel) (ui_rx inner) (ui_ry inner) (ui_rh inner) st vbg frame)))))))))
+
+; How far in from the frame the parts are: 4, or 2 in a bar under 16.
+(def ui_segbar_inset ((h int)) int (if (lt h 16) 2 4))
+
+; Each part's weight, in order.
+(def ui_weights ((segs (list UiSegment)) (acc (list int))) (list int)
+  (if (is_empty segs)
+      (rev acc)
+      (match (head segs) ((UiSegment k w t sub kind) (ui_weights (tail segs) (cons w acc))))))
+
+; Each part from x on, as wide as ws says, onto acc.
+(def ui_segments ((prefix (list int)) (segs (list UiSegment)) (ws (list int)) (sel (list int)) (x int) (y int) (h int)
+                  (st UiState) (vbg int) (acc (list UiNode))) (list UiNode)
+  (if (if (is_empty segs) true (is_empty ws))
+      acc
+      (match (head segs)
+        ((UiSegment key w title sub style)
+          (let action (if (is_empty prefix) "" (ui_select_action prefix key))
+            (let sr (UiRect x y (head ws) h)
+              (ui_segments prefix (tail segs) (tail ws) sel (add x (add (head ws) (ui_segment_gap))) y h st vbg
+                           (cons (UiNode sr (ui_segment_ops sr title sub style (eq key sel)
+                                                            (if (is_empty action) false (eq (ui_st_hover st) action)) st vbg)
+                                         action false)
+                                 acc))))))))
+
+; A part of the bar: its ground, edged unless selected; its title over
+; its line, each in its middle, cut to fit, if the part is high enough.
+(def ui_segment_ops ((sr UiRect) (title (list int)) (sub (list int)) (style UiSegStyle) (selected bool) (hover bool)
+                     (st UiState) (vbg int)) (list UiPaint)
+  (let s (ui_st_style st)
+    (let ground (if selected
+                    (ui_accent_bg)
+                    (let g (match style ((UiSegPlain) vbg) ((UiSegMuted) (ui_window_bg s)))
+                      (if hover (ui_hover_bg s g) g)))
+      (let fg (if selected (ui_accent_fg) (match style ((UiSegPlain) (ui_fg s)) ((UiSegMuted) (ui_dim_fg s ground))))
+        (let dim (if selected (ui_accent_fg) (ui_dim_fg s ground))
+          (let rad (max 0 (min (sub (ui_button_radius) 2) (div (ui_rh sr) 2)))
+            (let face (if selected
+                          (cons (UiPRound sr rad ground vbg) (nil UiPaint))
+                          (cons (UiPRound sr rad (ui_border s vbg) vbg)
+                                (cons (UiPRound (ui_rect_inset sr 1) (max 0 (sub rad 1)) ground (ui_border s vbg)) (nil UiPaint))))
+              (append face (ui_segment_text sr title sub fg dim selected)))))))))
+
+; A part's text in sr: its title over its line if both fit, the title
+; alone if one does, else nothing.
+(def ui_segment_text ((sr UiRect) (title (list int)) (sub (list int)) (fg int) (dim int) (bold bool)) (list UiPaint)
+  (let mid (add (ui_ry sr) (div (ui_rh sr) 2))
+    (let tw (max 0 (sub (ui_rw sr) 8))
+      (if (ge (ui_rh sr) (add (mul 2 (ui_char_h)) 8))
+          (cons (UiPText (UiRect (add (ui_rx sr) 4) (sub mid (ui_char_h)) tw (ui_char_h)) title (UiCenter) fg bold 1)
+                (cons (UiPText (UiRect (add (ui_rx sr) 4) mid tw (ui_char_h)) sub (UiCenter) dim false 1) (nil UiPaint)))
+          (if (ge (ui_rh sr) (add (ui_char_h) 4))
+              (cons (UiPText (UiRect (add (ui_rx sr) 4) (sub mid (div (ui_char_h) 2)) tw (ui_char_h)) title (UiCenter) fg bold 1) (nil UiPaint))
+              (nil UiPaint))))))
+
+; Linux's codes for the keys that move along a bar.
+(def ui_key_left () int 105)
+(def ui_key_right () int 106)
+
+; The key selected after a key is pressed in a bar whose selected key is
+; sel: the one before it for Left, after it for Right, stopping at the
+; ends; sel for any other key.
+(def ui_segbar_key ((segs (list UiSegment)) (sel (list int)) (code int)) (list int)
+  (let keys (ui_segment_keys segs (nil (list int)))
+    (if (eq code (ui_key_left))
+        (ui_key_before keys sel sel)
+        (if (eq code (ui_key_right)) (ui_key_before (rev keys) sel sel) sel))))
+
+; Each part's key, in order.
+(def ui_segment_keys ((segs (list UiSegment)) (acc (list (list int)))) (list (list int))
+  (if (is_empty segs)
+      (rev acc)
+      (match (head segs) ((UiSegment k w t sub kind) (ui_segment_keys (tail segs) (cons k acc))))))
+
+; The key before sel among keys, or prev, where sel is first; sel if it
+; is not among them.
+(def ui_key_before ((keys (list (list int))) (sel (list int)) (prev (list int))) (list int)
+  (if (is_empty keys)
+      sel
+      (if (eq (head keys) sel) prev (ui_key_before (tail keys) sel (head keys)))))
+
+; -------------------------------------------------------------- properties
+
+; The widest name, which the names' column is as wide as.
+(def ui_props_key_w ((ps (list UiProp)) (acc int)) int
+  (if (is_empty ps) acc (match (head ps) ((UiProp k v) (ui_props_key_w (tail ps) (max acc (ui_text_w k false 1)))))))
+
+; A property's row: as high as its value, and at least a line.
+(def ui_prop_h ((v UiWidget)) int (max (ui_char_h) (ui_sh (ui_measure v))))
+
+; Properties' size: the names' column, 12, the widest value; every row,
+; 6 apart.
+(def ui_props_size ((ps (list UiProp))) UiSize
+  (ui_props_size_onto ps (ui_props_key_w ps 0) 0 0 true))
+
+(def ui_props_size_onto ((ps (list UiProp)) (kw int) (w int) (h int) (first bool)) UiSize
+  (if (is_empty ps)
+      (UiSize (add kw (add (ui_space_m) w)) h)
+      (match (head ps)
+        ((UiProp k v)
+          (ui_props_size_onto (tail ps) kw (max w (ui_sw (ui_measure v)))
+                              (add h (add (ui_prop_h v) (if first 0 (ui_space_s)))) false)))))
+
+; Properties down r, 6 apart: each name dimmed, at the end of a column as
+; wide as the widest, then 12, then its value in the rest of the row.
+(def ui_props_lay ((ps (list UiProp)) (r UiRect) (st UiState) (bg int) (acc (list UiNode))) (list UiNode)
+  (ui_props_rows ps (ui_props_key_w ps 0) (ui_rx r) (ui_ry r) (ui_rw r) st bg acc))
+
+; Each property from y down, its name in a column kw wide, onto acc.
+(def ui_props_rows ((ps (list UiProp)) (kw int) (x int) (y int) (w int) (st UiState) (bg int) (acc (list UiNode))) (list UiNode)
+  (if (is_empty ps)
+      acc
+      (match (head ps)
+        ((UiProp k v)
+          (let h (ui_prop_h v)
+            (let kr (UiRect x y kw h)
+              (let vx (add x (add kw (ui_space_m)))
+                (let a1 (ui_leaf kr (cons (UiPText kr k (UiEnd) (ui_dim_fg (ui_st_style st) bg) false 1) (nil UiPaint)) acc)
+                  (ui_props_rows (tail ps) kw x (add y (add h (ui_space_s))) w st bg
+                                 (ui_lay v (UiRect vx y (max 0 (sub (add x w) vx)) h) st bg a1))))))))))
+
+; ----------------------------------------------------------------- dialogs
+
+; An alert's content, as libadwaita's alert dialog lays it out: its
+; heading, its lines, and its buttons sharing a row, 24 in from the card's
+; edges.
+(def ui_alert ((heading (list int)) (lines (list (list int))) (buttons (list UiWidget))) UiWidget
+  (UiPad 24 24
+    (UiBox (UiV) (ui_space_m)
+      (cons (UiLabel heading (UiHeading) (UiCenter))
+            (append (ui_alert_lines lines)
+                    (cons (UiSpace 0 (ui_space_s))
+                          (cons (UiBox (UiH) (ui_space_m) (ui_expanded buttons (nil UiWidget))) (nil UiWidget))))))))
+
+; Each line, in the middle.
+(def ui_alert_lines ((lines (list (list int)))) (list UiWidget)
+  (if (is_empty lines) (nil UiWidget) (cons (UiLabel (head lines) (UiBody) (UiCenter)) (ui_alert_lines (tail lines)))))
+
+; Each widget sharing what room its box has, onto acc.
+(def ui_expanded ((ws (list UiWidget)) (acc (list UiWidget))) (list UiWidget)
+  (if (is_empty ws) (rev acc) (ui_expanded (tail ws) (cons (UiExpand (head ws)) acc))))
+
+; A modal: everything under it, laid out in r, dimmed and no longer a
+; target; then a card in the middle of r, its corners round and its edge
+; a line, with the alert on it.
+(def ui_modal_lay ((base UiWidget) (alert UiWidget) (r UiRect) (st UiState) (bg int) (acc (list UiNode))) (list UiNode)
+  (let under (ui_dimmed (ui_lay base r st bg acc) (nil UiNode))
+    (let s (ui_st_style st)
+      (let cbg (ui_card_bg s)
+        (let size (ui_measure alert)
+          (let cw (min (ui_rw r) (max (ui_dialog_w) (ui_sw size)))
+            (let ch (min (ui_rh r) (ui_sh size))
+              (let card (UiRect (ui_aligned (ui_rx r) (ui_rw r) cw (UiCenter)) (ui_aligned (ui_ry r) (ui_rh r) ch (UiCenter)) cw ch)
+                (ui_lay alert card st cbg
+                        (ui_leaf card (cons (UiPRound card (ui_dialog_radius) (ui_border s (ui_scrim bg)) -1)
+                                            (cons (UiPRound (ui_rect_inset card 1) (sub (ui_dialog_radius) 1) cbg (ui_border s (ui_scrim bg))) (nil UiPaint)))
+                                 under))))))))))
+
+; Nodes, newest first, each dimmed as under a dialog and with no action;
+; onto acc, which ends up newest first again.
+(def ui_dimmed ((ns (list UiNode)) (acc (list UiNode))) (list UiNode)
+  (if (is_empty ns)
+      (rev acc)
+      (match (head ns)
+        ((UiNode r ops a f) (ui_dimmed (tail ns) (cons (UiNode r (ui_dim_ops ops (nil UiPaint)) "" false) acc))))))
+
+; Each op in its color as under a dialog, onto acc.
+(def ui_dim_ops ((ops (list UiPaint)) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty ops)
+      (rev acc)
+      (ui_dim_ops (tail ops) (cons (ui_dim_op (head ops)) acc))))
+
+; An op in its color as under a dialog.
+(def ui_dim_op ((op UiPaint)) UiPaint
+  (match op
+    ((UiPFill r c) (UiPFill r (ui_scrim c)))
+    ((UiPRound r rad c under) (UiPRound r rad (ui_scrim c) (if (lt under 0) under (ui_scrim under))))
+    ((UiPText r s a c bold scale) (UiPText r s a (ui_scrim c) bold scale))
+    ((UiPIcon x y name c scale) (UiPIcon x y name (ui_scrim c) scale))))

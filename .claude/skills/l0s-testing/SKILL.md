@@ -100,7 +100,10 @@ These boot with QEMU's monitor and QMP on Unix sockets and check pixels of a
 `screendump`. Each can be run alone from the top of the project once its
 image exists: `make initramfs` for `vt.sh` (the demo), and
 `make screen-initramfs` for `gpu-screen.sh`, `keyboard.sh`, `widgets.sh` and
-`procmon.sh` (the demo without the terminals, `tests/screen/etc`).
+`procmon.sh` (the demo without the terminals, `tests/screen/etc`), and
+`make disks-initramfs` for `disks.sh` (that with the disk's driver and
+file server, `tests/disks/etc`, on a fresh `tools/mkdisk` disk it makes
+itself and passes as `QEMU_DISK`).
 
 Their helpers, copied in each script:
 

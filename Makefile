@@ -56,9 +56,9 @@ FSLIB   := user/lib/fs.l0
 # commands, which need only render.l0; and its client windows, which need
 # the compositor's protocol too.
 UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
-             user/lib/ui/grid.l0 user/lib/ui/draw_cmd.l0
+             user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/draw_cmd.l0
 UI_WINDOW := user/lib/ui/window.l0
-UI_TESTS  := theme icons paint widget grid draw_cmd
+UI_TESTS  := theme icons paint widget grid panes draw_cmd
 
 LIBS_virtio-gpu := $(RENDER)
 LIBS_rtc        := $(CLOCK)
@@ -71,9 +71,10 @@ LIBS_procmon    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_fs         := $(DISKLIB) $(L0FS) $(FSLIB)
 LIBS_sh         := $(FSLIB) user/sh/files.l0
+LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(L0FS) $(FSLIB)
 
 PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio-input keys vt wm windows widgets procmon \
-            virtio-blk disk fs
+            virtio-blk disk fs disks
 MKSPLASH := tools/mksplash/mksplash.l0
 L0SDOC   := tools/l0sdoc/l0sdoc.l0
 MKFS     := common/abi.l0 $(L0FS) tools/mkfs/mkfs.l0
@@ -84,7 +85,7 @@ DOC_SRCS := common/abi.l0 common/initramfs.l0 common/queue.l0 $(filter-out $(COM
             user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0 \
             $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(DISKLIB) $(L0FS) $(FSLIB) $(UI_CORE) $(UI_WINDOW)
 
-.PHONY: all check test test-virt e2e images initramfs screen-initramfs boot demo clean sample doc mcp
+.PHONY: all check test test-virt e2e images initramfs screen-initramfs disks-initramfs boot demo clean sample doc mcp
 
 all: check test test-virt e2e
 
@@ -186,13 +187,21 @@ screen-initramfs: images $(SPLASH) $(FONT)
 	cp $(SPLASH) $(BUILD)/screen-etc/splash.ppm && cp $(FONT) $(BUILD)/screen-etc/font.txt
 	tools/mkinitramfs $(BUILD)/screen.cpio $(BUILD)/screen-etc $(IMAGES)
 
-e2e: images initramfs screen-initramfs
+# What tests/disks.sh boots: tests/disks/etc, the screen tests' with the
+# disk's driver and file server, with the splash and font.
+disks-initramfs: images $(SPLASH) $(FONT)
+	rm -rf $(BUILD)/disks-etc && cp -R tests/disks/etc $(BUILD)/disks-etc
+	cp $(SPLASH) $(BUILD)/disks-etc/splash.ppm && cp $(FONT) $(BUILD)/disks-etc/font.txt
+	tools/mkinitramfs $(BUILD)/disks.cpio $(BUILD)/disks-etc $(IMAGES)
+
+e2e: images initramfs screen-initramfs disks-initramfs
 	tests/e2e.sh
 	tests/gpu-screen.sh
 	tests/keyboard.sh
 	tests/vt.sh
 	tests/widgets.sh
 	tests/procmon.sh
+	tests/disks.sh
 
 boot: images $(DISK)
 	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(IMAGES)

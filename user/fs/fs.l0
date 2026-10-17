@@ -2,8 +2,10 @@
 ; each volume of L0S's file system on it (user/lib/l0fs.l0) at
 ; /Volumes/LABEL, all from one port, and serves the fs protocol
 ; (user/lib/fs.l0) there: the kernel's requests for every process's
-; calls on those files, and list, df and format from programs. It also
-; registers the port as fs, once every volume is mounted.
+; calls on those files, and list, df, format and rescan from programs. It
+; also registers the port as fs, once every volume is mounted, and serves
+; though the disk has none. A rescan reads the disk's volumes again, and
+; mounts any new label.
 ;
 ; Each volume's metadata is kept in memory and written back, after the
 ; data, whenever it changes. A handle is the pid that opened it, which
@@ -123,6 +125,14 @@
 
 (def with_handles ((f Fs) (h2 (Map int Handle))) Fs
   (match f ((Fs s port vols hs next ws) (Fs s port vols h2 next ws))))
+
+; f serving vols in place of its volumes.
+(def with_vols ((f Fs) (vols2 (list FsVol))) Fs
+  (match f ((Fs s port vols hs next ws) (Fs s port (vols_array vols2) hs next ws))))
+
+; vols as an array, which may be empty.
+(def vols_array ((vols (list FsVol))) (array FsVol)
+  (array_from vols (FsVol 0 (vol_new "x" (vol_layout 16)))))
 
 ; f with v as volume vi, in memory only.
 (def with_vol ((f Fs) (vi int) (v Vol)) Fs
@@ -255,13 +265,15 @@
     (obey_volumes f op ws)))))))
 
 (def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
+  (if (eq op "rescan")
+      (if (is_empty ws) (do_rescan f) (word f -5))
   (if (not (eq (length ws) 1))
       (word f -5)
       (if (eq op "remove") (do_remove f (head ws))
       (if (eq op "list") (do_list f (head ws))
       (if (eq op "df") (do_df f (head ws))
       (if (eq op "format") (do_format f (head ws))
-      (word f -5)))))))
+      (word f -5))))))))
 
 ; Whether w is a decimal number: digits, at least one.
 (def is_number ((w (list int))) bool
@@ -502,6 +514,63 @@
               ((CommitFailed f2) (word f2 -5))
               ((Committed f2) (word f2 0)))))))
 
+; ---------------------------------------------------------------- rescan
+
+; What a rescan answered, and the labels it found that f did not serve
+; before, to be mounted.
+(data Rescanned (Rescanned Answered (list (list int))))
+
+; The disk read again as at the start, sector 0's partitions and each
+; volume on them, served in place of the volumes before: the answer is
+; how many there are now, then LABEL\n for each. Refused -4 while any
+; file is open, since a handle names its volume by where it is among
+; them; -5 if sector 0 cannot be read.
+(def rescan ((f Fs)) Rescanned
+  (if (gt (map_size (fs_handles f)) 0)
+      (Rescanned (word f -4) (nil (list int)))
+      (match (store_read (match f ((Fs s port vols hs next ws) s)) 0 1)
+        ((GotNot s2 why) (Rescanned (word (with_store f s2) -5) (nil (list int))))
+        ((Got s2 bs)
+          (match (load_vols s2 (mbr_volumes (mbr_decode (bytes_from_list bs))) (nil FsVol))
+            ((Loaded s3 vols)
+              (Rescanned (Answered (with_vols (with_store f s3) vols) (length vols) (labels_text vols (nil int)))
+                         (new_labels (fs_vols f) vols))))))))
+
+; The labels of vols, a line each, after acc.
+(def labels_text ((vols (list FsVol)) (acc (list int))) (list int)
+  (if (is_empty vols)
+      (rev acc)
+      (match (head vols) ((FsVol start v) (labels_text (tail vols) (push "\n" (push (vol_label v) acc)))))))
+
+; The labels of vols that none of old has.
+(def new_labels ((old (array FsVol)) (vols (list FsVol))) (list (list int))
+  (if (is_empty vols)
+      (nil (list int))
+      (match (head vols)
+        ((FsVol start v)
+          (if (lt (vol_index old (vol_label v) 0) 0)
+              (cons (vol_label v) (new_labels old (tail vols)))
+              (new_labels old (tail vols)))))))
+
+; A rescan, its new labels mounted from f's port. A label that has gone
+; stays in the kernel's table, there being no unmount, and its requests
+; are answered as for any volume fs does not serve.
+(def do_rescan ((f Fs)) Answered
+  (match (rescan f)
+    ((Rescanned a labels)
+      (let m (mount_new (match f ((Fs s port vols hs next ws) port)) labels) a))))
+
+; Each label mounted from port. One mounted already is fs's from before,
+; served again; any other failure is said why.
+(def mount_new ((port int) (labels (list (list int)))) int
+  (if (is_empty labels)
+      0
+      (match (fs_mount (head labels) port)
+        ((Mounted) (mount_new port (tail labels)))
+        ((MountTaken) (mount_new port (tail labels)))
+        ((MountNoPort) (let w (complain (append (head labels) (append ": " (mounting_why (MountNoPort))))) (mount_new port (tail labels))))
+        ((MountBadLabel) (let w (complain (append (head labels) (append ": " (mounting_why (MountBadLabel))))) (mount_new port (tail labels)))))))
+
 ; ---------------------------------------------------------------- serving
 
 ; Every message on the port: a request answered to its reply port, if it
@@ -544,7 +613,8 @@
           ((Got s2 bs)
             (let parts (mbr_volumes (mbr_decode (bytes_from_list bs)))
               (if (is_empty parts)
-                  (nothing_to_serve "no volumes on the disk; tools/mkdisk makes a disk with two")
+                  (let w (write_err "fs: no volumes on the disk yet; a rescan serves any made\n")
+                    (found (Loaded s2 (nil FsVol))))
                   (found (load_vols s2 parts (nil FsVol)))))))))))
 
 ; The volumes of parts, each a partition, onto acc; one that cannot be
@@ -578,18 +648,18 @@
   (let w (write_err (append "fs: the partition at sector " (append (digits start) (append ": " (append why "\n")))))
     acc))
 
+; The volumes loaded mounted and served, and fs registered, though there
+; be none: a rescan serves any made later.
 (def found ((loaded Loaded)) int
   (match loaded
     ((Loaded s vols)
-      (if (is_empty vols)
-          (nothing_to_serve "no volume on the disk can be served")
-          (let port (port_new)
-            (let m (mount_all port vols)
-              (match (name_register port "fs")
-                ((Registered) (serve (fs_new s port (array_from vols (head vols))) port))
-                ((RegisterNoPort) (complain (registration_why (RegisterNoPort))))
-                ((RegisterTaken) (complain "fs is registered already"))
-                ((RegisterTooLong) (complain (registration_why (RegisterTooLong)))))))))))
+      (let port (port_new)
+        (let m (mount_all port vols)
+          (match (name_register port "fs")
+            ((Registered) (serve (fs_new s port (vols_array vols)) port))
+            ((RegisterNoPort) (complain (registration_why (RegisterNoPort))))
+            ((RegisterTaken) (complain "fs is registered already"))
+            ((RegisterTooLong) (complain (registration_why (RegisterTooLong))))))))))
 
 ; Each volume mounted from port; one that cannot be is said why.
 (def mount_all ((port int) (vols (list FsVol))) int

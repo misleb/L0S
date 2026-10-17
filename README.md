@@ -60,7 +60,8 @@ sets to this machine's local time. There are three shells in all:
 
 `run widgets &` at any shell opens the toolkit's gallery: a toolbar and a
 sortable data grid of sample processes, the scaffolding for a process
-monitor.
+monitor. `run disks &` opens Disks, the disk, its partitions and its
+volumes as GNOME Disks shows them.
 
 Each shell runs programs on its own terminal: their standard input,
 output and error are its. The demo's [inittab](demo/etc/inittab) starts:
@@ -304,7 +305,7 @@ on it. The demo's disk is `build/disk.img`, 1 MB, which
 [tools/mkdisk](tools/mkdisk) makes once, with two empty volumes on it,
 so what is written to it stays from one boot to the next; `make clean`
 resets it. A `build/disk.img` made before the file system was, holding
-raw sectors only, has no volumes, and `fs` says so: remove it, and
+raw sectors only, has no volumes, and `fs` says so and serves none: remove it, and
 `make demo` makes a new one. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
 QMP on sockets, as the screen tests do, to type keys, move the pointer,
 and dump the screen.
@@ -620,7 +621,11 @@ takes a path, made absolute, to where it is mounted:
 **The fs protocol** ([user/lib/fs.l0](user/lib/fs.l0)) is what a file
 server serves on the port it mounts from. The kernel sends the first
 six; programs send `list`, `df` and `format` themselves, to the port
-`mount_at` gives, as `ls`, `df` and `format` in the shell do.
+`mount_at` gives, as `ls`, `df` and `format` in the shell do, and
+`rescan` to the port registered as `fs`. `fs_df_on`, `fs_format_on`
+and `fs_rescan_on` take a reply port the program keeps, for one that
+asks again and again; `fs_df` and `fs_format` make one each call, which
+never goes.
 
 | Request | Reply |
 |---|---|
@@ -633,6 +638,7 @@ six; programs send `list`, `df` and `format` themselves, to the port
 | `list VOLUME` | how many files, then a line `NAME SIZE` for each, by name |
 | `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files |
 | `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open |
+| `rescan` | the partition table and every volume read again, as at the start, and served in place of those before, each new label mounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open. A label that has gone stays mounted, there being no unmount, and is answered as a volume not served: -3, or -9 to write |
 
 Each is a request (`request` in `l0s.l0`), its words separated by
 spaces; a PATH is whole, `/Volumes/LABEL/NAME`, and a VOLUME
@@ -651,7 +657,11 @@ that port as `fs`, so that a program can wait for every volume with
 the data whenever it changes. It reads only the sectors a read needs,
 and reads a sector before a write only where the write keeps some of
 its bytes. It watches each process that opens a file, and drops its
-handles when it exits. With no disk, or no volume on it, it says so and
+handles when it exits. A `rescan` does the reading again, so a volume
+made or changed on the disk since is served without a reboot. A disk
+with no volume on it, or none that can be served, is no reason to stop:
+`fs` says so, registers, and serves nothing until a rescan finds some.
+With no disk at all, where nothing could ever be made, it says so and
 exits 0.
 
 ## How it boots
@@ -939,11 +949,12 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL` and serves the fs protocol for them, the kernel's requests for every program's file calls there and `list`, `df` and `format`; then registers as `fs`. With no disk, or no volume on it, it says so on stderr and exits 0 |
+| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL` and serves the fs protocol for them, the kernel's requests for every program's file calls there and `list`, `df`, `format` and `rescan`; then registers as `fs`, though the disk has no volume yet. With no disk it says so on stderr and exits 0 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, and serves `compositor`. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round` and `button`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
+| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type and sectors. It reads the partition table and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again; Format Volume..., for a mounted volume, asks in a dialog, then has `fs` `format` it. With no disk it shows a status page |
 | `procmon` | the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 
@@ -962,8 +973,8 @@ Makefile's `LIBS_` lists:
 | [clock.l0](user/lib/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm` |
 | [disk.l0](user/lib/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs` |
 | [l0fs.l0](user/lib/l0fs.l0) | the file system on a disk, as bytes: the MBR, a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `tools/mkfs` |
-| [fs.l0](user/lib/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives | `fs`, `sh` |
-| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets` (both) |
+| [fs.l0](user/lib/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh` |
+| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, panes (a sidebar, a segment bar, property rows, an alert dialog), the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
 
 ## Tests
 
@@ -971,7 +982,7 @@ Makefile's `LIBS_` lists:
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts and the file calls a volume's server answers, its request, its answer, and its going, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), and the process monitor (`tests/procmon.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), and Disks (`tests/disks.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -1098,6 +1109,20 @@ screendump:
 - the pointer on the scrollbar's strip: the slider wider and darker;
   then the slider dragged back up, and the rows at the top again.
 
+[tests/disks.sh](tests/disks.sh) boots
+[tests/disks/etc](tests/disks/etc/inittab), the screen tests' with the
+disk's driver and file server, on a fresh disk from `tools/mkdisk`,
+writes a file on data, types `run disks &`, and learns where its window
+is. Then, by screendump:
+- the sidebar's ground and its drive's row, selected;
+- the bar: data selected in the accent, the free space before it on the
+  window's ground, and scratch on white;
+- a click on scratch, selecting it;
+- Format Volume..., whose dialog shows its red Format button over the
+  window dimmed, and Esc, which closes it;
+- Format Volume... again, and the dialog's Format: then `ls
+  /Volumes/data` at the serial shell lists no file.
+
 Every boot is killed after a minute by [tools/deadline](tools/deadline),
 since macOS has no `timeout`. `tests/e2e.sh` also builds three raw programs
 of a few aarch64 instructions each, for what L0 code cannot do on purpose:
@@ -1134,12 +1159,20 @@ fault, pass a bad buffer, and wait on nothing.
   and chain, and the disk's own cache is never flushed. A file open
   cannot be removed or renamed over, where Unix would let it go once
   closed. Any process may mount a label no one has, as any may register
-  a name, and nothing unmounts a volume but its server's port going.
+  a name, and nothing unmounts a volume but its server's port going:
+a label that a `rescan` no longer finds stays mounted, answered -3,
+and a rescan is refused while any file is open.
 - **The disk is one virtio-blk, one request at a time.** `virtio-blk`
   drives the first disk on the board, polls for each request rather than
   taking the interrupt, and moves at most 128 sectors a request. It
   accepts no device features, so it never flushes a write cache and
   never learns a disk is read-only, whose writes the device then fails.
+- **Disks shows the one disk, and changes it only two ways.** It can
+  format a mounted volume, keeping its label and size, and have `fs`
+  rescan; it cannot partition, resize, relabel or make a new volume, nor
+  format a partition `fs` does not serve. Its window is a fixed 880 by
+  520, as every window is, and it reads the disk only when it opens and
+  when asked.
 - Images are copied from the archive into fresh frames for every process
   that runs them. Only pages made with `shm_alloc` or `dma_alloc` can be
   shared, and a share cannot be taken back from a driver.

@@ -8,10 +8,11 @@ paths:
   - "user/vt/**"
   - "user/widgets/**"
   - "user/procmon/**"
+  - "user/disks/**"
   - "user/draw/**"
   - "user/virtio-gpu/**"
   - "tests/*.sh"
-globs: user/lib/ui/**,user/lib/display.l0,user/lib/wm.l0,user/wm/**,user/vt/**,user/widgets/**,user/procmon/**,user/draw/**,user/virtio-gpu/**,tests/*.sh
+globs: user/lib/ui/**,user/lib/display.l0,user/lib/wm.l0,user/wm/**,user/vt/**,user/widgets/**,user/procmon/**,user/disks/**,user/draw/**,user/virtio-gpu/**,tests/*.sh
 alwaysApply: false
 ---
 
@@ -31,4 +32,4 @@ The `l0s-ui` skill has the detail; load it before changing these files.
 - Every layer makes every restack dearer; batch `damage` into one request.
 - Changes here are verified on the screen: `make e2e`, or the one screen test
   that covers them (`tests/vt.sh`, `widgets.sh`, `procmon.sh`,
-  `gpu-screen.sh`).
+  `disks.sh`, `gpu-screen.sh`).

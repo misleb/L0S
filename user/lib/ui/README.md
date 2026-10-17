@@ -3,17 +3,19 @@
 A small widget toolkit for L0S programs. It follows the
 [GNOME Human Interface Guidelines](https://developer.gnome.org/hig/) and
 draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
-`vt`'s colors, `draw`'s commands and the `widgets` gallery are built on it.
+`vt`'s colors, `draw`'s commands, the `widgets` gallery, `procmon` and
+`disks` are built on it.
 
 ## Files
 
 | File | What it is | GTK / libadwaita |
 |---|---|---|
 | `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends on nothing. | `@window_bg_color`, `@accent_bg_color`, … |
-| `icons.l0` | 16×16 symbolic icons, kept as `#`/`.` art: window-close, pan-down, pan-up, view-refresh, open-menu, system-search. | `*-symbolic` icons |
+| `icons.l0` | 16×16 symbolic icons, kept as `#`/`.` art: window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk. | `*-symbolic` icons |
 | `paint.l0` | `UiRect`; the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon); `ui_paint` runs them on a canvas, clipped. Also `ui_buffer` for shm buffers and Adwaita's arrow cursor. | GSK render nodes |
-| `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
+| `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, and panes.l0's sidebar, segment bar, properties and modal); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
 | `grid.l0` | A data grid: columns, typed cells (text, number, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. | `GtkColumnView`, `GtkScrolledWindow` |
+| `panes.l0` | A window of panes: `UiSidebar`, rows of an icon, a title and a line, one selected; `UiSegmentBar`, a whole in parts each as wide as its share by weight (`ui_shares`), each plain or muted (`UiSegPlain`, `UiSegMuted`), at any height: a title over a line at `ui_segbar_h`, the title alone lower, no text as a usage bar; one part selected and moved along by Left and Right (`ui_segbar_key`), or, with prefix `""`, none and no targets; `UiProps`, a dimmed name before each value, which is any widget; `UiModal` and `ui_alert`, an alert dialog on a card over everything beneath, which is dimmed (`ui_scrim`) and no longer a target. Rows and parts carry `PREFIX.select.KEY`, read back by `ui_select_key`. | `AdwNavigationSplitView`'s sidebar, `GtkListBox` `.navigation-sidebar`, GNOME Disks' volume grid and Usage's storage bar, `AdwAlertDialog` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round` and `button`. Used by `draw` to check a command and by `wm` to draw it. | — |
 | `window.l0` | A client window: `ui_open`, `ui_event_of`, `ui_route` (hover, press, click on release, Tab focus, Enter/Space, the wheel and scrollbar drags), `ui_present` (repaints only what changed), `ui_win_scroller`. Needs `user/lib/wm.l0`. | `GtkWindow`, event controllers |
 
@@ -85,6 +87,12 @@ to `l0` are one namespace, and a duplicate is a compile error.
   keyboard focus ring (accent at half) appears only after Tab.
 - **Empty states** use a status page: a large dim icon, a title, and what to
   do next.
+- **Sidebars** are 220 wide on libadwaita's sidebar ground (`ebebed`), rows
+  of 48 with a 32 px icon, the selected one rounded in 10% of the text.
+- **Dialogs** are libadwaita's alert dialog: a 320-wide card, its corners a
+  window's, a bold heading, its lines, and its buttons sharing a row; the
+  window beneath is mixed 30% with black, since nothing can blend, and
+  takes no press until the dialog is answered.
 - **Text** is the 8×16 bitmap font, so text is ASCII only, ellipsized with
   `...`, bold is a double strike, and large text is scaled 2×.
 
