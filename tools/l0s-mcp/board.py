@@ -1,5 +1,6 @@
 """board.py -- an L0S board on QEMU, for the l0s MCP server: boots it with
-tools/qemu-boot.sh, keeps everything its serial line shows, types at the
+tools/qemu-boot.sh, and a fresh disk from tools/mkdisk at build/mcp/disk.img,
+keeps everything its serial line shows, types at the
 serial shell, and drives the screen, the virtio keyboard and the virtio
 tablet through QMP, as the screen tests in tests/*.sh do with the monitor
 and nc.
@@ -335,7 +336,10 @@ class Board:
         STATE.mkdir(parents=True, exist_ok=True)
         qmp_path = STATE / "qmp.sock"
         qmp_path.unlink(missing_ok=True)
-        env = dict(os.environ, QEMU_DISPLAY=display,
+        # A fresh disk each boot, as tools/mkdisk makes it, for virtio-blk.
+        disk = STATE / "disk.img"
+        subprocess.run([str(ROOT / "tools" / "mkdisk"), str(disk)], cwd=ROOT, check=True)
+        env = dict(os.environ, QEMU_DISPLAY=display, QEMU_DISK=str(disk),
                    QEMU_QMP=f"unix:{qmp_path},server=on,wait=off")
         with self.cond:
             self.out = bytearray()

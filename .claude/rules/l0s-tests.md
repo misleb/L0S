@@ -23,7 +23,8 @@ The `l0s-testing` skill has the detail; load it before writing tests.
 - A new system call gets board tests in `kernel/kernel_virt_test.l0`,
   refusals included.
 - An e2e case is `tests/e2e/CASE/` with `etc/inittab` and `expected`, plus
-  `status`, `stderr`, `typed` (then start `uart noecho`) or `font` as needed.
+  `status`, `stderr`, `typed` (then start `uart noecho`), `font` or `disk`
+  (a fresh virtio-blk disk) as needed.
 - Screen tests keep sockets and dumps in `build/`, with relative paths
   (sockets need paths under 104 bytes). Remove any debug output added to
   find a failure.

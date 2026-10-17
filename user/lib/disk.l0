@@ -1,0 +1,142 @@
+; disk.l0 -- the disk protocol, as a client of it sends it: what a disk
+; driver, user/virtio-blk here, serves on the port it registers as disk.
+;
+;   info                    disk SECTORS 512: the disk's size in sectors,
+;                           and a sector's in bytes
+;   read SECTOR COUNT VA    COUNT sectors from SECTOR put by the device
+;                           into the client's pages, which it shared with
+;                           the driver at VA there (shm_share); 1 to 128
+;   write SECTOR COUNT VA   the same, taken from those pages and written
+;                           to the disk
+;
+; Each is a request (l0s.l0), its words separated by spaces; the reply is
+; ok, or as said above, or error: WHY. No sector travels in a message:
+; the device reads and writes the client's pages itself. Linked into the
+; programs that use a disk, by the Makefile's LIBS_ lists.
+
+; A sector's bytes, and the most sectors one request moves.
+(def disk_sector_size () int 512)
+(def disk_max_sectors () int 128)
+
+; The disk, as a client holds it: its port, a port for its replies, the
+; driver's pid, to share buffers with, and the disk's size in sectors.
+(data Disk (Disk int int int int) (NoDisk (list int)))
+
+; The disk, once its driver has registered, within 5 seconds; or why not.
+(def disk_open () Disk
+  (match (name_wait "disk" 5000000000)
+    ((NotFound) (NoDisk "no disk; is virtio-blk running?"))
+    ((Found port) (disk_opened port (port_new)))))
+
+; The disk at port, asked its size, its replies to rp.
+(def disk_opened ((port int) (rp int)) Disk
+  (match (disk_reply port rp "info")
+    ((DiskReply from r)
+      (match (disk_info_of r)
+        ((Some n) (Disk port rp from n))
+        ((None) (NoDisk (disk_error r)))))))
+
+; A reply, and who sent it: the driver, or 0 if none came.
+(data DiskReply (DiskReply int (list int)))
+
+; The reply to body, sent to port with its reply to rp.
+(def disk_reply ((port int) (rp int) (body (list int))) DiskReply
+  (match (port_send port (request rp body))
+    ((Sent)
+      (match (port_receive rp)
+        ((Message from payload) (DiskReply from payload))
+        ((RecvFailed) (DiskReply 0 "error: no reply from the disk"))))
+    ((SendNoPort) (DiskReply 0 "error: the disk is gone"))
+    ((SendFull) (DiskReply 0 "error: the disk did not take the request: its queue is full"))
+    ((SendTooBig) (DiskReply 0 "error: the request is too big for the disk"))))
+
+; The sectors info's reply says the disk has, or none if it is not that
+; reply.
+(def disk_info_of ((r (list int))) (Option int)
+  (let ws (split_spaces r)
+    (if (if (eq (length ws) 3) (if (eq (head ws) "disk") (eq (head (tail (tail ws))) "512") false) false)
+        (Some (int_prefix (head (tail ws)) 0))
+        ((None int)))))
+
+; The reply, as an error's reason, or empty for ok.
+(def disk_error ((r (list int))) (list int)
+  (if (eq r "ok") "" (if (starts_with r "error: ") (drop_n r 7) (append "the disk said " r))))
+
+; The disk's size in sectors, 0 for none.
+(def disk_sectors ((d Disk)) int (match d ((Disk port rp pid n) n) ((NoDisk why) 0)))
+
+; The pid its driver runs as, 0 for none.
+(def disk_pid ((d Disk)) int (match d ((Disk port rp pid n) pid) ((NoDisk why) 0)))
+
+; op SECTOR COUNT VA, as a request's body.
+(def disk_request ((op (list int)) (sector int) (count int) (va int)) (list int)
+  (append op (append " " (append (digits sector) (append " " (append (digits count) (append " " (digits va))))))))
+
+; ----------------------------------------------------------------- buffers
+
+; A buffer of shared memory to move sectors through: its address here,
+; its pages, its address at the driver, and the region to read and write
+; it with; or why there is none.
+(data DiskBuf (DiskBuf int int int IoDevice) (NoDiskBuf (list int)))
+
+; A buffer for sectors sectors, shared with the disk's driver. It opens a
+; region, of which a process may have only so many, so a client makes
+; one and keeps it.
+(def disk_buffer ((d Disk) (sectors int)) DiskBuf
+  (let n (div (add (mul sectors (disk_sector_size)) (sub (page_size) 1)) (page_size))
+    (match (shm_alloc n)
+      ((ShmNoRoom) (NoDiskBuf "no memory for a disk buffer"))
+      ((ShmTooMany) (NoDiskBuf (append "a disk buffer of too many pages: " (digits n))))
+      ((ShmPages va)
+        (match (dma_open va n)
+          ((DeviceFailed fault why) (NoDiskBuf why))
+          ((DeviceOpened r) (disk_shared d va n r)))))))
+
+; The n pages from va, opened as r, shared with the disk's driver.
+(def disk_shared ((d Disk) (va int) (n int) (r IoDevice)) DiskBuf
+  (match (shm_share va n (disk_pid d))
+    ((ShmShared there) (DiskBuf va n there r))
+    ((ShmShareNoProc) (disk_unshared (ShmShareNoProc)))
+    ((ShmShareTooMany) (disk_unshared (ShmShareTooMany)))
+    ((ShmShareFailed) (disk_unshared (ShmShareFailed)))))
+
+; Why a buffer could not be shared with the disk, as shm_share says.
+(def disk_unshared ((s ShmShare)) DiskBuf
+  (NoDiskBuf (append "cannot share a buffer with the disk: " (shm_share_why s))))
+
+; count sectors from sector read into b: empty, or why not.
+(def disk_read ((d Disk) (b DiskBuf) (sector int) (count int)) (list int)
+  (disk_move d b "read" sector count))
+
+; count sectors from sector written from b: empty, or why not.
+(def disk_write ((d Disk) (b DiskBuf) (sector int) (count int)) (list int)
+  (disk_move d b "write" sector count))
+
+; op, read or write, for count sectors from sector, through b.
+(def disk_move ((d Disk) (b DiskBuf) (op (list int)) (sector int) (count int)) (list int)
+  (match d
+    ((NoDisk why) why)
+    ((Disk port rp pid n)
+      (match b
+        ((NoDiskBuf why) why)
+        ((DiskBuf va pages there r)
+          (if (gt (mul count (disk_sector_size)) (mul pages (page_size)))
+              "the buffer is too small for so many sectors"
+              (match (disk_reply port rp (disk_request op sector count there))
+                ((DiskReply from reply) (disk_error reply)))))))))
+
+; The first n bytes of b.
+(def disk_get ((b DiskBuf) (n int)) (list int)
+  (match b
+    ((NoDiskBuf why) (nil int))
+    ((DiskBuf va pages there r) (disk_get_from r (sub n 1) (nil int)))))
+
+; Bytes 0 to i of r, onto acc.
+(def disk_get_from ((r IoDevice) (i int) (acc (list int))) (list int)
+  (if (lt i 0) acc (disk_get_from r (sub i 1) (cons (device_read8 r i) acc))))
+
+; bs written into b from its start.
+(def disk_put ((b DiskBuf) (bs (list int))) int
+  (match b
+    ((NoDiskBuf why) 0)
+    ((DiskBuf va pages there r) (put_bytes r 0 bs))))

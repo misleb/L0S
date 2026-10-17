@@ -7,7 +7,8 @@
 #   make initramfs   build/initramfs.cpio: every program, demo/etc, and
 #                    the splash screen as /etc/splash.ppm
 #   make demo        boot it to the shell, on this terminal: type help;
-#                    the splash shows in QEMU's window
+#                    the splash shows in QEMU's window, and build/disk.img
+#                    is the disk, made once, so what is written to it stays
 #   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
 #   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
@@ -33,6 +34,8 @@ L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc/*.bc)
 SPLASH       ?= $(BUILD)/splash.ppm
 QEMU_DISPLAY ?= cocoa
 DEVICES      := -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
+DISK         := $(BUILD)/disk.img
+DISK_DEVICE  := -drive file=$(DISK),if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0
 
 COMMON := common/abi.l0 common/initramfs.l0
 KERNEL := $(COMMON) common/queue.l0 kernel/memory.l0 kernel/ipc.l0 kernel/inittab.l0 \
@@ -45,6 +48,7 @@ RENDER  := user/lib/render.l0
 DISPLAY := user/lib/display.l0
 WMLIB   := user/lib/wm.l0
 CLOCK   := user/lib/clock.l0
+DISKLIB := user/lib/disk.l0
 
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
 # commands, which need only render.l0; and its client windows, which need
@@ -62,8 +66,10 @@ LIBS_draw       := $(RENDER) $(UI_CORE)
 LIBS_windows    := $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_disk       := $(DISKLIB)
 
-PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio-input keys vt wm windows widgets procmon
+PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio-input keys vt wm windows widgets procmon \
+            virtio-blk disk
 MKSPLASH := tools/mksplash/mksplash.l0
 L0SDOC   := tools/l0sdoc/l0sdoc.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
@@ -71,7 +77,7 @@ IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 # Every library, which make doc reads the documentation of.
 DOC_SRCS := common/abi.l0 common/initramfs.l0 common/queue.l0 $(filter-out $(COMMON) common/queue.l0,$(KERNEL)) \
             user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0 \
-            $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(UI_CORE) $(UI_WINDOW)
+            $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(DISKLIB) $(UI_CORE) $(UI_WINDOW)
 
 .PHONY: all check test test-virt e2e images initramfs screen-initramfs boot demo clean sample doc mcp
 
@@ -106,6 +112,7 @@ test: sample
 	$(L0) test $(ULIB) user/lib/tty_test.l0
 	$(L0) test $(ULIB) $(RENDER) user/lib/render_test.l0
 	$(L0) test $(ULIB) $(CLOCK) user/lib/clock_test.l0
+	$(L0) test $(ULIB) $(DISKLIB) user/lib/disk_test.l0
 	$(foreach t,$(UI_TESTS),$(L0) test $(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0 && ) true
 	$(L0) test $(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0
 	$(foreach p,$(PROGRAMS),$(L0) test $(ULIB) $(LIBS_$(p)) user/$(p)/$(p).l0 user/$(p)/$(p)_test.l0 && ) true
@@ -172,13 +179,18 @@ e2e: images initramfs screen-initramfs
 	tests/widgets.sh
 	tests/procmon.sh
 
-boot: images
+boot: images $(DISK)
 	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(IMAGES)
-	L0_QEMU_ARGS="$(DEVICES)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
+	L0_QEMU_ARGS="$(DEVICES) $(DISK_DEVICE)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
 
-demo: initramfs
+# The disk: made once, and never again while it is there, so that what is
+# written to it stays from one boot to the next. make clean resets it.
+$(DISK): | $(BUILD)
+	tools/mkdisk $@
+
+demo: initramfs $(DISK)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@QEMU_DISPLAY=$(QEMU_DISPLAY) tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(DISK) tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 clean:
 	rm -rf $(BUILD)

@@ -86,6 +86,7 @@ case's `etc`, and compares. A case is a directory:
 | `stderr` | one line standard error must contain |
 | `typed` | lines typed at the serial line by `tools/slowtype`, with pauses |
 | `font` | if present, the console font is added as `/etc/font.txt`, for `vt` |
+| `disk` | if present, the board has a virtio-blk on a fresh `tools/mkdisk` image (`build/e2e/CASE.disk`); without it there is no disk |
 
 - A case with `typed` should start `uart noecho`, so the output doesn't
   depend on how the echo interleaves.

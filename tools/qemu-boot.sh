@@ -16,6 +16,8 @@
 # it nowhere; cocoa is a window on macOS.
 # The PL031 real-time clock counts local time, not UTC, so that the
 # desktop's top bar, which shows it as it is, agrees with this machine's.
+# QEMU_DISK, unset unless given, is a raw disk image the board has as a
+# virtio-blk, for the virtio-blk driver; the demo's is build/disk.img.
 # QEMU_MONITOR, none unless set, is where QEMU's monitor listens, such as
 # unix:PATH,server=on,wait=off for tests/gpu-screen.sh's screendump; and
 # QEMU_QMP, unset unless given, where its QMP does, for the tests that
@@ -32,11 +34,16 @@ display=${QEMU_DISPLAY:-none}
 monitor=${QEMU_MONITOR:-none}
 qmp=()
 if [ -n "${QEMU_QMP:-}" ]; then qmp=(-qmp "$QEMU_QMP"); fi
+disk=()
+if [ -n "${QEMU_DISK:-}" ]; then
+  disk=(-drive "file=$QEMU_DISK,if=none,format=raw,id=disk0" -device virtio-blk-device,drive=disk0)
+fi
 len=$(wc -c < "$initramfs" | tr -d ' ')
 exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=localtime \
   -global virtio-mmio.force-legacy=false \
   -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device \
+  ${disk[@]+"${disk[@]}"} \
   -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \
   -device loader,addr=0x4FFFFFF8,data="$len",data-len=8 \
   -device loader,file="$initramfs",addr=0x50000000,force-raw=on \

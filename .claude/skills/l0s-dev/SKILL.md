@@ -31,10 +31,10 @@ the `;` comment block directly above each form, so write yours that way
 |---|---|
 | `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `process.l0`, `memory.l0`, `ipc.l0`, `sched.l0`, `pids.l0`, `inittab.l0` are its parts. `asm.l0` hand-assembles threads for board tests |
 | `common/` | shared by kernel and programs: `abi.l0` (call numbers `call_*`, error codes, limits, little-endian helpers), `initramfs.l0` (the cpio archive), `queue.l0` |
-| `user/lib/` | linked into programs: `l0s.l0` (call wrappers, `request`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `tty.l0`, `virtio.l0` in every program; `render.l0`, `display.l0`, `wm.l0`, `clock.l0` and `ui/` only where a `LIBS_` list says |
+| `user/lib/` | linked into programs: `l0s.l0` (call wrappers, `request`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `tty.l0`, `virtio.l0` (registers, queues, descriptors, `virtq_wait`) in every program; `render.l0`, `display.l0`, `wm.l0`, `clock.l0`, `disk.l0` and `ui/` only where a `LIBS_` list says |
 | `user/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`). Becomes `/bin/NAME` |
 | `demo/etc/` | the demo's `inittab`, `motd`; `tests/screen/etc/` the screen tests' |
-| `tools/` | `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets), `mkinitramfs`, `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
+| `tools/` | `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 
@@ -135,6 +135,15 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
   driver's list, which it then sends each event. Drop a listener whose
   port is gone (`SendNoPort`), and keep one whose queue is full
   (`still_told` in `user/rtc/rtc.l0`, `tell` in virtio-input).
+- **A driver moving bulk data** (`user/virtio-blk/virtio-blk.l0` with
+  `user/lib/disk.l0`, like `virtio-gpu` with `display.l0`): the client
+  `shm_alloc`s a buffer, opens it once with `dma_open`, `shm_share`s it
+  with the driver's pid (learned from the `from` of a first reply), and
+  names it in its requests by where the driver sees it. The driver gets
+  the device's addresses of those pages with `page_addresses`, whose
+  `None` means they are not shared with it, and builds descriptors over
+  them, so nothing is copied. A driver that polls its queue waits with
+  `virtq_wait` (`user/lib/virtio.l0`).
 - **Waiting for a message or a time.** A receive cannot time out. Either a
   device interrupt arrives as a message (`irq_bind`), or the loop polls with
   `port_try_receive` and `sleep_ns` (`rtc clock`, `procmon`).

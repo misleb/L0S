@@ -10,7 +10,9 @@
 # If NAME/typed exists, it is typed at the board's serial line, through
 # tools/qemu-boot.sh, a line at a time as tools/slowtype types, for the
 # console driver to read. If NAME/font exists, the console font is added
-# to the case's etc as /etc/font.txt, for vt. Every boot is killed after a minute. Run from
+# to the case's etc as /etc/font.txt, for vt. If NAME/disk exists, the
+# board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
+# case. Every boot is killed after a minute. Run from
 # the top of the project, after make images. The board has a virtio-gpu,
 # shown nowhere, and a virtio keyboard, either way.
 set -u
@@ -48,11 +50,17 @@ for dir in tests/e2e/*/; do
   if ! tools/mkinitramfs "$cpio" "$etc" "${programs[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; fail=$((fail+1)); continue
   fi
+  disk=""; qemu_args=$L0_QEMU_ARGS
+  if [ -f "$dir/disk" ]; then
+    disk="$BUILD/e2e/$name.disk"
+    tools/mkdisk "$disk"
+    qemu_args="$qemu_args -drive file=$disk,if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0"
+  fi
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$dir/typed" |
-      tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_DISK=$disk tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
-    tools/deadline 60 "$L0" boot "$BUILD/kernel.img" < "$cpio" > "$out" 2> "$err"
+    L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" < "$cpio" > "$out" 2> "$err"
   fi
   status=$?
   why=""

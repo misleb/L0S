@@ -75,7 +75,8 @@ output and error are its. The demo's [inittab](demo/etc/inittab) starts:
 | 6 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
 | 7, 8 | `vt`, `vt` | the windows' terminals, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
 | 9 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
-| 10, 11 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not the inittab, in whichever order the two get there. A shell's `exit` ends its `vt` too, and closes its window |
+| 10 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `run disk` |
+| 11, 12 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not the inittab, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -153,15 +154,16 @@ Things to try:
     PID  PARENT  PROGRAM       STATE
       1       0  sh            running
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 6
-      4       0  virtio-input  waiting for a message on port 5
+      3       0  virtio-gpu    waiting for a message on port 9
+      4       0  virtio-input  waiting for a message on port 7
       5       0  virtio-input  waiting for a message on port 2
-      6       0  wm            waiting for a message on port 8
-      7       0  vt            waiting for a message on port 11
-      8       0  vt            waiting for a message on port 12
+      6       0  wm            waiting for a message on port 11
+      7       0  vt            waiting for a message on port 3
+      8       0  vt            waiting for a message on port 4
       9       0  rtc           sleeping
-     10       7  sh            waiting for a message on port 13
-     11       8  sh            waiting for a message on port 14
+     10       0  virtio-blk    waiting for a message on port 6
+     11       7  sh            waiting for a message on port 14
+     12       8  sh            waiting for a message on port 15
   ```
 
   It lists the processes that have not exited. The shell asking is always
@@ -262,7 +264,10 @@ board. The script copies how `l0` loads the initramfs into the board's
 memory; that is not a documented interface, so a change to `l0` may need
 the same change there. It also attaches the virtio-gpu, the virtio
 keyboard and the virtio tablet, on modern transports, as `l0 boot` does
-with `L0_QEMU_ARGS`. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
+with `L0_QEMU_ARGS`, and, if `QEMU_DISK` names a raw image, a virtio-blk
+on it. The demo's disk is `build/disk.img`, 1 MB, which
+[tools/mkdisk](tools/mkdisk) makes once, so what is written to it stays
+from one boot to the next; `make clean` resets it. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
 QMP on sockets, as the screen tests do, to type keys, move the pointer,
 and dump the screen.
 
@@ -275,6 +280,8 @@ board, so it outlives a kernel that panics or hangs and can boot again.
 `make mcp` makes its Python, `build/mcp/venv`, with the MCP SDK; the
 project's [.mcp.json](.mcp.json) runs it. It boots one board at a time
 and does not build: run `make initramfs` or `make screen-initramfs` first.
+Each boot gets a fresh disk, `build/mcp/disk.img`, as `tools/mkdisk`
+makes it.
 
 | Tool | Does |
 |---|---|
@@ -483,6 +490,34 @@ so that the guest copies no pixels at all:
 So `vt` scrolls by changing its window's `top`, with no copying anywhere,
 and draws only the new row.
 
+### The disk
+
+`virtio-blk` ([user/virtio-blk](user/virtio-blk/virtio-blk.l0)) drives
+QEMU's virtio-blk: the demo's `build/disk.img`, 2048 sectors of 512
+bytes. It serves `disk`, raw sectors with no file system on them yet,
+to clients through **the disk protocol**
+([user/lib/disk.l0](user/lib/disk.l0)). As with the display, no sector
+travels in a message. A client shares a buffer of its own pages with the
+driver (`shm_share`), and the device reads or writes those pages itself,
+by DMA, from a chain of descriptors the driver builds over them. The
+driver makes one request of the device at a time, and waits for it by
+polling the used ring, as `virtio-gpu` does (`virtq_wait` in
+[user/lib/virtio.l0](user/lib/virtio.l0)).
+
+| Request | Does |
+|---|---|
+| `info` | `disk SECTORS 512`: the disk's size in sectors, and a sector's in bytes |
+| `read SECTOR COUNT VA` | COUNT sectors from SECTOR, 1 to 128, put by the device into the client's pages shared with the driver at VA |
+| `write SECTOR COUNT VA` | the same, taken from those pages and written to the disk |
+
+The reply is `ok`, `disk SECTORS 512` for `info`, or `error: WHY`: a
+count out of range, sectors past the disk's end, a buffer not shared
+with the driver, or the device's own failure.
+
+`run disk info`, `run disk read SECTOR [COUNT]` (shown as `hexdump -C`
+shows bytes) and `run disk write SECTOR WORDS...` use it from a shell.
+`tools/mkdisk` makes a fresh disk's sector 0 begin `L0S disk`.
+
 ## How it boots
 
 ```
@@ -517,7 +552,7 @@ Only files with an execute bit are programs. The system runs until pid 1
 exits; the kernel then exits with pid 1's status.
 
 Device authority comes only from `dev` lines. The demo grants it to `uart`,
-`rtc`, `virtio-gpu` and `virtio-input`, so the shell can start `rtc`
+`rtc`, `virtio-gpu`, `virtio-input` and `virtio-blk`, so the shell can start `rtc`
 without having it itself. `wm` and `vt` have none: they reach only
 memory they share.
 
@@ -760,6 +795,8 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, and builds its backing from the layers' buffers, so the host composes the screen. It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
+| `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
+| `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, and serves `compositor`. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round` and `button`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
@@ -775,11 +812,12 @@ Makefile's `LIBS_` lists:
 |---|---|---|
 | [l0s.l0](user/lib/l0s.l0) | the call wrappers; requests; `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register | every program |
 | [tty.l0](user/lib/tty.l0) | a terminal's line editing and protocol | every program |
-| [virtio.l0](user/lib/virtio.l0) | the transports' registers, finding a device by ID, negotiating, setting up a queue, and descriptors | every program |
+| [virtio.l0](user/lib/virtio.l0) | the transports' registers, finding a device by ID, negotiating, setting up a queue, descriptors, and waiting for the device to use a request (`virtq_wait`) | every program |
 | [render.l0](user/lib/render.l0) | drawing into a buffer of pixels: shapes, the font, PPM images, the wallpaper, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets` |
 | [display.l0](user/lib/display.l0) | the display protocol, as a client sends it | `wm` |
 | [wm.l0](user/lib/wm.l0) | the compositor protocol, as a client sends it | `vt`, `windows`, `widgets` |
 | [clock.l0](user/lib/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm` |
+| [disk.l0](user/lib/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk` |
 | [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets` (both) |
 
 ## Tests
@@ -796,10 +834,12 @@ Each case of `tests/e2e/` is a directory:
 - `status`, if not 0;
 - `stderr`, a line standard error must hold;
 - `typed`, keys to type at the serial line;
-- `font`, if the console font is to be added to `etc`, for `vt`.
+- `font`, if the console font is to be added to `etc`, for `vt`;
+- `disk`, if the board is to have a virtio-blk, a fresh disk from
+  `tools/mkdisk` for each run.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Nine cases type a session through
+`etc`, boots it, and compares. Ten cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -821,13 +861,19 @@ Ctrl-C as a person would:
 - `virtio-input` and `virtio-input_tablet` start the input driver for
   the keyboard and for the tablet, and check with `ps` that it is
   serving: it found its device, set up its queue, and bound its
-  interrupt.
+  interrupt;
+- `virtio-blk`, on a disk of its own, has `disk` show the disk's size
+  and its first sector as `tools/mkdisk` made it, write a sector and
+  read it back, read the last sector, and be refused one past it.
 
-`files` reads the initramfs through `cat`. `virtio-gpu_nodev` starts the
-display driver with no `dev` line, which is refused the device. `garbage`
+`files` reads the initramfs through `cat`. `virtio-gpu_nodev` and
+`virtio-blk_nodev` start a driver with no `dev` line, which is refused
+the device, and `virtio-blk_nodisk` the disk's driver on a board with no
+disk, which is no failure. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
-shows, a virtio keyboard, and a virtio tablet.
+shows, a virtio keyboard, and a virtio tablet; only a case with a `disk`
+file has a virtio-blk.
 
 [tests/gpu-screen.sh](tests/gpu-screen.sh) boots the initramfs of
 [tests/screen/etc](tests/screen/etc/inittab), the demo's without its
@@ -923,7 +969,13 @@ fault, pass a bad buffer, and wait on nothing.
   renamed or removed. Directories can't be listed except through
   `entry_paths`, which lists everything. There is no current directory, so
   a relative path is taken from `/`. A writable file server could later
-  take these calls over IPC.
+  take these calls over IPC. The disk (see [The disk](#the-disk)) holds
+  raw sectors only, with no file system on it yet.
+- **The disk is one virtio-blk, one request at a time.** `virtio-blk`
+  drives the first disk on the board, polls for each request rather than
+  taking the interrupt, and moves at most 128 sectors a request. It
+  accepts no device features, so it never flushes a write cache and
+  never learns a disk is read-only, whose writes the device then fails.
 - Images are copied from the archive into fresh frames for every process
   that runs them. Only pages made with `shm_alloc` or `dma_alloc` can be
   shared, and a share cannot be taken back from a driver.
