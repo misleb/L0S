@@ -5,7 +5,7 @@
 ; made them before the disk had a GPT, empty, on a store of memory of
 ; 2048 sectors; the port 7.
 (def two () Fs
-  (fs_new (StoreMem ((MapEmpty int (list int))) 2048) 7
+  (fs_new (StoreMem ((MapEmpty int (list int))) 2048 0) 7
           (array_from (cons (FsVol 8 (vol_new "data" (vol_layout 1528)))
                             (cons (FsVol 1536 (vol_new "scratch" (vol_layout 512))) (nil FsVol)))
                       (FsVol 0 (vol_new "x" (vol_layout 16))))))
@@ -175,6 +175,121 @@
   (match (obey f 5 (append "read " (append (digits h) " 4092")))
     ((Answered g w bs) (if (le w 0) (rev acc) (read_all g h (rev_onto bs acc))))))
 
+; ------------------------------------------------------ reading in order
+
+; How many reads and writes f's store has been asked.
+(def requests ((f Fs)) int
+  (match (fs_store f) ((StoreMem m n r) r) ((StoreDisk d b) -1)))
+
+; f with a file of n bytes, the pattern, written at /Volumes/data/big and
+; closed, and handle 2 open on it to read.
+(def big_open ((n int)) Fs
+  (let f (ran_fs (run (two) (reqs3 "open 2 /Volumes/data/big" (append "write 1 " (pattern n)) "close 1")))
+    (after (obey f 5 "open 1 /Volumes/data/big"))))
+
+; The counts of reads of up to 4092 of handle h, until one gives 0, a
+; space between, and f after them.
+(def counts ((f Fs) (h int) (acc (list int))) Ran
+  (match (obey f 5 (append "read " (append (digits h) " 4092")))
+    ((Answered g w bs) (if (le w 0) (Ran g (rev (push (digits w) acc))) (counts g h (push " " (push (digits w) acc)))))))
+
+; Reads of as much as a reply holds stay whole across clusters: 12300
+; bytes are three of 4092 and 24, not 4092 then the 4 left in a cluster.
+(def test_read_whole_replies () int
+  (check_str "4092s" (ran_text (counts (big_open 12300) 2 (nil int))) "4092 4092 4092 24 0"))
+
+; A file of ten clusters read in order: each cluster read from the disk
+; once, though eleven replies take it, and the bytes as written.
+(def test_read_a_cluster_once () int
+  (let f (big_open 40960)
+    (let r (requests f)
+      (let g (ran_fs (counts f 2 (nil int)))
+        (add (check_int "reads" (sub (requests g) r) 10)
+             (check_true "the same" (eq (read_back f "/Volumes/data/big") (pattern 40960))))))))
+
+; Small reads in order take what is held: a cluster read once for 100
+; reads of 10.
+(def test_small_reads_held () int
+  (let f (big_open 1000)
+    (let r (requests f)
+      (check_int "one read" (sub (requests (reads_of f 2 100)) r) 1))))
+
+; f after n reads of 10 bytes of handle h.
+(def reads_of ((f Fs) (h int) (n int)) Fs
+  (if (eq n 0) f (reads_of (after (obey f 5 (append "read " (append (digits h) " 10")))) h (sub n 1))))
+
+; A reader holding a cluster sees the file written anew under it.
+(def test_read_after_rewrite () int
+  (check_str "the new bytes"
+             (answers (append (written_notes)
+                              (append (reqs2 "open 1 /Volumes/data/notes" "read 2 4")
+                                      (reqs3 "open 2 /Volumes/data/notes" "write 3 HELLO DISK" "read 2 100"))))
+             "1:|10:|0:|2:|4:hell|3:|10:|6:O DISK"))
+
+; A reader that has read to the end keeps its place while a writer adds
+; to the file, and then reads what was added, across clusters.
+(def test_read_on_after_append () int
+  (let f (big_open 5000)
+    (let g (after (obey f 5 "read 2 4092"))
+      (let h (after (obey g 5 "read 2 4092"))
+        (let i (ran_fs (run h (reqs2 "open 3 /Volumes/data/big" (append "write 3 " (pattern 9000)))))
+          (check_true "the rest" (eq (read_all i 2 (nil int)) (pattern 9000))))))))
+
+; A file written in order, 40 writes of 4000 bytes, each walking on from
+; the cluster the last ended in: read back as written, and the metadata
+; on the disk as fs has it.
+(def test_write_in_order () int
+  (let f (writes_of (ran_fs (run (two) (reqs1 "open 2 /Volumes/data/big"))) 1 40)
+    (add (check_true "read back" (eq (read_back f "/Volumes/data/big") (pieces_of 40 (nil int))))
+         (check_true "on the disk" (meta_kept f 0)))))
+
+; f after n writes to handle h of the pattern's first 4000 bytes.
+(def writes_of ((f Fs) (h int) (n int)) Fs
+  (if (eq n 0) f (writes_of (after (obey f 5 (append "write " (append (digits h) (append " " (pattern 4000)))))) h (sub n 1))))
+
+; The pattern's first 4000 bytes, n times, onto acc.
+(def pieces_of ((n int) (acc (list int))) (list int)
+  (if (eq n 0) acc (pieces_of (sub n 1) (append (pattern 4000) acc))))
+
+; ------------------------------------------------- the metadata written
+
+; Whether the metadata of volume vi on f's disk reads back as f has it.
+(def meta_kept ((f Fs) (vi int)) bool
+  (let v (fs_vol f vi)
+    (match (vol_of (vol_label v) (vol_layout_of v) (bytes_from_list (sectors f (fs_start f vi) (vol_meta_sectors (vol_layout_of v)))))
+      ((VolGot w) (eq w v))
+      ((VolBad why) false))))
+
+; Made, written, emptied, replaced by a rename and removed: what is on
+; the disk is what fs has, each change writing only its own sectors.
+(def test_meta_kept () int
+  (let r (run (two) (append (written_notes)
+                            (append (reqs4 "open 2 /Volumes/data/b" (append "write 2 " (pattern 9000)) "close 2" "open 2 /Volumes/data/notes")
+                                    (reqs3 "close 3" "rename /Volumes/data/b /Volumes/data/notes" "remove /Volumes/data/notes"))))
+    (add (check_str "answers" (ran_text r) "1:|10:|0:|2:|9000:|0:|3:|0:|0:|0:")
+         (check_true "on the disk" (meta_kept (ran_fs r) 0)))))
+
+; A write of a new file's first bytes: the data, then the table's and the
+; directory's sectors, which are close, in one request.
+(def test_write_requests () int
+  (let f (ran_fs (run (two) (reqs1 "open 2 /Volumes/data/notes")))
+    (check_int "two" (sub (requests (after (obey f 5 "write 1 hello"))) (requests f)) 2)))
+
+; On a volume of 33 clusters of metadata, a write is three requests, not
+; the 33 of all of it: the data, a sector of the table, one of the
+; directory; and the disk then holds what fs has.
+(def test_write_big_volume () int
+  (let f (ran_fs (run (big_fs) (reqs1 "open 2 /Volumes/big/a")))
+    (let g (after (obey f 5 "write 1 hello"))
+      (add (check_int "three" (sub (requests g) (requests f)) 3)
+           (check_true "on the disk" (meta_kept g 0))))))
+
+; A server of a volume of 2^20 sectors, its metadata on the disk.
+(def big_fs () Fs
+  (let v (vol_new "big" (vol_layout 1048576))
+    (fs_new (put_at (StoreMem ((MapEmpty int (list int))) 1048576 0) 0 (vol_meta v)) 7
+            (array_from (cons (FsVol 0 v) (nil FsVol)) (FsVol 0 v)))))
+
 ; Random appends of up to 5000 bytes to two files read back as what was
 ; written, every one of 40 runs.
 (def test_random_appends () int
@@ -193,7 +308,7 @@
 ; what each should hold.
 (def random_run ((f Fs) (seed int) (n int) (a (list int)) (b (list int))) bool
   (if (eq n 0)
-      (if (eq (read_back f "/Volumes/data/a") a) (eq (read_back f "/Volumes/data/b") b) false)
+      (if (if (eq (read_back f "/Volumes/data/a") a) (eq (read_back f "/Volumes/data/b") b) false) (meta_kept f 0) false)
       (let s1 (rand_next seed)
         (let s2 (rand_next s1)
           (let which (rand_below s1 2)
@@ -271,7 +386,7 @@
 ; A 2048-sector disk in memory with vols on it: a GPT of their
 ; partitions, each volume's metadata where its partition starts.
 (def disk_with ((vols (list FsVol))) Store
-  (metas_on (table_on (StoreMem ((MapEmpty int (list int))) 2048) (GptDisk (test_uuid 0) (parts_of vols 1))) vols))
+  (metas_on (table_on (StoreMem ((MapEmpty int (list int))) 2048 0) (GptDisk (test_uuid 0) (parts_of vols 1))) vols))
 
 (def table_on ((s Store) (d GptDisk)) Store
   (match (write_table s d) ((Put s2) s2) ((PutNot s2 why) s2)))
@@ -368,7 +483,7 @@
 (def demo_fs () Fs (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (scratch_vol))))
 
 ; A server of nothing, on a blank disk of 2048 sectors.
-(def blank_fs () Fs (fs_new (StoreMem ((MapEmpty int (list int))) 2048) 7 (vols_array (nil FsVol))))
+(def blank_fs () Fs (fs_new (StoreMem ((MapEmpty int (list int))) 2048 0) 7 (vols_array (nil FsVol))))
 
 ; The bytes of an answer.
 (def answer_bytes ((a Answered)) (list int) (match a ((Answered f w bs) bs)))
@@ -449,7 +564,7 @@
 ; With no volumes fs goes on to serve, rather than giving up with 0; under
 ; an operating system there is no kernel to register it with, so it fails.
 (def test_serves_none () int
-  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int))) 2048) (nil FsVol))) 1))
+  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int))) 2048 0) (nil FsVol))) 1))
 
 ; Under an operating system there is no disk.
 (def test_no_disk () int

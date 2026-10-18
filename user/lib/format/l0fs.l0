@@ -1,8 +1,9 @@
 ; l0fs.l0 -- the file system L0S keeps on a disk, as bytes: on each
 ; partition of the disk's GPT (user/lib/gpt.l0) whose type is
 ; gpt_l0fs_type, a volume of its own format, L0FS. Pure: it encodes and
-; decodes the sectors, and plans which clusters a read or a write
-; touches; user/fs serves volumes with it, tools/mkfs makes them.
+; decodes the sectors, plans which clusters a read or a write touches,
+; and which sectors of the metadata a change does; user/fs serves
+; volumes with it, tools/mkfs makes them.
 ;
 ;   volume sector 0     the superblock: L0FS, version 1, the label, the layout
 ;   sectors 1..         the cluster table, a u16 a cluster: 0 free, FFFF a
@@ -146,12 +147,23 @@
 
 ; The table as its sectors hold it.
 (def vol_table_bytes ((t (array int)) (l VolLayout)) (list int)
-  (vol_pad (rev (vol_table_push t 0 (nil int))) (mul (vol_table_sectors l) (vol_sector_size))))
+  (vol_pad (rev (vol_table_push t 0 (array_len t) (nil int))) (mul (vol_table_sectors l) (vol_sector_size))))
 
-(def vol_table_push ((t (array int)) (i int) (acc (list int))) (list int)
-  (if (ge i (array_len t))
+; The marks of clusters i up to j, onto acc.
+(def vol_table_push ((t (array int)) (i int) (j int) (acc (list int))) (list int)
+  (if (ge i j)
       acc
-      (vol_table_push t (add i 1) (push (le16 (array_get t i)) acc))))
+      (vol_table_push t (add i 1) j (push (le16 (array_get t i)) acc))))
+
+; How many clusters' marks a sector of the table holds.
+(def vol_marks_per_sector () int (div (vol_sector_size) 2))
+
+; Sector j of the table, from its first: the marks of the clusters it
+; holds, zeros past the last.
+(def vol_table_sector ((t (array int)) (j int)) (list int)
+  (let i (mul j (vol_marks_per_sector))
+    (vol_pad (rev (vol_table_push t i (min (array_len t) (add i (vol_marks_per_sector))) (nil int)))
+             (vol_sector_size))))
 
 ; The table of layout l, from byte at of b, which holds it.
 (def vol_table_of ((b bytes) (at int) (l VolLayout)) (array int)
@@ -248,10 +260,20 @@
 
 ; The directory as its sectors hold it.
 (def vol_dir_bytes ((d (array VolEntry))) (list int)
-  (rev (vol_dir_push d 0 (nil int))))
+  (rev (vol_dir_push d 0 (array_len d) (nil int))))
 
-(def vol_dir_push ((d (array VolEntry)) (i int) (acc (list int))) (list int)
-  (if (ge i (array_len d)) acc (vol_dir_push d (add i 1) (push (vol_entry_bytes (array_get d i)) acc))))
+; Entries i up to j, onto acc.
+(def vol_dir_push ((d (array VolEntry)) (i int) (j int) (acc (list int))) (list int)
+  (if (ge i j) acc (vol_dir_push d (add i 1) j (push (vol_entry_bytes (array_get d i)) acc))))
+
+; How many entries a sector of the directory holds.
+(def vol_entries_per_sector () int (div (vol_sector_size) (vol_entry_size)))
+
+; Sector j of the directory, from its first.
+(def vol_dir_sector ((d (array VolEntry)) (j int)) (list int)
+  (let i (mul j (vol_entries_per_sector))
+    (vol_pad (rev (vol_dir_push d i (min (array_len d) (add i (vol_entries_per_sector))) (nil int)))
+             (vol_sector_size))))
 
 ; The directory from byte at of b.
 (def vol_dir_of ((b bytes) (at int)) (array VolEntry)
@@ -288,6 +310,65 @@
     ((Vol label l t d)
       (vol_pad (append (vol_super label l) (append (vol_table_bytes t l) (vol_dir_bytes d)))
                (mul (vol_meta_sectors l) (vol_sector_size))))))
+
+; Sector s of v's metadata, as vol_meta lays it out: the superblock, a
+; sector of the table or of the directory, or zeros after them.
+(def vol_meta_sector ((v Vol) (s int)) (list int)
+  (match v
+    ((Vol label l t d)
+      (let ds (vol_dir_start l)
+        (if (eq s 0)
+            (vol_super label l)
+            (if (lt s ds)
+                (vol_table_sector t (sub s 1))
+                (if (lt s (add ds (vol_dir_sectors)))
+                    (vol_dir_sector d (sub s ds))
+                    (zeros (vol_sector_size)))))))))
+
+; The sectors of the metadata of layout l that hold the marks of clusters
+; cs and the entries es, in order; one holding several is there as many
+; times.
+(def vol_dirty_sectors ((l VolLayout) (cs (list int)) (es (list int))) (list int)
+  (sort (vol_dirty_onto l cs es (nil int))))
+
+(def vol_dirty_onto ((l VolLayout) (cs (list int)) (es (list int)) (acc (list int))) (list int)
+  (if (not (is_empty cs))
+      (vol_dirty_onto l (tail cs) es (cons (add 1 (div (head cs) (vol_marks_per_sector))) acc))
+      (if (is_empty es)
+          acc
+          (vol_dirty_onto l cs (tail es) (cons (add (vol_dir_start l) (div (head es) (vol_entries_per_sector))) acc)))))
+
+; Sectors to write: the first and how many, at most a cluster's, so that
+; one request writes them.
+(data VolRun (VolRun int int))
+
+; Sectors ss, in order, as runs: each from one of them to the last of them
+; less than a cluster's sectors on, the sectors between written too, so
+; that sectors close together go in one request.
+(def vol_runs ((ss (list int))) (list VolRun)
+  (rev (vol_runs_onto ss (nil VolRun))))
+
+(def vol_runs_onto ((ss (list int)) (acc (list VolRun))) (list VolRun)
+  (if (is_empty ss)
+      acc
+      (let s (head ss)
+        (let limit (add s (vol_cluster_sectors))
+          (vol_runs_onto (vol_from ss limit) (cons (VolRun s (add (sub (vol_last_below ss limit s) s) 1)) acc))))))
+
+; Those of ss, in order, from limit on.
+(def vol_from ((ss (list int)) (limit int)) (list int)
+  (if (is_empty ss) ss (if (lt (head ss) limit) (vol_from (tail ss) limit) ss)))
+
+; The last of ss, in order, below limit, or last if none is.
+(def vol_last_below ((ss (list int)) (limit int) (last int)) int
+  (if (is_empty ss) last (if (lt (head ss) limit) (vol_last_below (tail ss) limit (head ss)) last)))
+
+; The bytes of v's metadata that run r writes.
+(def vol_run_bytes ((v Vol) (r VolRun)) (list int)
+  (match r ((VolRun s n) (rev (vol_run_onto v s (add s n) (nil int))))))
+
+(def vol_run_onto ((v Vol) (s int) (e int) (acc (list int))) (list int)
+  (if (ge s e) acc (vol_run_onto v (add s 1) e (push (vol_meta_sector v s) acc))))
 
 ; A volume read, or why it cannot be used.
 (data VolGot (VolGot Vol) (VolBad (list int)))
@@ -392,68 +473,148 @@
 (def vol_unchain ((v Vol) (first int)) Vol
   (match v ((Vol label l t d) (Vol label l (vol_unlink t (vol_chain t first)) d))))
 
+; The clusters of the file at i, in order; none for a free entry.
+(def vol_file_clusters ((v Vol) (i int)) (list int)
+  (match (vol_entry v i)
+    ((VolNone) (nil int))
+    ((VolFile name size first) (vol_chain (vol_table v) first))))
+
 ; ------------------------------------------------------------------ plans
 
 ; Bytes of a cluster: the cluster, the offset in it, and how many.
 (data VolSpan (VolSpan int int int))
 
+; A place in a file's chain: its kth cluster, from 0, is c, or c is 0 if
+; the chain is shorter. A reader keeps the last, to walk on from.
+(data VolAt (VolAt int int))
+
+; No place yet: a walk starts from the file's first cluster.
+(def vol_at_none () VolAt (VolAt 0 0))
+
+; The kth cluster of the chain from first: walked on from hint, if that
+; is a cluster at k or before, else from first; so a file read in order
+; walks each link once. At most as many links as there are clusters.
+(def vol_at ((t (array int)) (first int) (hint VolAt) (k int)) VolAt
+  (match hint
+    ((VolAt hk hc)
+      (if (if (gt hc 0) (if (ge hk 0) (le hk k) false) false)
+          (vol_walk t hc hk k (array_len t))
+          (vol_walk t first 0 k (array_len t))))))
+
+; From c, the ith cluster of a chain, on to the kth, at most left links.
+(def vol_walk ((t (array int)) (c int) (i int) (k int) (left int)) VolAt
+  (if (if (le c 0) true (ge c (array_len t)))
+      (VolAt k 0)
+      (if (ge i k)
+          (VolAt k c)
+          (if (le left 0) (VolAt k 0) (vol_walk t (array_get t c) (add i 1) k (sub left 1))))))
+
 ; Where the next bytes of the file at i are, from offset, at most n: in
-; one cluster, so a read moves one; none at the file's end.
-(def vol_read_span ((v Vol) (i int) (offset int) (n int)) (Option VolSpan)
+; one cluster, found from hint as vol_at finds it; none at the file's
+; end.
+(def vol_read_span ((v Vol) (i int) (offset int) (n int) (hint VolAt)) (Option VolSpan)
   (match (vol_entry v i)
     ((VolNone) ((None VolSpan)))
     ((VolFile name size first)
       (let k (min n (min (sub size offset) (sub (vol_cluster_size) (mod offset (vol_cluster_size)))))
         (if (le k 0)
             ((None VolSpan))
-            (let c (nth_or (vol_chain (vol_table v) first) (div offset (vol_cluster_size)) 0)
-              (if (eq c 0)
-                  ((None VolSpan))
-                  (Some (VolSpan c (mod offset (vol_cluster_size)) k)))))))))
+            (match (vol_at (vol_table v) first hint (div offset (vol_cluster_size)))
+              ((VolAt j c)
+                (if (eq c 0)
+                    ((None VolSpan))
+                    (Some (VolSpan c (mod offset (vol_cluster_size)) k))))))))))
+
+; How many of the bytes of the file at i its kth cluster holds: a
+; cluster's, fewer in its last, none past it.
+(def vol_held ((v Vol) (i int) (k int)) int
+  (match (vol_entry v i)
+    ((VolNone) 0)
+    ((VolFile name size first) (max 0 (min (vol_cluster_size) (sub size (mul k (vol_cluster_size))))))))
 
 ; A write planned: the volume after it, with the file's new size and any
-; clusters it needed, the spans to write the bytes to, in order, and the
-; clusters it took, which hold nothing yet; or no room for it.
-(data VolWrote (VolWrote Vol (list VolSpan) (list int)) (VolNoSpace))
+; clusters it needed, the spans to write the bytes to, in order, the
+; clusters it took, which hold nothing yet, and the clusters whose marks
+; it changed, those and the one before them; or no room for it.
+(data VolWrote (VolWrote Vol (list VolSpan) (list int) (list int)) (VolNoSpace))
 
-; n bytes written to the file at i from offset, which is not past its end.
-(def vol_write ((v Vol) (i int) (offset int) (n int)) VolWrote
+; n bytes written to the file at i from offset, which is not past its
+; end. Its clusters are found from hint, as vol_at finds them, and only
+; those the write touches are walked, from the kth, the one offset is
+; in, or the last, if the write goes past it and it comes before; so a
+; file written in order walks each link once. The chain is as long as
+; the size says, as vol_of checks and every change keeps it.
+(def vol_write ((v Vol) (i int) (offset int) (n int) (hint VolAt)) VolWrote
   (match (vol_entry v i)
     ((VolNone) (VolNoSpace))
     ((VolFile name size first)
-      (let chain (vol_chain (vol_table v) first)
-        (let need (sub (ceil_div (add offset n) (vol_cluster_size)) (length chain))
-          (if (le need 0)
-              (vol_wrote (vol_set_entry v i (VolFile name (max size (add offset n)) first)) chain offset n (nil int))
-              (match (vol_alloc (vol_table v) need)
-                ((VolFull) (VolNoSpace))
-                ((VolAlloc t2 cs) (vol_grown v i t2 chain cs offset n)))))))))
+      (let len (ceil_div size (vol_cluster_size))
+        (let need (sub (ceil_div (add offset n) (vol_cluster_size)) len)
+          (let k (div offset (vol_cluster_size))
+            (let ks (if (if (gt need 0) (gt len 0) false) (min k (sub len 1)) k)
+              (let have (vol_touched (vol_table v) first hint ks (vol_touch_count offset n len ks))
+                (if (le need 0)
+                    (vol_wrote (vol_set_entry v i (VolFile name (max size (add offset n)) first)) have ks offset n (nil int) (nil int))
+                    (match (vol_alloc (vol_table v) need)
+                      ((VolFull) (VolNoSpace))
+                      ((VolAlloc t2 cs) (vol_grown v i t2 have ks cs offset n))))))))))))
+
+; How many of a file's len clusters, from the ksth, a write of n bytes
+; from offset touches: up to the one it ends in, or the last.
+(def vol_touch_count ((offset int) (n int) (len int) (ks int)) int
+  (if (le n 0)
+      0
+      (max 0 (add (sub (min (div (sub (add offset n) 1) (vol_cluster_size)) (sub len 1)) ks) 1))))
+
+; count clusters of the chain from first, from the ksth, found from hint.
+(def vol_touched ((t (array int)) (first int) (hint VolAt) (ks int) (count int)) (list int)
+  (if (le count 0)
+      (nil int)
+      (match (vol_at t first hint ks)
+        ((VolAt j c) (vol_run_from t c count (array_len t) (nil int))))))
+
+; count clusters of a chain from c, onto acc, at most left links.
+(def vol_run_from ((t (array int)) (c int) (count int) (left int) (acc (list int))) (list int)
+  (if (if (le count 0) true (if (le c 0) true (if (ge c (array_len t)) true (le left 0))))
+      (rev acc)
+      (vol_run_from t (array_get t c) (sub count 1) (sub left 1) (cons c acc))))
 
 ; v with the clusters cs, now linked in t, joined to the end of the file
-; at i, whose chain was chain.
-(def vol_grown ((v Vol) (i int) (t (array int)) (chain (list int)) (cs (list int)) (offset int) (n int)) VolWrote
+; at i, whose clusters from the ksth, to its last, are have.
+(def vol_grown ((v Vol) (i int) (t (array int)) (have (list int)) (ks int) (cs (list int)) (offset int) (n int)) VolWrote
   (match v
     ((Vol label l t0 d)
       (match (array_get d i)
         ((VolNone) (VolNoSpace))
         ((VolFile name size first)
-          (let t3 (if (is_empty chain) t (array_set t (head (rev chain)) (head cs)))
-            (let f (if (is_empty chain) (head cs) first)
-              (vol_wrote (Vol label l t3 (array_set d i (VolFile name (max size (add offset n)) f)))
-                         (append chain cs) offset n cs))))))))
+          (let last (if (is_empty have) 0 (head (rev have)))
+            (let t3 (if (is_empty have) t (array_set t last (head cs)))
+              (let f (if (is_empty have) (head cs) first)
+                (vol_wrote (Vol label l t3 (array_set d i (VolFile name (max size (add offset n)) f)))
+                           (append have cs) ks offset n cs (if (is_empty have) cs (cons last cs)))))))))))
 
-; The write planned on v, over chain, the file's clusters now.
-(def vol_wrote ((v Vol) (chain (list int)) (offset int) (n int) (fresh (list int))) VolWrote
-  (VolWrote v (vol_spans chain offset n (nil VolSpan)) fresh))
+; The write planned on v, over chain, the file's clusters from the ksth
+; now.
+(def vol_wrote ((v Vol) (chain (list int)) (ks int) (offset int) (n int) (fresh (list int)) (marked (list int))) VolWrote
+  (VolWrote v (vol_spans chain ks offset n (nil VolSpan)) fresh marked))
 
-; The spans of n bytes from offset over chain, onto acc.
-(def vol_spans ((chain (list int)) (offset int) (n int) (acc (list VolSpan))) (list VolSpan)
+; The spans of n bytes from offset over chain, the file's clusters from
+; the ksth, onto acc.
+(def vol_spans ((chain (list int)) (ks int) (offset int) (n int) (acc (list VolSpan))) (list VolSpan)
   (if (le n 0)
       (rev acc)
       (let at (mod offset (vol_cluster_size))
         (let k (min n (sub (vol_cluster_size) at))
-          (vol_spans chain (add offset k) (sub n k)
-                     (cons (VolSpan (nth_or chain (div offset (vol_cluster_size)) 0) at k) acc))))))
+          (vol_spans chain ks (add offset k) (sub n k)
+                     (cons (VolSpan (nth_or chain (sub (div offset (vol_cluster_size)) ks) 0) at k) acc))))))
+
+; Where a write of n bytes from offset, whose spans are spans, ended: the
+; place of the cluster its last byte went to; none if it wrote nothing.
+(def vol_spans_end ((spans (list VolSpan)) (offset int) (n int)) VolAt
+  (if (is_empty spans)
+      (vol_at_none)
+      (match (head (rev spans))
+        ((VolSpan c at k) (VolAt (div (sub (add offset n) 1) (vol_cluster_size)) c)))))
 
 ; The sector of v's partition, from start, that cluster c begins at.
 (def vol_cluster_sector ((start int) (c int)) int

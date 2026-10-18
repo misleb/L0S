@@ -10,8 +10,8 @@
 
 ; scratch with a file of n bytes written, at entry 0.
 (def with_file ((name (list int)) (n int)) Vol
-  (match (vol_write (vol_create (scratch) 0 name) 0 0 n)
-    ((VolWrote v spans fresh) v)
+  (match (vol_write (vol_create (scratch) 0 name) 0 0 n (vol_at_none))
+    ((VolWrote v spans fresh marked) v)
     ((VolNoSpace) (scratch))))
 
 ; ------------------------------------------------------------- layout
@@ -166,6 +166,45 @@
          (add (check_int "cluster 1 the file's last" (le_u16_at b 514) (vol_end))
               (check_str "its entry at sector 2" (bytes_range b 1024 1029) "notes")))))
 
+; The metadata sector by sector is the metadata, for a volume of one
+; cluster's and one of 33 clusters'.
+(def test_meta_by_sector () int
+  (let v (with_file "notes" 9000)
+    (let big (vol_create (vol_new "big" (vol_layout 1048576)) 9 "x")
+      (add (check_true "scratch" (eq (meta_by_sector v) (vol_meta v)))
+           (check_true "big" (eq (meta_by_sector big) (vol_meta big)))))))
+
+; Every sector of v's metadata, from vol_meta_sector.
+(def meta_by_sector ((v Vol)) (list int)
+  (vol_run_bytes v (VolRun 0 (vol_meta_sectors (vol_layout_of v)))))
+
+; scratch's table is sector 1, its directory 2 to 7; the large layout's
+; table 1 to 256, cluster 300's mark in the second, and its directory
+; from 257, entry 9 in its second.
+(def test_dirty_sectors () int
+  (add (check_true "scratch" (eq (vol_dirty_sectors (scratch_layout) (cons 1 (cons 2 (nil int))) (cons 0 (cons 9 (nil int))))
+                                 (cons 1 (cons 1 (cons 2 (cons 3 (nil int)))))))
+       (check_true "large" (eq (vol_dirty_sectors (vol_layout 1048576) (cons 300 (nil int)) (cons 9 (nil int)))
+                               (cons 2 (cons 258 (nil int)))))))
+
+; Runs as text: FIRST+COUNT each.
+(def runs_text ((rs (list VolRun))) (list int)
+  (if (is_empty rs)
+      ""
+      (match (head rs) ((VolRun s n) (append (digits s) (append "+" (append (digits n) (append " " (runs_text (tail rs))))))))))
+
+; Sectors within a cluster's go in one run, those between included; a
+; repeat is no more.
+(def test_runs () int
+  (add (check_str "close" (runs_text (vol_runs (cons 1 (cons 2 (cons 2 (cons 8 (nil int))))))) "1+8 ")
+       (add (check_str "apart" (runs_text (vol_runs (cons 1 (cons 9 (cons 20 (cons 21 (nil int))))))) "1+1 9+1 20+2 ")
+            (check_str "none" (runs_text (vol_runs (nil int))) ""))))
+
+; A run's bytes are its sectors of the metadata.
+(def test_run_bytes () int
+  (let v (with_file "notes" 10)
+    (check_true "sectors 1 and 2" (eq (vol_run_bytes v (VolRun 1 2)) (take (drop_n (vol_meta v) 512) 1024)))))
+
 (def test_volume_round_trip () int
   (let v (with_file "notes" 5000)
     (match (vol_of "scratch" (scratch_layout) (bytes_from_list (vol_meta v)))
@@ -200,8 +239,8 @@
     (check_true "a then b" (eq (vol_files v) (cons (VolFile "a" 0 0) (cons (VolFile "b" 0 0) (nil VolEntry)))))))
 
 (def test_write_new () int
-  (match (vol_write (vol_create (scratch) 0 "notes") 0 0 10)
-    ((VolWrote v spans fresh)
+  (match (vol_write (vol_create (scratch) 0 "notes") 0 0 10 (vol_at_none))
+    ((VolWrote v spans fresh marked)
       (add (check_true "one span" (eq spans (cons (VolSpan 1 0 10) (nil VolSpan))))
            (add (check_true "cluster 1 new" (eq fresh (cons 1 (nil int))))
                 (check_true "the entry" (eq (vol_entry v 0) (VolFile "notes" 10 1))))))
@@ -209,30 +248,98 @@
 
 ; 4090 more from 10: 4086 fill cluster 1, 4 start cluster 2.
 (def test_write_across () int
-  (match (vol_write (with_file "notes" 10) 0 10 4090)
-    ((VolWrote v spans fresh)
+  (match (vol_write (with_file "notes" 10) 0 10 4090 (vol_at_none))
+    ((VolWrote v spans fresh marked)
       (add (check_true "two spans" (eq spans (cons (VolSpan 1 10 4086) (cons (VolSpan 2 0 4) (nil VolSpan)))))
            (add (check_true "cluster 2 new" (eq fresh (cons 2 (nil int))))
                 (check_true "chained" (eq (vol_chain (vol_table v) 1) (cons 1 (cons 2 (nil int))))))))
     ((VolNoSpace) (fail_because "write" "no space"))))
 
+; Marks changed: a new file's first cluster; for one grown, its old last
+; cluster, linked on, and the new; none for a write within the file.
+(def test_write_marked () int
+  (add (match (vol_write (vol_create (scratch) 0 "notes") 0 0 10 (vol_at_none))
+         ((VolWrote v spans fresh marked) (check_true "the first" (eq marked (cons 1 (nil int)))))
+         ((VolNoSpace) (fail_because "new" "no space")))
+       (add (match (vol_write (with_file "notes" 10) 0 10 4090 (vol_at_none))
+              ((VolWrote v spans fresh marked) (check_true "1 and 2" (eq marked (cons 1 (cons 2 (nil int))))))
+              ((VolNoSpace) (fail_because "grown" "no space")))
+            (match (vol_write (with_file "notes" 100) 0 0 5 (vol_at_none))
+              ((VolWrote v spans fresh marked) (check_int "none" (length marked) 0))
+              ((VolNoSpace) (fail_because "within" "no space"))))))
+
 (def test_write_over () int
-  (match (vol_write (with_file "notes" 100) 0 0 5)
-    ((VolWrote v spans fresh)
+  (match (vol_write (with_file "notes" 100) 0 0 5 (vol_at_none))
+    ((VolWrote v spans fresh marked)
       (add (check_int "nothing new" (length fresh) 0)
            (check_true "size kept" (eq (vol_entry v 0) (VolFile "notes" 100 1)))))
     ((VolNoSpace) (fail_because "write" "no space"))))
 
 (def test_write_no_space () int
-  (match (vol_write (vol_create (scratch) 0 "big") 0 0 (mul 64 4096))
-    ((VolWrote v spans fresh) (fail_because "write" "written"))
+  (match (vol_write (vol_create (scratch) 0 "big") 0 0 (mul 64 4096) (vol_at_none))
+    ((VolWrote v spans fresh marked) (fail_because "write" "written"))
     ((VolNoSpace) 0)))
 
 (def test_read_span () int
   (let v (with_file "notes" 4100)
-    (add (check_true "to the cluster's end" (eq (vol_read_span v 0 4094 100) (Some (VolSpan 1 4094 2))))
-         (add (check_true "the next" (eq (vol_read_span v 0 4096 100) (Some (VolSpan 2 0 4))))
-              (check_true "the end" (eq (vol_read_span v 0 4100 100) ((None VolSpan))))))))
+    (add (check_true "to the cluster's end" (eq (vol_read_span v 0 4094 100 (vol_at_none)) (Some (VolSpan 1 4094 2))))
+         (add (check_true "the next" (eq (vol_read_span v 0 4096 100 (vol_at_none)) (Some (VolSpan 2 0 4))))
+              (check_true "the end" (eq (vol_read_span v 0 4100 100 (vol_at_none)) ((None VolSpan))))))))
+
+; The same span found from a hint at the cluster before, and a hint past
+; the place, or of no cluster, ignored.
+(def test_read_span_hint () int
+  (let v (with_file "notes" 4100)
+    (add (check_true "from cluster 1" (eq (vol_read_span v 0 4096 100 (VolAt 0 1)) (Some (VolSpan 2 0 4))))
+         (add (check_true "past it" (eq (vol_read_span v 0 0 10 (VolAt 1 2)) (Some (VolSpan 1 0 10))))
+              (check_true "no cluster" (eq (vol_read_span v 0 4096 10 (VolAt 1 0)) (Some (VolSpan 2 0 4))))))))
+
+; The chain 3 7 5: its third from the start, or walked on from the
+; second, and none past its end.
+(def test_at () int
+  (let t (vol_link (vol_table_new (scratch_layout)) (cons 3 (cons 7 (cons 5 (nil int)))))
+    (add (check_true "from the start" (eq (vol_at t 3 (vol_at_none) 2) (VolAt 2 5)))
+         (add (check_true "from 7" (eq (vol_at t 3 (VolAt 1 7) 2) (VolAt 2 5)))
+              (check_true "past the end" (eq (vol_at t 3 (VolAt 2 5) 3) (VolAt 3 0)))))))
+
+; A hint is walked on from, not from the start: a hint that says 9 is
+; the first cluster finds 9's next as the second.
+(def test_at_walks_on () int
+  (let t (vol_link (vol_link (vol_table_new (scratch_layout)) (cons 3 (cons 7 (nil int)))) (cons 9 (cons 11 (nil int))))
+    (check_true "9's next" (eq (vol_at t 3 (VolAt 0 9) 1) (VolAt 1 11)))))
+
+; A write walks on from its hint too: one that says 9 is the first
+; cluster gives 9's next as the second, and only as many as asked.
+(def test_touched_walks_on () int
+  (let t (vol_link (vol_link (vol_table_new (scratch_layout)) (cons 3 (cons 7 (nil int)))) (cons 9 (cons 11 (cons 12 (nil int)))))
+    (add (check_true "11" (eq (vol_touched t 3 (VolAt 0 9) 1 1) (cons 11 (nil int))))
+         (check_true "3 7, from none" (eq (vol_touched t 3 (vol_at_none) 0 5) (cons 3 (cons 7 (nil int))))))))
+
+; What a write touches of a file of 3 clusters: from 5000, 100 bytes the
+; second cluster; to past the end, from the second to the last; from the
+; end of the last, the last, to link on.
+(def test_touch_count () int
+  (add (check_int "within" (vol_touch_count 5000 100 3 1) 1)
+       (add (check_int "on past the end" (vol_touch_count 5000 9000 3 1) 2)
+            (check_int "from the end" (vol_touch_count 12288 10 3 2) 1))))
+
+; A write's end: the place of the cluster its last byte went to.
+(def test_spans_end () int
+  (add (check_true "4090 from 10" (eq (vol_spans_end (cons (VolSpan 1 10 4086) (cons (VolSpan 2 0 4) (nil VolSpan))) 10 4090) (VolAt 1 2)))
+       (check_true "nothing" (eq (vol_spans_end (nil VolSpan) 0 0) (vol_at_none)))))
+
+; A loop ends: at most as many links as there are clusters.
+(def test_at_loop () int
+  (let t (array_set (array_set (vol_table_new (scratch_layout)) 3 4) 4 3)
+    (check_true "none" (eq (vol_at t 3 (vol_at_none) 1000) (VolAt 1000 0)))))
+
+; A file of 4100 bytes: a cluster's in the first, 4 in the second, none
+; in the third.
+(def test_held () int
+  (let v (with_file "notes" 4100)
+    (add (check_int "first" (vol_held v 0 0) 4096)
+         (add (check_int "second" (vol_held v 0 1) 4)
+              (check_int "third" (vol_held v 0 2) 0)))))
 
 (def test_remove () int
   (let v (vol_remove (with_file "notes" 9000) 0)
@@ -275,9 +382,66 @@
       (match (vol_entry v i)
         ((VolNone) v)
         ((VolFile name size first)
-          (match (vol_write v i size n)
-            ((VolWrote w spans fresh) w)
+          (match (vol_write v i size n (vol_at_none))
+            ((VolWrote w spans fresh marked) w)
             ((VolNoSpace) v))))))
+
+; The same random steps, each append also checked: planned with a hint,
+; the place of a random cluster of the file up to where the write starts,
+; it is the plan made with none, and its spans are those over the whole
+; chain after it, as an obvious walk finds them.
+(def test_random_hinted () int
+  (check_int "plans that differ"
+             (rand_hinted (vol_create (vol_create (vol_create (scratch) 0 "a") 1 "b") 2 "c") 13 300 0)
+             0))
+
+(def rand_hinted ((v Vol) (seed int) (left int) (bad int)) int
+  (if (eq left 0)
+      bad
+      (let s1 (rand_next seed)
+        (let s2 (rand_next s1)
+          (let s3 (rand_next s2)
+            (let i (rand_below s1 3)
+              (let n (rand_below s2 9000)
+                (rand_hinted (step v i n) s3 (sub left 1)
+                             (if (hinted_ok v i n (rand_below s3 1000)) bad (add bad 1))))))))))
+
+; Whether an append of n to file i of v plans the same with the place of
+; its cluster r mod how many there are up to the write's as without, and
+; spans the clusters the whole chain after it gives.
+(def hinted_ok ((v Vol) (i int) (n int) (r int)) bool
+  (match (vol_entry v i)
+    ((VolNone) true)
+    ((VolFile name size first)
+      (let hint (vol_at (vol_table v) first (vol_at_none) (mod r (add 1 (div size 4096))))
+        (let plain (vol_write v i size n (vol_at_none))
+          (if (not (eq (vol_write v i size n hint) plain))
+              false
+              (match plain
+                ((VolNoSpace) true)
+                ((VolWrote w spans fresh marked)
+                  (eq spans (vol_spans (vol_file_clusters w i) 0 size n (nil VolSpan)))))))))))
+
+; A file written in pieces, each from the place the last one ended: the
+; same volume, and the same spans, as written with no hints.
+(def test_write_on_from_end () int
+  (let v (vol_create (scratch) 0 "a")
+    (check_true "the same" (eq (pieces v (vol_at_none) 0 20 true) (pieces v (vol_at_none) 0 20 false)))))
+
+; v after count writes of 3000 bytes to file 0, each from where the last
+; ended if hinted; and every span written, in order.
+(data Pieces (Pieces Vol (list VolSpan)))
+
+(def pieces ((v Vol) (hint VolAt) (offset int) (count int) (hinted bool)) Pieces
+  (pieces_onto v hint offset count hinted (nil VolSpan)))
+
+(def pieces_onto ((v Vol) (hint VolAt) (offset int) (count int) (hinted bool) (acc (list VolSpan))) Pieces
+  (if (eq count 0)
+      (Pieces v (rev acc))
+      (match (vol_write v 0 offset 3000 (if hinted hint (vol_at_none)))
+        ((VolNoSpace) (Pieces v (rev acc)))
+        ((VolWrote w spans fresh marked)
+          (pieces_onto w (vol_spans_end spans offset 3000) (add offset 3000) (sub count 1) hinted (rev_onto spans acc))))))
 
 (def accounted ((v Vol)) bool
   (eq (add (vol_free_count (vol_table v)) (used v 0 0)) 63))

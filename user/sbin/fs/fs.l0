@@ -8,9 +8,12 @@
 ; mounts any new label.
 ;
 ; Each volume's metadata is kept in memory and written back, after the
-; data, whenever it changes. A handle is the pid that opened it, which
-; fs watches, dropping its handles when it exits. The disk is reached
-; through a Store, which in tests is memory instead.
+; data, whenever it changes: only the sectors that changed. A handle is
+; the pid that opened it, which fs watches, dropping its handles when it
+; exits; a reader's keeps the cluster it read last, so that a file read
+; in order reads each cluster once and walks each link of its chain
+; once. The disk is reached through a Store, which in tests is memory
+; instead.
 
 ; why said on standard error, and a failure.
 (def complain ((why (list int))) int (complain_as "fs" why))
@@ -21,12 +24,13 @@
 ; -------------------------------------------------------------- the store
 
 ; Where the sectors are: the disk, through a buffer of a cluster shared
-; with its driver; or memory, by sector, for tests.
-(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int))
+; with its driver; or memory, by sector, for tests, with its sectors and
+; how many reads and writes it has been asked, as the disk would.
+(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int int))
 
 ; How many sectors the store has: the disk's, or the memory's.
 (def store_sectors ((s Store)) int
-  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n) n)))
+  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n r) n)))
 
 ; Sectors read, and the store after; or why not.
 (data Got (Got Store (list int)) (GotNot Store (list int)))
@@ -34,7 +38,7 @@
 ; count sectors from sector, at most a cluster's.
 (def store_read ((s Store) (sector int) (count int)) Got
   (match s
-    ((StoreMem m n) (Got s (mem_sectors m sector count (nil int))))
+    ((StoreMem m n r) (Got (StoreMem m n (add r 1)) (mem_sectors m sector count (nil int))))
     ((StoreDisk d b)
       (let why (disk_read d b sector count)
         (if (is_empty why)
@@ -70,7 +74,7 @@
 ; bs, whole sectors, at most a cluster's, written from sector.
 (def store_write ((s Store) (sector int) (bs (list int))) Put
   (match s
-    ((StoreMem m n) (Put (StoreMem (mem_put m sector bs) n)))
+    ((StoreMem m n r) (Put (StoreMem (mem_put m sector bs) n (add r 1))))
     ((StoreDisk d b)
       (let p (disk_put b bs)
         (let why (disk_write d b sector (div (length bs) (vol_sector_size)))
@@ -95,8 +99,33 @@
 (data FsVol (FsVol int Vol))
 
 ; An open file: the pid that opened it, its volume and directory entry,
-; where it has read or written to, and its mode, 1 to 3 as open's.
-(data Handle (Handle int int int int int))
+; where it has read or written to, its mode, 1 to 3 as open's, and the
+; cluster it read or wrote last.
+(data Handle (Handle int int int int int Held))
+
+; The cluster a handle read last: its place in the file's chain, and the
+; file's bytes in it, all of them, which the next read takes from
+; memory, finding the cluster after from it. Or only the place, of the
+; cluster a writer wrote last, or a reader read before the file was
+; written to, which is still that cluster's, since a write only adds to
+; the end of a chain; or none, at first and once the file is emptied.
+(data Held (Held VolAt bytes) (HeldPlace VolAt) (HeldNone))
+
+; Where a read or write from what h holds finds the file's clusters from.
+(def held_at ((h Held)) VolAt
+  (match h ((Held a bs) a) ((HeldPlace a) a) ((HeldNone) (vol_at_none))))
+
+; Whether h holds cluster a, need bytes of it at least.
+(def holds ((h Held) (a VolAt) (need int)) bool
+  (match h ((Held b bs) (if (eq b a) (ge (bytes_len bs) need) false)) ((HeldPlace b) false) ((HeldNone) false)))
+
+; The bytes h holds from i up to j.
+(def held_range ((h Held) (i int) (j int)) (list int)
+  (match h ((Held a bs) (bytes_range bs i j)) ((HeldPlace a) (nil int)) ((HeldNone) (nil int))))
+
+; What h holds once its file is written to: the place, not the bytes.
+(def held_written ((h Held)) Held
+  (match h ((Held a bs) (HeldPlace a)) ((HeldPlace a) h) ((HeldNone) h)))
 
 ; The server: its store, its port, its volumes, the open files by handle,
 ; the next handle to give, the pids it watches, and a port of its own the
@@ -142,7 +171,7 @@
   (match f
     ((Fs s port vols hs next ws cp)
       (let ws2 (if (any_eq pid ws) ws (watched pid port ws))
-        (Opened (Fs s port vols (map_put hs next (Handle pid vi ei 0 mode)) (add next 1) ws2 cp) next)))))
+        (Opened (Fs s port vols (map_put hs next (Handle pid vi ei 0 mode (HeldNone))) (add next 1) ws2 cp) next)))))
 
 ; ws, with pid if it can be watched.
 (def watched ((pid int) (port int) (ws (list int))) (list int)
@@ -155,7 +184,7 @@
 (def handle_of ((f Fs) (pid int) (h int)) (Option Handle)
   (match (map_get (fs_handles f) h)
     ((None) ((None Handle)))
-    ((Some x) (match x ((Handle p vi ei off mode) (if (eq p pid) (Some x) ((None Handle))))))))
+    ((Some x) (match x ((Handle p vi ei off mode held) (if (eq p pid) (Some x) ((None Handle))))))))
 
 ; Whether any handle is open on entry ei of volume vi; or, ei -1, on any
 ; of vi's.
@@ -166,7 +195,7 @@
   (if (is_empty hs)
       false
       (match (head hs)
-        ((Handle p v e off mode)
+        ((Handle p v e off mode held)
           (if (if (eq v vi) (if (eq ei -1) true (eq e ei)) false) true (any_open (tail hs) vi ei))))))
 
 ; f without pid's handles, pid having exited.
@@ -179,9 +208,27 @@
   (if (is_empty keys)
       hs
       (drop_handles (match (map_get hs (head keys))
-                      ((Some x) (match x ((Handle p vi ei off mode) (if (eq p pid) (map_remove hs (head keys)) hs))))
+                      ((Some x) (match x ((Handle p vi ei off mode held) (if (eq p pid) (map_remove hs (head keys)) hs))))
                       ((None) hs))
                     (tail keys) pid)))
+
+; f with the handles on entry ei of volume vi holding no bytes of it, its
+; file having been written to, but their places; or, emptied, nothing.
+(def unheld ((f Fs) (vi int) (ei int) (emptied bool)) Fs
+  (with_handles f (unheld_in (fs_handles f) (map_keys (fs_handles f)) vi ei emptied)))
+
+(def unheld_in ((hs (Map int Handle)) (keys (list int)) (vi int) (ei int) (emptied bool)) (Map int Handle)
+  (if (is_empty keys)
+      hs
+      (unheld_in (match (map_get hs (head keys))
+                   ((Some x)
+                     (match x
+                       ((Handle p v e off mode held)
+                         (if (if (eq v vi) (eq e ei) false)
+                             (map_put hs (head keys) (Handle p v e off mode (if emptied (HeldNone) (held_written held))))
+                             hs))))
+                   ((None) hs))
+                 (tail keys) vi ei emptied)))
 
 (def drop_int ((xs (list int)) (x int)) (list int)
   (if (is_empty xs) xs (if (eq (head xs) x) (drop_int (tail xs) x) (cons (head xs) (drop_int (tail xs) x)))))
@@ -190,10 +237,30 @@
 ; was, and -5, if the write failed.
 (data Committed (Committed Fs) (CommitFailed Fs))
 
+; All of v's metadata written, as format must.
 (def commit ((f Fs) (vi int) (v Vol)) Committed
-  (match (store_write_all (match f ((Fs s port vols hs next ws cp) s)) (fs_start f vi) (vol_meta v))
+  (committed f vi v (store_write_all (match f ((Fs s port vols hs next ws cp) s)) (fs_start f vi) (vol_meta v))))
+
+; Only the sectors of v's metadata that hold the marks of clusters cs and
+; the entries es written, which must be all that changed: those close
+; together in one request, as vol_runs puts them.
+(def commit_some ((f Fs) (vi int) (v Vol) (cs (list int)) (es (list int))) Committed
+  (committed f vi v (write_runs (fs_store f) (fs_start f vi) v (vol_runs (vol_dirty_sectors (vol_layout_of v) cs es)))))
+
+(def committed ((f Fs) (vi int) (v Vol) (p Put)) Committed
+  (match p
     ((Put s2) (Committed (with_vol (with_store f s2) vi v)))
     ((PutNot s2 why) (CommitFailed (with_store f s2)))))
+
+; Each run of v's metadata written, the volume's partition from start.
+(def write_runs ((s Store) (start int) (v Vol) (rs (list VolRun))) Put
+  (if (is_empty rs)
+      (Put s)
+      (match (head rs)
+        ((VolRun first n)
+          (match (store_write s (add start first) (vol_run_bytes v (head rs)))
+            ((PutNot s2 why) (PutNot s2 why))
+            ((Put s2) (write_runs s2 start v (tail rs))))))))
 
 ; ---------------------------------------------------------------- paths
 
@@ -312,13 +379,18 @@
   (let v (fs_vol f vi)
     (let ei (vol_find v name)
       (if (ge ei 0)
-          (opened_write (if (eq m 2) (commit f vi (vol_truncate v ei)) (Committed f)) pid vi ei m)
+          (opened_write (if (eq m 2) (emptied f vi v ei) (Committed f)) pid vi ei m)
           (if (not (vol_name_ok name))
               (word f -5)
               (let free (vol_free_entry v)
                 (if (lt free 0)
                     (word f -5)
-                    (opened_write (commit f vi (vol_create v free name)) pid vi free m))))))))
+                    (opened_write (commit_some f vi (vol_create v free name) (nil int) (cons free (nil int))) pid vi free m))))))))
+
+; The file at ei of v, volume vi, emptied, and no longer held by its
+; readers.
+(def emptied ((f Fs) (vi int) (v Vol) (ei int)) Committed
+  (commit_some (unheld f vi ei true) vi (vol_truncate v ei) (vol_file_clusters v ei) (cons ei (nil int))))
 
 (def opened_write ((c Committed) (pid int) (vi int) (ei int) (m int)) Answered
   (match c
@@ -327,34 +399,61 @@
 
 ; ------------------------------------------------------------------ read
 
-; At most n bytes of handle h, pid's, from where it is: those of one
-; cluster, read from as few sectors as hold them.
+; At most n bytes of handle h, pid's, from where it is, and no more than
+; a reply holds with its word: across the end of a cluster, if they go
+; on, so that reads of as much as a reply holds go on a whole reply at a
+; time, rather than one ending each cluster with the few bytes left.
 (def do_read ((f Fs) (pid int) (h int) (n int)) Answered
   (match (handle_of f pid h)
     ((None) (word f -5))
     ((Some x)
       (match x
-        ((Handle p vi ei off mode)
+        ((Handle p vi ei off mode held)
           (if (not (eq mode 1))
               (word f -5)
-              (match (vol_read_span (fs_vol f vi) ei off (min n (sub (max_message) 4)))
-                ((None) (word f 0))
-                ((Some span) (read_span f h x span)))))))))
+              (read_on f h x (min n (sub (max_message) 4)) (nil int))))))))
 
-(def read_span ((f Fs) (h int) (x Handle) (span VolSpan)) Answered
+; Handle h, x, read on for n bytes more, a cluster's at a time, onto acc,
+; reversed: the bytes, once the file or n ends, and x moved past them.
+(def read_on ((f Fs) (h int) (x Handle) (n int) (acc (list int))) Answered
   (match x
-    ((Handle p vi ei off mode)
+    ((Handle p vi ei off mode held)
+      (match (if (le n 0) ((None VolSpan)) (vol_read_span (fs_vol f vi) ei off n (held_at held)))
+        ((None) (read_done f h x acc))
+        ((Some span) (read_piece f h x n acc span))))))
+
+; The bytes read, acc reversed, and handle h moved to x.
+(def read_done ((f Fs) (h int) (x Handle) (acc (list int))) Answered
+  (Answered (with_handles f (map_put (fs_handles f) h x)) (length acc) (rev acc)))
+
+; The bytes of span read on from what x holds, or its cluster read and
+; held in its place; -5 if the disk fails before any bytes are read, and
+; those read if after.
+(def read_piece ((f Fs) (h int) (x Handle) (n int) (acc (list int)) (span VolSpan)) Answered
+  (match x
+    ((Handle p vi ei off mode held)
       (match span
         ((VolSpan c at k)
-          (let s0 (div at (vol_sector_size))
-            (let count (add (sub (div (add at (sub k 1)) (vol_sector_size)) s0) 1)
-              (match (store_read (match f ((Fs s port vols hs next ws cp) s))
-                                 (add (vol_cluster_sector (fs_start f vi) c) s0) count)
-                ((GotNot s2 why) (word (with_store f s2) -5))
-                ((Got s2 bs)
-                  (Answered (with_handles (with_store f s2) (map_put (fs_handles f) h (Handle p vi ei (add off k) mode)))
-                            k
-                            (take (drop_n bs (sub at (mul s0 (vol_sector_size)))) k)))))))))))
+          (match (fetch f vi ei (VolAt (div off (vol_cluster_size)) c) held (add at k))
+            ((FetchFailed f2) (if (is_empty acc) (word f2 -5) (read_done f2 h x acc)))
+            ((Fetched f2 held2)
+              (read_on f2 h (Handle p vi ei (add off k) mode held2) (sub n k)
+                       (rev_onto (held_range held2 at (add at k)) acc)))))))))
+
+; What holds cluster a of the file at ei of volume vi, need bytes of it:
+; held, if it holds them, or else the file's bytes in the cluster read
+; from as few sectors as hold them, to be held in its place.
+(data Fetched (Fetched Fs Held) (FetchFailed Fs))
+
+(def fetch ((f Fs) (vi int) (ei int) (a VolAt) (held Held) (need int)) Fetched
+  (if (holds held a need)
+      (Fetched f held)
+      (match a
+        ((VolAt k c)
+          (let bytes_in (vol_held (fs_vol f vi) ei k)
+            (match (store_read (fs_store f) (vol_cluster_sector (fs_start f vi) c) (ceil_div bytes_in (vol_sector_size)))
+              ((GotNot s2 why) (FetchFailed (with_store f s2)))
+              ((Got s2 bs) (Fetched (with_store f s2) (Held a (bytes_from_list (take bs bytes_in)))))))))))
 
 ; ----------------------------------------------------------------- write
 
@@ -365,28 +464,34 @@
     ((None) (word f -5))
     ((Some x)
       (match x
-        ((Handle p vi ei off mode)
+        ((Handle p vi ei off mode held)
           (if (eq mode 1)
               (word f -5)
               (match (vol_entry (fs_vol f vi) ei)
                 ((VolNone) (word f -5))
                 ((VolFile name size first)
                   (let at (if (eq mode 3) size (min off size))
-                    (match (vol_write (fs_vol f vi) ei at (length bs))
+                    (match (vol_write (fs_vol f vi) ei at (length bs) (held_at held))
                       ((VolNoSpace) (word f -6))
-                      ((VolWrote v2 spans fresh) (written f h x at size bs v2 spans fresh))))))))))))
+                      ((VolWrote v2 spans fresh marked) (written f h x at size bs v2 spans fresh marked))))))))))))
 
-; The spans written, then the metadata; the handle moved past the bytes.
-(def written ((f Fs) (h int) (x Handle) (at int) (size int) (bs (list int)) (v2 Vol) (spans (list VolSpan)) (fresh (list int))) Answered
+; The spans written, then the metadata that changed, the marks of the
+; clusters linked and the entry, if its size or first cluster did; the
+; handle moved past the bytes, holding the place of the cluster it wrote
+; last, for the next write to walk on from, and the file's readers
+; holding none of its bytes.
+(def written ((f Fs) (h int) (x Handle) (at int) (size int) (bs (list int)) (v2 Vol) (spans (list VolSpan)) (fresh (list int)) (marked (list int))) Answered
   (match x
-    ((Handle p vi ei off mode)
+    ((Handle p vi ei off mode held)
       (match (write_spans (match f ((Fs s port vols hs next ws cp) s)) (fs_start f vi) spans bs fresh at size)
-        ((PutNot s2 why) (word (with_store f s2) -5))
+        ((PutNot s2 why) (word (unheld (with_store f s2) vi ei false) -5))
         ((Put s2)
-          (match (commit (with_store f s2) vi v2)
+          (match (commit_some (unheld (with_store f s2) vi ei false) vi v2 marked
+                              (if (eq (vol_entry v2 ei) (vol_entry (fs_vol f vi) ei)) (nil int) (cons ei (nil int))))
             ((CommitFailed f2) (word f2 -5))
             ((Committed f2)
-              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at (length bs)) mode))) (length bs)))))))))
+              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at (length bs)) mode (HeldPlace (vol_spans_end spans at (length bs))))))
+                    (length bs)))))))))
 
 ; Each span of data written, the bytes of the file from at. A span's
 ; sectors are read first only where they hold the file's bytes that
@@ -445,7 +550,9 @@
               (word f 0)
               (if (if (ge old 0) (is_open f vi old) false)
                   (word f -4)
-                  (match (commit f vi (vol_rename (if (ge old 0) (vol_remove v old) v) ei to))
+                  (match (commit_some f vi (vol_rename (if (ge old 0) (vol_remove v old) v) ei to)
+                                      (if (ge old 0) (vol_file_clusters v old) (nil int))
+                                      (if (ge old 0) (cons old (cons ei (nil int))) (cons ei (nil int))))
                     ((CommitFailed f2) (word f2 -5))
                     ((Committed f2) (word f2 0)))))))))
 
@@ -460,7 +567,7 @@
             (word f -3)
             (if (is_open f vi ei)
                 (word f -4)
-                (match (commit f vi (vol_remove (fs_vol f vi) ei))
+                (match (commit_some f vi (vol_remove (fs_vol f vi) ei) (vol_file_clusters (fs_vol f vi) ei) (cons ei (nil int)))
                   ((CommitFailed f2) (word f2 -5))
                   ((Committed f2) (word f2 0)))))))))
 

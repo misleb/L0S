@@ -713,7 +713,7 @@ never goes. A refusal's word may be followed by why, in words.
 | Request | Reply |
 |---|---|
 | `open MODE PATH` | MODE 1 to read, 2 to write anew, 3 to add to the end, making the file if it is not there: a handle |
-| `read H N` | at most N bytes of handle H from where it is, those of one cluster: the count, then the bytes; 0 at the end |
+| `read H N` | at most N bytes of handle H from where it is, and at most 4092, what a reply holds after its word, on across the end of a cluster if the file goes on: the count, then the bytes; 0 at the end |
 | `write H BYTES` | BYTES written to H, at its end for mode 3: how many, all of them, or -6 if the volume has no room |
 | `close H` | 0 |
 | `rename FROM TO` | 0, a file named TO replaced, unless it is open, -4; both in one volume, else -10 |
@@ -740,9 +740,23 @@ L0FS's type, its
 metadata, mounts each by its label from one port, and then registers
 that port as `fs`, so that a program can wait for every volume with
 `name_wait`. It keeps the metadata in memory and writes it back after
-the data whenever it changes. It reads only the sectors a read needs,
-and reads a sector before a write only where the write keeps some of
-its bytes. It watches each process that opens a file, and drops its
+the data whenever it changes, only the sectors that changed: the
+table's that hold the marks a change made, and the directory's that
+holds the entry, those within a cluster of each other in one request:
+on these volumes a write's metadata is one request, and on the largest,
+whose metadata is 33 clusters, at most two rather than 33. A handle
+open to read holds the cluster it read last, the file's bytes in it,
+read whole, and its place in the file's chain: the next read takes
+what it can from there and finds the next cluster from it, so a file
+read in order reads each cluster from the disk once and walks each
+link of its chain once. A handle open to write holds the place of the
+cluster it wrote last, and a write walks on from it only through the
+clusters it touches, so a file written in order walks each link once
+too. A write to the file drops the bytes its readers hold, keeping
+their places, since a write only adds to a chain's end; an `open 2`
+drops both. It reads
+a sector before a write only where the write keeps some of its bytes.
+It watches each process that opens a file, and drops its
 handles when it exits. A `rescan` does the reading again, so a volume
 made or changed on the disk since is served without a reboot.
 `partition` and `mkfs` make partitions and volumes on the running
@@ -1136,7 +1150,7 @@ name in a library is taken in every program that links it.
 | [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `sh`, `disks`, `tools/mkfs` |
 | [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
 | [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
-| [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `disks`, `tools/mkfs` |
+| [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata a change touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
 | [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
 | [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `tools/mkicon` |
@@ -1356,10 +1370,13 @@ fault, pass a bad buffer, and wait on nothing.
   bytes and no spaces, and no subdirectories, permissions or times; at
   most 65534 clusters of 4 KB; and a disk at most the GPT's 128. One
   file server, `fs`, serves the first disk's volumes, one request at a
-  time, and a read moves at most a cluster. A write is as safe as the
-  order it is made in, its data and then the metadata, and no more: a
-  crash between the two loses the write's changes to the file's size
-  and chain, and the disk's own cache is never flushed. A file open
+  time, and a read moves at most 4092 bytes, what a reply holds. A
+  write is as safe as the order it is made in, its data and then the
+  metadata, and no more: a crash between the two loses the write's
+  changes to the file's size and chain; on a volume whose metadata is
+  more than a cluster, a crash between the table's sector and the
+  directory's leaves the two disagreeing, and `fs` refuses the volume
+  rather than follow it; and the disk's own cache is never flushed. A file open
   cannot be removed or renamed over, where Unix would let it go once
   closed. Any process may mount a label no one has, as any may register
   a name, and nothing unmounts a volume but its server's port going:
