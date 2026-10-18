@@ -1,0 +1,208 @@
+; mkicon.l0 -- draws an app's icon: reads a source of the desktop's
+; drawing commands, a line each, as run draw takes them, and writes the
+; icon they draw, 48 by 48, as a binary PPM, on the launcher's ground.
+;
+;   mkicon user/vt/Terminal.app/icon.draw > icon.ppm
+;
+; A # line is a comment. It draws without a canvas, into an array of
+; pixels, so only the commands that need no font: line, circle, disc,
+; rect, fill and clear, and the toolkit's round and icon. No layer
+; blends, so a round's corners are mixed with what is under them, the
+; ground first: the icon is right only on the launcher's ui_launcher_bg.
+
+; The icon's side, and its pixels at the start: the launcher's ground.
+(def mkicon_size () int (ui_app_icon))
+
+(def mkicon_new () (array int) (array_new (mul (mkicon_size) (mkicon_size)) (ui_launcher_bg)))
+
+; ---------------------------------------------------------------- reading
+
+; The pixels a source's text draws, or why not, with the line.
+(def mkicon_draw_text ((text (list int))) (Result (array int) (list int))
+  (mkicon_lines text 1 (mkicon_new)))
+
+(def mkicon_lines ((text (list int)) (n int) (px (array int))) (Result (array int) (list int))
+  (if (is_empty text)
+      ((Ok (array int) (list int)) px)
+      (match (mkicon_line (split_spaces (take_line text)) px)
+        ((Ok next) (mkicon_lines (drop_line text) (add n 1) next))
+        ((Err why) ((Err (array int) (list int)) (append "line " (append (digits n) (append ": " why))))))))
+
+; One line drawn: nothing for a blank line or a comment.
+(def mkicon_line ((words (list (list int))) (px (array int))) (Result (array int) (list int))
+  (if (is_empty words)
+      ((Ok (array int) (list int)) px)
+      (if (starts_with (head words) "#")
+          ((Ok (array int) (list int)) px)
+          (match (ui_parse_draw words)
+            ((Err why) ((Err (array int) (list int)) why))
+            ((Ok d) (mkicon_draw px d))))))
+
+(def mkicon_draw ((px (array int)) (d UiDraw)) (Result (array int) (list int))
+  (match d
+    ((UiDrawBasic cmd) (mkicon_basic px cmd))
+    ((UiDrawRound x y w h r c) (mkicon_ops px (ui_draw_ops d)))
+    ((UiDrawButton x y k label) (mkicon_cannot "button"))
+    ((UiDrawIcon x y name sc c) (mkicon_ops px (ui_draw_ops d)))))
+
+; A command refused, as one an icon cannot hold; and the pixels drawn.
+(def mkicon_cannot ((op (list int))) (Result (array int) (list int))
+  ((Err (array int) (list int)) (append op " cannot be drawn in an icon")))
+
+(def mkicon_ok ((px (array int))) (Result (array int) (list int)) ((Ok (array int) (list int)) px))
+
+; ---------------------------------------------------------------- drawing
+
+; render.l0's commands, drawn as wm draws them on the desktop; those that
+; need a font or the screen are refused.
+(def mkicon_basic ((px (array int)) (cmd Command)) (Result (array int) (list int))
+  (match cmd
+    ((CmdLine x0 y0 x1 y1 c) (mkicon_ok (mkicon_points px (line_points x0 y0 x1 y1) c)))
+    ((CmdCircle cx cy r c) (mkicon_ok (mkicon_points px (circle_points cx cy r) c)))
+    ((CmdDisc cx cy r c) (mkicon_ok (mkicon_disc px cx cy r c (neg r))))
+    ((CmdRect x y w h c) (mkicon_ok (mkicon_outline px x y w h c)))
+    ((CmdFill x y w h c) (mkicon_ok (mkicon_fill px x y w h c)))
+    ((CmdClear c) (mkicon_ok (mkicon_fill px 0 0 (mkicon_size) (mkicon_size) c)))
+    ((CmdChar x y code c) (mkicon_cannot "char"))
+    ((CmdText x y c bg s) (mkicon_cannot "text"))
+    ((CmdScroll n c) (mkicon_cannot "scroll"))
+    ((CmdRestore x y w h) (mkicon_cannot "restore"))
+    ((CmdSplash p) (mkicon_cannot "splash"))
+    ((CmdSize) (mkicon_cannot "size"))
+    ((CmdFont) (mkicon_cannot "font"))))
+
+; The toolkit's ops: fills, rounds and icons; text needs a font.
+(def mkicon_ops ((px (array int)) (ops (list UiPaint))) (Result (array int) (list int))
+  (if (is_empty ops)
+      (mkicon_ok px)
+      (match (head ops)
+        ((UiPFill r c) (mkicon_ops (mkicon_fill px (ui_rx r) (ui_ry r) (ui_rw r) (ui_rh r) c) (tail ops)))
+        ((UiPRound r rad c under)
+          (mkicon_ops (mkicon_round px r (ui_fit_radius rad (ui_rw r) (ui_rh r)) c 0) (tail ops)))
+        ((UiPText r s a c b sc) (mkicon_cannot "text"))
+        ((UiPIcon x y name c sc) (mkicon_ops (mkicon_icon px x y (ui_icon_rows name) c sc 0) (tail ops))))))
+
+; The pixel at x, y, or -1 off the icon.
+(def mkicon_get ((px (array int)) (x int) (y int)) int
+  (if (mkicon_on x y) (array_get px (add (mul y (mkicon_size)) x)) -1))
+
+(def mkicon_on ((x int) (y int)) bool
+  (if (if (lt x 0) true (ge x (mkicon_size))) false (if (lt y 0) false (lt y (mkicon_size)))))
+
+; px with x, y in color c, if it is on the icon.
+(def mkicon_put ((px (array int)) (x int) (y int) (c int)) (array int)
+  (if (mkicon_on x y) (array_set px (add (mul y (mkicon_size)) x) c) px))
+
+; Each of ps in color c: a line's or a circle's points.
+(def mkicon_points ((px (array int)) (ps (list Point)) (c int)) (array int)
+  (if (is_empty ps)
+      px
+      (match (head ps) ((Point x y) (mkicon_points (mkicon_put px x y c) (tail ps) c)))))
+
+; Columns x0 up to x1 of row y.
+(def mkicon_span ((px (array int)) (y int) (x0 int) (x1 int) (c int)) (array int)
+  (if (ge x0 x1) px (mkicon_span (mkicon_put px x0 y c) y (add x0 1) x1 c)))
+
+; A rectangle filled, and one outlined, as render.l0's fill and rect.
+(def mkicon_fill ((px (array int)) (x int) (y int) (w int) (h int) (c int)) (array int)
+  (if (le h 0) px (mkicon_fill (mkicon_span px y x (add x w) c) x (add y 1) w (sub h 1) c)))
+
+(def mkicon_outline ((px (array int)) (x int) (y int) (w int) (h int) (c int)) (array int)
+  (if (if (lt w 1) true (lt h 1))
+      px
+      (let x1 (add x (sub w 1))
+        (let y1 (add y (sub h 1))
+          (let a (mkicon_points px (line_points x y x1 y) c)
+            (let b (mkicon_points a (line_points x y1 x1 y1) c)
+              (let d (mkicon_points b (line_points x y x y1) c)
+                (mkicon_points d (line_points x1 y x1 y1) c))))))))
+
+; Rows dy from -r to r of a filled circle, as render.l0's disc.
+(def mkicon_disc ((px (array int)) (cx int) (cy int) (r int) (c int) (dy int)) (array int)
+  (if (gt dy r)
+      px
+      (let hw (isqrt (sub (mul r r) (mul dy dy)))
+        (mkicon_disc (mkicon_span px (add cy dy) (sub cx hw) (add (add cx hw) 1) c) cx cy r c (add dy 1)))))
+
+; A rectangle with rounded corners, row by row from dy, as paint.l0's
+; ui_round: each row's edge pixels mixed with what is there by how much
+; of them the corner covers.
+(def mkicon_round ((px (array int)) (r UiRect) (radius int) (c int) (dy int)) (array int)
+  (if (ge dy (ui_rh r))
+      px
+      (mkicon_round (mkicon_round_row px r radius c dy) r radius c (add dy 1))))
+
+(def mkicon_round_row ((px (array int)) (r UiRect) (radius int) (c int) (dy int)) (array int)
+  (match r
+    ((UiRect x y w h)
+      (let in16 (ui_row_inset16 radius h dy)
+        (let full (div in16 16)
+          (let part (mod in16 16)
+            (let edge (if (gt part 0) 1 0)
+              (let s (mkicon_span px (add y dy) (add x (add full edge)) (sub (add x w) (add full edge)) c)
+                (if (eq edge 0)
+                    s
+                    (let pct (div (mul (sub 16 part) 100) 16)
+                      (let l (mkicon_blend s (add x full) (add y dy) c pct)
+                        (mkicon_blend l (sub (add x w) (add full 1)) (add y dy) c pct))))))))))))
+
+; c at pct percent over the pixel at x, y.
+(def mkicon_blend ((px (array int)) (x int) (y int) (c int) (pct int)) (array int)
+  (let under (mkicon_get px x y)
+    (if (lt under 0) px (mkicon_put px x y (ui_mix c under pct)))))
+
+; An icon's rows of bits, each lit pixel scale square, from row i.
+(def mkicon_icon ((px (array int)) (x int) (y int) (rows (list int)) (c int) (scale int) (i int)) (array int)
+  (if (is_empty rows)
+      px
+      (mkicon_icon (mkicon_bits px x (add y (mul i scale)) (head rows) c scale 0) x y (tail rows) c scale (add i 1))))
+
+(def mkicon_bits ((px (array int)) (x int) (y int) (bits int) (c int) (scale int) (col int)) (array int)
+  (if (eq col (ui_icon_size))
+      px
+      (mkicon_bits (if (eq (bit_and (bit_shr bits (sub (sub (ui_icon_size) 1) col)) 1) 1)
+                       (mkicon_fill px (add x (mul col scale)) y scale scale c)
+                       px)
+                   x y bits c scale (add col 1))))
+
+; ---------------------------------------------------------------- writing
+
+; The icon as a binary PPM: its header, then each pixel's red, green and
+; blue, row by row.
+(def mkicon_ppm ((px (array int))) (list int)
+  (let header (append "P6\n" (append (digits (mkicon_size)) (append " " (append (digits (mkicon_size)) " 255\n"))))
+    (rev (mkicon_rgb px 0 (rev header)))))
+
+(def mkicon_rgb ((px (array int)) (i int) (acc (list int))) (list int)
+  (if (ge i (array_len px))
+      acc
+      (let c (array_get px i)
+        (mkicon_rgb px (add i 1) (cons (ui_blue_of c) (cons (ui_green_of c) (cons (ui_red_of c) acc)))))))
+
+; Says why on standard error: status 1.
+(def mkicon_complain ((why (list int))) int
+  (let w (write_err (append "mkicon: " (append why "\n"))) 1))
+
+; The program: the icon of the source argv names, on standard output.
+(def mkicon ((argv (list (list int)))) int
+  (if (not (eq (length argv) 1))
+      (mkicon_complain "usage: mkicon SOURCE > icon.ppm")
+      (match (open_in (head argv))
+        ((IoFailed fault why) (mkicon_complain (append (head argv) (append ": " why))))
+        ((IoOpened f)
+          (let got (file_read_all f)
+            (let c (file_close f)
+              (match got
+                ((IoReadFailed code) (mkicon_complain (append (head argv) ": cannot be read")))
+                ((IoBytes b) (mkicon_written (head argv) (mkicon_draw_text (bytes_to_list b)))))))))))
+
+; The icon drawn from src written, or why it could not be drawn.
+(def mkicon_written ((src (list int)) (r (Result (array int) (list int)))) int
+  (match r
+    ((Err why) (mkicon_complain (append src (append " " why))))
+    ((Ok px)
+      (let out (bytes_from_list (mkicon_ppm px))
+        (let w (file_write_bytes (IoFile 1) out 0 (bytes_len out))
+          (match (file_flush (IoFile 1))
+            ((NotDone fault why) (mkicon_complain why))
+            ((Done) 0)))))))

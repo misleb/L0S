@@ -13,7 +13,9 @@
 # to the case's etc as /etc/font.txt, for vt. If NAME/disk exists, the
 # board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
 # case. Every boot is killed after a minute. Run from
-# the top of the project, after make images. The board has a virtio-gpu,
+# the top of the project, after make root, which stages every program in
+# build/root as /bin, /sbin and /Applications; this script's raw programs
+# go in /bin beside them. The board has a virtio-gpu,
 # shown nowhere, and a virtio keyboard, either way.
 set -u
 cd "$(dirname "$0")/.."
@@ -33,7 +35,7 @@ image "$BUILD/raw/badbuf.img"   D2800020 D2800201 D28000A2 D2800048 $SVC D280006
 image "$BUILD/raw/deadlock.img" D2802048 $SVC D2802088 D2800102 $SVC 14000000
                                 # port_new; receive(x0, 0, 8); b .
 
-programs=("$BUILD"/bin/*.img "$BUILD"/raw/*.img)
+raws=("$BUILD"/raw/*.img)
 
 pass=0; fail=0
 for dir in tests/e2e/*/; do
@@ -47,7 +49,7 @@ for dir in tests/e2e/*/; do
     etc="$BUILD/e2e/$name.etc"
     rm -rf "$etc" && cp -R "$dir/etc" "$etc" && cp fonts/l0s-8x16.txt "$etc/font.txt"
   fi
-  if ! tools/mkinitramfs "$cpio" "$etc" "${programs[@]}"; then
+  if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${raws[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; fail=$((fail+1)); continue
   fi
   disk=""; qemu_args=$L0_QEMU_ARGS

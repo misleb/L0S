@@ -91,7 +91,15 @@ case's `etc`, and compares. A case is a directory:
 - A case with `typed` should start `uart noecho`, so the output doesn't
   depend on how the echo interleaves.
 - On failure the case's output, stderr and diff are in `build/e2e/CASE.*`.
-- There is no filter: `tests/e2e.sh` runs every case (after `make images`).
+- There is no filter: `tests/e2e.sh` runs every case (after `make root`,
+  which stages every program in `build/root` as `/bin`, `/sbin` and
+  `/Applications`; the script's raw programs go in `/bin`).
+- An inittab names a program where it is: `/bin/sh`, `/sbin/uart`,
+  `/Applications/Terminal.app/vt`. A case that starts `vt` without `wm`
+  and needs a quiet ending gives it a `font`, so it waits for a
+  compositor rather than failing at once (`apps`).
+- An app's manifest is read on the host by `app_test.l0`'s
+  `test_app_sources`, from its source directory.
 - Every boot is killed after 60 s by `tools/deadline`, which exits 124.
 
 ## Screen tests (`tests/*.sh`)
@@ -99,12 +107,20 @@ case's `etc`, and compares. A case is a directory:
 These boot with QEMU's monitor and QMP on Unix sockets and check pixels of a
 `screendump`. Each can be run alone from the top of the project once its
 image exists: `make initramfs` for `vt.sh` (the demo), and
-`make screen-initramfs` for `gpu-screen.sh`, `keyboard.sh`, `widgets.sh` and
-`procmon.sh` (the demo without the terminals, `tests/screen/etc`), and
-`make disks-initramfs` for `disks.sh` and `partitions.sh` (that with
-the clock and the disk's driver and file server, `tests/disks/etc`, on a
-disk each makes itself, from `tools/mkdisk` or `build/mkfs`, and passes
-as `QEMU_DISK`). `partitions.sh` checks only the serial line, and reads
+`make screen-initramfs` for `gpu-screen.sh`, `keyboard.sh`, `widgets.sh`,
+`procmon.sh` and `launcher.sh` (the demo without the terminals,
+`tests/screen/etc`; `launcher.sh` clicks Applications, checks the
+launcher's page and Terminal's icon, closes it by Esc and by a click,
+and starts Terminal from it, the top bar then naming it), and
+`make disks-initramfs` for `disks.sh`, `disks-create.sh` and
+`partitions.sh` (that with the clock and the disk's driver and file
+server, `tests/disks/etc`, on a disk each makes itself, from
+`tools/mkdisk` or `build/mkfs`, and passes as `QEMU_DISK`).
+`disks-create.sh` types into Disks's entries with the monitor's
+`sendkey`, one key a call (`keys m a d e`, `keys ret`), and checks an
+entry's focus by its ring and a dialog's input by its button, faded or
+not; a check point on a button must miss its label's white ink.
+`partitions.sh` checks only the serial line, and reads
 a UUID the board makes from it to type it back, since an e2e case's
 `typed` input cannot hold what is made as it runs.
 

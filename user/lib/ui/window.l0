@@ -117,12 +117,6 @@
         ((Some front) (UiFocus front))
         ((None) (UiOther from payload)))))
 
-; Linux's codes for the keys that move and use the focus.
-(def ui_key_tab () int 15)
-(def ui_key_enter () int 28)
-(def ui_key_space () int 57)
-(def ui_key_esc () int 1)
-
 ; The window after an event, and the action it set off, or "".
 (data UiRouted (UiRouted UiWin (list int)))
 
@@ -165,18 +159,41 @@
 (def ui_press_routed ((w UiWin) (st UiState) (x int) (y int) (b int)) UiRouted
   (let ns (ui_win_nodes w)
     (let t (ui_hit ns x y)
-      (let w2 (ui_win_with w (ui_st_focusing (ui_st_pressing (ui_st_hovering st t) t) "") b)
-        (match (ui_scroll_of t)
-          ((UiScrollBar name f m sp sl)
-            (match (ui_scrollbar_named ns name)
-              ((None) (UiRouted w2 ""))
-              ((Some n)
-                (let top (ui_slider_top (ui_ry (ui_node_rect n)) f m sp)
-                  (if (if (ge y top) (lt y (add top sl)) false)
-                      (UiRouted (ui_win_grabbing w2 (sub y top)) "")
-                      (UiRouted (ui_win_grabbing w2 (div sl 2)) (ui_slid_to ns name (sub y (div sl 2)))))))))
-          ((UiScrollArea name f m s) (UiRouted w2 ""))
-          ((UiNoScroll) (UiRouted w2 "")))))))
+      (if (is_empty (ui_entry_name_of t))
+          (ui_press_target w st ns t y b)
+          (ui_press_entry w st ns t x b)))))
+
+; A press on an entry: the focus on it, nothing left pressed, and its
+; cursor placed under the pointer, as GtkEntry does.
+(def ui_press_entry ((w UiWin) (st UiState) (ns (list UiNode)) (t (list int)) (x int) (b int)) UiRouted
+  (UiRouted (ui_win_with w (ui_st_focusing (ui_st_pressing (ui_st_hovering st t) "") t) b)
+            (match (ui_node_with ns t)
+              ((None) "")
+              ((Some n) (ui_entry_place_action (ui_entry_name_of t) (ui_entry_char_at (ui_node_rect n) x))))))
+
+; The last node whose action is a, if one is.
+(def ui_node_with ((ns (list UiNode)) (a (list int))) (Option UiNode)
+  (ui_node_with_onto ns a ((None UiNode))))
+
+(def ui_node_with_onto ((ns (list UiNode)) (a (list int)) (found (Option UiNode))) (Option UiNode)
+  (if (is_empty ns)
+      found
+      (ui_node_with_onto (tail ns) a (if (eq (ui_node_action (head ns)) a) (Some (head ns)) found))))
+
+; A press on anything else: shown pressed, and on a scrollbar, scrolled.
+(def ui_press_target ((w UiWin) (st UiState) (ns (list UiNode)) (t (list int)) (y int) (b int)) UiRouted
+  (let w2 (ui_win_with w (ui_st_focusing (ui_st_pressing (ui_st_hovering st t) t) "") b)
+    (match (ui_scroll_of t)
+      ((UiScrollBar name f m sp sl)
+        (match (ui_scrollbar_named ns name)
+          ((None) (UiRouted w2 ""))
+          ((Some n)
+            (let top (ui_slider_top (ui_ry (ui_node_rect n)) f m sp)
+              (if (if (ge y top) (lt y (add top sl)) false)
+                  (UiRouted (ui_win_grabbing w2 (sub y top)) "")
+                  (UiRouted (ui_win_grabbing w2 (div sl 2)) (ui_slid_to ns name (sub y (div sl 2)))))))))
+      ((UiScrollArea name f m s) (UiRouted w2 ""))
+      ((UiNoScroll) (UiRouted w2 "")))))
 
 ; The action that scrolls the scroller called name so that its slider's
 ; top is at top, as near as a whole row goes; "" if it is there already.
@@ -213,9 +230,37 @@
                 (UiRouted (ui_win_with w (ui_st_focusing st (ui_focus_next (ui_win_nodes w) (ui_st_focus st))) (ui_win_held w)) "")
                 (if (eq code (ui_key_esc))
                     (UiRouted (ui_win_with w (ui_st_focusing st "") (ui_win_held w)) "")
-                    (if (if (any_eq code (cons (ui_key_enter) (cons (ui_key_space) (nil int)))) (not (is_empty (ui_st_focus st))) false)
-                        (UiRouted w (ui_st_focus st))
-                        (UiRouted w "")))))))))
+                    (let entry (ui_focused_entry w)
+                      (if (not (is_empty entry))
+                          (UiRouted w (if (eq code (ui_key_enter)) (ui_entry_activate_action entry) (ui_entry_edit_action entry)))
+                          (if (if (any_eq code (cons (ui_key_enter) (cons (ui_key_space) (nil int)))) (not (is_empty (ui_st_focus st))) false)
+                              (UiRouted w (ui_st_focus st))
+                              (UiRouted w "")))))))))))
+
+; The name of the entry the focus is on, if it is one and is laid out:
+; it takes every key but Tab and Esc. Else "".
+(def ui_focused_entry ((w UiWin)) (list int)
+  (let f (ui_st_focus (ui_win_state w))
+    (let name (ui_entry_name_of f)
+      (if (is_empty name)
+          ""
+          (match (ui_node_with (ui_win_nodes w) f) ((None) "") ((Some n) name))))))
+
+; The focus put on action, as a program does when a dialog with an entry
+; opens, so that typing goes to it at once.
+(def ui_win_focusing ((w UiWin) (action (list int))) UiWin
+  (ui_win_with w (ui_st_focusing (ui_win_state w) action) (ui_win_held w)))
+
+; An entry's text after action, set off with ev: edited by a key, or its
+; cursor placed by a press; as it was for any other action.
+(def ui_entry_update ((name (list int)) (t UiEntryText) (action (list int)) (ev UiEvent)) UiEntryText
+  (if (eq action (ui_entry_edit_action name))
+      (match ev
+        ((UiKey k) (ui_entry_keyed t k))
+        ((UiPress x y b) t) ((UiRelease x y b) t) ((UiMotion x y b) t) ((UiLeave) t)
+        ((UiFocus f) t) ((UiScroll x y dx dy) t) ((UiExit p s) t) ((UiOther f p) t))
+      (let p (append name ".place.")
+        (if (starts_with action p) (ui_entry_placed t (int_prefix (drop_n action (length p)) 0)) t))))
 
 (def ui_win_held ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g) b)))
 

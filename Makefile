@@ -4,8 +4,10 @@
 #   make test-virt   the kernel's tests on QEMU's virt board
 #   make e2e         every case of tests/e2e booted under the kernel
 #   make all         all three, after type checking
-#   make initramfs   build/initramfs.cpio: every program, demo/etc, and
-#                    the splash screen as /etc/splash.ppm
+#   make initramfs   build/initramfs.cpio: every program, in /bin, /sbin
+#                    and /Applications as make root stages them in
+#                    build/root, demo/etc, and the splash screen as
+#                    /etc/splash.ppm
 #   make demo        boot it to the shell, on this terminal: type help;
 #                    the splash shows in QEMU's window, and build/disk.img
 #                    is the disk, made once, so what is written to it stays
@@ -51,6 +53,7 @@ CLOCK   := user/lib/clock.l0
 DISKLIB := user/lib/disk.l0
 L0FS    := user/lib/l0fs.l0
 FSLIB   := user/lib/fs.l0
+APPLIB  := user/lib/app.l0
 
 # The partition table, GPT, and the UUIDs and CRC-32 it needs.
 UUIDLIB := user/lib/uuid.l0
@@ -62,13 +65,13 @@ PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB)
 # commands, which need only render.l0; and its client windows, which need
 # the compositor's protocol too.
 UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
-             user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/draw_cmd.l0
+             user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0
 UI_WINDOW := user/lib/ui/window.l0
-UI_TESTS  := theme icons paint widget grid panes draw_cmd
+UI_TESTS  := theme icons paint widget grid panes entry draw_cmd
 
 LIBS_virtio-gpu := $(RENDER)
 LIBS_rtc        := $(CLOCK)
-LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
+LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB) user/wm/launcher.l0
 LIBS_vt         := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_draw       := $(RENDER) $(UI_CORE)
 LIBS_windows    := $(WMLIB)
@@ -76,7 +79,7 @@ LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_fs         := $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(CLOCK)
-LIBS_sh         := $(UUIDLIB) $(FSLIB) user/sh/files.l0
+LIBS_sh         := $(UUIDLIB) $(FSLIB) $(APPLIB) user/sh/files.l0
 LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB)
 
 PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio-input keys vt wm windows widgets procmon \
@@ -84,14 +87,27 @@ PROGRAMS := sh uart init hello echo ping spin nap rtc cat virtio-gpu draw virtio
 MKSPLASH := tools/mksplash/mksplash.l0
 L0SDOC   := tools/l0sdoc/l0sdoc.l0
 MKFS     := common/abi.l0 $(PARTS) $(L0FS) tools/mkfs/mkfs.l0
+MKICON   := $(ULIB) $(RENDER) $(UI_CORE) tools/mkicon/mkicon.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
+
+# Where each program is in the initramfs. Drivers and services are in
+# /sbin; an app is in a bundle, /Applications/NAME.app, whose source is
+# the directory user/PROGRAM/NAME.app, holding its manifest and its
+# icon.draw, which tools/mkicon draws as its icon.ppm; and the rest, the
+# commands, are in /bin. BUNDLE_PROGRAM is the bundle's name.
+SBIN     := uart rtc virtio-gpu virtio-input virtio-blk fs wm echo
+APPS     := $(foreach d,$(wildcard user/*/*.app),$(word 2,$(subst /, ,$(d))))
+BIN      := $(filter-out $(SBIN) $(APPS),$(PROGRAMS))
+$(foreach p,$(APPS),$(eval BUNDLE_$(p) := $(notdir $(wildcard user/$(p)/*.app))))
+ICONS    := $(APPS:%=$(BUILD)/icons/%.ppm)
+ROOT     := $(BUILD)/root
 
 # Every library, which make doc reads the documentation of.
 DOC_SRCS := common/abi.l0 common/initramfs.l0 common/queue.l0 $(filter-out $(COMMON) common/queue.l0,$(KERNEL)) \
             user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0 \
-            $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(UI_CORE) $(UI_WINDOW)
+            $(RENDER) $(DISPLAY) $(WMLIB) $(CLOCK) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(APPLIB) $(UI_CORE) $(UI_WINDOW)
 
-.PHONY: all check test test-virt e2e images initramfs screen-initramfs disks-initramfs boot demo clean sample doc mcp
+.PHONY: all check test test-virt e2e images root initramfs screen-initramfs disks-initramfs boot demo clean sample doc mcp
 
 all: check test test-virt e2e
 
@@ -101,6 +117,7 @@ check:
 	$(L0) check $(MKSPLASH) tools/mksplash/main.l0
 	$(L0) check $(L0SDOC) tools/l0sdoc/main.l0
 	$(L0) check $(MKFS) tools/mkfs/main.l0
+	$(L0) check $(MKICON) tools/mkicon/main.l0
 
 # An archive bsdtar makes, of bin/x, "hi", mode 0755: what the host tests
 # of initramfs.l0 and of cat read.
@@ -132,19 +149,22 @@ test: sample
 	$(L0) test $(CRC32) user/lib/crc32_test.l0
 	$(L0) test common/abi.l0 $(PARTS) user/lib/gpt_test.l0
 	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/fs_test.l0
+	$(L0) test $(ULIB) $(APPLIB) user/lib/app_test.l0
 	$(L0) test $(ULIB) $(LIBS_sh) user/sh/sh.l0 user/sh/files_test.l0
+	$(L0) test $(ULIB) $(RENDER) $(UI_CORE) $(APPLIB) user/wm/launcher.l0 user/wm/launcher_test.l0
 	$(foreach t,$(UI_TESTS),$(L0) test $(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0 && ) true
 	$(L0) test $(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0
 	$(foreach p,$(PROGRAMS),$(L0) test $(ULIB) $(LIBS_$(p)) user/$(p)/$(p).l0 user/$(p)/$(p)_test.l0 && ) true
 	$(L0) test $(MKSPLASH) tools/mksplash/mksplash_test.l0
 	$(L0) test $(L0SDOC) tools/l0sdoc/l0sdoc_test.l0
 	$(L0) test $(MKFS) tools/mkfs/mkfs_test.l0
+	$(L0) test $(MKICON) tools/mkicon/mkicon_test.l0
 	python3 tools/l0s-mcp/test_board.py
 
 test-virt:
 	$(L0) test --target virt $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
 
-$(BUILD) $(BUILD)/bin:
+$(BUILD) $(BUILD)/bin $(BUILD)/icons:
 	mkdir -p $@
 
 $(BUILD)/kernel.img: $(KERNEL) kernel/main.l0 $(L0_VIRTRT) | $(BUILD)
@@ -168,6 +188,34 @@ $(BUILD)/l0sdoc: $(L0SDOC) tools/l0sdoc/main.l0 | $(BUILD)
 $(BUILD)/mkfs: $(MKFS) tools/mkfs/main.l0 | $(BUILD)
 	$(L0) build $(MKFS) tools/mkfs/main.l0 -o $@
 
+$(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
+	$(L0) build $(MKICON) tools/mkicon/main.l0 -o $@
+
+# Each app's icon, drawn from its bundle's icon.draw. mkicon draws on the
+# theme's colors, so an icon is drawn again when they change.
+define ICON_RULE
+$(BUILD)/icons/$(1).ppm: user/$(1)/$(BUNDLE_$(1))/icon.draw $(BUILD)/mkicon | $(BUILD)/icons
+	$(BUILD)/mkicon $$< > $$@.tmp && mv $$@.tmp $$@
+endef
+$(foreach p,$(APPS),$(eval $(call ICON_RULE,$(p))))
+
+# The initramfs's programs, staged in build/root as the archive holds
+# them: /bin, /sbin, and each app's bundle, its program, manifest and
+# icon. Made anew each time, so that a program that moves leaves nothing
+# where it was.
+define STAGE_APP
+mkdir -p $(ROOT)/Applications/$(BUNDLE_$(1)) && \
+install -m 755 $(BUILD)/bin/$(1).img $(ROOT)/Applications/$(BUNDLE_$(1))/$(1) && \
+install -m 644 user/$(1)/$(BUNDLE_$(1))/manifest $(ROOT)/Applications/$(BUNDLE_$(1))/manifest && \
+install -m 644 $(BUILD)/icons/$(1).ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon.ppm
+endef
+
+root: $(IMAGES) $(ICONS)
+	rm -rf $(ROOT) && mkdir -p $(ROOT)/bin $(ROOT)/sbin $(ROOT)/Applications
+	$(foreach p,$(BIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/bin/$(p) && ) true
+	$(foreach p,$(SBIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/sbin/$(p) && ) true
+	$(foreach p,$(APPS),$(call STAGE_APP,$(p)) && ) true
+
 doc: $(BUILD)/l0sdoc
 	@$(BUILD)/l0sdoc "$(Q)" $(DOC_SRCS)
 
@@ -184,26 +232,26 @@ mcp: $(MCP_VENV)/.installed
 # archive's /etc.
 FONT := fonts/l0s-8x16.txt
 
-initramfs: images $(SPLASH) $(FONT)
+initramfs: images root $(SPLASH) $(FONT)
 	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc && cp $(SPLASH) $(BUILD)/etc/splash.ppm
 	cp $(FONT) $(BUILD)/etc/font.txt
-	tools/mkinitramfs $(BUILD)/initramfs.cpio $(BUILD)/etc $(IMAGES)
+	tools/mkinitramfs $(BUILD)/initramfs.cpio $(BUILD)/etc $(ROOT)
 
 # What the screen and keyboard tests boot: tests/screen/etc, with the
 # splash and font as the demo has them, but no vt.
-screen-initramfs: images $(SPLASH) $(FONT)
+screen-initramfs: images root $(SPLASH) $(FONT)
 	rm -rf $(BUILD)/screen-etc && cp -R tests/screen/etc $(BUILD)/screen-etc
 	cp $(SPLASH) $(BUILD)/screen-etc/splash.ppm && cp $(FONT) $(BUILD)/screen-etc/font.txt
-	tools/mkinitramfs $(BUILD)/screen.cpio $(BUILD)/screen-etc $(IMAGES)
+	tools/mkinitramfs $(BUILD)/screen.cpio $(BUILD)/screen-etc $(ROOT)
 
 # What tests/disks.sh boots: tests/disks/etc, the screen tests' with the
 # disk's driver and file server, with the splash and font.
-disks-initramfs: images $(SPLASH) $(FONT)
+disks-initramfs: images root $(SPLASH) $(FONT)
 	rm -rf $(BUILD)/disks-etc && cp -R tests/disks/etc $(BUILD)/disks-etc
 	cp $(SPLASH) $(BUILD)/disks-etc/splash.ppm && cp $(FONT) $(BUILD)/disks-etc/font.txt
-	tools/mkinitramfs $(BUILD)/disks.cpio $(BUILD)/disks-etc $(IMAGES)
+	tools/mkinitramfs $(BUILD)/disks.cpio $(BUILD)/disks-etc $(ROOT)
 
-e2e: images initramfs screen-initramfs disks-initramfs
+e2e: images root initramfs screen-initramfs disks-initramfs
 	tests/e2e.sh
 	tests/gpu-screen.sh
 	tests/keyboard.sh
@@ -211,10 +259,12 @@ e2e: images initramfs screen-initramfs disks-initramfs
 	tests/widgets.sh
 	tests/procmon.sh
 	tests/disks.sh
+	tests/disks-create.sh
 	tests/partitions.sh
+	tests/launcher.sh
 
-boot: images $(DISK)
-	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(IMAGES)
+boot: images root $(DISK)
+	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(ROOT)
 	L0_QEMU_ARGS="$(DEVICES) $(DISK_DEVICE)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
 
 # The disk: made once, and never again while it is there, so that what is

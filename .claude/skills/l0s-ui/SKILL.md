@@ -64,7 +64,8 @@ display. This is the working summary, with the rules.
 - **`widget.l0`**: a `UiWidget` tree (`UiLabel`, `UiButton`, `UiBox`,
   `UiExpand`, `UiPad`, `UiSeparator`, `UiHeaderBar`, `UiView`, `UiLevel`,
   `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`, and `panes.l0`'s
-  `UiSidebar`, `UiSegmentBar`, `UiProps`, `UiModal`). `ui_layout widget rect
+  `UiSidebar`, `UiSegmentBar`, `UiProps`, `UiModal`, and `entry.l0`'s
+  `UiEntry`). `ui_layout widget rect
   state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them;
   `ui_hit nodes x y` gives the action under a point.
 - **`grid.l0`**: the data grid, typed cells, sorting, selection, keys,
@@ -77,9 +78,20 @@ display. This is the working summary, with the rules.
   nothing in is chosen; Left and Right with `ui_segbar_key`), `UiProps`
   (a dimmed name, then any widget), and
   `UiModal` with `ui_alert` (a card over the window, everything beneath
-  mixed with black by `ui_scrim` and no longer a target). Rows and parts
-  carry `PREFIX.select.KEY`; `ui_select_key` reads it back. `user/disks`
-  uses them all.
+  mixed with black by `ui_scrim` and no longer a target; `ui_alert_form`
+  puts widgets, such as properties with entries, between its lines and
+  its buttons). Rows and parts carry `PREFIX.select.KEY`; `ui_select_key`
+  reads it back. `user/disks` uses them all.
+- **Entries** (`entry.l0`): `UiEntry NAME TEXT PLACEHOLDER WIDTH`, the
+  text and cursor a `UiEntryText` in the program's state. Its node's
+  action is `NAME.entry`; a press focuses it and sets off `NAME.place.N`;
+  with the focus on it (and it laid out), `ui_route` sends every key but
+  Tab and Esc to it, Enter as `NAME.activate` and the rest as
+  `NAME.edit`, so Space types. The update passes the action and event to
+  `ui_entry_update NAME text action ev`. A dialog focuses its entry as it
+  opens with `ui_win_focusing w "NAME.entry"` before presenting. A
+  focused entry shows its ring whenever it has the focus, not only after
+  Tab. No scrolling or selection: make it as wide as it must hold.
 - **Scrollers** (`widget.l0`): a widget that scrolls keeps how it is
   scrolled in its nodes' actions, `NAME.scroll.FIRST.MOST.SHOWN` for its
   area and `NAME.scrollbar.FIRST.MOST.SPAN.SLIDER` for its scrollbar's
@@ -118,13 +130,14 @@ It owns the screen through the display protocol and keeps windows for its
 clients. It never copies a window's pixels: each is a shared buffer, and the
 driver composes them.
 
-- **Buffers**: desktop 0, pointer 1, top bar 2, and window `i`'s content
-  `3 + 3i`, title bar `4 + 3i`, frame `5 + 3i` (`content_id`, `title_id`,
-  `frame_id`).
-- **Layers**, bottom first (`layers`): the desktop; each window from the back,
+- **Buffers**: desktop 0, pointer 1, top bar 2, launcher 3, and window
+  `i`'s content `4 + 3i`, title bar `5 + 3i`, frame `6 + 3i`
+  (`launcher_id`, `content_id`, `title_id`, `frame_id`).
+- **Layers**, bottom first (`layers ws shown`): the desktop; each window from the back,
   its title bar at `x, y`, its frame at `x, y + 46`, its content at
-  `x + edge, y + 46`; then the top bar over everything. The pointer is the
-  driver's cursor, not a layer.
+  `x + edge, y + 46`; then the top bar over everything. While the launcher
+  is shown: the desktop, the launcher at `0, 32`, the bar, and no
+  window. The pointer is the driver's cursor, not a layer.
 - **Window geometry**: `Win` keeps the content's size `cw` by `ch`, as the
   client asked and as `windows` reports it. The window is `outer_w cw` = `cw +
   2·edge` wide; its frame is `frame_h ch` = `ch + edge` high under the 46-row
@@ -143,11 +156,29 @@ driver composes them.
   `ui_st_backdropped` for the back windows) repainted by `titles` whenever
   the front window changes; `titles` also repaints the frames and the top
   bar.
-- **The top bar** (`bar_ops`, `draw_bar`): 32 rows, black, the front
-  window's title at its start and `clock_text` of the time, bold, in its
-  middle. `rtc clock` tells `wm` the time each minute (`user/lib/clock.l0`).
-  Windows open below it (`cascade` starts at 40), and a drag keeps their top
-  at `below_bar`.
+- **The top bar** (`bar_ops`, `draw_bar`): 32 rows, black. At its start
+  Applications, `bar_apps_w` (120) wide, on a pill (`ui_bar_active_bg`)
+  while the launcher is open; then, from 120, the front window's app's
+  name (`Win`'s last field, from `client_app`: `proc_info`'s entry, its
+  path, the manifest of the bundle it is in, `app.l0`), or its title if
+  it is no app's (`bar_title`); and `clock_text` of the time, bold, in
+  its middle. `rtc clock` tells `wm` the time each minute
+  (`user/lib/clock.l0`). `Bar` also keeps the apps, read once at start
+  (`app_bundles`), and the `Launcher`. Windows open below it (`cascade`
+  starts at 40), and a drag keeps their top at `below_bar`.
+- **The launcher** (`user/wm/launcher.l0`, and wm's section "the
+  launcher"): GNOME Shell's app grid, a page `w` by `h − 32` under the
+  bar, `ui_launcher_bg`, painted once in `with_launcher`. Cells
+  `ui_app_cell_w` by `ui_app_cell_h` (136×104), in rows from 64, in the
+  middle (`launcher_cell`); the 48×48 icon 44 in and 12 down, the name
+  under it. Icons are PPMs blitted as they are: no alpha, so
+  `tools/mkicon` draws them on the launcher's ground. A press is noted as
+  a target (`launcher_target`: Applications −2, the bar −3, the page −4,
+  an app its index), and the release acts (`launcher_act`): an app
+  starts (`started`, watched as a client), Applications toggles, the
+  page closes. While it is shown, or a press on Applications holds the
+  pointer (`launcher_busy`), no window gets the pointer, wheel or keys;
+  Esc closes it.
 - **Input**: keys go to the front window's port. The pointer goes, relative
   to the content, to the window whose content it is in, or to the one a press
   in its content grabbed until every button is up, with a leave notice when
@@ -185,4 +216,5 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   copying (`vt` does).
 - **The cursor** is the device's own, 64×64, moved without touching the
   screen.
-- **The 64-region limit** (`l0s-dev`): `wm` opens two regions a window.
+- **The 64-region limit** (`l0s-dev`): `wm` opens two regions a window,
+  and keeps four of its own: desktop, pointer, top bar, launcher.

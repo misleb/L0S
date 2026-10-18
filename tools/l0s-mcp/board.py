@@ -278,8 +278,9 @@ class Qmp:
 
 def resolve_image(image):
     """The initramfs to boot for image: demo, screen, a .cpio, or an etc
-    directory holding an inittab, packed with every program in build/bin
-    as tests/e2e.sh packs a case."""
+    directory holding an inittab, packed with every program as make root
+    stages them in build/root, /bin, /sbin and /Applications, as
+    tests/e2e.sh packs a case."""
     if image in IMAGES:
         path, how = IMAGES[image]
         if not path.exists():
@@ -289,9 +290,9 @@ def resolve_image(image):
     if path.is_file():
         return path
     if path.is_dir() and (path / "inittab").is_file():
-        programs = sorted((BUILD / "bin").glob("*.img"))
-        if not programs:
-            raise BoardError("build/bin has no programs; run make images")
+        tree = BUILD / "root"
+        if not (tree / "bin").is_dir():
+            raise BoardError("build/root has no programs; run make root")
         etc = STATE / "etc"
         shutil.rmtree(etc, ignore_errors=True)
         shutil.copytree(path, etc)
@@ -301,8 +302,7 @@ def resolve_image(image):
         if not (etc / "splash.ppm").exists() and splash.exists():
             shutil.copy(splash, etc / "splash.ppm")
         out = STATE / "custom.cpio"
-        made = subprocess.run([str(ROOT / "tools" / "mkinitramfs"), str(out), str(etc)]
-                              + [str(p) for p in programs],
+        made = subprocess.run([str(ROOT / "tools" / "mkinitramfs"), str(out), str(etc), str(tree)],
                               cwd=ROOT, capture_output=True, text=True)
         if made.returncode != 0:
             raise BoardError(f"mkinitramfs failed: {made.stderr.strip()}")

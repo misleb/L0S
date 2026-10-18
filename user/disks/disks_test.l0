@@ -111,8 +111,17 @@
        (add (check_str "left" (dk_selected (dk_update (demo) "" (key (ui_key_left)))) "free.34")
             (check_str "right" (dk_selected (dk_update (demo) "" (key (ui_key_right)))) "2"))))
 
+(def entry_of ((t UiEntryText)) (list int)
+  (append (ui_entry_text t) (append "|" (digits (ui_entry_cursor t)))))
+
 (def dialog_of ((m Disks)) (list int)
-  (match m ((Disks d sel dlg st) (match dlg ((DkNoDialog) "none") ((DkConfirm l) l)))))
+  (match m
+    ((Disks d sel dlg st)
+      (match dlg
+        ((DkNoDialog) "none")
+        ((DkConfirm l) l)
+        ((DkCreate start count t) (append "create " (append (digits start) (append "+" (append (digits count) (append " " (entry_of t)))))))
+        ((DkMkfs n u had t) (append "mkfs " (append (digits n) (append " " (append had (append " " (entry_of t)))))))))))
 
 (def test_format_dialog () int
   (let m (dk_update (demo) "app.format" (none))
@@ -183,6 +192,12 @@
 (def test_view_format_insensitive () int
   (check_bool "not for free space" (has_target (laid (dk_update (demo) "vols.select.free.34" (none))) "app.format") false))
 
+; One button under the bar, for what the selected part can have done.
+(def test_view_act_button () int
+  (add (check_bool "free space, create" (has_target (laid (dk_update (demo) "vols.select.free.34" (none))) "app.create") true)
+       (add (check_bool "scratch, not served, format" (has_target (laid (dk_update (demo) "vols.select.2" (none))) "app.mkfs") true)
+            (check_bool "data, mounted, no other" (has_target (laid (demo)) "app.mkfs") false))))
+
 (def test_view_dialog () int
   (let ns (laid (dk_update (demo) "app.format" (none)))
     (add (check_bool "the dialog's button" (has_target ns "dialog.format") true)
@@ -191,6 +206,140 @@
 
 (def test_view_no_disk () int
   (check_bool "a status page" (has_text (texts (laid (dk_new (DkNoDrive "no disk; is virtio-blk running?")))) "No Disks|") true))
+
+; ------------------------------------------------- partitions and volumes
+
+; A disk as tests/disks-create.sh makes it: data at 40 for 1000, then 496
+; sectors free from 1040, then scratch at 1536 for 479.
+(def gapped () Disks
+  (dk_new (DkDrive 2048 true (dk_segments 2048 (cons (gp 1 40 1000 "data") (cons (gp 2 1536 479 "scratch") (nil GptPart)))
+                                          (demo_contents)))))
+
+(def creating () Disks (dk_update (dk_update (gapped) "vols.select.free.1040" (none)) "app.create" (none)))
+
+(def keych ((code int) (ch int)) UiEvent (UiKey (KeyEvent code 1 ch)))
+
+; 496 sectors are 253,952 bytes, 254.0 kB to the tenth.
+(def test_create_dialog () int
+  (add (check_str "all the free space" (dialog_of (creating)) "create 1040+496 254.0|5")
+       (check_str "its entry focused as it opens" (dk_dialog_entry (dk_dialog (creating))) "size.entry")))
+
+(def test_create_not_on_a_volume () int
+  (check_str "no dialog" (dialog_of (dk_update (gapped) "app.create" (none))) "none"))
+
+(def test_create_typing () int
+  (let m (dk_update (creating) "size.edit" (keych (ui_key_backspace) 8))
+    (add (check_str "backspace" (dialog_of m) "create 1040+496 254.|4")
+         (add (check_str "Home" (dialog_of (dk_update m "size.edit" (keych (ui_key_home) 0))) "create 1040+496 254.|0")
+              (check_str "placed" (dialog_of (dk_update m "size.place.1" (UiPress 0 0 1))) "create 1040+496 254.|1")))))
+
+; Keys in the dialog's entry move nothing along the bar, and Esc closes
+; it.
+(def test_create_keys () int
+  (add (check_str "Left" (dk_selected (dk_update (creating) "size.edit" (keych (ui_key_left) 0))) "free.1040")
+       (check_str "Esc" (dialog_of (dk_update (creating) "" (key (ui_key_esc)))) "none")))
+
+; A size in kB, to the nearest sector of 512 bytes: 254.0 is 254,000
+; bytes, 496.1 sectors, all of them; 127 is 248.0; 254.3 is 496.7, 497,
+; one too many; 1.5 is 2.9, 3; 12.345 is 24.1, 24.
+(def test_size_sectors () int
+  (add (check_int "all" (dk_size_sectors "254.0" 496) 496)
+       (add (check_int "half" (dk_size_sectors "127" 496) 248)
+            (add (check_int "too big" (dk_size_sectors "254.3" 496) 0)
+                 (add (check_int "a tenth" (dk_size_sectors "1.5" 496) 3)
+                      (check_int "a thousandth" (dk_size_sectors "12.345" 496) 24))))))
+
+(def test_size_not_sizes () int
+  (add (check_int "none" (dk_size_sectors "0" 496) 0)
+       (add (check_int "empty" (dk_size_sectors "" 496) 0)
+            (add (check_int "words" (dk_size_sectors "12kB" 496) 0)
+                 (add (check_int "four decimals" (dk_size_sectors "1.2345" 496) 0)
+                      (add (check_int "a dot alone" (dk_size_sectors "1." 496) 0)
+                           (check_int "no whole" (dk_size_sectors ".5" 496) 0)))))))
+
+; 6 sectors are 3,072 bytes, 3.1 kB; the text always comes back to them.
+(def test_kb_text () int
+  (add (check_str "the gap before data" (dk_kb_text 6) "3.1")
+       (add (check_int "back to 6" (dk_size_sectors (dk_kb_text 6) 6) 6)
+            (check_int "back to 479" (dk_size_sectors (dk_kb_text 479) 479) 479))))
+
+(def with_size ((s (list int))) Disks
+  (match (creating) ((Disks d sel dlg st) (Disks d sel (DkCreate 1040 496 (ui_entry_new s)) st))))
+
+; Half, 248 sectors, leaves 248, 126,976 bytes.
+(def test_view_create () int
+  (let t (texts (laid (with_size "127")))
+    (add (check_bool "the free space" (has_text t "Free space: 254.0 kB|") true)
+         (add (check_bool "the size typed" (has_text t "Size|127|kB|") true)
+              (check_bool "what is left" (has_text t "Free Space Following|127.0 kB|") true)))))
+
+(def test_view_create_insensitive () int
+  (add (check_bool "a size that fits" (has_target (laid (with_size "127")) "dialog.create") true)
+       (add (check_bool "one too big" (has_target (laid (with_size "300")) "dialog.create") false)
+            (check_bool "the entry" (has_target (laid (with_size "300")) "size.entry") true))))
+
+; scratch, partition 2, holds a volume fs does not serve.
+(def mkfs_of ((m Disks)) Disks (dk_update (dk_update m "vols.select.2" (none)) "app.mkfs" (none)))
+
+(def test_mkfs_dialog () int
+  (add (check_str "the label it had" (dialog_of (mkfs_of (demo))) "mkfs 2 scratch scratch|7")
+       (check_str "its entry focused as it opens" (dk_dialog_entry (dk_dialog (mkfs_of (demo)))) "label.entry")))
+
+(def with_label ((had (list int)) (s (list int))) Disks
+  (match (mkfs_of (demo)) ((Disks d sel dlg st) (Disks d sel (DkMkfs 2 (gpt_part_uuid (gp 2 1536 479 "scratch")) had (ui_entry_new s)) st))))
+
+(def test_mkfs_typing () int
+  (add (check_str "typed" (dialog_of (dk_update (with_label "" "mad") "label.edit" (keych 18 101))) "mkfs 2  made|4")
+       (check_str "not past 15" (dialog_of (dk_update (with_label "" "abcdefghijklmno") "label.edit" (keych 45 120)))
+                  "mkfs 2  abcdefghijklmno|15")))
+
+(def test_view_mkfs () int
+  (let t (texts (laid (with_label "scratch" "made")))
+    (add (check_bool "the partition" (has_text t "Format Partition 2|") true)
+         (add (check_bool "what is lost" (has_text t "Every file on scratch will be lost.|") true)
+              (check_bool "where it goes" (has_text t "Mounted At|/Volumes/made|") true)))))
+
+; The card as wide whatever is typed: "Volume Name", 88, 12, then
+; "/Volumes/" and 15 letters, 192; 24 either side: 340.
+(def test_view_mkfs_width () int
+  (add (check_int "empty" (ui_sw (ui_measure (dk_mkfs_alert 3 "" (ui_entry_new "")))) 340)
+       (check_int "the longest" (ui_sw (ui_measure (dk_mkfs_alert 3 "" (ui_entry_new "abcdefghijklmno")))) 340)))
+
+(def test_view_mkfs_insensitive () int
+  (add (check_bool "a label" (has_target (laid (with_label "" "made")) "dialog.mkfs") true)
+       (add (check_bool "none" (has_target (laid (with_label "" "")) "dialog.mkfs") false)
+            (check_bool "not a label" (has_target (laid (with_label "" "a b")) "dialog.mkfs") false))))
+
+(def test_with_uuid () int
+  (add (check_str "scratch's" (dk_selected (dk_with_uuid (gapped) (gpt_part_uuid (gp 2 1536 479 "scratch")))) "2")
+       (check_str "none has it: kept" (dk_selected (dk_with_uuid (gapped) (gpt_part_uuid (gp 7 0 1 "x")))) "1")))
+
+; A new partition, with nothing on it yet, is to be formatted.
+(def test_new_partition_formats () int
+  (let m (dk_new (DkDrive 2048 true (dk_segments 2048 (cons (gp 1 40 1000 "data") (nil GptPart)) (cons (DkUnknown "no volume") (nil DkContent)))))
+    (check_str "no label to keep" (dialog_of (dk_update m "app.mkfs" (none))) "mkfs 1  |0")))
+
+(def test_created_text () int
+  (add (check_str "made" (dk_created_text (FsPartitioned (gpt_part_uuid (gp 3 1040 496 ""))) 496) "Created a partition of 254.0 kB")
+       (add (check_str "in its words" (dk_created_text (FsPartitionRefused -6 "no room for it") 496) "Could not create the partition: no room for it")
+            (check_str "by its code" (dk_created_text (FsPartitionRefused -4 "") 496) "Could not create the partition: a file on it is open"))))
+
+(def test_made_text () int
+  (add (check_str "made" (dk_made_text (FsMade "made")) "New volume made, mounted at /Volumes/made")
+       (check_str "refused" (dk_made_text (FsMkfsRefused -4 "that label is served already")) "Could not format the partition: that label is served already")))
+
+; With no file server, as under l0 test, each is refused and says so,
+; and the dialog closes; one that does not fit is not asked at all.
+(def test_created_no_server () int
+  (let m (dk_created (DkNoIo "no disk") (creating))
+    (add (check_str "closed" (dialog_of m) "none")
+         (add (check_str "refused" (match m ((Disks d sel dlg st) st)) "Could not create the partition: no file server")
+              (check_str "too big, not asked" (dialog_of (dk_created (DkNoIo "no disk") (with_size "300"))) "create 1040+496 300|3")))))
+
+(def test_made_no_server () int
+  (let m (dk_made (DkNoIo "no disk") (with_label "" "made"))
+    (add (check_str "closed" (dialog_of m) "none")
+         (check_bool "refused" (starts_with (match m ((Disks d sel dlg st) st)) "Could not format the partition: ") true))))
 
 ; Under an operating system there is no compositor.
 (def test_no_compositor () int

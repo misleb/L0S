@@ -32,9 +32,12 @@ the `;` comment block directly above each form, so write yours that way
 | `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `process.l0`, `memory.l0`, `mounts.l0` (the mount table: the initramfs at `/`, volumes at `/Volumes/LABEL`), `ipc.l0`, `sched.l0`, `pids.l0`, `inittab.l0` are its parts. File calls on a volume go to its server as fs-protocol requests (`ask_fs`, the `AwaitingFs` state). `asm.l0` hand-assembles threads for board tests |
 | `common/` | shared by kernel and programs: `abi.l0` (call numbers `call_*`, error codes, limits, little-endian helpers), `initramfs.l0` (the cpio archive), `queue.l0` |
 | `user/lib/` | linked into programs: `l0s.l0` (call wrappers, `request`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `tty.l0`, `virtio.l0` (registers, queues, descriptors, `virtq_wait`) in every program; `render.l0`, `display.l0`, `wm.l0`, `clock.l0`, `disk.l0`, `uuid.l0` (UUIDs, version 7), `crc32.l0`, `gpt.l0` (the partition table, pure; `PARTS` is all three), `l0fs.l0` (a volume's on-disk format, pure), `fs.l0` (the fs protocol) and `ui/` only where a `LIBS_` list says |
-| `user/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`). Becomes `/bin/NAME` |
+| `user/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`). Becomes `/bin/NAME`, a command; `/sbin/NAME`, a driver or service (the Makefile's `SBIN`); or, if it holds a bundle's source `APP.app/` (`manifest`, `icon.draw`), an app, `/Applications/APP.app/NAME` |
+| `user/lib/app.l0` | apps: a bundle's manifest, the bundles there are, the app a program is, and running one by its bundle's name (`sh`, `wm`) |
+| `user/wm/launcher.l0` | the compositor's launcher, GNOME Shell's grid of apps: its layout, painting and clicks |
 | `demo/etc/` | the demo's `inittab`, `motd`; `tests/screen/etc/` the screen tests' |
-| `tools/` | `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, partitioned and formatted by `mkfs/`, an L0 host tool), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
+| `build/root` | `make root`: every program staged as the initramfs holds it, `bin/`, `sbin/`, `Applications/APP.app/`, which `tools/mkinitramfs OUT ETC ROOT [IMAGE...]` archives with an `etc` |
+| `tools/` | `mkicon/` (an L0 tool: an app's `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, partitioned and formatted by `mkfs/`, an L0 host tool), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 
@@ -71,11 +74,23 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
    function (`virtio-gpu` → `virtio_gpu`).
 2. Makefile: add NAME to `PROGRAMS`, and `LIBS_NAME := ...` if it needs more
    than `ULIB`. Its check, test, image and initramfs rules follow from those.
-3. To start it at boot, a `start /bin/NAME [ARGS]` line in `demo/etc/inittab`.
-   A program that maps devices or binds interrupts needs `dev /bin/NAME`.
-   Adding a `start` line shifts later pids: update the README's pid table and
-   `ps` sample, and check `tests/vt.sh`'s pid arithmetic.
-4. Its row in the README's programs table.
+   Where it goes: `/bin` unless it is a driver or service, then add it to
+   `SBIN` too, for `/sbin`.
+3. **An app** (a program with a window the desktop starts) is a bundle
+   too: `user/NAME/APP.app/manifest` (`name`, `exec NAME`, `icon
+   icon.ppm`, `summary`; `app.l0`) and `icon.draw`, `run draw`'s
+   commands for its 48×48 icon on the launcher's ground (a `round 0 0 48
+   48 10 COLOR` and an `icon 8 8 NAME 2 COLOR`; a new glyph goes in
+   `ui/icons.l0`). The Makefile finds the directory: the program goes in
+   `/Applications/APP.app/NAME`, and the launcher shows it. APP is one
+   word; add the bundle to `app_test.l0`'s `test_app_sources`.
+4. To start it at boot, a `start PATH [ARGS]` line in `demo/etc/inittab`,
+   PATH where step 2 put it (`/bin/sh`, `/sbin/wm`,
+   `/Applications/Terminal.app/vt`). A program that maps devices or binds
+   interrupts needs `dev PATH`. Adding a `start` line shifts later pids:
+   update the README's pid table and `ps` sample, and check
+   `tests/vt.sh`'s pid arithmetic.
+5. Its row in the README's programs table, and for an app, the Apps table.
 
 **A library** in `user/lib/`
 1. Its file header `; NAME.l0 -- summary`, a doc block on every def.

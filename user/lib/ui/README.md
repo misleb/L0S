@@ -11,13 +11,14 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | File | What it is | GTK / libadwaita |
 |---|---|---|
 | `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends on nothing. | `@window_bg_color`, `@accent_bg_color`, … |
-| `icons.l0` | 16×16 symbolic icons, kept as `#`/`.` art: window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk. | `*-symbolic` icons |
+| `icons.l0` | 16×16 symbolic icons, kept as `#`/`.` art: window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, and the apps' utilities-terminal, utilities-system-monitor and view-app-grid. | `*-symbolic` icons |
 | `paint.l0` | `UiRect`; the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon); `ui_paint` runs them on a canvas, clipped. Also `ui_buffer` for shm buffers and Adwaita's arrow cursor. | GSK render nodes |
-| `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, and panes.l0's sidebar, segment bar, properties and modal); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
+| `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, and entry.l0's entry); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
 | `grid.l0` | A data grid: columns, typed cells (text, number, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. | `GtkColumnView`, `GtkScrolledWindow` |
-| `panes.l0` | A window of panes: `UiSidebar`, rows of an icon, a title and a line, one selected; `UiSegmentBar`, a whole in parts each as wide as its share by weight (`ui_shares`), each plain or muted (`UiSegPlain`, `UiSegMuted`), at any height: a title over a line at `ui_segbar_h`, the title alone lower, no text as a usage bar; one part selected and moved along by Left and Right (`ui_segbar_key`), or, with prefix `""`, none and no targets; `UiProps`, a dimmed name before each value, which is any widget; `UiModal` and `ui_alert`, an alert dialog on a card over everything beneath, which is dimmed (`ui_scrim`) and no longer a target. Rows and parts carry `PREFIX.select.KEY`, read back by `ui_select_key`. | `AdwNavigationSplitView`'s sidebar, `GtkListBox` `.navigation-sidebar`, GNOME Disks' volume grid and Usage's storage bar, `AdwAlertDialog` |
-| `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round` and `button`. Used by `draw` to check a command and by `wm` to draw it. | — |
-| `window.l0` | A client window: `ui_open`, `ui_event_of`, `ui_route` (hover, press, click on release, Tab focus, Enter/Space, the wheel and scrollbar drags), `ui_present` (repaints only what changed), `ui_win_scroller`. Needs `user/lib/wm.l0`. | `GtkWindow`, event controllers |
+| `panes.l0` | A window of panes: `UiSidebar`, rows of an icon, a title and a line, one selected; `UiSegmentBar`, a whole in parts each as wide as its share by weight (`ui_shares`), each plain or muted (`UiSegPlain`, `UiSegMuted`), at any height: a title over a line at `ui_segbar_h`, the title alone lower, no text as a usage bar; one part selected and moved along by Left and Right (`ui_segbar_key`), or, with prefix `""`, none and no targets; `UiProps`, a dimmed name before each value, which is any widget; `UiModal` and `ui_alert`, an alert dialog on a card over everything beneath, which is dimmed (`ui_scrim`) and no longer a target, and `ui_alert_form`, one with widgets, such as properties holding entries, between its lines and its buttons. Rows and parts carry `PREFIX.select.KEY`, read back by `ui_select_key`. | `AdwNavigationSplitView`'s sidebar, `GtkListBox` `.navigation-sidebar`, GNOME Disks' volume grid and Usage's storage bar, `AdwAlertDialog` and its extra child |
+| `entry.l0` | `UiEntry NAME TEXT PLACEHOLDER WIDTH`, a line of text: `UiEntryText`, its text and cursor, kept by the program; `ui_entry_keyed`, typing at the cursor, Backspace, Delete, Left, Right, Home and End; drawn on the text's color at 10%, with the accent's ring and a cursor while it has the focus, the placeholder dimmed while it is empty. | `GtkEntry` |
+| `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`. Used by `draw` to check a command, by `wm` to draw it, and by `tools/mkicon` to draw an app's icon. | — |
+| `window.l0` | A client window: `ui_open`, `ui_event_of`, `ui_route` (hover, press, click on release, Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus), `ui_present` (repaints only what changed), `ui_win_scroller`, `ui_win_focusing`, `ui_entry_update`. Needs `user/lib/wm.l0`. | `GtkWindow`, event controllers |
 
 The Makefile links either `UI_CORE` (every file but `window.l0`; needs only
 `render.l0`) or `UI_CORE` plus `UI_WINDOW` (`window.l0`; needs
@@ -68,6 +69,26 @@ The layout no longer keeps the selection in view on its own, so the wheel
 can scroll it away, as in GTK. A step of the wheel is three rows
 (`ui_wheel_rows`).
 
+### Entries
+
+An entry's text and cursor are the program's, a `UiEntryText` in its
+state, as everything is in the Elm architecture. The entry's node has the
+action `NAME.entry`. A press on it gives it the focus and sets off
+`NAME.place.N`, the character the pointer is before. While it has the
+focus, and is laid out, every key but Tab and Esc goes to it: Enter sets
+off `NAME.activate`, as GtkEntry's `activate`, and any other `NAME.edit`,
+Space included. The program passes each to `ui_entry_update`, which gives
+the text after an edit or a place, and the text unchanged after any other
+action:
+
+```
+(ui_entry_update "size" text action event)
+```
+
+A dialog that asks for something puts the focus on its entry as it opens,
+with `ui_win_focusing w "size.entry"` before it presents, so typing goes
+there at once. `user/disks` does both.
+
 Every name is `ui_…` and every type or constructor `Ui…`. All files given
 to `l0` are one namespace, and a duplicate is a compile error.
 
@@ -84,7 +105,10 @@ to `l0` are one namespace, and a duplicate is a compile error.
   are in the accent, destructive ones in red. Insensitive buttons are drawn
   at half strength and aren't targets.
 - **Clicks** activate on release over the same target, as GTK's do. The
-  keyboard focus ring (accent at half) appears only after Tab.
+  keyboard focus ring (accent at half) appears only after Tab, except on
+  an entry, which shows it, and its cursor, whenever it has the focus.
+- **Entries** are a button high, 6 px round, on 10% of the text color,
+  their text 9 px in, their cursor a pixel wide.
 - **Empty states** use a status page: a large dim icon, a title, and what to
   do next.
 - **Sidebars** are 220 wide on libadwaita's sidebar ground (`ebebed`), rows
@@ -108,6 +132,8 @@ to `l0` are one namespace, and a duplicate is a compile error.
 - Scrolling is by whole rows: the wheel's steps are counted, not its
   speed, and there is no kinetic scrolling. The wheel across, which the
   driver reports, scrolls nothing yet.
+- An entry does not scroll its text, which is cut short with `...`, and
+  has no selection, copying or pasting.
 
 ## The display layer
 

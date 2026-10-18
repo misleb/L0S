@@ -29,8 +29,19 @@
 ; in order; or why there is none.
 (data DkDrive (DkDrive int bool (list DkSeg)) (DkNoDrive (list int)))
 
-; A dialog over the window: none, or asking whether to format a label.
-(data DkDialog (DkNoDialog) (DkConfirm (list int)))
+; A dialog over the window: none; asking whether to format a mounted
+; volume, by its label; asking how much of the free space from a sector,
+; of so many, a new partition is to have, the size typed so far; or
+; asking what a new volume on partition N, of a UUID, is to be called,
+; the label it had if it held a volume no server serves, and the name
+; typed so far.
+(data DkDialog (DkNoDialog) (DkConfirm (list int)) (DkCreate int int UiEntryText) (DkMkfs int Uuid (list int) UiEntryText))
+
+; What can be done with the selected part: free space made a partition,
+; from its first sector, of its sectors; a mounted volume formatted, by
+; its label; a partition with no volume served given one, by its number,
+; its UUID and the label of any volume it held; or nothing.
+(data DkAct (DkActCreate int int) (DkActFormat (list int)) (DkActMkfs int Uuid (list int)) (DkActNone))
 
 ; The window's state: the drive, the selected part's key, the dialog, and
 ; a line saying what was last done.
@@ -204,15 +215,77 @@
 (def dk_seg_keyed ((segs (list DkSeg)) (key (list int))) (Option DkSeg)
   (if (is_empty segs) ((None DkSeg)) (if (eq (dk_key (head segs)) key) (Some (head segs)) (dk_seg_keyed (tail segs) key))))
 
-; The label of the selected part, if it is a mounted volume, which only
-; can be formatted; else empty.
-(def dk_formattable ((m Disks)) (list int)
+; What can be done with the selected part.
+(def dk_act ((m Disks)) DkAct
   (match (dk_selected_seg m)
-    ((None) "")
+    ((None) (DkActNone))
     ((Some s)
       (match s
-        ((DkFree start count) "")
-        ((DkPart n start count ty c) (match c ((DkVolume label a b e) label) ((DkUnmounted l) "") ((DkUnknown w) "")))))))
+        ((DkFree start count) (DkActCreate start count))
+        ((DkPart n start count p c)
+          (match c
+            ((DkVolume label a b e) (DkActFormat label))
+            ((DkUnmounted label) (DkActMkfs n (gpt_part_uuid p) label))
+            ((DkUnknown why) (DkActMkfs n (gpt_part_uuid p) ""))))))))
+
+; The label of the selected part, if it is a mounted volume, which only
+; can be emptied by Format Volume; else empty.
+(def dk_formattable ((m Disks)) (list int)
+  (match (dk_act m) ((DkActFormat label) label) ((DkActCreate s c) "") ((DkActMkfs n u h) "") ((DkActNone) "")))
+
+; The key of the part that is the partition whose UUID is u, or "".
+(def dk_uuid_key ((segs (list DkSeg)) (u Uuid)) (list int)
+  (if (is_empty segs)
+      ""
+      (match (head segs)
+        ((DkPart n start count p c) (if (eq (gpt_part_uuid p) u) (dk_key (head segs)) (dk_uuid_key (tail segs) u)))
+        ((DkFree start count) (dk_uuid_key (tail segs) u)))))
+
+; The state with the partition whose UUID is u selected, if there is one.
+(def dk_with_uuid ((m Disks) (u Uuid)) Disks
+  (match m
+    ((Disks d sel dlg st)
+      (let k (dk_uuid_key (dk_segs m) u) (if (is_empty k) m (Disks d k dlg st))))))
+
+; ------------------------------------------------------------------ sizes
+
+; The bytes a size in kB, of 1000 bytes, says: N, or N and up to three
+; decimals; -1 if it is not one.
+(def dk_kb_bytes ((s (list int))) int
+  (let whole (dk_digit_run s 0)
+    (if (if (eq whole 0) true (gt whole 9))
+        -1
+        (let rest (drop_n s whole)
+          (let w (mul (int_prefix s 0) 1000)
+            (if (is_empty rest)
+                w
+                (if (eq (head rest) 46) (dk_kb_frac w (tail rest)) -1)))))))
+
+; w and the decimals fr after it, of 1 to 3 digits; -1 if they are not.
+(def dk_kb_frac ((w int) (fr (list int))) int
+  (let n (dk_digit_run fr 0)
+    (if (if (ge n 1) (if (le n 3) (eq n (length fr)) false) false)
+        (add w (mul (int_prefix fr 0) (if (eq n 1) 100 (if (eq n 2) 10 1))))
+        -1)))
+
+; How many digits s starts with, onto n.
+(def dk_digit_run ((s (list int)) (n int)) int
+  (if (is_empty s) n (if (is_digit (head s)) (dk_digit_run (tail s) (add n 1)) n)))
+
+; The sectors a size in kB comes to, to the nearest: 0 if it is not a
+; size, or not 1 to count of them.
+(def dk_size_sectors ((s (list int)) (count int)) int
+  (let bytes (dk_kb_bytes s)
+    (if (lt bytes 0)
+        0
+        (let n (div (add bytes (div (dk_sector) 2)) (dk_sector))
+          (if (if (ge n 1) (le n count) false) n 0)))))
+
+; count sectors in kB, to the nearest tenth: what a size is filled in
+; with, which comes back to count, being within 50 bytes of it.
+(def dk_kb_text ((count int)) (list int)
+  (let t (div (add (mul (dk_bytes count) 10) 500) 1000)
+    (append (digits (div t 10)) (append "." (digits (mod t 10))))))
 
 ; The window's state with the drive read again: its selection kept if
 ; the part is still there, and a line saying what happened.
@@ -227,21 +300,59 @@
 ; ----------------------------------------------------------------- update
 
 ; The state after an action, or a key, that needs nothing read or written:
-; selecting, opening the dialog and closing it. Refreshing and formatting
-; are done by the loop, which reads and writes the disk.
+; selecting, opening a dialog, typing in it and closing it. Refreshing,
+; formatting, and making partitions and volumes are done by the loop,
+; which reads and writes the disk.
 (def dk_update ((m Disks) (action (list int)) (ev UiEvent)) Disks
   (match m
     ((Disks d sel dlg st)
       (let vk (ui_select_key (dk_vols) action)
         (if (not (is_empty vk))
             (Disks d vk dlg st)
-            (if (eq action "app.format")
-                (let label (dk_formattable m) (if (is_empty label) m (Disks d sel (DkConfirm label) st)))
+            (if (any_eq action (split_spaces "app.format app.create app.mkfs"))
+                (Disks d sel (dk_opened (dk_act m) action dlg) st)
                 (if (eq action "dialog.cancel")
                     (Disks d sel (DkNoDialog) st)
-                    (dk_keyed m ev))))))))
+                    (dk_keyed (Disks d sel (dk_edited dlg action ev) st) ev))))))))
 
-; A key: Esc closes the dialog; Left and Right move along the bar while
+; The dialog an action opens for what can be done, if they go together;
+; else dlg as it was. A size starts as all the free space, and a name as
+; the label the partition's volume had.
+(def dk_opened ((a DkAct) (action (list int)) (dlg DkDialog)) DkDialog
+  (match a
+    ((DkActFormat label) (if (eq action "app.format") (DkConfirm label) dlg))
+    ((DkActCreate start count) (if (eq action "app.create") (DkCreate start count (ui_entry_new (dk_kb_text count))) dlg))
+    ((DkActMkfs n u had) (if (eq action "app.mkfs") (DkMkfs n u had (ui_entry_new had)) dlg))
+    ((DkActNone) dlg)))
+
+; The entries' names in the dialogs.
+(def dk_size_entry () (list int) "size")
+(def dk_label_entry () (list int) "label")
+
+; The dialog with what action typed in its entry, if it has one. A name
+; is kept to the 15 characters a label may have.
+(def dk_edited ((dlg DkDialog) (action (list int)) (ev UiEvent)) DkDialog
+  (match dlg
+    ((DkNoDialog) dlg)
+    ((DkConfirm label) dlg)
+    ((DkCreate start count t) (DkCreate start count (ui_entry_update (dk_size_entry) t action ev)))
+    ((DkMkfs n u had t)
+      (let t2 (ui_entry_update (dk_label_entry) t action ev)
+        (DkMkfs n u had (if (gt (length (ui_entry_text t2)) (vol_label_max)) t t2))))))
+
+; The action of the entry a dialog has, for the focus to go to as it
+; opens; "" for one with none.
+(def dk_dialog_entry ((dlg DkDialog)) (list int)
+  (match dlg
+    ((DkNoDialog) "")
+    ((DkConfirm label) "")
+    ((DkCreate start count t) (ui_entry_action (dk_size_entry)))
+    ((DkMkfs n u had t) (ui_entry_action (dk_label_entry)))))
+
+; The dialog open, if any.
+(def dk_dialog ((m Disks)) DkDialog (match m ((Disks d sel dlg st) dlg)))
+
+; A key: Esc closes a dialog; Left and Right move along the bar while
 ; there is none.
 (def dk_keyed ((m Disks) (ev UiEvent)) Disks
   (match m
@@ -253,10 +364,16 @@
               (if (eq value 0)
                   m
                   (match dlg
-                    ((DkConfirm label) (if (eq code (ui_key_esc)) (Disks d sel (DkNoDialog) st) m))
-                    ((DkNoDialog) (Disks d (ui_segbar_key (dk_segments_of m) sel code) dlg st)))))))
+                    ((DkNoDialog) (Disks d (ui_segbar_key (dk_segments_of m) sel code) dlg st))
+                    ((DkConfirm label) (dk_escaped m code))
+                    ((DkCreate start count t) (dk_escaped m code))
+                    ((DkMkfs n u had t) (dk_escaped m code)))))))
         ((UiPress x y b) m) ((UiRelease x y b) m) ((UiMotion x y b) m) ((UiLeave) m)
         ((UiFocus f) m) ((UiScroll x y dx dy) m) ((UiExit p s) m) ((UiOther f p) m)))))
+
+; The dialog closed if code is Esc.
+(def dk_escaped ((m Disks) (code int)) Disks
+  (match m ((Disks d sel dlg st) (if (eq code (ui_key_esc)) (Disks d sel (DkNoDialog) st) m))))
 
 ; ------------------------------------------------------------------- view
 
@@ -270,13 +387,62 @@
                                            (cons (UiExpand (dk_pane m)) (nil UiWidget)))))
         (match dlg
           ((DkNoDialog) page)
-          ((DkConfirm label) (UiModal page (dk_alert label))))))))
+          ((DkConfirm label) (UiModal page (dk_alert label)))
+          ((DkCreate start count t) (UiModal page (dk_create_alert count t)))
+          ((DkMkfs n u had t) (UiModal page (dk_mkfs_alert n had t))))))))
 
 ; The dialog asking whether to format label.
 (def dk_alert ((label (list int))) UiWidget
   (ui_alert "Format Volume?" (cons (append "Every file on " (append label " will be lost.")) (nil (list int)))
-            (cons (UiButton "dialog.cancel" "" "Cancel" (UiBtnRegular) true)
+            (cons (dk_cancel)
                   (cons (UiButton "dialog.format" "" "Format" (UiBtnDestructive) true) (nil UiWidget)))))
+
+; A dialog's Cancel.
+(def dk_cancel () UiWidget (UiButton "dialog.cancel" "" "Cancel" (UiBtnRegular) true))
+
+; The dialog asking how much of count free sectors a new partition is to
+; have, t typed so far, in kB, as GNOME Disks asks: the space left after
+; it said as it is typed, and Create only for a size that fits.
+(def dk_create_alert ((count int) (t UiEntryText)) UiWidget
+  (let n (dk_size_sectors (ui_entry_text t) count)
+    (ui_alert_form "Create Partition" (cons (append "Free space: " (dk_size_text (dk_bytes count))) (nil (list int)))
+      (cons (UiProps (cons (UiProp "Size" (UiBox (UiH) (ui_space_s) (cons (UiEntry (dk_size_entry) t "" 120) (cons (dk_value "kB") (nil UiWidget)))))
+                           (cons (UiProp "Free Space Following" (dk_value (if (eq n 0) "-" (dk_size_text (dk_bytes (sub count n))))))
+                                 (nil UiProp))))
+            (nil UiWidget))
+      (cons (dk_cancel) (cons (UiButton "dialog.create" "" "Create" (UiBtnSuggested) (gt n 0)) (nil UiWidget))))))
+
+; The dialog asking what a new volume on partition n is to be called, t
+; typed so far: where it will be mounted said as it is typed, and Format
+; only for a label a volume may have. Red, and saying so, if the
+; partition held a volume, had.
+(def dk_mkfs_alert ((n int) (had (list int)) (t UiEntryText)) UiWidget
+  (let label (ui_entry_text t)
+    (ui_alert_form (append "Format Partition " (digits n))
+      (cons "A new, empty L0FS volume."
+            (if (is_empty had) (nil (list int)) (cons (append "Every file on " (append had " will be lost.")) (nil (list int)))))
+      (cons (UiProps (cons (UiProp "Volume Name" (UiEntry (dk_label_entry) t "" (dk_label_entry_w)))
+                           (cons (UiProp "Mounted At" (dk_at_least (ui_text_w (append "/Volumes/" (dk_longest_label)) false 1)
+                                                                   (dk_value (if (vol_label_ok label) (append "/Volumes/" label) "-"))))
+                                 (nil UiProp))))
+            (nil UiWidget))
+      (cons (dk_cancel)
+            (cons (UiButton "dialog.mkfs" "" "Format" (if (is_empty had) (UiBtnSuggested) (UiBtnDestructive)) (vol_label_ok label))
+                  (nil UiWidget))))))
+
+; w at least w wide, so that a dialog keeps its width as what is in it is
+; typed.
+(def dk_at_least ((w int) (wd UiWidget)) UiWidget
+  (UiBox (UiV) 0 (cons (UiSpace w 0) (cons wd (nil UiWidget)))))
+
+; A label as long as one may be.
+(def dk_longest_label () (list int) (dk_xs (vol_label_max)))
+
+; n x's.
+(def dk_xs ((n int)) (list int) (if (le n 0) "" (cons 120 (dk_xs (sub n 1)))))
+
+; A label's entry: as wide as the longest label, and its edges.
+(def dk_label_entry_w () int (add (mul (vol_label_max) (ui_char_w)) (add (mul 2 (ui_entry_pad)) (ui_entry_cursor_w))))
 
 ; The sidebar's rows: the drive, if there is one.
 (def dk_side_rows ((d DkDrive)) (list UiSideRow)
@@ -288,8 +454,9 @@
 (def dk_drive_title ((sectors int)) (list int) (append (dk_size_text (dk_bytes sectors)) " Disk"))
 
 ; The drive's pane, 18 in: its name and Refresh; its properties; the bar
-; of its parts and Format Volume; the selected part's properties; and the
-; line saying what was done. A status page if there is no drive.
+; of its parts and the button for what can be done with the selected
+; one; its properties; and the line saying what was done. A status page
+; if there is no drive.
 (def dk_pane ((m Disks)) UiWidget
   (match m
     ((Disks d sel dlg st)
@@ -303,11 +470,21 @@
               (cons (UiLabel "Volumes" (UiHeading) (UiStart))
               (cons (UiSegmentBar (dk_vols) (dk_ui_segments segs (nil UiSegment)) sel (ui_segbar_h))
               (cons (UiBox (UiH) (ui_space_s)
-                      (cons (UiButton "app.format" "" "Format Volume..." (UiBtnRegular) (not (is_empty (dk_formattable m))))
-                            (nil UiWidget)))
+                      (cons (dk_act_button (dk_act m)) (nil UiWidget)))
               (cons (UiProps (dk_seg_props (dk_selected_seg m)))
               (cons (UiExpand (UiSpace 0 0))
               (cons (UiLabel st (UiDimmed) (UiStart)) (nil UiWidget))))))))))))))))
+
+; The button under the bar: Create Partition... on free space, Format
+; Volume... on a mounted volume, Format... on any other partition, as
+; GNOME Disks has them; Format Volume..., insensitive, with nothing
+; selected.
+(def dk_act_button ((a DkAct)) UiWidget
+  (match a
+    ((DkActCreate start count) (UiButton "app.create" "" "Create Partition..." (UiBtnRegular) true))
+    ((DkActFormat label) (UiButton "app.format" "" "Format Volume..." (UiBtnRegular) true))
+    ((DkActMkfs n u had) (UiButton "app.mkfs" "" "Format..." (UiBtnRegular) true))
+    ((DkActNone) (UiButton "app.format" "" "Format Volume..." (UiBtnRegular) false))))
 
 ; The drive's name, large, and Refresh at the row's end.
 (def dk_heading ((n int)) UiWidget
@@ -457,10 +634,61 @@
     ((Disks d sel dlg st)
       (match dlg
         ((DkNoDialog) m)
+        ((DkCreate start count t) m)
+        ((DkMkfs n u had t) m)
         ((DkConfirm label)
           (let code (fs_format_on (dk_rp io) (append "/Volumes/" label))
             (dk_rescanned m (dk_read io)
               (if (eq code 0) (append "Formatted " label) (append "Could not format " (append label (append ": " (dk_fs_why code))))))))))))
+
+; The dialog's partition made by the file server, if its size fits; then
+; the disk read again, as Refresh does, and the new partition selected.
+(def dk_created ((io DkIo) (m Disks)) Disks
+  (match (dk_dialog m)
+    ((DkNoDialog) m)
+    ((DkConfirm label) m)
+    ((DkMkfs n u had t) m)
+    ((DkCreate start count t)
+      (let n (dk_size_sectors (ui_entry_text t) count)
+        (if (eq n 0)
+            m
+            (let made (fs_partition_on (dk_rp io) n start)
+              (let r (fs_rescan_on (dk_rp io))
+                (let m2 (dk_rescanned m (dk_read io) (dk_created_text made n))
+                  (match made
+                    ((FsPartitioned u) (dk_with_uuid m2 u))
+                    ((FsPartitionRefused code why) m2))))))))))
+
+; The dialog's volume made by the file server, if its label is one; then
+; the disk read again.
+(def dk_made ((io DkIo) (m Disks)) Disks
+  (match (dk_dialog m)
+    ((DkNoDialog) m)
+    ((DkConfirm label) m)
+    ((DkCreate start count t) m)
+    ((DkMkfs n u had t)
+      (let label (ui_entry_text t)
+        (if (not (vol_label_ok label))
+            m
+            (let made (fs_mkfs_on (dk_rp io) u label)
+              (let r (fs_rescan_on (dk_rp io))
+                (dk_rescanned m (dk_read io) (dk_made_text made)))))))))
+
+; What making a partition of n sectors came to, in words.
+(def dk_created_text ((made FsPartition) (n int)) (list int)
+  (match made
+    ((FsPartitioned u) (append "Created a partition of " (dk_size_text (dk_bytes n))))
+    ((FsPartitionRefused code why) (append "Could not create the partition: " (dk_why code why)))))
+
+; What making a volume came to, in words.
+(def dk_made_text ((made FsMkfs)) (list int)
+  (match made
+    ((FsMade label) (append "New volume " (append label (append ", mounted at /Volumes/" label))))
+    ((FsMkfsRefused code why) (append "Could not format the partition: " (dk_why code why)))))
+
+; Why a file server refused: in its own words if it gave any.
+(def dk_why ((code int) (why (list int))) (list int)
+  (if (is_empty why) (dk_fs_why code) why))
 
 ; What a file server's code says.
 (def dk_fs_why ((code int)) (list int)
@@ -493,13 +721,24 @@
         (match (ui_route w ev)
           ((UiRouted w2 action)
             (let m2 (dk_acted io m action ev)
-              (dk_loop (ui_present w2 (dk_view m2)) io m2))))))))
+              (dk_loop (ui_present (dk_focused w2 m m2) (dk_view m2)) io m2))))))))
 
-; The state after action: refreshing and formatting read and write the
-; disk; the rest is dk_update.
+; The window with the focus on the entry of a dialog that has just
+; opened, so that typing goes to it at once; else as it was.
+(def dk_focused ((w UiWin) (m Disks) (m2 Disks)) UiWin
+  (let e (dk_dialog_entry (dk_dialog m2))
+    (if (if (is_empty e) true (eq (dk_dialog_entry (dk_dialog m)) e)) w (ui_win_focusing w e))))
+
+; The state after action: refreshing, formatting, and making partitions
+; and volumes read and write the disk; the rest is dk_update. Enter in a
+; dialog's entry is its button.
 (def dk_acted ((io DkIo) (m Disks) (action (list int)) (ev UiEvent)) Disks
   (if (eq action "app.refresh")
       (dk_refreshed io m)
       (if (eq action "dialog.format")
           (dk_formatted io m)
-          (dk_update m action ev))))
+          (if (any_eq action (cons "dialog.create" (cons (ui_entry_activate_action (dk_size_entry)) (nil (list int)))))
+              (dk_created io m)
+              (if (any_eq action (cons "dialog.mkfs" (cons (ui_entry_activate_action (dk_label_entry)) (nil (list int)))))
+                  (dk_made io m)
+                  (dk_update m action ev))))))

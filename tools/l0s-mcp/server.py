@@ -55,8 +55,8 @@ def boot(image: str = "demo", display: str = "none", until: str = "^l0s> ",
     does once pid 1 ends, running is false and status is its exit
     status. image is demo (build/initramfs.cpio),
     screen (build/screen.cpio), a .cpio, or an etc directory holding an
-    inittab, such as tests/e2e/ipc/etc, packed with every program in
-    build/bin. display is none, or cocoa to also show QEMU's window on
+    inittab, such as tests/e2e/ipc/etc, packed with every program as
+    make root stages them in build/root. display is none, or cocoa to also show QEMU's window on
     this Mac."""
     return board.boot(image, display, until, timeout, settle)
 

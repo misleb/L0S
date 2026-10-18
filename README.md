@@ -39,8 +39,9 @@ its virtio-gpu, virtio keyboard and virtio tablet are in a QEMU window.
 The window shows a desktop, the compositor's: a wallpaper, a top bar,
 and two terminal windows that overlap, each with a title bar and a
 shell. The top bar is GNOME Shell's, black across the top of the screen:
-the front window's title at its left, and the date and time in its
-middle, `Oct 15  22:42`, from the board's real-time clock, which QEMU
+**Applications** at its left, then the name of the front window's app
+(`Terminal`), or its title if it is no app's, and the date and time in
+its middle, `Oct 15  22:42`, from the board's real-time clock, which QEMU
 sets to this machine's local time. There are three shells in all:
 
 - **The serial line**, in the terminal you ran `make demo` from.
@@ -58,10 +59,16 @@ sets to this machine's local time. There are three shells in all:
   - Each is a terminal of 80 by 24 cells: white on GNOME Console's
     `1e1e1e`, scrolling, with a cursor along the foot of its cell.
 
-`run widgets &` at any shell opens the toolkit's gallery: a toolbar and a
-sortable data grid of sample processes, the scaffolding for a process
-monitor. `run disks &` opens Disks, the disk, its partitions and its
-volumes as GNOME Disks shows them.
+Click **Applications** to open the launcher, GNOME Shell's grid of apps:
+a page over the desktop, in place of the windows, of each app's icon and
+name. Click one to start it; Esc, a click on the page, or Applications
+again closes it. The apps are the desktop's programs, each kept as macOS
+keeps one, in a bundle under [/Applications](#apps): Terminal (`vt`),
+System Monitor (`procmon`), Widgets (`widgets`), the toolkit's gallery,
+and Disks (`disks`), the disk, its partitions and its volumes as GNOME
+Disks shows them, where free space can be made a partition and a
+partition given a volume. Each also runs from a shell, by its name or its
+program's: `run Widgets &` and `run widgets &` are the same.
 
 Each shell runs programs on its own terminal: their standard input,
 output and error are its. The demo's [inittab](demo/etc/inittab) starts:
@@ -74,7 +81,7 @@ output and error are its. The demo's [inittab](demo/etc/inittab) starts:
 | 4 | `virtio-input keyboard` | the keyboard driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 5 | `virtio-input tablet` | the pointer's driver. It serves `pointer`, telling `wm` where the pointer is and what its buttons do |
 | 6 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 7, 8 | `vt`, `vt` | the windows' terminals, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 7, 8 | `vt`, `vt` | the windows' terminals, Terminal's program, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
 | 9 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
 | 10 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
 | 11 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
@@ -103,22 +110,27 @@ What is typed in the window goes to the virtio keyboard, and so through
 Each shell shows [/etc/motd](demo/etc/motd), then its prompt:
 
 ```
-Welcome to L0S, booted from an initramfs.
-Programs are in /bin, the disk's files in /Volumes; try ls, df, run hello, ps.
-Two more shells run in windows in QEMU's: click one, and type there.
-Drag a window by its title bar; run windows lists them; try run widgets &.
+Welcome to L0S, booted from an initramfs. Try ls, df, ps, run hello.
+Commands in /bin, services in /sbin, apps in /Applications, files in /Volumes.
+Two more shells run in Terminals in QEMU's window: click one, and type there.
+Applications, on the top bar, starts apps; drag a window by its title bar.
 Draw on the desktop: run draw circle 640 400 300 cyan; run draw for more.
 run keys echoes what the keyboard driver sees, until Esc.
 
 L0S shell, on an L0 microkernel. Type help for the commands.
 l0s> ls
+  /Applications/Disks.app/disks
+  /Applications/Disks.app/icon.ppm
+  /Applications/Disks.app/manifest
+  ...
   /bin/cat
-  /bin/echo
   ...
   /etc/font.txt
   /etc/inittab
   /etc/motd
   /etc/splash.ppm
+  /sbin/echo
+  ...
   /Volumes/data/notes
 l0s> run echo &
 [pid 3 running]
@@ -130,8 +142,12 @@ l0s> exit
 
 Programs only run through `run NAME [ARG ...]`, with a final `&` to leave
 one running in the background:
-- `NAME` is `/bin/NAME`, or a path if it holds a `/`: `run hello` and
-  `run /bin/hello` are the same.
+- `NAME` is `/bin/NAME`, else `/sbin/NAME`, else an app's program
+  `/Applications/APP.app/NAME`, else the app `/Applications/NAME.app`,
+  whose manifest names its program; or a path if it holds a `/`, to a
+  program or an app's bundle. `run hello` and `run /bin/hello` are the
+  same, and so are `run vt`, `run Terminal` and
+  `run /Applications/Terminal.app`.
 - Arguments given replace the ones the inittab gives the program. Plain
   `run NAME` keeps the inittab's.
 - Arguments are split at spaces; there is no quoting.
@@ -152,7 +168,7 @@ which refuse every change (`permission denied`), and the disk's, under
 
 | Command | Does |
 |---|---|
-| `ls [PATH ...]` | with no path, every file of the initramfs, then of each volume; else each directory's names (`/`, `/bin`, `/Volumes`, `/Volumes/data`), a directory's with a final `/`, or a file's path |
+| `ls [PATH ...]` | with no path, every file of the initramfs, then of each volume; else each directory's names (`/`, `/bin`, `/sbin`, `/Applications`, `/Applications/Terminal.app`, `/Volumes`, `/Volumes/data`), a directory's with a final `/`, or a file's path |
 | `cat FILE ...` | shows the files |
 | `write FILE WORDS ...` | makes FILE hold the words, spaced, and a newline |
 | `append FILE WORDS ...` | adds that line to FILE's end, making it if need be |
@@ -326,7 +342,7 @@ makes it.
 
 | Tool | Does |
 |---|---|
-| `boot` | boots `demo`, `screen`, a `.cpio`, or an `etc` directory packed with every program in `build/bin`, and waits for the serial shell's prompt |
+| `boot` | boots `demo`, `screen`, a `.cpio`, or an `etc` directory packed with every program as `make root` stages them in `build/root`, and waits for the serial shell's prompt |
 | `shutdown`, `status` | stops the board, by `exit` or by killing QEMU; whether it runs, its exit status, QEMU's stderr |
 | `shell` | types a command at the serial shell and returns what it printed before the next prompt |
 | `serial_send`, `serial_read` | types anything at the serial line, Ctrl-C included; what it showed since last read, waiting for a pattern |
@@ -439,16 +455,36 @@ The reply is `ok`, `display W H cursor` for `info`, or `error: WHY`.
 | `windows` | a line a window, front first, then `pointer X Y` |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
-draws), the pointer's arrow (Adwaita's), the top bar, and each window's
-title bar and frame. The layers it gives the driver are the desktop,
-then each window from back to front, its title bar, its frame and then
-its content, then the top bar over them all.
+draws), buffer 0; the pointer's arrow (Adwaita's), 1; the top bar, 2;
+the launcher's page, 3; and each window's title bar and frame, window
+i's content, title bar and frame being 4 + 3i, 5 + 3i and 6 + 3i. The
+layers it gives the driver are the desktop, then each window from back
+to front, its title bar, its frame and then its content, then the top
+bar over them all; while the launcher is open, the desktop, the
+launcher under the bar, and the bar, the windows left out.
 
 The top bar is GNOME Shell's: 32 rows across the screen, black, with
-the front window's title in white at its left and the date and time,
+**Applications** at its left, then the name of the front window's app in
+white, or its title if its client is no app, and the date and time,
 bold, in its middle, as GNOME shows them by default (`Oct 15  22:42`,
-on a 24-hour clock). `wm` repaints it when the front window or its
-title changes, and when the clock says a minute has begun. The clock is
+on a 24-hour clock). An app's name is its bundle's manifest's: `wm`
+reads every manifest in `/Applications` as it starts, and names a
+window by where its client's program is, from `proc_info`. `wm`
+repaints the bar when the front window or its title changes, when the
+launcher opens or closes, and when the clock says a minute has begun.
+
+**The launcher** ([user/wm/launcher.l0](user/wm/launcher.l0)) is GNOME
+Shell's grid of apps. A click on Applications, acting on its release
+over it, lights the button with a pill and shows a page under the bar,
+`242424`, of each app's 48×48 icon with its name under it, in cells
+136×104, in rows from 64 below the bar, in the middle of the screen, in
+the archive's order. A click on an app closes the page and starts the
+app's program, which `wm` watches, as it does any client, so its slot
+is free once it exits; it gets the inittab's arguments for it, and
+`wm`'s terminal, the serial line. Esc, a click on the page, or
+Applications again closes it. While it is open no window is told of
+the pointer, the wheel or the keys. Its page is one buffer, painted
+once, as the apps never change while the system runs. The clock is
 `rtc clock` ([user/rtc](user/rtc/rtc.l0)), which serves `clock`
 ([user/lib/clock.l0](user/lib/clock.l0)): `listen` replies `time S`, S
 the PL031's count of seconds, and sends `time S` again at the start of
@@ -721,16 +757,60 @@ exits 0.
 ## How it boots
 
 ```
-tools/mkinitramfs OUT ETC IMAGE...        # programs as /bin/NAME, ETC as /etc
+make root                                 # build/root: /bin, /sbin, /Applications
+tools/mkinitramfs OUT ETC ROOT [IMAGE...] # ROOT as it is, IMAGEs as /bin/NAME, ETC as /etc
 l0 boot build/kernel.img < OUT            # the kernel reads the initramfs on stdin
 ```
 
+`make root` stages every program in `build/root` where the initramfs
+keeps it, made anew each time:
+- **`/bin`**, the commands, for people and agents: `sh`, `cat`, `hello`,
+  `init`, `ping`, `spin`, `nap`, `draw`, `keys`, `windows`, `disk`;
+- **`/sbin`**, the drivers and services: `uart`, `rtc`, `virtio-gpu`,
+  `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo` (the Makefile's
+  `SBIN`);
+- **`/Applications`**, the desktop's apps, each in a bundle (below).
+
 [tools/mkinitramfs](tools/mkinitramfs) stages a directory and archives it
 with `bsdtar --format newc`, in order of path:
-- each image becomes `/bin/NAME`, mode 0755;
+- everything in `ROOT`, its modes kept: programs 0755, the rest 0644;
+- each IMAGE becomes `/bin/NAME`, mode 0755, as `tests/e2e.sh` adds its
+  raw programs;
 - everything in `ETC` becomes `/etc/...`, mode 0644.
 
 `bsdtar -tvf build/initramfs.cpio` lists it like any cpio archive.
+
+### Apps
+
+An app is kept as macOS keeps one: a bundle, a directory
+`/Applications/NAME.app`, holding its program, under the program's own
+name, so that `ps` still says `vt`; its icon, `icon.ppm`; and its
+`manifest`, which says what they are, a line each, `#` for a comment
+([user/lib/app.l0](user/lib/app.l0)):
+
+```
+name Terminal                  # what the launcher and the top bar call it
+exec vt                        # its program, a file in the bundle
+icon icon.ppm                  # its icon, a 48×48 binary PPM in the bundle
+summary A terminal in a window, with its own shell
+```
+
+| Bundle | Program | Name |
+|---|---|---|
+| `Terminal.app` | `vt` | Terminal |
+| `Monitor.app` | `procmon` | System Monitor |
+| `Widgets.app` | `widgets` | Widgets |
+| `Disks.app` | `disks` | Disks |
+
+A bundle's name is one word, as the shell and the inittab split at
+spaces; an app's name may be several. Its source is the directory beside
+its program's, `user/vt/Terminal.app`, holding the manifest and
+`icon.draw`, the icon as lines of `run draw`'s commands, which
+[tools/mkicon](tools/mkicon/mkicon.l0) draws at build time, on the
+launcher's ground, into the 48×48 PPM: a rounded square and a symbolic
+icon at twice its size (`round 0 0 48 48 10 dark_3`,
+`icon 8 8 utilities-terminal 2 white`). Making an app is making that
+directory; the Makefile finds it, and the launcher finds the bundle.
 
 The kernel keeps the whole archive in memory, parses its entries
 ([common/initramfs.l0](common/initramfs.l0)), and reads `/etc/inittab`
@@ -754,7 +834,9 @@ exits; the kernel then exits with pid 1's status.
 Device authority comes only from `dev` lines. The demo grants it to `uart`,
 `rtc`, `virtio-gpu`, `virtio-input` and `virtio-blk`, so the shell can start `rtc`
 without having it itself. `wm`, `vt` and `fs` have none: they reach only
-memory they share.
+memory they share. In the demo's inittab, then, the drivers' and
+services' paths are `/sbin/...`, and the terminals'
+`/Applications/Terminal.app/vt`.
 
 ## The kernel
 
@@ -984,13 +1066,17 @@ how the shell waits for a job and for Ctrl-C at the same time.
 ## The programs
 
 Each one is the usual three files under `user/NAME/`: `NAME.l0`,
-`NAME_test.l0` and `main.l0`. Each becomes `/bin/NAME` in the initramfs.
+`NAME_test.l0` and `main.l0`. Each becomes `/bin/NAME` in the initramfs,
+if it is a command; `/sbin/NAME`, if it is a driver or a service (`uart`,
+`rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo`); or
+`/Applications/APP.app/NAME`, if it is an app, which `user/NAME/APP.app`
+makes it (`vt`, `procmon`, `widgets`, `disks`; see [Apps](#apps)).
 
 | Program | What it does |
 |---|---|
 | `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `df` and `format`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
-| `vt` | a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font, in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
+| `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font, in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
 | `cat` | writes the files its arguments name, through the ordinary `open_in`, the initramfs's or a volume's; reports each it can't read, and exits 1 if any |
 | `hello` | prints its pid and arguments, and answers a line: typed at its terminal, with `console_line` |
 | `init` | starts the programs its arguments name (`NAME&` runs one in the background), waits for the rest, and reports each one's status |
@@ -1004,12 +1090,12 @@ Each one is the usual three files under `user/NAME/`: `NAME.l0`,
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
 | `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL` and serves the fs protocol for them, the kernel's requests for every program's file calls there and `list`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
-| `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, and serves `compositor`. It needs no `dev` line |
+| `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
-| `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round` and `button`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
-| `widgets` | the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
-| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again; Format Volume..., for a mounted volume, asks in a dialog, then has `fs` `format` it. With no disk it shows a status page |
-| `procmon` | the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
+| `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
+| `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
+| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
+| `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 
 The libraries in `user/lib/` are linked into every program
@@ -1031,7 +1117,8 @@ Makefile's `LIBS_` lists:
 | [gpt.l0](user/lib/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
 | [l0fs.l0](user/lib/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `disks`, `tools/mkfs` |
 | [fs.l0](user/lib/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh`, `disks` |
-| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, panes (a sidebar, a segment bar, property rows, an alert dialog), the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
+| [app.l0](user/lib/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
+| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
 
 ## Tests
 
@@ -1039,7 +1126,7 @@ Makefile's `LIBS_` lists:
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts and the file calls a volume's server answers, its request, its answer, and its going, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -1052,7 +1139,7 @@ Each case of `tests/e2e/` is a directory:
   `tools/mkdisk` for each run.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Eleven cases type a session through
+`etc`, boots it, and compares. Twelve cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -1085,7 +1172,10 @@ Ctrl-C as a person would:
   `cp` it into the other volume, `mv` it within a volume and across
   volumes, `ls` everything, `rm` it; be refused a `write` to the
   initramfs; `cp` a file of the initramfs to a volume; and `format` a
-  volume, `ls` showing it empty.
+  volume, `ls` showing it empty;
+- `apps` lists `/Applications` and a bundle, shows Terminal's manifest,
+  is told there is no app `Nope`, by name or by path, and runs
+  `Terminal` by its name, which the shell finds through its manifest.
 
 `files` reads the initramfs through `cat`. `virtio-gpu_nodev` and
 `virtio-blk_nodev` start a driver with no `dev` line, which is refused
@@ -1180,6 +1270,21 @@ is. Then, by screendump:
 - Format Volume... again, and the dialog's Format: then `ls
   /Volumes/data` at the serial shell lists no file.
 
+[tests/disks-create.sh](tests/disks-create.sh) boots the same, on a
+disk `build/mkfs` makes with 496 sectors free between data and scratch,
+and by screendump:
+- a click on that free space, selecting it;
+- Create Partition..., whose dialog shows its entry focused, in the
+  accent's ring, and Create in the accent;
+- 999 typed through the monitor's `sendkey` for the size, too much,
+  fading Create, and then 254, which fits;
+- Enter: the dialog gone, and the new partition selected where the
+  free space was;
+- Format..., whose dialog has its entry focused and Format faded, for
+  no name; `made` typed, and Format in the accent;
+- Enter: the dialog gone; then `ls /Volumes` at the serial shell lists
+  `made`, and a file written to it is read back.
+
 [tests/partitions.sh](tests/partitions.sh) boots the same, with `rtc
 clock`, on a disk `build/mkfs` makes with room between its volumes, and
 at the serial shell: `partition 400`, which says a UUID of version 7
@@ -1188,6 +1293,14 @@ listed in `/Volumes`, holds a file written to it, and is counted by
 `df`; a second `mkfs` of it, refused; and, booted again on the same
 disk, the volume mounted at once, its file there, and the UUID still
 naming its partition.
+
+[tests/launcher.sh](tests/launcher.sh) boots the screen tests' initramfs
+and clicks the top bar's Applications with the tablet: the launcher
+opens, Applications on its pill and the page's ground showing, and
+Terminal's icon, its dark square, in the grid's third cell. Esc closes
+it, and so does a click on the page. A click on Terminal starts it: `run
+windows` lists `vt1`'s window, in front, and the top bar names it
+Terminal, a lit pixel of the `T`, where its title, `vt1`, would show none.
 
 Every boot is killed after a minute by [tools/deadline](tools/deadline),
 since macOS has no `timeout`. `tests/e2e.sh` also builds three raw programs
@@ -1211,7 +1324,9 @@ fault, pass a bad buffer, and wait on nothing.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
 - **The initramfs is read-only.** Nothing in it can be written, renamed
-  or removed. There is no current directory, so a relative path is taken
+  or removed. So the apps are fixed at boot: the launcher shows the
+  bundles in `/Applications` as `wm` started, and an app copied to a
+  volume is not one. There is no current directory, so a relative path is taken
   from `/`. No call lists a directory: the initramfs's are `entry_paths`,
   which lists everything, and a volume's its server's `list`.
 - **The volumes are small and simple** (see [Volumes](#volumes)). Each
@@ -1240,12 +1355,16 @@ resizes a partition.
   taking the interrupt, and moves at most 128 sectors a request. It
   accepts no device features, so it never flushes a write cache and
   never learns a disk is read-only, whose writes the device then fails.
-- **Disks shows the one disk, and changes it only two ways.** It can
-  format a mounted volume, keeping its label and size, and have `fs`
-  rescan; it cannot yet partition or make a new volume, which the
-  shell's `partition` and `mkfs` do, nor resize or relabel. Its window is a fixed 880 by
-  520, as every window is, and it reads the disk only when it opens and
-  when asked.
+- **Disks shows the one disk, and cannot take anything away.** It can
+  make a partition of free space, give a partition a new volume, format
+  a mounted volume, keeping its label and size, and have `fs` rescan;
+  it cannot delete, resize or relabel a partition or a volume, nor
+  choose a partition's type or name. Sizes are typed in kB, whatever the
+  disk's size. Its window is a fixed 880 by 520, as every window is, and
+  it reads the disk only when it opens and when asked.
+- **A text entry does not scroll or select.** Its text is cut short with
+  `...`, so an entry is made as wide as what it will hold, and there is no
+  selecting, copying or pasting.
 - Images are copied from the archive into fresh frames for every process
   that runs them. Only pages made with `shm_alloc` or `dma_alloc` can be
   shared, and a share cannot be taken back from a driver.
@@ -1260,8 +1379,9 @@ resizes a partition.
   it keeps no copy of its text.
 - Windows cannot be resized. `wm` opens two regions for each window,
   its title bar's and its frame's, and the proc runtime closes none and
-  keeps at most 64 open, so `wm` can open only so many windows over its
-  life, closed ones included. The close button kills its client at
+  keeps at most 64 open, so `wm`, which keeps four of its own (the
+  desktop, the pointer, the top bar and the launcher), can open only so
+  many windows over its life, closed ones included. The close button kills its client at
   once: the client is not asked first, and cannot refuse. The pointer has
   one button that does anything, the left.
 - The display driver attaches a whole new backing, a run list of some
