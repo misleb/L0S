@@ -62,9 +62,11 @@ PROCS  := user/lib/sys/procs.l0
 # needs; proto, the protocols of servers, as their clients speak them;
 # format, data as bytes, pure, which host tools link too; gfx, drawing,
 # which would otherwise clash with the shell's own commands; and ui, the
-# toolkit.
+# toolkit. The protocols name rectangles with rect.l0's Rect, so DISPLAY
+# and WMLIB need RECT, which RENDER holds.
 PPM     := user/lib/format/ppm.l0
-RENDER  := $(PPM) user/lib/gfx/render.l0
+RECT    := user/lib/gfx/rect.l0
+RENDER  := $(PPM) $(RECT) user/lib/gfx/render.l0
 DISPLAY := user/lib/proto/display.l0
 WMLIB   := user/lib/proto/wm.l0
 CLOCK   := user/lib/proto/clock.l0
@@ -95,7 +97,7 @@ LIBS_rtc        := $(CLOCK)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
-LIBS_windows    := $(WMLIB)
+LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
@@ -178,6 +180,7 @@ test: sample
 	$(L0) test $(ULIB) $(PROCS) user/lib/sys/procs_test.l0
 	$(L0) test $(ULIB) $(VIRTIO) user/lib/sys/virtio_test.l0
 	$(L0) test $(ULIB) $(TTY) user/lib/sys/tty_test.l0
+	$(L0) test $(ULIB) $(RECT) user/lib/gfx/rect_test.l0
 	$(L0) test $(ULIB) $(RENDER) user/lib/gfx/render_test.l0
 	$(L0) test $(ULIB) $(CLOCK) user/lib/proto/clock_test.l0
 	$(L0) test $(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0

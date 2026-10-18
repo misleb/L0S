@@ -1,19 +1,18 @@
 ; render.l0 -- drawing into a canvas, a buffer of 4-byte pixels, b, g, r,
-; then unused: shapes, the 8 by 16 font, PPM images, which ppm.l0 reads,
-; and the commands that say what to draw. Shared by the compositor, wm,
-; its clients, such as vt, and the display drivers. Linked into the
-; programs that draw, with ppm.l0, by the Makefile's RENDER, not into
-; every program.
+; then unused, or an array of them: shapes, the 8 by 16 font, PPM images,
+; which ppm.l0 reads, and the commands that say what to draw. Shared by
+; the compositor, wm, its clients, such as vt, the display drivers, and
+; tools/mkicon. Linked into the programs that draw, with ppm.l0 and
+; rect.l0, by the Makefile's RENDER, not into every program.
 
 ; ------------------------------------------------------------- placement
 
-; Where an image goes on a screen, centered, cut to fit: the screen's x
-; and y it starts at, the image's x and y it starts from, and how many
-; columns and rows are copied.
-(data Place (Place int int int int int int))
+; Where an image goes on a screen, centered, cut to fit: the part of the
+; screen it is copied to, and the image's x and y it starts from.
+(data Place (Place Rect int int))
 
 (def placement ((sw int) (sh int) (iw int) (ih int)) Place
-  (Place (half_gap sw iw) (half_gap sh ih) (half_gap iw sw) (half_gap ih sh) (min sw iw) (min sh ih)))
+  (Place (Rect (half_gap sw iw) (half_gap sh ih) (min sw iw) (min sh ih)) (half_gap iw sw) (half_gap ih sh)))
 
 ; Half of how much bigger a is than b, or 0.
 (def half_gap ((a int) (b int)) int (if (gt a b) (div (sub a b) 2) 0))
@@ -50,34 +49,37 @@
     ((NoBackground) 0)
     ((Background b iw ih off percent)
       (match (placement w h iw ih)
-        ((Place dx dy sx sy cw ch)
-          (if (if (if (ge x dx) (lt x (add dx cw)) false) (if (ge y dy) (lt y (add dy ch)) false) false)
-              (dim (pixel_at b off iw (add sx (sub x dx)) (add sy (sub y dy))) percent)
+        ((Place to sx sy)
+          (if (rect_has to x y)
+              (dim (pixel_at b off iw (add sx (sub x (rect_x to))) (add sy (sub y (rect_y to)))) percent)
               (dim (pixel_at b off iw 0 0) percent)))))))
 
 ; The whole screen as the background has it.
-(def paint_background ((f Canvas) (bg Background)) int
-  (match f
-    ((Canvas fb w h top)
+(def paint_background ((f Canvas) (bg Background)) Canvas
+  (let w (canvas_w f)
+    (let h (canvas_h f)
       (match bg
-        ((NoBackground) (fill fb 0 0 (mul w h)))
+        ((NoBackground) (canvas_fill f 0 0 (mul w h)))
         ((Background b iw ih off percent)
-          (let k (fill fb (dim (pixel_at b off iw 0 0) percent) 0 (mul w h))
-            (blit f b off iw percent (placement w h iw ih) 0)))))))
+          (blit (canvas_fill f (dim (pixel_at b off iw 0 0) percent) 0 (mul w h)) b off iw percent (placement w h iw ih) 0))))))
+
+; The background put back over r, as much of it as is on the canvas.
+(def restore_rect ((f Canvas) (bg Background) (r Rect)) Canvas
+  (let k (rect_clip r (Rect 0 0 (canvas_w f) (canvas_h f)))
+    (if (rect_empty k) f (restore_rows f bg (rect_x k) (rect_x1 k) (rect_y k) (rect_y1 k)))))
 
 ; The background put back over columns x0 up to x1 of rows y up to y1,
 ; already cut to the screen.
-(def restore_rows ((f Canvas) (bg Background) (x0 int) (x1 int) (y int) (y1 int)) int
+(def restore_rows ((f Canvas) (bg Background) (x0 int) (x1 int) (y int) (y1 int)) Canvas
   (if (ge y y1)
-      0
-      (let r (restore_row f bg x0 x1 y)
-        (restore_rows f bg x0 x1 (add y 1) y1))))
+      f
+      (restore_rows (restore_row f bg x0 x1 y) bg x0 x1 (add y 1) y1)))
 
-(def restore_row ((f Canvas) (bg Background) (x int) (x1 int) (y int)) int
+(def restore_row ((f Canvas) (bg Background) (x int) (x1 int) (y int)) Canvas
   (if (ge x x1)
-      0
-      (let p (put f x y (background_at bg (canvas_w f) (canvas_h f) x y))
-        (restore_row f bg (add x 1) x1 y))))
+      f
+      (let c (background_at bg (canvas_w f) (canvas_h f) x y)
+        (restore_row (put f x y c) bg (add x 1) x1 y))))
 
 ; ------------------------------------------------------------------ font
 
@@ -163,17 +165,15 @@
 
 ; Draws glyph code with its top left at x, y: its lit pixels only, so what
 ; is under the others shows through.
-(def draw_glyph ((f Canvas) (font (array int)) (x int) (y int) (code int) (c int) (r int)) int
+(def draw_glyph ((f Canvas) (font (array int)) (x int) (y int) (code int) (c int) (r int)) Canvas
   (if (eq r (glyph_h))
-      0
-      (let d (glyph_bits f x (add y r) (glyph_row font code r) c 0)
-        (draw_glyph f font x y code c (add r 1)))))
+      f
+      (draw_glyph (glyph_bits f x (add y r) (glyph_row font code r) c 0) font x y code c (add r 1))))
 
-(def glyph_bits ((f Canvas) (x int) (y int) (bits int) (c int) (col int)) int
+(def glyph_bits ((f Canvas) (x int) (y int) (bits int) (c int) (col int)) Canvas
   (if (eq col (glyph_w))
-      0
-      (let p (if (eq (bit_and (bit_shr bits (sub 7 col)) 1) 1) (plot f (add x col) y c) 0)
-        (glyph_bits f x y bits c (add col 1)))))
+      f
+      (glyph_bits (if (eq (bit_and (bit_shr bits (sub 7 col)) 1) 1) (plot f (add x col) y c) f) x y bits c (add col 1))))
 
 ; The code glyph code draws: itself, or ? for one the font lacks.
 (def drawable ((code int)) int
@@ -181,37 +181,13 @@
 
 ; Characters cs from x, y, one cell each, with each cell first filled
 ; with bg, unless bg is negative, so what is under shows through.
-(def draw_text ((f Canvas) (font (array int)) (x int) (y int) (fg int) (bg int) (cs (list int))) int
+(def draw_text ((f Canvas) (font (array int)) (x int) (y int) (fg int) (bg int) (cs (list int))) Canvas
   (if (is_empty cs)
-      0
-      (let b (if (ge bg 0) (fill_rect f x y (glyph_w) (glyph_h) bg) 0)
-        (let g (draw_glyph f font x y (drawable (head cs)) fg 0)
-          (draw_text f font (add x (glyph_w)) y fg bg (tail cs))))))
+      f
+      (let b (if (ge bg 0) (fill_rect f x y (glyph_w) (glyph_h) bg) f)
+        (draw_text (draw_glyph b font x y (drawable (head cs)) fg 0) font (add x (glyph_w)) y fg bg (tail cs)))))
 
-; ---------------------------------------------------------------- damage
-
-; Where the frame has changed since it was last shown: columns x0 up to x1
-; of rows y0 up to y1; or nowhere.
-(data Damage (Box int int int int) (NoDamage))
-
-(def union ((a Damage) (b Damage)) Damage
-  (match a
-    ((NoDamage) b)
-    ((Box ax0 ay0 ax1 ay1)
-      (match b
-        ((NoDamage) a)
-        ((Box bx0 by0 bx1 by1) (Box (min ax0 bx0) (min ay0 by0) (max ax1 bx1) (max ay1 by1)))))))
-
-; d cut to a screen w by h.
-(def clip_damage ((d Damage) (w int) (h int)) Damage
-  (match d
-    ((NoDamage) d)
-    ((Box x0 y0 x1 y1)
-      (let cx0 (max x0 0)
-        (let cy0 (max y0 0)
-          (let cx1 (min x1 w)
-            (let cy1 (min y1 h)
-              (if (if (ge cx0 cx1) true (ge cy0 cy1)) (NoDamage) (Box cx0 cy0 cx1 cy1)))))))))
+; ------------------------------------------------------------- requests
 
 ; The words of a request cut at each ;, into its commands.
 (def split_commands ((words (list (list int)))) (list (list (list int)))
@@ -506,85 +482,118 @@
 ; How many pages hold a w by h buffer of 4-byte pixels.
 (def buffer_pages ((w int) (h int)) int (pages_for (mul (mul w h) 4)))
 
-; A canvas, as a ring of rows: the region over its pixels, its width and
+; A canvas, as a ring of rows: what holds its pixels, its width and
 ; height, and the row of it its top row is. Scrolling moves top, not
 ; pixels; whoever shows the canvas reads its rows from top, in order.
-(data Canvas (Canvas IoDevice int int int))
+; Over a region, the pixels are a buffer shared with the compositor or the
+; display, and drawing writes them there. Over an array, as a host tool or
+; a test draws, the canvas is a value like any other. So every drawing
+; function returns the canvas drawn on: over a region it is the same one,
+; and over an array it is the only one holding what was drawn, so pass it
+; on and keep no other.
+(data Canvas (Canvas IoDevice int int int) (ArrayCanvas (array int) int int int))
 
-(def canvas_w ((f Canvas)) int (match f ((Canvas fb w h top) w)))
-(def canvas_h ((f Canvas)) int (match f ((Canvas fb w h top) h)))
-(def canvas_top ((f Canvas)) int (match f ((Canvas fb w h top) top)))
+; A canvas over an array, w by h, every pixel color c.
+(def canvas_new ((w int) (h int) (c int)) Canvas (ArrayCanvas (array_new (mul w h) c) w h 0))
+
+; Its width, height, and top row.
+(def canvas_w ((f Canvas)) int (match f ((Canvas fb w h top) w) ((ArrayCanvas px w h top) w)))
+(def canvas_h ((f Canvas)) int (match f ((Canvas fb w h top) h) ((ArrayCanvas px w h top) h)))
+(def canvas_top ((f Canvas)) int (match f ((Canvas fb w h top) top) ((ArrayCanvas px w h top) top)))
 
 ; Which of the frame's rows the screen's row y is.
 (def row_at ((top int) (h int) (y int)) int (mod (add y top) h))
 
 ; The index of the screen's pixel 0, y in the frame.
 (def row_start ((f Canvas) (y int)) int
-  (match f ((Canvas fb w h top) (mul (row_at top h y) w))))
+  (mul (row_at (canvas_top f) (canvas_h f) y) (canvas_w f)))
 
 ; Pixels i up to n of the frame, by index, all color.
-(def canvas_fill ((f Canvas) (c int) (i int) (n int)) int
-  (match f ((Canvas fb w h top) (fill fb c i n))))
+(def canvas_fill ((f Canvas) (c int) (i int) (n int)) Canvas
+  (match f
+    ((Canvas fb w h top) (let k (fill fb c i n) f))
+    ((ArrayCanvas px w h top) (ArrayCanvas (fill_cells px c i n) w h top))))
 
-(def put ((f Canvas) (x int) (y int) (c int)) int
-  (match f ((Canvas fb w h top) (device_write32 fb (mul (add (row_start f y) x) 4) c))))
+; Cells i up to n of px, all c.
+(def fill_cells ((px (array int)) (c int) (i int) (n int)) (array int)
+  (if (ge i n) px (fill_cells (array_set px i c) c (add i 1) n)))
+
+; The pixel at x, y, which must be on the canvas, color c.
+(def put ((f Canvas) (x int) (y int) (c int)) Canvas
+  (let i (add (row_start f y) x)
+    (match f
+      ((Canvas fb w h top) (let k (device_write32 fb (mul i 4) c) f))
+      ((ArrayCanvas px w h top) (ArrayCanvas (array_set px i c) w h top)))))
+
+; The color of the pixel at x, y, which must be on the canvas.
+(def canvas_pixel ((f Canvas) (x int) (y int)) int
+  (let i (add (row_start f y) x)
+    (match f
+      ((Canvas fb w h top) (bit_and (device_read32 fb (mul i 4)) 16777215))
+      ((ArrayCanvas px w h top) (bit_and (array_get px i) 16777215)))))
+
+; f, its rows read from its row top.
+(def canvas_from_top ((f Canvas) (top int)) Canvas
+  (match f
+    ((Canvas fb w h old) (Canvas fb w h top))
+    ((ArrayCanvas px w h old) (ArrayCanvas px w h top))))
 
 ; The frame after scrolling dy rows up: the top dy rows gone, and dy rows
 ; of color new at the bottom.
 (def scrolled ((f Canvas) (dy int) (c int)) Canvas
-  (match f
-    ((Canvas fb w h top)
-      (let f2 (Canvas fb w h (row_at top h dy))
-        (let k (fill_rows f2 0 (sub w 1) (sub h dy) h c) f2)))))
+  (let w (canvas_w f)
+    (let h (canvas_h f)
+      (let top (row_at (canvas_top f) h dy)
+        (fill_rows (canvas_from_top f top) 0 (sub w 1) (sub h dy) h c)))))
 
 ; ---------------------------------------------------------- drawing shapes
 
-(def plot ((f Canvas) (x int) (y int) (c int)) int
+(def plot ((f Canvas) (x int) (y int) (c int)) Canvas
   (if (if (lt x 0) true (if (ge x (canvas_w f)) true (if (lt y 0) true (ge y (canvas_h f)))))
-      0
+      f
       (put f x y c)))
 
-(def plot_all ((f Canvas) (ps (list Point)) (c int)) int
+(def plot_all ((f Canvas) (ps (list Point)) (c int)) Canvas
   (if (is_empty ps)
-      0
+      f
       (match (head ps)
-        ((Point x y) (let p (plot f x y c) (plot_all f (tail ps) c))))))
+        ((Point x y) (plot_all (plot f x y c) (tail ps) c)))))
 
 ; Columns x0 to x1 of row y, those on the screen.
-(def span ((f Canvas) (y int) (x0 int) (x1 int) (c int)) int
+(def span ((f Canvas) (y int) (x0 int) (x1 int) (c int)) Canvas
   (if (if (lt y 0) true (ge y (canvas_h f)))
-      0
+      f
       (match (clip_span x0 x1 (canvas_w f))
-        ((NoSpan) 0)
-        ((Span lo hi) (canvas_fill f c (add (row_start f y) lo) (add (row_start f y) (add hi 1)))))))
+        ((NoSpan) f)
+        ((Span lo hi) (let at (row_start f y) (canvas_fill f c (add at lo) (add at (add hi 1))))))))
 
 ; Rows dy from -r to r of a filled circle.
-(def disc ((f Canvas) (cx int) (cy int) (r int) (c int) (dy int)) int
+(def disc ((f Canvas) (cx int) (cy int) (r int) (c int) (dy int)) Canvas
   (if (gt dy r)
-      0
+      f
       (let hw (isqrt (sub (mul r r) (mul dy dy)))
-        (let s (span f (add cy dy) (sub cx hw) (add cx hw) c)
-          (disc f cx cy r c (add dy 1))))))
+        (disc (span f (add cy dy) (sub cx hw) (add cx hw) c) cx cy r c (add dy 1)))))
 
-(def fill_rect ((f Canvas) (x int) (y int) (rw int) (rh int) (c int)) int
+(def fill_rect ((f Canvas) (x int) (y int) (rw int) (rh int) (c int)) Canvas
   (if (if (lt rw 1) true (lt rh 1))
-      0
-      (fill_rows f x (add x (sub rw 1)) (max y 0) (min (add y rh) (canvas_h f)) c)))
+      f
+      (let end (min (add y rh) (canvas_h f))
+        (fill_rows f x (add x (sub rw 1)) (max y 0) end c))))
 
-(def fill_rows ((f Canvas) (x0 int) (x1 int) (y int) (end int) (c int)) int
+(def fill_rows ((f Canvas) (x0 int) (x1 int) (y int) (end int) (c int)) Canvas
   (if (ge y end)
-      0
-      (let s (span f y x0 x1 c) (fill_rows f x0 x1 (add y 1) end c))))
+      f
+      (fill_rows (span f y x0 x1 c) x0 x1 (add y 1) end c)))
 
-(def outline ((f Canvas) (x int) (y int) (rw int) (rh int) (c int)) int
+(def outline ((f Canvas) (x int) (y int) (rw int) (rh int) (c int)) Canvas
   (if (if (lt rw 1) true (lt rh 1))
-      0
+      f
       (let x1 (add x (sub rw 1))
         (let y1 (add y (sub rh 1))
           (let a (plot_all f (line_points x y x1 y) c)
-            (let b (plot_all f (line_points x y1 x1 y1) c)
-              (let l (plot_all f (line_points x y x y1) c)
-                (plot_all f (line_points x1 y x1 y1) c))))))))
+            (let b (plot_all a (line_points x y1 x1 y1) c)
+              (let l (plot_all b (line_points x y x y1) c)
+                (plot_all l (line_points x1 y x1 y1) c))))))))
 
 ; ---------------------------------------------------------------- drawing
 
@@ -601,19 +610,32 @@
 
 ; Rows r on of the image's part that place copies, into the frame, at
 ; percent of their brightness.
-(def blit ((f Canvas) (b bytes) (off int) (iw int) (percent int) (p Place) (r int)) int
+(def blit ((f Canvas) (b bytes) (off int) (iw int) (percent int) (p Place) (r int)) Canvas
   (match p
-    ((Place dx dy sx sy cw ch)
-      (if (ge r ch)
-          0
-          (match f
-            ((Canvas fb w h top)
-              (let row (blit_row fb (mul (add (row_start f (add dy r)) dx) 4) b off iw percent sx (add sy r) 0 cw)
-                (blit f b off iw percent p (add r 1)))))))))
+    ((Place to sx sy)
+      (if (ge r (rect_h to))
+          f
+          (blit (blit_row f (rect_x to) (add (rect_y to) r) b off iw percent sx (add sy r) (rect_w to)) b off iw percent p (add r 1))))))
 
-; Columns c up to cw of image row y from column sx, to the frame from at.
-(def blit_row ((fb IoDevice) (at int) (b bytes) (off int) (iw int) (percent int) (sx int) (y int) (c int) (cw int)) int
+; cw columns of image row sy from column sx, to the frame's row y from
+; column x: over a region written straight to it, over an array a pixel
+; at a time.
+(def blit_row ((f Canvas) (x int) (y int) (b bytes) (off int) (iw int) (percent int) (sx int) (sy int) (cw int)) Canvas
+  (match f
+    ((Canvas fb w h top) (let k (blit_run fb (mul (add (row_start f y) x) 4) b off iw percent sx sy 0 cw) f))
+    ((ArrayCanvas px w h top) (blit_cells f x y b off iw percent sx sy 0 cw))))
+
+; Columns c up to cw of image row y from column sx, to the region from at.
+(def blit_run ((fb IoDevice) (at int) (b bytes) (off int) (iw int) (percent int) (sx int) (y int) (c int) (cw int)) int
   (if (ge c cw)
       0
       (let w (device_write32 fb (add at (mul c 4)) (dim (pixel_at b off iw (add sx c) y) percent))
-        (blit_row fb at b off iw percent sx y (add c 1) cw))))
+        (blit_run fb at b off iw percent sx y (add c 1) cw))))
+
+; Columns c up to cw of image row sy from column sx, to the canvas's row y
+; from column x, a pixel at a time.
+(def blit_cells ((f Canvas) (x int) (y int) (b bytes) (off int) (iw int) (percent int) (sx int) (sy int) (c int) (cw int)) Canvas
+  (if (ge c cw)
+      f
+      (let p (dim (pixel_at b off iw (add sx c) sy) percent)
+        (blit_cells (put f (add x c) y p) x y b off iw percent sx sy (add c 1) cw))))

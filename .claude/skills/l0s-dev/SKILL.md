@@ -34,7 +34,7 @@ the `;` comment block directly above each form, so write yours that way
 | `user/lib/sys/` | in every program (`ULIB`): `l0s.l0` (call wrappers, `request`, `port_ask`, `reply_why`, `shm_region`, `shm_share_to`, `put_bytes`/`get_bytes`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `server.l0` (`name_register_or_why`, `irq_bind_or_why`, `request_numbers`, `Served`, `served_ok`/`served_error`, `request_answer`, `port_tell`, listeners), `cli.l0` (`complain_as`, `note_as`, `say`, `arg_number`, `read_whole`, `write_whole`, `done_why`; the host tools link it too). Where a `LIBS_` list says: `tty.l0` (`TTY`), `virtio.l0` (`VIRTIO`: `virtio_open`, `virtio_probe`, `virtq_mem`, `virtq_offer`, `virtq_wait`, `VirtqRun`), `procs.l0` (`PROCS`: the live processes, `state_text`) |
 | `user/lib/proto/` | the servers' protocols, client side: `display.l0`, `wm.l0`, `clock.l0`, `disk.l0`, `fs.l0`, `app.l0` (apps: a bundle's manifest, the bundles there are, the app a program is, running one by its bundle's name) |
 | `user/lib/format/` | data as bytes, pure, linked by host tools too: `uuid.l0` (UUIDs, version 7), `crc32.l0`, `gpt.l0` (the partition table, `gpt_layout`; `PARTS` is these three), `l0fs.l0` (a volume's on-disk format), `ppm.l0` (PPM images, `rgb` and its channels) |
-| `user/lib/gfx/`, `user/lib/ui/` | `render.l0` (`RENDER` is it with `ppm.l0`: shapes, the font, `corner_cut`, `draw`'s commands); the toolkit (`l0s-ui`) |
+| `user/lib/gfx/`, `user/lib/ui/` | `rect.l0` (`RECT`: `Rect`, the one rectangle type, and its operations, for layout, painting, damage and the protocols); `render.l0` (`RENDER` is it with `ppm.l0` and `rect.l0`: the `Canvas`, over a shared region or an array (`canvas_new`), shapes, the font, `corner_cut`, `draw`'s commands); the toolkit (`l0s-ui`) |
 | `user/bin/NAME/`, `user/sbin/NAME/`, `user/apps/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`), and any more `.l0` files of its own with their tests (`sh/files.l0`, `wm/launcher.l0`). The directory says where it goes: `bin` a command, `/bin/NAME`; `sbin` a driver or service, `/sbin/NAME`; `apps` an app, with its bundle's source `APP.app/` (`manifest`, `icon.draw`) beside it, `/Applications/APP.app/NAME`. The Makefile finds all three |
 | `user/sbin/wm/launcher.l0` | the compositor's launcher, GNOME Shell's grid of apps: its layout, painting and clicks |
 | `demo/etc/` | the demo's `inittab`, `motd`; `tests/screen/etc/` the screen tests' |
@@ -68,8 +68,9 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
   `IoDone`'s. Look a name up first: `make -s doc Q=NAME`.
 - **Before writing a helper, look for it**: `common/text.l0` has the list
   and string helpers, `cli.l0` failing and files, `server.l0` and `l0s.l0`
-  asking and answering. A second copy under another prefix is what this
-  layout exists to stop.
+  asking and answering, `rect.l0` rectangles, and `render.l0` drawing on
+  any canvas, an array's too. A second copy under another prefix is what
+  this layout exists to stop.
 - The toolkit prefixes every name `ui_` and every type `Ui`; do the same in
   any new library that many programs link. Programs never linked together
   may reuse names (`complain`, `serve`, `requested`).

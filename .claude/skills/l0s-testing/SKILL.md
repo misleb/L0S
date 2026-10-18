@@ -52,6 +52,12 @@ The `l0-code` skill has the test syntax: `(def test_NAME () int ...)`, the
   rendering of it as text with `check_str`, because a failing string shows
   where it differs: `placed_text` (layers), `hit_text`, `boxes_text`,
   `run_text`, `segs_text`. Write one for any new structure.
+- **Drawing is tested on an array.** No region opens under `l0 test`, but
+  `render.l0`'s `canvas_new w h color` is a canvas over an array that
+  every drawing and painting function takes and returns: draw, then read
+  pixels back with `canvas_pixel`, or as `#`/`.` rows (`canvas_art` in
+  `render_test.l0`, `px_at` in `paint_test.l0`). `tools/mkicon` draws
+  icons the same way, so `mkicon_test.l0` pins their pixels.
 - **Pin numbers, not just shapes.** Geometry tests give exact pixels and say
   in a comment how they were worked out (`test_hit_close` in `wm_test.l0`).
   When the geometry changes, recompute and update them, along with the

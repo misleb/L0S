@@ -1,55 +1,14 @@
 ; paint.l0 -- what the toolkit draws, and drawing it into a canvas
-; (render.l0): rectangles, the ops a widget is painted with, and the
-; buffers windows are drawn in.
+; (render.l0): the ops a widget is painted with, and the buffers windows
+; are drawn in. Where things go is rect.l0's Rect.
 ;
 ; Painting is in two halves. Layout (widget.l0) says what to paint, as a
 ; list of UiPaint ops, which tests can look at; ui_paint then does them
 ; on a canvas, each cut to a clip rectangle, so that a change repaints
 ; only where it changed. No layer blends, so a rounded corner's edge is
 ; mixed by hand with what is under it: a color the op is given, or, if it
-; is given -1, the pixel already there.
-
-; -------------------------------------------------------------- rectangles
-
-; x, y, width, height.
-(data UiRect (UiRect int int int int))
-
-(def ui_rx ((r UiRect)) int (match r ((UiRect x y w h) x)))
-(def ui_ry ((r UiRect)) int (match r ((UiRect x y w h) y)))
-(def ui_rw ((r UiRect)) int (match r ((UiRect x y w h) w)))
-(def ui_rh ((r UiRect)) int (match r ((UiRect x y w h) h)))
-
-(def ui_rect_empty ((r UiRect)) bool (if (le (ui_rw r) 0) true (le (ui_rh r) 0)))
-
-; Where a and b overlap: empty, 0 by 0, if they do not.
-(def ui_rect_clip ((a UiRect) (b UiRect)) UiRect
-  (let x0 (max (ui_rx a) (ui_rx b))
-    (let y0 (max (ui_ry a) (ui_ry b))
-      (let x1 (min (add (ui_rx a) (ui_rw a)) (add (ui_rx b) (ui_rw b)))
-        (let y1 (min (add (ui_ry a) (ui_rh a)) (add (ui_ry b) (ui_rh b)))
-          (if (if (le x1 x0) true (le y1 y0)) (UiRect x0 y0 0 0) (UiRect x0 y0 (sub x1 x0) (sub y1 y0))))))))
-
-(def ui_rect_overlaps ((a UiRect) (b UiRect)) bool (not (ui_rect_empty (ui_rect_clip a b))))
-
-; The least rectangle holding both; an empty one holds nothing.
-(def ui_rect_union ((a UiRect) (b UiRect)) UiRect
-  (if (ui_rect_empty a)
-      b
-      (if (ui_rect_empty b)
-          a
-          (let x0 (min (ui_rx a) (ui_rx b))
-            (let y0 (min (ui_ry a) (ui_ry b))
-              (UiRect x0 y0 (sub (max (add (ui_rx a) (ui_rw a)) (add (ui_rx b) (ui_rw b))) x0)
-                            (sub (max (add (ui_ry a) (ui_rh a)) (add (ui_ry b) (ui_rh b))) y0)))))))
-
-(def ui_rect_has ((r UiRect) (x int) (y int)) bool
-  (if (if (ge x (ui_rx r)) (lt x (add (ui_rx r) (ui_rw r))) false)
-      (if (ge y (ui_ry r)) (lt y (add (ui_ry r) (ui_rh r))) false)
-      false))
-
-; r shrunk by d on every side.
-(def ui_rect_inset ((r UiRect) (d int)) UiRect
-  (match r ((UiRect x y w h) (UiRect (add x d) (add y d) (max 0 (sub w (mul 2 d))) (max 0 (sub h (mul 2 d)))))))
+; is given -1, the pixel already there. Like render.l0's drawing, each
+; painting function returns the canvas painted on.
 
 ; ----------------------------------------------------------------- the ops
 
@@ -57,10 +16,14 @@
 (data UiAlign (UiStart) (UiCenter) (UiEnd))
 
 (data UiPaint
-  (UiPFill UiRect int)                                 ; rect, color
-  (UiPRound UiRect int int int)                        ; rect, radius, color, color under the corners or -1
-  (UiPText UiRect (list int) UiAlign int bool int)     ; rect, text, align, color, bold, scale
+  (UiPFill Rect int)                                 ; rect, color
+  (UiPRound Rect int int int)                        ; rect, radius, color, color under the corners or -1
+  (UiPText Rect (list int) UiAlign int bool int)     ; rect, text, align, color, bold, scale
   (UiPIcon int int (list int) int int))                ; x, y, icon name, color, scale
+
+; Each of rs filled with color c.
+(def ui_fills ((rs (list Rect)) (c int)) (list UiPaint)
+  (if (is_empty rs) (nil UiPaint) (cons (UiPFill (head rs) c) (ui_fills (tail rs) c))))
 
 ; ------------------------------------------------------------------- text
 
@@ -109,120 +72,112 @@
 ; ---------------------------------------------------------------- painting
 
 ; Does ops on canvas c, each cut to clip, and to the canvas.
-(def ui_paint ((c Canvas) (font (array int)) (clip UiRect) (ops (list UiPaint))) int
-  (let k (ui_rect_clip clip (UiRect 0 0 (canvas_w c) (canvas_h c)))
-    (if (ui_rect_empty k) 0 (ui_paint_ops c font k ops))))
+(def ui_paint ((c Canvas) (font (array int)) (clip Rect) (ops (list UiPaint))) Canvas
+  (let k (rect_clip clip (Rect 0 0 (canvas_w c) (canvas_h c)))
+    (if (rect_empty k) c (ui_paint_ops c font k ops))))
 
-(def ui_paint_ops ((c Canvas) (font (array int)) (k UiRect) (ops (list UiPaint))) int
+(def ui_paint_ops ((c Canvas) (font (array int)) (k Rect) (ops (list UiPaint))) Canvas
   (if (is_empty ops)
-      0
-      (let p (ui_paint_op c font k (head ops))
-        (ui_paint_ops c font k (tail ops)))))
+      c
+      (ui_paint_ops (ui_paint_op c font k (head ops)) font k (tail ops))))
 
-(def ui_paint_op ((c Canvas) (font (array int)) (k UiRect) (op UiPaint)) int
+(def ui_paint_op ((c Canvas) (font (array int)) (k Rect) (op UiPaint)) Canvas
   (match op
     ((UiPFill r color) (ui_fill c k r color))
-    ((UiPRound r radius color under) (ui_round c k r (ui_fit_radius radius (ui_rw r) (ui_rh r)) color under))
+    ((UiPRound r radius color under) (ui_round c k r (ui_fit_radius radius (rect_w r) (rect_h r)) color under))
     ((UiPText r s a color bold scale) (ui_text c font k r s a color bold scale))
     ((UiPIcon x y name color scale) (ui_icon c k x y (ui_icon_rows name) color scale 0))))
 
 ; r filled, as much of it as is in k.
-(def ui_fill ((c Canvas) (k UiRect) (r UiRect) (color int)) int
-  (let a (ui_rect_clip k r)
-    (if (ui_rect_empty a) 0 (match a ((UiRect x y w h) (fill_rect c x y w h color))))))
+(def ui_fill ((c Canvas) (k Rect) (r Rect) (color int)) Canvas
+  (let a (rect_clip k r)
+    (if (rect_empty a) c (match a ((Rect x y w h) (fill_rect c x y w h color))))))
 
 ; Columns x0 up to x1 of row y, those in k.
-(def ui_span ((c Canvas) (k UiRect) (y int) (x0 int) (x1 int) (color int)) int
-  (if (if (lt y (ui_ry k)) true (ge y (add (ui_ry k) (ui_rh k))))
-      0
-      (let lo (max x0 (ui_rx k))
-        (let hi (min x1 (add (ui_rx k) (ui_rw k)))
-          (if (le hi lo) 0 (span c y lo (sub hi 1) color))))))
+(def ui_span ((c Canvas) (k Rect) (y int) (x0 int) (x1 int) (color int)) Canvas
+  (if (if (lt y (rect_y k)) true (ge y (rect_y1 k)))
+      c
+      (let lo (max x0 (rect_x k))
+        (let hi (min x1 (rect_x1 k))
+          (if (le hi lo) c (span c y lo (sub hi 1) color))))))
 
 ; The pixel at x, y, if it is in k.
-(def ui_put ((c Canvas) (k UiRect) (x int) (y int) (color int)) int
-  (if (ui_rect_has k x y) (put c x y color) 0))
-
-; The pixel at x, y of the canvas, which must be on it.
-(def ui_pixel ((c Canvas) (x int) (y int)) int
-  (match c ((Canvas fb w h top) (bit_and (device_read32 fb (mul (add (row_start c y) x) 4)) 16777215))))
+(def ui_put ((c Canvas) (k Rect) (x int) (y int) (color int)) Canvas
+  (if (rect_has k x y) (put c x y color) c))
 
 ; color at pct percent over what is under it: under, or if under is -1,
 ; the pixel there now.
-(def ui_blend ((c Canvas) (k UiRect) (x int) (y int) (color int) (pct int) (under int)) int
-  (if (not (ui_rect_has k x y))
-      0
-      (put c x y (ui_mix color (if (lt under 0) (ui_pixel c x y) under) pct))))
+(def ui_blend ((c Canvas) (k Rect) (x int) (y int) (color int) (pct int) (under int)) Canvas
+  (if (not (rect_has k x y))
+      c
+      (let u (if (lt under 0) (canvas_pixel c x y) under)
+        (put c x y (ui_mix color u pct)))))
 
 ; A rectangle with rounded corners, row by row: each row's edge pixels
 ; mixed by how much of them the corner covers.
-(def ui_round ((c Canvas) (k UiRect) (r UiRect) (radius int) (color int) (under int)) int
+(def ui_round ((c Canvas) (k Rect) (r Rect) (radius int) (color int) (under int)) Canvas
   (if (eq radius 0)
       (ui_fill c k r color)
-      (ui_round_rows c k r radius color under (max 0 (sub (ui_ry k) (ui_ry r)))
-                     (min (ui_rh r) (sub (add (ui_ry k) (ui_rh k)) (ui_ry r))))))
+      (ui_round_rows c k r radius color under (max 0 (sub (rect_y k) (rect_y r)))
+                     (min (rect_h r) (sub (rect_y1 k) (rect_y r))))))
 
-(def ui_round_rows ((c Canvas) (k UiRect) (r UiRect) (radius int) (color int) (under int) (dy int) (end int)) int
+(def ui_round_rows ((c Canvas) (k Rect) (r Rect) (radius int) (color int) (under int) (dy int) (end int)) Canvas
   (if (ge dy end)
-      0
-      (let d (ui_round_row c k r radius color under dy)
-        (ui_round_rows c k r radius color under (add dy 1) end))))
+      c
+      (ui_round_rows (ui_round_row c k r radius color under dy) k r radius color under (add dy 1) end)))
 
-(def ui_round_row ((c Canvas) (k UiRect) (r UiRect) (radius int) (color int) (under int) (dy int)) int
+(def ui_round_row ((c Canvas) (k Rect) (r Rect) (radius int) (color int) (under int) (dy int)) Canvas
   (match r
-    ((UiRect x y w h)
+    ((Rect x y w h)
       (let in16 (ui_row_inset16 radius h dy)
         (let full (div in16 16)
           (let part (mod in16 16)
             (let edge (if (gt part 0) 1 0)
               (let s (ui_span c k (add y dy) (add x (add full edge)) (sub (add x w) (add full edge)) color)
                 (if (eq edge 0)
-                    0
+                    s
                     (let pct (div (mul (sub 16 part) 100) 16)
-                      (let l (ui_blend c k (add x full) (add y dy) color pct under)
-                        (ui_blend c k (sub (add x w) (add full 1)) (add y dy) color pct under))))))))))))
+                      (let l (ui_blend s k (add x full) (add y dy) color pct under)
+                        (ui_blend l k (sub (add x w) (add full 1)) (add y dy) color pct under))))))))))))
 
 ; Text in r, along it as a says, in its middle up and down: cut short
 ; with "..." if it is too wide. Bold is struck twice, a pixel apart.
-(def ui_text ((c Canvas) (font (array int)) (k UiRect) (r UiRect) (s (list int)) (a UiAlign) (color int) (bold bool) (scale int)) int
+(def ui_text ((c Canvas) (font (array int)) (k Rect) (r Rect) (s (list int)) (a UiAlign) (color int) (bold bool) (scale int)) Canvas
   (if (eq (array_len font) 0)
-      0
-      (let shown (ui_ellipsized s (sub (ui_rw r) (if bold 1 0)) scale)
-        (let x (ui_aligned (ui_rx r) (ui_rw r) (ui_text_w shown bold scale) a)
-          (let y (add (ui_ry r) (div (sub (ui_rh r) (mul (ui_char_h) scale)) 2))
+      c
+      (let shown (ui_ellipsized s (sub (rect_w r) (if bold 1 0)) scale)
+        (let x (ui_aligned (rect_x r) (rect_w r) (ui_text_w shown bold scale) a)
+          (let y (add (rect_y r) (div (sub (rect_h r) (mul (ui_char_h) scale)) 2))
             (let t (ui_chars c font k x y shown color scale)
-              (if bold (ui_chars c font k (add x 1) y shown color scale) 0)))))))
+              (if bold (ui_chars t font k (add x 1) y shown color scale) t)))))))
 
-(def ui_chars ((c Canvas) (font (array int)) (k UiRect) (x int) (y int) (s (list int)) (color int) (scale int)) int
+(def ui_chars ((c Canvas) (font (array int)) (k Rect) (x int) (y int) (s (list int)) (color int) (scale int)) Canvas
   (if (is_empty s)
-      0
-      (let g (ui_glyph c font k x y (drawable (head s)) color scale 0)
-        (ui_chars c font k (add x (mul (ui_char_w) scale)) y (tail s) color scale))))
+      c
+      (ui_chars (ui_glyph c font k x y (drawable (head s)) color scale 0) font k (add x (mul (ui_char_w) scale)) y (tail s) color scale)))
 
-(def ui_glyph ((c Canvas) (font (array int)) (k UiRect) (x int) (y int) (code int) (color int) (scale int) (r int)) int
+(def ui_glyph ((c Canvas) (font (array int)) (k Rect) (x int) (y int) (code int) (color int) (scale int) (r int)) Canvas
   (if (eq r (ui_char_h))
-      0
-      (let b (ui_bits c k x (add y (mul r scale)) (glyph_row font code r) 8 color scale 0)
-        (ui_glyph c font k x y code color scale (add r 1)))))
+      c
+      (ui_glyph (ui_bits c k x (add y (mul r scale)) (glyph_row font code r) 8 color scale 0) font k x y code color scale (add r 1))))
 
 ; The lit bits of a row n wide, the leftmost the highest, from x, y.
-(def ui_bits ((c Canvas) (k UiRect) (x int) (y int) (bits int) (n int) (color int) (scale int) (col int)) int
+(def ui_bits ((c Canvas) (k Rect) (x int) (y int) (bits int) (n int) (color int) (scale int) (col int)) Canvas
   (if (eq col n)
-      0
-      (let p (if (eq (bit_and (bit_shr bits (sub (sub n 1) col)) 1) 1)
-                 (ui_dot c k (add x (mul col scale)) y color scale)
-                 0)
-        (ui_bits c k x y bits n color scale (add col 1)))))
+      c
+      (ui_bits (if (eq (bit_and (bit_shr bits (sub (sub n 1) col)) 1) 1)
+                   (ui_dot c k (add x (mul col scale)) y color scale)
+                   c)
+               k x y bits n color scale (add col 1))))
 
 ; A pixel of text or an icon: scale by scale pixels.
-(def ui_dot ((c Canvas) (k UiRect) (x int) (y int) (color int) (scale int)) int
-  (if (eq scale 1) (ui_put c k x y color) (ui_fill c k (UiRect x y scale scale) color)))
+(def ui_dot ((c Canvas) (k Rect) (x int) (y int) (color int) (scale int)) Canvas
+  (if (eq scale 1) (ui_put c k x y color) (ui_fill c k (Rect x y scale scale) color)))
 
-(def ui_icon ((c Canvas) (k UiRect) (x int) (y int) (rows (list int)) (color int) (scale int) (r int)) int
+(def ui_icon ((c Canvas) (k Rect) (x int) (y int) (rows (list int)) (color int) (scale int) (r int)) Canvas
   (if (is_empty rows)
-      0
-      (let b (ui_bits c k x (add y (mul r scale)) (head rows) (ui_icon_size) color scale 0)
-        (ui_icon c k x y (tail rows) color scale (add r 1)))))
+      c
+      (ui_icon (ui_bits c k x (add y (mul r scale)) (head rows) (ui_icon_size) color scale 0) k x y (tail rows) color scale (add r 1))))
 
 ; ----------------------------------------------------------------- buffers
 
@@ -249,17 +204,16 @@
 
 ; The arrow drawn into c, a cursor's 64 by 64 buffer of b, g, r, alpha:
 ; what it does not cover stays as it was, clear.
-(def ui_paint_arrow ((c Canvas)) int (ui_arrow_rows c (ui_arrow_art) 0))
+(def ui_paint_arrow ((c Canvas)) Canvas (ui_arrow_rows c (ui_arrow_art) 0))
 
-(def ui_arrow_rows ((c Canvas) (rows (list (list int))) (y int)) int
+(def ui_arrow_rows ((c Canvas) (rows (list (list int))) (y int)) Canvas
   (if (is_empty rows)
-      0
-      (let r (ui_arrow_row c (head rows) 0 y)
-        (ui_arrow_rows c (tail rows) (add y 1)))))
+      c
+      (ui_arrow_rows (ui_arrow_row c (head rows) 0 y) (tail rows) (add y 1))))
 
-(def ui_arrow_row ((c Canvas) (row (list int)) (x int) (y int)) int
+(def ui_arrow_row ((c Canvas) (row (list int)) (x int) (y int)) Canvas
   (if (is_empty row)
-      0
-      (let p (if (eq (head row) 87) (put c x y (bit_or (ui_opaque) (ui_white)))      ; W
-                 (if (eq (head row) 66) (put c x y (ui_opaque)) 0))                     ; B
-        (ui_arrow_row c (tail row) (add x 1) y))))
+      c
+      (ui_arrow_row (if (eq (head row) 87) (put c x y (bit_or (ui_opaque) (ui_white)))      ; W
+                        (if (eq (head row) 66) (put c x y (ui_opaque)) c))                     ; B
+                    (tail row) (add x 1) y)))

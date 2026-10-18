@@ -808,7 +808,8 @@ spaces; an app's name may be several. Its source is the directory beside
 its program's, `user/apps/vt/Terminal.app`, holding the manifest and
 `icon.draw`, the icon as lines of `run draw`'s commands, which
 [tools/mkicon](tools/mkicon/mkicon.l0) draws at build time, on the
-launcher's ground, into the 48×48 PPM: a rounded square and a symbolic
+launcher's ground, into the 48×48 PPM, with the desktop's own drawing on
+a canvas over an array: a rounded square and a symbolic
 icon at twice its size (`round 0 0 48 48 10 dark_3`,
 `icon 8 8 utilities-terminal 2 white`). Making an app is making that
 directory; the Makefile finds it, and the launcher finds the bundle.
@@ -1126,8 +1127,8 @@ name in a library is taken in every program that links it.
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
 | [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk` |
-| [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it | `wm` |
-| [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
+| [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it; its rectangles are `rect.l0`'s | `wm` |
+| [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh`, `disks` |
@@ -1137,7 +1138,8 @@ name in a library is taken in every program that links it.
 | [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
-| [gfx/render.l0](user/lib/gfx/render.l0) | drawing into a buffer of pixels: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `tools/mkicon` |
+| [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
+| [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `tools/mkicon` |
 | [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
 
 ## Tests

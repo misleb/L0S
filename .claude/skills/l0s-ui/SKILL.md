@@ -55,11 +55,28 @@ display. This is the working summary, with the rules.
 
 ## Painting and widgets
 
-- **`paint.l0`**: `UiRect`; the ops `UiPFill`, `UiPRound` (antialiased only
-  against the color given, or `-1`, the pixel already there), `UiPText`
-  (aligned, bold as a double strike, ellipsized with `...`, scale 1 or 2),
-  `UiPIcon`. `ui_paint canvas font clip ops` runs a list. `ui_buffer w h`
-  makes a shared buffer and its `Canvas`.
+- **Rectangles** are `user/lib/gfx/rect.l0`'s `Rect` (x, y, width,
+  height) everywhere: layout, painting, the protocols' damage, the
+  display driver. `rect_x`…`rect_h`, `rect_x1`/`rect_y1` (just past the
+  end), `rect_clip` (cut to a screen is a clip with `(Rect 0 0 w h)`),
+  `rect_union` (`rect_union_all` of a list), `rect_overlaps`, `rect_has`,
+  `rect_inset`; an empty one (`rect_empty`, `rect_none`) holds nothing.
+  `rect_merge` joins damage until no two rectangles overlap: `ui_changed`
+  merges a window's damage with it, and the display driver a `damage`
+  request's. Never declare another rectangle or another merge.
+- **`paint.l0`**: the ops `UiPFill` (`ui_fills rs c` for many),
+  `UiPRound` (antialiased only against the color given, or `-1`, the
+  pixel already there), `UiPText` (aligned, bold as a double strike,
+  ellipsized with `...`, scale 1 or 2), `UiPIcon`. `ui_paint canvas font
+  clip ops` runs a list. `ui_buffer w h` makes a shared buffer and its
+  `Canvas`.
+- **A canvas** (`render.l0`) is over a shared region or, for host tools
+  and tests, an array (`canvas_new w h color`, read back with
+  `canvas_pixel`). Every drawing and painting function returns the canvas
+  drawn on: over a region it is the same one, over an array the only one
+  holding the pixels, so pass it on and keep no other. Host tests draw
+  this way (`paint_test.l0`, `render_test.l0`), and so does
+  `tools/mkicon`.
 - **Text** is the 8×16 bitmap font (`ui_char_w`, `ui_char_h`), ASCII only.
   `ui_text_w s bold scale` measures.
 - **Icons** are 16×16 `#`/`.` art in `icons.l0`, named as GNOME's symbolic
@@ -148,7 +165,8 @@ driver composes them.
   client asked and as `windows` reports it. The window is `outer_w cw` = `cw +
   2·edge` wide; its frame is `frame_h ch` = `ch + edge` high under the 46-row
   title bar, `edge` = 2. The frame is painted only where it shows: the sides,
-  the foot, and its bottom corners (`frame_ops`), in the title bar's ground.
+  the foot, and its bottom corners (`frame_rects`), in the title bar's
+  ground (`frame_ops`), and those same rectangles are its damage.
 - **Corners**: `display_shape` rounds the title bar's top corners
   (`top_radius`, 12), the frame's bottom ones (`bottom_radius`) and the
   content's inside them (`inner_radius`, 12 − edge). `cut_off` uses the
