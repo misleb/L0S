@@ -2,7 +2,7 @@
 # disks.sh -- boots tests/disks/etc's initramfs, the compositor with no
 # window and the disk's driver and file server, on a fresh disk from
 # tools/mkdisk. Writes a file on data, types run disks & at the serial
-# shell, which opens Disks (user/disks) in a window, learns where it is
+# shell, which opens Disks (user/apps/disks) in a window, learns where it is
 # from run windows, and checks, by QEMU's screendump:
 #
 #   1. the sidebar's ground, ebebed, and its drive's row selected, d9d9da

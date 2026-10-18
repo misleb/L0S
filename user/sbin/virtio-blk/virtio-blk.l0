@@ -1,0 +1,195 @@
+; virtio-blk.l0 -- a disk driver for QEMU's virtio-blk, serving the disk
+; protocol, user/lib/disk.l0: 512-byte sectors, read into and written
+; from pages a client shares with it. Its module must be flagged dev.
+;
+; No sector passes through a message, or through the driver: a request
+; names the client's pages, where they are mapped here, and the device
+; reads or writes them itself, by DMA. The driver makes one request of
+; the device at a time, and waits for it as virtq_wait does.
+
+(def blk_device () int 2)           ; DeviceID of a block device
+
+; ---------------------------------------------------------------- requests
+
+; virtio-blk's request types and statuses (virtio 1.2, section 5.2.6).
+(def blk_in () int 0)               ; read sectors from the disk
+(def blk_out () int 1)              ; write sectors to it
+(def blk_ok () int 0)
+(def blk_ioerr () int 1)
+(def blk_unsupp () int 2)
+
+(def sector_size () int 512)
+
+; The most sectors one request may move: 64 KB, 16 pages, so a chain is
+; at most 18 descriptors, within the ring.
+(def blk_max_sectors () int 128)
+
+; A request's header: its type, a reserved word, and the first sector.
+(def blk_header ((type int) (sector int)) (list int)
+  (append (u32_le type) (append (u32_le 0) (le64 sector))))
+
+; The n bytes of a client's buffer whose pages the device reaches at
+; addrs, as runs, in order.
+(def blk_runs ((addrs (array int)) (n int)) (list VirtqRun)
+  (rev (virtq_page_runs addrs 0 n (nil VirtqRun))))
+
+; A request's chain: the header at hdr, readable; each run of data, which
+; the device writes when reading the disk; and the status byte at status,
+; which it writes.
+(def blk_descriptors ((hdr int) (runs (list VirtqRun)) (reading bool) (status int)) (list int)
+  (let flags (if reading (bit_or (desc_next) (desc_write)) (desc_next))
+    (rev (push (descriptor status 1 (desc_write) 0)
+               (virtq_push_chain runs flags 2 (push (descriptor hdr 16 (desc_next) 1) (nil int)))))))
+
+; What the device's status byte says, as a reason; empty for ok.
+(def blk_why ((status int)) (list int)
+  (if (eq status (blk_ok)) ""
+  (if (eq status (blk_ioerr)) "the disk failed the request"
+  (if (eq status (blk_unsupp)) "the disk does not do that"
+  (append "the disk answered " (digits status))))))
+
+; Why sectors from sector, count of them, cannot be moved on a disk of cap
+; sectors; empty if they can.
+(def blk_refusal ((sector int) (count int) (cap int)) (list int)
+  (if (if (lt count 1) true (gt count (blk_max_sectors)))
+      (append "a request moves 1 to " (append (digits (blk_max_sectors)) " sectors"))
+      (if (lt sector 0)
+          "no sector below 0"
+          (if (gt (add sector count) cap)
+              (append "past the disk's end, sector " (digits (sub cap 1)))
+              ""))))
+
+; The pages count sectors take.
+(def blk_pages ((count int)) int (pages_for (mul count (sector_size))))
+
+; ---------------------------------------------------------------- the queue
+
+; The queue, in one DMA page: 16 descriptors at 0, the available ring at
+; 256, the used ring at 512, the request's header at 1024 and its status
+; at 1040.
+(def ring_size () int 16)
+(def avail_off () int (virtq_avail_off (ring_size)))
+(def used_off () int (virtq_used_off (ring_size)))
+(def header_off () int 1024)
+(def status_off () int 1040)
+
+; The driver: the transports' registers and the disk's transport, the
+; queue's page and where the device reaches it, the disk's size in
+; sectors, and how many requests it has made.
+(data Blk (Blk IoDevice int IoDevice int int int))
+
+; What came of a request: the driver after it, and why it failed, or
+; empty.
+(data BlkDone (BlkDone Blk (list int)))
+
+; type for count sectors from sector, the data at runs, made of the
+; device and waited for.
+(def blk_request ((b Blk) (type int) (sector int) (runs (list VirtqRun))) BlkDone
+  (match b
+    ((Blk d t q qa cap n)
+      (let h (put_bytes q (header_off) (blk_header type sector))
+        (let s (device_write8 q (status_off) 255)
+          (let c (put_bytes q 0 (blk_descriptors (add qa (header_off)) runs (eq type (blk_in)) (add qa (status_off))))
+            (blk_queued b)))))))
+
+; The request at descriptor 0 made available and the device told.
+(def blk_queued ((b Blk)) BlkDone
+  (match b
+    ((Blk d t q qa cap n)
+      (let n2 (virtq_offer d t 0 q (avail_off) (ring_size) n 0)
+        (blk_finished (Blk d t q qa cap n2) (clock_ns))))))
+
+; The request made at since, waited for, and its status read.
+(def blk_finished ((b Blk) (since int)) BlkDone
+  (match b
+    ((Blk d t q qa cap n)
+      (if (virtq_wait q (used_off) n since)
+          (BlkDone b (blk_why (device_read8 q (status_off))))
+          (BlkDone b "the disk did not answer")))))
+
+; ---------------------------------------------------------------- driving
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "virtio-blk" why))
+
+; The driver: the transports opened, and the first disk among them found.
+(def virtio_blk () int
+  (match (virtio_open)
+    ((Err why) (complain why))
+    ((Ok d) (found d (find_device d (blk_device) 0)))))
+
+; No disk is no failure: the board was started without one.
+(def found ((d IoDevice) (t int)) int
+  (match (virtio_probe d t "the virtio-blk" "request" (ring_size))
+    ((VirtioAbsent) (note_as "virtio-blk" "no virtio-blk on the board"))
+    ((VirtioUnusable why) (complain why))
+    ((VirtioReady t2)
+      (match (virtq_mem 1 "the queue")
+        ((NoVirtqMem why) (complain why))
+        ((VirtqMem va q addrs) (started (Blk d t q (array_get addrs 0) (capacity d t) 0)))))))
+
+; The disk's size in sectors: config's capacity, a le64 at its start.
+(def capacity ((d IoDevice) (t int)) int
+  (bit_or (device_read32 d (treg t (reg_config)))
+          (bit_shl (device_read32 d (treg t (add (reg_config) 4))) 32)))
+
+; The queue started, the device told the driver is ready, and the disk
+; served.
+(def started ((b Blk)) int
+  (match b
+    ((Blk d t q qa cap n)
+      (let s (start_queue d t 0 (ring_size) qa (add qa (avail_off)) (add qa (used_off)))
+        (let o (driver_ok d t)
+          (start_serving b))))))
+
+; ---------------------------------------------------------------- serving
+
+; Registers as disk, then answers each request, as disk.l0 makes them:
+; ok, disk SECTORS 512, or error: WHY.
+(def start_serving ((b Blk)) int
+  (let port (port_new)
+    (let r (name_register_or_why port "disk")
+      (if (is_empty r) (serve b port) (complain r)))))
+
+; Each request on port answered, one at a time.
+(def serve ((b Blk) (port int)) int
+  (match (port_receive port)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from payload)
+      (match (handle b (request_body payload))
+        ((Served b2 reply)
+          (let r (request_answer payload reply)
+            (serve b2 port)))))))
+
+; A request's body, its op and then its numbers, answered.
+(def handle ((b Blk) (body (list int))) (Served Blk)
+  (match (request_numbers body)
+    ((ReqBad why) (served_error b why))
+    ((ReqNums op ns) (requested b op ns (length ns)))))
+
+; The request op with its n numbers ns, answered.
+(def requested ((b Blk) (op (list int)) (ns (list int)) (n int)) (Served Blk)
+  (if (if (eq op "info") (eq n 0) false) (info b)
+  (if (if (eq op "read") (eq n 3) false) (moved b (blk_in) (nth ns 0) (nth ns 1) (nth ns 2))
+  (if (if (eq op "write") (eq n 3) false) (moved b (blk_out) (nth ns 0) (nth ns 1) (nth ns 2))
+  (served_error b (append "no request " op))))))
+
+; info: the disk's size, in sectors, and a sector's.
+(def info ((b Blk)) (Served Blk)
+  (match b
+    ((Blk d t q qa cap n)
+      (Served b (append "disk " (append (digits cap) (append " " (digits (sector_size)))))))))
+
+; read or write SECTOR COUNT VA: count sectors from sector moved, as type
+; says, between the disk and the client's pages shared here at va.
+(def moved ((b Blk) (type int) (sector int) (count int) (va int)) (Served Blk)
+  (match b
+    ((Blk d t q qa cap n)
+      (let why (blk_refusal sector count cap)
+        (if (not (is_empty why))
+            (served_error b why)
+            (match (page_addresses va (blk_pages count))
+              ((None) (served_error b "the buffer is not shared with the disk"))
+              ((Some addrs)
+                (match (blk_request b type sector (blk_runs addrs (mul count (sector_size))))
+                  ((BlkDone b2 err) (if (is_empty err) (served_ok b2) (served_error b2 err)))))))))))

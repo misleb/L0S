@@ -1,0 +1,73 @@
+; uart.l0 -- the console: a driver in user space for the board's PL011
+; serial port, which is the terminal QEMU is run from. It takes the
+; port's receive interrupt, edits what is typed into lines, echoing it,
+; and hands each line to whoever asked for one. Its module must be
+; flagged dev. Given the argument noecho, it does not echo.
+;
+; It registers its port as "console", a terminal as user/lib/tty.l0 says:
+; "r" for a line, "i" for Ctrl-C notices, and "w" for bytes to write,
+; which it writes to the serial line through its own standard output,
+; the kernel's.
+
+(def uart_base () int 150994944)    ; 0x09000000
+(def uart_irq () int 33)
+
+; The PL011's registers, as offsets.
+(def reg_data () int 0)             ; the next byte received
+(def reg_flags () int 24)           ; bit 4: nothing received
+(def reg_mask () int 56)            ; which interrupts are raised
+(def reg_clear () int 68)           ; ends interrupts
+(def rx_interrupts () int 80)       ; receive, 16, and receive timeout, 64
+
+(def complain ((why (list int))) int (complain_as "uart" why))
+
+(def uart () int
+  (match (open_device (uart_base) 4096)
+    ((DeviceFailed fault why) (complain (append "no serial port: " why)))
+    ((DeviceOpened d)
+      (let port (port_new)
+        (let r (name_register_or_why port "console")
+          (if (not (is_empty r))
+              (complain r)
+              (let b (irq_bind_or_why (uart_irq) port)
+                (if (not (is_empty b))
+                    (complain b)
+                    (let m (device_write32 d (reg_mask) (rx_interrupts))
+                      (serve d port (not (any_eq "noecho" (args))) (console_new)))))))))))
+
+(def serve ((d IoDevice) (port int) (echo bool) (c Console)) int
+  (let m (port_receive port)
+    (match m
+      ((RecvFailed) (complain "lost its port"))
+      ((Message from payload)
+        (if (is_irq_notice m (uart_irq))
+            (serve d port echo (received d echo c))
+            (match (tty_request c payload)
+              ((TtyAsk c2) (serve d port echo (deliver c2)))
+              ((TtyWrite bs) (let w (say bs) (serve d port echo c)))
+              ((TtyAnswer to body) (let s (port_send to body) (serve d port echo c)))))))))
+
+; c after every byte waiting in the port's receive FIFO, each echoed and
+; delivered before the next is fed, so that whoever reads the console
+; sees lines and Ctrl-C in the order they were typed, however the bytes
+; were batched. The device's interrupt is cleared before the FIFO is read,
+; never after: a byte arriving between the last read and a clear would be
+; left in the FIFO with nothing to say it is there.
+(def received ((d IoDevice) (echo bool) (c Console)) Console
+  (let k (device_write32 d (reg_clear) (rx_interrupts))
+    (let c2 (each_byte echo c (drain d (nil int)))
+      (let a (irq_ack (uart_irq))
+        c2))))
+
+(def each_byte ((echo bool) (c Console) (bs (list int))) Console
+  (if (is_empty bs)
+      c
+      (match (feed c (head bs))
+        ((Fed c2 e)
+          (let w (if echo (say e) 0)
+            (each_byte echo (deliver c2) (tail bs)))))))
+
+(def drain ((d IoDevice) (acc (list int))) (list int)
+  (if (eq (bit_and (device_read32 d (reg_flags)) 16) 16)
+      (rev acc)
+      (drain d (cons (bit_and (device_read32 d (reg_data)) 255) acc))))

@@ -1,0 +1,137 @@
+; launcher.l0 -- the compositor's launcher, GNOME Shell's grid of apps:
+; a page under the top bar, over the desktop and in place of the
+; windows, of every app's icon with its name beneath, in a grid in the
+; middle of the screen, in rows from the top. The top bar's Applications
+; opens it; a click on an app starts it, and a click anywhere else on the
+; page, Applications again, or Esc closes it. The apps are those whose
+; bundles the initramfs holds (app.l0), read once, as wm starts.
+;
+; wm keeps it, routes the pointer and the keys to it while it is open,
+; and starts what it says; here are its look, where each app is on it,
+; and what a click does. Its coordinates are its own: 0, 0 is its top
+; left, under the top bar.
+
+; Its canvas, whether it is shown, and what the last press was on, a
+; target as below; or no launcher, if its buffer could not be made.
+(data Launcher (Launcher Canvas bool int) (NoLauncher))
+
+; What a press or a release is on: nothing the launcher takes, the top
+; bar's Applications, the rest of the top bar, the page around the apps,
+; or an app, by its number in the grid, from 0.
+(def launcher_none () int -1)
+(def launcher_button () int -2)
+(def launcher_bar () int -3)
+(def launcher_ground () int -4)
+
+; Whether it is shown, what the last press was on, and it with those
+; changed; no launcher is never shown, and stays none.
+(def launcher_shown ((l Launcher)) bool
+  (match l ((Launcher c shown pressed) shown) ((NoLauncher) false)))
+
+(def launcher_pressed ((l Launcher)) int
+  (match l ((Launcher c shown pressed) pressed) ((NoLauncher) (launcher_none))))
+
+(def launcher_with ((l Launcher) (shown bool) (pressed int)) Launcher
+  (match l ((Launcher c was p) (Launcher c shown pressed)) ((NoLauncher) l)))
+
+; ------------------------------------------------------------------ layout
+
+; The grid's top, and the room kept either side of it.
+(def launcher_top () int 64)
+(def launcher_margin () int 48)
+
+; How many apps a row holds, on a page w wide, n apps in all: as many as
+; fit, at least one.
+(def launcher_cols ((w int) (n int)) int
+  (max 1 (min n (div (sub w (mul 2 (launcher_margin))) (ui_app_cell_w)))))
+
+; The cell of app i of n, on a page w wide: the grid in the middle.
+(def launcher_cell ((w int) (n int) (i int)) UiRect
+  (let cols (launcher_cols w n)
+    (let x0 (div (sub w (mul cols (ui_app_cell_w))) 2)
+      (UiRect (add x0 (mul (mod i cols) (ui_app_cell_w)))
+              (add (launcher_top) (mul (div i cols) (ui_app_cell_h)))
+              (ui_app_cell_w) (ui_app_cell_h)))))
+
+; Where an app's icon goes in its cell: in the middle, 12 down.
+(def launcher_icon_x ((cell UiRect)) int (add (ui_rx cell) (div (sub (ui_rw cell) (ui_app_icon)) 2)))
+(def launcher_icon_y ((cell UiRect)) int (add (ui_ry cell) (ui_space_m)))
+
+; Its name, under the icon, 12 below it, as wide as the cell less 4 a
+; side.
+(def launcher_label ((cell UiRect)) UiRect
+  (UiRect (add (ui_rx cell) 4) (add (launcher_icon_y cell) (add (ui_app_icon) (ui_space_m)))
+          (sub (ui_rw cell) 8) (ui_char_h)))
+
+; What x, y on a page w wide, of n apps, is on: an app's cell, or the
+; page.
+(def launcher_at ((w int) (n int) (x int) (y int)) int
+  (launcher_at_from w n x y 0))
+
+(def launcher_at_from ((w int) (n int) (x int) (y int) (i int)) int
+  (if (ge i n)
+      (launcher_ground)
+      (if (ui_rect_has (launcher_cell w n i) x y) i (launcher_at_from w n x y (add i 1)))))
+
+; ------------------------------------------------------------------ clicks
+
+; What a click does, pressed on one target and released on another: an
+; app started, if both are on it; the launcher opened or closed, if both
+; are on Applications; closed, if both are on the page; and nothing if
+; the pointer went from one to another.
+(data LauncherAct (LaunchApp int) (LaunchToggle) (LaunchClose) (LaunchNothing))
+
+(def launcher_act ((press int) (release int)) LauncherAct
+  (if (not (eq press release))
+      (LaunchNothing)
+      (if (ge press 0)
+          (LaunchApp press)
+          (if (eq press (launcher_button))
+              (LaunchToggle)
+              (if (eq press (launcher_ground)) (LaunchClose) (LaunchNothing))))))
+
+; ---------------------------------------------------------------- painting
+
+; The page w by h: its ground, and each app's name under where its icon
+; goes, cut short with ... if it is too long.
+(def launcher_ops ((w int) (h int) (apps (list App))) (list UiPaint)
+  (cons (UiPFill (UiRect 0 0 w h) (ui_launcher_bg))
+        (launcher_labels w (length apps) apps 0 (nil UiPaint))))
+
+(def launcher_labels ((w int) (n int) (apps (list App)) (i int) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty apps)
+      (rev acc)
+      (launcher_labels w n (tail apps) (add i 1)
+        (cons (UiPText (launcher_label (launcher_cell w n i)) (app_name (head apps)) (UiCenter) (ui_launcher_fg) false 1) acc))))
+
+; The page painted on c, w by h: the ops, then each app's icon; one
+; whose icon cannot be read, or is not 48 square, gets a plain one.
+(def launcher_paint ((c Canvas) (font (array int)) (w int) (h int) (apps (list App))) int
+  (let p (ui_paint c font (UiRect 0 0 w h) (launcher_ops w h apps))
+    (launcher_icons c w h (length apps) apps 0)))
+
+(def launcher_icons ((c Canvas) (w int) (h int) (n int) (apps (list App)) (i int)) int
+  (if (is_empty apps)
+      0
+      (let cell (launcher_cell w n i)
+        (let d (if (le (add (launcher_icon_y cell) (ui_app_icon)) h)
+                   (launcher_icon c w h (launcher_icon_x cell) (launcher_icon_y cell) (app_icon (head apps)))
+                   0)
+          (launcher_icons c w h n (tail apps) (add i 1))))))
+
+; The icon at path, a binary PPM, drawn at x, y; or the plain one.
+(def launcher_icon ((c Canvas) (w int) (h int) (x int) (y int) (path (list int))) int
+  (match (if (is_empty path) ((Err bytes (list int)) "no icon") (read_whole path))
+    ((Err why) (launcher_plain c w h x y))
+    ((Ok b)
+      (match (parse_ppm b)
+        ((PpmBad why) (launcher_plain c w h x y))
+        ((Ppm iw ih off)
+          (if (if (eq iw (ui_app_icon)) (eq ih (ui_app_icon)) false)
+              (blit c b off iw 100 (Place x y 0 0 iw ih) 0)
+              (launcher_plain c w h x y)))))))
+
+; An app with no icon: a plain rounded square.
+(def launcher_plain ((c Canvas) (w int) (h int) (x int) (y int)) int
+  (ui_paint c (array_new 0 0) (UiRect 0 0 w h)
+    (cons (UiPRound (UiRect x y (ui_app_icon) (ui_app_icon)) (ui_app_icon_radius) (ui_app_icon_plain) (ui_launcher_bg)) (nil UiPaint))))

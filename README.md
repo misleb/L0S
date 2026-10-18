@@ -356,7 +356,7 @@ Everything the serial line shows is also kept in `build/mcp/serial.out`.
 ### Terminals
 
 A terminal is a port that edits typed keys into lines and writes what it is
-sent. [user/lib/tty.l0](user/lib/tty.l0) has the line editing both share,
+sent. [user/lib/sys/tty.l0](user/lib/sys/tty.l0) has the line editing both share,
 and says what a terminal takes, each a request (`request` in `l0s.l0`):
 
 | Request | Does |
@@ -420,7 +420,7 @@ Pixels never travel in messages. They move by sharing pages:
 What goes over IPC is only which buffers there are, where each goes, and
 which rectangles changed.
 
-**The display protocol** ([user/lib/display.l0](user/lib/display.l0)) is
+**The display protocol** ([user/lib/proto/display.l0](user/lib/proto/display.l0)) is
 the whole contract between the compositor and the display hardware's
 driver. It says nothing about virtio. A driver for other hardware, a
 plain framebuffer say, serves the same requests as `display`, and `wm`
@@ -440,7 +440,7 @@ pixels, and draw the pointer as a top layer.
 
 The reply is `ok`, `display W H cursor` for `info`, or `error: WHY`.
 
-**The compositor protocol** ([user/lib/wm.l0](user/lib/wm.l0)) is what
+**The compositor protocol** ([user/lib/proto/wm.l0](user/lib/proto/wm.l0)) is what
 `wm` serves, as `compositor`, to its clients:
 
 | Request | Does |
@@ -473,7 +473,7 @@ window by where its client's program is, from `proc_info`. `wm`
 repaints the bar when the front window or its title changes, when the
 launcher opens or closes, and when the clock says a minute has begun.
 
-**The launcher** ([user/wm/launcher.l0](user/wm/launcher.l0)) is GNOME
+**The launcher** ([user/sbin/wm/launcher.l0](user/sbin/wm/launcher.l0)) is GNOME
 Shell's grid of apps. A click on Applications, acting on its release
 over it, lights the button with a pill and shows a page under the bar,
 `242424`, of each app's 48×48 icon with its name under it, in cells
@@ -485,8 +485,8 @@ is free once it exits; it gets the inittab's arguments for it, and
 Applications again closes it. While it is open no window is told of
 the pointer, the wheel or the keys. Its page is one buffer, painted
 once, as the apps never change while the system runs. The clock is
-`rtc clock` ([user/rtc](user/rtc/rtc.l0)), which serves `clock`
-([user/lib/clock.l0](user/lib/clock.l0)): `listen` replies `time S`, S
+`rtc clock` ([user/sbin/rtc](user/sbin/rtc/rtc.l0)), which serves `clock`
+([user/lib/proto/clock.l0](user/lib/proto/clock.l0)): `listen` replies `time S`, S
 the PL031's count of seconds, and sends `time S` again at the start of
 every minute; `time` replies once. `wm` waits a second for a clock as
 it starts, after the keyboard and the pointer; with none, the bar shows
@@ -534,7 +534,7 @@ Input:
   window until every button is up (an implicit grab), even outside it,
   where x and y may be negative. When the pointer leaves a window, its
   client gets a leave notice (`leave_notice` in
-  [user/lib/l0s.l0](user/lib/l0s.l0)).
+  [user/lib/sys/l0s.l0](user/lib/sys/l0s.l0)).
 - **The scroll wheel** goes, as a `WheelEvent` relative to the window, to
   the window the pointer would go to: the one whose content it is over,
   or the one holding it since a press. It counts steps, down and right
@@ -569,17 +569,17 @@ and draws only the new row.
 
 ### The disk
 
-`virtio-blk` ([user/virtio-blk](user/virtio-blk/virtio-blk.l0)) drives
+`virtio-blk` ([user/sbin/virtio-blk](user/sbin/virtio-blk/virtio-blk.l0)) drives
 QEMU's virtio-blk: the demo's `build/disk.img`, 2048 sectors of 512
 bytes. It serves `disk`, raw sectors, to clients, `fs` above all,
 through **the disk protocol**
-([user/lib/disk.l0](user/lib/disk.l0)). As with the display, no sector
+([user/lib/proto/disk.l0](user/lib/proto/disk.l0)). As with the display, no sector
 travels in a message. A client shares a buffer of its own pages with the
 driver (`shm_share`), and the device reads or writes those pages itself,
 by DMA, from a chain of descriptors the driver builds over them. The
 driver makes one request of the device at a time, and waits for it by
 polling the used ring, as `virtio-gpu` does (`virtq_wait` in
-[user/lib/virtio.l0](user/lib/virtio.l0)).
+[user/lib/sys/virtio.l0](user/lib/sys/virtio.l0)).
 
 | Request | Does |
 |---|---|
@@ -599,7 +599,7 @@ Sectors 1 to 7 of a disk `tools/mkdisk` makes belong to no volume, so a
 ### Volumes
 
 A disk holds **volumes**, each a partition of it with a file system of
-L0S's own, L0FS ([user/lib/l0fs.l0](user/lib/l0fs.l0)), and a label.
+L0S's own, L0FS ([user/lib/format/l0fs.l0](user/lib/format/l0fs.l0)), and a label.
 `fs` mounts each at `/Volumes/LABEL`, as macOS mounts disks, and the
 kernel sends every call on a file there to it, so every program reads
 and writes them with the ordinary `open_in`, `open_out` and the rest:
@@ -625,7 +625,7 @@ nothing reads now: `fs` finds no table on it. `rm build/disk.img`, or
 `make clean`, and the next `make demo` makes a disk of GPT.
 
 **Partitions.** A disk's partitions are in a **GPT**, UEFI's GUID partition table
-([user/lib/gpt.l0](user/lib/gpt.l0)), so each has a **UUID** of its
+([user/lib/format/gpt.l0](user/lib/format/gpt.l0)), so each has a **UUID** of its
 own, which it is given when it is made and keeps: a request names a
 partition by it, not by where it is, which another partition made or
 removed could change, nor by the label of its volume, which a format
@@ -634,11 +634,11 @@ UUID, its own, its first and last sectors, and a name of 36 characters,
 its volume's label for one `mkfs` or `tools/mkfs` made. L0FS's type is
 `4c304653-0001-4000-8000-4c30534c3046`, `L0FS` in its first field. The
 header and its entries are checked by CRC-32
-([user/lib/crc32.l0](user/lib/crc32.l0)), and copied in the disk's last
+([user/lib/format/crc32.l0](user/lib/format/crc32.l0)), and copied in the disk's last
 33 sectors, which `fs` reads if the first copy is bad; it writes both,
 and never over a table it found bad.
 
-The UUIDs are of **version 7** ([user/lib/uuid.l0](user/lib/uuid.l0),
+The UUIDs are of **version 7** ([user/lib/format/uuid.l0](user/lib/format/uuid.l0),
 RFC 9562): the time in Unix milliseconds in their first 48 bits, so they
 sort in the order they were made, then noise. `fs` asks `rtc clock` the
 time, and the board's clock keeps this machine's local time, not UTC
@@ -700,7 +700,7 @@ takes a path, made absolute, to where it is mounted:
   call on its files. Only the server's own reply is taken: anything else
   sent to the reply port is dropped.
 
-**The fs protocol** ([user/lib/fs.l0](user/lib/fs.l0)) is what a file
+**The fs protocol** ([user/lib/proto/fs.l0](user/lib/proto/fs.l0)) is what a file
 server serves on the port it mounts from. The kernel sends the first
 six; programs send `list`, `df` and `format` themselves, to the port
 `mount_at` gives, as `ls`, `df` and `format` in the shell do, and
@@ -734,7 +734,7 @@ code, as spec §6.3's I/O builtins give them (-3 no such file, -4 denied,
 directory, -10 another file system). A handle is the pid that opened
 it, the sender, so a process can use only its own.
 
-**`fs`** ([user/fs](user/fs/fs.l0)) opens the disk with a buffer of a
+**`fs`** ([user/sbin/fs](user/sbin/fs/fs.l0)) opens the disk with a buffer of a
 cluster, reads the GPT, checks and loads the volume on each partition of
 L0FS's type, its
 metadata, mounts each by its label from one port, and then registers
@@ -765,11 +765,12 @@ l0 boot build/kernel.img < OUT            # the kernel reads the initramfs on st
 `make root` stages every program in `build/root` where the initramfs
 keeps it, made anew each time:
 - **`/bin`**, the commands, for people and agents: `sh`, `cat`, `hello`,
-  `init`, `ping`, `spin`, `nap`, `draw`, `keys`, `windows`, `disk`;
+  `init`, `ping`, `spin`, `nap`, `draw`, `keys`, `windows`, `disk`, those
+  in `user/bin`;
 - **`/sbin`**, the drivers and services: `uart`, `rtc`, `virtio-gpu`,
-  `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo` (the Makefile's
-  `SBIN`);
-- **`/Applications`**, the desktop's apps, each in a bundle (below).
+  `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo`, those in `user/sbin`;
+- **`/Applications`**, the desktop's apps, each in a bundle (below), those
+  in `user/apps`.
 
 [tools/mkinitramfs](tools/mkinitramfs) stages a directory and archives it
 with `bsdtar --format newc`, in order of path:
@@ -786,7 +787,7 @@ An app is kept as macOS keeps one: a bundle, a directory
 `/Applications/NAME.app`, holding its program, under the program's own
 name, so that `ps` still says `vt`; its icon, `icon.ppm`; and its
 `manifest`, which says what they are, a line each, `#` for a comment
-([user/lib/app.l0](user/lib/app.l0)):
+([user/lib/proto/app.l0](user/lib/proto/app.l0)):
 
 ```
 name Terminal                  # what the launcher and the top bar call it
@@ -804,7 +805,7 @@ summary A terminal in a window, with its own shell
 
 A bundle's name is one word, as the shell and the inittab split at
 spaces; an app's name may be several. Its source is the directory beside
-its program's, `user/vt/Terminal.app`, holding the manifest and
+its program's, `user/apps/vt/Terminal.app`, holding the manifest and
 `icon.draw`, the icon as lines of `run draw`'s commands, which
 [tools/mkicon](tools/mkicon/mkicon.l0) draws at build time, on the
 launcher's ground, into the 48×48 PPM: a rounded square and a symbolic
@@ -981,7 +982,7 @@ being made, what was made for it is freed again.
 ## System calls
 
 `x8` holds the call number, `x0`–`x3` the arguments, and the result comes
-back in `x0`. From L0, use the wrappers in `user/lib/l0s.l0`.
+back in `x0`. From L0, use the wrappers in `user/lib/sys/l0s.l0`.
 
 ### Calls 1–10: the process ABI of spec §10.3
 
@@ -1055,7 +1056,7 @@ Listening to a driver, `keyboard_listen`, `pointer_listen` and
 IPC is asynchronous. A send copies the payload into the port's queue and
 returns at once. A receive blocks until there is a message, and is given the
 sender's pid with it. A request that wants an answer carries a reply port:
-see `request` and `request_reply` in `l0s.l0`, and `user/echo`.
+see `request` and `request_reply` in `l0s.l0`, `server.l0`, and `user/sbin/echo`.
 
 When a process exits or is killed, its ports, names, interrupt bindings and
 open files go with it. Whoever waits for it is woken with its status, and
@@ -1065,12 +1066,19 @@ how the shell waits for a job and for Ctrl-C at the same time.
 
 ## The programs
 
-Each one is the usual three files under `user/NAME/`: `NAME.l0`,
-`NAME_test.l0` and `main.l0`. Each becomes `/bin/NAME` in the initramfs,
-if it is a command; `/sbin/NAME`, if it is a driver or a service (`uart`,
-`rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo`); or
-`/Applications/APP.app/NAME`, if it is an app, which `user/NAME/APP.app`
-makes it (`vt`, `procmon`, `widgets`, `disks`; see [Apps](#apps)).
+Each one is the usual three files, `NAME.l0`, `NAME_test.l0` and
+`main.l0`, in a directory whose place says where the program goes in the
+initramfs, so that the Makefile finds it there:
+
+| Directory | What | In the initramfs |
+|---|---|---|
+| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `init`, `keys`, `nap`, `ping`, `spin`, `windows` | `/bin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo` | `/sbin/NAME` |
+| `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
+
+A program may have more files of its own, each with its tests beside it,
+as `sh` has `files.l0` and `wm` has `launcher.l0`: every `.l0` in its
+directory is part of it.
 
 | Program | What it does |
 |---|---|
@@ -1098,27 +1106,39 @@ makes it (`vt`, `procmon`, `widgets`, `disks`; see [Apps](#apps)).
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 
-The libraries in `user/lib/` are linked into every program
-(`l0s.l0`, `tty.l0`, `virtio.l0`), or into those that need them, by the
-Makefile's `LIBS_` lists:
+The libraries are in `common/`, shared by the kernel, every program and
+the host tools, and in `user/lib/`, grouped by what they are: `sys/`, the
+kernel's calls and what programs do alike; `proto/`, the protocols of
+the servers, as their clients speak them; `format/`, data as bytes,
+pure, which the host tools link too; `gfx/`, drawing; and `ui/`, the
+toolkit. Each is linked into every program (`ULIB`), or into those that
+need it, by the Makefile's `LIBS_` lists. L0 has one namespace, so a
+name in a library is taken in every program that links it.
 
 | Library | What it holds | Linked into |
 |---|---|---|
-| [l0s.l0](user/lib/l0s.l0) | the call wrappers; requests; `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount` and the mount table | every program |
-| [tty.l0](user/lib/tty.l0) | a terminal's line editing and protocol | every program |
-| [virtio.l0](user/lib/virtio.l0) | the transports' registers, finding a device by ID, negotiating, setting up a queue, descriptors, and waiting for the device to use a request (`virtq_wait`) | every program |
-| [render.l0](user/lib/render.l0) | drawing into a buffer of pixels: shapes, the font, PPM images, the wallpaper, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets` |
-| [display.l0](user/lib/display.l0) | the display protocol, as a client sends it | `wm` |
-| [wm.l0](user/lib/wm.l0) | the compositor protocol, as a client sends it | `vt`, `windows`, `widgets` |
-| [clock.l0](user/lib/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm` |
-| [disk.l0](user/lib/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs` |
-| [uuid.l0](user/lib/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `sh`, `disks`, `tools/mkfs` |
-| [crc32.l0](user/lib/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
-| [gpt.l0](user/lib/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
-| [l0fs.l0](user/lib/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `disks`, `tools/mkfs` |
-| [fs.l0](user/lib/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh`, `disks` |
-| [app.l0](user/lib/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
-| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
+| [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
+| [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div` | the kernel, every program, the host tools |
+| [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
+| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount` and the mount table | every program |
+| [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order | every program |
+| [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |
+| [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
+| [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
+| [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk` |
+| [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it | `wm` |
+| [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
+| [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs` |
+| [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
+| [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh`, `disks` |
+| [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
+| [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `sh`, `disks`, `tools/mkfs` |
+| [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
+| [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
+| [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, and which clusters a read or a write touches | `fs`, `disks`, `tools/mkfs` |
+| [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
+| [gfx/render.l0](user/lib/gfx/render.l0) | drawing into a buffer of pixels: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `tools/mkicon` |
+| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
 
 ## Tests
 

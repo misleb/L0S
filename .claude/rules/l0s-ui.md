@@ -2,17 +2,15 @@
 description: L0S UI rules, for the toolkit, the compositor, its clients and the display
 paths:
   - "user/lib/ui/**"
-  - "user/lib/display.l0"
-  - "user/lib/wm.l0"
-  - "user/wm/**"
-  - "user/vt/**"
-  - "user/widgets/**"
-  - "user/procmon/**"
-  - "user/disks/**"
-  - "user/draw/**"
-  - "user/virtio-gpu/**"
+  - "user/lib/gfx/**"
+  - "user/lib/proto/display.l0"
+  - "user/lib/proto/wm.l0"
+  - "user/sbin/wm/**"
+  - "user/apps/**"
+  - "user/bin/draw/**"
+  - "user/sbin/virtio-gpu/**"
   - "tests/*.sh"
-globs: user/lib/ui/**,user/lib/display.l0,user/lib/wm.l0,user/wm/**,user/vt/**,user/widgets/**,user/procmon/**,user/disks/**,user/draw/**,user/virtio-gpu/**,tests/*.sh
+globs: user/lib/ui/**,user/lib/gfx/**,user/lib/proto/display.l0,user/lib/proto/wm.l0,user/sbin/wm/**,user/apps/**,user/bin/draw/**,user/sbin/virtio-gpu/**,tests/*.sh
 alwaysApply: false
 ---
 

@@ -1,0 +1,283 @@
+; vt.l0 -- a terminal in a window: keys typed while its window is in
+; front, which the compositor, user/wm, sends it, edited into lines as the
+; serial line's are, and what is written to it, drawn into the window's
+; buffer in the font's 8 by 16 cells, light on a dark ground, scrolling up
+; a line at the bottom.
+;
+;   vt [COLS ROWS]          80 by 24 cells unless given
+;
+; It names itself, as it starts, the first of vt1, vt2, and so on that no
+; one has registered, and registers as NAME, which is also its title: a
+; terminal as user/lib/tty.l0 says, the same as uart's console: "r" for
+; a line, "i" for Ctrl-C notices, "w" to write. It registers before
+; anything else, so vts the inittab starts take their names in order.
+; Once its window is open it starts its own shell, sh NAME, on it, and
+; when the shell exits, closes the window and exits with its status.
+; Its buffer is memory it shares with the compositor, which never copies
+; it: the display shows it from where vt draws. Scrolling moves the
+; buffer's top row, so it copies nothing either.
+
+; Its colors are the toolkit's for a terminal, GNOME Console's.
+(def ground () int (ui_term_bg))
+(def ink () int (ui_term_fg))
+(def cursor_color () int (ui_term_cursor))
+
+; A cell: the toolkit's character, the font's glyph.
+(def cell_w () int (ui_char_w))
+(def cell_h () int (ui_char_h))
+
+; ---------------------------------------------------------------- render
+
+; Where the next character goes, and how many columns and rows fit.
+(data Term (Term int int int int))
+
+; What drawing bytes written at the terminal takes, in the window's own
+; cells: a run of characters from a cell, a cell blanked, a line scrolled
+; up, and the cursor drawn or erased at a cell.
+(data Op (OpText int int (list int)) (OpBlank int int) (OpScroll) (OpCursor int int bool))
+
+; The ops that show bytes, and where the cursor is after them.
+(data Rendered (Rendered Term (list Op)))
+
+(def render ((t Term) (bs (list int))) Rendered
+  (render_onto t bs (nil int) 0 (nil Op)))
+
+; A run of printable characters waiting to be drawn: reversed, from
+; column start of the term's row; and the ops so far, reversed.
+(def render_onto ((t Term) (bs (list int)) (run (list int)) (start int) (ops (list Op))) Rendered
+  (if (is_empty bs)
+      (Rendered t (rev (flush_run t run start ops)))
+      (render_byte t (head bs) (tail bs) run start ops)))
+
+(def render_byte ((t Term) (b int) (rest (list int)) (run (list int)) (start int) (ops (list Op))) Rendered
+  (match t
+    ((Term col row cols rows)
+      (if (if (ge b 32) (le b 126) false)
+          (if (ge col cols)
+              (wrapped t b rest run start ops)
+              (render_onto (Term (add col 1) row cols rows) rest (cons b run) (if (is_empty run) col start) ops))
+          (let done (flush_run t run start ops)
+            (if (eq b 10) (newline t rest done)
+            (if (eq b 13) (render_onto (Term 0 row cols rows) rest (nil int) 0 done)
+            (if (eq b 9) (render_onto t (append (spaces (sub 8 (mod col 8))) rest) (nil int) 0 done)
+            (if (eq b 8) (backed t rest done)
+            (render_onto t rest (nil int) 0 done))))))))))
+
+; Past the last column: the next line, then the character.
+(def wrapped ((t Term) (b int) (rest (list int)) (run (list int)) (start int) (ops (list Op))) Rendered
+  (newline t (cons b rest) (flush_run t run start ops)))
+
+; The next line's start, scrolling a line up from the last.
+(def newline ((t Term) (rest (list int)) (ops (list Op))) Rendered
+  (match t
+    ((Term col row cols rows)
+      (if (ge (add row 1) rows)
+          (render_onto (Term 0 row cols rows) rest (nil int) 0 (cons (OpScroll) ops))
+          (render_onto (Term 0 (add row 1) cols rows) rest (nil int) 0 ops)))))
+
+; Back one column, and that cell blanked, as a Backspace's echo needs.
+(def backed ((t Term) (rest (list int)) (ops (list Op))) Rendered
+  (match t
+    ((Term col row cols rows)
+      (if (eq col 0)
+          (render_onto t rest (nil int) 0 ops)
+          (let b (Term (sub (min col cols) 1) row cols rows)
+            (render_onto b rest (nil int) 0 (cons (OpBlank (term_col b) row) ops)))))))
+
+; The run drawn, if there is one, onto ops.
+(def flush_run ((t Term) (run (list int)) (start int) (ops (list Op))) (list Op)
+  (if (is_empty run)
+      ops
+      (match t ((Term col row cols rows) (cons (OpText start row (rev run)) ops)))))
+
+; The cursor's cell: the last column while a wrap is pending.
+(def term_col ((t Term)) int (match t ((Term col row cols rows) (min col (sub cols 1)))))
+(def term_row ((t Term)) int (match t ((Term col row cols rows) row)))
+
+; Everything bytes written take: the cursor erased, the bytes, and the
+; cursor drawn where they leave it.
+(def shown_bytes ((t Term) (bs (list int))) Rendered
+  (match (render t bs)
+    ((Rendered t2 ops)
+      (Rendered t2 (cons (OpCursor (term_col t) (term_row t) false)
+                         (append ops (cons (OpCursor (term_col t2) (term_row t2) true) (nil Op))))))))
+
+; ------------------------------------------------------------------- draw
+
+; Ops done on the window's canvas, which scrolling moves the top of.
+(def drawn ((c Canvas) (font (array int)) (ops (list Op))) Canvas
+  (if (is_empty ops)
+      c
+      (drawn (draw_op c font (head ops)) font (tail ops))))
+
+(def draw_op ((c Canvas) (font (array int)) (op Op)) Canvas
+  (match op
+    ((OpText col row cs)
+      (let k (draw_text c font (mul col (cell_w)) (mul row (cell_h)) (ink) (ground) cs) c))
+    ((OpBlank col row)
+      (let k (fill_rect c (mul col (cell_w)) (mul row (cell_h)) (cell_w) (cell_h) (ground)) c))
+    ((OpScroll) (scrolled c (cell_h) (ground)))
+    ((OpCursor col row on)
+      (let k (fill_rect c (mul col (cell_w)) (add (mul row (cell_h)) (sub (cell_h) 1)) (cell_w) 1
+                        (if on (cursor_color) (ground)))
+        c))))
+
+; ---------------------------------------------------------------- serving
+
+; The terminal: the compositor, its window's id, the window's canvas, the
+; font, the cursor, and the line editing.
+(data Vt (Vt Compositor int Canvas (array int) Term Console))
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "vt" why))
+
+; The name of terminal i: vt1 for 1.
+(def vt_name ((i int)) (list int) (append "vt" (digits i)))
+
+; The most names vt tries: as many as there can be processes.
+(def vt_names () int (max_procs))
+
+; What naming the terminal came to: the name it registered as, or why it
+; has none.
+(data VtName (VtNamed (list int)) (VtUnnamed (list int)))
+
+; port registered as the first free name from vt_name i on: one taken
+; means the next is tried, up to vt_names of them.
+(def vt_register ((port int) (i int)) VtName
+  (match (name_register port (vt_name i))
+    ((Registered) (VtNamed (vt_name i)))
+    ((RegisterTaken)
+      (if (ge i (vt_names))
+          (VtUnnamed (append "every name from vt1 to " (append (vt_name i) " is taken")))
+          (vt_register port (add i 1))))
+    ((RegisterNoPort) (VtUnnamed (vt_unregistered (RegisterNoPort))))
+    ((RegisterTooLong) (VtUnnamed (vt_unregistered (RegisterTooLong))))))
+
+; Why vt could not register, as name_register answered r.
+(def vt_unregistered ((r Registration)) (list int)
+  (append "cannot register: " (registration_why r)))
+
+; The columns and rows the arguments give, or 80 by 24.
+(def vt_cells ((argv (list (list int)))) Term
+  (if (lt (length argv) 2)
+      (Term 0 0 80 24)
+      (Term 0 0 (max 8 (min 158 (int_prefix (head argv) 0)))
+                (max 2 (min 46 (int_prefix (head (tail argv)) 0))))))
+
+(def vt () int
+  (let port (port_new)
+    (match (vt_register port 1)
+      ((VtUnnamed why) (complain why))
+      ((VtNamed name) (named name port)))))
+
+; The terminal, registered as name on port: its font loaded, and its
+; window made.
+(def named ((name (list int)) (port int)) int
+  (let font (load_font (font_path))
+    (if (eq (array_len font) 0)
+        (complain "no font")
+        (match (compositor_open)
+          ((NoCompositor why) (let w (write_err (append "vt: " (append why "\n"))) 0))
+          ((Compositor cp rp pid) (with_buffer (Compositor cp rp pid) font (vt_cells (args)) name port))))))
+
+(def with_buffer ((c Compositor) (font (array int)) (t Term) (name (list int)) (port int)) int
+  (match t
+    ((Term col row cols rows)
+      (let w (mul cols (cell_w))
+        (let h (mul rows (cell_h))
+          (match (ui_buffer w h)
+            ((UiNoBuf why) (complain (append "no memory for the window: " why)))
+            ((UiBuf va n canvas)
+              (let k (fill_rect canvas 0 0 w h (ground))
+                (registered c font t canvas va n name port)))))))))
+
+; The terminal, registered as name on port: its window opened and its
+; shell started.
+(def registered ((c Compositor) (font (array int)) (t Term) (canvas Canvas) (va int) (n int) (name (list int)) (port int)) int
+  (match (window_open c (canvas_w canvas) (canvas_h canvas) va n port name)
+    ((WindowFailed why) (complain why))
+    ((WindowOpened id)
+      (match (shell_started name port)
+        ((NoShell why) (let x (window_close c id) (complain why)))
+        ((ShellRunning sh) (serve port sh (shown_v (Vt c id canvas font t (console_new)) (nil int))))))))
+
+; What starting the shell came to: its pid, watched; or why not.
+(data Shell (ShellRunning int) (NoShell (list int)))
+
+; sh NAME started, and watched on port.
+(def shell_started ((name (list int)) (port int)) Shell
+  (let e (program_entry "sh" (entry_paths))
+    (if (lt e 0)
+        (NoShell "no /bin/sh to run")
+        (match (spawn_entry_with e (cons name (nil (list int))))
+          ((Spawned pid) (shell_watched pid (proc_watch pid port)))
+          ((SpawnNoEntry) (NoShell (cannot_shell (SpawnNoEntry))))
+          ((SpawnNotProgram) (NoShell (cannot_shell (SpawnNotProgram))))
+          ((SpawnTooBig) (NoShell (cannot_shell (SpawnTooBig))))
+          ((SpawnNoRoom) (NoShell (cannot_shell (SpawnNoRoom))))))))
+
+; The shell, pid, as watching it went: a shell that is not watched would
+; never be known to have exited.
+(def shell_watched ((pid int) (w Watch)) Shell
+  (match w
+    ((Watched) (ShellRunning pid))
+    ((WatchNoProc) (NoShell "cannot watch /bin/sh: it is gone"))
+    ((WatchFull) (NoShell "cannot watch /bin/sh: too many ports watch it"))))
+
+; Why the shell did not start, as spawning it answered s.
+(def cannot_shell ((s Spawn)) (list int)
+  (append "cannot start /bin/sh: " (spawn_why s)))
+
+; Serves the terminal until sh, its shell, exits: then closes the window,
+; and gives the shell's status.
+(def serve ((port int) (sh int) (v Vt)) int
+  (let m (port_receive port)
+    (match m
+      ((RecvFailed) (complain "lost its port"))
+      ((Message from payload)
+        (if (eq from (vt_wm_pid v))
+            (match (key_event_of m)
+              ((Some ev) (serve port sh (keyed v ev)))
+              ((None) (serve port sh v)))
+            (match (exit_of m)
+              ((Exited pid status)
+                (if (eq pid sh) (closed v status) (serve port sh v)))
+              ((NotExit) (serve port sh (requested v payload)))))))))
+
+(def closed ((v Vt) (status int)) int
+  (match v ((Vt c id canvas font t con) (let x (window_close c id) status))))
+
+(def vt_wm_pid ((v Vt)) int (match v ((Vt c id canvas font t con) (compositor_pid c))))
+
+; A key's character fed to the line editing, its echo shown, and any line
+; finished delivered. Esc is not fed: the editing would take it for the
+; start of an escape sequence, and drop the key after it.
+(def keyed ((v Vt) (ev KeyEvent)) Vt
+  (match ev
+    ((KeyEvent code value ch)
+      (if (if (eq value 0) true (if (eq ch 0) true (eq ch 27)))
+          v
+          (match v
+            ((Vt c id canvas font t con)
+              (match (feed con ch)
+                ((Fed con2 e) (shown_v (Vt c id canvas font t (deliver con2)) e)))))))))
+
+(def requested ((v Vt) (payload (list int))) Vt
+  (match v
+    ((Vt c id canvas font t con)
+      (match (tty_request con payload)
+        ((TtyAsk con2) (Vt c id canvas font t (deliver con2)))
+        ((TtyWrite bs) (shown_v v bs))
+        ((TtyAnswer to body) (let s (port_send to body) v))))))
+
+; v with bs drawn, the cursor moved, and the window told: its new top if
+; it scrolled, and its damage, the whole of it.
+(def shown_v ((v Vt) (bs (list int))) Vt
+  (match v
+    ((Vt c id canvas font t con)
+      (match (shown_bytes t bs)
+        ((Rendered t2 ops)
+          (let canvas2 (drawn canvas font ops)
+            (let s (if (eq (canvas_top canvas2) (canvas_top canvas)) "" (window_top c id (canvas_top canvas2)))
+              (let d (window_damage c id 0 0 (canvas_w canvas2) (canvas_h canvas2))
+                (Vt c id canvas2 font t2 con)))))))))

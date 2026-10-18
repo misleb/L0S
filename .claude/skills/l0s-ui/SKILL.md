@@ -15,11 +15,14 @@ display. This is the working summary, with the rules.
 1. **Colors and sizes come from `user/lib/ui/theme.l0`.** No hex literal or
    pixel size outside it, except a program's own layout arithmetic. A new
    one goes in the theme with a test in `theme_test.l0`. The one exception
-   is `render.l0`'s plain color names (`red`, `cyan`...) for `run draw`,
+   is `render.l0`'s (`user/lib/gfx`) plain color names (`red`, `cyan`...) for `run draw`,
    which predate the toolkit.
 2. **Every toolkit name is `ui_…`, every type and constructor `Ui…`.** All
    files are one namespace; the toolkit is linked into `wm`, `vt`, `draw`,
-   `widgets` and `procmon`, so a bare name there clashes sooner or later.
+   `widgets`, `procmon` and `disks`, so a bare name there clashes sooner or
+   later. Colors' channels are `ppm.l0`'s `rgb`, `rgb_red` and the rest, and
+   a corner's cut `render.l0`'s `corner_cut`, shared with the display
+   driver.
 3. **Follow the HIG's numbers**, already in the theme: spacing 6 between
    related things, 12 between groups, 18 around a page (`ui_space_s/m/l`);
    header bars 46 (`ui_headerbar_h`) with a bold centered title; buttons 34
@@ -81,7 +84,7 @@ display. This is the working summary, with the rules.
   mixed with black by `ui_scrim` and no longer a target; `ui_alert_form`
   puts widgets, such as properties with entries, between its lines and
   its buttons). Rows and parts carry `PREFIX.select.KEY`; `ui_select_key`
-  reads it back. `user/disks` uses them all.
+  reads it back. `user/apps/disks` uses them all.
 - **Entries** (`entry.l0`): `UiEntry NAME TEXT PLACEHOLDER WIDTH`, the
   text and cursor a `UiEntryText` in the program's state. Its node's
   action is `NAME.entry`; a press focuses it and sets off `NAME.place.N`;
@@ -107,7 +110,7 @@ display. This is the working summary, with the rules.
 
 The Elm architecture: a `data` for the state, a `view` from state to a
 `UiWidget`, an `update` from state, action and event to a state. The loop,
-from `user/widgets/widgets.l0`:
+from `user/apps/widgets/widgets.l0`:
 
 ```
 (match (ui_open "Widgets" 640 400) ...)     once: UiOpenedWin or UiOpenFailed
@@ -120,11 +123,14 @@ from `user/widgets/widgets.l0`:
 Events are `UiKey`, `UiPress`, `UiRelease`, `UiMotion` (window coordinates),
 `UiLeave`, `UiFocus front`, `UiScroll x y dx dy` (the wheel, in steps, down
 and right positive), `UiExit pid status` and `UiOther`. A window that
-must also refresh on a timer polls instead (`user/procmon/procmon.l0`: a
-`port_try_receive`, and an idle branch that sleeps). Linking a window needs
-`UI_CORE`, `UI_WINDOW` and `WMLIB` (`LIBS_widgets`).
+must also refresh on a timer polls instead (`user/apps/procmon/procmon.l0`: a
+`port_try_receive`, and an idle branch that sleeps). `ui_key_pressed ev`
+is the code of a key pressed or repeated, -1 for anything else, and
+`ui_grid_page` the toolbar-over-grid page `widgets` and `procmon` share.
+Linking a window needs `RENDER`, `UI_CORE`, `UI_WINDOW` and `WMLIB`
+(`LIBS_widgets`).
 
-## The compositor (`user/wm/wm.l0`)
+## The compositor (`user/sbin/wm/wm.l0`)
 
 It owns the screen through the display protocol and keeps windows for its
 clients. It never copies a window's pixels: each is a shared buffer, and the
@@ -146,7 +152,7 @@ driver composes them.
 - **Corners**: `display_shape` rounds the title bar's top corners
   (`top_radius`, 12), the frame's bottom ones (`bottom_radius`) and the
   content's inside them (`inner_radius`, 12 − edge). `cut_off` uses the
-  driver's own formula (`ui_corner_cut`), so a press in a cut corner falls
+  driver's own formula (`render.l0`'s `corner_cut`), so a press in a cut corner falls
   through to what is beneath.
 - **Hit testing**: `hit` gives `OnClose`, `OnTitle`, `OnContent win cx cy`
   (content coordinates), `OnFrame` or `OnDesktop`, frontmost first; `on_bar`
@@ -163,10 +169,10 @@ driver composes them.
   path, the manifest of the bundle it is in, `app.l0`), or its title if
   it is no app's (`bar_title`); and `clock_text` of the time, bold, in
   its middle. `rtc clock` tells `wm` the time each minute
-  (`user/lib/clock.l0`). `Bar` also keeps the apps, read once at start
+  (`user/lib/proto/clock.l0`). `Bar` also keeps the apps, read once at start
   (`app_bundles`), and the `Launcher`. Windows open below it (`cascade`
   starts at 40), and a drag keeps their top at `below_bar`.
-- **The launcher** (`user/wm/launcher.l0`, and wm's section "the
+- **The launcher** (`user/sbin/wm/launcher.l0`, and wm's section "the
   launcher"): GNOME Shell's app grid, a page `w` by `h − 32` under the
   bar, `ui_launcher_bg`, painted once in `with_launcher`. Cells
   `ui_app_cell_w` by `ui_app_cell_h` (136×104), in rows from 64, in the
@@ -197,7 +203,7 @@ driver composes them.
   tool, then let `l0 check` name the remaining patterns with other binding
   names.
 
-## The display (`user/lib/display.l0`, `user/virtio-gpu/virtio-gpu.l0`)
+## The display (`user/lib/proto/display.l0`, `user/sbin/virtio-gpu/virtio-gpu.l0`)
 
 virtio-gpu's 2D mode: the host composes the screen from a list of memory
 runs that the driver builds from the layers, so no guest code copies pixels.

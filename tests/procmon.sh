@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # procmon.sh -- boots tests/screen/etc's initramfs with no window: the
 # compositor, wm, and no vt. Types run procmon & at the serial shell, which
-# opens the process monitor (user/procmon) in a window, learns where it is
+# opens the process monitor (user/apps/procmon) in a window, learns where it is
 # from run windows, and checks, by QEMU's screendump:
 #
 #   1. its title bar, an Adwaita header bar in front, ebebeb

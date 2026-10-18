@@ -1,0 +1,456 @@
+; fs_test.l0 -- tests of the file server, on volumes in memory: what each
+; request answers, and what it leaves on the disk.
+
+; data, sectors 8 to 1535, and scratch, 1536 to 2047, as tools/mkdisk
+; made them before the disk had a GPT, empty, on a store of memory of
+; 2048 sectors; the port 7.
+(def two () Fs
+  (fs_new (StoreMem ((MapEmpty int (list int))) 2048) 7
+          (array_from (cons (FsVol 8 (vol_new "data" (vol_layout 1528)))
+                            (cons (FsVol 1536 (vol_new "scratch" (vol_layout 512))) (nil FsVol)))
+                      (FsVol 0 (vol_new "x" (vol_layout 16))))))
+
+; An answer as text: the word, a colon, the bytes.
+(def answer_text ((a Answered)) (list int)
+  (match a ((Answered f w bs) (append (digits w) (append ":" bs)))))
+
+(def after ((a Answered)) Fs (match a ((Answered f w bs) f)))
+
+; The requests done in order by pid 5, their answers joined by |, and f
+; after them.
+(data Ran (Ran Fs (list int)))
+
+(def run ((f Fs) (reqs (list (list int)))) Ran
+  (run_from f reqs (nil int)))
+
+(def run_from ((f Fs) (reqs (list (list int))) (acc (list int))) Ran
+  (if (is_empty reqs)
+      (Ran f (rev acc))
+      (let a (obey f 5 (head reqs))
+        (run_from (after a) (tail reqs) (push (answer_text a) (if (is_empty acc) acc (push "|" acc)))))))
+
+(def ran_text ((r Ran)) (list int) (match r ((Ran f t) t)))
+(def ran_fs ((r Ran)) Fs (match r ((Ran f t) f)))
+
+; What the requests answer, from two.
+(def answers ((reqs (list (list int)))) (list int)
+  (ran_text (run (two) reqs)))
+
+(def reqs1 ((a (list int))) (list (list int)) (cons a (nil (list int))))
+(def reqs2 ((a (list int)) (b (list int))) (list (list int)) (cons a (reqs1 b)))
+(def reqs3 ((a (list int)) (b (list int)) (c (list int))) (list (list int)) (cons a (reqs2 b c)))
+(def reqs4 ((a (list int)) (b (list int)) (c (list int)) (d (list int))) (list (list int)) (cons a (reqs3 b c d)))
+
+; ----------------------------------------------------------- write, read
+
+(def written_notes () (list (list int))
+  (reqs3 "open 2 /Volumes/data/notes" "write 1 hello disk" "close 1"))
+
+(def test_write () int
+  (check_str "a handle, ten bytes, closed" (answers (written_notes)) "1:|10:|0:"))
+
+(def test_read_back () int
+  (check_str "the bytes, then the end"
+             (answers (append (written_notes) (reqs3 "open 1 /Volumes/data/notes" "read 2 100" "read 2 100")))
+             "1:|10:|0:|2:|10:hello disk|0:"))
+
+(def test_read_in_pieces () int
+  (check_str "four, then six"
+             (answers (append (written_notes) (reqs3 "open 1 /Volumes/data/notes" "read 2 4" "read 2 100")))
+             "1:|10:|0:|2:|4:hell|6:o disk"))
+
+; Opening to write anew empties the file.
+(def test_write_anew () int
+  (check_str "empty"
+             (answers (append (written_notes) (reqs3 "open 2 /Volumes/data/notes" "open 1 /Volumes/data/notes" "read 3 100")))
+             "1:|10:|0:|2:|3:|0:"))
+
+(def test_append () int
+  (check_str "added to"
+             (answers (append (written_notes) (reqs4 "open 3 /Volumes/data/notes" "write 2  again" "open 1 /Volumes/data/notes" "read 3 100")))
+             "1:|10:|0:|2:|6:|3:|16:hello disk again"))
+
+; The bytes reach the disk: the file's first cluster is cluster 1, from
+; sector 8 + 8, and the metadata, at sector 8, reads back as the volume.
+(def test_on_disk () int
+  (let f (ran_fs (run (two) (written_notes)))
+    (add (check_str "the data" (take (sectors f 16 1) 10) "hello disk")
+         (check_true "the metadata"
+                     (match (vol_of "data" (vol_layout 1528) (bytes_from_list (sectors f 8 8)))
+                       ((VolGot v) (eq v (fs_vol f 0)))
+                       ((VolBad why) false))))))
+
+; count sectors of f's store from sector.
+(def sectors ((f Fs) (sector int) (count int)) (list int)
+  (match f
+    ((Fs s port vols hs next ws cp)
+      (match (store_read_all s sector count) ((Got s2 bs) bs) ((GotNot s2 why) why)))))
+
+; ---------------------------------------------------- refusals and opens
+
+(def test_open_missing () int
+  (check_str "no such file" (answers (reqs1 "open 1 /Volumes/data/none")) "-3:"))
+
+(def test_open_places () int
+  (add (check_str "no such volume" (answers (reqs2 "open 1 /Volumes/x/a" "open 2 /Volumes/x/a")) "-3:|-9:")
+       (add (check_str "deeper" (answers (reqs2 "open 1 /Volumes/data/a/b" "open 2 /Volumes/data/a/b")) "-3:|-9:")
+            (check_str "the volume" (answers (reqs1 "open 1 /Volumes/data")) "-8:"))))
+
+(def test_open_mode () int
+  (check_str "mode 4" (answers (reqs1 "open 4 /Volumes/data/a")) "-5:"))
+
+(def test_bad_requests () int
+  (check_str "unknown, short, no number"
+             (answers (reqs3 "what" "read 1" "write x y"))
+             "-5:|-5:|-5:"))
+
+; A handle is only its opener's.
+(def test_others_handle () int
+  (let f (ran_fs (run (two) (reqs1 "open 2 /Volumes/data/notes")))
+    (add (check_str "pid 6 writing" (answer_text (obey f 6 "write 1 x")) "-5:")
+         (check_str "pid 5 writing" (answer_text (obey f 5 "write 1 x")) "1:"))))
+
+(def test_wrong_direction () int
+  (check_str "read a writer, write a reader"
+             (answers (append (written_notes) (reqs3 "open 2 /Volumes/data/a" "read 2 10" "write 2 x")))
+             "1:|10:|0:|2:|-5:|1:"))
+
+(def test_closed () int
+  (check_str "gone once closed" (answers (reqs3 "open 2 /Volumes/data/a" "close 1" "write 1 x")) "1:|0:|-5:"))
+
+; An exit notice's pid loses its handles.
+(def test_forget_pid () int
+  (let f (forget_pid (ran_fs (run (two) (reqs1 "open 2 /Volumes/data/notes"))) 5)
+    (check_str "gone" (answer_text (obey f 5 "write 1 x")) "-5:")))
+
+(def test_directory_full () int
+  (check_str "the 49th" (answer_text (obey (opened_n (two) 48) 5 "open 2 /Volumes/scratch/z")) "-5:"))
+
+; f with n files made on scratch, f0 to fN.
+(def opened_n ((f Fs) (n int)) Fs
+  (if (eq n 0) f (opened_n (after (obey f 5 (append "open 2 /Volumes/scratch/f" (digits n)))) (sub n 1))))
+
+(def test_write_a_message () int
+  (let f (ran_fs (run (two) (reqs1 "open 2 /Volumes/scratch/big")))
+    (check_str "all of it" (answer_text (obey f 5 (append "write 1 " (zeros 4000)))) "4000:")))
+
+; scratch has 63 clusters of data; 64 clusters' worth does not fit, and
+; leaves the file as it was.
+(def test_full_volume () int
+  (let f (fill_up (ran_fs (run (two) (reqs1 "open 2 /Volumes/scratch/big"))) 63)
+    (add (check_str "no room" (answer_text (obey f 5 "write 1 x")) "-6:")
+         (check_str "df" (answer_text (obey f 5 "df /Volumes/scratch")) "0:512 63 0 1"))))
+
+; f with n clusters more written to handle 1.
+(def fill_up ((f Fs) (n int)) Fs
+  (if (eq n 0) f (fill_up (after (obey f 5 (append "write 1 " (zeros 4096)))) (sub n 1))))
+
+; ------------------------------------------------------- larger writes
+
+; 5000 bytes, across two clusters, read back in pieces of a cluster.
+(def test_across_clusters () int
+  (let body (pattern 5000)
+    (let f (ran_fs (run (two) (reqs2 "open 2 /Volumes/data/big" (append "write 1 " body))))
+      (let g (after (obey f 5 "open 1 /Volumes/data/big"))
+        (check_true "the same" (eq (read_all g 2 (nil int)) body))))))
+
+; Appends that start inside a sector keep what is before them: 3, then
+; 600 more, then 100, reading back as one.
+(def test_appends () int
+  (let body (pattern 703)
+    (let f (ran_fs (run (two) (reqs4 "open 3 /Volumes/data/a" (append "write 1 " (take body 3))
+                                     (append "write 1 " (take (drop_n body 3) 600)) (append "write 1 " (drop_n body 603)))))
+      (let g (after (obey f 5 "open 1 /Volumes/data/a"))
+        (check_true "the same" (eq (read_all g 2 (nil int)) body))))))
+
+; Bytes 0 to n - 1 of a pattern that does not repeat within a sector.
+(def pattern ((n int)) (list int)
+  (pattern_onto n (nil int)))
+
+(def pattern_onto ((n int) (acc (list int))) (list int)
+  (if (eq n 0) acc (pattern_onto (sub n 1) (cons (add 33 (mod (mul (sub n 1) 7) 89)) acc))))
+
+; Everything left on handle h, pid 5's, read in pieces of up to 4092.
+(def read_all ((f Fs) (h int) (acc (list int))) (list int)
+  (match (obey f 5 (append "read " (append (digits h) " 4092")))
+    ((Answered g w bs) (if (le w 0) (rev acc) (read_all g h (rev_onto bs acc))))))
+
+; Random appends of up to 5000 bytes to two files read back as what was
+; written, every one of 40 runs.
+(def test_random_appends () int
+  (check_int "mismatches" (random_runs 11 40 0) 0))
+
+(def random_runs ((seed int) (left int) (bad int)) int
+  (if (eq left 0)
+      bad
+      (let s1 (rand_next seed)
+        (random_runs (rand_next s1) (sub left 1)
+                     (if (random_run (ran_fs (run (two) (reqs2 "open 3 /Volumes/data/a" "open 3 /Volumes/data/b"))) s1 6 (nil int) (nil int))
+                         bad
+                         (add bad 1))))))
+
+; n appends from seed, to handle 1 (file a) or 2 (b), checked against
+; what each should hold.
+(def random_run ((f Fs) (seed int) (n int) (a (list int)) (b (list int))) bool
+  (if (eq n 0)
+      (if (eq (read_back f "/Volumes/data/a") a) (eq (read_back f "/Volumes/data/b") b) false)
+      (let s1 (rand_next seed)
+        (let s2 (rand_next s1)
+          (let which (rand_below s1 2)
+            (let more (pattern (add 1 (rand_below s2 3000)))
+              (let g (after (obey f 5 (append "write " (append (digits (add which 1)) (append " " more)))))
+                (if (eq which 0)
+                    (random_run g s2 (sub n 1) (append a more) b)
+                    (random_run g s2 (sub n 1) a (append b more))))))))))
+
+(def read_back ((f Fs) (path (list int))) (list int)
+  (match (obey f 5 (append "open 1 " path))
+    ((Answered g h bs) (read_all g h (nil int)))))
+
+; ------------------------------------------------------ rename, remove
+
+(def test_rename () int
+  (check_str "renamed"
+             (answers (append (written_notes) (reqs3 "rename /Volumes/data/notes /Volumes/data/old" "open 1 /Volumes/data/notes" "open 1 /Volumes/data/old")))
+             "1:|10:|0:|0:|-3:|2:"))
+
+(def test_rename_refused () int
+  (check_str "missing, across, to the volume"
+             (answers (append (written_notes) (reqs3 "rename /Volumes/data/x /Volumes/data/y" "rename /Volumes/data/notes /Volumes/scratch/notes" "rename /Volumes/data/notes /Volumes/data")))
+             "1:|10:|0:|-3:|-10:|-8:"))
+
+; Renaming onto a file replaces it, and frees its clusters.
+(def test_rename_over () int
+  (let r (run (two) (append (written_notes) (reqs4 "open 2 /Volumes/data/b" "write 2 bee" "close 2" "rename /Volumes/data/b /Volumes/data/notes")))
+    (add (check_str "answers" (ran_text r) "1:|10:|0:|2:|3:|0:|0:")
+         (check_str "one file" (answer_text (obey (ran_fs r) 5 "list /Volumes/data")) "1:notes 3\n"))))
+
+(def test_remove () int
+  (check_str "removed, then gone"
+             (answers (append (written_notes) (reqs2 "remove /Volumes/data/notes" "open 1 /Volumes/data/notes")))
+             "1:|10:|0:|0:|-3:"))
+
+(def test_remove_open () int
+  (check_str "open, so kept" (answers (reqs2 "open 2 /Volumes/data/a" "remove /Volumes/data/a")) "1:|-4:"))
+
+(def test_remove_refused () int
+  (check_str "missing, the volume" (answers (reqs2 "remove /Volumes/data/a" "remove /Volumes/data")) "-3:|-8:"))
+
+; ------------------------------------------------------------- volumes
+
+(def test_list () int
+  (check_str "by name"
+             (answers (append (written_notes) (reqs3 "open 2 /Volumes/data/a" "close 2" "list /Volumes/data")))
+             "1:|10:|0:|2:|0:|2:a 0\nnotes 10\n"))
+
+(def test_list_refused () int
+  (check_str "no volume" (answers (reqs2 "list /Volumes/x" "list /Volumes/data/notes")) "-3:|-3:"))
+
+; data: 1528 sectors, 191 clusters, 190 of them data, one taken by notes.
+(def test_df () int
+  (check_str "data" (answers (append (written_notes) (reqs1 "df /Volumes/data"))) "1:|10:|0:|0:1528 190 189 1"))
+
+(def test_format () int
+  (check_str "emptied"
+             (answers (append (written_notes) (reqs2 "format /Volumes/data" "list /Volumes/data")))
+             "1:|10:|0:|0:|0:"))
+
+(def test_format_open () int
+  (check_str "a file open" (answers (reqs2 "open 2 /Volumes/data/a" "format /Volumes/data")) "1:|-4:"))
+
+; ---------------------------------------------------------------- rescan
+
+; Volumes as tools/mkdisk makes them, empty, and another in scratch's
+; place.
+(def data_vol () FsVol (FsVol 40 (vol_new "data" (vol_layout 1496))))
+(def scratch_vol () FsVol (FsVol 1536 (vol_new "scratch" (vol_layout 479))))
+(def other_vol () FsVol (FsVol 1536 (vol_new "other" (vol_layout 479))))
+
+(def vols2 ((a FsVol) (b FsVol)) (list FsVol) (cons a (cons b (nil FsVol))))
+
+; A 2048-sector disk in memory with vols on it: a GPT of their
+; partitions, each volume's metadata where its partition starts.
+(def disk_with ((vols (list FsVol))) Store
+  (metas_on (table_on (StoreMem ((MapEmpty int (list int))) 2048) (GptDisk (test_uuid 0) (parts_of vols 1))) vols))
+
+(def table_on ((s Store) (d GptDisk)) Store
+  (match (write_table s d) ((Put s2) s2) ((PutNot s2 why) s2)))
+
+; A UUID of version 7 for the tests, the same each run.
+(def test_uuid ((n int)) Uuid (uuid_v7 1760000000000 (uuid_noise n 10)))
+
+(def parts_of ((vols (list FsVol)) (n int)) (list GptPart)
+  (if (is_empty vols)
+      (nil GptPart)
+      (match (head vols)
+        ((FsVol start v)
+          (cons (GptPart (gpt_l0fs_type) (test_uuid n) start (match (vol_layout_of v) ((VolLayout s c t d) s)) (vol_label v))
+                (parts_of (tail vols) (add n 1)))))))
+
+(def metas_on ((s Store) (vols (list FsVol))) Store
+  (if (is_empty vols) s (match (head vols) ((FsVol start v) (metas_on (put_at s start (vol_meta v)) (tail vols))))))
+
+(def put_at ((s Store) (sector int) (bs (list int))) Store
+  (match (store_write_all s sector bs) ((Put s2) s2) ((PutNot s2 why) s2)))
+
+; A server of vols, on a disk that has ondisk.
+(def serving ((vols (list FsVol)) (ondisk (list FsVol))) Fs
+  (fs_new (disk_with ondisk) 7 (array_from vols (data_vol))))
+
+; A rescan as text: its answer, a bar, the labels to mount, comma
+; separated.
+(def rescan_text ((r Rescanned)) (list int)
+  (match r ((Rescanned a labels) (append (answer_text a) (append "|" (join_commas labels))))))
+
+(def join_commas ((ls (list (list int)))) (list int)
+  (if (is_empty ls) "" (if (is_empty (tail ls)) (head ls) (append (head ls) (append "," (join_commas (tail ls)))))))
+
+(def rescanned_fs ((r Rescanned)) Fs (match r ((Rescanned a labels) (after a))))
+
+; The same volumes: both served, nothing new to mount.
+(def test_rescan_same () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (check_str "two, none new" (rescan_text (rescan (serving both both))) "2:data\nscratch\n|")))
+
+; A volume in scratch's place is new; data is not.
+(def test_rescan_new () int
+  (check_str "other new"
+             (rescan_text (rescan (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (other_vol)))))
+             "2:data\nother\n|other"))
+
+; From one volume to two: the second is new, and served.
+(def test_rescan_more () int
+  (let r (rescan (serving (cons (data_vol) (nil FsVol)) (vols2 (data_vol) (scratch_vol))))
+    (add (check_str "scratch new" (rescan_text r) "2:data\nscratch\n|scratch")
+         (check_str "served" (answer_text (obey (rescanned_fs r) 5 "df /Volumes/scratch")) "0:479 58 58 0"))))
+
+; A volume that has gone is answered as no volume of fs's.
+(def test_rescan_gone () int
+  (let f (rescanned_fs (rescan (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (other_vol)))))
+    (check_str "scratch gone, other there"
+               (ran_text (run f (reqs3 "list /Volumes/scratch" "open 2 /Volumes/scratch/a" "list /Volumes/other")))
+               "-3:|-9:|0:")))
+
+; No partitions at all: no volume served.
+(def test_rescan_empty () int
+  (let r (rescan (serving (vols2 (data_vol) (scratch_vol)) (nil FsVol)))
+    (add (check_str "none" (rescan_text r) "0:|")
+         (check_str "data gone" (answer_text (obey (rescanned_fs r) 5 "list /Volumes/data")) "-3:"))))
+
+; What a rescan serves is what is on the disk: a file written and
+; closed is there after it.
+(def test_rescan_reads_disk () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (let f (ran_fs (run (serving both both) (written_notes)))
+      (check_str "the file" (ran_text (run (rescanned_fs (rescan f)) (reqs2 "open 1 /Volumes/data/notes" "read 2 100")))
+                 "2:|10:hello disk"))))
+
+; Refused while a file is open, served once it is closed.
+(def test_rescan_open () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (add (check_str "open" (ran_text (run (serving both both) (reqs2 "open 2 /Volumes/data/a" "rescan"))) "1:|-4:")
+         (check_str "closed" (ran_text (run (serving both both) (reqs3 "open 2 /Volumes/data/a" "close 1" "rescan")))
+                    "1:|0:|2:data\nscratch\n"))))
+
+(def test_rescan_words () int
+  (check_str "takes none" (answers (reqs1 "rescan /Volumes/data")) "-5:"))
+
+; A server of no volumes, as one that started on a disk with none, finds
+; both once they are made, and mounts both.
+(def test_rescan_from_none () int
+  (let f (fs_new (disk_with (vols2 (data_vol) (scratch_vol))) 7 (vols_array (nil FsVol)))
+    (add (check_str "nothing yet" (answer_text (obey f 5 "list /Volumes/data")) "-3:")
+         (check_str "both new" (rescan_text (rescan f)) "2:data\nscratch\n|data,scratch"))))
+
+; ------------------------------------------------------------ partitions
+
+; A server of both volumes, on a disk that has them.
+(def demo_fs () Fs (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (scratch_vol))))
+
+; A server of nothing, on a blank disk of 2048 sectors.
+(def blank_fs () Fs (fs_new (StoreMem ((MapEmpty int (list int))) 2048) 7 (vols_array (nil FsVol))))
+
+; The bytes of an answer.
+(def answer_bytes ((a Answered)) (list int) (match a ((Answered f w bs) bs)))
+(def answer_word ((a Answered)) int (match a ((Answered f w bs) w)))
+
+; The table on f's disk, as text: each partition's name, first sector
+; and sectors.
+(def table_text ((f Fs)) (list int)
+  (match (read_table (fs_store f))
+    ((NoTable s why) (append "none: " why))
+    ((BadTable s why) (append "bad: " why))
+    ((Table s d) (gpt_parts_text (gpt_parts d)))))
+
+(def gpt_parts_text ((ps (list GptPart))) (list int)
+  (if (is_empty ps) "" (append (gpt_part_text (head ps)) (gpt_parts_text (tail ps)))))
+
+(def gpt_part_text ((p GptPart)) (list int)
+  (match p
+    ((GptPart t u s c n) (append "[" (append n (append "] " (append (digits s) (append "+" (append (digits c) " ")))))))))
+
+; The 6 free sectors before data: a partition there, and its UUID, of
+; version 7, in the answer.
+(def test_partition () int
+  (let a (obey (demo_fs) 5 "partition 6")
+    (add (check_int "made" (answer_word a) 0)
+         (add (check_bool "its UUID" (match (uuid_of_text (answer_bytes a)) ((Some u) (eq (uuid_version u) 7)) ((None) false)) true)
+              (check_str "in the table, after the two" (table_text (after a)) "[data] 40+1496 [scratch] 1536+479 [] 34+6 ")))))
+
+(def test_partition_refused () int
+  (add (check_str "no room" (answer_text (obey (demo_fs) 5 "partition 7")) "-6:no free stretch is that long")
+       (add (check_str "on data" (answer_text (obey (demo_fs) 5 "partition 4 100")) "-6:those sectors are not free")
+            (check_str "not a number" (answer_text (obey (demo_fs) 5 "partition six")) "-5:"))))
+
+; A blank disk gets a table, then the partition where asked.
+(def test_partition_blank () int
+  (let a (obey (blank_fs) 5 "partition 1000 100")
+    (add (check_int "made" (answer_word a) 0)
+         (check_str "a table of one" (table_text (after a)) "[] 100+1000 "))))
+
+; A partition made, then a volume on it, by its UUID: served, and named.
+(def test_mkfs () int
+  (let a (obey (blank_fs) 5 "partition 1000")
+    (let b (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " new")))
+      (add (check_str "made" (answer_text b) "0:new")
+           (add (check_str "named" (table_text (after b)) "[new] 34+1000 ")
+                (check_str "served" (answer_text (obey (after b) 5 "df /Volumes/new")) "0:1000 124 124 0"))))))
+
+; Made by its UUID, it is found again by a rescan, as at the start.
+(def test_mkfs_found () int
+  (let a (obey (blank_fs) 5 "partition 500")
+    (let b (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " kept")))
+      (check_str "rescanned" (rescan_text (rescan (after b))) "1:kept\n|"))))
+
+; mkfs of uuid and label on f, as text.
+(def mkfs_text ((f Fs) (uuid (list int)) (label (list int))) (list int)
+  (answer_text (obey f 5 (append "mkfs " (append uuid (append " " label))))))
+
+(def test_mkfs_refused () int
+  (let a (obey (demo_fs) 5 "partition 6")
+    (let f (after a)
+      (let u (answer_bytes a)
+        (add (check_str "not a UUID" (mkfs_text f "12" "x") "-5:not a UUID")
+             (add (check_str "no such partition" (mkfs_text f (uuid_text (test_uuid 99)) "x") "-3:no partition has that UUID")
+                  (add (check_str "data's, served" (mkfs_text f (uuid_text (test_uuid 1)) "x") "-4:its volume is served; format empties it")
+                       (add (check_str "a label served" (mkfs_text f u "data") "-4:that label is served already")
+                            (add (check_str "a bad label" (mkfs_text f u "a.b") "-5:a label is 1 to 15 letters, digits, - and _")
+                                 (check_str "too small" (mkfs_text f u "tiny") "-6:the partition is too small for a volume"))))))))))
+
+; A header with GPT's signature and nothing else right.
+(def bad_header () (list int) (append "EFI PART" (zeros 504)))
+
+; A table damaged, both copies, is never written over.
+(def test_partition_bad_table () int
+  (let f (blank_fs)
+    (let s (put_at (put_at (fs_store f) 1 (bad_header)) 2047 (bad_header))
+      (check_str "refused" (answer_text (obey (with_store f s) 5 "partition 10")) "-5:a GPT header of another size"))))
+
+; With no volumes fs goes on to serve, rather than giving up with 0; under
+; an operating system there is no kernel to register it with, so it fails.
+(def test_serves_none () int
+  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int))) 2048) (nil FsVol))) 1))
+
+; Under an operating system there is no disk.
+(def test_no_disk () int
+  (check_int "nothing to serve" (fs) 0))

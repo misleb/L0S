@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # disks-create.sh -- a partition and a volume made with Disks
-# (user/disks). Boots tests/disks/etc's initramfs, the compositor with no
+# (user/apps/disks). Boots tests/disks/etc's initramfs, the compositor with no
 # window and the disk's driver and file server, on a disk build/mkfs
 # makes with sectors 1040 to 1535 free between data and scratch, as
 # tests/partitions.sh does. Types run disks & at the serial shell, learns

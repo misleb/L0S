@@ -1,0 +1,174 @@
+; procmon.l0 -- a process monitor, in a window of the toolkit's
+; (user/lib/ui): the system's processes, from the kernel's process table,
+; in a data grid under a toolbar. Each row is a live process: its pid, its
+; program's name, its state, as ps words it, split into the state and its
+; detail, and its parent. The kernel keeps no account of CPU time, so
+; there is no CPU column.
+;
+; The grid is read again every second, and when Refresh is pressed. A
+; column's title sorts by it, and again the other way; a press on a row,
+; or the arrow keys, select one; the wheel, and the scrollbar's slider,
+; scroll the rows when there are more than fit; End Process, red, is sensitive only
+; then, and ends it, as sh's kill does, saying what came of it. A driver
+; cannot be ended, and procmon does not end itself.
+;
+;   procmon          its window, until its close button is pressed
+
+; The grid's state, the rows it shows, and the line the toolbar shows.
+(data Monitor (Monitor UiGridState (list UiRow) (list int)))
+
+(def monitor_new ((rows (list UiRow))) Monitor
+  (Monitor (UiGridState 0 false "" 0) rows "Select a process"))
+
+(def monitor_prefix () (list int) "procs")
+
+(def monitor_columns () (list UiColumn)
+  (cons (UiColumn "PID" 70 (UiEnd) true)
+  (cons (UiColumn "Name" 120 (UiStart) true)
+  (cons (UiColumn "State" 120 (UiStart) true)
+  (cons (UiColumn "Parent" 70 (UiEnd) true)
+  (cons (UiColumn "Detail" 0 (UiStart) true) (nil UiColumn)))))))
+
+; How often the grid is read again, and how long the loop sleeps at most
+; while no message waits, so that the pointer and keys are answered
+; within that.
+(def refresh_ns () int 1000000000)
+(def poll_ns () int 20000000)
+
+; -------------------------------------------------------------- the rows
+
+; Running and ready green, waiting on another blue, sleeping gray, and a
+; state procmon does not know amber.
+(def state_tone ((st int)) UiTone
+  (if (any_eq st (cons (state_running) (cons (state_ready) (nil int)))) (UiGood)
+  (if (any_eq st (cons (state_receiving) (cons (state_waiting) (cons (state_writing) (cons (state_reading) (cons (state_filing) (nil int))))))) (UiAccentTone)
+  (if (any_eq st (cons (state_sleeping) (cons (state_exited) (nil int)))) (UiNeutral)
+  (UiWarn)))))
+
+; The row of process pid, whose program is called name.
+(def proc_row ((pid int) (info ProcInfo) (name (list int))) UiRow
+  (match info
+    ((ProcInfo st parent m detail)
+      (UiRow (digits pid)
+        (cons (UiCellNum pid "")
+        (cons (UiCellText name)
+        (cons (UiCellStatus (state_tone st) (state_word st))
+        (cons (UiCellNum parent "")
+        (cons (UiCellText (state_detail st detail)) (nil UiCell))))))))))
+
+; Every live process's row, procs.l0's procs_live, in the table's order.
+(def rows_now () (list UiRow) (live_rows (procs_live) (nil UiRow)))
+
+(def live_rows ((ps (list ProcLive)) (acc (list UiRow))) (list UiRow)
+  (if (is_empty ps)
+      (rev acc)
+      (match (head ps)
+        ((ProcLive pid info)
+          (match info
+            ((ProcInfo st parent m detail) (live_rows (tail ps) (cons (proc_row pid info (program_name m)) acc))))))))
+
+(def has_row ((rows (list UiRow)) (key (list int))) bool
+  (if (is_empty rows) false (if (eq (ui_row_key (head rows)) key) true (has_row (tail rows) key))))
+
+; The monitor showing rows, and its selection kept only if its process
+; is still among them.
+(def monitor_rows ((m Monitor) (rows (list UiRow))) Monitor
+  (match m
+    ((Monitor gs old status)
+      (match gs
+        ((UiGridState col desc sel first)
+          (Monitor (UiGridState col desc (if (has_row rows sel) sel "") first) rows status))))))
+
+; --------------------------------------------------------- ending one
+
+; What came of ending pid, as proc_kill answered r.
+(def kill_text ((pid int) (r Kill)) (list int)
+  (let p (digits pid)
+    (match r
+      ((Killed) (append "Ended process " p))
+      ((KillDenied) (append "Process " (append p " is a driver, and cannot be ended")))
+      ((KillNoProc) (append "No process " (append p ": it has exited"))))))
+
+; Ends pid, unless it is me, and says what came of it.
+(def end_text ((pid int) (me int)) (list int)
+  (if (eq pid me)
+      (append "Process " (append (digits pid) " is procmon itself"))
+      (kill_text pid (proc_kill pid))))
+
+; ------------------------------------------------------------------ view
+
+(def monitor_view ((m Monitor)) UiWidget
+  (match m
+    ((Monitor gs rows status) (ui_grid_page status (UiGridView (monitor_prefix) (monitor_columns) rows gs)))))
+
+; ---------------------------------------------------------------- update
+
+; The monitor after an action, or a key the grid takes, with the grid
+; scrolled as sc says: Refresh reads the table again, and End Process
+; ends the selected process and reads it. The grid's own actions select,
+; sort, and scroll it.
+(def monitor_update ((m Monitor) (action (list int)) (ev UiEvent) (sc UiScroller)) Monitor
+  (match m
+    ((Monitor gs rows status)
+      (if (eq action "app.refresh")
+          (let now (rows_now)
+            (monitor_rows (Monitor gs rows (append "Refreshed: " (append (digits (length now)) " processes"))) now))
+          (if (eq action "app.end")
+              (monitor_end m)
+              (if (starts_with action (append (monitor_prefix) "."))
+                  (selected (Monitor (ui_grid_action gs (monitor_prefix) action) rows status))
+                  (monitor_key m ev sc)))))))
+
+(def monitor_end ((m Monitor)) Monitor
+  (match m
+    ((Monitor gs rows status)
+      (if (is_empty (ui_gs_selected gs))
+          m
+          (let said (end_text (int_prefix (ui_gs_selected gs) 0) (l0s_pid))
+            (monitor_rows (Monitor gs rows said) (rows_now)))))))
+
+(def monitor_key ((m Monitor) (ev UiEvent) (sc UiScroller)) Monitor
+  (match m
+    ((Monitor gs rows status)
+      (let code (ui_key_pressed ev)
+        (if (lt code 0)
+            m
+            (selected (Monitor (ui_grid_key (UiGridView (monitor_prefix) (monitor_columns) rows gs) code sc) rows status)))))))
+
+; The monitor with its line saying what is selected, if anything is.
+(def selected ((m Monitor)) Monitor
+  (match m
+    ((Monitor gs rows status) (Monitor gs rows (ui_selected_line gs status)))))
+
+; ------------------------------------------------------------------ loop
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "procmon" why))
+
+(def procmon () int
+  (match (ui_open "Processes" 640 400)
+    ((UiOpenFailed why) (complain why))
+    ((UiOpenedWin w)
+      (let m (monitor_new (rows_now))
+        (monitor_loop (ui_present w (monitor_view m)) m (add (clock_ns) (refresh_ns)))))))
+
+; Each message waiting is answered at once; with none, the table is read
+; again once due is past, and otherwise the loop sleeps a little, since a
+; receive cannot wait for a message and a time together.
+(def monitor_loop ((w UiWin) (m Monitor) (due int)) int
+  (match (port_try_receive (ui_win_port w))
+    ((RecvFailed) (monitor_idle w m due))
+    ((Message from payload)
+      (let ev (ui_event_of w (Message from payload))
+        (match (ui_route w ev)
+          ((UiRouted w2 action)
+            (let m2 (monitor_update m action ev (ui_win_scroller w2 (monitor_prefix)))
+              (monitor_loop (ui_present w2 (monitor_view m2)) m2 due))))))))
+
+(def monitor_idle ((w UiWin) (m Monitor) (due int)) int
+  (let now (clock_ns)
+    (if (ge now due)
+        (let m2 (monitor_rows m (rows_now))
+          (monitor_loop (ui_present w (monitor_view m2)) m2 (add now (refresh_ns))))
+        (let s (sleep_ns (min (poll_ns) (sub due now)))
+          (monitor_loop w m due)))))

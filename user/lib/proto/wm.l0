@@ -1,0 +1,105 @@
+; wm.l0 -- the compositor's protocol, as a client of it sends it. The
+; compositor, user/wm, registers as compositor and takes these, each a
+; request (l0s.l0), its words separated by spaces:
+;
+;   hello                       compositor: says nothing but who it is,
+;                               so the client learns its pid to share with
+;   window W H VA PORT TITLE    a window of W by H pixels, its buffer at VA
+;                               in the compositor, shared there with
+;                               shm_share; keys typed while it is in front,
+;                               and presses of the pointer in it, go to
+;                               PORT. The reply is window ID
+;   damage ID X Y W H ...       each rectangle of the window changed, ID X
+;                               Y W H again for each, shown together
+;   top ID T                    the window's rows read from its buffer's
+;                               row T on, as a ring: how a client scrolls
+;   title ID TEXT               a new title
+;   close ID                    the window gone
+;   desktop CMD ...             CMD, a drawing command (render.l0's
+;                               parse_command), drawn on the desktop
+;   windows                     a line a window, front first: its id,
+;                               title, x, y, width, height, and front if it
+;                               is; then pointer X Y
+;
+; A window's buffer is 4-byte pixels, b, g, r, unused, row after row. The
+; reply is ok, or as said above, or error: WHY. Linked into the
+; compositor's clients, by the Makefile's LIBS_ lists.
+
+; The compositor: its port, a port for its replies, and its pid.
+(data Compositor (Compositor int int int) (NoCompositor (list int)))
+
+(def compositor_open () Compositor
+  (match (name_wait "compositor" 10000000000)
+    ((NotFound) (NoCompositor "no compositor; is wm running?"))
+    ((Found c)
+      (match (compositor_reply (Compositor c (port_new) 0) "hello")
+        ((Replied c2 r) (if (eq r "compositor") c2 (NoCompositor (append "the compositor said " r))))))))
+
+; The reply to body, and the compositor with its pid, which the reply
+; comes from.
+(data Replied (Replied Compositor (list int)))
+
+(def compositor_reply ((c Compositor) (body (list int))) Replied
+  (match c
+    ((NoCompositor why) (Replied c (append "error: " why)))
+    ((Compositor port rp pid)
+      (match (port_ask port rp body "the compositor")
+        ((Asked from r) (Replied (Compositor port rp from) r))
+        ((AskFailed why) (Replied c (append "error: " why)))))))
+
+(def compositor_ask ((c Compositor) (body (list int))) (list int)
+  (match (compositor_reply c body) ((Replied c2 r) r)))
+
+(def compositor_pid ((c Compositor) ) int
+  (match c ((Compositor port rp pid) pid) ((NoCompositor why) 0)))
+
+; The reply as an error's reason, or empty for ok.
+(def wm_error ((r (list int))) (list int) (reply_why r "the compositor"))
+
+; A new window, w by h, of this process's n pages from va, shared with the
+; compositor, its events to port: its id, or why not.
+(data Opened (WindowOpened int) (WindowFailed (list int)))
+
+(def window_open ((c Compositor) (w int) (h int) (va int) (n int) (port int) (title (list int))) Opened
+  (match (shm_share_to va n (compositor_pid c) "the compositor")
+    ((Ok there) (window_opened (compositor_ask c (window_request w h there port title))))
+    ((Err why) (WindowFailed why))))
+
+(def window_request ((w int) (h int) (va int) (port int) (title (list int))) (list int)
+  (append (unwords (cons "window" (numbers_words (cons w (cons h (cons va (cons port (nil int))))))))
+          (append " " title)))
+
+(def window_opened ((r (list int))) Opened
+  (let ws (split_spaces r)
+    (if (if (eq (length ws) 2) (eq (head ws) "window") false)
+        (WindowOpened (int_prefix (head (tail ws)) 0))
+        (WindowFailed (wm_error r)))))
+
+; op and its numbers asked, the reply as an error's reason or empty.
+(def ask_nums ((c Compositor) (op (list int)) (ns (list int))) (list int)
+  (wm_error (compositor_ask c (unwords (cons op (numbers_words ns))))))
+
+(def window_damage ((c Compositor) (id int) (x int) (y int) (w int) (h int)) (list int)
+  (ask_nums c "damage" (cons id (cons x (cons y (cons w (cons h (nil int))))))))
+
+; A rectangle of a window: x, y, width, height.
+(data WinRect (WinRect int int int int))
+
+(def win_rect_nums ((id int) (rs (list WinRect)) (acc (list int))) (list int)
+  (if (is_empty rs)
+      (rev acc)
+      (match (head rs) ((WinRect x y w h) (win_rect_nums id (tail rs) (cons h (cons w (cons y (cons x (cons id acc))))))))))
+
+; Every rectangle in rs of window id changed, told in one damage request,
+; so the compositor shows them together; nothing to tell for none.
+(def window_damage_many ((c Compositor) (id int) (rs (list WinRect))) (list int)
+  (if (is_empty rs) "" (ask_nums c "damage" (win_rect_nums id rs (nil int)))))
+
+(def window_top ((c Compositor) (id int) (top int)) (list int)
+  (ask_nums c "top" (cons id (cons top (nil int)))))
+
+(def window_title ((c Compositor) (id int) (title (list int))) (list int)
+  (wm_error (compositor_ask c (append "title " (append (digits id) (append " " title))))))
+
+(def window_close ((c Compositor) (id int)) (list int)
+  (ask_nums c "close" (cons id (nil int))))

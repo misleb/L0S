@@ -48,7 +48,7 @@ The `l0-code` skill has the test syntax: `(def test_NAME () int ...)`, the
   ```
 
 - **Fixtures are ordinary defs** at the top of the file, such as `win` and
-  `two` in `user/wm/wm_test.l0`. A test builds a structure and compares a
+  `two` in `user/sbin/wm/wm_test.l0`. A test builds a structure and compares a
   rendering of it as text with `check_str`, because a failing string shows
   where it differs: `placed_text` (layers), `hit_text`, `boxes_text`,
   `run_text`, `segs_text`. Write one for any new structure.
@@ -58,7 +58,7 @@ The `l0-code` skill has the test syntax: `(def test_NAME () int ...)`, the
   screen tests (below).
 - **Property tests** thread a seed through `rand_next` and `rand_below`.
   Check a few hundred cases against a slower obvious version, and count the
-  mismatches: `test_cached_rows_agree` in `user/virtio-gpu/virtio-gpu_test.l0`
+  mismatches: `test_cached_rows_agree` in `user/sbin/virtio-gpu/virtio-gpu_test.l0`
   checks cached screen rows against a full rebuild; `test_random_never_crashes`
   in `common/initramfs_test.l0`.
 - **Files**: host tests read only `build/sample.cpio`, which `make test`

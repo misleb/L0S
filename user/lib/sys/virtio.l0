@@ -1,0 +1,248 @@
+; virtio.l0 -- what drivers of QEMU's virtio-mmio devices share: the
+; transports' registers, finding a device among them and making it ready,
+; laying out a split virtqueue in the DMA pages the kernel gives
+; (dma_alloc, l0s.l0), offering it requests and waiting for them, and
+; the descriptors of memory in runs. Linked into the virtio drivers only,
+; by the Makefile's VIRTIO.
+
+(def virtio_base () int 167772160)  ; 0x0A000000: 32 transports
+(def virtio_span () int 16384)      ; 0x200 bytes each
+(def transports () int 32)
+
+; Interrupt 48 + t is transport t's (spec section 10.3).
+(def transport_irq ((t int)) int (add 48 t))
+
+; A transport's registers, as offsets (virtio 1.2, section 4.2.2).
+(def reg_version () int 4)
+(def reg_device () int 8)
+(def reg_driver_features () int 32)
+(def reg_driver_features_sel () int 36)
+(def reg_queue_sel () int 48)
+(def reg_queue_num_max () int 52)
+(def reg_queue_num () int 56)
+(def reg_queue_ready () int 68)
+(def reg_queue_notify () int 80)
+(def reg_interrupt_status () int 96)
+(def reg_interrupt_ack () int 100)
+(def reg_status () int 112)
+(def reg_queue_desc () int 128)
+(def reg_queue_driver () int 144)
+(def reg_queue_device () int 160)
+(def reg_config () int 256)         ; the device's own configuration
+
+; Device status bits.
+(def status_ack () int 1)
+(def status_driver () int 2)
+(def status_driver_ok () int 4)
+(def status_features_ok () int 8)
+
+; Register off of transport t, in the one region over all of them.
+(def treg ((t int) (off int)) int (add (mul t 512) off))
+
+; ---------------------------------------------------------------- finding
+
+; The first transport from t whose DeviceID is id, or -1.
+(def find_device ((d IoDevice) (id int) (t int)) int
+  (if (ge t (transports))
+      -1
+      (if (eq (device_read32 d (treg t (reg_device))) id) t (find_device d id (add t 1)))))
+
+(def is_modern ((d IoDevice) (t int)) bool
+  (eq (device_read32 d (treg t (reg_version)) ) 2))
+
+; Resets transport t's device, acknowledges it, and accepts only
+; VIRTIO_F_VERSION_1, bit 32: whether the device took that.
+(def negotiate ((d IoDevice) (t int)) bool
+  (let r (device_write32 d (treg t (reg_status)) 0)
+    (let a (device_write32 d (treg t (reg_status)) (bit_or (status_ack) (status_driver)))
+      (let s0 (device_write32 d (treg t (reg_driver_features_sel)) 0)
+        (let f0 (device_write32 d (treg t (reg_driver_features)) 0)
+          (let s1 (device_write32 d (treg t (reg_driver_features_sel)) 1)
+            (let f1 (device_write32 d (treg t (reg_driver_features)) 1)
+              (let s (device_write32 d (treg t (reg_status)) (bit_or 3 (status_features_ok)))
+                (not (eq (bit_and (device_read32 d (treg t (reg_status))) (status_features_ok)) 0))))))))))
+
+; Tells transport t's device the driver is ready, once its queues are.
+(def driver_ok ((d IoDevice) (t int)) int
+  (device_write32 d (treg t (reg_status)) (bit_or 11 (status_driver_ok))))
+
+; The transports' registers, opened; or why not, as a complaint says it.
+(def virtio_open () (Result IoDevice (list int))
+  (match (open_device (virtio_base) (virtio_span))
+    ((DeviceFailed fault why) ((Err IoDevice (list int)) (append "no virtio-mmio transports: " why)))
+    ((DeviceOpened d) ((Ok IoDevice (list int)) d))))
+
+; What finding a device came to: transport t, found and negotiated with,
+; its queue 0 big enough; no such device on the board, which is no
+; failure; or why the one there cannot be driven.
+(data VirtioProbe (VirtioReady int) (VirtioAbsent) (VirtioUnusable (list int)))
+
+; Transport t, as find_device found it, -1 for none, made ready to drive:
+; what names the device in why not, as "the virtio-blk", and qwhat its
+; queue 0, which must take size entries.
+(def virtio_probe ((d IoDevice) (t int) (what (list int)) (qwhat (list int)) (size int)) VirtioProbe
+  (if (lt t 0)
+      (VirtioAbsent)
+      (if (not (is_modern d t))
+          (VirtioUnusable (append what "'s transport is legacy, not version 2"))
+          (if (not (negotiate d t))
+              (VirtioUnusable (append what " refused its features"))
+              (if (lt (queue_max d t 0) size)
+                  (VirtioUnusable (append "the " (append qwhat " queue is too small")))
+                  (VirtioReady t))))))
+
+; ----------------------------------------------------------------- queues
+
+; How many entries queue sel of transport t may have.
+(def queue_max ((d IoDevice) (t int) (sel int)) int
+  (let s (device_write32 d (treg t (reg_queue_sel)) sel)
+    (device_read32 d (treg t (reg_queue_num_max)))))
+
+; Sets up queue sel of transport t with size entries, its descriptors,
+; available ring, and used ring where the device reaches them.
+(def start_queue ((d IoDevice) (t int) (sel int) (size int) (desc int) (avail int) (used int)) int
+  (let s (device_write32 d (treg t (reg_queue_sel)) sel)
+    (let m (device_write32 d (treg t (reg_queue_num)) size)
+      (let a (write_addr d (treg t (reg_queue_desc)) desc)
+        (let b (write_addr d (treg t (reg_queue_driver)) avail)
+          (let c (write_addr d (treg t (reg_queue_device)) used)
+            (device_write32 d (treg t (reg_queue_ready)) 1)))))))
+
+; Tells transport t's device that queue sel has more available.
+(def notify ((d IoDevice) (t int) (sel int)) int
+  (device_write32 d (treg t (reg_queue_notify)) sel))
+
+; Where a queue of size entries keeps its rings, from where its
+; descriptors start: the available ring after the size descriptors of 16
+; bytes, the used ring as far again, each with room to spare.
+(def virtq_avail_off ((size int)) int (mul 16 size))
+(def virtq_used_off ((size int)) int (mul 32 size))
+
+; DMA memory for a queue: its address here, the region over it, and
+; where the device reaches each page; or why not, as a complaint says it.
+(data VirtqMem (VirtqMem int IoDevice (array int)) (NoVirtqMem (list int)))
+
+; n new pages of DMA memory for what, as "the queue".
+(def virtq_mem ((n int) (what (list int))) VirtqMem
+  (let a (dma_alloc n)
+    (match a
+      ((DmaPages va)
+        (match (dma_open va n)
+          ((DeviceFailed fault why) (NoVirtqMem (append "cannot reach " (append what (append ": " why)))))
+          ((DeviceOpened q)
+            (match (page_addresses va n)
+              ((None) (NoVirtqMem (append "the device cannot reach " what)))
+              ((Some addrs) (VirtqMem va q addrs))))))
+      ((DmaDenied) (virtq_no_mem what a))
+      ((DmaTooMany) (virtq_no_mem what a))
+      ((DmaNoRoom) (virtq_no_mem what a)))))
+
+(def virtq_no_mem ((what (list int)) (a DmaAlloc)) VirtqMem
+  (NoVirtqMem (append "no memory for " (append what (append ": " (dma_alloc_why a))))))
+
+; Descriptor chain head put in slot n of the available ring at avail of
+; q, a queue of size entries, not yet published.
+(def virtq_slot ((q IoDevice) (avail int) (size int) (n int) (head int)) int
+  (device_write16 q (add avail (add 4 (mul 2 (mod n size)))) head))
+
+; The available ring at avail of q made to hold n entries, and transport
+; t's device told of queue sel: barriers either side, so that the device
+; sees the slots before the index, and the index before it is told.
+(def virtq_publish ((d IoDevice) (t int) (sel int) (q IoDevice) (avail int) (n int)) int
+  (let b (barrier)
+    (let i (device_write16 q (add avail 2) (bit_and n 65535))
+      (let b2 (barrier)
+        (notify d t sel)))))
+
+; Descriptor chain head offered as the nth request on queue sel, its ring
+; at avail of q, size entries: n + 1, the requests made.
+(def virtq_offer ((d IoDevice) (t int) (sel int) (q IoDevice) (avail int) (size int) (n int) (head int)) int
+  (let s (virtq_slot q avail size n head)
+    (let p (virtq_publish d t sel q avail (add n 1))
+      (add n 1))))
+
+; A 64-bit address, written as the two 32-bit registers from off.
+(def write_addr ((d IoDevice) (off int) (a int)) int
+  (let lo (device_write32 d off (bit_and a 4294967295))
+    (device_write32 d (add off 4) (bit_shr a 32))))
+
+; How long a driver waits for its device to use a request: 2 s.
+(def virtq_patience_ns () int 2000000000)
+
+; How long to wait by yielding, before sleeping a millisecond at a time:
+; a device uses most requests well within it, and a sleep is never
+; shorter than a millisecond.
+(def virtq_spin_ns () int 500000)
+
+; Whether the used ring at used_off of q has reached n, the requests
+; made, within virtq_patience_ns of since, when the last was made.
+(def virtq_wait ((q IoDevice) (used_off int) (n int) (since int)) bool
+  (let b (barrier)
+    (if (eq (device_read16 q (add used_off 2)) (bit_and n 65535))
+        (let b2 (barrier) true)
+        (let now (clock_ns)
+          (if (gt now (add since (virtq_patience_ns)))
+              false
+              (let s (if (lt (sub now since) (virtq_spin_ns)) (l0s_yield) (sleep_ns 1000000))
+                (virtq_wait q used_off n since)))))))
+
+; Where the device reaches each of the n DMA pages from va, or none if
+; one of them is not a DMA page of this process's.
+(def page_addresses ((va int) (n int)) (Option (array int))
+  (fill_addresses (array_new n 0) va 0))
+
+(def fill_addresses ((a (array int)) (va int) (i int)) (Option (array int))
+  (if (eq i (array_len a))
+      (Some a)
+      (match (dma_address (add va (mul i (page_size))))
+        ((DmaAddress at) (fill_addresses (array_set a i at) va (add i 1)))
+        ((DmaAddressDenied) ((None (array int))))
+        ((NotDma) ((None (array int)))))))
+
+; Where the device reaches offset off of memory whose pages it reaches at
+; addrs.
+(def device_at ((addrs (array int)) (off int)) int
+  (add (array_get addrs (div off (page_size))) (mod off (page_size))))
+
+; ------------------------------------------------------------ descriptors
+
+; A descriptor's flags: it chains to another, and the device writes it.
+(def desc_next () int 1)
+(def desc_write () int 2)
+
+; A split virtqueue descriptor: addr, len, flags, next.
+(def descriptor ((addr int) (len int) (flags int) (next int)) (list int)
+  (append (le64 addr) (append (u32_le len) (append (le16 flags) (le16 next)))))
+
+; A run of memory as a device reaches it: its address and length.
+(data VirtqRun (VirtqRun int int))
+
+; runs, reversed, with the n bytes from a after them, joined to the last
+; if it ends at a.
+(def virtq_push_run ((runs (list VirtqRun)) (a int) (n int)) (list VirtqRun)
+  (if (le n 0)
+      runs
+      (if (is_empty runs)
+          (cons (VirtqRun a n) runs)
+          (match (head runs)
+            ((VirtqRun pa pn)
+              (if (eq (add pa pn) a) (cons (VirtqRun pa (add pn n)) (tail runs)) (cons (VirtqRun a n) runs)))))))
+
+; The n bytes from offset off of memory whose pages a device reaches at
+; addrs, as the fewest runs, cut only where pages are not next to each
+; other where it sees them; onto runs, reversed.
+(def virtq_page_runs ((addrs (array int)) (off int) (n int) (runs (list VirtqRun))) (list VirtqRun)
+  (if (le n 0)
+      runs
+      (let k (min n (sub (page_size) (mod off (page_size))))
+        (virtq_page_runs addrs (add off k) (sub n k) (virtq_push_run runs (device_at addrs off) k)))))
+
+; Each run's descriptor, flags as given, the first chained to descriptor
+; next and each to the one after: the next ones of a chain, onto acc,
+; reversed.
+(def virtq_push_chain ((runs (list VirtqRun)) (flags int) (next int) (acc (list int))) (list int)
+  (if (is_empty runs)
+      acc
+      (match (head runs)
+        ((VirtqRun a n)
+          (virtq_push_chain (tail runs) flags (add next 1) (push (descriptor a n flags next) acc))))))

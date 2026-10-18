@@ -30,11 +30,13 @@ the `;` comment block directly above each form, so write yours that way
 | Path | What |
 |---|---|
 | `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `process.l0`, `memory.l0`, `mounts.l0` (the mount table: the initramfs at `/`, volumes at `/Volumes/LABEL`), `ipc.l0`, `sched.l0`, `pids.l0`, `inittab.l0` are its parts. File calls on a volume go to its server as fs-protocol requests (`ask_fs`, the `AwaitingFs` state). `asm.l0` hand-assembles threads for board tests |
-| `common/` | shared by kernel and programs: `abi.l0` (call numbers `call_*`, error codes, limits, little-endian helpers), `initramfs.l0` (the cpio archive), `queue.l0` |
-| `user/lib/` | linked into programs: `l0s.l0` (call wrappers, `request`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `tty.l0`, `virtio.l0` (registers, queues, descriptors, `virtq_wait`) in every program; `render.l0`, `display.l0`, `wm.l0`, `clock.l0`, `disk.l0`, `uuid.l0` (UUIDs, version 7), `crc32.l0`, `gpt.l0` (the partition table, pure; `PARTS` is all three), `l0fs.l0` (a volume's on-disk format, pure), `fs.l0` (the fs protocol) and `ui/` only where a `LIBS_` list says |
-| `user/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`). Becomes `/bin/NAME`, a command; `/sbin/NAME`, a driver or service (the Makefile's `SBIN`); or, if it holds a bundle's source `APP.app/` (`manifest`, `icon.draw`), an app, `/Applications/APP.app/NAME` |
-| `user/lib/app.l0` | apps: a bundle's manifest, the bundles there are, the app a program is, and running one by its bundle's name (`sh`, `wm`) |
-| `user/wm/launcher.l0` | the compositor's launcher, GNOME Shell's grid of apps: its layout, painting and clicks |
+| `common/` | shared by kernel, programs and host tools: `abi.l0` (call numbers `call_*`, error codes, limits, `le16`/`le64` and their readers, `label_ok`, `pages_for`, `array_from`/`array_to_list`), `text.l0` (lists and strings: `nth`, `take`, `drop`, `unwords`, `join_with`, `split_on`, `lines`, `up_to`, padding, `is_number`, `word_number(s)`, `ceil_div`); `initramfs.l0` (the cpio archive) and `queue.l0` for kernel and programs |
+| `user/lib/sys/` | in every program (`ULIB`): `l0s.l0` (call wrappers, `request`, `port_ask`, `reply_why`, `shm_region`, `shm_share_to`, `put_bytes`/`get_bytes`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `server.l0` (`name_register_or_why`, `irq_bind_or_why`, `request_numbers`, `Served`, `served_ok`/`served_error`, `request_answer`, `port_tell`, listeners), `cli.l0` (`complain_as`, `note_as`, `say`, `arg_number`, `read_whole`, `write_whole`, `done_why`; the host tools link it too). Where a `LIBS_` list says: `tty.l0` (`TTY`), `virtio.l0` (`VIRTIO`: `virtio_open`, `virtio_probe`, `virtq_mem`, `virtq_offer`, `virtq_wait`, `VirtqRun`), `procs.l0` (`PROCS`: the live processes, `state_text`) |
+| `user/lib/proto/` | the servers' protocols, client side: `display.l0`, `wm.l0`, `clock.l0`, `disk.l0`, `fs.l0`, `app.l0` (apps: a bundle's manifest, the bundles there are, the app a program is, running one by its bundle's name) |
+| `user/lib/format/` | data as bytes, pure, linked by host tools too: `uuid.l0` (UUIDs, version 7), `crc32.l0`, `gpt.l0` (the partition table, `gpt_layout`; `PARTS` is these three), `l0fs.l0` (a volume's on-disk format), `ppm.l0` (PPM images, `rgb` and its channels) |
+| `user/lib/gfx/`, `user/lib/ui/` | `render.l0` (`RENDER` is it with `ppm.l0`: shapes, the font, `corner_cut`, `draw`'s commands); the toolkit (`l0s-ui`) |
+| `user/bin/NAME/`, `user/sbin/NAME/`, `user/apps/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`), and any more `.l0` files of its own with their tests (`sh/files.l0`, `wm/launcher.l0`). The directory says where it goes: `bin` a command, `/bin/NAME`; `sbin` a driver or service, `/sbin/NAME`; `apps` an app, with its bundle's source `APP.app/` (`manifest`, `icon.draw`) beside it, `/Applications/APP.app/NAME`. The Makefile finds all three |
+| `user/sbin/wm/launcher.l0` | the compositor's launcher, GNOME Shell's grid of apps: its layout, painting and clicks |
 | `demo/etc/` | the demo's `inittab`, `motd`; `tests/screen/etc/` the screen tests' |
 | `build/root` | `make root`: every program staged as the initramfs holds it, `bin/`, `sbin/`, `Applications/APP.app/`, which `tools/mkinitramfs OUT ETC ROOT [IMAGE...]` archives with an `etc` |
 | `tools/` | `mkicon/` (an L0 tool: an app's `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, partitioned and formatted by `mkfs/`, an L0 host tool), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
@@ -51,15 +53,23 @@ files defining the same name do not compile**. That's why the Makefile links
 the optional libraries only into the programs that need them:
 
 ```make
-ULIB := common/abi.l0 common/initramfs.l0 common/queue.l0 user/lib/l0s.l0 user/lib/tty.l0 user/lib/virtio.l0
-LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
+BASE := common/abi.l0 common/text.l0                 # kernel, programs, tools
+ULIB := $(BASE) common/initramfs.l0 common/queue.l0 $(CLI) user/lib/sys/l0s.l0 user/lib/sys/server.l0
+LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
 ```
 
 - A new name in a library must not clash with **any** program that links it.
   Check with `make check`, which checks every program with its libraries.
-  Real clashes met so far: `fill_rows` (render.l0 vs a driver), `Command` and
-  `parse_command` (render.l0 vs sh), `Reply` (display.l0 vs draw),
-  `display_info` (display.l0 vs virtio-gpu).
+  `common/text.l0` and `abi.l0` take their names in the kernel too, and
+  `ULIB`'s in every program. Real clashes met so far: `fill_rows`
+  (render.l0 vs a driver), `Command` and `parse_command` (render.l0 vs sh),
+  `Reply` (display.l0 vs draw), `display_info` (display.l0 vs virtio-gpu),
+  and a constructor shadowing a library's, as draw's own `Done` once hid
+  `IoDone`'s. Look a name up first: `make -s doc Q=NAME`.
+- **Before writing a helper, look for it**: `common/text.l0` has the list
+  and string helpers, `cli.l0` failing and files, `server.l0` and `l0s.l0`
+  asking and answering. A second copy under another prefix is what this
+  layout exists to stop.
 - The toolkit prefixes every name `ui_` and every type `Ui`; do the same in
   any new library that many programs link. Programs never linked together
   may reuse names (`complain`, `serve`, `requested`).
@@ -69,15 +79,15 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
 ## Adding things: checklists
 
 **A program**
-1. `user/NAME/NAME.l0`, `NAME_test.l0`, `main.l0`. `main` only calls in:
-   `(def main () int (NAME))`. A name with a hyphen gets an underscored
-   function (`virtio-gpu` → `virtio_gpu`).
-2. Makefile: add NAME to `PROGRAMS`, and `LIBS_NAME := ...` if it needs more
-   than `ULIB`. Its check, test, image and initramfs rules follow from those.
-   Where it goes: `/bin` unless it is a driver or service, then add it to
-   `SBIN` too, for `/sbin`.
+1. `user/bin/NAME/` for a command, `user/sbin/NAME/` for a driver or
+   service, `user/apps/NAME/` for an app: `NAME.l0`, `NAME_test.l0`,
+   `main.l0`. `main` only calls in: `(def main () int (NAME))`. A name with
+   a hyphen gets an underscored function (`virtio-gpu` → `virtio_gpu`).
+2. Makefile: nothing, unless it needs more than `ULIB`: then
+   `LIBS_NAME := ...`. The Makefile finds the directory, every `.l0` in it
+   and its tests, and its check, test, image and initramfs rules follow.
 3. **An app** (a program with a window the desktop starts) is a bundle
-   too: `user/NAME/APP.app/manifest` (`name`, `exec NAME`, `icon
+   too: `user/apps/NAME/APP.app/manifest` (`name`, `exec NAME`, `icon
    icon.ppm`, `summary`; `app.l0`) and `icon.draw`, `run draw`'s
    commands for its 48×48 icon on the launcher's ground (a `round 0 0 48
    48 10 COLOR` and an `icon 8 8 NAME 2 COLOR`; a new glyph goes in
@@ -92,25 +102,29 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
    `tests/vt.sh`'s pid arithmetic.
 5. Its row in the README's programs table, and for an app, the Apps table.
 
-**A library** in `user/lib/`
-1. Its file header `; NAME.l0 -- summary`, a doc block on every def.
-2. Makefile: a variable for it, added to each `LIBS_` that needs it; a
-   `$(L0) test ... user/lib/NAME_test.l0` line in `test`; add it to `DOC_SRCS`
-   so `make doc` sees it.
+**A library** in `user/lib/GROUP/` (`sys`, `proto`, `format`, `gfx`, `ui`)
+1. Its file header `; NAME.l0 -- summary`, a doc block on every def. Its
+   stem must be unique across `user/lib` and `common`, for `make doc Q=`.
+2. Makefile: a variable for it, added to each `LIBS_` that needs it (or to
+   `ULIB`, if every program does); a `$(L0) test ... user/lib/GROUP/NAME_test.l0`
+   line in `test`. `DOC_SRCS` finds it.
 3. Its row in the README's libraries table.
 
 **A request to a server** (the compositor; the display driver is alike)
-1. Server: `user/wm/wm.l0` `requested` takes word arguments (`hello`,
+1. Server: `user/sbin/wm/wm.l0` `requested` takes word arguments (`hello`,
    `windows`, `desktop`, `title`); `requested_window` takes numbers
    (`window`, `damage`, `top`, `close`). Add an `(if (eq op "X") ...)` branch
-   returning `Answered` through `okay` or `refused`. The dispatcher is split
-   in two to keep nesting shallow; split again rather than nest deeper.
-2. Client: a wrapper in `user/lib/wm.l0` (`compositor_ask`, `ask_nums`,
-   `wm_error`), and its line in that file's header table.
+   returning a `(Served Wm)` through `okay` or `refused` (`server.l0`'s
+   `served_ok`, `served_error`). The dispatcher is split to keep nesting
+   shallow; split again rather than nest deeper. A server of numbers only
+   reads them with `request_numbers` (virtio-gpu, virtio-blk).
+2. Client: a wrapper in `user/lib/proto/wm.l0` (`compositor_ask`, `ask_nums`,
+   `wm_error`), and its line in that file's header table. Every client asks
+   through `l0s.l0`'s `port_ask` and reads errors with `reply_why`.
 3. The README's compositor protocol table, and tests on both sides.
-   For the display: `user/virtio-gpu/virtio-gpu.l0` `requested` /
-   `requested_pointer`, `user/lib/display.l0`'s header, the README's display
-   table.
+   For the display: `user/sbin/virtio-gpu/virtio-gpu.l0` `requested` /
+   `requested_pointer`, `user/lib/proto/display.l0`'s header, the README's
+   display table.
 
 **A system call** (`shm_revoke`, 282, is a complete example)
 1. `common/abi.l0`: `(def call_NAME () int N)` with its contract as a
@@ -120,7 +134,7 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
 3. `kernel/kernel.l0`: `do_NAME`, and its arm in `dispatch`. Check every
    argument against the kernel's own records before it reaches a builtin
    that can fail: nothing a process passes may crash the kernel.
-4. `user/lib/l0s.l0`: the wrapper over `supervisor_call`. If the call can
+4. `user/lib/sys/l0s.l0`: the wrapper over `supervisor_call`. If the call can
    fail, it returns a type of its own with a constructor for each answer
    (`(data Kill (Killed) (KillNoProc) (KillDenied))`), read from the
    kernel's word by a pure `X_of` that `l0s_test.l0` tests code by code;
@@ -137,35 +151,39 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK)
   each arm; for a failure's message use its `X_why` (`sending_why`,
   `registration_why`, `spawn_why`, `irq_binding_why`, `dma_alloc_why`,
   `shm_share_why`). Only a send whose answer truly does not matter is
-  dropped with `let`, and then say why (`tell_win` in `user/wm/wm.l0`).
-- **A server** (`user/echo/echo.l0`): `port_new`, `name_register port
-  "name"` (`Registered`, or why not), then a loop on `port_receive`. A request is
-  `(request REPLY BODY)`: read it with `request_reply` and `request_body`,
-  answer with `port_send (request_reply payload) reply`. Replies are `ok`,
-  `error: WHY`, or the request's own answer. Clients find a server with
-  `name_wait NAME ns`.
-- **Listening to a driver** (`user/virtio-input/virtio-input.l0`, server
-  side; `input_listen` in `l0s.l0` and `listen_pid` / `clock_listen` in
-  `wm.l0`, client side): a `listen` request adds the reply port to the
-  driver's list, which it then sends each event. Drop a listener whose
-  port is gone (`SendNoPort`), and keep one whose queue is full
-  (`still_told` in `user/rtc/rtc.l0`, `tell` in virtio-input).
-- **A driver moving bulk data** (`user/virtio-blk/virtio-blk.l0` with
-  `user/lib/disk.l0`, like `virtio-gpu` with `display.l0`): the client
-  `shm_alloc`s a buffer, opens it once with `dma_open`, `shm_share`s it
-  with the driver's pid (learned from the `from` of a first reply), and
-  names it in its requests by where the driver sees it. The driver gets
-  the device's addresses of those pages with `page_addresses`, whose
-  `None` means they are not shared with it, and builds descriptors over
-  them, so nothing is copied. A driver that polls its queue waits with
-  `virtq_wait` (`user/lib/virtio.l0`).
+  dropped, with `server.l0`'s `port_tell`, which says why.
+- **A server** (`user/sbin/echo/echo.l0`): `port_new`,
+  `name_register_or_why port "name"` (empty, or why not), then a loop on
+  `port_receive`. A request is `(request REPLY BODY)`: read it with
+  `request_body`, and answer it with `request_answer payload reply`, which
+  sends nothing if it names no reply port. Replies are `ok`, `error: WHY`
+  (`error_reply`), or the request's own answer; a server's state and its
+  answer are a `(Served S)`. Clients find a server with `name_wait NAME ns`
+  and ask with `port_ask`.
+- **Listening to a driver** (`user/sbin/virtio-input/virtio-input.l0`,
+  server side; `input_listen` in `l0s.l0`, whose `Listening` gives the
+  driver's pid, client side): a `listen` request adds the reply port to the
+  driver's list with `listener_add`, and each event goes to every listener
+  with `listeners_tell`, which drops one whose port is gone and keeps one
+  whose queue is full, in order (rtc does the same).
+- **A driver moving bulk data** (`user/sbin/virtio-blk/virtio-blk.l0` with
+  `user/lib/proto/disk.l0`, like `virtio-gpu` with `display.l0`): the
+  client makes a buffer once with `shm_region`, `shm_share_to`s it with the
+  driver's pid (learned from the `from` of a first reply), and names it in
+  its requests by where the driver sees it. The driver gets the device's
+  addresses of those pages with `page_addresses`, whose `None` means they
+  are not shared with it, and builds descriptors over them, so nothing is
+  copied (`virtq_page_runs`, `virtq_push_chain`). A virtio driver finds its
+  device with `virtio_probe`, takes its queue's memory with `virtq_mem`,
+  offers a request with `virtq_offer`, and waits with `virtq_wait`
+  (`user/lib/sys/virtio.l0`).
 - **Waiting for a message or a time.** A receive cannot time out. Either a
   device interrupt arrives as a message (`irq_bind`), or the loop polls with
   `port_try_receive` and `sleep_ns` (`rtc clock`, `procmon`).
 - **Failing.** Each program has
-  `(def complain ((why (list int))) int (let w (write_err (append "NAME: " (append why "\n"))) 1))`.
-  A driver whose device is absent says so and exits 0: no device is no
-  failure.
+  `(def complain ((why (list int))) int (complain_as "NAME" why))`
+  (`cli.l0`). A driver whose device is absent says so with `note_as` and
+  exits 0: no device is no failure.
 - **A state record** is one `data` with many fields, matched and rebuilt in
   every function (`Wm`, `Drv`, `Win`). Adding a field means updating every
   pattern: the Edit tool's replace-all on the exact pattern text does most

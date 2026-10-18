@@ -10,19 +10,19 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 
 | File | What it is | GTK / libadwaita |
 |---|---|---|
-| `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends on nothing. | `@window_bg_color`, `@accent_bg_color`, … |
+| `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends only on `ppm.l0`'s colors and `render.l0`'s glyph. | `@window_bg_color`, `@accent_bg_color`, … |
 | `icons.l0` | 16×16 symbolic icons, kept as `#`/`.` art: window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, and the apps' utilities-terminal, utilities-system-monitor and view-app-grid. | `*-symbolic` icons |
 | `paint.l0` | `UiRect`; the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon); `ui_paint` runs them on a canvas, clipped. Also `ui_buffer` for shm buffers and Adwaita's arrow cursor. | GSK render nodes |
 | `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, and entry.l0's entry); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
-| `grid.l0` | A data grid: columns, typed cells (text, number, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. | `GtkColumnView`, `GtkScrolledWindow` |
+| `grid.l0` | A data grid: columns, typed cells (text, number, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. `ui_grid_page`, a toolbar of Refresh, a status line and End Process over a grid, as `widgets` and `procmon` are, and `ui_selected_line`. | `GtkColumnView`, `GtkScrolledWindow` |
 | `panes.l0` | A window of panes: `UiSidebar`, rows of an icon, a title and a line, one selected; `UiSegmentBar`, a whole in parts each as wide as its share by weight (`ui_shares`), each plain or muted (`UiSegPlain`, `UiSegMuted`), at any height: a title over a line at `ui_segbar_h`, the title alone lower, no text as a usage bar; one part selected and moved along by Left and Right (`ui_segbar_key`), or, with prefix `""`, none and no targets; `UiProps`, a dimmed name before each value, which is any widget; `UiModal` and `ui_alert`, an alert dialog on a card over everything beneath, which is dimmed (`ui_scrim`) and no longer a target, and `ui_alert_form`, one with widgets, such as properties holding entries, between its lines and its buttons. Rows and parts carry `PREFIX.select.KEY`, read back by `ui_select_key`. | `AdwNavigationSplitView`'s sidebar, `GtkListBox` `.navigation-sidebar`, GNOME Disks' volume grid and Usage's storage bar, `AdwAlertDialog` and its extra child |
 | `entry.l0` | `UiEntry NAME TEXT PLACEHOLDER WIDTH`, a line of text: `UiEntryText`, its text and cursor, kept by the program; `ui_entry_keyed`, typing at the cursor, Backspace, Delete, Left, Right, Home and End; drawn on the text's color at 10%, with the accent's ring and a cursor while it has the focus, the placeholder dimmed while it is empty. | `GtkEntry` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`. Used by `draw` to check a command, by `wm` to draw it, and by `tools/mkicon` to draw an app's icon. | — |
-| `window.l0` | A client window: `ui_open`, `ui_event_of`, `ui_route` (hover, press, click on release, Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus), `ui_present` (repaints only what changed), `ui_win_scroller`, `ui_win_focusing`, `ui_entry_update`. Needs `user/lib/wm.l0`. | `GtkWindow`, event controllers |
+| `window.l0` | A client window: `ui_open`, `ui_event_of`, `ui_route` (hover, press, click on release, Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus), `ui_present` (repaints only what changed), `ui_win_scroller`, `ui_win_focusing`, `ui_entry_update`; `ui_key_of` and `ui_key_pressed`, the key an event is. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers |
 
 The Makefile links either `UI_CORE` (every file but `window.l0`; needs only
-`render.l0`) or `UI_CORE` plus `UI_WINDOW` (`window.l0`; needs
-`user/lib/wm.l0` too).
+`RENDER`, `ppm.l0` and `render.l0`) or `UI_CORE` plus `UI_WINDOW`
+(`window.l0`; needs `user/lib/proto/wm.l0` too).
 
 ## How a program uses it
 
@@ -47,7 +47,7 @@ and its loop is:
 (ui_present w2 (view state2))       -> w3                     paints what changed
 ```
 
-`user/widgets/widgets.l0` is that loop in full, with a toolbar and a data grid.
+`user/apps/widgets/widgets.l0` is that loop in full, with a toolbar and a data grid.
 
 ### Scrolling
 
@@ -87,7 +87,7 @@ action:
 
 A dialog that asks for something puts the focus on its entry as it opens,
 with `ui_win_focusing w "size.entry"` before it presents, so typing goes
-there at once. `user/disks` does both.
+there at once. `user/apps/disks` does both.
 
 Every name is `ui_…` and every type or constructor `Ui…`. All files given
 to `l0` are one namespace, and a duplicate is a compile error.
@@ -137,13 +137,13 @@ to `l0` are one namespace, and a duplicate is a compile error.
 
 ## The display layer
 
-Two Wayland-style changes to the display layer (`user/lib/display.l0`,
-`user/virtio-gpu/virtio-gpu.l0`) came with the toolkit:
+Two Wayland-style changes to the display layer (`user/lib/proto/display.l0`,
+`user/sbin/virtio-gpu/virtio-gpu.l0`) came with the toolkit:
 
 - **Shaped layers** (`shape ID TL TR BL BR`), like an opaque region. The
   driver narrows a layer's runs on its corner rows, so a window's 12 px
   corners show what's beneath with no blending. `wm` shapes every window,
-  and its hit test (`ui_corner_cut`, the driver's formula) lets a press in
+  and its hit test (`render.l0`'s `corner_cut`, as the driver cuts) lets a press in
   a cut corner fall through.
 - **Batched damage and minimal restacks.** One `damage` takes many rects,
   like `wl_surface.commit`, in the display protocol and the compositor's.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # widgets.sh -- boots tests/screen/etc's initramfs with no window: the
 # compositor, wm, and no vt. Types run widgets & at the serial shell, which
-# opens the toolkit's gallery (user/widgets) in a window, learns where it
+# opens the toolkit's gallery (user/apps/widgets) in a window, learns where it
 # is from run windows, and checks, by QEMU's screendump:
 #
 #   1. its title bar, an Adwaita header bar in front, ebebeb

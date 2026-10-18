@@ -1,0 +1,196 @@
+; tty.l0 -- a terminal's line editing, shared by the terminals: uart, the
+; serial line's, and vt, the display's. Linked into every user program.
+;
+; A terminal is a port that takes these, each a request (l0s.l0):
+;
+;   request REPLY "r"            the next line typed, newline and all, sent
+;                                to REPLY; empty once input has ended
+;                                (Ctrl-D on an empty line)
+;   request REPLY "i"            a lone byte 3 sent to REPLY at each Ctrl-C,
+;                                which drops the line being typed and every
+;                                line not yet read, as a terminal does
+;   request REPLY "p"            "tty" sent to REPLY at once, so that REPLY
+;                                learns the terminal's pid, the reply's
+;                                sender, to watch: how a shell hears that
+;                                its terminal has gone
+;   request 0 (cons w BYTES)     BYTES written; no reply. The kernel sends
+;                                these for the standard output and error of
+;                                each process whose terminal it is
+;
+; The kernel sends "r" too, for a process reading its standard input.
+
+; ------------------------------------------------------------ the editor
+
+; What has been typed: the line so far, reversed; lines finished and not
+; yet read; ports waiting for a line; whether input has ended; how far
+; into an escape sequence the last bytes were, 0 if not in one; the port
+; to tell of Ctrl-C, or -1; and whether a Ctrl-C has not been told yet.
+(data Console (Console (list int) (Queue (list int)) (Queue int) bool int int bool))
+
+(def console_new () Console
+  (Console (nil int) (Queue (nil (list int)) (nil (list int))) (Queue (nil int) (nil int)) false 0 -1 false))
+
+; The console after one more byte, and what to echo for it.
+(data Fed (Fed Console (list int)))
+
+(def feed ((c Console) (b int)) Fed
+  (match c
+    ((Console cur lines readers ended esc intr hit)
+      (if (gt esc 0)
+          (Fed (Console cur lines readers ended (escape_after esc b) intr hit) (nil int))
+          (if (eq b 3)                                ; Ctrl-C: what is unread dropped, and told
+              (Fed (Console (nil int) (Queue (nil (list int)) (nil (list int))) readers ended 0 intr true) "^C\n")
+              (Fed (Console (edit cur b) (finish lines cur b) readers (ends ended cur b)
+                            (if (eq b 27) 1 0) intr hit)
+                   (echo_for cur b)))))))
+
+; An escape sequence, such as an arrow key's ESC [ A, is dropped whole:
+; after ESC comes [, then bytes up to one from @ to ~.
+(def escape_after ((esc int) (b int)) int
+  (if (eq esc 1)
+      (if (eq b 91) 2 0)
+      (if (if (ge b 64) (le b 126) false) 0 2)))
+
+(def is_newline ((b int)) bool (any_eq b (cons 10 (cons 13 (nil int)))))
+(def is_rubout ((b int)) bool (any_eq b (cons 8 (cons 127 (nil int)))))
+
+; The line so far after b.
+(def edit ((cur (list int)) (b int)) (list int)
+  (if (is_newline b) (nil int)
+  (if (is_rubout b) (if (is_empty cur) cur (tail cur))
+  (if (eq b 21) (nil int)                             ; Ctrl-U: the line erased
+  (if (is_printable b) (cons b cur) cur)))))
+
+; The finished lines after b.
+(def finish ((lines (Queue (list int))) (cur (list int)) (b int)) (Queue (list int))
+  (if (is_newline b) (queue_push lines (rev (cons 10 cur))) lines))
+
+; Whether input has ended after b: Ctrl-D on an empty line ends it.
+(def ends ((ended bool) (cur (list int)) (b int)) bool
+  (if (eq b 4) (if (is_empty cur) true ended) ended))
+
+; What to echo for b.
+(def echo_for ((cur (list int)) (b int)) (list int)
+  (if (is_newline b) "\n"
+  (if (is_rubout b) (if (is_empty cur) (nil int) "\x08 \x08")
+  (if (eq b 21) (rubout (length cur) (nil int))
+  (if (is_printable b) (cons b (nil int)) (nil int))))))
+
+(def rubout ((n int) (acc (list int))) (list int)
+  (if (le n 0) acc (rubout (sub n 1) (append "\x08 \x08" acc))))
+
+; The console after the bytes of bs, and all their echo.
+(def feed_all ((c Console) (bs (list int)) (echo (list int))) Fed
+  (if (is_empty bs)
+      (Fed c (rev echo))
+      (match (feed c (head bs))
+        ((Fed c2 e) (feed_all c2 (tail bs) (rev_onto e echo))))))
+
+(def add_reader ((c Console) (port int)) Console
+  (match c
+    ((Console cur lines readers ended esc intr hit)
+      (Console cur lines (queue_push readers port) ended esc intr hit))))
+
+; The console with port told of each Ctrl-C from now on.
+(def tell_interrupts ((c Console) (port int)) Console
+  (match c
+    ((Console cur lines readers ended esc intr hit)
+      (Console cur lines readers ended esc port hit))))
+
+; What tells a port of a Ctrl-C: one byte, 3, which no line can be, since
+; a line ends with a newline or is empty.
+(def interrupt_message () (list int) (cons 3 (nil int)))
+
+; A message to send to a port.
+(data Delivery (Delivery int (list int)))
+
+; The next message to send, and the console after it; or nothing to send.
+(data Next (Send Console Delivery) (Idle Console))
+
+; A Ctrl-C not yet told, to the port that asked for them, if one did;
+; else the oldest finished line to the oldest waiting port; else, once
+; input has ended, the empty line to a waiting port.
+(def next_delivery ((c Console)) Next
+  (match c
+    ((Console cur lines readers ended esc intr hit)
+      (if (if hit (ge intr 0) false)
+          (Send (Console cur lines readers ended esc intr false) (Delivery intr (interrupt_message)))
+          (next_waiting (Console cur lines readers ended esc intr false))))))
+
+(def next_waiting ((c Console)) Next
+  (match c
+    ((Console cur lines readers ended esc intr hit)
+      (match (queue_pop readers)
+        ((PopEmpty) (Idle (Console cur lines readers ended esc intr hit)))
+        ((Popped port rest)
+          (match (queue_pop lines)
+            ((Popped line more) (Send (Console cur more rest ended esc intr hit) (Delivery port line)))
+            ((PopEmpty)
+              (if ended
+                  (Send (Console cur lines rest ended esc intr hit) (Delivery port (nil int)))
+                  (Idle (Console cur lines readers ended esc intr hit))))))))))
+
+; c with line back at the front of the finished lines, as when the port it
+; went to had gone: a process killed while it waited for a line.
+(def unread ((c Console) (line (list int))) Console
+  (match c
+    ((Console cur lines readers ended esc intr hit)
+      (match lines
+        ((Queue front back) (Console cur (Queue (cons line front) back) readers ended esc intr hit))))))
+
+(data Delivered (Delivered Console (list Delivery)))
+
+; Every message next_delivery would give, in order, if each were sent.
+(def deliveries ((c Console)) Delivered
+  (all_deliveries c (nil Delivery)))
+
+(def all_deliveries ((c Console) (acc (list Delivery))) Delivered
+  (match (next_delivery c)
+    ((Idle c2) (Delivered c2 (rev acc)))
+    ((Send c2 d) (all_deliveries c2 (cons d acc)))))
+
+; Whether msg is a line, rather than the end of input or a Ctrl-C notice.
+(def is_line ((msg (list int))) bool
+  (if (is_empty msg) false (not (eq msg (interrupt_message)))))
+
+; ------------------------------------------------------------- serving
+
+; What a request to a terminal asks: a line or Ctrl-C notices, the console
+; after it; or bytes to write.
+(data TtyAsked (TtyAsk Console) (TtyWrite (list int)) (TtyAnswer int (list int)))
+
+; c after a request, as a terminal takes them: "r" adds a reader, "i" a
+; port to tell of Ctrl-C, "w" with no reply port is bytes to write, and
+; "p" is a message for the terminal to send its reply port at once.
+; Anything else is ignored.
+(def tty_request ((c Console) (payload (list int))) TtyAsked
+  (let reply (request_reply payload)
+    (if (lt reply 0)
+        (TtyAsk c)
+        (let body (request_body payload)
+          (if (if (eq reply 0) (if (is_empty body) false (eq (head body) 119)) false)   ; w
+              (TtyWrite (tail body))
+              (if (eq body "r")
+                  (TtyAsk (add_reader c reply))
+                  (if (eq body "i")
+                      (TtyAsk (tell_interrupts c reply))
+                      (if (if (eq body "p") (gt reply 0) false) (TtyAnswer reply "tty") (TtyAsk c)))))))))
+
+; c after sending everything there is to send. A line its reader is not
+; there to take, because that process has gone, is kept for the next.
+(def deliver ((c Console)) Console
+  (match (next_delivery c)
+    ((Idle c2) c2)
+    ((Send c2 d)
+      (match d
+        ((Delivery port msg)
+          (deliver
+            (match (port_send port msg)
+              ((Sent) c2)
+              ((SendNoPort) (kept_line c2 msg))
+              ((SendFull) (kept_line c2 msg))
+              ((SendTooBig) (kept_line c2 msg)))))))))
+
+; c with msg kept for the next reader, if it is a line not delivered.
+(def kept_line ((c Console) (msg (list int))) Console
+  (if (is_line msg) (unread c msg) c))
