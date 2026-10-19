@@ -65,8 +65,10 @@ standard library is linked automatically, and `l0 test` adds its assertions,
 so never pass library files on the command line.
 
 `l0 build --target virt` builds an image for QEMU's aarch64 `virt` board,
-with no operating system, and `l0 boot IMAGE ARG ... < input` runs one
-(`l0 run --target virt -- ARG ...` does both). There the program has
+with no operating system, and `--arch riscv64` beside it for QEMU's
+riscv64 one; `l0 boot IMAGE ARG ... < input` runs one on the board its
+image is for (`l0 run --target virt -- ARG ...` does both). A program that
+must know which CPU it is on asks `(machine)`. There the program has
 standard input, output, and error, the clock, and arguments, its boot
 arguments, which hold no spaces, but no files and no environment: the
 spec's section 9.2 says what each builtin gives then. It also has the
@@ -80,7 +82,9 @@ makes address spaces, maps pages into them, and runs threads in them until
 they trap, and gives back a page, a space, or a frame once it is done with
 it (`space_unmap`, `space_free`, `frame_free`; a frame only once no space
 maps it), with the user-mode builtins of the spec's section 6.13 and the
-library's `Trap` (`l0 doc Trap`), and sets the timer, and waits for and
+library's `Trap` (`l0 doc Trap`), answering its threads' system calls with
+`call_number`, `call_arg`, and `call_result`, which find a call's registers
+on whichever CPU `(machine)` says it is, and sets the timer, and waits for and
 ends interrupts, with those of section 6.14. It gives a device memory to
 read and write itself, by DMA, as a frame, whose address `frame_address`
 gives to write into the device's registers. The board's own devices
@@ -89,7 +93,7 @@ one, and any QEMU options there are added to how `l0 boot`, `l0 run`, and
 `l0 test` start the board.
 
 `l0 build --target proc` builds a program as a process for a kernel on
-aarch64, in an address space of its own, reaching the kernel through the
+aarch64, or riscv64 with `--arch riscv64`, in an address space of its own, reaching the kernel through the
 system calls the spec's section 10.3 fixes. The kernel decides what the
 program gets: files, arguments, and devices, or none. The image is raw,
 its bytes from 0xC0000000, as a kernel maps them, so a kernel written in
