@@ -12,6 +12,14 @@
 #                    the splash shows in QEMU's window, and build/disk.img
 #                    is the disk, made once, so what is written to it stays
 #   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
+#   make demo ROOT=UUID                 the same, booted with root=UUID:
+#                    the volume of that partition, if fs mounts it and it
+#                    holds L0S, is / (sbin/boot)
+#   make sysdisk     build/system.img, a 64 MB disk: System, a copy of
+#                    the initramfs, and data; System's UUID in
+#                    build/system.uuid
+#   make demo-system the demo booted from build/system.img's System,
+#                    made anew
 #   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
 #                    L0's: every name, or Q a name, a file's stem, or text
@@ -37,6 +45,8 @@ SPLASH       ?= $(BUILD)/splash.ppm
 QEMU_DISPLAY ?= cocoa
 DEVICES      := -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
 DISK         := $(BUILD)/disk.img
+SYSDISK      := $(BUILD)/system.img
+SYSUUID      := $(BUILD)/system.uuid
 DISK_DEVICE  := -drive file=$(DISK),if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0
 
 # common/: BASE, the ABI and text.l0's lists and strings, is pure and
@@ -56,6 +66,10 @@ VIRTIO := user/lib/sys/virtio.l0
 
 # The process table as ps and procmon show it.
 PROCS  := user/lib/sys/procs.l0
+
+# The files of /, wherever it is, and its programs started by path: over
+# the fs protocol, and so its UUIDs.
+PATHS  := user/lib/format/uuid.l0 user/lib/proto/fs.l0 user/lib/sys/paths.l0
 
 # Libraries only some programs link, as LIBS_NAME, grouped by what they
 # are under user/lib: sys, the kernel's calls and what every program
@@ -94,15 +108,18 @@ LIBS_virtio-input := $(VIRTIO)
 LIBS_virtio-blk := $(VIRTIO)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK)
-LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
-LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE)
+LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB)
+LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(PATHS)
+LIBS_init       := $(PATHS)
+LIBS_boot       := $(PATHS)
+LIBS_install    := $(PATHS)
 LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_fs         := $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(CLOCK)
-LIBS_sh         := $(PROCS) $(UUIDLIB) $(FSLIB) $(APPLIB)
+LIBS_sh         := $(PROCS) $(PATHS) $(APPLIB)
 LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB)
 
 # The programs, found by where their directories are, which is where
@@ -130,7 +147,7 @@ $(foreach p,$(PROGRAMS),$(eval TESTS_$(p) := $(wildcard $(DIR_$(p))/*_test.l0)))
 
 MKSPLASH := $(BASE) $(CLI) $(PPM) tools/mksplash/mksplash.l0
 L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
-MKFS     := $(BASE) $(CLI) $(PARTS) $(L0FS) tools/mkfs/mkfs.l0
+MKFS     := $(COMMON) $(CLI) $(PARTS) $(L0FS) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) tools/mkicon/mkicon.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 ICONS    := $(APPS:%=$(BUILD)/icons/%.ppm)
@@ -142,7 +159,7 @@ LIB_SRCS := $(wildcard user/lib/*/*.l0)
 DOC_SRCS := $(filter-out %_test.l0,$(wildcard common/*.l0)) $(filter-out $(COMMON) common/queue.l0,$(KERNEL)) \
             $(filter-out %_test.l0,$(LIB_SRCS))
 
-.PHONY: all check test test-virt e2e images root initramfs screen-initramfs disks-initramfs boot demo clean sample doc mcp
+.PHONY: all check test test-virt e2e images root initramfs screen-initramfs disks-initramfs boot demo demo-system sysdisk clean sample doc mcp
 
 all: check test test-virt e2e
 
@@ -178,6 +195,7 @@ test: sample
 	$(L0) test $(ULIB) user/lib/sys/l0s_test.l0
 	$(L0) test $(ULIB) user/lib/sys/server_test.l0
 	$(L0) test $(ULIB) $(PROCS) user/lib/sys/procs_test.l0
+	$(L0) test $(ULIB) $(PATHS) user/lib/sys/paths_test.l0
 	$(L0) test $(ULIB) $(VIRTIO) user/lib/sys/virtio_test.l0
 	$(L0) test $(ULIB) $(TTY) user/lib/sys/tty_test.l0
 	$(L0) test $(ULIB) $(RECT) user/lib/gfx/rect_test.l0
@@ -185,7 +203,7 @@ test: sample
 	$(L0) test $(ULIB) $(CLOCK) user/lib/proto/clock_test.l0
 	$(L0) test $(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0
 	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0
-	$(L0) test $(ULIB) $(APPLIB) user/lib/proto/app_test.l0
+	$(L0) test $(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0
 	$(L0) test $(BASE) $(L0FS) user/lib/format/l0fs_test.l0
 	$(L0) test $(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0
 	$(L0) test $(BASE) $(CRC32) user/lib/format/crc32_test.l0
@@ -307,13 +325,34 @@ boot: images root $(DISK)
 	L0_QEMU_ARGS="$(DEVICES) $(DISK_DEVICE)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
 
 # The disk: made once, and never again while it is there, so that what is
-# written to it stays from one boot to the next. make clean resets it.
-$(DISK): | $(BUILD)
+# written to it stays from one boot to the next. make clean resets it. A
+# disk made before L0FS's version 2, which has directories, is older than
+# the stamp, and is made again, once.
+$(BUILD)/disk-l0fs-2: | $(BUILD)
+	touch $@
+
+$(DISK): $(BUILD)/disk-l0fs-2
 	tools/mkdisk $@
+
+# The system disk: 64 MB, with System, the initramfs copied onto it, and
+# data, empty; its System's UUID, which root= names, in system.uuid. Made
+# anew every time, from the initramfs as it is now.
+sysdisk: initramfs $(BUILD)/mkfs
+	tools/mkdisk $(SYSDISK) 131072 System:40:110000:$(BUILD)/initramfs.cpio data:110040:20998 > $(BUILD)/system.vols
+	awk '$$1 == "System" { print $$2 }' $(BUILD)/system.vols > $(SYSUUID)
+	@echo "System is $$(cat $(SYSUUID)): make demo-system boots from it"
 
 demo: initramfs $(DISK)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(DISK) tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(DISK) QEMU_APPEND="$(if $(ROOT),root=$(ROOT))" \
+	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
+
+# The demo booted from the system disk, its System volume /: made anew
+# from the initramfs as it is now, so what was written to it goes.
+demo-system: sysdisk
+	@echo "Booting L0S from System, $$(cat $(SYSUUID)). Type help; exit stops the system, Ctrl-A x quits QEMU."
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(SYSDISK) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
+	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 clean:
 	rm -rf $(BUILD)

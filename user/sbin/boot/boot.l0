@@ -1,0 +1,151 @@
+; boot.l0 -- the first process, pid 1, of an inittab that starts L0S in
+; two stages: the initramfs's inittab starts boot and the drivers and fs,
+; and boot starts the rest, the lines of /etc/system. Booted with
+; root=UUID, a GPT partition's UUID, boot waits for fs to mount that
+; partition's volume, and if it holds /etc/system, makes it / (the
+; kernel's root_switch, which gives the initramfs up) and starts the
+; system volume's /etc/system; with no root=, or no such volume, or
+; none that holds L0S, it says why and starts the initramfs's own. Then
+; it waits for the first program started, the shell on the serial line,
+; and exits with its status, which stops the system, as the first
+; program of a one-stage inittab does.
+;
+;   /etc/system: a line each, # for a comment
+;   start PATH [ARG ...]   PATH started, in order, with ARGs, or else the
+;                          arguments the inittab gives it
+
+; Says why, as boot.
+(def complain ((why (list int))) int (complain_as "boot" why))
+
+; ------------------------------------------------------------ arguments
+
+; The UUID root= names among the boot arguments, as text, in lower case;
+; empty if there is none.
+(def root_uuid ((args (list (list int)))) (list int)
+  (if (is_empty args)
+      ""
+      (if (starts_with (head args) "root=")
+          (lower (drop_n (head args) 5))
+          (root_uuid (tail args)))))
+
+; s with its capital letters made small, as a UUID is compared.
+(def lower ((s (list int))) (list int)
+  (if (is_empty s)
+      s
+      (let c (head s)
+        (cons (if (if (ge c 65) (le c 90) false) (add c 32) c) (lower (tail s))))))
+
+; ---------------------------------------------------------- /etc/system
+
+; A program to start: its path, and its arguments if the line gives any.
+(data Start (Start (list int) (Option (list (list int)))))
+
+; The programs /etc/system starts, text, in order, or why not, with the
+; line.
+(def system_starts ((text (list int))) (Result (list Start) (list int))
+  (system_lines (lines text) 1 (nil Start)))
+
+(def system_lines ((ls (list (list int))) (n int) (acc (list Start))) (Result (list Start) (list int))
+  (if (is_empty ls)
+      ((Ok (list Start) (list int)) (rev acc))
+      (let ws (split_spaces (strip_cr (head ls)))
+        (if (if (is_empty ws) true (starts_with (head ws) "#"))
+            (system_lines (tail ls) (add n 1) acc)
+            (if (if (eq (head ws) "start") (not (is_empty (tail ws))) false)
+                (system_lines (tail ls) (add n 1)
+                              (cons (Start (normal_path (head (tail ws)))
+                                           (if (is_empty (tail (tail ws))) ((None (list (list int)))) (Some (tail (tail ws)))))
+                                    acc))
+                ((Err (list Start) (list int)) (append "/etc/system line " (append (digits n) ": not start PATH [ARG ...]"))))))))
+
+; ----------------------------------------------------------- the volume
+
+; The volume mounted with the UUID u, /Volumes/LABEL, among ms; or empty.
+(def volume_of_uuid ((ms (list MountInfo)) (u (list int))) (list int)
+  (if (is_empty ms)
+      ""
+      (match (head ms)
+        ((MountInfo path port id)
+          (if (if (starts_with path "/Volumes/") (eq (lower id) u) false) path (volume_of_uuid (tail ms) u))))))
+
+; The volume u is, once fs has mounted it, asked every 100 ms, tries
+; times at most; or empty if it never is.
+(def volume_waited ((u (list int)) (tries int)) (list int)
+  (let v (volume_of_uuid (mount_list) u)
+    (if (if (not (is_empty v)) true (le tries 0))
+        v
+        (let s (sleep_ns 100000000) (volume_waited u (sub tries 1))))))
+
+; How long fs may take to mount the disk's volumes: 10 s, of 100 ms.
+(def volume_tries () int 100)
+
+; What came of making a volume /: it is, or why it is not.
+(data Rooted (Rooted (list int)) (NotRooted (list int)))
+
+; The volume u made /, if it is mounted and holds /etc/system.
+(def rooted ((u (list int))) Rooted
+  (let v (volume_waited u (volume_tries))
+    (if (is_empty v)
+        (NotRooted (append "no volume " (append u " is mounted")))
+        (match (read_whole (append v "/etc/system"))
+          ((Err why) (NotRooted (append v (append "/etc/system: " why))))
+          ((Ok b)
+            (match (root_switch (drop_n v 9))
+              ((Switched) (Rooted v))
+              ((SwitchDenied) (NotRooted (switch_why (SwitchDenied))))
+              ((SwitchDone) (NotRooted (switch_why (SwitchDone))))
+              ((SwitchNoVolume) (NotRooted (switch_why (SwitchNoVolume))))
+              ((SwitchBadLabel) (NotRooted (switch_why (SwitchBadLabel))))))))))
+
+; What boot says of making u /, what came of it; nothing with no root=.
+(def rooted_line ((u (list int)) (r Rooted)) (list int)
+  (if (is_empty u)
+      ""
+      (match r
+        ((Rooted v) (append "boot: / is " (append v "\n")))
+        ((NotRooted why) (append "boot: " (append why "; starting the initramfs's system\n"))))))
+
+; -------------------------------------------------------------- starting
+
+; Each of ss started, by its path: the first's pid, or 0 if it did not
+; start; each that did not is said why.
+(def start_all ((ss (list Start)) (first int)) int
+  (if (is_empty ss)
+      first
+      (match (head ss)
+        ((Start path args)
+          (match (spawn_path path args)
+            ((Spawned pid) (start_all (tail ss) (if (eq first 0) pid first)))
+            ((SpawnNoEntry) (start_all (tail ss) (not_started path (SpawnNoEntry) first)))
+            ((SpawnNotProgram) (start_all (tail ss) (not_started path (SpawnNotProgram) first)))
+            ((SpawnTooBig) (start_all (tail ss) (not_started path (SpawnTooBig) first)))
+            ((SpawnNoRoom) (start_all (tail ss) (not_started path (SpawnNoRoom) first))))))))
+
+; first, once path's not starting is said; -1 if it was to be the first.
+(def not_started ((path (list int)) (s Spawn) (first int)) int
+  (let w (complain (append path (append ": " (spawn_why s))))
+    (if (eq first 0) -1 first)))
+
+; The system /etc/system starts, the first waited for: its status.
+(def system () int
+  (match (read_whole "/etc/system")
+    ((Err why) (complain (append "/etc/system: " why)))
+    ((Ok b)
+      (match (system_starts (bytes_to_list b))
+        ((Err why) (complain why))
+        ((Ok ss)
+          (let first (start_all ss 0)
+            (if (le first 0)
+                (complain "the first program of /etc/system did not start")
+                (match (wait_pid first)
+                  ((Reaped st) st)
+                  ((WaitNoProc) 1)))))))))
+
+; Boots: the volume root= names made /, if it can be, then the system.
+; Under an operating system there is no kernel, no boot argument, and no
+; /etc/system.
+(def boot () int
+  (let u (root_uuid (boot_args))
+    (let r (if (is_empty u) (NotRooted "") (rooted u))
+      (let w (say (rooted_line u r))
+        (system)))))

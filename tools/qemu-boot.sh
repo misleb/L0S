@@ -21,7 +21,9 @@
 # QEMU_MONITOR, none unless set, is where QEMU's monitor listens, such as
 # unix:PATH,server=on,wait=off for tests/gpu-screen.sh's screendump; and
 # QEMU_QMP, unset unless given, where its QMP does, for the tests that
-# move the pointer with input-send-event.
+# move the pointer with input-send-event. QEMU_APPEND, unset unless
+# given, is the kernel's boot arguments, as -append gives them, such as
+# root=UUID to boot from that system volume.
 #
 # This copies how l0's virt_boot loads a program's standard input: its
 # bytes at 0x50000000 and their count in the word below, which is what the
@@ -38,6 +40,8 @@ disk=()
 if [ -n "${QEMU_DISK:-}" ]; then
   disk=(-drive "file=$QEMU_DISK,if=none,format=raw,id=disk0" -device virtio-blk-device,drive=disk0)
 fi
+append=()
+if [ -n "${QEMU_APPEND:-}" ]; then append=(-append "$QEMU_APPEND"); fi
 len=$(wc -c < "$initramfs" | tr -d ' ')
 exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=localtime \
@@ -47,4 +51,5 @@ exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monito
   -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \
   -device loader,addr=0x4FFFFFF8,data="$len",data-len=8 \
   -device loader,file="$initramfs",addr=0x50000000,force-raw=on \
+  ${append[@]+"${append[@]}"} \
   -kernel "$kernel"

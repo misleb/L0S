@@ -6,9 +6,9 @@
 ; 2048 sectors; the port 7.
 (def two () Fs
   (fs_new (StoreMem ((MapEmpty int (list int))) 2048 0) 7
-          (array_from (cons (FsVol 8 (vol_new "data" (vol_layout 1528)))
-                            (cons (FsVol 1536 (vol_new "scratch" (vol_layout 512))) (nil FsVol)))
-                      (FsVol 0 (vol_new "x" (vol_layout 16))))))
+          (array_from (cons (FsVol 8 "" (vol_new "data" (vol_layout 1528)))
+                            (cons (FsVol 1536 "" (vol_new "scratch" (vol_layout 512))) (nil FsVol)))
+                      (FsVol 0 "" (vol_new "x" (vol_layout 16))))))
 
 ; An answer as text: the word, a colon, the bytes.
 (def answer_text ((a Answered)) (list int)
@@ -70,15 +70,13 @@
              (answers (append (written_notes) (reqs4 "open 3 /Volumes/data/notes" "write 2  again" "open 1 /Volumes/data/notes" "read 3 100")))
              "1:|10:|0:|2:|6:|3:|16:hello disk again"))
 
-; The bytes reach the disk: the file's first cluster is cluster 1, from
-; sector 8 + 8, and the metadata, at sector 8, reads back as the volume.
+; The bytes reach the disk: the file's first cluster is cluster 2, the
+; root directory's being 1, from sector 8 + 16, and the volume, from
+; sector 8, reads back as fs has it.
 (def test_on_disk () int
   (let f (ran_fs (run (two) (written_notes)))
-    (add (check_str "the data" (take (sectors f 16 1) 10) "hello disk")
-         (check_true "the metadata"
-                     (match (vol_of "data" (vol_layout 1528) (bytes_from_list (sectors f 8 8)))
-                       ((VolGot v) (eq v (fs_vol f 0)))
-                       ((VolBad why) false))))))
+    (add (check_str "the data" (take (sectors f 24 1) 10) "hello disk")
+         (check_true "the metadata" (meta_kept f 0)))))
 
 ; count sectors of f's store from sector.
 (def sectors ((f Fs) (sector int) (count int)) (list int)
@@ -123,8 +121,14 @@
   (let f (forget_pid (ran_fs (run (two) (reqs1 "open 2 /Volumes/data/notes"))) 5)
     (check_str "gone" (answer_text (obey f 5 "write 1 x")) "-5:")))
 
-(def test_directory_full () int
-  (check_str "the 49th" (answer_text (obey (opened_n (two) 48) 5 "open 2 /Volumes/scratch/z")) "-5:"))
+; A directory of 64 entries grows by a cluster for a 65th, and the disk
+; then holds both of its clusters.
+(def test_directory_grows () int
+  (let f (opened_n (two) 64)
+    (let g (after (obey f 5 "open 2 /Volumes/scratch/z"))
+      (add (check_str "the 65th" (answer_text (obey f 5 "open 2 /Volumes/scratch/z")) "65:")
+           (add (check_str "listed" (take (answer_text (obey g 5 "list /Volumes/scratch")) 3) "65:")
+                (check_true "on the disk" (meta_kept g 1)))))))
 
 ; f with n files made on scratch, f0 to fN.
 (def opened_n ((f Fs) (n int)) Fs
@@ -134,10 +138,10 @@
   (let f (ran_fs (run (two) (reqs1 "open 2 /Volumes/scratch/big")))
     (check_str "all of it" (answer_text (obey f 5 (append "write 1 " (zeros 4000)))) "4000:")))
 
-; scratch has 63 clusters of data; 64 clusters' worth does not fit, and
-; leaves the file as it was.
+; scratch has 63 clusters of data, the root directory's one of them; 63
+; clusters' worth does not fit, and leaves the file as it was.
 (def test_full_volume () int
-  (let f (fill_up (ran_fs (run (two) (reqs1 "open 2 /Volumes/scratch/big"))) 63)
+  (let f (fill_up (ran_fs (run (two) (reqs1 "open 2 /Volumes/scratch/big"))) 62)
     (add (check_str "no room" (answer_text (obey f 5 "write 1 x")) "-6:")
          (check_str "df" (answer_text (obey f 5 "df /Volumes/scratch")) "0:512 63 0 1"))))
 
@@ -253,11 +257,13 @@
 
 ; ------------------------------------------------- the metadata written
 
-; Whether the metadata of volume vi on f's disk reads back as f has it.
+; Whether volume vi on f's disk, all of its sectors, its metadata and
+; directories, reads back as f has it.
 (def meta_kept ((f Fs) (vi int)) bool
   (let v (fs_vol f vi)
-    (match (vol_of (vol_label v) (vol_layout_of v) (bytes_from_list (sectors f (fs_start f vi) (vol_meta_sectors (vol_layout_of v)))))
-      ((VolGot w) (eq w v))
+    (match (vol_of (vol_label v) (vol_layout_of v)
+                   (bytes_from_list (sectors f (fs_start f vi) (match (vol_layout_of v) ((VolLayout n c t d) n)))))
+      ((VolGot w) (vol_same w v))
       ((VolBad why) false))))
 
 ; Made, written, emptied, replaced by a rename and removed: what is on
@@ -269,8 +275,9 @@
     (add (check_str "answers" (ran_text r) "1:|10:|0:|2:|9000:|0:|3:|0:|0:|0:")
          (check_true "on the disk" (meta_kept (ran_fs r) 0)))))
 
-; A write of a new file's first bytes: the data, then the table's and the
-; directory's sectors, which are close, in one request.
+; A write of a new file's first bytes: the data, then the table's sector
+; and the root directory's first, 1 and 8, which are close, in one
+; request.
 (def test_write_requests () int
   (let f (ran_fs (run (two) (reqs1 "open 2 /Volumes/data/notes")))
     (check_int "two" (sub (requests (after (obey f 5 "write 1 hello"))) (requests f)) 2)))
@@ -288,7 +295,7 @@
 (def big_fs () Fs
   (let v (vol_new "big" (vol_layout 1048576))
     (fs_new (put_at (StoreMem ((MapEmpty int (list int))) 1048576 0) 0 (vol_meta v)) 7
-            (array_from (cons (FsVol 0 v) (nil FsVol)) (FsVol 0 v)))))
+            (array_from (cons (FsVol 0 "" v) (nil FsVol)) (FsVol 0 "" v)))))
 
 ; Random appends of up to 5000 bytes to two files read back as what was
 ; written, every one of 40 runs.
@@ -351,6 +358,95 @@
 (def test_remove_refused () int
   (check_str "missing, the volume" (answers (reqs2 "remove /Volumes/data/a" "remove /Volumes/data")) "-3:|-8:"))
 
+; --------------------------------------------------------- directories
+
+; A directory made, a file written in it, and read back by its path.
+(def test_mkdir () int
+  (check_str "made, written, read"
+             (answers (append (reqs4 "mkdir /Volumes/data/bin" "open 2 /Volumes/data/bin/sh" "write 1 shell" "close 1")
+                              (reqs2 "open 1 /Volumes/data/bin/sh" "read 2 100")))
+             "0:|1:|5:|0:|2:|5:shell"))
+
+(def test_mkdir_refused () int
+  (check_str "there, no directory, a bad name, the volume"
+             (answers (reqs4 "mkdir /Volumes/data/bin" "mkdir /Volumes/data/bin" "mkdir /Volumes/data/x/y" "mkdir /Volumes/data/.."))
+             "0:|-4:|-9:|-5:"))
+
+; Directories nested, and on the disk as fs has them.
+(def test_nested () int
+  (let r (run (two) (reqs4 "mkdir /Volumes/data/a" "mkdir /Volumes/data/a/b" "open 2 /Volumes/data/a/b/c" "write 1 deep"))
+    (add (check_str "answers" (ran_text r) "0:|0:|1:|4:")
+         (add (check_str "read" (ran_text (run (ran_fs r) (reqs2 "open 1 /Volumes/data/a/b/c" "read 2 9"))) "2:|4:deep")
+              (check_true "on the disk" (meta_kept (ran_fs r) 0))))))
+
+; A directory lists its own entries, a directory's with a /; a file is no
+; directory to list.
+(def test_list_dir () int
+  (let f (ran_fs (run (two) (reqs4 "mkdir /Volumes/data/a" "mkdir /Volumes/data/a/b" "open 2 /Volumes/data/a/x" "close 1")))
+    (add (check_str "a" (answer_text (obey f 5 "list /Volumes/data/a")) "2:b/ 0\nx 0\n")
+         (add (check_str "the root" (answer_text (obey f 5 "list /Volumes/data")) "1:a/ 0\n")
+              (check_str "a file" (answer_text (obey f 5 "list /Volumes/data/a/x")) "-9:")))))
+
+; A directory is not opened, nor written.
+(def test_open_dir () int
+  (check_str "to read, to write" (answers (reqs3 "mkdir /Volumes/data/a" "open 1 /Volumes/data/a" "open 2 /Volumes/data/a")) "0:|-8:|-8:"))
+
+(def test_stat () int
+  (check_str "a directory, a file, nothing, the root"
+             (answers (append (reqs4 "mkdir /Volumes/data/a" "open 2 /Volumes/data/n" "write 1 abc" "stat /Volumes/data/a")
+                              (reqs3 "stat /Volumes/data/n" "stat /Volumes/data/none" "stat /Volumes/data")))
+             "0:|1:|3:|0:dir|0:file 3 -|-3:|0:dir"))
+
+(def test_chmod () int
+  (check_str "made a program, then not"
+             (answers (append (reqs3 "open 2 /Volumes/data/p" "chmod /Volumes/data/p +x" "stat /Volumes/data/p")
+                              (reqs2 "chmod /Volumes/data/p -x" "stat /Volumes/data/p")))
+             "1:|0:|0:file 0 x|0:|0:file 0 -"))
+
+(def test_chmod_refused () int
+  (check_str "a directory, nothing, a bad mode"
+             (answers (reqs4 "mkdir /Volumes/data/a" "chmod /Volumes/data/a +x" "chmod /Volumes/data/n +x" "chmod /Volumes/data/a 7"))
+             "0:|-8:|-3:|-5:"))
+
+; The exec flag is kept on the disk. (A byte is written first, so that
+; the table is on the disk: two's volumes are only in memory.)
+(def test_chmod_kept () int
+  (check_true "on the disk" (meta_kept (ran_fs (run (two) (reqs3 "open 2 /Volumes/data/p" "write 1 x" "chmod /Volumes/data/p +x"))) 0)))
+
+; A directory with something in it is kept; empty, it goes, and its
+; cluster with it.
+(def test_rmdir () int
+  (check_str "full, then empty"
+             (answers (append (reqs4 "mkdir /Volumes/data/a" "open 2 /Volumes/data/a/x" "close 1" "remove /Volumes/data/a")
+                              (reqs3 "remove /Volumes/data/a/x" "remove /Volumes/data/a" "df /Volumes/data")))
+             "0:|1:|0:|-4:|0:|0:|0:1528 190 189 0"))
+
+; A file moved between directories, and a handle open on it still
+; writing to it.
+(def test_move () int
+  (check_str "moved, written, read"
+             (answers (append (reqs4 "mkdir /Volumes/data/a" "open 2 /Volumes/data/x" "rename /Volumes/data/x /Volumes/data/a/y" "write 1 moved")
+                              (reqs3 "open 1 /Volumes/data/x" "open 1 /Volumes/data/a/y" "read 2 9")))
+             "0:|1:|0:|5:|-3:|2:|5:moved"))
+
+(def test_move_dir () int
+  (let r (run (two) (reqs4 "mkdir /Volumes/data/a" "mkdir /Volumes/data/b" "rename /Volumes/data/a /Volumes/data/b/a" "list /Volumes/data/b"))
+    (add (check_str "moved" (ran_text r) "0:|0:|0:|1:a/ 0\n")
+         (check_true "on the disk" (meta_kept (ran_fs r) 0)))))
+
+(def test_move_refused () int
+  (check_str "into itself, over a directory, a directory over a file"
+             (answers (append (reqs4 "mkdir /Volumes/data/a" "mkdir /Volumes/data/b" "open 2 /Volumes/data/f" "close 1")
+                              (reqs3 "rename /Volumes/data/a /Volumes/data/a/c" "rename /Volumes/data/f /Volumes/data/b" "rename /Volumes/data/a /Volumes/data/f")))
+             "0:|0:|1:|0:|-5:|-8:|-4:"))
+
+; A disk read anew finds directories within directories.
+(def test_rescan_nested () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (let f (ran_fs (run (serving both both) (reqs4 "mkdir /Volumes/data/a" "mkdir /Volumes/data/a/b" "open 2 /Volumes/data/a/b/c" "write 1 kept")))
+      (check_str "the file" (ran_text (run (rescanned_fs (rescan (after (obey f 5 "close 1")))) (reqs2 "open 1 /Volumes/data/a/b/c" "read 2 9")))
+                 "2:|4:kept"))))
+
 ; ------------------------------------------------------------- volumes
 
 (def test_list () int
@@ -361,9 +457,10 @@
 (def test_list_refused () int
   (check_str "no volume" (answers (reqs2 "list /Volumes/x" "list /Volumes/data/notes")) "-3:|-3:"))
 
-; data: 1528 sectors, 191 clusters, 190 of them data, one taken by notes.
+; data: 1528 sectors, 191 clusters, 190 of them data, one taken by the
+; root directory and one by notes.
 (def test_df () int
-  (check_str "data" (answers (append (written_notes) (reqs1 "df /Volumes/data"))) "1:|10:|0:|0:1528 190 189 1"))
+  (check_str "data" (answers (append (written_notes) (reqs1 "df /Volumes/data"))) "1:|10:|0:|0:1528 190 188 1"))
 
 (def test_format () int
   (check_str "emptied"
@@ -377,9 +474,9 @@
 
 ; Volumes as tools/mkdisk makes them, empty, and another in scratch's
 ; place.
-(def data_vol () FsVol (FsVol 40 (vol_new "data" (vol_layout 1496))))
-(def scratch_vol () FsVol (FsVol 1536 (vol_new "scratch" (vol_layout 479))))
-(def other_vol () FsVol (FsVol 1536 (vol_new "other" (vol_layout 479))))
+(def data_vol () FsVol (FsVol 40 (uuid_text (test_uuid 1)) (vol_new "data" (vol_layout 1496))))
+(def scratch_vol () FsVol (FsVol 1536 (uuid_text (test_uuid 2)) (vol_new "scratch" (vol_layout 479))))
+(def other_vol () FsVol (FsVol 1536 (uuid_text (test_uuid 2)) (vol_new "other" (vol_layout 479))))
 
 (def vols2 ((a FsVol) (b FsVol)) (list FsVol) (cons a (cons b (nil FsVol))))
 
@@ -398,12 +495,18 @@
   (if (is_empty vols)
       (nil GptPart)
       (match (head vols)
-        ((FsVol start v)
+        ((FsVol start u v)
           (cons (GptPart (gpt_l0fs_type) (test_uuid n) start (match (vol_layout_of v) ((VolLayout s c t d) s)) (vol_label v))
                 (parts_of (tail vols) (add n 1)))))))
 
 (def metas_on ((s Store) (vols (list FsVol))) Store
-  (if (is_empty vols) s (match (head vols) ((FsVol start v) (metas_on (put_at s start (vol_meta v)) (tail vols))))))
+  (if (is_empty vols) s (match (head vols) ((FsVol start u v) (metas_on (put_at s start (vol_meta v)) (tail vols))))))
+
+; A volume loaded from the disk knows its partition's UUID, to be mounted
+; with: data's is the first partition's.
+(def test_loaded_uuid () int
+  (match (rescan (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (scratch_vol))))
+    ((Rescanned a labels) (check_str "data's" (fs_uuid (after a) 0) (uuid_text (test_uuid 1))))))
 
 (def put_at ((s Store) (sector int) (bs (list int))) Store
   (match (store_write_all s sector bs) ((Put s2) s2) ((PutNot s2 why) s2)))
@@ -437,7 +540,7 @@
 (def test_rescan_more () int
   (let r (rescan (serving (cons (data_vol) (nil FsVol)) (vols2 (data_vol) (scratch_vol))))
     (add (check_str "scratch new" (rescan_text r) "2:data\nscratch\n|scratch")
-         (check_str "served" (answer_text (obey (rescanned_fs r) 5 "df /Volumes/scratch")) "0:479 58 58 0"))))
+         (check_str "served" (answer_text (obey (rescanned_fs r) 5 "df /Volumes/scratch")) "0:479 58 57 0"))))
 
 ; A volume that has gone is answered as no volume of fs's.
 (def test_rescan_gone () int
@@ -529,7 +632,7 @@
     (let b (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " new")))
       (add (check_str "made" (answer_text b) "0:new")
            (add (check_str "named" (table_text (after b)) "[new] 34+1000 ")
-                (check_str "served" (answer_text (obey (after b) 5 "df /Volumes/new")) "0:1000 124 124 0"))))))
+                (check_str "served" (answer_text (obey (after b) 5 "df /Volumes/new")) "0:1000 124 123 0"))))))
 
 ; Made by its UUID, it is found again by a rescan, as at the start.
 (def test_mkfs_found () int

@@ -2,7 +2,8 @@
 ; each volume of L0S's file system on it (user/lib/format/l0fs.l0) at
 ; /Volumes/LABEL, all from one port, and serves the fs protocol
 ; (user/lib/fs.l0) there: the kernel's requests for every process's
-; calls on those files, and list, df, format and rescan from programs. It
+; calls on those files, in directories at any depth, and list, mkdir,
+; stat, chmod, df, format and rescan from programs. It
 ; also registers the port as fs, once every volume is mounted, and serves
 ; though the disk has none. A rescan reads the disk's volumes again, and
 ; mounts any new label.
@@ -95,13 +96,14 @@
 
 ; ---------------------------------------------------------------- the state
 
-; A volume served: the sector its partition starts at, and the volume.
-(data FsVol (FsVol int Vol))
+; A volume served: the sector its partition starts at, the partition's
+; UUID as text, which the kernel mounts it with, and the volume.
+(data FsVol (FsVol int (list int) Vol))
 
 ; An open file: the pid that opened it, its volume and directory entry,
 ; where it has read or written to, its mode, 1 to 3 as open's, and the
 ; cluster it read or wrote last.
-(data Handle (Handle int int int int int Held))
+(data Handle (Handle int int VolRef int int Held))
 
 ; The cluster a handle read last: its place in the file's chain, and the
 ; file's bytes in it, all of them, which the next read takes from
@@ -141,8 +143,9 @@
 (def fs_vols ((f Fs)) (array FsVol) (match f ((Fs s port vols hs next ws cp) vols)))
 (def fs_handles ((f Fs)) (Map int Handle) (match f ((Fs s port vols hs next ws cp) hs)))
 
-(def fs_vol ((f Fs) (vi int)) Vol (match (array_get (fs_vols f) vi) ((FsVol start v) v)))
-(def fs_start ((f Fs) (vi int)) int (match (array_get (fs_vols f) vi) ((FsVol start v) start)))
+(def fs_vol ((f Fs) (vi int)) Vol (match (array_get (fs_vols f) vi) ((FsVol start u v) v)))
+(def fs_start ((f Fs) (vi int)) int (match (array_get (fs_vols f) vi) ((FsVol start u v) start)))
+(def fs_uuid ((f Fs) (vi int)) (list int) (match (array_get (fs_vols f) vi) ((FsVol start u v) u)))
 
 ; f with another store, or other handles.
 (def with_store ((f Fs) (s2 Store)) Fs
@@ -157,17 +160,17 @@
 
 ; vols as an array, which may be empty.
 (def vols_array ((vols (list FsVol))) (array FsVol)
-  (array_from vols (FsVol 0 (vol_new "x" (vol_layout 16)))))
+  (array_from vols (FsVol 0 "" (vol_new "x" (vol_layout 16)))))
 
 ; f with v as volume vi, in memory only.
 (def with_vol ((f Fs) (vi int) (v Vol)) Fs
-  (match f ((Fs s port vols hs next ws cp) (Fs s port (array_set vols vi (FsVol (fs_start f vi) v)) hs next ws cp))))
+  (match f ((Fs s port vols hs next ws cp) (Fs s port (array_set vols vi (FsVol (fs_start f vi) (fs_uuid f vi) v)) hs next ws cp))))
 
 ; f with handle h open, from pid, on entry ei of volume vi; and h. pid is
 ; watched from its first open, so its handles go when it exits.
 (data Opened (Opened Fs int))
 
-(def open_handle ((f Fs) (pid int) (vi int) (ei int) (mode int)) Opened
+(def open_handle ((f Fs) (pid int) (vi int) (ei VolRef) (mode int)) Opened
   (match f
     ((Fs s port vols hs next ws cp)
       (let ws2 (if (any_eq pid ws) ws (watched pid port ws))
@@ -186,17 +189,20 @@
     ((None) ((None Handle)))
     ((Some x) (match x ((Handle p vi ei off mode held) (if (eq p pid) (Some x) ((None Handle))))))))
 
-; Whether any handle is open on entry ei of volume vi; or, ei -1, on any
-; of vi's.
-(def is_open ((f Fs) (vi int) (ei int)) bool
-  (any_open (map_values (fs_handles f)) vi ei))
+; Whether any handle is open on entry ei of volume vi.
+(def is_open ((f Fs) (vi int) (ei VolRef)) bool
+  (any_open (map_values (fs_handles f)) vi ei false))
 
-(def any_open ((hs (list Handle)) (vi int) (ei int)) bool
+; Whether any handle is open on any of volume vi's files.
+(def is_open_on ((f Fs) (vi int)) bool
+  (any_open (map_values (fs_handles f)) vi (VolRef 0 0) true))
+
+(def any_open ((hs (list Handle)) (vi int) (ei VolRef) (any bool)) bool
   (if (is_empty hs)
       false
       (match (head hs)
         ((Handle p v e off mode held)
-          (if (if (eq v vi) (if (eq ei -1) true (eq e ei)) false) true (any_open (tail hs) vi ei))))))
+          (if (if (eq v vi) (if any true (eq e ei)) false) true (any_open (tail hs) vi ei any))))))
 
 ; f without pid's handles, pid having exited.
 (def forget_pid ((f Fs) (pid int)) Fs
@@ -214,10 +220,10 @@
 
 ; f with the handles on entry ei of volume vi holding no bytes of it, its
 ; file having been written to, but their places; or, emptied, nothing.
-(def unheld ((f Fs) (vi int) (ei int) (emptied bool)) Fs
+(def unheld ((f Fs) (vi int) (ei VolRef) (emptied bool)) Fs
   (with_handles f (unheld_in (fs_handles f) (map_keys (fs_handles f)) vi ei emptied)))
 
-(def unheld_in ((hs (Map int Handle)) (keys (list int)) (vi int) (ei int) (emptied bool)) (Map int Handle)
+(def unheld_in ((hs (Map int Handle)) (keys (list int)) (vi int) (ei VolRef) (emptied bool)) (Map int Handle)
   (if (is_empty keys)
       hs
       (unheld_in (match (map_get hs (head keys))
@@ -241,11 +247,14 @@
 (def commit ((f Fs) (vi int) (v Vol)) Committed
   (committed f vi v (store_write_all (match f ((Fs s port vols hs next ws cp) s)) (fs_start f vi) (vol_meta v))))
 
-; Only the sectors of v's metadata that hold the marks of clusters cs and
-; the entries es written, which must be all that changed: those close
-; together in one request, as vol_runs puts them.
-(def commit_some ((f Fs) (vi int) (v Vol) (cs (list int)) (es (list int))) Committed
-  (committed f vi v (write_runs (fs_store f) (fs_start f vi) v (vol_runs (vol_dirty_sectors (vol_layout_of v) cs es)))))
+; Only the sectors of v's metadata and directories that hold the marks
+; of clusters cs and the entries es written, which must be all that
+; changed: those close together in one request, as vol_runs puts them.
+(def commit_some ((f Fs) (vi int) (v Vol) (cs (list int)) (es (list VolRef))) Committed
+  (committed f vi v (write_runs (fs_store f) (fs_start f vi) v (vol_runs (vol_dirty_sectors v cs es)))))
+
+; The one entry r, as commit_some takes the entries that changed.
+(def one ((r VolRef)) (list VolRef) (cons r (nil VolRef)))
 
 (def committed ((f Fs) (vi int) (v Vol) (p Put)) Committed
   (match p
@@ -264,12 +273,14 @@
 
 ; ---------------------------------------------------------------- paths
 
-; Where a path is: a file's name in volume vi, volume vi itself, or
-; nothing of fs's, and the code that says so.
-(data Target (TFile int (list int)) (TVolume int) (TNone int))
+; Where a path is: a name in directory dc of volume vi, whether or not
+; it is there; volume vi itself, its root; or nothing of fs's, and the
+; code that says so.
+(data Target (TFile int int (list int)) (TVolume int) (TNone int))
 
 ; The target path names, writing or not: nothing past /Volumes/LABEL is a
-; volume of fs's, -3 or, to write, -9; nor a name with a / in it.
+; volume of fs's, nor a name in a directory that is missing or a file:
+; -3 or, to write, -9.
 (def target ((f Fs) (path (list int)) (writing bool)) Target
   (let missing (if writing -9 -3)
     (if (not (starts_with path "/Volumes/"))
@@ -279,17 +290,37 @@
             (let vi (vol_index (fs_vols f) label 0)
               (if (lt vi 0)
                   (TNone missing)
-                  (let name (drop_n rest (add (length label) 1))
-                    (if (is_empty name)
-                        (TVolume vi)
-                        (if (any_eq 47 name) (TNone missing) (TFile vi name)))))))))))
+                  (match (vol_place (fs_vol f vi) (vol_path_names (drop_n rest (length label))))
+                    ((VolTop) (TVolume vi))
+                    ((VolIn dc name) (TFile vi dc name))
+                    ((VolNowhere) (TNone missing))))))))))
+
+; What a path names in a volume: a file or a directory there, by its
+; entry; the volume's root; nothing there, though its directory is, -3;
+; or nowhere, with the code that says so.
+(data Found (FoundAt int VolRef VolEntry) (FoundRoot int) (FoundNone int int (list int)) (FoundNowhere int))
+
+; What path names, as target finds it.
+(def found_at ((f Fs) (path (list int)) (writing bool)) Found
+  (match (target f path writing)
+    ((TNone code) (FoundNowhere code))
+    ((TVolume vi) (FoundRoot vi))
+    ((TFile vi dc name)
+      (let i (vol_find (fs_vol f vi) dc name)
+        (if (lt i 0)
+            (FoundNone vi dc name)
+            (FoundAt vi (VolRef dc i) (vol_entry (fs_vol f vi) (VolRef dc i))))))))
+
+; Whether e is a directory.
+(def is_dir_entry ((e VolEntry)) bool
+  (match e ((VolDir name first) true) ((VolFile name size first exec) false) ((VolNone) false)))
 
 ; The volume of vols labelled label, from i, or -1.
 (def vol_index ((vols (array FsVol)) (label (list int)) (i int)) int
   (if (ge i (array_len vols))
       -1
       (match (array_get vols i)
-        ((FsVol start v) (if (eq (vol_label v) label) i (vol_index vols label (add i 1)))))))
+        ((FsVol start u v) (if (eq (vol_label v) label) i (vol_index vols label (add i 1)))))))
 
 ; ------------------------------------------------------------- answering
 
@@ -319,7 +350,8 @@
     (if (if (eq op "read") (eq n 2) false) (obey_read f pid (head ws) (head (tail ws)))
     (if (if (eq op "close") (eq n 1) false) (obey_close f pid (head ws))
     (if (if (eq op "rename") (eq n 2) false) (do_rename f (head ws) (head (tail ws)))
-    (obey_volumes f op ws)))))))
+    (if (if (eq op "chmod") (eq n 2) false) (do_chmod f (head ws) (head (tail ws)))
+    (obey_volumes f op ws))))))))
 
 (def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
   (if (eq op "partition") (obey_partition f ws)
@@ -333,10 +365,16 @@
   (if (not (eq (length ws) 1))
       (word f -5)
       (if (eq op "remove") (do_remove f (head ws))
-      (if (eq op "list") (do_list f (head ws))
-      (if (eq op "df") (do_df f (head ws))
-      (if (eq op "format") (do_format f (head ws))
-      (word f -5))))))))
+      (obey_path f op (head ws))))))
+
+; A request of one path: of a directory, a file, or a volume.
+(def obey_path ((f Fs) (op (list int)) (path (list int))) Answered
+  (if (eq op "list") (do_list f path)
+  (if (eq op "mkdir") (do_mkdir f path)
+  (if (eq op "stat") (do_stat f path)
+  (if (eq op "df") (do_df f path)
+  (if (eq op "format") (do_format f path)
+  (word f -5)))))))
 
 (def obey_open ((f Fs) (pid int) (mode (list int)) (path (list int))) Answered
   (let m (if (is_number mode) (int_prefix mode 0) 0)
@@ -361,38 +399,32 @@
 ; path opened by pid in mode m: to read, a file there; to write, it
 ; emptied (2) or kept (3), and made if it is not there.
 (def do_open ((f Fs) (pid int) (m int) (path (list int))) Answered
-  (match (target f path (not (eq m 1)))
-    ((TNone code) (word f code))
-    ((TVolume vi) (word f -8))
-    ((TFile vi name)
-      (if (eq m 1)
-          (open_read f pid vi (vol_find (fs_vol f vi) name))
-          (open_write f pid vi name m)))))
+  (match (found_at f path (not (eq m 1)))
+    ((FoundNowhere code) (word f code))
+    ((FoundRoot vi) (word f -8))
+    ((FoundNone vi dc name) (if (eq m 1) (word f -3) (open_new f pid vi dc name m)))
+    ((FoundAt vi r e)
+      (if (is_dir_entry e)
+          (word f -8)
+          (if (eq m 1)
+              (match (open_handle f pid vi r 1) ((Opened f2 h) (word f2 h)))
+              (opened_write (if (eq m 2) (emptied f vi (fs_vol f vi) r) (Committed f)) pid vi r m))))))
 
-(def open_read ((f Fs) (pid int) (vi int) (ei int)) Answered
-  (if (lt ei 0)
-      (word f -3)
-      (match (open_handle f pid vi ei 1) ((Opened f2 h) (word f2 h)))))
-
-; A name the volume cannot hold, or a full directory, is -5.
-(def open_write ((f Fs) (pid int) (vi int) (name (list int)) (m int)) Answered
-  (let v (fs_vol f vi)
-    (let ei (vol_find v name)
-      (if (ge ei 0)
-          (opened_write (if (eq m 2) (emptied f vi v ei) (Committed f)) pid vi ei m)
-          (if (not (vol_name_ok name))
-              (word f -5)
-              (let free (vol_free_entry v)
-                (if (lt free 0)
-                    (word f -5)
-                    (opened_write (commit_some f vi (vol_create v free name) (nil int) (cons free (nil int))) pid vi free m))))))))
+; A new file name made in directory dc of volume vi, and opened. A name
+; the volume cannot hold is -5; a directory with no room to grow, -6.
+(def open_new ((f Fs) (pid int) (vi int) (dc int) (name (list int)) (m int)) Answered
+  (if (not (vol_name_ok name))
+      (word f -5)
+      (match (vol_slot (fs_vol f vi) dc)
+        ((VolNoSlot) (word f -6))
+        ((VolSlot v r cs rs) (opened_write (commit_some f vi (vol_create v r name) cs (cons r rs)) pid vi r m)))))
 
 ; The file at ei of v, volume vi, emptied, and no longer held by its
 ; readers.
-(def emptied ((f Fs) (vi int) (v Vol) (ei int)) Committed
-  (commit_some (unheld f vi ei true) vi (vol_truncate v ei) (vol_file_clusters v ei) (cons ei (nil int))))
+(def emptied ((f Fs) (vi int) (v Vol) (ei VolRef)) Committed
+  (commit_some (unheld f vi ei true) vi (vol_truncate v ei) (vol_file_clusters v ei) (one ei)))
 
-(def opened_write ((c Committed) (pid int) (vi int) (ei int) (m int)) Answered
+(def opened_write ((c Committed) (pid int) (vi int) (ei VolRef) (m int)) Answered
   (match c
     ((CommitFailed f) (word f -5))
     ((Committed f) (match (open_handle f pid vi ei m) ((Opened f2 h) (word f2 h))))))
@@ -445,7 +477,7 @@
 ; from as few sectors as hold them, to be held in its place.
 (data Fetched (Fetched Fs Held) (FetchFailed Fs))
 
-(def fetch ((f Fs) (vi int) (ei int) (a VolAt) (held Held) (need int)) Fetched
+(def fetch ((f Fs) (vi int) (ei VolRef) (a VolAt) (held Held) (need int)) Fetched
   (if (holds held a need)
       (Fetched f held)
       (match a
@@ -469,7 +501,8 @@
               (word f -5)
               (match (vol_entry (fs_vol f vi) ei)
                 ((VolNone) (word f -5))
-                ((VolFile name size first)
+                ((VolDir name first) (word f -5))
+                ((VolFile name size first exec)
                   (let at (if (eq mode 3) size (min off size))
                     (match (vol_write (fs_vol f vi) ei at (length bs) (held_at held))
                       ((VolNoSpace) (word f -6))
@@ -487,7 +520,7 @@
         ((PutNot s2 why) (word (unheld (with_store f s2) vi ei false) -5))
         ((Put s2)
           (match (commit_some (unheld (with_store f s2) vi ei false) vi v2 marked
-                              (if (eq (vol_entry v2 ei) (vol_entry (fs_vol f vi) ei)) (nil int) (cons ei (nil int))))
+                              (if (eq (vol_entry v2 ei) (vol_entry (fs_vol f vi) ei)) (nil VolRef) (one ei)))
             ((CommitFailed f2) (word f2 -5))
             ((Committed f2)
               (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at (length bs)) mode (HeldPlace (vol_spans_end spans at (length bs))))))
@@ -523,72 +556,177 @@
 
 ; ----------------------------------------------------- rename and remove
 
-; The file at a named b, in one volume: one there already replaced,
-; unless it is open.
+; The file or directory at a named b, in one volume: a file there already
+; replaced, unless it is open; a directory there is -8, and a directory
+; moved into itself, or over a file, refused. In its own directory it
+; keeps its entry; moved to another, its open handles follow it.
 (def do_rename ((f Fs) (a (list int)) (b (list int))) Answered
-  (match (target f a false)
-    ((TNone code) (word f code))
-    ((TVolume vi) (word f -5))
-    ((TFile vi name)
-      (let ei (vol_find (fs_vol f vi) name)
-        (if (lt ei 0)
-            (word f -3)
-            (match (target f b true)
-              ((TNone code) (word f code))
-              ((TVolume wi) (word f -8))
-              ((TFile wi to)
-                (if (not (eq wi vi))
-                    (word f -10)
-                    (renamed f vi ei to)))))))))
+  (match (found_at f a false)
+    ((FoundNowhere code) (word f code))
+    ((FoundRoot vi) (word f -5))
+    ((FoundNone vi dc name) (word f -3))
+    ((FoundAt vi r e)
+      (match (target f b true)
+        ((TNone code) (word f code))
+        ((TVolume wi) (word f -8))
+        ((TFile wi dc to)
+          (if (not (eq wi vi))
+              (word f -10)
+              (if (not (vol_name_ok to))
+                  (word f -5)
+                  (if (moves_into (fs_vol f vi) e dc)
+                      (word f -5)
+                      (rename_onto f vi r e dc to)))))))))
 
-(def renamed ((f Fs) (vi int) (ei int) (to (list int))) Answered
+; Whether e is a directory that dc is, or is in.
+(def moves_into ((v Vol) (e VolEntry) (dc int)) bool
+  (match e ((VolDir name first) (vol_under v first dc)) ((VolFile name size first exec) false) ((VolNone) false)))
+
+; The entry r, e, of volume vi named to in directory dc.
+(def rename_onto ((f Fs) (vi int) (r VolRef) (e VolEntry) (dc int) (to (list int))) Answered
   (let v (fs_vol f vi)
-    (let old (vol_find v to)
-      (if (not (vol_name_ok to))
-          (word f -5)
-          (if (eq old ei)
-              (word f 0)
-              (if (if (ge old 0) (is_open f vi old) false)
-                  (word f -4)
-                  (match (commit_some f vi (vol_rename (if (ge old 0) (vol_remove v old) v) ei to)
-                                      (if (ge old 0) (vol_file_clusters v old) (nil int))
-                                      (if (ge old 0) (cons old (cons ei (nil int))) (cons ei (nil int))))
-                    ((CommitFailed f2) (word f2 -5))
-                    ((Committed f2) (word f2 0)))))))))
+    (let i (vol_find v dc to)
+      (if (lt i 0)
+          (rename_new f vi r dc to)
+          (rename_over f vi r e (VolRef dc i) to)))))
 
-; The file at path gone, unless it is open.
-(def do_remove ((f Fs) (path (list int))) Answered
-  (match (target f path false)
-    ((TNone code) (word f code))
-    ((TVolume vi) (word f -8))
-    ((TFile vi name)
-      (let ei (vol_find (fs_vol f vi) name)
-        (if (lt ei 0)
-            (word f -3)
-            (if (is_open f vi ei)
+; Over the entry old, which is there.
+(def rename_over ((f Fs) (vi int) (r VolRef) (e VolEntry) (old VolRef) (to (list int))) Answered
+  (let v (fs_vol f vi)
+    (if (eq old r)
+        (word f 0)
+        (if (is_dir_entry (vol_entry v old))
+            (word f -8)
+            (if (if (is_dir_entry e) true (is_open f vi old))
                 (word f -4)
-                (match (commit_some f vi (vol_remove (fs_vol f vi) ei) (vol_file_clusters (fs_vol f vi) ei) (cons ei (nil int)))
-                  ((CommitFailed f2) (word f2 -5))
-                  ((Committed f2) (word f2 0)))))))))
+                (rename_done f vi r old (vol_move (vol_remove v old) r old to) (vol_file_clusters v old) (nil VolRef)))))))
+
+; To a name not there: in place, in r's own directory; else to a free
+; entry of dc, which may grow for it.
+(def rename_new ((f Fs) (vi int) (r VolRef) (dc int) (to (list int))) Answered
+  (match r
+    ((VolRef rd ri)
+      (if (eq rd dc)
+          (rename_done f vi r r (vol_move (fs_vol f vi) r r to) (nil int) (nil VolRef))
+          (match (vol_slot (fs_vol f vi) dc)
+            ((VolNoSlot) (word f -6))
+            ((VolSlot v s cs rs) (rename_done f vi r s (vol_move v r s to) cs rs)))))))
+
+; The rename committed: v, its marks cs and entries rs changed besides r
+; and to, and the handles on r moved to to.
+(def rename_done ((f Fs) (vi int) (r VolRef) (to VolRef) (v Vol) (cs (list int)) (rs (list VolRef))) Answered
+  (match (commit_some f vi v cs (cons r (cons to rs)))
+    ((CommitFailed f2) (word f2 -5))
+    ((Committed f2) (word (with_handles f2 (rehandled (fs_handles f2) (map_keys (fs_handles f2)) vi r to)) 0))))
+
+; hs with those on entry r of volume vi on to instead.
+(def rehandled ((hs (Map int Handle)) (keys (list int)) (vi int) (r VolRef) (to VolRef)) (Map int Handle)
+  (if (is_empty keys)
+      hs
+      (rehandled (match (map_get hs (head keys))
+                   ((Some x)
+                     (match x
+                       ((Handle p v e off mode held)
+                         (if (if (eq v vi) (eq e r) false) (map_put hs (head keys) (Handle p v to off mode held)) hs))))
+                   ((None) hs))
+                 (tail keys) vi r to)))
+
+; The file at path gone, unless it is open; or the directory, unless it
+; has anything in it.
+(def do_remove ((f Fs) (path (list int))) Answered
+  (match (found_at f path false)
+    ((FoundNowhere code) (word f code))
+    ((FoundRoot vi) (word f -8))
+    ((FoundNone vi dc name) (word f -3))
+    ((FoundAt vi r e)
+      (if (if (is_dir_entry e) (not (vol_dir_empty (fs_vol f vi) (dir_first e))) (is_open f vi r))
+          (word f -4)
+          (match (commit_some f vi (vol_remove (fs_vol f vi) r) (vol_file_clusters (fs_vol f vi) r) (one r))
+            ((CommitFailed f2) (word f2 -5))
+            ((Committed f2) (word f2 0)))))))
+
+; A directory's first cluster; 0 for a file or none.
+(def dir_first ((e VolEntry)) int
+  (match e ((VolDir name first) first) ((VolFile name size first exec) 0) ((VolNone) 0)))
+
+; ----------------------------------------------------- directories, modes
+
+; A new, empty directory at path: -9 if its directory is not there, -4 if
+; something is at path already, -5 for a name the volume cannot hold, -6
+; with no room for it.
+(def do_mkdir ((f Fs) (path (list int))) Answered
+  (match (found_at f path true)
+    ((FoundNowhere code) (word f code))
+    ((FoundRoot vi) (word f -4))
+    ((FoundAt vi r e) (word f -4))
+    ((FoundNone vi dc name)
+      (if (not (vol_name_ok name))
+          (word f -5)
+          (match (vol_slot (fs_vol f vi) dc)
+            ((VolNoSlot) (word f -6))
+            ((VolSlot v r cs rs)
+              (match (vol_mkdir v r name)
+                ((VolNoRoom) (word f -6))
+                ((VolMade v2 c cs2)
+                  (match (commit_some f vi v2 (append cs cs2) (cons r (append rs (vol_cluster_refs c 0))))
+                    ((CommitFailed f2) (word f2 -5))
+                    ((Committed f2) (word f2 0)))))))))))
+
+; What is at path: 0, then dir, or file SIZE and x for a program, - for
+; any other file; -3 if nothing is.
+(def do_stat ((f Fs) (path (list int))) Answered
+  (match (found_at f path false)
+    ((FoundNowhere code) (word f code))
+    ((FoundRoot vi) (Answered f 0 "dir"))
+    ((FoundNone vi dc name) (word f -3))
+    ((FoundAt vi r e) (Answered f 0 (stat_text e)))))
+
+(def stat_text ((e VolEntry)) (list int)
+  (match e
+    ((VolDir name first) "dir")
+    ((VolFile name size first exec) (append "file " (append (digits size) (if exec " x" " -"))))
+    ((VolNone) "")))
+
+; The file at path made a program, +x, or not, -x: -8 for a directory.
+(def do_chmod ((f Fs) (path (list int)) (mode (list int))) Answered
+  (if (not (any_eq mode (split_spaces "+x -x")))
+      (word f -5)
+      (match (found_at f path false)
+        ((FoundNowhere code) (word f code))
+        ((FoundRoot vi) (word f -8))
+        ((FoundNone vi dc name) (word f -3))
+        ((FoundAt vi r e)
+          (if (is_dir_entry e)
+              (word f -8)
+              (match (commit_some f vi (vol_set_exec (fs_vol f vi) r (eq mode "+x")) (nil int) (one r))
+                ((CommitFailed f2) (word f2 -5))
+                ((Committed f2) (word f2 0))))))))
 
 ; --------------------------------------------------------------- volumes
 
 ; The volume path names, or -3 if it is no volume of fs's.
 (def volume_at ((f Fs) (path (list int))) int
-  (match (target f path false) ((TVolume vi) vi) ((TFile vi name) -3) ((TNone code) -3)))
+  (match (target f path false) ((TVolume vi) vi) ((TFile vi dc name) -3) ((TNone code) -3)))
 
+; The directory at path, a volume's root or another: how many entries it
+; has, then each, a directory's name ending in /; -9 for a file.
 (def do_list ((f Fs) (path (list int))) Answered
-  (let vi (volume_at f path)
-    (if (lt vi 0)
-        (word f -3)
-        (let files (vol_files (fs_vol f vi))
-          (Answered f (length files) (fs_listing (stats_of files)))))))
+  (match (found_at f path false)
+    ((FoundNowhere code) (word f -3))
+    ((FoundRoot vi) (listed f vi (vol_root (fs_vol f vi))))
+    ((FoundNone vi dc name) (word f -3))
+    ((FoundAt vi r e) (if (is_dir_entry e) (listed f vi (dir_first e)) (word f -9)))))
+
+(def listed ((f Fs) (vi int) (dc int)) Answered
+  (let es (vol_listing (fs_vol f vi) dc)
+    (Answered f (length es) (fs_listing (stats_of es)))))
 
 (def stats_of ((es (list VolEntry))) (list FsStat)
   (if (is_empty es)
       (nil FsStat)
       (match (head es)
-        ((VolFile name size first) (cons (FsStat name size) (stats_of (tail es))))
+        ((VolFile name size first exec) (cons (FsStat name size) (stats_of (tail es))))
+        ((VolDir name first) (cons (FsStat (append name "/") 0) (stats_of (tail es))))
         ((VolNone) (stats_of (tail es))))))
 
 (def do_df ((f Fs) (path (list int))) Answered
@@ -602,12 +740,22 @@
                                          (vol_free_count (vol_table v))
                                          (vol_file_count v))))))))
 
-; The volume emptied, unless a file on it is open.
+; Whether volume vi is /, the system volume: the kernel's mount 0 is
+; f's port's, with vi's UUID. Never, with no kernel.
+(def is_system ((f Fs) (vi int)) bool
+  (match (mount_at 0)
+    ((None) false)
+    ((Some m)
+      (match m
+        ((MountInfo path port u)
+          (if (eq port (match f ((Fs s p vols hs next ws cp) p))) (eq u (fs_uuid f vi)) false))))))
+
+; The volume emptied, unless a file on it is open, or it is /.
 (def do_format ((f Fs) (path (list int))) Answered
   (let vi (volume_at f path)
     (if (lt vi 0)
         (word f -3)
-        (if (is_open f vi -1)
+        (if (if (is_open_on f vi) true (is_system f vi))
             (word f -4)
             (match (commit f vi (vol_format (fs_vol f vi)))
               ((CommitFailed f2) (word f2 -5))
@@ -718,13 +866,13 @@
     ((Put s2)
       (match (write_table s2 (gpt_named d u label))
         ((PutNot s3 why) (Answered (with_store f s3) -5 why))
-        ((Put s3) (mounted_new (with_store f s3) (FsVol start v)))))))
+        ((Put s3) (mounted_new (with_store f s3) (FsVol start (uuid_text u) v)))))))
 
 ; Whether a volume served starts at start, among vols from i.
 (def served_at ((vols (array FsVol)) (start int) (i int)) bool
   (if (ge i (array_len vols))
       false
-      (match (array_get vols i) ((FsVol s v) (if (eq s start) true (served_at vols start (add i 1)))))))
+      (match (array_get vols i) ((FsVol s u v) (if (eq s start) true (served_at vols start (add i 1)))))))
 
 ; d with partition u named, and of L0FS's type.
 (def gpt_named ((d GptDisk) (u Uuid) (name (list int))) GptDisk
@@ -745,10 +893,10 @@
   (match f
     ((Fs s port vols hs next ws cp)
       (match fv
-        ((FsVol start v)
-          (let m (mount_new port (cons (vol_label v) (nil (list int))))
-            (Answered (Fs s port (vols_array (append (array_to_list vols) (cons fv (nil FsVol)))) hs next ws cp)
-                      0 (vol_label v))))))))
+        ((FsVol start u v)
+          (let vols2 (vols_array (append (array_to_list vols) (cons fv (nil FsVol))))
+            (let m (mount_new port vols2 (cons (vol_label v) (nil (list int))))
+              (Answered (Fs s port vols2 hs next ws cp) 0 (vol_label v)))))))))
 
 ; ---------------------------------------------------------------- rescan
 
@@ -778,14 +926,14 @@
 (def labels_text ((vols (list FsVol)) (acc (list int))) (list int)
   (if (is_empty vols)
       (rev acc)
-      (match (head vols) ((FsVol start v) (labels_text (tail vols) (push "\n" (push (vol_label v) acc)))))))
+      (match (head vols) ((FsVol start u v) (labels_text (tail vols) (push "\n" (push (vol_label v) acc)))))))
 
 ; The labels of vols that none of old has.
 (def new_labels ((old (array FsVol)) (vols (list FsVol))) (list (list int))
   (if (is_empty vols)
       (nil (list int))
       (match (head vols)
-        ((FsVol start v)
+        ((FsVol start u v)
           (if (lt (vol_index old (vol_label v) 0) 0)
               (cons (vol_label v) (new_labels old (tail vols)))
               (new_labels old (tail vols)))))))
@@ -796,18 +944,24 @@
 (def do_rescan ((f Fs)) Answered
   (match (rescan f)
     ((Rescanned a labels)
-      (let m (mount_new (match f ((Fs s port vols hs next ws cp) port)) labels) a))))
+      (let m (mount_new (match f ((Fs s port vols hs next ws cp) port)) (fs_vols (after_answer a)) labels) a))))
 
-; Each label mounted from port. One mounted already is fs's from before,
-; served again; any other failure is said why.
-(def mount_new ((port int) (labels (list (list int)))) int
+; f after the request a answers.
+(def after_answer ((a Answered)) Fs (match a ((Answered f w bs) f)))
+
+; Each label mounted from port, with its UUID, as vols has it. One
+; mounted already is fs's from before, served again; any other failure is
+; said why.
+(def mount_new ((port int) (vols (array FsVol)) (labels (list (list int)))) int
   (if (is_empty labels)
       0
-      (match (fs_mount (head labels) port)
-        ((Mounted) (mount_new port (tail labels)))
-        ((MountTaken) (mount_new port (tail labels)))
-        ((MountNoPort) (let w (complain (append (head labels) (append ": " (mounting_why (MountNoPort))))) (mount_new port (tail labels))))
-        ((MountBadLabel) (let w (complain (append (head labels) (append ": " (mounting_why (MountBadLabel))))) (mount_new port (tail labels)))))))
+      (let vi (vol_index vols (head labels) 0)
+        (let u (if (lt vi 0) "" (match (array_get vols vi) ((FsVol start id v) id)))
+          (match (fs_mount (head labels) u port)
+            ((Mounted) (mount_new port vols (tail labels)))
+            ((MountTaken) (mount_new port vols (tail labels)))
+            ((MountNoPort) (let w (complain (append (head labels) (append ": " (mounting_why (MountNoPort))))) (mount_new port vols (tail labels))))
+            ((MountBadLabel) (let w (complain (append (head labels) (append ": " (mounting_why (MountBadLabel))))) (mount_new port vols (tail labels)))))))))
 
 ; ---------------------------------------------------------------- serving
 
@@ -917,17 +1071,44 @@
             ((Got s2 bs)
               (match (vol_super_of (bytes_from_list bs))
                 ((VolNotSuper why) (load_vols s2 (tail parts) (cons_not acc start why)))
-                ((VolSuper label l) (load_meta s2 (tail parts) acc start count label l)))))))))
+                ((VolSuper label l) (load_meta s2 (tail parts) acc start (uuid_text u) count label l)))))))))
 
-(def load_meta ((s Store) (parts (list GptPart)) (acc (list FsVol)) (start int) (count int) (label (list int)) (l VolLayout)) Loaded
+(def load_meta ((s Store) (parts (list GptPart)) (acc (list FsVol)) (start int) (u (list int)) (count int) (label (list int)) (l VolLayout)) Loaded
   (if (gt (match l ((VolLayout n c t d) n)) count)
       (load_vols s parts (cons_not acc start "a volume larger than its partition"))
       (match (store_read_all s start (vol_meta_sectors l))
         ((GotNot s2 why) (load_vols s2 parts (cons_not acc start why)))
         ((Got s2 bs)
-          (match (vol_of label l (bytes_from_list bs))
+          (match (vol_base label l (bytes_from_list bs))
             ((VolBad why) (load_vols s2 parts (cons_not acc start why)))
-            ((VolGot v) (load_vols s2 parts (cons (FsVol start v) acc))))))))
+            ((VolGot v)
+              (match (load_dirs s2 start v (cons (vol_root v) (nil int)))
+                ((DirsNot s3 why) (load_vols s3 parts (cons_not acc start why)))
+                ((Dirs s3 v2) (load_vols s3 parts (cons (FsVol start u v2) acc))))))))))
+
+; A volume with every directory read, or why not, and the store after.
+(data Dirs (Dirs Store Vol) (DirsNot Store (list int)))
+
+; v, its partition from start, with the directories from dcs on read
+; from the store, and those in them.
+(def load_dirs ((s Store) (start int) (v Vol) (dcs (list int))) Dirs
+  (if (is_empty dcs)
+      (Dirs s v)
+      (match (read_clusters s start (vol_dir_clusters v (head dcs)) (nil int))
+        ((GotNot s2 why) (DirsNot s2 why))
+        ((Got s2 bs)
+          (match (vol_add_dir v (head dcs) (bytes_from_list bs))
+            ((VolBad why) (DirsNot s2 why))
+            ((VolGot v2) (load_dirs s2 start v2 (append (vol_subdirs v2 (head dcs)) (tail dcs)))))))))
+
+; The clusters cs of the partition from start, in order, after acc,
+; reversed.
+(def read_clusters ((s Store) (start int) (cs (list int)) (acc (list int))) Got
+  (if (is_empty cs)
+      (Got s (rev acc))
+      (match (store_read s (vol_cluster_sector start (head cs)) (vol_cluster_sectors))
+        ((GotNot s2 why) (GotNot s2 why))
+        ((Got s2 bs) (read_clusters s2 start (tail cs) (rev_onto bs acc))))))
 
 ; acc, having said why the partition at start is not served.
 (def cons_not ((acc (list FsVol)) (start int) (why (list int))) (list FsVol)
@@ -944,13 +1125,14 @@
           (let r (name_register_or_why port "fs")
             (if (is_empty r) (serve (fs_new s port (vols_array vols)) port) (complain r))))))))
 
-; Each volume mounted from port; one that cannot be is said why.
+; Each volume mounted from port, with its partition's UUID; one that
+; cannot be is said why.
 (def mount_all ((port int) (vols (list FsVol))) int
   (if (is_empty vols)
       0
       (match (head vols)
-        ((FsVol start v)
-          (match (fs_mount (vol_label v) port)
+        ((FsVol start u v)
+          (match (fs_mount (vol_label v) u port)
             ((Mounted) (mount_all port (tail vols)))
             ((MountNoPort) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountNoPort))))) (mount_all port (tail vols))))
             ((MountTaken) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountTaken))))) (mount_all port (tail vols))))

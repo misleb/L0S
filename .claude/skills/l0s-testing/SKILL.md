@@ -93,6 +93,8 @@ case's `etc`, and compares. A case is a directory:
 | `typed` | lines typed at the serial line by `tools/slowtype`, with pauses |
 | `font` | if present, the console font is added as `/etc/font.txt`, for `vt` |
 | `disk` | if present, the board has a virtio-blk on a fresh `tools/mkdisk` image (`build/e2e/CASE.disk`); without it there is no disk |
+| `layout` | that disk's layout, if not mkdisk's 1 MB one: `SECTORS LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, `@` the case's own cpio; give a UUID to boot from it, since mkfs's own differ every run |
+| `bootargs` | the kernel's boot arguments, such as `root=UUID` (`l0 boot IMAGE ARGS`, or `QEMU_APPEND` with `typed`) |
 
 - A case with `typed` should start `uart noecho`, so the output doesn't
   depend on how the echo interleaves.

@@ -331,26 +331,77 @@
     ((MountTaken) "the label is mounted already")
     ((MountBadLabel) "a label is 1 to 15 letters, digits, - and _")))
 
-; The volume label mounted at /Volumes/LABEL from port, this process's:
-; the kernel sends it every call on a file there, as the fs protocol's
-; requests (user/lib/fs.l0), until the port goes.
-(def fs_mount ((label (list int)) (port int)) Mounting
-  (let b (bytes_from_list label)
+; The volume label, of the partition whose UUID is uuid, as text, or
+; none, mounted at /Volumes/LABEL from port, this process's: the kernel
+; sends it every call on a file there, as the fs protocol's requests
+; (user/lib/fs.l0), until the port goes.
+(def fs_mount ((label (list int)) (uuid (list int)) (port int)) Mounting
+  (let b (bytes_from_list (if (is_empty uuid) label (append uuid (cons 32 label))))
     (mounting_of (supervisor_send (call_fs_mount) port b 0 (bytes_len b)))))
 
-; A mount: where it is, / for the initramfs or /Volumes/LABEL, and the
-; port of the server whose files are there, 0 for the kernel's own.
-(data MountInfo (MountInfo (list int) int))
+; A mount: where it is, / or /Volumes/LABEL, the port of the server whose
+; files are there, 0 for the kernel's own, the initramfs, and the UUID
+; of its volume's partition, as text, empty for none.
+(data MountInfo (MountInfo (list int) int (list int)))
 
-; Mount i of the kernel's table, from 0, the initramfs at /, if there
-; is one.
+; Mount i of the kernel's table, from 0, /, if there is one.
 (def mount_at ((i int)) (Option MountInfo)
-  (mount_info_of (supervisor_receive (call_mount_at) i 64)))
+  (mount_info_of (supervisor_receive (call_mount_at) i 128)))
 
 (def mount_info_of ((b bytes)) (Option MountInfo)
   (if (lt (bytes_len b) 5)
       ((None MountInfo))
-      (Some (MountInfo (bytes_range b 4 (bytes_len b)) (le_u32 b 0)))))
+      (let rest (bytes_range b 4 (bytes_len b))
+        (Some (MountInfo (up_to 0 rest) (le_u32 b 0) (drop_n rest (add (length (up_to 0 rest)) 1)))))))
+
+; What root_switch did: made the volume /, the initramfs given up; or
+; not, as this program is not the initramfs's, / is a volume already, the
+; label is not mounted, or it is no label.
+(data Switch (Switched) (SwitchDenied) (SwitchDone) (SwitchNoVolume) (SwitchBadLabel))
+
+(def switch_of ((code int)) Switch
+  (if (eq code 0) (Switched)
+  (if (eq code (err_denied)) (SwitchDenied)
+  (if (eq code (err_taken)) (SwitchDone)
+  (if (eq code (err_no_port)) (SwitchNoVolume) (SwitchBadLabel))))))
+
+; Why root_switch did not make the volume /, as a reason; empty if it did.
+(def switch_why ((s Switch)) (list int)
+  (match s
+    ((Switched) "")
+    ((SwitchDenied) "only a program of the initramfs may")
+    ((SwitchDone) "/ is a volume already")
+    ((SwitchNoVolume) "no such volume is mounted")
+    ((SwitchBadLabel) "a label is 1 to 15 letters, digits, - and _")))
+
+; The volume label, mounted at /Volumes/LABEL, made /, the system
+; volume, once, for good: every path outside /Volumes is its from then
+; on, and the initramfs is given up.
+(def root_switch ((label (list int))) Switch
+  (let b (bytes_from_list label)
+    (switch_of (supervisor_send (call_root_switch) 0 b 0 (bytes_len b)))))
+
+; The board's boot arguments, as the kernel was booted with them: the
+; words of QEMU's -append; none under another operating system.
+(def boot_args () (list (list int))
+  (match (decode_args (supervisor_receive (call_boot_args) 0 4096))
+    ((Some args) args)
+    ((None) (nil (list int)))))
+
+; What spawn_image takes, as bytes: path's length and path, the
+; arguments' length and the arguments encoded, none for the inittab's,
+; then the image.
+(def spawn_image_bytes ((path (list int)) (args (Option (list (list int)))) (image bytes)) bytes
+  (let enc (match args ((Some a) (encode_args a)) ((None) (nil int)))
+    (bytes_from_list (append (u32_le (length path)) (append path (append (u32_le (length enc)) (append enc (bytes_to_list image))))))))
+
+; Starts the program whose image is image, named path, with args, or
+; with the arguments the inittab gives path if none: as spawn_entry, but
+; from the bytes of a file anywhere, a volume's; it never drives a
+; device. SpawnNotProgram for an empty image.
+(def spawn_image ((path (list int)) (args (Option (list (list int)))) (image bytes)) Spawn
+  (let b (spawn_image_bytes path args image)
+    (spawn_of (supervisor_send (call_spawn_image) 0 b 0 (bytes_len b)))))
 
 ; Every mount, in the table's order: the initramfs first, then each
 ; volume.
@@ -379,10 +430,18 @@
   (if (lt i off) acc (get_bytes_onto q off (sub i 1) (cons (device_read8 q i) acc))))
 
 ; The path of entry e of the initramfs, such as "/bin/sh", or "/etc/" for
-; a directory, or the empty list if there is no entry e. Entries are
-; numbered from 0 with no gaps.
+; a directory, or the empty list if there is no entry e, or the
+; initramfs has been given up. Entries are numbered from 0 with no gaps.
 (def entry_path_of ((e int)) (list int)
-  (bytes_to_list (supervisor_receive (call_module_name) e (path_limit))))
+  (up_to 0 (entry_shown e)))
+
+; Whether entry e of the initramfs is a program: the kernel follows its
+; path with a NUL and x.
+(def entry_is_program ((e int)) bool
+  (ends_with (entry_shown e) (cons 0 "x")))
+
+(def entry_shown ((e int)) (list int)
+  (bytes_to_list (supervisor_receive (call_module_name) e (add (path_limit) 2))))
 
 ; The entry of the program what names, among paths, as entry_paths gives
 ; them, or -1: a path if what holds a /; and otherwise the first there is
@@ -487,6 +546,15 @@
 
 ; Slot i of the process table, 1 to max_procs.
 (def proc_slot ((i int)) Slot (slot_of_code (supervisor_call (call_proc_slot) i 0 0)))
+
+; The path of pid's program, as the kernel has it after its record: its
+; entry's in the initramfs, or the path spawn_image was given; empty if
+; no live process has pid.
+(def proc_path ((pid int)) (list int)
+  (proc_path_of (supervisor_receive (call_proc_info) pid (add (proc_record_len) (path_limit)))))
+
+(def proc_path_of ((b bytes)) (list int)
+  (if (lt (bytes_len b) (proc_record_len)) "" (bytes_range b (proc_record_len) (bytes_len b))))
 
 (def proc_info_of ((b bytes)) (Option ProcInfo)
   (if (lt (bytes_len b) (proc_record_len))

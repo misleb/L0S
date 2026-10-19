@@ -12,7 +12,11 @@
 # console driver to read. If NAME/font exists, the console font is added
 # to the case's etc as /etc/font.txt, for vt. If NAME/disk exists, the
 # board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
-# case. Every boot is killed after a minute. Run from
+# case: of its own layout, if NAME/layout holds one, SECTORS then each
+# volume as mkfs takes them, in which @ is the case's own initramfs, to
+# fill a volume from. If NAME/bootargs exists, its words are the
+# kernel's boot arguments, such as root=UUID. Every boot is killed after
+# a minute. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's raw programs
 # go in /bin beside them. The board has a virtio-gpu,
@@ -55,14 +59,22 @@ for dir in tests/e2e/*/; do
   disk=""; qemu_args=$L0_QEMU_ARGS
   if [ -f "$dir/disk" ]; then
     disk="$BUILD/e2e/$name.disk"
-    tools/mkdisk "$disk"
+    layout=()
+    if [ -f "$dir/layout" ]; then
+      read -ra layout < <(sed "s|@|$cpio|g" "$dir/layout")
+    fi
+    if ! tools/mkdisk "$disk" ${layout[@]+"${layout[@]}"} > /dev/null; then
+      echo "not ok - $name: mkdisk failed"; fail=$((fail+1)); continue
+    fi
     qemu_args="$qemu_args -drive file=$disk,if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0"
   fi
+  bootargs=()
+  [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$dir/typed" |
-      QEMU_DISK=$disk tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_DISK=$disk QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
-    L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" < "$cpio" > "$out" 2> "$err"
+    L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi
   status=$?
   why=""

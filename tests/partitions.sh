@@ -26,7 +26,7 @@ qemu=""
 fail() { echo "not ok - partitions: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
 make -s build/mkfs
-"$BUILD/mkfs" "$disk" 2048 "$(date +%s)000" data:40:1000 scratch:1536:479 || fail "mkfs failed"
+"$BUILD/mkfs" "$disk" 2048 "$(date +%s)000" data:40:1000 scratch:1536:479 > /dev/null || fail "mkfs failed"
 
 boot() {
   rm -f "$fifo"; mkfifo "$fifo"
@@ -70,7 +70,8 @@ said "mkfs $uuid made" | grep -aq "sh: mkfs" && fail "mkfs refused; it showed:"
 said 'ls /Volumes' | grep -aq "made/" || fail "/Volumes has no made; it showed:"
 said 'write /Volumes/made/hello hi there' > /dev/null
 said 'cat /Volumes/made/hello' | grep -aq "hi there" || fail "the file on made was not read back; it showed:"
-said 'df' | grep -aqE "/Volumes/made +196K +4K +192K +1" || fail "df does not count made; it showed:"
+# 196K of clusters: its root directory's 4K and its file's 4K used.
+said 'df' | grep -aqE "/Volumes/made +196K +8K +188K +1" || fail "df does not count made; it showed:"
 ok "mkfs made a volume on it, by its UUID, served at /Volumes/made"
 
 said "mkfs $uuid again" | grep -aq "its volume is served" || fail "a second mkfs was not refused; it showed:"

@@ -15,7 +15,8 @@ INSTRUCTIONS = """\
 Drives L0S, the L0 microkernel, booted on QEMU's aarch64 virt board.
 Build first (make initramfs for the demo, make screen-initramfs for the
 screen tests' image); boot does not build. Then boot, and use shell for
-commands at the serial shell (pid 1, prompt "l0s> "): it waits for the
+commands at the serial shell (the demo's pid 9, which boot, pid 1,
+starts and waits for; prompt "l0s> "): it waits for the
 next prompt and returns what was printed. ps and windows parse those
 commands' output. serial_send/serial_read are for anything that is not
 a command that returns to the prompt (a program reading its input,
@@ -52,7 +53,8 @@ def boot(image: str = "demo", display: str = "none", until: str = "^l0s> ",
     and settle seconds more, for the rest of the inittab to come up: the
     windows' shells start after the serial one, so look at the screen
     before typing into a window. If the kernel already exited, as it
-    does once pid 1 ends, running is false and status is its exit
+    does once pid 1 ends (the demo's, when its serial shell does),
+    running is false and status is its exit
     status. image is demo (build/initramfs.cpio),
     screen (build/screen.cpio), a .cpio, or an etc directory holding an
     inittab, such as tests/e2e/ipc/etc, packed with every program as

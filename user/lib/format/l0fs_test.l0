@@ -5,19 +5,35 @@
 (def data_layout () VolLayout (vol_layout 1528))
 (def scratch_layout () VolLayout (vol_layout 512))
 
-; A volume of 64 clusters, scratch's, empty.
+; A volume of 64 clusters, scratch's, empty: its root directory is
+; cluster 1.
 (def scratch () Vol (vol_new "scratch" (scratch_layout)))
 
-; scratch with a file of n bytes written, at entry 0.
+; The root's entry i.
+(def at_root ((i int)) VolRef (VolRef 1 i))
+
+; scratch with a file of n bytes written, at the root's entry 0.
 (def with_file ((name (list int)) (n int)) Vol
-  (match (vol_write (vol_create (scratch) 0 name) 0 0 n (vol_at_none))
+  (match (vol_write (vol_create (scratch) (at_root 0) name) (at_root 0) 0 n (vol_at_none))
     ((VolWrote v spans fresh marked) v)
     ((VolNoSpace) (scratch))))
+
+; Every sector of v that is metadata or a directory's, and zeros for the
+; rest: v as a disk image of scratch's 512 sectors holds it, but its
+; files' bytes.
+(def image ((v Vol)) bytes
+  (bytes_from_list (vol_run_bytes v (VolRun 0 512))))
+
+; v read back from its image.
+(def reads_back ((v Vol)) bool
+  (match (vol_of "scratch" (scratch_layout) (image v))
+    ((VolGot w) (vol_same w v))
+    ((VolBad why) false)))
 
 ; ------------------------------------------------------------- layout
 
 ; 1528 sectors are 191 clusters, a table of 382 bytes, one sector: with
-; the superblock and the directory 8 sectors, one cluster.
+; the superblock 2 sectors, one cluster, so the root is cluster 1.
 (def test_layout_data () int
   (check_true "data" (eq (data_layout) (VolLayout 1528 191 1 1))))
 
@@ -25,7 +41,7 @@
   (check_true "scratch" (eq (scratch_layout) (VolLayout 512 64 1 1))))
 
 ; 2^20 sectors would be 131072 clusters, so 65534; a table of 131068
-; bytes is 256 sectors; 263 sectors of metadata round up to 33 clusters.
+; bytes is 256 sectors; 257 sectors of metadata round up to 33 clusters.
 (def test_layout_large () int
   (check_true "512 MB" (eq (vol_layout 1048576) (VolLayout 1048576 65534 256 33))))
 
@@ -48,6 +64,11 @@
             (add (check_bool "a space" (vol_name_ok "a b") false)
                  (check_bool "empty" (vol_name_ok "") false)))))
 
+(def test_names_dots () int
+  (add (check_bool "." (vol_name_ok ".") false)
+       (add (check_bool ".." (vol_name_ok "..") false)
+            (check_true ".profile" (vol_name_ok ".profile")))))
+
 (def test_name_length () int
   (add (check_true "55" (vol_name_ok (rev (vol_name_of 55 (nil int)))))
        (check_bool "56" (vol_name_ok (rev (vol_name_of 56 (nil int)))) false)))
@@ -56,12 +77,17 @@
 (def vol_name_of ((n int) (acc (list int))) (list int)
   (if (eq n 0) acc (vol_name_of (sub n 1) (cons 97 acc))))
 
+(def test_path_names () int
+  (add (check_strs "a/b" (vol_path_names "a/b") (split_spaces "a b"))
+       (add (check_strs "/a//b/" (vol_path_names "/a//b/") (split_spaces "a b"))
+            (check_int "/" (length (vol_path_names "/")) 0))))
+
 ; --------------------------------------------------------- superblock
 
 (def test_super_bytes () int
   (let b (bytes_from_list (vol_super "data" (data_layout)))
     (add (check_int "a sector" (bytes_len b) 512)
-         (add (check_str "magic and version" (bytes_range b 0 5) (append "L0FS" (cons 1 (nil int))))
+         (add (check_str "magic and version" (bytes_range b 0 5) (append "L0FS" (cons 2 (nil int))))
               (add (check_str "label" (bytes_range b 8 13) (append "data" (cons 0 (nil int))))
                    (check_int "sectors at 24" (le_u32 b 24) 1528))))))
 
@@ -69,9 +95,8 @@
   (let b (bytes_from_list (vol_super "data" (data_layout)))
     (add (check_int "clusters" (le_u32 b 28) 191)
          (add (check_int "table at" (le_u32 b 32) 1)
-              (add (check_int "directory at" (le_u32 b 40) 2)
-                   (add (check_int "first data" (le_u32 b 48) 1)
-                        (check_int "entries" (le_u32 b 52) 48)))))))
+              (add (check_int "first data" (le_u32 b 40) 1)
+                   (check_int "root" (le_u32 b 44) 1))))))
 
 (def test_super_round_trip () int
   (match (vol_super_of (bytes_from_list (vol_super "scratch" (scratch_layout))))
@@ -87,6 +112,12 @@
     (check_str "clusters changed" (super_why (append (first_bytes s 28) (append (u32_le 190) (drop_n s 32))))
                "a bad layout")))
 
+; A volume of version 1, which had one flat directory, is not read.
+(def test_super_version_1 () int
+  (let s (vol_super "data" (data_layout))
+    (check_str "version 1" (super_why (append "L0FS" (cons 1 (drop_n s 5))))
+               "L0FS version 1, not 2; format makes it 2")))
+
 ; Why s is not a superblock, or empty if it is one.
 (def super_why ((s (list int))) (list int)
   (match (vol_super_of (bytes_from_list s)) ((VolSuper label l) "") ((VolNotSuper why) why)))
@@ -97,12 +128,14 @@
 
 ; -------------------------------------------------------------- table
 
+; Cluster 0 is the metadata's, 1 the root's, the end of its chain.
 (def test_table_new () int
   (let b (bytes_from_list (vol_table_bytes (vol_table_new (data_layout)) (data_layout)))
     (add (check_int "a sector" (bytes_len b) 512)
          (add (check_int "cluster 0 reserved" (le_u16_at b 0) 65534)
-              (add (check_int "cluster 1 free" (le_u16_at b 2) 0)
-                   (check_int "past the clusters" (le_u16_at b 382) 0))))))
+              (add (check_int "cluster 1 the root" (le_u16_at b 2) (vol_end))
+                   (add (check_int "cluster 2 free" (le_u16_at b 4) 0)
+                        (check_int "past the clusters" (le_u16_at b 382) 0)))))))
 
 (def test_table_round_trip () int
   (let t (vol_link (vol_table_new (scratch_layout)) (cons 3 (cons 7 (cons 5 (nil int)))))
@@ -126,66 +159,71 @@
     (check_int "as many as there are clusters" (length (vol_chain t 3)) 64)))
 
 (def test_alloc () int
-  (match (vol_alloc (array_set (vol_table_new (scratch_layout)) 2 (vol_end)) 3)
+  (match (vol_alloc (array_set (vol_table_new (scratch_layout)) 3 (vol_end)) 3)
     ((VolAlloc t cs)
-      (add (check_true "lowest free first" (eq cs (cons 1 (cons 3 (cons 4 (nil int))))))
-           (add (check_int "1 to 3" (array_get t 1) 3)
-                (check_int "4 the last" (array_get t 4) (vol_end)))))
+      (add (check_true "lowest free first" (eq cs (cons 2 (cons 4 (cons 5 (nil int))))))
+           (add (check_int "2 to 4" (array_get t 2) 4)
+                (check_int "5 the last" (array_get t 5) (vol_end)))))
     ((VolFull) (fail_because "alloc" "full"))))
 
 (def test_alloc_full () int
-  (add (match (vol_alloc (vol_table_new (scratch_layout)) 64) ((VolAlloc t cs) (fail_because "64" "made")) ((VolFull) 0))
-       (check_int "63 free" (vol_free_count (vol_table_new (scratch_layout))) 63)))
+  (add (match (vol_alloc (vol_table_new (scratch_layout)) 63) ((VolAlloc t cs) (fail_because "63" "made")) ((VolFull) 0))
+       (check_int "62 free" (vol_free_count (vol_table_new (scratch_layout))) 62)))
 
-; ---------------------------------------------------------- directory
+; ------------------------------------------------------------ entries
 
 (def test_entry_bytes () int
-  (let b (bytes_from_list (vol_entry_bytes (VolFile "notes" 4100 3)))
+  (let b (bytes_from_list (vol_entry_bytes (VolFile "notes" 4100 3 false)))
     (add (check_int "64 bytes" (bytes_len b) 64)
          (add (check_str "name" (bytes_range b 0 6) (append "notes" (cons 0 (nil int))))
               (add (check_int "size at 56" (le_u32 b 56) 4100)
                    (add (check_int "first at 60" (le_u16_at b 60) 3)
                         (check_int "in use at 62" (le_u16_at b 62) 1)))))))
 
-(def test_entry_round_trip () int
-  (add (check_true "a file" (eq (vol_entry_of (bytes_from_list (vol_entry_bytes (VolFile "a.b" 7 9))) 0) (VolFile "a.b" 7 9)))
-       (check_true "none" (eq (vol_entry_of (bytes_from_list (zeros 64)) 0) (VolNone)))))
+; A directory's flags are in use and a directory, 3; a program's in use
+; and executable, 5.
+(def test_entry_flags () int
+  (add (check_int "a directory" (le_u16_at (bytes_from_list (vol_entry_bytes (VolDir "bin" 9))) 62) 3)
+       (check_int "a program" (le_u16_at (bytes_from_list (vol_entry_bytes (VolFile "sh" 10 4 true))) 62) 5)))
 
-(def test_dir_bytes () int
-  (check_int "6 sectors" (length (vol_dir_bytes (vol_dir_new))) 3072))
+(def test_entry_round_trip () int
+  (add (check_true "a file" (round_trips (VolFile "a.b" 7 9 false)))
+       (add (check_true "a program" (round_trips (VolFile "sh" 70000 12 true)))
+            (add (check_true "a directory" (round_trips (VolDir "bin" 3)))
+                 (check_true "none" (eq (vol_entry_of (bytes_from_list (zeros 64)) 0) (VolNone)))))))
+
+(def round_trips ((e VolEntry)) bool
+  (eq (vol_entry_of (bytes_from_list (vol_entry_bytes e)) 0) e))
+
+(def test_dir_of () int
+  (let d (vol_dir_of (bytes_from_list (append (vol_entry_bytes (VolDir "bin" 3)) (zeros 4032))))
+    (add (check_int "64 entries" (array_len d) 64)
+         (check_true "the first" (eq (array_get d 0) (VolDir "bin" 3))))))
 
 ; ------------------------------------------------------------- volume
 
+; One cluster of metadata, then the root's: 8192 bytes; the large
+; layout's 33 clusters and the root's.
 (def test_meta_size () int
-  (add (check_int "one cluster" (length (vol_meta (vol_new "data" (data_layout)))) 4096)
-       (check_int "33 clusters" (length (vol_meta (vol_new "big" (vol_layout 1048576)))) 135168)))
+  (add (check_int "two clusters" (length (vol_meta (vol_new "data" (data_layout)))) 8192)
+       (check_int "34 clusters" (length (vol_meta (vol_new "big" (vol_layout 1048576)))) 139264)))
 
+; The superblock, the table with the root's and the file's marks, and the
+; root's first entry at its cluster, sector 8.
 (def test_meta_parts () int
   (let b (bytes_from_list (vol_meta (with_file "notes" 10)))
     (add (check_str "superblock" (bytes_range b 0 4) "L0FS")
-         (add (check_int "cluster 1 the file's last" (le_u16_at b 514) (vol_end))
-              (check_str "its entry at sector 2" (bytes_range b 1024 1029) "notes")))))
+         (add (check_int "cluster 2 the file's last" (le_u16_at b 516) (vol_end))
+              (check_str "its entry at sector 8" (bytes_range b 4096 4101) "notes")))))
 
-; The metadata sector by sector is the metadata, for a volume of one
-; cluster's and one of 33 clusters'.
-(def test_meta_by_sector () int
-  (let v (with_file "notes" 9000)
-    (let big (vol_create (vol_new "big" (vol_layout 1048576)) 9 "x")
-      (add (check_true "scratch" (eq (meta_by_sector v) (vol_meta v)))
-           (check_true "big" (eq (meta_by_sector big) (vol_meta big)))))))
-
-; Every sector of v's metadata, from vol_meta_sector.
-(def meta_by_sector ((v Vol)) (list int)
-  (vol_run_bytes v (VolRun 0 (vol_meta_sectors (vol_layout_of v)))))
-
-; scratch's table is sector 1, its directory 2 to 7; the large layout's
-; table 1 to 256, cluster 300's mark in the second, and its directory
-; from 257, entry 9 in its second.
+; scratch's table is sector 1, its root cluster 1, sectors 8 to 15; the
+; large layout's table 1 to 256, cluster 300's mark in the second, and
+; its root cluster 33, entry 9 in its second sector.
 (def test_dirty_sectors () int
-  (add (check_true "scratch" (eq (vol_dirty_sectors (scratch_layout) (cons 1 (cons 2 (nil int))) (cons 0 (cons 9 (nil int))))
-                                 (cons 1 (cons 1 (cons 2 (cons 3 (nil int)))))))
-       (check_true "large" (eq (vol_dirty_sectors (vol_layout 1048576) (cons 300 (nil int)) (cons 9 (nil int)))
-                               (cons 2 (cons 258 (nil int)))))))
+  (add (check_true "scratch" (eq (vol_dirty_sectors (scratch) (cons 1 (cons 2 (nil int))) (cons (at_root 0) (cons (at_root 9) (nil VolRef))))
+                                 (cons 1 (cons 1 (cons 8 (cons 9 (nil int)))))))
+       (check_true "large" (eq (vol_dirty_sectors (vol_new "big" (vol_layout 1048576)) (cons 300 (nil int)) (cons (VolRef 33 9) (nil VolRef)))
+                               (cons 2 (cons 265 (nil int)))))))
 
 ; Runs as text: FIRST+COUNT each.
 (def runs_text ((rs (list VolRun))) (list int)
@@ -200,16 +238,13 @@
        (add (check_str "apart" (runs_text (vol_runs (cons 1 (cons 9 (cons 20 (cons 21 (nil int))))))) "1+1 9+1 20+2 ")
             (check_str "none" (runs_text (vol_runs (nil int))) ""))))
 
-; A run's bytes are its sectors of the metadata.
+; A run's bytes are its sectors of the metadata and the root.
 (def test_run_bytes () int
   (let v (with_file "notes" 10)
-    (check_true "sectors 1 and 2" (eq (vol_run_bytes v (VolRun 1 2)) (take (drop_n (vol_meta v) 512) 1024)))))
+    (check_true "sectors 1 to 8" (eq (vol_run_bytes v (VolRun 1 8)) (take (drop_n (vol_meta v) 512) 4096)))))
 
 (def test_volume_round_trip () int
-  (let v (with_file "notes" 5000)
-    (match (vol_of "scratch" (scratch_layout) (bytes_from_list (vol_meta v)))
-      ((VolGot w) (check_true "the same" (eq w v)))
-      ((VolBad why) (fail_because "read" why)))))
+  (check_true "the same" (reads_back (with_file "notes" 5000))))
 
 (def test_volume_short () int
   (match (vol_of "scratch" (scratch_layout) (bytes_from_list (zeros 512)))
@@ -218,81 +253,193 @@
 
 ; A file whose size says two clusters, with a chain of one.
 (def test_volume_bad_chain () int
-  (let v (vol_set_entry (with_file "notes" 10) 0 (VolFile "notes" 5000 1))
-    (match (vol_of "scratch" (scratch_layout) (bytes_from_list (vol_meta v)))
+  (let v (vol_set_entry (with_file "notes" 10) (at_root 0) (VolFile "notes" 5000 2 false))
+    (match (vol_of "scratch" (scratch_layout) (image v))
       ((VolGot w) (fail_because "read" "a volume"))
       ((VolBad why) (check_str "why" why "a damaged directory")))))
 
+; A directory that holds itself would be read for ever; it is refused.
+(def test_volume_loop () int
+  (let v (vol_set_entry (scratch) (at_root 0) (VolDir "me" 1))
+    (match (vol_of "scratch" (scratch_layout) (image v))
+      ((VolGot w) (fail_because "read" "a volume"))
+      ((VolBad why) (check_str "why" why "a directory in itself")))))
+
 (def test_format () int
-  (check_true "empty" (eq (vol_format (with_file "notes" 9000)) (scratch))))
+  (check_true "empty" (vol_same (vol_format (with_file "notes" 9000)) (scratch))))
+
+; Volumes with the same contents are the same, though eq on their maps
+; can tell them apart; and different contents differ.
+(def test_same () int
+  (add (check_true "read back" (reads_back (with_file "notes" 10)))
+       (check_bool "another file" (vol_same (with_file "notes" 10) (with_file "other" 10)) false)))
+
+; ------------------------------------------------------- directories
+
+; scratch with directory bin at the root's entry 0, cluster 2, and in it
+; sh, a program of 10 bytes, cluster 3.
+(def with_bin () Vol
+  (match (vol_mkdir (scratch) (at_root 0) "bin")
+    ((VolNoRoom) (scratch))
+    ((VolMade v c cs)
+      (match (vol_write (vol_set_exec (vol_create v (VolRef c 0) "sh") (VolRef c 0) true) (VolRef c 0) 0 10 (vol_at_none))
+        ((VolWrote w spans fresh marked) w)
+        ((VolNoSpace) v)))))
+
+(def test_mkdir () int
+  (match (vol_mkdir (scratch) (at_root 0) "bin")
+    ((VolNoRoom) (fail_because "mkdir" "no room"))
+    ((VolMade v c cs)
+      (add (check_int "cluster 2" c 2)
+           (add (check_true "its entry" (eq (vol_entry v (at_root 0)) (VolDir "bin" 2)))
+                (check_true "empty" (vol_dir_empty v 2)))))))
+
+(def test_dir_at () int
+  (let v (with_bin)
+    (add (check_int "bin" (vol_dir_at v 1 (split_spaces "bin")) 2)
+         (add (check_int "a file" (vol_dir_at v 1 (split_spaces "bin sh")) -1)
+              (check_int "missing" (vol_dir_at v 1 (split_spaces "etc")) -1)))))
+
+(def test_place () int
+  (let v (with_bin)
+    (add (check_true "/" (eq (vol_place v (nil (list int))) (VolTop)))
+         (add (check_true "bin/sh" (eq (vol_place v (split_spaces "bin sh")) (VolIn 2 "sh")))
+              (add (check_true "bin/new" (eq (vol_place v (split_spaces "bin new")) (VolIn 2 "new")))
+                   (check_true "etc/x" (eq (vol_place v (split_spaces "etc x")) (VolNowhere))))))))
+
+(def test_program () int
+  (check_true "sh" (eq (vol_entry (with_bin) (VolRef 2 0)) (VolFile "sh" 10 3 true))))
+
+(def test_nested_round_trip () int
+  (check_true "the same" (reads_back (with_bin))))
+
+(def test_under () int
+  (let v (with_bin)
+    (add (check_true "bin in /" (vol_under v 1 2))
+         (add (check_bool "/ in bin" (vol_under v 2 1) false)
+              (check_true "bin in bin" (vol_under v 2 2))))))
+
+; A directory full, its 64 entries in use, grows by a cluster: its 65th
+; entry is the new cluster's first, linked after cluster 2.
+(def test_grow () int
+  (match (vol_slot (fill_dir (with_bin) 2 1) 2)
+    ((VolNoSlot) (fail_because "slot" "no room"))
+    ((VolSlot v r cs rs)
+      (add (check_true "entry 64" (eq r (VolRef 2 64)))
+           (add (check_true "linked" (eq (vol_chain (vol_table v) 2) (cons 2 (cons 4 (nil int)))))
+                (check_int "a sector each" (length rs) 8))))))
+
+; v with entries i to 63 of directory dc files named fI.
+(def fill_dir ((v Vol) (dc int) (i int)) Vol
+  (if (ge i 64) v (fill_dir (vol_create v (VolRef dc i) (append "f" (digits i))) dc (add i 1))))
+
+; A directory grown reads back, its second cluster's entries too.
+(def test_grown_round_trip () int
+  (match (vol_slot (fill_dir (with_bin) 2 1) 2)
+    ((VolNoSlot) (fail_because "slot" "no room"))
+    ((VolSlot v r cs rs) (check_true "the same" (reads_back (vol_create v r "last"))))))
+
+(def test_listing () int
+  (let v (vol_create (vol_create (with_bin) (at_root 1) "b") (at_root 2) "a")
+    (check_strs "a b bin" (names_of (vol_listing v 1)) (split_spaces "a b bin"))))
+
+(def names_of ((es (list VolEntry))) (list (list int))
+  (if (is_empty es) (nil (list int)) (cons (vol_entry_name (head es)) (names_of (tail es)))))
+
+(def test_remove_dir () int
+  (let v (vol_remove (vol_remove (with_bin) (VolRef 2 0)) (at_root 0))
+    (add (check_true "gone" (eq (vol_entry v (at_root 0)) (VolNone)))
+         (add (check_bool "no directory 2" (vol_is_dir v 2) false)
+              (check_int "all free" (vol_free_count (vol_table v)) 62)))))
+
+; sh moved from bin to the root as shell.
+(def test_move () int
+  (let v (vol_move (with_bin) (VolRef 2 0) (at_root 1) "shell")
+    (add (check_true "there" (eq (vol_entry v (at_root 1)) (VolFile "shell" 10 3 true)))
+         (check_true "bin empty" (vol_dir_empty v 2)))))
+
+(def test_file_count () int
+  (check_int "sh" (vol_file_count (with_bin)) 1))
+
+; The new directory's sectors: its cluster's, 16 to 23, are all written.
+(def test_new_dir_sectors () int
+  (match (vol_mkdir (scratch) (at_root 0) "bin")
+    ((VolNoRoom) (fail_because "mkdir" "no room"))
+    ((VolMade v c cs)
+      (check_true "16 to 23" (eq (vol_dirty_sectors v (nil int) (vol_cluster_refs c 0))
+                                 (cons 16 (cons 17 (cons 18 (cons 19 (cons 20 (cons 21 (cons 22 (cons 23 (nil int))))))))))))))
 
 ; -------------------------------------------------------------- files
 
 (def test_find () int
   (let v (with_file "notes" 10)
-    (add (check_int "notes" (vol_find v "notes") 0)
-         (add (check_int "none" (vol_find v "other") -1)
-              (check_int "free" (vol_free_entry v) 1)))))
-
-(def test_files_sorted () int
-  (let v (vol_create (vol_create (scratch) 0 "b") 5 "a")
-    (check_true "a then b" (eq (vol_files v) (cons (VolFile "a" 0 0) (cons (VolFile "b" 0 0) (nil VolEntry)))))))
+    (add (check_int "notes" (vol_find v 1 "notes") 0)
+         (add (check_int "none" (vol_find v 1 "other") -1)
+              (check_int "free" (vol_free_entry v 1) 1)))))
 
 (def test_write_new () int
-  (match (vol_write (vol_create (scratch) 0 "notes") 0 0 10 (vol_at_none))
+  (match (vol_write (vol_create (scratch) (at_root 0) "notes") (at_root 0) 0 10 (vol_at_none))
     ((VolWrote v spans fresh marked)
-      (add (check_true "one span" (eq spans (cons (VolSpan 1 0 10) (nil VolSpan))))
-           (add (check_true "cluster 1 new" (eq fresh (cons 1 (nil int))))
-                (check_true "the entry" (eq (vol_entry v 0) (VolFile "notes" 10 1))))))
+      (add (check_true "one span" (eq spans (cons (VolSpan 2 0 10) (nil VolSpan))))
+           (add (check_true "cluster 2 new" (eq fresh (cons 2 (nil int))))
+                (check_true "the entry" (eq (vol_entry v (at_root 0)) (VolFile "notes" 10 2 false))))))
     ((VolNoSpace) (fail_because "write" "no space"))))
 
-; 4090 more from 10: 4086 fill cluster 1, 4 start cluster 2.
+; 4090 more from 10: 4086 fill cluster 2, 4 start cluster 3.
 (def test_write_across () int
-  (match (vol_write (with_file "notes" 10) 0 10 4090 (vol_at_none))
+  (match (vol_write (with_file "notes" 10) (at_root 0) 10 4090 (vol_at_none))
     ((VolWrote v spans fresh marked)
-      (add (check_true "two spans" (eq spans (cons (VolSpan 1 10 4086) (cons (VolSpan 2 0 4) (nil VolSpan)))))
-           (add (check_true "cluster 2 new" (eq fresh (cons 2 (nil int))))
-                (check_true "chained" (eq (vol_chain (vol_table v) 1) (cons 1 (cons 2 (nil int))))))))
+      (add (check_true "two spans" (eq spans (cons (VolSpan 2 10 4086) (cons (VolSpan 3 0 4) (nil VolSpan)))))
+           (add (check_true "cluster 3 new" (eq fresh (cons 3 (nil int))))
+                (check_true "chained" (eq (vol_chain (vol_table v) 2) (cons 2 (cons 3 (nil int))))))))
     ((VolNoSpace) (fail_because "write" "no space"))))
 
 ; Marks changed: a new file's first cluster; for one grown, its old last
 ; cluster, linked on, and the new; none for a write within the file.
 (def test_write_marked () int
-  (add (match (vol_write (vol_create (scratch) 0 "notes") 0 0 10 (vol_at_none))
-         ((VolWrote v spans fresh marked) (check_true "the first" (eq marked (cons 1 (nil int)))))
+  (add (match (vol_write (vol_create (scratch) (at_root 0) "notes") (at_root 0) 0 10 (vol_at_none))
+         ((VolWrote v spans fresh marked) (check_true "the first" (eq marked (cons 2 (nil int)))))
          ((VolNoSpace) (fail_because "new" "no space")))
-       (add (match (vol_write (with_file "notes" 10) 0 10 4090 (vol_at_none))
-              ((VolWrote v spans fresh marked) (check_true "1 and 2" (eq marked (cons 1 (cons 2 (nil int))))))
+       (add (match (vol_write (with_file "notes" 10) (at_root 0) 10 4090 (vol_at_none))
+              ((VolWrote v spans fresh marked) (check_true "2 and 3" (eq marked (cons 2 (cons 3 (nil int))))))
               ((VolNoSpace) (fail_because "grown" "no space")))
-            (match (vol_write (with_file "notes" 100) 0 0 5 (vol_at_none))
+            (match (vol_write (with_file "notes" 100) (at_root 0) 0 5 (vol_at_none))
               ((VolWrote v spans fresh marked) (check_int "none" (length marked) 0))
               ((VolNoSpace) (fail_because "within" "no space"))))))
 
 (def test_write_over () int
-  (match (vol_write (with_file "notes" 100) 0 0 5 (vol_at_none))
+  (match (vol_write (with_file "notes" 100) (at_root 0) 0 5 (vol_at_none))
     ((VolWrote v spans fresh marked)
       (add (check_int "nothing new" (length fresh) 0)
-           (check_true "size kept" (eq (vol_entry v 0) (VolFile "notes" 100 1)))))
+           (check_true "size kept" (eq (vol_entry v (at_root 0)) (VolFile "notes" 100 2 false)))))
     ((VolNoSpace) (fail_because "write" "no space"))))
 
 (def test_write_no_space () int
-  (match (vol_write (vol_create (scratch) 0 "big") 0 0 (mul 64 4096) (vol_at_none))
+  (match (vol_write (vol_create (scratch) (at_root 0) "big") (at_root 0) 0 (mul 63 4096) (vol_at_none))
     ((VolWrote v spans fresh marked) (fail_because "write" "written"))
     ((VolNoSpace) 0)))
 
+; A directory is not written to, nor read.
+(def test_write_dir () int
+  (let v (with_bin)
+    (add (match (vol_write v (at_root 0) 0 5 (vol_at_none))
+           ((VolWrote w spans fresh marked) (fail_because "write" "written"))
+           ((VolNoSpace) 0))
+         (check_true "no span" (eq (vol_read_span v (at_root 0) 0 10 (vol_at_none)) ((None VolSpan)))))))
+
 (def test_read_span () int
   (let v (with_file "notes" 4100)
-    (add (check_true "to the cluster's end" (eq (vol_read_span v 0 4094 100 (vol_at_none)) (Some (VolSpan 1 4094 2))))
-         (add (check_true "the next" (eq (vol_read_span v 0 4096 100 (vol_at_none)) (Some (VolSpan 2 0 4))))
-              (check_true "the end" (eq (vol_read_span v 0 4100 100 (vol_at_none)) ((None VolSpan))))))))
+    (add (check_true "to the cluster's end" (eq (vol_read_span v (at_root 0) 4094 100 (vol_at_none)) (Some (VolSpan 2 4094 2))))
+         (add (check_true "the next" (eq (vol_read_span v (at_root 0) 4096 100 (vol_at_none)) (Some (VolSpan 3 0 4))))
+              (check_true "the end" (eq (vol_read_span v (at_root 0) 4100 100 (vol_at_none)) ((None VolSpan))))))))
 
 ; The same span found from a hint at the cluster before, and a hint past
 ; the place, or of no cluster, ignored.
 (def test_read_span_hint () int
   (let v (with_file "notes" 4100)
-    (add (check_true "from cluster 1" (eq (vol_read_span v 0 4096 100 (VolAt 0 1)) (Some (VolSpan 2 0 4))))
-         (add (check_true "past it" (eq (vol_read_span v 0 0 10 (VolAt 1 2)) (Some (VolSpan 1 0 10))))
-              (check_true "no cluster" (eq (vol_read_span v 0 4096 10 (VolAt 1 0)) (Some (VolSpan 2 0 4))))))))
+    (add (check_true "from cluster 2" (eq (vol_read_span v (at_root 0) 4096 100 (VolAt 0 2)) (Some (VolSpan 3 0 4))))
+         (add (check_true "past it" (eq (vol_read_span v (at_root 0) 0 10 (VolAt 1 3)) (Some (VolSpan 2 0 10))))
+              (check_true "no cluster" (eq (vol_read_span v (at_root 0) 4096 10 (VolAt 1 0)) (Some (VolSpan 3 0 4))))))))
 
 ; The chain 3 7 5: its third from the start, or walked on from the
 ; second, and none past its end.
@@ -337,22 +484,22 @@
 ; in the third.
 (def test_held () int
   (let v (with_file "notes" 4100)
-    (add (check_int "first" (vol_held v 0 0) 4096)
-         (add (check_int "second" (vol_held v 0 1) 4)
-              (check_int "third" (vol_held v 0 2) 0)))))
+    (add (check_int "first" (vol_held v (at_root 0) 0) 4096)
+         (add (check_int "second" (vol_held v (at_root 0) 1) 4)
+              (check_int "third" (vol_held v (at_root 0) 2) 0)))))
 
 (def test_remove () int
-  (let v (vol_remove (with_file "notes" 9000) 0)
-    (add (check_true "gone" (eq (vol_entry v 0) (VolNone)))
-         (check_int "its 3 clusters free" (vol_free_count (vol_table v)) 63))))
+  (let v (vol_remove (with_file "notes" 9000) (at_root 0))
+    (add (check_true "gone" (eq (vol_entry v (at_root 0)) (VolNone)))
+         (check_int "its 3 clusters free" (vol_free_count (vol_table v)) 62))))
 
 (def test_truncate () int
-  (let v (vol_truncate (with_file "notes" 9000) 0)
-    (add (check_true "empty" (eq (vol_entry v 0) (VolFile "notes" 0 0)))
-         (check_int "free" (vol_free_count (vol_table v)) 63))))
+  (let v (vol_truncate (with_file "notes" 9000) (at_root 0))
+    (add (check_true "empty" (eq (vol_entry v (at_root 0)) (VolFile "notes" 0 0 false)))
+         (check_int "free" (vol_free_count (vol_table v)) 62))))
 
 (def test_rename () int
-  (check_true "renamed" (eq (vol_entry (vol_rename (with_file "a" 10) 0 "b") 0) (VolFile "b" 10 1))))
+  (check_true "renamed" (eq (vol_entry (vol_move (with_file "a" 10) (at_root 0) (at_root 0) "b") (at_root 0)) (VolFile "b" 10 2 false))))
 
 (def test_cluster_sector () int
   (check_int "scratch's cluster 2" (vol_cluster_sector 1536 2) 1552))
@@ -360,10 +507,14 @@
 ; ------------------------------------------------------------ property
 
 ; Random appends to three files on scratch, and removes, never lose a
-; cluster: the free ones and the files' add up to the data clusters, and
-; the metadata reads back as the same volume.
+; cluster: the free ones, the root's and the files' add up to the data
+; clusters, and the volume reads back as the same.
 (def test_random_writes () int
-  (rand_writes (vol_create (vol_create (vol_create (scratch) 0 "a") 1 "b") 2 "c") 7 300 0))
+  (rand_writes (three_files) 7 300 0))
+
+; scratch with empty files a, b and c at the root's entries 0 to 2.
+(def three_files () Vol
+  (vol_create (vol_create (vol_create (scratch) (at_root 0) "a") (at_root 1) "b") (at_root 2) "c"))
 
 (def rand_writes ((v Vol) (seed int) (left int) (bad int)) int
   (if (eq left 0)
@@ -378,11 +529,12 @@
 ; emptied; unchanged if there is no room.
 (def step ((v Vol) (i int) (n int)) Vol
   (if (lt n 500)
-      (vol_truncate v i)
-      (match (vol_entry v i)
+      (vol_truncate v (at_root i))
+      (match (vol_entry v (at_root i))
         ((VolNone) v)
-        ((VolFile name size first)
-          (match (vol_write v i size n (vol_at_none))
+        ((VolDir name first) v)
+        ((VolFile name size first exec)
+          (match (vol_write v (at_root i) size n (vol_at_none))
             ((VolWrote w spans fresh marked) w)
             ((VolNoSpace) v))))))
 
@@ -391,9 +543,7 @@
 ; it is the plan made with none, and its spans are those over the whole
 ; chain after it, as an obvious walk finds them.
 (def test_random_hinted () int
-  (check_int "plans that differ"
-             (rand_hinted (vol_create (vol_create (vol_create (scratch) 0 "a") 1 "b") 2 "c") 13 300 0)
-             0))
+  (check_int "plans that differ" (rand_hinted (three_files) 13 300 0) 0))
 
 (def rand_hinted ((v Vol) (seed int) (left int) (bad int)) int
   (if (eq left 0)
@@ -410,22 +560,23 @@
 ; its cluster r mod how many there are up to the write's as without, and
 ; spans the clusters the whole chain after it gives.
 (def hinted_ok ((v Vol) (i int) (n int) (r int)) bool
-  (match (vol_entry v i)
+  (match (vol_entry v (at_root i))
     ((VolNone) true)
-    ((VolFile name size first)
+    ((VolDir name first) true)
+    ((VolFile name size first exec)
       (let hint (vol_at (vol_table v) first (vol_at_none) (mod r (add 1 (div size 4096))))
-        (let plain (vol_write v i size n (vol_at_none))
-          (if (not (eq (vol_write v i size n hint) plain))
+        (let plain (vol_write v (at_root i) size n (vol_at_none))
+          (if (not (eq (vol_write v (at_root i) size n hint) plain))
               false
               (match plain
                 ((VolNoSpace) true)
                 ((VolWrote w spans fresh marked)
-                  (eq spans (vol_spans (vol_file_clusters w i) 0 size n (nil VolSpan)))))))))))
+                  (eq spans (vol_spans (vol_file_clusters w (at_root i)) 0 size n (nil VolSpan)))))))))))
 
 ; A file written in pieces, each from the place the last one ended: the
 ; same volume, and the same spans, as written with no hints.
 (def test_write_on_from_end () int
-  (let v (vol_create (scratch) 0 "a")
+  (let v (vol_create (scratch) (at_root 0) "a")
     (check_true "the same" (eq (pieces v (vol_at_none) 0 20 true) (pieces v (vol_at_none) 0 20 false)))))
 
 ; v after count writes of 3000 bytes to file 0, each from where the last
@@ -438,22 +589,20 @@
 (def pieces_onto ((v Vol) (hint VolAt) (offset int) (count int) (hinted bool) (acc (list VolSpan))) Pieces
   (if (eq count 0)
       (Pieces v (rev acc))
-      (match (vol_write v 0 offset 3000 (if hinted hint (vol_at_none)))
+      (match (vol_write v (at_root 0) offset 3000 (if hinted hint (vol_at_none)))
         ((VolNoSpace) (Pieces v (rev acc)))
         ((VolWrote w spans fresh marked)
           (pieces_onto w (vol_spans_end spans offset 3000) (add offset 3000) (sub count 1) hinted (rev_onto spans acc))))))
 
+; The root's cluster, the files' and the free ones are all 63 clusters of
+; data.
 (def accounted ((v Vol)) bool
-  (eq (add (vol_free_count (vol_table v)) (used v 0 0)) 63))
+  (eq (add (vol_free_count (vol_table v)) (used v 0 1)) 63))
 
 (def used ((v Vol) (i int) (n int)) int
   (if (eq i 3)
       n
-      (match (vol_entry v i)
+      (match (vol_entry v (at_root i))
         ((VolNone) (used v (add i 1) n))
-        ((VolFile name size first) (used v (add i 1) (add n (length (vol_chain (vol_table v) first))))))))
-
-(def reads_back ((v Vol)) bool
-  (match (vol_of "scratch" (scratch_layout) (bytes_from_list (vol_meta v)))
-    ((VolGot w) (eq w v))
-    ((VolBad why) false)))
+        ((VolDir name first) (used v (add i 1) n))
+        ((VolFile name size first exec) (used v (add i 1) (add n (length (vol_chain (vol_table v) first))))))))

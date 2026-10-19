@@ -1,0 +1,100 @@
+; paths.l0 -- the files of /, wherever / is, and its programs started by
+; path. / is the initramfs until boot makes a volume the system volume
+; (root_switch), and that volume from then on: so a program lists /
+; here, not with entry_paths, and starts a program with spawn_path, not
+; spawn_entry, and finds both wherever they are. A program of the
+; initramfs is started from its entry, which may drive devices; any other,
+; a volume's, from its file, read whole, if it is marked a program.
+; Linked with user/lib/proto/fs.l0 and uuid.l0 (the Makefile's PATHS)
+; into sh, init, wm, vt and boot.
+
+; ---------------------------------------------------------------- listing
+
+; Every path of /, as entry_paths gives the initramfs's: each file's, and
+; each directory's with a final /, in order; the system volume's, when /
+; is one, listed by its file server, a directory at a time.
+(def root_paths () (list (list int))
+  (if (is_empty (fs_system_volume))
+      (entry_paths)
+      (rev (paths_under "/" (nil (list int))))))
+
+; The paths in directory dir, which ends in / and is a path of /, and in
+; those in it, onto acc, reversed: a directory's own before what is in it.
+(def paths_under ((dir (list int)) (acc (list (list int)))) (list (list int))
+  (match (fs_list (if (eq dir "/") dir (drop_last dir)))
+    ((FsListRefused code) acc)
+    ((FsFiles files) (paths_of_files dir (stats_names files) acc))))
+
+(def paths_of_files ((dir (list int)) (names (list (list int))) (acc (list (list int)))) (list (list int))
+  (if (is_empty names)
+      acc
+      (let path (append dir (head names))
+        (paths_of_files dir (tail names)
+                        (if (path_is_dir path) (paths_under path (cons path acc)) (cons path acc))))))
+
+; The names of a listing's entries, a directory's with its final /.
+(def stats_names ((files (list FsStat))) (list (list int))
+  (if (is_empty files)
+      (nil (list int))
+      (match (head files) ((FsStat name size) (cons name (stats_names (tail files)))))))
+
+; Whether path is a directory's, as root_paths gives it: ending in /.
+(def path_is_dir ((path (list int))) bool
+  (if (is_empty path) true (eq (last path) 47)))
+
+; ---------------------------------------------------------------- finding
+
+; The program what names, among paths, as root_paths gives them, as
+; program_path_in finds it: a path if what holds a /, else the first of
+; /bin/what, /sbin/what and what in an app's bundle; or empty if paths
+; have none of them.
+(def program_found ((what (list int)) (paths (list (list int)))) (list int)
+  (let p (program_path_in what paths)
+    (if (if (any_eq 47 what) (starts_with p "/Volumes/") false)
+        p
+        (if (any_eq p paths) p ""))))
+
+; Whether / is the initramfs's at path: while / is the initramfs, any
+; path outside /Volumes.
+(def on_initramfs ((path (list int))) bool
+  (if (is_empty (fs_system_volume)) (not (starts_with path "/Volumes/")) false))
+
+; Whether the file at path is a program: as its entry's mode says, on
+; the initramfs, or its volume's mark, on a volume.
+(def path_is_program ((path (list int))) bool
+  (if (on_initramfs path)
+      (let e (index_of path (entry_paths)) (if (lt e 0) false (entry_is_program e)))
+      (match (fs_stat path) ((FsIsFile size exec) exec) ((FsIsDir) false) ((FsNoKind code) false))))
+
+; ---------------------------------------------------------------- running
+
+; Starts the program at path, a path of / or of a volume, with args, or
+; with the arguments the inittab gives it if none: from its entry, while
+; / is the initramfs and the path is there; else from its file, read
+; whole, if fs says it is a program.
+(def spawn_path ((path (list int)) (args (Option (list (list int))))) Spawn
+  (if (on_initramfs path)
+      (spawn_from_entry path args)
+      (spawn_from_file path args)))
+
+; The program the initramfs's entry at path is, started.
+(def spawn_from_entry ((path (list int)) (args (Option (list (list int))))) Spawn
+  (let e (index_of path (entry_paths))
+    (if (lt e 0)
+        (SpawnNoEntry)
+        (match args
+          ((None) (spawn_entry e))
+          ((Some a) (spawn_entry_with e a))))))
+
+; The program whose file is at path, started from its bytes: not one, if
+; it is a directory, or a file not marked a program.
+(def spawn_from_file ((path (list int)) (args (Option (list (list int))))) Spawn
+  (match (fs_stat path)
+    ((FsNoKind code) (SpawnNoEntry))
+    ((FsIsDir) (SpawnNotProgram))
+    ((FsIsFile size exec)
+      (if (not exec)
+          (SpawnNotProgram)
+          (match (read_whole path)
+            ((Err why) (SpawnNoEntry))
+            ((Ok b) (spawn_image path args b)))))))

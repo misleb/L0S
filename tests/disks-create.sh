@@ -35,7 +35,7 @@ disk="$BUILD/disks-create.img"
 rm -f "$sock" "$qmp" "$fifo" "$dump"
 mkfifo "$fifo"
 make -s build/mkfs
-"$BUILD/mkfs" "$disk" 2048 "$(date +%s)000" data:40:1000 scratch:1536:479 || { echo "not ok - disks-create: mkfs failed"; exit 1; }
+"$BUILD/mkfs" "$disk" 2048 "$(date +%s)000" data:40:1000 scratch:1536:479 > /dev/null || { echo "not ok - disks-create: mkfs failed"; exit 1; }
 
 QEMU_DISK="$disk" QEMU_MONITOR="unix:$sock,server=on,wait=off" QEMU_QMP="unix:$qmp,server=on,wait=off" \
   tools/qemu-boot.sh "$BUILD/disks.cpio" < "$fifo" > "$out" 2>&1 &

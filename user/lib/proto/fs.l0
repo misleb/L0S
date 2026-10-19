@@ -1,20 +1,28 @@
 ; fs.l0 -- the fs protocol: what a file server, user/fs here, serves on
 ; the port it mounts its volumes from (fs_mount in l0s.l0). The kernel
 ; sends the first six for every call a process makes on a file under
-; /Volumes/LABEL, as from that process; a program sends the last four
-; itself, list, df and format to the port mount_at gives, rescan,
-; partition and mkfs to the port registered as fs. A refusal's word may
-; be followed by why, in words.
+; /Volumes/LABEL, as from that process; a program sends the rest itself,
+; list, mkdir, stat, chmod, df and format to the port mount_at gives,
+; rescan, partition and mkfs to the port registered as fs. A refusal's
+; word may be followed by why, in words.
 ;
 ;   open MODE PATH     opens PATH, 1 to read, 2 to write it anew, 3 to
-;                      add to its end: a handle
+;                      add to its end: a handle; a new file only in a
+;                      directory that is there
 ;   read H N           at most N bytes of handle H, from where it is: the
 ;                      count, then the bytes; 0 at the end
 ;   write H BYTES      BYTES written to H: how many
 ;   close H            0
-;   rename FROM TO     0; both in one volume
-;   remove PATH        0
-;   list VOLUME        how many files, then NAME SIZE\n for each, by name
+;   rename FROM TO     0; both in one volume, a file or a directory, to
+;                      another directory too
+;   remove PATH        0; a file, or a directory with nothing in it
+;   list PATH          the directory at PATH, a volume's root or any other:
+;                      how many entries, then NAME SIZE\n for each, by
+;                      name, a directory's NAME ending in / and its SIZE 0
+;   mkdir PATH         0, and an empty directory at PATH
+;   stat PATH          0, then dir, or file SIZE x for a program and
+;                      file SIZE - for any other file
+;   chmod PATH +x|-x   0, the file at PATH a program, or not
 ;   df VOLUME          0, then SECTORS CLUSTERS FREE FILES: the volume's
 ;                      sectors, its clusters of data, those free, and
 ;                      how many files it has
@@ -38,7 +46,7 @@
 ;                      is served already, -6 if it is too small
 ;
 ; Each is a request (l0s.l0), its words separated by spaces, a PATH and a
-; VOLUME whole, /Volumes/LABEL/NAME and /Volumes/LABEL. The reply is a
+; VOLUME whole, /Volumes/LABEL/NAME... and /Volumes/LABEL. The reply is a
 ; word, s32, then any bytes: a count or a handle, or a negative code as
 ; spec section 6.3's I/O builtins give them (-3 no such file, -4 denied,
 ; -5 any other failure, -6 no space, -8 a directory, -9 no such
@@ -82,9 +90,10 @@
 (def fs_port_in ((ms (list MountInfo)) (volume (list int))) int
   (if (is_empty ms)
       0
-      (match (head ms) ((MountInfo path port) (if (eq path volume) port (fs_port_in (tail ms) volume))))))
+      (match (head ms) ((MountInfo path port u) (if (eq path volume) port (fs_port_in (tail ms) volume))))))
 
-; The volumes mounted, /Volumes/LABEL each, in the table's order.
+; The volumes mounted, /Volumes/LABEL each, in the table's order: not /,
+; though it be a volume, which is in /Volumes too.
 (def fs_volumes () (list (list int))
   (fs_volumes_in (mount_list)))
 
@@ -92,24 +101,89 @@
   (if (is_empty ms)
       (nil (list int))
       (match (head ms)
-        ((MountInfo path port)
-          (if (eq port 0) (fs_volumes_in (tail ms)) (cons path (fs_volumes_in (tail ms))))))))
+        ((MountInfo path port u)
+          (if (if (eq port 0) true (eq path "/")) (fs_volumes_in (tail ms)) (cons path (fs_volumes_in (tail ms))))))))
+
+; The system volume, /Volumes/LABEL, if / is one: the volume mounted with
+; the UUID / has; empty while / is the initramfs.
+(def fs_system_volume () (list int)
+  (fs_system_in (mount_list)))
+
+(def fs_system_in ((ms (list MountInfo))) (list int)
+  (if (is_empty ms)
+      ""
+      (match (head ms)
+        ((MountInfo path port u)
+          (if (if (eq path "/") (gt port 0) false) (fs_volume_with (tail ms) port u) "")))))
+
+; The volume of ms mounted from port with UUID u, or empty.
+(def fs_volume_with ((ms (list MountInfo)) (port int) (u (list int))) (list int)
+  (if (is_empty ms)
+      ""
+      (match (head ms)
+        ((MountInfo path p id) (if (if (eq p port) (eq id u) false) path (fs_volume_with (tail ms) port u))))))
+
+; The path its file server knows path by: itself in /Volumes, and
+; outside it, when / is the system volume, the same path in that volume.
+(def fs_server_path ((path (list int))) (list int)
+  (fs_server_path_in (fs_system_volume) path))
+
+(def fs_server_path_in ((system (list int)) (path (list int))) (list int)
+  (if (if (is_empty system) true (if (eq path "/Volumes") true (starts_with path "/Volumes/")))
+      path
+      (if (eq path "/") system (append system path))))
 
 ; --------------------------------------------------------------- volumes
 
-; A file a volume lists: its name and size.
+; A file a directory lists: its name and size; a directory's name ends
+; in /.
 (data FsStat (FsStat (list int) int))
 
-; What list said: the files, or the code it refused with.
+; What list said: the entries, or the code it refused with.
 (data FsListing (FsFiles (list FsStat)) (FsListRefused int))
 
-; The files of the volume at /Volumes/LABEL.
-(def fs_list ((volume (list int))) FsListing
-  (let port (fs_port_of volume)
-    (if (eq port 0)
-        (FsListRefused -3)
-        (match (fs_ask port (port_new) (append "list " volume))
-          ((FsReply w rest) (if (lt w 0) (FsListRefused w) (FsFiles (fs_stats_of rest))))))))
+; The entries of the directory at path, /Volumes/LABEL or any path in
+; it, or on the system volume, when / is one, any path.
+(def fs_list ((path (list int))) FsListing
+  (match (fs_path_ask "list" path "")
+    ((FsReply w rest) (if (lt w 0) (FsListRefused w) (FsFiles (fs_stats_of rest))))))
+
+; A request of one path, /Volumes/LABEL/..., or any other on the system
+; volume, to the server of its volume: its word, -3 if no server serves
+; it.
+(def fs_path_ask ((op (list int)) (path (list int)) (more (list int))) FsReply
+  (let p (fs_server_path path)
+    (let port (fs_port_of (fs_volume_of p))
+      (if (eq port 0)
+          (FsReply -3 (nil int))
+          (fs_ask port (port_new) (append op (append " " (append p more))))))))
+
+; An empty directory made at path: 0, or the code it refused with.
+(def fs_mkdir ((path (list int))) int
+  (match (fs_path_ask "mkdir" path "") ((FsReply w rest) w)))
+
+; What is at a path: a directory, a file of a size and whether it is a
+; program, or the code stat refused with.
+(data FsKind (FsIsDir) (FsIsFile int bool) (FsNoKind int))
+
+; What is at path, as stat says.
+(def fs_stat ((path (list int))) FsKind
+  (match (fs_path_ask "stat" path "")
+    ((FsReply w rest) (if (lt w 0) (FsNoKind w) (fs_kind_of rest)))))
+
+; A stat reply's words as what is there.
+(def fs_kind_of ((s (list int))) FsKind
+  (let ws (split_spaces s)
+    (if (eq ws (cons "dir" (nil (list int))))
+        (FsIsDir)
+        (if (if (eq (length ws) 3) (eq (head ws) "file") false)
+            (FsIsFile (int_prefix (nth_or ws 1 "") 0) (eq (nth_or ws 2 "") "x"))
+            (FsNoKind -5)))))
+
+; The file at path made a program, or not: 0, or the code chmod refused
+; with.
+(def fs_chmod ((path (list int)) (exec bool)) int
+  (match (fs_path_ask "chmod" path (if exec " +x" " -x")) ((FsReply w rest) w)))
 
 ; A list reply's lines as files.
 (def fs_stats_of ((s (list int))) (list FsStat)

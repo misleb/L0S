@@ -1,14 +1,14 @@
 ; files.l0 -- the shell's commands on files, as busybox has them: ls,
-; cat, write, append, cp, mv, rm, df, format, partition and mkfs. They
-; make the ordinary file calls, so they work on the initramfs, which
+; cat, write, append, cp, mv, rm, mkdir, df, format, partition and mkfs.
+; They make the ordinary file calls, so they work on the initramfs, which
 ; refuses every change, and on the volumes under /Volumes, whose calls
-; the kernel sends their file server; ls, df, format, partition and mkfs
-; ask the file server themselves (user/lib/fs.l0), since no call lists a
-; directory or makes a volume. Linked into sh.
+; the kernel sends their file server; ls, mkdir, df, format, partition
+; and mkfs ask the file server themselves (user/lib/fs.l0), since no call
+; lists or makes a directory or makes a volume. Linked into sh.
 
 ; Whether w is one of these commands.
 (def is_file_command ((w (list int))) bool
-  (any_eq w (split_spaces "ls cat write append cp mv rm df format partition mkfs")))
+  (any_eq w (split_spaces "ls cat write append cp mv rm mkdir df format partition mkfs")))
 
 ; What the command op, with args, says once it is done: its output, and
 ; a line for each complaint.
@@ -23,10 +23,15 @@
   (if (eq op "cp") (two_paths op args)
   (if (eq op "mv") (two_paths op args)
   (if (eq op "rm") (rm_all args)
+  (if (eq op "mkdir") (mkdir_all args)
+  (file_command_rest op args))))))
+
+; The commands of volumes.
+(def file_command_rest ((op (list int)) (args (list (list int)))) (list int)
   (if (eq op "df") (df_text args)
   (if (eq op "partition") (partition_text args)
   (if (eq op "mkfs") (mkfs_text args)
-  (format_text args))))))))
+  (format_text args)))))
 
 ; A complaint about path, a line: sh: OP: PATH: WHY.
 (def complaint ((op (list int)) (path (list int)) (why (list int))) (list int)
@@ -38,12 +43,13 @@
 
 (def usage_words ((op (list int))) (list int)
   (if (any_eq op (split_spaces "cat rm")) "FILE..."
+  (if (eq op "mkdir") "DIRECTORY..."
   (if (any_eq op (split_spaces "write append")) "FILE WORDS..."
   (if (any_eq op (split_spaces "cp mv")) "FROM TO"
   (if (eq op "format") "VOLUME"
   (if (eq op "partition") "SECTORS [START]"
   (if (eq op "mkfs") "UUID LABEL"
-  "")))))))
+  ""))))))))
 
 ; ---------------------------------------------------------------------- ls
 
@@ -86,21 +92,20 @@
 (def indented_onto ((ws (list (list int))) (acc (list int))) (list int)
   (if (is_empty ws) acc (indented_onto (tail ws) (push "\n" (push (head ws) (push "  " acc))))))
 
-; What path is: /Volumes, a volume, a file on one, or the initramfs's.
+; What path is: /Volumes, a volume, a file on one, on the system volume
+; when / is one, or the initramfs's.
 (def ls_one ((path (list int)) (names (list (list int)))) (list int)
   (if (eq path "/Volumes")
       (indented (labels_of (fs_volumes)))
-      (let vol (fs_volume_of path)
+      (let vol (fs_volume_of (fs_server_path path))
         (if (is_empty vol)
             (ls_root path names)
-            (match (fs_list vol)
-              ((FsListRefused code) (complaint "ls" path (io_error code)))
-              ((FsFiles files)
-                (if (eq path vol)
-                    (indented (stat_names files))
-                    (if (any_eq (base_name path) (stat_names files))
-                        (indented (cons path (nil (list int))))
-                        (complaint "ls" path (io_error -3))))))))))
+            (match (fs_list path)
+              ((FsFiles files) (indented (if (eq path "/") (sort (cons "Volumes/" (stat_names files))) (stat_names files))))
+              ((FsListRefused code)
+                (if (eq code -9)
+                    (indented (cons path (nil (list int))))
+                    (complaint "ls" path (io_error code)))))))))
 
 ; Each volume's label, as a directory in /Volumes.
 (def labels_of ((vols (list (list int)))) (list (list int))
@@ -184,19 +189,33 @@
           (copy_file (head args) (head (tail args)))
           (move_file (head args) (head (tail args)) false))))
 
-; The file at from copied to to, or into to if it is a directory.
+; The file at from copied to to, or into to if it is a directory; a
+; program's copy a program too.
 (def copy_file ((from (list int)) (to (list int))) (list int)
   (match (read_whole from)
     ((Err why) (complaint "cp" from why))
-    ((Ok b) (copy_to from to b true))))
+    ((Ok b)
+      (match (copy_to from to b true)
+        ((CopyFailed why) why)
+        ((CopyDone at) (if (path_is_program from) (marked at) ""))))))
 
-(def copy_to ((from (list int)) (to (list int)) (b bytes) (into bool)) (list int)
+; What came of a copy: the path written, or the complaint.
+(data Copy (CopyDone (list int)) (CopyFailed (list int)))
+
+(def copy_to ((from (list int)) (to (list int)) (b bytes) (into bool)) Copy
   (match (open_out to)
     ((IoFailed fault why)
       (if (if into (eq fault (CreateIsDirectory)) false)
           (copy_to from (inside to from) b false)
-          (complaint "cp" to why)))
-    ((IoOpened f) (closed "cp" to f (file_write_bytes f b 0 (bytes_len b))))))
+          (CopyFailed (complaint "cp" to why))))
+    ((IoOpened f)
+      (let c (closed "cp" to f (file_write_bytes f b 0 (bytes_len b)))
+        (if (is_empty c) (CopyDone to) (CopyFailed c))))))
+
+; The file at path marked a program: nothing, or why not.
+(def marked ((path (list int))) (list int)
+  (let code (fs_chmod path true)
+    (if (eq code 0) "" (complaint "cp" path (append "not marked a program: " (io_error code))))))
 
 ; The path of from's name in directory dir.
 (def inside ((dir (list int)) (from (list int))) (list int)
@@ -223,10 +242,32 @@
 (def rm_onto ((args (list (list int))) (acc (list int))) (list int)
   (if (is_empty args) acc (rm_onto (tail args) (push (removed "rm" (head args)) acc))))
 
-; The file at path removed: nothing, or why not.
+; The file at path removed, or the directory, if nothing is in it:
+; nothing, or why not.
 (def removed ((op (list int)) (path (list int))) (list int)
   (let why (done_why (remove_file path))
     (if (is_empty why) "" (complaint op path why))))
+
+; ------------------------------------------------------------------- mkdir
+
+; mkdir DIRECTORY...: each made, empty, on a volume; the initramfs makes
+; none.
+(def mkdir_all ((args (list (list int)))) (list int)
+  (if (is_empty args) (usage_of "mkdir") (rev (mkdir_onto args (nil int)))))
+
+(def mkdir_onto ((args (list (list int))) (acc (list int))) (list int)
+  (if (is_empty args) acc (mkdir_onto (tail args) (push (made_dir (normal_path (head args))) acc))))
+
+; The directory at path made: nothing, or why not. Off the volumes, and
+; while / is the initramfs, which changes nothing, it is denied.
+(def made_dir ((path (list int))) (list int)
+  (if (on_initramfs path)
+      (complaint "mkdir" path (io_error -4))
+      (let code (fs_mkdir path)
+        (if (eq code 0) "" (complaint "mkdir" path (mkdir_why code))))))
+
+(def mkdir_why ((code int)) (list int)
+  (if (eq code -4) "it is there already, or cannot be made" (io_error code)))
 
 ; ---------------------------------------------------------------------- df
 
@@ -267,7 +308,9 @@
       (let vol (volume_named (head args))
         (if (not (eq (fs_volume_of vol) vol))
             (complaint "format" (head args) "not a volume")
-            (formatted vol (fs_format vol))))))
+            (if (eq vol (fs_system_volume))
+                (complaint "format" vol "it is /, the system volume")
+                (formatted vol (fs_format vol)))))))
 
 ; The volume w names: a path, or a label.
 (def volume_named ((w (list int))) (list int)

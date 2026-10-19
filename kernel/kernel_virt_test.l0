@@ -267,10 +267,18 @@
 (def test_sleep_in_past () int
   (check_int "at once" (boot_words 0 (cons (movz 0 1) (append (call_words (call_sleep_until)) (exit_x0)))) 0))
 
-; Entry 0's path is /bin/raw0: 9 bytes, copied to the heap.
+; Entry 0's path is /bin/raw0, a program: 9 bytes, then a NUL and x,
+; copied to the heap.
 (def test_module_name () int
   (check_int "/bin/raw0"
     (boot_words 0 (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_module_name)) (exit_x0))))))
+    11))
+
+; A file that is not a program has no x: /etc/motd, entry 2 after
+; /bin/raw0 and /etc.
+(def test_module_name_file () int
+  (check_int "/etc/motd"
+    (files_boot (cons (movz 0 2) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_module_name)) (exit_x0))))) "" "")
     9))
 
 (def test_module_name_missing () int
@@ -542,8 +550,12 @@
 ; Two u32s as the 8 bytes a load gives: low, then high.
 (def words ((low int) (high int)) int (bit_or low (bit_shl high 32)))
 
+; The record, then its program's path, /bin/raw0: as much as there is
+; room for, past the record.
 (def test_info_length () int
-  (check_int "16 bytes" (boot_words 0 (info_words 1 64 (nil int))) (proc_record_len)))
+  (add (check_int "16 bytes and the path" (boot_words 0 (info_words 1 64 (nil int))) 25)
+       (add (check_int "the record alone" (boot_words 0 (info_words 1 16 (nil int))) (proc_record_len))
+            (check_int "not even that" (boot_words 0 (info_words 1 15 (nil int))) (err_too_big)))))
 
 (def test_info_self () int
   (check_int "running, from the kernel" (boot_words 0 (info_words 1 64 (first_words))) (words (state_running) 0)))
@@ -1027,3 +1039,110 @@
                               (spawn_wait_loop 300 1 (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0)))))))
                      (cons (exits_with 0) (cons (exits_with 7) (nil Raw)))))
     7))
+
+; ------------------------------------------------- booting from a volume
+
+; A partition's UUID, as fs mounts its volume with it.
+(def sys_uuid () (list int) "018f0000-0000-7000-8000-000000000001")
+
+; The UUID, a space, and data: 41 bytes.
+(def uuid_data () (list int) (append (sys_uuid) " data"))
+
+(def test_mount_uuid () int
+  (add (check_int "mounted" (files_boot (mount_words 0 41 (exit_x0)) (uuid_data) "") 0)
+       (check_int "the record: a port, /Volumes/data, NUL and the UUID"
+                  (files_boot (mount_words 0 41 (mount_at_words 1 64)) (uuid_data) "") 54)))
+
+(def test_mount_bad_uuid () int
+  (check_int "not a UUID" (files_boot (mount_words 0 9 (exit_x0)) "1234 data" "") (err_fault)))
+
+; root_switch of the len bytes at data byte at, then ws.
+(def root_words ((at int) (len int) (ws (list int))) (list int)
+  (cons (movz 0 0) (append (data_words 1 at) (cons (movz 2 len) (append (call_words (call_root_switch)) ws)))))
+
+; data, with its UUID, mounted and made /: mount 0's record is then /,
+; NUL and the UUID, from the server's port.
+(def test_root_switch () int
+  (add (check_int "made /" (files_boot (mount_words 0 41 (root_words 37 4 (exit_x0))) (uuid_data) "") 0)
+       (check_int "mount 0" (files_boot (mount_words 0 41 (root_words 37 4 (mount_at_words 0 64))) (uuid_data) "") 42)))
+
+(def test_root_switch_refused () int
+  (add (check_int "no such volume" (files_boot (root_words 0 4 (exit_x0)) "data" "") (err_no_port))
+       (add (check_int "twice" (files_boot (mount_words 0 41 (root_words 37 4 (root_words 37 4 (exit_x0)))) (uuid_data) "") (err_taken))
+            (check_int "no label" (files_boot (root_words 0 0 (exit_x0)) "data" "") (err_fault)))))
+
+; Once / is a volume, the initramfs is given up: no entry can be spawned
+; or named.
+(def test_root_frees () int
+  (add (check_int "spawn"
+                  (files_boot (mount_words 0 41 (root_words 37 4 (append (spawn_words 0) (exit_x0)))) (uuid_data) "")
+                  (err_no_port))
+       (check_int "module_name"
+                  (files_boot (mount_words 0 41 (root_words 37 4 (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_module_name)) (exit_x0)))))))
+                              (uuid_data) "")
+                  (err_no_port))))
+
+; A process started before the initramfs is given up runs on after: pid
+; 1 spawns pid 2, makes data /, and waits for it, which exits with 42.
+(def test_root_keeps_running () int
+  (check_int "pid 2's status"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (append (spawn_words 1) (mount_words 0 41 (root_words 37 4 (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0))))))
+                                                           (uuid_data)))
+                               (cons (exits_with 42) (nil Raw)))))
+    42))
+
+; A file of the initramfs opened before reads as ended after: its stream
+; kept in x20 while mount_words takes x19.
+(def test_root_open_file_ends () int
+  (check_int "read nothing"
+    (files_boot (append (open_words 41 9 1)
+                        (cons (mov_reg 20 0) (mount_words 0 41 (root_words 37 4 (cons (mov_reg 19 20) (append (read_x19) (exit_x0)))))))
+                (append (uuid_data) "/etc/motd") "")
+    0))
+
+; The board's boot arguments: l0 test boots with the test's name, so
+; argc, its length and test_boot_args, 22 bytes.
+(def test_boot_args () int
+  (check_int "one argument"
+    (boot_words 0 (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_boot_args)) (exit_x0))))))
+    22))
+
+; ------------------------------------------------------------ spawn_image
+
+; What spawn_image takes: the path's length and the path, the arguments'
+; length and the arguments, encoded, then the image.
+(def image_bytes ((path (list int)) (args (list int)) (image (list int))) (list int)
+  (append (u32_le (length path)) (append path (append (u32_le (length args)) (append args image)))))
+
+; spawn_image of the len bytes at data byte 0, then ws, pid or code in x0.
+(def image_words ((len int) (ws (list int))) (list int)
+  (cons (movz 0 0) (append (data_words 1 0) (cons (movz 2 len) (append (call_words (call_spawn_image)) ws)))))
+
+; Spawns the image b from pid 1's data, waits for it, and exits with its
+; status, or with the refusal.
+(def image_boot ((b (list int))) int
+  (files_boot (image_words (length b) (append (call_words (call_wait)) (exit_x0))) b ""))
+
+(def test_spawn_image () int
+  (check_int "exits 9" (image_boot (image_bytes "/bin/x" "" (code (cons (movz 0 9) (exit_x0))))) 9))
+
+(def test_spawn_image_args () int
+  (add (check_int "two given" (image_boot (image_bytes "/bin/x" (encode_args (split_spaces "a b")) (code (append (call_words (sys_arg_count)) (exit_x0))))) 2)
+       (check_int "none, the inittab's" (image_boot (image_bytes "/bin/x" "" (code (append (call_words (sys_arg_count)) (exit_x0))))) 0)))
+
+; An image never drives a device, nor makes / a volume.
+(def test_spawn_image_no_dev () int
+  (add (check_int "region" (image_boot (image_bytes "/bin/x" "" (code (region_words)))) -3)
+       (check_int "root_switch" (image_boot (image_bytes "/bin/x" "" (with_data (root_words 0 4 (exit_x0)) "data"))) (err_denied))))
+
+(def test_spawn_image_refused () int
+  (add (check_int "too short" (files_boot (image_words 4 (exit_x0)) "abcd" "") (err_fault))
+       (add (check_int "no path" (files_boot (image_words 12 (exit_x0)) (image_bytes "" "" (zeros 4)) "") (err_fault))
+            (add (check_int "no image" (files_boot (image_words 14 (exit_x0)) (image_bytes "/bin/x" "" "") "") (err_denied))
+                 (check_int "bad arguments" (files_boot (image_words 20 (exit_x0)) (image_bytes "/bin/x" "ab" "abcd") "") (err_fault))))))
+
+; Its process is named by its path: the record and /bin/x, while it runs.
+(def test_spawn_image_named () int
+  (check_int "16 and 6"
+    (files_boot (image_words 18 (info_words 2 64 (nil int))) (image_bytes "/bin/x" "" (code (cons (b_self) (nil int)))) "")
+    22))

@@ -7,7 +7,10 @@ The kernel is an ordinary L0 program built with `--target virt`. It runs at
 EL1 and runs processes at EL0, each in its own address space. It boots from
 an **initramfs**: a cpio archive, in the same newc format as Linux's, of the
 programs it can run and the files they can read. An `/etc/inittab` inside
-says what starts at boot.
+says what starts at boot. L0S can also be copied onto a volume of the disk,
+and booted from it: given `root=UUID`, its first process makes that volume
+`/`, the **system volume**, and the kernel gives the initramfs up (see
+[Booting from a volume](#booting-from-a-volume)).
 
 A process is any L0 program built with `--target proc`, so it runs
 unchanged, and can read the initramfs's files with the ordinary `open_in`.
@@ -17,6 +20,7 @@ messages.
 
 ```bash
 make demo                                 # boot to the shell on this terminal, and type at it
+make demo-system                          # the same, from build/system.img's System volume, a copy of it
 make all                                  # type check, host tests, board tests, end-to-end
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
 make -s doc Q=port_send                   # the libraries' documentation, as l0 doc gives the standard library's
@@ -71,21 +75,26 @@ partition given a volume. Each also runs from a shell, by its name or its
 program's: `run Widgets &` and `run widgets &` are the same.
 
 Each shell runs programs on its own terminal: their standard input,
-output and error are its. The demo's [inittab](demo/etc/inittab) starts:
+output and error are its. The demo boots in two stages. Its
+[inittab](demo/etc/inittab) starts `boot` and the drivers, from the
+initramfs, and `boot` starts the rest, the lines of
+[/etc/system](demo/etc/system): from the system volume, if the board was
+booted with `root=UUID`, or else from the initramfs.
 
 | Pid | Program | What it is |
 |---|---|---|
-| 1 | `sh` | the serial line's shell, so its `exit` stops the system |
+| 1 | `boot` | the first stage's end: it makes the system volume `/` if `root=` names one, starts `/etc/system`, and waits for its first program, the serial shell, so that shell's `exit` stops the system |
 | 2 | `uart` | the serial line's terminal, `console` |
 | 3 | `virtio-gpu` | the display driver. It serves `display`, building the screen from the buffers the compositor gives it |
 | 4 | `virtio-input keyboard` | the keyboard driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 5 | `virtio-input tablet` | the pointer's driver. It serves `pointer`, telling `wm` where the pointer is and what its buttons do |
-| 6 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 7, 8 | `vt`, `vt` | the windows' terminals, Terminal's program, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
-| 9 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
-| 10 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
-| 11 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
-| 12, 13 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not the inittab, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
+| 6 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
+| 7 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
+| 8 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
+| 9 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
+| 10 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 11, 12 | `vt`, `vt` | the windows' terminals, Terminal's program, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 13, 14 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not `/etc/system`, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -110,7 +119,7 @@ What is typed in the window goes to the virtio keyboard, and so through
 Each shell shows [/etc/motd](demo/etc/motd), then its prompt:
 
 ```
-Welcome to L0S, booted from an initramfs. Try ls, df, ps, run hello.
+Welcome to L0S. Try ls, df, ps, run hello; run install VOLUME copies L0S.
 Commands in /bin, services in /sbin, apps in /Applications, files in /Volumes.
 Two more shells run in Terminals in QEMU's window: click one, and type there.
 Applications, on the top bar, starts apps; drag a window by its title bar.
@@ -164,19 +173,20 @@ hello; to run the program, type run hello`.
 The commands on files are the shell's own, as busybox's are. They make
 the ordinary file calls, so they work on any file: the initramfs's,
 which refuse every change (`permission denied`), and the disk's, under
-[/Volumes](#volumes):
+[/Volumes](#volumes), or anywhere once `/` is the system volume:
 
 | Command | Does |
 |---|---|
-| `ls [PATH ...]` | with no path, every file of the initramfs, then of each volume; else each directory's names (`/`, `/bin`, `/sbin`, `/Applications`, `/Applications/Terminal.app`, `/Volumes`, `/Volumes/data`), a directory's with a final `/`, or a file's path |
+| `ls [PATH ...]` | with no path, every file of `/`, then of each volume; else each directory's names (`/`, `/bin`, `/sbin`, `/Applications`, `/Applications/Terminal.app`, `/Volumes`, `/Volumes/data`, `/Volumes/data/a/b`), a directory's with a final `/`, or a file's path |
 | `cat FILE ...` | shows the files |
 | `write FILE WORDS ...` | makes FILE hold the words, spaced, and a newline |
 | `append FILE WORDS ...` | adds that line to FILE's end, making it if need be |
-| `cp FROM TO` | copies a file; into TO if it is a directory |
-| `mv FROM TO` | renames a file, or moves it into TO if it is a directory; between file systems, as from one volume to another, it copies and then removes |
-| `rm FILE ...` | removes the files |
-| `df` | each volume's size, the room its files take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
-| `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open |
+| `cp FROM TO` | copies a file; into TO if it is a directory. A program's copy, on a volume, is marked a program too |
+| `mv FROM TO` | renames a file or a directory, or moves it into TO if it is a directory; between file systems, as from one volume to another, it copies a file and then removes it |
+| `rm FILE ...` | removes the files, and directories with nothing in them |
+| `mkdir DIRECTORY ...` | makes each directory, empty, in one that is there, on a volume |
+| `df` | each volume's size, the room its files and directories take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
+| `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open, and for the system volume |
 | `partition SECTORS [START]` | a new partition of SECTORS in the disk's GPT, from START or where it first fits, and says its UUID (see [Volumes](#volumes)) |
 | `mkfs UUID LABEL` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL` |
 
@@ -188,9 +198,12 @@ hello disk
 and again
 l0s> df
   VOLUME              SIZE    USED    FREE  FILES
-  /Volumes/data       744K      4K    740K      1
-  /Volumes/scratch    232K      0K    232K      0
+  /Volumes/data       744K      8K    736K      1
+  /Volumes/scratch    232K      4K    228K      0
 ```
+
+Each volume's root directory takes a cluster of its own, so an empty
+volume's `USED` is 4K.
 
 Things to try:
 - `run hello one two`, and `run ping 5` once `run echo &` has started the
@@ -203,19 +216,20 @@ Things to try:
 
   ```
     PID  PARENT  PROGRAM       STATE
-      1       0  sh            running
+      1       0  boot          waiting for pid 9
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 10
-      4       0  virtio-input  waiting for a message on port 9
-      5       0  virtio-input  waiting for a message on port 2
-      6       0  wm            waiting for a message on port 13
-      7       0  vt            waiting for a message on port 3
-      8       0  vt            waiting for a message on port 4
-      9       0  rtc           sleeping
-     10       0  virtio-blk    waiting for a message on port 6
-     11       0  fs            waiting for a message on port 11
-     12       7  sh            waiting for a message on port 16
-     13       8  sh            waiting for a message on port 17
+      3       0  virtio-gpu    waiting for a message on port 7
+      4       0  virtio-input  waiting for a message on port 2
+      5       0  virtio-input  waiting for a message on port 3
+      6       0  rtc           sleeping
+      7       0  virtio-blk    waiting for a message on port 5
+      8       0  fs            waiting for a message on port 8
+      9       1  sh            running
+     10       1  wm            waiting for a message on port 670
+     11       1  vt            waiting for a message on port 446
+     12       1  vt            waiting for a message on port 563
+     13      12  sh            waiting for a message on port 905
+     14      11  sh            waiting for a message on port 923
   ```
 
   It lists the processes that have not exited. The shell asking is always
@@ -295,15 +309,15 @@ Job control:
   job, another shell's job, another shell, or `wm`. Drivers, the
   programs with a `dev` line, can't be killed, since the system would
   lose their devices, so `uart`, `virtio-gpu` and `virtio-input` stay.
-  Killing pid 1, the serial shell, from a window's shell stops the
-  system, as its `exit` does.
+  Killing pid 9, the serial shell, from a window's shell stops the
+  system, as its `exit` does: `boot`, pid 1, waiting for it, exits too.
 
 Editing, on any terminal: Backspace erases a character and Ctrl-U erases
 the line. Arrow keys are ignored. Ctrl-D on an empty line ends input. In
 a window, Ctrl-C, Ctrl-D and Ctrl-U are the keyboard's own.
 
-`exit [STATUS]` at the serial shell stops the system, since it is pid 1;
-at a window's shell it ends that shell, and with it the window's `vt`,
+`exit [STATUS]` at the serial shell stops the system, since `boot`, pid 1,
+waits for it and exits with its status; at a window's shell it ends that shell, and with it the window's `vt`,
 which closes the window. Nothing opens it again until the system
 restarts. The same happens when a window's shell is killed. Closing the
 window instead, or killing its `vt`, ends the shell too: its terminal has
@@ -324,7 +338,10 @@ on it. The demo's disk is `build/disk.img`, 1 MB, which
 so what is written to it stays from one boot to the next; `make clean`
 resets it. A `build/disk.img` made before the file system was, holding
 raw sectors only, has no volumes, and `fs` says so and serves none: remove it, and
-`make demo` makes a new one. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
+`make demo` makes a new one. One made before L0FS had directories is made
+again, once, by itself. `QEMU_APPEND` gives the kernel boot arguments, as
+`-append` does, which `make demo ROOT=UUID` sets to `root=UUID`.
+`QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
 QMP on sockets, as the screen tests do, to type keys, move the pointer,
 and dump the screen.
 
@@ -607,16 +624,21 @@ and writes them with the ordinary `open_in`, `open_out` and the rest:
 
 The disk, as [tools/mkdisk](tools/mkdisk) makes it with
 [tools/mkfs](tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS MS
-LABEL:START:COUNT...`, a host program, built into `build/mkfs`; MS is
-the Unix time in milliseconds, which mkdisk gives it from `date`, since
-a host program has no clock that is a date):
+LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, a host program, built into
+`build/mkfs`; MS is the Unix time in milliseconds, which mkdisk gives it
+from `date`, since a host program has no clock that is a date). An
+ARCHIVE, a newc cpio such as `build/initramfs.cpio`, fills its volume,
+its directories, files, and which are programs; a UUID is its
+partition's, in place of one made from MS; mkfs says each volume's
+label and UUID. `tools/mkdisk OUT SECTORS SPEC...` makes such a disk,
+and with only OUT this one:
 
 | Sectors | What |
 |---|---|
 | 0 | a protective MBR, one partition of type `EE` over the whole disk, so that what knows only MBRs leaves it be |
 | 1–33 | the GPT: its header, and 128 entries of 128 bytes (below) |
 | 34–39 | nothing |
-| 40–1535 | the volume `data`, 1496 sectors: 186 clusters of data, 744 KB |
+| 40–1535 | the volume `data`, 1496 sectors: 186 clusters of data, 744 KB, the root directory's one of them |
 | 1536–2014 | the volume `scratch`, 479 sectors: 58 clusters, 232 KB |
 | 2015–2047 | the GPT's backup: its entries, and its header in the last sector |
 
@@ -665,27 +687,44 @@ A volume, its sectors counted from its partition's first, in clusters of
 
 | Where | What |
 |---|---|
-| sector 0 | the superblock: `L0FS`, version 1, the label (1 to 15 letters, digits, `-`, `_`) in 16 bytes from 8, then u32s from 24: its sectors, clusters, the table's first sector and sectors, the directory's, the first cluster of data, and the entries |
-| sector 1 on | the cluster table, a u16 a cluster, a sector for each 256: 0 free, `FFFF` a file's last, `FFFE` the metadata's, else the file's next cluster, so each file is a chain, as in FAT |
-| the next 6 sectors | the directory, flat: 48 entries of 64 bytes, a name of 1 to 55 printable bytes with no space or `/`, NUL padded in 56, the size at 56, the first cluster at 60 (0 for an empty file), and 1 at 62 if the entry is in use |
-| from the first cluster after these | the files' data |
+| sector 0 | the superblock: `L0FS`, version 2, the label (1 to 15 letters, digits, `-`, `_`) in 16 bytes from 8, then u32s from 24: its sectors, clusters, the table's first sector and sectors, the first cluster of data, and the root directory's first cluster, the same |
+| sector 1 on | the cluster table, a u16 a cluster, a sector for each 256: 0 free, `FFFF` a chain's last, `FFFE` the metadata's, else the next cluster, so each file and each directory is a chain, as in FAT |
+| from the first cluster after these | the root directory's first cluster, then the files' data and the other directories' clusters |
 
-The superblock, table and directory, rounded up to whole clusters, are
-the metadata: for these volumes cluster 0, one 8-sector read. A volume
-holds at most 65534 clusters, so 256 MB. `fs` checks all of it, the
-layout against the size, every mark of the table and every file's chain
-against its size, before it serves a volume, so a damaged disk is
-refused rather than followed.
+A **directory** is a chain of clusters like a file's, 64 entries of 64
+bytes each: a name of 1 to 55 printable bytes with no space or `/`, nor
+`.` or `..`, NUL padded in 56; the size at 56; the first cluster at 60
+(0 for an empty file); and flags at 62: 1 in use, 2 a directory, 4 a
+program. A directory with every entry in use grows by a cluster, and
+never shrinks. A path is a walk from the root, a directory at a time.
+A volume of version 1, whose one directory was flat, is not read: `fs`
+says so (`L0FS version 1, not 2`), and `mkfs` on its partition makes it
+anew.
+
+The superblock and table, rounded up to whole clusters, are the
+metadata: for these volumes cluster 0, one 8-sector read. A volume holds
+at most 65534 clusters, so 256 MB. `fs` checks all of it, the layout
+against the size, every mark of the table, and every directory from the
+root down, each entry's name and every file's chain against its size,
+and refuses a directory met twice, before it serves a volume, so a
+damaged disk is refused rather than followed.
 
 **The mount table** ([kernel/mounts.l0](kernel/mounts.l0)) is a list
-whose first mount is the initramfs at `/`, which the kernel answers for
-itself; after it come the volumes, each at `/Volumes/LABEL` from the
-port of the server that mounted it with `fs_mount`. They go when that
-port does. `/Volumes` itself is always there, a directory holding only
-the volumes: nothing can be made in it, only in one of them. The kernel
-takes a path, made absolute, to where it is mounted:
+whose first mount is `/`: the initramfs, which the kernel answers for
+itself, until `root_switch` makes a volume the system volume, `/` for
+good. After it come the volumes, each at `/Volumes/LABEL` from the port
+of the server that mounted it with `fs_mount`, with its partition's
+UUID; the system volume is there too. They go when that port does, but
+for `/`, which stays the system volume's though its server goes, and is
+then answered -5, as any call on a gone server's files is: there is no
+going back to the initramfs, which the kernel gave up. `/Volumes`
+itself is always there, a directory holding only the volumes: nothing
+can be made in it, only in one of them. The kernel takes a path, made
+absolute, to where it is mounted:
 
 - the initramfs: answered as [Calls 1–10](#calls-110-the-process-abi-of-spec-103) say;
+- the system volume, any path outside `/Volumes` once `/` is one: its
+  server is asked for the same path in `/Volumes/LABEL`, as for a volume;
 - `/Volumes`: a directory, -8; straight in it, nothing there, -3, and
   nothing can be made, -4; in a volume not mounted, -3, or -9 to write;
 - a volume: its server is sent the call as a request of the fs protocol,
@@ -702,31 +741,36 @@ takes a path, made absolute, to where it is mounted:
 
 **The fs protocol** ([user/lib/proto/fs.l0](user/lib/proto/fs.l0)) is what a file
 server serves on the port it mounts from. The kernel sends the first
-six; programs send `list`, `df` and `format` themselves, to the port
-`mount_at` gives, as `ls`, `df` and `format` in the shell do, and
-`rescan`, `partition` and `mkfs` to the port registered as `fs`.
-`fs_df_on`, `fs_format_on`, `fs_rescan_on`, `fs_partition_on` and
-`fs_mkfs_on` take a reply port the program keeps, for one that asks
-again and again; `fs_df` and `fs_format` make one each call, which
-never goes. A refusal's word may be followed by why, in words.
+six; programs send `list`, `mkdir`, `stat`, `chmod`, `df` and `format`
+themselves, to the port `mount_at` gives, as `ls`, `mkdir`, `df` and
+`format` in the shell do (`fs_server_path` gives a path of the system
+volume as its server knows it, in `/Volumes/LABEL`), and `rescan`,
+`partition` and `mkfs` to the port registered as `fs`. `fs_df_on`,
+`fs_format_on`, `fs_rescan_on`, `fs_partition_on` and `fs_mkfs_on` take
+a reply port the program keeps, for one that asks again and again;
+`fs_df` and `fs_format` make one each call, which never goes. A
+refusal's word may be followed by why, in words.
 
 | Request | Reply |
 |---|---|
-| `open MODE PATH` | MODE 1 to read, 2 to write anew, 3 to add to the end, making the file if it is not there: a handle |
+| `open MODE PATH` | MODE 1 to read, 2 to write anew, 3 to add to the end, making the file if it is not there, in a directory that is: a handle; -8 for a directory, -3 or, to write, -9 where a directory on the way is missing |
 | `read H N` | at most N bytes of handle H from where it is, and at most 4092, what a reply holds after its word, on across the end of a cluster if the file goes on: the count, then the bytes; 0 at the end |
 | `write H BYTES` | BYTES written to H, at its end for mode 3: how many, all of them, or -6 if the volume has no room |
 | `close H` | 0 |
-| `rename FROM TO` | 0, a file named TO replaced, unless it is open, -4; both in one volume, else -10 |
-| `remove PATH` | 0, unless the file is open, -4 |
-| `list VOLUME` | how many files, then a line `NAME SIZE` for each, by name |
-| `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files |
-| `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open |
+| `rename FROM TO` | 0, a file or a directory, to another directory too, a file named TO replaced, unless it is open, -4; a directory there is -8, a directory over a file -4, and into itself -5; both in one volume, else -10. Handles open on a file moved follow it |
+| `remove PATH` | 0, a file, unless it is open, or a directory with nothing in it, else -4 |
+| `list PATH` | the directory at PATH, a volume's root or any other: how many entries, then a line `NAME SIZE` for each, by name, a directory's NAME ending in `/` and its SIZE 0; -9 for a file |
+| `mkdir PATH` | 0, an empty directory at PATH, of a cluster; -9 if its directory is missing, -4 if something is at PATH, -5 for a name a volume cannot hold, -6 with no room |
+| `stat PATH` | 0, then `dir`, or `file SIZE x` for a program and `file SIZE -` for any other file; -3 for nothing |
+| `chmod PATH +x` | 0, the file at PATH marked a program, or with `-x` not; -8 for a directory |
+| `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files, in every directory |
+| `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open, or for the system volume |
 | `rescan` | the partition table and every volume read again, as at the start, and served in place of those before, each new label mounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open; -5 if the table is bad. A label that has gone stays mounted, there being no unmount, and is answered as a volume not served: -3, or -9 to write |
 | `partition COUNT [START]` | a new partition of COUNT sectors in the GPT, both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad. A disk with no table gets one |
 | `mkfs UUID LABEL` | a new, empty volume labelled LABEL on the partition with that UUID, the partition named LABEL, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, -6 if the partition is too small |
 
 Each is a request (`request` in `l0s.l0`), its words separated by
-spaces; a PATH is whole, `/Volumes/LABEL/NAME`, and a VOLUME
+spaces; a PATH is whole, `/Volumes/LABEL/NAME...`, and a VOLUME
 `/Volumes/LABEL`, so one port serves every volume. The reply is a word,
 a little-endian s32, then any bytes: a count, a handle, or a negative
 code, as spec §6.3's I/O builtins give them (-3 no such file, -4 denied,
@@ -737,12 +781,14 @@ it, the sender, so a process can use only its own.
 **`fs`** ([user/sbin/fs](user/sbin/fs/fs.l0)) opens the disk with a buffer of a
 cluster, reads the GPT, checks and loads the volume on each partition of
 L0FS's type, its
-metadata, mounts each by its label from one port, and then registers
+metadata and every directory, mounts each by its label, with its
+partition's UUID, from one port, and then registers
 that port as `fs`, so that a program can wait for every volume with
-`name_wait`. It keeps the metadata in memory and writes it back after
-the data whenever it changes, only the sectors that changed: the
-table's that hold the marks a change made, and the directory's that
-holds the entry, those within a cluster of each other in one request:
+`name_wait`. It keeps the metadata and the directories in memory and
+writes them back after the data whenever they change, only the sectors
+that changed: the table's that hold the marks a change made, and the
+directory's that holds the entry, every sector of a directory's new
+cluster, those within a cluster of each other in one request:
 on these volumes a write's metadata is one request, and on the largest,
 whose metadata is 33 clusters, at most two rather than 33. A handle
 open to read holds the cluster it read last, the file's bytes in it,
@@ -779,10 +825,11 @@ l0 boot build/kernel.img < OUT            # the kernel reads the initramfs on st
 `make root` stages every program in `build/root` where the initramfs
 keeps it, made anew each time:
 - **`/bin`**, the commands, for people and agents: `sh`, `cat`, `hello`,
-  `init`, `ping`, `spin`, `nap`, `draw`, `keys`, `windows`, `disk`, those
-  in `user/bin`;
-- **`/sbin`**, the drivers and services: `uart`, `rtc`, `virtio-gpu`,
-  `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo`, those in `user/sbin`;
+  `init`, `install`, `ping`, `spin`, `nap`, `draw`, `keys`, `windows`,
+  `disk`, those in `user/bin`;
+- **`/sbin`**, the drivers and services: `boot`, `uart`, `rtc`,
+  `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo`, those in
+  `user/sbin`;
 - **`/Applications`**, the desktop's apps, each in a bundle (below), those
   in `user/apps`.
 
@@ -847,12 +894,72 @@ The boot fails with a message naming the problem if:
 Only files with an execute bit are programs. The system runs until pid 1
 exits; the kernel then exits with pid 1's status.
 
-Device authority comes only from `dev` lines. The demo grants it to `uart`,
+Device authority comes only from `dev` lines, and only to a program of
+the initramfs. The demo grants it to `uart`,
 `rtc`, `virtio-gpu`, `virtio-input` and `virtio-blk`, so the shell can start `rtc`
 without having it itself. `wm`, `vt` and `fs` have none: they reach only
 memory they share. In the demo's inittab, then, the drivers' and
-services' paths are `/sbin/...`, and the terminals'
+services' paths are `/sbin/...`, and in its `/etc/system` the terminals'
 `/Applications/Terminal.app/vt`.
+
+### Booting from a volume
+
+L0S can be copied onto a volume and booted from it, the volume made `/`,
+the **system volume**, as a Linux initramfs hands over to its root file
+system. The kernel itself still comes from QEMU (`-kernel`): the virt
+board has no firmware to load it from a disk. So the initramfs boots
+only the first stage, the drivers and `fs`, which a disk needs, and
+[/sbin/boot](user/sbin/boot/boot.l0) the rest:
+
+1. The board is booted with `root=UUID` among its boot arguments
+   (`l0 boot build/kernel.img root=UUID`, `QEMU_APPEND=root=UUID`, or
+   `make demo ROOT=UUID`), UUID a GPT partition's, as `partition` and
+   mkfs say it. The kernel gives its boot arguments to any process that
+   asks, call 285.
+2. `boot`, pid 1, waits up to 10 s for `fs` to mount the volume of that
+   partition, as `mount_list`'s UUIDs show, and checks that it holds
+   `/etc/system`.
+3. It makes the volume `/` with call 286, `root_switch`. From then on
+   every path outside `/Volumes` is the system volume's, and it is in
+   `/Volumes/LABEL` too; the kernel gives the initramfs's bytes up,
+   since every process started from it already has its image in frames
+   of its own. Its entries stay, a few names, to name those processes
+   and say which drive devices and what arguments a path gets; but no
+   entry can be started or read again, and stream 0's `stdin` file ends.
+   The raw copy QEMU's loader put at 0x50000000, which the kernel read
+   its standard input from, is outside L0's heap and frame pool, and
+   L0 has no call to give it back, so only the heap's copy is freed.
+4. `boot` starts `/etc/system`'s programs, now the volume's, with
+   `spawn_path` ([user/lib/sys/paths.l0](user/lib/sys/paths.l0)): it
+   reads each program's file, marked a program, and starts it from its
+   bytes with call 287, `spawn_image`, which never gives a device. It
+   waits for the first, the serial shell, and exits with its status.
+
+With no `root=`, a UUID no mounted volume has, or a volume without
+`/etc/system`, `boot` says why and starts the initramfs's own
+`/etc/system`, the system as it was: that is the only fallback. Once
+`/` is a volume it is for good: if `fs` died, every call on `/` would be
+answered -5, with no initramfs left to go back to.
+
+`/etc/system` is a line each, `#` for a comment:
+
+```
+start PATH [ARG ...]   start PATH, in order: the first is waited for; with ARGs, given those
+```
+
+To make a system volume:
+- **From the host**, `make sysdisk` makes `build/system.img`, 64 MB, with
+  `System` filled from `build/initramfs.cpio` by mkfs and `data` empty, and
+  writes System's UUID to `build/system.uuid`; `make demo-system` makes it
+  anew and boots from it.
+- **In L0S**, `run install VOLUME` copies every directory and file of `/`
+  but `/Volumes` onto the volume, marking each program's copy a program,
+  and says its UUID for `root=`. It copies from the initramfs, or from
+  another system volume, never onto the one `/` is.
+
+Programs never ask where `/` is: `root_paths` lists it, `program_found`
+finds a program in it, and `spawn_path` starts one, from the initramfs's
+entry or a volume's file, as the shell, `init`, `wm`, `vt` and `boot` do.
 
 ## The kernel
 
@@ -886,7 +993,7 @@ with random registers.
 | `common/queue.l0` | a FIFO queue of any type, shared with user programs |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
 | `kernel/memory.l0` | what each address is for; which pages to map before a copy; where device regions and DMA pages go; which frames to free when a process ends |
-| `kernel/mounts.l0` | the mount table: the initramfs at `/` and the volumes at `/Volumes/LABEL`, where a path's file is, and where a rename goes |
+| `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
 | `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
@@ -1002,19 +1109,19 @@ back in `x0`. From L0, use the wrappers in `user/lib/sys/l0s.l0`.
 ### Calls 1–10: the process ABI of spec §10.3
 
 The kernel answers these itself for the initramfs, a read-only file
-system, and for a file of a volume under `/Volumes` sends them to the
-volume's file server, as [Volumes](#volumes) says, its answer the
-call's:
+system, and for a file of a volume under `/Volumes`, or of the system
+volume once `/` is one, sends them to the volume's file server, as
+[Volumes](#volumes) says, its answer the call's:
 
 | Call | What the kernel does |
 |---|---|
 | open | modes 1 to 3, else -5. In the initramfs, to read: a new stream (3 and up), or -3 no such file, -8 a directory, -5 if the process has 16 open. To write: -8 a directory, -4 where the directory exists, -9 where it does not. In a volume: a new stream, once its server opens the file. A relative path is taken from `/` |
-| read | stream 0 reads a line from the process's terminal, if it has one (see Terminals), and otherwise the inittab's `stdin` file, with one cursor for everyone. Other streams read the file opened on them, from where the process left off, 0 at the end; a volume's at most 4092 bytes a call |
+| read | stream 0 reads a line from the process's terminal, if it has one (see Terminals), and otherwise the inittab's `stdin` file, with one cursor for everyone, until the initramfs is given up. Other streams read the file opened on them, from where the process left off, 0 at the end; a volume's at most 4092 bytes a call; one of the initramfs's, once it is given up, reads as at its end |
 | close | 0, or -5 for a stream that isn't open; a volume's file is closed by its server too |
 | rename, remove | in the initramfs, -3 if there's no such file; otherwise -4 (-8 to remove a directory). In a volume, as its server says; between two file systems, -10 |
 | write | streams 1 and 2 go to the process's terminal, if it has one, at most 4091 bytes per call, waiting while its queue is full; otherwise to the kernel's stdout and stderr, at most 64 KiB per call. A stream open on a volume's file is written by its server, a message's worth a call; any other is -5 |
 | exit | the process ends with that status |
-| arg_count, arg | the process's arguments: those it was spawned with by `spawn_entry_with`, or else the inittab's `args` for it |
+| arg_count, arg | the process's arguments: those it was spawned with by `spawn_entry_with` or `spawn_image`, or else the inittab's `args` for its path |
 | region | maps device registers for programs with a `dev` line, so `open_device` works, or for a range of the caller's DMA pages, returns where they are; -3 for any other |
 
 ### The kernel's own calls, 256 up
@@ -1042,16 +1149,16 @@ otherwise as its type's first failure.
 | 261 | `port_try_receive port` | `Message` | the same, or `(RecvFailed)` at once if no message is waiting |
 | 262 | `name_register port name` | `Registration`: `Registered`, `RegisterNoPort`, `RegisterTaken`, `RegisterTooLong` | 0, or -1 not your port, -2 the name is taken, -4 a name over 256 bytes |
 | 263 | `name_lookup name` | `Lookup`: `Found`, `NotFound` | a port, or -1 (`name_await` retries with yields, `name_wait` with sleeps) |
-| 264 | `spawn_entry e` | `Spawn`: `Spawned`, `SpawnNoEntry`, `SpawnNotProgram`, `SpawnTooBig`, `SpawnNoRoom` | a pid, or -1 no entry e, -6 not a program, -4 an image over 4 MB, -5 out of address spaces |
+| 264 | `spawn_entry e` | `Spawn`: `Spawned`, `SpawnNoEntry`, `SpawnNotProgram`, `SpawnTooBig`, `SpawnNoRoom` | a pid, or -1 no entry e, or the initramfs given up, -6 not a program, -4 an image over 4 MB, -5 out of address spaces. `spawn_path` starts a program by its path, wherever `/` is |
 | 265 | `wait_pid pid` | `Reaped`: `Reaped`, `WaitNoProc` | waits; the pid's exit status, or -1, which a status of -1 reads as too |
 | 266 | `sleep_until t`, `sleep_ns n` | `int` | 0, once `clock_ns` reaches t |
 | 267 | `irq_bind irq port` | `IrqBinding`: `IrqBound`, `IrqAbsent`, `IrqDenied`, `IrqNoPort`, `IrqTaken` | 0, or -6 no `dev` line for the program, -1 not your port, -2 already bound, -3 no such interrupt on the board. After this, each interrupt sends the message `irq_notice irq` to the port |
 | 268 | `irq_ack irq` | `IrqAck`: `IrqAcked`, `IrqNotPending` | 0, ending the interrupt once the driver has quieted its device; -1 if it is not yours or not taken |
-| 269 | `entry_path_of e` | `(list int)` | the entry's path, with a final `/` for a directory, or empty if there is no entry e. `entry_paths` lists them all, and `program_entry` finds a program by name |
+| 269 | `entry_path_of e`, `entry_is_program e` | `(list int)`, `bool` | the entry's path, with a final `/` for a directory, or empty if there is no entry e or the initramfs has been given up; the kernel follows a program's with a NUL and `x`. `entry_paths` lists them all, and `program_entry` finds a program by name; `root_paths` lists `/` wherever it is |
 | 270 | `proc_kill pid` | `Kill`: `Killed`, `KillNoProc`, `KillDenied` | 0, ending pid with status 130, any process but the caller; -6 if pid's program has a `dev` line, -1 if there is no such process or it is the caller. Ending pid 1 stops the system with status 130 |
 | 271 | `proc_watch pid port` | `Watch`: `Watched`, `WatchNoProc`, `WatchFull` | 0, and the kernel sends `exit_notice pid status` to the caller's port when pid exits, or at once if it has. -1 if there is no such pid, or the port is not the caller's; -3 if 32 ports watch pid already. `exit_of` reads the notice |
 | 272 | `spawn_entry_with e args` | `Spawn` | as `spawn_entry`, but the process gets args (sent as `encode_args` writes them) in place of the inittab's; -5 if they are not well formed, -4 over 4096 bytes |
-| 273 | `proc_info pid` | `(Option ProcInfo)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, and a detail (the port or pid it waits on, or an exited process's status); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). To list every process, ask `proc_slot` for each slot's pid |
+| 273 | `proc_info pid`, `proc_path pid` | `(Option ProcInfo)`, `(list int)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, -1 for one started from an image, and a detail (the port or pid it waits on, or an exited process's status); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). After the record's 16 bytes, as many as there is room for, the program's path, its entry's or its image's, which `proc_path` reads. To list every process, ask `proc_slot` for each slot's pid |
 | 274 | `dma_alloc n` | `DmaAlloc`: `DmaPages`, `DmaDenied`, `DmaTooMany`, `DmaNoRoom` | the address of n zeroed pages a device can reach, at the caller's next device pages; -6 no `dev` line, -4 n below 1 or over 4096, -5 out of frames or device pages. They last until the system stops |
 | 275 | `dma_address va` | `DmaWhere`: `DmaAddress`, `DmaAddressDenied`, `NotDma` | where a device reaches the caller's DMA page holding va, page aligned; -1 if no DMA page holds va, -6 no `dev` line |
 | 276 | `tty_set port` | `TtyChange`: `TtySet`, `TtyNoPort` | 0, making port, a terminal, the caller's standard input, output and error, and those of every process it starts from then on; 0 gives back the kernel's own; -1 if there is no such port |
@@ -1061,8 +1168,11 @@ otherwise as its type's first failure.
 | 280 | `proc_slot i` | `Slot`: `SlotHeld`, `SlotUnused`, `NoSlot` | the pid slot i of the process table holds, live or exited, or last held; 0 if it has held none; -1 for no slot i, outside 1 to 255 |
 | 281 | `shm_unmap va n` | `ShmUnmap`: `ShmUnmapped`, `ShmUnmapNotYours`, `ShmUnmapTooMany` | 0, the caller's n shared or DMA pages from va unmapped, each frame freed once no process maps it; -4 n below 1 or over 4096, -5 pages that are not the caller's, when none is unmapped |
 | 282 | `shm_revoke va n pid` | `ShmRevoke`: `ShmRevoked`, `ShmRevokeNoProc`, `ShmRevokeDenied`, `ShmRevokeTooMany`, `ShmRevokeNotYours` | how many mappings pid had of the caller's n shared or DMA pages from va, all now unmapped; -1 no such pid, -6 pid is the caller or drives devices, -4 n below 1 or over 4096, -5 pages that are not the caller's |
-| 283 | `fs_mount label port` | `Mounting`: `Mounted`, `MountNoPort`, `MountTaken`, `MountBadLabel` | 0, the caller's volume label mounted at `/Volumes/LABEL` from port, whose server is sent every call on a file there (see [Volumes](#volumes)) until the port goes; -1 not the caller's port, -2 the label is mounted already, -5 no label (1 to 15 letters, digits, `-`, `_`) |
-| 284 | `mount_at i`, `mount_list` | `(Option MountInfo)` | mount i of the table, from 0, the initramfs at `/`: where it is and the port of its server, 0 for the kernel's own; none past the last. `mount_list` gives them all |
+| 283 | `fs_mount label uuid port` | `Mounting`: `Mounted`, `MountNoPort`, `MountTaken`, `MountBadLabel` | 0, the caller's volume label, of the partition whose UUID that is, as text, or none, mounted at `/Volumes/LABEL` from port, whose server is sent every call on a file there (see [Volumes](#volumes)) until the port goes; -1 not the caller's port, -2 the label is mounted already, -5 no label (1 to 15 letters, digits, `-`, `_`) or a UUID that is none |
+| 284 | `mount_at i`, `mount_list` | `(Option MountInfo)` | mount i of the table, from 0, `/`: where it is, the port of its server, 0 for the kernel's own, and its partition's UUID, empty for none; none past the last. `mount_list` gives them all, and `fs_system_volume` the system volume's `/Volumes/LABEL` |
+| 285 | `boot_args` | `(list (list int))` | the board's boot arguments, QEMU's `-append`, split at spaces; none under another operating system |
+| 286 | `root_switch label` | `Switch`: `Switched`, `SwitchDenied`, `SwitchDone`, `SwitchNoVolume`, `SwitchBadLabel` | 0, the volume mounted as label made `/`, the system volume, for good, and the initramfs's bytes given up (see [Booting from a volume](#booting-from-a-volume)); -6 if the caller's program is not the initramfs's, -2 if `/` is a volume already, -1 if no such volume is mounted, -5 no label |
+| 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, -4 an image over 4 MB, -5 bytes not laid out as `spawn_image_bytes` lays them |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1087,8 +1197,8 @@ initramfs, so that the Makefile finds it there:
 
 | Directory | What | In the initramfs |
 |---|---|---|
-| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `init`, `keys`, `nap`, `ping`, `spin`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo` | `/sbin/NAME` |
+| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `init`, `install`, `keys`, `nap`, `ping`, `spin`, `windows` | `/bin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
@@ -1097,12 +1207,14 @@ directory is part of it.
 
 | Program | What it does |
 |---|---|
-| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `df` and `format`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
+| `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; starts `/etc/system`'s programs by path, and exits with the first one's status |
+| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df` and `format`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
+| `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font, in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
 | `cat` | writes the files its arguments name, through the ordinary `open_in`, the initramfs's or a volume's; reports each it can't read, and exits 1 if any |
 | `hello` | prints its pid and arguments, and answers a line: typed at its terminal, with `console_line` |
-| `init` | starts the programs its arguments name (`NAME&` runs one in the background), waits for the rest, and reports each one's status |
+| `init` | starts the programs its arguments name, from `/` wherever it is (`NAME&` runs one in the background), waits for the rest, and reports each one's status |
 | `echo` | a server: registers as `echo` and sends every request's body back |
 | `ping` | a client: finds `echo` by name and checks that N requests come back |
 | `spin` | loops forever without a call; other processes still run, thanks to the timer |
@@ -1112,7 +1224,7 @@ directory is part of it.
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL` and serves the fs protocol for them, the kernel's requests for every program's file calls there and `list`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
+| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
@@ -1135,7 +1247,8 @@ name in a library is taken in every program that links it.
 | [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
 | [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div` | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
-| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount` and the mount table | every program |
+| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
+| [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
 | [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order | every program |
 | [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
@@ -1145,12 +1258,12 @@ name in a library is taken in every program that links it.
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
-| [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps | `fs`, `sh`, `disks` |
-| [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
-| [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `sh`, `disks`, `tools/mkfs` |
+| [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
+| [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
+| [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `disks`, `tools/mkfs`, and every program `PATHS` is in |
 | [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
 | [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
-| [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directory, their layout, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata a change touches | `fs`, `disks`, `tools/mkfs` |
+| [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
 | [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
 | [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `tools/mkicon` |
@@ -1161,7 +1274,7 @@ name in a library is taken in every program that links it.
 | Command | What it runs |
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
-| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts and the file calls a volume's server answers, its request, its answer, and its going, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`) |
 
 Each case of `tests/e2e/` is a directory:
@@ -1172,10 +1285,14 @@ Each case of `tests/e2e/` is a directory:
 - `typed`, keys to type at the serial line;
 - `font`, if the console font is to be added to `etc`, for `vt`;
 - `disk`, if the board is to have a virtio-blk, a fresh disk from
-  `tools/mkdisk` for each run.
+  `tools/mkdisk` for each run;
+- `layout`, that disk's, if not mkdisk's own: SECTORS, then each volume
+  as mkfs takes it, `LABEL:START:COUNT[:ARCHIVE[:UUID]]`, `@` the case's
+  own initramfs, to fill a volume with;
+- `bootargs`, the kernel's boot arguments, such as `root=UUID`.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Twelve cases type a session through
+`etc`, boots it, and compares. Sixteen cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -1209,6 +1326,22 @@ Ctrl-C as a person would:
   volumes, `ls` everything, `rm` it; be refused a `write` to the
   initramfs; `cp` a file of the initramfs to a volume; and `format` a
   volume, `ls` showing it empty;
+- `dirs` makes directories on a volume, nested, writes, lists, moves and
+  removes in them, is refused a directory where one is, in one that is
+  not, the removal of one with something in it, and one in the
+  initramfs; and runs `hello` copied onto a volume, its copy marked a
+  program, and is told a text file copied there is not one;
+- `install`, on a disk of 8 MB whose layout gives System a known UUID,
+  has `install` copy the initramfs onto it, lists and reads the copy,
+  runs `hello` from it, and is refused a volume not mounted and no volume;
+- `rootboot` boots with `root=` System's UUID, System filled from the
+  case's own initramfs: `boot` makes it `/`, and the shell, started from
+  it, lists `/` and `/Volumes`, writes in `/etc` and reads that back, from
+  `/` and from `/Volumes/System`, makes a directory in `/`, reads
+  `/etc/system`, is refused a `format` of `/`, and runs `hello` from it;
+- `rootboot_missing` boots with `root=` a UUID no partition has: `boot`
+  says so and starts the initramfs's system, which still refuses a
+  `write`;
 - `apps` lists `/Applications` and a bundle, shows Terminal's manifest,
   is told there is no app `Nope`, by name or by path, and runs
   `Terminal` by its name, which the shell finds through its manifest.
@@ -1360,15 +1493,27 @@ fault, pass a bad buffer, and wait on nothing.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
 - **The initramfs is read-only.** Nothing in it can be written, renamed
-  or removed. So the apps are fixed at boot: the launcher shows the
-  bundles in `/Applications` as `wm` started, and an app copied to a
-  volume is not one. There is no current directory, so a relative path is taken
+  or removed. Booted from it, the apps are fixed at boot: the launcher
+  shows the bundles in `/Applications` as `wm` started, and an app copied
+  to another volume is not one. There is no current directory, so a relative path is taken
   from `/`. No call lists a directory: the initramfs's are `entry_paths`,
-  which lists everything, and a volume's its server's `list`.
-- **The volumes are small and simple** (see [Volumes](#volumes)). Each
-  has one flat directory of at most 48 files, with names of at most 55
-  bytes and no spaces, and no subdirectories, permissions or times; at
-  most 65534 clusters of 4 KB; and a disk at most the GPT's 128. One
+  which lists everything, and a volume's its server's `list`; `root_paths`
+  lists `/` either way, a system volume a directory at a time.
+- **Booting from a volume needs the initramfs still.** The kernel comes
+  from QEMU, and the drivers and `fs` from the initramfs, which are the
+  only programs that may drive devices: a program started from a
+  volume's file never may, whatever the inittab says of its path. The
+  system volume is chosen once, at boot, by `root=`, and is `/` for good:
+  nothing switches back, and if its server goes, `/` answers -5. Only
+  the kernel heap's copy of the archive is freed; the loader's raw copy
+  at 0x50000000 stays, L0 having no call to give it back. A volume's
+  programs are read whole into their starter's memory before they start,
+  and copied again into the new process.
+- **The volumes are small and simple** (see [Volumes](#volumes)). Their
+  directories hold names of at most 55 bytes with no spaces, and a
+  program mark, but no other permissions, owners or times; a directory
+  never shrinks; a volume has at most 65534 clusters of 4 KB; and a disk
+  at most the GPT's 128. One
   file server, `fs`, serves the first disk's volumes, one request at a
   time, and a read moves at most 4092 bytes, what a reply holds. A
   write is as safe as the order it is made in, its data and then the
@@ -1404,8 +1549,8 @@ resizes a partition.
 - **A text entry does not scroll or select.** Its text is cut short with
   `...`, so an entry is made as wide as what it will hold, and there is no
   selecting, copying or pasting.
-- Images are copied from the archive into fresh frames for every process
-  that runs them. Only pages made with `shm_alloc` or `dma_alloc` can be
+- Images are copied from the archive, or a volume's file, into fresh
+  frames for every process that runs them. Only pages made with `shm_alloc` or `dma_alloc` can be
   shared, and a share cannot be taken back from a driver.
 - A terminal is shared by every process on it: their output interleaves,
   and lines typed go to whoever asks first. A process with no terminal,

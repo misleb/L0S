@@ -1,28 +1,33 @@
 ; mkfs.l0 -- writes a disk image with L0S's file system on it
 ; (user/lib/format/l0fs.l0): a GPT (user/lib/format/gpt.l0), then each
-; volume given, empty, zeros everywhere else.
+; volume given, empty or filled from an archive, zeros everywhere else.
 ;
-;   mkfs OUT SECTORS MS LABEL:START:COUNT...
+;   mkfs OUT SECTORS MS LABEL:START:COUNT[:ARCHIVE[:UUID]]...
 ;
 ; Each volume is a partition of L0FS's type from sector START, COUNT
 ; sectors, named LABEL, as its volume is; at most 128, inside the disk's
-; usable sectors, 34 to SECTORS - 34, and none overlapping. The
-; disk and each partition get a UUID of version 7 (user/lib/format/uuid.l0) of
-; MS, the Unix time in milliseconds, which the caller gives, since a host
-; program has no other: tools/mkdisk runs it for the demo's disk and the
-; tests', with date's. A host program, linking common/abi.l0, uuid.l0,
-; crc32.l0, gpt.l0 and l0fs.l0.
+; usable sectors, 34 to SECTORS - 34, and none overlapping. ARCHIVE, a
+; newc cpio such as the initramfs (common/initramfs.l0), fills the
+; volume: its directories, its files, and which of them are programs, an
+; x in their modes. The disk and each partition get a UUID of version 7
+; (user/lib/format/uuid.l0) of MS, the Unix time in milliseconds, which
+; the caller gives, since a host program has no other: tools/mkdisk runs
+; it with date's; or the partition gets UUID, if it is given, as a test's
+; disk needs, to be booted from by it. It says each volume's label and
+; UUID, a line each. A host program, linking common/abi.l0, text.l0,
+; initramfs.l0, cli.l0, uuid.l0, crc32.l0, gpt.l0 and l0fs.l0.
 
 (def usage () (list int)
-  "usage: mkfs OUT SECTORS MS LABEL:START:COUNT...\n")
+  "usage: mkfs OUT SECTORS MS LABEL:START:COUNT[:ARCHIVE[:UUID]]...\n")
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "mkfs" why))
 
 ; ---------------------------------------------------------------- the plan
 
-; A volume to make: its label, first sector and sectors.
-(data MkVol (MkVol (list int) int int))
+; A volume to make: its label, first sector and sectors, the archive to
+; fill it from, if any, and its partition's UUID, if one is given.
+(data MkVol (MkVol (list int) int int (list int) (Option Uuid)))
 
 ; What the arguments ask for: the disk's sectors and its volumes; or why
 ; they ask nothing.
@@ -39,18 +44,27 @@
       (plan_checked n (rev acc))
       (match (vol_arg (head ws))
         ((Some v) (plan_vols n (tail ws) (cons v acc)))
-        ((None) (MkBad (append "not LABEL:START:COUNT: " (head ws)))))))
+        ((None) (MkBad (append "not LABEL:START:COUNT[:ARCHIVE[:UUID]]: " (head ws)))))))
 
-; LABEL:START:COUNT, with numbers where they go.
+; LABEL:START:COUNT, with numbers where they go, then the archive, which
+; may be empty, and a UUID.
 (def vol_arg ((w (list int))) (Option MkVol)
   (let parts (split_on 58 w)                                    ; :
-    (if (not (eq (length parts) 3))
+    (if (if (lt (length parts) 3) true (gt (length parts) 5))
         ((None MkVol))
-        (let start (head (tail parts))
-          (let count (head (tail (tail parts)))
+        (let start (nth_or parts 1 "")
+          (let count (nth_or parts 2 "")
             (if (if (is_number start) (is_number count) false)
-                (Some (MkVol (head parts) (int_prefix start 0) (int_prefix count 0)))
+                (vol_arg_uuid (head parts) (int_prefix start 0) (int_prefix count 0) (nth_or parts 3 "") (drop parts 4))
                 ((None MkVol))))))))
+
+; The volume, its UUID from us, none or one that is a UUID.
+(def vol_arg_uuid ((label (list int)) (start int) (count int) (archive (list int)) (us (list (list int)))) (Option MkVol)
+  (if (is_empty us)
+      (Some (MkVol label start count archive ((None Uuid))))
+      (match (uuid_of_text (head us))
+        ((Some u) (Some (MkVol label start count archive (Some u))))
+        ((None) ((None MkVol))))))
 
 ; The plan, if every volume fits: one to the GPT's 128, each with a good
 ; label used once and room for data, inside the disk's usable sectors,
@@ -72,7 +86,7 @@
 
 (def vol_why ((n int) (v MkVol) (before (list MkVol))) (list int)
   (match v
-    ((MkVol label start count)
+    ((MkVol label start count archive u)
       (if (not (label_ok label))
           (append "a label is 1 to 15 letters, digits, - and _: " label)
           (if (label_used label before)
@@ -88,48 +102,224 @@
 (def label_used ((label (list int)) (vols (list MkVol))) bool
   (if (is_empty vols)
       false
-      (match (head vols) ((MkVol l s c) (if (eq l label) true (label_used label (tail vols)))))))
+      (match (head vols) ((MkVol l s c a u) (if (eq l label) true (label_used label (tail vols)))))))
 
 (def overlaps ((start int) (count int) (vols (list MkVol))) bool
   (if (is_empty vols)
       false
       (match (head vols)
-        ((MkVol l s c)
+        ((MkVol l s c a u)
           (if (if (lt start (add s c)) (lt s (add start count)) false) true (overlaps start count (tail vols)))))))
+
+; ---------------------------------------------------------------- filling
+
+; Bytes to write at an offset of the image: a list of them, or those of
+; an archive from one index up to another, which are not copied.
+(data Chunk (ChunkList (list int)) (ChunkOf bytes int int))
+
+; A chunk at its offset.
+(data Piece (Piece int Chunk))
+
+; A chunk's length.
+(def chunk_len ((c Chunk)) int
+  (match c ((ChunkList bs) (length bs)) ((ChunkOf b i j) (sub j i))))
+
+; A volume filled, and the pieces of its files' bytes; or why it cannot
+; be.
+(data Filled (Filled Vol (list Piece)) (FillBad (list int)))
+
+; v with the entries of the archive b, es, from i on: its directories,
+; and its files, their modes' x saying which are programs; the pieces
+; of their bytes at their offsets from base, the partition's first
+; byte, onto acc.
+(def fill ((v Vol) (b bytes) (es (array Entry)) (i int) (base int) (acc (list Piece))) Filled
+  (if (ge i (array_len es))
+      (Filled v acc)
+      (match (fill_one v b (array_get es i) base)
+        ((FillBad why) (FillBad why))
+        ((Filled v2 ps) (fill v2 b es (add i 1) base (rev_onto ps acc))))))
+
+; v with the entry e: a directory made, a file written, and anything
+; else, a link, left out.
+(def fill_one ((v Vol) (b bytes) (e Entry) (base int)) Filled
+  (let names (vol_path_names (entry_path e))
+    (if (is_empty names)
+        (Filled v (nil Piece))
+        (if (entry_is_dir e)
+            (match (dirs_made v (vol_root v) names)
+              ((DirBad why) (FillBad why))
+              ((DirAt v2 dc) (Filled v2 (nil Piece))))
+            (if (entry_is_file e)
+                (file_made v b e base names)
+                (Filled v (nil Piece)))))))
+
+; The directory names lead to, made where missing, as mkdir -p makes it:
+; the volume, and its first cluster; or why not.
+(data Dir (DirAt Vol int) (DirBad (list int)))
+
+(def dirs_made ((v Vol) (dc int) (names (list (list int)))) Dir
+  (if (is_empty names)
+      (DirAt v dc)
+      (let i (vol_find v dc (head names))
+        (if (ge i 0)
+            (match (vol_entry v (VolRef dc i))
+              ((VolDir n c) (dirs_made v c (tail names)))
+              ((VolFile n size first exec) (DirBad (append "a file where a directory goes: " n)))
+              ((VolNone) (DirBad "an entry lost")))
+            (dir_made v dc names)))))
+
+; The first of names made in directory dc, and the rest in it.
+(def dir_made ((v Vol) (dc int) (names (list (list int)))) Dir
+  (if (not (vol_name_ok (head names)))
+      (DirBad (append "a name a volume cannot hold: " (head names)))
+      (match (vol_slot v dc)
+        ((VolNoSlot) (DirBad "the volume is too small for the archive"))
+        ((VolSlot v2 r cs rs)
+          (match (vol_mkdir v2 r (head names))
+            ((VolNoRoom) (DirBad "the volume is too small for the archive"))
+            ((VolMade v3 c cs2) (dirs_made v3 c (tail names))))))))
+
+; The file e, at names, made in its directory, which is made if it is
+; missing, its bytes those of b it holds.
+(def file_made ((v Vol) (b bytes) (e Entry) (base int) (names (list (list int)))) Filled
+  (match (dirs_made v (vol_root v) (drop_last names))
+    ((DirBad why) (FillBad why))
+    ((DirAt v2 dc)
+      (let name (last names)
+        (if (not (vol_name_ok name))
+            (FillBad (append "a name a volume cannot hold: " name))
+            (if (ge (vol_find v2 dc name) 0)
+                (FillBad (append "a file twice: " (entry_path e)))
+                (match (vol_slot v2 dc)
+                  ((VolNoSlot) (FillBad "the volume is too small for the archive"))
+                  ((VolSlot v3 r cs rs)
+                    (file_written (vol_set_exec (vol_create v3 r name) r (entry_is_exec e)) r b e base)))))))))
+
+; The bytes of e written to the new file at r.
+(def file_written ((v Vol) (r VolRef) (b bytes) (e Entry) (base int)) Filled
+  (if (eq (entry_size e) 0)
+      (Filled v (nil Piece))
+      (match (vol_write v r 0 (entry_size e) (vol_at_none))
+        ((VolNoSpace) (FillBad "the volume is too small for the archive"))
+        ((VolWrote v2 spans fresh marked) (Filled v2 (span_pieces spans b (entry_start e) base (nil Piece)))))))
+
+; The pieces of spans, the bytes of b from at in order, onto acc.
+(def span_pieces ((spans (list VolSpan)) (b bytes) (at int) (base int) (acc (list Piece))) (list Piece)
+  (if (is_empty spans)
+      acc
+      (match (head spans)
+        ((VolSpan c off k)
+          (span_pieces (tail spans) b (add at k) base
+                       (cons (Piece (add base (add (mul c (vol_cluster_size)) off)) (ChunkOf b at (add at k))) acc))))))
+
+; v's metadata and every cluster of its directories, as pieces from base.
+(def vol_pieces ((v Vol) (base int)) (list Piece)
+  (cons (Piece base (ChunkList (vol_run_bytes v (VolRun 0 (vol_meta_sectors (vol_layout_of v))))))
+        (dir_pieces v base (dir_clusters v (map_keys (vol_dirs v)) (nil int)) (nil Piece))))
+
+; The clusters of the directories dcs, onto acc.
+(def dir_clusters ((v Vol) (dcs (list int)) (acc (list int))) (list int)
+  (if (is_empty dcs) acc (dir_clusters v (tail dcs) (rev_onto (vol_dir_clusters v (head dcs)) acc))))
+
+(def dir_pieces ((v Vol) (base int) (cs (list int)) (acc (list Piece))) (list Piece)
+  (if (is_empty cs)
+      acc
+      (let c (head cs)
+        (dir_pieces v base (tail cs)
+                    (cons (Piece (add base (mul c (vol_cluster_size)))
+                                 (ChunkList (vol_run_bytes v (VolRun (mul c (vol_cluster_sectors)) (vol_cluster_sectors)))))
+                          acc)))))
+
+; ------------------------------------------------------------- volumes
+
+; A volume made: its label, its partition's UUID, and the pieces it
+; writes; or why it cannot be.
+(data Made (Made (list int) Uuid (list Piece)) (MadeBad (list int)))
+
+; vol made, with id unless it gives its own UUID, its archive's entries
+; es of b, none if it has none.
+(def vol_made ((vol MkVol) (id Uuid) (b bytes) (es (array Entry))) Made
+  (match vol
+    ((MkVol l s c a u)
+      (let base (mul s (vol_sector_size))
+        (match (fill (vol_new l (vol_layout c)) b es 0 base (nil Piece))
+          ((FillBad why) (MadeBad (append l (append ": " why))))
+          ((Filled v ps) (Made l (match u ((Some x) x) ((None) id)) (append (vol_pieces v base) ps))))))))
+
+; The archive of vol, read and parsed: none for none.
+(data Archive (Archive bytes (array Entry)) (ArchiveBad (list int)))
+
+(def archive_of ((vol MkVol)) Archive
+  (match vol
+    ((MkVol l s c a u)
+      (if (is_empty a)
+          (Archive (bytes_from_list (nil int)) (array_new 0 (Entry "/" 0 0 0)))
+          (match (read_whole a)
+            ((Err why) (ArchiveBad (append a (append ": " why))))
+            ((Ok b)
+              (match (parse_initramfs b)
+                ((Err why) (ArchiveBad (append a (append ": " why))))
+                ((Ok es) (Archive b es)))))))))
+
+; Each of vols made, with the UUID of its place in ids, onto acc.
+(def vols_made ((vols (list MkVol)) (ids (list Uuid)) (acc (list Made))) (list Made)
+  (if (if (is_empty vols) true (is_empty ids))
+      (rev acc)
+      (vols_made (tail vols) (tail ids)
+                 (cons (match (archive_of (head vols))
+                         ((ArchiveBad why) (MadeBad why))
+                         ((Archive b es) (vol_made (head vols) (head ids) b es)))
+                       acc))))
+
+; Why the first of ms that could not be made could not, or empty.
+(def made_why ((ms (list Made))) (list int)
+  (if (is_empty ms)
+      ""
+      (match (head ms) ((MadeBad why) why) ((Made l u ps) (made_why (tail ms))))))
 
 ; -------------------------------------------------------------- the image
 
-; Bytes to write at an offset of the image.
-(data Piece (Piece int (list int)))
-
 ; What an n-sector image holds besides zeros: the GPT, which disk heads,
-; and each volume's metadata, by offset.
-(def pieces ((n int) (disk Uuid) (ids (list Uuid)) (vols (list MkVol))) (list Piece)
-  (sort (append (gpt_bytes (gpt_pieces n (GptDisk disk (parts_of vols ids)))) (metas vols))))
+; and each volume, its metadata, directories and files, by offset.
+(def pieces ((n int) (disk Uuid) (vols (list MkVol)) (ms (list Made))) (list Piece)
+  (sort (append (gpt_bytes (gpt_pieces n (GptDisk disk (parts_of vols ms)))) (made_pieces ms (nil Piece)))))
 
 ; The GPT's pieces, at their offsets.
 (def gpt_bytes ((ps (list GptPiece))) (list Piece)
   (if (is_empty ps)
       (nil Piece)
-      (match (head ps) ((GptPiece sector b) (cons (Piece (mul sector (vol_sector_size)) b) (gpt_bytes (tail ps)))))))
+      (match (head ps) ((GptPiece sector b) (cons (Piece (mul sector (vol_sector_size)) (ChunkList b)) (gpt_bytes (tail ps)))))))
 
-; Each volume as a partition, with the UUID of its place in ids, and its
-; label for its name.
-(def parts_of ((vols (list MkVol)) (ids (list Uuid))) (list GptPart)
-  (if (if (is_empty vols) true (is_empty ids))
+; Each volume as a partition, with its made UUID, and its label for its
+; name.
+(def parts_of ((vols (list MkVol)) (ms (list Made))) (list GptPart)
+  (if (if (is_empty vols) true (is_empty ms))
       (nil GptPart)
       (match (head vols)
-        ((MkVol l s c) (cons (GptPart (gpt_l0fs_type) (head ids) s c l) (parts_of (tail vols) (tail ids)))))))
+        ((MkVol l s c a u) (cons (GptPart (gpt_l0fs_type) (made_uuid (head ms)) s c l) (parts_of (tail vols) (tail ms)))))))
+
+(def made_uuid ((m Made)) Uuid (match m ((Made l u ps) u) ((MadeBad why) (uuid_nil))))
+
+(def made_pieces ((ms (list Made)) (acc (list Piece))) (list Piece)
+  (if (is_empty ms)
+      acc
+      (made_pieces (tail ms) (match (head ms) ((Made l u ps) (rev_onto ps acc)) ((MadeBad why) acc)))))
+
+; What mkfs says of the volumes: LABEL UUID, a line each.
+(def uuids_text ((ms (list Made))) (list int)
+  (rev (uuids_onto ms (nil int))))
+
+(def uuids_onto ((ms (list Made)) (acc (list int))) (list int)
+  (if (is_empty ms)
+      acc
+      (uuids_onto (tail ms)
+                  (match (head ms)
+                    ((Made l u ps) (push "\n" (push (uuid_text u) (push " " (push l acc)))))
+                    ((MadeBad why) acc)))))
 
 ; n UUIDs of version 7 of time ms, their noise from seed, seed + 1 and on.
 (def uuids ((ms int) (seed int) (n int)) (list Uuid)
   (if (le n 0) (nil Uuid) (cons (uuid_v7 ms (uuid_noise seed 10)) (uuids ms (add seed 1) (sub n 1)))))
-
-(def metas ((vols (list MkVol))) (list Piece)
-  (if (is_empty vols)
-      (nil Piece)
-      (match (head vols)
-        ((MkVol l s c) (cons (Piece (mul s (vol_sector_size)) (vol_meta (vol_new l (vol_layout c)))) (metas (tail vols)))))))
 
 ; A cluster of zeros, written as many times as the gaps need.
 (def zero_block () bytes (bytes_from_list (zeros 4096)))
@@ -140,10 +330,15 @@
   (if (is_empty ps)
       (write_zeros f (sub size at) zs)
       (match (head ps)
-        ((Piece off b)
+        ((Piece off c)
           (let z (write_zeros f (sub off at) zs)
-            (let w (file_write_bytes f (bytes_from_list b) 0 (length b))
-              (write_image f (tail ps) (add off (length b)) size zs)))))))
+            (let w (write_chunk f c)
+              (write_image f (tail ps) (add off (chunk_len c)) size zs)))))))
+
+(def write_chunk ((f IoFile) (c Chunk)) int
+  (match c
+    ((ChunkList bs) (file_write_bytes f (bytes_from_list bs) 0 (length bs)))
+    ((ChunkOf b i j) (file_write_bytes f b i j))))
 
 ; n zeros written to f.
 (def write_zeros ((f IoFile) (n int) (zs bytes)) int
@@ -169,13 +364,18 @@
 ; The image written to out: its UUIDs' noise seeded from the clock.
 (def made ((out (list int)) (n int) (ms int) (vols (list MkVol))) int
   (let ids (uuids ms (clock_ns) (add 1 (length vols)))
-    (match (open_out out)
-      ((IoFailed fault why) (complain (append out (append ": " why))))
-      ((IoOpened f) (written out f (pieces n (head ids) (tail ids) vols) n)))))
+    (let mades (vols_made vols (tail ids) (nil Made))
+      (let why (made_why mades)
+        (if (not (is_empty why))
+            (complain why)
+            (match (open_out out)
+              ((IoFailed fault why2) (complain (append out (append ": " why2))))
+              ((IoOpened f) (written out f (pieces n (head ids) vols mades) n (uuids_text mades)))))))))
 
-; The pieces of an n-sector image written to f, and f closed.
-(def written ((out (list int)) (f IoFile) (ps (list Piece)) (n int)) int
+; The pieces of an n-sector image written to f, f closed, and the
+; volumes' UUIDs said.
+(def written ((out (list int)) (f IoFile) (ps (list Piece)) (n int) (said (list int))) int
   (let w (write_image f ps 0 (mul n (vol_sector_size)) (zero_block))
     (match (file_close f)
-      ((Done) 0)
+      ((Done) (let s (write_str said) 0))
       ((NotDone fault why) (complain (append out (append ": " why)))))))

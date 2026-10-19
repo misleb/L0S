@@ -1,14 +1,19 @@
 ; mounts.l0 -- the mount table: where each path's files are. The first
-; mount is always the initramfs, at /, which the kernel answers for
-; itself; after it, each volume a file server mounted, at /Volumes/LABEL,
-; whose calls the kernel sends that server's port. Pure: ipc.l0 keeps the
-; table beside the names, so a server's mounts go with its ports.
+; mount is /: the initramfs, which the kernel answers for itself, until
+; a volume is made the system volume by root_switch, once, and is / from
+; then on. After it, each volume a file server mounted, at
+; /Volumes/LABEL, whose calls the kernel sends that server's port; the
+; system volume is there too. Pure: ipc.l0 keeps the table beside the
+; names, so a server's mounts go with its ports, but for /, which stays
+; the system volume's though its server goes, and then answers nothing.
 ;
 ; /Volumes itself is a directory that is always there, holding only the
 ; volumes: nothing can be made in it, only in a volume.
 
-; A mount: the initramfs at /, or a server's volume, its label and port.
-(data Mount (MountRoot) (MountServer (list int) int))
+; A mount: the initramfs at /; a server's volume, its label, its
+; partition's UUID as text, which may be empty, and its port; or the
+; system volume at /, the same three.
+(data Mount (MountRoot) (MountServer (list int) (list int) int) (MountSystem (list int) (list int) int))
 
 ; The table at boot: the initramfs alone.
 (def mounts_new () (list Mount) (cons (MountRoot) (nil Mount)))
@@ -20,31 +25,52 @@
 (def mount_path ((m Mount)) (list int)
   (match m
     ((MountRoot) "/")
-    ((MountServer label port) (append (volumes_dir) (cons 47 label)))))
+    ((MountServer label uuid port) (append (volumes_dir) (cons 47 label)))
+    ((MountSystem label uuid port) "/")))
 
 ; The port m's calls go to, 0 for the kernel's own.
 (def mount_port ((m Mount)) int
-  (match m ((MountRoot) 0) ((MountServer label port) port)))
+  (match m ((MountRoot) 0) ((MountServer label uuid port) port) ((MountSystem label uuid port) port)))
+
+; The UUID of m's partition, as text; empty for the initramfs.
+(def mount_uuid ((m Mount)) (list int)
+  (match m ((MountRoot) "") ((MountServer label uuid port) uuid) ((MountSystem label uuid port) uuid)))
+
+; Whether / is still the initramfs.
+(def root_is_initramfs ((ms (list Mount))) bool
+  (if (is_empty ms) true (match (head ms) ((MountRoot) true) ((MountServer l u p) false) ((MountSystem l u p) false))))
 
 ; ----------------------------------------------------------------- where
 
 ; Where an absolute path's file is: the initramfs's; /Volumes itself; a
-; mounted volume's, and its server's port; or in no volume, either
-; straight in /Volumes (true), where nothing can be made, or in a volume
-; that is not mounted (false).
-(data Where (InRoot) (InVolumes) (InServer int) (InNothing bool))
+; mounted volume's, its server's port, and the path to ask the server
+; for, which for the system volume is the path in /Volumes/LABEL; or in
+; no volume, either straight in /Volumes (true), where nothing can be
+; made, or in a volume that is not mounted (false).
+(data Where (InRoot) (InVolumes) (InServer int (list int)) (InNothing bool))
 
 (def mount_where ((ms (list Mount)) (path (list int))) Where
   (if (eq path (volumes_dir))
       (InVolumes)
       (if (not (starts_with path "/Volumes/"))
-          (InRoot)
+          (root_where ms path)
           (let rest (drop_n path 9)
             (let label (up_to 47 rest)
               (let port (mount_port_of ms label)
                 (if (gt port 0)
-                    (InServer port)
+                    (InServer port path)
                     (InNothing (eq (length label) (length rest))))))))))
+
+; Where a path outside /Volumes is: the initramfs's, or the system
+; volume's, in /Volumes/LABEL.
+(def root_where ((ms (list Mount)) (path (list int))) Where
+  (if (is_empty ms)
+      (InRoot)
+      (match (head ms)
+        ((MountRoot) (InRoot))
+        ((MountServer label uuid port) (InRoot))
+        ((MountSystem label uuid port)
+          (InServer port (append (volumes_dir) (cons 47 (if (eq path "/") label (append label path)))))))))
 
 ; The port the volume label is mounted from, or 0.
 (def mount_port_of ((ms (list Mount)) (label (list int))) int
@@ -52,7 +78,17 @@
       0
       (match (head ms)
         ((MountRoot) (mount_port_of (tail ms) label))
-        ((MountServer l port) (if (eq l label) port (mount_port_of (tail ms) label))))))
+        ((MountSystem l uuid port) (mount_port_of (tail ms) label))
+        ((MountServer l uuid port) (if (eq l label) port (mount_port_of (tail ms) label))))))
+
+; The volume label's mount, if it is mounted.
+(def mount_named ((ms (list Mount)) (label (list int))) (Option Mount)
+  (if (is_empty ms)
+      ((None Mount))
+      (match (head ms)
+        ((MountRoot) (mount_named (tail ms) label))
+        ((MountSystem l uuid port) (mount_named (tail ms) label))
+        ((MountServer l uuid port) (if (eq l label) (Some (head ms)) (mount_named (tail ms) label))))))
 
 ; Where a rename from a to b goes: 0 to the kernel, both being in the
 ; initramfs; a server's port, both being in its volumes; or the answer, a
@@ -65,14 +101,19 @@
     ((InNothing direct) -3)
     ((InVolumes) -4)
     ((InRoot) (rename_to b 0))
-    ((InServer port) (rename_to b port))))
+    ((InServer port path) (rename_to b port))))
 
 (def rename_to ((b Where) (from int)) int
   (match b
     ((InVolumes) -8)
     ((InNothing direct) (if direct -4 -9))
     ((InRoot) (if (eq from 0) 0 -10))
-    ((InServer port) (if (eq port from) port -10))))
+    ((InServer port path) (if (eq port from) port -10))))
+
+; The path to ask a server for, where w is in a volume; path itself
+; otherwise.
+(def where_path ((w Where) (path (list int))) (list int)
+  (match w ((InServer port p) p) ((InRoot) path) ((InVolumes) path) ((InNothing direct) path)))
 
 ; ------------------------------------------------------------- changing
 
@@ -80,28 +121,66 @@
 ; mounted already, err_fault if it is no label.
 (data MountAdd (MountAdded (list Mount)) (MountRefused int))
 
-(def mount_add ((ms (list Mount)) (label (list int)) (port int)) MountAdd
+(def mount_add ((ms (list Mount)) (label (list int)) (uuid (list int)) (port int)) MountAdd
   (if (not (label_ok label))
       (MountRefused (err_fault))
       (if (gt (mount_port_of ms label) 0)
           (MountRefused (err_taken))
-          (MountAdded (append ms (cons (MountServer label port) (nil Mount)))))))
+          (MountAdded (append ms (cons (MountServer label uuid port) (nil Mount)))))))
 
-; The table without the volumes of the ports in dead.
+; The table with the volume label made /, or why not: err_taken if / is
+; a volume already, err_no_port if label is not mounted.
+(def mount_root ((ms (list Mount)) (label (list int))) MountAdd
+  (if (not (root_is_initramfs ms))
+      (MountRefused (err_taken))
+      (match (mount_named ms label)
+        ((None) (MountRefused (err_no_port)))
+        ((Some m)
+          (match m
+            ((MountServer l uuid port) (MountAdded (cons (MountSystem l uuid port) (tail ms))))
+            ((MountRoot) (MountRefused (err_no_port)))
+            ((MountSystem l uuid port) (MountRefused (err_no_port))))))))
+
+; The table without the volumes of the ports in dead. / stays, though
+; its server be dead: it is the system volume for good.
 (def mounts_without ((ms (list Mount)) (dead (list int))) (list Mount)
   (if (is_empty ms)
       ms
       (match (head ms)
         ((MountRoot) (cons (head ms) (mounts_without (tail ms) dead)))
-        ((MountServer label port)
+        ((MountSystem label uuid port) (cons (head ms) (mounts_without (tail ms) dead)))
+        ((MountServer label uuid port)
           (if (any_eq port dead) (mounts_without (tail ms) dead) (cons (head ms) (mounts_without (tail ms) dead)))))))
 
-; Mount i of the table, 0 the initramfs, if there is one.
+; Mount i of the table, 0 /, if there is one.
 (def mounts_at ((ms (list Mount)) (i int)) (Option Mount)
   (if (if (lt i 0) true (is_empty ms))
       ((None Mount))
       (if (eq i 0) (Some (head ms)) (mounts_at (tail ms) (sub i 1)))))
 
-; A mount as mount_at gives it: its port, a u32, then where it is.
+; A mount as mount_at gives it: its port, a u32, then where it is, then,
+; if it has a UUID, a NUL and the UUID.
 (def mount_record ((m Mount)) (list int)
-  (append (u32_le (mount_port m)) (mount_path m)))
+  (let u (mount_uuid m)
+    (append (u32_le (mount_port m)) (append (mount_path m) (if (is_empty u) u (cons 0 u))))))
+
+; A mount's label and UUID as fs_mount sends them: UUID LABEL, or LABEL
+; alone for none; its UUID, its label, or none if it is neither.
+(data MountName (MountName (list int) (list int)) (MountNameBad))
+
+(def mount_name_of ((s (list int))) MountName
+  (let ws (split_on 32 s)
+    (if (eq (length ws) 1)
+        (MountName "" (head ws))
+        (if (if (eq (length ws) 2) (uuid_text_ok (head ws)) false)
+            (MountName (head ws) (head (tail ws)))
+            (MountNameBad)))))
+
+; Whether s could be a UUID as text: 36 of hexadecimal digits and -.
+(def uuid_text_ok ((s (list int))) bool
+  (if (eq (length s) 36) (uuid_chars s) false))
+
+(def uuid_chars ((s (list int))) bool
+  (if (is_empty s)
+      true
+      (if (if (eq (head s) 45) true (ge (hex_val (head s)) 0)) (uuid_chars (tail s)) false)))

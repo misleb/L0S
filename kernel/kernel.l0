@@ -20,9 +20,13 @@
 
 ; The initramfs: its bytes and entries; for each entry, whether it may
 ; drive devices and its default arguments, as the inittab says; the entry
-; processes read as standard input, or -1; and how far into it they have
-; read.
-(data Boot (Boot bytes (array Entry) (array bool) (array (list (list int))) int int))
+; processes read as standard input, or -1; how far into it they have
+; read; and the path of each process started from an image of its own
+; (spawn_image), by pid, as entries name the rest. Once a volume is /,
+; the bytes are given up, none, and the stdin entry with them; the
+; entries stay, to name the processes started from them, and to say
+; which drive devices and what arguments a path gets.
+(data Boot (Boot bytes (array Entry) (array bool) (array (list (list int))) int int (Map int (list int))))
 
 ; Every slot of the table, the pids ready to run in order, the ports, the
 ; sleepers, the bound interrupts, the initramfs, the pid each slot holds,
@@ -37,7 +41,7 @@
   (match c
     ((Config launches devs defaults stdin)
       (Kernel (array_new 256 (Free)) (Queue (nil int) (nil int)) (ipc_new) (nil Sleeper)
-              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0) (pids_new) (mem_new)))))
+              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int)))) (pids_new) (mem_new)))))
 
 ; ------------------------------------------------------------- the fields
 
@@ -47,30 +51,68 @@
 
 (def k_entry ((k Kernel) (i int)) Entry
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur) (array_get es i))))))
+    (match boot ((Boot input es devs defaults stdin cur names) (array_get es i))))))
 
 (def k_entries ((k Kernel)) (array Entry)
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur) es)))))
+    (match boot ((Boot input es devs defaults stdin cur names) es)))))
 
 (def k_entry_count ((k Kernel)) int
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur) (array_len es))))))
+    (match boot ((Boot input es devs defaults stdin cur names) (array_len es))))))
 
 (def k_entry_dev ((k Kernel) (i int)) bool
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur) (array_get devs i))))))
+    (match boot ((Boot input es devs defaults stdin cur names) (array_get devs i))))))
 
 (def k_entry_args ((k Kernel) (i int)) (list (list int))
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur) (array_get defaults i))))))
+    (match boot ((Boot input es devs defaults stdin cur names) (array_get defaults i))))))
 
 (def k_input ((k Kernel)) bytes
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur) input)))))
+    (match boot ((Boot input es devs defaults stdin cur names) input)))))
 
 (def is_entry ((k Kernel) (i int)) bool
   (if (lt i 0) false (lt i (k_entry_count k))))
+
+; Whether k still holds the initramfs's bytes: until a volume is /.
+(def k_held ((k Kernel)) bool
+  (gt (bytes_len (k_input k)) 0))
+
+; k with the initramfs's bytes given up, and so its stdin file.
+(def k_free_initramfs ((k Kernel)) Kernel
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem)
+      (match boot
+        ((Boot input es devs defaults stdin cur names)
+          (Kernel slots ready ipc ss irqs (Boot (bytes_from_list (nil int)) es devs defaults -1 0 names) next mem))))))
+
+; The path of p's program: its entry's, or its image's, as spawn_image
+; was given it.
+(def k_proc_path ((k Kernel) (p Proc)) (list int)
+  (if (is_entry k (proc_module p))
+      (entry_path (k_entry k (proc_module p)))
+      (match (map_get (k_names k) (proc_pid p))
+        ((Some path) path)
+        ((None) "?"))))
+
+(def k_names ((k Kernel)) (Map int (list int))
+  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+    (match boot ((Boot input es devs defaults stdin cur names) names)))))
+
+; k with pid's image's path forgotten, pid having ended.
+(def k_forget_name ((k Kernel) (pid int)) Kernel
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem)
+      (match boot
+        ((Boot input es devs defaults stdin cur names)
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid)) next mem))))))
+
+; The arguments the inittab gives the program at path, if it names it.
+(def k_path_args ((k Kernel) (path (list int))) (list (list int))
+  (let e (entry_index (k_entries k) path)
+    (if (lt e 0) (nil (list int)) (k_entry_args k e))))
 
 (def with_sleepers ((k Kernel) (s (list Sleeper))) Kernel
   (match k ((Kernel slots ready ipc old irqs boot next mem) (Kernel slots ready ipc s irqs boot next mem))))
@@ -292,41 +334,40 @@
 
 ; Entry m started by parent, with args if given, and otherwise with the
 ; arguments the inittab gives it, and the terminal tty, its parent's:
-; err_no_port if there is no entry m, err_denied if it is not a program,
-; err_too_big if it is over the 4 MB of a process's image, err_fault if
-; no process can be made.
+; err_no_port if there is no entry m, or the initramfs has been given up,
+; err_denied if it is not a program, err_too_big if it is over the 4 MB
+; of a process's image, err_fault if no process can be made.
 (def spawn ((k Kernel) (m int) (parent int) (args (Option (list (list int)))) (tty int)) Spawned
-  (if (not (is_entry k m))
+  (if (if (not (is_entry k m)) true (not (k_held k)))
       (Spawned k (err_no_port))
       (if (not (entry_is_exec (k_entry k m)))
           (Spawned k (err_denied))
-          (if (gt (entry_size (k_entry k m)) (sub (image_limit) (user_base)))
+          (if (gt (entry_size (k_entry k m)) (image_room))
               (Spawned k (err_too_big))
-              (spawn_entry k m parent (args_or args (k_entry_args k m)) tty)))))
+              (spawn_from k m parent (args_or args (k_entry_args k m)) tty (k_input k) (entry_start (k_entry k m)) (entry_end (k_entry k m)))))))
 
-; The new process takes the slot pick_slot chooses, never that of parent,
-; which is running, and so out of the table; err_fault if every slot is
-; live.
-(def spawn_entry ((k Kernel) (m int) (parent int) (args (list (list int))) (tty int)) Spawned
+; The most bytes a process's image has: its 4 MB.
+(def image_room () int (sub (image_limit) (user_base)))
+
+; A new process of module m, an entry, or -1 for an image of its own,
+; whose image is the bytes of input from start up to end. It takes the
+; slot pick_slot chooses, never that of parent, which is running, and so
+; out of the table; err_fault if every slot is live.
+(def spawn_from ((k Kernel) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int)) Spawned
   (let s (pick_slot (slot_kinds k parent) (k_pids k) (slot_of parent))
     (if (lt s 0)
         (Spawned k (err_fault))
-        (spawn_in k s m parent args tty))))
+        (spawn_in k s m parent args tty input start end))))
 
-(def spawn_in ((k Kernel) (s int) (m int) (parent int) (args (list (list int))) (tty int)) Spawned
+(def spawn_in ((k Kernel) (s int) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int)) Spawned
   (match k
     ((Kernel slots ready ipc ss irqs boot pids mem)
       (let pid (pid_next_in pids s)
-        (match boot
-          ((Boot input es devs defaults stdin cur)
-            (let e (array_get es m)
-              (match (proc_create pid parent m args tty input (entry_start e) (entry_end e))
-                ((CreateFailed)
-                  (Spawned (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur) pids mem) (err_fault)))
-                ((Created p)
-                  (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs
-                                   (Boot input es devs defaults stdin cur) (pids_give pids s) mem)
-                           pid))))))))))
+        (match (proc_create pid parent m args tty input start end)
+          ((CreateFailed) (Spawned (Kernel slots ready ipc ss irqs boot pids mem) (err_fault)))
+          ((Created p)
+            (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) mem)
+                     pid)))))))
 
 (def k_pids ((k Kernel)) Pids (match k ((Kernel slots ready ipc ss irqs boot pids mem) pids)))
 
@@ -374,7 +415,7 @@
   (let pid (proc_pid p)
     (let ws (proc_watchers p)
       (let ns (irq_numbers k)
-        (let k1 (release_irqs (k_forget (k_release k p) pid) pid ns)
+        (let k1 (release_irqs (k_forget_name (k_forget (k_release k p) pid) pid) pid ns)
           (let k2 (with_sleepers k1 (sleep_remove (k_sleepers k1) pid))
             (let told (if (is_empty ws) (has_waiter k2 pid 1) true)
               (let k3 (wake_waiters (put_slot k2 pid (Dead (Gone status (proc_parent p) told))) pid status 1)
@@ -502,7 +543,7 @@
 
 ; p ended by the kernel, for why, as a fault ends a process on Unix.
 (def kill ((k Kernel) (p Proc) (why (list int))) Step
-  (let w (write_err (kill_message (base_name (entry_path (k_entry k (proc_module p)))) (proc_pid p) why))
+  (let w (write_err (kill_message (base_name (k_proc_path k p)) (proc_pid p) why))
     (exit_proc k p 139)))
 
 (def kill_message ((name (list int)) (pid int) (why (list int))) (list int)
@@ -516,8 +557,10 @@
 (def resume_with ((k Kernel) (p Proc) (v int)) Step
   (Resume k (proc_answer p v)))
 
+; Whether p may drive devices: a program of the initramfs's with a dev
+; line; never one started from an image of its own.
 (def proc_dev ((k Kernel) (p Proc)) bool
-  (k_entry_dev k (proc_module p)))
+  (if (is_entry k (proc_module p)) (k_entry_dev k (proc_module p)) false))
 
 ; The region call: device memory for a dev module, mapped where its
 ; device pages are next free, or, for a range in its device area, the
@@ -637,6 +680,9 @@
     ((CShmRevoke va n pid) (do_shm_revoke k p va n pid))
     ((CMount port buf len) (do_mount k p port buf len))
     ((CMountAt i buf max) (do_mount_at k p i buf max))
+    ((CBootArgs buf max) (give_record k p (encode_args (boot_args)) buf max))
+    ((CRootSwitch buf len) (do_root_switch k p buf len))
+    ((CSpawnImage buf len) (do_spawn_image k p buf len))
     ((CWait pid) (do_wait k p pid))
     ((CSleepUntil t) (do_sleep k p t))
     ((CIrqBind irq port) (do_irq_bind k p irq port))
@@ -668,20 +714,25 @@
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem)
       (match boot
-        ((Boot input es devs defaults stdin cur)
+        ((Boot input es devs defaults stdin cur names)
           (if (lt stdin 0)
-              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur) next mem) p 0)
+              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names) next mem) p 0)
               (let e (array_get es stdin)
                 (let from (add (entry_start e) cur)
                   (let cnt (min n (min (io_chunk) (sub (entry_end e) from)))
                     (match (proc_copy_in p buf input from (add from cnt))
                       ((CopyInBad q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur) next mem) q -5))
+                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names) next mem) q -5))
                       ((CopiedIn q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt)) next mem)
+                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names) next mem)
                                      q cnt))))))))))))
 
+; A file of the initramfs, opened before it was given up, reads as at its
+; end from then on.
 (def read_open ((k Kernel) (p Proc) (s int) (e int) (offset int) (buf int) (n int)) Step
+  (if (k_held k) (read_held k p s e offset buf n) (resume_with k p 0)))
+
+(def read_held ((k Kernel) (p Proc) (s int) (e int) (offset int) (buf int) (n int)) Step
   (let entry (k_entry k e)
     (let from (add (entry_start entry) offset)
       (let cnt (min n (min (io_chunk) (sub (entry_end entry) from)))
@@ -714,7 +765,7 @@
             ((InRoot) (open_root k q path mode))
             ((InVolumes) (resume_with k q -8))
             ((InNothing direct) (resume_with k q (if (eq mode 1) -3 (if direct -4 -9))))
-            ((InServer port) (open_remote k q port path mode)))))))
+            ((InServer port asked) (open_remote k q port asked mode)))))))
 
 ; Opens the initramfs's file at path. To read, mode 1: a new stream, or -3
 ; if there is no such file, -8 if it is a directory, -5 if p has
@@ -777,12 +828,15 @@
         ((PathBad r) (resume_with k r -5))
         ((PathGot r b)
           (let ms (ipc_mounts (k_ipc k))
-            (let route (rename_route (mount_where ms a) (mount_where ms b))
-              (if (lt route 0)
-                  (resume_with k r route)
-                  (if (eq route 0)
-                      (resume_with k r (if (lt (entry_index (k_entries k) a) 0) -3 -4))
-                      (ask_fs k r route (fs_op_word) 0 0 (append "rename " (append a (cons 32 b)))))))))))))
+            (let wa (mount_where ms a)
+              (let wb (mount_where ms b)
+                (let route (rename_route wa wb)
+                  (if (lt route 0)
+                      (resume_with k r route)
+                      (if (eq route 0)
+                          (resume_with k r (if (lt (entry_index (k_entries k) a) 0) -3 -4))
+                          (ask_fs k r route (fs_op_word) 0 0
+                                  (append "rename " (append (where_path wa a) (cons 32 (where_path wb b))))))))))))))))
 
 ; Removes the file at path: nothing in the initramfs can be, -3 if there
 ; is no file by the name, -8 for a directory, and otherwise -4; a
@@ -797,7 +851,7 @@
             (resume_with k q (if (lt e 0) -3 (if (entry_is_dir (k_entry k e)) -8 -4)))))
         ((InVolumes) (resume_with k q -8))
         ((InNothing direct) (resume_with k q -3))
-        ((InServer port) (ask_fs k q port (fs_op_word) 0 0 (append "remove " path)))))))
+        ((InServer port asked) (ask_fs k q port (fs_op_word) 0 0 (append "remove " asked)))))))
 
 ; Standard output and error go to p's terminal, or are the kernel's own
 ; if it has none, or its terminal has gone. Streams from 3 are written
@@ -923,18 +977,100 @@
       ((CopyInBad r) (proc_answer r -5))
       ((CopiedIn r) (proc_answer r cnt)))))
 
-; The volume label, the len bytes at buf, mounted from port, p's, at
+; The volume LABEL, the len bytes at buf being UUID LABEL, its
+; partition's UUID first, or LABEL alone, mounted from port, p's, at
 ; /Volumes/LABEL: 0, or err_no_port if port is not p's, err_taken if
-; label is mounted already, err_fault if it is no label or p may not
-; give it.
+; label is mounted already, err_fault if it is no label, the UUID is
+; none, or p may not give them.
 (def do_mount ((k Kernel) (p Proc) (port int) (buf int) (len int)) Step
-  (if (if (lt len 1) true (gt len 15))
+  (if (if (lt len 1) true (gt len 52))
       (resume_with k p (err_fault))
       (match (proc_copy_out p buf len)
         ((CopyOutBad q) (resume_with k q (err_fault)))
         ((CopiedOut q b)
-          (match (ipc_mount (k_ipc k) (proc_pid q) port (bytes_to_list b))
-            ((Registered code i2) (resume_with (with_ipc k i2) q code)))))))
+          (match (mount_name_of (bytes_to_list b))
+            ((MountNameBad) (resume_with k q (err_fault)))
+            ((MountName uuid label)
+              (match (ipc_mount (k_ipc k) (proc_pid q) port label uuid)
+                ((Registered code i2) (resume_with (with_ipc k i2) q code)))))))))
+
+; The volume label, the len bytes at buf, made /, and the initramfs given
+; up: 0, or err_denied if p's program is not the initramfs's, err_taken
+; if / is a volume already, err_no_port if label is not mounted, and
+; err_fault if it is no label or p may not give it.
+(def do_root_switch ((k Kernel) (p Proc) (buf int) (len int)) Step
+  (if (if (lt len 1) true (gt len 15))
+      (resume_with k p (err_fault))
+      (if (not (is_entry k (proc_module p)))
+          (resume_with k p (err_denied))
+          (match (proc_copy_out p buf len)
+            ((CopyOutBad q) (resume_with k q (err_fault)))
+            ((CopiedOut q b)
+              (match (ipc_root (k_ipc k) (bytes_to_list b))
+                ((Registered code i2)
+                  (if (eq code 0)
+                      (resume_with (k_free_initramfs (with_ipc k i2)) q 0)
+                      (resume_with k q code)))))))))
+
+; The board's boot arguments, split at spaces.
+(def boot_args () (list (list int))
+  (boot_args_from (sub (arg_count) 1) (nil (list int))))
+
+(def boot_args_from ((i int) (acc (list (list int)))) (list (list int))
+  (if (lt i 0) acc (boot_args_from (sub i 1) (cons (arg i) acc))))
+
+; A program started from the len bytes at buf, as spawn_image_bytes lays
+; them out: its path, its arguments, then its image. Its pid; or
+; err_too_big if they are over the room an image, a path and a message of
+; arguments take, or its image over 4 MB; err_fault if p may not give
+; them, or they are not laid out so; err_denied for no image at all; or
+; what spawn_from gives. Given no arguments it gets the inittab's for its
+; path; it never drives devices.
+(def do_spawn_image ((k Kernel) (p Proc) (buf int) (len int)) Step
+  (if (lt len 8)
+      (resume_with k p (err_fault))
+      (if (gt len (add (add 8 (path_limit)) (add (max_message) (image_room))))
+          (resume_with k p (err_too_big))
+          (match (proc_copy_out p buf len)
+            ((CopyOutBad q) (resume_with k q (err_fault)))
+            ((CopiedOut q b) (spawn_image_of k q b))))))
+
+(def spawn_image_of ((k Kernel) (p Proc) (b bytes)) Step
+  (let pl (le_u32 b 0)
+    (if (if (lt pl 1) true (if (gt pl (path_limit)) true (not (has b 4 (add pl 4)))))
+        (resume_with k p (err_fault))
+        (let al (le_u32 b (add 4 pl))
+          (let at (add 8 pl)
+            (if (if (gt al (max_message)) true (not (has b at al)))
+                (resume_with k p (err_fault))
+                (spawn_image_args k p b (normal_path (bytes_range b 4 (add 4 pl))) (bytes_range b at (add at al)) (add at al))))))))
+
+; The image of b from start, its path and its encoded arguments, none
+; for the inittab's.
+(def spawn_image_args ((k Kernel) (p Proc) (b bytes) (path (list int)) (enc (list int)) (start int)) Step
+  (let size (sub (bytes_len b) start)
+    (if (lt size 1)
+        (resume_with k p (err_denied))
+        (if (gt size (image_room))
+            (resume_with k p (err_too_big))
+            (if (is_empty enc)
+                (spawned_image k p b path (k_path_args k path) start)
+                (match (decode_args (bytes_from_list enc))
+                  ((None) (resume_with k p (err_fault)))
+                  ((Some args) (spawned_image k p b path args start))))))))
+
+(def spawned_image ((k Kernel) (p Proc) (b bytes) (path (list int)) (args (list (list int))) (start int)) Step
+  (match (spawn_from k -1 (proc_pid p) args (proc_tty_port p) b start (bytes_len b))
+    ((Spawned k2 pid)
+      (resume_with (if (gt pid 0) (k_name_put k2 pid path) k2) p pid))))
+
+; k knowing pid's image's path.
+(def k_name_put ((k Kernel) (pid int) (path (list int))) Kernel
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem)
+      (match boot
+        ((Boot input es devs defaults stdin cur names)
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_put names pid path)) next mem))))))
 
 ; Mount i's record copied to buf, if it fits in max: its length, or
 ; err_no_port if there is no mount i, err_too_big if it does not fit.
@@ -1063,18 +1199,19 @@
                   (match (spawn k m (proc_pid q) (Some args) (proc_tty_port q))
                     ((Spawned k2 pid) (resume_with k2 q pid))))))))))
 
-; pid's record, copied to buf if it fits in max: its length, or
-; err_no_port if pid was never used, err_too_big if it does not fit. The
-; caller is the only process running, and is out of the table while it
-; runs, so its own record is made from p.
+; pid's record, then its program's path, copied to buf, as much as max
+; holds: its length, or err_no_port if pid was never used, err_too_big
+; if not even the record fits. The caller is the only process running,
+; and is out of the table while it runs, so its own record is made from
+; p. An exited process's has no path.
 (def do_proc_info ((k Kernel) (p Proc) (pid int) (buf int) (max int)) Step
   (if (not (is_pid pid))
       (resume_with k p (err_no_port))
       (if (eq pid (proc_pid p))
-          (give_record k p (proc_info_record p true) buf max)
+          (give_cut k p (append (proc_info_record p true) (k_proc_path k p)) buf max)
           (match (record_of k pid)
             ((None) (resume_with k p (err_no_port)))
-            ((Some r) (give_record k p r buf max))))))
+            ((Some r) (give_cut k p r buf max))))))
 
 (def record_of ((k Kernel) (pid int)) (Option (list int))
   (if (not (k_current k pid))
@@ -1083,8 +1220,15 @@
         ((Kernel slots ready ipc ss irqs boot next mem)
           (match (array_get slots (slot_of pid))
             ((Free) ((None (list int))))
-            ((Live q) (Some (proc_info_record q false)))
+            ((Live q) (Some (append (proc_info_record q false) (k_proc_path k q))))
             ((Dead g) (Some (proc_record (state_exited) 0 -1 (gone_status g)))))))))
+
+; A record r copied to buf, as much of it as max holds past its first
+; proc_record_len bytes, which must fit.
+(def give_cut ((k Kernel) (p Proc) (r (list int)) (buf int) (max int)) Step
+  (if (lt max (proc_record_len))
+      (resume_with k p (err_too_big))
+      (give_record k p (take r max) buf max)))
 
 (def give_record ((k Kernel) (p Proc) (r (list int)) (buf int) (max int)) Step
   (if (gt (length r) max)
@@ -1160,14 +1304,15 @@
 ; The name of module i, copied to buf if it fits in max: its length, or
 ; err_no_port if there is no module i, err_too_big if it does not fit.
 ; An entry's path as call 269 gives it: a directory's with a final /, so
-; a caller can tell directories from files.
+; a caller can tell directories from files, and a program's followed by
+; a NUL and x, so that a copy of it can be marked one too.
 (def shown_path ((e Entry)) (list int)
   (if (if (entry_is_dir e) (not (eq (entry_path e) "/")) false)
       (append (entry_path e) "/")
-      (entry_path e)))
+      (if (entry_is_exec e) (append (entry_path e) (cons 0 "x")) (entry_path e))))
 
 (def do_module_name ((k Kernel) (p Proc) (i int) (buf int) (max int)) Step
-  (if (not (is_entry k i))
+  (if (if (not (is_entry k i)) true (not (k_held k)))
       (resume_with k p (err_no_port))
       (let name (shown_path (k_entry k i))
         (if (gt (length name) max)

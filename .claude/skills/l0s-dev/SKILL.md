@@ -29,17 +29,17 @@ the `;` comment block directly above each form, so write yours that way
 
 | Path | What |
 |---|---|
-| `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `process.l0`, `memory.l0`, `mounts.l0` (the mount table: the initramfs at `/`, volumes at `/Volumes/LABEL`), `ipc.l0`, `sched.l0`, `pids.l0`, `inittab.l0` are its parts. File calls on a volume go to its server as fs-protocol requests (`ask_fs`, the `AwaitingFs` state). `asm.l0` hand-assembles threads for board tests |
+| `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `process.l0`, `memory.l0`, `mounts.l0` (the mount table: the initramfs at `/` until `root_switch` makes a volume `/`, volumes at `/Volumes/LABEL` with their UUIDs), `ipc.l0`, `sched.l0`, `pids.l0`, `inittab.l0` are its parts. File calls on a volume go to its server as fs-protocol requests (`ask_fs`, the `AwaitingFs` state). `asm.l0` hand-assembles threads for board tests |
 | `common/` | shared by kernel, programs and host tools: `abi.l0` (call numbers `call_*`, error codes, limits, `le16`/`le64` and their readers, `label_ok`, `pages_for`, `array_from`/`array_to_list`), `text.l0` (lists and strings: `nth`, `take`, `drop`, `unwords`, `join_with`, `split_on`, `lines`, `up_to`, padding, `is_number`, `word_number(s)`, `ceil_div`); `initramfs.l0` (the cpio archive) and `queue.l0` for kernel and programs |
-| `user/lib/sys/` | in every program (`ULIB`): `l0s.l0` (call wrappers, `request`, `port_ask`, `reply_why`, `shm_region`, `shm_share_to`, `put_bytes`/`get_bytes`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `server.l0` (`name_register_or_why`, `irq_bind_or_why`, `request_numbers`, `Served`, `served_ok`/`served_error`, `request_answer`, `port_tell`, listeners), `cli.l0` (`complain_as`, `note_as`, `say`, `arg_number`, `read_whole`, `write_whole`, `done_why`; the host tools link it too). Where a `LIBS_` list says: `tty.l0` (`TTY`), `virtio.l0` (`VIRTIO`: `virtio_open`, `virtio_probe`, `virtq_mem`, `virtq_offer`, `virtq_wait`, `VirtqRun`), `procs.l0` (`PROCS`: the live processes, `state_text`) |
+| `user/lib/sys/` | in every program (`ULIB`): `l0s.l0` (call wrappers, `request`, `port_ask`, `reply_why`, `shm_region`, `shm_share_to`, `put_bytes`/`get_bytes`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `server.l0` (`name_register_or_why`, `irq_bind_or_why`, `request_numbers`, `Served`, `served_ok`/`served_error`, `request_answer`, `port_tell`, listeners), `cli.l0` (`complain_as`, `note_as`, `say`, `arg_number`, `read_whole`, `write_whole`, `done_why`; the host tools link it too). Where a `LIBS_` list says: `tty.l0` (`TTY`), `virtio.l0` (`VIRTIO`: `virtio_open`, `virtio_probe`, `virtq_mem`, `virtq_offer`, `virtq_wait`, `VirtqRun`), `procs.l0` (`PROCS`: the live processes, `state_text`), `paths.l0` (`PATHS`, with `proto/fs.l0` and `uuid.l0`: `root_paths`, `program_found`, `spawn_path`; a program never uses `entry_paths` or `spawn_entry` to find or start another, since `/` may be a volume) |
 | `user/lib/proto/` | the servers' protocols, client side: `display.l0`, `wm.l0`, `clock.l0`, `disk.l0`, `fs.l0`, `app.l0` (apps: a bundle's manifest, the bundles there are, the app a program is, running one by its bundle's name) |
-| `user/lib/format/` | data as bytes, pure, linked by host tools too: `uuid.l0` (UUIDs, version 7), `crc32.l0`, `gpt.l0` (the partition table, `gpt_layout`; `PARTS` is these three), `l0fs.l0` (a volume's on-disk format), `ppm.l0` (PPM images, `rgb` and its channels) |
+| `user/lib/format/` | data as bytes, pure, linked by host tools too: `uuid.l0` (UUIDs, version 7), `crc32.l0`, `gpt.l0` (the partition table, `gpt_layout`; `PARTS` is these three), `l0fs.l0` (a volume's on-disk format, directories as cluster chains; compare volumes with `vol_same`, not `eq`, which sees a map's unused slots), `ppm.l0` (PPM images, `rgb` and its channels) |
 | `user/lib/gfx/`, `user/lib/ui/` | `rect.l0` (`RECT`: `Rect`, the one rectangle type, and its operations, for layout, painting, damage and the protocols); `render.l0` (`RENDER` is it with `ppm.l0` and `rect.l0`: the `Canvas`, over a shared region or an array (`canvas_new`), shapes, the font, `corner_cut`, `draw`'s commands); the toolkit (`l0s-ui`) |
 | `user/bin/NAME/`, `user/sbin/NAME/`, `user/apps/NAME/` | one program each: `NAME.l0`, `NAME_test.l0`, `main.l0` (only `main`), and any more `.l0` files of its own with their tests (`sh/files.l0`, `wm/launcher.l0`). The directory says where it goes: `bin` a command, `/bin/NAME`; `sbin` a driver or service, `/sbin/NAME`; `apps` an app, with its bundle's source `APP.app/` (`manifest`, `icon.draw`) beside it, `/Applications/APP.app/NAME`. The Makefile finds all three |
 | `user/sbin/wm/launcher.l0` | the compositor's launcher, GNOME Shell's grid of apps: its layout, painting and clicks |
-| `demo/etc/` | the demo's `inittab`, `motd`; `tests/screen/etc/` the screen tests' |
+| `demo/etc/` | the demo's `inittab` (stage 1: `boot`, the drivers, `fs`), `system` (what `boot` starts: `sh`, `wm`, the `vt`s), `motd`; `tests/screen/etc/` the screen tests' |
 | `build/root` | `make root`: every program staged as the initramfs holds it, `bin/`, `sbin/`, `Applications/APP.app/`, which `tools/mkinitramfs OUT ETC ROOT [IMAGE...]` archives with an `etc` |
-| `tools/` | `mkicon/` (an L0 tool: an app's `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, partitioned and formatted by `mkfs/`, an L0 host tool), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
+| `tools/` | `mkicon/` (an L0 tool: an app's `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, and `QEMU_DISK` as a virtio-blk), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, or of any layout, partitioned and formatted by `mkfs/`, an L0 host tool, which fills a volume from a cpio too), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 
@@ -95,12 +95,14 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
    `ui/icons.l0`). The Makefile finds the directory: the program goes in
    `/Applications/APP.app/NAME`, and the launcher shows it. APP is one
    word; add the bundle to `app_test.l0`'s `test_app_sources`.
-4. To start it at boot, a `start PATH [ARGS]` line in `demo/etc/inittab`,
-   PATH where step 2 put it (`/bin/sh`, `/sbin/wm`,
-   `/Applications/Terminal.app/vt`). A program that maps devices or binds
-   interrupts needs `dev PATH`. Adding a `start` line shifts later pids:
-   update the README's pid table and `ps` sample, and check
-   `tests/vt.sh`'s pid arithmetic.
+4. To start it at boot: a driver, or anything a disk needs, a `start
+   PATH [ARGS]` line in `demo/etc/inittab`, with `dev PATH` if it maps
+   devices or binds interrupts; anything else a `start` line in
+   `demo/etc/system`, which `boot` starts, from the system volume when
+   `/` is one, and so never with devices. PATH is where step 2 put it
+   (`/bin/sh`, `/sbin/wm`, `/Applications/Terminal.app/vt`). Adding a
+   `start` line shifts later pids: update the README's pid table and `ps`
+   sample, and check `tests/vt.sh`'s pid arithmetic.
 5. Its row in the README's programs table, and for an app, the Apps table.
 
 **A library** in `user/lib/GROUP/` (`sys`, `proto`, `format`, `gfx`, `ui`)

@@ -6,17 +6,31 @@
 (def why_of ((sectors (list int)) (vols (list (list int)))) (list int)
   (match (plan_of sectors vols) ((MkPlan n vs) "") ((MkBad why) why)))
 
+; An empty volume to make.
+(def empty_vol ((label (list int)) (start int) (count int)) MkVol
+  (MkVol label start count "" ((None Uuid))))
+
 (def test_plan () int
   (match (plan_of "2048" (two))
     ((MkPlan n vols)
       (add (check_int "sectors" n 2048)
-           (check_true "volumes" (eq vols (cons (MkVol "data" 40 1496) (cons (MkVol "scratch" 1536 479) (nil MkVol)))))))
+           (check_true "volumes" (eq vols (cons (empty_vol "data" 40 1496) (cons (empty_vol "scratch" 1536 479) (nil MkVol)))))))
+    ((MkBad why) (fail_because "plan" why))))
+
+; An archive and a UUID, or a UUID and no archive.
+(def test_plan_archive () int
+  (match (plan_of "2048" (cons "sys:40:1000:root.cpio:018f0000-0000-7000-8000-000000000001" (cons "data:1100:500::018f0000-0000-7000-8000-000000000002" (nil (list int)))))
+    ((MkPlan n vols)
+      (add (check_true "the archive" (match (head vols) ((MkVol l s c a u) (eq a "root.cpio"))))
+           (check_str "the UUID" (match (head (tail vols)) ((MkVol l s c a u) (match u ((Some x) (uuid_text x)) ((None) "none"))))
+                      "018f0000-0000-7000-8000-000000000002")))
     ((MkBad why) (fail_because "plan" why))))
 
 (def test_plan_refusals () int
   (add (check_str "sectors" (why_of "lots" (two)) "the disk's sectors are a number")
-       (add (check_str "form" (why_of "2048" (cons "data:8" (nil (list int)))) "not LABEL:START:COUNT: data:8")
-            (check_str "none" (why_of "2048" (nil (list int))) "no volume"))))
+       (add (check_str "form" (why_of "2048" (cons "data:8" (nil (list int)))) "not LABEL:START:COUNT[:ARCHIVE[:UUID]]: data:8")
+            (add (check_str "no UUID" (why_of "2048" (cons "data:40:100:a:nope" (nil (list int)))) "not LABEL:START:COUNT[:ARCHIVE[:UUID]]: data:40:100:a:nope")
+                 (check_str "none" (why_of "2048" (nil (list int))) "no volume")))))
 
 ; The table's first 34 sectors and its backup's last 33 are no volume's.
 (def test_plan_places () int
@@ -32,34 +46,138 @@
 
 (def ids () (list Uuid) (uuids 1760000000000 7 3))
 
-(def demo_pieces () (list Piece)
-  (pieces 2048 (head (ids)) (tail (ids)) (cons (MkVol "scratch" 1536 479) (cons (MkVol "data" 40 1496) (nil MkVol)))))
+; Each of vols made empty, with ids.
+(def made_empty ((vols (list MkVol)) (ids (list Uuid))) (list Made)
+  (vols_made vols ids (nil Made)))
 
-; The protective MBR, the header, its entries; data's metadata at 40,
-; scratch's at 1536; the backup's entries at 2015, its header at 2047.
+(def demo_vols () (list MkVol) (cons (empty_vol "scratch" 1536 479) (cons (empty_vol "data" 40 1496) (nil MkVol))))
+
+(def demo_pieces () (list Piece)
+  (pieces 2048 (head (ids)) (demo_vols) (made_empty (demo_vols) (tail (ids)))))
+
+; The protective MBR, the header, its entries; data's metadata at 40 and
+; its root directory a cluster on, scratch's at 1536 and on; the backup's
+; entries at 2015, its header at 2047.
 (def test_pieces () int
-  (check_str "offsets" (offsets (demo_pieces)) "0 512 1024 20480 786432 1031680 1048064 "))
+  (check_str "offsets" (offsets (demo_pieces)) "0 512 1024 20480 24576 786432 790528 1031680 1048064 "))
 
 (def offsets ((ps (list Piece))) (list int)
-  (if (is_empty ps) "" (match (head ps) ((Piece off b) (append (digits off) (append " " (offsets (tail ps))))))))
+  (if (is_empty ps) "" (match (head ps) ((Piece off c) (append (digits off) (append " " (offsets (tail ps))))))))
 
 (def test_uuids () int
   (add (check_int "three" (length (ids)) 3)
        (add (check_bool "each its own" (eq (head (ids)) (head (tail (ids)))) false)
             (check_int "of version 7" (uuid_version (head (ids))) 7))))
 
-; A small image, written to a buffer: its size, the table read back from
-; where it is, and the volume's superblock where it goes.
-(def test_image () int
+; A volume given its UUID keeps it; the others get theirs from ids.
+(def test_given_uuid () int
+  (let u (uuid_v7 1760000000000 (uuid_noise 99 10))
+    (check_str "said" (uuids_text (made_empty (cons (MkVol "sys" 40 100 "" (Some u)) (cons (empty_vol "b" 200 100) (nil MkVol))) (tail (ids))))
+               (append "sys " (append (uuid_text u) (append "\nb " (append (uuid_text (head (tail (tail (ids))))) "\n")))))))
+
+; ------------------------------------------------------------ filling
+
+; A small archive: /, /bin, the program /bin/sh, and /etc/motd, whose
+; directory the archive leaves out.
+(def archive () bytes
+  (bytes_from_list
+    (append (newc_entry "." 16877 (nil int))                     ; 040755
+      (append (newc_entry "bin" 16877 (nil int))
+        (append (newc_entry "bin/sh" 33261 "shell")               ; 0100755
+          (append (newc_entry "etc/motd" 33188 "hello\n")         ; 0100644
+                  (newc_trailer)))))))
+
+; The archive's volume, scratch's size, from sector 40.
+(def filled () Filled
+  (match (parse_initramfs (archive))
+    ((Err why) (FillBad why))
+    ((Ok es) (fill (vol_new "sys" (vol_layout 479)) (archive) es 0 20480 (nil Piece)))))
+
+(def filled_vol () Vol (match (filled) ((Filled v ps) v) ((FillBad why) (vol_new "bad" (vol_layout 479)))))
+
+; The entry at a path's names in v, as text.
+(def entry_at ((v Vol) (path (list int))) (list int)
+  (match (vol_place v (vol_path_names path))
+    ((VolTop) "the root")
+    ((VolNowhere) "nowhere")
+    ((VolIn dc name)
+      (let i (vol_find v dc name)
+        (if (lt i 0) "none" (entry_text (vol_entry v (VolRef dc i))))))))
+
+(def entry_text ((e VolEntry)) (list int)
+  (match e
+    ((VolDir name first) (append name "/"))
+    ((VolFile name size first exec) (append name (append " " (append (digits size) (if exec " x" "")))))
+    ((VolNone) "free")))
+
+(def test_fill () int
+  (let v (filled_vol)
+    (add (check_str "bin" (entry_at v "/bin") "bin/")
+         (add (check_str "sh, a program" (entry_at v "/bin/sh") "sh 5 x")
+              (add (check_str "etc, made" (entry_at v "/etc") "etc/")
+                   (check_str "motd" (entry_at v "/etc/motd") "motd 6"))))))
+
+; The bytes of each file are a piece of the archive, at its cluster: sh
+; at cluster 3, bin's being 2, from sector 40; motd at 5, after etc's.
+(def test_fill_pieces () int
+  (match (filled)
+    ((FillBad why) (fail_because "fill" why))
+    ((Filled v ps) (check_str "offsets" (offsets (sort ps)) "32768 40960 "))))
+
+(def test_fill_bad () int
+  (match (parse_initramfs (bytes_from_list (append (newc_entry "a/b" 33188 "x") (append (newc_entry "a/b/c" 33188 "y") (newc_trailer)))))
+    ((Err why) (fail_because "parse" why))
+    ((Ok es)
+      (match (fill (vol_new "sys" (vol_layout 479)) (archive) es 0 0 (nil Piece))
+        ((Filled v ps) (fail_because "fill" "filled"))
+        ((FillBad why) (check_str "why" why "a file where a directory goes: b"))))))
+
+; Too big for the volume: 70 clusters' bytes on one of 59.
+(def test_fill_too_big () int
+  (match (parse_initramfs (bytes_from_list (append (newc_entry "big" 33188 (zeros (mul 70 4096))) (newc_trailer))))
+    ((Err why) (fail_because "parse" why))
+    ((Ok es)
+      (match (fill (vol_new "sys" (vol_layout 479)) (bytes_from_list (nil int)) es 0 0 (nil Piece))
+        ((Filled v ps) (fail_because "fill" "filled"))
+        ((FillBad why) (check_str "why" why "the volume is too small for the archive"))))))
+
+; ------------------------------------------------------------- images
+
+; The image of the pieces ps, of n sectors, as bytes.
+(def image_of ((ps (list Piece)) (n int)) bytes
   (match (open_out_buffer)
-    ((IoFailed fault why) (fail_because "buffer" why))
+    ((IoFailed fault why) (bytes_from_list why))
     ((IoOpened f)
-      (let w (write_image f (pieces 128 (head (ids)) (tail (ids)) (cons (MkVol "v" 40 54) (nil MkVol))) 0 65536 (zero_block))
+      (let w (write_image f ps 0 (mul n 512) (zero_block))
         (let b (bytes_from_list (buffer_contents f))
-          (let c (file_close f)
-            (add (check_int "128 sectors" (bytes_len b) 65536)
-                 (add (check_str "the table's" (table_text b) "v 40+54")
-                      (check_str "the superblock" (bytes_range b 20480 20484) "L0FS")))))))))
+          (let c (file_close f) b))))))
+
+; A small image: its size, the table read back from where it is, and the
+; volume's superblock where it goes.
+(def test_image () int
+  (let vols (cons (empty_vol "v" 40 54) (nil MkVol))
+    (let b (image_of (pieces 128 (head (ids)) vols (made_empty vols (tail (ids)))) 128)
+      (add (check_int "128 sectors" (bytes_len b) 65536)
+           (add (check_str "the table's" (table_text b) "v 40+54")
+                (check_str "the superblock" (bytes_range b 20480 20484) "L0FS"))))))
+
+; A volume filled from the archive, in an image, reads back as it was
+; made, and its file's bytes are where it says.
+(def test_image_filled () int
+  (match (parse_initramfs (archive))
+    ((Err why) (fail_because "parse" why))
+    ((Ok es)
+      (let vol (MkVol "sys" 40 479 "x" ((None Uuid)))
+        (match (vol_made vol (head (ids)) (archive) es)
+          ((MadeBad why) (fail_because "made" why))
+          ((Made l u ps)
+            (let b (image_of (pieces 2048 (head (ids)) (cons vol (nil MkVol)) (cons (Made l u ps) (nil Made))) 2048)
+              (let part (bytes_from_list (bytes_range b 20480 (add 20480 (mul 479 512))))
+                (match (vol_of "sys" (vol_layout 479) part)
+                  ((VolBad why) (fail_because "read" why))
+                  ((VolGot v)
+                    (add (check_str "sh" (entry_at v "/bin/sh") "sh 5 x")
+                         (check_str "its bytes, cluster 3" (bytes_range part 12288 12293) "shell"))))))))))))
 
 ; The partitions the image's GPT lists, as text.
 (def table_text ((b bytes)) (list int)

@@ -1,0 +1,96 @@
+; install.l0 -- install VOLUME: copies L0S, every directory and file of
+; / but /Volumes, onto the volume VOLUME, a label or /Volumes/LABEL, and
+; marks each program's copy a program, so that the volume can be booted
+; from: boot, given root= and its partition's UUID, which install says,
+; makes it /. It copies from wherever / is, the initramfs or another
+; system volume, but never onto the one / is. What is on the volume
+; already stays, but for files it copies over.
+
+; Says why, as install, and fails.
+(def complain ((why (list int))) int (complain_as "install" why))
+
+; The volume w names: a path, or a label.
+(def volume_named ((w (list int))) (list int)
+  (if (starts_with w "/") (normal_path w) (append "/Volumes/" w)))
+
+; The paths of / to copy, of paths as root_paths gives them: all but /
+; itself, and /Volumes/ and what is in it.
+(def to_copy ((paths (list (list int)))) (list (list int))
+  (if (is_empty paths)
+      paths
+      (let p (head paths)
+        (if (if (eq p "/") true (starts_with p "/Volumes/"))
+            (to_copy (tail paths))
+            (cons p (to_copy (tail paths)))))))
+
+; Where path's copy goes on vol, /Volumes/LABEL: a directory's without
+; its final /.
+(def target ((vol (list int)) (path (list int))) (list int)
+  (append vol (if (path_is_dir path) (drop_last path) path)))
+
+; What install says once it has copied n files to vol, whose partition's
+; UUID is u.
+(def done_line ((vol (list int)) (n int) (u (list int))) (list int)
+  (append "install: " (append (digits n) (append " files copied to " (append vol
+    (if (is_empty u) "\n" (append "; boot it with root=" (append u "\n"))))))))
+
+; The UUID vol is mounted with, among ms; empty for none.
+(def uuid_of ((ms (list MountInfo)) (vol (list int))) (list int)
+  (if (is_empty ms)
+      ""
+      (match (head ms) ((MountInfo path port u) (if (eq path vol) u (uuid_of (tail ms) vol))))))
+
+; ---------------------------------------------------------------- copying
+
+; What copying came to: how many files, or why it stopped.
+(data Copied (Copied int) (CopyStopped (list int)))
+
+; Each of paths copied onto vol, n files so far.
+(def copy_all ((vol (list int)) (paths (list (list int))) (n int)) Copied
+  (if (is_empty paths)
+      (Copied n)
+      (let why (copy_one vol (head paths))
+        (if (is_empty why)
+            (copy_all vol (tail paths) (if (path_is_dir (head paths)) n (add n 1)))
+            (CopyStopped why)))))
+
+; path copied onto vol: a directory made, if it is not there, or a file
+; written, and marked a program if it is one: nothing, or why not.
+(def copy_one ((vol (list int)) (path (list int))) (list int)
+  (let to (target vol path)
+    (if (path_is_dir path)
+        (let code (fs_mkdir to)
+          (if (any_eq code (cons 0 (cons -4 (nil int)))) "" (append to (append ": " (io_error code)))))
+        (match (read_whole path)
+          ((Err why) (append path (append ": " why)))
+          ((Ok b) (file_copied path to b))))))
+
+; b, path's bytes, written to to, and marked a program if path is one.
+(def file_copied ((path (list int)) (to (list int)) (b bytes)) (list int)
+  (let why (write_whole to b)
+    (if (not (is_empty why))
+        (append to (append ": " why))
+        (if (not (path_is_program path))
+            ""
+            (let code (fs_chmod to true)
+              (if (eq code 0) "" (append to (append ": not marked a program: " (io_error code)))))))))
+
+; ---------------------------------------------------------------- running
+
+; install VOLUME, as the arguments say.
+(def install () int
+  (if (not (eq (arg_count) 1))
+      (complain "usage: install VOLUME")
+      (install_on (volume_named (arg 0)))))
+
+; L0S copied onto vol, if it is a mounted volume, and not /.
+(def install_on ((vol (list int))) int
+  (if (not (eq (fs_volume_of vol) vol))
+      (complain (append vol ": not a volume"))
+      (if (eq (fs_port_of vol) 0)
+          (complain (append vol ": no such volume is mounted"))
+          (if (eq vol (fs_system_volume))
+              (complain (append vol ": it is /, which install copies"))
+              (match (copy_all vol (to_copy (root_paths)) 0)
+                ((CopyStopped why) (complain why))
+                ((Copied n) (let w (say (done_line vol n (uuid_of (mount_list) vol))) 0)))))))

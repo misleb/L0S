@@ -1,16 +1,25 @@
 ; mounts_test.l0 -- tests of the mount table and where a path's file is.
 
+; A partition's UUID, as fs mounts it.
+(def sys_uuid () (list int) "018f0000-0000-7000-8000-000000000001")
+
 ; The initramfs, then data from port 5 and scratch from port 9.
 (def two () (list Mount)
-  (cons (MountRoot) (cons (MountServer "data" 5) (cons (MountServer "scratch" 9) (nil Mount)))))
+  (cons (MountRoot) (cons (MountServer "data" "" 5) (cons (MountServer "scratch" (sys_uuid) 9) (nil Mount)))))
 
-; Where path is, as text.
-(def where_text ((path (list int))) (list int)
-  (match (mount_where (two) path)
+; two with scratch made /.
+(def switched () (list Mount)
+  (match (mount_root (two) "scratch") ((MountAdded ms) ms) ((MountRefused code) (two))))
+
+; Where path is in ms, as text.
+(def where_in ((ms (list Mount)) (path (list int))) (list int)
+  (match (mount_where ms path)
     ((InRoot) "root")
     ((InVolumes) "volumes")
-    ((InServer port) (append "server " (digits port)))
+    ((InServer port p) (append "server " (append (digits port) (append " " p))))
     ((InNothing direct) (if direct "nothing, in /Volumes" "nothing"))))
+
+(def where_text ((path (list int))) (list int) (where_in (two) path))
 
 (def test_where_root () int
   (add (check_str "/etc/motd" (where_text "/etc/motd") "root")
@@ -21,13 +30,21 @@
   (check_str "/Volumes" (where_text "/Volumes") "volumes"))
 
 (def test_where_server () int
-  (add (check_str "a file" (where_text "/Volumes/data/notes") "server 5")
-       (add (check_str "the volume" (where_text "/Volumes/scratch") "server 9")
-            (check_str "deeper" (where_text "/Volumes/data/a/b") "server 5"))))
+  (add (check_str "a file" (where_text "/Volumes/data/notes") "server 5 /Volumes/data/notes")
+       (add (check_str "the volume" (where_text "/Volumes/scratch") "server 9 /Volumes/scratch")
+            (check_str "deeper" (where_text "/Volumes/data/a/b") "server 5 /Volumes/data/a/b"))))
 
 (def test_where_nothing () int
   (add (check_str "in /Volumes" (where_text "/Volumes/notes") "nothing, in /Volumes")
        (check_str "in no volume" (where_text "/Volumes/other/notes") "nothing")))
+
+; Once scratch is /, every path but /Volumes's is scratch's, asked for in
+; /Volumes/scratch; and scratch is there too.
+(def test_where_switched () int
+  (add (check_str "/etc/motd" (where_in (switched) "/etc/motd") "server 9 /Volumes/scratch/etc/motd")
+       (add (check_str "/" (where_in (switched) "/") "server 9 /Volumes/scratch")
+            (add (check_str "in /Volumes" (where_in (switched) "/Volumes/scratch/a") "server 9 /Volumes/scratch/a")
+                 (check_str "data" (where_in (switched) "/Volumes/data/a") "server 5 /Volumes/data/a")))))
 
 ; Where a rename from a to b goes, on the two volumes.
 (def route ((a (list int)) (b (list int))) int
@@ -49,12 +66,18 @@
             (add (check_int "to no volume" (route "/Volumes/data/a" "/Volumes/x/a") -9)
                  (check_int "/Volumes itself" (route "/Volumes" "/Volumes/data/a") -4)))))
 
+; On the system volume, a rename from / into its own volume is one file
+; system, and to another is not.
+(def test_rename_route_switched () int
+  (add (check_int "/ to its volume" (rename_route (mount_where (switched) "/a") (mount_where (switched) "/Volumes/scratch/b")) 9)
+       (check_int "/ to data" (rename_route (mount_where (switched) "/a") (mount_where (switched) "/Volumes/data/b")) -10)))
+
 (def test_new () int
   (check_true "the initramfs alone" (eq (mounts_new) (cons (MountRoot) (nil Mount)))))
 
 (def test_add () int
-  (match (mount_add (mounts_new) "data" 5)
-    ((MountAdded ms) (check_true "after the root" (eq ms (cons (MountRoot) (cons (MountServer "data" 5) (nil Mount))))))
+  (match (mount_add (mounts_new) "data" (sys_uuid) 5)
+    ((MountAdded ms) (check_true "after the root" (eq ms (cons (MountRoot) (cons (MountServer "data" (sys_uuid) 5) (nil Mount))))))
     ((MountRefused code) (fail_because "add" (digits code)))))
 
 (def test_add_refused () int
@@ -65,18 +88,44 @@
 
 ; Why label cannot be mounted on ms, or 0 if it can.
 (def refusal ((ms (list Mount)) (label (list int))) int
-  (match (mount_add ms label 7) ((MountAdded m2) 0) ((MountRefused code) code)))
+  (match (mount_add ms label "" 7) ((MountAdded m2) 0) ((MountRefused code) code)))
+
+(def test_root () int
+  (check_true "scratch at /, and in /Volumes"
+              (eq (switched) (cons (MountSystem "scratch" (sys_uuid) 9) (cons (MountServer "data" "" 5) (cons (MountServer "scratch" (sys_uuid) 9) (nil Mount)))))))
+
+; / is made a volume once, and only one that is mounted.
+(def test_root_refused () int
+  (add (check_int "again" (match (mount_root (switched) "data") ((MountAdded ms) 0) ((MountRefused code) code)) (err_taken))
+       (check_int "no such volume" (match (mount_root (two) "other") ((MountAdded ms) 0) ((MountRefused code) code)) (err_no_port))))
+
+(def test_root_is_initramfs () int
+  (add (check_true "before" (root_is_initramfs (two)))
+       (check_bool "after" (root_is_initramfs (switched)) false)))
 
 (def test_without () int
   (check_true "scratch's port gone" (eq (mounts_without (two) (cons 9 (cons 3 (nil int))))
-                                        (cons (MountRoot) (cons (MountServer "data" 5) (nil Mount))))))
+                                        (cons (MountRoot) (cons (MountServer "data" "" 5) (nil Mount))))))
+
+; The system volume's server gone: / stays, though nothing answers there,
+; and only its place in /Volumes goes.
+(def test_without_system () int
+  (check_true "/ kept" (eq (mounts_without (switched) (cons 9 (nil int)))
+                           (cons (MountSystem "scratch" (sys_uuid) 9) (cons (MountServer "data" "" 5) (nil Mount))))))
 
 (def test_at () int
   (add (check_true "0 the root" (eq (mounts_at (two) 0) (Some (MountRoot))))
-       (add (check_true "2 scratch" (eq (mounts_at (two) 2) (Some (MountServer "scratch" 9))))
+       (add (check_true "2 scratch" (eq (mounts_at (two) 2) (Some (MountServer "scratch" (sys_uuid) 9))))
             (add (check_true "none at 3" (eq (mounts_at (two) 3) ((None Mount))))
                  (check_true "none at -1" (eq (mounts_at (two) -1) ((None Mount))))))))
 
 (def test_record () int
-  (add (check_str "data" (mount_record (MountServer "data" 5)) (append (u32_le 5) "/Volumes/data"))
-       (check_str "the root" (mount_record (MountRoot)) (append (u32_le 0) "/"))))
+  (add (check_str "data" (mount_record (MountServer "data" "" 5)) (append (u32_le 5) "/Volumes/data"))
+       (add (check_str "the root" (mount_record (MountRoot)) (append (u32_le 0) "/"))
+            (check_str "the system volume" (mount_record (MountSystem "scratch" (sys_uuid) 9))
+                       (append (u32_le 9) (append "/" (cons 0 (sys_uuid))))))))
+
+(def test_name_of () int
+  (add (check_true "a label" (eq (mount_name_of "data") (MountName "" "data")))
+       (add (check_true "a UUID and a label" (eq (mount_name_of (append (sys_uuid) " sys")) (MountName (sys_uuid) "sys")))
+            (check_true "not a UUID" (eq (mount_name_of "abc sys") (MountNameBad))))))
