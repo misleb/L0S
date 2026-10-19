@@ -12,7 +12,7 @@
 #                    the splash shows in QEMU's window, and build/disk.img
 #                    is the disk, made once, so what is written to it stays
 #   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
-#   make demo ROOT=UUID                 the same, booted with root=UUID:
+#   make demo ROOT_UUID=UUID            the same, booted with root=UUID:
 #                    the volume of that partition, if fs mounts it and it
 #                    holds L0S, is / (sbin/boot)
 #   make sysdisk     build/system.img, a 64 MB disk: System, a copy of
@@ -344,7 +344,7 @@ sysdisk: initramfs $(BUILD)/mkfs
 
 demo: initramfs $(DISK)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(DISK) QEMU_APPEND="$(if $(ROOT),root=$(ROOT))" \
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(DISK) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The demo booted from the system disk, its System volume /: made anew

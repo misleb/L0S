@@ -340,7 +340,7 @@ resets it. A `build/disk.img` made before the file system was, holding
 raw sectors only, has no volumes, and `fs` says so and serves none: remove it, and
 `make demo` makes a new one. One made before L0FS had directories is made
 again, once, by itself. `QEMU_APPEND` gives the kernel boot arguments, as
-`-append` does, which `make demo ROOT=UUID` sets to `root=UUID`.
+`-append` does, which `make demo ROOT_UUID=UUID` sets to `root=UUID`.
 `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
 QMP on sockets, as the screen tests do, to type keys, move the pointer,
 and dump the screen.
@@ -913,12 +913,13 @@ only the first stage, the drivers and `fs`, which a disk needs, and
 
 1. The board is booted with `root=UUID` among its boot arguments
    (`l0 boot build/kernel.img root=UUID`, `QEMU_APPEND=root=UUID`, or
-   `make demo ROOT=UUID`), UUID a GPT partition's, as `partition` and
+   `make demo ROOT_UUID=UUID`), UUID a GPT partition's, as `partition` and
    mkfs say it. The kernel gives its boot arguments to any process that
    asks, call 285.
-2. `boot`, pid 1, waits up to 10 s for `fs` to mount the volume of that
-   partition, as `mount_list`'s UUIDs show, and checks that it holds
-   `/etc/system`.
+2. `boot`, pid 1, waits for `fs` to mount the volume of that partition,
+   as `mount_list`'s UUIDs show: until `fs` registers, which it does once
+   it has mounted every volume, or 10 s if it never does, as on a board
+   with no disk. It checks that the volume holds `/etc/system`.
 3. It makes the volume `/` with call 286, `root_switch`. From then on
    every path outside `/Volumes` is the system volume's, and it is in
    `/Volumes/LABEL` too; the kernel gives the initramfs's bytes up,
