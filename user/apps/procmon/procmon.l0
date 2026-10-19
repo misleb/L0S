@@ -2,8 +2,11 @@
 ; (user/lib/ui): the system's processes, from the kernel's process table,
 ; in a data grid under a toolbar. Each row is a live process: its pid, its
 ; program's name, its state, as ps words it, split into the state and its
-; detail, and its parent. The kernel keeps no account of CPU time, so
-; there is no CPU column.
+; detail, its parent, and its memory: its own pages, and those it shares
+; or a device reaches, which other processes may map too. The kernel
+; keeps no account of CPU time, so there is no CPU column. Under the grid,
+; the memory processes are given: how much there is, how much is used,
+; with a level bar, and how much is available.
 ;
 ; The grid is read again every second, and when Refresh is pressed. A
 ; column's title sorts by it, and again the other way; a press on a row,
@@ -14,11 +17,12 @@
 ;
 ;   procmon          its window, until its close button is pressed
 
-; The grid's state, the rows it shows, and the line the toolbar shows.
-(data Monitor (Monitor UiGridState (list UiRow) (list int)))
+; The grid's state, the rows it shows, the line the toolbar shows, and
+; what the kernel last said of its memory, if it said anything.
+(data Monitor (Monitor UiGridState (list UiRow) (list int) (Option MemInfo)))
 
-(def monitor_new ((rows (list UiRow))) Monitor
-  (Monitor (UiGridState 0 false "" 0) rows "Select a process"))
+(def monitor_new ((rows (list UiRow)) (mem (Option MemInfo))) Monitor
+  (Monitor (UiGridState 0 false "" 0) rows "Select a process" mem))
 
 (def monitor_prefix () (list int) "procs")
 
@@ -27,7 +31,14 @@
   (cons (UiColumn "Name" 120 (UiStart) true)
   (cons (UiColumn "State" 120 (UiStart) true)
   (cons (UiColumn "Parent" 70 (UiEnd) true)
-  (cons (UiColumn "Detail" 0 (UiStart) true) (nil UiColumn)))))))
+  (cons (UiColumn "Memory" 100 (UiEnd) true)
+  (cons (UiColumn "Shared" 100 (UiEnd) true)
+  (cons (UiColumn "Detail" 0 (UiStart) true) (nil UiColumn)))))))))
+
+; The window's size: the columns with 260 for the detail, and ten rows
+; under the toolbar, with the memory's line beneath them.
+(def monitor_w () int 840)
+(def monitor_h () int 429)
 
 ; How often the grid is read again, and how long the loop sleeps at most
 ; while no message waits, so that the pointer and keys are answered
@@ -48,13 +59,15 @@
 ; The row of process pid, whose program is called name.
 (def proc_row ((pid int) (info ProcInfo) (name (list int))) UiRow
   (match info
-    ((ProcInfo st parent m detail)
+    ((ProcInfo st parent m detail own shared)
       (UiRow (digits pid)
         (cons (UiCellNum pid "")
         (cons (UiCellText name)
         (cons (UiCellStatus (state_tone st) (state_word st))
         (cons (UiCellNum parent "")
-        (cons (UiCellText (state_detail st detail)) (nil UiCell))))))))))
+        (cons (UiCellSize (mul own (page_size)))
+        (cons (UiCellSize (mul shared (page_size)))
+        (cons (UiCellText (state_detail st detail)) (nil UiCell))))))))))))
 
 ; Every live process's row, procs.l0's procs_live, in the table's order.
 (def rows_now () (list UiRow) (live_rows (procs_live) (nil UiRow)))
@@ -65,19 +78,62 @@
       (match (head ps)
         ((ProcLive pid info)
           (match info
-            ((ProcInfo st parent m detail) (live_rows (tail ps) (cons (proc_row pid info (program_name pid)) acc))))))))
+            ((ProcInfo st parent m detail own shared) (live_rows (tail ps) (cons (proc_row pid info (program_name pid)) acc))))))))
 
 (def has_row ((rows (list UiRow)) (key (list int))) bool
   (if (is_empty rows) false (if (eq (ui_row_key (head rows)) key) true (has_row (tail rows) key))))
 
-; The monitor showing rows, and its selection kept only if its process
-; is still among them.
-(def monitor_rows ((m Monitor) (rows (list UiRow))) Monitor
+; The monitor showing rows, and mem, and its selection kept only if its
+; process is still among them.
+(def monitor_rows ((m Monitor) (rows (list UiRow)) (mem (Option MemInfo))) Monitor
   (match m
-    ((Monitor gs old status)
+    ((Monitor gs old status was)
       (match gs
         ((UiGridState col desc sel first)
-          (Monitor (UiGridState col desc (if (has_row rows sel) sel "") first) rows status))))))
+          (Monitor (UiGridState col desc (if (has_row rows sel) sel "") first) rows status mem))))))
+
+; The monitor with the table and the memory read again.
+(def monitor_read ((m Monitor)) Monitor (monitor_rows m (rows_now) (mem_info)))
+
+; ---------------------------------------------------------------- memory
+
+; How much of the memory is used, in percent, rounded down: none of no
+; memory.
+(def mem_percent ((used int) (total int)) int
+  (if (le total 0) 0 (div (mul used 100) total)))
+
+; What the memory's line says of mem: how much there is, how much of it
+; is used, and how much is available, as GNOME says sizes. The pages the
+; kernel's page tables take are among the available, unseen.
+(def mem_text ((mem (Option MemInfo))) (list int)
+  (match mem
+    ((None) "Memory not known")
+    ((Some mi)
+      (match mi
+        ((MemInfo total used)
+          (let avail (max 0 (sub total used))
+            (append (format_size (mul used (page_size)))
+            (append " used of "
+            (append (format_size (mul total (page_size)))
+            (append " (" (append (digits (mem_percent used total))
+            (append "%), " (append (format_size (mul avail (page_size))) " available")))))))))))))
+
+; How much of mem is used, in percent, for its level bar: none if the
+; kernel said nothing.
+(def mem_used_percent ((mem (Option MemInfo))) int
+  (match mem
+    ((None) 0)
+    ((Some mi) (match mi ((MemInfo total used) (mem_percent used total))))))
+
+; The memory's line, under the grid: its title, a level bar of how much is
+; used, and mem_text.
+(def mem_line ((mem (Option MemInfo))) UiWidget
+  (UiPad (ui_space_m) (ui_space_s)
+    (UiBox (UiH) (ui_space_m)
+      (cons (UiLabel "Memory" (UiHeading) (UiStart))
+      (cons (UiLevel (mem_used_percent mem) 160)
+      (cons (UiExpand (UiLabel (mem_text mem) (UiDimmed) (UiStart)))
+            (nil UiWidget)))))))
 
 ; --------------------------------------------------------- ending one
 
@@ -99,7 +155,11 @@
 
 (def monitor_view ((m Monitor)) UiWidget
   (match m
-    ((Monitor gs rows status) (ui_grid_page status (UiGridView (monitor_prefix) (monitor_columns) rows gs)))))
+    ((Monitor gs rows status mem)
+      (UiBox (UiV) 0
+        (cons (UiExpand (ui_grid_page status (UiGridView (monitor_prefix) (monitor_columns) rows gs)))
+        (cons (UiSeparator (UiH))
+        (cons (mem_line mem) (nil UiWidget))))))))
 
 ; ---------------------------------------------------------------- update
 
@@ -109,36 +169,36 @@
 ; sort, and scroll it.
 (def monitor_update ((m Monitor) (action (list int)) (ev UiEvent) (sc UiScroller)) Monitor
   (match m
-    ((Monitor gs rows status)
+    ((Monitor gs rows status mem)
       (if (eq action "app.refresh")
           (let now (rows_now)
-            (monitor_rows (Monitor gs rows (append "Refreshed: " (append (digits (length now)) " processes"))) now))
+            (monitor_rows (Monitor gs rows (append "Refreshed: " (append (digits (length now)) " processes")) mem) now (mem_info)))
           (if (eq action "app.end")
               (monitor_end m)
               (if (starts_with action (append (monitor_prefix) "."))
-                  (selected (Monitor (ui_grid_action gs (monitor_prefix) action) rows status))
+                  (selected (Monitor (ui_grid_action gs (monitor_prefix) action) rows status mem))
                   (monitor_key m ev sc)))))))
 
 (def monitor_end ((m Monitor)) Monitor
   (match m
-    ((Monitor gs rows status)
+    ((Monitor gs rows status mem)
       (if (is_empty (ui_gs_selected gs))
           m
           (let said (end_text (int_prefix (ui_gs_selected gs) 0) (l0s_pid))
-            (monitor_rows (Monitor gs rows said) (rows_now)))))))
+            (monitor_read (Monitor gs rows said mem)))))))
 
 (def monitor_key ((m Monitor) (ev UiEvent) (sc UiScroller)) Monitor
   (match m
-    ((Monitor gs rows status)
+    ((Monitor gs rows status mem)
       (let code (ui_key_pressed ev)
         (if (lt code 0)
             m
-            (selected (Monitor (ui_grid_key (UiGridView (monitor_prefix) (monitor_columns) rows gs) code sc) rows status)))))))
+            (selected (Monitor (ui_grid_key (UiGridView (monitor_prefix) (monitor_columns) rows gs) code sc) rows status mem)))))))
 
 ; The monitor with its line saying what is selected, if anything is.
 (def selected ((m Monitor)) Monitor
   (match m
-    ((Monitor gs rows status) (Monitor gs rows (ui_selected_line gs status)))))
+    ((Monitor gs rows status mem) (Monitor gs rows (ui_selected_line gs status) mem))))
 
 ; ------------------------------------------------------------------ loop
 
@@ -146,10 +206,10 @@
 (def complain ((why (list int))) int (complain_as "procmon" why))
 
 (def procmon () int
-  (match (ui_open "Processes" 640 400)
+  (match (ui_open "Processes" (monitor_w) (monitor_h))
     ((UiOpenFailed why) (complain why))
     ((UiOpenedWin w)
-      (let m (monitor_new (rows_now))
+      (let m (monitor_new (rows_now) (mem_info))
         (monitor_loop (ui_present w (monitor_view m)) m (add (clock_ns) (refresh_ns)))))))
 
 ; Each message waiting is answered at once; with none, the table is read
@@ -168,7 +228,7 @@
 (def monitor_idle ((w UiWin) (m Monitor) (due int)) int
   (let now (clock_ns)
     (if (ge now due)
-        (let m2 (monitor_rows m (rows_now))
+        (let m2 (monitor_read m)
           (monitor_loop (ui_present w (monitor_view m2)) m2 (add now (refresh_ns))))
         (let s (sleep_ns (min (poll_ns) (sub due now)))
           (monitor_loop w m due)))))

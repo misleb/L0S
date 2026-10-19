@@ -8,7 +8,8 @@
 #   2. the toolbar on the window's ground, fafafa; the grid's header's
 #      line under it; End Process faded, with no row selected
 #   3. a row of its own, pid 7, the seventh by pid, its state's dot drawn;
-#      and no eighth row
+#      and no eighth row; and under the grid the memory's line, its level
+#      bar filled in the accent
 #   4. after run nap 600000 & at the shell, an eighth row, nap's (run
 #      windows's processes have exited, so are not listed), with nothing
 #      pressed: the table is read again by itself
@@ -129,8 +130,11 @@ shows() {
 # toolbar, 46 rows, its End Process button 108 wide at its right end, 6
 # in; a line; then the grid, its header 32 rows, the last its line, and
 # its rows, 30 each, sorted by pid, from 79. The State column runs from
-# 190, its dot 8 across from 199, 11 down a row; the Detail column from
-# 380, empty for a sleeping process, so its far end is the row's ground.
+# 190, its dot 8 across from 199, 11 down a row; Memory and Shared from
+# 380 and 480; the Detail column from 580, empty for a sleeping process,
+# and at most 24 characters, to 781, for a receiving one, so from 800 it
+# is the row's ground. The window is 840 wide, and under the grid's 400
+# rows is the memory's line.
 bar=46
 headerbar="235 235 235"; ground="250 250 250"; line="224 224 224"; white="255 255 255"
 selected="205 224 248"; red="224 27 36"; faded="237 139 143"
@@ -142,12 +146,19 @@ window
 cx=$((w_x + 2)); cy=$((w_y + bar))
 row() { echo $((cy + 79 + 30 * ($1 - 1))); }
 dot() { echo "$((cx + 203)) $(($(row $1) + 15))"; }
-endx=$((cx + 530)); endy=$((cy + 22))
+endx=$((cx + 730)); endy=$((cy + 22))
 
 shows "its header bar" "$((w_x + 6)) $((w_y + 6)) $headerbar"
 shows "the toolbar, the grid's header, End Process faded" \
   "$((cx + 100)) $((cy + 3)) $ground" "$((cx + 5)) $((cy + 78)) $line" "$endx $endy $faded"
 shows "its own row, the seventh, and no eighth" "$(dot 7) !$white" "$(dot 8) $white"
+
+# The memory's line under the grid's 400 rows and their line: 6 down,
+# Memory in bold, 49 wide, from 12, then 12 on its level bar, 8 high
+# in the middle of the line's 16, from 411; the share used is filled in
+# the accent, at least 8 of it.
+accent="53 132 228"
+shows "the memory's line, its level bar filled in the accent" "$((cx + 76)) $((cy + 415)) $accent"
 
 from=$(($(wc -c < "$out") + 1))
 printf 'run nap 600000 &\n' >&3
@@ -158,13 +169,13 @@ for try in $(seq 1 30); do
 done
 shows "nap's row, the eighth, read by itself" "$(dot 8) !$white"
 
-click $((cx + 600)) $(($(row 8) + 15))
+click $((cx + 800)) $(($(row 8) + 15))
 shows "a click selected nap's row, and End Process woke" \
-  "$((cx + 600)) $(($(row 8) + 1)) $selected" "$endx $endy $red"
+  "$((cx + 800)) $(($(row 8) + 1)) $selected" "$endx $endy $red"
 
 click $((endx + 20)) $endy
 shows "End Process ended nap: its row gone, End Process faded" \
-  "$((cx + 600)) $(($(row 8) + 1)) $white" "$(dot 8) $white" "$endx $endy $faded"
+  "$((cx + 800)) $(($(row 8) + 1)) $white" "$(dot 8) $white" "$endx $endy $faded"
 
 from=$(($(wc -c < "$out") + 1))
 printf 'ps\n' >&3
@@ -177,11 +188,11 @@ echo "ok - procmon: ps lists no nap"
 # Thirteen rows, ten shown from y 79 to 379: the slider is ten thirteenths
 # of the 300, 230 long, so it travels 70. At the top it is from 81 to 307,
 # 2 in from each end of its 230, and at the end, three rows on, from 151
-# to 377. At rest it is 6 wide, 3 in from the grid's right edge at 640,
-# from x 631, the text at 40% on white, adadad; with the pointer on its
-# strip, 8 wide, from 629, at 60%, 848484.
+# to 377. At rest it is 6 wide, 3 in from the grid's right edge at 840,
+# from x 831, the text at 40% on white, adadad; with the pointer on its
+# strip, 8 wide, from 829, at 60%, 848484.
 for n in 1 2 3 4 5 6; do printf 'run nap 600000 &\n' >&3; sleep 1; done
-gx=$((cx + 633)); wide=$((cx + 630))
+gx=$((cx + 833)); wide=$((cx + 830))
 slider="173 173 173"; slider_hot="132 132 132"
 shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $white"
 
@@ -189,10 +200,10 @@ shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $(
 # row under it is tinted, 4% of the text on white, 247, before the
 # wheel turns and after, though another row is under it then.
 hovered="247 247 247"
-events "$(at $((cx + 500)) $(($(row 5) + 15)))"; sleep 1
+events "$(at $((cx + 800)) $(($(row 5) + 15)))"; sleep 1
 events "$(wheel wheel-down)"; sleep 1
 shows "a step of the wheel scrolled to the end, the row now under the pointer tinted" \
-  "$gx $((cy + 100)) $white" "$gx $((cy + 360)) $slider" "$((cx + 500)) $(($(row 5) + 15)) $hovered" "$((cx + 500)) $(($(row 2) + 15)) $white"
+  "$gx $((cy + 100)) $white" "$gx $((cy + 360)) $slider" "$((cx + 800)) $(($(row 5) + 15)) $hovered" "$((cx + 800)) $(($(row 2) + 15)) $white"
 
 events "$(at $gx $((cy + 360)))"; sleep 1
 shows "the pointer on the strip: the slider wide and dark" "$wide $((cy + 360)) $slider_hot"

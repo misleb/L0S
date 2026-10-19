@@ -3,20 +3,25 @@
 ; The monitor after an action or event, before its window is laid out.
 (def upd ((m Monitor) (action (list int)) (ev UiEvent)) Monitor (monitor_update m action ev (ui_no_scroller)))
 
-(def status_of ((m Monitor)) (list int) (match m ((Monitor gs rows s) s)))
-(def grid_of ((m Monitor)) UiGridState (match m ((Monitor gs rows s) gs)))
-(def rows_of ((m Monitor)) (list UiRow) (match m ((Monitor gs rows s) rows)))
+(def status_of ((m Monitor)) (list int) (match m ((Monitor gs rows s mem) s)))
+(def grid_of ((m Monitor)) UiGridState (match m ((Monitor gs rows s mem) gs)))
+(def rows_of ((m Monitor)) (list UiRow) (match m ((Monitor gs rows s mem) rows)))
+(def mem_of ((m Monitor)) (Option MemInfo) (match m ((Monitor gs rows s mem) mem)))
 
 ; A table as the demo's might be: the shell, two drivers, the
-; compositor, and procmon, run from the shell.
+; compositor, and procmon, run from the shell, each with pages of its
+; own, and the screen's driver and the compositor sharing a screen.
 (def sample_rows () (list UiRow)
-  (cons (proc_row 1 (ProcInfo (state_reading) 0 12 4) "sh")
-  (cons (proc_row 2 (ProcInfo (state_receiving) 1 15 3) "uart")
-  (cons (proc_row 3 (ProcInfo (state_receiving) 1 17 5) "virtio-gpu")
-  (cons (proc_row 6 (ProcInfo (state_receiving) 1 20 9) "wm")
-  (cons (proc_row 7 (ProcInfo (state_running) 1 11 0) "procmon") (nil UiRow)))))))
+  (cons (proc_row 1 (ProcInfo (state_reading) 0 12 4 30 0) "sh")
+  (cons (proc_row 2 (ProcInfo (state_receiving) 1 15 3 20 1) "uart")
+  (cons (proc_row 3 (ProcInfo (state_receiving) 1 17 5 40 1000) "virtio-gpu")
+  (cons (proc_row 6 (ProcInfo (state_receiving) 1 20 9 60 1000) "wm")
+  (cons (proc_row 7 (ProcInfo (state_running) 1 11 0 50 0) "procmon") (nil UiRow)))))))
 
-(def sample () Monitor (monitor_new (sample_rows)))
+; 1,200 pages of the 98,304 used.
+(def sample_mem () (Option MemInfo) (Some (MemInfo 98304 1200)))
+
+(def sample () Monitor (monitor_new (sample_rows) (sample_mem)))
 
 ; A state's words are procs.l0's, tested there.
 (def test_filing_tone () int
@@ -28,15 +33,40 @@
        (check_bool "unknown" (eq (state_tone 42) (UiWarn)) true))))
 
 (def test_proc_row () int
-  (match (proc_row 2 (ProcInfo (state_receiving) 1 15 3) "uart")
+  (match (proc_row 2 (ProcInfo (state_receiving) 1 15 3 20 1) "uart")
     ((UiRow key cells)
       (add (check_str "keyed by pid" key "2")
            (check_bool "cells" (eq cells (cons (UiCellNum 2 "")
                                          (cons (UiCellText "uart")
                                          (cons (UiCellStatus (UiAccentTone) "waiting")
                                          (cons (UiCellNum 1 "")
-                                         (cons (UiCellText "for a message on port 3") (nil UiCell)))))))
+                                         (cons (UiCellSize 81920)
+                                         (cons (UiCellSize 4096)
+                                         (cons (UiCellText "for a message on port 3") (nil UiCell)))))))))
                        true)))))
+
+; By its own memory, most first: wm's 60 pages, procmon's 50, virtio-gpu's 40.
+(def test_sort_by_memory () int
+  (let m (upd (upd (sample) "procs.sort.4" (none)) "procs.sort.4" (none))
+    (check_str "most first" (unwords (keys_in (ui_grid_shown (rows_of m) (grid_of m)))) "6 7 3 1 2")))
+
+(def keys_in ((rows (list UiRow))) (list (list int))
+  (if (is_empty rows) (nil (list int)) (cons (ui_row_key (head rows)) (keys_in (tail rows)))))
+
+; 1,200 pages are 4,915,200 bytes, 1% of 402,653,184, and 97,104 are
+; left.
+(def test_mem_text () int
+  (add (check_str "used, of, available" (mem_text (sample_mem)) "4.9 MB used of 402.7 MB (1%), 397.7 MB available")
+       (check_str "none" (mem_text ((None MemInfo))) "Memory not known")))
+
+(def test_mem_percent () int
+  (add (check_int "half" (mem_percent 49152 98304) 50)
+       (add (check_int "rounded down" (mem_percent 1200 98304) 1)
+            (check_int "no memory" (mem_percent 0 0) 0))))
+
+; More used than the pool, as cannot be, leaves none available.
+(def test_mem_text_over () int
+  (check_str "none left" (mem_text (Some (MemInfo 10 12))) "49.2 kB used of 41.0 kB (120%), 0 bytes available"))
 
 ; Under an operating system there is no initramfs, and no process table.
 (def test_no_kernel () int
@@ -59,11 +89,11 @@
 
 (def test_selection_kept () int
   (let m (upd (sample) "procs.select.6" (none))
-    (check_str "still there" (ui_gs_selected (grid_of (monitor_rows m (sample_rows)))) "6")))
+    (check_str "still there" (ui_gs_selected (grid_of (monitor_rows m (sample_rows) (sample_mem)))) "6")))
 
 (def test_selection_dropped () int
   (let m (upd (sample) "procs.select.1" (none))
-    (check_str "gone with its process" (ui_gs_selected (grid_of (monitor_rows m (tail (sample_rows))))) "")))
+    (check_str "gone with its process" (ui_gs_selected (grid_of (monitor_rows m (tail (sample_rows)) (sample_mem)))) "")))
 
 ; Under an operating system the kernel answers no call: the end fails,
 ; and the table read again is empty.
@@ -78,11 +108,12 @@
 (def test_refresh () int
   (let m (upd (sample) "app.refresh" (none))
     (add (check_str "counted" (status_of m) "Refreshed: 0 processes")
-         (check_int "read again" (length (rows_of m)) 0))))
+         (add (check_int "read again" (length (rows_of m)) 0)
+              (check_str "the memory too, which no kernel tells" (mem_text (mem_of m)) "Memory not known")))))
 
 (def test_sort () int
-  (match (grid_of (upd (sample) "procs.sort.4" (none)))
-    ((UiGridState col desc sel first) (add (check_int "by detail" col 4) (check_bool "ascending" desc false)))))
+  (match (grid_of (upd (sample) "procs.sort.6" (none)))
+    ((UiGridState col desc sel first) (add (check_int "by detail" col 6) (check_bool "ascending" desc false)))))
 
 (def test_arrow_key () int
   (check_str "down from none, the first by pid"
@@ -104,11 +135,24 @@
 (def has_target ((ns (list UiNode)) (a (list int))) bool
   (if (is_empty ns) false (if (eq (ui_node_action (head ns)) a) true (has_target (tail ns) a))))
 
-(def laid ((m Monitor)) (list UiNode) (ui_layout_window (monitor_view m) 640 400 (ui_state_new (UiLight))))
+(def laid ((m Monitor)) (list UiNode) (ui_layout_window (monitor_view m) (monitor_w) (monitor_h) (ui_state_new (UiLight))))
 
 (def test_end_insensitive () int
   (add (check_bool "not without a selection" (has_target (laid (sample)) "app.end") false)
        (check_bool "with one" (has_target (laid (upd (sample) "procs.select.3" (none))) "app.end") true)))
+
+; The rows' area, as its scroller names it: from 79, under the toolbar's
+; 46, its line and the header's 32, and 321 high, ten rows of 30, above
+; the memory's line, 29 with its own line: as tests/procmon.sh counts.
+(def rows_area ((ns (list UiNode))) (list int)
+  (if (is_empty ns)
+      "none"
+      (if (starts_with (ui_node_action (head ns)) "procs.scroll.")
+          (match (ui_node_rect (head ns)) ((Rect x y w h) (unwords (numbers_words (cons x (cons y (cons w (cons h (nil int)))))))))
+          (rows_area (tail ns)))))
+
+(def test_rows_area () int
+  (check_str "ten rows, the window's width" (rows_area (laid (sample))) "0 79 840 321"))
 
 (def test_rows_shown () int
   (add (check_bool "the first" (has_target (laid (sample)) "procs.select.1") true)

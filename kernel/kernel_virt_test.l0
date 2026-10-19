@@ -546,6 +546,7 @@
 
 (def first_words () (list int) (cons (ldr_x0_x1) (nil int)))
 (def second_words () (list int) (cons (ldr_x0_x1_8) (nil int)))
+(def third_words () (list int) (cons (ldr_x0_x1_16) (nil int)))
 
 ; Two u32s as the 8 bytes a load gives: low, then high.
 (def words ((low int) (high int)) int (bit_or low (bit_shl high 32)))
@@ -553,9 +554,59 @@
 ; The record, then its program's path, /bin/raw0: as much as there is
 ; room for, past the record.
 (def test_info_length () int
-  (add (check_int "16 bytes and the path" (boot_words 0 (info_words 1 64 (nil int))) 25)
-       (add (check_int "the record alone" (boot_words 0 (info_words 1 16 (nil int))) (proc_record_len))
-            (check_int "not even that" (boot_words 0 (info_words 1 15 (nil int))) (err_too_big)))))
+  (add (check_int "24 bytes and the path" (boot_words 0 (info_words 1 64 (nil int))) 33)
+       (add (check_int "the record alone" (boot_words 0 (info_words 1 24 (nil int))) (proc_record_len))
+            (check_int "not even that" (boot_words 0 (info_words 1 23 (nil int))) (err_too_big)))))
+
+; Its own pages: some, its image's, its stack's and the heap's the record
+; is written to; and none at its device pages.
+(def test_info_own_pages () int
+  (let r (boot_words 0 (info_words 1 64 (third_words)))
+    (add (check_true "some of its own" (gt (bit_and r 4294967295) 0))
+         (check_int "none shared" (bit_shr r 32) 0))))
+
+; Three pages of shared memory first: three at its device pages.
+(def test_info_shared_pages () int
+  (check_int "three shared"
+    (bit_shr (boot_words 0 (shm_words 3 (info_words 1 64 (third_words)))) 32)
+    3))
+
+; An exited process has no pages.
+(def test_info_exited_pages () int
+  (check_int "none"
+    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (third_words)))))
+                     (cons (exits_with 7) (nil Raw))))
+    0))
+
+; ------------------------------------------------------------ mem_info
+
+; Asks for the memory record into the heap, with room for max, then
+; exits with the count, or with the record, as load says.
+(def mem_words ((max int) (load (list int))) (list int)
+  (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 max)
+    (append (call_words (call_mem_info)) (append load (exit_x0)))))))
+
+(def test_mem_info_length () int
+  (add (check_int "the record" (boot_words 0 (mem_words 64 (nil int))) (mem_record_len))
+       (check_int "no room" (boot_words 0 (mem_words 7 (nil int))) (err_too_big))))
+
+(def test_mem_info_total () int
+  (check_int "the pool, 384 MB of pages" (bit_and (boot_words 0 (mem_words 8 (first_words))) 4294967295) 98304))
+
+; The process's own pages are given, and so are the pages it shares:
+; with four shared first, four more than without.
+(def test_mem_info_used () int
+  (let alone (bit_shr (boot_words 0 (mem_words 8 (first_words))) 32)
+    (add (check_true "some given" (gt alone 0))
+         (check_int "four more"
+           (sub (bit_shr (boot_words 0 (shm_words 4 (mem_words 8 (first_words)))) 32) alone)
+           4))))
+
+; A buffer the process may not write is refused.
+(def test_mem_info_bad_buffer () int
+  (check_int "below the user range"
+    (boot_words 0 (cons (movz 0 0) (cons (movz 1 16) (cons (movz 2 8) (append (call_words (call_mem_info)) (exit_x0))))))
+    (err_fault)))
 
 (def test_info_self () int
   (check_int "running, from the kernel" (boot_words 0 (info_words 1 64 (first_words))) (words (state_running) 0)))
@@ -889,6 +940,16 @@
     (boot_words 0 (append (repeat_words 23 (cons (movz 0 4096) (call_words (call_shm_alloc)))) (exit_x0)))
     (add (stack_top) (mul 22 16777216))))
 
+; One call shares as much as dma_limit, 64 MB, the most a 4K screen's
+; buffer needs; a page more is refused.
+(def test_shm_alloc_limit () int
+  (add (check_int "64 MB"
+         (boot_words 0 (cons (movz 0 16384) (append (call_words (call_shm_alloc)) (exit_x0))))
+         (stack_top))
+       (check_int "a page more"
+         (boot_words 0 (cons (movz 0 16385) (append (call_words (call_shm_alloc)) (exit_x0))))
+         (err_too_big))))
+
 ; The same with shared frames: seven processes that share 64 MB each.
 (def test_freed_shared_suffices () int
   (check_int "the last one's last 16 MB"
@@ -939,16 +1000,6 @@
   (check_int "killed"
     (boot_words 0 (shm_words 1 (unmap_words 1 (cons (mov_x1_x19) (cons (ldr_x0_x1) (exit_x0))))))
     139))
-
-; One call shares as much as dma_limit, 64 MB, the most a 4K screen's
-; buffer needs; a page more is refused.
-(def test_shm_alloc_limit () int
-  (add (check_int "64 MB"
-         (boot_words 0 (cons (movz 0 16384) (append (call_words (call_shm_alloc)) (exit_x0))))
-         (stack_top))
-       (check_int "a page more"
-         (boot_words 0 (cons (movz 0 16385) (append (call_words (call_shm_alloc)) (exit_x0))))
-         (err_too_big))))
 
 (def test_shm_unmap_refused () int
   (add (check_int "not its pages"
@@ -1154,7 +1205,7 @@
 ; Its process is named by its path: the record and /bin/x, while it runs.
 (def test_spawn_image_named () int
   (let b (image_bytes "/bin/x" "" (code (cons (b_self) (nil int))))
-    (check_int "16 and 6" (files_boot (image_words (length b) (info_words 2 64 (nil int))) b "") 22)))
+    (check_int "24 and 6" (files_boot (image_words (length b) (info_words 2 64 (nil int))) b "") 30)))
 
 (def test_spawn_image_elf () int
   (check_int "exits 9" (image_boot (image_bytes "/bin/x" "" (elf_code (cons (movz 0 9) (exit_x0)) (nil Part)))) 9))

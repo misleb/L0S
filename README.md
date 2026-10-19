@@ -1222,7 +1222,7 @@ otherwise as its type's first failure.
 | 270 | `proc_kill pid` | `Kill`: `Killed`, `KillNoProc`, `KillDenied` | 0, ending pid with status 130, any process but the caller; -6 if pid's program has a `dev` line, -1 if there is no such process or it is the caller. Ending pid 1 stops the system with status 130 |
 | 271 | `proc_watch pid port` | `Watch`: `Watched`, `WatchNoProc`, `WatchFull` | 0, and the kernel sends `exit_notice pid status` to the caller's port when pid exits, or at once if it has. -1 if there is no such pid, or the port is not the caller's; -3 if 32 ports watch pid already. `exit_of` reads the notice |
 | 272 | `spawn_entry_with e args` | `Spawn` | as `spawn_entry`, but the process gets args (sent as `encode_args` writes them) in place of the inittab's; -5 if they are not well formed, -4 over 4096 bytes |
-| 273 | `proc_info pid`, `proc_path pid` | `(Option ProcInfo)`, `(list int)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, -1 for one started from an image, and a detail (the port or pid it waits on, or an exited process's status); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). After the record's 16 bytes, as many as there is room for, the program's path, its entry's or its image's, which `proc_path` reads. To list every process, ask `proc_slot` for each slot's pid |
+| 273 | `proc_info pid`, `proc_path pid` | `(Option ProcInfo)`, `(list int)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, -1 for one started from an image, a detail (the port or pid it waits on, or an exited process's status), and its pages of memory: its own (image, heap and stack, as far as it has touched them) and those at its device pages (shared and DMA memory, which other processes may map too); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). After the record's 24 bytes, as many as there is room for, the program's path, its entry's or its image's, which `proc_path` reads. To list every process, ask `proc_slot` for each slot's pid |
 | 274 | `dma_alloc n` | `DmaAlloc`: `DmaPages`, `DmaDenied`, `DmaTooMany`, `DmaNoRoom` | the address of n zeroed pages a device can reach, at the caller's next device pages; -6 no `dev` line, -4 n below 1 or over 16384 (64 MB, a 4K screen's buffer), -5 out of frames or device pages. They last until the system stops |
 | 275 | `dma_address va` | `DmaWhere`: `DmaAddress`, `DmaAddressDenied`, `NotDma` | where a device reaches the caller's DMA page holding va, page aligned; -1 if no DMA page holds va, -6 no `dev` line |
 | 276 | `tty_set port` | `TtyChange`: `TtySet`, `TtyNoPort` | 0, making port, a terminal, the caller's standard input, output and error, and those of every process it starts from then on; 0 gives back the kernel's own; -1 if there is no such port |
@@ -1237,6 +1237,7 @@ otherwise as its type's first failure.
 | 285 | `boot_args` | `(list (list int))` | the board's boot arguments, QEMU's `-append`, split at spaces; none under another operating system |
 | 286 | `root_switch label` | `Switch`: `Switched`, `SwitchDenied`, `SwitchDone`, `SwitchNoVolume`, `SwitchBadLabel` | 0, the volume mounted as label made `/`, the system volume, for good, and the initramfs's bytes given up (see [Booting from a volume](#booting-from-a-volume)); -6 if the caller's program is not the initramfs's, -2 if `/` is a volume already, -1 if no such volume is mounted, -5 no label |
 | 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, or not an ELF the kernel starts, -4 the whole over 64 MB of image with the path and arguments, -5 bytes not laid out as `spawn_image_bytes` lays them |
+| 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, the board's pool of 98,304 (384 MB), and how many of them are given, each process's own and every shared or DMA page once, however many processes map it; none under another operating system. Pages the kernel's page tables take from the pool are not known to it, so what is not given is at most what is free |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1294,7 +1295,7 @@ directory is part of it.
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
 | `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
-| `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent), read again every second and on Refresh, sortable by any column. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
+| `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 
 The libraries are in `common/`, shared by the kernel, every program and
@@ -1309,7 +1310,7 @@ name in a library is taken in every program that links it.
 | Library | What it holds | Linked into |
 |---|---|---|
 | [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
-| [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div` | the kernel, every program, the host tools |
+| [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div`, `format_size` (a size as GNOME says it, `782.3 kB`) | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
 | [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
@@ -1435,7 +1436,6 @@ host:
 - after typing `run draw circle 640 400 300 cyan`, its left and right
   edges.
 
-[tests/keyboard.sh](tests/keyboard.sh) boots the same way, types
 [tests/hidpi.sh](tests/hidpi.sh) boots the same on a 4K virtio-gpu,
 3840×2160, and by screendump checks:
 - the screen is the mode's size, and the top bar is 64 rows, twice its 32;
@@ -1449,6 +1449,7 @@ host:
 
 It keeps the screen at scale 2 in `build/hidpi-2x.ppm`, to look at.
 
+[tests/keyboard.sh](tests/keyboard.sh) boots the same way, types
 `run keys` at the serial line, then presses `h`, `i`, Shift-1, Space,
 Shift-A and Enter on the virtio keyboard with the monitor's `sendkey`, as
 typing in the window would. It checks that the serial line shows `hi! A`,
@@ -1494,7 +1495,8 @@ are from `run windows` at the serial shell. Then:
 `run procmon &`, and learns where the monitor's window is. Then, by
 screendump:
 - its header bar, its toolbar, the grid's header, End Process faded, and
-  its own row, the seventh, with no eighth;
+  its own row, the seventh, with no eighth; and under the grid the
+  memory's line, its level bar filled in the accent;
 - after `run nap 600000 &`, nap's row, read again with nothing pressed;
 - a click on it, selecting it, then on End Process, which ends it: its
   row gone, and `ps` listing no `nap`;
