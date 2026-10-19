@@ -335,35 +335,37 @@
 ; Entry m started by parent, with args if given, and otherwise with the
 ; arguments the inittab gives it, and the terminal tty, its parent's:
 ; err_no_port if there is no entry m, or the initramfs has been given up,
-; err_denied if it is not a program, err_too_big if it is over the 4 MB
-; of a process's image, err_fault if no process can be made.
+; err_denied if it is not a program, or not an ELF the kernel loads,
+; err_fault if no process can be made.
 (def spawn ((k Kernel) (m int) (parent int) (args (Option (list (list int)))) (tty int)) Spawned
   (if (if (not (is_entry k m)) true (not (k_held k)))
       (Spawned k (err_no_port))
       (if (not (entry_is_exec (k_entry k m)))
           (Spawned k (err_denied))
-          (if (gt (entry_size (k_entry k m)) (image_room))
-              (Spawned k (err_too_big))
-              (spawn_from k m parent (args_or args (k_entry_args k m)) tty (k_input k) (entry_start (k_entry k m)) (entry_end (k_entry k m)))))))
-
-; The most bytes a process's image has: its 4 MB.
-(def image_room () int (sub (image_limit) (user_base)))
+          (spawn_from k m parent (args_or args (k_entry_args k m)) tty (k_input k) (entry_start (k_entry k m)) (entry_end (k_entry k m))))))
 
 ; A new process of module m, an entry, or -1 for an image of its own,
 ; whose image is the bytes of input from start up to end. It takes the
 ; slot pick_slot chooses, never that of parent, which is running, and so
-; out of the table; err_fault if every slot is live.
+; out of the table; err_fault if every slot is live, or what image_of
+; refuses the image with.
 (def spawn_from ((k Kernel) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int)) Spawned
+  (let img (image_of input start end)
+    (match img
+      ((BadImage code) (Spawned k code))
+      ((ElfImage entry segs heap) (spawn_slot k m parent args tty input start end img)))))
+
+(def spawn_slot ((k Kernel) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int) (img Image)) Spawned
   (let s (pick_slot (slot_kinds k parent) (k_pids k) (slot_of parent))
     (if (lt s 0)
         (Spawned k (err_fault))
-        (spawn_in k s m parent args tty input start end))))
+        (spawn_in k s m parent args tty input start end img))))
 
-(def spawn_in ((k Kernel) (s int) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int)) Spawned
+(def spawn_in ((k Kernel) (s int) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int) (img Image)) Spawned
   (match k
     ((Kernel slots ready ipc ss irqs boot pids mem)
       (let pid (pid_next_in pids s)
-        (match (proc_create pid parent m args tty input start end)
+        (match (proc_create pid parent m args tty input start end img)
           ((CreateFailed) (Spawned (Kernel slots ready ipc ss irqs boot pids mem) (err_fault)))
           ((Created p)
             (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) mem)
@@ -1021,15 +1023,16 @@
 
 ; A program started from the len bytes at buf, as spawn_image_bytes lays
 ; them out: its path, its arguments, then its image. Its pid; or
-; err_too_big if they are over the room an image, a path and a message of
-; arguments take, or its image over 4 MB; err_fault if p may not give
-; them, or they are not laid out so; err_denied for no image at all; or
-; what spawn_from gives. Given no arguments it gets the inittab's for its
-; path; it never drives devices.
+; err_too_big if they are over the room a program's file, a path and a
+; message of arguments take; err_fault if p may not give them, or they
+; are not laid out so; err_denied for no image at all; or what spawn_from
+; gives, err_denied for an image that is not an ELF the kernel loads.
+; Given no arguments it gets the inittab's for its path; it never drives
+; devices.
 (def do_spawn_image ((k Kernel) (p Proc) (buf int) (len int)) Step
   (if (lt len 8)
       (resume_with k p (err_fault))
-      (if (gt len (add (add 8 (path_limit)) (add (max_message) (image_room))))
+      (if (gt len (add (add 8 (path_limit)) (add (max_message) (image_file_room))))
           (resume_with k p (err_too_big))
           (match (proc_copy_out p buf len)
             ((CopyOutBad q) (resume_with k q (err_fault)))
@@ -1051,13 +1054,11 @@
   (let size (sub (bytes_len b) start)
     (if (lt size 1)
         (resume_with k p (err_denied))
-        (if (gt size (image_room))
-            (resume_with k p (err_too_big))
-            (if (is_empty enc)
-                (spawned_image k p b path (k_path_args k path) start)
-                (match (decode_args (bytes_from_list enc))
-                  ((None) (resume_with k p (err_fault)))
-                  ((Some args) (spawned_image k p b path args start))))))))
+        (if (is_empty enc)
+            (spawned_image k p b path (k_path_args k path) start)
+            (match (decode_args (bytes_from_list enc))
+              ((None) (resume_with k p (err_fault)))
+              ((Some args) (spawned_image k p b path args start)))))))
 
 (def spawned_image ((k Kernel) (p Proc) (b bytes) (path (list int)) (args (list (list int))) (start int)) Step
   (match (spawn_from k -1 (proc_pid p) args (proc_tty_port p) b start (bytes_len b))

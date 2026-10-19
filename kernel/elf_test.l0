@@ -1,0 +1,158 @@
+; elf_test.l0 -- reading and refusing images, built by asm.l0's elf_image.
+
+(def read_list ((img (list int))) Elf
+  (let b (bytes_from_list img) (elf_read b 0 (bytes_len b) (em_aarch64))))
+
+; Why an image was refused, or "ok".
+(def why_of ((img (list int))) (list int)
+  (match (read_list img) ((Elf entry segs heap) "ok") ((ElfRefused why) why)))
+
+; img with byte i made v.
+(def poke ((img (list int)) (i int) (v int)) (list int)
+  (append (take img i) (cons v (drop img (add i 1)))))
+
+(def exits () (list int) (cons (movz 0 7) (exit_x0)))
+
+(def one_seg () (list int) (elf_code (exits) (nil Part)))
+
+; Code, a page of rodata, and data with 6 MB of bss.
+(def three_segs () (list int)
+  (elf_code (exits)
+    (cons (Part (add (user_base) 4096) (pf_r) "hello" 5)
+      (cons (Part (add (user_base) 8192) (pf_rw) "x" 6291456) (nil Part)))))
+
+(def test_elf_is () int
+  (add (check_bool "an ELF" (elf_is (bytes_from_list (one_seg)) 0 64) true)
+       (add (check_bool "raw code" (elf_is (bytes_from_list (code_bytes (exits))) 0 8) false)
+            (check_bool "too short" (elf_is (bytes_from_list (one_seg)) 0 3) false))))
+
+(def test_elf_machine () int
+  (add (check_int "aarch64" (elf_machine 1) 183)
+       (add (check_int "riscv64" (elf_machine 2) 243)
+            (check_int "a host" (elf_machine 0) 0))))
+
+(def test_elf_one_segment () int
+  (match (read_list (one_seg))
+    ((Elf entry segs heap)
+      (add (check_int "entry" entry (user_base))
+           (add (check_int "segments" (length segs) 1)
+                (check_int "heap" heap (add (user_base) 4096)))))
+    ((ElfRefused why) (fail_because "read" why))))
+
+(def test_elf_code_perm () int
+  (match (read_list (one_seg))
+    ((Elf entry segs heap)
+      (match (head segs)
+        ((ElfSeg off va fsz msz perm)
+          (add (check_int "offset" off 4096)
+               (add (check_int "three instructions" fsz 12) (check_int "read and execute" perm 2))))))
+    ((ElfRefused why) (fail_because "read" why))))
+
+(def test_elf_three_segments () int
+  (match (read_list (three_segs))
+    ((Elf entry segs heap)
+      (add (check_int "segments" (length segs) 3)
+           (check_int "heap after the bss" heap (add (user_base) (add 8192 6291456)))))
+    ((ElfRefused why) (fail_because "read" why))))
+
+; The perms of the rodata and the data: read only, and read and write.
+(def test_elf_data_perms () int
+  (match (read_list (three_segs))
+    ((Elf entry segs heap)
+      (match (nth segs 1)
+        ((ElfSeg off va fsz msz r)
+          (match (nth segs 2)
+            ((ElfSeg off2 va2 fsz2 msz2 w)
+              (add (check_int "rodata" r 0)
+                   (add (check_int "data" w 1) (check_int "bss" msz2 6291456))))))))
+    ((ElfRefused why) (fail_because "read" why))))
+
+; A second program header turned into a PT_RISCV_ATTRIBUTES, 0x70000003,
+; is passed over.
+(def test_elf_other_headers () int
+  (let img (poke (poke (elf_code (exits) (cons (Part (add (user_base) 4096) (pf_r) "a" 1) (nil Part))) 120 3) 123 112)
+    (match (read_list img)
+      ((Elf entry segs heap) (check_int "one PT_LOAD" (length segs) 1))
+      ((ElfRefused why) (fail_because "read" why)))))
+
+(def test_elf_from_an_offset () int
+  (let b (bytes_from_list (append "pad!" (one_seg)))
+    (match (elf_read b 4 (bytes_len b) (em_aarch64))
+      ((Elf entry segs heap) (check_int "entry" entry (user_base)))
+      ((ElfRefused why) (fail_because "read" why)))))
+
+; ---------------------------------------------------------------- refused
+
+(def test_elf_refuses_short () int
+  (check_str "why" (why_of (take (one_seg) 40)) "shorter than an ELF header"))
+
+(def test_elf_refuses_raw () int
+  (check_str "why" (why_of (append (code_bytes (exits)) (zeros 64))) "not an ELF"))
+
+(def test_elf_refuses_32_bit () int
+  (check_str "why" (why_of (poke (one_seg) 4 1)) "not 64-bit and little-endian"))
+
+(def test_elf_refuses_shared_object () int
+  (check_str "why" (why_of (poke (one_seg) 16 3)) "not an executable"))
+
+(def test_elf_refuses_other_cpu () int
+  (check_str "why" (why_of (elf_image (em_riscv) (user_base) (cons (Part (user_base) (pf_rx) (code_bytes (exits)) 12) (nil Part))))
+             "for another CPU"))
+
+(def test_elf_refuses_header_size () int
+  (check_str "why" (why_of (poke (one_seg) 54 64)) "program headers not 56 bytes"))
+
+(def test_elf_refuses_headers_past_end () int
+  (check_str "why" (why_of (take (one_seg) 100)) "program headers past the end"))
+
+(def test_elf_refuses_headers_in_header () int
+  (check_str "why" (why_of (poke (one_seg) 32 8)) "program headers inside the ELF header"))
+
+(def test_elf_refuses_too_many_headers () int
+  (check_str "why" (why_of (poke (one_seg) 56 17)) "over 16 program headers"))
+
+(def test_elf_refuses_writable_code () int
+  (check_str "why" (why_of (elf_image (em_aarch64) (user_base) (cons (Part (user_base) (pf_rwx) (code_bytes (exits)) 12) (nil Part))))
+             "a segment writable and executable"))
+
+(def test_elf_refuses_unaligned () int
+  (check_str "why" (why_of (elf_image (em_aarch64) (add (user_base) 16) (cons (Part (add (user_base) 16) (pf_rx) (code_bytes (exits)) 12) (nil Part))))
+             "a segment not page-aligned"))
+
+(def test_elf_refuses_overlap () int
+  (check_str "why" (why_of (elf_code (exits) (cons (Part (user_base) (pf_r) "a" 1) (nil Part))))
+             "a segment below user_base or over another"))
+
+(def test_elf_refuses_below_user_base () int
+  (check_str "why" (why_of (elf_image (em_aarch64) 4096 (cons (Part 4096 (pf_rx) (code_bytes (exits)) 12) (nil Part))))
+             "a segment below user_base or over another"))
+
+(def test_elf_refuses_above_range () int
+  (check_str "why" (why_of (elf_code (exits) (cons (Part (sub (elf_top) 4096) (pf_rw) "" 8192) (nil Part))))
+             "a segment above the image's range"))
+
+(def test_elf_refuses_more_in_file () int
+  (check_str "why" (why_of (elf_code (exits) (cons (Part (add (user_base) 4096) (pf_r) "abc" 2) (nil Part))))
+             "a segment with more in the file than in memory"))
+
+(def test_elf_refuses_cut_short () int
+  (check_str "why" (why_of (take (one_seg) 4100)) "a segment past the end"))
+
+(def test_elf_refuses_huge () int
+  (check_str "why" (why_of (poke (one_seg) 111 128)) "a segment out of range"))   ; the top byte of p_memsz
+
+(def test_elf_refuses_four_segments () int
+  (check_str "why"
+    (why_of (elf_code (exits) (cons (Part (add (user_base) 4096) (pf_r) "a" 1)
+                                (cons (Part (add (user_base) 8192) (pf_rw) "b" 1)
+                                  (cons (Part (add (user_base) 12288) (pf_rw) "c" 1) (nil Part))))))
+    "over three segments"))
+
+(def test_elf_refuses_entry_in_data () int
+  (check_str "why"
+    (why_of (elf_image (em_aarch64) (add (user_base) 4096)
+              (cons (Part (user_base) (pf_rx) (code_bytes (exits)) 12) (cons (Part (add (user_base) 4096) (pf_rw) "" 8) (nil Part)))))
+    "entry not in an executable segment"))
+
+(def test_elf_refuses_no_segments () int
+  (check_str "why" (why_of (elf_image (em_aarch64) (user_base) (nil Part))) "entry not in an executable segment"))

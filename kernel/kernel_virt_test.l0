@@ -486,7 +486,7 @@
     (append (call_words (call_spawn_args)) (append (call_words (call_wait)) (exit_x0))))))))
 
 (def spawner ((m int) (extra (list int)) (len int)) Raw
-  (Raw (flag_boot) (append (code (spawn_args_words m len)) extra)))
+  (Raw (flag_boot) (program (append (code_bytes (spawn_args_words m len)) extra))))
 
 ; The same, but exits with what spawn_args gave, for a spawn that fails:
 ; eight words of code.
@@ -495,7 +495,7 @@
     (append (call_words (call_spawn_args)) (exit_x0)))))))
 
 (def spawn_tryer ((m int) (extra (list int)) (len int)) Raw
-  (Raw (flag_boot) (append (code (spawn_try_words m len)) extra)))
+  (Raw (flag_boot) (program (append (code_bytes (spawn_try_words m len)) extra))))
 
 (def test_spawn_args () int
   (check_int "two arguments"
@@ -605,7 +605,7 @@
 ; A program of these instructions, padded to 1024 bytes, then data: the
 ; paths it opens, which data_words puts the address of in a register.
 (def with_data ((ws (list int)) (d (list int))) (list int)
-  (append (pad_to 1024 (code ws)) d))
+  (program (append (pad_to 1024 (code_bytes ws)) d)))
 
 (def pad_to ((n int) (s (list int))) (list int)
   (append s (zeros (sub n (length s)))))
@@ -1143,6 +1143,98 @@
 
 ; Its process is named by its path: the record and /bin/x, while it runs.
 (def test_spawn_image_named () int
-  (check_int "16 and 6"
-    (files_boot (image_words 18 (info_words 2 64 (nil int))) (image_bytes "/bin/x" "" (code (cons (b_self) (nil int)))) "")
-    22))
+  (let b (image_bytes "/bin/x" "" (code (cons (b_self) (nil int))))
+    (check_int "16 and 6" (files_boot (image_words (length b) (info_words 2 64 (nil int))) b "") 22)))
+
+(def test_spawn_image_elf () int
+  (check_int "exits 9" (image_boot (image_bytes "/bin/x" "" (elf_code (cons (movz 0 9) (exit_x0)) (nil Part)))) 9))
+
+; An ELF the kernel does not load: spawn_image's own answer.
+(def test_spawn_image_elf_refused () int
+  (let b (image_bytes "/bin/x" "" (elf_image (em_aarch64) (user_base) (cons (Part (user_base) (pf_rwx) (code_bytes (exit_x0)) 8) (nil Part))))
+    (check_int "writable code" (files_boot (image_words (length b) (exit_x0)) b "") (err_denied))))
+
+; ------------------------------------------------------------------- ELF
+
+; Boots one ELF program, started at boot.
+(def boot_elf ((img (list int))) int
+  (boot (raw_initramfs (cons (Raw (flag_boot) img) (nil Raw)))))
+
+; x1 = user_base plus n pages.
+(def page_words ((n int)) (list int)
+  (cons (movz_hi 1 49152) (cons (add_imm_hi 1 1 n) (nil int))))
+
+(def test_elf_exit () int
+  (check_int "exit 7" (boot_elf (elf_code (cons (movz 0 7) (exit_x0)) (nil Part))) 7))
+
+; Its code is readable: the second instruction's word, ldr w0, [x1, #4].
+(def test_elf_code_readable () int
+  (check_int "ldr w0, [x1, #4]"
+    (boot_elf (elf_code (cons (movz_hi 1 49152) (cons (ldr_w0_x1_4) (exit_x0))) (nil Part)))
+    (ldr_w0_x1_4)))
+
+; But not writable: a store to it is a fault, which kills the process.
+(def test_elf_code_not_writable () int
+  (check_int "killed"
+    (boot_elf (elf_code (cons (movz_hi 1 49152) (cons (str_x0_x1) (cons (movz 0 7) (exit_x0)))) (nil Part)))
+    139))
+
+; Its rodata, "hello" a page in, is readable but not writable.
+(def rodata () (list Part) (cons (Part (add (user_base) 4096) (pf_r) "hello" 5) (nil Part)))
+
+(def test_elf_rodata () int
+  (add (check_int "the o of hello" (boot_elf (elf_code (append (page_words 1) (cons (ldr_w0_x1_4) (exit_x0))) (rodata))) 111)
+       (check_int "a store killed" (boot_elf (elf_code (append (page_words 1) (cons (str_x0_x1) (exit_x0))) (rodata))) 139)))
+
+; Data's bytes are its file's, and its bss, 6 MB past the 4 MB a raw image
+; may have, is zero and writable to its last page, 0xC0600000.
+(def big_data () (list Part) (cons (Part (add (user_base) 4096) (pf_rw) "abcd*" 6291456) (nil Part)))
+
+(def test_elf_data () int
+  (check_int "the *" (boot_elf (elf_code (append (page_words 1) (cons (ldr_w0_x1_4) (exit_x0))) (big_data))) 42))
+
+(def test_elf_big_bss () int
+  (check_int "stored and loaded"
+    (boot_elf (elf_code (append (page_words 1536) (cons (ldr_x0_x1) (cons (movz 0 9) (cons (str_x0_x1) (cons (movz 0 0) (cons (ldr_x0_x1) (exit_x0)))))))
+                        (big_data)))
+    9))
+
+; The heap starts at the page after the image, here its one page of code,
+; and is mapped on demand there.
+(def test_elf_heap_after_image () int
+  (check_int "stored and loaded"
+    (boot_elf (elf_code (append (page_words 1) (cons (movz 0 9) (cons (str_x0_x1) (cons (movz 0 0) (cons (ldr_x0_x1) (exit_x0)))))) (nil Part)))
+    9))
+
+; The kernel copies a name into its data, and not into its code: -5.
+(def name_words ((pages int)) (list int)
+  (cons (movz 0 0) (append (page_words pages) (cons (movz 2 64) (append (call_words (call_module_name)) (exit_x0))))))
+
+(def test_elf_copy_in () int
+  (add (check_int "into the data" (boot_elf (elf_code (name_words 1) (big_data))) 11)
+       (check_int "into the code" (boot_elf (elf_code (name_words 0) (nil Part))) (err_fault))))
+
+; Pid 1 spawns module 1 and exits with what spawning it gives.
+(def spawn_one ((img (list int))) int
+  (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn)) (append (call_words (call_wait)) (exit_x0)))))
+                   (cons (Raw 0 img) (nil Raw)))))
+
+(def test_elf_spawned () int
+  (check_int "its status" (spawn_one (elf_code (cons (movz 0 42) (exit_x0)) (nil Part))) 42))
+
+(def spawned_why ((img (list int))) int
+  (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn)) (exit_x0))))
+                   (cons (Raw 0 img) (nil Raw)))))
+
+(def test_elf_other_cpu_refused () int
+  (check_int "not a program"
+    (spawned_why (elf_image (em_riscv) (user_base) (cons (Part (user_base) (pf_rx) (code_bytes (exit_x0)) 8) (nil Part))))
+    (err_denied)))
+
+; A raw image, as toolchains wrote them before ELF, is no program.
+(def test_raw_image_refused () int
+  (check_int "not a program" (spawned_why (code_bytes (cons (movz 0 42) (exit_x0)))) (err_denied)))
+
+(def test_elf_malformed_refused () int
+  (add (check_int "cut short" (spawned_why (take (elf_code (exit_x0) (nil Part)) 4100)) (err_denied))
+       (check_int "only a header" (spawned_why (take (elf_code (exit_x0) (nil Part)) 64)) (err_denied))))

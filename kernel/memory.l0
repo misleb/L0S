@@ -3,10 +3,31 @@
 
 (data Area (AreaImage) (AreaHeap) (AreaStack) (AreaDevice) (AreaOutside))
 
-(def area_of ((va int)) Area
+; Where a process's image lies, its ELF's segments (spec section 10.3):
+; their spans, each the pages from a page up to another, mapped with a
+; perm, and the first page of its heap. A segment's pages that hold its
+; file's bytes are mapped as it loads; the rest, its bss, as each is
+; first touched, as the heap's are.
+(data Span (Span int int int))
+(data Layout (Layout (list Span) int))
+
+(def layout_heap ((l Layout)) int (match l ((Layout spans heap) heap)))
+
+; The perm of the span of l holding va, or -1 if none does.
+(def span_perm ((l Layout) (va int)) int
+  (match l ((Layout spans heap) (perm_in spans va))))
+
+(def perm_in ((spans (list Span)) (va int)) int
+  (if (is_empty spans)
+      -1
+      (match (head spans)
+        ((Span from to perm)
+          (if (if (ge va from) (lt va to) false) perm (perm_in (tail spans) va))))))
+
+(def area_of ((l Layout) (va int)) Area
   (if (lt va (user_base))
       (AreaOutside)
-      (if (lt va (image_limit))
+      (if (lt va (layout_heap l))
           (AreaImage)
           (if (lt va (heap_limit))
               (AreaHeap)
@@ -21,17 +42,28 @@
 (def page_of ((va int)) int
   (bit_and va (bit_xor (sub (page_size) 1) -1)))
 
-; The permissions of a zeroed page the kernel maps at va when it is first
-; touched, or -1 if nothing is mapped there on demand. The image's 4 MB
-; are readable, writable, and executable, since a raw image does not say
-; where its code ends; the heap and stack only readable and writable.
-(def demand_perm ((va int)) int
-  (match (area_of va)
-    ((AreaImage) 3)
+; The permissions of a zeroed page the kernel maps at va of a process
+; laid out as l when it is first touched, or -1 if nothing is mapped there
+; on demand: in the image, its segment's, for a page of its bss, and none
+; between segments; the heap and stack only readable and writable.
+(def demand_perm ((l Layout) (va int)) int
+  (match (area_of l va)
+    ((AreaImage) (span_perm l va))
     ((AreaHeap) 1)
     ((AreaStack) 1)
     ((AreaDevice) -1)
     ((AreaOutside) -1)))
+
+; Whether the kernel may copy into page va of a process laid out as l,
+; as the process itself may write it: not into its code or rodata. Every
+; page above the image a process has is writable.
+(def may_write ((l Layout) (va int)) bool
+  (match (area_of l va)
+    ((AreaImage) (let p (span_perm l va) (if (lt p 0) false (eq (bit_and p 1) 1))))
+    ((AreaHeap) true)
+    ((AreaStack) true)
+    ((AreaDevice) true)
+    ((AreaOutside) false)))
 
 ; The pages that hold the n bytes from va, lowest first; none when n is 0.
 (def range_pages ((va int) (n int)) (list int)
@@ -45,28 +77,32 @@
       (pages_down (sub p (page_size)) first (cons p acc))))
 
 ; What the kernel must do before copying the n bytes from va of a process
-; whose frames are pages: map the pages listed, which are not mapped yet
-; and may be mapped on demand; or refuse, because some byte is outside the
-; user range, on a device, or nowhere a page may be mapped.
+; laid out as l, whose frames are pages, out of it, or into it if write:
+; map the pages listed, which are not mapped yet and may be mapped on
+; demand; or refuse, because some byte is outside the user range, on a
+; device, nowhere a page may be mapped, or, to write, where the process
+; may not write.
 (data Plan (PlanMap (list int)) (PlanBad))
 
-(def range_plan ((pages (Map int int)) (va int) (n int)) Plan
+(def range_plan ((l Layout) (pages (Map int int)) (va int) (n int) (write bool)) Plan
   (if (lt n 0)
       (PlanBad)
       (if (eq n 0)
           (PlanMap (nil int))
           (if (if (lt va (user_base)) true (gt n (sub (user_limit) va)))
               (PlanBad)
-              (plan_pages pages (range_pages va n) (nil int))))))
+              (plan_pages l pages (range_pages va n) write (nil int))))))
 
-(def plan_pages ((pages (Map int int)) (ps (list int)) (acc (list int))) Plan
+(def plan_pages ((l Layout) (pages (Map int int)) (ps (list int)) (write bool) (acc (list int))) Plan
   (if (is_empty ps)
       (PlanMap (rev acc))
-      (if (map_has pages (head ps))
-          (plan_pages pages (tail ps) acc)
-          (if (lt (demand_perm (head ps)) 0)
-              (PlanBad)
-              (plan_pages pages (tail ps) (cons (head ps) acc))))))
+      (if (if write (not (may_write l (head ps))) false)
+          (PlanBad)
+          (if (map_has pages (head ps))
+              (plan_pages l pages (tail ps) write acc)
+              (if (lt (demand_perm l (head ps)) 0)
+                  (PlanBad)
+                  (plan_pages l pages (tail ps) write (cons (head ps) acc)))))))
 
 ; Where the region system call maps the len bytes of device memory from
 ; base, given that the next free device page is at next: at va, through

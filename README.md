@@ -837,7 +837,7 @@ keeps it, made anew each time:
 with `bsdtar --format newc`, in order of path:
 - everything in `ROOT`, its modes kept: programs 0755, the rest 0644;
 - each IMAGE becomes `/bin/NAME`, mode 0755, as `tests/e2e.sh` adds its
-  raw programs;
+  hand-made programs;
 - everything in `ETC` becomes `/etc/...`, mode 0644.
 
 `bsdtar -tvf build/initramfs.cpio` lists it like any cpio archive.
@@ -993,13 +993,14 @@ with random registers.
 | `common/initramfs.l0` | the newc archive: parsing it, paths, entry kinds, and a writer for tests |
 | `common/queue.l0` | a FIFO queue of any type, shared with user programs |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
-| `kernel/memory.l0` | what each address is for; which pages to map before a copy; where device regions and DMA pages go; which frames to free when a process ends |
+| `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; where device regions and DMA pages go; which frames to free when a process ends |
+| `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
 | `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
 | `kernel/syscall.l0` | a trapped context decoded into a `Call` |
-| `kernel/process.l0` | creating, demand-paging, copying in and out of, mapping devices and DMA pages into, and the open files of a process |
+| `kernel/process.l0` | creating a process from its ELF's segments, demand-paging, copying in and out of, mapping devices and DMA pages into, and the open files of a process |
 | `kernel/kernel.l0` | the state, every call's handler, traps, the loop, and boot |
 
 All of these except `process.l0` and `kernel.l0` are pure and tested on the
@@ -1030,20 +1031,31 @@ It gives none, and spawning fails with -5, only when all 255 are alive.
 
 ### A process's memory
 
-The layout is fixed by spec §10.3.
+The layout is fixed by spec §10.3. A program's image is an ELF, as
+`l0 build --target proc` writes them, and
+[kernel/elf.l0](kernel/elf.l0) reads and checks its headers.
 
 | Address | What | Mapped |
 |---|---|---|
-| `0xC0000000` | the image | at load, readable, writable and executable |
-| to `0xC0400000` | the rest of the image's 4 MB (bss) | on first touch, RWX |
-| to `0xD8000000` | heap | on first touch, RW |
+| `0xC0000000` | the image's segments, code, rodata, and data, ending below `0xD0000000` | at load, the pages holding the file's bytes, each with its segment's flags: code readable and executable, rodata readable, data readable and writable |
+| the rest of a segment | its bss, zero | on first touch, with the segment's flags |
+| from the page after the image to `0xD8000000` | heap | on first touch, RW |
 | to `0xE8000000` | stack, `sp` starting at the top | on first touch, RW |
 | `0xE8000000` up | device regions, DMA pages, and shared pages | by the `region` and `dma_alloc` calls, for programs with a `dev` line only; by `shm_alloc` and `shm_share`, for any |
 
+A process starts at its image's `e_entry`. The kernel starts only an ELF
+of spec §10.3's for this CPU: static, `ET_EXEC`, at most three
+page-aligned `PT_LOAD`s in order, none writable and executable, within
+its file and the image's range; anything else, the raw images earlier
+toolchains wrote among it, is "not a program", -6. A store to its code
+or rodata faults, and the process is killed, as does a touch of a page
+between its segments.
+
 The kernel copies in and out of a process only through pages it mapped
 itself. A buffer on a device's registers, or outside the user range, gets
--5. DMA pages are ordinary memory the kernel mapped, so a buffer there is
-accepted.
+-5, and so does one the kernel would write into the process's code or
+rodata, which it may not write itself. DMA pages are ordinary memory the
+kernel mapped, so a buffer there is accepted.
 
 **DMA.** A device such as the virtio-gpu reads and writes memory itself,
 at addresses it is given in its registers. `dma_alloc n` maps n fresh
@@ -1150,7 +1162,7 @@ otherwise as its type's first failure.
 | 261 | `port_try_receive port` | `Message` | the same, or `(RecvFailed)` at once if no message is waiting |
 | 262 | `name_register port name` | `Registration`: `Registered`, `RegisterNoPort`, `RegisterTaken`, `RegisterTooLong` | 0, or -1 not your port, -2 the name is taken, -4 a name over 256 bytes |
 | 263 | `name_lookup name` | `Lookup`: `Found`, `NotFound` | a port, or -1 (`name_await` retries with yields, `name_wait` with sleeps) |
-| 264 | `spawn_entry e` | `Spawn`: `Spawned`, `SpawnNoEntry`, `SpawnNotProgram`, `SpawnTooBig`, `SpawnNoRoom` | a pid, or -1 no entry e, or the initramfs given up, -6 not a program, -4 an image over 4 MB, -5 out of address spaces. `spawn_path` starts a program by its path, wherever `/` is |
+| 264 | `spawn_entry e` | `Spawn`: `Spawned`, `SpawnNoEntry`, `SpawnNotProgram`, `SpawnTooBig`, `SpawnNoRoom` | a pid, or -1 no entry e, or the initramfs given up, -6 not a program, or not an ELF the kernel starts, -5 out of address spaces. `spawn_path` starts a program by its path, wherever `/` is |
 | 265 | `wait_pid pid` | `Reaped`: `Reaped`, `WaitNoProc` | waits; the pid's exit status, or -1, which a status of -1 reads as too |
 | 266 | `sleep_until t`, `sleep_ns n` | `int` | 0, once `clock_ns` reaches t |
 | 267 | `irq_bind irq port` | `IrqBinding`: `IrqBound`, `IrqAbsent`, `IrqDenied`, `IrqNoPort`, `IrqTaken` | 0, or -6 no `dev` line for the program, -1 not your port, -2 already bound, -3 no such interrupt on the board. After this, each interrupt sends the message `irq_notice irq` to the port |
@@ -1173,7 +1185,7 @@ otherwise as its type's first failure.
 | 284 | `mount_at i`, `mount_list` | `(Option MountInfo)` | mount i of the table, from 0, `/`: where it is, the port of its server, 0 for the kernel's own, and its partition's UUID, empty for none; none past the last. `mount_list` gives them all, and `fs_system_volume` the system volume's `/Volumes/LABEL` |
 | 285 | `boot_args` | `(list (list int))` | the board's boot arguments, QEMU's `-append`, split at spaces; none under another operating system |
 | 286 | `root_switch label` | `Switch`: `Switched`, `SwitchDenied`, `SwitchDone`, `SwitchNoVolume`, `SwitchBadLabel` | 0, the volume mounted as label made `/`, the system volume, for good, and the initramfs's bytes given up (see [Booting from a volume](#booting-from-a-volume)); -6 if the caller's program is not the initramfs's, -2 if `/` is a volume already, -1 if no such volume is mounted, -5 no label |
-| 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, -4 an image over 4 MB, -5 bytes not laid out as `spawn_image_bytes` lays them |
+| 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, or not an ELF the kernel starts, -4 the whole over 64 MB of image with the path and arguments, -5 bytes not laid out as `spawn_image_bytes` lays them |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1275,7 +1287,7 @@ name in a library is taken in every program that links it.
 | Command | What it runs |
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
-| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`) |
 
 Each case of `tests/e2e/` is a directory:
@@ -1473,9 +1485,10 @@ windows` lists `vt1`'s window, in front, and the top bar names it
 Terminal, a lit pixel of the `T`, where its title, `vt1`, would show none.
 
 Every boot is killed after a minute by [tools/deadline](tools/deadline),
-since macOS has no `timeout`. `tests/e2e.sh` also builds three raw programs
-of a few aarch64 instructions each, for what L0 code cannot do on purpose:
-fault, pass a bad buffer, and wait on nothing.
+since macOS has no `timeout`. `tests/e2e.sh` also builds three programs
+of a few aarch64 instructions each, each an ELF of one code segment it
+writes with `printf`, for what L0 code cannot do on purpose: fault, pass
+a bad buffer, and wait on nothing.
 
 ## Limits
 
@@ -1577,8 +1590,11 @@ resizes a partition.
 - Interrupts the kernel enables stay enabled (L0 cannot disable one). If a
   driver exits while its device keeps the interrupt raised, the kernel ends
   each one as it comes.
-- The image is mapped RWX, because a raw `--target proc` image does not say
-  where its code ends.
+- Only ELF images run: a raw one, as toolchains before L0's roadmap item
+  0093 wrote them, is refused, so programs built by one must be built
+  again. An image's pages are copied for each process, and none is shared
+  between processes running the same program, its code and rodata
+  included.
 - Instruction-cache maintenance after loading an image is left to the board's
   host file. This is fine under QEMU.
 - A failed receive reports no reason. `supervisor_receive` gives no bytes

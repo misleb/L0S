@@ -54,7 +54,7 @@ DISK_DEVICE  := -drive file=$(DISK),if=none,format=raw,id=disk0 -device virtio-b
 # is in the kernel and every program.
 BASE   := common/abi.l0 common/text.l0
 COMMON := $(BASE) common/initramfs.l0
-KERNEL := $(COMMON) common/queue.l0 kernel/memory.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/inittab.l0 \
+KERNEL := $(COMMON) common/queue.l0 kernel/memory.l0 kernel/elf.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/inittab.l0 \
           kernel/sched.l0 kernel/pids.l0 kernel/syscall.l0 kernel/process.l0 kernel/kernel.l0
 CLI    := user/lib/sys/cli.l0
 ULIB   := $(COMMON) common/queue.l0 $(CLI) user/lib/sys/l0s.l0 user/lib/sys/server.l0
@@ -191,6 +191,7 @@ test: sample
 	$(L0) test $(BASE) kernel/pids.l0 kernel/pids_test.l0
 	$(L0) test $(BASE) kernel/syscall.l0 kernel/syscall_test.l0
 	$(L0) test $(KERNEL) kernel/asm.l0 kernel/kernel_test.l0
+	$(L0) test $(KERNEL) kernel/asm.l0 kernel/elf_test.l0
 	$(L0) test $(BASE) $(CLI) user/lib/sys/cli_test.l0
 	$(L0) test $(ULIB) user/lib/sys/l0s_test.l0
 	$(L0) test $(ULIB) user/lib/sys/server_test.l0

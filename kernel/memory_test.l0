@@ -1,22 +1,68 @@
 (def area_code ((a Area)) int
   (match a ((AreaImage) 0) ((AreaHeap) 1) ((AreaStack) 2) ((AreaDevice) 3) ((AreaOutside) 4)))
 
+(def at ((off int)) int (add (user_base) off))
+
+; As process.l0 makes one from an ELF: a page of code, a page between
+; segments the image does not have, a page of rodata, and two of data,
+; then the heap from 0xC0005000.
+(def elf () Layout
+  (Layout (cons (Span (at 0) (at 4096) 2)
+            (cons (Span (at 8192) (at 12288) 0)
+              (cons (Span (at 12288) (at 20480) 1) (nil Span))))
+          (at 20480)))
+
+; As asm.l0's programs are laid out: a page of code, and bss to the heap
+; at 0xC0400000.
+(def big_heap () int 3225419776)
+
+(def big () Layout
+  (Layout (cons (Span (at 0) (at 4096) 2) (cons (Span (at 4096) (big_heap) 1) (nil Span))) (big_heap)))
+
 (def test_areas () int
-  (add (check_int "below" (area_code (area_of 4096)) 4)
-       (add (check_int "entry" (area_code (area_of (user_base))) 0)
-            (add (check_int "heap" (area_code (area_of (image_limit))) 1)
-                 (add (check_int "stack top byte" (area_code (area_of (sub (stack_top) 1))) 2)
-                      (add (check_int "device" (area_code (area_of (stack_top))) 3)
-                           (check_int "above" (area_code (area_of (user_limit))) 4)))))))
+  (add (check_int "below" (area_code (area_of (big) 4096)) 4)
+       (add (check_int "entry" (area_code (area_of (big) (user_base))) 0)
+            (add (check_int "heap" (area_code (area_of (big) (big_heap))) 1)
+                 (add (check_int "stack top byte" (area_code (area_of (big) (sub (stack_top) 1))) 2)
+                      (add (check_int "device" (area_code (area_of (big) (stack_top))) 3)
+                           (check_int "above" (area_code (area_of (big) (user_limit))) 4)))))))
+
+(def test_elf_areas () int
+  (add (check_int "data" (area_code (area_of (elf) (at 16384))) 0)
+       (check_int "heap after the data" (area_code (area_of (elf) (at 20480))) 1)))
 
 (def test_page_of () int
   (add (check_int "aligned" (page_of 8192) 8192)
        (check_int "inside" (page_of 12287) 8192)))
 
 (def test_demand_perm () int
-  (add (check_int "bss" (demand_perm (add (user_base) 40960)) 3)
-       (add (check_int "heap" (demand_perm (image_limit)) 1)
-            (check_int "device" (demand_perm (stack_top)) -1))))
+  (add (check_int "bss" (demand_perm (big) (at 40960)) 1)
+       (add (check_int "heap" (demand_perm (big) (big_heap)) 1)
+            (check_int "device" (demand_perm (big) (stack_top)) -1))))
+
+; A page of a segment not mapped yet is its bss, mapped with the
+; segment's perm on demand; a page between segments never is.
+(def test_elf_demand_perm () int
+  (add (check_int "between" (demand_perm (elf) (at 4096)) -1)
+       (add (check_int "bss" (demand_perm (elf) (at 16384)) 1)
+            (check_int "heap" (demand_perm (elf) (at 20480)) 1))))
+
+(def test_span_perm () int
+  (add (check_int "rodata" (span_perm (elf) (at 8200)) 0)
+       (add (check_int "data's last byte" (span_perm (elf) (at 20479)) 1)
+            (add (check_int "between" (span_perm (elf) (at 4096)) -1)
+                 (check_int "past" (span_perm (elf) (at 20480)) -1)))))
+
+(def test_may_write () int
+  (add (check_bool "code" (may_write (elf) (user_base)) false)
+       (add (check_bool "between" (may_write (elf) (at 4096)) false)
+            (add (check_bool "rodata" (may_write (elf) (at 8192)) false)
+                 (check_bool "data" (may_write (elf) (at 12288)) true)))))
+
+(def test_may_write_elsewhere () int
+  (add (check_bool "heap" (may_write (elf) (at 20480)) true)
+       (add (check_bool "stack" (may_write (elf) (sub (stack_top) 8)) true)
+            (check_bool "below" (may_write (elf) 4096) false))))
 
 (def test_range_pages () int
   (add (check_int "none" (length (range_pages (user_base) 0)) 0)
@@ -27,12 +73,13 @@
   (map_put ((MapEmpty int int)) (user_base) 7))
 
 (def test_plan_mapped () int
-  (match (range_plan (mapped_first) (add (user_base) 10) 100)
+  (match (range_plan (big) (mapped_first) (add (user_base) 10) 100 false)
     ((PlanMap ps) (check_int "nothing to map" (length ps) 0))
     ((PlanBad) (fail_because "plan" "refused"))))
 
+; Read from the code into the bss, whose first page is mapped then.
 (def test_plan_demand () int
-  (match (range_plan (mapped_first) (add (user_base) 4000) 200)
+  (match (range_plan (big) (mapped_first) (add (user_base) 4000) 200 false)
     ((PlanMap ps) (check_str "second page" (map_show ps) (map_show (cons (add (user_base) 4096) (nil int)))))
     ((PlanBad) (fail_because "plan" "refused"))))
 
@@ -40,13 +87,30 @@
   (if (is_empty ps) "" (append (hex_digits (head ps) 0) (append " " (map_show (tail ps))))))
 
 (def test_plan_refuses () int
-  (add (check_true "below user range" (is_bad (range_plan (mapped_first) 4096 10)))
-       (add (check_true "device page" (is_bad (range_plan (mapped_first) (stack_top) 1)))
-            (add (check_true "past the end" (is_bad (range_plan (mapped_first) (sub (user_limit) 2) 4)))
-                 (check_true "negative count" (is_bad (range_plan (mapped_first) (user_base) -1)))))))
+  (add (check_true "below user range" (is_bad (range_plan (big) (mapped_first) 4096 10 false)))
+       (add (check_true "device page" (is_bad (range_plan (big) (mapped_first) (stack_top) 1 false)))
+            (add (check_true "past the end" (is_bad (range_plan (big) (mapped_first) (sub (user_limit) 2) 4 false)))
+                 (check_true "negative count" (is_bad (range_plan (big) (mapped_first) (user_base) -1 false)))))))
 
 (def test_plan_huge () int
-  (check_true "wraps nothing" (is_bad (range_plan (mapped_first) (user_base) 9223372036854775807))))
+  (check_true "wraps nothing" (is_bad (range_plan (big) (mapped_first) (user_base) 9223372036854775807 false))))
+
+; An ELF's code page, mapped: the kernel reads it, as for a write call,
+; but never writes it, as for a read call.
+(def test_plan_elf_code () int
+  (add (check_bool "read" (is_bad (range_plan (elf) (mapped_first) (user_base) 16 false)) false)
+       (check_bool "written" (is_bad (range_plan (elf) (mapped_first) (user_base) 16 true)) true)))
+
+; A copy into the data that runs on through its bss into the heap maps
+; the bss's page and the heap's.
+(def test_plan_elf_into_heap () int
+  (match (range_plan (elf) (map_put (mapped_first) (at 12288) 8) (at 16000) 4800 true)
+    ((PlanMap ps) (check_str "bss and heap" (map_show ps) (map_show (cons (at 16384) (cons (at 20480) (nil int))))))
+    ((PlanBad) (fail_because "plan" "refused"))))
+
+; A page between an ELF's segments, which it never had, is not mapped.
+(def test_plan_elf_gap () int
+  (check_true "between segments" (is_bad (range_plan (elf) (mapped_first) (at 4096) 8 false))))
 
 (def is_bad ((p Plan)) bool
   (match p ((PlanMap ps) false) ((PlanBad) true)))
@@ -91,7 +155,7 @@
 ; ----------------------------------------------------------------- freeing
 
 ; A heap page, a stack page, and two device pages of a process.
-(def heap_page () int (image_limit))
+(def heap_page () int (big_heap))
 (def stack_page () int (sub (stack_top) 4096))
 (def dev_page ((i int)) int (add (stack_top) (mul i 4096)))
 

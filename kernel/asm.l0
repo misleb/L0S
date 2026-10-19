@@ -1,6 +1,7 @@
 ; asm.l0 -- just enough aarch64 to write the threads the kernel's tests
-; run: each function is one instruction's 32-bit word, and code lays the
-; words out as an image's bytes. Linked only into tests.
+; run: each function is one instruction's 32-bit word, code_bytes lays
+; the words out as bytes, and code wraps them in an ELF, as spec section
+; 10.3 lays a program's image out. Linked only into tests.
 
 (def movz ((d int) (imm int)) int              ; movz xd, #imm
   (bit_or 3531603968 (bit_or (bit_shl (bit_and imm 65535) 5) d)))          ; 0xD2800000
@@ -47,9 +48,86 @@
 ; Exits with whatever x0 holds.
 (def exit_x0 () (list int) (call_words (sys_exit)))
 
-; The instructions as an image, each least significant byte first.
-(def code ((ws (list int))) (list int)
-  (if (is_empty ws) (nil int) (append (u32_le (head ws)) (code (tail ws)))))
+; The instructions as bytes, each least significant byte first.
+(def code_bytes ((ws (list int))) (list int)
+  (if (is_empty ws) (nil int) (append (u32_le (head ws)) (code_bytes (tail ws)))))
+
+; The instructions as a program's image: program's ELF of them.
+(def code ((ws (list int))) (list int) (program (code_bytes ws)))
+
+; Where the heap of a program's image starts, 0xC0400000, as the tests
+; reach it: past a bss as big as the 4 MB images had before they were
+; ELFs.
+(def program_heap () int 3225419776)
+
+; An ELF whose code, readable and executable, is bs, at user_base, and
+; whose bss, readable and writable, runs from the next page to
+; program_heap. The kernel maps the bss's pages as they are touched, as
+; the heap's.
+(def program ((bs (list int))) (list int)
+  (let bss (add (user_base) (mul (pages_for (length bs)) 4096))
+    (elf_image (em_aarch64) (user_base)
+               (cons (Part (user_base) (pf_rx) bs (length bs)) (cons (Part bss (pf_rw) "" (sub (program_heap) bss)) (nil Part))))))
+
+; ---------------------------------------------------------------- ELF
+
+; A segment of an ELF image the tests build: its address, its p_flags,
+; its bytes, and its size in memory, which the bytes may be short of.
+(data Part (Part int int (list int) int))
+
+(def pf_rx () int 5)                 ; PF_R | PF_X: code
+(def pf_r () int 4)                  ; PF_R: rodata
+(def pf_rw () int 6)                 ; PF_R | PF_W: data and bss
+(def pf_rwx () int 7)                ; what spec section 10.3 never allows
+
+(def em_aarch64 () int 183)
+(def em_riscv () int 243)
+
+; An ELF image for e_machine m, entered at entry, of these segments, as
+; spec section 10.3 lays one out: the ELF header and the program headers
+; in the first page, and each segment's bytes from the next page on.
+(def elf_image ((m int) (entry int) (parts (list Part))) (list int)
+  (let n (length parts)
+    (concat (cons (elf_header m entry n)
+              (cons (elf_phdrs parts 4096 (nil (list int)))
+                (cons (zeros (sub 4096 (add 64 (mul n 56))))
+                  (cons (elf_bodies parts (nil (list int))) (nil (list int)))))))))
+
+; The 64 bytes of an ELF header for n program headers right after it.
+(def elf_header ((m int) (entry int) (n int)) (list int)
+  (concat (cons (cons 127 (cons 69 (cons 76 (cons 70 (cons 2 (cons 1 (cons 1 (zeros 9))))))))   ; \x7FELF, 64-bit, LSB, v1
+            (cons (le16 2) (cons (le16 m) (cons (u32_le 1) (cons (le64 entry)
+              (cons (le64 64) (cons (le64 0) (cons (u32_le 0)
+                (cons (le16 64) (cons (le16 56) (cons (le16 n) (cons (zeros 6) (nil (list int))))))))))))))))
+
+; The program headers of parts, the first one's bytes at off.
+(def elf_phdrs ((parts (list Part)) (off int) (acc (list (list int)))) (list int)
+  (if (is_empty parts)
+      (concat (rev acc))
+      (match (head parts)
+        ((Part va flags bs msz)
+          (elf_phdrs (tail parts) (add off (mul (pages_for (length bs)) 4096))
+                     (cons (elf_phdr 1 flags off va (length bs) msz) acc))))))
+
+; A program header of type t.
+(def elf_phdr ((t int) (flags int) (off int) (va int) (fsz int) (msz int)) (list int)
+  (concat (cons (u32_le t) (cons (u32_le flags) (cons (le64 off) (cons (le64 va) (cons (le64 va)
+            (cons (le64 fsz) (cons (le64 msz) (cons (le64 4096) (nil (list int))))))))))))
+
+; Each part's bytes, padded to whole pages.
+(def elf_bodies ((parts (list Part)) (acc (list (list int)))) (list int)
+  (if (is_empty parts)
+      (concat (rev acc))
+      (match (head parts)
+        ((Part va flags bs msz)
+          (elf_bodies (tail parts)
+                      (cons (zeros (sub (mul (pages_for (length bs)) 4096) (length bs))) (cons bs acc)))))))
+
+; An ELF for this CPU of one code segment of these instructions, at
+; user_base, and more segments after it.
+(def elf_code ((ws (list int)) (more (list Part))) (list int)
+  (let bs (code_bytes ws)
+    (elf_image (em_aarch64) (user_base) (cons (Part (user_base) (pf_rx) bs (length bs)) more))))
 
 ; A program for an initramfs: flags, and its image.
 (data Raw (Raw int (list int)))

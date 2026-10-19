@@ -18,28 +18,45 @@
 # kernel's boot arguments, such as root=UUID. Every boot is killed after
 # a minute. Run from
 # the top of the project, after make root, which stages every program in
-# build/root as /bin, /sbin and /Applications; this script's raw programs
-# go in /bin beside them. The board has a virtio-gpu,
+# build/root as /bin, /sbin and /Applications; this script's hand-made
+# programs go in /bin beside them. The board has a virtio-gpu,
 # shown nowhere, and a virtio keyboard, either way.
 set -u
 cd "$(dirname "$0")/.."
 L0=${L0:-l0}
 export L0_QEMU_ARGS="-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device"
 BUILD=build
-mkdir -p "$BUILD/raw" "$BUILD/e2e"
+mkdir -p "$BUILD/asm" "$BUILD/e2e"
 
-# Raw programs, a few aarch64 instructions each, for what an L0 program
-# cannot do: fault, pass a bad buffer, or wait on nothing.
+# Hand-made programs, a few aarch64 instructions each, for what an L0
+# program cannot do: fault, pass a bad buffer, or wait on nothing. Each
+# is an ELF as spec section 10.3 lays one out: the ELF header and one
+# program header in the first page, then the code, one PT_LOAD readable
+# and executable at 0xC0000000, its entry.
 word() { printf "\\x${1:6:2}\\x${1:4:2}\\x${1:2:2}\\x${1:0:2}"; }
-image() { local out=$1; shift; : > "$out"; for w in "$@"; do word "$w" >> "$out"; done; }
+le64() { local i; for i in 0 1 2 3 4 5 6 7; do printf "\\x$(printf %02x $(( ($1 >> (8 * i)) & 255 )))"; done; }
+image() {
+  local out=$1; shift
+  local n=$(( $# * 4 )) at=$((0xC0000000))
+  {
+    printf '\x7fELF\x02\x01\x01\x00'; le64 0                 # 64-bit, little-endian, version 1
+    printf '\x02\x00\xb7\x00\x01\x00\x00\x00'                # ET_EXEC, EM_AARCH64
+    le64 $at; le64 64; le64 0                                # entry, program headers, no sections
+    printf '\x00\x00\x00\x00\x40\x00\x38\x00\x01\x00\x00\x00\x00\x00\x00\x00'
+    printf '\x01\x00\x00\x00\x05\x00\x00\x00'                # PT_LOAD, PF_R | PF_X
+    le64 4096; le64 $at; le64 $at; le64 $n; le64 $n; le64 4096
+    head -c $((4096 - 120)) /dev/zero
+    for w in "$@"; do word "$w"; done
+  } > "$out"
+}
 SVC=D4000001
-image "$BUILD/raw/crash.img"    D2800201 F9400020                  # movz x1,#16; ldr x0,[x1]
-image "$BUILD/raw/badbuf.img"   D2800020 D2800201 D28000A2 D2800048 $SVC D2800068 $SVC
+image "$BUILD/asm/crash.img"    D2800201 F9400020                  # movz x1,#16; ldr x0,[x1]
+image "$BUILD/asm/badbuf.img"   D2800020 D2800201 D28000A2 D2800048 $SVC D2800068 $SVC
                                 # write(1, 16, 5); exit(x0)
-image "$BUILD/raw/deadlock.img" D2802048 $SVC D2802088 D2800102 $SVC 14000000
+image "$BUILD/asm/deadlock.img" D2802048 $SVC D2802088 D2800102 $SVC 14000000
                                 # port_new; receive(x0, 0, 8); b .
 
-raws=("$BUILD"/raw/*.img)
+asms=("$BUILD"/asm/*.img)
 
 pass=0; fail=0
 for dir in tests/e2e/*/; do
@@ -53,7 +70,7 @@ for dir in tests/e2e/*/; do
     etc="$BUILD/e2e/$name.etc"
     rm -rf "$etc" && cp -R "$dir/etc" "$etc" && cp fonts/l0s-8x16.txt "$etc/font.txt"
   fi
-  if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${raws[@]}"; then
+  if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; fail=$((fail+1)); continue
   fi
   disk=""; qemu_args=$L0_QEMU_ARGS

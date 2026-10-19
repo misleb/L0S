@@ -101,7 +101,8 @@ case's `etc`, and compares. A case is a directory:
 - On failure the case's output, stderr and diff are in `build/e2e/CASE.*`.
 - There is no filter: `tests/e2e.sh` runs every case (after `make root`,
   which stages every program in `build/root` as `/bin`, `/sbin` and
-  `/Applications`; the script's raw programs go in `/bin`).
+  `/Applications`; the script's hand-made programs, each an ELF of a few
+  instructions, go in `/bin`).
 - An inittab names a program where it is: `/bin/sh`, `/sbin/uart`,
   `/Applications/Terminal.app/vt`. A case that starts `vt` without `wm`
   and needs a quiet ending gives it a `font`, so it waits for a

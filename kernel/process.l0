@@ -30,9 +30,9 @@
 (def tty_none () Tty (Tty 0 0 (bytes_from_list (nil int))))
 
 ; What a process is doing, the pid that spawned it, 0 for the kernel,
-; the ports to tell when it exits, its arguments, its open files, and its
-; terminal.
-(data Life (Life State int (list int) (list (list int)) Files Tty))
+; the ports to tell when it exits, its arguments, its open files, its
+; terminal, and where its image lies.
+(data Life (Life State int (list int) (list (list int)) Files Tty Layout))
 
 ; pid, entry index of its program, space, context, page -> frame for
 ; every frame mapped, the next free device page, and its life.
@@ -42,32 +42,35 @@
 (def proc_module ((p Proc)) int (match p ((Proc pid m s c pages dev st) m)))
 (def proc_space ((p Proc)) int (match p ((Proc pid m s c pages dev st) s)))
 (def proc_state ((p Proc)) State
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) st)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) st)))))
 
 (def proc_parent ((p Proc)) int
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) parent)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) parent)))))
 
 (def proc_watchers ((p Proc)) (list int)
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) ws)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) ws)))))
 
 (def proc_args ((p Proc)) (list (list int))
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) args)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) args)))))
+
+(def proc_layout ((p Proc)) Layout
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) lay)))))
 
 ; p, with port told when it exits.
 (def proc_watch ((p Proc) (port int)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args fs tty) (Proc pid m s c pages dev (Life st parent (cons port ws) args fs tty)))))))
+      (match life ((Life st parent ws args fs tty lay) (Proc pid m s c pages dev (Life st parent (cons port ws) args fs tty lay)))))))
 
 ; ------------------------------------------------------------- terminal
 
 (def proc_tty ((p Proc)) Tty
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) tty)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) tty)))))
 
 (def proc_set_tty ((p Proc) (tty Tty)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args fs old) (Proc pid m s c pages dev (Life st parent ws args fs tty)))))))
+      (match life ((Life st parent ws args fs old lay)(Proc pid m s c pages dev (Life st parent ws args fs tty lay)))))))
 
 ; The port p's terminal is, 0 for the kernel's own.
 (def proc_tty_port ((p Proc)) int (match (proc_tty p) ((Tty port reply rest) port)))
@@ -82,12 +85,12 @@
 (def files_none () Files (Files ((MapEmpty int Open)) 3))
 
 (def proc_files ((p Proc)) Files
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty) fs)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) fs)))))
 
 (def proc_set_files ((p Proc) (fs Files)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args old tty) (Proc pid m s c pages dev (Life st parent ws args fs tty)))))))
+      (match life ((Life st parent ws args old tty lay)(Proc pid m s c pages dev (Life st parent ws args fs tty lay)))))))
 
 ; p with entry e open on a new stream, and the stream; or -5, open_limit
 ; files being open already.
@@ -168,7 +171,7 @@
 (def proc_set_state ((p Proc) (st State)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life old parent ws args fs tty) (Proc pid m s c pages dev (Life st parent ws args fs tty)))))))
+      (match life ((Life old parent ws args fs tty lay)(Proc pid m s c pages dev (Life st parent ws args fs tty lay)))))))
 
 ; A word of p's registers.
 (def proc_reg ((p Proc) (i int)) int
@@ -176,35 +179,83 @@
 
 ; ---------------------------------------------------------------- creating
 
+; What the kernel makes of a program's image: an ELF of spec section
+; 10.3, its entry, its segments, and where its heap starts; or one it
+; refuses, with the code it answers, err_denied: not an ELF, one the
+; section does not allow, or one for another CPU.
+(data Image (ElfImage int (list ElfSeg) int) (BadImage int))
+
+; The image that is the bytes of input from start up to end.
+(def image_of ((input bytes) (start int) (end int)) Image
+  (match (elf_read input start end (elf_machine (machine)))
+    ((Elf entry segs heap) (ElfImage entry segs heap))
+    ((ElfRefused why) (BadImage (err_denied)))))
+
+; The most bytes a program's file has, whatever it holds: 64 MB, an ELF's
+; symbols and all, which the kernel copies whole out of a process that
+; starts a program from its own memory (spawn_image).
+(def image_file_room () int 67108864)
+
 (data Created (Created Proc) (CreateFailed))
 
 ; A new process pid, spawned by parent, running module index m with
-; args, whose image is the bytes of input from start up to end, mapped at
-; user_base, ready to run from it, its terminal the port tty. If the host
-; runs out part way, what was made is freed.
-(def proc_create ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (input bytes) (start int) (end int)) Created
+; args, whose image is img, the bytes of input from start up to end,
+; mapped as img says, ready to run from its entry, its terminal the port
+; tty. If the host runs out part way, what was made is freed. A BadImage
+; makes nothing.
+(def proc_create ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (input bytes) (start int) (end int) (img Image)) Created
   (let s (space_new)
     (if (lt s 0)
         (CreateFailed)
-        (match (load_image s input start end 0 ((MapEmpty int int)))
-          ((ImageLoaded pages)
-            (Created (Proc pid m s (user_context (user_base) (stack_top)) pages (stack_top)
-                           (Life (Ready) parent (nil int) args (files_none)
-                                 (match (tty_none) ((Tty none reply rest) (Tty tty reply rest)))))))
-          ((ImageFailed pages)
-            (let f (free_space s (map_values pages)) (CreateFailed)))))))
+        (match img
+          ((ElfImage entry segs heap)
+            (proc_loaded pid parent m args tty s entry (Layout (spans_of segs) heap)
+                         (load_segs s input start segs ((MapEmpty int int)))))
+          ((BadImage code) (let f (space_free s) (CreateFailed)))))))
+
+(def proc_loaded ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (s int) (entry int) (lay Layout) (l Load)) Created
+  (match l
+    ((ImageLoaded pages)
+      (Created (Proc pid m s (user_context entry (stack_top)) pages (stack_top)
+                     (Life (Ready) parent (nil int) args (files_none)
+                           (match (tty_none) ((Tty none reply rest) (Tty tty reply rest))) lay))))
+    ((ImageFailed pages)
+      (let f (free_space s (map_values pages)) (CreateFailed)))))
+
+; The spans an ELF's segments are mapped as: each the pages it covers,
+; with its perm.
+(def spans_of ((segs (list ElfSeg))) (list Span)
+  (if (is_empty segs)
+      (nil Span)
+      (match (head segs)
+        ((ElfSeg off va fsz msz perm)
+          (cons (Span va (mul (pages_for (add va msz)) (page_size)) perm) (spans_of (tail segs)))))))
 
 (data Load (ImageLoaded (Map int int)) (ImageFailed (Map int int)))
 
-(def load_image ((s int) (input bytes) (start int) (end int) (off int) (pages (Map int int))) Load
-  (if (ge (add start off) end)
+; Each of an ELF's segments, the image's bytes of input from start: the
+; pages that hold its file bytes mapped with its perm, and those bytes
+; copied in, the rest of the pages zero, as fresh frames are. Its pages
+; past them, its bss, are mapped as they are first touched.
+(def load_segs ((s int) (input bytes) (start int) (segs (list ElfSeg)) (pages (Map int int))) Load
+  (if (is_empty segs)
       (ImageLoaded pages)
-      (let va (add (user_base) off)
-        (let f (map_frame s va 3)
-          (if (lt f 0)
-              (ImageFailed pages)
-              (let w (space_write s va input (add start off) (min end (add start (add off (page_size)))))
-                (load_image s input start end (add off (page_size)) (map_put pages va f))))))))
+      (match (head segs)
+        ((ElfSeg off va fsz msz perm)
+          (match (map_pages s va (add va fsz) perm pages)
+            ((ImageLoaded more)
+              (let w (space_write s va input (add start off) (add start (add off fsz)))
+                (load_segs s input start (tail segs) more)))
+            ((ImageFailed more) (ImageFailed more)))))))
+
+; Fresh zeroed frames at the pages from page va up to end, with perm.
+(def map_pages ((s int) (va int) (end int) (perm int) (pages (Map int int))) Load
+  (if (ge va end)
+      (ImageLoaded pages)
+      (let f (map_frame s va perm)
+        (if (lt f 0)
+            (ImageFailed pages)
+            (map_pages s (add va (page_size)) end perm (map_put pages va f))))))
 
 ; A fresh zeroed frame mapped at page va of space s with perm, and its
 ; number, or a negative code if the host has none left, or no memory for
@@ -241,19 +292,20 @@
   (match p
     ((Proc pid m s c pages dev st)
       (let page (page_of va)
-        (if (if (map_has pages page) true (lt (demand_perm page) 0))
-            (PageRefused (Proc pid m s c pages dev st))
-            (let f (map_frame s page (demand_perm page))
-              (if (lt f 0)
-                  (PageRefused (Proc pid m s c pages dev st))
-                  (Paged (Proc pid m s c (map_put pages page f) dev st)))))))))
+        (let perm (match st ((Life state parent ws args fs tty lay) (demand_perm lay page)))
+          (if (if (map_has pages page) true (lt perm 0))
+              (PageRefused (Proc pid m s c pages dev st))
+              (let f (map_frame s page perm)
+                (if (lt f 0)
+                    (PageRefused (Proc pid m s c pages dev st))
+                    (Paged (Proc pid m s c (map_put pages page f) dev st))))))))))
 
 ; p with every page of the n bytes from va mapped, so the kernel can copy
-; them, or refused if any may not be.
-(def proc_prepare ((p Proc) (va int) (n int)) Paged
+; them out of it, or into it if write, or refused if any may not be.
+(def proc_prepare ((p Proc) (va int) (n int) (write bool)) Paged
   (match p
     ((Proc pid m s c pages dev st)
-      (match (range_plan pages va n)
+      (match (range_plan (match st ((Life state parent ws args fs tty lay) lay)) pages va n write)
         ((PlanBad) (PageRefused (Proc pid m s c pages dev st)))
         ((PlanMap todo) (demand_all (Proc pid m s c pages dev st) todo))))))
 
@@ -270,15 +322,16 @@
 
 ; The n bytes of p from va, if p may give them.
 (def proc_copy_out ((p Proc) (va int) (n int)) CopiedOut
-  (match (proc_prepare p va n)
+  (match (proc_prepare p va n false)
     ((PageRefused q) (CopyOutBad q))
     ((Paged q) (CopiedOut q (space_read (proc_space q) va n)))))
 
 (data CopiedIn (CopiedIn Proc) (CopyInBad Proc))
 
-; p with bytes i up to j of b copied to va, if p may take them there.
+; p with bytes i up to j of b copied to va, if p may take them there: not
+; into its code or rodata, which it may not write itself.
 (def proc_copy_in ((p Proc) (va int) (b bytes) (i int) (j int)) CopiedIn
-  (match (proc_prepare p va (sub j i))
+  (match (proc_prepare p va (sub j i) true)
     ((PageRefused q) (CopyInBad q))
     ((Paged q) (let w (space_write (proc_space q) va b i j) (CopiedIn q)))))
 
