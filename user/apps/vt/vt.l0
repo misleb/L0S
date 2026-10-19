@@ -15,7 +15,9 @@
 ; when the shell exits, closes the window and exits with its status.
 ; Its buffer is memory it shares with the compositor, which never copies
 ; it: the display shows it from where vt draws. Scrolling moves the
-; buffer's top row, so it copies nothing either.
+; buffer's top row, so it copies nothing either. At the desktop's scale
+; 2 a cell is still 8 by 16 of the desktop's pixels, 16 by 32 of its
+; buffer's, and its characters are the face's (face.l0), smooth.
 
 ; Its colors are the toolkit's for a terminal, GNOME Console's.
 (def ground () int (ui_term_bg))
@@ -104,26 +106,31 @@
 
 ; ------------------------------------------------------------------- draw
 
-; Ops done on the window's canvas, which scrolling moves the top of.
-(def drawn ((c Canvas) (font (array int)) (ops (list Op))) Canvas
+; Ops done on the window's canvas, which scrolling moves the top of, at
+; the face's scale.
+(def drawn ((c Canvas) (face UiFace) (ops (list Op))) Canvas
   (if (is_empty ops)
       c
-      (drawn (draw_op c font (head ops)) font (tail ops))))
+      (drawn (draw_op c face (head ops)) face (tail ops))))
 
-(def draw_op ((c Canvas) (font (array int)) (op Op)) Canvas
-  (match op
-    ((OpText col row cs) (draw_text c font (mul col (cell_w)) (mul row (cell_h)) (ink) (ground) cs))
-    ((OpBlank col row) (fill_rect c (mul col (cell_w)) (mul row (cell_h)) (cell_w) (cell_h) (ground)))
-    ((OpScroll) (scrolled c (cell_h) (ground)))
-    ((OpCursor col row on)
-      (fill_rect c (mul col (cell_w)) (add (mul row (cell_h)) (sub (cell_h) 1)) (cell_w) 1
-                 (if on (cursor_color) (ground))))))
+(def draw_op ((c Canvas) (face UiFace) (op Op)) Canvas
+  (let s (ui_face_scale face)
+    (match op
+      ((OpText col row cs) (ui_draw_text c face (mul col (cell_w)) (mul row (cell_h)) (ink) (ground) cs))
+      ((OpBlank col row) (ui_draw_fill c (Rect (mul col (cell_w)) (mul row (cell_h)) (cell_w) (cell_h)) (ground) s))
+      ((OpScroll) (scrolled c (mul (cell_h) s) (ground)))
+      ((OpCursor col row on)
+        (ui_draw_fill c (Rect (mul col (cell_w)) (add (mul row (cell_h)) (sub (cell_h) 1)) (cell_w) 1)
+                      (if on (cursor_color) (ground)) s)))))
+
+; The window's top row, as the compositor counts it: the desktop's.
+(def logical_top ((c Canvas) (face UiFace)) int (div (canvas_top c) (ui_face_scale face)))
 
 ; ---------------------------------------------------------------- serving
 
 ; The terminal: the compositor, its window's id, the window's canvas, the
-; font, the cursor, and the line editing.
-(data Vt (Vt Compositor int Canvas (array int) Term Console))
+; face, the cursor, and the line editing.
+(data Vt (Vt Compositor int Canvas UiFace Term Console))
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "vt" why))
@@ -167,31 +174,32 @@
       ((VtUnnamed why) (complain why))
       ((VtNamed name) (named name port)))))
 
-; The terminal, registered as name on port: its font loaded, and its
-; window made.
+; The terminal, registered as name on port: its face loaded, at the
+; desktop's scale, and its window made.
 (def named ((name (list int)) (port int)) int
-  (let font (load_font (font_path))
-    (if (eq (array_len font) 0)
-        (complain "no font")
-        (match (compositor_open)
-          ((NoCompositor why) (let w (write_err (append "vt: " (append why "\n"))) 0))
-          ((Compositor cp rp pid) (with_buffer (Compositor cp rp pid) font (vt_cells (args)) name port))))))
+  (match (compositor_open)
+    ((NoCompositor why) (let w (write_err (append "vt: " (append why "\n"))) 0))
+    ((Compositor cp rp pid s)
+      (let face (ui_face_load s)
+        (if (eq (array_len (ui_face_font face)) 0)
+            (complain "no font")
+            (with_buffer (Compositor cp rp pid s) face (vt_cells (args)) name port))))))
 
-(def with_buffer ((c Compositor) (font (array int)) (t Term) (name (list int)) (port int)) int
+(def with_buffer ((c Compositor) (face UiFace) (t Term) (name (list int)) (port int)) int
   (match t
     ((Term col row cols rows)
       (let w (mul cols (cell_w))
         (let h (mul rows (cell_h))
-          (match (ui_buffer w h)
+          (match (ui_buffer_at w h (ui_face_scale face))
             ((UiNoBuf why) (complain (append "no memory for the window: " why)))
             ((UiBuf va n canvas)
-              (let k (fill_rect canvas 0 0 w h (ground))
-                (registered c font t canvas va n name port)))))))))
+              (let k (fill_rect canvas 0 0 (canvas_w canvas) (canvas_h canvas) (ground))
+                (registered c face t canvas va n name port)))))))))
 
-; The terminal, registered as name on port: its window opened and its
-; shell started.
-(def registered ((c Compositor) (font (array int)) (t Term) (canvas Canvas) (va int) (n int) (name (list int)) (port int)) int
-  (match (window_open c (canvas_w canvas) (canvas_h canvas) va n port name)
+; The terminal, registered as name on port: its window opened, in the
+; desktop's pixels, and its shell started.
+(def registered ((c Compositor) (font UiFace) (t Term) (canvas Canvas) (va int) (n int) (name (list int)) (port int)) int
+  (match (window_open c (ui_logical_w canvas font) (ui_logical_h canvas font) va n port name)
     ((WindowFailed why) (complain why))
     ((WindowOpened id)
       (match (shell_started name port)
@@ -272,6 +280,6 @@
       (match (shown_bytes t bs)
         ((Rendered t2 ops)
           (let canvas2 (drawn canvas font ops)
-            (let s (if (eq (canvas_top canvas2) (canvas_top canvas)) "" (window_top c id (canvas_top canvas2)))
-              (let d (window_damage c id (Rect 0 0 (canvas_w canvas2) (canvas_h canvas2)))
+            (let s (if (eq (canvas_top canvas2) (canvas_top canvas)) "" (window_top c id (logical_top canvas2 font)))
+              (let d (window_damage c id (Rect 0 0 (ui_logical_w canvas2 font) (ui_logical_h canvas2 font)))
                 (Vt c id canvas2 font t2 con)))))))))

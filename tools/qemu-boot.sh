@@ -18,6 +18,8 @@
 # desktop's top bar, which shows it as it is, agrees with this machine's.
 # QEMU_DISK, unset unless given, is a raw disk image the board has as a
 # virtio-blk, for the virtio-blk driver; the demo's is build/disk.img.
+# QEMU_GPU, unset unless given, is options for the virtio-gpu, such as
+# xres=3840,yres=2160 for a 4K screen, which the desktop draws at scale 2.
 # QEMU_MONITOR, none unless set, is where QEMU's monitor listens, such as
 # unix:PATH,server=on,wait=off for tests/gpu-screen.sh's screendump; and
 # QEMU_QMP, unset unless given, where its QMP does, for the tests that
@@ -42,11 +44,12 @@ if [ -n "${QEMU_DISK:-}" ]; then
 fi
 append=()
 if [ -n "${QEMU_APPEND:-}" ]; then append=(-append "$QEMU_APPEND"); fi
+gpu=virtio-gpu-device${QEMU_GPU:+,$QEMU_GPU}
 len=$(wc -c < "$initramfs" | tr -d ' ')
 exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=localtime \
   -global virtio-mmio.force-legacy=false \
-  -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device \
+  -device "$gpu" -device virtio-keyboard-device -device virtio-tablet-device \
   ${disk[@]+"${disk[@]}"} \
   -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \
   -device loader,addr=0x4FFFFFF8,data="$len",data-len=8 \

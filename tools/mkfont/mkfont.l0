@@ -1,0 +1,184 @@
+; mkfont.l0 -- makes the face the desktop draws with at scale 2
+; (user/lib/ui/face.l0's /etc/face2x): Source Code Pro's ASCII glyphs,
+; regular and bold, 16 by 32 for text and 32 by 64 for text at scale 2,
+; and the icons and the pointer of fonts/icons.paths, rasterized with
+; smooth edges.
+;
+;   mkfont REGULAR.ttf BOLD.ttf ICONS.paths OUT
+;
+; A glyph's cell is its font's advance wide, so Source Code Pro's 600
+; units of 1000 make the cell's width, and its baseline is 23 rows of 32
+; down, where the 8 by 16 font's would be at twice its size, so text
+; at scale 2 sits where it did at 1.
+
+(def complain ((why (list int))) int (complain_as "mkfont" why))
+
+(def mkfont ((argv (list (list int)))) int
+  (if (not (eq (length argv) 4))
+      (complain "usage: mkfont REGULAR.ttf BOLD.ttf ICONS.paths OUT")
+      (match (mkfont_tables (nth argv 0) (nth argv 1) (nth argv 2))
+        ((Err why) (complain why))
+        ((Ok ts)
+          (let e (write_whole (nth argv 3) (ui_face_file ts))
+            (if (is_empty e) 0 (complain e)))))))
+
+; Every table, or why not.
+(def mkfont_tables ((regular (list int)) (bold (list int)) (icons (list int))) (Result (list UiNamedCov) (list int))
+  (match (mkfont_font regular)
+    ((Err why) ((Err (list UiNamedCov) (list int)) why))
+    ((Ok r)
+      (match (mkfont_font bold)
+        ((Err why) ((Err (list UiNamedCov) (list int)) why))
+        ((Ok b)
+          (match (read_whole icons)
+            ((Err why) ((Err (list UiNamedCov) (list int)) (append icons (append ": " why))))
+            ((Ok text)
+              (match (mkfont_shapes (mkfont_blocks (lines (bytes_to_list text)) (nil MkBlock)))
+                ((Err why) ((Err (list UiNamedCov) (list int)) (append icons (append ": " why))))
+                ((Ok shapes)
+                  ((Ok (list UiNamedCov) (list int))
+                    (cons (mkfont_glyphs r false 32) (cons (mkfont_glyphs b true 32)
+                      (cons (mkfont_glyphs r false 64) (cons (mkfont_glyphs b true 64) shapes))))))))))))))
+
+(def mkfont_font ((path (list int))) (Result Ttf (list int))
+  (match (read_whole path)
+    ((Err why) ((Err Ttf (list int)) (append path (append ": " why))))
+    ((Ok b)
+      (match (ttf_read b)
+        ((Err why) ((Err Ttf (list int)) (append path (append ": " why))))
+        ((Ok f) ((Ok Ttf (list int)) f))))))
+
+; ---------------------------------------------------------------- glyphs
+
+; The glyphs of codes 32 to 126, h tall and h / 2 wide, as one table.
+(def mkfont_glyphs ((f Ttf) (bold bool) (h int)) UiNamedCov
+  (UiNamedCov (ui_glyph_table bold h)
+              (UiCov (div h 2) h (mkfont_glyph_words f h (first_glyph) (nil (array int))))))
+
+(def mkfont_glyph_words ((f Ttf) (h int) (code int) (acc (list (array int)))) (array int)
+  (if (ge code (add (first_glyph) (glyph_count)))
+      (array_from (mkfont_concat (rev acc) (nil int)) 0)
+      (mkfont_glyph_words f h (add code 1) (cons (mkfont_glyph f h code) acc))))
+
+(def mkfont_concat ((as (list (array int))) (acc (list int))) (list int)
+  (if (is_empty as) (rev acc) (mkfont_concat (tail as) (mkfont_onto (head as) 0 acc))))
+
+(def mkfont_onto ((a (array int)) (i int) (acc (list int))) (list int)
+  (if (ge i (array_len a)) acc (mkfont_onto a (add i 1) (cons (array_get a i) acc))))
+
+; One glyph's coverage, packed: its outline placed so that the font's
+; advance is the cell's width and its baseline 23/32 of the way down.
+(def mkfont_glyph ((f Ttf) (h int) (code int)) (array int)
+  (let w (div h 2)
+    (let g (ttf_glyph_index f code)
+      (let place (TtfPlace (mul w (rast_one)) (ttf_advance f g) 0 (mkfont_baseline h))
+        (rast_pack (rast_cover (rast_polygons (ttf_segs (ttf_contours f g) place)) w h) w h)))))
+
+(def mkfont_baseline ((h int)) int (div (mul (mul h 23) (rast_one)) 32))
+
+; ---------------------------------------------------------------- shapes
+
+; A block of icons.paths: an icon, its name and shapes' lines; or the
+; pointer's lines.
+(data MkBlock (MkIcon (list int) (list (list int))) (MkCursor (list (list int))))
+
+; The file's lines as blocks, each line after "icon NAME" or "cursor" its
+; block's, comments and blank lines left out.
+(def mkfont_blocks ((ls (list (list int))) (acc (list MkBlock))) (list MkBlock)
+  (if (is_empty ls)
+      (rev (mkfont_blocks_done acc))
+      (let ws (split_spaces (head ls))
+        (if (if (is_empty ws) true (eq (head (head ws)) 59))
+            (mkfont_blocks (tail ls) acc)
+            (if (if (eq (head ws) "icon") (eq (length ws) 2) false)
+                (mkfont_blocks (tail ls) (cons (MkIcon (nth ws 1) (nil (list int))) (mkfont_blocks_done acc)))
+                (if (eq (head ws) "cursor")
+                    (mkfont_blocks (tail ls) (cons (MkCursor (nil (list int))) (mkfont_blocks_done acc)))
+                    (mkfont_blocks (tail ls) (mkfont_add_line acc (unwords ws)))))))))
+
+; A line added to the block being read, kept reversed until it is done;
+; a line before any block is dropped.
+(def mkfont_add_line ((acc (list MkBlock)) (l (list int))) (list MkBlock)
+  (if (is_empty acc)
+      acc
+      (match (head acc)
+        ((MkIcon name ls) (cons (MkIcon name (cons l ls)) (tail acc)))
+        ((MkCursor ls) (cons (MkCursor (cons l ls)) (tail acc))))))
+
+; The block being read with its lines put in order.
+(def mkfont_blocks_done ((acc (list MkBlock))) (list MkBlock)
+  (if (is_empty acc)
+      acc
+      (match (head acc)
+        ((MkIcon name ls) (cons (MkIcon name (rev ls)) (tail acc)))
+        ((MkCursor ls) (cons (MkCursor (rev ls)) (tail acc))))))
+
+; The sizes an icon is drawn at: 16 · scale · 2 for its scales 1 to 4.
+(def mkfont_icon_sizes () (list int) (cons 32 (cons 64 (cons 96 (cons 128 (nil int))))))
+
+; Every block's tables: an icon's at each size, the pointer's one.
+(def mkfont_shapes ((bs (list MkBlock))) (Result (list UiNamedCov) (list int))
+  (mkfont_shapes_onto bs (nil UiNamedCov)))
+
+(def mkfont_shapes_onto ((bs (list MkBlock)) (acc (list UiNamedCov))) (Result (list UiNamedCov) (list int))
+  (if (is_empty bs)
+      ((Ok (list UiNamedCov) (list int)) (rev acc))
+      (match (head bs)
+        ((MkIcon name ls)
+          (match (mkfont_icon name ls (mkfont_icon_sizes) acc)
+            ((Err why) ((Err (list UiNamedCov) (list int)) why))
+            ((Ok acc2) (mkfont_shapes_onto (tail bs) acc2))))
+        ((MkCursor ls)
+          (match (mkfont_cursor ls)
+            ((Err why) ((Err (list UiNamedCov) (list int)) why))
+            ((Ok t) (mkfont_shapes_onto (tail bs) (cons t acc))))))))
+
+(def mkfont_icon ((name (list int)) (ls (list (list int))) (sizes (list int)) (acc (list UiNamedCov))) (Result (list UiNamedCov) (list int))
+  (if (is_empty sizes)
+      ((Ok (list UiNamedCov) (list int)) acc)
+      (let n (head sizes)
+        (match (shape_cover ls (ShapeScale n 16) n n)
+          ((Err why) ((Err (list UiNamedCov) (list int)) (append name (append ": " why))))
+          ((Ok cov) (mkfont_icon name ls (tail sizes) (cons (UiNamedCov (ui_icon_table name n) (UiCov n n (rast_pack cov n n))) acc)))))))
+
+; ---------------------------------------------------------------- pointer
+
+; The pointer, 64 by 64 at scale 2, a word a pixel: its white shapes,
+; then its black ones over them, each pixel's alpha what they cover.
+(def mkfont_cursor_size () int 64)
+
+(def mkfont_cursor ((ls (list (list int)))) (Result UiNamedCov (list int))
+  (let n (mkfont_cursor_size)
+    (match (shape_cover (mkfont_colored ls "white " (nil (list int))) (ShapeScale 2 1) n n)
+      ((Err why) ((Err UiNamedCov (list int)) (append "cursor: " why)))
+      ((Ok white)
+        (match (shape_cover (mkfont_colored ls "black " (nil (list int))) (ShapeScale 2 1) n n)
+          ((Err why) ((Err UiNamedCov (list int)) (append "cursor: " why)))
+          ((Ok black)
+            ((Ok UiNamedCov (list int))
+              (UiNamedCov "cursor" (UiCov n n (mkfont_argb white black 0 (array_new (mul n n) 0)))))))))))
+
+; The lines that start with color, without it.
+(def mkfont_colored ((ls (list (list int))) (color (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ls)
+      (rev acc)
+      (mkfont_colored (tail ls) color
+        (if (starts_with (head ls) color) (cons (drop_n (head ls) (length color)) acc) acc))))
+
+(def mkfont_argb ((white (array int)) (black (array int)) (i int) (out (array int))) (array int)
+  (if (ge i (array_len out))
+      out
+      (let v (mkfont_pixel (array_get white i) (array_get black i))
+        (mkfont_argb white black (add i 1) (array_set out i v)))))
+
+; A pixel black covers b of, over white covering w, each 0 to 15: its
+; alpha how much of it either covers, its gray the white that shows, not
+; premultiplied.
+(def mkfont_pixel ((w int) (b int)) int
+  (let ba (mul b 17)
+    (let wa (mul w 17)
+      (let a (add ba (div (mul wa (sub 255 ba)) 255))
+        (if (eq a 0)
+            0
+            (let g (min 255 (div (mul (div (mul wa (sub 255 ba)) 255) 255) a))
+              (bit_or (bit_shl a 24) (bit_or (bit_shl g 16) (bit_or (bit_shl g 8) g)))))))))

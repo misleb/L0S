@@ -1,0 +1,125 @@
+; face.l0 -- what the toolkit draws text, icons and the pointer from, at
+; the desktop's scale. At scale 1 that is the 8 by 16 bitmap font
+; (render.l0's, /etc/font.txt) and icons.l0's 16 by 16 art, as it has
+; always been. At scale 2 every logical pixel is 2 by 2 of the screen's,
+; and doubling the bitmaps would be blocky, so the face holds coverage
+; tools/mkfont rasterized from vector outlines, Source Code Pro's glyphs
+; and icons' paths: how much of each pixel a shape covers, 0 to 15, which
+; painting mixes the color with what is under it by. It is read from
+; /etc/face2x, written by mkfont:
+;
+;   "L0SF", a u32 version (1), a u32 count of tables, then each table:
+;   a u32 name length, the name, u32 width, height, and word count, and
+;   that many u64 words, all least significant byte first.
+;
+; A table named glyph.regular.H or glyph.bold.H is the glyphs of codes 32
+; to 126, H tall and H / 2 wide, glyph after glyph, row after row; one
+; named icon.NAME.N is an icon N by N; each row is as many words as its
+; 16s, each word 16 levels, the leftmost pixel in the highest four bits.
+; The one named cursor is the pointer, 64 by 64, a word a pixel, its
+; alpha, red, green and blue.
+
+; A table: its width, height and words.
+(data UiCov (UiCov int int (array int)))
+
+; A face: its scale, the bitmap font (empty if it could not be read),
+; and at scale 2 the tables by name.
+(data UiFace (UiFace int (array int) (Map (list int) UiCov)))
+
+(def ui_face_path () (list int) "/etc/face2x")
+
+; A face of the bitmap font alone, at scale 1: what a program with no
+; scale, and every host test, draws with.
+(def ui_face_1x ((font (array int))) UiFace (UiFace 1 font ((MapEmpty (list int) UiCov))))
+
+; The face at scale s: at 2, its tables too, if /etc/face2x can be read.
+; With none, text and icons at 2 are the bitmaps doubled.
+(def ui_face_load ((s int)) UiFace
+  (let font (load_font (font_path))
+    (if (lt s 2)
+        (ui_face_1x font)
+        (match (read_whole (ui_face_path))
+          ((Err why) (let w (write_err (append (ui_face_path) (append ": " (append why "; text drawn doubled\n"))))
+                       (UiFace s font ((MapEmpty (list int) UiCov)))))
+          ((Ok b) (UiFace s font (ui_face_tables b)))))))
+
+(def ui_face_scale ((f UiFace)) int (match f ((UiFace s font ts) s)))
+(def ui_face_font ((f UiFace)) (array int) (match f ((UiFace s font ts) font)))
+
+; The table called name, if the face has it.
+(def ui_face_table ((f UiFace) (name (list int))) (Option UiCov)
+  (match f ((UiFace s font ts) (map_get ts name))))
+
+; ----------------------------------------------------------- the tables
+
+; The level of pixel x, y of a table of coverage, 0 to 15.
+(def ui_cov_level ((c UiCov) (x int) (y int)) int
+  (match c
+    ((UiCov w h words)
+      (let word (array_get words (add (mul y (ui_cov_wpr w)) (div x 16)))
+        (bit_and (bit_shr word (mul 4 (sub 15 (mod x 16)))) 15)))))
+
+; The words a row w wide takes.
+(def ui_cov_wpr ((w int)) int (div (add w 15) 16))
+
+; The level of pixel x, y of glyph code, in a table of glyphs cw wide and
+; ch tall; a code it lacks is drawn as ?.
+(def ui_glyph_level ((c UiCov) (code int) (x int) (y int)) int
+  (match c
+    ((UiCov w h words)
+      (ui_cov_level c x (add (mul (sub (drawable code) (first_glyph)) h) y)))))
+
+(def ui_glyph_table ((bold bool) (h int)) (list int)
+  (append (if bold "glyph.bold." "glyph.regular.") (digits h)))
+
+(def ui_icon_table ((name (list int)) (n int)) (list int)
+  (append "icon." (append name (append "." (digits n)))))
+
+; ------------------------------------------------------------- the file
+
+; The tables a face file holds; none if it is not one.
+(def ui_face_tables ((b bytes)) (Map (list int) UiCov)
+  (if (if (has b 0 12) (eq (bytes_range b 0 4) "L0SF") false)
+      (ui_face_read b 12 (le_u32 b 8) ((MapEmpty (list int) UiCov)))
+      ((MapEmpty (list int) UiCov))))
+
+(def ui_face_read ((b bytes) (at int) (n int) (m (Map (list int) UiCov))) (Map (list int) UiCov)
+  (if (if (le n 0) true (not (has b at 4)))
+      m
+      (let nl (le_u32 b at)
+        (if (not (has b (add at 4) (add nl 12)))
+            m
+            (let name (bytes_range b (add at 4) (add (add at 4) nl))
+              (let p (add (add at 4) nl)
+                (let k (le_u32 b (add p 8))
+                  (if (not (has b (add p 12) (mul k 8)))
+                      m
+                      (ui_face_read b (add (add p 12) (mul k 8)) (sub n 1)
+                        (map_put m name (UiCov (le_u32 b p) (le_u32 b (add p 4)) (ui_face_words b (add p 12) 0 k (array_new k 0)))))))))))))
+
+(def ui_face_words ((b bytes) (at int) (i int) (k int) (out (array int))) (array int)
+  (if (ge i k)
+      out
+      (ui_face_words b at (add i 1) k (array_set out i (le_u64_at b (add at (mul i 8)))))))
+
+; A face file of tables, named, as bytes: what mkfont writes.
+(data UiNamedCov (UiNamedCov (list int) UiCov))
+
+(def ui_face_file ((ts (list UiNamedCov))) bytes
+  (bytes_from_list (rev (ui_face_onto ts (push (u32_le (length ts)) (push (u32_le 1) (push "L0SF" (nil int))))))))
+
+(def ui_face_onto ((ts (list UiNamedCov)) (acc (list int))) (list int)
+  (if (is_empty ts)
+      acc
+      (match (head ts)
+        ((UiNamedCov name c)
+          (match c
+            ((UiCov w h words)
+              (ui_face_onto (tail ts)
+                (ui_words_onto words 0 (push (u32_le (array_len words)) (push (u32_le h) (push (u32_le w)
+                  (push name (push (u32_le (length name)) acc)))))))))))))
+
+(def ui_words_onto ((words (array int)) (i int) (acc (list int))) (list int)
+  (if (ge i (array_len words))
+      acc
+      (ui_words_onto words (add i 1) (push (le64 (array_get words i)) acc))))

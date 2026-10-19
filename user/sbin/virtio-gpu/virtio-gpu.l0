@@ -18,6 +18,11 @@
 ; - A damaged rectangle is a transfer and a flush of just that part.
 ; - The pointer is the device's own cursor, resource 2, a 64 by 64 image
 ;   moved on the cursor queue.
+;
+; The screen is the mode the device offers, in its own pixels. On a large
+; one, 2560 by 1440 or more, info says the scale is 2, so the compositor
+; lays out a desktop half as wide and high and draws it at twice that, as
+; GNOME's scale factor does; boot argument scale=1 or scale=2 says which.
 
 (def gpu_device () int 16)          ; DeviceID of a GPU
 
@@ -439,7 +444,9 @@
 
 ; The control queue's memory: page 0 the ring, descriptors at 0, the
 ; available ring at 1024, the used ring at 2048; page 1 a response; the
-; rest a request, which may be long, for a backing of many runs.
+; rest a request, which may be long, for a backing of many runs. QEMU's
+; control queue takes 64 entries, so the request's 62 pages and the
+; response are as many descriptors as it holds.
 (def queue_pages () int 64)
 (def ring_size () int 64)
 (def avail_off () int (virtq_avail_off (ring_size)))
@@ -448,7 +455,7 @@
 (def req_off () int 8192)
 
 ; The most runs one backing may have: what the request's pages hold.
-(def max_runs () int (div (sub (mul (sub (queue_pages) 2) (page_size)) 32) 16))
+(def max_runs () int (div (sub (sub (mul (queue_pages) (page_size)) (req_off)) 32) 16))
 
 ; The driver: the transports' registers and the GPU's transport, the
 ; queue's memory and where the device reaches each page of it, and how
@@ -613,7 +620,7 @@
 ; ------------------------------------------------------------- serving
 
 ; Registers as display, then answers each request, as display.l0 makes
-; them: ok, display W H cursor, or error: WHY.
+; them: ok, display W H cursor scale S, or error: WHY.
 (def start_serving ((v Drv)) int
   (let port (port_new)
     (let r (name_register_or_why port "display")
@@ -651,7 +658,33 @@
 (def info ((v Drv)) (Served Drv)
   (match v
     ((Drv g c w h bufs layers attached cur zero rows)
-      (Served v (append "display " (append (digits w) (append " " (append (digits h) " cursor"))))))))
+      (Served v (info_reply w h (scale_of w h (boot_args)))))))
+
+; info's answer: the screen's size, its own cursor, and the scale.
+(def info_reply ((w int) (h int) (s int)) (list int)
+  (unwords (cons "display" (cons (digits w) (cons (digits h) (cons "cursor" (cons "scale" (cons (digits s) (nil (list int))))))))))
+
+; How many of the screen's pixels each way a pixel of the desktop is: 2
+; on a screen of 2560 by 1440 or more, so that a 4K one is laid out as
+; 1920 by 1080, else 1; or what boot argument scale= says, if it says 1
+; or 2.
+(def scale_of ((w int) (h int) (args (list (list int)))) int
+  (let a (scale_arg args)
+    (if (gt a 0) a (screen_scale w h))))
+
+(def screen_scale ((w int) (h int)) int
+  (if (if (ge w 2560) (ge h 1440) false) 2 1))
+
+; The scale the first scale= boot argument asks for, 1 or 2; 0 for none,
+; or for any other value.
+(def scale_arg ((args (list (list int)))) int
+  (if (is_empty args)
+      0
+      (if (starts_with (head args) "scale=")
+          (match (word_number (drop_n (head args) 6))
+            ((Some n) (if (if (eq n 1) true (eq n 2)) n 0))
+            ((None) 0))
+          (scale_arg (tail args)))))
 
 (def layers_of ((ns (list int)) (acc (list Layer))) (list Layer)
   (if (is_empty ns)

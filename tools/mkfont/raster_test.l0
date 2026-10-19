@@ -1,0 +1,88 @@
+; raster_test.l0 -- tests of the rasterizer: exact coverage of simple
+; shapes, the nonzero rule, curves, and a property against area.
+
+; A w by h rectangle at x, y, in 1/256 pixel, as segments.
+(def box ((x int) (y int) (w int) (h int)) (list RastSeg)
+  (cons (RastMove x y) (cons (RastLine (add x w) y) (cons (RastLine (add x w) (add y h)) (cons (RastLine x (add y h)) (cons (RastClose) (nil RastSeg)))))))
+
+; The same the other way round, a hole in a shape going the first way.
+(def box_back ((x int) (y int) (w int) (h int)) (list RastSeg)
+  (cons (RastMove x y) (cons (RastLine x (add y h)) (cons (RastLine (add x w) (add y h)) (cons (RastLine (add x w) y) (cons (RastClose) (nil RastSeg)))))))
+
+(def cover ((segs (list RastSeg)) (w int) (h int)) (array int) (rast_cover (rast_polygons segs) w h))
+
+(def levels ((a (array int))) (list int) (unwords (levels_onto a 0 (nil (list int)))))
+(def levels_onto ((a (array int)) (i int) (acc (list (list int)))) (list (list int))
+  (if (ge i (array_len a)) (rev acc) (levels_onto a (add i 1) (cons (digits (array_get a i)) acc))))
+
+(def test_full_pixel () int
+  (check_str "one pixel" (levels (cover (box 0 0 256 256) 1 1)) "15"))
+
+; A pixel's square at half a pixel's offset covers a quarter of each of
+; four: 4096 / 4 = 1024, level 15 · 1024 / 4096 = 3.75, 4.
+(def test_half_offset () int
+  (check_str "quarters" (levels (cover (box 128 128 256 256) 2 2)) "4 4 4 4"))
+
+(def test_half_column () int
+  (check_str "half a pixel wide" (levels (cover (box 0 0 128 512) 1 2)) "8 8"))
+
+; A triangle cut along a pixel's diagonal: half of it, 8 by rounding.
+(def test_diagonal () int
+  (check_str "half"
+    (levels (cover (cons (RastMove 0 0) (cons (RastLine 256 256) (cons (RastLine 0 256) (cons (RastClose) (nil RastSeg))))) 1 1))
+    "8"))
+
+(def test_hole () int
+  (check_str "a ring"
+    (levels (cover (append (box 0 0 768 768) (box_back 256 256 256 256)) 3 3))
+    "15 15 15 15 0 15 15 15 15"))
+
+; Two shapes the same way round overlap as one, by the nonzero rule.
+(def test_overlap_nonzero () int
+  (check_str "union" (levels (cover (append (box 0 0 512 256) (box 256 0 512 256)) 3 1)) "15 15 15"))
+
+; A quadratic curve is cut into lines near enough to it: a lens of two
+; arcs covers some of the middle pixel but not all.
+(def test_quad_flattened () int
+  (let ps (rast_polygons (cons (RastMove 0 0) (cons (RastQuad 512 512 1024 0) (cons (RastClose) (nil RastSeg)))))
+    (check_true "more than two points" (gt (length (head ps)) 3))))
+
+(def test_cubic_ends () int
+  (let ps (rast_polygons (cons (RastMove 0 0) (cons (RastCubic 0 512 512 512 512 0) (cons (RastClose) (nil RastSeg)))))
+    (check_true "ends at its end" (eq (head (rev (head ps))) (Point 512 0)))))
+
+(def test_union () int
+  (check_str "the more" (levels (rast_union (array_from (cons 3 (cons 9 (nil int))) 0) (array_from (cons 5 (cons 2 (nil int))) 0))) "5 9"))
+
+; Packing: 16 levels to a word, the first the highest four bits.
+(def test_pack () int
+  (let w (array_get (rast_pack (array_from (cons 15 (cons 1 (nil int))) 0) 2 1) 0)
+    (check_str "f1 then zeros" (hex_digits w 16) "f100000000000000")))
+
+(def test_pack_rows () int
+  (check_int "two words a row of 17" (array_len (rast_pack (array_new 34 0) 17 2)) 4))
+
+; Over seeded rectangles at any 1/256 offsets, what is covered adds up
+; to the rectangle's area, within the rounding of each pixel's level.
+(def area_bad ((seed int) (n int) (bad int)) int
+  (if (eq n 0)
+      bad
+      (let s1 (rand_next seed)
+        (let s2 (rand_next s1)
+          (let s3 (rand_next s2)
+            (let s4 (rand_next s3)
+              (area_bad s4 (sub n 1)
+                (add bad (area_off (rand_below s1 512) (mul 16 (rand_below s2 32))
+                                   (add 256 (rand_below s3 768)) (mul 16 (add 16 (rand_below s4 32))))))))))))
+
+; 1 if a w by h rectangle at x, y covers other than its area, else 0.
+(def area_off ((x int) (y int) (w int) (h int)) int
+  (let total (sum_levels (cover (box x y w h) 8 8) 0 0)
+    (let want (div (mul (mul w h) 15) 65536)
+      (if (le (rast_abs (sub total want)) 12) 0 1))))
+
+(def sum_levels ((a (array int)) (i int) (acc int)) int
+  (if (ge i (array_len a)) acc (sum_levels a (add i 1) (add acc (array_get a i)))))
+
+(def test_area_property () int
+  (check_int "rectangles whose coverage is off" (area_bad 11 200 0) 0))

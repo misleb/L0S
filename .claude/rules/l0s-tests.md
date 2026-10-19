@@ -24,7 +24,8 @@ The `l0s-testing` skill has the detail; load it before writing tests.
   refusals included.
 - An e2e case is `tests/e2e/CASE/` with `etc/inittab` and `expected`, plus
   `status`, `stderr`, `typed` (then start `uart noecho`), `font`, `bootargs`,
-  or `disk` with its `layout`
+  `gpu` (the virtio-gpu's options, such as a 4K mode), or `disk` with its
+  `layout`
   (a fresh virtio-blk disk) as needed.
 - Screen tests keep sockets and dumps in `build/`, with relative paths
   (sockets need paths under 104 bytes). Remove any debug output added to

@@ -1,0 +1,333 @@
+; ttf.l0 -- reads a TrueType font, as bytes: its glyphs' outlines, by
+; character, as the rasterizer's segments (raster.l0). Only what drawing
+; ASCII needs: the tables head, maxp, hhea, hmtx, cmap's format 4, loca
+; and glyf, and glyphs simple and composite, the latter with offsets and
+; any of their three kinds of scale. No hinting: a glyph is drawn as its
+; outline says. Numbers in a font are big-endian.
+
+; ---------------------------------------------------------------- numbers
+
+(def ttf_u8 ((b bytes) (i int)) int (if (if (ge i 0) (lt i (bytes_len b)) false) (bytes_get b i) 0))
+(def ttf_u16 ((b bytes) (i int)) int (bit_or (bit_shl (ttf_u8 b i) 8) (ttf_u8 b (add i 1))))
+(def ttf_u32 ((b bytes) (i int)) int (bit_or (bit_shl (ttf_u16 b i) 16) (ttf_u16 b (add i 2))))
+
+; A u16 as signed, and a byte as signed.
+(def ttf_i16 ((b bytes) (i int)) int (let v (ttf_u16 b i) (if (ge v 32768) (sub v 65536) v)))
+(def ttf_i8 ((b bytes) (i int)) int (let v (ttf_u8 b i) (if (ge v 128) (sub v 256) v)))
+
+; ----------------------------------------------------------------- tables
+
+; A font: its bytes; units per em; whether loca's offsets are long; how
+; many glyphs; how many have their own advance; and where cmap's format 4
+; subtable, loca, glyf and hmtx are.
+(data Ttf (Ttf bytes int bool int int int int int int))
+
+; Where the table tag is, or -1 if the font has none.
+(def ttf_table ((b bytes) (tag (list int))) int
+  (ttf_table_at b tag 0 (ttf_u16 b 4)))
+
+(def ttf_table_at ((b bytes) (tag (list int)) (i int) (n int)) int
+  (if (ge i n)
+      -1
+      (let rec (add 12 (mul 16 i))
+        (if (eq (ttf_tag b rec) tag)
+            (ttf_u32 b (add rec 8))
+            (ttf_table_at b tag (add i 1) n)))))
+
+; The four bytes from i, 0 for any past the end.
+(def ttf_tag ((b bytes) (i int)) (list int)
+  (cons (ttf_u8 b i) (cons (ttf_u8 b (add i 1)) (cons (ttf_u8 b (add i 2)) (cons (ttf_u8 b (add i 3)) (nil int))))))
+
+; The font in b, or why it is not one this reads.
+(def ttf_read ((b bytes)) (Result Ttf (list int))
+  (let head (ttf_table b "head")
+    (let maxp (ttf_table b "maxp")
+      (let hhea (ttf_table b "hhea")
+        (let cmap (ttf_table b "cmap")
+          (if (lt (bytes_len b) 12)
+              ((Err Ttf (list int)) "too short to be a font")
+              (if (lt (min head (min maxp (min hhea cmap))) 0)
+                  ((Err Ttf (list int)) "no head, maxp, hhea or cmap: not a TrueType font")
+                  (ttf_with_cmap b head maxp hhea (ttf_cmap4 b cmap)))))))))
+
+(def ttf_with_cmap ((b bytes) (head int) (maxp int) (hhea int) (cmap4 int)) (Result Ttf (list int))
+  (let loca (ttf_table b "loca")
+    (let glyf (ttf_table b "glyf")
+      (if (lt (min loca glyf) 0)
+          ((Err Ttf (list int)) "no glyf: the outlines are not TrueType's")
+          (if (lt cmap4 0)
+              ((Err Ttf (list int)) "no Unicode cmap of format 4")
+              ((Ok Ttf (list int))
+                (Ttf b (ttf_u16 b (add head 18)) (eq (ttf_i16 b (add head 50)) 1) (ttf_u16 b (add maxp 4))
+                     (ttf_u16 b (add hhea 34)) cmap4 loca glyf (ttf_table b "hmtx"))))))))
+
+; Where cmap's Unicode subtable of format 4 is, Windows' (3, 1) or
+; Unicode's own (0, 3), or -1.
+(def ttf_cmap4 ((b bytes) (cmap int)) int
+  (ttf_cmap4_at b cmap 0 (ttf_u16 b (add cmap 2))))
+
+(def ttf_cmap4_at ((b bytes) (cmap int) (i int) (n int)) int
+  (if (ge i n)
+      -1
+      (let rec (add cmap (add 4 (mul 8 i)))
+        (let at (add cmap (ttf_u32 b (add rec 4)))
+          (if (if (ttf_unicode (ttf_u16 b rec) (ttf_u16 b (add rec 2))) (eq (ttf_u16 b at) 4) false)
+              at
+              (ttf_cmap4_at b cmap (add i 1) n))))))
+
+(def ttf_unicode ((platform int) (encoding int)) bool
+  (if (if (eq platform 3) (eq encoding 1) false) true (if (eq platform 0) (eq encoding 3) false)))
+
+(def ttf_upm ((f Ttf)) int (match f ((Ttf b upm long n nh cm loca glyf hmtx) upm)))
+
+; ----------------------------------------------------------------- glyphs
+
+; The glyph of character c: its index, 0 if the font has none.
+(def ttf_glyph_index ((f Ttf) (c int)) int
+  (match f
+    ((Ttf b upm long n nh cm loca glyf hmtx)
+      (ttf_seg_glyph b cm c 0 (div (ttf_u16 b (add cm 6)) 2)))))
+
+; Format 4: segments of characters, each with its end, start, delta and
+; range offset in four arrays one after another.
+(def ttf_seg_glyph ((b bytes) (cm int) (c int) (i int) (segs int)) int
+  (if (ge i segs)
+      0
+      (let ends (add cm 14)
+        (let starts (add ends (add (mul 2 segs) 2))
+          (let deltas (add starts (mul 2 segs))
+            (let ranges (add deltas (mul 2 segs))
+              (if (gt c (ttf_u16 b (add ends (mul 2 i))))
+                  (ttf_seg_glyph b cm c (add i 1) segs)
+                  (ttf_seg_lookup b c (ttf_u16 b (add starts (mul 2 i))) (ttf_u16 b (add deltas (mul 2 i)))
+                                  (add ranges (mul 2 i))))))))))
+
+(def ttf_seg_lookup ((b bytes) (c int) (start int) (delta int) (range_at int)) int
+  (if (lt c start)
+      0
+      (let ro (ttf_u16 b range_at)
+        (if (eq ro 0)
+            (bit_and (add c delta) 65535)
+            (let g (ttf_u16 b (add range_at (add ro (mul 2 (sub c start)))))
+              (if (eq g 0) 0 (bit_and (add g delta) 65535)))))))
+
+; How far glyph g moves the pen, in font units.
+(def ttf_advance ((f Ttf) (g int)) int
+  (match f
+    ((Ttf b upm long n nh cm loca glyf hmtx)
+      (if (lt hmtx 0) upm (ttf_u16 b (add hmtx (mul 4 (min g (sub nh 1)))))))))
+
+; Where glyph g's outline starts in the font, and where it ends.
+(def ttf_glyph_at ((f Ttf) (g int)) int
+  (match f ((Ttf b upm long n nh cm loca glyf hmtx) (add glyf (ttf_loca b loca long g)))))
+
+(def ttf_glyph_len ((f Ttf) (g int)) int
+  (match f ((Ttf b upm long n nh cm loca glyf hmtx) (sub (ttf_loca b loca long (add g 1)) (ttf_loca b loca long g)))))
+
+(def ttf_loca ((b bytes) (loca int) (long bool) (g int)) int
+  (if long (ttf_u32 b (add loca (mul 4 g))) (mul 2 (ttf_u16 b (add loca (mul 2 g))))))
+
+; A point of an outline, in font units, y up, and whether it is on the
+; curve or a quadratic curve's control point.
+(data TtfPt (TtfPt int int bool))
+
+; Glyph g's contours, those of its parts too if it is composite, each
+; as its points. A glyph with no outline, as a space, has none.
+(def ttf_contours ((f Ttf) (g int)) (list (list TtfPt))
+  (ttf_contours_deep f g 0))
+
+; Composites nest, but not deeper than 4, so a font that loops is still
+; read.
+(def ttf_contours_deep ((f Ttf) (g int) (depth int)) (list (list TtfPt))
+  (match f
+    ((Ttf b upm long n nh cm loca glyf hmtx)
+      (if (if (ge g n) true (if (gt depth 4) true (le (ttf_glyph_len f g) 0)))
+          (nil (list TtfPt))
+          (let o (ttf_glyph_at f g)
+            (let nc (ttf_i16 b o)
+              (if (ge nc 0)
+                  (ttf_simple b o nc)
+                  (ttf_composite f b (add o 10) depth (nil (list TtfPt))))))))))
+
+; ---------------------------------------------------------- simple glyphs
+
+; A simple glyph's nc contours: their last points' numbers, its flags,
+; then its xs and ys, each a delta from the one before.
+(def ttf_simple ((b bytes) (o int) (nc int)) (list (list TtfPt))
+  (if (eq nc 0)
+      (nil (list TtfPt))
+      (let np (add 1 (ttf_u16 b (add o (add 10 (mul 2 (sub nc 1))))))
+        (let ins (ttf_u16 b (add o (add 10 (mul 2 nc))))
+          (let fl_at (add o (add 12 (add (mul 2 nc) ins)))
+            (match (ttf_flags b fl_at np (nil int))
+              ((TtfFlags flags xs_at)
+                (match (ttf_coords b xs_at flags 2 16 0 (nil int))
+                  ((TtfCoords xs ys_at)
+                    (match (ttf_coords b ys_at flags 4 32 0 (nil int))
+                      ((TtfCoords ys after)
+                        (ttf_split b o nc (ttf_points flags xs ys (nil TtfPt))))))))))))))
+
+; The flags, one a point, and where the xs begin. A flag with bit 8 set
+; is followed by how many times more it repeats.
+(data TtfFlags (TtfFlags (list int) int))
+
+(def ttf_flags ((b bytes) (at int) (left int) (acc (list int))) TtfFlags
+  (if (le left 0)
+      (TtfFlags (rev acc) at)
+      (let fl (ttf_u8 b at)
+        (if (eq (bit_and fl 8) 0)
+            (ttf_flags b (add at 1) (sub left 1) (cons fl acc))
+            (let r (min (ttf_u8 b (add at 1)) (sub left 1))
+              (ttf_flags b (add at 2) (sub left (add r 1)) (ttf_repeat fl (add r 1) acc)))))))
+
+(def ttf_repeat ((fl int) (n int) (acc (list int))) (list int)
+  (if (le n 0) acc (ttf_repeat fl (sub n 1) (cons fl acc))))
+
+; One axis's coordinates, from at, each point's flag saying how its delta
+; is kept: short is the bit for a byte, same the bit that then says it is
+; positive, and otherwise that it is 0, not a 16-bit delta.
+(data TtfCoords (TtfCoords (list int) int))
+
+(def ttf_coords ((b bytes) (at int) (flags (list int)) (short int) (same int) (v int) (acc (list int))) TtfCoords
+  (if (is_empty flags)
+      (TtfCoords (rev acc) at)
+      (let fl (head flags)
+        (if (not (eq (bit_and fl short) 0))
+            (let d (ttf_u8 b at)
+              (let nv (if (eq (bit_and fl same) 0) (sub v d) (add v d))
+                (ttf_coords b (add at 1) (tail flags) short same nv (cons nv acc))))
+            (if (not (eq (bit_and fl same) 0))
+                (ttf_coords b at (tail flags) short same v (cons v acc))
+                (let nv (add v (ttf_i16 b at))
+                  (ttf_coords b (add at 2) (tail flags) short same nv (cons nv acc))))))))
+
+(def ttf_points ((flags (list int)) (xs (list int)) (ys (list int)) (acc (list TtfPt))) (array TtfPt)
+  (if (if (is_empty flags) true (if (is_empty xs) true (is_empty ys)))
+      (array_from (rev acc) (TtfPt 0 0 true))
+      (ttf_points (tail flags) (tail xs) (tail ys)
+                  (cons (TtfPt (head xs) (head ys) (not (eq (bit_and (head flags) 1) 0))) acc))))
+
+; The points cut into contours at each contour's last point.
+(def ttf_split ((b bytes) (o int) (nc int) (pts (array TtfPt))) (list (list TtfPt))
+  (ttf_split_at b o nc pts 0 0 (nil (list TtfPt))))
+
+(def ttf_split_at ((b bytes) (o int) (nc int) (pts (array TtfPt)) (k int) (from int) (acc (list (list TtfPt)))) (list (list TtfPt))
+  (if (ge k nc)
+      (rev acc)
+      (let last (ttf_u16 b (add o (add 10 (mul 2 k))))
+        (ttf_split_at b o nc pts (add k 1) (add last 1) (cons (ttf_slice pts from (add last 1) (nil TtfPt)) acc)))))
+
+(def ttf_slice ((pts (array TtfPt)) (i int) (j int) (acc (list TtfPt))) (list TtfPt)
+  (if (if (ge i j) true (ge i (array_len pts)))
+      (rev acc)
+      (ttf_slice pts (add i 1) j (cons (array_get pts i) acc))))
+
+; ------------------------------------------------------- composite glyphs
+
+; A composite glyph's parts, from at: each a flag word, a glyph, its
+; offset, and perhaps a scale, as F2Dot14s (1 is 16384); more follow
+; while bit 32 of the flags is set.
+(def ttf_composite ((f Ttf) (b bytes) (at int) (depth int) (acc (list (list TtfPt)))) (list (list TtfPt))
+  (let fl (ttf_u16 b at)
+    (let g (ttf_u16 b (add at 2))
+      (let words (not (eq (bit_and fl 1) 0))
+        (let dx (if words (ttf_i16 b (add at 4)) (ttf_i8 b (add at 4)))
+          (let dy (if words (ttf_i16 b (add at 6)) (ttf_i8 b (add at 5)))
+            (let sat (add at (if words 8 6))
+              (ttf_part f b fl g dx dy sat depth acc))))))))
+
+(def ttf_part ((f Ttf) (b bytes) (fl int) (g int) (dx int) (dy int) (sat int) (depth int) (acc (list (list TtfPt)))) (list (list TtfPt))
+  (let one (not (eq (bit_and fl 8) 0))
+    (let two (not (eq (bit_and fl 64) 0))
+      (let four (not (eq (bit_and fl 128) 0))
+        (let m (if four (TtfMatrix (ttf_i16 b sat) (ttf_i16 b (add sat 2)) (ttf_i16 b (add sat 4)) (ttf_i16 b (add sat 6)))
+                 (if two (TtfMatrix (ttf_i16 b sat) 0 0 (ttf_i16 b (add sat 2)))
+                   (if one (TtfMatrix (ttf_i16 b sat) 0 0 (ttf_i16 b sat)) (TtfMatrix 16384 0 0 16384))))
+          (let next (add sat (if four 8 (if two 4 (if one 2 0))))
+            (let parts (ttf_moved (ttf_contours_deep f g (add depth 1)) m dx dy (rev acc))
+              (if (eq (bit_and fl 32) 0)
+                  parts
+                  (ttf_composite f b next depth (rev parts))))))))))
+
+; A part's 2 by 2 transform, a b c d as F2Dot14s: x' = a x + c y,
+; y' = b x + d y.
+(data TtfMatrix (TtfMatrix int int int int))
+
+; Each contour of cs transformed by m and moved by dx, dy, after acc.
+(def ttf_moved ((cs (list (list TtfPt))) (m TtfMatrix) (dx int) (dy int) (acc (list (list TtfPt)))) (list (list TtfPt))
+  (if (is_empty cs)
+      (rev acc)
+      (ttf_moved (tail cs) m dx dy (cons (ttf_moved_pts (head cs) m dx dy (nil TtfPt)) acc))))
+
+(def ttf_moved_pts ((ps (list TtfPt)) (m TtfMatrix) (dx int) (dy int) (acc (list TtfPt))) (list TtfPt)
+  (if (is_empty ps)
+      (rev acc)
+      (match (head ps)
+        ((TtfPt x y on)
+          (match m
+            ((TtfMatrix a b c d)
+              (ttf_moved_pts (tail ps) m dx dy
+                (cons (TtfPt (add (div (add (mul a x) (mul c y)) 16384) dx) (add (div (add (mul b x) (mul d y)) 16384) dy) on) acc))))))))
+
+; ----------------------------------------------------------- to segments
+
+; How font units become the rasterizer's: x · num / den + ox, and y, which
+; goes up in a font but down on a screen, oy − y · num / den.
+(data TtfPlace (TtfPlace int int int int))
+
+(def ttf_x ((p TtfPlace) (x int)) int (match p ((TtfPlace num den ox oy) (add ox (div (mul x num) den)))))
+(def ttf_y ((p TtfPlace) (y int)) int (match p ((TtfPlace num den ox oy) (sub oy (div (mul y num) den)))))
+
+; Contours as segments: each from a point on its curve, a line to each
+; next on it, a quadratic curve through each control point, and between
+; two control points in a row the point midway between them, which
+; TrueType leaves implied.
+(def ttf_segs ((cs (list (list TtfPt))) (p TtfPlace)) (list RastSeg)
+  (rev (ttf_segs_onto cs p (nil RastSeg))))
+
+(def ttf_segs_onto ((cs (list (list TtfPt))) (p TtfPlace) (acc (list RastSeg))) (list RastSeg)
+  (if (is_empty cs)
+      acc
+      (ttf_segs_onto (tail cs) p (if (is_empty (head cs)) acc (ttf_contour (ttf_from_on (head cs)) p acc)))))
+
+; A contour turned to begin on its curve: at its first point on it, or,
+; if none is, at the point midway between its last and first.
+(def ttf_from_on ((ps (list TtfPt))) (list TtfPt)
+  (ttf_rotate ps (nil TtfPt) ps))
+
+(def ttf_rotate ((rest (list TtfPt)) (before (list TtfPt)) (all (list TtfPt))) (list TtfPt)
+  (if (is_empty rest)
+      (cons (ttf_mid (head (rev all)) (head all)) all)
+      (match (head rest)
+        ((TtfPt x y on)
+          (if on
+              (append rest (rev before))
+              (ttf_rotate (tail rest) (cons (head rest) before) all))))))
+
+(def ttf_mid ((a TtfPt) (b TtfPt)) TtfPt
+  (match a ((TtfPt ax ay aon) (match b ((TtfPt bx by bon) (TtfPt (div (add ax bx) 2) (div (add ay by) 2) true))))))
+
+(def ttf_contour ((ps (list TtfPt)) (p TtfPlace) (acc (list RastSeg))) (list RastSeg)
+  (match (head ps)
+    ((TtfPt x y on)
+      (cons (RastClose) (ttf_walk (tail ps) (head ps) ((None TtfPt)) p (cons (RastMove (ttf_x p x) (ttf_y p y)) acc))))))
+
+; Through ps, with a control point pending or none, then back to start.
+(def ttf_walk ((ps (list TtfPt)) (start TtfPt) (ctrl (Option TtfPt)) (p TtfPlace) (acc (list RastSeg))) (list RastSeg)
+  (if (is_empty ps)
+      (ttf_to ctrl start p acc)
+      (match (head ps)
+        ((TtfPt x y on)
+          (if on
+              (ttf_walk (tail ps) start ((None TtfPt)) p (ttf_to ctrl (head ps) p acc))
+              (match ctrl
+                ((None) (ttf_walk (tail ps) start (Some (head ps)) p acc))
+                ((Some c) (ttf_walk (tail ps) start (Some (head ps)) p (ttf_to ctrl (ttf_mid c (head ps)) p acc)))))))))
+
+; To point to, on the curve: a line, or a curve through ctrl.
+(def ttf_to ((ctrl (Option TtfPt)) (to TtfPt) (p TtfPlace) (acc (list RastSeg))) (list RastSeg)
+  (match to
+    ((TtfPt x y on)
+      (match ctrl
+        ((None) (cons (RastLine (ttf_x p x) (ttf_y p y)) acc))
+        ((Some c) (match c ((TtfPt cx cy con) (cons (RastQuad (ttf_x p cx) (ttf_y p cy) (ttf_x p x) (ttf_y p y)) acc))))))))

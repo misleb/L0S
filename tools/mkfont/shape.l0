@@ -1,0 +1,305 @@
+; shape.l0 -- icons as shapes, for the rasterizer (raster.l0): the
+; language fonts/icons.paths is written in, and its shapes as polygons.
+;
+; Each line of a shape is one of:
+;
+;   fill PATH                 PATH filled, by the nonzero rule
+;   stroke W PATH             PATH's lines W wide, their ends and joins
+;                             round
+;   circle CX CY R            a disc
+;   ring CX CY R W            a circle's line, W wide
+;   arc CX CY R W A0 A1       part of one, from angle A0 to A1 in degrees,
+;                             each a multiple of 5, from the right towards
+;                             the bottom, A0 below A1, its ends round
+;   rect X Y W H              a rectangle
+;   rrect X Y W H R           one with its corners rounded R
+;   frame X Y W H R T         a rounded rectangle's border, T wide inside
+;                             its edge
+;
+; A PATH is SVG's: M, L, H, V, Q, C and Z, absolute, or as m, l, h, v,
+; q, c relative, each command and number a word. Numbers may have up to
+; three decimals. An icon is drawn on a grid of 16, so its numbers run 0
+; to 16, whatever its size in pixels. Shapes go together by taking each
+; pixel's most covered, so they never cancel; only within one shape do
+; directions matter, as a ring's hole does.
+
+; --------------------------------------------------------------- numbers
+
+; A number, its decimals too, in 1/256: "4.5" is 1152.
+(def shape_num ((w (list int))) (Option int)
+  (if (is_empty w)
+      ((None int))
+      (if (eq (head w) 45)
+          (match (shape_unsigned (tail w)) ((Some v) (Some (neg v))) ((None) ((None int))))
+          (shape_unsigned w))))
+
+(def shape_unsigned ((w (list int))) (Option int)
+  (let whole (take_while_digits w (nil int))
+    (let rest (drop_n w (length whole))
+      (if (is_empty whole)
+          ((None int))
+          (if (is_empty rest)
+              (Some (mul (int_prefix whole 0) 256))
+              (if (eq (head rest) 46)
+                  (shape_decimals (int_prefix whole 0) (tail rest))
+                  ((None int))))))))
+
+(def take_while_digits ((w (list int)) (acc (list int))) (list int)
+  (if (if (is_empty w) true (if (lt (head w) 48) true (gt (head w) 57)))
+      (rev acc)
+      (take_while_digits (tail w) (cons (head w) acc))))
+
+; whole and up to three decimals, in 1/256, rounded.
+(def shape_decimals ((whole int) (ds (list int))) (Option int)
+  (let digs (take_while_digits ds (nil int))
+    (if (if (is_empty digs) true (if (gt (length digs) 3) true (not (eq (length digs) (length ds)))))
+        ((None int))
+        (let thousandths (mul (int_prefix digs 0) (if (eq (length digs) 1) 100 (if (eq (length digs) 2) 10 1)))
+          (Some (add (mul whole 256) (div (add (mul thousandths 256) 500) 1000)))))))
+
+; Every word a number, or none.
+(def shape_nums ((ws (list (list int))) (acc (list int))) (Option (list int))
+  (if (is_empty ws)
+      (Some (rev acc))
+      (match (shape_num (head ws))
+        ((None) ((None (list int))))
+        ((Some v) (shape_nums (tail ws) (cons v acc))))))
+
+; ----------------------------------------------------------------- paths
+
+; How a shape's numbers become pixels: v · num / den, in 1/256, so an
+; icon n pixels across has num n and den 16.
+(data ShapeScale (ShapeScale int int))
+
+(def shape_px ((s ShapeScale) (v int)) int (match s ((ShapeScale num den) (div (mul v num) den))))
+
+; A path's words as segments, in pixels as s says; or why not.
+(def shape_path ((ws (list (list int))) (s ShapeScale)) (Result (list RastSeg) (list int))
+  (shape_path_at ws s 0 0 0 0 (nil RastSeg)))
+
+; Through the words, at x, y, the contour having started at sx, sy.
+(def shape_path_at ((ws (list (list int))) (s ShapeScale) (x int) (y int) (sx int) (sy int) (acc (list RastSeg))) (Result (list RastSeg) (list int))
+  (if (is_empty ws)
+      ((Ok (list RastSeg) (list int)) (rev acc))
+      (let op (head ws)
+        (if (any_eq op (split_spaces "Z z"))
+            (shape_path_at (tail ws) s sx sy sx sy (cons (RastClose) (cons (RastLine (shape_px s sx) (shape_px s sy)) acc)))
+            (match (shape_path_arity op)
+              ((None) ((Err (list RastSeg) (list int)) (append "no path command " op)))
+              ((Some n)
+                (match (shape_nums (take_words (tail ws) n) (nil int))
+                  ((None) ((Err (list RastSeg) (list int)) (append op " wants numbers")))
+                  ((Some ns)
+                    (if (lt (length ns) n)
+                        ((Err (list RastSeg) (list int)) (append op " is cut short"))
+                        (shape_step (drop_words (tail ws) n) s op ns x y sx sy acc))))))))))
+
+(def take_words ((ws (list (list int))) (n int)) (list (list int))
+  (if (if (le n 0) true (is_empty ws)) (nil (list int)) (cons (head ws) (take_words (tail ws) (sub n 1)))))
+
+(def drop_words ((ws (list (list int))) (n int)) (list (list int))
+  (if (if (le n 0) true (is_empty ws)) ws (drop_words (tail ws) (sub n 1))))
+
+; How many numbers a path command takes.
+(def shape_path_arity ((op (list int))) (Option int)
+  (if (any_eq op (split_spaces "M m L l")) (Some 2)
+    (if (any_eq op (split_spaces "H h V v")) (Some 1)
+      (if (any_eq op (split_spaces "Q q")) (Some 4)
+        (if (any_eq op (split_spaces "C c")) (Some 6) ((None int)))))))
+
+(def shape_rel ((op (list int))) bool (any_eq op (split_spaces "m l h v q c")))
+
+; One command done: its points made absolute, then as a segment.
+(def shape_step ((ws (list (list int))) (s ShapeScale) (op (list int)) (ns (list int)) (x int) (y int) (sx int) (sy int) (acc (list RastSeg))) (Result (list RastSeg) (list int))
+  (let rx (if (shape_rel op) x 0)
+    (let ry (if (shape_rel op) y 0)
+      (let k (head op)
+        (if (any_eq k "Mm")
+            (let nx (add rx (nth ns 0)) (let ny (add ry (nth ns 1))
+              (shape_path_at ws s nx ny nx ny (cons (RastMove (shape_px s nx) (shape_px s ny)) acc))))
+            (if (any_eq k "Ll")
+                (let nx (add rx (nth ns 0)) (let ny (add ry (nth ns 1))
+                  (shape_path_at ws s nx ny sx sy (cons (RastLine (shape_px s nx) (shape_px s ny)) acc))))
+                (if (any_eq k "Hh")
+                    (let nx (add rx (nth ns 0))
+                      (shape_path_at ws s nx y sx sy (cons (RastLine (shape_px s nx) (shape_px s y)) acc)))
+                    (if (any_eq k "Vv")
+                        (let ny (add ry (nth ns 0))
+                          (shape_path_at ws s x ny sx sy (cons (RastLine (shape_px s x) (shape_px s ny)) acc)))
+                        (shape_curve ws s k ns rx ry sx sy acc)))))))))
+
+(def shape_curve ((ws (list (list int))) (s ShapeScale) (k int) (ns (list int)) (rx int) (ry int) (sx int) (sy int) (acc (list RastSeg))) (Result (list RastSeg) (list int))
+  (if (any_eq k "Qq")
+      (let nx (add rx (nth ns 2)) (let ny (add ry (nth ns 3))
+        (shape_path_at ws s nx ny sx sy
+          (cons (RastQuad (shape_px s (add rx (nth ns 0))) (shape_px s (add ry (nth ns 1))) (shape_px s nx) (shape_px s ny)) acc))))
+      (let nx (add rx (nth ns 4)) (let ny (add ry (nth ns 5))
+        (shape_path_at ws s nx ny sx sy
+          (cons (RastCubic (shape_px s (add rx (nth ns 0))) (shape_px s (add ry (nth ns 1)))
+                           (shape_px s (add rx (nth ns 2))) (shape_px s (add ry (nth ns 3)))
+                           (shape_px s nx) (shape_px s ny)) acc))))))
+
+; ------------------------------------------------------------ the circle
+
+; sin of 5k degrees, k 0 to 18, in 1/65536.
+(def shape_sines () (array int)
+  (array_from (word_numbers_or (split_spaces "0 5712 11380 16962 22415 27697 32768 37590 42126 46341 50203 53684 56756 59396 61584 63303 64540 65287 65536")) 0))
+
+(def word_numbers_or ((ws (list (list int)))) (list int)
+  (if (is_empty ws) (nil int) (cons (int_prefix (head ws) 0) (word_numbers_or (tail ws)))))
+
+; sin and cos of a multiple of 5 degrees, any, in 1/65536.
+(def shape_sin ((deg int)) int
+  (let d (mod (add (mod deg 360) 360) 360)
+    (if (le d 90) (array_get (shape_sines) (div d 5))
+      (if (le d 180) (array_get (shape_sines) (div (sub 180 d) 5))
+        (if (le d 270) (neg (array_get (shape_sines) (div (sub d 180) 5)))
+          (neg (array_get (shape_sines) (div (sub 360 d) 5))))))))
+
+(def shape_cos ((deg int)) int (shape_sin (add deg 90)))
+
+; The point at deg on a circle at cx, cy of radius r, in pixels' 1/256.
+(def shape_on ((cx int) (cy int) (r int) (deg int)) Point
+  (Point (add cx (div (mul r (shape_cos deg)) 65536)) (add cy (div (mul r (shape_sin deg)) 65536))))
+
+; Points along a circle from angle a down to b, 5 degrees apart, b too,
+; consed onto acc: going down the angles, a shape winds the way every
+; shape here that fills does.
+(def shape_arc_down ((cx int) (cy int) (r int) (a int) (b int) (acc (list Point))) (list Point)
+  (if (lt a b)
+      acc
+      (shape_arc_down cx cy r (sub a 5) b (cons (shape_on cx cy r a) acc))))
+
+; The same going up, from a to b: the other way round, for a hole.
+(def shape_arc_up ((cx int) (cy int) (r int) (a int) (b int) (acc (list Point))) (list Point)
+  (if (gt a b)
+      acc
+      (shape_arc_up cx cy r (add a 5) b (cons (shape_on cx cy r a) acc))))
+
+(def shape_disc ((cx int) (cy int) (r int)) (list Point)
+  (rev (shape_arc_down cx cy r 355 0 (nil Point))))
+
+(def shape_disc_back ((cx int) (cy int) (r int)) (list Point)
+  (rev (shape_arc_up cx cy r 0 355 (nil Point))))
+
+; A rectangle at x, y, w by h, its corners of radius r, going down the
+; angles: its bottom right corner, top right, top left, bottom left.
+(def shape_rrect ((x int) (y int) (w int) (h int) (r int)) (list Point)
+  (rev (shape_corner (add x r) (sub (add y h) r) r 180 90
+         (shape_corner (add x r) (add y r) r 270 180
+           (shape_corner (sub (add x w) r) (add y r) r 360 270
+             (shape_corner (sub (add x w) r) (sub (add y h) r) r 90 0 (nil Point)))))))
+
+(def shape_corner ((cx int) (cy int) (r int) (a int) (b int) (acc (list Point))) (list Point)
+  (if (eq r 0) (cons (Point cx cy) acc) (shape_arc_down cx cy r a b acc)))
+
+; -------------------------------------------------------------- strokes
+
+; Each polyline of ps stroked w wide (in 1/256): a rectangle along each of
+; its lines, and a disc at each point, all winding one way.
+(def shape_stroke ((ps (list (list Point))) (w int)) (list (list Point))
+  (shape_stroke_onto ps (div w 2) (nil (list Point))))
+
+(def shape_stroke_onto ((ps (list (list Point))) (hw int) (acc (list (list Point)))) (list (list Point))
+  (if (is_empty ps)
+      acc
+      (shape_stroke_onto (tail ps) hw (shape_line_onto (head ps) hw acc))))
+
+(def shape_line_onto ((pts (list Point)) (hw int) (acc (list (list Point)))) (list (list Point))
+  (if (is_empty pts)
+      acc
+      (match (head pts)
+        ((Point x y)
+          (let joined (cons (shape_disc x y hw) acc)
+            (if (is_empty (tail pts))
+                joined
+                (shape_line_onto (tail pts) hw (shape_band (head pts) (head (tail pts)) hw joined))))))))
+
+; The rectangle 2 hw wide along a to b.
+(def shape_band ((a Point) (b Point) (hw int) (acc (list (list Point)))) (list (list Point))
+  (match a
+    ((Point x0 y0)
+      (match b
+        ((Point x1 y1)
+          (let len (isqrt (add (mul (sub x1 x0) (sub x1 x0)) (mul (sub y1 y0) (sub y1 y0))))
+            (if (eq len 0)
+                acc
+                (let nx (div (mul (neg (sub y1 y0)) hw) len)
+                  (let ny (div (mul (sub x1 x0) hw) len)
+                    (cons (cons (Point (add x0 nx) (add y0 ny)) (cons (Point (add x1 nx) (add y1 ny))
+                            (cons (Point (sub x1 nx) (sub y1 ny)) (cons (Point (sub x0 nx) (sub y0 ny)) (nil Point)))))
+                          acc))))))))))
+
+; --------------------------------------------------------------- shapes
+
+; A shape's line as polygons, in pixels as s says; or why not.
+(def shape_polygons ((ws (list (list int))) (s ShapeScale)) (Result (list (list Point)) (list int))
+  (if (is_empty ws)
+      ((Err (list (list Point)) (list int)) "an empty line")
+      (let op (head ws)
+        (if (eq op "fill")
+            (match (shape_path (tail ws) s)
+              ((Err why) ((Err (list (list Point)) (list int)) why))
+              ((Ok segs) ((Ok (list (list Point)) (list int)) (rast_polygons segs))))
+            (if (eq op "stroke")
+                (shape_stroked (tail ws) s)
+                (shape_figure op (tail ws) s))))))
+
+(def shape_stroked ((ws (list (list int))) (s ShapeScale)) (Result (list (list Point)) (list int))
+  (match (if (is_empty ws) ((None int)) (shape_num (head ws)))
+    ((None) ((Err (list (list Point)) (list int)) "stroke wants its width"))
+    ((Some w)
+      (match (shape_path (tail ws) s)
+        ((Err why) ((Err (list (list Point)) (list int)) why))
+        ((Ok segs) ((Ok (list (list Point)) (list int)) (shape_stroke (rast_polylines segs) (shape_px s w))))))))
+
+; The figures: circle, ring, arc, rect, rrect, frame.
+(def shape_figure ((op (list int)) (ws (list (list int))) (s ShapeScale)) (Result (list (list Point)) (list int))
+  (match (shape_nums ws (nil int))
+    ((None) ((Err (list (list Point)) (list int)) (append op " wants numbers")))
+    ((Some raw)
+      (let n (length raw)
+        (let ns (shape_px_all s raw)
+          (if (if (eq op "circle") (eq n 3) false)
+              (shape_ok (cons (shape_disc (nth ns 0) (nth ns 1) (nth ns 2)) (nil (list Point))))
+          (if (if (eq op "ring") (eq n 4) false)
+              (shape_ok (shape_ring (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)))
+          (if (if (eq op "arc") (eq n 6) false)
+              (shape_ok (shape_stroke (cons (rev (shape_arc_up (nth ns 0) (nth ns 1) (nth ns 2) (div (nth raw 4) 256) (div (nth raw 5) 256) (nil Point))) (nil (list Point))) (nth ns 3)))
+              (shape_box op n ns)))))))))
+
+(def shape_box ((op (list int)) (n int) (ns (list int))) (Result (list (list Point)) (list int))
+  (if (if (eq op "rect") (eq n 4) false)
+      (shape_ok (cons (shape_rrect (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) 0) (nil (list Point))))
+  (if (if (eq op "rrect") (eq n 5) false)
+      (shape_ok (cons (shape_rrect (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)) (nil (list Point))))
+  (if (if (eq op "frame") (eq n 6) false)
+      (shape_ok (shape_frame (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4) (nth ns 5)))
+      ((Err (list (list Point)) (list int)) (append "no shape " op))))))
+
+(def shape_ok ((ps (list (list Point)))) (Result (list (list Point)) (list int)) ((Ok (list (list Point)) (list int)) ps))
+
+(def shape_px_all ((s ShapeScale) (vs (list int))) (list int)
+  (if (is_empty vs) (nil int) (cons (shape_px s (head vs)) (shape_px_all s (tail vs)))))
+
+; A circle's line, w wide: a disc with a hole in it.
+(def shape_ring ((cx int) (cy int) (r int) (w int)) (list (list Point))
+  (cons (shape_disc cx cy (add r (div w 2))) (cons (shape_disc_back cx cy (max 0 (sub r (div w 2)))) (nil (list Point)))))
+
+; A rounded rectangle's border, t wide: the inside of it the other way
+; round.
+(def shape_frame ((x int) (y int) (w int) (h int) (r int) (t int)) (list (list Point))
+  (cons (shape_rrect x y w h r)
+        (cons (rev (shape_rrect (add x t) (add y t) (sub w (mul 2 t)) (sub h (mul 2 t)) (max 0 (sub r t)))) (nil (list Point)))))
+
+; A shape's lines, each drawn alone, then put together: n by n pixels of
+; coverage; or why not, with the line.
+(def shape_cover ((lines (list (list int))) (s ShapeScale) (w int) (h int)) (Result (array int) (list int))
+  (shape_cover_onto lines s w h (array_new (mul w h) 0)))
+
+(def shape_cover_onto ((lines (list (list int))) (s ShapeScale) (w int) (h int) (acc (array int))) (Result (array int) (list int))
+  (if (is_empty lines)
+      ((Ok (array int) (list int)) acc)
+      (match (shape_polygons (split_spaces (head lines)) s)
+        ((Err why) ((Err (array int) (list int)) (append why (append ": " (head lines)))))
+        ((Ok ps) (shape_cover_onto (tail lines) s w h (rast_union acc (rast_cover ps w h)))))))

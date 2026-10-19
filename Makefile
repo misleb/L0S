@@ -43,7 +43,14 @@ L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc/*.bc)
 # is macOS's window; gtk or sdl elsewhere, none for no window.
 SPLASH       ?= $(BUILD)/splash.ppm
 QEMU_DISPLAY ?= cocoa
-DEVICES      := -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
+# SCREEN, WxH, is the virtio-gpu's mode, QEMU's 1280x800 if not given. A
+# screen of 2560x1440 or more is drawn at scale 2: make demo
+# SCREEN=3840x2160, with QEMU_DISPLAY=cocoa,full-screen=on,zoom-to-fit=on
+# to fill a 4K monitor.
+SCREEN       ?=
+comma        := ,
+GPU_OPTS     := $(if $(SCREEN),xres=$(word 1,$(subst x, ,$(SCREEN)))$(comma)yres=$(word 2,$(subst x, ,$(SCREEN))))
+DEVICES      := -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device
 DISK         := $(BUILD)/disk.img
 SYSDISK      := $(BUILD)/system.img
 SYSUUID      := $(BUILD)/system.uuid
@@ -98,10 +105,10 @@ PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB)
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
 # commands, which need only render.l0; and its client windows, which need
 # the compositor's protocol too.
-UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
+UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0
 UI_WINDOW := user/lib/ui/window.l0
-UI_TESTS  := theme icons paint widget grid panes entry draw_cmd
+UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER)
 LIBS_virtio-input := $(VIRTIO)
@@ -149,8 +156,10 @@ MKSPLASH := $(BASE) $(CLI) $(PPM) tools/mksplash/mksplash.l0
 L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
 MKFS     := $(COMMON) $(CLI) $(PARTS) $(L0FS) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) tools/mkicon/mkicon.l0
+MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) tools/mkfont/raster.l0 tools/mkfont/ttf.l0 tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 ICONS    := $(APPS:%=$(BUILD)/icons/%.ppm)
+ICONS2X  := $(APPS:%=$(BUILD)/icons/%2x.ppm)
 ROOT     := $(BUILD)/root
 
 # Every library, which make doc reads the documentation of: common's, the
@@ -170,6 +179,7 @@ check:
 	$(L0) check $(L0SDOC) tools/l0sdoc/main.l0
 	$(L0) check $(MKFS) tools/mkfs/main.l0
 	$(L0) check $(MKICON) tools/mkicon/main.l0
+	$(L0) check $(MKFONT) tools/mkfont/main.l0
 
 # An archive bsdtar makes, of bin/x, "hi", mode 0755: what the host tests
 # of initramfs.l0 and of cat read.
@@ -202,6 +212,8 @@ test: sample
 	$(L0) test $(ULIB) $(RECT) user/lib/gfx/rect_test.l0
 	$(L0) test $(ULIB) $(RENDER) user/lib/gfx/render_test.l0
 	$(L0) test $(ULIB) $(CLOCK) user/lib/proto/clock_test.l0
+	$(L0) test $(ULIB) $(RECT) $(DISPLAY) user/lib/proto/display_test.l0
+	$(L0) test $(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0
 	$(L0) test $(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0
 	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0
 	$(L0) test $(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0
@@ -217,6 +229,7 @@ test: sample
 	$(L0) test $(L0SDOC) tools/l0sdoc/l0sdoc_test.l0
 	$(L0) test $(MKFS) tools/mkfs/mkfs_test.l0
 	$(L0) test $(MKICON) tools/mkicon/mkicon_test.l0
+	$(foreach t,raster ttf shape mkfont,$(L0) test $(MKFONT) tools/mkfont/$(t)_test.l0 && ) true
 	python3 tools/l0s-mcp/test_board.py
 
 test-virt:
@@ -239,6 +252,11 @@ images: $(BUILD)/kernel.img $(IMAGES)
 $(BUILD)/splash.ppm: $(MKSPLASH) tools/mksplash/main.l0 | $(BUILD)
 	$(L0) run $(MKSPLASH) tools/mksplash/main.l0 > $@.tmp && mv $@.tmp $@
 
+# The same at scale 2, which the desktop shows on a large screen; none
+# for a SPLASH of another's, which is shown at scale 2 as it is.
+$(BUILD)/splash2x.ppm: $(MKSPLASH) tools/mksplash/main.l0 | $(BUILD)
+	$(L0) run $(MKSPLASH) tools/mksplash/main.l0 -- 2 > $@.tmp && mv $@.tmp $@
+
 $(BUILD)/l0sdoc: $(L0SDOC) tools/l0sdoc/main.l0 | $(BUILD)
 	$(L0) build $(L0SDOC) tools/l0sdoc/main.l0 -o $@
 
@@ -249,11 +267,25 @@ $(BUILD)/mkfs: $(MKFS) tools/mkfs/main.l0 | $(BUILD)
 $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 	$(L0) build $(MKICON) tools/mkicon/main.l0 -o $@
 
+# The face the desktop draws text, icons and the pointer with at scale 2,
+# /etc/face2x: Source Code Pro's glyphs and fonts/icons.paths, rasterized.
+FACE := $(BUILD)/face2x
+FONT_TTFS := fonts/SourceCodePro-Regular.ttf fonts/SourceCodePro-Bold.ttf
+
+$(BUILD)/mkfont: $(MKFONT) tools/mkfont/main.l0 | $(BUILD)
+	$(L0) build $(MKFONT) tools/mkfont/main.l0 -o $@
+
+$(FACE): $(BUILD)/mkfont $(FONT_TTFS) fonts/icons.paths
+	$(BUILD)/mkfont $(FONT_TTFS) fonts/icons.paths $@.tmp && mv $@.tmp $@
+
 # Each app's icon, drawn from its bundle's icon.draw. mkicon draws on the
 # theme's colors, so an icon is drawn again when they change.
 define ICON_RULE
 $(BUILD)/icons/$(1).ppm: $(DIR_$(1))/$(BUNDLE_$(1))/icon.draw $(BUILD)/mkicon | $(BUILD)/icons
 	$(BUILD)/mkicon $$< > $$@.tmp && mv $$@.tmp $$@
+
+$(BUILD)/icons/$(1)2x.ppm: $(DIR_$(1))/$(BUNDLE_$(1))/icon.draw $(BUILD)/mkicon $(FACE) | $(BUILD)/icons
+	$(BUILD)/mkicon $$< $(FACE) > $$@.tmp && mv $$@.tmp $$@
 endef
 $(foreach p,$(APPS),$(eval $(call ICON_RULE,$(p))))
 
@@ -265,10 +297,11 @@ define STAGE_APP
 mkdir -p $(ROOT)/Applications/$(BUNDLE_$(1)) && \
 install -m 755 $(BUILD)/bin/$(1).img $(ROOT)/Applications/$(BUNDLE_$(1))/$(1) && \
 install -m 644 $(DIR_$(1))/$(BUNDLE_$(1))/manifest $(ROOT)/Applications/$(BUNDLE_$(1))/manifest && \
-install -m 644 $(BUILD)/icons/$(1).ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon.ppm
+install -m 644 $(BUILD)/icons/$(1).ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon.ppm && \
+install -m 644 $(BUILD)/icons/$(1)2x.ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon2x.ppm
 endef
 
-root: $(IMAGES) $(ICONS)
+root: $(IMAGES) $(ICONS) $(ICONS2X)
 	rm -rf $(ROOT) && mkdir -p $(ROOT)/bin $(ROOT)/sbin $(ROOT)/Applications
 	$(foreach p,$(BIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/bin/$(p) && ) true
 	$(foreach p,$(SBIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/sbin/$(p) && ) true
@@ -286,32 +319,37 @@ $(MCP_VENV)/.installed: tools/l0s-mcp/requirements.txt
 
 mcp: $(MCP_VENV)/.installed
 
-# demo/etc, the splash, and the console font, staged together as the
-# archive's /etc.
-FONT := fonts/l0s-8x16.txt
+# demo/etc, the splash at both scales, the console font, and the face
+# for scale 2, staged together as the archive's /etc.
+FONT     := fonts/l0s-8x16.txt
+SPLASH2X := $(if $(filter $(BUILD)/splash.ppm,$(SPLASH)),$(BUILD)/splash2x.ppm)
+ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FONT) $(FACE)
+stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FONT) $(1)/font.txt && cp $(FACE) $(1)/face2x \
+            $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm)
 
-initramfs: images root $(SPLASH) $(FONT)
-	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc && cp $(SPLASH) $(BUILD)/etc/splash.ppm
-	cp $(FONT) $(BUILD)/etc/font.txt
+initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc
+	$(call stage_etc,$(BUILD)/etc)
 	tools/mkinitramfs $(BUILD)/initramfs.cpio $(BUILD)/etc $(ROOT)
 
 # What the screen and keyboard tests boot: tests/screen/etc, with the
-# splash and font as the demo has them, but no vt.
-screen-initramfs: images root $(SPLASH) $(FONT)
+# splash, font and face as the demo has them, but no vt.
+screen-initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/screen-etc && cp -R tests/screen/etc $(BUILD)/screen-etc
-	cp $(SPLASH) $(BUILD)/screen-etc/splash.ppm && cp $(FONT) $(BUILD)/screen-etc/font.txt
+	$(call stage_etc,$(BUILD)/screen-etc)
 	tools/mkinitramfs $(BUILD)/screen.cpio $(BUILD)/screen-etc $(ROOT)
 
 # What tests/disks.sh boots: tests/disks/etc, the screen tests' with the
-# disk's driver and file server, with the splash and font.
-disks-initramfs: images root $(SPLASH) $(FONT)
+# disk's driver and file server, with the splash, font and face.
+disks-initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/disks-etc && cp -R tests/disks/etc $(BUILD)/disks-etc
-	cp $(SPLASH) $(BUILD)/disks-etc/splash.ppm && cp $(FONT) $(BUILD)/disks-etc/font.txt
+	$(call stage_etc,$(BUILD)/disks-etc)
 	tools/mkinitramfs $(BUILD)/disks.cpio $(BUILD)/disks-etc $(ROOT)
 
 e2e: images root initramfs screen-initramfs disks-initramfs
 	tests/e2e.sh
 	tests/gpu-screen.sh
+	tests/hidpi.sh
 	tests/keyboard.sh
 	tests/vt.sh
 	tests/widgets.sh
@@ -345,14 +383,14 @@ sysdisk: initramfs $(BUILD)/mkfs
 
 demo: initramfs $(DISK)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(DISK) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The demo booted from the system disk, its System volume /: made anew
 # from the initramfs as it is now, so what was written to it goes.
 demo-system: sysdisk
 	@echo "Booting L0S from System, $$(cat $(SYSUUID)). Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_DISK=$(SYSDISK) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 clean:

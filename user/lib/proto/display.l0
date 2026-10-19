@@ -4,8 +4,11 @@
 ; serves the same requests on the port it registers as display, so the
 ; compositor never knows which it has.
 ;
-;   info                    display W H cursor, the screen's size, and
-;                           cursor if the driver moves a pointer itself
+;   info                    display W H cursor scale S, the screen's size
+;                           in its own pixels, cursor if the driver moves
+;                           a pointer itself, and how many of them each
+;                           way a pixel of the desktop is, 1 or 2; a
+;                           reply without scale means 1
 ;   buffer ID W H VA        a buffer of W by H pixels, 4 bytes each (b,
 ;                           g, r, and unused, or alpha for a cursor),
 ;                           row after row, at VA in the driver, which the
@@ -29,23 +32,30 @@
 ;   move X Y                the pointer's hot spot at X, Y
 ;
 ; Each is a request (l0s.l0), its words separated by spaces; the reply is
-; ok, or display W H cursor for info, or error: WHY. A rectangle is
-; rect.l0's Rect. Linked into the programs that talk to a display, by the
-; Makefile's LIBS_ lists, with rect.l0.
+; ok, or display W H cursor scale S for info, or error: WHY. A rectangle
+; is rect.l0's Rect. Linked into the programs that talk to a display, by
+; the Makefile's LIBS_ lists, with rect.l0.
+;
+; The driver counts the screen's own pixels. Once info has said the
+; scale, a client here counts the desktop's: every place, rectangle and
+; radius it gives is made the screen's on the way, s times as far, so at
+; scale 2 the compositor lays out half the screen each way and its
+; buffers are drawn twice the size. Only a buffer's width and height are
+; its own pixels, as it was made.
 
 ; The display, as a client holds it: its port, a port for its replies,
-; and the driver's pid, for sharing buffers with it.
-(data Display (Display int int int) (NoDisplay (list int)))
+; the driver's pid, for sharing buffers with it, and the scale.
+(data Display (Display int int int int) (NoDisplay (list int)))
 
-; What info says: the screen's width and height, and whether the driver
-; has a cursor of its own.
-(data DisplayInfo (DisplayInfo int int bool))
+; What info says: the screen's width and height, whether the driver has
+; a cursor of its own, and the scale.
+(data DisplayInfo (DisplayInfo int int bool int))
 
 ; The display, once its driver has registered, within 5 seconds; or why
 ; not.
 (def display_open () Display
   (match (name_wait "display" 5000000000)
-    ((Found d) (Display d (port_new) 0))
+    ((Found d) (Display d (port_new) 0 1))
     ((NotFound) (NoDisplay "no display; is a display driver running?"))))
 
 ; The reply to body, and the display with the driver's pid, which the
@@ -55,9 +65,9 @@
 (def display_ask ((d Display) (body (list int))) Reply
   (match d
     ((NoDisplay why) (Reply d (append "error: " why)))
-    ((Display port rp pid)
+    ((Display port rp pid s)
       (match (port_ask port rp body "the display")
-        ((Asked from r) (Reply (Display port rp from) r))
+        ((Asked from r) (Reply (Display port rp from s) r))
         ((AskFailed why) (Reply d (append "error: " why)))))))
 
 ; The reply, as an error's reason, or empty for ok.
@@ -67,24 +77,45 @@
 (def request_of ((op (list int)) (ns (list int))) (list int)
   (unwords (cons op (numbers_words ns))))
 
-; info's answer, and the display with the driver's pid.
+; info's answer, and the display with the driver's pid and the scale.
 (data Info (Info Display DisplayInfo) (NoInfo (list int)))
 
 (def display_info ((d Display)) Info
   (match (display_ask d "info")
     ((Reply d2 r)
-      (let ws (split_spaces r)
-        (if (if (ge (length ws) 3) (eq (head ws) "display") false)
-            (Info d2 (DisplayInfo (int_prefix (head (tail ws)) 0) (int_prefix (head (tail (tail ws))) 0)
-                                  (any_eq "cursor" ws)))
-            (NoInfo (reply_error r)))))))
+      (match (info_of r)
+        ((Some i) (Info (display_at_scale d2 (match i ((DisplayInfo w h cursor s) s))) i))
+        ((None) (NoInfo (reply_error r)))))))
+
+(def display_at_scale ((d Display) (s int)) Display
+  (match d ((Display port rp pid old) (Display port rp pid s)) ((NoDisplay why) d)))
+
+; How many of the screen's pixels each way one of the desktop's is.
+(def display_scale ((d Display)) int
+  (match d ((Display port rp pid s) s) ((NoDisplay why) 1)))
+
+; info's reply read, or none if it is not one.
+(def info_of ((r (list int))) (Option DisplayInfo)
+  (let ws (split_spaces r)
+    (if (if (ge (length ws) 3) (eq (head ws) "display") false)
+        (Some (DisplayInfo (int_prefix (head (tail ws)) 0) (int_prefix (head (tail (tail ws))) 0)
+                           (any_eq "cursor" ws) (info_scale ws)))
+        ((None DisplayInfo)))))
+
+; The number after scale in info's words, 1 or 2; 1 if there is none.
+(def info_scale ((ws (list (list int)))) int
+  (if (is_empty ws)
+      1
+      (if (if (eq (head ws) "scale") (not (is_empty (tail ws))) false)
+          (if (eq (head (tail ws)) "2") 2 1)
+          (info_scale (tail ws)))))
 
 ; The pid the driver runs as, 0 before its first reply.
 (def display_pid ((d Display)) int
-  (match d ((Display port rp pid) pid) ((NoDisplay why) 0)))
+  (match d ((Display port rp pid s) pid) ((NoDisplay why) 0)))
 
-; Buffer id, w by h, this process's n pages from va, shared with the
-; driver and given to it: empty, or why not.
+; Buffer id, w by h of its own pixels, this process's n pages from va,
+; shared with the driver and given to it: empty, or why not.
 (def display_buffer ((d Display) (id int) (w int) (h int) (va int) (n int)) (list int)
   (match (shm_share_to va n (display_pid d) "the display")
     ((Err why) why)
@@ -98,35 +129,36 @@
 ; A layer: a buffer's id, where it goes, and its top row.
 (data Placed (Placed int int int int))
 
-(def placed_nums ((ls (list Placed))) (list int)
+; The layers' numbers, places and top rows made the screen's at scale s.
+(def placed_nums ((ls (list Placed)) (s int)) (list int)
   (if (is_empty ls)
       (nil int)
       (match (head ls)
-        ((Placed id x y top) (cons id (cons x (cons y (cons top (placed_nums (tail ls))))))))))
+        ((Placed id x y top) (cons id (cons (mul x s) (cons (mul y s) (cons (mul top s) (placed_nums (tail ls) s)))))))))
 
 (def display_layers ((d Display) (ls (list Placed))) (list int)
-  (match (display_ask d (request_of "layers" (placed_nums ls))) ((Reply d2 r) (reply_error r))))
+  (match (display_ask d (request_of "layers" (placed_nums ls (display_scale d)))) ((Reply d2 r) (reply_error r))))
 
 ; Rectangle r of buffer id changed.
 (def display_damage ((d Display) (id int) (r Rect)) (list int)
-  (display_damage_nums d (rev (rect_nums_onto id r (nil int)))))
+  (display_damage_nums d (rev (rect_nums_onto id (rect_scaled r (display_scale d)) (nil int)))))
 
 ; A rectangle of a buffer that changed: the buffer's id, and where.
 (data Dirty (Dirty int Rect))
 
-(def dirty_nums ((ds (list Dirty)) (acc (list int))) (list int)
+(def dirty_nums ((ds (list Dirty)) (s int) (acc (list int))) (list int)
   (if (is_empty ds)
       (rev acc)
-      (match (head ds) ((Dirty id r) (dirty_nums (tail ds) (rect_nums_onto id r acc))))))
+      (match (head ds) ((Dirty id r) (dirty_nums (tail ds) s (rect_nums_onto id (rect_scaled r s) acc))))))
 
 ; Every rectangle in ds, of any buffers, in one damage request; nothing to
 ; send for none.
 (def display_damage_many ((d Display) (ds (list Dirty))) (list int)
-  (display_damage_nums d (dirty_nums ds (nil int))))
+  (display_damage_nums d (dirty_nums ds (display_scale d) (nil int))))
 
 ; Every rectangle in rs of buffer id, in one damage request.
 (def display_damage_rects ((d Display) (id int) (rs (list Rect))) (list int)
-  (display_damage_nums d (rev (rects_nums_onto id rs (nil int)))))
+  (display_damage_nums d (rev (rects_nums_onto id (rects_scaled rs (display_scale d)) (nil int)))))
 
 ; damage with ns, each rectangle's id, x, y, width and height; nothing
 ; to send for none.
@@ -136,11 +168,15 @@
       (match (display_ask d (request_of "damage" ns)) ((Reply d2 r) (reply_error r)))))
 
 (def display_shape ((d Display) (id int) (tl int) (tr int) (bl int) (br int)) (list int)
-  (match (display_ask d (request_of "shape" (cons id (cons tl (cons tr (cons bl (cons br (nil int))))))))
-    ((Reply d2 r) (reply_error r))))
+  (let s (display_scale d)
+    (match (display_ask d (request_of "shape" (cons id (cons (mul tl s) (cons (mul tr s) (cons (mul bl s) (cons (mul br s) (nil int))))))))
+      ((Reply d2 r) (reply_error r)))))
 
+; The pointer's image, buffer id, its own 64 by 64 pixels whatever the
+; scale, and its hot spot in them.
 (def display_cursor ((d Display) (id int) (hx int) (hy int)) (list int)
   (match (display_ask d (request_of "cursor" (cons id (cons hx (cons hy (nil int)))))) ((Reply d2 r) (reply_error r))))
 
 (def display_move ((d Display) (x int) (y int)) (list int)
-  (match (display_ask d (request_of "move" (cons x (cons y (nil int))))) ((Reply d2 r) (reply_error r))))
+  (let s (display_scale d)
+    (match (display_ask d (request_of "move" (cons (mul x s) (cons (mul y s) (nil int))))) ((Reply d2 r) (reply_error r)))))

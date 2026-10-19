@@ -24,6 +24,13 @@
 ; close button at its end; lighter, its title dimmed, in the backdrop,
 ; when its window is not in front. The pointer is Adwaita's arrow.
 ;
+; On a large screen the display says the scale is 2 (display.l0): wm then
+; lays everything out in the desktop's pixels, half the screen's each
+; way, and its buffers and its clients' are twice as wide and high,
+; painted at the screen's own resolution with the face for scale 2
+; (face.l0). Everything here, the windows, the pointer, the protocol's
+; numbers, is the desktop's pixels; display.l0 makes them the screen's.
+;
 ; The pointer goes to clients as Wayland's does: each move and press in a
 ; window's content to that window, relative to it; after a press, to the
 ; same window until every button is up, wherever the pointer goes; and a
@@ -34,7 +41,17 @@
 
 (def title_h () int (ui_headerbar_h))
 (def wallpaper () (list int) "/etc/splash.ppm")
+(def wallpaper_2x () (list int) "/etc/splash2x.ppm")
 (def wallpaper_percent () int 70)
+
+; The wallpaper at scale s: at 2 the splash drawn twice the size, if
+; there is one, else the one splash, shown as it is.
+(def load_wallpaper ((s int) (percent int)) BgLoad
+  (if (lt s 2)
+      (load_background (wallpaper) percent)
+      (match (load_background (wallpaper_2x) percent)
+        ((BgOk b) (BgOk b))
+        ((BgBad why) (load_background (wallpaper) percent)))))
 
 ; The desktop's buffer is 0, the pointer's 1, the top bar's 2, the
 ; launcher's 3, and window i's content, title bar and frame 4 + 3i,
@@ -299,51 +316,59 @@
 ; was last rebuilt for it; or none.
 (data Drag (Dragging int int int int) (NoDrag))
 
-; The compositor: the display and the screen's size, the desktop's canvas,
-; the font, the wallpaper, the windows, front first, the next window's
-; number, the pointer and its drag, the keyboard and pointer drivers'
-; pids, which their events come from, and the top bar.
-(data Wm (Wm Display int int Canvas (array int) Background (list Win) int Ptr Drag int int Bar))
+; The compositor: the display and the desktop's size, the desktop's
+; canvas, the face, at the display's scale, the wallpaper, the windows,
+; front first, the next window's number, the pointer and its drag, the
+; keyboard and pointer drivers' pids, which their events come from, and
+; the top bar.
+(data Wm (Wm Display int int Canvas UiFace Background (list Win) int Ptr Drag int int Bar))
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "wm" why))
 
+; The screen, laid out as a desktop of its size over its scale.
 (def wm () int
   (match (display_info (display_open))
     ((NoInfo why) (complain why))
-    ((Info d di) (match di ((DisplayInfo w h cursor) (with_desktop d w h))))))
+    ((Info d di) (match di ((DisplayInfo w h cursor s) (with_desktop d (div w s) (div h s) (ui_face_load s)))))))
 
-(def with_desktop ((d Display) (w int) (h int)) int
-  (match (ui_buffer w h)
+; A buffer of wm's own given to the display as buffer id: its own pixels'
+; size, its address and its pages.
+(def give_buffer ((d Display) (id int) (c Canvas) (va int) (pages int)) (list int)
+  (display_buffer d id (canvas_w c) (canvas_h c) va pages))
+
+(def with_desktop ((d Display) (w int) (h int) (face UiFace)) int
+  (match (ui_buffer_at w h (display_scale d))
     ((UiNoBuf why) (complain why))
     ((UiBuf va pages c)
-      (let bg (match (load_background (wallpaper) (wallpaper_percent)) ((BgOk b) b) ((BgBad why) (NoBackground)))
+      (let bg (match (load_wallpaper (display_scale d) (wallpaper_percent)) ((BgOk b) b) ((BgBad why) (NoBackground)))
         (let p (paint_background c bg)
-          (let e (display_buffer d (desktop_id) w h va (buffer_pages w h))
+          (let e (give_buffer d (desktop_id) c va pages)
             (if (not (is_empty e))
                 (complain e)
-                (with_arrow d w h c bg))))))))
+                (with_arrow d w h c bg face))))))))
 
-; The pointer's arrow: 64 by 64, its hot spot its tip, Adwaita's.
-(def with_arrow ((d Display) (w int) (h int) (desk Canvas) (bg Background)) int
+; The pointer's arrow: 64 by 64 of the screen's pixels at any scale, its
+; hot spot its tip, Adwaita's, twice the size at scale 2.
+(def with_arrow ((d Display) (w int) (h int) (desk Canvas) (bg Background) (face UiFace)) int
   (match (ui_buffer 64 64)
     ((UiNoBuf why) (complain why))
     ((UiBuf va pages c)
-      (let a (ui_paint_arrow c)
-        (let e (display_buffer d (arrow_id) 64 64 va pages)
+      (let a (ui_paint_cursor c face)
+        (let e (give_buffer d (arrow_id) c va pages)
           (let e2 (display_cursor d (arrow_id) 0 0)
-            (with_bar d w h desk bg)))))))
+            (with_bar d w h desk bg face)))))))
 
 ; The top bar: as wide as the screen, over everything but the pointer.
-(def with_bar ((d Display) (w int) (h int) (desk Canvas) (bg Background)) int
-  (match (ui_buffer w (bar_h))
+(def with_bar ((d Display) (w int) (h int) (desk Canvas) (bg Background) (face UiFace)) int
+  (match (ui_buffer_at w (bar_h) (display_scale d))
     ((UiNoBuf why) (complain why))
     ((UiBuf va pages c)
-      (let e (display_buffer d (bar_id) w (bar_h) va pages)
+      (let e (give_buffer d (bar_id) c va pages)
         (let e2 (if (is_empty e) (display_layers d (layers (nil Win) false)) e)
           (if (not (is_empty e2))
               (complain e2)
-              (listening (Wm d w h desk (load_font (font_path)) bg (nil Win) 0 (Ptr 0 0 0 -1 -1) (NoDrag) 0 0
+              (listening (Wm d w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1) (NoDrag) 0 0
                              (Bar c -1 -1 (app_bundles) (NoLauncher))))))))))
 
 ; Listens to the keyboard, the pointer and the clock, then serves
@@ -435,6 +460,13 @@
   (match (requested v port from (split_spaces (request_body payload)))
     ((Served v2 reply) (let s (request_answer payload reply) v2))))
 
+; hello's reply: who wm is, and the scale clients draw at.
+(def hello_reply ((s int)) (list int) (append "compositor scale " (digits s)))
+
+; The desktop's scale: how many of the screen's pixels each way one of
+; its is.
+(def wm_scale ((v Wm)) int (match v ((Wm d w h desk font bg ws n ptr drag kp pp bar) (display_scale d))))
+
 (def okay ((v Wm)) (Served Wm) (served_ok v))
 (def refused ((v Wm) (why (list int))) (Served Wm) (served_error v why))
 
@@ -445,7 +477,7 @@
       (refused v "no request")
       (let op (head ws)
         (let args (tail ws)
-          (if (eq op "hello") (Served v "compositor")
+          (if (eq op "hello") (Served v (hello_reply (wm_scale v)))
           (if (eq op "windows") (Served v (window_lines v))
           (if (eq op "desktop") (drew v args)
           (if (eq op "title") (requested_title v args)
@@ -483,10 +515,15 @@
         (let ch (nth ns 1)
           (if (if (lt cw 1) true (if (lt ch 1) true (gt (outer_w cw) w)))
               (refused v "a window must fit the screen")
-              (let e (display_buffer d (content_id n) cw ch (nth ns 2) (buffer_pages cw ch))
+              (let e (display_buffer d (content_id n) (mul cw (display_scale d)) (mul ch (display_scale d)) (nth ns 2)
+                                     (content_pages cw ch (display_scale d)))
                 (if (not (is_empty e))
                     (refused v e)
                     (titled_window v from (nth ns 3) cw ch (nth ns 2) title)))))))))
+
+; The pages of a client's content, cw by ch of the desktop's pixels, at
+; scale s.
+(def content_pages ((cw int) (ch int) (s int)) int (buffer_pages (mul cw s) (mul ch s)))
 
 (def titled_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int))) (Served Wm)
   (match (watch_client v from)
@@ -506,10 +543,10 @@
 (def watched_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int))) (Served Wm)
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (match (ui_buffer (outer_w cw) (title_h))
+      (match (ui_buffer_at (outer_w cw) (title_h) (display_scale d))
         ((UiNoBuf why) (refused v why))
         ((UiBuf va pages tc)
-          (let e (display_buffer d (title_id n) (outer_w cw) (title_h) va pages)
+          (let e (give_buffer d (title_id n) tc va pages)
             (if (not (is_empty e))
                 (refused v e)
                 (framed_window v from port cw ch cva title tc va))))))))
@@ -519,10 +556,10 @@
 (def framed_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int)) (tc Canvas) (tva int)) (Served Wm)
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (match (ui_buffer (outer_w cw) (frame_h ch))
+      (match (ui_buffer_at (outer_w cw) (frame_h ch) (display_scale d))
         ((UiNoBuf why) (refused v why))
         ((UiBuf fva pages fc)
-          (let e (display_buffer d (frame_id n) (outer_w cw) (frame_h ch) fva pages)
+          (let e (give_buffer d (frame_id n) fc fva pages)
             (if (not (is_empty e))
                 (refused v e)
                 (let s1 (display_shape d (title_id n) (top_radius cw) (top_radius cw) 0 0)
@@ -563,13 +600,13 @@
 (def titles ((v Wm)) int
   (match v ((Wm d w h desk font bg ws n ptr drag kp pp bar) (let t (draw_titles d font ws true) (draw_bar v)))))
 
-(def draw_titles ((d Display) (font (array int)) (ws (list Win)) (front bool)) int
+(def draw_titles ((d Display) (font UiFace) (ws (list Win)) (front bool)) int
   (if (is_empty ws)
       0
       (let t (draw_title d font (head ws) front)
         (draw_titles d font (tail ws) false))))
 
-(def draw_title ((d Display) (font (array int)) (w Win) (front bool)) int
+(def draw_title ((d Display) (font UiFace) (w Win) (front bool)) int
   (match w
     ((Win id port pid x y cw ch top title tc cva tva fc fva app)
       (let p (ui_paint_nodes tc font (Rect 0 0 (outer_w cw) (title_h)) (title_nodes title (outer_w cw) front))
@@ -649,7 +686,7 @@
             (let f1 (display_forget d (content_id id))
               (let f2 (display_forget d (title_id id))
                 (let f3 (display_forget d (frame_id id))
-                  (let u (give_up (with_id ws id)) (okay v2))))))))))))
+                  (let u (give_up (with_id ws id) (display_scale d)) (okay v2))))))))))))
 
 ; The windows of ws with id: one, or none.
 (def with_id ((ws (list Win)) (id int)) (list Win)
@@ -657,17 +694,17 @@
 
 ; Each closed window's buffers given up, once the display has dropped
 ; them: the content's, which its client shared with wm, and the title
-; bar's and the frame's, wm's own. Each one's memory is freed once no
-; process maps it.
-(def give_up ((ws (list Win))) int
+; bar's and the frame's, wm's own, each made at scale s. Each one's memory
+; is freed once no process maps it.
+(def give_up ((ws (list Win)) (s int)) int
   (if (is_empty ws)
       0
       (match (head ws)
         ((Win id port pid x y cw ch top title tc cva tva fc fva app)
-          (let a (shm_unmap cva (buffer_pages cw ch))
-            (let b (shm_unmap tva (buffer_pages (outer_w cw) (title_h)))
-              (let c (shm_unmap fva (buffer_pages (outer_w cw) (frame_h ch)))
-                (give_up (tail ws)))))))))
+          (let a (shm_unmap cva (content_pages cw ch s))
+            (let b (shm_unmap tva (content_pages (outer_w cw) (title_h) s))
+              (let c (shm_unmap fva (content_pages (outer_w cw) (frame_h ch) s))
+                (give_up (tail ws) s))))))))
 
 ; Every window of pid, which has exited, closed.
 (def gone ((v Wm) (pid int)) Wm
@@ -718,18 +755,18 @@
         ((CmdFont) (Served v (append "font " (append (digits (glyph_w)) (append " " (digits (glyph_h)))))))
         ((CmdScroll dy c) (refused v "the desktop does not scroll"))
         ((CmdSplash percent)
-          (match (load_background (wallpaper) percent)
+          (match (load_wallpaper (display_scale d) percent)
             ((BgBad why) (refused v why))
             ((BgOk bg2) (desk_shown (Wm d w h desk font bg2 ws n ptr drag kp pp bar) (paint_background desk bg2)))))
-        ((CmdRestore x y rw rh) (desk_shown v (restore_rect desk bg (Rect x y rw rh))))
-        ((CmdChar x y code c) (desk_shown v (if (eq (array_len font) 0) desk (draw_text desk font x y c -1 (cons code (nil int))))))
-        ((CmdText x y fg bgc cs) (desk_shown v (if (eq (array_len font) 0) desk (draw_text desk font x y fg bgc cs))))
-        ((CmdLine x0 y0 x1 y1 c) (desk_shown v (plot_all desk (line_points x0 y0 x1 y1) c)))
-        ((CmdCircle cx cy r c) (desk_shown v (plot_all desk (circle_points cx cy r) c)))
-        ((CmdDisc cx cy r c) (desk_shown v (disc desk cx cy r c (neg r))))
-        ((CmdRect x y rw rh c) (desk_shown v (outline desk x y rw rh c)))
-        ((CmdFill x y rw rh c) (desk_shown v (fill_rect desk x y rw rh c)))
-        ((CmdClear c) (desk_shown v (fill_rect desk 0 0 w h c)))))))
+        ((CmdRestore x y rw rh) (desk_shown v (restore_rect desk bg (rect_scaled (Rect x y rw rh) (display_scale d)))))
+        ((CmdChar x y code c) (desk_shown v (ui_draw_text desk font x y c -1 (cons code (nil int)))))
+        ((CmdText x y fg bgc cs) (desk_shown v (ui_draw_text desk font x y fg bgc cs)))
+        ((CmdLine x0 y0 x1 y1 c) (desk_shown v (ui_draw_line desk x0 y0 x1 y1 c (display_scale d))))
+        ((CmdCircle cx cy r c) (desk_shown v (ui_draw_circle desk cx cy r c (display_scale d))))
+        ((CmdDisc cx cy r c) (desk_shown v (ui_draw_disc desk cx cy r c (display_scale d))))
+        ((CmdRect x y rw rh c) (desk_shown v (ui_draw_outline desk x y rw rh c (display_scale d))))
+        ((CmdFill x y rw rh c) (desk_shown v (ui_draw_fill desk (Rect x y rw rh) c (display_scale d))))
+        ((CmdClear c) (desk_shown v (ui_draw_fill desk (Rect 0 0 w h) c (display_scale d))))))))
 
 ; The desktop shown again, once drawn on; its canvas is a region, so the
 ; one drawn on is the one v holds.
@@ -917,10 +954,10 @@
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
       (let lh (sub h (bar_h))
-        (match (ui_buffer w lh)
+        (match (ui_buffer_at w lh (display_scale d))
           ((UiNoBuf why) (let s (wm_says (append "no launcher: " why)) v))
           ((UiBuf va pages c)
-            (let e (display_buffer d (launcher_id) w lh va pages)
+            (let e (give_buffer d (launcher_id) c va pages)
               (if (not (is_empty e))
                   (let s (wm_says (append "no launcher: " e)) v)
                   (let p (launcher_paint c font w lh (bar_apps bar))

@@ -91,10 +91,11 @@ case's `etc`, and compares. A case is a directory:
 | `status` | the kernel's exit status, if not 0 (the first `start`'s, pid 1's) |
 | `stderr` | one line standard error must contain |
 | `typed` | lines typed at the serial line by `tools/slowtype`, with pauses |
-| `font` | if present, the console font is added as `/etc/font.txt`, for `vt` |
+| `font` | if present, the console font is added as `/etc/font.txt`, for `vt`, and the face for scale 2 as `/etc/face2x` |
 | `disk` | if present, the board has a virtio-blk on a fresh `tools/mkdisk` image (`build/e2e/CASE.disk`); without it there is no disk |
 | `layout` | that disk's layout, if not mkdisk's 1 MB one: `SECTORS LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, `@` the case's own cpio; give a UUID to boot from it, since mkfs's own differ every run |
 | `bootargs` | the kernel's boot arguments, such as `root=UUID` (`l0 boot IMAGE ARGS`, or `QEMU_APPEND` with `typed`) |
+| `gpu` | the virtio-gpu's options, such as `xres=3840,yres=2160` for a 4K screen, drawn at scale 2 (`draw_4k`) |
 
 - A case with `typed` should start `uart noecho`, so the output doesn't
   depend on how the echo interleaves.
@@ -132,6 +133,12 @@ not; a check point on a button must miss its label's white ink.
 `partitions.sh` checks only the serial line, and reads
 a UUID the board makes from it to type it back, since an e2e case's
 `typed` input cannot hold what is made as it runs.
+`hidpi.sh` (`make screen-initramfs`) boots on a 4K screen,
+`QEMU_GPU=xres=3840,yres=2160`, drawn at scale 2: its screendump is
+3840×2160 with a 17-byte header, and every pin is the desktop's pixel ×2.
+It checks text is smoothed by counting the colors along a row through a
+title, and boots again with `QEMU_APPEND=scale=1`. It keeps the 2x screen
+in `build/hidpi-2x.ppm` for looking at.
 
 Their helpers, copied in each script:
 

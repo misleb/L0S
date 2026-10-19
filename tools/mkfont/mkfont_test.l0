@@ -1,0 +1,81 @@
+; mkfont_test.l0 -- tests of mkfont: icons.paths read into blocks, the
+; pointer's pixels, glyphs on their baseline, and the face it writes, read
+; back. Run from the top of the project.
+
+(def test_baseline () int
+  (add (check_int "23 rows of 32" (mkfont_baseline 32) (mul 23 256))
+       (check_int "46 of 64" (mkfont_baseline 64) (mul 46 256))))
+
+(def block_text ((b MkBlock)) (list int)
+  (match b
+    ((MkIcon name ls) (append name (append ":" (digits (length ls)))))
+    ((MkCursor ls) (append "cursor:" (digits (length ls))))))
+
+(def blocks_text ((bs (list MkBlock)) (acc (list (list int)))) (list int)
+  (if (is_empty bs) (unwords (rev acc)) (blocks_text (tail bs) (cons (block_text (head bs)) acc))))
+
+(def test_blocks () int
+  (check_str "icons and the pointer"
+    (blocks_text (mkfont_blocks (lines "; a comment\nicon a\nrect 0 0 1 1\n\nrect 1 1 1 1\nicon b\ncircle 8 8 2\ncursor\nwhite rect 0 0 1 1\n") (nil MkBlock))
+                 (nil (list int)))
+    "a:2 b:1 cursor:1"))
+
+(def test_colored () int
+  (check_strs "black lines"
+    (mkfont_colored (cons "white rect 0 0 1 1" (cons "black circle 1 1 1" (nil (list int)))) "black " (nil (list int)))
+    (cons "circle 1 1 1" (nil (list int)))))
+
+; Black over white: opaque black; white alone: opaque white; neither:
+; clear; half white: half alpha, still white.
+(def test_pixel () int
+  (add (check_str "black" (hex_digits (mkfont_pixel 15 15) 8) "ff000000")
+       (add (check_str "white" (hex_digits (mkfont_pixel 15 0) 8) "ffffffff")
+            (add (check_str "clear" (hex_digits (mkfont_pixel 0 0) 8) "00000000")
+                 (check_str "half white" (hex_digits (mkfont_pixel 8 0) 8) "88ffffff")))))
+
+(def regular () Ttf
+  (match (mkfont_font "fonts/SourceCodePro-Regular.ttf")
+    ((Ok f) f)
+    ((Err why) (Ttf (bytes_from_list "") 0 false 0 0 0 0 0 0))))
+
+(def levels_sum ((c UiCov) (code int) (x int) (y int) (w int) (h int) (acc int)) int
+  (if (ge y h)
+      acc
+      (if (ge x w)
+          (levels_sum c code 0 (add y 1) w h acc)
+          (levels_sum c code (add x 1) y w h (add acc (ui_glyph_level c code x y))))))
+
+(def partial_count ((c UiCov) (code int) (x int) (y int) (w int) (h int) (acc int)) int
+  (if (ge y h)
+      acc
+      (if (ge x w)
+          (partial_count c code 0 (add y 1) w h acc)
+          (let l (ui_glyph_level c code x y)
+            (partial_count c code (add x 1) y w h (if (if (gt l 0) (lt l 15) false) (add acc 1) acc))))))
+
+(def table_of ((t UiNamedCov)) UiCov (match t ((UiNamedCov name c) c)))
+
+; A space covers nothing; an A covers something, its edges in part, so
+; it is drawn smooth.
+(def test_glyphs () int
+  (let c (table_of (mkfont_glyphs (regular) false 32))
+    (add (check_int "space" (levels_sum c 32 0 0 16 32 0) 0)
+         (check_true "A, smoothed" (gt (partial_count c 65 0 0 16 32 0) 10)))))
+
+; Nothing of a capital stands below the baseline, row 23, nor above
+; row 2: it sits in the cell where the bitmap font's would.
+(def test_capital_in_cell () int
+  (let c (table_of (mkfont_glyphs (regular) false 32))
+    (add (check_int "below the baseline" (levels_sum_rows c 72 24 32) 0)
+         (check_int "at the top" (levels_sum_rows c 72 0 2) 0))))
+
+(def levels_sum_rows ((c UiCov) (code int) (y0 int) (y1 int)) int
+  (sub (levels_sum c code 0 y0 16 y1 0) 0))
+
+; The face written and read back has every table, and the same levels.
+(def test_face_round_trip () int
+  (let t (mkfont_glyphs (regular) true 32)
+    (let m (ui_face_tables (ui_face_file (cons t (nil UiNamedCov))))
+      (match (map_get m "glyph.bold.32")
+        ((None) (fail_because "table" "not read back"))
+        ((Some c) (check_int "A's levels" (levels_sum c 65 0 0 16 32 0) (levels_sum (table_of t) 65 0 0 16 32 0)))))))

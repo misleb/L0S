@@ -242,3 +242,30 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   screen.
 - **The 64-region limit** (`l0s-dev`): `wm` opens two regions a window,
   and keeps four of its own: desktop, pointer, top bar, launcher.
+- **No GPU drawing.** The installed QEMU has no virgl; the host only
+  composes. Every pixel is the guest's.
+
+## Scale (`face.l0`, the README's "A large screen")
+
+On a screen of 2560×1440 or more (or boot argument `scale=2`), `info`
+says scale 2. Layout is in the desktop's pixels, half the screen's each
+way; buffers and painting are in the screen's.
+
+- **Logical everywhere above the canvas**: theme sizes, `UiNode`s, hit
+  tests, `wm`'s geometry, the wm protocol's sizes, damage, top rows and
+  pointer, `draw`'s coordinates. Never multiply by the scale in a layout.
+- **Where the scale is applied**: `ui_paint` (ops and clip ×s, rounds at
+  radius ×s, text and icons from the face); `ui_buffer_at w h s`; `display.l0`
+  (places, rectangles, top rows, radii and moves ×s; a buffer's W H are its
+  own pixels); `draw_cmd.l0`'s `ui_draw_*` (render.l0's shapes, s thick);
+  `vt` (cells ×s, `top` ÷ s for the protocol); the launcher's `icon2x.ppm`.
+- **The face**, a `UiFace`: scale, the 1x bitmap font, and at 2 the
+  tables of `/etc/face2x` (coverage 0–15, 16 levels a word):
+  `glyph.regular.32`, `glyph.bold.32`, `.64` for text scale 2, `icon.NAME.N`
+  for N = 32, 64, 96, 128, and `cursor`. A pixel is mixed with what is under
+  it by its level (`ui_cov_put`); a missing table falls back to the bitmap
+  doubled. Host tests make one with `ui_face_1x` or `(UiFace 2 font map)`.
+- **Bold at 2** is the bold face, not a double strike; widths are still the
+  logical `ui_text_w`.
+- **A new icon** needs its 16×16 art in `icons.l0` and its shapes in
+  `fonts/icons.paths` (`tools/mkfont/shape.l0`'s language).

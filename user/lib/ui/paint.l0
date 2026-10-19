@@ -9,6 +9,12 @@
 ; mixed by hand with what is under it: a color the op is given, or, if it
 ; is given -1, the pixel already there. Like render.l0's drawing, each
 ; painting function returns the canvas painted on.
+;
+; Ops and clips are in the desktop's pixels, and the canvas in the
+; screen's: at the face's scale 2 (face.l0) each op is painted twice as
+; large, its corners rounded at twice the radius, and its text and icons
+; drawn from the face's coverage, mixed with what is under them, so they
+; are smooth, not doubled.
 
 ; ----------------------------------------------------------------- the ops
 
@@ -71,22 +77,25 @@
 
 ; ---------------------------------------------------------------- painting
 
-; Does ops on canvas c, each cut to clip, and to the canvas.
-(def ui_paint ((c Canvas) (font (array int)) (clip Rect) (ops (list UiPaint))) Canvas
-  (let k (rect_clip clip (Rect 0 0 (canvas_w c) (canvas_h c)))
-    (if (rect_empty k) c (ui_paint_ops c font k ops))))
+; Does ops on canvas c, each cut to clip, and to the canvas, at the
+; face's scale.
+(def ui_paint ((c Canvas) (face UiFace) (clip Rect) (ops (list UiPaint))) Canvas
+  (let k (rect_clip (rect_scaled clip (ui_face_scale face)) (Rect 0 0 (canvas_w c) (canvas_h c)))
+    (if (rect_empty k) c (ui_paint_ops c face k ops))))
 
-(def ui_paint_ops ((c Canvas) (font (array int)) (k Rect) (ops (list UiPaint))) Canvas
+(def ui_paint_ops ((c Canvas) (face UiFace) (k Rect) (ops (list UiPaint))) Canvas
   (if (is_empty ops)
       c
-      (ui_paint_ops (ui_paint_op c font k (head ops)) font k (tail ops))))
+      (ui_paint_ops (ui_paint_op c face k (head ops)) face k (tail ops))))
 
-(def ui_paint_op ((c Canvas) (font (array int)) (k Rect) (op UiPaint)) Canvas
-  (match op
-    ((UiPFill r color) (ui_fill c k r color))
-    ((UiPRound r radius color under) (ui_round c k r (ui_fit_radius radius (rect_w r) (rect_h r)) color under))
-    ((UiPText r s a color bold scale) (ui_text c font k r s a color bold scale))
-    ((UiPIcon x y name color scale) (ui_icon c k x y (ui_icon_rows name) color scale 0))))
+(def ui_paint_op ((c Canvas) (face UiFace) (k Rect) (op UiPaint)) Canvas
+  (let s (ui_face_scale face)
+    (match op
+      ((UiPFill r color) (ui_fill c k (rect_scaled r s) color))
+      ((UiPRound r radius color under)
+        (ui_round c k (rect_scaled r s) (mul s (ui_fit_radius radius (rect_w r) (rect_h r))) color under))
+      ((UiPText r t a color bold scale) (ui_text_at c face k r t a color bold scale))
+      ((UiPIcon x y name color scale) (ui_icon_at c face k x y name color scale)))))
 
 ; r filled, as much of it as is in k.
 (def ui_fill ((c Canvas) (k Rect) (r Rect) (color int)) Canvas
@@ -140,6 +149,69 @@
                       (let l (ui_blend s k (add x full) (add y dy) color pct under)
                         (ui_blend l k (sub (add x w) (add full 1)) (add y dy) color pct under))))))))))))
 
+; Text in r at the face's scale: at 1 the bitmap font's; at 2 the face's
+; glyphs, the same cells twice the size, or, if it has none, the bitmap's
+; doubled.
+(def ui_text_at ((c Canvas) (face UiFace) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (bold bool) (scale int)) Canvas
+  (let s (ui_face_scale face)
+    (if (eq s 1)
+        (ui_text c (ui_face_font face) k r t a color bold scale)
+        (match (ui_face_table face (ui_glyph_table bold (mul (mul (ui_char_h) scale) s)))
+          ((Some g) (ui_text_smooth c g k r t a color bold scale s))
+          ((None) (ui_text c (ui_face_font face) k (rect_scaled r s) t a color bold (mul scale s)))))))
+
+; Text placed as ui_text places it, in the desktop's pixels, then drawn
+; from glyphs g at scale s, bold from the bold face's glyphs.
+(def ui_text_smooth ((c Canvas) (g UiCov) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (bold bool) (scale int) (s int)) Canvas
+  (let shown (ui_ellipsized t (sub (rect_w r) (if bold 1 0)) scale)
+    (let x (ui_aligned (rect_x r) (rect_w r) (ui_text_w shown bold scale) a)
+      (let y (add (rect_y r) (div (sub (rect_h r) (mul (ui_char_h) scale)) 2))
+        (ui_cov_chars c g k (mul x s) (mul y s) shown color (mul (mul (ui_char_w) scale) s))))))
+
+(def ui_cov_chars ((c Canvas) (g UiCov) (k Rect) (x int) (y int) (t (list int)) (color int) (cw int)) Canvas
+  (if (is_empty t)
+      c
+      (match g
+        ((UiCov w h words)
+          (ui_cov_chars (ui_cov_blit c k g x y (mul (sub (drawable (head t)) (first_glyph)) h) h color) g k (add x cw) y (tail t) color cw)))))
+
+; Rows row0 on, n of them, of a table of coverage, its top left at x, y:
+; each pixel the color, mixed with what is under it by how much is
+; covered; what is not covered at all left as it is.
+(def ui_cov_blit ((c Canvas) (k Rect) (cov UiCov) (x int) (y int) (row0 int) (n int) (color int)) Canvas
+  (ui_cov_rows c k cov x y row0 0 n color))
+
+(def ui_cov_rows ((c Canvas) (k Rect) (cov UiCov) (x int) (y int) (row0 int) (r int) (n int) (color int)) Canvas
+  (if (ge r n)
+      c
+      (if (if (lt (add y r) (rect_y k)) true (ge (add y r) (rect_y1 k)))
+          (ui_cov_rows c k cov x y row0 (add r 1) n color)
+          (ui_cov_rows (ui_cov_words c k cov x (add y r) (add row0 r) 0 color) k cov x y row0 (add r 1) n color))))
+
+(def ui_cov_words ((c Canvas) (k Rect) (cov UiCov) (x int) (y int) (row int) (j int) (color int)) Canvas
+  (match cov
+    ((UiCov w h words)
+      (let wpr (ui_cov_wpr w)
+        (if (ge j wpr)
+            c
+            (let word (array_get words (add (mul row wpr) j))
+              (ui_cov_words (if (eq word 0) c (ui_cov_word c k word (add x (mul j 16)) y (min 16 (sub w (mul j 16))) 0 color))
+                            k cov x y row (add j 1) color)))))))
+
+; The n levels of a word from column x, the first its highest four bits.
+(def ui_cov_word ((c Canvas) (k Rect) (word int) (x int) (y int) (n int) (i int) (color int)) Canvas
+  (if (ge i n)
+      c
+      (let l (bit_and (bit_shr word (mul 4 (sub 15 i))) 15)
+        (ui_cov_word (ui_cov_put c k (add x i) y l color) k word x y n (add i 1) color))))
+
+(def ui_cov_put ((c Canvas) (k Rect) (x int) (y int) (l int) (color int)) Canvas
+  (if (eq l 0)
+      c
+      (if (eq l 15)
+          (ui_put c k x y color)
+          (ui_blend c k x y color (div (add (mul l 100) 7) 15) -1))))
+
 ; Text in r, along it as a says, in its middle up and down: cut short
 ; with "..." if it is too wide. Bold is struck twice, a pixel apart.
 (def ui_text ((c Canvas) (font (array int)) (k Rect) (r Rect) (s (list int)) (a UiAlign) (color int) (bold bool) (scale int)) Canvas
@@ -174,6 +246,15 @@
 (def ui_dot ((c Canvas) (k Rect) (x int) (y int) (color int) (scale int)) Canvas
   (if (eq scale 1) (ui_put c k x y color) (ui_fill c k (Rect x y scale scale) color)))
 
+; Icon name at x, y of the desktop's pixels, at the face's scale: at 2,
+; the face's icon of its size, or, if it has none, the bitmap doubled.
+(def ui_icon_at ((c Canvas) (face UiFace) (k Rect) (x int) (y int) (name (list int)) (color int) (scale int)) Canvas
+  (let s (ui_face_scale face)
+    (let n (mul (mul (ui_icon_size) scale) s)
+      (match (if (eq s 1) ((None UiCov)) (ui_face_table face (ui_icon_table name n)))
+        ((Some cov) (ui_cov_blit c k cov (mul x s) (mul y s) 0 n color))
+        ((None) (ui_icon c k (mul x s) (mul y s) (ui_icon_rows name) color (mul scale s) 0))))))
+
 (def ui_icon ((c Canvas) (k Rect) (x int) (y int) (rows (list int)) (color int) (scale int) (r int)) Canvas
   (if (is_empty rows)
       c
@@ -192,6 +273,15 @@
       ((NoShmRegion why) (UiNoBuf why))
       ((ShmRegion va r) (UiBuf va n (Canvas r w h 0))))))
 
+; A buffer w by h of the desktop's pixels at scale s: s times as wide and
+; high in the screen's.
+(def ui_buffer_at ((w int) (h int) (s int)) UiBuf (ui_buffer (mul w s) (mul h s)))
+
+; A canvas's width and height in the desktop's pixels: its own over the
+; face's scale.
+(def ui_logical_w ((cv Canvas) (face UiFace)) int (div (canvas_w cv) (ui_face_scale face)))
+(def ui_logical_h ((cv Canvas) (face UiFace)) int (div (canvas_h cv) (ui_face_scale face)))
+
 ; ------------------------------------------------------------------ cursor
 
 ; Adwaita's pointer: a black arrow edged white, its hot spot its tip, at
@@ -205,6 +295,21 @@
 ; The arrow drawn into c, a cursor's 64 by 64 buffer of b, g, r, alpha:
 ; what it does not cover stays as it was, clear.
 (def ui_paint_arrow ((c Canvas)) Canvas (ui_arrow_rows c (ui_arrow_art) 0))
+
+; The arrow at the face's scale: at 2, the face's pointer, twice the size
+; and its edges smooth, each pixel's alpha what it covers; else the 1x
+; arrow.
+(def ui_paint_cursor ((c Canvas) (face UiFace)) Canvas
+  (match (if (lt (ui_face_scale face) 2) ((None UiCov)) (ui_face_table face "cursor"))
+    ((None) (ui_paint_arrow c))
+    ((Some cov) (match cov ((UiCov w h words) (ui_cursor_px c words (min w (canvas_w c)) (min h (canvas_h c)) w 0))))))
+
+(def ui_cursor_px ((c Canvas) (words (array int)) (w int) (h int) (stride int) (i int)) Canvas
+  (if (ge i (mul w h))
+      c
+      (let x (mod i w)
+        (let y (div i w)
+          (ui_cursor_px (put c x y (array_get words (add (mul y stride) x))) words w h stride (add i 1))))))
 
 (def ui_arrow_rows ((c Canvas) (rows (list (list int))) (y int)) Canvas
   (if (is_empty rows)

@@ -21,6 +21,7 @@ messages.
 ```bash
 make demo                                 # boot to the shell on this terminal, and type at it
 make demo-system                          # the same, from build/system.img's System volume, a copy of it
+make demo SCREEN=3840x2160                # on a 4K screen, the desktop drawn at scale 2
 make all                                  # type check, host tests, board tests, end-to-end
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
 make -s doc Q=port_send                   # the libraries' documentation, as l0 doc gives the standard library's
@@ -102,13 +103,18 @@ How the display, the compositor and its clients fit together is under
 The text font is [fonts/l0s-8x16.txt](fonts/l0s-8x16.txt), drawn for
 L0S: printable ASCII, 8×16, one glyph per `@ CODE` line and 16 rows of
 `#` and `.`, so it can be read and edited as text. The initramfs carries
-it as `/etc/font.txt`.
+it as `/etc/font.txt`. On a large screen, drawn at scale 2 (see
+[A large screen](#a-large-screen)), text is Source Code Pro instead,
+[fonts/SourceCodePro-Regular.ttf](fonts/SourceCodePro-Regular.ttf) and
+its bold, rasterized with smooth edges into `/etc/face2x` as the build
+makes it.
 
 The wallpaper is the splash, drawn by
 [tools/mksplash](tools/mksplash/mksplash.l0) into `build/splash.ppm`, at
-70% of its brightness, so that what is drawn over it reads.
+70% of its brightness, so that what is drawn over it reads; at scale 2,
+`build/splash2x.ppm`, the same drawn twice the size.
 `make demo SPLASH=picture.ppm` shows any other binary PPM (P6, maxval 255)
-instead, centered and cut to fit the 1280×800 screen, on the color of its
+instead, centered and cut to fit the screen, on the color of its
 top-left pixel.
 
 The window is macOS's (`cocoa`). `QEMU_DISPLAY=gtk` or `sdl` picks
@@ -446,7 +452,7 @@ pixels, and draw the pointer as a top layer.
 
 | Request | Does |
 |---|---|
-| `info` | `display W H cursor`: the screen's size, and `cursor` if the driver moves a pointer itself |
+| `info` | `display W H cursor scale S`: the screen's size in its own pixels, `cursor` if the driver moves a pointer itself, and the desktop's scale, 1 or 2 (none means 1) |
 | `buffer ID W H VA` | a buffer of W×H 4-byte pixels (b, g, r, and unused, or alpha for a cursor), at VA in the driver, shared there with `shm_share` |
 | `forget ID` | the buffer dropped, and the driver's mapping of it given up with `shm_unmap`; refused while it is on the screen or is the pointer's |
 | `layers ID X Y TOP ...` | the screen, bottom first: each buffer at X, Y, its rows read from row TOP on, as a ring. The bottom layer covers the screen. Only the bands of rows whose pixels changed are transferred and flushed; the first `layers` shows the whole screen |
@@ -455,14 +461,17 @@ pixels, and draw the pointer as a top layer.
 | `cursor ID HX HY` | the pointer's image, a 64×64 buffer, and its hot spot |
 | `move X Y` | the pointer's hot spot at X, Y |
 
-The reply is `ok`, `display W H cursor` for `info`, or `error: WHY`.
+The reply is `ok`, `display W H cursor scale S` for `info`, or
+`error: WHY`. The driver counts the screen's own pixels; once `info` has
+said the scale, the client side, `display.l0`, counts the desktop's, and
+makes every place, rectangle, top row and radius the screen's on the way.
 
 **The compositor protocol** ([user/lib/proto/wm.l0](user/lib/proto/wm.l0)) is what
 `wm` serves, as `compositor`, to its clients:
 
 | Request | Does |
 |---|---|
-| `hello` | `compositor`, so the client learns `wm`'s pid, to share with |
+| `hello` | `compositor scale S`, so the client learns `wm`'s pid, to share with, and the scale to make its buffer at: S times W×H. Every other number, a window's size, place and damage, its top row, and the pointer, is the desktop's pixels |
 | `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT. The reply is `window ID` |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
 | `top ID T` | the window's rows read from its buffer's row T on, as a ring: how a client scrolls |
@@ -583,6 +592,46 @@ so that the guest copies no pixels at all:
 
 So `vt` scrolls by changing its window's `top`, with no copying anywhere,
 and draws only the new row.
+
+### A large screen
+
+On a screen of 2560×1440 or more, such as `make demo SCREEN=3840x2160`
+(the virtio-gpu's `xres` and `yres`), the desktop is drawn at scale 2, as
+GNOME's scale factor does: laid out in pixels of its own, half the
+screen's each way, so a 4K screen is a desktop of 1920×1080, and drawn
+at the screen's own resolution, each of its pixels 2×2 of the screen's.
+Nothing is doubled: text is Source Code Pro, icons and the pointer are
+outlines, and corners are rounded at twice the radius, all with smooth
+edges. The boot argument `scale=1` or `scale=2` chooses instead.
+
+- **`virtio-gpu`** takes the screen at the mode the device offers and says
+  the scale in `info`; it knows nothing else of it.
+- **`wm`** lays everything out in the desktop's pixels: windows, the top
+  bar, the launcher, the pointer, `draw`'s shapes and the protocol's
+  numbers. Its buffers, and its clients', are twice as wide and high.
+  `display.l0` makes its places the screen's on the way to the driver.
+- **The toolkit** paints its ops twice the size (`paint.l0`). Text, icons
+  and the pointer come from the face, `/etc/face2x`
+  ([user/lib/ui/face.l0](user/lib/ui/face.l0)): coverage, how much of each
+  pixel a shape covers, 0 to 15. Each pixel is mixed with what is under
+  it by that much, since layers do not blend.
+- **[tools/mkfont](tools/mkfont/mkfont.l0)** makes the face at build time.
+  It reads Source Code Pro's TrueType outlines (`ttf.l0`), and the
+  icons' and pointer's in [fonts/icons.paths](fonts/icons.paths)
+  (`shape.l0`). It rasterizes them in integers alone (`raster.l0`): 16
+  samples a pixel row, each crossing exact to 1/256 of a pixel, by the
+  nonzero rule. Glyphs come out 16×32 for text, 32×64 for large text, in
+  regular and bold; icons at 32, 64, 96 and 128.
+- **`vt`**'s cells are still 8×16 of the desktop's pixels; it scrolls by
+  32 of its buffer's rows.
+- **The launcher** shows each app's `icon2x.ppm`, which `tools/mkicon`
+  draws at 96×96 from the same `icon.draw`.
+
+The GPU composes the screen as it does at scale 1, from the buffers
+where they are. It does not draw: the installed QEMU has no virgl, so
+the guest's CPU paints every pixel. A 4K screen's backing is more runs
+than a 1280×800 one's, so the 64-entry control queue has less to spare
+(see [Limits](#limits)).
 
 ### The disk
 
@@ -872,8 +921,10 @@ its program's, `user/apps/vt/Terminal.app`, holding the manifest and
 launcher's ground, into the 48×48 PPM, with the desktop's own drawing on
 a canvas over an array: a rounded square and a symbolic
 icon at twice its size (`round 0 0 48 48 10 dark_3`,
-`icon 8 8 utilities-terminal 2 white`). Making an app is making that
-directory; the Makefile finds it, and the launcher finds the bundle.
+`icon 8 8 utilities-terminal 2 white`). It draws the same again at scale
+2, `icon2x.ppm`, 96×96, its icon from the face, for a large screen.
+Making an app is making that directory; the Makefile finds it, and the
+launcher finds the bundle.
 
 The kernel keeps the whole archive in memory, parses its entries
 ([common/initramfs.l0](common/initramfs.l0)), and reads `/etc/inittab`
@@ -1172,15 +1223,15 @@ otherwise as its type's first failure.
 | 271 | `proc_watch pid port` | `Watch`: `Watched`, `WatchNoProc`, `WatchFull` | 0, and the kernel sends `exit_notice pid status` to the caller's port when pid exits, or at once if it has. -1 if there is no such pid, or the port is not the caller's; -3 if 32 ports watch pid already. `exit_of` reads the notice |
 | 272 | `spawn_entry_with e args` | `Spawn` | as `spawn_entry`, but the process gets args (sent as `encode_args` writes them) in place of the inittab's; -5 if they are not well formed, -4 over 4096 bytes |
 | 273 | `proc_info pid`, `proc_path pid` | `(Option ProcInfo)`, `(list int)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, -1 for one started from an image, and a detail (the port or pid it waits on, or an exited process's status); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). After the record's 16 bytes, as many as there is room for, the program's path, its entry's or its image's, which `proc_path` reads. To list every process, ask `proc_slot` for each slot's pid |
-| 274 | `dma_alloc n` | `DmaAlloc`: `DmaPages`, `DmaDenied`, `DmaTooMany`, `DmaNoRoom` | the address of n zeroed pages a device can reach, at the caller's next device pages; -6 no `dev` line, -4 n below 1 or over 4096, -5 out of frames or device pages. They last until the system stops |
+| 274 | `dma_alloc n` | `DmaAlloc`: `DmaPages`, `DmaDenied`, `DmaTooMany`, `DmaNoRoom` | the address of n zeroed pages a device can reach, at the caller's next device pages; -6 no `dev` line, -4 n below 1 or over 16384 (64 MB, a 4K screen's buffer), -5 out of frames or device pages. They last until the system stops |
 | 275 | `dma_address va` | `DmaWhere`: `DmaAddress`, `DmaAddressDenied`, `NotDma` | where a device reaches the caller's DMA page holding va, page aligned; -1 if no DMA page holds va, -6 no `dev` line |
 | 276 | `tty_set port` | `TtyChange`: `TtySet`, `TtyNoPort` | 0, making port, a terminal, the caller's standard input, output and error, and those of every process it starts from then on; 0 gives back the kernel's own; -1 if there is no such port |
 | 277 | `tty_get` | `Terminal`: `Terminal`, `KernelTerminal` | the caller's terminal's port, or 0 for the kernel's own |
-| 278 | `shm_alloc n` | `ShmAlloc`: `ShmPages`, `ShmNoRoom`, `ShmTooMany` | the address of n zeroed pages to share, at the caller's next device pages, for any process; -4 n below 1 or over 4096, -5 out of frames or device pages. They are freed once every process that maps them has ended, unless one of those drives devices |
-| 279 | `shm_share va n pid` | `ShmShare`: `ShmShared`, `ShmShareNoProc`, `ShmShareTooMany`, `ShmShareFailed` | where pid sees the caller's n shared or DMA pages from va, now mapped into pid's next device pages too, the same frames; -1 no such pid, -4 n below 1 or over 4096, -5 pages that are not the caller's, or pid out of device pages |
+| 278 | `shm_alloc n` | `ShmAlloc`: `ShmPages`, `ShmNoRoom`, `ShmTooMany` | the address of n zeroed pages to share, at the caller's next device pages, for any process; -4 n below 1 or over 16384 (64 MB, a 4K screen's buffer), -5 out of frames or device pages. They are freed once every process that maps them has ended, unless one of those drives devices |
+| 279 | `shm_share va n pid` | `ShmShare`: `ShmShared`, `ShmShareNoProc`, `ShmShareTooMany`, `ShmShareFailed` | where pid sees the caller's n shared or DMA pages from va, now mapped into pid's next device pages too, the same frames; -1 no such pid, -4 n below 1 or over 16384 (64 MB, a 4K screen's buffer), -5 pages that are not the caller's, or pid out of device pages |
 | 280 | `proc_slot i` | `Slot`: `SlotHeld`, `SlotUnused`, `NoSlot` | the pid slot i of the process table holds, live or exited, or last held; 0 if it has held none; -1 for no slot i, outside 1 to 255 |
-| 281 | `shm_unmap va n` | `ShmUnmap`: `ShmUnmapped`, `ShmUnmapNotYours`, `ShmUnmapTooMany` | 0, the caller's n shared or DMA pages from va unmapped, each frame freed once no process maps it; -4 n below 1 or over 4096, -5 pages that are not the caller's, when none is unmapped |
-| 282 | `shm_revoke va n pid` | `ShmRevoke`: `ShmRevoked`, `ShmRevokeNoProc`, `ShmRevokeDenied`, `ShmRevokeTooMany`, `ShmRevokeNotYours` | how many mappings pid had of the caller's n shared or DMA pages from va, all now unmapped; -1 no such pid, -6 pid is the caller or drives devices, -4 n below 1 or over 4096, -5 pages that are not the caller's |
+| 281 | `shm_unmap va n` | `ShmUnmap`: `ShmUnmapped`, `ShmUnmapNotYours`, `ShmUnmapTooMany` | 0, the caller's n shared or DMA pages from va unmapped, each frame freed once no process maps it; -4 n below 1 or over 16384 (64 MB, a 4K screen's buffer), -5 pages that are not the caller's, when none is unmapped |
+| 282 | `shm_revoke va n pid` | `ShmRevoke`: `ShmRevoked`, `ShmRevokeNoProc`, `ShmRevokeDenied`, `ShmRevokeTooMany`, `ShmRevokeNotYours` | how many mappings pid had of the caller's n shared or DMA pages from va, all now unmapped; -1 no such pid, -6 pid is the caller or drives devices, -4 n below 1 or over 16384 (64 MB, a 4K screen's buffer), -5 pages that are not the caller's |
 | 283 | `fs_mount label uuid port` | `Mounting`: `Mounted`, `MountNoPort`, `MountTaken`, `MountBadLabel` | 0, the caller's volume label, of the partition whose UUID that is, as text, or none, mounted at `/Volumes/LABEL` from port, whose server is sent every call on a file there (see [Volumes](#volumes)) until the port goes; -1 not the caller's port, -2 the label is mounted already, -5 no label (1 to 15 letters, digits, `-`, `_`) or a UUID that is none |
 | 284 | `mount_at i`, `mount_list` | `(Option MountInfo)` | mount i of the table, from 0, `/`: where it is, the port of its server, 0 for the kernel's own, and its partition's UUID, empty for none; none past the last. `mount_list` gives them all, and `fs_system_volume` the system volume's `/Volumes/LABEL` |
 | 285 | `boot_args` | `(list (list int))` | the board's boot arguments, QEMU's `-append`, split at spaces; none under another operating system |
@@ -1224,7 +1275,7 @@ directory is part of it.
 | `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df` and `format`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
-| `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font, in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
+| `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font (at scale 2, cells of 16×32 in the face's Source Code Pro), in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
 | `cat` | writes the files its arguments name, through the ordinary `open_in`, the initramfs's or a volume's; reports each it can't read, and exits 1 if any |
 | `hello` | prints its pid and arguments, and answers a line: typed at its terminal, with `console_line` |
 | `init` | starts the programs its arguments name, from `/` wherever it is (`NAME&` runs one in the background), waits for the rest, and reports each one's status |
@@ -1233,12 +1284,12 @@ directory is part of it.
 | `spin` | loops forever without a call; other processes still run, thanks to the timer |
 | `nap` | sleeps for N ms and checks that the time passed |
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
-| `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, and builds its backing from the layers' buffers, so the host composes the screen. It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts |
+| `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
 | `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
-| `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. It needs no `dev` line |
+| `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. At scale 2 it lays the desktop out at half the screen's size each way and draws it at the screen's resolution. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
@@ -1267,8 +1318,8 @@ name in a library is taken in every program that links it.
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
 | [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk` |
-| [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it; its rectangles are `rect.l0`'s | `wm` |
-| [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
+| [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
+| [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
@@ -1278,9 +1329,9 @@ name in a library is taken in every program that links it.
 | [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
-| [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
+| [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, its place at a scale (`rect_scaled`), and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
 | [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `tools/mkicon` |
-| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, painting, widgets, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
+| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, the face it draws text, icons and the pointer with at scale 2 (`face.l0`), painting at either scale, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
 
 ## Tests
 
@@ -1288,7 +1339,7 @@ name in a library is taken in every program that links it.
 |---|---|
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -1302,7 +1353,8 @@ Each case of `tests/e2e/` is a directory:
 - `layout`, that disk's, if not mkdisk's own: SECTORS, then each volume
   as mkfs takes it, `LABEL:START:COUNT[:ARCHIVE[:UUID]]`, `@` the case's
   own initramfs, to fill a volume with;
-- `bootargs`, the kernel's boot arguments, such as `root=UUID`.
+- `bootargs`, the kernel's boot arguments, such as `root=UUID`;
+- `gpu`, the virtio-gpu's options, such as `xres=3840,yres=2160`.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
 `etc`, boots it, and compares. Sixteen cases type a session through
@@ -1317,7 +1369,9 @@ Ctrl-C as a person would:
   the foreground and the background, and `cat`s a file;
 - `draw` sends the compositor, over the display driver, a line, `size`,
   an unknown command, a bad color, and nothing. `draw`'s complaints, on
-  its standard error, are on the shell's terminal, the serial line;
+  its standard error, are on the shell's terminal, the serial line; and
+  `draw_4k` the same on a 4K screen, whose `size` is the desktop's at
+  scale 2, 1920×1080;
 - `virtio-gpu` starts the display driver, the input drivers, `wm`, and
   one `vt`, and checks with `run windows` that its window opened where
   the first one goes, in front;
@@ -1377,11 +1431,24 @@ step, all of them from the compositor's desktop buffer, composed by the
 host:
 - the wallpaper: the corner, its ground color, and a pixel of the L of
   "L0S", where centering on a 1280×800 screen puts it, both at 70%;
-- after typing `run draw line 0 0 1279 799 red`, both of the line's ends;
+- after typing `run draw line 0 32 1279 799 red`, both of the line's ends;
 - after typing `run draw circle 640 400 300 cyan`, its left and right
   edges.
 
 [tests/keyboard.sh](tests/keyboard.sh) boots the same way, types
+[tests/hidpi.sh](tests/hidpi.sh) boots the same on a 4K virtio-gpu,
+3840×2160, and by screendump checks:
+- the screen is the mode's size, and the top bar is 64 rows, twice its 32;
+- `run draw size` says 1920x1080, the desktop's;
+- `run draw line 0 32 1919 1079 red` ends in dots of 2×2;
+- after `run widgets &`, the gallery's bold title is smooth: a row through
+  it has more colors than its ground and its text;
+- after `run Terminal &`, `vt1`'s text, which `vt` draws itself, is smooth
+  the same way;
+- booted again with `scale=1`, the same screen has a bar of 32 rows.
+
+It keeps the screen at scale 2 in `build/hidpi-2x.ppm`, to look at.
+
 `run keys` at the serial line, then presses `h`, `i`, Shift-1, Space,
 Shift-A and Enter on the virtio keyboard with the monitor's `sendkey`, as
 typing in the window would. It checks that the serial line shows `hi! A`,
@@ -1503,7 +1570,18 @@ a bad buffer, and wait on nothing.
 - A device page given up returns to the process's pool of device pages
   only if it was the last given; otherwise its address is not used again,
   and a process that gives up pages out of order can run out of its 384
-  MB of them though its memory is freed.
+  MB of them though its memory is freed. At scale 2 every window's
+  buffers are four times as many pages, so `virtio-gpu`, which maps them
+  all, gets there four times as soon.
+- **A screen's backing is at most 15,870 runs**, what the virtio-gpu's
+  control queue of 64 entries can carry in one request. A 4K desktop
+  whose pages are all apart, with a 1280×800 window over it, at scale 2,
+  takes 10,500; more windows over pages apart could reach the limit, and
+  the driver then says the screen is in too many pieces. Pages given
+  together usually lie together, and their runs join.
+- **Nothing is drawn by the GPU.** The installed QEMU has no virgl, so
+  the host composes the layers and every pixel in them is painted by the
+  guest's CPU, at scale 2 four times as many.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
 - **The initramfs is read-only.** Nothing in it can be written, renamed
