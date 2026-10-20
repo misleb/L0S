@@ -618,8 +618,9 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
 - **[tools/mkfont](tools/mkfont/mkfont.l0)** makes the face at build time.
   It reads Source Code Pro's TrueType outlines (`ttf.l0`), and the
   icons' and pointer's in [fonts/icons.paths](fonts/icons.paths)
-  (`shape.l0`). It rasterizes them in integers alone (`raster.l0`): 16
-  samples a pixel row, each crossing exact to 1/256 of a pixel, by the
+  (`shape.l0`). It rasterizes them (`raster.l0`), curves, arcs and
+  strokes worked out in `float`s and rounded to nearest: 16
+  samples a pixel row, each crossing to 1/256 of a pixel, by the
   nonzero rule. Glyphs come out 16×32 for text, 32×64 for large text, in
   regular and bold; icons at 32, 64, 96 and 128.
 - **`vt`**'s cells are still 8×16 of the desktop's pixels; it scrolls by

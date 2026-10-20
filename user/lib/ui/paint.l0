@@ -54,26 +54,61 @@
 
 ; --------------------------------------------------------------- corners
 
-; How far into a rounded rectangle's row its edge is, in sixteenths of a
-; pixel: dy rows from its top or bottom, of a corner of radius r. The
-; circle is measured at the row's middle, so a radius of 12 cuts 12 rows.
-(def ui_corner_inset16 ((r int) (dy int)) int
-  (if (ge dy r)
+; How far into a corner's row y, measured from the rectangle's edge, the
+; corner of radius r is: y is in pixels from the top of the corner, so the
+; circle centred r, r is r - sqrt(r² - (r - y)²) in.
+(def ui_edge ((r int) (y float)) float
+  (let d (float_sub (float_of r) y)
+    (let q (float_sub (float_mul (float_of r) (float_of r)) (float_mul d d))
+      (float_sub (float_of r) (float_sqrt (if (float_lt q 0.0) 0.0 q))))))
+
+; The edge at the middle of each of a row's 16 sub-rows, from s, set into
+; acc: row dy of a corner of radius r.
+(def ui_edges ((r int) (dy int) (s int) (acc (array float))) (array float)
+  (if (ge s 16)
+      acc
+      (let y (float_add (float_of dy) (float_div (float_of (add (mul 2 s) 1)) 32.0))
+        (ui_edges r dy (add s 1) (array_set acc s (ui_edge r y))))))
+
+; How many pixels from a rectangle's edge a corner's row dy is not all
+; covered: the pixels before its top sub-row's edge, at most r; 0 once dy
+; reaches r.
+(def ui_corner_reach ((r int) (dy int)) int
+  (if (if (lt dy 0) true (ge dy r))
       0
-      (let big (mul 16 r)
-        (let v (sub big (add (mul 16 dy) 8))
-          (sub big (isqrt (sub (mul big big) (mul v v))))))))
+      (min r (add 1 (float_floor (ui_edge r (float_add (float_of dy) 0.03125)))))))
+
+; Of pixel column i of that row, how much the corner covers, summed over
+; the sub-rows from s: each covers the part of the pixel past its edge.
+(def ui_edges_cover ((es (array float)) (i int) (s int) (acc float)) float
+  (if (ge s 16)
+      acc
+      (let c (float_sub (float_of (add i 1)) (array_get es s))
+        (ui_edges_cover es i (add s 1)
+          (float_add acc (if (float_lt c 0.0) 0.0 (if (float_gt c 1.0) 1.0 c)))))))
+
+; Percent of pixel column i of a corner's row dy the corner covers, 0 to
+; 100: a pixel is the share of its 16 sub-rows' lengths it holds. The
+; corner is a circle of radius r, so the pixels read the same across and
+; down within a sub-row's sampling.
+(def ui_corner_pct ((r int) (dy int) (i int)) int
+  (if (if (ge dy r) true (ge i r))
+      100
+      (ui_cover_pct (ui_edges r dy 0 (array_new 16 0.0)) i)))
+
+(def ui_cover_pct ((es (array float)) (i int)) int
+  (float_round (float_mul (float_div (ui_edges_cover es i 0 0.0) 16.0) 100.0)))
 
 ; The radius a rectangle w by h can have: at most half its shorter side.
 (def ui_fit_radius ((r int) (w int) (h int)) int
   (max 0 (min r (min (div w 2) (div h 2)))))
 
-; The inset, in sixteenths, of row dy of a rectangle h tall with corners
-; of radius r: rows near the top and the bottom are cut.
-(def ui_row_inset16 ((r int) (h int) (dy int)) int
+; Which row of a corner row dy of a rectangle h tall with corners of
+; radius r is: dy near the top, the mirror near the bottom, -1 between.
+(def ui_corner_row ((r int) (h int) (dy int)) int
   (if (lt dy r)
-      (ui_corner_inset16 r dy)
-      (if (ge dy (sub h r)) (ui_corner_inset16 r (sub (sub h 1) dy)) 0)))
+      dy
+      (if (ge dy (sub h r)) (sub (sub h 1) dy) -1)))
 
 ; ---------------------------------------------------------------- painting
 
@@ -138,16 +173,28 @@
 (def ui_round_row ((c Canvas) (k Rect) (r Rect) (radius int) (color int) (under int) (dy int)) Canvas
   (match r
     ((Rect x y w h)
-      (let in16 (ui_row_inset16 radius h dy)
-        (let full (div in16 16)
-          (let part (mod in16 16)
-            (let edge (if (gt part 0) 1 0)
-              (let s (ui_span c k (add y dy) (add x (add full edge)) (sub (add x w) (add full edge)) color)
-                (if (eq edge 0)
-                    s
-                    (let pct (div (mul (sub 16 part) 100) 16)
-                      (let l (ui_blend s k (add x full) (add y dy) color pct under)
-                        (ui_blend l k (sub (add x w) (add full 1)) (add y dy) color pct under))))))))))))
+      (let cd (ui_corner_row radius h dy)
+        (if (lt cd 0)
+            (ui_span c k (add y dy) x (add x w) color)
+            (let n (ui_corner_reach radius cd)
+              (let s (ui_span c k (add y dy) (add x n) (sub (add x w) n) color)
+                (ui_edge_pixels s k r color under (ui_edges radius cd 0 (array_new 16 0.0)) n 0 dy))))))))
+
+; Pixels i up to n of a corner's row, at both ends of row dy of r, each
+; mixed by how much of it the corner covers; none where it covers none.
+(def ui_edge_pixels ((c Canvas) (k Rect) (r Rect) (color int) (under int) (es (array float)) (n int) (i int) (dy int)) Canvas
+  (if (ge i n)
+      c
+      (let pct (ui_cover_pct es i)
+        (ui_edge_pixels (ui_edge_pair c k r color under pct i dy) k r color under es n (add i 1) dy))))
+
+(def ui_edge_pair ((c Canvas) (k Rect) (r Rect) (color int) (under int) (pct int) (i int) (dy int)) Canvas
+  (if (le pct 0)
+      c
+      (match r
+        ((Rect x y w h)
+          (let l (ui_blend c k (add x i) (add y dy) color pct under)
+            (ui_blend l k (sub (add x (sub w 1)) i) (add y dy) color pct under))))))
 
 ; Text in r at the face's scale: at 1 the bitmap font's; at 2 the face's
 ; glyphs, the same cells twice the size, or, if it has none, the bitmap's

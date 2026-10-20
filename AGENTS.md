@@ -42,7 +42,7 @@ sort.
 types, `match`, returning several values, reporting failure, type
 parameters, maps and hashing, reading and writing, files and telling their
 failures apart, replacing and deleting files, reading in pieces, arrays and
-grids, bytes, bits, ordering and sorting, timing, and driving a device,
+grids, bytes, bits, floats, ordering and sorting, timing, and driving a device,
 and tests of them.
 
 Everything these commands show comes from the installed toolchain, so it
@@ -140,8 +140,9 @@ confirmation, or progress during a run is not one either: write it with a
 be renamed, deleted, and read in pieces; failures of each say which they
 were; values of any type can be compared, ordered, hashed, and sorted; and
 `int`s have bitwise operations. Memory is reclaimed automatically, and
-`clock_ns` times part of a program. A network, the environment, listing or
-creating directories, and floating point do not exist yet.
+`clock_ns` times part of a program, and `float` does IEEE arithmetic, with
+`float_sin` and `float_cos` in the library. A network, the environment, listing or
+creating directories do not exist yet. Floating point does, as `float`.
 
 ## Two traps specific to L0
 

@@ -194,6 +194,37 @@ table of `n`, for keys of any type. Two different keys can share a hash, so
 a table compares the keys it finds with `eq`. The hash is defined by the
 spec, the same on every machine and run, so a test can pin one.
 
+**`float` is a binary64 number with its own builtins** (spec 6.17), because
+`add` and `lt` take only `int`: `float_add`, `float_sub`, `float_mul`,
+`float_div`, `float_sqrt`, `float_neg`, `float_lt`, `float_le`, `float_gt`, `float_ge`,
+`float_from_int`, and `float_to_int`, and the library's `float_sin` and
+`float_cos`. There is no conversion from an `int` literal, so write `2.0`,
+not `2`, and `(float_from_int n)` for a variable.
+
+```
+(def on_circle_x ((cx int) (r int) (deg int)) int
+  (add cx (float_to_int
+    (float_mul (float_from_int r)
+      (float_cos (float_div (float_mul (float_from_int deg) 3.141592653589793) 180.0))))))
+```
+
+A literal is digits, a point, and digits, with no exponent: at most 2^53 as
+an integer once the point is gone and at most 22 digits after it, which
+`3.141592653589793` meets and `0.1000000000000000055` does not. For any
+other value write its IEEE bits, `(float_from_bits 4591870180066957722)`,
+and read a float's with `float_bits`. `float_to_int` truncates toward zero
+and never fails: NaN is 0, and a value past the range is its end. Float
+operations never fail either: `(float_div 1.0 0.0)` is an infinity.
+
+**`eq`, `compare`, and `hash` see a float's key, not its number** (spec
+6.17), so they work on floats and on anything holding one, a float can key a
+`Map`, and `sort` orders a list of them, but they differ from the
+comparisons: `(eq 0.0 -0.0)` is false, `(compare -0.0 0.0)` is -1, and NaN
+is `eq` to itself, while `(float_lt (float_div 0.0 0.0) 1.0)` is false, as
+is every `float_` comparison with a NaN. To ask whether two floats are the
+same number, use `float_le` both ways. There is only one NaN, so a program
+cannot tell where one came from.
+
 **A name in call position is never a local.** `(f 1)` always means a builtin
 or a `def`, so a parameter named `f` cannot be called and does not shadow a
 function named `f`.
