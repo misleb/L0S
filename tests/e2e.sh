@@ -21,7 +21,12 @@
 # screen. If NAME/net exists, the board has a virtio-net on the network
 # its line names, as -netdev takes one without its id, such as user, or
 # user,tftp=tests/e2e/NAME/tftp for QEMU's TFTP server at 10.0.2.2
-# serving that directory. Every boot is killed after
+# serving that directory. If NAME/serve exists, its line is a command run
+# on the host for the length of the boot, a server the board reaches at
+# 10.0.2.2, and if NAME/peer does, its line is a command run from its
+# start that must exit 0 by the boot's end, a client of a port the board
+# listens to; @PORT@ in either, in NAME/net, and in NAME/typed is a free
+# port of the host's loopback, chosen for the boot. Every boot is killed after
 # a minute. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
@@ -96,22 +101,54 @@ for dir in tests/e2e/*/; do
     fi
     qemu_args="$qemu_args -drive file=$disk,if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0"
   fi
+  # A free port of the host, for what names @PORT@, and the files it is in.
+  port=""
+  if [ -f "$dir/serve" ] || [ -f "$dir/peer" ] || grep -qs '@PORT@' "$dir/net" "$dir/typed"; then
+    port=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  fi
   net=""
   if [ -f "$dir/net" ]; then
-    net=$(cat "$dir/net")
+    net=$(sed "s/@PORT@/$port/g" "$dir/net")
     qemu_args="$qemu_args -netdev $net,id=net0 -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56"
+  fi
+  typed="$dir/typed"
+  if [ -f "$typed" ]; then
+    typed="$BUILD/e2e/$name.typed"
+    sed "s/@PORT@/$port/g" "$dir/typed" > "$typed"
+  fi
+  serve_pid=""; peer_pid=""
+  if [ -f "$dir/serve" ]; then
+    bash -c "$(sed "s/@PORT@/$port/g" "$dir/serve")" > "$BUILD/e2e/$name.serve" 2>&1 &
+    serve_pid=$!
+  fi
+  if [ -f "$dir/peer" ]; then
+    bash -c "$(sed "s/@PORT@/$port/g" "$dir/peer")" > "$BUILD/e2e/$name.peer" 2>&1 &
+    peer_pid=$!
   fi
   bootargs=()
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
-    tools/slowtype "$dir/typed" |
+    tools/slowtype "$typed" |
       QEMU_DISK=$disk QEMU_GPU=$gpu QEMU_NET=$net QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
     L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi
   status=$?
   why=""
-  if ! diff -u "$dir/expected" "$out" > "$BUILD/e2e/$name.diff"; then
+  if [ -n "$serve_pid" ]; then kill "$serve_pid" 2> /dev/null; wait "$serve_pid" 2> /dev/null; fi
+  if [ -n "$peer_pid" ]; then
+    # The peer has had the whole boot; give it a moment more, then stop it.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$peer_pid" 2> /dev/null || break; sleep 0.5; done
+    if kill -0 "$peer_pid" 2> /dev/null; then
+      kill "$peer_pid" 2> /dev/null; wait "$peer_pid" 2> /dev/null
+      why="the peer never finished: $(cat "$BUILD/e2e/$name.peer")"
+    elif ! wait "$peer_pid"; then
+      why="the peer failed: $(cat "$BUILD/e2e/$name.peer")"
+    fi
+  fi
+  if [ -n "$why" ]; then
+    :
+  elif ! diff -u "$dir/expected" "$out" > "$BUILD/e2e/$name.diff"; then
     why="standard output differs:"$'\n'"$(cat "$BUILD/e2e/$name.diff")"
   elif [ "$status" != "$want_status" ]; then
     why="exit status $status, wanted $want_status"

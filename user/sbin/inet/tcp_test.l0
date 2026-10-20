@@ -1,0 +1,556 @@
+; tcp_test.l0 -- tests of tcp.l0: one connection's events and what each
+; calls for, worked out by hand from RFC 9293 and written as the acts'
+; text; then two connections joined, which move whole transfers, with
+; and without a segment lost.
+
+; ------------------------------------------------------------------- text
+
+; The names of the flags of f that are set, joined by |.
+(def flag_word ((f int) (bit int) (name (list int))) (list (list int))
+  (if (eq (bit_and f bit) 0) (nil (list int)) (cons name (nil (list int)))))
+
+(def flags_text ((f int)) (list int)
+  (join_with "|" (append (flag_word f (tcp_syn) "SYN") (append (flag_word f (tcp_fin) "FIN")
+    (append (flag_word f (tcp_rst) "RST") (append (flag_word f (tcp_ack) "ACK") (flag_word f (tcp_psh) "PSH")))))))
+
+; A segment: flags, ports, sequence and acknowledgement numbers, window,
+; the option if it has one, and its data in quotes.
+(def seg_line ((s Seg)) (list int)
+  (match s
+    ((Seg sport dport seq ack flags window mss body)
+      (unwords (cons (flags_text flags) (cons (append (digits sport) (append ">" (digits dport)))
+        (cons (append "s" (digits seq)) (cons (append "a" (digits ack)) (cons (append "w" (digits window))
+          (append (if (eq mss 0) (nil (list int)) (cons (append "m" (digits mss)) (nil (list int))))
+                  (if (is_empty body) (nil (list int)) (cons (cons 39 (append body "'")) (nil (list int))))))))))))))
+
+; An act, as text.
+(def act_line ((a TcpAct)) (list int)
+  (match a
+    ((SendSeg addr s) (append "send " (seg_line s)))
+    ((ConnUp) "up")
+    ((ConnAccepted) "accepted")
+    ((GotData d) (append "data " d))
+    ((GotFin) "fin")
+    ((ConnOver) "over")
+    ((ConnGone why) (if (is_empty why) "gone" (append "gone " why)))))
+
+(def acts_lines ((as (list TcpAct)) (acc (list (list int)))) (list (list int))
+  (if (is_empty as) (rev acc) (acts_lines (tail as) (cons (act_line (head as)) acc))))
+
+; The acts of a step, in order, joined by " ; ".
+(def acts_text ((st TcpStep)) (list int) (join_with " ; " (acts_lines (step_acts st) (nil (list int)))))
+
+; The state a step leaves its connection in, by name.
+(def state_text ((st TcpStep)) (list int) (tcp_state_name (c_state (step_conn st))))
+
+; ---------------------------------------------------------------- fixtures
+
+(def peer () int (ip_of 10 0 2 2))
+
+; The step of opening connection 1, for the process whose port is 10 and
+; pid 3, from port 49152 to port 80, with 1000 as the first sequence number,
+; at time 0: a SYN.
+(def opening () TcpStep (tcp_active 1 10 3 49152 (peer) 80 1000 0))
+
+; The peer's SYN and ACK: sequence 5000, acknowledging 1001, a window of
+; 4096 and a segment size of 1200.
+(def synack ((window int) (mss int)) Seg (Seg 80 49152 5000 1001 (bit_or (tcp_syn) (tcp_ack)) window mss (nil int)))
+
+; A segment of the peer's, in order: it acknowledges ack, its data comes
+; at sequence seq.
+(def from_peer ((seq int) (ack int) (flags int) (window int) (body (list int))) Seg
+  (Seg 80 49152 seq ack flags window 0 body))
+
+; The connection once open, the peer's window and segment size window and mss.
+(def open_conn ((window int) (mss int)) Conn
+  (step_conn (tcp_arrive (step_conn (opening)) 0 (synack window mss))))
+
+(def established () Conn (open_conn 4096 1200))
+
+; The connection of c after segment s at time now, and what s made.
+(def after ((c Conn) (now int) (s Seg)) Conn (step_conn (tcp_arrive c now s)))
+(def says ((c Conn) (now int) (s Seg)) (list int) (acts_text (tcp_arrive c now s)))
+
+; The connection after each of segments in turn, at time 0.
+(def after_all ((c Conn) (ss (list Seg))) Conn
+  (if (is_empty ss) c (after_all (after c 0 (head ss)) (tail ss))))
+
+(def one ((s Seg)) (list Seg) (cons s (nil Seg)))
+
+; ---------------------------------------------------------------- handshake
+
+(def test_active_open () int
+  (add (check_str "the SYN" (acts_text (opening)) "send SYN 49152>80 s1000 a0 w8192 m1460")
+       (add (check_str "SYN-SENT" (state_text (opening)) "SYN-SENT")
+            (check_int "its timer" (c_deadline (step_conn (opening))) 1000000000))))
+
+; The SYN and ACK opens it: the application is told, the SYN is
+; acknowledged, and the peer's window and segment size are kept.
+(def test_active_established () int
+  (let st (tcp_arrive (step_conn (opening)) 0 (synack 4096 1200))
+    (add (check_str "up and ACK" (acts_text st) "up ; send ACK 49152>80 s1001 a5001 w8192")
+         (add (check_str "state" (state_text st) "ESTABLISHED")
+              (add (check_int "window" (c_wnd (step_conn st)) 4096)
+                   (add (check_int "segment size" (c_mss (step_conn st)) 1200)
+                        (check_int "timer off" (c_deadline (step_conn st)) 0)))))))
+
+; A peer that offers no segment size is taken to take 536.
+(def test_default_mss () int
+  (check_int "536" (c_mss (open_conn 4096 0)) 536))
+
+; The peer answers with a reset: refused. With one for another SYN, not.
+(def test_refused () int
+  (add (check_str "refused" (says (step_conn (opening)) 0 (Seg 80 49152 0 1001 (bit_or (tcp_rst) (tcp_ack)) 0 0 (nil int))) "gone refused")
+       (check_str "not ours" (says (step_conn (opening)) 0 (Seg 80 49152 0 77 (bit_or (tcp_rst) (tcp_ack)) 0 0 (nil int))) "")))
+
+; An acknowledgement of what was not sent is answered with a reset.
+(def test_syn_sent_bad_ack () int
+  (check_str "reset" (says (step_conn (opening)) 0 (Seg 80 49152 0 5 (tcp_ack) 0 0 (nil int))) "send RST 49152>80 s5 a0 w8192"))
+
+; Time runs out before an answer: the SYN again, the timeout twice as long.
+(def test_syn_retransmitted () int
+  (let st (tcp_tick (step_conn (opening)) 1000000000)
+    (add (check_str "again" (acts_text st) "send SYN 49152>80 s1000 a0 w8192 m1460")
+         (add (check_int "the deadline" (c_deadline (step_conn st)) 3000000000)
+              (check_int "tries" (c_tries (step_conn st)) 1)))))
+
+(def test_syn_gives_up () int
+  (let c (ticked (step_conn (opening)) 5)
+    (add (check_str "no answer" (acts_text (tcp_tick c (c_deadline c))) "send RST|ACK 49152>80 s1001 a0 w8192 ; gone timeout")
+         (check_int "the last wait" (c_rto c) 16000000000))))
+
+; The connection after n timeouts, each at its deadline.
+(def ticked ((c Conn) (n int)) Conn
+  (if (eq n 0) c (ticked (step_conn (tcp_tick c (c_deadline c))) (sub n 1))))
+
+; The passive side: the peer's SYN answered with SYN and ACK, a segment size
+; kept; the ACK of it makes the connection, and tells its listener.
+(def syn_from_peer () Seg (Seg 49152 80 7000 0 (tcp_syn) 4096 1000 (nil int)))
+
+(def accepting () TcpStep (tcp_passive 2 20 5 (peer) (syn_from_peer) 9000 0))
+
+(def test_passive_open () int
+  (add (check_str "SYN and ACK" (acts_text (accepting)) "send SYN|ACK 80>49152 s9000 a7001 w8192 m1460")
+       (add (check_str "SYN-RECEIVED" (state_text (accepting)) "SYN-RECEIVED")
+            (check_int "its segment size" (c_mss (step_conn (accepting))) 1000))))
+
+(def test_passive_established () int
+  (let st (tcp_arrive (step_conn (accepting)) 0 (Seg 49152 80 7001 9001 (tcp_ack) 4096 0 (nil int)))
+    (add (check_str "accepted" (acts_text st) "accepted")
+         (add (check_str "state" (state_text st) "ESTABLISHED")
+              (check_int "timer off" (c_deadline (step_conn st)) 0)))))
+
+; The ACK may carry the first data.
+(def test_passive_data_with_ack () int
+  (check_str "accepted, then data" (says (step_conn (accepting)) 0 (Seg 49152 80 7001 9001 (tcp_ack) 4096 0 "GET"))
+             "accepted ; data GET ; send ACK 80>49152 s9001 a7004 w8192"))
+
+; The SYN again, because the SYN and ACK was lost: it is sent again.
+(def test_passive_syn_again () int
+  (check_str "again" (says (step_conn (accepting)) 0 (syn_from_peer)) "send SYN|ACK 80>49152 s9000 a7001 w8192 m1460"))
+
+; An ACK of something else is answered with a reset, and does not open it.
+(def test_passive_bad_ack () int
+  (let st (tcp_arrive (step_conn (accepting)) 0 (Seg 49152 80 7001 1 (tcp_ack) 4096 0 (nil int)))
+    (add (check_str "reset" (acts_text st) "send RST 80>49152 s1 a7001 w8192")
+         (check_str "still waiting" (state_text st) "SYN-RECEIVED"))))
+
+(def test_passive_reset () int
+  (check_str "refused" (says (step_conn (accepting)) 0 (Seg 49152 80 7001 0 (tcp_rst) 0 0 (nil int))) "gone refused"))
+
+; The first sequence number is 2 before the wrap: the handshake and the
+; first bytes cross it.
+(def test_across_the_wrap () int
+  (let c0 (step_conn (tcp_active 1 10 3 49152 (peer) 80 4294967294 0))
+    (let c1 (after c0 0 (Seg 80 49152 5000 4294967295 (bit_or (tcp_syn) (tcp_ack)) 4096 1200 (nil int)))
+      (let st (tcp_send c1 0 "abc")
+        (add (check_str "the data" (acts_text st) "send ACK|PSH 49152>80 s4294967295 a5001 w8192 'abc'")
+             (add (check_int "SND.NXT wrapped" (c_nxt (step_conn st)) 2)
+                  (check_str "acknowledged" (acts_text (tcp_arrive (step_conn st) 0 (from_peer 5001 2 (tcp_ack) 4096 (nil int)))) "")))))))
+
+; ------------------------------------------------------------------ sending
+
+(def test_send () int
+  (let st (tcp_send (established) 0 "hello")
+    (add (check_str "a segment" (acts_text st) "send ACK|PSH 49152>80 s1001 a5001 w8192 'hello'")
+         (check_int "the timer runs" (c_deadline (step_conn st)) 1000000000))))
+
+(def test_send_acknowledged () int
+  (let c (step_conn (tcp_send (established) 0 "hello"))
+    (let st (tcp_arrive c 500 (from_peer 5001 1006 (tcp_ack) 4096 (nil int)))
+      (add (check_str "nothing to send" (acts_text st) "")
+           (add (check_int "SND.UNA" (c_una (step_conn st)) 1006)
+                (add (check_int "queue" (length (c_queue (step_conn st))) 0)
+                     (check_int "timer off" (c_deadline (step_conn st)) 0)))))))
+
+; Only some of it acknowledged: the rest stays queued, and the timer
+; restarts from the acknowledgement.
+(def test_send_partly_acknowledged () int
+  (let c (step_conn (tcp_send (established) 0 "hello"))
+    (let st (tcp_arrive c 500 (from_peer 5001 1003 (tcp_ack) 4096 (nil int)))
+      (add (check_str "the rest kept" (c_queue (step_conn st)) "llo")
+           (check_int "timer restarted" (c_deadline (step_conn st)) 1000000500)))))
+
+; The segment size is the peer's: 10 bytes in segments of 4, and the last
+; with PSH.
+(def test_send_segments () int
+  (check_str "4, 4 and 2" (acts_text (tcp_send (open_conn 4096 4) 0 "0123456789"))
+             "send ACK 49152>80 s1001 a5001 w8192 '0123' ; send ACK 49152>80 s1005 a5001 w8192 '4567' ; send ACK|PSH 49152>80 s1009 a5001 w8192 '89'"))
+
+; The peer's window is a limit: 6 bytes of 10, and when it acknowledges
+; them, with the window open again, the rest.
+(def test_send_window () int
+  (let st (tcp_send (open_conn 6 1200) 0 "0123456789")
+    (add (check_str "6 bytes" (acts_text st) "send ACK 49152>80 s1001 a5001 w8192 '012345'")
+         (check_str "then the rest" (acts_text (tcp_arrive (step_conn st) 10 (from_peer 5001 1007 (tcp_ack) 6 (nil int))))
+                    "send ACK|PSH 49152>80 s1007 a5001 w8192 '6789'"))))
+
+; A window of 0: nothing is sent, the timer runs, and when it fires a byte
+; asks the peer to open it.
+(def test_zero_window_probe () int
+  (let st (tcp_send (open_conn 0 1200) 0 "xyz")
+    (add (check_str "held" (acts_text st) "")
+         (add (check_int "the timer runs" (c_deadline (step_conn st)) 1000000000)
+              (check_str "a probe" (acts_text (tcp_tick (step_conn st) 1000000000)) "send ACK 49152>80 s1001 a5001 w8192 'x'")))))
+
+; The timer fires with data not acknowledged: from SND.UNA, again.
+(def test_data_retransmitted () int
+  (let c (step_conn (tcp_send (established) 0 "hello"))
+    (add (check_str "not yet" (acts_text (tcp_tick c 999999999)) "")
+         (let st (tcp_tick c 1000000000)
+           (add (check_str "again" (acts_text st) "send ACK 49152>80 s1001 a5001 w8192 'hello'")
+                (add (check_int "twice as long" (c_deadline (step_conn st)) 3000000000)
+                     (check_int "SND.NXT not moved" (c_nxt (step_conn st)) 1006)))))))
+
+; The wait doubles each time and stops at 16 seconds: 1, 2, 4, 8, 16, 16.
+(def test_backoff () int
+  (let c (step_conn (tcp_send (established) 0 "hello"))
+    (add (check_int "after 2" (c_rto (ticked c 2)) 4000000000)
+         (add (check_int "after 4" (c_rto (ticked c 4)) 16000000000)
+              (check_str "then it gives up" (acts_text (tcp_tick (ticked c 5) (c_deadline (ticked c 5)))) "send RST|ACK 49152>80 s1006 a5001 w8192 ; gone timeout")))))
+
+; An acknowledgement that is old changes nothing; one of what was never
+; sent is answered with ours.
+(def test_odd_acks () int
+  (let c (step_conn (tcp_send (established) 0 "hello"))
+    (add (check_str "old" (says c 5 (from_peer 5001 1000 (tcp_ack) 4096 (nil int))) "")
+         (add (check_int "SND.UNA kept" (c_una (after c 5 (from_peer 5001 1000 (tcp_ack) 4096 (nil int)))) 1001)
+              (check_str "of the future" (says c 5 (from_peer 5001 1007 (tcp_ack) 4096 (nil int))) "send ACK 49152>80 s1006 a5001 w8192")))))
+
+; --------------------------------------------------------------- receiving
+
+(def test_receive () int
+  (check_str "data and its ACK" (says (established) 0 (from_peer 5001 1001 (bit_or (tcp_ack) (tcp_psh)) 4096 "abc"))
+             "data abc ; send ACK 49152>80 s1001 a5004 w8192"))
+
+; Not in order: dropped, and the ACK says where it is still waiting.
+(def test_receive_gap () int
+  (let st (tcp_arrive (established) 0 (from_peer 5010 1001 (tcp_ack) 4096 "zzz"))
+    (add (check_str "only an ACK" (acts_text st) "send ACK 49152>80 s1001 a5001 w8192")
+         (check_int "RCV.NXT" (c_rcv (step_conn st)) 5001))))
+
+; Some of it seen already: the new part is given.
+(def test_receive_overlap () int
+  (let c (after (established) 0 (from_peer 5001 1001 (tcp_ack) 4096 "abc"))
+    (check_str "only 'de'" (says c 0 (from_peer 5002 1001 (tcp_ack) 4096 "bcde"))
+               "data de ; send ACK 49152>80 s1001 a5006 w8192")))
+
+; All of it seen already: acknowledged again, and not given.
+(def test_receive_duplicate () int
+  (let c (after (established) 0 (from_peer 5001 1001 (tcp_ack) 4096 "abc"))
+    (check_str "old" (says c 0 (from_peer 5001 1001 (tcp_ack) 4096 "abc")) "send ACK 49152>80 s1001 a5004 w8192")))
+
+; Beyond the window, nothing is taken; the window is 8192.
+(def test_receive_window () int
+  (let c (established)
+    (add (check_str "far past" (says c 0 (from_peer 90000 1001 (tcp_ack) 4096 "zzz")) "send ACK 49152>80 s1001 a5001 w8192")
+         (check_int "RCV.NXT" (c_rcv (after c 0 (from_peer 90000 1001 (tcp_ack) 4096 "zzz"))) 5001))))
+
+; A segment longer than the window is taken to its end, and without its FIN.
+(def test_receive_truncated () int
+  (let body (take_n_a 8193)
+    (let st (tcp_arrive (established) 0 (from_peer 5001 1001 (bit_or (tcp_ack) (tcp_fin)) 4096 body))
+      (add (check_int "RCV.NXT" (c_rcv (step_conn st)) (add 5001 8192))
+           (check_str "no FIN" (state_text st) "ESTABLISHED")))))
+
+; n letters a.
+(def take_n_a ((n int)) (list int) (if (eq n 0) (nil int) (cons 97 (take_n_a (sub n 1)))))
+
+; Without ACK, a segment is not looked at.
+(def test_receive_no_ack () int
+  (check_str "dropped" (says (established) 0 (from_peer 5001 0 0 4096 "abc")) ""))
+
+; ---------------------------------------------------------------- closing
+
+; Our side closes first: FIN, then the peer's ACK of it, its FIN, and
+; TIME-WAIT until the timer runs out.
+(def test_active_close () int
+  (let st (tcp_close (established) 0)
+    (add (check_str "FIN" (acts_text st) "send FIN|ACK 49152>80 s1001 a5001 w8192")
+         (add (check_str "FIN-WAIT-1" (state_text st) "FIN-WAIT-1")
+              (let c2 (after (step_conn st) 0 (from_peer 5001 1002 (tcp_ack) 4096 (nil int)))
+                (add (check_int "FIN-WAIT-2" (c_state c2) (tcp_fin_wait_2))
+                     (let st3 (tcp_arrive c2 100 (from_peer 5001 1002 (bit_or (tcp_fin) (tcp_ack)) 4096 (nil int)))
+                       (add (check_str "told and acknowledged" (acts_text st3) "fin ; over ; send ACK 49152>80 s1002 a5002 w8192")
+                            (add (check_str "TIME-WAIT" (state_text st3) "TIME-WAIT")
+                                 (add (check_int "its end" (c_deadline (step_conn st3)) 4000000100)
+                                      (check_str "then gone, unannounced" (acts_text (tcp_tick (step_conn st3) 4000000100)) "gone")))))))))))
+
+; The peer's FIN and the ACK of ours together go straight to TIME-WAIT.
+(def test_close_both_at_once () int
+  (let c (step_conn (tcp_close (established) 0))
+    (check_str "TIME-WAIT" (state_text (tcp_arrive c 0 (from_peer 5001 1002 (bit_or (tcp_fin) (tcp_ack)) 4096 (nil int)))) "TIME-WAIT")))
+
+; Both close at once: the peer's FIN before the ACK of ours is CLOSING; the
+; ACK then makes the wait.
+(def test_simultaneous_close () int
+  (let c (step_conn (tcp_close (established) 0))
+    (let st (tcp_arrive c 0 (from_peer 5001 1001 (bit_or (tcp_fin) (tcp_ack)) 4096 (nil int)))
+      (add (check_str "CLOSING" (state_text st) "CLOSING")
+           (check_str "TIME-WAIT" (state_text (tcp_arrive (step_conn st) 0 (from_peer 5002 1002 (tcp_ack) 4096 (nil int)))) "TIME-WAIT")))))
+
+; The peer closes first: its FIN is told, ours follows when the application
+; closes, and its ACK ends the connection.
+(def test_passive_close () int
+  (let st (tcp_arrive (established) 0 (from_peer 5001 1001 (bit_or (tcp_fin) (tcp_ack)) 4096 (nil int)))
+    (add (check_str "told" (acts_text st) "fin ; send ACK 49152>80 s1001 a5002 w8192")
+         (add (check_str "CLOSE-WAIT" (state_text st) "CLOSE-WAIT")
+              (let st2 (tcp_close (step_conn st) 0)
+                (add (check_str "our FIN" (acts_text st2) "send FIN|ACK 49152>80 s1001 a5002 w8192")
+                     (add (check_str "LAST-ACK" (state_text st2) "LAST-ACK")
+                          (check_str "the end" (says (step_conn st2) 0 (from_peer 5002 1002 (tcp_ack) 4096 (nil int))) "gone closed"))))))))
+
+; Data comes with the FIN: given first, then the FIN is told.
+(def test_data_with_fin () int
+  (check_str "both" (says (established) 0 (from_peer 5001 1001 (bit_or (tcp_fin) (tcp_ack)) 4096 "bye"))
+             "data bye ; fin ; send ACK 49152>80 s1001 a5005 w8192"))
+
+; The application closes with data waiting for the window: the FIN comes
+; after the data, once the window opens.
+(def test_close_after_data () int
+  (let c (step_conn (tcp_close (step_conn (tcp_send (open_conn 0 1200) 0 "ab")) 0))
+    (add (check_str "nothing yet" (state_text (tcp_tick c 0)) "ESTABLISHED")
+         (check_str "data, then the FIN" (says c 0 (from_peer 5001 1001 (tcp_ack) 100 (nil int)))
+                    "send ACK|PSH 49152>80 s1001 a5001 w8192 'ab' ; send FIN|ACK 49152>80 s1003 a5001 w8192"))))
+
+; The FIN lost: it is sent again.
+(def test_fin_retransmitted () int
+  (let c (step_conn (tcp_close (established) 0))
+    (check_str "again" (acts_text (tcp_tick c 1000000000)) "send FIN|ACK 49152>80 s1001 a5001 w8192")))
+
+; The peer's FIN again, in TIME-WAIT: acknowledged, and the wait is as long again.
+(def test_time_wait_fin_again () int
+  (let c (after (after (step_conn (tcp_close (established) 0)) 0 (from_peer 5001 1002 (tcp_ack) 4096 (nil int))) 0
+                (from_peer 5001 1002 (bit_or (tcp_fin) (tcp_ack)) 4096 (nil int)))
+    (let st (tcp_arrive c 3000000000 (from_peer 5001 1002 (bit_or (tcp_fin) (tcp_ack)) 4096 (nil int)))
+      (add (check_str "acknowledged" (acts_text st) "send ACK 49152>80 s1002 a5002 w8192")
+           (check_int "the wait begins again" (c_deadline (step_conn st)) 7000000000)))))
+
+; Closing a connection not open yet just ends it.
+(def test_close_syn_sent () int
+  (check_str "gone" (acts_text (tcp_close (step_conn (opening)) 0)) "gone closed"))
+
+(def test_abort () int
+  (add (check_str "open: a reset" (acts_text (tcp_abort (established) "aborted")) "send RST|ACK 49152>80 s1001 a5001 w8192 ; gone aborted")
+       (check_str "not open: nothing to reset" (acts_text (tcp_abort (step_conn (opening)) "aborted")) "gone aborted")))
+
+; ------------------------------------------------------------------ resets
+
+; A reset where the next byte is expected ends it, as for a connection at
+; any state; one elsewhere in the window asks for the ACK again; one out of
+; the window is passed over.
+(def test_reset () int
+  (add (check_str "exact" (says (established) 0 (from_peer 5001 0 (tcp_rst) 0 (nil int))) "gone reset")
+       (add (check_str "in the window" (says (established) 0 (from_peer 5100 0 (tcp_rst) 0 (nil int))) "send ACK 49152>80 s1001 a5001 w8192")
+            (check_str "outside" (says (established) 0 (from_peer 90000 0 (tcp_rst) 0 (nil int))) ""))))
+
+; A SYN in an open connection is not a new one: the ACK says what we expect.
+(def test_syn_in_open () int
+  (check_str "challenge" (says (established) 0 (from_peer 5001 1001 (bit_or (tcp_syn) (tcp_ack)) 4096 (nil int))) "send ACK 49152>80 s1001 a5001 w8192"))
+
+; What a segment for no connection is answered with.
+(def reset_text ((r (Option Seg))) (list int) (match r ((None) "none") ((Some s) (seg_line s))))
+
+(def test_reset_for () int
+  (add (check_str "a SYN" (reset_text (tcp_reset_for (Seg 49152 80 7000 0 (tcp_syn) 4096 1000 (nil int)))) "RST|ACK 80>49152 s0 a7001 w0")
+       (add (check_str "an ACK" (reset_text (tcp_reset_for (Seg 49152 80 7000 333 (tcp_ack) 4096 0 "abc"))) "RST 80>49152 s333 a0 w0")
+            (add (check_str "data without ACK" (reset_text (tcp_reset_for (Seg 49152 80 7000 0 (tcp_psh) 4096 0 "abc"))) "RST|ACK 80>49152 s0 a7003 w0")
+                 (check_str "a reset" (reset_text (tcp_reset_for (Seg 49152 80 7000 0 (tcp_rst) 0 0 (nil int)))) "none")))))
+
+(def test_state_names () int
+  (add (check_str "first" (tcp_state_name (tcp_syn_sent)) "SYN-SENT")
+       (add (check_str "TIME-WAIT" (tcp_state_name (tcp_time_wait)) "TIME-WAIT")
+            (check_str "last" (tcp_state_name (tcp_closed)) "CLOSED"))))
+
+; ---------------------------------------------------- two connections joined
+
+; One end of a simulated link: its connection, the segments waiting for it,
+; and what it was given, reversed.
+(data Side (Side Conn (list Seg) (list int)))
+
+; Two ends; how many segments carrying data have been sent, and the number,
+; from 0, of the one to lose, or -1 for none.
+(data Duo (Duo Side Side int int))
+
+; A segment's end taken: the end, and what its connection sent in answer.
+(data Moved (Moved Side (list Seg)))
+
+; The segments kept, and how many with data were seen.
+(data Kept (Kept (list Seg) int))
+
+(def side_conn ((s Side)) Conn (match s ((Side c inbox got) c)))
+(def side_inbox ((s Side)) (list Seg) (match s ((Side c inbox got) inbox)))
+(def side_got ((s Side)) (list int) (match s ((Side c inbox got) (rev got))))
+(def side_push ((s Side) (ss (list Seg))) Side (match s ((Side c inbox got) (Side c (append inbox ss) got))))
+
+(def duo_a ((d Duo)) Side (match d ((Duo a b seen lose) a)))
+(def duo_b ((d Duo)) Side (match d ((Duo a b seen lose) b)))
+
+; The segments in out that the link carries: one with data whose number is
+; lose is lost.
+(def lossy ((out (list Seg)) (seen int) (lose int) (acc (list Seg))) Kept
+  (if (is_empty out)
+      (Kept (rev acc) seen)
+      (match (head out)
+        ((Seg sport dport seq ack flags window mss body)
+          (if (is_empty body)
+              (lossy (tail out) seen lose (cons (head out) acc))
+              (lossy (tail out) (add seen 1) lose (if (eq seen lose) acc (cons (head out) acc))))))))
+
+; The end s with the acts a step called for taken in: what came is kept,
+; what it sends is out, reversed.
+(def absorbed ((s Side) (acts (list TcpAct)) (out (list Seg))) Moved
+  (if (is_empty acts)
+      (Moved s (rev out))
+      (match (head acts)
+        ((SendSeg addr sg) (absorbed s (tail acts) (cons sg out)))
+        ((ConnUp) (absorbed s (tail acts) out))
+        ((ConnAccepted) (absorbed s (tail acts) out))
+        ((GotFin) (absorbed s (tail acts) out))
+        ((ConnOver) (absorbed s (tail acts) out))
+        ((ConnGone why) (absorbed s (tail acts) out))
+        ((GotData d) (match s ((Side c inbox got) (absorbed (Side c inbox (push d got)) (tail acts) out)))))))
+
+; The end a took the step st of, and what it sends, to b.
+(def apply_a ((d Duo) (st TcpStep)) Duo
+  (match d
+    ((Duo a b seen lose)
+      (match (absorbed (Side (step_conn st) (side_inbox a) (rev (side_got a))) (step_acts st) (nil Seg))
+        ((Moved a2 out)
+          (match (lossy out seen lose (nil Seg))
+            ((Kept keep seen2) (Duo a2 (side_push b keep) seen2 lose))))))))
+
+; The same for b, which sends to a.
+(def apply_b ((d Duo) (st TcpStep)) Duo
+  (match d
+    ((Duo a b seen lose)
+      (match (absorbed (Side (step_conn st) (side_inbox b) (rev (side_got b))) (step_acts st) (nil Seg))
+        ((Moved b2 out)
+          (match (lossy out seen lose (nil Seg))
+            ((Kept keep seen2) (Duo (side_push a keep) b2 seen2 lose))))))))
+
+; The ends after every segment waiting has been delivered, a's first.
+(def run_duo ((d Duo) (fuel int)) Duo
+  (let a (duo_a d)
+    (let b (duo_b d)
+      (if (le fuel 0)
+          d
+          (if (not (is_empty (side_inbox a)))
+              (run_duo (apply_a (with_inbox_a d (tail (side_inbox a))) (tcp_arrive (side_conn a) 0 (head (side_inbox a)))) (sub fuel 1))
+              (if (not (is_empty (side_inbox b)))
+                  (run_duo (apply_b (with_inbox_b d (tail (side_inbox b))) (tcp_arrive (side_conn b) 0 (head (side_inbox b)))) (sub fuel 1))
+                  d))))))
+
+; d with a's, and b's, waiting segments those.
+(def with_inbox_a ((d Duo) (ss (list Seg))) Duo
+  (match d ((Duo a b seen lose) (match a ((Side c inbox got) (Duo (Side c ss got) b seen lose))))))
+(def with_inbox_b ((d Duo) (ss (list Seg))) Duo
+  (match d ((Duo a b seen lose) (match b ((Side c inbox got) (Duo a (Side c ss got) seen lose))))))
+
+; d, losing the n'th segment with data from now.
+(def losing ((d Duo) (n int)) Duo (match d ((Duo a b seen lose) (Duo a b 0 n))))
+
+; The SYN of a step's acts.
+(def first_seg ((acts (list TcpAct))) Seg
+  (if (is_empty (segs_of acts (nil Seg))) (Seg 0 0 0 0 0 0 0 (nil int)) (head (segs_of acts (nil Seg)))))
+
+; Two connections, the first opened to the second, which a listener would
+; have made of its SYN, after every segment of the handshake: both open.
+(def duo_open ((iss_a int) (iss_b int)) Duo
+  (let sta (tcp_active 1 10 3 49152 (peer) 80 iss_a 0)
+    (let stb (tcp_passive 2 20 5 (peer) (first_seg (step_acts sta)) iss_b 0)
+      (run_duo (Duo (Side (step_conn sta) (step_segs stb) (nil int)) (Side (step_conn stb) (nil Seg) (nil int)) 0 -1) 100))))
+
+; The segments of a step, in order.
+(def step_segs ((st TcpStep)) (list Seg) (segs_of (step_acts st) (nil Seg)))
+(def segs_of ((acts (list TcpAct)) (acc (list Seg))) (list Seg)
+  (if (is_empty acts)
+      (rev acc)
+      (match (head acts)
+        ((SendSeg addr s) (segs_of (tail acts) (cons s acc)))
+        ((ConnUp) (segs_of (tail acts) acc))
+        ((ConnAccepted) (segs_of (tail acts) acc))
+        ((GotData d) (segs_of (tail acts) acc))
+        ((GotFin) (segs_of (tail acts) acc))
+        ((ConnOver) (segs_of (tail acts) acc))
+        ((ConnGone why) (segs_of (tail acts) acc)))))
+
+; n bytes of a pattern that repeats every 251, so that a block moved or
+; lost shows.
+(def pattern ((n int)) (list int) (pattern_from 0 n (nil int)))
+(def pattern_from ((i int) (n int) (acc (list int))) (list int)
+  (if (eq i n) (rev acc) (pattern_from (add i 1) n (cons (mod i 251) acc))))
+
+; The two ends' states, by name.
+(def duo_states ((d Duo)) (list int)
+  (append (tcp_state_name (c_state (side_conn (duo_a d)))) (append " " (tcp_state_name (c_state (side_conn (duo_b d)))))))
+
+(def test_duo_handshake () int
+  (add (check_str "both open" (duo_states (duo_open 100 900)) "ESTABLISHED ESTABLISHED")
+       (check_str "across the wrap" (duo_states (duo_open 4294967290 4294967295)) "ESTABLISHED ESTABLISHED")))
+
+; 20000 bytes, which is more than the window holds, one way, and 3000 the
+; other, arrive whole and in order, and nothing is left unacknowledged.
+(def test_duo_transfer () int
+  (let d0 (duo_open 100 900)
+    (let d1 (run_duo (apply_b (apply_a d0 (tcp_send (side_conn (duo_a d0)) 0 (pattern 20000))) (tcp_send (side_conn (duo_b d0)) 0 (pattern 3000))) 1000)
+      (add (check_bool "b got it" (eq (side_got (duo_b d1)) (pattern 20000)) true)
+           (add (check_bool "a got it" (eq (side_got (duo_a d1)) (pattern 3000)) true)
+                (add (check_int "a's queue" (length (c_queue (side_conn (duo_a d1)))) 0)
+                     (check_int "a's timer" (c_deadline (side_conn (duo_a d1))) 0)))))))
+
+; Then both close: the one that did first waits, the other is gone.
+(def test_duo_close () int
+  (let d0 (duo_open 100 900)
+    (let d1 (run_duo (apply_a d0 (tcp_close (side_conn (duo_a d0)) 0)) 100)
+      (let d2 (run_duo (apply_b d1 (tcp_close (side_conn (duo_b d1)) 0)) 100)
+        (add (check_str "b waits to close" (duo_states d1) "FIN-WAIT-2 CLOSE-WAIT")
+             (check_str "closed" (duo_states d2) "TIME-WAIT CLOSED"))))))
+
+; A segment lost: the sender's timer fires, it sends all it has not had
+; acknowledged again, and everything arrives, in order.
+(def test_duo_loss () int
+  (let d0 (losing (duo_open 100 900) 2)
+    (let d1 (run_duo (apply_a d0 (tcp_send (side_conn (duo_a d0)) 0 (pattern 6000))) 1000)
+      (let d2 (run_duo (apply_a d1 (tcp_tick (side_conn (duo_a d1)) (c_deadline (side_conn (duo_a d1))))) 1000)
+        (add (check_bool "part came first" (lt (length (side_got (duo_b d1))) 6000) true)
+             (add (check_bool "all came after" (eq (side_got (duo_b d2)) (pattern 6000)) true)
+                  (check_int "nothing outstanding" (c_deadline (side_conn (duo_a d2))) 0)))))))
+
+; The SYN lost: opened by the timer.
+(def test_duo_syn_lost () int
+  (let sta (tcp_active 1 10 3 49152 (peer) 80 100 0)
+    (let st2 (tcp_tick (step_conn sta) 1000000000)
+      (let stb (tcp_passive 2 20 5 (peer) (first_seg (step_acts st2)) 900 0)
+        (let d (run_duo (Duo (Side (step_conn st2) (step_segs stb) (nil int)) (Side (step_conn stb) (nil Seg) (nil int)) 0 -1) 100)
+          (check_str "open" (duo_states d) "ESTABLISHED ESTABLISHED"))))))
+
+; The last ACK of the handshake lost: the first data it brings is enough.
+(def test_duo_ack_lost () int
+  (let sta (tcp_active 1 10 3 49152 (peer) 80 100 0)
+    (let stb (tcp_passive 2 20 5 (peer) (first_seg (step_acts sta)) 900 0)
+      (let a1 (tcp_arrive (step_conn sta) 0 (first_seg (step_acts stb)))
+        (let sent (tcp_send (step_conn a1) 0 "hi")
+          (let b2 (tcp_arrive (step_conn stb) 0 (head (step_segs sent)))
+            (add (check_str "b is open" (state_text b2) "ESTABLISHED")
+                 (check_str "and has the data" (acts_text b2) "accepted ; data hi ; send ACK 80>49152 s901 a103 w8192"))))))))

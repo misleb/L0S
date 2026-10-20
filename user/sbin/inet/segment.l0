@@ -1,0 +1,120 @@
+; segment.l0 -- TCP's segments as bytes, built and read, for inet (RFC 9293):
+; the header of ports, sequence and acknowledgement numbers, flags and
+; window, with the one option inet speaks, the maximum segment size, and the
+; checksum over IPv4's pseudo-header (RFC 791, section 3.1; RFC 1071), and
+; the arithmetic on sequence numbers, which wrap at 2^32. Pure, like
+; packet.l0, whose be16, be32 and checksum it uses.
+
+; ------------------------------------------------------------------ the form
+
+; What an IPv4 datagram carrying TCP says it carries.
+(def proto_tcp () int 6)
+
+; A header with no options, and with the maximum segment size option, the
+; only one inet sends, on a segment that opens a connection.
+(def tcp_header_len () int 20)
+(def tcp_header_mss_len () int 24)
+
+; The flags, as the header's 14th byte holds them.
+(def tcp_fin () int 1)
+(def tcp_syn () int 2)
+(def tcp_rst () int 4)
+(def tcp_psh () int 8)
+(def tcp_ack () int 16)
+
+; A segment: the source and destination ports, the sequence number of its
+; first byte (or of its SYN or FIN), the sequence number it acknowledges
+; (read only if the ACK flag is set), its flags, the window it offers, the
+; maximum segment size its SYN option gives (0 if it has none), and its data.
+(data Seg (Seg int int int int int int int (list int)))
+
+; Whether segment s has flag f set.
+(def seg_has ((s Seg) (f int)) bool
+  (match s ((Seg sport dport seq ack flags window mss body) (not (eq (bit_and flags f) 0)))))
+
+; The sequence numbers s takes up: its data's bytes, and one each for SYN
+; and FIN.
+(def seg_space ((s Seg)) int
+  (match s
+    ((Seg sport dport seq ack flags window mss body)
+      (add (length body) (add (if (eq (bit_and flags (tcp_syn)) 0) 0 1) (if (eq (bit_and flags (tcp_fin)) 0) 0 1))))))
+
+; ------------------------------------------------------------ the checksum
+
+; The pseudo-header's sum, which TCP's checksum covers with the segment, for
+; one of len bytes from src to dst.
+(def tcp_pseudo_sum ((src int) (dst int) (len int)) int
+  (sum16 (append (be32 src) (append (be32 dst) (cons 0 (cons (proto_tcp) (be16 len))))) 0))
+
+; ----------------------------------------------------------------- building
+
+; The header's options: the maximum segment size, if the segment gives one.
+(def tcp_options ((mss int)) (list int)
+  (if (eq mss 0) (nil int) (cons 2 (cons 4 (be16 mss)))))
+
+; The segment's bytes with the checksum field sum.
+(def tcp_with_sum ((s Seg) (sum int)) (list int)
+  (match s
+    ((Seg sport dport seq ack flags window mss body)
+      (let opts (tcp_options mss)
+        (append (be16 sport) (append (be16 dport) (append (be32 seq) (append (be32 ack)
+          (cons (shl_nibble (div (add (tcp_header_len) (length opts)) 4)) (cons flags
+            (append (be16 window) (append (be16 sum) (append (be16 0) (append opts body))))))))))))))
+
+; A data offset in the high four bits of a byte.
+(def shl_nibble ((n int)) int (bit_shl n 4))
+
+; The segment from src to dst, as bytes, with its checksum.
+(def tcp_bytes ((src int) (dst int) (s Seg)) (list int)
+  (let zero (tcp_with_sum s 0)
+    (tcp_with_sum s (checksum_of (sum16 zero (tcp_pseudo_sum src dst (length zero)))))))
+
+; ------------------------------------------------------------------ reading
+
+; The maximum segment size the options in bytes i up to j of b give, or 0
+; if they give none. An option is a kind, and unless it is 0 (the end) or 1
+; (no operation), a length counting its two bytes.
+(def tcp_mss_of ((b bytes) (i int) (j int)) int
+  (if (ge i j)
+      0
+      (let kind (bytes_get b i)
+        (if (eq kind 0)
+            0
+            (if (eq kind 1)
+                (tcp_mss_of b (add i 1) j)
+                (if (ge (add i 1) j)
+                    0
+                    (let len (bytes_get b (add i 1))
+                      (if (lt len 2)
+                          0
+                          (if (if (eq kind 2) (eq len 4) false)
+                              (if (le (add i 4) j) (be16_at b (add i 2)) 0)
+                              (tcp_mss_of b (add i len) j))))))))))
+
+; The segment xs holds, sent from src to dst, or none if it is too short,
+; says its header is longer than it is, or has a wrong checksum.
+(def tcp_of ((src int) (dst int) (xs (list int))) (Option Seg)
+  (let b (bytes_from_list xs)
+    (if (lt (bytes_len b) (tcp_header_len))
+        ((None Seg))
+        (let hl (mul 4 (bit_shr (bytes_get b 12) 4))
+          (if (if (lt hl (tcp_header_len)) true (gt hl (bytes_len b)))
+              ((None Seg))
+              (if (not (eq (checksum_of (sum16_bytes b 0 (bytes_len b) (tcp_pseudo_sum src dst (bytes_len b)))) 0))
+                  ((None Seg))
+                  (Some (Seg (be16_at b 0) (be16_at b 2) (be32_at b 4) (be32_at b 8) (bytes_get b 13)
+                             (be16_at b 14) (tcp_mss_of b (tcp_header_len) hl) (bytes_range b hl (bytes_len b))))))))))
+
+; ------------------------------------------------------ sequence numbers
+
+; The sequence number n after a.
+(def seq_add ((a int) (n int)) int (bit_and (add a n) 4294967295))
+
+; How far a is past b, from -2^31 to 2^31 - 1: negative if a is before b.
+(def seq_diff ((a int) (b int)) int
+  (let d (bit_and (sub a b) 4294967295)
+    (if (ge d 2147483648) (sub d 4294967296) d)))
+
+; Whether a comes before b, and whether it does or is b, in sequence space.
+(def seq_lt ((a int) (b int)) bool (lt (seq_diff a b) 0))
+(def seq_le ((a int) (b int)) bool (le (seq_diff a b) 0))

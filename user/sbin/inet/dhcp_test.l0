@@ -1,0 +1,96 @@
+; dhcp_test.l0 -- tests of dhcp.l0: the client's messages byte by byte,
+; and a server's read back, with what is refused.
+
+(def mac () (list int) (cons 82 (cons 84 (cons 0 (cons 18 (cons 52 (cons 86 (nil int))))))))
+
+; xs with element i v.
+(def set_at ((xs (list int)) (i int) (v int)) (list int)
+  (append (take xs i) (cons v (drop xs (add i 1)))))
+
+; A server's message of type, from a client's message m: its op 2, and
+; yiaddr, with options after the type's.
+(def server_says ((m (list int)) (type int) (yiaddr int) (options (list int))) (list int)
+  (append (take (set_at m 0 2) 16)
+    (append (be32 yiaddr)
+      (append (take (drop m 20) 220)
+        (append (opt_bytes (opt_type) (cons type (nil int))) (append options (cons 255 (nil int))))))))
+
+; A message's fields as text: op, xid, type, mac, yiaddr, the requested
+; address, mask, router, server and lease, or none.
+(def dhcp_text ((m (Option Dhcp))) (list int)
+  (match m
+    ((None) "none")
+    ((Some d)
+      (match d
+        ((Dhcp op xid type hw yi req mask router server lease)
+          (unwords (cons (digits op) (cons (digits xid) (cons (digits type) (cons (mac_text hw)
+            (cons (ip_text yi) (cons (ip_text req) (cons (ip_text mask) (cons (ip_text router) (cons (ip_text server)
+              (cons (digits lease) (nil (list int))))))))))))))))))
+
+; A discover is 240 bytes and its options: type, three bytes; the wanted
+; list, four; and the end.
+(def test_discover_length () int
+  (check_int "bytes" (length (dhcp_discover 4660 (mac))) 248))
+
+; Byte by byte: op 1, Ethernet 1 of 6, no hops; the xid 0x1234; no
+; seconds; the broadcast flag; zero addresses; the hardware address and
+; its padding; the cookie.
+(def test_discover_fixed () int
+  (let m (dhcp_discover 4660 (mac))
+    (add (check_str "op to hops" (take m 4) (cons 1 (cons 1 (cons 6 (cons 0 (nil int))))))
+         (add (check_str "xid, secs, flags" (take (drop m 4) 8) (cons 0 (cons 0 (cons 18 (cons 52 (cons 0 (cons 0 (cons 128 (cons 0 (nil int))))))))))
+              (add (check_str "chaddr" (take (drop m 28) 6) (mac))
+                   (check_str "cookie" (take (drop m 236) 4) (cons 99 (cons 130 (cons 83 (cons 99 (nil int)))))))))))
+
+(def test_discover_options () int
+  (check_str "type 1, wanting mask and router, the end" (drop (dhcp_discover 4660 (mac)) 240)
+             (cons 53 (cons 1 (cons 1 (cons 55 (cons 2 (cons 1 (cons 3 (cons 255 (nil int)))))))))))
+
+; A request names the address and the server.
+(def test_request_options () int
+  (check_str "type 3, 50, 54, wanted, end" (drop (dhcp_request 4660 (mac) (ip_of 10 0 2 15) (ip_of 10 0 2 2)) 240)
+             (cons 53 (cons 1 (cons 3 (cons 50 (cons 4 (cons 10 (cons 0 (cons 2 (cons 15 (cons 54 (cons 4 (cons 10 (cons 0 (cons 2 (cons 2
+               (cons 55 (cons 2 (cons 1 (cons 3 (cons 255 (nil int)))))))))))))))))))))))
+
+; A client's own message is not a server's: its op is 1, which dhcp_of
+; reads all the same.
+(def test_read_own () int
+  (check_str "a discover" (dhcp_text (dhcp_of (dhcp_discover 4660 (mac))))
+             "1 4660 1 52:54:00:12:34:56 0.0.0.0 0.0.0.0 0.0.0.0 0.0.0.0 0.0.0.0 0"))
+
+; An offer: the address, the mask, the router, the server, a day's lease.
+(def test_read_offer () int
+  (let o (append (opt_bytes (opt_mask) (be32 (ip_mask 24)))
+         (append (opt_bytes (opt_router) (be32 (ip_of 10 0 2 2)))
+         (append (opt_bytes (opt_server) (be32 (ip_of 10 0 2 2)))
+                 (opt_bytes (opt_lease) (be32 86400)))))
+    (check_str "an offer" (dhcp_text (dhcp_of (server_says (dhcp_discover 4660 (mac)) 2 (ip_of 10 0 2 15) o)))
+               "2 4660 2 52:54:00:12:34:56 10.0.2.15 0.0.0.0 255.255.255.0 10.0.2.2 10.0.2.2 86400")))
+
+; Pad options are skipped, and the first of several routers is the one.
+(def test_read_pad_routers () int
+  (let o (append (cons 0 (cons 0 (nil int))) (opt_bytes (opt_router) (append (be32 (ip_of 10 0 2 1)) (be32 (ip_of 10 0 2 2)))))
+    (check_str "padded" (dhcp_text (dhcp_of (server_says (dhcp_discover 1 (mac)) 5 (ip_of 10 0 2 15) o)))
+               "2 1 5 52:54:00:12:34:56 10.0.2.15 0.0.0.0 0.0.0.0 10.0.2.1 0.0.0.0 0")))
+
+; An option cut short by the end of the message is left out, with what
+; follows it; the message is read all the same.
+(def test_read_truncated () int
+  (let m (append (take (server_says (dhcp_discover 1 (mac)) 5 (ip_of 10 0 2 15) (nil int)) 243) (cons 3 (cons 4 (cons 10 (nil int)))))
+    (check_str "no router" (dhcp_text (dhcp_of m)) "2 1 5 52:54:00:12:34:56 10.0.2.15 0.0.0.0 0.0.0.0 0.0.0.0 0.0.0.0 0")))
+
+(def test_read_refused () int
+  (let m (server_says (dhcp_discover 1 (mac)) 2 (ip_of 10 0 2 15) (nil int))
+    (add (check_str "short" (dhcp_text (dhcp_of (take m 239))) "none")
+         (add (check_str "not Ethernet" (dhcp_text (dhcp_of (set_at m 1 6))) "none")
+              (add (check_str "no cookie" (dhcp_text (dhcp_of (set_at m 236 0))) "none")
+                   (check_str "no type" (dhcp_text (dhcp_of (append (take m 240) (cons 255 (nil int))))) "none"))))))
+
+; An option's data is at least four bytes to be an address.
+(def test_short_address () int
+  (check_int "none" (opt_addr (cons (Opt 1 (cons 255 (cons 255 (nil int)))) (nil Opt)) 1) 0))
+
+; Round trip: what a client builds is what dhcp_of reads, for any xid.
+(def test_request_read () int
+  (check_str "a request" (dhcp_text (dhcp_of (dhcp_request 4294967295 (mac) (ip_of 10 0 2 15) (ip_of 10 0 2 2))))
+             "1 4294967295 3 52:54:00:12:34:56 0.0.0.0 10.0.2.15 0.0.0.0 0.0.0.0 10.0.2.2 0"))

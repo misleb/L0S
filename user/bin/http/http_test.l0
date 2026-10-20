@@ -1,0 +1,89 @@
+; http_test.l0 -- tests of http.l0: the URLs it takes, the request it
+; sends, and the responses it reads.
+
+; A URL as text: the address, port, path and host, or why not.
+(def url_text ((r (Result Url (list int)))) (list int)
+  (match r
+    ((Err why) (append "error: " why))
+    ((Ok u) (match u ((Url addr port path host) (unwords (cons (ip_text addr) (cons (digits port) (cons path (cons host (nil (list int))))))))))))
+
+(def test_url_plain () int
+  (check_str "http://" (url_text (url_of "http://10.0.2.2/index.html")) "10.0.2.2 80 /index.html 10.0.2.2"))
+
+(def test_url_port () int
+  (check_str "a port" (url_text (url_of "http://10.0.2.2:8080/a/b?c=d")) "10.0.2.2 8080 /a/b?c=d 10.0.2.2:8080"))
+
+; The scheme and the path may be left out.
+(def test_url_short () int
+  (add (check_str "no scheme" (url_text (url_of "10.0.2.2:81/x")) "10.0.2.2 81 /x 10.0.2.2:81")
+       (check_str "no path" (url_text (url_of "10.0.2.2")) "10.0.2.2 80 / 10.0.2.2")))
+
+(def test_url_refused () int
+  (add (check_str "a name" (url_text (url_of "http://example.com/")) "error: not an address: example.com")
+       (add (check_str "https" (url_text (url_of "https://10.0.2.2/")) "error: only http:// is spoken")
+            (add (check_str "port 0" (url_text (url_of "10.0.2.2:0/")) "error: a port is 1 to 65535")
+                 (check_str "not a port" (url_text (url_of "10.0.2.2:x/")) "error: not a port: x")))))
+
+(def test_request () int
+  (match (url_of "http://10.0.2.2:8080/p")
+    ((Err why) (fail_because "url" why))
+    ((Ok u)
+      (check_str "the request" (request_text u)
+                 "GET /p HTTP/1.0\r\nHost: 10.0.2.2:8080\r\nUser-Agent: l0s-http\r\nConnection: close\r\n\r\n"))))
+
+; ------------------------------------------------------------------ responses
+
+(def test_head_end () int
+  (add (check_int "after CR LF CR LF" (head_end "HTTP/1.0 200 OK\r\nA: b\r\n\r\nbody" 0) 25)
+       (add (check_int "after LF LF" (head_end "HTTP/1.0 200 OK\n\nbody" 0) 17)
+            (check_int "not yet" (head_end "HTTP/1.0 200 OK\r\nA: b\r\n" 0) -1))))
+
+(def test_status_codes () int
+  (add (check_int "200" (status_of "HTTP/1.0 200 OK\r\n\r\n") 200)
+       (add (check_int "404" (status_of "HTTP/1.1 404 Not Found\r\nA: b\r\n\r\n") 404)
+            (add (check_int "not HTTP" (status_of "SSH-2.0-x\r\n") 0)
+                 (check_int "no code" (status_of "HTTP/1.0\r\n") 0)))))
+
+(def test_served () int
+  (add (check_bool "200" (served 200) true)
+       (add (check_bool "299" (served 299) true)
+            (add (check_bool "301" (served 301) false)
+                 (check_bool "0" (served 0) false)))))
+
+(def test_status_line () int
+  (check_str "the first line" (status_line "HTTP/1.0 404 Not Found\r\nA: b\r\n\r\n") "HTTP/1.0 404 Not Found"))
+
+; A response in two pieces, cut in the middle of the empty line: the header
+; is kept until it is complete, and its status is then known.
+(def test_page_pieces () int
+  (let p (page_more (page_more (Page false (nil int) false 0) "HTTP/1.0 200 OK\r\nA: b\r\n\r") "\nbody")
+    (add (check_bool "complete" (page_done p) true)
+         (add (check_int "status" (page_status p) 200)
+              (check_str "header" (page_head p) "HTTP/1.0 200 OK\r\nA: b\r\n\r\n")))))
+
+(def test_page_incomplete () int
+  (let p (page_more (Page false (nil int) false 0) "HTTP/1.0 200 OK\r\n")
+    (add (check_bool "not complete" (page_done p) false)
+         (check_int "no status" (page_status p) 0))))
+
+; Exit statuses: served, a status that is not 2xx, and no response.
+(def test_page_exit () int
+  (add (check_int "200" (page_exit (Page false "HTTP/1.0 200 OK\r\n\r\n" true 200)) 0)
+       (add (check_int "404" (page_exit (Page false "HTTP/1.0 404 Not Found\r\n\r\n" true 404)) 1)
+            (add (check_int "not HTTP" (page_exit (Page false (nil int) true 0)) 1)
+                 (check_int "nothing" (page_exit (Page false (nil int) false 0)) 1)))))
+
+; Why a connection ended: after a whole response, "closed" is the page, and
+; anything else is not; with no response, nothing is.
+(def test_ended () int
+  (add (check_int "closed" (ended (Page false "HTTP/1.0 200 OK\r\n\r\n" true 200) "closed") 0)
+       (add (check_int "reset after the header" (ended (Page false "HTTP/1.0 200 OK\r\n\r\n" true 200) "reset") 1)
+            (check_int "refused" (ended (Page false (nil int) false 0) "refused") 1))))
+
+; Under an operating system there is no network, nor l0 test's arguments a
+; URL.
+(def test_no_network () int
+  (add (check_int "no arguments" (http) 1)
+       (match (url_of "10.0.2.2/")
+         ((Err why) (fail_because "url" why))
+         ((Ok u) (check_int "no inet" (fetch (inet_open) 0 u false) 1)))))

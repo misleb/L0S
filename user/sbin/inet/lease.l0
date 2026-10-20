@@ -1,0 +1,211 @@
+; lease.l0 -- inet's DHCP client (RFC 2131): the exchange that gives a
+; stack its address, run over the stack itself. The client has the stack
+; send its DISCOVER, and then its REQUEST of the offer it takes, as any
+; datagram it sends, from 0.0.0.0 port 68 to 255.255.255.255 port 67,
+; where the Out queue holds them; and it binds port 68 to inet's own
+; port, so that the servers' answers, which come to 255.255.255.255 or
+; to the address offered, are taken by the stack like any datagram, and
+; found in the Out queue as the notices they are. Each step is a pure
+; function of the stack, so a test reads what it sent from its queue;
+; lease_run is what waits for the servers.
+
+; ---------------------------------------------------------------- the state
+
+; Where the exchange is, and for which xid: DISCOVER sent, the offers
+; awaited; REQUEST of an address sent to a server, whose ACK is awaited;
+; or the address taken and the stack configured.
+(data Lease (Selecting int) (Requesting int int int) (Leased))
+
+; The stack after a step, and where the exchange is.
+(data Leasing (Leasing Stack Lease))
+
+; How long to wait for an answer before sending again, and how many
+; times to send in all.
+(def lease_retry_ns () int 2000000000)
+(def lease_tries () int 5)
+
+; The xid of an exchange begun at time now by the card whose address is
+; mac: 32 bits, from both.
+(def lease_xid ((mac (list int)) (now int)) int
+  (bit_and (bit_xor now (be32_at (bytes_from_list mac) 2)) 4294967295))
+
+; The xid of the exchange l is.
+(def lease_xid_of ((l Lease)) int
+  (match l
+    ((Selecting x) x)
+    ((Requesting x offered server) x)
+    ((Leased) -1)))
+
+; Whether the exchange is over.
+(def lease_done ((l Lease)) bool
+  (match l
+    ((Selecting x) false)
+    ((Requesting x offered server) false)
+    ((Leased) true)))
+
+; ------------------------------------------------------------------ sending
+
+; s with c as its interface.
+(def stack_with ((s Stack) (c Config)) Stack
+  (match s ((Stack l old n k id t o) (Stack l c n k id t o))))
+
+; s's interface.
+(def stack_config ((s Stack)) Config
+  (match s ((Stack l c n k id t o) c)))
+
+; A datagram of DHCP, content, from port 68 at 0.0.0.0 to port 67 at
+; 255.255.255.255, put on the wire once s is done with its message.
+(def lease_datagram ((s Stack) (content (list int))) Stack
+  (ip_out s (ip_broadcast) (proto_udp)
+          (udp_bytes 0 (ip_broadcast) (dhcp_client_port) (dhcp_server_port) content)))
+
+; What l has the client say: a DISCOVER while selecting, a REQUEST of the
+; offer while requesting.
+(def lease_send ((s Stack) (l Lease)) Stack
+  (match l
+    ((Selecting x) (lease_datagram s (dhcp_discover x (stack_mac s))))
+    ((Requesting x offered server) (lease_datagram s (dhcp_request x (stack_mac s) offered server)))
+    ((Leased) s)))
+
+; The exchange begun: s, whose address is 0, listening for the servers'
+; answers on port, and DISCOVER sent with the xid.
+(def lease_start ((s Stack) (port int) (xid int)) Leasing
+  (let l (Selecting xid)
+    (Leasing (lease_send (lease_listening s port) l) l)))
+
+; s with port 68's datagrams told to port, inet's own.
+(def lease_listening ((s Stack) (port int)) Stack
+  (match (bind_port s port (dhcp_client_port))
+    ((Served s2 answer) s2)))
+
+; ---------------------------------------------------------------- receiving
+
+; The netmask a classful address has, for a server that gives none.
+(def class_mask ((a int)) int
+  (if (lt (ip_byte a 0) 128)
+      (ip_mask 8)
+      (if (lt (ip_byte a 0) 192) (ip_mask 16) (ip_mask 24))))
+
+; The interface an ACK of d gives: the address, the mask it names or the
+; address's class has, and the first router, or none.
+(def lease_config ((d Dhcp)) Config
+  (match d
+    ((Dhcp op xid type hw yi req mask router server lease)
+      (Config yi (if (eq mask 0) (class_mask yi) mask) router))))
+
+; The exchange l, and the stack, after d, which is for this card and this
+; exchange if it comes from a server with the xid; anything else leaves
+; them as they are.
+(def lease_heard ((s Stack) (l Lease) (d Dhcp)) Leasing
+  (match d
+    ((Dhcp op xid type hw yi req mask router server lease)
+      (if (if (eq op 2) (if (eq xid (lease_xid_of l)) (eq hw (stack_mac s)) false) false)
+          (lease_answered s l d)
+          (Leasing s l)))))
+
+; The exchange after an answer d that is for it: an OFFER of an address
+; is taken, by a REQUEST of it to the server; an ACK of that address
+; configures the stack; a NAK begins again, with a new xid.
+(def lease_answered ((s Stack) (l Lease) (d Dhcp)) Leasing
+  (match d
+    ((Dhcp op xid type hw yi req mask router server lease)
+      (match l
+        ((Selecting x)
+          (if (if (eq type (dhcp_offer_type)) (if (eq yi 0) false (not (eq server 0))) false)
+              (lease_next s (Requesting x yi server))
+              (Leasing s l)))
+        ((Requesting x offered srv)
+          (if (if (eq type (dhcp_ack_type)) (eq yi offered) false)
+              (Leasing (stack_with s (lease_config d)) (Leased))
+              (if (eq type (dhcp_nak_type)) (lease_next s (Selecting (bit_and (add x 1) 4294967295))) (Leasing s l))))
+        ((Leased) (Leasing s l))))))
+
+; l, and s with what it has the client say, said.
+(def lease_next ((s Stack) (l Lease)) Leasing
+  (Leasing (lease_send s l) l))
+
+; Each datagram of DHCP in datagrams, which are the content of what
+; servers sent, heard in turn.
+(def lease_each ((s Stack) (l Lease) (datagrams (list (list int)))) Leasing
+  (if (is_empty datagrams)
+      (Leasing s l)
+      (match (dhcp_of (head datagrams))
+        ((None) (lease_each s l (tail datagrams)))
+        ((Some d)
+          (match (lease_heard s l d)
+            ((Leasing s2 l2) (lease_each s2 l2 (tail datagrams))))))))
+
+; The content of the datagram notice payload holds, if it is one from
+; a server's port.
+(def lease_content ((payload (list int))) (list (list int))
+  (match (datagram_of payload)
+    ((None) (nil (list int)))
+    ((Some d)
+      (match d
+        ((Datagram src sport dport content)
+          (if (eq sport (dhcp_server_port)) (cons content (nil (list int))) (nil (list int))))))))
+
+; The Out queue os, oldest first, split: what is not for port 68 stays,
+; reversed as the queue holds it, in keep, and the content of what is is
+; put after got, in order.
+(def lease_taken ((os (list Out)) (keep (list Out)) (got (list (list int)))) Taken
+  (if (is_empty os)
+      (Taken keep (rev got))
+      (match (head os)
+        ((Out port payload dest)
+          (match dest
+            ((ToUdp p)
+              (if (eq p (dhcp_client_port))
+                  (lease_taken (tail os) keep (append (rev (lease_content payload)) got))
+                  (lease_taken (tail os) (cons (head os) keep) got)))
+            ((ToWire) (lease_taken (tail os) (cons (head os) keep) got))
+            ((ToClient) (lease_taken (tail os) (cons (head os) keep) got))
+            ((ToPing e) (lease_taken (tail os) (cons (head os) keep) got))
+            ((ToTcp id) (lease_taken (tail os) (cons (head os) keep) got)))))))
+
+; What is left in the queue, and the datagrams taken out of it.
+(data Taken (Taken (list Out) (list (list int))))
+
+; message, a frame or a request from pid from, given to s, and the
+; servers' answers it brought heard. While an address is offered, s has
+; it as its own for the message, so that a server may send the ACK to it;
+; its interface is 0.0.0.0 again afterwards, until an ACK gives it one.
+(def lease_hear ((s Stack) (l Lease) (from int) (payload (list int))) Leasing
+  (let c (stack_config s)
+    (match (message (stack_with s (hearing c l)) from payload)
+      ((Stack lk c2 n k id t o)
+        (match (lease_taken (rev o) (nil Out) (nil (list int)))
+          ((Taken keep got) (lease_each (Stack lk c n k id t keep) l got)))))))
+
+; The interface to give a stack that hears for l, whose own is c: with
+; the offered address once there is one.
+(def hearing ((c Config) (l Lease)) Config
+  (match l
+    ((Selecting x) c)
+    ((Requesting x offered server) (Config offered 0 0))
+    ((Leased) c)))
+
+; ------------------------------------------------------------------ waiting
+
+; s with its first DISCOVER sent, its answers waited for, and sent again
+; every lease_retry_ns, lease_tries times in all: s configured by a
+; server, or none if no server answered. The queue is sent after each
+; step.
+(def lease_run ((s Stack) (port int)) (Option Stack)
+  (match (lease_start s port (lease_xid (stack_mac s) (clock_ns)))
+    ((Leasing s2 l) (lease_wait (sent_out s2) l port (add (clock_ns) (lease_retry_ns)) 1))))
+
+; Waits for answers to l, which s's queue has sent, until due, the time
+; the try is over, the tries'th.
+(def lease_wait ((s Stack) (l Lease) (port int) (due int) (tries int)) (Option Stack)
+  (if (lease_done l)
+      (Some (unbound s (dhcp_client_port)))
+      (if (ge (clock_ns) due)
+          (if (ge tries (lease_tries))
+              ((None Stack))
+              (lease_wait (sent_out (lease_send s l)) l port (add (clock_ns) (lease_retry_ns)) (add tries 1)))
+          (match (port_try_receive port)
+            ((RecvFailed) (let z (sleep_ns 10000000) (lease_wait s l port due tries)))
+            ((Message from payload)
+              (match (lease_hear s l from payload)
+                ((Leasing s2 l2) (lease_wait (sent_out s2) l2 port due tries))))))))

@@ -1,0 +1,196 @@
+; http.l0 -- fetches a page over HTTP/1.0 (RFC 1945), through the network
+; stack's TCP, inet:
+;
+;   http [-i] [http://]ADDR[:PORT][/PATH]
+;                           the page at PATH (/ if none) of the server at
+;                           ADDR, port 80 if none, written to standard
+;                           output; -i writes the response's header first
+;
+; ADDR is dotted: there is no name service. It sends one request, with
+; Connection: close, and reads until the server closes, so the page is as
+; long as it is; it does not follow a redirect. A status other than 2xx
+; is said on standard error and fails the command, after the page.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "http" why))
+
+; How long to wait for the server to say anything, and how much of a
+; response's header to wait for the end of.
+(def idle_ns () int 10000000000)
+(def head_limit () int 16384)
+
+; ---------------------------------------------------------------------- URLs
+
+; A page asked for: the server's address and port, the path, and the host
+; as the request names it.
+(data Url (Url int int (list int) (list int)))
+
+; The URL s names, which may leave out the http://.
+(def url_of ((s (list int))) (Result Url (list int))
+  (let rest (if (starts_with s "http://") (drop_n s 7) s)
+    (if (contains (up_to 47 rest) "/")
+        ((Err Url (list int)) "no path to a page here")
+        (if (if (starts_with rest "https://") true (contains (up_to 47 rest) "@"))
+            ((Err Url (list int)) "only http:// is spoken")
+            (url_parts (up_to 47 rest) (let p (drop_n rest (length (up_to 47 rest))) (if (is_empty p) "/" p)))))))
+
+; The URL of a host and port as hostport, `ADDR` or `ADDR:PORT`, and path.
+(def url_parts ((hostport (list int)) (path (list int))) (Result Url (list int))
+  (match (ip_parse (up_to 58 hostport))
+    ((None) ((Err Url (list int)) (append "not an address: " (up_to 58 hostport))))
+    ((Some addr)
+      (let after (drop_n hostport (length (up_to 58 hostport)))
+        (if (is_empty after)
+            ((Ok Url (list int)) (Url addr 80 path hostport))
+            (match (word_number (drop_n after 1))
+              ((None) ((Err Url (list int)) (append "not a port: " (drop_n after 1))))
+              ((Some port)
+                (if (if (ge port 1) (le port 65535) false)
+                    ((Ok Url (list int)) (Url addr port path hostport))
+                    ((Err Url (list int)) "a port is 1 to 65535")))))))))
+
+; The request for a page: HTTP/1.0, which the server closes the connection
+; after answering, so that the answer's end is the connection's.
+(def request_text ((u Url)) (list int)
+  (match u
+    ((Url addr port path host)
+      (concat (cons "GET " (cons path (cons " HTTP/1.0\r\nHost: " (cons host (cons "\r\nUser-Agent: l0s-http\r\nConnection: close\r\n\r\n" (nil (list int)))))))))))
+
+; ------------------------------------------------------------------ responses
+
+; The index just past the empty line that ends a response's header, from i
+; on in xs, or -1 if it has not come.
+(def head_end ((xs (list int)) (i int)) int
+  (if (is_empty xs)
+      -1
+      (if (starts_with xs "\r\n\r\n")
+          (add i 4)
+          (if (starts_with xs "\n\n") (add i 2) (head_end (tail xs) (add i 1))))))
+
+; The status code of a response whose header is head, or 0 if it does not
+; start with a status line: HTTP/1.0 200 OK.
+(def status_of ((head (list int))) int
+  (let ws (split_spaces (strip_cr (take_line head)))
+    (if (if (gt (length ws) 1) (starts_with (head ws) "HTTP/") false)
+        (match (word_number (nth ws 1))
+          ((None) 0)
+          ((Some code) code))
+        0)))
+
+; The status line of a response whose header is head, as a message.
+(def status_line ((head (list int))) (list int) (strip_cr (take_line head)))
+
+; Whether a status code says the request was served.
+(def served ((code int)) bool (if (ge code 200) (lt code 300) false))
+
+; ---------------------------------------------------------------- the response
+
+; How far a response has come: whether to write its header, the header so
+; far, or all of it once it is complete; whether it is complete; and its
+; status.
+(data Page (Page bool (list int) bool int))
+
+; The page p after more bytes: while its header is not complete they are
+; kept; the header's end is found, the header is written if it is to be, and
+; what follows it; after that everything is written as it comes.
+(def page_more ((p Page) (chunk (list int))) Page
+  (match p
+    ((Page show head done status)
+      (if done
+          (let w (write_str chunk) p)
+          (let all (append head chunk)
+            (let e (head_end all 0)
+              (if (lt e 0)
+                  (if (gt (length all) (head_limit))
+                      (let w (write_str all) (Page show (nil int) true 0))
+                      (Page show all false 0))
+                  (let w (if show (write_str (take all e)) 0)
+                    (let w2 (write_str (drop_n all e))
+                      (Page show (take all e) true (status_of all)))))))))))
+
+; The header of a page that has one.
+(def page_head ((p Page)) (list int) (match p ((Page show head done status) head)))
+
+; The page's status: 0 if it is not a response, or has not come.
+(def page_status ((p Page)) int (match p ((Page show head done status) status)))
+
+; Whether the page's header has come.
+(def page_done ((p Page)) bool (match p ((Page show head done status) done)))
+
+; What the page came to, as an exit status: 0 if it was served, and
+; otherwise why not, said.
+(def page_exit ((p Page)) int
+  (if (not (page_done p))
+      (complain "no response")
+      (if (eq (page_status p) 0)
+          (complain "not an HTTP response")
+          (if (served (page_status p))
+              0
+              (complain (status_line (page_head p)))))))
+
+; ------------------------------------------------------------------- fetching
+
+; The page the arguments name.
+(def http () int
+  (let argv (args)
+    (let show (if (is_empty argv) false (eq (head argv) "-i"))
+      (let rest (if show (tail argv) argv)
+        (if (not (eq (length rest) 1))
+            (complain "http [-i] [http://]ADDR[:PORT][/PATH]")
+            (match (url_of (head rest))
+              ((Err why) (complain why))
+              ((Ok u) (fetch (inet_open) (port_new) u show))))))))
+
+; u fetched through inet n, its notices coming to port np.
+(def fetch ((n Inet) (np int) (u Url) (show bool)) int
+  (match u
+    ((Url addr port path host)
+      (match (tcp_connect n np addr port)
+        ((Err why) (complain why))
+        ((Ok id) (awaiting n np id u (Page show (nil int) false 0) (add (clock_ns) (idle_ns))))))))
+
+; Notices of connection id, until it is gone: the request sent when it
+; opens, the response taken as it comes, and our end closed when the
+; server's is.
+(def awaiting ((n Inet) (np int) (id int) (u Url) (p Page) (deadline int)) int
+  (match (port_try_receive np)
+    ((RecvFailed)
+      (if (gt (clock_ns) deadline)
+          (let r (tcp_reset n id) (complain "the server did not answer"))
+          (let z (sleep_ns 1000000) (awaiting n np id u p deadline))))
+    ((Message from payload)
+      (match (tcp_event_of payload)
+        ((None) (awaiting n np id u p deadline))
+        ((Some e) (heard n np id u p e (add (clock_ns) (idle_ns))))))))
+
+; The event e, if it is connection id's, dealt with.
+(def heard ((n Inet) (np int) (id int) (u Url) (p Page) (e TcpEvent) (deadline int)) int
+  (match e
+    ((TcpUp i)
+      (if (eq i id) (sent_request n np id u p deadline) (awaiting n np id u p deadline)))
+    ((TcpAccepted i src sport lport) (awaiting n np id u p deadline))
+    ((TcpData i body)
+      (if (eq i id) (awaiting n np id u (page_more p body) deadline) (awaiting n np id u p deadline)))
+    ((TcpFin i)
+      (if (eq i id)
+          (let w (tcp_finish n id) (awaiting n np id u p deadline))
+          (awaiting n np id u p deadline)))
+    ((TcpClosed i why)
+      (if (eq i id) (ended p why) (awaiting n np id u p deadline)))))
+
+; The request written to connection id, now it is open.
+(def sent_request ((n Inet) (np int) (id int) (u Url) (p Page) (deadline int)) int
+  (let why (tcp_write n id (request_text u))
+    (if (is_empty why) (awaiting n np id u p deadline) (complain why))))
+
+; The fetch over, as the connection ended: closed after a response is the
+; page; anything else is why there is none.
+(def ended ((p Page) (why (list int))) int
+  (if (eq why "closed")
+      (page_exit p)
+      (if (page_done p) (page_exit_cut p why) (complain (append "the connection " why)))))
+
+; A response cut short by its connection's end: what came is written, and
+; this is said.
+(def page_exit_cut ((p Page) (why (list int))) int
+  (complain (append "the connection " (append why " before the page ended"))))

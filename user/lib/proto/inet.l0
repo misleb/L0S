@@ -20,13 +20,55 @@
 ;                           refused; the echo's reply comes to the reply
 ;                           port as a pong notice
 ;
+;   connect ADDR PORT NPORT a TCP connection opened to PORT at ADDR, whose
+;                           notices go to the port NPORT, which is the
+;                           client's: connecting ID LPORT, its number and
+;                           local port. It is not open until a notice says
+;                           so
+;   listen PORT NPORT       listening PORT: TCP connections to PORT are
+;                           made, and told to NPORT; 0 for a port inet
+;                           picks, from 49152
+;   unlisten PORT           ok: no more are made; those made go on
+;   write ID                and then a newline and the data: given to
+;                           connection ID, which sends it as the peer's
+;                           window lets it. Answered only if the request
+;                           names a reply port, with ok or why not; more
+;                           than 16384 bytes unsent resets the connection
+;   finish ID               ok: connection ID closed once its data is sent
+;   reset ID                ok: connection ID given up, with a reset
+;   tcp                     a line ID STATE LPORT ADDR:RPORT for each
+;                           connection, and listen PORT for each listener
+;
 ; Each is a request (l0s.l0), its words separated by spaces; the reply is
-; as said above, or error: WHY. The notices inet sends a client:
+; as said above, or error: WHY. Only the process that opened a connection,
+; or listened to its port, may write to it, finish it, reset it, or
+; unlisten (inet knows it by its pid). The notices inet sends a client:
 ;
 ;   udp SRC SPORT DPORT     then a newline and the data: a datagram from
 ;                           SPORT at SRC to the client's DPORT
 ;   pong SRC SEQ TTL N      echo reply SEQ from SRC, an ICMP message of N
 ;                           bytes, with TTL hops left
+;
+; and, to the port a connection's owner named, each as a TcpEvent:
+;
+;   tcp ID up               connection ID, which the client opened, is open
+;   tcp ID accepted SRC SPORT LPORT
+;                           a connection to LPORT, which the client
+;                           listens to, from SPORT at SRC, is open, as ID
+;   tcp ID data             then a newline and the data that came
+;   tcp ID fin              the peer will send no more
+;   tcp ID closed WHY       the end of connection ID, and WHY in a word:
+;                           closed (it ended as it should, once both
+;                           ends had closed), reset (the peer reset it),
+;                           refused (the peer reset it at the start),
+;                           timeout (nothing came after many tries),
+;                           aborted (the client reset it), or
+;                           overflow (the client's port was full, or it
+;                           wrote too much)
+;
+; A client asks through its own reply port, and has its connections' notices
+; come to another, so that an answer is never taken for a notice; its
+; connection's last notice is closed.
 ;
 ; An address is an int here, its first byte the most significant: 10.0.2.15
 ; is 167772687. Linked, with nic.l0, into the stack and into the programs
@@ -224,3 +266,126 @@
               ((None) ((None Pong)))
               ((Some ns) (Some (Pong src (nth ns 0) (nth ns 1) (nth ns 2)))))))
         ((None Pong)))))
+
+; -------------------------------------------------------------------- TCP
+
+; What a notice about a TCP connection tells: that one this process opened
+; is up; that a listener's port was connected to, from an address and port,
+; as a connection with this number; data that came; that the peer will send
+; no more; or that the connection is gone, and why, in one word: closed (it
+; ended as it should), reset, refused, timeout, aborted, or overflow (the
+; process did not take its notices fast enough).
+(data TcpEvent (TcpUp int) (TcpAccepted int int int int) (TcpData int (list int)) (TcpFin int) (TcpClosed int (list int)))
+
+; The tcp notice of e, as inet sends it to the port a connection's notices
+; go to.
+(def tcp_notice ((e TcpEvent)) (list int)
+  (match e
+    ((TcpUp id) (unwords (cons "tcp" (cons (digits id) (cons "up" (nil (list int)))))))
+    ((TcpAccepted id src sport lport)
+      (unwords (cons "tcp" (cons (digits id) (cons "accepted" (cons (ip_text src) (numbers_words (cons sport (cons lport (nil int))))))))))
+    ((TcpData id body) (append (unwords (cons "tcp" (cons (digits id) (cons "data" (nil (list int)))))) (cons 10 body)))
+    ((TcpFin id) (unwords (cons "tcp" (cons (digits id) (cons "fin" (nil (list int)))))))
+    ((TcpClosed id why) (unwords (cons "tcp" (cons (digits id) (cons "closed" (cons why (nil (list int))))))))))
+
+; The event a tcp notice holds, or none if payload is not one.
+(def tcp_event_of ((payload (list int))) (Option TcpEvent)
+  (if (not (starts_with payload "tcp "))
+      ((None TcpEvent))
+      (let ws (split_spaces (take_line payload))
+        (if (lt (length ws) 3)
+            ((None TcpEvent))
+            (match (word_number (nth ws 1))
+              ((None) ((None TcpEvent)))
+              ((Some id) (tcp_event_words id (nth ws 2) (drop ws 3) (drop_line payload))))))))
+
+; The event for connection id of the notice's kind, its other words, and the
+; lines after its first.
+(def tcp_event_words ((id int) (kind (list int)) (rest (list (list int))) (body (list int))) (Option TcpEvent)
+  (if (if (eq kind "up") (is_empty rest) false) (Some (TcpUp id))
+  (if (if (eq kind "fin") (is_empty rest) false) (Some (TcpFin id))
+  (if (if (eq kind "data") (is_empty rest) false) (Some (TcpData id body))
+  (if (eq kind "closed") (Some (TcpClosed id (unwords rest)))
+  (if (if (eq kind "accepted") (eq (length rest) 3) false) (tcp_accepted_of id rest)
+  ((None TcpEvent))))))))
+
+; The accepted event of connection id, from the words ADDR PORT LPORT.
+(def tcp_accepted_of ((id int) (ws (list (list int)))) (Option TcpEvent)
+  (match (ip_parse (nth ws 0))
+    ((None) ((None TcpEvent)))
+    ((Some src)
+      (match (word_numbers (tail ws))
+        ((None) ((None TcpEvent)))
+        ((Some ps) (Some (TcpAccepted id src (nth ps 0) (nth ps 1))))))))
+
+; A connection to port at dst, opened for this process, whose notices go
+; to the port np, which must be this process's: its number and its local
+; port, or why not. The connection is not open until a tcp notice says
+; it is up, or closed, and why not.
+(def tcp_connect ((n Inet) (np int) (dst int) (port int)) (Result int (list int))
+  (let r (inet_ask n (append "connect " (unwords (cons (ip_text dst) (numbers_words (cons port (cons np (nil int))))))))
+    (let ws (split_spaces r)
+      (if (if (eq (length ws) 3) (if (eq (head ws) "connecting") (is_number (nth ws 1)) false) false)
+          ((Ok int (list int)) (int_prefix (nth ws 1) 0))
+          ((Err int (list int)) (inet_error r))))))
+
+; TCP port p listened to for this process, 0 for a port inet picks: the
+; port, or why not. Each connection to it is a notice to the port np, as
+; accepted, and its notices after that go there too.
+(def tcp_listen ((n Inet) (np int) (p int)) (Result int (list int))
+  (let r (inet_ask n (append "listen " (unwords (numbers_words (cons p (cons np (nil int)))))))
+    (let ws (split_spaces r)
+      (if (if (eq (length ws) 2) (if (eq (head ws) "listening") (is_number (nth ws 1)) false) false)
+          ((Ok int (list int)) (int_prefix (nth ws 1) 0))
+          ((Err int (list int)) (inet_error r))))))
+
+; TCP port p listened to no more: empty, or why not. Connections already
+; accepted stay.
+(def tcp_unlisten ((n Inet) (p int)) (list int)
+  (inet_error (inet_ask n (append "unlisten " (digits p)))))
+
+; The most data one write request holds.
+(def tcp_write_max () int 2048)
+
+; The data content given to connection id, which sends it as the peer's
+; window lets it: empty once inet has it all, or why not. Nothing answers;
+; a connection that cannot take it ends with a closed notice.
+(def tcp_write ((n Inet) (id int) (content (list int))) (list int)
+  (match n
+    ((NoInet why) why)
+    ((Inet port rp)
+      (if (is_empty content)
+          (nil int)
+          (let why (tcp_write_chunk port id (take content (tcp_write_max)) 0)
+            (if (is_empty why) (tcp_write n id (drop content (tcp_write_max))) why))))))
+
+; How many times a write is tried while inet's queue is full.
+(def tcp_write_tries () int 10000)
+
+; One request of at most tcp_write_max bytes, sent, again after a
+; millisecond if inet's queue is full, until it has been tried
+; tcp_write_tries times, tries of them already.
+(def tcp_write_chunk ((port int) (id int) (chunk (list int)) (tries int)) (list int)
+  (match (port_send port (request 0 (append "write " (append (digits id) (cons 10 chunk)))))
+    ((Sent) (nil int))
+    ((SendNoPort) "inet is gone")
+    ((SendTooBig) "a write is too big")
+    ((SendFull)
+      (if (ge tries (tcp_write_tries))
+          "inet does not take its requests"
+          (let z (sleep_ns 1000000) (tcp_write_chunk port id chunk (add tries 1)))))))
+
+; Connection id told it will send no more, after its data: empty once inet
+; has the request, or why not.
+(def tcp_finish ((n Inet) (id int)) (list int)
+  (tcp_tell n (append "finish " (digits id))))
+
+; Connection id given up, with a reset to the peer.
+(def tcp_reset ((n Inet) (id int)) (list int)
+  (tcp_tell n (append "reset " (digits id))))
+
+; body sent to inet, with nothing to answer.
+(def tcp_tell ((n Inet) (body (list int))) (list int)
+  (match n
+    ((NoInet why) why)
+    ((Inet port rp) (sending_why (port_send port (request 0 body))))))

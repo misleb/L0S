@@ -1,0 +1,120 @@
+; segment_test.l0 -- tests of segment.l0: segments built and read back,
+; their checksums against ones worked out apart (Python's struct and the
+; RFC 1071 sum), the options, what is refused, and sequence numbers
+; across the wrap at 2^32.
+
+(def seg_me () int (ip_of 10 0 2 15))
+(def seg_gw () int (ip_of 10 0 2 2))
+
+; A SYN from 10.0.2.15:49152 to 10.0.2.2:80, sequence 1000, window 8192,
+; offering a maximum segment size of 1460.
+(def syn_seg () Seg (Seg 49152 80 1000 0 (tcp_syn) 8192 1460 (nil int)))
+
+; The reply's data segment: from 80 to 49152, sequence 5000, acknowledging
+; 1001, with ACK and PSH, carrying "hello" (an odd number of bytes).
+(def hello_seg () Seg (Seg 80 49152 5000 1001 (bit_or (tcp_ack) (tcp_psh)) 8192 0 "hello"))
+
+; xs as hexadecimal, two digits a byte.
+(def hex_text ((xs (list int))) (list int)
+  (if (is_empty xs) (nil int) (append (hex_digits (head xs) 2) (hex_text (tail xs)))))
+
+; The bytes xs of hexadecimal digits spell.
+(def from_hex ((s (list int))) (list int)
+  (if (is_empty s)
+      (nil int)
+      (cons (add (mul 16 (hex_val (head s))) (hex_val (head (tail s)))) (from_hex (drop_n s 2)))))
+
+; The SYN's bytes, with the checksum 39901 (0x9bdd), and the data
+; segment's with 23587 (0x5c23), which the sum over the pseudo-header and
+; the segment gives in a program written apart: c000 0050, sequence
+; 0x3e8, acknowledgement 0, offset 6 words, SYN, window 0x2000, the
+; checksum, no urgent pointer, and the option 02 04 05b4.
+(def syn_hex () (list int) "c0000050000003e800000000600220009bdd0000020405b4")
+
+(def test_syn_bytes () int
+  (check_str "the SYN" (hex_text (tcp_bytes (seg_me) (seg_gw) (syn_seg))) (syn_hex)))
+
+(def test_hello_bytes () int
+  (let b (tcp_bytes (seg_gw) (seg_me) (hello_seg))
+    (add (check_int "its length" (length b) 25)
+         (add (check_int "the checksum" (be16_at (bytes_from_list b) 16) 23587)
+              (check_str "the data" (drop_n b 20) "hello")))))
+
+; A segment's text: ports, sequence, acknowledgement, flags as a number,
+; window, option and data.
+(def seg_text ((r (Option Seg))) (list int)
+  (match r
+    ((None) "none")
+    ((Some s)
+      (match s
+        ((Seg sport dport seq ack flags window mss body)
+          (join_with " " (cons (digits sport) (cons (digits dport) (cons (digits seq) (cons (digits ack) (cons (digits flags)
+            (cons (digits window) (cons (digits mss) (cons body (nil (list int))))))))))))))))
+
+(def test_round_trip () int
+  (add (check_str "the SYN" (seg_text (tcp_of (seg_me) (seg_gw) (tcp_bytes (seg_me) (seg_gw) (syn_seg))))
+                  "49152 80 1000 0 2 8192 1460 ")
+       (check_str "the data" (seg_text (tcp_of (seg_gw) (seg_me) (tcp_bytes (seg_gw) (seg_me) (hello_seg))))
+                  "80 49152 5000 1001 24 8192 0 hello")))
+
+; Every bit of the sequence number, acknowledgement and window survives.
+(def test_round_trip_big () int
+  (let s (Seg 65535 1 4294967295 2147483648 63 65535 65535 "")
+    (check_str "read back" (seg_text (tcp_of 1 2 (tcp_bytes 1 2 s))) "65535 1 4294967295 2147483648 63 65535 65535 ")))
+
+; A byte changed, the wrong address in the pseudo-header, and a header cut short.
+(def test_refused () int
+  (let b (tcp_bytes (seg_gw) (seg_me) (hello_seg))
+    (add (check_str "a changed byte" (seg_text (tcp_of (seg_gw) (seg_me) (append (take b 22) (cons 0 (drop_n b 23))))) "none")
+         (add (check_str "another address" (seg_text (tcp_of (seg_gw) (seg_gw) b)) "none")
+              (check_str "too short" (seg_text (tcp_of (seg_gw) (seg_me) (take b 19))) "none")))))
+
+; A data offset past the segment's end, and one inside the fixed header.
+(def test_bad_offset () int
+  (let b (from_hex (syn_hex))
+    (add (check_str "past the end" (seg_text (tcp_of (seg_me) (seg_gw) (append (take b 12) (cons 240 (drop_n b 13))))) "none")
+         (check_str "inside the header" (seg_text (tcp_of (seg_me) (seg_gw) (append (take b 12) (cons 64 (drop_n b 13))))) "none"))))
+
+; Options are read where they are: after no operations, and skipping
+; those inet does not know. 01 01 08 0a (a timestamp, 10 bytes) 02 04 05 b4.
+(def option_bytes () bytes
+  (bytes_from_list (from_hex "0101080a0000000000000000020405b4")))
+
+(def test_options () int
+  (add (check_int "found after others" (tcp_mss_of (option_bytes) 0 16) 1460)
+       (add (check_int "none" (tcp_mss_of (option_bytes) 0 12) 0)
+            (check_int "the end stops it" (tcp_mss_of (bytes_from_list (cons 0 (cons 2 (cons 4 (cons 5 (cons 180 (nil int))))))) 0 5) 0))))
+
+; An option whose length is cut off, or is 0, or 1, must not loop or fail.
+(def test_bad_options () int
+  (add (check_int "cut off" (tcp_mss_of (bytes_from_list (cons 2 (nil int))) 0 1) 0)
+       (add (check_int "length 0" (tcp_mss_of (bytes_from_list (cons 9 (cons 0 (cons 2 (cons 4 (cons 5 (cons 180 (nil int)))))))) 0 6) 0)
+            (check_int "mss cut short" (tcp_mss_of (bytes_from_list (cons 2 (cons 4 (cons 5 (nil int))))) 0 3) 0))))
+
+(def test_space () int
+  (add (check_int "a SYN" (seg_space (syn_seg)) 1)
+       (add (check_int "data" (seg_space (hello_seg)) 5)
+            (check_int "data and FIN" (seg_space (Seg 1 2 3 4 (bit_or (tcp_fin) (tcp_ack)) 5 0 "ab")) 3))))
+
+(def test_has_flags () int
+  (add (check_bool "SYN" (seg_has (syn_seg) (tcp_syn)) true)
+       (check_bool "no ACK" (seg_has (syn_seg) (tcp_ack)) false)))
+
+; ----------------------------------------------------------- sequence numbers
+
+(def test_seq_wraps () int
+  (add (check_int "past the end" (seq_add 4294967295 1) 0)
+       (check_int "well past" (seq_add 4294967290 10) 4)))
+
+; The difference is signed: 5 is 10 past 4294967291, and it is 10 before it
+; the other way.
+(def test_seq_diff () int
+  (add (check_int "ahead across the wrap" (seq_diff 5 4294967291) 10)
+       (add (check_int "behind across the wrap" (seq_diff 4294967291 5) -10)
+            (check_int "same" (seq_diff 77 77) 0))))
+
+(def test_seq_order () int
+  (add (check_bool "before across the wrap" (seq_lt 4294967291 5) true)
+       (add (check_bool "not after" (seq_lt 5 4294967291) false)
+            (add (check_bool "not before itself" (seq_lt 9 9) false)
+                 (check_bool "or is" (seq_le 9 9) true)))))

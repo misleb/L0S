@@ -95,7 +95,7 @@ booted with `root=UUID`, or else from the initramfs.
 | 7 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
 | 8 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
 | 9 | `virtio-net` | the network card's driver. It serves `nic`, telling `inet` of every frame the card takes, and putting on the wire every frame `inet` gives it |
-| 10 | `inet` | the IPv4 stack, at 10.0.2.15 on QEMU's user network. It serves `inet`, for `run net` and `run tftp` (see [The network](#the-network)) |
+| 10 | `inet` | the IPv4 stack, at the address a DHCP server gives it (`inet dhcp`; 10.0.2.15 on QEMU's user network). It serves `inet`, for `run net` and `run tftp` (see [The network](#the-network)) |
 | 11 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
 | 12 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
 | 13, 14 | `vt`, `vt` | the windows' terminals, Terminal's program, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
@@ -320,7 +320,8 @@ Job control:
 - **`kill PID`** ends any process but the shell itself: a background
   job, another shell's job, another shell, or `wm`. Drivers, the
   programs with a `dev` line, can't be killed, since the system would
-  lose their devices, so `uart`, `virtio-gpu` and `virtio-input` stay.
+  lose their devices, so `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk` and
+  `virtio-net` stay.
   Killing pid 11, the serial shell, from a window's shell stops the
   system, as its `exit` does: `boot`, pid 1, waiting for it, exits too.
 
@@ -880,8 +881,9 @@ Two processes make the network, a driver and a stack above it, as the
 disk is `virtio-blk` and `fs`:
 
 ```
-net, tftp ──inet──▶ inet ──nic──▶ virtio-net ──DMA──▶ virtio-net card ──▶ QEMU's user network
-          ◀─pong, udp─      ◀─frm──                                         10.0.2.2: gateway, TFTP
+net, tftp,  ──inet──▶ inet ──nic──▶ virtio-net ──DMA──▶ virtio-net card ──▶ QEMU's user network
+http        ◀─pong, udp,─      ◀─frm──                                      10.0.2.2: gateway, TFTP,
+              tcp notices                                                     the host's loopback
 ```
 
 `virtio-net` ([user/sbin/virtio-net](user/sbin/virtio-net/virtio-net.l0))
@@ -903,10 +905,13 @@ waited for, as `virtio-blk` waits. It serves **the nic protocol**
 | `send FRAME` | the frame, without its check sequence, put on the wire, padded to 60 bytes; answered only if the request names a reply port |
 
 `inet` ([user/sbin/inet](user/sbin/inet/inet.l0)) is IPv4: Ethernet,
-ARP, IPv4, ICMP and UDP, with each packet built and read in
-[packet.l0](user/sbin/inet/packet.l0). It listens to `nic`, and is
-started as `inet [ADDR/PREFIX [GATEWAY]]`, by default at 10.0.2.15/24
-behind 10.0.2.2, QEMU's user network. It answers ARP for its address and
+ARP, IPv4, ICMP, UDP and TCP, with each packet built and read in
+[packet.l0](user/sbin/inet/packet.l0) and [segment.l0](user/sbin/inet/segment.l0)
+(TCP's). It listens to `nic`, and is
+started as `inet dhcp`, which takes its address, netmask and router from
+a DHCP server (below), or as `inet [ADDR/PREFIX [GATEWAY]]`, which sets
+them, by default 10.0.2.15/24 behind 10.0.2.2, QEMU's user network's
+own. It answers ARP for its address and
 keeps up to 64 neighbours' addresses that ARP tells it; holds up to 16
 datagrams for 3 seconds while ARP finds their next hop, the gateway for
 any address off the link, asking again after a second; answers ICMP echo
@@ -928,9 +933,71 @@ done, which is how its tests see it. It serves **the inet protocol**
 | `unbind PORT` | `ok`: no more of them; refused if PORT is another's |
 | `send SPORT DST DPORT` | then a newline and the data: a datagram from SPORT to DPORT at DST; answered only if refused, or with `ok` if the request names a reply port |
 | `ping DST SEQ` | an ICMP echo request to DST, whose id is the reply port's: answered only if refused; its reply comes to the reply port as `pong SRC SEQ TTL BYTES` |
+| `connect ADDR PORT NPORT` | a TCP connection opened to PORT at ADDR, its notices to the client's port NPORT: `connecting ID LPORT`, the connection's number and local port. It is open once a notice says so |
+| `listen PORT NPORT` | `listening PORT`: TCP connections to PORT are made, and told to NPORT; `listen 0` for a port `inet` picks, from 49152. Refused if PORT is listened to |
+| `unlisten PORT` | `ok`: no more are made; those made go on. Only by the process that listens |
+| `write ID` | then a newline and the data: given to connection ID, which sends it as the peer's window lets it; answered only if the request names a reply port. More than 16384 bytes not yet acknowledged resets the connection |
+| `finish ID` | `ok`: connection ID is closed once its data is sent (a FIN) |
+| `reset ID` | `ok`: connection ID is given up, with a reset |
+| `tcp` | a line `ID STATE LPORT ADDR:RPORT` for each connection, then `listen PORT` for each listener; `none` for neither |
 
 A client lets go of what it bound with `unbind`, and `inet` lets go of a
 client whose port has gone when it next has something for it.
+
+**TCP** (RFC 9293). A connection is made by `connect` or by a SYN to a
+port that is listened to, goes through the three-way handshake, and is
+a state machine, in [tcp.l0](user/sbin/inet/tcp.l0), of the states of
+the RFC's diagram. The machine is pure: an event, a segment, the application's `write` or
+`finish`, or a timer's deadline, takes a connection and the time and
+gives it back with the acts it calls for, which
+[tcpstack.l0](user/sbin/inet/tcpstack.l0) turns into frames, in `inet`'s
+queue, and notices, and keeps the connections, 32 at most, and the
+listeners. It keeps sequence and acknowledgement numbers modulo 2^32,
+holds the data it has sent until it is acknowledged, and sends it again
+when no acknowledgement comes: after 1 second, then 2, 4, 8, 16 and 16
+more, and then gives up with a reset and `closed timeout`. A window of 8192 bytes is offered
+always, the data being given to the client as it comes; the peer's is
+kept, and a closed one probed with a byte. Segments carry at most 1460 bytes,
+or what the peer's SYN says, so that no frame is over 1514. FIN
+closes in either order, or both together, and TIME-WAIT, 4 seconds, lets
+the client know the connection ended at once. A RST ends a connection
+only if it is where the next byte is expected, as RFC 5961 has it, and a
+segment to no connection or listener is answered with one. The TCP
+checksum covers IPv4's pseudo-header. A connection to `inet`'s own address
+is made inside it, with no frame.
+
+A client asks through its own reply port, and has the connection's notices
+come to another, named in `connect` and `listen`, so that an answer is never
+taken for a notice; it owns its connections by its pid. The notices, to that
+port, are `tcp ID up` (opened), `tcp ID accepted SRC SPORT LPORT` (to
+the listener, which is then the owner), `tcp ID data` and a newline and the data,
+`tcp ID fin` (the peer will send no more), and the last of each connection,
+`tcp ID closed WHY`: `closed`, `reset`, `refused`, `timeout`, `aborted` or
+`overflow`. A client whose port has gone, or is full, loses its
+connections, with a reset.
+
+While it holds a connection `inet` looks at their timers every millisecond;
+with none, it waits for a message.
+
+**DHCP.** `inet dhcp` (the demo's line) starts with no address, and gets
+one as a DHCP client (RFC 2131) before it registers as `inet`, so that
+clients' `name_wait` waits for it. The messages are built and read in
+[dhcp.l0](user/sbin/inet/dhcp.l0), and the exchange is
+[lease.l0](user/sbin/inet/lease.l0), run over the stack itself: `inet`
+binds UDP port 68 to its own port, so the stack takes what servers send
+as it takes any datagram, to 255.255.255.255, which is ours at any
+address, or to the address offered, once there is one; and it sends a
+DISCOVER, and then a REQUEST of the offer it takes, from 0.0.0.0 port 68
+to 255.255.255.255 port 67, as datagrams of its own, which wait in the
+same queue as every frame it sends. The OFFER of an address and a
+server, for this card and this exchange's xid, is taken; the ACK of that
+address gives the stack its address, the netmask it names, or the
+address's class's, and the first router it names, or none; a NAK begins
+again. It sends again every 2 seconds, 5 times in all, and if no server
+has answered says so and exits 1. The lease's time is read but not
+used: the address is not renewed. Giving the demo another
+network, `make demo NET=user,net=192.168.7.0/24,dhcpstart=192.168.7.50`,
+shows the address it takes is the server's.
 
 `run net` uses it from a shell, as `ifconfig` and `ping` would, and
 `run tftp ADDR FILE [PATH]` fetches a file over TFTP, from QEMU's TFTP
@@ -954,6 +1021,19 @@ QEMU's user network answers pings to its gateway itself, and its TFTP
 server is there too; what goes beyond the gateway is QEMU's to carry.
 `run net send ADDR PORT TEXT...` sends a datagram, and `run net recv
 PORT` waits for one and shows it.
+
+`run http [-i] [http://]ADDR[:PORT][/PATH]` fetches a page over HTTP/1.0
+(RFC 1945), through TCP, and writes it, with its header first for `-i`.
+QEMU's user network reaches the host's loopback as 10.0.2.2, so a server
+on the host, say `python3 -m http.server 8000 --bind 127.0.0.1`, is
+fetched with `run http 10.0.2.2:8000/`. It speaks to addresses only, with
+no name service, and does not follow a redirect; a status that is not
+2xx is said, after the page, and fails the command. `run net tcp` shows
+the connections, and `run net echo PORT` listens to TCP PORT, sends back
+what the first connection sends, and says how much, for a connection
+from the host to a port forwarded to the board
+(`make demo NET=user,hostfwd=tcp:127.0.0.1:7000-:7000`, then `nc 127.0.0.1
+7000`).
 
 ## How it boots
 
@@ -1354,12 +1434,12 @@ initramfs, so that the Makefile finds it there:
 
 | Directory | What | In the initramfs |
 |---|---|---|
-| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `init`, `install`, `keys`, `nap`, `net`, `ping`, `spin`, `tftp`, `windows` | `/bin/NAME` |
+| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `nap`, `net`, `ping`, `spin`, `tftp`, `windows` | `/bin/NAME` |
 | `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0` and `inet` `packet.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0` and `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
@@ -1381,8 +1461,9 @@ every `.l0` in its directory is part of it.
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
-| `inet` | the IPv4 stack, `inet [ADDR/PREFIX [GATEWAY]]`, 10.0.2.15/24 behind 10.0.2.2 unless given (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
-| `net` | a client of `inet`: `net` shows the interface, `net stats` and `net arp` what `inet` counts and knows, `net ping [-q] ADDR [COUNT]` pings, a second apart, and says how long each reply took, failing if none came, `net send ADDR PORT TEXT...` sends a datagram, and `net recv PORT` waits for one and shows it |
+| `inet` | the IPv4 stack, `inet dhcp` or `inet [ADDR/PREFIX [GATEWAY]]`: the address, netmask and router a DHCP server gives it, or those given, 10.0.2.15/24 behind 10.0.2.2 by default (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
+| `net` | a client of `inet`: `net` shows the interface, `net stats`, `net arp` and `net tcp` what `inet` counts and knows (the last, its TCP connections and listeners), `net ping [-q] ADDR [COUNT]` pings, a second apart, and says how long each reply took, failing if none came, `net send ADDR PORT TEXT...` sends a datagram, `net recv PORT` waits for one and shows it, and `net echo PORT` listens to a TCP port and sends back what its first connection sends |
+| `http` | a client of `inet`: `http [-i] [http://]ADDR[:PORT][/PATH]` fetches a page over HTTP/1.0 (RFC 1945) through TCP, and writes its body, and with `-i` its header first; says the status, after the page, if it is not 2xx, and fails; the address is dotted, there being no name service |
 | `tftp` | a client of `inet`: `tftp ADDR FILE [PATH]` fetches FILE over TFTP (RFC 1350), in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
 | `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
@@ -1421,7 +1502,7 @@ name in a library is taken in every program that links it.
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
 | [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text (`NICLIB`) | `virtio-net`, and with `INETLIB` |
-| [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, and reading the notices of datagrams and echoes' replies; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`) | `inet`, `net`, `tftp` |
+| [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`) | `inet`, `net`, `tftp`, `http` |
 | [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
 | [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `disks`, `tools/mkfs`, and every program `PATHS` is in |
 | [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
@@ -1457,10 +1538,15 @@ Each case of `tests/e2e/` is a directory:
 - `gpu`, the virtio-gpu's options, such as `xres=3840,yres=2160`;
 - `net`, if the board is to have a virtio-net: the network it is on, as
   QEMU's `-netdev` names one without its id, such as `user` or
-  `user,tftp=DIR`.
+  `user,tftp=DIR`;
+- `serve`, a command line run on the host for the length of the boot, a
+  server the board reaches at 10.0.2.2, killed after; and `peer`, one run
+  from its start that must exit 0, a client of a port the board listens
+  to. `@PORT@` in either, in `net` and in `typed` is a free port of the
+  host's loopback, chosen for the boot.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Seventeen cases type a session through
+`etc`, boots it, and compares. Twenty-one cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -1519,8 +1605,22 @@ Ctrl-C as a person would:
   [tests/e2e/net/tftp](tests/e2e/net/tftp), starts `virtio-net` and
   `inet`, and has `net` show the interface, ping the gateway, which ARP
   finds first, and show what ARP found; `tftp` fetch a file of one block
-  and one of four full blocks and then an empty one, and be told of a
-  file the server does not have; and `net` ping `inet`'s own address.
+  and one of four full blocks, which the server ends with an empty
+  one, and be told of a file the server does not have; and `net` ping `inet`'s own address;
+- `dhcp`, on a QEMU user network of 192.168.7.0/24 whose server offers
+  192.168.7.50, starts `inet dhcp`, and has `net` show that address, the
+  netmask and the router, which only the server's ACK can have given it,
+  ping the router, and show what ARP found;
+- `http`, with [a small server](tests/e2e/http/server.py) on the host's
+  loopback, has `http` fetch a page, the same with its header, one of
+  300 lines, more than a window holds, and one that is not there, said
+  to be after the page, and be refused by a port nothing listens to; and
+  `net tcp` show no connection is left;
+- `net_echo`, with a forward from a port of the host's loopback to port
+  7000 of the board, has `net echo` listen to it, take the connection
+  [a client on the host](tests/e2e/net_echo/peer.py) makes, which sends
+  12000 bytes and closes its end, and send them back, which that client
+  checks; and `net tcp` show no connection is left.
 
 `files` reads the initramfs through `cat`. `virtio-gpu_nodev`,
 `virtio-blk_nodev` and `virtio-net_nodev` start a driver with no `dev`
@@ -1743,18 +1843,39 @@ resizes a partition.
   taking the interrupt, and moves at most 128 sectors a request. It
   accepts no device features, so it never flushes a write cache and
   never learns a disk is read-only, whose writes the device then fails.
-- **The network is one card and IPv4's datagrams, with no TCP.**
+- **The network is one card, IPv4's datagrams and a small TCP.**
   `virtio-net` drives the first card on the board, sends one frame at a
   time and waits for the card to take it, and accepts no feature but
   its address, so it neither offloads checksums nor merges buffers.
-  `inet` has one interface, set by its arguments, as there is no DHCP
-  client, and no DNS, so every address is typed as numbers; it neither
+  `inet` has one interface, set by its arguments or by DHCP, which
+  gives it an address once, at its start, with no renewal, no
+  rebinding, and no other option than the mask and the first router, so
+  that no DNS server is learnt, and there is no DNS client either, so
+  every address is typed as numbers; it neither
   fragments nor takes fragments, so a datagram holds at most 1472 bytes;
-  it has no TCP and no IP options, and passes over every protocol but
-  ICMP and UDP, without saying so; and it keeps at most 64 neighbours,
+  it has no IP options, and passes over every protocol but ICMP, UDP
+  and TCP, without saying so; and it keeps at most 64 neighbours,
   starting again from one when it has as many, and 16 datagrams waiting
   for ARP, for 3 seconds. Any process may bind any port no one holds,
   and send from any port, bound or not.
+- **TCP has the essentials, and little else.** `inet` holds 32
+  connections, each with at most 16384 bytes of the client's data not
+  yet acknowledged (more resets it), and offers a window of 8192 bytes
+  that never changes. A segment that arrives out of order is dropped,
+  not kept, and asked for again by an acknowledgement, so a lost segment
+  makes the peer send everything after it again; the retransmission timeout
+  is 1 second, doubled each time, whatever the round trip is, and every
+  segment is acknowledged at once. There is no congestion control, no
+  selective acknowledgement, window scaling, timestamps, urgent data,
+  nor simultaneous open, and no MSS but the peer's SYN's; ICMP's errors
+  do not end a connection, only the retransmissions' running out does
+  (after 47 seconds). A client must take its notices as they come: if its
+  port holds 32 messages, `inet` resets the connection that
+  overflows it. Notices carry what came in the segments it came in, at
+  most 1460 bytes each, so a client sees no message boundary of the
+  sender's. A connection's owner is the pid that opened it, which is all
+  the check there is, and the first sequence number is the clock's, so
+  guessable.
 - **Disks shows the one disk, and cannot take anything away.** It can
   make a partition of free space, give a partition a new volume, format
   a mounted volume, keeping its label and size, and have `fs` rescan;

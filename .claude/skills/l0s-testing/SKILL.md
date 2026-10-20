@@ -97,6 +97,7 @@ case's `etc`, and compares. A case is a directory:
 | `bootargs` | the kernel's boot arguments, such as `root=UUID` (`l0 boot IMAGE ARGS`, or `QEMU_APPEND` with `typed`) |
 | `gpu` | the virtio-gpu's options, such as `xres=3840,yres=2160` for a 4K screen, drawn at scale 2 (`draw_4k`) |
 | `net` | if present, the board has a virtio-net on the network its line names, as `-netdev` takes one without its id: `user`, or `user,tftp=tests/e2e/CASE/tftp` for QEMU's TFTP server at 10.0.2.2 (`net`); without it there is no card |
+| `serve`, `peer` | a command line `e2e.sh` runs on the host for the boot: `serve` a server the board reaches at 10.0.2.2, killed at the end (`http`), `peer` a client of a port the board listens to, which must exit 0 (`net_echo`, with `user,hostfwd=tcp:127.0.0.1:@PORT@-:7000` in `net`). `@PORT@` in these, in `net` and in `typed` is a free port of the host's loopback |
 
 - A case with `typed` should start `uart noecho`, so the output doesn't
   depend on how the echo interleaves.

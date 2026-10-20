@@ -110,9 +110,29 @@
           (match m
             ((Icmp type code rest)
               (append "icmp " (append (digits type) (append " " (append (digits code) (icmp_detail type rest)))))))))
-      (match (udp_of src dst payload)
-        ((None) "a bad datagram")
-        ((Some u) (match u ((Udp sp dp content) (append "udp " (append (digits sp) (append ">" (append (digits dp) (append " " content)))))))))))
+      (if (eq proto (proto_tcp))
+          (match (tcp_of src dst payload)
+            ((None) "a bad segment")
+            ((Some sg) (append "tcp " (seg_brief sg))))
+          (match (udp_of src dst payload)
+            ((None) "a bad datagram")
+            ((Some u) (match u ((Udp sp dp content) (append "udp " (append (digits sp) (append ">" (append (digits dp) (append " " content))))))))))))
+
+; A TCP segment as ports, flags and data, which is all that does not depend
+; on the sequence numbers the stack picks.
+(def seg_brief ((sg Seg)) (list int)
+  (match sg
+    ((Seg sport dport seq ack flags window mss body)
+      (unwords (cons (append (digits sport) (append ">" (digits dport))) (cons (brief_flags flags)
+        (if (is_empty body) (nil (list int)) (cons (cons 39 (append body "'")) (nil (list int))))))))))
+
+; The names of the flags set, joined by |.
+(def brief_flags ((f int)) (list int)
+  (join_with "|" (append (brief_flag f (tcp_syn) "SYN") (append (brief_flag f (tcp_fin) "FIN")
+    (append (brief_flag f (tcp_rst) "RST") (append (brief_flag f (tcp_ack) "ACK") (brief_flag f (tcp_psh) "PSH")))))))
+
+(def brief_flag ((f int) (bit int) (name (list int))) (list (list int))
+  (if (eq (bit_and f bit) 0) (nil (list int)) (cons name (nil (list int)))))
 
 (def wire_text ((s Stack)) (list (list int)) (wire_texts (wire s) (nil (list int))))
 
@@ -314,3 +334,512 @@
 ; Arguments that are not an interface fail.
 (def test_bad_arguments () int
   (check_int "fails" (inet) 1))
+
+; ------------------------------------------------------------------ DHCP
+
+; A stack with no address yet, and the xid of its exchange.
+(def bare () Stack
+  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config 0 0 0)))
+
+(def xid () int 777)
+
+; The exchange begun on a bare stack, its listening port 100.
+(def started () Leasing (lease_start (bare) 100 (xid)))
+
+; A server's message to the client whose card is hw: its op 2, its type, the
+; address it gives, and options after the type's.
+(def server_msg_for ((hw (list int)) (x int) (type int) (yi int) (options (list int))) (list int)
+  (let m (dhcp_bytes x hw (append (opt_bytes (opt_type) (cons type (nil int))) options))
+    (append (cons 2 (take (drop m 1) 15)) (append (be32 yi) (drop m 20)))))
+
+(def server_msg ((x int) (type int) (yi int) (options (list int))) (list int)
+  (server_msg_for (my_mac) x type yi options))
+
+; What a server gives with an address: the mask, its router, its own
+; identifier and a day's lease.
+(def std_options () (list int)
+  (append (opt_bytes (opt_mask) (be32 (ip_mask 24)))
+    (append (opt_bytes (opt_router) (be32 (gw)))
+      (append (opt_bytes (opt_server) (be32 (gw))) (opt_bytes (opt_lease) (be32 86400))))))
+
+; A frame from the gateway's card, QEMU's server, carrying content from
+; port 67 to dst's port 68.
+(def server_frame ((dst_mac (list int)) (dst int) (content (list int))) (list int)
+  (eth_frame dst_mac (gw_mac) (eth_ipv4) (ipv4_packet (gw) dst (proto_udp) 1 (udp_bytes (gw) dst 67 68 content))))
+
+; The server's message m, broadcast; and sent to the address it gives.
+(def broadcast_of ((m (list int))) (list int) (server_frame (mac_broadcast) (ip_broadcast) m))
+(def unicast_of ((m (list int))) (list int) (server_frame (my_mac) (me) m))
+
+(def offer_frame () (list int) (broadcast_of (server_msg (xid) 2 (me) (std_options))))
+(def ack_frame () (list int) (broadcast_of (server_msg (xid) 5 (me) (std_options))))
+
+; r, once the frame has come, with what was queued before it gone.
+(def heard ((r Leasing) (frame (list int))) Leasing
+  (match r ((Leasing s l) (lease_hear (cleared s) l (nic_pid) (frame_notice frame)))))
+
+; Where the exchange is, and the interface the stack has.
+(def lease_text ((r Leasing)) (list int)
+  (match r
+    ((Leasing s l)
+      (append (match l
+                ((Selecting x) (append "selecting " (digits x)))
+                ((Requesting x offered server) (unwords (cons "requesting" (cons (digits x) (cons (ip_text offered) (cons (ip_text server) (nil (list int))))))))
+                ((Leased) "leased"))
+              (append " " (config_text ((Ok Config (list int)) (stack_config s))))))))
+
+; The DHCP message in a frame, as text: where it goes, and the message.
+(def dhcp_frame_text ((f (list int))) (list int)
+  (let b (bytes_from_list f)
+    (match (ipv4_of b 14)
+      ((IpBad why) why)
+      ((IpRead d)
+        (match d
+          ((Ipv4 src dst proto ttl payload quoted)
+            (match (udp_of src dst payload)
+              ((None) "a bad datagram")
+              ((Some u)
+                (match u
+                  ((Udp sp dp content)
+                    (unwords (cons (mac_text (eth_dst b)) (cons (append (ip_text src) (append ">" (ip_text dst)))
+                      (cons (append (digits sp) (append ">" (digits dp))) (cons (dhcp_message_text content) (nil (list int)))))))))))))))))
+
+; A message's type, xid, the address it asks for and its server.
+(def dhcp_message_text ((content (list int))) (list int)
+  (match (dhcp_of content)
+    ((None) "not DHCP")
+    ((Some m)
+      (match m
+        ((Dhcp op x type hw yi req mask router server lease)
+          (unwords (cons "type" (cons (digits type) (cons "xid" (cons (digits x)
+            (cons "asks" (cons (ip_text req) (cons "server" (cons (ip_text server) (nil (list int))))))))))))))))
+
+; What the stack of r has to put on the wire, as text.
+(def lease_wire ((r Leasing)) (list (list int))
+  (match r ((Leasing s l) (lease_wire_of (wire s) (nil (list int))))))
+
+(def lease_wire_of ((fs (list (list int))) (acc (list (list int)))) (list (list int))
+  (if (is_empty fs) (rev acc) (lease_wire_of (tail fs) (cons (dhcp_frame_text (head fs)) acc))))
+
+(def discover_text () (list int)
+  "ff:ff:ff:ff:ff:ff 0.0.0.0>255.255.255.255 68>67 type 1 xid 777 asks 0.0.0.0 server 0.0.0.0")
+
+(def request_text () (list int)
+  "ff:ff:ff:ff:ff:ff 0.0.0.0>255.255.255.255 68>67 type 3 xid 777 asks 10.0.2.15 server 10.0.2.2")
+
+(def none_wire () (list (list int)) (nil (list int)))
+(def one_wire ((t (list int))) (list (list int)) (cons t (nil (list int))))
+
+; Begun, the client broadcasts a DISCOVER from 0.0.0.0, and listens on port 68.
+(def test_lease_discover () int
+  (add (check_strs "discover" (lease_wire (started)) (one_wire (discover_text)))
+       (add (check_str "selecting" (lease_text (started)) "selecting 777 0.0.0.0 0.0.0.0 0.0.0.0")
+            (check_bool "port 68 is its own" (match (started) ((Leasing s l) (eq (bound_to s 68) (Some 100)))) true))))
+
+; The offer, broadcast: a REQUEST of its address to its server, still from 0.0.0.0.
+(def test_lease_offer () int
+  (let r (heard (started) (offer_frame))
+    (add (check_strs "request" (lease_wire r) (one_wire (request_text)))
+         (check_str "requesting" (lease_text r) "requesting 777 10.0.2.15 10.0.2.2 0.0.0.0 0.0.0.0 0.0.0.0"))))
+
+; The ACK, broadcast: the stack has the address, the server's mask and its router.
+(def test_lease_ack () int
+  (let r (heard (heard (started) (offer_frame)) (ack_frame))
+    (add (check_str "leased" (lease_text r) "leased 10.0.2.15 255.255.255.0 10.0.2.2")
+         (check_int "nothing more to say" (length (lease_wire r)) 0))))
+
+; The ACK may come to the address offered, from the server's card to ours.
+(def test_lease_ack_unicast () int
+  (let r (heard (heard (started) (offer_frame)) (unicast_of (server_msg (xid) 5 (me) (std_options))))
+    (check_str "leased" (lease_text r) "leased 10.0.2.15 255.255.255.0 10.0.2.2")))
+
+; Before there is an offer, no address is ours but the broadcast.
+(def test_lease_unicast_before_offer () int
+  (let r (heard (started) (unicast_of (server_msg (xid) 2 (me) (std_options))))
+    (add (check_str "still selecting" (lease_text r) "selecting 777 0.0.0.0 0.0.0.0 0.0.0.0")
+         (check_int "nothing said" (length (lease_wire r)) 0))))
+
+; An offer of another exchange or for another card is not ours.
+(def test_lease_not_ours () int
+  (add (check_str "another xid" (lease_text (heard (started) (broadcast_of (server_msg 5 2 (me) (std_options)))))
+                  "selecting 777 0.0.0.0 0.0.0.0 0.0.0.0")
+       (check_str "another card" (lease_text (heard (started) (broadcast_of (server_msg_for (gw_mac) (xid) 2 (me) (std_options)))))
+                  "selecting 777 0.0.0.0 0.0.0.0 0.0.0.0")))
+
+; An offer that names no server, or gives no address, is not taken.
+(def test_lease_bad_offer () int
+  (add (check_str "no server" (lease_text (heard (started) (broadcast_of (server_msg (xid) 2 (me) (opt_bytes (opt_mask) (be32 (ip_mask 24)))))))
+                  "selecting 777 0.0.0.0 0.0.0.0 0.0.0.0")
+       (check_str "no address" (lease_text (heard (started) (broadcast_of (server_msg (xid) 2 0 (std_options)))))
+                  "selecting 777 0.0.0.0 0.0.0.0 0.0.0.0")))
+
+; An ACK of an address that was not offered is not taken.
+(def test_lease_wrong_ack () int
+  (check_str "still requesting"
+             (lease_text (heard (heard (started) (offer_frame)) (broadcast_of (server_msg (xid) 5 (ip_of 10 0 2 99) (std_options)))))
+             "requesting 777 10.0.2.15 10.0.2.2 0.0.0.0 0.0.0.0 0.0.0.0"))
+
+; A NAK begins again, with the next xid.
+(def test_lease_nak () int
+  (let r (heard (heard (started) (offer_frame)) (broadcast_of (server_msg (xid) 6 0 (opt_bytes (opt_server) (be32 (gw))))))
+    (add (check_str "discover again" (lease_text r) "selecting 778 0.0.0.0 0.0.0.0 0.0.0.0")
+         (check_strs "sent" (lease_wire r)
+                     (one_wire "ff:ff:ff:ff:ff:ff 0.0.0.0>255.255.255.255 68>67 type 1 xid 778 asks 0.0.0.0 server 0.0.0.0")))))
+
+; With no mask the address's class gives one, and with no router there is none.
+(def test_lease_classful () int
+  (check_str "class A"
+             (lease_text (heard (heard (started) (offer_frame))
+                                (broadcast_of (server_msg (xid) 5 (me) (opt_bytes (opt_server) (be32 (gw)))))))
+             "leased 10.0.2.15 255.0.0.0 0.0.0.0"))
+
+; Once leased the stack is an ordinary one at its new address: it answers ARP for it.
+(def test_lease_then_arp () int
+  (match (heard (heard (started) (offer_frame)) (ack_frame))
+    ((Leasing s l)
+      (check_strs "the reply" (wire_text (from_wire (cleared s) (gw_asks)))
+                  (cons "52:55:0a:00:02:02 arp 2 52:54:00:12:34:56 10.0.2.15 52:55:0a:00:02:02 10.0.2.2" (nil (list int)))))))
+
+; Whatever else the stack has to send is kept, not taken for an answer: the
+; client's own queue is sent after each step.
+(def test_lease_keeps_queue () int
+  (match (started)
+    ((Leasing s l)
+      (check_int "the discover waits" (length (lease_wire (lease_hear s l 30 (request 0 "info")))) 1))))
+
+(def test_lease_xid () int
+  (add (check_int "from the card's last four bytes" (lease_xid (my_mac) 0) 1193046)
+       (add (check_int "and the time" (lease_xid (my_mac) 1193046) 0)
+            (check_int "32 bits" (lease_xid (my_mac) 4294967296) 1193046))))
+
+(def test_lease_done () int
+  (add (check_bool "leased" (lease_done (Leased)) true)
+       (check_bool "selecting" (lease_done (Selecting 1)) false)))
+
+(def test_config_dhcp () int
+  (add (check_str "dhcp" (config_text (config_of (cons "dhcp" (nil (list int))))) "0.0.0.0 0.0.0.0 0.0.0.0")
+       (add (check_str "and no more" (config_text (config_of (cons "dhcp" (cons "10.0.2.2" (nil (list int)))))) "dhcp takes no more arguments")
+            (check_str "no 0.0.0.0" (config_text (config_of (cons "0.0.0.0/24" (nil (list int))))) "0.0.0.0 is no address; say dhcp to be given one"))))
+
+; With no card there is nothing to ask either.
+(def test_no_card_dhcp () int
+  (check_int "nothing to serve" (linked (Config 0 0 0) 0) 0))
+
+; -------------------------------------------------------------------- TCP
+
+; The TCP segments on the wire, in order.
+(def wire_segs ((s Stack)) (list Seg) (frame_segs (wire s) (nil Seg)))
+
+(def frame_segs ((fs (list (list int))) (acc (list Seg))) (list Seg)
+  (if (is_empty fs)
+      (rev acc)
+      (match (ipv4_of (bytes_from_list (head fs)) 14)
+        ((IpBad why) (frame_segs (tail fs) acc))
+        ((IpRead d)
+          (match d
+            ((Ipv4 src dst proto ttl payload quoted)
+              (if (eq proto (proto_tcp))
+                  (match (tcp_of src dst payload)
+                    ((None) (frame_segs (tail fs) acc))
+                    ((Some sg) (frame_segs (tail fs) (cons sg acc))))
+                  (frame_segs (tail fs) acc))))))))
+
+; A segment's source port, sequence number, and acknowledgement.
+(def sg_sport ((sg Seg)) int (match sg ((Seg sport dport seq ack flags window mss body) sport)))
+(def sg_seq ((sg Seg)) int (match sg ((Seg sport dport seq ack flags window mss body) seq)))
+(def sg_ack ((sg Seg)) int (match sg ((Seg sport dport seq ack flags window mss body) ack)))
+
+; A frame to me from the gateway carrying TCP segment sg.
+(def peer_frame ((sg Seg)) (list int) (ip_frame (gw) (proto_tcp) (tcp_bytes (gw) (me) sg)))
+
+; s after the gateway sent segment sg.
+(def from_peer_seg ((s Stack) (sg Seg)) Stack (from_wire s (peer_frame sg)))
+
+; The connection numbered id in s: its next sequence number to send and to
+; receive, or -1 if there is none.
+(def conn_nxt ((s Stack) (id int)) int (match (map_get (tcp_conns s) id) ((None) -1) ((Some c) (c_nxt c))))
+(def conn_rcv ((s Stack) (id int)) int (match (map_get (tcp_conns s) id) ((None) -1) ((Some c) (c_rcv c))))
+(def conn_state_of ((s Stack) (id int)) (list int)
+  (match (map_get (tcp_conns s) id) ((None) "none") ((Some c) (tcp_state_name (c_state c)))))
+
+; The line of the notice or answer at index i of what s tells its clients.
+(def notice_at ((s Stack) (i int)) (list int) (nth_or (told s) i "-"))
+
+; The gateway's answers will come from port 80 to port 49152, the first
+; one inet picks, and begin at sequence 5000.
+
+; A connection opened to the gateway's port 80, its notices to port 56.
+(def tcp_opened () Stack (asked_of (knowing) (client) "connect 10.0.2.2 80 56"))
+
+; The gateway's SYN and ACK of the SYN s sent.
+(def peer_synack ((s Stack)) Seg
+  (Seg 80 49152 5000 (conn_nxt s 1) (bit_or (tcp_syn) (tcp_ack)) 4096 1400 (nil int)))
+
+; The connection s opened, and the SYN and ACK that has come: nothing waits
+; to be sent.
+(def tcp_up_of ((s Stack)) Stack (cleared (from_peer_seg (cleared s) (peer_synack s))))
+
+; An open connection. The first sequence number inet picks is of the clock,
+; so each call is another connection, and a test that makes one calls it
+; once.
+(def tcp_up () Stack (tcp_up_of (tcp_opened)))
+
+; A segment from the gateway, in order on an open connection, with ack as
+; far as it acknowledges: flags, and data.
+(def peer_data ((s Stack) (flags int) (body (list int))) Seg
+  (Seg 80 49152 (conn_rcv s 1) (conn_nxt s 1) flags 4096 0 body))
+
+(def test_tcp_connect () int
+  (let s (tcp_opened)
+    (add (check_strs "answered" (told s) (cons "55: connecting 1 49152" (nil (list int))))
+         (add (check_strs "the SYN" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 SYN" (nil (list int))))
+              (check_str "SYN-SENT" (conn_state_of s 1) "SYN-SENT")))))
+
+; The SYN's checksum covers the pseudo-header, and its segment size is
+; 1460, which a frame holds.
+(def test_tcp_syn_form () int
+  (match (head (wire_segs (tcp_opened)))
+    ((Seg sport dport seq ack flags window mss body)
+      (add (check_int "segment size" mss 1460)
+           (check_int "window" window 8192)))))
+
+; The gateway's SYN and ACK: the process is told it is open, and the SYN
+; is acknowledged.
+(def test_tcp_up () int
+  (let o (tcp_opened)
+   (let s (from_peer_seg (cleared o) (peer_synack o))
+    (add (check_strs "told" (told s) (cons "56: tcp 1 up" (nil (list int))))
+         (add (check_strs "the ACK" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 ACK" (nil (list int))))
+              (check_int "acknowledging 5001" (sg_ack (head (wire_segs s))) 5001))))))
+
+(def test_tcp_write () int
+  (let s (asked_of (tcp_up) 0 "write 1\nhello")
+    (add (check_strs "sent" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 ACK|PSH 'hello'" (nil (list int))))
+         (check_int "nothing to tell" (length (told s)) 0))))
+
+; Data from the gateway is given to the process, and acknowledged.
+(def test_tcp_data_in () int
+  (let u (tcp_up)
+   (let s (from_peer_seg u (peer_data u (bit_or (tcp_ack) (tcp_psh)) "hi"))
+    (add (check_strs "told" (told s) (cons "56: tcp 1 data\nhi" (nil (list int))))
+         (add (check_strs "acknowledged" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 ACK" (nil (list int))))
+              (check_int "up to 5003" (sg_ack (head (wire_segs s))) 5003))))))
+
+; The process ends it: its data and then a FIN; the gateway's ACK and FIN
+; end it, and the process is told as soon as it has.
+(def test_tcp_close () int
+  (let s (asked_of (tcp_up) 0 "finish 1")
+    (add (check_strs "the FIN" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 FIN|ACK" (nil (list int))))
+         (let s2 (from_peer_seg (cleared s) (Seg 80 49152 5001 (conn_nxt s 1) (bit_or (tcp_fin) (tcp_ack)) 4096 0 (nil int)))
+           (add (check_strs "told" (told s2) (cons "56: tcp 1 fin" (cons "56: tcp 1 closed closed" (nil (list int)))))
+                (check_str "TIME-WAIT" (conn_state_of s2 1) "TIME-WAIT"))))))
+
+; TIME-WAIT passes: the connection is gone, and nothing more is told.
+(def test_tcp_time_wait_ends () int
+  (let f (asked_of (tcp_up) 0 "finish 1")
+   (let s (from_peer_seg (cleared f) (Seg 80 49152 5001 (conn_nxt f 1) (bit_or (tcp_fin) (tcp_ack)) 4096 0 (nil int)))
+    (let s2 (tcp_ticked (cleared s) 9000000000000000)
+      (add (check_bool "gone" (tcp_busy s2) false)
+           (check_int "silent" (length (told s2)) 0))))))
+
+; The peer ends it: the process is told, and finishes it in turn.
+(def test_tcp_passive_close () int
+  (let u (tcp_up)
+   (let s (from_peer_seg u (peer_data u (bit_or (tcp_ack) (tcp_fin)) ""))
+    (add (check_strs "told" (told s) (cons "56: tcp 1 fin" (nil (list int))))
+         (add (check_str "CLOSE-WAIT" (conn_state_of s 1) "CLOSE-WAIT")
+              (check_strs "its FIN" (wire_text (asked_of (cleared s) 0 "finish 1"))
+                          (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 FIN|ACK" (nil (list int)))))))))
+
+; A reset ends it, with a reason.
+(def test_tcp_reset_in () int
+  (let u (tcp_up)
+   (let s (from_peer_seg u (peer_data u (tcp_rst) ""))
+    (add (check_strs "told" (told s) (cons "56: tcp 1 closed reset" (nil (list int))))
+         (check_bool "gone" (tcp_busy s) false)))))
+
+; Refused: the gateway answers the SYN with a reset.
+(def test_tcp_refused () int
+  (let o (tcp_opened)
+   (let s (from_peer_seg (cleared o) (Seg 80 49152 0 (conn_nxt o 1) (bit_or (tcp_rst) (tcp_ack)) 0 0 (nil int)))
+    (check_strs "told" (told s) (cons "56: tcp 1 closed refused" (nil (list int)))))))
+
+; The process resets it: a reset to the gateway, and the process is told.
+(def test_tcp_reset_out () int
+  (let s (asked_of (tcp_up) (client) "reset 1")
+    (add (check_strs "the RST" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 RST|ACK" (nil (list int))))
+         (check_strs "told" (told s) (cons "56: tcp 1 closed aborted" (cons "55: ok" (nil (list int))))))))
+
+; Only the process that opened a connection may use it.
+(def test_tcp_ownership () int
+  (let s (tcp_up)
+    (add (check_strs "another's write" (told (message s 31 (request 55 "write 1\nx"))) (cons "55: error: connection 1 is not yours" (nil (list int))))
+         (add (check_strs "its own" (told (message s 30 (request 55 "write 1\nx"))) (cons "55: ok" (nil (list int))))
+              (check_strs "none such" (told (asked_of s (client) "finish 9")) (cons "55: error: no connection 9" (nil (list int))))))))
+
+; Too much waiting to be sent resets it.
+(def test_tcp_overflow () int
+  (let s (asked_of (tcp_up) (client) (append "write 1\n" (repeat 16385 97)))
+    (add (check_strs "refused, and told" (told s) (cons "56: tcp 1 closed overflow" (cons "55: error: too much data waits to be sent" (nil (list int)))))
+         (check_bool "gone" (tcp_busy s) false))))
+
+; ----------------------------------------------------------------- listening
+
+(def tcp_listening_stack () Stack (cleared (asked_of (knowing) (client) "listen 7000 56")))
+
+; The gateway's SYN to port 7000, from its port 49999, sequence 9000.
+(def peer_syn () Seg (Seg 49999 7000 9000 0 (tcp_syn) 4096 1000 (nil int)))
+
+(def test_tcp_listen () int
+  (add (check_strs "answered" (told (asked_of (knowing) (client) "listen 7000 56")) (cons "55: listening 7000" (nil (list int))))
+       (check_strs "answered a port picked" (told (asked_of (knowing) (client) "listen 0 56")) (cons "55: listening 49152" (nil (list int))))))
+
+(def test_tcp_listen_taken () int
+  (check_strs "refused" (told (asked_of (tcp_listening_stack) 57 "listen 7000 58")) (cons "57: error: port 7000 is taken" (nil (list int)))))
+
+; A SYN to a port with a listener: a SYN and ACK, and the listener is told
+; when the handshake is done.
+(def test_tcp_accept () int
+  (let s (from_peer_seg (tcp_listening_stack) (peer_syn))
+    (add (check_strs "SYN and ACK" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 7000>49999 SYN|ACK" (nil (list int))))
+         (add (check_int "acknowledging 9001" (sg_ack (head (wire_segs s))) 9001)
+              (let s2 (from_peer_seg (cleared s) (Seg 49999 7000 9001 (conn_nxt s 1) (tcp_ack) 4096 0 (nil int)))
+                (add (check_strs "accepted" (told s2) (cons "56: tcp 1 accepted 10.0.2.2 49999 7000" (nil (list int))))
+                     (check_str "ESTABLISHED" (conn_state_of s2 1) "ESTABLISHED")))))))
+
+; Its data comes to the listener's port too.
+(def test_tcp_accepted_data () int
+  (let a (from_peer_seg (tcp_listening_stack) (peer_syn))
+   (let s (from_peer_seg (cleared a) (Seg 49999 7000 9001 (conn_nxt a 1) (tcp_ack) 4096 0 (nil int)))
+    (let s2 (from_peer_seg (cleared s) (Seg 49999 7000 9001 (conn_nxt s 1) (bit_or (tcp_ack) (tcp_psh)) 4096 0 "GET"))
+      (check_strs "told" (told s2) (cons "56: tcp 1 data\nGET" (nil (list int))))))))
+
+; A port no one listens to: a reset, as RFC 9293 3.10.7.1 has it.
+(def test_tcp_no_listener () int
+  (let s (from_peer_seg (knowing) (Seg 49999 9999 9000 0 (tcp_syn) 4096 1000 (nil int)))
+    (add (check_strs "a reset" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 9999>49999 RST|ACK" (nil (list int))))
+         (check_int "acknowledging the SYN" (sg_ack (head (wire_segs s))) 9001))))
+
+; A reset to a port no one listens to is not answered.
+(def test_tcp_reset_not_answered () int
+  (check_int "nothing" (length (wire (from_peer_seg (knowing) (Seg 49999 9999 9000 0 (tcp_rst) 0 0 (nil int))))) 0))
+
+(def test_tcp_unlisten () int
+  (let s (tcp_listening_stack)
+    (add (check_strs "not another's" (told (message s 31 (request 55 "unlisten 7000"))) (cons "55: error: port 7000 is not yours" (nil (list int))))
+         (let s2 (cleared (asked_of s (client) "unlisten 7000"))
+           (add (check_int "a SYN is refused" (length (wire (from_peer_seg s2 (peer_syn)))) 1)
+                (check_str "with a reset" (frame_text (head (wire (from_peer_seg s2 (peer_syn))))) "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 7000>49999 RST|ACK"))))))
+
+; ---------------------------------------------------------------- the timers
+
+; s after n timer looks, each past any timeout.
+(def ticked_n ((s Stack) (now int) (n int)) Stack
+  (if (eq n 0) s (ticked_n (cleared (tcp_ticked s now)) (add now 20000000000) (sub n 1))))
+
+; The SYN is sent again when no answer comes.
+(def test_tcp_syn_again () int
+  (let s (tcp_ticked (cleared (tcp_opened)) 9000000000000000)
+    (check_strs "again" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 SYN" (nil (list int))))))
+
+; After five times, it gives up, with a reset, and the process is told.
+(def test_tcp_give_up () int
+  (let s (tcp_ticked (ticked_n (cleared (tcp_opened)) 9000000000000000 5) 9000100000000000)
+    (add (check_strs "told" (told s) (cons "56: tcp 1 closed timeout" (nil (list int))))
+         (check_bool "gone" (tcp_busy s) false))))
+
+; Data not acknowledged is sent again.
+(def test_tcp_data_again () int
+  (let s (tcp_ticked (cleared (asked_of (tcp_up) 0 "write 1\nhello")) 9000000000000000)
+    (check_strs "again" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 ACK 'hello'" (nil (list int))))))
+
+; Nothing is sent again of a connection that is only listened to.
+(def test_tcp_idle () int
+  (add (check_bool "no connection, no timers" (tcp_busy (tcp_listening_stack)) false)
+       (check_int "nothing to do" (length (outs (tcp_ticked (tcp_listening_stack) 9000000000000000))) 0)))
+
+; ------------------------------------------------------------------ failures
+
+; The owner's port is gone: its connection is reset; so is the listener it
+; had.
+(def test_tcp_owner_gone () int
+  (let s (after_send (tcp_up) (ToTcp 1) (SendNoPort))
+    (add (check_strs "a reset" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 RST|ACK" (nil (list int))))
+         (check_bool "gone" (tcp_busy s) false))))
+
+(def test_tcp_owner_full () int
+  (let s (after_send (tcp_up) (ToTcp 1) (SendFull))
+    (check_strs "told, if it can be" (told s) (cons "56: tcp 1 closed overflow" (nil (list int))))))
+
+(def test_tcp_listener_gone () int
+  (let s (after_send (from_peer_seg (tcp_listening_stack) (peer_syn)) (ToTcp 1) (SendNoPort))
+    (check_strs "refused after" (wire_text (from_peer_seg (cleared s) (Seg 49998 7000 1 0 (tcp_syn) 4096 0 (nil int))))
+                (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 7000>49998 RST|ACK" (nil (list int))))))
+
+; A segment with a wrong checksum is passed over.
+(def test_tcp_bad_checksum () int
+  (let b (tcp_bytes (gw) (me) (Seg 80 49152 5000 1 (tcp_syn) 4096 0 (nil int)))
+    (let s (from_wire (knowing) (ip_frame (gw) (proto_tcp) (append (take b 5) (cons 77 (drop_n b 6)))))
+      (check_str "dropped" (stats_text s) "rx 2 tx 0 dropped 1 arp 1"))))
+
+; TCP to another address, or to everyone, is not for inet.
+(def test_tcp_not_to_us () int
+  (let s (from_wire (knowing) (eth_frame (my_mac) (gw_mac) (eth_ipv4) (ipv4_packet (gw) (ip_of 10 0 2 255) (proto_tcp) 1 (tcp_bytes (gw) (ip_of 10 0 2 255) (peer_syn)))))
+    (check_int "nothing sent" (length (wire s)) 0)))
+
+; ---------------------------------------------------------------- requests
+
+(def test_tcp_bad_requests () int
+  (add (check_strs "a name" (told (asked_of (knowing) (client) "connect x 80 56")) (cons "55: error: not an address: x" (nil (list int))))
+       (add (check_strs "port 0" (told (asked_of (knowing) (client) "connect 10.0.2.2 0 56")) (cons "55: error: a port is 1 to 65535" (nil (list int))))
+            (add (check_strs "no notice port" (told (asked_of (knowing) (client) "connect 10.0.2.2 80")) (cons "55: error: connect ADDR PORT NPORT" (nil (list int))))
+                 (add (check_strs "broadcast" (told (asked_of (knowing) (client) "connect 10.0.2.255 80 56")) (cons "55: error: not a host's address" (nil (list int))))
+                      (check_strs "no such request" (told (asked_of (knowing) (client) "tcpx")) (cons "55: error: no request tcpx" (nil (list int)))))))))
+
+; The listing: each connection and each listener.
+(def test_tcp_listing () int
+  (let s (asked_of (cleared (asked_of (tcp_up) (client) "listen 7000 56")) (client) "tcp")
+    (check_strs "listed" (told s) (cons "55: 1 ESTABLISHED 49152 10.0.2.2:80\nlisten 7000\n" (nil (list int))))))
+
+; With none, it says so: an empty answer would be no answer.
+(def test_tcp_listing_none () int
+  (check_strs "none" (told (asked_of (knowing) (client) "tcp")) (cons "55: none\n" (nil (list int)))))
+
+; At most tcp_conn_limit connections.
+(def opened_n ((s Stack) (n int)) Stack
+  (if (eq n 0) s (opened_n (cleared (asked_of s (client) "connect 10.0.2.2 80 56")) (sub n 1))))
+
+(def test_tcp_limit () int
+  (let s (opened_n (knowing) (tcp_conn_limit))
+    (add (check_strs "the last" (told (asked_of s (client) "connect 10.0.2.2 80 56")) (cons "55: error: too many connections" (nil (list int))))
+         (check_int "each its own port" (map_size (tcp_conns s)) (tcp_conn_limit)))))
+
+; Local ports go on from where the last was.
+(def test_tcp_ports () int
+  (let s (asked_of (cleared (tcp_opened)) (client) "connect 10.0.2.2 80 56")
+    (check_strs "the next" (told s) (cons "55: connecting 2 49153" (nil (list int))))))
+
+; ------------------------------------------------------------------ loopback
+
+; A connection to this stack's own address, to a port it listens to,
+; is made without a frame: both ends are told.
+(def tcp_looped () Stack
+  (asked_of (tcp_listening_stack) (client) "connect 10.0.2.15 7000 58"))
+
+(def test_tcp_loopback () int
+  (let s (tcp_looped)
+    (add (check_strs "told" (told s)
+                     (cons "58: tcp 1 up" (cons "56: tcp 2 accepted 10.0.2.15 49152 7000" (cons "55: connecting 1 49152" (nil (list int))))))
+         (check_int "no frames" (length (wire s)) 0))))
+
+; Data and an end each way.
+(def test_tcp_loopback_data () int
+  (let s1 (asked_of (cleared (tcp_looped)) 0 "write 1\nping")
+    (let s2 (asked_of (cleared s1) 0 "write 2\npong")
+      (let s3 (asked_of (cleared s2) 0 "finish 1")
+        (let s4 (asked_of (cleared s3) 0 "finish 2")
+          (add (check_strs "to the listener" (told s1) (cons "56: tcp 2 data\nping" (nil (list int))))
+               (add (check_strs "back" (told s2) (cons "58: tcp 1 data\npong" (nil (list int))))
+                    (add (check_strs "the listener's end is told" (told s3) (cons "56: tcp 2 fin" (nil (list int))))
+                         (check_strs "and the other's end" (told s4)
+                                     (cons "58: tcp 1 fin" (cons "58: tcp 1 closed closed" (cons "56: tcp 2 closed closed" (nil (list int))))))))))))))

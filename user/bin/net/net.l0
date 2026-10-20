@@ -11,6 +11,11 @@
 ;                               spaces between, to PORT at ADDR
 ;   net recv PORT               waits for a UDP datagram to PORT, and shows
 ;                               where it came from and what it holds
+;   net tcp                     the TCP connections inet holds, and the
+;                               ports it listens to
+;   net echo PORT               listens to TCP PORT, takes the first
+;                               connection, sends back everything it
+;                               sends until it closes, and says how much
 ;
 ; Fails if inet is not running, or for ping, if no reply came.
 
@@ -31,7 +36,9 @@
   (if (eq cmd "ping") (ping_with (ping_args rest))
   (if (eq cmd "send") (send_with rest)
   (if (if (eq cmd "recv") (eq (length rest) 1) false) (recv_on (head rest))
-  (complain "net [stats | arp | ping [-q] ADDR [COUNT] | send ADDR PORT TEXT... | recv PORT]")))))))
+  (if (if (eq cmd "tcp") (is_empty rest) false) (show_answer (inet_open) "tcp")
+  (if (if (eq cmd "echo") (eq (length rest) 1) false) (echo_on (head rest))
+  (complain "net [stats | arp | tcp | ping [-q] ADDR [COUNT] | send ADDR PORT TEXT... | recv PORT | echo PORT]")))))))))
 
 ; ---------------------------------------------------------------- showing
 
@@ -193,3 +200,58 @@
 ; content with each byte that does not print as a dot.
 (def shown ((s (list int))) (list int)
   (if (is_empty s) s (cons (if (is_printable (head s)) (head s) 46) (shown (tail s)))))
+
+; ------------------------------------------------------------------- TCP
+
+; echo PORT: the first connection to TCP port PORT, served.
+(def echo_on ((w (list int))) int
+  (match (word_number w)
+    ((None) (complain "the port is a number"))
+    ((Some p)
+      (let n (inet_open)
+        (let np (port_new)
+          (match (tcp_listen n np p)
+            ((Err why) (complain why))
+            ((Ok bound) (echo_wait n np bound))))))))
+
+; Waits at port bound for a connection, whose notices come to np, and serves it.
+(def echo_wait ((n Inet) (np int) (bound int)) int
+  (match (port_receive np)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from payload)
+      (match (tcp_event_of payload)
+        ((Some e)
+          (match e
+            ((TcpAccepted id src sport lport)
+              (let w (write_str (append "accepted from " (append (ip_text src) "\n")))
+                (let u (tcp_unlisten n bound)
+                  (echoing n np id 0))))
+            ((TcpUp id) (echo_wait n np bound))
+            ((TcpData id body) (echo_wait n np bound))
+            ((TcpFin id) (echo_wait n np bound))
+            ((TcpClosed id why) (echo_wait n np bound))))
+        ((None) (echo_wait n np bound))))))
+
+; Connection id's notices, as they come: its data sent back, counting what
+; came; and when the peer has closed, ours, and when it is over, the count.
+(def echoing ((n Inet) (np int) (id int) (count int)) int
+  (match (port_receive np)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from payload)
+      (match (tcp_event_of payload)
+        ((None) (echoing n np id count))
+        ((Some e)
+          (match e
+            ((TcpData i body)
+              (let why (tcp_write n id body)
+                (if (is_empty why) (echoing n np id (add count (length body))) (complain why))))
+            ((TcpFin i) (let why (tcp_finish n id) (echoing n np id count)))
+            ((TcpClosed i why) (echoed count why))
+            ((TcpUp i) (echoing n np id count))
+            ((TcpAccepted i src sport lport) (let r (tcp_reset n i) (echoing n np id count)))))))))
+
+; What an echo came to: how many bytes it sent back, and how it ended.
+(def echoed ((count int) (why (list int))) int
+  (if (eq why "closed")
+      (write_str (append "echoed " (append (digits count) " bytes\n")))
+      (complain (append "the connection " why))))
