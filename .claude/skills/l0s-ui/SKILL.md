@@ -242,8 +242,16 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   screen.
 - **The 64-region limit** (`l0s-dev`): `wm` opens two regions a window,
   and keeps four of its own: desktop, pointer, top bar, launcher.
-- **No GPU drawing.** The installed QEMU has no virgl; the host only
-  composes. Every pixel is the guest's.
+- **3D mode** (`user/sbin/virtio-gpu/gl.l0`, `compose.l0`, `virgl.l0`): on
+  QEMU's `virtio-gpu-gl-device` the driver makes each buffer a texture and
+  composes the screen with virgl copies (`make demo` does when
+  `tools/qemu-gl` says gl; `GPU=2d` doesn't). The host's texture is
+  updated **only by `damage`**: whatever a client or `wm` paints after
+  giving a buffer must be damaged, or GL mode shows the old pixels while
+  2D mode, which reads the pages at every restack, hides the omission.
+  Same look, same protocol; only copies, no blending.
+- **No GPU drawing.** The GPU only composes (2D mode: the host; 3D mode:
+  copies). Every pixel is the guest's.
 
 ## Scale (`face.l0`, the README's "A large screen")
 

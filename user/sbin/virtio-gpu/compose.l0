@@ -1,0 +1,109 @@
+; compose.l0 -- how the virtio-gpu driver composes the screen on the host's
+; GPU when it has virgl: each buffer a texture, the screen made of copies
+; of parts of them, bottom layer first. No pixel is blended, so a layer
+; over another is a copy over it, and a corner it cuts is a row that is
+; copied shorter. The planner is pure: layers and buffers in, the copies
+; out, and virgl.l0 puts them into bytes.
+
+; The texture of a buffer shared as id, and the screen's, the black the
+; screen is cleared with, and how many rows that is high: a copy from it
+; fills up to that many rows of what no layer covers.
+(def buffer_res ((id int)) int (add 16 id))
+(def black_res () int 3)
+(def black_rows () int 64)
+
+; A copy of the part of texture res, at sx, sy, w by h, to the screen at
+; dx, dy.
+(data Copy (Copy int int int int int int int))
+
+; The copies that draw layers over buffers bufs on a screen w by h, in the
+; part of it inside clip: the screen cleared to black there, and then
+; each layer, bottom first, over it.
+(def compose_plan ((w int) (h int) (layers (list Layer)) (bufs (Map int Buffer)) (clip Rect)) (list Copy)
+  (let k (rect_clip clip (Rect 0 0 w h))
+    (if (rect_empty k)
+        (nil Copy)
+        (rev (layers_copies w k layers bufs (black_copies k (rect_y k) (nil Copy)))))))
+
+; Black copied over k from row y down, in strips as high as the black
+; texture, onto the reversed acc.
+(def black_copies ((k Rect) (y int) (acc (list Copy))) (list Copy)
+  (if (ge y (rect_y1 k))
+      acc
+      (let n (min (black_rows) (sub (rect_y1 k) y))
+        (black_copies k (add y n)
+          (cons (Copy (black_res) (rect_x k) 0 (rect_x k) y (rect_w k) n) acc)))))
+
+; Each layer of layers copied onto the reversed acc, over what is there.
+(def layers_copies ((w int) (k Rect) (layers (list Layer)) (bufs (Map int Buffer)) (acc (list Copy))) (list Copy)
+  (if (is_empty layers)
+      acc
+      (layers_copies w k (tail layers) bufs (layer_copies w k (head layers) bufs acc))))
+
+; What a layer shows of its buffer: nothing if there is no such buffer;
+; else its rows within k, grouped by where its corners cut them.
+(def layer_copies ((w int) (k Rect) (l Layer) (bufs (Map int Buffer)) (acc (list Copy))) (list Copy)
+  (match l
+    ((Layer id lx ly top)
+      (match (map_get bufs id)
+        ((None) acc)
+        ((Some b)
+          (match b
+            ((Buffer bw bh addrs va cs)
+              (rows_copies (Lay (buffer_res id) lx ly top bw bh cs k w)
+                           (max ly (rect_y k)) (min (add ly bh) (rect_y1 k)) (NoRun) acc))))))))
+
+; A layer being copied: its buffer's texture, its place, its top row, its
+; buffer's size and corners, the clip and the screen's width.
+(data Lay (Lay int int int int int int Corners Rect int))
+
+; A run of screen rows copied together: the first, the buffer row it
+; shows, how many pixels its corners cut at the left and at the right,
+; and how many rows there are; or none.
+(data Run (Run int int int int int) (NoRun))
+
+; Screen rows y up to end of the layer, grouped into runs, each run
+; copied onto the reversed acc: a run goes on while the corners cut the
+; same, and the buffer's next row is the next row.
+(def rows_copies ((l Lay) (y int) (end int) (run Run) (acc (list Copy))) (list Copy)
+  (match l
+    ((Lay res lx ly top bw bh cs k w)
+      (if (ge y end)
+          (run_copy l run acc)
+          (let by (sub y ly)
+            (let r (mod (add (mod (add by top) bh) bh) bh)
+              (let li (left_inset cs bh by)
+                (let ri (right_inset cs bh by)
+                  (match run
+                    ((NoRun) (rows_copies l (add y 1) end (Run y r li ri 1) acc))
+                    ((Run y0 r0 li0 ri0 n)
+                      (if (if (eq li li0) (if (eq ri ri0) (eq r (add r0 n)) false) false)
+                          (rows_copies l (add y 1) end (Run y0 r0 li0 ri0 (add n 1)) acc)
+                          (rows_copies l (add y 1) end (Run y r li ri 1) (run_copy l run acc)))))))))))))
+
+; The copy of run, onto the reversed acc: its rows from the layer's
+; buffer, between its corners' cuts and inside the clip and the screen.
+(def run_copy ((l Lay) (run Run) (acc (list Copy))) (list Copy)
+  (match l
+    ((Lay res lx ly top bw bh cs k w)
+      (match run
+        ((NoRun) acc)
+        ((Run y0 r0 li ri n)
+          (let x0 (max (max (add lx li) (rect_x k)) 0)
+            (let x1 (min (min (sub (add lx bw) ri) (rect_x1 k)) w)
+              (if (lt x0 x1)
+                  (cons (Copy res (sub x0 lx) r0 x0 y0 (sub x1 x0) n) acc)
+                  acc))))))))
+
+; ------------------------------------------------------------ the bytes
+
+; A copy as virgl.l0's resource copy region sends it, to the screen.
+(def copy_words ((c Copy)) (list int)
+  (match c ((Copy src sx sy dx dy w h) (copy_region (screen_res) dx dy src sx sy w h))))
+
+; Every copy of cs as words, pushed onto the reversed acc, which a
+; caller turns round once.
+(def copies_words_onto ((cs (list Copy)) (acc (list int))) (list int)
+  (if (is_empty cs)
+      acc
+      (copies_words_onto (tail cs) (push (copy_words (head cs)) acc))))

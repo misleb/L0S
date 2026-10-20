@@ -124,6 +124,15 @@ top-left pixel.
 The window is macOS's (`cocoa`) there and SDL's (`sdl`) elsewhere, as on
 Linux. `QEMU_DISPLAY=gtk` picks another (on Wayland it scales the window),
 and `none` none. What is typed in your terminal goes to `uart`.
+
+With a render node (`/dev/dri/renderD*`) and QEMU's `virtio-gpu-gl-device`,
+which [tools/qemu-gl](tools/qemu-gl) looks for, the demo gives the board
+the GL device and the window GL (`sdl,gl=on`), and `virtio-gpu` composes
+the screen on the host's GPU with virgl (see
+[virtio-gpu's 3D mode](#the-desktop)). `make demo GPU=2d` gives it the plain
+device and the 2D mode instead, and so do `make boot` and the tests: QEMU's
+`screendump`, which they read the screen with, has no surface to read when
+the scanout is a GL texture.
 What is typed in the window goes to the virtio keyboard, and so through
 `virtio-input` and `wm` to the front window's `vt`.
 
@@ -604,6 +613,29 @@ so that the guest copies no pixels at all:
 
 So `vt` scrolls by changing its window's `top`, with no copying anywhere,
 and draws only the new row.
+
+**virtio-gpu's 3D mode.** If the device offers `VIRTIO_GPU_F_VIRGL`, as
+QEMU's `virtio-gpu-gl-device` does, the driver (`gl.l0`) composes the
+screen on the host's GPU instead, with virgl but without a shader:
+
+1. **Each buffer a client shares is a texture** (`RESOURCE_CREATE_3D`),
+   backed by the client's own pages and filled by `TRANSFER_TO_HOST_3D`
+   when it is shared. The host's copy of it changes only when a `damage`
+   says so, so a client must damage what it paints, as every one does;
+   `wm` damages the launcher's page once it has painted it.
+2. **The screen is composed from copies** (`compose.l0`): the planner turns
+   the layers, bottom first, into `RESOURCE_COPY_REGION` commands, which a
+   `SUBMIT_3D` carries to the GPU, 128 to a request. A ring's wrap is two
+   copies; a corner a layer cuts is rows copied shorter, so what it looks
+   like is what 2D mode shows, pixel for pixel. What no layer covers is
+   copied from a black texture of 64 rows. `layers` composes all of the
+   screen, a `damage` only the boxes it shows in, and each box is flushed.
+3. **The cursor is as in 2D mode.**
+
+A restack of a window drag takes about 8 ms there, against about 20 ms in
+2D mode, both under `egl-headless`. If the device offers no virgl, or gives
+no context, the driver is the 2D one. Nothing is blended or drawn by the
+GPU: it only copies.
 
 ### A large screen
 
@@ -1458,7 +1490,7 @@ every `.l0` in its directory is part of it.
 | `spin` | loops forever without a call; other processes still run, thanks to the timer |
 | `nap` | sleeps for N ms and checks that the time passed |
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
-| `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts |
+| `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
@@ -1792,9 +1824,13 @@ a bad buffer, and wait on nothing.
   takes 10,500; more windows over pages apart could reach the limit, and
   the driver then says the screen is in too many pieces. Pages given
   together usually lie together, and their runs join.
-- **Nothing is drawn by the GPU.** The installed QEMU has no virgl, so
-  the host composes the layers and every pixel in them is painted by the
-  guest's CPU, at scale 2 four times as many.
+- **Nothing is drawn by the GPU.** With virgl (the GL device) it copies
+  the layers into the screen, and in 2D mode the host composes them
+  from the clients' pages, but every pixel in them is painted by the
+  guest's CPU, at scale 2 four times as many. Nothing is blended.
+- **The screen tests run in 2D mode** (`GPU=2d`, the default of
+  `tools/qemu-boot.sh`): `screendump` fails with "no surface" on a GL
+  scanout. The 3D mode is tried by `make demo`.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
 - **The initramfs is read-only.** Nothing in it can be written, renamed

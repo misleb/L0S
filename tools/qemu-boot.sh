@@ -20,6 +20,11 @@
 # virtio-blk, for the virtio-blk driver; the demo's is build/disk.img.
 # QEMU_GPU, unset unless given, is options for the virtio-gpu, such as
 # xres=3840,yres=2160 for a 4K screen, which the desktop draws at scale 2.
+# GPU, gl or 2d, 2d if not set, says whether the board's virtio-gpu is the
+# GL device, for which the display has GL on (none becomes egl-headless),
+# or the plain one. The demo sets it from tools/qemu-gl. The screen tests
+# stay on 2d: QEMU's screendump has no surface to read when the scanout is
+# a GL texture, as it is on the GL device even for 2D resources.
 # QEMU_NET, unset unless given, is the network a virtio-net is on, for
 # the virtio-net driver, as -netdev names one without its id: user,
 # QEMU's own, at 10.0.2.0/24, or user,tftp=DIR with its TFTP server
@@ -52,7 +57,20 @@ if [ -n "${QEMU_NET:-}" ]; then
 fi
 append=()
 if [ -n "${QEMU_APPEND:-}" ]; then append=(-append "$QEMU_APPEND"); fi
-gpu=virtio-gpu-device${QEMU_GPU:+,$QEMU_GPU}
+mode=${GPU:-2d}
+if [ "$mode" = gl ]; then
+  # virgl: the GL device, and a display that has GL, which none and a
+  # window both are given.
+  gpudev=virtio-gpu-gl-device
+  case $display in
+    none) display=egl-headless ;;
+    *gl=*) ;;
+    *) display="$display,gl=on" ;;
+  esac
+else
+  gpudev=virtio-gpu-device
+fi
+gpu=$gpudev${QEMU_GPU:+,$QEMU_GPU}
 len=$(wc -c < "$initramfs" | tr -d ' ')
 exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=localtime \

@@ -116,6 +116,13 @@ case's `etc`, and compares. A case is a directory:
 
 ## Screen tests (`tests/*.sh`)
 
+They run in 2D mode (`tools/qemu-boot.sh`'s `GPU` defaults to `2d`): on the
+GL device (`GPU=gl`) QEMU's `screendump` says "no surface". To look at
+virgl's 3D mode, boot headless with `GPU=gl QEMU_DISPLAY=none` and read the
+screen back from inside the driver (a temporary `TRANSFER_FROM_HOST_3D` of
+the screen into a page, sampled and printed), or `make demo` and look. They
+also need `nc` (netcat), which is not on every machine.
+
 These boot with QEMU's monitor and QMP on Unix sockets and check pixels of a
 `screendump`. Each can be run alone from the top of the project once its
 image exists: `make initramfs` for `vt.sh` (the demo), and

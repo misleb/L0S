@@ -1,0 +1,196 @@
+; Tests of the planner that composes the screen on the GPU: the copies
+; for layers over buffers, as text, "RES SX,SY DX,DY WxH" each.
+
+; A copy as text.
+(def copy_text ((c Copy)) (list int)
+  (match c
+    ((Copy res sx sy dx dy w h)
+      (join_with " " (cons (digits res) (cons (append (digits sx) (append "," (digits sy)))
+        (cons (append (digits dx) (append "," (digits dy))) (cons (append (digits w) (append "x" (digits h))) (nil (list int))))))))))
+
+(def plan_text ((cs (list Copy))) (list int)
+  (if (is_empty cs)
+      ""
+      (append (copy_text (head cs)) (append "; " (plan_text (tail cs))))))
+
+; Buffer 0, the desktop, 8 by 4; buffer 1, a window, 4 by 2; buffer 2, a
+; 10 by 8 one with 4 pixel corners. Their pages are no matter here.
+(def pages () (array int) (array_from (cons 4096 (nil int)) 0))
+
+(def bufs () (Map int Buffer)
+  (map_put (map_put (map_put ((MapEmpty int Buffer)) 0 (Buffer 8 4 (pages) 0 (square)))
+                    1 (Buffer 4 2 (pages) 0 (square)))
+           2 (Buffer 10 8 (pages) 0 (Corners 4 4 4 4))))
+
+(def desktop () Layer (Layer 0 0 0 0))
+
+(def plan ((w int) (h int) (ls (list Layer)) (clip Rect)) (list int)
+  (plan_text (compose_plan w h ls (bufs) clip)))
+
+(def test_nothing_is_black () int
+  (check_str "black alone" (plan 8 4 (nil Layer) (Rect 0 0 8 4)) "3 0,0 0,0 8x4; "))
+
+(def test_desktop () int
+  (check_str "black, then the desktop" (plan 8 4 (cons (desktop) (nil Layer)) (Rect 0 0 8 4))
+             "3 0,0 0,0 8x4; 16 0,0 0,0 8x4; "))
+
+(def test_window_over_desktop () int
+  (check_str "the window's texture is 17, after the desktop's"
+    (plan 8 4 (cons (desktop) (cons (Layer 1 2 1 0) (nil Layer))) (Rect 0 0 8 4))
+    "3 0,0 0,0 8x4; 16 0,0 0,0 8x4; 17 0,0 2,1 4x2; "))
+
+; Screen rows 0 to 3 show the desktop's rows 1, 2, 3 and then 0.
+(def test_ring () int
+  (check_str "wraps in two copies" (plan 8 4 (cons (Layer 0 0 0 1) (nil Layer)) (Rect 0 0 8 4))
+             "3 0,0 0,0 8x4; 16 0,1 0,0 8x3; 16 0,0 0,3 8x1; "))
+
+; Radius 4 cuts 2 pixels of a corner's first row, 1 of its second and
+; none after (render.l0's corner_cut), read down from the top and up from
+; the foot: rows 0 to 7 are cut by 2, 1, 0, 0, 0, 0, 1, 2 on each side,
+; and the four between that are cut by none are one copy.
+(def test_corners () int
+  (check_str "five copies"
+    (plan 10 8 (cons (Layer 2 0 0 0) (nil Layer)) (Rect 0 0 10 8))
+    "3 0,0 0,0 10x8; 18 2,0 2,0 6x1; 18 1,1 1,1 8x1; 18 0,2 0,2 10x4; 18 1,6 1,6 8x1; 18 2,7 2,7 6x1; "))
+
+; The part of the screen at 2, 1, 3 by 2 only.
+(def test_clip () int
+  (check_str "black and desktop, cut to it" (plan 8 4 (cons (desktop) (nil Layer)) (Rect 2 1 3 2))
+             "3 2,0 2,1 3x2; 16 2,1 2,1 3x2; "))
+
+(def test_clip_past_the_screen () int
+  (check_str "cut to the screen" (plan 8 4 (cons (desktop) (nil Layer)) (Rect 6 2 10 10))
+             "3 6,0 6,2 2x2; 16 6,2 6,2 2x2; "))
+
+(def test_clip_empty () int
+  (check_str "nothing" (plan 8 4 (cons (desktop) (nil Layer)) (Rect 9 9 2 2)) ""))
+
+; A window of 4 by 2 at 6, 2 on a screen 8 wide shows its first 2 columns.
+(def test_window_off_the_right () int
+  (check_str "cut at the screen's edge"
+    (plan 8 4 (cons (Layer 1 6 2 0) (nil Layer)) (Rect 0 0 8 4))
+    "3 0,0 0,0 8x4; 17 0,0 6,2 2x2; "))
+
+; At -1, 1 its first column is off the screen: 3 columns from its 1.
+(def test_window_off_the_left () int
+  (check_str "cut at the left"
+    (plan 8 4 (cons (Layer 1 -1 1 0) (nil Layer)) (Rect 0 0 8 4))
+    "3 0,0 0,0 8x4; 17 1,0 0,1 3x2; "))
+
+; A window at 0, 3 of 2 rows, on a screen 4 high, shows one.
+(def test_window_off_the_foot () int
+  (check_str "cut at the bottom"
+    (plan 8 4 (cons (Layer 1 0 3 0) (nil Layer)) (Rect 0 0 8 4))
+    "3 0,0 0,0 8x4; 17 0,0 0,3 4x1; "))
+
+(def test_missing_buffer () int
+  (check_str "nothing for buffer 9" (plan 8 4 (cons (Layer 9 0 0 0) (nil Layer)) (Rect 0 0 8 4))
+             "3 0,0 0,0 8x4; "))
+
+; A screen of 130 rows is cleared by strips of the black texture's 64.
+(def test_black_strips () int
+  (check_str "64, 64 and 2 rows" (plan 8 130 (nil Layer) (Rect 0 0 8 130))
+             "3 0,0 0,0 8x64; 3 0,0 0,64 8x64; 3 0,0 0,128 8x2; "))
+
+(def test_copy_words () int
+  (let ws (copy_words (Copy 17 3 4 10 20 30 40))
+    (add (check_int "14 words" (length ws) 14)
+         (add (check_int "to the screen" (nth ws 1) 1)
+              (add (check_int "from texture 17" (nth ws 6) 17)
+                   (check_int "dst x" (nth ws 3) 10))))))
+
+(def test_copies_words () int
+  (let ws (rev (copies_words_onto (cons (Copy 17 0 0 0 0 1 1) (cons (Copy 18 0 0 0 0 1 1) (nil Copy))) (nil int)))
+    (add (check_int "two commands" (length ws) 28)
+         (add (check_int "the first's source" (nth ws 6) 17)
+              (check_int "the second's" (nth ws 20) 18)))))
+
+; Every buffer id's texture is its id from 16, clear of the screen's,
+; the cursor's and the black.
+(def test_resources () int
+  (add (check_int "buffer 0" (buffer_res 0) 16)
+       (check_int "buffer 5" (buffer_res 5) 21)))
+
+; ------------------------------------------------------------ properties
+
+; A screen 24 by 16 of buffers: 0, the desktop, 24 by 16, square; 1, 10 by
+; 6, with 3 pixel corners; 2, 7 by 9, with corners of 4, 0, 2 and 0.
+(def prop_bufs () (Map int Buffer)
+  (map_put (map_put (map_put ((MapEmpty int Buffer)) 0 (Buffer 24 16 (pages) 0 (square)))
+                    1 (Buffer 10 6 (pages) 0 (Corners 3 3 3 3)))
+           2 (Buffer 7 9 (pages) 0 (Corners 4 0 2 0))))
+
+; Layers from state s: the desktop, then buffers 1 and 2, in either order,
+; anywhere from partly off the screen on, with any top row.
+(def prop_layers ((s int)) (list Layer)
+  (let a (Layer 1 (sub (rand_below s 30) 6) (sub (rand_below (rand_next s) 22) 5) (rand_below (rand_next (rand_next s)) 6))
+    (let b (Layer 2 (sub (rand_below (rand_next (rand_next (rand_next s))) 30) 6) (sub (rand_below (rand_next (rand_next (rand_next (rand_next s)))) 22) 5) 0)
+      (if (eq (mod s 2) 0)
+          (cons (desktop) (cons a (cons b (nil Layer))))
+          (cons (desktop) (cons b (cons a (nil Layer))))))))
+
+; A pixel's source as one number: -1 for black, else its texture, row and
+; column.
+(def source_code ((res int) (row int) (col int)) int
+  (add (mul res 1000000) (add (mul row 1000) col)))
+
+; What a pixel shows by the driver's own rows, which the 2D mode builds the
+; screen from.
+(def pixel_owner ((ls (list Layer)) (x int) (y int)) int
+  (seg_owner (row_segs 24 y ls (prop_bufs) (cons (Bare 0 24) (nil Seg))) x y))
+
+(def seg_owner ((segs (list Seg)) (x int) (y int)) int
+  (if (is_empty segs)
+      -1
+      (let s (head segs)
+        (if (if (ge x (seg_x0 s)) (lt x (seg_x1 s)) false)
+            (match s ((Bare a b) -1) ((Owned a b l) (layer_source l x y)))
+            (seg_owner (tail segs) x y)))))
+
+; Where pixel x, y of layer l comes from: its buffer's row, read as a
+; ring from the layer's top, and its column.
+(def layer_source ((l Layer) (x int) (y int)) int
+  (match l
+    ((Layer id lx ly top)
+      (match (map_get (prop_bufs) id)
+        ((None) -1)
+        ((Some bf)
+          (match bf
+            ((Buffer bw bh addrs va cs)
+              (source_code (buffer_res id) (mod (add (mod (add (sub y ly) top) bh) bh) bh) (sub x lx)))))))))
+
+; What copies cs leave at x, y, after got: the last that covers it.
+(def copied_owner ((cs (list Copy)) (x int) (y int) (got int)) int
+  (if (is_empty cs)
+      got
+      (match (head cs)
+        ((Copy res sx sy dx dy w h)
+          (copied_owner (tail cs) x y
+            (if (if (ge x dx) (if (lt x (add dx w)) (if (ge y dy) (lt y (add dy h)) false) false) false)
+                (if (eq res (black_res)) -1 (source_code res (add sy (sub y dy)) (add sx (sub x dx))))
+                got))))))
+
+; How many pixels of the screen, from i on, the copies get wrong: where
+; they leave something other than the rows' owner, inside clip; or
+; something at all (-2 is untouched), outside it.
+(def prop_mismatches ((cs (list Copy)) (ls (list Layer)) (clip Rect) (i int) (bad int)) int
+  (if (ge i 384)
+      bad
+      (let x (mod i 24)
+        (let y (div i 24)
+          (prop_mismatches cs ls clip (add i 1)
+            (add bad (if (eq (copied_owner cs x y -2) (if (rect_has clip x y) (pixel_owner ls x y) -2)) 0 1)))))))
+
+; n random layouts and clips from state s, and the pixels wrong in all.
+(def prop_steps ((s int) (n int) (bad int)) int
+  (if (eq n 0)
+      bad
+      (let ls (prop_layers s)
+        (let clip (Rect (rand_below (rand_next s) 24) (rand_below (rand_next (rand_next s)) 16)
+                        (add 1 (rand_below (rand_next (rand_next (rand_next s))) 30))
+                        (add 1 (rand_below (rand_next (rand_next (rand_next (rand_next s)))) 20)))
+          (prop_steps (rand_next (rand_next (rand_next (rand_next (rand_next (rand_next s)))))) (sub n 1)
+            (add bad (prop_mismatches (compose_plan 24 16 ls (prop_bufs) clip) ls clip 0 0)))))))
+
+(def test_plan_agrees_with_rows () int
+  (check_int "pixels where the copies and the rows differ" (prop_steps 11 300 0) 0))
