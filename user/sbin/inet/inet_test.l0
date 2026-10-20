@@ -1,0 +1,316 @@
+; inet_test.l0 -- tests of inet.l0: frames and requests given to a stack,
+; and what it then has to send, read back from its queue, which is where
+; every message it sends waits (Stack's Out).
+
+; The stack's address and the gateway's, QEMU's user network's; a host
+; beyond it; and the cards' addresses.
+(def me () int (ip_of 10 0 2 15))
+(def gw () int (ip_of 10 0 2 2))
+(def far () int (ip_of 8 8 8 8))
+(def my_mac () (list int) (cons 82 (cons 84 (cons 0 (cons 18 (cons 52 (cons 86 (nil int))))))))
+(def gw_mac () (list int) (cons 82 (cons 85 (cons 10 (cons 0 (cons 2 (cons 2 (nil int))))))))
+
+; The driver's port is 100 and its pid 7; a client's port is 55.
+(def nic_pid () int 7)
+(def client () int 55)
+
+(def stack0 () Stack
+  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config (me) (ip_mask 24) (gw))))
+
+; frame given to s by the driver.
+(def from_wire ((s Stack) (frame (list int))) Stack
+  (message s (nic_pid) (frame_notice frame)))
+
+; body asked of s by a client whose port is reply.
+(def asked_of ((s Stack) (reply int) (body (list int))) Stack
+  (message s 30 (request reply body)))
+
+; What s has to send, in order.
+(def outs ((s Stack)) (list Out) (match s ((Stack l c n k id t o) (rev o))))
+
+; The frames s has to put on the wire, in order.
+(def wire ((s Stack)) (list (list int)) (wire_of (outs s) (nil (list int))))
+
+(def wire_of ((os (list Out)) (acc (list (list int)))) (list (list int))
+  (if (is_empty os)
+      (rev acc)
+      (match (head os)
+        ((Out port payload dest)
+          (match (nic_sent_frame (request_body payload))
+            ((Some f) (wire_of (tail os) (if (eq dest (ToWire)) (cons f acc) acc)))
+            ((None) (wire_of (tail os) acc)))))))
+
+; What s has to tell its clients, each as PORT: PAYLOAD, in order.
+(def told ((s Stack)) (list (list int)) (told_of (outs s) (nil (list int))))
+
+(def told_of ((os (list Out)) (acc (list (list int)))) (list (list int))
+  (if (is_empty os)
+      (rev acc)
+      (match (head os)
+        ((Out port payload dest)
+          (told_of (tail os) (if (eq dest (ToWire)) acc (cons (append (digits port) (append ": " payload)) acc)))))))
+
+; s with what it had to send gone, as if it had sent it.
+(def cleared ((s Stack)) Stack (match s ((Stack l c n k id t o) (Stack l c n k id t (nil Out)))))
+
+; A frame to me from the gateway, of IPv4 carrying payload of proto, from src.
+(def ip_frame ((src int) (proto int) (payload (list int))) (list int)
+  (eth_frame (my_mac) (gw_mac) (eth_ipv4) (ipv4_packet src (me) proto 1 payload)))
+
+; The gateway's ARP request for my address.
+(def gw_asks () (list int)
+  (eth_frame (mac_broadcast) (gw_mac) (eth_arp) (arp_bytes (Arp (arp_request) (gw_mac) (gw) (zeros 6) (me)))))
+
+; The gateway's ARP reply to my request.
+(def gw_answers () (list int)
+  (eth_frame (my_mac) (gw_mac) (eth_arp) (arp_bytes (Arp (arp_reply) (gw_mac) (gw) (my_mac) (me)))))
+
+; A stack that knows the gateway's card.
+(def knowing () Stack (cleared (from_wire (stack0) (gw_answers))))
+
+; A frame as text: where it goes, what it carries, and for IPv4 the
+; addresses, and the message or datagram it carries, if its checksum is
+; right.
+(def frame_text ((f (list int))) (list int)
+  (let b (bytes_from_list f)
+    (let type (eth_type b)
+      (append (mac_text (eth_dst b))
+              (if (eq type (eth_arp))
+                  (append " arp " (arp_text_of (arp_of b 14)))
+                  (append " ip " (ip_text_of (ipv4_of b 14))))))))
+
+(def arp_text_of ((a (Option Arp))) (list int)
+  (match a
+    ((None) "none")
+    ((Some p)
+      (match p
+        ((Arp op sha spa tha tpa)
+          (unwords (cons (digits op) (cons (mac_text sha) (cons (ip_text spa) (cons (mac_text tha) (cons (ip_text tpa) (nil (list int)))))))))))))
+
+(def ip_text_of ((r IpRead)) (list int)
+  (match r
+    ((IpBad why) why)
+    ((IpRead d)
+      (match d
+        ((Ipv4 src dst proto ttl payload quoted)
+          (append (ip_text src) (append " " (append (ip_text dst) (append " " (carried src dst proto payload))))))))))
+
+; An echo's id and seq; an error's, the address the datagram it quotes
+; went to.
+(def icmp_detail ((type int) (rest (list int))) (list int)
+  (if (eq type (icmp_unreachable))
+      (append " of " (ip_text (be32_at (bytes_from_list (drop_n rest 4)) 16)))
+      (append " id " (append (digits (echo_id rest)) (append " seq " (digits (echo_seq rest)))))))
+
+(def carried ((src int) (dst int) (proto int) (payload (list int))) (list int)
+  (if (eq proto (proto_icmp))
+      (match (icmp_of payload)
+        ((None) "a bad ICMP message")
+        ((Some m)
+          (match m
+            ((Icmp type code rest)
+              (append "icmp " (append (digits type) (append " " (append (digits code) (icmp_detail type rest)))))))))
+      (match (udp_of src dst payload)
+        ((None) "a bad datagram")
+        ((Some u) (match u ((Udp sp dp content) (append "udp " (append (digits sp) (append ">" (append (digits dp) (append " " content)))))))))))
+
+(def wire_text ((s Stack)) (list (list int)) (wire_texts (wire s) (nil (list int))))
+
+(def wire_texts ((fs (list (list int))) (acc (list (list int)))) (list (list int))
+  (if (is_empty fs) (rev acc) (wire_texts (tail fs) (cons (frame_text (head fs)) acc))))
+
+; ----------------------------------------------------------------- config
+
+(def config_text ((r (Result Config (list int)))) (list int)
+  (match r
+    ((Err why) why)
+    ((Ok c) (match c ((Config a m g) (unwords (cons (ip_text a) (cons (ip_text m) (cons (ip_text g) (nil (list int)))))))))))
+
+(def test_config_default () int
+  (check_str "QEMU's" (config_text (config_of (nil (list int)))) "10.0.2.15 255.255.255.0 10.0.2.2"))
+
+(def test_config_given () int
+  (check_str "given" (config_text (config_of (cons "192.168.1.9/16" (cons "192.168.0.1" (nil (list int))))))
+             "192.168.1.9 255.255.0.0 192.168.0.1"))
+
+(def test_config_bad () int
+  (add (check_str "no prefix" (config_text (config_of (cons "10.0.0.1" (nil (list int))))) "not ADDR/PREFIX: 10.0.0.1")
+       (add (check_str "too long a prefix" (config_text (config_of (cons "10.0.0.1/31" (nil (list int))))) "a prefix is 1 to 30 bits")
+            (check_str "a bad gateway" (config_text (config_of (cons "10.0.0.1/8" (cons "x" (nil (list int)))))) "not an address: x"))))
+
+(def test_routes () int
+  (let c (Config (me) (ip_mask 24) (gw))
+    (add (check_int "on the link" (next_hop c (ip_of 10 0 2 3)) (ip_of 10 0 2 3))
+         (add (check_int "beyond it" (next_hop c (far)) (gw))
+              (check_int "everyone" (next_hop c (ip_broadcast)) (ip_broadcast))))))
+
+(def test_broadcasts () int
+  (let c (Config (me) (ip_mask 24) (gw))
+    (add (check_bool "the subnet's" (is_broadcast c (ip_of 10 0 2 255)) true)
+         (add (check_bool "another's" (is_broadcast c (ip_of 10 0 3 255)) false)
+              (check_bool "ours" (is_ours c (me)) true)))))
+
+; -------------------------------------------------------------------- ARP
+
+; The gateway asks for my address: it is answered, and learnt.
+(def test_arp_answered () int
+  (let s (from_wire (stack0) (gw_asks))
+    (add (check_strs "the reply" (wire_text s)
+                     (cons "52:55:0a:00:02:02 arp 2 52:54:00:12:34:56 10.0.2.15 52:55:0a:00:02:02 10.0.2.2" (nil (list int))))
+         (check_str "learnt" (arp_text s) "10.0.2.2 52:55:0a:00:02:02\n"))))
+
+; A request for another's address teaches nothing, and is not answered.
+(def test_arp_others () int
+  (let s (from_wire (stack0) (eth_frame (mac_broadcast) (gw_mac) (eth_arp)
+                                         (arp_bytes (Arp (arp_request) (gw_mac) (gw) (zeros 6) (ip_of 10 0 2 9)))))
+    (add (check_int "nothing sent" (length (wire s)) 0)
+         (check_str "nothing learnt" (arp_text s) ""))))
+
+; A frame for another card is passed over.
+(def test_other_card () int
+  (let s (from_wire (stack0) (eth_frame (gw_mac) (my_mac) (eth_arp) (arp_bytes (Arp (arp_request) (gw_mac) (gw) (zeros 6) (me)))))
+    (check_str "dropped" (stats_text s) "rx 1 tx 0 dropped 1 arp 0")))
+
+; ---------------------------------------------------------- echo requests
+
+(def echo_request () (list int)
+  (icmp_bytes (Icmp (icmp_echo_request) 0 (echo_rest 9 1 "abcd"))))
+
+; Answered to the gateway's card, with the request's id, seq and data.
+(def test_echo_answered () int
+  (let s (from_wire (knowing) (ip_frame (gw) (proto_icmp) (echo_request)))
+    (check_strs "the reply" (wire_text s)
+                (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 icmp 0 0 id 9 seq 1" (nil (list int))))))
+
+; From a host ARP has not found yet: ARP asks for it, and the reply waits.
+(def test_echo_waits_for_arp () int
+  (let s (from_wire (stack0) (ip_frame (gw) (proto_icmp) (echo_request)))
+    (check_strs "ARP's request" (wire_text s)
+                (cons "ff:ff:ff:ff:ff:ff arp 1 52:54:00:12:34:56 10.0.2.15 00:00:00:00:00:00 10.0.2.2" (nil (list int))))))
+
+; Then ARP's answer sends it.
+(def test_arp_flushes () int
+  (let s (from_wire (cleared (from_wire (stack0) (ip_frame (gw) (proto_icmp) (echo_request)))) (gw_answers))
+    (check_strs "the reply" (wire_text s)
+                (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 icmp 0 0 id 9 seq 1" (nil (list int))))))
+
+; From beyond the gateway, the reply goes to the gateway's card.
+(def test_echo_routed () int
+  (let s (from_wire (knowing) (ip_frame (far) (proto_icmp) (echo_request)))
+    (check_strs "the reply" (wire_text s)
+                (cons "52:55:0a:00:02:02 ip 10.0.2.15 8.8.8.8 icmp 0 0 id 9 seq 1" (nil (list int))))))
+
+; ------------------------------------------------------------------- UDP
+
+; To a port no one is bound to: ICMP's port unreachable, type 3 code 3.
+(def test_udp_unreachable () int
+  (let s (from_wire (knowing) (ip_frame (gw) (proto_udp) (udp_bytes (gw) (me) 1234 7 "hi")))
+    (check_str "unreachable" (frame_text (head (wire s))) "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 icmp 3 3 of 10.0.2.15")))
+
+(def test_bind () int
+  (let s (asked_of (stack0) (client) "bind 7")
+    (check_strs "answered" (told s) (cons "55: bound 7" (nil (list int))))))
+
+; Bound, a datagram to the port goes to the client.
+(def test_udp_delivered () int
+  (let s (from_wire (cleared (asked_of (knowing) (client) "bind 7")) (ip_frame (gw) (proto_udp) (udp_bytes (gw) (me) 1234 7 "hi")))
+    (check_strs "told" (told s) (cons "55: udp 10.0.2.2 1234 7\nhi" (nil (list int))))))
+
+; bind 0 picks from 49152, one after another.
+(def test_bind_any () int
+  (let s (asked_of (cleared (asked_of (stack0) (client) "bind 0")) 56 "bind 0")
+    (add (check_strs "the second" (told s) (cons "56: bound 49153" (nil (list int))))
+         (check_bool "the first" (eq (bound_to s 49152) (Some (client))) true))))
+
+(def test_bind_taken () int
+  (let s (asked_of (cleared (asked_of (stack0) (client) "bind 7")) 56 "bind 7")
+    (check_strs "refused" (told s) (cons "56: error: port 7 is taken" (nil (list int))))))
+
+(def test_unbind () int
+  (let s (cleared (asked_of (stack0) (client) "bind 7"))
+    (add (check_strs "not another's" (told (asked_of s 56 "unbind 7")) (cons "56: error: port 7 is not yours" (nil (list int))))
+         (check_strs "the binder's" (told (asked_of s (client) "unbind 7")) (cons "55: ok" (nil (list int)))))))
+
+; A client whose port has gone is let go.
+(def test_gone_client () int
+  (let s (cleared (asked_of (stack0) (client) "bind 7"))
+    (check_bool "unbound" (eq (bound_to (after_send s (ToUdp 7) (SendNoPort)) 7) ((None int))) true)))
+
+; send, with no reply port: a datagram to the gateway, unanswered.
+(def test_send () int
+  (let s (asked_of (knowing) 0 "send 5000 10.0.2.2 53\nquery")
+    (add (check_strs "sent" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 udp 5000>53 query" (nil (list int))))
+         (check_int "unanswered" (length (told s)) 0))))
+
+; Its UDP checksums, read back.
+(def test_send_readable () int
+  (let s (asked_of (knowing) 0 "send 5000 10.0.2.2 53\nquery")
+    (match (ipv4_of (bytes_from_list (head (wire s))) 14)
+      ((IpBad why) (fail_because "read" why))
+      ((IpRead d)
+        (match d
+          ((Ipv4 src dst proto ttl payload quoted)
+            (match (udp_of src dst payload)
+              ((None) (fail_because "read" "a bad datagram"))
+              ((Some u) (match u ((Udp sp dp content) (check_str "data" content "query")))))))))))
+
+(def test_send_refused () int
+  (add (check_strs "a bad port" (told (asked_of (stack0) (client) "send 0 10.0.2.2 53\nx")) (cons "55: error: a port is 1 to 65535" (nil (list int))))
+       (check_strs "answered ok" (told (asked_of (knowing) (client) "send 1 10.0.2.2 53\nx")) (cons "55: ok" (nil (list int))))))
+
+; To my own address: no further than inet, and to the client bound there.
+(def test_send_to_self () int
+  (let s (asked_of (cleared (asked_of (stack0) (client) "bind 7")) 0 "send 9 10.0.2.15 7\nme")
+    (add (check_int "not on the wire" (length (wire s)) 0)
+         (check_strs "told" (told s) (cons "55: udp 10.0.2.15 9 7\nme" (nil (list int)))))))
+
+; To the subnet's broadcast: every card's address, no ARP.
+(def test_send_broadcast () int
+  (check_strs "sent" (wire_text (asked_of (stack0) 0 "send 9 10.0.2.255 7\nall"))
+              (cons "ff:ff:ff:ff:ff:ff ip 10.0.2.15 10.0.2.255 udp 9>7 all" (nil (list int)))))
+
+; ------------------------------------------------------------------- ping
+
+; ping: an echo request with the client's port as its id, then the reply
+; told to it as a pong: 64 bytes, its 56 of data and ICMP's header.
+(def test_ping () int
+  (let s (asked_of (knowing) (client) "ping 10.0.2.2 3")
+    (add (check_strs "the request" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 icmp 8 0 id 55 seq 3" (nil (list int))))
+         (check_int "unanswered" (length (told s)) 0))))
+
+(def test_pong () int
+  (let s (from_wire (cleared (asked_of (knowing) (client) "ping 10.0.2.2 3"))
+                    (ip_frame (gw) (proto_icmp) (icmp_bytes (Icmp (icmp_echo_reply) 0 (echo_rest (client) 3 (echo_data))))))
+    (check_strs "told" (told s) (cons "55: pong 10.0.2.2 3 64 64" (nil (list int))))))
+
+; Pinging my own address answers itself.
+(def test_ping_self () int
+  (let s (asked_of (stack0) (client) "ping 10.0.2.15 1")
+    (add (check_int "not on the wire" (length (wire s)) 0)
+         (check_strs "told" (told s) (cons "55: pong 10.0.2.15 1 64 64" (nil (list int)))))))
+
+(def test_ping_refused () int
+  (add (check_strs "no address" (told (asked_of (stack0) (client) "ping x 1")) (cons "55: error: not an address: x" (nil (list int))))
+       (check_int "no reply port, no answer" (length (told (asked_of (stack0) 0 "ping 10.0.2.2 1"))) 0)))
+
+; --------------------------------------------------------------- requests
+
+(def test_info () int
+  (check_strs "info" (told (asked_of (stack0) (client) "info"))
+              (cons "55: inet 10.0.2.15 255.255.255.0 10.0.2.2 52:54:00:12:34:56" (nil (list int)))))
+
+(def test_stats () int
+  (check_strs "stats" (told (asked_of (from_wire (stack0) (gw_asks)) (client) "stats"))
+              (cons "55: rx 1 tx 0 dropped 0 arp 1" (nil (list int)))))
+
+(def test_no_request () int
+  (check_strs "refused" (told (asked_of (stack0) (client) "dance")) (cons "55: error: no request dance" (nil (list int)))))
+
+; Under an operating system there is no network card, which is no
+; failure. (inet itself would read l0 test's arguments as its own.)
+(def test_no_card () int
+  (check_int "nothing to serve" (linked (Config (me) (ip_mask 24) (gw)) 0) 0))
+
+; Arguments that are not an interface fail.
+(def test_bad_arguments () int
+  (check_int "fails" (inet) 1))

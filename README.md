@@ -41,7 +41,8 @@ Requirements:
 
 `make demo` builds every program and the initramfs, `build/initramfs.cpio`,
 and boots it on QEMU. The board's serial line is on your terminal, and
-its virtio-gpu, virtio keyboard and virtio tablet are in a QEMU window.
+its virtio-gpu, virtio keyboard and virtio tablet are in a QEMU window;
+its virtio-net is on QEMU's user network.
 The window shows a desktop, the compositor's: a wallpaper, a top bar,
 and two terminal windows that overlap, each with a title bar and a
 shell. The top bar is GNOME Shell's, black across the top of the screen:
@@ -93,10 +94,12 @@ booted with `root=UUID`, or else from the initramfs.
 | 6 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
 | 7 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
 | 8 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
-| 9 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 10 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 11, 12 | `vt`, `vt` | the windows' terminals, Terminal's program, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
-| 13, 14 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not `/etc/system`, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
+| 9 | `virtio-net` | the network card's driver. It serves `nic`, telling `inet` of every frame the card takes, and putting on the wire every frame `inet` gives it |
+| 10 | `inet` | the IPv4 stack, at 10.0.2.15 on QEMU's user network. It serves `inet`, for `run net` and `run tftp` (see [The network](#the-network)) |
+| 11 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
+| 12 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 13, 14 | `vt`, `vt` | the windows' terminals, Terminal's program, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 15, 16 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not `/etc/system`, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -223,20 +226,22 @@ Things to try:
 
   ```
     PID  PARENT  PROGRAM       STATE
-      1       0  boot          waiting for pid 9
+      1       0  boot          waiting for pid 11
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 7
+      3       0  virtio-gpu    waiting for a message on port 13
       4       0  virtio-input  waiting for a message on port 2
       5       0  virtio-input  waiting for a message on port 3
       6       0  rtc           sleeping
       7       0  virtio-blk    waiting for a message on port 5
-      8       0  fs            waiting for a message on port 8
-      9       1  sh            running
-     10       1  wm            waiting for a message on port 670
-     11       1  vt            waiting for a message on port 446
-     12       1  vt            waiting for a message on port 563
-     13      12  sh            waiting for a message on port 905
-     14      11  sh            waiting for a message on port 923
+      8       0  fs            waiting for a message on port 15
+      9       0  virtio-net    waiting for a message on port 7
+     10       0  inet          waiting for a message on port 8
+     11       1  sh            running
+     12       1  wm            waiting for a message on port 16
+     13       1  vt            waiting for a message on port 11
+     14       1  vt            waiting for a message on port 12
+     15      13  sh            waiting for a message on port 19
+     16      14  sh            waiting for a message on port 20
   ```
 
   It lists the processes that have not exited. The shell asking is always
@@ -316,7 +321,7 @@ Job control:
   job, another shell's job, another shell, or `wm`. Drivers, the
   programs with a `dev` line, can't be killed, since the system would
   lose their devices, so `uart`, `virtio-gpu` and `virtio-input` stay.
-  Killing pid 9, the serial shell, from a window's shell stops the
+  Killing pid 11, the serial shell, from a window's shell stops the
   system, as its `exit` does: `boot`, pid 1, waiting for it, exits too.
 
 Editing, on any terminal: Backspace erases a character and Ctrl-U erases
@@ -340,7 +345,10 @@ memory; that is not a documented interface, so a change to `l0` may need
 the same change there. It also attaches the virtio-gpu, the virtio
 keyboard and the virtio tablet, on modern transports, as `l0 boot` does
 with `L0_QEMU_ARGS`, and, if `QEMU_DISK` names a raw image, a virtio-blk
-on it. The demo's disk is `build/disk.img`, 1 MB, which
+on it, and if `QEMU_NET` names a network, as QEMU's `-netdev` does
+without its id, a virtio-net on it, at `52:54:00:12:34:56`: the demo's
+is `user`, QEMU's own, or what `make demo NET=...` gives. The demo's
+disk is `build/disk.img`, 1 MB, which
 [tools/mkdisk](tools/mkdisk) makes once, with two empty volumes on it,
 so what is written to it stays from one boot to the next; `make clean`
 resets it. A `build/disk.img` made before the file system was, holding
@@ -362,7 +370,7 @@ board, so it outlives a kernel that panics or hangs and can boot again.
 project's [.mcp.json](.mcp.json) runs it. It boots one board at a time
 and does not build: run `make initramfs` or `make screen-initramfs` first.
 Each boot gets a fresh disk, `build/mcp/disk.img`, as `tools/mkdisk`
-makes it.
+makes it, and a network card on QEMU's user network.
 
 | Tool | Does |
 |---|---|
@@ -866,6 +874,87 @@ until `mkfs` makes a volume or a rescan finds some.
 With no disk at all, where nothing could ever be made, it says so and
 exits 0.
 
+### The network
+
+Two processes make the network, a driver and a stack above it, as the
+disk is `virtio-blk` and `fs`:
+
+```
+net, tftp ──inet──▶ inet ──nic──▶ virtio-net ──DMA──▶ virtio-net card ──▶ QEMU's user network
+          ◀─pong, udp─      ◀─frm──                                         10.0.2.2: gateway, TFTP
+```
+
+`virtio-net` ([user/sbin/virtio-net](user/sbin/virtio-net/virtio-net.l0))
+drives QEMU's virtio-net. It takes the card's address from its
+configuration (`VIRTIO_NET_F_MAC`), keeps 16 receive buffers of 2048
+bytes on the card's receive queue, in DMA pages, and takes its interrupt
+as a message: each frame the card has written is told to every process
+listening, and its buffer given back. A frame fits in a message, so
+frames travel in messages, not shared pages, both ways: one to send is
+copied into the one transmit buffer, offered on the transmit queue, and
+waited for, as `virtio-blk` waits. It serves **the nic protocol**
+([user/lib/proto/nic.l0](user/lib/proto/nic.l0)) as `nic`:
+
+| Request | Does |
+|---|---|
+| `info` | `nic MAC`: the card's Ethernet address, as `52:54:00:12:34:56` |
+| `stats` | `rx N tx N dropped N`: frames taken and sent, and those lost |
+| `listen` | `ok`; then every frame taken comes to the reply port as a notice, `frm` and the frame, 14 to 1514 bytes |
+| `send FRAME` | the frame, without its check sequence, put on the wire, padded to 60 bytes; answered only if the request names a reply port |
+
+`inet` ([user/sbin/inet](user/sbin/inet/inet.l0)) is IPv4: Ethernet,
+ARP, IPv4, ICMP and UDP, with each packet built and read in
+[packet.l0](user/sbin/inet/packet.l0). It listens to `nic`, and is
+started as `inet [ADDR/PREFIX [GATEWAY]]`, by default at 10.0.2.15/24
+behind 10.0.2.2, QEMU's user network. It answers ARP for its address and
+keeps up to 64 neighbours' addresses that ARP tells it; holds up to 16
+datagrams for 3 seconds while ARP finds their next hop, the gateway for
+any address off the link, asking again after a second; answers ICMP echo
+requests; and gives each UDP datagram to the client bound to its port,
+answering one to a port no one is bound to with ICMP's port
+unreachable. A datagram to its own address goes no further than `inet`.
+It does not fragment, nor take fragments, so a datagram's data is at
+most 1472 bytes. Everything it sends while dealing with one message,
+frames and notices alike, waits in its state until that message is
+done, which is how its tests see it. It serves **the inet protocol**
+([user/lib/proto/inet.l0](user/lib/proto/inet.l0)) as `inet`:
+
+| Request | Does |
+|---|---|
+| `info` | `inet ADDR MASK GATEWAY MAC`: the interface |
+| `stats` | `rx N tx N dropped N arp N`: frames taken and sent, those passed over or lost, and the neighbours known |
+| `arp` | a line `ADDR MAC` for each neighbour, by address |
+| `bind PORT` | `bound PORT`: UDP datagrams to PORT come to the reply port from now on, as notices `udp SRC SPORT DPORT`, a newline, and the data; `bind 0` for a port `inet` picks, from 49152. Refused if another client holds PORT |
+| `unbind PORT` | `ok`: no more of them; refused if PORT is another's |
+| `send SPORT DST DPORT` | then a newline and the data: a datagram from SPORT to DPORT at DST; answered only if refused, or with `ok` if the request names a reply port |
+| `ping DST SEQ` | an ICMP echo request to DST, whose id is the reply port's: answered only if refused; its reply comes to the reply port as `pong SRC SEQ TTL BYTES` |
+
+A client lets go of what it bound with `unbind`, and `inet` lets go of a
+client whose port has gone when it next has something for it.
+
+`run net` uses it from a shell, as `ifconfig` and `ping` would, and
+`run tftp ADDR FILE [PATH]` fetches a file over TFTP, from QEMU's TFTP
+server, which serves a directory at the gateway when the demo is made
+with `make demo NET=user,tftp=DIR`:
+
+```
+l0s> run net
+inet 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2
+ether 52:54:00:12:34:56
+l0s> run net ping 10.0.2.2
+64 bytes from 10.0.2.2: seq 1 ttl 255 time 5.4 ms
+64 bytes from 10.0.2.2: seq 2 ttl 255 time 4.9 ms
+64 bytes from 10.0.2.2: seq 3 ttl 255 time 5.0 ms
+3 sent, 3 received
+l0s> run net arp
+10.0.2.2 52:55:0a:00:02:02
+```
+
+QEMU's user network answers pings to its gateway itself, and its TFTP
+server is there too; what goes beyond the gateway is QEMU's to carry.
+`run net send ADDR PORT TEXT...` sends a datagram, and `run net recv
+PORT` waits for one and shows it.
+
 ## How it boots
 
 ```
@@ -878,10 +967,10 @@ l0 boot build/kernel.img < OUT            # the kernel reads the initramfs on st
 keeps it, made anew each time:
 - **`/bin`**, the commands, for people and agents: `sh`, `cat`, `hello`,
   `init`, `install`, `ping`, `spin`, `nap`, `draw`, `keys`, `windows`,
-  `disk`, those in `user/bin`;
+  `disk`, `net`, `tftp`, those in `user/bin`;
 - **`/sbin`**, the drivers and services: `boot`, `uart`, `rtc`,
-  `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo`, those in
-  `user/sbin`;
+  `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `fs`, `inet`,
+  `wm`, `echo`, those in `user/sbin`;
 - **`/Applications`**, the desktop's apps, each in a bundle (below), those
   in `user/apps`.
 
@@ -950,9 +1039,9 @@ exits; the kernel then exits with pid 1's status.
 
 Device authority comes only from `dev` lines, and only to a program of
 the initramfs. The demo grants it to `uart`,
-`rtc`, `virtio-gpu`, `virtio-input` and `virtio-blk`, so the shell can start `rtc`
-without having it itself. `wm`, `vt` and `fs` have none: they reach only
-memory they share. In the demo's inittab, then, the drivers' and
+`rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk` and `virtio-net`, so the shell can start `rtc`
+without having it itself. `wm`, `vt`, `fs` and `inet` have none: they reach only
+memory they share, and messages. In the demo's inittab, then, the drivers' and
 services' paths are `/sbin/...`, and in its `/etc/system` the terminals'
 `/Applications/Terminal.app/vt`.
 
@@ -1265,13 +1354,13 @@ initramfs, so that the Makefile finds it there:
 
 | Directory | What | In the initramfs |
 |---|---|---|
-| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `init`, `install`, `keys`, `nap`, `ping`, `spin`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `fs`, `wm`, `echo` | `/sbin/NAME` |
+| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `init`, `install`, `keys`, `nap`, `net`, `ping`, `spin`, `tftp`, `windows` | `/bin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0` and `wm` has `launcher.l0`: every `.l0` in its
-directory is part of it.
+as `sh` has `files.l0`, `wm` `launcher.l0` and `inet` `packet.l0`:
+every `.l0` in its directory is part of it.
 
 | Program | What it does |
 |---|---|
@@ -1291,6 +1380,10 @@ directory is part of it.
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
+| `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
+| `inet` | the IPv4 stack, `inet [ADDR/PREFIX [GATEWAY]]`, 10.0.2.15/24 behind 10.0.2.2 unless given (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
+| `net` | a client of `inet`: `net` shows the interface, `net stats` and `net arp` what `inet` counts and knows, `net ping [-q] ADDR [COUNT]` pings, a second apart, and says how long each reply took, failing if none came, `net send ADDR PORT TEXT...` sends a datagram, and `net recv PORT` waits for one and shows it |
+| `tftp` | a client of `inet`: `tftp ADDR FILE [PATH]` fetches FILE over TFTP (RFC 1350), in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
 | `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. At scale 2 it lays the desktop out at half the screen's size each way and draws it at the screen's resolution. It needs no `dev` line |
@@ -1321,12 +1414,14 @@ name in a library is taken in every program that links it.
 | [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
-| [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk` |
+| [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net` |
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
+| [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text (`NICLIB`) | `virtio-net`, and with `INETLIB` |
+| [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, and reading the notices of datagrams and echoes' replies; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`) | `inet`, `net`, `tftp` |
 | [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
 | [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `disks`, `tools/mkfs`, and every program `PATHS` is in |
 | [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
@@ -1359,10 +1454,13 @@ Each case of `tests/e2e/` is a directory:
   as mkfs takes it, `LABEL:START:COUNT[:ARCHIVE[:UUID]]`, `@` the case's
   own initramfs, to fill a volume with;
 - `bootargs`, the kernel's boot arguments, such as `root=UUID`;
-- `gpu`, the virtio-gpu's options, such as `xres=3840,yres=2160`.
+- `gpu`, the virtio-gpu's options, such as `xres=3840,yres=2160`;
+- `net`, if the board is to have a virtio-net: the network it is on, as
+  QEMU's `-netdev` names one without its id, such as `user` or
+  `user,tftp=DIR`.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Sixteen cases type a session through
+`etc`, boots it, and compares. Seventeen cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -1416,17 +1514,25 @@ Ctrl-C as a person would:
   `write`;
 - `apps` lists `/Applications` and a bundle, shows Terminal's manifest,
   is told there is no app `Nope`, by name or by path, and runs
-  `Terminal` by its name, which the shell finds through its manifest.
+  `Terminal` by its name, which the shell finds through its manifest;
+- `net`, on QEMU's user network with its TFTP server serving
+  [tests/e2e/net/tftp](tests/e2e/net/tftp), starts `virtio-net` and
+  `inet`, and has `net` show the interface, ping the gateway, which ARP
+  finds first, and show what ARP found; `tftp` fetch a file of one block
+  and one of four full blocks and then an empty one, and be told of a
+  file the server does not have; and `net` ping `inet`'s own address.
 
-`files` reads the initramfs through `cat`. `virtio-gpu_nodev` and
-`virtio-blk_nodev` start a driver with no `dev` line, which is refused
-the device, `virtio-blk_nodisk` the disk's driver on a board with no
-disk, and `fs_nodisk` the file server there, neither of which is a
-failure. `garbage`
+`files` reads the initramfs through `cat`. `virtio-gpu_nodev`,
+`virtio-blk_nodev` and `virtio-net_nodev` start a driver with no `dev`
+line, which is refused the device, `virtio-blk_nodisk` the disk's driver
+on a board with no disk, `fs_nodisk` the file server there,
+`virtio-net_nocard` the network's driver on a board with no card, and
+`inet_nocard` the stack with no driver, none of which is a failure.
+`garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
 shows, a virtio keyboard, and a virtio tablet; only a case with a `disk`
-file has a virtio-blk.
+file has a virtio-blk, and only one with a `net` file a virtio-net.
 
 [tests/gpu-screen.sh](tests/gpu-screen.sh) boots the initramfs of
 [tests/screen/etc](tests/screen/etc/inittab), the demo's without its
@@ -1637,6 +1743,18 @@ resizes a partition.
   taking the interrupt, and moves at most 128 sectors a request. It
   accepts no device features, so it never flushes a write cache and
   never learns a disk is read-only, whose writes the device then fails.
+- **The network is one card and IPv4's datagrams, with no TCP.**
+  `virtio-net` drives the first card on the board, sends one frame at a
+  time and waits for the card to take it, and accepts no feature but
+  its address, so it neither offloads checksums nor merges buffers.
+  `inet` has one interface, set by its arguments, as there is no DHCP
+  client, and no DNS, so every address is typed as numbers; it neither
+  fragments nor takes fragments, so a datagram holds at most 1472 bytes;
+  it has no TCP and no IP options, and passes over every protocol but
+  ICMP and UDP, without saying so; and it keeps at most 64 neighbours,
+  starting again from one when it has as many, and 16 datagrams waiting
+  for ARP, for 3 seconds. Any process may bind any port no one holds,
+  and send from any port, bound or not.
 - **Disks shows the one disk, and cannot take anything away.** It can
   make a partition of free space, give a partition a new volume, format
   a mounted volume, keeping its label and size, and have `fs` rescan;

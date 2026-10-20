@@ -1,0 +1,195 @@
+; net.l0 -- the network, as the network stack, inet, has it:
+;
+;   net                         the interface: its address, netmask and
+;                               gateway, and its card's Ethernet address
+;   net stats                   the frames inet took and sent, and passed over
+;   net arp                     the neighbours ARP has found, and their cards
+;   net ping [-q] ADDR [COUNT]  COUNT echo requests, 3 if not given, a
+;                               second apart, and each reply, with how long
+;                               it took; -q says only how many came back
+;   net send ADDR PORT TEXT...  one UDP datagram of the words of TEXT, with
+;                               spaces between, to PORT at ADDR
+;   net recv PORT               waits for a UDP datagram to PORT, and shows
+;                               where it came from and what it holds
+;
+; Fails if inet is not running, or for ping, if no reply came.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "net" why))
+
+; The interface with no arguments, or what the first asks for.
+(def net () int
+  (let argv (args)
+    (if (is_empty argv)
+        (show_info (inet_open))
+        (subcommand (head argv) (tail argv)))))
+
+; cmd with the arguments after it, rest; anything else, its usage.
+(def subcommand ((cmd (list int)) (rest (list (list int)))) int
+  (if (if (eq cmd "stats") (is_empty rest) false) (show_answer (inet_open) "stats")
+  (if (if (eq cmd "arp") (is_empty rest) false) (show_answer (inet_open) "arp")
+  (if (eq cmd "ping") (ping_with (ping_args rest))
+  (if (eq cmd "send") (send_with rest)
+  (if (if (eq cmd "recv") (eq (length rest) 1) false) (recv_on (head rest))
+  (complain "net [stats | arp | ping [-q] ADDR [COUNT] | send ADDR PORT TEXT... | recv PORT]")))))))
+
+; ---------------------------------------------------------------- showing
+
+; The interface, as ifconfig shows one.
+(def info_lines ((i InetInfo)) (list int)
+  (match i
+    ((InetInfo a m g e)
+      (concat (cons "inet " (cons (ip_text a) (cons " netmask " (cons (ip_text m) (cons " gateway " (cons (ip_text g)
+        (cons "\nether " (cons (mac_text e) (cons "\n" (nil (list int)))))))))))))))
+
+; The interface inet n has, shown; or why not.
+(def show_info ((n Inet)) int
+  (match (inet_info n)
+    ((Err why) (complain why))
+    ((Ok i) (write_str (info_lines i)))))
+
+; What inet answers to body, shown as it is, ending in a newline.
+(def show_answer ((n Inet) (body (list int))) int
+  (let r (inet_ask n body)
+    (if (starts_with r "error: ")
+        (complain (drop_n r 7))
+        (write_str (if (if (is_empty r) true (ends_with r "\n")) r (append r "\n"))))))
+
+; ------------------------------------------------------------------- ping
+
+; What ping was asked: quietly or not, to whom, how many times; or why
+; the words are not that.
+(data PingArgs (PingArgs bool int int) (PingBad (list int)))
+
+; What ping's words ws ask: [-q] ADDR [COUNT].
+(def ping_args ((ws (list (list int)))) PingArgs
+  (let quiet (if (is_empty ws) false (eq (head ws) "-q"))
+    (let rest (if quiet (tail ws) ws)
+      (if (if (is_empty rest) true (gt (length rest) 2))
+          (PingBad "net ping [-q] ADDR [COUNT]")
+          (match (ip_parse (head rest))
+            ((None) (PingBad (append "not an address: " (head rest))))
+            ((Some dst)
+              (match (arg_number (tail rest) 3)
+                ((None) (PingBad "the count is a number"))
+                ((Some count)
+                  (if (lt count 1) (PingBad "the count is at least 1") (PingArgs quiet dst count))))))))))
+
+; The pings p asks for, through inet, from echo 1; or why there are none.
+(def ping_with ((p PingArgs)) int
+  (match p
+    ((PingBad why) (complain why))
+    ((PingArgs quiet dst count)
+      (match (inet_open)
+        ((NoInet why) (complain why))
+        ((Inet port rp) (pinging (Inet port rp) quiet dst 1 count 0))))))
+
+; Echo seq to dst of count, received of them so far: each sent a second
+; after the last, then how many came back.
+(def pinging ((n Inet) (quiet bool) (dst int) (seq int) (count int) (got int)) int
+  (if (gt seq count)
+      (let w (write_line (ping_summary count got))
+        (if (eq got 0) 1 0))
+      (let t0 (clock_ns)
+        (let why (inet_ping n dst seq)
+          (if (not (is_empty why))
+              (complain why)
+              (let r (ping_reply n seq t0)
+                (let w (if quiet 0 (say (reply_line dst seq r)))
+                  (let z (if (lt seq count) (sleep_until (add t0 1000000000)) 0)
+                    (pinging n quiet dst (add seq 1) count (if (is_pong r) (add got 1) got))))))))))
+
+; What came of an echo: its reply, after how long; why it was refused;
+; or nothing within a second.
+(data Reply (Replied Pong int) (Refused (list int)) (NoReply))
+
+; Whether r is a reply that came.
+(def is_pong ((r Reply)) bool
+  (match r ((Replied p ns) true) ((Refused why) false) ((NoReply) false)))
+
+; The reply to echo seq, sent at t0, as it comes to n's port.
+(def ping_reply ((n Inet) (seq int) (t0 int)) Reply
+  (match (port_try_receive (inet_port n))
+    ((RecvFailed)
+      (if (gt (sub (clock_ns) t0) 1000000000)
+          (NoReply)
+          (let z (sleep_ns 1000000) (ping_reply n seq t0))))
+    ((Message from payload)
+      (match (pong_of payload)
+        ((Some p)
+          (match p ((Pong src s ttl size) (if (eq s seq) (Replied p (sub (clock_ns) t0)) (ping_reply n seq t0)))))
+        ((None)
+          (if (starts_with payload "error: ") (Refused (drop_n payload 7)) (ping_reply n seq t0)))))))
+
+; A reply's line, as ping shows it.
+(def reply_line ((dst int) (seq int) (r Reply)) (list int)
+  (match r
+    ((Replied p ns)
+      (match p
+        ((Pong src s ttl size)
+          (concat (cons (digits size) (cons " bytes from " (cons (ip_text src) (cons ": seq " (cons (digits s)
+            (cons " ttl " (cons (digits ttl) (cons " time " (cons (tenths_ms ns) (cons " ms\n" (nil (list int))))))))))))))))
+    ((Refused why) (append "net: " (append why "\n")))
+    ((NoReply) (append "no reply from " (append (ip_text dst) (append ": seq " (append (digits seq) "\n")))))))
+
+; ns in milliseconds, to a tenth: 1250000 is 1.2.
+(def tenths_ms ((ns int)) (list int)
+  (let t (div ns 100000)
+    (append (digits (div t 10)) (append "." (digits (mod t 10))))))
+
+; How many echoes went, and how many came back.
+(def ping_summary ((count int) (got int)) (list int)
+  (append (digits count) (append " sent, " (append (digits got) " received"))))
+
+; ------------------------------------------------------------------- UDP
+
+; send ADDR PORT TEXT...: one datagram, from a port inet picks.
+(def send_with ((ws (list (list int)))) int
+  (if (lt (length ws) 3)
+      (complain "net send ADDR PORT TEXT...")
+      (match (ip_parse (head ws))
+        ((None) (complain (append "not an address: " (head ws))))
+        ((Some dst)
+          (match (word_number (nth ws 1))
+            ((None) (complain "the port is a number"))
+            ((Some dport) (sending (inet_open) dst dport (unwords (drop ws 2)))))))))
+
+; text sent to dport at dst, from a port bound for it and then let go.
+(def sending ((n Inet) (dst int) (dport int) (text (list int))) int
+  (match (udp_bind n 0)
+    ((Err why) (complain why))
+    ((Ok sport)
+      (let why (udp_send n sport dst dport text)
+        (let u (udp_unbind n sport)
+          (if (is_empty why) 0 (complain why)))))))
+
+; recv PORT: the first datagram to PORT.
+(def recv_on ((w (list int))) int
+  (match (word_number w)
+    ((None) (complain "the port is a number"))
+    ((Some p)
+      (let n (inet_open)
+        (match (udp_bind n p)
+          ((Err why) (complain why))
+          ((Ok bound) (receiving n bound)))))))
+
+; The first datagram to come to port p, shown; anything else passed over.
+(def receiving ((n Inet) (p int)) int
+  (match (port_receive (inet_port n))
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from payload)
+      (match (datagram_of payload)
+        ((None) (receiving n p))
+        ((Some d)
+          (let w (write_str (datagram_line d))
+            (let u (udp_unbind n p) 0)))))))
+
+; Where a datagram came from, and what it holds, shown as text.
+(def datagram_line ((d Datagram)) (list int)
+  (match d
+    ((Datagram src sport dport content)
+      (append "from " (append (ip_text src) (append ":" (append (digits sport) (append ": " (append (shown content) "\n")))))))))
+
+; content with each byte that does not print as a dot.
+(def shown ((s (list int))) (list int)
+  (if (is_empty s) s (cons (if (is_printable (head s)) (head s) 46) (shown (tail s)))))

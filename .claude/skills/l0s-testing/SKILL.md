@@ -96,6 +96,7 @@ case's `etc`, and compares. A case is a directory:
 | `layout` | that disk's layout, if not mkdisk's 1 MB one: `SECTORS LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, `@` the case's own cpio; give a UUID to boot from it, since mkfs's own differ every run |
 | `bootargs` | the kernel's boot arguments, such as `root=UUID` (`l0 boot IMAGE ARGS`, or `QEMU_APPEND` with `typed`) |
 | `gpu` | the virtio-gpu's options, such as `xres=3840,yres=2160` for a 4K screen, drawn at scale 2 (`draw_4k`) |
+| `net` | if present, the board has a virtio-net on the network its line names, as `-netdev` takes one without its id: `user`, or `user,tftp=tests/e2e/CASE/tftp` for QEMU's TFTP server at 10.0.2.2 (`net`); without it there is no card |
 
 - A case with `typed` should start `uart noecho`, so the output doesn't
   depend on how the echo interleaves.
@@ -165,7 +166,8 @@ Their helpers, copied in each script:
   gives the content's size. Pick check points away from rounded corners, text
   and the cursor unless that is what is checked: a point in a corner is cut
   to show what is beneath.
-- `vt.sh` relies on pids from the demo's inittab (`vt=$((6 + ...))`).
+- `vt.sh` relies on pids from the demo's inittab (`vt=$((12 + ...))`):
+  a `start` line added there shifts them.
 
 ## Trying things on a running board: the l0s MCP server
 

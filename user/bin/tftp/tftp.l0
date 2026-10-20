@@ -1,0 +1,131 @@
+; tftp.l0 -- fetches a file over TFTP (RFC 1350), through the network
+; stack, inet:
+;
+;   tftp ADDR FILE [PATH]   FILE from the TFTP server at ADDR, written to
+;                           PATH, or else to standard output
+;
+; It reads in octet mode, 512 bytes a block, each acknowledged before the
+; next comes, and asks again for what does not come within a second, five
+; times. QEMU's user network serves a directory at 10.0.2.2 when it is
+; given one, as tftp=DIR.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "tftp" why))
+
+; TFTP's opcodes, the server's port, and a block's most bytes.
+(def op_rrq () int 1)
+(def op_data () int 3)
+(def op_ack () int 4)
+(def op_error () int 5)
+(def tftp_port () int 69)
+(def block_size () int 512)
+
+; How long to wait for a block, and how many times to ask again.
+(def wait_ns () int 1000000000)
+(def tries () int 5)
+
+; ------------------------------------------------------------------ packets
+
+; v as 2 bytes, most significant first, as TFTP's numbers are.
+(def u16_bytes ((v int)) (list int)
+  (cons (bit_and (bit_shr v 8) 255) (cons (bit_and v 255) (nil int))))
+
+; A read request for file, in octet mode.
+(def rrq ((file (list int))) (list int)
+  (append (u16_bytes (op_rrq)) (append file (cons 0 (append "octet" (cons 0 (nil int)))))))
+
+; The acknowledgement of block n.
+(def ack ((n int)) (list int) (append (u16_bytes (op_ack)) (u16_bytes n)))
+
+; What a server's packet is: block n of the file and its bytes; an error
+; and its message; or anything else.
+(data Packet (Block int (list int)) (Failure (list int)) (Strange))
+
+; The number xs's first 2 bytes are. The caller has checked they are there.
+(def u16_of ((xs (list int))) int
+  (bit_or (bit_shl (head xs) 8) (head (tail xs))))
+
+; The packet a datagram's data xs is.
+(def packet_of ((xs (list int))) Packet
+  (if (lt (length xs) 4)
+      (Strange)
+      (let op (u16_of xs)
+        (if (eq op (op_data))
+            (Block (u16_of (drop_n xs 2)) (drop_n xs 4))
+            (if (eq op (op_error))
+                (Failure (up_to 0 (drop_n xs 4)))
+                (Strange))))))
+
+; ---------------------------------------------------------------- fetching
+
+; The file the arguments name, from the server they name.
+(def tftp () int
+  (let argv (args)
+    (if (if (lt (length argv) 2) true (gt (length argv) 3))
+        (complain "tftp ADDR FILE [PATH]")
+        (match (ip_parse (head argv))
+          ((None) (complain (append "not an address: " (head argv))))
+          ((Some server) (fetch (inet_open) server (nth argv 1) (drop argv 2)))))))
+
+; file fetched from server, from a port inet picks, and written out.
+(def fetch ((n Inet) (server int) (file (list int)) (out (list (list int)))) int
+  (match (udp_bind n 0)
+    ((Err why) (complain why))
+    ((Ok port)
+      (let got (fetched n port server (tftp_port) (rrq file) 1 (tries) (nil int))
+        (let u (udp_unbind n port)
+          (match got
+            ((Err why) (complain why))
+            ((Ok content) (written content out))))))))
+
+; The file's bytes to standard output, or to the path out names.
+(def written ((content (list int)) (out (list (list int)))) int
+  (if (is_empty out)
+      (write_str content)
+      (let why (write_whole (head out) (bytes_from_list content))
+        (if (is_empty why) 0 (complain (append (head out) (append ": " why)))))))
+
+; The rest of the file, from block want on: last sent to sport at server,
+; to be sent again if nothing comes in time, left times more. acc holds
+; what came before it, reversed.
+(def fetched ((n Inet) (port int) (server int) (sport int) (last (list int)) (want int) (left int) (acc (list int))) (Result (list int) (list int))
+  (let why (udp_send n port server sport last)
+    (if (not (is_empty why))
+        ((Err (list int) (list int)) why)
+        (match (block_from n server (add (clock_ns) (wait_ns)))
+          ((None)
+            (if (eq left 0)
+                ((Err (list int) (list int)) "the server did not answer")
+                (fetched n port server sport last want (sub left 1) acc)))
+          ((Some d)
+            (match d
+              ((Datagram src from to content)
+                (match (packet_of content)
+                  ((Failure msg) ((Err (list int) (list int)) (append "the server said: " msg)))
+                  ((Strange) (fetched n port server sport last want left acc))
+                  ((Block b bs) (blocked n port server from want b bs acc))))))))))
+
+; Block b, its bytes bs, come from port from: the one wanted, kept and
+; acknowledged, the last if it is short; or one again, acknowledged again.
+(def blocked ((n Inet) (port int) (server int) (from int) (want int) (b int) (bs (list int)) (acc (list int))) (Result (list int) (list int))
+  (if (eq b (bit_and want 65535))
+      (if (lt (length bs) (block_size))
+          (let a (udp_send n port server from (ack b))
+            ((Ok (list int) (list int)) (rev (push bs acc))))
+          (fetched n port server from (ack b) (add want 1) (tries) (push bs acc)))
+      (fetched n port server from (ack (bit_and (sub want 1) 65535)) want (tries) acc)))
+
+; The next datagram from server to come to n's port by deadline, or none.
+(def block_from ((n Inet) (server int) (deadline int)) (Option Datagram)
+  (match (port_try_receive (inet_port n))
+    ((RecvFailed)
+      (if (gt (clock_ns) deadline)
+          ((None Datagram))
+          (let z (sleep_ns 1000000) (block_from n server deadline))))
+    ((Message from payload)
+      (match (datagram_of payload)
+        ((None) (block_from n server deadline))
+        ((Some d)
+          (match d
+            ((Datagram src sport dport content)
+              (if (eq src server) (Some d) (block_from n server deadline)))))))))

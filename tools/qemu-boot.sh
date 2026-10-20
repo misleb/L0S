@@ -20,6 +20,10 @@
 # virtio-blk, for the virtio-blk driver; the demo's is build/disk.img.
 # QEMU_GPU, unset unless given, is options for the virtio-gpu, such as
 # xres=3840,yres=2160 for a 4K screen, which the desktop draws at scale 2.
+# QEMU_NET, unset unless given, is the network a virtio-net is on, for
+# the virtio-net driver, as -netdev names one without its id: user,
+# QEMU's own, at 10.0.2.0/24, or user,tftp=DIR with its TFTP server
+# serving DIR at 10.0.2.2. The card's address is 52:54:00:12:34:56.
 # QEMU_MONITOR, none unless set, is where QEMU's monitor listens, such as
 # unix:PATH,server=on,wait=off for tests/gpu-screen.sh's screendump; and
 # QEMU_QMP, unset unless given, where its QMP does, for the tests that
@@ -42,6 +46,10 @@ disk=()
 if [ -n "${QEMU_DISK:-}" ]; then
   disk=(-drive "file=$QEMU_DISK,if=none,format=raw,id=disk0" -device virtio-blk-device,drive=disk0)
 fi
+net=()
+if [ -n "${QEMU_NET:-}" ]; then
+  net=(-netdev "$QEMU_NET,id=net0" -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56)
+fi
 append=()
 if [ -n "${QEMU_APPEND:-}" ]; then append=(-append "$QEMU_APPEND"); fi
 gpu=virtio-gpu-device${QEMU_GPU:+,$QEMU_GPU}
@@ -51,6 +59,7 @@ exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monito
   -global virtio-mmio.force-legacy=false \
   -device "$gpu" -device virtio-keyboard-device -device virtio-tablet-device \
   ${disk[@]+"${disk[@]}"} \
+  ${net[@]+"${net[@]}"} \
   -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \
   -device loader,addr=0x4FFFFFF8,data="$len",data-len=8 \
   -device loader,file="$initramfs",addr=0x50000000,force-raw=on \

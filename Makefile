@@ -12,6 +12,8 @@
 #                    the splash shows in QEMU's window, and build/disk.img
 #                    is the disk, made once, so what is written to it stays
 #   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
+#   make demo NET=user,tftp=DIR         the same, the network's gateway
+#                    serving DIR over TFTP, for tftp 10.0.2.2 FILE
 #   make demo ROOT_UUID=UUID            the same, booted with root=UUID:
 #                    the volume of that partition, if fs mounts it and it
 #                    holds L0S, is / (sbin/boot)
@@ -58,6 +60,12 @@ DISK         := $(BUILD)/disk.img
 SYSDISK      := $(BUILD)/system.img
 SYSUUID      := $(BUILD)/system.uuid
 DISK_DEVICE  := -drive file=$(DISK),if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0
+# NET is the network the board's virtio-net is on, as QEMU's -netdev names
+# one without its id: user, QEMU's own, 10.0.2.0/24 behind a gateway at
+# 10.0.2.2, which inet's defaults are; make demo NET=user,tftp=DIR to
+# have the gateway serve DIR over TFTP too.
+NET          ?= user
+NET_DEVICE   := -netdev $(NET),id=net0 -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56
 
 # common/: BASE, the ABI and text.l0's lists and strings, is pure and
 # linked into everything, host tools too; COMMON adds the initramfs, and
@@ -99,6 +107,11 @@ FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
 L0FS    := user/lib/format/l0fs.l0
 
+# The network: nic, the driver's frames and Ethernet's addresses; and
+# inet, the stack's datagrams and IPv4's addresses, which needs nic.
+NICLIB  := user/lib/proto/nic.l0
+INETLIB := $(NICLIB) user/lib/proto/inet.l0
+
 # The partition table, GPT, and the UUIDs and CRC-32 it needs.
 UUIDLIB := user/lib/format/uuid.l0
 CRC32   := user/lib/format/crc32.l0
@@ -116,6 +129,10 @@ UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER)
 LIBS_virtio-input := $(VIRTIO)
 LIBS_virtio-blk := $(VIRTIO)
+LIBS_virtio-net := $(VIRTIO) $(NICLIB)
+LIBS_inet       := $(INETLIB)
+LIBS_net        := $(INETLIB)
+LIBS_tftp       := $(INETLIB)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB)
@@ -228,6 +245,8 @@ test: sample
 	$(L0) test $(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0
 	$(L0) test $(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0
 	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0
+	$(L0) test $(ULIB) $(NICLIB) user/lib/proto/nic_test.l0
+	$(L0) test $(ULIB) $(INETLIB) user/lib/proto/inet_test.l0
 	$(L0) test $(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0
 	$(L0) test $(BASE) $(L0FS) user/lib/format/l0fs_test.l0
 	$(L0) test $(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0
@@ -378,7 +397,7 @@ e2e: images root initramfs screen-initramfs disks-initramfs
 
 boot: images root $(DISK)
 	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(ROOT)
-	L0_QEMU_ARGS="$(DEVICES) $(DISK_DEVICE)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
+	L0_QEMU_ARGS="$(DEVICES) $(DISK_DEVICE) $(NET_DEVICE)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
 
 # The disk: made once, and never again while it is there, so that what is
 # written to it stays from one boot to the next. make clean resets it. A
@@ -400,14 +419,14 @@ sysdisk: initramfs $(BUILD)/mkfs
 
 demo: initramfs $(DISK)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The demo booted from the system disk, its System volume /: made anew
 # from the initramfs as it is now, so what was written to it goes.
 demo-system: sysdisk
 	@echo "Booting L0S from System, $$(cat $(SYSUUID)). Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
+	@QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_NET=$(NET) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 clean:

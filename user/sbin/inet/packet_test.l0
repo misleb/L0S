@@ -1,0 +1,147 @@
+; packet_test.l0 -- tests of packet.l0: each packet built and read back,
+; checksums against published examples, and what is refused.
+
+(def me () int (ip_of 10 0 2 15))
+(def gw () int (ip_of 10 0 2 2))
+
+; xs with element i v.
+(def set_nth ((xs (list int)) (i int) (v int)) (list int)
+  (append (take xs i) (cons v (drop xs (add i 1)))))
+
+(def test_big_endian () int
+  (add (check_str "16 bits" (be16 4660) (cons 18 (cons 52 (nil int))))
+       (check_str "an address" (be32 (me)) (cons 10 (cons 0 (cons 2 (cons 15 (nil int))))))))
+
+(def test_read_big_endian () int
+  (let b (bytes_from_list (cons 1 (cons 2 (cons 3 (cons 4 (nil int))))))
+    (add (check_int "16 bits" (be16_at b 1) 515)
+         (check_int "32 bits" (be32_at b 0) 16909060))))
+
+; RFC 1071's example, 00 01 f2 03 f4 f5 f6 f7: the sum is 0xddf2, so the
+; checksum is 0x220d.
+(def test_checksum_rfc1071 () int
+  (check_int "0x220d" (checksum (cons 0 (cons 1 (cons 242 (cons 3 (cons 244 (cons 245 (cons 246 (cons 247 (nil int)))))))))) 8717))
+
+; An odd byte counts as a word's high byte.
+(def test_checksum_odd () int
+  (check_int "0xfeff" (checksum (cons 1 (nil int))) 65279))
+
+; The header 45 00 00 73 00 00 40 00 40 11 .. .. c0 a8 00 01 c0 a8 00 c7,
+; a UDP datagram of 115 bytes from 192.168.0.1 to 192.168.0.199 with DF
+; and a TTL of 64, has the checksum 0xb861.
+(def test_ipv4_header_checksum () int
+  (check_int "0xb861" (checksum (ipv4_header (ip_of 192 168 0 1) (ip_of 192 168 0 199) 17 0 115 0)) 47201))
+
+(def test_ipv4_round_trip () int
+  (match (ipv4_of (bytes_from_list (ipv4_packet (me) (gw) (proto_udp) 7 "hello")) 0)
+    ((IpBad why) (fail_because "read" why))
+    ((IpRead d)
+      (match d
+        ((Ipv4 src dst proto ttl payload quoted)
+          (add (check_int "from" src (me))
+               (add (check_int "to" dst (gw))
+                    (add (check_int "proto" proto 17)
+                         (add (check_int "ttl" ttl 64)
+                              (add (check_str "payload" payload "hello")
+                                   (check_int "quoted, the header and 8 bytes at most" (length quoted) 25)))))))))))
+
+(def ip_why ((r IpRead)) (list int)
+  (match r ((IpBad why) why) ((IpRead d) "read")))
+
+; One byte of the source address changed.
+(def test_ipv4_bad_checksum () int
+  (check_str "refused" (ip_why (ipv4_of (bytes_from_list (set_nth (ipv4_packet (me) (gw) 17 7 "x") 12 11)) 0))
+             "a bad header checksum"))
+
+(def test_ipv4_short () int
+  (add (check_str "no header" (ip_why (ipv4_of (bytes_from_list "abc") 0)) "too short for IPv4")
+       (check_str "not version 4" (ip_why (ipv4_of (bytes_from_list (set_nth (ipv4_packet (me) (gw) 17 7 "x") 0 101)) 0))
+                  "not IPv4")))
+
+; A total length past the frame's end.
+(def test_ipv4_truncated () int
+  (let p (ipv4_packet (me) (gw) 17 7 "hello")
+    (check_str "refused" (ip_why (ipv4_of (bytes_from_list (take p 22)) 0)) "a bad total length")))
+
+; More fragments: flags 0x2000. The checksum is made again, so only the
+; fragment is wrong.
+(def test_ipv4_fragment () int
+  (let h (set_nth (ipv4_header (me) (gw) 17 7 21 0) 6 32)
+    (check_str "refused" (ip_why (ipv4_of (bytes_from_list (append (set_nth (set_nth h 10 (bit_shr (checksum h) 8)) 11 (bit_and (checksum h) 255)) "x")) 0))
+               "a fragment")))
+
+; Read from where it starts in a frame, and padding after it ignored.
+(def test_ipv4_in_frame () int
+  (match (ipv4_of (bytes_from_list (append (zeros 14) (append (ipv4_packet (me) (gw) 1 7 "ab") (zeros 10)))) 14)
+    ((IpBad why) (fail_because "read" why))
+    ((IpRead d) (match d ((Ipv4 src dst proto ttl payload quoted) (check_str "payload" payload "ab"))))))
+
+(def test_arp_round_trip () int
+  (let mac (cons 82 (cons 84 (cons 0 (cons 18 (cons 52 (cons 86 (nil int)))))))
+    (let b (bytes_from_list (arp_bytes (Arp (arp_request) mac (me) (zeros 6) (gw))))
+      (add (check_int "28 bytes" (bytes_len b) 28)
+           (match (arp_of b 0)
+             ((None) (fail_because "read" "none"))
+             ((Some a)
+               (match a
+                 ((Arp op sha spa tha tpa)
+                   (add (check_int "op" op 1)
+                        (add (check_str "sender" sha mac)
+                             (add (check_int "sender's address" spa (me))
+                                  (check_int "target's address" tpa (gw)))))))))))))
+
+(def test_arp_not_ipv4 () int
+  (let a (arp_bytes (Arp (arp_request) (zeros 6) (me) (zeros 6) (gw)))
+    (add (check_bool "another protocol" (is_some (arp_of (bytes_from_list (set_nth a 2 134)) 0)) false)
+         (check_bool "too short" (is_some (arp_of (bytes_from_list (take a 27)) 0)) false))))
+
+(def (is_some T) ((o (Option T))) bool (match o ((None) false) ((Some x) true)))
+
+(def test_icmp_round_trip () int
+  (match (icmp_of (icmp_bytes (Icmp (icmp_echo_request) 0 (echo_rest 513 7 "data"))))
+    ((None) (fail_because "read" "none"))
+    ((Some m)
+      (match m
+        ((Icmp type code rest)
+          (add (check_int "type" type 8)
+               (add (check_int "id" (echo_id rest) 513)
+                    (add (check_int "seq" (echo_seq rest) 7)
+                         (check_str "data" (drop_n rest 4) "data")))))))))
+
+(def test_icmp_bad_checksum () int
+  (check_bool "refused" (is_some (icmp_of (set_nth (icmp_bytes (Icmp 8 0 (echo_rest 1 1 "data"))) 9 0))) false))
+
+(def test_echo_data () int
+  (let d (echo_data)
+    (add (check_int "56 bytes" (length d) 56)
+         (check_int "counting up" (nth d 55) 55))))
+
+(def udp_text ((u (Option Udp))) (list int)
+  (match u
+    ((None) "none")
+    ((Some d) (match d ((Udp sport dport content) (append (digits sport) (append ">" (append (digits dport) (append " " content)))))))))
+
+(def test_udp_round_trip () int
+  (check_str "read" (udp_text (udp_of (me) (gw) (udp_bytes (me) (gw) 49152 53 "query"))) "49152>53 query"))
+
+; The checksum covers the addresses too, through the pseudo-header.
+(def test_udp_checksum () int
+  (add (check_str "a byte changed" (udp_text (udp_of (me) (gw) (set_nth (udp_bytes (me) (gw) 1 2 "abc") 9 0))) "none")
+       (check_str "another sender" (udp_text (udp_of (gw) (gw) (udp_bytes (me) (gw) 1 2 "abc"))) "none")))
+
+; A checksum of 0 is none, which is taken as it is.
+(def test_udp_no_checksum () int
+  (check_str "read" (udp_text (udp_of (me) (gw) (append (be16 7) (append (be16 9) (append (be16 10) (append (be16 0) "hi")))))) "7>9 hi"))
+
+; The length says how much is the datagram's: more is padding, and less
+; than it says is refused.
+(def test_udp_length () int
+  (let u (udp_bytes (me) (gw) 1 2 "abc")
+    (add (check_str "padded" (udp_text (udp_of (me) (gw) (append u (zeros 3)))) "1>2 abc")
+         (check_str "cut short" (udp_text (udp_of (me) (gw) (take u 10))) "none"))))
+
+(def test_eth_frame () int
+  (let b (bytes_from_list (eth_frame (repeat 6 255) (repeat 6 1) (eth_arp) "x"))
+    (add (check_str "to" (eth_dst b) (repeat 6 255))
+         (add (check_str "from" (eth_src b) (repeat 6 1))
+              (check_int "type" (eth_type b) 2054)))))

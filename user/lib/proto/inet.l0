@@ -1,0 +1,226 @@
+; inet.l0 -- the inet protocol, as a client of it sends it: what the
+; network stack, user/sbin/inet, serves on the port it registers as
+; inet; and IPv4 addresses, as text. Needs nic.l0, for Ethernet's.
+;
+;   info                    inet ADDR MASK GATEWAY MAC: the interface,
+;                           its address, netmask and gateway dotted, its
+;                           Ethernet address as six hex pairs
+;   stats                   rx N tx N dropped N arp N: frames taken and
+;                           sent, those passed over, the neighbours known
+;   arp                     a line ADDR MAC for each neighbour known
+;   bind PORT               bound PORT: UDP datagrams to PORT come to the
+;                           reply port from now on, as udp notices; 0
+;                           for a port inet picks, from 49152
+;   unbind PORT             ok: no more of them
+;   send SPORT DST DPORT    and then a newline and the datagram's data:
+;                           sent from UDP port SPORT to DPORT at DST;
+;                           answered only if refused, and with ok if the
+;                           request names a reply port
+;   ping DST SEQ            an ICMP echo request to DST: answered only if
+;                           refused; the echo's reply comes to the reply
+;                           port as a pong notice
+;
+; Each is a request (l0s.l0), its words separated by spaces; the reply is
+; as said above, or error: WHY. The notices inet sends a client:
+;
+;   udp SRC SPORT DPORT     then a newline and the data: a datagram from
+;                           SPORT at SRC to the client's DPORT
+;   pong SRC SEQ TTL N      echo reply SEQ from SRC, an ICMP message of N
+;                           bytes, with TTL hops left
+;
+; An address is an int here, its first byte the most significant: 10.0.2.15
+; is 167772687. Linked, with nic.l0, into the stack and into the programs
+; that use it, by the Makefile's INETLIB.
+
+; --------------------------------------------------------------- addresses
+
+; a.b.c.d as an address.
+(def ip_of ((a int) (b int) (c int) (d int)) int
+  (bit_or (bit_shl a 24) (bit_or (bit_shl b 16) (bit_or (bit_shl c 8) d))))
+
+; Byte i of address a, 0 the first, most significant.
+(def ip_byte ((a int) (i int)) int
+  (bit_and (bit_shr a (mul 8 (sub 3 i))) 255))
+
+; The address s writes as four numbers 0 to 255 with dots between, or none.
+(def ip_parse ((s (list int))) (Option int)
+  (let parts (split_on 46 s)
+    (if (not (eq (length parts) 4))
+        ((None int))
+        (ip_parts parts 0 0))))
+
+; The rest of ip_parse: each of parts, after the n before them, a number
+; 0 to 255 of at most three digits, put after acc.
+(def ip_parts ((parts (list (list int))) (n int) (acc int)) (Option int)
+  (if (is_empty parts)
+      (Some acc)
+      (let p (head parts)
+        (if (if (is_number p) (le (length p) 3) false)
+            (let v (int_prefix p 0)
+              (if (gt v 255) ((None int)) (ip_parts (tail parts) (add n 1) (bit_or (bit_shl acc 8) v))))
+            ((None int))))))
+
+; Address a, dotted: 10.0.2.15.
+(def ip_text ((a int)) (list int)
+  (join_with "." (cons (digits (ip_byte a 0)) (cons (digits (ip_byte a 1))
+                 (cons (digits (ip_byte a 2)) (cons (digits (ip_byte a 3)) (nil (list int))))))))
+
+; The netmask of a prefix of n bits: 24 is 255.255.255.0.
+(def ip_mask ((n int)) int
+  (bit_and (bit_shl (sub (bit_shl 1 n) 1) (sub 32 n)) 4294967295))
+
+; The bits a mask's prefix is, if it is one: 255.255.255.0 is 24.
+(def ip_prefix_len ((mask int)) int (bit_count mask))
+
+; 255.255.255.255, everyone on the link.
+(def ip_broadcast () int 4294967295)
+
+; ------------------------------------------------------------------ client
+
+; The most data one datagram carries: an Ethernet frame's 1500 bytes,
+; less IPv4's header and UDP's, since inet does not fragment.
+(def udp_max_data () int 1472)
+
+; The stack, as a client holds it: its port, and the port its answers
+; and notices come to; or why there is none.
+(data Inet (Inet int int) (NoInet (list int)))
+
+; The stack, once it has registered, within 5 seconds; or why not.
+(def inet_open () Inet
+  (match (name_wait "inet" 5000000000)
+    ((NotFound) (NoInet "no network; is inet running?"))
+    ((Found port) (Inet port (port_new)))))
+
+; The port answers and notices come to, -1 for none.
+(def inet_port ((n Inet)) int (match n ((Inet port rp) rp) ((NoInet why) -1)))
+
+; The answer to body, or error: WHY.
+(def inet_ask ((n Inet) (body (list int))) (list int)
+  (match n
+    ((NoInet why) (append "error: " why))
+    ((Inet port rp) (asked_reply (port_ask port rp body "inet")))))
+
+; The answer as an error's reason, or empty for ok.
+(def inet_error ((r (list int))) (list int) (reply_why r "inet"))
+
+; The interface, as info's answer gives it: its address, netmask and
+; gateway, and its card's Ethernet address.
+(data InetInfo (InetInfo int int int (list int)))
+
+; The interface info's answer r gives, or why it gives none.
+(def inet_info_of ((r (list int))) (Result InetInfo (list int))
+  (let ws (split_spaces r)
+    (if (if (eq (length ws) 5) (eq (head ws) "inet") false)
+        (inet_info_words (ip_parse (nth ws 1)) (ip_parse (nth ws 2)) (ip_parse (nth ws 3)) (mac_parse (nth ws 4)))
+        ((Err InetInfo (list int)) (inet_error r)))))
+
+; The interface of info's words, read as addresses, if each is one.
+(def inet_info_words ((a (Option int)) (m (Option int)) (g (Option int)) (mac (Option (list int)))) (Result InetInfo (list int))
+  (match a
+    ((None) (inet_info_bad))
+    ((Some addr)
+      (match m
+        ((None) (inet_info_bad))
+        ((Some mask)
+          (match g
+            ((None) (inet_info_bad))
+            ((Some gw)
+              (match mac
+                ((None) (inet_info_bad))
+                ((Some e) ((Ok InetInfo (list int)) (InetInfo addr mask gw e)))))))))))
+
+; Why an answer to info gives no interface.
+(def inet_info_bad () (Result InetInfo (list int))
+  ((Err InetInfo (list int)) "inet's info is not addresses"))
+
+; Asks for the interface.
+(def inet_info ((n Inet)) (Result InetInfo (list int))
+  (inet_info_of (inet_ask n "info")))
+
+; info's answer for an interface.
+(def inet_info_text ((i InetInfo)) (list int)
+  (match i
+    ((InetInfo a m g e)
+      (unwords (cons "inet" (cons (ip_text a) (cons (ip_text m) (cons (ip_text g) (cons (mac_text e) (nil (list int)))))))))))
+
+; UDP port p bound for this client, 0 for one inet picks: the port bound,
+; or why not.
+(def udp_bind ((n Inet) (p int)) (Result int (list int))
+  (let r (inet_ask n (append "bind " (digits p)))
+    (let ws (split_spaces r)
+      (if (if (eq (length ws) 2) (if (eq (head ws) "bound") (is_number (nth ws 1)) false) false)
+          ((Ok int (list int)) (int_prefix (nth ws 1) 0))
+          ((Err int (list int)) (inet_error r))))))
+
+; UDP port p given up: empty, or why not.
+(def udp_unbind ((n Inet) (p int)) (list int)
+  (inet_error (inet_ask n (append "unbind " (digits p)))))
+
+; send's request body: its words, a newline, the data.
+(def udp_send_body ((sport int) (dst int) (dport int) (content (list int))) (list int)
+  (append "send " (append (unwords (cons (digits sport) (cons (ip_text dst) (cons (digits dport) (nil (list int))))))
+                          (cons 10 content))))
+
+; A datagram of content from UDP port sport to dport at dst: empty once
+; inet has it, or why it never will. Nothing answers; inet sends it when
+; it can, as a network does.
+(def udp_send ((n Inet) (sport int) (dst int) (dport int) (content (list int))) (list int)
+  (match n
+    ((NoInet why) why)
+    ((Inet port rp)
+      (if (gt (length content) (udp_max_data))
+          (append "a datagram holds at most " (append (digits (udp_max_data)) " bytes"))
+          (sending_why (port_send port (request 0 (udp_send_body sport dst dport content))))))))
+
+; A datagram, as a udp notice gives it: from port sport at src, to dport.
+(data Datagram (Datagram int int int (list int)))
+
+; The udp notice of d, as inet sends it to the client bound to its port.
+(def udp_notice ((d Datagram)) (list int)
+  (match d
+    ((Datagram src sport dport content)
+      (append "udp " (append (unwords (cons (ip_text src) (cons (digits sport) (cons (digits dport) (nil (list int))))))
+                             (cons 10 content))))))
+
+; The datagram payload holds, or none if it is not a udp notice.
+(def datagram_of ((payload (list int))) (Option Datagram)
+  (if (not (starts_with payload "udp "))
+      ((None Datagram))
+      (let ws (split_spaces (take_line (drop_n payload 4)))
+        (if (not (eq (length ws) 3))
+            ((None Datagram))
+            (match (ip_parse (head ws))
+              ((None) ((None Datagram)))
+              ((Some src)
+                (match (word_numbers (tail ws))
+                  ((None) ((None Datagram)))
+                  ((Some ps) (Some (Datagram src (nth ps 0) (nth ps 1) (drop_line payload)))))))))))
+
+; An echo request to dst, the seq'th: empty once inet has it, or why not.
+; Its reply comes as a pong notice, or an error if inet refuses it.
+(def inet_ping ((n Inet) (dst int) (seq int)) (list int)
+  (match n
+    ((NoInet why) why)
+    ((Inet port rp)
+      (sending_why (port_send port (request rp (append "ping " (append (ip_text dst) (append " " (digits seq))))))))))
+
+; An echo's reply: from src, the seq'th, with its time to live and size.
+(data Pong (Pong int int int int))
+
+; The pong notice of p, as inet sends it to the client that pinged.
+(def pong_notice ((p Pong)) (list int)
+  (match p
+    ((Pong src seq ttl size)
+      (unwords (cons "pong" (cons (ip_text src) (numbers_words (cons seq (cons ttl (cons size (nil int)))))))))))
+
+; The pong payload holds, or none if it is not one.
+(def pong_of ((payload (list int))) (Option Pong)
+  (let ws (split_spaces payload)
+    (if (if (eq (length ws) 5) (eq (head ws) "pong") false)
+        (match (ip_parse (nth ws 1))
+          ((None) ((None Pong)))
+          ((Some src)
+            (match (word_numbers (drop ws 2))
+              ((None) ((None Pong)))
+              ((Some ns) (Some (Pong src (nth ns 0) (nth ns 1) (nth ns 2)))))))
+        ((None Pong)))))

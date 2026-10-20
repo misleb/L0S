@@ -18,7 +18,10 @@
 # fill a volume from. If NAME/bootargs exists, its words are the
 # kernel's boot arguments, such as root=UUID. If NAME/gpu exists, its
 # line is the virtio-gpu's options, such as xres=3840,yres=2160 for a 4K
-# screen. Every boot is killed after
+# screen. If NAME/net exists, the board has a virtio-net on the network
+# its line names, as -netdev takes one without its id, such as user, or
+# user,tftp=tests/e2e/NAME/tftp for QEMU's TFTP server at 10.0.2.2
+# serving that directory. Every boot is killed after
 # a minute. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
@@ -93,11 +96,16 @@ for dir in tests/e2e/*/; do
     fi
     qemu_args="$qemu_args -drive file=$disk,if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0"
   fi
+  net=""
+  if [ -f "$dir/net" ]; then
+    net=$(cat "$dir/net")
+    qemu_args="$qemu_args -netdev $net,id=net0 -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56"
+  fi
   bootargs=()
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$dir/typed" |
-      QEMU_DISK=$disk QEMU_GPU=$gpu QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_DISK=$disk QEMU_GPU=$gpu QEMU_NET=$net QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
     L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi

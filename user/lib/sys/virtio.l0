@@ -15,6 +15,8 @@
 ; A transport's registers, as offsets (virtio 1.2, section 4.2.2).
 (def reg_version () int 4)
 (def reg_device () int 8)
+(def reg_device_features () int 16)
+(def reg_device_features_sel () int 20)
 (def reg_driver_features () int 32)
 (def reg_driver_features_sel () int 36)
 (def reg_queue_sel () int 48)
@@ -52,15 +54,30 @@
 
 ; Resets transport t's device, acknowledges it, and accepts only
 ; VIRTIO_F_VERSION_1, bit 32: whether the device took that.
-(def negotiate ((d IoDevice) (t int)) bool
+(def negotiate ((d IoDevice) (t int)) bool (negotiate_features d t 0))
+
+; The 32 bits sel of the features transport t's device offers: 0 for
+; bits 0 to 31, its own, 1 for 32 to 63.
+(def device_features ((d IoDevice) (t int) (sel int)) int
+  (let s (device_write32 d (treg t (reg_device_features_sel)) sel)
+    (device_read32 d (treg t (reg_device_features)))))
+
+; negotiate, also accepting those of the device's own features, bits 0
+; to 31, in wanted that it offers.
+(def negotiate_features ((d IoDevice) (t int) (wanted int)) bool
   (let r (device_write32 d (treg t (reg_status)) 0)
     (let a (device_write32 d (treg t (reg_status)) (bit_or (status_ack) (status_driver)))
-      (let s0 (device_write32 d (treg t (reg_driver_features_sel)) 0)
-        (let f0 (device_write32 d (treg t (reg_driver_features)) 0)
-          (let s1 (device_write32 d (treg t (reg_driver_features_sel)) 1)
-            (let f1 (device_write32 d (treg t (reg_driver_features)) 1)
-              (let s (device_write32 d (treg t (reg_status)) (bit_or 3 (status_features_ok)))
-                (not (eq (bit_and (device_read32 d (treg t (reg_status))) (status_features_ok)) 0))))))))))
+      (let low (bit_and wanted (device_features d t 0))
+        (let s0 (device_write32 d (treg t (reg_driver_features_sel)) 0)
+          (let f0 (device_write32 d (treg t (reg_driver_features)) low)
+            (features_high d t)))))))
+
+; The rest of negotiate_features: VIRTIO_F_VERSION_1, and features ok.
+(def features_high ((d IoDevice) (t int)) bool
+  (let s1 (device_write32 d (treg t (reg_driver_features_sel)) 1)
+    (let f1 (device_write32 d (treg t (reg_driver_features)) 1)
+      (let s (device_write32 d (treg t (reg_status)) (bit_or 3 (status_features_ok)))
+        (not (eq (bit_and (device_read32 d (treg t (reg_status))) (status_features_ok)) 0))))))
 
 ; Tells transport t's device the driver is ready, once its queues are.
 (def driver_ok ((d IoDevice) (t int)) int
@@ -81,11 +98,16 @@
 ; what names the device in why not, as "the virtio-blk", and qwhat its
 ; queue 0, which must take size entries.
 (def virtio_probe ((d IoDevice) (t int) (what (list int)) (qwhat (list int)) (size int)) VirtioProbe
+  (virtio_probe_features d t what qwhat size 0))
+
+; virtio_probe, accepting those of the device's own features in wanted
+; that it offers, as negotiate_features does.
+(def virtio_probe_features ((d IoDevice) (t int) (what (list int)) (qwhat (list int)) (size int) (wanted int)) VirtioProbe
   (if (lt t 0)
       (VirtioAbsent)
       (if (not (is_modern d t))
           (VirtioUnusable (append what "'s transport is legacy, not version 2"))
-          (if (not (negotiate d t))
+          (if (not (negotiate_features d t wanted))
               (VirtioUnusable (append what " refused its features"))
               (if (lt (queue_max d t 0) size)
                   (VirtioUnusable (append "the " (append qwhat " queue is too small")))
@@ -160,6 +182,18 @@
   (let s (virtq_slot q avail size n head)
     (let p (virtq_publish d t sel q avail (add n 1))
       (add n 1))))
+
+; How many entries the device has put on the used ring at used of q, as
+; the ring counts them, from 0 to 65535 and round again.
+(def virtq_used_index ((q IoDevice) (used int)) int
+  (device_read16 q (add used 2)))
+
+; Entry n of the used ring at used of q, a queue of size entries: the
+; head of the chain the device used, and how many bytes it wrote into it.
+(def virtq_used_id ((q IoDevice) (used int) (size int) (n int)) int
+  (device_read32 q (add used (add 4 (mul 8 (mod n size))))))
+(def virtq_used_len ((q IoDevice) (used int) (size int) (n int)) int
+  (device_read32 q (add used (add 8 (mul 8 (mod n size))))))
 
 ; A 64-bit address, written as the two 32-bit registers from off.
 (def write_addr ((d IoDevice) (off int) (a int)) int

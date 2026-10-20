@@ -17,7 +17,7 @@ INSTRUCTIONS = """\
 Drives L0S, the L0 microkernel, booted on QEMU's aarch64 virt board.
 Build first (make initramfs for the demo, make screen-initramfs for the
 screen tests' image); boot does not build. Then boot, and use shell for
-commands at the serial shell (the demo's pid 9, which boot, pid 1,
+commands at the serial shell (the demo's pid 11, which boot, pid 1,
 starts and waits for; prompt "l0s> "): it waits for the
 next prompt and returns what was printed. ps and windows parse those
 commands' output. serial_send/serial_read are for anything that is not

@@ -1,0 +1,248 @@
+; packet.l0 -- the network's packets as bytes, built and read, for inet:
+; Ethernet's frames (IEEE 802.3), ARP's requests and replies (RFC 826),
+; IPv4's datagrams (RFC 791), ICMP's echoes and errors (RFC 792), and
+; UDP's datagrams (RFC 768), each with its checksum (RFC 1071). Pure: a
+; packet built is a list of bytes, and one read is read from bytes, with
+; the offset where it starts. Every number on the wire is big-endian.
+
+; ---------------------------------------------------------------- numbers
+
+; v as 2 bytes, most significant first.
+(def be16 ((v int)) (list int)
+  (cons (bit_and (bit_shr v 8) 255) (cons (bit_and v 255) (nil int))))
+
+; v as 4 bytes, most significant first.
+(def be32 ((v int)) (list int)
+  (append (be16 (bit_shr v 16)) (be16 v)))
+
+; The u16 at byte i of b, most significant byte first. The caller has
+; checked that the bytes are there.
+(def be16_at ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 8) (bytes_get b (add i 1))))
+
+; The u32 at byte i of b, most significant byte first.
+(def be32_at ((b bytes) (i int)) int
+  (bit_or (bit_shl (be16_at b i) 16) (be16_at b (add i 2))))
+
+; --------------------------------------------------------------- checksums
+
+; The 16-bit words of xs added to acc, a last odd byte as a word's high
+; byte: the Internet checksum's sum, before it is folded.
+(def sum16 ((xs (list int)) (acc int)) int
+  (if (is_empty xs)
+      acc
+      (if (is_empty (tail xs))
+          (add acc (bit_shl (head xs) 8))
+          (sum16 (tail (tail xs)) (add acc (bit_or (bit_shl (head xs) 8) (head (tail xs))))))))
+
+; The same of bytes i up to j of b.
+(def sum16_bytes ((b bytes) (i int) (j int) (acc int)) int
+  (if (ge i j)
+      acc
+      (if (eq (add i 1) j)
+          (add acc (bit_shl (bytes_get b i) 8))
+          (sum16_bytes b (add i 2) j (add acc (be16_at b i))))))
+
+; A sum's carries added back in, until it is 16 bits.
+(def fold16 ((s int)) int
+  (if (gt s 65535) (fold16 (add (bit_and s 65535) (bit_shr s 16))) s))
+
+; The Internet checksum of words summed to s: the ones' complement of
+; their ones' complement sum. Over bytes that hold their own checksum, 0
+; if it is right.
+(def checksum_of ((s int)) int (bit_xor (fold16 s) 65535))
+
+; The Internet checksum of the bytes xs.
+(def checksum ((xs (list int))) int (checksum_of (sum16 xs 0)))
+
+; ---------------------------------------------------------------- Ethernet
+
+; EtherTypes: what a frame carries.
+(def eth_ipv4 () int 2048)          ; 0x0800
+(def eth_arp () int 2054)           ; 0x0806
+
+; A frame's header: its two addresses and its type.
+(def eth_header_len () int 14)
+
+; A frame to dst from src, carrying payload of type.
+(def eth_frame ((dst (list int)) (src (list int)) (type int) (payload (list int))) (list int)
+  (append dst (append src (append (be16 type) payload))))
+
+; The address a frame b goes to, and the type it carries. The caller has
+; checked that it has a header.
+(def eth_dst ((b bytes)) (list int) (bytes_range b 0 6))
+(def eth_src ((b bytes)) (list int) (bytes_range b 6 12))
+(def eth_type ((b bytes)) int (be16_at b 12))
+
+; --------------------------------------------------------------------- ARP
+
+; ARP's operations.
+(def arp_request () int 1)
+(def arp_reply () int 2)
+
+; An ARP packet's bytes, of Ethernet and IPv4.
+(def arp_len () int 28)
+
+; An ARP packet of Ethernet and IPv4: its operation, the sender's
+; Ethernet and IPv4 addresses, and the target's.
+(data Arp (Arp int (list int) int (list int) int))
+
+; The packet's bytes: hardware 1, Ethernet; protocol IPv4; their lengths,
+; 6 and 4; then the operation and the addresses.
+(def arp_bytes ((a Arp)) (list int)
+  (match a
+    ((Arp op sha spa tha tpa)
+      (append (be16 1) (append (be16 (eth_ipv4)) (append (cons 6 (cons 4 (be16 op)))
+        (append sha (append (be32 spa) (append tha (be32 tpa))))))))))
+
+; The ARP packet at off of b, or none if it is not one of Ethernet and
+; IPv4.
+(def arp_of ((b bytes) (off int)) (Option Arp)
+  (if (lt (bytes_len b) (add off (arp_len)))
+      ((None Arp))
+      (if (if (eq (be16_at b off) 1)
+              (if (eq (be16_at b (add off 2)) (eth_ipv4))
+                  (if (eq (bytes_get b (add off 4)) 6) (eq (bytes_get b (add off 5)) 4) false)
+                  false)
+              false)
+          (Some (Arp (be16_at b (add off 6))
+                     (bytes_range b (add off 8) (add off 14)) (be32_at b (add off 14))
+                     (bytes_range b (add off 18) (add off 24)) (be32_at b (add off 24))))
+          ((None Arp)))))
+
+; -------------------------------------------------------------------- IPv4
+
+; What a datagram carries.
+(def proto_icmp () int 1)
+(def proto_udp () int 17)
+
+; A header with no options, the only kind inet sends.
+(def ip_header_len () int 20)
+
+; How many hops a datagram sent here may take.
+(def ip_ttl () int 64)
+
+; A datagram from src to dst of proto, the id'th sent: version 4, a header
+; of 5 words with no options, don't fragment, and its checksum.
+(def ipv4_packet ((src int) (dst int) (proto int) (id int) (payload (list int))) (list int)
+  (let h (ipv4_header src dst proto id (add (ip_header_len) (length payload)) 0)
+    (append (ipv4_header src dst proto id (add (ip_header_len) (length payload)) (checksum h)) payload)))
+
+; The header of a datagram of total bytes, with sum as its checksum.
+(def ipv4_header ((src int) (dst int) (proto int) (id int) (total int) (sum int)) (list int)
+  (cons 69 (cons 0 (append (be16 total) (append (be16 id) (append (be16 16384)       ; 0x45; DF
+    (cons (ip_ttl) (cons proto (append (be16 sum) (append (be32 src) (be32 dst)))))))))))
+
+; A datagram read: from src to dst, carrying payload of proto, with ttl
+; hops left; and its header and the first 8 bytes of its payload, which
+; an ICMP error about it quotes.
+(data Ipv4 (Ipv4 int int int int (list int) (list int)))
+
+; What reading a datagram came to: the datagram, or why it is passed over.
+(data IpRead (IpRead Ipv4) (IpBad (list int)))
+
+; The datagram at off of b.
+(def ipv4_of ((b bytes) (off int)) IpRead
+  (if (lt (bytes_len b) (add off (ip_header_len)))
+      (IpBad "too short for IPv4")
+      (let vh (bytes_get b off)
+        (let hl (mul 4 (bit_and vh 15))
+          (if (not (eq (bit_shr vh 4) 4))
+              (IpBad "not IPv4")
+              (if (if (lt hl (ip_header_len)) true (gt (add off hl) (bytes_len b)))
+                  (IpBad "a bad header length")
+                  (ipv4_checked b off hl)))))))
+
+; The rest of ipv4_of, its header of hl bytes there: its checksum, its
+; length, and whether it is a fragment, checked.
+(def ipv4_checked ((b bytes) (off int) (hl int)) IpRead
+  (let total (be16_at b (add off 2))
+    (if (not (eq (checksum_of (sum16_bytes b off (add off hl) 0)) 0))
+        (IpBad "a bad header checksum")
+        (if (if (lt total hl) true (gt (add off total) (bytes_len b)))
+            (IpBad "a bad total length")
+            (if (not (eq (bit_and (be16_at b (add off 6)) 16383) 0))   ; MF, offset
+                (IpBad "a fragment")
+                (IpRead (Ipv4 (be32_at b (add off 12)) (be32_at b (add off 16)) (bytes_get b (add off 9))
+                              (bytes_get b (add off 8))
+                              (bytes_range b (add off hl) (add off total))
+                              (bytes_range b off (min (add off total) (add off (add hl 8)))))))))))
+
+; -------------------------------------------------------------------- ICMP
+
+; ICMP's types: echo reply, destination unreachable, echo request; and
+; unreachable's code for a port nothing listens on.
+(def icmp_echo_reply () int 0)
+(def icmp_unreachable () int 3)
+(def icmp_echo_request () int 8)
+(def icmp_port_unreachable () int 3)
+
+; An ICMP message: its type and code, then the rest, the four bytes of
+; its header after the checksum and whatever follows.
+(data Icmp (Icmp int int (list int)))
+
+; The message's bytes, with its checksum.
+(def icmp_bytes ((m Icmp)) (list int)
+  (match m
+    ((Icmp type code rest)
+      (let sum (checksum (cons type (cons code (append (be16 0) rest))))
+        (cons type (cons code (append (be16 sum) rest)))))))
+
+; The ICMP message xs holds, or none if it is too short or its checksum
+; is wrong.
+(def icmp_of ((xs (list int))) (Option Icmp)
+  (if (lt (length xs) 8)
+      ((None Icmp))
+      (if (eq (checksum xs) 0)
+          (Some (Icmp (head xs) (head (tail xs)) (drop_n xs 4)))
+          ((None Icmp)))))
+
+; An echo's rest: its id and its sequence number, then its data.
+(def echo_rest ((id int) (seq int) (content (list int))) (list int)
+  (append (be16 id) (append (be16 seq) content)))
+
+; The id, and the sequence number, of an echo's rest.
+(def echo_id ((rest (list int))) int (be16_at (bytes_from_list (take rest 2)) 0))
+(def echo_seq ((rest (list int))) int (be16_at (bytes_from_list (take (drop_n rest 2) 2)) 0))
+
+; What an echo request sent here carries: 56 bytes, counting up.
+(def echo_data () (list int) (rev (echo_bytes 0 (nil int))))
+
+; The bytes i to 55, onto acc, reversed.
+(def echo_bytes ((i int) (acc (list int))) (list int)
+  (if (eq i 56) acc (echo_bytes (add i 1) (cons i acc))))
+
+; ---------------------------------------------------------------------- UDP
+
+; A UDP header: the ports, the length, and the checksum.
+(def udp_header_len () int 8)
+
+; A UDP datagram read: its source and destination ports, and its data.
+(data Udp (Udp int int (list int)))
+
+; The pseudo-header's sum, which UDP's checksum covers, for a datagram of
+; len bytes from src to dst.
+(def pseudo_sum ((src int) (dst int) (len int)) int
+  (sum16 (append (be32 src) (append (be32 dst) (cons 0 (cons (proto_udp) (be16 len))))) 0))
+
+; The UDP datagram from port sport at src to dport at dst holding
+; content, with its checksum; one that comes to 0 is sent as 65535,
+; since 0 says there is none.
+(def udp_bytes ((src int) (dst int) (sport int) (dport int) (content (list int))) (list int)
+  (let len (add (udp_header_len) (length content))
+    (let sum (checksum_of (sum16 (append (be16 sport) (append (be16 dport) (append (be16 len) (append (be16 0) content))))
+                                 (pseudo_sum src dst len)))
+      (append (be16 sport) (append (be16 dport) (append (be16 len) (append (be16 (if (eq sum 0) 65535 sum)) content)))))))
+
+; The UDP datagram xs holds, sent from src to dst, or none if it is too
+; short, says it is longer than it is, or has a checksum that is wrong.
+(def udp_of ((src int) (dst int) (xs (list int))) (Option Udp)
+  (let b (bytes_from_list xs)
+    (if (lt (bytes_len b) (udp_header_len))
+        ((None Udp))
+        (let len (be16_at b 4)
+          (if (if (lt len (udp_header_len)) true (gt len (bytes_len b)))
+              ((None Udp))
+              (if (if (eq (be16_at b 6) 0) false (not (eq (checksum_of (sum16_bytes b 0 len (pseudo_sum src dst len))) 0)))
+                  ((None Udp))
+                  (Some (Udp (be16_at b 0) (be16_at b 2) (bytes_range b (udp_header_len) len)))))))))
