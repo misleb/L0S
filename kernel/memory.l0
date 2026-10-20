@@ -1,6 +1,9 @@
 ; memory.l0 -- what each address of a process is for, and so what the
 ; kernel may map there. Pure: it decides, and process.l0 maps.
 
+; The parts of a process's address range, from the bottom: its image, its
+; heap, its stack, its device pages, and outside, below user_base or from
+; user_limit.
 (data Area (AreaImage) (AreaHeap) (AreaStack) (AreaDevice) (AreaOutside))
 
 ; Where a process's image lies, its ELF's segments (spec section 10.3):
@@ -11,12 +14,14 @@
 (data Span (Span int int int))
 (data Layout (Layout (list Span) int))
 
+; The first page of l's heap, just past its image.
 (def layout_heap ((l Layout)) int (match l ((Layout spans heap) heap)))
 
 ; The perm of the span of l holding va, or -1 if none does.
 (def span_perm ((l Layout) (va int)) int
   (match l ((Layout spans heap) (perm_in spans va))))
 
+; The perm of the first of spans holding va, or -1 if none does.
 (def perm_in ((spans (list Span)) (va int)) int
   (if (is_empty spans)
       -1
@@ -24,6 +29,7 @@
         ((Span from to perm)
           (if (if (ge va from) (lt va to) false) perm (perm_in (tail spans) va))))))
 
+; Which part of a process laid out as l address va is in.
 (def area_of ((l Layout) (va int)) Area
   (if (lt va (user_base))
       (AreaOutside)
@@ -39,6 +45,7 @@
 (def in_device_area ((va int)) bool
   (if (ge va (stack_top)) (lt va (user_limit)) false))
 
+; The address of the page holding va: va rounded down to a page.
 (def page_of ((va int)) int
   (bit_and va (bit_xor (sub (page_size) 1) -1)))
 
@@ -71,6 +78,7 @@
       (nil int)
       (pages_down (page_of (add va (sub n 1))) (page_of va) (nil int))))
 
+; The pages from first up to p onto acc, lowest first, working down from p.
 (def pages_down ((p int) (first int) (acc (list int))) (list int)
   (if (lt p first)
       acc
@@ -84,6 +92,8 @@
 ; may not write.
 (data Plan (PlanMap (list int)) (PlanBad))
 
+; The Plan for copying the n bytes from va: nothing to map for none, a
+; refusal for a negative n or bytes outside the user range.
 (def range_plan ((l Layout) (pages (Map int int)) (va int) (n int) (write bool)) Plan
   (if (lt n 0)
       (PlanBad)
@@ -93,6 +103,9 @@
               (PlanBad)
               (plan_pages l pages (range_pages va n) write (nil int))))))
 
+; The rest of range_plan, page by page through ps: each unmapped page onto
+; acc, or a refusal at the first the copy may not write or no page may be
+; mapped at on demand.
 (def plan_pages ((l Layout) (pages (Map int int)) (ps (list int)) (write bool) (acc (list int))) Plan
   (if (is_empty ps)
       (PlanMap (rev acc))
@@ -111,6 +124,9 @@
 ; hold, -5 when the process's device pages have run out.
 (data RegionPlan (RegionAt int int int) (RegionRefused int))
 
+; The RegionPlan for len bytes from base: refused for under a byte, a
+; negative base, over 4 GB, or a base past 2^48; the pages spanned taken
+; from next if they fit below user_limit.
 (def region_plan ((next int) (base int) (len int)) RegionPlan
   (if (if (lt len 1) true (if (lt base 0) true (if (gt len 4294967296) true (gt base 281474976710656))))
       (RegionRefused -3)
@@ -126,6 +142,7 @@
 ; when the process's device pages have run out.
 (data DmaPlan (DmaAt int int) (DmaRefused int))
 
+; The DmaPlan for n pages, taken from next if they fit below user_limit.
 (def dma_plan ((next int) (n int)) DmaPlan
   (if (if (lt n 1) true (gt n (dma_limit)))
       (DmaRefused (err_too_big))
@@ -150,6 +167,7 @@
 ; processes have, a driver's counting for good.
 (data Mem (Mem (Map int int)))
 
+; The counts before any process maps a device page: none.
 (def mem_new () Mem (Mem ((MapEmpty int int))))
 
 ; How many frames m counts mappings of: every shared and DMA frame still
@@ -161,6 +179,7 @@
 ; tables take, unseen by the kernel.
 (def frame_pool () int 98304)
 
+; How many mappings of frame f m counts, 0 for a frame it does not know.
 (def mem_count ((m Mem) (f int)) int
   (match m ((Mem counts) (match (map_get counts f) ((Some n) n) ((None) 0)))))
 
@@ -177,6 +196,9 @@
 (def mem_release ((m Mem) (pages (Map int int)) (dev bool)) Released
   (release_pages m pages (map_keys pages) dev (nil int)))
 
+; The rest of mem_release, through the pages at vas: a frame below the
+; device pages onto acc to free; one at them kept for a driver, else one
+; mapping of it fewer.
 (def release_pages ((m Mem) (pages (Map int int)) (vas (list int)) (dev bool) (acc (list int))) Released
   (if (is_empty vas)
       (Released m acc)
@@ -199,6 +221,8 @@
 ; or has it taken back, and whether it was the last, so f is to be freed.
 (data Unshared (Unshared Mem bool))
 
+; One mapping of f taken from m: its count one less, or f dropped from m
+; at its last.
 (def mem_unshare ((m Mem) (f int)) Unshared
   (let n (mem_count m f)
     (match m

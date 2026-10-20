@@ -13,15 +13,20 @@ changing code.
 
 - **Look things up first.** `make -s doc` lists every documented name in
   L0S's libraries; `make -s doc Q=NAME` shows one, `Q=FILE` (a stem such as
-  `l0s` or `wm`) a whole library, any other `Q=TEXT` searches. `l0 doc` does
-  the same for the L0 standard library. Use both before writing a helper.
+  `l0s` or `wm`, or the end of a path such as `sbin/wm/wm`) a whole file,
+  any other `Q=TEXT` searches. Queries reach the programs' and tools' own
+  sources too, after the libraries'. `l0 doc` does the same for the L0
+  standard library. Use both before writing a helper, and before grepping
+  for a name; grep is for finding where something is used.
 - **Done** means `make check` and `make test` pass, and also `make e2e` for
   anything that boots, drives a device, draws or takes input, and
   `make test-virt` for the kernel. Say which ran; never claim L0 code works
   without them.
 - **Document every top-level form** with a `;` block directly above it, no
   blank line between, and start every file with `; FILE.l0 -- summary`.
-  `make doc` reads exactly that.
+  `make doc` reads exactly that, and `make check` fails on a form without
+  one unless `tools/l0sdoc/undocumented.txt` lists it from before. Never
+  add a line there; after documenting a listed form, `make doc-prune`.
 - **New library?** Add it to the Makefile's `DOC_SRCS`, a `test` line, and
   the `LIBS_` lists that need it.
 - **Keep the README's tables true** in the same change: programs,

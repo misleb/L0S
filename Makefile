@@ -22,7 +22,10 @@
 #                    made anew
 #   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
-#                    L0's: every name, or Q a name, a file's stem, or text
+#                    L0's: every name, or Q a name, a file's stem or the
+#                    end of its path, or text, in the programs' too
+#   make doc-prune   take the forms documented since off DOC_GAPS, which
+#                    make check holds every undocumented form to
 #   make mcp         build/mcp/venv, the Python with the MCP SDK that
 #                    .mcp.json runs tools/l0s-mcp in: the MCP server
 #                    that boots and drives L0S for agents
@@ -167,8 +170,16 @@ ROOT     := $(BUILD)/root
 LIB_SRCS := $(wildcard user/lib/*/*.l0)
 DOC_SRCS := $(filter-out %_test.l0,$(wildcard common/*.l0)) $(filter-out $(COMMON) common/queue.l0,$(KERNEL)) \
             $(filter-out %_test.l0,$(LIB_SRCS))
+# Every program's own sources, and the host tools' and the kernel's board
+# tests' assembler: make doc Q=... finds names there too, after the
+# libraries', though no other program can link them.
+PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
+                 $(filter-out %_test.l0 %/main.l0,$(wildcard tools/*/*.l0))
+# The forms of all of them that had no documentation when make check began
+# to ask for it: the only ones that may still lack it, as make check says.
+DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: all check test test-virt e2e images root initramfs screen-initramfs disks-initramfs boot demo demo-system sysdisk clean sample doc mcp
+.PHONY: all check test test-virt e2e images root initramfs screen-initramfs disks-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
 
 all: check test test-virt e2e
 
@@ -180,6 +191,7 @@ check:
 	$(L0) check $(MKFS) tools/mkfs/main.l0
 	$(L0) check $(MKICON) tools/mkicon/main.l0
 	$(L0) check $(MKFONT) tools/mkfont/main.l0
+	$(MAKE) -s $(BUILD)/l0sdoc && $(BUILD)/l0sdoc --check $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
 
 # An archive bsdtar makes, of bin/x, "hi", mode 0755: what the host tests
 # of initramfs.l0 and of cat read.
@@ -308,7 +320,12 @@ root: $(IMAGES) $(ICONS) $(ICONS2X)
 	$(foreach p,$(APPS),$(call STAGE_APP,$(p)) && ) true
 
 doc: $(BUILD)/l0sdoc
-	@$(BUILD)/l0sdoc "$(Q)" $(DOC_SRCS)
+	@$(BUILD)/l0sdoc "$(Q)" $(DOC_SRCS) -- $(PROG_DOC_SRCS)
+
+# DOC_GAPS without the forms documented since, or gone: it only shrinks.
+doc-prune: $(BUILD)/l0sdoc
+	$(BUILD)/l0sdoc --prune $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS) > $(BUILD)/undocumented.txt
+	mv $(BUILD)/undocumented.txt $(DOC_GAPS)
 
 # The MCP server's Python, with the SDK its requirements name.
 MCP_VENV := $(BUILD)/mcp/venv

@@ -171,7 +171,8 @@ same files through symlinks in `.cursor/`):
   toolkit, the compositor, the display). Load the one that fits first.
 - **Rules**: `.claude/rules/`, `l0s.md` always, the others by path.
 - **Lookup**: `make -s doc [Q=NAME|FILE|TEXT]` is `l0 doc` for L0S's own
-  libraries.
+  code, the libraries' first, then the programs' and tools'; the l0s MCP
+  server's `doc` tool is the same. Use it before grepping for a name.
 - **Done** means `make check` and `make test` pass, plus `make e2e` for
   anything that boots, draws or takes input, and `make test-virt` for the
   kernel.

@@ -16,12 +16,18 @@ detail, but use this skill and `make -s doc` to find things fast.
 make -s doc                    # every documented name in the libraries, one line each
 make -s doc Q=port_send        # one name in full: def, data type, or constructor
 make -s doc Q=l0s              # one library file in full (its stem: l0s, wm, widget, kernel...)
+make -s doc Q=sbin/wm/wm       # any file by the end of its path, a program's too
+make -s doc Q=cascade          # a program's own def, when no library has the name
 make -s doc Q=damage           # every name or doc line mentioning the text
 l0 doc NAME                    # the L0 standard library, which is linked into everything
 ```
 
 Run both before writing a helper: L0S's libraries already have list, number,
-request and drawing helpers that the standard library lacks. The docs are
+request and drawing helpers that the standard library lacks. Queries look
+in the libraries first, then in every program's and tool's own sources (a
+name found there is that program's, which no other program can link), so
+reach for `make -s doc` before grepping for a name; grep is for where a
+name is used. The l0s MCP server's `doc` tool runs the same. The docs are
 the `;` comment block directly above each form, so write yours that way
 (below).
 
@@ -201,6 +207,10 @@ between: what it is or does, in plain words. One comment may cover a group
 of one-liners directly beneath it. Section dividers are
 `; ---------------------------------------------------------------- name`.
 `make doc` reads exactly this, so an undocumented def is invisible there.
+`make check` enforces it: a form with no block fails it, unless
+`tools/l0sdoc/undocumented.txt` lists it from before the check began. Never
+add to that list. Documenting a listed form fails the check too, until
+`make doc-prune` takes its line off, so the list only shrinks.
 
 ## Pitfalls that have cost time
 

@@ -5,6 +5,8 @@ server does. Run by .mcp.json, from the venv make mcp builds."""
 
 import atexit
 import functools
+import pathlib
+import subprocess
 
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -24,7 +26,12 @@ Ctrl-C, output of background jobs). The screen is 1280x800; screenshot
 shows it, pixels gives exact colors. type_keys and press_keys go to the
 virtio keyboard, so to the front window, not the serial line; click,
 drag, move and scroll (the wheel) drive the virtio tablet. Everything the serial line shows
-is also saved in build/mcp/serial.out."""
+is also saved in build/mcp/serial.out.
+
+doc needs no board: it looks up L0S's own code, as make -s doc Q=...
+does, before you grep for a helper or a name."""
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 mcp = MCPServer("l0s", instructions=INSTRUCTIONS)
 board = Board()
@@ -42,6 +49,23 @@ def tool(fn):
         except (BoardError, OSError) as e:
             raise ToolError(str(e)) from e
     return mcp.tool()(run)
+
+
+@mcp.tool()
+def doc(query: str = "") -> str:
+    """L0S's own documentation, as make -s doc Q=query gives it and as l0
+    doc gives the L0 standard library's: with no query, every documented
+    name in the libraries, one line each; a def, data type or constructor
+    in full, with its signature; a file by its stem (l0s, widget) or the
+    end of its path (proto/wm, sbin/wm/wm); or else every name or doc
+    line mentioning the text, ignoring case. Queries search the
+    programs' and tools' own sources too, after the libraries; a name
+    there is that program's, which no other program can link."""
+    run = subprocess.run(["make", "-s", "doc", f"Q={query}"], cwd=ROOT,
+                         capture_output=True, text=True, timeout=300)
+    if run.returncode != 0:
+        raise ToolError(run.stderr.strip() or f"make doc exited {run.returncode}")
+    return run.stdout
 
 
 @tool
