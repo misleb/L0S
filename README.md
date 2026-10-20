@@ -121,8 +121,9 @@ The wallpaper is the splash, drawn by
 instead, centered and cut to fit the screen, on the color of its
 top-left pixel.
 
-The window is macOS's (`cocoa`). `QEMU_DISPLAY=gtk` or `sdl` picks
-another, and `none` none. What is typed in your terminal goes to `uart`.
+The window is macOS's (`cocoa`) there and SDL's (`sdl`) elsewhere, as on
+Linux. `QEMU_DISPLAY=gtk` picks another (on Wayland it scales the window),
+and `none` none. What is typed in your terminal goes to `uart`.
 What is typed in the window goes to the virtio keyboard, and so through
 `virtio-input` and `wm` to the front window's `vt`.
 

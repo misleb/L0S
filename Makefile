@@ -45,9 +45,10 @@ L0_VIRTRT := $(L0LIB)l0c $(wildcard $(L0LIB)virt/*.bc)
 L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc/*.bc)
 
 # The splash screen the gpu driver shows, and where QEMU shows it: cocoa
-# is macOS's window; gtk or sdl elsewhere, none for no window.
+# is macOS's window; sdl elsewhere (gtk is scaled on Wayland), none for no
+# window.
 SPLASH       ?= $(BUILD)/splash.ppm
-QEMU_DISPLAY ?= cocoa
+QEMU_DISPLAY ?= $(if $(filter Darwin,$(shell uname -s)),cocoa,sdl)
 # SCREEN, WxH, is the virtio-gpu's mode, QEMU's 1280x800 if not given. A
 # screen of 2560x1440 or more is drawn at scale 2: make demo
 # SCREEN=3840x2160, with QEMU_DISPLAY=cocoa,full-screen=on,zoom-to-fit=on
