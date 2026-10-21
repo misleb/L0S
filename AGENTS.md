@@ -95,6 +95,15 @@ include no virtio device; `L0_QEMU_ARGS="-device virtio-gpu-device"` adds
 one, and any QEMU options there are added to how `l0 boot`, `l0 run`, and
 `l0 test` start the board.
 
+`l0 build --target pi5` builds an image for the Raspberry Pi 5, with no
+operating system, which no emulator runs, so `l0 boot` refuses it. `l0 card
+IMAGE DIR ARG ... < input` writes the files its SD card's boot partition
+needs, beside the firmware's own: the image, `config.txt`, `cmdline.txt`
+for the arguments, and the input as an initramfs. Its standard output and
+error are its debug UART; a status that is not 0 is written there, and the
+board is powered off. Nothing of it has run on a board yet (changelog, "The
+Raspberry Pi 5"), and its DMA is not coherent.
+
 `l0 build --target proc` builds a program as a process for a kernel on
 aarch64, or riscv64 with `--arch riscv64`, in an address space of its own, reaching the kernel through the
 system calls the spec's section 10.3 fixes. The kernel decides what the

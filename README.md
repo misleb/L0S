@@ -855,7 +855,7 @@ itself is always there, a directory holding only the volumes: nothing
 can be made in it, only in one of them. The kernel takes a path, made
 absolute, to where it is mounted:
 
-- the initramfs: answered as [Calls 1–10](#calls-110-the-process-abi-of-spec-103) say;
+- the initramfs: answered as [Calls 1–12](#calls-112-the-process-abi-of-spec-103) say;
 - the system volume, any path outside `/Volumes` once `/` is one: its
   server is asked for the same path in `/Volumes/LABEL`, as for a volume;
 - `/Volumes`: a directory, -8; straight in it, nothing there, -3, and
@@ -1366,14 +1366,14 @@ with random registers.
 | `common/initramfs.l0` | the newc archive: parsing it, paths, entry kinds, and a writer for tests |
 | `common/queue.l0` | a FIFO queue of any type, shared with user programs |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
-| `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; which frames to free when a process ends |
+| `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; which heap pages a release names; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; which frames to free when a process ends |
 | `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
 | `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
 | `kernel/syscall.l0` | a trapped context decoded into a `Call` |
-| `kernel/process.l0` | creating a process from its ELF's segments, demand-paging, copying in and out of, mapping devices and DMA pages into, and the open files of a process |
+| `kernel/process.l0` | creating a process from its ELF's segments, demand-paging, heap pages released, copying in and out of, mapping devices and DMA pages into, and the open files of a process |
 | `kernel/kernel.l0` | the state, every call's handler, traps, the loop, and boot |
 
 All of these except `process.l0` and `kernel.l0` are pure and tested on the
@@ -1412,7 +1412,7 @@ The layout is fixed by spec §10.3. A program's image is an ELF, as
 |---|---|---|
 | `0xC0000000` | the image's segments, code, rodata, and data, ending below `0xD0000000` | at load, the pages holding the file's bytes, each with its segment's flags: code readable and executable, rodata readable, data readable and writable |
 | the rest of a segment | its bss, zero | on first touch, with the segment's flags |
-| from the page after the image to `0xD8000000` | heap | on first touch, RW |
+| from the page after the image to `0xD8000000` | heap | on first touch, RW; unmapped again, its frame freed, when the runtime releases it (call 12) |
 | to `0xE8000000` | stack, `sp` starting at the top | on first touch, RW |
 | `0xE8000000` up | device regions, DMA pages, and shared pages | by the `region` and `dma_alloc` calls, for programs with a `dev` line only; by `shm_alloc` and `shm_share`, for any |
 
@@ -1475,6 +1475,14 @@ buffers, the content's, the title bar's and the frame's: the driver once the scr
 no longer shows them, on `forget`, and `wm` after that. So a closed
 window's memory is freed once its `vt` has ended too.
 
+**Releasing.** While a process runs, its runtime names the whole heap
+pages that its allocator has freed by call 12, `release` (spec §10.3).
+The kernel unmaps each one it has mapped and frees its frame, and a later
+touch of the page gets a zeroed frame again, as a first touch does. So a
+process holds the heap it uses now, not the most it ever used. Its servers
+run from boot to shutdown, so without this the frames they touched once
+would never come back.
+
 **Freeing.** When a process ends, the kernel gives back its space with
 `space_free`, which takes its page tables and every mapping with it, and
 then, with `frame_free`, every frame of it that no other space maps
@@ -1497,7 +1505,7 @@ being made, what was made for it is freed again.
 `x8` holds the call number, `x0`–`x3` the arguments, and the result comes
 back in `x0`. From L0, use the wrappers in `user/lib/sys/l0s.l0`.
 
-### Calls 1–10: the process ABI of spec §10.3
+### Calls 1–12: the process ABI of spec §10.3
 
 The kernel answers these itself for the initramfs, a read-only file
 system, and for a file of a volume under `/Volumes`, or of the system
@@ -1514,6 +1522,8 @@ volume once `/` is one, sends them to the volume's file server, as
 | exit | the process ends with that status |
 | arg_count, arg | the process's arguments: those it was spawned with by `spawn_entry_with` or `spawn_image`, or else the inittab's `args` for its path |
 | region | maps device registers for programs with a `dev` line, so `open_device` works, or for a range of the caller's DMA pages, returns where they are; -3 for any other |
+| clock | not answered (-5): only a riscv64 process asks, and an aarch64 one reads the virtual counter itself |
+| release | 0. The runtime makes it, never a program: each whole page of the heap in the range that is mapped is unmapped and its frame freed (see [Releasing](#a-processs-memory)); part of a page, and anything outside the heap, are passed over |
 
 ### The kernel's own calls, 256 up
 
@@ -1681,7 +1691,7 @@ name in a library is taken in every program that links it.
 |---|---|
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
-| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 Each case of `tests/e2e/` is a directory:
