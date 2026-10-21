@@ -721,8 +721,10 @@ driver (`shm_share`), and the device reads or writes those pages itself,
 by DMA, from a chain of descriptors the driver builds over them. The
 driver makes one request of the device at a time, and waits for the
 device's interrupt, which the kernel sends to a port of the driver's
-own, so that the requests waiting on its other port stay there. It takes
-two of the device's features, if it offers them: `VIRTIO_BLK_F_FLUSH`,
+own, so that the requests waiting on its other port stay there. A
+request that takes more than 30 seconds fails, and so does every later
+one, since the device may still be working on it: the disk has stopped
+answering. It takes two of the device's features, if it offers them: `VIRTIO_BLK_F_FLUSH`,
 so that `flush` empties the disk's write cache, and `VIRTIO_BLK_F_RO`,
 so that it knows a disk is read-only (QEMU's `readonly=on`) and refuses
 its writes itself.
@@ -1099,8 +1101,9 @@ name's IPv4 address, built in [dns.l0](user/lib/format/dns.l0), to port
 53 there, and reads the first A record of the answer, past any CNAME;
 an address dotted is taken as it is, with nothing asked. It waits 2
 seconds for the answer, asks 3 times in all, and drops anything else
-that comes to its port meanwhile. `net`, `tftp` and `http` take names
-this way.
+that comes to its port meanwhile. The query's id is 16 bits asked of
+`random`, or the clock's when there is none. `net`, `tftp` and `http`
+take names this way.
 
 `run net` uses it from a shell, as `ifconfig` and `ping` would, and
 `run tftp HOST FILE [PATH]` fetches a file over TFTP, from QEMU's TFTP
@@ -1551,7 +1554,7 @@ otherwise as its type's first failure.
 | 262 | `name_register port name` | `Registration`: `Registered`, `RegisterNoPort`, `RegisterTaken`, `RegisterTooLong` | 0, or -1 not your port, -2 the name is taken, -4 a name over 256 bytes |
 | 263 | `name_lookup name` | `Lookup`: `Found`, `NotFound` | a port, or -1 (`name_await` retries with yields, `name_wait` with sleeps) |
 | 264 | `spawn_entry e` | `Spawn`: `Spawned`, `SpawnNoEntry`, `SpawnNotProgram`, `SpawnTooBig`, `SpawnNoRoom` | a pid, or -1 no entry e, or the initramfs given up, -6 not a program, or not an ELF the kernel starts, -5 out of address spaces. `spawn_path` starts a program by its path, wherever `/` is |
-| 265 | `wait_pid pid` | `Reaped`: `Reaped`, `WaitNoProc` | waits; the pid's exit status, or -1, which a status of -1 reads as too |
+| 265 | `wait_pid pid` | `Reaped`: `Reaped`, `WaitNoProc` | waits; the pid's exit status, its low 32 bits as a word never negative, which `wait_pid` reads back signed, or -1 for no such process |
 | 266 | `sleep_until t`, `sleep_ns n` | `int` | 0, once `clock_ns` reaches t |
 | 267 | `irq_bind irq port` | `IrqBinding`: `IrqBound`, `IrqAbsent`, `IrqDenied`, `IrqNoPort`, `IrqTaken` | 0, or -6 no `dev` line for the program, -1 not your port, -2 already bound, -3 no such interrupt on the board. After this, each interrupt sends the message `irq_notice irq` to the port |
 | 268 | `irq_ack irq` | `IrqAck`: `IrqAcked`, `IrqNotPending` | 0, ending the interrupt once the driver has quieted its device; -1 if it is not yours or not taken |
@@ -1627,7 +1630,7 @@ every `.l0` in its directory is part of it.
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
-| `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
+| `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own, for 30 seconds at most, after which it takes the disk to have stopped answering and fails every request. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
 | `virtio-rng` | a user-space driver for QEMU's virtio-rng, the entropy device, which draws on the host's `/dev/urandom`, serving the random protocol as `random` (see [Randomness](#randomness)). It finds the device, sets up its one queue of 8 entries in a DMA page, and for `bytes N` offers the device a buffer to fill, again until it has N, waiting for each as `virtq_wait` does. With no virtio-rng on the board it says so on stderr and exits 0 |
 | `inet` | the IPv4 stack, `inet dhcp` or `inet [ADDR/PREFIX [GATEWAY [DNS]]]`: the address, netmask, router and name server a DHCP server gives it, its lease renewed and rebound as the clock's minutes pass, or those given, 10.0.2.15/24 behind 10.0.2.2, with 10.0.2.3 as the name server, by default (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
@@ -1670,10 +1673,10 @@ name in a library is taken in every program that links it.
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs`, `inet` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
-| [proto/random.l0](user/lib/proto/random.l0) | the random protocol: its request and reply, and `random_bytes` and `random_word`, which ask `virtio-rng` for bytes and do without when it is not there (`RANDOM`) | `virtio-rng`, `random`, `fs`, `inet` |
+| [proto/random.l0](user/lib/proto/random.l0) | the random protocol: its request and reply, and `random_bytes` and `random_word`, which ask `virtio-rng` for bytes and do without when it is not there (`RANDOM`) | `virtio-rng`, `random`, `fs`, and with `INETLIB` |
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
 | [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text (`NICLIB`) | `virtio-net`, and with `INETLIB` |
-| [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; resolving a name, `inet_resolve`, by asking the interface's name server over UDP; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0` and `dns.l0`) | `inet`, `net`, `tftp`, `http` |
+| [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; resolving a name, `inet_resolve`, by asking the interface's name server over UDP; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`, `dns.l0` and `random.l0`) | `inet`, `net`, `tftp`, `http` |
 | [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
 | [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `disks`, `tools/mkfs`, and every program `PATHS` is in |
 | [format/dns.l0](user/lib/format/dns.l0) | DNS's messages, RFC 1035: the query for a name's IPv4 address, and the first A record read out of an answer, past CNAMEs and name pointers (`DNSLIB`, in `INETLIB`) | with `INETLIB` |
@@ -1987,11 +1990,12 @@ a bad buffer, and wait on nothing.
 - **At most 255 processes alive at once**, the table's slots (see
   [Processes and pids](#processes-and-pids)), and a status no one asked
   for is lost once 255 newer processes have needed its slot.
-- A process's image, heap and stack pages stay mapped until it ends. Its
-  runtime reuses what it frees within its own heap, but L0's runtime has
-  no way to tell a kernel which pages it no longer needs, so the kernel
-  cannot unmap them while it runs. Only shared and DMA pages can be given
-  up or taken back early.
+- A process's image and stack pages stay mapped until it ends, and so do
+  the heap pages its allocator keeps: the 4 chunks it holds back and the
+  blocks on its free lists, which it cuts from next. Only the whole heap
+  pages it frees are released, by call 12 (see
+  [Releasing](#a-processs-memory)), and only shared and DMA pages are
+  given up or taken back otherwise.
 - **A process has 384 MB of device pages**, its shared, DMA and device
   memory mapped at once. Pages it gives up are given again, but a
   request's pages must lie together, so 384 MB in holes too small for it
@@ -2062,17 +2066,19 @@ a bad buffer, and wait on nothing.
   longer finds it. Nothing removes or resizes a partition.
 - **A UUID's time is local, and its noise needs the device.** The board's
   clock, `rtc clock`, keeps this machine's local time, not UTC, so a
-  UUID's time is off by its zone, 0 where no clock runs. Its noise is the
+  UUID's time is off by its zone; where no clock runs its seconds are 0,
+  and only the milliseconds of `clock_ns` are left. Its noise is the
   entropy device's, but on a board with no virtio-rng a mixer's, seeded
   from the clock, which can be guessed.
 - **The disk is one virtio-blk, one request at a time.** `virtio-blk`
   drives the first disk on the board and moves at most 128 sectors a
-  request. It waits for the device's interrupt with no timeout, so a
-  device that never answers holds it, and every client of the disk,
-  for good.
+  request. It gives a request 30 seconds; one that takes longer fails,
+  and the disk is then taken to have stopped answering, so every later
+  request fails too, until the board is started again, since the
+  request it gave up on may still be in the device's queue.
 - **The network is one card, IPv4's datagrams and a small TCP.**
   `virtio-net` drives the first card on the board, sends one frame at a
-  time and waits for the card to take it, and accepts no feature but
+  time and waits up to 2 seconds for the card to take it, and accepts no feature but
   its address, so it neither offloads checksums nor merges buffers.
   `inet` has one interface, set by its arguments or by DHCP, which
   takes no other options than the mask, the first router and the first
@@ -2084,7 +2090,7 @@ a bad buffer, and wait on nothing.
   its first IPv4 address only, from one name server, over UDP alone, so
   an answer cut short is not asked again over TCP; while it waits the
   resolver drops anything else that comes to its client's port, and
-  its query's id is the clock's. It neither
+  on a board with no virtio-rng its query's id is the clock's. It neither
   fragments nor takes fragments, so a datagram holds at most 1472 bytes;
   it has no IP options, and passes over every protocol but ICMP, UDP
   and TCP, without saying so; and it keeps at most 64 neighbours,
@@ -2139,8 +2145,9 @@ a bad buffer, and wait on nothing.
   desktop, the pointer, the top bar and the launcher), can open only so
   many windows over its life, closed ones included. The close button kills its client at
   once: the client is not asked first, and cannot refuse. The pointer has
-  one button that does anything, the left.
-- The display driver attaches a whole new backing, a run list of some
+  one button that does anything, the left: `wm` passes the others on to
+  the window under the pointer, and the toolkit drops them.
+- In 2D mode, the display driver attaches a whole new backing, a run list of some
   thousands of entries, for every raise, move or scroll, though it builds
   again only the rows that changed, and finds who shows along them once
   for each run of rows alike. A drag's restack takes about 9 ms with two
@@ -2148,6 +2155,7 @@ a bad buffer, and wait on nothing.
   joining the run list and attaching it (virtio-gpu's 2D mode has one
   backing for the screen, and replaces it whole), and 1 showing the
   damage, so a drag shows a few dozen positions a second, not every one.
+  With virgl a restack is a few commands, and nothing is attached again.
 - Interrupts the kernel enables stay enabled (L0 cannot disable one). If a
   driver exits while its device keeps the interrupt raised, the kernel ends
   each one as it comes.
@@ -2156,10 +2164,12 @@ a bad buffer, and wait on nothing.
   again. An image's pages are copied for each process, and none is shared
   between processes running the same program, its code and rodata
   included.
-- Instruction-cache maintenance after loading an image is left to the board's
-  host file. This is fine under QEMU.
+- Nothing cleans the data cache or invalidates the instruction cache
+  after an image is loaded: neither the kernel nor L0 has a way to.
+  QEMU keeps the two coherent, so this is fine there, but a board that
+  does not would run stale instructions.
 - A failed receive reports no reason. `supervisor_receive` gives no bytes
   when the kernel's word is negative (spec §6.15), so `RecvFailed` stands
   for every failure, and for no message yet.
-- `wait_pid`'s word is a status or -1 for no such process, so a process
-  that exits with -1 reads as `WaitNoProc`.
+- An exit status is 32 bits, to `wait_pid` as in an exit notice: a
+  status outside a signed 32-bit number is read back as its low 32 bits.

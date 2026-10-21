@@ -8,7 +8,8 @@
 ; reads or writes them itself, by DMA. The driver makes one request of
 ; the device at a time, and waits for the device's interrupt, which the
 ; kernel sends to a port of its own, so that the requests waiting on the
-; other stay where they are.
+; other stay where they are. A request that takes more than 30 s leaves
+; the disk taken to have stopped answering: it and every later one fail.
 ;
 ; It accepts two of the device's features, when it offers them: FLUSH,
 ; so that a flush empties the disk's write cache, and RO, so that it
@@ -106,46 +107,70 @@
 ; The driver: the transports' registers and the disk's transport, the
 ; queue's page and where the device reaches it, the disk's size in
 ; sectors, how many requests it has made, the features the device and it
-; agreed on, and the port the device's interrupt comes to.
-(data Blk (Blk IoDevice int IoDevice int int int int int))
+; agreed on, the port the device's interrupt comes to, and whether the
+; disk has stopped answering, a request outliving blk_patience_ns.
+(data Blk (Blk IoDevice int IoDevice int int int int int bool))
 
 ; What came of a request: the driver after it, and why it failed, or
 ; empty.
 (data BlkDone (BlkDone Blk (list int)))
 
+; How long a request may take before the disk is taken to have stopped
+; answering: 30 s, well past a flush of a slow host's cache.
+(def blk_patience_ns () int 30000000000)
+
+; Why every request fails once the disk has stopped answering.
+(def blk_hung_why () (list int) "the disk stopped answering")
+
+; Whether a request made at since is overdue at now.
+(def blk_overdue ((since int) (now int)) bool (gt (sub now since) (blk_patience_ns)))
+
 ; type for count sectors from sector, the data at runs, made of the
-; device and waited for.
+; device and waited for; refused at once once the disk has stopped
+; answering, since the request it never finished may still be in its
+; queue.
 (def blk_request ((b Blk) (type int) (sector int) (runs (list VirtqRun))) BlkDone
   (match b
-    ((Blk d t q qa cap n fs ip)
-      (let h (put_bytes q (header_off) (blk_header type sector))
-        (let s (device_write8 q (status_off) 255)
-          (let c (put_bytes q 0 (blk_descriptors (add qa (header_off)) runs (eq type (blk_in)) (add qa (status_off))))
-            (blk_queued b)))))))
+    ((Blk d t q qa cap n fs ip hung)
+      (if hung
+          (BlkDone b (blk_hung_why))
+          (let h (put_bytes q (header_off) (blk_header type sector))
+            (let s (device_write8 q (status_off) 255)
+              (let c (put_bytes q 0 (blk_descriptors (add qa (header_off)) runs (eq type (blk_in)) (add qa (status_off))))
+                (blk_queued b))))))))
 
 ; The request at descriptor 0 made available and the device told.
 (def blk_queued ((b Blk)) BlkDone
   (match b
-    ((Blk d t q qa cap n fs ip)
+    ((Blk d t q qa cap n fs ip hung)
       (let n2 (virtq_offer d t 0 q (avail_off) (ring_size) n 0)
-        (blk_finished (Blk d t q qa cap n2 fs ip))))))
+        (blk_finished (Blk d t q qa cap n2 fs ip hung) (clock_ns))))))
 
-; The request made, waited for, and its status read: done once the used
-; ring has it, and otherwise not before the device's next interrupt. An
-; interrupt for a request already done may still be waiting on the port;
-; it is taken and ended like any other, and the ring looked at again.
-(def blk_finished ((b Blk)) BlkDone
+; The request made at since, waited for, and its status read: done once
+; the used ring has it. Until then the device's interrupt port is looked
+; at, yielding for virtq_spin_ns and then sleeping a millisecond at a
+; time, as a receive cannot time out; an interrupt for a request already
+; done may be waiting there too, and is ended like any other. A request
+; overdue leaves the driver hung.
+(def blk_finished ((b Blk) (since int)) BlkDone
   (match b
-    ((Blk d t q qa cap n fs ip)
+    ((Blk d t q qa cap n fs ip hung)
       (let br (barrier)
         (if (eq (virtq_used_index q (used_off)) (bit_and n 65535))
             (let b2 (barrier) (BlkDone b (blk_why (device_read8 q (status_off)))))
-            (match (port_receive ip)
-              ((RecvFailed) (BlkDone b "lost its interrupt's port"))
+            (match (port_try_receive ip)
               ((Message from payload)
-                (if (is_irq_notice (Message from payload) (transport_irq t))
-                    (let e (blk_interrupted d t) (blk_finished b))
-                    (blk_finished b)))))))))
+                (let e (if (is_irq_notice (Message from payload) (transport_irq t)) (blk_interrupted d t) 0)
+                  (blk_finished b since)))
+              ((RecvFailed) (blk_waited b since (clock_ns)))))))))
+
+; Nothing on the interrupt port at now: the driver hung if the request
+; made at since is overdue, and otherwise waited a little and looked again.
+(def blk_waited ((b Blk) (since int) (now int)) BlkDone
+  (if (blk_overdue since now)
+      (match b ((Blk d t q qa cap n fs ip hung) (BlkDone (Blk d t q qa cap n fs ip true) (blk_hung_why))))
+      (let s (if (lt (sub now since) (virtq_spin_ns)) (l0s_yield) (sleep_ns 1000000))
+        (blk_finished b since))))
 
 ; Transport t's interrupt ended: the device's status acknowledged, then
 ; the kernel's.
@@ -176,7 +201,7 @@
         ((NoVirtqMem why) (complain why))
         ((VirtqMem va q addrs)
           (started (Blk d t q (array_get addrs 0) (capacity d t) 0
-                        (bit_and (blk_wanted) (device_features d t 0)) 0)))))))
+                        (bit_and (blk_wanted) (device_features d t 0)) 0 false)))))))
 
 ; The disk's size in sectors: config's capacity, a le64 at its start.
 (def capacity ((d IoDevice) (t int)) int
@@ -187,14 +212,14 @@
 ; the device told the driver is ready, and the disk served.
 (def started ((b Blk)) int
   (match b
-    ((Blk d t q qa cap n fs ip)
+    ((Blk d t q qa cap n fs ip hung)
       (let s (start_queue d t 0 (ring_size) qa (add qa (avail_off)) (add qa (used_off)))
         (let iport (port_new)
           (let why (irq_bind_or_why (transport_irq t) iport)
             (if (not (is_empty why))
                 (complain why)
                 (let o (driver_ok d t)
-                  (start_serving (Blk d t q qa cap n fs iport))))))))))
+                  (start_serving (Blk d t q qa cap n fs iport hung))))))))))
 
 ; ---------------------------------------------------------------- serving
 
@@ -233,7 +258,7 @@
 ; for a read-only disk.
 (def info ((b Blk)) (Served Blk)
   (match b
-    ((Blk d t q qa cap n fs ip)
+    ((Blk d t q qa cap n fs ip hung)
       (Served b (append "disk " (append (digits cap) (append " " (append (digits (sector_size))
                   (if (blk_has fs (blk_f_ro)) " ro" "")))))))))
 
@@ -242,7 +267,7 @@
 ; flush.
 (def flushed ((b Blk)) (Served Blk)
   (match b
-    ((Blk d t q qa cap n fs ip)
+    ((Blk d t q qa cap n fs ip hung)
       (if (not (blk_has fs (blk_f_flush)))
           (served_ok b)
           (blk_answered (blk_request b (blk_flush) 0 (nil VirtqRun)))))))
@@ -255,7 +280,7 @@
 ; says, between the disk and the client's pages shared here at va.
 (def moved ((b Blk) (type int) (sector int) (count int) (va int)) (Served Blk)
   (match b
-    ((Blk d t q qa cap n fs ip)
+    ((Blk d t q qa cap n fs ip hung)
       (let why (blk_move_refusal type sector count cap fs)
         (if (not (is_empty why))
             (served_error b why)

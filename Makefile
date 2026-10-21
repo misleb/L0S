@@ -116,13 +116,12 @@ L0FS    := user/lib/format/l0fs.l0
 
 # The network: nic, the driver's frames and Ethernet's addresses; and
 # inet, the stack's datagrams and IPv4's addresses, and its resolver,
-# which needs nic and DNS's messages.
+# which needs nic, DNS's messages, and randomness for its queries' ids.
+# Randomness from the entropy device's driver, for UUIDs, TCP and DNS.
+RANDOM  := user/lib/proto/random.l0
 NICLIB  := user/lib/proto/nic.l0
 DNSLIB  := user/lib/format/dns.l0
-INETLIB := $(NICLIB) $(DNSLIB) user/lib/proto/inet.l0
-
-# Randomness from the entropy device's driver, for UUIDs and TCP.
-RANDOM  := user/lib/proto/random.l0
+INETLIB := $(NICLIB) $(DNSLIB) $(RANDOM) user/lib/proto/inet.l0
 
 # The partition table, GPT, and the UUIDs and CRC-32 it needs.
 UUIDLIB := user/lib/format/uuid.l0
@@ -143,7 +142,7 @@ LIBS_virtio-input := $(VIRTIO)
 LIBS_virtio-blk := $(VIRTIO)
 LIBS_virtio-net := $(VIRTIO) $(NICLIB)
 LIBS_virtio-rng := $(VIRTIO) $(RANDOM)
-LIBS_inet       := $(INETLIB) $(RANDOM) $(CLOCK)
+LIBS_inet       := $(INETLIB) $(CLOCK)
 LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(INETLIB)
