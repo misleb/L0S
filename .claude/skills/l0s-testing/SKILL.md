@@ -125,7 +125,8 @@ also need `nc` (netcat), which is not on every machine.
 
 These boot with QEMU's monitor and QMP on Unix sockets and check pixels of a
 `screendump`. Each can be run alone from the top of the project once its
-image exists: `make initramfs` for `vt.sh` (the demo), and
+image exists: `make vt-initramfs` for `vt.sh` (the demo, with
+`tests/vt/etc/system`'s two Terminals over its own), and
 `make screen-initramfs` for `gpu-screen.sh`, `keyboard.sh`, `widgets.sh`,
 `procmon.sh` and `launcher.sh` (the demo without the terminals,
 `tests/screen/etc`; `launcher.sh` clicks Applications, checks the
@@ -174,7 +175,8 @@ Their helpers, copied in each script:
   gives the content's size. Pick check points away from rounded corners, text
   and the cursor unless that is what is checked: a point in a corner is cut
   to show what is beneath.
-- `vt.sh` relies on pids from the demo's inittab (`vt=$((12 + ...))`):
+- `vt.sh` relies on pids from the demo's inittab and `tests/vt/etc/system`
+  (`vt=$((12 + ...))`):
   a `start` line added there shifts them.
 
 ## Trying things on a running board: the l0s MCP server

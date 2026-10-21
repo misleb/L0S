@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# vt.sh -- boots the demo's initramfs with no window: the compositor, wm,
-# with two vt windows, each with a shell. It learns where the windows are
+# vt.sh -- boots the demo's initramfs with no window, but with
+# tests/vt/etc/system's two terminals: the compositor, wm, with two vt
+# windows, each with a shell. It learns where the windows are
 # from run windows, typed at the serial shell, since which vt opens first,
 # and so where each is, varies. Then it checks:
 #
@@ -26,7 +27,7 @@
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
-# initramfs.
+# vt-initramfs.
 set -u
 cd "$(dirname "$0")/.."
 BUILD=build
@@ -39,7 +40,7 @@ rm -f "$sock" "$qmp" "$fifo" "$dump"
 mkfifo "$fifo"
 
 QEMU_MONITOR="unix:$sock,server=on,wait=off" QEMU_QMP="unix:$qmp,server=on,wait=off" \
-  tools/qemu-boot.sh "$BUILD/initramfs.cpio" < "$fifo" > "$out" 2>&1 &
+  tools/qemu-boot.sh "$BUILD/vt.cpio" < "$fifo" > "$out" 2>&1 &
 qemu=$!
 trap 'kill $qemu 2> /dev/null; rm -f "$fifo"' EXIT
 exec 3> "$fifo"

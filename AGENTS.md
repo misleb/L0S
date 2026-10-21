@@ -87,7 +87,10 @@ library's `Trap` (`l0 doc Trap`), answering its threads' system calls with
 on whichever CPU `(machine)` says it is, and sets the timer, and waits for and
 ends interrupts, with those of section 6.14. It gives a device memory to
 read and write itself, by DMA, as a frame, whose address `frame_address`
-gives to write into the device's registers. The board's own devices
+gives to write into the device's registers. `(frame_free_count)` says how
+many pages are left for frames and tables, so it can refuse work that would
+not fit; the pages standard input was loaded into join them once a read
+reaches its end. The board's own devices
 include no virtio device; `L0_QEMU_ARGS="-device virtio-gpu-device"` adds
 one, and any QEMU options there are added to how `l0 boot`, `l0 run`, and
 `l0 test` start the board.

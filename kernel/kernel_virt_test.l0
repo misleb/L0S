@@ -75,9 +75,15 @@
   (cons (add_imm 0 19 (div off 2)) (cons (add_imm 0 0 (sub off (div off 2)))
     (append (call_words (call_dma_address)) (exit_x0)))))
 
+; Whether a is a page of the board's frame windows (spec 10.3): past the
+; image up to the heap, 0x40080000 to 0x58000000, or past the heap up to
+; the stack, 0x98000000 to 0xB0000000.
 (def in_frame_pool ((a int)) int
   (add (check_int "page aligned" (mod a 4096) 0)
-       (check_true "in the frame pool" (if (ge a 2550136832) (lt a 2952790016) false))))   ; 0x98000000, 0xB0000000
+       (check_true "in the frame pool"
+         (if (if (ge a 1074266112) (lt a 1476395008) false)
+             true
+             (if (ge a 2550136832) (lt a 2952790016) false)))))
 
 (def test_dma_address () int
   (in_frame_pool (boot_words (flag_dev) (dma_words 2 (dma_address_words 16)))))
@@ -590,8 +596,13 @@
   (add (check_int "the record" (boot_words 0 (mem_words 64 (nil int))) (mem_record_len))
        (check_int "no room" (boot_words 0 (mem_words 7 (nil int))) (err_too_big))))
 
+; The pool is the frame windows less the image, the device tree and the
+; page tables: at most 383.5 MB and 384 MB, 196,480 pages, and with a
+; small image, over 750 MB, 192,000 pages.
 (def test_mem_info_total () int
-  (check_int "the pool, 384 MB of pages" (bit_and (boot_words 0 (mem_words 8 (first_words))) 4294967295) 98304))
+  (let total (bit_and (boot_words 0 (mem_words 8 (first_words))) 4294967295)
+    (add (check_true "over 750 MB" (gt total 192000))
+         (check_true "within the windows" (le total 196480)))))
 
 ; The process's own pages are given, and so are the pages it shares:
 ; with four shared first, four more than without.
@@ -914,12 +925,12 @@
     (boot_mods (cons (one_then_two) (cons (shm_toucher 8) (cons (summer 8) (nil Raw)))))
     0))
 
-; Seven processes of 64 MB each, one after another: 114,688 frames, more
-; than the board's 98,304, so each must be given what the one before it
-; freed.
+; Sixteen processes of 64 MB each, one after another: 262,144 frames, more
+; than the board's 196,480 at most, so each must be given what the ones
+; before it freed.
 (def test_freed_heap_suffices () int
   (check_int "the last one's status"
-    (boot_mods (cons (first (spawn_wait_times 7 1)) (cons (toucher 16384) (nil Raw))))
+    (boot_mods (cons (first (spawn_wait_times 16 1)) (cons (toucher 16384) (nil Raw))))
     0))
 
 ; Shares 16 MB, a quarter of the most one call gives, four times over, and exits with
@@ -927,12 +938,19 @@
 (def shm_hog () Raw
   (Raw 0 (code (append (repeat_words 4 (cons (movz 0 4096) (call_words (call_shm_alloc)))) (exit_x0)))))
 
-; What the tests of seven 64 MB processes rely on: one process that holds
-; as much at once, 64 MB of heap and 368 MB shared, 110,592 frames, runs out of
-; them, though not of device pages, of which there are 384 MB.
+; n shares of 16 MB each, the last one's answer in x0, then words.
+(def shm_16s ((n int) (ws (list int))) (list int)
+  (append (repeat_words n (cons (movz 0 4096) (call_words (call_shm_alloc)))) ws))
+
+; What the tests of sixteen 64 MB processes rely on: as much at once runs
+; out of frames. One process has only 384 MB of device pages, so pid 1
+; shares 368 MB and then spawns a child that holds 64 MB of heap and
+; tries for 368 MB more: 800 MB, 204,800 frames, more than the pool, and
+; the child exits with its last share's answer.
 (def test_frames_run_out () int
-  (check_int "the last 16 MB"
-    (boot_words 0 (touch_words 16384 (append (repeat_words 23 (cons (movz 0 4096) (call_words (call_shm_alloc)))) (exit_x0))))
+  (check_int "the child's last 16 MB"
+    (boot_mods (cons (first (shm_16s 23 (spawn_wait_times 1 1)))
+                     (cons (Raw 0 (code (touch_words 16384 (shm_16s 23 (exit_x0))))) (nil Raw))))
     (err_fault)))
 
 (def test_device_pages_suffice () int
@@ -950,10 +968,10 @@
          (boot_words 0 (cons (movz 0 16385) (append (call_words (call_shm_alloc)) (exit_x0))))
          (err_too_big))))
 
-; The same with shared frames: seven processes that share 64 MB each.
+; The same with shared frames: sixteen processes that share 64 MB each.
 (def test_freed_shared_suffices () int
   (check_int "the last one's last 16 MB"
-    (boot_mods (cons (first (spawn_wait_times 7 1)) (cons (shm_hog) (nil Raw))))
+    (boot_mods (cons (first (spawn_wait_times 16 1)) (cons (shm_hog) (nil Raw))))
     (add (stack_top) (mul 3 16777216))))
 
 ; Spaces are given back: 300 processes in a row that each share a page,
@@ -1007,13 +1025,13 @@
          (err_fault))
        (check_int "no pages" (boot_words 0 (shm_words 1 (unmap_words 0 (exit_x0)))) (err_too_big))))
 
-; One process shares 16 MB and gives it up, 30 times over: 480 MB, more
+; One process shares 16 MB and gives it up, 60 times over: 960 MB, more
 ; than the board's frames and than its 384 MB of device pages, so both
 ; the memory and the pages must come back each time. The last 16 MB is
 ; where the first was.
 (def test_shm_unmap_frees_memory () int
-  (check_int "the 30th 16 MB"
-    (boot_words 0 (append (repeat_words 30 (shm_words 4096 (unmap_words 4096 (nil int)))) (cons (mov_x0_x19) (exit_x0))))
+  (check_int "the 60th 16 MB"
+    (boot_words 0 (append (repeat_words 60 (shm_words 4096 (unmap_words 4096 (nil int)))) (cons (mov_x0_x19) (exit_x0))))
     (stack_top)))
 
 ; Pid 1 shares a page with pid 2, then takes it back.

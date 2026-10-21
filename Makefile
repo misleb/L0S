@@ -203,7 +203,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: all check test test-virt e2e images root initramfs screen-initramfs disks-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
+.PHONY: all check test test-virt e2e images root initramfs screen-initramfs vt-initramfs disks-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
 
 all: check test test-virt e2e
 
@@ -382,6 +382,13 @@ screen-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/screen-etc)
 	tools/mkinitramfs $(BUILD)/screen.cpio $(BUILD)/screen-etc $(ROOT)
 
+# What tests/vt.sh boots: the demo's etc, with tests/vt/etc/system over
+# its own, so that two terminals run whatever the demo starts.
+vt-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/vt-etc && cp -R demo/etc $(BUILD)/vt-etc && cp tests/vt/etc/system $(BUILD)/vt-etc/system
+	$(call stage_etc,$(BUILD)/vt-etc)
+	tools/mkinitramfs $(BUILD)/vt.cpio $(BUILD)/vt-etc $(ROOT)
+
 # What tests/disks.sh boots: tests/disks/etc, the screen tests' with the
 # disk's driver and file server, with the splash, font and face.
 disks-initramfs: images root $(ETC_DEPS)
@@ -389,7 +396,7 @@ disks-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/disks-etc)
 	tools/mkinitramfs $(BUILD)/disks.cpio $(BUILD)/disks-etc $(ROOT)
 
-e2e: images root initramfs screen-initramfs disks-initramfs
+e2e: images root initramfs screen-initramfs vt-initramfs disks-initramfs
 	tests/e2e.sh
 	tests/gpu-screen.sh
 	tests/hidpi.sh

@@ -44,27 +44,34 @@ and boots it on QEMU. The board's serial line is on your terminal, and
 its virtio-gpu, virtio keyboard and virtio tablet are in a QEMU window;
 its virtio-net is on QEMU's user network.
 The window shows a desktop, the compositor's: a wallpaper, a top bar,
-and two terminal windows that overlap, each with a title bar and a
-shell. The top bar is GNOME Shell's, black across the top of the screen:
-**Applications** at its left, then the name of the front window's app
-(`Terminal`), or its title if it is no app's, and the date and time in
-its middle, `Oct 15  22:42`, from the board's real-time clock, which QEMU
-sets to this machine's local time. There are three shells in all:
+and two windows that overlap, each with a title bar: a terminal with a
+shell, and the System Monitor. The top bar is GNOME Shell's, black across
+the top of the screen: **Applications** at its left, then the name of the
+front window's app (`Terminal`, `System Monitor`), or its title if it is
+no app's, and the date and time in its middle, `Oct 15  22:42`, from the
+board's real-time clock, which QEMU sets to this machine's local time.
+There are two shells in all:
 
 - **The serial line**, in the terminal you ran `make demo` from.
-- **`vt1` and `vt2`**, the windows. They're drawn in GNOME's Adwaita
-  style by the toolkit in [user/lib/ui](user/lib/ui/README.md): rounded
-  corners and a header bar with a bold, centered title, and a thin
-  border of the header bar's color down the terminal's sides and along
-  its foot. Keys typed in QEMU's window go to the one in front, whose
-  header bar and border are `ebebeb`; the other's are lighter, in the
-  backdrop, its title dimmed.
+- **`vt1`**, the terminal's window. The windows are drawn in GNOME's
+  Adwaita style by the toolkit in [user/lib/ui](user/lib/ui/README.md):
+  rounded corners and a header bar with a bold, centered title, and a
+  thin border of the header bar's color down the sides and along the
+  foot. Keys typed in QEMU's window go to the one in front, whose header
+  bar and border are `ebebeb`; the other's are lighter, in the backdrop,
+  its title dimmed.
   - Click a window to bring it to the front. Drag it by its title bar to
     move it.
   - Click the round close button at the right end of its title bar to
-    close it. That kills the window's `vt`, and its shell goes with it.
-  - Each is a terminal of 80 by 24 cells: white on GNOME Console's
+    close it. For `vt1` that kills its `vt`, and its shell goes with it.
+  - It is a terminal of 80 by 24 cells: white on GNOME Console's
     `1e1e1e`, scrolling, with a cursor along the foot of its cell.
+    Start another from Applications, or with `run vt &`: it is `vt2`.
+
+The other window, `Processes`, is the System Monitor (`procmon`): the
+kernel's processes in a grid, read again every second, and under it the
+memory processes are given and how much of it is free (see
+[The programs](#the-programs)).
 
 Click **Applications** to open the launcher, GNOME Shell's grid of apps:
 a page over the desktop, in place of the windows, of each app's icon and
@@ -98,8 +105,9 @@ booted with `root=UUID`, or else from the initramfs.
 | 10 | `inet` | the IPv4 stack, at the address a DHCP server gives it (`inet dhcp`; 10.0.2.15 on QEMU's user network). It serves `inet`, for `run net` and `run tftp` (see [The network](#the-network)) |
 | 11 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
 | 12 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 13, 14 | `vt`, `vt` | the windows' terminals, Terminal's program, which name themselves `vt1` and `vt2`, the first names free, in the order they start. Each edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
-| 15, 16 | `sh vt1`, `sh vt2` | the windows' shells, which the `vt`s start, not `/etc/system`, in whichever order the two get there, and after any program run before they do. A shell's `exit` ends its `vt` too, and closes its window |
+| 13 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 14 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
+| 15 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -141,7 +149,7 @@ Each shell shows [/etc/motd](demo/etc/motd), then its prompt:
 ```
 Welcome to L0S. Try ls, df, ps, run hello; run install VOLUME copies L0S.
 Commands in /bin, services in /sbin, apps in /Applications, files in /Volumes.
-Two more shells run in Terminals in QEMU's window: click one, and type there.
+Another shell runs in the Terminal in QEMU's window: click it, and type there.
 Applications, on the top bar, starts apps; drag a window by its title bar.
 Draw on the desktop: run draw circle 640 400 300 cyan; run draw for more.
 run keys echoes what the keyboard driver sees, until Esc.
@@ -238,20 +246,19 @@ Things to try:
     PID  PARENT  PROGRAM       STATE
       1       0  boot          waiting for pid 11
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 13
-      4       0  virtio-input  waiting for a message on port 2
-      5       0  virtio-input  waiting for a message on port 3
+      3       0  virtio-gpu    waiting for a message on port 12
+      4       0  virtio-input  waiting for a message on port 11
+      5       0  virtio-input  waiting for a message on port 2
       6       0  rtc           sleeping
-      7       0  virtio-blk    waiting for a message on port 5
+      7       0  virtio-blk    waiting for a message on port 4
       8       0  fs            waiting for a message on port 15
-      9       0  virtio-net    waiting for a message on port 7
-     10       0  inet          waiting for a message on port 8
+      9       0  virtio-net    waiting for a message on port 6
+     10       0  inet          waiting for a message on port 7
      11       1  sh            running
-     12       1  wm            waiting for a message on port 16
-     13       1  vt            waiting for a message on port 11
-     14       1  vt            waiting for a message on port 12
+     12       1  wm            waiting for a message on port 14
+     13       1  vt            waiting for a message on port 10
+     14       1  procmon       sleeping
      15      13  sh            waiting for a message on port 19
-     16      14  sh            waiting for a message on port 20
   ```
 
   It lists the processes that have not exited. The shell asking is always
@@ -267,10 +274,12 @@ Things to try:
 
   ```
   l0s> run windows
-  1 vt2 100 90 640 384 front
+  1 Processes 100 90 840 429 front
   0 vt1 40 40 640 384 -
   pointer 0 0
   ```
+
+  Which of the two opens first, and so which is in front, varies.
 - `run draw`, to draw on the desktop, behind the windows. Each change
   shows before the shell's next prompt. Pixels count from 0, 0 at the top
   left of the 1280×800 desktop, and a shape may run off its edge:
@@ -411,7 +420,8 @@ and says what a terminal takes, each a request (`request` in `l0s.l0`):
 | `request 0 ("w" ++ BYTES)` | writes BYTES; no reply |
 
 `uart` is one, as `console`, and each `vt` another, as the first of
-`vt1`, `vt2`, and so on that is free: `vt1` and `vt2` in the demo.
+`vt1`, `vt2`, and so on that is free: `vt1` in the demo, and `vt2` for
+the next one started.
 
 A process's terminal is its standard input, output and error. `sh TTY`
 finds the terminal named TTY, `console` unless given, sets it as its own
@@ -448,7 +458,7 @@ Unix shell does on SIGHUP. A read the kernel does carry, a program's
 
 ```
  sh ─tty─ vt1 ─┐ compositor protocol                display protocol
- sh ─tty─ vt2 ─┼──────────────────▶ wm ─────────────────────────▶ virtio-gpu ──▶ QEMU
+     procmon ──┼──────────────────▶ wm ─────────────────────────▶ virtio-gpu ──▶ QEMU
        draw ───┘ (shared buffers)   ▲ ▲                           (or another driver)
                                     │ └── pointer ◀── virtio-input tablet
                                     └──── keyboard ◀── virtio-input keyboard
@@ -1183,9 +1193,10 @@ only the first stage, the drivers and `fs`, which a disk needs, and
    of its own. Its entries stay, a few names, to name those processes
    and say which drive devices and what arguments a path gets; but no
    entry can be started or read again, and stream 0's `stdin` file ends.
-   The raw copy QEMU's loader put at 0x50000000, which the kernel read
-   its standard input from, is outside L0's heap and frame pool, and
-   L0 has no call to give it back, so only the heap's copy is freed.
+   The heap's copy goes back to the kernel's heap. The raw copy QEMU's
+   loader put at 0x50000000, which the kernel read its standard input
+   from, joined the frame pool as soon as the kernel had read it at
+   boot (spec 10.3), so that one is processes' memory already.
 4. `boot` starts `/etc/system`'s programs, now the volume's, with
    `spawn_path` ([user/lib/sys/paths.l0](user/lib/sys/paths.l0)): it
    reads each program's file, marked a program, and starts it from its
@@ -1442,7 +1453,7 @@ otherwise as its type's first failure.
 | 285 | `boot_args` | `(list (list int))` | the board's boot arguments, QEMU's `-append`, split at spaces; none under another operating system |
 | 286 | `root_switch label` | `Switch`: `Switched`, `SwitchDenied`, `SwitchDone`, `SwitchNoVolume`, `SwitchBadLabel` | 0, the volume mounted as label made `/`, the system volume, for good, and the initramfs's bytes given up (see [Booting from a volume](#booting-from-a-volume)); -6 if the caller's program is not the initramfs's, -2 if `/` is a volume already, -1 if no such volume is mounted, -5 no label |
 | 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, or not an ELF the kernel starts, -4 the whole over 64 MB of image with the path and arguments, -5 bytes not laid out as `spawn_image_bytes` lays them |
-| 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, the board's pool of 98,304 (384 MB), and how many of them are given, each process's own and every shared or DMA page once, however many processes map it; none under another operating system. Pages the kernel's page tables take from the pool are not known to it, so what is not given is at most what is free |
+| 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, those given and those L0's `frame_free_count` says are left, about 765 MB with `-m 2G`, and how many of them are given, each process's own and every shared or DMA page once, however many processes map it; none under another operating system. What is not given is free; the kernel's page tables take from it, so the total moves a little |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1698,8 +1709,9 @@ Shift-A and Enter on the virtio keyboard with the monitor's `sendkey`, as
 typing in the window would. It checks that the serial line shows `hi! A`,
 and that after Esc the shell runs the next command typed.
 
-[tests/vt.sh](tests/vt.sh) boots the demo's own initramfs, every shell
-running, with QMP on a socket as well, to work the tablet. Which `vt`
+[tests/vt.sh](tests/vt.sh) boots the demo's own initramfs (`make
+vt-initramfs`), every shell running, but with two Terminals whatever the
+demo's `/etc/system` starts after its first ([tests/vt/etc/system](tests/vt/etc/system)), with QMP on a socket as well, to work the tablet. Which `vt`
 opens first, and so where each window is, varies, so it learns where they
 are from `run windows` at the serial shell. Then:
 - the title bars: the front window's header bar active, `ebebeb`, the
@@ -1845,9 +1857,10 @@ a bad buffer, and wait on nothing.
   only programs that may drive devices: a program started from a
   volume's file never may, whatever the inittab says of its path. The
   system volume is chosen once, at boot, by `root=`, and is `/` for good:
-  nothing switches back, and if its server goes, `/` answers -5. Only
-  the kernel heap's copy of the archive is freed; the loader's raw copy
-  at 0x50000000 stays, L0 having no call to give it back. A volume's
+  nothing switches back, and if its server goes, `/` answers -5. The
+  kernel heap's copy of the archive is freed into the kernel's heap,
+  which no process's pages come from; the loader's raw copy is frames
+  from the moment it has been read. A volume's
   programs are read whole into their starter's memory before they start,
   and copied again into the new process.
 - **The volumes are small and simple** (see [Volumes](#volumes)). Their
