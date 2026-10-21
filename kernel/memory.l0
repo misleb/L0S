@@ -117,39 +117,124 @@
                   (PlanBad)
                   (plan_pages l pages (tail ps) write (cons (head ps) acc)))))))
 
+; ------------------------------------------------------------ device pages
+
+; A process's device pages, from stack_top up to user_limit, as given
+; and given up: top, the first page never given, and below it the runs
+; of pages given up again, each the pages from a page up to another,
+; highest first, none touching another or ending at top. Pages given up
+; in any order are given again, so a process that maps and unmaps never
+; runs out while its memory is freed.
+(data DevRun (DevRun int int))
+(data DevPages (DevPages int (list DevRun)))
+
+; A new process's device pages: none given yet.
+(def dev_pages_new () DevPages (DevPages (stack_top) (nil DevRun)))
+
+; The first page of pool never given.
+(def dev_top ((pool DevPages)) int (match pool ((DevPages top runs) top)))
+
+; How many runs of pages given up pool has below its top.
+(def dev_run_count ((pool DevPages)) int (match pool ((DevPages top runs) (length runs))))
+
+; span bytes of pages taken from a pool: the first, and the pool without
+; them; or none, no run nor the pages from top below user_limit holding
+; them.
+(data DevTake (DevTaken int DevPages) (DevFull))
+
+; span bytes, a whole number of pages, taken from pool: from the start of
+; the first run, highest first, that holds them, or else from top.
+(def dev_take ((pool DevPages) (span int)) DevTake
+  (match pool
+    ((DevPages top runs)
+      (match (take_run runs span (nil DevRun))
+        ((RunTaken va rest) (DevTaken va (DevPages top rest)))
+        ((RunNone)
+          (if (gt (add top span) (user_limit))
+              (DevFull)
+              (DevTaken top (DevPages (add top span) runs))))))))
+
+; A run's pages taken: the first, and the runs left; or none that held
+; them.
+(data RunTake (RunTaken int (list DevRun)) (RunNone))
+
+; The first of runs holding span bytes, its start taken and the rest of
+; it kept, the runs passed over onto acc, highest first in reverse.
+(def take_run ((runs (list DevRun)) (span int) (acc (list DevRun))) RunTake
+  (if (is_empty runs)
+      (RunNone)
+      (match (head runs)
+        ((DevRun from to)
+          (if (lt (sub to from) span)
+              (take_run (tail runs) span (cons (head runs) acc))
+              (RunTaken from (runs_onto acc (if (eq (sub to from) span)
+                                                (tail runs)
+                                                (cons (DevRun (add from span) to) (tail runs))))))))))
+
+; The runs acc, reversed, in front of rest.
+(def runs_onto ((acc (list DevRun)) (rest (list DevRun))) (list DevRun)
+  (if (is_empty acc) rest (runs_onto (tail acc) (cons (head acc) rest))))
+
+; pool with the span bytes of pages from va given up, joined to any run
+; they touch, and top lowered to the run that then ends at it.
+(def dev_give ((pool DevPages) (va int) (span int)) DevPages
+  (if (le span 0)
+      pool
+      (match pool
+        ((DevPages top runs) (dev_lower top (give_run runs va (add va span) (nil DevRun)))))))
+
+; The pages from from up to to put into runs, highest first, joined with
+; those they touch, the runs above them onto acc in reverse.
+(def give_run ((runs (list DevRun)) (from int) (to int) (acc (list DevRun))) (list DevRun)
+  (if (is_empty runs)
+      (runs_onto acc (cons (DevRun from to) (nil DevRun)))
+      (match (head runs)
+        ((DevRun a b)
+          (if (gt a to)
+              (give_run (tail runs) from to (cons (head runs) acc))
+              (if (lt b from)
+                  (runs_onto acc (cons (DevRun from to) runs))
+                  (give_run (tail runs) (min a from) (max b to) acc)))))))
+
+; The pool of top and runs, its highest run dropped and top lowered to
+; its start if the run ends at top.
+(def dev_lower ((top int) (runs (list DevRun))) DevPages
+  (if (is_empty runs)
+      (DevPages top runs)
+      (match (head runs)
+        ((DevRun from to) (if (ge to top) (DevPages from (tail runs)) (DevPages top runs))))))
+
 ; Where the region system call maps the len bytes of device memory from
-; base, given that the next free device page is at next: at va, through
-; the page before after, and the process reaches base at addr. Or the
-; call's result when it maps nothing: -3 for a range no device could
-; hold, -5 when the process's device pages have run out.
-(data RegionPlan (RegionAt int int int) (RegionRefused int))
+; base, taken from the device pages pool: at va, pool then without them,
+; and the process reaches base at addr. Or the call's result when it
+; maps nothing: -3 for a range no device could hold, -5 when the
+; process's device pages have run out.
+(data RegionPlan (RegionAt int DevPages int) (RegionRefused int))
 
 ; The RegionPlan for len bytes from base: refused for under a byte, a
 ; negative base, over 4 GB, or a base past 2^48; the pages spanned taken
-; from next if they fit below user_limit.
-(def region_plan ((next int) (base int) (len int)) RegionPlan
+; from pool if they fit.
+(def region_plan ((pool DevPages) (base int) (len int)) RegionPlan
   (if (if (lt len 1) true (if (lt base 0) true (if (gt len 4294967296) true (gt base 281474976710656))))
       (RegionRefused -3)
-      (let span (add (sub (page_of (add base (sub len 1))) (page_of base)) (page_size))
-        (if (gt (add next span) (user_limit))
-            (RegionRefused -5)
-            (RegionAt next (add next span) (add next (sub base (page_of base))))))))
+      (match (dev_take pool (add (sub (page_of (add base (sub len 1))) (page_of base)) (page_size)))
+        ((DevFull) (RegionRefused -5))
+        ((DevTaken va rest) (RegionAt va rest (add va (sub base (page_of base))))))))
 
 ; Where the dma_alloc call maps n pages of memory a device can reach,
-; given that the next free device page is at next: at va, through the
-; page before after. Or the call's result when it maps nothing:
-; err_too_big for fewer than one page or more than dma_limit, err_fault
-; when the process's device pages have run out.
-(data DmaPlan (DmaAt int int) (DmaRefused int))
+; taken from the device pages pool: at va, through the page before
+; after, pool then without them. Or the call's result when it maps
+; nothing: err_too_big for fewer than one page or more than dma_limit,
+; err_fault when the process's device pages have run out.
+(data DmaPlan (DmaAt int int DevPages) (DmaRefused int))
 
-; The DmaPlan for n pages, taken from next if they fit below user_limit.
-(def dma_plan ((next int) (n int)) DmaPlan
+; The DmaPlan for n pages, taken from pool if they fit.
+(def dma_plan ((pool DevPages) (n int)) DmaPlan
   (if (if (lt n 1) true (gt n (dma_limit)))
       (DmaRefused (err_too_big))
-      (let after (add next (mul n (page_size)))
-        (if (gt after (user_limit))
-            (DmaRefused (err_fault))
-            (DmaAt next after)))))
+      (match (dev_take pool (mul n (page_size)))
+        ((DevFull) (DmaRefused (err_fault)))
+        ((DevTaken va rest) (DmaAt va (add va (mul n (page_size))) rest)))))
 
 ; ----------------------------------------------------------------- freeing
 

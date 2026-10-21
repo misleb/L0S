@@ -1366,7 +1366,7 @@ with random registers.
 | `common/initramfs.l0` | the newc archive: parsing it, paths, entry kinds, and a writer for tests |
 | `common/queue.l0` | a FIFO queue of any type, shared with user programs |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
-| `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; where device regions and DMA pages go; which frames to free when a process ends |
+| `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; which frames to free when a process ends |
 | `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
 | `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
@@ -1433,8 +1433,11 @@ kernel mapped, so a buffer there is accepted.
 **DMA.** A device such as the virtio-gpu reads and writes memory itself,
 at addresses it is given in its registers. `dma_alloc n` maps n fresh
 frames at the caller's next device pages and returns the first one's
-address; `dma_address va` gives where the device reaches the page holding
-va, from L0's `frame_address`. The pages are consecutive in the process,
+address. A process's device pages, the 384 MB above its stack, are
+given out as a pool: its next ones are the first run of pages it gave
+up that holds them, highest first, or else the pages above all it was
+ever given. `dma_address va` gives where the device reaches the page
+holding va, from L0's `frame_address`. The pages are consecutive in the process,
 but not necessarily for the device, so a driver gives the device one
 address per page, or merges the runs that happen to be consecutive.
 A `region` call over DMA pages (`dma_open` in `l0s.l0`) returns the same
@@ -1455,9 +1458,11 @@ reaches memory.
 **Taking it back.** Both are L0's `space_unmap` (spec §6.13).
 `shm_unmap va n` gives up n of the caller's own shared or DMA pages from
 va: they are unmapped, and each frame is freed once no process maps it.
-If they were the last device pages it was given, its next ones start at
-va again, so a process that shares and gives up in turn reuses the same
-pages. A driver may give up its own too: its doing so says its device is
+Their addresses return to its pool of device pages, joined to any free
+pages beside them, in whatever order they are given up, so a process
+that shares and gives up in turn reuses its pages rather than running
+out; pages taken back by `shm_revoke`, and those a call reserved but
+could not map, return too. A driver may give up its own too: its doing so says its device is
 done with them. `shm_revoke va n pid` takes back from pid every mapping
 it has of the caller's n pages from va, so a process can withdraw what
 it shared; never from a driver, whose device may have been given their
@@ -1977,12 +1982,11 @@ a bad buffer, and wait on nothing.
   no way to tell a kernel which pages it no longer needs, so the kernel
   cannot unmap them while it runs. Only shared and DMA pages can be given
   up or taken back early.
-- A device page given up returns to the process's pool of device pages
-  only if it was the last given; otherwise its address is not used again,
-  and a process that gives up pages out of order can run out of its 384
-  MB of them though its memory is freed. At scale 2 every window's
-  buffers are four times as many pages, so `virtio-gpu`, which maps them
-  all, gets there four times as soon.
+- **A process has 384 MB of device pages**, its shared, DMA and device
+  memory mapped at once. Pages it gives up are given again, but a
+  request's pages must lie together, so 384 MB in holes too small for it
+  is still refused. `virtio-gpu` maps every window's buffers, four times
+  as many pages at scale 2.
 - **A screen's backing is at most 15,870 runs**, what the virtio-gpu's
   control queue of 64 entries can carry in one request. A 4K desktop
   whose pages are all apart, with a 1280×800 window over it, at scale 2,

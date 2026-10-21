@@ -37,8 +37,8 @@
 (data Life (Life State int (list int) (list (list int)) Files Tty Layout (list int)))
 
 ; pid, entry index of its program, space, context, page -> frame for
-; every frame mapped, the next free device page, and its life.
-(data Proc (Proc int int int (array int) (Map int int) int Life))
+; every frame mapped, its device pages given and free, and its life.
+(data Proc (Proc int int int (array int) (Map int int) DevPages Life))
 
 ; p's pid, the entry index of its program, its space, and its state.
 (def proc_pid ((p Proc)) int (match p ((Proc pid m s c pages dev st) pid)))
@@ -269,7 +269,7 @@
 (def proc_loaded ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (s int) (entry int) (lay Layout) (l Load)) Created
   (match l
     ((ImageLoaded pages)
-      (Created (Proc pid m s (user_context entry (stack_top)) pages (stack_top)
+      (Created (Proc pid m s (user_context entry (stack_top)) pages (dev_pages_new)
                      (Life (Ready) parent (nil int) args (files_none)
                            (match (tty_none) ((Tty none reply rest) (Tty tty reply rest))) lay "/"))))
     ((ImageFailed pages)
@@ -423,9 +423,10 @@
 (def is_dma_page ((pages (Map int int)) (page int)) bool
   (if (in_device_area page) (map_has pages page) false))
 
-; p with n zeroed frames mapped at its next free device pages, answered
+; p with n zeroed frames mapped at free device pages of its, answered
 ; with the first page's address, or with the code that says why not. A
-; frame mapped before they ran out stays mapped until p ends.
+; frame mapped before they ran out stays mapped until p ends; the pages
+; past it are free again.
 (data Allocated (Allocated Mem Proc))
 
 ; The dma_alloc call of n pages, as Allocated says, its pages counted in
@@ -435,11 +436,11 @@
     ((Proc pid m s c pages dev st)
       (match (dma_plan dev n)
         ((DmaRefused code) (Allocated mem (Proc pid m s (answer c code) pages dev st)))
-        ((DmaAt va after) (dma_map_pages mem (Proc pid m s c pages after st) va va after))))))
+        ((DmaAt va after rest) (dma_map_pages mem (Proc pid m s c pages rest st) va va after))))))
 
 ; The rest of proc_dma_alloc, from page va to after: a fresh frame at
 ; each, read-write, and p answered with first at the end, or with
-; err_fault where the host ran out.
+; err_fault where the host ran out, the pages from there given back.
 (def dma_map_pages ((mem Mem) (p Proc) (first int) (va int) (after int)) Allocated
   (if (ge va after)
       (Allocated mem (proc_answer p first))
@@ -447,7 +448,7 @@
         ((Proc pid m s c pages dev st)
           (let f (map_frame s va 1)
             (if (lt f 0)
-                (Allocated mem (Proc pid m s (answer c (err_fault)) pages dev st))
+                (Allocated mem (Proc pid m s (answer c (err_fault)) pages (dev_give dev va (sub after va)) st))
                 (dma_map_pages (mem_share mem f) (Proc pid m s c (map_put pages va f) dev st)
                                first (add va (page_size)) after)))))))
 
@@ -464,7 +465,7 @@
                 ((Some f) (dma_frames p (add va (page_size)) (sub n 1) (cons f acc)))
                 ((None) ((None (list int))))))))))
 
-; q with frames mapped at its next free device pages, read-write, for
+; q with frames mapped at free device pages of its, read-write, for
 ; memory another process shares with it: where q reaches the first; or
 ; the code that says why not.
 (data Shared (Shared Mem Proc int) (ShareRefused Mem Proc int))
@@ -476,17 +477,18 @@
     ((Proc pid m s c pages dev st)
       (match (dma_plan dev (length fs))
         ((DmaRefused code) (ShareRefused mem q (if (eq code (err_too_big)) (err_too_big) (err_fault))))
-        ((DmaAt va after) (map_shared mem (Proc pid m s c pages after st) va va fs))))))
+        ((DmaAt va after rest) (map_shared mem (Proc pid m s c pages rest st) va va fs))))))
 
 ; The rest of proc_map_shared, from page va: each of fs mapped there in
-; turn and counted in mem, or err_fault at the first the host cannot map.
+; turn and counted in mem, or err_fault at the first the host cannot map,
+; the pages from there given back.
 (def map_shared ((mem Mem) (q Proc) (first int) (va int) (fs (list int))) Shared
   (if (is_empty fs)
       (Shared mem q first)
       (match q
         ((Proc pid m s c pages dev st)
           (if (lt (space_map s va (head fs) 1) 0)
-              (ShareRefused mem q (err_fault))
+              (ShareRefused mem (Proc pid m s c pages (dev_give dev va (mul (length fs) (page_size))) st) (err_fault))
               (map_shared (mem_share mem (head fs)) (Proc pid m s c (map_put pages va (head fs)) dev st)
                           first (add va (page_size)) (tail fs)))))))
 
@@ -508,15 +510,15 @@
               (Unmapped m2 (Proc pid m s c (map_remove pages va) dev st)))))))))
 
 ; p without its n DMA or shared pages from page va, which dma_frames has
-; found are all p's. If they were the last p's device pages were given
-; to, its next free device page is va again, so a process that maps and
-; unmaps in turn reuses the same pages rather than running out.
+; found are all p's, and with them free device pages again, in whatever
+; order they were given, so a process that maps and unmaps reuses its
+; pages rather than running out.
 (def proc_unmap ((mem Mem) (p Proc) (va int) (n int)) Unmapped
   (match (unmap_range mem p va n)
     ((Unmapped m2 q)
       (match q
         ((Proc pid m s c pages dev st)
-          (Unmapped m2 (Proc pid m s c pages (if (eq dev (add va (mul n (page_size)))) va dev) st)))))))
+          (Unmapped m2 (Proc pid m s c pages (dev_give dev va (mul n (page_size))) st)))))))
 
 ; The rest of proc_unmap: each of the n pages from va taken back that p
 ; has mapped, the others passed over.
@@ -545,7 +547,8 @@
   (if (is_empty fs) acc (set_of (tail fs) (map_put acc (head fs) true))))
 
 ; The rest of proc_revoke, through q's pages vas: each at its device
-; pages whose frame is in fs taken back, n counting them.
+; pages whose frame is in fs taken back, and free for q again, n
+; counting them.
 (def revoke_pages ((mem Mem) (q Proc) (fs (Map int bool)) (vas (list int)) (n int)) Revoked
   (if (is_empty vas)
       (Revoked mem q n)
@@ -555,8 +558,12 @@
           ((Some f)
             (if (if (in_device_area va) (map_has fs f) false)
                 (match (unmap_shared mem q va f)
-                  ((Unmapped m2 q2) (revoke_pages m2 q2 fs (tail vas) (add n 1))))
+                  ((Unmapped m2 q2) (revoke_pages m2 (proc_give_page q2 va) fs (tail vas) (add n 1))))
                 (revoke_pages mem q fs (tail vas) n)))))))
+
+; p with its device page va free again.
+(def proc_give_page ((p Proc) (va int)) Proc
+  (match p ((Proc pid m s c pages dev st) (Proc pid m s c pages (dev_give dev va (page_size)) st))))
 
 ; p answered with where a device reaches the DMA page holding va, or
 ; err_no_port if it has none there.

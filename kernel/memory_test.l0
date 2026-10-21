@@ -116,41 +116,178 @@
   (match p ((PlanMap ps) false) ((PlanBad) true)))
 
 (def test_region_plan () int
-  (match (region_plan (stack_top) 151060496 4)        ; 0x09010010
-    ((RegionAt va next addr)
+  (match (region_plan (dev_pages_new) 151060496 4)        ; 0x09010010
+    ((RegionAt va rest addr)
       (add (check_int "va" va (stack_top))
-           (add (check_int "next" next (add (stack_top) 4096))
+           (add (check_int "top" (dev_top rest) (add (stack_top) 4096))
                 (check_int "addr" addr (add (stack_top) 16)))))
     ((RegionRefused code) (fail_because "region" (digits code)))))
 
 (def test_region_straddles () int
-  (match (region_plan (stack_top) 4095 2)
-    ((RegionAt va next addr) (check_int "two pages" (sub next va) 8192))
+  (match (region_plan (dev_pages_new) 4095 2)
+    ((RegionAt va rest addr) (check_int "two pages" (sub (dev_top rest) va) 8192))
     ((RegionRefused code) (fail_because "region" (digits code)))))
 
+; A pool whose top is the last page below user_limit, and none free.
+(def pool_last () DevPages (DevPages (sub (user_limit) 4096) (nil DevRun)))
+
 (def test_region_refused () int
-  (add (check_int "empty" (refused (region_plan (stack_top) 0 0)) -3)
-       (add (check_int "negative base" (refused (region_plan (stack_top) -4096 16)) -3)
-            (check_int "out of room" (refused (region_plan (sub (user_limit) 4096) 0 8192)) -5))))
+  (add (check_int "empty" (refused (region_plan (dev_pages_new) 0 0)) -3)
+       (add (check_int "negative base" (refused (region_plan (dev_pages_new) -4096 16)) -3)
+            (check_int "out of room" (refused (region_plan (pool_last) 0 8192)) -5))))
 
 (def test_dma_plan () int
-  (match (dma_plan (stack_top) 3)
-    ((DmaAt va after)
+  (match (dma_plan (dev_pages_new) 3)
+    ((DmaAt va after rest)
       (add (check_int "va" va (stack_top))
-           (check_int "after" after (add (stack_top) 12288))))
+           (add (check_int "after" after (add (stack_top) 12288))
+                (check_int "top" (dev_top rest) after))))
     ((DmaRefused code) (fail_because "dma" (digits code)))))
 
 (def dma_refused ((p DmaPlan)) int
-  (match p ((DmaAt va after) 0) ((DmaRefused code) code)))
+  (match p ((DmaAt va after rest) 0) ((DmaRefused code) code)))
 
 (def test_dma_plan_refused () int
-  (add (check_int "none" (dma_refused (dma_plan (stack_top) 0)) -4)
-       (add (check_int "over the limit" (dma_refused (dma_plan (stack_top) 16385)) -4)
-            (add (check_int "at the limit" (dma_refused (dma_plan (stack_top) 16384)) 0)
-                 (check_int "out of room" (dma_refused (dma_plan (sub (user_limit) 4096) 2)) -5)))))
+  (add (check_int "none" (dma_refused (dma_plan (dev_pages_new) 0)) -4)
+       (add (check_int "over the limit" (dma_refused (dma_plan (dev_pages_new) 16385)) -4)
+            (add (check_int "at the limit" (dma_refused (dma_plan (dev_pages_new) 16384)) 0)
+                 (check_int "out of room" (dma_refused (dma_plan (pool_last) 2)) -5)))))
 
 (def refused ((p RegionPlan)) int
-  (match p ((RegionAt va next addr) 0) ((RegionRefused code) code)))
+  (match p ((RegionAt va rest addr) 0) ((RegionRefused code) code)))
+
+; ------------------------------------------------------------ device pages
+
+; Device page i, from stack_top, and i pages' bytes.
+(def dp ((i int)) int (add (stack_top) (mul i 4096)))
+(def pgs ((i int)) int (mul i 4096))
+
+; pool as text, in pages from stack_top: its top, then each free run.
+(def pool_show ((pool DevPages)) (list int)
+  (match pool
+    ((DevPages top runs) (append (digits (div (sub top (stack_top)) 4096)) (runs_show runs)))))
+
+(def runs_show ((runs (list DevRun))) (list int)
+  (if (is_empty runs)
+      ""
+      (match (head runs)
+        ((DevRun from to)
+          (append " " (append (digits (div (sub from (stack_top)) 4096))
+                              (append "-" (append (digits (div (sub to (stack_top)) 4096)) (runs_show (tail runs))))))))))
+
+; span bytes taken from pool: where, or -1.
+(def taken_at ((t DevTake)) int (match t ((DevTaken va rest) va) ((DevFull) -1)))
+
+; The pool after span bytes are taken, or pool itself if they are not.
+(def taken_pool ((pool DevPages) (span int)) DevPages
+  (match (dev_take pool span) ((DevTaken va rest) rest) ((DevFull) pool)))
+
+; Pages 0-2, 2-5 and 5-6 given, as three dma_allocs of 2, 3 and 1.
+(def three () DevPages (taken_pool (taken_pool (taken_pool (dev_pages_new) (pgs 2)) (pgs 3)) (pgs 1)))
+
+(def test_dev_take_new () int
+  (add (check_int "at the first device page" (taken_at (dev_take (dev_pages_new) (pgs 2))) (dp 0))
+       (check_str "three given" (pool_show (three)) "6")))
+
+; The first given up, out of order: a run below top, and given again.
+(def test_dev_give_out_of_order () int
+  (let p (dev_give (three) (dp 0) (pgs 2))
+    (add (check_str "a run" (pool_show p) "6 0-2")
+         (add (check_int "given again" (taken_at (dev_take p (pgs 2))) (dp 0))
+              (check_str "and gone" (pool_show (taken_pool p (pgs 2))) "6")))))
+
+; Given up in the middle and then below: one run, joined.
+(def test_dev_give_joins () int
+  (check_str "joined" (pool_show (dev_give (dev_give (three) (dp 2) (pgs 3)) (dp 0) (pgs 2))) "6 0-5"))
+
+; The last given back lowers top through every run it reaches.
+(def test_dev_give_lowers_top () int
+  (let p (dev_give (dev_give (three) (dp 0) (pgs 2)) (dp 2) (pgs 3))
+    (add (check_str "the last, after the others" (pool_show (dev_give p (dp 5) (pgs 1))) "0")
+         (check_str "the last alone" (pool_show (dev_give (three) (dp 5) (pgs 1))) "5"))))
+
+; Runs apart, highest first; a take goes to the first that holds it,
+; else to top.
+(def test_dev_take_fits () int
+  (let p (dev_give (dev_give (three) (dp 0) (pgs 2)) (dp 3) (pgs 1))
+    (add (check_str "apart" (pool_show p) "6 3-4 0-2")
+         (add (check_int "two pages, the lower run" (taken_at (dev_take p (pgs 2))) (dp 0))
+              (add (check_int "one, the higher" (taken_at (dev_take p (pgs 1))) (dp 3))
+                   (check_int "three, at top" (taken_at (dev_take p (pgs 3))) (dp 6)))))))
+
+; Part of a run taken leaves the rest of it.
+(def test_dev_take_part () int
+  (check_str "the rest" (pool_show (taken_pool (dev_give (three) (dp 0) (pgs 2)) (pgs 1))) "6 1-2"))
+
+; A run too small and no room above top: full.
+(def test_dev_full () int
+  (check_int "full" (taken_at (dev_take (dev_give (pool_last) (dp 0) (pgs 1)) (pgs 2))) -1))
+
+; Pages given up out of order are given again, where once only the last
+; given were. 96 takes of 1 MB fill 96 MB, pages 0 to 24576; giving back
+; every other one, from the first, leaves 48 holes below top, as none
+; reaches it; a 1 MB take goes to the highest, the 95th's place, page
+; 94 * 256; and 48 of them fill every hole, leaving top where it was.
+(def test_dev_holes_reused () int
+  (let filled (take_n (dev_pages_new) 96 (pgs 256))
+    (let holed (give_every_other filled 0 96 (pgs 256))
+      (add (check_int "48 runs" (dev_run_count holed) 48)
+           (add (check_int "a hole" (taken_at (dev_take holed (pgs 256))) (dp (mul 94 256)))
+                (check_str "holes filled" (pool_show (take_n holed 48 (pgs 256))) (digits (mul 96 256))))))))
+
+; pool after n takes of span bytes.
+(def take_n ((pool DevPages) (n int) (span int)) DevPages
+  (if (eq n 0) pool (take_n (taken_pool pool span) (sub n 1) span)))
+
+; pool with the even ones of n runs of span bytes from stack_top, from
+; the ith, given back.
+(def give_every_other ((pool DevPages) (i int) (n int) (span int)) DevPages
+  (if (ge i n)
+      pool
+      (give_every_other (dev_give pool (add (stack_top) (mul i span)) span) (add i 2) n span)))
+
+; ---------------------------------------------- device pages, at random
+
+; A few hundred seeded takes and gives against the obvious version, a
+; set of pages: every take lands on pages none holds and below
+; user_limit, and once all is given back the pool is new again.
+(def test_dev_random () int
+  (dev_walk (dev_pages_new) (nil DevRun) 12345 400 0))
+
+; The walk: held, the ranges taken and not given; s the seed; left steps
+; to go; bad the count of failures so far.
+(def dev_walk ((pool DevPages) (held (list DevRun)) (s int) (left int) (bad int)) int
+  (if (eq left 0)
+      (add bad (check_str "all given back" (pool_show (give_all pool held)) "0"))
+      (let s1 (rand_next s)
+        (if (if (is_empty held) true (lt (rand_below s1 3) 2))
+            (let span (pgs (add 1 (rand_below (rand_next s1) 8)))
+              (match (dev_take pool span)
+                ((DevFull) (dev_walk pool held (rand_next s1) (sub left 1) (add bad 1)))
+                ((DevTaken va rest)
+                  (dev_walk rest (cons (DevRun va (add va span)) held) (rand_next s1) (sub left 1)
+                            (add bad (check_bool "apart" (overlaps held va (add va span)) false))))))
+            (let i (rand_below (rand_next s1) (length held))
+              (match (nth held i)
+                ((DevRun from to)
+                  (dev_walk (dev_give pool from (sub to from)) (drop_nth held i) (rand_next s1) (sub left 1) bad))))))))
+
+; Whether any of held shares a page with from up to to.
+(def overlaps ((held (list DevRun)) (from int) (to int)) bool
+  (if (is_empty held)
+      false
+      (match (head held)
+        ((DevRun a b) (if (if (lt a to) (lt from b) false) true (overlaps (tail held) from to))))))
+
+; pool with every one of held given back.
+(def give_all ((pool DevPages) (held (list DevRun))) DevPages
+  (if (is_empty held)
+      pool
+      (match (head held) ((DevRun a b) (give_all (dev_give pool a (sub b a)) (tail held))))))
+
+; xs without its ith.
+(def drop_nth ((xs (list DevRun)) (i int)) (list DevRun)
+  (if (eq i 0) (tail xs) (cons (head xs) (drop_nth (tail xs) (sub i 1)))))
 
 ; ----------------------------------------------------------------- freeing
 
