@@ -746,7 +746,7 @@
     ((CReceive port buf max wait) (do_receive k p port buf max wait))
     ((CRegister port buf len) (do_register k p port buf len))
     ((CLookup buf len) (do_lookup k p buf len))
-    ((CSpawn m) (match (spawn k m (proc_pid p) ((None (list (list int)))) (proc_tty_port p)) ((Spawned k2 pid) (resume_with k2 p pid))))
+    ((CSpawn m) (match (spawn k m (proc_pid p) ((None (list (list int)))) (proc_tty_port p)) ((Spawned k2 pid) (resume_with (k_child_cwd k2 pid (proc_cwd p)) p pid))))
     ((CSpawnArgs m buf len) (do_spawn_args k p m buf len))
     ((CProcInfo pid buf max) (do_proc_info k p pid buf max))
     ((CDmaAlloc n) (if (proc_dev k p) (k_dma_alloc k p n) (resume_with k p (err_denied))))
@@ -765,6 +765,8 @@
     ((CMemInfo buf max) (give_record k p (k_mem_record k p) buf max))
     ((CRootSwitch buf len) (do_root_switch k p buf len))
     ((CSpawnImage buf len) (do_spawn_image k p buf len))
+    ((CChdir buf len) (do_chdir k p buf len))
+    ((CGetCwd buf max) (give_record k p (proc_cwd p) buf max))
     ((CWait pid) (do_wait k p pid))
     ((CSleepUntil t) (do_sleep k p t))
     ((CIrqBind irq port) (do_irq_bind k p irq port))
@@ -834,13 +836,19 @@
 ; path_limit, or not p's to read.
 (data PathGot (PathGot Proc (list int)) (PathBad Proc))
 
-; The path of len bytes p gives at buf.
+; The path of len bytes p gives at buf, made absolute from p's current
+; directory, with its . and .. taken out: PathBad if it is over path_limit
+; once it is.
 (def path_from ((p Proc) (buf int) (len int)) PathGot
   (if (if (lt len 0) true (gt len (path_limit)))
       (PathBad p)
       (match (proc_copy_out p buf len)
         ((CopyOutBad q) (PathBad q))
-        ((CopiedOut q b) (PathGot q (normal_path (bytes_to_list b)))))))
+        ((CopiedOut q b) (path_resolved q (path_resolve (proc_cwd q) (bytes_to_list b)))))))
+
+; q's path, which path_resolve gave, unless it is over path_limit.
+(def path_resolved ((q Proc) (path (list int))) PathGot
+  (if (gt (length path) (path_limit)) (PathBad q) (PathGot q path)))
 
 ; Opens the file at path, by where the mount table puts it: the
 ; initramfs's (open_root), a volume's, whose server is asked, or none.
@@ -890,6 +898,30 @@
       true
       (let e (entry_index (k_entries k) path)
         (if (lt e 0) false (entry_is_dir (k_entry k e))))))
+
+; Makes the directory at the len bytes at buf, from p's current directory,
+; its new one: 0, or -3 if there is none, -9 if it is a file, -5 if the
+; path is not p's to give or is over path_limit. The initramfs's, /Volumes
+; and a volume's root the kernel knows; anything in a volume its server
+; says, with a stat, p waiting for it.
+(def do_chdir ((k Kernel) (p Proc) (buf int) (len int)) Step
+  (match (path_from p buf len)
+    ((PathBad q) (resume_with k q -5))
+    ((PathGot q path)
+      (if (eq path "/")
+          (resume_with k (proc_set_cwd q path) 0)
+          (match (mount_where (ipc_mounts (k_ipc k)) path)
+            ((InRoot) (chdir_root k q path))
+            ((InVolumes) (resume_with k (proc_set_cwd q path) 0))
+            ((InNothing direct) (resume_with k q -3))
+            ((InServer port asked) (ask_fs k q port (fs_op_cd) buf len (append "stat " asked))))))))
+
+; The rest of do_chdir for path in the initramfs: its current directory if
+; it is one there, else -9 for a file, -3 for nothing.
+(def chdir_root ((k Kernel) (q Proc) (path (list int))) Step
+  (if (has_dir k path)
+      (resume_with k (proc_set_cwd q path) 0)
+      (resume_with k q (if (lt (entry_index (k_entries k) path) 0) -3 -9))))
 
 ; The directory path is in: "/bin" for "/bin/sh", "/" for "/sh".
 (def parent_path ((path (list int))) (list int)
@@ -979,12 +1011,14 @@
 
 ; What a process waiting for a file server does with its answer: opens a
 ; stream on the handle, takes a read's bytes, takes a write's count,
-; closes the stream its buf names, or takes the word.
+; closes the stream its buf names, takes the word, or makes the directory
+; a stat says is one its current directory.
 (def fs_op_open () int 1)
 (def fs_op_read () int 2)
 (def fs_op_write () int 3)
 (def fs_op_close () int 4)
 (def fs_op_word () int 5)
+(def fs_op_cd () int 6)       ; its buf and n the path's, which a directory makes the new current one
 
 ; The most bytes a read reply carries: a message, less its word.
 (def fs_chunk () int (sub (max_message) 4))
@@ -1063,7 +1097,20 @@
               (fs_read_in q buf n w b)
               (if (eq op (fs_op_write))
                   (proc_answer q (if (if (lt w 1) true (gt w n)) -5 w))
-                  (proc_answer q w))))))
+                  (if (eq op (fs_op_cd))
+                      (fs_cd_in q buf n b)
+                      (proc_answer q w)))))))
+
+; q answered for a chdir whose path is the n bytes at buf, the server's
+; stat reply b saying what is there: the path q's current directory if it
+; is a directory, else -9; -5 if q may not give the path any more.
+(def fs_cd_in ((q Proc) (buf int) (n int) (b bytes)) Proc
+  (match (path_from q buf n)
+    ((PathBad r) (proc_answer r -5))
+    ((PathGot r path)
+      (if (eq (bytes_range b 4 (bytes_len b)) "dir")
+          (proc_answer (proc_set_cwd r path) 0)
+          (proc_answer r -9)))))
 
 ; q given the w bytes of a read's reply b after its word, at most n, at
 ; buf: how many, or -5 if q may not take them there.
@@ -1179,7 +1226,19 @@
 (def spawned_image ((k Kernel) (p Proc) (b bytes) (path (list int)) (args (list (list int))) (start int)) Step
   (match (spawn_from k -1 (proc_pid p) args (proc_tty_port p) b start (bytes_len b))
     ((Spawned k2 pid)
-      (resume_with (if (gt pid 0) (k_name_put k2 pid path) k2) p pid))))
+      (resume_with (k_child_cwd (if (gt pid 0) (k_name_put k2 pid path) k2) pid (proc_cwd p)) p pid))))
+
+; k with the new process pid's current directory cwd, its parent's; as
+; it was if pid is an error, not a process.
+(def k_child_cwd ((k Kernel) (pid int) (cwd (list int))) Kernel
+  (if (lt pid 1)
+      k
+      (match k
+        ((Kernel slots ready ipc ss irqs boot next mem)
+          (match (array_get slots (slot_of pid))
+            ((Live c) (put_slot k pid (Live (proc_set_cwd c cwd))))
+            ((Free) k)
+            ((Dead st) k))))))
 
 ; k knowing pid's image's path.
 (def k_name_put ((k Kernel) (pid int) (path (list int))) Kernel
@@ -1325,7 +1384,7 @@
                 ((None) (resume_with k q (err_fault)))
                 ((Some args)
                   (match (spawn k m (proc_pid q) (Some args) (proc_tty_port q))
-                    ((Spawned k2 pid) (resume_with k2 q pid))))))))))
+                    ((Spawned k2 pid) (resume_with (k_child_cwd k2 pid (proc_cwd q)) q pid))))))))))
 
 ; pid's record, then its program's path, copied to buf, as much as max
 ; holds: its length, or err_no_port if pid was never used, err_too_big

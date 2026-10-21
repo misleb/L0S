@@ -8,6 +8,12 @@
 ; though the disk has none. A rescan reads the disk's volumes again, and
 ; mounts any new label.
 ;
+; Started as fs ram [MB], it serves no disk but one volume, tmp, of MB
+; megabytes (32 unless given), in its own memory, empty, at /Volumes/tmp,
+; and registers as tmpfs, not fs: a second server beside the disk's, or
+; on a board with no disk. It has no table: partition, mkfs and rescan
+; are refused, and nothing in it outlives it.
+;
 ; Each volume's metadata is kept in memory and written back, after the
 ; data, whenever it changes: only the sectors that changed. Between a
 ; write's data and its metadata the disk is flushed, so that its cache
@@ -29,12 +35,18 @@
 ; Where the sectors are: the disk, through a buffer of a cluster shared
 ; with its driver; or memory, by sector, for tests, with its sectors, how
 ; many reads and writes it has been asked, as the disk would, and how
-; many flushes.
-(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int int int))
+; many flushes. Or the memory of a RAM file system, started as fs ram:
+; the sectors written, as bytes, those not written being zeros, and how
+; many sectors there are.
+(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int int int) (StoreRam (Map int bytes) int))
 
 ; How many sectors the store has: the disk's, or the memory's.
 (def store_sectors ((s Store)) int
-  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n r fl) n)))
+  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n r fl) n) ((StoreRam m n) n)))
+
+; Whether s is a RAM file system's, which has no partition table.
+(def store_is_ram ((s Store)) bool
+  (match s ((StoreDisk d b) false) ((StoreMem m n r fl) false) ((StoreRam m n) true)))
 
 ; Sectors read, and the store after; or why not.
 (data Got (Got Store (list int)) (GotNot Store (list int)))
@@ -43,6 +55,7 @@
 (def store_read ((s Store) (sector int) (count int)) Got
   (match s
     ((StoreMem m n r fl) (Got (StoreMem m n (add r 1) fl) (mem_sectors m sector count (nil int))))
+    ((StoreRam m n) (Got s (ram_sectors m sector count (nil int))))
     ((StoreDisk d b)
       (let why (disk_read d b sector count)
         (if (is_empty why)
@@ -57,6 +70,17 @@
       (mem_sectors m sector (sub count 1)
                    (append (match (map_get m (add sector (sub count 1)))
                              ((Some bs) bs)
+                             ((None) (zeros (vol_sector_size))))
+                           acc))))
+
+; Sectors count to 1 from sector of m, a RAM file system's, onto acc, as
+; mem_sectors does, as bytes in a list.
+(def ram_sectors ((m (Map int bytes)) (sector int) (count int) (acc (list int))) (list int)
+  (if (le count 0)
+      acc
+      (ram_sectors m sector (sub count 1)
+                   (append (match (map_get m (add sector (sub count 1)))
+                             ((Some b) (bytes_to_list b))
                              ((None) (zeros (vol_sector_size))))
                            acc))))
 
@@ -79,6 +103,7 @@
 (def store_write ((s Store) (sector int) (bs (list int))) Put
   (match s
     ((StoreMem m n r fl) (Put (StoreMem (mem_put m sector bs) n (add r 1) fl)))
+    ((StoreRam m n) (Put (StoreRam (ram_put m sector bs) n)))
     ((StoreDisk d b)
       (let p (disk_put b bs)
         (let why (disk_write d b sector (div (length bs) (vol_sector_size)))
@@ -89,6 +114,7 @@
 (def store_flush ((s Store)) Put
   (match s
     ((StoreMem m n r fl) (Put (StoreMem m n r (add fl 1))))
+    ((StoreRam m n) (Put s))
     ((StoreDisk d b)
       (let why (disk_flush d)
         (if (is_empty why) (Put s) (PutNot s why))))))
@@ -97,6 +123,12 @@
   (if (is_empty bs)
       m
       (mem_put (map_put m sector (take bs (vol_sector_size))) (add sector 1) (drop_n bs (vol_sector_size)))))
+
+; bs, whole sectors, written from sector into m, a RAM file system's.
+(def ram_put ((m (Map int bytes)) (sector int) (bs (list int))) (Map int bytes)
+  (if (is_empty bs)
+      m
+      (ram_put (map_put m sector (bytes_from_list (take bs (vol_sector_size)))) (add sector 1) (drop_n bs (vol_sector_size)))))
 
 ; bs, whole sectors, written from sector, a cluster's at a time.
 (def store_write_all ((s Store) (sector int) (bs (list int))) Put
@@ -366,6 +398,12 @@
     (obey_volumes f op ws))))))))
 
 (def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
+  (if (if (store_is_ram (fs_store f)) (any_eq op (split_spaces "partition mkfs rescan")) false)
+      (Answered f -5 "a RAM file system has no partition table")
+      (obey_volumes_disk f op ws)))
+
+; The same on a disk.
+(def obey_volumes_disk ((f Fs) (op (list int)) (ws (list (list int)))) Answered
   (if (eq op "partition") (obey_partition f ws)
   (if (eq op "mkfs") (if (eq (length ws) 2) (do_mkfs f (head ws) (head (tail ws))) (word f -5))
   (obey_volume f op ws))))
@@ -1062,11 +1100,52 @@
 
 ; ---------------------------------------------------------------- starting
 
-; The server: the disk, its volumes found and mounted, and served.
+; The server: the disk, its volumes found and mounted, and served; or,
+; given the argument ram, a file system in memory.
 (def fs () int
+  (if (ram_requested (args))
+      (fs_ram (ram_megabytes (args)))
+      (fs_disk)))
+
+; The disk's volumes, found, mounted and served.
+(def fs_disk () int
   (match (disk_open)
     ((NoDisk why) (nothing_to_serve why))
     ((Disk port rp pid n) (fs_on (Disk port rp pid n) (disk_buffer (Disk port rp pid n) (vol_cluster_sectors))))))
+
+; ---------------------------------------------------------- RAM file system
+
+; Whether the arguments ask for a file system in memory, a first of ram.
+(def ram_requested ((argv (list (list int)))) bool
+  (if (is_empty argv) false (eq (head argv) "ram")))
+
+; The megabytes the RAM file system is, the second argument, 32 unless
+; it gives a number from 1 to 255, a volume holding at most 65534
+; clusters of 4 KB.
+(def ram_megabytes ((argv (list (list int)))) int
+  (if (if (gt (length argv) 1) (is_number (nth argv 1)) false)
+      (max 1 (min 255 (int_prefix (nth argv 1) 0)))
+      32))
+
+; The UUID the RAM file system's volume is mounted with, which boot's
+; root=tmpfs looks for; it is no partition's.
+(def ram_uuid () (list int) "00000000-0000-7000-8000-000000000000")
+
+; The label the RAM file system is mounted at, /Volumes/tmp.
+(def ram_label () (list int) "tmp")
+
+; A volume of mb megabytes, empty, in memory, mounted at /Volumes/tmp and
+; served, registered as tmpfs: it has no disk, no partition table, and
+; nothing of it survives. Nothing in it is written to a disk.
+(def fs_ram ((mb int)) int
+  (let sectors (mul mb 2048)
+    (let l (vol_layout sectors)
+      (if (not (vol_layout_ok l))
+          (complain "the RAM file system is too small")
+          (let v (vol_new (ram_label) l)
+            (match (store_write_all (StoreRam ((MapEmpty int bytes)) sectors) 0 (vol_meta v))
+              ((PutNot s why) (complain why))
+              ((Put s) (found_as (Loaded s (cons (FsVol 0 (ram_uuid) v) (nil FsVol))) "tmpfs"))))))))
 
 (def fs_on ((d Disk) (b DiskBuf)) int
   (match b
@@ -1199,11 +1278,15 @@
 ; The volumes loaded mounted and served, and fs registered, though there
 ; be none: a rescan serves any made later.
 (def found ((loaded Loaded)) int
+  (found_as loaded "fs"))
+
+; The same, registered as name.
+(def found_as ((loaded Loaded) (name (list int))) int
   (match loaded
     ((Loaded s vols)
       (let port (port_new)
         (let m (mount_all port vols)
-          (let r (name_register_or_why port "fs")
+          (let r (name_register_or_why port name)
             (if (is_empty r) (serve (fs_new s port (vols_array vols)) port) (complain r))))))))
 
 ; Each volume mounted from port, with its partition's UUID; one that

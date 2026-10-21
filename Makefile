@@ -211,7 +211,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: all check test test-virt e2e images root initramfs screen-initramfs vt-initramfs disks-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
+.PHONY: all check test test-virt e2e images root initramfs screen-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
 
 all: check test test-virt e2e
 
@@ -406,7 +406,15 @@ disks-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/disks-etc)
 	tools/mkinitramfs $(BUILD)/disks.cpio $(BUILD)/disks-etc $(ROOT)
 
-e2e: images root initramfs screen-initramfs vt-initramfs disks-initramfs
+# What tests/launcher-install.sh boots, and copies onto its disk's System
+# volume to boot from: tests/launcher-install/etc, boot and the disk's
+# driver and file server beside the compositor.
+launcher-install-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/launcher-install-etc && cp -R tests/launcher-install/etc $(BUILD)/launcher-install-etc
+	$(call stage_etc,$(BUILD)/launcher-install-etc)
+	tools/mkinitramfs $(BUILD)/launcher-install.cpio $(BUILD)/launcher-install-etc $(ROOT)
+
+e2e: images root initramfs screen-initramfs vt-initramfs disks-initramfs launcher-install-initramfs
 	tests/e2e.sh
 	tests/gpu-screen.sh
 	tests/hidpi.sh
@@ -418,6 +426,7 @@ e2e: images root initramfs screen-initramfs vt-initramfs disks-initramfs
 	tests/disks-create.sh
 	tests/partitions.sh
 	tests/launcher.sh
+	tests/launcher-install.sh
 
 boot: images root $(DISK)
 	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(ROOT)

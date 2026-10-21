@@ -193,11 +193,19 @@ one running in the background:
   along as an argument.
 
 Any other word must be one of the shell's own commands (`help`, `ps`,
-`wait`, `kill`, `sleep`, `echo`, `exit`, and those on files below), so a
+`wait`, `kill`, `sleep`, `echo`, `exit`, `cd`, `pwd`, and those on files
+below), so a
 program can never be mistaken for a command. Here `echo` is both a
 command and a program: the command prints, and `run echo &` starts the
 server; `cat` is too. A bare program name gets a hint: `sh: no command
 hello; to run the program, type run hello`.
+
+`cd [DIR]` makes DIR the shell's current directory, `/` if none is given,
+and `pwd` says it. A path that does not start with `/` is from it, for
+these commands, `run` of a name with a `/`, and every program the shell
+runs, which inherits it; `.` and `..` are taken out. `ls` with no path
+lists the current directory, every file of `/` and each volume when that
+is `/`.
 
 The commands on files are the shell's own, as busybox's are. They make
 the ordinary file calls, so they work on any file: the initramfs's,
@@ -206,7 +214,7 @@ which refuse every change (`permission denied`), and the disk's, under
 
 | Command | Does |
 |---|---|
-| `ls [PATH ...]` | with no path, every file of `/`, then of each volume; else each directory's names (`/`, `/bin`, `/sbin`, `/Applications`, `/Applications/Terminal.app`, `/Volumes`, `/Volumes/data`, `/Volumes/data/a/b`), a directory's with a final `/`, or a file's path |
+| `ls [PATH ...]` | with no path, every file of `/`, then of each volume, or, if the current directory is not `/`, its names; else each directory's names (`/`, `/bin`, `/sbin`, `/Applications`, `/Applications/Terminal.app`, `/Volumes`, `/Volumes/data`, `/Volumes/data/a/b`), a directory's with a final `/`, or a file's path |
 | `cat FILE ...` | shows the files |
 | `write FILE WORDS ...` | makes FILE hold the words, spaced, and a newline |
 | `append FILE WORDS ...` | adds that line to FILE's end, making it if need be |
@@ -429,7 +437,8 @@ the next one started.
 A process's terminal is its standard input, output and error. `sh TTY`
 finds the terminal named TTY, `console` unless given, sets it as its own
 with `tty_set`, and so as that of every program it starts, since a child
-gets its parent's terminal. The kernel then does the rest:
+gets its parent's terminal (and its current directory, whichever call
+starts it). The kernel then does the rest:
 
 - A write to stream 1 or 2 is sent to the terminal as a `w`, at most 4091
   bytes a message. If the terminal's queue is full, the writer waits until
@@ -513,6 +522,7 @@ makes every place, rectangle, top row and radius the screen's on the way.
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
 | `windows` | a line a window, front first, then `pointer X Y` |
+| `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
 draws), buffer 0; the pointer's arrow (Adwaita's), 1; the top bar, 2;
@@ -528,8 +538,11 @@ The top bar is GNOME Shell's: 32 rows across the screen, black, with
 white, or its title if its client is no app, and the date and time,
 bold, in its middle, as GNOME shows them by default (`Oct 15  22:42`,
 on a 24-hour clock). An app's name is its bundle's manifest's: `wm`
-reads every manifest in `/Applications` as it starts, and names a
-window by where its client's program is, from `proc_info`. `wm`
+reads every manifest in `/Applications` as it starts, and again each
+time the launcher opens if `/` is a volume and the bundles in
+`/Applications` are not those it knows, and names a window by where its
+client's program is, from `proc_info`; the manifest of a program it has
+not scanned yet is read at that moment. `wm`
 repaints the bar when the front window or its title changes, when the
 launcher opens or closes, and when the clock says a minute has begun.
 
@@ -538,13 +551,18 @@ Shell's grid of apps. A click on Applications, acting on its release
 over it, lights the button with a pill and shows a page under the bar,
 `242424`, of each app's 48×48 icon with its name under it, in cells
 136×104, in rows from 64 below the bar, in the middle of the screen, in
-the archive's order. A click on an app closes the page and starts the
+the archive's order, or, once `/` is a volume, the name order its file
+server lists them in. A click on an app closes the page and starts the
 app's program, which `wm` watches, as it does any client, so its slot
 is free once it exits; it gets the inittab's arguments for it, and
 `wm`'s terminal, the serial line. Esc, a click on the page, or
 Applications again closes it. While it is open no window is told of
 the pointer, the wheel or the keys. Its page is one buffer, painted
-once, as the apps never change while the system runs. The clock is
+when `wm` starts and again when opening it finds a changed set of
+bundles: the apps of the initramfs never change, but an app copied into
+`/Applications` on a system volume, a bundle `mkdir`, `cp`, `write` and
+`append` make, is there the next time it opens (`tests/launcher-install.sh`).
+The clock is
 `rtc clock` ([user/sbin/rtc](user/sbin/rtc/rtc.l0)), which serves `clock`
 ([user/lib/proto/clock.l0](user/lib/proto/clock.l0)): `listen` replies `time S`, S
 the PL031's count of seconds, and sends `time S` again at the start of
@@ -1294,6 +1312,25 @@ To make a system volume:
   and says its UUID for `root=`. It copies from the initramfs, or from
   another system volume, never onto the one `/` is.
 
+**With no disk, `/` can be a RAM file system.** `fs ram [MB]`, a second
+`fs` or the only one, serves no disk but one volume, `tmp`, in its own
+memory (32 MB unless given, at most 255), mounted at `/Volumes/tmp` with
+the UUID `00000000-0000-7000-8000-000000000000` and registered as
+`tmpfs`, not `fs`. It has no partition table, so `partition`, `mkfs` and
+`rescan` are refused (-5), and nothing in it outlives it: a board
+that has a disk too still starts the disk's `fs` as before. A program can
+use it as any volume, as the shell does (`cp /bin/hello /Volumes/tmp/bin`,
+`run /Volumes/tmp/bin/hello`). Booted with `root=tmpfs`, `boot` has
+`install tmp` copy the initramfs onto it, which takes the moments of its
+49 files, and then makes it `/` as for a system volume, so that `/` can be
+written, directories made, and apps installed (see [the
+launcher](#the-desktop)), with no disk on the board. The inittab starts
+`fs ram` beside `boot`, as `tests/e2e/rootboot_tmpfs` does; without it,
+or with the volume missing, `boot` says so and starts the initramfs's own
+`/etc/system`. As for any system volume, the drivers and `fs` are the
+initramfs's, started before the switch, and a program started after it
+never drives a device.
+
 Programs never ask where `/` is: `root_paths` lists it, `program_found`
 finds a program in it, and `spawn_path` starts one, from the initramfs's
 entry or a volume's file, as the shell, `init`, `wm`, `vt` and `boot` do.
@@ -1464,7 +1501,7 @@ volume once `/` is one, sends them to the volume's file server, as
 
 | Call | What the kernel does |
 |---|---|
-| open | modes 1 to 3, else -5. In the initramfs, to read: a new stream (3 and up), or -3 no such file, -8 a directory, -5 if the process has 16 open. To write: -8 a directory, -4 where the directory exists, -9 where it does not. In a volume: a new stream, once its server opens the file. A relative path is taken from `/` |
+| open | modes 1 to 3, else -5. In the initramfs, to read: a new stream (3 and up), or -3 no such file, -8 a directory, -5 if the process has 16 open. To write: -8 a directory, -4 where the directory exists, -9 where it does not. In a volume: a new stream, once its server opens the file. A relative path is taken from the current directory (calls 290, 291), `/` to begin with, and its `.` and `..` taken out; one over 1024 bytes once made absolute is -5 |
 | read | stream 0 reads a line from the process's terminal, if it has one (see Terminals), and otherwise the inittab's `stdin` file, with one cursor for everyone, until the initramfs is given up. Other streams read the file opened on them, from where the process left off, 0 at the end; a volume's at most 4092 bytes a call; one of the initramfs's, once it is given up, reads as at its end |
 | close | 0, or -5 for a stream that isn't open; a volume's file is closed by its server too |
 | rename, remove | in the initramfs, -3 if there's no such file; otherwise -4 (-8 to remove a directory). In a volume, as its server says; between two file systems, -10 |
@@ -1524,6 +1561,8 @@ otherwise as its type's first failure.
 | 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, or not an ELF the kernel starts, -4 the whole over 64 MB of image with the path and arguments, -5 bytes not laid out as `spawn_image_bytes` lays them |
 | 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, those given and those L0's `frame_free_count` says are left, about 765 MB with `-m 2G`, and how many of them are given, each process's own and every shared or DMA page once, however many processes map it; none under another operating system. What is not given is free; the kernel's page tables take from it, so the total moves a little |
 | 289 | `fs_unmount label port` | `Unmounting`: `Unmounted`, `UnmountNotMounted`, `UnmountDenied`, `UnmountBadLabel` | 0, the volume label, which the caller mounted from port, unmounted: `/Volumes/LABEL` is in no volume from then on, and the label free; -1 if the port is not the caller's or mounted no such volume, -6 for the system volume, which is `/` for good, -5 no label |
+| 290 | `chdir path` | `Chdir`: `ChdirDone`, `ChdirNoDir`, `ChdirNotDir`, `ChdirBad` | 0, the directory at path, from the current directory, made the caller's current one, and its children's, as spawn gives them; -3 if there is none, -9 if it is a file, -5 for a path over 1024 bytes or not the caller's to give, or one in a volume whose server has gone. The initramfs's, `/Volumes` and `/` the kernel answers itself; a path in a volume is checked with its server's `stat`, the caller waiting as for any file call |
+| 291 | `getcwd`, `path_abs path` | `(list int)` | the current directory, an absolute path with no final `/`, `/` at the start; `path_abs` is a path made absolute from it, unless it starts with `/` already |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1558,7 +1597,7 @@ every `.l0` in its directory is part of it.
 
 | Program | What it does |
 |---|---|
-| `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; starts `/etc/system`'s programs by path, and exits with the first one's status |
+| `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; given `root=tmpfs`, has `install` fill the RAM file system first; starts `/etc/system`'s programs by path, and exits with the first one's status |
 | `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format` and `unmount`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
@@ -1582,7 +1621,7 @@ every `.l0` in its directory is part of it.
 | `tftp` | a client of `inet`: `tftp HOST FILE [PATH]` fetches FILE over TFTP (RFC 1350), from a host named or dotted, in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
 | `random` | a client of `random`: `random [N]` writes N bytes of the entropy device's, 16 if not given, 1 to 1024, as hex digits and a newline, waiting a second at most for the driver to register; fails, saying why, without one |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `unmount`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
+| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `unmount`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0. `fs ram [MB]` serves no disk but one volume in memory instead (see [Booting from a volume](#booting-from-a-volume)) |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. At scale 2 it lays the desktop out at half the screen's size each way and draws it at the screen's resolution. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
@@ -1638,7 +1677,7 @@ name in a library is taken in every program that links it.
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -1670,7 +1709,8 @@ Each case of `tests/e2e/` is a directory:
   host's loopback, chosen for the boot.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Twenty-three cases type a session through
+`etc`, boots it, and compares; given case names, as `tests/e2e.sh cwd`,
+only those. Twenty-six cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -1715,6 +1755,17 @@ Ctrl-C as a person would:
   not, the removal of one with something in it, and one in the
   initramfs; and runs `hello` copied onto a volume, its copy marked a
   program, and is told a text file copied there is not one;
+- `tmpfs`, with no disk and `fs ram`, writes, reads and lists in
+  `/Volumes/tmp`, makes a directory there, copies `hello` onto it and runs
+  it from there, and formats it;
+- `rootboot_tmpfs`, with `fs ram` and `root=tmpfs`, has `boot` copy the
+  initramfs onto the RAM file system and make it `/`: writes there,
+  makes a directory, `cd`s to it, is refused a format of the system
+  volume, and runs `hello` from the copy;
+- `cwd` has the shell `cd` and `pwd` in the initramfs and on a volume,
+  with `.`, `..` and `//` in the path, is told there is no such
+  directory, or that a file is one, and `ls`, `write`, `cat`, `mv` and a
+  program it runs, `run cat`, start in the directory it is in;
 - `install`, on a disk of 16 MB whose layout gives System a known UUID,
   has `install` copy the initramfs onto it, lists and reads the copy,
   runs `hello` from it, and is refused a volume not mounted and no volume;
@@ -1903,6 +1954,13 @@ it, and so does a click on the page. A click on Terminal starts it: `run
 windows` lists `vt1`'s window, in front, and the top bar names it
 Terminal, a lit pixel of the `T`, where its title, `vt1`, would show none.
 
+[tests/launcher-install.sh](tests/launcher-install.sh) boots a system
+volume (`root=`) with `wm` and no window, opens the launcher with four
+apps, and installs a fifth from the shell, a bundle `Extra.app` of a copy
+of Terminal's program and icon and a manifest `write` and `append` make.
+Opened again, the launcher shows it in the second cell, and a click on it
+starts it, the top bar naming it Extra.
+
 Every boot is killed after a minute by [tools/deadline](tools/deadline),
 since macOS has no `timeout`. `tests/e2e.sh` also builds three programs
 of a few aarch64 instructions each, each an ELF of one code segment it
@@ -1941,10 +1999,19 @@ a bad buffer, and wait on nothing.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
 - **The initramfs is read-only.** Nothing in it can be written, renamed
-  or removed. Booted from it, the apps are fixed at boot: the launcher
-  shows the bundles in `/Applications` as `wm` started, and an app copied
-  to another volume is not one. There is no current directory, so a relative path is taken
-  from `/`. No call lists a directory: the initramfs's are `entry_paths`,
+  or removed. Booted from it alone, the apps are fixed at boot, and `/`
+  cannot be written: a system volume, or `root=tmpfs` on a board with
+  `fs ram` and no disk, makes it writable (a RAM file system is small,
+  32 MB unless `fs ram` is given more, up to 255, and is gone with the
+  board). Once `/` is a
+  volume, the launcher shows the bundles in `/Applications` as of the
+  last time it opened; an app copied to another volume is not one. The
+  current directory is a path, kept as text, so it stays what it is when
+  a volume is made `/`, and it is the program's own: `cd` in the shell
+  is the shell's and every program it then runs. Only `open`, `rename`,
+  `remove` and `chdir` take paths in the kernel; the file server's
+  `list`, `mkdir`, `stat` and `chmod` are asked by programs, which make a
+  relative path absolute themselves (`path_abs`). No call lists a directory: the initramfs's are `entry_paths`,
   which lists everything, and a volume's its server's `list`; `root_paths`
   lists `/` either way, a system volume a directory at a time.
 - **Booting from a volume needs the initramfs still.** The kernel comes

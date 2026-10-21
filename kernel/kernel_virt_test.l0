@@ -314,7 +314,7 @@
 ; standard error.
 
 (def fuzz_calls () (list int)
-  (numbers (split_spaces "1 2 4 5 6 7 8 9 10 11 99 256 257 258 259 261 262 263 267 268 269 270 271 272 273 274 275 276 277 278 279 300")))
+  (numbers (split_spaces "1 2 4 5 6 7 8 9 10 11 99 256 257 258 259 261 262 263 267 268 269 270 271 272 273 274 275 276 277 278 279 290 291 300")))
 
 (def numbers ((ws (list (list int)))) (list int)
   (if (is_empty ws) (nil int) (cons (int_prefix (head ws) 0) (numbers (tail ws)))))
@@ -1336,3 +1336,126 @@
 (def test_elf_malformed_refused () int
   (add (check_int "cut short" (spawned_why (take (elf_code (exit_x0) (nil Part)) 4100)) (err_denied))
        (check_int "only a header" (spawned_why (take (elf_code (exit_x0) (nil Part)) 64)) (err_denied))))
+
+; ---------------------------------------------------- current directory
+
+; The len bytes at data byte at made the current directory, then ws.
+(def chdir_words ((at int) (len int) (ws (list int))) (list int)
+  (cons (movz 0 0) (append (data_words 1 at) (cons (movz 2 len) (append (call_words (call_chdir)) ws)))))
+
+; The current directory copied to the heap, max bytes at most, and the
+; length exited with.
+(def getcwd_words ((max int)) (list int)
+  (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movz 2 max) (append (call_words (call_getcwd)) (exit_x0))))))
+
+(def test_cwd_at_boot () int
+  (check_int "/" (files_boot (getcwd_words 64) "" "") 1))
+
+(def test_chdir_then_open () int
+  (check_int "motd, from /etc: stream 3"
+    (files_boot (chdir_words 0 4 (append (open_words 4 4 1) (exit_x0))) "/etcmotd" "") 3))
+
+(def test_chdir_refused () int
+  (add (check_int "no such directory" (files_boot (chdir_words 0 5 (exit_x0)) "/nope" "") -3)
+       (check_int "a file" (files_boot (chdir_words 0 9 (exit_x0)) "/etc/motd" "") -9)))
+
+(def test_chdir_too_long () int
+  (check_int "1025 bytes" (files_boot (chdir_words 0 1025 (exit_x0)) "" "") -5))
+
+(def test_chdir_bad_buffer () int
+  (check_int "from below the user range"
+    (boot_words 0 (cons (movz 0 0) (cons (movz 1 16) (cons (movz 2 4) (append (call_words (call_chdir)) (exit_x0)))))) -5))
+
+; Its . and .. taken out, the new directory is as long as its text.
+(def test_chdir_dots () int
+  (add (check_int "/etc/.. is /" (files_boot (chdir_words 0 7 (getcwd_words 64)) "/etc/.." "") 1)
+       (add (check_int "/etc/../etc/. is /etc" (files_boot (chdir_words 0 13 (getcwd_words 64)) "/etc/../etc/." "") 4)
+            (check_int "past the top" (files_boot (chdir_words 0 6 (getcwd_words 64)) "/../.." "") 1))))
+
+; A relative path goes from the current directory, and .. leaves it.
+(def test_chdir_relative () int
+  (add (check_int "/etc, then .. is /" (files_boot (chdir_words 0 4 (chdir_words 4 2 (getcwd_words 64))) "/etc.." "") 1)
+       (check_int "/etc, then motd is a file" (files_boot (chdir_words 0 4 (chdir_words 4 4 (exit_x0))) "/etcmotd" "") -9)))
+
+(def test_chdir_volumes () int
+  (check_int "/Volumes is one" (files_boot (chdir_words 0 8 (getcwd_words 64)) "/Volumes" "") 8))
+
+(def test_chdir_unmounted () int
+  (check_int "no volume data" (files_boot (chdir_words 0 13 (exit_x0)) "/Volumes/data" "") -3))
+
+(def test_getcwd_short () int
+  (check_int "room for 2 of /etc" (files_boot (chdir_words 0 4 (getcwd_words 2)) "/etc" "") (err_too_big)))
+
+; rename and remove take the same relative paths as open.
+(def test_chdir_remove () int
+  (add (check_int "motd, an existing file" (files_boot (chdir_words 0 4 (path_call 4 4 (sys_remove))) "/etcmotd" "") -4)
+       (check_int "nope, a missing one" (files_boot (chdir_words 0 4 (path_call 4 4 (sys_remove))) "/etcnope" "") -3)))
+
+; A child, started by spawn, spawn_args or spawn_image, has its parent's
+; current directory: /etc, four bytes, which it exits with.
+(def cwd_child () Raw (Raw 0 (code (getcwd_words 64))))
+
+(def cwd_files () (list RawFile) (cons (RawFile "etc" 16877 "") (nil RawFile)))
+
+(def test_chdir_inherited_spawn () int
+  (check_int "its child's /etc"
+    (boot (raw_initramfs_with
+            (cons (Raw (flag_boot) (with_data (chdir_words 0 4 (append (spawn_words 1) (append (call_words (call_wait)) (exit_x0)))) "/etc"))
+                  (cons (cwd_child) (nil Raw)))
+            (cwd_files) ""))
+    4))
+
+(def test_chdir_inherited_spawn_args () int
+  (check_int "its child's /etc"
+    (boot (raw_initramfs_with
+            (cons (Raw (flag_boot)
+                    (with_data (chdir_words 0 4 (cons (movz 0 1) (append (data_words 1 8) (cons (movz 2 4)
+                                  (append (call_words (call_spawn_args)) (append (call_words (call_wait)) (exit_x0)))))))
+                               (append (pad_to 8 "/etc") (encode_args (nil (list int))))))
+                  (cons (cwd_child) (nil Raw)))
+            (cwd_files) ""))
+    4))
+
+(def test_chdir_inherited_spawn_image () int
+  (let b (image_bytes "/bin/x" "" (code (getcwd_words 64)))
+    (check_int "its child's /etc"
+      (files_boot (chdir_words 0 4 (cons (movz 0 0) (append (data_words 1 4) (cons (movz 2 (length b))
+                    (append (call_words (call_spawn_image)) (append (call_words (call_wait)) (exit_x0)))))))
+                  (append "/etc" b) "")
+      4)))
+
+; ---------------------------------------------- chdir in a volume
+
+; pid 1 mounts data and answers the one request pid 2's chdir makes with
+; the len bytes at its data byte 8, the reply's word, 0, and what stat
+; says; pid 2 exits with chdir's answer, or, with getcwd, the length of
+; its directory after.
+(def chdir_served ((reply (list int)) (client (list int))) int
+  (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (stat_answer_words (length reply)))) (append (pad_to 8 "data") reply)))
+                             (cons (Raw (flag_boot) (with_data client "/Volumes/data/a")) (nil Raw))))))
+
+; The len bytes at data byte 8 sent to the reply port of the request in
+; the heap, then pid 2 waited for, and its status the exit's.
+(def stat_answer_words ((len int)) (list int)
+  (cons (movz_hi 1 49216) (cons (ldr_w0_x1_4)
+    (append (data_words 1 8) (cons (movz 2 len) (append (call_words (call_send))
+      (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0)))))))))
+
+(def test_chdir_served_dir () int
+  (add (check_int "a directory: 0" (chdir_served (append (u32_le 0) "dir") (chdir_words 0 15 (exit_x0))) 0)
+       (check_int "and the directory is its own: 15 bytes"
+         (chdir_served (append (u32_le 0) "dir") (chdir_words 0 15 (getcwd_words 64))) 15)))
+
+(def test_chdir_served_file () int
+  (check_int "a file: -9" (chdir_served (append (u32_le 0) "file 1 -") (chdir_words 0 15 (exit_x0))) -9))
+
+(def test_chdir_served_missing () int
+  (check_int "the server says -3" (chdir_served (u32_le -3) (chdir_words 0 15 (exit_x0))) -3))
+
+; pid 1 yields, so pid 2 mounts data first; pid 2 takes pid 1's request
+; and exits without answering: pid 1's chdir is answered -5.
+(def test_chdir_server_gone () int
+  (check_int "-5"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (append (call_words (call_yield)) (chdir_words 0 15 (exit_x0))) "/Volumes/data/a"))
+                               (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (cons (movz 0 0) (exit_x0)))) "data")) (nil Raw)))))
+    -5))

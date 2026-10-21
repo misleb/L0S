@@ -33,8 +33,8 @@
 
 ; What a process is doing, the pid that spawned it, 0 for the kernel,
 ; the ports to tell when it exits, its arguments, its open files, its
-; terminal, and where its image lies.
-(data Life (Life State int (list int) (list (list int)) Files Tty Layout))
+; terminal, where its image lies, and its current directory.
+(data Life (Life State int (list int) (list (list int)) Files Tty Layout (list int)))
 
 ; pid, entry index of its program, space, context, page -> frame for
 ; every frame mapped, the next free device page, and its life.
@@ -45,41 +45,54 @@
 (def proc_module ((p Proc)) int (match p ((Proc pid m s c pages dev st) m)))
 (def proc_space ((p Proc)) int (match p ((Proc pid m s c pages dev st) s)))
 (def proc_state ((p Proc)) State
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) st)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) st)))))
 
 ; The pid that spawned p, 0 for the kernel.
 (def proc_parent ((p Proc)) int
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) parent)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) parent)))))
 
 ; The ports to tell when p exits, the latest added first.
 (def proc_watchers ((p Proc)) (list int)
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) ws)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) ws)))))
 
 ; p's arguments.
 (def proc_args ((p Proc)) (list (list int))
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) args)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) args)))))
 
 ; Where p's image lies, and so what may be mapped where.
 (def proc_layout ((p Proc)) Layout
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) lay)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) lay)))))
 
 ; p, with port told when it exits.
 (def proc_watch ((p Proc) (port int)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args fs tty lay) (Proc pid m s c pages dev (Life st parent (cons port ws) args fs tty lay)))))))
+      (match life ((Life st parent ws args fs tty lay cwd) (Proc pid m s c pages dev (Life st parent (cons port ws) args fs tty lay cwd)))))))
 
 ; ------------------------------------------------------------- terminal
 
 ; p's terminal.
 (def proc_tty ((p Proc)) Tty
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) tty)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) tty)))))
 
 ; p with tty as its terminal.
 (def proc_set_tty ((p Proc) (tty Tty)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args fs old lay)(Proc pid m s c pages dev (Life st parent ws args fs tty lay)))))))
+      (match life ((Life st parent ws args fs old lay cwd)(Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
+
+; ------------------------------------------------- current directory
+
+; p's current directory: an absolute path, "/" for a new process's, with
+; no final / but for that.
+(def proc_cwd ((p Proc)) (list int)
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) cwd)))))
+
+; p with cwd as its current directory.
+(def proc_set_cwd ((p Proc) (cwd (list int))) Proc
+  (match p
+    ((Proc pid m s c pages dev life)
+      (match life ((Life st parent ws args fs tty lay old) (Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
 
 ; The port p's terminal is, 0 for the kernel's own.
 (def proc_tty_port ((p Proc)) int (match (proc_tty p) ((Tty port reply rest) port)))
@@ -97,13 +110,13 @@
 
 ; The files p has open.
 (def proc_files ((p Proc)) Files
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay) fs)))))
+  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) fs)))))
 
 ; p with fs as its open files.
 (def proc_set_files ((p Proc) (fs Files)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args old tty lay)(Proc pid m s c pages dev (Life st parent ws args fs tty lay)))))))
+      (match life ((Life st parent ws args old tty lay cwd)(Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
 
 ; p with entry e open on a new stream, and the stream; or -5, open_limit
 ; files being open already.
@@ -206,7 +219,7 @@
 (def proc_set_state ((p Proc) (st State)) Proc
   (match p
     ((Proc pid m s c pages dev life)
-      (match life ((Life old parent ws args fs tty lay)(Proc pid m s c pages dev (Life st parent ws args fs tty lay)))))))
+      (match life ((Life old parent ws args fs tty lay cwd)(Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
 
 ; A word of p's registers.
 (def proc_reg ((p Proc) (i int)) int
@@ -258,7 +271,7 @@
     ((ImageLoaded pages)
       (Created (Proc pid m s (user_context entry (stack_top)) pages (stack_top)
                      (Life (Ready) parent (nil int) args (files_none)
-                           (match (tty_none) ((Tty none reply rest) (Tty tty reply rest))) lay))))
+                           (match (tty_none) ((Tty none reply rest) (Tty tty reply rest))) lay "/"))))
     ((ImageFailed pages)
       (let f (free_space s (map_values pages)) (CreateFailed)))))
 
@@ -338,7 +351,7 @@
   (match p
     ((Proc pid m s c pages dev st)
       (let page (page_of va)
-        (let perm (match st ((Life state parent ws args fs tty lay) (demand_perm lay page)))
+        (let perm (match st ((Life state parent ws args fs tty lay cwd) (demand_perm lay page)))
           (if (if (map_has pages page) true (lt perm 0))
               (PageRefused (Proc pid m s c pages dev st))
               (let f (map_frame s page perm)
@@ -351,7 +364,7 @@
 (def proc_prepare ((p Proc) (va int) (n int) (write bool)) Paged
   (match p
     ((Proc pid m s c pages dev st)
-      (match (range_plan (match st ((Life state parent ws args fs tty lay) lay)) pages va n write)
+      (match (range_plan (match st ((Life state parent ws args fs tty lay cwd) lay)) pages va n write)
         ((PlanBad) (PageRefused (Proc pid m s c pages dev st)))
         ((PlanMap todo) (demand_all (Proc pid m s c pages dev st) todo))))))
 

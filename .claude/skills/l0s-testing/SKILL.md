@@ -137,7 +137,11 @@ and starts Terminal from it, the top bar then naming it), and
 `make disks-initramfs` for `disks.sh`, `disks-create.sh` and
 `partitions.sh` (that with the clock and the disk's driver and file
 server, `tests/disks/etc`, on a disk each makes itself, from
-`tools/mkdisk` or `build/mkfs`, and passes as `QEMU_DISK`).
+`tools/mkdisk` or `build/mkfs`, and passes as `QEMU_DISK`), and
+`make launcher-install-initramfs` for `launcher-install.sh` (boot and the
+disk's driver and file server, `tests/launcher-install/etc`, copied onto a
+System volume of its disk and booted with `root=`; it installs an app from
+the shell and checks the launcher shows it).
 `disks-create.sh` types into Disks's entries with the monitor's
 `sendkey`, one key a call (`keys m a d e`, `keys ret`), and checks an
 entry's focus by its ring and a dialog's input by its button, faded or

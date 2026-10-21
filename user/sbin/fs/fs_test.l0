@@ -183,11 +183,11 @@
 
 ; How many reads and writes f's store has been asked.
 (def requests ((f Fs)) int
-  (match (fs_store f) ((StoreMem m n r fl) r) ((StoreDisk d b) -1)))
+  (match (fs_store f) ((StoreMem m n r fl) r) ((StoreDisk d b) -1) ((StoreRam m n) -1)))
 
 ; How many flushes f's store has been asked.
 (def flushes ((f Fs)) int
-  (match (fs_store f) ((StoreMem m n r fl) fl) ((StoreDisk d b) -1)))
+  (match (fs_store f) ((StoreMem m n r fl) fl) ((StoreDisk d b) -1) ((StoreRam m n) -1)))
 
 ; A write flushes its data once, before the metadata that points at it;
 ; a read flushes nothing.
@@ -709,3 +709,72 @@
 ; Under an operating system there is no disk.
 (def test_no_disk () int
   (check_int "nothing to serve" (fs) 0))
+
+; ----------------------------------------------------- RAM file system
+
+; A RAM file system as fs ram makes it: tmp, 8 MB, from sector 0, on a
+; store of memory, the port 7.
+(def ram_fs () Fs
+  (let l (vol_layout 16384)
+    (let v (vol_new "tmp" l)
+      (match (store_write_all (StoreRam ((MapEmpty int bytes)) 16384) 0 (vol_meta v))
+        ((PutNot s why) (blank_fs))
+        ((Put s) (fs_new s 7 (array_from (cons (FsVol 0 (ram_uuid) v) (nil FsVol)) (FsVol 0 "" (vol_new "x" (vol_layout 16))))))))))
+
+(def ram_answers ((reqs (list (list int)))) (list int)
+  (ran_text (run (ram_fs) reqs)))
+
+(def test_ram_args () int
+  (add (check_bool "ram" (ram_requested (split_spaces "ram")) true)
+       (add (check_bool "none" (ram_requested (nil (list int))) false)
+            (add (check_int "default" (ram_megabytes (split_spaces "ram")) 32)
+                 (add (check_int "given" (ram_megabytes (split_spaces "ram 64")) 64)
+                      (check_int "too many" (ram_megabytes (split_spaces "ram 9999")) 255))))))
+
+(def test_ram_write_read () int
+  (check_str "written, read back, listed"
+             (ram_answers (reqs4 "open 2 /Volumes/tmp/a" "write 1 hello ram" "close 1" "list /Volumes/tmp"))
+             "1:|9:|0:|1:a 9\n"))
+
+(def test_ram_read_back () int
+  (check_str "the bytes"
+             (ram_answers (append (reqs3 "open 2 /Volumes/tmp/a" "write 1 hello ram" "close 1") (reqs2 "open 1 /Volumes/tmp/a" "read 2 100")))
+             "1:|9:|0:|2:|9:hello ram"))
+
+(def test_ram_directories () int
+  (check_str "made, written in, moved"
+             (ram_answers (append (reqs3 "mkdir /Volumes/tmp/d" "open 2 /Volumes/tmp/d/n" "write 1 x")
+                                  (reqs3 "close 1" "rename /Volumes/tmp/d/n /Volumes/tmp/m" "stat /Volumes/tmp/m")))
+             "0:|1:|1:|0:|0:|0:file 1 -"))
+
+; A file of three writes, over three clusters, is its whole size.
+(def test_ram_big_file () int
+  (let w (append "write 1 " (repeat 3000 97))
+    (check_str "9000 bytes"
+               (ram_answers (append (reqs4 "open 2 /Volumes/tmp/big" w w w) (reqs2 "close 1" "stat /Volumes/tmp/big")))
+               "1:|3000:|3000:|3000:|0:|0:file 9000 -")))
+
+(def test_ram_refuses_tables () int
+  (add (check_str "partition" (ram_answers (reqs1 "partition 100")) "-5:a RAM file system has no partition table")
+       (add (check_str "rescan" (ram_answers (reqs1 "rescan")) "-5:a RAM file system has no partition table")
+            (check_str "mkfs" (ram_answers (reqs1 "mkfs 00000000-0000-7000-8000-000000000000 x")) "-5:a RAM file system has no partition table"))))
+
+; Its sectors are zeros until written, and what is written reads back.
+(def test_ram_store () int
+  (let s (StoreRam ((MapEmpty int bytes)) 16)
+    (match (store_write s 3 (zeros_plus 7))
+      ((PutNot s2 why) (fail_because "write" why))
+      ((Put s2)
+        (match (store_read s2 2 3)
+          ((GotNot s3 why) (fail_because "read" why))
+          ((Got s3 bs)
+            (add (check_int "three sectors" (length bs) 1536)
+                 (add (check_int "zero before" (nth bs 511) 0)
+                      (check_int "written" (nth bs 512) 7)))))))))
+
+; One sector, its first byte b, the rest zeros.
+(def zeros_plus ((b int)) (list int) (cons b (zeros 511)))
+
+(def test_ram_not_a_disk () int
+  (add (check_bool "ram" (store_is_ram (StoreRam ((MapEmpty int bytes)) 8)) true)
+       (check_bool "memory" (store_is_ram (StoreMem ((MapEmpty int (list int))) 8 0 0)) false)))

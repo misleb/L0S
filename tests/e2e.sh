@@ -30,7 +30,7 @@
 # start that must exit 0 by the boot's end, a client of a port the board
 # listens to; @PORT@ in either, in NAME/net, and in NAME/typed is a free
 # port of the host's loopback, chosen for the boot. Every boot is killed after
-# a minute. Run from
+# a minute. Given case names as arguments, it runs only those. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
 # programs go in /bin beside them. The board has a virtio-gpu,
@@ -73,8 +73,15 @@ image "$BUILD/asm/deadlock.img" D2802048 $SVC D2802088 D2800102 $SVC 14000000
 
 asms=("$BUILD"/asm/*.img)
 
+# Every case, or the ones named as arguments: tests/e2e.sh cwd dirs.
+cases=(tests/e2e/*/)
+if [ $# -gt 0 ]; then
+  cases=()
+  for n in "$@"; do cases+=("tests/e2e/$n/"); done
+fi
+
 pass=0; fail=0
-for dir in tests/e2e/*/; do
+for dir in "${cases[@]}"; do
   dir=${dir%/}
   name=$(basename "$dir")
   want_status=0
