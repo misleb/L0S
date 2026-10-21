@@ -10,20 +10,25 @@
 ; the gateway, waiting for ARP to find the next hop. Serves the inet
 ; protocol, user/lib/proto/inet.l0, as inet. Started as
 ;
-;   inet [ADDR/PREFIX [GATEWAY]]    10.0.2.15/24 and 10.0.2.2 if not given,
-;                                   as QEMU's user network gives them
-;   inet dhcp                       the address, netmask and router a DHCP
-;                                   server gives (lease.l0), taken before
-;                                   it registers as inet; it exits 1 if
-;                                   none answers
+;   inet [ADDR/PREFIX [GATEWAY [DNS]]]
+;                                   10.0.2.15/24, 10.0.2.2 and 10.0.2.3 if
+;                                   not given, as QEMU's user network
+;                                   gives them
+;   inet dhcp                       the address, netmask, router and name
+;                                   server a DHCP server gives (lease.l0),
+;                                   taken before it registers as inet; it
+;                                   exits 1 if none answers. The lease is
+;                                   renewed at half its time, and asked of
+;                                   any server once seven eighths are gone
 ;
 ; It does not fragment, nor take fragments. A datagram to its own address
 ; goes no further than inet, a TCP connection to it too.
 
 ; ---------------------------------------------------------------- the state
 
-; The interface: its address, netmask and gateway.
-(data Config (Config int int int))
+; The interface: its address, netmask and gateway, and the name server
+; its clients resolve names with, 0 for none.
+(data Config (Config int int int int))
 
 ; The link: the driver's port and pid, and the card's address.
 (data Link (Link int int (list int)))
@@ -88,24 +93,27 @@
   (match s ((Stack l c n k id t o) (Stack l c n k id (tally_drop t) o))))
 
 ; The interface's address.
-(def stack_addr ((s Stack)) int (match s ((Stack l c n k id t o) (match c ((Config a m g) a)))))
+(def stack_addr ((s Stack)) int (match s ((Stack l c n k id t o) (match c ((Config a m g dns) a)))))
 
 ; The card's Ethernet address.
 (def stack_mac ((s Stack)) (list int) (match s ((Stack l c n k id t o) (match l ((Link p pid mac) mac)))))
 
 ; ------------------------------------------------------------- the config
 
-; The interface the arguments give: ADDR/PREFIX and GATEWAY, each with
-; its default; or why they are not addresses. dhcp is no address at all,
-; 0.0.0.0, which the stack takes from a server.
+; The interface the arguments give: ADDR/PREFIX, GATEWAY and DNS, each
+; with its default; or why they are not addresses. dhcp is no address at
+; all, 0.0.0.0, which the stack takes from a server.
 (def config_of ((argv (list (list int)))) (Result Config (list int))
   (if (eq (nth_or argv 0 "") "dhcp")
       (if (eq (length argv) 1)
-          ((Ok Config (list int)) (Config 0 0 0))
+          ((Ok Config (list int)) (Config 0 0 0 0))
           ((Err Config (list int)) "dhcp takes no more arguments"))
-      (static_config_of argv)))
+      (if (gt (length argv) 3)
+          ((Err Config (list int)) "inet [ADDR/PREFIX [GATEWAY [DNS]]]")
+          (static_config_of argv))))
 
-; The interface ADDR/PREFIX and GATEWAY give, each with its default.
+; The interface ADDR/PREFIX, GATEWAY and DNS give, each with its
+; default: QEMU's user network's, whose name server is 10.0.2.3.
 (def static_config_of ((argv (list (list int)))) (Result Config (list int))
   (let net (nth_or argv 0 "10.0.2.15/24")
     (let gw (nth_or argv 1 "10.0.2.2")
@@ -121,28 +129,34 @@
                       ((Err Config (list int)) "a prefix is 1 to 30 bits")
                       (match (ip_parse gw)
                         ((None) ((Err Config (list int)) (append "not an address: " gw)))
-                        ((Some g) ((Ok Config (list int)) (Config a (ip_mask p) g)))))))))))))
+                        ((Some g) (static_dns a (ip_mask p) g (nth_or argv 2 "10.0.2.3")))))))))))))
+
+; The interface at a, mask m, behind g, with the name server ds names.
+(def static_dns ((a int) (m int) (g int) (ds (list int))) (Result Config (list int))
+  (match (ip_parse ds)
+    ((None) ((Err Config (list int)) (append "not an address: " ds)))
+    ((Some dns) ((Ok Config (list int)) (Config a m g dns)))))
 
 ; Whether dst is on the link of c: in its subnet, or a broadcast.
 (def on_link ((c Config) (dst int)) bool
   (match c
-    ((Config a m g)
+    ((Config a m g dns)
       (if (eq dst (ip_broadcast)) true (eq (bit_and dst m) (bit_and a m))))))
 
 ; Whether dst is a broadcast on the link of c: everyone, or the subnet's.
 (def is_broadcast ((c Config) (dst int)) bool
   (match c
-    ((Config a m g)
+    ((Config a m g dns)
       (if (eq dst (ip_broadcast)) true (eq dst (bit_or (bit_and a m) (bit_xor m 4294967295)))))))
 
 ; Where a datagram to dst goes first: dst itself if it is on the link,
 ; and otherwise the gateway.
 (def next_hop ((c Config) (dst int)) int
-  (match c ((Config a m g) (if (on_link c dst) dst g))))
+  (match c ((Config a m g dns) (if (on_link c dst) dst g))))
 
 ; Whether a datagram to dst is for inet: to its address, or a broadcast.
 (def is_ours ((c Config) (dst int)) bool
-  (match c ((Config a m g) (if (eq dst a) true (is_broadcast c dst)))))
+  (match c ((Config a m g dns) (if (eq dst a) true (is_broadcast c dst)))))
 
 ; ---------------------------------------------------------------- starting
 
@@ -181,29 +195,56 @@
   (if (eq (stack_addr s) 0)
       (match (lease_run s port)
         ((None) (complain "no DHCP server answered"))
-        ((Some s2) (registered s2 port)))
-      (registered s port)))
+        ((Some ls) (match ls ((Leasing s2 l) (registered s2 port (clock_told port l))))))
+      (registered s port (Unleased))))
 
-; port registered as inet, and s served on it.
-(def registered ((s Stack) (port int)) int
+; l, once the clock has been asked to tell port the time every minute,
+; when the lease is looked at, if l is a lease and there is a clock.
+; With none, the lease is never renewed.
+(def clock_told ((port int) (l Lease)) Lease
+  (if (lease_static l)
+      l
+      (match (name_lookup "clock")
+        ((NotFound) l)
+        ((Found c) (let r (port_send c (request port "listen")) l)))))
+
+; port registered as inet, and s served on it, with the lease l.
+(def registered ((s Stack) (port int) (l Lease)) int
   (let r (name_register_or_why port "inet")
-    (if (is_empty r) (serve s port) (complain r))))
+    (if (is_empty r) (serve s port l) (complain r))))
 
 ; ---------------------------------------------------------------- serving
 
-; Each message on port: a frame from the driver, or a client's request;
-; then what it made inet send, sent. While a TCP connection is open its
-; timers must be looked at, so inet then takes a message if there is one,
-; and otherwise looks at them and waits tcp_poll_ns; with none, it waits
-; for a message.
-(def serve ((s Stack) (port int)) int
+; Each message on port: a frame from the driver, a client's request, or
+; the clock's notice; then what it made inet send, sent. While a TCP
+; connection is open its timers must be looked at, so inet then takes a
+; message if there is one, and otherwise looks at them and waits
+; tcp_poll_ns; with none, it waits for a message. l is the lease.
+(def serve ((s Stack) (port int) (l Lease)) int
   (if (tcp_busy s)
       (match (port_try_receive port)
-        ((RecvFailed) (let z (sleep_ns (tcp_poll_ns)) (serve (sent_out (tcp_ticked s (clock_ns))) port)))
-        ((Message from payload) (serve (sent_out (message s from payload)) port)))
+        ((RecvFailed) (let z (sleep_ns (tcp_poll_ns)) (serve (sent_out (tcp_ticked s (clock_ns))) port l)))
+        ((Message from payload) (served_message s port l from payload)))
       (match (port_receive port)
         ((RecvFailed) (complain "lost its port"))
-        ((Message from payload) (serve (sent_out (message s from payload)) port)))))
+        ((Message from payload) (served_message s port l from payload)))))
+
+; A message from pid from dealt with, what it made inet send sent, and
+; the next one served.
+(def served_message ((s Stack) (port int) (l Lease) (from int) (payload (list int))) int
+  (match (leased_message s l from payload (clock_ns))
+    ((Leasing s2 l2) (serve (sent_out s2) port l2))))
+
+; A message at time now, with the lease l: the clock's notice moves the
+; lease on; anything else is message's, and a lease hears what a server
+; sent with it.
+(def leased_message ((s Stack) (l Lease) (from int) (payload (list int)) (now int)) Leasing
+  (match (time_of payload)
+    ((Some t) (lease_tick s l now))
+    ((None)
+      (if (lease_static l)
+          (Leasing (message s from payload) l)
+          (lease_hear s l from payload now)))))
 
 ; A message from pid from: a frame, counted, if it is from the driver,
 ; and otherwise a request.
@@ -381,7 +422,7 @@
   (match s
     ((Stack l c n k id t o)
       (match c
-        ((Config a m g)
+        ((Config a m g dns)
           (let packet (ipv4_packet a dst proto id payload)
             (let s2 (Stack l c n k (bit_and (add id 1) 65535) t o)
               (if (eq dst a)
@@ -497,19 +538,24 @@
 ; first line, answered.
 (def handled_op ((s Stack) (from int) (reply int) (op (list int)) (ws (list (list int))) (rest (list int))) (Served Stack)
   (if (if (eq op "info") (is_empty ws) false) (Served s (info_text s))
+  (if (if (eq op "dns") (is_empty ws) false) (Served s (dns_text s))
   (if (if (eq op "stats") (is_empty ws) false) (Served s (stats_text s))
   (if (if (eq op "arp") (is_empty ws) false) (Served s (arp_text s))
   (if (eq op "send") (sent s reply ws rest)
   (if (eq op "ping") (pinged s reply ws)
   (if (eq op "bind") (bind s reply ws)
   (if (eq op "unbind") (unbind s reply ws)
-  (tcp_request s reply from op ws rest)))))))))
+  (tcp_request s reply from op ws rest))))))))))
+
+; dns's answer: dns ADDR, the name server, 0.0.0.0 if there is none.
+(def dns_text ((s Stack)) (list int)
+  (match s ((Stack l c n k id t o) (match c ((Config a m g dns) (append "dns " (ip_text dns)))))))
 
 ; info's answer.
 (def info_text ((s Stack)) (list int)
   (match s
     ((Stack l c n k id t o)
-      (match c ((Config a m g) (inet_info_text (InetInfo a m g (stack_mac s))))))))
+      (match c ((Config a m g dns) (inet_info_text (InetInfo a m g (stack_mac s))))))))
 
 ; stats's answer.
 (def stats_text ((s Stack)) (list int)

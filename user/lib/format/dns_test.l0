@@ -1,0 +1,79 @@
+; dns_test.l0 -- tests of dns.l0: the query byte by byte, and answers
+; built by hand as a name server sends them, with what is refused.
+
+; The query for a.bc, numbered 0x1234: the header, the name as labels,
+; type A, class IN.
+(def test_query () int
+  (check_str "bytes" (dns_query 4660 "a.bc")
+             (append (cons 18 (cons 52 (cons 1 (cons 0 (cons 0 (cons 1 (zeros 6)))))))
+                     (cons 1 (cons 97 (cons 2 (cons 98 (cons 99 (cons 0 (cons 0 (cons 1 (cons 0 (cons 1 (nil int))))))))))))))
+
+; A final dot changes nothing.
+(def test_query_dot () int
+  (check_str "the same" (dns_query 1 "a.bc.") (dns_query 1 "a.bc")))
+
+(def test_name_ok () int
+  (add (check_bool "a name" (dns_name_ok "example.com") true)
+       (add (check_bool "rooted" (dns_name_ok "example.com.") true)
+            (add (check_bool "empty" (dns_name_ok "") false)
+                 (add (check_bool "an empty label" (dns_name_ok "a..b") false)
+                      (check_bool "a space" (dns_name_ok "a b") false))))))
+
+; A label of 63 is the most.
+(def test_label_max () int
+  (add (check_bool "63" (dns_name_ok (append (dns_n_bytes 63) ".com")) true)
+       (check_bool "64" (dns_name_ok (append (dns_n_bytes 64) ".com")) false)))
+
+; n letters x.
+(def dns_n_bytes ((n int)) (list int) (if (eq n 0) (nil int) (cons 120 (dns_n_bytes (sub n 1)))))
+
+; ------------------------------------------------------------ answers
+
+; The question of the query for a.bc, as an answer repeats it: 12 on, 10
+; bytes of name, then type and class.
+(def question () (list int) (drop (dns_query 0 "a.bc") 12))
+
+; A server's header: id, flags (a response, recursion available), the
+; code rcode, one question and an answers.
+(def header ((id int) (rcode int) (an int)) (list int)
+  (append (dns_be16 id) (append (cons 129 (cons (add 128 rcode) (nil int))) (append (dns_be16 1) (append (dns_be16 an) (zeros 4))))))
+
+; An answer record: a pointer to the question's name at 12, type, class,
+; a time to live of 60, and its data, body.
+(def record ((type int) (body (list int))) (list int)
+  (append (cons 192 (cons 12 (nil int)))
+    (append (dns_be16 type) (append (dns_be16 1) (append (cons 0 (cons 0 (cons 0 (cons 60 (nil int)))))
+      (append (dns_be16 (length body)) body))))))
+
+(def answer_text ((a DnsAnswer)) (list int)
+  (match a ((DnsAddr x) (append "addr " (digits x))) ((DnsNone why) (append "none " why))))
+
+; One A record: 10.0.2.15 is 167772687.
+(def test_answer_a () int
+  (check_str "the address" (answer_text (dns_answer (append (header 7 0 1) (append (question) (record 1 (cons 10 (cons 0 (cons 2 (cons 15 (nil int)))))))) 7))
+             "addr 167772687"))
+
+; A CNAME first, its data a name of labels, then the A record: the A's
+; address.
+(def test_answer_cname () int
+  (let cname (record 5 (cons 1 (cons 122 (cons 192 (cons 12 (nil int))))))
+    (check_str "past the alias" (answer_text (dns_answer (append (header 7 0 2) (append (question) (append cname (record 1 (cons 1 (cons 2 (cons 3 (cons 4 (nil int))))))))) 7))
+               "addr 16909060")))
+
+; No such name, rcode 3; another failure, 2; and no A record at all.
+(def test_answer_failures () int
+  (add (check_str "nxdomain" (answer_text (dns_answer (append (header 7 3 0) (question)) 7)) "none no such name")
+       (add (check_str "servfail" (answer_text (dns_answer (append (header 7 2 0) (question)) 7)) "none the name server answered 2")
+            (check_str "no address" (answer_text (dns_answer (append (header 7 0 0) (question)) 7)) "none the name has no IPv4 address"))))
+
+; Another query's answer, a query, and what is too short are not the
+; answer at all: no reason.
+(def test_answer_not_ours () int
+  (add (check_str "another id" (answer_text (dns_answer (append (header 8 0 0) (question)) 7)) "none ")
+       (add (check_str "a query" (answer_text (dns_answer (dns_query 7 "a.bc") 7)) "none ")
+            (check_str "short" (answer_text (dns_answer (zeros 11) 7)) "none "))))
+
+; An answer cut off inside its record is said to be.
+(def test_answer_cut () int
+  (let whole (append (header 7 0 1) (append (question) (record 1 (cons 10 (cons 0 (cons 2 (cons 15 (nil int))))))))
+    (check_str "cut" (answer_text (dns_answer (take whole (sub (length whole) 2)) 7)) "none the name server's answer is cut short")))

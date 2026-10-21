@@ -1,0 +1,133 @@
+; dns.l0 -- DNS's messages (RFC 1035) as bytes, for a resolver: the
+; query for a name's IPv4 address, and the address read out of a name
+; server's answer. Pure; a client carries them in UDP, to port 53
+; (inet.l0's inet_resolve). A message is a 12-byte header (its id,
+; flags, and how many questions, answers, authorities and additions
+; follow), then the questions, each a name and its type and class, then
+; the answers, each a name, a type, a class, a time to live, and data. A
+; name is labels, each its length and its bytes, ended by a 0, or ended
+; by a pointer, two bytes from 192 up, to a name earlier in the message.
+
+; The port a name server listens on.
+(def dns_port () int 53)
+
+; A record's type for an IPv4 address, A, and the class of the Internet, IN.
+(def dns_type_a () int 1)
+(def dns_class_in () int 1)
+
+; The longest label, and the longest name.
+(def dns_label_max () int 63)
+(def dns_name_max () int 253)
+
+; v as 2 bytes, most significant first.
+(def dns_be16 ((v int)) (list int)
+  (cons (bit_and (bit_shr v 8) 255) (cons (bit_and v 255) (nil int))))
+
+; The u16 at byte i of b, most significant first.
+(def dns_u16 ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 8) (bytes_get b (add i 1))))
+
+; ---------------------------------------------------------------- the query
+
+; Whether name can be asked for: 1 to 253 bytes, with no empty label nor
+; one over 63, a final dot allowed, and no space.
+(def dns_name_ok ((name (list int))) bool
+  (let n (dns_trimmed name)
+    (if (if (is_empty n) true (gt (length n) (dns_name_max)))
+        false
+        (if (any_eq 32 n) false (dns_labels_ok (split_on 46 n))))))
+
+; name without its final dot, if it has one.
+(def dns_trimmed ((name (list int))) (list int)
+  (if (is_empty name) name (if (eq (last name) 46) (drop_last name) name)))
+
+; Whether every label of ls is 1 to 63 bytes.
+(def dns_labels_ok ((ls (list (list int)))) bool
+  (if (is_empty ls)
+      true
+      (if (if (is_empty (head ls)) true (gt (length (head ls)) (dns_label_max)))
+          false
+          (dns_labels_ok (tail ls)))))
+
+; name as a message holds it: each label, its length first, and a 0.
+(def dns_name_bytes ((name (list int))) (list int)
+  (dns_labels_onto (split_on 46 (dns_trimmed name)) (nil int)))
+
+; Each of ls, its length first, onto acc, reversed; the 0 last.
+(def dns_labels_onto ((ls (list (list int))) (acc (list int))) (list int)
+  (if (is_empty ls)
+      (rev (cons 0 acc))
+      (dns_labels_onto (tail ls) (rev_onto (head ls) (cons (length (head ls)) acc)))))
+
+; The query, numbered id, for name's address: recursion desired, one
+; question, of type A and class IN.
+(def dns_query ((id int) (name (list int))) (list int)
+  (append (dns_be16 id)
+    (append (dns_be16 256)                       ; 0x0100: RD
+      (append (dns_be16 1) (append (zeros 6)
+        (append (dns_name_bytes name)
+          (append (dns_be16 (dns_type_a)) (dns_be16 (dns_class_in)))))))))
+
+; --------------------------------------------------------------- the answer
+
+; What an answer says: the name's first IPv4 address; or why it gives
+; none, which for one not the answer to the query is empty.
+(data DnsAnswer (DnsAddr int) (DnsNone (list int)))
+
+; What the message xs says in answer to the query numbered id: none,
+; with no reason, if it is not that answer.
+(def dns_answer ((xs (list int)) (id int)) DnsAnswer
+  (let b (bytes_from_list xs)
+    (if (lt (bytes_len b) 12)
+        (DnsNone "")
+        (if (if (eq (dns_u16 b 0) id) (not (eq (bit_and (bytes_get b 2) 128) 0)) false)
+            (dns_answered b (bit_and (bytes_get b 3) 15))
+            (DnsNone "")))))
+
+; An answer whose code is rcode: its first address, or why it has none.
+(def dns_answered ((b bytes) (rcode int)) DnsAnswer
+  (if (eq rcode 3)
+      (DnsNone "no such name")
+      (if (not (eq rcode 0))
+          (DnsNone (append "the name server answered " (digits rcode)))
+          (match (dns_skip_questions b (dns_u16 b 4) 12)
+            ((None) (DnsNone "the name server's answer is cut short"))
+            ((Some i) (dns_first_a b (dns_u16 b 6) i))))))
+
+; Where the bytes after n questions from i begin, or none if they run
+; past the end.
+(def dns_skip_questions ((b bytes) (n int) (i int)) (Option int)
+  (if (eq n 0)
+      (Some i)
+      (match (dns_skip_name b i)
+        ((None) ((None int)))
+        ((Some j) (if (gt (add j 4) (bytes_len b)) ((None int)) (dns_skip_questions b (sub n 1) (add j 4)))))))
+
+; Where the bytes after the name at i begin: past its labels and the 0,
+; or past a pointer; none if it runs past the end.
+(def dns_skip_name ((b bytes) (i int)) (Option int)
+  (if (ge i (bytes_len b))
+      ((None int))
+      (let k (bytes_get b i)
+        (if (eq k 0)
+            (Some (add i 1))
+            (if (ge k 192)
+                (if (gt (add i 2) (bytes_len b)) ((None int)) (Some (add i 2)))
+                (dns_skip_name b (add (add i 1) k)))))))
+
+; The address of the first of n answers from i that is of type A and
+; class IN, with four bytes of data; or why there is none.
+(def dns_first_a ((b bytes) (n int) (i int)) DnsAnswer
+  (if (eq n 0)
+      (DnsNone "the name has no IPv4 address")
+      (match (dns_skip_name b i)
+        ((None) (DnsNone "the name server's answer is cut short"))
+        ((Some j)
+          (if (gt (add j 10) (bytes_len b))
+              (DnsNone "the name server's answer is cut short")
+              (let len (dns_u16 b (add j 8))
+                (if (gt (add (add j 10) len) (bytes_len b))
+                    (DnsNone "the name server's answer is cut short")
+                    (if (if (eq (dns_u16 b j) (dns_type_a)) (if (eq (dns_u16 b (add j 2)) (dns_class_in)) (eq len 4) false) false)
+                        (DnsAddr (bit_or (bit_shl (dns_u16 b (add j 10)) 16) (dns_u16 b (add j 12))))
+                        (dns_first_a b (sub n 1) (add (add j 10) len))))))))))

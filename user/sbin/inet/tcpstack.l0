@@ -25,11 +25,13 @@
 (data Listener (Listener int int))
 
 ; The connections by number, the listeners by local port, the number of
-; the next connection, and the next local port to try for one opened here.
-(data Tcps (Tcps (Map int Conn) (Map int Listener) int int))
+; the next connection, the next local port to try for one opened here,
+; the secret first sequence numbers are keyed with, 0 until random has
+; given one, and the port random's answers come to, 0 until it is made.
+(data Tcps (Tcps (Map int Conn) (Map int Listener) int int int int))
 
-; No connection, no listener.
-(def tcps_new () Tcps (Tcps ((MapEmpty int Conn)) ((MapEmpty int Listener)) 1 (ephemeral_first)))
+; No connection, no listener, no secret yet.
+(def tcps_new () Tcps (Tcps ((MapEmpty int Conn)) ((MapEmpty int Listener)) 1 (ephemeral_first) 0 0))
 
 ; The stack's TCP state.
 (def stack_tcps ((s Stack)) Tcps
@@ -40,21 +42,36 @@
   (match s ((Stack l c n k id t o) (match k ((Socks udp pings eph old) (Stack l c n (Socks udp pings eph tcps) id t o))))))
 
 ; The connections, and the listeners.
-(def tcp_conns ((s Stack)) (Map int Conn) (match (stack_tcps s) ((Tcps conns ls next eph) conns)))
-(def tcp_listeners ((s Stack)) (Map int Listener) (match (stack_tcps s) ((Tcps conns ls next eph) ls)))
+(def tcp_conns ((s Stack)) (Map int Conn) (match (stack_tcps s) ((Tcps conns ls next eph key rp) conns)))
+(def tcp_listeners ((s Stack)) (Map int Listener) (match (stack_tcps s) ((Tcps conns ls next eph key rp) ls)))
 
 ; The stack with other connections, other listeners, and its next number
 ; and port.
 (def tcp_set_conns ((s Stack) (conns (Map int Conn))) Stack
-  (match (stack_tcps s) ((Tcps old ls next eph) (with_tcps s (Tcps conns ls next eph)))))
+  (match (stack_tcps s) ((Tcps old ls next eph key rp) (with_tcps s (Tcps conns ls next eph key rp)))))
 (def tcp_set_listeners ((s Stack) (ls (Map int Listener))) Stack
-  (match (stack_tcps s) ((Tcps conns old next eph) (with_tcps s (Tcps conns ls next eph)))))
+  (match (stack_tcps s) ((Tcps conns old next eph key rp) (with_tcps s (Tcps conns ls next eph key rp)))))
 (def tcp_set_next ((s Stack) (next int) (eph int)) Stack
-  (match (stack_tcps s) ((Tcps conns ls n e) (with_tcps s (Tcps conns ls next eph)))))
+  (match (stack_tcps s) ((Tcps conns ls n e key rp) (with_tcps s (Tcps conns ls next eph key rp)))))
 
 ; The number the next connection has, and the port to try for it.
-(def tcp_next_id ((s Stack)) int (match (stack_tcps s) ((Tcps conns ls next eph) next)))
-(def tcp_next_port ((s Stack)) int (match (stack_tcps s) ((Tcps conns ls next eph) eph)))
+(def tcp_next_id ((s Stack)) int (match (stack_tcps s) ((Tcps conns ls next eph key rp) next)))
+(def tcp_next_port ((s Stack)) int (match (stack_tcps s) ((Tcps conns ls next eph key rp) eph)))
+
+; The secret first sequence numbers are keyed with, 0 for none yet.
+(def tcp_secret ((s Stack)) int (match (stack_tcps s) ((Tcps conns ls next eph key rp) key)))
+
+; The stack with a secret, once it has one: asked of random the first
+; time a connection needs one, its answer to a port of the stack's own,
+; made then. While there is no random, there is no secret, and random is
+; asked again for the next connection.
+(def tcp_keyed ((s Stack)) Stack
+  (match (stack_tcps s)
+    ((Tcps conns ls next eph key rp)
+      (if (not (eq key 0))
+          s
+          (let rp2 (if (eq rp 0) (port_new) rp)
+            (with_tcps s (Tcps conns ls next eph (random_word rp2 0) rp2)))))))
 
 ; Whether inet has a connection, whose timer it must look at.
 (def tcp_busy ((s Stack)) bool (gt (map_size (tcp_conns s)) 0))
@@ -91,9 +108,18 @@
 (def tcp_port_from ((s Stack) (p int) (n int)) int
   (if (eq n 0) 0 (if (tcp_port_used s p) (tcp_port_from s (next_ephemeral p) (sub n 1)) p)))
 
-; The first sequence number of a connection opened at time now: a clock that
-; ticks every 4 microseconds, as RFC 9293 3.4.1 has it.
-(def tcp_iss ((now int)) int (bit_and (div now 4000) 4294967295))
+; A connection's ends, and the secret, as tcp_iss hashes them.
+(data TcpIssKey (TcpIssKey int int int int int))
+
+; The first sequence number of a connection opened at time now from local
+; port lport of laddr to rport of raddr: a clock that ticks every 4
+; microseconds, as RFC 9293 3.4.1 has it, moved on by a hash of the ends
+; keyed with secret, as RFC 6528 has it, so that one who does not know
+; the secret cannot guess where another's connection starts. With no
+; secret, 0, it is the clock alone.
+(def tcp_iss ((now int) (secret int) (laddr int) (lport int) (raddr int) (rport int)) int
+  (let off (if (eq secret 0) 0 (hash (TcpIssKey laddr lport raddr rport secret)))
+    (bit_and (add (div now 4000) off) 4294967295)))
 
 ; ------------------------------------------------------------------ the acts
 
@@ -195,8 +221,12 @@
       (dropped s)
       (match l
         ((Listener np pid)
-          (let id (tcp_next_id s)
-            (tcp_run (tcp_set_next s (add id 1) (tcp_next_port s)) (tcp_passive id np pid src seg (tcp_iss now) now)))))))
+          (let s2 (tcp_keyed s)
+            (let id (tcp_next_id s2)
+              (match seg
+                ((Seg sport dport seq ack flags window mss body)
+                  (let iss (tcp_iss now (tcp_secret s2) (stack_addr s2) dport src sport)
+                    (tcp_run (tcp_set_next s2 (add id 1) (tcp_next_port s2)) (tcp_passive id np pid src seg iss now)))))))))))
 
 ; --------------------------------------------------------------------- timers
 
@@ -253,10 +283,12 @@
           (let lport (tcp_port_from s (tcp_next_port s) 16384)
             (if (eq lport 0)
                 (served_error s "no port is free")
-                (let id (tcp_next_id s)
-                  (let now (clock_ns)
-                    (Served (tcp_run (tcp_set_next s (add id 1) (next_ephemeral lport)) (tcp_active id np from lport dst port (tcp_iss now) now))
-                            (append "connecting " (unwords (numbers_words (cons id (cons lport (nil int))))))))))))))
+                (let s2 (tcp_keyed s)
+                  (let id (tcp_next_id s2)
+                    (let now (clock_ns)
+                      (let iss (tcp_iss now (tcp_secret s2) (stack_addr s2) lport dst port)
+                        (Served (tcp_run (tcp_set_next s2 (add id 1) (next_ephemeral lport)) (tcp_active id np from lport dst port iss now))
+                                (append "connecting " (unwords (numbers_words (cons id (cons lport (nil int))))))))))))))))
 
 ; listen PORT NPORT: PORT's connections, from now on, made and told to NPORT;
 ; 0 for a port inet picks. Answered with the port.

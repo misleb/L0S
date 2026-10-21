@@ -88,12 +88,14 @@ case's `etc`, and compares. A case is a directory:
 |---|---|
 | `etc/inittab` | what runs; any other files of `/etc` beside it |
 | `expected` | the boot's whole standard output, exactly |
+| `pattern` | instead of `expected`, for output that differs every boot: an extended regular expression its one line must match whole (BSD grep: no repeat over 255) (`virtio-rng`) |
 | `status` | the kernel's exit status, if not 0 (the first `start`'s, pid 1's) |
 | `stderr` | one line standard error must contain |
 | `typed` | lines typed at the serial line by `tools/slowtype`, with pauses |
 | `font` | if present, the console font is added as `/etc/font.txt`, for `vt`, and the face for scale 2 as `/etc/face2x` |
 | `disk` | if present, the board has a virtio-blk on a fresh `tools/mkdisk` image (`build/e2e/CASE.disk`); without it there is no disk |
 | `layout` | that disk's layout, if not mkdisk's 1 MB one: `SECTORS LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, `@` the case's own cpio; give a UUID to boot from it, since mkfs's own differ every run |
+| `readonly`, `norng` | for a case that types nothing: the disk read-only (`virtio-blk_ro`); no virtio-rng, which every other boot has (`virtio-rng_nodev`) |
 | `bootargs` | the kernel's boot arguments, such as `root=UUID` (`l0 boot IMAGE ARGS`, or `QEMU_APPEND` with `typed`) |
 | `gpu` | the virtio-gpu's options, such as `xres=3840,yres=2160` for a 4K screen, drawn at scale 2 (`draw_4k`) |
 | `net` | if present, the board has a virtio-net on the network its line names, as `-netdev` takes one without its id: `user`, or `user,tftp=tests/e2e/CASE/tftp` for QEMU's TFTP server at 10.0.2.2 (`net`); without it there is no card |
@@ -176,7 +178,7 @@ Their helpers, copied in each script:
   and the cursor unless that is what is checked: a point in a corner is cut
   to show what is beneath.
 - `vt.sh` relies on pids from the demo's inittab and `tests/vt/etc/system`
-  (`vt=$((12 + ...))`):
+  (`vt=$((13 + ...))`):
   a `start` line added there shifts them.
 
 ## Trying things on a running board: the l0s MCP server

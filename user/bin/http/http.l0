@@ -1,12 +1,13 @@
 ; http.l0 -- fetches a page over HTTP/1.0 (RFC 1945), through the network
 ; stack's TCP, inet:
 ;
-;   http [-i] [http://]ADDR[:PORT][/PATH]
+;   http [-i] [http://]HOST[:PORT][/PATH]
 ;                           the page at PATH (/ if none) of the server at
-;                           ADDR, port 80 if none, written to standard
+;                           HOST, port 80 if none, written to standard
 ;                           output; -i writes the response's header first
 ;
-; ADDR is dotted: there is no name service. It sends one request, with
+; HOST is a name, which inet's name server resolves, or an address
+; dotted. It sends one request, with
 ; Connection: close, and reads until the server closes, so the page is as
 ; long as it is; it does not follow a redirect. A status other than 2xx
 ; is said on standard error and fails the command, after the page.
@@ -21,9 +22,9 @@
 
 ; ---------------------------------------------------------------------- URLs
 
-; A page asked for: the server's address and port, the path, and the host
-; as the request names it.
-(data Url (Url int int (list int) (list int)))
+; A page asked for: the server, its name or its address dotted, and its
+; port, the path, and the host as the request names it.
+(data Url (Url (list int) int (list int) (list int)))
 
 ; The URL s names, which may leave out the http://.
 (def url_of ((s (list int))) (Result Url (list int))
@@ -36,18 +37,18 @@
 
 ; The URL of a host and port as hostport, `ADDR` or `ADDR:PORT`, and path.
 (def url_parts ((hostport (list int)) (path (list int))) (Result Url (list int))
-  (match (ip_parse (up_to 58 hostport))
-    ((None) ((Err Url (list int)) (append "not an address: " (up_to 58 hostport))))
-    ((Some addr)
-      (let after (drop_n hostport (length (up_to 58 hostport)))
-        (if (is_empty after)
-            ((Ok Url (list int)) (Url addr 80 path hostport))
-            (match (word_number (drop_n after 1))
-              ((None) ((Err Url (list int)) (append "not a port: " (drop_n after 1))))
-              ((Some port)
-                (if (if (ge port 1) (le port 65535) false)
-                    ((Ok Url (list int)) (Url addr port path hostport))
-                    ((Err Url (list int)) "a port is 1 to 65535")))))))))
+  (let server (up_to 58 hostport)
+    (if (not (dns_name_ok server))
+        ((Err Url (list int)) (append "not a name or an address: " server))
+        (let after (drop_n hostport (length server))
+          (if (is_empty after)
+              ((Ok Url (list int)) (Url server 80 path hostport))
+              (match (word_number (drop_n after 1))
+                ((None) ((Err Url (list int)) (append "not a port: " (drop_n after 1))))
+                ((Some port)
+                  (if (if (ge port 1) (le port 65535) false)
+                      ((Ok Url (list int)) (Url server port path hostport))
+                      ((Err Url (list int)) "a port is 1 to 65535")))))))))
 
 ; The request for a page: HTTP/1.0, which the server closes the connection
 ; after answering, so that the answer's end is the connection's.
@@ -136,18 +137,22 @@
     (let show (if (is_empty argv) false (eq (head argv) "-i"))
       (let rest (if show (tail argv) argv)
         (if (not (eq (length rest) 1))
-            (complain "http [-i] [http://]ADDR[:PORT][/PATH]")
+            (complain "http [-i] [http://]HOST[:PORT][/PATH]")
             (match (url_of (head rest))
               ((Err why) (complain why))
               ((Ok u) (fetch (inet_open) (port_new) u show))))))))
 
-; u fetched through inet n, its notices coming to port np.
+; u fetched through inet n, its server's name resolved, its notices
+; coming to port np.
 (def fetch ((n Inet) (np int) (u Url) (show bool)) int
   (match u
-    ((Url addr port path host)
-      (match (tcp_connect n np addr port)
+    ((Url server port path host)
+      (match (inet_resolve n server)
         ((Err why) (complain why))
-        ((Ok id) (awaiting n np id u (Page show (nil int) false 0) (add (clock_ns) (idle_ns))))))))
+        ((Ok addr)
+          (match (tcp_connect n np addr port)
+            ((Err why) (complain why))
+            ((Ok id) (awaiting n np id u (Page show (nil int) false 0) (add (clock_ns) (idle_ns))))))))))
 
 ; Notices of connection id, until it is gone: the request sent when it
 ; opens, the response taken as it comes, and our end closed when the

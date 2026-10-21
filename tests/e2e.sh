@@ -4,6 +4,8 @@
 # inittab says what runs. Then it compares:
 #
 #   expected   what standard output must be
+#   pattern    or, for output that differs every boot, an extended
+#              regular expression its one line must match whole
 #   status     the exit status, 0 if there is no such file
 #   stderr     a line standard error must hold, if there is such a file
 #
@@ -15,7 +17,8 @@
 # board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
 # case: of its own layout, if NAME/layout holds one, SECTORS then each
 # volume as mkfs takes them, in which @ is the case's own initramfs, to
-# fill a volume from. If NAME/bootargs exists, its words are the
+# fill a volume from; read-only, if NAME/readonly exists, for a case
+# that types nothing. If NAME/bootargs exists, its words are the
 # kernel's boot arguments, such as root=UUID. If NAME/gpu exists, its
 # line is the virtio-gpu's options, such as xres=3840,yres=2160 for a 4K
 # screen. If NAME/net exists, the board has a virtio-net on the network
@@ -31,11 +34,12 @@
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
 # programs go in /bin beside them. The board has a virtio-gpu,
-# shown nowhere, and a virtio keyboard, either way.
+# shown nowhere, a virtio keyboard and tablet, either way, and a
+# virtio-rng, unless NAME/norng exists, for a case that types nothing.
 set -u
 cd "$(dirname "$0")/.."
 L0=${L0:-l0}
-export L0_QEMU_ARGS="-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device"
+export L0_QEMU_ARGS="-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device -device virtio-rng-device"
 BUILD=build
 mkdir -p "$BUILD/asm" "$BUILD/e2e"
 
@@ -86,6 +90,7 @@ for dir in tests/e2e/*/; do
     echo "not ok - $name: mkinitramfs failed"; fail=$((fail+1)); continue
   fi
   disk=""; qemu_args=$L0_QEMU_ARGS; gpu=""
+  [ -f "$dir/norng" ] && qemu_args=${qemu_args/ -device virtio-rng-device/}
   if [ -f "$dir/gpu" ]; then
     gpu=$(cat "$dir/gpu")
     qemu_args=${qemu_args/virtio-gpu-device/virtio-gpu-device,$gpu}
@@ -99,7 +104,9 @@ for dir in tests/e2e/*/; do
     if ! tools/mkdisk "$disk" ${layout[@]+"${layout[@]}"} > /dev/null; then
       echo "not ok - $name: mkdisk failed"; fail=$((fail+1)); continue
     fi
-    qemu_args="$qemu_args -drive file=$disk,if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0"
+    ro=""
+    [ -f "$dir/readonly" ] && ro=",readonly=on"
+    qemu_args="$qemu_args -drive file=$disk,if=none,format=raw,id=disk0$ro -device virtio-blk-device,drive=disk0"
   fi
   # A free port of the host, for what names @PORT@, and the files it is in.
   port=""
@@ -148,6 +155,9 @@ for dir in tests/e2e/*/; do
   fi
   if [ -n "$why" ]; then
     :
+  elif [ -f "$dir/pattern" ]; then
+    [ "$(wc -l < "$out")" -le 1 ] && grep -qxE "$(cat "$dir/pattern")" "$out" ||
+      why="standard output does not match $(cat "$dir/pattern"): $(head -c 200 "$out")"
   elif ! diff -u "$dir/expected" "$out" > "$BUILD/e2e/$name.diff"; then
     why="standard output differs:"$'\n'"$(cat "$BUILD/e2e/$name.diff")"
   elif [ "$status" != "$want_status" ]; then

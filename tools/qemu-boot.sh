@@ -9,9 +9,10 @@
 # driver tells the shell; QEMU's own signal handling of it is off. To
 # quit QEMU itself, type Ctrl-A then x.
 #
-# The board has a virtio-gpu, a virtio keyboard, and a virtio tablet, on
-# modern transports as l0 boot gives them, for the virtio-gpu and
-# virtio-input drivers. QEMU_DISPLAY says where the screen is shown, and
+# The board has a virtio-gpu, a virtio keyboard, a virtio tablet, and a
+# virtio-rng, on modern transports as l0 boot gives them, for the
+# virtio-gpu, virtio-input and virtio-rng drivers; the virtio-rng draws
+# on the host's /dev/urandom. QEMU_DISPLAY says where the screen is shown, and
 # so where keys are typed and the pointer moved: none, the default, shows
 # it nowhere; cocoa is a window on macOS.
 # The PL031 real-time clock counts local time, not UTC, so that the
@@ -75,7 +76,7 @@ len=$(wc -c < "$initramfs" | tr -d ' ')
 exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=localtime \
   -global virtio-mmio.force-legacy=false \
-  -device "$gpu" -device virtio-keyboard-device -device virtio-tablet-device \
+  -device "$gpu" -device virtio-keyboard-device -device virtio-tablet-device -device virtio-rng-device \
   ${disk[@]+"${disk[@]}"} \
   ${net[@]+"${net[@]}"} \
   -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \

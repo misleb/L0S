@@ -102,12 +102,13 @@ booted with `root=UUID`, or else from the initramfs.
 | 7 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
 | 8 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
 | 9 | `virtio-net` | the network card's driver. It serves `nic`, telling `inet` of every frame the card takes, and putting on the wire every frame `inet` gives it |
-| 10 | `inet` | the IPv4 stack, at the address a DHCP server gives it (`inet dhcp`; 10.0.2.15 on QEMU's user network). It serves `inet`, for `run net` and `run tftp` (see [The network](#the-network)) |
-| 11 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 12 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 13 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
-| 14 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
-| 15 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
+| 10 | `inet` | the IPv4 stack, at the address and with the name server a DHCP server gives it (`inet dhcp`; 10.0.2.15 and 10.0.2.3 on QEMU's user network), and keeps the lease. It serves `inet`, for `run net`, `run tftp` and `run http` (see [The network](#the-network)) |
+| 11 | `virtio-rng` | the entropy device's driver. It serves `random`, the host's randomness, which `fs` makes UUIDs of and `inet` keys TCP's first sequence numbers with |
+| 12 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
+| 13 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 14 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 15 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
+| 16 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -215,6 +216,7 @@ which refuse every change (`permission denied`), and the disk's, under
 | `mkdir DIRECTORY ...` | makes each directory, empty, in one that is there, on a volume |
 | `df` | each volume's size, the room its files and directories take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
 | `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open, and for the system volume |
+| `unmount VOLUME` | takes a volume away: `fs` stops serving it and the kernel unmounts it, until a rescan (Disks' Refresh) finds it again; refused while any file is open, and for the system volume |
 | `partition SECTORS [START]` | a new partition of SECTORS in the disk's GPT, from START or where it first fits, and says its UUID (see [Volumes](#volumes)) |
 | `mkfs UUID LABEL` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL` |
 
@@ -244,21 +246,22 @@ Things to try:
 
   ```
     PID  PARENT  PROGRAM       STATE
-      1       0  boot          waiting for pid 11
+      1       0  boot          waiting for pid 12
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 12
-      4       0  virtio-input  waiting for a message on port 11
+      3       0  virtio-gpu    waiting for a message on port 14
+      4       0  virtio-input  waiting for a message on port 13
       5       0  virtio-input  waiting for a message on port 2
       6       0  rtc           sleeping
-      7       0  virtio-blk    waiting for a message on port 4
-      8       0  fs            waiting for a message on port 15
-      9       0  virtio-net    waiting for a message on port 6
-     10       0  inet          waiting for a message on port 7
-     11       1  sh            running
-     12       1  wm            waiting for a message on port 14
-     13       1  vt            waiting for a message on port 10
-     14       1  procmon       sleeping
-     15      13  sh            waiting for a message on port 19
+      7       0  virtio-blk    waiting for a message on port 5
+      8       0  fs            waiting for a message on port 16
+      9       0  virtio-net    waiting for a message on port 7
+     10       0  inet          waiting for a message on port 8
+     11       0  virtio-rng    waiting for a message on port 10
+     12       1  sh            running
+     13       1  wm            waiting for a message on port 17
+     14       1  vt            waiting for a message on port 12
+     15       1  procmon       sleeping
+     16      14  sh            waiting for a message on port 21
   ```
 
   It lists the processes that have not exited. The shell asking is always
@@ -339,9 +342,9 @@ Job control:
 - **`kill PID`** ends any process but the shell itself: a background
   job, another shell's job, another shell, or `wm`. Drivers, the
   programs with a `dev` line, can't be killed, since the system would
-  lose their devices, so `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk` and
-  `virtio-net` stay.
-  Killing pid 11, the serial shell, from a window's shell stops the
+  lose their devices, so `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`,
+  `virtio-net` and `virtio-rng` stay.
+  Killing pid 12, the serial shell, from a window's shell stops the
   system, as its `exit` does: `boot`, pid 1, waiting for it, exits too.
 
 Editing, on any terminal: Backspace erases a character and Ctrl-U erases
@@ -698,19 +701,24 @@ through **the disk protocol**
 travels in a message. A client shares a buffer of its own pages with the
 driver (`shm_share`), and the device reads or writes those pages itself,
 by DMA, from a chain of descriptors the driver builds over them. The
-driver makes one request of the device at a time, and waits for it by
-polling the used ring, as `virtio-gpu` does (`virtq_wait` in
-[user/lib/sys/virtio.l0](user/lib/sys/virtio.l0)).
+driver makes one request of the device at a time, and waits for the
+device's interrupt, which the kernel sends to a port of the driver's
+own, so that the requests waiting on its other port stay there. It takes
+two of the device's features, if it offers them: `VIRTIO_BLK_F_FLUSH`,
+so that `flush` empties the disk's write cache, and `VIRTIO_BLK_F_RO`,
+so that it knows a disk is read-only (QEMU's `readonly=on`) and refuses
+its writes itself.
 
 | Request | Does |
 |---|---|
-| `info` | `disk SECTORS 512`: the disk's size in sectors, and a sector's in bytes |
+| `info` | `disk SECTORS 512`: the disk's size in sectors, and a sector's in bytes; `disk SECTORS 512 ro` for a read-only disk |
 | `read SECTOR COUNT VA` | COUNT sectors from SECTOR, 1 to 128, put by the device into the client's pages shared with the driver at VA |
 | `write SECTOR COUNT VA` | the same, taken from those pages and written to the disk |
+| `flush` | `ok` once every write answered before it is on the disk itself, not only in its cache; at once for a disk with no cache, which writes through |
 
 The reply is `ok`, `disk SECTORS 512` for `info`, or `error: WHY`: a
-count out of range, sectors past the disk's end, a buffer not shared
-with the driver, or the device's own failure.
+count out of range, sectors past the disk's end, a write to a read-only
+disk, a buffer not shared with the driver, or the device's own failure.
 
 `run disk info`, `run disk read SECTOR [COUNT]` (shown as `hexdump -C`
 shows bytes) and `run disk write SECTOR WORDS...` use it from a shell.
@@ -768,9 +776,11 @@ The UUIDs are of **version 7** ([user/lib/format/uuid.l0](user/lib/format/uuid.l
 RFC 9562): the time in Unix milliseconds in their first 48 bits, so they
 sort in the order they were made, then noise. `fs` asks `rtc clock` the
 time, and the board's clock keeps this machine's local time, not UTC
-(see [The desktop](#the-desktop)); with no clock, the time is 0. L0S
-has no source of randomness, so the noise is splitmix64's, seeded from
-the clock: it tells apart UUIDs made apart, but can be guessed.
+(see [The desktop](#the-desktop)); with no clock, the time is 0. The
+noise is `random`'s, the entropy device's bytes (see
+[Randomness](#randomness)); on a board without the device it is
+splitmix64's, seeded from the clock, which tells apart UUIDs made apart
+but can be guessed.
 
 ```
 l0s> partition 400
@@ -818,8 +828,9 @@ whose first mount is `/`: the initramfs, which the kernel answers for
 itself, until `root_switch` makes a volume the system volume, `/` for
 good. After it come the volumes, each at `/Volumes/LABEL` from the port
 of the server that mounted it with `fs_mount`, with its partition's
-UUID; the system volume is there too. They go when that port does, but
-for `/`, which stays the system volume's though its server goes, and is
+UUID; the system volume is there too. A volume goes when its server
+unmounts it with `fs_unmount`, or when that port goes, but for `/`,
+which stays the system volume's though its server goes, and is
 then answered -5, as any call on a gone server's files is: there is no
 going back to the initramfs, which the kernel gave up. `/Volumes`
 itself is always there, a directory holding only the volumes: nothing
@@ -845,9 +856,9 @@ absolute, to where it is mounted:
 
 **The fs protocol** ([user/lib/proto/fs.l0](user/lib/proto/fs.l0)) is what a file
 server serves on the port it mounts from. The kernel sends the first
-six; programs send `list`, `mkdir`, `stat`, `chmod`, `df` and `format`
-themselves, to the port `mount_at` gives, as `ls`, `mkdir`, `df` and
-`format` in the shell do (`fs_server_path` gives a path of the system
+six; programs send `list`, `mkdir`, `stat`, `chmod`, `df`, `format` and
+`unmount` themselves, to the port `mount_at` gives, as `ls`, `mkdir`,
+`df`, `format` and `unmount` in the shell do (`fs_server_path` gives a path of the system
 volume as its server knows it, in `/Volumes/LABEL`), and `rescan`,
 `partition` and `mkfs` to the port registered as `fs`. `fs_df_on`,
 `fs_format_on`, `fs_rescan_on`, `fs_partition_on` and `fs_mkfs_on` take
@@ -869,7 +880,8 @@ refusal's word may be followed by why, in words.
 | `chmod PATH +x` | 0, the file at PATH marked a program, or with `-x` not; -8 for a directory |
 | `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files, in every directory |
 | `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open, or for the system volume |
-| `rescan` | the partition table and every volume read again, as at the start, and served in place of those before, each new label mounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open; -5 if the table is bad. A label that has gone stays mounted, there being no unmount, and is answered as a volume not served: -3, or -9 to write |
+| `unmount VOLUME` | 0, the volume no longer served, and unmounted with `fs_unmount`, its label free, until a rescan finds it again; -4 while any file is open, since a handle names its volume by where it is among them, and for the system volume; -3 for a volume not served |
+| `rescan` | the partition table and every volume read again, as at the start, and served in place of those before, each new label mounted and each that has gone unmounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open; -5 if the table is bad. The system volume's label stays mounted though it has gone, and is answered as a volume not served: -3, or -9 to write |
 | `partition COUNT [START]` | a new partition of COUNT sectors in the GPT, both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad. A disk with no table gets one |
 | `mkfs UUID LABEL` | a new, empty volume labelled LABEL on the partition with that UUID, the partition named LABEL, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, -6 if the partition is too small |
 
@@ -889,7 +901,9 @@ metadata and every directory, mounts each by its label, with its
 partition's UUID, from one port, and then registers
 that port as `fs`, so that a program can wait for every volume with
 `name_wait`. It keeps the metadata and the directories in memory and
-writes them back after the data whenever they change, only the sectors
+writes them back after the data whenever they change, with a `flush`
+of the disk between, so that its cache cannot put the metadata down
+before the data it points at; only the sectors
 that changed: the table's that hold the marks a change made, and the
 directory's that holds the entry, every sector of a directory's new
 cluster, those within a cluster of each other in one request:
@@ -951,10 +965,11 @@ waited for, as `virtio-blk` waits. It serves **the nic protocol**
 ARP, IPv4, ICMP, UDP and TCP, with each packet built and read in
 [packet.l0](user/sbin/inet/packet.l0) and [segment.l0](user/sbin/inet/segment.l0)
 (TCP's). It listens to `nic`, and is
-started as `inet dhcp`, which takes its address, netmask and router from
-a DHCP server (below), or as `inet [ADDR/PREFIX [GATEWAY]]`, which sets
-them, by default 10.0.2.15/24 behind 10.0.2.2, QEMU's user network's
-own. It answers ARP for its address and
+started as `inet dhcp`, which takes its address, netmask, router and
+name server from a DHCP server (below), or as `inet [ADDR/PREFIX
+[GATEWAY [DNS]]]`, which sets them, by default 10.0.2.15/24 behind
+10.0.2.2, with 10.0.2.3 as the name server, QEMU's user network's own.
+It answers ARP for its address and
 keeps up to 64 neighbours' addresses that ARP tells it; holds up to 16
 datagrams for 3 seconds while ARP finds their next hop, the gateway for
 any address off the link, asking again after a second; answers ICMP echo
@@ -970,6 +985,7 @@ done, which is how its tests see it. It serves **the inet protocol**
 | Request | Does |
 |---|---|
 | `info` | `inet ADDR MASK GATEWAY MAC`: the interface |
+| `dns` | `dns ADDR`: the name server the interface has, `0.0.0.0` for none, which a client's `inet_resolve` asks |
 | `stats` | `rx N tx N dropped N arp N`: frames taken and sent, those passed over or lost, and the neighbours known |
 | `arp` | a line `ADDR MAC` for each neighbour, by address |
 | `bind PORT` | `bound PORT`: UDP datagrams to PORT come to the reply port from now on, as notices `udp SRC SPORT DPORT`, a newline, and the data; `bind 0` for a port `inet` picks, from 49152. Refused if another client holds PORT |
@@ -1000,14 +1016,21 @@ holds the data it has sent until it is acknowledged, and sends it again
 when no acknowledgement comes: after 1 second, then 2, 4, 8, 16 and 16
 more, and then gives up with a reset and `closed timeout`. A window of 8192 bytes is offered
 always, the data being given to the client as it comes; the peer's is
-kept, and a closed one probed with a byte. Segments carry at most 1460 bytes,
+kept, and a closed one probed with a byte. A segment that comes before
+the bytes ahead of it is held, cut to the window, up to 16 of them, and
+given to the client with them once they come, so that a segment lost
+costs only itself. Segments carry at most 1460 bytes,
 or what the peer's SYN says, so that no frame is over 1514. FIN
 closes in either order, or both together, and TIME-WAIT, 4 seconds, lets
 the client know the connection ended at once. A RST ends a connection
 only if it is where the next byte is expected, as RFC 5961 has it, and a
 segment to no connection or listener is answered with one. The TCP
 checksum covers IPv4's pseudo-header. A connection to `inet`'s own address
-is made inside it, with no frame.
+is made inside it, with no frame. Its first sequence number is RFC
+6528's: a clock that ticks every 4 microseconds, moved on by a hash of
+the connection's ends keyed with a secret `inet` asks `random` for when
+its first connection is made, so that one who does not know the secret
+cannot guess where another's connection starts.
 
 A client asks through its own reply port, and has the connection's notices
 come to another, named in `connect` and `listen`, so that an answer is never
@@ -1035,15 +1058,34 @@ to 255.255.255.255 port 67, as datagrams of its own, which wait in the
 same queue as every frame it sends. The OFFER of an address and a
 server, for this card and this exchange's xid, is taken; the ACK of that
 address gives the stack its address, the netmask it names, or the
-address's class's, and the first router it names, or none; a NAK begins
-again. It sends again every 2 seconds, 5 times in all, and if no server
-has answered says so and exits 1. The lease's time is read but not
-used: the address is not renewed. Giving the demo another
+address's class's, the first router it names, or none, and the first
+name server, or none; a NAK begins again. It sends again every 2
+seconds, 5 times in all, and if no server has answered says so and
+exits 1. Giving the demo another
 network, `make demo NET=user,net=192.168.7.0/24,dhcpstart=192.168.7.50`,
 shows the address it takes is the server's.
 
+The lease is kept. Port 68 stays bound, and `inet` asks `rtc clock` to
+tell it the time every minute, when it looks at the lease: once half
+its time is gone it sends a REQUEST from its address to the server that
+gave it (RENEWING), and once seven eighths are, broadcast to any server
+(REBINDING), each asked again every minute until it is answered; an
+ACK begins the lease again, and a NAK, or the lease running out, takes
+the address away, and the exchange begins again from a DISCOVER. A
+lease of 0xFFFFFFFF seconds is for ever.
+
+**Names** (RFC 1035). A client resolves a name itself, with
+`inet_resolve` in [inet.l0](user/lib/proto/inet.l0): it asks `inet`
+for its name server (`dns`), binds a UDP port, sends the query for the
+name's IPv4 address, built in [dns.l0](user/lib/format/dns.l0), to port
+53 there, and reads the first A record of the answer, past any CNAME;
+an address dotted is taken as it is, with nothing asked. It waits 2
+seconds for the answer, asks 3 times in all, and drops anything else
+that comes to its port meanwhile. `net`, `tftp` and `http` take names
+this way.
+
 `run net` uses it from a shell, as `ifconfig` and `ping` would, and
-`run tftp ADDR FILE [PATH]` fetches a file over TFTP, from QEMU's TFTP
+`run tftp HOST FILE [PATH]` fetches a file over TFTP, from QEMU's TFTP
 server, which serves a directory at the gateway when the demo is made
 with `make demo NET=user,tftp=DIR`:
 
@@ -1058,25 +1100,52 @@ l0s> run net ping 10.0.2.2
 3 sent, 3 received
 l0s> run net arp
 10.0.2.2 52:55:0a:00:02:02
+l0s> run net dns
+dns 10.0.2.3
+l0s> run net resolve example.com
+104.20.23.154
 ```
 
-QEMU's user network answers pings to its gateway itself, and its TFTP
-server is there too; what goes beyond the gateway is QEMU's to carry.
-`run net send ADDR PORT TEXT...` sends a datagram, and `run net recv
-PORT` waits for one and shows it.
+QEMU's user network answers pings to its gateway itself, its TFTP
+server is there too, and its name server, 10.0.2.3, asks the host's;
+what goes beyond the gateway is QEMU's to carry. `run net resolve NAME
+[SERVER [PORT]]` resolves a name, as the interface's name server
+answers, or another's; `run net ping HOST` and `run net send HOST PORT
+TEXT...` take names too, and `run net recv PORT` waits for a datagram
+and shows it.
 
-`run http [-i] [http://]ADDR[:PORT][/PATH]` fetches a page over HTTP/1.0
+`run http [-i] [http://]HOST[:PORT][/PATH]` fetches a page over HTTP/1.0
 (RFC 1945), through TCP, and writes it, with its header first for `-i`.
 QEMU's user network reaches the host's loopback as 10.0.2.2, so a server
 on the host, say `python3 -m http.server 8000 --bind 127.0.0.1`, is
-fetched with `run http 10.0.2.2:8000/`. It speaks to addresses only, with
-no name service, and does not follow a redirect; a status that is not
+fetched with `run http 10.0.2.2:8000/`. HOST is a name, resolved first,
+or an address. It does not follow a redirect; a status that is not
 2xx is said, after the page, and fails the command. `run net tcp` shows
 the connections, and `run net echo PORT` listens to TCP PORT, sends back
 what the first connection sends, and says how much, for a connection
 from the host to a port forwarded to the board
 (`make demo NET=user,hostfwd=tcp:127.0.0.1:7000-:7000`, then `nc 127.0.0.1
 7000`).
+
+### Randomness
+
+`virtio-rng` ([user/sbin/virtio-rng](user/sbin/virtio-rng/virtio-rng.l0))
+drives QEMU's virtio-rng, which every boot gives the board
+(`tools/qemu-boot.sh`, the Makefile's `DEVICES`, `tests/e2e.sh`), and
+which reads the host's `/dev/urandom`. It serves **the random protocol**
+([user/lib/proto/random.l0](user/lib/proto/random.l0)) as `random`:
+
+| Request | Does |
+|---|---|
+| `bytes N` | `random HEX`: N bytes, 1 to 1024, that the device gave, as 2N lowercase hex digits |
+
+`random_bytes` asks for some, at once with no waiting, and says why
+there are none when no driver has registered `random`, so its clients do
+without on a board with no device: `fs`, which makes the noise of a new
+partition's UUID of it (see [Volumes](#volumes)), falling back to the
+clock's mixer, and `inet`, which keys TCP's first sequence numbers with
+a word of it (see [The network](#the-network)), falling back to the
+clock alone. `run random [N]` writes N bytes.
 
 ## How it boots
 
@@ -1090,10 +1159,10 @@ l0 boot build/kernel.img < OUT            # the kernel reads the initramfs on st
 keeps it, made anew each time:
 - **`/bin`**, the commands, for people and agents: `sh`, `cat`, `hello`,
   `init`, `install`, `ping`, `spin`, `nap`, `draw`, `keys`, `windows`,
-  `disk`, `net`, `tftp`, those in `user/bin`;
+  `disk`, `net`, `tftp`, `http`, `random`, those in `user/bin`;
 - **`/sbin`**, the drivers and services: `boot`, `uart`, `rtc`,
-  `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `fs`, `inet`,
-  `wm`, `echo`, those in `user/sbin`;
+  `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`,
+  `fs`, `inet`, `wm`, `echo`, those in `user/sbin`;
 - **`/Applications`**, the desktop's apps, each in a bundle (below), those
   in `user/apps`.
 
@@ -1162,7 +1231,7 @@ exits; the kernel then exits with pid 1's status.
 
 Device authority comes only from `dev` lines, and only to a program of
 the initramfs. The demo grants it to `uart`,
-`rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk` and `virtio-net`, so the shell can start `rtc`
+`rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net` and `virtio-rng`, so the shell can start `rtc`
 without having it itself. `wm`, `vt`, `fs` and `inet` have none: they reach only
 memory they share, and messages. In the demo's inittab, then, the drivers' and
 services' paths are `/sbin/...`, and in its `/etc/system` the terminals'
@@ -1454,6 +1523,7 @@ otherwise as its type's first failure.
 | 286 | `root_switch label` | `Switch`: `Switched`, `SwitchDenied`, `SwitchDone`, `SwitchNoVolume`, `SwitchBadLabel` | 0, the volume mounted as label made `/`, the system volume, for good, and the initramfs's bytes given up (see [Booting from a volume](#booting-from-a-volume)); -6 if the caller's program is not the initramfs's, -2 if `/` is a volume already, -1 if no such volume is mounted, -5 no label |
 | 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, or not an ELF the kernel starts, -4 the whole over 64 MB of image with the path and arguments, -5 bytes not laid out as `spawn_image_bytes` lays them |
 | 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, those given and those L0's `frame_free_count` says are left, about 765 MB with `-m 2G`, and how many of them are given, each process's own and every shared or DMA page once, however many processes map it; none under another operating system. What is not given is free; the kernel's page tables take from it, so the total moves a little |
+| 289 | `fs_unmount label port` | `Unmounting`: `Unmounted`, `UnmountNotMounted`, `UnmountDenied`, `UnmountBadLabel` | 0, the volume label, which the caller mounted from port, unmounted: `/Volumes/LABEL` is in no volume from then on, and the label free; -1 if the port is not the caller's or mounted no such volume, -6 for the system volume, which is `/` for good, -5 no label |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1478,8 +1548,8 @@ initramfs, so that the Makefile finds it there:
 
 | Directory | What | In the initramfs |
 |---|---|---|
-| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `nap`, `net`, `ping`, `spin`, `tftp`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
+| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
@@ -1489,7 +1559,7 @@ every `.l0` in its directory is part of it.
 | Program | What it does |
 |---|---|
 | `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; starts `/etc/system`'s programs by path, and exits with the first one's status |
-| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df` and `format`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
+| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format` and `unmount`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font (at scale 2, cells of 16×32 in the face's Source Code Pro), in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
@@ -1503,14 +1573,16 @@ every `.l0` in its directory is part of it.
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
-| `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page. With no virtio-blk on the board it says so on stderr and exits 0. It polls the queue rather than taking interrupts |
+| `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
-| `inet` | the IPv4 stack, `inet dhcp` or `inet [ADDR/PREFIX [GATEWAY]]`: the address, netmask and router a DHCP server gives it, or those given, 10.0.2.15/24 behind 10.0.2.2 by default (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
-| `net` | a client of `inet`: `net` shows the interface, `net stats`, `net arp` and `net tcp` what `inet` counts and knows (the last, its TCP connections and listeners), `net ping [-q] ADDR [COUNT]` pings, a second apart, and says how long each reply took, failing if none came, `net send ADDR PORT TEXT...` sends a datagram, `net recv PORT` waits for one and shows it, and `net echo PORT` listens to a TCP port and sends back what its first connection sends |
-| `http` | a client of `inet`: `http [-i] [http://]ADDR[:PORT][/PATH]` fetches a page over HTTP/1.0 (RFC 1945) through TCP, and writes its body, and with `-i` its header first; says the status, after the page, if it is not 2xx, and fails; the address is dotted, there being no name service |
-| `tftp` | a client of `inet`: `tftp ADDR FILE [PATH]` fetches FILE over TFTP (RFC 1350), in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
+| `virtio-rng` | a user-space driver for QEMU's virtio-rng, the entropy device, which draws on the host's `/dev/urandom`, serving the random protocol as `random` (see [Randomness](#randomness)). It finds the device, sets up its one queue of 8 entries in a DMA page, and for `bytes N` offers the device a buffer to fill, again until it has N, waiting for each as `virtq_wait` does. With no virtio-rng on the board it says so on stderr and exits 0 |
+| `inet` | the IPv4 stack, `inet dhcp` or `inet [ADDR/PREFIX [GATEWAY [DNS]]]`: the address, netmask, router and name server a DHCP server gives it, its lease renewed and rebound as the clock's minutes pass, or those given, 10.0.2.15/24 behind 10.0.2.2, with 10.0.2.3 as the name server, by default (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
+| `net` | a client of `inet`: `net` shows the interface, `net stats`, `net arp`, `net dns` and `net tcp` what `inet` counts and knows (the last, its TCP connections and listeners), `net resolve NAME [SERVER [PORT]]` resolves a name, `net ping [-q] HOST [COUNT]` pings, a second apart, and says how long each reply took, failing if none came, `net send HOST PORT TEXT...` sends a datagram, `net recv PORT` waits for one and shows it, and `net echo PORT` listens to a TCP port and sends back what its first connection sends. A HOST is a name, resolved first, or an address |
+| `http` | a client of `inet`: `http [-i] [http://]HOST[:PORT][/PATH]` fetches a page over HTTP/1.0 (RFC 1945) through TCP, and writes its body, and with `-i` its header first; says the status, after the page, if it is not 2xx, and fails; HOST is a name, which `inet`'s name server resolves, or an address |
+| `tftp` | a client of `inet`: `tftp HOST FILE [PATH]` fetches FILE over TFTP (RFC 1350), from a host named or dotted, in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
+| `random` | a client of `random`: `random [N]` writes N bytes of the entropy device's, 16 if not given, 1 to 1024, as hex digits and a newline, waiting a second at most for the driver to register; fails, saying why, without one |
 | `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
+| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `unmount`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0 |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. At scale 2 it lays the desktop out at half the screen's size each way and draws it at the screen's resolution. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
@@ -1533,22 +1605,24 @@ name in a library is taken in every program that links it.
 | [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
 | [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div`, `format_size` (a size as GNOME says it, `782.3 kB`) | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
-| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
+| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
 | [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order | every program |
 | [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
-| [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net` |
+| [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng` |
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
-| [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs` |
-| [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
+| [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs`, `inet` |
+| [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
+| [proto/random.l0](user/lib/proto/random.l0) | the random protocol: its request and reply, and `random_bytes` and `random_word`, which ask `virtio-rng` for bytes and do without when it is not there (`RANDOM`) | `virtio-rng`, `random`, `fs`, `inet` |
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
 | [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text (`NICLIB`) | `virtio-net`, and with `INETLIB` |
-| [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`) | `inet`, `net`, `tftp`, `http` |
+| [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; resolving a name, `inet_resolve`, by asking the interface's name server over UDP; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0` and `dns.l0`) | `inet`, `net`, `tftp`, `http` |
 | [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
 | [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `disks`, `tools/mkfs`, and every program `PATHS` is in |
+| [format/dns.l0](user/lib/format/dns.l0) | DNS's messages, RFC 1035: the query for a name's IPv4 address, and the first A record read out of an answer, past CNAMEs and name pointers (`DNSLIB`, in `INETLIB`) | with `INETLIB` |
 | [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
 | [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
@@ -1568,7 +1642,9 @@ name in a library is taken in every program that links it.
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
-- `expected`, its standard output;
+- `expected`, its standard output; or `pattern`, for output that
+  differs every boot, an extended regular expression its one line must
+  match whole;
 - `status`, if not 0;
 - `stderr`, a line standard error must hold;
 - `typed`, keys to type at the serial line;
@@ -1578,6 +1654,10 @@ Each case of `tests/e2e/` is a directory:
 - `layout`, that disk's, if not mkdisk's own: SECTORS, then each volume
   as mkfs takes it, `LABEL:START:COUNT[:ARCHIVE[:UUID]]`, `@` the case's
   own initramfs, to fill a volume with;
+- `readonly`, if that disk is to be read-only, for a case that types
+  nothing;
+- `norng`, if the board is to have no virtio-rng, for a case that types
+  nothing;
 - `bootargs`, the kernel's boot arguments, such as `root=UUID`;
 - `gpu`, the virtio-gpu's options, such as `xres=3840,yres=2160`;
 - `net`, if the board is to have a virtio-net: the network it is on, as
@@ -1590,7 +1670,7 @@ Each case of `tests/e2e/` is a directory:
   host's loopback, chosen for the boot.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
-`etc`, boots it, and compares. Twenty-one cases type a session through
+`etc`, boots it, and compares. Twenty-three cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -1626,12 +1706,16 @@ Ctrl-C as a person would:
   volumes, `ls` everything, `rm` it; be refused a `write` to the
   initramfs; `cp` a file of the initramfs to a volume; and `format` a
   volume, `ls` showing it empty;
+- `unmount`, on a disk of its own, writes a file on scratch, then
+  `unmount`s scratch: `df` and `ls /Volumes` show data alone, the file is
+  in no volume, and scratch cannot be unmounted again, nor what is not a
+  volume;
 - `dirs` makes directories on a volume, nested, writes, lists, moves and
   removes in them, is refused a directory where one is, in one that is
   not, the removal of one with something in it, and one in the
   initramfs; and runs `hello` copied onto a volume, its copy marked a
   program, and is told a text file copied there is not one;
-- `install`, on a disk of 8 MB whose layout gives System a known UUID,
+- `install`, on a disk of 16 MB whose layout gives System a known UUID,
   has `install` copy the initramfs onto it, lists and reads the copy,
   runs `hello` from it, and is refused a volume not mounted and no volume;
 - `rootboot` boots with `root=` System's UUID, System filled from the
@@ -1654,7 +1738,13 @@ Ctrl-C as a person would:
 - `dhcp`, on a QEMU user network of 192.168.7.0/24 whose server offers
   192.168.7.50, starts `inet dhcp`, and has `net` show that address, the
   netmask and the router, which only the server's ACK can have given it,
-  ping the router, and show what ARP found;
+  and the name server, 192.168.7.3, ping the router, and show what ARP
+  found;
+- `dns`, with [a small name server](tests/e2e/dns/server.py) on the
+  host's loopback, has `net dns` show the interface's name server, and
+  `net resolve` ask the host's for a name with an address, an alias of
+  it, answered with a CNAME and then the address, a name with no
+  address, and one it does not know; and take an address as it is;
 - `http`, with [a small server](tests/e2e/http/server.py) on the host's
   loopback, has `http` fetch a page, the same with its header, one of
   300 lines, more than a window holds, and one that is not there, said
@@ -1671,11 +1761,16 @@ Ctrl-C as a person would:
 line, which is refused the device, `virtio-blk_nodisk` the disk's driver
 on a board with no disk, `fs_nodisk` the file server there,
 `virtio-net_nocard` the network's driver on a board with no card, and
-`inet_nocard` the stack with no driver, none of which is a failure.
-`garbage`
+`inet_nocard` the stack with no driver, and `virtio-rng_nodev` the
+entropy device's driver on a board with none, none of which is a
+failure. `virtio-blk_ro` has `disk` write to a read-only disk, which the
+driver refuses itself, having learnt it from the device, and
+`virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
+of a line, which its `pattern` checks. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
-shows, a virtio keyboard, and a virtio tablet; only a case with a `disk`
+shows, a virtio keyboard, a virtio tablet, and a virtio-rng unless the
+case has a `norng` file; only a case with a `disk`
 file has a virtio-blk, and only one with a `net` file a virtio-net.
 
 [tests/gpu-screen.sh](tests/gpu-screen.sh) boots the initramfs of
@@ -1870,38 +1965,45 @@ a bad buffer, and wait on nothing.
   at most the GPT's 128. One
   file server, `fs`, serves the first disk's volumes, one request at a
   time, and a read moves at most 4092 bytes, what a reply holds. A
-  write is as safe as the order it is made in, its data and then the
-  metadata, and no more: a crash between the two loses the write's
-  changes to the file's size and chain; on a volume whose metadata is
-  more than a cluster, a crash between the table's sector and the
-  directory's leaves the two disagreeing, and `fs` refuses the volume
-  rather than follow it; and the disk's own cache is never flushed. A file open
+  write is as safe as the order it is made in, its data, a flush, and
+  then the metadata, and no more: a crash between the two loses the
+  write's changes to the file's size and chain; on a volume whose
+  metadata is more than a cluster, a crash between the table's sector
+  and the directory's leaves the two disagreeing, and `fs` refuses the
+  volume rather than follow it; and nothing flushes the metadata after
+  it, so a write answered may still be in the disk's cache. A flush
+  each write costs what the host's sync does. A file open
   cannot be removed or renamed over, where Unix would let it go once
   closed. Any process may mount a label no one has, as any may register
-  a name, and nothing unmounts a volume but its server's port going:
-a label that a `rescan` no longer finds stays mounted, answered -3,
-and a rescan is refused while any file is open. Nothing removes or
-resizes a partition.
-- **A UUID's noise can be guessed, and its time is local.** There is no
-  source of randomness, so the noise of a version 7 UUID is a mixer's,
-  seeded from the clock; and the board's clock, `rtc clock`, keeps this
-  machine's local time, not UTC, so a UUID's time is off by its zone, 0
-  where no clock runs. They are unique on one machine, not proof against
-  a forger.
+  a name. `unmount`, as a rescan, is refused while any file is open, on
+  any volume, since a handle names its volume by where it is among
+  `fs`'s; and the system volume is never unmounted, though a rescan no
+  longer finds it. Nothing removes or resizes a partition.
+- **A UUID's time is local, and its noise needs the device.** The board's
+  clock, `rtc clock`, keeps this machine's local time, not UTC, so a
+  UUID's time is off by its zone, 0 where no clock runs. Its noise is the
+  entropy device's, but on a board with no virtio-rng a mixer's, seeded
+  from the clock, which can be guessed.
 - **The disk is one virtio-blk, one request at a time.** `virtio-blk`
-  drives the first disk on the board, polls for each request rather than
-  taking the interrupt, and moves at most 128 sectors a request. It
-  accepts no device features, so it never flushes a write cache and
-  never learns a disk is read-only, whose writes the device then fails.
+  drives the first disk on the board and moves at most 128 sectors a
+  request. It waits for the device's interrupt with no timeout, so a
+  device that never answers holds it, and every client of the disk,
+  for good.
 - **The network is one card, IPv4's datagrams and a small TCP.**
   `virtio-net` drives the first card on the board, sends one frame at a
   time and waits for the card to take it, and accepts no feature but
   its address, so it neither offloads checksums nor merges buffers.
   `inet` has one interface, set by its arguments or by DHCP, which
-  gives it an address once, at its start, with no renewal, no
-  rebinding, and no other option than the mask and the first router, so
-  that no DNS server is learnt, and there is no DNS client either, so
-  every address is typed as numbers; it neither
+  takes no other options than the mask, the first router and the first
+  name server. Its lease is looked at only when `rtc clock` tells it a
+  minute has begun, so with no clock running it is never renewed, and
+  a lease shorter than two minutes runs out before it is; one taken
+  away leaves the clients' sockets and connections bound to an address
+  that is gone. A name is resolved by each client, with no cache, to
+  its first IPv4 address only, from one name server, over UDP alone, so
+  an answer cut short is not asked again over TCP; while it waits the
+  resolver drops anything else that comes to its client's port, and
+  its query's id is the clock's. It neither
   fragments nor takes fragments, so a datagram holds at most 1472 bytes;
   it has no IP options, and passes over every protocol but ICMP, UDP
   and TCP, without saying so; and it keeps at most 64 neighbours,
@@ -1911,9 +2013,9 @@ resizes a partition.
 - **TCP has the essentials, and little else.** `inet` holds 32
   connections, each with at most 16384 bytes of the client's data not
   yet acknowledged (more resets it), and offers a window of 8192 bytes
-  that never changes. A segment that arrives out of order is dropped,
-  not kept, and asked for again by an acknowledgement, so a lost segment
-  makes the peer send everything after it again; the retransmission timeout
+  that never changes. At most 16 segments that arrive out of order are
+  held, within the window; one more is dropped, and asked for again once
+  those before it come. The retransmission timeout
   is 1 second, doubled each time, whatever the round trip is, and every
   segment is acknowledged at once. There is no congestion control, no
   selective acknowledgement, window scaling, timestamps, urgent data,
@@ -1924,8 +2026,10 @@ resizes a partition.
   overflows it. Notices carry what came in the segments it came in, at
   most 1460 bytes each, so a client sees no message boundary of the
   sender's. A connection's owner is the pid that opened it, which is all
-  the check there is, and the first sequence number is the clock's, so
-  guessable.
+  the check there is. The first sequence number's offset is L0's `hash`
+  of the ends and the secret, which is no cryptographic hash, and on a
+  board with no virtio-rng there is no secret, so the first sequence
+  number is the clock's, and guessable.
 - **Disks shows the one disk, and cannot take anything away.** It can
   make a partition of free space, give a partition a new volume, format
   a mounted volume, keeping its label and size, and have `fs` rescan;

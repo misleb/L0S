@@ -5,6 +5,8 @@
 ;   info                    inet ADDR MASK GATEWAY MAC: the interface,
 ;                           its address, netmask and gateway dotted, its
 ;                           Ethernet address as six hex pairs
+;   dns                     dns ADDR: the name server the interface has,
+;                           0.0.0.0 for none, which inet_resolve asks
 ;   stats                   rx N tx N dropped N arp N: frames taken and
 ;                           sent, those passed over, the neighbours known
 ;   arp                     a line ADDR MAC for each neighbour known
@@ -71,8 +73,9 @@
 ; connection's last notice is closed.
 ;
 ; An address is an int here, its first byte the most significant: 10.0.2.15
-; is 167772687. Linked, with nic.l0, into the stack and into the programs
-; that use it, by the Makefile's INETLIB.
+; is 167772687. inet_resolve finds a name's, asking the name server over
+; UDP (format/dns.l0). Linked, with nic.l0 and dns.l0, into the stack and
+; into the programs that use it, by the Makefile's INETLIB.
 
 ; --------------------------------------------------------------- addresses
 
@@ -237,6 +240,96 @@
                 (match (word_numbers (tail ws))
                   ((None) ((None Datagram)))
                   ((Some ps) (Some (Datagram src (nth ps 0) (nth ps 1) (drop_line payload)))))))))))
+
+; ------------------------------------------------------------------ names
+
+; The name server dns's answer r names, 0 for none, or why it names none.
+(def inet_dns_of ((r (list int))) (Result int (list int))
+  (let ws (split_spaces r)
+    (if (if (eq (length ws) 2) (eq (head ws) "dns") false)
+        (match (ip_parse (nth ws 1))
+          ((None) ((Err int (list int)) "inet's dns is not an address"))
+          ((Some a) ((Ok int (list int)) a)))
+        ((Err int (list int)) (inet_error r)))))
+
+; The name server inet's interface has, 0 for none.
+(def inet_dns ((n Inet)) (Result int (list int))
+  (inet_dns_of (inet_ask n "dns")))
+
+; How long a resolver waits for a name server's answer, and how many
+; times it asks.
+(def resolve_wait_ns () int 2000000000)
+(def resolve_tries () int 3)
+
+; The address name has: itself, if it is one, dotted; or what the name
+; server of inet's interface answers for it; or why there is none.
+(def inet_resolve ((n Inet) (name (list int))) (Result int (list int))
+  (match (ip_parse name)
+    ((Some a) ((Ok int (list int)) a))
+    ((None)
+      (match (inet_dns n)
+        ((Err why) ((Err int (list int)) why))
+        ((Ok server)
+          (if (eq server 0)
+              ((Err int (list int)) "inet knows no name server")
+              (inet_resolve_at n name server (dns_port))))))))
+
+; The address the name server at port of server answers for name: asked
+; from a UDP port inet picks, given up again after, resolve_tries times
+; resolve_wait_ns apart. What comes to this client meanwhile that is not
+; the answer is dropped.
+(def inet_resolve_at ((n Inet) (name (list int)) (server int) (port int)) (Result int (list int))
+  (if (not (dns_name_ok name))
+      ((Err int (list int)) (append "not a name: " name))
+      (match (udp_bind n 0)
+        ((Err why) ((Err int (list int)) why))
+        ((Ok p)
+          (let r (resolve_tries_left n name server port p (bit_and (clock_ns) 65535) (resolve_tries))
+            (let u (udp_unbind n p) r))))))
+
+; The query, numbered id, sent from p to the server, and its answer
+; waited for; asked again, tries times in all.
+(def resolve_tries_left ((n Inet) (name (list int)) (server int) (port int) (p int) (id int) (tries int)) (Result int (list int))
+  (if (eq tries 0)
+      ((Err int (list int)) (append "the name server did not answer for " name))
+      (let why (udp_send n p server port (dns_query id name))
+        (if (not (is_empty why))
+            ((Err int (list int)) why)
+            (match (resolve_wait n server port p id (add (clock_ns) (resolve_wait_ns)))
+              ((Some r) r)
+              ((None) (resolve_tries_left n name server port p id (sub tries 1))))))))
+
+; The answer to the query numbered id, from port at server to p, once it
+; comes before due; none if it does not.
+(def resolve_wait ((n Inet) (server int) (port int) (p int) (id int) (due int)) (Option (Result int (list int)))
+  (if (gt (clock_ns) due)
+      ((None (Result int (list int))))
+      (match (port_try_receive (inet_port n))
+        ((RecvFailed)
+          (if (lt (inet_port n) 0)
+              ((None (Result int (list int))))
+              (let z (sleep_ns 10000000) (resolve_wait n server port p id due))))
+        ((Message from payload)
+          (match (resolve_heard payload server port p id)
+            ((Some r) (Some r))
+            ((None) (resolve_wait n server port p id due)))))))
+
+; What payload says, if it is the answer to the query numbered id, from
+; port at server to p: the address, or why there is none.
+(def resolve_heard ((payload (list int)) (server int) (port int) (p int) (id int)) (Option (Result int (list int)))
+  (match (datagram_of payload)
+    ((None) ((None (Result int (list int)))))
+    ((Some d)
+      (match d
+        ((Datagram src sport dport content)
+          (if (not (if (eq src server) (if (eq sport port) (eq dport p) false) false))
+              ((None (Result int (list int))))
+              (match (dns_answer content id)
+                ((DnsAddr a) (Some ((Ok int (list int)) a)))
+                ((DnsNone why)
+                  (if (is_empty why)
+                      ((None (Result int (list int))))
+                      (Some ((Err int (list int)) why)))))))))))
 
 ; An echo request to dst, the seq'th: empty once inet has it, or why not.
 ; Its reply comes as a pong notice, or an error if inet refuses it.

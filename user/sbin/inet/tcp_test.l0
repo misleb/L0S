@@ -243,11 +243,68 @@
   (check_str "data and its ACK" (says (established) 0 (from_peer 5001 1001 (bit_or (tcp_ack) (tcp_psh)) 4096 "abc"))
              "data abc ; send ACK 49152>80 s1001 a5004 w8192"))
 
-; Not in order: dropped, and the ACK says where it is still waiting.
+; Not in order: held, not given, and the ACK says where it is still
+; waiting.
 (def test_receive_gap () int
   (let st (tcp_arrive (established) 0 (from_peer 5010 1001 (tcp_ack) 4096 "zzz"))
     (add (check_str "only an ACK" (acts_text st) "send ACK 49152>80 s1001 a5001 w8192")
-         (check_int "RCV.NXT" (c_rcv (step_conn st)) 5001))))
+         (add (check_int "RCV.NXT" (c_rcv (step_conn st)) 5001)
+              (check_int "held" (length (c_held (step_conn st))) 1)))))
+
+; What is missing before held data comes: both given at once, and both
+; acknowledged. 5001 "abcdefghi" fills up to the held 5010 "zzz".
+(def test_receive_gap_filled () int
+  (let c (after (established) 0 (from_peer 5010 1001 (tcp_ack) 4096 "zzz"))
+    (let st (tcp_arrive c 0 (from_peer 5001 1001 (tcp_ack) 4096 "abcdefghi"))
+      (add (check_str "joined" (acts_text st) "data abcdefghizzz ; send ACK 49152>80 s1001 a5013 w8192")
+           (check_int "nothing held" (length (c_held (step_conn st))) 0)))))
+
+; Three segments in reverse order: the last two held, in order, then all
+; given when the first comes.
+(def test_receive_reversed () int
+  (let c (after_all (established) (cons (from_peer 5007 1001 (tcp_ack) 4096 "ghi")
+                                        (one (from_peer 5004 1001 (tcp_ack) 4096 "def"))))
+    (check_str "in order" (says c 0 (from_peer 5001 1001 (tcp_ack) 4096 "abc"))
+               "data abcdefghi ; send ACK 49152>80 s1001 a5010 w8192")))
+
+; A filler that stops short of the held data leaves it held: 5001 "ab"
+; reaches 5003, and 5010 is further on.
+(def test_receive_gap_left () int
+  (let c (after (after (established) 0 (from_peer 5010 1001 (tcp_ack) 4096 "zzz")) 0 (from_peer 5001 1001 (tcp_ack) 4096 "ab"))
+    (add (check_int "RCV.NXT" (c_rcv c) 5003)
+         (check_int "still held" (length (c_held c)) 1))))
+
+; Held data that overlaps what came: only the part past it is given.
+; 5004 "defg" is held; 5001 "abcde" comes, and fg is all that is new.
+(def test_receive_held_overlap () int
+  (let c (after (established) 0 (from_peer 5004 1001 (tcp_ack) 4096 "defg"))
+    (check_str "the rest" (says c 0 (from_peer 5001 1001 (tcp_ack) 4096 "abcde"))
+               "data abcdefg ; send ACK 49152>80 s1001 a5008 w8192")))
+
+; A FIN that comes before the data ahead of it waits for it, and is told
+; after it.
+(def test_receive_fin_held () int
+  (let c (after (established) 0 (from_peer 5004 1001 (bit_or (tcp_fin) (tcp_ack)) 4096 "end"))
+    (let st (tcp_arrive c 0 (from_peer 5001 1001 (tcp_ack) 4096 "the"))
+      (add (check_str "data, then fin" (acts_text st) "data theend ; fin ; send ACK 49152>80 s1001 a5008 w8192")
+           (check_str "CLOSE-WAIT" (state_text st) "CLOSE-WAIT")))))
+
+; What is held is cut to the window: 5001 + 8192 is its end, so of 5000
+; bytes from 9000, 4193 are kept, and the FIN after them is not.
+(def test_receive_held_window () int
+  (let c (after (established) 0 (from_peer 9000 1001 (bit_or (tcp_fin) (tcp_ack)) 4096 (take_n_a 5000)))
+    (match (head (c_held c))
+      ((TcpHeld seq body fin)
+        (add (check_int "kept" (length body) 4193)
+             (check_bool "no FIN" fin false))))))
+
+; At most tcp_held_limit segments are held: the seventeenth is dropped.
+(def test_receive_held_limit () int
+  (check_int "sixteen" (length (c_held (after_all (established) (gapped 17 (nil Seg))))) 16))
+
+; n one-byte segments, each with a gap before it, from 5003 on.
+(def gapped ((n int) (acc (list Seg))) (list Seg)
+  (if (eq n 0) acc (gapped (sub n 1) (cons (from_peer (add 5001 (mul 2 n)) 1001 (tcp_ack) 4096 "x") acc))))
 
 ; Some of it seen already: the new part is given.
 (def test_receive_overlap () int

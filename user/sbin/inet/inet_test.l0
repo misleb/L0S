@@ -15,7 +15,7 @@
 (def client () int 55)
 
 (def stack0 () Stack
-  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config (me) (ip_mask 24) (gw))))
+  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3))))
 
 ; frame given to s by the driver.
 (def from_wire ((s Stack) (frame (list int))) Stack
@@ -144,7 +144,7 @@
 (def config_text ((r (Result Config (list int)))) (list int)
   (match r
     ((Err why) why)
-    ((Ok c) (match c ((Config a m g) (unwords (cons (ip_text a) (cons (ip_text m) (cons (ip_text g) (nil (list int)))))))))))
+    ((Ok c) (match c ((Config a m g dns) (unwords (cons (ip_text a) (cons (ip_text m) (cons (ip_text g) (nil (list int)))))))))))
 
 (def test_config_default () int
   (check_str "QEMU's" (config_text (config_of (nil (list int)))) "10.0.2.15 255.255.255.0 10.0.2.2"))
@@ -159,13 +159,13 @@
             (check_str "a bad gateway" (config_text (config_of (cons "10.0.0.1/8" (cons "x" (nil (list int)))))) "not an address: x"))))
 
 (def test_routes () int
-  (let c (Config (me) (ip_mask 24) (gw))
+  (let c (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3))
     (add (check_int "on the link" (next_hop c (ip_of 10 0 2 3)) (ip_of 10 0 2 3))
          (add (check_int "beyond it" (next_hop c (far)) (gw))
               (check_int "everyone" (next_hop c (ip_broadcast)) (ip_broadcast))))))
 
 (def test_broadcasts () int
-  (let c (Config (me) (ip_mask 24) (gw))
+  (let c (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3))
     (add (check_bool "the subnet's" (is_broadcast c (ip_of 10 0 2 255)) true)
          (add (check_bool "another's" (is_broadcast c (ip_of 10 0 3 255)) false)
               (check_bool "ours" (is_ours c (me)) true)))))
@@ -329,7 +329,7 @@
 ; Under an operating system there is no network card, which is no
 ; failure. (inet itself would read l0 test's arguments as its own.)
 (def test_no_card () int
-  (check_int "nothing to serve" (linked (Config (me) (ip_mask 24) (gw)) 0) 0))
+  (check_int "nothing to serve" (linked (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3)) 0) 0))
 
 ; Arguments that are not an interface fail.
 (def test_bad_arguments () int
@@ -339,7 +339,7 @@
 
 ; A stack with no address yet, and the xid of its exchange.
 (def bare () Stack
-  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config 0 0 0)))
+  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config 0 0 0 0)))
 
 (def xid () int 777)
 
@@ -376,17 +376,29 @@
 
 ; r, once the frame has come, with what was queued before it gone.
 (def heard ((r Leasing) (frame (list int))) Leasing
-  (match r ((Leasing s l) (lease_hear (cleared s) l (nic_pid) (frame_notice frame)))))
+  (heard_at r frame 0))
+
+; The same, the frame heard at time now.
+(def heard_at ((r Leasing) (frame (list int)) (now int)) Leasing
+  (match r ((Leasing s l) (lease_hear (cleared s) l (nic_pid) (frame_notice frame) now))))
 
 ; Where the exchange is, and the interface the stack has.
 (def lease_text ((r Leasing)) (list int)
   (match r
     ((Leasing s l)
-      (append (match l
-                ((Selecting x) (append "selecting " (digits x)))
-                ((Requesting x offered server) (unwords (cons "requesting" (cons (digits x) (cons (ip_text offered) (cons (ip_text server) (nil (list int))))))))
-                ((Leased) "leased"))
+      (append (lease_state_text l)
               (append " " (config_text ((Ok Config (list int)) (stack_config s))))))))
+
+; Where an exchange is, as words: its state, and its xid, addresses and
+; times.
+(def lease_state_text ((l Lease)) (list int)
+  (match l
+    ((Selecting x) (append "selecting " (digits x)))
+    ((Requesting x offered server) (unwords (cons "requesting" (cons (digits x) (cons (ip_text offered) (cons (ip_text server) (nil (list int))))))))
+    ((Leased server secs since) (unwords (cons "leased" (cons (ip_text server) (cons (digits secs) (cons (digits since) (nil (list int))))))))
+    ((Renewing x server secs since) (unwords (cons "renewing" (cons (digits x) (cons (ip_text server) (cons (digits secs) (cons (digits since) (nil (list int)))))))))
+    ((Rebinding x secs since) (unwords (cons "rebinding" (cons (digits x) (cons (digits secs) (cons (digits since) (nil (list int))))))))
+    ((Unleased) "unleased")))
 
 ; The DHCP message in a frame, as text: where it goes, and the message.
 (def dhcp_frame_text ((f (list int))) (list int)
@@ -410,7 +422,7 @@
     ((None) "not DHCP")
     ((Some m)
       (match m
-        ((Dhcp op x type hw yi req mask router server lease)
+        ((Dhcp op x type hw yi req mask router server lease dns)
           (unwords (cons "type" (cons (digits type) (cons "xid" (cons (digits x)
             (cons "asks" (cons (ip_text req) (cons "server" (cons (ip_text server) (nil (list int))))))))))))))))
 
@@ -442,16 +454,17 @@
     (add (check_strs "request" (lease_wire r) (one_wire (request_text)))
          (check_str "requesting" (lease_text r) "requesting 777 10.0.2.15 10.0.2.2 0.0.0.0 0.0.0.0 0.0.0.0"))))
 
-; The ACK, broadcast: the stack has the address, the server's mask and its router.
+; The ACK, broadcast: the stack has the address, the server's mask and
+; its router, and the lease, from the server, of a day from time 0.
 (def test_lease_ack () int
   (let r (heard (heard (started) (offer_frame)) (ack_frame))
-    (add (check_str "leased" (lease_text r) "leased 10.0.2.15 255.255.255.0 10.0.2.2")
+    (add (check_str "leased" (lease_text r) "leased 10.0.2.2 86400 0 10.0.2.15 255.255.255.0 10.0.2.2")
          (check_int "nothing more to say" (length (lease_wire r)) 0))))
 
 ; The ACK may come to the address offered, from the server's card to ours.
 (def test_lease_ack_unicast () int
   (let r (heard (heard (started) (offer_frame)) (unicast_of (server_msg (xid) 5 (me) (std_options))))
-    (check_str "leased" (lease_text r) "leased 10.0.2.15 255.255.255.0 10.0.2.2")))
+    (check_str "leased" (lease_text r) "leased 10.0.2.2 86400 0 10.0.2.15 255.255.255.0 10.0.2.2")))
 
 ; Before there is an offer, no address is ours but the broadcast.
 (def test_lease_unicast_before_offer () int
@@ -491,7 +504,7 @@
   (check_str "class A"
              (lease_text (heard (heard (started) (offer_frame))
                                 (broadcast_of (server_msg (xid) 5 (me) (opt_bytes (opt_server) (be32 (gw)))))))
-             "leased 10.0.2.15 255.0.0.0 0.0.0.0"))
+             "leased 10.0.2.2 0 0 10.0.2.15 255.0.0.0 0.0.0.0"))
 
 ; Once leased the stack is an ordinary one at its new address: it answers ARP for it.
 (def test_lease_then_arp () int
@@ -505,7 +518,115 @@
 (def test_lease_keeps_queue () int
   (match (started)
     ((Leasing s l)
-      (check_int "the discover waits" (length (lease_wire (lease_hear s l 30 (request 0 "info")))) 1))))
+      (check_int "the discover waits" (length (lease_wire (lease_hear s l 30 (request 0 "info") 0))) 1))))
+
+; ------------------------------------------------------------ the lease
+
+; A second, in nanoseconds, and t of them.
+(def secs ((t int)) int (mul t 1000000000))
+
+; Leased at time 0, for a day, from the gateway.
+(def leased () Leasing (heard (heard (started) (offer_frame)) (ack_frame)))
+
+; r after the clock's notice at time now.
+(def ticked_at ((r Leasing) (now int)) Leasing
+  (match r ((Leasing s l) (lease_tick (cleared s) l now))))
+
+; A lease of 100 seconds: renewed from 50, rebound from 87.5, gone at 100.
+(def test_lease_phase () int
+  (add (check_int "early" (lease_phase 100 0 (secs 49)) 0)
+       (add (check_int "renew" (lease_phase 100 0 (secs 50)) 1)
+            (add (check_int "rebind" (lease_phase 100 0 87500000000) 2)
+                 (check_int "gone" (lease_phase 100 0 (secs 100)) 3)))))
+
+; A lease of no time, or of 0xFFFFFFFF, is for ever.
+(def test_lease_phase_forever () int
+  (add (check_int "none" (lease_phase 0 0 (secs 1000000)) 0)
+       (check_int "infinite" (lease_phase 4294967295 0 (secs 1000000)) 0)))
+
+; Before half the day, a notice changes nothing and sends nothing.
+(def test_lease_tick_early () int
+  (let r (ticked_at (leased) (secs 100))
+    (add (check_str "still leased" (lease_state_text (match r ((Leasing s l) l))) "leased 10.0.2.2 86400 0")
+         (check_int "nothing said" (length (lease_wire r)) 0))))
+
+; Half the day gone: a REQUEST to the server that gave it, from the
+; address, which first needs ARP to find the server's card.
+(def test_lease_renews () int
+  (let t (secs 43200)
+    (let r (ticked_at (leased) t)
+      (add (check_str "renewing" (lease_state_text (match r ((Leasing s l) l)))
+                      (append "renewing " (append (digits (lease_xid (my_mac) t)) " 10.0.2.2 86400 0")))
+           (check_strs "ARP for the server" (match r ((Leasing s l) (wire_text s)))
+                       (cons "ff:ff:ff:ff:ff:ff arp 1 52:54:00:12:34:56 10.0.2.15 00:00:00:00:00:00 10.0.2.2" (nil (list int))))))))
+
+; Seven eighths gone: a REQUEST broadcast, to any server, from the address.
+(def test_lease_rebinds () int
+  (let t (secs 80000)
+    (let r (ticked_at (leased) t)
+      (check_strs "broadcast" (lease_wire r)
+                  (one_wire (append "ff:ff:ff:ff:ff:ff 10.0.2.15>255.255.255.255 68>67 type 3 xid "
+                                    (append (digits (lease_xid (my_mac) t)) " asks 0.0.0.0 server 0.0.0.0")))))))
+
+; The server's ACK of the renewal begins the lease again from then.
+(def test_lease_renewed () int
+  (let t (secs 43200)
+    (let r (heard_at (ticked_at (leased) t) (unicast_of (server_msg (lease_xid (my_mac) t) 5 (me) (std_options))) (add t 5))
+      (check_str "leased anew" (lease_text r) (append "leased 10.0.2.2 86400 " (append (digits (add t 5)) " 10.0.2.15 255.255.255.0 10.0.2.2"))))))
+
+; A NAK of the renewal takes the address away, and the client looks for a
+; server again.
+(def test_lease_renew_nak () int
+  (let t (secs 43200)
+    (let r (heard_at (ticked_at (leased) t) (broadcast_of (server_msg (lease_xid (my_mac) t) 6 0 (opt_bytes (opt_server) (be32 (gw))))) t)
+      (add (check_str "selecting" (lease_text r) (append "selecting " (append (digits (lease_xid (my_mac) t)) " 0.0.0.0 0.0.0.0 0.0.0.0")))
+           (check_int "a discover" (length (lease_wire r)) 1)))))
+
+; All the day gone with no answer: the address is given up, and a
+; DISCOVER broadcast.
+(def test_lease_runs_out () int
+  (let t (secs 86400)
+    (let r (ticked_at (ticked_at (leased) (secs 43200)) t)
+      (add (check_str "no address" (lease_text r) (append "selecting " (append (digits (lease_xid (my_mac) t)) " 0.0.0.0 0.0.0.0 0.0.0.0")))
+           (check_strs "discover" (lease_wire r)
+                       (one_wire (append "ff:ff:ff:ff:ff:ff 0.0.0.0>255.255.255.255 68>67 type 1 xid "
+                                         (append (digits (lease_xid (my_mac) t)) " asks 0.0.0.0 server 0.0.0.0"))))))))
+
+; A renewal asked again at the next notice keeps its xid.
+(def test_lease_renew_again () int
+  (let t (secs 43200)
+    (let r (ticked_at (ticked_at (leased) t) (add t (secs 60)))
+      (check_str "the same xid" (lease_state_text (match r ((Leasing s l) l)))
+                 (append "renewing " (append (digits (lease_xid (my_mac) t)) " 10.0.2.2 86400 0"))))))
+
+; The name server an ACK names is the stack's, and dns says which.
+(def test_lease_dns () int
+  (let o (append (std_options) (opt_bytes (opt_dns) (be32 (ip_of 10 0 2 3))))
+    (match (heard (heard (started) (offer_frame)) (broadcast_of (server_msg (xid) 5 (me) o)))
+      ((Leasing s l) (check_str "dns" (dns_text s) "dns 10.0.2.3")))))
+
+; With no name server named there is none.
+(def test_lease_no_dns () int
+  (match (leased) ((Leasing s l) (check_str "dns" (dns_text s) "dns 0.0.0.0"))))
+
+; The clock's notice is the lease's, not a request: with no lease it does
+; nothing at all.
+(def test_time_notice () int
+  (match (leased_message (cleared (knowing)) (Unleased) 6 "time 1000" 0)
+    ((Leasing s l) (add (check_int "nothing said" (length (told s)) 0)
+                        (check_str "no lease" (lease_state_text l) "unleased")))))
+
+; A static interface's name server is its third argument, 10.0.2.3 if
+; none is given.
+(def test_config_dns () int
+  (add (check_str "given" (config_dns_text (config_of (split_spaces "10.0.2.15/24 10.0.2.2 1.1.1.1"))) "1.1.1.1")
+       (add (check_str "default" (config_dns_text (config_of (split_spaces "10.0.2.15/24"))) "10.0.2.3")
+            (add (check_str "bad" (config_dns_text (config_of (split_spaces "10.0.2.15/24 10.0.2.2 x"))) "not an address: x")
+                 (check_str "too many" (config_dns_text (config_of (split_spaces "10.0.2.15/24 10.0.2.2 1.1.1.1 2"))) "inet [ADDR/PREFIX [GATEWAY [DNS]]]")))))
+
+; A config's name server, or why there is none.
+(def config_dns_text ((r (Result Config (list int)))) (list int)
+  (match r ((Err why) why) ((Ok c) (match c ((Config a m g dns) (ip_text dns))))))
 
 (def test_lease_xid () int
   (add (check_int "from the card's last four bytes" (lease_xid (my_mac) 0) 1193046)
@@ -513,7 +634,7 @@
             (check_int "32 bits" (lease_xid (my_mac) 4294967296) 1193046))))
 
 (def test_lease_done () int
-  (add (check_bool "leased" (lease_done (Leased)) true)
+  (add (check_bool "leased" (lease_done (Leased 1 2 3)) true)
        (check_bool "selecting" (lease_done (Selecting 1)) false)))
 
 (def test_config_dhcp () int
@@ -523,7 +644,7 @@
 
 ; With no card there is nothing to ask either.
 (def test_no_card_dhcp () int
-  (check_int "nothing to serve" (linked (Config 0 0 0) 0) 0))
+  (check_int "nothing to serve" (linked (Config 0 0 0 0) 0) 0))
 
 ; -------------------------------------------------------------------- TCP
 
@@ -579,8 +700,9 @@
 ; to be sent.
 (def tcp_up_of ((s Stack)) Stack (cleared (from_peer_seg (cleared s) (peer_synack s))))
 
-; An open connection. The first sequence number inet picks is of the clock,
-; so each call is another connection, and a test that makes one calls it
+; An open connection. The first sequence number inet picks is of the clock
+; (with no random, under l0 test, there is no secret to key it with), so
+; each call is another connection, and a test that makes one calls it
 ; once.
 (def tcp_up () Stack (tcp_up_of (tcp_opened)))
 
@@ -588,6 +710,29 @@
 ; far as it acknowledges: flags, and data.
 (def peer_data ((s Stack) (flags int) (body (list int))) Seg
   (Seg 80 49152 (conn_rcv s 1) (conn_nxt s 1) flags 4096 0 body))
+
+; With no secret the first sequence number is the clock in 4 microsecond
+; ticks, cut to 32 bits: 4000 ns a tick, so 8000 ns is 2.
+(def test_iss_clock () int
+  (add (check_int "two ticks" (tcp_iss 8000 0 1 2 3 4) 2)
+       (check_int "wrapped" (tcp_iss (mul 4000 4294967298) 0 1 2 3 4) 2)))
+
+; Keyed, it is the same for the same ends and secret, and moves with
+; either: a hash's offset on the same clock.
+(def test_iss_keyed () int
+  (let a (tcp_iss 8000 77 167772687 49152 167772674 80)
+    (add (check_int "the same again" (tcp_iss 8000 77 167772687 49152 167772674 80) a)
+         (add (check_true "another secret" (not (eq (tcp_iss 8000 78 167772687 49152 167772674 80) a)))
+              (check_true "another port" (not (eq (tcp_iss 8000 77 167772687 49153 167772674 80) a)))))))
+
+; The clock still moves a keyed one on: a tick later is one more.
+(def test_iss_keyed_ticks () int
+  (check_int "one tick" (bit_and (sub (tcp_iss 12000 77 1 2 3 4) (tcp_iss 8000 77 1 2 3 4)) 4294967295) 1))
+
+; Under l0 test there is no random: the stack stays without a secret,
+; and asks again next time.
+(def test_no_secret () int
+  (check_int "none" (tcp_secret (tcp_keyed (knowing))) 0))
 
 (def test_tcp_connect () int
   (let s (tcp_opened)

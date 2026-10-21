@@ -1,19 +1,41 @@
 ; virtio-blk.l0 -- a disk driver for QEMU's virtio-blk, serving the disk
 ; protocol, user/lib/disk.l0: 512-byte sectors, read into and written
-; from pages a client shares with it. Its module must be flagged dev.
+; from pages a client shares with it, and flushes of the disk's cache.
+; Its module must be flagged dev.
 ;
 ; No sector passes through a message, or through the driver: a request
 ; names the client's pages, where they are mapped here, and the device
 ; reads or writes them itself, by DMA. The driver makes one request of
-; the device at a time, and waits for it as virtq_wait does.
+; the device at a time, and waits for the device's interrupt, which the
+; kernel sends to a port of its own, so that the requests waiting on the
+; other stay where they are.
+;
+; It accepts two of the device's features, when it offers them: FLUSH,
+; so that a flush empties the disk's write cache, and RO, so that it
+; knows a disk is read-only and refuses its writes itself.
 
 (def blk_device () int 2)           ; DeviceID of a block device
+
+; ---------------------------------------------------------------- features
+
+; VIRTIO_BLK_F_RO, bit 5, the disk is read-only; VIRTIO_BLK_F_FLUSH, bit
+; 9, it has a write cache, which a flush request empties (virtio 1.2,
+; section 5.2.3).
+(def blk_f_ro () int 32)
+(def blk_f_flush () int 512)
+
+; The features the driver asks for.
+(def blk_wanted () int (bit_or (blk_f_ro) (blk_f_flush)))
+
+; Whether features, as negotiated, include f.
+(def blk_has ((features int) (f int)) bool (not (eq (bit_and features f) 0)))
 
 ; ---------------------------------------------------------------- requests
 
 ; virtio-blk's request types and statuses (virtio 1.2, section 5.2.6).
 (def blk_in () int 0)               ; read sectors from the disk
 (def blk_out () int 1)              ; write sectors to it
+(def blk_flush () int 4)            ; empty its write cache
 (def blk_ok () int 0)
 (def blk_ioerr () int 1)
 (def blk_unsupp () int 2)
@@ -35,7 +57,8 @@
 
 ; A request's chain: the header at hdr, readable; each run of data, which
 ; the device writes when reading the disk; and the status byte at status,
-; which it writes.
+; which it writes. A flush has no runs, so its header chains to the
+; status at once.
 (def blk_descriptors ((hdr int) (runs (list VirtqRun)) (reading bool) (status int)) (list int)
   (let flags (if reading (bit_or (desc_next) (desc_write)) (desc_next))
     (rev (push (descriptor status 1 (desc_write) 0)
@@ -59,6 +82,13 @@
               (append "past the disk's end, sector " (digits (sub cap 1)))
               ""))))
 
+; Why a request of type cannot be made of a disk with features; empty if
+; it can. A read-only disk takes no write.
+(def blk_feature_refusal ((type int) (features int)) (list int)
+  (if (if (eq type (blk_out)) (blk_has features (blk_f_ro)) false)
+      "the disk is read-only"
+      ""))
+
 ; The pages count sectors take.
 (def blk_pages ((count int)) int (pages_for (mul count (sector_size))))
 
@@ -75,8 +105,9 @@
 
 ; The driver: the transports' registers and the disk's transport, the
 ; queue's page and where the device reaches it, the disk's size in
-; sectors, and how many requests it has made.
-(data Blk (Blk IoDevice int IoDevice int int int))
+; sectors, how many requests it has made, the features the device and it
+; agreed on, and the port the device's interrupt comes to.
+(data Blk (Blk IoDevice int IoDevice int int int int int))
 
 ; What came of a request: the driver after it, and why it failed, or
 ; empty.
@@ -86,7 +117,7 @@
 ; device and waited for.
 (def blk_request ((b Blk) (type int) (sector int) (runs (list VirtqRun))) BlkDone
   (match b
-    ((Blk d t q qa cap n)
+    ((Blk d t q qa cap n fs ip)
       (let h (put_bytes q (header_off) (blk_header type sector))
         (let s (device_write8 q (status_off) 255)
           (let c (put_bytes q 0 (blk_descriptors (add qa (header_off)) runs (eq type (blk_in)) (add qa (status_off))))
@@ -95,17 +126,34 @@
 ; The request at descriptor 0 made available and the device told.
 (def blk_queued ((b Blk)) BlkDone
   (match b
-    ((Blk d t q qa cap n)
+    ((Blk d t q qa cap n fs ip)
       (let n2 (virtq_offer d t 0 q (avail_off) (ring_size) n 0)
-        (blk_finished (Blk d t q qa cap n2) (clock_ns))))))
+        (blk_finished (Blk d t q qa cap n2 fs ip))))))
 
-; The request made at since, waited for, and its status read.
-(def blk_finished ((b Blk) (since int)) BlkDone
+; The request made, waited for, and its status read: done once the used
+; ring has it, and otherwise not before the device's next interrupt. An
+; interrupt for a request already done may still be waiting on the port;
+; it is taken and ended like any other, and the ring looked at again.
+(def blk_finished ((b Blk)) BlkDone
   (match b
-    ((Blk d t q qa cap n)
-      (if (virtq_wait q (used_off) n since)
-          (BlkDone b (blk_why (device_read8 q (status_off))))
-          (BlkDone b "the disk did not answer")))))
+    ((Blk d t q qa cap n fs ip)
+      (let br (barrier)
+        (if (eq (virtq_used_index q (used_off)) (bit_and n 65535))
+            (let b2 (barrier) (BlkDone b (blk_why (device_read8 q (status_off)))))
+            (match (port_receive ip)
+              ((RecvFailed) (BlkDone b "lost its interrupt's port"))
+              ((Message from payload)
+                (if (is_irq_notice (Message from payload) (transport_irq t))
+                    (let e (blk_interrupted d t) (blk_finished b))
+                    (blk_finished b)))))))))
+
+; Transport t's interrupt ended: the device's status acknowledged, then
+; the kernel's.
+(def blk_interrupted ((d IoDevice) (t int)) int
+  (let st (device_read32 d (treg t (reg_interrupt_status)))
+    (let a (device_write32 d (treg t (reg_interrupt_ack)) st)
+      (let br (barrier)
+        (match (irq_ack (transport_irq t)) ((IrqAcked) 0) ((IrqNotPending) 0))))))
 
 ; ---------------------------------------------------------------- driving
 
@@ -120,27 +168,33 @@
 
 ; No disk is no failure: the board was started without one.
 (def found ((d IoDevice) (t int)) int
-  (match (virtio_probe d t "the virtio-blk" "request" (ring_size))
+  (match (virtio_probe_features d t "the virtio-blk" "request" (ring_size) (blk_wanted))
     ((VirtioAbsent) (note_as "virtio-blk" "no virtio-blk on the board"))
     ((VirtioUnusable why) (complain why))
     ((VirtioReady t2)
       (match (virtq_mem 1 "the queue")
         ((NoVirtqMem why) (complain why))
-        ((VirtqMem va q addrs) (started (Blk d t q (array_get addrs 0) (capacity d t) 0)))))))
+        ((VirtqMem va q addrs)
+          (started (Blk d t q (array_get addrs 0) (capacity d t) 0
+                        (bit_and (blk_wanted) (device_features d t 0)) 0)))))))
 
 ; The disk's size in sectors: config's capacity, a le64 at its start.
 (def capacity ((d IoDevice) (t int)) int
   (bit_or (device_read32 d (treg t (reg_config)))
           (bit_shl (device_read32 d (treg t (add (reg_config) 4))) 32)))
 
-; The queue started, the device told the driver is ready, and the disk
-; served.
+; The queue started, the device's interrupt bound to a port of its own,
+; the device told the driver is ready, and the disk served.
 (def started ((b Blk)) int
   (match b
-    ((Blk d t q qa cap n)
+    ((Blk d t q qa cap n fs ip)
       (let s (start_queue d t 0 (ring_size) qa (add qa (avail_off)) (add qa (used_off)))
-        (let o (driver_ok d t)
-          (start_serving b))))))
+        (let iport (port_new)
+          (let why (irq_bind_or_why (transport_irq t) iport)
+            (if (not (is_empty why))
+                (complain why)
+                (let o (driver_ok d t)
+                  (start_serving (Blk d t q qa cap n fs iport))))))))))
 
 ; ---------------------------------------------------------------- serving
 
@@ -172,24 +226,46 @@
   (if (if (eq op "info") (eq n 0) false) (info b)
   (if (if (eq op "read") (eq n 3) false) (moved b (blk_in) (nth ns 0) (nth ns 1) (nth ns 2))
   (if (if (eq op "write") (eq n 3) false) (moved b (blk_out) (nth ns 0) (nth ns 1) (nth ns 2))
-  (served_error b (append "no request " op))))))
+  (if (if (eq op "flush") (eq n 0) false) (flushed b)
+  (served_error b (append "no request " op)))))))
 
-; info: the disk's size, in sectors, and a sector's.
+; info: the disk's size, in sectors, and a sector's; and ro after them
+; for a read-only disk.
 (def info ((b Blk)) (Served Blk)
   (match b
-    ((Blk d t q qa cap n)
-      (Served b (append "disk " (append (digits cap) (append " " (digits (sector_size)))))))))
+    ((Blk d t q qa cap n fs ip)
+      (Served b (append "disk " (append (digits cap) (append " " (append (digits (sector_size))
+                  (if (blk_has fs (blk_f_ro)) " ro" "")))))))))
+
+; flush: what the disk's cache holds written to the disk itself. A disk
+; with no cache, which offers no FLUSH, writes through, so has nothing to
+; flush.
+(def flushed ((b Blk)) (Served Blk)
+  (match b
+    ((Blk d t q qa cap n fs ip)
+      (if (not (blk_has fs (blk_f_flush)))
+          (served_ok b)
+          (blk_answered (blk_request b (blk_flush) 0 (nil VirtqRun)))))))
+
+; A request's outcome, as the answer to it.
+(def blk_answered ((r BlkDone)) (Served Blk)
+  (match r ((BlkDone b2 err) (if (is_empty err) (served_ok b2) (served_error b2 err)))))
 
 ; read or write SECTOR COUNT VA: count sectors from sector moved, as type
 ; says, between the disk and the client's pages shared here at va.
 (def moved ((b Blk) (type int) (sector int) (count int) (va int)) (Served Blk)
   (match b
-    ((Blk d t q qa cap n)
-      (let why (blk_refusal sector count cap)
+    ((Blk d t q qa cap n fs ip)
+      (let why (blk_move_refusal type sector count cap fs)
         (if (not (is_empty why))
             (served_error b why)
             (match (page_addresses va (blk_pages count))
               ((None) (served_error b "the buffer is not shared with the disk"))
               ((Some addrs)
-                (match (blk_request b type sector (blk_runs addrs (mul count (sector_size))))
-                  ((BlkDone b2 err) (if (is_empty err) (served_ok b2) (served_error b2 err)))))))))))
+                (blk_answered (blk_request b type sector (blk_runs addrs (mul count (sector_size))))))))))))
+
+; Why a request of type for count sectors from sector cannot be made of a
+; disk of cap sectors with features; empty if it can.
+(def blk_move_refusal ((type int) (sector int) (count int) (cap int) (features int)) (list int)
+  (let why (blk_feature_refusal type features)
+    (if (is_empty why) (blk_refusal sector count cap) why)))

@@ -1,0 +1,133 @@
+; virtio-rng.l0 -- a driver for QEMU's virtio-rng, the entropy device,
+; serving the random protocol, user/lib/proto/random.l0, as random: bytes
+; the host's own source of randomness gives, for UUIDs, TCP's first
+; sequence numbers, and anything else that must not be guessed. Its
+; module must be flagged dev.
+;
+; The device has one queue, which the driver offers a buffer the device
+; fills by DMA, as much of it as it likes; the driver offers it again
+; until it has what was asked, and waits for each as virtq_wait does.
+; One request at a time, as every driver here makes them.
+
+(def rng_device () int 4)           ; DeviceID of an entropy source
+
+; ---------------------------------------------------------------- the queue
+
+; The queue, in one DMA page: 8 descriptors at 0, as many as QEMU's
+; device takes, the available ring at 128, the used ring at 256, and the
+; buffer the device fills, the page's second half.
+(def ring_size () int 8)
+(def avail_off () int (virtq_avail_off (ring_size)))
+(def used_off () int (virtq_used_off (ring_size)))
+(def buffer_off () int 2048)
+(def buffer_size () int 2048)
+
+; How many times in a row the device may fill none of the buffer before
+; the driver says it gives nothing.
+(def rng_patience () int 8)
+
+; The driver: the transports' registers and the device's transport, the
+; queue's page and where the device reaches it, and how many requests it
+; has made.
+(data Rng (Rng IoDevice int IoDevice int int))
+
+; What came of asking the device for bytes: the driver after, and the
+; bytes, reversed; or why there are none.
+(data Drawn (Drawn Rng (list int)) (DrawnNot Rng (list int)))
+
+; The descriptor of k bytes of the buffer, which the device writes: the
+; only one a request has.
+(def rng_descriptor ((qa int) (k int)) (list int)
+  (descriptor (add qa (buffer_off)) k (desc_write) 0))
+
+; How many bytes to ask the device for when n more are wanted: as many,
+; but no more than the buffer holds.
+(def rng_ask_size ((n int)) int (min n (buffer_size)))
+
+; n bytes drawn from the device onto acc, reversed; dry, how many times
+; in a row it has filled none.
+(def rng_draw ((g Rng) (n int) (acc (list int)) (dry int)) Drawn
+  (if (le n 0)
+      (Drawn g acc)
+      (if (ge dry (rng_patience))
+          (DrawnNot g "the device gave no bytes")
+          (match g
+            ((Rng d t q qa k)
+              (let w (put_bytes q 0 (rng_descriptor qa (rng_ask_size n)))
+                (let k2 (virtq_offer d t 0 q (avail_off) (ring_size) k 0)
+                  (if (not (virtq_wait q (used_off) k2 (clock_ns)))
+                      (DrawnNot (Rng d t q qa k2) "the device did not answer")
+                      (let got (min n (virtq_used_len q (used_off) (ring_size) k))
+                        (rng_draw (Rng d t q qa k2) (sub n got)
+                                  (rev_onto (get_bytes q (buffer_off) got) acc)
+                                  (if (eq got 0) (add dry 1) 0)))))))))))
+
+; ---------------------------------------------------------------- driving
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "virtio-rng" why))
+
+; The driver: the transports opened, and the first entropy source among
+; them found.
+(def virtio_rng () int
+  (match (virtio_open)
+    ((Err why) (complain why))
+    ((Ok d) (found d (find_device d (rng_device) 0)))))
+
+; No device is no failure: the board was started without one, and the
+; clients of random then do without.
+(def found ((d IoDevice) (t int)) int
+  (match (virtio_probe d t "the virtio-rng" "request" (ring_size))
+    ((VirtioAbsent) (note_as "virtio-rng" "no virtio-rng on the board"))
+    ((VirtioUnusable why) (complain why))
+    ((VirtioReady t2)
+      (match (virtq_mem 1 "the queue")
+        ((NoVirtqMem why) (complain why))
+        ((VirtqMem va q addrs) (started (Rng d t q (array_get addrs 0) 0)))))))
+
+; The queue started, the device told the driver is ready, and random
+; served. The available ring asks for no interrupt: the driver waits for
+; the device itself.
+(def started ((g Rng)) int
+  (match g
+    ((Rng d t q qa k)
+      (let f (put_bytes q (avail_off) (le16 1))
+        (let s (start_queue d t 0 (ring_size) qa (add qa (avail_off)) (add qa (used_off)))
+          (let o (driver_ok d t)
+            (start_serving g)))))))
+
+; ---------------------------------------------------------------- serving
+
+; Registers as random, then answers each request.
+(def start_serving ((g Rng)) int
+  (let port (port_new)
+    (let r (name_register_or_why port "random")
+      (if (is_empty r) (serve g port) (complain r)))))
+
+; Each request on port answered, one at a time.
+(def serve ((g Rng) (port int)) int
+  (match (port_receive port)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from payload)
+      (match (handle g (request_body payload))
+        ((Served g2 reply)
+          (let r (request_answer payload reply)
+            (serve g2 port)))))))
+
+; A request's body, its op and then its numbers, answered.
+(def handle ((g Rng) (body (list int))) (Served Rng)
+  (match (request_numbers body)
+    ((ReqBad why) (served_error g why))
+    ((ReqNums op ns)
+      (if (if (eq op "bytes") (eq (length ns) 1) false)
+          (drawn g (head ns))
+          (served_error g (append "no request " op))))))
+
+; bytes N: N bytes from the device, as random HEX; or why not.
+(def drawn ((g Rng) (n int)) (Served Rng)
+  (let why (random_refusal n)
+    (if (not (is_empty why))
+        (served_error g why)
+        (match (rng_draw g n (nil int) 0)
+          ((DrawnNot g2 why2) (served_error g2 why2))
+          ((Drawn g2 acc) (Served g2 (random_reply (rev acc))))))))

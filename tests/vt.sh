@@ -179,11 +179,11 @@ typekeys "echo hi"
 # h's stem, column 1, its middle, on row 8: the text's color.
 shows "echo hi typed and answered in $f_title" "$((f_x + edge + 1)) $((f_y + bar + 8 * 16 + 8)) $ink"
 
-# vt1 and vt2 are pids 13 and 14: boot, pid 1, starts /etc/system's
-# programs after the inittab's ten, sh 11, wm 12, then the two vts in
+# vt1 and vt2 are pids 14 and 15: boot, pid 1, starts /etc/system's
+# programs after the inittab's eleven, sh 12, wm 13, then the two vts in
 # that order, and each names itself first thing. Each starts its own
 # shell, which ps shows as its child.
-vt=$((12 + ${f_title#vt}))
+vt=$((13 + ${f_title#vt}))
 typekeys "run nap 30000 &"
 sleep 2
 printf 'ps\n' >&3
@@ -223,7 +223,7 @@ shows "$front scrolled, the prompt on its last row" "$((f_x + edge + 40)) $((f_y
 # exit at its shell ends the shell, and so its vt, which closes its
 # window: the other is left, in front, and ps shows neither process.
 other=$b_title
-vt=$((12 + ${front#vt}))
+vt=$((13 + ${front#vt}))
 typekeys "exit"
 windows 1
 [ "$f_title" = "$other" ] || fail "after exit in $front, $f_title is left, not $other"
@@ -237,7 +237,7 @@ echo "ok - vt: exit closed $front, its vt gone, $other left in front"
 # A click on the close button, at the right end of the title bar, kills
 # the window's vt, which closes the window; its shell, its terminal gone,
 # exits too.
-vt=$((12 + ${other#vt}))
+vt=$((13 + ${other#vt}))
 from=$(($(wc -c < "$out") + 1))
 printf 'ps\n' >&3
 waits_for "^ +[0-9]+ +$vt  sh "

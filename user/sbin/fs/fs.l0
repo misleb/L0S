@@ -9,7 +9,9 @@
 ; mounts any new label.
 ;
 ; Each volume's metadata is kept in memory and written back, after the
-; data, whenever it changes: only the sectors that changed. A handle is
+; data, whenever it changes: only the sectors that changed. Between a
+; write's data and its metadata the disk is flushed, so that its cache
+; cannot put the metadata down first. A handle is
 ; the pid that opened it, which fs watches, dropping its handles when it
 ; exits; a reader's keeps the cluster it read last, so that a file read
 ; in order reads each cluster once and walks each link of its chain
@@ -25,13 +27,14 @@
 ; -------------------------------------------------------------- the store
 
 ; Where the sectors are: the disk, through a buffer of a cluster shared
-; with its driver; or memory, by sector, for tests, with its sectors and
-; how many reads and writes it has been asked, as the disk would.
-(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int int))
+; with its driver; or memory, by sector, for tests, with its sectors, how
+; many reads and writes it has been asked, as the disk would, and how
+; many flushes.
+(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int int int))
 
 ; How many sectors the store has: the disk's, or the memory's.
 (def store_sectors ((s Store)) int
-  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n r) n)))
+  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n r fl) n)))
 
 ; Sectors read, and the store after; or why not.
 (data Got (Got Store (list int)) (GotNot Store (list int)))
@@ -39,7 +42,7 @@
 ; count sectors from sector, at most a cluster's.
 (def store_read ((s Store) (sector int) (count int)) Got
   (match s
-    ((StoreMem m n r) (Got (StoreMem m n (add r 1)) (mem_sectors m sector count (nil int))))
+    ((StoreMem m n r fl) (Got (StoreMem m n (add r 1) fl) (mem_sectors m sector count (nil int))))
     ((StoreDisk d b)
       (let why (disk_read d b sector count)
         (if (is_empty why)
@@ -75,11 +78,20 @@
 ; bs, whole sectors, at most a cluster's, written from sector.
 (def store_write ((s Store) (sector int) (bs (list int))) Put
   (match s
-    ((StoreMem m n r) (Put (StoreMem (mem_put m sector bs) n (add r 1))))
+    ((StoreMem m n r fl) (Put (StoreMem (mem_put m sector bs) n (add r 1) fl)))
     ((StoreDisk d b)
       (let p (disk_put b bs)
         (let why (disk_write d b sector (div (length bs) (vol_sector_size)))
           (if (is_empty why) (Put s) (PutNot s why)))))))
+
+; Every write made so far on the disk itself, out of its cache, so that
+; none made after reaches the disk before them.
+(def store_flush ((s Store)) Put
+  (match s
+    ((StoreMem m n r fl) (Put (StoreMem m n r (add fl 1))))
+    ((StoreDisk d b)
+      (let why (disk_flush d)
+        (if (is_empty why) (Put s) (PutNot s why))))))
 
 (def mem_put ((m (Map int (list int))) (sector int) (bs (list int))) (Map int (list int))
   (if (is_empty bs)
@@ -374,7 +386,8 @@
   (if (eq op "stat") (do_stat f path)
   (if (eq op "df") (do_df f path)
   (if (eq op "format") (do_format f path)
-  (word f -5)))))))
+  (if (eq op "unmount") (do_unmount f path)
+  (word f -5))))))))
 
 (def obey_open ((f Fs) (pid int) (mode (list int)) (path (list int))) Answered
   (let m (if (is_number mode) (int_prefix mode 0) 0)
@@ -508,15 +521,16 @@
                       ((VolNoSpace) (word f -6))
                       ((VolWrote v2 spans fresh marked) (written f h x at size bs v2 spans fresh marked))))))))))))
 
-; The spans written, then the metadata that changed, the marks of the
-; clusters linked and the entry, if its size or first cluster did; the
-; handle moved past the bytes, holding the place of the cluster it wrote
-; last, for the next write to walk on from, and the file's readers
-; holding none of its bytes.
+; The spans written and flushed, then the metadata that changed, the
+; marks of the clusters linked and the entry, if its size or first
+; cluster did; the handle moved past the bytes, holding the place of the
+; cluster it wrote last, for the next write to walk on from, and the
+; file's readers holding none of its bytes. The flush keeps the disk from
+; putting the metadata down before the data it points at.
 (def written ((f Fs) (h int) (x Handle) (at int) (size int) (bs (list int)) (v2 Vol) (spans (list VolSpan)) (fresh (list int)) (marked (list int))) Answered
   (match x
     ((Handle p vi ei off mode held)
-      (match (write_spans (match f ((Fs s port vols hs next ws cp) s)) (fs_start f vi) spans bs fresh at size)
+      (match (flushed_after (write_spans (match f ((Fs s port vols hs next ws cp) s)) (fs_start f vi) spans bs fresh at size))
         ((PutNot s2 why) (word (unheld (with_store f s2) vi ei false) -5))
         ((Put s2)
           (match (commit_some (unheld (with_store f s2) vi ei false) vi v2 marked
@@ -525,6 +539,10 @@
             ((Committed f2)
               (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at (length bs)) mode (HeldPlace (vol_spans_end spans at (length bs))))))
                     (length bs)))))))))
+
+; The store flushed once p's writes have been made; p, if they failed.
+(def flushed_after ((p Put)) Put
+  (match p ((Put s) (store_flush s)) ((PutNot s why) p)))
 
 ; Each span of data written, the bytes of the file from at. A span's
 ; sectors are read first only where they hold the file's bytes that
@@ -761,6 +779,33 @@
               ((CommitFailed f2) (word f2 -5))
               ((Committed f2) (word f2 0)))))))
 
+; unmount VOLUME: the volume no longer served, and /Volumes/LABEL no
+; volume, until a rescan finds it again: -3 if it is not fs's, -4 while
+; any file is open, since a handle names its volume by where it is among
+; them, and for the system volume.
+(def do_unmount ((f Fs) (path (list int))) Answered
+  (let vi (volume_at f path)
+    (if (lt vi 0)
+        (word f -3)
+        (if (if (gt (map_size (fs_handles f)) 0) true (is_system f vi))
+            (word f -4)
+            (let label (vol_label (fs_vol f vi))
+              (match (fs_unmount label (match f ((Fs s port vols hs next ws cp) port)))
+                ((Unmounted) (word (without_vol f vi) 0))
+                ((UnmountNotMounted) (word (without_vol f vi) 0))
+                ((UnmountDenied) (word f -4))
+                ((UnmountBadLabel) (word f -5))))))))
+
+; f serving every volume but the vi'th.
+(def without_vol ((f Fs) (vi int)) Fs
+  (with_vols f (vols_without (array_to_list (fs_vols f)) vi)))
+
+; vols without the i'th.
+(def vols_without ((vols (list FsVol)) (i int)) (list FsVol)
+  (if (is_empty vols)
+      vols
+      (if (eq i 0) (tail vols) (cons (head vols) (vols_without (tail vols) (sub i 1))))))
+
 ; ------------------------------------------------------------ partitions
 
 ; Its store.
@@ -790,6 +835,16 @@
         ((Some t) t)
         ((None) 0)))))
 
+; A new UUID of version 7 for Unix time ms: its noise random's, asked
+; through f's own port for replies, which now_ms has made; or, with no
+; random, the clock's mixer's, salted with salt.
+(def fresh_uuid ((f Fs) (ms int) (salt int)) Uuid
+  (match f
+    ((Fs s port vols hs next ws cp)
+      (match (random_bytes cp 10)
+        ((Ok noise) (uuid_v7 ms noise))
+        ((Err why) (uuid_new ms salt))))))
+
 ; partition COUNT [START]: a new partition of COUNT sectors, from START or
 ; wherever it first fits. Numbers, one or two.
 (def obey_partition ((f Fs) (ws (list (list int)))) Answered
@@ -809,7 +864,7 @@
   (match (now_ms f)
     ((Timed f2 ms)
       (match (read_table (fs_store f2))
-        ((NoTable s2 why) (partition_in (with_store f2 s2) (GptDisk (uuid_new ms 0) (nil GptPart)) count start ms))
+        ((NoTable s2 why) (partition_in (with_store f2 s2) (GptDisk (fresh_uuid f2 ms 0) (nil GptPart)) count start ms))
         ((BadTable s2 why) (Answered (with_store f2 s2) -5 why))
         ((Table s2 d) (partition_in (with_store f2 s2) d count start ms))))))
 
@@ -820,7 +875,7 @@
       (match (gpt_place (store_sectors (fs_store f)) parts count start)
         ((GptNoRoom why) (Answered f -6 why))
         ((GptAt at)
-          (let p (GptPart (gpt_l0fs_type) (uuid_new ms (add 1 (length parts))) at count "")
+          (let p (GptPart (gpt_l0fs_type) (fresh_uuid f ms (add 1 (length parts))) at count "")
             (match (write_table (fs_store f) (GptDisk du (append parts (cons p (nil GptPart)))))
               ((PutNot s2 why) (Answered (with_store f s2) -5 why))
               ((Put s2)
@@ -900,9 +955,10 @@
 
 ; ---------------------------------------------------------------- rescan
 
-; What a rescan answered, and the labels it found that f did not serve
-; before, to be mounted.
-(data Rescanned (Rescanned Answered (list (list int))))
+; What a rescan answered, the labels it found that f did not serve
+; before, to be mounted, and those f served that it no longer finds, to
+; be unmounted.
+(data Rescanned (Rescanned Answered (list (list int)) (list (list int))))
 
 ; The disk read again as at the start, its table's partitions of L0FS's
 ; type and each volume on them, served in place of the volumes before:
@@ -911,16 +967,28 @@
 ; among them. A disk with no table has no volumes.
 (def rescan ((f Fs)) Rescanned
   (if (gt (map_size (fs_handles f)) 0)
-      (Rescanned (word f -4) (nil (list int)))
+      (Rescanned (word f -4) (nil (list int)) (nil (list int)))
       (match (read_table (match f ((Fs s port vols hs next ws cp) s)))
         ((NoTable s2 why)
-          (Rescanned (Answered (with_vols (with_store f s2) (nil FsVol)) 0 "") (nil (list int))))
-        ((BadTable s2 why) (Rescanned (Answered (with_store f s2) -5 why) (nil (list int))))
+          (Rescanned (Answered (with_vols (with_store f s2) (nil FsVol)) 0 "") (nil (list int))
+                     (gone_labels (array_to_list (fs_vols f)) (vols_array (nil FsVol)))))
+        ((BadTable s2 why) (Rescanned (Answered (with_store f s2) -5 why) (nil (list int)) (nil (list int))))
         ((Table s2 d)
           (match (load_vols s2 (gpt_typed (gpt_parts d) (gpt_l0fs_type)) (nil FsVol))
             ((Loaded s3 vols)
               (Rescanned (Answered (with_vols (with_store f s3) vols) (length vols) (labels_text vols (nil int)))
-                         (new_labels (fs_vols f) vols))))))))
+                         (new_labels (fs_vols f) vols)
+                         (gone_labels (array_to_list (fs_vols f)) (vols_array vols)))))))))
+
+; The labels of old that none of vols has.
+(def gone_labels ((old (list FsVol)) (vols (array FsVol))) (list (list int))
+  (if (is_empty old)
+      (nil (list int))
+      (match (head old)
+        ((FsVol start u v)
+          (if (lt (vol_index vols (vol_label v) 0) 0)
+              (cons (vol_label v) (gone_labels (tail old) vols))
+              (gone_labels (tail old) vols))))))
 
 ; The labels of vols, a line each, after acc.
 (def labels_text ((vols (list FsVol)) (acc (list int))) (list int)
@@ -938,13 +1006,26 @@
               (cons (vol_label v) (new_labels old (tail vols)))
               (new_labels old (tail vols)))))))
 
-; A rescan, its new labels mounted from f's port. A label that has gone
-; stays in the kernel's table, there being no unmount, and its requests
-; are answered as for any volume fs does not serve.
+; A rescan, its new labels mounted from f's port, and those that have
+; gone unmounted, but for the system volume's, which is / for good, and
+; whose requests are then answered as for any volume fs does not serve.
 (def do_rescan ((f Fs)) Answered
   (match (rescan f)
-    ((Rescanned a labels)
-      (let m (mount_new (match f ((Fs s port vols hs next ws cp) port)) (fs_vols (after_answer a)) labels) a))))
+    ((Rescanned a labels gone)
+      (let port (match f ((Fs s port vols hs next ws cp) port))
+        (let u (unmount_gone port gone)
+          (let m (mount_new port (fs_vols (after_answer a)) labels) a))))))
+
+; Each label unmounted from port. The system volume's stays; any other
+; failure is said why.
+(def unmount_gone ((port int) (labels (list (list int)))) int
+  (if (is_empty labels)
+      0
+      (match (fs_unmount (head labels) port)
+        ((Unmounted) (unmount_gone port (tail labels)))
+        ((UnmountDenied) (unmount_gone port (tail labels)))
+        ((UnmountNotMounted) (unmount_gone port (tail labels)))
+        ((UnmountBadLabel) (let w (complain (append (head labels) (append ": " (unmounting_why (UnmountBadLabel))))) (unmount_gone port (tail labels)))))))
 
 ; f after the request a answers.
 (def after_answer ((a Answered)) Fs (match a ((Answered f w bs) f)))

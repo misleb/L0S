@@ -61,7 +61,8 @@ SCREEN       ?= 2560x1440
 GPU          ?= $(shell tools/qemu-gl)
 comma        := ,
 GPU_OPTS     := $(if $(SCREEN),xres=$(word 1,$(subst x, ,$(SCREEN)))$(comma)yres=$(word 2,$(subst x, ,$(SCREEN))))
-DEVICES      := -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device
+DEVICES      := -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device \
+                -device virtio-rng-device
 DISK         := $(BUILD)/disk.img
 SYSDISK      := $(BUILD)/system.img
 SYSUUID      := $(BUILD)/system.uuid
@@ -114,9 +115,14 @@ APPLIB  := user/lib/proto/app.l0
 L0FS    := user/lib/format/l0fs.l0
 
 # The network: nic, the driver's frames and Ethernet's addresses; and
-# inet, the stack's datagrams and IPv4's addresses, which needs nic.
+# inet, the stack's datagrams and IPv4's addresses, and its resolver,
+# which needs nic and DNS's messages.
 NICLIB  := user/lib/proto/nic.l0
-INETLIB := $(NICLIB) user/lib/proto/inet.l0
+DNSLIB  := user/lib/format/dns.l0
+INETLIB := $(NICLIB) $(DNSLIB) user/lib/proto/inet.l0
+
+# Randomness from the entropy device's driver, for UUIDs and TCP.
+RANDOM  := user/lib/proto/random.l0
 
 # The partition table, GPT, and the UUIDs and CRC-32 it needs.
 UUIDLIB := user/lib/format/uuid.l0
@@ -136,7 +142,8 @@ LIBS_virtio-gpu := $(VIRTIO) $(RENDER)
 LIBS_virtio-input := $(VIRTIO)
 LIBS_virtio-blk := $(VIRTIO)
 LIBS_virtio-net := $(VIRTIO) $(NICLIB)
-LIBS_inet       := $(INETLIB)
+LIBS_virtio-rng := $(VIRTIO) $(RANDOM)
+LIBS_inet       := $(INETLIB) $(RANDOM) $(CLOCK)
 LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(INETLIB)
@@ -152,7 +159,8 @@ LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
-LIBS_fs         := $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(CLOCK)
+LIBS_random     := $(RANDOM)
+LIBS_fs         := $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(CLOCK) $(RANDOM)
 LIBS_sh         := $(PROCS) $(PATHS) $(APPLIB)
 LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB)
 
@@ -254,9 +262,11 @@ test: sample
 	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0
 	$(L0) test $(ULIB) $(NICLIB) user/lib/proto/nic_test.l0
 	$(L0) test $(ULIB) $(INETLIB) user/lib/proto/inet_test.l0
+	$(L0) test $(ULIB) $(RANDOM) user/lib/proto/random_test.l0
 	$(L0) test $(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0
 	$(L0) test $(BASE) $(L0FS) user/lib/format/l0fs_test.l0
 	$(L0) test $(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0
+	$(L0) test $(BASE) $(DNSLIB) user/lib/format/dns_test.l0
 	$(L0) test $(BASE) $(CRC32) user/lib/format/crc32_test.l0
 	$(L0) test $(BASE) $(PARTS) user/lib/format/gpt_test.l0
 	$(L0) test $(BASE) $(PPM) user/lib/format/ppm_test.l0

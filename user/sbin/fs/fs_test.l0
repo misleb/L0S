@@ -5,7 +5,7 @@
 ; made them before the disk had a GPT, empty, on a store of memory of
 ; 2048 sectors; the port 7.
 (def two () Fs
-  (fs_new (StoreMem ((MapEmpty int (list int))) 2048 0) 7
+  (fs_new (StoreMem ((MapEmpty int (list int))) 2048 0 0) 7
           (array_from (cons (FsVol 8 "" (vol_new "data" (vol_layout 1528)))
                             (cons (FsVol 1536 "" (vol_new "scratch" (vol_layout 512))) (nil FsVol)))
                       (FsVol 0 "" (vol_new "x" (vol_layout 16))))))
@@ -183,7 +183,20 @@
 
 ; How many reads and writes f's store has been asked.
 (def requests ((f Fs)) int
-  (match (fs_store f) ((StoreMem m n r) r) ((StoreDisk d b) -1)))
+  (match (fs_store f) ((StoreMem m n r fl) r) ((StoreDisk d b) -1)))
+
+; How many flushes f's store has been asked.
+(def flushes ((f Fs)) int
+  (match (fs_store f) ((StoreMem m n r fl) fl) ((StoreDisk d b) -1)))
+
+; A write flushes its data once, before the metadata that points at it;
+; a read flushes nothing.
+(def test_write_flushes () int
+  (let f (ran_fs (run (two) (reqs2 "open 2 /Volumes/data/a" "write 1 hello")))
+    (let g (after (obey f 5 "write 1 again"))
+      (let h (after (obey (after (obey g 5 "open 1 /Volumes/data/a")) 5 "read 2 4"))
+        (add (check_int "one write, one flush" (sub (flushes g) (flushes f)) 1)
+             (check_int "none to read" (sub (flushes h) (flushes g)) 0))))))
 
 ; f with a file of n bytes, the pattern, written at /Volumes/data/big and
 ; closed, and handle 2 open on it to read.
@@ -294,7 +307,7 @@
 ; A server of a volume of 2^20 sectors, its metadata on the disk.
 (def big_fs () Fs
   (let v (vol_new "big" (vol_layout 1048576))
-    (fs_new (put_at (StoreMem ((MapEmpty int (list int))) 1048576 0) 0 (vol_meta v)) 7
+    (fs_new (put_at (StoreMem ((MapEmpty int (list int))) 1048576 0 0) 0 (vol_meta v)) 7
             (array_from (cons (FsVol 0 "" v) (nil FsVol)) (FsVol 0 "" v)))))
 
 ; Random appends of up to 5000 bytes to two files read back as what was
@@ -483,7 +496,7 @@
 ; A 2048-sector disk in memory with vols on it: a GPT of their
 ; partitions, each volume's metadata where its partition starts.
 (def disk_with ((vols (list FsVol))) Store
-  (metas_on (table_on (StoreMem ((MapEmpty int (list int))) 2048 0) (GptDisk (test_uuid 0) (parts_of vols 1))) vols))
+  (metas_on (table_on (StoreMem ((MapEmpty int (list int))) 2048 0 0) (GptDisk (test_uuid 0) (parts_of vols 1))) vols))
 
 (def table_on ((s Store) (d GptDisk)) Store
   (match (write_table s d) ((Put s2) s2) ((PutNot s2 why) s2)))
@@ -506,7 +519,7 @@
 ; with: data's is the first partition's.
 (def test_loaded_uuid () int
   (match (rescan (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (scratch_vol))))
-    ((Rescanned a labels) (check_str "data's" (fs_uuid (after a) 0) (uuid_text (test_uuid 1))))))
+    ((Rescanned a labels gone) (check_str "data's" (fs_uuid (after a) 0) (uuid_text (test_uuid 1))))))
 
 (def put_at ((s Store) (sector int) (bs (list int))) Store
   (match (store_write_all s sector bs) ((Put s2) s2) ((PutNot s2 why) s2)))
@@ -516,30 +529,31 @@
   (fs_new (disk_with ondisk) 7 (array_from vols (data_vol))))
 
 ; A rescan as text: its answer, a bar, the labels to mount, comma
-; separated.
+; separated, a bar, and those to unmount.
 (def rescan_text ((r Rescanned)) (list int)
-  (match r ((Rescanned a labels) (append (answer_text a) (append "|" (join_commas labels))))))
+  (match r ((Rescanned a labels gone) (append (answer_text a) (append "|" (append (join_commas labels) (append "|" (join_commas gone))))))))
 
 (def join_commas ((ls (list (list int)))) (list int)
   (if (is_empty ls) "" (if (is_empty (tail ls)) (head ls) (append (head ls) (append "," (join_commas (tail ls)))))))
 
-(def rescanned_fs ((r Rescanned)) Fs (match r ((Rescanned a labels) (after a))))
+(def rescanned_fs ((r Rescanned)) Fs (match r ((Rescanned a labels gone) (after a))))
 
-; The same volumes: both served, nothing new to mount.
+; The same volumes: both served, nothing new to mount, nothing gone.
 (def test_rescan_same () int
   (let both (vols2 (data_vol) (scratch_vol))
-    (check_str "two, none new" (rescan_text (rescan (serving both both))) "2:data\nscratch\n|")))
+    (check_str "two, none new" (rescan_text (rescan (serving both both))) "2:data\nscratch\n||")))
 
-; A volume in scratch's place is new; data is not.
+; A volume in scratch's place is new; data is not; scratch is gone, to
+; be unmounted.
 (def test_rescan_new () int
   (check_str "other new"
              (rescan_text (rescan (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (other_vol)))))
-             "2:data\nother\n|other"))
+             "2:data\nother\n|other|scratch"))
 
 ; From one volume to two: the second is new, and served.
 (def test_rescan_more () int
   (let r (rescan (serving (cons (data_vol) (nil FsVol)) (vols2 (data_vol) (scratch_vol))))
-    (add (check_str "scratch new" (rescan_text r) "2:data\nscratch\n|scratch")
+    (add (check_str "scratch new" (rescan_text r) "2:data\nscratch\n|scratch|")
          (check_str "served" (answer_text (obey (rescanned_fs r) 5 "df /Volumes/scratch")) "0:479 58 57 0"))))
 
 ; A volume that has gone is answered as no volume of fs's.
@@ -552,7 +566,7 @@
 ; No partitions at all: no volume served.
 (def test_rescan_empty () int
   (let r (rescan (serving (vols2 (data_vol) (scratch_vol)) (nil FsVol)))
-    (add (check_str "none" (rescan_text r) "0:|")
+    (add (check_str "none, both gone" (rescan_text r) "0:||data,scratch")
          (check_str "data gone" (answer_text (obey (rescanned_fs r) 5 "list /Volumes/data")) "-3:"))))
 
 ; What a rescan serves is what is on the disk: a file written and
@@ -578,7 +592,30 @@
 (def test_rescan_from_none () int
   (let f (fs_new (disk_with (vols2 (data_vol) (scratch_vol))) 7 (vols_array (nil FsVol)))
     (add (check_str "nothing yet" (answer_text (obey f 5 "list /Volumes/data")) "-3:")
-         (check_str "both new" (rescan_text (rescan f)) "2:data\nscratch\n|data,scratch"))))
+         (check_str "both new" (rescan_text (rescan f)) "2:data\nscratch\n|data,scratch|"))))
+
+; ---------------------------------------------------------------- unmount
+
+; Unmounted, a volume is no longer served: requests of it are answered
+; as for any volume fs does not have. (Under l0 test there is no kernel,
+; whose word, not mounted, fs takes as gone already.)
+(def test_unmount () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (check_str "scratch gone, data kept"
+               (ran_text (run (serving both both) (reqs3 "unmount /Volumes/scratch" "list /Volumes/scratch" "list /Volumes/data")))
+               "0:|-3:|0:")))
+
+; Refused while any file is open, and for a volume fs does not serve.
+(def test_unmount_refused () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (add (check_str "a file open" (ran_text (run (serving both both) (reqs2 "open 2 /Volumes/data/a" "unmount /Volumes/scratch"))) "1:|-4:")
+         (check_str "no such volume" (ran_text (run (serving both both) (reqs1 "unmount /Volumes/other"))) "-3:"))))
+
+; Unmounted, it is found again by a rescan, as new.
+(def test_unmount_rescan () int
+  (let both (vols2 (data_vol) (scratch_vol))
+    (let f (ran_fs (run (serving both both) (reqs1 "unmount /Volumes/scratch")))
+      (check_str "scratch new again" (rescan_text (rescan f)) "2:data\nscratch\n|scratch|"))))
 
 ; ------------------------------------------------------------ partitions
 
@@ -586,7 +623,7 @@
 (def demo_fs () Fs (serving (vols2 (data_vol) (scratch_vol)) (vols2 (data_vol) (scratch_vol))))
 
 ; A server of nothing, on a blank disk of 2048 sectors.
-(def blank_fs () Fs (fs_new (StoreMem ((MapEmpty int (list int))) 2048 0) 7 (vols_array (nil FsVol))))
+(def blank_fs () Fs (fs_new (StoreMem ((MapEmpty int (list int))) 2048 0 0) 7 (vols_array (nil FsVol))))
 
 ; The bytes of an answer.
 (def answer_bytes ((a Answered)) (list int) (match a ((Answered f w bs) bs)))
@@ -638,7 +675,7 @@
 (def test_mkfs_found () int
   (let a (obey (blank_fs) 5 "partition 500")
     (let b (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " kept")))
-      (check_str "rescanned" (rescan_text (rescan (after b))) "1:kept\n|"))))
+      (check_str "rescanned" (rescan_text (rescan (after b))) "1:kept\n||"))))
 
 ; mkfs of uuid and label on f, as text.
 (def mkfs_text ((f Fs) (uuid (list int)) (label (list int))) (list int)
@@ -667,7 +704,7 @@
 ; With no volumes fs goes on to serve, rather than giving up with 0; under
 ; an operating system there is no kernel to register it with, so it fails.
 (def test_serves_none () int
-  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int))) 2048 0) (nil FsVol))) 1))
+  (check_int "tried to register" (found (Loaded (StoreMem ((MapEmpty int (list int))) 2048 0 0) (nil FsVol))) 1))
 
 ; Under an operating system there is no disk.
 (def test_no_disk () int
