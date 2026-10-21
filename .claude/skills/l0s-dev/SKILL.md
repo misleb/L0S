@@ -46,7 +46,7 @@ the `;` comment block directly above each form, so write yours that way
 | `demo/etc/` | the demo's `inittab` (stage 1: `boot`, the drivers, `fs`), `system` (what `boot` starts: `sh`, `wm`, the `vt`s), `motd`; `tests/screen/etc/` the screen tests' |
 | `build/root` | `make root`: every program staged as the initramfs holds it, `bin/`, `sbin/`, `Applications/APP.app/`, which `tools/mkinitramfs OUT ETC ROOT [IMAGE...]` archives with an `etc` |
 | `tools/` | `mkicon/` (an L0 tool: an app's `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`, and with a face given, its 96×96 `icon2x.ppm`), `mkfont/` (an L0 tool: TrueType outlines and `fonts/icons.paths`, rasterized (in floats, rounded to 1/256 pixel) into `/etc/face2x`, the face for scale 2: `ttf.l0`, `shape.l0`, `raster.l0`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, `QEMU_DISK` as a virtio-blk, and `QEMU_GPU` the GPU's options, such as `xres=3840,yres=2160`), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, or of any layout, partitioned and formatted by `mkfs/`, an L0 host tool, which fills a volume from a cpio too), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
-| `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `procmon.sh` |
+| `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `resize.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 
 Who talks to whom at run time is the table under "The interactive demo" in

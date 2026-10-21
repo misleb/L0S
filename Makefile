@@ -420,6 +420,7 @@ e2e: images root initramfs screen-initramfs vt-initramfs disks-initramfs launche
 	tests/keyboard.sh
 	tests/vt.sh
 	tests/widgets.sh
+	tests/resize.sh
 	tests/procmon.sh
 	tests/disks.sh
 	tests/disks-create.sh

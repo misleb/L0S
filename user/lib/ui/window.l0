@@ -22,32 +22,51 @@
 ;
 ; ui_present lays the view out, and paints only the parts that differ from
 ; what it painted last, telling the compositor of each.
+;
+; When the user drags the window's edge, the compositor asks for a size
+; and ui_route makes a buffer that size (UiResize); the next ui_present
+; lays the view out for it, paints all of it, and gives it to the
+; compositor in place of the old one, which is then given up. A program
+; needs no code for it, if its view is made from the window's size.
 
 ; The window: the compositor, its id there, the canvas it is drawn in,
 ; the port its events come to, the face (at the desktop's scale, as the
 ; canvas is), the widgets' state, the nodes painted last, the pointer's
 ; buttons as last told, and, while a scrollbar's slider is dragged, how
-; far below its top the pointer holds it.
-(data UiWin (UiWin Compositor int Canvas int UiFace UiState (list UiNode) int int))
+; far below its top the pointer holds it; then where the canvas's buffer
+; is, and what a resize has done to it that wm has not yet been told.
+(data UiWin (UiWin Compositor int Canvas int UiFace UiState (list UiNode) int int UiMem))
+
+; The address of the window's buffer, its pages, which may be more than
+; the canvas takes, room to grow into, and a resize wm is yet to be told
+; of.
+(data UiMem (UiMem int int UiSwap))
+
+; What a resize did that wm is yet to be told of: made a new buffer, the
+; old one's address, pages and canvas kept until wm has the new one; or
+; made the canvas another size in the same buffer, which had room, its
+; own width and height before kept to go back to if wm will not have it;
+; or nothing.
+(data UiSwap (UiSwap int int Canvas) (UiInPlace int int) (UiNoSwap))
 
 ; A window opened, or why not.
 (data UiOpened (UiOpenedWin UiWin) (UiOpenFailed (list int)))
 
 ; Its port, its widgets' state, and the nodes it painted last.
-(def ui_win_port ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g) port)))
-(def ui_win_state ((w UiWin)) UiState (match w ((UiWin c id cv port font st ns b g) st)))
-(def ui_win_nodes ((w UiWin)) (list UiNode) (match w ((UiWin c id cv port font st ns b g) ns)))
+(def ui_win_port ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g m) port)))
+(def ui_win_state ((w UiWin)) UiState (match w ((UiWin c id cv port font st ns b g m) st)))
+(def ui_win_nodes ((w UiWin)) (list UiNode) (match w ((UiWin c id cv port font st ns b g m) ns)))
 
 ; w with the widgets' state st and the pointer's buttons b.
 (def ui_win_with ((w UiWin) (st UiState) (b int)) UiWin
-  (match w ((UiWin c id cv port font old ns ob g) (UiWin c id cv port font st ns b g))))
+  (match w ((UiWin c id cv port font old ns ob g m) (UiWin c id cv port font st ns b g m))))
 
 ; How far below a dragged slider's top the pointer holds it.
-(def ui_win_grab ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g) g)))
+(def ui_win_grab ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g m) g)))
 
 ; w with its slider held g below its top.
 (def ui_win_grabbing ((w UiWin) (g int)) UiWin
-  (match w ((UiWin c id cv port font st ns b old) (UiWin c id cv port font st ns b g))))
+  (match w ((UiWin c id cv port font st ns b old m) (UiWin c id cv port font st ns b g m))))
 
 ; Where the scroller called name is scrolled in the window as last
 ; painted, for keys that keep a selection in view (ui_grid_key).
@@ -69,9 +88,32 @@
                   (match (window_open (Compositor cport rp pid s) w h va n port title)
                     ((WindowFailed why) (UiOpenFailed why))
                     ((WindowOpened id)
-                      (UiOpenedWin (UiWin (Compositor cport rp pid s) id canvas port face (ui_state_new (ui_style)) (nil UiNode) 0 0))))))))))))
+                      (UiOpenedWin (UiWin (Compositor cport rp pid s) id canvas port face (ui_state_new (ui_style)) (nil UiNode) 0 0 (UiMem va n (UiNoSwap))))))))))))))
+
+; The window closed, and its buffer, and any a resize has not yet
+; replaced, given up.
 (def ui_close ((w UiWin)) int
-  (match w ((UiWin c id cv port font st ns b g) (let x (window_close c id) 0))))
+  (match w
+    ((UiWin c id cv port font st ns b g m)
+      (match m
+        ((UiMem va n swap)
+          (let x (window_close c id)
+            (let f (ui_buffer_free va n cv)
+              (match swap
+                ((UiNoSwap) 0)
+                ((UiInPlace ow oh) 0)
+                ((UiSwap ova on ocv) (ui_buffer_free ova on ocv))))))))))
+
+; cv over the same buffer, w by h of its own pixels: its first w by h
+; pixels, row after row, the image wm is told of.
+(def ui_canvas_sized ((cv Canvas) (w int) (h int)) Canvas
+  (match cv
+    ((Canvas r cw ch top) (Canvas r w h 0))
+    ((ArrayCanvas px cw ch top) (canvas_new w h 0))))
+
+; A buffer's side n of the desktop's pixels with room to grow: a quarter
+; more, and 64.
+(def ui_grown ((n int)) int (add n (add (div n 4) 64)))
 
 ; --------------------------------------------------------------- events
 
@@ -86,6 +128,7 @@
   (UiLeave)                      ; the pointer has gone from the window
   (UiFocus bool)                 ; the window has come to the front, or gone from it
   (UiScroll int int int int)     ; the wheel turned at x, y: its steps across, and down
+  (UiResize int int)             ; the user drags the window's edge: the size wanted
   (UiExit int int)               ; a process watched has exited: its pid, its status
   (UiOther int (list int)))      ; anything else: who sent it, and what
 
@@ -95,6 +138,7 @@
     ((UiKey k) (Some k))
     ((UiPress x y b) ((None KeyEvent))) ((UiRelease x y b) ((None KeyEvent))) ((UiMotion x y b) ((None KeyEvent)))
     ((UiLeave) ((None KeyEvent))) ((UiFocus f) ((None KeyEvent))) ((UiScroll x y dx dy) ((None KeyEvent)))
+    ((UiResize rw rh) ((None KeyEvent)))
     ((UiExit p s) ((None KeyEvent))) ((UiOther f p) ((None KeyEvent)))))
 
 ; The code of the key ev presses, or holds down so that it repeats; -1
@@ -107,7 +151,7 @@
 ; What a message to the window's port is.
 (def ui_event_of ((w UiWin) (m Message)) UiEvent
   (match w
-    ((UiWin c id cv port font st ns held g)
+    ((UiWin c id cv port font st ns held g mem)
       (match m
         ((RecvFailed) (UiOther -1 ""))
         ((Message from payload)
@@ -140,13 +184,16 @@
       (if (if (not (eq held 0)) (eq b 0) false) (UiRelease x y b) (UiMotion x y b))))
 
 ; A compositor's notice: the pointer gone, the window come to the front
-; or gone from it, or anything else.
+; or gone from it, a size asked for, or anything else.
 (def ui_notice_of ((m Message) (from int) (payload (list int))) UiEvent
   (if (is_leave_notice m)
       (UiLeave)
       (match (focus_notice_of m)
         ((Some front) (UiFocus front))
-        ((None) (UiOther from payload)))))
+        ((None)
+          (match (size_notice_of m)
+            ((Some ns) (UiResize (nth ns 0) (nth ns 1)))
+            ((None) (UiOther from payload)))))))
 
 ; The window after an event, and the action it set off, or "".
 (data UiRouted (UiRouted UiWin (list int)))
@@ -160,8 +207,9 @@
   (let st (ui_win_state w)
     (let ns (ui_win_nodes w)
       (match w
-        ((UiWin c id cv port font old nodes held g)
+        ((UiWin c id cv port font old nodes held g m)
           (match ev
+            ((UiResize rw rh) (UiRouted (ui_resized w rw rh) ""))
             ((UiMotion x y b) (ui_motion_routed w st x y b))
             ((UiPress x y b) (ui_press_routed w st x y b))
             ((UiScroll x y dx dy) (ui_wheel_routed w x y dy))
@@ -304,21 +352,110 @@
         (if (starts_with action p) (ui_entry_placed t (int_prefix (drop_n action (length p)) 0)) t))))
 
 ; The pointer's buttons as last told.
-(def ui_win_held ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g) b)))
+(def ui_win_held ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g m) b)))
 
 ; ------------------------------------------------------------- painting
 
 ; The window showing widget: laid out, and where that differs from what
-; was painted last, painted and its damage told.
+; was painted last, painted and its damage told. After a resize it is all
+; of a new buffer, which wm is given in place of the old one.
 (def ui_present ((w UiWin) (widget UiWidget)) UiWin
   (match w
-    ((UiWin c id canvas port font st old held g)
+    ((UiWin c id canvas port font st old held g m)
       (let w (ui_logical_w canvas font)
         (let h (ui_logical_h canvas font)
           (let ns (ui_layout_window widget w h st)
-            (let boxes (ui_changed old ns (Rect 0 0 w h))
-              (let p (ui_repaint c id canvas font ns boxes)
-                (UiWin c id canvas port font st ns held g)))))))))
+            (match m
+              ((UiMem va n swap)
+                (match swap
+                  ((UiNoSwap)
+                    (let boxes (ui_changed old ns (Rect 0 0 w h))
+                      (let p (ui_repaint c id canvas font ns boxes)
+                        (UiWin c id canvas port font st ns held g m))))
+                  ((UiInPlace ow oh) (ui_swapped (UiWin c id canvas port font st ns held g m) ns))
+                  ((UiSwap ova on ocv) (ui_swapped (UiWin c id canvas port font st ns held g m) ns)))))))))))
+
+; The window, resized, painted whole and wm told: of its buffer's new
+; size, if it was resized in it, or of its new buffer, which wm then
+; shows in place of the old one, and the old one given up. If wm will not
+; have it, the window goes back to the buffer and size wm shows, to be
+; painted again, a new buffer given up.
+(def ui_swapped ((w UiWin) (ns (list UiNode))) UiWin
+  (match w
+    ((UiWin c id canvas port font st old held g m)
+      (match m
+        ((UiMem va n swap)
+          (let pw (ui_logical_w canvas font)
+            (let ph (ui_logical_h canvas font)
+              (let p (ui_paint_boxes canvas font ns (cons (Rect 0 0 pw ph) (nil Rect)))
+                (let e (match swap
+                         ((UiInPlace ow oh) (window_resize_in_place c id pw ph))
+                         ((UiSwap ova on ocv) (window_resize c id pw ph va n))
+                         ((UiNoSwap) ""))
+                  (if (is_empty e)
+                      (ui_told (UiWin c id canvas port font st ns held g m))
+                      (ui_refused (UiWin c id canvas port font st ns held g m))))))))))))
+
+; w once wm has its resize: any old buffer given up.
+(def ui_told ((w UiWin)) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g m)
+      (match m
+        ((UiMem va n swap)
+          (let f (match swap ((UiSwap ova on ocv) (ui_buffer_free ova on ocv)) ((UiInPlace ow oh) 0) ((UiNoSwap) 0))
+            (UiWin c id canvas port font st ns held g (UiMem va n (UiNoSwap)))))))))
+
+; w once wm has refused its resize: as wm shows it, in the size it had in
+; the same buffer, or in the old buffer, the new one given up; nothing
+; painted, so all of it is painted next.
+(def ui_refused ((w UiWin)) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g m)
+      (match m
+        ((UiMem va n swap)
+          (match swap
+            ((UiInPlace ow oh) (UiWin c id (ui_canvas_sized canvas ow oh) port font st (nil UiNode) held g (UiMem va n (UiNoSwap))))
+            ((UiSwap ova on ocv)
+              (let f (ui_buffer_free va n canvas)
+                (UiWin c id ocv port font st (nil UiNode) held g (UiMem ova on (UiNoSwap)))))
+            ((UiNoSwap) w)))))))
+
+; The window asked to be rw by rh, its nodes forgotten so the next
+; ui_present paints it all: in the buffer it has, if that has room, else
+; in a new one with room to grow, the old one kept until wm has the new
+; one. A buffer that wm has never been told of is given up, as nothing
+; shows it. As it was if the size is the one it has, or there is no
+; memory for a new buffer.
+(def ui_resized ((w UiWin) (rw int) (rh int)) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g m)
+      (if (if (lt rw 1) true (lt rh 1))
+          w
+          (if (if (eq rw (ui_logical_w canvas font)) (eq rh (ui_logical_h canvas font)) false)
+              w
+              (match m
+                ((UiMem va n swap)
+                  (let s (ui_face_scale font)
+                    (if (le (buffer_pages (mul rw s) (mul rh s)) n)
+                        (UiWin c id (ui_canvas_sized canvas (mul rw s) (mul rh s)) port font st (nil UiNode) held g
+                               (UiMem va n (match swap ((UiNoSwap) (UiInPlace (canvas_w canvas) (canvas_h canvas))) ((UiInPlace ow oh) swap) ((UiSwap ova on ocv) swap))))
+                        (match (ui_buffer_at (ui_grown rw) (ui_grown rh) s)
+                          ((UiNoBuf why) w)
+                          ((UiBuf nva nn big) (ui_swapped_in w nva nn (ui_canvas_sized big (mul rw s) (mul rh s))))))))))))))
+
+; w with the new buffer at va, n pages, canvas ncv, as its own: the one it
+; had kept until wm has the new one, unless wm has never been told of it.
+(def ui_swapped_in ((w UiWin) (va int) (n int) (ncv Canvas)) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g m)
+      (match m
+        ((UiMem cva cn swap)
+          (match swap
+            ((UiNoSwap) (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n (UiSwap cva cn canvas))))
+            ((UiInPlace ow oh) (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n (UiSwap cva cn canvas))))
+            ((UiSwap ova on ocv)
+              (let f (ui_buffer_free cva cn canvas)
+                (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n swap))))))))))
 
 ; Each box painted, then all of them told in one damage request.
 (def ui_repaint ((c Compositor) (id int) (canvas Canvas) (font UiFace) (ns (list UiNode)) (boxes (list Rect))) int

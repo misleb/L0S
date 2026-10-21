@@ -130,6 +130,7 @@ These boot with QEMU's monitor and QMP on Unix sockets and check pixels of a
 image exists: `make vt-initramfs` for `vt.sh` (the demo, with
 `tests/vt/etc/system`'s two Terminals over its own), and
 `make screen-initramfs` for `gpu-screen.sh`, `keyboard.sh`, `widgets.sh`,
+`resize.sh` (drags the gallery's edges and corner with the tablet),
 `procmon.sh` and `launcher.sh` (the demo without the terminals,
 `tests/screen/etc`; `launcher.sh` clicks Applications, checks the
 launcher's page and Terminal's icon, closes it by Esc and by a click,

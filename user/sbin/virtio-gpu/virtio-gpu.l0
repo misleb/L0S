@@ -706,11 +706,14 @@
 
 (def requested ((v Drv) (op (list int)) (ns (list int)) (n int)) (Served Drv)
   (if (if (eq op "info") (eq n 0) false) (info v)
-  (if (if (eq op "buffer") (eq n 4) false) (shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3))
+  (if (if (eq op "buffer") (if (eq n 4) true (eq n 5)) false) (shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (buffer_pages_arg ns))
   (if (if (eq op "forget") (eq n 1) false) (forgot v (nth ns 0))
   (if (if (eq op "layers") (eq (mod n 4) 0) false) (stacked v (layers_of ns (nil Layer)))
   (if (if (eq op "damage") (if (gt n 0) (eq (mod n 5) 0) false) false) (damaged v ns (nil Rect))
   (requested_pointer v op ns n)))))))
+
+; A buffer request's PAGES, its fifth number, or 0 if it has none.
+(def buffer_pages_arg ((ns (list int))) int (if (eq (length ns) 5) (nth ns 4) 0))
 
 (def requested_pointer ((v Drv) (op (list int)) (ns (list int)) (n int)) (Served Drv)
   (if (if (eq op "shape") (eq n 5) false) (shaped v (nth ns 0) (Corners (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)))
@@ -754,14 +757,35 @@
       (rev acc)
       (layers_of (drop_n ns 4) (cons (Layer (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)) acc))))
 
-; buffer ID W H VA: the w by h pixels a client shared, at va here.
-(def shared ((v Drv) (id int) (bw int) (bh int) (va int)) (Served Drv)
+; buffer ID W H VA [PAGES]: the w by h pixels a client shared, at va here,
+; in the pages it shared, which may be more than they take.
+(def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int)) (Served Drv)
   (if (if (lt bw 1) true (lt bh 1))
       (served_error v "a buffer has no pixels")
-      (let n (div (add (mul (mul bw bh) 4) (sub (page_size) 1)) (page_size))
-        (match (page_addresses va n)
-          ((None) (served_error v "the buffer is not shared with the display"))
-          ((Some addrs) (put_buffer v id (Buffer bw bh addrs va (square))))))))
+      (match (page_addresses va (buffer_shared_pages bw bh pages))
+        ((None) (served_error v "the buffer is not shared with the display"))
+        ((Some addrs) (put_buffer v id (Buffer bw bh addrs va (square)))))))
+
+; The pages a buffer bw by bh shared as pages takes: as many as its
+; pixels fill, or pages if that is more, the room its client kept for it
+; to grow into, so that forgetting it gives them all up.
+(def buffer_shared_pages ((bw int) (bh int) (pages int)) int
+  (max pages (div (add (mul (mul bw bh) 4) (sub (page_size) 1)) (page_size))))
+
+; Whether a buffer of bufs other than id is at va: another view of the
+; same pages, as a buffer remade at another size is while the old one
+; still shows, so the pages stay mapped until the last of them is
+; forgotten.
+(def va_shown_by_other ((bufs (Map int Buffer)) (id int) (va int)) bool
+  (any_buffer_at (map_keys bufs) (map_values bufs) id va))
+
+; va_shown_by_other's loop over ids and their buffers bs, in step.
+(def any_buffer_at ((ids (list int)) (bs (list Buffer)) (id int) (va int)) bool
+  (if (is_empty ids)
+      false
+      (if (if (not (eq (head ids) id)) (match (head bs) ((Buffer bw bh addrs bva cs) (eq bva va))) false)
+          true
+          (any_buffer_at (tail ids) (tail bs) id va))))
 
 ; The driver with buffer b as id: the screen rebuilt if it shows id, since
 ; its backing reads the old one's pages, or its corners have changed.
@@ -804,8 +828,12 @@
               (served_error v (append "buffer " (append (digits id) " is in use")))
               (match b
                 ((Buffer bw bh addrs va cs)
-                  (let u (shm_unmap va (array_len addrs))
+                  (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
                     (served_ok (Drv g c w h (map_remove bufs id) layers attached cur zero rows)))))))))))
+
+; The n pages at va given up: 0.
+(def shm_unmap_count ((va int) (n int)) int
+  (match (shm_unmap va n) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
 
 (def in_layers ((ls (list Layer)) (id int)) bool
   (if (is_empty ls)

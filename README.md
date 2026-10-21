@@ -496,8 +496,8 @@ pixels, and draw the pointer as a top layer.
 | Request | Does |
 |---|---|
 | `info` | `display W H cursor scale S`: the screen's size in its own pixels, `cursor` if the driver moves a pointer itself, and the desktop's scale, 1 or 2 (none means 1) |
-| `buffer ID W H VA` | a buffer of W×H 4-byte pixels (b, g, r, and unused, or alpha for a cursor), at VA in the driver, shared there with `shm_share` |
-| `forget ID` | the buffer dropped, and the driver's mapping of it given up with `shm_unmap`; refused while it is on the screen or is the pointer's |
+| `buffer ID W H VA [N]` | a buffer of W×H 4-byte pixels (b, g, r, and unused, or alpha for a cursor), at VA in the driver, shared there with `shm_share`; N its pages, if more than W×H takes. The same pages may be given again under another ID at another size, as `wm` does to resize a window without sharing anything anew |
+| `forget ID` | the buffer dropped, and the driver's mapping of it given up with `shm_unmap` once no other buffer is in its pages; refused while it is on the screen or is the pointer's |
 | `layers ID X Y TOP ...` | the screen, bottom first: each buffer at X, Y, its rows read from row TOP on, as a ring. The bottom layer covers the screen. Only the bands of rows whose pixels changed are transferred and flushed; the first `layers` shows the whole screen |
 | `damage ID X Y W H ...` | each rectangle of its buffer changed, one or more groups of five: shown wherever they are visible, all together, with boxes that overlap transferred and flushed as one |
 | `shape ID TL TR BL BR` | the buffer's corners rounded, top left, top right, bottom left, bottom right, each radius from 0 (square) to half its width and height. The driver cannot blend, so it narrows the layer's rows within a corner and the layer beneath shows there. A buffer is square when shared; if it is on the screen, the screen is rebuilt |
@@ -518,19 +518,24 @@ makes every place, rectangle, top row and radius the screen's on the way.
 | `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT. The reply is `window ID` |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
 | `top ID T` | the window's rows read from its buffer's row T on, as a ring: how a client scrolls |
+| `resize ID W H [VA N]` | the window's content is now W×H: in the buffer it has, which must have room for it, or in a new one at VA, N pages, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
 | `title ID TEXT` | a new title |
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
-| `windows` | a line a window, front first, then `pointer X Y` |
+| `windows` | a line a window, front first, then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
 | `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
-draws), buffer 0; the pointer's arrow (Adwaita's), 1; the top bar, 2;
-the launcher's page, 3; and each window's title bar and frame, window
-i's content, title bar and frame being 4 + 3i, 5 + 3i and 6 + 3i. The
-layers it gives the driver are the desktop, then each window from back
-to front, its title bar, its frame and then its content, then the top
-bar over them all; while the launcher is open, the desktop, the
+draws), buffer 0; the pointer's image (Adwaita's arrow, or a resize
+pointer), 1; the top bar, 2; the launcher's page, 3; and each window's
+chrome, its title bar with the frame under it, one buffer as big as the
+window: window i's content and chrome being 4 + 4i + 2k and 5 + 4i + 2k,
+k a bank, 0 or 1. A resize gives the display a window's buffers at
+their new size under the other bank's ids, shows them, and only then
+forgets the old ones, since the display refuses to forget a buffer that
+is on the screen. The layers it gives the driver are the desktop, then
+each window from back to front, its chrome and then its content, then
+the top bar over them all; while the launcher is open, the desktop, the
 launcher under the bar, and the bar, the windows left out.
 
 The top bar is GNOME Shell's: 32 rows across the screen, black, with
@@ -619,6 +624,25 @@ Input:
   positive, three rows a step in the toolkit's grid.
 - **The front window changing** is told to both clients with a focus
   notice (`focus_notice`), so a client can draw itself in the backdrop.
+- **Resizing**: the frame's sides and foot, and a border 6 pixels wide
+  outside the window's left, right, top and bottom, grab its edges; 20
+  pixels along from a corner, the border, the frame and the corners the
+  window's shape cuts away grab both edges that meet there. The pointer
+  shows which: GNOME's `ew-resize`, `ns-resize`, `nwse-resize` and
+  `nesw-resize` (`ui_paint_named_cursor`, smooth from the face at scale
+  2), the arrow elsewhere. Dragging asks the window's client for the size
+  that gives (`size_notice`, "siz" and two u32s, in
+  [user/lib/sys/l0s.l0](user/lib/sys/l0s.l0)): the opposite edge stays,
+  at least 200×100, and no further than the screen or the top bar. It
+  asks again only once the client has answered, so a slow client is
+  asked for the latest size, not every one. A toolkit window
+  (`ui_route`'s `UiResize`) keeps room in its buffer, a quarter more and
+  64 each way, so most sizes fit the buffer it has: it lays out for the
+  new size there and, at its next `ui_present`, paints it whole and
+  answers with `resize`; only a size past that room makes a new buffer.
+  `wm`'s chrome keeps room the same way, so a resize that fits shares and
+  gives up no page, which is what costs most. A client that ignores the
+  notice, such as `vt`, keeps its size.
 - **A left press on the close button**, the round button at a title
   bar's right end, kills the window's client with `proc_kill`. Its exit
   then closes its windows, as any client's does. If the client cannot be
@@ -1440,7 +1464,9 @@ address. A process's device pages, the 384 MB above its stack, are
 given out as a pool: its next ones are the first run of pages it gave
 up that holds them, highest first, or else the pages above all it was
 ever given. `dma_address va` gives where the device reaches the page
-holding va, from L0's `frame_address`. The pages are consecutive in the process,
+holding va, from L0's `frame_address`, and `dma_addresses va n` the same
+of n pages from it in one call, as the display driver takes a buffer's
+thousands of pages. The pages are consecutive in the process,
 but not necessarily for the device, so a driver gives the device one
 address per page, or merges the runs that happen to be consecutive.
 A `region` call over DMA pages (`dma_open` in `l0s.l0`) returns the same
@@ -1475,8 +1501,8 @@ addresses, as a driver cannot be killed either. Either way, a process
 that touches a page it no longer has is ended, as for any device page
 with nothing mapped.
 
-When a window closes, the display driver and `wm` both give up its three
-buffers, the content's, the title bar's and the frame's: the driver once the screen
+When a window closes, the display driver and `wm` both give up its two
+buffers, the content's and the chrome's: the driver once the screen
 no longer shows them, on `forget`, and `wm` after that. So a closed
 window's memory is freed once its `vt` has ended too.
 
@@ -1599,6 +1625,7 @@ otherwise as its type's first failure.
 | 289 | `fs_unmount label port` | `Unmounting`: `Unmounted`, `UnmountNotMounted`, `UnmountDenied`, `UnmountBadLabel` | 0, the volume label, which the caller mounted from port, unmounted: `/Volumes/LABEL` is in no volume from then on, and the label free; -1 if the port is not the caller's or mounted no such volume, -6 for the system volume, which is `/` for good, -5 no label |
 | 290 | `chdir path` | `Chdir`: `ChdirDone`, `ChdirNoDir`, `ChdirNotDir`, `ChdirBad` | 0, the directory at path, from the current directory, made the caller's current one, and its children's, as spawn gives them; -3 if there is none, -9 if it is a file, -5 for a path over 1024 bytes or not the caller's to give, or one in a volume whose server has gone. The initramfs's, `/Volumes` and `/` the kernel answers itself; a path in a volume is checked with its server's `stat`, the caller waiting as for any file call |
 | 291 | `getcwd`, `path_abs path` | `(list int)` | the current directory, an absolute path with no final `/`, `/` at the start; `path_abs` is a path made absolute from it, unless it starts with `/` already |
+| 292 | `dma_addresses va n` | `(array int)` | where a device reaches each of the caller's DMA pages from the one holding va, n at most, a u64 each, up to the first that is not one: fewer than n then, none if va's is not; -6 no `dev` line, which the wrapper gives as none |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1713,7 +1740,7 @@ name in a library is taken in every program that links it.
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -1927,6 +1954,21 @@ are from `run windows` at the serial shell. Then:
 - a click on the second row, through QMP: the press and release go
   through `wm` to the window, and the row is tinted with the accent and
   End Process turns red.
+
+[tests/resize.sh](tests/resize.sh) boots the screen initramfs, types
+`run widgets &`, and drags the gallery's edges with the tablet, through
+QMP, checking `run windows` and, by screendump, what is shown:
+- the lower right corner dragged 100 right and 60 down: the window is 100
+  wider and 60 higher, in the same place, and End Process, at the
+  content's right end, has moved 100 right;
+- the left edge dragged 30 left: the window is 30 wider and its left
+  30 less, so its right is where it was;
+- the pointer, as `run windows` names it: `ew-resize` over the frame's
+  right side, `nwse-resize` over the lower right corner, the arrow over
+  the content;
+- the top left corner grabbed just outside the window, by its rounded
+  corner, and dragged 30 right and 20 down: the window that much smaller
+  and its top left that much further in.
 
 [tests/procmon.sh](tests/procmon.sh) boots the screen initramfs, types
 `run procmon &`, and learns where the monitor's window is. Then, by
@@ -2161,12 +2203,19 @@ a bad buffer, and wait on nothing.
   typed session ends cleanly.
 - A window's terminal has no scrollback, and draws only what is written:
   it keeps no copy of its text.
-- Windows cannot be resized, though nothing in the runtime stands in the
-  way any more. `wm` opens two regions for each window, its title bar's
-  and its frame's, and closes them when the window closes; the proc
-  runtime keeps at most 64 open at once, so `wm`, which keeps four of its
-  own (the desktop, the pointer, the top bar and the launcher), can have
-  30 windows open at once, and open them for ever. The close button kills its client at
+- Only toolkit windows can be resized (`vt` and `draw` ignore the size
+  notice, since a terminal keeps no copy of its text to lay out again).
+  A client paints all of its window for every size it is asked for, and
+  `wm` restacks the screen once, so a drag shows about 25 sizes a second
+  on QEMU for a window of 900 by 600, about 15 ms of it the client's
+  painting and 9 the restack. `wm` opens a region for each window, its
+  chrome's, and closes it when the window closes; the proc runtime keeps
+  at most 64 open at once, so `wm`, which keeps four of its own (the
+  desktop, the pointer, the top bar and the launcher), can have 60
+  windows open at once, and open them for ever; a resize past a buffer's
+  room holds one more for a moment, and is refused if there is none. The
+  pointer's image is painted again and given to the display whenever it
+  changes between the arrow and a resize pointer. The close button kills its client at
   once: the client is not asked first, and cannot refuse. The pointer has
   one button that does anything, the left: `wm` passes the others on to
   the window under the pointer, and the toolkit drops them.

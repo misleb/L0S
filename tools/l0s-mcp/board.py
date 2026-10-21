@@ -210,8 +210,9 @@ def parse_windows(text):
     wins, pointer, errors = [], None, []
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) == 3 and parts[0] == "pointer" and parts[1].isdigit() and parts[2].isdigit():
-            pointer = {"x": int(parts[1]), "y": int(parts[2])}
+        if len(parts) in (3, 4) and parts[0] == "pointer" and parts[1].isdigit() and parts[2].isdigit():
+            pointer = {"x": int(parts[1]), "y": int(parts[2]),
+                       "cursor": parts[3] if len(parts) == 4 else "default"}
         elif (len(parts) >= 7 and parts[0].isdigit() and parts[-1] in ("front", "-")
               and all(p.isdigit() for p in parts[-5:-1])):
             x, y, w, h = (int(p) for p in parts[-5:-1])

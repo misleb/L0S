@@ -113,10 +113,14 @@ class Shell(unittest.TestCase):
 
     def test_windows(self):
         got = parse_windows("1 vt2 100 90 640 384 front\n0 vt1 40 40 640 384 -\npointer 3 4\n")
-        self.assertEqual(got["pointer"], {"x": 3, "y": 4})
+        self.assertEqual(got["pointer"], {"x": 3, "y": 4, "cursor": "default"})
         self.assertEqual([w["title"] for w in got["windows"]], ["vt2", "vt1"])
         self.assertEqual(got["windows"][0], {"id": 1, "title": "vt2", "x": 100, "y": 90,
                                              "width": 640, "height": 384, "front": True})
+
+    def test_windows_resize_pointer(self):
+        got = parse_windows("1 vt2 100 90 640 384 front\npointer 99 200 ew-resize\n")
+        self.assertEqual(got["pointer"], {"x": 99, "y": 200, "cursor": "ew-resize"})
 
     def test_window_title_with_spaces(self):
         got = parse_windows("2 my window 1 2 3 4 -\n")

@@ -3,9 +3,9 @@
 ; protocol). It never copies a window's pixels: each client draws into a
 ; buffer it shares, and wm stacks the buffers into the screen as layers,
 ; which the display driver composes. Its own buffers are the desktop, the
-; pointer's arrow, the top bar, and each window's title bar and frame:
-; a thin border down its content's sides and along its foot, in its
-; title bar's color.
+; pointer's image, the top bar, and each window's chrome: its title bar,
+; and under its content a frame, a thin border down the content's sides
+; and along its foot, in the title bar's color.
 ;
 ; The top bar is GNOME Shell's, across the top of the screen and over
 ; the windows: Applications, which opens the launcher (launcher.l0), a
@@ -16,8 +16,11 @@
 ;
 ; Keys go to the window in front. A press of the pointer's left button
 ; on a window brings it to the front; on its title bar it starts a drag,
-; which moves it while the button is held. draw's commands paint the
-; desktop, behind the windows.
+; which moves it while the button is held; on an edge of it, or the
+; border just outside, it starts a resize: the client is asked for the
+; size the pointer's drag gives (size_notice), and answers with a new
+; buffer (the resize request), which replaces the old one. draw's commands
+; paint the desktop, behind the windows.
 ;
 ; A title bar is an Adwaita header bar, laid out and painted by the
 ; toolkit (user/lib/ui): the title in bold in its middle, and a round
@@ -54,15 +57,17 @@
         ((BgBad why) (load_background (wallpaper) percent)))))
 
 ; The desktop's buffer is 0, the pointer's 1, the top bar's 2, the
-; launcher's 3, and window i's content, title bar and frame 4 + 3i,
-; 5 + 3i and 6 + 3i.
+; launcher's 3, and window i's content and chrome 4 + 4i + 2k and
+; 5 + 4i + 2k, k its bank, 0 or 1. A resize makes the window's new
+; buffers in the other bank, shows them, and then forgets the old ones:
+; the display refuses to forget a buffer on the screen, and one made
+; again under its id would leave its old pages mapped.
 (def desktop_id () int 0)
 (def arrow_id () int 1)
 (def bar_id () int 2)
 (def launcher_id () int 3)
-(def content_id ((i int)) int (add 4 (mul 3 i)))
-(def title_id ((i int)) int (add 5 (mul 3 i)))
-(def frame_id ((i int)) int (add 6 (mul 3 i)))
+(def content_id ((i int) (k int)) int (add 4 (add (mul 4 i) (mul 2 k))))
+(def chrome_id ((i int) (k int)) int (add 5 (add (mul 4 i) (mul 2 k))))
 
 ; During a drag, rebuild the screen once 20 ms have passed since the last
 ; rebuild ended: rebuilding costs more than a move, so the moves in
@@ -73,40 +78,79 @@
 
 ; A window: its id, the port its events go to, its client's pid, its top
 ; left, its content's width and height, the row its buffer is read from,
-; its title, the canvas of its title bar, where in wm its content's and
-; its title bar's buffers are, to give them up when it closes, its
-; frame's canvas and buffer, and the name of the app its client is, ""
-; if it is none.
-(data Win (Win int int int int int int int int (list int) Canvas int int Canvas int (list int)))
+; its title, the canvas of its chrome, where in wm its content's and its
+; chrome's buffers are, to give them up when it closes, how many pages
+; they are and where the display has them, the name of the app its client
+; is, "" if it is none, and how it is being resized.
+(data Win (Win int int int int int int int int (list int) Canvas int int Bufs (list int) Sizing))
 
-(def win_id ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva fc fva app) id)))
-(def win_port ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva fc fva app) port)))
-(def win_pid ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva fc fva app) pid)))
+; A window's buffers as shared: how many pages its content is, as its
+; client shared them, and where the display has them; and the same of its
+; chrome. Each may be more than its size takes, room to grow into, so
+; that a resize to a size that fits is shown in the same pages: no page
+; is shared or given up, which is what costs most.
+(data Bufs (Bufs int int int int))
+
+; How a window is resized: the bank its buffers' ids are in, the edges the
+; user last dragged (the bits edge_left, edge_right, edge_top and
+; edge_bottom, which say which sides stay and which move), the size last
+; asked of its client, and whether an answer is awaited.
+(data Sizing (Sizing int int int int bool))
+
+; The bits of a window's edges: the left, the right, the top, the bottom.
+(def edge_left () int 1)
+(def edge_right () int 2)
+(def edge_top () int 4)
+(def edge_bottom () int 8)
+
+; Whether the edges e include edge b.
+(def has_edge ((e int) (b int)) bool (not (eq (bit_and e b) 0)))
+
+; The bank of buffer ids a window's buffers are in.
+(def sz_bank ((sz Sizing)) int (match sz ((Sizing k e ww wh asking) k)))
+
+; The bank of buffer ids w's buffers are in.
+(def win_bank ((w Win)) int
+  (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) (sz_bank sz))))
+
+; w with its size asked for, as the pointer's drag wants it.
+(def win_asked ((w Win) (edges int) (ww int) (wh int) (asking bool)) Win
+  (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+    (match sz ((Sizing k e ow oh oa) (Win id port pid x y cw ch top title tc cva tva bf app (Sizing k edges ww wh asking)))))))
+
+(def win_id ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) id)))
+(def win_port ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) port)))
+(def win_pid ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) pid)))
+
+; A window's title.
+(def win_title ((w Win)) (list int) (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) title)))
 
 (def win_at ((w Win) (x int) (y int)) Win
-  (match w ((Win id port pid ox oy cw ch top title tc cva tva fc fva app) (Win id port pid x y cw ch top title tc cva tva fc fva app))))
+  (match w ((Win id port pid ox oy cw ch top title tc cva tva bf app sz) (Win id port pid x y cw ch top title tc cva tva bf app sz))))
 
 (def win_top ((w Win) (top int)) Win
-  (match w ((Win id port pid x y cw ch old title tc cva tva fc fva app) (Win id port pid x y cw ch top title tc cva tva fc fva app))))
+  (match w ((Win id port pid x y cw ch old title tc cva tva bf app sz) (Win id port pid x y cw ch top title tc cva tva bf app sz))))
 
 (def win_titled ((w Win) (title (list int))) Win
-  (match w ((Win id port pid x y cw ch top old tc cva tva fc fva app) (Win id port pid x y cw ch top title tc cva tva fc fva app))))
+  (match w ((Win id port pid x y cw ch top old tc cva tva bf app sz) (Win id port pid x y cw ch top title tc cva tva bf app sz))))
 
 ; A window's frame: a border edge pixels thick down its content's sides
 ; and along its foot, in its title bar's color, so the content sits in
-; the title bar's ground. The frame is a buffer under the content, which
-; covers all of it but the border and the corners its shape cuts.
+; the title bar's ground. The frame is the part of the window's chrome
+; under the title bar, a buffer as big as the whole window under the
+; content, which covers all of it but the border and the corners its
+; shape cuts.
 (def edge () int 2)
 
-; How wide a window is, its content cw wide; and how high its frame is,
-; its content ch high.
+; How wide a window is, its content cw wide; how high its frame is, its
+; content ch high; and how high its chrome, the title bar and the frame.
 (def outer_w ((cw int)) int (add cw (mul 2 (edge))))
 (def frame_h ((ch int)) int (add ch (edge)))
+(def chrome_h ((ch int)) int (add (title_h) (frame_h ch)))
 
 ; The layers of windows, front first, as the display takes them: the
-; desktop, then each window from the back, its title bar, its frame
-; under its title bar, and its content in its frame, then the top bar
-; over them all. While the launcher is shown it is there instead of the
+; desktop, then each window from the back, its chrome, and its content
+; in its frame, then the top bar over them all. While the launcher is shown it is there instead of the
 ; windows, under the bar: they are hidden, and so the screen is rebuilt
 ; from fewer layers.
 (def layers ((ws (list Win)) (shown bool)) (list Placed)
@@ -120,11 +164,10 @@
   (if (is_empty ws)
       acc
       (match (head ws)
-        ((Win id port pid x y cw ch top title tc cva tva fc fva app)
+        ((Win id port pid x y cw ch top title tc cva tva bf app sz)
           (window_layers (tail ws)
-                         (cons (Placed (title_id id) x y 0)
-                               (cons (Placed (frame_id id) x (add y (title_h)) 0)
-                                     (cons (Placed (content_id id) (add x (edge)) (add y (title_h)) top) acc))))))))
+                         (cons (Placed (chrome_id id (win_bank (head ws))) x y 0)
+                               (cons (Placed (content_id id (win_bank (head ws))) (add x (edge)) (add y (title_h)) top) acc)))))))
 
 ; A title bar cw wide, as the toolkit lays it out: in front or not.
 (def title_nodes ((title (list int)) (cw int) (front bool)) (list UiNode)
@@ -138,17 +181,107 @@
   (eq (ui_hit (title_nodes "" cw true) x y) "win.close"))
 
 ; Where a press at x, y lands: on a window's close button, title bar,
-; content or frame, the frontmost there; or the desktop.
-(data Hit (OnClose Win) (OnTitle Win) (OnContent Win int int) (OnFrame Win) (OnDesktop))
+; content or frame, or on an edge of it that resizes it (the edges as
+; edges_at says), the frontmost there; or the desktop.
+(data Hit (OnClose Win) (OnTitle Win) (OnContent Win int int) (OnFrame Win) (OnEdge Win int) (OnDesktop))
 
 (def hit ((ws (list Win)) (x int) (y int)) Hit
   (if (is_empty ws)
       (OnDesktop)
       (match (head ws)
-        ((Win id port pid wx wy cw ch top title tc cva tva fc fva app)
-          (if (in_window cw ch (sub x wx) (sub y wy))
-              (hit_in (head ws) cw ch (sub x wx) (sub y wy))
-              (hit (tail ws) x y))))))
+        ((Win id port pid wx wy cw ch top title tc cva tva bf app sz)
+          (let e (edges_at cw ch (sub x wx) (sub y wy))
+            (if (not (eq e 0))
+                (OnEdge (head ws) e)
+                (if (in_window cw ch (sub x wx) (sub y wy))
+                    (hit_in (head ws) cw ch (sub x wx) (sub y wy))
+                    (hit (tail ws) x y))))))))
+
+; How far outside a window its edges are still grabbed.
+(def resize_border () int 6)
+
+; The smallest a window's content is dragged to.
+(def min_w () int 200)
+(def min_h () int 100)
+
+; How far along each side from a window's corner the corner is grabbed:
+; both the edges that meet there.
+(def resize_corner () int 20)
+
+; The edges of a window, its content cw by ch, that x, y from its top left
+; grabs, as edge_left and the others added together, or 0. Within
+; resize_corner of a corner, the two edges that meet there, wherever
+; nothing of the window's own is pressed (free_at): the border outside,
+; the corners its shape cuts away, the frame, and the content's corners,
+; cut to show the frame. Elsewhere one edge: the frame's sides and foot,
+; and the border outside, resize_border wide; a window's top is its title
+; bar, so only the border above it is an edge.
+(def edges_at ((cw int) (ch int) (x int) (y int)) int
+  (let ow (outer_w cw)
+    (let oh (chrome_h ch)
+      (let b (resize_border)
+        (if (if (if (lt x (sub 0 b)) true (ge x (add ow b))) true (if (lt y (sub 0 b)) true (ge y (add oh b))))
+            0
+            (let c (if (free_at cw ch x y) (corner_of ow oh x y) 0)
+              (if (not (eq c 0)) c (side_edges ow oh x y))))))))
+
+; The one edge, or none, x, y from the top left of a window ow by oh is
+; on, as edges_at says.
+(def side_edges ((ow int) (oh int) (x int) (y int)) int
+  (add (if (if (lt x 0) true (if (lt x (edge)) (ge y (title_h)) false)) (edge_left) 0)
+  (add (if (if (ge x ow) true (if (ge x (sub ow (edge))) (ge y (title_h)) false)) (edge_right) 0)
+  (add (if (lt y 0) (edge_top) 0)
+       (if (ge y (sub oh (edge))) (edge_bottom) 0)))))
+
+; The edges of the corner of a window ow by oh that x, y from its top left
+; is within resize_corner of, both ways; 0 if none.
+(def corner_of ((ow int) (oh int) (x int) (y int)) int
+  (let hz (if (lt x (resize_corner)) (edge_left) (if (ge x (sub ow (resize_corner))) (edge_right) 0))
+    (let vt (if (lt y (resize_corner)) (edge_top) (if (ge y (sub oh (resize_corner))) (edge_bottom) 0))
+      (if (if (eq hz 0) true (eq vt 0)) 0 (add hz vt)))))
+
+; Whether x, y from the top left of a window, its content cw by ch, is on
+; nothing of the window's own to press: outside it, in a corner its shape
+; cuts away, on its frame, or in a corner of its content, cut away to
+; show the frame.
+(def free_at ((cw int) (ch int) (x int) (y int)) bool
+  (if (not (if (if (ge x 0) (lt x (outer_w cw)) false) (if (ge y 0) (lt y (chrome_h ch)) false) false))
+      true
+      (if (cut_off cw ch x y)
+          true
+          (if (lt y (title_h))
+              false
+              (let cx (sub x (edge))
+                (let cy (sub y (title_h))
+                  (if (if (if (ge cx 0) (lt cx cw) false) (lt cy ch) false)
+                      (content_cut cw ch cx cy)
+                      true)))))))
+
+; Whether cx, cy in a content cw by ch is in one of its bottom corners,
+; which the display cuts.
+(def content_cut ((cw int) (ch int) (cx int) (cy int)) bool
+  (let inset (corner_cut (inner_radius cw ch) (sub (sub ch 1) cy))
+    (if (lt cx inset) true (ge cx (sub cw inset)))))
+
+; A window's content size.
+(data Size (Size int int))
+
+; The size a window, its content cw by ch at wx, wy, is dragged to by its
+; edges e when the pointer has moved dx, dy: the edge on the side moved
+; grows it, the opposite side stays; at least min_w by min_h, and no more
+; than fits the desktop w by h below the top bar.
+(def resize_geometry ((e int) (dx int) (dy int) (wx int) (wy int) (cw int) (ch int) (w int) (h int)) Size
+  (Size (clamped (if (has_edge e (edge_left)) (sub cw dx) (if (has_edge e (edge_right)) (add cw dx) cw))
+                (min_w)
+                (if (has_edge e (edge_left)) (add wx cw) (sub (sub w wx) (mul 2 (edge)))))
+        (clamped (if (has_edge e (edge_top)) (sub ch dy) (if (has_edge e (edge_bottom)) (add ch dy) ch))
+                 (min_h)
+                 (if (has_edge e (edge_top))
+                     (sub (add wy ch) (bar_h))
+                     (sub (sub (sub h wy) (title_h)) (edge))))))
+
+; n kept from lo up to hi, or lo if there is no room.
+(def clamped ((n int) (lo int) (hi int)) int (max lo (min n hi)))
 
 ; Whether x, y from a window's top left is on it, its content cw by ch:
 ; within its title bar and frame, and not in a corner cut away.
@@ -267,7 +400,7 @@
 (def bar_title ((ws (list Win)) (shown bool)) (list int)
   (if (if shown true (is_empty ws))
       ""
-      (match (head ws) ((Win id port pid x y cw ch top title tc cva tva fc fva app) (if (is_empty app) title app)))))
+      (match (head ws) ((Win id port pid x y cw ch top title tc cva tva bf app sz) (if (is_empty app) title app)))))
 
 (def bar_clock_text ((t int)) (list int) (if (lt t 0) "" (clock_text t)))
 
@@ -319,12 +452,15 @@
 
 ; The pointer: where it is, and its buttons; the window whose content it
 ; was last in, and the window a press in its content holds it for until
-; every button is up, each -1 for none.
-(data Ptr (Ptr int int int int int))
+; every button is up, each -1 for none; and the canvas of its image, and
+; which pointer that shows, as ui_paint_named_cursor names them.
+(data Ptr (Ptr int int int int int Canvas (list int)))
 
 ; A drag: the window, where the pointer holds it, and when the screen
-; was last rebuilt for it; or none.
-(data Drag (Dragging int int int int) (NoDrag))
+; was last rebuilt for it; or a window's edges dragged to resize it: its
+; id, the edges, where the pointer was pressed, and the window's top
+; left and content size then; or none.
+(data Drag (Dragging int int int int) (Resizing int int int int int int int int) (NoDrag))
 
 ; The compositor: the display and the desktop's size, the desktop's
 ; canvas, the face, at the display's scale, the wallpaper, the windows,
@@ -367,10 +503,11 @@
       (let a (ui_paint_cursor c face)
         (let e (give_buffer d (arrow_id) c va pages)
           (let e2 (display_cursor d (arrow_id) 0 0)
-            (with_bar d w h desk bg face)))))))
+            (with_bar d w h desk bg face c)))))))
 
-; The top bar: as wide as the screen, over everything but the pointer.
-(def with_bar ((d Display) (w int) (h int) (desk Canvas) (bg Background) (face UiFace)) int
+; The top bar: as wide as the screen, over everything but the pointer,
+; whose image is ac.
+(def with_bar ((d Display) (w int) (h int) (desk Canvas) (bg Background) (face UiFace) (ac Canvas)) int
   (match (ui_buffer_at w (bar_h) (display_scale d))
     ((UiNoBuf why) (complain why))
     ((UiBuf va pages c)
@@ -378,7 +515,7 @@
         (let e2 (if (is_empty e) (display_layers d (layers (nil Win) false)) e)
           (if (not (is_empty e2))
               (complain e2)
-              (listening (Wm d w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1) (NoDrag) 0 0
+              (listening (Wm d w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1 ac "") (NoDrag) 0 0
                              (Bar c -1 -1 (app_bundles) (NoLauncher))))))))))
 
 ; Listens to the keyboard, the pointer and the clock, then serves
@@ -467,8 +604,11 @@
 
 ; A request answered.
 (def replied ((v Wm) (port int) (from int) (payload (list int))) Wm
-  (match (requested v port from (split_spaces (request_body payload)))
-    ((Served v2 reply) (let s (request_answer payload reply) v2))))
+  (let ws (split_spaces (request_body payload))
+    (if (if (is_empty ws) false (eq (head ws) "resize"))
+        (resize_replied v from payload (tail ws))
+        (match (requested v port from ws)
+          ((Served v2 reply) (let s (request_answer payload reply) v2))))))
 
 ; hello's reply: who wm is, and the scale clients draw at.
 (def hello_reply ((s int)) (list int) (append "compositor scale " (digits s)))
@@ -526,19 +666,18 @@
         (let ch (nth ns 1)
           (if (if (lt cw 1) true (if (lt ch 1) true (gt (outer_w cw) w)))
               (refused v "a window must fit the screen")
-              (let e (display_buffer d (content_id n) (mul cw (display_scale d)) (mul ch (display_scale d)) (nth ns 2)
-                                     (content_pages cw ch (display_scale d)))
-                (if (not (is_empty e))
-                    (refused v e)
-                    (titled_window v from (nth ns 3) cw ch (nth ns 2) title)))))))))
+              (match (display_buffer_shared d (content_id n 0) (mul cw (display_scale d)) (mul ch (display_scale d)) (nth ns 2)
+                                            (content_pages cw ch (display_scale d)))
+                ((Err e) (refused v e))
+                ((Ok dcva) (titled_window v from (nth ns 3) cw ch (nth ns 2) dcva title)))))))))
 
 ; The pages of a client's content, cw by ch of the desktop's pixels, at
 ; scale s.
 (def content_pages ((cw int) (ch int) (s int)) int (buffer_pages (mul cw s) (mul ch s)))
 
-(def titled_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int))) (Served Wm)
+(def titled_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (dcva int) (title (list int))) (Served Wm)
   (match (watch_client v from)
-    ((Watched) (watched_window v from port cw ch cva title))
+    ((Watched) (watched_window v from port cw ch cva dcva title))
     ((WatchNoProc) (refused v "the client has gone"))
     ((WatchFull) (refused v "too many ports watch the client"))))
 
@@ -549,45 +688,244 @@
     ((Found port) (proc_watch from port))
     ((NotFound) (WatchNoProc))))
 
-; A window for from, whose exit is watched: its title bar made, then the
-; rest.
-(def watched_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int))) (Served Wm)
+; A window for from, whose exit is watched, its content at cva here and
+; dcva in the display: its chrome made, and both its buffers shaped, the
+; window's corners rounded (shape_window), then it is shown in front.
+(def watched_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (dcva int) (title (list int))) (Served Wm)
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (match (ui_buffer_at (outer_w cw) (title_h) (display_scale d))
+      (match (ui_buffer_at (outer_w cw) (chrome_h ch) (display_scale d))
         ((UiNoBuf why) (refused v why))
-        ((UiBuf va pages tc)
-          (let e (give_buffer d (title_id n) tc va pages)
-            (if (not (is_empty e))
-                (let u (ui_buffer_free va pages tc) (refused v e))
-                (framed_window v from port cw ch cva title tc va))))))))
-
-; The window's frame made, and every buffer of it shaped: the title bar's
-; top corners, the frame's bottom ones, and the content's inside those.
-; Without a frame, the title bar made for it is given up again.
-(def framed_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (title (list int)) (tc Canvas) (tva int)) (Served Wm)
-  (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (match (ui_buffer_at (outer_w cw) (frame_h ch) (display_scale d))
-        ((UiNoBuf why) (let u (title_given_up d n cw tc tva) (refused v why)))
-        ((UiBuf fva pages fc)
-          (let e (give_buffer d (frame_id n) fc fva pages)
-            (if (not (is_empty e))
-                (let u (title_given_up d n cw tc tva) (let u2 (ui_buffer_free fva pages fc) (refused v e)))
-                (let s1 (display_shape d (title_id n) (top_radius cw) (top_radius cw) 0 0)
-                (let s2 (display_shape d (frame_id n) 0 0 (bottom_radius cw ch) (bottom_radius cw ch))
-                (let s3 (display_shape d (content_id n) 0 0 (inner_radius cw ch) (inner_radius cw ch))
+        ((UiBuf tva pages tc)
+          (match (display_buffer_shared d (chrome_id n 0) (canvas_w tc) (canvas_h tc) tva pages)
+            ((Err e) (let u (ui_buffer_free tva pages tc) (refused v e)))
+            ((Ok dtva)
+              (let s (shape_window d n 0 cw ch)
                 (match (cascade n cw ch w h)
                   ((Placed z x y top)
-                    (let win (Win n port from x y cw ch 0 title tc cva tva fc fva (client_app bar from))
-                      (let f (refocused ws (cons win ws))
-                        (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n)))))))))))))))
+                    (let bf (Bufs (content_pages cw ch (display_scale d)) dcva pages dtva)
+                      (let win (Win n port from x y cw ch 0 title tc cva tva bf (client_app bar from) (Sizing 0 0 cw ch false))
+                        (let f (refocused ws (cons win ws))
+                          (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))))))
 
-; Window n's title bar, cw wide, at tva with canvas tc, dropped by the
-; display and given up, its window not to be made after all.
-(def title_given_up ((d Display) (n int) (cw int) (tc Canvas) (tva int)) int
-  (let f (display_forget d (title_id n))
-    (ui_buffer_free tva (content_pages (outer_w cw) (title_h) (display_scale d)) tc)))
+; Window i's buffers in bank k shaped, its content cw by ch: the chrome's
+; top corners as the title bar's, its bottom ones as the frame's, and the
+; content's inside those.
+(def shape_window ((d Display) (i int) (k int) (cw int) (ch int)) int
+  (let s1 (display_shape d (chrome_id i k) (top_radius cw) (top_radius cw) (bottom_radius cw ch) (bottom_radius cw ch))
+    (let s2 (display_shape d (content_id i k) 0 0 (inner_radius cw ch) (inner_radius cw ch)) 0)))
+
+; resize ID W H [VA [N]], from from, in payload: window ID's content made
+; W by H, in the buffer it has, or in a new one of N pages at VA, with a
+; chrome made to fit, all under the other bank of ids and shown at once;
+; the old ids are forgotten, and any buffer no longer used given up. The
+; window's top left moves with an edge dragged left or up, so that the
+; opposite edge stays where it was. Refused, and the window as it was, if
+; from is not its client, the size does not fit the screen or the
+; buffer, or the display will not have the content.
+;
+; Each buffer the display has is given again in the same pages when the
+; new size fits them, as a client that keeps room in its buffer does:
+; only a buffer that must grow is shared anew, with room to grow more.
+; It is answered as soon as the display has the new content, and the
+; client asked then for the size the user has dragged to since, if that
+; is another, so that the client paints it while wm makes the rest. If
+; the rest cannot be made, the window stays as it was, and its client is
+; asked for the size it shows.
+(def resize_replied ((v Wm) (from int) (payload (list int)) (args (list (list int)))) Wm
+  (match (if (if (ge (length args) 3) (le (length args) 5) false) (word_numbers args) ((None (list int))))
+    ((None) (answered (refused v "no request resize") payload))
+    ((Some ns)
+      (match (resize_checked v from ns)
+        ((Err why) (answered (refused v why) payload))
+        ((Ok win) (resize_content v win (nth ns 1) (nth ns 2) (resize_where win ns) payload))))))
+
+; Where a resize's content is in wm: its address, and how many pages, 0
+; for as many as its size takes.
+(data Where (Where int int))
+
+; Where a resize's numbers ns say the content is: in the window's own
+; buffer, with no VA; else at VA, in N pages, or as many as the size
+; takes.
+(def resize_where ((win Win) (ns (list int))) Where
+  (match win
+    ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+      (match bf
+        ((Bufs cn dcva tn dtva)
+          (if (eq (length ns) 3)
+              (Where cva cn)
+              (Where (nth ns 3) (if (eq (length ns) 5) (nth ns 4) 0))))))))
+
+; The state served, its answer sent to the request payload.
+(def answered ((s (Served Wm)) (payload (list int))) Wm
+  (match s ((Served v r) (let a (request_answer payload r) v))))
+
+; The window a resize's numbers ns are of, if from is its client and the
+; size fits the screen; or why not.
+(def resize_checked ((v Wm) (from int) (ns (list int))) (Result Win (list int))
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match (find_win ws (nth ns 0))
+        ((None) ((Err Win (list int)) (append "no window " (digits (nth ns 0)))))
+        ((Some win)
+          (if (not (eq (win_pid win) from))
+              ((Err Win (list int)) "not that window's client")
+              (if (if (lt (nth ns 1) 1) true (if (lt (nth ns 2) 1) true (gt (outer_w (nth ns 1)) w)))
+                  ((Err Win (list int)) "a window must fit the screen")
+                  ((Ok Win (list int)) win))))))))
+
+; A resize refused for why, and the window as it was: the client's new
+; buffer at wh, which wm mapped, given up again, if it is a new one.
+(def resize_refused ((v Wm) (win Win) (wh Where) (why (list int))) (Served Wm)
+  (match wh
+    ((Where va pages)
+      (let u (if (eq va (win_cva win)) 0 (match (shm_unmap va pages) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
+        (refused v why)))))
+
+; Where in wm a window's content's buffer is, and its buffers as shared.
+(def win_cva ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) cva)))
+(def win_bufs ((w Win)) Bufs (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) bf)))
+
+; The new content given to the display under the other bank's id: in the
+; pages it has of the window's own buffer, if it is in that one, else in
+; a new one shared with it. Once it has it, the request answered, the
+; client asked for the next size, and the rest made.
+(def resize_content ((v Wm) (win Win) (nw int) (nh int) (wh Where) (payload (list int))) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match wh
+        ((Where va given)
+          (match (win_bufs win)
+            ((Bufs cn dcva tn dtva)
+              (let s (display_scale d)
+                (let need (content_pages nw nh s)
+                  (let pages (if (eq va (win_cva win)) cn (max given need))
+                    (if (lt pages need)
+                        (answered (resize_refused v win wh "the buffer is too small for the size") payload)
+                        (let cid (content_id (win_id win) (sub 1 (win_bank win)))
+                          (match (if (eq va (win_cva win))
+                                     (let e (display_buffer_at d cid (mul nw s) (mul nh s) dcva cn)
+                                       (if (is_empty e) ((Ok int (list int)) dcva) ((Err int (list int)) e)))
+                                     (display_buffer_shared d cid (mul nw s) (mul nh s) va pages))
+                            ((Err e) (answered (resize_refused v win wh e) payload))
+                            ((Ok there)
+                              (let a (answered (okay v) payload)
+                                (let next (resize_ask_next win nw nh)
+                                  (resize_finished (resize_chrome v win nw nh (Where va pages) there) win nw nh next)))))))))))))))))
+
+; The window's client asked for the size the user has dragged it to, if
+; it was asked for one and that is not nw by nh, the size it has answered
+; with: whether it was.
+(def resize_ask_next ((win Win) (nw int) (nh int)) bool
+  (match win
+    ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+      (match sz
+        ((Sizing k e ww wh asking)
+          (if (if asking (not (if (eq ww nw) (eq wh nh) false)) false)
+              (let t (port_tell port (size_notice ww wh)) true)
+              false))))))
+
+; What making the rest of window win's resize to nw by nh came to. If it
+; failed, the window is as it was, and its client, which has given up
+; the buffer shown, is asked for the size shown again: unless it has
+; been asked for another already, or that is the size that failed.
+(def resize_finished ((s (Served Wm)) (win Win) (nw int) (nh int) (next bool)) Wm
+  (match s
+    ((Served v r)
+      (if (not (starts_with r "error"))
+          v
+          (match win
+            ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+              (if (if next true (if (eq nw cw) (eq nh ch) false))
+                  v
+                  (let t (port_tell port (size_notice cw ch)) v))))))))
+
+; The chrome made for the new size and given to the display, the content
+; being at wh here and there in the display: in the pages of the one it
+; has, if they hold it, painted where it shows, which the screen takes up
+; only at the restack; else in a new one, with room to grow.
+(def resize_chrome ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int)) (Served Wm)
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match win
+        ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+          (match bf
+            ((Bufs cn dcva tn dtva)
+              (let s (display_scale d)
+                (let cid (content_id id (sub 1 (win_bank win)))
+                  (let tid (chrome_id id (sub 1 (win_bank win)))
+                    (let front (eq id (win_id (head ws)))
+                      (if (le (content_pages (outer_w nw) (chrome_h nh) s) tn)
+                          (let tc2 (paint_chrome (canvas_sized tc (mul (outer_w nw) s) (mul (chrome_h nh) s)) font title nw nh front)
+                            (let e (display_buffer_at d tid (canvas_w tc2) (canvas_h tc2) dtva tn)
+                              (if (not (is_empty e))
+                                  (let f (display_forget d cid) (resize_refused v win wh e))
+                                  (resize_shown v win nw nh wh there tc2 tva tn dtva))))
+                          (match (ui_buffer_at (grown (outer_w nw)) (grown (chrome_h nh)) s)
+                            ((UiNoBuf why) (let f (display_forget d cid) (resize_refused v win wh why)))
+                            ((UiBuf tva2 pages big)
+                              (let tc2 (paint_chrome (canvas_sized big (mul (outer_w nw) s) (mul (chrome_h nh) s)) font title nw nh front)
+                                (match (display_buffer_shared d tid (canvas_w tc2) (canvas_h tc2) tva2 pages)
+                                  ((Err e) (let f (display_forget d cid) (let u (ui_buffer_free tva2 pages big) (resize_refused v win wh e))))
+                                  ((Ok dtva2) (resize_shown v win nw nh wh there tc2 tva2 pages dtva2))))))))))))))))))
+
+; A buffer's side n with room to grow: a quarter more, and 64.
+(def grown ((n int)) int (add n (add (div n 4) 64)))
+
+; c over the same pixels, w by h of its own: a buffer kept with room, at
+; the size it shows now. Its first w by h pixels, row after row, are the
+; image, as the display takes it.
+(def canvas_sized ((c Canvas) (w int) (h int)) Canvas
+  (match c
+    ((Canvas r cw ch top) (Canvas r w h 0))
+    ((ArrayCanvas px cw ch top) (canvas_new w h 0))))
+
+; Win with its new buffers: their corners shaped, the window moved if
+; its left or top edge was dragged, and then the screen shown with them.
+(def resize_shown ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int) (tc Canvas) (tva int) (tn int) (dtva int)) (Served Wm)
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match win
+        ((Win id port pid x y cw ch top title otc ocva otva obf app sz)
+          (match sz
+            ((Sizing ok edges ww wht asking)
+              (match wh
+                ((Where cva cn)
+                  (let k (sub 1 ok)
+                    (let s (shape_window d id k nw nh)
+                      (let again (if asking (not (if (eq ww nw) (eq wht nh) false)) false)
+                        (let nx (if (has_edge edges (edge_left)) (add x (sub cw nw)) x)
+                          (let ny (below_bar (if (has_edge edges (edge_top)) (add y (sub ch nh)) y))
+                            (resize_done v win (Win id port pid nx ny nw nh 0 title tc cva tva (Bufs cn there tn dtva) app (Sizing k edges ww wht again)))))))))))))))))
+
+; The window old replaced by nwin, whose new buffers were painted before
+; the display had them, so it took their pixels with them: the screen
+; shown with them, and the old ones forgotten by the display and given up.
+(def resize_done ((v Wm) (old Win) (nwin Win)) (Served Wm)
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (let v2 (Wm d w h desk font bg (replaced ws nwin) n ptr drag kp pp bar)
+        (let e (restack v2)
+          (let u (resize_old_given_up d old nwin)
+            (okay v2)))))))
+
+; The window's old ids, which a resize replaced with nwin's, forgotten by
+; the display, which keeps pages a new id is over; and each old buffer
+; nwin no longer uses given up.
+(def resize_old_given_up ((d Display) (old Win) (nwin Win)) int
+  (let k (win_bank old)
+    (let id (win_id old)
+      (let f1 (display_forget d (content_id id k))
+        (let f2 (display_forget d (chrome_id id k))
+          (match old
+            ((Win oid port pid x y cw ch top title tc cva tva bf app sz)
+              (match bf
+                ((Bufs cn dcva tn dtva)
+                  (let a (if (eq cva (win_cva nwin)) 0 (match (shm_unmap cva cn) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
+                    (if (eq tva (win_tva nwin)) 0 (ui_buffer_free tva tn tc))))))))))))
+
+; Where in wm a window's chrome's buffer is.
+(def win_tva ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz) tva)))
 
 ; The windows in front before and after, told if they changed: the one
 ; that was, that it is not, and the one that is, that it is.
@@ -624,25 +962,33 @@
       (let t (draw_title d font (head ws) front)
         (draw_titles d font (tail ws) false))))
 
+; Window w's chrome painted, in front or not, and its title bar and frame
+; damaged.
 (def draw_title ((d Display) (font UiFace) (w Win) (front bool)) int
   (match w
-    ((Win id port pid x y cw ch top title tc cva tva fc fva app)
-      (let p (ui_paint_nodes tc font (Rect 0 0 (outer_w cw) (title_h)) (title_nodes title (outer_w cw) front))
-        (let e (display_damage d (title_id id) (Rect 0 0 (outer_w cw) (title_h)))
-          (let f (ui_paint fc font (Rect 0 0 (outer_w cw) (frame_h ch)) (frame_ops cw ch front))
-            (let e2 (display_damage_rects d (frame_id id) (frame_rects cw ch)) 0)))))))
+    ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+      (let p (paint_chrome tc font title cw ch front)
+        (let e (display_damage_rects d (chrome_id id (sz_bank sz)) (cons (Rect 0 0 (outer_w cw) (title_h)) (frame_rects cw ch))) 0)))))
 
-; The frame of a window, its content cw by ch: its two sides and its
-; foot, and its bottom corners, as far in as their curve, where the
-; content's corners are cut and the frame shows through. The rest is
-; under the content, and never shown.
+; A window's chrome painted on tc, its content cw by ch: its title bar,
+; then its frame under it.
+(def paint_chrome ((tc Canvas) (font UiFace) (title (list int)) (cw int) (ch int) (front bool)) Canvas
+  (let p (ui_paint_nodes tc font (Rect 0 0 (outer_w cw) (title_h)) (title_nodes title (outer_w cw) front))
+    (ui_paint p font (Rect 0 (title_h) (outer_w cw) (frame_h ch)) (frame_ops cw ch front))))
+
+; The frame of a window, its content cw by ch, in its chrome under the
+; title bar: its two sides and its foot, and its bottom corners, as far
+; in as their curve, where the content's corners are cut and the frame
+; shows through. The rest is under the content, and never shown.
 (def frame_rects ((cw int) (ch int)) (list Rect)
   (let r (bottom_radius cw ch)
-    (cons (Rect 0 0 (edge) (frame_h ch))
-      (cons (Rect (add cw (edge)) 0 (edge) (frame_h ch))
-        (cons (Rect 0 ch (outer_w cw) (edge))
-          (cons (Rect 0 (sub (frame_h ch) r) r r)
-            (cons (Rect (sub (outer_w cw) r) (sub (frame_h ch) r) r r) (nil Rect))))))))
+    (let t (title_h)
+      (let b (chrome_h ch)
+        (cons (Rect 0 t (edge) (frame_h ch))
+          (cons (Rect (add cw (edge)) t (edge) (frame_h ch))
+            (cons (Rect 0 (add t ch) (outer_w cw) (edge))
+              (cons (Rect 0 (sub b r) r r)
+                (cons (Rect (sub (outer_w cw) r) (sub b r) r r) (nil Rect))))))))))
 
 ; The frame painted in its title bar's ground, in front or in the
 ; backdrop.
@@ -662,9 +1008,9 @@
               ((None) (refused v (append "no window " (digits id))))
               ((Some win)
                 (match win
-                  ((Win wid port pid wx wy cw ch top title tc cva tva fc fva app)
+                  ((Win wid port pid wx wy cw ch top title tc cva tva bf app sz)
                     (damaged v (drop_n ns 5)
-                             (buffer_dirty (content_id id) (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4) top ch acc)))))))))))
+                             (buffer_dirty (content_id id (sz_bank sz)) (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4) top ch acc)))))))))))
 
 ; Rows y up to y + n of a ring of ch rows read from top, as its buffer's:
 ; one rectangle, or two where they wrap, onto acc, reversed.
@@ -701,29 +1047,29 @@
         (let e (restack v2)
           (let t (if (is_empty (without_win ws id)) 0 (refocused ws (without_win ws id)))
             (let t2 (titles v2)
-            (let f1 (display_forget d (content_id id))
-              (let f2 (display_forget d (title_id id))
-                (let f3 (display_forget d (frame_id id))
-                  (let u (give_up (with_id ws id) (display_scale d)) (okay v2))))))))))))
+            (let k (match (find_win ws id) ((Some win) (win_bank win)) ((None) 0))
+            (let f1 (display_forget d (content_id id k))
+              (let f2 (display_forget d (chrome_id id k))
+                (let u (give_up (with_id ws id) (display_scale d)) (okay v2))))))))))))
 
 ; The windows of ws with id: one, or none.
 (def with_id ((ws (list Win)) (id int)) (list Win)
   (if (is_empty ws) ws (if (eq (win_id (head ws)) id) (cons (head ws) (nil Win)) (with_id (tail ws) id))))
 
 ; Each closed window's buffers given up, once the display has dropped
-; them: the content's, which its client shared with wm, and the title
-; bar's and the frame's, wm's own, each made at scale s, their regions
-; closed too, so wm can open windows for ever. Each one's memory is freed
-; once no process maps it.
+; them: the content's, which its client shared with wm, and the chrome's,
+; wm's own, made at scale s, its region closed too, so wm can open
+; windows for ever. Each one's memory is freed once no process maps it.
 (def give_up ((ws (list Win)) (s int)) int
   (if (is_empty ws)
       0
       (match (head ws)
-        ((Win id port pid x y cw ch top title tc cva tva fc fva app)
-          (let a (shm_unmap cva (content_pages cw ch s))
-            (let b (ui_buffer_free tva (content_pages (outer_w cw) (title_h) s) tc)
-              (let c (ui_buffer_free fva (content_pages (outer_w cw) (frame_h ch) s) fc)
-                (give_up (tail ws) s))))))))
+        ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+          (match bf
+            ((Bufs cn dcva tn dtva)
+              (let a (shm_unmap cva cn)
+                (let b (ui_buffer_free tva tn tc)
+                  (give_up (tail ws) s)))))))))
 
 ; Every window of pid, which has exited, closed.
 (def gone ((v Wm) (pid int)) Wm
@@ -738,13 +1084,14 @@
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
       (match ptr
-        ((Ptr px py b over grab) (append (win_lines ws true) (append "pointer " (append (digits px) (append " " (digits py))))))))))
+        ((Ptr px py b over grab ac shape)
+          (append (win_lines ws true) (append "pointer " (append (digits px) (append " " (append (digits py) (if (is_empty shape) "" (append " " shape))))))))))))
 
 (def win_lines ((ws (list Win)) (front bool)) (list int)
   (if (is_empty ws)
       ""
       (match (head ws)
-        ((Win id port pid x y cw ch top title tc cva tva fc fva app)
+        ((Win id port pid x y cw ch top title tc cva tva bf app sz)
           (append (unwords (cons (digits id) (cons title (cons (digits x) (cons (digits y) (cons (digits cw) (cons (digits ch)
                     (cons (if front "front" "-") (nil (list int))))))))))
                   (append "\n" (win_lines (tail ws) false)))))))
@@ -806,10 +1153,54 @@
             (let y (scaled py h)
               (let m (display_move d x y)
                 (match ptr
-                  ((Ptr ox oy was over grab)
-                    (forwarded (moved (Wm d w h desk font bg ws n (Ptr x y buttons over grab) drag kp pp bar)
-                                      x y (bit_and was 1) (bit_and buttons 1))
-                               was)))))))))))
+                  ((Ptr ox oy was over grab ac shape)
+                    (pointer_shaped
+                      (forwarded (moved (Wm d w h desk font bg ws n (Ptr x y buttons over grab ac shape) drag kp pp bar)
+                                        x y (bit_and was 1) (bit_and buttons 1))
+                                 was))))))))))))
+
+; The pointer shown as what it is over says, as GNOME's is: a resize
+; pointer over a window's edge, or while one is dragged, the arrow
+; elsewhere. Its image is painted and given to the display only when it
+; changes.
+(def pointer_shaped ((v Wm)) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match ptr
+        ((Ptr x y b over grab ac shape)
+          (let want (pointer_wanted v x y)
+            (if (eq want shape)
+                v
+                (let p (ui_paint_named_cursor ac font want)
+                  (let e (display_cursor d (arrow_id) (ui_cursor_hot_x want (display_scale d)) (ui_cursor_hot_y want (display_scale d)))
+                    (Wm d w h desk font bg ws n (Ptr x y b over grab ac want) drag kp pp bar))))))))))
+
+; Which pointer x, y wants: the resize pointer of the edges being
+; dragged, or of those it is over, as edges_at says; else the arrow, "".
+(def pointer_wanted ((v Wm) (x int) (y int)) (list int)
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match drag
+        ((Resizing id e px py wx wy cw ch) (resize_cursor e))
+        ((Dragging id ox oy when) "")
+        ((NoDrag)
+          (if (if (launcher_busy v) true (on_bar y))
+              ""
+              (match (hit ws x y)
+                ((OnEdge win e) (resize_cursor e))
+                ((OnClose win) "") ((OnTitle win) "") ((OnContent win cx cy) "") ((OnFrame win) "") ((OnDesktop) ""))))))))
+
+; The pointer for dragging edges e: across for the left or right alone,
+; up and down for the top or bottom alone, and for a corner the diagonal
+; it moves along.
+(def resize_cursor ((e int)) (list int)
+  (let across (if (has_edge e (edge_left)) true (has_edge e (edge_right)))
+    (let down (if (has_edge e (edge_top)) true (has_edge e (edge_bottom)))
+      (if (not down)
+          (if across "ew-resize" "")
+          (if (not across)
+              "ns-resize"
+              (if (eq (has_edge e (edge_left)) (has_edge e (edge_top))) "nwse-resize" "nesw-resize"))))))
 
 ; The pointer told to the window it is for, once wm has done what it
 ; does with it: the window holding it since a press in its content, or
@@ -821,16 +1212,17 @@
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
       (match ptr
-        ((Ptr x y b over grab)
+        ((Ptr x y b over grab ac shape)
           (let target (if (launcher_busy v) ((None Win)) (pointer_target ws drag x y grab))
             (let tid (match target ((None) -1) ((Some t) (win_id t)))
               (let l (if (if (ge over 0) (not (eq over tid)) false) (told_left ws over) 0)
                 (let s (match target ((None) 0) ((Some t) (port_tell (win_port t) (pointer_notice (relative t x y b)))))
-                  (Wm d w h desk font bg ws n (Ptr x y b tid (if (eq b 0) -1 (if (eq was 0) tid grab))) drag kp pp bar))))))))))
+                  (Wm d w h desk font bg ws n (Ptr x y b tid (if (eq b 0) -1 (if (eq was 0) tid grab)) ac shape) drag kp pp bar))))))))))
 
 (def pointer_target ((ws (list Win)) (drag Drag) (x int) (y int) (grab int)) (Option Win)
   (match drag
     ((Dragging id ox oy when) ((None Win)))
+    ((Resizing id e px py wx wy cw ch) ((None Win)))
     ((NoDrag)
       (match (if (lt grab 0) ((None Win)) (find_win ws grab))
         ((Some w) (Some w))
@@ -841,11 +1233,12 @@
                       ((OnTitle w) ((None Win)))
                       ((OnClose w) ((None Win)))
                       ((OnFrame w) ((None Win)))
+                      ((OnEdge w e) ((None Win)))
                       ((OnDesktop) ((None Win))))))))))
 
 ; Where x, y on the screen is in window w's content, with the buttons.
 (def relative ((w Win) (x int) (y int) (b int)) PointerEvent
-  (match w ((Win id port pid wx wy cw ch top title tc cva tva fc fva app) (PointerEvent (sub x (add wx (edge))) (sub y (add wy (title_h))) b))))
+  (match w ((Win id port pid wx wy cw ch top title tc cva tva bf app sz) (PointerEvent (sub x (add wx (edge))) (sub y (add wy (title_h))) b))))
 
 ; The wheel turned: told to the window the pointer would be told of, with
 ; where the pointer is in its content. The driver sends the turn before
@@ -861,7 +1254,7 @@
                 ((None) v)
                 ((Some t) (let s (port_tell (win_port t) (wheel_notice (wheel_relative t x y ev))) v))))))))))
 
-(def ptr_grab ((p Ptr)) int (match p ((Ptr x y b over grab) grab)))
+(def ptr_grab ((p Ptr)) int (match p ((Ptr x y b over grab ac shape) grab)))
 
 ; A wheel event with x, y on the screen made relative to w's content.
 (def wheel_relative ((w Win) (x int) (y int) (ev WheelEvent)) WheelEvent
@@ -894,11 +1287,18 @@
         ((OnTitle win)
           (let f (refocused ws (raised ws (win_id win)))
             (fronted (Wm d w h desk font bg (raised ws (win_id win)) n ptr
-                         (match win ((Win id port pid wx wy cw ch top title tc cva tva fc fva app) (Dragging id (sub x wx) (sub y wy) 0)))
+                         (match win ((Win id port pid wx wy cw ch top title tc cva tva bf app sz) (Dragging id (sub x wx) (sub y wy) 0)))
                          kp pp bar)
                      (eq (win_id win) (win_id (head ws))))))
         ((OnContent win cx cy) (raised_by v win))
-        ((OnFrame win) (raised_by v win))))))
+        ((OnFrame win) (raised_by v win))
+        ((OnEdge win e)
+          (match win
+            ((Win id port pid wx wy cw ch top title tc cva tva bf app sz)
+              (let ws2 (raised (replaced ws (win_asked win e cw ch false)) id)
+                (let f (refocused ws ws2)
+                  (fronted (Wm d w h desk font bg ws2 n ptr (Resizing id e x y wx wy cw ch) kp pp bar)
+                           (eq id (win_id (head ws)))))))))))))
 
 ; A press on win's content or frame: win brought to the front.
 (def raised_by ((v Wm) (win Win)) Wm
@@ -931,10 +1331,13 @@
         ((NoDrag) v)
         ((Dragging id ox oy last)
           (let v2 (dragged v (ptr_x ptr) (ptr_y ptr) true)
+            (match v2 ((Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 drag2 kp2 pp2 bar2) (Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 (NoDrag) kp2 pp2 bar2)))))
+        ((Resizing id e px py wx wy cw ch)
+          (let v2 (dragged v (ptr_x ptr) (ptr_y ptr) true)
             (match v2 ((Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 drag2 kp2 pp2 bar2) (Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 (NoDrag) kp2 pp2 bar2)))))))))
 
-(def ptr_x ((p Ptr)) int (match p ((Ptr x y b over grab) x)))
-(def ptr_y ((p Ptr)) int (match p ((Ptr x y b over grab) y)))
+(def ptr_x ((p Ptr)) int (match p ((Ptr x y b over grab ac shape) x)))
+(def ptr_y ((p Ptr)) int (match p ((Ptr x y b over grab ac shape) y)))
 
 ; The dragged window moved under the pointer, and the screen rebuilt if
 ; the last rebuild ended long enough ago, or at the drag's end. The
@@ -955,7 +1358,28 @@
                 (if (if last true (ge (sub (clock_ns) when) (drag_ns)))
                     (let e (display_layers d (layers moved_ws false))
                       (Wm d w h desk font bg moved_ws n ptr (Dragging id ox oy (clock_ns)) kp pp bar))
-                    (Wm d w h desk font bg moved_ws n ptr drag kp pp bar))))))))))
+                    (Wm d w h desk font bg moved_ws n ptr drag kp pp bar))))))
+        ((Resizing id e px py wx wy cw ch)
+          (match (find_win ws id)
+            ((None) v)
+            ((Some win)
+              (match (resize_geometry e (sub x px) (sub y py) wx wy cw ch w h)
+                ((Size nw nh) (resize_asked v win e nw nh))))))))))
+
+; The window win, which edges e of are being dragged to make it nw by nh,
+; asked for that size, unless it is its size, or it has been asked for
+; one and has not answered: it is asked again for the latest when it
+; answers. The size asked for is kept.
+(def resize_asked ((v Wm) (win Win) (e int) (nw int) (nh int)) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match win
+        ((Win id port pid x y cw ch top title tc cva tva bf app sz)
+          (match sz
+            ((Sizing k oe ww wh asking)
+              (let ask (if asking false (not (if (eq nw cw) (eq nh ch) false)))
+                (let t (if ask (port_tell port (size_notice nw nh)) 0)
+                  (Wm d w h desk font bg (replaced ws (win_asked win e nw nh (if asking true ask))) n ptr drag kp pp bar))))))))))
 
 ; ------------------------------------------------------------ the launcher
 

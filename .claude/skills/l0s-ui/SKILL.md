@@ -154,28 +154,62 @@ clients. It never copies a window's pixels: each is a shared buffer, and the
 driver composes them.
 
 - **Buffers**: desktop 0, pointer 1, top bar 2, launcher 3, and window
-  `i`'s content `4 + 3i`, title bar `5 + 3i`, frame `6 + 3i`
-  (`launcher_id`, `content_id`, `title_id`, `frame_id`).
+  `i`'s content `4 + 4i + 2k` and chrome `5 + 4i + 2k` (its title bar with
+  the frame under it, one buffer the window's size), k its bank
+  (`launcher_id`, `content_id i k`, `chrome_id i k`; `win_bank`). A resize
+  gives the display the window's buffers under the other bank and forgets
+  the old ids after the restack: the display refuses to forget a buffer
+  on the screen. `Bufs` keeps each buffer's pages and where the display
+  has them, so a size that fits is given again in the same pages
+  (`display_buffer_at`); the driver keeps pages mapped while any id is
+  over them.
+- **Resizing** (`edges_at`, `resize_geometry`, `Drag`'s `Resizing`,
+  `resize_asked`, `resize_replied`): the frame's sides and foot and a
+  6-pixel border outside the window are `OnEdge win edges` (bits
+  `edge_left`...); within `resize_corner` (20) of a corner, wherever the
+  window has nothing of its own (`free_at`: outside, cut corners, frame,
+  the content's cut corners), both edges. Dragging asks the client with
+  `size_notice` and never has two asks out (`Sizing`'s `asking`); the
+  client answers with the wm protocol's `resize ID W H` (in place,
+  `window_resize_in_place`) or `resize ID W H VA N` (a new buffer,
+  `window_resize`). `wm` answers once the display has the content, asks
+  for the next size at once, then makes the chrome, restacks and gives up
+  what is unused, moving the window for a left or top edge so the
+  opposite edge stays. A toolkit window takes `UiResize` in `ui_route`
+  (`ui_resized`: in its buffer if it has room, `UiInPlace`, else a new one
+  with `ui_grown` room, the old kept as `UiSwap` until wm has the new) and
+  the next `ui_present` paints it whole (`ui_swapped`). Apps need no code;
+  `vt` ignores the notice. The cost that matters is pages shared and
+  given up, not pixels: keep resizes in place.
+- **The pointer's image** (`pointer_shaped`, `pointer_wanted`,
+  `resize_cursor`): buffer 1, painted again with `ui_paint_named_cursor`
+  and given with `display_cursor` and its hot spot (`ui_cursor_hot_x`) only
+  when it changes: `ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize`
+  over edges or while they are dragged, the arrow `""` elsewhere. `Ptr`
+  keeps its canvas and name; `windows` reports the name. A new pointer
+  needs its 1x art in `ui_cursor_art`, its hot spot, and its shapes as
+  `cursor NAME` in `fonts/icons.paths`.
 - **Layers**, bottom first (`layers ws shown`): the desktop; each window from the back,
-  its title bar at `x, y`, its frame at `x, y + 46`, its content at
-  `x + edge, y + 46`; then the top bar over everything. While the launcher
-  is shown: the desktop, the launcher at `0, 32`, the bar, and no
-  window. The pointer is the driver's cursor, not a layer.
+  its chrome at `x, y`, its content at `x + edge, y + 46`; then the top
+  bar over everything. While the launcher is shown: the desktop, the
+  launcher at `0, 32`, the bar, and no window. The pointer is the
+  driver's cursor, not a layer.
 - **Window geometry**: `Win` keeps the content's size `cw` by `ch`, as the
   client asked and as `windows` reports it. The window is `outer_w cw` = `cw +
   2·edge` wide; its frame is `frame_h ch` = `ch + edge` high under the 46-row
-  title bar, `edge` = 2. The frame is painted only where it shows: the sides,
-  the foot, and its bottom corners (`frame_rects`), in the title bar's
-  ground (`frame_ops`), and those same rectangles are its damage.
-- **Corners**: `display_shape` rounds the title bar's top corners
-  (`top_radius`, 12), the frame's bottom ones (`bottom_radius`) and the
-  content's inside them (`inner_radius`, 12 − edge). `cut_off` uses the
-  driver's own formula (`render.l0`'s `corner_cut`), so a press in a cut corner falls
-  through to what is beneath.
-- **Hit testing**: `hit` gives `OnClose`, `OnTitle`, `OnContent win cx cy`
-  (content coordinates), `OnFrame` or `OnDesktop`, frontmost first; `on_bar`
-  is checked before it. A new kind of region means a new `Hit` constructor,
-  and every match on `Hit` gains an arm.
+  title bar, `edge` = 2, the chrome `chrome_h ch` high. The frame is painted
+  only where it shows: the sides, the foot, and its bottom corners
+  (`frame_rects`, in the chrome's rows), in the title bar's ground
+  (`frame_ops`), and those same rectangles are its damage.
+- **Corners**: `display_shape` rounds the chrome's top corners
+  (`top_radius`, 12) and bottom ones (`bottom_radius`), and the content's
+  inside them (`inner_radius`, 12 − edge); `shape_window`. `cut_off` uses the
+  driver's own formula (`render.l0`'s `corner_cut`), so a press in a cut
+  corner is no window's but grabs that corner's edges.
+- **Hit testing**: `hit` gives `OnEdge win edges`, `OnClose`, `OnTitle`,
+  `OnContent win cx cy` (content coordinates), `OnFrame` or `OnDesktop`,
+  frontmost first; `on_bar` is checked before it. A new kind of region
+  means a new `Hit` constructor, and every match on `Hit` gains an arm.
 - **Title bars** are toolkit header bars (`title_nodes`, with
   `ui_st_backdropped` for the back windows) repainted by `titles` whenever
   the front window changes; `titles` also repaints the frames and the top
@@ -241,11 +275,16 @@ runs that the driver builds from the layers, so no guest code copies pixels.
 - **Scrolling** is a ring: a client changes its window's `top` row instead of
   copying (`vt` does).
 - **The cursor** is the device's own, 64×64, moved without touching the
-  screen.
+  screen; a new image is a `cursor` request again, a few commands.
 - **The 64-region limit** (`l0s-dev`): at most 64 open at once. `wm`
-  opens two regions a window, closed with `ui_buffer_free` when it
-  closes, and keeps four of its own: desktop, pointer, top bar, launcher.
-  A buffer remade, as for a resize, frees the old one the same way.
+  opens one region a window, its chrome's, closed with `ui_buffer_free`
+  when it closes, and keeps four of its own: desktop, pointer, top bar,
+  launcher. A buffer remade, as for a resize past its room, frees the old
+  one the same way.
+- **`buffer ID W H VA N`** gives a buffer N pages, more than W×H may take,
+  and the driver takes their addresses with one `dma_addresses` call; the
+  same pages may be another ID at another size, and `forget` unmaps them
+  only with the last.
 - **3D mode** (`user/sbin/virtio-gpu/gl.l0`, `compose.l0`, `virgl.l0`): on
   QEMU's `virtio-gpu-gl-device` the driver makes each buffer a texture and
   composes the screen with virgl copies (`make demo` does when
