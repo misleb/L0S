@@ -857,7 +857,7 @@ itself is always there, a directory holding only the volumes: nothing
 can be made in it, only in one of them. The kernel takes a path, made
 absolute, to where it is mounted:
 
-- the initramfs: answered as [Calls 1–12](#calls-112-the-process-abi-of-spec-103) say;
+- the initramfs: answered as [Calls 1–13](#calls-113-the-process-abi-of-spec-103) say;
 - the system volume, any path outside `/Volumes` once `/` is one: its
   server is asked for the same path in `/Volumes/LABEL`, as for a volume;
 - `/Volumes`: a directory, -8; straight in it, nothing there, -3, and
@@ -1445,8 +1445,10 @@ but not necessarily for the device, so a driver gives the device one
 address per page, or merges the runs that happen to be consecutive.
 A `region` call over DMA pages (`dma_open` in `l0s.l0`) returns the same
 address, so the driver reads and writes them with `device_read32` and the
-rest. The proc runtime keeps at most 64 regions open, which is why the
-pages are mapped together rather than as one region each.
+rest. The proc runtime keeps at most 64 regions open at once, which is
+why the pages are mapped together rather than as one region each; one
+closed (`close_device`, or `shm_region_free` for shared pages) frees its
+place for another.
 
 **Shared memory.** `shm_alloc n` is `dma_alloc` for any process: n zeroed
 pages at its next device pages, with no `dev` line needed.
@@ -1523,7 +1525,7 @@ being made, what was made for it is freed again.
 `x8` holds the call number, `x0`–`x3` the arguments, and the result comes
 back in `x0`. From L0, use the wrappers in `user/lib/sys/l0s.l0`.
 
-### Calls 1–12: the process ABI of spec §10.3
+### Calls 1–13: the process ABI of spec §10.3
 
 The kernel answers these itself for the initramfs, a read-only file
 system, and for a file of a volume under `/Volumes`, or of the system
@@ -1542,6 +1544,7 @@ volume once `/` is one, sends them to the volume's file server, as
 | region | maps device registers for programs with a `dev` line, so `open_device` works, or for a range of the caller's DMA pages, returns where they are; -3 for any other |
 | clock | not answered (-5): only a riscv64 process asks, and an aarch64 one reads the virtual counter itself |
 | release | 0. The runtime makes it, never a program: each whole page of the heap in the range that is mapped is unmapped and its frame freed (see [Releasing](#a-processs-memory)); part of a page, and anything outside the heap, are passed over |
+| unregion | 0. The runtime makes it once a region is closed: the device registers a `region` call mapped there are unmapped, and their pages go back to the process's device pages, to be given again; a later touch of one faults. A region over the caller's own DMA or shared pages mapped nothing, and nothing of it changes; nor does anything for a range the call never mapped |
 
 ### The kernel's own calls, 256 up
 
@@ -1677,7 +1680,7 @@ name in a library is taken in every program that links it.
 | [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
 | [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div`, `format_size` (a size as GNOME says it, `782.3 kB`) | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
-| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
+| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
 | [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order | every program |
 | [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |
@@ -1709,7 +1712,7 @@ name in a library is taken in every program that links it.
 |---|---|
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
-| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 Each case of `tests/e2e/` is a directory:
@@ -2158,11 +2161,12 @@ a bad buffer, and wait on nothing.
   typed session ends cleanly.
 - A window's terminal has no scrollback, and draws only what is written:
   it keeps no copy of its text.
-- Windows cannot be resized. `wm` opens two regions for each window,
-  its title bar's and its frame's, and the proc runtime closes none and
-  keeps at most 64 open, so `wm`, which keeps four of its own (the
-  desktop, the pointer, the top bar and the launcher), can open only so
-  many windows over its life, closed ones included. The close button kills its client at
+- Windows cannot be resized, though nothing in the runtime stands in the
+  way any more. `wm` opens two regions for each window, its title bar's
+  and its frame's, and closes them when the window closes; the proc
+  runtime keeps at most 64 open at once, so `wm`, which keeps four of its
+  own (the desktop, the pointer, the top bar and the launcher), can have
+  30 windows open at once, and open them for ever. The close button kills its client at
   once: the client is not asked first, and cannot refuse. The pointer has
   one button that does anything, the left: `wm` passes the others on to
   the window under the pointer, and the toolkit drops them.

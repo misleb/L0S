@@ -220,9 +220,11 @@ add to that list. Documenting a listed form fails the check too, until
   `(let f (file_flush (IoFile 2)) ...)` after the `write_err`. Processes the
   inittab starts write to the serial line; in a screen test that is the
   `build/NAME.out` file.
-- **The proc runtime keeps at most 64 regions open and closes none.** Every
-  `ui_buffer` and `dma_open` is one; `wm` opens two per window (title bar
-  and frame), so it can only ever open so many windows.
+- **The proc runtime keeps at most 64 regions open at once.** Every
+  `ui_buffer`, `shm_region` and `dma_open` is one; close it when done
+  (`close_device`, or `ui_buffer_free` / `shm_region_free`, which also
+  unmap the pages), or the 65th open fails. `wm` opens two per window
+  (title bar and frame) and closes them in `give_up`.
 - **Ports** hold 32 messages of at most 4096 bytes. A message must carry
   numbers, never pixels: pixels go through shared pages (`shm_alloc`,
   `shm_share`).

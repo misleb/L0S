@@ -242,8 +242,10 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   copying (`vt` does).
 - **The cursor** is the device's own, 64×64, moved without touching the
   screen.
-- **The 64-region limit** (`l0s-dev`): `wm` opens two regions a window,
-  and keeps four of its own: desktop, pointer, top bar, launcher.
+- **The 64-region limit** (`l0s-dev`): at most 64 open at once. `wm`
+  opens two regions a window, closed with `ui_buffer_free` when it
+  closes, and keeps four of its own: desktop, pointer, top bar, launcher.
+  A buffer remade, as for a resize, frees the old one the same way.
 - **3D mode** (`user/sbin/virtio-gpu/gl.l0`, `compose.l0`, `virgl.l0`): on
   QEMU's `virtio-gpu-gl-device` the driver makes each buffer a texture and
   composes the screen with virgl copies (`make demo` does when
