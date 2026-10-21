@@ -1,5 +1,6 @@
 ; memory.l0 -- what each address of a process is for, and so what the
-; kernel may map there. Pure: it decides, and process.l0 maps.
+; kernel may map there, and which frames processes share. Pure: it
+; decides, and process.l0 maps.
 
 ; The parts of a process's address range, from the bottom: its image, its
 ; heap, its stack, its device pages, and outside, below user_base or from
@@ -254,33 +255,136 @@
 
 ; When a process ends, the kernel frees its space (spec section 6.13's
 ; space_free), and then every frame of it no space maps any more
-; (frame_free). A frame of its image, heap, or stack is its alone, so it
-; is freed at once. A frame at its device pages, DMA or shared, may be
-; mapped by other processes too, so it is freed once the last of them has
-; ended, the kernel counting each mapping, since frame_free of a frame
-; still mapped is a runtime error. A driver's frames at its device pages
-; are never freed: its device may still read and write them, and only a
-; driver could stop it.
+; (frame_free). A frame of its heap or stack, or of its image's data, is
+; its alone, so it is freed at once. A frame at its device pages, DMA or
+; shared, may be mapped by other processes too, and so may one of its
+; image's code or rodata (an ImageSeg's), so it is freed once the last of
+; them has ended, the kernel counting each mapping, since frame_free of a
+; frame still mapped is a runtime error. A driver's frames at its device
+; pages are never freed: its device may still read and write them, and
+; only a driver could stop it.
 
-; For each frame mapped at device pages, how many mappings of it live
-; processes have, a driver's counting for good.
-(data Mem (Mem (Map int int)))
+; A read-only segment of an image that processes running it share: its
+; address, its bytes in the file, its perm, the frames of its pages in
+; order, and the spaces of the live processes that map them.
+(data ImageSeg (ImageSeg int int int (list int) (list int)))
+
+; For each frame mapped at device pages or shared as an image's, how many
+; mappings of it live processes have, a driver's device pages counting
+; for good; and the image segments shared, by the hash of their bytes.
+(data Mem (Mem (Map int int) (Map int (list ImageSeg))))
 
 ; The counts before any process maps a device page: none.
-(def mem_new () Mem (Mem ((MapEmpty int int))))
+(def mem_new () Mem (Mem ((MapEmpty int int)) ((MapEmpty int (list ImageSeg)))))
 
-; How many frames m counts mappings of: every shared and DMA frame still
-; given, each once, however many processes map it.
-(def mem_shared_frames ((m Mem)) int (match m ((Mem counts) (map_size counts))))
+; How many frames m counts mappings of: every shared, DMA and image frame
+; shared still given, each once, however many processes map it.
+(def mem_shared_frames ((m Mem)) int (match m ((Mem counts imgs) (map_size counts))))
 
 ; How many mappings of frame f m counts, 0 for a frame it does not know.
 (def mem_count ((m Mem) (f int)) int
-  (match m ((Mem counts) (match (map_get counts f) ((Some n) n) ((None) 0)))))
+  (match m ((Mem counts imgs) (match (map_get counts f) ((Some n) n) ((None) 0)))))
 
-; m with one more mapping of f at a live process's device pages.
+; m with one more mapping of f at a live process's device pages, or of
+; an image segment's.
 (def mem_share ((m Mem) (f int)) Mem
   (let n (mem_count m f)
-    (match m ((Mem counts) (Mem (map_put counts f (add n 1)))))))
+    (match m ((Mem counts imgs) (Mem (map_put counts f (add n 1)) imgs)))))
+
+; m with one more mapping of each of fs.
+(def mem_share_all ((m Mem) (fs (list int))) Mem
+  (if (is_empty fs) m (mem_share_all (mem_share m (head fs)) (tail fs))))
+
+; ---------------------------------------------------------- shared images
+
+; The segments m shares whose bytes hash to key and which lie at va, len
+; bytes of the file, with perm: those whose bytes may be the same, which
+; the kernel compares to be sure.
+(def mem_image_candidates ((m Mem) (key int) (va int) (len int) (perm int)) (list ImageSeg)
+  (match m ((Mem counts imgs) (segs_at (image_segs imgs key) va len perm (nil ImageSeg)))))
+
+; The segments at key in imgs, none if there are none. A function of its
+; own: the same match bound by let, in a body that uses imgs again, is
+; never freed by L0's runtime, which its leak check reports.
+(def image_segs ((imgs (Map int (list ImageSeg))) (key int)) (list ImageSeg)
+  (match (map_get imgs key) ((None) (nil ImageSeg)) ((Some gs) gs)))
+
+; imgs with segs at key, or with nothing there if there are none.
+(def images_put ((imgs (Map int (list ImageSeg))) (key int) (segs (list ImageSeg))) (Map int (list ImageSeg))
+  (if (is_empty segs) (map_remove imgs key) (map_put imgs key segs)))
+
+; Those of segs that lie at va, len bytes of the file, with perm, onto
+; acc, in order.
+(def segs_at ((segs (list ImageSeg)) (va int) (len int) (perm int) (acc (list ImageSeg))) (list ImageSeg)
+  (if (is_empty segs)
+      (rev acc)
+      (segs_at (tail segs) va len perm (if (image_seg_at (head segs) va len perm) (cons (head segs) acc) acc))))
+
+; Whether g lies at va, len bytes of the file, with perm.
+(def image_seg_at ((g ImageSeg) (va int) (len int) (perm int)) bool
+  (match g ((ImageSeg gva glen gperm fs ss) (if (eq gva va) (if (eq glen len) (eq gperm perm) false) false))))
+
+; The frames of g's pages, in order.
+(def image_seg_frames ((g ImageSeg)) (list int) (match g ((ImageSeg va len perm fs ss) fs)))
+
+; A space that maps g, to compare its bytes with: the first of them.
+(def image_seg_space ((g ImageSeg)) int (match g ((ImageSeg va len perm fs ss) (head ss))))
+
+; m with space s mapping the frames of g too, which hashes to key: a
+; mapping more of each.
+(def mem_image_join ((m Mem) (key int) (g ImageSeg) (s int)) Mem
+  (match (mem_share_all m (image_seg_frames g))
+    ((Mem counts imgs)
+      (Mem counts (images_put imgs key (segs_joined (image_segs imgs key) g s (nil ImageSeg)))))))
+
+; segs onto acc, in order, with s among the spaces of the one that is g.
+(def segs_joined ((segs (list ImageSeg)) (g ImageSeg) (s int) (acc (list ImageSeg))) (list ImageSeg)
+  (if (is_empty segs)
+      (rev acc)
+      (segs_joined (tail segs) g s (cons (image_seg_joined (head segs) g s) acc))))
+
+; h, with s among its spaces if it is g.
+(def image_seg_joined ((h ImageSeg) (g ImageSeg) (s int)) ImageSeg
+  (if (eq h g) (match h ((ImageSeg va len perm fs ss) (ImageSeg va len perm fs (cons s ss)))) h))
+
+; m sharing a new segment, hashing to key, at va, len bytes of the file,
+; with perm, its pages' frames fs, which space s alone maps so far.
+(def mem_image_new ((m Mem) (key int) (va int) (len int) (perm int) (fs (list int)) (s int)) Mem
+  (match (mem_share_all m fs)
+    ((Mem counts imgs)
+      (Mem counts (map_put imgs key (cons (ImageSeg va len perm fs (cons s (nil int))) (image_segs imgs key)))))))
+
+; m once space s maps no segment: s taken from each, and a segment no
+; space maps any more forgotten. Its frames' counts are mem_release's.
+(def mem_image_leave ((m Mem) (s int)) Mem
+  (match m
+    ((Mem counts imgs)
+      (Mem counts (images_without imgs (map_keys imgs) s)))))
+
+; imgs with s taken from the segments at keys, and a key with none left
+; dropped.
+(def images_without ((imgs (Map int (list ImageSeg))) (keys (list int)) (s int)) (Map int (list ImageSeg))
+  (if (is_empty keys)
+      imgs
+      (images_without (images_put imgs (head keys) (segs_without (image_segs imgs (head keys)) s (nil ImageSeg)))
+                      (tail keys) s)))
+
+; segs with s taken from each, onto acc, those left with no space dropped.
+(def segs_without ((segs (list ImageSeg)) (s int) (acc (list ImageSeg))) (list ImageSeg)
+  (if (is_empty segs)
+      (rev acc)
+      (match (head segs)
+        ((ImageSeg va len perm fs ss)
+          (let ss2 (without s ss (nil int))
+            (segs_without (tail segs) s (if (is_empty ss2) acc (cons (ImageSeg va len perm fs ss2) acc))))))))
+
+; How many segments m shares.
+(def mem_image_count ((m Mem)) int
+  (match m ((Mem counts imgs) (sum_lengths (map_values imgs) 0))))
+
+; n and the lengths of each of ls.
+(def sum_lengths ((ls (list (list ImageSeg))) (n int)) int
+  (if (is_empty ls) n (sum_lengths (tail ls) (add n (length (head ls))))))
 
 ; What a process's end leaves to do: m without its mappings, and the
 ; frames to free once its space is.
@@ -291,8 +395,9 @@
   (release_pages m pages (map_keys pages) dev (nil int)))
 
 ; The rest of mem_release, through the pages at vas: a frame below the
-; device pages onto acc to free; one at them kept for a driver, else one
-; mapping of it fewer.
+; device pages onto acc to free, unless it is an image's shared, when it
+; has one mapping fewer; one at them kept for a driver, else one mapping
+; of it fewer.
 (def release_pages ((m Mem) (pages (Map int int)) (vas (list int)) (dev bool) (acc (list int))) Released
   (if (is_empty vas)
       (Released m acc)
@@ -300,16 +405,18 @@
         ((None) (release_pages m pages (tail vas) dev acc))
         ((Some f)
           (if (not (in_device_area (head vas)))
-              (release_pages m pages (tail vas) dev (cons f acc))
+              (if (gt (mem_count m f) 0)
+                  (release_shared m pages (tail vas) dev f acc)
+                  (release_pages m pages (tail vas) dev (cons f acc)))
               (if dev
                   (release_pages m pages (tail vas) dev acc)
-                  (release_shared m pages (tail vas) f acc)))))))
+                  (release_shared m pages (tail vas) dev f acc)))))))
 
 ; The same, one mapping of shared frame f fewer, and f to free if it was
 ; the last.
-(def release_shared ((m Mem) (pages (Map int int)) (vas (list int)) (f int) (acc (list int))) Released
+(def release_shared ((m Mem) (pages (Map int int)) (vas (list int)) (dev bool) (f int) (acc (list int))) Released
   (match (mem_unshare m f)
-    ((Unshared m2 last) (release_pages m2 pages vas false (if last (cons f acc) acc)))))
+    ((Unshared m2 last) (release_pages m2 pages vas dev (if last (cons f acc) acc)))))
 
 ; m with one mapping of shared frame f fewer, as when a process unmaps it
 ; or has it taken back, and whether it was the last, so f is to be freed.
@@ -320,7 +427,7 @@
 (def mem_unshare ((m Mem) (f int)) Unshared
   (let n (mem_count m f)
     (match m
-      ((Mem counts)
+      ((Mem counts imgs)
         (if (gt n 1)
-            (Unshared (Mem (map_put counts f (sub n 1))) false)
-            (Unshared (Mem (map_remove counts f)) true))))))
+            (Unshared (Mem (map_put counts f (sub n 1)) imgs) false)
+            (Unshared (Mem (map_remove counts f) imgs) true))))))

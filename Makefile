@@ -236,7 +236,7 @@ test: sample
 	$(L0) test $(BASE) common/text_test.l0
 	$(L0) test $(COMMON) common/initramfs_test.l0
 	$(L0) test $(BASE) common/queue.l0 common/queue_test.l0
-	$(L0) test $(BASE) kernel/memory.l0 kernel/memory_test.l0
+	$(L0) test $(BASE) common/queue.l0 kernel/memory.l0 kernel/memory_test.l0
 	$(L0) test $(BASE) kernel/mounts.l0 kernel/mounts_test.l0
 	$(L0) test $(BASE) common/queue.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/ipc_test.l0
 	$(L0) test $(COMMON) kernel/inittab.l0 kernel/inittab_test.l0

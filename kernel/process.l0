@@ -164,26 +164,33 @@
           (ClosedFile p false)))))
 
 ; p's record for proc_info: running, if it is the process asking.
-(def proc_info_record ((p Proc) (running bool)) (list int)
+(def proc_info_record ((p Proc) (mem Mem) (running bool)) (list int)
   (let st (proc_state p)
-    (match (proc_page_counts p)
+    (match (proc_page_counts p mem)
       ((PageCounts own shared)
         (proc_record (if running (state_running) (state_code st)) (proc_parent p) (proc_module p)
                      (if running 0 (state_detail st)) own shared)))))
 
-; How many pages p has mapped of its own, and how many at its device
-; pages, which are shared or DMA memory.
+; How many pages p has mapped of its own, and how many it may share: those
+; at its device pages, which are shared or DMA memory, and its image's
+; shared code and rodata.
 (data PageCounts (PageCounts int int))
 
-; p's pages, counted as PageCounts says.
-(def proc_page_counts ((p Proc)) PageCounts
-  (let vas (map_keys (proc_pages p))
-    (let shared (count_device_pages vas 0)
-      (PageCounts (sub (length vas) shared) shared))))
+; p's pages, counted as PageCounts says, by what mem counts.
+(def proc_page_counts ((p Proc) (mem Mem)) PageCounts
+  (let pages (proc_pages p)
+    (let shared (count_shared_pages pages (map_keys pages) mem 0)
+      (PageCounts (sub (map_size pages) shared) shared))))
 
-; n and how many of the pages vas are device pages.
-(def count_device_pages ((vas (list int)) (n int)) int
-  (if (is_empty vas) n (count_device_pages (tail vas) (if (in_device_area (head vas)) (add n 1) n))))
+; n and how many of the pages vas are device pages, or frames mem counts.
+(def count_shared_pages ((pages (Map int int)) (vas (list int)) (mem Mem) (n int)) int
+  (if (is_empty vas)
+      n
+      (count_shared_pages pages (tail vas) mem
+        (if (if (in_device_area (head vas)) true
+                (match (map_get pages (head vas)) ((Some f) (gt (mem_count mem f) 0)) ((None) false)))
+            (add n 1)
+            n))))
 
 ; The code proc_info gives for state s (abi.l0's state_*): a terminal
 ; write blocked for room is state_writing, a file server's answer awaited
@@ -331,12 +338,91 @@
   (if (is_empty fs) 0 (let r (frame_free (head fs)) (free_frames (tail fs)))))
 
 ; mem once p has ended, which drove devices if dev: its space given back,
-; and every frame of it no other space maps.
+; and every frame of it no other space maps, its image's shared segments
+; no longer its.
 (def proc_release ((mem Mem) (p Proc) (dev bool)) Mem
   (match p
     ((Proc pid m s c pages next st)
       (match (mem_release mem pages dev)
-        ((Released m2 fs) (let f (free_space s fs) m2))))))
+        ((Released m2 fs) (let f (free_space s fs) (mem_image_leave m2 s)))))))
+
+; ---------------------------------------------------------------- sharing
+
+; Processes running the same program share its code and rodata. Once a
+; new process's image is loaded, each of its read-only segments is
+; compared with those mem shares at the same address, of the same length
+; and perm, whose bytes hash alike: read out of the new space and out of
+; one that maps the other, the two compared whole, so no hash decides.
+; If one is the same, the new space maps its frames instead, and the
+; fresh ones are freed; if none is, the new segment is shared from then
+; on. A segment of the data, which a process writes, is its own.
+
+; The most bytes of a segment shared: 8 MB. Comparing reads it into the
+; kernel's heap twice; a larger one is the process's own.
+(def share_max_bytes () int 8388608)
+
+; mem and p, just made from img, with p's read-only segments shared with
+; other processes' that are the same, or shared from now on.
+(def proc_share_image ((mem Mem) (p Proc) (img Image)) Allocated
+  (match img
+    ((ElfImage entry segs heap) (share_segs mem p segs))
+    ((BadImage code) (Allocated mem p))))
+
+; Each of segs shared, if it is read-only, has bytes in the file, and is
+; no more than share_max_bytes of them.
+(def share_segs ((mem Mem) (p Proc) (segs (list ElfSeg))) Allocated
+  (if (is_empty segs)
+      (Allocated mem p)
+      (match (head segs)
+        ((ElfSeg off va fsz msz perm)
+          (if (if (eq (bit_and perm 1) 0) (if (gt fsz 0) (le fsz (share_max_bytes)) false) false)
+              (match (share_seg mem p va fsz perm) ((Allocated m2 p2) (share_segs m2 p2 (tail segs))))
+              (share_segs mem p (tail segs)))))))
+
+; The segment at va, its fsz bytes of the file, with perm, shared: its
+; bytes read and hashed, and compared with each candidate's.
+(def share_seg ((mem Mem) (p Proc) (va int) (fsz int) (perm int)) Allocated
+  (let b (space_read (proc_space p) va fsz)
+    (let key (hash b)
+      (share_with mem p va fsz perm key b (mem_image_candidates mem key va fsz perm)))))
+
+; The rest of share_seg, through the candidates gs: p mapping the first
+; whose bytes are b; or, if none are, its own frames shared from now on.
+(def share_with ((mem Mem) (p Proc) (va int) (fsz int) (perm int) (key int) (b bytes) (gs (list ImageSeg))) Allocated
+  (if (is_empty gs)
+      (Allocated (mem_image_new mem key va fsz perm (seg_frames (proc_pages p) va (add va fsz) (nil int)) (proc_space p)) p)
+      (if (eq (space_read (image_seg_space (head gs)) va fsz) b)
+          (Allocated (mem_image_join mem key (head gs) (proc_space p)) (proc_remap p va (image_seg_frames (head gs)) perm))
+          (share_with mem p va fsz perm key b (tail gs)))))
+
+; The frames at the pages from page va up to end, in order, after the
+; reversed acc.
+(def seg_frames ((pages (Map int int)) (va int) (end int) (acc (list int))) (list int)
+  (if (ge va end)
+      (rev acc)
+      (seg_frames pages (add va (page_size)) end
+                  (match (map_get pages va) ((Some f) (cons f acc)) ((None) acc)))))
+
+; p mapping fs at the pages from page va with perm, in place of its own
+; frames there, which are freed. A page is mapped again where its table
+; already is, so space_map needs no memory; were it ever refused, the
+; page's own frame is mapped back and kept, and only that frame of the
+; shared segment is counted once too often, so never freed.
+(def proc_remap ((p Proc) (va int) (fs (list int)) (perm int)) Proc
+  (if (is_empty fs)
+      p
+      (match p
+        ((Proc pid m s c pages dev st)
+          (match (map_get pages va)
+            ((None) (proc_remap p (add va (page_size)) (tail fs) perm))
+            ((Some old)
+              (let u (space_unmap s va)
+                (let r (space_map s va (head fs) perm)
+                  (if (lt r 0)
+                      (let r2 (space_map s va old perm) (proc_remap p (add va (page_size)) (tail fs) perm))
+                      (let f (frame_free old)
+                        (proc_remap (Proc pid m s c (map_put pages va (head fs)) dev st)
+                                    (add va (page_size)) (tail fs) perm)))))))))))
 
 ; --------------------------------------------------------------- touching
 

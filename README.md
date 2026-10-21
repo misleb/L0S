@@ -1369,14 +1369,14 @@ with random registers.
 | `common/initramfs.l0` | the newc archive: parsing it, paths, entry kinds, and a writer for tests |
 | `common/queue.l0` | a FIFO queue of any type, shared with user programs |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
-| `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; which heap pages a release names; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; which frames to free when a process ends |
+| `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; which heap pages a release names; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; the code and rodata processes share, by their bytes' hash; which frames to free when a process ends |
 | `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
 | `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
 | `kernel/syscall.l0` | a trapped context decoded into a `Call` |
-| `kernel/process.l0` | creating a process from its ELF's segments, demand-paging, heap pages released, copying in and out of, mapping devices and DMA pages into, and the open files of a process |
+| `kernel/process.l0` | creating a process from its ELF's segments, sharing its code and rodata with processes whose are the same, demand-paging, heap pages released, copying in and out of, mapping devices and DMA pages into, and the open files of a process |
 | `kernel/kernel.l0` | the state, every call's handler, traps, the loop, and boot |
 
 All of these except `process.l0` and `kernel.l0` are pure and tested on the
@@ -1413,7 +1413,7 @@ The layout is fixed by spec §10.3. A program's image is an ELF, as
 
 | Address | What | Mapped |
 |---|---|---|
-| `0xC0000000` | the image's segments, code, rodata, and data, ending below `0xD0000000` | at load, the pages holding the file's bytes, each with its segment's flags: code readable and executable, rodata readable, data readable and writable |
+| `0xC0000000` | the image's segments, code, rodata, and data, ending below `0xD0000000` | at load, the pages holding the file's bytes, each with its segment's flags: code readable and executable, rodata readable, data readable and writable; code and rodata the same frames as another live process's, where its are the same bytes (see Sharing below) |
 | the rest of a segment | its bss, zero | on first touch, with the segment's flags |
 | from the page after the image to `0xD8000000` | heap | on first touch, RW; unmapped again, its frame freed, when the runtime releases it (call 12) |
 | to `0xE8000000` | stack, `sp` starting at the top | on first touch, RW |
@@ -1486,16 +1486,31 @@ process holds the heap it uses now, not the most it ever used. Its servers
 run from boot to shutdown, so without this the frames they touched once
 would never come back.
 
+**Sharing.** Processes running the same program share its code and
+rodata. Once a new process's image is loaded, each of its read-only
+segments is compared with those the kernel already shares at the same
+address, of the same length and flags, whose bytes hash alike: read out
+of the new space and out of one that maps the other, the two compared
+whole, so a hash alone never decides. If they are the same, the new
+process maps the shared frames, and its fresh ones are freed; if none is,
+its segment is shared from then on. It is the bytes that decide, not the
+path, so a program started from the initramfs and the same one from a
+volume share too. A segment over 8 MB is not shared, as comparing reads
+it into the kernel's heap twice, and the data segment, which a process
+writes, never is. So the shells and terminals of the desktop hold one
+copy of `sh`'s and `vt`'s code between them.
+
 **Freeing.** When a process ends, the kernel gives back its space with
 `space_free`, which takes its page tables and every mapping with it, and
 then, with `frame_free`, every frame of it that no other space maps
 (spec §6.13; `kernel/memory.l0`'s `Mem` decides which):
-- Its image, heap and stack frames are its alone, so they are freed at
-  once.
-- A shared or DMA frame may be mapped by other processes too, so the
-  kernel counts each frame's mappings, and frees it once the last process
-  mapping it has ended. Freeing one still mapped would be a runtime error,
-  `frame still mapped`.
+- Its heap and stack frames, and its image's data, are its alone, so they
+  are freed at once.
+- A shared or DMA frame may be mapped by other processes too, and so may
+  a frame of its image's code or rodata, so the kernel counts each such
+  frame's mappings, and frees it once the last process mapping it has
+  ended. Freeing one still mapped would be a runtime error, `frame still
+  mapped`.
 - A driver's DMA and shared frames are never freed: its device may still
   hold their addresses, as the device keeps going after its driver ends.
 
@@ -1562,7 +1577,7 @@ otherwise as its type's first failure.
 | 270 | `proc_kill pid` | `Kill`: `Killed`, `KillNoProc`, `KillDenied` | 0, ending pid with status 130, any process but the caller; -6 if pid's program has a `dev` line, -1 if there is no such process or it is the caller. Ending pid 1 stops the system with status 130 |
 | 271 | `proc_watch pid port` | `Watch`: `Watched`, `WatchNoProc`, `WatchFull` | 0, and the kernel sends `exit_notice pid status` to the caller's port when pid exits, or at once if it has. -1 if there is no such pid, or the port is not the caller's; -3 if 32 ports watch pid already. `exit_of` reads the notice |
 | 272 | `spawn_entry_with e args` | `Spawn` | as `spawn_entry`, but the process gets args (sent as `encode_args` writes them) in place of the inittab's; -5 if they are not well formed, -4 over 4096 bytes |
-| 273 | `proc_info pid`, `proc_path pid` | `(Option ProcInfo)`, `(list int)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, -1 for one started from an image, a detail (the port or pid it waits on, or an exited process's status), and its pages of memory: its own (image, heap and stack, as far as it has touched them) and those at its device pages (shared and DMA memory, which other processes may map too); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). After the record's 24 bytes, as many as there is room for, the program's path, its entry's or its image's, which `proc_path` reads. To list every process, ask `proc_slot` for each slot's pid |
+| 273 | `proc_info pid`, `proc_path pid` | `(Option ProcInfo)`, `(list int)` | a `ProcInfo`: state (`state_running` … `state_exited`), parent, the program's entry, -1 for one started from an image, a detail (the port or pid it waits on, or an exited process's status), and its pages of memory: its own (its image's data, heap and stack, as far as it has touched them) and those it may share (its image's code and rodata, and at its device pages shared and DMA memory, which other processes may map too); none if no process has that pid now: none has had it, or its slot has gone to another process (see [Processes and pids](#processes-and-pids)). After the record's 24 bytes, as many as there is room for, the program's path, its entry's or its image's, which `proc_path` reads. To list every process, ask `proc_slot` for each slot's pid |
 | 274 | `dma_alloc n` | `DmaAlloc`: `DmaPages`, `DmaDenied`, `DmaTooMany`, `DmaNoRoom` | the address of n zeroed pages a device can reach, at the caller's next device pages; -6 no `dev` line, -4 n below 1 or over 16384 (64 MB, a 4K screen's buffer), -5 out of frames or device pages. They last until the system stops |
 | 275 | `dma_address va` | `DmaWhere`: `DmaAddress`, `DmaAddressDenied`, `NotDma` | where a device reaches the caller's DMA page holding va, page aligned; -1 if no DMA page holds va, -6 no `dev` line |
 | 276 | `tty_set port` | `TtyChange`: `TtySet`, `TtyNoPort` | 0, making port, a terminal, the caller's standard input, output and error, and those of every process it starts from then on; 0 gives back the kernel's own; -1 if there is no such port |
@@ -1577,7 +1592,7 @@ otherwise as its type's first failure.
 | 285 | `boot_args` | `(list (list int))` | the board's boot arguments, QEMU's `-append`, split at spaces; none under another operating system |
 | 286 | `root_switch label` | `Switch`: `Switched`, `SwitchDenied`, `SwitchDone`, `SwitchNoVolume`, `SwitchBadLabel` | 0, the volume mounted as label made `/`, the system volume, for good, and the initramfs's bytes given up (see [Booting from a volume](#booting-from-a-volume)); -6 if the caller's program is not the initramfs's, -2 if `/` is a volume already, -1 if no such volume is mounted, -5 no label |
 | 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, or not an ELF the kernel starts, -4 the whole over 64 MB of image with the path and arguments, -5 bytes not laid out as `spawn_image_bytes` lays them |
-| 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, those given and those L0's `frame_free_count` says are left, about 765 MB with `-m 2G`, and how many of them are given, each process's own and every shared or DMA page once, however many processes map it; none under another operating system. What is not given is free; the kernel's page tables take from it, so the total moves a little |
+| 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, those given and those L0's `frame_free_count` says are left, about 765 MB with `-m 2G`, and how many of them are given, each process's own and every shared, DMA or shared code and rodata page once, however many processes map it; none under another operating system. What is not given is free; the kernel's page tables take from it, so the total moves a little |
 | 289 | `fs_unmount label port` | `Unmounting`: `Unmounted`, `UnmountNotMounted`, `UnmountDenied`, `UnmountBadLabel` | 0, the volume label, which the caller mounted from port, unmounted: `/Volumes/LABEL` is in no volume from then on, and the label free; -1 if the port is not the caller's or mounted no such volume, -6 for the system volume, which is `/` for good, -5 no label |
 | 290 | `chdir path` | `Chdir`: `ChdirDone`, `ChdirNoDir`, `ChdirNotDir`, `ChdirBad` | 0, the directory at path, from the current directory, made the caller's current one, and its children's, as spawn gives them; -3 if there is none, -9 if it is a file, -5 for a path over 1024 bytes or not the caller's to give, or one in a volume whose server has gone. The initramfs's, `/Volumes` and `/` the kernel answers itself; a path in a volume is checked with its server's `stat`, the caller waiting as for any file call |
 | 291 | `getcwd`, `path_abs path` | `(list int)` | the current directory, an absolute path with no final `/`, `/` at the start; `path_abs` is a path made absolute from it, unless it starts with `/` already |
@@ -1694,7 +1709,7 @@ name in a library is taken in every program that links it.
 |---|---|
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
-| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 Each case of `tests/e2e/` is a directory:
@@ -2128,8 +2143,12 @@ a bad buffer, and wait on nothing.
   `...`, so an entry is made as wide as what it will hold, and there is no
   selecting, copying or pasting.
 - Images are copied from the archive, or a volume's file, into fresh
-  frames for every process that runs them. Only pages made with `shm_alloc` or `dma_alloc` can be
-  shared, and a share cannot be taken back from a driver.
+  frames for every process that runs them, before its code and rodata
+  are found to be another's and those frames freed again, so starting a
+  program costs a copy and a compare whether or not it shares. Its data
+  is never shared, nor a segment over 8 MB. Besides these, only pages
+  made with `shm_alloc` or `dma_alloc` can be shared, and a share cannot
+  be taken back from a driver.
 - A terminal is shared by every process on it: their output interleaves,
   and lines typed go to whoever asks first. A process with no terminal,
   one the inittab starts, writes to the kernel's own stdout, and its
@@ -2161,9 +2180,7 @@ a bad buffer, and wait on nothing.
   each one as it comes.
 - Only ELF images run: a raw one, as toolchains before L0's roadmap item
   0093 wrote them, is refused, so programs built by one must be built
-  again. An image's pages are copied for each process, and none is shared
-  between processes running the same program, its code and rodata
-  included.
+  again.
 - Nothing cleans the data cache or invalidates the instruction cache
   after an image is loaded: neither the kernel nor L0 has a way to.
   QEMU keeps the two coherent, so this is fine there, but a board that

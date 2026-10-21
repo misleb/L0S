@@ -49,10 +49,12 @@
 
 ; ------------------------------------------------------------- the fields
 
-; k's ports, its sleepers, and how many interrupts are bound.
+; k's ports, its sleepers, how many interrupts are bound, and its count
+; of frames shared.
 (def k_ipc ((k Kernel)) Ipc (match k ((Kernel slots ready ipc ss irqs boot next mem) ipc)))
 (def k_sleepers ((k Kernel)) (list Sleeper) (match k ((Kernel slots ready ipc ss irqs boot next mem) ss)))
 (def k_irq_count ((k Kernel)) int (match k ((Kernel slots ready ipc ss irqs boot next mem) (map_size irqs))))
+(def k_mem ((k Kernel)) Mem (match k ((Kernel slots ready ipc ss irqs boot next mem) mem)))
 
 ; Entry i of the initramfs, which must be one (is_entry).
 (def k_entry ((k Kernel) (i int)) Entry
@@ -410,9 +412,11 @@
       (let pid (pid_next_in pids s)
         (match (proc_create pid parent m args tty input start end img)
           ((CreateFailed) (Spawned (Kernel slots ready ipc ss irqs boot pids mem) (err_fault)))
-          ((Created p)
-            (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) mem)
-                     pid)))))))
+          ((Created p0)
+            (match (proc_share_image mem p0 img)
+              ((Allocated m2 p)
+                (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) m2)
+                         pid)))))))))
 
 ; The pid each slot holds, or last held.
 (def k_pids ((k Kernel)) Pids (match k ((Kernel slots ready ipc ss irqs boot pids mem) pids)))
@@ -1396,7 +1400,7 @@
   (if (not (is_pid pid))
       (resume_with k p (err_no_port))
       (if (eq pid (proc_pid p))
-          (give_cut k p (append (proc_info_record p true) (k_proc_path k p)) buf max)
+          (give_cut k p (append (proc_info_record p (k_mem k) true) (k_proc_path k p)) buf max)
           (match (record_of k pid)
             ((None) (resume_with k p (err_no_port)))
             ((Some r) (give_cut k p r buf max))))))
@@ -1411,16 +1415,17 @@
         ((Kernel slots ready ipc ss irqs boot next mem)
           (match (array_get slots (slot_of pid))
             ((Free) ((None (list int))))
-            ((Live q) (Some (append (proc_info_record q false) (k_proc_path k q))))
+            ((Live q) (Some (append (proc_info_record q mem false) (k_proc_path k q))))
             ((Dead g) (Some (proc_record (state_exited) 0 -1 (gone_status g) 0 0))))))))
 
 ; The frames processes have been given: each live process's own pages,
 ; p's among them, as it is out of the table while it runs, and every
-; shared or DMA frame once. An exited process's were freed as it ended.
+; shared, DMA or shared image frame once. An exited process's were freed
+; as it ended.
 (def k_used_frames ((k Kernel) (p Proc)) int
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem)
-      (used_from slots 0 (add (mem_shared_frames mem) (own_pages p))))))
+      (used_from slots mem 0 (add (mem_shared_frames mem) (own_pages p mem))))))
 
 ; The mem_record mem_info gives p: the pages processes can have, those
 ; given and those the host has left (spec 6.13's frame_free_count), and
@@ -1432,18 +1437,18 @@
     (mem_record (add used (max 0 (frame_free_count))) used)))
 
 ; n and the own pages of every live process from slot i on.
-(def used_from ((slots (array Slot)) (i int) (n int)) int
+(def used_from ((slots (array Slot)) (mem Mem) (i int) (n int)) int
   (if (ge i (array_len slots))
       n
-      (used_from slots (add i 1)
+      (used_from slots mem (add i 1)
         (match (array_get slots i)
-          ((Live q) (add n (own_pages q)))
+          ((Live q) (add n (own_pages q mem)))
           ((Free) n)
           ((Dead g) n)))))
 
-; The pages p has of its own, which it alone maps.
-(def own_pages ((p Proc)) int
-  (match (proc_page_counts p) ((PageCounts own shared) own)))
+; The pages p has of its own, which it alone maps, by what mem counts.
+(def own_pages ((p Proc) (mem Mem)) int
+  (match (proc_page_counts p mem) ((PageCounts own shared) own)))
 
 ; A record r copied to buf, as much of it as max holds past its first
 ; proc_record_len bytes, which must fit.
