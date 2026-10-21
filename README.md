@@ -586,7 +586,7 @@ Input:
   button is released. The screen is rebuilt for it once 20 ms have
   passed since the last rebuild ended, timed from its end and not its
   start: a rebuild can take longer than the pointer takes to move
-  (about 15 ms with two windows), so the moves that come in while one runs
+  (about 9 ms with two windows), so the moves that come in while one runs
   only move the window, and the next rebuild shows the latest.
 - **The pointer in a window's content** goes to its client as Wayland's
   does: every move and button change as a `PointerEvent` relative to the
@@ -2061,9 +2061,12 @@ a bad buffer, and wait on nothing.
   one button that does anything, the left.
 - The display driver attaches a whole new backing, a run list of some
   thousands of entries, for every raise, move or scroll, though it builds
-  again only the rows that changed. A rebuild takes about 15 ms with two
-  windows on QEMU, so a drag shows a few dozen positions a second, not
-  every one.
+  again only the rows that changed, and finds who shows along them once
+  for each run of rows alike. A drag's restack takes about 9 ms with two
+  windows on QEMU, about 5 of them building the rows that changed, 3
+  joining the run list and attaching it (virtio-gpu's 2D mode has one
+  backing for the screen, and replaces it whole), and 1 showing the
+  damage, so a drag shows a few dozen positions a second, not every one.
 - Interrupts the kernel enables stay enabled (L0 cannot disable one). If a
   driver exits while its device keeps the interrupt raised, the kernel ends
   each one as it comes.

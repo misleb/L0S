@@ -230,17 +230,72 @@
 
 ; Screen row y, w wide, from layers over bufs.
 (def row_of ((w int) (y int) (layers (list Layer)) (bufs (Map int Buffer)) (zero int)) Row
-  (let segs (row_segs w y layers bufs (cons (Bare 0 w) (nil Seg)))
-    (Row segs (rev (seg_runs y segs bufs zero (nil VirtqRun))))))
+  (row_with y (row_segs w y layers bufs (cons (Bare 0 w) (nil Seg))) bufs zero))
+
+; Screen row y, who shows along it being segs.
+(def row_with ((y int) (segs (list Seg)) (bufs (Map int Buffer)) (zero int)) Row
+  (Row segs (rev (seg_runs y segs bufs zero (nil VirtqRun)))))
+
+; Rows that show the same layers in the same columns, which differ only
+; in which of a buffer's rows they read: the segments of the first, and
+; the row they hold up to. Finding who shows along a row costs more than
+; the rest of building it, and a window's rows are nearly all alike.
+(data Stripe (Stripe (list Seg) int))
+
+; The stripe that holds no row, so that the first asked of is found.
+(def no_stripe () Stripe (Stripe (nil Seg) 0))
+
+; Who shows along every row of s.
+(def stripe_segs ((s Stripe)) (list Seg) (match s ((Stripe segs until) segs)))
+
+; s, if it holds row y; else the stripe from y, on a screen w by h, from
+; layers over bufs.
+(def stripe_at ((s Stripe) (w int) (h int) (y int) (layers (list Layer)) (bufs (Map int Buffer))) Stripe
+  (match s
+    ((Stripe segs until)
+      (if (lt y until)
+          s
+          (Stripe (row_segs w y layers bufs (cons (Bare 0 w) (nil Seg))) (stripe_until y h layers bufs))))))
+
+; The first row after y, or end if none is sooner, where the segments may
+; not be row y's: a layer's edge, or a row its corners cut, or the foot
+; of its rows they will.
+(def stripe_until ((y int) (end int) (layers (list Layer)) (bufs (Map int Buffer))) int
+  (if (is_empty layers)
+      end
+      (match (head layers)
+        ((Layer id lx ly top)
+          (stripe_until y
+            (match (map_get bufs id)
+              ((None) end)
+              ((Some b) (match b ((Buffer bw bh addrs va cs) (layer_edge y end ly bh cs)))))
+            (tail layers) bufs)))))
+
+; Where, after row y and before end, the rows of the layer at row ly of bh
+; rows, its corners cs, may show other columns than row y: its first row, if
+; it is to come, the first row its bottom corners cut, and the next row
+; for as long as a corner cuts.
+(def layer_edge ((y int) (end int) (ly int) (bh int) (cs Corners)) int
+  (if (lt y ly)
+      (min end ly)
+      (if (ge y (add ly bh))
+          end
+          (match cs
+            ((Corners tl tr bl br)
+              (let foot (sub (add ly bh) (max bl br))
+                (if (lt (sub y ly) (max tl tr))
+                    (add y 1)
+                    (if (lt y foot) (min end foot) (add y 1)))))))))
 
 ; Every row of a screen w by h, from layers over bufs.
 (def screen_rows ((w int) (h int) (layers (list Layer)) (bufs (Map int Buffer)) (zero int)) (array Row)
-  (build_rows w 0 layers bufs zero (array_new h (Row (nil Seg) (nil VirtqRun)))))
+  (build_rows w 0 layers bufs zero (no_stripe) (array_new h (Row (nil Seg) (nil VirtqRun)))))
 
-(def build_rows ((w int) (y int) (layers (list Layer)) (bufs (Map int Buffer)) (zero int) (rows (array Row))) (array Row)
+(def build_rows ((w int) (y int) (layers (list Layer)) (bufs (Map int Buffer)) (zero int) (s Stripe) (rows (array Row))) (array Row)
   (if (ge y (array_len rows))
       rows
-      (build_rows w (add y 1) layers bufs zero (array_set rows y (row_of w y layers bufs zero)))))
+      (let s2 (stripe_at s w (array_len rows) y layers bufs)
+        (build_rows w (add y 1) layers bufs zero s2 (array_set rows y (row_with y (stripe_segs s2) bufs zero))))))
 
 ; The rows' runs, one after another, a run that starts where the one
 ; before it ends, as the end of one row and the start of the next often
@@ -301,22 +356,25 @@
 (def rows_restacked ((r Restack) (zero int) (rows (array Row))) Restacked
   (match r
     ((Restack w h ols obufs nls nbufs ids)
-      (update_rows r (dirty_rows h ols obufs nls nbufs) zero rows 0 (rect_none) (nil Rect)))))
+      (update_rows r (dirty_rows h ols obufs nls nbufs) zero rows 0 (no_stripe) (rect_none) (nil Rect)))))
 
-(def update_rows ((r Restack) (dirty (array bool)) (zero int) (rows (array Row)) (y int) (band Rect) (acc (list Rect))) Restacked
+; rows from row y on, s the stripe of the row before, built again where
+; dirty says.
+(def update_rows ((r Restack) (dirty (array bool)) (zero int) (rows (array Row)) (y int) (s Stripe) (band Rect) (acc (list Rect))) Restacked
   (match r
     ((Restack w h ols obufs nls nbufs ids)
       (if (ge y h)
           (Restacked rows (rev (band_onto band acc)))
           (if (not (array_get dirty y))
-              (update_rows r dirty zero rows (add y 1) (rect_none) (band_onto band acc))
-              (let old (row_segs_of (array_get rows y))
-                (let new (row_of w y nls nbufs zero)
-                  (let change (row_change old (row_segs_of new) ids)
-                    (let rows2 (array_set rows y new)
-                      (match change
-                        ((NoSpan) (update_rows r dirty zero rows2 (add y 1) (rect_none) (band_onto band acc)))
-                        ((Span x0 x1) (update_rows r dirty zero rows2 (add y 1) (rect_union band (Rect x0 y (sub x1 x0) 1)) acc))))))))))))
+              (update_rows r dirty zero rows (add y 1) s (rect_none) (band_onto band acc))
+              (let s2 (stripe_at s w h y nls nbufs)
+                (let old (row_segs_of (array_get rows y))
+                  (let new (row_with y (stripe_segs s2) nbufs zero)
+                    (let change (row_change old (row_segs_of new) ids)
+                      (let rows2 (array_set rows y new)
+                        (match change
+                          ((NoSpan) (update_rows r dirty zero rows2 (add y 1) s2 (rect_none) (band_onto band acc)))
+                          ((Span x0 x1) (update_rows r dirty zero rows2 (add y 1) s2 (rect_union band (Rect x0 y (sub x1 x0) 1)) acc)))))))))))))
 
 ; Which of h rows a restack from layers ols over obufs to nls over nbufs
 ; can change: every row, if the layers are not the same buffers in the

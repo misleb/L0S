@@ -233,8 +233,10 @@ runs that the driver builds from the layers, so no guest code copies pixels.
 - **A restack** (`layers`) rebuilds the backing. The driver keeps every
   screen row and rebuilds only the rows of layers that moved, scrolled or
   changed buffer (`rows_restacked`, `dirty_rows`); a change of layer order
-  rebuilds them all. With two windows a drag's restack takes about 15 ms on
-  QEMU. More layers make every restack dearer: think twice before adding one
+  rebuilds them all; rows alike (`Stripe`) share who shows along them. With
+  two windows a drag's restack takes about 9 ms on QEMU: 5 building the
+  changed rows, 3 on the run list and the attach (one backing, replaced
+  whole), 1 showing. More layers make every restack dearer: think twice before adding one
   per window.
 - **Scrolling** is a ring: a client changes its window's `top` row instead of
   copying (`vt` does).
