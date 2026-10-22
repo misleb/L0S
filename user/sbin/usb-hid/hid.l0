@@ -1,0 +1,152 @@
+; hid.l0 -- HID's boot protocol (HID 1.11, appendix B), purely: a
+; keyboard's 8-byte report, the modifiers as bits and up to six keys
+; held, each a usage of the Keyboard page, compared with the last one to
+; find what was pressed and released, as Linux's key codes, which
+; keymap.l0 types; the repeat of a key held, which a USB keyboard leaves
+; to the host; and a mouse's report, its buttons, its movement and its
+; wheel's turn.
+
+; ------------------------------------------------------------- key codes
+
+; Linux's key code of each usage of the Keyboard page from 0 to 0x67,
+; as its usbkbd driver has them; 0 for none.
+(def usage_codes () (array int)
+  (array_from (concat (cons (byte_row "0 0 0 0 30 48 46 32 18 33 34 35 23 36 37 38")
+                      (cons (byte_row "50 49 24 25 16 19 31 20 22 47 17 45 21 44 2 3")
+                      (cons (byte_row "4 5 6 7 8 9 10 11 28 1 14 15 57 12 13 26")
+                      (cons (byte_row "27 43 43 39 40 41 51 52 53 58 59 60 61 62 63 64")
+                      (cons (byte_row "65 66 67 68 87 88 99 70 119 110 102 104 111 107 109 106")
+                      (cons (byte_row "105 108 103 69 98 55 74 78 96 79 80 81 75 76 77 71")
+                      (cons (byte_row "72 73 82 83 86 127 116 117") (nil (list int)))))))))) 0))
+
+; The numbers of a row of the table.
+(def byte_row ((s (list int))) (list int)
+  (match (word_numbers (split_spaces s)) ((Some ns) ns) ((None) (nil int))))
+
+; The key codes of the modifier byte's bits, from bit 0: left control,
+; shift, alt, meta, then the right ones, usages 0xE0 to 0xE7.
+(def modifier_codes () (list int) (byte_row "29 42 56 125 97 54 100 126"))
+
+; Linux's key code of usage u, 0 for one it has none for.
+(def usage_code ((u int)) int
+  (if (if (ge u 0) (lt u (array_len (usage_codes))) false)
+      (array_get (usage_codes) u)
+      (if (if (ge u 224) (lt u 232) false) (nth (modifier_codes) (sub u 224)) 0)))
+
+; -------------------------------------------------------------- keyboard
+
+; A key pressed, 1, or released, 0, as its Linux code.
+(data KeyChange (KeyChange int int))
+
+; What a keyboard holds, as its reports say: the modifier byte, and the
+; keys' usages, in the order they were pressed.
+(data Held (Held int (list int)))
+
+; Nothing held, as before a keyboard's first report.
+(def held_none () Held (Held 0 (nil int)))
+
+; The usage that says too many keys are held to tell which: a report of
+; it in every key's place says nothing of what is held.
+(def usage_rollover () int 1)
+
+; What a report says is held, or none if it says nothing: one shorter
+; than 3 bytes, or a rollover error.
+(def held_of ((report (list int))) (Option Held)
+  (if (lt (length report) 3)
+      ((None Held))
+      (let keys (keys_held (take (drop report 2) 6) (nil int))
+        (if (any_eq (usage_rollover) keys)
+            ((None Held))
+            (Some (Held (head report) keys))))))
+
+; The usages of ks that are keys, not 0, after the reversed acc.
+(def keys_held ((ks (list int)) (acc (list int))) (list int)
+  (if (is_empty ks) (rev acc) (keys_held (tail ks) (if (eq (head ks) 0) acc (cons (head ks) acc)))))
+
+; What changed from was to now, in the order it is told: the keys let go,
+; then the modifiers pressed or let go, so a key pressed with shift is
+; shifted and one pressed as shift is let go is not, then the keys
+; pressed.
+(def changes ((was Held) (now Held)) (list KeyChange)
+  (match was
+    ((Held wm wk)
+      (match now
+        ((Held nm nk)
+          (append (keys_changed wk nk 0 (nil KeyChange))
+                  (append (modifiers_changed wm nm 0 (nil KeyChange))
+                          (keys_changed nk wk 1 (nil KeyChange)))))))))
+
+; The keys of xs not among ys, each as a change to value, after the
+; reversed acc.
+(def keys_changed ((xs (list int)) (ys (list int)) (value int) (acc (list KeyChange))) (list KeyChange)
+  (if (is_empty xs)
+      (rev acc)
+      (keys_changed (tail xs) ys value
+        (if (if (any_eq (head xs) ys) true (eq (usage_code (head xs)) 0))
+            acc
+            (cons (KeyChange (usage_code (head xs)) value) acc)))))
+
+; The modifiers that changed from bits was to now, from bit i.
+(def modifiers_changed ((was int) (now int) (i int) (acc (list KeyChange))) (list KeyChange)
+  (if (eq i 8)
+      (rev acc)
+      (let a (bit_and (bit_shr was i) 1)
+        (let b (bit_and (bit_shr now i) 1)
+          (modifiers_changed was now (add i 1)
+            (if (eq a b) acc (cons (KeyChange (nth (modifier_codes) i) b) acc)))))))
+
+; ---------------------------------------------------------------- repeat
+
+; A key held long enough repeats, as a terminal expects: 500 ms after it
+; is pressed, then every 33 ms, about 30 a second.
+(def repeat_delay_ns () int 500000000)
+(def repeat_every_ns () int 33000000)
+
+; The key repeating, the last pressed that is still held and is no
+; modifier, and when it next repeats; or none.
+(data Repeat (Repeating int int) (NoRepeat))
+
+; The repeat after changes cs at time now: a key pressed starts its own;
+; the key repeating let go stops it; anything else leaves it.
+(def repeat_after ((r Repeat) (cs (list KeyChange)) (now int)) Repeat
+  (if (is_empty cs)
+      r
+      (match (head cs)
+        ((KeyChange code value)
+          (repeat_after
+            (if (any_eq code (modifier_codes))
+                r
+                (if (eq value 1)
+                    (Repeating code (add now (repeat_delay_ns)))
+                    (match r
+                      ((Repeating rc at) (if (eq rc code) (NoRepeat) r))
+                      ((NoRepeat) r))))
+            (tail cs) now)))))
+
+; Whether r is due at now.
+(def repeat_due ((r Repeat) (now int)) bool
+  (match r ((Repeating code at) (ge now at)) ((NoRepeat) false)))
+
+; r once it has repeated at now.
+(def repeated ((r Repeat) (now int)) Repeat
+  (match r ((Repeating code at) (Repeating code (add now (repeat_every_ns)))) ((NoRepeat) r)))
+
+; How long until r is due from now, or -1 if never.
+(def repeat_wait ((r Repeat) (now int)) int
+  (match r ((Repeating code at) (max 0 (sub at now))) ((NoRepeat) -1)))
+
+; ----------------------------------------------------------------- mouse
+
+; A byte as a signed number, as a boot mouse moves.
+(def s8 ((b int)) int (if (ge b 128) (sub b 256) b))
+
+; The motion a boot mouse's report says: its buttons, byte 0, as a
+; PointerEvent's (1 left, 2 right, 4 middle); how far it moved, bytes 1
+; and 2, right and down; and the wheel's turn, byte 3 if there is one,
+; positive away from you, which scrolls up, so a WheelEvent's down is
+; its negation. None for a report shorter than 3 bytes.
+(def motion_of ((report (list int))) (Option PointerMotion)
+  (if (lt (length report) 3)
+      ((None PointerMotion))
+      (Some (PointerMotion (s8 (nth report 1)) (s8 (nth report 2)) (bit_and (head report) 7)
+                           0 (neg (s8 (nth_or report 3 0)))))))

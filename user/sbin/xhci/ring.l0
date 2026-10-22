@@ -1,0 +1,91 @@
+; ring.l0 -- xHCI's rings in DMA pages (xHCI 1.2, section 4.9): a
+; producer ring, which the driver fills and the controller consumes, as
+; the command ring and each endpoint's transfer ring are; and the event
+; ring, which the controller fills and the driver consumes. Purely: what
+; to write where, and where the next event is, as offsets in a page; the
+; shell does the writing and reading.
+;
+; A producer ring is one page. A TD is never split by the Link TRB that
+; takes the controller back to the start: one that would not fit before
+; the ring's end has a Link TRB written where it would have begun, so the
+; ring's last slots may go unused for a pass. Each pass writes its own
+; Link TRB, so one left from an earlier pass is never reached.
+
+; A u32 to write into a page: its offset there, and the value.
+(data W32 (W32 int int))
+
+; A producer ring: the DMA page it is in, by the driver's number for it,
+; and that page's address as the device reaches it; how many TRBs a pass
+; may hold, which leaves room for a Link TRB after them; the next to
+; write, from 0; and the cycle bit of this pass, 1 on the first.
+(data Ring (Ring int int int int int))
+
+; A new ring in page, at bus address addr, of slots TRBs a pass.
+(def ring_new ((page int) (addr int) (slots int)) Ring (Ring page addr slots 0 1))
+
+; Its page, the page's bus address, and the cycle bit of this pass.
+(def ring_page ((r Ring)) int (match r ((Ring page addr slots i c) page)))
+(def ring_addr ((r Ring)) int (match r ((Ring page addr slots i c) addr)))
+(def ring_cycle ((r Ring)) int (match r ((Ring page addr slots i c) c)))
+
+; The bus address of the next TRB to write, where a Set TR Dequeue
+; Pointer sends the controller to go on from.
+(def ring_next_addr ((r Ring)) int (match r ((Ring page addr slots i c) (add addr (mul 16 i)))))
+
+; What queueing a TD came to: the ring after it, the u32s to write into
+; its page, in the order they must be written, and the bus address of
+; each of the TD's TRBs, in order.
+(data Queued (Queued Ring (list W32) (list int)))
+
+; The TD trbs queued on r. Its first TRB's control word is written last,
+; once everything after it is there, so a controller running the ring
+; never takes part of a TD. A TD is at most 3 TRBs, a control transfer's,
+; and a pass must hold twice as many, so the Link TRB, written where the
+; TD would have begun, is past the TD that takes the ring's start.
+(def ring_queue ((r Ring) (trbs (list Trb))) Queued
+  (match r
+    ((Ring page addr slots i c)
+      (if (if (gt i 0) (gt (add i (length trbs)) slots) false)
+          (match (ring_queue (Ring page addr slots 0 (bit_xor c 1)) trbs)
+            ((Queued r2 ws addrs) (Queued r2 (append ws (trb_put (mul 16 i) (link_trb addr false) c)) addrs)))
+          (ring_written (Ring page addr slots i c) trbs (nil W32) (nil int) (nil W32))))))
+
+; r with trbs written from its next slot, after the reversed ws and
+; addrs; first holds the first TRB's control word, written last.
+(def ring_written ((r Ring) (trbs (list Trb)) (ws (list W32)) (addrs (list int)) (first (list W32))) Queued
+  (match r
+    ((Ring page addr slots i c)
+      (if (is_empty trbs)
+          (Queued r (append (rev ws) first) (rev addrs))
+          (let put (trb_put (mul 16 i) (head trbs) c)
+            (let next (Ring page addr slots (add i 1) c)
+              (if (is_empty first)
+                  (ring_written next (tail trbs) (rev_onto (take put 3) ws) (cons (add addr (mul 16 i)) addrs) (drop put 3))
+                  (ring_written next (tail trbs) (rev_onto put ws) (cons (add addr (mul 16 i)) addrs) first))))))))
+
+; The four u32s of t at offset off of its page, its cycle bit c.
+(def trb_put ((off int) (t Trb) (c int)) (list W32)
+  (let ws (trb_words (trb_with_cycle t c))
+    (cons (W32 off (nth ws 0)) (cons (W32 (add off 4) (nth ws 1)) (cons (W32 (add off 8) (nth ws 2)) (cons (W32 (add off 12) (nth ws 3)) (nil W32)))))))
+
+; ------------------------------------------------------------- the events
+
+; The event ring, one segment of a page: the next TRB to read, from 0,
+; and the cycle bit the controller writes on this pass, 1 on the first.
+(data Events (Events int int))
+
+; TRBs in the event ring's segment.
+(def events_size () int 256)
+
+; The event ring before the controller has written to it.
+(def events_new () Events (Events 0 1))
+
+; Where the next event is in the segment's page, and the cycle bit it
+; has once the controller has written it.
+(def events_offset ((e Events)) int (match e ((Events i c) (mul 16 i))))
+(def events_cycle ((e Events)) int (match e ((Events i c) c)))
+
+; e once the next event has been read.
+(def events_next ((e Events)) Events
+  (match e
+    ((Events i c) (if (eq (add i 1) (events_size)) (Events 0 (bit_xor c 1)) (Events (add i 1) c)))))

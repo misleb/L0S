@@ -1,0 +1,218 @@
+; bus.l0 -- the usb protocol's server side, purely: the driver's
+; controllers, each a core.l0 state machine, numbered from 0, with one
+; count of devices among them all, so a device's number is never given
+; twice; and the claims of interfaces. A request (proto/usb.l0's table)
+; is answered here, or routed to the controller of the device it names;
+; and when a client's port is gone, its claims and the endpoints it
+; opened go with it.
+
+; An interface claimed: the device, the interface's number, and the port
+; holding it.
+(data Claim (Claim int int int))
+
+; The controllers, the number the next device will have, the claims.
+(data Bus (Bus (list Hc) int (list Claim)))
+
+; The acts for controller k, or for none, -1, as answers and notices.
+(data HcActs (HcActs int (list Act)))
+
+; The bus after a step, and the acts it came to.
+(data BusDid (BusDid Bus (list HcActs)))
+
+; A bus with no controllers yet, its first device numbered 1.
+(def bus_new () Bus (Bus (nil Hc) 1 (nil Claim)))
+
+; Its controllers, its next device's number, its claims.
+(def bus_hcs ((b Bus)) (list Hc) (match b ((Bus hs next cs) hs)))
+(def bus_next ((b Bus)) int (match b ((Bus hs next cs) next)))
+(def bus_claims ((b Bus)) (list Claim) (match b ((Bus hs next cs) cs)))
+
+; b with h, its controller numbered as many as b has, added.
+(def bus_added ((b Bus) (h Hc)) Bus (match b ((Bus hs next cs) (Bus (append hs (cons h (nil Hc))) next cs))))
+
+; Controller k of b; and b with it replaced by h.
+(def bus_hc ((b Bus) (k int)) Hc (nth (bus_hcs b) k))
+(def bus_with_hc ((b Bus) (k int) (h Hc)) Bus
+  (match b ((Bus hs next cs) (Bus (replaced_at hs k h) (hc_next h) cs))))
+
+; xs with element k, from 0, x instead.
+(def (replaced_at T) ((xs (list T)) (k int) (x T)) (list T)
+  (if (is_empty xs) xs (if (eq k 0) (cons x (tail xs)) (cons (head xs) (replaced_at (tail xs) (sub k 1) x)))))
+
+; Controller k, its count of devices the bus's, before a step of it.
+(def bus_hc_now ((b Bus) (k int)) Hc (hc_with_next (bus_hc b k) (bus_next b)))
+
+; What a step d of controller k came to on b.
+(def bus_did ((b Bus) (k int) (d Did)) BusDid
+  (match d ((Did h acts) (BusDid (bus_with_hc b k h) (cons (HcActs k acts) (nil HcActs))))))
+
+; b unchanged, and acts for no controller.
+(def bus_told ((b Bus) (acts (list Act))) BusDid (BusDid b (cons (HcActs -1 acts) (nil HcActs))))
+
+; b unchanged, and a as the answer to reply.
+(def bus_answer ((b Bus) (reply int) (a (list int))) BusDid (bus_told b (cons (ActAnswer reply a) (nil Act))))
+
+; ----------------------------------------------------------------- events
+
+; A port of controller k, its PORTSC v.
+(def bus_port ((b Bus) (k int) (p int) (v int)) BusDid
+  (bus_did b k (hc_port (bus_hc_now b k) p v)))
+
+; An event of controller k, and what was read for it.
+(def bus_event ((b Bus) (k int) (t Trb) (got Got)) BusDid
+  (bus_did b k (hc_event (bus_hc_now b k) t got)))
+
+; b with controller k's next event read.
+(def bus_event_read ((b Bus) (k int)) Bus (bus_with_hc b k (hc_event_read (bus_hc_now b k))))
+
+; Port o gone: its claims let go, and every endpoint it opened closed.
+(def bus_gone ((b Bus) (o int)) BusDid
+  (match b
+    ((Bus hs next cs) (gone_from (Bus hs next (claims_without_port cs o)) 0 o (nil HcActs)))))
+
+; bus_gone's loop: o's endpoints closed on controller k on, after the
+; reversed acc.
+(def gone_from ((b Bus) (k int) (o int) (acc (list HcActs))) BusDid
+  (if (ge k (length (bus_hcs b)))
+      (BusDid b (rev acc))
+      (match (hc_opener_gone (bus_hc_now b k) o)
+        ((Did h acts) (gone_from (bus_with_hc b k h) (add k 1) o (cons (HcActs k acts) acc))))))
+
+; cs without those o holds.
+(def claims_without_port ((cs (list Claim)) (o int)) (list Claim)
+  (if (is_empty cs) cs (match (head cs) ((Claim d i p) (if (eq p o) (claims_without_port (tail cs) o) (cons (head cs) (claims_without_port (tail cs) o)))))))
+
+; ---------------------------------------------------------------- finding
+
+; A device and the controller it is on; or none.
+(data Owner (Owner int Dev) (NoOwner))
+
+; The ready device numbered dev, on whichever controller has it.
+(def bus_owner ((b Bus) (dev int)) Owner (owner_from (bus_hcs b) 0 dev))
+
+; bus_owner's loop: controllers hs, the first numbered k.
+(def owner_from ((hs (list Hc)) (k int) (dev int)) Owner
+  (if (is_empty hs)
+      (NoOwner)
+      (match (hc_device (head hs) dev)
+        ((Some d) (Owner k d))
+        ((None) (owner_from (tail hs) (add k 1) dev)))))
+
+; Every ready device, as clients are told of them, controller by
+; controller.
+(def bus_ready ((b Bus)) (list UsbAttached) (ready_from (bus_hcs b) (nil UsbAttached)))
+
+; bus_ready's loop: each of hs's devices after acc's.
+(def ready_from ((hs (list Hc)) (acc (list UsbAttached))) (list UsbAttached)
+  (if (is_empty hs) acc (ready_from (tail hs) (append acc (hc_ready (head hs))))))
+
+; --------------------------------------------------------------- requests
+
+; The request body, its answer to reply.
+(def bus_request ((b Bus) (reply int) (body (list int))) BusDid
+  (if (eq body "listen")
+      (bus_told b (cons (ActListen reply) (attach_tells (bus_ready b) reply (nil Act))))
+      (if (eq body "devices")
+          (bus_answer b reply (devices_text (bus_ready b) (nil int)))
+          (match (request_numbers body)
+            ((ReqBad why) (bus_answer b reply (error_reply why)))
+            ((ReqNums op ns) (bus_numbers b reply op ns))))))
+
+; A notice of each device, to port, after the reversed acc.
+(def attach_tells ((ds (list UsbAttached)) (port int) (acc (list Act))) (list Act)
+  (if (is_empty ds) (rev acc) (attach_tells (tail ds) port (cons (ActTell port (usb_attach_notice (head ds))) acc))))
+
+; The devices answer: each device's line, after the reversed acc.
+(def devices_text ((ds (list UsbAttached)) (acc (list int))) (list int)
+  (if (is_empty ds) (rev acc) (devices_text (tail ds) (push (usb_device_line (head ds)) acc))))
+
+; A request of numbers: op, then the device, then the rest.
+(def bus_numbers ((b Bus) (reply int) (op (list int)) (ns (list int))) BusDid
+  (if (is_empty ns)
+      (bus_answer b reply (error_reply (append op " needs a device")))
+      (match (bus_owner b (head ns))
+        ((NoOwner) (bus_answer b reply (error_reply "no such device")))
+        ((Owner k d) (bus_of_device b reply op k d (tail ns))))))
+
+; A request op of device d, on controller k, ns the rest of its numbers.
+(def bus_of_device ((b Bus) (reply int) (op (list int)) (k int) (d Dev) (ns (list int))) BusDid
+  (if (eq op "descriptor") (bus_answer b reply (usb_hex (dev_desc d)))
+  (if (eq op "config") (bus_answer b reply (usb_hex (dev_config d)))
+  (if (eq op "claim") (bus_claim b reply d ns)
+  (if (eq op "control") (bus_control b reply k d ns)
+  (if (eq op "open") (bus_open b reply k d ns)
+  (if (eq op "close") (bus_close b reply k d ns)
+  (bus_answer b reply (error_reply (append "no request " op))))))))))
+
+; claim DEV IFACE: the interface reply's, if d has it and no other port
+; holds it.
+(def bus_claim ((b Bus) (reply int) (d Dev) (ns (list int))) BusDid
+  (if (not (eq (length ns) 1))
+      (bus_answer b reply (error_reply "claim DEV IFACE"))
+      (if (not (has_interface d (head ns)))
+          (bus_answer b reply (error_reply "no such interface"))
+          (match (claim_holder (bus_claims b) (dev_num d) (head ns))
+            ((Some p)
+              (if (eq p reply) (bus_answer b reply "ok") (bus_answer b reply (error_reply "taken"))))
+            ((None)
+              (match b
+                ((Bus hs next cs) (bus_answer (Bus hs next (cons (Claim (dev_num d) (head ns) reply) cs)) reply "ok"))))))))
+
+; The port holding interface i of device dev, or none.
+(def claim_holder ((cs (list Claim)) (dev int) (i int)) (Option int)
+  (if (is_empty cs)
+      ((None int))
+      (match (head cs) ((Claim cd ci p) (if (if (eq cd dev) (eq ci i) false) (Some p) (claim_holder (tail cs) dev i))))))
+
+; d's configuration's interfaces.
+(def dev_interfaces ((d Dev)) (list UsbInterface)
+  (match (usb_config_of (dev_config d)) ((Err e) (nil UsbInterface)) ((Ok c) (match c ((UsbConfig v t ifs) ifs)))))
+
+; Whether d has interface i.
+(def has_interface ((d Dev) (i int)) bool
+  (match (usb_interface_at (dev_interfaces d) i) ((Some x) true) ((None) false)))
+
+; The interface of d whose endpoint ep is, or -1.
+(def interface_of_endpoint ((ifs (list UsbInterface)) (ep int)) int
+  (if (is_empty ifs)
+      -1
+      (match (head ifs)
+        ((UsbInterface n alt c s p es)
+          (match (usb_endpoint_among es ep)
+            ((Some e) n)
+            ((None) (interface_of_endpoint (tail ifs) ep)))))))
+
+; control DEV TYPE REQ VALUE INDEX LEN [BYTE...]: routed to d's
+; controller, the BYTEs an OUT one's data, LEN of them.
+(def bus_control ((b Bus) (reply int) (k int) (d Dev) (ns (list int))) BusDid
+  (if (lt (length ns) 5)
+      (bus_answer b reply (error_reply "control DEV TYPE REQ VALUE INDEX LEN [BYTE...]"))
+      (let type (nth ns 0)
+        (let len (nth ns 4)
+          (let out (drop ns 5)
+            (let setup (usb_setup type (nth ns 1) (nth ns 2) (nth ns 3) len)
+              (if (usb_rt_is_in type)
+                  (if (is_empty out)
+                      (bus_did b k (hc_control (bus_hc_now b k) (dev_num d) setup out len reply))
+                      (bus_answer b reply (error_reply "an IN request sends no bytes")))
+                  (if (eq (length out) len)
+                      (bus_did b k (hc_control (bus_hc_now b k) (dev_num d) setup out 0 reply))
+                      (bus_answer b reply (error_reply "LEN bytes, each 0 to 255"))))))))))
+
+; open DEV EP: routed to d's controller, if reply holds the interface
+; whose endpoint EP is.
+(def bus_open ((b Bus) (reply int) (k int) (d Dev) (ns (list int))) BusDid
+  (if (not (eq (length ns) 1))
+      (bus_answer b reply (error_reply "open DEV EP"))
+      (let i (interface_of_endpoint (dev_interfaces d) (head ns))
+        (if (lt i 0)
+            (bus_answer b reply (error_reply "no such endpoint"))
+            (if (eq (claim_holder (bus_claims b) (dev_num d) i) (Some reply))
+                (bus_did b k (hc_open (bus_hc_now b k) (dev_num d) (head ns) reply))
+                (bus_answer b reply (error_reply "its interface is not claimed")))))))
+
+; close DEV EP: routed to d's controller.
+(def bus_close ((b Bus) (reply int) (k int) (d Dev) (ns (list int))) BusDid
+  (if (not (eq (length ns) 1))
+      (bus_answer b reply (error_reply "close DEV EP"))
+      (bus_did b k (hc_close (bus_hc_now b k) (dev_num d) (head ns) reply))))

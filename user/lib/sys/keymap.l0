@@ -1,0 +1,108 @@
+; keymap.l0 -- the US keyboard's layout, over Linux's key codes, for the
+; keyboard drivers (virtio-input, usb-hid), so that each types the same
+; characters: what a key types alone, shifted, with caps lock, and with
+; control, and the modifiers each key event leaves held. A driver keeps
+; the modifiers as an int, starting at 0, passes them through
+; mods_after with each event, and gives event_char the modifiers as they
+; were before the event, for its KeyEvent's character.
+
+; Linux's key codes, as virtio-input gives them and usb-hid maps HID's
+; usages to.
+(def key_esc () int 1)
+(def key_backspace () int 14)
+(def key_tab () int 15)
+(def key_enter () int 28)
+(def key_lshift () int 42)
+(def key_rshift () int 54)
+(def key_lctrl () int 29)
+(def key_rctrl () int 97)
+(def key_space () int 57)
+(def key_capslock () int 58)
+
+; ----------------------------------------------------------------- layout
+
+; The keys of a row of the keyboard, from code first, as typed alone and
+; with shift.
+(data KeyRow (KeyRow int (list int) (list int)))
+
+; The rows with characters: digits, the three of letters, the keypad's
+; star, and space.
+(def key_rows () (list KeyRow)
+  (cons (KeyRow 2 "1234567890-=" "!@#$%^&*()_+")
+  (cons (KeyRow 16 "qwertyuiop[]" "QWERTYUIOP{}")
+  (cons (KeyRow 30 "asdfghjkl;'`" "ASDFGHJKL:\"~")
+  (cons (KeyRow 43 "\\zxcvbnm,./" "|ZXCVBNM<>?")
+  (cons (KeyRow 55 "*" "*")
+  (cons (KeyRow 57 " " " ") (nil KeyRow))))))))
+
+; The character of key code on a row, typed alone or shifted; or 0.
+(def key_row_char ((rs (list KeyRow)) (code int) (shifted bool)) int
+  (if (is_empty rs)
+      0
+      (match (head rs)
+        ((KeyRow first plain shift)
+          (let i (sub code first)
+            (if (if (ge i 0) (lt i (length plain)) false)
+                (nth (if shifted shift plain) i)
+                (key_row_char (tail rs) code shifted)))))))
+
+; Whether c is a letter a to z: the prelude's is_lower takes _ too.
+(def key_is_letter ((c int)) bool (if (ge c 97) (le c 122) false))
+
+; The character key code types with shift held or not and caps lock on or
+; not: caps lock shifts only letters, and shift undoes it. Enter,
+; Backspace, Tab, and Esc type their control characters; any other key
+; without a character, 0.
+(def key_char ((code int) (shift bool) (caps bool)) int
+  (if (eq code (key_enter)) 10
+  (if (eq code (key_backspace)) 8
+  (if (eq code (key_tab)) 9
+  (if (eq code (key_esc)) 27
+  (let plain (key_row_char (key_rows) code false)
+    (if (key_is_letter plain)
+        (key_row_char (key_rows) code (not (eq shift caps)))
+        (key_row_char (key_rows) code shift))))))))
+
+; ------------------------------------------------------------- modifiers
+
+; Which modifiers are on, as bits: left shift, right shift, caps lock,
+; left and right control.
+(def mod_lshift () int 1)
+(def mod_rshift () int 2)
+(def mod_caps () int 4)
+(def mod_lctrl () int 8)
+(def mod_rctrl () int 16)
+
+; Whether bit m is set in mods; mods with bit m set or cleared. Any set of
+; bits will do: virtio-input keeps a tablet's buttons this way too.
+(def mod_has ((mods int) (m int)) bool (not (eq (bit_and mods m) 0)))
+(def mod_with ((mods int) (m int) (on bool)) int
+  (if on (bit_or mods m) (bit_and mods (bit_xor m -1))))
+
+; mods after key code goes to value: 1 pressed, 0 released, 2 repeated.
+; Caps lock turns over when pressed, not when held or released.
+(def mods_after ((mods int) (code int) (value int)) int
+  (if (eq code (key_lshift)) (mod_with mods (mod_lshift) (not (eq value 0)))
+  (if (eq code (key_rshift)) (mod_with mods (mod_rshift) (not (eq value 0)))
+  (if (eq code (key_lctrl)) (mod_with mods (mod_lctrl) (not (eq value 0)))
+  (if (eq code (key_rctrl)) (mod_with mods (mod_rctrl) (not (eq value 0)))
+  (if (if (eq code (key_capslock)) (eq value 1) false)
+      (mod_with mods (mod_caps) (not (mod_has mods (mod_caps))))
+      mods))))))
+
+; Whether either shift is held; whether either control is.
+(def mods_shifted ((mods int)) bool
+  (if (mod_has mods (mod_lshift)) true (mod_has mods (mod_rshift))))
+(def mods_controlled ((mods int)) bool
+  (if (mod_has mods (mod_lctrl)) true (mod_has mods (mod_rctrl))))
+
+; The character a key event types, with mods as they were before it: 0
+; for a release. With control held, a letter types its control
+; character, Ctrl-C 3, Ctrl-D 4, Ctrl-U 21, and any other key nothing.
+(def event_char ((mods int) (code int) (value int)) int
+  (if (eq value 0)
+      0
+      (if (mods_controlled mods)
+          (let plain (key_char code false false)
+            (if (key_is_letter plain) (bit_and plain 31) 0))
+          (key_char code (mods_shifted mods) (mod_has mods (mod_caps))))))

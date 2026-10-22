@@ -1,0 +1,150 @@
+; trb.l0 -- xHCI's Transfer Request Blocks (xHCI 1.2, section 6.4): the
+; 16 bytes every ring is made of, a 64-bit parameter, a status word and
+; a control word, whose bit 0 is the cycle bit that says which pass of
+; the ring a TRB belongs to. The commands this driver gives, the
+; transfers it queues, and the events it reads back, built and taken
+; apart, purely.
+
+; A TRB: its parameter, 64 bits, and its status and control words.
+(data Trb (Trb int int int))
+
+; ------------------------------------------------------------------ types
+
+; TRB types, the control word's bits 10 to 15.
+(def trb_normal () int 1)
+(def trb_setup () int 2)
+(def trb_data () int 3)
+(def trb_status () int 4)
+(def trb_link () int 6)
+(def trb_noop () int 8)
+(def trb_enable_slot () int 9)
+(def trb_disable_slot () int 10)
+(def trb_address_device () int 11)
+(def trb_configure_endpoint () int 12)
+(def trb_evaluate_context () int 13)
+(def trb_reset_endpoint () int 14)
+(def trb_stop_endpoint () int 15)
+(def trb_set_dequeue () int 16)
+(def trb_noop_command () int 23)
+(def trb_transfer_event () int 32)
+(def trb_command_completion () int 33)
+(def trb_port_status_change () int 34)
+(def trb_host_controller_event () int 37)
+
+; Control word flags: the cycle bit, Toggle Cycle of a Link TRB (bit 1),
+; Interrupt on Short Packet (2), Chain (4), Interrupt On Completion (5),
+; and Immediate Data (6), the parameter itself being the data.
+(def trb_cycle () int 1)
+(def trb_toggle () int 2)
+(def trb_isp () int 4)
+(def trb_chain () int 16)
+(def trb_ioc () int 32)
+(def trb_idt () int 64)
+
+; Completion codes, an event's status word's bits 24 to 31.
+(def cc_success () int 1)
+(def cc_data_buffer () int 2)
+(def cc_babble () int 3)
+(def cc_transaction () int 4)
+(def cc_trb () int 5)
+(def cc_stall () int 6)
+(def cc_short_packet () int 13)
+
+; ---------------------------------------------------------------- reading
+
+; A TRB's parameter, status word and control word.
+(def trb_param ((t Trb)) int (match t ((Trb p s c) p)))
+(def trb_status_word ((t Trb)) int (match t ((Trb p s c) s)))
+(def trb_control ((t Trb)) int (match t ((Trb p s c) c)))
+
+; A TRB's type, cycle bit, and, for an event, its completion code, the
+; slot it is about (bits 24 to 31), the endpoint (bits 16 to 20), and the
+; bytes a transfer left untransferred (status bits 0 to 23).
+(def trb_type ((t Trb)) int (bit_and (bit_shr (trb_control t) 10) 63))
+(def trb_cycle_of ((t Trb)) int (bit_and (trb_control t) 1))
+(def trb_code ((t Trb)) int (bit_and (bit_shr (trb_status_word t) 24) 255))
+(def trb_slot ((t Trb)) int (bit_and (bit_shr (trb_control t) 24) 255))
+(def trb_endpoint ((t Trb)) int (bit_and (bit_shr (trb_control t) 16) 31))
+(def trb_residual ((t Trb)) int (bit_and (trb_status_word t) 16777215))
+
+; The port a Port Status Change event is about: its parameter's bits 24
+; to 31.
+(def trb_port ((t Trb)) int (bit_and (bit_shr (trb_param t) 24) 255))
+
+; t with its cycle bit c, 0 or 1.
+(def trb_with_cycle ((t Trb) (c int)) Trb
+  (match t ((Trb p s ctl) (Trb p s (bit_or (bit_and ctl -2) c)))))
+
+; The four u32s of t, in order: the parameter's low and high halves, the
+; status, the control.
+(def trb_words ((t Trb)) (list int)
+  (match t
+    ((Trb p s c)
+      (cons (bit_and p 4294967295) (cons (bit_and (bit_shr p 32) 4294967295) (cons (bit_and s 4294967295) (cons (bit_and c 4294967295) (nil int))))))))
+
+; The TRB of four u32s, as trb_words gives them.
+(def trb_of_words ((lo int) (hi int) (s int) (c int)) Trb
+  (Trb (bit_or lo (bit_shl hi 32)) s c))
+
+; --------------------------------------------------------------- building
+
+; The control word of a TRB of type, with flags and the field at bits 16
+; up, as a command's slot or a transfer's direction is.
+(def trb_ctl ((type int) (flags int) (high int)) int
+  (bit_or (bit_shl type 10) (bit_or flags high)))
+
+; A Link TRB to the ring's start at addr, toggling the cycle, chained if
+; the TD before it goes on past it.
+(def link_trb ((addr int) (chained bool)) Trb
+  (Trb addr 0 (trb_ctl (trb_link) (bit_or (trb_toggle) (if chained (trb_chain) 0)) 0)))
+
+; Commands (section 6.4.3), each with the slot it is for, if any.
+(def noop_command () Trb (Trb 0 0 (trb_ctl (trb_noop_command) 0 0)))
+(def enable_slot_command () Trb (Trb 0 0 (trb_ctl (trb_enable_slot) 0 0)))
+(def disable_slot_command ((slot int)) Trb (Trb 0 0 (trb_ctl (trb_disable_slot) 0 (bit_shl slot 24))))
+
+; Address Device with the input context at ctx: the controller gives the
+; device its address, sending SET_ADDRESS.
+(def address_device_command ((ctx int) (slot int)) Trb
+  (Trb ctx 0 (trb_ctl (trb_address_device) 0 (bit_shl slot 24))))
+
+; Configure Endpoint and Evaluate Context of slot, with the input context
+; at ctx: endpoints added or dropped; the default endpoint's packet size.
+(def configure_endpoint_command ((ctx int) (slot int)) Trb
+  (Trb ctx 0 (trb_ctl (trb_configure_endpoint) 0 (bit_shl slot 24))))
+(def evaluate_context_command ((ctx int) (slot int)) Trb
+  (Trb ctx 0 (trb_ctl (trb_evaluate_context) 0 (bit_shl slot 24))))
+
+; Reset Endpoint of endpoint dci of slot, halted by a stall.
+(def reset_endpoint_command ((slot int) (dci int)) Trb
+  (Trb 0 0 (trb_ctl (trb_reset_endpoint) 0 (bit_or (bit_shl slot 24) (bit_shl dci 16)))))
+
+; Set TR Dequeue Pointer: endpoint dci of slot to go on from addr, on the
+; pass whose cycle bit is c.
+(def set_dequeue_command ((slot int) (dci int) (addr int) (c int)) Trb
+  (Trb (bit_or addr c) 0 (trb_ctl (trb_set_dequeue) 0 (bit_or (bit_shl slot 24) (bit_shl dci 16)))))
+
+; A control transfer's stages (section 6.4.1.2): the setup packet's 8
+; bytes as immediate data, with the transfer type, 0 none, 2 OUT, 3 IN;
+; a data stage of len bytes at buf, IN or OUT; and a status stage the
+; other way, which interrupts when done. TRT is bits 16 and 17 of a
+; setup TRB, DIR bit 16 of the others.
+(def setup_trb ((setup (list int)) (len int) (in bool)) Trb
+  (Trb (setup_param setup) 8
+       (trb_ctl (trb_setup) (trb_idt) (bit_shl (if (eq len 0) 0 (if in 3 2)) 16))))
+(def data_trb ((buf int) (len int) (in bool)) Trb
+  (Trb buf len (trb_ctl (trb_data) (if in (trb_isp) 0) (if in 65536 0))))
+(def status_trb ((in bool)) Trb
+  (Trb 0 0 (trb_ctl (trb_status) (trb_ioc) (if in 65536 0))))
+
+; The setup packet's 8 bytes as a little-endian parameter.
+(def setup_param ((setup (list int))) int (setup_param_from (rev setup) 0))
+
+; The bytes bs, the most significant first, after acc's.
+(def setup_param_from ((bs (list int)) (acc int)) int
+  (if (is_empty bs) acc (setup_param_from (tail bs) (bit_or (bit_shl acc 8) (head bs)))))
+
+; A Normal TRB for len bytes at buf, interrupting when done or short: an
+; interrupt or bulk endpoint's transfer.
+(def normal_trb ((buf int) (len int)) Trb
+  (Trb buf len (trb_ctl (trb_normal) (bit_or (trb_isp) (trb_ioc)) 0)))

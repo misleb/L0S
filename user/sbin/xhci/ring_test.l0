@@ -1,0 +1,67 @@
+; ring_test.l0 -- producer rings and the event ring.
+
+; Writes as off=value, in hex.
+(def puts_text ((ws (list W32))) (list int) (unwords (puts_words ws (nil (list int)))))
+
+(def puts_words ((ws (list W32)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ws)
+      (rev acc)
+      (match (head ws) ((W32 off v) (puts_words (tail ws) (cons (append (digits off) (append "=" (hex_digits v 0))) acc))))))
+
+(def queued_text ((q Queued)) (list int)
+  (match q ((Queued r ws addrs) (puts_text ws))))
+
+(def queued_ring ((q Queued)) Ring (match q ((Queued r ws addrs) r)))
+(def queued_addrs ((q Queued)) (list int) (match q ((Queued r ws addrs) addrs)))
+
+; A ring of 4 TRBs a pass at 0x1000, for wrapping soon.
+(def small () Ring (ring_new 5 4096 4))
+
+; One TRB: its control word, with the cycle bit, written last.
+(def test_one () int
+  (check_str "No Op command" (queued_text (ring_queue (small) (cons (noop_command) (nil Trb)))) "0=0 4=0 8=0 12=5c01"))
+
+; Two: the first's control word after everything of the second.
+(def test_first_last () int
+  (check_str "first's control last"
+             (queued_text (ring_queue (small) (cons (noop_command) (cons (enable_slot_command) (nil Trb)))))
+             "0=0 4=0 8=0 16=0 20=0 24=0 28=2401 12=5c01"))
+
+(def test_addresses () int
+  (check_bool "each TRB's" (eq (queued_addrs (ring_queue (small) (cons (noop_command) (cons (noop_command) (nil Trb)))))
+                               (cons 4096 (cons 4112 (nil int)))) true))
+
+; A ring of 8 TRBs a pass. A pass must hold twice the longest TD, so a
+; Link TRB written where a TD would have begun is past the TD that takes
+; the ring's start.
+(def eight () Ring (ring_new 5 4096 8))
+
+(def three () (list Trb) (cons (noop_command) (cons (noop_command) (cons (noop_command) (nil Trb)))))
+
+; Three TRBs at slot 6 of 8 would pass the end: the TD from 0 with the
+; new cycle, 0, its first control word last, then a Link TRB at 6, 96
+; bytes in, with the old cycle, back to 0x1000, toggling.
+(def test_wraps () int
+  (let r (queued_ring (ring_queue (queued_ring (ring_queue (eight) (three))) (three)))
+    (let q (ring_queue r (three))
+      (add (check_true "link after the TD" (ends_with (queued_text q) "12=5c00 96=1000 100=0 104=0 108=1803"))
+           (add (check_int "the new pass's cycle" (ring_cycle (queued_ring q)) 0)
+                (check_bool "the TD at the start" (eq (queued_addrs q) (cons 4096 (cons 4112 (cons 4128 (nil int))))) true))))))
+
+; A TD that just fits takes the last slot, and the next wraps.
+(def test_fits () int
+  (let q (ring_queue (small) (cons (noop_command) (cons (noop_command) (cons (noop_command) (cons (noop_command) (nil Trb))))))
+    (add (check_int "the next at the end" (ring_next_addr (queued_ring q)) 4160)
+         (check_int "the same pass" (ring_cycle (queued_ring q)) 1))))
+
+(def test_events () int
+  (let e (events_next (events_next (events_new)))
+    (add (check_int "third" (events_offset e) 32)
+         (check_int "first pass" (events_cycle e) 1))))
+
+(def test_events_wrap () int
+  (let e (events_steps (events_new) 256)
+    (add (check_int "back to the start" (events_offset e) 0)
+         (check_int "the next pass" (events_cycle e) 0))))
+
+(def events_steps ((e Events) (n int)) Events (if (eq n 0) e (events_steps (events_next e) (sub n 1))))

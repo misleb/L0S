@@ -1,0 +1,131 @@
+; hid_test.l0 -- boot reports: keys found pressed and released, their
+; codes, their repeat, and a mouse's motion.
+
+; A keyboard report: the modifier byte, then up to six usages.
+(def report ((mods int) (keys (list int))) (list int)
+  (cons mods (cons 0 (take (append keys (zeros 6)) 6))))
+
+; Changes as code:value words.
+(def changes_text ((cs (list KeyChange))) (list int) (unwords (changes_words cs (nil (list int)))))
+
+(def changes_words ((cs (list KeyChange)) (acc (list (list int)))) (list (list int))
+  (if (is_empty cs)
+      (rev acc)
+      (match (head cs) ((KeyChange c v) (changes_words (tail cs) (cons (append (digits c) (append ":" (digits v))) acc))))))
+
+; The changes from report a to report b.
+(def between ((a (list int)) (b (list int))) (list int)
+  (match (held_of a)
+    ((None) "none")
+    ((Some ha) (match (held_of b) ((None) "none") ((Some hb) (changes_text (changes ha hb)))))))
+
+(def nothing () (list int) (report 0 (nil int)))
+
+(def one ((x int)) (list int) (cons x (nil int)))
+
+; ------------------------------------------------------------- key codes
+
+; a is usage 4 and KEY_A 30; 1 is 0x1E and KEY_1 2; Enter 0x28, 28; the
+; arrows 0x4F to 0x52, right 106, left 105, down 108, up 103.
+(def test_usage_codes () int
+  (add (check_int "a" (usage_code 4) 30)
+       (add (check_int "z" (usage_code 29) 44)
+            (add (check_int "1" (usage_code 30) 2)
+                 (add (check_int "enter" (usage_code 40) 28)
+                      (add (check_int "up" (usage_code 82) 103) (check_int "right" (usage_code 79) 106)))))))
+
+(def test_modifier_usages () int
+  (add (check_int "left shift, 0xE1" (usage_code 225) 42)
+       (add (check_int "right meta, 0xE7" (usage_code 231) 126)
+            (check_int "none past 0x67" (usage_code 120) 0))))
+
+; ------------------------------------------------------------- keyboard
+
+(def test_press () int
+  (check_str "a" (between (nothing) (report 0 (one 4))) "30:1"))
+
+(def test_release () int
+  (check_str "a" (between (report 0 (one 4)) (nothing)) "30:0"))
+
+(def test_held_still () int
+  (check_str "nothing" (between (report 0 (one 4)) (report 0 (one 4))) ""))
+
+; Shift and a in one report: shift first, so a is shifted.
+(def test_shift_first () int
+  (check_str "shift, a" (between (nothing) (report 2 (one 4))) "42:1 30:1"))
+
+; Shift let go as b is pressed, a still held: b is not shifted.
+(def test_shift_released_first () int
+  (check_str "shift up, b" (between (report 2 (one 4)) (report 0 (cons 4 (one 5)))) "42:0 48:1"))
+
+(def test_six_keys () int
+  (check_str "six" (between (nothing) (report 0 (cons 4 (cons 5 (cons 6 (cons 7 (cons 8 (one 9))))))))
+             "30:1 48:1 46:1 32:1 18:1 33:1"))
+
+(def test_rolled_over () int
+  (add (check_str "says nothing" (between (report 0 (one 4)) (report 0 (repeat 6 1))) "none")
+       (check_bool "is none" (eq (held_of (report 0 (repeat 6 1))) ((None Held))) true)))
+
+(def test_short () int
+  (check_bool "2 bytes" (eq (held_of (cons 0 (one 0))) ((None Held))) true))
+
+; A usage with no code, as 0x70, F21, is passed over.
+(def test_no_code () int
+  (check_str "passed over" (between (nothing) (report 0 (cons 112 (one 4)))) "30:1"))
+
+(def test_both_controls () int
+  (check_str "left then right" (between (nothing) (report 17 (nil int))) "29:1 97:1"))
+
+; ---------------------------------------------------------------- repeat
+
+(def repeat_text ((r Repeat)) (list int)
+  (match r ((Repeating c at) (append (digits c) (append "@" (digits at)))) ((NoRepeat) "none")))
+
+(def test_repeat_starts () int
+  (check_str "a at 500 ms" (repeat_text (repeat_after (NoRepeat) (cons (KeyChange 30 1) (nil KeyChange)) 1000)) "30@500001000"))
+
+(def test_repeat_modifier () int
+  (check_str "shift does not" (repeat_text (repeat_after (NoRepeat) (cons (KeyChange 42 1) (nil KeyChange)) 0)) "none"))
+
+; The last pressed repeats; letting go of another leaves it.
+(def test_repeat_last () int
+  (let r (repeat_after (NoRepeat) (cons (KeyChange 30 1) (cons (KeyChange 48 1) (nil KeyChange))) 0)
+    (add (check_str "b" (repeat_text r) "48@500000000")
+         (check_str "a let go" (repeat_text (repeat_after r (cons (KeyChange 30 0) (nil KeyChange)) 10)) "48@500000000"))))
+
+(def test_repeat_stops () int
+  (check_str "b let go" (repeat_text (repeat_after (Repeating 48 9) (cons (KeyChange 48 0) (nil KeyChange)) 10)) "none"))
+
+(def test_repeat_due () int
+  (let r (Repeating 30 500)
+    (add (check_bool "not yet" (repeat_due r 499) false)
+         (add (check_bool "due" (repeat_due r 500) true)
+              (add (check_str "then every 33 ms" (repeat_text (repeated r 500)) "30@33000500")
+                   (check_int "wait" (repeat_wait r 200) 300))))))
+
+; ----------------------------------------------------------------- mouse
+
+(def motion_text ((o (Option PointerMotion))) (list int)
+  (match o
+    ((Some m) (match m ((PointerMotion dx dy b wdx wdy) (unwords (cons (int_text dx) (cons (int_text dy) (cons (digits b) (cons (int_text wdx) (cons (int_text wdy) (nil (list int)))))))))))
+    ((None) "none")))
+
+(def int_text ((n int)) (list int) (if (lt n 0) (cons 45 (digits (neg n))) (digits n)))
+
+(def test_mouse_moves () int
+  (check_str "right 5, up 3, left held" (motion_text (motion_of (cons 1 (cons 5 (one 253))))) "5 -3 1 0 0"))
+
+; The wheel turned away from you, 1, scrolls up: -1 down.
+(def test_mouse_wheel () int
+  (add (check_str "up" (motion_text (motion_of (cons 0 (cons 0 (cons 0 (one 1)))))) "0 0 0 0 -1")
+       (check_str "down" (motion_text (motion_of (cons 4 (cons 0 (cons 0 (one 255)))))) "0 0 4 0 1")))
+
+(def test_mouse_extremes () int
+  (check_str "-128, 127" (motion_text (motion_of (cons 0 (cons 128 (one 127))))) "-128 127 0 0 0"))
+
+; Bits past the three buttons are not buttons.
+(def test_mouse_buttons () int
+  (check_str "8 is none" (motion_text (motion_of (cons 15 (cons 0 (one 0))))) "0 0 7 0 0"))
+
+(def test_mouse_short () int
+  (check_str "2 bytes" (motion_text (motion_of (cons 0 (one 1)))) "none"))

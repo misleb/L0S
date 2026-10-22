@@ -1,0 +1,929 @@
+; core.l0 -- one xHCI controller as a state machine, purely: what it is
+; told, a port's status, an event from its event ring, or a request a
+; client made of a device on it, gives the controller's state after it
+; and the acts the driver's shell is to carry out, in order: u32s to
+; write into DMA pages, doorbells to ring, PORTSC writes, answers and
+; notices to send, lines for the serial line.
+;
+; It brings each device up one at a time (xHCI 1.2, section 4.3): a port
+; that has a device is reset, if it is USB 2, until it is enabled; then
+; Enable Slot gives the device a slot, Address Device its address, and
+; then GET_DESCRIPTOR its device descriptor, 8 bytes first, whose
+; bMaxPacketSize0 Evaluate Context gives the default endpoint, then all
+; 18, then its first configuration, 9 bytes and then wTotalLength, which
+; SET_CONFIGURATION chooses. Then it is ready: its clients are told, and
+; may make control transfers and open its IN endpoints, each of which
+; Configure Endpoint adds, keeping one transfer queued on it.
+;
+; Commands go one at a time, in the order asked. Its memory is the DMA
+; pages the shell gives it, by number: the DCBAA, the command ring and
+; the event ring's segment, then pages it takes and gives back for each
+; device, its input and output contexts and its default endpoint's ring,
+; and for each endpoint opened. A transfer ring has 127 TRBs a pass and
+; its buffer in the page's second half.
+
+; ------------------------------------------------------------------- acts
+
+; What the shell is to do: write u32s into a page, clear a page, ring
+; slot's doorbell for target, write a port's PORTSC, read a port's PORTSC
+; and tell hc_port, answer a request, send one port a notice, send every
+; listener one, or write a line.
+(data Act
+  (ActPut int (list W32))
+  (ActZero int)
+  (ActBell int int)
+  (ActPort int int)
+  (ActRecheck int)
+  (ActAnswer int (list int))
+  (ActTell int (list int))
+  (ActNotify (list int))
+  (ActListen int)
+  (ActLog (list int)))
+
+; What the shell is to read for an event before it tells the controller
+; of it: nothing; bytes of a page, from an offset, so many; or a port's
+; PORTSC. And what it read.
+(data Want (WantNothing) (WantBytes int int int) (WantPortsc int))
+(data Got (GotNothing) (GotBytes (list int)) (GotPortsc int))
+
+; ------------------------------------------------------------------ state
+
+; A root hub port: nothing on it, or nothing being done; being reset; its
+; device, of that speed, waiting for a slot; its device's slot; or a
+; device that could not be brought up, left alone until it is unplugged.
+(data Port (PortIdle) (PortReset) (PortSlotting int) (PortHas int) (PortFailed))
+
+; Why a control transfer is made: a step of bringing a device up, or for
+; a client, whose reply port is told what came of it.
+(data Purpose (ForDev8) (ForDev18) (ForCfg9) (ForCfg) (ForSetCfg) (ForClient int))
+
+; A control transfer: why, its setup packet, the bytes of its OUT data
+; stage, and the length of its IN data stage, 0 for an OUT one.
+(data Ctl (Ctl Purpose (list int) (list int) int))
+
+; An endpoint opened: its DCI, its descriptor, its ring, whose page's
+; second half is its buffer, the port told of its reports, and whether
+; it is configured and has a transfer queued.
+(data Pipe (Pipe int UsbEndpoint Ring int bool))
+
+; A device: its number, its slot, its root hub port and speed, its input
+; and output contexts' pages, its default endpoint's ring and largest
+; packet, whether it is ready, its device descriptor and configuration's
+; bytes, its control transfers waiting, the first sent if sent, with how
+; many bytes its data stage moved if it was short, else -1; its
+; endpoints opened; and the last DCI its slot context counts.
+(data Dev (Dev int int int int int int Ring int bool (list int) (list int) (list Ctl) bool int (list Pipe) int))
+
+; A command, with what it is for: a slot for the device on a port; the
+; slot's address; its default endpoint's packet size; an endpoint added,
+; or dropped and its page given back, with the reply port to tell; an
+; endpoint reset after a stall, and sent on past the TD that stalled; or
+; a slot given up, with its pages.
+(data Cmd
+  (CmdEnable int)
+  (CmdAddress int)
+  (CmdEvaluate int)
+  (CmdConfigure int int int)
+  (CmdDrop int int int int)
+  (CmdResetEp int int)
+  (CmdDequeue int int)
+  (CmdDisable int (list int)))
+
+; The controller: its number among the driver's, its contexts' size, each
+; DMA page's bus address by number, the pages free, the command ring, the
+; event ring, the commands waiting, the first sent if sent, each port by
+; number from 1, the ports waiting to be brought up, the devices, and
+; the number the next device will have.
+(data Hc (Hc int int (array int) (list int) Ring Events (list Cmd) bool (array Port) (list int) (list Dev) int))
+
+; A controller and the acts its last step came to.
+(data Did (Did Hc (list Act)))
+
+; The pages every controller has first: the DCBAA, the command ring, the
+; event ring's segment.
+(def page_dcbaa () int 0)
+(def page_commands () int 1)
+(def page_events () int 2)
+
+; TRBs a pass of the command ring and of a transfer ring; where a
+; transfer ring's buffer is in its page, and its size.
+(def command_slots () int 255)
+(def transfer_slots () int 127)
+(def buffer_at () int 2048)
+(def buffer_max () int 2048)
+
+; A controller numbered k, with contexts of csz bytes, the DMA pages at
+; pages, of which the first fixed are the shell's, and ports ports; its
+; first device to be numbered first.
+(def hc_new ((k int) (csz int) (pages (array int)) (fixed int) (ports int) (first int)) Hc
+  (Hc k csz pages (numbers_up fixed (array_len pages) (nil int))
+      (ring_new (page_commands) (array_get pages (page_commands)) (command_slots))
+      (events_new) (nil Cmd) false (array_new (add ports 1) (PortIdle)) (nil int) (nil Dev) first))
+
+; The numbers from i up to n, after the reversed acc.
+(def numbers_up ((i int) (n int) (acc (list int))) (list int)
+  (if (ge i n) (rev acc) (numbers_up (add i 1) n (cons i acc))))
+
+; ---------------------------------------------------------------- reading
+
+; Its number, its contexts' size, its devices, its event ring, its next
+; device's number, its free pages, its commands, its ports waiting.
+(def hc_k ((h Hc)) int (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) k)))
+(def hc_csz ((h Hc)) int (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) csz)))
+(def hc_devs ((h Hc)) (list Dev) (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) devs)))
+(def hc_events ((h Hc)) Events (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) ev)))
+(def hc_next ((h Hc)) int (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) next)))
+(def hc_free ((h Hc)) (list int) (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) free)))
+(def hc_cmds ((h Hc)) (list Cmd) (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) cmds)))
+(def hc_waiting ((h Hc)) (list int) (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) wait)))
+
+; The bus address of page p.
+(def hc_bus ((h Hc) (p int)) int (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (array_get pages p))))
+
+; Port p's state; PortFailed for a port the controller has not.
+(def hc_port_state ((h Hc) (p int)) Port
+  (match h
+    ((Hc k csz pages free cr ev cmds sent ports wait devs next)
+      (if (if (ge p 1) (lt p (array_len ports)) false) (array_get ports p) (PortFailed)))))
+
+; -------------------------------------------------------------- rebuilding
+
+; h with port p's state s, no longer waiting.
+(def hc_with_port ((h Hc) (p int) (s Port)) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next)
+    (Hc k csz pages free cr ev cmds sent (array_set ports p s) (without_int wait p) devs next))))
+
+; h with one of its fields replaced: the ports waiting, the devices,
+; the free pages, the commands and whether the first is sent, the
+; command ring, the event ring, the next device's number.
+(def hc_with_waiting ((h Hc) (w (list int))) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (Hc k csz pages free cr ev cmds sent ports w devs next))))
+(def hc_with_devs ((h Hc) (ds (list Dev))) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (Hc k csz pages free cr ev cmds sent ports wait ds next))))
+(def hc_with_free ((h Hc) (f (list int))) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (Hc k csz pages f cr ev cmds sent ports wait devs next))))
+(def hc_with_cmds ((h Hc) (cs (list Cmd)) (s bool)) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (Hc k csz pages free cr ev cs s ports wait devs next))))
+(def hc_with_ring ((h Hc) (r Ring)) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (Hc k csz pages free r ev cmds sent ports wait devs next))))
+(def hc_with_events ((h Hc) (e Events)) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (Hc k csz pages free cr e cmds sent ports wait devs next))))
+(def hc_with_next ((h Hc) (n int)) Hc
+  (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (Hc k csz pages free cr ev cmds sent ports wait devs n))))
+
+; h with the next event read.
+(def hc_event_read ((h Hc)) Hc (hc_with_events h (events_next (hc_events h))))
+
+; xs without x.
+(def without_int ((xs (list int)) (x int)) (list int)
+  (if (is_empty xs) xs (if (eq (head xs) x) (without_int (tail xs) x) (cons (head xs) (without_int (tail xs) x)))))
+
+; ------------------------------------------------------------------ pages
+
+; n free pages, each cleared, and h without them; or none if there are
+; not that many.
+(data Taken (Taken Hc (list int) (list Act)) (TakenNone))
+
+; n pages taken from h's free ones.
+(def hc_take ((h Hc) (n int)) Taken
+  (let f (hc_free h)
+    (if (lt (length f) n)
+        (TakenNone)
+        (let ps (take f n)
+          (Taken (hc_with_free h (drop f n)) ps (zeroed ps (nil Act)))))))
+
+; An ActZero of each page, after the reversed acc.
+(def zeroed ((ps (list int)) (acc (list Act))) (list Act)
+  (if (is_empty ps) (rev acc) (zeroed (tail ps) (cons (ActZero (head ps)) acc))))
+
+; h with pages ps free again.
+(def hc_give ((h Hc) (ps (list int))) Hc (hc_with_free h (append (hc_free h) ps)))
+
+; --------------------------------------------------------------- devices
+
+; Its number, slot, port, speed, whether it is ready, its descriptor
+; and configuration, its pipes, its control transfers, whether the first
+; is sent.
+(def dev_num ((d Dev)) int (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) n)))
+(def dev_slot ((d Dev)) int (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) s)))
+(def dev_port ((d Dev)) int (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) p)))
+(def dev_speed ((d Dev)) int (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) sp)))
+(def dev_ready ((d Dev)) bool (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) rd)))
+(def dev_desc ((d Dev)) (list int) (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) ds)))
+(def dev_config ((d Dev)) (list int) (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) cf)))
+(def dev_pipes ((d Dev)) (list Pipe) (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) ps)))
+(def dev_ctls ((d Dev)) (list Ctl) (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) cs)))
+(def dev_sent ((d Dev)) bool (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) st)))
+
+; Every page d has: its contexts', its default endpoint's, its pipes'.
+(def dev_pages ((d Dev)) (list int)
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (cons ip (cons op (cons (ring_page r) (pipe_pages ps (nil int))))))))
+
+; Each pipe's ring's page, after the reversed acc.
+(def pipe_pages ((ps (list Pipe)) (acc (list int))) (list int)
+  (if (is_empty ps) (rev acc) (match (head ps) ((Pipe dci e r o run) (pipe_pages (tail ps) (cons (ring_page r) acc))))))
+
+; d with one of its fields replaced: its default endpoint's ring and
+; packet size, ready, its descriptor, its configuration, its control
+; transfers, whether the first is sent and how much it moved, how much
+; it moved alone, its pipes and the last DCI they use.
+(def dev_with_ep0 ((d Dev) (r2 Ring)) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r2 m rd ds cf cs st g ps e))))
+(def dev_with_mps0 ((d Dev) (m2 int)) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r m2 rd ds cf cs st g ps e))))
+(def dev_with_ready ((d Dev)) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r m true ds cf cs st g ps e))))
+(def dev_with_desc ((d Dev) (b (list int))) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r m rd b cf cs st g ps e))))
+(def dev_with_config ((d Dev) (b (list int))) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r m rd ds b cs st g ps e))))
+(def dev_with_ctls ((d Dev) (cs2 (list Ctl)) (st2 bool) (g2 int)) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r m rd ds cf cs2 st2 g2 ps e))))
+(def dev_with_got ((d Dev) (g2 int)) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r m rd ds cf cs st g2 ps e))))
+(def dev_with_pipes ((d Dev) (ps2 (list Pipe)) (e2 int)) Dev
+  (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (Dev n s p sp ip op r m rd ds cf cs st g ps2 e2))))
+
+; The device in slot s, or numbered n, among ds; none if there is none.
+(def dev_in_slot ((ds (list Dev)) (s int)) (Option Dev)
+  (if (is_empty ds) ((None Dev)) (if (eq (dev_slot (head ds)) s) (Some (head ds)) (dev_in_slot (tail ds) s))))
+(def dev_numbered ((ds (list Dev)) (n int)) (Option Dev)
+  (if (is_empty ds) ((None Dev)) (if (eq (dev_num (head ds)) n) (Some (head ds)) (dev_numbered (tail ds) n))))
+
+; h with d in place of the device in its slot, or added if none is.
+(def hc_put_dev ((h Hc) (d Dev)) Hc
+  (hc_with_devs h (devs_put (hc_devs h) d)))
+
+; ds with d in place of the device in its slot, or added; ds without the
+; device in slot s.
+(def devs_put ((ds (list Dev)) (d Dev)) (list Dev)
+  (if (is_empty ds)
+      (cons d ds)
+      (if (eq (dev_slot (head ds)) (dev_slot d)) (cons d (tail ds)) (cons (head ds) (devs_put (tail ds) d)))))
+(def devs_without ((ds (list Dev)) (s int)) (list Dev)
+  (if (is_empty ds) ds (if (eq (dev_slot (head ds)) s) (tail ds) (cons (head ds) (devs_without (tail ds) s)))))
+
+; Whether a device is being brought up: a port being reset or given a
+; slot, or a device not yet ready. One at a time is brought up.
+(def hc_busy ((h Hc)) bool
+  (match h
+    ((Hc k csz pages free cr ev cmds sent ports wait devs next)
+      (if (ports_busy ports 1) true (devs_busy devs)))))
+
+; Whether a port from i is being reset or given a slot.
+(def ports_busy ((ports (array Port)) (i int)) bool
+  (if (ge i (array_len ports))
+      false
+      (match (array_get ports i)
+        ((PortIdle) (ports_busy ports (add i 1)))
+        ((PortReset) true)
+        ((PortSlotting s) true)
+        ((PortHas s) (ports_busy ports (add i 1)))
+        ((PortFailed) (ports_busy ports (add i 1))))))
+
+; Whether a device of ds is not yet ready.
+(def devs_busy ((ds (list Dev))) bool
+  (if (is_empty ds) false (if (dev_ready (head ds)) (devs_busy (tail ds)) true)))
+
+; The line on the serial line about port p of h.
+(def port_line ((h Hc) (p int) (what (list int))) Act
+  (ActLog (append "xhci " (append (digits (hc_k h)) (append ": port " (append (digits p) (append ": " what)))))))
+
+; ---------------------------------------------------------------- settling
+
+; d's acts, then, if nothing is being brought up, a port waiting asked
+; about again.
+(def settled ((d Did)) Did
+  (match d
+    ((Did h acts)
+      (let w (hc_waiting h)
+        (if (if (is_empty w) true (hc_busy h))
+            d
+            (Did (hc_with_waiting h (tail w)) (append acts (cons (ActRecheck (head w)) (nil Act)))))))))
+
+; The acts of two steps, the second's after the first's, and the second's
+; controller.
+(def then_acts ((first (list Act)) (d Did)) Did
+  (match d ((Did h acts) (Did h (append first acts)))))
+
+; ------------------------------------------------------------------ ports
+
+; Port p's PORTSC is v: its changes cleared, a device unplugged let go, a
+; device plugged in reset, given a slot, or kept waiting for the one
+; being brought up.
+(def hc_port ((h Hc) (p int) (v int)) Did
+  (if (if (lt p 1) true (ge p (ports_count h)))
+      (Did h (nil Act))
+      (settled
+        (then_acts (if (port_has_changes v) (cons (ActPort p (port_clear_write v)) (nil Act)) (nil Act))
+                   (if (port_connected v) (port_present h p v (hc_port_state h p)) (port_gone h p (hc_port_state h p)))))))
+
+; The ports h has, and 1 for port 0, which none is.
+(def ports_count ((h Hc)) int (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) (array_len ports))))
+
+; A port with nothing on it: its device, if it had one, let go.
+(def port_gone ((h Hc) (p int) (s Port)) Did
+  (match s
+    ((PortIdle) (Did (hc_with_waiting h (without_int (hc_waiting h) p)) (nil Act)))
+    ((PortReset) (Did (hc_with_port h p (PortIdle)) (nil Act)))
+    ((PortSlotting sp) (Did (hc_with_port h p (PortIdle)) (nil Act)))
+    ((PortHas slot) (dev_detached h slot))
+    ((PortFailed) (Did (hc_with_port h p (PortIdle)) (nil Act)))))
+
+; A port with a device on it, v its PORTSC.
+(def port_present ((h Hc) (p int) (v int) (s Port)) Did
+  (match s
+    ((PortIdle)
+      (if (hc_busy h)
+          (Did (hc_with_waiting h (append (without_int (hc_waiting h) p) (cons p (nil int)))) (nil Act))
+          (port_begun h p v)))
+    ((PortReset)
+      (if (if (port_enabled v) (not (port_resetting v)) false) (port_slotting h p (port_speed v)) (Did h (nil Act))))
+    ((PortSlotting sp) (Did h (nil Act)))
+    ((PortHas slot)
+      (if (port_connect_changed v)
+          (match (dev_detached h slot) ((Did h2 acts) (then_acts acts (port_present h2 p v (hc_port_state h2 p)))))
+          (Did h (nil Act))))
+    ((PortFailed) (Did h (nil Act)))))
+
+; A device first seen on port p: given a slot if its port is enabled, as
+; a USB 3 port is once its link is up, else reset, as a USB 2 port must
+; be.
+(def port_begun ((h Hc) (p int) (v int)) Did
+  (if (port_enabled v)
+      (port_slotting h p (port_speed v))
+      (Did (hc_with_port h p (PortReset)) (cons (ActPort p (port_reset_write v)) (nil Act)))))
+
+; Port p's device, of speed, given a slot: Enable Slot sent.
+(def port_slotting ((h Hc) (p int) (speed int)) Did
+  (hc_command (hc_with_port h p (PortSlotting speed)) (CmdEnable p)))
+
+; A device unplugged, or replaced: every request of it answered gone,
+; every client told if it was ready, its slot given up.
+(def dev_detached ((h Hc) (slot int)) Did
+  (match (dev_in_slot (hc_devs h) slot)
+    ((None) (Did h (nil Act)))
+    ((Some d)
+      (let h2 (hc_with_port (hc_with_devs h (devs_without (hc_devs h) slot)) (dev_port d) (PortIdle))
+        (let told (if (dev_ready d)
+                      (cons (ActNotify (usb_detach_notice (dev_num d)))
+                            (cons (port_line h (dev_port d) (append "device " (append (digits (dev_num d)) " gone"))) (nil Act)))
+                      (nil Act))
+          (then_acts (append told (gone_answers (dev_ctls d) (nil Act)))
+                     (hc_command h2 (CmdDisable slot (dev_pages d)))))))))
+
+; error: gone to each client's transfer of cs, after the reversed acc.
+(def gone_answers ((cs (list Ctl)) (acc (list Act))) (list Act)
+  (if (is_empty cs)
+      (rev acc)
+      (match (head cs)
+        ((Ctl why setup out len)
+          (gone_answers (tail cs)
+            (match why
+              ((ForClient reply) (cons (ActAnswer reply (error_reply "gone")) acc))
+              ((ForDev8) acc) ((ForDev18) acc) ((ForCfg9) acc) ((ForCfg) acc) ((ForSetCfg) acc)))))))
+
+; A device that could not be brought up: why on the serial line, its
+; slot given up, its port left alone until it is unplugged.
+(def dev_failed ((h Hc) (d Dev) (why (list int))) Did
+  (let h2 (hc_with_port (hc_with_devs h (devs_without (hc_devs h) (dev_slot d))) (dev_port d) (PortFailed))
+    (then_acts (cons (port_line h (dev_port d) why) (nil Act))
+               (hc_command h2 (CmdDisable (dev_slot d) (dev_pages d))))))
+
+; --------------------------------------------------------------- commands
+
+; cmd queued, and sent if none is outstanding.
+(def hc_command ((h Hc) (cmd Cmd)) Did
+  (hc_send (hc_with_cmds h (append (hc_cmds h) (cons cmd (nil Cmd))) (cmd_sent h))))
+
+; Whether h's first command is outstanding.
+(def cmd_sent ((h Hc)) bool (match h ((Hc k csz pages free cr ev cmds sent ports wait devs next) sent)))
+
+; The first command waiting sent, if none is outstanding: its contexts
+; written, its TRB on the command ring, the ring's doorbell rung.
+(def hc_send ((h Hc)) Did
+  (match h
+    ((Hc k csz pages free cr ev cmds sent ports wait devs next)
+      (if (if sent true (is_empty cmds))
+          (Did h (nil Act))
+          (match (cmd_prepared h (head cmds))
+            ((Prep acts trb)
+              (match (ring_queue cr (cons trb (nil Trb)))
+                ((Queued cr2 ws addrs)
+                  (Did (hc_with_cmds (hc_with_ring h cr2) cmds true)
+                       (append acts (cons (ActPut (page_commands) ws) (cons (ActBell 0 0) (nil Act)))))))))))))
+
+; What sending a command takes: contexts to write first, and its TRB.
+(data Prep (Prep (list Act) Trb))
+
+; What sending cmd takes, from h as it is now.
+(def cmd_prepared ((h Hc) (cmd Cmd)) Prep
+  (match cmd
+    ((CmdEnable p) (Prep (nil Act) (enable_slot_command)))
+    ((CmdAddress slot) (with_dev h slot (cmd_address h)))
+    ((CmdEvaluate slot) (with_dev h slot (cmd_evaluate h)))
+    ((CmdConfigure slot dci reply) (with_dev h slot (cmd_configure h dci)))
+    ((CmdDrop slot dci page reply) (with_dev h slot (cmd_drop h dci)))
+    ((CmdResetEp slot dci) (Prep (nil Act) (reset_endpoint_command slot dci)))
+    ((CmdDequeue slot dci) (with_dev h slot (cmd_dequeue dci)))
+    ((CmdDisable slot ps) (Prep (nil Act) (disable_slot_command slot)))))
+
+; What a command of a device takes, by what it is.
+(data DevCmd (CmdAddressOf) (CmdEvaluateOf) (CmdConfigureOf int) (CmdDropOf int) (CmdDequeueOf int))
+
+; Each of them, by name.
+(def cmd_address ((h Hc)) DevCmd (CmdAddressOf))
+(def cmd_evaluate ((h Hc)) DevCmd (CmdEvaluateOf))
+(def cmd_configure ((h Hc) (dci int)) DevCmd (CmdConfigureOf dci))
+(def cmd_drop ((h Hc) (dci int)) DevCmd (CmdDropOf dci))
+(def cmd_dequeue ((dci int)) DevCmd (CmdDequeueOf dci))
+
+; The command c of the device in slot, or a No Op if it has gone.
+(def with_dev ((h Hc) (slot int) (c DevCmd)) Prep
+  (match (dev_in_slot (hc_devs h) slot)
+    ((None) (Prep (nil Act) (noop_command)))
+    ((Some d) (dev_command h d c))))
+
+; What sending c of d takes: its input context written, its TRB.
+(def dev_command ((h Hc) (d Dev) (c DevCmd)) Prep
+  (match d
+    ((Dev n s p sp ip op r m rd ds cf cs st g ps e)
+      (let csz (hc_csz h)
+        (let ctx (hc_bus h ip)
+          (match c
+            ((CmdAddressOf)
+              (Prep (cons (ActPut ip (append (input_control 0 3) (append (slot_context csz sp 1 p) (ep0_context csz m r)))) (nil Act))
+                    (address_device_command ctx s)))
+            ((CmdEvaluateOf)
+              (Prep (cons (ActPut ip (append (input_control 0 2) (ep0_context csz m r))) (nil Act))
+                    (evaluate_context_command ctx s)))
+            ((CmdConfigureOf dci)
+              (Prep (cons (ActPut ip (append (input_control 0 (bit_or 1 (bit_shl 1 dci)))
+                                     (append (slot_context csz sp e p) (pipe_context csz sp ps dci)))) (nil Act))
+                    (configure_endpoint_command ctx s)))
+            ((CmdDropOf dci)
+              (Prep (cons (ActPut ip (append (input_control (bit_shl 1 dci) 1) (slot_context csz sp e p))) (nil Act))
+                    (configure_endpoint_command ctx s)))
+            ((CmdDequeueOf dci)
+              (let ring (if (eq dci 1) r (pipe_ring ps dci r))
+                (Prep (nil Act) (set_dequeue_command s dci (ring_next_addr ring) (ring_cycle ring)))))))))))
+
+; The context of the pipe at dci among ps, none if there is none.
+(def pipe_context ((csz int) (speed int) (ps (list Pipe)) (dci int)) (list W32)
+  (match (pipe_at ps dci)
+    ((None) (nil W32))
+    ((Some pp)
+      (match pp
+        ((Pipe d ep r o run)
+          (match ep
+            ((UsbEndpoint addr attrs mps ival)
+              (let kind (bit_and attrs 3)
+                (ep_context csz dci (ep_type kind (usb_ep_is_in addr)) mps (ep_interval speed kind ival)
+                            (ring_addr r) (ring_cycle r) mps)))))))))
+
+; The ring of the pipe at dci among ps, or fallback.
+(def pipe_ring ((ps (list Pipe)) (dci int) (fallback Ring)) Ring
+  (match (pipe_at ps dci) ((None) fallback) ((Some pp) (match pp ((Pipe d ep r o run) r)))))
+
+; The pipe at dci among ps, or none; ps without it; ps with pp in its
+; place.
+(def pipe_at ((ps (list Pipe)) (dci int)) (Option Pipe)
+  (if (is_empty ps) ((None Pipe)) (match (head ps) ((Pipe d ep r o run) (if (eq d dci) (Some (head ps)) (pipe_at (tail ps) dci))))))
+(def pipes_without ((ps (list Pipe)) (dci int)) (list Pipe)
+  (if (is_empty ps) ps (match (head ps) ((Pipe d ep r o run) (if (eq d dci) (tail ps) (cons (head ps) (pipes_without (tail ps) dci)))))))
+(def pipes_put ((ps (list Pipe)) (pp Pipe)) (list Pipe)
+  (match pp ((Pipe d ep r o run) (append (pipes_without ps d) (cons pp (nil Pipe))))))
+
+; The last DCI ps use, at least 1.
+(def pipes_entries ((ps (list Pipe)) (acc int)) int
+  (if (is_empty ps) acc (match (head ps) ((Pipe d ep r o run) (pipes_entries (tail ps) (max acc d))))))
+
+; The outstanding command done, with completion code code, for slot:
+; what it was for carried on, and the next command sent.
+(def hc_command_done ((h Hc) (code int) (slot int)) Did
+  (match h
+    ((Hc k csz pages free cr ev cmds sent ports wait devs next)
+      (if (if sent (not (is_empty cmds)) false)
+          (match (command_done (hc_with_cmds h (tail cmds) false) (head cmds) code slot)
+            ((Did h2 acts) (then_acts acts (hc_send h2))))
+          (Did h (nil Act))))))
+
+; What command cmd was for, carried on now it is done with code.
+(def command_done ((h Hc) (cmd Cmd) (code int) (slot int)) Did
+  (let ok (eq code (cc_success))
+    (match cmd
+      ((CmdEnable p) (slot_given h p ok code slot))
+      ((CmdAddress s) (dev_step h s ok (append "address device failed: " (digits code)) (DevAddressed)))
+      ((CmdEvaluate s) (dev_step h s ok (append "evaluate context failed: " (digits code)) (DevEvaluated)))
+      ((CmdConfigure s dci reply) (pipe_configured h s dci reply ok code))
+      ((CmdDrop s dci page reply)
+        (Did (hc_give h (cons page (nil int))) (if (gt reply 0) (cons (ActAnswer reply "ok") (nil Act)) (nil Act))))
+      ((CmdResetEp s dci) (Did h (nil Act)))
+      ((CmdDequeue s dci) (dequeued h s dci))
+      ((CmdDisable s ps)
+        (Did (hc_give h ps) (cons (ActPut (page_dcbaa) (addr_words (mul 8 s) 0)) (nil Act)))))))
+
+; Enable Slot done for the device on port p: a device made, with pages
+; for its contexts and default endpoint, the DCBAA pointing at its output
+; context, and Address Device sent; or, if the port has lost it, the
+; slot given up again.
+(def slot_given ((h Hc) (p int) (ok bool) (code int) (slot int)) Did
+  (if (not ok)
+      (Did (hc_with_port h p (PortFailed)) (cons (port_line h p (append "no slot: " (digits code))) (nil Act)))
+      (match (hc_port_state h p)
+        ((PortSlotting speed) (dev_made h p speed slot))
+        ((PortIdle) (hc_command h (CmdDisable slot (nil int))))
+        ((PortReset) (hc_command h (CmdDisable slot (nil int))))
+        ((PortHas s) (hc_command h (CmdDisable slot (nil int))))
+        ((PortFailed) (hc_command h (CmdDisable slot (nil int)))))))
+
+; A device of speed on port p in slot: its pages, its DCBAA entry,
+; Address Device.
+(def dev_made ((h Hc) (p int) (speed int) (slot int)) Did
+  (match (hc_take h 3)
+    ((TakenNone)
+      (then_acts (cons (port_line h p "no memory for a device") (nil Act))
+                 (hc_command (hc_with_port h p (PortFailed)) (CmdDisable slot (nil int)))))
+    ((Taken h2 ps zero)
+      (let ip (nth ps 0)
+        (let op (nth ps 1)
+          (let rp (nth ps 2)
+            (let d (Dev (hc_next h2) slot p speed ip op (ring_new rp (hc_bus h2 rp) (transfer_slots))
+                        (usb_default_max_packet0 speed) false (nil int) (nil int) (nil Ctl) false -1 (nil Pipe) 1)
+              (let h3 (hc_with_port (hc_put_dev (hc_with_next h2 (add (hc_next h2) 1)) d) p (PortHas slot))
+                (then_acts (append zero (cons (ActPut (page_dcbaa) (addr_words (mul 8 slot) (hc_bus h2 op))) (nil Act)))
+                           (hc_command h3 (CmdAddress slot)))))))))))
+
+; A step of bringing a device up, done by a command: what follows it, or
+; why it failed.
+(data DevStep (DevAddressed) (DevEvaluated))
+
+; The step s of the device in slot done, ok or not.
+(def dev_step ((h Hc) (slot int) (ok bool) (why (list int)) (s DevStep)) Did
+  (match (dev_in_slot (hc_devs h) slot)
+    ((None) (Did h (nil Act)))
+    ((Some d)
+      (if (not ok)
+          (dev_failed h d why)
+          (match s
+            ((DevAddressed) (dev_control h d (Ctl (ForDev8) (usb_get_descriptor (usb_desc_device) 0 8) (nil int) 8)))
+            ((DevEvaluated) (dev_control h d (Ctl (ForDev18) (usb_get_descriptor (usb_desc_device) 0 (usb_device_len)) (nil int) (usb_device_len)))))))))
+
+; Set TR Dequeue done for endpoint dci of slot, past a TD that failed:
+; the default endpoint's next transfer started, or a pipe's next one
+; queued.
+(def dequeued ((h Hc) (slot int) (dci int)) Did
+  (match (dev_in_slot (hc_devs h) slot)
+    ((None) (Did h (nil Act)))
+    ((Some d)
+      (if (eq dci 1)
+          (ctl_started h d)
+          (match (pipe_at (dev_pipes d) dci)
+            ((None) (Did h (nil Act)))
+            ((Some pp) (pipe_queued h d pp)))))))
+
+; ---------------------------------------------------------------- control
+
+; c queued on d's default endpoint, and started if none is outstanding.
+(def dev_control ((h Hc) (d Dev) (c Ctl)) Did
+  (ctl_started h (dev_with_ctls d (append (dev_ctls d) (cons c (nil Ctl))) (dev_sent d) -1)))
+
+; d's first control transfer started, if it has one and none is
+; outstanding: its OUT bytes in the buffer, its stages on the ring, the
+; doorbell rung. h then holds d.
+(def ctl_started ((h Hc) (d Dev)) Did
+  (if (if (dev_sent d) true (is_empty (dev_ctls d)))
+      (Did (hc_put_dev h d) (nil Act))
+      (match d
+        ((Dev n s p sp ip op r m rd ds cf cs st g ps e)
+          (match (head cs)
+            ((Ctl why setup out len)
+              (let in (usb_rt_is_in (head setup))
+                (let size (if in len (length out))
+                  (match (ring_queue r (ctl_trbs setup (add (hc_bus h (ring_page r)) (buffer_at)) size in))
+                    ((Queued r2 ws addrs)
+                      (Did (hc_put_dev h (Dev n s p sp ip op r2 m rd ds cf cs true -1 ps e))
+                           (append (if (is_empty out) (nil Act) (cons (ActPut (ring_page r) (bytes_w32 (buffer_at) out)) (nil Act)))
+                                   (cons (ActPut (ring_page r) ws) (cons (ActBell s 1) (nil Act)))))))))))))))
+
+; A control transfer's TRBs: setup, data if it moves any, status.
+(def ctl_trbs ((setup (list int)) (buf int) (len int) (in bool)) (list Trb)
+  (if (eq len 0)
+      (cons (setup_trb setup 0 in) (cons (status_trb true) (nil Trb)))
+      (cons (setup_trb setup len in) (cons (data_trb buf len in) (cons (status_trb (not in)) (nil Trb))))))
+
+; The bytes bs as u32s from off, least significant byte first, the last
+; filled out with 0s.
+(def bytes_w32 ((off int) (bs (list int))) (list W32)
+  (rev (bytes_w32_onto off bs (nil W32))))
+
+; bytes_w32's loop: four bytes of bs a u32, after the reversed acc.
+(def bytes_w32_onto ((off int) (bs (list int)) (acc (list W32))) (list W32)
+  (if (is_empty bs)
+      acc
+      (let w (bit_or (nth_or bs 0 0) (bit_or (bit_shl (nth_or bs 1 0) 8) (bit_or (bit_shl (nth_or bs 2 0) 16) (bit_shl (nth_or bs 3 0) 24))))
+        (bytes_w32_onto (add off 4) (drop bs 4) (cons (W32 off w) acc)))))
+
+; A transfer event of d's default endpoint: a short data stage counted;
+; the transfer done, with the bytes the shell read for it; or failed,
+; the endpoint reset and sent past it.
+(def ctl_event ((h Hc) (d Dev) (code int) (residual int) (bytes (list int))) Did
+  (if (not (dev_sent d))
+      (Did h (nil Act))
+      (match (head (dev_ctls d))
+        ((Ctl why setup out len)
+          (if (eq code (cc_short_packet))
+              (Did (hc_put_dev h (dev_with_got d (max 0 (sub len residual)))) (nil Act))
+              (let d2 (dev_with_ctls d (tail (dev_ctls d)) false -1)
+                (if (eq code (cc_success))
+                    (ctl_done h d2 why bytes)
+                    (match (ctl_failed h d2 why (if (eq code (cc_stall)) "stall" (append "failed " (digits code))))
+                      ((Did h2 acts)
+                        (match (dev_in_slot (hc_devs h2) (dev_slot d))
+                          ((None) (Did h2 acts))
+                          ((Some d3)
+                            (then_acts acts
+                              (hc_command (hc_command_then h2 (CmdResetEp (dev_slot d) 1)) (CmdDequeue (dev_slot d) 1))))))))))))))
+
+; h with cmd queued and sent if it can be, its acts dropped: for a
+; command whose acts the next one's hc_command will carry, since only
+; the first of two queued at once is sent.
+(def hc_command_then ((h Hc) (cmd Cmd)) Hc
+  (hc_with_cmds h (append (hc_cmds h) (cons cmd (nil Cmd))) (cmd_sent h)))
+
+; The bytes of the outstanding transfer's IN data stage the shell is to
+; read for its completion: as many as its data stage moved.
+(def ctl_want ((d Dev) (code int)) Want
+  (if (if (dev_sent d) (eq code (cc_success)) false)
+      (match (head (dev_ctls d))
+        ((Ctl why setup out len)
+          (if (if (usb_rt_is_in (head setup)) (gt len 0) false)
+              (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (WantBytes (ring_page r) (buffer_at) (if (ge g 0) g len))))
+              (WantNothing))))
+      (WantNothing)))
+
+; A control transfer done, bytes its data: what it was for carried on,
+; and d's next one started.
+(def ctl_done ((h Hc) (d Dev) (why Purpose) (bytes (list int))) Did
+  (match why
+    ((ForClient reply)
+      (let a (ActAnswer reply (if (is_empty bytes) "ok" (usb_hex bytes)))
+        (then_acts (cons a (nil Act)) (ctl_started h d))))
+    ((ForDev8)
+      (match (usb_max_packet0_of bytes)
+        ((None) (dev_failed h d "no device descriptor"))
+        ((Some m)
+          (if (if (gt m 0) (not (eq m (dev_mps0 d))) false)
+              (hc_command (hc_put_dev h (dev_with_mps0 d m)) (CmdEvaluate (dev_slot d)))
+              (dev_control h d (Ctl (ForDev18) (usb_get_descriptor (usb_desc_device) 0 (usb_device_len)) (nil int) (usb_device_len)))))))
+    ((ForDev18)
+      (match (usb_device_of bytes)
+        ((None) (dev_failed h d "no device descriptor"))
+        ((Some dd) (dev_control h (dev_with_desc d bytes) (Ctl (ForCfg9) (usb_get_descriptor (usb_desc_config) 0 9) (nil int) 9)))))
+    ((ForCfg9)
+      (if (lt (length bytes) 4)
+          (dev_failed h d "no configuration")
+          (let n (min (buffer_max) (bit_or (nth bytes 2) (bit_shl (nth bytes 3) 8)))
+            (dev_control h d (Ctl (ForCfg) (usb_get_descriptor (usb_desc_config) 0 n) (nil int) n)))))
+    ((ForCfg)
+      (match (usb_config_of bytes)
+        ((Err e) (dev_failed h d e))
+        ((Ok c)
+          (match c
+            ((UsbConfig v total ifs)
+              (dev_control h (dev_with_config d bytes)
+                (Ctl (ForSetCfg) (usb_setup (usb_rt_device_out) (usb_req_set_configuration) v 0 0) (nil int) 0)))))))
+    ((ForSetCfg)
+      (let d2 (dev_with_ready d)
+        (then_acts (cons (ActNotify (usb_attach_notice (dev_attached d2))) (cons (port_line h (dev_port d) (dev_line d2)) (nil Act)))
+                   (ctl_started h d2))))))
+
+; Its default endpoint's packet size.
+(def dev_mps0 ((d Dev)) int (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) m)))
+
+; A control transfer failed, why: a client told, or a device being
+; brought up given up.
+(def ctl_failed ((h Hc) (d Dev) (why Purpose) (e (list int))) Did
+  (match why
+    ((ForClient reply) (Did (hc_put_dev h d) (cons (ActAnswer reply (error_reply e)) (nil Act))))
+    ((ForDev8) (dev_failed h d (append "no device descriptor: " e)))
+    ((ForDev18) (dev_failed h d (append "no device descriptor: " e)))
+    ((ForCfg9) (dev_failed h d (append "no configuration: " e)))
+    ((ForCfg) (dev_failed h d (append "no configuration: " e)))
+    ((ForSetCfg) (dev_failed h d (append "set configuration: " e)))))
+
+; d as clients are told of it.
+(def dev_attached ((d Dev)) UsbAttached
+  (match (usb_device_of (dev_desc d))
+    ((Some dd) (UsbAttached (dev_num d) (usb_device_vendor dd) (usb_device_product dd) (dev_speed d)))
+    ((None) (UsbAttached (dev_num d) 0 0 (dev_speed d)))))
+
+; d's line on the serial line once ready: its number, ids, speed, and
+; each interface's name.
+(def dev_line ((d Dev)) (list int)
+  (match (dev_attached d)
+    ((UsbAttached n vid pid speed)
+      (unwords (cons "device" (cons (digits n) (cons (append (usb_id_text vid) (append ":" (usb_id_text pid)))
+               (cons (usb_speed_name speed) (interface_names (dev_config d))))))))))
+
+; The name of each interface of the configuration cfg; and of ifs, after
+; the reversed acc.
+(def interface_names ((cfg (list int))) (list (list int))
+  (match (usb_config_of cfg)
+    ((Err e) (nil (list int)))
+    ((Ok c) (match c ((UsbConfig v t ifs) (interface_names_onto ifs (nil (list int))))))))
+(def interface_names_onto ((ifs (list UsbInterface)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ifs) (rev acc) (interface_names_onto (tail ifs) (cons (usb_interface_name (head ifs)) acc))))
+
+; ------------------------------------------------------------------ pipes
+
+; Configure Endpoint done for the pipe at dci of slot: its first transfer
+; queued and its opener told ok; or it given up, and told why.
+(def pipe_configured ((h Hc) (slot int) (dci int) (reply int) (ok bool) (code int)) Did
+  (match (dev_in_slot (hc_devs h) slot)
+    ((None) (Did h (cons (ActAnswer reply (error_reply "gone")) (nil Act))))
+    ((Some d)
+      (match (pipe_at (dev_pipes d) dci)
+        ((None) (Did h (cons (ActAnswer reply (error_reply "closed")) (nil Act))))
+        ((Some pp)
+          (if ok
+              (match pp
+                ((Pipe pd ep r o run)
+                  (then_acts (cons (ActAnswer reply "ok") (nil Act)) (pipe_queued h d (Pipe pd ep r o true)))))
+              (let ps (pipes_without (dev_pipes d) dci)
+                (Did (hc_give (hc_put_dev h (dev_with_pipes d ps (pipes_entries ps 1))) (cons (ring_page (pipe_ring (dev_pipes d) dci (ring_new 0 0 1))) (nil int)))
+                     (cons (ActAnswer reply (error_reply (append "configure endpoint failed: " (digits code)))) (nil Act))))))))))
+
+; A transfer of a packet queued on pp, and its doorbell rung; h then
+; holds d with pp.
+(def pipe_queued ((h Hc) (d Dev) (pp Pipe)) Did
+  (match pp
+    ((Pipe dci ep r o run)
+      (match (ring_queue r (cons (normal_trb (add (hc_bus h (ring_page r)) (buffer_at)) (endpoint_mps ep)) (nil Trb)))
+        ((Queued r2 ws addrs)
+          (Did (hc_put_dev h (dev_with_pipes d (pipes_put (dev_pipes d) (Pipe dci ep r2 o run)) (dev_entries_of d)))
+               (cons (ActPut (ring_page r) ws) (cons (ActBell (dev_slot d) dci) (nil Act)))))))))
+
+; An endpoint's packet, at most the buffer; d's last DCI in use.
+(def endpoint_mps ((e UsbEndpoint)) int (match e ((UsbEndpoint a t m i) (min m (buffer_max)))))
+(def dev_entries_of ((d Dev)) int (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) e)))
+
+; A transfer event of the pipe pp of d: its report told to its opener and
+; the next queued; or, failed, the endpoint reset and sent past it.
+(def pipe_event ((h Hc) (d Dev) (pp Pipe) (code int) (bytes (list int))) Did
+  (match pp
+    ((Pipe dci ep r o run)
+      (if (if (eq code (cc_success)) true (eq code (cc_short_packet)))
+          (then_acts (cons (ActTell o (usb_report_notice (UsbReport (dev_num d) (usb_endpoint_addr ep) bytes))) (nil Act))
+                     (pipe_queued h d pp))
+          (then_acts (cons (port_line h (dev_port d) (append "endpoint " (append (hex_digits (usb_endpoint_addr ep) 2) (append " failed " (digits code))))) (nil Act))
+                     (hc_command (hc_command_then h (CmdResetEp (dev_slot d) dci)) (CmdDequeue (dev_slot d) dci)))))))
+
+; The bytes of pp's buffer the shell is to read for a transfer of it
+; done with code, residual of them not moved.
+(def pipe_want ((pp Pipe) (code int) (residual int)) Want
+  (match pp
+    ((Pipe dci ep r o run)
+      (if (if (eq code (cc_success)) true (eq code (cc_short_packet)))
+          (WantBytes (ring_page r) (buffer_at) (max 0 (sub (endpoint_mps ep) residual)))
+          (WantNothing)))))
+
+; ----------------------------------------------------------------- events
+
+; What the shell is to read before telling h of the event t.
+(def hc_wants ((h Hc) (t Trb)) Want
+  (let type (trb_type t)
+    (if (eq type (trb_port_status_change))
+        (WantPortsc (trb_port t))
+        (if (not (eq type (trb_transfer_event)))
+            (WantNothing)
+            (match (dev_in_slot (hc_devs h) (trb_slot t))
+              ((None) (WantNothing))
+              ((Some d)
+                (if (eq (trb_endpoint t) 1)
+                    (ctl_want d (trb_code t))
+                    (match (pipe_at (dev_pipes d) (trb_endpoint t))
+                      ((None) (WantNothing))
+                      ((Some pp) (pipe_want pp (trb_code t) (trb_residual t)))))))))))
+
+; The event t, with what the shell read for it, told to h.
+(def hc_event ((h Hc) (t Trb) (got Got)) Did
+  (let type (trb_type t)
+    (if (eq type (trb_command_completion))
+        (settled (hc_command_done h (trb_code t) (trb_slot t)))
+        (if (eq type (trb_transfer_event))
+            (settled (transfer_event h t (got_bytes got)))
+            (if (eq type (trb_port_status_change))
+                (match got
+                  ((GotPortsc v) (hc_port h (trb_port t) v))
+                  ((GotBytes bs) (Did h (nil Act)))
+                  ((GotNothing) (Did h (nil Act))))
+                (if (eq type (trb_host_controller_event))
+                    (Did h (cons (ActLog (append "xhci " (append (digits (hc_k h)) (append ": controller event " (digits (trb_code t)))))) (nil Act)))
+                    (Did h (nil Act))))))))
+
+; The bytes the shell read, if any.
+(def got_bytes ((g Got)) (list int) (match g ((GotBytes bs) bs) ((GotNothing) (nil int)) ((GotPortsc v) (nil int))))
+
+; A Transfer Event, to its endpoint, default or opened.
+(def transfer_event ((h Hc) (t Trb) (bytes (list int))) Did
+  (match (dev_in_slot (hc_devs h) (trb_slot t))
+    ((None) (Did h (nil Act)))
+    ((Some d)
+      (if (eq (trb_endpoint t) 1)
+          (ctl_event h d (trb_code t) (trb_residual t) bytes)
+          (match (pipe_at (dev_pipes d) (trb_endpoint t))
+            ((None) (Did h (nil Act)))
+            ((Some pp) (pipe_event h d pp (trb_code t) bytes)))))))
+
+; --------------------------------------------------------------- requests
+
+; A control transfer for a client, its answer to reply.
+(def hc_control ((h Hc) (dev int) (setup (list int)) (out (list int)) (len int) (reply int)) Did
+  (match (dev_numbered (hc_devs h) dev)
+    ((None) (Did h (cons (ActAnswer reply (error_reply "no such device")) (nil Act))))
+    ((Some d)
+      (if (not (dev_ready d))
+          (Did h (cons (ActAnswer reply (error_reply "no such device")) (nil Act)))
+          (if (gt (max len (length out)) (buffer_max))
+              (Did h (cons (ActAnswer reply (error_reply "too long")) (nil Act)))
+              (dev_control h d (Ctl (ForClient reply) setup out len)))))))
+
+; IN endpoint ep of device dev opened for port o: a page for its ring
+; and Configure Endpoint sent, o told when it is done; or why not.
+(def hc_open ((h Hc) (dev int) (ep int) (o int)) Did
+  (match (dev_numbered (hc_devs h) dev)
+    ((None) (Did h (cons (ActAnswer o (error_reply "no such device")) (nil Act))))
+    ((Some d)
+      (match (usb_config_of (dev_config d))
+        ((Err e) (Did h (cons (ActAnswer o (error_reply e)) (nil Act))))
+        ((Ok c)
+          (match c
+            ((UsbConfig v total ifs)
+              (match (usb_endpoint_at ifs ep)
+                ((None) (Did h (cons (ActAnswer o (error_reply "no such endpoint")) (nil Act))))
+                ((Some e) (pipe_opened h d e o))))))))))
+
+; hc_open's rest, for d's endpoint e.
+(def pipe_opened ((h Hc) (d Dev) (e UsbEndpoint) (o int)) Did
+  (let dci (dci_of (usb_endpoint_addr e))
+    (if (if (not (usb_ep_is_in (usb_endpoint_addr e))) true (eq (usb_endpoint_kind e) (usb_ep_control)))
+        (Did h (cons (ActAnswer o (error_reply "not an IN endpoint")) (nil Act)))
+        (match (pipe_at (dev_pipes d) dci)
+          ((Some pp) (Did h (cons (ActAnswer o (error_reply "open already")) (nil Act))))
+          ((None)
+            (match (hc_take h 1)
+              ((TakenNone) (Did h (cons (ActAnswer o (error_reply "no memory")) (nil Act))))
+              ((Taken h2 ps zero)
+                (let pp (Pipe dci e (ring_new (head ps) (hc_bus h2 (head ps)) (transfer_slots)) o false)
+                  (let ps2 (pipes_put (dev_pipes d) pp)
+                    (then_acts zero
+                      (hc_command (hc_put_dev h2 (dev_with_pipes d ps2 (pipes_entries ps2 1))) (CmdConfigure (dev_slot d) dci o))))))))))))
+
+; Endpoint ep of device dev closed: dropped, its page given back once the
+; controller has let it go, and reply told; 0 tells no one.
+(def hc_close ((h Hc) (dev int) (ep int) (reply int)) Did
+  (match (dev_numbered (hc_devs h) dev)
+    ((None) (Did h (if (gt reply 0) (cons (ActAnswer reply (error_reply "no such device")) (nil Act)) (nil Act))))
+    ((Some d)
+      (let dci (dci_of ep)
+        (match (pipe_at (dev_pipes d) dci)
+          ((None) (Did h (if (gt reply 0) (cons (ActAnswer reply (error_reply "not open")) (nil Act)) (nil Act))))
+          ((Some pp)
+            (let ps (pipes_without (dev_pipes d) dci)
+              (hc_command (hc_put_dev h (dev_with_pipes d ps (pipes_entries ps 1)))
+                          (CmdDrop (dev_slot d) dci (ring_page (pipe_ring (dev_pipes d) dci (ring_new 0 0 1))) reply)))))))))
+
+; Every endpoint port o opened closed, as when o is gone.
+(def hc_opener_gone ((h Hc) (o int)) Did
+  (opener_gone_from h (hc_devs h) o (nil Act)))
+
+; hc_opener_gone's loop: the first pipe of o's among ds closed, then
+; again from the start, after acc's acts.
+(def opener_gone_from ((h Hc) (ds (list Dev)) (o int) (acc (list Act))) Did
+  (if (is_empty ds)
+      (Did h acc)
+      (match (pipes_of_opener (dev_pipes (head ds)) o)
+        ((None) (opener_gone_from h (tail ds) o acc))
+        ((Some pp)
+          (match pp
+            ((Pipe dci ep r po run)
+              (match (hc_close h (dev_num (head ds)) (usb_endpoint_addr ep) 0)
+                ((Did h2 acts) (opener_gone_from h2 (hc_devs h2) o (append acc acts))))))))))
+
+; The first pipe of ps o opened, or none.
+(def pipes_of_opener ((ps (list Pipe)) (o int)) (Option Pipe)
+  (if (is_empty ps) ((None Pipe)) (match (head ps) ((Pipe d ep r po run) (if (eq po o) (Some (head ps)) (pipes_of_opener (tail ps) o))))))
+
+; The devices of h that are ready, as clients are told of them.
+(def hc_ready ((h Hc)) (list UsbAttached) (ready_onto (hc_devs h) (nil UsbAttached)))
+
+; hc_ready's loop: each ready device of ds, after the reversed acc.
+(def ready_onto ((ds (list Dev)) (acc (list UsbAttached))) (list UsbAttached)
+  (if (is_empty ds) (rev acc) (ready_onto (tail ds) (if (dev_ready (head ds)) (cons (dev_attached (head ds)) acc) acc))))
+
+; The device numbered dev on h, if it is ready.
+(def hc_device ((h Hc) (dev int)) (Option Dev)
+  (match (dev_numbered (hc_devs h) dev)
+    ((None) ((None Dev)))
+    ((Some d) (if (dev_ready d) (Some d) ((None Dev))))))

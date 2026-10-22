@@ -88,7 +88,12 @@ library's `Trap` (`l0 doc Trap`), answering its threads' system calls with
 on whichever CPU `(machine)` says it is, and sets the timer, and waits for and
 ends interrupts, with those of section 6.14. It gives a device memory to
 read and write itself, by DMA, as a frame, whose address `frame_address`
-gives to write into the device's registers. `(frame_free_count)` says how
+gives to write into the device's registers, and `(frame_sync f 1)` before
+the device reads the frame and `(frame_sync f 2)` before reading what it
+wrote, on every board, since on some DMA does not see the CPU's caches.
+The board's own devices include the PCIe ECAM and MMIO window on the
+aarch64 board, for a driver that finds and sets up a PCIe device
+itself. `(frame_free_count)` says how
 many pages are left for frames and tables, so it can refuse work that would
 not fit; the pages standard input was loaded into join them once a read
 reaches its end. The board's own devices
@@ -103,7 +108,8 @@ needs, beside the firmware's own: the image, `config.txt`, `cmdline.txt`
 for the arguments, and the input as an initramfs. Its standard output and
 error are its debug UART; a status that is not 0 is written there, and the
 board is powered off. Nothing of it has run on a board yet (changelog, "The
-Raspberry Pi 5"), and its DMA is not coherent.
+Raspberry Pi 5"), and its DMA is not coherent, so `frame_sync` matters
+there. RP1's peripherals, its USB controllers among them, are a region.
 
 `l0 build --target proc` builds a program as a process for a kernel on
 aarch64, or riscv64 with `--arch riscv64`, in an address space of its own, reaching the kernel through the

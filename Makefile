@@ -84,10 +84,12 @@ KERNEL := $(COMMON) common/queue.l0 kernel/memory.l0 kernel/elf.l0 kernel/mounts
 CLI    := user/lib/sys/cli.l0
 ULIB   := $(COMMON) common/queue.l0 $(CLI) user/lib/sys/l0s.l0 user/lib/sys/server.l0
 
-# A terminal's line editing, for the terminals; and the virtio-mmio
-# transports and queues, for the virtio drivers.
+# A terminal's line editing, for the terminals; the virtio-mmio
+# transports and queues, for the virtio drivers; and the US keyboard's
+# layout, for the keyboards' drivers.
 TTY    := user/lib/sys/tty.l0
 VIRTIO := user/lib/sys/virtio.l0
+KEYMAP := user/lib/sys/keymap.l0
 
 # The process table as ps and procmon show it.
 PROCS  := user/lib/sys/procs.l0
@@ -123,6 +125,13 @@ NICLIB  := user/lib/proto/nic.l0
 DNSLIB  := user/lib/format/dns.l0
 INETLIB := $(NICLIB) $(DNSLIB) $(RANDOM) user/lib/proto/inet.l0
 
+# USB: its descriptors and requests, and the usb protocol, which the
+# host controller's driver serves to the class drivers, over them; and
+# the pci protocol, which the PCIe bus's server answers drivers with.
+USBDESC := user/lib/format/usbdesc.l0
+USBLIB  := $(USBDESC) user/lib/proto/usb.l0
+PCILIB  := user/lib/proto/pci.l0
+
 # The partition table, GPT, and the UUIDs and CRC-32 it needs.
 UUIDLIB := user/lib/format/uuid.l0
 CRC32   := user/lib/format/crc32.l0
@@ -138,7 +147,11 @@ UI_WINDOW := user/lib/ui/window.l0
 UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER)
-LIBS_virtio-input := $(VIRTIO)
+LIBS_virtio-input := $(VIRTIO) $(KEYMAP)
+LIBS_pcie       := $(PCILIB)
+LIBS_xhci       := $(USBLIB) $(PCILIB)
+LIBS_usb-hid    := $(USBLIB) $(KEYMAP)
+LIBS_lsusb      := $(USBLIB)
 LIBS_virtio-blk := $(VIRTIO)
 LIBS_virtio-net := $(VIRTIO) $(NICLIB)
 LIBS_virtio-rng := $(VIRTIO) $(RANDOM)
@@ -210,7 +223,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: all check test test-virt e2e images root initramfs screen-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
+.PHONY: all check test test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
 
 all: check test test-virt e2e
 
@@ -252,6 +265,7 @@ test: sample
 	$(L0) test $(ULIB) $(PATHS) user/lib/sys/paths_test.l0
 	$(L0) test $(ULIB) $(VIRTIO) user/lib/sys/virtio_test.l0
 	$(L0) test $(ULIB) $(TTY) user/lib/sys/tty_test.l0
+	$(L0) test $(BASE) $(KEYMAP) user/lib/sys/keymap_test.l0
 	$(L0) test $(ULIB) $(RECT) user/lib/gfx/rect_test.l0
 	$(L0) test $(ULIB) $(RENDER) user/lib/gfx/render_test.l0
 	$(L0) test $(ULIB) $(CLOCK) user/lib/proto/clock_test.l0
@@ -262,10 +276,13 @@ test: sample
 	$(L0) test $(ULIB) $(NICLIB) user/lib/proto/nic_test.l0
 	$(L0) test $(ULIB) $(INETLIB) user/lib/proto/inet_test.l0
 	$(L0) test $(ULIB) $(RANDOM) user/lib/proto/random_test.l0
+	$(L0) test $(ULIB) $(USBLIB) user/lib/proto/usb_test.l0
+	$(L0) test $(ULIB) $(PCILIB) user/lib/proto/pci_test.l0
 	$(L0) test $(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0
 	$(L0) test $(BASE) $(L0FS) user/lib/format/l0fs_test.l0
 	$(L0) test $(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0
 	$(L0) test $(BASE) $(DNSLIB) user/lib/format/dns_test.l0
+	$(L0) test $(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0
 	$(L0) test $(BASE) $(CRC32) user/lib/format/crc32_test.l0
 	$(L0) test $(BASE) $(PARTS) user/lib/format/gpt_test.l0
 	$(L0) test $(BASE) $(PPM) user/lib/format/ppm_test.l0
@@ -391,6 +408,13 @@ screen-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/screen-etc)
 	tools/mkinitramfs $(BUILD)/screen.cpio $(BUILD)/screen-etc $(ROOT)
 
+# The same desktop on USB's keyboard and mouse, for tests/usb.sh, booted
+# with QEMU_INPUT=usb.
+usb-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/usb-etc && cp -R tests/usb/etc $(BUILD)/usb-etc
+	$(call stage_etc,$(BUILD)/usb-etc)
+	tools/mkinitramfs $(BUILD)/usb.cpio $(BUILD)/usb-etc $(ROOT)
+
 # What tests/vt.sh boots: the demo's etc, with tests/vt/etc/system over
 # its own, so that two terminals run whatever the demo starts.
 vt-initramfs: images root $(ETC_DEPS)
@@ -413,11 +437,12 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/launcher-install-etc)
 	tools/mkinitramfs $(BUILD)/launcher-install.cpio $(BUILD)/launcher-install-etc $(ROOT)
 
-e2e: images root initramfs screen-initramfs vt-initramfs disks-initramfs launcher-install-initramfs
+e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs
 	tests/e2e.sh
 	tests/gpu-screen.sh
 	tests/hidpi.sh
 	tests/keyboard.sh
+	tests/usb.sh
 	tests/vt.sh
 	tests/widgets.sh
 	tests/resize.sh

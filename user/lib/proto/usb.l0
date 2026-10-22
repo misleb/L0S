@@ -1,0 +1,200 @@
+; usb.l0 -- the usb protocol: what the host controller's driver,
+; user/sbin/xhci, serves on the port it registers as usb, for the class
+; drivers (usb-hid) and lsusb. The driver enumerates every device itself,
+; and configures it in its first configuration; a class driver claims an
+; interface of it, sets it up with control transfers, and opens its
+; endpoints. A device is DEV, a number the driver gives it when it is
+; plugged in and never gives again.
+;
+;   listen                   ok; then a notice to the reply port for each
+;                            device there and each plugged in later, uat:
+;                            DEV, its vendor and product ids, its speed;
+;                            and udt: DEV, when one is unplugged
+;   devices                  the devices there, a line each: DEV VID PID
+;                            SPEED, in decimal; nothing if there are none
+;   descriptor DEV           its device descriptor's bytes, in hex
+;   config DEV               its configuration's bytes, all wTotalLength
+;                            of them, in hex
+;   claim DEV IFACE          ok, the interface the asker's, whose reply
+;                            port goes on holding it until it is gone; or
+;                            error: taken
+;   control DEV TYPE REQ VALUE INDEX LEN [BYTE...]
+;                            a control transfer to the default endpoint:
+;                            for an IN request, the LEN bytes or fewer the
+;                            device gave, in hex; for an OUT one, ok,
+;                            having sent the BYTEs, LEN of them
+;   open DEV EP              ok, and the IN endpoint EP of an interface the
+;                            asker claimed polled: each report it gives is
+;                            a notice to the reply port, uin: DEV, EP, and
+;                            the bytes
+;   close DEV EP             ok, and EP no longer polled
+;
+; Each is a request (l0s.l0), its words separated by spaces, every
+; number in decimal; the reply is as said above, or error: WHY, where WHY
+; is stall for a request the device refused and gone for a device
+; unplugged. Notices are a tag of three bytes and their u32s, as the input
+; drivers' are. Speeds are usbdesc.l0's. Linked into the driver and its
+; clients, with usbdesc.l0, by the Makefile's LIBS_ lists.
+
+; ----------------------------------------------------------------- notices
+
+; A device plugged in, or there when listen was asked: its number, its
+; vendor and product ids, and its speed.
+(data UsbAttached (UsbAttached int int int int))
+
+; "uat" and its four fields, each a u32.
+(def usb_attach_notice ((a UsbAttached)) (list int)
+  (match a ((UsbAttached dev vid pid speed) (append "uat" (append (u32_le dev) (append (u32_le vid) (append (u32_le pid) (u32_le speed))))))))
+
+; The device m says was plugged in, or none if m is not that notice.
+(def usb_attached_of ((m Message)) (Option UsbAttached)
+  (match (tagged_u32s m "uat" 4)
+    ((Some ws) (Some (UsbAttached (nth ws 0) (nth ws 1) (nth ws 2) (nth ws 3))))
+    ((None) ((None UsbAttached)))))
+
+; A device unplugged: "udt" and its number.
+(def usb_detach_notice ((dev int)) (list int) (append "udt" (u32_le dev)))
+
+; The device m says was unplugged, or none if m is not that notice.
+(def usb_detached_of ((m Message)) (Option int)
+  (match (tagged_u32s m "udt" 1)
+    ((Some ws) (Some (head ws)))
+    ((None) ((None int)))))
+
+; A report from an endpoint opened: the device, the endpoint's address,
+; and the bytes it gave.
+(data UsbReport (UsbReport int int (list int)))
+
+; "uin", the device and the endpoint, each a u32, then the bytes.
+(def usb_report_notice ((r UsbReport)) (list int)
+  (match r ((UsbReport dev ep bs) (append "uin" (append (u32_le dev) (append (u32_le ep) bs))))))
+
+; The report m holds, or none if m is not one.
+(def usb_report_of ((m Message)) (Option UsbReport)
+  (match m
+    ((Message from payload)
+      (if (if (ge (length payload) 11) (starts_with payload "uin") false)
+          (let b (bytes_from_list payload)
+            (Some (UsbReport (le_u32 b 3) (le_u32 b 7) (drop payload 11))))
+          ((None UsbReport))))
+    ((RecvFailed) ((None UsbReport)))))
+
+; -------------------------------------------------------------------- hex
+
+; bs as hex, two lowercase digits a byte, as the driver answers bytes.
+(def usb_hex ((bs (list int))) (list int) (rev (usb_hex_onto bs (nil int))))
+
+; usb_hex's loop: each byte's digits pushed onto the reversed acc.
+(def usb_hex_onto ((bs (list int)) (acc (list int))) (list int)
+  (if (is_empty bs) acc (usb_hex_onto (tail bs) (push (hex_digits (head bs) 2) acc))))
+
+; The bytes s spells, two hex digits each, or none: an answer with bytes
+; read back.
+(def usb_unhex ((s (list int))) (Option (list int))
+  (usb_unhex_onto s (nil int)))
+
+; usb_unhex's loop: each pair of digits of s a byte, after the reversed
+; acc.
+(def usb_unhex_onto ((s (list int)) (acc (list int))) (Option (list int))
+  (if (is_empty s)
+      (Some (rev acc))
+      (if (is_empty (tail s))
+          ((None (list int)))
+          (let hi (hex_val (head s))
+            (let lo (hex_val (head (tail s)))
+              (if (if (lt hi 0) true (lt lo 0))
+                  ((None (list int)))
+                  (usb_unhex_onto (tail (tail s)) (cons (add (mul hi 16) lo) acc))))))))
+
+; ------------------------------------------------------------------ asking
+
+; The usb server, as a client holds it: its port and a port for its
+; replies; or why there is none.
+(data Usb (Usb int int) (NoUsb (list int)))
+
+; The usb server, once the driver has registered, within 5 seconds; or
+; why not.
+(def usb_open () Usb
+  (match (name_wait "usb" 5000000000)
+    ((NotFound) (NoUsb "no usb; is xhci running?"))
+    ((Found port) (Usb port (port_new)))))
+
+; The answer to body, or error: WHY.
+(def usb_ask ((u Usb) (body (list int))) (list int)
+  (match u
+    ((Usb port rp)
+      (match (port_ask port rp body "usb")
+        ((Asked from r) r)
+        ((AskFailed why) (error_reply why))))
+    ((NoUsb why) (error_reply why))))
+
+; The answer, as an error's reason, or empty for ok.
+(def usb_error ((r (list int))) (list int) (reply_why r "usb"))
+
+; op and its numbers, as a request's body.
+(def usb_request ((op (list int)) (ns (list int))) (list int)
+  (unwords (cons op (numbers_words ns))))
+
+; The bytes an answer of bytes in hex gives, or why not.
+(def usb_bytes_of ((r (list int))) (Result (list int) (list int))
+  (if (starts_with r "error: ")
+      ((Err (list int) (list int)) (drop r 7))
+      (match (usb_unhex r)
+        ((Some bs) ((Ok (list int) (list int)) bs))
+        ((None) ((Err (list int) (list int)) (append "usb said " r))))))
+
+; dev's device descriptor, or why not.
+(def usb_descriptor ((u Usb) (dev int)) (Result (list int) (list int))
+  (usb_bytes_of (usb_ask u (usb_request "descriptor" (cons dev (nil int))))))
+
+; dev's configuration, all of it, or why not.
+(def usb_config ((u Usb) (dev int)) (Result (list int) (list int))
+  (usb_bytes_of (usb_ask u (usb_request "config" (cons dev (nil int))))))
+
+; An IN control transfer of up to len bytes: what dev gave, or why not.
+(def usb_control_in ((u Usb) (dev int) (type int) (req int) (value int) (index int) (len int)) (Result (list int) (list int))
+  (usb_bytes_of (usb_ask u (usb_request "control" (cons dev (cons type (cons req (cons value (cons index (cons len (nil int)))))))))))
+
+; An OUT control transfer of bs: empty, or why not.
+(def usb_control_out ((u Usb) (dev int) (type int) (req int) (value int) (index int) (bs (list int))) (list int)
+  (usb_error (usb_ask u (usb_request "control" (cons dev (cons type (cons req (cons value (cons index (cons (length bs) bs))))))))))
+
+; The asking process's own: interface iface of dev, claimed with its
+; reply port, which the driver tells of what it opens; empty, or why not.
+(def usb_claim ((u Usb) (dev int) (iface int)) (list int)
+  (usb_error (usb_ask u (usb_request "claim" (cons dev (cons iface (nil int)))))))
+
+; Endpoint ep of dev polled, its reports to the reply port; empty, or why
+; not.
+(def usb_open_endpoint ((u Usb) (dev int) (ep int)) (list int)
+  (usb_error (usb_ask u (usb_request "open" (cons dev (cons ep (nil int)))))))
+
+; Notices of every device to the reply port of u, from now on, for the
+; devices there now first: empty, or why not.
+(def usb_listen ((u Usb)) (list int)
+  (usb_error (usb_ask u "listen")))
+
+; The reply port u's answers and notices come to, or -1 for none.
+(def usb_reply_port ((u Usb)) int (match u ((Usb port rp) rp) ((NoUsb why) -1)))
+
+; ----------------------------------------------------------------- devices
+
+; The devices answer lists, from its lines of four numbers; a line that
+; is not one is passed over.
+(def usb_devices_of ((r (list int))) (list UsbAttached)
+  (usb_devices_onto (lines r) (nil UsbAttached)))
+
+; usb_devices_of's loop: each line of ls that is a device's, after the
+; reversed acc.
+(def usb_devices_onto ((ls (list (list int))) (acc (list UsbAttached))) (list UsbAttached)
+  (if (is_empty ls)
+      (rev acc)
+      (match (word_numbers (split_spaces (head ls)))
+        ((Some ns)
+          (usb_devices_onto (tail ls)
+            (if (eq (length ns) 4) (cons (UsbAttached (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)) acc) acc)))
+        ((None) (usb_devices_onto (tail ls) acc)))))
+
+; A device as a line of the devices answer, its newline after it.
+(def usb_device_line ((a UsbAttached)) (list int)
+  (match a ((UsbAttached dev vid pid speed) (append (usb_request (digits dev) (cons vid (cons pid (cons speed (nil int))))) "\n"))))

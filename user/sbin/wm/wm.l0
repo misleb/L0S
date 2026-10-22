@@ -581,12 +581,7 @@
       (if (if (eq from kp) (gt kp 0) false)
           (keyed v payload)
           (if (if (eq from pp) (gt pp 0) false)
-              (match (pointer_event_of (Message from payload))
-                ((Some ev) (pointed v ev))
-                ((None)
-                  (match (wheel_event_of (Message from payload))
-                    ((Some ev) (wheeled v ev))
-                    ((None) v))))
+              (pointer_received v (Message from payload))
               (if (eq from 0)
                   (match (exit_of (Message from payload))
                     ((Exited pid status) (gone v pid))
@@ -596,6 +591,19 @@
                         ((Some t) (ticked v t))
                         ((None) v))
                       (replied v port from payload))))))))
+
+; What the pointer's driver sent: a tablet's place, a mouse's motion, or
+; a wheel's turn.
+(def pointer_received ((v Wm) (m Message)) Wm
+  (match (pointer_event_of m)
+    ((Some ev) (pointed v ev))
+    ((None)
+      (match (pointer_motion_of m)
+        ((Some ev) (nudged v ev))
+        ((None)
+          (match (wheel_event_of m)
+            ((Some ev) (wheeled v ev))
+            ((None) v)))))))
 
 ; A key, to the window in front; or the launcher's, while it is shown.
 (def keyed ((v Wm) (payload (list int))) Wm
@@ -1144,20 +1152,40 @@
 
 ; ---------------------------------------------------------------- pointer
 
+; A tablet's report: the pointer at its place, scaled to the screen.
 (def pointed ((v Wm) (ev PointerEvent)) Wm
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
       (match ev
-        ((PointerEvent px py buttons)
-          (let x (scaled px w)
-            (let y (scaled py h)
-              (let m (display_move d x y)
-                (match ptr
-                  ((Ptr ox oy was over grab ac shape)
-                    (pointer_shaped
-                      (forwarded (moved (Wm d w h desk font bg ws n (Ptr x y buttons over grab ac shape) drag kp pp bar)
-                                        x y (bit_and was 1) (bit_and buttons 1))
-                                 was))))))))))))
+        ((PointerEvent px py buttons) (pointer_at v (scaled px w) (scaled py h) buttons))))))
+
+; A mouse's report: the wheel's turn, if it turned, where the pointer is,
+; then the pointer moved by it, a pixel a count, kept on the screen.
+(def nudged ((v Wm) (ev PointerMotion)) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match ptr
+        ((Ptr x y b over grab ac shape)
+          (match ev
+            ((PointerMotion dx dy buttons wdx wdy)
+              (let v2 (if (if (eq wdx 0) (eq wdy 0) false) v (wheel_at v x y wdx wdy))
+                (pointer_at v2 (clamp (add x dx) 0 (sub w 1)) (clamp (add y dy) 0 (sub h 1)) buttons)))))))))
+
+; v from lo to hi.
+(def clamp ((v int) (lo int) (hi int)) int (max lo (min v hi)))
+
+; The pointer at x, y on the screen with buttons down: shown there, what
+; it is over or dragging told, and its shape as what it is over says.
+(def pointer_at ((v Wm) (x int) (y int) (buttons int)) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (let m (display_move d x y)
+        (match ptr
+          ((Ptr ox oy was over grab ac shape)
+            (pointer_shaped
+              (forwarded (moved (Wm d w h desk font bg ws n (Ptr x y buttons over grab ac shape) drag kp pp bar)
+                                x y (bit_and was 1) (bit_and buttons 1))
+                         was))))))))
 
 ; The pointer shown as what it is over says, as GNOME's is: a resize
 ; pointer over a window's edge, or while one is dragged, the arrow
@@ -1247,12 +1275,16 @@
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
       (match ev
-        ((WheelEvent px py dx dy)
-          (let x (scaled px w)
-            (let y (scaled py h)
-              (match (if (launcher_busy v) ((None Win)) (pointer_target ws drag x y (ptr_grab ptr)))
-                ((None) v)
-                ((Some t) (let s (port_tell (win_port t) (wheel_notice (wheel_relative t x y ev))) v))))))))))
+        ((WheelEvent px py dx dy) (wheel_at v (scaled px w) (scaled py h) dx dy))))))
+
+; The wheel turned dx across and dy down with the pointer at x, y on the
+; screen.
+(def wheel_at ((v Wm) (x int) (y int) (dx int) (dy int)) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match (if (launcher_busy v) ((None Win)) (pointer_target ws drag x y (ptr_grab ptr)))
+        ((None) v)
+        ((Some t) (let s (port_tell (win_port t) (wheel_notice (wheel_relative t x y (WheelEvent x y dx dy)))) v))))))
 
 (def ptr_grab ((p Ptr)) int (match p ((Ptr x y b over grab ac shape) grab)))
 

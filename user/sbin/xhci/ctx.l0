@@ -1,0 +1,85 @@
+; ctx.l0 -- xHCI's contexts (xHCI 1.2, section 6.2): the slot context,
+; which says where a device is and how fast, and an endpoint context for
+; each endpoint, which says what kind it is, how big its packets are, how
+; often it is polled, and where its ring is. The driver writes them into
+; a device's input context, an Input Control Context saying which to take
+; first, and the controller keeps its own copy in the device's output
+; context. Each context is 32 bytes, or 64 on a controller whose CSZ says
+; so (regs.l0's context_size_of), of which only the first 32 are used.
+; Purely, as the u32s to write.
+
+; ------------------------------------------------------------- endpoints
+
+; An endpoint's Device Context Index, by which contexts and doorbells
+; know it: 1 for the default endpoint, else its number twice, plus 1 for
+; IN.
+(def dci_of ((addr int)) int
+  (let n (usb_ep_number addr)
+    (if (eq n 0) 1 (add (mul n 2) (if (usb_ep_is_in addr) 1 0)))))
+
+; An endpoint context's EP Type by the transfer type, usbdesc.l0's, and
+; direction: 4 for control, 1 to 3 for isochronous, bulk and interrupt
+; OUT, and 5 to 7 IN.
+(def ep_type ((kind int) (in bool)) int
+  (if (eq kind (usb_ep_control)) 4 (add kind (if in 4 0))))
+
+; An endpoint context's Interval, as 2 to the Interval times 125 µs, by
+; the device's speed, usbdesc.l0's, and the descriptor's bInterval: at
+; high speed and up, for interrupt and isochronous endpoints, bInterval
+; less 1, from 0 to 15; at low and full speed, a period of bInterval
+; milliseconds, which is 8 times as many 125 µs, rounded down to a power
+; of 2, from 2^3 to 2^10; for any other endpoint, 0.
+(def ep_interval ((speed int) (kind int) (binterval int)) int
+  (if (if (eq kind (usb_ep_interrupt)) false (not (eq kind (usb_ep_iso))))
+      0
+      (if (ge speed (usb_speed_high))
+          (max 0 (min 15 (sub binterval 1)))
+          (max 3 (min 10 (floor_log2 (mul (max binterval 1) 8)))))))
+
+; The largest k with 2^k at most n, n at least 1.
+(def floor_log2 ((n int)) int (if (le n 1) 0 (add 1 (floor_log2 (bit_shr n 1)))))
+
+; -------------------------------------------------------------- contexts
+
+; Where context i is in an input context of contexts csz bytes each: 0
+; the Input Control Context, 1 the slot's, 1 + DCI an endpoint's.
+(def input_ctx_at ((csz int) (i int)) int (mul csz i))
+
+; The Input Control Context: the contexts to drop and to add, as bits,
+; bit 0 the slot's and bit DCI an endpoint's.
+(def input_control ((drop int) (add_flags int)) (list W32)
+  (cons (W32 0 drop) (cons (W32 4 add_flags) (nil W32))))
+
+; The slot context, in an input context of csz-byte contexts: the speed,
+; the last DCI in use, and the root hub port the device is on; a route
+; string of 0, as for a device on a root port.
+(def slot_context ((csz int) (speed int) (entries int) (port int)) (list W32)
+  (let at (input_ctx_at csz 1)
+    (cons (W32 at (bit_or (bit_shl entries 27) (bit_shl speed 20)))
+    (cons (W32 (add at 4) (bit_shl port 16))
+    (cons (W32 (add at 8) 0)
+    (cons (W32 (add at 12) 0) (nil W32)))))))
+
+; An endpoint's context, at DCI dci: its EP Type, largest packet,
+; Interval, and its ring at ring with the ring's cycle bit as the
+; Dequeue Cycle State; 3 errors allowed before it halts; an average TRB
+; of avg bytes; and, for a periodic endpoint, its Max ESIT Payload, the
+; bytes it moves at most an interval, its packet's size for a USB 2 one.
+(def ep_context ((csz int) (dci int) (type int) (mps int) (interval int) (ring int) (cycle int) (avg int)) (list W32)
+  (let at (input_ctx_at csz (add dci 1))
+    (let esit (if (eq (bit_and type 1) 1) mps 0)                     ; the periodic types are odd
+      (cons (W32 at (bit_shl interval 16))
+      (cons (W32 (add at 4) (bit_or (bit_shl 3 1) (bit_or (bit_shl type 3) (bit_shl mps 16))))
+      (cons (W32 (add at 8) (bit_or (bit_and ring 4294967280) cycle))
+      (cons (W32 (add at 12) (bit_and (bit_shr ring 32) 4294967295))
+      (cons (W32 (add at 16) (bit_or avg (bit_shl esit 16))) (nil W32)))))))))
+
+; The default endpoint's context: control, its packet's size mps0, its
+; ring, an average TRB of 8 bytes.
+(def ep0_context ((csz int) (mps0 int) (r Ring)) (list W32)
+  (ep_context csz 1 (ep_type (usb_ep_control) false) mps0 0 (ring_addr r) (ring_cycle r) 8))
+
+; The 64-bit bus address addr as two u32s at off of a page, low first,
+; as the DCBAA's entries, ERST's, and the scratchpad array's are.
+(def addr_words ((off int) (addr int)) (list W32)
+  (cons (W32 off (bit_and addr 4294967295)) (cons (W32 (add off 4) (bit_and (bit_shr addr 32) 4294967295)) (nil W32))))

@@ -603,7 +603,10 @@ Input:
 - **Keys** go to the front window's client, as the `KeyEvent` notices
   the keyboard driver sends.
 - **The pointer**'s place, 0 to 32767 on each axis from the tablet, is
-  scaled to the screen and sent to the driver as a `move`.
+  scaled to the screen and sent to the driver as a `move`. A mouse's
+  report, a `PointerMotion` from `usb-hid mouse`, moves it instead from
+  where it is, a pixel a count, kept on the screen; its wheel's turn is
+  told first, where the pointer was (see [USB](#usb)).
 - **A left press** on a window brings it to the front. On its title bar,
   the press starts a drag: the window follows the pointer until the
   button is released. The screen is rebuilt for it once 20 ms have
@@ -1211,6 +1214,90 @@ clock's mixer, and `inet`, which keys TCP's first sequence numbers with
 a word of it (see [The network](#the-network)), falling back to the
 clock alone. `run random [N]` writes N bytes.
 
+### USB
+
+USB is how a keyboard and a mouse reach a Raspberry Pi 5, whose ports
+are on RP1, the southbridge behind PCIe: two Synopsys DWC3 controllers,
+each an xHCI in host mode. QEMU has no Pi 5, but its virt board takes a
+`qemu-xhci` on PCIe, with a `usb-kbd` and a `usb-mouse` on it
+(`QEMU_INPUT=usb` in `tools/qemu-boot.sh`). So one driver serves both,
+and only how it finds its controllers differs:
+
+```
+ usb-hid keyboard --+                          +-- wm, vt, keys: keyboard and pointer,
+ usb-hid mouse -----+  usb (proto/usb.l0)      |   as from virtio-input
+                    v                          |
+                  xhci (dev): every controller, rings, ports, enumeration,
+                    |         control transfers, IN endpoints polled
+                    |  pci (proto/pci.l0), QEMU only
+                  pcie (dev): the ECAM read, BARs put in the MMIO window
+```
+
+**It runs on QEMU** (`tests/e2e/usb`, `tests/usb.sh`): the keyboard
+types in the shell and the mouse moves the pointer and clicks. L0's
+runtime gives the regions it needs, QEMU's PCIe ECAM and MMIO window and
+the Pi 5's RP1, and `frame_sync`, which `dma_sync` (call 293) offers
+drivers, for the Pi's DMA, which does not see the CPU's caches; L0S
+asked for them in [probes/usb](probes/usb/REQUEST-pcie-rp1-cache.md).
+Everything the stack decides is pure and tested on the host: `xhci`'s
+`core.l0` is a state machine of one controller, driven in its tests
+through usb-kbd's whole enumeration, a stall, an unplug and a full-speed
+device, and its shell only carries out the writes, doorbells and
+messages it says, cleaning each page of the controller's memory as it
+writes it and cleaning and invalidating it before it reads it.
+
+**The usb protocol** ([user/lib/proto/usb.l0](user/lib/proto/usb.l0)),
+which `xhci` serves as `usb`; a device is DEV, a number never given
+twice, and numbers are decimal:
+
+| Request | Answer |
+|---|---|
+| `listen` | `ok`; then to the reply port a notice `uat` of each device there and each plugged in later (DEV, vendor, product, speed), and `udt` of each unplugged |
+| `devices` | a line `DEV VID PID SPEED` for each device |
+| `descriptor DEV`, `config DEV` | its device descriptor's bytes, or its first configuration's, all of them, in hex |
+| `claim DEV IFACE` | `ok`, the interface the asker's reply port's until it is gone; or `error: taken` |
+| `control DEV TYPE REQ VALUE INDEX LEN [BYTE...]` | a control transfer: for IN, the bytes the device gave, in hex; for OUT, `ok` once the BYTEs, LEN of them, are sent; `error: stall` if the device refused it |
+| `open DEV EP` | `ok`, and IN endpoint EP of an interface the asker claimed polled: each report a notice `uin` (DEV, EP, the bytes) to the reply port |
+| `close DEV EP` | `ok` |
+
+**The pci protocol** ([user/lib/proto/pci.l0](user/lib/proto/pci.l0)),
+which `pcie` serves as `pci`:
+
+| Request | Answer |
+|---|---|
+| `devices` | a line for each function: `BDF VENDOR DEVICE CLASS IRQ` and each of its six BARs' base and size |
+| `find CLASS` | the lines of those of the 24-bit class CLASS, an xHCI's 787248 (0x0C0330) |
+
+`xhci` brings each device up alone: a USB 2 port is reset until it is
+enabled; Enable Slot gives it a slot, Address Device its address; then
+GET_DESCRIPTOR reads 8 bytes, whose packet size Evaluate Context gives the
+default endpoint if it differs, then all 18, then 9 of the configuration
+and all wTotalLength (2 KB at most), and SET_CONFIGURATION chooses the
+first. Commands go one at a time, and a stalled default endpoint is
+reset and sent past the transfer. Each ring is a DMA page, 127 TRBs a
+pass and its buffer in the second half, and a TD never straddles the
+Link TRB. A device costs 3 pages, an endpoint opened 1, from each
+controller's 64.
+
+`usb-hid` uses HID's boot protocol only: a keyboard's 8-byte reports,
+compared with the last to find what was pressed and let go (Linux's key
+codes, then `keymap.l0`'s characters), and a mouse's buttons, movement
+and wheel. A held key repeats in the driver, as USB keyboards leave to
+the host. A report descriptor is never read, so a tablet, a wheel past
+the boot report's, or a key outside the boot keyboard's 104 usages is
+not seen; nor is anything behind a hub.
+
+**On the Pi 5** (`xhci rp1`; L0S does not boot there yet): the
+firmware must leave RP1 set up (`pciex4_reset=0` in `config.txt`); the
+DWC3s are put in host mode, their PHYs kept from suspending, as RP1's
+device tree's quirks say; and a device reaches memory 0x10_0000_0000
+above the CPU's address (bcm2712's `dma-ranges` for RP1). The first run
+should check, on the serial line: that each controller's line comes
+(HCIVERSION, ports, slots, scratchpads, contexts' size), that a key
+plugged in gives a `device` line, and that those agree with Linux's view
+of the same board, its `dma-ranges` and its RP1 node's quirks, and read
+DWC3's GSNPSID (0xC120) to confirm the window reaches the controllers.
+
 ## How it boots
 
 ```
@@ -1645,6 +1732,7 @@ otherwise as its type's first failure.
 | 290 | `chdir path` | `Chdir`: `ChdirDone`, `ChdirNoDir`, `ChdirNotDir`, `ChdirBad` | 0, the directory at path, from the current directory, made the caller's current one, and its children's, as spawn gives them; -3 if there is none, -9 if it is a file, -5 for a path over 1024 bytes or not the caller's to give, or one in a volume whose server has gone. The initramfs's, `/Volumes` and `/` the kernel answers itself; a path in a volume is checked with its server's `stat`, the caller waiting as for any file call |
 | 291 | `getcwd`, `path_abs path` | `(list int)` | the current directory, an absolute path with no final `/`, `/` at the start; `path_abs` is a path made absolute from it, unless it starts with `/` already |
 | 292 | `dma_addresses va n` | `(array int)` | where a device reaches each of the caller's DMA pages from the one holding va, n at most, a u64 each, up to the first that is not one: fewer than n then, none if va's is not; -6 no `dev` line, which the wrapper gives as none |
+| 293 | `dma_sync va n dir` | `DmaSynced n`, `DmaSyncDenied`, `DmaSyncBad` | n of the caller's DMA pages from the one holding va, up to the first that is not one, made to agree between the CPU's caches and memory by L0's `frame_sync`, for a device that does not see the caches, as the Raspberry Pi 5's do not: dir 1 cleans (`dma_to_device`, after writing what it will read), 2 invalidates (`dma_from_device`, before reading what it wrote), 3 both; how many; -5 another dir, -6 no `dev` line |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1669,12 +1757,12 @@ initramfs, so that the Makefile finds it there:
 
 | Directory | What | In the initramfs |
 |---|---|---|
-| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
+| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `lsusb`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0` and `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `usb-hid` `hid.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
@@ -1693,7 +1781,10 @@ every `.l0` in its directory is part of it.
 | `nap` | sleeps for N ms and checks that the time passed |
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
-| `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0 |
+| `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
+| `pcie` | the PCIe bus's server, `pcie virt`, for QEMU's virt board (see [USB](#usb)): reads every function of bus 0 through the ECAM, sizes each memory BAR, puts it in the 32-bit MMIO window, turns on memory space and bus mastering, and serves the pci protocol as `pci`: every function, or those of a class |
+| `xhci` | the USB host controller driver and USB's core (see [USB](#usb)): `xhci pci` drives every xHCI `pci` found, `xhci rp1` the Raspberry Pi 5's two DWC3s on RP1. It halts and resets each controller, gives it its DCBAA, scratchpads, command ring and event ring in DMA pages, and runs it; brings up each device on a root port, one at a time, reading its descriptors and setting its first configuration; and serves the usb protocol as `usb`: devices, their descriptors, claims of interfaces, control transfers, and IN endpoints polled, each report a notice to the client that opened it. It polls its event rings, every millisecond when idle, rather than taking interrupts. Each controller and each device is a line on stderr. Everything it decides is `core.l0`'s and `bus.l0`'s, pure, tested on the host |
+| `usb-hid` | the class driver of USB boot keyboards and mice (see [USB](#usb)), started once for each: `usb-hid keyboard` claims every boot keyboard, sets the boot protocol and SET_IDLE(0), opens its interrupt endpoint, and serves `keyboard`, sending a `KeyEvent` for each key its reports press or let go, with the character `keymap.l0` says, and repeating a held key itself, 500 ms then every 33 ms; `usb-hid mouse` claims every boot mouse and serves `pointer`, sending a `PointerMotion` of each report. It drives no device, and needs no `dev` line |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own, for 30 seconds at most, after which it takes the disk to have stopped answering and fails every request. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
 | `virtio-rng` | a user-space driver for QEMU's virtio-rng, the entropy device, which draws on the host's `/dev/urandom`, serving the random protocol as `random` (see [Randomness](#randomness)). It finds the device, sets up its one queue of 8 entries in a DMA page, and for `bytes N` offers the device a buffer to fill, again until it has N, waiting for each as `virtq_wait` does. With no virtio-rng on the board it says so on stderr and exits 0 |
@@ -1710,7 +1801,8 @@ every `.l0` in its directory is part of it.
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
 | `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
-| `keys` | a client of `keyboard`, for checking `virtio-input`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
+| `keys` | a client of `keyboard`, for checking `virtio-input` or `usb-hid keyboard`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
+| `lsusb` | a client of `usb`: a line for each device `xhci` brought up, its number, vendor and product ids, speed, and what each interface is (`keyboard`, `mouse`, `hub`, …) |
 
 The libraries are in `common/`, shared by the kernel, every program and
 the host tools, and in `user/lib/`, grouped by what they are: `sys/`, the
@@ -1726,12 +1818,13 @@ name in a library is taken in every program that links it.
 | [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
 | [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div`, `format_size` (a size as GNOME says it, `782.3 kB`) | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
-| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
+| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `PointerMotion`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
 | [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order | every program |
 | [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
+| [sys/keymap.l0](user/lib/sys/keymap.l0) | the US keyboard's layout over Linux's key codes: what a key types alone, shifted, with Caps Lock and with Ctrl, and the modifiers each key event leaves held (`KEYMAP`) | `virtio-input`, `usb-hid` |
 | [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng` |
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
@@ -1741,9 +1834,12 @@ name in a library is taken in every program that links it.
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
 | [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text (`NICLIB`) | `virtio-net`, and with `INETLIB` |
 | [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; resolving a name, `inet_resolve`, by asking the interface's name server over UDP; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`, `dns.l0` and `random.l0`) | `inet`, `net`, `tftp`, `http` |
+| [proto/usb.l0](user/lib/proto/usb.l0) | the usb protocol: its notices, a device plugged in or unplugged and an endpoint's report; its requests and answers, bytes in hex; and asking for devices, descriptors and configurations (`USBLIB`, with `usbdesc.l0`) | `xhci`, `usb-hid`, `lsusb` |
+| [proto/pci.l0](user/lib/proto/pci.l0) | the pci protocol: a function's line, its BDF, ids, class, interrupt and BARs, and `pci_find`, the functions of a class (`PCILIB`) | `pcie`, `xhci` |
 | [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
 | [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `disks`, `tools/mkfs`, and every program `PATHS` is in |
 | [format/dns.l0](user/lib/format/dns.l0) | DNS's messages, RFC 1035: the query for a name's IPv4 address, and the first A record read out of an answer, past CNAMEs and name pointers (`DNSLIB`, in `INETLIB`) | with `INETLIB` |
+| [format/usbdesc.l0](user/lib/format/usbdesc.l0) | USB's descriptors and requests as bytes: setup packets, a device descriptor, a configuration with its interfaces and their endpoints, the speeds as xHCI numbers them, and names for them (`USBDESC`, in `USBLIB`) | with `USBLIB` |
 | [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
 | [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
@@ -1759,7 +1855,7 @@ name in a library is taken in every program that links it.
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. Last, `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`) |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
@@ -1788,7 +1884,13 @@ Each case of `tests/e2e/` is a directory:
   server the board reaches at 10.0.2.2, killed after; and `peer`, one run
   from its start that must exit 0, a client of a port the board listens
   to. `@PORT@` in either, in `net` and in `typed` is a free port of the
-  host's loopback, chosen for the boot.
+  host's loopback, chosen for the boot;
+- `usb`, if the board's keyboard and pointer are to be a `usb-kbd` and a
+  `usb-mouse` on a `qemu-xhci`, not virtio's.
+
+Two cases are USB's: `pcie`, the bus's server waiting once it has set
+the bus up, and `usb`, `run lsusb` listing the keyboard and the mouse
+`xhci` brought up, its stderr naming the keyboard's port.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
 `etc`, boots it, and compares; given case names, as `tests/e2e.sh cwd`,
@@ -2095,6 +2197,13 @@ a bad buffer, and wait on nothing.
   scanout. The 3D mode is tried by `make demo`.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
+- **USB has run on QEMU only** (see [USB](#usb)), not on a Pi 5, where
+  L0S does not boot yet. Boot keyboards and mice only, on root ports
+  only, no hubs; `xhci` polls rather than taking interrupts, which L0's
+  runtime does not give yet for PCIe or RP1; a control
+  transfer moves 2 KB at most, an endpoint's report 2 KB; and each
+  controller has 64 pages for its devices, about 3 a device and 1 an
+  endpoint opened.
 - **The initramfs is read-only.** Nothing in it can be written, renamed
   or removed. Booted from it alone, the apps are fixed at boot, and `/`
   cannot be written: a system volume, or `root=tmpfs` on a board with

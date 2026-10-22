@@ -96,6 +96,7 @@ case's `etc`, and compares. A case is a directory:
 | `disk` | if present, the board has a virtio-blk on a fresh `tools/mkdisk` image (`build/e2e/CASE.disk`); without it there is no disk |
 | `layout` | that disk's layout, if not mkdisk's 1 MB one: `SECTORS LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, `@` the case's own cpio; give a UUID to boot from it, since mkfs's own differ every run |
 | `readonly`, `norng` | for a case that types nothing: the disk read-only (`virtio-blk_ro`); no virtio-rng, which every other boot has (`virtio-rng_nodev`) |
+| `usb` | if present, the keyboard and pointer are a `usb-kbd` and `usb-mouse` on a `qemu-xhci`, not virtio's (`QEMU_INPUT=usb` for a typed case); for `pcie`, `xhci`, `usb-hid` |
 | `bootargs` | the kernel's boot arguments, such as `root=UUID` (`l0 boot IMAGE ARGS`, or `QEMU_APPEND` with `typed`) |
 | `gpu` | the virtio-gpu's options, such as `xres=3840,yres=2160` for a 4K screen, drawn at scale 2 (`draw_4k`) |
 | `net` | if present, the board has a virtio-net on the network its line names, as `-netdev` takes one without its id: `user`, or `user,tftp=tests/e2e/CASE/tftp` for QEMU's TFTP server at 10.0.2.2 (`net`); without it there is no card |
@@ -115,6 +116,16 @@ case's `etc`, and compares. A case is a directory:
 - An app's manifest is read on the host by `app_test.l0`'s
   `test_app_sources`, from its source directory.
 - Every boot is killed after 60 s by `tools/deadline`, which exits 124.
+- **USB** (`pcie`, `xhci`, `usb-hid`): the e2e cases `pcie` and `usb`,
+  and the screen test `tests/usb.sh` (`make usb-initramfs`, booted
+  with `QEMU_INPUT=usb`), which types on the USB keyboard with `sendkey`
+  and moves the USB mouse with QMP's relative `input-send-event`. The
+  xHCI's logic is tested on the host: `core_test.l0` drives `core.l0`
+  through whole enumerations, as scripted events in and acts out,
+  rendered as text; change a case there before the board. On the board,
+  `L0_QEMU_ARGS="... -trace usb_xhci_*"` (or the same in
+  `tools/qemu-boot.sh`'s command) shows QEMU's side of every command and
+  transfer, and `xhci`'s lines on stderr its own.
 
 ## Screen tests (`tests/*.sh`)
 

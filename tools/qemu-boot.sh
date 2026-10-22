@@ -35,7 +35,9 @@
 # QEMU_QMP, unset unless given, where its QMP does, for the tests that
 # move the pointer with input-send-event. QEMU_APPEND, unset unless
 # given, is the kernel's boot arguments, as -append gives them, such as
-# root=UUID to boot from that system volume.
+# root=UUID to boot from that system volume. QEMU_INPUT=usb gives the
+# board a qemu-xhci on PCIe with a USB keyboard and mouse on it, for
+# pcie, xhci and usb-hid, in place of the virtio keyboard and tablet.
 #
 # This copies how l0's virt_boot loads a program's standard input: its
 # bytes at 0x50000000 and their count in the word below, which is what the
@@ -58,6 +60,12 @@ if [ -n "${QEMU_NET:-}" ]; then
 fi
 append=()
 if [ -n "${QEMU_APPEND:-}" ]; then append=(-append "$QEMU_APPEND"); fi
+# The keyboard and pointer: virtio's, or with QEMU_INPUT=usb a USB
+# keyboard and mouse on a qemu-xhci, for pcie, xhci and usb-hid.
+input=(-device virtio-keyboard-device -device virtio-tablet-device)
+if [ "${QEMU_INPUT:-virtio}" = usb ]; then
+  input=(-device qemu-xhci -device usb-kbd -device usb-mouse)
+fi
 mode=${GPU:-2d}
 if [ "$mode" = gl ]; then
   # virgl: the GL device, and a display that has GL, which none and a
@@ -76,7 +84,7 @@ len=$(wc -c < "$initramfs" | tr -d ' ')
 exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=localtime \
   -global virtio-mmio.force-legacy=false \
-  -device "$gpu" -device virtio-keyboard-device -device virtio-tablet-device -device virtio-rng-device \
+  -device "$gpu" "${input[@]}" -device virtio-rng-device \
   ${disk[@]+"${disk[@]}"} \
   ${net[@]+"${net[@]}"} \
   -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \

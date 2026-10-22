@@ -1,0 +1,88 @@
+; pci.l0 -- the pci protocol: what the PCIe bus's server, user/sbin/pcie,
+; serves on the port it registers as pci, once it has found every
+; function on the bus and put each one's memory BARs in the MMIO window,
+; for the drivers of what it found (xhci).
+;
+;   devices          every function found, a line each, as below
+;   find CLASS       those whose class, the 24 bits of base class,
+;                    subclass and programming interface, is CLASS: an
+;                    xHCI's is 0x0C0330, 787248
+;
+; A function's line is BDF VENDOR DEVICE CLASS IRQ, then a base and a
+; size for each of its six BARs, every number in decimal: BDF is the bus
+; times 256, the device times 8 and the function; IRQ the interrupt its
+; INTx reaches the board's interrupt controller as, 0 for none; and a BAR
+; that is no memory BAR, or the high half of a 64-bit one, 0 0. Each is a
+; request (l0s.l0); the reply is the lines, nothing if none matches, or
+; error: WHY. Linked into the server and its clients by the Makefile's
+; LIBS_ lists.
+
+; A function: its BDF, vendor and device ids, class, interrupt, and its
+; BARs' bases and sizes, six of each in order.
+(data PciFunction (PciFunction int int int int int (list int) (list int)))
+
+; An xHCI's class: serial bus, USB, xHCI.
+(def pci_class_xhci () int 787248)     ; 0x0C0330
+
+; A function's line, its newline after it.
+(def pci_function_line ((f PciFunction)) (list int)
+  (match f
+    ((PciFunction bdf vid did class irq bases sizes)
+      (append (unwords (numbers_words (append (cons bdf (cons vid (cons did (cons class (cons irq (nil int))))))
+                                              (pci_interleaved bases sizes (nil int)))))
+              "\n"))))
+
+; Each base then its size, after the reversed acc.
+(def pci_interleaved ((bases (list int)) (sizes (list int)) (acc (list int))) (list int)
+  (if (if (is_empty bases) true (is_empty sizes))
+      (rev acc)
+      (pci_interleaved (tail bases) (tail sizes) (cons (head sizes) (cons (head bases) acc)))))
+
+; The functions an answer lists; a line that is not one is passed over.
+(def pci_functions_of ((r (list int))) (list PciFunction)
+  (pci_functions_onto (lines r) (nil PciFunction)))
+
+; pci_functions_of's loop: each line of ls that is a function's, after
+; the reversed acc.
+(def pci_functions_onto ((ls (list (list int))) (acc (list PciFunction))) (list PciFunction)
+  (if (is_empty ls)
+      (rev acc)
+      (match (word_numbers (split_spaces (head ls)))
+        ((Some ns)
+          (pci_functions_onto (tail ls)
+            (if (eq (length ns) 17)
+                (cons (PciFunction (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)
+                                   (pci_evens (drop ns 5) (nil int)) (pci_evens (drop ns 6) (nil int)))
+                      acc)
+                acc)))
+        ((None) (pci_functions_onto (tail ls) acc)))))
+
+; Every other number of ns from the first, after the reversed acc.
+(def pci_evens ((ns (list int)) (acc (list int))) (list int)
+  (if (is_empty ns)
+      (rev acc)
+      (pci_evens (if (is_empty (tail ns)) (tail ns) (tail (tail ns))) (cons (head ns) acc))))
+
+; The functions of class at the pci server, within 5 seconds of its
+; registering, or why none can be asked for.
+(def pci_find ((class int)) (Result (list PciFunction) (list int))
+  (match (name_wait "pci" 5000000000)
+    ((NotFound) ((Err (list PciFunction) (list int)) "no pci; is pcie running?"))
+    ((Found port)
+      (match (port_ask port (port_new) (append "find " (digits class)) "pci")
+        ((Asked from r)
+          (if (starts_with r "error: ")
+              ((Err (list PciFunction) (list int)) (drop r 7))
+              ((Ok (list PciFunction) (list int)) (pci_functions_of r))))
+        ((AskFailed why) ((Err (list PciFunction) (list int)) why))))))
+
+; A function's BAR i: its base and size, 0 0 for none.
+(def pci_bar_base ((f PciFunction) (i int)) int
+  (match f ((PciFunction bdf vid did class irq bases sizes) (nth_or bases i 0))))
+(def pci_bar_size ((f PciFunction) (i int)) int
+  (match f ((PciFunction bdf vid did class irq bases sizes) (nth_or sizes i 0))))
+
+; A function's BDF as bus:device.function, in hex, as lspci writes it.
+(def pci_bdf_text ((bdf int)) (list int)
+  (append (hex_digits (bit_shr bdf 8) 2)
+          (append ":" (append (hex_digits (bit_and (bit_shr bdf 3) 31) 2) (append "." (digits (bit_and bdf 7)))))))

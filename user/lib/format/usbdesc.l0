@@ -1,0 +1,245 @@
+; usbdesc.l0 -- USB's descriptors and requests as bytes (USB 2.0, chapter
+; 9; HID 1.11, chapter 7), pure, for the host controller's driver, which
+; reads a device's descriptors as it enumerates it, and for the class
+; drivers and lsusb, which ask it for them: the setup packet of a control
+; transfer; a device descriptor and a configuration with its interfaces
+; and their endpoints, read from the bytes a device gives; the speeds as
+; xHCI numbers them, which the usb protocol uses too; and names for
+; showing them.
+
+; ------------------------------------------------------------- requests
+
+; Descriptor types, the high byte of GET_DESCRIPTOR's value.
+(def usb_desc_device () int 1)
+(def usb_desc_config () int 2)
+(def usb_desc_string () int 3)
+(def usb_desc_interface () int 4)
+(def usb_desc_endpoint () int 5)
+(def usb_desc_hid () int 33)           ; 0x21, inside a HID interface
+
+; Standard requests, bRequest.
+(def usb_req_get_status () int 0)
+(def usb_req_get_descriptor () int 6)
+(def usb_req_set_configuration () int 9)
+; HID's class requests, to an interface: SET_REPORT, SET_IDLE, and
+; SET_PROTOCOL, whose value 0 is the boot protocol.
+(def usb_hid_set_report () int 9)
+(def usb_hid_set_idle () int 10)
+(def usb_hid_set_protocol () int 11)
+
+; bmRequestType: the direction in bit 7, the type in bits 5 and 6
+; (standard, class, vendor), and the recipient in bits 0 to 4 (device,
+; interface, endpoint).
+(def usb_rt_device_in () int 128)      ; 0x80
+(def usb_rt_device_out () int 0)
+(def usb_rt_class_iface_out () int 33) ; 0x21
+(def usb_rt_class_iface_in () int 161) ; 0xA1
+
+; Whether a request of type moves data from the device to the host.
+(def usb_rt_is_in ((type int)) bool (not (eq (bit_and type 128) 0)))
+
+; The 8 bytes of a setup packet: bmRequestType, bRequest, then wValue,
+; wIndex, and wLength, each a u16.
+(def usb_setup ((type int) (req int) (value int) (index int) (len int)) (list int)
+  (cons (bit_and type 255) (cons (bit_and req 255) (append (le16 value) (append (le16 index) (le16 len))))))
+
+; GET_DESCRIPTOR of len bytes of the descriptor of type and index.
+(def usb_get_descriptor ((type int) (index int) (len int)) (list int)
+  (usb_setup (usb_rt_device_in) (usb_req_get_descriptor) (bit_or (bit_shl type 8) index) 0 len))
+
+; ---------------------------------------------------------------- device
+
+; A device descriptor's fields: bcdUSB, the class, subclass and protocol
+; (0 when each interface says its own), bMaxPacketSize0, the vendor and
+; product ids, and how many configurations it has.
+(data UsbDevice (UsbDevice int int int int int int int int))
+
+; The bytes of a device descriptor.
+(def usb_device_len () int 18)
+
+; The device descriptor b holds, or none if it is not one or too short.
+(def usb_device_of ((b (list int))) (Option UsbDevice)
+  (let d (bytes_from_list b)
+    (if (lt (bytes_len d) (usb_device_len))
+        ((None UsbDevice))
+        (if (eq (bytes_get d 1) (usb_desc_device))
+            (Some (UsbDevice (le_u16_at d 2) (bytes_get d 4) (bytes_get d 5) (bytes_get d 6)
+                             (bytes_get d 7) (le_u16_at d 8) (le_u16_at d 10) (bytes_get d 17)))
+            ((None UsbDevice))))))
+
+; bMaxPacketSize0 from the first 8 bytes of a device descriptor, which is
+; all a full-speed device's default endpoint can be asked for before its
+; size is known; or none if b is shorter or no device descriptor.
+(def usb_max_packet0_of ((b (list int))) (Option int)
+  (if (lt (length b) 8)
+      ((None int))
+      (if (eq (nth b 1) (usb_desc_device)) (Some (nth b 7)) ((None int)))))
+
+; A device's vendor id, product id, and class.
+(def usb_device_vendor ((d UsbDevice)) int (match d ((UsbDevice v c s p m vid pid n) vid)))
+(def usb_device_product ((d UsbDevice)) int (match d ((UsbDevice v c s p m vid pid n) pid)))
+(def usb_device_class ((d UsbDevice)) int (match d ((UsbDevice v c s p m vid pid n) c)))
+
+; ---------------------------------------------------------- configuration
+
+; An endpoint: its address, the direction in bit 7 and the number in bits
+; 0 to 3; its attributes, the transfer type in bits 0 and 1; its largest
+; packet, wMaxPacketSize's low 11 bits; and bInterval.
+(data UsbEndpoint (UsbEndpoint int int int int))
+
+; An interface, as one alternate setting: its number, the setting, its
+; class, subclass and protocol, and its endpoints in the order given.
+(data UsbInterface (UsbInterface int int int int int (list UsbEndpoint)))
+
+; A configuration: bConfigurationValue, which SET_CONFIGURATION takes,
+; wTotalLength, the bytes of it all, and its interfaces in order.
+(data UsbConfig (UsbConfig int int (list UsbInterface)))
+
+; The transfer types, an endpoint's attributes' low two bits.
+(def usb_ep_control () int 0)
+(def usb_ep_iso () int 1)
+(def usb_ep_bulk () int 2)
+(def usb_ep_interrupt () int 3)
+
+; The bytes of a configuration descriptor alone, which give wTotalLength.
+(def usb_config_len () int 9)
+
+; The configuration b holds, the descriptor and every one after it up to
+; wTotalLength, or why not: an interface's endpoints are those after it
+; up to the next interface; other descriptors, such as HID's, are passed
+; over, and so is anything past the bytes there are.
+(def usb_config_of ((b (list int))) (Result UsbConfig (list int))
+  (let d (bytes_from_list b)
+    (if (lt (bytes_len d) (usb_config_len))
+        ((Err UsbConfig (list int)) "a configuration is 9 bytes at least")
+        (if (not (eq (bytes_get d 1) (usb_desc_config)))
+            ((Err UsbConfig (list int)) "no configuration descriptor")
+            (let total (le_u16_at d 2)
+              (match (usb_descriptors d (bytes_get d 0) (min total (bytes_len d)) (nil UsbInterface))
+                ((Ok ifs) ((Ok UsbConfig (list int)) (UsbConfig (bytes_get d 5) total ifs)))
+                ((Err why) ((Err UsbConfig (list int)) why))))))))
+
+; The interfaces of the descriptors of d from i up to n, after the
+; reversed ifs, each with its endpoints reversed until it is done.
+(def usb_descriptors ((d bytes) (i int) (n int) (ifs (list UsbInterface))) (Result (list UsbInterface) (list int))
+  (if (ge (add i 1) n)
+      ((Ok (list UsbInterface) (list int)) (rev (usb_last_done ifs)))
+      (let l (bytes_get d i)
+        (if (if (lt l 2) true (gt (add i l) n))
+            ((Err (list UsbInterface) (list int)) "a descriptor runs past the configuration")
+            (usb_descriptors d (add i l) n (usb_described d i l ifs))))))
+
+; ifs after the descriptor of l bytes at i: a new interface, an endpoint
+; of the last one, or nothing new.
+(def usb_described ((d bytes) (i int) (l int) (ifs (list UsbInterface))) (list UsbInterface)
+  (let t (bytes_get d (add i 1))
+    (if (if (eq t (usb_desc_interface)) (ge l 9) false)
+        (cons (UsbInterface (bytes_get d (add i 2)) (bytes_get d (add i 3)) (bytes_get d (add i 5))
+                            (bytes_get d (add i 6)) (bytes_get d (add i 7)) (nil UsbEndpoint))
+              (usb_last_done ifs))
+        (if (if (eq t (usb_desc_endpoint)) (ge l 7) false)
+            (usb_with_endpoint ifs (UsbEndpoint (bytes_get d (add i 2)) (bytes_get d (add i 3))
+                                                (bit_and (le_u16_at d (add i 4)) 2047) (bytes_get d (add i 6))))
+            ifs))))
+
+; The last interface of ifs, the first of the list, with e among its
+; endpoints; ifs as they were if there is none yet.
+(def usb_with_endpoint ((ifs (list UsbInterface)) (e UsbEndpoint)) (list UsbInterface)
+  (if (is_empty ifs)
+      ifs
+      (match (head ifs)
+        ((UsbInterface n alt c s p es) (cons (UsbInterface n alt c s p (cons e es)) (tail ifs))))))
+
+; ifs with the last interface's endpoints in their order.
+(def usb_last_done ((ifs (list UsbInterface))) (list UsbInterface)
+  (if (is_empty ifs)
+      ifs
+      (match (head ifs)
+        ((UsbInterface n alt c s p es) (cons (UsbInterface n alt c s p (rev es)) (tail ifs))))))
+
+; --------------------------------------------------------------- reading
+
+; Whether an endpoint address is IN, to the host; its number.
+(def usb_ep_is_in ((addr int)) bool (not (eq (bit_and addr 128) 0)))
+(def usb_ep_number ((addr int)) int (bit_and addr 15))
+
+; An endpoint's address, and its transfer type.
+(def usb_endpoint_addr ((e UsbEndpoint)) int (match e ((UsbEndpoint a t m i) a)))
+(def usb_endpoint_kind ((e UsbEndpoint)) int (match e ((UsbEndpoint a t m i) (bit_and t 3))))
+
+; The first IN endpoint of kind among es, or none.
+(def usb_endpoint_in ((es (list UsbEndpoint)) (kind int)) (Option UsbEndpoint)
+  (if (is_empty es)
+      ((None UsbEndpoint))
+      (let e (head es)
+        (if (if (usb_ep_is_in (usb_endpoint_addr e)) (eq (usb_endpoint_kind e) kind) false)
+            (Some e)
+            (usb_endpoint_in (tail es) kind)))))
+
+; The endpoint of address addr among the interfaces' endpoints, or none.
+(def usb_endpoint_at ((ifs (list UsbInterface)) (addr int)) (Option UsbEndpoint)
+  (if (is_empty ifs)
+      ((None UsbEndpoint))
+      (match (head ifs)
+        ((UsbInterface n alt c s p es)
+          (match (usb_endpoint_among es addr)
+            ((Some e) (Some e))
+            ((None) (usb_endpoint_at (tail ifs) addr)))))))
+
+; The endpoint of address addr among es, or none.
+(def usb_endpoint_among ((es (list UsbEndpoint)) (addr int)) (Option UsbEndpoint)
+  (if (is_empty es)
+      ((None UsbEndpoint))
+      (if (eq (usb_endpoint_addr (head es)) addr) (Some (head es)) (usb_endpoint_among (tail es) addr))))
+
+; The interface numbered n among ifs, its first setting, or none.
+(def usb_interface_at ((ifs (list UsbInterface)) (n int)) (Option UsbInterface)
+  (if (is_empty ifs)
+      ((None UsbInterface))
+      (match (head ifs)
+        ((UsbInterface m alt c s p es) (if (eq m n) (Some (head ifs)) (usb_interface_at (tail ifs) n))))))
+
+; ---------------------------------------------------------------- speeds
+
+; A device's speed as xHCI's ports say it, PORTSC's Port Speed with the
+; default protocol speed ids, which the usb protocol passes on.
+(def usb_speed_full () int 1)
+(def usb_speed_low () int 2)
+(def usb_speed_high () int 3)
+(def usb_speed_super () int 4)
+(def usb_speed_super_plus () int 5)
+
+; A speed's name: low, full, high, super, super+; or ? for another.
+(def usb_speed_name ((s int)) (list int)
+  (nth_or (split_spaces "? full low high super super+") s "?"))
+
+; The largest packet a default endpoint can take before its descriptor
+; says, by speed: 8 at low and full speed, which a full-speed device may
+; raise, 64 at high, 512 at super.
+(def usb_default_max_packet0 ((s int)) int
+  (if (eq s (usb_speed_high)) 64 (if (ge s (usb_speed_super)) 512 8)))
+
+; ----------------------------------------------------------------- names
+
+; The name of a class, as lsusb shows it: hid, storage, hub, vendor; -
+; for 0, said by each interface; or its number in hex.
+(def usb_class_name ((c int)) (list int)
+  (if (eq c 0) "-"
+  (if (eq c 3) "hid"
+  (if (eq c 8) "storage"
+  (if (eq c 9) "hub"
+  (if (eq c 255) "vendor"
+  (hex_digits c 2)))))))
+
+; The name of an interface as a class driver would know it: a HID boot
+; keyboard or mouse (class 3, subclass 1, protocol 1 or 2) by that, any
+; other by its class's name.
+(def usb_interface_name ((i UsbInterface)) (list int)
+  (match i
+    ((UsbInterface n alt c s p es)
+      (if (if (eq c 3) (eq s 1) false)
+          (if (eq p 1) "keyboard" (if (eq p 2) "mouse" "hid"))
+          (usb_class_name c)))))
+
+; A vendor or product id as four hex digits, as lsusb shows them.
+(def usb_id_text ((id int)) (list int) (hex_digits id 4))

@@ -1,0 +1,179 @@
+; usbdesc_test.l0 -- descriptors and setup packets, against what QEMU's
+; usb-kbd and usb-mouse give (hw/usb/dev-hid.c).
+
+; ------------------------------------------------------------- fixtures
+
+; usb-kbd's device descriptor at high speed: USB 2.0, its class said by
+; its interface, a default endpoint of 64, vendor 0x0627, product 0x0001,
+; one configuration.
+(def kbd_device () (list int)
+  (cons 18 (cons 1 (cons 0 (cons 2 (cons 0 (cons 0 (cons 0 (cons 64
+  (cons 39 (cons 6 (cons 1 (cons 0 (cons 0 (cons 0 (cons 1 (cons 4 (cons 11 (cons 1 (nil int))))))))))))))))))))
+
+; usb-kbd's configuration, 34 bytes: the configuration (value 1, one
+; interface), interface 0 (HID, boot, keyboard), HID's descriptor, and
+; endpoint 0x81, interrupt IN, 8 bytes, bInterval 7.
+(def kbd_config () (list int)
+  (concat (cons (bytes_list "09 02 22 00 01 01 06 a0 32")
+          (cons (bytes_list "09 04 00 00 01 03 01 01 00")
+          (cons (bytes_list "09 21 11 01 00 01 22 3f 00")
+          (cons (bytes_list "07 05 81 03 08 00 07") (nil (list int))))))))
+
+; The bytes hex words give.
+(def bytes_list ((s (list int))) (list int) (rev (bytes_list_onto (split_spaces s) (nil int))))
+
+(def bytes_list_onto ((ws (list (list int))) (acc (list int))) (list int)
+  (if (is_empty ws)
+      acc
+      (let w (head ws)
+        (bytes_list_onto (tail ws) (cons (add (mul 16 (hex_val (nth w 0))) (hex_val (nth w 1))) acc)))))
+
+; A configuration as text: its value, then each interface as
+; n.alt:class/subclass/protocol and its endpoints as address:kind:size/interval.
+(def config_text ((c UsbConfig)) (list int)
+  (match c ((UsbConfig v total ifs) (unwords (cons (digits v) (interfaces_text ifs (nil (list int))))))))
+
+(def interfaces_text ((ifs (list UsbInterface)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ifs)
+      (rev acc)
+      (match (head ifs)
+        ((UsbInterface n alt c s p es)
+          (interfaces_text (tail ifs)
+            (cons (append (digits n) (append "." (append (digits alt) (append ":" (append (digits c) (append "/" (append (digits s) (append "/" (append (digits p) (endpoints_text es))))))))))
+                  acc))))))
+
+(def endpoints_text ((es (list UsbEndpoint))) (list int)
+  (if (is_empty es)
+      ""
+      (match (head es)
+        ((UsbEndpoint a t m i)
+          (append (concat (cons " " (cons (hex_digits a 2) (cons ":" (cons (digits t) (cons ":" (cons (digits m) (cons "/" (cons (digits i) (nil (list int)))))))))))
+                  (endpoints_text (tail es)))))))
+
+(def parsed_text ((b (list int))) (list int)
+  (match (usb_config_of b) ((Ok c) (config_text c)) ((Err why) (append "error: " why))))
+
+; ------------------------------------------------------------- requests
+
+; GET_DESCRIPTOR of the device's 18 bytes: 80 06 0001 0000 0012.
+(def test_get_descriptor () int
+  (check_bool "bytes" (eq (usb_get_descriptor 1 0 18) (bytes_list "80 06 00 01 00 00 12 00")) true))
+
+; SET_PROTOCOL(boot) to interface 1: 21 0b 0000 0001 0000.
+(def test_set_protocol () int
+  (check_bool "bytes" (eq (usb_setup (usb_rt_class_iface_out) (usb_hid_set_protocol) 0 1 0) (bytes_list "21 0b 00 00 01 00 00 00")) true))
+
+(def test_directions () int
+  (add (check_bool "in" (usb_rt_is_in (usb_rt_device_in)) true)
+       (add (check_bool "class in" (usb_rt_is_in (usb_rt_class_iface_in)) true)
+            (check_bool "out" (usb_rt_is_in (usb_rt_class_iface_out)) false))))
+
+; ---------------------------------------------------------------- device
+
+(def test_device () int
+  (match (usb_device_of (kbd_device))
+    ((Some d)
+      (match d
+        ((UsbDevice v c s p m vid pid n)
+          (add (check_int "USB 2.0" v 512)
+               (add (check_str "ids" (append (usb_id_text vid) (append ":" (usb_id_text pid))) "0627:0001")
+                    (add (check_int "default endpoint" m 64) (check_int "configurations" n 1)))))))
+    ((None) (fail_because "device" "refused"))))
+
+(def test_device_short () int
+  (check_bool "17 bytes" (eq (usb_device_of (take (kbd_device) 17)) ((None UsbDevice))) true))
+
+(def test_device_not () int
+  (check_bool "a configuration" (eq (usb_device_of (append (kbd_config) (kbd_config))) ((None UsbDevice))) true))
+
+; A full-speed device is asked for 8 bytes first, which give its size.
+(def test_max_packet0 () int
+  (add (check_bool "of 8 bytes" (eq (usb_max_packet0_of (take (kbd_device) 8)) (Some 64)) true)
+       (check_bool "of 7" (eq (usb_max_packet0_of (take (kbd_device) 7)) ((None int))) true)))
+
+; ---------------------------------------------------------- configuration
+
+(def test_kbd_config () int
+  (check_str "one keyboard interface, one endpoint" (parsed_text (kbd_config)) "1 0.0:3/1/1 81:3:8/7"))
+
+; Two interfaces, as a keyboard with a mouse in it: each keeps its own
+; endpoints.
+(def test_two_interfaces () int
+  (let b (concat (cons (bytes_list "09 02 30 00 02 01 00 a0 32")
+                 (cons (bytes_list "09 04 00 00 01 03 01 01 00")
+                 (cons (bytes_list "07 05 81 03 08 00 0a")
+                 (cons (bytes_list "09 04 01 00 02 03 01 02 00")
+                 (cons (bytes_list "07 05 82 03 04 00 0a")
+                 (cons (bytes_list "07 05 02 03 04 00 0a") (nil (list int)))))))))
+    (check_str "both" (parsed_text b) "1 0.0:3/1/1 81:3:8/10 1.0:3/1/2 82:3:4/10 02:3:4/10")))
+
+; Only wTotalLength's bytes are read: what a device sends past them is
+; not its configuration.
+(def test_config_total () int
+  (check_str "the rest passed over" (parsed_text (append (kbd_config) (bytes_list "09 04 01 00 00 08 06 50 00"))) "1 0.0:3/1/1 81:3:8/7"))
+
+; A descriptor longer than the bytes there are.
+(def test_config_overrun () int
+  (check_str "refused" (parsed_text (take (kbd_config) 30)) "error: a descriptor runs past the configuration"))
+
+(def test_config_zero_length () int
+  (check_str "refused" (parsed_text (append (bytes_list "09 02 0b 00 01 01 00 a0 32") (bytes_list "00 04")))
+             "error: a descriptor runs past the configuration"))
+
+(def test_config_not () int
+  (add (check_str "a device" (parsed_text (kbd_device)) "error: no configuration descriptor")
+       (check_str "short" (parsed_text (bytes_list "09 02")) "error: a configuration is 9 bytes at least")))
+
+; wMaxPacketSize's bits 11 and 12, extra transactions, are not its size.
+(def test_max_packet_bits () int
+  (let b (append (bytes_list "09 02 19 00 01 01 00 a0 32")
+         (append (bytes_list "09 04 00 00 01 03 00 00 00") (bytes_list "07 05 81 03 00 14 01")))
+    (check_str "1024 of 0x1400" (parsed_text b) "1 0.0:3/0/0 81:3:1024/1")))
+
+; --------------------------------------------------------------- reading
+
+(def test_endpoint_in () int
+  (match (usb_config_of (kbd_config))
+    ((Ok c)
+      (match c
+        ((UsbConfig v t ifs)
+          (match (usb_interface_at ifs 0)
+            ((Some i)
+              (match i
+                ((UsbInterface n alt cl s p es)
+                  (add (check_bool "interrupt" (eq (usb_endpoint_in es (usb_ep_interrupt)) (Some (UsbEndpoint 129 3 8 7))) true)
+                       (check_bool "no bulk" (eq (usb_endpoint_in es (usb_ep_bulk)) ((None UsbEndpoint))) true)))))
+            ((None) (fail_because "interface 0" "missing"))))))
+    ((Err why) (fail_because "config" why))))
+
+(def test_endpoint_at () int
+  (match (usb_config_of (kbd_config))
+    ((Ok c)
+      (match c
+        ((UsbConfig v t ifs)
+          (add (check_bool "0x81" (eq (usb_endpoint_at ifs 129) (Some (UsbEndpoint 129 3 8 7))) true)
+               (check_bool "0x82" (eq (usb_endpoint_at ifs 130) ((None UsbEndpoint))) true)))))
+    ((Err why) (fail_because "config" why))))
+
+(def test_ep_address () int
+  (add (check_bool "0x81 in" (usb_ep_is_in 129) true)
+       (add (check_bool "0x02 out" (usb_ep_is_in 2) false)
+            (check_int "0x81 is 1" (usb_ep_number 129) 1))))
+
+; ---------------------------------------------------------- speeds, names
+
+(def test_speeds () int
+  (add (check_str "full" (usb_speed_name 1) "full")
+       (add (check_str "super" (usb_speed_name 4) "super")
+            (check_str "none" (usb_speed_name 9) "?"))))
+
+(def test_default_max_packet0 () int
+  (add (check_int "low" (usb_default_max_packet0 (usb_speed_low)) 8)
+       (add (check_int "high" (usb_default_max_packet0 (usb_speed_high)) 64)
+            (check_int "super" (usb_default_max_packet0 (usb_speed_super)) 512))))
+
+(def test_names () int
+  (add (check_str "keyboard" (usb_interface_name (UsbInterface 0 0 3 1 1 (nil UsbEndpoint))) "keyboard")
+       (add (check_str "mouse" (usb_interface_name (UsbInterface 0 0 3 1 2 (nil UsbEndpoint))) "mouse")
+            (add (check_str "a hub" (usb_interface_name (UsbInterface 0 0 9 0 0 (nil UsbEndpoint))) "hub")
+                 (check_str "other" (usb_class_name 224) "e0")))))

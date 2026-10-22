@@ -1,0 +1,403 @@
+; xhci.l0 -- a driver in user space for xHCI USB host controllers, and
+; the USB core over them: it brings each controller up, then serves usb
+; (proto/usb.l0) to the class drivers, carrying out what core.l0 and
+; bus.l0, which hold everything it decides, say to do. Its module must be
+; flagged dev. Started as
+;
+;   xhci pci    every xHCI the pci server (pcie) found: QEMU's virt
+;               board's qemu-xhci
+;   xhci rp1    the Raspberry Pi 5's two, RP1's DWC3s, which the firmware
+;               leaves where dwc3.l0 says
+;
+; It takes no interrupt, which L0's runtime does not give yet for PCIe
+; or RP1: it polls each controller's
+; event ring between requests, every millisecond when there is nothing
+; to do, which a keyboard or a mouse, reporting every 1 to 10 ms, does
+; not notice. Each controller's memory is DMA pages of its own: the
+; DCBAA, the command ring, the event ring's segment and its table, the
+; scratchpads the controller asks for, and pool_pages more for its
+; devices. Each controller brought up, and each device, is a line on
+; standard error, the serial line, for a new board's first run.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "xhci" why))
+
+; Where the controllers are, from the arguments, and each brought up.
+(def xhci () int
+  (let as (args)
+    (if (eq as (cons "pci" (nil (list int))))
+        (from_pci)
+        (if (eq as (cons "rp1" (nil (list int))))
+            (started (cons (Place (rp1_usb0) (rp1_usb_bytes) (rp1_dma_offset) true)
+                     (cons (Place (rp1_usb1) (rp1_usb_bytes) (rp1_dma_offset) true) (nil Place))))
+            (complain "usage: xhci pci|rp1")))))
+
+; Where a controller is: its registers' base and bytes, what to add to a
+; page's address for it to reach the page, and whether it is a DWC3 to
+; put in host mode first.
+(data Place (Place int int int bool))
+
+; Every xHCI the pci server knows of, brought up; no xHCI is no failure.
+(def from_pci () int
+  (match (pci_find (pci_class_xhci))
+    ((Err why) (complain why))
+    ((Ok fs) (if (is_empty fs) (note_as "xhci" "no xHCI on the bus") (started (pci_places fs (nil Place)))))))
+
+; Where each function's BAR 0 is, after the reversed acc.
+(def pci_places ((fs (list PciFunction)) (acc (list Place))) (list Place)
+  (if (is_empty fs)
+      (rev acc)
+      (pci_places (tail fs) (cons (Place (pci_bar_base (head fs) 0) (pci_bar_size (head fs) 0) 0 false) acc))))
+
+; ------------------------------------------------------------ bringing up
+
+; A controller's registers: the region over them, where the operational
+; and runtime registers and the doorbells start in it; its DMA pages'
+; region and their address here; and how many ports it has.
+(data Ctrl (Ctrl IoDevice int int int IoDevice int int))
+
+; Controllers brought up, and the bus over them; or why one could not be.
+(data Up (Up Bus (list Ctrl)) (Down (list int)))
+
+; Every controller at ps brought up, and the usb name served.
+(def started ((ps (list Place))) int
+  (match (brought_up ps (bus_new) (nil Ctrl))
+    ((Down why) (complain why))
+    ((Up b cs)
+      (let port (port_new)
+        (let r (name_register_or_why port "usb")
+          (if (not (is_empty r))
+              (complain r)
+              (serve (ports_checked (Srv b cs (nil int) port) 0))))))))
+
+; Each controller at ps brought up, numbered on from cs's, onto b.
+(def brought_up ((ps (list Place)) (b Bus) (cs (list Ctrl))) Up
+  (if (is_empty ps)
+      (Up b (rev cs))
+      (match (controller_up (head ps) (length cs) (bus_next b))
+        ((NotBrought why) (Down why))
+        ((Brought c h) (brought_up (tail ps) (bus_added b h) (cons c cs))))))
+
+; A controller up, its registers and its state; or why not.
+(data Brought (Brought Ctrl Hc) (NotBrought (list int)))
+
+; The pages each controller has for its devices, beyond its own.
+(def pool_pages () int 64)
+
+; The controller at pl, numbered k, its first device to be numbered next:
+; its registers mapped, a DWC3 put in host mode, the controller halted
+; and reset, its memory given it, and run.
+(def controller_up ((pl Place) (k int) (next int)) Brought
+  (match pl
+    ((Place base len offset dwc3)
+      (match (open_device base len)
+        ((DeviceFailed fault why) (NotBrought (append "no controller: " why)))
+        ((DeviceOpened r)
+          (let d (if dwc3 (dwc3_host r) 0)
+            (let caplen (cap_length_of r)
+              (let op caplen
+                (if (not (halted r op))
+                    (NotBrought "the controller does not halt")
+                    (if (not (came_out_of_reset r op))
+                        (NotBrought "the controller does not come out of reset")
+                        (with_memory r k offset next)))))))))))
+
+; CAPLENGTH, where the operational registers start: the low byte of the
+; first word, read whole, as some controllers want their capability
+; registers read.
+(def cap_length_of ((r IoDevice)) int (bit_and (device_read32 r (cap_length)) 255))
+
+; A DWC3 in host mode, its PHYs kept from suspending.
+(def dwc3_host ((r IoDevice)) int
+  (let a (device_write32 r (dwc3_gctl) (gctl_host (device_read32 r (dwc3_gctl))))
+    (let b (device_write32 r (dwc3_gusb2phycfg) (u2_awake (device_read32 r (dwc3_gusb2phycfg))))
+      (device_write32 r (dwc3_gusb3pipectl) (u3_awake (device_read32 r (dwc3_gusb3pipectl)))))))
+
+; Whether the controller, told to stop, has halted within 100 ms.
+(def halted ((r IoDevice) (op int)) bool
+  (let s (device_write32 r (add op (op_usbcmd)) (bit_and (device_read32 r (add op (op_usbcmd))) (bit_xor (cmd_run) -1)))
+    (waited r (add op (op_usbsts)) (sts_halted) (sts_halted) 100)))
+
+; Whether the controller, reset, is ready again within a second.
+(def came_out_of_reset ((r IoDevice) (op int)) bool
+  (let s (device_write32 r (add op (op_usbcmd)) (cmd_reset))
+    (if (waited r (add op (op_usbcmd)) (cmd_reset) 0 1000)
+        (waited r (add op (op_usbsts)) (sts_not_ready) 0 1000)
+        false)))
+
+; Whether the register at off, masked, is want within tries milliseconds.
+(def waited ((r IoDevice) (off int) (mask int) (want int) (tries int)) bool
+  (if (eq (bit_and (device_read32 r off) mask) want)
+      true
+      (if (le tries 0) false (let z (sleep_ns 1000000) (waited r off mask want (sub tries 1))))))
+
+; The controller's memory: its pages, the DCBAA, the scratchpads, the
+; event ring's table and the command ring given it, and it run.
+(def with_memory ((r IoDevice) (k int) (offset int) (next int)) Brought
+  (let p1 (device_read32 r (cap_hcsparams1))
+    (let sp (scratchpads_of (device_read32 r (cap_hcsparams2)))
+      (let fixed (add 4 (if (gt sp 0) (add sp 1) 0))
+        (let n (add fixed (pool_pages))
+          (match (dma_alloc n)
+            ((DmaPages va)
+              (match (dma_open va n)
+                ((DeviceFailed fault why) (NotBrought (append "cannot reach its memory: " why)))
+                ((DeviceOpened m)
+                  (let addrs (dma_addresses va n)
+                    (if (not (eq (array_len addrs) n))
+                        (NotBrought "it cannot reach its memory")
+                        (running r m va k (shifted_by addrs offset 0) fixed sp p1 next))))))
+            ((DmaDenied) (NotBrought (dma_alloc_why (DmaDenied))))
+            ((DmaTooMany) (NotBrought (dma_alloc_why (DmaTooMany))))
+            ((DmaNoRoom) (NotBrought (dma_alloc_why (DmaNoRoom))))))))))
+
+; addrs with offset added to each from i, as the controller reaches them.
+(def shifted_by ((addrs (array int)) (offset int) (i int)) (array int)
+  (if (ge i (array_len addrs)) addrs (shifted_by (array_set addrs i (add (array_get addrs i) offset)) offset (add i 1))))
+
+; The controller given its memory, at bus addresses pages, and run.
+(def running ((r IoDevice) (m IoDevice) (va int) (k int) (pages (array int)) (fixed int) (sp int) (p1 int) (next int)) Brought
+  (let op (cap_length_of r)
+    (let rt (rtsoff_of (device_read32 r (cap_rtsoff)))
+      (let db (dboff_of (device_read32 r (cap_dboff)))
+        (let csz (context_size_of (device_read32 r (cap_hccparams1)))
+          (let slots (max_slots_of p1)
+            (let ports (max_ports_of p1)
+              (let w (put_all m (memory_words pages sp))
+                (let f (dma_sync va (array_len pages) (dma_to_device))
+                  (let s (registers_set r op rt pages slots)
+                    (if (not (waited r (add op (op_usbsts)) (sts_halted) 0 100))
+                        (NotBrought "the controller does not run")
+                        (let l (logged (bring_line k (bit_shr (device_read32 r 0) 16) ports slots sp csz))
+                          (Brought (Ctrl r op rt db m va ports) (hc_new k csz pages fixed ports next))))))))))))))
+
+; The u32s of the controller's own pages: the DCBAA's entry 0, the
+; scratchpad array, if it asked for scratchpads, and the event ring's
+; table of one segment.
+(data PageWords (PageWords int (list W32)))
+
+; Those of a controller with pages at pages and sp scratchpads.
+(def memory_words ((pages (array int)) (sp int)) (list PageWords)
+  (cons (PageWords 3 (append (addr_words 0 (array_get pages (page_events))) (cons (W32 8 (events_size)) (cons (W32 12 0) (nil W32)))))
+        (if (eq sp 0)
+            (nil PageWords)
+            (cons (PageWords (page_dcbaa) (addr_words 0 (array_get pages 4)))
+                  (cons (PageWords 4 (scratch_words pages sp 0 (nil W32))) (nil PageWords))))))
+
+; The scratchpad array's entries from i, each the address of page 5 + i.
+(def scratch_words ((pages (array int)) (sp int) (i int) (acc (list W32))) (list W32)
+  (if (ge i sp) (rev acc) (scratch_words pages sp (add i 1) (rev_onto (addr_words (mul 8 i) (array_get pages (add 5 i))) acc))))
+
+; Each page's u32s of ps written into m.
+(def put_all ((m IoDevice) (ps (list PageWords))) int
+  (if (is_empty ps) 0 (match (head ps) ((PageWords p ws) (let w (put_words m p ws) (put_all m (tail ps)))))))
+
+; The registers that give the controller its memory, then Run.
+(def registers_set ((r IoDevice) (op int) (rt int) (pages (array int)) (slots int)) int
+  (let a (device_write32 r (add op (op_config)) slots)
+    (let b (write64 r (add op (op_dcbaap)) (array_get pages (page_dcbaa)))
+      (let c (write64 r (add op (op_crcr)) (bit_or (array_get pages (page_commands)) 1))
+        (let d (device_write32 r (add rt (rt_erstsz)) 1)
+          (let e (write64 r (add rt (rt_erdp)) (array_get pages (page_events)))
+            (let f (write64 r (add rt (rt_erstba)) (array_get pages 3))
+              (let g (barrier)
+                (device_write32 r (add op (op_usbcmd)) (cmd_run))))))))))
+
+; A 64-bit register written as two 32-bit halves, low first.
+(def write64 ((r IoDevice) (off int) (v int)) int
+  (let a (device_write32 r off (bit_and v 4294967295))
+    (device_write32 r (add off 4) (bit_shr v 32))))
+
+; The line saying a controller is up: its number, HCIVERSION, its ports,
+; slots, scratchpads and contexts' size.
+(def bring_line ((k int) (version int) (ports int) (slots int) (sp int) (csz int)) (list int)
+  (concat (cons "xhci " (cons (digits k) (cons ": xHCI " (cons (hex_digits (bit_shr version 8) 0) (cons "." (cons (hex_digits (bit_and version 255) 2)
+    (cons ", " (cons (digits ports) (cons " ports, " (cons (digits slots) (cons " slots, " (cons (digits sp) (cons " scratchpads, "
+    (cons (digits csz) (cons "-byte contexts" (nil (list int)))))))))))))))))))
+
+; --------------------------------------------------------------- serving
+
+; The driver: the bus, the controllers, the ports listening, its port.
+(data Srv (Srv Bus (list Ctrl) (list int) int))
+
+; Its fields read, and two replaced.
+(def srv_bus ((s Srv)) Bus (match s ((Srv b cs ls port) b)))
+(def srv_port ((s Srv)) int (match s ((Srv b cs ls port) port)))
+(def srv_ctrl ((s Srv) (k int)) Ctrl (match s ((Srv b cs ls port) (nth cs k))))
+(def srv_count ((s Srv)) int (match s ((Srv b cs ls port) (length cs))))
+(def srv_with_bus ((s Srv) (b2 Bus)) Srv (match s ((Srv b cs ls port) (Srv b2 cs ls port))))
+(def srv_with_listeners ((s Srv) (ls2 (list int))) Srv (match s ((Srv b cs ls port) (Srv b cs ls2 port))))
+(def srv_listeners ((s Srv)) (list int) (match s ((Srv b cs ls port) ls)))
+
+; How long to sleep with nothing to do.
+(def poll_ns () int 1000000)
+
+; Each request answered as it comes, and after each, every event read,
+; so requests coming fast keep no event waiting; with neither, a nap.
+(def serve ((s Srv)) int
+  (match (port_try_receive (srv_port s))
+    ((Message from payload)
+      (match (drained (requested s payload) 0 false) ((Drained s2 any) (serve s2))))
+    ((RecvFailed)
+      (match (drained s 0 false)
+        ((Drained s2 any) (if any (serve s2) (let z (sleep_ns (poll_ns)) (serve s2))))))))
+
+; A request, answered by the bus.
+(def requested ((s Srv) (payload (list int))) Srv
+  (let reply (request_reply payload)
+    (if (le reply 0) s (run_did s (bus_request (srv_bus s) reply (request_body payload))))))
+
+; Every port of controller k from 1 asked about, as each would be once it
+; changed, since a device there before the controller ran says nothing;
+; then the next controller's.
+(def ports_checked ((s Srv) (k int)) Srv
+  (if (ge k (srv_count s)) s (ports_checked (port_checked s k 1) (add k 1))))
+
+; ports_checked's loop: controller k's ports from p.
+(def port_checked ((s Srv) (k int) (p int)) Srv
+  (match (srv_ctrl s k)
+    ((Ctrl r op rt db m va ports)
+      (if (gt p ports)
+          s
+          (let v (powered r (add op (op_portsc p)))
+            (port_checked (run_did s (bus_port (srv_bus s) k p v)) k (add p 1)))))))
+
+; The PORTSC at off, once the port has power: a controller that switches
+; its ports' power, as a DWC3 may, has them off after a reset, and a
+; port needs 20 ms from power on before it is looked at.
+(def powered ((r IoDevice) (off int)) int
+  (let v (device_read32 r off)
+    (if (not (eq (bit_and v (portsc_pp)) 0))
+        v
+        (let w (device_write32 r off (bit_or (port_neutral v) (portsc_pp)))
+          (let z (sleep_ns 20000000)
+            (device_read32 r off))))))
+
+; ----------------------------------------------------------------- events
+
+; The driver after reading every event waiting, controller by controller
+; from k, and whether there was any.
+(data Drained (Drained Srv bool))
+
+; Each controller's events read, from k.
+(def drained ((s Srv) (k int) (any bool)) Drained
+  (if (ge k (srv_count s))
+      (Drained s any)
+      (match (events_read s k false)
+        ((Drained s2 a) (drained s2 (add k 1) (if any true a))))))
+
+; Each event of controller k's event ring the controller has written,
+; told to the bus; then, if there were any, the ring's dequeue pointer
+; moved past them.
+(def events_read ((s Srv) (k int) (got bool)) Drained
+  (match (srv_ctrl s k)
+    ((Ctrl r op rt db m va ports)
+      (let h (bus_hc (srv_bus s) k)
+        (let ev (hc_events h)
+          (let off (add (mul 4096 (page_events)) (events_offset ev))
+            (let f (page_fetched va (page_events))
+              (let ctl (device_read32 m (add off 12))
+                (if (not (eq (bit_and ctl 1) (events_cycle ev)))
+                    (Drained (if got (dequeued_to s k) s) got)
+                    (let b (barrier)
+                      (let t (trb_of_words (device_read32 m off) (device_read32 m (add off 4)) (device_read32 m (add off 8)) ctl)
+                        (let g (read_want r op m va (hc_wants h t))
+                          (let s2 (srv_with_bus s (bus_event_read (srv_bus s) k))
+                            (events_read (run_did s2 (bus_event (srv_bus s2) k t g)) k true))))))))))))))
+
+; ERDP at the next event to read, Event Handler Busy cleared.
+(def dequeued_to ((s Srv) (k int)) Srv
+  (match (srv_ctrl s k)
+    ((Ctrl r op rt db m va ports)
+      (let h (bus_hc (srv_bus s) k)
+        (let w (write64 r (add rt (rt_erdp)) (bit_or (add (hc_bus h (page_events)) (events_offset (hc_events h))) (erdp_busy)))
+          s)))))
+
+; What the core wants read for an event, read.
+(def read_want ((r IoDevice) (op int) (m IoDevice) (va int) (w Want)) Got
+  (match w
+    ((WantNothing) (GotNothing))
+    ((WantBytes p off n) (let f (page_fetched va p) (GotBytes (get_bytes m (add (mul 4096 p) off) n))))
+    ((WantPortsc p) (GotPortsc (device_read32 r (add op (op_portsc p)))))))
+
+; ------------------------------------------------------------------- acts
+
+; What a bus step came to: its bus kept, and its acts carried out,
+; controller by controller, in order.
+(def run_did ((s Srv) (d BusDid)) Srv
+  (match d ((BusDid b gs) (run_groups (srv_with_bus s b) gs))))
+(def run_groups ((s Srv) (gs (list HcActs))) Srv
+  (if (is_empty gs) s (match (head gs) ((HcActs k acts) (run_groups (run_acts s k acts) (tail gs))))))
+(def run_acts ((s Srv) (k int) (acts (list Act))) Srv
+  (if (is_empty acts) s (run_acts (run_act s k (head acts)) k (tail acts))))
+
+; One act carried out: those of a controller's memory and registers on
+; controller k's, the rest by messages and on the serial line.
+(def run_act ((s Srv) (k int) (a Act)) Srv
+  (match a
+    ((ActPut p ws) (let w (put_words (ctrl_memory (srv_ctrl s k)) p ws) (let f (page_flushed (ctrl_va (srv_ctrl s k)) p) s)))
+    ((ActZero p) (let w (page_zeroed (ctrl_memory (srv_ctrl s k)) (mul 4096 p) 0) (let f (page_flushed (ctrl_va (srv_ctrl s k)) p) s)))
+    ((ActBell slot target) (let w (rung (srv_ctrl s k) slot target) s))
+    ((ActPort p v) (let w (port_written (srv_ctrl s k) p v) s))
+    ((ActRecheck p) (run_did s (bus_port (srv_bus s) k p (port_read (srv_ctrl s k) p))))
+    ((ActAnswer port t) (let w (port_tell port t) s))
+    ((ActTell port t)
+      (match (port_send port t)
+        ((SendNoPort) (client_gone s port))
+        ((Sent) s) ((SendFull) s) ((SendTooBig) s)))
+    ((ActNotify t) (srv_with_listeners s (listeners_tell (srv_listeners s) t)))
+    ((ActListen port) (srv_with_listeners s (listener_add (srv_listeners s) port (port_send port "ok"))))
+    ((ActLog t) (let w (logged t) s))))
+
+; A line on standard error, delivered at once: the serial line, apart
+; from what the shell writes.
+(def logged ((t (list int))) int
+  (let w (write_err (append t "\n"))
+    (let f (file_flush (IoFile 2)) 0)))
+
+; A client's port gone: it no longer listens, and its claims and
+; endpoints go with it.
+(def client_gone ((s Srv) (port int)) Srv
+  (run_did (srv_with_listeners s (without_int (srv_listeners s) port)) (bus_gone (srv_bus s) port)))
+
+; The region over a controller's DMA pages, and their address here.
+(def ctrl_memory ((c Ctrl)) IoDevice (match c ((Ctrl r op rt db m va ports) m)))
+(def ctrl_va ((c Ctrl)) int (match c ((Ctrl r op rt db m va ports) va)))
+
+; ws written into page p of m.
+(def put_words ((m IoDevice) (p int) (ws (list W32))) int
+  (if (is_empty ws)
+      0
+      (match (head ws) ((W32 off v) (let w (device_write32 m (add (mul 4096 p) off) v) (put_words m p (tail ws)))))))
+
+; The page at off of m cleared, 8 bytes at a time from i.
+(def page_zeroed ((m IoDevice) (off int) (i int)) int
+  (if (ge i 4096) 0 (let w (device_write64 m (add off i) 0) (page_zeroed m off (add i 8)))))
+
+; slot's doorbell rung for target, once every write to memory before it
+; is complete; each page written was cleaned as it was (page_flushed).
+(def rung ((c Ctrl) (slot int) (target int)) int
+  (match c
+    ((Ctrl r op rt db m va ports)
+      (let f (barrier)
+        (device_write32 r (add db (doorbell slot)) target)))))
+
+; Port p's PORTSC written v, and read.
+(def port_written ((c Ctrl) (p int) (v int)) int
+  (match c ((Ctrl r op rt db m va ports) (device_write32 r (add op (op_portsc p)) v))))
+(def port_read ((c Ctrl) (p int)) int
+  (match c ((Ctrl r op rt db m va ports) (device_read32 r (add op (op_portsc p))))))
+
+; ------------------------------------------------------------ coherence
+
+; Page p of the controller's memory, at va here, made to agree between
+; the CPU's caches and memory, as the Raspberry Pi 5's DMA, which does
+; not see the caches, needs (dma_sync): cleaned as soon as the CPU has
+; written it, so it is never dirty in the cache when the controller
+; writes it; cleaned and invalidated before the CPU reads what the
+; controller wrote. On QEMU's virt board, whose devices see the caches,
+; the same instructions run and change nothing.
+(def page_flushed ((va int) (p int)) int
+  (match (dma_sync (add va (mul 4096 p)) 1 (dma_to_device)) ((DmaSynced n) n) ((DmaSyncDenied) 0) ((DmaSyncBad) 0)))
+(def page_fetched ((va int) (p int)) int
+  (match (dma_sync (add va (mul 4096 p)) 1 (dma_both_ways)) ((DmaSynced n) n) ((DmaSyncDenied) 0) ((DmaSyncBad) 0)))

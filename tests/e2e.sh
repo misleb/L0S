@@ -29,7 +29,9 @@
 # 10.0.2.2, and if NAME/peer does, its line is a command run from its
 # start that must exit 0 by the boot's end, a client of a port the board
 # listens to; @PORT@ in either, in NAME/net, and in NAME/typed is a free
-# port of the host's loopback, chosen for the boot. Every boot is killed after
+# port of the host's loopback, chosen for the boot. If NAME/usb exists,
+# the board's keyboard and pointer are a USB keyboard and mouse on a
+# qemu-xhci, for pcie, xhci and usb-hid, not virtio's. Every boot is killed after
 # a minute. Given case names as arguments, it runs only those. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
@@ -98,6 +100,11 @@ for dir in "${cases[@]}"; do
   fi
   disk=""; qemu_args=$L0_QEMU_ARGS; gpu=""
   [ -f "$dir/norng" ] && qemu_args=${qemu_args/ -device virtio-rng-device/}
+  input=virtio
+  if [ -f "$dir/usb" ]; then
+    input=usb
+    qemu_args=${qemu_args/-device virtio-keyboard-device -device virtio-tablet-device/-device qemu-xhci -device usb-kbd -device usb-mouse}
+  fi
   if [ -f "$dir/gpu" ]; then
     gpu=$(cat "$dir/gpu")
     qemu_args=${qemu_args/virtio-gpu-device/virtio-gpu-device,$gpu}
@@ -143,7 +150,7 @@ for dir in "${cases[@]}"; do
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$typed" |
-      QEMU_DISK=$disk QEMU_GPU=$gpu QEMU_NET=$net QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_DISK=$disk QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
     L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi
