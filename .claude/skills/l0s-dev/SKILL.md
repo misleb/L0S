@@ -206,6 +206,55 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
   of them; then `l0 check` names the rest, with their different binding
   names.
 
+## What a driver says
+
+Everything a program or the kernel reports goes through the kernel's log:
+`log_write level text` (call 294) keeps it, stamped with the time and the
+pid, in a ring of 64 KiB, and writes the line to the kernel's standard
+error, the serial line, at once, unless its level is debug. `dmesg` at a
+shell (or the MCP's `dmesg`) reads it back, which is how a desktop with
+no serial console sees what booted. In `user/lib/sys/server.l0`:
+
+| Call | Level | Gives | For |
+|---|---|---|---|
+| `info_as "NAME" TEXT` | info | 0 | what it found or did |
+| `warn_as "NAME" TEXT` | warning | 0 | something wrong it goes on through |
+| `debug_as "NAME" TEXT` | debug | 0 | per-event chatter; kept, never printed |
+| `fail_as "NAME" TEXT` | error | 1 | what ends it: each program's `complain` |
+
+The conventions, so every driver reads alike:
+
+- **One info line for each thing it found, as it starts to serve**, as
+  `NAME: WHAT: FACTS`: what the device is, where it is (`virtio_where t`
+  for a virtio transport, `pci_bdf_text` and the BAR for PCI, a base
+  address and irq for a fixed device), its size or mode, and the name it
+  serves, as `sdhci: disk1: an SD card of 268.4 MB, 524288 sectors` and
+  `virtio-net: a card 52:54:00:12:34:56, virtio-mmio 30 at 0x0a003c00,
+  irq 78, serving nic`. Sizes go through `format_size`, addresses are
+  `0x` and `hex_digits`, and a MAC, IP or time goes through the formatter
+  its protocol library has (`mac_text`, `ip_text`, `clock_text`).
+- **Build the line in a pure function** (`card_line`, `disk_line`,
+  `screen_line`) and test its text, as the programs' `_test.l0` do; the
+  call that says it is one `info_as`.
+- **No device is no failure**: `info_as` "no X on the board" and exit 0.
+  A failure is `fail_as`, and the program's exit status is its 1.
+- **Say it once the thing is true**, after the name is registered or the
+  device is ready, not when it is about to be.
+- **Never on standard output**: the e2e cases compare it exactly, and a
+  program's stdout is its answer to whoever ran it. Commands in `bin/`
+  and apps keep `complain_as` on stderr for their own user; only the
+  kernel's servers and drivers use the log.
+- **Don't flush**: `log_as` delivers the line itself.
+- A library or host tool that must not link `l0s.l0` cannot call these;
+  they are in `server.l0`, with the other server helpers.
+
+The kernel logs as `l0s: ...` with pid 0: a board banner (CPU, boot
+arguments, pages free, how a process's memory is laid out, limits, the
+initramfs), each process it starts (debug), each volume mounted or
+unmounted, `/` becoming a volume, kills, deadlock. L0 has no builtin for
+the board's RAM, CPUs, timer or interrupt controller, so it says nothing
+of them rather than guess.
+
 ## Documenting
 
 The first lines of every file: `; FILE.l0 -- summary`, a few lines, a blank
@@ -224,9 +273,13 @@ add to that list. Documenting a listed form fails the check too, until
 - **Writes are held back.** A process's stdout and stderr reach the terminal
   only when flushed or when it exits, and `wm`, the drivers and servers
   never exit. `(file_flush (IoFile 1))` after a prompt; for a debug line,
-  `(let f (file_flush (IoFile 2)) ...)` after the `write_err`. Processes the
-  inittab starts write to the serial line; in a screen test that is the
-  `build/NAME.out` file.
+  `(let f (file_flush (IoFile 2)) ...)` after the `write_err`. What a
+  process the inittab starts writes reaches the kernel's own streams, but
+  only its standard error is the serial line's text (QEMU's semihosting
+  stderr: in a screen test the `build/NAME.out` file, where the script
+  merges both streams; in an e2e case `NAME.err`, never the diffed
+  `expected`). To report, use `info_as` and its kind (see "What a driver
+  says"), which flushes and keeps the line for `dmesg`.
 - **The proc runtime keeps at most 64 regions open at once.** Every
   `ui_buffer`, `shm_region` and `dma_open` is one; close it when done
   (`close_device`, or `ui_buffer_free` / `shm_region_free`, which also

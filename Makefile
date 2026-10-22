@@ -85,10 +85,10 @@ NET_DEVICE   := -netdev $(NET),id=net0 -device virtio-net-device,netdev=net0,mac
 # is in the kernel and every program.
 BASE   := common/abi.l0 common/text.l0
 COMMON := $(BASE) common/initramfs.l0
-KERNEL := $(COMMON) common/queue.l0 kernel/memory.l0 kernel/elf.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/inittab.l0 \
+KERNEL := $(COMMON) common/queue.l0 common/klog.l0 kernel/log.l0 kernel/memory.l0 kernel/elf.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/inittab.l0 \
           kernel/sched.l0 kernel/pids.l0 kernel/syscall.l0 kernel/process.l0 kernel/kernel.l0
 CLI    := user/lib/sys/cli.l0
-ULIB   := $(COMMON) common/queue.l0 $(CLI) user/lib/sys/l0s.l0 user/lib/sys/server.l0
+ULIB   := $(COMMON) common/queue.l0 common/klog.l0 $(CLI) user/lib/sys/l0s.l0 user/lib/sys/server.l0
 
 # A terminal's line editing, for the terminals; the virtio-mmio
 # transports and queues, for the virtio drivers; and the US keyboard's
@@ -219,7 +219,7 @@ ROOT     := $(BUILD)/root
 # Every library, which make doc reads the documentation of: common's, the
 # kernel's parts, and everything under user/lib.
 LIB_SRCS := $(wildcard user/lib/*/*.l0)
-DOC_SRCS := $(filter-out %_test.l0,$(wildcard common/*.l0)) $(filter-out $(COMMON) common/queue.l0,$(KERNEL)) \
+DOC_SRCS := $(filter-out %_test.l0,$(wildcard common/*.l0)) $(filter-out $(COMMON) common/queue.l0 common/klog.l0,$(KERNEL)) \
             $(filter-out %_test.l0,$(LIB_SRCS))
 # Every program's own sources, and the host tools' and the kernel's board
 # tests' assembler: make doc Q=... finds names there too, after the
@@ -256,6 +256,8 @@ test: sample
 	$(L0) test $(BASE) common/text_test.l0
 	$(L0) test $(COMMON) common/initramfs_test.l0
 	$(L0) test $(BASE) common/queue.l0 common/queue_test.l0
+	$(L0) test $(BASE) common/klog.l0 common/klog_test.l0
+	$(L0) test $(BASE) common/queue.l0 common/klog.l0 kernel/log.l0 kernel/log_test.l0
 	$(L0) test $(BASE) common/queue.l0 kernel/memory.l0 kernel/memory_test.l0
 	$(L0) test $(BASE) kernel/mounts.l0 kernel/mounts_test.l0
 	$(L0) test $(BASE) common/queue.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/ipc_test.l0

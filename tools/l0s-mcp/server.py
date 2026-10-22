@@ -11,7 +11,7 @@ import subprocess
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from board import Board, BoardError, parse_combo, parse_ps, parse_windows
+from board import Board, BoardError, parse_combo, parse_dmesg, parse_ps, parse_windows
 
 INSTRUCTIONS = """\
 Drives L0S, the L0 microkernel, booted on QEMU's aarch64 virt board.
@@ -135,6 +135,18 @@ def ps() -> dict:
     lists them: pid, parent, program and what each waits for."""
     reply = board.shell("ps")
     return {"processes": parse_ps(reply["output"]), "raw": reply["output"]}
+
+
+@tool
+def dmesg() -> dict:
+    """The kernel's log since boot, as the serial shell's dmesg prints it:
+    each message the kernel and the drivers reported (what each found, and
+    anything that went wrong), with its time in seconds since boot, oldest
+    first, and how many older ones the log had dropped. The board keeps
+    the log, so it holds what the serial line showed before this was
+    attached."""
+    reply = board.shell("dmesg")
+    return {**parse_dmesg(reply["output"]), "raw": reply["output"]}
 
 
 @tool

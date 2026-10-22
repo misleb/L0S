@@ -205,6 +205,25 @@ def parse_ps(text):
     return procs
 
 
+_DMESG = re.compile(r"^\[\s*(\d+)\.(\d{6})\] (.*)$")
+_DROPPED = re.compile(r"^\((\d+) earlier messages dropped\)$")
+
+
+def parse_dmesg(text):
+    """dmesg's lines as messages: time in seconds since boot, and text, in
+    order; and how many earlier messages the kernel's log had dropped."""
+    messages, dropped = [], 0
+    for line in text.splitlines():
+        m = _DMESG.match(line)
+        if m:
+            messages.append({"time": int(m[1]) + int(m[2]) / 1e6, "text": m[3]})
+            continue
+        m = _DROPPED.match(line)
+        if m:
+            dropped = int(m[1])
+    return {"messages": messages, "dropped": dropped}
+
+
 def parse_windows(text):
     """run windows's lines: the windows, front first, and the pointer."""
     wins, pointer, errors = [], None, []

@@ -215,9 +215,15 @@ keep working still goes in a test.
 
 - **Print from a process**: `write_err`, then `file_flush (IoFile 2)`.
   Without the flush nothing shows until the process exits, and servers never
-  do. A process the inittab starts writes to the serial line, which a screen
-  test saves in `build/NAME.out`. Prefix lines (`DBG`) and grep for them.
-  Remove them before finishing.
+  do. What a process the inittab starts writes to standard error is the
+  serial line's, which a screen test saves in `build/NAME.out` and an e2e
+  case in `NAME.err`; its standard output is the diffed `expected`'s, so
+  never print a debug line there. Prefix lines (`DBG`) and grep for them.
+  Remove them before finishing. For a line that should stay, `debug_as`
+  keeps it in the kernel's log without printing it.
+- **Read what booted**: `dmesg` at the shell (or the MCP's `dmesg` tool)
+  lists the kernel's log, every driver's line with its time since boot,
+  after the serial line has scrolled past or on a board with none.
 - **Time a phase**: `(let t0 (clock_ns) ...)` around it and print
   `(div (sub t1 t0) 100000)`, tenths of a millisecond.
 - **Drive the pointer from a script**: copy `events`, `at` and `button` from

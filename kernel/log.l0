@@ -1,0 +1,62 @@
+; log.l0 -- the kernel's ring of messages: the newest records that fit
+; in log_bytes, each numbered in the order it was logged, read back from
+; any number on. Pure: the kernel holds one and stamps the time itself.
+
+; The ring: its records, oldest first, the bytes they take encoded, and
+; the number the next one gets.
+(data KLog (KLog (Queue LogRecord) int int))
+
+; A ring with nothing in it.
+(def klog_new () KLog
+  (KLog (queue_empty (LogRecord 0 0 0 0 (nil int))) 0 0))
+
+; How many messages have been logged in all, those dropped included.
+(def klog_count ((log KLog)) int
+  (match log ((KLog q used next) next)))
+
+; The ring with a message more, numbered next, logged at ns by pid, at a
+; level, of text; the oldest records are dropped while the ring holds more
+; than log_bytes.
+(def klog_add ((log KLog) (pid int) (level int) (text (list int)) (ns int)) KLog
+  (match log
+    ((KLog q used next)
+      (let r (LogRecord next ns pid level text)
+        (klog_trim (queue_push q r) (add used (log_record_len r)) (add next 1))))))
+
+; The ring with its oldest records dropped until it fits, but never the
+; newest.
+(def klog_trim ((q (Queue LogRecord)) (used int) (next int)) KLog
+  (if (gt used (log_bytes))
+      (match (queue_pop q)
+        ((PopEmpty) (KLog q used next))
+        ((Popped old rest)
+          (if (eq (queue_size rest) 0)
+              (KLog q used next)
+              (klog_trim rest (sub used (log_record_len old)) next))))
+      (KLog q used next)))
+
+; Every record in the ring, oldest first.
+(def klog_records ((log KLog)) (list LogRecord)
+  (match log
+    ((KLog q used next)
+      (match q ((Queue front back) (append front (rev back)))))))
+
+; The bytes of the records numbered seq or more, oldest first, as many
+; whole records as fit in max; from the oldest kept if seq is older. Empty
+; if there are none, or the first does not fit.
+(def klog_from ((log KLog) (seq int) (max int)) (list int)
+  (rev (klog_take (klog_records log) seq max (nil int))))
+
+; klog_from's loop: skips records before seq, then pushes each record's
+; bytes onto acc while max holds them.
+(def klog_take ((rs (list LogRecord)) (seq int) (max int) (acc (list int))) (list int)
+  (if (is_empty rs)
+      acc
+      (match (head rs)
+        ((LogRecord n ns pid level text)
+          (if (lt n seq)
+              (klog_take (tail rs) seq max acc)
+              (if (gt (log_record_len (head rs)) max)
+                  acc
+                  (klog_take (tail rs) seq (sub max (log_record_len (head rs)))
+                             (push (log_record_bytes (head rs)) acc))))))))

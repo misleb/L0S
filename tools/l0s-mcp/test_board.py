@@ -7,7 +7,7 @@ import unittest
 import zlib
 
 from board import (BoardError, axis, button, crop, key_combo, parse_combo, parse_ppm,
-                   parse_ps, parse_windows, png, reply_of, wheel)
+                   parse_dmesg, parse_ps, parse_windows, png, reply_of, wheel)
 
 
 class Keys(unittest.TestCase):
@@ -110,6 +110,20 @@ class Shell(unittest.TestCase):
             {"pid": 1, "parent": 0, "program": "sh", "state": "running"},
             {"pid": 10, "parent": 7, "program": "sh", "state": "waiting for a message on port 13"},
         ])
+
+    def test_dmesg(self):
+        text = ("[    0.000123] l0s: aarch64, booted with no arguments\n"
+                "[   12.500000] sdhci: disk1: an SD card of 268.4 MB, 524288 sectors\n")
+        self.assertEqual(parse_dmesg(text), {"messages": [
+            {"time": 0.000123, "text": "l0s: aarch64, booted with no arguments"},
+            {"time": 12.5, "text": "sdhci: disk1: an SD card of 268.4 MB, 524288 sectors"},
+        ], "dropped": 0})
+
+    def test_dmesg_dropped(self):
+        text = "(36 earlier messages dropped)\n[    1.000000] l0s: x\nl0s> "
+        got = parse_dmesg(text)
+        self.assertEqual(got["dropped"], 36)
+        self.assertEqual(len(got["messages"]), 1)
 
     def test_windows(self):
         got = parse_windows("1 vt2 100 90 640 384 front\n0 vt1 40 40 640 384 -\npointer 3 4\n")

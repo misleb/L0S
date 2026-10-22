@@ -180,6 +180,13 @@ for dir in "${cases[@]}"; do
   elif [ -f "$dir/pattern" ]; then
     [ "$(wc -l < "$out")" -le 1 ] && grep -qxE "$(cat "$dir/pattern")" "$out" ||
       why="standard output does not match $(cat "$dir/pattern"): $(head -c 200 "$out")"
+  elif [ -f "$dir/contains" ]; then
+    # What the time or the board varies is not diffed: each line of the
+    # file must be somewhere in standard output.
+    while IFS= read -r want; do
+      grep -qF -- "$want" "$out" || { why="standard output lacks: $want"$'\n'"$(head -c 600 "$out")"; break; }
+    done < "$dir/contains"
+    [ -z "$why" ] && [ "$status" != "$want_status" ] && why="exit status $status, wanted $want_status"
   elif ! diff -u "$dir/expected" "$out" > "$BUILD/e2e/$name.diff"; then
     why="standard output differs:"$'\n'"$(cat "$BUILD/e2e/$name.diff")"
   elif [ "$status" != "$want_status" ]; then

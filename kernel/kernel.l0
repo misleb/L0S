@@ -26,8 +26,9 @@
 ; (spawn_image), by pid, as entries name the rest. Once a volume is /,
 ; the bytes are given up, none, and the stdin entry with them; the
 ; entries stay, to name the processes started from them, and to say
-; which drive devices and what arguments a path gets.
-(data Boot (Boot bytes (array Entry) (array bool) (array (list (list int))) int int (Map int (list int))))
+; which drive devices and what arguments a path gets. It holds the log
+; of messages too (log.l0), which outlives the initramfs.
+(data Boot (Boot bytes (array Entry) (array bool) (array (list (list int))) int int (Map int (list int)) KLog))
 
 ; Every slot of the table, the pids ready to run in order, the ports, the
 ; sleepers, the bound interrupts, the initramfs, the pid each slot holds,
@@ -45,7 +46,7 @@
   (match c
     ((Config launches devs defaults stdin)
       (Kernel (array_new 256 (Free)) (Queue (nil int) (nil int)) (ipc_new) (nil Sleeper)
-              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int)))) (pids_new) (mem_new)))))
+              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int))) (klog_new)) (pids_new) (mem_new)))))
 
 ; ------------------------------------------------------------- the fields
 
@@ -59,32 +60,32 @@
 ; Entry i of the initramfs, which must be one (is_entry).
 (def k_entry ((k Kernel) (i int)) Entry
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur names) (array_get es i))))))
+    (match boot ((Boot input es devs defaults stdin cur names klog) (array_get es i))))))
 
 ; Every entry of the initramfs.
 (def k_entries ((k Kernel)) (array Entry)
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur names) es)))))
+    (match boot ((Boot input es devs defaults stdin cur names klog) es)))))
 
 ; How many entries the initramfs has.
 (def k_entry_count ((k Kernel)) int
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur names) (array_len es))))))
+    (match boot ((Boot input es devs defaults stdin cur names klog) (array_len es))))))
 
 ; Whether the inittab lets entry i drive devices.
 (def k_entry_dev ((k Kernel) (i int)) bool
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur names) (array_get devs i))))))
+    (match boot ((Boot input es devs defaults stdin cur names klog) (array_get devs i))))))
 
 ; The arguments the inittab gives entry i when started without any.
 (def k_entry_args ((k Kernel) (i int)) (list (list int))
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur names) (array_get defaults i))))))
+    (match boot ((Boot input es devs defaults stdin cur names klog) (array_get defaults i))))))
 
 ; The initramfs's bytes, none once a volume is /.
 (def k_input ((k Kernel)) bytes
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur names) input)))))
+    (match boot ((Boot input es devs defaults stdin cur names klog) input)))))
 
 ; Whether i is the index of an entry of the initramfs.
 (def is_entry ((k Kernel) (i int)) bool
@@ -99,8 +100,8 @@
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem)
       (match boot
-        ((Boot input es devs defaults stdin cur names)
-          (Kernel slots ready ipc ss irqs (Boot (bytes_from_list (nil int)) es devs defaults -1 0 names) next mem))))))
+        ((Boot input es devs defaults stdin cur names klog)
+          (Kernel slots ready ipc ss irqs (Boot (bytes_from_list (nil int)) es devs defaults -1 0 names klog) next mem))))))
 
 ; The path of p's program: its entry's, or its image's, as spawn_image
 ; was given it.
@@ -114,18 +115,50 @@
 ; The path of each process started from an image of its own, by pid.
 (def k_names ((k Kernel)) (Map int (list int))
   (match k ((Kernel slots ready ipc ss irqs boot next mem)
-    (match boot ((Boot input es devs defaults stdin cur names) names)))))
+    (match boot ((Boot input es devs defaults stdin cur names klog) names)))))
 
 ; k with pid's image's path forgotten, pid having ended.
 (def k_forget_name ((k Kernel) (pid int)) Kernel
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem)
       (match boot
-        ((Boot input es devs defaults stdin cur names)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid)) next mem))))))
+        ((Boot input es devs defaults stdin cur names klog)
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid) klog) next mem))))))
+
+; The kernel's log of messages.
+(def k_log ((k Kernel)) KLog
+  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+    (match boot ((Boot input es devs defaults stdin cur names klog) klog)))))
+
+; k with its log replaced.
+(def k_with_log ((k Kernel) (log KLog)) Kernel
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem)
+      (match boot
+        ((Boot input es devs defaults stdin cur names klog)
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names log) next mem))))))
+
+; k with a message logged by pid (0 for the kernel) at level, of text
+; with no newline, stamped with the time. Any level but debug is written
+; to the kernel's standard error too, a line each, at once, as the kernel
+; has always reported: so the serial line shows it before any process
+; has started, and a log nobody has read loses nothing.
+(def k_note ((k Kernel) (pid int) (level int) (text (list int))) Kernel
+  (let t (max 0 (clock_ns))
+    (let short (take text (log_text_max))
+      (let w (k_echo level short)
+        (k_with_log k (klog_add (k_log k) pid level short t))))))
+
+; Writes a line of text to the kernel's standard error, delivered at
+; once, unless level is debug; 0.
+(def k_echo ((level int) (text (list int))) int
+  (if (lt level (log_debug))
+      (let w (write_err (append text "\n"))
+        (let f (file_flush (IoFile 2)) 0))
+      0))
 
 ; The arguments the inittab gives the program at path, if it names it.
-(def k_path_args ((k Kernel) (path (list int))) (list (list int))
+(def k_path_args((k Kernel) (path (list int))) (list (list int))
   (let e (entry_index (k_entries k) path)
     (if (lt e 0) (nil (list int)) (k_entry_args k e))))
 
@@ -613,16 +646,19 @@
 
 ; p ended by the kernel, for why, as a fault ends a process on Unix.
 (def kill ((k Kernel) (p Proc) (why (list int))) Step
-  (let w (write_err (kill_message (base_name (k_proc_path k p)) (proc_pid p) why))
-    (exit_proc k p 139)))
+  (exit_proc (k_note k 0 (log_error) (kill_text (base_name (k_proc_path k p)) (proc_pid p) why)) p 139))
 
 ; The line the kernel writes when it kills process pid, named name, for
 ; why: "l0s: process PID (NAME) killed: WHY".
 (def kill_message ((name (list int)) (pid int) (why (list int))) (list int)
+  (append (kill_text name pid why) "\n"))
+
+; kill_message without its newline, the text the kernel logs.
+(def kill_text ((name (list int)) (pid int) (why (list int))) (list int)
   (let a (push "l0s: process " (nil int))
     (let b (push (digits pid) a)
       (let c (push (append " (" (append name ") killed: ")) b)
-        (rev (push "\n" (push why c)))))))
+        (rev (push why c))))))
 
 ; ------------------------------------------------------------------ calls
 
@@ -775,6 +811,8 @@
     ((CSpawnImage buf len) (do_spawn_image k p buf len))
     ((CChdir buf len) (do_chdir k p buf len))
     ((CGetCwd buf max) (give_record k p (proc_cwd p) buf max))
+    ((CLogWrite level buf len) (do_log_write k p level buf len))
+    ((CLogRead seq buf max) (do_log_read k p seq buf max))
     ((CWait pid) (do_wait k p pid))
     ((CSleepUntil t) (do_sleep k p t))
     ((CIrqBind irq port) (do_irq_bind k p irq port))
@@ -810,17 +848,17 @@
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem)
       (match boot
-        ((Boot input es devs defaults stdin cur names)
+        ((Boot input es devs defaults stdin cur names klog)
           (if (lt stdin 0)
-              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names) next mem) p 0)
+              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem) p 0)
               (let e (array_get es stdin)
                 (let from (add (entry_start e) cur)
                   (let cnt (min n (min (io_chunk) (sub (entry_end e) from)))
                     (match (proc_copy_in p buf input from (add from cnt))
                       ((CopyInBad q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names) next mem) q -5))
+                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem) q -5))
                       ((CopiedIn q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names) next mem)
+                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names klog) next mem)
                                      q cnt))))))))))))
 
 ; A file of the initramfs, opened before it was given up, reads as at its
@@ -1143,7 +1181,8 @@
             ((MountNameBad) (resume_with k q (err_fault)))
             ((MountName uuid label)
               (match (ipc_mount (k_ipc k) (proc_pid q) port label uuid)
-                ((Registered code i2) (resume_with (with_ipc k i2) q code)))))))))
+                ((Registered code i2)
+                  (resume_with (if (eq code 0) (k_note (with_ipc k i2) 0 (log_info) (append "l0s: /Volumes/" (append label " mounted"))) (with_ipc k i2)) q code)))))))))
 
 ; The volume at /Volumes/LABEL, the len bytes at buf, which port, p's,
 ; mounted, unmounted: 0, or err_no_port if port is not p's or mounted no
@@ -1157,7 +1196,8 @@
         ((CopyOutBad q) (resume_with k q (err_fault)))
         ((CopiedOut q b)
           (match (ipc_unmount (k_ipc k) (proc_pid q) port (bytes_to_list b))
-            ((Registered code i2) (resume_with (with_ipc k i2) q code)))))))
+            ((Registered code i2)
+              (resume_with (if (eq code 0) (k_note (with_ipc k i2) 0 (log_info) (append "l0s: /Volumes/" (append (bytes_to_list b) " unmounted"))) (with_ipc k i2)) q code)))))))
 
 ; The volume label, the len bytes at buf, made /, and the initramfs given
 ; up: 0, or err_denied if p's program is not the initramfs's, err_taken
@@ -1174,7 +1214,7 @@
               (match (ipc_root (k_ipc k) (bytes_to_list b))
                 ((Registered code i2)
                   (if (eq code 0)
-                      (resume_with (k_free_initramfs (with_ipc k i2)) q 0)
+                      (resume_with (k_note (k_free_initramfs (with_ipc k i2)) 0 (log_info) (append "l0s: / is the volume " (append (bytes_to_list b) ", and the initramfs is given up"))) q 0)
                       (resume_with k q code)))))))))
 
 ; The board's boot arguments, split at spaces.
@@ -1253,8 +1293,8 @@
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem)
       (match boot
-        ((Boot input es devs defaults stdin cur names)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_put names pid path)) next mem))))))
+        ((Boot input es devs defaults stdin cur names klog)
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_put names pid path) klog) next mem))))))
 
 ; Where a device reaches each of p's DMA pages from va's on, copied to
 ; buf, as many as room holds, a u64 each, dma_limit at most: how many
@@ -1417,6 +1457,31 @@
                 ((Some args)
                   (match (spawn k m (proc_pid q) (Some args) (proc_tty_port q))
                     ((Spawned k2 pid) (resume_with (k_child_cwd k2 pid (proc_cwd q)) q pid))))))))))
+
+; The len bytes at buf logged as a message of p's, at level: the number
+; it was given, or err_fault for a level that is none, or a buffer p may
+; not give, or err_too_big for more than log_text_max bytes. A newline in
+; it, or at its end, makes no new line (log_clean).
+(def do_log_write ((k Kernel) (p Proc) (level int) (buf int) (len int)) Step
+  (if (not (log_level_ok level))
+      (resume_with k p (err_fault))
+      (if (lt len 0)
+          (resume_with k p (err_fault))
+          (if (gt len (log_text_max))
+              (resume_with k p (err_too_big))
+              (match (proc_copy_out p buf len)
+                ((CopyOutBad q) (resume_with k q (err_fault)))
+                ((CopiedOut q b)
+                  (resume_with (k_note k (proc_pid q) level (log_clean (bytes_to_list b))) q (klog_count (k_log k)))))))))
+
+; The messages of the log numbered seq or more, as many whole ones as max
+; holds, copied to buf as klog.l0 lays them out: their length, 0 if
+; there are none, or err_too_big for a max below 0, err_fault if p may
+; not take them at buf.
+(def do_log_read ((k Kernel) (p Proc) (seq int) (buf int) (max int)) Step
+  (if (lt max 0)
+      (resume_with k p (err_too_big))
+      (give_record k p (klog_from (k_log k) seq max) buf max)))
 
 ; pid's record, then its program's path, copied to buf, as much as max
 ; holds: its length, or err_no_port if pid was never used, err_too_big
@@ -1776,7 +1841,7 @@
 ; ever come.
 (def idle ((k Kernel)) int
   (if (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false)
-      (let w (write_err "l0s: deadlock: every process waits for something that cannot happen\n")
+      (let k2 (k_note k 0 (log_error) "l0s: deadlock: every process waits for something that cannot happen")
         124)
       (let t (timer_at (soonest (k_sleepers k)))
         (let n (interrupt_wait)
@@ -1786,7 +1851,7 @@
                   (schedule k)))
               (if (gt n 0)
                   (schedule (device_irq k n))
-                  (let w (write_err "l0s: no interrupt can come\n")
+                  (let k2 (k_note k 0 (log_error) "l0s: no interrupt can come")
                     124)))))))
 
 ; ------------------------------------------------------------------- boot
@@ -1800,9 +1865,8 @@
           (match (spawn k e 0 args 0)
             ((Spawned k2 pid)
               (if (lt pid 0)
-                  (let w (write_err (append "l0s: cannot start " (append (entry_path (k_entry k2 e)) (append ": " (append (digits pid) "\n")))))
-                    (start_all k2 (tail ls)))
-                  (start_all k2 (tail ls)))))))))
+                  (start_all (k_note k2 0 (log_error) (append "l0s: cannot start " (append (entry_path (k_entry k2 e)) (append ": " (digits pid))))) (tail ls))
+                  (start_all (k_note k2 0 (log_debug) (append "l0s: pid " (append (digits pid) (append ": " (entry_path (k_entry k2 e)))))) (tail ls)))))))))
 
 ; why written to standard error as the kernel's, "l0s: WHY"; 1, the
 ; status to stop with.
@@ -1825,14 +1889,59 @@
                   ((Err why) (complain why))
                   ((Ok config) (boot_config input es config))))))))))
 
+; The CPU's name, for the first line of boot: what (machine) says.
+(def cpu_name ((m int)) (list int)
+  (if (eq m 1) "aarch64" (if (eq m 2) "riscv64" "an unknown CPU")))
+
+; The lines the kernel logs as it boots, each "l0s: ...": the CPU and
+; the boot arguments args, the pages of memory free, how processes' memory
+; is laid out, the kernel's limits, and the initramfs, of size bytes and
+; entries entries, with starts programs to start. All of it is what the
+; kernel can learn: L0 has no builtin for the board's RAM, its image, its
+; CPUs, its timer or its interrupt controller.
+(def banner_lines ((m int) (args (list (list int))) (free int) (size int) (entries int) (starts int)) (list (list int))
+  (cons (append "l0s: " (append (cpu_name m) (boot_arguments_text args)))
+  (cons (memory_text free)
+  (cons (append "l0s: processes: images and heaps from 0x" (append (hex_digits (user_base) 0)
+          (append " to 0x" (append (hex_digits (heap_limit) 0)
+            (append ", stacks below 0x" (append (hex_digits (stack_top) 0)
+              (append ", device and DMA pages to 0x" (hex_digits (user_limit) 0))))))))
+  (cons (append "l0s: limits: " (append (digits (max_procs)) (append " processes, " (append (digits (div (slice_ns) 1000000))
+          (append " ms slices, ports of " (append (digits (queue_limit)) (append " messages of up to " (append (digits (max_message)) " bytes"))))))))
+  (cons (append "l0s: initramfs: " (append (format_size size) (append ", " (append (digits entries)
+          (append " entries, " (append (digits starts) " programs to start"))))))
+  (nil (list int))))))))
+
+; ", booted with ARGS" for boot arguments, or ", booted with no arguments".
+(def boot_arguments_text ((args (list (list int)))) (list int)
+  (if (is_empty args)
+      ", booted with no arguments"
+      (append ", booted with " (unwords args))))
+
+; The line about memory: the pages free, and their size; nothing known
+; where the host has no user mode (-3).
+(def memory_text ((free int)) (list int)
+  (if (lt free 0)
+      "l0s: memory: no user mode"
+      (append "l0s: memory: " (append (digits free) (append " pages free, " (format_size (mul free 4096)))))))
+
+; k with each line logged by the kernel at info.
+(def k_notes ((k Kernel) (lines (list (list int)))) Kernel
+  (if (is_empty lines)
+      k
+      (k_notes (k_note k 0 (log_info) (head lines)) (tail lines))))
+
 ; The rest of boot, the inittab resolved as config: the timer's interrupt
-; enabled, every start line started, and the loop run if pid 1 is live;
-; pid 1's status if it has exited already, or 1 if nothing started.
+; enabled, the board described, every start line started, and the loop
+; run if pid 1 is live; pid 1's status if it has exited already, or 1 if
+; nothing started.
 (def boot_config ((input bytes) (es (array Entry)) (config Config)) int
   (match config
     ((Config launches devs defaults stdin)
       (let e (interrupt_enable 0)
-        (let k (start_all (kernel_new input es config) launches)
+        (let k (start_all (k_notes (kernel_new input es config)
+                            (banner_lines (machine) (boot_args) (frame_free_count) (bytes_len input) (array_len es) (length launches)))
+                          launches)
           (match (look k 1)
             ((LookLive) (schedule k))
             ((LookFree) (complain "nothing could be started"))

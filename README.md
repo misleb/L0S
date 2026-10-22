@@ -195,7 +195,7 @@ one running in the background:
   along as an argument.
 
 Any other word must be one of the shell's own commands (`help`, `ps`,
-`wait`, `kill`, `sleep`, `echo`, `exit`, `cd`, `pwd`, and those on files
+`wait`, `kill`, `sleep`, `echo`, `exit`, `cd`, `pwd`, `dmesg`, and those on files
 below), so a
 program can never be mistaken for a command. Here `echo` is both a
 command and a program: the command prints, and `run echo &` starts the
@@ -414,6 +414,7 @@ makes it, and a network card on QEMU's user network.
 | `shell` | types a command at the serial shell and returns what it printed before the next prompt |
 | `serial_send`, `serial_read` | types anything at the serial line, Ctrl-C included; what it showed since last read, waiting for a pattern |
 | `ps`, `windows` | `ps` and `run windows` at the serial shell, parsed |
+| `dmesg` | `dmesg` at the serial shell, parsed: each message of the kernel's log with its time since boot, which the board keeps, so no tool keeps a log of its own |
 | `screenshot`, `pixels` | the screen, or part of it, as a PNG, by QMP's `screendump`; the exact colors of pixels |
 | `type_keys`, `press_keys` | text, or combinations such as `ctrl-c`, on the virtio keyboard, so to the front window |
 | `move`, `click`, `drag`, `scroll` | the virtio tablet, in screen pixels, and its scroll wheel |
@@ -1536,6 +1537,8 @@ with random registers.
 | `common/abi.l0` | call numbers, error codes, limits, the address-space layout, little-endian helpers, argument encoding |
 | `common/initramfs.l0` | the newc archive: parsing it, paths, entry kinds, and a writer for tests |
 | `common/queue.l0` | a FIFO queue of any type, shared with user programs |
+| `common/klog.l0` | the log's records, their levels, bytes and the lines `dmesg` prints, shared with user programs |
+| `kernel/log.l0` | the ring of the kernel's log: stamping, dropping the oldest, and reading from a number |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
 | `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; which heap pages a release names; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; the code and rodata processes share, by their bytes' hash; which frames to free when a process ends |
 | `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
@@ -1549,6 +1552,37 @@ with random registers.
 
 All of these except `process.l0` and `kernel.l0` are pure and tested on the
 host. The kernel itself is tested on the board.
+
+### The kernel's log
+
+Every message the kernel and the drivers report is kept in a ring in the
+kernel, as Linux keeps its own for `dmesg`, so that what booted can be
+read again after the serial line has scrolled, or on a board with no
+serial console, from the desktop's Terminal or the MCP's `dmesg` tool. A
+message is a record: a number, from 0 in the order logged; the time in
+nanoseconds since boot; the pid that logged it, 0 for the kernel; a level
+(0 error, 1 warning, 2 info, 3 debug); and a line of at most 512 bytes of
+text, which says who as `NAME: WHAT`. The ring holds 64 KiB of records
+(`log_bytes`); a new one drops the oldest while it is over, so the first
+number `dmesg` reads says how many were dropped.
+
+Logging is call 294 (`log_write`) and reading call 295 (`log_read`); the
+kernel's own messages go in by the same path, as `l0s: ...` with pid 0.
+Every message but a debug one is also written to the kernel's standard
+error as it is logged, which is the serial line, so the serial console
+shows each as it happens, from the first line the kernel says: nothing is
+held back for `uart`, and nothing is replayed when it starts. `dmesg` is
+how to read the rest, and what was said before a program started.
+
+The kernel says, as it boots (`banner_lines`): its CPU and boot
+arguments; the pages of memory free; how a process's memory is laid out,
+images and heaps, stacks, device and DMA pages; its limits; the
+initramfs's size and entries. L0 has no builtin for the board's RAM,
+CPUs, timer or interrupt controller, so it says nothing of them. It logs
+at the debug level each process it starts, and at info each volume
+mounted or unmounted and `/` becoming a volume. Each driver says what it
+found as it starts to serve, as `sdhci` does (see the `l0s-dev` skill's
+"What a driver says").
 
 ### Processes and pids
 
@@ -1771,6 +1805,8 @@ otherwise as its type's first failure.
 | 291 | `getcwd`, `path_abs path` | `(list int)` | the current directory, an absolute path with no final `/`, `/` at the start; `path_abs` is a path made absolute from it, unless it starts with `/` already |
 | 292 | `dma_addresses va n` | `(array int)` | where a device reaches each of the caller's DMA pages from the one holding va, n at most, a u64 each, up to the first that is not one: fewer than n then, none if va's is not; -6 no `dev` line, which the wrapper gives as none |
 | 293 | `dma_sync va n dir` | `DmaSynced n`, `DmaSyncDenied`, `DmaSyncBad` | n of the caller's DMA pages from the one holding va, up to the first that is not one, made to agree between the CPU's caches and memory by L0's `frame_sync`, for a device that does not see the caches, as the Raspberry Pi 5's do not: dir 1 cleans (`dma_to_device`, after writing what it will read), 2 invalidates (`dma_from_device`, before reading what it wrote), 3 both; how many; -5 another dir, -6 no `dev` line |
+| 294 | `log_write level text` | `Logging`: `Logged n`, `LogTooLong`, `LogRefused` | puts text, a line, in the kernel's log (see [The kernel's log](#the-kernels-log)) as the caller's, at level 0 error, 1 warning, 2 info or 3 debug, stamped with the time and the caller's pid: its number, or -4 for over 512 bytes, -5 for another level or a buffer the caller may not give. A newline in the text is a space, and one at its end is dropped. Any process may. Any level but debug is written to the kernel's standard error too, a line each |
+| 295 | `log_read seq`, `log_all` | `(list LogRecord)` | the messages in the log numbered seq or more, as many whole ones as 4096 bytes hold, oldest first, as `klog.l0` lays each out: a u64 number, a u64 time in ns since boot, a u16 pid, a byte of level, a u16 length, then the text. From the oldest kept if seq is older; none past the last. `log_all` reads them all, a read at a time. Any process may |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -1806,7 +1842,7 @@ every `.l0` in its directory is part of it.
 | Program | What it does |
 |---|---|
 | `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; given `root=tmpfs`, has `install` fill the RAM file system first; starts `/etc/system`'s programs by path, and exits with the first one's status |
-| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format` and `unmount`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo` and `exit`. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
+| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format` and `unmount`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo`, `exit` and `dmesg`, which prints the kernel's log, a line for each message with its time since boot. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font (at scale 2, cells of 16×32 in the face's Source Code Pro), in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
@@ -1857,6 +1893,7 @@ name in a library is taken in every program that links it.
 | [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
 | [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div`, `format_size` (a size as GNOME says it, `782.3 kB`) | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
+| [common/klog.l0](common/klog.l0) | the kernel's log: a record's levels, its bytes as `log_read` gives them, and `dmesg`'s lines (`[    1.234567] TEXT`) | the kernel, every program |
 | [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `PointerMotion`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
 | [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order | every program |
@@ -2212,6 +2249,10 @@ a bad buffer, and wait on nothing.
 
 ## Limits
 
+- **The kernel's log keeps 64 KiB of records**, about 1,500 lines of the
+  usual length, and a message is at most 512 bytes (see
+  [The kernel's log](#the-kernels-log)); older messages are dropped as
+  newer ones come, and `dmesg` says how many.
 - **At most 255 processes alive at once**, the table's slots (see
   [Processes and pids](#processes-and-pids)), and a status no one asked
   for is lost once 255 newer processes have needed its slot.

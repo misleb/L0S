@@ -1,0 +1,129 @@
+; klog.l0 -- the kernel's log of messages: a record's levels, its bytes as
+; log_read gives them and log_write is given them, and the line dmesg
+; prints for it. Pure; the kernel and every program link it.
+
+; ---------------------------------------------------------------- levels
+
+; The levels of a message, most urgent first, as log_write is given them.
+(def log_error () int 0)
+(def log_warn () int 1)
+(def log_info () int 2)
+(def log_debug () int 3)
+
+; The most bytes of text one message holds.
+(def log_text_max () int 512)
+
+; The most bytes of text the log keeps; the oldest messages are dropped
+; to stay within it.
+(def log_bytes () int 65536)
+
+; Whether n is a level.
+(def log_level_ok ((n int)) bool (if (ge n 0) (le n 3) false))
+
+; A level's name, as dmesg words it; "?" for a number that is none.
+(def log_level_name ((n int)) (list int)
+  (if (eq n 0) "error"
+      (if (eq n 1) "warn"
+          (if (eq n 2) "info"
+              (if (eq n 3) "debug" "?")))))
+
+; text as one line: a newline or carriage return at its end dropped, any
+; other in it a space, so that a message is a line however it was written.
+(def log_clean ((text (list int))) (list int)
+  (log_clean_onto (log_trimmed (rev text)) (nil int)))
+
+; text, which is reversed, without the newlines and carriage returns at
+; its start, turned round again.
+(def log_trimmed ((rtext (list int))) (list int)
+  (if (is_empty rtext)
+      rtext
+      (if (if (eq (head rtext) 10) true (eq (head rtext) 13))
+          (log_trimmed (tail rtext))
+          (rev rtext))))
+
+; log_clean's loop: the bytes of text with each newline or carriage return
+; a space, onto acc, reversed, and then turned round.
+(def log_clean_onto ((text (list int)) (acc (list int))) (list int)
+  (if (is_empty text)
+      (rev acc)
+      (log_clean_onto (tail text)
+        (cons (if (if (eq (head text) 10) true (eq (head text) 13)) 32 (head text)) acc))))
+
+; ---------------------------------------------------------------- records
+
+; One message: its sequence number, from 0 in the order they were logged,
+; the time it was logged in nanoseconds since boot, the pid that logged
+; it (0 for the kernel), its level, and its text with no newline.
+(data LogRecord (LogRecord int int int int (list int)))
+
+; The bytes in a record before its text: a u64 sequence number, a u64
+; time, a u16 pid, a byte of level, and a u16 length of the text.
+(def log_header_len () int 21)
+
+; The bytes r takes: its header and its text.
+(def log_record_len ((r LogRecord)) int
+  (match r ((LogRecord seq ns pid level text) (add (log_header_len) (length text)))))
+
+; r as bytes, the header and then the text, as log_read gives it.
+(def log_record_bytes ((r LogRecord)) (list int)
+  (match r
+    ((LogRecord seq ns pid level text)
+      (append (le64 seq)
+        (append (le64 ns)
+          (append (le16 pid)
+            (cons level (append (le16 (length text)) text))))))))
+
+; The records in b, as many whole ones as it holds from byte i on.
+(def log_records_of ((b bytes)) (list LogRecord)
+  (rev (log_records_from b 0 (nil LogRecord))))
+
+; log_records_of's loop: the records from byte i on, onto acc, which
+; holds those before them, last first. A record cut short ends it.
+(def log_records_from ((b bytes) (i int) (acc (list LogRecord))) (list LogRecord)
+  (if (gt (add i (log_header_len)) (bytes_len b))
+      acc
+      (let n (le_u16_at b (add i 19))
+        (if (gt (add (add i (log_header_len)) n) (bytes_len b))
+            acc
+            (log_records_from b (add (add i (log_header_len)) n)
+              (cons (LogRecord (le_u64_at b i) (le_u64_at b (add i 8)) (le_u16_at b (add i 16))
+                               (bytes_get b (add i 18))
+                               (bytes_range b (add i (log_header_len)) (add (add i (log_header_len)) n)))
+                    acc))))))
+
+; ------------------------------------------------------------------ lines
+
+; A time in nanoseconds as dmesg shows it: seconds in 5 columns, a
+; point, and microseconds in 6 digits, in brackets.
+(def log_stamp ((ns int)) (list int)
+  (append "["
+    (append (pad_left (digits (div ns 1000000000)) 5)
+      (append "."
+        (append (pad_left_with 48 (digits (div (mod ns 1000000000) 1000)) 6) "]")))))
+
+; The line dmesg prints for r, with no newline: its stamp and its text.
+(def log_line ((r LogRecord)) (list int)
+  (match r
+    ((LogRecord seq ns pid level text) (append (log_stamp ns) (cons 32 text)))))
+
+; Every record as a line with its newline, in order; and a first line
+; saying how many before them were dropped, if the first is not number 0.
+(def log_lines ((rs (list LogRecord))) (list int)
+  (if (is_empty rs)
+      (nil int)
+      (rev (log_lines_onto rs (log_dropped_note (head rs))))))
+
+; The note that records were dropped, reversed onto nothing, if r, the
+; first, is not number 0; else nothing.
+(def log_dropped_note ((r LogRecord)) (list int)
+  (match r
+    ((LogRecord seq ns pid level text)
+      (if (eq seq 0)
+          (nil int)
+          (push (append "(" (append (digits seq) " earlier messages dropped)\n")) (nil int))))))
+
+; log_lines's loop: each record's line and newline pushed onto acc.
+(def log_lines_onto ((rs (list LogRecord)) (acc (list int))) (list int)
+  (if (is_empty rs)
+      acc
+      (log_lines_onto (tail rs) (push "\n" (push (log_line (head rs)) acc)))))
