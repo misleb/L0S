@@ -31,7 +31,9 @@
 # listens to; @PORT@ in either, in NAME/net, and in NAME/typed is a free
 # port of the host's loopback, chosen for the boot. If NAME/usb exists,
 # the board's keyboard and pointer are a USB keyboard and mouse on a
-# qemu-xhci, for pcie, xhci and usb-hid, not virtio's. Every boot is killed after
+# qemu-xhci, for pcie, xhci and usb-hid, not virtio's. If NAME/sd exists,
+# the board has an SD card in a sdhci-pci, a blank image of 64 MB made
+# for the boot, for pcie and sdhci. Every boot is killed after
 # a minute. Given case names as arguments, it runs only those. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
@@ -100,6 +102,12 @@ for dir in "${cases[@]}"; do
   fi
   disk=""; qemu_args=$L0_QEMU_ARGS; gpu=""
   [ -f "$dir/norng" ] && qemu_args=${qemu_args/ -device virtio-rng-device/}
+  sd=""
+  if [ -f "$dir/sd" ]; then
+    sd="$BUILD/e2e/$name.sd"
+    rm -f "$sd" && dd if=/dev/zero of="$sd" bs=1048576 count=0 seek=64 2> /dev/null
+    qemu_args="$qemu_args -device sdhci-pci -drive file=$sd,if=none,format=raw,id=sd0 -device sd-card,drive=sd0"
+  fi
   input=virtio
   if [ -f "$dir/usb" ]; then
     input=usb
@@ -150,7 +158,7 @@ for dir in "${cases[@]}"; do
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$typed" |
-      QEMU_DISK=$disk QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
     L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi

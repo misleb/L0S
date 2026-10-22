@@ -10,7 +10,8 @@
 #                    /etc/splash.ppm
 #   make demo        boot it to the shell, on this terminal: type help;
 #                    the splash shows in QEMU's window, and build/disk.img
-#                    is the disk, made once, so what is written to it stays
+#                    is the disk, made once, so what is written to it stays;
+#                    build/sd.img, blank until Disks formats it, the SD card
 #   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
 #   make demo NET=user,tftp=DIR         the same, the network's gateway
 #                    serving DIR over TFTP, for tftp 10.0.2.2 FILE
@@ -67,6 +68,11 @@ DISK         := $(BUILD)/disk.img
 SYSDISK      := $(BUILD)/system.img
 SYSUUID      := $(BUILD)/system.uuid
 DISK_DEVICE  := -drive file=$(DISK),if=none,format=raw,id=disk0 -device virtio-blk-device,drive=disk0
+# The SD card: a blank image of 256 MB, a size QEMU's sd-card takes (a
+# power of 2), in a sdhci-pci on PCIe, for pcie and sdhci; made once and
+# kept, as the disk is, so a volume made on it stays.
+SD           := $(BUILD)/sd.img
+SD_DEVICE    := -device sdhci-pci -drive file=$(SD),if=none,format=raw,id=sd0 -device sd-card,drive=sd0
 # NET is the network the board's virtio-net is on, as QEMU's -netdev names
 # one without its id: user, QEMU's own, 10.0.2.0/24 behind a gateway at
 # 10.0.2.2, which inet's defaults are; make demo NET=user,tftp=DIR to
@@ -152,7 +158,8 @@ LIBS_pcie       := $(PCILIB)
 LIBS_xhci       := $(USBLIB) $(PCILIB)
 LIBS_usb-hid    := $(USBLIB) $(KEYMAP)
 LIBS_lsusb      := $(USBLIB)
-LIBS_virtio-blk := $(VIRTIO)
+LIBS_sdhci      := $(PCILIB) $(DISKLIB) $(UUIDLIB) $(FSLIB)
+LIBS_virtio-blk := $(VIRTIO) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-net := $(VIRTIO) $(NICLIB)
 LIBS_virtio-rng := $(VIRTIO) $(RANDOM)
 LIBS_inet       := $(INETLIB) $(CLOCK)
@@ -453,9 +460,13 @@ e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-ini
 	tests/launcher.sh
 	tests/launcher-install.sh
 
-boot: images root $(DISK)
+boot: images root $(DISK) $(SD)
 	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(ROOT)
-	L0_QEMU_ARGS="$(DEVICES) $(DISK_DEVICE) $(NET_DEVICE)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
+	L0_QEMU_ARGS="$(DEVICES) $(DISK_DEVICE) $(SD_DEVICE) $(NET_DEVICE)" $(L0) boot $(BUILD)/kernel.img < $(BUILD)/boot.cpio
+
+# The SD card's image, blank, a sparse file: made once, and kept.
+$(SD): | $(BUILD)
+	dd if=/dev/zero of=$@ bs=1048576 count=0 seek=256 2> /dev/null
 
 # The disk: made once, and never again while it is there, so that what is
 # written to it stays from one boot to the next. make clean resets it. A
@@ -475,9 +486,9 @@ sysdisk: initramfs $(BUILD)/mkfs
 	awk '$$1 == "System" { print $$2 }' $(BUILD)/system.vols > $(SYSUUID)
 	@echo "System is $$(cat $(SYSUUID)): make demo-system boots from it"
 
-demo: initramfs $(DISK)
+demo: initramfs $(DISK) $(SD)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@GPU=$(GPU) QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
+	@GPU=$(GPU) QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_SD=$(SD) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The demo booted from the system disk, its System volume /: made anew

@@ -1,0 +1,346 @@
+; sdhci.l0 -- a disk driver for SD cards behind SD Host Controllers,
+; serving the disk protocol (proto/disk.l0) for each card, under the
+; first diskN free, every card's name on one port. Its module must be
+; flagged dev. Started as
+;
+;   sdhci pci    every SD host controller the pci server (pcie) found:
+;                QEMU's sdhci-pci, with an sd-card in it
+;
+; It brings each card up as the specifications say (sd.l0): reset, a
+; slow clock, CMD0, CMD8, ACMD41 until the card is ready, CMD2, CMD3 for
+; its address, CMD9 for its size, CMD7 to select it, then the card's
+; default speed. A slot with no card, or a card that does not come up,
+; is said so and served by nothing. Blocks move by the controller's
+; buffer, a word at a time, between the card and the client's pages,
+; which the driver opens as a region for the request and closes after:
+; no DMA, so it needs neither the device's view of memory nor, on a
+; board whose DMA does not see the caches, their cleaning. It polls; it
+; takes no interrupt.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "sdhci" why))
+
+; An SD host controller's class: base system peripheral, SD host
+; controller, standard with DMA, as QEMU's is: 0x080501.
+(def sdhci_class () int 525569)
+
+; Where the hosts are, from the arguments, and each card brought up.
+(def sdhci () int
+  (if (eq (args) (cons "pci" (nil (list int))))
+      (from_pci)
+      (complain "usage: sdhci pci")))
+
+; Every SD host controller the pci server knows of, its card brought up
+; and served; none is no failure.
+(def from_pci () int
+  (match (pci_find (sdhci_class))
+    ((Err why) (complain why))
+    ((Ok fs)
+      (if (is_empty fs)
+          (note_as "sdhci" "no SD host controller on the bus")
+          (slots_up fs (nil SdSlot))))))
+
+; ----------------------------------------------------------------- slots
+
+; A card, as the driver holds it: its relative address, whether it is
+; high-capacity, addressed by block, and its sectors.
+(data Card (Card int bool int))
+
+; A slot served: its controller's registers, the disk name its card is
+; registered as, and the card.
+(data SdSlot (SdSlot IoDevice (list int) Card))
+
+; Each function's controller mapped and its card brought up, after the
+; reversed acc; then those with cards served.
+(def slots_up ((fs (list PciFunction)) (acc (list SdSlot))) int
+  (if (is_empty fs)
+      (serving (rev acc))
+      (let f (head fs)
+        (match (open_device (pci_bar_base f 0) (pci_bar_size f 0))
+          ((DeviceFailed fault why) (let w (note_as "sdhci" (append "no controller: " why)) (slots_up (tail fs) acc)))
+          ((DeviceOpened r)
+            (match (card_up r)
+              ((Err why) (let w (note_as "sdhci" why) (slots_up (tail fs) acc)))
+              ((Ok c) (slots_up (tail fs) (cons (SdSlot r "" c) acc)))))))))
+
+; Every slot's card registered as a disk on one port, said on the
+; serial line, and served; nothing to serve is no failure.
+(def serving ((slots (list SdSlot))) int
+  (if (is_empty slots)
+      (note_as "sdhci" "no card to serve")
+      (let port (port_new)
+        (match (registered port slots (nil SdSlot))
+          ((Err why) (complain why))
+          ((Ok named) (serve named port))))))
+
+; Each slot given the first disk name free, after the reversed acc, and
+; fs told of it, if it is there yet; or why one could not be.
+(def registered ((port int) (slots (list SdSlot)) (acc (list SdSlot))) (Result (list SdSlot) (list int))
+  (if (is_empty slots)
+      ((Ok (list SdSlot) (list int)) (rev acc))
+      (match (disk_register port)
+        ((Err why) ((Err (list SdSlot) (list int)) (append "cannot register as a disk: " why)))
+        ((Ok name)
+          (match (head slots)
+            ((SdSlot r n c)
+              (let w (note_as "sdhci" (append name (append ": " (card_line c))))
+                (let a (fs_attach_disk name)
+                  (registered port (tail slots) (cons (SdSlot r name c) acc))))))))))
+
+; A card, in words: its size, and whether it is high-capacity.
+(def card_line ((c Card)) (list int)
+  (match c
+    ((Card rca high n)
+      (append (if high "an SDHC card of " "an SD card of ") (append (format_size (mul n 512)) (append ", " (append (digits n) " sectors")))))))
+
+; --------------------------------------------------------------- bringing up
+
+; The controller at r reset, powered and clocked slowly, and its card
+; brought up and clocked at its default speed; or why not.
+(def card_up ((r IoDevice)) (Result Card (list int))
+  (if (not (was_reset r (reset_all)))
+      ((Err Card (list int)) "the controller does not come out of reset")
+      (let p (device_write8 r (reg_power) (power_on))
+        (let e (device_write32 r (reg_status_enable) 4294967295)
+          (let g (device_write32 r (reg_signal_enable) 0)
+            (let t (device_write8 r (reg_timeout) (timeout_max))
+              (if (not (clocked r (init_khz)))
+                  ((Err Card (list int)) "the controller's clock is not stable")
+                  (if (eq (bit_and (device_read32 r (reg_present)) (present_card)) 0)
+                      ((Err Card (list int)) "no card in the slot")
+                      (match (identified r)
+                        ((Err why) ((Err Card (list int)) why))
+                        ((Ok c)
+                          (if (clocked r (data_khz))
+                              ((Ok Card (list int)) c)
+                              ((Err Card (list int)) "the controller's clock is not stable"))))))))))))
+
+; Whether the reset of bits is done within 100 ms.
+(def was_reset ((r IoDevice) (bits int)) bool
+  (let w (device_write8 r (reg_reset) bits)
+    (bits_cleared r (reg_reset) bits 100)))
+
+; Whether the byte at off has bits clear within tries milliseconds.
+(def bits_cleared ((r IoDevice) (off int) (bits int) (tries int)) bool
+  (if (eq (bit_and (device_read8 r off) bits) 0)
+      true
+      (if (le tries 0) false (let z (sleep_ns 1000000) (bits_cleared r off bits (sub tries 1))))))
+
+; The card's clock at khz at most, from the controller's base: off, the
+; divisor set, the internal clock stable within 100 ms, then the card's
+; clock on.
+(def clocked ((r IoDevice) (khz int)) bool
+  (let w (device_write16 r (reg_clock) 0)
+    (let cw (clock_word (clock_divisor (caps_base_mhz (device_read32 r (reg_caps))) khz))
+      (let s (device_write16 r (reg_clock) cw)
+        (if (stable r 100)
+            (let on (device_write16 r (reg_clock) (bit_or cw (clock_card_on))) true)
+            false)))))
+
+; Whether the internal clock is stable within tries milliseconds.
+(def stable ((r IoDevice) (tries int)) bool
+  (if (not (eq (bit_and (device_read16 r (reg_clock)) (clock_stable)) 0))
+      true
+      (if (le tries 0) false (let z (sleep_ns 1000000) (stable r (sub tries 1))))))
+
+; The card in the slot brought up: idle, asked its voltage, asked to be
+; ready until it is, its CID taken, its address, its size, and it
+; selected; or why not.
+(def identified ((r IoDevice)) (Result Card (list int))
+  (match (sent r (cmd_go_idle))
+    ((CmdFailed why) ((Err Card (list int)) (append "CMD0: " why)))
+    ((CmdDone a b c d)
+      (let v2 (match (sent r (cmd_if_cond)) ((CmdDone e f g h) (if_cond_echoed e)) ((CmdFailed why) false))
+        (match (made_ready r 1000)
+          ((Err why) ((Err Card (list int)) why))
+          ((Ok ocr) (addressed r (if v2 (ocr_high ocr) false))))))))
+
+; ACMD41 until the card says it is ready, at most tries times a
+; millisecond apart: its OCR; or why not.
+(def made_ready ((r IoDevice) (tries int)) (Result int (list int))
+  (match (sent r (cmd_app 0))
+    ((CmdFailed why) ((Err int (list int)) (append "CMD55: " why)))
+    ((CmdDone a b c d)
+      (match (sent r (cmd_op_cond))
+        ((CmdFailed why) ((Err int (list int)) (append "ACMD41: " why)))
+        ((CmdDone ocr f g h)
+          (if (ocr_ready ocr)
+              ((Ok int (list int)) ocr)
+              (if (le tries 0)
+                  ((Err int (list int)) "the card never became ready")
+                  (let z (sleep_ns 1000000) (made_ready r (sub tries 1))))))))))
+
+; The ready card's CID taken, its address asked, its CSD read for its
+; size, and it selected, its blocks 512 bytes.
+(def addressed ((r IoDevice) (high bool)) (Result Card (list int))
+  (match (sent r (cmd_all_cid))
+    ((CmdFailed why) ((Err Card (list int)) (append "CMD2: " why)))
+    ((CmdDone a b c d)
+      (match (sent r (cmd_relative_addr))
+        ((CmdFailed why) ((Err Card (list int)) (append "CMD3: " why)))
+        ((CmdDone r6 f g h)
+          (let rca (rca_of r6)
+            (match (sent r (cmd_csd rca))
+              ((CmdFailed why) ((Err Card (list int)) (append "CMD9: " why)))
+              ((CmdDone c0 c1 c2 c3)
+                (match (sent r (cmd_select rca))
+                  ((CmdFailed why) ((Err Card (list int)) (append "CMD7: " why)))
+                  ((CmdDone s0 s1 s2 s3)
+                    (if high
+                        ((Ok Card (list int)) (Card rca high (csd_sectors c0 c1 c2 c3)))
+                        (match (sent r (cmd_blocklen))
+                          ((CmdFailed why) ((Err Card (list int)) (append "CMD16: " why)))
+                          ((CmdDone b0 b1 b2 b3) ((Ok Card (list int)) (Card rca high (csd_sectors c0 c1 c2 c3))))))))))))))))
+
+; --------------------------------------------------------------- commands
+
+; What a command came to: its response's four words; or why it failed.
+(data CmdAnswer (CmdDone int int int int) (CmdFailed (list int)))
+
+; c sent, once the lines it uses are free, and its completion waited for:
+; its response; or, if it failed, why, the lines reset.
+(def sent ((r IoDevice) (c SdCmd)) CmdAnswer
+  (let lines (if (uses_data_lines c) (bit_or (present_cmd_inhibit) (present_dat_inhibit)) (present_cmd_inhibit))
+    (if (not (free_within r lines 1000))
+        (CmdFailed "the card's lines stay busy")
+        (match c
+          ((SdCmd index arg resp dat)
+            (let s (device_write32 r (reg_status) 4294967295)
+              (let a (device_write32 r (reg_argument) arg)
+                (let w (device_write16 r (reg_command) (command_word c))
+                  (let st (status_within r (status_command) 1000)
+                    (if (failed st)
+                        (let x (was_reset r (reset_lines)) (CmdFailed (if (eq st -1) "no answer" (status_why st))))
+                        (let k (device_write32 r (reg_status) (status_command))
+                          (CmdDone (device_read32 r (reg_response)) (device_read32 r (add (reg_response) 4))
+                                   (device_read32 r (add (reg_response) 8)) (device_read32 r (add (reg_response) 12))))))))))))))
+
+; Whether Present State's lines are free within tries polls, a
+; millisecond apart once the first hundred have passed.
+(def free_within ((r IoDevice) (lines int) (tries int)) bool
+  (if (eq (bit_and (device_read32 r (reg_present)) lines) 0)
+      true
+      (if (le tries 0) false (let z (napped tries) (free_within r lines (sub tries 1))))))
+
+; The statuses once bits or an error are set, within tries polls; -1 if
+; neither is.
+(def status_within ((r IoDevice) (bits int) (tries int)) int
+  (let s (device_read32 r (reg_status))
+    (if (not (eq (bit_and s (bit_or bits (status_errors))) 0))
+        s
+        (if (le tries 0) -1 (let z (napped tries) (status_within r bits (sub tries 1)))))))
+
+; Whether statuses st say an error, or that none came.
+(def failed ((st int)) bool (if (lt st 0) true (not (eq (bit_and st (status_errors)) 0))))
+
+; A millisecond's nap once a wait has polled a hundred times; nothing
+; before, since a command is done in microseconds.
+(def napped ((tries int)) int (if (lt tries 900) (sleep_ns 1000000) 0))
+
+; ------------------------------------------------------------------ blocks
+
+; count blocks moved between the card from sector and the client's pages
+; at m, read if read, a word at a time through the buffer: empty, or why
+; not.
+(def moved ((r IoDevice) (c Card) (m IoDevice) (sector int) (count int) (read bool)) (list int)
+  (match c
+    ((Card rca high n)
+      (let a (device_write16 r (reg_block_size) 512)
+        (let b (device_write16 r (reg_block_count) count)
+          (let t (device_write16 r (reg_transfer_mode) (transfer_mode count read))
+            (match (sent r (if read (cmd_read (sd_address sector high) count) (cmd_write (sd_address sector high) count)))
+              ((CmdFailed why) why)
+              ((CmdDone x y z w) (blocks_moved r m 0 count read)))))))))
+
+; Blocks i on of count, each once the buffer is ready, then the
+; transfer's end.
+(def blocks_moved ((r IoDevice) (m IoDevice) (i int) (count int) (read bool)) (list int)
+  (if (ge i count)
+      (let st (status_within r (status_transfer) 1000)
+        (if (failed st)
+            (let x (was_reset r (reset_lines)) (if (eq st -1) "the transfer did not end" (status_why st)))
+            (let k (device_write32 r (reg_status) (status_transfer)) "")))
+      (let ready (if read (status_read_ready) (status_write_ready))
+        (let st (status_within r ready 1000)
+          (if (failed st)
+              (let x (was_reset r (reset_lines)) (if (eq st -1) "the buffer never became ready" (status_why st)))
+              (let k (device_write32 r (reg_status) ready)
+                (let w (words_moved r m (mul i 512) 0 read)
+                  (blocks_moved r m (add i 1) count read))))))))
+
+; A block's 128 words from word j, from the buffer into m from off, or
+; from m into the buffer.
+(def words_moved ((r IoDevice) (m IoDevice) (off int) (j int) (read bool)) int
+  (if (ge j 128)
+      0
+      (let w (if read
+                 (device_write32 m (add off (mul j 4)) (device_read32 r (reg_buffer)))
+                 (device_write32 r (reg_buffer) (device_read32 m (add off (mul j 4)))))
+        (words_moved r m off (add j 1) read))))
+
+; ----------------------------------------------------------------- serving
+
+; Each request on port, for the disk it names among slots, answered, one
+; at a time.
+(def serve ((slots (list SdSlot)) (port int)) int
+  (match (port_receive port)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from payload)
+      (let s (request_answer payload (answer slots (request_body payload)))
+        (serve slots port)))))
+
+; The answer to body: ok, disk SECTORS 512, or error: WHY.
+(def answer ((slots (list SdSlot)) (body (list int))) (list int)
+  (match (disk_asked body)
+    ((DiskAsked name rest)
+      (match (slot_named slots name)
+        ((None) (error_reply (append "no disk " (if (is_empty name) "named" name))))
+        ((Some s)
+          (match (request_numbers rest)
+            ((ReqBad why) (error_reply why))
+            ((ReqNums op ns) (requested s op ns))))))))
+
+; The slot whose card is registered as name, or none.
+(def slot_named ((slots (list SdSlot)) (name (list int))) (Option SdSlot)
+  (if (is_empty slots)
+      ((None SdSlot))
+      (match (head slots) ((SdSlot r n c) (if (eq n name) (Some (head slots)) (slot_named (tail slots) name))))))
+
+; The request op with its numbers ns, of slot s.
+(def requested ((s SdSlot) (op (list int)) (ns (list int))) (list int)
+  (match s
+    ((SdSlot r name c)
+      (let n (length ns)
+        (if (if (eq op "info") (eq n 0) false) (info_of c)
+        (if (if (eq op "flush") (eq n 0) false) "ok"
+        (if (if (eq op "read") (eq n 3) false) (move_reply r c (nth ns 0) (nth ns 1) (nth ns 2) true)
+        (if (if (eq op "write") (eq n 3) false) (move_reply r c (nth ns 0) (nth ns 1) (nth ns 2) false)
+        (error_reply (append "no request " op))))))))))
+
+; info: the card's sectors, of 512 bytes.
+(def info_of ((c Card)) (list int)
+  (match c ((Card rca high n) (append "disk " (append (digits n) " 512")))))
+
+; read or write SECTOR COUNT VA: refused if it is past the card or too
+; many, else moved through the client's pages, shared here at va, opened
+; as a region for it.
+(def move_reply ((r IoDevice) (c Card) (sector int) (count int) (va int) (read bool)) (list int)
+  (let why (move_refusal c sector count)
+    (if (not (is_empty why))
+        (error_reply why)
+        (match (dma_open va (pages_for (mul count 512)))
+          ((DeviceFailed fault w) (error_reply "the buffer is not shared with the disk"))
+          ((DeviceOpened m)
+            (let moved_why (moved r c m sector count read)
+              (let z (close_device m)
+                (if (is_empty moved_why) "ok" (error_reply moved_why)))))))))
+
+; Why count sectors from sector cannot be moved on c; empty if they can.
+(def move_refusal ((c Card) (sector int) (count int)) (list int)
+  (match c
+    ((Card rca high n)
+      (if (if (lt count 1) true (gt count (disk_max_sectors)))
+          "1 to 128 sectors at a time"
+          (if (if (lt sector 0) true (gt (add sector count) n))
+              "past the end of the disk"
+              "")))))

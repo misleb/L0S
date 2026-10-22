@@ -19,6 +19,9 @@
 # desktop's top bar, which shows it as it is, agrees with this machine's.
 # QEMU_DISK, unset unless given, is a raw disk image the board has as a
 # virtio-blk, for the virtio-blk driver; the demo's is build/disk.img.
+# QEMU_SD, unset unless given, is a raw image, of a power of 2 bytes, the
+# board has as an SD card in a sdhci-pci on PCIe, for pcie and sdhci; the
+# demo's is build/sd.img.
 # QEMU_GPU, unset unless given, is options for the virtio-gpu, such as
 # xres=3840,yres=2160 for a 4K screen, which the desktop draws at scale 2.
 # GPU, gl or 2d, 2d if not set, says whether the board's virtio-gpu is the
@@ -54,6 +57,10 @@ disk=()
 if [ -n "${QEMU_DISK:-}" ]; then
   disk=(-drive "file=$QEMU_DISK,if=none,format=raw,id=disk0" -device virtio-blk-device,drive=disk0)
 fi
+sd=()
+if [ -n "${QEMU_SD:-}" ]; then
+  sd=(-device sdhci-pci -drive "file=$QEMU_SD,if=none,format=raw,id=sd0" -device sd-card,drive=sd0)
+fi
 net=()
 if [ -n "${QEMU_NET:-}" ]; then
   net=(-netdev "$QEMU_NET,id=net0" -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56)
@@ -86,6 +93,7 @@ exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monito
   -global virtio-mmio.force-legacy=false \
   -device "$gpu" "${input[@]}" -device virtio-rng-device \
   ${disk[@]+"${disk[@]}"} \
+  ${sd[@]+"${sd[@]}"} \
   ${net[@]+"${net[@]}"} \
   -chardev stdio,id=console,mux=on,signal=off -serial chardev:console -semihosting \
   -device loader,addr=0x4FFFFFF8,data="$len",data-len=8 \

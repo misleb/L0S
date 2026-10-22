@@ -1,0 +1,92 @@
+; sd_test.l0 -- commands as their words, and a card's answers read.
+
+; SEND_IF_COND: index 8 at bit 8, R7 checked for CRC and index, 0x1A.
+(def test_command_words () int
+  (add (check_str "CMD8" (hex_digits (command_word (cmd_if_cond)) 4) "081a")
+       (add (check_str "CMD0" (hex_digits (command_word (cmd_go_idle)) 4) "0000")
+            (add (check_str "ACMD41, R3" (hex_digits (command_word (cmd_op_cond)) 4) "2902")
+                 (add (check_str "CMD2, R2" (hex_digits (command_word (cmd_all_cid)) 4) "0209")
+                      (check_str "CMD7, R1b" (hex_digits (command_word (cmd_select 1)) 4) "071b"))))))
+
+; A read of many blocks has data present, bit 5: CMD18 is 0x123a.
+(def test_data_commands () int
+  (add (check_str "CMD18" (hex_digits (command_word (cmd_read 0 8)) 4) "123a")
+       (add (check_str "CMD17" (hex_digits (command_word (cmd_read 0 1)) 4) "113a")
+            (add (check_str "CMD25" (hex_digits (command_word (cmd_write 0 2)) 4) "193a")
+                 (check_str "CMD24" (hex_digits (command_word (cmd_write 0 1)) 4) "183a")))))
+
+; Many blocks: count on, Auto CMD12, multi; one: neither; read is bit 4.
+(def test_transfer_mode () int
+  (add (check_int "read 8" (transfer_mode 8 true) 54)
+       (add (check_int "write 8" (transfer_mode 8 false) 38)
+            (add (check_int "read 1" (transfer_mode 1 true) 16)
+                 (check_int "write 1" (transfer_mode 1 false) 0)))))
+
+(def test_data_lines () int
+  (add (check_bool "a read" (uses_data_lines (cmd_read 0 1)) true)
+       (add (check_bool "select, busy" (uses_data_lines (cmd_select 1)) true)
+            (check_bool "SEND_CSD" (uses_data_lines (cmd_csd 1)) false))))
+
+(def test_addresses () int
+  (add (check_int "high capacity, by block" (sd_address 3 true) 3)
+       (check_int "standard, by byte" (sd_address 3 false) 1536)))
+
+(def test_ocr () int
+  (add (check_bool "busy" (ocr_ready 16744448) false)                      ; 0x00FF8000
+       (add (check_bool "ready" (ocr_ready 2164228096) true)                ; 0x80FF8000
+            (add (check_bool "high" (ocr_high 3237969920) true)             ; 0xC0FF8000
+                 (check_bool "standard" (ocr_high 2164228096) false)))))
+
+(def test_rca () int
+  (add (check_int "the top half" (rca_of 1164378112) 17767)                  ; 0x45670000
+       (check_bool "echoed" (if_cond_echoed 426) true)))
+
+; A CSD's fields at their bits, as the controller keeps the response:
+; its bit b at the u32s' bit b - 8.
+(def regs_of ((fields (list int))) (list int) (regs_fill fields (cons 0 (cons 0 (cons 0 (cons 0 (nil int)))))))
+
+; fields: bit, width, value, ...
+(def regs_fill ((fields (list int)) (rs (list int))) (list int)
+  (if (is_empty fields)
+      rs
+      (let at (sub (nth fields 0) 8)
+        (let v (nth fields 2)
+          (regs_fill (drop fields 3) (regs_or rs at v))))))
+
+; rs with v's bits or-ed in from bit at, across a u32's end if need be.
+(def regs_or ((rs (list int)) (at int) (v int)) (list int)
+  (let w (div at 32)
+    (let b (mod at 32)
+      (regs_put (regs_put rs w (bit_and (bit_shl v b) 4294967295)) (add w 1) (bit_shr v (sub 32 b))))))
+
+(def regs_put ((rs (list int)) (i int) (v int)) (list int)
+  (if (ge i 4) rs (append (take rs i) (cons (bit_or (nth rs i) v) (drop rs (add i 1))))))
+
+(def sectors_of ((rs (list int))) int (csd_sectors (nth rs 0) (nth rs 1) (nth rs 2) (nth rs 3)))
+
+; A version 2 CSD of C_SIZE 15: 16 times 512 KB, 16384 sectors.
+(def test_csd_v2 () int
+  (check_int "8 MB" (sectors_of (regs_of (cons 126 (cons 2 (cons 1 (cons 48 (cons 22 (cons 15 (nil int)))))))))  16384))
+
+; A version 1 CSD: C_SIZE 2047, C_SIZE_MULT 7, READ_BL_LEN 9: 2048 blocks
+; of 512 of 512 bytes, 512 MB, 1048576 sectors. C_SIZE straddles a u32.
+(def test_csd_v1 () int
+  (check_int "512 MB" (sectors_of (regs_of (cons 62 (cons 12 (cons 2047 (cons 47 (cons 3 (cons 7 (cons 80 (cons 4 (cons 9 (nil int))))))))))))
+             1048576))
+
+; The clock: from a base of 200 MHz, 400 kHz is 200000 / 800, 250; 25 MHz
+; is 4. A base of none is given the largest; one slow enough, none.
+(def test_clock_divisor () int
+  (add (check_int "400 kHz" (clock_divisor 200 400) 250)
+       (add (check_int "25 MHz" (clock_divisor 200 25000) 4)
+            (add (check_int "no base" (clock_divisor 0 400) 1023)
+                 (check_int "slow already" (clock_divisor 10 25000) 0)))))
+
+; Divisor 250, 0xFA, at bit 8, the internal clock on: 0xFA01; 1023's high
+; bits at 6: 0xFFC1.
+(def test_clock_word () int
+  (add (check_str "250" (hex_digits (clock_word 250) 4) "fa01")
+       (check_str "1023" (hex_digits (clock_word 1023) 4) "ffc1")))
+
+(def test_caps () int
+  (check_int "200 MHz" (caps_base_mhz 51200) 200))                           ; 0xC800

@@ -99,16 +99,18 @@ booted with `root=UUID`, or else from the initramfs.
 | 4 | `virtio-input keyboard` | the keyboard driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 5 | `virtio-input tablet` | the pointer's driver. It serves `pointer`, telling `wm` where the pointer is and what its buttons do |
 | 6 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
-| 7 | `virtio-blk` | the disk's driver. It serves `disk`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
-| 8 | `fs` | the file server. It mounts the disk's volumes at `/Volumes/data` and `/Volumes/scratch`, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
+| 7 | `virtio-blk` | the disk's driver. It serves `disk0`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
+| 8 | `fs` | the file server. It mounts the disks' volumes, the disk's at `/Volumes/data` and `/Volumes/scratch`, and any made on the SD card, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
 | 9 | `virtio-net` | the network card's driver. It serves `nic`, telling `inet` of every frame the card takes, and putting on the wire every frame `inet` gives it |
 | 10 | `inet` | the IPv4 stack, at the address and with the name server a DHCP server gives it (`inet dhcp`; 10.0.2.15 and 10.0.2.3 on QEMU's user network), and keeps the lease. It serves `inet`, for `run net`, `run tftp` and `run http` (see [The network](#the-network)) |
 | 11 | `virtio-rng` | the entropy device's driver. It serves `random`, the host's randomness, which `fs` makes UUIDs of and `inet` keys TCP's first sequence numbers with |
-| 12 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 13 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 14 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
-| 15 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
-| 16 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
+| 12 | `pcie virt` | the PCIe bus's server. It puts each device's registers in the bus's window, and serves `pci`, telling `sdhci` where the SD host controller is |
+| 13 | `sdhci pci` | the SD card's driver. It serves `disk1`, reading and writing the sectors of `build/sd.img`, blank until Disks formats it |
+| 14 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
+| 15 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 16 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 17 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
+| 18 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -225,7 +227,7 @@ which refuse every change (`permission denied`), and the disk's, under
 | `df` | each volume's size, the room its files and directories take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
 | `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open, and for the system volume |
 | `unmount VOLUME` | takes a volume away: `fs` stops serving it and the kernel unmounts it, until a rescan (Disks' Refresh) finds it again; refused while any file is open, and for the system volume |
-| `partition SECTORS [START]` | a new partition of SECTORS in the disk's GPT, from START or where it first fits, and says its UUID (see [Volumes](#volumes)) |
+| `partition [DISK] SECTORS [START]` | a new partition of SECTORS in the GPT of DISK, `disk0` unless named, from START or where it first fits, and says its UUID (see [Volumes](#volumes)) |
 | `mkfs UUID LABEL` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL` |
 
 ```
@@ -254,22 +256,24 @@ Things to try:
 
   ```
     PID  PARENT  PROGRAM       STATE
-      1       0  boot          waiting for pid 12
+      1       0  boot          waiting for pid 14
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 14
-      4       0  virtio-input  waiting for a message on port 13
-      5       0  virtio-input  waiting for a message on port 2
+      3       0  virtio-gpu    waiting for a message on port 17
+      4       0  virtio-input  waiting for a message on port 2
+      5       0  virtio-input  waiting for a message on port 3
       6       0  rtc           sleeping
-      7       0  virtio-blk    waiting for a message on port 5
-      8       0  fs            waiting for a message on port 16
-      9       0  virtio-net    waiting for a message on port 7
-     10       0  inet          waiting for a message on port 8
-     11       0  virtio-rng    waiting for a message on port 10
-     12       1  sh            running
-     13       1  wm            waiting for a message on port 17
-     14       1  vt            waiting for a message on port 12
-     15       1  procmon       sleeping
-     16      14  sh            waiting for a message on port 21
+      7       0  virtio-blk    waiting for a message on port 6
+      8       0  fs            waiting for a message on port 20
+      9       0  virtio-net    waiting for a message on port 8
+     10       0  inet          waiting for a message on port 9
+     11       0  virtio-rng    waiting for a message on port 11
+     12       0  pcie          waiting for a message on port 12
+     13       0  sdhci         waiting for a message on port 16
+     14       1  sh            running
+     15       1  wm            waiting for a message on port 19
+     16       1  vt            waiting for a message on port 15
+     17       1  procmon       sleeping
+     18      16  sh            waiting for a message on port 25
   ```
 
   It lists the processes that have not exited. The shell asking is always
@@ -757,11 +761,19 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
 
 ### The disk
 
+A disk is served by its driver under a name of its own, `disk0`,
+`disk1` and so on: the first number free when the driver registers it,
+so the first disk found is `disk0`. In the demo `virtio-blk` serves its
+disk as `disk0`, and `sdhci` the SD card as `disk1`. A driver of
+several disks registers each one's name, and may do so on one port, since
+every request names its disk first. Once a driver has registered a disk,
+it tells `fs`, which takes it on (`attach`, under
+[Volumes](#volumes)).
+
 `virtio-blk` ([user/sbin/virtio-blk](user/sbin/virtio-blk/virtio-blk.l0)) drives
 QEMU's virtio-blk: the demo's `build/disk.img`, 2048 sectors of 512
-bytes. It serves `disk`, raw sectors, to clients, `fs` above all,
-through **the disk protocol**
-([user/lib/proto/disk.l0](user/lib/proto/disk.l0)). As with the display, no sector
+bytes. It serves raw sectors to clients, `fs` above all, through **the
+disk protocol** ([user/lib/proto/disk.l0](user/lib/proto/disk.l0)). As with the display, no sector
 travels in a message. A client shares a buffer of its own pages with the
 driver (`shm_share`), and the device reads or writes those pages itself,
 by DMA, from a chain of descriptors the driver builds over them. The
@@ -777,19 +789,36 @@ its writes itself.
 
 | Request | Does |
 |---|---|
-| `info` | `disk SECTORS 512`: the disk's size in sectors, and a sector's in bytes; `disk SECTORS 512 ro` for a read-only disk |
-| `read SECTOR COUNT VA` | COUNT sectors from SECTOR, 1 to 128, put by the device into the client's pages shared with the driver at VA |
-| `write SECTOR COUNT VA` | the same, taken from those pages and written to the disk |
-| `flush` | `ok` once every write answered before it is on the disk itself, not only in its cache; at once for a disk with no cache, which writes through |
+| `NAME info` | `disk SECTORS 512`: the disk's size in sectors, and a sector's in bytes; `disk SECTORS 512 ro` for a read-only disk |
+| `NAME read SECTOR COUNT VA` | COUNT sectors from SECTOR, 1 to 128, put into the client's pages shared with the driver at VA |
+| `NAME write SECTOR COUNT VA` | the same, taken from those pages and written to the disk |
+| `NAME flush` | `ok` once every write answered before it is on the disk itself, not only in its cache; at once for a disk with no cache, which writes through |
 
-The reply is `ok`, `disk SECTORS 512` for `info`, or `error: WHY`: a
-count out of range, sectors past the disk's end, a write to a read-only
-disk, a buffer not shared with the driver, or the device's own failure.
+NAME is the disk's, `disk0` say. The reply is `ok`, `disk SECTORS 512`
+for `info`, or `error: WHY`: no such disk, a count out of range, sectors
+past the disk's end, a write to a read-only disk, a buffer not shared
+with the driver, or the device's own failure.
 
-`run disk info`, `run disk read SECTOR [COUNT]` (shown as `hexdump -C`
-shows bytes) and `run disk write SECTOR WORDS...` use it from a shell.
-Sectors 1 to 7 of a disk `tools/mkdisk` makes belong to no volume, so a
-`disk write` there harms no file.
+`run disk list` lists the disks there are; `run disk [NAME] info`, `run
+disk [NAME] read SECTOR [COUNT]` (shown as `hexdump -C` shows bytes) and
+`run disk [NAME] write SECTOR WORDS...` use one from a shell, `disk0`
+unless NAME is given. Sectors 1 to 7 of a disk `tools/mkdisk` makes
+belong to no volume, so a `disk write` there harms no file.
+
+**The SD card.** `sdhci` ([user/sbin/sdhci](user/sbin/sdhci/sdhci.l0))
+drives SD cards behind SD Host Controllers that `pcie` finds, QEMU's
+`sdhci-pci` (the demo's `build/sd.img`, a blank 256 MB, made once and
+kept; `QEMU_SD` in `tools/qemu-boot.sh`). It brings each card up as the
+SD specifications say, at 400 kHz then its default speed, 25 MHz: CMD0,
+CMD8, ACMD41 until the card is ready, CMD2, CMD3 for its address, CMD9,
+whose CSD gives its size, of either version, and CMD7 to select it
+(`sd.l0`). It moves blocks through the controller's buffer a word at a
+time, between the card and the client's pages, which it opens as a
+region for each request: no DMA, so it needs neither the device's view
+of memory nor, on the Raspberry Pi 5, the cache's cleaning. A standard
+card is addressed by byte, a high-capacity one by block, and many blocks
+go in one command, ended by Auto CMD12. It polls, and serves every card
+it finds on one port, each under its own name.
 
 ### Volumes
 
@@ -947,9 +976,10 @@ refusal's word may be followed by why, in words.
 | `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files, in every directory |
 | `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open, or for the system volume |
 | `unmount VOLUME` | 0, the volume no longer served, and unmounted with `fs_unmount`, its label free, until a rescan finds it again; -4 while any file is open, since a handle names its volume by where it is among them, and for the system volume; -3 for a volume not served |
-| `rescan` | the partition table and every volume read again, as at the start, and served in place of those before, each new label mounted and each that has gone unmounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open; -5 if the table is bad. The system volume's label stays mounted though it has gone, and is answered as a volume not served: -3, or -9 to write |
-| `partition COUNT [START]` | a new partition of COUNT sectors in the GPT, both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad. A disk with no table gets one |
-| `mkfs UUID LABEL` | a new, empty volume labelled LABEL on the partition with that UUID, the partition named LABEL, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, -6 if the partition is too small |
+| `rescan` | every disk taken on, those registered since too, and each one's partition table and every volume read again, as at the start, and served in place of those before, each new label mounted and each that has gone unmounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open. A disk whose table is bad has no volumes, and is said so on stderr. The system volume's label stays mounted though it has gone, and is answered as a volume not served: -3, or -9 to write |
+| `partition DISK COUNT [START]` | a new partition of COUNT sectors in the GPT of the disk DISK (`disk1`, say), both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad; -3 if there is no such disk. A disk with no table gets one |
+| `attach DISK` | the disk DISK taken on, and its volumes mounted and served after those before: 0, then how many; 0 and 0 for a disk taken on already; -3 if there is no such disk. A driver asks it, with no reply port, once it has registered a disk |
+| `mkfs UUID LABEL` | a new, empty volume labelled LABEL on the partition with that UUID, on whichever disk has it, the partition named LABEL, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, -6 if the partition is too small |
 
 Each is a request (`request` in `l0s.l0`), its words separated by
 spaces; a PATH is whole, `/Volumes/LABEL/NAME...`, and a VOLUME
@@ -988,15 +1018,23 @@ drops both. It reads
 a sector before a write only where the write keeps some of its bytes.
 It watches each process that opens a file, and drops its
 handles when it exits. A `rescan` does the reading again, so a volume
-made or changed on the disk since is served without a reboot.
+made or changed on a disk since is served without a reboot.
 `partition` and `mkfs` make partitions and volumes on the running
-system, `fs` being the disk's only writer: a volume `mkfs` makes is
+system, `fs` being every disk's only writer: a volume `mkfs` makes is
 served at once, after those served before, so open files keep theirs. A
 disk with no volume on it, or none that can be served, or no table at
 all, is no reason to stop: `fs` says so, registers, and serves nothing
 until `mkfs` makes a volume or a rescan finds some.
 With no disk at all, where nothing could ever be made, it says so and
 exits 0.
+
+`fs` serves every disk there is from one port, each volume knowing which
+disk it is on. It waits for `disk0`, then takes on every disk registered
+by then; one whose driver registers it later, as `sdhci`'s card comes
+after `pcie` has set the bus up, is taken on when that driver asks it to
+`attach` the disk, or, if `fs` was still loading the others then, as
+soon as `fs` has registered. `partition` names the disk it is of, and
+`mkfs` finds its partition on whichever disk has it.
 
 ### The network
 
@@ -1758,11 +1796,11 @@ initramfs, so that the Makefile finds it there:
 | Directory | What | In the initramfs |
 |---|---|---|
 | `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `lsusb`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `usb-hid` `hid.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
@@ -1783,9 +1821,10 @@ every `.l0` in its directory is part of it.
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
 | `pcie` | the PCIe bus's server, `pcie virt`, for QEMU's virt board (see [USB](#usb)): reads every function of bus 0 through the ECAM, sizes each memory BAR, puts it in the 32-bit MMIO window, turns on memory space and bus mastering, and serves the pci protocol as `pci`: every function, or those of a class |
+| `sdhci` | a driver for SD cards behind SD Host Controllers, `sdhci pci` those `pcie` finds, QEMU's `sdhci-pci` (see [The disk](#the-disk)): it brings each card up, standard or high-capacity, and serves each as the first `diskN` free, all on one port, telling `fs` of each. Blocks move through the controller's buffer into and out of the client's pages, no DMA; it polls. A slot with no card, or no controller on the bus, is said so on stderr, and exits 0 |
 | `xhci` | the USB host controller driver and USB's core (see [USB](#usb)): `xhci pci` drives every xHCI `pci` found, `xhci rp1` the Raspberry Pi 5's two DWC3s on RP1. It halts and resets each controller, gives it its DCBAA, scratchpads, command ring and event ring in DMA pages, and runs it; brings up each device on a root port, one at a time, reading its descriptors and setting its first configuration; and serves the usb protocol as `usb`: devices, their descriptors, claims of interfaces, control transfers, and IN endpoints polled, each report a notice to the client that opened it. It polls its event rings, every millisecond when idle, rather than taking interrupts. Each controller and each device is a line on stderr. Everything it decides is `core.l0`'s and `bus.l0`'s, pure, tested on the host |
 | `usb-hid` | the class driver of USB boot keyboards and mice (see [USB](#usb)), started once for each: `usb-hid keyboard` claims every boot keyboard, sets the boot protocol and SET_IDLE(0), opens its interrupt endpoint, and serves `keyboard`, sending a `KeyEvent` for each key its reports press or let go, with the character `keymap.l0` says, and repeating a held key itself, 500 ms then every 33 ms; `usb-hid mouse` claims every boot mouse and serves `pointer`, sending a `PointerMotion` of each report. It drives no device, and needs no `dev` line |
-| `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as `disk` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own, for 30 seconds at most, after which it takes the disk to have stopped answering and fails every request. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
+| `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as the first `diskN` free, `disk0` in the demo, and telling `fs` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own, for 30 seconds at most, after which it takes the disk to have stopped answering and fails every request. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
 | `virtio-rng` | a user-space driver for QEMU's virtio-rng, the entropy device, which draws on the host's `/dev/urandom`, serving the random protocol as `random` (see [Randomness](#randomness)). It finds the device, sets up its one queue of 8 entries in a DMA page, and for `bytes N` offers the device a buffer to fill, again until it has N, waiting for each as `virtq_wait` does. With no virtio-rng on the board it says so on stderr and exits 0 |
 | `inet` | the IPv4 stack, `inet dhcp` or `inet [ADDR/PREFIX [GATEWAY [DNS]]]`: the address, netmask, router and name server a DHCP server gives it, its lease renewed and rebound as the clock's minutes pass, or those given, 10.0.2.15/24 behind 10.0.2.2, with 10.0.2.3 as the name server, by default (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
@@ -1793,13 +1832,13 @@ every `.l0` in its directory is part of it.
 | `http` | a client of `inet`: `http [-i] [http://]HOST[:PORT][/PATH]` fetches a page over HTTP/1.0 (RFC 1945) through TCP, and writes its body, and with `-i` its header first; says the status, after the page, if it is not 2xx, and fails; HOST is a name, which `inet`'s name server resolves, or an address |
 | `tftp` | a client of `inet`: `tftp HOST FILE [PATH]` fetches FILE over TFTP (RFC 1350), from a host named or dotted, in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
 | `random` | a client of `random`: `random [N]` writes N bytes of the entropy device's, 16 if not given, 1 to 1024, as hex digits and a newline, waiting a second at most for the driver to register; fails, saying why, without one |
-| `disk` | a client of `disk`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of `disk`, which mounts each volume of L0S's file system on the disk at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `unmount`, `rescan`, `partition` and `mkfs`; then registers as `fs`, though the disk has no volume, or no partition table, yet. It reads the disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, the disk's only writer. With no disk it says so on stderr and exits 0. `fs ram [MB]` serves no disk but one volume in memory instead (see [Booting from a volume](#booting-from-a-volume)) |
+| `disk` | a client of the disks: `disk list` lists them, each name and size; of `disk0`, or of the disk named first, as `disk disk1 info`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
+| `fs` | the file server (see [Volumes](#volumes)): a client of every disk, `disk0` and the rest, which mounts each volume of L0S's file system on them at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `unmount`, `rescan`, `partition`, `attach` and `mkfs`; then registers as `fs`, though no disk has a volume, or a partition table, yet. It reads each disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, every disk's only writer. A disk registered after it started is taken on when its driver asks it to `attach` it. With no `disk0` within 5 seconds it says so on stderr and exits 0. `fs ram [MB]` serves no disk but one volume in memory instead (see [Booting from a volume](#booting-from-a-volume)) |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. At scale 2 it lays the desktop out at half the screen's size each way and draws it at the screen's resolution. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
-| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives; the drive's model, size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan` and reads the disk again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
+| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives, every disk registered, each its size and name, one shown at a time, chosen by click; the drive's name (`disk1`), size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan`, takes on any disk registered since, and reads the drive again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input` or `usb-hid keyboard`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 | `lsusb` | a client of `usb`: a line for each device `xhci` brought up, its number, vendor and product ids, speed, and what each interface is (`keyboard`, `mouse`, `hub`, …) |
@@ -1829,9 +1868,9 @@ name in a library is taken in every program that links it.
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs`, `inet` |
-| [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol, as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks` |
+| [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol: disks' names, `disk0` on, the disks there are, a driver's disk registered under the first name free and a request's disk read; as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks`, `virtio-blk`, `sdhci` |
 | [proto/random.l0](user/lib/proto/random.l0) | the random protocol: its request and reply, and `random_bytes` and `random_word`, which ask `virtio-rng` for bytes and do without when it is not there (`RANDOM`) | `virtio-rng`, `random`, `fs`, and with `INETLIB` |
-| [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` and `mkfs`, to `fs`'s; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, and every program `PATHS` is in |
+| [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` (of a disk named) and `mkfs`, to `fs`'s, and `attach`, which a disk's driver tells it; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, `virtio-blk`, `sdhci`, and every program `PATHS` is in |
 | [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text (`NICLIB`) | `virtio-net`, and with `INETLIB` |
 | [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; resolving a name, `inet_resolve`, by asking the interface's name server over UDP; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`, `dns.l0` and `random.l0`) | `inet`, `net`, `tftp`, `http` |
 | [proto/usb.l0](user/lib/proto/usb.l0) | the usb protocol: its notices, a device plugged in or unplugged and an endpoint's report; its requests and answers, bytes in hex; and asking for devices, descriptors and configurations (`USBLIB`, with `usbdesc.l0`) | `xhci`, `usb-hid`, `lsusb` |
@@ -1886,11 +1925,16 @@ Each case of `tests/e2e/` is a directory:
   to. `@PORT@` in either, in `net` and in `typed` is a free port of the
   host's loopback, chosen for the boot;
 - `usb`, if the board's keyboard and pointer are to be a `usb-kbd` and a
-  `usb-mouse` on a `qemu-xhci`, not virtio's.
+  `usb-mouse` on a `qemu-xhci`, not virtio's;
+- `sd`, if the board is to have an SD card in a `sdhci-pci`, a blank
+  image of 64 MB made for the boot.
 
 Two cases are USB's: `pcie`, the bus's server waiting once it has set
 the bus up, and `usb`, `run lsusb` listing the keyboard and the mouse
-`xhci` brought up, its stderr naming the keyboard's port.
+`xhci` brought up, its stderr naming the keyboard's port. `sdhci` (with
+`sd`) brings a blank SD card up as `disk0`, lists the disks, writes a
+sector and reads it back, is refused past the card's end, and reads its
+last sector.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
 `etc`, boots it, and compares; given case names, as `tests/e2e.sh cwd`,
@@ -2197,6 +2241,12 @@ a bad buffer, and wait on nothing.
   scanout. The 3D mode is tried by `make demo`.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
   a message runs at the end of the current slice, not at once.
+- **The SD card has run on QEMU only**, and slowly: `sdhci` moves every
+  word through the controller's buffer, on one data line at 25 MHz, and
+  polls. No DMA, no 4-bit bus, no high-speed modes, and a card is found
+  only at boot. At most 16 disks, `disk0` to `disk15`, are named; a
+  disk's name is its driver's place in the order they register, so a
+  driver that registers late gets a later name.
 - **USB has run on QEMU only** (see [USB](#usb)), not on a Pi 5, where
   L0S does not boot yet. Boot keyboards and mice only, on root ports
   only, no hubs; `xhci` polls rather than taking interrupts, which L0's

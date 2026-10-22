@@ -185,7 +185,14 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
   copied (`virtq_page_runs`, `virtq_push_chain`). A virtio driver finds its
   device with `virtio_probe`, takes its queue's memory with `virtq_mem`,
   offers a request with `virtq_offer`, and waits with `virtq_wait`
-  (`user/lib/sys/virtio.l0`).
+  (`user/lib/sys/virtio.l0`). A driver that moves no DMA, as `sdhci`
+  does, opens the client's shared pages as a region for the request
+  (`dma_open` of its VA) and closes it after.
+- **A disk driver** registers each disk with `disk_register`, the first
+  `diskN` free, any number on one port; reads each request's disk with
+  `disk_asked`, the name its first word; and then tells `fs` with
+  `fs_attach_disk`. Clients find disks with `disk_names` and
+  `disk_open_named`; `disk_open` waits for `disk0`.
 - **Waiting for a message or a time.** A receive cannot time out. Either a
   device interrupt arrives as a message (`irq_bind`), or the loop polls with
   `port_try_receive` and `sleep_ns` (`rtc clock`, `procmon`).

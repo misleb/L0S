@@ -1,0 +1,186 @@
+; sd.l0 -- SD cards behind an SD Host Controller (SD Host Controller
+; Simplified Specification 3.00; Physical Layer Simplified Specification
+; 3.01), purely: where the controller's registers are and what their
+; bits say, the commands that bring a card up and move its blocks, as
+; the words the command and transfer mode registers take, and what a
+; card's answers say: its OCR, its relative address, and from its CSD how
+; many sectors it has.
+
+; ------------------------------------------------------------ registers
+
+; The registers, as offsets: Block Size and Block Count (u16s),
+; Argument, Transfer Mode and Command (u16s), the response (four u32s),
+; the buffer's data port, Present State, Host Control 1, Power Control
+; and Clock Control's bytes, Timeout Control and Software Reset (bytes),
+; the normal and error interrupt statuses (u16s, read together), their
+; enables (likewise), the interrupt signals' enables, the capabilities,
+; and the Host Controller Version (u16).
+(def reg_block_size () int 4)
+(def reg_block_count () int 6)
+(def reg_argument () int 8)
+(def reg_transfer_mode () int 12)
+(def reg_command () int 14)
+(def reg_response () int 16)
+(def reg_buffer () int 32)
+(def reg_present () int 36)
+(def reg_host_control () int 40)
+(def reg_power () int 41)
+(def reg_clock () int 44)
+(def reg_timeout () int 46)
+(def reg_reset () int 47)
+(def reg_status () int 48)
+(def reg_status_enable () int 52)
+(def reg_signal_enable () int 56)
+(def reg_caps () int 64)
+(def reg_version () int 254)
+
+; Present State's bits: a command, or the data lines, in use; the buffer
+; ready to be written or read; a card in the slot.
+(def present_cmd_inhibit () int 1)
+(def present_dat_inhibit () int 2)
+(def present_card () int 65536)
+
+; The statuses' bits, the normal ones low and the errors from bit 16: a
+; command complete, a transfer complete, the buffer ready to be written
+; or read, any error.
+(def status_command () int 1)
+(def status_transfer () int 2)
+(def status_write_ready () int 16)
+(def status_read_ready () int 32)
+(def status_errors () int 4294901760)  ; 0xFFFF0000
+
+; Software Reset's bits: everything, the command line, the data lines.
+(def reset_all () int 1)
+(def reset_lines () int 6)
+
+; Power Control: the bus powered at 3.3 V; Timeout Control: the longest.
+(def power_on () int 15)
+(def timeout_max () int 14)
+
+; The base clock the capabilities say, in MHz, bits 8 to 15; 0 if they
+; do not say.
+(def caps_base_mhz ((caps int)) int (bit_and (bit_shr caps 8) 255))
+
+; The divisor N that clocks the card at khz at most from a base of mhz,
+; the base over 2N; 0 for the base itself, if that is slow enough. A
+; controller that gives no base is given the largest divisor.
+(def clock_divisor ((mhz int) (khz int)) int
+  (if (le mhz 0)
+      1023
+      (if (le (mul mhz 1000) khz) 0 (min 1023 (ceil_div (mul mhz 1000) (mul 2 khz))))))
+
+; Clock Control for divisor n, its low 8 bits at 8 and its high 2 at 6,
+; with the internal clock on; with the card's clock on too; and the bit
+; that says the internal clock is stable.
+(def clock_word ((n int)) int
+  (bit_or (bit_shl (bit_and n 255) 8) (bit_or (bit_shl (bit_and (bit_shr n 8) 3) 6) 1)))
+(def clock_card_on () int 4)
+(def clock_stable () int 2)
+
+; The speeds a card is clocked at: 400 kHz to be brought up, 25 MHz
+; then, the default speed.
+(def init_khz () int 400)
+(def data_khz () int 25000)
+
+; ------------------------------------------------------------- commands
+
+; What a command's response is: none; 48 bits, checked for its CRC and
+; index, as R1, R6 and R7 are; the same with busy after, R1b; 136 bits,
+; R2, checked for its CRC; or 48 bits unchecked, R3.
+(data Resp (RespNone) (Resp48) (Resp48Busy) (Resp136) (Resp48Bare))
+
+; A command: its index, its argument, its response, and whether it moves
+; data.
+(data SdCmd (SdCmd int int Resp bool))
+
+; The Command register's word: the index at 8, data present at bit 5,
+; the index and CRC checks at 4 and 3, the response's length in bits 0
+; and 1.
+(def command_word ((c SdCmd)) int
+  (match c
+    ((SdCmd index arg r dat)
+      (bit_or (bit_shl index 8) (bit_or (if dat 32 0) (resp_bits r))))))
+
+; A response's bits in the Command register: its length, and its checks.
+(def resp_bits ((r Resp)) int
+  (match r ((RespNone) 0) ((Resp48) 26) ((Resp48Busy) 27) ((Resp136) 9) ((Resp48Bare) 2)))
+
+; Whether a command waits for the data lines too: one that moves data,
+; or answers busy.
+(def uses_data_lines ((c SdCmd)) bool
+  (match c ((SdCmd index arg r dat) (if dat true (eq r (Resp48Busy))))))
+
+; Bringing a card up: GO_IDLE_STATE; SEND_IF_COND, 2.7 to 3.6 V and the
+; check pattern 0xAA; APP_CMD before an application command, for the
+; card at rca, 0 before it has one; SD_SEND_OP_COND, every voltage from
+; 2.7 to 3.6 V, and asking for high capacity; ALL_SEND_CID; SEND_RELATIVE_ADDR;
+; SEND_CSD; SELECT_CARD; and SET_BLOCKLEN 512, which a high-capacity card
+; has already.
+(def cmd_go_idle () SdCmd (SdCmd 0 0 (RespNone) false))
+(def cmd_if_cond () SdCmd (SdCmd 8 426 (Resp48) false))                   ; 0x1AA
+(def cmd_app ((rca int)) SdCmd (SdCmd 55 (bit_shl rca 16) (Resp48) false))
+(def cmd_op_cond () SdCmd (SdCmd 41 1090486272 (Resp48Bare) false))         ; 0x40FF8000: HCS, 2.7 to 3.6 V
+(def cmd_all_cid () SdCmd (SdCmd 2 0 (Resp136) false))
+(def cmd_relative_addr () SdCmd (SdCmd 3 0 (Resp48) false))
+(def cmd_csd ((rca int)) SdCmd (SdCmd 9 (bit_shl rca 16) (Resp136) false))
+(def cmd_select ((rca int)) SdCmd (SdCmd 7 (bit_shl rca 16) (Resp48Busy) false))
+(def cmd_blocklen () SdCmd (SdCmd 16 512 (Resp48) false))
+
+; Reading or writing count blocks from addr: READ_SINGLE_BLOCK or
+; READ_MULTIPLE_BLOCK, WRITE_BLOCK or WRITE_MULTIPLE_BLOCK.
+(def cmd_read ((addr int) (count int)) SdCmd (SdCmd (if (gt count 1) 18 17) addr (Resp48) true))
+(def cmd_write ((addr int) (count int)) SdCmd (SdCmd (if (gt count 1) 25 24) addr (Resp48) true))
+
+; Transfer Mode for count blocks, read or written: the block count on and
+; Auto CMD12 to stop them for more than one (bits 1, 2, 5), and the
+; direction, read at bit 4.
+(def transfer_mode ((count int) (read bool)) int
+  (bit_or (if (gt count 1) 38 0) (if read 16 0)))
+
+; Where a card is told sector is: the sector, on a high-capacity card;
+; its byte, on a standard one.
+(def sd_address ((sector int) (high bool)) int (if high sector (mul sector 512)))
+
+; ------------------------------------------------------------- answers
+
+; The SEND_IF_COND answer's check pattern, echoed: the card is version 2.
+(def if_cond_echoed ((r int)) bool (eq (bit_and r 4095) 426))
+
+; The OCR's bits: the card is ready, bit 31; it is high-capacity, bit 30.
+(def ocr_ready ((ocr int)) bool (not (eq (bit_and ocr 2147483648) 0)))
+(def ocr_high ((ocr int)) bool (not (eq (bit_and ocr 1073741824) 0)))
+
+; The relative address an R6 answer gives, its top 16 bits.
+(def rca_of ((r int)) int (bit_and (bit_shr r 16) 65535))
+
+; n bits of a 136-bit response from bit at, as the controller keeps it:
+; the response's bits 8 to 127 in the four u32s r0 to r3, so its bit b
+; is their bit b - 8.
+(def resp_bits_at ((r0 int) (r1 int) (r2 int) (r3 int) (at int) (n int)) int
+  (bit_and (resp_shifted r0 r1 r2 r3 at) (sub (bit_shl 1 n) 1)))
+
+; The response's words from bit at on, at bit 0: at's word's bits from
+; it, and the next word's above them.
+(def resp_shifted ((r0 int) (r1 int) (r2 int) (r3 int) (at int)) int
+  (let w (div at 32)
+    (let b (mod at 32)
+      (let lo (nth (cons r0 (cons r1 (cons r2 (cons r3 (cons 0 (nil int)))))) w)
+        (let hi (nth (cons r0 (cons r1 (cons r2 (cons r3 (cons 0 (cons 0 (nil int))))))) (add w 1))
+          (bit_or (bit_shr lo b) (bit_shl hi (sub 32 b))))))))
+
+; The sectors a card's CSD says it has. CSD version 2's C_SIZE, its bits
+; 48 to 69, counts 512 KB less one; version 1's C_SIZE, bits 62 to 73,
+; C_SIZE_MULT, 47 to 49, and READ_BL_LEN, 80 to 83, give (C_SIZE + 1)
+; blocks of 2^(C_SIZE_MULT + 2) of 2^READ_BL_LEN bytes. The structure's
+; version is bits 126 and 127.
+(def csd_sectors ((r0 int) (r1 int) (r2 int) (r3 int)) int
+  (if (eq (resp_bits_at r0 r1 r2 r3 118 2) 1)
+      (mul (add (resp_bits_at r0 r1 r2 r3 40 22) 1) 1024)
+      (let c (resp_bits_at r0 r1 r2 r3 54 12)
+        (let m (resp_bits_at r0 r1 r2 r3 39 3)
+          (let l (resp_bits_at r0 r1 r2 r3 72 4)
+            (div (bit_shl (add c 1) (add m (add 2 l))) 512))))))
+
+; A status's errors, as a word to say: the error status's bits.
+(def status_why ((s int)) (list int)
+  (append "the card's error status " (hex_digits (bit_shr (bit_and s (status_errors)) 16) 4)))

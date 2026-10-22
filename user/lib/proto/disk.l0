@@ -1,51 +1,117 @@
-; disk.l0 -- the disk protocol, as a client of it sends it: what a disk
-; driver, user/virtio-blk here, serves on the port it registers as disk.
+; disk.l0 -- the disk protocol: what a disk driver (virtio-blk, sdhci)
+; serves for each disk it drives, under the name diskN it registers for
+; it, the first of disk0, disk1, ... that no one has: so the first disk
+; found is disk0. A driver of several disks registers a name for each,
+; and may register them all on one port, since every request names the
+; disk it is for:
 ;
-;   info                    disk SECTORS 512: the disk's size in sectors,
+;   NAME info               disk SECTORS 512: the disk's size in sectors,
 ;                           and a sector's in bytes; disk SECTORS 512 ro
 ;                           for a disk that is read-only, whose writes
 ;                           are refused
-;   read SECTOR COUNT VA    COUNT sectors from SECTOR put by the device
-;                           into the client's pages, which it shared with
-;                           the driver at VA there (shm_share); 1 to 128
-;   write SECTOR COUNT VA   the same, taken from those pages and written
+;   NAME read SECTOR COUNT VA
+;                           COUNT sectors from SECTOR put into the
+;                           client's pages, which it shared with the
+;                           driver at VA there (shm_share); 1 to 128
+;   NAME write SECTOR COUNT VA
+;                           the same, taken from those pages and written
 ;                           to the disk
-;   flush                   ok once every write answered before it is on
+;   NAME flush              ok once every write answered before it is on
 ;                           the disk itself, not only in its cache
 ;
 ; Each is a request (l0s.l0), its words separated by spaces; the reply is
 ; ok, or as said above, or error: WHY. No sector travels in a message:
-; the device reads and writes the client's pages itself. Linked into the
-; programs that use a disk, by the Makefile's LIBS_ lists.
+; the device, or the driver, reads and writes the client's pages itself.
+; Linked into the drivers and the programs that use a disk, by the
+; Makefile's LIBS_ lists.
 
 ; A sector's bytes, and the most sectors one request moves.
 (def disk_sector_size () int 512)
 (def disk_max_sectors () int 128)
 
-; The disk, as a client holds it: its port, a port for its replies, the
-; driver's pid, to share buffers with, and the disk's size in sectors.
-(data Disk (Disk int int int int) (NoDisk (list int)))
+; ------------------------------------------------------------------ names
 
-; The disk, once its driver has registered, within 5 seconds; or why not.
+; How many disk names there are, disk0 to disk15, and the name of the
+; n-th.
+(def disk_names_max () int 16)
+(def disk_name ((n int)) (list int) (append "disk" (digits n)))
+
+; Whether w is a disk's name: disk and a number.
+(def is_disk_name ((w (list int))) bool
+  (if (starts_with w "disk") (if (gt (length w) 4) (is_number (drop w 4)) false) false))
+
+; The names of the disks there are, in order of their numbers.
+(def disk_names () (list (list int)) (disk_names_from 0 (nil (list int))))
+
+; disk_names's loop: the names from disk n on that are registered, after
+; the reversed acc.
+(def disk_names_from ((n int) (acc (list (list int)))) (list (list int))
+  (if (ge n (disk_names_max))
+      (rev acc)
+      (disk_names_from (add n 1)
+        (match (name_lookup (disk_name n)) ((Found p) (cons (disk_name n) acc)) ((NotFound) acc)))))
+
+; A driver's disk registered on port under the first name no one has:
+; the name; or why none could be.
+(def disk_register ((port int)) (Result (list int) (list int))
+  (disk_register_from port 0))
+
+; disk_register's loop: disk n tried, then the next while each is taken.
+(def disk_register_from ((port int) (n int)) (Result (list int) (list int))
+  (if (ge n (disk_names_max))
+      ((Err (list int) (list int)) "every disk name is taken")
+      (let r (name_register port (disk_name n))
+        (if (eq r (Registered))
+            ((Ok (list int) (list int)) (disk_name n))
+            (if (eq r (RegisterTaken))
+                (disk_register_from port (add n 1))
+                ((Err (list int) (list int)) (registration_why r)))))))
+
+; A request's body as a driver reads it: the disk it names, and the rest,
+; the request itself; an empty name if it names none.
+(data DiskAsked (DiskAsked (list int) (list int)))
+
+; body read so: its first word, if it is a disk's name, and the rest.
+(def disk_asked ((body (list int))) DiskAsked
+  (let ws (split_spaces body)
+    (if (if (is_empty ws) true (not (is_disk_name (head ws))))
+        (DiskAsked "" body)
+        (DiskAsked (head ws) (unwords (tail ws))))))
+
+; ----------------------------------------------------------------- asking
+
+; The disk, as a client holds it: its name, its driver's port, a port for
+; its replies, the driver's pid, to share buffers with, and the disk's
+; size in sectors.
+(data Disk (Disk (list int) int int int int) (NoDisk (list int)))
+
+; The first disk, disk0, once its driver has registered, within 5
+; seconds; or why not.
 (def disk_open () Disk
-  (match (name_wait "disk" 5000000000)
+  (match (name_wait (disk_name 0) 5000000000)
     ((NotFound) (NoDisk "no disk; is virtio-blk running?"))
-    ((Found port) (disk_opened port (port_new)))))
+    ((Found port) (disk_opened (disk_name 0) port (port_new)))))
 
-; The disk at port, asked its size, its replies to rp.
-(def disk_opened ((port int) (rp int)) Disk
-  (match (disk_reply port rp "info")
+; The disk registered as name, if one is now; or why not.
+(def disk_open_named ((name (list int))) Disk
+  (match (name_lookup name)
+    ((NotFound) (NoDisk (append "no disk " name)))
+    ((Found port) (disk_opened name port (port_new)))))
+
+; The disk name at port, asked its size, its replies to rp.
+(def disk_opened ((name (list int)) (port int) (rp int)) Disk
+  (match (disk_reply name port rp "info")
     ((DiskReply from r)
       (match (disk_info_of r)
-        ((Some n) (Disk port rp from n))
+        ((Some n) (Disk name port rp from n))
         ((None) (NoDisk (disk_error r)))))))
 
 ; A reply, and who sent it: the driver, or 0 if none came.
 (data DiskReply (DiskReply int (list int)))
 
-; The reply to body, sent to port with its reply to rp.
-(def disk_reply ((port int) (rp int) (body (list int))) DiskReply
-  (match (port_ask port rp body "the disk")
+; The reply to body, of disk name, sent to port with its reply to rp.
+(def disk_reply ((name (list int)) (port int) (rp int) (body (list int))) DiskReply
+  (match (port_ask port rp (append name (append " " body)) name)
     ((Asked from r) (DiskReply from r))
     ((AskFailed why) (DiskReply 0 (append "error: " why)))))
 
@@ -65,12 +131,15 @@
 (def disk_error ((r (list int))) (list int) (reply_why r "the disk"))
 
 ; The disk's size in sectors, 0 for none.
-(def disk_sectors ((d Disk)) int (match d ((Disk port rp pid n) n) ((NoDisk why) 0)))
+(def disk_sectors ((d Disk)) int (match d ((Disk name port rp pid n) n) ((NoDisk why) 0)))
 
 ; The pid its driver runs as, 0 for none.
-(def disk_pid ((d Disk)) int (match d ((Disk port rp pid n) pid) ((NoDisk why) 0)))
+(def disk_pid ((d Disk)) int (match d ((Disk name port rp pid n) pid) ((NoDisk why) 0)))
 
-; op SECTOR COUNT VA, as a request's body.
+; Its name, empty for none.
+(def disk_name_of ((d Disk)) (list int) (match d ((Disk name port rp pid n) name) ((NoDisk why) "")))
+
+; op SECTOR COUNT VA, as a request's body, before the disk's name.
 (def disk_request ((op (list int)) (sector int) (count int) (va int)) (list int)
   (append op (append " " (append (digits sector) (append " " (append (digits count) (append " " (digits va))))))))
 
@@ -105,21 +174,21 @@
 (def disk_flush ((d Disk)) (list int)
   (match d
     ((NoDisk why) why)
-    ((Disk port rp pid n)
-      (match (disk_reply port rp "flush")
+    ((Disk name port rp pid n)
+      (match (disk_reply name port rp "flush")
         ((DiskReply from reply) (disk_error reply))))))
 
 ; op, read or write, for count sectors from sector, through b.
 (def disk_move ((d Disk) (b DiskBuf) (op (list int)) (sector int) (count int)) (list int)
   (match d
     ((NoDisk why) why)
-    ((Disk port rp pid n)
+    ((Disk name port rp pid n)
       (match b
         ((NoDiskBuf why) why)
         ((DiskBuf va pages there r)
           (if (gt (mul count (disk_sector_size)) (mul pages (page_size)))
               "the buffer is too small for so many sectors"
-              (match (disk_reply port rp (disk_request op sector count there))
+              (match (disk_reply name port rp (disk_request op sector count there))
                 ((DiskReply from reply) (disk_error reply)))))))))
 
 ; The first n bytes of b.

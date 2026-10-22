@@ -194,7 +194,7 @@ Their helpers, copied in each script:
   and the cursor unless that is what is checked: a point in a corner is cut
   to show what is beneath.
 - `vt.sh` relies on pids from the demo's inittab and `tests/vt/etc/system`
-  (`vt=$((13 + ...))`):
+  (`vt=$((15 + ...))`):
   a `start` line added there shifts them.
 
 ## Trying things on a running board: the l0s MCP server
