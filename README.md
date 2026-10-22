@@ -496,7 +496,7 @@ pixels, and draw the pointer as a top layer.
 | Request | Does |
 |---|---|
 | `info` | `display W H cursor scale S`: the screen's size in its own pixels, `cursor` if the driver moves a pointer itself, and the desktop's scale, 1 or 2 (none means 1) |
-| `buffer ID W H VA [N]` | a buffer of W×H 4-byte pixels (b, g, r, and unused, or alpha for a cursor), at VA in the driver, shared there with `shm_share`; N its pages, if more than W×H takes. The same pages may be given again under another ID at another size, as `wm` does to resize a window without sharing anything anew |
+| `buffer ID W H VA [N [S]]` | a buffer of W×H 4-byte pixels (b, g, r, and unused, or alpha for a cursor), at VA in the driver, shared there with `shm_share`, its rows S pixels apart (W if not given); N its pages, if more than S×H takes. The same pages may be given again under another ID at another size, as `wm` does to resize a window without sharing anything anew, and with the same S each row stays where it was |
 | `forget ID` | the buffer dropped, and the driver's mapping of it given up with `shm_unmap` once no other buffer is in its pages; refused while it is on the screen or is the pointer's |
 | `layers ID X Y TOP ...` | the screen, bottom first: each buffer at X, Y, its rows read from row TOP on, as a ring. The bottom layer covers the screen. Only the bands of rows whose pixels changed are transferred and flushed; the first `layers` shows the whole screen |
 | `damage ID X Y W H ...` | each rectangle of its buffer changed, one or more groups of five: shown wherever they are visible, all together, with boxes that overlap transferred and flushed as one |
@@ -518,7 +518,7 @@ makes every place, rectangle, top row and radius the screen's on the way.
 | `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT. The reply is `window ID` |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
 | `top ID T` | the window's rows read from its buffer's row T on, as a ring: how a client scrolls |
-| `resize ID W H [VA N]` | the window's content is now W×H: in the buffer it has, which must have room for it, or in a new one at VA, N pages, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
+| `resize ID W H [VA N S]` | the window's content is now W×H: in the buffer it has, which must have room for it, its rows where they were, or in a new one at VA, N pages, its rows S of its own pixels apart, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
 | `title ID TEXT` | a new title |
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
@@ -637,12 +637,31 @@ Input:
   asks again only once the client has answered, so a slow client is
   asked for the latest size, not every one. A toolkit window
   (`ui_route`'s `UiResize`) keeps room in its buffer, a quarter more and
-  64 each way, so most sizes fit the buffer it has: it lays out for the
-  new size there and, at its next `ui_present`, paints it whole and
-  answers with `resize`; only a size past that room makes a new buffer.
-  `wm`'s chrome keeps room the same way, so a resize that fits shares and
-  gives up no page, which is what costs most. A client that ignores the
-  notice, such as `vt`, keeps its size.
+  64 each way, its rows as far apart as the buffer is wide, so most sizes
+  fit the buffer it has and every pixel keeps its place as the window
+  grows or shrinks in it. At its next `ui_present` it paints only what
+  changed and what the window grew into, and answers with `resize`; only
+  a size past that room makes a new buffer, painted whole. `wm`'s chrome
+  keeps room the same way, so a resize that fits shares and gives up no
+  page, which is what costs most. A client that ignores the notice, such
+  as `vt`, keeps its size.
+- **Repainting** (`ui_changed` in
+  [user/lib/ui/window.l0](user/lib/ui/window.l0)): a window paints only
+  where what it paints differs from what it painted last, as GTK diffs
+  its render nodes. Every paint op is compared, as a multiset: an op both
+  times paint is unchanged, wherever it is in the layout; a text is
+  compared as the characters it shows where it shows them, not by the
+  cell it is in; and a fill only where the other time's fills of its
+  color do not cover. So when Disks grows wider, its sidebar is not
+  painted again, only the segment bar, what moved and the strip the
+  window grew by, about a tenth of the window. The damage is made
+  disjoint, the largest first, so no pixel is painted twice.
+- **Scrolling** a grid moves what it showed: the scroller's area says how
+  high its rows are (`NAME.scroll.FIRST.MOST.SHOWN.STEP`), and when its
+  first row moves by less than it shows, `ui_present` moves the area's
+  pixels in the buffer (`render.l0`'s `canvas_copy_rows`), as GTK 3's
+  copy of an area did, and paints only the rows that came into view and
+  the scrollbar's slider, about a third of the rows.
 - **A left press on the close button**, the round button at a title
   bar's right end, kills the window's client with `proc_kill`. Its exit
   then closes its windows, as any client's does. If the client cannot be
@@ -2205,10 +2224,14 @@ a bad buffer, and wait on nothing.
   it keeps no copy of its text.
 - Only toolkit windows can be resized (`vt` and `draw` ignore the size
   notice, since a terminal keeps no copy of its text to lay out again).
-  A client paints all of its window for every size it is asked for, and
-  `wm` restacks the screen once, so a drag shows about 25 sizes a second
-  on QEMU for a window of 900 by 600, about 15 ms of it the client's
-  painting and 9 the restack. `wm` opens a region for each window, its
+  A client paints what changed for every size it is asked for, all of it
+  when the size outgrows its buffer, and `wm` restacks the screen once:
+  Disks's drag paints about 7 ms a size on QEMU, and the restack takes
+  9. A layout whose parts all move with the width, as a grid whose
+  columns stretch does, paints most of itself all the same. A client
+  paints into the buffer the screen shows, so a frame can be shown half
+  painted; its rows never move, as they did when a buffer's stride was
+  its width, which tore a width drag in 2D mode. `wm` opens a region for each window, its
   chrome's, and closes it when the window closes; the proc runtime keeps
   at most 64 open at once, so `wm`, which keeps four of its own (the
   desktop, the pointer, the top bar and the launcher), can have 60

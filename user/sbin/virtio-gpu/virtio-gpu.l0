@@ -113,10 +113,16 @@
 
 ; ---------------------------------------------------------------- layers
 
-; A buffer a client shared: its width and height in pixels, where the
+; A buffer a client shared: its width and height in pixels, its stride,
+; how many pixels apart its rows are, at least its width, where the
 ; device reaches each of its pages, where this process does, and its
-; corners.
-(data Buffer (Buffer int int (array int) int Corners))
+; corners. A stride past the width is the room a client keeps for its
+; buffer to grow: a row keeps its place whatever the width.
+(data Buffer (Buffer int int int (array int) int Corners))
+
+; A buffer whose rows are as far apart as it is wide.
+(def buffer_plain ((bw int) (bh int) (addrs (array int)) (va int) (cs Corners)) Buffer
+  (Buffer bw bh bw addrs va cs))
 
 ; The radii of a buffer's corners, top left, top right, bottom left and
 ; bottom right, in pixels: 0 is square. Where a corner is rounded off, the
@@ -173,7 +179,7 @@
             ((None) (row_segs w y (tail layers) bufs segs))
             ((Some b)
               (match b
-                ((Buffer bw bh addrs va cs)
+                ((Buffer bw bh sd addrs va cs)
                   (if (if (ge y ly) (lt y (add ly bh)) false)
                       (row_segs w y (tail layers) bufs
                         (overlay_span segs (max (add lx (left_inset cs bh (sub y ly))) 0)
@@ -208,9 +214,9 @@
         ((None) (zero_runs zero (mul (sub x1 x0) 4) runs))
         ((Some b)
           (match b
-            ((Buffer bw bh addrs va cs)
+            ((Buffer bw bh sd addrs va cs)
               (let r (mod (add (sub y ly) top) bh)
-                (virtq_page_runs addrs (mul (add (mul r bw) (sub x0 lx)) 4) (mul (sub x1 x0) 4) runs)))))))))
+                (virtq_page_runs addrs (mul (add (mul r sd) (sub x0 lx)) 4) (mul (sub x1 x0) 4) runs)))))))))
 
 ; The screen's backing, w by h, from layers, bottom first: every row's
 ; runs, in order, the screen's bytes row after row, with what no layer
@@ -268,7 +274,7 @@
           (stripe_until y
             (match (map_get bufs id)
               ((None) end)
-              ((Some b) (match b ((Buffer bw bh addrs va cs) (layer_edge y end ly bh cs)))))
+              ((Some b) (match b ((Buffer bw bh sd addrs va cs) (layer_edge y end ly bh cs)))))
             (tail layers) bufs)))))
 
 ; Where, after row y and before end, the rows of the layer at row ly of bh
@@ -407,7 +413,7 @@
     ((Layer id x y top)
       (match (map_get bufs id)
         ((None) d)
-        ((Some b) (match b ((Buffer bw bh addrs va cs) (mark_span d (max y 0) (min (add y bh) (array_len d))))))))))
+        ((Some b) (match b ((Buffer bw bh sd addrs va cs) (mark_span d (max y 0) (min (add y bh) (array_len d))))))))))
 
 (def mark_span ((d (array bool)) (y int) (end int)) (array bool)
   (if (ge y end) d (mark_span (array_set d y true) (add y 1) end)))
@@ -427,7 +433,7 @@
 (def pixels_of ((b (Option Buffer))) (Option Buffer)
   (match b
     ((None) b)
-    ((Some x) (match x ((Buffer bw bh addrs va cs) (Some (Buffer bw bh addrs 0 (square))))))))
+    ((Some x) (match x ((Buffer bw bh sd addrs va cs) (Some (Buffer bw bh sd addrs 0 (square))))))))
 
 (def layer_id ((l Layer)) int (match l ((Layer id x y top) id)))
 
@@ -706,14 +712,16 @@
 
 (def requested ((v Drv) (op (list int)) (ns (list int)) (n int)) (Served Drv)
   (if (if (eq op "info") (eq n 0) false) (info v)
-  (if (if (eq op "buffer") (if (eq n 4) true (eq n 5)) false) (shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (buffer_pages_arg ns))
+  (if (if (eq op "buffer") (if (ge n 4) (le n 6) false) false) (shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (buffer_pages_arg ns) (buffer_stride_arg ns))
   (if (if (eq op "forget") (eq n 1) false) (forgot v (nth ns 0))
   (if (if (eq op "layers") (eq (mod n 4) 0) false) (stacked v (layers_of ns (nil Layer)))
   (if (if (eq op "damage") (if (gt n 0) (eq (mod n 5) 0) false) false) (damaged v ns (nil Rect))
   (requested_pointer v op ns n)))))))
 
-; A buffer request's PAGES, its fifth number, or 0 if it has none.
-(def buffer_pages_arg ((ns (list int))) int (if (eq (length ns) 5) (nth ns 4) 0))
+; A buffer request's PAGES, its fifth number, or 0 if it has none; and
+; its STRIDE, its sixth, or its width, W.
+(def buffer_pages_arg ((ns (list int))) int (if (ge (length ns) 5) (nth ns 4) 0))
+(def buffer_stride_arg ((ns (list int))) int (if (eq (length ns) 6) (nth ns 5) (nth ns 1)))
 
 (def requested_pointer ((v Drv) (op (list int)) (ns (list int)) (n int)) (Served Drv)
   (if (if (eq op "shape") (eq n 5) false) (shaped v (nth ns 0) (Corners (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)))
@@ -757,20 +765,21 @@
       (rev acc)
       (layers_of (drop_n ns 4) (cons (Layer (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)) acc))))
 
-; buffer ID W H VA [PAGES]: the w by h pixels a client shared, at va here,
-; in the pages it shared, which may be more than they take.
-(def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int)) (Served Drv)
-  (if (if (lt bw 1) true (lt bh 1))
-      (served_error v "a buffer has no pixels")
-      (match (page_addresses va (buffer_shared_pages bw bh pages))
+; buffer ID W H VA [PAGES [STRIDE]]: the w by h pixels a client shared,
+; at va here, in the pages it shared, which may be more than they take,
+; its rows sd pixels apart.
+(def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
+  (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
+      (served_error v "a buffer has no pixels, or its stride is less than its width")
+      (match (page_addresses va (buffer_shared_pages sd bh pages))
         ((None) (served_error v "the buffer is not shared with the display"))
-        ((Some addrs) (put_buffer v id (Buffer bw bh addrs va (square)))))))
+        ((Some addrs) (put_buffer v id (Buffer bw bh sd addrs va (square)))))))
 
-; The pages a buffer bw by bh shared as pages takes: as many as its
-; pixels fill, or pages if that is more, the room its client kept for it
-; to grow into, so that forgetting it gives them all up.
-(def buffer_shared_pages ((bw int) (bh int) (pages int)) int
-  (max pages (div (add (mul (mul bw bh) 4) (sub (page_size) 1)) (page_size))))
+; The pages a buffer of bh rows sd pixels apart shared as pages takes: as
+; many as its rows fill, or pages if that is more, the room its client
+; kept for it to grow into, so that forgetting it gives them all up.
+(def buffer_shared_pages ((sd int) (bh int) (pages int)) int
+  (max pages (div (add (mul (mul sd bh) 4) (sub (page_size) 1)) (page_size))))
 
 ; Whether a buffer of bufs other than id is at va: another view of the
 ; same pages, as a buffer remade at another size is while the old one
@@ -783,7 +792,7 @@
 (def any_buffer_at ((ids (list int)) (bs (list Buffer)) (id int) (va int)) bool
   (if (is_empty ids)
       false
-      (if (if (not (eq (head ids) id)) (match (head bs) ((Buffer bw bh addrs bva cs) (eq bva va))) false)
+      (if (if (not (eq (head ids) id)) (match (head bs) ((Buffer bw bh sd addrs bva cs) (eq bva va))) false)
           true
           (any_buffer_at (tail ids) (tail bs) id va))))
 
@@ -805,9 +814,9 @@
         ((None) (served_error v (append "no buffer " (digits id))))
         ((Some b)
           (match b
-            ((Buffer bw bh addrs va old)
+            ((Buffer bw bh sd addrs va old)
               (if (corners_fit cs bw bh)
-                  (put_buffer v id (Buffer bw bh addrs va cs))
+                  (put_buffer v id (Buffer bw bh sd addrs va cs))
                   (served_error v "a corner's radius must be from 0 to half the buffer's width and height")))))))))
 
 (def corners_fit ((cs Corners) (bw int) (bh int)) bool
@@ -827,7 +836,7 @@
           (if (if (in_layers layers id) true (eq (cursor_buffer cur) id))
               (served_error v (append "buffer " (append (digits id) " is in use")))
               (match b
-                ((Buffer bw bh addrs va cs)
+                ((Buffer bw bh sd addrs va cs)
                   (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
                     (served_ok (Drv g c w h (map_remove bufs id) layers attached cur zero rows)))))))))))
 
@@ -892,7 +901,7 @@
             ((None) (served_error v (append "no buffer " (digits (head ns)))))
             ((Some b)
               (match b
-                ((Buffer bw bh addrs va cs)
+                ((Buffer bw bh sd addrs va cs)
                   (damaged v (drop_n ns 5)
                     (rev_onto (damage_boxes layers (nth ns 0) bh (nth ns 1) (max (nth ns 2) 0) (nth ns 3) (min (nth ns 4) bh)) acc))))))))))
 
@@ -935,7 +944,7 @@
         ((None) (served_error v (append "no buffer " (digits id))))
         ((Some b)
           (match b
-            ((Buffer bw bh addrs va cs)
+            ((Buffer bw bh sd addrs va cs)
               (if (not (if (eq bw (cursor_size)) (eq bh (cursor_size)) false))
                   (served_error v "a cursor is 64 by 64")
                   (cursor_resource v cur id addrs hx hy)))))))))

@@ -61,9 +61,17 @@ display. This is the working summary, with the rules.
   end), `rect_clip` (cut to a screen is a clip with `(Rect 0 0 w h)`),
   `rect_union` (`rect_union_all` of a list), `rect_overlaps`, `rect_has`,
   `rect_inset`; an empty one (`rect_empty`, `rect_none`) holds nothing.
-  `rect_merge` joins damage until no two rectangles overlap: `ui_changed`
-  merges a window's damage with it, and the display driver a `damage`
-  request's. Never declare another rectangle or another merge.
+  `rect_merge` joins damage until no two rectangles overlap (the display
+  driver merges a `damage` request's with it); `rect_minus` and
+  `rects_minus` subtract, which `ui_changed`'s `ui_merged` uses to make a
+  window's damage disjoint without growing it. Never declare another
+  rectangle or another merge.
+- **Damage is diffed from paint ops** (`ui_changed` in `window.l0`): old
+  and new nodes' ops compared as multisets (`ui_op_key` makes a text its
+  drawn characters and extent), a fill only where same-color fills on the
+  other side don't cover. Never add damage by hand in an app; an op that
+  paints the same pixels must compare equal, or it is repainted for
+  nothing.
 - **`paint.l0`**: the ops `UiPFill` (`ui_fills rs c` for many),
   `UiPRound` (antialiased only against the color given, or `-1`, the
   pixel already there), `UiPText` (aligned, bold as a double strike,
@@ -113,12 +121,16 @@ display. This is the working summary, with the rules.
   focused entry shows its ring whenever it has the focus, not only after
   Tab. No scrolling or selection: make it as wide as it must hold.
 - **Scrollers** (`widget.l0`): a widget that scrolls keeps how it is
-  scrolled in its nodes' actions, `NAME.scroll.FIRST.MOST.SHOWN` for its
-  area and `NAME.scrollbar.FIRST.MOST.SPAN.SLIDER` for its scrollbar's
-  strip, since the view cannot write state. `ui_route` reads them for the
-  wheel and drags and sets off `NAME.scrollto.N`; keys that move a
-  selection take `ui_win_scroller w NAME` to scroll it into view. The
-  layout does not keep a selection in view by itself.
+  scrolled in its nodes' actions, `NAME.scroll.FIRST.MOST.SHOWN.STEP` for
+  its area (STEP its row height, rows laid out from the area's top) and
+  `NAME.scrollbar.FIRST.MOST.SPAN.SLIDER` for its scrollbar's strip,
+  since the view cannot write state. `ui_route` reads them for the wheel
+  and drags and sets off `NAME.scrollto.N`; keys that move a selection
+  take `ui_win_scroller w NAME` to scroll it into view. The layout does
+  not keep a selection in view by itself. `ui_present` sees FIRST move by
+  less than SHOWN (`ui_scroll_moved`), moves the area's pixels
+  (`canvas_copy_rows`) and paints only what came into view
+  (`ui_scrolled_changed`).
 - **Actions, not callbacks.** L0 has no function values, so a widget that
   does something carries an action name, as GActions are named:
   `"app.refresh"`, `"procs.sort.2"`, `"procs.select.6"`, `"win.close"`.
@@ -178,7 +190,9 @@ driver composes them.
   opposite edge stays. A toolkit window takes `UiResize` in `ui_route`
   (`ui_resized`: in its buffer if it has room, `UiInPlace`, else a new one
   with `ui_grown` room, the old kept as `UiSwap` until wm has the new) and
-  the next `ui_present` paints it whole (`ui_swapped`). Apps need no code;
+  the next `ui_present` paints what changed and the exposed strip, or all
+  of a new buffer (`ui_swapped`). The canvas is the whole buffer, its
+  stride its width; `UiMem` keeps the window's size. Apps need no code;
   `vt` ignores the notice. The cost that matters is pages shared and
   given up, not pixels: keep resizes in place.
 - **The pointer's image** (`pointer_shaped`, `pointer_wanted`,
@@ -281,10 +295,13 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   when it closes, and keeps four of its own: desktop, pointer, top bar,
   launcher. A buffer remade, as for a resize past its room, frees the old
   one the same way.
-- **`buffer ID W H VA N`** gives a buffer N pages, more than W×H may take,
-  and the driver takes their addresses with one `dma_addresses` call; the
-  same pages may be another ID at another size, and `forget` unmaps them
-  only with the last.
+- **`buffer ID W H VA N S`** gives a buffer N pages, more than W×H may
+  take, its rows S pixels apart (`Buffer`'s stride; 2D `layer_runs`
+  addresses rows by it, GL makes the texture S wide), and the driver takes
+  their addresses with one `dma_addresses` call; the same pages may be
+  another ID at another size, and `forget` unmaps them only with the
+  last. A width change with the same S keeps every row in place, which a
+  stride equal to the width did not: that tore width drags in 2D mode.
 - **3D mode** (`user/sbin/virtio-gpu/gl.l0`, `compose.l0`, `virgl.l0`): on
   QEMU's `virtio-gpu-gl-device` the driver makes each buffer a texture and
   composes the screen with virgl copies (`make demo` does when

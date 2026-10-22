@@ -148,6 +148,12 @@ drag $x0 $((y0 + bar + 100)) $((x0 - 30)) $((y0 + bar + 100))
 window $((w1 + 30)) $h_before
 [ "$w_x" = "$((x0 - 30))" ] || fail "the left edge dragged left put the window at $w_x, not $((x0 - 30))"
 echo "ok - resize: the left edge dragged: ${w_w} by ${w_h} at ${w_x}"
+# That resize was in the buffer the window had, its rows where they were
+# and only what changed painted: End Process at the new right end, the
+# toolbar's ground where it was, nothing shifted or torn.
+lx=$((w_x + 2))
+shows "in place: End Process at the right end, the toolbar's ground before it" \
+  "$((lx + w_w - 60)) $((cy + 22)) $faded" "$((lx + w_w - 200)) $((cy + 22)) $ground"
 
 # The pointer at x, y: waits up to 30 s for run windows to name it as
 # shown, nothing for the arrow.

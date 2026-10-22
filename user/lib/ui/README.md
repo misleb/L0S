@@ -54,7 +54,9 @@ and its loop is:
 
 A widget that scrolls, the grid so far, is a **scroller**. Its layout
 keeps how it is scrolled in two nodes' actions, as a `GtkAdjustment`
-would hold it: its area, `NAME.scroll.FIRST.MOST.SHOWN`, and its
+would hold it: its area, `NAME.scroll.FIRST.MOST.SHOWN.STEP`, STEP its
+rows' height, by which `ui_present` moves the area's pixels when it
+scrolls rather than painting them again, and its
 scrollbar's strip, `NAME.scrollbar.FIRST.MOST.SPAN.SLIDER`. `ui_route`
 reads them to scroll it with no help from the program. The wheel over
 either, a press on the strip off the slider, and a drag of the slider set

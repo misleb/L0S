@@ -37,17 +37,25 @@
 ; is, and what a resize has done to it that wm has not yet been told.
 (data UiWin (UiWin Compositor int Canvas int UiFace UiState (list UiNode) int int UiMem))
 
-; The address of the window's buffer, its pages, which may be more than
-; the canvas takes, room to grow into, and a resize wm is yet to be told
-; of.
-(data UiMem (UiMem int int UiSwap))
+; The address of the window's buffer, its pages, the window's width and
+; height, the desktop's pixels, and a resize wm is yet to be told of. The
+; canvas is all of the buffer, which may be bigger than the window, room
+; to grow into: its rows are as far apart as it is wide, whatever size
+; the window is, so what is painted keeps its place as the window grows
+; and shrinks in it, and only what changed is painted again.
+(data UiMem (UiMem int int int int UiSwap))
 
 ; What a resize did that wm is yet to be told of: made a new buffer, the
-; old one's address, pages and canvas kept until wm has the new one; or
-; made the canvas another size in the same buffer, which had room, its
-; own width and height before kept to go back to if wm will not have it;
-; or nothing.
-(data UiSwap (UiSwap int int Canvas) (UiInPlace int int) (UiNoSwap))
+; old one's address, pages and canvas kept until wm has the new one, with
+; the window's width and height in it; or
+; made the window another size in the same buffer, which had room, its
+; width and height before kept to go back to if wm will not have it; or
+; nothing.
+(data UiSwap (UiSwap int int Canvas int int) (UiInPlace int int) (UiNoSwap))
+
+; The window's width and height, the desktop's pixels.
+(def ui_win_w ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g m) (match m ((UiMem va n ww wh swap) ww)))))
+(def ui_win_h ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g m) (match m ((UiMem va n ww wh swap) wh)))))
 
 ; A window opened, or why not.
 (data UiOpened (UiOpenedWin UiWin) (UiOpenFailed (list int)))
@@ -88,7 +96,7 @@
                   (match (window_open (Compositor cport rp pid s) w h va n port title)
                     ((WindowFailed why) (UiOpenFailed why))
                     ((WindowOpened id)
-                      (UiOpenedWin (UiWin (Compositor cport rp pid s) id canvas port face (ui_state_new (ui_style)) (nil UiNode) 0 0 (UiMem va n (UiNoSwap))))))))))))))
+                      (UiOpenedWin (UiWin (Compositor cport rp pid s) id canvas port face (ui_state_new (ui_style)) (nil UiNode) 0 0 (UiMem va n w h (UiNoSwap))))))))))))))
 
 ; The window closed, and its buffer, and any a resize has not yet
 ; replaced, given up.
@@ -96,20 +104,13 @@
   (match w
     ((UiWin c id cv port font st ns b g m)
       (match m
-        ((UiMem va n swap)
+        ((UiMem va n ww wh swap)
           (let x (window_close c id)
             (let f (ui_buffer_free va n cv)
               (match swap
                 ((UiNoSwap) 0)
                 ((UiInPlace ow oh) 0)
-                ((UiSwap ova on ocv) (ui_buffer_free ova on ocv))))))))))
-
-; cv over the same buffer, w by h of its own pixels: its first w by h
-; pixels, row after row, the image wm is told of.
-(def ui_canvas_sized ((cv Canvas) (w int) (h int)) Canvas
-  (match cv
-    ((Canvas r cw ch top) (Canvas r w h 0))
-    ((ArrayCanvas px cw ch top) (canvas_new w h 0))))
+                ((UiSwap ova on ocv ow oh) (ui_buffer_free ova on ocv))))))))))
 
 ; A buffer's side n of the desktop's pixels with room to grow: a quarter
 ; more, and 64.
@@ -233,7 +234,7 @@
         (UiRouted w2 "")
         (match (ui_scroll_of (ui_st_pressed st))
           ((UiScrollBar name f m sp sl) (UiRouted w2 (ui_slid_to (ui_win_nodes w) name (sub y (ui_win_grab w)))))
-          ((UiScrollArea name f m s) (UiRouted w2 ""))
+          ((UiScrollArea name f m s st) (UiRouted w2 ""))
           ((UiNoScroll) (UiRouted w2 ""))))))
 
 ; A press: its target shown pressed, and the focus gone, as GTK's does.
@@ -278,7 +279,7 @@
               (if (if (ge y top) (lt y (add top sl)) false)
                   (UiRouted (ui_win_grabbing w2 (sub y top)) "")
                   (UiRouted (ui_win_grabbing w2 (div sl 2)) (ui_slid_to ns name (sub y (div sl 2)))))))))
-      ((UiScrollArea name f m s) (UiRouted w2 ""))
+      ((UiScrollArea name f m s st) (UiRouted w2 ""))
       ((UiNoScroll) (UiRouted w2 "")))))
 
 ; The action that scrolls the scroller called name so that its slider's
@@ -291,7 +292,7 @@
         ((UiScrollBar nm f m sp sl)
           (let to (ui_slider_first top (rect_y (ui_node_rect n)) m sp)
             (if (eq to f) "" (ui_scrollto_action name to))))
-        ((UiScrollArea nm f m s) "")
+        ((UiScrollArea nm f m s st) "")
         ((UiNoScroll) "")))))
 
 ; The wheel turned dy steps at x, y: the scroller there scrolled, if one
@@ -299,7 +300,7 @@
 (def ui_wheel_routed ((w UiWin) (x int) (y int) (dy int)) UiRouted
   (UiRouted w
     (match (ui_scroll_hit (ui_win_nodes w) x y)
-      ((UiScrollArea name f m s) (ui_wheeled_to name f m dy))
+      ((UiScrollArea name f m s st) (ui_wheeled_to name f m dy))
       ((UiScrollBar name f m sp sl) (ui_wheeled_to name f m dy))
       ((UiNoScroll) ""))))
 
@@ -356,111 +357,128 @@
 
 ; ------------------------------------------------------------- painting
 
-; The window showing widget: laid out, and where that differs from what
-; was painted last, painted and its damage told. After a resize it is all
-; of a new buffer, which wm is given in place of the old one.
+; The window showing widget: laid out at its size, and where that differs
+; from what was painted last, painted and its damage told; what a scroll
+; moved is moved rather than painted again (ui_presented). After a resize
+; in its buffer, what kept its place is not painted again either, only
+; what changed and what the window has grown into, and wm is told of the
+; size; after one into a new buffer, all of it is painted, and wm given
+; that buffer in place of the old one.
 (def ui_present ((w UiWin) (widget UiWidget)) UiWin
   (match w
     ((UiWin c id canvas port font st old held g m)
-      (let w (ui_logical_w canvas font)
-        (let h (ui_logical_h canvas font)
-          (let ns (ui_layout_window widget w h st)
-            (match m
-              ((UiMem va n swap)
-                (match swap
-                  ((UiNoSwap)
-                    (let boxes (ui_changed old ns (Rect 0 0 w h))
-                      (let p (ui_repaint c id canvas font ns boxes)
-                        (UiWin c id canvas port font st ns held g m))))
-                  ((UiInPlace ow oh) (ui_swapped (UiWin c id canvas port font st ns held g m) ns))
-                  ((UiSwap ova on ocv) (ui_swapped (UiWin c id canvas port font st ns held g m) ns)))))))))))
-
-; The window, resized, painted whole and wm told: of its buffer's new
-; size, if it was resized in it, or of its new buffer, which wm then
-; shows in place of the old one, and the old one given up. If wm will not
-; have it, the window goes back to the buffer and size wm shows, to be
-; painted again, a new buffer given up.
-(def ui_swapped ((w UiWin) (ns (list UiNode))) UiWin
-  (match w
-    ((UiWin c id canvas port font st old held g m)
       (match m
-        ((UiMem va n swap)
-          (let pw (ui_logical_w canvas font)
-            (let ph (ui_logical_h canvas font)
-              (let p (ui_paint_boxes canvas font ns (cons (Rect 0 0 pw ph) (nil Rect)))
-                (let e (match swap
-                         ((UiInPlace ow oh) (window_resize_in_place c id pw ph))
-                         ((UiSwap ova on ocv) (window_resize c id pw ph va n))
-                         ((UiNoSwap) ""))
-                  (if (is_empty e)
-                      (ui_told (UiWin c id canvas port font st ns held g m))
-                      (ui_refused (UiWin c id canvas port font st ns held g m))))))))))))
+        ((UiMem va n ww wh swap)
+          (let ns (ui_layout_window widget ww wh st)
+            (let full (Rect 0 0 ww wh)
+              (let w2 (UiWin c id canvas port font st ns held g m)
+                (match swap
+                  ((UiNoSwap) (ui_presented w2 old ns full))
+                  ((UiInPlace ow oh)
+                    (ui_swapped w2 (ui_changed_onto old ns full (rects_minus (cons full (nil Rect)) (cons (Rect 0 0 ow oh) (nil Rect))))))
+                  ((UiSwap ova on ocv ow oh) (ui_swapped w2 (cons full (nil Rect)))))))))))))
+
+; w, showing ns, painted where they differ from old, the nodes painted
+; last, within full, and wm told: as ui_changed says, or, if a scroll
+; moved what the scroller's area shows, those pixels moved by as much
+; and only what that does not show painted (ui_scrolled_changed), the
+; whole area told, as all of its pixels have changed.
+(def ui_presented ((w UiWin) (old (list UiNode)) (ns (list UiNode)) (full Rect)) UiWin
+  (match w
+    ((UiWin c id canvas port font st nodes held g m)
+      (match (ui_scroll_moved ns old)
+        ((UiNoScrollMove)
+          (let boxes (ui_changed old ns full)
+            (let p (ui_repaint c id canvas font ns boxes boxes) w)))
+        ((UiScrollMove area dy)
+          (let s (ui_face_scale font)
+            (let moved (canvas_copy_rows canvas (rect_scaled area s) (mul dy s))
+              (let boxes (ui_scrolled_changed old ns full area dy)
+                (let p (ui_repaint c id moved font ns boxes (ui_merged (cons area boxes) full)) w)))))))))
+
+; The window, resized, painted in boxes and wm told: of its new size, if it
+; was resized in its buffer, or of its new buffer, which wm then shows in
+; place of the old one, and the old one given up. If wm will not have it,
+; the window goes back to the buffer and size wm shows, to be painted
+; again, a new buffer given up.
+(def ui_swapped ((w UiWin) (boxes (list Rect))) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g m)
+      (match m
+        ((UiMem va n ww wh swap)
+          (let p (ui_paint_boxes canvas font ns boxes)
+            (let e (match swap
+                     ((UiInPlace ow oh) (window_resize_in_place c id ww wh))
+                     ((UiSwap ova on ocv ow oh) (window_resize c id ww wh va n (canvas_w canvas)))
+                     ((UiNoSwap) ""))
+              (if (is_empty e) (ui_told w) (ui_refused w)))))))))
 
 ; w once wm has its resize: any old buffer given up.
 (def ui_told ((w UiWin)) UiWin
   (match w
     ((UiWin c id canvas port font st ns held g m)
       (match m
-        ((UiMem va n swap)
-          (let f (match swap ((UiSwap ova on ocv) (ui_buffer_free ova on ocv)) ((UiInPlace ow oh) 0) ((UiNoSwap) 0))
-            (UiWin c id canvas port font st ns held g (UiMem va n (UiNoSwap)))))))))
+        ((UiMem va n ww wh swap)
+          (let f (match swap ((UiSwap ova on ocv ow oh) (ui_buffer_free ova on ocv)) ((UiInPlace ow oh) 0) ((UiNoSwap) 0))
+            (UiWin c id canvas port font st ns held g (UiMem va n ww wh (UiNoSwap)))))))))
 
-; w once wm has refused its resize: as wm shows it, in the size it had in
-; the same buffer, or in the old buffer, the new one given up; nothing
-; painted, so all of it is painted next.
+; w once wm has refused its resize: as wm shows it, at the size it had, in
+; the same buffer or the old one, the new one given up; nothing painted,
+; so all of it is painted next.
 (def ui_refused ((w UiWin)) UiWin
   (match w
     ((UiWin c id canvas port font st ns held g m)
       (match m
-        ((UiMem va n swap)
+        ((UiMem va n ww wh swap)
           (match swap
-            ((UiInPlace ow oh) (UiWin c id (ui_canvas_sized canvas ow oh) port font st (nil UiNode) held g (UiMem va n (UiNoSwap))))
-            ((UiSwap ova on ocv)
+            ((UiInPlace ow oh) (UiWin c id canvas port font st (nil UiNode) held g (UiMem va n ow oh (UiNoSwap))))
+            ((UiSwap ova on ocv ow oh)
               (let f (ui_buffer_free va n canvas)
-                (UiWin c id ocv port font st (nil UiNode) held g (UiMem ova on (UiNoSwap)))))
+                (UiWin c id ocv port font st (nil UiNode) held g (UiMem ova on ow oh (UiNoSwap)))))
             ((UiNoSwap) w)))))))
 
-; The window asked to be rw by rh, its nodes forgotten so the next
-; ui_present paints it all: in the buffer it has, if that has room, else
-; in a new one with room to grow, the old one kept until wm has the new
-; one. A buffer that wm has never been told of is given up, as nothing
-; shows it. As it was if the size is the one it has, or there is no
-; memory for a new buffer.
+; The window asked to be rw by rh: in the buffer it has, if its canvas
+; holds that, what was painted kept where it is for the next ui_present to
+; paint only what changed; else in a new one with room to grow, the old
+; one kept until wm has the new one, and its nodes forgotten so that all
+; of it is painted. A buffer that wm has never been told of is given up,
+; as nothing shows it. As it was if the size is the one it has, or there
+; is no memory for a new buffer.
 (def ui_resized ((w UiWin) (rw int) (rh int)) UiWin
   (match w
     ((UiWin c id canvas port font st ns held g m)
-      (if (if (lt rw 1) true (lt rh 1))
-          w
-          (if (if (eq rw (ui_logical_w canvas font)) (eq rh (ui_logical_h canvas font)) false)
+      (match m
+        ((UiMem va n ww wh swap)
+          (if (if (lt rw 1) true (if (lt rh 1) true (if (eq rw ww) (eq rh wh) false)))
               w
-              (match m
-                ((UiMem va n swap)
-                  (let s (ui_face_scale font)
-                    (if (le (buffer_pages (mul rw s) (mul rh s)) n)
-                        (UiWin c id (ui_canvas_sized canvas (mul rw s) (mul rh s)) port font st (nil UiNode) held g
-                               (UiMem va n (match swap ((UiNoSwap) (UiInPlace (canvas_w canvas) (canvas_h canvas))) ((UiInPlace ow oh) swap) ((UiSwap ova on ocv) swap))))
-                        (match (ui_buffer_at (ui_grown rw) (ui_grown rh) s)
-                          ((UiNoBuf why) w)
-                          ((UiBuf nva nn big) (ui_swapped_in w nva nn (ui_canvas_sized big (mul rw s) (mul rh s))))))))))))))
+              (let s (ui_face_scale font)
+                (if (if (le (mul rw s) (canvas_w canvas)) (le (mul rh s) (canvas_h canvas)) false)
+                    (UiWin c id canvas port font st ns held g
+                           (UiMem va n rw rh (match swap ((UiNoSwap) (UiInPlace ww wh)) ((UiInPlace ow oh) swap) ((UiSwap ova on ocv ow oh) swap))))
+                    (match (ui_buffer_at (ui_grown rw) (ui_grown rh) s)
+                      ((UiNoBuf why) w)
+                      ((UiBuf nva nn big) (ui_swapped_in w nva nn big rw rh)))))))))))
 
-; w with the new buffer at va, n pages, canvas ncv, as its own: the one it
-; had kept until wm has the new one, unless wm has never been told of it.
-(def ui_swapped_in ((w UiWin) (va int) (n int) (ncv Canvas)) UiWin
+; w with the new buffer at va, n pages, canvas ncv, as its own, rw by rh:
+; the one it had kept until wm has the new one, unless wm has never been
+; told of it.
+(def ui_swapped_in ((w UiWin) (va int) (n int) (ncv Canvas) (rw int) (rh int)) UiWin
   (match w
     ((UiWin c id canvas port font st ns held g m)
       (match m
-        ((UiMem cva cn swap)
+        ((UiMem cva cn ww wh swap)
           (match swap
-            ((UiNoSwap) (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n (UiSwap cva cn canvas))))
-            ((UiInPlace ow oh) (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n (UiSwap cva cn canvas))))
-            ((UiSwap ova on ocv)
+            ((UiNoSwap) (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n rw rh (UiSwap cva cn canvas ww wh))))
+            ((UiInPlace ow oh) (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n rw rh (UiSwap cva cn canvas ow oh))))
+            ((UiSwap ova on ocv ow oh)
               (let f (ui_buffer_free cva cn canvas)
-                (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n swap))))))))))
+                (UiWin c id ncv port font st (nil UiNode) held g (UiMem va n rw rh swap))))))))))
 
-; Each box painted, then all of them told in one damage request.
-(def ui_repaint ((c Compositor) (id int) (canvas Canvas) (font UiFace) (ns (list UiNode)) (boxes (list Rect))) int
+; Each of boxes painted, then each of told, where pixels have changed,
+; told to wm in one damage request.
+(def ui_repaint ((c Compositor) (id int) (canvas Canvas) (font UiFace) (ns (list UiNode)) (boxes (list Rect)) (told (list Rect))) int
   (let p (ui_paint_boxes canvas font ns boxes)
-    (let d (window_damage_many c id boxes) 0)))
+    (let d (window_damage_many c id told) 0)))
 
 ; The nodes ns painted in each of boxes, cut to it, a box at a time.
 (def ui_paint_boxes ((canvas Canvas) (font UiFace) (ns (list UiNode)) (boxes (list Rect))) Canvas
@@ -468,23 +486,263 @@
       canvas
       (ui_paint_boxes (ui_paint_nodes canvas font (head boxes) ns) font ns (tail boxes))))
 
-; Where new differs from old: each node that is not the same, where it
-; was and where it is, merged where they overlap; all of full if the two
-; do not have the same parts; none if they are the same.
+; ---------------------------------------------------------------- damage
+
+; Where what new paints differs from what old painted, within full: the
+; boxes to paint again, as GTK's render nodes are diffed. Each paint op is
+; compared, not each node, as a multiset: an op both paint is unchanged,
+; wherever it is in the list; one only one side paints is damage, all of
+; where it paints, but a fill only where the other side's fills of its
+; color do not cover. So a window's ground grown wider is damage only in
+; the strip it grew by, and a pane whose ops are all as they were is not
+; painted again.
 (def ui_changed ((old (list UiNode)) (new (list UiNode)) (full Rect)) (list Rect)
-  (if (not (eq (length old) (length new)))
-      (cons full (nil Rect))
-      (let rs (rect_merge (ui_differing old new (nil Rect)))
-        (if (gt (length rs) (ui_max_boxes)) (cons (rect_union_all rs) (nil Rect)) rs))))
+  (ui_changed_onto old new full (nil Rect)))
+
+; ui_changed's boxes, with each of more too, as what a resize has exposed.
+(def ui_changed_onto ((old (list UiNode)) (new (list UiNode)) (full Rect) (more (list Rect))) (list Rect)
+  (ui_ops_changed (ui_ops_of old) (ui_ops_of new) full more))
+
+; Where ops news differ from olds, and more, within full, merged.
+(def ui_ops_changed ((olds (list UiPaint)) (news (list UiPaint)) (full Rect) (more (list Rect))) (list Rect)
+  (let gone (ui_ops_unmatched olds (ui_op_counts news ((MapEmpty UiPaint int))) (nil UiPaint))
+    (let came (ui_ops_unmatched news (ui_op_counts olds ((MapEmpty UiPaint int))) (nil UiPaint))
+      (ui_merged (ui_ops_damage gone news (ui_ops_damage came olds more)) full))))
+
+; rs cut to full and made disjoint, each less those before it: so no
+; pixel is painted twice, and none is added, as merging two that overlap
+; into the least rectangle holding both would add, a thin scrollbar and a
+; wide strip across it becoming all of the area. More than ui_max_boxes
+; are one, the least that holds them.
+(def ui_merged ((rs (list Rect)) (full Rect)) (list Rect)
+  (let ms (ui_disjoint (ui_largest_first (ui_clipped rs full (nil Rect))) (nil Rect))
+    (if (gt (length ms) (ui_max_boxes)) (cons (rect_union_all ms) (nil Rect)) ms)))
+
+; A rectangle and its area, less than 0, so that sorting puts the
+; largest first.
+(data UiByArea (UiByArea int Rect))
+
+; rs, the largest first: so the small ones inside it, a row's text in its
+; row, are taken from what is left of it, not it cut around them.
+(def ui_largest_first ((rs (list Rect))) (list Rect)
+  (ui_rects_of (sort (ui_by_area rs (nil UiByArea))) (nil Rect)))
+
+; Each of rs with its area, onto acc.
+(def ui_by_area ((rs (list Rect)) (acc (list UiByArea))) (list UiByArea)
+  (if (is_empty rs) acc (ui_by_area (tail rs) (cons (UiByArea (sub 0 (mul (rect_w (head rs)) (rect_h (head rs)))) (head rs)) acc))))
+
+; The rectangles of bs, in order.
+(def ui_rects_of ((bs (list UiByArea)) (acc (list Rect))) (list Rect)
+  (if (is_empty bs) (rev acc) (match (head bs) ((UiByArea a r) (ui_rects_of (tail bs) (cons r acc))))))
+
+; rs made disjoint onto acc, which is: each of rs less all of acc, its
+; pieces then part of acc.
+(def ui_disjoint ((rs (list Rect)) (acc (list Rect))) (list Rect)
+  (if (is_empty rs)
+      (rev acc)
+      (ui_disjoint (tail rs) (rects_rev_onto (rects_minus (cons (head rs) (nil Rect)) acc) acc))))
+
+; Each of rs cut to full, onto the reversed acc.
+(def ui_clipped ((rs (list Rect)) (full Rect) (acc (list Rect))) (list Rect)
+  (if (is_empty rs) (rev acc) (ui_clipped (tail rs) full (cons (rect_clip (head rs) full) acc))))
 
 ; More boxes than this are painted as one.
-(def ui_max_boxes () int 8)
+(def ui_max_boxes () int 24)
 
-; Of old and new, node by node, where each pair that differs was and is,
-; onto acc, reversed.
-(def ui_differing ((old (list UiNode)) (new (list UiNode)) (acc (list Rect))) (list Rect)
-  (if (if (is_empty old) true (is_empty new))
+; Every op of ns, in order.
+(def ui_ops_of ((ns (list UiNode))) (list UiPaint) (rev (ui_ops_onto ns (nil UiPaint))))
+
+; ui_ops_of's loop: each node's ops onto the reversed acc.
+(def ui_ops_onto ((ns (list UiNode)) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty ns)
+      acc
+      (match (head ns) ((UiNode r ops a f) (ui_ops_onto (tail ns) (ui_paints_onto ops acc))))))
+
+; ops onto the reversed acc, each as ui_op_key compares it.
+(def ui_paints_onto ((ops (list UiPaint)) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty ops) acc (ui_paints_onto (tail ops) (cons (ui_op_key (head ops)) acc))))
+
+; op as what it paints: a line of text as the characters it shows, cut
+; short as ui_text cuts them, in the rectangle they cover, aligned and
+; centred as they are in its own; so text in a cell that grew, which
+; paints the same pixels, is the same. Any other op as it is.
+(def ui_op_key ((op UiPaint)) UiPaint
+  (match op
+    ((UiPText r s a c bold scale)
+      (let shown (ui_ellipsized s (sub (rect_w r) (if bold 1 0)) scale)
+        (let tw (ui_text_w shown bold scale)
+          (let th (mul (ui_char_h) scale)
+            (UiPText (Rect (ui_aligned (rect_x r) (rect_w r) tw a) (add (rect_y r) (div (sub (rect_h r) th) 2)) tw th)
+                     shown (UiStart) c bold scale)))))
+    ((UiPFill r c) op)
+    ((UiPRound r radius c under) op)
+    ((UiPIcon x y name c scale) op)))
+
+; m with how many times each of ops is in it added.
+(def ui_op_counts ((ops (list UiPaint)) (m (Map UiPaint int))) (Map UiPaint int)
+  (if (is_empty ops)
+      m
+      (ui_op_counts (tail ops) (map_put m (head ops) (add 1 (match (map_get m (head ops)) ((None) 0) ((Some k) k)))))))
+
+; The ops of xs that m's counts do not match, each count matching one,
+; onto the reversed acc: what xs paints that the other side does not.
+(def ui_ops_unmatched ((xs (list UiPaint)) (m (Map UiPaint int)) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty xs)
       (rev acc)
-      (if (eq (head old) (head new))
-          (ui_differing (tail old) (tail new) acc)
-          (ui_differing (tail old) (tail new) (cons (ui_node_rect (head new)) (cons (ui_node_rect (head old)) acc))))))
+      (match (map_get m (head xs))
+        ((Some k) (if (gt k 0) (ui_ops_unmatched (tail xs) (map_put m (head xs) (sub k 1)) acc) (ui_ops_unmatched (tail xs) m (cons (head xs) acc))))
+        ((None) (ui_ops_unmatched (tail xs) m (cons (head xs) acc))))))
+
+; Where each of ops, painted on one side only, is damage against other,
+; the ops of the other side, onto acc.
+(def ui_ops_damage ((ops (list UiPaint)) (other (list UiPaint)) (acc (list Rect))) (list Rect)
+  (if (is_empty ops)
+      acc
+      (ui_ops_damage (tail ops) other (rects_rev_onto (ui_op_damage (head ops) other) acc))))
+
+; Where op is damage: a fill where other's fills of its color do not
+; cover, anything else all of where it paints.
+(def ui_op_damage ((op UiPaint) (other (list UiPaint))) (list Rect)
+  (match op
+    ((UiPFill r c) (rects_minus (cons r (nil Rect)) (ui_fill_rects other c (nil Rect))))
+    ((UiPRound r radius c under) (cons r (nil Rect)))
+    ((UiPText r s a c bold scale) (cons r (nil Rect)))
+    ((UiPIcon x y name c scale) (cons (ui_op_rect op) (nil Rect)))))
+
+; The rectangles of ops's fills of color c, onto acc.
+(def ui_fill_rects ((ops (list UiPaint)) (c int) (acc (list Rect))) (list Rect)
+  (if (is_empty ops)
+      acc
+      (ui_fill_rects (tail ops) c
+        (match (head ops)
+          ((UiPFill r fc) (if (eq fc c) (cons r acc) acc))
+          ((UiPRound r radius fc under) acc) ((UiPText r s a fc bold scale) acc) ((UiPIcon x y name fc scale) acc)))))
+
+; Where op paints: its rectangle, or an icon's square.
+(def ui_op_rect ((op UiPaint)) Rect
+  (match op
+    ((UiPFill r c) r)
+    ((UiPRound r radius c under) r)
+    ((UiPText r s a c bold scale) r)
+    ((UiPIcon x y name c scale) (Rect x y (mul (ui_icon_size) scale) (mul (ui_icon_size) scale)))))
+
+; op painted dy rows higher, below 0 lower.
+(def ui_op_up ((op UiPaint) (dy int)) UiPaint
+  (match op
+    ((UiPFill r c) (UiPFill (ui_rect_up r dy) c))
+    ((UiPRound r radius c under) (UiPRound (ui_rect_up r dy) radius c under))
+    ((UiPText r s a c bold scale) (UiPText (ui_rect_up r dy) s a c bold scale))
+    ((UiPIcon x y name c scale) (UiPIcon x (sub y dy) name c scale))))
+
+; r dy rows higher.
+(def ui_rect_up ((r Rect) (dy int)) Rect (match r ((Rect x y w h) (Rect x (sub y dy) w h))))
+
+; ------------------------------------------------------------- scrolling
+
+; How a scroll moved what a scroller's area shows: its area, and how many
+; pixels up its rows moved, below 0 down; or it did not, or by too much
+; for any of them still to show.
+(data UiScrollMove (UiScrollMove Rect int) (UiNoScrollMove))
+
+; The first scroller of ns whose area, as old laid it out, is where it
+; was and showed rows that it still shows, moved by its rows' height for
+; each row its first moved by.
+(def ui_scroll_moved ((ns (list UiNode)) (old (list UiNode))) UiScrollMove
+  (if (is_empty ns)
+      (UiNoScrollMove)
+      (match (head ns)
+        ((UiNode r ops a f)
+          (match (ui_scroll_of a)
+            ((UiScrollArea name first most shown step)
+              (match (ui_area_named old name)
+                ((None) (ui_scroll_moved (tail ns) old))
+                ((Some on)
+                  (match on
+                    ((UiNode or2 oops oa of)
+                      (match (ui_scroll_of oa)
+                        ((UiScrollArea n2 f2 m2 s2 st2)
+                          (let d (sub first f2)
+                            (if (if (if (eq or2 r) (eq st2 step) false) (if (gt step 0) (if (not (eq d 0)) (lt (max d (sub 0 d)) shown) false) false) false)
+                                (UiScrollMove r (mul d step))
+                                (ui_scroll_moved (tail ns) old))))
+                        ((UiScrollBar n2 f2 m2 sp sl) (ui_scroll_moved (tail ns) old))
+                        ((UiNoScroll) (ui_scroll_moved (tail ns) old))))))))
+            ((UiScrollBar n fi m sp sl) (ui_scroll_moved (tail ns) old))
+            ((UiNoScroll) (ui_scroll_moved (tail ns) old)))))))
+
+; The area node of the scroller called name in ns, if there is one.
+(def ui_area_named ((ns (list UiNode)) (name (list int))) (Option UiNode)
+  (if (is_empty ns)
+      ((None UiNode))
+      (match (ui_scroll_of (ui_node_action (head ns)))
+        ((UiScrollArea n f m s st) (if (eq n name) (Some (head ns)) (ui_area_named (tail ns) name)))
+        ((UiScrollBar n f m sp sl) (ui_area_named (tail ns) name))
+        ((UiNoScroll) (ui_area_named (tail ns) name)))))
+
+; What old and new differ by, within full, once area's pixels have been
+; moved dy up: old's ops wholly in area moved with them and compared so;
+; the rows nothing moved into; and, for an op across the area's edge,
+; what of it is in the area, where its pixels were moved from and to,
+; unless it is a fill as high as the area, which moving leaves alike.
+(def ui_scrolled_changed ((old (list UiNode)) (new (list UiNode)) (full Rect) (area Rect) (dy int)) (list Rect)
+  (match (ui_ops_moved (ui_ops_of old) area dy (nil UiPaint) (nil Rect))
+    ((UiMovedOps olds extra)
+      (let news (ui_ops_of new)
+        (ui_ops_changed olds news full (cons (ui_scroll_strip area dy) (ui_across_damage news area 0 extra)))))))
+
+; Old ops as a scroll left them, and damage they make.
+(data UiMovedOps (UiMovedOps (list UiPaint) (list Rect)))
+
+; Each of ops as it is once area's pixels are moved dy up, onto the
+; reversed acc, and what that damages onto extra: one wholly in area moved
+; with them, if it is still wholly in it, else what of it is still in the
+; area damaged and the op dropped; one across the area's edge kept where
+; it was, what of it is in the area damaged where it was and where that
+; moved to; any other as it was. A fill as high as the area, such as its
+; ground, is not moved: moving the area's rows leaves it as it was.
+(def ui_ops_moved ((ops (list UiPaint)) (area Rect) (dy int) (acc (list UiPaint)) (extra (list Rect))) UiMovedOps
+  (if (is_empty ops)
+      (UiMovedOps (rev acc) extra)
+      (let op (head ops)
+        (let b (ui_op_rect op)
+          (if (if (eq (rect_clip b area) b) (not (ui_fill_spans op area)) false)
+              (let up (ui_op_up op dy)
+                (if (eq (rect_clip (ui_op_rect up) area) (ui_op_rect up))
+                    (ui_ops_moved (tail ops) area dy (cons up acc) extra)
+                    (ui_ops_moved (tail ops) area dy acc (cons (rect_clip (ui_op_rect up) area) extra))))
+              (if (rect_overlaps b area)
+                  (ui_ops_moved (tail ops) area dy (cons op acc) (ui_across_one op area dy extra))
+                  (ui_ops_moved (tail ops) area dy (cons op acc) extra)))))))
+
+; What op, across area's edge, damages once area's pixels are moved dy
+; up, onto extra: nothing if it is a fill as high as the area; else
+; what of it is in the area, and that moved up dy, cut to the area.
+(def ui_across_one ((op UiPaint) (area Rect) (dy int) (extra (list Rect))) (list Rect)
+  (if (ui_fill_spans op area)
+      extra
+      (let k (rect_clip (ui_op_rect op) area)
+        (cons k (cons (rect_clip (ui_rect_up k dy) area) extra)))))
+
+; What each of news across area's edge damages, as ui_across_one says,
+; dy 0: where the pixels moved into its part of the area were another's.
+(def ui_across_damage ((news (list UiPaint)) (area Rect) (dy int) (extra (list Rect))) (list Rect)
+  (if (is_empty news)
+      extra
+      (let b (ui_op_rect (head news))
+        (ui_across_damage (tail news) area dy
+          (if (if (rect_overlaps b area) (not (eq (rect_clip b area) b)) false)
+              (ui_across_one (head news) area dy extra)
+              extra)))))
+
+; Whether op is a fill from the area's top to its bottom, or past them,
+; which looks the same however the area's rows are moved.
+(def ui_fill_spans ((op UiPaint) (area Rect)) bool
+  (match op
+    ((UiPFill r c) (if (le (rect_y r) (rect_y area)) (ge (rect_y1 r) (rect_y1 area)) false))
+    ((UiPRound r radius c under) false) ((UiPText r s a c bold scale) false) ((UiPIcon x y name c scale) false)))
+
+; The rows of area nothing moves into when its pixels move dy up: dy at
+; its foot, or, below 0, at its top.
+(def ui_scroll_strip ((area Rect) (dy int)) Rect
+  (match area
+    ((Rect x y w h) (if (gt dy 0) (Rect x (sub (add y h) dy) w dy) (Rect x y w (sub 0 dy))))))

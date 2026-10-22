@@ -108,7 +108,7 @@
 ; rest in gl_requested_pointer.
 (def gl_requested ((v Drv) (op (list int)) (ns (list int)) (n int)) (Served Drv)
   (if (if (eq op "info") (eq n 0) false) (info v)
-  (if (if (eq op "buffer") (if (eq n 4) true (eq n 5)) false) (gl_shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (buffer_pages_arg ns))
+  (if (if (eq op "buffer") (if (ge n 4) (le n 6) false) false) (gl_shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (buffer_pages_arg ns) (buffer_stride_arg ns))
   (if (if (eq op "forget") (eq n 1) false) (gl_forgot v (nth ns 0))
   (if (if (eq op "layers") (eq (mod n 4) 0) false) (gl_stacked v (layers_of ns (nil Layer)))
   (if (if (eq op "damage") (if (gt n 0) (eq (mod n 5) 0) false) false) (gl_damaged v ns (nil Rect))
@@ -127,16 +127,18 @@
 ; 32 bits.
 (def max_buffer_id () int 1000000)
 
-; buffer ID W H VA [PAGES]: the w by h pixels a client shared, at va here,
-; in the pages it shared (buffer_shared_pages), made a texture.
-(def gl_shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int)) (Served Drv)
-  (if (if (lt bw 1) true (lt bh 1))
-      (served_error v "a buffer has no pixels")
+; buffer ID W H VA [PAGES [STRIDE]]: the w by h pixels a client shared,
+; at va here, in the pages it shared (buffer_shared_pages), its rows sd
+; apart, made a texture sd wide, so that its backing's rows are its own,
+; of which the screen is composed from the first w columns.
+(def gl_shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
+  (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
+      (served_error v "a buffer has no pixels, or its stride is less than its width")
       (if (if (lt id 0) true (gt id (max_buffer_id)))
           (served_error v "a buffer's id is from 0 to 1000000")
-          (match (page_addresses va (buffer_shared_pages bw bh pages))
+          (match (page_addresses va (buffer_shared_pages sd bh pages))
             ((None) (served_error v "the buffer is not shared with the display"))
-            ((Some addrs) (gl_put_buffer v id (Buffer bw bh addrs va (square))))))))
+            ((Some addrs) (gl_put_buffer v id (Buffer bw bh sd addrs va (square))))))))
 
 ; The driver with buffer b as id: the texture it had given up, a new one
 ; made and filled, and the screen composed again if it shows id.
@@ -147,8 +149,8 @@
         ((NotCommanded why) (served_error v why))
         ((Commanded g2)
           (match b
-            ((Buffer bw bh addrs va cs)
-              (match (gl_texture g2 (buffer_res id) bw bh (bind_texture) (pages_runs addrs))
+            ((Buffer bw bh sd addrs va cs)
+              (match (gl_texture g2 (buffer_res id) sd bh (bind_texture) (pages_runs addrs))
                 ((NotCommanded why) (served_error (Drv g2 c w h (map_remove bufs id) layers attached cur zero rows) why))
                 ((Commanded g3) (gl_changed (Drv g3 c w h (map_put bufs id b) layers attached cur zero rows) id))))))))))
 
@@ -175,7 +177,7 @@
                 ((NotCommanded why) (served_error v why))
                 ((Commanded g2)
                   (match b
-                    ((Buffer bw bh addrs va cs)
+                    ((Buffer bw bh sd addrs va cs)
                       (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
                         (served_ok (Drv g2 c w h (map_remove bufs id) layers attached cur zero rows)))))))))))))
 
@@ -194,9 +196,9 @@
         ((None) (served_error v (append "no buffer " (digits id))))
         ((Some b)
           (match b
-            ((Buffer bw bh addrs va old)
+            ((Buffer bw bh sd addrs va old)
               (if (corners_fit cs bw bh)
-                  (gl_changed (Drv g c w h (map_put bufs id (Buffer bw bh addrs va cs)) layers attached cur zero rows) id)
+                  (gl_changed (Drv g c w h (map_put bufs id (Buffer bw bh sd addrs va cs)) layers attached cur zero rows) id)
                   (served_error v "a corner's radius must be from 0 to half the buffer's width and height")))))))))
 
 ; damage ID X Y W H ...: each rectangle of its buffer sent to its texture,
@@ -211,12 +213,13 @@
             ((None) (served_error v (append "no buffer " (digits (head ns)))))
             ((Some b)
               (match b
-                ((Buffer bw bh addrs va cs)
-                  (gl_damaged_rect v ns acc bw bh)))))))))
+                ((Buffer bw bh sd addrs va cs)
+                  (gl_damaged_rect v ns acc bw bh sd)))))))))
 
-; The first rectangle of ns, cut to its buffer bw by bh, sent to the
-; texture, and the boxes it shows in added to acc; then the rest.
-(def gl_damaged_rect ((v Drv) (ns (list int)) (acc (list Rect)) (bw int) (bh int)) (Served Drv)
+; The first rectangle of ns, cut to its buffer bw by bh, its rows sd
+; apart, sent to the texture, and the boxes it shows in added to acc;
+; then the rest.
+(def gl_damaged_rect ((v Drv) (ns (list int)) (acc (list Rect)) (bw int) (bh int) (sd int)) (Served Drv)
   (match v
     ((Drv g c w h bufs layers attached cur zero rows)
       (let k (rect_clip (Rect (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)) (Rect 0 0 bw bh))
@@ -224,7 +227,7 @@
             (gl_damaged v (drop_n ns 5) acc)
             (match (send g "transfer_to_host_3d"
                          (transfer_to_host_3d (buffer_res (nth ns 0)) (rect_x k) (rect_y k) (rect_w k) (rect_h k)
-                                              (mul (add (mul (rect_y k) bw) (rect_x k)) 4) (mul bw 4))
+                                              (mul (add (mul (rect_y k) sd) (rect_x k)) 4) (mul sd 4))
                          (resp_ok_nodata))
               ((NotCommanded why) (served_error v why))
               ((Commanded g2)
