@@ -2548,8 +2548,9 @@ a bad buffer, and wait on nothing.
 - **USB has run on QEMU only** (see [USB](#usb)), not on a Pi 5, where
   L0S does not boot yet. Boot keyboards and mice only, on root ports
   only, no hubs; `xhci` polls rather than taking interrupts, which L0's
-  runtime does not give yet for PCIe or RP1 (asked for in
-  [probes/usb](probes/usb/REQUEST-pcie-interrupts.md)); a control
+  runtime gives for the virt board's PCIe since its roadmap 0106 (asked
+  for in [probes/usb](probes/usb/REQUEST-pcie-interrupts.md)) but not yet
+  for RP1; a control
   transfer moves 2 KB at most, an endpoint's report 2 KB; and each
   controller has 64 pages for its devices, about 3 a device and 1 an
   endpoint opened.

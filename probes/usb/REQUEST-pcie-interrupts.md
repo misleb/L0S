@@ -1,8 +1,18 @@
 # Feature request: PCIe interrupts on the virt board, INTx and then MSI
 
-Status: draft, not yet sent
+Status: landed, as newlang roadmap 0106 (1586fc8)
 Project: L0S, a microkernel in L0 for QEMU's virt board, heading for the
 Raspberry Pi 5
+
+> **Since landing:** `irq_virt_test.l0` passes 6/6 under `l0 test
+> --target virt`. The virt aarch64 board gives INTA to INTD as 35 to 38,
+> level-sensitive, a function's line its pin turned by its slot as gpex
+> swizzles it, and the GICv2m frame's SPIs as 80 to 143, edge-triggered
+> once enabled, raised by writing the number to 0x08020040. `xhci` and
+> `sdhci` still poll: moving them to `irq_bind` is L0S's to do next.
+> Without `-nic none`, QEMU's default virtio-net-pci takes slot 00:01.0,
+> which moves the other functions' slots and so their INTx lines. The
+> Pi 5 (bcm2712's MIP) and the riscv64 board are unchanged, as asked.
 
 L0S drives two PCIe devices on QEMU's aarch64 virt board, using the
 regions roadmap 0101 gave it: `qemu-xhci`, which the demo's USB keyboard
