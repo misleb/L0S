@@ -16,8 +16,7 @@ virtio-gpu's 2D mode does on QEMU, copying no pixels:
   driver maps each buffer's pages one after another in an aperture of the
   IOMMU in front of the HVS, `iommu4`.
 
-L0's runtime gives none of these as a region. This asks for three, and
-for one line of `config.txt`.
+L0's runtime gives none of these as a region. This asks for three.
 
 ## What could not be written
 
@@ -63,9 +62,9 @@ page and share one with others (`iommu2` at 0x1000005100, `iommu5` at
 0x1000005280). The mailbox already is such a region, so the host's rule,
 "any range wholly within one of the board's devices", covers them.
 
-**`hdmi_force_hotplug=1` in `l0 card`'s `config.txt`.** Then the firmware
-brings HDMI0 up even when the monitor's hotplug line is late. The driver
-takes the mode the firmware chose and never sets one.
+`l0 card`'s `config.txt` already says `hdmi_force_hotplug=1`, so the
+firmware brings HDMI0 up even when the monitor's hotplug line is late.
+The driver takes the mode the firmware chose and never sets one.
 
 ## Later, for its own request
 

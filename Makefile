@@ -24,6 +24,13 @@
 #   make demo-system the demo booted from build/system.img's System,
 #                    made anew
 #   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
+#   make pi5-card    build/pi5-card: the kernel built for the Raspberry
+#                    Pi 5, every program with pi5/etc, and what l0 card
+#                    writes for its SD card's boot partition; untried
+#                    on a board
+#   make pi5-netboot PI5_BOOT=DIR [PI5_TFTP_PREFIX=SERIAL]
+#                    build/pi5-tftp: the same, with the Pi 5's device
+#                    trees from DIR, as a TFTP root it network boots from
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
 #                    L0's: every name, or Q a name, a file's stem or the
 #                    end of its path, or text, in the programs' too
@@ -525,6 +532,60 @@ demo-system: sysdisk
 	@echo "Booting L0S from System, $$(cat $(SYSUUID)). Type help; exit stops the system, Ctrl-A x quits QEMU."
 	@GPU=$(GPU) QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_NET=$(NET) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
+
+# The Raspberry Pi 5, which nothing here can boot: the kernel built for
+# it, its initramfs, every program with pi5/etc, and the files its SD
+# card's boot partition needs beside the firmware's own, which l0 card
+# writes into build/pi5-card: the image, config.txt, cmdline.txt (no
+# boot arguments) and the initramfs. Copy them onto a card that holds
+# Raspberry Pi's firmware. The programs are the same images as on QEMU.
+#
+# The kernel's heap keeps a record of every page it gives, about 285
+# bytes a page, so the Pi's, which may have 16 GB, gets 768 MB of the
+# 1,024 MB its layout has for heap and stack (spec 10.3): records for
+# about 9 GB of pages given at once.
+.PHONY: pi5-initramfs pi5-card
+
+PI5_KERNEL_HEAP_MB  ?= 768
+PI5_KERNEL_STACK_MB ?= 16
+PI5_KERNEL_LAYOUT   := --heap-mb $(PI5_KERNEL_HEAP_MB) --stack-mb $(PI5_KERNEL_STACK_MB)
+L0_PI5RT := $(L0LIB)l0c $(wildcard $(L0LIB)pi5-aarch64/*.bc) $(L0LIB)pi5-aarch64/layout.ld
+
+$(BUILD)/kernel-pi5.img: $(KERNEL) kernel/main.l0 $(L0_PI5RT) | $(BUILD)
+	$(L0) build --target pi5 $(PI5_KERNEL_LAYOUT) $(KERNEL) kernel/main.l0 -o $@
+
+pi5-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc
+	$(call stage_etc,$(BUILD)/pi5-etc)
+	tools/mkinitramfs $(BUILD)/pi5.cpio $(BUILD)/pi5-etc $(ROOT)
+
+pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs
+	rm -rf $(BUILD)/pi5-card && mkdir -p $(BUILD)/pi5-card
+	$(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-card < $(BUILD)/pi5.cpio
+	@echo "build/pi5-card: copy its files onto the boot partition of a card with Raspberry Pi's firmware"
+
+# The same booted over the network: build/pi5-tftp, a TFTP server's root,
+# holding what the Pi 5's bootloader fetches by TFTP once DHCP names the
+# server: the card's files and the board's device tree. The Pi 5's
+# firmware is in its EEPROM, so nothing else is fetched; its BOOT_ORDER
+# must try the network (a 2 in it, as 0xf21 does). The bootloader looks
+# in a directory named for the board's serial number unless its EEPROM
+# says TFTP_PREFIX=1 with an empty TFTP_PREFIX_STR: PI5_TFTP_PREFIX is
+# that directory, the 8 hex digits, or empty for the root. The device
+# trees, bcm2712-rpi-5-b.dtb for the C1 stepping and bcm2712d0-rpi-5-b.dtb
+# for D0, are Raspberry Pi's: PI5_BOOT names a directory holding them,
+# Raspberry Pi OS's boot partition or raspberrypi/firmware's boot/.
+.PHONY: pi5-netboot
+PI5_BOOT        ?=
+PI5_TFTP_PREFIX ?=
+PI5_TFTP        := $(BUILD)/pi5-tftp$(if $(PI5_TFTP_PREFIX),/$(PI5_TFTP_PREFIX))
+
+pi5-netboot: pi5-card
+	@test -n "$(PI5_BOOT)" || { echo "pi5-netboot: give PI5_BOOT=DIR, a directory holding bcm2712-rpi-5-b.dtb: Raspberry Pi OS's boot partition, or raspberrypi/firmware's boot/" >&2; exit 1; }
+	@ls $(PI5_BOOT)/bcm2712*-rpi-5-b.dtb > /dev/null 2>&1 || { echo "pi5-netboot: no bcm2712*-rpi-5-b.dtb in $(PI5_BOOT)" >&2; exit 1; }
+	rm -rf $(BUILD)/pi5-tftp && mkdir -p $(PI5_TFTP)
+	cp $(BUILD)/pi5-card/* $(PI5_BOOT)/bcm2712*-rpi-5-b.dtb $(PI5_TFTP)/
+	@echo "$(PI5_TFTP): serve $(BUILD)/pi5-tftp as a TFTP root, with DHCP naming it (option 66), to a Pi 5 whose BOOT_ORDER tries the network"
 
 clean:
 	rm -rf $(BUILD)

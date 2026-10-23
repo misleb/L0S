@@ -74,28 +74,54 @@
 
 (def poll_ns () int 250000000)
 
+; The clock rtc clock serves: a PL031, or the Raspberry Pi 5's RTC,
+; which only its firmware reaches (firmware.l0).
+(data Clock (Pl031Clock IoDevice) (FirmwareClock FwClock))
+
+; A PL031's part number in its ID registers.
+(def pl031_part () int 49)               ; 0x031
+
+; Seconds since 1970, as c says.
+(def clock_now ((c Clock)) int
+  (match c ((Pl031Clock d) (device_read32 d (reg_data))) ((FirmwareClock f) (fw_time f))))
+
+; The board's clock, found: a PL031 where QEMU's virt board has one, if
+; the kernel gives it and its ID registers say PL031; else the
+; firmware's, on a Pi 5; else none, which is no failure, as every
+; client of clock goes on without one.
 (def rtc_clock () int
   (match (open_device (rtc_base) 4096)
-    ((DeviceFailed fault why) (complain (append "no clock: " why)))
     ((DeviceOpened d)
-      (let port (port_new)
-        (let r (name_register_or_why port "clock")
-          (if (is_empty r)
-              (let n (info_as "rtc" (clock_line (device_read32 d (reg_data))))
-                (clock_serve d port (next_minute (device_read32 d (reg_data))) (nil int)))
-              (complain r)))))))
+      (if (eq (primecell_part d) (pl031_part))
+          (clock_started (Pl031Clock d) (clock_line (device_read32 d (reg_data))))
+          (let c (close_device d) (firmware_clock))))
+    ((DeviceFailed fault why) (firmware_clock))))
+
+(def firmware_clock () int
+  (match (fw_clock_found)
+    ((NoFw why) (info_as "rtc" (append "no clock on the board: " why)))
+    ((FwFound f t) (clock_started (FirmwareClock f) (fw_clock_line t)))))
+
+; clock served from c, once said as line.
+(def clock_started ((c Clock) (line (list int))) int
+  (let port (port_new)
+    (let r (name_register_or_why port "clock")
+      (if (is_empty r)
+          (let n (info_as "rtc" line)
+            (clock_serve c port (next_minute (clock_now c)) (nil int)))
+          (complain r)))))
 
 ; Every request waiting answered, then the listeners told the time if a
 ; minute has begun, then a nap: due is when the next minute begins, and
 ; ls the ports listening.
-(def clock_serve ((d IoDevice) (port int) (due int) (ls (list int))) int
+(def clock_serve ((c Clock) (port int) (due int) (ls (list int))) int
   (match (port_try_receive port)
-    ((Message from payload) (clock_serve d port due (clock_asked (device_read32 d (reg_data)) payload ls)))
+    ((Message from payload) (clock_serve c port due (clock_asked (clock_now c) payload ls)))
     ((RecvFailed)
-      (let t (device_read32 d (reg_data))
+      (let t (clock_now c)
         (if (lt t due)
-            (let z (sleep_ns (poll_ns)) (clock_serve d port due ls))
-            (let z (sleep_ns (poll_ns)) (clock_serve d port (next_minute t) (listeners_tell ls (time_notice t)))))))))
+            (let z (sleep_ns (poll_ns)) (clock_serve c port due ls))
+            (let z (sleep_ns (poll_ns)) (clock_serve c port (next_minute t) (listeners_tell ls (time_notice t)))))))))
 
 ; A request at t, answered: listen adds its reply port to ls.
 (def clock_asked ((t int) (payload (list int)) (ls (list int))) (list int)

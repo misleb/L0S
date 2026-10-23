@@ -27,6 +27,8 @@ make demo-system                          # the same, from build/system.img's Sy
 make demo SCREEN=3840x2160                # on a 4K screen, the desktop drawn at scale 2
 make all                                  # type check, host tests, board tests, end-to-end
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
+make pi5-card                             # build/pi5-card: the boot partition's files for a Raspberry Pi 5, untried
+make pi5-netboot PI5_BOOT=DIR             # build/pi5-tftp: the same as a TFTP root, to boot a Pi 5 over the network
 make -s doc Q=port_send                   # the libraries' documentation, as l0 doc gives the standard library's
 make -s doc Q=sbin/wm/wm                  # a file by the end of its path; names and searches reach the programs too
 ```
@@ -1393,7 +1395,8 @@ the host. A report descriptor is never read, so a tablet, a wheel past
 the boot report's, or a key outside the boot keyboard's 104 usages is
 not seen; nor is anything behind a hub.
 
-**On the Pi 5** (`xhci rp1`; L0S does not boot there yet): the
+**On the Pi 5** (`xhci rp1`, which `pi5/etc/inittab` starts; see
+[The Raspberry Pi 5](#the-raspberry-pi-5), untried): the
 firmware must leave RP1 set up (`pciex4_reset=0` in `config.txt`); the
 DWC3s are put in host mode, their PHYs kept from suspending, as RP1's
 device tree's quirks say; and a device reaches memory 0x10_0000_0000
@@ -1431,6 +1434,78 @@ with `bsdtar --format newc`, in order of path:
 - everything in `ETC` becomes `/etc/...`, mode 0644.
 
 `bsdtar -tvf build/initramfs.cpio` lists it like any cpio archive.
+
+### The Raspberry Pi 5
+
+```
+make pi5-card     # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt
+```
+
+L0S builds for the Pi 5, but has never booted on one. `make pi5-card`
+does three things:
+- builds the kernel with `--target pi5`, as `build/kernel-pi5.img`
+- builds the initramfs from `pi5/etc` and the same programs as QEMU's,
+  as `build/pi5.cpio`
+- has `l0 card` write the boot partition's files into `build/pi5-card`
+
+Copy them onto the boot partition of an SD card that holds Raspberry Pi's
+firmware, from Raspberry Pi OS. `l0 card`'s `config.txt` loads the image
+at 0x80000 and the initramfs at 0x10000000, leaves RP1 set up
+(`pciex4_reset=0`) and forces HDMI's hotplug.
+
+**Over the network.** The Pi 5 keeps its firmware in its EEPROM and can
+fetch the rest by TFTP:
+
+```
+make pi5-netboot PI5_BOOT=DIR [PI5_TFTP_PREFIX=SERIAL]   # build/pi5-tftp
+```
+
+This copies the card's files and the board's device trees into
+`build/pi5-tftp`, the root a TFTP server serves. The device trees are
+`bcm2712-rpi-5-b.dtb` for the C1 stepping and `bcm2712d0-rpi-5-b.dtb`
+for D0. They are Raspberry Pi's, so `PI5_BOOT` names a directory that
+holds them: Raspberry Pi OS's boot partition, or `boot/` of
+raspberrypi/firmware. The Pi's bootloader asks in a directory named for
+its serial number, 8 hex digits, which `PI5_TFTP_PREFIX` makes, unless
+its EEPROM says `TFTP_PREFIX=1` with no `TFTP_PREFIX_STR`.
+
+The board's EEPROM must try the network: `BOOT_ORDER=0xf21`, from
+`rpi-eeprom-config --edit` on Raspberry Pi OS, tries the SD card, then
+the network. The network's DHCP server must name the TFTP server, as a
+proxy can for an existing network; with dnsmasq that is
+`dhcp-range=192.168.1.0,proxy`, `pxe-service=0,"Raspberry Pi Boot"`,
+`enable-tftp` and `tftp-root=build/pi5-tftp`. L0S itself still has no
+network on the Pi: only the firmware uses it, to fetch the files.
+
+The kernel is the same source as QEMU's. Only the board under it is L0's
+other host: the GIC-400, the generic timer at 54 MHz, and the debug UART
+as the kernel's standard output and error. Its heap is 768 MB
+(`PI5_KERNEL_HEAP_MB`), against QEMU's 192, as the kernel keeps about
+285 bytes of record for each page it gives, and a Pi may have 16 GB.
+That is enough for about 9 GB of pages given at once (see
+[Limits](#limits)).
+
+`pi5/etc/inittab` starts what the board has a driver for:
+
+| Program | What it does there |
+|---|---|
+| `boot` | pid 1, then `/etc/system`: `sh` on the console, `wm`, a Terminal |
+| `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
+| `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](#usb)) |
+| `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)): until L0 gives a region over the HVS it says there is none and exits, and `wm` waits for a display |
+| `fs ram` | a volume in memory, `/Volumes/tmp`, since L0 gives no region over the Pi's SD controller |
+| `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0`). It keeps time over a power cut only with a battery on the RTC connector |
+
+Nothing else of the demo's has a device here: no virtio, no PCIe for
+`pcie virt`, and no `sdhci pci`. The first boot should check these, on
+the debug UART (`dmesg` repeats them):
+- the kernel's banner: `aarch64`, the pages free, and the initramfs
+- `uart`'s line, and that what is typed reaches `sh`
+- `rtc`'s line and its time. The mailbox's message is given the page's
+  own address, as the BCM2712's firmware node's identity `dma-ranges`
+  says, not the Pi 4's 0xC0000000 above it: unconfirmed
+- `xhci`'s lines and `usb-hid`'s (see [USB](#usb))
+- `hvs` saying it found no HVS, until L0 has the regions
 
 ### Apps
 
@@ -1903,7 +1978,7 @@ initramfs, so that the Makefile finds it there:
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0` and `iommu.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `rtc` `firmware.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0` and `iommu.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
@@ -1911,7 +1986,7 @@ every `.l0` in its directory is part of it.
 | `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; given `root=tmpfs`, has `install` fill the RAM file system first; starts `/etc/system`'s programs by path, and exits with the first one's status |
 | `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format` and `unmount`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo`, `exit` and `dmesg`, which prints the kernel's log, a line for each message with its time since boot. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
-| `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. It takes receive interrupt 33, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
+| `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. L0 says nothing of the board, so it finds its port: of the places a PL011 is on L0's boards, QEMU's at 0x09000000 and the Raspberry Pi 5's debug UART at 0x107D001000, the first the kernel gives whose ID registers say PL011. It takes that port's receive interrupt, 33 or 153, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font (at scale 2, cells of 16×32 in the face's Source Code Pro), in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
 | `cat` | writes the files its arguments name, through the ordinary `open_in`, the initramfs's or a volume's; reports each it can't read, and exits 1 if any |
 | `hello` | prints its pid and arguments, and answers a line: typed at its terminal, with `console_line` |
@@ -1920,7 +1995,7 @@ every `.l0` in its directory is part of it.
 | `ping` | a client: finds `echo` by name and checks that N requests come back |
 | `spin` | loops forever without a call; other processes still run, thanks to the timer |
 | `nap` | sleeps for N ms and checks that the time passed |
-| `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
+| `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc`. Its clock is a PL031 where the kernel gives one whose ID registers say so, or else the Raspberry Pi 5's RTC, asked of the firmware through the mailbox (`firmware.l0`, see [The Raspberry Pi 5](#the-raspberry-pi-5)); with neither it says so and exits 0 |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `hvs` | the Raspberry Pi 5's display driver, a first draft that has run nowhere, serving the display protocol as `display` as `virtio-gpu` does (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)). It takes HDMI0's channel of the BCM2712's HVS at the mode the firmware left. It shows the layers as one display list of planes fetched straight from the clients' pages, each buffer made one run of addresses by the IOMMU in front of the HVS. It writes each list in the half of the list memory the channel isn't fetching, then moves the channel to it. A `damage` cleans the damaged rows' pages out of the caches, and the pointer is a plane on top. Corners are not cut yet. With no region over the HVS, as on QEMU and, until L0 gives one, on a Pi, it says so and exits 0 |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
@@ -1964,7 +2039,7 @@ name in a library is taken in every program that links it.
 | [common/klog.l0](common/klog.l0) | the kernel's log: a record's levels, its bytes as `log_read` gives them, and `dmesg`'s lines (`[    1.234567] TEXT`) | the kernel, every program |
 | [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `PointerMotion`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
-| [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order | every program |
+| [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order; an ARM PrimeCell's part number from its ID registers (`primecell_part`), by which `uart` and `rtc` know their device | every program |
 | [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
@@ -2369,6 +2444,15 @@ a bad buffer, and wait on nothing.
   planes' rows also share half of 256 KB of line memory, about 8 rows
   1920 wide, or 4 at 3840. A screen past either is refused. Corners are
   square there.
+- **L0S has never booted on a Raspberry Pi 5** (see
+  [The Raspberry Pi 5](#the-raspberry-pi-5)): `make pi5-card` builds its
+  card, and `make pi5-netboot` a TFTP root, both untried. There it has
+  no disk and no network, as L0 gives no region over the Pi's SD
+  controller or Ethernet, and reaches its RTC only through the
+  firmware. Its
+  kernel's heap of 768 MB records about 9 GB of pages given at once.
+  Nothing yet stops a process taking more on a 16 GB board, and the
+  kernel would then run out of heap.
 - **The screen tests run in 2D mode** (`GPU=2d`, the default of
   `tools/qemu-boot.sh`): `screendump` fails with "no surface" on a GL
   scanout. The 3D mode is tried by `make demo`.

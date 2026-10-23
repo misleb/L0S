@@ -1,0 +1,153 @@
+; firmware.l0 -- the Raspberry Pi 5's real-time clock, which is in its
+; power controller and which only the board's firmware reaches: asked for
+; through the VideoCore mailbox, one of L0's regions on the Pi 5, by the
+; firmware's property interface, as Linux's rtc-rpi does. The messages
+; are pure; the asking is a page of DMA memory and four registers. None
+; of it has run on a board.
+
+; The mailbox in the CPU's map (bcm2712.dtsi's mailbox@7c013880) and its
+; bytes.
+(def mbox_base () int 70799931520)       ; 0x107C013880
+(def mbox_bytes () int 64)
+
+; Its registers: the firmware writes to the ARM in mailbox 0 and the ARM
+; to the firmware in mailbox 1 (bcm2835-mailbox.c): MAIL0_RD, MAIL0_STA,
+; MAIL1_WRT, MAIL1_STA.
+(def mbox_read () int 0)
+(def mbox_read_status () int 24)         ; 0x18
+(def mbox_write () int 32)               ; 0x20
+(def mbox_write_status () int 56)        ; 0x38
+
+; A status's FULL, bit 31, and EMPTY, bit 30.
+(def mbox_full ((w int)) bool (eq (bit_and (bit_shr w 31) 1) 1))
+(def mbox_empty ((w int)) bool (eq (bit_and (bit_shr w 30) 1) 1))
+
+; The property channel, 8, which a message names in its low four bits
+; beside where its buffer is, 16-byte aligned. The firmware node's
+; dma-ranges on the BCM2712 are identity, so that is the buffer's own
+; address, below 4 GB to fit: UNCONFIRMED, as the Pi 4's firmware took
+; it at 0xC0000000 above.
+(def mbox_property () int 8)
+
+(def mbox_message ((pa int)) int (bit_or (bit_and pa 4294967280) (mbox_property)))
+
+; ------------------------------------------------------------- messages
+
+; RPI_FIRMWARE_GET_RTC_REG, and the RTC's register RTC_TIME, seconds
+; since 1970 (rtc-rpi.c).
+(def tag_get_rtc_reg () int 196743)      ; 0x00030087
+(def rtc_time_reg () int 0)
+
+; A request's code, 0, and a reply's that succeeded, bit 31.
+(def property_success () int 2147483648) ; 0x80000000
+
+; The buffer asking for register reg: its size in bytes, the request's
+; code, the tag, its value's 8 bytes, its own code, the register and room
+; for its value, and the end tag.
+(def rtc_request ((reg int)) (list int)
+  (cons 32 (cons 0 (cons (tag_get_rtc_reg) (cons 8 (cons 0 (cons reg (cons 0 (cons 0 (nil int))))))))))
+
+; What the firmware wrote back, the same eight words: the register's
+; value, if the buffer and the tag both say they succeeded.
+(def rtc_reply ((ws (list int))) (Option int)
+  (if (not (eq (length ws) 8))
+      ((None int))
+      (if (if (eq (nth ws 1) (property_success)) (eq (bit_and (bit_shr (nth ws 4) 31) 1) 1) false)
+          (Some (nth ws 6))
+          ((None int)))))
+
+; ------------------------------------------------------------- asking
+
+; The firmware's clock: the mailbox; the page of DMA memory its messages
+; are in, opened, where this process sees it, and its address.
+(data FwClock (FwClock IoDevice IoDevice int int))
+
+; The page a message is in: a DMA page below 4 GB, as a message's
+; address must be, tried for up to n times.
+(data FwPage (FwPage IoDevice int int) (NoFwPage (list int)))
+
+(def fw_page ((n int)) FwPage
+  (if (le n 0)
+      (NoFwPage "no DMA page below 4 GB for the firmware's messages")
+      (match (dma_alloc 1)
+        ((DmaPages va)
+          (let addrs (dma_addresses va 1)
+            (if (not (eq (array_len addrs) 1))
+                (NoFwPage "its page is not a DMA page")
+                (if (lt (array_get addrs 0) 4294967296)
+                    (match (dma_open va 1)
+                      ((DeviceFailed fault why) (NoFwPage why))
+                      ((DeviceOpened m) (FwPage m va (array_get addrs 0))))
+                    (fw_page (sub n 1))))))
+        ((DmaDenied) (NoFwPage (dma_alloc_why (DmaDenied))))
+        ((DmaTooMany) (NoFwPage (dma_alloc_why (DmaTooMany))))
+        ((DmaNoRoom) (NoFwPage (dma_alloc_why (DmaNoRoom)))))))
+
+; The firmware's clock found: the mailbox a region, a page for its
+; messages, and the clock answering; or why not.
+(data FwFound (FwFound FwClock int) (NoFw (list int)))
+
+(def fw_clock_found () FwFound
+  (match (open_device (mbox_base) (mbox_bytes))
+    ((DeviceFailed fault why) (NoFw "no VideoCore mailbox on the board"))
+    ((DeviceOpened mb)
+      (match (fw_page 8)
+        ((NoFwPage why) (NoFw why))
+        ((FwPage m va pa)
+          (let c (FwClock mb m va pa)
+            (match (fw_rtc c (rtc_time_reg))
+              ((None) (NoFw "the firmware does not answer for the RTC"))
+              ((Some t) (FwFound c t)))))))))
+
+; The seconds since 1970 the firmware's clock says, or 0 if it does not
+; answer.
+(def fw_time ((c FwClock)) int
+  (match (fw_rtc c (rtc_time_reg)) ((None) 0) ((Some t) t)))
+
+; Register reg of the RTC, asked of the firmware: the request written to
+; the page and cleaned for it, the page's address sent once the mailbox
+; has room, the answer waited for, up to 100 ms, and the page read back
+; once invalidated.
+(def fw_rtc ((c FwClock) (reg int)) (Option int)
+  (match c
+    ((FwClock mb m va pa)
+      (let w (words_put m 0 (rtc_request reg))
+        (let s (dma_sync va 1 1)
+          (if (not (mbox_waited mb (mbox_write_status) false 100))
+              ((None int))
+              (let x (device_write32 mb (mbox_write) (mbox_message pa))
+                (if (not (answered mb (mbox_message pa) 100))
+                    ((None int))
+                    (let i (dma_sync va 1 2)
+                      (rtc_reply (words_got m 0 8 (nil int))))))))))))
+
+; Whether the mailbox's status at off has room, FULL clear, or, for its
+; reads, something to read, EMPTY clear; read up to n times, a
+; millisecond apart. reads says which.
+(def mbox_waited ((mb IoDevice) (off int) (reads bool) (n int)) bool
+  (let w (device_read32 mb off)
+    (if (if reads (not (mbox_empty w)) (not (mbox_full w)))
+        true
+        (if (le n 0) false (let z (sleep_ns 1000000) (mbox_waited mb off reads (sub n 1)))))))
+
+; Whether the firmware has answered message msg, the next it wrote that
+; is on the property channel, within n milliseconds.
+(def answered ((mb IoDevice) (msg int) (n int)) bool
+  (if (not (mbox_waited mb (mbox_read_status) true n))
+      false
+      (if (eq (device_read32 mb (mbox_read)) msg) true (answered mb msg (sub n 1)))))
+
+; ws written into m from byte off, a word each: 0.
+(def words_put ((m IoDevice) (off int) (ws (list int))) int
+  (if (is_empty ws)
+      0
+      (let w (device_write32 m off (head ws)) (words_put m (add off 4) (tail ws)))))
+
+; n words of m from byte off.
+(def words_got ((m IoDevice) (off int) (n int) (acc (list int))) (list int)
+  (if (le n 0) (rev acc) (words_got m (add off 4) (sub n 1) (cons (device_read32 m off) acc))))
+
+; What rtc clock says as it starts serving the firmware's clock.
+(def fw_clock_line ((s int)) (list int)
+  (append "the Raspberry Pi 5's RTC, through the firmware's mailbox at 0x"
+    (append (hex_digits (mbox_base) 10) (append ", the time " (append (clock_text s) ", serving clock")))))

@@ -8,9 +8,44 @@
 ; "r" for a line, "i" for Ctrl-C notices, and "w" for bytes to write,
 ; which it writes to the serial line through its own standard output,
 ; the kernel's.
+;
+; L0 tells a program nothing of the board but its CPU, so uart finds its
+; port: of the places a board L0 runs on keeps a PL011 and its interrupt,
+; the first the kernel gives as a region whose ID registers say it is a
+; PL011 (server.l0's primecell_part). QEMU's virt board's, or the
+; Raspberry Pi 5's debug UART.
 
-(def uart_base () int 150994944)    ; 0x09000000
-(def uart_irq () int 33)
+; A PL011: where its registers are and its interrupt.
+(data Pl011 (Pl011 int int))
+
+; QEMU's virt board's, at 0x09000000, interrupt 33; and the Raspberry Pi
+; 5's debug UART, at 0x107D001000, interrupt 153 (spec 10.3).
+(def virt_uart () Pl011 (Pl011 150994944 33))
+(def pi5_uart () Pl011 (Pl011 70816632832 153))
+
+; Where to look, in order.
+(def uart_places () (list Pl011) (cons (virt_uart) (cons (pi5_uart) (nil Pl011))))
+
+(def uart_base ((p Pl011)) int (match p ((Pl011 base irq) base)))
+(def uart_irq ((p Pl011)) int (match p ((Pl011 base irq) irq)))
+
+; A PL011's part number in its ID registers.
+(def pl011_part () int 17)               ; 0x011
+
+; The port found: the PL011 and its registers opened, or none.
+(data UartFound (UartAt Pl011 IoDevice) (NoUart))
+
+; The first of ps that is a region and a PL011, opened; any other opened
+; is closed again.
+(def uart_found ((ps (list Pl011))) UartFound
+  (if (is_empty ps)
+      (NoUart)
+      (match (open_device (uart_base (head ps)) 4096)
+        ((DeviceFailed fault why) (uart_found (tail ps)))
+        ((DeviceOpened d)
+          (if (eq (primecell_part d) (pl011_part))
+              (UartAt (head ps) d)
+              (let c (close_device d) (uart_found (tail ps))))))))
 
 ; The PL011's registers, as offsets.
 (def reg_data () int 0)             ; the next byte received
@@ -23,37 +58,39 @@
 
 ; What uart says as it starts: the port it drives, its interrupt, the name
 ; it serves and, if echo is off, that.
-(def uart_line ((echo bool)) (list int)
-  (append "a PL011 at 0x" (append (hex_digits (uart_base) 8)
-    (append ", irq " (append (digits (uart_irq))
+(def uart_line ((p Pl011) (echo bool)) (list int)
+  (append "a PL011 at 0x" (append (hex_digits (uart_base p) 8)
+    (append ", irq " (append (digits (uart_irq p))
       (append ", serving console" (if echo "" ", without echo")))))))
 
+; Finds the board's PL011 and drives it as the console.
 (def uart () int
-  (match (open_device (uart_base) 4096)
-    ((DeviceFailed fault why) (complain (append "no serial port: " why)))
-    ((DeviceOpened d)
+  (match (uart_found (uart_places))
+    ((NoUart) (complain "no serial port: no PL011 on the board"))
+    ((UartAt p d)
       (let port (port_new)
         (let r (name_register_or_why port "console")
           (if (not (is_empty r))
               (complain r)
-              (let b (irq_bind_or_why (uart_irq) port)
+              (let b (irq_bind_or_why (uart_irq p) port)
                 (if (not (is_empty b))
                     (complain b)
                     (let m (device_write32 d (reg_mask) (rx_interrupts))
-                      (let n (info_as "uart" (uart_line (not (any_eq "noecho" (args)))))
-                        (serve d port (not (any_eq "noecho" (args))) (console_new))))))))))))
+                      (let n (info_as "uart" (uart_line p (not (any_eq "noecho" (args)))))
+                        (serve d (uart_irq p) port (not (any_eq "noecho" (args))) (console_new))))))))))))
 
-(def serve ((d IoDevice) (port int) (echo bool) (c Console)) int
+; Each message on port: a byte received, at interrupt irq, or a request.
+(def serve ((d IoDevice) (irq int) (port int) (echo bool) (c Console)) int
   (let m (port_receive port)
     (match m
       ((RecvFailed) (complain "lost its port"))
       ((Message from payload)
-        (if (is_irq_notice m (uart_irq))
-            (serve d port echo (received d echo c))
+        (if (is_irq_notice m irq)
+            (serve d irq port echo (received d irq echo c))
             (match (tty_request c payload)
-              ((TtyAsk c2) (serve d port echo (deliver c2)))
-              ((TtyWrite bs) (let w (say bs) (serve d port echo c)))
-              ((TtyAnswer to body) (let s (port_send to body) (serve d port echo c)))))))))
+              ((TtyAsk c2) (serve d irq port echo (deliver c2)))
+              ((TtyWrite bs) (let w (say bs) (serve d irq port echo c)))
+              ((TtyAnswer to body) (let s (port_send to body) (serve d irq port echo c)))))))))
 
 ; c after every byte waiting in the port's receive FIFO, each echoed and
 ; delivered before the next is fed, so that whoever reads the console
@@ -61,10 +98,10 @@
 ; were batched. The device's interrupt is cleared before the FIFO is read,
 ; never after: a byte arriving between the last read and a clear would be
 ; left in the FIFO with nothing to say it is there.
-(def received ((d IoDevice) (echo bool) (c Console)) Console
+(def received ((d IoDevice) (irq int) (echo bool) (c Console)) Console
   (let k (device_write32 d (reg_clear) (rx_interrupts))
     (let c2 (each_byte echo c (drain d (nil int)))
-      (let a (irq_ack (uart_irq))
+      (let a (irq_ack irq)
         c2))))
 
 (def each_byte ((echo bool) (c Console) (bs (list int))) Console
