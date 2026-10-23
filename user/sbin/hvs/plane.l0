@@ -1,0 +1,111 @@
+; plane.l0 -- one plane of an HVS display list: a rectangle of the
+; screen fetched, unscaled, from memory, as SCALER6 reads it, in the
+; order vc4_plane.c's vc6_plane_mode_set writes its words; and the UPM,
+; the HVS's own line memory, that every plane takes some of. Purely.
+
+; A plane: its place and size on the screen, x, y, width and height; the
+; address its top left pixel is fetched from, as the HVS reaches memory;
+; how many bytes its rows are apart; its UPM, where it starts in 256-byte
+; units and its handle; and whether its pixels' fourth bytes are alpha,
+; as the pointer's are, or it is opaque, as every layer is.
+(data Plane (Plane int int int int int int int int bool))
+
+; ---------------------------------------------------------------- words
+
+; How many words a plane takes: CTL0, POS0, CTL2, POS2, the context
+; word, PTR0, PTR1, PTR2 and the word after them, which CTL0's NEXT
+; counts and the HVS skips.
+(def plane_words_n () int 9)
+
+; The word that ends a list, SCALER6_CTL0_END, bit 31.
+(def dlist_end () int 2147483648)        ; 0x80000000
+
+; The words of plane p, for an HVS of layout g.
+(def plane_words ((g HvsGen) (p Plane)) (list int)
+  (match p
+    ((Plane x y w h addr pitch upm handle alpha)
+      (cons (plane_ctl0 g alpha)
+        (cons (plane_pos0 x y)
+          (cons (plane_ctl2 g alpha)
+            (cons (plane_pos2 w h)
+              (cons (plane_context)
+                (cons (plane_ptr0 addr upm handle)
+                  (cons (bit_and addr 4294967295)
+                    (cons (bit_and pitch 131071)
+                      (cons (dlist_end) (nil int)))))))))))))
+
+; CTL0: VALID, bit 30; NEXT, bits 29 to 24, the plane's words; UNITY,
+; bit 15, unscaled; ORDERRGBA, bits 14 and 13, 2 for ARGB; and
+; PIXEL_FORMAT, bits 4 to 0, 7 for RGBA8888: so b, g, r, then x or a, in
+; memory. On D0, an opaque plane's alpha is fixed here too, ALPHA_MASK,
+; bits 19 and 18, 3. 0x4900C007 on C0.
+(def plane_ctl0 ((g HvsGen) (alpha bool)) int
+  (let base (bit_or (bit_shl 1 30) (bit_or (bit_shl (plane_words_n) 24)
+              (bit_or (bit_shl 1 15) (bit_or (bit_shl 2 13) 7))))
+    (match g
+      ((HvsC0) base)
+      ((HvsD0) (if alpha base (bit_or base (bit_shl 3 18)))))))
+
+; POS0: START_Y, bits 28 to 16, and START_X, bits 12 to 0, where on the
+; screen the plane's top left is; never negative.
+(def plane_pos0 ((x int) (y int)) int
+  (bit_or (bit_shl (bit_and y 8191) 16) (bit_and x 8191)))
+
+; CTL2: ALPHA, bits 15 to 4, 0xFFF, all of the plane; and on C0
+; ALPHA_MODE, bits 31 and 30, 1, fixed, for an opaque plane, and 0, the
+; pixels' own, for one with alpha, not premultiplied. D0 leaves the mode
+; 0 and fixes an opaque plane's alpha in CTL0. 0x4000FFF0 opaque on C0.
+(def plane_ctl2 ((g HvsGen) (alpha bool)) int
+  (let a (bit_shl 4095 4)
+    (match g
+      ((HvsC0) (if alpha a (bit_or (bit_shl 1 30) a)))
+      ((HvsD0) a))))
+
+; POS2: SRC_LINES, bits 28 to 16, and SRC_WIDTH, bits 12 to 0, the
+; plane's height and width less one.
+(def plane_pos2 ((w int) (h int)) int
+  (bit_or (bit_shl (bit_and (sub h 1) 8191) 16) (bit_and (sub w 1) 8191)))
+
+; The context word, which the HVS writes itself as it fetches; the
+; driver gives it vc6_plane_mode_set's pattern.
+(def plane_context () int 3233857728)    ; 0xC0C0C0C0
+
+; PTR0: UPM_BASE, bits 28 to 16, in 256-byte units; UPM_HANDLE, bits 14
+; to 10; UPM_BUFF_SIZE, bits 9 and 8, 0 for two lines; and UPPER_ADDR,
+; bits 7 to 0, the address's bits 39 to 32. PTR1 is its bits 31 to 0.
+(def plane_ptr0 ((addr int) (upm int) (handle int)) int
+  (bit_or (bit_shl (bit_and upm 8191) 16)
+    (bit_or (bit_shl (bit_and handle 31) 10) (bit_and (bit_shr addr 32) 255))))
+
+; The words of a list of planes, bottom first, and the word that ends it.
+(def list_words ((g HvsGen) (ps (list Plane))) (list int)
+  (rev (cons (dlist_end) (planes_words_onto g ps (nil int)))))
+
+; The words of ps, reversed, onto acc.
+(def planes_words_onto((g HvsGen) (ps (list Plane)) (acc (list int))) (list int)
+  (if (is_empty ps)
+      acc
+      (planes_words_onto g (tail ps) (rev_onto (plane_words g (head ps)) acc))))
+
+; ------------------------------------------------------------------ UPM
+
+; The UPM the HVS has, in 256-byte units: vc4_hvs.c assumes 1,024, 256
+; KB. UNCONFIRMED: SCALER6_UBM_SIZE says, on a board.
+(def upm_units () int 1024)
+
+; Its handles, UPM_HANDLE's 5 bits.
+(def upm_handles () int 32)
+
+; Each of the driver's two lists has half of each, so that the list it
+; writes never takes what the list shown is fetching with: 512 units and
+; 16 handles. So a list holds at most 16 planes.
+(def upm_half_units () int (div (upm_units) 2))
+(def upm_half_handles () int (div (upm_handles) 2))
+
+; The UPM a plane fetching rows of so many bytes takes, in 256-byte units:
+; vc6_plane_allocate_upm's ((pitch + 62) / 32) * 32 * 2 bytes, rounded up
+; to 256. The bytes are the plane's own width's, not its buffer's stride:
+; UNCONFIRMED, since Linux gives the framebuffer's pitch, which there is
+; the width's.
+(def upm_for ((row_bytes int)) int
+  (ceil_div (mul (mul (div (add row_bytes 62) 32) 32) 2) 256))

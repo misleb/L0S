@@ -1,0 +1,168 @@
+; iommu.l0 -- the BCM2712's IOMMU in front of the HVS, iommu4, and the
+; cache it shares, iommuc: what the driver writes in their registers and
+; its page tables to make each client's buffer, scattered over pages, one
+; run of addresses the HVS can fetch rows from. And the aperture, those
+; addresses, given out and taken back. Purely. bcm2712-iommu.c and
+; bcm2712-iommu-cache.c are the guide; none of it has run on a board.
+
+; The IOMMUs in the CPU's map (bcm2712-ds.dtsi) and the bytes of each.
+(def iommu4_base () int 68719497728)     ; 0x1000005200
+(def iommuc_base () int 68719500032)     ; 0x1000005B00
+(def iommu_bytes () int 128)
+
+; ------------------------------------------------------------ registers
+
+; MMMU_CTRL, PT_PA_BASE, ADDR_CAP, SHOOT_DOWN, BYPASS_START, BYPASS_END
+; and DEBUG_INFO.
+(def mmu_ctrl () int 0)
+(def mmu_pt_pa_base () int 4)
+(def mmu_addr_cap () int 20)             ; 0x14
+(def mmu_bypass_start () int 28)         ; 0x1C
+(def mmu_bypass_end () int 32)           ; 0x20
+(def mmu_debug_info () int 56)           ; 0x38
+
+; CTRL as bcm2712_iommu_init leaves it: enabled, its aborts and stats on.
+(def mmu_ctrl_on () int 67700739)        ; 0x04090803
+
+; CTRL's TLB_CLEAR, bit 2, which clears every entry the IOMMU keeps, and
+; TLB_CLEARING, bit 7, set until it has.
+(def mmu_tlb_clear ((ctrl int)) int (bit_or ctrl 4))
+(def mmu_tlb_clearing ((ctrl int)) bool (eq (bit_and (bit_shr ctrl 7) 1) 1))
+
+; The cache: writing ENABLE and FLUSH, 3, at 0 flushes it, and FLUSHING,
+; bit 2, is set until it has.
+(def cache_flush () int 3)
+(def cache_flushing ((w int)) bool (eq (bit_and (bit_shr w 2) 1) 1))
+
+; ------------------------------------------------------------- aperture
+
+; The addresses the HVS reaches buffers at: 512 MB from 40 GB, past all
+; the Pi's RAM, as DEFAULT_APERTURE_BASE puts them; below it, memory is
+; reached as it is, so the firmware's own list keeps working.
+(def aperture_base () int 42949672960)   ; 0xA00000000
+(def aperture_bytes () int 536870912)    ; 0x20000000
+(def aperture_pages () int (div (aperture_bytes) (page_size)))
+
+; Where the HVS reaches page n of the aperture.
+(def aperture_address ((n int)) int (add (aperture_base) (mul n (page_size))))
+
+; PT_PA_BASE: the first-level table's page number less the aperture's
+; base in 4 GB, which the IOMMU adds back.
+(def pt_pa_base ((l1 int)) int (sub (div l1 (page_size)) (bit_shr (aperture_base) 32)))
+
+; ADDR_CAP: ENABLE, bit 31, and the aperture's end in 256 MB, less one.
+(def addr_cap () int
+  (bit_or (bit_shl 1 31) (sub (bit_shr (add (aperture_base) (aperture_bytes)) 28) 1)))
+
+; BYPASS_END: ENABLE, bit 31, and the aperture's start, below which
+; addresses pass, in 4 MB if DEBUG_INFO's bit 28 says this IOMMU counts
+; so, else in 256 MB.
+(def bypass_end ((debug int)) int
+  (bit_or (bit_shl 1 31)
+    (bit_shr (aperture_base) (if (eq (bit_and (bit_shr debug 28) 1) 1) 22 28))))
+
+; ---------------------------------------------------------- page tables
+
+; The tables: one first-level page, each entry 4 MB, and as many
+; second-level pages as the aperture takes, each 1,024 entries of a page:
+; 128. The driver keeps them in one run of its DMA pages, the first-level
+; page first.
+(def l2_tables () int (div (aperture_pages) 1024))
+(def table_pages () int (add 1 (l2_tables)))
+
+; A second-level entry, mapping a page at physical address pa: VALID, bit
+; 28, WRITEABLE, bit 29, a 4 KB page, 0 in bits 31 and 30, and pa's page
+; number. 0 maps nothing.
+(def pte ((pa int)) int
+  (bit_or (bit_shl 1 28) (bit_or (bit_shl 1 29) (bit_and (div pa (page_size)) 268435455))))
+
+; A first-level entry, VALID and the page number of the second-level
+; table at pa.
+(def l1_entry ((pa int)) int
+  (bit_or (bit_shl 1 28) (bit_and (div pa (page_size)) 268435455)))
+
+; Where in the tables' pages aperture page n's entry is: its table, the
+; one after the first-level page for each 1,024 pages, and its place in
+; it.
+(def pte_offset ((n int)) int
+  (add (mul (add 1 (div n 1024)) (page_size)) (mul 4 (mod n 1024))))
+
+; Where in the first-level page the entry for second-level table t is:
+; the aperture starts on a 4 GB boundary, so its first table is entry 0.
+(def l1_offset ((t int)) int (mul 4 t))
+
+; ------------------------------------------------------- giving it out
+
+; A run of free pages of the aperture: its first and how many.
+(data Span (Span int int))
+
+; A buffer's pages mapped: where in the aperture they start, how many.
+(data Mapped (Mapped int int))
+
+; The aperture: its free runs, in order, none touching another; and what
+; is mapped, by where the driver sees the buffer's pages, so that a
+; buffer given again in the same pages, as a window resized in its room
+; is, is where it was.
+(data Aperture (Aperture (list Span) (Map int Mapped)))
+
+; All of it free.
+(def aperture_new () Aperture
+  (Aperture (cons (Span 0 (aperture_pages)) (nil Span)) ((MapEmpty int Mapped))))
+
+; What the pages at va are mapped as, if they are.
+(def aperture_mapped ((a Aperture) (va int)) (Option Mapped)
+  (match a ((Aperture spans m) (map_get m va))))
+
+; What taking pages of the aperture gave: the aperture with them taken
+; and where they start, or no run long enough.
+(data Taken (Taken Aperture int) (NoRoom))
+
+; n pages of the aperture for the pages at va: the first run that holds
+; them, from its start.
+(def aperture_take ((a Aperture) (va int) (n int)) Taken
+  (match a
+    ((Aperture spans m)
+      (match (span_take spans n (nil Span))
+        ((None) (NoRoom))
+        ((Some r)
+          (match r ((SpanTaken first rest) (Taken (Aperture rest (map_put m va (Mapped first n))) first))))))))
+
+; A run taken from spans, and the spans left.
+(data SpanTaken (SpanTaken int (list Span)))
+
+; n pages from the first of spans long enough, before holding those
+; passed, reversed; or none.
+(def span_take((spans (list Span)) (n int) (before (list Span))) (Option SpanTaken)
+  (if (is_empty spans)
+      ((None SpanTaken))
+      (match (head spans)
+        ((Span first count)
+          (if (lt count n)
+              (span_take (tail spans) n (cons (head spans) before))
+              (Some (SpanTaken first
+                      (rev_onto before (if (eq count n) (tail spans) (cons (Span (add first n) (sub count n)) (tail spans)))))))))))
+
+; The pages at va given back: the aperture without them, their run free
+; again, joined to the runs beside it.
+(def aperture_give ((a Aperture) (va int)) Aperture
+  (match a
+    ((Aperture spans m)
+      (match (map_get m va)
+        ((None) a)
+        ((Some mp)
+          (match mp
+            ((Mapped first n) (Aperture (spans_joined (sort (cons (Span first n) spans)) (nil Span)) (map_remove m va)))))))))
+
+; spans, in order, with each run that touches the next made one with it.
+(def spans_joined ((spans (list Span)) (acc (list Span))) (list Span)
+  (if (is_empty spans)
+      (rev acc)
+      (if (is_empty acc)
+          (spans_joined (tail spans) (cons (head spans) acc))
+          (match (head acc)
+            ((Span f c)
+              (match (head spans)
+                ((Span sf sc)
+                  (if (eq (add f c) sf)
+                      (spans_joined (tail spans) (cons (Span f (add c sc)) (tail acc)))
+                      (spans_joined (tail spans) (cons (head spans) acc))))))))))

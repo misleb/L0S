@@ -1,0 +1,126 @@
+; pieces_test.l0 -- tests of the screen cut into HVS planes.
+
+; A screen 100 by 80 of buffers: 0, the desktop, 100 by 80, from address
+; 1000000; 1, a window 30 by 20, its rows 40 pixels apart, from 2000000;
+; 2, the pointer, 64 by 64, from 3000000; 3, a strip 1920 by 10.
+(def bufs () (Map int Buffer)
+  (map_put (map_put (map_put (map_put ((MapEmpty int Buffer))
+    0 (Buffer 100 80 100 0 8 1000000 (square)))
+    1 (Buffer 30 20 40 0 1 2000000 (square)))
+    2 (Buffer 64 64 64 0 4 3000000 (square)))
+    3 (Buffer 1920 10 1920 0 19 4000000 (square))))
+
+(def desktop () Layer (Layer 0 0 0 0))
+
+; Each piece as X,Y WxH @ADDR /PITCH, and a for alpha.
+(def pieces_text ((ps (list Piece))) (list int)
+  (if (is_empty ps)
+      ""
+      (match (head ps)
+        ((Piece r addr pitch alpha)
+          (match r
+            ((Rect x y w h)
+              (append (digits x) (append "," (append (digits y) (append " " (append (digits w) (append "x" (append (digits h)
+                (append " @" (append (digits addr) (append " /" (append (digits pitch)
+                  (append (if alpha "a " " ") (pieces_text (tail ps))))))))))))))))))))
+
+(def shown ((ls (list Layer)) (cur Cursor)) (list int)
+  (pieces_text (screen_pieces 100 80 ls (bufs) cur)))
+
+(def two ((a Layer) (b Layer)) (list Layer) (cons a (cons b (nil Layer))))
+
+; ------------------------------------------------------------- placing
+
+(def test_desktop_and_window () int
+  (check_str "bottom first" (shown (two (desktop) (Layer 1 10 5 0)) (no_cursor))
+    "0,0 100x80 @1000000 /400 10,5 30x20 @2000000 /160 "))
+
+; Off the top left by 5 and 3: the plane starts at the screen's corner,
+; its address 3 rows of 40 and 5 pixels on, 4 bytes each: 2000500.
+(def test_off_top_left () int
+  (check_str "cut into the address" (shown (cons (Layer 1 -5 -3 0) (nil Layer)) (no_cursor))
+    "0,0 25x17 @2000500 /160 "))
+
+(def test_off_bottom_right () int
+  (check_str "cut short" (shown (cons (Layer 1 90 70 0) (nil Layer)) (no_cursor))
+    "90,70 10x10 @2000000 /160 "))
+
+(def test_off_screen () int
+  (check_str "none" (shown (cons (Layer 1 200 0 0) (nil Layer)) (no_cursor)) ""))
+
+(def test_unknown_buffer () int
+  (check_str "none" (shown (cons (Layer 9 0 0 0) (nil Layer)) (no_cursor)) ""))
+
+; A ring read from row 4: rows 4 to 19 at the layer's top, from 4 rows on,
+; 2000640; then rows 0 to 3 under them, at 21.
+(def test_ring () int
+  (check_str "two pieces" (shown (cons (Layer 1 10 5 4) (nil Layer)) (no_cursor))
+    "10,5 30x16 @2000640 /160 10,21 30x4 @2000000 /160 "))
+
+(def test_ring_past_its_height () int
+  (check_str "top 24 is row 4" (shown (cons (Layer 1 10 5 24) (nil Layer)) (no_cursor))
+    "10,5 30x16 @2000640 /160 10,21 30x4 @2000000 /160 "))
+
+; ------------------------------------------------------------- hiding
+
+(def test_hidden_whole () int
+  (check_str "the window under the desktop" (shown (two (Layer 1 10 5 0) (desktop)) (no_cursor))
+    "0,0 100x80 @1000000 /400 "))
+
+(def test_partly_hidden () int
+  (check_str "both, the desktop showing round the window"
+    (shown (two (desktop) (Layer 0 50 0 0)) (no_cursor))
+    "0,0 100x80 @1000000 /400 50,0 50x80 @1000000 /400 "))
+
+; The pointer is drawn with alpha, so it hides nothing, and is on top.
+(def test_cursor () int
+  (check_str "the pointer, its hot spot at 50, 40"
+    (shown (cons (desktop) (nil Layer)) (Cursor 2 50 40 3 4))
+    "0,0 100x80 @1000000 /400 47,36 53x44 @3000000 /256a "))
+
+(def test_cursor_off_left () int
+  (check_str "cut at the left" (shown (nil Layer) (Cursor 2 0 0 3 0))
+    "0,0 61x64 @3000012 /256a "))
+
+; ------------------------------------------------------------- budget
+
+; n layers of buffer 1, each a pixel right of the one before, so each
+; shows a column.
+(def staggered ((n int) (acc (list Layer))) (list Layer)
+  (if (eq n 0) acc (staggered (sub n 1) (cons (Layer 1 n 0 0) acc))))
+
+(def planned_text ((p Planned)) (list int)
+  (match p
+    ((Planned ps) (append "planes " (digits (length ps))))
+    ((Unplannable why) why)))
+
+(def test_sixteen_planes () int
+  (check_str "a list's handles"
+    (planned_text (screen_planes 100 80 (staggered 16 (nil Layer)) (bufs) (no_cursor) 0)) "planes 16"))
+
+(def test_seventeen_refused () int
+  (check_str "one too many"
+    (planned_text (screen_planes 100 80 (staggered 17 (nil Layer)) (bufs) (no_cursor) 0))
+    "the screen has too many layers for the HVS"))
+
+; n strips 1920 wide, one under the next: each takes 61 units, and nine,
+; 549, are more than a half's 512.
+(def strips ((n int) (acc (list Layer))) (list Layer)
+  (if (eq n 0) acc (strips (sub n 1) (cons (Layer 3 0 (mul 10 (sub n 1)) 0) acc))))
+
+(def test_upm_refused () int
+  (add (check_str "eight fit"
+         (planned_text (screen_planes 1920 100 (strips 8 (nil Layer)) (bufs) (no_cursor) 0)) "planes 8")
+       (check_str "nine do not"
+         (planned_text (screen_planes 1920 100 (strips 9 (nil Layer)) (bufs) (no_cursor) 0))
+         "the screen's layers are too wide for the HVS's line memory")))
+
+; Half 1's planes take handles from 16 and units from 512.
+(def test_second_half () int
+  (match (screen_planes 100 80 (two (desktop) (Layer 1 10 5 0)) (bufs) (no_cursor) 1)
+    ((Unplannable why) (fail_because "planned" why))
+    ((Planned ps)
+      (match (head (tail ps))
+        ((Plane x y w h addr pitch upm handle alpha)
+          (add (check_int "handle" handle 17)
+               (check_int "units after the desktop's 4" upm 516)))))))

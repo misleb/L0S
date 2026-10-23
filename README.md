@@ -719,6 +719,70 @@ A restack of a window drag takes about 8 ms there, against about 20 ms in
 no context, the driver is the 2D one. Nothing is blended or drawn by the
 GPU: it only copies.
 
+### The display on the Raspberry Pi 5
+
+On the Pi 5 the display protocol is served by `hvs` (`user/sbin/hvs/`), a
+first draft. It has run nowhere yet: L0 gives no region over the HVS or
+its IOMMU (`probes/display/REQUEST-pi5-hvs-iommu.md`). Until it does,
+`hvs` says "no HVS on the board" and exits 0, as it does on QEMU. It is in
+no inittab. A Pi's would hold `start /sbin/hvs` and `dev /sbin/hvs` in
+place of `virtio-gpu`'s.
+
+It is virtio-gpu's 2D mode done by the BCM2712's HVS, the Hardware Video
+Scaler (SCALER6), so no pixel is copied:
+
+1. **The screen is the firmware's.** The firmware brings HDMI0 up and
+   leaves the HVS scanning channel 0. `hvs` reads the mode from the
+   channel's `CTRL0`, never resets anything, and only sets the channel's
+   background to black.
+2. **A list of planes.** Each layer is one plane, fetched unscaled from
+   the client's pages (`plane.l0`). A ring read from a row other than
+   its first is two planes, one each side of the wrap, and a layer
+   hidden whole by those above is none. A plane partly off the screen is
+   cut, and the cut moves into its address (`pieces.l0`).
+3. **Two lists.** Each restack writes the half of the list memory the
+   channel isn't fetching (words 32 to 2063, or 2064 to 4095), points the
+   channel's `LPTRS` at it, and waits up to 50 ms for `DL` to show it was
+   taken.
+4. **The IOMMU.** A plane reads one run of addresses, and a client's
+   pages are scattered. So each buffer's pages are mapped one after
+   another in a 512 MB aperture of `iommu4` at 40 GB (`iommu.l0`).
+   Memory below the aperture passes through as it is. The tables are 129
+   of the driver's DMA pages, cleaned with `dma_sync` before the IOMMU
+   reads them. A buffer given again in the same pages, as a window
+   resized in its room is, keeps its place.
+5. **Damage is a cache clean.** The HVS reads every pixel every frame, but
+   the Pi's DMA does not see the CPU's caches. So `damage` only cleans the
+   pages of the damaged rows, and `buffer` cleans all of a new buffer's.
+6. **The pointer is a plane on top** with its pixels' own alpha. A move
+   writes the list again.
+
+**Not yet:** corners are not cut. `shape` is kept, but a window shows
+whole, its corners square. Cutting them a row at a time would cost a
+plane per row of each corner, and a list has at most 16 (see
+[Limits](#limits)); the way is the toolkit painting its corners with
+alpha. The HVS's end-of-frame interrupts are not taken either.
+
+**The first run** should check these on the serial line and `dmesg`,
+against Linux's view of the same board. None of them could be confirmed
+from Linux's source:
+
+- that the firmware leaves channel 0 enabled and running
+  (`STATUS.MODE` 2), and where its own list is (`DL.LACT`)
+- that `LPTRS.HEADE` is taken at the next frame, so `DL.LACT` comes to
+  the new start
+- that `SCALER6_VERSION` reads 0x53 (C0) or 0x54 (D0), and the layout it
+  picks is right
+- the state the firmware leaves `iommu4` in (`CTRL`, `BYPASS_END`,
+  `ADDR_CAP`), and whether a plane's address in the aperture reaches the
+  page mapped there
+- `SCALER6_UBM_SIZE` and `CXM_SIZE`: the driver takes 1,024 units of UPM
+  (256 KB) and 4,096 words of list memory
+- that a plane's UPM can be sized by its width rather than its buffer's
+  stride
+- the pointer's alpha: not premultiplied, as the toolkit paints it
+- that the 9th word of a plane, which CTL0's NEXT counts, is skipped
+
 ### A large screen
 
 On a screen of 2560×1440 or more, such as `make demo SCREEN=3840x2160`
@@ -1832,11 +1896,11 @@ initramfs, so that the Makefile finds it there:
 | Directory | What | In the initramfs |
 |---|---|---|
 | `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `lsusb`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `hvs`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0` and `iommu.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
@@ -1855,6 +1919,7 @@ every `.l0` in its directory is part of it.
 | `nap` | sleeps for N ms and checks that the time passed |
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc` |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
+| `hvs` | the Raspberry Pi 5's display driver, a first draft that has run nowhere, serving the display protocol as `display` as `virtio-gpu` does (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)). It takes HDMI0's channel of the BCM2712's HVS at the mode the firmware left. It shows the layers as one display list of planes fetched straight from the clients' pages, each buffer made one run of addresses by the IOMMU in front of the HVS. It writes each list in the half of the list memory the channel isn't fetching, then moves the channel to it. A `damage` cleans the damaged rows' pages out of the caches, and the pointer is a plane on top. Corners are not cut yet. With no region over the HVS, as on QEMU and, until L0 gives one, on a Pi, it says so and exits 0 |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
 | `pcie` | the PCIe bus's server, `pcie virt`, for QEMU's virt board (see [USB](#usb)): reads every function of bus 0 through the ECAM, sizes each memory BAR, puts it in the 32-bit MMIO window, turns on memory space and bus mastering, and serves the pci protocol as `pci`: every function, or those of a class |
 | `sdhci` | a driver for SD cards behind SD Host Controllers, `sdhci pci` those `pcie` finds, QEMU's `sdhci-pci` (see [The disk](#the-disk)): it brings each card up, standard or high-capacity, and serves each as the first `diskN` free, all on one port, telling `fs` of each. Blocks move through the controller's buffer into and out of the client's pages, no DMA; it polls. A slot with no card, or no controller on the bus, is said so on stderr, and exits 0 |
@@ -1903,6 +1968,7 @@ name in a library is taken in every program that links it.
 | [sys/keymap.l0](user/lib/sys/keymap.l0) | the US keyboard's layout over Linux's key codes: what a key types alone, shifted, with Caps Lock and with Ctrl, and the modifiers each key event leaves held (`KEYMAP`) | `virtio-input`, `usb-hid` |
 | [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng` |
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
+| [proto/display_server.l0](user/lib/proto/display_server.l0) | the display protocol, as a driver serves it: a `Layer`, a buffer's `Corners` and the radii it may have, requests' numbers read (`layers_of`, a buffer's pages and stride), damage cut to the screen, and `info`'s answer with the scale (`scale_of`, `scale=`) | `virtio-gpu`, `hvs` |
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs`, `inet` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol: disks' names, `disk0` on, the disks there are, a driver's disk registered under the first name free and a request's disk read; as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks`, `virtio-blk`, `sdhci` |
@@ -2077,8 +2143,9 @@ Ctrl-C as a person would:
 line, which is refused the device, `virtio-blk_nodisk` the disk's driver
 on a board with no disk, `fs_nodisk` the file server there,
 `virtio-net_nocard` the network's driver on a board with no card, and
-`inet_nocard` the stack with no driver, and `virtio-rng_nodev` the
-entropy device's driver on a board with none, none of which is a
+`inet_nocard` the stack with no driver, `virtio-rng_nodev` the
+entropy device's driver on a board with none, and `hvs_nohvs` the Pi 5's
+display driver on a board with no HVS, none of which is a
 failure. `virtio-blk_ro` has `disk` write to a read-only disk, which the
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
@@ -2277,6 +2344,15 @@ a bad buffer, and wait on nothing.
   the layers into the screen, and in 2D mode the host composes them
   from the clients' pages, but every pixel in them is painted by the
   guest's CPU, at scale 2 four times as many. Nothing is blended.
+- **The Pi 5's display has run nowhere** (see
+  [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)):
+  L0 gives no region over its HVS or IOMMU yet. Once it does, a screen is
+  at most 16 planes, half the HVS's 32 UPM handles, since each of the
+  driver's two lists keeps its own half. Every layer is one plane, a
+  scrolled ring two, and a layer hidden whole by those above is none. The
+  planes' rows also share half of 256 KB of line memory, about 8 rows
+  1920 wide, or 4 at 3840. A screen past either is refused. Corners are
+  square there.
 - **The screen tests run in 2D mode** (`GPU=2d`, the default of
   `tools/qemu-boot.sh`): `screendump` fails with "no surface" on a GL
   scanout. The 3D mode is tried by `make demo`.

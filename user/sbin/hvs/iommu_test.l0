@@ -1,0 +1,85 @@
+; iommu_test.l0 -- tests of the IOMMU's entries, registers and aperture.
+
+; ------------------------------------------------------------ entries
+
+; Page 0x12345 mapped: VALID and WRITEABLE, 0x30012345; its table, 0x10012345.
+(def test_pte () int
+  (add (check_str "page" (hex_digits (pte 305418240) 8) "30012345")
+       (check_str "table" (hex_digits (l1_entry 305418240) 8) "10012345")))
+
+; Page 0 of the aperture is the first entry of the first second-level
+; table, the page after the first-level one; 1024 the next table's.
+(def test_pte_offset () int
+  (add (check_int "page 0" (pte_offset 0) 4096)
+       (add (check_int "page 1023" (pte_offset 1023) 8188)
+            (check_int "page 1024" (pte_offset 1024) 8192))))
+
+(def test_tables () int
+  (add (check_int "aperture pages" (aperture_pages) 131072)
+       (check_int "tables' pages" (table_pages) 129)))
+
+; ------------------------------------------------------------ registers
+
+; The first-level table at 0x40000000, page 0x40000, less 0xA, the
+; aperture's base in 4 GB.
+(def test_pt_pa_base () int
+  (check_int "page less 10" (pt_pa_base 1073741824) 262134))
+
+; The aperture ends at 0xA20000000, 0xA2 in 256 MB; less one, 0xA1.
+(def test_addr_cap () int
+  (check_str "enabled, 0xa1" (hex_digits (addr_cap) 8) "800000a1"))
+
+; Its start, 0xA00000000, is 0x2800 in 4 MB and 0xA0 in 256 MB.
+(def test_bypass_end () int
+  (add (check_str "in 4 MB" (hex_digits (bypass_end (bit_shl 1 28)) 8) "80002800")
+       (check_str "in 256 MB" (hex_digits (bypass_end 0) 8) "800000a0")))
+
+(def test_flags () int
+  (add (check_bool "clearing" (mmu_tlb_clearing 128) true)
+       (add (check_int "clear" (mmu_tlb_clear (mmu_ctrl_on)) 67700743)
+            (check_bool "flushed" (cache_flushing 1) false))))
+
+; ------------------------------------------------------------- aperture
+
+(def spans_text ((a Aperture)) (list int)
+  (match a ((Aperture spans m) (span_list_text spans))))
+
+(def span_list_text ((ss (list Span))) (list int)
+  (if (is_empty ss)
+      ""
+      (match (head ss) ((Span f c) (append (digits f) (append "+" (append (digits c) (append " " (span_list_text (tail ss))))))))))
+
+; n pages for va taken from a, or a as it was if there is no room.
+(def taken ((a Aperture) (va int) (n int)) Aperture
+  (match (aperture_take a va n) ((Taken a2 first) a2) ((NoRoom) a)))
+
+(def first_of ((a Aperture) (va int)) int
+  (match (aperture_mapped a va) ((None) -1) ((Some m) (match m ((Mapped first n) first)))))
+
+(def test_take () int
+  (let a (taken (taken (aperture_new) 100 10) 200 5)
+    (add (check_int "the first at 0" (first_of a 100) 0)
+         (add (check_int "the second after it" (first_of a 200) 10)
+              (check_str "the rest free" (spans_text a) "15+131057 ")))))
+
+(def test_give_and_take_again () int
+  (let a (taken (aperture_give (taken (taken (aperture_new) 100 10) 200 5) 100) 300 3)
+    (add (check_int "into the hole" (first_of a 300) 0)
+         (check_str "what is free" (spans_text a) "3+7 15+131057 "))))
+
+; Every run given back is one run again, whatever the order.
+(def test_give_joins () int
+  (let a (taken (taken (taken (aperture_new) 1 4) 2 4) 3 4)
+    (add (check_str "middle, then first" (spans_text (aperture_give (aperture_give a 2) 1)) "0+8 12+131060 ")
+         (check_str "all of it" (spans_text (aperture_give (aperture_give (aperture_give a 2) 3) 1)) "0+131072 "))))
+
+(def test_no_room () int
+  (match (aperture_take (aperture_new) 1 (add (aperture_pages) 1))
+    ((Taken a first) (fail_because "too many pages" "taken"))
+    ((NoRoom) (pass "too many pages"))))
+
+(def test_give_unknown () int
+  (check_str "nothing changes" (spans_text (aperture_give (aperture_new) 7)) "0+131072 "))
+
+(def test_address () int
+  (check_str "page 1" (hex_digits (aperture_address 1) 10) "0a00001000"))

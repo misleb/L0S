@@ -310,6 +310,14 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   giving a buffer must be damaged, or GL mode shows the old pixels while
   2D mode, which reads the pages at every restack, hides the omission.
   Same look, same protocol; only copies, no blending.
+- **The Pi 5** (`user/sbin/hvs/`, a draft that has run nowhere): the
+  same protocol served by the HVS's planes, each layer a plane fetched
+  from the client's pages through the IOMMU, so `damage` is only a cache
+  clean there. What every display driver reads from requests alike
+  (`Layer`, `Corners`, `scale_of`, `info_reply`) is
+  `user/lib/proto/display_server.l0`. A screen is at most 16 planes and
+  its corners aren't cut yet: another layer per window costs more there
+  than in 2D mode.
 - **No GPU drawing.** The GPU only composes (2D mode: the host; 3D mode:
   copies). Every pixel is the guest's.
 

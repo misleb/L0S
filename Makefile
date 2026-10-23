@@ -115,6 +115,7 @@ PPM     := user/lib/format/ppm.l0
 RECT    := user/lib/gfx/rect.l0
 RENDER  := $(PPM) $(RECT) user/lib/gfx/render.l0
 DISPLAY := user/lib/proto/display.l0
+DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
 CLOCK   := user/lib/proto/clock.l0
 DISKLIB := user/lib/proto/disk.l0
@@ -152,7 +153,8 @@ UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/
 UI_WINDOW := user/lib/ui/window.l0
 UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd
 
-LIBS_virtio-gpu := $(VIRTIO) $(RENDER)
+LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
+LIBS_hvs        := $(VIRTIO) $(RECT) $(DISPLAY_SERVER)
 LIBS_virtio-input := $(VIRTIO) $(KEYMAP)
 LIBS_pcie       := $(PCILIB)
 LIBS_xhci       := $(USBLIB) $(PCILIB)
@@ -279,6 +281,7 @@ test: sample
 	$(L0) test $(ULIB) $(RENDER) user/lib/gfx/render_test.l0
 	$(L0) test $(ULIB) $(CLOCK) user/lib/proto/clock_test.l0
 	$(L0) test $(ULIB) $(RECT) $(DISPLAY) user/lib/proto/display_test.l0
+	$(L0) test $(ULIB) $(RECT) $(DISPLAY_SERVER) user/lib/proto/display_server_test.l0
 	$(L0) test $(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0
 	$(L0) test $(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0
 	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0

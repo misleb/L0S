@@ -1,0 +1,112 @@
+; pieces.l0 -- the screen as HVS planes: each layer over its buffer cut
+; into the pieces the HVS fetches row by row from one run of addresses,
+; those on the screen, less those hidden whole, and the pointer on top;
+; then each given its share of the UPM, or the screen refused as more
+; than one list can hold. Purely.
+
+; A buffer a client shared: its width and height in pixels; its stride,
+; how many pixels apart its rows are; where this process sees its pages,
+; and how many; where the HVS reaches its first pixel, through the
+; IOMMU; and its corners, kept but not yet shown.
+(data Buffer (Buffer int int int int int int Corners))
+
+; The pointer: the buffer its image is, -1 for none, where its hot spot
+; is, and the hot spot in the image.
+(data Cursor (Cursor int int int int int))
+
+; No pointer yet.
+(def no_cursor () Cursor (Cursor -1 0 0 0 0))
+
+; A piece of the screen: the rectangle it covers, where its top left
+; pixel is fetched from, how many bytes apart its rows are, and whether
+; it has alpha of its own, as only the pointer has.
+(data Piece (Piece Rect int int bool))
+
+; --------------------------------------------------------------- pieces
+
+; The pieces of a screen w by h: its layers, bottom first, then the
+; pointer, each less what lies off the screen, and without those the
+; layers above hide.
+(def screen_pieces ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (cur Cursor)) (list Piece)
+  (shown_pieces (cursor_pieces w h bufs cur (layers_pieces w h ls bufs (nil Piece))) (nil Rect) (nil Piece)))
+
+; The pieces of layers ls onto acc, the topmost first.
+(def layers_pieces ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (acc (list Piece))) (list Piece)
+  (if (is_empty ls)
+      acc
+      (match (head ls)
+        ((Layer id lx ly top)
+          (match (map_get bufs id)
+            ((None) (layers_pieces w h (tail ls) bufs acc))
+            ((Some b) (layers_pieces w h (tail ls) bufs (buffer_pieces w h b lx ly top false acc))))))))
+
+; The pointer's piece onto acc, if it has an image.
+(def cursor_pieces ((w int) (h int) (bufs (Map int Buffer)) (cur Cursor) (acc (list Piece))) (list Piece)
+  (match cur
+    ((Cursor id px py hx hy)
+      (match (map_get bufs id)
+        ((None) acc)
+        ((Some b) (buffer_pieces w h b (sub px hx) (sub py hy) 0 true acc))))))
+
+; Buffer b at lx, ly, its rows read from row top as a ring, as pieces onto
+; acc: its rows from top to its end, then, if top is not its first, those
+; above top under them, each cut to the screen.
+(def buffer_pieces ((w int) (h int) (b Buffer) (lx int) (ly int) (top int) (alpha bool) (acc (list Piece))) (list Piece)
+  (match b
+    ((Buffer bw bh sd va pages addr cs)
+      (let t (mod (add (mod top bh) bh) bh)
+        (let a (part_onto w h b lx ly (sub bh t) t alpha acc)
+          (if (eq t 0) a (part_onto w h b lx (add ly (sub bh t)) t 0 alpha a)))))))
+
+; Rows r0 on of b, n of them, at lx, sy on the screen, cut to it, as a
+; piece onto acc; acc if none of it is on the screen.
+(def part_onto ((w int) (h int) (b Buffer) (lx int) (sy int) (n int) (r0 int) (alpha bool) (acc (list Piece))) (list Piece)
+  (match b
+    ((Buffer bw bh sd va pages addr cs)
+      (let k (rect_clip (Rect lx sy bw n) (Rect 0 0 w h))
+        (if (rect_empty k)
+            acc
+            (match k
+              ((Rect kx ky kw kh)
+                (cons (Piece k (add addr (mul 4 (add (mul (add r0 (sub ky sy)) sd) (sub kx lx)))) (mul 4 sd) alpha) acc))))))))
+
+; pieces, the topmost first, without those wholly under the opaque ones
+; above them, covered, bottom first again onto acc.
+(def shown_pieces ((pieces (list Piece)) (covered (list Rect)) (acc (list Piece))) (list Piece)
+  (if (is_empty pieces)
+      acc
+      (match (head pieces)
+        ((Piece r addr pitch alpha)
+          (if (is_empty (rects_minus (cons r (nil Rect)) covered))
+              (shown_pieces (tail pieces) covered acc)
+              (shown_pieces (tail pieces) (if alpha covered (cons r covered)) (cons (head pieces) acc)))))))
+
+; --------------------------------------------------------------- planes
+
+; The screen's planes for list half k, or why it cannot be one list.
+(data Planned (Planned (list Plane)) (Unplannable (list int)))
+
+; Each piece a plane, with its own UPM handle and units from half k's.
+(def pieces_planes ((pieces (list Piece)) (k int)) Planned
+  (planes_from pieces (mul k (upm_half_handles)) (mul k (upm_half_units)) 0 0 (nil Plane)))
+
+; The rest of pieces as planes, n of them made and u units taken, the
+; handles from h0 and the units from u0.
+(def planes_from ((pieces (list Piece)) (h0 int) (u0 int) (n int) (u int) (acc (list Plane))) Planned
+  (if (is_empty pieces)
+      (Planned (rev acc))
+      (match (head pieces)
+        ((Piece r addr pitch alpha)
+          (match r
+            ((Rect x y pw ph)
+              (let need (upm_for (mul 4 pw))
+                (if (ge n (upm_half_handles))
+                    (Unplannable "the screen has too many layers for the HVS")
+                    (if (gt (add u need) (upm_half_units))
+                        (Unplannable "the screen's layers are too wide for the HVS's line memory")
+                        (planes_from (tail pieces) h0 u0 (add n 1) (add u need)
+                          (cons (Plane x y pw ph addr pitch (add u0 u) (add h0 n) alpha) acc)))))))))))
+
+; The screen w by h as planes for half k: its pieces, then their planes.
+(def screen_planes ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (cur Cursor) (k int)) Planned
+  (pieces_planes (screen_pieces w h ls bufs cur) k))

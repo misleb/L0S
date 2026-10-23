@@ -1,0 +1,98 @@
+; display_server.l0 -- the display protocol, as a driver serves it: what
+; every display driver reads from its requests and answers alike, whatever
+; its hardware does with them. display.l0 is the client's side and says
+; what each request means. Linked into virtio-gpu and hvs, by the
+; Makefile's DISPLAY_SERVER, with rect.l0.
+
+; ---------------------------------------------------------------- layers
+
+; A buffer on the screen: its id, its top left there, and the row of the
+; buffer that is its top, its rows read from there as a ring.
+(data Layer (Layer int int int int))
+
+; layers ID X Y TOP ...: each four numbers a layer, bottom first.
+(def layers_of ((ns (list int)) (acc (list Layer))) (list Layer)
+  (if (is_empty ns)
+      (rev acc)
+      (layers_of (drop_n ns 4) (cons (Layer (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)) acc))))
+
+; Whether buffer id is one of the layers.
+(def in_layers ((ls (list Layer)) (id int)) bool
+  (if (is_empty ls)
+      false
+      (match (head ls) ((Layer lid x y top) (if (eq lid id) true (in_layers (tail ls) id))))))
+
+; --------------------------------------------------------------- buffers
+
+; A buffer request's PAGES, its fifth number, or 0 if it has none; and
+; its STRIDE, its sixth, or its width, W.
+(def buffer_pages_arg ((ns (list int))) int (if (ge (length ns) 5) (nth ns 4) 0))
+(def buffer_stride_arg ((ns (list int))) int (if (eq (length ns) 6) (nth ns 5) (nth ns 1)))
+
+; The pages a buffer of bh rows sd pixels apart shared as pages takes: as
+; many as its rows fill, or pages if that is more, the room its client
+; kept for it to grow into, so that forgetting it gives them all up.
+(def buffer_shared_pages ((sd int) (bh int) (pages int)) int
+  (max pages (div (add (mul (mul sd bh) 4) (sub (page_size) 1)) (page_size))))
+
+; The n pages at va given up: 0.
+(def shm_unmap_count ((va int) (n int)) int
+  (match (shm_unmap va n) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
+
+; ---------------------------------------------------------------- shapes
+
+; The radii of a buffer's corners, top left, top right, bottom left and
+; bottom right, in pixels: 0 is square. Where a corner is rounded off, the
+; layer beneath shows, since no display blends.
+(data Corners (Corners int int int int))
+
+; Four square corners, as a new buffer has.
+(def square () Corners (Corners 0 0 0 0))
+
+; Whether r is a radius a buffer bw by bh can have: up to half of each.
+(def fits_radius ((r int) (bw int) (bh int)) bool
+  (if (lt r 0) false (if (gt (mul 2 r) bw) false (le (mul 2 r) bh))))
+
+; Whether every one of cs is a radius a buffer bw by bh can have.
+(def corners_fit ((cs Corners) (bw int) (bh int)) bool
+  (match cs
+    ((Corners tl tr bl br)
+      (if (fits_radius tl bw bh) (if (fits_radius tr bw bh) (if (fits_radius bl bw bh) (fits_radius br bw bh) false) false) false))))
+
+; ---------------------------------------------------------------- damage
+
+; boxes, those on a screen w by h, cut to it.
+(def clipped ((boxes (list Rect)) (w int) (h int) (acc (list Rect))) (list Rect)
+  (if (is_empty boxes)
+      (rev acc)
+      (let k (rect_clip (head boxes) (Rect 0 0 w h))
+        (clipped (tail boxes) w h (if (rect_empty k) acc (cons k acc))))))
+
+; ----------------------------------------------------------------- scale
+
+; info's answer: the screen's size, its own cursor, and the scale.
+(def info_reply ((w int) (h int) (s int)) (list int)
+  (unwords (cons "display" (cons (digits w) (cons (digits h) (cons "cursor" (cons "scale" (cons (digits s) (nil (list int))))))))))
+
+; How many of the screen's pixels each way a pixel of the desktop is: 2
+; on a screen of 2560 by 1440 or more, so that a 4K one is laid out as
+; 1920 by 1080, else 1; or what boot argument scale= says, if it says 1
+; or 2.
+(def scale_of ((w int) (h int) (args (list (list int)))) int
+  (let a (scale_arg args)
+    (if (gt a 0) a (screen_scale w h))))
+
+; The scale a screen w by h has unless a boot argument says otherwise.
+(def screen_scale ((w int) (h int)) int
+  (if (if (ge w 2560) (ge h 1440) false) 2 1))
+
+; The scale the first scale= boot argument asks for, 1 or 2; 0 for none,
+; or for any other value.
+(def scale_arg ((args (list (list int)))) int
+  (if (is_empty args)
+      0
+      (if (starts_with (head args) "scale=")
+          (match (word_number (drop_n (head args) 6))
+            ((Some n) (if (if (eq n 1) true (eq n 2)) n 0))
+            ((None) 0))
+          (scale_arg (tail args)))))

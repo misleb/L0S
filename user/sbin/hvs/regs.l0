@@ -1,0 +1,116 @@
+; regs.l0 -- the Raspberry Pi 5's HVS, the BCM2712's Hardware Video
+; Scaler (SCALER6), as its registers lay it out: where it is, which of its
+; two layouts a board has, each display channel's registers, and their
+; fields. Purely. None of this has run on a board: Raspberry Pi's Linux
+; (rpi-6.12.y, vc4_regs.h and vc4_hvs.c) is the guide, and what it could
+; not confirm is on the README's first-run checklist.
+
+; The HVS in the CPU's map, bcm2712.dtsi's hvs@107c580000, and the bytes
+; of it this driver maps: its registers and its display list memory.
+(def hvs_base () int 70805618688)        ; 0x107C580000
+(def hvs_bytes () int 106496)            ; 0x1A000
+
+; ------------------------------------------------------------ the layouts
+
+; The HVS's two register layouts, the BCM2712's C0 stepping's and its
+; D0's, which move the channels' registers apart.
+(data HvsGen (HvsC0) (HvsD0))
+
+; SCALER6_VERSION, at 0: its low byte says the layout.
+(def hvs_version () int 0)
+
+; The layout a version register's word says, or none for one this driver
+; does not know: 0x53 is C0, 0x54 D0 (vc4_hvs_bind).
+(def hvs_gen_of ((w int)) (Option HvsGen)
+  (let v (bit_and w 255)
+    (if (eq v 83) (Some (HvsC0))
+        (if (eq v 84) (Some (HvsD0)) ((None HvsGen))))))
+
+; Its name, for the driver's line.
+(def hvs_gen_name ((g HvsGen)) (list int)
+  (match g ((HvsC0) "C0") ((HvsD0) "D0")))
+
+; ------------------------------------------------------------- channels
+
+; HDMI0's channel, display FIFO 0: pixelvalve 0 feeds HDMI0 and takes
+; only channel 0 (bcm2712_pv0_data).
+(def hdmi0_channel () int 0)
+
+; Where channel ch's registers start: 0x30 + 0x20 ch on C0, 0x100 +
+; 0x40 ch on D0.
+(def disp_base ((g HvsGen) (ch int)) int
+  (match g
+    ((HvsC0) (add 48 (mul 32 ch)))
+    ((HvsD0) (add 256 (mul 64 ch)))))
+
+; SCALER6_DISPX_CTRL0, the channel's enable and size; CTRL1, its
+; background's enable; BGND, the background's color. At the same places
+; in both layouts.
+(def disp_ctrl0 ((g HvsGen) (ch int)) int (disp_base g ch))
+(def disp_ctrl1 ((g HvsGen) (ch int)) int (add (disp_base g ch) 4))
+(def disp_bgnd ((g HvsGen) (ch int)) int (add (disp_base g ch) 8))
+
+; SCALER6_DISPX_LPTRS, where the channel's list starts; STATUS, where it
+; is in its frame; DL, the list it fetches now. 4 further on D0, past
+; its second background register.
+(def disp_lptrs ((g HvsGen) (ch int)) int
+  (add (disp_base g ch) (match g ((HvsC0) 12) ((HvsD0) 16))))
+(def disp_status ((g HvsGen) (ch int)) int
+  (add (disp_base g ch) (match g ((HvsC0) 20) ((HvsD0) 24))))
+(def disp_dl ((g HvsGen) (ch int)) int
+  (add (disp_base g ch) (match g ((HvsC0) 24) ((HvsD0) 28))))
+
+; --------------------------------------------------------------- fields
+
+; The bits of w from lo, n of them.
+(def bits_of ((w int) (lo int) (n int)) int
+  (bit_and (bit_shr w lo) (sub (bit_shl 1 n) 1)))
+
+; CTRL0: ENB, bit 31, whether the channel runs; FWIDTH, bits 28 to 16,
+; and LINES, 12 to 0, its width and height less one.
+(def ctrl0_enabled ((w int)) bool (eq (bits_of w 31 1) 1))
+(def ctrl0_width ((w int)) int (add (bits_of w 16 13) 1))
+(def ctrl0_height ((w int)) int (add (bits_of w 0 13) 1))
+
+; CTRL1 with BGENB, bit 8, set: what no plane covers is filled with the
+; background's color rather than left as it was.
+(def ctrl1_with_background ((w int)) int (bit_or w 256))
+
+; STATUS: MODE, bits 14 and 13, 0 disabled, 1 starting, 2 running, 3 at
+; the end of a frame; and FRCNT, bits 21 to 16, which counts frames.
+(def status_mode ((w int)) int (bits_of w 13 2))
+(def status_frames ((w int)) int (bits_of w 16 6))
+
+; DL's LACT, bits 11 to 0: the word of list memory the channel's list
+; starts at now.
+(def dl_active ((w int)) int (bits_of w 0 12))
+
+; LPTRS with HEADE, bits 11 to 0, made start: the list the channel is to
+; fetch from its next frame on.
+(def lptrs_with_head ((w int) (start int)) int
+  (bit_or (bit_and w (bit_xor 4095 -1)) (bit_and start 4095)))
+
+; ------------------------------------------------------- the list memory
+
+; The display list memory, SCALER5_DLIST_START, 0x4000 into the HVS's
+; registers: 4096 words, of which the first 32 are the bootloader's and
+; left alone (HVS_BOOTLOADER_DLIST_END).
+(def dlist_offset () int 16384)          ; 0x4000
+(def dlist_words () int 4096)
+(def dlist_first () int 32)
+
+; The driver keeps two lists, one the channel fetches and one it writes
+; the next into, so that it never writes the list being shown: the words
+; past the bootloader's halved, each half's start. 2032 words each.
+(def dlist_half_words () int (div (sub (dlist_words) (dlist_first)) 2))
+(def dlist_half_start ((k int)) int (add (dlist_first) (mul k (dlist_half_words))))
+
+; The half word start of list memory is in, 0 or 1, or -1 if neither, as
+; the firmware's own list may be.
+(def dlist_half_of ((start int)) int
+  (if (lt start (dlist_first))
+      -1
+      (if (lt start (dlist_half_start 1)) 0 (if (lt start (dlist_words)) 1 -1))))
+
+; The byte offset in the HVS's registers of word i of list memory.
+(def dlist_word_offset ((i int)) int (add (dlist_offset) (mul 4 i)))
