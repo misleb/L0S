@@ -1,0 +1,99 @@
+; phy.l0 -- the Raspberry Pi 5's Ethernet PHY, a Broadcom BCM54213PE at
+; MDIO address 1 (rp1.dtsi's ethernet-phy@1), as IEEE 802.3's clause 22
+; registers and Broadcom's shadow registers have it (Linux's broadcom.c
+; and bcm-phy-lib.c): what to write to bring it up, and the link its
+; registers say there is. Pure; the reading and writing is gem.l0's.
+
+; Where the PHY answers on the GEM's MDIO bus.
+(def phy_address () int 1)
+
+; Clause 22's registers: control, status, the two of its ID, what it
+; advertises and what its link partner does, and the same for 1000BASE-T.
+(def mii_bmcr () int 0)
+(def mii_bmsr () int 1)
+(def mii_id1 () int 2)
+(def mii_id2 () int 3)
+(def mii_adv () int 4)
+(def mii_lpa () int 5)
+(def mii_ctrl1000 () int 9)
+(def mii_stat1000 () int 10)
+
+; Broadcom's auxiliary control and shadow registers.
+(def bcm_auxctl () int 24)               ; 0x18
+(def bcm_shadow () int 28)               ; 0x1C
+
+; The PHY's ID, the two ID registers as one word, without the revision
+; in its low four bits: PHY_ID_BCM54213PE, 0x600d84a0.
+(def phy_id ((id1 int) (id2 int)) int (bit_or (bit_shl (bit_and id1 65535) 16) (bit_and id2 65535)))
+(def bcm54213pe () int 1611498656)       ; 0x600D84A0
+(def is_bcm54213pe ((id int)) bool (eq (bit_and id 4294967280) (bcm54213pe)))
+
+; Whether anything answered at the address: a bus with nothing on it
+; reads all ones, and one held in reset may read zeros.
+(def phy_answers ((id int)) bool (if (eq id 0) false (not (eq id 4294967295))))
+
+; BMCR: reset, bit 15, which clears itself once done; and
+; autonegotiation enabled, bit 12, and restarted, bit 9.
+(def bmcr_reset () int 32768)
+(def bmcr_autoneg () int 4608)           ; 0x1200
+
+; What it advertises: 10 and 100 Mb/s at either duplex and symmetric
+; pause, beside IEEE 802.3's selector, 0x05E1; and 1000 Mb/s at either,
+; 0x0300.
+(def adv_all () int 1505)
+(def ctrl1000_all () int 768)
+
+; BMSR's link status, bit 2, latched low, so read twice for the link
+; now, and autonegotiation complete, bit 5.
+(def bmsr_up ((w int)) bool (eq (bit_and w 36) 36))
+
+; ---------------------------------------------------------------- delays
+
+; RP1's MAC wants rgmii-id: the PHY delays both clocks against the data.
+; Shadow 7 of the auxiliary control register, misc control, read by
+; writing its number to both selectors, and written with WREN, bit 15,
+; and RGMII_SKEW_EN, bit 8, the receive clock's delay.
+(def auxctl_misc_read () int 28679)      ; 0x7007
+(def auxctl_misc_write ((v int)) int (bit_and 65535 (bit_or v (bit_or 32768 (bit_or 256 7)))))
+
+; Shadow 3 of register 0x1C, clock alignment control, read by writing
+; its number in bits 10 to 14, and written with bit 15 and GTXCLK_EN,
+; bit 9, the transmit clock's delay, in its ten data bits.
+(def shadow_clk_read () int 3072)        ; 3 << 10
+(def shadow_clk_write ((v int)) int (bit_or 35840 (bit_or (bit_and v 1023) 512)))   ; 0x8C00
+
+; ---------------------------------------------------------------- the link
+
+; The link: none, or up at so many Mb/s, full duplex or not.
+(data Link (LinkDown) (LinkUp int bool))
+
+; The link the PHY's registers say it negotiated: the fastest both ends
+; advertise, 1000BASE-T's first (its status register's bits 11 and 10
+; for what the partner does at full and half duplex, beside ours, bits 9
+; and 8), then 100 and 10 Mb/s from what both advertise.
+(def link_of ((bmsr int) (adv int) (lpa int) (ctrl1000 int) (stat1000 int)) Link
+  (if (not (bmsr_up bmsr))
+      (LinkDown)
+      (if (both_set ctrl1000 512 stat1000 2048)
+          (LinkUp 1000 true)
+          (if (both_set ctrl1000 256 stat1000 1024)
+              (LinkUp 1000 false)
+              (slow_link (bit_and adv lpa))))))
+
+; Whether bit a of x and bit b of y are both set.
+(def both_set ((x int) (a int) (y int) (b int)) bool
+  (if (eq (bit_and x a) 0) false (not (eq (bit_and y b) 0))))
+
+; 100 or 10 Mb/s from what both ends advertise.
+(def slow_link ((common int)) Link
+  (if (not (eq (bit_and common 256) 0)) (LinkUp 100 true)
+  (if (not (eq (bit_and common 128) 0)) (LinkUp 100 false)
+  (if (not (eq (bit_and common 64) 0)) (LinkUp 10 true)
+  (LinkUp 10 false)))))
+
+; The link as the driver says it: up at 1000 Mb/s, full duplex.
+(def link_text ((l Link)) (list int)
+  (match l
+    ((LinkDown) "link down")
+    ((LinkUp speed full)
+      (append "link up at " (append (digits speed) (if full " Mb/s, full duplex" " Mb/s, half duplex"))))))

@@ -1,0 +1,476 @@
+; gem.l0 -- a network driver for the Raspberry Pi 5's Ethernet port:
+; RP1's Cadence GEM (regs.l0), through the window L0 gives onto RP1, and
+; the Broadcom PHY behind it on its MDIO bus (phy.l0). It takes the
+; board's Ethernet address from the firmware, through the mailbox
+; (mailbox.l0), brings the PHY up to autonegotiate, and serves the nic
+; protocol, user/lib/proto/nic.l0, as nic, as virtio-net does on QEMU.
+; Its module must be flagged dev.
+;
+; It takes no interrupt, which L0's runtime does not give for RP1: it
+; polls the receive ring between requests, every millisecond when there
+; is nothing to do, and the PHY's link every half second; a link coming
+; up sets the GEM's speed and duplex, lays the rings out afresh and
+; starts it, as Linux's macb_mac_link_up does. A frame travels in a
+; message, both ways: one received is copied out of its buffer into a
+; notice, and one to send into the one transmit buffer, sent, and waited
+; for. The Pi's DMA does not see the CPU's caches, so every page is
+; cleaned after the CPU writes it and invalidated before it reads what
+; the GEM wrote (dma_sync), and receive descriptors are given back a
+; cache line at a time (rx_group). None of it has run on a board.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (fail_as "gem" why))
+
+; ---------------------------------------------------------------- the driver
+
+; What stays as it was set up: the GEM's registers; its DMA pages, opened,
+; where this process sees them, and where the GEM reaches each; NCFGR
+; with no speed; the queues it does not use; and the card's address.
+(data Hw (Hw IoDevice IoDevice int (array int) int (list int) (list int)))
+
+; The driver: its Hw; the link; the next receive descriptor to read and
+; the next transmit descriptor to fill; the ports listening; the counts;
+; and when to ask the PHY about the link next, as clock_ns counts.
+(data Gem (Gem Hw Link int int (list int) NicCounts int))
+
+; How long to nap with nothing to do, and between looks at the link.
+(def poll_ns () int 1000000)
+(def link_poll_ns () int 500000000)
+
+; The driver: the GEM found, and set up; no RP1 or no GEM is no failure.
+(def gem () int
+  (match (open_device (rp1_eth) (rp1_eth_bytes))
+    ((DeviceFailed fault why) (info_as "gem" "no RP1 on the board"))
+    ((DeviceOpened r) (identified r))))
+
+; A GEM, by its module ID, that takes 64-bit addresses, quieted and given
+; its address.
+(def identified ((r IoDevice)) int
+  (if (not (is_gem (device_read32 r (gem_mid))))
+      (info_as "gem" (append "no GEM at 0x" (hex_digits (rp1_eth) 10)))
+      (if (not (daw64 (device_read32 r (gem_dcfg6))))
+          (complain "the GEM takes no 64-bit addresses, and RP1 reaches memory only above 64 GB")
+          (let q (quieted r)
+            (match (card_mac r)
+              ((None) (complain "no Ethernet address: neither the firmware nor the GEM gives one"))
+              ((Some mac) (addressed r mac)))))))
+
+; The GEM stopped, as macb_reset_hw leaves it: receiving and sending off,
+; the management port on, its statistics, statuses and interrupts cleared.
+(def quieted ((r IoDevice)) int
+  (let a (device_write32 r (gem_ncr) (bit_or (ncr_idle) (ncr_clrstat)))
+    (let b (device_write32 r (gem_tsr) (all_bits))
+      (let c (device_write32 r (gem_rsr) (all_bits))
+        (let d (device_write32 r (gem_idr) (all_bits))
+          (device_read32 r (gem_isr)))))))
+
+; The card's address: the board's, which the firmware keeps, or else what
+; the GEM's first specific address holds, as a network boot may leave it.
+(def card_mac ((r IoDevice)) (Option (list int))
+  (let fw (firmware_mac)
+    (if (mac_usable fw)
+        (Some fw)
+        (let sa (sa_mac (device_read32 r (gem_sa1b)) (device_read32 r (gem_sa1t)))
+          (if (mac_usable sa) (Some sa) ((None (list int))))))))
+
+; The board's address, as the firmware answers for it; empty if it does not.
+(def firmware_mac () (list int)
+  (match (mailbox_open)
+    ((NoMbox why) (nil int))
+    ((MboxOpen mb)
+      (match (mailbox_ask mb (mac_request) 8)
+        ((None) (nil int))
+        ((Some ws) (mac_reply ws))))))
+
+; RPI_FIRMWARE_GET_BOARD_MAC_ADDRESS, whose value is the address's six
+; bytes, in order.
+(def tag_get_board_mac () int 65539)     ; 0x00010003
+
+; The buffer asking for it: its size, the request's code, the tag, its
+; value's 8 bytes, its own code, room for the value, and the end tag.
+(def mac_request () (list int)
+  (cons 32 (cons 0 (cons (tag_get_board_mac) (cons 8 (cons 0 (cons 0 (cons 0 (cons 0 (nil int))))))))))
+
+; The address the firmware wrote back, the value's six bytes from the
+; sixth word, the first lowest; empty if it did not succeed.
+(def mac_reply ((ws (list int))) (list int)
+  (if (if (eq (length ws) 8) (property_answered ws) false)
+      (take (append (word_bytes (nth ws 5)) (word_bytes (nth ws 6))) 6)
+      (nil int)))
+
+; w's four bytes, the lowest first.
+(def word_bytes ((w int)) (list int)
+  (cons (bit_and w 255) (cons (bit_and (bit_shr w 8) 255) (cons (bit_and (bit_shr w 16) 255) (cons (bit_and (bit_shr w 24) 255) (nil int))))))
+
+; The GEM configured for RGMII with mac its address, the PHY brought up,
+; and the GEM given its memory.
+(def addressed ((r IoDevice) (mac (list int))) int
+  (let base (ncfgr_base (mdc_div128) (dbw_of (device_read32 r (gem_dcfg1))))
+    (let a (device_write32 r (gem_ncfgr) base)
+      (let b (device_write32 r (gem_usrio) (usrio_rgmii))
+        (let c (device_write32 r (gem_amp) (amp_value (device_read32 r (gem_amp))))
+          (let d (device_write32 r (gem_sa1b) (sa_bottom mac))
+            (let e (device_write32 r (gem_sa1t) (sa_top mac))
+              (match (phy_up r)
+                ((NoPhy why) (complain why))
+                ((PhyUp id) (with_memory r base mac id))))))))))
+
+; ---------------------------------------------------------------- the PHY
+
+; Register reg of the PHY, read over MDIO; all ones if the GEM never
+; finishes, as no PHY would answer.
+(def mdio_read ((r IoDevice) (reg int)) int
+  (let w (device_write32 r (gem_man) (man_read (phy_address) reg))
+    (if (mdio_done r 1000 10) (bit_and (device_read32 r (gem_man)) 65535) 65535)))
+
+; Register reg of the PHY written v over MDIO.
+(def mdio_write ((r IoDevice) (reg int) (v int)) int
+  (let w (device_write32 r (gem_man) (man_write (phy_address) reg v))
+    (let d (mdio_done r 1000 10) 0)))
+
+; Whether the GEM has finished with the PHY maintenance register: looked
+; at up to spins times at once, since a transfer takes some 40 µs, then
+; up to naps times a millisecond apart.
+(def mdio_done ((r IoDevice) (spins int) (naps int)) bool
+  (if (nsr_idle (device_read32 r (gem_nsr)))
+      true
+      (if (gt spins 0)
+          (mdio_done r (sub spins 1) naps)
+          (if (le naps 0) false (let z (sleep_ns 1000000) (mdio_done r 0 (sub naps 1)))))))
+
+; The PHY found and brought up, its ID; or why not.
+(data PhyFound (PhyUp int) (NoPhy (list int)))
+
+; The PHY at its address: reset, its clocks delayed as rgmii-id wants if
+; it is the BCM54213PE, every speed advertised, and autonegotiating.
+(def phy_up ((r IoDevice)) PhyFound
+  (let id (phy_id (mdio_read r (mii_id1)) (mdio_read r (mii_id2)))
+    (if (not (phy_answers id))
+        (NoPhy (append "no PHY answers at MDIO address " (digits (phy_address))))
+        (let s (mdio_write r (mii_bmcr) (bmcr_reset))
+          (if (not (phy_reset_done r 500))
+              (NoPhy "the PHY does not come out of reset")
+              (let d (delayed r id)
+                (let a (mdio_write r (mii_adv) (adv_all))
+                  (let g (mdio_write r (mii_ctrl1000) (ctrl1000_all))
+                    (let n (mdio_write r (mii_bmcr) (bmcr_autoneg))
+                      (PhyUp id))))))))))
+
+; Whether BMCR's reset has cleared within n milliseconds.
+(def phy_reset_done ((r IoDevice) (n int)) bool
+  (if (eq (bit_and (mdio_read r (mii_bmcr)) (bmcr_reset)) 0)
+      true
+      (if (le n 0) false (let z (sleep_ns 1000000) (phy_reset_done r (sub n 1))))))
+
+; Both clocks delayed in the PHY, if it is the BCM54213PE; another PHY
+; is left as it came up, and said so.
+(def delayed ((r IoDevice) (id int)) int
+  (if (not (is_bcm54213pe id))
+      (warn_as "gem" (append "the PHY, 0x" (append (hex_digits id 8) ", is no BCM54213PE: its RGMII delays are as it came up")))
+      (let a (mdio_write r (bcm_auxctl) (auxctl_misc_read))
+        (let b (mdio_write r (bcm_auxctl) (auxctl_misc_write (mdio_read r (bcm_auxctl))))
+          (let c (mdio_write r (bcm_shadow) (shadow_clk_read))
+            (mdio_write r (bcm_shadow) (shadow_clk_write (mdio_read r (bcm_shadow)))))))))
+
+; The link the PHY has now: BMSR read twice, as its link bit latches low.
+(def link_now ((r IoDevice)) Link
+  (let first (mdio_read r (mii_bmsr))
+    (link_of (mdio_read r (mii_bmsr)) (mdio_read r (mii_adv)) (mdio_read r (mii_lpa))
+             (mdio_read r (mii_ctrl1000)) (mdio_read r (mii_stat1000)))))
+
+; ---------------------------------------------------------------- memory
+
+; The GEM's DMA pages taken, cleaned at once so that no line the kernel
+; zeroed is left dirty to be written over what the GEM writes, and the
+; driver started.
+(def with_memory ((r IoDevice) (base int) (mac (list int)) (id int)) int
+  (match (dma_alloc (eth_pages))
+    ((DmaPages va)
+      (match (dma_open va (eth_pages))
+        ((DeviceFailed fault why) (complain (append "cannot reach its memory: " why)))
+        ((DeviceOpened m)
+          (let addrs (dma_addresses va (eth_pages))
+            (if (not (eq (array_len addrs) (eth_pages)))
+                (complain "it cannot reach its memory")
+                (let f (dma_sync va (eth_pages) (dma_to_device))
+                  (started (Hw r m va (bus_pages addrs 0) base (extra_queues (device_read32 r (gem_dcfg6))) mac) id)))))))
+    ((DmaDenied) (complain (dma_alloc_why (DmaDenied))))
+    ((DmaTooMany) (complain (dma_alloc_why (DmaTooMany))))
+    ((DmaNoRoom) (complain (dma_alloc_why (DmaNoRoom))))))
+
+; addrs from i with RP1's offset added to each, as the GEM reaches them.
+(def bus_pages ((addrs (array int)) (i int)) (array int)
+  (if (ge i (array_len addrs))
+      addrs
+      (bus_pages (array_set addrs i (add (array_get addrs i) (eth_dma_offset))) (add i 1))))
+
+; Where the GEM reaches byte off of the driver's pages.
+(def bus_at ((hw Hw) (off int)) int
+  (match hw ((Hw r m va bus base qs mac) (add (array_get bus (div off 4096)) (mod off 4096)))))
+
+; The DMA configured, nic registered, and the driver serving, its link
+; looked at at once.
+(def started ((hw Hw) (id int)) int
+  (match hw
+    ((Hw r m va bus base qs mac)
+      (let d (device_write32 r (gem_dmacfg) (dmacfg_value (device_read32 r (gem_dmacfg))))
+        (let port (port_new)
+          (let n (name_register_or_why port "nic")
+            (if (not (is_empty n))
+                (complain n)
+                (let l (info_as "gem" (card_line mac id))
+                  (serve (Gem hw (LinkDown) 0 0 (nil int) (NicCounts 0 0 0) 0) port)))))))))
+
+; What the driver says once it serves nic: the card's address, where the
+; GEM is, and its PHY.
+(def card_line ((mac (list int)) (id int)) (list int)
+  (append "RP1's Ethernet " (append (mac_text mac)
+    (append ", a GEM at 0x" (append (hex_digits (rp1_eth) 10)
+      (append ", its PHY 0x" (append (hex_digits id 8)
+        (append " at MDIO " (append (digits (phy_address)) ", serving nic")))))))))
+
+; ws written into m from byte off, a u32 each.
+(def words_at ((m IoDevice) (off int) (ws (list int))) int
+  (if (is_empty ws) 0 (let w (device_write32 m off (head ws)) (words_at m (add off 4) (tail ws)))))
+
+; Every descriptor laid out afresh and the GEM pointed at its rings, the
+; queues it does not use at the idle descriptor: as on every link up,
+; since turning transmitting off resets the GEM's place in its rings.
+(def rings_set ((hw Hw)) int
+  (match hw
+    ((Hw r m va bus base qs mac)
+      (let i (dma_sync va 1 (dma_both_ways))
+        (let a (rx_descs_put hw 0 (rx_ring_size))
+          (let b (tx_descs_put m 0)
+            (let c (words_at m (idle_desc) (idle_desc_words))
+              (let f (dma_sync va 1 (dma_to_device))
+                (let h (device_write32 r (gem_rbqph) (hi32 (bus_at hw (rx_ring))))
+                  (let h2 (device_write32 r (gem_tbqph) (hi32 (bus_at hw (tx_ring))))
+                    (let p (device_write32 r (gem_rbqp) (lo32 (bus_at hw (rx_ring))))
+                      (let p2 (device_write32 r (gem_tbqp) (lo32 (bus_at hw (tx_ring))))
+                        (idle_queues r (lo32 (bus_at hw (idle_desc))) qs)))))))))))))
+
+; Receive descriptors from i up to end, each given its buffer.
+(def rx_descs_put ((hw Hw) (i int) (end int)) int
+  (if (ge i end)
+      0
+      (match hw
+        ((Hw r m va bus base qs mac)
+          (let w (words_at m (rx_desc i) (rx_desc_words (bus_at hw (rx_buffer i)) (eq i (sub (rx_ring_size) 1))))
+            (rx_descs_put hw (add i 1) end))))))
+
+; Transmit descriptors from i, each passed by.
+(def tx_descs_put ((m IoDevice) (i int)) int
+  (if (ge i (tx_ring_size))
+      0
+      (let w (words_at m (tx_desc i) (tx_idle_words (eq i (sub (tx_ring_size) 1)))) (tx_descs_put m (add i 1)))))
+
+; Each of qs's queues pointed both ways at the idle descriptor, at a.
+(def idle_queues ((r IoDevice) (a int) (qs (list int))) int
+  (if (is_empty qs)
+      0
+      (let t (device_write32 r (gem_tbqp_q (head qs)) a)
+        (let x (device_write32 r (gem_rbqp_q (head qs)) a) (idle_queues r a (tail qs))))))
+
+; ---------------------------------------------------------------- the link
+
+; The link looked at, if it is time: a change says so, and a link come
+; up starts the GEM at its speed, one gone stops it.
+(def link_watched ((g Gem)) Gem
+  (match g
+    ((Gem hw link rxi txi ls c due)
+      (let now (clock_ns)
+        (if (lt now due)
+            g
+            (match hw
+              ((Hw r m va bus base qs mac)
+                (let l (link_now r)
+                  (let g2 (Gem hw link rxi txi ls c (add now (link_poll_ns)))
+                    (if (eq l link) g2 (relinked g2 l)))))))))))
+
+; g with the link l, said.
+(def relinked ((g Gem) (l Link)) Gem
+  (let n (info_as "gem" (link_text l)) (link_set g l)))
+
+; g with the link l, the GEM started at its speed or stopped.
+(def link_set ((g Gem) (l Link)) Gem
+  (match g
+    ((Gem hw link rxi txi ls c due)
+      (match hw
+        ((Hw r m va bus base qs mac)
+          (let s (device_write32 r (gem_ncr) (ncr_idle))
+            (match l
+              ((LinkDown) (Gem hw l 0 0 ls c due))
+              ((LinkUp speed full)
+                (let f (device_write32 r (gem_ncfgr) (ncfgr_link base speed full))
+                  (let rs (rings_set hw)
+                    (let on (device_write32 r (gem_ncr) (ncr_running))
+                      (Gem hw l 0 0 ls c due))))))))))))
+
+; Whether the link is up.
+(def link_up ((g Gem)) bool
+  (match g ((Gem hw link rxi txi ls c due) (match link ((LinkDown) false) ((LinkUp s f) true)))))
+
+; ---------------------------------------------------------------- serving
+
+; Each request waiting answered; with none, every frame received told,
+; and with none of those, a nap and a look at the link.
+(def serve ((g Gem) (port int)) int
+  (match (port_try_receive port)
+    ((Message from payload) (serve (requested g payload) port))
+    ((RecvFailed)
+      (match (drained g 0)
+        ((Drained g2 n)
+          (if (gt n 0) (serve g2 port) (let z (sleep_ns (poll_ns)) (serve (link_watched g2) port))))))))
+
+; A request answered: send puts a frame on the wire, listen adds the
+; reply port to those told of frames, info and stats say what they say.
+(def requested ((g Gem) (payload (list int))) Gem
+  (let body (request_body payload)
+    (match (nic_sent_frame body)
+      ((Some frame) (answered (transmitted g frame) payload))
+      ((None)
+        (if (eq body "listen")
+            (listened g (request_reply payload))
+            (answered (asked g body) payload))))))
+
+; info, stats, or anything else, which is refused.
+(def asked ((g Gem) (body (list int))) (Served Gem)
+  (match g
+    ((Gem hw link rxi txi ls c due)
+      (match hw
+        ((Hw r m va bus base qs mac)
+          (if (eq body "info") (Served g (append "nic " (mac_text mac)))
+          (if (eq body "stats") (Served g (nic_counts_text c))
+          (served_error g (append "no request " (take_line body))))))))))
+
+; A request's answer, to its reply port if it names one.
+(def answered ((s (Served Gem)) (payload (list int))) Gem
+  (match s ((Served g answer) (let a (request_answer payload answer) g))))
+
+; g with port listening, if it is one and the answer to its listen says
+; it is still there.
+(def listened ((g Gem) (port int)) Gem
+  (if (le port 0)
+      g
+      (match g
+        ((Gem hw link rxi txi ls c due)
+          (Gem hw link rxi txi (listener_add ls port (port_send port "ok")) c due)))))
+
+; g with its counts c2.
+(def with_counts ((g Gem) (c2 NicCounts)) Gem
+  (match g ((Gem hw link rxi txi ls c due) (Gem hw link rxi txi ls c2 due))))
+
+; The driver's counts.
+(def gem_counts ((g Gem)) NicCounts (match g ((Gem hw link rxi txi ls c due) c)))
+
+; ---------------------------------------------------------------- sending
+
+; frame put on the wire, or why not.
+(def transmitted ((g Gem) (frame (list int))) (Served Gem)
+  (let why (nic_frame_refusal frame)
+    (if (not (is_empty why))
+        (served_error (with_counts g (nic_counted_tx (gem_counts g) false)) why)
+        (if (not (link_up g))
+            (served_error (with_counts g (nic_counted_tx (gem_counts g) false)) "no link")
+            (transmit g (nic_padded frame))))))
+
+; How long a frame may take to go, in tenths of a millisecond: 100 ms,
+; past a frame of 1514 bytes at 10 Mb/s, 1.2 ms, many times over.
+(def tx_tries () int 1000)
+
+; The frame bs copied into the transmit buffer, its descriptor filled,
+; both pages cleaned, the GEM told to start, and the frame waited for;
+; a frame that failed or never went restarts the GEM, whose transmit
+; side stops at an error.
+(def transmit ((g Gem) (bs (list int))) (Served Gem)
+  (match g
+    ((Gem hw link rxi txi ls c due)
+      (match hw
+        ((Hw r m va bus base qs mac)
+          (let i (dma_sync va 2 (dma_both_ways))
+            (let w (put_bytes m (tx_buffer) bs)
+              (let d (words_at m (tx_desc txi) (tx_frame_words (bus_at hw (tx_buffer)) (length bs) (eq txi (sub (tx_ring_size) 1))))
+                (let f (dma_sync va 2 (dma_to_device))
+                  (let s (device_write32 r (gem_ncr) (bit_or (ncr_running) (ncr_tstart)))
+                    (let st (tx_waited m va txi (tx_tries))
+                      (let x (device_write32 r (gem_tsr) (all_bits))
+                        (match st
+                          ((TxSent) (served_ok (Gem hw link rxi (mod (add txi 1) (tx_ring_size)) ls (nic_counted_tx c true) due)))
+                          ((TxFailed) (served_error (restarted g (nic_counted_tx c false)) "the frame failed on the wire"))
+                          ((TxPending) (served_error (restarted g (nic_counted_tx c false)) "the GEM did not send the frame")))))))))))))))
+
+; What transmit descriptor i says, looked at up to n times 100 µs apart
+; while it is still pending.
+(def tx_waited ((m IoDevice) (va int) (i int) (n int)) TxState
+  (let s (dma_sync va 1 (dma_from_device))
+    (let st (tx_state (device_read32 m (add (tx_desc i) 4)))
+      (match st
+        ((TxPending) (if (le n 0) st (let z (sleep_ns 100000) (tx_waited m va i (sub n 1)))))
+        ((TxSent) st)
+        ((TxFailed) st)))))
+
+; g with counts c, its GEM restarted as a link come up starts it.
+(def restarted ((g Gem) (c NicCounts)) Gem
+  (match g ((Gem hw link rxi txi ls c0 due) (link_set (Gem hw link rxi txi ls c due) link))))
+
+; -------------------------------------------------------------- receiving
+
+; g with every frame received told, up to the ring's size at a time,
+; after n told, and how many.
+(data Drained (Drained Gem int))
+
+; Every frame received from the next descriptor on told, after n.
+(def drained ((g Gem) (n int)) Drained
+  (if (ge n (rx_ring_size))
+      (Drained g n)
+      (match (rx_next g)
+        ((None) (Drained g n))
+        ((Some g2) (drained g2 (add n 1))))))
+
+; The next receive descriptor read, once its line is invalidated: its
+; frame told, or counted lost, and the descriptor passed; or none if the
+; GEM has not used it, or there is no link and so no ring.
+(def rx_next ((g Gem)) (Option Gem)
+  (if (not (link_up g))
+      ((None Gem))
+      (match g
+        ((Gem hw link rxi txi ls c due)
+          (match hw
+            ((Hw r m va bus base qs mac)
+              (let s (dma_sync va 1 (dma_from_device))
+                (match (rx_slot (device_read32 m (rx_desc rxi)) (device_read32 m (add (rx_desc rxi) 4)))
+                  ((RxEmpty) ((None Gem)))
+                  ((RxFrame len) (Some (rx_passed (rx_told g len))))
+                  ((RxBad) (Some (rx_passed (with_counts g (nic_counted_rx c false)))))))))))))
+
+; The frame of len bytes in the next descriptor's buffer, once its page
+; is invalidated, told to every listener and counted; one too short or
+; too long to be a frame, or with no one to tell, is a frame dropped.
+(def rx_told ((g Gem) (len int)) Gem
+  (match g
+    ((Gem hw link rxi txi ls c due)
+      (if (if (lt len (frame_min)) true (gt len (frame_max)))
+          (with_counts g (nic_counted_rx c false))
+          (match hw
+            ((Hw r m va bus base qs mac)
+              (let s (dma_sync (add va (rx_buffer rxi)) 1 (dma_from_device))
+                (let frame (get_bytes m (rx_buffer rxi) len)
+                  (Gem hw link rxi txi (listeners_tell ls (frame_notice frame)) (nic_counted_rx c (not (is_empty ls))) due)))))))))
+
+; Past the next descriptor; once the four of a cache line are used, they
+; are given back their buffers together and the line cleaned.
+(def rx_passed ((g Gem)) Gem
+  (match g
+    ((Gem hw link rxi txi ls c due)
+      (let next (add rxi 1)
+        (let given (if (eq (mod next (rx_group)) 0) (rx_given_back hw (sub next (rx_group)) next) 0)
+          (Gem hw link (mod next (rx_ring_size)) txi ls c due))))))
+
+; Receive descriptors from i up to end given their buffers again, and
+; their page cleaned.
+(def rx_given_back ((hw Hw) (i int) (end int)) int
+  (match hw
+    ((Hw r m va bus base qs mac)
+      (let w (rx_descs_put hw i end)
+        (match (dma_sync va 1 (dma_to_device)) ((DmaSynced n) n) ((DmaSyncDenied) 0) ((DmaSyncBad) 0))))))

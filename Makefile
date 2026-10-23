@@ -115,10 +115,12 @@ ULIB   := $(COMMON) common/queue.l0 common/klog.l0 $(CLI) user/lib/sys/l0s.l0 us
 
 # A terminal's line editing, for the terminals; the virtio-mmio
 # transports and queues, for the virtio drivers; and the US keyboard's
-# layout, for the keyboards' drivers.
+# layout, for the keyboards' drivers; and the Raspberry Pi 5's VideoCore
+# mailbox, for the drivers that ask its firmware.
 TTY    := user/lib/sys/tty.l0
 VIRTIO := user/lib/sys/virtio.l0
 KEYMAP := user/lib/sys/keymap.l0
+MAILBOX := user/lib/sys/mailbox.l0
 
 # The process table as ps and procmon show it.
 PROCS  := user/lib/sys/procs.l0
@@ -186,13 +188,14 @@ LIBS_lsusb      := $(USBLIB)
 LIBS_sdhci      := $(PCILIB) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-blk := $(VIRTIO) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-net := $(VIRTIO) $(NICLIB)
+LIBS_gem        := $(NICLIB) $(MAILBOX)
 LIBS_virtio-rng := $(VIRTIO) $(RANDOM)
 LIBS_inet       := $(INETLIB) $(CLOCK)
 LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(INETLIB)
 LIBS_uart       := $(TTY)
-LIBS_rtc        := $(CLOCK)
+LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(PATHS)
 LIBS_init       := $(PATHS)
@@ -300,6 +303,7 @@ test: sample
 	$(L0) test $(ULIB) $(VIRTIO) user/lib/sys/virtio_test.l0
 	$(L0) test $(ULIB) $(TTY) user/lib/sys/tty_test.l0
 	$(L0) test $(BASE) $(KEYMAP) user/lib/sys/keymap_test.l0
+	$(L0) test $(ULIB) $(MAILBOX) user/lib/sys/mailbox_test.l0
 	$(L0) test $(ULIB) $(RECT) user/lib/gfx/rect_test.l0
 	$(L0) test $(ULIB) $(RENDER) user/lib/gfx/render_test.l0
 	$(L0) test $(ULIB) $(CLOCK) user/lib/proto/clock_test.l0

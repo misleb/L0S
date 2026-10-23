@@ -1135,6 +1135,11 @@ waited for, as `virtio-blk` waits. It serves **the nic protocol**
 | `listen` | `ok`; then every frame taken comes to the reply port as a notice, `frm` and the frame, 14 to 1514 bytes |
 | `send FRAME` | the frame, without its check sequence, put on the wire, padded to 60 bytes; answered only if the request names a reply port |
 
+On the Raspberry Pi 5 the same protocol is served by `gem`
+([user/sbin/gem](user/sbin/gem/gem.l0)), so `inet` and everything above
+it are the same there; see [The network on the Raspberry Pi
+5](#the-network-on-the-raspberry-pi-5).
+
 `inet` ([user/sbin/inet](user/sbin/inet/inet.l0)) is IPv4: Ethernet,
 ARP, IPv4, ICMP, UDP and TCP, with each packet built and read in
 [packet.l0](user/sbin/inet/packet.l0) and [segment.l0](user/sbin/inet/segment.l0)
@@ -1474,8 +1479,9 @@ The board's EEPROM must try the network: `BOOT_ORDER=0xf21`, from
 the network. The network's DHCP server must name the TFTP server, as a
 proxy can for an existing network; with dnsmasq that is
 `dhcp-range=192.168.1.0,proxy`, `pxe-service=0,"Raspberry Pi Boot"`,
-`enable-tftp` and `tftp-root=build/pi5-tftp`. L0S itself still has no
-network on the Pi: only the firmware uses it, to fetch the files.
+`enable-tftp` and `tftp-root=build/pi5-tftp`. Once booted, L0S has its
+own driver for the same port, `gem` (see [The network on the Raspberry
+Pi 5](#the-network-on-the-raspberry-pi-5)).
 
 The kernel is the same source as QEMU's. Only the board under it is L0's
 other host: the GIC-400, the generic timer at 54 MHz, and the debug UART
@@ -1494,11 +1500,12 @@ That is enough for about 9 GB of pages given at once (see
 | `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)): until L0 gives a region over the HVS it says there is none and exits, and `wm` waits for a display |
 | `fs ram` | a volume in memory, `/Volumes/tmp`, since L0 gives no region over the Pi's SD controller |
-| `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0`). It keeps time over a power cut only with a battery on the RTC connector |
+| `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). It keeps time over a power cut only with a battery on the RTC connector |
+| `gem`, `inet dhcp` | the Ethernet port, RP1's GEM, serving `nic`, and the IPv4 stack over it at the address DHCP gives (see [The network on the Raspberry Pi 5](#the-network-on-the-raspberry-pi-5)) |
 
-Nothing else of the demo's has a device here: no virtio, no PCIe for
-`pcie virt`, and no `sdhci pci`. The first boot should check these, on
-the debug UART (`dmesg` repeats them):
+Nothing else of the demo's has a device here: no virtio, so no `random`
+for `inet`'s TCP, no PCIe for `pcie virt`, and no `sdhci pci`. The first
+boot should check these, on the debug UART (`dmesg` repeats them):
 - the kernel's banner: `aarch64`, the pages free, and the initramfs
 - `uart`'s line, and that what is typed reaches `sh`
 - `rtc`'s line and its time. The mailbox's message is given the page's
@@ -1506,6 +1513,67 @@ the debug UART (`dmesg` repeats them):
   says, not the Pi 4's 0xC0000000 above it: unconfirmed
 - `xhci`'s lines and `usb-hid`'s (see [USB](#usb))
 - `hvs` saying it found no HVS, until L0 has the regions
+- `gem`'s line, its link line once a cable is in, and `inet`'s lease
+  (see [The network on the Raspberry Pi 5](#the-network-on-the-raspberry-pi-5))
+
+### The network on the Raspberry Pi 5
+
+```
+inet ──nic──▶ gem ──MDIO──▶ BCM54213PE PHY ──▶ the RJ45 port
+     ◀─frm──      ──DMA, 64 GB up──▶ RP1's GEM
+```
+
+`gem` ([user/sbin/gem](user/sbin/gem/gem.l0)) drives the Pi 5's Ethernet
+port and serves the nic protocol as `nic`, as `virtio-net` does on QEMU.
+It is a first draft that has run nowhere: what it writes follows Linux's
+macb driver and RP1's device tree, Raspberry Pi's rpi-6.12.y. The port
+is RP1's Cadence GEM, at RP1's 0x40100000, which L0's region onto RP1
+holds at 0x1F00100000 ([regs.l0](user/sbin/gem/regs.l0)), and behind it
+a Broadcom BCM54213PE PHY at MDIO address 1
+([phy.l0](user/sbin/gem/phy.l0)). It:
+
+- knows the GEM by its module ID and checks that it takes 64-bit
+  addresses, since RP1 reaches the Pi's memory 0x10_0000_0000 above the
+  CPU's addresses. With no RP1, as on QEMU, it says so and exits 0
+- takes the board's Ethernet address from the firmware,
+  `GET_BOARD_MAC_ADDRESS` through the mailbox
+  ([mailbox.l0](user/lib/sys/mailbox.l0), shared with `rtc`), or else
+  what the GEM's first specific address already holds
+- sets the GEM up for RGMII with MDC at pclk / 128, resets the PHY, has
+  it delay both clocks (rgmii-id: shadow 7's `RGMII_SKEW_EN`, shadow 3's
+  `GTXCLK_EN`), advertises every speed and autonegotiates
+- keeps a receive ring of 32 buffers of 2048 bytes and a transmit ring
+  of 8, in 18 DMA pages, with 16-byte descriptors (`ADDR64`); the queues
+  it does not use point at one descriptor marked used
+- polls, as L0 gives no interrupt for RP1: the receive ring between
+  requests, every millisecond when idle, and the PHY's link every half
+  second. A link coming up sets NCFGR's speed and duplex, lays the rings
+  out afresh and enables the GEM, as `macb_mac_link_up` does; a link
+  going down disables it. Each is a line in the log
+- sends one frame at a time and waits up to 100 ms for the GEM to mark
+  its descriptor used; a frame that fails or never goes restarts the
+  GEM, whose transmit side stops at an error
+
+The Pi's DMA does not see the CPU's caches, so every page is cleaned
+right after the CPU writes it and invalidated before it reads what the
+GEM wrote. Four receive descriptors share a cache line, and cleaning a
+line would undo what the GEM had written since into the others, so they
+are given back four at a time, once the GEM has used all of the line's.
+
+The first run should check, beside `gem`'s line, which names its
+address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
+- that the firmware gives the address. Without it, and with nothing in
+  SA1B and SA1T, `gem` fails
+- that the PHY answers. "No PHY answers" means it is still held in
+  reset by RP1's GPIO 32 (`phy-reset-gpios`, which Linux pulses), which
+  `gem` does not drive, or the PHY is not at address 1
+- the link line, and frames both ways: `inet`'s lease, `ping`. A link
+  with nothing sent may mean RP1's Ethernet clocks were left off by the
+  firmware (`clk_eth`, `clk_eth_tsu` in RP1's clocks block, which `gem`
+  does not set up), or the RGMII delays are doubled or missing
+- the AXI pipelining register, AMP at 0x54 (`cdns,ar2r-max-pipe`,
+  `cdns,use-aw2b-fill`), which Raspberry Pi's macb adds, unconfirmed
+- that DCFG1 gives the bus's width, and DCFG6 the queues there are
 
 ### Apps
 
@@ -1636,7 +1704,7 @@ that has a disk too still starts the disk's `fs` as before. A program can
 use it as any volume, as the shell does (`cp /bin/hello /Volumes/tmp/bin`,
 `run /Volumes/tmp/bin/hello`). Booted with `root=tmpfs`, `boot` has
 `install tmp` copy the initramfs onto it, which takes the moments of its
-49 files, and then makes it `/` as for a system volume, so that `/` can be
+56 files, and then makes it `/` as for a system volume, so that `/` can be
 written, directories made, and apps installed (see [the
 launcher](#the-desktop)), with no disk on the board. The inittab starts
 `fs ram` beside `boot`, as `tests/e2e/rootboot_tmpfs` does; without it,
@@ -1974,11 +2042,11 @@ initramfs, so that the Makefile finds it there:
 | Directory | What | In the initramfs |
 |---|---|---|
 | `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `lsusb`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `hvs`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `hvs`, `virtio-input`, `virtio-blk`, `virtio-net`, `gem`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `rtc` `firmware.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0` and `iommu.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `rtc` `firmware.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0` and `iommu.l0`, `gem` `regs.l0` and `phy.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
@@ -1995,7 +2063,7 @@ every `.l0` in its directory is part of it.
 | `ping` | a client: finds `echo` by name and checks that N requests come back |
 | `spin` | loops forever without a call; other processes still run, thanks to the timer |
 | `nap` | sleeps for N ms and checks that the time passed |
-| `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc`. Its clock is a PL031 where the kernel gives one whose ID registers say so, or else the Raspberry Pi 5's RTC, asked of the firmware through the mailbox (`firmware.l0`, see [The Raspberry Pi 5](#the-raspberry-pi-5)); with neither it says so and exits 0 |
+| `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc`. Its clock is a PL031 where the kernel gives one whose ID registers say so, or else the Raspberry Pi 5's RTC, asked of the firmware through the mailbox (`firmware.l0` over `mailbox.l0`, see [The Raspberry Pi 5](#the-raspberry-pi-5)); with neither it says so and exits 0 |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `hvs` | the Raspberry Pi 5's display driver, a first draft that has run nowhere, serving the display protocol as `display` as `virtio-gpu` does (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)). It takes HDMI0's channel of the BCM2712's HVS at the mode the firmware left. It shows the layers as one display list of planes fetched straight from the clients' pages, each buffer made one run of addresses by the IOMMU in front of the HVS. It writes each list in the half of the list memory the channel isn't fetching, then moves the channel to it. A `damage` cleans the damaged rows' pages out of the caches, and the pointer is a plane on top. Corners are not cut yet. With no region over the HVS, as on QEMU and, until L0 gives one, on a Pi, it says so and exits 0 |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
@@ -2005,6 +2073,7 @@ every `.l0` in its directory is part of it.
 | `usb-hid` | the class driver of USB boot keyboards and mice (see [USB](#usb)), started once for each: `usb-hid keyboard` claims every boot keyboard, sets the boot protocol and SET_IDLE(0), opens its interrupt endpoint, and serves `keyboard`, sending a `KeyEvent` for each key its reports press or let go, with the character `keymap.l0` says, and repeating a held key itself, 500 ms then every 33 ms; `usb-hid mouse` claims every boot mouse and serves `pointer`, sending a `PointerMotion` of each report. It drives no device, and needs no `dev` line |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as the first `diskN` free, `disk0` in the demo, and telling `fs` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own, for 30 seconds at most, after which it takes the disk to have stopped answering and fails every request. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
+| `gem` | the Raspberry Pi 5's network driver, a first draft that has run nowhere, serving the nic protocol as `nic` as `virtio-net` does (see [The network on the Raspberry Pi 5](#the-network-on-the-raspberry-pi-5)). It drives RP1's Cadence GEM and the BCM54213PE PHY behind it over MDIO, takes the board's address from the firmware through the mailbox, and polls its rings and the link, since L0 gives no interrupt for RP1. With no RP1 on the board, as on QEMU, it says so and exits 0 |
 | `virtio-rng` | a user-space driver for QEMU's virtio-rng, the entropy device, which draws on the host's `/dev/urandom`, serving the random protocol as `random` (see [Randomness](#randomness)). It finds the device, sets up its one queue of 8 entries in a DMA page, and for `bytes N` offers the device a buffer to fill, again until it has N, waiting for each as `virtq_wait` does. With no virtio-rng on the board it says so on stderr and exits 0 |
 | `inet` | the IPv4 stack, `inet dhcp` or `inet [ADDR/PREFIX [GATEWAY [DNS]]]`: the address, netmask, router and name server a DHCP server gives it, its lease renewed and rebound as the clock's minutes pass, or those given, 10.0.2.15/24 behind 10.0.2.2, with 10.0.2.3 as the name server, by default (see [The network](#the-network)): a client of `nic`, which answers ARP and ICMP echo requests, keeps the neighbours ARP finds, routes to the link or the gateway, gives UDP datagrams to the clients bound to their ports, and sends their datagrams and echo requests, serving the inet protocol as `inet`. With no `nic` within 5 seconds it says there is no card and exits 0 |
 | `net` | a client of `inet`: `net` shows the interface, `net stats`, `net arp`, `net dns` and `net tcp` what `inet` counts and knows (the last, its TCP connections and listeners), `net resolve NAME [SERVER [PORT]]` resolves a name, `net ping [-q] HOST [COUNT]` pings, a second apart, and says how long each reply took, failing if none came, `net send HOST PORT TEXT...` sends a datagram, `net recv PORT` waits for one and shows it, and `net echo PORT` listens to a TCP port and sends back what its first connection sends. A HOST is a name, resolved first, or an address |
@@ -2044,6 +2113,7 @@ name in a library is taken in every program that links it.
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
 | [sys/keymap.l0](user/lib/sys/keymap.l0) | the US keyboard's layout over Linux's key codes: what a key types alone, shifted, with Caps Lock and with Ctrl, and the modifiers each key event leaves held (`KEYMAP`) | `virtio-input`, `usb-hid` |
+| [sys/mailbox.l0](user/lib/sys/mailbox.l0) | the Raspberry Pi 5's VideoCore mailbox and the firmware's property interface over it: a page below 4 GB for the buffer, `mailbox_ask` with a buffer's words, and whether the firmware's answer succeeded (`property_answered`) (`MAILBOX`) | `rtc`, `gem` |
 | [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng` |
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
 | [proto/display_server.l0](user/lib/proto/display_server.l0) | the display protocol, as a driver serves it: a `Layer`, a buffer's `Corners` and the radii it may have, requests' numbers read (`layers_of`, a buffer's pages and stride), damage cut to the screen, and `info`'s answer with the scale (`scale_of`, `scale=`) | `virtio-gpu`, `hvs` |
@@ -2052,7 +2122,7 @@ name in a library is taken in every program that links it.
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol: disks' names, `disk0` on, the disks there are, a driver's disk registered under the first name free and a request's disk read; as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks`, `virtio-blk`, `sdhci` |
 | [proto/random.l0](user/lib/proto/random.l0) | the random protocol: its request and reply, and `random_bytes` and `random_word`, which ask `virtio-rng` for bytes and do without when it is not there (`RANDOM`) | `virtio-rng`, `random`, `fs`, and with `INETLIB` |
 | [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` (of a disk named) and `mkfs`, to `fs`'s, and `attach`, which a disk's driver tells it; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, `virtio-blk`, `sdhci`, and every program `PATHS` is in |
-| [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text (`NICLIB`) | `virtio-net`, and with `INETLIB` |
+| [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text; what its drivers keep alike, the counts `stats` gives, why a frame is refused, and padding (`NICLIB`) | `virtio-net`, `gem`, and with `INETLIB` |
 | [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; resolving a name, `inet_resolve`, by asking the interface's name server over UDP; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`, `dns.l0` and `random.l0`) | `inet`, `net`, `tftp`, `http` |
 | [proto/usb.l0](user/lib/proto/usb.l0) | the usb protocol: its notices, a device plugged in or unplugged and an endpoint's report; its requests and answers, bytes in hex; and asking for devices, descriptors and configurations (`USBLIB`, with `usbdesc.l0`) | `xhci`, `usb-hid`, `lsusb` |
 | [proto/pci.l0](user/lib/proto/pci.l0) | the pci protocol: a function's line, its BDF, ids, class, interrupt and BARs, and `pci_find`, the functions of a class (`PCILIB`) | `pcie`, `xhci` |
@@ -2222,9 +2292,9 @@ line, which is refused the device, `virtio-blk_nodisk` the disk's driver
 on a board with no disk, `fs_nodisk` the file server there,
 `virtio-net_nocard` the network's driver on a board with no card, and
 `inet_nocard` the stack with no driver, `virtio-rng_nodev` the
-entropy device's driver on a board with none, and `hvs_nohvs` the Pi 5's
-display driver on a board with no HVS, none of which is a
-failure. `virtio-blk_ro` has `disk` write to a read-only disk, which the
+entropy device's driver on a board with none, `hvs_nohvs` the Pi 5's
+display driver on a board with no HVS, and `gem_norp1` its network
+driver on a board with no RP1, none of which is a failure. `virtio-blk_ro` has `disk` write to a read-only disk, which the
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
 of a line, which its `pattern` checks. `garbage`
@@ -2535,6 +2605,10 @@ a bad buffer, and wait on nothing.
   `virtio-net` drives the first card on the board, sends one frame at a
   time and waits up to 2 seconds for the card to take it, and accepts no feature but
   its address, so it neither offloads checksums nor merges buffers.
+  On the Pi 5, `gem` also sends one frame at a time, waiting up to
+  100 ms, takes frames of up to 1536 bytes in one buffer each, no
+  jumbo frames and no multicast, and polls rather than taking
+  interrupts.
   `inet` has one interface, set by its arguments or by DHCP, which
   takes no other options than the mask, the first router and the first
   name server. Its lease is looked at only when `rtc clock` tells it a

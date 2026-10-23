@@ -1,0 +1,247 @@
+; regs.l0 -- the Raspberry Pi 5's Ethernet MAC: RP1's Cadence GEM, its
+; registers, the words written into them, and its DMA descriptors, as
+; Linux's macb driver (macb.h, macb_main.c, rpi-6.12.y) has them. Pure.
+; None of this has run on a board: the README's "The network on the
+; Raspberry Pi 5" lists what the first run must confirm.
+
+; The GEM in the CPU's map: RP1's 0x40100000 (rp1.dtsi's ethernet@100000)
+; through the window L0 gives onto RP1 at 0x1F00000000, and its bytes.
+(def rp1_eth () int 133145034752)        ; 0x1F00100000
+(def rp1_eth_bytes () int 16384)         ; 0x4000
+
+; Where RP1 reaches the Pi's memory: 0x10_0000_0000 above the CPU's
+; address, bcm2712's dma-ranges for it.
+(def eth_dma_offset () int 68719476736)
+
+; ---------------------------------------------------------------- registers
+
+; The network control, configuration and status registers, the user IO
+; register, the DMA configuration, the transmit and receive status, the
+; queues' descriptor pointers, the interrupt disable register, the PHY
+; maintenance register, the first specific address, and the module ID.
+(def gem_ncr () int 0)
+(def gem_ncfgr () int 4)
+(def gem_nsr () int 8)
+(def gem_usrio () int 12)                ; 0x00C
+(def gem_dmacfg () int 16)               ; 0x010
+(def gem_tsr () int 20)                  ; 0x014
+(def gem_rbqp () int 24)                 ; 0x018
+(def gem_tbqp () int 28)                 ; 0x01C
+(def gem_rsr () int 32)                  ; 0x020
+(def gem_isr () int 36)                  ; 0x024
+(def gem_idr () int 44)                  ; 0x02C
+(def gem_man () int 52)                  ; 0x034
+(def gem_sa1b () int 136)                ; 0x088
+(def gem_sa1t () int 140)                ; 0x08C
+(def gem_mid () int 252)                 ; 0x0FC
+
+; The AXI pipelining register Raspberry Pi's macb adds for RP1's
+; cdns,ar2r-max-pipe and cdns,use-aw2b-fill: UNCONFIRMED.
+(def gem_amp () int 84)                  ; 0x054
+
+; The design configuration: DCFG1, the bus's width; DCFG6, the queues
+; there are and whether addresses are 64 bits.
+(def gem_dcfg1 () int 640)               ; 0x280
+(def gem_dcfg6 () int 660)               ; 0x294
+
+; The upper 32 bits of every queue's descriptors' address, shared.
+(def gem_tbqph () int 1224)              ; 0x4C8
+(def gem_rbqph () int 1236)              ; 0x4D4
+
+; Queue q's transmit and receive descriptor pointers, for q from 1.
+(def gem_tbqp_q ((q int)) int (add 1088 (mul 4 (sub q 1))))   ; 0x440
+(def gem_rbqp_q ((q int)) int (add 1152 (mul 4 (sub q 1))))   ; 0x480
+
+; NCR's bits: receive and transmit enable, the management port (MDIO)
+; enable, clear statistics, and start transmission.
+(def ncr_re () int 4)
+(def ncr_te () int 8)
+(def ncr_mpe () int 16)
+(def ncr_clrstat () int 32)
+(def ncr_tstart () int 512)
+
+; NCR with the management port on and nothing moving, as it is set up;
+; and with receiving and transmitting on, once there is a link.
+(def ncr_idle () int (ncr_mpe))
+(def ncr_running () int (bit_or (ncr_mpe) (bit_or (ncr_re) (ncr_te))))
+
+; NSR's IDLE, bit 2: the PHY maintenance register has finished.
+(def nsr_idle ((w int)) bool (eq (bit_and w 4) 4))
+
+; NCFGR: frames of up to 1536 bytes (BIG, bit 8), pause frames heeded
+; (PAE, 13), the check sequence not copied to memory (DRFCS, 17), MDC
+; as pclk divided (CLK, bits 18 to 20), and the AXI bus's width (DBW,
+; 21 and 22), with no speed: 10 Mb/s, half duplex.
+(def ncfgr_base ((mdc int) (dbw int)) int
+  (bit_or (bit_or 256 8192) (bit_or 131072 (bit_or (bit_shl mdc 18) (bit_shl dbw 21)))))
+
+; MDC's divisor: pclk / 128, code 6, which keeps MDC under 2.5 MHz for a
+; pclk of up to 320 MHz; RP1's is 200 MHz (rp1.dtsi's macb_pclk), for
+; which Linux takes / 96.
+(def mdc_div128 () int 6)
+
+; base with the link's speed and duplex: SPD, bit 0, for 100 Mb/s, GBE,
+; bit 10, for 1000, and FD, bit 1, for full duplex.
+(def ncfgr_link ((base int) (speed int) (full bool)) int
+  (bit_or base
+    (bit_or (if (eq speed 1000) 1024 (if (eq speed 100) 1 0)) (if full 2 0))))
+
+; DBW for DCFG1's DBWDEF, bits 25 to 27: 128 bits wide, 64, or 32.
+(def dbw_of ((dcfg1 int)) int
+  (let d (bit_and (bit_shr dcfg1 25) 7)
+    (if (eq d 4) 2 (if (eq d 2) 1 0))))
+
+; DCFG6's DAW64, bit 23: the DMA takes 64-bit addresses. RP1 reaches
+; memory 64 GB up, so nothing works without it.
+(def daw64 ((dcfg6 int)) bool (eq (bit_and (bit_shr dcfg6 23) 1) 1))
+
+; The queues beyond the first that DCFG6's low byte says are there, by
+; number, from 1.
+(def extra_queues ((dcfg6 int)) (list int) (queues_from dcfg6 7 (nil int)))
+
+; Those from q down to 1, onto acc.
+(def queues_from ((dcfg6 int) (q int) (acc (list int))) (list int)
+  (if (lt q 1)
+      acc
+      (queues_from dcfg6 (sub q 1) (if (eq (bit_and (bit_shr dcfg6 q) 1) 1) (cons q acc) acc))))
+
+; MID's IDNUM, bits 16 to 27: 2 and above is a GEM, 0xFFF no device.
+(def idnum_of ((mid int)) int (bit_and (bit_shr mid 16) 4095))
+(def is_gem ((mid int)) bool
+  (let id (idnum_of mid) (if (ge id 2) (lt id 4095) false)))
+
+; USRIO for RGMII, its bit 0 on a GEM (macb_default_usrio), as RP1's
+; phy-mode, rgmii-id, wants.
+(def usrio_rgmii () int 1)
+
+; DMACFG over old: bursts of 16 (FBLDO), the whole of both packet
+; buffers (RXBMS, TXPBMS), receive buffers of 2048 bytes in units of 64
+; (RXBS, bits 16 to 23), 64-bit addresses (ADDR64, bit 30), and the
+; fields it sets cleared first, with them both endian swaps, the
+; transmit checksum offload, and the extended descriptors, since frames
+; are copied whole and have no timestamps.
+(def dmacfg_value ((old int)) int
+  (bit_and 4294967295
+    (bit_or (bit_and old (bit_xor (dmacfg_owned) -1)) (dmacfg_ours))))
+
+; FBLDO 16, RXBMS 3, TXPBMS, RXBS 32, ADDR64: 0x40200710.
+(def dmacfg_ours () int
+  (bit_or 16 (bit_or 768 (bit_or 1024 (bit_or (bit_shl (div (buffer_size) 64) 16) 1073741824)))))
+
+; Bits 0 to 4, 6 to 11, 16 to 23, and 28 to 30.
+(def dmacfg_owned () int 1895763935)     ; 0x70FF0FDF
+
+; AMP over old: AR2R_MAX_PIPE, bits 0 to 7, 8, and AW2B_FILL, bit 16, as
+; RP1's device tree asks: UNCONFIRMED.
+(def amp_value ((old int)) int (bit_or (bit_or (bit_and old (bit_xor 255 -1)) 8) 65536))
+
+; Every bit of a 32-bit register, to clear a status or disable every
+; interrupt.
+(def all_bits () int 4294967295)
+
+; The station address registers for mac: its first four bytes, the
+; first lowest, and its last two.
+(def sa_bottom ((mac (list int))) int
+  (bit_or (nth mac 0) (bit_or (bit_shl (nth mac 1) 8) (bit_or (bit_shl (nth mac 2) 16) (bit_shl (nth mac 3) 24)))))
+(def sa_top ((mac (list int))) int (bit_or (nth mac 4) (bit_shl (nth mac 5) 8)))
+
+; The address SA1B and SA1T hold, as the firmware may have left them.
+(def sa_mac ((bottom int) (top int)) (list int)
+  (cons (bit_and bottom 255) (cons (bit_and (bit_shr bottom 8) 255) (cons (bit_and (bit_shr bottom 16) 255)
+    (cons (bit_and (bit_shr bottom 24) 255) (cons (bit_and top 255) (cons (bit_and (bit_shr top 8) 255) (nil int))))))))
+
+; Whether mac can be a card's own: not all zeros, and not a group's
+; address, bit 0 of its first byte.
+(def mac_usable ((mac (list int))) bool
+  (if (not (eq (length mac) 6))
+      false
+      (if (eq mac (zeros 6)) false (eq (bit_and (head mac) 1) 0))))
+
+; ---------------------------------------------------------------- MDIO
+
+; The PHY maintenance word reading register reg of the PHY at phy, and
+; writing it v: clause 22's start (bits 30, 31: 01), the operation (bits
+; 28, 29: 10 read, 01 write), the PHY (23 to 27), the register (18 to
+; 22), and the turnaround code, 10 (16, 17).
+(def man_read ((phy int) (reg int)) int
+  (bit_or 1610743808 (bit_or (bit_shl phy 23) (bit_shl reg 18))))        ; 0x60020000
+(def man_write ((phy int) (reg int) (v int)) int
+  (bit_or 1342308352 (bit_or (bit_shl phy 23) (bit_or (bit_shl reg 18) (bit_and v 65535)))))  ; 0x50020000
+
+; ---------------------------------------------------------------- memory
+
+; The driver's DMA pages: the receive ring of 32 descriptors from 0, the
+; transmit ring of 8 from 2048, and a descriptor for the queues it does
+; not use at 3072, all in the first, each with room after it for the
+; descriptors the GEM reads ahead (MACB_CAPS_BD_RD_PREFETCH); the one
+; transmit buffer, the second page; and from the third, the receive
+; buffers, 2048 bytes each, two a page.
+(def rx_ring_size () int 32)
+(def tx_ring_size () int 8)
+(def buffer_size () int 2048)
+(def eth_pages () int 18)
+(def rx_ring () int 0)
+(def tx_ring () int 2048)
+(def idle_desc () int 3072)
+(def tx_buffer () int 4096)
+(def rx_buffer ((i int)) int (add 8192 (mul i (buffer_size))))
+
+; A descriptor's bytes with 64-bit addresses and no timestamps: the
+; address's low word, the control word, its high word, and one unused.
+(def desc_bytes () int 16)
+(def rx_desc ((i int)) int (add (rx_ring) (mul i (desc_bytes))))
+(def tx_desc ((i int)) int (add (tx_ring) (mul i (desc_bytes))))
+
+; The receive descriptors the CPU gives back at once, those in one
+; 64-byte cache line: the Pi's DMA does not see the caches, and cleaning
+; a line the GEM has since written would undo its write, so the CPU
+; writes a line only once the GEM has used all four of its descriptors.
+(def rx_group () int 4)
+
+; The low and high words of a's 64 bits.
+(def lo32 ((a int)) int (bit_and a 4294967295))
+(def hi32 ((a int)) int (bit_and (bit_shr a 32) 4294967295))
+
+; A receive descriptor giving the GEM the buffer at bus address a, the
+; ring's last if wrap: the address with WRAP, bit 1, and USED, bit 0,
+; clear, an empty status, and the high word.
+(def rx_desc_words ((a int) (wrap bool)) (list int)
+  (cons (bit_or (bit_and (lo32 a) 4294967292) (if wrap 2 0)) (cons 0 (cons (hi32 a) (cons 0 (nil int))))))
+
+; A transmit descriptor the GEM is to pass by: USED, bit 31, set, and
+; WRAP, bit 30, if it is the ring's last.
+(def tx_idle_words ((wrap bool)) (list int)
+  (cons 0 (cons (bit_or 2147483648 (if wrap 1073741824 0)) (cons 0 (cons 0 (nil int))))))
+
+; A transmit descriptor of the frame of len bytes at bus address a, the
+; whole frame: its length, LAST, bit 15, WRAP if the ring's last, and
+; USED clear, so the GEM sends it.
+(def tx_frame_words ((a int) (len int) (wrap bool)) (list int)
+  (cons (lo32 a) (cons (bit_or (bit_and len 16383) (bit_or 32768 (if wrap 1073741824 0))) (cons (hi32 a) (cons 0 (nil int))))))
+
+; The descriptor the unused queues point at, as either ring's: USED and
+; WRAP both ways, so the GEM neither writes nor sends through it.
+(def idle_desc_words () (list int)
+  (cons 3 (cons 3221225472 (cons 0 (cons 0 (nil int))))))
+
+; What a receive descriptor's first two words say: nothing yet, USED
+; clear; a frame of so many bytes, in one buffer, its start and end
+; (SOF, bit 14, EOF, bit 15) both; or a frame that is not whole.
+(data RxSlot (RxEmpty) (RxFrame int) (RxBad))
+
+; That, from the words w0 and w1.
+(def rx_slot ((w0 int) (w1 int)) RxSlot
+  (if (eq (bit_and w0 1) 0)
+      (RxEmpty)
+      (if (eq (bit_and w1 49152) 49152) (RxFrame (bit_and w1 4095)) (RxBad))))
+
+; What a transmit descriptor's control word says once offered: not yet,
+; USED clear; sent; or failed, with any of bits 26 to 29 (late
+; collision, buffers exhausted, underrun, retry limit).
+(data TxState (TxPending) (TxSent) (TxFailed))
+
+; That, from the control word w1.
+(def tx_state ((w1 int)) TxState
+  (if (eq (bit_and (bit_shr w1 31) 1) 0)
+      (TxPending)
+      (if (eq (bit_and w1 1006632960) 0) (TxSent) (TxFailed))))   ; 0x3C000000

@@ -1,0 +1,129 @@
+; mailbox.l0 -- the Raspberry Pi 5's VideoCore mailbox, one of L0's
+; regions on the Pi 5, and the firmware's property interface over it: a
+; driver asks the firmware for what only it knows (rtc the time, gem the
+; board's Ethernet address) by writing a buffer of words into a page of
+; DMA memory and sending the page's address. The words are the caller's;
+; the asking is a page and four registers. None of it has run on a
+; board. Linked by the Makefile's MAILBOX.
+
+; The mailbox in the CPU's map (bcm2712.dtsi's mailbox@7c013880) and its
+; bytes.
+(def mbox_base () int 70799931520)       ; 0x107C013880
+(def mbox_bytes () int 64)
+
+; Its registers: the firmware writes to the ARM in mailbox 0 and the ARM
+; to the firmware in mailbox 1 (bcm2835-mailbox.c): MAIL0_RD, MAIL0_STA,
+; MAIL1_WRT, MAIL1_STA.
+(def mbox_read () int 0)
+(def mbox_read_status () int 24)         ; 0x18
+(def mbox_write () int 32)               ; 0x20
+(def mbox_write_status () int 56)        ; 0x38
+
+; A status's FULL, bit 31, and EMPTY, bit 30.
+(def mbox_full ((w int)) bool (eq (bit_and (bit_shr w 31) 1) 1))
+(def mbox_empty ((w int)) bool (eq (bit_and (bit_shr w 30) 1) 1))
+
+; The property channel, 8, which a message names in its low four bits
+; beside where its buffer is, 16-byte aligned. The firmware node's
+; dma-ranges on the BCM2712 are identity, so that is the buffer's own
+; address, below 4 GB to fit: UNCONFIRMED, as the Pi 4's firmware took
+; it at 0xC0000000 above.
+(def mbox_property () int 8)
+
+; The message naming the buffer at pa on the property channel.
+(def mbox_message ((pa int)) int (bit_or (bit_and pa 4294967280) (mbox_property)))
+
+; A request's code, 0, and a reply's that succeeded, bit 31.
+(def property_success () int 2147483648) ; 0x80000000
+
+; Whether ws, a buffer of one tag as the firmware wrote it back, says it
+; succeeded: the buffer's code, its second word, and the tag's, its
+; fifth, bit 31 set.
+(def property_answered ((ws (list int))) bool
+  (if (lt (length ws) 5)
+      false
+      (if (eq (nth ws 1) (property_success)) (eq (bit_and (bit_shr (nth ws 4) 31) 1) 1) false)))
+
+; ------------------------------------------------------------- asking
+
+; The mailbox: its registers; the page of DMA memory its messages are in,
+; opened, where this process sees it, and its address.
+(data Mailbox (Mailbox IoDevice IoDevice int int))
+
+; The mailbox opened, or why not.
+(data MboxOpened (MboxOpen Mailbox) (NoMbox (list int)))
+
+; The page a message is in: a DMA page below 4 GB, as a message's
+; address must be, tried for up to n times.
+(data MboxPage (MboxPage IoDevice int int) (NoMboxPage (list int)))
+
+; That page, opened, where this process sees it, and its address; or why
+; there is none.
+(def mbox_page ((n int)) MboxPage
+  (if (le n 0)
+      (NoMboxPage "no DMA page below 4 GB for the firmware's messages")
+      (match (dma_alloc 1)
+        ((DmaPages va)
+          (let addrs (dma_addresses va 1)
+            (if (not (eq (array_len addrs) 1))
+                (NoMboxPage "its page is not a DMA page")
+                (if (lt (array_get addrs 0) 4294967296)
+                    (match (dma_open va 1)
+                      ((DeviceFailed fault why) (NoMboxPage why))
+                      ((DeviceOpened m) (MboxPage m va (array_get addrs 0))))
+                    (mbox_page (sub n 1))))))
+        ((DmaDenied) (NoMboxPage (dma_alloc_why (DmaDenied))))
+        ((DmaTooMany) (NoMboxPage (dma_alloc_why (DmaTooMany))))
+        ((DmaNoRoom) (NoMboxPage (dma_alloc_why (DmaNoRoom)))))))
+
+; The mailbox a region, with a page for its messages; or why not.
+(def mailbox_open () MboxOpened
+  (match (open_device (mbox_base) (mbox_bytes))
+    ((DeviceFailed fault why) (NoMbox "no VideoCore mailbox on the board"))
+    ((DeviceOpened mb)
+      (match (mbox_page 8)
+        ((NoMboxPage why) (NoMbox why))
+        ((MboxPage m va pa) (MboxOpen (Mailbox mb m va pa)))))))
+
+; The n words the firmware wrote back over ws, a property buffer: ws
+; written to the page and cleaned for it, the page's address sent once
+; the mailbox has room, the answer waited for, up to 100 ms, and the page
+; read back once invalidated; or none if the firmware did not answer.
+(def mailbox_ask ((c Mailbox) (ws (list int)) (n int)) (Option (list int))
+  (match c
+    ((Mailbox mb m va pa)
+      (let w (mbox_put m 0 ws)
+        (let s (dma_sync va 1 (dma_to_device))
+          (if (not (mbox_waited mb (mbox_write_status) false 100))
+              ((None (list int)))
+              (let x (device_write32 mb (mbox_write) (mbox_message pa))
+                (if (not (mbox_answered mb (mbox_message pa) 100))
+                    ((None (list int)))
+                    (let i (dma_sync va 1 (dma_from_device))
+                      (Some (mbox_got m 0 n (nil int))))))))))))
+
+; Whether the mailbox's status at off has room, FULL clear, or, for its
+; reads, something to read, EMPTY clear; read up to n times, a
+; millisecond apart. reads says which.
+(def mbox_waited ((mb IoDevice) (off int) (reads bool) (n int)) bool
+  (let w (device_read32 mb off)
+    (if (if reads (not (mbox_empty w)) (not (mbox_full w)))
+        true
+        (if (le n 0) false (let z (sleep_ns 1000000) (mbox_waited mb off reads (sub n 1)))))))
+
+; Whether the firmware has answered message msg, the next it wrote that
+; is on the property channel, within n milliseconds.
+(def mbox_answered ((mb IoDevice) (msg int) (n int)) bool
+  (if (not (mbox_waited mb (mbox_read_status) true n))
+      false
+      (if (eq (device_read32 mb (mbox_read)) msg) true (mbox_answered mb msg (sub n 1)))))
+
+; ws written into m from byte off, a word each: 0.
+(def mbox_put ((m IoDevice) (off int) (ws (list int))) int
+  (if (is_empty ws)
+      0
+      (let w (device_write32 m off (head ws)) (mbox_put m (add off 4) (tail ws)))))
+
+; n words of m from byte off, after the reversed acc.
+(def mbox_got ((m IoDevice) (off int) (n int) (acc (list int))) (list int)
+  (if (le n 0) (rev acc) (mbox_got m (add off 4) (sub n 1) (cons (device_read32 m off) acc))))

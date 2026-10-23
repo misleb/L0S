@@ -26,10 +26,6 @@
 ; csum_start, csum_offset, num_buffers. Zero for a frame sent whole.
 (def net_header_len () int 12)
 
-; The fewest bytes a frame on the wire has before its check sequence, to
-; which a shorter one is padded.
-(def frame_padded () int 60)
-
 ; ---------------------------------------------------------------- the queues
 
 ; The queues, in 10 DMA pages: the receive queue's descriptors, available
@@ -91,23 +87,9 @@
 
 ; frame as the card is to read it: the header, then the frame, padded.
 (def tx_bytes ((frame (list int))) (list int)
-  (append (zeros (net_header_len))
-          (append frame (zeros (max 0 (sub (frame_padded) (length frame)))))))
-
-; Why frame cannot be sent; empty if it can.
-(def frame_refusal ((frame (list int))) (list int)
-  (let n (length frame)
-    (if (lt n (frame_min))
-        (append "a frame has at least " (append (digits (frame_min)) " bytes"))
-        (if (gt n (frame_max))
-            (append "a frame has at most " (append (digits (frame_max)) " bytes"))
-            ""))))
+  (append (zeros (net_header_len)) (nic_padded frame)))
 
 ; ---------------------------------------------------------------- the driver
-
-; Frames taken from the wire and put on it, and those lost: taken with no
-; one listening, or bad, or not sent.
-(data NicCounts (NicCounts int int int))
 
 ; The driver: the transports' registers and the card's transport; the
 ; queues' pages and where the card reaches each; the next index to make
@@ -115,20 +97,6 @@
 ; rings count them; the frames sent, as the transmit ring counts them;
 ; the ports listening; the card's address; and the counts.
 (data Nic (Nic IoDevice int IoDevice (array int) int int int (list int) (list int) NicCounts))
-
-; stats's answer.
-(def counts_text ((c NicCounts)) (list int)
-  (match c
-    ((NicCounts rx tx dropped)
-      (unwords (cons "rx" (cons (digits rx) (cons "tx" (cons (digits tx) (cons "dropped" (cons (digits dropped) (nil (list int))))))))))))
-
-; c after a frame taken: told to a listener if kept, or lost.
-(def counted_rx ((c NicCounts) (kept bool)) NicCounts
-  (match c ((NicCounts rx tx dropped) (if kept (NicCounts (add rx 1) tx dropped) (NicCounts rx tx (add dropped 1))))))
-
-; c after a frame given to send: sent, or lost.
-(def counted_tx ((c NicCounts) (sent bool)) NicCounts
-  (match c ((NicCounts rx tx dropped) (if sent (NicCounts rx (add tx 1) dropped) (NicCounts rx tx (add dropped 1))))))
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "virtio-net" why))
@@ -219,7 +187,7 @@
   (match k
     ((Nic d t q addrs rxa rxu txn ls mac c)
       (if (eq body "info") (Served k (append "nic " (mac_text mac)))
-      (if (eq body "stats") (Served k (counts_text c))
+      (if (eq body "stats") (Served k (nic_counts_text c))
       (served_error k (append "no request " (take_line body))))))))
 
 ; A send's answer, to its reply port if it names one.
@@ -239,9 +207,9 @@
 
 ; frame put on the wire, or why not.
 (def transmitted ((k Nic) (frame (list int))) (Served Nic)
-  (let why (frame_refusal frame)
+  (let why (nic_frame_refusal frame)
     (if (not (is_empty why))
-        (served_error (with_counts k (counted_tx (nic_counts k) false)) why)
+        (served_error (with_counts k (nic_counted_tx (nic_counts k) false)) why)
         (transmit k frame))))
 
 ; The driver's counts.
@@ -261,7 +229,7 @@
           (let ds (put_bytes q (tx_desc) (descriptor (device_at addrs (tx_buffer)) (length bs) 0 0))
             (let n (virtq_offer d t (tx_queue) q (tx_avail) (ring_size) txn 0)
               (let ok (virtq_wait q (tx_used) n (clock_ns))
-                (let k2 (Nic d t q addrs rxa rxu n ls mac (counted_tx c ok))
+                (let k2 (Nic d t q addrs rxa rxu n ls mac (nic_counted_tx c ok))
                   (if ok (served_ok k2) (served_error k2 "the card did not take the frame")))))))))))
 
 ; -------------------------------------------------------------- receiving
@@ -308,10 +276,10 @@
   (match k
     ((Nic d t q addrs rxa rxu txn ls mac c)
       (match f
-        ((None) (Nic d t q addrs rxa rxu txn ls mac (counted_rx c false)))
+        ((None) (Nic d t q addrs rxa rxu txn ls mac (nic_counted_rx c false)))
         ((Some frame)
           (Nic d t q addrs rxa rxu txn (listeners_tell ls (frame_notice frame)) mac
-               (counted_rx c (not (is_empty ls)))))))))
+               (nic_counted_rx c (not (is_empty ls)))))))))
 
 ; Buffer id on the available ring again.
 (def given_back ((k Nic) (id int)) Nic

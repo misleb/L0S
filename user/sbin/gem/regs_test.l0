@@ -1,0 +1,102 @@
+; regs_test.l0 -- tests of regs.l0: the words the GEM's registers are
+; given, its descriptors, and the driver's pages.
+
+; Words as eight hex digits each, with spaces.
+(def words_text ((ws (list int))) (list int)
+  (if (is_empty ws)
+      ""
+      (append (hex_digits (head ws) 8) (if (is_empty (tail ws)) "" (append " " (words_text (tail ws)))))))
+
+; Numbers in decimal, with spaces.
+(def numbers_text ((ns (list int))) (list int)
+  (if (is_empty ns)
+      ""
+      (append (digits (head ns)) (if (is_empty (tail ns)) "" (append " " (numbers_text (tail ns)))))))
+
+; Reading register 2 of PHY 1: 0x60020000, PHY 1 at bit 23, register 2
+; at bit 18.
+(def test_man_read () int
+  (check_str "read" (hex_digits (man_read 1 2) 8) "608a0000"))
+
+(def test_man_write () int
+  (add (check_str "reset" (hex_digits (man_write 1 0 32768) 8) "50828000")
+       (check_str "only 16 bits" (hex_digits (man_write 1 0 65537) 8) "50820001")))
+
+; BIG, PAE, DRFCS, MDC / 128 (6 at bit 18), a 64-bit bus (1 at bit 21).
+(def test_ncfgr_base () int
+  (check_str "base" (hex_digits (ncfgr_base (mdc_div128) 1) 8) "003a2100"))
+
+(def test_ncfgr_link () int
+  (add (check_str "gigabit, full" (hex_digits (ncfgr_link 0 1000 true) 8) "00000402")
+       (add (check_str "100, half" (hex_digits (ncfgr_link 0 100 false) 8) "00000001")
+            (check_str "10, full" (hex_digits (ncfgr_link 0 10 true) 8) "00000002"))))
+
+; From nothing, only its own fields; from every bit, the others kept.
+(def test_dmacfg () int
+  (add (check_str "from zero" (hex_digits (dmacfg_value 0) 8) "40200710")
+       (check_str "from ones" (hex_digits (dmacfg_value (all_bits)) 8) "cf20f730")))
+
+(def test_dbw () int
+  (add (check_int "128 bits" (dbw_of (bit_shl 4 25)) 2)
+       (add (check_int "64 bits" (dbw_of (bit_shl 2 25)) 1)
+            (check_int "32 bits" (dbw_of (bit_shl 1 25)) 0))))
+
+(def test_dcfg6 () int
+  (add (check_bool "64-bit" (daw64 8388608) true)
+       (add (check_str "queues 1 to 3" (numbers_text (extra_queues 8388622)) "1 2 3")
+            (check_int "one queue" (length (extra_queues 1)) 0))))
+
+; IDNUM 7 is a GEM, 1 a MACB, and all ones no device.
+(def test_is_gem () int
+  (add (check_bool "a GEM" (is_gem 458752) true)
+       (add (check_bool "a MACB" (is_gem 65536) false)
+            (check_bool "nothing" (is_gem (all_bits)) false))))
+
+(def test_amp () int
+  (check_str "pipe 8, fill" (hex_digits (amp_value 65535) 8) "0001ff08"))
+
+(def mac () (list int) (cons 216 (cons 58 (cons 221 (cons 18 (cons 52 (cons 86 (nil int))))))))
+
+; d8:3a:dd:12:34:56, the first byte lowest.
+(def test_sa () int
+  (add (check_str "bottom" (hex_digits (sa_bottom (mac)) 8) "12dd3ad8")
+       (add (check_str "top" (hex_digits (sa_top (mac)) 8) "00005634")
+            (check_str "read back" (mac_text (sa_mac (sa_bottom (mac)) (sa_top (mac)))) "d8:3a:dd:12:34:56"))))
+
+(def test_mac_usable () int
+  (add (check_bool "the board's" (mac_usable (mac)) true)
+       (add (check_bool "zeros" (mac_usable (zeros 6)) false)
+            (check_bool "a group's" (mac_usable (cons 1 (drop (mac) 1))) false))))
+
+; The rings and their room fit the first page, and the buffers the 18.
+(def test_layout () int
+  (add (check_int "the last buffer's end" (add (rx_buffer 31) (buffer_size)) (mul (eth_pages) 4096))
+       (add (check_bool "rx ring before tx" (le (rx_desc (rx_ring_size)) (tx_ring)) true)
+            (check_bool "tx ring before idle" (le (tx_desc (tx_ring_size)) (idle_desc)) true))))
+
+; A buffer at 0x1012345000, the ring's last: WRAP, USED clear, the high word.
+(def test_rx_desc () int
+  (add (check_str "last" (words_text (rx_desc_words 69024894976 true)) "12345002 00000000 00000010 00000000")
+       (check_str "not last" (words_text (rx_desc_words 69024894976 false)) "12345000 00000000 00000010 00000000")))
+
+; 60 bytes at 0x1000001000, the ring's last: LAST, WRAP, USED clear.
+(def test_tx_desc () int
+  (add (check_str "a frame" (words_text (tx_frame_words 68719480832 60 true)) "00001000 4000803c 00000010 00000000")
+       (add (check_str "idle" (words_text (tx_idle_words false)) "00000000 80000000 00000000 00000000")
+            (check_str "idle, last" (words_text (tx_idle_words true)) "00000000 c0000000 00000000 00000000"))))
+
+(def slot_text ((s RxSlot)) (list int)
+  (match s ((RxEmpty) "empty") ((RxFrame n) (append "frame " (digits n))) ((RxBad) "bad")))
+
+(def test_rx_slot () int
+  (add (check_str "unused" (slot_text (rx_slot 0 49212)) "empty")
+       (add (check_str "whole" (slot_text (rx_slot 1 49212)) "frame 60")
+            (check_str "only its start" (slot_text (rx_slot 1 16444)) "bad"))))
+
+(def tx_text ((s TxState)) (list int)
+  (match s ((TxPending) "pending") ((TxSent) "sent") ((TxFailed) "failed")))
+
+(def test_tx_state () int
+  (add (check_str "pending" (tx_text (tx_state 32828)) "pending")
+       (add (check_str "sent" (tx_text (tx_state 2147516476)) "sent")
+            (check_str "retries" (tx_text (tx_state 2684354560)) "failed"))))
