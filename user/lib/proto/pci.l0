@@ -1,21 +1,27 @@
 ; pci.l0 -- the pci protocol: what the PCIe bus's server, user/sbin/pcie,
 ; serves on the port it registers as pci, once it has found every
 ; function on the bus and put each one's memory BARs in the MMIO window,
-; for the drivers of what it found (xhci).
+; for the drivers of what it found (xhci, sdhci).
 ;
 ;   devices          every function found, a line each, as below
 ;   find CLASS       those whose class, the 24 bits of base class,
 ;                    subclass and programming interface, is CLASS: an
 ;                    xHCI's is 0x0C0330, 787248
+;   msi BDF          function BDF given an MSI of the board's, 80 on,
+;                    by its MSI capability or else its MSI-X table's
+;                    first entry, its INTx then off: the interrupt, or
+;                    the one it was given already
 ;
 ; A function's line is BDF VENDOR DEVICE CLASS IRQ, then a base and a
 ; size for each of its six BARs, every number in decimal: BDF is the bus
-; times 256, the device times 8 and the function; IRQ the interrupt its
-; INTx reaches the board's interrupt controller as, 0 for none; and a BAR
+; times 256, the device times 8 and the function; IRQ the interrupt it
+; raises, for its driver to irq_bind: its MSI, once msi has given it
+; one, or else the board's interrupt its INTx line is, 35 to 38, which
+; other functions may share; 0 for none; and a BAR
 ; that is no memory BAR, or the high half of a 64-bit one, 0 0. Each is a
-; request (l0s.l0); the reply is the lines, nothing if none matches, or
-; error: WHY. Linked into the server and its clients by the Makefile's
-; LIBS_ lists.
+; request (l0s.l0); the reply is the lines, nothing if none matches, the
+; interrupt for msi, or error: WHY. Linked into the server and its
+; clients by the Makefile's LIBS_ lists.
 
 ; A function: its BDF, vendor and device ids, class, interrupt, and its
 ; BARs' bases and sizes, six of each in order.
@@ -75,6 +81,37 @@
               ((Err (list PciFunction) (list int)) (drop r 7))
               ((Ok (list PciFunction) (list int)) (pci_functions_of r))))
         ((AskFailed why) ((Err (list PciFunction) (list int)) why))))))
+
+; The interrupt a function raises, for its driver to bind; 0 for none.
+(def pci_irq ((f PciFunction)) int
+  (match f ((PciFunction bdf vid did class irq bases sizes) irq)))
+
+; A function's BDF.
+(def pci_bdf ((f PciFunction)) int
+  (match f ((PciFunction bdf vid did class irq bases sizes) bdf)))
+
+; The function at bdf given an MSI by the pci server: the interrupt, or
+; why not, as one that can signal none.
+(def pci_msi ((bdf int)) (Result int (list int))
+  (match (name_wait "pci" 5000000000)
+    ((NotFound) ((Err int (list int)) "no pci; is pcie running?"))
+    ((Found port)
+      (match (port_ask port (port_new) (append "msi " (digits bdf)) "pci")
+        ((Asked from r) (pci_msi_of r))
+        ((AskFailed why) ((Err int (list int)) why))))))
+
+; The interrupt an answer to msi gives, or why not.
+(def pci_msi_of ((r (list int))) (Result int (list int))
+  (if (starts_with r "error: ")
+      ((Err int (list int)) (drop r 7))
+      (match (word_number r)
+        ((Some n) ((Ok int (list int)) n))
+        ((None) ((Err int (list int)) (append "not an interrupt: " r))))))
+
+; The interrupt for f's driver to bind: an MSI, if the pci server gives
+; it one, or else its INTx line's, as pci found it.
+(def pci_interrupt ((f PciFunction)) int
+  (match (pci_msi (pci_bdf f)) ((Ok n) n) ((Err why) (pci_irq f))))
 
 ; A function's BAR i: its base and size, 0 0 for none.
 (def pci_bar_base ((f PciFunction) (i int)) int

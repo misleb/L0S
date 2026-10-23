@@ -109,9 +109,9 @@ booted with `root=UUID`, or else from the initramfs.
 | 7 | `virtio-net` | the network card's driver. It serves `nic`, telling `inet` of every frame the card takes, and putting on the wire every frame `inet` gives it |
 | 8 | `inet` | the IPv4 stack, at the address and with the name server a DHCP server gives it (`inet dhcp`; 10.0.2.15 and 10.0.2.3 on QEMU's user network), and keeps the lease. It serves `inet`, for `run net`, `run tftp` and `run http` (see [The network](#the-network)) |
 | 9 | `virtio-rng` | the entropy device's driver. It serves `random`, the host's randomness, which `fs` makes UUIDs of and `inet` keys TCP's first sequence numbers with |
-| 10 | `pcie virt` | the PCIe bus's server. It puts each device's registers in the bus's window, and serves `pci`, telling `sdhci` and `xhci` where the SD host controller and the USB one are |
-| 11 | `sdhci pci` | the SD card's driver. It serves `disk1`, reading and writing the sectors of `build/sd.img`, blank until Disks formats it |
-| 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard and the mouse on its ports, and serves `usb`, telling each `usb-hid` of its device's reports. It polls the controller, so `ps` shows it `ready`, not waiting (see [USB](#usb)) |
+| 10 | `pcie virt` | the PCIe bus's server. It puts each device's registers in the bus's window, and serves `pci`, telling `sdhci` and `xhci` where the SD host controller and the USB one are, and the interrupt each raises |
+| 11 | `sdhci pci` | the SD card's driver. It serves `disk1`, reading and writing the sectors of `build/sd.img`, blank until Disks formats it, waiting on its controller's INTx line, interrupt 37 |
+| 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard and the mouse on its ports, and serves `usb`, telling each `usb-hid` of its device's reports. It takes the controller's interrupt, MSI 80, which `pcie` sets up for it (see [USB](#usb)) |
 | 13 | `usb-hid keyboard` | the keyboard's driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 14 | `usb-hid mouse` | the mouse's driver. It serves `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
 | 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
@@ -268,27 +268,26 @@ Things to try:
       2       0  uart          waiting for a message on port 1
       3       0  virtio-gpu    waiting for a message on port 19
       4       0  rtc           sleeping
-      5       0  virtio-blk    waiting for a message on port 3
-      6       0  fs            waiting for a message on port 22
-      7       0  virtio-net    waiting for a message on port 5
-      8       0  inet          waiting for a message on port 6
-      9       0  virtio-rng    waiting for a message on port 8
-     10       0  pcie          waiting for a message on port 9
-     11       0  sdhci         waiting for a message on port 15
-     12       0  xhci          ready
-     13       0  usb-hid       waiting for a message on port 17
-     14       0  usb-hid       waiting for a message on port 18
+      5       0  virtio-blk    waiting for a message on port 4
+      6       0  fs            waiting for a message on port 25
+      7       0  virtio-net    waiting for a message on port 6
+      8       0  inet          waiting for a message on port 7
+      9       0  virtio-rng    waiting for a message on port 9
+     10       0  pcie          waiting for a message on port 10
+     11       0  sdhci         waiting for a message on port 22
+     12       0  xhci          waiting for a message on port 17
+     13       0  usb-hid       waiting for a message on port 18
+     14       0  usb-hid       waiting for a message on port 20
      15       1  sh            running
-     16       1  wm            waiting for a message on port 21
+     16       1  wm            waiting for a message on port 24
      17       1  vt            waiting for a message on port 14
      18       1  procmon       sleeping
-     19      17  sh            waiting for a message on port 27
+     19      17  sh            waiting for a message on port 30
   ```
 
   It lists the processes that have not exited. The shell asking is always
-  `running`, since `ps` runs inside it. `xhci` is `ready`, or `sleeping`
-  for the millisecond between its looks at the controller, since it polls
-  rather than taking an interrupt. A process writing to a terminal
+  `running`, since `ps` runs inside it. Every driver waits, for a request
+  or its device's interrupt, which comes as a message too. A process writing to a terminal
   whose queue is full shows `writing to port N`, one reading its
   standard input from a terminal `reading a line, to port N`, and one
   whose call on a file of a volume its server has yet to answer
@@ -898,8 +897,14 @@ time, between the card and the client's pages, which it opens as a
 region for each request: no DMA, so it needs neither the device's view
 of memory nor, on the Raspberry Pi 5, the cache's cleaning. A standard
 card is addressed by byte, a high-capacity one by block, and many blocks
-go in one command, ended by Auto CMD12. It polls, and serves every card
-it finds on one port, each under its own name.
+go in one command, ended by Auto CMD12. It serves every card it finds
+on one port, each under its own name. A command or a block not done at
+once is waited for by the controller's interrupt, an MSI if `pcie` can
+give it one and otherwise its INTx line (QEMU's `sdhci-pci` has no
+MSI), bound to a port of the slot's own so that requests queue on the
+other; it turns the controller's interrupt signals on only while it
+waits. A slot with no interrupt, or one another driver has bound, is
+polled, and so is every card while it is brought up.
 
 ### Volumes
 
@@ -1389,8 +1394,18 @@ which `pcie` serves as `pci`:
 
 | Request | Answer |
 |---|---|
-| `devices` | a line for each function: `BDF VENDOR DEVICE CLASS IRQ` and each of its six BARs' base and size |
+| `devices` | a line for each function: `BDF VENDOR DEVICE CLASS IRQ` and each of its six BARs' base and size; IRQ is its INTx line's interrupt, 35 to 38, shared by every fourth slot, or its MSI once it has one |
 | `find CLASS` | the lines of those of the 24-bit class CLASS, an xHCI's 787248 (0x0C0330) |
+| `msi BDF` | the function given an MSI, the next of the GICv2m frame's 80 to 143, through its MSI capability or else the first entry of its MSI-X table, which `pcie` reaches through the function's BAR, and its INTx turned off: the interrupt, the same one if asked again, or `error: it can signal no MSI` (QEMU's `sdhci-pci`) or `error: no MSI left`. Only a function whose driver asks is given one, so `pcie` changes nothing of a device no driver drives |
+
+`xhci` and `sdhci` ask for an MSI first, through `pci_interrupt`, and
+bind their INTx line if refused. QEMU's `qemu-xhci` has MSI-X only, so it
+is given entry 0 of its table, which serves interrupter 0. A board given
+no network of its own, as `l0 boot` gives the e2e cases and
+`tools/qemu-boot.sh` without `QEMU_NET`, gets QEMU's default network
+card, a virtio-net-pci, at 00:01.0, which moves the other functions down
+a slot, and so their INTx lines; the demo, on QEMU's user network, has
+none.
 
 `xhci` brings each device up alone: a USB 2 port is reset until it is
 enabled; Enable Slot gives it a slot, Address Device its address; then
@@ -2078,9 +2093,9 @@ every `.l0` in its directory is part of it.
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `hvs` | the Raspberry Pi 5's display driver, a first draft that has run nowhere, serving the display protocol as `display` as `virtio-gpu` does (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)). It takes HDMI0's channel of the BCM2712's HVS at the mode the firmware left. It shows the layers as one display list of planes fetched straight from the clients' pages, each buffer made one run of addresses by the IOMMU in front of the HVS. It writes each list in the half of the list memory the channel isn't fetching, then moves the channel to it. A `damage` cleans the damaged rows' pages out of the caches, and the pointer is a plane on top. Corners are not cut yet. With no region over the HVS, as on QEMU and, until L0 gives one, on a Pi, it says so and exits 0 |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
-| `pcie` | the PCIe bus's server, `pcie virt`, for QEMU's virt board (see [USB](#usb)): reads every function of bus 0 through the ECAM, sizes each memory BAR, puts it in the 32-bit MMIO window, turns on memory space and bus mastering, and serves the pci protocol as `pci`: every function, or those of a class |
-| `sdhci` | a driver for SD cards behind SD Host Controllers, `sdhci pci` those `pcie` finds, QEMU's `sdhci-pci` (see [The disk](#the-disk)): it brings each card up, standard or high-capacity, and serves each as the first `diskN` free, all on one port, telling `fs` of each. Blocks move through the controller's buffer into and out of the client's pages, no DMA; it polls. A slot with no card, or no controller on the bus, is said so on stderr, and exits 0 |
-| `xhci` | the USB host controller driver and USB's core (see [USB](#usb)): `xhci pci` drives every xHCI `pci` found, `xhci rp1` the Raspberry Pi 5's two DWC3s on RP1. It halts and resets each controller, gives it its DCBAA, scratchpads, command ring and event ring in DMA pages, and runs it; brings up each device on a root port, one at a time, reading its descriptors and setting its first configuration; and serves the usb protocol as `usb`: devices, their descriptors, claims of interfaces, control transfers, and IN endpoints polled, each report a notice to the client that opened it. It polls its event rings, every millisecond when idle, rather than taking interrupts. Each controller and each device is a line on stderr. Everything it decides is `core.l0`'s and `bus.l0`'s, pure, tested on the host |
+| `pcie` | the PCIe bus's server, `pcie virt`, for QEMU's virt board (see [USB](#usb)): reads every function of bus 0 through the ECAM, sizes each memory BAR, puts it in the 32-bit MMIO window, turns on memory space and bus mastering, and serves the pci protocol as `pci`: every function, or those of a class, and an MSI for a driver that asks, set up through the function's MSI or MSI-X capability |
+| `sdhci` | a driver for SD cards behind SD Host Controllers, `sdhci pci` those `pcie` finds, QEMU's `sdhci-pci` (see [The disk](#the-disk)): it brings each card up, standard or high-capacity, and serves each as the first `diskN` free, all on one port, telling `fs` of each. Blocks move through the controller's buffer into and out of the client's pages, no DMA; it waits on the controller's interrupt, an MSI or else its INTx line, for what is not done at once, and polls a slot with none. A slot with no card, or no controller on the bus, is said so on stderr, and exits 0 |
+| `xhci` | the USB host controller driver and USB's core (see [USB](#usb)): `xhci pci` drives every xHCI `pci` found, `xhci rp1` the Raspberry Pi 5's two DWC3s on RP1. It halts and resets each controller, gives it its DCBAA, scratchpads, command ring and event ring in DMA pages, and runs it; brings up each device on a root port, one at a time, reading its descriptors and setting its first configuration; and serves the usb protocol as `usb`: devices, their descriptors, claims of interfaces, control transfers, and IN endpoints polled, each report a notice to the client that opened it. It takes each controller's interrupt, an MSI it asks `pcie` for or else its INTx line, as a message, and reads that controller's events; with a controller that has none, as RP1's, or whose line another driver has bound, it polls every event ring, every millisecond when idle. Each controller and each device is a line on stderr. Everything it decides is `core.l0`'s and `bus.l0`'s, pure, tested on the host |
 | `usb-hid` | the class driver of USB boot keyboards and mice (see [USB](#usb)), started once for each: `usb-hid keyboard` claims every boot keyboard, sets the boot protocol and SET_IDLE(0), opens its interrupt endpoint, and serves `keyboard`, sending a `KeyEvent` for each key its reports press or let go, with the character `keymap.l0` says, and repeating a held key itself, 500 ms then every 33 ms; `usb-hid mouse` claims every boot mouse and serves `pointer`, sending a `PointerMotion` of each report. It drives no device, and needs no `dev` line |
 | `virtio-blk` | a user-space driver for QEMU's virtio-blk, serving the disk protocol as the first `diskN` free, `disk0` in the demo, and telling `fs` (see [The disk](#the-disk)). It finds the device, reads its capacity from its config, and sets up its request queue in one DMA page. Each `read` or `write` it checks against the disk's size and the pages the client shared, then has the device move the sectors straight into or out of those pages, a descriptor a page, and waits for the device's interrupt, on a port of its own, for 30 seconds at most, after which it takes the disk to have stopped answering and fails every request. It accepts FLUSH, for `flush`, and RO, refusing a read-only disk's writes itself. With no virtio-blk on the board it says so on stderr and exits 0 |
 | `virtio-net` | a user-space driver for QEMU's virtio-net, serving the nic protocol as `nic` (see [The network](#the-network)). It finds the card, takes its address from its config, sets up its receive and transmit queues in DMA pages, and takes its interrupt as a message: each frame the card takes it tells every port that asked it to `listen`, and each frame it is sent it copies into its transmit buffer and waits for the card to take. With no virtio-net on the board it says so on stderr and exits 0 |
@@ -2193,10 +2208,11 @@ Each case of `tests/e2e/` is a directory:
 
 Two cases are USB's: `pcie`, the bus's server waiting once it has set
 the bus up, and `usb`, `run lsusb` listing the keyboard and the mouse
-`xhci` brought up, its stderr naming the keyboard's port. `sdhci` (with
-`sd`) brings a blank SD card up as `disk0`, lists the disks, writes a
-sector and reads it back, is refused past the card's end, and reads its
-last sector.
+`xhci` brought up on MSI 80, which its stderr names, and `ps` showing
+`xhci` waiting for a message, not polling. `sdhci` (with `sd`) brings a
+blank SD card up as `disk0` on its INTx line, 37, which its stderr
+names, lists the disks, writes a sector and reads it back, is refused
+past the card's end, and reads its last sector.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
 `etc`, boots it, and compares; given case names, as `tests/e2e.sh cwd`,
@@ -2547,10 +2563,10 @@ a bad buffer, and wait on nothing.
   driver that registers late gets a later name.
 - **USB has run on QEMU only** (see [USB](#usb)), not on a Pi 5, where
   L0S does not boot yet. Boot keyboards and mice only, on root ports
-  only, no hubs; `xhci` polls rather than taking interrupts, which L0's
-  runtime gives for the virt board's PCIe since its roadmap 0106 (asked
-  for in [probes/usb](probes/usb/REQUEST-pcie-interrupts.md)) but not yet
-  for RP1; a control
+  only, no hubs; `xhci` takes interrupts on the virt board, which L0's
+  runtime gives for PCIe since its roadmap 0106 (asked for in
+  [probes/usb](probes/usb/REQUEST-pcie-interrupts.md)), but polls RP1's
+  controllers, whose interrupts it does not give yet; a control
   transfer moves 2 KB at most, an endpoint's report 2 KB; and each
   controller has 64 pages for its devices, about 3 a device and 1 an
   endpoint opened.

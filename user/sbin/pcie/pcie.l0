@@ -2,8 +2,10 @@
 ; else sets the bus up: it reads every function of bus 0 through the
 ; ECAM, sizes each memory BAR and puts it in the 32-bit MMIO window,
 ; turns on each function's memory space and bus mastering, and then
-; serves pci (proto/pci.l0): what it found, to the drivers of it. Its
-; module must be flagged dev. Started as
+; serves pci (proto/pci.l0): what it found, to the drivers of it, each
+; function's interrupt its INTx line, until its driver asks for an MSI of
+; the board's GICv2m frame, 80 on, which it sets up by the function's MSI
+; or MSI-X capability. Its module must be flagged dev. Started as
 ;
 ;   pcie virt    QEMU's virt board: its high ECAM, 0x4010000000, and its
 ;                MMIO window, 0x10000000 up to 0x3EFF0000
@@ -54,7 +56,7 @@
         ((DeviceFailed fault why) (complain (append "no ECAM: " why)))
         ((DeviceOpened e)
           (match (scanned e 0 0 (Scan (window_base) (nil PciFunction)))
-            ((Scan next fs) (serving fs)))))))
+            ((Scan next fs) (serving e fs)))))))
 
 ; ------------------------------------------------------------------ scan
 
@@ -91,6 +93,113 @@
               ((Bars next2 bases sizes)
                 (let on (device_write32 e (add off (cfg_command)) (bit_or (command_memory) (command_master)))
                   (Scan next2 (cons (PciFunction (bdf_of 0 dev fn) (ids_vendor ids) (ids_device ids) class (virt_intx dev pin) bases sizes) fs)))))))))))
+
+; ------------------------------------------------------------------ MSIs
+
+; What a request for an MSI came to: the functions, the one asked for
+; with its interrupt now, and the answer.
+(data Given (Given (list PciFunction) (list int)))
+
+; msi BDF: function bdf given an MSI, the board's next, by its MSI
+; capability or else its MSI-X table's first entry, its INTx then off,
+; and its number answered; the one it has if it was given one already;
+; or why not. Only a driver that asks gets one, so a function no driver
+; drives stays as the scan left it.
+(def msi_answer ((e IoDevice) (fs (list PciFunction)) (bdf int)) Given
+  (match (function_at fs bdf)
+    ((None) (Given fs (error_reply (append "no function " (digits bdf)))))
+    ((Some f)
+      (if (ge (pci_irq f) (virt_msi 0))
+          (Given fs (digits (pci_irq f)))
+          (let n (virt_msi (msis_given fs 0))
+            (if (eq n 0)
+                (Given fs (error_reply "no MSI left"))
+                (let why (msi_given e (ecam_offset 0 (bit_and (bit_shr bdf 3) 31) (bit_and bdf 7)) f n)
+                  (if (is_empty why)
+                      (Given (with_irq fs bdf n (nil PciFunction)) (digits n))
+                      (Given fs (error_reply why))))))))))
+
+; The function of fs at bdf, or none.
+(def function_at ((fs (list PciFunction)) (bdf int)) (Option PciFunction)
+  (if (is_empty fs) ((None PciFunction)) (if (eq (pci_bdf (head fs)) bdf) (Some (head fs)) (function_at (tail fs) bdf))))
+
+; fs with the function at bdf's interrupt n, after the reversed acc.
+(def with_irq ((fs (list PciFunction)) (bdf int) (n int) (acc (list PciFunction))) (list PciFunction)
+  (if (is_empty fs)
+      (rev acc)
+      (match (head fs)
+        ((PciFunction b vid did c irq bases sizes)
+          (with_irq (tail fs) bdf n (cons (PciFunction b vid did c (if (eq b bdf) n irq) bases sizes) acc))))))
+
+; How many of fs, and n more, signal MSIs.
+(def msis_given ((fs (list PciFunction)) (n int)) int
+  (if (is_empty fs) n (msis_given (tail fs) (if (ge (pci_irq (head fs)) (virt_msi 0)) (add n 1) n))))
+
+; Function f, at off, set to signal n: by MSI, or by MSI-X; empty, or
+; why not.
+(def msi_given ((e IoDevice) (off int) (f PciFunction) (n int)) (list int)
+  (let at (cap_found e off (cap_msi))
+    (if (not (eq at 0))
+        (let s (msi_set e off at n) "")
+        (let x (cap_found e off (cap_msix))
+          (if (eq x 0) "it can signal no MSI" (msix_set e off x f n))))))
+
+; Where in the function at off its capability id is; 0 for none.
+(def cap_found ((e IoDevice) (off int) (id int)) int
+  (if (has_capabilities (device_read32 e (add off (cfg_command))))
+      (cap_walked e off id (capabilities_at (device_read32 e (add off (cfg_capabilities)))) 48)
+      0))
+
+; The capabilities list from at walked for id's, at most hops of it, so
+; that a list that loops ends.
+(def cap_walked ((e IoDevice) (off int) (id int) (at int) (hops int)) int
+  (if (if (eq at 0) true (le hops 0))
+      0
+      (let w (device_read32 e (add off at))
+        (if (eq (cap_id w) id) at (cap_walked e off id (cap_next w) (sub hops 1))))))
+
+; The function at off's MSI, its capability at at, set to write n to the
+; GICv2m frame, and enabled, its INTx turned off: n.
+(def msi_set ((e IoDevice) (off int) (at int) (n int)) int
+  (let c (add off at)
+    (let w (device_read32 e c)
+      (let wide (msi_wide w)
+        (let a (device_write32 e (add c 4) (msi_address))
+          (let b (if wide (device_write32 e (add c 8) 0) 0)
+            (let d (device_write32 e (add c (msi_data_at wide)) n)
+              (let x (device_write32 e c (msi_enabled w))
+                (intx_off e off n)))))))))
+
+; The function at off's MSI-X, its capability at at: its table's first
+; entry, through the BAR the table is in, set to write n to the GICv2m
+; frame and unmasked, then MSI-X enabled, its INTx off; empty, or why
+; not. The table's page is mapped only for that, and the function's
+; other entries stay masked, as reset leaves them.
+(def msix_set ((e IoDevice) (off int) (at int) (f PciFunction) (n int)) (list int)
+  (let c (add off at)
+    (let t (device_read32 e (add c 4))
+      (let base (pci_bar_base f (msix_bir t))
+        (if (eq base 0)
+            "its MSI-X table is in no BAR placed"
+            (let where (add base (msix_offset t))
+              (match (open_device (bit_and where (bit_xor 4095 -1)) 4096)
+                ((DeviceFailed fault why) (append "cannot reach its MSI-X table: " why))
+                ((DeviceOpened r)
+                  (let i (bit_and where 4095)
+                    (let a (device_write32 r i (msi_address))
+                      (let b (device_write32 r (add i 4) 0)
+                        (let d (device_write32 r (add i 8) n)
+                          (let u (device_write32 r (add i 12) 0)
+                            (let z (close_device r)
+                              (let x (device_write32 e c (msix_enabled (device_read32 e c)))
+                                (let y (intx_off e off n) ""))))))))))))))))
+
+; The function at off's INTx turned off, its memory space and bus
+; mastering left on: n. The command word is written with its status
+; half 0, which clears none of its bits.
+(def intx_off ((e IoDevice) (off int) (n int)) int
+  (let i (device_write32 e (add off (cfg_command)) (bit_or (bit_or (command_memory) (command_master)) (command_intx_off)))
+    n))
 
 ; BARs placed: where the next may go, and each BAR's base and size.
 (data Bars (Bars int (list int) (list int)))
@@ -136,22 +245,42 @@
 
 ; --------------------------------------------------------------- serving
 
-; pci registered, and served with what was found.
-(def serving ((fs (list PciFunction))) int
+; pci registered, and served with what was found, through the ECAM e.
+(def serving ((e IoDevice) (fs (list PciFunction))) int
   (let port (port_new)
     (let r (name_register_or_why port "pci")
       (if (is_empty r)
           (let n (functions_said fs 0)
-            (serve fs port))
+            (serve e fs port))
           (complain r)))))
 
-; Each request answered, for ever.
-(def serve ((fs (list PciFunction)) (port int)) int
+; Each request answered, for ever: msi, which sets a function up, and so
+; changes what is served, through e; the rest from what was found.
+(def serve ((e IoDevice) (fs (list PciFunction)) (port int)) int
   (match (port_receive port)
     ((RecvFailed) (complain "lost its port"))
     ((Message from payload)
-      (let s (request_answer payload (pci_answer fs (request_body payload)))
-        (serve fs port)))))
+      (let body (request_body payload)
+        (match (msi_asked body)
+          ((Some bdf)
+            (match (msi_answer e fs bdf)
+              ((Given fs2 a)
+                (let s (request_answer payload a)
+                  (let w (if (eq fs2 fs) 0 (info_as "pcie" (msi_line bdf a)))
+                    (serve e fs2 port))))))
+          ((None)
+            (let s (request_answer payload (pci_answer fs body))
+              (serve e fs port))))))))
+
+; The BDF an msi request asks for, or none if it is not one.
+(def msi_asked ((body (list int))) (Option int)
+  (match (request_numbers body)
+    ((ReqBad why) ((None int)))
+    ((ReqNums op ns) (if (if (eq op "msi") (eq (length ns) 1) false) (Some (head ns)) ((None int))))))
+
+; The line saying a function was given MSI a.
+(def msi_line ((bdf int) (a (list int))) (list int)
+  (append (pci_bdf_text bdf) (append ": MSI " a)))
 
 ; The answer to body: every function's line, those of a class, or why not.
 (def pci_answer ((fs (list PciFunction)) (body (list int))) (list int)

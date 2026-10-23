@@ -9,11 +9,13 @@
 ;   xhci rp1    the Raspberry Pi 5's two, RP1's DWC3s, which the firmware
 ;               leaves where dwc3.l0 says
 ;
-; It takes no interrupt yet, which L0's runtime gives for the virt
-; board's PCIe but not for RP1: it polls each controller's event ring
-; between requests, every millisecond when there is nothing
-; to do, which a keyboard or a mouse, reporting every 1 to 10 ms, does
-; not notice. Each controller's memory is DMA pages of its own: the
+; It takes each controller's interrupt, an MSI it asks pcie for, or else
+; its INTx line, as a message on its port, and on each reads that
+; controller's events. A controller with none, as RP1's are until L0's
+; runtime gives theirs, or whose interrupt another driver has bound,
+; leaves the driver polling every event ring between requests, every
+; millisecond when there is nothing to do, which a keyboard or a mouse,
+; reporting every 1 to 10 ms, does not notice. Each controller's memory is DMA pages of its own: the
 ; DCBAA, the command ring, the event ring's segment and its table, the
 ; scratchpads the controller asks for, and pool_pages more for its
 ; devices. Each controller brought up, and each device, is a line on
@@ -28,14 +30,15 @@
     (if (eq as (cons "pci" (nil (list int))))
         (from_pci)
         (if (eq as (cons "rp1" (nil (list int))))
-            (started (cons (Place (rp1_usb0) (rp1_usb_bytes) (rp1_dma_offset) true)
-                     (cons (Place (rp1_usb1) (rp1_usb_bytes) (rp1_dma_offset) true) (nil Place))))
+            (started (cons (Place (rp1_usb0) (rp1_usb_bytes) (rp1_dma_offset) true 0)
+                     (cons (Place (rp1_usb1) (rp1_usb_bytes) (rp1_dma_offset) true 0) (nil Place))))
             (complain "usage: xhci pci|rp1")))))
 
 ; Where a controller is: its registers' base and bytes, what to add to a
-; page's address for it to reach the page, and whether it is a DWC3 to
-; put in host mode first.
-(data Place (Place int int int bool))
+; page's address for it to reach the page, whether it is a DWC3 to put
+; in host mode first, and the interrupt it raises, 0 for none, as RP1's
+; give none yet.
+(data Place (Place int int int bool int))
 
 ; Every xHCI the pci server knows of, brought up; no xHCI is no failure.
 (def from_pci () int
@@ -43,11 +46,16 @@
     ((Err why) (complain why))
     ((Ok fs) (if (is_empty fs) (info_as "xhci" "no xHCI on the bus") (started (pci_places fs (nil Place)))))))
 
-; Where each function's BAR 0 is, after the reversed acc.
+; Where each function's BAR 0 is, and its interrupt, an MSI if pci
+; gives it one, after the reversed acc.
 (def pci_places ((fs (list PciFunction)) (acc (list Place))) (list Place)
   (if (is_empty fs)
       (rev acc)
-      (pci_places (tail fs) (cons (Place (pci_bar_base (head fs) 0) (pci_bar_size (head fs) 0) 0 false) acc))))
+      (pci_places (tail fs) (cons (Place (pci_bar_base (head fs) 0) (pci_bar_size (head fs) 0) 0 false (pci_interrupt (head fs))) acc))))
+
+; The interrupt of each place, in order.
+(def place_irqs ((ps (list Place))) (list int)
+  (if (is_empty ps) (nil int) (match (head ps) ((Place base len offset dwc3 irq) (cons irq (place_irqs (tail ps)))))))
 
 ; ------------------------------------------------------------ bringing up
 
@@ -59,7 +67,9 @@
 ; Controllers brought up, and the bus over them; or why one could not be.
 (data Up (Up Bus (list Ctrl)) (Down (list int)))
 
-; Every controller at ps brought up, and the usb name served.
+; Every controller at ps brought up, and the usb name served: waiting
+; for messages, its interrupts among them, if every controller's
+; interrupt is bound to its port, or else polling.
 (def started ((ps (list Place))) int
   (match (brought_up ps (bus_new) (nil Ctrl))
     ((Down why) (complain why))
@@ -68,7 +78,9 @@
         (let r (name_register_or_why port "usb")
           (if (not (is_empty r))
               (complain r)
-              (serve (ports_checked (Srv b cs (nil int) port) 0))))))))
+              (let is (bound_all cs (place_irqs ps) port 0)
+                (let s (ports_checked (Srv b cs (nil int) port is) 0)
+                  (if (all_bound is) (waits s) (serve s))))))))))
 
 ; Each controller at ps brought up, numbered on from cs's, onto b.
 (def brought_up ((ps (list Place)) (b Bus) (cs (list Ctrl))) Up
@@ -89,7 +101,7 @@
 ; and reset, its memory given it, and run.
 (def controller_up ((pl Place) (k int) (next int)) Brought
   (match pl
-    ((Place base len offset dwc3)
+    ((Place base len offset dwc3 irq)
       (match (open_device base len)
         ((DeviceFailed fault why) (NotBrought (append "no controller: " why)))
         ((DeviceOpened r)
@@ -217,30 +229,104 @@
 
 ; --------------------------------------------------------------- serving
 
-; The driver: the bus, the controllers, the ports listening, its port.
-(data Srv (Srv Bus (list Ctrl) (list int) int))
+; The driver: the bus, the controllers, the ports listening, its port,
+; and each controller's interrupt bound to it, 0 for one polled.
+(data Srv (Srv Bus (list Ctrl) (list int) int (list int)))
 
 ; Its fields read, and two replaced.
-(def srv_bus ((s Srv)) Bus (match s ((Srv b cs ls port) b)))
-(def srv_port ((s Srv)) int (match s ((Srv b cs ls port) port)))
-(def srv_ctrl ((s Srv) (k int)) Ctrl (match s ((Srv b cs ls port) (nth cs k))))
-(def srv_count ((s Srv)) int (match s ((Srv b cs ls port) (length cs))))
-(def srv_with_bus ((s Srv) (b2 Bus)) Srv (match s ((Srv b cs ls port) (Srv b2 cs ls port))))
-(def srv_with_listeners ((s Srv) (ls2 (list int))) Srv (match s ((Srv b cs ls port) (Srv b cs ls2 port))))
-(def srv_listeners ((s Srv)) (list int) (match s ((Srv b cs ls port) ls)))
+(def srv_bus ((s Srv)) Bus (match s ((Srv b cs ls port is) b)))
+(def srv_port ((s Srv)) int (match s ((Srv b cs ls port is) port)))
+(def srv_ctrl ((s Srv) (k int)) Ctrl (match s ((Srv b cs ls port is) (nth cs k))))
+(def srv_count ((s Srv)) int (match s ((Srv b cs ls port is) (length cs))))
+(def srv_irqs ((s Srv)) (list int) (match s ((Srv b cs ls port is) is)))
+(def srv_with_bus ((s Srv) (b2 Bus)) Srv (match s ((Srv b cs ls port is) (Srv b2 cs ls port is))))
+(def srv_with_listeners ((s Srv) (ls2 (list int))) Srv (match s ((Srv b cs ls port is) (Srv b cs ls2 port is))))
+(def srv_listeners ((s Srv)) (list int) (match s ((Srv b cs ls port is) ls)))
 
-; How long to sleep with nothing to do.
+; How long to sleep with nothing to do, polling.
 (def poll_ns () int 1000000)
 
-; Each request answered as it comes, and after each, every event read,
-; so requests coming fast keep no event waiting; with neither, a nap.
+; Polling: each message handled as it comes; with none, every event
+; read, and with none of those either, a nap.
 (def serve ((s Srv)) int
   (match (port_try_receive (srv_port s))
-    ((Message from payload)
-      (match (drained (requested s payload) 0 false) ((Drained s2 any) (serve s2))))
+    ((Message from payload) (serve (handled s from payload)))
     ((RecvFailed)
       (match (drained s 0 false)
         ((Drained s2 any) (if any (serve s2) (let z (sleep_ns (poll_ns)) (serve s2))))))))
+
+; With every controller's interrupt bound: the events that came before
+; the interrupts were on read, then each message waited for and handled.
+(def waits ((s Srv)) int
+  (match (drained s 0 false) ((Drained s2 any) (waiting s2))))
+(def waiting ((s Srv)) int
+  (match (port_receive (srv_port s))
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from payload) (waiting (handled s from payload)))))
+
+; A message handled: a controller's interrupt, or a request answered and
+; then every event read, so requests coming fast keep no event waiting.
+(def handled ((s Srv) (from int) (payload (list int))) Srv
+  (let k (noticed (srv_irqs s) from payload 0)
+    (if (ge k 0)
+        (interrupted s k)
+        (match (drained (requested s payload) 0 false) ((Drained s2 any) s2)))))
+
+; Which controller, from k, a message from from says interrupted: the
+; one whose bound interrupt the kernel's notice names; -1 for none.
+(def noticed ((is (list int)) (from int) (payload (list int)) (k int)) int
+  (if (if (is_empty is) true (not (eq from 0)))
+      -1
+      (if (if (gt (head is) 0) (eq payload (irq_notice (head is))) false)
+          k
+          (noticed (tail is) from payload (add k 1)))))
+
+; Controller k's interrupt: its pending cleared, so that an INTx line
+; falls, every event read, and the interrupt ended, so it can come
+; again. One that comes while the events are read is noticed after.
+(def interrupted ((s Srv) (k int)) Srv
+  (let c (pending_cleared (srv_ctrl s k))
+    (match (drained s 0 false)
+      ((Drained s2 any) (let a (irq_ack (nth (srv_irqs s) k)) s2)))))
+
+; A controller's interrupter 0 enabled, what it had pending cleared, and
+; its interrupts on.
+(def interrupts_on ((c Ctrl)) int
+  (match c
+    ((Ctrl r op rt db m va ports)
+      (let a (pending_cleared c)
+        (device_write32 r (add op (op_usbcmd)) (bit_or (device_read32 r (add op (op_usbcmd))) (cmd_interrupts)))))))
+
+; IMAN's Interrupt Pending and USBSTS's Event Interrupt cleared,
+; interrupter 0 left enabled.
+(def pending_cleared ((c Ctrl)) int
+  (match c
+    ((Ctrl r op rt db m va ports)
+      (let a (device_write32 r (add rt (rt_iman)) (iman_cleared))
+        (device_write32 r (add op (op_usbsts)) (sts_event))))))
+
+; Each controller of cs, numbered from k, its interrupt of irqs bound to
+; port and turned on, and said: the interrupt bound, or 0 for one that
+; has none or could not be bound, which is polled.
+(def bound_all ((cs (list Ctrl)) (irqs (list int)) (port int) (k int)) (list int)
+  (if (if (is_empty cs) true (is_empty irqs))
+      (nil int)
+      (let n (head irqs)
+        (let why (if (le n 0) "it raises none" (irq_bind_or_why n port))
+          (let w (logged (irq_line k n why))
+            (let i (if (is_empty why) (let on (interrupts_on (head cs)) n) 0)
+              (cons i (bound_all (tail cs) (tail irqs) port (add k 1)))))))))
+
+; Whether every controller's interrupt was bound.
+(def all_bound ((is (list int))) bool
+  (if (is_empty is) false (not (any_eq 0 is))))
+
+; What became of controller k's interrupt n: taken, or why not, polled.
+(def irq_line ((k int) (n int) (why (list int))) (list int)
+  (append "xhci " (append (digits k)
+    (if (is_empty why)
+        (append ": interrupt " (digits n))
+        (append ": polled, as " why)))))
 
 ; A request, answered by the bus.
 (def requested ((s Srv) (payload (list int))) Srv
