@@ -2,9 +2,10 @@
 tools/qemu-boot.sh, a fresh disk from tools/mkdisk at build/mcp/disk.img,
 and a network card on QEMU's user network, keeps everything its serial
 line shows, types at the
-serial shell, and drives the screen, the virtio keyboard and the virtio
-tablet through QMP, as the screen tests in tests/*.sh do with the monitor
-and nc.
+serial shell, and drives the screen, the keyboard and the pointer through
+QMP, as the screen tests in tests/*.sh do with the monitor and nc: virtio's
+keyboard and tablet, or, for an image whose inittab starts usb-hid, as
+the demo's does, a USB keyboard and mouse.
 
 Nothing here imports the MCP SDK, so the pure parts can be tested with
 plain python3 (test_board.py)."""
@@ -103,6 +104,32 @@ def at(x, y):
         {"type": "abs", "data": {"axis": "x", "value": axis(x, WIDTH)}},
         {"type": "abs", "data": {"axis": "y", "value": axis(y, HEIGHT)}},
     ]
+
+
+def by(dx, dy):
+    """The input events that move a mouse dx, dy, which wm takes as that
+    many pixels, keeping the pointer on the screen."""
+    return [
+        {"type": "rel", "data": {"axis": "x", "value": dx}},
+        {"type": "rel", "data": {"axis": "y", "value": dy}},
+    ]
+
+
+def clamped(x, y):
+    """Screen pixel x, y, or the nearest one on the screen, as wm keeps a
+    mouse's pointer."""
+    return max(0, min(WIDTH - 1, x)), max(0, min(HEIGHT - 1, y))
+
+
+# Far enough up and left from anywhere on the screen to reach its corner.
+HOME = by(-4000, -4000)
+
+
+def uses_usb(cpio):
+    """Whether the initramfs cpio's inittab starts usb-hid, and so wants
+    QEMU's USB keyboard and mouse rather than virtio's keyboard and
+    tablet (tools/qemu-boot.sh's QEMU_INPUT=usb)."""
+    return b"start /sbin/usb-hid" in Path(cpio).read_bytes()
 
 
 def button(down, which="left"):
@@ -342,6 +369,11 @@ class Board:
         self.status = None
         self.image = None
         self.cond = threading.Condition()
+        # A USB mouse moves relatively: where the pointer is, once a move
+        # has put it somewhere, and whether a drag holds a button.
+        self.usb = False
+        self.pointer = None
+        self.holding = False
 
     # Starting and stopping
 
@@ -360,8 +392,12 @@ class Board:
         # A fresh disk each boot, as tools/mkdisk makes it, for virtio-blk.
         disk = STATE / "disk.img"
         subprocess.run([str(ROOT / "tools" / "mkdisk"), str(disk)], cwd=ROOT, check=True)
+        self.usb = uses_usb(cpio)
+        self.pointer = None
+        self.holding = False
         env = dict(os.environ, QEMU_DISPLAY=display, QEMU_DISK=str(disk), QEMU_NET="user",
-                   QEMU_QMP=f"unix:{qmp_path},server=on,wait=off")
+                   QEMU_QMP=f"unix:{qmp_path},server=on,wait=off",
+                   QEMU_INPUT="usb" if self.usb else "virtio")
         with self.cond:
             self.out = bytearray()
             self.read_at = 0
@@ -586,7 +622,21 @@ class Board:
         time.sleep(POINTER_GAP)
 
     def move(self, x, y):
-        self.events(at(x, y))
+        """The pointer to screen pixel x, y: the tablet put there, or the
+        mouse moved there. A mouse goes into the top left corner first,
+        unless a drag holds a button, so that its moves add up from a
+        place known; QEMU adds up one batch's moves, so that is sent
+        apart."""
+        if not self.usb:
+            self.events(at(x, y))
+            return
+        x, y = clamped(x, y)
+        if self.pointer is None or not self.holding:
+            self.events(HOME)
+            self.pointer = (0, 0)
+        px, py = self.pointer
+        self.events(by(x - px, y - py))
+        self.pointer = (x, y)
 
     def click(self, x, y, which="left"):
         self.move(x, y)
@@ -604,6 +654,10 @@ class Board:
     def drag(self, x0, y0, x1, y1, steps=8, which="left"):
         self.move(x0, y0)
         self.events(button(True, which))
-        for i in range(1, steps + 1):
-            self.move(x0 + (x1 - x0) * i // steps, y0 + (y1 - y0) * i // steps)
+        self.holding = True
+        try:
+            for i in range(1, steps + 1):
+                self.move(x0 + (x1 - x0) * i // steps, y0 + (y1 - y0) * i // steps)
+        finally:
+            self.holding = False
         self.events(button(False, which))

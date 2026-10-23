@@ -11,7 +11,11 @@
 #   make demo        boot it to the shell, on this terminal: type help;
 #                    the splash shows in QEMU's window, and build/disk.img
 #                    is the disk, made once, so what is written to it stays;
-#                    build/sd.img, blank until Disks formats it, the SD card
+#                    build/sd.img, blank until Disks formats it, the SD card;
+#                    the keyboard and mouse are USB's, on a qemu-xhci, and
+#                    the mouse moves relatively, so a click in QEMU's
+#                    window grabs the host's pointer, and Ctrl-Alt-G
+#                    (Ctrl-Option-G on macOS) lets it go
 #   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
 #   make demo NET=user,tftp=DIR         the same, the network's gateway
 #                    serving DIR over TFTP, for tftp 10.0.2.2 FILE
@@ -85,8 +89,10 @@ SCREEN       ?= 2560x1440
 GPU          ?= $(shell tools/qemu-gl)
 comma        := ,
 GPU_OPTS     := $(if $(SCREEN),xres=$(word 1,$(subst x, ,$(SCREEN)))$(comma)yres=$(word 2,$(subst x, ,$(SCREEN))))
+# make boot gives an etc both inputs: virtio's keyboard and tablet, and a
+# qemu-xhci with a USB keyboard and mouse, as the demo's inittab drives.
 DEVICES      := -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device \
-                -device virtio-rng-device
+                -device qemu-xhci -device usb-kbd -device usb-mouse -device virtio-rng-device
 DISK         := $(BUILD)/disk.img
 SYSDISK      := $(BUILD)/system.img
 SYSUUID      := $(BUILD)/system.uuid
@@ -527,14 +533,14 @@ sysdisk: initramfs $(BUILD)/mkfs
 
 demo: initramfs $(DISK) $(SD)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@GPU=$(GPU) QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_SD=$(SD) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
+	@GPU=$(GPU) QEMU_INPUT=usb QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_SD=$(SD) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The demo booted from the system disk, its System volume /: made anew
 # from the initramfs as it is now, so what was written to it goes.
 demo-system: sysdisk
 	@echo "Booting L0S from System, $$(cat $(SYSUUID)). Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@GPU=$(GPU) QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_NET=$(NET) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
+	@GPU=$(GPU) QEMU_INPUT=usb QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_NET=$(NET) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The Raspberry Pi 5, which nothing here can boot: the kernel built for

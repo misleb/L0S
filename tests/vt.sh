@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# vt.sh -- boots the demo's initramfs with no window, but with
-# tests/vt/etc/system's two terminals: the compositor, wm, with two vt
+# vt.sh -- boots the demo's initramfs with no window, on its USB keyboard
+# and mouse (QEMU_INPUT=usb), but with tests/vt/etc/system's two
+# terminals: the compositor, wm, with two vt
 # windows, each with a shell. It learns where the windows are
 # from run windows, typed at the serial shell, since which vt opens first,
 # and so where each is, varies. Then it checks:
 #
 #   1. both title bars, by QEMU's screendump: the front window's active,
 #      the other's in the backdrop
-#   2. echo hi, typed on the virtio keyboard through QEMU's monitor
+#   2. echo hi, typed on the USB keyboard through QEMU's monitor
 #      (sendkey), as typing in QEMU's window would: the front window
 #      shows the h of hi on row 8, under the motd, the banner, and the
 #      prompt
 #   3. run nap 30000 &, typed the same way: ps at the serial shell shows
 #      nap, started by the front window's shell, which its vt started
-#   4. a click of the tablet, through QMP, on the other window's title
+#   4. a click of the USB mouse, through QMP, on the other window's title
 #      bar: it comes to the front, its title bar active, as run windows
 #      and the screendump show
 #   5. a drag of its title bar: run windows shows it moved as far as the
@@ -39,7 +40,7 @@ dump="$BUILD/vt.ppm"
 rm -f "$sock" "$qmp" "$fifo" "$dump"
 mkfifo "$fifo"
 
-QEMU_MONITOR="unix:$sock,server=on,wait=off" QEMU_QMP="unix:$qmp,server=on,wait=off" \
+QEMU_INPUT=usb QEMU_MONITOR="unix:$sock,server=on,wait=off" QEMU_QMP="unix:$qmp,server=on,wait=off" \
   tools/qemu-boot.sh "$BUILD/vt.cpio" < "$fifo" > "$out" 2>&1 &
 qemu=$!
 trap 'kill $qemu 2> /dev/null; rm -f "$fifo"' EXIT
@@ -65,20 +66,21 @@ typekeys() {
   monitor "sendkey ret"
 }
 
-# The tablet, through QMP: each argument an input event.
+# The USB mouse, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
     | nc -U -w 1 "$qmp" > /dev/null 2>&1
 }
-# Where screen pixel x, y is on the tablet's axes, 0 to 32767, and back:
-# the screen pixel the compositor makes of it.
-axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
-onscreen() { echo $(( $(axis "$1" "$2") * ($2 - 1) / 32767 )); }
-at() {
-  echo "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$(axis "$1" 1280)}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$(axis "$2" 800)}}"
+# A move of dx, dy, a pixel a count, as a mouse moves.
+by() {
+  echo "{\"type\":\"rel\",\"data\":{\"axis\":\"x\",\"value\":$1}},{\"type\":\"rel\",\"data\":{\"axis\":\"y\",\"value\":$2}}"
 }
+# The pointer to screen pixel x, y: into the top left corner first, where
+# wm keeps it however far past it the mouse goes, then from there. QEMU
+# adds up one batch's moves, so the two are sent apart.
+point() { events "$(by -4000 -4000)"; sleep 1; events "$(by "$1" "$2")"; }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
 # Waits up to 30 s for the serial line to show a line matching a pattern.
@@ -179,11 +181,11 @@ typekeys "echo hi"
 # h's stem, column 1, its middle, on row 8: the text's color.
 shows "echo hi typed and answered in $f_title" "$((f_x + edge + 1)) $((f_y + bar + 8 * 16 + 8)) $ink"
 
-# vt1 and vt2 are pids 16 and 17: boot, pid 1, starts /etc/system's
-# programs after the inittab's thirteen, sh 14, wm 15, then the two vts
+# vt1 and vt2 are pids 17 and 18: boot, pid 1, starts /etc/system's
+# programs after the inittab's fourteen, sh 15, wm 16, then the two vts
 # in that order, and each names itself first thing. Each starts its own
 # shell, which ps shows as its child.
-vt=$((15 + ${f_title#vt}))
+vt=$((16 + ${f_title#vt}))
 typekeys "run nap 30000 &"
 sleep 2
 printf 'ps\n' >&3
@@ -194,7 +196,7 @@ echo "ok - vt: $f_title's shell, pid $shell, started by $f_title, ran nap"
 
 # A click on the back window's title bar brings it to the front.
 front=$b_title
-events "$(at "$bx" "$by")"; sleep 1
+point "$bx" "$by"; sleep 1
 events "$(button true)"; sleep 1
 events "$(button false)"; sleep 1
 windows
@@ -203,12 +205,11 @@ shows "a click brought $front to the front" "$((f_x + 6)) $((f_y + 6)) $active" 
 
 # A drag of its title bar moves it as far as the pointer moved.
 x0=$((f_x + 30)); y0=$((f_y + 10)); x1=$((x0 + 150)); y1=$((y0 + 120))
-want_x=$((f_x + $(onscreen $x1 1280) - $(onscreen $x0 1280)))
-want_y=$((f_y + $(onscreen $y1 800) - $(onscreen $y0 800)))
-events "$(at $x0 $y0)"; sleep 1
+want_x=$((f_x + x1 - x0)); want_y=$((f_y + y1 - y0))
+point $x0 $y0; sleep 1
 events "$(button true)"; sleep 1
-events "$(at $((x0 + 70)) $((y0 + 60)))"; sleep 1
-events "$(at $x1 $y1)"; sleep 1
+events "$(by 70 60)"; sleep 1
+events "$(by $((x1 - x0 - 70)) $((y1 - y0 - 60)))"; sleep 1
 events "$(button false)"; sleep 1
 windows
 [ "$f_title" = "$front" ] && [ "$f_x" = "$want_x" ] && [ "$f_y" = "$want_y" ] ||
@@ -223,7 +224,7 @@ shows "$front scrolled, the prompt on its last row" "$((f_x + edge + 40)) $((f_y
 # exit at its shell ends the shell, and so its vt, which closes its
 # window: the other is left, in front, and ps shows neither process.
 other=$b_title
-vt=$((15 + ${front#vt}))
+vt=$((16 + ${front#vt}))
 typekeys "exit"
 windows 1
 [ "$f_title" = "$other" ] || fail "after exit in $front, $f_title is left, not $other"
@@ -237,13 +238,13 @@ echo "ok - vt: exit closed $front, its vt gone, $other left in front"
 # A click on the close button, at the right end of the title bar, kills
 # the window's vt, which closes the window; its shell, its terminal gone,
 # exits too.
-vt=$((15 + ${other#vt}))
+vt=$((16 + ${other#vt}))
 from=$(($(wc -c < "$out") + 1))
 printf 'ps\n' >&3
 waits_for "^ +[0-9]+ +$vt  sh "
 shell=$(tail -c +$from "$out" | grep -aE "^ +[0-9]+ +$vt  sh " | tail -1 | awk '{print $1}')
 cx=$((f_x + f_w + 2 * edge - 18)); cy=$((f_y + 22))
-events "$(at $cx $cy)"; sleep 1
+point $cx $cy; sleep 1
 events "$(button true)"; sleep 1
 events "$(button false)"; sleep 1
 windows 0

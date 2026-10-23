@@ -46,8 +46,10 @@ Requirements:
 
 `make demo` builds every program and the initramfs, `build/initramfs.cpio`,
 and boots it on QEMU. The board's serial line is on your terminal, and
-its virtio-gpu, virtio keyboard and virtio tablet are in a QEMU window;
-its virtio-net is on QEMU's user network.
+its virtio-gpu is in a QEMU window, with a USB keyboard and mouse on a
+`qemu-xhci` (see [USB](#usb)); its virtio-net is on QEMU's user network.
+The mouse moves relatively, as a real one does, so a click in the window
+grabs your pointer, and Ctrl-Alt-G (Ctrl-Option-G on a Mac) lets it go.
 The window shows a desktop, the compositor's: a wallpaper, a top bar,
 and two windows that overlap, each with a title bar: a terminal with a
 shell, and the System Monitor. The top bar is GNOME Shell's, black across
@@ -101,21 +103,22 @@ booted with `root=UUID`, or else from the initramfs.
 | 1 | `boot` | the first stage's end: it makes the system volume `/` if `root=` names one, starts `/etc/system`, and waits for its first program, the serial shell, so that shell's `exit` stops the system |
 | 2 | `uart` | the serial line's terminal, `console` |
 | 3 | `virtio-gpu` | the display driver. It serves `display`, building the screen from the buffers the compositor gives it |
-| 4 | `virtio-input keyboard` | the keyboard driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
-| 5 | `virtio-input tablet` | the pointer's driver. It serves `pointer`, telling `wm` where the pointer is and what its buttons do |
-| 6 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
-| 7 | `virtio-blk` | the disk's driver. It serves `disk0`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
-| 8 | `fs` | the file server. It mounts the disks' volumes, the disk's at `/Volumes/data` and `/Volumes/scratch`, and any made on the SD card, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
-| 9 | `virtio-net` | the network card's driver. It serves `nic`, telling `inet` of every frame the card takes, and putting on the wire every frame `inet` gives it |
-| 10 | `inet` | the IPv4 stack, at the address and with the name server a DHCP server gives it (`inet dhcp`; 10.0.2.15 and 10.0.2.3 on QEMU's user network), and keeps the lease. It serves `inet`, for `run net`, `run tftp` and `run http` (see [The network](#the-network)) |
-| 11 | `virtio-rng` | the entropy device's driver. It serves `random`, the host's randomness, which `fs` makes UUIDs of and `inet` keys TCP's first sequence numbers with |
-| 12 | `pcie virt` | the PCIe bus's server. It puts each device's registers in the bus's window, and serves `pci`, telling `sdhci` where the SD host controller is |
-| 13 | `sdhci pci` | the SD card's driver. It serves `disk1`, reading and writing the sectors of `build/sd.img`, blank until Disks formats it |
-| 14 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 15 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 16 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
-| 17 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
-| 18 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
+| 4 | `rtc clock` | the real-time clock's driver. It serves `clock`, telling `wm` the time at the start of every minute, for the top bar |
+| 5 | `virtio-blk` | the disk's driver. It serves `disk0`, reading and writing the sectors of `build/disk.img` for `fs` and `run disk` |
+| 6 | `fs` | the file server. It mounts the disks' volumes, the disk's at `/Volumes/data` and `/Volumes/scratch`, and any made on the SD card, and serves their files to every program, through the kernel (see [Volumes](#volumes)) |
+| 7 | `virtio-net` | the network card's driver. It serves `nic`, telling `inet` of every frame the card takes, and putting on the wire every frame `inet` gives it |
+| 8 | `inet` | the IPv4 stack, at the address and with the name server a DHCP server gives it (`inet dhcp`; 10.0.2.15 and 10.0.2.3 on QEMU's user network), and keeps the lease. It serves `inet`, for `run net`, `run tftp` and `run http` (see [The network](#the-network)) |
+| 9 | `virtio-rng` | the entropy device's driver. It serves `random`, the host's randomness, which `fs` makes UUIDs of and `inet` keys TCP's first sequence numbers with |
+| 10 | `pcie virt` | the PCIe bus's server. It puts each device's registers in the bus's window, and serves `pci`, telling `sdhci` and `xhci` where the SD host controller and the USB one are |
+| 11 | `sdhci pci` | the SD card's driver. It serves `disk1`, reading and writing the sectors of `build/sd.img`, blank until Disks formats it |
+| 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard and the mouse on its ports, and serves `usb`, telling each `usb-hid` of its device's reports. It polls the controller, so `ps` shows it `ready`, not waiting (see [USB](#usb)) |
+| 13 | `usb-hid keyboard` | the keyboard's driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
+| 14 | `usb-hid mouse` | the mouse's driver. It serves `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
+| 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
+| 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 17 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 18 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
+| 19 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
@@ -149,8 +152,8 @@ the screen on the host's GPU with virgl (see
 device and the 2D mode instead, and so do `make boot` and the tests: QEMU's
 `screendump`, which they read the screen with, has no surface to read when
 the scanout is a GL texture.
-What is typed in the window goes to the virtio keyboard, and so through
-`virtio-input` and `wm` to the front window's `vt`.
+What is typed in the window goes to the USB keyboard, and so through
+`xhci`, `usb-hid` and `wm` to the front window's `vt`.
 
 Each shell shows [/etc/motd](demo/etc/motd), then its prompt:
 
@@ -261,28 +264,31 @@ Things to try:
 
   ```
     PID  PARENT  PROGRAM       STATE
-      1       0  boot          waiting for pid 14
+      1       0  boot          waiting for pid 15
       2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 17
-      4       0  virtio-input  waiting for a message on port 2
-      5       0  virtio-input  waiting for a message on port 3
-      6       0  rtc           sleeping
-      7       0  virtio-blk    waiting for a message on port 6
-      8       0  fs            waiting for a message on port 20
-      9       0  virtio-net    waiting for a message on port 8
-     10       0  inet          waiting for a message on port 9
-     11       0  virtio-rng    waiting for a message on port 11
-     12       0  pcie          waiting for a message on port 12
-     13       0  sdhci         waiting for a message on port 16
-     14       1  sh            running
-     15       1  wm            waiting for a message on port 19
-     16       1  vt            waiting for a message on port 15
-     17       1  procmon       sleeping
-     18      16  sh            waiting for a message on port 25
+      3       0  virtio-gpu    waiting for a message on port 19
+      4       0  rtc           sleeping
+      5       0  virtio-blk    waiting for a message on port 3
+      6       0  fs            waiting for a message on port 22
+      7       0  virtio-net    waiting for a message on port 5
+      8       0  inet          waiting for a message on port 6
+      9       0  virtio-rng    waiting for a message on port 8
+     10       0  pcie          waiting for a message on port 9
+     11       0  sdhci         waiting for a message on port 15
+     12       0  xhci          ready
+     13       0  usb-hid       waiting for a message on port 17
+     14       0  usb-hid       waiting for a message on port 18
+     15       1  sh            running
+     16       1  wm            waiting for a message on port 21
+     17       1  vt            waiting for a message on port 14
+     18       1  procmon       sleeping
+     19      17  sh            waiting for a message on port 27
   ```
 
   It lists the processes that have not exited. The shell asking is always
-  `running`, since `ps` runs inside it. A process writing to a terminal
+  `running`, since `ps` runs inside it. `xhci` is `ready`, or `sleeping`
+  for the millisecond between its looks at the controller, since it polls
+  rather than taking an interrupt. A process writing to a terminal
   whose queue is full shows `writing to port N`, one reading its
   standard input from a terminal `reading a line, to port N`, and one
   whose call on a file of a volume its server has yet to answer
@@ -359,9 +365,11 @@ Job control:
 - **`kill PID`** ends any process but the shell itself: a background
   job, another shell's job, another shell, or `wm`. Drivers, the
   programs with a `dev` line, can't be killed, since the system would
-  lose their devices, so `uart`, `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`,
-  `virtio-net` and `virtio-rng` stay.
-  Killing pid 12, the serial shell, from a window's shell stops the
+  lose their devices, so `uart`, `rtc`, `virtio-gpu`, `virtio-blk`,
+  `virtio-net`, `virtio-rng`, `pcie`, `sdhci` and `xhci` stay. The
+  `usb-hid`s drive no device, so killing one takes the keyboard or the
+  mouse away until the next boot.
+  Killing pid 15, the serial shell, from a window's shell stops the
   system, as its `exit` does: `boot`, pid 1, waiting for it, exits too.
 
 Editing, on any terminal: Backspace erases a character and Ctrl-U erases
@@ -384,7 +392,9 @@ board. The script copies how `l0` loads the initramfs into the board's
 memory; that is not a documented interface, so a change to `l0` may need
 the same change there. It also attaches the virtio-gpu, the virtio
 keyboard and the virtio tablet, on modern transports, as `l0 boot` does
-with `L0_QEMU_ARGS`, and, if `QEMU_DISK` names a raw image, a virtio-blk
+with `L0_QEMU_ARGS`, or with `QEMU_INPUT=usb`, as the demo boots, a
+`qemu-xhci` with a `usb-kbd` and a `usb-mouse` in place of those two;
+and, if `QEMU_DISK` names a raw image, a virtio-blk
 on it, and if `QEMU_NET` names a network, as QEMU's `-netdev` does
 without its id, a virtio-net on it, at `52:54:00:12:34:56`: the demo's
 is `user`, QEMU's own, or what `make demo NET=...` gives. The demo's
@@ -421,8 +431,8 @@ makes it, and a network card on QEMU's user network.
 | `ps`, `windows` | `ps` and `run windows` at the serial shell, parsed |
 | `dmesg` | `dmesg` at the serial shell, parsed: each message of the kernel's log with its time since boot, which the board keeps, so no tool keeps a log of its own |
 | `screenshot`, `pixels` | the screen, or part of it, as a PNG, by QMP's `screendump`; the exact colors of pixels |
-| `type_keys`, `press_keys` | text, or combinations such as `ctrl-c`, on the virtio keyboard, so to the front window |
-| `move`, `click`, `drag`, `scroll` | the virtio tablet, in screen pixels, and its scroll wheel |
+| `type_keys`, `press_keys` | text, or combinations such as `ctrl-c`, on the keyboard, so to the front window: USB's for an image whose inittab starts `usb-hid`, as the demo's does, virtio's otherwise |
+| `move`, `click`, `drag`, `scroll` | the pointer, in screen pixels, and its scroll wheel: the virtio tablet, or the USB mouse, which `move` takes into the screen's top left corner and then as far as the pixel, since it moves relatively |
 | `doc` | `make -s doc Q=...`, with no board: L0S's own documentation, the libraries' first, then the programs' |
 
 Everything the serial line shows is also kept in `build/mcp/serial.out`.
@@ -482,8 +492,9 @@ Unix shell does on SIGHUP. A read the kernel does carry, a program's
  sh ─tty─ vt1 ─┐ compositor protocol                display protocol
      procmon ──┼──────────────────▶ wm ─────────────────────────▶ virtio-gpu ──▶ QEMU
        draw ───┘ (shared buffers)   ▲ ▲                           (or another driver)
-                                    │ └── pointer ◀── virtio-input tablet
-                                    └──── keyboard ◀── virtio-input keyboard
+                                    │ └── pointer ◀── usb-hid mouse ◀──┐ usb
+                                    └──── keyboard ◀── usb-hid keyboard ◀─ xhci
+                                             (or virtio-input tablet and keyboard)
 ```
 
 Pixels never travel in messages. They move by sharing pages:
@@ -2337,7 +2348,7 @@ and that after Esc the shell runs the next command typed.
 
 [tests/vt.sh](tests/vt.sh) boots the demo's own initramfs (`make
 vt-initramfs`), every shell running, but with two Terminals whatever the
-demo's `/etc/system` starts after its first ([tests/vt/etc/system](tests/vt/etc/system)), with QMP on a socket as well, to work the tablet. Which `vt`
+demo's `/etc/system` starts after its first ([tests/vt/etc/system](tests/vt/etc/system)), on its USB keyboard and mouse (`QEMU_INPUT=usb`), with QMP on a socket as well, to work the mouse, which it moves into the screen's top left corner before each move to a pixel. Which `vt`
 opens first, and so where each window is, varies, so it learns where they
 are from `run windows` at the serial shell. Then:
 - the title bars: the front window's header bar active, `ebebeb`, the
@@ -2537,7 +2548,8 @@ a bad buffer, and wait on nothing.
 - **USB has run on QEMU only** (see [USB](#usb)), not on a Pi 5, where
   L0S does not boot yet. Boot keyboards and mice only, on root ports
   only, no hubs; `xhci` polls rather than taking interrupts, which L0's
-  runtime does not give yet for PCIe or RP1; a control
+  runtime does not give yet for PCIe or RP1 (asked for in
+  [probes/usb](probes/usb/REQUEST-pcie-interrupts.md)); a control
   transfer moves 2 KB at most, an endpoint's report 2 KB; and each
   controller has 64 pages for its devices, about 3 a device and 1 an
   endpoint opened.

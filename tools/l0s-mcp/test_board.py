@@ -1,13 +1,15 @@
 """test_board.py -- tests of board.py's pure parts, with no board: keys,
-the tablet's axes, pictures, and parsing what the shell prints. Run by
+the tablet's axes and the mouse's moves, pictures, and parsing what the shell prints. Run by
 make test-mcp, with plain python3."""
 
 import struct
+import tempfile
 import unittest
 import zlib
+from pathlib import Path
 
-from board import (BoardError, axis, button, crop, key_combo, parse_combo, parse_ppm,
-                   parse_dmesg, parse_ps, parse_windows, png, reply_of, wheel)
+from board import (BoardError, axis, button, by, clamped, crop, key_combo, parse_combo, parse_ppm,
+                   parse_dmesg, parse_ps, parse_windows, png, reply_of, uses_usb, wheel)
 
 
 class Keys(unittest.TestCase):
@@ -39,7 +41,7 @@ class Tablet(unittest.TestCase):
         self.assertEqual(axis(0, 1280), 0)
         self.assertEqual(axis(1279, 1280), 32767)
 
-    def test_as_vt_sh_scales(self):
+    def test_as_disks_sh_scales(self):
         # $(( 640 * 32767 / 1279 ))
         self.assertEqual(axis(640, 1280), 16396)
 
@@ -54,6 +56,24 @@ class Tablet(unittest.TestCase):
         up = button(True, "wheel-up") + button(False, "wheel-up")
         left = button(True, "wheel-left") + button(False, "wheel-left")
         self.assertEqual(wheel(-1, -2), up + up + left)
+
+
+class Mouse(unittest.TestCase):
+    def test_by(self):
+        self.assertEqual(by(60, -16), [{"type": "rel", "data": {"axis": "x", "value": 60}},
+                                       {"type": "rel", "data": {"axis": "y", "value": -16}}])
+
+    def test_clamped_to_the_screen(self):
+        self.assertEqual(clamped(-5, 900), (0, 799))
+        self.assertEqual(clamped(640, 400), (640, 400))
+
+    def test_uses_usb(self):
+        with tempfile.TemporaryDirectory() as d:
+            usb, virtio = Path(d) / "usb.cpio", Path(d) / "virtio.cpio"
+            usb.write_bytes(b"...start /sbin/xhci pci\nstart /sbin/usb-hid mouse\n...")
+            virtio.write_bytes(b"...start /sbin/virtio-input tablet\n# usb-hid\n...")
+            self.assertTrue(uses_usb(usb))
+            self.assertFalse(uses_usb(virtio))
 
 
 def ppm(w, h, rgb):

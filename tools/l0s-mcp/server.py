@@ -17,15 +17,17 @@ INSTRUCTIONS = """\
 Drives L0S, the L0 microkernel, booted on QEMU's aarch64 virt board.
 Build first (make initramfs for the demo, make screen-initramfs for the
 screen tests' image); boot does not build. Then boot, and use shell for
-commands at the serial shell (the demo's pid 12, which boot, pid 1,
+commands at the serial shell (the demo's pid 15, which boot, pid 1,
 starts and waits for; prompt "l0s> "): it waits for the
 next prompt and returns what was printed. ps and windows parse those
 commands' output. serial_send/serial_read are for anything that is not
 a command that returns to the prompt (a program reading its input,
 Ctrl-C, output of background jobs). The screen is 1280x800; screenshot
 shows it, pixels gives exact colors. type_keys and press_keys go to the
-virtio keyboard, so to the front window, not the serial line; click,
-drag, move and scroll (the wheel) drive the virtio tablet. Everything the serial line shows
+keyboard, so to the front window, not the serial line; click, drag,
+move and scroll (the wheel) drive the pointer. Both are USB's for an
+image whose inittab starts usb-hid, as the demo's does, and virtio's
+otherwise, as the screen image's. Everything the serial line shows
 is also saved in build/mcp/serial.out.
 
 doc needs no board: it looks up L0S's own code, as make -s doc Q=...
