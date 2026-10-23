@@ -290,6 +290,20 @@ add to that list. Documenting a listed form fails the check too, until
   `shm_share`).
 - **Docker must be running**: board images (`--target virt` and `proc`) are
   linked in l0's container. Homebrew's `ld.lld` is blocked on this machine.
+- **The kernel's heap is 192 MB and its stack 16 MB** (`KERNEL_HEAP_MB`,
+  `KERNEL_STACK_MB`, passed as `--heap-mb` and `--stack-mb` to both
+  `l0 build` and `l0 test --target virt`): every other page below the user
+  range is frames. Build the kernel by hand without them and it gets L0's
+  1,024 and 256, and a pool of 765 MB. The heap holds a record of every
+  page given (about 128 MB for the whole pool; at 96 MB
+  `test_frames_run_out` exhausts it) and the whole initramfs, so
+  `mkinitramfs` refuses one past `INITRAMFS_MAX`, 48 MB. Shrinking the heap
+  grows the pool, and so the records it must hold: never go below what a
+  full pool needs. Anything the kernel keeps per process, port, message or
+  mapping must stay bounded, or a process can exhaust that heap; ports and
+  a region shared into many processes are not yet.
+  `kernel_virt_test.l0`'s `in_frame_pool` and `test_mem_info_total` pin
+  the windows these sizes give, so they change with them.
 - **QEMU's Unix sockets** must have paths under 104 bytes: put them in
   `build/` and use relative paths, as the tests do. A scratch directory's
   path is too long.

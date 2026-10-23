@@ -110,15 +110,17 @@
   (cons (add_imm 0 19 (div off 2)) (cons (add_imm 0 0 (sub off (div off 2)))
     (append (call_words (call_dma_address)) (exit_x0)))))
 
-; Whether a is a page of the board's frame windows (spec 10.3): past the
-; image up to the heap, 0x40080000 to 0x58000000, or past the heap up to
-; the stack, 0x98000000 to 0xB0000000.
+; Whether a is a page of the board's frame windows (spec 10.3), as the
+; Makefile's KERNEL_HEAP_MB of 192 and KERNEL_STACK_MB of 16 lay them out:
+; past the image up to the heap, 0x40080000 to 0x58000000, or past the
+; heap's 192 MB up to the stack's 16 MB below 0xC0000000, 0x64000000 to
+; 0xBF000000.
 (def in_frame_pool ((a int)) int
   (add (check_int "page aligned" (mod a 4096) 0)
        (check_true "in the frame pool"
          (if (if (ge a 1074266112) (lt a 1476395008) false)
              true
-             (if (ge a 2550136832) (lt a 2952790016) false)))))
+             (if (ge a 1677721600) (lt a 3204448256) false)))))
 
 (def test_dma_address () int
   (in_frame_pool (boot_words (flag_dev) (dma_words 2 (dma_address_words 16)))))
@@ -688,12 +690,12 @@
        (check_int "no room" (boot_words 0 (mem_words 7 (nil int))) (err_too_big))))
 
 ; The pool is the frame windows less the image, the device tree and the
-; page tables: at most 383.5 MB and 384 MB, 196,480 pages, and with a
-; small image, over 750 MB, 192,000 pages.
+; page tables: at most 383.5 MB and 1,456 MB (in_frame_pool's), 470,912
+; pages, and with a small image, over 1,820 MB, 465,920 pages.
 (def test_mem_info_total () int
   (let total (bit_and (boot_words 0 (mem_words 8 (first_words))) 4294967295)
-    (add (check_true "over 750 MB" (gt total 192000))
-         (check_true "within the windows" (le total 196480)))))
+    (add (check_true "over 1,820 MB" (gt total 465920))
+         (check_true "within the windows" (le total 470912)))))
 
 ; The process's own pages are given, and so are the pages it shares:
 ; with four shared first, four more than without.
@@ -1075,12 +1077,12 @@
     (boot_mods (cons (one_then_two) (cons (shm_toucher 8) (cons (summer 8) (nil Raw)))))
     0))
 
-; Sixteen processes of 64 MB each, one after another: 262,144 frames, more
-; than the board's 196,480 at most, so each must be given what the ones
-; before it freed.
+; Thirty-two processes of 64 MB each, one after another: 524,288 frames,
+; more than the board's 470,912 at most (test_mem_info_total), so each
+; must be given what the ones before it freed.
 (def test_freed_heap_suffices () int
   (check_int "the last one's status"
-    (boot_mods (cons (first (spawn_wait_times 16 1)) (cons (toucher 16384) (nil Raw))))
+    (boot_mods (cons (first (spawn_wait_times 32 1)) (cons (toucher 16384) (nil Raw))))
     0))
 
 ; Shares 16 MB, a quarter of the most one call gives, four times over, and exits with
@@ -1092,15 +1094,25 @@
 (def shm_16s ((n int) (ws (list int))) (list int)
   (append (repeat_words n (cons (movz 0 4096) (call_words (call_shm_alloc)))) ws))
 
-; What the tests of sixteen 64 MB processes rely on: as much at once runs
-; out of frames. One process has only 384 MB of device pages, so pid 1
-; shares 368 MB and then spawns a child that holds 64 MB of heap and
-; tries for 368 MB more: 800 MB, 204,800 frames, more than the pool, and
-; the child exits with its last share's answer.
+; Touches 256 MB of heap, shares 368 MB, then spawns module m and exits
+; with what waiting for it gives: 624 MB held while m runs.
+(def hog_then ((m int)) Raw
+  (Raw 0 (code (touch_words 65535 (shm_16s 23 (spawn_wait_times 1 m))))))
+
+; What the tests of thirty-two 64 MB processes rely on: as much at once
+; runs out of frames. One process has only 384 MB of device pages and
+; touch_words reaches 256 MB of heap, so the frames are held by a chain:
+; pid 1 shares 368 MB, two hog_thens hold 624 MB each, and the last
+; touches 128 MB and tries for 368 MB more: 2,112 MB, more than the pool's
+; 1,839.5 MB, run out in the last's shares, past the 1,744 MB its heap
+; needs. It exits with its last share's answer, which each wait passes
+; up unchanged, wait_word keeping a word as it is. This also fills the
+; kernel's heap with the record of every page: a heap of 96 MB runs out.
 (def test_frames_run_out () int
-  (check_int "the child's last 16 MB"
+  (check_int "the last one's last 16 MB"
     (boot_mods (cons (first (shm_16s 23 (spawn_wait_times 1 1)))
-                     (cons (Raw 0 (code (touch_words 16384 (shm_16s 23 (exit_x0))))) (nil Raw))))
+               (cons (hog_then 2) (cons (hog_then 3)
+               (cons (Raw 0 (code (touch_words 32768 (shm_16s 23 (exit_x0))))) (nil Raw))))))
     (wait_word (err_fault))))
 
 (def test_device_pages_suffice () int
@@ -1118,10 +1130,10 @@
          (boot_words 0 (cons (movz 0 16385) (append (call_words (call_shm_alloc)) (exit_x0))))
          (err_too_big))))
 
-; The same with shared frames: sixteen processes that share 64 MB each.
+; The same with shared frames: thirty-two processes that share 64 MB each.
 (def test_freed_shared_suffices () int
   (check_int "the last one's last 16 MB"
-    (boot_mods (cons (first (spawn_wait_times 16 1)) (cons (shm_hog) (nil Raw))))
+    (boot_mods (cons (first (spawn_wait_times 32 1)) (cons (shm_hog) (nil Raw))))
     (add (stack_top) (mul 3 16777216))))
 
 ; Spaces are given back: 300 processes in a row that each share a page,
@@ -1270,15 +1282,16 @@
               5))))
 
 ; Released frames are the board's again. Pid 1 touches 256 MB of heap,
-; releases it, shares 368 MB, and spawns a child that touches 256 MB:
-; 880 MB if the heap's frames were kept, more than the board holds (see
-; test_frames_run_out), and 624 MB as they are given back, so the child
-; exits 0 rather than being ended for want of a frame.
+; releases it, shares 368 MB, and spawns a chain, two hog_thens of 624 MB
+; and a last that touches 128 MB: 2,000 MB if pid 1's heap frames were
+; kept, more than the pool's 1,839.5 MB (see test_frames_run_out), and
+; 1,744 MB as they are given back, so the last exits 0 rather than being
+; ended for want of a frame, and each wait passes the 0 up.
 (def test_release_frees_memory () int
-  (check_int "the child's status"
+  (check_int "the last one's status"
     (boot_mods (cons (first (touch_words 65535 (release_words (movz_hi 0 49216) (movz_hi 1 4096)
                               (shm_16s 23 (spawn_wait_times 1 1)))))
-                     (cons (toucher 65535) (nil Raw))))
+               (cons (hog_then 2) (cons (hog_then 3) (cons (toucher 32768) (nil Raw))))))
     0))
 
 ; ------------------------------------------------------------------- pids

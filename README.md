@@ -3,8 +3,11 @@
 A microkernel written in L0, for QEMU's aarch64 `virt` board, and the start
 of an operating system around it.
 
-The kernel is an ordinary L0 program built with `--target virt`. It runs at
-EL1 and runs processes at EL0, each in its own address space. It boots from
+The kernel is an ordinary L0 program built with `--target virt`, with a
+heap of 192 MB and a stack of 16 MB (the Makefile's `KERNEL_HEAP_MB` and
+`KERNEL_STACK_MB`) in place of L0's 1,024 and 256, so that the rest of the
+board's RAM, about 1,840 MB at `-m 2G`, is the frames processes are made
+of. It runs at EL1 and runs processes at EL0, each in its own address space. It boots from
 an **initramfs**: a cpio archive, in the same newc format as Linux's, of the
 programs it can run and the files they can read. An `/etc/inittab` inside
 says what starts at boot. L0S can also be copied onto a volume of the disk,
@@ -1863,7 +1866,7 @@ otherwise as its type's first failure.
 | 285 | `boot_args` | `(list (list int))` | the board's boot arguments, QEMU's `-append`, split at spaces; none under another operating system |
 | 286 | `root_switch label` | `Switch`: `Switched`, `SwitchDenied`, `SwitchDone`, `SwitchNoVolume`, `SwitchBadLabel` | 0, the volume mounted as label made `/`, the system volume, for good, and the initramfs's bytes given up (see [Booting from a volume](#booting-from-a-volume)); -6 if the caller's program is not the initramfs's, -2 if `/` is a volume already, -1 if no such volume is mounted, -5 no label |
 | 287 | `spawn_image path args image` | `Spawn` | as `spawn_entry`, but a program started from image, its bytes, named path, which `proc_path`, `ps` and the inittab's `args` know it by; given no args, the inittab's for path. It never drives a device. -6 for no image, or not an ELF the kernel starts, -4 the whole over 64 MB of image with the path and arguments, -5 bytes not laid out as `spawn_image_bytes` lays them |
-| 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, those given and those L0's `frame_free_count` says are left, about 765 MB with `-m 2G`, and how many of them are given, each process's own and every shared, DMA or shared code and rodata page once, however many processes map it; none under another operating system. What is not given is free; the kernel's page tables take from it, so the total moves a little |
+| 288 | `mem_info` | `(Option MemInfo)` | a `MemInfo`: the pages processes' memory comes from, those given and those L0's `frame_free_count` says are left, about 1,840 MB with `-m 2G` and the kernel's heap of 192 MB and stack of 16 MB, and how many of them are given, each process's own and every shared, DMA or shared code and rodata page once, however many processes map it; none under another operating system. What is not given is free; the kernel's page tables take from it, so the total moves a little |
 | 289 | `fs_unmount label port` | `Unmounting`: `Unmounted`, `UnmountNotMounted`, `UnmountDenied`, `UnmountBadLabel` | 0, the volume label, which the caller mounted from port, unmounted: `/Volumes/LABEL` is in no volume from then on, and the label free; -1 if the port is not the caller's or mounted no such volume, -6 for the system volume, which is `/` for good, -5 no label |
 | 290 | `chdir path` | `Chdir`: `ChdirDone`, `ChdirNoDir`, `ChdirNotDir`, `ChdirBad` | 0, the directory at path, from the current directory, made the caller's current one, and its children's, as spawn gives them; -3 if there is none, -9 if it is a file, -5 for a path over 1024 bytes or not the caller's to give, or one in a volume whose server has gone. The initramfs's, `/Volumes` and `/` the kernel answers itself; a path in a volume is checked with its server's `stat`, the caller waiting as for any file call |
 | 291 | `getcwd`, `path_abs path` | `(list int)` | the current directory, an absolute path with no final `/`, `/` at the start; `path_abs` is a path made absolute from it, unless it starts with `/` already |
@@ -2316,6 +2319,19 @@ a bad buffer, and wait on nothing.
 
 ## Limits
 
+- **The kernel has a heap of 192 MB and a stack of 16 MB**, the Makefile's
+  `KERNEL_HEAP_MB` and `KERNEL_STACK_MB`, which `l0 build` and `l0 test`
+  give the board's layout; the RAM past them, below the user range, is
+  the frame pool, about 1,840 MB at `-m 2G`. The heap keeps a record of
+  every page given, about 128 MB with the whole pool given, and the
+  kernel's copy of the initramfs; the demo's kernel peaked at 20.5 MB,
+  12.3 MB of it that copy, and under 8 KB of stack. **An initramfs is at
+  most 48 MB**, the heap less 144 MB, since the kernel keeps all of it:
+  `mkinitramfs` refuses a larger one, and naming a larger
+  `KERNEL_HEAP_MB` raises both. Ports and the messages queued on them,
+  and the pages one shared region maps into many processes, are not yet
+  bounded but by the heap, so a process that makes enough full ports, or
+  shares one region with enough processes, can exhaust it.
 - **The kernel's log keeps 64 KiB of records**, about 1,500 lines of the
   usual length, and a message is at most 512 bytes (see
   [The kernel's log](#the-kernels-log)); older messages are dropped as

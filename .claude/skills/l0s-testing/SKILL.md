@@ -77,7 +77,10 @@ The `l0-code` skill has the test syntax: `(def test_NAME () int ...)`, the
 kernel once a test from an initramfs built in L0, whose programs are threads
 hand-assembled by `kernel/asm.l0` (`call_words N` makes a system call). Add
 one for every system call and every refusal it makes. There are no files on
-the board, so these tests can't read any.
+the board, so these tests can't read any. `make test-virt` gives them the
+kernel's own `--heap-mb` and `--stack-mb`, so they run in the layout the
+kernel ships with; running `l0 test --target virt` by hand without them
+gets L0's defaults, and `in_frame_pool`'s windows no longer match.
 
 ## End-to-end cases (`tests/e2e/CASE/`)
 

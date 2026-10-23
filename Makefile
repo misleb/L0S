@@ -39,11 +39,27 @@
 L0     ?= l0
 BUILD  := build
 
-# The installed toolchain's compiler and runtimes, so that images are
-# rebuilt when l0 is updated, and take its runtime's changes.
+# The installed toolchain's compiler, runtimes and layouts, so that images
+# are rebuilt when l0 is updated, and take its runtime's changes.
 L0LIB     := $(dir $(shell $(L0) spec --path))
-L0_VIRTRT := $(L0LIB)l0c $(wildcard $(L0LIB)virt/*.bc)
-L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc/*.bc)
+L0_VIRTRT := $(L0LIB)l0c $(wildcard $(L0LIB)virt-aarch64/*.bc) $(L0LIB)virt-aarch64/layout.ld
+L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc-aarch64/*.bc) $(L0LIB)proc-aarch64/layout.ld
+
+# The kernel's own heap and stack, in MB, which l0 build and l0 test give
+# the board's layout (spec 10.3's --heap-mb and --stack-mb); the rest of
+# the RAM below the user range is the frame pool processes are made of,
+# about 1,840 MB at -m 2G, against 765 MB with L0's defaults of 1,024 and
+# 256. The kernel's heap holds a record of every page it has given, about
+# 128 MB once the whole pool is given (96 MB runs out, test-virt's
+# test_frames_run_out says), and its copy of the initramfs; the rest,
+# 20.5 MB at the demo's peak with 65 processes, 12.3 MB of it that copy,
+# is small. Its stack stayed under 8 KB. So mkinitramfs refuses an
+# archive past INITRAMFS_MAX, the heap less 144 MB: 128 for the pool's
+# records and 16 for everything else.
+KERNEL_HEAP_MB  ?= 192
+KERNEL_STACK_MB ?= 16
+KERNEL_LAYOUT   := --heap-mb $(KERNEL_HEAP_MB) --stack-mb $(KERNEL_STACK_MB)
+export INITRAMFS_MAX := $(shell echo $$(( ($(KERNEL_HEAP_MB) - 144) * 1048576 )))
 
 # The splash screen the gpu driver shows, and where QEMU shows it: cocoa
 # is macOS's window; sdl elsewhere (gtk is scaled on Wayland), none for no
@@ -232,7 +248,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: all check test test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
+.PHONY: FORCE all check test test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
 
 all: check test test-virt e2e
 
@@ -309,13 +325,20 @@ test: sample
 	python3 tools/l0s-mcp/test_board.py
 
 test-virt:
-	$(L0) test --target virt $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
+	$(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
 
 $(BUILD) $(BUILD)/bin $(BUILD)/icons:
 	mkdir -p $@
 
-$(BUILD)/kernel.img: $(KERNEL) kernel/main.l0 $(L0_VIRTRT) | $(BUILD)
-	$(L0) build --target virt $(KERNEL) kernel/main.l0 -o $@
+# The kernel's layout options as last built, rewritten only when they
+# change, so that a new KERNEL_HEAP_MB or KERNEL_STACK_MB rebuilds it.
+$(BUILD)/kernel.layout: FORCE | $(BUILD)
+	@echo '$(KERNEL_LAYOUT)' | cmp -s - $@ || echo '$(KERNEL_LAYOUT)' > $@
+
+FORCE:
+
+$(BUILD)/kernel.img: $(KERNEL) kernel/main.l0 $(L0_VIRTRT) $(BUILD)/kernel.layout | $(BUILD)
+	$(L0) build --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/main.l0 -o $@
 
 define PROGRAM_RULE
 $(BUILD)/bin/$(1).img: $(SRCS_$(1)) $(DIR_$(1))/main.l0 $(ULIB) $(LIBS_$(1)) $(L0_PROCRT) | $(BUILD)/bin
