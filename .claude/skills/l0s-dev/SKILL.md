@@ -115,8 +115,8 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
 1. Its file header `; NAME.l0 -- summary`, a doc block on every def. Its
    stem must be unique across `user/lib` and `common`, for `make doc Q=`.
 2. Makefile: a variable for it, added to each `LIBS_` that needs it (or to
-   `ULIB`, if every program does); a `$(L0) test ... user/lib/GROUP/NAME_test.l0`
-   line in `test`. `DOC_SRCS` finds it.
+   `ULIB`, if every program does); a `$(call l0_test,... user/lib/GROUP/NAME_test.l0)`
+   line beside the others. `DOC_SRCS` finds it.
 3. Its row in the README's libraries table.
 
 **A request to a server** (the compositor; the display driver is alike)

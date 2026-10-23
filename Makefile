@@ -1,6 +1,10 @@
 # L0S -- build, test, and boot the microkernel and its programs.
 #
-#   make test        host tests of everything: l0 test on this machine
+#   make check       l0 check of the kernel, every program and the host
+#                    tools, and that every form is documented
+#   make test        host tests of everything: l0 test on this machine;
+#                    both run only what changed since it passed, JOBS
+#                    at once, every CPU unless JOBS=N
 #   make test-virt   the kernel's tests on QEMU's virt board
 #   make e2e         every case of tests/e2e booted under the kernel
 #   make all         all three, after type checking
@@ -55,6 +59,13 @@ BUILD  := build
 L0LIB     := $(dir $(shell $(L0) spec --path))
 L0_VIRTRT := $(L0LIB)l0c $(wildcard $(L0LIB)virt-aarch64/*.bc) $(L0LIB)virt-aarch64/layout.ld
 L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc-aarch64/*.bc) $(L0LIB)proc-aarch64/layout.ld
+# What every check and host test is built with, the driver among them, so
+# that a new l0 checks and tests everything again.
+L0_HOSTRT := $(shell command -v $(L0)) $(L0LIB)l0c $(L0LIB)prelude.l0 $(L0LIB)io.l0 $(L0LIB)test.l0 $(L0LIB)l0rt.o $(L0LIB)l0host.o
+
+# How many checks or tests make check and make test run at once: one for
+# each CPU, unless JOBS says otherwise.
+JOBS ?= $(shell sysctl -n hw.ncpu 2> /dev/null || nproc 2> /dev/null || echo 1)
 
 # The kernel's own heap and stack, in MB, which l0 build and l0 test give
 # the board's layout (spec 10.3's --heap-mb and --stack-mb); the rest of
@@ -264,82 +275,139 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
+.PHONY: FORCE all check test check-each test-each test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
 
 all: check test test-virt e2e
 
+# Each check and each host test is a target of its own, build/check/FILE.ok
+# or build/test/FILE.ok, FILE the last file it names: made once it passes,
+# its output kept beside it in FILE.log. So make check and make test run
+# only what changed since it last passed, JOBS at once, and say nothing of
+# what passes; what fails is shown whole, and every failure is shown, since
+# the rest go on (-k).
+#
+# $(call logged,COMMAND,WHAT) runs COMMAND, its output in the target's
+# log, and touches the target if it passes, or else removes it, shows
+# the log and names WHAT as failing.
+logged = if $(1) > $(@:.ok=.log) 2>&1; then touch $@; else rm -f $@; cat $(@:.ok=.log); echo "make: $(2) failed"; exit 1; fi
+
+# $(call l0_check,FILES): l0 check of FILES, the last a main.l0.
+define L0_CHECK
+$(BUILD)/check/$(lastword $(1)).ok: $(1) $(L0_HOSTRT)
+	@mkdir -p $$(@D)
+	@$$(call logged,$(L0) check $(1),l0 check of $(lastword $(1)))
+CHECKS += $(BUILD)/check/$(lastword $(1)).ok
+endef
+l0_check = $(eval $(call L0_CHECK,$(1)))
+
+# The files host tests read beside their sources: fonts, the apps'
+# bundles, and the sample archive.
+TEST_DATA := $(wildcard fonts/*) $(wildcard user/apps/*/*.app/*)
+
+# $(call l0_test,FILES): l0 test of FILES, the last a test file.
+define L0_TEST
+$(BUILD)/test/$(lastword $(1)).ok: $(1) $(L0_HOSTRT) $(TEST_DATA) $(BUILD)/sample.cpio
+	@mkdir -p $$(@D)
+	@$$(call logged,$(L0) test $(1),l0 test of $(lastword $(1)))
+TESTS += $(BUILD)/test/$(lastword $(1)).ok
+endef
+l0_test = $(eval $(call L0_TEST,$(1)))
+
+$(call l0_check,$(KERNEL) kernel/main.l0)
+$(foreach p,$(PROGRAMS),$(call l0_check,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(DIR_$(p))/main.l0))
+$(call l0_check,$(MKSPLASH) tools/mksplash/main.l0)
+$(call l0_check,$(L0SDOC) tools/l0sdoc/main.l0)
+$(call l0_check,$(MKFS) tools/mkfs/main.l0)
+$(call l0_check,$(MKICON) tools/mkicon/main.l0)
+$(call l0_check,$(MKFONT) tools/mkfont/main.l0)
+
+# That every form is documented, but those DOC_GAPS lists.
+$(BUILD)/check/doc.ok: $(BUILD)/l0sdoc $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
+	@mkdir -p $(@D)
+	@$(call logged,$(BUILD)/l0sdoc --check $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS),the documentation check)
+CHECKS += $(BUILD)/check/doc.ok
+
 check:
-	$(L0) check $(KERNEL) kernel/main.l0
-	$(foreach p,$(PROGRAMS),$(L0) check $(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(DIR_$(p))/main.l0 && ) true
-	$(L0) check $(MKSPLASH) tools/mksplash/main.l0
-	$(L0) check $(L0SDOC) tools/l0sdoc/main.l0
-	$(L0) check $(MKFS) tools/mkfs/main.l0
-	$(L0) check $(MKICON) tools/mkicon/main.l0
-	$(L0) check $(MKFONT) tools/mkfont/main.l0
-	$(MAKE) -s $(BUILD)/l0sdoc && $(BUILD)/l0sdoc --check $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
+	@$(MAKE) -s -k -j$(JOBS) check-each
+
+check-each: $(CHECKS)
 
 # An archive bsdtar makes, of bin/x, "hi", mode 0755: what the host tests
 # of initramfs.l0 and of cat read.
-sample:
+sample: $(BUILD)/sample.cpio
+
+$(BUILD)/sample.cpio: | $(BUILD)
 	rm -rf $(BUILD)/sample && mkdir -p $(BUILD)/sample/bin
 	printf hi > $(BUILD)/sample/bin/x && chmod 755 $(BUILD)/sample/bin/x
 	cd $(BUILD)/sample && find . | LC_ALL=C sort | bsdtar -n --format newc -cf ../sample.cpio -T -
 
-test: sample
-	$(L0) test $(BASE) common/abi_test.l0
-	$(L0) test $(BASE) common/text_test.l0
-	$(L0) test $(COMMON) common/initramfs_test.l0
-	$(L0) test $(BASE) common/queue.l0 common/queue_test.l0
-	$(L0) test $(BASE) common/klog.l0 common/klog_test.l0
-	$(L0) test $(BASE) common/queue.l0 common/klog.l0 kernel/log.l0 kernel/log_test.l0
-	$(L0) test $(BASE) common/queue.l0 kernel/memory.l0 kernel/memory_test.l0
-	$(L0) test $(BASE) kernel/mounts.l0 kernel/mounts_test.l0
-	$(L0) test $(BASE) common/queue.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/ipc_test.l0
-	$(L0) test $(COMMON) kernel/inittab.l0 kernel/inittab_test.l0
-	$(L0) test $(BASE) kernel/sched.l0 kernel/sched_test.l0
-	$(L0) test $(BASE) kernel/pids.l0 kernel/pids_test.l0
-	$(L0) test $(BASE) kernel/syscall.l0 kernel/syscall_test.l0
-	$(L0) test $(KERNEL) kernel/asm.l0 kernel/kernel_test.l0
-	$(L0) test $(KERNEL) kernel/asm.l0 kernel/elf_test.l0
-	$(L0) test $(BASE) $(CLI) user/lib/sys/cli_test.l0
-	$(L0) test $(ULIB) user/lib/sys/l0s_test.l0
-	$(L0) test $(ULIB) user/lib/sys/server_test.l0
-	$(L0) test $(ULIB) $(PROCS) user/lib/sys/procs_test.l0
-	$(L0) test $(ULIB) $(PATHS) user/lib/sys/paths_test.l0
-	$(L0) test $(ULIB) $(VIRTIO) user/lib/sys/virtio_test.l0
-	$(L0) test $(ULIB) $(TTY) user/lib/sys/tty_test.l0
-	$(L0) test $(BASE) $(KEYMAP) user/lib/sys/keymap_test.l0
-	$(L0) test $(ULIB) $(MAILBOX) user/lib/sys/mailbox_test.l0
-	$(L0) test $(ULIB) $(RECT) user/lib/gfx/rect_test.l0
-	$(L0) test $(ULIB) $(RENDER) user/lib/gfx/render_test.l0
-	$(L0) test $(ULIB) $(CLOCK) user/lib/proto/clock_test.l0
-	$(L0) test $(ULIB) $(RECT) $(DISPLAY) user/lib/proto/display_test.l0
-	$(L0) test $(ULIB) $(RECT) $(DISPLAY_SERVER) user/lib/proto/display_server_test.l0
-	$(L0) test $(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0
-	$(L0) test $(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0
-	$(L0) test $(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0
-	$(L0) test $(ULIB) $(NICLIB) user/lib/proto/nic_test.l0
-	$(L0) test $(ULIB) $(INETLIB) user/lib/proto/inet_test.l0
-	$(L0) test $(ULIB) $(RANDOM) user/lib/proto/random_test.l0
-	$(L0) test $(ULIB) $(USBLIB) user/lib/proto/usb_test.l0
-	$(L0) test $(ULIB) $(PCILIB) user/lib/proto/pci_test.l0
-	$(L0) test $(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0
-	$(L0) test $(BASE) $(L0FS) user/lib/format/l0fs_test.l0
-	$(L0) test $(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0
-	$(L0) test $(BASE) $(DNSLIB) user/lib/format/dns_test.l0
-	$(L0) test $(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0
-	$(L0) test $(BASE) $(CRC32) user/lib/format/crc32_test.l0
-	$(L0) test $(BASE) $(PARTS) user/lib/format/gpt_test.l0
-	$(L0) test $(BASE) $(PPM) user/lib/format/ppm_test.l0
-	$(foreach t,$(UI_TESTS),$(L0) test $(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0 && ) true
-	$(L0) test $(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0
-	$(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(L0) test $(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(t) && )) true
-	$(L0) test $(MKSPLASH) tools/mksplash/mksplash_test.l0
-	$(L0) test $(L0SDOC) tools/l0sdoc/l0sdoc_test.l0
-	$(L0) test $(MKFS) tools/mkfs/mkfs_test.l0
-	$(L0) test $(MKICON) tools/mkicon/mkicon_test.l0
-	$(foreach t,raster ttf shape mkfont,$(L0) test $(MKFONT) tools/mkfont/$(t)_test.l0 && ) true
-	python3 tools/l0s-mcp/test_board.py
+$(call l0_test,$(BASE) common/abi_test.l0)
+$(call l0_test,$(BASE) common/text_test.l0)
+$(call l0_test,$(COMMON) common/initramfs_test.l0)
+$(call l0_test,$(BASE) common/queue.l0 common/queue_test.l0)
+$(call l0_test,$(BASE) common/klog.l0 common/klog_test.l0)
+$(call l0_test,$(BASE) common/queue.l0 common/klog.l0 kernel/log.l0 kernel/log_test.l0)
+$(call l0_test,$(BASE) common/queue.l0 kernel/memory.l0 kernel/memory_test.l0)
+$(call l0_test,$(BASE) kernel/mounts.l0 kernel/mounts_test.l0)
+$(call l0_test,$(BASE) common/queue.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/ipc_test.l0)
+$(call l0_test,$(COMMON) kernel/inittab.l0 kernel/inittab_test.l0)
+$(call l0_test,$(BASE) kernel/sched.l0 kernel/sched_test.l0)
+$(call l0_test,$(BASE) kernel/pids.l0 kernel/pids_test.l0)
+$(call l0_test,$(BASE) kernel/syscall.l0 kernel/syscall_test.l0)
+$(call l0_test,$(KERNEL) kernel/asm.l0 kernel/kernel_test.l0)
+$(call l0_test,$(KERNEL) kernel/asm.l0 kernel/elf_test.l0)
+$(call l0_test,$(BASE) $(CLI) user/lib/sys/cli_test.l0)
+$(call l0_test,$(ULIB) user/lib/sys/l0s_test.l0)
+$(call l0_test,$(ULIB) user/lib/sys/server_test.l0)
+$(call l0_test,$(ULIB) $(PROCS) user/lib/sys/procs_test.l0)
+$(call l0_test,$(ULIB) $(PATHS) user/lib/sys/paths_test.l0)
+$(call l0_test,$(ULIB) $(VIRTIO) user/lib/sys/virtio_test.l0)
+$(call l0_test,$(ULIB) $(TTY) user/lib/sys/tty_test.l0)
+$(call l0_test,$(BASE) $(KEYMAP) user/lib/sys/keymap_test.l0)
+$(call l0_test,$(ULIB) $(MAILBOX) user/lib/sys/mailbox_test.l0)
+$(call l0_test,$(ULIB) $(RECT) user/lib/gfx/rect_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) user/lib/gfx/render_test.l0)
+$(call l0_test,$(ULIB) $(CLOCK) user/lib/proto/clock_test.l0)
+$(call l0_test,$(ULIB) $(RECT) $(DISPLAY) user/lib/proto/display_test.l0)
+$(call l0_test,$(ULIB) $(RECT) $(DISPLAY_SERVER) user/lib/proto/display_server_test.l0)
+$(call l0_test,$(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0)
+$(call l0_test,$(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0)
+$(call l0_test,$(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0)
+$(call l0_test,$(ULIB) $(NICLIB) user/lib/proto/nic_test.l0)
+$(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)
+$(call l0_test,$(ULIB) $(RANDOM) user/lib/proto/random_test.l0)
+$(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
+$(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)
+$(call l0_test,$(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0)
+$(call l0_test,$(BASE) $(L0FS) user/lib/format/l0fs_test.l0)
+$(call l0_test,$(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0)
+$(call l0_test,$(BASE) $(DNSLIB) user/lib/format/dns_test.l0)
+$(call l0_test,$(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0)
+$(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
+$(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)
+$(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
+$(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
+$(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
+$(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(call l0_test,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(t))))
+$(call l0_test,$(MKSPLASH) tools/mksplash/mksplash_test.l0)
+$(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
+$(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
+$(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
+$(foreach t,raster ttf shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
+
+# The MCP server's tests, of its pure parts.
+$(BUILD)/test/l0s-mcp.ok: $(wildcard tools/l0s-mcp/*.py)
+	@mkdir -p $(@D)
+	@$(call logged,python3 tools/l0s-mcp/test_board.py,tools/l0s-mcp/test_board.py)
+
+# Every host test, and then how many passed in all, those run before
+# among them. A failure is shown as it happens, and the count still given.
+test:
+	@$(MAKE) -s -k -j$(JOBS) test-each; st=$$?; \
+	cat $(TESTS:.ok=.log) 2> /dev/null | awk '/^# [0-9]+ passed, [0-9]+ failed$$/ { p += $$2; f += $$4 } \
+	  END { print "make test: " p " passed, " f " failed, of $(words $(TESTS)) files" }'; exit $$st
+
+test-each: $(TESTS) $(BUILD)/test/l0s-mcp.ok
 
 test-virt:
 	$(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0

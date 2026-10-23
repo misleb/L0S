@@ -11,8 +11,8 @@ the full set before calling it done.
 | What | Command | Time | Covers |
 |---|---|---|---|
 | one module | `l0 test FILES... X_test.l0` | seconds | the logic of one file, on this Mac |
-| every host test | `make test` | about a minute | every pure module, the libraries, each program's logic |
-| the kernel on the board | `make test-virt` | minutes | each test boots the kernel with hand-assembled threads |
+| every host test | `make test` | about 90 seconds from nothing; seconds for what changed | every pure module, the libraries, each program's logic |
+| the kernel on the board | `make test-virt` | about 20 seconds | each test boots the kernel with hand-assembled threads, as many at once as there are CPUs |
 | boots and the screen | `make e2e` | several minutes | real programs under the real kernel, then the screen tests |
 
 - **Done** means `make check` and `make test` pass. Run `make e2e` too for
@@ -20,9 +20,18 @@ the full set before calling it done.
   `make test-virt` for the kernel. Run long ones in the background.
 - **The files to pass `l0 test`** are the Makefile's line for that module:
   `l0 test $(ULIB) $(LIBS_NAME) user/NAME/NAME.l0 user/NAME/NAME_test.l0`.
-  Copy them from `make -n test | grep NAME`.
-- `make test` stops at the first failing module. Look for `not ok` in its
-  output; each failing assertion is listed under its test.
+  Copy them from `make -nB test-each | grep NAME`.
+- `make check` and `make test` run each check and test file as a target
+  of its own, `build/check/FILE.ok` or `build/test/FILE.ok`, made once it
+  passes, with its output in `FILE.log` beside it. So only what changed
+  since it last passed runs again (its files, the toolchain, or for a
+  test the fonts, the apps' bundles and the sample archive), `JOBS` at
+  once, every CPU unless set (`JOBS=1` for one at a time). Nothing is
+  shown of what passes. A failing file's whole output is, `not ok` lines
+  and each failing assertion under its test, and the rest still run, so
+  every failure is shown. `make test` ends with `make test: N passed, M
+  failed, of F files`, counted from every file's log. To run everything
+  again, `rm -rf build/check build/test`.
 
 ## Host unit tests (`*_test.l0`)
 
@@ -67,8 +76,12 @@ The `l0-code` skill has the test syntax: `(def test_NAME () int ...)`, the
   mismatches: `test_cached_rows_agree` in `user/sbin/virtio-gpu/virtio-gpu_test.l0`
   checks cached screen rows against a full rebuild; `test_random_never_crashes`
   in `common/initramfs_test.l0`.
-- **Files**: host tests read only `build/sample.cpio`, which `make test`
-  makes first with `bsdtar` (the `sample` target).
+- **Files**: host tests read `build/sample.cpio`, which `make test`
+  makes first with `bsdtar` (the `sample` target), `fonts/`, and the
+  apps' bundles, and `cli_test` writes `build/cli_test.tmp`. Test files
+  run side by side, so a test that writes a file names it for its own
+  test file. A file a test reads that is not one of these goes in the
+  Makefile's `TEST_DATA`, or a change to it won't run the test again.
 - Keep tests to one to three assertions each, and many of them.
 
 ## Board tests (`make test-virt`)

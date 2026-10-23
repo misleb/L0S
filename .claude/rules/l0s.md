@@ -27,7 +27,7 @@ changing code.
   `make doc` reads exactly that, and `make check` fails on a form without
   one unless `tools/l0sdoc/undocumented.txt` lists it from before. Never
   add a line there; after documenting a listed form, `make doc-prune`.
-- **New library?** Add it to the Makefile's `DOC_SRCS`, a `test` line, and
+- **New library?** Add it to the Makefile's `DOC_SRCS`, an `l0_test` line, and
   the `LIBS_` lists that need it.
 - **Keep the README's tables true** in the same change: programs,
   libraries, protocols, system calls, the demo's pids, tests, limits.
