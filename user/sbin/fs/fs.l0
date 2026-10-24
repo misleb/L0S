@@ -421,7 +421,7 @@
     (obey_volumes f op ws))))))))
 
 (def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
-  (if (if (store_is_ram (fs_store_at f 0)) (any_eq op (split_spaces "partition mkfs rescan attach")) false)
+  (if (if (store_is_ram (fs_store_at f 0)) (any_eq op (split_spaces "partition mkfs rescan attach relabel")) false)
       (Answered f -5 "a RAM file system has no partition table")
       (obey_volumes_disk f op ws)))
 
@@ -430,7 +430,8 @@
   (if (eq op "partition") (obey_partition f ws)
   (if (eq op "attach") (if (eq (length ws) 1) (do_attach f (head ws)) (word f -5))
   (if (eq op "mkfs") (if (eq (length ws) 2) (do_mkfs f (head ws) (head (tail ws))) (word f -5))
-  (obey_volume f op ws)))))
+  (if (eq op "relabel") (if (eq (length ws) 2) (do_relabel f (head ws) (head (tail ws))) (word f -5))
+  (obey_volume f op ws))))))
 
 ; A request of a volume, or rescan.
 (def obey_volume ((f Fs) (op (list int)) (ws (list (list int)))) Answered
@@ -857,6 +858,87 @@
                 ((UnmountNotMounted) (word (without_vol f vi) 0))
                 ((UnmountDenied) (word f -4))
                 ((UnmountBadLabel) (word f -5))))))))
+
+; relabel VOLUME LABEL: the volume called LABEL from then on, as its
+; superblock and its partition's name in the table say, and mounted at
+; /Volumes/LABEL in place of where it was; its open files stay open, as
+; it keeps its place among the volumes. The new label is mounted first,
+; so that one mounted already, by any server, changes nothing. Refused
+; -3 for no volume of fs's; -5 for a label that is not one; -4 for one
+; served already, or mounted, and for the system volume, whose label the
+; kernel keeps; -5 if the disk cannot be written, the old label kept.
+(def do_relabel ((f Fs) (path (list int)) (label (list int))) Answered
+  (let vi (volume_at f path)
+    (if (lt vi 0)
+        (word f -3)
+        (if (not (label_ok label))
+            (Answered f -5 "a label is 1 to 15 letters, digits, - and _")
+            (if (ge (vol_index (fs_vols f) label 0) 0)
+                (Answered f -4 "that label is served already")
+                (if (is_system f vi)
+                    (Answered f -4 "it is /, the system volume")
+                    (relabel_mounting f vi label (fs_mount label (fs_uuid f vi) (fs_port f)))))))))
+
+; The port fs serves on.
+(def fs_port ((f Fs)) int (match f ((Fs s port vols hs next ws cp) port)))
+
+; do_relabel once the kernel was asked to mount label: refused if it is
+; mounted already, or no label; else written. With no kernel, as under
+; test, nothing is mounted, and it is written all the same, as mkfs's
+; new volume is.
+(def relabel_mounting ((f Fs) (vi int) (label (list int)) (m Mounting)) Answered
+  (match m
+    ((MountTaken) (Answered f -4 (mounting_why m)))
+    ((MountBadLabel) (Answered f -5 (mounting_why m)))
+    ((Mounted) (relabel_written f vi label))
+    ((MountNoPort) (relabel_written f vi label))))
+
+; Volume vi's superblock written with label, and its partition named it
+; in its disk's table, if it has one; the disk flushed; then the old
+; label unmounted, and 0 and the label answered. If a write fails, the
+; new label is unmounted again, and the volume is as it was.
+(def relabel_written ((f Fs) (vi int) (label (list int))) Answered
+  (let old (vol_label (fs_vol f vi))
+    (let v2 (vol_relabel (fs_vol f vi) label)
+      (match (flushed_after (store_write (vol_store f vi) (fs_start f vi) (vol_super label (vol_layout_of v2))))
+        ((PutNot s2 why) (relabel_undone (with_vol_store f vi s2) label why))
+        ((Put s2)
+          (match (relabel_table (with_vol_store f vi s2) vi label)
+            ((PutNot s3 why) (relabel_undone (with_vol_store f vi s3) label why))
+            ((Put s3)
+              (let u (fs_unmount old (fs_port f))
+                (let w (info_as "fs" (append "/Volumes/" (append old (append " is /Volumes/" label))))
+                  (Answered (with_vol (with_vol_store f vi s3) vi v2) 0 label))))))))))
+
+; Volume vi's partition named label in its disk's table, if the disk has
+; a table and it is in it; the store as it was if not, as for a RAM
+; file system's.
+(def relabel_table ((f Fs) (vi int) (label (list int))) Put
+  (let s (vol_store f vi)
+    (match (uuid_of_text (fs_uuid f vi))
+      ((None) (Put s))
+      ((Some u)
+        (match (read_table s)
+          ((NoTable s2 why) (Put s2))
+          ((BadTable s2 why) (Put s2))
+          ((Table s2 d) (flushed_after (write_table s2 (gpt_named_only d u label)))))))))
+
+; d with partition u named name, its type as it was.
+(def gpt_named_only ((d GptDisk) (u Uuid) (name (list int))) GptDisk
+  (match d ((GptDisk du parts) (GptDisk du (parts_renamed parts u name)))))
+
+; parts with u's named name.
+(def parts_renamed ((parts (list GptPart)) (u Uuid) (name (list int))) (list GptPart)
+  (if (is_empty parts)
+      parts
+      (match (head parts)
+        ((GptPart ty id s c n)
+          (cons (if (eq id u) (GptPart ty id s c name) (head parts)) (parts_renamed (tail parts) u name))))))
+
+; A relabel that failed for why: the new label unmounted, and -5.
+(def relabel_undone ((f Fs) (label (list int)) (why (list int))) Answered
+  (let u (fs_unmount label (fs_port f))
+    (Answered f -5 why)))
 
 ; f serving every volume but the vi'th.
 (def without_vol ((f Fs) (vi int)) Fs

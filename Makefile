@@ -191,9 +191,10 @@ PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB)
 # commands, which need only render.l0; and its client windows, which need
 # the compositor's protocol too.
 UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
-             user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0
+             user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
+             user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0
 UI_WINDOW := user/lib/ui/window.l0
-UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd
+UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
 LIBS_hvs        := $(VIRTIO) $(RECT) $(DISPLAY_SERVER)
@@ -227,6 +228,7 @@ LIBS_random     := $(RANDOM)
 LIBS_fs         := $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(CLOCK) $(RANDOM)
 LIBS_sh         := $(PROCS) $(PATHS) $(APPLIB)
 LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB)
+LIBS_files      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS) $(APPLIB)
 
 # The programs, found by where their directories are, which is where
 # each goes in the initramfs: user/bin/NAME, a command, in /bin;
@@ -542,8 +544,9 @@ vt-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/vt-etc)
 	tools/mkinitramfs $(BUILD)/vt.cpio $(BUILD)/vt-etc $(ROOT)
 
-# What tests/disks.sh boots: tests/disks/etc, the screen tests' with the
-# disk's driver and file server, with the splash, font and face.
+# What tests/disks.sh and tests/files.sh boot: tests/disks/etc, the
+# screen tests' with the disk's driver and file server, with the splash,
+# font and face.
 disks-initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/disks-etc && cp -R tests/disks/etc $(BUILD)/disks-etc
 	$(call stage_etc,$(BUILD)/disks-etc)
@@ -569,6 +572,7 @@ e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-ini
 	tests/procmon.sh
 	tests/disks.sh
 	tests/disks-create.sh
+	tests/files.sh
 	tests/partitions.sh
 	tests/launcher.sh
 	tests/launcher-install.sh

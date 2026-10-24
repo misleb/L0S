@@ -4,7 +4,7 @@
 # tablet, through QMP, and checks, by QEMU's screendump:
 #
 #   1. the launcher open: Applications on its pill, the page's ground,
-#      and Terminal's icon, its dark square, in the grid's third cell
+#      and Terminal's icon, its dark square, in the grid's fourth cell
 #   2. Esc, on the virtio keyboard, closes it: the desktop shows again
 #   3. a click on the page, away from the apps, closes it too
 #   4. a click on Terminal starts it: run windows, typed at the serial
@@ -109,10 +109,10 @@ shows() {
 # The top bar is 32 rows; Applications is its first 120 columns, and
 # while the launcher is open a pill, 404040, from 4 to 116 across and 4
 # to 28 down, is behind its label, which starts at 12. The page is under
-# the bar, 242424. Its four apps, Disks, System Monitor, Terminal and
-# Widgets, in the archive's order, are one row of cells 136 wide from
-# (1280 - 4 * 136) / 2 = 368, 64 below the bar: Terminal's cell is 640 to
-# 776 across and 96 to 200 down on the screen, its icon 48 square at 684,
+# the bar, 242424. Its five apps, Disks, Files, System Monitor, Terminal
+# and Widgets, in the archive's order, are one row of cells 136 wide from
+# (1280 - 5 * 136) / 2 = 300, 64 below the bar: Terminal's cell is 708 to
+# 844 across and 96 to 200 down on the screen, its icon 48 square at 752,
 # 108, a rounded square of dark_3, 3d3846, its prompt's glyph from 8 in.
 # The desktop's wallpaper at 0, 32 is 8 19 26, as gpu-screen.sh pins it.
 # The front window's app's name starts at 120, 8 down: T's crossbar is
@@ -125,7 +125,7 @@ shows "closed, at the start" "8 16 0 0 0" "0 32 $desk"
 
 click 60 16
 shows "Applications opened it: the pill, the page, Terminal's icon" \
-  "8 16 $pill" "100 700 $page" "0 32 $page" "708 112 $square"
+  "8 16 $pill" "100 700 $page" "0 32 $page" "776 112 $square"
 
 monitor "sendkey esc"
 shows "Esc closed it" "8 16 0 0 0" "0 32 $desk"
@@ -136,8 +136,8 @@ click 100 700
 shows "a click on the page closed it" "8 16 0 0 0" "0 32 $desk"
 
 click 60 16
-shows "opened a third time" "708 112 $square"
-click 708 150
+shows "opened a third time" "776 112 $square"
+click 776 150
 window
 [ "$w_front" = "front" ] || fail "vt1's window opened, but not in front"
 echo "ok - launcher: a click on Terminal started vt1, in front"

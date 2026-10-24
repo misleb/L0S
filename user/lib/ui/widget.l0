@@ -53,7 +53,12 @@
   (UiSegmentBar (list int) (list UiSegment) (list int) int) ; a whole in parts by weight: prefix or "" for none chosen, its parts, the selected key, height
   (UiProps (list UiProp))                                ; rows of properties, a name before each value
   (UiModal UiWidget UiWidget)                            ; a window's content, and an alert dialog over it
-  (UiEntry (list int) UiEntryText (list int) int))       ; a text entry, entry.l0: name, text, placeholder, width
+  (UiEntry (list int) UiEntryText (list int) int)        ; a text entry, entry.l0: name, text, placeholder, width
+  (UiCsdBar (list UiWidget) UiWidget (list UiWidget) bool) ; a window's own header bar: at its start, its title widget, at its end, and whether the close button ends it
+  (UiPathBar (list int) (list (list int)))               ; a path bar, nav.l0: prefix, each directory's label, the first first
+  (UiToggleGroup (list int) (list UiToggle) (list int))  ; a toggle group, nav.l0: prefix, its toggles, the active one's key
+  (UiIconView UiIconData)                                ; an icon view, icon_view.l0
+  (UiPopover UiWidget UiMenu))                           ; a window's content, and a popover menu over it, menu.l0
 
 ; What the widgets' look depends on beyond themselves: the action the
 ; pointer is over, the one pressed, the one with the keyboard's focus,
@@ -127,7 +132,12 @@
     ((UiSegmentBar prefix segs sel h) (ui_segbar_size segs h))
     ((UiProps ps) (ui_props_size ps))
     ((UiModal base alert) (ui_measure base))
-    ((UiEntry name t placeholder ew) (ui_entry_size ew))))
+    ((UiEntry name t placeholder ew) (ui_entry_size ew))
+    ((UiCsdBar st title en closes) (ui_csd_size st title en closes))
+    ((UiPathBar prefix labels) (ui_pathbar_size labels))
+    ((UiToggleGroup prefix ts sel) (ui_toggles_size ts))
+    ((UiIconView d) (ui_icon_size_of d))
+    ((UiPopover base menu) (ui_measure base))))
 
 ; A status page's height: its icon, 64, then 12, its title, 32, then 6,
 ; and its line of text.
@@ -215,7 +225,12 @@
     ((UiSegmentBar prefix segs sel h) (ui_segbar_lay prefix segs sel h r st bg acc))
     ((UiProps ps) (ui_props_lay ps r st bg acc))
     ((UiModal base alert) (ui_modal_lay base alert r st bg acc))
-    ((UiEntry name t placeholder ew) (cons (ui_entry_node r name t placeholder st bg) acc))))
+    ((UiEntry name t placeholder ew) (cons (ui_entry_node r name t placeholder st bg) acc))
+    ((UiCsdBar start title en closes) (ui_csd_lay start title (ui_csd_end en closes) r st acc))
+    ((UiPathBar prefix labels) (ui_pathbar_lay prefix labels r st bg acc))
+    ((UiToggleGroup prefix ts sel) (ui_toggles_lay prefix ts sel r st bg acc))
+    ((UiIconView d) (ui_icon_lay d r st acc))
+    ((UiPopover base menu) (ui_popover_lay base menu r st bg acc))))
 
 ; A label's text color on bg: dimmed for a dimmed one, else the text's.
 (def ui_label_color ((k UiLabelKind) (st UiState) (bg int)) int
@@ -248,7 +263,8 @@
     ((UiSeparator o) false) ((UiHeaderBar s t e) false) ((UiView c) false) ((UiLevel p w) false)
     ((UiStatus t s) false) ((UiStatusPage i t d) false) ((UiGrid g) false) ((UiSpace w h) false)
     ((UiSidebar w rs p k) false) ((UiSegmentBar p ss k h) false) ((UiProps ps) false) ((UiModal b a) false)
-    ((UiEntry n t p w) false)))
+    ((UiEntry n t p w) false) ((UiCsdBar s t e c) false) ((UiPathBar p ls) false) ((UiToggleGroup p ts k) false)
+    ((UiIconView d) false) ((UiPopover b m) false)))
 
 ; What the seen-th of n expanders gets of extra.
 (def ui_share ((extra int) (n int) (seen int)) int
@@ -366,8 +382,7 @@
       (let active (not (ui_st_backdrop st))
         (let s (ui_st_style st)
           (let hbg (ui_headerbar_bg s active)
-            (let ground (ui_leaf r (cons (UiPFill (Rect x y w (sub h 1)) hbg)
-                                        (cons (UiPFill (Rect x (sub (add y h) 1) w 1) (ui_headerbar_shade s active)) (nil UiPaint))) acc)
+            (let ground (ui_leaf r (ui_headerbar_ground r st) acc)
               (let sw (ui_row_w start)
                 (let ew (ui_row_w en)
                   (let left (add x (ui_space_s))
@@ -377,6 +392,71 @@
                           (ui_title_node title (if (is_empty start) left (add left (add sw (ui_space_s))))
                                          (if (is_empty en) (add x (sub w (ui_space_s))) (sub right (ui_space_s)))
                                          r (ui_headerbar_fg s active) a2))))))))))))))
+
+; A header bar's ground in r: its color, in front or in the backdrop, and
+; the shade along its foot.
+(def ui_headerbar_ground ((r Rect) (st UiState)) (list UiPaint)
+  (match r
+    ((Rect x y w h)
+      (let active (not (ui_st_backdrop st))
+        (let s (ui_st_style st)
+          (cons (UiPFill (Rect x y w (sub h 1)) (ui_headerbar_bg s active))
+                (cons (UiPFill (Rect x (sub (add y h) 1) w 1) (ui_headerbar_shade s active)) (nil UiPaint))))))))
+
+; --------------------------------------------------------- csd header bars
+
+; A window's own header bar, libadwaita's AdwHeaderBar in a window that
+; draws its own title bar (window.l0's ui_open_csd): what it holds at its
+; start, a title widget, any widget, in its middle, and what it holds at
+; its end, then the window's close button if it has one. Its ground is
+; the window's to drag, its action ui_move_action, which window.l0 turns
+; into the compositor's move as it is pressed; the close button sets off
+; ui_close_action, which the program answers by closing.
+
+; The actions of a header bar's ground, and of its close button.
+(def ui_move_action () (list int) "win.move")
+(def ui_close_action () (list int) "win.close")
+
+; What a header bar holds at its end: en, and the close button after it
+; if closes.
+(def ui_csd_end ((en (list UiWidget)) (closes bool)) (list UiWidget)
+  (if closes
+      (append en (cons (UiButton (ui_close_action) "window-close" "" (UiBtnTitle) true) (nil UiWidget)))
+      en))
+
+; Its size: its start, title and end in a row, 6 apart and 6 in from
+; each side, and a header bar high.
+(def ui_csd_size ((start (list UiWidget)) (title UiWidget) (en (list UiWidget)) (closes bool)) UiSize
+  (UiSize (add (ui_row_w start) (add (ui_sw (ui_measure title)) (add (ui_row_w (ui_csd_end en closes)) (mul 4 (ui_space_s)))))
+          (ui_headerbar_h)))
+
+; A header bar in r: its ground, which drags the window, then its start
+; packed from the left and its end from the right, 6 in, and the title
+; widget its natural width in the middle of the bar, or as near it as the
+; room between them lets it be, cut to that room.
+(def ui_csd_lay ((start (list UiWidget)) (title UiWidget) (en (list UiWidget)) (r Rect) (st UiState) (acc (list UiNode))) (list UiNode)
+  (match r
+    ((Rect x y w h)
+      (let hbg (ui_headerbar_bg (ui_st_style st) (not (ui_st_backdrop st)))
+        (let ground (cons (UiNode r (ui_headerbar_ground r st) (ui_move_action) false) acc)
+          (let sw (ui_row_w start)
+            (let ew (ui_row_w en)
+              (let left (add x (ui_space_s))
+                (let right (sub (add x w) (add (ui_space_s) ew))
+                  (let a1 (ui_box_lay (UiH) (ui_space_s) start (Rect left y sw (sub h 1)) st hbg ground)
+                    (let a2 (ui_box_lay (UiH) (ui_space_s) en (Rect right y ew (sub h 1)) st hbg a1)
+                      (ui_lay title (ui_csd_title_rect (ui_sw (ui_measure title)) (if (is_empty start) left (add left (add sw (ui_space_s))))
+                                                       (if (is_empty en) (add x (sub w (ui_space_s))) (sub right (ui_space_s)))
+                                                       x w y (sub h 1))
+              st hbg a2))))))))))))
+
+; Where a title widget tw wide goes in a bar from x, w wide, between lo
+; and hi: centered on the bar, moved to stay between them, and no wider
+; than they are apart.
+(def ui_csd_title_rect ((tw int) (lo int) (hi int) (x int) (w int) (y int) (h int)) Rect
+  (let room (max 0 (sub hi lo))
+    (let cw (min tw room)
+      (Rect (max lo (min (sub hi cw) (add x (div (sub w cw) 2)))) y cw h))))
 
 ; The title between from and to, in the middle of r if it fits there.
 (def ui_title_node ((title (list int)) (from int) (to int) (r Rect) (fg int) (acc (list UiNode))) (list UiNode)

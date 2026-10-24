@@ -86,10 +86,13 @@ name. Click one to start it; Esc, a click on the page, or Applications
 again closes it. The apps are the desktop's programs, each kept as macOS
 keeps one, in a bundle under [/Applications](#apps): Terminal (`vt`),
 System Monitor (`procmon`), Widgets (`widgets`), the toolkit's gallery,
-and Disks (`disks`), the disk, its partitions and its volumes as GNOME
+Disks (`disks`), the disk, its partitions and its volumes as GNOME
 Disks shows them, where free space can be made a partition and a
-partition given a volume. Each also runs from a shell, by its name or its
-program's: `run Widgets &` and `run widgets &` are the same.
+partition given a volume, and Files (`files`), the computer's files and
+the volumes' as GNOME 45's Files shows them, in a window that draws its
+own header bars, where folders are made and things renamed and deleted,
+a volume renamed relabelled. Each also runs from a shell, by its name or
+its program's: `run Widgets &` and `run widgets &` are the same.
 
 Each shell runs programs on its own terminal: their standard input,
 output and error are its. The demo boots in two stages. Its
@@ -235,6 +238,7 @@ which refuse every change (`permission denied`), and the disk's, under
 | `df` | each volume's size, the room its files and directories take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
 | `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open, and for the system volume |
 | `unmount VOLUME` | takes a volume away: `fs` stops serving it and the kernel unmounts it, until a rescan (Disks' Refresh) finds it again; refused while any file is open, and for the system volume |
+| `relabel VOLUME LABEL` | renames a volume: `fs` writes LABEL in its superblock and as its partition's name in the GPT, and the kernel mounts it at `/Volumes/LABEL` in place of where it was; its open files stay open. Refused for a label served or mounted already, one that is no label, and the system volume. A process whose current directory was on it under its old name is left there, as after `unmount` |
 | `partition [DISK] SECTORS [START]` | a new partition of SECTORS in the GPT of DISK, `disk0` unless named, from START or where it first fits, and says its UUID (see [Volumes](#volumes)) |
 | `mkfs UUID LABEL` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL` |
 
@@ -536,6 +540,8 @@ makes every place, rectangle, top row and radius the screen's on the way.
 |---|---|
 | `hello` | `compositor scale S`, so the client learns `wm`'s pid, to share with, and the scale to make its buffer at: S times W×H. Every other number, a window's size, place and damage, its top row, and the pointer, is the desktop's pixels |
 | `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT. The reply is `window ID` |
+| `csd W H VA PORT TITLE` | a window as `window` makes one, but one its client decorates, as GNOME's own apps do: `wm` draws no title bar or frame for it, all of it is the client's content, its four corners rounded to 12, and the border round it, its top's too, resizes it. The reply is `window ID` |
+| `move ID` | the window dragged with the pointer from where it is, held where the pointer holds it, until the button is up: what a client that draws its own header bar asks as it is pressed, xdg_toplevel's move. Only while the left button is down after a press in that window, and nothing else is dragged (`not pressed`); only the window's client may ask |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
 | `top ID T` | the window's rows read from its buffer's row T on, as a ring: how a client scrolls |
 | `resize ID W H [VA N S]` | the window's content is now W×H: in the buffer it has, which must have room for it, its rows where they were, or in a new one at VA, N pages, its rows S of its own pixels apart, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
@@ -618,6 +624,16 @@ and the frame's bottom corners to Adwaita's 12-pixel radius, and the
 content's bottom corners to 10, inside the frame's, and a press in a
 cut corner falls through to what is beneath.
 
+A window its client decorates (`csd`), as Files is, has none of that:
+no chrome, no buffer or layer of `wm`'s for it, so one fewer layer in
+every restack and one fewer region of `wm`'s. It is its content alone,
+W×H at its top left, `windows` giving that place; its four corners are
+shaped to 12, and a press anywhere in it goes to its client. The client
+draws its own header bars, the toolkit's `UiCsdBar`, and a press on one's
+ground asks `wm` to `move` the window, which `wm` then drags as by its
+own title bar; its close button is the client's, which closes the window
+and exits. The 6-pixel border outside it, on all four sides, resizes it.
+
 Input:
 
 - **Keys** go to the front window's client, as the `KeyEvent` notices
@@ -628,6 +644,7 @@ Input:
   where it is, a pixel a count, kept on the screen; its wheel's turn is
   told first, where the pointer was (see [USB](#usb)).
 - **A left press** on a window brings it to the front. On its title bar,
+  or on a header bar its client draws, whose client then asks `move`,
   the press starts a drag: the window follows the pointer until the
   button is released. The screen is rebuilt for it once 20 ms have
   passed since the last rebuild ended, timed from its end and not its
@@ -1037,12 +1054,12 @@ absolute, to where it is mounted:
 
 **The fs protocol** ([user/lib/proto/fs.l0](user/lib/proto/fs.l0)) is what a file
 server serves on the port it mounts from. The kernel sends the first
-six; programs send `list`, `mkdir`, `stat`, `chmod`, `df`, `format` and
-`unmount` themselves, to the port `mount_at` gives, as `ls`, `mkdir`,
-`df`, `format` and `unmount` in the shell do (`fs_server_path` gives a path of the system
+six; programs send `list`, `mkdir`, `stat`, `chmod`, `df`, `format`,
+`relabel` and `unmount` themselves, to the port `mount_at` gives, as `ls`, `mkdir`,
+`df`, `format`, `relabel` and `unmount` in the shell do (`fs_server_path` gives a path of the system
 volume as its server knows it, in `/Volumes/LABEL`), and `rescan`,
 `partition` and `mkfs` to the port registered as `fs`. `fs_df_on`,
-`fs_format_on`, `fs_rescan_on`, `fs_partition_on` and `fs_mkfs_on` take
+`fs_format_on`, `fs_relabel_on`, `fs_rescan_on`, `fs_partition_on` and `fs_mkfs_on` take
 a reply port the program keeps, for one that asks again and again;
 `fs_df` and `fs_format` make one each call, which never goes. A
 refusal's word may be followed by why, in words.
@@ -1062,6 +1079,7 @@ refusal's word may be followed by why, in words.
 | `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files, in every directory |
 | `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open, or for the system volume |
 | `unmount VOLUME` | 0, the volume no longer served, and unmounted with `fs_unmount`, its label free, until a rescan finds it again; -4 while any file is open, since a handle names its volume by where it is among them, and for the system volume; -3 for a volume not served |
+| `relabel VOLUME LABEL` | 0, then LABEL: the volume called LABEL, written in its superblock and as its partition's name in the GPT, mounted at `/Volumes/LABEL` with `fs_mount` first, so that a label mounted already by any server changes nothing, and then unmounted from its old place; it keeps its place among the volumes, so open files stay open. -5 for a label that is none, -4 for one served or mounted already and for the system volume, whose label the kernel keeps, -3 for a volume not served; -5 on a RAM file system, and if the disk cannot be written, the old label kept |
 | `rescan` | every disk taken on, those registered since too, and each one's partition table and every volume read again, as at the start, and served in place of those before, each new label mounted and each that has gone unmounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open. A disk whose table is bad has no volumes, and is said so on stderr. The system volume's label stays mounted though it has gone, and is answered as a volume not served: -3, or -9 to write |
 | `partition DISK COUNT [START]` | a new partition of COUNT sectors in the GPT of the disk DISK (`disk1`, say), both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad; -3 if there is no such disk. A disk with no table gets one |
 | `attach DISK` | the disk DISK taken on, and its volumes mounted and served after those before: 0, then how many; 0 and 0 for a disk taken on already; -3 if there is no such disk. A driver asks it, with no reply port, once it has registered a disk |
@@ -1622,6 +1640,7 @@ summary A terminal in a window, with its own shell
 | `Monitor.app` | `procmon` | System Monitor |
 | `Widgets.app` | `widgets` | Widgets |
 | `Disks.app` | `disks` | Disks |
+| `Files.app` | `files` | Files |
 
 A bundle's name is one word, as the shell and the inittab split at
 spaces; an app's name may be several. Its source is the directory beside
@@ -1730,7 +1749,7 @@ that has a disk too still starts the disk's `fs` as before. A program can
 use it as any volume, as the shell does (`cp /bin/hello /Volumes/tmp/bin`,
 `run /Volumes/tmp/bin/hello`). Booted with `root=tmpfs`, `boot` has
 `install tmp` copy the initramfs onto it, which takes the moments of its
-56 files, and then makes it `/` as for a system volume, so that `/` can be
+60 files, and then makes it `/` as for a system volume, so that `/` can be
 written, directories made, and apps installed (see [the
 launcher](#the-desktop)), with no disk on the board. The inittab starts
 `fs ram` beside `boot`, as `tests/e2e/rootboot_tmpfs` does; without it,
@@ -2069,16 +2088,16 @@ initramfs, so that the Makefile finds it there:
 |---|---|---|
 | `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `lsusb`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
 | `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `hvs`, `virtio-input`, `virtio-blk`, `virtio-net`, `gem`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
-| `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
+| `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks`, `files` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `rtc` `firmware.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0` and `iommu.l0`, `gem` `regs.l0` and `phy.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0`, `files` `fsview.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `rtc` `firmware.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0` and `iommu.l0`, `gem` `regs.l0` and `phy.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
 |---|---|
 | `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; given `root=tmpfs`, has `install` fill the RAM file system first; starts `/etc/system`'s programs by path, and exits with the first one's status |
-| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format` and `unmount`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo`, `exit` and `dmesg`, which prints the kernel's log, a line for each message with its time since boot. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
+| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format`, `unmount` and `relabel`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo`, `exit` and `dmesg`, which prints the kernel's log, a line for each message with its time since boot. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. L0 says nothing of the board, so it finds its port: of the places a PL011 is on L0's boards, QEMU's at 0x09000000 and the Raspberry Pi 5's debug UART at 0x107D001000, the first the kernel gives whose ID registers say PL011. It takes that port's receive interrupt, 33 or 153, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font (at scale 2, cells of 16×32 in the face's Source Code Pro), in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
@@ -2107,12 +2126,13 @@ every `.l0` in its directory is part of it.
 | `tftp` | a client of `inet`: `tftp HOST FILE [PATH]` fetches FILE over TFTP (RFC 1350), from a host named or dotted, in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
 | `random` | a client of `random`: `random [N]` writes N bytes of the entropy device's, 16 if not given, 1 to 1024, as hex digits and a newline, waiting a second at most for the driver to register; fails, saying why, without one |
 | `disk` | a client of the disks: `disk list` lists them, each name and size; of `disk0`, or of the disk named first, as `disk disk1 info`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of every disk, `disk0` and the rest, which mounts each volume of L0S's file system on them at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `unmount`, `rescan`, `partition`, `attach` and `mkfs`; then registers as `fs`, though no disk has a volume, or a partition table, yet. It reads each disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, every disk's only writer. A disk registered after it started is taken on when its driver asks it to `attach` it. With no `disk0` within 5 seconds it says so on stderr and exits 0. `fs ram [MB]` serves no disk but one volume in memory instead (see [Booting from a volume](#booting-from-a-volume)) |
+| `fs` | the file server (see [Volumes](#volumes)): a client of every disk, `disk0` and the rest, which mounts each volume of L0S's file system on them at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `relabel`, `unmount`, `rescan`, `partition`, `attach` and `mkfs`; then registers as `fs`, though no disk has a volume, or a partition table, yet. It reads each disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, every disk's only writer. A disk registered after it started is taken on when its driver asks it to `attach` it. With no `disk0` within 5 seconds it says so on stderr and exits 0. `fs ram [MB]` serves no disk but one volume in memory instead (see [Booting from a volume](#booting-from-a-volume)) |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. At scale 2 it lays the desktop out at half the screen's size each way and draws it at the screen's resolution. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
 | `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives, every disk registered, each its size and name, one shown at a time, chosen by click; the drive's name (`disk1`), size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan`, takes on any disk registered since, and reads the drive again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
+| `files` | Files, `run files &`, as GNOME 45's Files is, in a window that draws its own header bars (`csd`): a sidebar of places under a header bar titled Files, Computer (`/`), Volumes (`/Volumes`), and each volume with how much of it is free; and the place shown, under a header bar of Back and Forward, a path bar of where it is, whose parts go there, a toggle between a grid of icons and a list (name, size, kind, sortable), the menu (New Folder..., Refresh, the other view) and the window's close button; and a line of what was last done. It lists the initramfs from its entries, a volume through its file server, and `/Volumes` from the mount table (`fsview.l0`), folders first. A click selects; a double click or Enter opens: a folder or a volume is gone into, an app's bundle or a marked program started, and any other file's text shown, its first 64 KB, as a list of its lines, until Back, Backspace or Esc. A right click opens a menu of Open, Rename... and Delete for a thing, New Folder... for the place, or Open and Rename... for a volume's row. F2 renames, Delete deletes, each after a dialog. The initramfs cannot be changed, and `/Volumes` only by renaming a volume, which `fs` relabels (`relabel`), and Files shows what was under the old name under the new. The initramfs's files' sizes are not known, and are blank |
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input` or `usb-hid keyboard`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 | `lsusb` | a client of `usb`: a line for each device `xhci` brought up, its number, vendor and product ids, speed, and what each interface is (`keyboard`, `mouse`, `hub`, …) |
@@ -2143,16 +2163,16 @@ name in a library is taken in every program that links it.
 | [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng` |
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
 | [proto/display_server.l0](user/lib/proto/display_server.l0) | the display protocol, as a driver serves it: a `Layer`, a buffer's `Corners` and the radii it may have, requests' numbers read (`layers_of`, a buffer's pages and stride), damage cut to the screen, and `info`'s answer with the scale (`scale_of`, `scale=`) | `virtio-gpu`, `hvs` |
-| [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks` |
+| [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, a window its client decorates (`csd`) and its `move` too, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks`, `files` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs`, `inet` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol: disks' names, `disk0` on, the disks there are, a driver's disk registered under the first name free and a request's disk read; as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks`, `virtio-blk`, `sdhci` |
 | [proto/random.l0](user/lib/proto/random.l0) | the random protocol: its request and reply, and `random_bytes` and `random_word`, which ask `virtio-rng` for bytes and do without when it is not there (`RANDOM`) | `virtio-rng`, `random`, `fs`, and with `INETLIB` |
-| [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df` and `format` as a program sends them, to the port the mount table gives, and `rescan`, `partition` (of a disk named) and `mkfs`, to `fs`'s, and `attach`, which a disk's driver tells it; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, `virtio-blk`, `sdhci`, and every program `PATHS` is in |
+| [proto/fs.l0](user/lib/proto/fs.l0) | the fs protocol: its replies, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format` and `relabel` as a program sends them, to the port the mount table gives, and `rescan`, `partition` (of a disk named) and `mkfs`, to `fs`'s, and `attach`, which a disk's driver tells it; `_on` versions take a reply port the caller keeps; the system volume, and a path of it as its server knows it | `fs`, `disks`, `virtio-blk`, `sdhci`, and every program `PATHS` is in |
 | [proto/nic.l0](user/lib/proto/nic.l0) | the nic protocol: frames as notices and as requests to send, and Ethernet's addresses as text; what its drivers keep alike, the counts `stats` gives, why a frame is refused, and padding (`NICLIB`) | `virtio-net`, `gem`, and with `INETLIB` |
 | [proto/inet.l0](user/lib/proto/inet.l0) | the inet protocol, as a client sends it: the interface, binding a UDP port, sending a datagram, pinging, opening, listening to, writing to and closing TCP connections, and reading the notices of datagrams, echoes' replies and connections' events; resolving a name, `inet_resolve`, by asking the interface's name server over UDP; and IPv4's addresses as text and as netmasks (`INETLIB`, with `nic.l0`, `dns.l0` and `random.l0`) | `inet`, `net`, `tftp`, `http` |
 | [proto/usb.l0](user/lib/proto/usb.l0) | the usb protocol: its notices, a device plugged in or unplugged and an endpoint's report; its requests and answers, bytes in hex; and asking for devices, descriptors and configurations (`USBLIB`, with `usbdesc.l0`) | `xhci`, `usb-hid`, `lsusb` |
 | [proto/pci.l0](user/lib/proto/pci.l0) | the pci protocol: a function's line, its BDF, ids, class, interrupt and BARs, and `pci_find`, the functions of a class (`PCILIB`) | `pcie`, `xhci` |
-| [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm` |
+| [proto/app.l0](user/lib/proto/app.l0) | apps: a bundle's manifest, read and checked; the bundles in `/Applications`, wherever `/` is; the app whose program is at a path; and an app's program, found by its bundle's name | `sh`, `wm`, `files` |
 | [format/uuid.l0](user/lib/format/uuid.l0) | UUIDs, RFC 9562: their text, GPT's byte order, and new ones of version 7, the time in milliseconds then noise | `fs`, `disks`, `tools/mkfs`, and every program `PATHS` is in |
 | [format/dns.l0](user/lib/format/dns.l0) | DNS's messages, RFC 1035: the query for a name's IPv4 address, and the first A record read out of an answer, past CNAMEs and name pointers (`DNSLIB`, in `INETLIB`) | with `INETLIB` |
 | [format/usbdesc.l0](user/lib/format/usbdesc.l0) | USB's descriptors and requests as bytes: setup packets, a device descriptor, a configuration with its interfaces and their endpoints, the speeds as xHCI numbers them, and names for them (`USBDESC`, in `USBLIB`) | with `USBLIB` |
@@ -2161,8 +2181,8 @@ name in a library is taken in every program that links it.
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
 | [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, its place at a scale (`rect_scaled`), and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
-| [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `tools/mkicon` |
-| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, the face it draws text, icons and the pointer with at scale 2 (`face.l0`), painting at either scale, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`) | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks` (both) |
+| [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `files`, `tools/mkicon` |
+| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, the face it draws text, icons and the pointer with at scale 2 (`face.l0`), painting at either scale, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, a window's own header bar (`UiCsdBar`), a path bar and a toggle group (`nav.l0`), an icon view (`icon_view.l0`), a popover menu (`menu.l0`), the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`), their own decorations, double clicks and right clicks too | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks`, `files` (both) |
 
 ## Tests
 
@@ -2171,7 +2191,7 @@ name in a library is taken in every program that links it.
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`). Last, it says how many tests passed and failed, of how many files |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 `make check` and `make test` run each check and each test file as a
 target of its own, `build/check/FILE.ok` or `build/test/FILE.ok`, made once
@@ -2265,6 +2285,10 @@ Ctrl-C as a person would:
   `unmount`s scratch: `df` and `ls /Volumes` show data alone, the file is
   in no volume, and scratch cannot be unmounted again, nor what is not a
   volume;
+- `relabel`, on a disk of its own, writes a file on scratch, then
+  `relabel`s it `notes`: `ls /Volumes` and `df` show data and notes, the
+  file is read from notes and not from scratch, and a label served
+  already, or none, is refused;
 - `dirs` makes directories on a volume, nested, writes, lists, moves and
   removes in them, is refused a directory where one is, in one that is
   not, the removal of one with something in it, and one in the
@@ -2468,6 +2492,25 @@ and by screendump:
 - Enter: the dialog gone; then `ls /Volumes` at the serial shell lists
   `made`, and a file written to it is read back.
 
+[tests/files.sh](tests/files.sh) boots the same, writes a file on data,
+types `run files &`, and learns where its window is, its content at its
+own top left, as `wm` draws no title bar for it. Then, by screendump, the
+tablet through QMP, its right button too, and keys through the monitor:
+- its own two header bars' ground, the sidebar's, Computer's row
+  selected, and `/`'s folders' tiles in the accent;
+- a click on data's row, selecting it; a double click on the file, which
+  shows its text as a list of its lines; and Esc, back to the tiles;
+- a drag of the place's header bar's ground, which asks `wm` to `move`
+  the window: `windows` says it is 100 right and 80 down;
+- the toggle to the list, its header's line;
+- a right click on the file, Rename..., a new name typed and Enter: `ls`
+  at the serial shell lists the file so;
+- the menu button's New Folder..., a name and Enter: the folder made;
+  Delete, and the dialog's Delete: it gone again;
+- Volumes, scratch selected, F2, `notes` and Enter: `ls /Volumes` lists
+  `notes`, relabelled;
+- the header bar's own close button: `windows` lists no Files.
+
 [tests/partitions.sh](tests/partitions.sh) boots the same, with `rtc
 clock`, on a disk `build/mkfs` makes with room between its volumes, and
 at the serial shell: `partition 400`, which says a UUID of version 7
@@ -2480,14 +2523,14 @@ naming its partition.
 [tests/launcher.sh](tests/launcher.sh) boots the screen tests' initramfs
 and clicks the top bar's Applications with the tablet: the launcher
 opens, Applications on its pill and the page's ground showing, and
-Terminal's icon, its dark square, in the grid's third cell. Esc closes
+Terminal's icon, its dark square, in the grid's fourth cell. Esc closes
 it, and so does a click on the page. A click on Terminal starts it: `run
 windows` lists `vt1`'s window, in front, and the top bar names it
 Terminal, a lit pixel of the `T`, where its title, `vt1`, would show none.
 
 [tests/launcher-install.sh](tests/launcher-install.sh) boots a system
-volume (`root=`) with `wm` and no window, opens the launcher with four
-apps, and installs a fifth from the shell, a bundle `Extra.app` of a copy
+volume (`root=`) with `wm` and no window, opens the launcher with five
+apps, and installs a sixth from the shell, a bundle `Extra.app` of a copy
 of Terminal's program and icon and a manifest `write` and `append` make.
 Opened again, the launcher shows it in the second cell, and a click on it
 starts it, the top bar naming it Extra.
@@ -2687,10 +2730,23 @@ a bad buffer, and wait on nothing.
 - **Disks shows the one disk, and cannot take anything away.** It can
   make a partition of free space, give a partition a new volume, format
   a mounted volume, keeping its label and size, and have `fs` rescan;
-  it cannot delete, resize or relabel a partition or a volume, nor
-  choose a partition's type or name. Sizes are typed in kB, whatever the
-  disk's size. Its window is a fixed 880 by 520, as every window is, and
-  it reads the disk only when it opens and when asked.
+  it cannot delete, resize or relabel a partition or a volume (Files and
+  `relabel` relabel one), nor choose a partition's type or name. Sizes
+  are typed in kB, whatever the disk's size. Its window is a fixed 880
+  by 520, as every window is, and it reads the disk only when it opens
+  and when asked.
+- **Files works on one thing at a time, and does not copy.** It selects
+  one thing, so there is no selecting several, no rubber band, no
+  dragging and dropping, no cut, copy or paste, and no trash: Delete
+  deletes for good, and a folder only once it is empty. It lists a place
+  when it goes there and after it changes something, not when another
+  program does, until Refresh. The initramfs's files' sizes are not
+  known to a program, so they are blank. A file is shown as text only,
+  its first 64 KB, 2000 lines of 240 characters at most, ASCII; and a
+  program it starts has no terminal. KeyEvent has no modifiers yet, so
+  there is no Ctrl-C, Ctrl-V or Alt-Left. Its window, like every
+  client-decorated one, is not maximized by a double click on its
+  header bar, and has no shadow.
 - **A text entry does not scroll or select.** Its text is cut short with
   `...`, so an entry is made as wide as what it will hold, and there is no
   selecting, copying or pasting.

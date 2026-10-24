@@ -6,11 +6,11 @@
 # Terminal's program and icon and a manifest of its own, and checks, by
 # QEMU's screendump, that the launcher shows it once it is opened again:
 #
-#   1. the launcher opened: four apps, Terminal's icon in the third cell
-#      and none in the second
+#   1. the launcher opened: five apps, Terminal's icon in the fourth cell
+#      and none where Extra's will be
 #   2. Esc closes it; Extra.app is installed from the shell
-#   3. Applications opens it again: a fifth app, Extra, in the second cell,
-#      with Terminal's icon, and Terminal in the fourth
+#   3. Applications opens it again: a sixth app, Extra, in the second cell,
+#      with Terminal's icon, and Terminal in the fifth
 #   4. a click on Extra starts it: run windows lists vt1's window in front,
 #      and the top bar names the front window's app, Extra
 #
@@ -126,23 +126,24 @@ shows() {
   exit 1
 }
 
-# The geometry is launcher.sh's. Four apps, Disks, System Monitor,
-# Terminal and Widgets, are cells 136 wide from (1280 - 4 * 136) / 2 =
-# 368, so the second cell starts at 504, its icon, 48 square, 44 in, and
-# its pixel 504, 112 is the page's; Terminal, the third, has its icon's
-# at 708, 112. A fifth app, the volume's listing being sorted by name,
-# Disks, Extra, System Monitor, Terminal, Widgets, moves the grid to
-# start at (1280 - 5 * 136) / 2 = 300: Extra's cell is 436 across, its
-# icon, Terminal's, at 480, so 504, 112 is on it, and Terminal's, the
-# fourth, at 708 across, has its at 752, so 776, 112 is on that.
+# The geometry is launcher.sh's. Five apps, Disks, Files, System
+# Monitor, Terminal and Widgets, are cells 136 wide from (1280 - 5 *
+# 136) / 2 = 300, so the second cell starts at 436, its icon, 48 square,
+# 44 in, at 480, and its pixel 436, 112 is the page's; Terminal, the
+# fourth, at 708, has its icon at 752, so 776, 112 is on it. A sixth app,
+# the volume's listing being sorted by name, Disks, Extra, Files, System
+# Monitor, Terminal, Widgets, moves the grid to start at (1280 - 6 *
+# 136) / 2 = 232: Extra's cell is 368 across, its icon, Terminal's, at
+# 412, so 436, 112 is on it, and Terminal's, the fifth, at 776 across,
+# has its at 820, so 844, 112 is on that, and 776, 112 is the page's.
 page="36 36 36"; square="61 56 70"; desk="8 19 26"; headerbar="235 235 235"; ink="255 255 255"
 
 waits_for "^l0s> "
 shows "closed, at the start" "8 16 0 0 0" "0 32 $desk"
 
 click 60 16
-shows "four apps: Terminal's icon, and none in the second cell" \
-  "0 32 $page" "708 112 $square" "504 112 $page"
+shows "five apps: Terminal's icon, and none at the second cell's edge" \
+  "0 32 $page" "776 112 $square" "436 112 $page"
 
 monitor "sendkey esc"
 shows "Esc closed it" "8 16 0 0 0" "0 32 $desk"
@@ -156,10 +157,10 @@ typed "append /Applications/Extra.app/manifest icon icon.ppm"
 echo "ok - launcher-install: Extra.app installed from the shell"
 
 click 60 16
-shows "opened again: Extra's icon in the second cell, Terminal's in the fourth" \
-  "0 32 $page" "504 112 $square" "776 112 $square" "708 112 $page"
+shows "opened again: Extra's icon in the second cell, Terminal's in the fifth" \
+  "0 32 $page" "436 112 $square" "844 112 $square" "776 112 $page"
 
-click 504 150
+click 436 150
 window
 [ "$w_front" = "front" ] || fail "vt1's window opened, but not in front"
 echo "ok - launcher-install: a click on Extra started vt1, in front"
