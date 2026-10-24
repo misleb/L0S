@@ -108,7 +108,7 @@ case's `etc`, and compares. A case is a directory:
 | `status` | the kernel's exit status, if not 0 (the first `start`'s, pid 1's) |
 | `stderr` | one line standard error must contain |
 | `typed` | lines typed at the serial line by `tools/slowtype`, with pauses |
-| `font` | if present, the console font is added as `/etc/font.txt`, for `vt`, and the face for scale 2 as `/etc/face2x` |
+| `font` | if present, the face (the text's glyphs) is added as `/etc/face`, for `vt` |
 | `disk` | if present, the board has a virtio-blk on a fresh `tools/mkdisk` image (`build/e2e/CASE.disk`); without it there is no disk |
 | `layout` | that disk's layout, if not mkdisk's 1 MB one: `SECTORS LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, `@` the case's own cpio; give a UUID to boot from it, since mkfs's own differ every run |
 | `readonly`, `norng` | for a case that types nothing: the disk read-only (`virtio-blk_ro`); no virtio-rng, which every other boot has (`virtio-rng_nodev`) |

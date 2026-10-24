@@ -1,5 +1,5 @@
 ; render.l0 -- drawing into a canvas, a buffer of 4-byte pixels, b, g, r,
-; then unused, or an array of them: shapes, the 8 by 16 font, PPM images,
+; then unused, or an array of them: shapes, the text cell's size, PPM images,
 ; which ppm.l0 reads, and the commands that say what to draw. Shared by
 ; the compositor, wm, its clients, such as vt, the display drivers, and
 ; tools/mkicon. Linked into the programs that draw, with ppm.l0 and
@@ -90,126 +90,16 @@
 
 ; ------------------------------------------------------------------ font
 
-; The font: glyphs 8 wide and 16 tall for codes 32 to 126, as
-; fonts/l0s-8x16.txt draws them, kept as a row's 8 bits each, the
-; leftmost the highest, glyph by glyph. Empty if it could not be read.
-(def font_path () (list int) "/etc/font.txt")
+; The text cell: glyphs 8 wide and 16 tall for codes 32 to 126, as
+; /etc/face holds them (user/lib/ui/face.l0).
 (def glyph_w () int 8)
 (def glyph_h () int 16)
 (def first_glyph () int 32)
 (def glyph_count () int 95)
 
-; The font in the file at path, as parse_font reads it; or, having said
-; why on standard error, none, an empty array.
-(def load_font ((path (list int))) (array int)
-  (match (read_whole path)
-    ((Err why) (no_font (append path (append ": " why))))
-    ((Ok b)
-      (match (parse_font (bytes_to_list b))
-        ((Err why) (no_font (append path (append ": " why))))
-        ((Ok rows) rows)))))
-
-; No font, having said why on standard error.
-(def no_font ((why (list int))) (array int)
-  (let w (write_err (append why "; no text\n")) (array_new 0 0)))
-
-; A font file refused, for why.
-(def font_bad ((why (list int))) (Result (array int) (list int))
-  ((Err (array int) (list int)) why))
-
-; A font file's text as font_rows: lines starting with ; are comments, and
-; a glyph is "@ CODE" then 16 rows of 8 of # and ., every code from 32
-; to 126 once.
-(def parse_font ((text (list int))) (Result (array int) (list int))
-  (font_lines (lines text) (array_new (mul (glyph_count) (glyph_h)) 0) (array_new (glyph_count) false)))
-
-; parse_font's loop between glyphs: comments and empty lines skipped,
-; each "@ CODE" read by font_header, and at the end font_done's check
-; that every code was seen. rows holds the glyphs so far, seen which
-; codes they are.
-(def font_lines ((ls (list (list int))) (rows (array int)) (seen (array bool))) (Result (array int) (list int))
-  (if (is_empty ls)
-      (font_done rows seen 0)
-      (let l (head ls)
-        (if (if (is_empty l) true (eq (head l) 59))      ; ;
-            (font_lines (tail ls) rows seen)
-            (if (not (starts_with l "@ "))
-                (font_bad (append "not a glyph's header: " l))
-                (font_header (tail ls) rows seen (drop_n l 2)))))))
-
-; A glyph's header, its code's text after the "@ ": refused unless a code
-; from 32 to 126 not seen before, which is then marked seen and its 16
-; rows read by font_glyph from ls.
-(def font_header ((ls (list (list int))) (rows (array int)) (seen (array bool)) (code_text (list int))) (Result (array int) (list int))
-  (let code (if (is_number code_text) (int_prefix code_text 0) -1)
-    (if (if (lt code (first_glyph)) true (ge code (add (first_glyph) (glyph_count))))
-        (font_bad (append "no glyph " code_text))
-        (let was (array_get seen (sub code (first_glyph)))
-          (if was
-              (font_bad (append "glyph " (append (digits code) " twice")))
-              (font_glyph ls rows (array_set seen (sub code (first_glyph)) true) code 0))))))
-
-; Rows r on of glyph code, from ls, each kept in rows as row_bits reads
-; it; then back to font_lines. Refused if the file ends first or a row is
-; not 8 of the characters # and . (a period).
-(def font_glyph ((ls (list (list int))) (rows (array int)) (seen (array bool)) (code int) (r int)) (Result (array int) (list int))
-  (if (eq r (glyph_h))
-      (font_lines ls rows seen)
-      (if (is_empty ls)
-          (font_bad (append "glyph " (append (digits code) " cut short")))
-          (let v (row_bits (head ls) 0 0)
-            (if (lt v 0)
-                (font_bad (append "glyph " (append (digits code) (append ", row " (append (digits r) " is not 8 of # and .")))))
-                (font_glyph (tail ls) (array_set rows (add (mul (sub code (first_glyph)) (glyph_h)) r) v) seen code (add r 1)))))))
-
-; A row's 8 of # and . as bits, the first the highest; or -1.
-(def row_bits ((l (list int)) (n int) (acc int)) int
-  (if (is_empty l)
-      (if (eq n (glyph_w)) acc -1)
-      (if (ge n (glyph_w))
-          -1
-          (if (eq (head l) 35)
-              (row_bits (tail l) (add n 1) (bit_or (bit_shl acc 1) 1))
-              (if (eq (head l) 46) (row_bits (tail l) (add n 1) (bit_shl acc 1)) -1)))))
-
-; The font's rows, once every glyph from index i on was seen; else the
-; first code missing, refused.
-(def font_done ((rows (array int)) (seen (array bool)) (i int)) (Result (array int) (list int))
-  (if (eq i (glyph_count))
-      ((Ok (array int) (list int)) rows)
-      (if (array_get seen i)
-          (font_done rows seen (add i 1))
-          (font_bad (append "no glyph " (digits (add i (first_glyph))))))))
-
-; Row r of glyph code's bits.
-(def glyph_row ((font (array int)) (code int) (r int)) int
-  (array_get font (add (mul (sub code (first_glyph)) (glyph_h)) r)))
-
-; Draws glyph code with its top left at x, y: its lit pixels only, so what
-; is under the others shows through.
-(def draw_glyph ((f Canvas) (font (array int)) (x int) (y int) (code int) (c int) (r int)) Canvas
-  (if (eq r (glyph_h))
-      f
-      (draw_glyph (glyph_bits f x (add y r) (glyph_row font code r) c 0) font x y code c (add r 1))))
-
-; One row of a glyph, its bits, at x, y: columns col on of the 8 plotted
-; in color c where their bit is set, the highest bit leftmost.
-(def glyph_bits ((f Canvas) (x int) (y int) (bits int) (c int) (col int)) Canvas
-  (if (eq col (glyph_w))
-      f
-      (glyph_bits (if (eq (bit_and (bit_shr bits (sub 7 col)) 1) 1) (plot f (add x col) y c) f) x y bits c (add col 1))))
-
 ; The code glyph code draws: itself, or ? for one the font lacks.
 (def drawable ((code int)) int
   (if (if (lt code (first_glyph)) true (ge code (add (first_glyph) (glyph_count)))) 63 code))
-
-; Characters cs from x, y, one cell each, with each cell first filled
-; with bg, unless bg is negative, so what is under shows through.
-(def draw_text ((f Canvas) (font (array int)) (x int) (y int) (fg int) (bg int) (cs (list int))) Canvas
-  (if (is_empty cs)
-      f
-      (let b (if (ge bg 0) (fill_rect f x y (glyph_w) (glyph_h) bg) f)
-        (draw_text (draw_glyph b font x y (drawable (head cs)) fg 0) font (add x (glyph_w)) y fg bg (tail cs)))))
 
 ; ------------------------------------------------------------- requests
 

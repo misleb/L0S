@@ -344,8 +344,9 @@ def resolve_image(image):
         etc = STATE / "etc"
         shutil.rmtree(etc, ignore_errors=True)
         shutil.copytree(path, etc)
-        if not (etc / "font.txt").exists():
-            shutil.copy(ROOT / "fonts" / "l0s-8x16.txt", etc / "font.txt")
+        face = BUILD / "face"
+        if not (etc / "face").exists() and face.exists():
+            shutil.copy(face, etc / "face")
         splash = BUILD / "splash.ppm"
         if not (etc / "splash.ppm").exists() and splash.exists():
             shutil.copy(splash, etc / "splash.ppm")

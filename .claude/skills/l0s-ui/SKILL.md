@@ -87,7 +87,8 @@ display. This is the working summary, with the rules.
   holding the pixels, so pass it on and keep no other. Host tests draw
   this way (`paint_test.l0`, `render_test.l0`), and so does
   `tools/mkicon`.
-- **Text** is the 8×16 bitmap font (`ui_char_w`, `ui_char_h`), ASCII only.
+- **Text** is Source Code Pro in cells 8×16 (`ui_char_w`, `ui_char_h`),
+  smooth at every scale, ASCII only.
   `ui_text_w s bold scale` measures.
 - **Icons** are GNOME's own SVGs under `icons/` (Adwaita's symbolic
   ones, each project's license and `SOURCE` beside them), named in
@@ -349,15 +350,15 @@ way; buffers and painting are in the screen's.
   (places, rectangles, top rows, radii and moves ×s; a buffer's W H are its
   own pixels); `draw_cmd.l0`'s `ui_draw_*` (render.l0's shapes, s thick);
   `vt` (cells ×s, `top` ÷ s for the protocol); the launcher's `icon2x.ppm`.
-- **The face**, a `UiFace`: scale, the 1x bitmap font, the icons of
-  `/etc/icons` at the sizes the scale paints (`icon.NAME.N`, N = 16·k·s,
-  `ui_icon_sizes`), and at 2 the tables of `/etc/face2x` (coverage 0–15,
-  16 levels a word): `glyph.regular.32`, `glyph.bold.32`, `.64` for text
-  scale 2, and `cursor`. A pixel is mixed with what is under it by its
-  level (`ui_cov_put`); a missing glyph table falls back to the bitmap
-  doubled, a missing icon is not drawn. Host tests make one with
-  `ui_face_1x` (no icons) or `(UiFace s font map)` with tables of their
-  own (`paint_test.l0`'s `box_face`).
+- **The face**, a `UiFace`: scale, the icons of `/etc/icons` at the
+  sizes the scale paints (`icon.NAME.N`, N = 16·k·s, `ui_icon_sizes`),
+  and the tables of `/etc/face` (coverage 0–15, 16 levels a word):
+  `glyph.regular.H` and `glyph.bold.H`, H = 16·text scale·s (16, 32, 64),
+  and `cursor`. A pixel is mixed with what is under it by its level
+  (`ui_cov_put`); a missing glyph table or icon is not drawn
+  (`ui_face_has_text`, and a window that cannot say so does not open).
+  Host tests make one with `ui_face_none` (no tables) or `(UiFace s map)`
+  with tables of their own (`paint_test.l0`'s `box_face`, `face1_glyphs`).
 - **Bold at 2** is the bold face, not a double strike; widths are still the
   logical `ui_text_w`.
 - **A new icon** is GNOME's SVG of it copied unchanged into

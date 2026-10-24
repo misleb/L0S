@@ -154,7 +154,7 @@ back_title() {
 # content is 2 in from its left. The terminal is GNOME Console's, white
 # on 1e1e1e, its cursor white too.
 bar=46; edge=2
-active="48 48 48"; backdrop="36 36 36"; ink="255 255 255"; cursor="255 255 255"
+active="48 48 48"; backdrop="36 36 36"; ink="255 255 255"; cursor="255 255 255"; stem="194 194 194"
 
 waits_for "^l0s> "
 windows
@@ -178,8 +178,9 @@ shows "$f_title's border, its title bar's color" \
 # The prompt's cursor on row 7's last pixel row, after "l0s> ".
 shows "$f_title's shell is waiting" "$((f_x + edge + 40)) $((f_y + bar + 7 * 16 + 15)) $cursor"
 typekeys "echo hi"
-# h's stem, column 1, its middle, on row 8: the text's color.
-shows "echo hi typed and answered in $f_title" "$((f_x + edge + 1)) $((f_y + bar + 8 * 16 + 8)) $ink"
+# h's stem, column 1, its middle, on row 8: 11 of 15 covered, white mixed
+# over the terminal's ground, as the smooth 8 by 16 glyph has it.
+shows "echo hi typed and answered in $f_title" "$((f_x + edge + 1)) $((f_y + bar + 8 * 16 + 8)) $stem"
 
 # vt1 and vt2 are pids 17 and 18: boot, pid 1, starts /etc/system's
 # programs after the inittab's fourteen, sh 15, wm 16, then the two vts

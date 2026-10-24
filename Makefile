@@ -474,9 +474,9 @@ $(BUILD)/mkfs: $(MKFS) tools/mkfs/main.l0 | $(BUILD)
 $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 	$(L0) build $(MKICON) tools/mkicon/main.l0 -o $@
 
-# The face the desktop draws text, icons and the pointer with at scale 2,
-# /etc/face2x: Source Code Pro's glyphs and fonts/cursors.paths, rasterized.
-FACE := $(BUILD)/face2x
+# The face the desktop draws text and the pointer with, /etc/face: Source
+# Code Pro's glyphs, at every scale, and fonts/cursors.paths, rasterized.
+FACE := $(BUILD)/face
 FONT_TTFS := fonts/SourceCodePro-Regular.ttf fonts/SourceCodePro-Bold.ttf
 
 $(BUILD)/mkfont: $(MKFONT) tools/mkfont/main.l0 | $(BUILD)
@@ -555,12 +555,11 @@ $(MCP_VENV)/.installed: tools/l0s-mcp/requirements.txt
 
 mcp: $(MCP_VENV)/.installed
 
-# demo/etc, the splash at both scales, the console font, and the face
-# for scale 2, staged together as the archive's /etc.
-FONT     := fonts/l0s-8x16.txt
+# demo/etc, the splash at both scales, and the face, staged together as
+# the archive's /etc.
 SPLASH2X := $(if $(filter $(BUILD)/splash.ppm,$(SPLASH)),$(BUILD)/splash2x.ppm)
-ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FONT) $(FACE) $(ICON_FACE)
-stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FONT) $(1)/font.txt && cp $(FACE) $(1)/face2x && cp $(ICON_FACE) $(1)/icons \
+ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE)
+stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
             $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm)
 
 initramfs: images root $(ETC_DEPS)

@@ -127,14 +127,12 @@ booted with `root=UUID`, or else from the initramfs.
 How the display, the compositor and its clients fit together is under
 [The desktop](#the-desktop).
 
-The text font is [fonts/l0s-8x16.txt](fonts/l0s-8x16.txt), drawn for
-L0S: printable ASCII, 8×16, one glyph per `@ CODE` line and 16 rows of
-`#` and `.`, so it can be read and edited as text. The initramfs carries
-it as `/etc/font.txt`. On a large screen, drawn at scale 2 (see
-[A large screen](#a-large-screen)), text is Source Code Pro instead,
+The text font is Source Code Pro,
 [fonts/SourceCodePro-Regular.ttf](fonts/SourceCodePro-Regular.ttf) and
-its bold, rasterized with smooth edges into `/etc/face2x` as the build
-makes it.
+its bold: printable ASCII in cells 8×16, rasterized with smooth edges by
+[tools/mkfont](tools/mkfont/mkfont.l0) at every size the desktop draws it
+(see [A large screen](#a-large-screen)) into `/etc/face`, which the
+initramfs carries.
 
 The wallpaper is the splash, drawn by
 [tools/mksplash](tools/mksplash/mksplash.l0) into `build/splash.ppm`, at
@@ -178,7 +176,7 @@ l0s> ls
   ...
   /bin/cat
   ...
-  /etc/font.txt
+  /etc/face
   /etc/icons
   /etc/inittab
   /etc/motd
@@ -339,9 +337,9 @@ Things to try:
   ```
 
   - `char X Y CODE` draws a character of the 8×16
-    [font](fonts/l0s-8x16.txt), its code 32 to 126, with its top left at
-    X, Y. Only its lit pixels are drawn, so what is under the rest shows
-    through.
+    [font](fonts/SourceCodePro-Regular.ttf), its code 32 to 126, with its
+    top left at X, Y. Each pixel is mixed with what is under it by how
+    much the glyph covers it.
   - `splash 30` redraws the wallpaper at 30% of its brightness.
   - `restore` puts the wallpaper back over a rectangle, as `splash` last
     drew it.
@@ -850,7 +848,7 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   numbers. Its buffers, and its clients', are twice as wide and high.
   `display.l0` makes its places the screen's on the way to the driver.
 - **The toolkit** paints its ops twice the size (`paint.l0`). Text and
-  the pointer come from the face, `/etc/face2x`, and icons, at every
+  the pointer come from the face, `/etc/face`, and icons, at every
   scale, from `/etc/icons` ([user/lib/ui/face.l0](user/lib/ui/face.l0)):
   coverage, how much of each pixel a shape covers, 0 to 15. Each pixel
   is mixed with what is under it by that much, since layers do not
