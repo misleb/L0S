@@ -37,12 +37,12 @@
     ((IpBad why) (fail_because "read" why))
     ((IpRead d)
       (match d
-        ((Ipv4 src dst proto ttl payload quoted)
+        ((Ipv4 src dst proto ttl b pi pj quoted)
           (add (check_int "from" src (me))
                (add (check_int "to" dst (gw))
                     (add (check_int "proto" proto 17)
                          (add (check_int "ttl" ttl 64)
-                              (add (check_str "payload" payload "hello")
+                              (add (check_str "payload" (bytes_range b pi pj) "hello")
                                    (check_int "quoted, the header and 8 bytes at most" (length quoted) 25)))))))))))
 
 (def ip_why ((r IpRead)) (list int)
@@ -74,7 +74,20 @@
 (def test_ipv4_in_frame () int
   (match (ipv4_of (bytes_from_list (append (zeros 14) (append (ipv4_packet (me) (gw) 1 7 "ab") (zeros 10)))) 14)
     ((IpBad why) (fail_because "read" why))
-    ((IpRead d) (match d ((Ipv4 src dst proto ttl payload quoted) (check_str "payload" payload "ab"))))))
+    ((IpRead d) (match d ((Ipv4 src dst proto ttl b pi pj quoted) (check_str "payload" (bytes_range b pi pj) "ab"))))))
+
+; The ICMP message, the UDP datagram, and the segment xs holds, read from
+; bytes of their own, as ip_in reads them from a frame.
+(def icmp_of_list ((xs (list int))) (Option Icmp)
+  (let b (bytes_from_list xs) (icmp_of b 0 (bytes_len b))))
+(def udp_of_list ((src int) (dst int) (xs (list int))) (Option Udp)
+  (let b (bytes_from_list xs) (udp_of src dst b 0 (bytes_len b))))
+
+; A datagram read in place, from the middle of what holds it: the bytes
+; before and after it are never read.
+(def test_udp_in_place () int
+  (let b (bytes_from_list (append "xyz" (append (udp_bytes (me) (gw) 1 2 "abc") "pad")))
+    (check_str "read" (udp_text (udp_of (me) (gw) b 3 (sub (bytes_len b) 3))) "1>2 abc")))
 
 (def test_arp_round_trip () int
   (let mac (cons 82 (cons 84 (cons 0 (cons 18 (cons 52 (cons 86 (nil int)))))))
@@ -98,7 +111,7 @@
 (def (is_some T) ((o (Option T))) bool (match o ((None) false) ((Some x) true)))
 
 (def test_icmp_round_trip () int
-  (match (icmp_of (icmp_bytes (Icmp (icmp_echo_request) 0 (echo_rest 513 7 "data"))))
+  (match (icmp_of_list (icmp_bytes (Icmp (icmp_echo_request) 0 (echo_rest 513 7 "data"))))
     ((None) (fail_because "read" "none"))
     ((Some m)
       (match m
@@ -109,7 +122,7 @@
                          (check_str "data" (drop_n rest 4) "data")))))))))
 
 (def test_icmp_bad_checksum () int
-  (check_bool "refused" (is_some (icmp_of (set_nth (icmp_bytes (Icmp 8 0 (echo_rest 1 1 "data"))) 9 0))) false))
+  (check_bool "refused" (is_some (icmp_of_list (set_nth (icmp_bytes (Icmp 8 0 (echo_rest 1 1 "data"))) 9 0))) false))
 
 (def test_echo_data () int
   (let d (echo_data)
@@ -122,26 +135,26 @@
     ((Some d) (match d ((Udp sport dport content) (append (digits sport) (append ">" (append (digits dport) (append " " content)))))))))
 
 (def test_udp_round_trip () int
-  (check_str "read" (udp_text (udp_of (me) (gw) (udp_bytes (me) (gw) 49152 53 "query"))) "49152>53 query"))
+  (check_str "read" (udp_text (udp_of_list (me) (gw) (udp_bytes (me) (gw) 49152 53 "query"))) "49152>53 query"))
 
 ; The checksum covers the addresses too, through the pseudo-header.
 (def test_udp_checksum () int
-  (add (check_str "a byte changed" (udp_text (udp_of (me) (gw) (set_nth (udp_bytes (me) (gw) 1 2 "abc") 9 0))) "none")
-       (check_str "another sender" (udp_text (udp_of (gw) (gw) (udp_bytes (me) (gw) 1 2 "abc"))) "none")))
+  (add (check_str "a byte changed" (udp_text (udp_of_list (me) (gw) (set_nth (udp_bytes (me) (gw) 1 2 "abc") 9 0))) "none")
+       (check_str "another sender" (udp_text (udp_of_list (gw) (gw) (udp_bytes (me) (gw) 1 2 "abc"))) "none")))
 
 ; A checksum of 0 is none, which is taken as it is.
 (def test_udp_no_checksum () int
-  (check_str "read" (udp_text (udp_of (me) (gw) (append (be16 7) (append (be16 9) (append (be16 10) (append (be16 0) "hi")))))) "7>9 hi"))
+  (check_str "read" (udp_text (udp_of_list (me) (gw) (append (be16 7) (append (be16 9) (append (be16 10) (append (be16 0) "hi")))))) "7>9 hi"))
 
 ; The length says how much is the datagram's: more is padding, and less
 ; than it says is refused.
 (def test_udp_length () int
   (let u (udp_bytes (me) (gw) 1 2 "abc")
-    (add (check_str "padded" (udp_text (udp_of (me) (gw) (append u (zeros 3)))) "1>2 abc")
-         (check_str "cut short" (udp_text (udp_of (me) (gw) (take u 10))) "none"))))
+    (add (check_str "padded" (udp_text (udp_of_list (me) (gw) (append u (zeros 3)))) "1>2 abc")
+         (check_str "cut short" (udp_text (udp_of_list (me) (gw) (take u 10))) "none"))))
 
 (def test_eth_frame () int
   (let b (bytes_from_list (eth_frame (repeat 6 255) (repeat 6 1) (eth_arp) "x"))
-    (add (check_str "to" (eth_dst b) (repeat 6 255))
-         (add (check_str "from" (eth_src b) (repeat 6 1))
-              (check_int "type" (eth_type b) 2054)))))
+    (add (check_bool "to" (eth_dst_is b 0 (repeat 6 255)) true)
+         (add (check_bool "not from" (eth_dst_is b 0 (repeat 6 1)) false)
+              (check_int "type" (eth_type b 0) 2054)))))

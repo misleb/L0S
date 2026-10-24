@@ -1155,7 +1155,7 @@
   (match (path_from q buf n)
     ((PathBad r) (proc_answer r -5))
     ((PathGot r path)
-      (if (eq (bytes_range b 4 (bytes_len b)) "dir")
+      (if (if (eq (bytes_len b) 7) (bytes_is_at b 4 "dir") false)
           (proc_answer (proc_set_cwd r path) 0)
           (proc_answer r -9)))))
 
@@ -1255,17 +1255,17 @@
           (let at (add 8 pl)
             (if (if (gt al (max_message)) true (not (has b at al)))
                 (resume_with k p (err_fault))
-                (spawn_image_args k p b (normal_path (bytes_range b 4 (add 4 pl))) (bytes_range b at (add at al)) (add at al))))))))
+                (spawn_image_args k p b (normal_path (bytes_range b 4 (add 4 pl))) at (add at al))))))))
 
-; The image of b from start, its path and its encoded arguments, none
-; for the inittab's.
-(def spawn_image_args ((k Kernel) (p Proc) (b bytes) (path (list int)) (enc (list int)) (start int)) Step
+; The image of b from start, its path and its encoded arguments, the
+; bytes of b from at up to start, read in place; none for the inittab's.
+(def spawn_image_args ((k Kernel) (p Proc) (b bytes) (path (list int)) (at int) (start int)) Step
   (let size (sub (bytes_len b) start)
     (if (lt size 1)
         (resume_with k p (err_denied))
-        (if (is_empty enc)
+        (if (eq at start)
             (spawned_image k p b path (k_path_args k path) start)
-            (match (decode_args (bytes_from_list enc))
+            (match (decode_args_in b at start)
               ((None) (resume_with k p (err_fault)))
               ((Some args) (spawned_image k p b path args start)))))))
 
@@ -1371,16 +1371,16 @@
 ; terminal that has gone reads as the end of input.
 (def read_tty ((k Kernel) (p Proc) (buf int) (n int)) Step
   (match (proc_tty p)
-    ((Tty t reply rest)
-      (if (gt (bytes_len rest) 0)
-          (resume_line k p buf n rest)
+    ((Tty t reply rest off)
+      (if (gt (bytes_len rest) off)
+          (resume_line k p buf n rest off)
           (if (if (eq n 0) true (lt (ipc_owner (k_ipc k) t) 1))
               (resume_with k p 0)
               (if (eq (ipc_owner (k_ipc k) reply) (proc_pid p))
                   (ask_line k p t reply buf n)
                   (match (ipc_port_new (k_ipc k) (proc_pid p))
                     ((NewPort r i2)
-                      (ask_line (with_ipc k i2) (proc_set_tty p (Tty t r rest)) t r buf n)))))))))
+                      (ask_line (with_ipc k i2) (proc_set_tty p (Tty t r rest off)) t r buf n)))))))))
 
 ; The rest of read_tty: a line asked of the terminal at port t, "r", to
 ; come back on reply, and p reading it; if t's queue is full, p blocked
@@ -1397,20 +1397,22 @@
 (def request_to ((reply int) (body (list int))) (list int)
   (append (u32_le reply) body))
 
-; p reading line into buf: as much as n holds, the rest kept for its next
-; read, and how many as its answer; or -5 if it may not take them there.
-(def line_given ((p Proc) (buf int) (n int) (line bytes)) Proc
-  (let cnt (min n (bytes_len line))
-    (match (proc_copy_in p buf line 0 cnt)
+; p reading line from off into buf: as much as n holds, copied from line
+; in place, the line kept with how much has been read, for its next read
+; to go on from, and how many as its answer; or -5 if it may not take
+; them there.
+(def line_given ((p Proc) (buf int) (n int) (line bytes) (off int)) Proc
+  (let cnt (min n (sub (bytes_len line) off))
+    (match (proc_copy_in p buf line off (add off cnt))
       ((CopyInBad q) (proc_answer q -5))
       ((CopiedIn q)
         (match (proc_tty q)
-          ((Tty t reply rest)
-            (proc_answer (proc_set_tty q (Tty t reply (bytes_from_list (bytes_range line cnt (bytes_len line))))) cnt)))))))
+          ((Tty t reply rest o)
+            (proc_answer (proc_set_tty q (Tty t reply line (add off cnt))) cnt)))))))
 
-; p running on, given line as line_given says.
-(def resume_line ((k Kernel) (p Proc) (buf int) (n int) (line bytes)) Step
-  (Resume k (line_given p buf n line)))
+; p running on, given line from off as line_given says.
+(def resume_line ((k Kernel) (p Proc) (buf int) (n int) (line bytes) (off int)) Step
+  (Resume k (line_given p buf n line off)))
 
 ; q, waiting for its terminal's line on reply, given it now that one has
 ; come: an empty line is the end of input.
@@ -1420,7 +1422,7 @@
     ((Some m)
       (match m
         ((Msg from payload)
-          (park (with_ipc_dropped k reply) (proc_set_state (line_given q buf n payload) (Ready))))))))
+          (park (with_ipc_dropped k reply) (proc_set_state (line_given q buf n payload 0) (Ready))))))))
 
 ; p's terminal set to port, 0 for the kernel's own: 0, or err_no_port if
 ; there is no such port. Its children, from now on, get it too.
@@ -1428,7 +1430,7 @@
   (if (if (eq port 0) false (lt (ipc_owner (k_ipc k) port) 1))
       (resume_with k p (err_no_port))
       (match (proc_tty p)
-        ((Tty t reply rest) (resume_with k (proc_set_tty p (Tty port reply (bytes_from_list (nil int)))) 0)))))
+        ((Tty t reply rest off) (resume_with k (proc_set_tty p (Tty port reply (bytes_from_list (nil int)) 0)) 0)))))
 
 ; Argument i of p's, as much as n holds copied to buf: its whole length,
 ; or -5 for no argument i, a negative n, or a buf p may not take it at.

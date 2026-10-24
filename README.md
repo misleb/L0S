@@ -2030,8 +2030,8 @@ otherwise as its type's first failure.
 | 256 | `l0s_yield` | `int` | 0, after the others have run |
 | 257 | `l0s_pid` | `int` | the caller's pid |
 | 258 | `port_new` | `int` | a new port, which only the caller may receive on |
-| 259 | `port_send port payload` | `Sending`: `Sent`, `SendNoPort`, `SendFull`, `SendTooBig` | 0, or -1 no such port, -3 its queue (32) is full, -4 over 4096 bytes |
-| 260 | `port_receive port` | `Message`: `Message`, `RecvFailed` | waits; `(Message sender payload)`, where sender 0 is the kernel |
+| 259 | `port_send port payload`, `port_send_bytes port b i j`, `port_forward port b` | `Sending`: `Sent`, `SendNoPort`, `SendFull`, `SendTooBig` | 0, or -1 no such port, -3 its queue (32) is full, -4 over 4096 bytes. A list, a range of bytes sent in place, or a message received passed on as it came |
+| 260 | `port_receive port` | `Message`: `Message`, `RecvFailed` | waits; `(Message sender b)`, where sender 0 is the kernel and `b` the bytes received, the sender's pid and then the payload, which the `msg_` functions read in place and `msg_text` gives as a list |
 | 261 | `port_try_receive port` | `Message` | the same, or `(RecvFailed)` at once if no message is waiting |
 | 262 | `name_register port name` | `Registration`: `Registered`, `RegisterNoPort`, `RegisterTaken`, `RegisterTooLong` | 0, or -1 not your port, -2 the name is taken, -4 a name over 256 bytes |
 | 263 | `name_lookup name` | `Lookup`: `Found`, `NotFound` | a port, or -1 (`name_await` retries with yields, `name_wait` with sleeps) |
@@ -2076,7 +2076,13 @@ Listening to a driver, `keyboard_listen`, `pointer_listen` and
 IPC is asynchronous. A send copies the payload into the port's queue and
 returns at once. A receive blocks until there is a message, and is given the
 sender's pid with it. A request that wants an answer carries a reply port:
-see `request` and `request_reply` in `l0s.l0`, `server.l0`, and `user/sbin/echo`.
+see `request` and `msg_reply` in `l0s.l0`, `msg_answer` in `server.l0`,
+and `user/sbin/echo`, which sends each request's body back from the
+bytes it came in. A message stays the bytes it came as: a server reads
+what it needs where it is, and makes a list of a payload only to read it
+as text. L0 cannot yet slice or join bytes, so a header and a body that
+must become one message still go through a list
+([probes/bytes](probes/bytes/REQUEST-bytes-slice-join.md)).
 
 When a process exits or is killed, its ports, names, interrupt bindings and
 open files go with it. Whoever waits for it is woken with its status, and
@@ -2158,7 +2164,7 @@ name in a library is taken in every program that links it.
 | [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div`, `format_size` (a size as GNOME says it, `782.3 kB`) | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
 | [common/klog.l0](common/klog.l0) | the kernel's log: a record's levels, its bytes as `log_read` gives them, and `dmesg`'s lines (`[    1.234567] TEXT`) | the kernel, every program |
-| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `PointerMotion`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
+| [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; a message's payload read in place (`msg_len`, `msg_u32`, `msg_is`, `msg_text`), and sent as a range (`port_send_bytes`, `port_forward`); requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `PointerMotion`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
 | [sys/server.l0](user/lib/sys/server.l0) | what servers do alike: taking a name and an interrupt, or saying why not; a request's op and numbers; `Served`, ok and error answers, and answering a request; the ports listening, told in order; an ARM PrimeCell's part number from its ID registers (`primecell_part`), by which `uart` and `rtc` know their device | every program |
 | [sys/cli.l0](user/lib/sys/cli.l0) | what programs and tools do alike: `complain_as` and `note_as`, `say`, a number argument, a file read or written whole | every program, the host tools |

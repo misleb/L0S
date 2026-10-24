@@ -163,9 +163,12 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
   dropped, with `server.l0`'s `port_tell`, which says why.
 - **A server** (`user/sbin/echo/echo.l0`): `port_new`,
   `name_register_or_why port "name"` (empty, or why not), then a loop on
-  `port_receive`. A request is `(request REPLY BODY)`: read it with
-  `request_body`, and answer it with `request_answer payload reply`, which
-  sends nothing if it names no reply port. Replies are `ok`, `error: WHY`
+  `port_receive`. A `(Message from b)` holds the bytes the kernel gave,
+  the sender's pid and then the payload (see "Bytes, not lists"). A
+  request is `(request REPLY BODY)`: a text server reads the body once
+  with `(msg_text_from b 4)`, and answers with `(msg_answer b reply)`,
+  which sends nothing if it names no reply port (`request_body` and
+  `request_answer` do the same for a payload already a list). Replies are `ok`, `error: WHY`
   (`error_reply`), or the request's own answer; a server's state and its
   answer are a `(Served S)`. Clients find a server with `name_wait NAME ns`
   and ask with `port_ask`.
@@ -205,6 +208,40 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
   pattern: the Edit tool's replace-all on the exact pattern text does most
   of them; then `l0 check` names the rest, with their different binding
   names.
+
+## Bytes, not lists
+
+A `(list int)` costs a cons cell per byte, about 16 times what `bytes`
+does, and converting either way copies every byte. Data that arrives or
+leaves as bytes stays `bytes`: messages, files, sectors, frames, images.
+Make a list only to parse text or to build output, and convert once.
+
+- **Read in place**: `bytes_get`, `le_u32`, `le_u16_at`, `be16_at` and
+  `be32_at` (inet), `bytes_is_at b i "lit"` for a magic number or a tag,
+  and `crc32 b i j`, `crc32_zeroed`, `sum16_bytes` over a range. Never
+  `(eq (bytes_range ...) "lit")`, and never `bytes_from_list` a list
+  just to read a field from it; a list's own field reads with `nth`.
+- **Pass (bytes, start, end), not a slice.** L0 has no builtin to slice
+  or join `bytes` (`probes/bytes/REQUEST-bytes-slice-join.md`), so a
+  reader takes the whole value and its range: `udp_of src dst b i j`,
+  `tcp_of`, `icmp_of`, `decode_args_in`, `ipv4_of b off` and its `Ipv4`,
+  which keeps its payload as the frame's bytes and two offsets.
+- **Messages**: a `Message`, and an `Asked`, hold the bytes received,
+  the pid's 4 bytes first. `msg_len`, `msg_byte`, `msg_u32`, `msg_is`
+  and `msg_starts` read the payload in place, and `msg_reply` its reply
+  port; `msg_text` and `msg_text_from b i` give it as a list, for text.
+  Binary notices (keys, the pointer, `exit_of`, `is_irq_notice`,
+  `usb_report_of`, `fs_reply_of`'s word) are read in place. A frame's
+  place in a notice is `frame_notice_at`, a send's `nic_frame_at`, a
+  write's `tty_is_write`/`tty_written_at`. Tests build one with
+  `message_new from payload`.
+- **Send a range**: `port_send_bytes port b i j`, `port_forward port b`
+  (a message's payload as it came, as `wm` passes keys on and `echo`
+  answers); to a device, `put_bytes_range` and `disk_put_range`, the
+  frame or the file's bytes copied from the message in place.
+- **Joining waits for L0.** A header and a body that must become one
+  value go through a list: build it once with `push`/`rev`, and note
+  the place in the request's table.
 
 ## What a driver says
 
@@ -288,6 +325,11 @@ add to that list. Documenting a listed form fails the check too, until
 - **Ports** hold 32 messages of at most 4096 bytes. A message must carry
   numbers, never pixels: pixels go through shared pages (`shm_alloc`,
   `shm_share`).
+- **A list round trip passes every test and costs every byte.** A
+  `bytes_to_list` then `bytes_from_list`, or a whole payload turned
+  into a list to read four bytes of it, gives the right answer. It just
+  copies each message, frame or file chunk byte by byte, once for every
+  hop it takes. See "Bytes, not lists".
 - **Docker must be running**: board images (`--target virt` and `proc`) are
   linked in l0's container. Homebrew's `ld.lld` is blocked on this machine.
 - **The kernel's heap is 192 MB and its stack 16 MB** (`KERNEL_HEAP_MB`,

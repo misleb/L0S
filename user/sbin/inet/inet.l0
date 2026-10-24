@@ -253,40 +253,39 @@
   (if (tcp_busy s)
       (match (port_try_receive port)
         ((RecvFailed) (let z (sleep_ns (tcp_poll_ns)) (serve (sent_out (tcp_ticked s (clock_ns))) port l)))
-        ((Message from payload) (served_message s port l from payload)))
+        ((Message from b) (served_message s port l from b)))
       (match (port_receive port)
         ((RecvFailed) (complain "lost its port"))
-        ((Message from payload) (served_message s port l from payload)))))
+        ((Message from b) (served_message s port l from b)))))
 
-; A message from pid from dealt with, what it made inet send sent, and
-; the next one served.
-(def served_message ((s Stack) (port int) (l Lease) (from int) (payload (list int))) int
-  (match (leased_message s l from payload (clock_ns))
+; A message from pid from, its bytes b, dealt with, what it made inet
+; send sent, and the next one served.
+(def served_message ((s Stack) (port int) (l Lease) (from int) (b bytes)) int
+  (match (leased_message s l from b (clock_ns))
     ((Leasing s2 l2) (serve (sent_out s2) port l2))))
 
-; A message at time now, with the lease l: the clock's notice moves the
-; lease on; anything else is message's, and a lease hears what a server
-; sent with it.
-(def leased_message ((s Stack) (l Lease) (from int) (payload (list int)) (now int)) Leasing
-  (match (time_of payload)
+; A message, its bytes b, at time now, with the lease l: the clock's
+; notice moves the lease on; anything else is message's, and a lease
+; hears what a server sent with it.
+(def leased_message ((s Stack) (l Lease) (from int) (b bytes) (now int)) Leasing
+  (match (if (msg_starts b "time ") (time_of (msg_text b)) ((None int)))
     ((Some t) (lease_tick s l now))
     ((None)
       (if (lease_static l)
-          (Leasing (message s from payload) l)
-          (lease_hear s l from payload now)))))
+          (Leasing (message s from b) l)
+          (lease_hear s l from b now)))))
 
-; A message from pid from: a frame, counted, if it is from the driver,
-; and otherwise a request.
-(def message ((s Stack) (from int) (payload (list int))) Stack
+; A message from pid from, its bytes b: a frame, counted and read in
+; place, if it is from the driver, and otherwise a request.
+(def message ((s Stack) (from int) (b bytes)) Stack
   (match s
     ((Stack l c n k id t o)
       (match l
         ((Link nic pid mac)
           (if (eq from pid)
-              (match (frame_of payload)
-                ((Some frame) (framed (Stack l c n k id (tally_rx t) o) frame))
-                ((None) s))
-              (requested s from payload)))))))
+              (let fi (frame_notice_at b)
+                (if (lt fi 0) s (framed (Stack l c n k id (tally_rx t) o) b fi)))
+              (requested s from (msg_text b))))))))
 
 ; ---------------------------------------------------------------- sending
 
@@ -323,17 +322,16 @@
 
 ; A frame taken: ARP or IPv4 to this card, or to every card; anything
 ; else is passed over.
-(def framed ((s Stack) (frame (list int))) Stack
-  (let b (bytes_from_list frame)
-    (let dst (eth_dst b)
-      (if (not (if (eq dst (stack_mac s)) true (eq dst (mac_broadcast))))
-          (dropped s)
-          (let type (eth_type b)
-            (if (eq type (eth_arp))
-                (arp_in s (arp_of b (eth_header_len)))
-                (if (eq type (eth_ipv4))
-                    (ip_in s (ipv4_of b (eth_header_len)))
-                    (dropped s))))))))
+; The frame is the bytes of b from fi on, read there in place.
+(def framed ((s Stack) (b bytes) (fi int)) Stack
+  (if (not (if (eth_dst_is b fi (stack_mac s)) true (eth_dst_is b fi (mac_broadcast))))
+      (dropped s)
+      (let type (eth_type b fi)
+        (if (eq type (eth_arp))
+            (arp_in s (arp_of b (add fi (eth_header_len))))
+            (if (eq type (eth_ipv4))
+                (ip_in s (ipv4_of b (add fi (eth_header_len))))
+                (dropped s))))))
 
 ; frame to be put on the wire, through the driver.
 (def frame_out ((s Stack) (frame (list int))) Stack
@@ -431,17 +429,17 @@
     ((IpBad why) (dropped s))
     ((IpRead d)
       (match d
-        ((Ipv4 src dst proto ttl payload quoted)
+        ((Ipv4 src dst proto ttl b pi pj quoted)
           (match s
             ((Stack l c n k id t o)
               (if (not (is_ours c dst))
                   (dropped s)
                   (if (eq proto (proto_icmp))
-                      (icmp_in s d (icmp_of payload))
+                      (icmp_in s d (icmp_of b pi pj))
                       (if (eq proto (proto_udp))
-                          (udp_in s d (udp_of src dst payload))
+                          (udp_in s d (udp_of src dst b pi pj))
                           (if (eq proto (proto_tcp))
-                              (tcp_in s d (tcp_of src dst payload))
+                              (tcp_in s d (tcp_of src dst b pi pj))
                               (dropped s))))))))))))
 
 ; A datagram of proto holding payload, to dst: to inet itself if dst is
@@ -491,7 +489,7 @@
 ; passed over.
 (def icmp_in ((s Stack) (d Ipv4) (m (Option Icmp))) Stack
   (match d
-    ((Ipv4 src dst proto ttl payload quoted)
+    ((Ipv4 src dst proto ttl b pi pj quoted)
       (match m
         ((None) (dropped s))
         ((Some msg)
@@ -525,7 +523,7 @@
 ; port unreachable.
 (def udp_in ((s Stack) (d Ipv4) (u (Option Udp))) Stack
   (match d
-    ((Ipv4 src dst proto ttl payload quoted)
+    ((Ipv4 src dst proto ttl b pi pj quoted)
       (match u
         ((None) (dropped s))
         ((Some dg)

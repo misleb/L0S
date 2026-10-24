@@ -317,22 +317,24 @@
 ; and with none of those, a nap and a look at the link.
 (def serve ((g Gem) (port int)) int
   (match (port_try_receive port)
-    ((Message from payload) (serve (requested g payload) port))
+    ((Message from b) (serve (requested g b) port))
     ((RecvFailed)
       (match (drained g 0)
         ((Drained g2 n)
           (if (gt n 0) (serve g2 port) (let z (sleep_ns (poll_ns)) (serve (link_watched g2) port))))))))
 
-; A request answered: send puts a frame on the wire, listen adds the
-; reply port to those told of frames, info and stats say what they say.
-(def requested ((g Gem) (payload (list int))) Gem
-  (let body (request_body payload)
-    (match (nic_sent_frame body)
-      ((Some frame) (answered (transmitted g frame) payload))
-      ((None)
-        (if (eq body "listen")
-            (listened g (request_reply payload))
-            (answered (asked g body) payload))))))
+; A request, its message's bytes b, answered: send puts a frame on the
+; wire, copied from b in place; listen adds the reply port to those told
+; of frames; info and stats say what they say.
+(def requested ((g Gem) (b bytes)) Gem
+  (let fi (nic_frame_at b)
+    (if (ge fi 0)
+        (answered (transmitted g b fi) (msg_reply b))
+        (let payload (msg_text b)
+          (let body (request_body payload)
+            (if (eq body "listen")
+                (listened g (request_reply payload))
+                (answered (asked g body) (request_reply payload))))))))
 
 ; info, stats, or anything else, which is refused.
 (def asked ((g Gem) (body (list int))) (Served Gem)
@@ -344,9 +346,9 @@
           (if (eq body "stats") (Served g (nic_counts_text c))
           (served_error g (append "no request " (take_line body))))))))))
 
-; A request's answer, to its reply port if it names one.
-(def answered ((s (Served Gem)) (payload (list int))) Gem
-  (match s ((Served g answer) (let a (request_answer payload answer) g))))
+; A request's answer, to its reply port to, if it names one.
+(def answered ((s (Served Gem)) (to int)) Gem
+  (match s ((Served g answer) (let a (if (le to 0) 0 (port_tell to answer)) g))))
 
 ; g with port listening, if it is one and the answer to its listen says
 ; it is still there.
@@ -366,31 +368,38 @@
 
 ; ---------------------------------------------------------------- sending
 
-; frame put on the wire, or why not.
-(def transmitted ((g Gem) (frame (list int))) (Served Gem)
-  (let why (nic_frame_refusal frame)
+; The frame in b from fi on put on the wire, or why not.
+(def transmitted ((g Gem) (b bytes) (fi int)) (Served Gem)
+  (let why (nic_size_refusal (sub (bytes_len b) fi))
     (if (not (is_empty why))
         (served_error (with_counts g (nic_counted_tx (gem_counts g) false)) why)
         (if (not (link_up g))
             (served_error (with_counts g (nic_counted_tx (gem_counts g) false)) "no link")
-            (transmit g (nic_padded frame))))))
+            (transmit g b fi)))))
+
+; The transmit buffer in m as the frame in b from fi on, then zeros to
+; pad it: 0.
+(def tx_copied ((m IoDevice) (b bytes) (fi int)) int
+  (let n (sub (bytes_len b) fi)
+    (let f (put_bytes_range m (tx_buffer) b fi (bytes_len b))
+      (put_bytes m (add (tx_buffer) n) (zeros (sub (nic_padded_len n) n))))))
 
 ; How long a frame may take to go, in tenths of a millisecond: 100 ms,
 ; past a frame of 1514 bytes at 10 Mb/s, 1.2 ms, many times over.
 (def tx_tries () int 1000)
 
-; The frame bs copied into the transmit buffer, its descriptor filled,
-; both pages cleaned, the GEM told to start, and the frame waited for;
-; a frame that failed or never went restarts the GEM, whose transmit
-; side stops at an error.
-(def transmit ((g Gem) (bs (list int))) (Served Gem)
+; The frame in b from fi on copied into the transmit buffer and padded,
+; read in place, its descriptor filled, both pages cleaned, the GEM told
+; to start, and the frame waited for; a frame that failed or never went
+; restarts the GEM, whose transmit side stops at an error.
+(def transmit ((g Gem) (b bytes) (fi int)) (Served Gem)
   (match g
     ((Gem hw link rxi txi ls c due)
       (match hw
         ((Hw r m va bus base qs mac)
           (let i (dma_sync va 2 (dma_both_ways))
-            (let w (put_bytes m (tx_buffer) bs)
-              (let d (words_at m (tx_desc txi) (tx_frame_words (bus_at hw (tx_buffer)) (length bs) (eq txi (sub (tx_ring_size) 1))))
+            (let w (tx_copied m b fi)
+              (let d (words_at m (tx_desc txi) (tx_frame_words (bus_at hw (tx_buffer)) (nic_padded_len (sub (bytes_len b) fi)) (eq txi (sub (tx_ring_size) 1))))
                 (let f (dma_sync va 2 (dma_to_device))
                   (let s (device_write32 r (gem_ncr) (bit_or (ncr_running) (ncr_tstart)))
                     (let st (tx_waited m va txi (tx_tries))

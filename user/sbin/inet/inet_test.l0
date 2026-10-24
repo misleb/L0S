@@ -17,13 +17,17 @@
 (def stack0 () Stack
   (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3))))
 
+; The bytes of a message from pid from with payload, as inet receives it.
+(def msg_from ((from int) (payload (list int))) bytes
+  (match (message_new from payload) ((Message f b) b) ((RecvFailed) (bytes_from_list (nil int)))))
+
 ; frame given to s by the driver.
 (def from_wire ((s Stack) (frame (list int))) Stack
-  (message s (nic_pid) (frame_notice frame)))
+  (message s (nic_pid) (msg_from (nic_pid) (frame_notice frame))))
 
 ; body asked of s by a client whose port is reply.
 (def asked_of ((s Stack) (reply int) (body (list int))) Stack
-  (message s 30 (request reply body)))
+  (message s 30 (msg_from 30 (request reply body))))
 
 ; What s has to send, in order.
 (def outs ((s Stack)) (list Out) (match s ((Stack l c n k id t o) (rev o))))
@@ -73,8 +77,8 @@
 ; right.
 (def frame_text ((f (list int))) (list int)
   (let b (bytes_from_list f)
-    (let type (eth_type b)
-      (append (mac_text (eth_dst b))
+    (let type (eth_type b 0)
+      (append (mac_text (bytes_range b 0 6))
               (if (eq type (eth_arp))
                   (append " arp " (arp_text_of (arp_of b 14)))
                   (append " ip " (ip_text_of (ipv4_of b 14))))))))
@@ -92,8 +96,8 @@
     ((IpBad why) why)
     ((IpRead d)
       (match d
-        ((Ipv4 src dst proto ttl payload quoted)
-          (append (ip_text src) (append " " (append (ip_text dst) (append " " (carried src dst proto payload))))))))))
+        ((Ipv4 src dst proto ttl b pi pj quoted)
+          (append (ip_text src) (append " " (append (ip_text dst) (append " " (carried src dst proto b pi pj))))))))))
 
 ; An echo's id and seq; an error's, the address the datagram it quotes
 ; went to.
@@ -102,19 +106,19 @@
       (append " of " (ip_text (be32_at (bytes_from_list (drop_n rest 4)) 16)))
       (append " id " (append (digits (echo_id rest)) (append " seq " (digits (echo_seq rest)))))))
 
-(def carried ((src int) (dst int) (proto int) (payload (list int))) (list int)
+(def carried ((src int) (dst int) (proto int) (b bytes) (pi int) (pj int)) (list int)
   (if (eq proto (proto_icmp))
-      (match (icmp_of payload)
+      (match (icmp_of b pi pj)
         ((None) "a bad ICMP message")
         ((Some m)
           (match m
             ((Icmp type code rest)
               (append "icmp " (append (digits type) (append " " (append (digits code) (icmp_detail type rest)))))))))
       (if (eq proto (proto_tcp))
-          (match (tcp_of src dst payload)
+          (match (tcp_of src dst b pi pj)
             ((None) "a bad segment")
             ((Some sg) (append "tcp " (seg_brief sg))))
-          (match (udp_of src dst payload)
+          (match (udp_of src dst b pi pj)
             ((None) "a bad datagram")
             ((Some u) (match u ((Udp sp dp content) (append "udp " (append (digits sp) (append ">" (append (digits dp) (append " " content))))))))))))
 
@@ -269,8 +273,8 @@
       ((IpBad why) (fail_because "read" why))
       ((IpRead d)
         (match d
-          ((Ipv4 src dst proto ttl payload quoted)
-            (match (udp_of src dst payload)
+          ((Ipv4 src dst proto ttl pb pi pj quoted)
+            (match (udp_of src dst pb pi pj)
               ((None) (fail_because "read" "a bad datagram"))
               ((Some u) (match u ((Udp sp dp content) (check_str "data" content "query")))))))))))
 
@@ -380,7 +384,7 @@
 
 ; The same, the frame heard at time now.
 (def heard_at ((r Leasing) (frame (list int)) (now int)) Leasing
-  (match r ((Leasing s l) (lease_hear (cleared s) l (nic_pid) (frame_notice frame) now))))
+  (match r ((Leasing s l) (lease_hear (cleared s) l (nic_pid) (msg_from (nic_pid) (frame_notice frame)) now))))
 
 ; Where the exchange is, and the interface the stack has.
 (def lease_text ((r Leasing)) (list int)
@@ -407,13 +411,13 @@
       ((IpBad why) why)
       ((IpRead d)
         (match d
-          ((Ipv4 src dst proto ttl payload quoted)
-            (match (udp_of src dst payload)
+          ((Ipv4 src dst proto ttl pb pi pj quoted)
+            (match (udp_of src dst pb pi pj)
               ((None) "a bad datagram")
               ((Some u)
                 (match u
                   ((Udp sp dp content)
-                    (unwords (cons (mac_text (eth_dst b)) (cons (append (ip_text src) (append ">" (ip_text dst)))
+                    (unwords (cons (mac_text (bytes_range b 0 6)) (cons (append (ip_text src) (append ">" (ip_text dst)))
                       (cons (append (digits sp) (append ">" (digits dp))) (cons (dhcp_message_text content) (nil (list int)))))))))))))))))
 
 ; A message's type, xid, the address it asks for and its server.
@@ -518,7 +522,7 @@
 (def test_lease_keeps_queue () int
   (match (started)
     ((Leasing s l)
-      (check_int "the discover waits" (length (lease_wire (lease_hear s l 30 (request 0 "info") 0))) 1))))
+      (check_int "the discover waits" (length (lease_wire (lease_hear s l 30 (msg_from 30 (request 0 "info")) 0))) 1))))
 
 ; ------------------------------------------------------------ the lease
 
@@ -612,7 +616,7 @@
 ; The clock's notice is the lease's, not a request: with no lease it does
 ; nothing at all.
 (def test_time_notice () int
-  (match (leased_message (cleared (knowing)) (Unleased) 6 "time 1000" 0)
+  (match (leased_message (cleared (knowing)) (Unleased) 6 (msg_from 6 "time 1000") 0)
     ((Leasing s l) (add (check_int "nothing said" (length (told s)) 0)
                         (check_str "no lease" (lease_state_text l) "unleased")))))
 
@@ -658,9 +662,9 @@
         ((IpBad why) (frame_segs (tail fs) acc))
         ((IpRead d)
           (match d
-            ((Ipv4 src dst proto ttl payload quoted)
+            ((Ipv4 src dst proto ttl pb pi pj quoted)
               (if (eq proto (proto_tcp))
-                  (match (tcp_of src dst payload)
+                  (match (tcp_of src dst pb pi pj)
                     ((None) (frame_segs (tail fs) acc))
                     ((Some sg) (frame_segs (tail fs) (cons sg acc))))
                   (frame_segs (tail fs) acc))))))))
@@ -818,8 +822,8 @@
 ; Only the process that opened a connection may use it.
 (def test_tcp_ownership () int
   (let s (tcp_up)
-    (add (check_strs "another's write" (told (message s 31 (request 55 "write 1\nx"))) (cons "55: error: connection 1 is not yours" (nil (list int))))
-         (add (check_strs "its own" (told (message s 30 (request 55 "write 1\nx"))) (cons "55: ok" (nil (list int))))
+    (add (check_strs "another's write" (told (message s 31 (msg_from 31 (request 55 "write 1\nx")))) (cons "55: error: connection 1 is not yours" (nil (list int))))
+         (add (check_strs "its own" (told (message s 30 (msg_from 30 (request 55 "write 1\nx")))) (cons "55: ok" (nil (list int))))
               (check_strs "none such" (told (asked_of s (client) "finish 9")) (cons "55: error: no connection 9" (nil (list int))))))))
 
 ; Too much waiting to be sent resets it.
@@ -871,7 +875,7 @@
 
 (def test_tcp_unlisten () int
   (let s (tcp_listening_stack)
-    (add (check_strs "not another's" (told (message s 31 (request 55 "unlisten 7000"))) (cons "55: error: port 7000 is not yours" (nil (list int))))
+    (add (check_strs "not another's" (told (message s 31 (msg_from 31 (request 55 "unlisten 7000")))) (cons "55: error: port 7000 is not yours" (nil (list int))))
          (let s2 (cleared (asked_of s (client) "unlisten 7000"))
            (add (check_int "a SYN is refused" (length (wire (from_peer_seg s2 (peer_syn)))) 1)
                 (check_str "with a reset" (frame_text (head (wire (from_peer_seg s2 (peer_syn))))) "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 7000>49999 RST|ACK"))))))

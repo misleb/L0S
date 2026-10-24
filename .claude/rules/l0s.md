@@ -27,6 +27,13 @@ changing code.
   `make doc` reads exactly that, and `make check` fails on a form without
   one unless `tools/l0sdoc/undocumented.txt` lists it from before. Never
   add a line there; after documenting a listed form, `make doc-prune`.
+- **Bytes, not lists.** Data that arrives or leaves as bytes (messages,
+  files, sectors, frames, images) stays `bytes`, read in place (`msg_`
+  accessors, `le_u32`, `be16_at`, `bytes_is_at`) and sent as a range
+  (`port_send_bytes`, `port_forward`, `put_bytes_range`). Make a list only
+  to parse text or build output, and convert once. Never round-trip
+  through a list, and never `bytes_from_list` a list to read a field. The
+  `l0s-dev` skill's "Bytes, not lists" has the helpers.
 - **New library?** Add it to the Makefile's `DOC_SRCS`, an `l0_test` line, and
   the `LIBS_` lists that need it.
 - **Keep the README's tables true** in the same change: programs,

@@ -42,11 +42,46 @@
 ; Sends payload to port.
 (def port_send ((port int) (payload (list int))) Sending
   (let b (bytes_from_list payload)
-    (sending_of (supervisor_send (call_send) port b 0 (bytes_len b)))))
+    (port_send_bytes port b 0 (bytes_len b))))
+
+; Sends the bytes of b from i up to j to port, read in place.
+(def port_send_bytes ((port int) (b bytes) (i int) (j int)) Sending
+  (sending_of (supervisor_send (call_send) port b i j)))
+
+; Sends the payload of a message received, its bytes b, to port as it
+; came.
+(def port_forward ((port int) (b bytes)) Sending
+  (port_send_bytes port b (header_len) (bytes_len b)))
 
 ; A message received: the pid that sent it, 0 for the kernel, and its
-; payload; or (RecvFailed) if port is not this process's.
-(data Message (Message int (list int)) (RecvFailed))
+; bytes, as the kernel gave them, the sender's pid first and then the
+; payload, so nothing is copied; or (RecvFailed) if port is not this
+; process's. The msg_ functions read the payload in place, and msg_text
+; gives it as a list, for parsing as text.
+(data Message (Message int bytes) (RecvFailed))
+
+; A message from from with payload, as port_receive would give it: for
+; tests, and for passing on a message made here.
+(def message_new ((from int) (payload (list int))) Message
+  (Message from (bytes_from_list (append (u32_le from) payload))))
+
+; How many bytes the payload of a message's bytes b holds.
+(def msg_len ((b bytes)) int (sub (bytes_len b) (header_len)))
+
+; The payload of a message's bytes b, and its bytes from i on, as a list.
+(def msg_text ((b bytes)) (list int) (bytes_range b (header_len) (bytes_len b)))
+(def msg_text_from ((b bytes) (i int)) (list int) (bytes_range b (add (header_len) i) (bytes_len b)))
+
+; Byte i and the u32 at byte i of the payload of a message's bytes b; the
+; caller has checked that they are there.
+(def msg_byte ((b bytes) (i int)) int (bytes_get b (add (header_len) i)))
+(def msg_u32 ((b bytes) (i int)) int (le_u32 b (add (header_len) i)))
+
+; Whether the payload of a message's bytes b is s, and whether it starts
+; with s.
+(def msg_is ((b bytes) (s (list int))) bool
+  (if (eq (msg_len b) (length s)) (bytes_is_at b (header_len) s) false))
+(def msg_starts ((b bytes) (s (list int))) bool (bytes_is_at b (header_len) s))
 
 ; The next message on port, waiting for one.
 (def port_receive ((port int)) Message
@@ -61,7 +96,7 @@
 (def message_of ((b bytes)) Message
   (if (lt (bytes_len b) (header_len))
       (RecvFailed)
-      (Message (le_u32 b 0) (bytes_range b (header_len) (bytes_len b)))))
+      (Message (le_u32 b 0) b)))
 
 ; What name_register did: registered the name; or not, as the port is not
 ; this process's, the name is someone's already, or it is over 256 bytes.
@@ -570,6 +605,10 @@
 (def put_bytes ((q IoDevice) (off int) (xs (list int))) int
   (if (is_empty xs) 0 (let w (device_write8 q off (head xs)) (put_bytes q (add off 1) (tail xs)))))
 
+; Writes the bytes of b from i up to j into q from off, read in place.
+(def put_bytes_range ((q IoDevice) (off int) (b bytes) (i int) (j int)) int
+  (if (ge i j) 0 (let w (device_write8 q off (bytes_get b i)) (put_bytes_range q (add off 1) b (add i 1) j))))
+
 ; The n bytes of q from off.
 (def get_bytes ((q IoDevice) (off int) (n int)) (list int)
   (get_bytes_onto q off (sub (add off n) 1) (nil int)))
@@ -807,17 +846,16 @@
 ; signed; NotExit if m is anything else.
 (def exit_of ((m Message)) Exit
   (match m
-    ((Message from payload)
-      (if (if (eq from 0) (if (eq (length payload) 12) (starts_with payload "exit") false) false)
-          (let b (bytes_from_list payload)
-            (Exited (le_u32 b 4) (s32 (le_u32 b 8))))
+    ((Message from b)
+      (if (if (eq from 0) (if (eq (msg_len b) 12) (msg_starts b "exit") false) false)
+          (Exited (msg_u32 b 4) (s32 (msg_u32 b 8)))
           (NotExit)))
     ((RecvFailed) (NotExit))))
 
 ; Whether m is the kernel's notice that interrupt irq happened.
 (def is_irq_notice ((m Message) (irq int)) bool
   (match m
-    ((Message from payload) (if (eq from 0) (eq payload (irq_notice irq)) false))
+    ((Message from b) (if (eq from 0) (if (eq (msg_len b) 7) (if (msg_starts b "irq") (eq (msg_u32 b 3) irq) false) false) false))
     ((RecvFailed) false)))
 
 ; -------------------------------------------------------------- console
@@ -872,7 +910,7 @@
 ; which must be this process's.
 (def console_line_on ((console int) (port int)) (list int)
   (match (port_ask console port "r" "the console")
-    ((Asked from line) line)
+    ((Asked from b) (msg_text b))
     ((AskFailed why) (nil int))))
 
 ; The port registered as name, waiting up to ns nanoseconds for a server
@@ -927,7 +965,7 @@
     ((NotFound) (NoDriver))
     ((Found drv)
       (match (port_ask drv port "listen" name)
-        ((Asked from r) (if (eq r "ok") (Listening from) (ListenRefused)))
+        ((Asked from b) (if (msg_is b "ok") (Listening from) (ListenRefused)))
         ((AskFailed why) (NoDriver))))))
 
 ; The pid a listen's driver sends from, or -1 if it is not sending.
@@ -1015,7 +1053,7 @@
 
 ; Whether m says the pointer has left the window.
 (def is_leave_notice ((m Message)) bool
-  (match m ((Message from payload) (eq payload (leave_notice))) ((RecvFailed) false)))
+  (match m ((Message from b) (msg_is b (leave_notice))) ((RecvFailed) false)))
 
 ; Whether m says the window is in front, or not; none if it says neither.
 (def focus_notice_of ((m Message)) (Option bool)
@@ -1037,9 +1075,9 @@
 ; is not that notice: what each event's X_of reads.
 (def tagged_u32s ((m Message) (tag (list int)) (n int)) (Option (list int))
   (match m
-    ((Message from payload)
-      (if (if (eq (length payload) (add 3 (mul 4 n))) (starts_with payload tag) false)
-          (Some (u32s_at (bytes_from_list payload) 3 n (nil int)))
+    ((Message from b)
+      (if (if (eq (msg_len b) (add 3 (mul 4 n))) (msg_starts b tag) false)
+          (Some (u32s_at b (add (header_len) 3) n (nil int)))
           ((None (list int)))))
     ((RecvFailed) ((None (list int))))))
 
@@ -1057,17 +1095,23 @@
 (def request ((reply int) (body (list int))) (list int)
   (append (u32_le reply) body))
 
-; The reply port of a request, or -1 if it is too short to have one.
+; The reply port of a request, or -1 if it is too short to have one: from
+; its payload as a list, and from a message's bytes b.
 (def request_reply ((payload (list int))) int
-  (if (lt (length payload) 4) -1 (le_u32 (bytes_from_list payload) 0)))
+  (if (lt (length payload) 4)
+      -1
+      (bit_or (nth payload 0) (bit_or (bit_shl (nth payload 1) 8) (bit_or (bit_shl (nth payload 2) 16) (bit_shl (nth payload 3) 24))))))
+(def msg_reply ((b bytes)) int
+  (if (lt (msg_len b) 4) -1 (msg_u32 b 0)))
 
 ; A request without its reply port: what the server is asked.
 (def request_body ((payload (list int))) (list int)
   (drop_n payload 4))
 
-; What asking a server came to: its answer, and who sent it, the
-; server's pid; or why there is none, in words.
-(data Asked (Asked int (list int)) (AskFailed (list int)))
+; What asking a server came to: its answer, as the bytes of the message
+; it came in (Message's), and who sent it, the server's pid; or why there
+; is none, in words.
+(data Asked (Asked int bytes) (AskFailed (list int)))
 
 ; body asked of the server at port, its answer to rp, which must be this
 ; process's; noun names the server in why not, as "the disk".
@@ -1075,7 +1119,7 @@
   (match (port_send port (request rp body))
     ((Sent)
       (match (port_receive rp)
-        ((Message from payload) (Asked from payload))
+        ((Message from b) (Asked from b))
         ((RecvFailed) (AskFailed (append "no reply from " noun)))))
     ((SendNoPort) (AskFailed (append noun " is gone")))
     ((SendFull) (AskFailed (append noun " did not take the request: its queue is full")))
@@ -1083,7 +1127,7 @@
 
 ; The answer, or error: WHY if there was none, as a reply would say it.
 (def asked_reply ((a Asked)) (list int)
-  (match a ((Asked from r) r) ((AskFailed why) (append "error: " why))))
+  (match a ((Asked from b) (msg_text b)) ((AskFailed why) (append "error: " why))))
 
 ; A reply as an error's reason, or empty for ok: error: WHY is WHY, and
 ; anything else is what noun said, as "the disk said ...".

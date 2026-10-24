@@ -409,7 +409,28 @@
   (let h (up_to 32 rest)
     (if (not (is_number h))
         (word f -5)
-        (do_write f pid (int_prefix h 0) (drop_n rest (add (length h) 1))))))
+        (do_write f pid (int_prefix h 0) (bytes_from_list (drop_n rest (add (length h) 1))) 0))))
+
+; What a request from pid, its message's bytes b, asks done. A write's
+; bytes are written from b in place; anything else is read as text.
+(def obey_msg ((f Fs) (pid int) (b bytes)) Answered
+  (let i (add (header_len) 4)
+    (if (bytes_is_at b i "write ")
+        (obey_write_at f pid b (add i 6))
+        (obey f pid (msg_text_from b 4)))))
+
+; write H BYTES read from b in place, H's digits from i: the handle, then
+; every byte after its space.
+(def obey_write_at ((f Fs) (pid int) (b bytes) (i int)) Answered
+  (let sp (space_from b i)
+    (let h (bytes_range b i sp)
+      (if (not (is_number h))
+          (word f -5)
+          (do_write f pid (int_prefix h 0) b (min (add sp 1) (bytes_len b)))))))
+
+; The first space in b at or after i, or b's end if there is none.
+(def space_from ((b bytes) (i int)) int
+  (if (ge i (bytes_len b)) i (if (eq (bytes_get b i) 32) i (space_from b (add i 1)))))
 
 (def obey_words ((f Fs) (pid int) (op (list int)) (ws (list (list int)))) Answered
   (let n (length ws)
@@ -565,9 +586,10 @@
 
 ; ----------------------------------------------------------------- write
 
-; data written to handle h, pid's: from where it is, or for mode 3 at
-; the file's end; all of it, or -6 if the volume has no room.
-(def do_write ((f Fs) (pid int) (h int) (bs (list int))) Answered
+; The bytes of b from i on written to handle h, pid's, read in place:
+; from where it is, or for mode 3 at the file's end; all of them, or -6
+; if the volume has no room.
+(def do_write ((f Fs) (pid int) (h int) (b bytes) (i int)) Answered
   (match (handle_of f pid h)
     ((None) (word f -5))
     ((Some x)
@@ -580,9 +602,9 @@
                 ((VolDir name first) (word f -5))
                 ((VolFile name size first exec)
                   (let at (if (eq mode 3) size (min off size))
-                    (match (vol_write (fs_vol f vi) ei at (length bs) (held_at held))
+                    (match (vol_write (fs_vol f vi) ei at (sub (bytes_len b) i) (held_at held))
                       ((VolNoSpace) (word f -6))
-                      ((VolWrote v2 spans fresh marked) (written f h x at size bs v2 spans fresh marked))))))))))))
+                      ((VolWrote v2 spans fresh marked) (written f h x at size b i v2 spans fresh marked))))))))))))
 
 ; The spans written and flushed, then the metadata that changed, the
 ; marks of the clusters linked and the entry, if its size or first
@@ -590,18 +612,19 @@
 ; cluster it wrote last, for the next write to walk on from, and the
 ; file's readers holding none of its bytes. The flush keeps the disk from
 ; putting the metadata down before the data it points at.
-(def written ((f Fs) (h int) (x Handle) (at int) (size int) (bs (list int)) (v2 Vol) (spans (list VolSpan)) (fresh (list int)) (marked (list int))) Answered
+(def written ((f Fs) (h int) (x Handle) (at int) (size int) (b bytes) (i int) (v2 Vol) (spans (list VolSpan)) (fresh (list int)) (marked (list int))) Answered
   (match x
     ((Handle p vi ei off mode held)
-      (match (flushed_after (write_spans (vol_store f vi) (fs_start f vi) spans bs fresh at size))
+      (let n (sub (bytes_len b) i)
+      (match (flushed_after (write_spans (vol_store f vi) (fs_start f vi) spans b i fresh at size))
         ((PutNot s2 why) (word (unheld (with_vol_store f vi s2) vi ei false) -5))
         ((Put s2)
           (match (commit_some (unheld (with_vol_store f vi s2) vi ei false) vi v2 marked
                               (if (eq (vol_entry v2 ei) (vol_entry (fs_vol f vi) ei)) (nil VolRef) (one ei)))
             ((CommitFailed f2) (word f2 -5))
             ((Committed f2)
-              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at (length bs)) mode (HeldPlace (vol_spans_end spans at (length bs))))))
-                    (length bs)))))))))
+              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at n) mode (HeldPlace (vol_spans_end spans at n)))))
+                    n)))))))))
 
 ; The store flushed once p's writes have been made; p, if they failed.
 (def flushed_after ((p Put)) Put
@@ -611,25 +634,49 @@
 ; sectors are read first only where they hold the file's bytes that
 ; stay: before it in its first sector, or after it in its last, within
 ; the old size; never in a cluster just taken.
-(def write_spans ((s Store) (start int) (spans (list VolSpan)) (bs (list int)) (fresh (list int)) (at int) (size int)) Put
+(def write_spans ((s Store) (start int) (spans (list VolSpan)) (b bytes) (i int) (fresh (list int)) (at int) (size int)) Put
   (if (is_empty spans)
       (Put s)
       (match (head spans)
         ((VolSpan c off k)
-          (match (write_span s start c off (take bs k) (any_eq c fresh) (lt (add at k) size))
+          (match (write_span s start c off b i (add i k) (any_eq c fresh) (lt (add at k) size))
             ((PutNot s2 why) (PutNot s2 why))
-            ((Put s2) (write_spans s2 start (tail spans) (drop_n bs k) fresh (add at k) size)))))))
+            ((Put s2) (write_spans s2 start (tail spans) b (add i k) fresh (add at k) size)))))))
 
-(def write_span ((s Store) (start int) (c int) (off int) (piece (list int)) (fresh bool) (more bool)) Put
+; The piece, the bytes of b from i up to j, written at off in cluster c.
+(def write_span ((s Store) (start int) (c int) (off int) (b bytes) (i int) (j int) (fresh bool) (more bool)) Put
   (let ss (vol_sector_size)
     (let s0 (div off ss)
-      (let end (add off (length piece))
+      (let end (add off (sub j i))
         (let count (add (sub (div (sub end 1) ss) s0) 1)
           (let sector (add (vol_cluster_sector start c) s0)
             (let keep (if fresh false (if (not (eq (mod off ss) 0)) true (if more (not (eq (mod end ss) 0)) false)))
-              (match (if keep (store_read s sector count) (Got s (zeros (mul count ss))))
-                ((GotNot s2 why) (PutNot s2 why))
-                ((Got s2 old) (store_write s2 sector (splice old (sub off (mul s0 ss)) piece)))))))))))
+              (store_patch s sector count keep (sub off (mul s0 ss)) b i j))))))))
+
+; count sectors from sector with the bytes of b from i up to j at at in
+; them: what was there before kept around them if keep, and zeros if
+; not. A disk's sectors are patched in its buffer, the piece copied there
+; from b in place; memory's are spliced.
+(def store_patch ((s Store) (sector int) (count int) (keep bool) (at int) (b bytes) (i int) (j int)) Put
+  (let n (mul count (vol_sector_size))
+    (match s
+      ((StoreDisk d buf)
+        (let why (if keep (disk_read d buf sector count) "")
+          (if (not (is_empty why))
+              (PutNot s why)
+              (let z (if keep 0 (let h (disk_zero buf 0 at) (disk_zero buf (add at (sub j i)) (sub n (add at (sub j i))))))
+                (let p (disk_put_range buf at b i j)
+                  (let why2 (disk_write d buf sector count)
+                    (if (is_empty why2) (Put s) (PutNot s why2))))))))
+      ((StoreMem m sn r fl) (store_spliced s sector count keep at (bytes_range b i j)))
+      ((StoreRam m sn) (store_spliced s sector count keep at (bytes_range b i j))))))
+
+; store_patch's in memory: the sectors read, or zeros, with piece put in
+; at at, and written back.
+(def store_spliced ((s Store) (sector int) (count int) (keep bool) (at int) (piece (list int))) Put
+  (match (if keep (store_read s sector count) (Got s (zeros (mul count (vol_sector_size)))))
+    ((GotNot s2 why) (PutNot s2 why))
+    ((Got s2 old) (store_write s2 sector (splice old at piece)))))
 
 ; old with piece in place of its bytes from i.
 (def splice ((old (list int)) (i int) (piece (list int))) (list int)
@@ -1305,14 +1352,14 @@
 (def serve ((f Fs) (port int)) int
   (match (port_receive port)
     ((RecvFailed) (complain "lost its port"))
-    ((Message from payload)
-      (match (exit_of (Message from payload))
+    ((Message from b)
+      (match (exit_of (Message from b))
         ((Exited pid status) (serve (forget_pid f pid) port))
         ((NotExit)
           (if (eq from 0)
               (serve f port)
-              (match (obey f from (request_body payload))
-                ((Answered f2 w bs) (let s (request_answer payload (fs_reply_bytes w bs)) (serve f2 port))))))))))
+              (match (obey_msg f from b)
+                ((Answered f2 w bs) (let s (msg_answer b (fs_reply_bytes w bs)) (serve f2 port))))))))))
 
 ; ---------------------------------------------------------------- starting
 

@@ -68,11 +68,10 @@
 (def eth_frame ((dst (list int)) (src (list int)) (type int) (payload (list int))) (list int)
   (append dst (append src (append (be16 type) payload))))
 
-; The address a frame b goes to, and the type it carries. The caller has
-; checked that it has a header.
-(def eth_dst ((b bytes)) (list int) (bytes_range b 0 6))
-(def eth_src ((b bytes)) (list int) (bytes_range b 6 12))
-(def eth_type ((b bytes)) int (be16_at b 12))
+; Whether the frame at off of b goes to mac, and the type it carries,
+; read in place. The caller has checked that it has a header.
+(def eth_dst_is ((b bytes) (off int) (mac (list int))) bool (bytes_is_at b off mac))
+(def eth_type ((b bytes) (off int)) int (be16_at b (add off 12)))
 
 ; --------------------------------------------------------------------- ARP
 
@@ -133,10 +132,12 @@
   (cons 69 (cons 0 (append (be16 total) (append (be16 id) (append (be16 16384)       ; 0x45; DF
     (cons (ip_ttl) (cons proto (append (be16 sum) (append (be32 src) (be32 dst)))))))))))
 
-; A datagram read: from src to dst, carrying payload of proto, with ttl
-; hops left; and its header and the first 8 bytes of its payload, which
-; an ICMP error about it quotes.
-(data Ipv4 (Ipv4 int int int int (list int) (list int)))
+; A datagram read: from src to dst, carrying a payload of proto, with ttl
+; hops left; the bytes it was read from, and where in them its payload
+; starts and ends, so ICMP, UDP and TCP read it there in place; and its
+; header and the first 8 bytes of its payload, which an ICMP error about
+; it quotes.
+(data Ipv4 (Ipv4 int int int int bytes int int (list int)))
 
 ; What reading a datagram came to: the datagram, or why it is passed over.
 (data IpRead (IpRead Ipv4) (IpBad (list int)))
@@ -165,7 +166,7 @@
                 (IpBad "a fragment")
                 (IpRead (Ipv4 (be32_at b (add off 12)) (be32_at b (add off 16)) (bytes_get b (add off 9))
                               (bytes_get b (add off 8))
-                              (bytes_range b (add off hl) (add off total))
+                              b (add off hl) (add off total)
                               (bytes_range b off (min (add off total) (add off (add hl 8)))))))))))
 
 ; -------------------------------------------------------------------- ICMP
@@ -188,13 +189,13 @@
       (let sum (checksum (cons type (cons code (append (be16 0) rest))))
         (cons type (cons code (append (be16 sum) rest)))))))
 
-; The ICMP message xs holds, or none if it is too short or its checksum
-; is wrong.
-(def icmp_of ((xs (list int))) (Option Icmp)
-  (if (lt (length xs) 8)
+; The ICMP message the bytes of b from i up to j hold, read in place, or
+; none if it is too short or its checksum is wrong.
+(def icmp_of ((b bytes) (i int) (j int)) (Option Icmp)
+  (if (lt (sub j i) 8)
       ((None Icmp))
-      (if (eq (checksum xs) 0)
-          (Some (Icmp (head xs) (head (tail xs)) (drop_n xs 4)))
+      (if (eq (checksum_of (sum16_bytes b i j 0)) 0)
+          (Some (Icmp (bytes_get b i) (bytes_get b (add i 1)) (bytes_range b (add i 4) j)))
           ((None Icmp)))))
 
 ; An echo's rest: its id and its sequence number, then its data.
@@ -202,8 +203,8 @@
   (append (be16 id) (append (be16 seq) content)))
 
 ; The id, and the sequence number, of an echo's rest.
-(def echo_id ((rest (list int))) int (be16_at (bytes_from_list (take rest 2)) 0))
-(def echo_seq ((rest (list int))) int (be16_at (bytes_from_list (take (drop_n rest 2) 2)) 0))
+(def echo_id ((rest (list int))) int (bit_or (bit_shl (nth rest 0) 8) (nth rest 1)))
+(def echo_seq ((rest (list int))) int (bit_or (bit_shl (nth rest 2) 8) (nth rest 3)))
 
 ; What an echo request sent here carries: 56 bytes, counting up.
 (def echo_data () (list int) (rev (echo_bytes 0 (nil int))))
@@ -234,15 +235,15 @@
                                  (pseudo_sum src dst len)))
       (append (be16 sport) (append (be16 dport) (append (be16 len) (append (be16 (if (eq sum 0) 65535 sum)) content)))))))
 
-; The UDP datagram xs holds, sent from src to dst, or none if it is too
-; short, says it is longer than it is, or has a checksum that is wrong.
-(def udp_of ((src int) (dst int) (xs (list int))) (Option Udp)
-  (let b (bytes_from_list xs)
-    (if (lt (bytes_len b) (udp_header_len))
-        ((None Udp))
-        (let len (be16_at b 4)
-          (if (if (lt len (udp_header_len)) true (gt len (bytes_len b)))
-              ((None Udp))
-              (if (if (eq (be16_at b 6) 0) false (not (eq (checksum_of (sum16_bytes b 0 len (pseudo_sum src dst len))) 0)))
-                  ((None Udp))
-                  (Some (Udp (be16_at b 0) (be16_at b 2) (bytes_range b (udp_header_len) len)))))))))
+; The UDP datagram the bytes of b from i up to j hold, sent from src to
+; dst, read in place; or none if it is too short, says it is longer than
+; it is, or has a checksum that is wrong.
+(def udp_of ((src int) (dst int) (b bytes) (i int) (j int)) (Option Udp)
+  (if (lt (sub j i) (udp_header_len))
+      ((None Udp))
+      (let len (be16_at b (add i 4))
+        (if (if (lt len (udp_header_len)) true (gt len (sub j i)))
+            ((None Udp))
+            (if (if (eq (be16_at b (add i 6)) 0) false (not (eq (checksum_of (sum16_bytes b i (add i len) (pseudo_sum src dst len))) 0)))
+                ((None Udp))
+                (Some (Udp (be16_at b i) (be16_at b (add i 2)) (bytes_range b (add i (udp_header_len)) (add i len)))))))))
