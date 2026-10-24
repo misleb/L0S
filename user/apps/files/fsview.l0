@@ -8,11 +8,13 @@
 ; tested.
 
 ; What a thing in a directory is: a folder; a volume, in /Volumes; an
-; app's bundle, a folder NAME.app; a program; or any other file.
-(data FvKind (FvDir) (FvVolume) (FvApp) (FvProgram) (FvText))
+; app's bundle, a folder NAME.app, with the drawing commands of its icon,
+; from its icon.draw, none if it has none; a program; or any other file.
+(data FvKind (FvDir) (FvVolume) (FvApp (list UiDraw)) (FvProgram) (FvText))
 
 ; A thing in a directory: its name, with no final /, what it is, and its
-; size in bytes, -1 if it is not known, as of the initramfs's files.
+; size: a file's bytes, a volume's, or how many things a folder or a
+; bundle holds; -1 if it is not known.
 (data FvEntry (FvEntry (list int) FvKind int))
 
 ; A directory listed, or why not.
@@ -26,7 +28,12 @@
 ; Whether a thing is one to go into: a folder or a volume. An app's
 ; bundle is a folder too, but opening it starts the app.
 (def fv_is_place ((k FvKind)) bool
-  (match k ((FvDir) true) ((FvVolume) true) ((FvApp) false) ((FvProgram) false) ((FvText) false)))
+  (match k ((FvDir) true) ((FvVolume) true) ((FvApp ds) false) ((FvProgram) false) ((FvText) false)))
+
+; Whether a thing's size is how many things it holds: a folder's or a
+; bundle's.
+(def fv_is_holder ((k FvKind)) bool
+  (match k ((FvDir) true) ((FvVolume) false) ((FvApp ds) true) ((FvProgram) false) ((FvText) false)))
 
 ; ------------------------------------------------------------------ paths
 
@@ -96,7 +103,7 @@
 ; an app's bundle; prog, whether a file is a program.
 (def fv_kind_of ((name (list int)) (prog bool)) FvKind
   (if (ends_with name ".app/")
-      (FvApp)
+      (FvApp (nil UiDraw))
       (if (ends_with name "/") (FvDir) (if prog (FvProgram) (FvText)))))
 
 ; A name as a listing gives it, without its final /.
@@ -123,30 +130,44 @@
   (if (is_empty rs) (rev acc) (match (head rs) ((FvRanked r n e) (fv_unranked (tail rs) (cons e acc))))))
 
 ; The entries of directory dir of the initramfs, whose paths are names,
-; as entry_paths gives them, programs those of progs; in / the volumes'
-; directory too, as ls shows it.
-(def fv_root_entries ((names (list (list int))) (progs (list (list int))) (dir (list int))) (list FvEntry)
+; as entry_paths gives them, programs those of progs, and sizes their
+; sizes, a size each in the same order; in / the volumes' directory too,
+; as ls shows it. A folder's size is how many things are in it, from
+; names; the volumes' is not known here.
+(def fv_root_entries ((names (list (list int))) (progs (list (list int))) (sizes (list int)) (dir (list int))) (list FvEntry)
   (let kids (entry_children names dir)
-    (fv_sorted (fv_root_onto (if (eq dir "/") (cons "Volumes/" kids) kids) progs dir (nil FvEntry)))))
+    (fv_sorted (fv_root_onto (if (eq dir "/") (cons "Volumes/" kids) kids) names progs sizes dir (nil FvEntry)))))
 
 ; fv_root_entries's loop: an entry for each of kids, onto acc.
-(def fv_root_onto ((kids (list (list int))) (progs (list (list int))) (dir (list int)) (acc (list FvEntry))) (list FvEntry)
+(def fv_root_onto ((kids (list (list int))) (names (list (list int))) (progs (list (list int))) (sizes (list int))
+                   (dir (list int)) (acc (list FvEntry))) (list FvEntry)
   (if (is_empty kids)
       acc
       (let n (head kids)
-        (fv_root_onto (tail kids) progs dir
-                      (cons (FvEntry (fv_bare n) (fv_kind_of n (any_eq (fv_join dir n) progs)) -1) acc)))))
+        (fv_root_onto (tail kids) names progs sizes dir
+                      (cons (FvEntry (fv_bare n) (fv_kind_of n (any_eq (fv_join dir n) progs)) (fv_root_size names sizes (fv_join dir n))) acc)))))
 
-; The entries of /Volumes: each volume of vols, /Volumes/LABEL.
-(def fv_volume_entries ((vols (list (list int)))) (list FvEntry)
-  (fv_sorted (fv_volumes_onto vols (nil FvEntry))))
+; How big the initramfs's thing at path is, as fv_root_entries says: its
+; listed path's size, a folder's things, or -1 if it is not listed.
+(def fv_root_size ((names (list (list int))) (sizes (list int)) (path (list int))) int
+  (if (ends_with path "/")
+      (if (any_eq path names) (length (entry_children names (drop_last path))) -1)
+      (let i (index_of path names) (if (lt i 0) -1 (nth_or sizes i -1)))))
+
+; The entries of /Volumes: each volume of vols, /Volumes/LABEL, its size
+; the one of sizes beside it, -1 if there is none.
+(def fv_volume_entries ((vols (list (list int))) (sizes (list int))) (list FvEntry)
+  (fv_sorted (fv_volumes_onto vols sizes (nil FvEntry))))
 
 ; fv_volume_entries's loop: an entry for each of vols, onto acc.
-(def fv_volumes_onto ((vols (list (list int))) (acc (list FvEntry))) (list FvEntry)
-  (if (is_empty vols) acc (fv_volumes_onto (tail vols) (cons (FvEntry (base_name (head vols)) (FvVolume) 0) acc))))
+(def fv_volumes_onto ((vols (list (list int))) (sizes (list int)) (acc (list FvEntry))) (list FvEntry)
+  (if (is_empty vols)
+      acc
+      (fv_volumes_onto (tail vols) (if (is_empty sizes) sizes (tail sizes))
+                       (cons (FvEntry (base_name (head vols)) (FvVolume) (if (is_empty sizes) -1 (head sizes))) acc))))
 
 ; The entries of a directory a file server listed as stats, programs
-; those named in progs.
+; those named in progs: a file's size its own, a folder's not known yet.
 (def fv_stat_entries ((stats (list FsStat)) (progs (list (list int)))) (list FvEntry)
   (fv_sorted (fv_stats_onto stats progs (nil FvEntry))))
 
@@ -156,14 +177,21 @@
       acc
       (match (head stats)
         ((FsStat name size)
-          (fv_stats_onto (tail stats) progs (cons (FvEntry (fv_bare name) (fv_kind_of name (any_eq name progs)) size) acc))))))
+          (fv_stats_onto (tail stats) progs (cons (FvEntry (fv_bare name) (fv_kind_of name (any_eq name progs)) (if (ends_with name "/") -1 size)) acc))))))
 
-; Directory dir listed, wherever it is: /Volumes, from the mount table; a
-; path on a volume, or on / when / is a volume, by its file server; else
-; the initramfs's, from its entries.
+; Directory dir listed, wherever it is, as fv_listed lists it, each
+; folder's things counted and each app's icon read (fv_filled).
 (def fv_list ((dir (list int))) FvListing
+  (match (fv_listed dir)
+    ((FvNotListed why) (FvNotListed why))
+    ((FvListed es) (FvListed (fv_filled dir es)))))
+
+; dir listed: /Volumes, from the mount table, each volume's size asked
+; of its file server; a path on a volume, or on / when / is a volume, by
+; its file server; else the initramfs's, from its entries.
+(def fv_listed ((dir (list int))) FvListing
   (if (fv_is_volumes dir)
-      (FvListed (fv_volume_entries (fs_volumes)))
+      (let vols (fs_volumes) (FvListed (fv_volume_entries vols (fv_volume_sizes vols))))
       (if (is_empty (fs_volume_of (fs_server_path dir)))
           (fv_list_root dir)
           (match (fs_list dir)
@@ -173,11 +201,19 @@
                             (fv_sorted (cons (FvEntry "Volumes" (FvDir) -1) (fv_stat_entries stats (fv_programs dir stats))))
                             (fv_stat_entries stats (fv_programs dir stats)))))))))
 
+; Each of vols's size in bytes, its clusters of data, 4 KB each, as df
+; says; -1 for one that does not say.
+(def fv_volume_sizes ((vols (list (list int)))) (list int)
+  (if (is_empty vols)
+      (nil int)
+      (cons (match (fs_df (head vols)) ((FsSpace sectors clusters free files) (mul clusters 4096)) ((FsSpaceRefused code) -1))
+            (fv_volume_sizes (tail vols)))))
+
 ; The initramfs's directory dir, if it is one.
 (def fv_list_root ((dir (list int))) FvListing
   (let names (entry_paths)
     (if (if (eq dir "/") true (any_eq (append dir "/") names))
-        (FvListed (fv_root_entries names (fv_entry_programs names 0 (nil (list int))) dir))
+        (FvListed (fv_root_entries names (fv_entry_programs names 0 (nil (list int))) (fv_entry_sizes 0 (length names)) dir))
         (FvNotListed (io_error -9)))))
 
 ; The paths of names, from entry i, that are programs, onto acc.
@@ -185,6 +221,56 @@
   (if (is_empty names)
       acc
       (fv_entry_programs (tail names) (add i 1) (if (entry_is_program i) (cons (head names) acc) acc))))
+
+; The sizes of entries i up to n, as the kernel says them.
+(def fv_entry_sizes ((i int) (n int)) (list int)
+  (if (ge i n) (nil int) (cons (entry_size_of i) (fv_entry_sizes (add i 1) n))))
+
+; es of dir with what listing them did not say: each app's icon, from its
+; icon.draw, and how many things are in each folder and bundle whose
+; size is not known, each listed.
+(def fv_filled ((dir (list int)) (es (list FvEntry))) (list FvEntry)
+  (if (is_empty es)
+      es
+      (match (head es)
+        ((FvEntry n k s)
+          (let path (fv_join dir n)
+            (let s2 (if (if (fv_is_holder k) (lt s 0) false) (fv_count path) s)
+              (cons (FvEntry n (match k ((FvApp ds) (FvApp (fv_app_draws path))) ((FvDir) k) ((FvVolume) k) ((FvProgram) k) ((FvText) k)) s2)
+                    (fv_filled dir (tail es)))))))))
+
+; How many things are in the folder at path, -1 if it cannot be listed;
+; /Volumes's, the volumes.
+(def fv_count ((path (list int))) int
+  (if (fv_is_volumes path)
+      (length (fs_volumes))
+      (if (is_empty (fs_volume_of (fs_server_path path)))
+          (length (entry_children (entry_paths) path))
+          (match (fs_list path) ((FsFiles stats) (length stats)) ((FsListRefused code) -1)))))
+
+; The drawing commands of the app whose bundle is at path, from its
+; icon.draw; none if it has none.
+(def fv_app_draws ((path (list int))) (list UiDraw)
+  (match (read_whole (append path "/icon.draw"))
+    ((Err why) (nil UiDraw))
+    ((Ok b) (fv_draws_of (bytes_to_list b)))))
+
+; The commands of an icon.draw's text, as tools/mkicon reads them: a
+; line each, blank lines and # comments left out, as are lines that are
+; no command.
+(def fv_draws_of ((text (list int))) (list UiDraw)
+  (fv_draws_onto (lines text) (nil UiDraw)))
+
+; fv_draws_of's loop: the command of each of ls that is one, onto acc.
+(def fv_draws_onto ((ls (list (list int))) (acc (list UiDraw))) (list UiDraw)
+  (if (is_empty ls)
+      (rev acc)
+      (let ws (split_spaces (head ls))
+        (if (if (is_empty ws) true (starts_with (head ws) "#"))
+            (fv_draws_onto (tail ls) acc)
+            (match (ui_parse_draw ws)
+              ((Ok d) (fv_draws_onto (tail ls) (cons d acc)))
+              ((Err why) (fv_draws_onto (tail ls) acc)))))))
 
 ; The names of the files of stats in dir that their file server marks
 ; programs, each asked of it.
@@ -253,7 +339,7 @@
     (match k
       ((FvDir) (FvGo path))
       ((FvVolume) (FvGo path))
-      ((FvApp)
+      ((FvApp ds)
         (match (app_read path)
           ((Err why) (FvNotOpened why))
           ((Ok a) (fv_started (app_name a) (spawn_path (app_exec a) ((None (list (list int)))))))))

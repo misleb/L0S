@@ -477,14 +477,16 @@ $(foreach p,$(APPS),$(eval $(call ICON_RULE,$(p))))
 
 # The initramfs's programs, staged in build/root as the archive holds
 # them: /bin, /sbin, and each app's bundle, its program, manifest and
-# icon. Made anew each time, so that a program that moves leaves nothing
+# icon, at both scales and as the drawing commands it was drawn from,
+# which Files paints on any ground. Made anew each time, so that a program that moves leaves nothing
 # where it was.
 define STAGE_APP
 mkdir -p $(ROOT)/Applications/$(BUNDLE_$(1)) && \
 install -m 755 $(BUILD)/bin/$(1).img $(ROOT)/Applications/$(BUNDLE_$(1))/$(1) && \
 install -m 644 $(DIR_$(1))/$(BUNDLE_$(1))/manifest $(ROOT)/Applications/$(BUNDLE_$(1))/manifest && \
 install -m 644 $(BUILD)/icons/$(1).ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon.ppm && \
-install -m 644 $(BUILD)/icons/$(1)2x.ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon2x.ppm
+install -m 644 $(BUILD)/icons/$(1)2x.ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon2x.ppm && \
+install -m 644 $(DIR_$(1))/$(BUNDLE_$(1))/icon.draw $(ROOT)/Applications/$(BUNDLE_$(1))/icon.draw
 endef
 
 root: $(IMAGES) $(ICONS) $(ICONS2X)

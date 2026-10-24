@@ -171,6 +171,7 @@ run keys echoes what the keyboard driver sees, until Esc.
 L0S shell, on an L0 microkernel. Type help for the commands.
 l0s> ls
   /Applications/Disks.app/disks
+  /Applications/Disks.app/icon.draw
   /Applications/Disks.app/icon.ppm
   /Applications/Disks.app/manifest
   ...
@@ -1652,7 +1653,11 @@ a canvas over an array: a rounded square and a symbolic
 icon at twice its size (`round 0 0 48 48 10 dark_3`,
 `icon 8 8 utilities-terminal 2 white`). It draws the same again at scale
 2, `icon2x.ppm`, 96×96, its icon from the face, for a large screen.
-Making an app is making that directory; the Makefile finds it, and the
+The bundle keeps `icon.draw` too, which Files paints the app's icon
+from, on its own ground, as the PPMs, drawn on the launcher's, cannot
+be shown on another with no alpha; a bundle without one, as one copied
+in by hand, shows the generic app icon there. Making an app is making
+that directory; the Makefile finds it, and the
 launcher finds the bundle.
 
 The kernel keeps the whole archive in memory, parses its entries
@@ -1749,7 +1754,7 @@ that has a disk too still starts the disk's `fs` as before. A program can
 use it as any volume, as the shell does (`cp /bin/hello /Volumes/tmp/bin`,
 `run /Volumes/tmp/bin/hello`). Booted with `root=tmpfs`, `boot` has
 `install tmp` copy the initramfs onto it, which takes the moments of its
-60 files, and then makes it `/` as for a system volume, so that `/` can be
+65 files, and then makes it `/` as for a system volume, so that `/` can be
 written, directories made, and apps installed (see [the
 launcher](#the-desktop)), with no disk on the board. The inittab starts
 `fs ram` beside `boot`, as `tests/e2e/rootboot_tmpfs` does; without it,
@@ -2062,6 +2067,7 @@ otherwise as its type's first failure.
 | 293 | `dma_sync va n dir` | `DmaSynced n`, `DmaSyncDenied`, `DmaSyncBad` | n of the caller's DMA pages from the one holding va, up to the first that is not one, made to agree between the CPU's caches and memory by L0's `frame_sync`, for a device that does not see the caches, as the Raspberry Pi 5's do not: dir 1 cleans (`dma_to_device`, after writing what it will read), 2 invalidates (`dma_from_device`, before reading what it wrote), 3 both; how many; -5 another dir, -6 no `dev` line |
 | 294 | `log_write level text` | `Logging`: `Logged n`, `LogTooLong`, `LogRefused` | puts text, a line, in the kernel's log (see [The kernel's log](#the-kernels-log)) as the caller's, at level 0 error, 1 warning, 2 info or 3 debug, stamped with the time and the caller's pid: its number, or -4 for over 512 bytes, -5 for another level or a buffer the caller may not give. A newline in the text is a space, and one at its end is dropped. Any process may. Any level but debug is written to the kernel's standard error too, a line each |
 | 295 | `log_read seq`, `log_all` | `(list LogRecord)` | the messages in the log numbered seq or more, as many whole ones as 4096 bytes hold, oldest first, as `klog.l0` lays each out: a u64 number, a u64 time in ns since boot, a u16 pid, a byte of level, a u16 length, then the text. From the oldest kept if seq is older; none past the last. `log_all` reads them all, a read at a time. Any process may |
+| 296 | `entry_size_of e` | `int` | how many bytes entry e of the initramfs holds, 0 for a directory, as Files shows its files' sizes; -1 (`err_no_port`) if there is no entry e or the initramfs has been given up, as 269 refuses it. Any process may |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -2132,7 +2138,7 @@ every `.l0` in its directory is part of it.
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
 | `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives, every disk registered, each its size and name, one shown at a time, chosen by click; the drive's name (`disk1`), size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan`, takes on any disk registered since, and reads the drive again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
-| `files` | Files, `run files &`, as GNOME 45's Files is, in a window that draws its own header bars (`csd`): a sidebar of places under a header bar titled Files, Computer (`/`), Volumes (`/Volumes`), and each volume with how much of it is free; and the place shown, under a header bar of Back and Forward, a path bar of where it is, whose parts go there, a toggle between a grid of icons and a list (name, size, kind, sortable), the menu (New Folder..., Refresh, the other view) and the window's close button; and a line of what was last done. It lists the initramfs from its entries, a volume through its file server, and `/Volumes` from the mount table (`fsview.l0`), folders first. A click selects; a double click or Enter opens: a folder or a volume is gone into, an app's bundle or a marked program started, and any other file's text shown, its first 64 KB, as a list of its lines, until Back, Backspace or Esc. A right click opens a menu of Open, Rename... and Delete for a thing, New Folder... for the place, or Open and Rename... for a volume's row. F2 renames, Delete deletes, each after a dialog. The initramfs cannot be changed, and `/Volumes` only by renaming a volume, which `fs` relabels (`relabel`), and Files shows what was under the old name under the new. The initramfs's files' sizes are not known, and are blank |
+| `files` | Files, `run files &`, as GNOME 45's Files is, in a window that draws its own header bars (`csd`): a sidebar of places under a header bar titled Files, Computer (`/`), Volumes (`/Volumes`), and each volume with how much of it is free; and the place shown, under a header bar of Back and Forward, a path bar of where it is, whose parts go there, a toggle between a grid of icons and a list (name, size, kind, sortable), the menu (New Folder..., Refresh, the other view) and the window's close button; and a line of what was last done. It lists the initramfs from its entries, a volume through its file server, and `/Volumes` from the mount table (`fsview.l0`), folders first. A click selects; a double click or Enter opens: a folder or a volume is gone into, an app's bundle or a marked program started, and any other file's text shown, its first 64 KB, as a list of its lines, until Back, Backspace or Esc. A right click opens a menu of Open, Rename... and Delete for a thing, New Folder... for the place, or Open and Rename... for a volume's row. F2 renames, Delete deletes, each after a dialog. The initramfs cannot be changed, and `/Volumes` only by renaming a volume, which `fs` relabels (`relabel`), and Files shows what was under the old name under the new. The list's sizes are a file's bytes, the initramfs's from `entry_size_of` (call 296), a volume's, and how many things a folder or a bundle holds. An app's bundle shows the app's own icon, painted from its `icon.draw`, and in the list its symbol in its color |
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input` or `usb-hid keyboard`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 | `lsusb` | a client of `usb`: a line for each device `xhci` brought up, its number, vendor and product ids, speed, and what each interface is (`keyboard`, `mouse`, `hub`, …) |
@@ -2740,8 +2746,7 @@ a bad buffer, and wait on nothing.
   dragging and dropping, no cut, copy or paste, and no trash: Delete
   deletes for good, and a folder only once it is empty. It lists a place
   when it goes there and after it changes something, not when another
-  program does, until Refresh. The initramfs's files' sizes are not
-  known to a program, so they are blank. A file is shown as text only,
+  program does, until Refresh. A file is shown as text only,
   its first 64 KB, 2000 lines of 240 characters at most, ASCII; and a
   program it starts has no terminal. KeyEvent has no modifiers yet, so
   there is no Ctrl-C, Ctrl-V or Alt-Left. Its window, like every
