@@ -10,7 +10,7 @@ cannot substitute for reading the specification and running the checker.
 the examples. If a construct is not in it, it does not exist. `l0 spec --path`
 names the file; read it before writing L0 for the first time in a session.
 
-**Never state that L0 code works without running `l0 check` on it.** Code that
+**Never state that L0 code works without running** `l0 check` **on it.** Code that
 looks plausible is routinely invalid, because L0 is not any language you have
 seen. That it type checks says nothing about what it does: write tests, and
 run them with `l0 test`.
@@ -29,7 +29,7 @@ keep `main.l0` to input, one call, and the exit status. Done means
 `l0 test hello.l0 hello_test.l0` passes and `l0 build hello.l0 main.l0`
 builds. The `l0-code` skill has hello world written out this way.
 
-**Run `l0 doc` before writing a helper.** It lists every function and type in
+**Run** `l0 doc` **before writing a helper.** It lists every function and type in
 the standard library, which is linked into every program, and `l0 doc NAME`
 shows one in full. What you would have written may already be there: lists,
 arrays, `Option`, `Result`, a `Map` that works for keys and values of any
@@ -37,8 +37,7 @@ type, so never write a table or a list of pairs of your own to look things
 up, and `sort`, `min`, and `max` for values of any type, so never write a
 sort.
 
-**Read the examples before writing anything substantial.** `l0 examples
---path` names two files: working programs covering recursion, strings, data
+**Read the examples before writing anything substantial.** `l0 examples --path` names two files: working programs covering recursion, strings, data
 types, `match`, returning several values, reporting failure, type
 parameters, maps and hashing, reading and writing, files and telling their
 failures apart, replacing and deleting files, reading in pieces, arrays and
@@ -75,10 +74,13 @@ spec's section 9.2 says what each builtin gives then. It also has the
 board's devices, which a program drives through their registers with
 `open_device` and `device_read32` and the rest, at most 64 open at once,
 and `close_device` when done with one (`l0 doc IoDevice`); under
-an operating system there are none, and opening one fails. `l0 test
---target virt` runs tests on the board, booting the program once a test;
-there are no files there, so a golden file's test fails and `--bless` is
-refused, and tests that need files stay on this host. A program there can also be a kernel: it
+an operating system there are none, and opening one fails. `l0 test --target virt` runs tests on the board, booting the program once a test,
+as many at once as there are CPUs; there are no files there, so a golden
+file's test fails and `--bless` is refused, and tests that need files stay
+on this host. `l0 test -j N`, or `L0_JOBS=N`, runs up to N tests at once
+on either, and writes their results in order; on this host it is one at a
+time unless asked, since tests there share a directory and may write the
+same files. A program there can also be a kernel: it
 makes address spaces, maps pages into them, and runs threads in them until
 they trap, and gives back a page, a space, or a frame once it is done with
 it (`space_unmap`, `space_free`, `frame_free`; a frame only once no space
@@ -102,8 +104,7 @@ one, and any QEMU options there are added to how `l0 boot`, `l0 run`, and
 `l0 test` start the board.
 
 `l0 build --target pi5` builds an image for the Raspberry Pi 5, with no
-operating system, which no emulator runs, so `l0 boot` refuses it. `l0 card
-IMAGE DIR ARG ... < input` writes the files its SD card's boot partition
+operating system, which no emulator runs, so `l0 boot` refuses it. `l0 card IMAGE DIR ARG ... < input` writes the files its SD card's boot partition
 needs, beside the firmware's own: the image, `config.txt`, `cmdline.txt`
 for the arguments, and the input as an initramfs. Its standard output and
 error are its debug UART; a status that is not 0 is written there, and the
@@ -174,7 +175,7 @@ closing parens and are the most common source of parse errors. Use
 `split_spaces` with `any_eq` for membership tests, and split any function
 nesting more than about four levels deep.
 
-The `l0-code` skill covers both in detail, along with the syntax that differs
+The `l0-code` skill covers both in detail, along with the syntax that differs  
 from what other languages would lead you to expect.
 
 <!-- L0S begin: everything above is l0 init's; restore this block from git if l0 init replaces the file -->
