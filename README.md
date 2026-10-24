@@ -234,16 +234,16 @@ which refuse every change (`permission denied`), and the disk's, under
 | `cat FILE ...` | shows the files |
 | `write FILE WORDS ...` | makes FILE hold the words, spaced, and a newline |
 | `append FILE WORDS ...` | adds that line to FILE's end, making it if need be |
-| `cp FROM TO` | copies a file; into TO if it is a directory. A program's copy, on a volume, is marked a program too |
+| `cp FROM TO` | copies a file; into TO if it is a directory. A program's copy, on a volume, is marked a program too, but for FAT32's, which keeps no programs |
 | `mv FROM TO` | renames a file or a directory, or moves it into TO if it is a directory; between file systems, as from one volume to another, it copies a file and then removes it |
 | `rm FILE ...` | removes the files, and directories with nothing in them |
 | `mkdir DIRECTORY ...` | makes each directory, empty, in one that is there, on a volume |
-| `df` | each volume's size, the room its files and directories take and what is free, in kilobytes of its 4 KB clusters, and how many files it has |
+| `df` | each volume's size, the room its files and directories take and what is free, in kilobytes of 4 KB clusters (a FAT32 volume's counted as so many 4 KB), and how many files it has |
 | `format VOLUME` | empties a volume, `/Volumes/LABEL` or just `LABEL`; refused while a file on it is open, and for the system volume |
 | `unmount VOLUME` | takes a volume away: `fs` stops serving it and the kernel unmounts it, until a rescan (Disks' Refresh) finds it again; refused while any file is open, and for the system volume |
 | `relabel VOLUME LABEL` | renames a volume: `fs` writes LABEL in its superblock and as its partition's name in the GPT, and the kernel mounts it at `/Volumes/LABEL` in place of where it was; its open files stay open. Refused for a label served or mounted already, one that is no label, and the system volume. A process whose current directory was on it under its old name is left there, as after `unmount` |
 | `partition [DISK] SECTORS [START]` | a new partition of SECTORS in the GPT of DISK, `disk0` unless named, from START or where it first fits, and says its UUID (see [Volumes](#volumes)) |
-| `mkfs UUID LABEL` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL` |
+| `mkfs UUID LABEL [fat32]` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL`: L0FS, or FAT32 with `fat32`, which a Raspberry Pi boots from (see [FAT32 volumes](#fat32-volumes)) |
 
 ```
 l0s> write /Volumes/data/notes hello disk
@@ -937,7 +937,8 @@ polled, and so is every card while it is brought up.
 ### Volumes
 
 A disk holds **volumes**, each a partition of it with a file system of
-L0S's own, L0FS ([user/lib/format/l0fs.l0](user/lib/format/l0fs.l0)), and a label.
+L0S's own, L0FS ([user/lib/format/l0fs.l0](user/lib/format/l0fs.l0)), or FAT32 (see
+[FAT32 volumes](#fat32-volumes)), and a label.
 `fs` mounts each at `/Volumes/LABEL`, as macOS mounts disks, and the
 kernel sends every call on a file there to it, so every program reads
 and writes them with the ordinary `open_in`, `open_out` and the rest:
@@ -1032,6 +1033,65 @@ root down, each entry's name and every file's chain against its size,
 and refuses a directory met twice, before it serves a volume, so a
 damaged disk is refused rather than followed.
 
+#### FAT32 volumes
+
+`fs` serves **FAT32** too ([user/lib/format/fat.l0](user/lib/format/fat.l0)), the
+file system a Raspberry Pi boots from and every other system reads,
+through the same requests ([user/sbin/fs/volume.l0](user/sbin/fs/volume.l0) is
+the one layer between them): so a running L0S, from the initramfs or a
+system volume, can make a card's boot partition, fill it with a system
+(`install --boot`, [The Raspberry Pi 5](#the-raspberry-pi-5)), and
+change one, `config.txt` or `cmdline.txt`, made by anything else.
+
+- **Where.** On a GPT, a partition of Microsoft's basic data type
+  (`ebd0a0a2-b9e5-4433-87c0-68b6b72699c7`), which `mkfs UUID LABEL
+  fat32` gives the partition it formats, or an EFI system partition. On
+  a disk with no GPT but an **MBR**, as Raspberry Pi's Imager and
+  Raspberry Pi OS write one ([user/lib/format/mbr.l0](user/lib/format/mbr.l0)),
+  each primary partition of type `0B`, `0C` or `EF`. An MBR has no
+  UUIDs, so `fs` mounts its volumes by one it makes of the disk's
+  signature and the partition's number, `SSSSSSSS-0000-0000-0000-0000000000NN`.
+  L0S reads MBRs but never writes one: `partition` on such a disk is -5,
+  `mkfs` finds no partition by its UUID there (-3), and Disks offers
+  only Format Volume on it; `format` and `relabel` work on its volumes.
+- **The volume.** `mkfs` lays it out as mkfs.fat does: clusters of a
+  sector below 260 MB, 4 KB below 8 GB and larger after, 32 reserved
+  sectors holding the boot sector and FSInfo and their backups at 6 and
+  7, two FATs, the root directory at cluster 2, and the label in the
+  boot sector and as the root's label entry. A volume made elsewhere is
+  read whatever its clusters, 512 bytes to 32 KB.
+- **Names.** Long names, of up to 255 bytes, as every system has had
+  since Windows 95: a name of 8.3 in one case is a short entry alone,
+  its case in the NT byte, so `config.txt` stays `config.txt`; any other
+  has its long name's slots before a short alias, `LONGFI~1.TXT`. Names
+  are found ignoring case. A name L0S cannot spell, with a space or
+  past ASCII, is kept, but not listed or found.
+- **The label** is the root's label entry's, else the boot sector's,
+  each byte `label_ok` refuses made `_`; one with none is mounted as
+  `FAT-` and its serial number. `relabel` rewrites both, at most 11.
+- **Programs.** FAT has no mark for one, so every file `stat`s as no
+  program, `chmod` is -8, and `cp` copies a program there as a plain
+  file. The system volume stays L0FS.
+- **Times.** What `fs` makes or writes is dated by the clock's time
+  once `rtc clock` answers; before that, 1980's first moment.
+- **Kept in memory** as an L0FS volume is: the FAT as an array of a
+  sector's 128 marks each, so a change copies a sector's, and every
+  directory as its slots' bytes. A change writes the FAT's sectors it
+  touched, in both copies, FSInfo's count of free clusters, and the
+  directory sectors it touched, after the data and a flush. `fs` checks
+  every chain when it loads a volume, refusing one with a cluster two
+  chains claim, a loop, or a file shorter than its size, and says so if
+  the volume was not put away cleanly, then serves it all the same.
+
+`tools/mkfs` makes FAT32 volumes too, an ARCHIVE of `fat32`, or
+`fat32=PATH` to fill one from a cpio, and with `mbr` before the volumes
+writes an MBR, as Imager does, in place of a GPT:
+`tools/mkdisk build/card.img 71680 mbr bootfs:2048:67584:fat32=build/initramfs.cpio`.
+[tests/fat.sh](tests/fat.sh) checks the result both ways with the
+host's own tools: `fsck_msdos` or `fsck.fat` finds nothing wrong with
+what L0S makes or writes, and L0S reads and writes a volume the host
+made, which the host then finds its files on.
+
 **The mount table** ([kernel/mounts.l0](kernel/mounts.l0)) is a list
 whose first mount is `/`: the initramfs, which the kernel answers for
 itself, until `root_switch` makes a volume the system volume, `/` for
@@ -1086,15 +1146,15 @@ refusal's word may be followed by why, in words.
 | `list PATH` | the directory at PATH, a volume's root or any other: how many entries, then a line `NAME SIZE` for each, by name, a directory's NAME ending in `/` and its SIZE 0; -9 for a file |
 | `mkdir PATH` | 0, an empty directory at PATH, of a cluster; -9 if its directory is missing, -4 if something is at PATH, -5 for a name a volume cannot hold, -6 with no room |
 | `stat PATH` | 0, then `dir`, or `file SIZE x` for a program and `file SIZE -` for any other file; -3 for nothing |
-| `chmod PATH +x` | 0, the file at PATH marked a program, or with `-x` not; -8 for a directory |
-| `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files, in every directory |
+| `chmod PATH +x` | 0, the file at PATH marked a program, or with `-x` not; -8 for a directory, and for any file of a FAT32 volume, which keeps no programs |
+| `df VOLUME` | 0, then `SECTORS CLUSTERS FREE FILES`: its sectors, its clusters of data, those free, and its files, in every directory; clusters of 4 KB, a FAT32 volume's counted as so many 4 KB |
 | `format VOLUME` | 0, the volume empty, its label kept; -4 while a file on it is open, or for the system volume |
 | `unmount VOLUME` | 0, the volume no longer served, and unmounted with `fs_unmount`, its label free, until a rescan finds it again; -4 while any file is open, since a handle names its volume by where it is among them, and for the system volume; -3 for a volume not served |
 | `relabel VOLUME LABEL` | 0, then LABEL: the volume called LABEL, written in its superblock and as its partition's name in the GPT, mounted at `/Volumes/LABEL` with `fs_mount` first, so that a label mounted already by any server changes nothing, and then unmounted from its old place; it keeps its place among the volumes, so open files stay open. -5 for a label that is none, -4 for one served or mounted already and for the system volume, whose label the kernel keeps, -3 for a volume not served; -5 on a RAM file system, and if the disk cannot be written, the old label kept |
 | `rescan` | every disk taken on, those registered since too, and each one's partition table and every volume read again, as at the start, and served in place of those before, each new label mounted and each that has gone unmounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open. A disk whose table is bad has no volumes, and is said so on stderr. The system volume's label stays mounted though it has gone, and is answered as a volume not served: -3, or -9 to write |
-| `partition DISK COUNT [START]` | a new partition of COUNT sectors in the GPT of the disk DISK (`disk1`, say), both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad; -3 if there is no such disk. A disk with no table gets one |
+| `partition DISK COUNT [START]` | a new partition of COUNT sectors in the GPT of the disk DISK (`disk1`, say), both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad, or the disk has an MBR's, which L0S never writes over; -3 if there is no such disk. A disk with no table gets one |
 | `attach DISK` | the disk DISK taken on, and its volumes mounted and served after those before: 0, then how many; 0 and 0 for a disk taken on already; -3 if there is no such disk. A driver asks it, with no reply port, once it has registered a disk |
-| `mkfs UUID LABEL` | a new, empty volume labelled LABEL on the partition with that UUID, on whichever disk has it, the partition named LABEL, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, -6 if the partition is too small |
+| `mkfs UUID LABEL [l0fs\|fat32]` | a new, empty volume labelled LABEL on the partition with that UUID, on whichever disk's GPT has it, L0FS's unless `fat32` is asked for, the partition named LABEL and given L0FS's type or the basic data type, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, or a FAT32 label of more than 11, -6 if the partition is too small (FAT32 needs 33 MB) |
 
 Each is a request (`request` in `l0s.l0`), its words separated by
 spaces; a PATH is whole, `/Volumes/LABEL/NAME...`, and a VOLUME
@@ -1505,13 +1565,40 @@ L0S builds for the Pi 5, but has never booted on one. `make pi5-card`
 does three things:
 - builds the kernel with `--target pi5`, as `build/kernel-pi5.img`
 - builds the initramfs from `pi5/etc` and the same programs as QEMU's,
-  as `build/pi5.cpio`
+  as `build/pi5.cpio`, with the boot files in `/boot` too (below)
 - has `l0 card` write the boot partition's files into `build/pi5-card`
 
 Copy them onto the boot partition of an SD card that holds Raspberry Pi's
 firmware, from Raspberry Pi OS. `l0 card`'s `config.txt` loads the image
 at 0x80000 and the initramfs at 0x10000000, leaves RP1 set up
 (`pciex4_reset=0`) and forces HDMI's hotplug.
+
+**Making a card from a running L0S.** The Pi 5's initramfs holds its own
+boot files in `/boot`, `l0.img`, `config.txt` and `cmdline.txt` as `l0
+card` writes them, so a running system, from its initramfs or a system
+volume, can make a card boot it, with no other computer, on any disk it
+can write ([FAT32 volumes](#fat32-volumes)):
+
+```
+l0s> partition disk1 1048576 2048
+0199c82c-c07b-7123-8456-0123456789ab
+l0s> mkfs 0199c82c-c07b-7123-8456-0123456789ab BOOT fat32
+l0s> run install --boot BOOT
+install: 3 boot files and input.bin, an initramfs of 70 files, written to /Volumes/BOOT
+install: /Volumes/BOOT: no bcm2712-rpi-5-b.dtb; copy the Pi 5's device trees there from Raspberry Pi OS's boot partition
+```
+
+or Disks' Create Partition... and Format... with FAT32 chosen. `install
+--boot VOLUME [FROM]` copies FROM's files, `/boot` unless given, onto the
+volume, and writes `input.bin` beside them, an initramfs of every
+directory and file of `/` but `/Volumes`, a file at a time, so the card
+boots the system running now, `/boot` and all. The firmware is in the
+Pi 5's EEPROM, but it loads the board's device tree from the card, so
+`bcm2712-rpi-5-b.dtb` (C1) and `bcm2712d0-rpi-5-b.dtb` (D0), Raspberry
+Pi's, must be copied there too, as `install` says when they are not.
+Onto a card Raspberry Pi OS made, whose `bootfs` on its MBR holds them
+already, `run install --boot bootfs` is all; and its `config.txt` or
+`cmdline.txt` can be changed in place with `write`, as on any volume.
 
 **Over the network.** The Pi 5 keeps its firmware in its EEPROM and can
 fetch the rest by TFTP:
@@ -2134,7 +2221,7 @@ every `.l0` in its directory is part of it.
 |---|---|
 | `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; given `root=tmpfs`, has `install` fill the RAM file system first; starts `/etc/system`'s programs by path, and exits with the first one's status |
 | `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format`, `unmount` and `relabel`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo`, `exit` and `dmesg`, which prints the kernel's log, a line for each message with its time since boot. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
-| `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own |
+| `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own. `install --boot VOLUME [FROM]` makes a FAT32 volume a Raspberry Pi 5's boot partition instead: FROM's files, `/boot` unless given, copied onto it, and `input.bin` written, an initramfs of `/` but `/Volumes`, a file at a time; it says so if the card has no device tree (see [The Raspberry Pi 5](#the-raspberry-pi-5)) |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. L0 says nothing of the board, so it finds its port: of the places a PL011 is on L0's boards, QEMU's at 0x09000000 and the Raspberry Pi 5's debug UART at 0x107D001000, the first the kernel gives whose ID registers say PL011. It takes that port's receive interrupt, 33 or 153, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font (at scale 2, cells of 16×32 in the face's Source Code Pro), in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
 | `cat` | writes the files its arguments name, through the ordinary `open_in`, the initramfs's or a volume's; reports each it can't read, and exits 1 if any |
@@ -2162,12 +2249,12 @@ every `.l0` in its directory is part of it.
 | `tftp` | a client of `inet`: `tftp HOST FILE [PATH]` fetches FILE over TFTP (RFC 1350), from a host named or dotted, in blocks of 512 bytes each acknowledged, asking again for one that does not come within a second, and writes it to PATH or standard output; says what the server says if it refuses |
 | `random` | a client of `random`: `random [N]` writes N bytes of the entropy device's, 16 if not given, 1 to 1024, as hex digits and a newline, waiting a second at most for the driver to register; fails, saying why, without one |
 | `disk` | a client of the disks: `disk list` lists them, each name and size; of `disk0`, or of the disk named first, as `disk disk1 info`: `disk info` prints its size; `disk read SECTOR [COUNT]` prints COUNT sectors, 1 unless given, as `hexdump -C` does, a `*` for repeated lines; `disk write SECTOR WORDS...` writes the words, spaced, and a newline as sector SECTOR, zeros after them. A refusal goes to stderr, with status 1 |
-| `fs` | the file server (see [Volumes](#volumes)): a client of every disk, `disk0` and the rest, which mounts each volume of L0S's file system on them at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `relabel`, `unmount`, `rescan`, `partition`, `attach` and `mkfs`; then registers as `fs`, though no disk has a volume, or a partition table, yet. It reads each disk's GPT, and makes partitions in it, each with its UUID, and volumes on them, every disk's only writer. A disk registered after it started is taken on when its driver asks it to `attach` it. With no `disk0` within 5 seconds it says so on stderr and exits 0. `fs ram [MB]` serves no disk but one volume in memory instead (see [Booting from a volume](#booting-from-a-volume)) |
+| `fs` | the file server (see [Volumes](#volumes)): a client of every disk, `disk0` and the rest, which mounts each volume on them, of L0S's file system or FAT32 (see [FAT32 volumes](#fat32-volumes)), at `/Volumes/LABEL`, with its partition's UUID, and serves the fs protocol for them, the kernel's requests for every program's file calls there, in directories at any depth, and `list`, `mkdir`, `stat`, `chmod`, `df`, `format`, `relabel`, `unmount`, `rescan`, `partition`, `attach` and `mkfs`; then registers as `fs`, though no disk has a volume, or a partition table, yet. It reads each disk's GPT, or with none its MBR, and makes partitions in a GPT, each with its UUID, and volumes on them, L0FS or FAT32, every disk's only writer. A disk registered after it started is taken on when its driver asks it to `attach` it. With no `disk0` within 5 seconds it says so on stderr and exits 0. `fs ram [MB]` serves no disk but one volume in memory instead (see [Booting from a volume](#booting-from-a-volume)) |
 | `wm` | the compositor (see [The desktop](#the-desktop)): waits for `display`, `keyboard` and `pointer`, and a second for `clock`, paints the wallpaper on the desktop, sets the pointer's arrow, draws the top bar, reads every app's manifest and paints the launcher's page of them, and serves `compositor`. Its top bar names the front window's app; its launcher starts apps. At scale 2 it lays the desktop out at half the screen's size each way and draws it at the screen's resolution. It needs no `dev` line |
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
-| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives, every disk registered, each its size and name, one shown at a time, chosen by click; the drive's name (`disk1`), size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan`, takes on any disk registered since, and reads the drive again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's name, a label `fs` will take, and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
+| `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives, every disk registered, each its size and name, one shown at a time, chosen by click; the drive's name (`disk1`), size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan`, takes on any disk registered since, and reads the drive again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's type, L0FS or FAT32, by a toggle, and its name, a label `fs` will take (FAT32's of up to 11), and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. A disk with an MBR, not a GPT, shows its partitions and their volumes, FAT32's, its partitioning Master Boot Record, and offers only Format Volume..., L0S making no partitions or volumes in an MBR. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
 | `files` | Files, `run files &`, as GNOME 45's Files is, in a window that draws its own header bars (`csd`): a sidebar of places under a header bar titled Files, Computer (`/`), Volumes (`/Volumes`), and each volume with how much of it is free; and the place shown, under a header bar of Back and Forward, a path bar of where it is, whose parts go there, a toggle between a grid of icons and a list (name, size, kind, sortable), the menu (New Folder..., Refresh, the other view) and the window's close button; and a line of what was last done. It lists the initramfs from its entries, a volume through its file server, and `/Volumes` from the mount table (`fsview.l0`), folders first. A click selects; a double click or Enter opens: a folder or a volume is gone into, an app's bundle or a marked program started, and any other file's text shown, its first 64 KB, as a list of its lines, until Back, Backspace or Esc. A right click opens a menu of Open, Rename... and Delete for a thing, New Folder... for the place, or Open and Rename... for a volume's row. F2 renames, Delete deletes, each after a dialog. The initramfs cannot be changed, and `/Volumes` only by renaming a volume, which `fs` relabels (`relabel`), and Files shows what was under the old name under the new. The list's sizes are a file's bytes, the initramfs's from `entry_size_of` (call 296), a volume's, and how many things a folder or a bundle holds. An app's bundle shows the app's own icon, painted from its `icon.draw`, and in the list its symbol in its color |
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input` or `usb-hid keyboard`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
@@ -2213,7 +2300,9 @@ name in a library is taken in every program that links it.
 | [format/dns.l0](user/lib/format/dns.l0) | DNS's messages, RFC 1035: the query for a name's IPv4 address, and the first A record read out of an answer, past CNAMEs and name pointers (`DNSLIB`, in `INETLIB`) | with `INETLIB` |
 | [format/usbdesc.l0](user/lib/format/usbdesc.l0) | USB's descriptors and requests as bytes: setup packets, a device descriptor, a configuration with its interfaces and their endpoints, the speeds as xHCI numbers them, and names for them (`USBDESC`, in `USBLIB`) | with `USBLIB` |
 | [format/crc32.l0](user/lib/format/crc32.l0) | CRC-32, as zlib and GPT reckon it | `fs`, `disks`, `tools/mkfs` |
-| [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
+| [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); where a new partition fits; and the types FAT32 may be on | `fs`, `disks`, `tools/mkfs` |
+| [format/mbr.l0](user/lib/format/mbr.l0) | the master boot record's table, read only: its four primary entries and the disk's signature, a GPT's protective MBR told apart, the FAT32 types, and the UUID a partition is known by | `fs`, `disks`, `tools/mkfs` |
+| [format/fat.l0](user/lib/format/fat.l0) | FAT32, as bytes: the boot sector, FSInfo, the FAT as arrays of a sector's marks, directories as their slots, long names and their short aliases, mkfs's layout, paths walked ignoring case, making, renaming and removing, which clusters a read or a write touches, the sectors a change dirties as pieces to write, and every chain checked as a volume is read | `fs`, `disks`, `tools/mkfs` |
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
 | [format/xml.l0](user/lib/format/xml.l0) | just enough XML to read SVG, in place from its bytes: elements, their attributes with entities replaced, and their children, comments, processing instructions, a doctype and CDATA skipped, errors by line (`XML`, in `SVG`) | `tools/mkicons`, `tools/mkicon` |
@@ -2230,7 +2319,7 @@ name in a library is taken in every program that links it.
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`). Last, it says how many tests passed and failed, of how many files |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 `make check` and `make test` run each check and each test file as a
 target of its own, `build/check/FILE.ok` or `build/test/FILE.ok`, made once
@@ -2347,6 +2436,19 @@ Ctrl-C as a person would:
 - `install`, on a disk of 16 MB whose layout gives System a known UUID,
   has `install` copy the initramfs onto it, lists and reads the copy,
   runs `hello` from it, and is refused a volume not mounted and no volume;
+- `install_boot`, on a disk whose BOOT is FAT32, made by `tools/mkfs`,
+  has `install --boot` make it a Pi 5's boot partition from stand-in boot
+  files in `/etc/boot`: their copies and `input.bin`, and the note that
+  it has no device tree; then it is refused no boot files, and no volume;
+- `fat` unmounts scratch, an L0FS volume of 33 MB, and has `mkfs ...
+  fat32` make it FAT32, BOOT: a file written and read back by its name
+  in capitals, a directory made, a program of a long name copied into
+  it, a file moved into it and read, one removed, a program refused, as
+  FAT has none, BOOT relabelled bootfs, and `df`;
+- `fat_mbr`, on a disk with an MBR and bootfs on it, FAT32 of type 0C
+  filled from the initramfs, as Raspberry Pi's Imager makes a card:
+  served, its files read, `config.txt` written and read back, and a
+  `partition` refused;
 - `rootboot` boots with `root=` System's UUID, System filled from the
   case's own initramfs: `boot` makes it `/`, and the shell, started from
   it, lists `/` and `/Volumes`, writes in `/etc` and reads that back, from
@@ -2692,7 +2794,14 @@ a bad buffer, and wait on nothing.
   directories hold names of at most 55 bytes with no spaces, and a
   program mark, but no other permissions, owners or times; a directory
   never shrinks; a volume has at most 65534 clusters of 4 KB; and a disk
-  at most the GPT's 128. One
+  at most the GPT's 128. FAT32 ([FAT32 volumes](#fat32-volumes)) is read
+  only with 512-byte sectors, clusters of up to 32 KB and at most 2M of
+  them (64 GB of 32 KB clusters), the whole FAT and every directory held
+  in `fs`'s memory, and no smaller than its 65525 clusters, 33 MB; not
+  FAT12, FAT16 or exFAT, nor a disk that is one FAT volume with no
+  table; a name with a space, or past ASCII, is kept but unreachable,
+  since a path cannot hold one; it holds no programs; and an MBR is
+  read, never written, its extended partitions not followed. One
   file server, `fs`, serves the first disk's volumes, one request at a
   time, and a read moves at most 4092 bytes, what a reply holds. A
   write is as safe as the order it is made in, its data, a flush, and

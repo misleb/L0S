@@ -146,9 +146,11 @@ said() {
 # it the space left, and from 314 its buttons, each in a half of the 314
 # across, 12 apart: Create, 68 wide, from 487.
 #
-# Format's card is 340 by 224, from 270, 148, its content from 294, 172:
-# its Volume Name, the names' column 88 wide, so the entry from 394; its
-# buttons from 314, each in a half of 292: Format, 68 wide, from 482.
+# Format's card is 340 by 264, from 270, 128, its content from 294, 152:
+# its heading and line, then from 208 its Type, the toggles L0FS and
+# FAT32, a button high, and 6 under them its Volume Name, the names'
+# column 88 wide, so the entry from 394, 248; its buttons from 334, each
+# in a half of 292: Format, 68 wide, from 482.
 #
 # On a card's 363636 the entry's ring, the accent at half, is 54 93 141,
 # as is a suggested button faded.
@@ -164,7 +166,7 @@ segy=$((cy + 172))
 data_x=$((cx + 420)); free_x=$((cx + 630))
 button_x=$((cx + 280)); button_y=$((cy + 257))
 # Each dialog's button, 4 in, before its label, which is 10 in.
-create_x=$((cx + 491)); format_x=$((cx + 486)); ok_y=$((cy + 331))
+create_x=$((cx + 491)); format_x=$((cx + 486)); ok_y=$((cy + 331)); fmt_y=$((cy + 351))
 
 shows "data selected, the free space after it" "$data_x $segy $accent" "$free_x $segy $ground"
 
@@ -185,9 +187,9 @@ shows "Enter made the partition, and selected it" "$((cx + 100)) $((cy + 300)) $
 
 click $button_x $button_y
 shows "Format... asks, its entry focused, for a name" \
-  "$((cx + 460)) $((cy + 228)) $faded" "$format_x $ok_y $faded"
+  "$((cx + 460)) $((cy + 248)) $faded" "$format_x $fmt_y $faded"
 keys m a d e
-shows "made is a name" "$format_x $ok_y $accent"
+shows "made is a name" "$format_x $fmt_y $accent"
 
 keys ret
 shows "Enter made the volume" "$((cx + 100)) $((cy + 300)) $sidebar" "$free_x $segy $accent"

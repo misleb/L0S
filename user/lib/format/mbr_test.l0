@@ -1,0 +1,64 @@
+; mbr_test.l0 -- tests of mbr.l0.
+
+; Sector 0 with the signature sig and entries es, each 16 bytes, after
+; the boot code, then 55 AA.
+(def sector ((sig int) (es (list int))) bytes
+  (bytes_from_list
+    (append (zeros 440)
+      (append (u32_le sig)
+        (append (zeros 2)
+          (append es (append (zeros (sub 64 (length es))) (cons 85 (cons 170 (nil int))))))))))
+
+; An entry of type ty from start, of count sectors.
+(def entry ((ty int) (start int) (count int)) (list int)
+  (append (zeros 4) (append (cons ty (zeros 3)) (append (u32_le start) (u32_le count)))))
+
+; A Raspberry Pi OS card: bootfs, FAT32 LBA, from 8192, 512 MB; rootfs,
+; Linux, after it.
+(def pi_card () bytes
+  (sector 305419896 (append (entry 12 8192 1048576) (entry 131 1056768 30000000))))
+
+(def test_pi_card () int
+  (match (mbr_of (pi_card))
+    ((MbrGot d)
+      (add (check_int "two partitions" (length (mbr_parts d)) 2)
+           (add (check_int "the signature" (mbr_sig d) 305419896)
+                (check_int "bootfs's start" (mbr_part_start (head (mbr_parts d))) 8192))))
+    ((MbrProtective) (fail_because "a table" "protective"))
+    ((MbrNone) (fail_because "a table" "none"))))
+
+(def test_fat_parts () int
+  (match (mbr_of (pi_card))
+    ((MbrGot d)
+      (let fs (mbr_fat_parts (mbr_parts d))
+        (add (check_int "one is FAT" (length fs) 1)
+             (check_int "the first" (mbr_part_number (head fs)) 1))))
+    ((MbrProtective) (fail_because "a table" "protective"))
+    ((MbrNone) (fail_because "a table" "none"))))
+
+; An empty entry between two is skipped, and numbers keep their places.
+(def test_gap () int
+  (match (mbr_of (sector 1 (append (entry 12 100 200) (append (zeros 16) (entry 12 400 100)))))
+    ((MbrGot d) (check_int "the third" (mbr_part_number (head (tail (mbr_parts d)))) 3))
+    ((MbrProtective) (fail_because "a table" "protective"))
+    ((MbrNone) (fail_because "a table" "none"))))
+
+(def test_protective () int
+  (match (mbr_of (bytes_from_list (gpt_protective_mbr 2048)))
+    ((MbrGot d) (fail_because "protective" "a table"))
+    ((MbrProtective) (pass "protective"))
+    ((MbrNone) (fail_because "protective" "none"))))
+
+(def test_none () int
+  (match (mbr_of (bytes_from_list (zeros 512)))
+    ((MbrGot d) (fail_because "none" "a table"))
+    ((MbrProtective) (fail_because "none" "protective"))
+    ((MbrNone) (pass "none"))))
+
+(def test_part_uuid () int
+  (check_str "signature and number" (uuid_text (mbr_part_uuid 305419896 1))
+    "12345678-0000-0000-0000-000000000001"))
+
+(def test_type_text () int
+  (add (check_str "FAT32" (mbr_type_text 12) "FAT32 (0x0c)")
+       (check_str "Linux" (mbr_type_text 131) "MBR type 0x83")))

@@ -1,0 +1,206 @@
+; volume_test.l0 -- tests of volume.l0 and of fs serving a FAT32 volume:
+; made by mkfs, files and directories made, written, read, renamed and
+; removed on it through fs's requests, and read back by a rescan.
+
+; What a request answered, its word and its bytes.
+(def said ((a Answered)) (list int)
+  (append (digits (match a ((Answered f w bs) w) ((AnsweredData f w b) w)))
+          (append ":" (match a ((Answered f w bs) bs) ((AnsweredData f w b) (bytes_to_list b))))))
+
+; f after a.
+(def then ((a Answered)) Fs (after_answer a))
+
+; A disk of 35 MB with a partition of 33 MB from sector 2048, the
+; least FAT32 takes, made FAT32 and labelled BOOT; and what mkfs said.
+(data Made (Made Fs (list int)))
+
+(def fat_disk () Made
+  (let a (obey (fs_new (StoreMem ((MapEmpty int (list int))) 71680 0 0) 7 (vols_array (nil FsVol))) 5 "partition disk0 67584 2048")
+    (let b (obey (then a) 5 (append "mkfs " (append (match a ((Answered f w bs) bs) ((AnsweredData f w d) "")) " BOOT fat32")))
+      (Made (then b) (said b)))))
+
+(def fat_fs () Fs (match (fat_disk) ((Made f t) f)))
+
+; The requests, each as pid 5 sends it, their answers joined by |.
+(def asked ((f Fs) (reqs (list (list int)))) (list int)
+  (asked_text (asked_fs f reqs (nil int))))
+
+(data Went (Went Fs (list int)))
+
+(def asked_text ((a Went)) (list int) (match a ((Went f t) t)))
+(def asked_after ((a Went)) Fs (match a ((Went f t) f)))
+
+(def asked_fs ((f Fs) (reqs (list (list int))) (acc (list int))) Went
+  (if (is_empty reqs)
+      (Went f (rev acc))
+      (let a (obey_msg f 5 (msg_of (head reqs)))
+        (asked_fs (then a) (tail reqs) (push (said a) (if (is_empty acc) acc (push "|" acc)))))))
+
+; body as a request's message from pid 5, its reply to 9.
+(def msg_of ((body (list int))) bytes
+  (match (message_new 5 (request 9 body)) ((Message from b) b) ((RecvFailed) (bytes_from_list (nil int)))))
+
+(def r1 ((a (list int))) (list (list int)) (cons a (nil (list int))))
+(def r2 ((a (list int)) (b (list int))) (list (list int)) (cons a (r1 b)))
+(def r3 ((a (list int)) (b (list int)) (c (list int))) (list (list int)) (cons a (r2 b c)))
+(def r4 ((a (list int)) (b (list int)) (c (list int)) (d (list int))) (list (list int)) (cons a (r3 b c d)))
+
+; config.txt written with a line, on BOOT.
+(def configured () Fs
+  (asked_after (asked_fs (fat_fs) (r3 "open 2 /Volumes/BOOT/config.txt" "write 1 arm_64bit=1" "close 1") (nil int))))
+
+; ---------------------------------------------------------------- mkfs
+
+(def test_mkfs_fat () int
+  (match (fat_disk) ((Made f t) (check_str "made" t "0:BOOT"))))
+
+(def test_mkfs_fat_type () int
+  (match (read_table (fs_store_at (fat_fs) 0))
+    ((Table s d) (check_bool "basic data" (eq (gpt_part_type (head (gpt_parts d))) (gpt_basic_type)) true))
+    ((NoTable s why) (fail_because "a table" why))
+    ((BadTable s why) (fail_because "a table" why))))
+
+; 67584 sectors, 528 a FAT: (67584 - 32 - 1056) clusters of a sector,
+; the root's taken; counted in 4 KB, 66496 / 8 and 66495 / 8.
+(def test_df () int
+  (check_str "df" (asked (fat_fs) (r1 "df /Volumes/BOOT")) "0:67584 8312 8311 0"))
+
+(def test_mkfs_fat_small () int
+  (let a (obey (fs_new (StoreMem ((MapEmpty int (list int))) 4096 0 0) 7 (vols_array (nil FsVol))) 5 "partition disk0 2000")
+    (check_str "refused"
+      (said (obey (then a) 5 (append "mkfs " (append (match a ((Answered f w bs) bs) ((AnsweredData f w d) "")) " B fat32"))))
+      "-6:the partition is too small for FAT32, which needs at least 33 MB")))
+
+(def test_mkfs_fat_label () int
+  (let a (obey (fs_new (StoreMem ((MapEmpty int (list int))) 4096 0 0) 7 (vols_array (nil FsVol))) 5 "partition disk0 2000")
+    (check_str "refused"
+      (said (obey (then a) 5 (append "mkfs " (append (match a ((Answered f w bs) bs) ((AnsweredData f w d) "")) " TWELVELETTER fat32"))))
+      "-5:a FAT32 label is at most 11 characters")))
+
+(def test_mkfs_bad_format () int
+  (check_str "refused" (asked (fat_fs) (r1 "mkfs 01234567-0000-7000-8000-000000000000 X ext4")) "-5:"))
+
+; ---------------------------------------------------------------- files
+
+(def test_write_read () int
+  (check_str "written, read"
+    (asked (configured) (r3 "open 1 /Volumes/BOOT/config.txt" "read 2 100" "close 2"))
+    "2:|11:arm_64bit=1|0:"))
+
+; Found ignoring case, as FAT does.
+(def test_case () int
+  (check_str "upper" (asked (configured) (r1 "stat /Volumes/BOOT/CONFIG.TXT")) "0:file 11 -"))
+
+(def test_list () int
+  (check_str "listed" (asked (configured) (r1 "list /Volumes/BOOT")) "1:config.txt 11\n"))
+
+(def test_chmod_fat () int
+  (check_str "no programs" (asked (configured) (r1 "chmod /Volumes/BOOT/config.txt +x")) "-8:"))
+
+; A file of many clusters, written in two pieces, read back whole.
+(def test_big_file () int
+  (let p (repeat 1500 97)
+    (check_str "1500 and 1500"
+      (asked (fat_fs) (r4 "open 2 /Volumes/BOOT/l0.img" (append "write 1 " p) (append "write 1 " p) "stat /Volumes/BOOT/l0.img"))
+      "1:|1500:|1500:|0:file 3000 -")))
+
+(def test_mkdir_nested () int
+  (check_str "made, and a file in it"
+    (asked (fat_fs) (r4 "mkdir /Volumes/BOOT/overlays" "open 2 /Volumes/BOOT/overlays/MyOverlay.dtbo" "close 1" "list /Volumes/BOOT/overlays"))
+    "0:|1:|0:|1:MyOverlay.dtbo 0\n"))
+
+(def test_rename () int
+  (check_str "renamed, and read"
+    (asked (configured) (r3 "rename /Volumes/BOOT/config.txt /Volumes/BOOT/config-old.txt" "list /Volumes/BOOT" "stat /Volumes/BOOT/config.txt"))
+    "0:|1:config-old.txt 11\n|-3:"))
+
+(def test_rename_over () int
+  (check_str "the old one gone"
+    (asked (configured) (r4 "open 2 /Volumes/BOOT/new.txt" "close 2" "rename /Volumes/BOOT/new.txt /Volumes/BOOT/config.txt" "list /Volumes/BOOT"))
+    "2:|0:|0:|1:config.txt 0\n"))
+
+(def test_rename_into_dir () int
+  (check_str "moved"
+    (asked (configured) (r3 "mkdir /Volumes/BOOT/old" "rename /Volumes/BOOT/config.txt /Volumes/BOOT/old/config.txt" "list /Volumes/BOOT/old"))
+    "0:|0:|1:config.txt 11\n"))
+
+(def test_remove () int
+  (check_str "removed, freed"
+    (asked (configured) (r2 "remove /Volumes/BOOT/config.txt" "df /Volumes/BOOT"))
+    "0:|0:67584 8312 8311 0"))
+
+(def test_remove_dir_not_empty () int
+  (check_str "refused"
+    (asked (fat_fs) (r4 "mkdir /Volumes/BOOT/d" "open 2 /Volumes/BOOT/d/f" "close 1" "remove /Volumes/BOOT/d"))
+    "0:|1:|0:|-4:"))
+
+(def test_bad_name () int
+  (check_str "refused" (asked (fat_fs) (r1 "open 2 /Volumes/BOOT/a:b")) "-5:"))
+
+; ------------------------------------------------------ read back again
+
+; All of it as a rescan reads it from the disk: the volume, its files
+; and their bytes.
+(def test_rescan_reads_back () int
+  (let f (asked_after (asked_fs (configured) (r2 "mkdir /Volumes/BOOT/overlays" "open 2 /Volumes/BOOT/overlays/LongerName.dtbo") (nil int)))
+    (let f2 (asked_after (asked_fs f (r2 "write 2 dtb" "close 2") (nil int)))
+      (match (rescan f2)
+        ((Rescanned a labels gone)
+          (check_str "read back"
+            (asked (then a) (r3 "list /Volumes/BOOT" "list /Volumes/BOOT/overlays" "df /Volumes/BOOT"))
+            "2:config.txt 11\noverlays/ 0\n|1:LongerName.dtbo 3\n|0:67584 8312 8311 2"))))))
+
+(def test_relabel_fat () int
+  (let a (obey (configured) 5 "relabel /Volumes/BOOT bootfs")
+    (match (rescan (then a))
+      ((Rescanned b labels gone) (check_str "relabelled, read back" (said b) "1:bootfs\n")))))
+
+(def test_format_fat () int
+  (check_str "emptied" (asked (configured) (r2 "format /Volumes/BOOT" "list /Volumes/BOOT")) "0:|0:"))
+
+; ------------------------------------------------------------------- MBR
+
+; A disk with an MBR of one FAT32 partition, 0C, from 2048, the volume
+; on it as another system made it: found, and known by the UUID of the
+; disk's signature and its number.
+(def mbr_fs () Fs
+  (let s (StoreMem ((MapEmpty int (list int))) 69632 0 0)
+    (let v (fat_new (fat_layout 67584 1) 2048 "bootfs" 0)
+      (match (write_pieces_at s 2048 (fat_all_pieces v))
+        ((PutNot s2 why) (fs_new s 7 (vols_array (nil FsVol))))
+        ((Put s2)
+          (match (store_write s2 0 (mbr_sector))
+            ((PutNot s3 why) (fs_new s2 7 (vols_array (nil FsVol))))
+            ((Put s3) (fs_new s3 7 (vols_array (nil FsVol))))))))))
+
+; Sector 0: signature 0x12345678, one entry of type 0C.
+(def mbr_sector () bytes
+  (bytes_from_list
+    (append (zeros 440)
+      (append (u32_le 305419896)
+        (append (zeros 2)
+          (append (zeros 4) (append (cons 12 (zeros 3)) (append (u32_le 2048) (append (u32_le 67584)
+            (append (zeros 48) (cons 85 (cons 170 (nil int)))))))))))))
+
+(def test_mbr_found () int
+  (match (disks_loaded (mbr_fs) 0 (nil FsVol) false)
+    ((DisksLoaded f vols)
+      (match (head vols)
+        ((FsVol di start u v)
+          (add (check_str "label" (fv_label v) "bootfs")
+               (add (check_int "start" start 2048)
+                    (check_str "UUID" u "12345678-0000-0000-0000-000000000001"))))))))
+
+(def test_mbr_partition_refused () int
+  (check_str "refused" (said (obey (mbr_fs) 5 "partition disk0 100"))
+    "-5:an MBR table; L0S partitions only GPT disks"))
+
+; ------------------------------------------------------------ the layer
+
+(def test_csize () int
+  (add (check_int "L0FS" (fv_csize (FvL0 (vol_new "x" (vol_layout 2048)))) 4096)
+       (check_int "FAT32 of 2 KB" (fv_csize (FvFat (fat_new (FatGeom 1048576 4 32 2 2044 2 261630 1 1 6) 0 "B" 0))) 2048)))
+
+(def test_undated () int
+  (add (check_bool "L0FS" (fv_undated (FvL0 (vol_new "x" (vol_layout 2048)))) false)
+       (check_bool "FAT32" (fv_undated (FvFat (fat_new (fat_layout 67584 1) 0 "B" 0))) true)))

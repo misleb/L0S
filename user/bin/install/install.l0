@@ -5,6 +5,15 @@
 ; makes it /. It copies from wherever / is, the initramfs or another
 ; system volume, but never onto the one / is. What is on the volume
 ; already stays, but for files it copies over.
+;
+; install --boot VOLUME [FROM] makes VOLUME, a FAT32 volume, a Raspberry
+; Pi 5's boot partition instead: the files of FROM, /boot unless given,
+; which the Pi 5's initramfs holds as l0 card writes them (l0.img,
+; config.txt, cmdline.txt), copied onto its root, and input.bin written
+; beside them, an initramfs of every directory and file of / but
+; /Volumes, written a file at a time, so that the card boots the system
+; running now, /boot and all. With Raspberry Pi's firmware on the card's
+; EEPROM, as a Pi 5's is, that is all a card needs.
 
 ; Says why, as install, and fails.
 (def complain ((why (list int))) int (complain_as "install" why))
@@ -75,22 +84,163 @@
             (let code (fs_chmod to true)
               (if (eq code 0) "" (append to (append ": not marked a program: " (io_error code)))))))))
 
+; ------------------------------------------------------------ boot files
+
+; The files of directory from, a path of / with its final /, among paths
+; as root_paths gives them: those directly in it, not in a directory of
+; its own.
+(def boot_files ((from (list int)) (paths (list (list int)))) (list (list int))
+  (if (is_empty paths)
+      paths
+      (let p (head paths)
+        (if (if (starts_with p from) (if (path_is_dir p) false (not (contains (drop p (length from)) "/"))) false)
+            (cons p (boot_files from (tail paths)))
+            (boot_files from (tail paths))))))
+
+; The directory from names, with its final /: /boot unless given.
+(def boot_dir ((from (list int))) (list int)
+  (let d (normal_path from)
+    (if (eq d "/") d (append d "/"))))
+
+; An archive entry's name for path, a path of /: without its first /, or
+; a directory's final one.
+(def entry_name ((path (list int))) (list int)
+  (let p (if (path_is_dir path) (drop_last path) path)
+    (if (starts_with p "/") (tail p) p)))
+
+; An entry's mode: a directory's 040755, a program's 0100755, any other
+; file's 0100644.
+(def entry_mode_of ((path (list int))) int
+  (if (path_is_dir path) 16877 (if (path_is_program path) 33261 33188)))
+
+; What install --boot says once it has copied n boot files to vol and
+; written its initramfs of files files.
+(def boot_line ((vol (list int)) (n int) (files int)) (list int)
+  (append "install: " (append (digits n) (append " boot files and input.bin, an initramfs of " (append (digits files)
+    (append " files, written to " (append vol "\n")))))))
+
+; How many of paths, as root_paths gives them, are files.
+(def file_count ((paths (list (list int)))) int
+  (if (is_empty paths) 0 (add (if (path_is_dir (head paths)) 0 1) (file_count (tail paths)))))
+
+; What writing the initramfs came to: its bytes, or why it stopped.
+(data Archived (Archived int) (ArchiveStopped (list int)))
+
+; The initramfs, input.bin, of paths, as root_paths gives them, written
+; to f an entry at a time: a directory's header, or a file's header, its
+; bytes, read whole one file at a time, and its padding; then the
+; trailer. at is how many bytes are written so far.
+(def archive_to ((f IoFile) (paths (list (list int))) (at int)) Archived
+  (if (is_empty paths)
+      (let t (bytes_from_list (newc_trailer))
+        (let w (file_write_bytes f t 0 (bytes_len t))
+          (Archived (add at (bytes_len t)))))
+      (let p (head paths)
+        (if (path_is_dir p)
+            (let h (newc_head (entry_name p) (entry_mode_of p) 0)
+              (let w (file_write_bytes f h 0 (bytes_len h))
+                (archive_to f (tail paths) (add at (bytes_len h)))))
+            (match (read_whole p)
+              ((Err why) (ArchiveStopped (append p (append ": " why))))
+              ((Ok b) (archive_to f (tail paths) (add at (archive_file f p b)))))))))
+
+; The entry of the file at p, its bytes b, written to f: its header, b,
+; and its padding; how many bytes they are.
+(def archive_file ((f IoFile) (p (list int)) (b bytes)) int
+  (let h (newc_head (entry_name p) (entry_mode_of p) (bytes_len b))
+    (let z (newc_padding (bytes_len b))
+      (let w1 (file_write_bytes f h 0 (bytes_len h))
+        (let w2 (file_write_bytes f b 0 (bytes_len b))
+          (let w3 (file_write_bytes f z 0 (bytes_len z))
+            (add (bytes_len h) (add (bytes_len b) (bytes_len z)))))))))
+
+; Each of the files ps copied to vol's root, by its name, n so far.
+(def boot_copied ((vol (list int)) (ps (list (list int))) (n int)) Copied
+  (if (is_empty ps)
+      (Copied n)
+      (match (read_whole (head ps))
+        ((Err why) (CopyStopped (append (head ps) (append ": " why))))
+        ((Ok b)
+          (let to (append vol (append "/" (base_name (head ps))))
+            (let why (write_whole to b)
+              (if (is_empty why)
+                  (boot_copied vol (tail ps) (add n 1))
+                  (CopyStopped (append to (append ": " why))))))))))
+
+; The Raspberry Pi 5's boot partition made of vol: each file of from
+; copied onto it, the image, config.txt and cmdline.txt as l0 card
+; writes them, and input.bin, an initramfs of every directory and file
+; of / but /Volumes, so that the card boots the system running now.
+(def boot_on ((vol (list int)) (from (list int))) int
+  (let why (volume_why vol)
+    (if (not (is_empty why))
+        (complain why)
+        (let paths (root_paths)
+          (let files (boot_files from paths)
+            (if (is_empty files)
+                (complain (append (drop_last from) ": no boot files; the Raspberry Pi 5's initramfs has them in /boot"))
+                (match (boot_copied vol files 0)
+                  ((CopyStopped why2) (complain why2))
+                  ((Copied n) (boot_archived vol n (to_copy paths))))))))))
+
+; input.bin written to vol, of paths, once n boot files are copied.
+(def boot_archived ((vol (list int)) (n int) (paths (list (list int)))) int
+  (let out (append vol "/input.bin")
+    (match (open_out out)
+      ((IoFailed fault why) (complain (append out (append ": " why))))
+      ((IoOpened f)
+        (match (archive_to f paths 0)
+          ((ArchiveStopped why) (let c (file_close f) (complain why)))
+          ((Archived size)
+            (let why (done_why (file_close f))
+              (if (is_empty why)
+                  (let w (say (append (boot_line vol n (file_count paths)) (dtb_note vol (has_dtb (vol_names vol))))) 0)
+                  (complain (append out (append ": " why)))))))))))
+
+; The names in vol's root, a directory's with its final /.
+(def vol_names ((vol (list int))) (list (list int))
+  (match (fs_list vol) ((FsListRefused code) (nil (list int))) ((FsFiles files) (stats_names files))))
+
+; Whether names hold a Raspberry Pi 5's device tree, bcm2712*.dtb, which
+; the firmware loads, and only Raspberry Pi gives.
+(def has_dtb ((names (list (list int)))) bool
+  (if (is_empty names)
+      false
+      (if (if (starts_with (head names) "bcm2712") (ends_with (head names) ".dtb") false) true (has_dtb (tail names)))))
+
+; What install --boot says of vol's device tree: nothing if it has one;
+; else that it must be copied there, as onto any card l0 card makes.
+(def dtb_note ((vol (list int)) (has bool)) (list int)
+  (if has
+      ""
+      (append "install: " (append vol ": no bcm2712-rpi-5-b.dtb; copy the Pi 5's device trees there from Raspberry Pi OS's boot partition\n"))))
+
 ; ---------------------------------------------------------------- running
 
-; install VOLUME, as the arguments say.
+; install VOLUME, or install --boot VOLUME [FROM], as the arguments say.
 (def install () int
-  (if (not (eq (arg_count) 1))
-      (complain "usage: install VOLUME")
-      (install_on (volume_named (arg 0)))))
+  (if (if (ge (arg_count) 2) (eq (arg 0) "--boot") false)
+      (if (gt (arg_count) 3)
+          (complain "usage: install --boot VOLUME [FROM]")
+          (boot_on (volume_named (arg 1)) (boot_dir (if (eq (arg_count) 3) (arg 2) "/boot"))))
+      (if (not (eq (arg_count) 1))
+          (complain "usage: install VOLUME, or install --boot VOLUME [FROM]")
+          (install_on (volume_named (arg 0))))))
+
+; Why install may not write to vol, or empty: it must be a mounted
+; volume, and not /.
+(def volume_why ((vol (list int))) (list int)
+  (if (not (eq (fs_volume_of vol) vol))
+      (append vol ": not a volume")
+      (if (eq (fs_port_of vol) 0)
+          (append vol ": no such volume is mounted")
+          (if (eq vol (fs_system_volume)) (append vol ": it is /, which install copies") ""))))
 
 ; L0S copied onto vol, if it is a mounted volume, and not /.
 (def install_on ((vol (list int))) int
-  (if (not (eq (fs_volume_of vol) vol))
-      (complain (append vol ": not a volume"))
-      (if (eq (fs_port_of vol) 0)
-          (complain (append vol ": no such volume is mounted"))
-          (if (eq vol (fs_system_volume))
-              (complain (append vol ": it is /, which install copies"))
-              (match (copy_all vol (to_copy (root_paths)) 0)
-                ((CopyStopped why) (complain why))
-                ((Copied n) (let w (say (done_line vol n (uuid_of (mount_list) vol))) 0)))))))
+  (let why (volume_why vol)
+    (if (not (is_empty why))
+        (complain why)
+        (match (copy_all vol (to_copy (root_paths)) 0)
+          ((CopyStopped why2) (complain why2))
+          ((Copied n) (let w (say (done_line vol n (uuid_of (mount_list) vol))) 0))))))

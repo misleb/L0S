@@ -170,6 +170,7 @@ DISKLIB := user/lib/proto/disk.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
 L0FS    := user/lib/format/l0fs.l0
+FAT     := $(L0FS) user/lib/format/fat.l0
 
 # The network: nic, the driver's frames and Ethernet's addresses; and
 # inet, the stack's datagrams and IPv4's addresses, and its resolver,
@@ -187,11 +188,13 @@ USBDESC := user/lib/format/usbdesc.l0
 USBLIB  := $(USBDESC) user/lib/proto/usb.l0
 PCILIB  := user/lib/proto/pci.l0
 
-# The partition table, GPT, and the UUIDs and CRC-32 it needs.
+# The partition tables, GPT, and the UUIDs and CRC-32 it needs, and
+# MBR's, read only.
 UUIDLIB := user/lib/format/uuid.l0
 CRC32   := user/lib/format/crc32.l0
 GPTLIB  := user/lib/format/gpt.l0
-PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB)
+MBRLIB  := user/lib/format/mbr.l0
+PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB) $(MBRLIB)
 
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
 # commands, which need only render.l0; and its client windows, which need
@@ -231,9 +234,9 @@ LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_random     := $(RANDOM)
-LIBS_fs         := $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB) $(CLOCK) $(RANDOM)
+LIBS_fs         := $(DISKLIB) $(PARTS) $(FAT) $(FSLIB) $(CLOCK) $(RANDOM)
 LIBS_sh         := $(PROCS) $(PATHS) $(APPLIB)
-LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(L0FS) $(FSLIB)
+LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(FAT) $(FSLIB)
 LIBS_files      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS) $(APPLIB)
 
 # The programs, found by where their directories are, which is where
@@ -263,7 +266,7 @@ $(foreach p,$(PROGRAMS),$(eval TESTS_$(p) := $(wildcard $(DIR_$(p))/*_test.l0)))
 
 MKSPLASH := $(BASE) $(CLI) $(PPM) tools/mksplash/mksplash.l0
 L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
-MKFS     := $(COMMON) $(CLI) $(PARTS) $(L0FS) tools/mkfs/mkfs.l0
+MKFS     := $(COMMON) $(CLI) $(PARTS) $(FAT) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
 MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
 MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/ttf.l0 tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
@@ -392,6 +395,8 @@ $(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
 $(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)
 $(call l0_test,$(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0)
 $(call l0_test,$(BASE) $(L0FS) user/lib/format/l0fs_test.l0)
+$(call l0_test,$(BASE) $(FAT) user/lib/format/fat_test.l0)
+$(call l0_test,$(BASE) $(PARTS) user/lib/format/mbr_test.l0)
 $(call l0_test,$(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0)
 $(call l0_test,$(BASE) $(DNSLIB) user/lib/format/dns_test.l0)
 $(call l0_test,$(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0)
@@ -613,6 +618,7 @@ e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-ini
 	tests/disks-create.sh
 	tests/files.sh
 	tests/partitions.sh
+	tests/fat.sh
 	tests/launcher.sh
 	tests/launcher-install.sh
 
@@ -675,10 +681,18 @@ L0_PI5RT := $(L0LIB)l0c $(wildcard $(L0LIB)pi5-aarch64/*.bc) $(L0LIB)pi5-aarch64
 $(BUILD)/kernel-pi5.img: $(KERNEL) kernel/main.l0 $(L0_PI5RT) | $(BUILD)
 	$(L0) build --target pi5 $(PI5_KERNEL_LAYOUT) $(KERNEL) kernel/main.l0 -o $@
 
-pi5-initramfs: images root $(ETC_DEPS)
+# The Pi's initramfs holds its own boot files too, in /boot: the image,
+# config.txt and cmdline.txt, as l0 card writes them, for install --boot
+# to make a card's boot partition of, input.bin and all, from the system
+# running. config.txt names input.bin and no size, so any will do; l0
+# card is given a byte of one, since with none it names none.
+pi5-initramfs: images root $(ETC_DEPS) $(BUILD)/kernel-pi5.img
 	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc
 	$(call stage_etc,$(BUILD)/pi5-etc)
-	tools/mkinitramfs $(BUILD)/pi5.cpio $(BUILD)/pi5-etc $(ROOT)
+	rm -rf $(BUILD)/pi5-root && mkdir -p $(BUILD)/pi5-root/boot && cp -Rp $(ROOT)/. $(BUILD)/pi5-root/
+	printf x | $(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-root/boot
+	rm -f $(BUILD)/pi5-root/boot/input.bin && chmod 644 $(BUILD)/pi5-root/boot/*
+	tools/mkinitramfs $(BUILD)/pi5.cpio $(BUILD)/pi5-etc $(BUILD)/pi5-root
 
 pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs
 	rm -rf $(BUILD)/pi5-card && mkdir -p $(BUILD)/pi5-card

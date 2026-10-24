@@ -14,11 +14,28 @@
 ; the caller gives, since a host program has no other: tools/mkdisk runs
 ; it with date's; or the partition gets UUID, if it is given, as a test's
 ; disk needs, to be booted from by it. It says each volume's label and
-; UUID, a line each. A host program, linking common/abi.l0, text.l0,
-; initramfs.l0, cli.l0, uuid.l0, crc32.l0, gpt.l0 and l0fs.l0.
+; UUID, a line each.
+;
+; An ARCHIVE of fat32, or fat32=PATH, makes the volume FAT32
+; (user/lib/format/fat.l0) instead, empty or filled from the archive at
+; PATH, on a partition of the basic data type; FAT32 needs 33 MB at
+; least, and takes labels of up to 11. With mbr before the volumes, the
+; disk has an MBR's table, as Raspberry Pi's Imager writes one, of up to
+; four FAT32 volumes, each of type 0C, and no GPT; the UUIDs it says are
+; those fs knows them by, of the MBR's signature, its time's low 32
+; bits. A host program, linking common/abi.l0, text.l0, initramfs.l0,
+; cli.l0, uuid.l0, crc32.l0, gpt.l0, mbr.l0, l0fs.l0 and fat.l0.
 
 (def usage () (list int)
-  "usage: mkfs OUT SECTORS MS LABEL:START:COUNT[:ARCHIVE[:UUID]]...\n")
+  "usage: mkfs OUT SECTORS MS [mbr] LABEL:START:COUNT[:ARCHIVE[:UUID]]...\n")
+
+; Whether a volume's ARCHIVE makes it FAT32: fat32, or fat32=PATH.
+(def is_fat_archive ((a (list int))) bool
+  (if (eq a "fat32") true (starts_with a "fat32=")))
+
+; The archive a volume is filled from: PATH of fat32=PATH, none of fat32.
+(def archive_path ((a (list int))) (list int)
+  (if (eq a "fat32") "" (if (starts_with a "fat32=") (drop a 6) a)))
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "mkfs" why))
@@ -93,11 +110,24 @@
               (append "a label used twice: " label)
               (if (if (lt start (gpt_first_usable)) true (gt (add start count) (add (gpt_last_usable n) 1)))
                   (append label (append " is not inside the disk's usable sectors, 34 to " (digits (gpt_last_usable n))))
-                  (if (not (vol_layout_ok (vol_layout count)))
-                      (append label " is too small for a volume")
-                      (if (overlaps start count before)
-                          (append label " overlaps another volume")
-                          ""))))))))
+                  (if (is_fat_archive archive)
+                      (fat_why label count before start)
+                      (if (not (vol_layout_ok (vol_layout count)))
+                          (append label " is too small for a volume")
+                          (overlap_why label start count before)))))))))
+
+; Why a FAT32 volume of count sectors labelled label cannot be, or
+; empty.
+(def fat_why ((label (list int)) (count int) (before (list MkVol)) (start int)) (list int)
+  (if (gt (length label) (fat_label_max))
+      (append "a FAT32 label is at most 11 characters: " label)
+      (if (not (fat_layout_ok (fat_layout count 0)))
+          (append label (append " is " (fat_layout_why (fat_layout count 0))))
+          (overlap_why label start count before))))
+
+; Why a volume overlaps one of before, or empty.
+(def overlap_why ((label (list int)) (start int) (count int) (before (list MkVol))) (list int)
+  (if (overlaps start count before) (append label " overlaps another volume") ""))
 
 (def label_used ((label (list int)) (vols (list MkVol))) bool
   (if (is_empty vols)
@@ -242,9 +272,115 @@
   (match vol
     ((MkVol l s c a u)
       (let base (mul s (vol_sector_size))
-        (match (fill (vol_new l (vol_layout c)) b es 0 base (nil Piece))
-          ((FillBad why) (MadeBad (append l (append ": " why))))
-          ((Filled v ps) (Made l (match u ((Some x) x) ((None) id)) (append (vol_pieces v base) ps))))))))
+        (if (is_fat_archive a)
+            (fat_made l s c (match u ((Some x) x) ((None) id)) b es)
+            (match (fill (vol_new l (vol_layout c)) b es 0 base (nil Piece))
+              ((FillBad why) (MadeBad (append l (append ": " why))))
+              ((Filled v ps) (Made l (match u ((Some x) x) ((None) id)) (append (vol_pieces v base) ps)))))))))
+
+; ------------------------------------------------------------------ FAT32
+
+; A FAT32 volume labelled l on the count sectors from s, its partition's
+; UUID id, filled from the archive b's entries es: its serial the UUID's
+; last four bytes, its times 1980's first.
+(def fat_made ((l (list int)) (s int) (c int) (id Uuid) (b bytes) (es (array Entry))) Made
+  (let v (fat_new (fat_layout c (le_u32 (bytes_from_list (uuid_bytes id)) 12)) s l 0)
+    (let base (mul s (vol_sector_size))
+      (match (fat_fill v b es 0 base (nil Piece))
+        ((FatFillBad why) (MadeBad (append l (append ": " why))))
+        ((FatFilled v2 ps) (Made l id (append (fat_meta_pieces (fat_all_pieces v2) base) ps)))))))
+
+; A FAT32 volume filled, and the pieces of its files' bytes; or why not.
+(data FatFilled (FatFilled FatVol (list Piece)) (FatFillBad (list int)))
+
+; v with the entries of es from i on, as fill fills an L0FS volume: no
+; file is a program, FAT having none.
+(def fat_fill ((v FatVol) (b bytes) (es (array Entry)) (i int) (base int) (acc (list Piece))) FatFilled
+  (if (ge i (array_len es))
+      (FatFilled v acc)
+      (match (fat_fill_one v b (array_get es i) base)
+        ((FatFillBad why) (FatFillBad why))
+        ((FatFilled v2 ps) (fat_fill v2 b es (add i 1) base (rev_onto ps acc))))))
+
+; v with the entry e: a directory made, a file written, anything else
+; left out.
+(def fat_fill_one ((v FatVol) (b bytes) (e Entry) (base int)) FatFilled
+  (let names (vol_path_names (entry_path e))
+    (if (is_empty names)
+        (FatFilled v (nil Piece))
+        (if (entry_is_dir e)
+            (match (fat_dirs_made v (fat_root v) names)
+              ((FatDirBad why) (FatFillBad why))
+              ((FatDirAt v2 dc) (FatFilled v2 (nil Piece))))
+            (if (entry_is_file e)
+                (fat_file_made v b e base names)
+                (FatFilled v (nil Piece)))))))
+
+; The directory names lead to, made where missing: the volume and its
+; first cluster; or why not.
+(data FatDir (FatDirAt FatVol int) (FatDirBad (list int)))
+
+; The directory names lead to from dc, as mkdir -p makes it.
+(def fat_dirs_made ((v FatVol) (dc int) (names (list (list int)))) FatDir
+  (if (is_empty names)
+      (FatDirAt v dc)
+      (let i (fat_find v dc (head names))
+        (if (ge i 0)
+            (match (fat_entry v (VolRef dc i))
+              ((VolDir n c) (fat_dirs_made v c (tail names)))
+              ((VolFile n size first exec) (FatDirBad (append "a file where a directory goes: " n)))
+              ((VolNone) (FatDirBad "an entry lost")))
+            (fat_dir_made v dc names)))))
+
+; The first of names made in directory dc, and the rest in it.
+(def fat_dir_made ((v FatVol) (dc int) (names (list (list int)))) FatDir
+  (if (not (fat_name_ok (head names)))
+      (FatDirBad (append "a name FAT32 cannot hold: " (head names)))
+      (match (fat_slot v dc (head names))
+        ((FatNoSlot) (FatDirBad "the volume is too small for the archive"))
+        ((FatSlot v2 r)
+          (match (fat_mkdir v2 r (head names) 0)
+            ((FatNoRoom) (FatDirBad "the volume is too small for the archive"))
+            ((FatMade v3 c) (fat_dirs_made v3 c (tail names))))))))
+
+; The file e, at names, made in its directory, its bytes those of b it
+; holds.
+(def fat_file_made ((v FatVol) (b bytes) (e Entry) (base int) (names (list (list int)))) FatFilled
+  (match (fat_dirs_made v (fat_root v) (drop_last names))
+    ((FatDirBad why) (FatFillBad why))
+    ((FatDirAt v2 dc)
+      (let name (last names)
+        (if (not (fat_name_ok name))
+            (FatFillBad (append "a name FAT32 cannot hold: " name))
+            (if (ge (fat_find v2 dc name) 0)
+                (FatFillBad (append "a file twice: " (entry_path e)))
+                (match (fat_slot v2 dc name)
+                  ((FatNoSlot) (FatFillBad "the volume is too small for the archive"))
+                  ((FatSlot v3 r) (fat_file_written (fat_create v3 r name 0) r b e base)))))))))
+
+; The bytes of e written to the new file at r.
+(def fat_file_written ((v FatVol) (r VolRef) (b bytes) (e Entry) (base int)) FatFilled
+  (if (eq (entry_size e) 0)
+      (FatFilled v (nil Piece))
+      (match (fat_write v r 0 (entry_size e) (vol_at_none) 0)
+        ((FatNoSpace) (FatFillBad "the volume is too small for the archive"))
+        ((FatWrote v2 spans fresh) (FatFilled v2 (fat_span_pieces v2 spans b (entry_start e) base (nil Piece)))))))
+
+; The pieces of spans, the bytes of b from at in order, onto acc.
+(def fat_span_pieces ((v FatVol) (spans (list VolSpan)) (b bytes) (at int) (base int) (acc (list Piece))) (list Piece)
+  (if (is_empty spans)
+      acc
+      (match (head spans)
+        ((VolSpan c off k)
+          (fat_span_pieces v (tail spans) b (add at k) base
+            (cons (Piece (add base (add (mul (fat_cluster_at (fat_geom v) c) (vol_sector_size)) off)) (ChunkOf b at (add at k))) acc))))))
+
+; The volume's own pieces, its metadata and directories, from base.
+(def fat_meta_pieces ((ps (list FatPiece)) (base int)) (list Piece)
+  (if (is_empty ps)
+      (nil Piece)
+      (match (head ps)
+        ((FatPiece s b) (cons (Piece (add base (mul s (vol_sector_size))) (ChunkOf b 0 (bytes_len b))) (fat_meta_pieces (tail ps) base))))))
 
 ; The archive of vol, read and parsed: none for none.
 (data Archive (Archive bytes (array Entry)) (ArchiveBad (list int)))
@@ -252,14 +388,15 @@
 (def archive_of ((vol MkVol)) Archive
   (match vol
     ((MkVol l s c a u)
-      (if (is_empty a)
-          (Archive (bytes_from_list (nil int)) (array_new 0 (Entry "/" 0 0 0)))
-          (match (read_whole a)
-            ((Err why) (ArchiveBad (append a (append ": " why))))
-            ((Ok b)
-              (match (parse_initramfs b)
-                ((Err why) (ArchiveBad (append a (append ": " why))))
-                ((Ok es) (Archive b es)))))))))
+      (let p (archive_path a)
+        (if (is_empty p)
+            (Archive (bytes_from_list (nil int)) (array_new 0 (Entry "/" 0 0 0)))
+            (match (read_whole p)
+              ((Err why) (ArchiveBad (append p (append ": " why))))
+              ((Ok b)
+                (match (parse_initramfs b)
+                  ((Err why) (ArchiveBad (append p (append ": " why))))
+                  ((Ok es) (Archive b es))))))))))
 
 ; Each of vols made, with the UUID of its place in ids, onto acc.
 (def vols_made ((vols (list MkVol)) (ids (list Uuid)) (acc (list Made))) (list Made)
@@ -296,7 +433,49 @@
   (if (if (is_empty vols) true (is_empty ms))
       (nil GptPart)
       (match (head vols)
-        ((MkVol l s c a u) (cons (GptPart (gpt_l0fs_type) (made_uuid (head ms)) s c l) (parts_of (tail vols) (tail ms)))))))
+        ((MkVol l s c a u)
+          (cons (GptPart (if (is_fat_archive a) (gpt_basic_type) (gpt_l0fs_type)) (made_uuid (head ms)) s c l)
+                (parts_of (tail vols) (tail ms)))))))
+
+; What an n-sector image with an MBR of signature sig holds besides
+; zeros: the MBR, an entry of type 0C for each volume, and the volumes.
+(def mbr_pieces ((sig int) (vols (list MkVol)) (ms (list Made))) (list Piece)
+  (sort (cons (Piece 0 (ChunkList (mbr_bytes sig vols))) (made_pieces ms (nil Piece)))))
+
+; Sector 0 of an MBR of signature sig with an entry for each of vols,
+; 0C, its start and sectors, up to 4.
+(def mbr_bytes ((sig int) (vols (list MkVol))) (list int)
+  (append (zeros 440)
+    (append (u32_le sig)
+      (append (zeros 2)
+        (append (mbr_entries_bytes vols 4) (cons 85 (cons 170 (nil int))))))))
+
+; left entries, of vols and then empty ones.
+(def mbr_entries_bytes ((vols (list MkVol)) (left int)) (list int)
+  (if (eq left 0)
+      (nil int)
+      (if (is_empty vols)
+          (append (zeros 16) (mbr_entries_bytes vols (sub left 1)))
+          (match (head vols)
+            ((MkVol l s c a u)
+              (append (zeros 4) (append (cons 12 (zeros 3)) (append (u32_le s) (append (u32_le c) (mbr_entries_bytes (tail vols) (sub left 1)))))))))))
+
+; Why vols cannot be on an MBR, or empty: at most four, each FAT32.
+(def mbr_why ((vols (list MkVol))) (list int)
+  (if (gt (length vols) 4)
+      "an MBR holds at most four volumes"
+      (if (mbr_all_fat vols) "" "an MBR here holds FAT32 volumes only")))
+
+; Whether every one of vols is FAT32.
+(def mbr_all_fat ((vols (list MkVol))) bool
+  (if (is_empty vols) true (match (head vols) ((MkVol l s c a u) (if (is_fat_archive a) (mbr_all_fat (tail vols)) false)))))
+
+; ms with the UUIDs fs knows MBR volumes by: of sig and each's number.
+(def mbr_named ((ms (list Made)) (sig int) (k int)) (list Made)
+  (if (is_empty ms)
+      ms
+      (cons (match (head ms) ((Made l u ps) (Made l (mbr_part_uuid sig k) ps)) ((MadeBad why) (head ms)))
+            (mbr_named (tail ms) sig (add k 1)))))
 
 (def made_uuid ((m Made)) Uuid (match m ((Made l u ps) u) ((MadeBad why) (uuid_nil))))
 
@@ -357,20 +536,28 @@
       (let ms (head (tail (tail argv)))
         (if (not (is_number ms))
             (complain "the time is a number of milliseconds")
-            (match (plan_of (head (tail argv)) (tail (tail (tail argv))))
-              ((MkBad why) (complain why))
-              ((MkPlan n vols) (made (head argv) n (int_prefix ms 0) vols)))))))
+            (let ws (tail (tail (tail argv)))
+              (let mbr (if (is_empty ws) false (eq (head ws) "mbr"))
+                (match (plan_of (head (tail argv)) (if mbr (tail ws) ws))
+                  ((MkBad why) (complain why))
+                  ((MkPlan n vols)
+                    (let why (if mbr (mbr_why vols) "")
+                      (if (is_empty why) (made (head argv) n (int_prefix ms 0) vols mbr) (complain why)))))))))))
 
-; The image written to out: its UUIDs' noise seeded from the clock.
-(def made ((out (list int)) (n int) (ms int) (vols (list MkVol))) int
+; The image written to out: its UUIDs' noise seeded from the clock; with
+; mbr, an MBR's table, its signature ms's low 32 bits, in place of a
+; GPT.
+(def made ((out (list int)) (n int) (ms int) (vols (list MkVol)) (mbr bool)) int
   (let ids (uuids ms (clock_ns) (add 1 (length vols)))
-    (let mades (vols_made vols (tail ids) (nil Made))
-      (let why (made_why mades)
-        (if (not (is_empty why))
-            (complain why)
-            (match (open_out out)
-              ((IoFailed fault why2) (complain (append out (append ": " why2))))
-              ((IoOpened f) (written out f (pieces n (head ids) vols mades) n (uuids_text mades)))))))))
+    (let sig (bit_and ms 4294967295)
+      (let mades (if mbr (mbr_named (vols_made vols (tail ids) (nil Made)) sig 1) (vols_made vols (tail ids) (nil Made)))
+        (let why (made_why mades)
+          (if (not (is_empty why))
+              (complain why)
+              (match (open_out out)
+                ((IoFailed fault why2) (complain (append out (append ": " why2))))
+                ((IoOpened f)
+                  (written out f (if mbr (mbr_pieces sig vols mades) (pieces n (head ids) vols mades)) n (uuids_text mades))))))))))
 
 ; The pieces of an n-sector image written to f, f closed, and the
 ; volumes' UUIDs said.

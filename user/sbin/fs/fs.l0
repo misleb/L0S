@@ -1,7 +1,8 @@
 ; fs.l0 -- the file server, of every disk. Once disk0 has registered, it
 ; takes on every disk there is, disk0, disk1 and so on (proto/disk.l0),
-; reads each one's partition table, mounts each volume of L0S's file
-; system on them (user/lib/format/l0fs.l0) at /Volumes/LABEL, all from
+; reads each one's partition table, a GPT or else an MBR, mounts each
+; volume on them, of L0S's file system (user/lib/format/l0fs.l0) or
+; FAT32 (user/lib/format/fat.l0), through volume.l0, at /Volumes/LABEL, all from
 ; one port, and serves the fs protocol (user/lib/fs.l0) there: the
 ; kernel's requests for every process's calls on those files, in
 ; directories at any depth, and list, mkdir, stat, chmod, df, format and
@@ -57,10 +58,14 @@
 (def store_name ((s Store)) (list int)
   (match s ((StoreDisk d b) (disk_name_of d)) ((StoreMem m n r fl) (disk_name 0)) ((StoreRam m n) "tmp")))
 
+; The most sectors one read or write of the store moves, and its
+; buffer with a disk's driver holds: 32 KB, FAT32's largest cluster.
+(def store_chunk () int 64)
+
 ; Sectors read, as bytes, and the store after; or why not.
 (data Got (Got Store bytes) (GotNot Store (list int)))
 
-; count sectors from sector, at most a cluster's. A disk's come out of
+; count sectors from sector, at most store_chunk's. A disk's come out of
 ; its buffer a byte at a time, the one way a region is read.
 (def store_read ((s Store) (sector int) (count int)) Got
   (match s
@@ -94,14 +99,14 @@
                            ((None) (bytes_from_list (zeros (vol_sector_size)))))
                          acc))))
 
-; Every one of count sectors from sector, a cluster's at a time.
+; Every one of count sectors from sector, store_chunk's at a time.
 (def store_read_all ((s Store) (sector int) (count int)) Got
   (store_read_from s sector count (nil bytes)))
 
 (def store_read_from ((s Store) (sector int) (count int) (acc (list bytes))) Got
   (if (le count 0)
       (Got s (bytes_concat (rev acc)))
-      (let k (min count (vol_cluster_sectors))
+      (let k (min count (store_chunk))
         (match (store_read s sector k)
           ((GotNot s2 why) (GotNot s2 why))
           ((Got s2 bs) (store_read_from s2 (add sector k) (sub count k) (cons bs acc)))))))
@@ -109,7 +114,7 @@
 ; The store after a write, or why it failed.
 (data Put (Put Store) (PutNot Store (list int)))
 
-; b, whole sectors, at most a cluster's, written from sector.
+; b, whole sectors, at most store_chunk's, written from sector.
 (def store_write ((s Store) (sector int) (b bytes)) Put
   (match s
     ((StoreMem m n r fl) (Put (StoreMem (mem_put m sector (bytes_to_list b)) n (add r 1) fl)))
@@ -142,8 +147,8 @@
       (let j (min (bytes_len b) (add i (vol_sector_size)))
         (ram_put (map_put m sector (bytes_slice b i j)) (add sector 1) b j))))
 
-; bs, whole sectors, written from sector, a cluster's at a time: made
-; bytes once, and each cluster sliced from them.
+; bs, whole sectors, written from sector, store_chunk's at a time: made
+; bytes once, and each chunk sliced from them.
 (def store_write_all ((s Store) (sector int) (bs (list int))) Put
   (store_write_from s sector (bytes_from_list bs) 0))
 
@@ -151,17 +156,28 @@
 (def store_write_from ((s Store) (sector int) (b bytes) (i int)) Put
   (if (ge i (bytes_len b))
       (Put s)
-      (let j (min (bytes_len b) (add i (vol_cluster_size)))
+      (let j (min (bytes_len b) (add i (mul (store_chunk) (vol_sector_size))))
         (match (store_write s sector (bytes_slice b i j))
           ((PutNot s2 why) (PutNot s2 why))
-          ((Put s2) (store_write_from s2 (add sector (vol_cluster_sectors)) b j))))))
+          ((Put s2) (store_write_from s2 (add sector (store_chunk)) b j))))))
+
+; Each piece written, its sector from start: a partition's first.
+(def write_pieces_at ((s Store) (start int) (ps (list FatPiece))) Put
+  (if (is_empty ps)
+      (Put s)
+      (match (head ps)
+        ((FatPiece sector b)
+          (match (store_write_from s (add start sector) b 0)
+            ((PutNot s2 why) (PutNot s2 why))
+            ((Put s2) (write_pieces_at s2 start (tail ps))))))))
 
 ; ---------------------------------------------------------------- the state
 
 ; A volume served: the disk it is on, by its place among the server's
 ; stores, the sector its partition starts at, the partition's UUID as
-; text, which the kernel mounts it with, and the volume.
-(data FsVol (FsVol int int (list int) Vol))
+; text, which the kernel mounts it with, and the volume, L0FS or FAT32
+; (volume.l0).
+(data FsVol (FsVol int int (list int) Fv))
 
 ; An open file: the pid that opened it, its volume and directory entry,
 ; where it has read or written to, its mode, 1 to 3 as open's, and the
@@ -212,7 +228,7 @@
 
 ; Volume vi, the place of its disk among the stores, its partition's
 ; start, and its UUID.
-(def fs_vol ((f Fs) (vi int)) Vol (match (array_get (fs_vols f) vi) ((FsVol di start u v) v)))
+(def fs_vol ((f Fs) (vi int)) Fv (match (array_get (fs_vols f) vi) ((FsVol di start u v) v)))
 (def fs_vol_disk ((f Fs) (vi int)) int (match (array_get (fs_vols f) vi) ((FsVol di start u v) di)))
 (def fs_start ((f Fs) (vi int)) int (match (array_get (fs_vols f) vi) ((FsVol di start u v) start)))
 (def fs_uuid ((f Fs) (vi int)) (list int) (match (array_get (fs_vols f) vi) ((FsVol di start u v) u)))
@@ -236,10 +252,10 @@
 
 ; vols as an array, which may be empty.
 (def vols_array ((vols (list FsVol))) (array FsVol)
-  (array_from vols (FsVol 0 0 "" (vol_new "x" (vol_layout 16)))))
+  (array_from vols (FsVol 0 0 "" (FvL0 (vol_new "x" (vol_layout 16))))))
 
 ; f with v as volume vi, in memory only.
-(def with_vol ((f Fs) (vi int) (v Vol)) Fs
+(def with_vol ((f Fs) (vi int) (v Fv)) Fs
   (match f ((Fs s port vols hs next ws cp) (Fs s port (array_set vols vi (FsVol (fs_vol_disk f vi) (fs_start f vi) (fs_uuid f vi) v)) hs next ws cp))))
 
 ; f with handle h open, from pid, on entry ei of volume vi; and h. pid is
@@ -320,32 +336,25 @@
 (data Committed (Committed Fs) (CommitFailed Fs))
 
 ; All of v's metadata written, as format must.
-(def commit ((f Fs) (vi int) (v Vol)) Committed
-  (committed f vi v (store_write_all (vol_store f vi) (fs_start f vi) (vol_meta v))))
+(def commit ((f Fs) (vi int) (v Fv)) Committed
+  (committed f vi v (write_pieces_at (vol_store f vi) (fs_start f vi) (fv_all_pieces v))))
 
-; Only the sectors of v's metadata and directories that hold the marks
-; of clusters cs and the entries es written, which must be all that
-; changed: those close together in one request, as vol_runs puts them.
-(def commit_some ((f Fs) (vi int) (v Vol) (cs (list int)) (es (list VolRef))) Committed
-  (committed f vi v (write_runs (vol_store f vi) (fs_start f vi) v (vol_runs (vol_dirty_sectors v cs es)))))
+; Only the sectors of v's metadata and directories that changed
+; written: for L0FS, those that hold the marks of clusters cs and the
+; entries es, which must be all that changed, as vol_runs puts them;
+; for FAT, those it counted dirty itself (volume.l0's fv_pieces).
+(def commit_some ((f Fs) (vi int) (v Fv) (cs (list int)) (es (list VolRef))) Committed
+  (committed f vi v (write_pieces_at (vol_store f vi) (fs_start f vi) (fv_pieces v cs es))))
 
 ; The one entry r, as commit_some takes the entries that changed.
 (def one ((r VolRef)) (list VolRef) (cons r (nil VolRef)))
 
-(def committed ((f Fs) (vi int) (v Vol) (p Put)) Committed
+; f with v kept, nothing of it dirty, once p wrote it; as it was if p
+; failed.
+(def committed ((f Fs) (vi int) (v Fv) (p Put)) Committed
   (match p
-    ((Put s2) (Committed (with_vol (with_vol_store f vi s2) vi v)))
+    ((Put s2) (Committed (with_vol (with_vol_store f vi s2) vi (fv_cleaned v))))
     ((PutNot s2 why) (CommitFailed (with_vol_store f vi s2)))))
-
-; Each run of v's metadata written, the volume's partition from start.
-(def write_runs ((s Store) (start int) (v Vol) (rs (list VolRun))) Put
-  (if (is_empty rs)
-      (Put s)
-      (match (head rs)
-        ((VolRun first n)
-          (match (store_write s (add start first) (bytes_from_list (vol_run_bytes v (head rs))))
-            ((PutNot s2 why) (PutNot s2 why))
-            ((Put s2) (write_runs s2 start v (tail rs))))))))
 
 ; ---------------------------------------------------------------- paths
 
@@ -366,7 +375,7 @@
             (let vi (vol_index (fs_vols f) label 0)
               (if (lt vi 0)
                   (TNone missing)
-                  (match (vol_place (fs_vol f vi) (vol_path_names (drop_n rest (length label))))
+                  (match (fv_place (fs_vol f vi) (vol_path_names (drop_n rest (length label))))
                     ((VolTop) (TVolume vi))
                     ((VolIn dc name) (TFile vi dc name))
                     ((VolNowhere) (TNone missing))))))))))
@@ -382,10 +391,10 @@
     ((TNone code) (FoundNowhere code))
     ((TVolume vi) (FoundRoot vi))
     ((TFile vi dc name)
-      (let i (vol_find (fs_vol f vi) dc name)
+      (let i (fv_find (fs_vol f vi) dc name)
         (if (lt i 0)
             (FoundNone vi dc name)
-            (FoundAt vi (VolRef dc i) (vol_entry (fs_vol f vi) (VolRef dc i))))))))
+            (FoundAt vi (VolRef dc i) (fv_entry (fs_vol f vi) (VolRef dc i))))))))
 
 ; Whether e is a directory.
 (def is_dir_entry ((e VolEntry)) bool
@@ -396,7 +405,7 @@
   (if (ge i (array_len vols))
       -1
       (match (array_get vols i)
-        ((FsVol di start u v) (if (eq (vol_label v) label) i (vol_index vols label (add i 1)))))))
+        ((FsVol di start u v) (if (eq (fv_label v) label) i (vol_index vols label (add i 1)))))))
 
 ; ------------------------------------------------------------- answering
 
@@ -426,8 +435,34 @@
 (def obey_msg ((f Fs) (pid int) (b bytes)) Answered
   (let i (add (header_len) 4)
     (if (bytes_is_at b i "write ")
-        (obey_write_at f pid b (add i 6))
-        (obey f pid (msg_text_from b 4)))))
+        (obey_write_at (dated f) pid b (add i 6))
+        (obey (if (changes b i) (dated f) f) pid (msg_text_from b 4)))))
+
+; Whether the request at i of b may change a file, and so date it: an
+; open, a mkdir or a rename.
+(def changes ((b bytes) (i int)) bool
+  (if (bytes_is_at b i "open ") true (if (bytes_is_at b i "mkdir ") true (bytes_is_at b i "rename "))))
+
+; f with every FAT volume that has no epoch yet told the time, once the
+; clock says one; as it was while no clock does, or none needs it.
+(def dated ((f Fs)) Fs
+  (if (not (any_undated (fs_vols f) 0))
+      f
+      (match (now_ms f)
+        ((Timed f2 ms) (if (lt ms 1000000000000) f2 (dated_from f2 ms 0))))))
+
+; Whether any of vols from i has no epoch yet.
+(def any_undated ((vols (array FsVol)) (i int)) bool
+  (if (ge i (array_len vols))
+      false
+      (match (array_get vols i) ((FsVol di start u v) (if (fv_undated v) true (any_undated vols (add i 1)))))))
+
+; f with volumes i on told that Unix time ms is now, those with no
+; epoch.
+(def dated_from ((f Fs) (ms int) (i int)) Fs
+  (if (ge i (array_len (fs_vols f)))
+      f
+      (dated_from (if (fv_undated (fs_vol f i)) (with_vol f i (fv_dated (fs_vol f i) ms)) f) ms (add i 1))))
 
 ; write H BYTES read from b in place, H's digits from i: the handle, then
 ; every byte after its space.
@@ -460,9 +495,18 @@
 (def obey_volumes_disk ((f Fs) (op (list int)) (ws (list (list int)))) Answered
   (if (eq op "partition") (obey_partition f ws)
   (if (eq op "attach") (if (eq (length ws) 1) (do_attach f (head ws)) (word f -5))
-  (if (eq op "mkfs") (if (eq (length ws) 2) (do_mkfs f (head ws) (head (tail ws))) (word f -5))
+  (if (eq op "mkfs") (obey_mkfs f ws)
   (if (eq op "relabel") (if (eq (length ws) 2) (do_relabel f (head ws) (head (tail ws))) (word f -5))
   (obey_volume f op ws))))))
+
+; mkfs UUID LABEL [l0fs|fat32]: L0FS's unless fat32 is asked for.
+(def obey_mkfs ((f Fs) (ws (list (list int)))) Answered
+  (let n (length ws)
+    (if (eq n 2)
+        (do_mkfs f (head ws) (nth ws 1) false)
+        (if (if (eq n 3) (any_eq (nth ws 2) (split_spaces "l0fs fat32")) false)
+            (do_mkfs f (head ws) (nth ws 1) (eq (nth ws 2) "fat32"))
+            (word f -5)))))
 
 ; A request of a volume, or rescan.
 (def obey_volume ((f Fs) (op (list int)) (ws (list (list int)))) Answered
@@ -520,16 +564,16 @@
 ; A new file name made in directory dc of volume vi, and opened. A name
 ; the volume cannot hold is -5; a directory with no room to grow, -6.
 (def open_new ((f Fs) (pid int) (vi int) (dc int) (name (list int)) (m int)) Answered
-  (if (not (vol_name_ok name))
+  (if (not (fv_name_ok (fs_vol f vi) name))
       (word f -5)
-      (match (vol_slot (fs_vol f vi) dc)
-        ((VolNoSlot) (word f -6))
-        ((VolSlot v r cs rs) (opened_write (commit_some f vi (vol_create v r name) cs (cons r rs)) pid vi r m)))))
+      (match (fv_slot (fs_vol f vi) dc name)
+        ((FvNoSlot) (word f -6))
+        ((FvSlot v r cs rs) (opened_write (commit_some f vi (fv_create v r name) cs (cons r rs)) pid vi r m)))))
 
 ; The file at ei of v, volume vi, emptied, and no longer held by its
 ; readers.
-(def emptied ((f Fs) (vi int) (v Vol) (ei VolRef)) Committed
-  (commit_some (unheld f vi ei true) vi (vol_truncate v ei) (vol_file_clusters v ei) (one ei)))
+(def emptied ((f Fs) (vi int) (v Fv) (ei VolRef)) Committed
+  (commit_some (unheld f vi ei true) vi (fv_truncate v ei) (fv_file_clusters v ei) (one ei)))
 
 (def opened_write ((c Committed) (pid int) (vi int) (ei VolRef) (m int)) Answered
   (match c
@@ -558,7 +602,7 @@
 (def read_on ((f Fs) (h int) (x Handle) (n int) (acc (list bytes))) Answered
   (match x
     ((Handle p vi ei off mode held)
-      (match (if (le n 0) ((None VolSpan)) (vol_read_span (fs_vol f vi) ei off n (held_at held)))
+      (match (if (le n 0) ((None VolSpan)) (fv_read_span (fs_vol f vi) ei off n (held_at held)))
         ((None) (read_done f h x acc))
         ((Some span) (read_piece f h x n acc span))))))
 
@@ -575,7 +619,7 @@
     ((Handle p vi ei off mode held)
       (match span
         ((VolSpan c at k)
-          (match (fetch f vi ei (VolAt (div off (vol_cluster_size)) c) held (add at k))
+          (match (fetch f vi ei (VolAt (div off (fv_csize (fs_vol f vi))) c) held (add at k))
             ((FetchFailed f2) (if (is_empty acc) (word f2 -5) (read_done f2 h x acc)))
             ((Fetched f2 held2)
               (read_on f2 h (Handle p vi ei (add off k) mode held2) (sub n k)
@@ -591,8 +635,8 @@
       (Fetched f held)
       (match a
         ((VolAt k c)
-          (let bytes_in (vol_held (fs_vol f vi) ei k)
-            (match (store_read (vol_store f vi) (vol_cluster_sector (fs_start f vi) c) (ceil_div bytes_in (vol_sector_size)))
+          (let bytes_in (fv_held (fs_vol f vi) ei k)
+            (match (store_read (vol_store f vi) (fv_cluster_sector (fs_vol f vi) (fs_start f vi) c) (ceil_div bytes_in (vol_sector_size)))
               ((GotNot s2 why) (FetchFailed (with_vol_store f vi s2)))
               ((Got s2 bs) (Fetched (with_vol_store f vi s2) (Held a (bytes_slice bs 0 (min bytes_in (bytes_len bs))))))))))))
 
@@ -609,14 +653,14 @@
         ((Handle p vi ei off mode held)
           (if (eq mode 1)
               (word f -5)
-              (match (vol_entry (fs_vol f vi) ei)
+              (match (fv_entry (fs_vol f vi) ei)
                 ((VolNone) (word f -5))
                 ((VolDir name first) (word f -5))
                 ((VolFile name size first exec)
                   (let at (if (eq mode 3) size (min off size))
-                    (match (vol_write (fs_vol f vi) ei at (sub (bytes_len b) i) (held_at held))
-                      ((VolNoSpace) (word f -6))
-                      ((VolWrote v2 spans fresh marked) (written f h x at size b i v2 spans fresh marked))))))))))))
+                    (match (fv_write (fs_vol f vi) ei at (sub (bytes_len b) i) (held_at held))
+                      ((FvNoSpace) (word f -6))
+                      ((FvWrote v2 spans fresh marked) (written f h x at size b i v2 spans fresh marked))))))))))))
 
 ; The spans written and flushed, then the metadata that changed, the
 ; marks of the clusters linked and the entry, if its size or first
@@ -624,18 +668,18 @@
 ; cluster it wrote last, for the next write to walk on from, and the
 ; file's readers holding none of its bytes. The flush keeps the disk from
 ; putting the metadata down before the data it points at.
-(def written ((f Fs) (h int) (x Handle) (at int) (size int) (b bytes) (i int) (v2 Vol) (spans (list VolSpan)) (fresh (list int)) (marked (list int))) Answered
+(def written ((f Fs) (h int) (x Handle) (at int) (size int) (b bytes) (i int) (v2 Fv) (spans (list VolSpan)) (fresh (list int)) (marked (list int))) Answered
   (match x
     ((Handle p vi ei off mode held)
       (let n (sub (bytes_len b) i)
-      (match (flushed_after (write_spans (vol_store f vi) (fs_start f vi) spans b i fresh at size))
+      (match (flushed_after (write_spans (vol_store f vi) v2 (fs_start f vi) spans b i fresh at size))
         ((PutNot s2 why) (word (unheld (with_vol_store f vi s2) vi ei false) -5))
         ((Put s2)
           (match (commit_some (unheld (with_vol_store f vi s2) vi ei false) vi v2 marked
-                              (if (eq (vol_entry v2 ei) (vol_entry (fs_vol f vi) ei)) (nil VolRef) (one ei)))
+                              (if (eq (fv_entry v2 ei) (fv_entry (fs_vol f vi) ei)) (nil VolRef) (one ei)))
             ((CommitFailed f2) (word f2 -5))
             ((Committed f2)
-              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at n) mode (HeldPlace (vol_spans_end spans at n)))))
+              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at n) mode (HeldPlace (fv_spans_end v2 spans at n)))))
                     n)))))))))
 
 ; The store flushed once p's writes have been made; p, if they failed.
@@ -646,22 +690,23 @@
 ; sectors are read first only where they hold the file's bytes that
 ; stay: before it in its first sector, or after it in its last, within
 ; the old size; never in a cluster just taken.
-(def write_spans ((s Store) (start int) (spans (list VolSpan)) (b bytes) (i int) (fresh (list int)) (at int) (size int)) Put
+(def write_spans ((s Store) (v Fv) (start int) (spans (list VolSpan)) (b bytes) (i int) (fresh (list int)) (at int) (size int)) Put
   (if (is_empty spans)
       (Put s)
       (match (head spans)
         ((VolSpan c off k)
-          (match (write_span s start c off b i (add i k) (any_eq c fresh) (lt (add at k) size))
+          (match (write_span s v start c off b i (add i k) (any_eq c fresh) (lt (add at k) size))
             ((PutNot s2 why) (PutNot s2 why))
-            ((Put s2) (write_spans s2 start (tail spans) b (add i k) fresh (add at k) size)))))))
+            ((Put s2) (write_spans s2 v start (tail spans) b (add i k) fresh (add at k) size)))))))
 
-; The piece, the bytes of b from i up to j, written at off in cluster c.
-(def write_span ((s Store) (start int) (c int) (off int) (b bytes) (i int) (j int) (fresh bool) (more bool)) Put
+; The piece, the bytes of b from i up to j, written at off in cluster c
+; of v.
+(def write_span ((s Store) (v Fv) (start int) (c int) (off int) (b bytes) (i int) (j int) (fresh bool) (more bool)) Put
   (let ss (vol_sector_size)
     (let s0 (div off ss)
       (let end (add off (sub j i))
         (let count (add (sub (div (sub end 1) ss) s0) 1)
-          (let sector (add (vol_cluster_sector start c) s0)
+          (let sector (add (fv_cluster_sector v start c) s0)
             (let keep (if fresh false (if (not (eq (mod off ss) 0)) true (if more (not (eq (mod end ss) 0)) false)))
               (store_patch s sector count keep (sub off (mul s0 ss)) b i j))))))))
 
@@ -714,20 +759,20 @@
         ((TFile wi dc to)
           (if (not (eq wi vi))
               (word f -10)
-              (if (not (vol_name_ok to))
+              (if (not (fv_name_ok (fs_vol f vi) to))
                   (word f -5)
                   (if (moves_into (fs_vol f vi) e dc)
                       (word f -5)
                       (rename_onto f vi r e dc to)))))))))
 
 ; Whether e is a directory that dc is, or is in.
-(def moves_into ((v Vol) (e VolEntry) (dc int)) bool
-  (match e ((VolDir name first) (vol_under v first dc)) ((VolFile name size first exec) false) ((VolNone) false)))
+(def moves_into ((v Fv) (e VolEntry) (dc int)) bool
+  (match e ((VolDir name first) (fv_under v first dc)) ((VolFile name size first exec) false) ((VolNone) false)))
 
 ; The entry r, e, of volume vi named to in directory dc.
 (def rename_onto ((f Fs) (vi int) (r VolRef) (e VolEntry) (dc int) (to (list int))) Answered
   (let v (fs_vol f vi)
-    (let i (vol_find v dc to)
+    (let i (fv_find v dc to)
       (if (lt i 0)
           (rename_new f vi r dc to)
           (rename_over f vi r e (VolRef dc i) to)))))
@@ -737,26 +782,27 @@
   (let v (fs_vol f vi)
     (if (eq old r)
         (word f 0)
-        (if (is_dir_entry (vol_entry v old))
+        (if (is_dir_entry (fv_entry v old))
             (word f -8)
             (if (if (is_dir_entry e) true (is_open f vi old))
                 (word f -4)
-                (rename_done f vi r old (vol_move (vol_remove v old) r old to) (vol_file_clusters v old) (nil VolRef)))))))
+                (rename_moved f vi r (fv_rename_over v r old to)))))))
 
 ; To a name not there: in place, in r's own directory; else to a free
 ; entry of dc, which may grow for it.
 (def rename_new ((f Fs) (vi int) (r VolRef) (dc int) (to (list int))) Answered
-  (match r
-    ((VolRef rd ri)
-      (if (eq rd dc)
-          (rename_done f vi r r (vol_move (fs_vol f vi) r r to) (nil int) (nil VolRef))
-          (match (vol_slot (fs_vol f vi) dc)
-            ((VolNoSlot) (word f -6))
-            ((VolSlot v s cs rs) (rename_done f vi r s (vol_move v r s to) cs rs)))))))
+  (rename_moved f vi r (fv_rename_new (fs_vol f vi) r dc to)))
+
+; The rename m planned committed, of the entry at r; -6 if there was no
+; room for it.
+(def rename_moved ((f Fs) (vi int) (r VolRef) (m FvMoved)) Answered
+  (match m
+    ((FvNoMove) (word f -6))
+    ((FvMoved v to cs rs) (rename_done f vi r to v cs rs))))
 
 ; The rename committed: v, its marks cs and entries rs changed besides r
 ; and to, and the handles on r moved to to.
-(def rename_done ((f Fs) (vi int) (r VolRef) (to VolRef) (v Vol) (cs (list int)) (rs (list VolRef))) Answered
+(def rename_done ((f Fs) (vi int) (r VolRef) (to VolRef) (v Fv) (cs (list int)) (rs (list VolRef))) Answered
   (match (commit_some f vi v cs (cons r (cons to rs)))
     ((CommitFailed f2) (word f2 -5))
     ((Committed f2) (word (with_handles f2 (rehandled (fs_handles f2) (map_keys (fs_handles f2)) vi r to)) 0))))
@@ -781,9 +827,9 @@
     ((FoundRoot vi) (word f -8))
     ((FoundNone vi dc name) (word f -3))
     ((FoundAt vi r e)
-      (if (if (is_dir_entry e) (not (vol_dir_empty (fs_vol f vi) (dir_first e))) (is_open f vi r))
+      (if (if (is_dir_entry e) (not (fv_dir_empty (fs_vol f vi) (dir_first e))) (is_open f vi r))
           (word f -4)
-          (match (commit_some f vi (vol_remove (fs_vol f vi) r) (vol_file_clusters (fs_vol f vi) r) (one r))
+          (match (commit_some f vi (fv_remove (fs_vol f vi) r) (fv_file_clusters (fs_vol f vi) r) (one r))
             ((CommitFailed f2) (word f2 -5))
             ((Committed f2) (word f2 0)))))))
 
@@ -802,15 +848,15 @@
     ((FoundRoot vi) (word f -4))
     ((FoundAt vi r e) (word f -4))
     ((FoundNone vi dc name)
-      (if (not (vol_name_ok name))
+      (if (not (fv_name_ok (fs_vol f vi) name))
           (word f -5)
-          (match (vol_slot (fs_vol f vi) dc)
-            ((VolNoSlot) (word f -6))
-            ((VolSlot v r cs rs)
-              (match (vol_mkdir v r name)
-                ((VolNoRoom) (word f -6))
-                ((VolMade v2 c cs2)
-                  (match (commit_some f vi v2 (append cs cs2) (cons r (append rs (vol_cluster_refs c 0))))
+          (match (fv_slot (fs_vol f vi) dc name)
+            ((FvNoSlot) (word f -6))
+            ((FvSlot v r cs rs)
+              (match (fv_mkdir v r name)
+                ((FvNoRoom) (word f -6))
+                ((FvMade v2 c cs2 rs2)
+                  (match (commit_some f vi v2 (append cs cs2) (cons r (append rs rs2)))
                     ((CommitFailed f2) (word f2 -5))
                     ((Committed f2) (word f2 0)))))))))))
 
@@ -829,7 +875,8 @@
     ((VolFile name size first exec) (append "file " (append (digits size) (if exec " x" " -"))))
     ((VolNone) "")))
 
-; The file at path made a program, +x, or not, -x: -8 for a directory.
+; The file at path made a program, +x, or not, -x: -8 for a directory,
+; and for any file of a FAT volume, which holds no programs.
 (def do_chmod ((f Fs) (path (list int)) (mode (list int))) Answered
   (if (not (any_eq mode (split_spaces "+x -x")))
       (word f -5)
@@ -838,9 +885,9 @@
         ((FoundRoot vi) (word f -8))
         ((FoundNone vi dc name) (word f -3))
         ((FoundAt vi r e)
-          (if (is_dir_entry e)
+          (if (if (is_dir_entry e) true (not (fv_has_programs (fs_vol f vi))))
               (word f -8)
-              (match (commit_some f vi (vol_set_exec (fs_vol f vi) r (eq mode "+x")) (nil int) (one r))
+              (match (commit_some f vi (fv_set_exec (fs_vol f vi) r (eq mode "+x")) (nil int) (one r))
                 ((CommitFailed f2) (word f2 -5))
                 ((Committed f2) (word f2 0))))))))
 
@@ -855,12 +902,12 @@
 (def do_list ((f Fs) (path (list int))) Answered
   (match (found_at f path false)
     ((FoundNowhere code) (word f -3))
-    ((FoundRoot vi) (listed f vi (vol_root (fs_vol f vi))))
+    ((FoundRoot vi) (listed f vi (fv_root (fs_vol f vi))))
     ((FoundNone vi dc name) (word f -3))
     ((FoundAt vi r e) (if (is_dir_entry e) (listed f vi (dir_first e)) (word f -9)))))
 
 (def listed ((f Fs) (vi int) (dc int)) Answered
-  (let es (vol_listing (fs_vol f vi) dc)
+  (let es (fv_listing (fs_vol f vi) dc)
     (Answered f (length es) (fs_listing (stats_of es)))))
 
 (def stats_of ((es (list VolEntry))) (list FsStat)
@@ -875,12 +922,7 @@
   (let vi (volume_at f path)
     (if (lt vi 0)
         (word f -3)
-        (let v (fs_vol f vi)
-          (let l (vol_layout_of v)
-            (Answered f 0 (fs_space_text (match l ((VolLayout n c t d) n))
-                                         (sub (vol_clusters l) (vol_first_data l))
-                                         (vol_free_count (vol_table v))
-                                         (vol_file_count v))))))))
+        (Answered f 0 (fv_df (fs_vol f vi))))))
 
 ; Whether volume vi is /, the system volume: the kernel's mount 0 is
 ; f's port's, with vi's UUID. Never, with no kernel.
@@ -899,7 +941,7 @@
         (word f -3)
         (if (if (is_open_on f vi) true (is_system f vi))
             (word f -4)
-            (match (commit f vi (vol_format (fs_vol f vi)))
+            (match (commit f vi (fv_format (fs_vol f vi)))
               ((CommitFailed f2) (word f2 -5))
               ((Committed f2) (word f2 0)))))))
 
@@ -913,7 +955,7 @@
         (word f -3)
         (if (if (gt (map_size (fs_handles f)) 0) true (is_system f vi))
             (word f -4)
-            (let label (vol_label (fs_vol f vi))
+            (let label (fv_label (fs_vol f vi))
               (match (fs_unmount label (match f ((Fs s port vols hs next ws cp) port)))
                 ((Unmounted) (word (without_vol f vi) 0))
                 ((UnmountNotMounted) (word (without_vol f vi) 0))
@@ -934,11 +976,13 @@
         (word f -3)
         (if (not (label_ok label))
             (Answered f -5 "a label is 1 to 15 letters, digits, - and _")
-            (if (ge (vol_index (fs_vols f) label 0) 0)
-                (Answered f -4 "that label is served already")
-                (if (is_system f vi)
-                    (Answered f -4 "it is /, the system volume")
-                    (relabel_mounting f vi label (fs_mount label (fs_uuid f vi) (fs_port f)))))))))
+            (if (if (fv_is_fat (fs_vol f vi)) (gt (length label) (fat_label_max)) false)
+                (Answered f -5 "a FAT32 label is at most 11 characters")
+                (if (ge (vol_index (fs_vols f) label 0) 0)
+                    (Answered f -4 "that label is served already")
+                    (if (is_system f vi)
+                        (Answered f -4 "it is /, the system volume")
+                        (relabel_mounting f vi label (fs_mount label (fs_uuid f vi) (fs_port f))))))))))
 
 ; The port fs serves on.
 (def fs_port ((f Fs)) int (match f ((Fs s port vols hs next ws cp) port)))
@@ -959,9 +1003,9 @@
 ; label unmounted, and 0 and the label answered. If a write fails, the
 ; new label is unmounted again, and the volume is as it was.
 (def relabel_written ((f Fs) (vi int) (label (list int))) Answered
-  (let old (vol_label (fs_vol f vi))
-    (let v2 (vol_relabel (fs_vol f vi) label)
-      (match (flushed_after (store_write (vol_store f vi) (fs_start f vi) (bytes_from_list (vol_super label (vol_layout_of v2)))))
+  (let old (fv_label (fs_vol f vi))
+    (let v2 (fv_relabel (fs_vol f vi) label)
+      (match (flushed_after (write_pieces_at (vol_store f vi) (fs_start f vi) (fv_label_pieces v2)))
         ((PutNot s2 why) (relabel_undone (with_vol_store f vi s2) label why))
         ((Put s2)
           (match (relabel_table (with_vol_store f vi s2) vi label)
@@ -969,7 +1013,7 @@
             ((Put s3)
               (let u (fs_unmount old (fs_port f))
                 (let w (info_as "fs" (append "/Volumes/" (append old (append " is /Volumes/" label))))
-                  (Answered (with_vol (with_vol_store f vi s3) vi v2) 0 label))))))))))
+                  (Answered (with_vol (with_vol_store f vi s3) vi (fv_cleaned v2)) 0 label))))))))))
 
 ; Volume vi's partition named label in its disk's table, if the disk has
 ; a table and it is in it; the store as it was if not, as for a RAM
@@ -1064,7 +1108,7 @@
 
 ; The labels of vols, after the reversed acc.
 (def labels_of ((vols (list FsVol)) (acc (list (list int)))) (list (list int))
-  (if (is_empty vols) (rev acc) (match (head vols) ((FsVol di start u v) (labels_of (tail vols) (cons (vol_label v) acc))))))
+  (if (is_empty vols) (rev acc) (match (head vols) ((FsVol di start u v) (labels_of (tail vols) (cons (fv_label v) acc))))))
 
 ; f with every disk of names it has not taken on yet attached, as attach
 ; does: those registered while f was loading, before it could be asked.
@@ -1079,7 +1123,7 @@
   (match (disk_open_named name)
     ((NoDisk why) ((Err Store (list int)) why))
     ((Disk n port rp pid size)
-      (match (disk_buffer (Disk n port rp pid size) (vol_cluster_sectors))
+      (match (disk_buffer (Disk n port rp pid size) (store_chunk))
         ((NoDiskBuf why) ((Err Store (list int)) why))
         ((DiskBuf va pages there r) ((Ok Store (list int)) (StoreDisk (Disk n port rp pid size) (DiskBuf va pages there r))))))))
 
@@ -1141,7 +1185,10 @@
   (match (now_ms f)
     ((Timed f2 ms)
       (match (read_table (fs_store_at f2 di))
-        ((NoTable s2 why) (partition_in (with_store_at f2 di s2) di (GptDisk (fresh_uuid f2 ms 0) (nil GptPart)) count start ms))
+        ((NoTable s2 why)
+          (match (read_mbr s2)
+            ((MbrHas s3 m) (Answered (with_store_at f2 di s3) -5 "an MBR table; L0S partitions only GPT disks"))
+            ((MbrHasNot s3) (partition_in (with_store_at f2 di s3) di (GptDisk (fresh_uuid f2 ms 0) (nil GptPart)) count start ms))))
         ((BadTable s2 why) (Answered (with_store_at f2 di s2) -5 why))
         ((Table s2 d) (partition_in (with_store_at f2 di s2) di d count start ms))))))
 
@@ -1161,52 +1208,69 @@
                   ((PutNot s3 why) (Answered (with_store_at f di s3) -5 why))
                   ((Put s3) (Answered (with_store_at f di s3) 0 (uuid_text (gpt_part_uuid p)))))))))))))
 
-; mkfs UUID LABEL: a new, empty volume labelled label on the partition
-; whose UUID is ut, the partition named label in the table, and the
-; volume mounted at /Volumes/LABEL and served. Refused -5 for a UUID or
-; a label that is not one, or a bad table; -4 if label is served, or the
-; partition's volume is (format empties that instead); -3 if no
-; partition has that UUID; -6 if the partition is too small for a volume.
-(def do_mkfs ((f Fs) (ut (list int)) (label (list int))) Answered
+; mkfs UUID LABEL [fat32]: a new, empty volume labelled label on the
+; partition whose UUID is ut, L0FS's, or FAT32's if fat, the partition
+; named label in the table, of L0FS's type or the basic data type, and
+; the volume mounted at /Volumes/LABEL and served. Refused -5 for a UUID
+; or a label that is not one, a FAT32 label of more than 11, or a bad
+; table; -4 if label is served, or the partition's volume is (format
+; empties that instead); -3 if no partition has that UUID; -6 if the
+; partition is too small for a volume.
+(def do_mkfs ((f Fs) (ut (list int)) (label (list int)) (fat bool)) Answered
   (match (uuid_of_text ut)
     ((None) (Answered f -5 "not a UUID"))
     ((Some u)
       (if (not (label_ok label))
           (Answered f -5 "a label is 1 to 15 letters, digits, - and _")
-          (if (ge (vol_index (fs_vols f) label 0) 0)
-              (Answered f -4 "that label is served already")
-              (mkfs_from (attached_all f (disk_names)) 0 u label))))))
+          (if (if fat (gt (length label) (fat_label_max)) false)
+              (Answered f -5 "a FAT32 label is at most 11 characters")
+              (if (ge (vol_index (fs_vols f) label 0) 0)
+                  (Answered f -4 "that label is served already")
+                  (mkfs_from (attached_all f (disk_names)) 0 u label fat)))))))
 
 ; The volume made on the partition u of the first disk from di whose
 ; table has it; -3 if none has.
-(def mkfs_from ((f Fs) (di int) (u Uuid) (label (list int))) Answered
+(def mkfs_from ((f Fs) (di int) (u Uuid) (label (list int)) (fat bool)) Answered
   (if (ge di (array_len (fs_stores f)))
       (Answered f -3 "no partition has that UUID")
       (match (read_table (fs_store_at f di))
-        ((NoTable s2 why) (mkfs_from (with_store_at f di s2) (add di 1) u label))
-        ((BadTable s2 why) (mkfs_from (with_store_at f di s2) (add di 1) u label))
+        ((NoTable s2 why) (mkfs_from (with_store_at f di s2) (add di 1) u label fat))
+        ((BadTable s2 why) (mkfs_from (with_store_at f di s2) (add di 1) u label fat))
         ((Table s2 d)
           (match (gpt_part_of (gpt_parts d) u)
-            ((None) (mkfs_from (with_store_at f di s2) (add di 1) u label))
-            ((Some p) (mkfs_on (with_store_at f di s2) di d p u label)))))))
+            ((None) (mkfs_from (with_store_at f di s2) (add di 1) u label fat))
+            ((Some p) (mkfs_on (with_store_at f di s2) di d p u label fat)))))))
 
 ; The volume made on partition p, u, of disk di, whose table is d, if it
 ; can be.
-(def mkfs_on ((f Fs) (di int) (d GptDisk) (p GptPart) (u Uuid) (label (list int))) Answered
+(def mkfs_on ((f Fs) (di int) (d GptDisk) (p GptPart) (u Uuid) (label (list int)) (fat bool)) Answered
   (if (served_at (fs_vols f) di (gpt_part_start p) 0)
       (Answered f -4 "its volume is served; format empties it")
-      (let l (vol_layout (gpt_part_sectors p))
-        (if (not (vol_layout_ok l))
-            (Answered f -6 "the partition is too small for a volume")
-            (made_on f di d u label (gpt_part_start p) (vol_new label l))))))
+      (if fat
+          (mkfs_fat f di d p u label)
+          (let l (vol_layout (gpt_part_sectors p))
+            (if (not (vol_layout_ok l))
+                (Answered f -6 "the partition is too small for a volume")
+                (made_on f di d u label (gpt_part_start p) (FvL0 (vol_new label l)) (gpt_l0fs_type)))))))
 
-; v written at start of disk di, its partition named in the table, and v
-; mounted.
-(def made_on ((f Fs) (di int) (d GptDisk) (u Uuid) (label (list int)) (start int) (v Vol)) Answered
-  (match (store_write_all (fs_store_at f di) start (vol_meta v))
+; A FAT32 volume made on partition p, u, of disk di: its serial the
+; last four bytes of a fresh UUID, its times from the clock's now.
+(def mkfs_fat ((f Fs) (di int) (d GptDisk) (p GptPart) (u Uuid) (label (list int))) Answered
+  (match (now_ms f)
+    ((Timed f2 ms)
+      (let g (fat_layout (gpt_part_sectors p) (le_u32 (bytes_from_list (uuid_bytes (fresh_uuid f2 ms 0))) 12))
+        (if (not (fat_layout_ok g))
+            (Answered f2 -6 (append "the partition is " (fat_layout_why g)))
+            (made_on f2 di d u label (gpt_part_start p)
+                     (fv_dated (FvFat (fat_new g (gpt_part_start p) label ms)) ms) (gpt_basic_type)))))))
+
+; v written at start of disk di, its partition named in the table, of
+; type ty, and v mounted.
+(def made_on ((f Fs) (di int) (d GptDisk) (u Uuid) (label (list int)) (start int) (v Fv) (ty Uuid)) Answered
+  (match (write_pieces_at (fs_store_at f di) start (fv_all_pieces v))
     ((PutNot s2 why) (Answered (with_store_at f di s2) -5 why))
     ((Put s2)
-      (match (write_table s2 (gpt_named d u label))
+      (match (write_table s2 (gpt_named d u label ty))
         ((PutNot s3 why) (Answered (with_store_at f di s3) -5 why))
         ((Put s3) (mounted_new (with_store_at f di s3) (FsVol di start (uuid_text u) v)))))))
 
@@ -1217,17 +1281,17 @@
       (match (array_get vols i)
         ((FsVol d s u v) (if (if (eq d di) (eq s start) false) true (served_at vols di start (add i 1)))))))
 
-; d with partition u named, and of L0FS's type.
-(def gpt_named ((d GptDisk) (u Uuid) (name (list int))) GptDisk
-  (match d ((GptDisk du parts) (GptDisk du (parts_named parts u name)))))
+; d with partition u named, and of type ty.
+(def gpt_named ((d GptDisk) (u Uuid) (name (list int)) (ty Uuid)) GptDisk
+  (match d ((GptDisk du parts) (GptDisk du (parts_named parts u name ty)))))
 
-; parts with u's named name, and of L0FS's type.
-(def parts_named ((parts (list GptPart)) (u Uuid) (name (list int))) (list GptPart)
+; parts with u's named name, and of type t2.
+(def parts_named ((parts (list GptPart)) (u Uuid) (name (list int)) (t2 Uuid)) (list GptPart)
   (if (is_empty parts)
       parts
       (match (head parts)
         ((GptPart ty id s c n)
-          (cons (if (eq id u) (GptPart (gpt_l0fs_type) id s c name) (head parts)) (parts_named (tail parts) u name))))))
+          (cons (if (eq id u) (GptPart t2 id s c name) (head parts)) (parts_named (tail parts) u name t2))))))
 
 ; fv served, after the volumes served before, so that open handles keep
 ; theirs, and mounted from f's port, as a rescan mounts a new label: 0
@@ -1238,8 +1302,8 @@
       (match fv
         ((FsVol di start u v)
           (let vols2 (vols_array (append (array_to_list vols) (cons fv (nil FsVol))))
-            (let m (mount_new port vols2 (cons (vol_label v) (nil (list int))))
-              (Answered (Fs s port vols2 hs next ws cp) 0 (vol_label v)))))))))
+            (let m (mount_new port vols2 (cons (fv_label v) (nil (list int))))
+              (Answered (Fs s port vols2 hs next ws cp) 0 (fv_label v)))))))))
 
 ; ---------------------------------------------------------------- rescan
 
@@ -1284,16 +1348,24 @@
       (let name (store_name (fs_store_at f di))
         (match (read_table (fs_store_at f di))
           ((NoTable s2 why)
-            (let w (if say (warn_as "fs" (append name (append ": " (append why "; partition makes a table, and a rescan serves any volume made")))) 0)
-              (disks_loaded (with_store_at f di s2) (add di 1) acc say)))
+            (match (read_mbr s2)
+              ((MbrHas s3 m)
+                (match (load_fats s3 di (mbr_fat_parts (mbr_parts m)) (mbr_sig m) (nil FsVol))
+                  ((Loaded s4 vols) (disks_loaded (with_store_at f di s4) (add di 1) (rev_onto vols acc) say))))
+              ((MbrHasNot s3)
+                (let w (if say (warn_as "fs" (append name (append ": " (append why "; partition makes a table, and a rescan serves any volume made")))) 0)
+                  (disks_loaded (with_store_at f di s3) (add di 1) acc say)))))
           ((BadTable s2 why)
             (let w (log_as (log_error) "fs" (append name (append ": the partition table is bad: " why)))
               (disks_loaded (with_store_at f di s2) (add di 1) acc say)))
           ((Table s2 d)
             (let parts (gpt_typed (gpt_parts d) (gpt_l0fs_type))
-              (let w (if (if say (is_empty parts) false) (info_as "fs" (append name ": no volumes on the disk yet; a rescan serves any made")) 0)
-                (match (load_vols s2 di parts (nil FsVol))
-                  ((Loaded s3 vols) (disks_loaded (with_store_at f di s3) (add di 1) (rev_onto vols acc) say))))))))))
+              (let fats (gpt_fat_parts (gpt_parts d))
+                (let w (if (if say (if (is_empty parts) (is_empty fats) false) false) (info_as "fs" (append name ": no volumes on the disk yet; a rescan serves any made")) 0)
+                  (match (load_vols s2 di parts (nil FsVol))
+                    ((Loaded s3 vols)
+                      (match (load_gpt_fats s3 di fats (nil FsVol))
+                        ((Loaded s4 fvols) (disks_loaded (with_store_at f di s4) (add di 1) (rev_onto fvols (rev_onto vols acc)) say)))))))))))))
 
 ; The labels of old that none of vols has.
 (def gone_labels ((old (list FsVol)) (vols (array FsVol))) (list (list int))
@@ -1301,15 +1373,15 @@
       (nil (list int))
       (match (head old)
         ((FsVol di start u v)
-          (if (lt (vol_index vols (vol_label v) 0) 0)
-              (cons (vol_label v) (gone_labels (tail old) vols))
+          (if (lt (vol_index vols (fv_label v) 0) 0)
+              (cons (fv_label v) (gone_labels (tail old) vols))
               (gone_labels (tail old) vols))))))
 
 ; The labels of vols, a line each, after acc.
 (def labels_text ((vols (list FsVol)) (acc (list int))) (list int)
   (if (is_empty vols)
       (rev acc)
-      (match (head vols) ((FsVol di start u v) (labels_text (tail vols) (push "\n" (push (vol_label v) acc)))))))
+      (match (head vols) ((FsVol di start u v) (labels_text (tail vols) (push "\n" (push (fv_label v) acc)))))))
 
 ; The labels of vols that none of old has.
 (def new_labels ((old (array FsVol)) (vols (list FsVol))) (list (list int))
@@ -1317,8 +1389,8 @@
       (nil (list int))
       (match (head vols)
         ((FsVol di start u v)
-          (if (lt (vol_index old (vol_label v) 0) 0)
-              (cons (vol_label v) (new_labels old (tail vols)))
+          (if (lt (vol_index old (fv_label v) 0) 0)
+              (cons (fv_label v) (new_labels old (tail vols)))
               (new_labels old (tail vols)))))))
 
 ; A rescan, its new labels mounted from f's port, and those that have
@@ -1392,7 +1464,7 @@
   (match (disk_open)
     ((NoDisk why) (nothing_to_serve why))
     ((Disk name port rp pid n)
-      (match (disk_buffer (Disk name port rp pid n) (vol_cluster_sectors))
+      (match (disk_buffer (Disk name port rp pid n) (store_chunk))
         ((NoDiskBuf why) (complain why))
         ((DiskBuf va pages there r)
           (fs_on (attached_all (fs_new (StoreDisk (Disk name port rp pid n) (DiskBuf va pages there r)) 0 (vols_array (nil FsVol)))
@@ -1430,7 +1502,7 @@
           (let v (vol_new (ram_label) l)
             (match (store_write_all (StoreRam ((MapEmpty int bytes)) sectors) 0 (vol_meta v))
               ((PutNot s why) (complain why))
-              ((Put s) (found_as (fs_new s 0 (vols_array (nil FsVol))) (cons (FsVol 0 0 (ram_uuid) v) (nil FsVol)) "tmpfs" false))))))))
+              ((Put s) (found_as (fs_new s 0 (vols_array (nil FsVol))) (cons (FsVol 0 0 (ram_uuid) (FvL0 v)) (nil FsVol)) "tmpfs" false))))))))
 
 ; f's disks' volumes found, mounted and served, each disk with no table
 ; or no volumes said so.
@@ -1518,7 +1590,103 @@
             ((VolGot v)
               (match (load_dirs s2 start v (cons (vol_root v) (nil int)))
                 ((DirsNot s3 why) (load_vols s3 di parts (cons_not acc start why)))
-                ((Dirs s3 v2) (load_vols s3 di parts (cons (FsVol di start u v2) acc))))))))))
+                ((Dirs s3 v2) (load_vols s3 di parts (cons (FsVol di start u (FvL0 v2)) acc))))))))))
+
+; ----------------------------------------------------------------- FAT32
+
+; What sector 0 of a disk with no GPT holds: an MBR's table, of
+; partitions FAT32 may be on; or none.
+(data MbrTable (MbrHas Store MbrDisk) (MbrHasNot Store))
+
+; The MBR of s, if it has one of its own.
+(def read_mbr ((s Store)) MbrTable
+  (match (store_read s 0 1)
+    ((GotNot s2 why) (MbrHasNot s2))
+    ((Got s2 b)
+      (match (mbr_of b)
+        ((MbrGot d) (MbrHas s2 d))
+        ((MbrProtective) (MbrHasNot s2))
+        ((MbrNone) (MbrHasNot s2))))))
+
+; The FAT32 volumes of GPT's partitions parts, of disk di, onto acc.
+(def load_gpt_fats ((s Store) (di int) (parts (list GptPart)) (acc (list FsVol))) Loaded
+  (if (is_empty parts)
+      (Loaded s (rev acc))
+      (match (head parts)
+        ((GptPart ty u start count name)
+          (match (load_fat s start count)
+            ((FatNotLoaded s2 why) (load_gpt_fats s2 di (tail parts) (cons_not acc start why)))
+            ((FatLoaded s2 v) (load_gpt_fats s2 di (tail parts) (cons (FsVol di start (uuid_text u) (FvFat v)) acc))))))))
+
+; The FAT32 volumes of MBR's partitions parts, of disk di, its
+; signature sig, onto acc: each known by mbr_part_uuid.
+(def load_fats ((s Store) (di int) (parts (list MbrPart)) (sig int) (acc (list FsVol))) Loaded
+  (if (is_empty parts)
+      (Loaded s (rev acc))
+      (match (head parts)
+        ((MbrPart k ty start count)
+          (match (load_fat s start count)
+            ((FatNotLoaded s2 why) (load_fats s2 di (tail parts) sig (cons_not acc start why)))
+            ((FatLoaded s2 v)
+              (load_fats s2 di (tail parts) sig (cons (FsVol di start (uuid_text (mbr_part_uuid sig k)) (FvFat v)) acc))))))))
+
+; A FAT32 volume read, and the store after; or why not.
+(data FatRead (FatLoaded Store FatVol) (FatNotLoaded Store (list int)))
+
+; The FAT32 volume on the partition at start, of count sectors: its boot
+; sector, its first FAT, and every directory from the root down, known
+; by its label made one label_ok takes. One not put away cleanly is
+; served all the same, and said so.
+(def load_fat ((s Store) (start int) (count int)) FatRead
+  (match (store_read s start 1)
+    ((GotNot s2 why) (FatNotLoaded s2 why))
+    ((Got s2 bt)
+      (match (fat_boot_of bt)
+        ((FatNotBoot why) (FatNotLoaded s2 why))
+        ((FatBoot g label)
+          (if (gt (fat_sectors g) count)
+              (FatNotLoaded s2 "a volume larger than its partition")
+              (match (store_read_all s2 (add start (fat_reserved g)) (fat_fatsz g))
+                ((GotNot s3 why) (FatNotLoaded s3 why))
+                ((Got s3 fb)
+                  (match (fat_base g label bt fb)
+                    ((FatBad why) (FatNotLoaded s3 why))
+                    ((FatGot l) (fat_loaded (load_fat_dirs s3 start l (cons (fat_root_of g) (nil int))) start)))))))))))
+
+; A FAT32 volume with every directory read, or why not.
+(data FatDirs (FatDirs Store FatLoad) (FatDirsNot Store (list int)))
+
+; What load_fat gives once d is read, the partition at start: the
+; volume known by a label label_ok takes.
+(def fat_loaded ((d FatDirs) (start int)) FatRead
+  (match d
+    ((FatDirsNot s why) (FatNotLoaded s why))
+    ((FatDirs s l)
+      (let v (fat_load_vol l)
+        (let w (if (fat_unclean v) (warn_as "fs" (append "the FAT32 volume at sector " (append (digits start) " was not put away cleanly"))) 0)
+          (FatLoaded s (fat_with_label v (fat_mount_label (fat_label v) (fat_serial (fat_geom v))))))))))
+
+; l, its partition from start, with the directories from dcs on read,
+; and those in them.
+(def load_fat_dirs ((s Store) (start int) (l FatLoad) (dcs (list int))) FatDirs
+  (if (is_empty dcs)
+      (FatDirs s l)
+      (let g (fat_geom (fat_load_vol l))
+        (match (read_fat_clusters s start g (fat_dir_clusters l (head dcs)) (nil bytes))
+          ((GotNot s2 why) (FatDirsNot s2 why))
+          ((Got s2 bs)
+            (match (fat_add_dir l (head dcs) bs)
+              ((FatBad why) (FatDirsNot s2 why))
+              ((FatGot l2) (load_fat_dirs s2 start l2 (append (fat_load_subdirs l2 (head dcs)) (tail dcs))))))))))
+
+; The clusters cs of a FAT32 volume of g on the partition from start,
+; in order, after acc, reversed, joined once.
+(def read_fat_clusters ((s Store) (start int) (g FatGeom) (cs (list int)) (acc (list bytes))) Got
+  (if (is_empty cs)
+      (Got s (bytes_concat (rev acc)))
+      (match (store_read s (add start (fat_cluster_at g (head cs))) (fat_spc g))
+        ((GotNot s2 why) (GotNot s2 why))
+        ((Got s2 bs) (read_fat_clusters s2 start g (tail cs) (cons bs acc))))))
 
 ; A volume with every directory read, or why not, and the store after.
 (data Dirs (Dirs Store Vol) (DirsNot Store (list int)))
@@ -1583,8 +1751,8 @@
       0
       (match (head vols)
         ((FsVol di start u v)
-          (match (fs_mount (vol_label v) u port)
-            ((Mounted) (let w (info_as "fs" (volume_line (vol_label v) start u)) (mount_all port (tail vols))))
-            ((MountNoPort) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountNoPort))))) (mount_all port (tail vols))))
-            ((MountTaken) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountTaken))))) (mount_all port (tail vols))))
-            ((MountBadLabel) (let w (complain (append (vol_label v) (append ": " (mounting_why (MountBadLabel))))) (mount_all port (tail vols)))))))))
+          (match (fs_mount (fv_label v) u port)
+            ((Mounted) (let w (info_as "fs" (volume_line (fv_label v) start u)) (mount_all port (tail vols))))
+            ((MountNoPort) (let w (complain (append (fv_label v) (append ": " (mounting_why (MountNoPort))))) (mount_all port (tail vols))))
+            ((MountTaken) (let w (complain (append (fv_label v) (append ": " (mounting_why (MountTaken))))) (mount_all port (tail vols))))
+            ((MountBadLabel) (let w (complain (append (fv_label v) (append ": " (mounting_why (MountBadLabel))))) (mount_all port (tail vols)))))))))

@@ -13,30 +13,42 @@
 ; disk registered since; Format Volume empties a volume, once a dialog
 ; has asked. It keeps one reply port for the file server, and one buffer
 ; shared with each disk's driver, for as long as it runs.
+;
+; A volume is L0S's own, L0FS, or FAT32 (user/lib/format/fat.l0), which
+; Format... makes either of, as its dialog's toggle says. A disk with no
+; GPT but an MBR, as Raspberry Pi's Imager writes, shows its partitions
+; and their volumes; L0S makes no partitions in an MBR, so its free
+; space offers nothing, and a partition no volume is served on, no
+; Format... either.
 
 ; ------------------------------------------------------------------ model
 
-; What a partition holds: a volume of L0S's file system, mounted, with
-; its label, clusters of data, those free, and files; one no server
-; serves, with its label; or anything else, and why it is no volume.
-(data DkContent (DkVolume (list int) int int int) (DkUnmounted (list int)) (DkUnknown (list int)))
+; What a partition holds: a volume, mounted, with its label, clusters of
+; data, those free, files, a cluster's bytes, and whether it is FAT32;
+; one no server serves, with its label and whether it is FAT32; or
+; anything else, and why it is no volume.
+(data DkContent (DkVolume (list int) int int int int bool) (DkUnmounted (list int) bool) (DkUnknown (list int)))
 
 ; A part of the disk: a partition, its number in the table from 1, first
 ; sector, sectors, its entry in the table, and what it holds; or free
 ; space, its first sector and sectors.
 (data DkSeg (DkPart int int int GptPart DkContent) (DkFree int int))
 
-; The drive: its sectors, whether it has a partition table, and its parts
-; in order; or why there is none.
-(data DkDrive (DkDrive int bool (list DkSeg)) (DkNoDrive (list int)))
+; The drive: its sectors, its partition table, dk_gpt, dk_mbr or none,
+; 0, and its parts in order; or why there is none.
+(data DkDrive (DkDrive int int (list DkSeg)) (DkNoDrive (list int)))
+
+; A drive's tables: GPT's, and MBR's.
+(def dk_gpt () int 1)
+(def dk_mbr () int 2)
 
 ; A dialog over the window: none; asking whether to format a mounted
 ; volume, by its label; asking how much of the free space from a sector,
 ; of so many, a new partition is to have, the size typed so far; or
 ; asking what a new volume on partition N, of a UUID, is to be called,
-; the label it had if it held a volume no server serves, and the name
-; typed so far.
-(data DkDialog (DkNoDialog) (DkConfirm (list int)) (DkCreate int int UiEntryText) (DkMkfs int Uuid (list int) UiEntryText))
+; the label it had if it held a volume no server serves, the name typed
+; so far, and whether it is to be FAT32.
+(data DkDialog (DkNoDialog) (DkConfirm (list int)) (DkCreate int int UiEntryText) (DkMkfs int Uuid (list int) UiEntryText bool))
 
 ; What can be done with the selected part: free space made a partition,
 ; from its first sector, of its sectors; a mounted volume formatted, by
@@ -82,14 +94,32 @@
     ((GptUnused start count) (DkFree start count))))
 
 ; What a partition's first sector, read as bs, says it holds, mounted if
-; space is the answer of df: a volume of L0S's file system, or not.
+; space is the answer of df: a volume of L0FS or FAT32, or not. A FAT32
+; volume's label is the one fs mounts it at, of its boot sector's.
 (def dk_content_of ((bs bytes) (space FsSpace)) DkContent
   (match (vol_super_of bs)
-    ((VolNotSuper why) (DkUnknown why))
-    ((VolSuper label l)
-      (match space
-        ((FsSpace sectors clusters free files) (DkVolume label clusters free files))
-        ((FsSpaceRefused code) (DkUnmounted label))))))
+    ((VolSuper label l) (dk_content_with label (vol_cluster_size) false space))
+    ((VolNotSuper why)
+      (match (fat_boot_of bs)
+        ((FatBoot g label) (dk_content_with (fat_mount_label label (fat_serial g)) (vol_cluster_size) true space))
+        ((FatNotBoot why2) (DkUnknown (if (eq why2 "no FAT32 volume") why why2)))))))
+
+; A volume labelled label, of clusters of cb bytes, FAT32's if fat:
+; mounted if space says how full it is.
+(def dk_content_with ((label (list int)) (cb int) (fat bool) (space FsSpace)) DkContent
+  (match space
+    ((FsSpace sectors clusters free files) (DkVolume label clusters free files cb fat))
+    ((FsSpaceRefused code) (DkUnmounted label fat))))
+
+; The label a volume whose first sector is bs is mounted at, if it is
+; one: L0FS's superblock's, or FAT32's as fs makes it; else empty.
+(def dk_label_of ((bs bytes)) (list int)
+  (match (vol_super_of bs)
+    ((VolSuper label l) label)
+    ((VolNotSuper why)
+      (match (fat_boot_of bs)
+        ((FatBoot g label) (fat_mount_label label (fat_serial g)))
+        ((FatNotBoot why2) "")))))
 
 ; ------------------------------------------------------------------- text
 
@@ -110,9 +140,25 @@
 (def dk_three ((n int)) (list int)
   (if (lt n 10) (append "00" (digits n)) (if (lt n 100) (append "0" (digits n)) (digits n))))
 
-; What a partition's type is called.
+; What a partition's type is called: L0FS's, Microsoft's basic data,
+; EFI's, an MBR's by its byte as dk_mbr_type keeps it, or its UUID.
 (def dk_type_text ((ty Uuid)) (list int)
-  (if (eq ty (gpt_l0fs_type)) "L0FS" (uuid_text ty)))
+  (if (eq ty (gpt_l0fs_type))
+      "L0FS"
+      (if (eq ty (gpt_basic_type))
+          "Microsoft Basic Data"
+          (if (eq ty (gpt_esp_type))
+              "EFI System"
+              (if (starts_with (uuid_bytes ty) "MBR")
+                  (mbr_type_text (last (uuid_bytes ty)))
+                  (uuid_text ty))))))
+
+; An MBR partition's type byte ty, kept where a GPT partition's type
+; goes: MBR, zeros, then ty.
+(def dk_mbr_type ((ty int)) Uuid (Uuid (append "MBR" (append (zeros 12) (cons ty (nil int))))))
+
+; The name of a volume's format.
+(def dk_format_name ((fat bool)) (list int) (if fat "FAT32" "L0FS"))
 
 ; The bytes of sectors.
 (def dk_bytes ((sectors int)) int (mul sectors (dk_sector)))
@@ -123,8 +169,8 @@
     ((DkFree start count) "Free Space")
     ((DkPart n start count ty c)
       (match c
-        ((DkVolume label cl fr fi) label)
-        ((DkUnmounted label) label)
+        ((DkVolume label cl fr fi cb fat) label)
+        ((DkUnmounted label fat) label)
         ((DkUnknown why) (append "Partition " (digits n)))))))
 
 ; A part's line: its size, and what it holds.
@@ -133,19 +179,25 @@
     ((DkFree start count) (format_size (dk_bytes count)))
     ((DkPart n start count ty c)
       (append (format_size (dk_bytes count))
-              (match c ((DkVolume l a b e) " L0FS") ((DkUnmounted l) " L0FS") ((DkUnknown why) " Unknown"))))))
+              (match c
+                ((DkVolume l a b e cb fat) (cons 32 (dk_format_name fat)))
+                ((DkUnmounted l fat) (cons 32 (dk_format_name fat)))
+                ((DkUnknown why) " Unknown"))))))
 
 ; What a partition holds, in words.
 (def dk_contents_text ((c DkContent)) (list int)
   (match c
-    ((DkVolume label cl fr fi) (append "L0FS version 1 - Mounted at /Volumes/" label))
-    ((DkUnmounted label) "L0FS version 1 - Not Mounted")
+    ((DkVolume label cl fr fi cb fat) (append (dk_format_long fat) (append " - Mounted at /Volumes/" label)))
+    ((DkUnmounted label fat) (append (dk_format_long fat) " - Not Mounted"))
     ((DkUnknown why) (append "Unknown - " why))))
 
-; How full a volume is: used, then free.
-(def dk_usage_text ((clusters int) (free int)) (list int)
-  (append (format_size (mul (sub clusters free) (vol_cluster_size)))
-          (append " used, " (append (format_size (mul free (vol_cluster_size))) " free"))))
+; A volume's format as Contents names it.
+(def dk_format_long ((fat bool)) (list int) (if fat "FAT32" "L0FS version 2"))
+
+; How full a volume of clusters of cb bytes is: used, then free.
+(def dk_usage_text ((clusters int) (free int) (cb int)) (list int)
+  (append (format_size (mul (sub clusters free) cb))
+          (append " used, " (append (format_size (mul free cb)) " free"))))
 
 ; How much of a volume is used, in percent: at least 1 if any is, so
 ; that the level bar shows it.
@@ -188,18 +240,24 @@
 (def dk_seg_keyed ((segs (list DkSeg)) (key (list int))) (Option DkSeg)
   (if (is_empty segs) ((None DkSeg)) (if (eq (dk_key (head segs)) key) (Some (head segs)) (dk_seg_keyed (tail segs) key))))
 
-; What can be done with the selected part.
+; The drive's table: dk_gpt, dk_mbr, or 0 for none.
+(def dk_scheme ((m Disks)) int
+  (match m ((Disks d sel dlg st) (match d ((DkDrive n gpt segs) gpt) ((DkNoDrive why) 0)))))
+
+; What can be done with the selected part: on an MBR's disk, only a
+; mounted volume formatted, since L0S makes neither partitions nor
+; volumes in an MBR.
 (def dk_act ((m Disks)) DkAct
   (match (dk_selected_seg m)
     ((None) (DkActNone))
     ((Some s)
       (match s
-        ((DkFree start count) (DkActCreate start count))
+        ((DkFree start count) (if (eq (dk_scheme m) (dk_mbr)) (DkActNone) (DkActCreate start count)))
         ((DkPart n start count p c)
           (match c
-            ((DkVolume label a b e) (DkActFormat label))
-            ((DkUnmounted label) (DkActMkfs n (gpt_part_uuid p) label))
-            ((DkUnknown why) (DkActMkfs n (gpt_part_uuid p) ""))))))))
+            ((DkVolume label a b e cb fat) (DkActFormat label))
+            ((DkUnmounted label fat) (if (eq (dk_scheme m) (dk_mbr)) (DkActNone) (DkActMkfs n (gpt_part_uuid p) label)))
+            ((DkUnknown why) (if (eq (dk_scheme m) (dk_mbr)) (DkActNone) (DkActMkfs n (gpt_part_uuid p) "")))))))))
 
 ; The label of the selected part, if it is a mounted volume, which only
 ; can be emptied by Format Volume; else empty.
@@ -295,23 +353,39 @@
   (match a
     ((DkActFormat label) (if (eq action "app.format") (DkConfirm label) dlg))
     ((DkActCreate start count) (if (eq action "app.create") (DkCreate start count (ui_entry_new (dk_kb_text count))) dlg))
-    ((DkActMkfs n u had) (if (eq action "app.mkfs") (DkMkfs n u had (ui_entry_new had)) dlg))
+    ((DkActMkfs n u had) (if (eq action "app.mkfs") (DkMkfs n u had (ui_entry_new had) false) dlg))
     ((DkActNone) dlg)))
 
 ; The entries' names in the dialogs.
 (def dk_size_entry () (list int) "size")
 (def dk_label_entry () (list int) "label")
 
-; The dialog with what action typed in its entry, if it has one. A name
-; is kept to the 15 characters a label may have.
+; The prefix of the format dialog's toggles, and their keys.
+(def dk_fmt () (list int) "fmt")
+(def dk_fmt_l0fs () (list int) "l0fs")
+(def dk_fmt_fat () (list int) "fat32")
+
+; The dialog with what action typed in its entry, if it has one, or the
+; format its toggle chose. A name is kept to the 15 characters a label
+; may have, or FAT32's 11.
 (def dk_edited ((dlg DkDialog) (action (list int)) (ev UiEvent)) DkDialog
   (match dlg
     ((DkNoDialog) dlg)
     ((DkConfirm label) dlg)
     ((DkCreate start count t) (DkCreate start count (ui_entry_update (dk_size_entry) t action ev)))
-    ((DkMkfs n u had t)
-      (let t2 (ui_entry_update (dk_label_entry) t action ev)
-        (DkMkfs n u had (if (gt (length (ui_entry_text t2)) (label_max)) t t2))))))
+    ((DkMkfs n u had t fat)
+      (let fk (ui_select_key (dk_fmt) action)
+        (if (not (is_empty fk))
+            (DkMkfs n u had t (eq fk (dk_fmt_fat)))
+            (let t2 (ui_entry_update (dk_label_entry) t action ev)
+              (DkMkfs n u had (if (gt (length (ui_entry_text t2)) (dk_label_max fat)) t t2) fat)))))))
+
+; The longest label a volume may have: FAT32's 11, or 15.
+(def dk_label_max ((fat bool)) int (if fat (fat_label_max) (label_max)))
+
+; Whether label may be a new volume's, FAT32's if fat.
+(def dk_label_fits ((label (list int)) (fat bool)) bool
+  (if (label_ok label) (le (length label) (dk_label_max fat)) false))
 
 ; The action of the entry a dialog has, for the focus to go to as it
 ; opens; "" for one with none.
@@ -320,7 +394,7 @@
     ((DkNoDialog) "")
     ((DkConfirm label) "")
     ((DkCreate start count t) (ui_entry_action (dk_size_entry)))
-    ((DkMkfs n u had t) (ui_entry_action (dk_label_entry)))))
+    ((DkMkfs n u had t fat) (ui_entry_action (dk_label_entry)))))
 
 ; The dialog open, if any.
 (def dk_dialog ((m Disks)) DkDialog (match m ((Disks d sel dlg st) dlg)))
@@ -337,7 +411,7 @@
               ((DkNoDialog) (Disks d (ui_segbar_key (dk_segments_of m) sel code) dlg st))
               ((DkConfirm label) (dk_escaped m code))
               ((DkCreate start count t) (dk_escaped m code))
-              ((DkMkfs n u had t) (dk_escaped m code))))))))
+              ((DkMkfs n u had t fat) (dk_escaped m code))))))))
 
 ; The dialog closed if code is Esc.
 (def dk_escaped ((m Disks) (code int)) Disks
@@ -362,7 +436,7 @@
           ((DkNoDialog) page)
           ((DkConfirm label) (UiModal page (dk_alert label)))
           ((DkCreate start count t) (UiModal page (dk_create_alert count t)))
-          ((DkMkfs n u had t) (UiModal page (dk_mkfs_alert n had t))))))))
+          ((DkMkfs n u had t fat) (UiModal page (dk_mkfs_alert n had t fat))))))))
 
 ; The dialog asking whether to format label.
 (def dk_alert ((label (list int))) UiWidget
@@ -386,22 +460,28 @@
       (cons (dk_cancel) (cons (UiButton "dialog.create" "" "Create" (UiBtnSuggested) (gt n 0)) (nil UiWidget))))))
 
 ; The dialog asking what a new volume on partition n is to be called, t
-; typed so far: where it will be mounted said as it is typed, and Format
-; only for a label a volume may have. Red, and saying so, if the
-; partition held a volume, had.
-(def dk_mkfs_alert ((n int) (had (list int)) (t UiEntryText)) UiWidget
+; typed so far, and of which format, FAT32 if fat, as its toggles say:
+; where it will be mounted said as it is typed, and Format only for a
+; label the volume may have. Red, and saying so, if the partition held a
+; volume, had.
+(def dk_mkfs_alert ((n int) (had (list int)) (t UiEntryText) (fat bool)) UiWidget
   (let label (ui_entry_text t)
     (ui_alert_form (append "Format Partition " (digits n))
-      (cons "A new, empty L0FS volume."
+      (cons (if fat "A new, empty FAT32 volume, which a Raspberry Pi boots from." "A new, empty L0FS volume.")
             (if (is_empty had) (nil (list int)) (cons (append "Every file on " (append had " will be lost.")) (nil (list int)))))
-      (cons (UiProps (cons (UiProp "Volume Name" (UiEntry (dk_label_entry) t "" (dk_label_entry_w)))
+      (cons (UiProps (cons (UiProp "Type" (UiToggleGroup (dk_fmt) (dk_fmt_toggles) (if fat (dk_fmt_fat) (dk_fmt_l0fs))))
+                     (cons (UiProp "Volume Name" (UiEntry (dk_label_entry) t "" (dk_label_entry_w)))
                            (cons (UiProp "Mounted At" (dk_at_least (ui_text_w (append "/Volumes/" (dk_longest_label)) false 1)
-                                                                   (dk_value (if (label_ok label) (append "/Volumes/" label) "-"))))
-                                 (nil UiProp))))
+                                                                   (dk_value (if (dk_label_fits label fat) (append "/Volumes/" label) "-"))))
+                                 (nil UiProp)))))
             (nil UiWidget))
       (cons (dk_cancel)
-            (cons (UiButton "dialog.mkfs" "" "Format" (if (is_empty had) (UiBtnSuggested) (UiBtnDestructive)) (label_ok label))
+            (cons (UiButton "dialog.mkfs" "" "Format" (if (is_empty had) (UiBtnSuggested) (UiBtnDestructive)) (dk_label_fits label fat))
                   (nil UiWidget))))))
+
+; The format dialog's toggles: L0FS, L0S's own, and FAT32.
+(def dk_fmt_toggles () (list UiToggle)
+  (cons (UiToggle (dk_fmt_l0fs) "" "L0FS") (cons (UiToggle (dk_fmt_fat) "" "FAT32") (nil UiToggle))))
 
 ; w at least w wide, so that a dialog keeps its width as what is in it is
 ; typed.
@@ -472,11 +552,11 @@
                 (cons (UiButton "app.refresh" "view-refresh" "Refresh" (UiBtnFlat) true) (nil UiWidget))))))
 
 ; The drive's properties: the disk's name, as its driver registered it,
-; its size, and its partitioning, a GPT if it has a table.
-(def dk_drive_props ((n int) (gpt bool) (name (list int))) (list UiProp)
+; its size, and its partitioning, its table: GPT's, MBR's, or none.
+(def dk_drive_props ((n int) (gpt int) (name (list int))) (list UiProp)
   (cons (UiProp "Device" (dk_value name))
         (cons (UiProp "Size" (dk_value (dk_size_long (dk_bytes n))))
-              (cons (UiProp "Partitioning" (dk_value (if gpt "GUID Partition Table" "None")))
+              (cons (UiProp "Partitioning" (dk_value (if (eq gpt (dk_gpt)) "GUID Partition Table" (if (eq gpt (dk_mbr)) "Master Boot Record" "None"))))
                     (nil UiProp)))))
 
 ; A property's value: text.
@@ -515,12 +595,12 @@
 ; How full a mounted volume is, and its files; nothing for any other.
 (def dk_usage_props ((c DkContent)) (list UiProp)
   (match c
-    ((DkVolume label clusters free files)
+    ((DkVolume label clusters free files cb fat)
       (cons (UiProp "Usage" (UiBox (UiH) (ui_space_m)
                               (cons (UiLevel (dk_used_pct clusters free) 160)
-                                    (cons (dk_value (dk_usage_text clusters free)) (nil UiWidget)))))
+                                    (cons (dk_value (dk_usage_text clusters free cb)) (nil UiWidget)))))
             (cons (UiProp "Files" (dk_value (digits files))) (nil UiProp))))
-    ((DkUnmounted label) (nil UiProp))
+    ((DkUnmounted label fat) (nil UiProp))
     ((DkUnknown why) (nil UiProp))))
 
 ; Where a part is: its first and last sectors.
@@ -591,18 +671,36 @@
           ((DkNoIo why) acc)
           ((DkIo d b rp) (cons (dk_side_row i (disk_name_of d) (disk_sectors d)) acc))))))
 
-; The drive as it is now: its GPT read, and each partition's first
-; sector, and asked how full it is if it is a volume. A disk with no
-; table, or a bad one, is all free space.
+; The drive as it is now: its GPT read, or, if it has none, its MBR; and
+; each partition's first sector, and asked how full it is if it is a
+; volume. A disk with neither, or a bad GPT, is all free space.
 (def dk_read ((io DkIo)) DkDrive
   (match io
     ((DkNoIo why) (DkNoDrive why))
     ((DkIo d b rp)
       (match (dk_table d b)
-        ((GptBad why) (DkDrive (disk_sectors d) false (dk_segments (disk_sectors d) (nil GptPart) (nil DkContent))))
-        ((GptGot t)
-          (let parts (gpt_parts t)
-            (DkDrive (disk_sectors d) true (dk_segments (disk_sectors d) parts (dk_contents d b rp parts (nil DkContent))))))))))
+        ((GptBad why)
+          (match (dk_sectors_bytes d b 0 1)
+            ((DkBytesNot why2) (dk_drive_of d b rp 0 (nil GptPart)))
+            ((DkBytes s0)
+              (match (mbr_of s0)
+                ((MbrGot t) (dk_drive_of d b rp (dk_mbr) (dk_mbr_parts (mbr_sig t) (mbr_parts t))))
+                ((MbrProtective) (dk_drive_of d b rp 0 (nil GptPart)))
+                ((MbrNone) (dk_drive_of d b rp 0 (nil GptPart)))))))
+        ((GptGot t) (dk_drive_of d b rp (dk_gpt) (gpt_parts t)))))))
+
+; The drive of disk d, its table gpt, its partitions parts, each read.
+(def dk_drive_of ((d Disk) (b DiskBuf) (rp int) (gpt int) (parts (list GptPart))) DkDrive
+  (DkDrive (disk_sectors d) gpt (dk_segments (disk_sectors d) parts (dk_contents d b rp parts (nil DkContent)))))
+
+; An MBR's partitions as GPT's, for the bar: each's type kept as
+; dk_mbr_type has it, its UUID the one fs mounts it by, and no name.
+(def dk_mbr_parts ((sig int) (ps (list MbrPart))) (list GptPart)
+  (if (is_empty ps)
+      (nil GptPart)
+      (match (head ps)
+        ((MbrPart k ty start count)
+          (cons (GptPart (dk_mbr_type ty) (mbr_part_uuid sig k) start count "") (dk_mbr_parts sig (tail ps)))))))
 
 ; The disk's GPT, from its header at sector 1 and the entries it names.
 (def dk_table ((d Disk) (b DiskBuf)) GptRead
@@ -637,9 +735,8 @@
 
 ; How full the volume whose first sector is bs is, by df, if it is one.
 (def dk_space ((rp int) (bs bytes)) FsSpace
-  (match (vol_super_of bs)
-    ((VolNotSuper why) (FsSpaceRefused -3))
-    ((VolSuper label l) (fs_df_on rp (append "/Volumes/" label)))))
+  (let label (dk_label_of bs)
+    (if (is_empty label) (FsSpaceRefused -3) (fs_df_on rp (append "/Volumes/" label)))))
 
 ; The port the file server's replies come to, 0 for none.
 (def dk_rp ((io DkIo)) int (match io ((DkIo d b rp) rp) ((DkNoIo why) 0)))
@@ -659,7 +756,7 @@
       (match dlg
         ((DkNoDialog) m)
         ((DkCreate start count t) m)
-        ((DkMkfs n u had t) m)
+        ((DkMkfs n u had t fat) m)
         ((DkConfirm label)
           (let code (fs_format_on (dk_rp io) (append "/Volumes/" label))
             (dk_rescanned m (dk_read io)
@@ -671,7 +768,7 @@
   (match (dk_dialog m)
     ((DkNoDialog) m)
     ((DkConfirm label) m)
-    ((DkMkfs n u had t) m)
+    ((DkMkfs n u had t fat) m)
     ((DkCreate start count t)
       (let n (dk_size_sectors (ui_entry_text t) count)
         (if (eq n 0)
@@ -683,18 +780,18 @@
                     ((FsPartitioned u) (dk_with_uuid m2 u))
                     ((FsPartitionRefused code why) m2))))))))))
 
-; The dialog's volume made by the file server, if its label is one; then
-; the disk read again.
+; The dialog's volume made by the file server, of the format its toggle
+; chose, if its label is one; then the disk read again.
 (def dk_made ((io DkIo) (m Disks)) Disks
   (match (dk_dialog m)
     ((DkNoDialog) m)
     ((DkConfirm label) m)
     ((DkCreate start count t) m)
-    ((DkMkfs n u had t)
+    ((DkMkfs n u had t fat)
       (let label (ui_entry_text t)
-        (if (not (label_ok label))
+        (if (not (dk_label_fits label fat))
             m
-            (let made (fs_mkfs_on (dk_rp io) u label)
+            (let made (fs_mkfs_as_on (dk_rp io) u label fat)
               (let r (fs_rescan_on (dk_rp io))
                 (dk_rescanned m (dk_read io) (dk_made_text made)))))))))
 

@@ -193,3 +193,66 @@
 (def test_usage () int
   (add (check_int "too few" (mkfs (cons "out" (nil (list int)))) 1)
        (check_int "no time" (mkfs (cons "out" (cons "2048" (cons "now" (cons "a:40:100" (nil (list int))))))) 1)))
+
+; ------------------------------------------------------------------ FAT32
+
+(def test_plan_fat () int
+  (add (check_str "a FAT32 volume" (why_of "71680" (cons "BOOT:2048:67584:fat32" (nil (list int)))) "")
+       (add (check_str "too small" (why_of "71680" (cons "BOOT:2048:20000:fat32" (nil (list int))))
+                       "BOOT is too small for FAT32, which needs at least 33 MB")
+            (check_str "a long label" (why_of "71680" (cons "TWELVELETTER:2048:67584:fat32" (nil (list int))))
+                       "a FAT32 label is at most 11 characters: TWELVELETTER"))))
+
+(def test_archive_path () int
+  (add (check_str "none" (archive_path "fat32") "")
+       (add (check_str "given" (archive_path "fat32=root.cpio") "root.cpio")
+            (check_bool "L0FS" (is_fat_archive "root.cpio") false))))
+
+; The archive's FAT32 volume of 33 MB from sector 2048, in an image:
+; its boot sector where it goes, and sh's bytes where its cluster is.
+(def fat_image () bytes
+  (match (parse_initramfs (archive))
+    ((Err why) (bytes_from_list why))
+    ((Ok es)
+      (let vol (MkVol "BOOT" 2048 67584 "fat32=x" ((None Uuid)))
+        (match (vol_made vol (head (ids)) (archive) es)
+          ((MadeBad why) (bytes_from_list why))
+          ((Made l u ps) (image_of (pieces 71680 (head (ids)) (cons vol (nil MkVol)) (cons (Made l u ps) (nil Made))) 71680)))))))
+
+(def test_fat_image () int
+  (let b (fat_image)
+    (match (fat_boot_of (bytes_from_list (bytes_range b (mul 2048 512) (mul 2049 512))))
+      ((FatNotBoot why) (fail_because "a boot sector" why))
+      ((FatBoot g label)
+        (add (check_str "label" label "BOOT")
+             (check_int "the partition's start" (le_u32 (bytes_from_list (bytes_range b (mul 2048 512) (mul 2049 512))) 28) 2048))))))
+
+; The root holds the label, bin and etc; bin's cluster 3, sh's 4, each a
+; sector, from the data's first, 32 + 2 * 528 after 2048.
+(def test_fat_image_bytes () int
+  (let at (mul (add 2048 (add 1088 2)) 512)
+    (check_str "sh" (bytes_range (fat_image) at (add at 5)) "shell")))
+
+(def test_fat_table_type () int
+  (match (gpt_disk_of (gpt_header_of (bytes_from_list (bytes_range (fat_image) 512 1024))) (bytes_from_list (bytes_range (fat_image) 1024 17408)))
+    ((GptBad why) (fail_because "a table" why))
+    ((GptGot d) (check_bool "basic data" (eq (gpt_part_type (head (gpt_parts d))) (gpt_basic_type)) true))))
+
+; ------------------------------------------------------------------- MBR
+
+(def test_mbr_refusals () int
+  (add (check_str "L0FS" (mbr_why (cons (empty_vol "data" 40 1496) (nil MkVol))) "an MBR here holds FAT32 volumes only")
+       (check_str "FAT32" (mbr_why (cons (MkVol "B" 2048 67584 "fat32" ((None Uuid))) (nil MkVol))) "")))
+
+(def test_mbr_sector () int
+  (match (mbr_of (bytes_from_list (mbr_bytes 305419896 (cons (MkVol "B" 2048 67584 "fat32" ((None Uuid))) (nil MkVol)))))
+    ((MbrGot d)
+      (add (check_int "one" (length (mbr_parts d)) 1)
+           (check_int "0C" (mbr_part_type (head (mbr_parts d))) 12)))
+    ((MbrProtective) (fail_because "a table" "protective"))
+    ((MbrNone) (fail_because "a table" "none"))))
+
+(def test_mbr_uuids () int
+  (check_str "of the signature"
+    (uuids_text (mbr_named (made_empty (cons (empty_vol "a" 40 100) (nil MkVol)) (tail (ids))) 305419896 1))
+    "a 12345678-0000-0000-0000-000000000001\n"))

@@ -1,0 +1,372 @@
+; fat_test.l0 -- tests of fat.l0: names, the layout, the boot sector,
+; and volumes made, changed, written as their pieces and read back.
+
+; ------------------------------------------------------------------ names
+
+(def test_name_ok () int
+  (add (check_bool "config.txt" (fat_name_ok "config.txt") true)
+       (add (check_bool "a colon" (fat_name_ok "a:b") false)
+            (check_bool "a final dot" (fat_name_ok "abc.") false))))
+
+(def test_fits_short () int
+  (add (check_bool "config.txt" (fat_fits_short "config.txt") true)
+       (add (check_bool "two cases" (fat_fits_short "Readme.txt") false)
+            (add (check_bool "two dots" (fat_fits_short "a.b.c") false)
+                 (check_bool "nine" (fat_fits_short "abcdefghi") false)))))
+
+(def test_short_of () int
+  (add (check_str "padded" (fat_short_of "config.txt") "CONFIG  TXT")
+       (check_int "both parts lowercase" (fat_nt_of "config.txt") 24)))
+
+; The base in lowercase, the extension not.
+(def test_nt_mixed () int
+  (check_int "base only" (fat_nt_of "kernel.IMG") 8))
+
+; As the specification reckons it; these by its algorithm.
+(def test_checksum () int
+  (add (check_int "an alias" (fat_checksum "LONGFI~1TXT") 212)
+       (check_int "a short name" (fat_checksum "CONFIG  TXT") 57)))
+
+(def test_alias () int
+  (add (check_str "first" (fat_alias "long file name.txt" 1) "LONGFI~1TXT")
+       (check_str "taken" (fat_alias_free "long file name.txt" 1 (cons "LONGFI~1TXT" (nil (list int)))) "LONGFI~2TXT")))
+
+(def test_short_name () int
+  (add (check_str "lowercase" (fat_short_name "CONFIG  TXT" 24) "config.txt")
+       (check_str "no extension" (fat_short_name "README     " 0) "README")))
+
+(def test_lfn_count () int
+  (add (check_int "short" (fat_lfn_count "config.txt") 0)
+       (check_int "fourteen" (fat_lfn_count "abcdefghijklmn") 2)))
+
+; 2024-03-15 12:34:56 UTC: (44 << 9) | (3 << 5) | 15, and
+; (12 << 11) | (34 << 5) | 28.
+(def test_time () int
+  (match (fat_time_of 1710506096000)
+    ((FatTime d t) (add (check_int "date" d 22639) (check_int "time" t 25692)))))
+
+(def test_time_before_1980 () int
+  (match (fat_time_of 0) ((FatTime d t) (check_int "1980-01-01" d 33))))
+
+; ----------------------------------------------------------------- layout
+
+; 512 MB: 8 sectors a cluster; a FAT of 1024 sectors holds the 131070
+; marks of (1048576 - 32) / 8 + 2; the data from 32 + 2048, aligned.
+(def test_layout_512 () int
+  (let g (fat_layout 1048576 1)
+    (add (check_int "a cluster" (fat_spc g) 8)
+         (add (check_int "a FAT" (fat_fatsz g) 1024)
+              (add (check_int "reserved" (fat_reserved g) 32)
+                   (check_int "clusters" (fat_clusters g) 130812))))))
+
+; 64 MB: a sector a cluster, the data aligned already.
+(def test_layout_64 () int
+  (let g (fat_layout 131072 1)
+    (add (check_int "a cluster" (fat_spc g) 1)
+         (check_bool "a FAT32 volume" (fat_layout_ok g) true))))
+
+(def test_too_small () int
+  (add (check_bool "30 MB" (fat_layout_ok (fat_layout 61440 1)) false)
+       (check_str "why" (fat_layout_why (fat_layout 61440 1)) "too small for FAT32, which needs at least 33 MB")))
+
+; ------------------------------------------------------------ boot sector
+
+(def geom_text ((g FatGeom)) (list int)
+  (let a (cons (fat_fsinfo_at g) (cons (fat_backup_at g) (nil int)))
+    (let b (cons (fat_fatsz g) (cons (fat_root_of g) (cons (fat_clusters g) (cons (fat_serial g) a))))
+      (unwords (numbers_words (cons (fat_sectors g) (cons (fat_spc g) (cons (fat_reserved g) (cons (fat_nfats g) b)))))))))
+
+(def test_boot_round_trip () int
+  (let g (fat_layout 1048576 305419896)
+    (match (fat_boot_of (fat_boot_new g 8192 "BOOT"))
+      ((FatNotBoot why) (fail_because "read back" why))
+      ((FatBoot g2 label)
+        (add (check_str "geometry" (geom_text g2) (geom_text g))
+             (check_str "label" label "BOOT"))))))
+
+(def test_boot_hidden () int
+  (check_int "the partition's start" (le_u32 (fat_boot_new (fat_layout 1048576 1) 8192 "B") 28) 8192))
+
+; pi-gen's bootfs, mkdosfs -F 32 -s 4 of 512 MB, rebuilt: 2 KB clusters.
+(def test_boot_pi_gen () int
+  (let b (fat_boot_new (FatGeom 1048576 4 32 2 2044 2 261630 1 1 6) 8192 "bootfs")
+    (match (fat_boot_of b)
+      ((FatNotBoot why) (fail_because "read" why))
+      ((FatBoot g label)
+        (add (check_int "2 KB" (fat_cluster_bytes g) 2048)
+             (check_str "label" label "bootfs"))))))
+
+(def test_boot_fat16 () int
+  (let b (fat_put16 (fat_boot_new (fat_layout 1048576 1) 0 "X") 22 200)
+    (match (fat_boot_of b)
+      ((FatNotBoot why) (check_str "why" why "FAT12 or FAT16, not FAT32"))
+      ((FatBoot g label) (fail_because "refused" "read")))))
+
+(def test_boot_none () int
+  (match (fat_boot_of (bytes_from_list (zeros 512)))
+    ((FatNotBoot why) (check_str "why" why "no FAT32 volume"))
+    ((FatBoot g label) (fail_because "refused" "read"))))
+
+(def test_mount_label () int
+  (add (check_str "kept" (fat_mount_label "bootfs" 1) "bootfs")
+       (add (check_str "a space" (fat_mount_label "MY DISK" 1) "MY_DISK")
+            (check_str "none" (fat_mount_label "" 305419896) "FAT-12345678"))))
+
+; --------------------------------------------------------------- volumes
+
+; A disk of sectors, written as pieces say.
+(def disk_put ((m (Map int bytes)) (ps (list FatPiece))) (Map int bytes)
+  (if (is_empty ps)
+      m
+      (match (head ps) ((FatPiece s b) (disk_put (disk_sectors_put m s b 0) (tail ps))))))
+
+(def disk_sectors_put ((m (Map int bytes)) (s int) (b bytes) (i int)) (Map int bytes)
+  (if (ge i (bytes_len b))
+      m
+      (disk_sectors_put (map_put m s (bytes_slice b i (add i 512))) (add s 1) b (add i 512))))
+
+; n sectors from s, zeros where none was written.
+(def disk_get ((m (Map int bytes)) (s int) (n int)) bytes
+  (bytes_concat (disk_get_onto m (add s (sub n 1)) n (nil bytes))))
+
+(def disk_get_onto ((m (Map int bytes)) (s int) (n int) (acc (list bytes))) (list bytes)
+  (if (le n 0)
+      acc
+      (disk_get_onto m (sub s 1) (sub n 1)
+        (cons (match (map_get m s) ((Some b) b) ((None) (bytes_from_list (zeros 512)))) acc))))
+
+; A new 64 MB volume, as its pieces put it on a disk.
+(def made () FatVol (fat_new (fat_layout 131072 7) 2048 "BOOT" 1710506096000))
+(def made_disk () (Map int bytes) (disk_put ((MapEmpty int bytes)) (fat_all_pieces (made))))
+
+; The volume a disk holds, read as fs reads it: the boot sector, the
+; first FAT, then every directory from the root down.
+(def read_back ((m (Map int bytes))) (Option FatVol)
+  (match (fat_boot_of (disk_get m 0 1))
+    ((FatNotBoot why) ((None FatVol)))
+    ((FatBoot g label)
+      (match (fat_base g label (disk_get m 0 1) (disk_get m (fat_reserved g) (fat_fatsz g)))
+        ((FatBad why) ((None FatVol)))
+        ((FatGot l) (load_dirs m l (cons (fat_root_of g) (nil int))))))))
+
+(def load_dirs ((m (Map int bytes)) (l FatLoad) (dcs (list int))) (Option FatVol)
+  (if (is_empty dcs)
+      (Some (fat_load_vol l))
+      (match (fat_add_dir l (head dcs) (clusters_of m (fat_geom (fat_load_vol l)) (fat_dir_clusters l (head dcs))))
+        ((FatBad why) ((None FatVol)))
+        ((FatGot l2) (load_dirs m l2 (append (fat_load_subdirs l2 (head dcs)) (tail dcs)))))))
+
+(def clusters_of ((m (Map int bytes)) (g FatGeom) (cs (list int))) bytes
+  (if (is_empty cs)
+      (bytes_from_list (nil int))
+      (bytes_concat (cons (disk_get m (fat_cluster_at g (head cs)) (fat_spc g))
+                          (cons (clusters_of m g (tail cs)) (nil bytes))))))
+
+; A listing as text: each name, / after a directory's, and a file's size.
+(def listing_text ((es (list VolEntry))) (list int)
+  (if (is_empty es)
+      ""
+      (append (match (head es)
+                ((VolFile name size first exec) (append name (append " " (digits size))))
+                ((VolDir name first) (append name "/"))
+                ((VolNone) "?"))
+              (append ";" (listing_text (tail es))))))
+
+; v with a file name made in directory dc.
+(def with_file ((v FatVol) (dc int) (name (list int))) FatVol
+  (match (fat_slot v dc name)
+    ((FatNoSlot) v)
+    ((FatSlot v2 r) (fat_create v2 r name 0))))
+
+; The root of v and of what it reads back as, after its pieces are
+; written to its disk.
+(def root_after ((v FatVol)) (list int)
+  (match (read_back (disk_put (made_disk) (fat_pieces v)))
+    ((None) "unreadable")
+    ((Some v2) (listing_text (fat_listing v2 (fat_root v2))))))
+
+(def test_made () int
+  (match (read_back (made_disk))
+    ((None) (fail_because "read back" "unreadable"))
+    ((Some v)
+      (add (check_str "label" (fat_label v) "BOOT")
+           (add (check_int "free" (fat_free v) (sub (fat_clusters (fat_geom v)) 1))
+                (check_str "empty" (listing_text (fat_listing v (fat_root v))) ""))))))
+
+(def test_made_clean () int
+  (match (read_back (made_disk))
+    ((None) (fail_because "read back" "unreadable"))
+    ((Some v) (check_bool "clean" (fat_unclean v) false))))
+
+(def test_create () int
+  (check_str "two files" (root_after (with_file (with_file (made) 2 "config.txt") 2 "LongName.txt"))
+    "LongName.txt 0;config.txt 0;"))
+
+(def test_find_case () int
+  (let v (with_file (made) 2 "config.txt")
+    (add (check_bool "CONFIG.TXT" (ge (fat_find v 2 "CONFIG.TXT") 0) true)
+         (check_int "missing" (fat_find v 2 "cmdline.txt") -1))))
+
+; A long name's slots before its short entry: one for 13 characters.
+(def test_long_slot () int
+  (match (fat_slot (made) 2 "abcdefghijklm")
+    ((FatNoSlot) (fail_because "a slot" "none"))
+    ((FatSlot v r) (match r ((VolRef dc i) (check_int "after the label and one" i 2))))))
+
+; Bytes written to a file, read as its spans say, and kept on the disk.
+(def written ((v FatVol) (name (list int)) (n int)) FatVol
+  (let i (fat_find v 2 name)
+    (match (fat_write v (VolRef 2 i) 0 n (vol_at_none) 0)
+      ((FatNoSpace) v)
+      ((FatWrote v2 spans fresh) v2))))
+
+(def test_write () int
+  (check_str "sizes" (root_after (written (with_file (made) 2 "kernel.img") "kernel.img" 5000))
+    "kernel.img 5000;"))
+
+; 5000 bytes of 512-byte clusters: 10 of them, linked.
+(def test_write_chain () int
+  (let v (written (with_file (made) 2 "kernel.img") "kernel.img" 5000)
+    (match (fat_entry v (VolRef 2 (fat_find v 2 "kernel.img")))
+      ((VolFile name size first exec) (check_int "ten" (length (fat_chain (fat_geom v) (fat_tab v) first)) 10))
+      ((VolDir name first) (fail_because "a file" "a directory"))
+      ((VolNone) (fail_because "a file" "none")))))
+
+(def test_write_spans () int
+  (let v (with_file (made) 2 "a")
+    (match (fat_write v (VolRef 2 (fat_find v 2 "a")) 0 700 (vol_at_none) 0)
+      ((FatNoSpace) (fail_because "spans" "no space"))
+      ((FatWrote v2 spans fresh)
+        (add (check_int "two clusters" (length spans) 2)
+             (check_int "both fresh" (length fresh) 2))))))
+
+(def test_read_span () int
+  (let v (written (with_file (made) 2 "a") "a" 700)
+    (match (fat_read_span v (VolRef 2 (fat_find v 2 "a")) 600 200 (vol_at_none))
+      ((None) (fail_because "a span" "none"))
+      ((Some s) (match s ((VolSpan c at k) (add (check_int "at" at 88) (check_int "to the end" k 100))))))))
+
+(def test_free_after_write () int
+  (let v (written (with_file (made) 2 "a") "a" 700)
+    (match (read_back (disk_put (made_disk) (fat_pieces v)))
+      ((None) (fail_because "read back" "unreadable"))
+      ((Some v2) (check_int "two taken" (fat_free v2) (sub (fat_free (made)) 2))))))
+
+(def test_remove () int
+  (let v (written (with_file (made) 2 "a") "a" 700)
+    (let v2 (fat_remove v (VolRef 2 (fat_find v 2 "a")))
+      (add (check_str "gone" (root_after v2) "")
+           (check_int "freed" (fat_free v2) (fat_free (made)))))))
+
+(def test_remove_long () int
+  (let v (with_file (with_file (made) 2 "ALongName") 2 "b")
+    (check_str "only b" (root_after (fat_remove v (VolRef 2 (fat_find v 2 "alongname")))) "b 0;")))
+
+; A directory made, a file in it, read back from the disk.
+(def with_dir ((v FatVol) (name (list int))) FatVol
+  (match (fat_slot v 2 name)
+    ((FatNoSlot) v)
+    ((FatSlot v2 r)
+      (match (fat_mkdir v2 r name 0)
+        ((FatNoRoom) v)
+        ((FatMade v3 c) (with_file v3 c "inner.txt"))))))
+
+(def test_mkdir () int
+  (let v (with_dir (made) "overlays")
+    (match (read_back (disk_put (made_disk) (fat_pieces v)))
+      ((None) (fail_because "read back" "unreadable"))
+      ((Some v2)
+        (match (fat_place v2 (cons "overlays" (cons "inner.txt" (nil (list int)))))
+          ((VolIn dc name) (check_bool "inner.txt" (ge (fat_find v2 dc name) 0) true))
+          ((VolTop) (fail_because "in overlays" "top"))
+          ((VolNowhere) (fail_because "in overlays" "nowhere")))))))
+
+; A new directory's . and .., its parent the root, 0.
+(def test_mkdir_dots () int
+  (let v (with_dir (made) "d")
+    (let c (match (fat_entry v (VolRef 2 (fat_find v 2 "d"))) ((VolDir n f) f) ((VolFile n s f x) 0) ((VolNone) 0))
+      (let d (fat_dir v c)
+        (add (check_int "." (fat_slot_first (array_get d 0)) c)
+             (check_int ".." (fat_slot_first (array_get d 1)) 0))))))
+
+(def test_dir_empty () int
+  (let v (with_dir (made) "d")
+    (let c (match (fat_entry v (VolRef 2 (fat_find v 2 "d"))) ((VolDir n f) f) ((VolFile n s f x) 0) ((VolNone) 0))
+      (check_bool "not empty" (fat_dir_empty v c) false))))
+
+; A rename into another directory: a fresh slot there, the old one
+; freed.
+(def test_move () int
+  (let v (with_file (with_dir (made) "d") 2 "config.txt")
+    (let c (match (fat_entry v (VolRef 2 (fat_find v 2 "d"))) ((VolDir n f) f) ((VolFile n s f x) 0) ((VolNone) 0))
+      (match (fat_slot v c "ConfigOld.txt")
+        ((FatNoSlot) (fail_because "a slot" "none"))
+        ((FatSlot v2 b)
+          (let v3 (fat_move v2 (VolRef 2 (fat_find v2 2 "config.txt")) b "ConfigOld.txt")
+            (add (check_str "the root" (root_after v3) "d/;")
+                 (check_bool "in d" (ge (fat_find v3 c "configold.txt") 0) true))))))))
+
+; A directory moved into another has its .. made the other's.
+(def test_move_dir () int
+  (let v (with_dir (with_dir (made) "a") "b")
+    (let ca (match (fat_entry v (VolRef 2 (fat_find v 2 "a"))) ((VolDir n f) f) ((VolFile n s f x) 0) ((VolNone) 0))
+      (let cb (match (fat_entry v (VolRef 2 (fat_find v 2 "b"))) ((VolDir n f) f) ((VolFile n s f x) 0) ((VolNone) 0))
+        (match (fat_slot v ca "b")
+          ((FatNoSlot) (fail_because "a slot" "none"))
+          ((FatSlot v2 s)
+            (let v3 (fat_move v2 (VolRef 2 (fat_find v2 2 "b")) s "b")
+              (check_int ".." (fat_slot_first (array_get (fat_dir v3 cb) 1)) ca))))))))
+
+; A directory of 512-byte clusters holds 16 slots: the 17th entry grows
+; it by a cluster.
+(def many ((v FatVol) (n int)) FatVol
+  (if (eq n 0) v (many (with_file v 2 (append "f" (digits n))) (sub n 1))))
+
+(def test_grow () int
+  (let v (many (made) 20)
+    (add (check_int "two clusters" (length (fat_chain (fat_geom v) (fat_tab v) 2)) 2)
+         (check_int "all of them" (length (fat_listing v 2)) 20))))
+
+(def test_grow_read_back () int
+  (match (read_back (disk_put (made_disk) (fat_pieces (many (made) 20))))
+    ((None) (fail_because "read back" "unreadable"))
+    ((Some v) (check_int "all of them" (length (fat_listing v 2)) 20))))
+
+(def test_truncate () int
+  (let v (written (with_file (made) 2 "a") "a" 700)
+    (let v2 (fat_truncate v (VolRef 2 (fat_find v 2 "a")) 0)
+      (add (check_str "empty" (root_after v2) "a 0;")
+           (check_int "freed" (fat_free v2) (fat_free (made)))))))
+
+(def test_relabel () int
+  (match (read_back (disk_put (made_disk) (fat_pieces (fat_relabel (made) "SYSTEM"))))
+    ((None) (fail_because "read back" "unreadable"))
+    ((Some v) (check_str "label" (fat_label v) "SYSTEM"))))
+
+(def test_format () int
+  (let v (fat_format (many (made) 20))
+    (match (read_back (disk_put (made_disk) (fat_all_pieces v)))
+      ((None) (fail_because "read back" "unreadable"))
+      ((Some v2) (add (check_str "empty" (listing_text (fat_listing v2 2)) "")
+                      (check_int "free" (fat_free v2) (fat_free (made))))))))
+
+; Pieces in a row are joined: the FAT's copies and FSInfo apart.
+(def test_pieces_merged () int
+  (let v (with_file (made) 2 "a")
+    (check_int "one directory sector" (length (fat_pieces v)) 1)))
+
+(def test_pieces_fat () int
+  (let v (written (with_file (made) 2 "a") "a" 700)
+    (check_int "a sector of each FAT, FSInfo, the directory's" (length (fat_pieces v)) 4)))
+
+; A file claiming a cluster another has is refused.
+(def test_cross_link () int
+  (let v (written (with_file (made) 2 "a") "a" 700)
+    (let first (match (fat_entry v (VolRef 2 (fat_find v 2 "a"))) ((VolFile n s f x) f) ((VolDir n f) 0) ((VolNone) 0))
+      (match (fat_slot v 2 "b")
+        ((FatNoSlot) (fail_because "a slot" "none"))
+        ((FatSlot v2 r)
+          (let v3 (fat_put_entry v2 r "b" (fat_attr_archive) first 10 (FatTime 0 0))
+            (match (read_back (disk_put (made_disk) (fat_pieces v3)))
+              ((None) (pass "refused"))
+              ((Some v4) (fail_because "refused" "read")))))))))

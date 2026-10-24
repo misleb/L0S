@@ -1,0 +1,254 @@
+; volume.l0 -- the volumes fs serves, of either format: L0S's own, L0FS
+; (user/lib/format/l0fs.l0), or FAT32 (user/lib/format/fat.l0). Each fv_
+; function is the l0fs.l0 one fs used, given whichever volume it is, and
+; answers in l0fs.l0's types, VolRef, VolEntry, VolSpan and VolAt, so
+; that fs's handles, reads and writes are the same for both. What a
+; change writes comes back as pieces, a sector and its bytes, for both.
+;
+; The formats differ where fs sees it: a FAT32 cluster is 512 bytes to
+; 32 KB, not 4 KB; a name's slots there depend on the name; FAT holds no
+; programs; and a FAT32 volume dates what changes, in Unix ms, from an
+; epoch fs gives it once the clock answers.
+
+; A volume: L0FS, or FAT32.
+(data Fv (FvL0 Vol) (FvFat FatVol))
+
+; Whether v is FAT32's.
+(def fv_is_fat ((v Fv)) bool (match v ((FvL0 x) false) ((FvFat x) true)))
+
+; Its label, and its root directory's first cluster.
+(def fv_label ((v Fv)) (list int) (match v ((FvL0 x) (vol_label x)) ((FvFat x) (fat_label x))))
+(def fv_root ((v Fv)) int (match v ((FvL0 x) (vol_root x)) ((FvFat x) (fat_root x))))
+
+; A cluster's bytes, and its sectors.
+(def fv_csize ((v Fv)) int (match v ((FvL0 x) (vol_cluster_size)) ((FvFat x) (fat_csize x))))
+(def fv_csectors ((v Fv)) int (div (fv_csize v) (vol_sector_size)))
+
+; The sector of the disk cluster c begins at, the partition from start.
+(def fv_cluster_sector ((v Fv) (start int) (c int)) int
+  (match v ((FvL0 x) (vol_cluster_sector start c)) ((FvFat x) (add start (fat_cluster_at (fat_geom x) c)))))
+
+; Whether name may name a file on v.
+(def fv_name_ok ((v Fv) (name (list int))) bool
+  (match v ((FvL0 x) (vol_name_ok name)) ((FvFat x) (fat_name_ok name))))
+
+; Whether v keeps programs, which chmod marks: FAT has no such mark.
+(def fv_has_programs ((v Fv)) bool (not (fv_is_fat v)))
+
+; ---------------------------------------------------------------- finding
+
+; Where a path's names lead.
+(def fv_place ((v Fv) (names (list (list int)))) VolPlace
+  (match v ((FvL0 x) (vol_place x names)) ((FvFat x) (fat_place x names))))
+
+; Where name is in directory dc, or -1: on FAT, ignoring case.
+(def fv_find ((v Fv) (dc int) (name (list int))) int
+  (match v ((FvL0 x) (vol_find x dc name)) ((FvFat x) (fat_find x dc name))))
+
+; The entry r is.
+(def fv_entry ((v Fv) (r VolRef)) VolEntry
+  (match v ((FvL0 x) (vol_entry x r)) ((FvFat x) (fat_entry x r))))
+
+; Directory dc's entries, by name.
+(def fv_listing ((v Fv) (dc int)) (list VolEntry)
+  (match v ((FvL0 x) (vol_listing x dc)) ((FvFat x) (fat_listing x dc))))
+
+; Whether directory dc is c or in it.
+(def fv_under ((v Fv) (c int) (dc int)) bool
+  (match v ((FvL0 x) (vol_under x c dc)) ((FvFat x) (fat_under x c dc))))
+
+; Whether directory dc holds nothing.
+(def fv_dir_empty ((v Fv) (dc int)) bool
+  (match v ((FvL0 x) (vol_dir_empty x dc)) ((FvFat x) (fat_dir_empty x dc))))
+
+; The clusters whose marks removing or emptying r changes, for L0FS;
+; FAT keeps its own count of what it dirties.
+(def fv_file_clusters ((v Fv) (r VolRef)) (list int)
+  (match v ((FvL0 x) (vol_file_clusters x r)) ((FvFat x) (nil int))))
+
+; What df answers: the sectors, the clusters of data, those free, and
+; the files. Clusters are counted in 4 KB, as df's are, so FAT32's of
+; another size come to as many 4 KB as they hold.
+(def fv_df ((v Fv)) (list int)
+  (match v
+    ((FvL0 x)
+      (let l (vol_layout_of x)
+        (fs_space_text (match l ((VolLayout n c t d) n)) (sub (vol_clusters l) (vol_first_data l))
+                       (vol_free_count (vol_table x)) (vol_file_count x))))
+    ((FvFat x)
+      (let g (fat_geom x)
+        (let cb (fat_cluster_bytes g)
+          (fs_space_text (fat_sectors g) (div (mul (fat_clusters g) cb) 4096) (div (mul (fat_free x) cb) 4096) (fat_file_count x)))))))
+
+; ---------------------------------------------------------------- the time
+
+; The Unix ms of now, for a FAT volume, from its epoch; 0 for L0FS,
+; which dates nothing.
+(def fv_now ((v Fv)) int
+  (match v ((FvL0 x) 0) ((FvFat x) (add (fat_epoch x) (div (clock_ns) 1000000)))))
+
+; Whether v dates changes but has not been told when it is: an epoch
+; before 2001 is none.
+(def fv_undated ((v Fv)) bool
+  (match v ((FvL0 x) false) ((FvFat x) (lt (fat_epoch x) 1000000000000))))
+
+; v told that Unix time ms is now.
+(def fv_dated ((v Fv) (ms int)) Fv
+  (match v
+    ((FvL0 x) v)
+    ((FvFat x) (FvFat (fat_with_epoch x (sub ms (div (clock_ns) 1000000)))))))
+
+; -------------------------------------------------------------- changing
+
+; Room made for name in directory dc: the volume, the entry's place,
+; and, for L0FS, the clusters and entries that changed.
+(data FvSlot (FvSlot Fv VolRef (list int) (list VolRef)) (FvNoSlot))
+
+; A place for name in directory dc.
+(def fv_slot ((v Fv) (dc int) (name (list int))) FvSlot
+  (match v
+    ((FvL0 x)
+      (match (vol_slot x dc)
+        ((VolNoSlot) (FvNoSlot))
+        ((VolSlot x2 r cs rs) (FvSlot (FvL0 x2) r cs rs))))
+    ((FvFat x)
+      (match (fat_slot x dc name)
+        ((FatNoSlot) (FvNoSlot))
+        ((FatSlot x2 r) (FvSlot (FvFat x2) r (nil int) (nil VolRef)))))))
+
+; v with a new, empty file name at r, its slot.
+(def fv_create ((v Fv) (r VolRef) (name (list int))) Fv
+  (match v ((FvL0 x) (FvL0 (vol_create x r name))) ((FvFat x) (FvFat (fat_create x r name (fv_now v))))))
+
+; A directory made: the volume, its first cluster, and, for L0FS, the
+; clusters and entries that changed; or no room.
+(data FvMade (FvMade Fv int (list int) (list VolRef)) (FvNoRoom))
+
+; v with a new, empty directory name at r.
+(def fv_mkdir ((v Fv) (r VolRef) (name (list int))) FvMade
+  (match v
+    ((FvL0 x)
+      (match (vol_mkdir x r name)
+        ((VolNoRoom) (FvNoRoom))
+        ((VolMade x2 c cs) (FvMade (FvL0 x2) c cs (vol_cluster_refs c 0)))))
+    ((FvFat x)
+      (match (fat_mkdir x r name (fv_now v))
+        ((FatNoRoom) (FvNoRoom))
+        ((FatMade x2 c) (FvMade (FvFat x2) c (nil int) (nil VolRef)))))))
+
+; v with the file at r emptied.
+(def fv_truncate ((v Fv) (r VolRef)) Fv
+  (match v ((FvL0 x) (FvL0 (vol_truncate x r))) ((FvFat x) (FvFat (fat_truncate x r (fv_now v))))))
+
+; v with the entry at r gone.
+(def fv_remove ((v Fv) (r VolRef)) Fv
+  (match v ((FvL0 x) (FvL0 (vol_remove x r))) ((FvFat x) (FvFat (fat_remove x r)))))
+
+; v with the file at r a program, or not; FAT's are never.
+(def fv_set_exec ((v Fv) (r VolRef) (exec bool)) Fv
+  (match v ((FvL0 x) (FvL0 (vol_set_exec x r exec))) ((FvFat x) v)))
+
+; An entry renamed: the volume, where it is now, and, for L0FS, the
+; clusters and entries that changed besides; or no room for it.
+(data FvMoved (FvMoved Fv VolRef (list int) (list VolRef)) (FvNoMove))
+
+; The entry at r named to in directory dc, where no entry is to. L0FS
+; renames in place in r's own directory; FAT, whose slots a name decides,
+; always takes new ones.
+(def fv_rename_new ((v Fv) (r VolRef) (dc int) (to (list int))) FvMoved
+  (match v
+    ((FvL0 x)
+      (match r
+        ((VolRef rd ri)
+          (if (eq rd dc)
+              (FvMoved (FvL0 (vol_move x r r to)) r (nil int) (nil VolRef))
+              (match (vol_slot x dc)
+                ((VolNoSlot) (FvNoMove))
+                ((VolSlot x2 s cs rs) (FvMoved (FvL0 (vol_move x2 r s to)) s cs rs)))))))
+    ((FvFat x)
+      (match (fat_slot x dc to)
+        ((FatNoSlot) (FvNoMove))
+        ((FatSlot x2 s) (FvMoved (FvFat (fat_move x2 r s to)) s (nil int) (nil VolRef)))))))
+
+; The entry at r named to over the file at old, which goes.
+(def fv_rename_over ((v Fv) (r VolRef) (old VolRef) (to (list int))) FvMoved
+  (match v
+    ((FvL0 x) (FvMoved (FvL0 (vol_move (vol_remove x old) r old to)) old (vol_file_clusters x old) (nil VolRef)))
+    ((FvFat x)
+      (match old
+        ((VolRef dc i)
+          (match (fat_slot (fat_remove x old) dc to)
+            ((FatNoSlot) (FvNoMove))
+            ((FatSlot x2 s) (FvMoved (FvFat (fat_move x2 r s to)) s (nil int) (nil VolRef)))))))))
+
+; v labelled label.
+(def fv_relabel ((v Fv) (label (list int))) Fv
+  (match v ((FvL0 x) (FvL0 (vol_relabel x label))) ((FvFat x) (FvFat (fat_relabel x label)))))
+
+; v emptied, its label kept.
+(def fv_format ((v Fv)) Fv
+  (match v ((FvL0 x) (FvL0 (vol_format x))) ((FvFat x) (FvFat (fat_format x)))))
+
+; ------------------------------------------------------- reading, writing
+
+; Where the next bytes of the file at r are, from offset, at most n.
+(def fv_read_span ((v Fv) (r VolRef) (offset int) (n int) (hint VolAt)) (Option VolSpan)
+  (match v ((FvL0 x) (vol_read_span x r offset n hint)) ((FvFat x) (fat_read_span x r offset n hint))))
+
+; How many of the file at r's bytes its kth cluster holds.
+(def fv_held ((v Fv) (r VolRef) (k int)) int
+  (match v ((FvL0 x) (vol_held x r k)) ((FvFat x) (fat_held x r k))))
+
+; A write planned: the volume after, the spans, the clusters it took,
+; and, for L0FS, those whose marks changed; or no room.
+(data FvWrote (FvWrote Fv (list VolSpan) (list int) (list int)) (FvNoSpace))
+
+; n bytes written to the file at r from offset.
+(def fv_write ((v Fv) (r VolRef) (offset int) (n int) (hint VolAt)) FvWrote
+  (match v
+    ((FvL0 x)
+      (match (vol_write x r offset n hint)
+        ((VolNoSpace) (FvNoSpace))
+        ((VolWrote x2 spans fresh marked) (FvWrote (FvL0 x2) spans fresh marked))))
+    ((FvFat x)
+      (match (fat_write x r offset n hint (fv_now v))
+        ((FatNoSpace) (FvNoSpace))
+        ((FatWrote x2 spans fresh) (FvWrote (FvFat x2) spans fresh (nil int)))))))
+
+; Where a write of n bytes from offset, of spans, ended.
+(def fv_spans_end ((v Fv) (spans (list VolSpan)) (offset int) (n int)) VolAt
+  (match v ((FvL0 x) (vol_spans_end spans offset n)) ((FvFat x) (fat_spans_end spans (fat_csize x) offset n))))
+
+; ------------------------------------------------------- what is written
+
+; The sectors a change to v dirtied, as pieces, from its partition's
+; first: for L0FS those of the marks of cs and the entries rs, as
+; vol_runs puts them; for FAT, those it counted itself.
+(def fv_pieces ((v Fv) (cs (list int)) (rs (list VolRef))) (list FatPiece)
+  (match v
+    ((FvL0 x) (fv_run_pieces x (vol_runs (vol_dirty_sectors x cs rs))))
+    ((FvFat x) (fat_pieces x))))
+
+; Each run of x as a piece.
+(def fv_run_pieces ((x Vol) (rs (list VolRun))) (list FatPiece)
+  (if (is_empty rs)
+      (nil FatPiece)
+      (match (head rs)
+        ((VolRun s n) (cons (FatPiece s (bytes_from_list (vol_run_bytes x (head rs)))) (fv_run_pieces x (tail rs)))))))
+
+; Every sector a new or emptied volume writes, as pieces.
+(def fv_all_pieces ((v Fv)) (list FatPiece)
+  (match v
+    ((FvL0 x) (cons (FatPiece 0 (bytes_from_list (vol_meta x))) (nil FatPiece)))
+    ((FvFat x) (fat_all_pieces x))))
+
+; The sectors a relabel writes: L0FS's superblock; FAT's boot sectors
+; and the root's label slot.
+(def fv_label_pieces ((v Fv)) (list FatPiece)
+  (match v
+    ((FvL0 x) (cons (FatPiece 0 (bytes_from_list (vol_super (vol_label x) (vol_layout_of x)))) (nil FatPiece)))
+    ((FvFat x) (fat_pieces x))))
+
+; v once what it dirtied is written.
+(def fv_cleaned ((v Fv)) Fv
+  (match v ((FvL0 x) v) ((FvFat x) (FvFat (fat_cleaned x)))))

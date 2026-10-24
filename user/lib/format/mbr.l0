@@ -1,0 +1,111 @@
+; mbr.l0 -- the master boot record's partition table, as bytes, read
+; only: what a disk partitioned before GPT, or by Raspberry Pi's Imager,
+; has in its sector 0. Pure: it decodes the four primary entries, tells a
+; GPT's protective MBR from a table of its own, and gives each partition
+; a UUID, which MBR has none of, for fs to mount its volume with.
+;
+;   bytes 0-439     boot code, not read
+;   bytes 440-443   the disk's signature, a u32
+;   bytes 446-509   four entries of 16 bytes: the type at 4, the first
+;                   sector at 8 and the sectors at 12, u32s
+;   bytes 510-511   55 AA
+;
+; Extended partitions (05, 0F) are not followed. L0S never writes an MBR
+; but GPT's protective one (gpt.l0). Linked with common/abi.l0 and
+; user/lib/format/uuid.l0.
+
+; Where the signature and the entries are, and how many entries.
+(def mbr_sig_at () int 440)
+(def mbr_entries_at () int 446)
+(def mbr_entry_count () int 4)
+
+; The type of a GPT's protective MBR's one entry, EE.
+(def mbr_protective_type () int 238)
+
+; The types of a FAT32 partition: 0B, CHS; 0C, LBA; and EF, an EFI
+; system partition.
+(def mbr_fat_types () (list int) (cons 11 (cons 12 (cons 239 (nil int)))))
+
+; A partition: its number in the table, from 1; its type; its first
+; sector; and its sectors.
+(data MbrPart (MbrPart int int int int))
+
+; A table: the disk's signature and its partitions, those with a type
+; and sectors, in the table's order.
+(data MbrDisk (MbrDisk int (list MbrPart)))
+
+; A partition's number, type, first sector and sectors.
+(def mbr_part_number ((p MbrPart)) int (match p ((MbrPart k t s c) k)))
+(def mbr_part_type ((p MbrPart)) int (match p ((MbrPart k t s c) t)))
+(def mbr_part_start ((p MbrPart)) int (match p ((MbrPart k t s c) s)))
+(def mbr_part_sectors ((p MbrPart)) int (match p ((MbrPart k t s c) c)))
+
+; A table's signature and partitions.
+(def mbr_sig ((d MbrDisk)) int (match d ((MbrDisk s ps) s)))
+(def mbr_parts ((d MbrDisk)) (list MbrPart) (match d ((MbrDisk s ps) ps)))
+
+; What sector 0 holds: a table; GPT's protective MBR, so that the GPT is
+; the table; or no MBR, no 55 AA at its end.
+(data MbrRead (MbrGot MbrDisk) (MbrProtective) (MbrNone))
+
+; The table in sector 0, b. A table with an entry of type EE is GPT's.
+(def mbr_of ((b bytes)) MbrRead
+  (if (lt (bytes_len b) 512)
+      (MbrNone)
+      (if (not (if (eq (bytes_get b 510) 85) (eq (bytes_get b 511) 170) false))
+          (MbrNone)
+          (let ps (mbr_entries b (sub (mbr_entry_count) 1) (nil MbrPart))
+            (if (mbr_any_type ps (mbr_protective_type))
+                (MbrProtective)
+                (MbrGot (MbrDisk (le_u32 b (mbr_sig_at)) ps)))))))
+
+; Entries 0 to i of b that have a type and sectors, onto acc.
+(def mbr_entries ((b bytes) (i int) (acc (list MbrPart))) (list MbrPart)
+  (if (lt i 0)
+      acc
+      (let at (add (mbr_entries_at) (mul i 16))
+        (let ty (bytes_get b (add at 4))
+          (let count (le_u32 b (add at 12))
+            (mbr_entries b (sub i 1)
+              (if (if (eq ty 0) true (eq count 0))
+                  acc
+                  (cons (MbrPart (add i 1) ty (le_u32 b (add at 8)) count) acc))))))))
+
+; Whether any of ps is of type ty.
+(def mbr_any_type ((ps (list MbrPart)) (ty int)) bool
+  (if (is_empty ps)
+      false
+      (if (eq (mbr_part_type (head ps)) ty) true (mbr_any_type (tail ps) ty))))
+
+; Whether p may hold a FAT32 volume, by its type.
+(def mbr_is_fat ((p MbrPart)) bool
+  (any_eq (mbr_part_type p) (mbr_fat_types)))
+
+; The partitions of ps that may hold FAT32, in order.
+(def mbr_fat_parts ((ps (list MbrPart))) (list MbrPart)
+  (if (is_empty ps)
+      (nil MbrPart)
+      (if (mbr_is_fat (head ps))
+          (cons (head ps) (mbr_fat_parts (tail ps)))
+          (mbr_fat_parts (tail ps)))))
+
+; The UUID a partition of a disk whose signature is sig, number k, is
+; known by: the signature's four bytes, most significant first, then
+; zeros, and k in the last byte, as SSSSSSSS-0000-0000-0000-0000000000KK.
+; Two disks of one signature give the same UUIDs, as Linux's PARTUUIDs
+; of them would be the same.
+(def mbr_part_uuid ((sig int) (k int)) Uuid
+  (Uuid (append (cons (bit_and (bit_shr sig 24) 255)
+                  (cons (bit_and (bit_shr sig 16) 255)
+                    (cons (bit_and (bit_shr sig 8) 255)
+                      (cons (bit_and sig 255) (nil int)))))
+                (append (zeros 11) (cons (bit_and k 255) (nil int))))))
+
+; The name of a partition's type, for Disks: FAT32's and EFI's in words,
+; any other in hexadecimal.
+(def mbr_type_text ((ty int)) (list int)
+  (if (any_eq ty (cons 11 (cons 12 (nil int))))
+      (append "FAT32 (0x" (append (hex_digits ty 2) ")"))
+      (if (eq ty 239)
+          "EFI system (0xEF)"
+          (append "MBR type 0x" (hex_digits ty 2)))))
