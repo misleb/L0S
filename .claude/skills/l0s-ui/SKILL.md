@@ -172,6 +172,13 @@ It owns the screen through the display protocol and keeps windows for its
 clients. It never copies a window's pixels: each is a shared buffer, and the
 driver composes them.
 
+- **The L0S menu** (`user/sbin/wm/logo_menu.l0`): the logo in the bar's
+  first 32 columns (`menu_logo_w`; Applications and the title follow it),
+  a card (`menu_w` by `menu_h`, buffer `menu_id` 100000, layered under the
+  bar by `menu_layered` only while shown) of About L0S and Shut Down
+  (`proc_kill 1`). Its state is `Bar`'s `Menu`, its press/release like the
+  launcher's (`menu_act`); `pointer_held` keeps windows off the pointer
+  while it or the launcher is up.
 - **Buffers**: desktop 0, pointer 1, top bar 2, launcher 3, and window
   `i`'s content `4 + 4i + 2k` and chrome `5 + 4i + 2k` (its title bar with
   the frame under it, one buffer the window's size), k its bank

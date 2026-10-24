@@ -53,7 +53,7 @@ grabs your pointer, and Ctrl-Alt-G (Ctrl-Option-G on a Mac) lets it go.
 The window shows a desktop, the compositor's: a wallpaper, a top bar,
 and two windows that overlap, each with a title bar: a terminal with a
 shell, and the System Monitor. The top bar is GNOME Shell's, black across
-the top of the screen: **Applications** at its left, then the name of the
+the top of the screen: the L0S logo and **Applications** at its left, then the name of the
 front window's app (`Terminal`, `System Monitor`), or its title if it is
 no app's, and the date and time in its middle, `Oct 15  22:42`, from the
 board's real-time clock, which QEMU sets to this machine's local time.
@@ -556,7 +556,8 @@ makes every place, rectangle, top row and radius the screen's on the way.
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
 draws), buffer 0; the pointer's image (Adwaita's arrow, or a resize
-pointer), 1; the top bar, 2; the launcher's page, 3; and each window's
+pointer), 1; the top bar, 2; the launcher's page, 3; the L0S menu's card,
+100000; and each window's
 chrome, its title bar with the frame under it, one buffer as big as the
 window: window i's content and chrome being 4 + 4i + 2k and 5 + 4i + 2k,
 k a bank, 0 or 1. A resize gives the display a window's buffers at
@@ -568,7 +569,7 @@ the top bar over them all; while the launcher is open, the desktop, the
 launcher under the bar, and the bar, the windows left out.
 
 The top bar is GNOME Shell's: 32 rows across the screen, black, with
-**Applications** at its left, then the name of the front window's app in
+the **L0S menu**'s logo at its left, then **Applications**, then the name of the front window's app in
 white, or its title if its client is no app, and the date and time,
 bold, in its middle, as GNOME shows them by default (`Oct 15  22:42`,
 on a 24-hour clock). An app's name is its bundle's manifest's: `wm`
@@ -579,6 +580,19 @@ client's program is, from `proc_info`; the manifest of a program it has
 not scanned yet is read at that moment. `wm`
 repaints the bar when the front window or its title changes, when the
 launcher opens or closes, and when the clock says a minute has begun.
+
+**The L0S menu** ([user/sbin/wm/logo_menu.l0](user/sbin/wm/logo_menu.l0)) is
+the logo, `branding/logo.svg`'s mark painted flat in 22×22 pixels, in the
+bar's first 32 columns, as the Apple menu is in macOS's. A click on it,
+acting on its release over it, lights it with a pill and drops a card, 200
+by 84, 4 in from the screen's edge and under the bar, in its own buffer
+(id 100000, a layer over the windows and under the bar, in the display's
+layers only while it is shown): **About L0S**, which starts the About app,
+and **Shut Down**, which kills pid 1 (`proc_kill 1`), so `boot` exits and
+the kernel halts. It tells nothing first, a stand-in for a safer
+shutdown. Esc, a click outside the card or on the bar closes it. While it
+is open no window is told of the pointer or the keys
+(`tests/logo-menu.sh`).
 
 **The launcher** ([user/sbin/wm/launcher.l0](user/sbin/wm/launcher.l0)) is GNOME
 Shell's grid of apps. A click on Applications, acting on its release
@@ -1739,6 +1753,7 @@ summary A terminal in a window, with its own shell
 | `Widgets.app` | `widgets` | Widgets |
 | `Disks.app` | `disks` | Disks |
 | `Files.app` | `files` | Files |
+| `About.app` | `about` | About |
 
 A bundle's name is one word, as the shell and the inittab split at
 spaces; an app's name may be several. Its source is the directory beside
@@ -2254,6 +2269,7 @@ every `.l0` in its directory is part of it.
 | `windows` | a client of `compositor`: prints its `windows` reply, the windows front first and where the pointer is |
 | `draw` | a client of `compositor`: sends it `desktop` and the command its arguments make (`line`, `circle`, `disc`, `rect`, `fill`, `clear`, `char`, the toolkit's `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`, `splash`, `restore`, `size`, `font`), which `wm` draws on the desktop. Colors may be Adwaita's by name (`blue_3`, `dark_4`, `accent`…). It checks the command with the toolkit's parser first, so a bad one fails without asking `wm`. It prints the size, or the error on stderr with status 1. With no arguments it lists the commands |
 | `widgets` | Widgets, the toolkit's gallery ([user/lib/ui](user/lib/ui/README.md)): a window with a toolbar (Refresh, and End Process, sensitive only with a row selected) over a data grid of sample processes, sortable by any column, selected by click or the arrow keys. It's the scaffolding for a process monitor; it reads no real processes and ends none |
+| `about` | About L0S, which the L0S menu opens: a window of the machine's CPU (`machine`), the memory the kernel has given out (`mem_info`), how many processes live, and the uptime (`clock_ns`), under the name and the logo's icon |
 | `disks` | Disks, `run disks &`, as GNOME Disks is: a sidebar of drives, every disk registered, each its size and name, one shown at a time, chosen by click; the drive's name (`disk1`), size and partitioning; a bar of its partitions and the free space between them, each as wide as its share of the disk, one selected by click or Left and Right; and the selected part's size, usage, files, contents, partition type, partition UUID and sectors. It reads the GPT and each partition's first sector through `disk` itself, so a partition no server serves still shows, and asks `fs` how full each mounted volume is, through one reply port. Refresh has `fs` `rescan`, takes on any disk registered since, and reads the drive again. Under the bar, one button for the selected part: on free space, Create Partition... asks its size in kB, all the free space unless another is typed, with the space it leaves said as it is typed, then has `fs` `partition` it there and selects the new partition; on a mounted volume, Format Volume... asks in a dialog, then has `fs` `format` it; on any other partition, Format... asks the new volume's type, L0FS or FAT32, by a toggle, and its name, a label `fs` will take (FAT32's of up to 11), and has `fs` `mkfs` it by the partition's UUID, mounted at `/Volumes/NAME`. A disk with an MBR, not a GPT, shows its partitions and their volumes, FAT32's, its partitioning Master Boot Record, and offers only Format Volume..., L0S making no partitions or volumes in an MBR. Each dialog's entry has the focus as it opens, and Enter is its button; a refusal is said in the line at the foot. With no disk it shows a status page |
 | `files` | Files, `run files &`, as GNOME 45's Files is, in a window that draws its own header bars (`csd`): a sidebar of places under a header bar titled Files, Computer (`/`), Volumes (`/Volumes`), and each volume with how much of it is free; and the place shown, under a header bar of Back and Forward, a path bar of where it is, whose parts go there, a toggle between a grid of icons and a list (name, size, kind, sortable), the menu (New Folder..., Refresh, the other view) and the window's close button; and a line of what was last done. It lists the initramfs from its entries, a volume through its file server, and `/Volumes` from the mount table (`fsview.l0`), folders first. A click selects; a double click or Enter opens: a folder or a volume is gone into, an app's bundle or a marked program started, and any other file's text shown, its first 64 KB, as a list of its lines, until Back, Backspace or Esc. A right click opens a menu of Open, Rename... and Delete for a thing, New Folder... for the place, or Open and Rename... for a volume's row. F2 renames, Delete deletes, each after a dialog. The initramfs cannot be changed, and `/Volumes` only by renaming a volume, which `fs` relabels (`relabel`), and Files shows what was under the old name under the new. The list's sizes are a file's bytes, the initramfs's from `entry_size_of` (call 296), a volume's, and how many things a folder or a bundle holds. An app's bundle shows the app's own icon, painted from its `icon.draw`, and in the list its symbol in its color |
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
@@ -2319,7 +2335,7 @@ name in a library is taken in every program that links it.
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`). Last, it says how many tests passed and failed, of how many files |
 | `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), the L0S menu, opened, closed, starting About and shutting the board down (`tests/logo-menu.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 `make check` and `make test` run each check and each test file as a
 target of its own, `build/check/FILE.ok` or `build/test/FILE.ok`, made once
@@ -2660,6 +2676,11 @@ listed in `/Volumes`, holds a file written to it, and is counted by
 `df`; a second `mkfs` of it, refused; and, booted again on the same
 disk, the volume mounted at once, its file there, and the UUID still
 naming its partition.
+
+[tests/logo-menu.sh](tests/logo-menu.sh) boots the screen tests' initramfs
+and clicks the top bar's logo: the pill and the card show, Esc closes
+them, About L0S opens the About window (`run windows` lists it), and
+Shut Down stops the board.
 
 [tests/launcher.sh](tests/launcher.sh) boots the screen tests' initramfs
 and clicks the top bar's Applications with the tablet: the launcher

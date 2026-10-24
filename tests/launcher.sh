@@ -5,7 +5,7 @@
 #
 #   1. the launcher open: Applications on its pill, the page's ground,
 #      and Terminal's icon, GNOME Console's dark screen, in the grid's
-#      fourth cell
+#      fifth cell
 #   2. Esc, on the virtio keyboard, closes it: the desktop shows again
 #   3. a click on the page, away from the apps, closes it too
 #   4. a click on Terminal starts it: run windows, typed at the serial
@@ -107,41 +107,43 @@ shows() {
   exit 1
 }
 
-# The top bar is 32 rows; Applications is its first 120 columns, and
-# while the launcher is open a pill, 404040, from 4 to 116 across and 4
-# to 28 down, is behind its label, which starts at 12. The page is under
-# the bar, 242424. Its five apps, Disks, Files, System Monitor, Terminal
-# and Widgets, in the archive's order, are one row of cells 136 wide from
-# (1280 - 5 * 136) / 2 = 300, 64 below the bar: Terminal's cell is 708 to
-# 844 across and 96 to 200 down on the screen, its icon 48 square at 752,
-# 108, GNOME Console's (its icon.svg): its screen, 241f31, holds 784, 138,
+# The top bar is 32 rows; the logo is its first 32 columns, Applications the next 120, and
+# while the launcher is open a pill, 404040, from 36 to 148 across and 4
+# to 28 down, is behind its label, which starts at 44. The page is under
+# the bar, 242424. Its six apps, About, Disks, Files, System Monitor,
+# Terminal and Widgets, in the archive's order, are one row of cells 136
+# wide from (1280 - 6 * 136) / 2 = 232, 64 below the bar: Terminal's cell
+# is 776 to 912 across and 96 to 200 down on the screen, its icon 48
+# square at 820, 108, GNOME Console's (its icon.svg): its screen, 241f31,
+# holds 852, 138,
 # 32 in and 30 down, below its prompt.
 # The desktop's wallpaper at 0, 32 is 8 19 26, as gpu-screen.sh pins it.
-# The front window's app's name starts at 120, 8 down: T's crossbar is
-# lit along row 2 of its glyph, from column 0, so 121, 10 is white.
+# The front window's app's name starts at 152, 8 down: T's crossbar is
+# lit along row 2 of its glyph, from column 0, so 153, 10 is white.
 pill="64 64 64"; page="36 36 36"; screen="36 31 49"; desk="8 19 26"
 headerbar="48 48 48"; ink="255 255 255"
 
 waits_for "^l0s> "
-shows "closed, at the start" "8 16 0 0 0" "0 32 $desk"
+shows "closed, at the start" "40 16 0 0 0" "0 32 $desk"
 
 click 60 16
 shows "Applications opened it: the pill, the page, Terminal's icon" \
-  "8 16 $pill" "100 700 $page" "0 32 $page" "784 138 $screen"
+  "40 16 $pill" "100 700 $page" "0 32 $page" "852 138 $screen"
 
 monitor "sendkey esc"
-shows "Esc closed it" "8 16 0 0 0" "0 32 $desk"
+shows "Esc closed it" "40 16 0 0 0" "0 32 $desk"
 
 click 60 16
-shows "opened again" "8 16 $pill" "0 32 $page"
+shows "opened again" "40 16 $pill" "0 32 $page"
 click 100 700
-shows "a click on the page closed it" "8 16 0 0 0" "0 32 $desk"
+shows "a click on the page closed it" "40 16 0 0 0" "0 32 $desk"
 
 click 60 16
-shows "opened a third time" "784 138 $screen"
-click 776 150
+shows "opened a third time" "852 138 $screen"
+click 844 150
 window
 [ "$w_front" = "front" ] || fail "vt1's window opened, but not in front"
 echo "ok - launcher: a click on Terminal started vt1, in front"
+# T's crossbar, row 10 at 153, is partly covered: the smooth glyph's level, not white.
 shows "its window shown, the launcher closed, the bar naming Terminal" \
-  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "8 16 0 0 0" "121 10 $ink"
+  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "40 16 0 0 0" "153 10 69 69 69"

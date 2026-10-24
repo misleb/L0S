@@ -6,11 +6,11 @@
 # Terminal's program and icon and a manifest of its own, and checks, by
 # QEMU's screendump, that the launcher shows it once it is opened again:
 #
-#   1. the launcher opened: five apps, Terminal's icon in the fourth cell
+#   1. the launcher opened: six apps, Terminal's icon in the fifth cell
 #      and none where Extra's will be
 #   2. Esc closes it; Extra.app is installed from the shell
-#   3. Applications opens it again: a sixth app, Extra, in the second cell,
-#      with Terminal's icon, and Terminal in the fifth
+#   3. Applications opens it again: a seventh app, Extra, in the third cell,
+#      with Terminal's icon, and Terminal in the sixth
 #   4. a click on Extra starts it: run windows lists vt1's window in front,
 #      and the top bar names the front window's app, Extra
 #
@@ -126,28 +126,28 @@ shows() {
   exit 1
 }
 
-# The geometry is launcher.sh's. Five apps, Disks, Files, System
-# Monitor, Terminal and Widgets, are cells 136 wide from (1280 - 5 *
-# 136) / 2 = 300, so the second cell starts at 436, its icon, 48 square,
-# 44 in, at 480, and its pixel 444, 138 is the page's; Terminal, the
-# fourth, at 708, has its icon at 752, so 784, 138, 32 in and 30 down,
-# is on its screen, 241f31. A sixth app, the volume's listing being
-# sorted by name, Disks, Extra, Files, System Monitor, Terminal,
-# Widgets, moves the grid to start at (1280 - 6 * 136) / 2 = 232:
-# Extra's cell is 368 across, its icon, Terminal's, at 412, so 444, 138
-# is on it, and Terminal's, the fifth, at 776 across, has its at 820, so
-# 852, 138 is on that, and 776, 138 is the page's.
+# The geometry is launcher.sh's. Six apps, About, Disks, Files, System
+# Monitor, Terminal and Widgets, are cells 136 wide from (1280 - 6 *
+# 136) / 2 = 232, so the second cell starts at 368, its icon, 48 square,
+# 44 in, at 412, and its pixel 404, 138 is the page's; Terminal, the
+# fifth, at 776, has its icon at 820, so 852, 138, 32 in and 30 down, is
+# on its screen, 241f31. A seventh app, the volume's listing being
+# sorted by name, About, Disks, Extra, Files, System Monitor, Terminal,
+# Widgets, moves the grid to start at (1280 - 7 * 136) / 2 = 164:
+# Extra's cell is 436 across, its icon, Terminal's, at 480, so 512, 138
+# is on it, and Terminal's, the sixth, at 844 across, has its at 888, so
+# 920, 138 is on that, and 844, 138 is the page's.
 page="36 36 36"; screen="36 31 49"; desk="8 19 26"; headerbar="48 48 48"; ink="255 255 255"
 
 waits_for "^l0s> "
-shows "closed, at the start" "8 16 0 0 0" "0 32 $desk"
+shows "closed, at the start" "40 16 0 0 0" "0 32 $desk"
 
 click 60 16
-shows "five apps: Terminal's icon, and none at the second cell's edge" \
-  "0 32 $page" "784 138 $screen" "444 138 $page"
+shows "six apps: Terminal's icon, and none at the second cell's edge" \
+  "0 32 $page" "852 138 $screen" "404 138 $page"
 
 monitor "sendkey esc"
-shows "Esc closed it" "8 16 0 0 0" "0 32 $desk"
+shows "Esc closed it" "40 16 0 0 0" "0 32 $desk"
 
 typed "mkdir /Applications/Extra.app"
 typed "cp /Applications/Terminal.app/vt /Applications/Extra.app/vt"
@@ -158,15 +158,15 @@ typed "append /Applications/Extra.app/manifest icon icon.ppm"
 echo "ok - launcher-install: Extra.app installed from the shell"
 
 click 60 16
-shows "opened again: Extra's icon in the second cell, Terminal's in the fifth" \
-  "0 32 $page" "444 138 $screen" "852 138 $screen" "776 138 $page"
+shows "opened again: Extra's icon in the third cell, Terminal's in the sixth" \
+  "0 32 $page" "512 138 $screen" "920 138 $screen" "844 138 $page"
 
-click 436 150
+click 504 150
 window
 [ "$w_front" = "front" ] || fail "vt1's window opened, but not in front"
 echo "ok - launcher-install: a click on Extra started vt1, in front"
-# The bar names the window's app, Extra, from 120: E's top arm is lit along
+# The bar names the window's app, Extra, from 152: E's top arm is lit along
 # row 10, as T's crossbar is, and its stem down the left of its glyph, which
-# T's is not.
+# T's is not; each pixel is the smooth glyph's partial cover, not white.
 shows "its window shown, the launcher closed, the bar naming Extra" \
-  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "121 10 $ink" "121 16 $ink"
+  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "153 10 33 33 33" "153 16 120 120 120"

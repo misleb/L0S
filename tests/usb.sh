@@ -91,8 +91,8 @@ monitor "sendkey esc"
 # As launcher.sh pins them: the top bar's 8, 16 black, the launcher's
 # pill behind Applications 404040 once it is open.
 pill="64 64 64"
-shows "the launcher closed" "8 16 0 0 0"
+shows "the launcher closed" "40 16 0 0 0"
 events "$(by 60 16)"; sleep 1
 events "$(button true)"; sleep 1
 events "$(button false)"; sleep 1
-shows "the mouse moved to Applications and clicked it open" "8 16 $pill"
+shows "the mouse moved to Applications and clicked it open" "40 16 $pill"

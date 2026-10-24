@@ -231,6 +231,7 @@ LIBS_install    := $(PATHS)
 LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_random     := $(RANDOM)
@@ -620,6 +621,7 @@ e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-ini
 	tests/partitions.sh
 	tests/fat.sh
 	tests/launcher.sh
+	tests/logo-menu.sh
 	tests/launcher-install.sh
 
 boot: images root $(DISK) $(SD)
