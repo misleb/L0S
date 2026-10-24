@@ -1,0 +1,241 @@
+; xml.l0 -- just enough XML to read SVG: a document's elements, their
+; attributes and children, read in place from its bytes. Text between
+; elements is skipped, as are comments, processing instructions such as
+; <?xml ...?>, a <!DOCTYPE ...> with its internal subset, and CDATA. An
+; attribute's value has its entities replaced: the five named ones
+; (&amp; &lt; &gt; &quot; &apos;) and &#N; and &#xH;, written as UTF-8.
+; Names are kept as written, a prefix and all ("xlink:href"). Pure, so
+; host tools link it.
+
+; An attribute: its name and its value.
+(data XmlAttr (XmlAttr (list int) (list int)))
+
+; An element: its name, its attributes in order, and its child elements.
+(data XmlEl (XmlEl (list int) (list XmlAttr) (list XmlEl)))
+
+; An element's name.
+(def xml_name ((e XmlEl)) (list int) (match e ((XmlEl n as cs) n)))
+; Its attributes, in order.
+(def xml_attrs ((e XmlEl)) (list XmlAttr) (match e ((XmlEl n as cs) as)))
+; Its child elements, in order.
+(def xml_children ((e XmlEl)) (list XmlEl) (match e ((XmlEl n as cs) cs)))
+
+; An element's attribute's value, if it has the attribute.
+(def xml_attr ((e XmlEl) (name (list int))) (Option (list int))
+  (xml_attr_in (xml_attrs e) name))
+
+; xml_attr's loop, through as.
+(def xml_attr_in((as (list XmlAttr)) (name (list int))) (Option (list int))
+  (if (is_empty as)
+      ((None (list int)))
+      (match (head as)
+        ((XmlAttr n v) (if (eq n name) (Some v) (xml_attr_in (tail as) name))))))
+
+; ---------------------------------------------------------------- reading
+
+; How far a step of the reader got: what it read, and where it stopped,
+; or why it could not, and where.
+(data (XmlStep T) (XmlGot T int) (XmlBad (list int) int))
+
+; The document b holds: its one root element, or why not, with the line.
+(def xml_parse ((b bytes)) (Result XmlEl (list int))
+  (match (xml_root b (xml_misc b 0))
+    ((XmlGot e at)
+      (if (lt (xml_misc b at) (bytes_len b))
+          ((Err XmlEl (list int)) (xml_why b "more after the root element" (xml_misc b at)))
+          ((Ok XmlEl (list int)) e)))
+    ((XmlBad why at) ((Err XmlEl (list int)) (xml_why b why at)))))
+
+; Why, and the line of at: "line 3: why".
+(def xml_why ((b bytes) (why (list int)) (at int)) (list int)
+  (append "line " (append (digits (add 1 (xml_lines b 0 (min at (bytes_len b)) 0))) (append ": " why))))
+
+; How many newlines b has from i up to at.
+(def xml_lines ((b bytes) (i int) (at int) (n int)) int
+  (if (ge i at) n (xml_lines b (add i 1) at (if (eq (bytes_get b i) 10) (add n 1) n))))
+
+; The root element at i, which must start with <.
+(def xml_root((b bytes) (i int)) (XmlStep XmlEl)
+  (if (if (lt i (bytes_len b)) (eq (bytes_get b i) 60) false)
+      (xml_element b i)
+      ((XmlBad XmlEl) "no root element" i)))
+
+; Whether c is XML's white space: a space, tab, newline or return.
+(def xml_is_space((c int)) bool (any_eq c (cons 32 (cons 9 (cons 10 (cons 13 (nil int)))))))
+
+; Past spaces from i.
+(def xml_space ((b bytes) (i int)) int
+  (if (if (lt i (bytes_len b)) (xml_is_space (bytes_get b i)) false) (xml_space b (add i 1)) i))
+
+; Past spaces, comments, processing instructions and declarations from
+; i: what may come before and after the root element.
+(def xml_misc ((b bytes) (i int)) int
+  (let j (xml_space b i)
+    (let k (xml_skip_markup b j)
+      (if (eq k j) j (xml_misc b k)))))
+
+; Past one comment, processing instruction, declaration or CDATA at i,
+; or i if there is none there.
+(def xml_skip_markup ((b bytes) (i int)) int
+  (if (bytes_is_at b i "<!--")
+      (xml_past b (add i 4) "-->")
+      (if (bytes_is_at b i "<![CDATA[")
+          (xml_past b (add i 9) "]]>")
+          (if (bytes_is_at b i "<?")
+              (xml_past b (add i 2) "?>")
+              (if (bytes_is_at b i "<!")
+                  (xml_past_decl b (add i 2) 0)
+                  i)))))
+
+; Just past the next end, or the end of b if there is none.
+(def xml_past ((b bytes) (i int) (end (list int))) int
+  (if (ge i (bytes_len b))
+      i
+      (if (bytes_is_at b i end) (add i (length end)) (xml_past b (add i 1) end))))
+
+; Past a declaration's >, skipping its internal subset's [ ... ].
+(def xml_past_decl ((b bytes) (i int) (depth int)) int
+  (if (ge i (bytes_len b))
+      i
+      (let c (bytes_get b i)
+        (if (eq c 91)
+            (xml_past_decl b (add i 1) (add depth 1))
+            (if (eq c 93)
+                (xml_past_decl b (add i 1) (sub depth 1))
+                (if (if (eq c 62) (le depth 0) false)
+                    (add i 1)
+                    (xml_past_decl b (add i 1) depth)))))))
+
+; A name from i: up to a space, /, >, = or the end.
+(def xml_name_end ((b bytes) (i int)) int
+  (if (ge i (bytes_len b))
+      i
+      (let c (bytes_get b i)
+        (if (if (xml_is_space c) true (any_eq c "/>="))
+            i
+            (xml_name_end b (add i 1))))))
+
+; An element from its < at i.
+(def xml_element ((b bytes) (i int)) (XmlStep XmlEl)
+  (let e (xml_name_end b (add i 1))
+    (if (eq e (add i 1))
+        ((XmlBad XmlEl) "an element with no name" i)
+        (xml_attrs_from b (xml_slice b (add i 1) e) e (nil XmlAttr)))))
+
+; b from i up to j as a string.
+(def xml_slice ((b bytes) (i int) (j int)) (list int) (bytes_to_list (bytes_slice b i j)))
+
+; An element's attributes from i, read so far reversed in acc, then its
+; end: /> for none, or > and its content.
+(def xml_attrs_from ((b bytes) (name (list int)) (i int) (acc (list XmlAttr))) (XmlStep XmlEl)
+  (let j (xml_space b i)
+    (if (bytes_is_at b j "/>")
+        ((XmlGot XmlEl) (XmlEl name (rev acc) (nil XmlEl)) (add j 2))
+        (if (bytes_is_at b j ">")
+            (xml_content b name (rev acc) (add j 1) (nil XmlEl))
+            (match (xml_attribute b j)
+              ((XmlGot a k) (xml_attrs_from b name k (cons a acc)))
+              ((XmlBad why k) ((XmlBad XmlEl) why k)))))))
+
+; One attribute at i: a name, =, and a quoted value.
+(def xml_attribute ((b bytes) (i int)) (XmlStep XmlAttr)
+  (let e (xml_name_end b i)
+    (let q (xml_space b (xml_space b e))
+      (if (if (eq e i) true (not (bytes_is_at b q "=")))
+          ((XmlBad XmlAttr) "an attribute with no =" i)
+          (let v (xml_space b (add q 1))
+            (if (if (bytes_is_at b v "\"") true (bytes_is_at b v "'"))
+                (let close (xml_past b (add v 1) (cons (bytes_get b v) (nil int)))
+                  (if (gt close (bytes_len b))
+                      ((XmlBad XmlAttr) "a value with no end" v)
+                      ((XmlGot XmlAttr) (XmlAttr (xml_slice b i e) (xml_unescape (xml_slice b (add v 1) (sub close 1)) (nil int))) close)))
+                ((XmlBad XmlAttr) "a value with no quotes" v)))))))
+
+; An element's content from i, its children so far reversed in acc,
+; up to its end tag.
+(def xml_content ((b bytes) (name (list int)) (as (list XmlAttr)) (i int) (acc (list XmlEl))) (XmlStep XmlEl)
+  (if (ge i (bytes_len b))
+      ((XmlBad XmlEl) (append "no end to " name) i)
+      (if (bytes_is_at b i "</")
+          (xml_end_tag b name as (add i 2) (rev acc))
+          (let k (xml_skip_markup b i)
+            (if (not (eq k i))
+                (xml_content b name as k acc)
+                (if (bytes_is_at b i "<")
+                    (match (xml_element b i)
+                      ((XmlGot c j) (xml_content b name as j (cons c acc)))
+                      ((XmlBad why j) ((XmlBad XmlEl) why j)))
+                    (xml_content b name as (xml_text_end b i) acc)))))))
+
+; Past text from i, up to the next <.
+(def xml_text_end ((b bytes) (i int)) int
+  (if (if (lt i (bytes_len b)) (not (eq (bytes_get b i) 60)) false) (xml_text_end b (add i 1)) i))
+
+; An end tag's name from i, which must be name's, and its >.
+(def xml_end_tag ((b bytes) (name (list int)) (as (list XmlAttr)) (i int) (cs (list XmlEl))) (XmlStep XmlEl)
+  (let e (xml_name_end b i)
+    (let gt (xml_space b e)
+      (if (not (eq (xml_slice b i e) name))
+          ((XmlBad XmlEl) (append name (append " ended by " (xml_slice b i e))) i)
+          (if (bytes_is_at b gt ">")
+              ((XmlGot XmlEl) (XmlEl name as cs) (add gt 1))
+              ((XmlBad XmlEl) (append "no > after </" name) gt))))))
+
+; --------------------------------------------------------------- entities
+
+; s with its entities replaced, onto acc reversed.
+(def xml_unescape ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s)
+      (rev acc)
+      (if (eq (head s) 38)
+          (let name (xml_until_semi (tail s) (nil int))
+            (let rest (drop_n (tail s) (add (length name) 1))
+              (match (xml_entity name)
+                ((Some code) (xml_unescape rest (rev_onto (xml_utf8 code) acc)))
+                ((None) (xml_unescape (tail s) (cons 38 acc))))))
+          (xml_unescape (tail s) (cons (head s) acc)))))
+
+; s up to its first ;, or all of s if it has none.
+(def xml_until_semi ((s (list int)) (acc (list int))) (list int)
+  (if (if (is_empty s) true (eq (head s) 59)) (rev acc) (xml_until_semi (tail s) (cons (head s) acc))))
+
+; The code an entity's name between & and ; stands for.
+(def xml_entity ((name (list int))) (Option int)
+  (if (eq name "amp") (Some 38)
+    (if (eq name "lt") (Some 60)
+      (if (eq name "gt") (Some 62)
+        (if (eq name "quot") (Some 34)
+          (if (eq name "apos") (Some 39)
+            (if (if (is_empty name) true (not (eq (head name) 35)))
+                ((None int))
+                (xml_char_ref (tail name)))))))))
+
+; A character reference's digits after #: decimal, or hex after x.
+(def xml_char_ref ((ds (list int))) (Option int)
+  (if (is_empty ds)
+      ((None int))
+      (if (eq (head ds) 120)
+          (xml_digits (tail ds) 16 0)
+          (xml_digits ds 10 0))))
+
+; Digits in base as a number, onto acc; none for a digit not of it.
+(def xml_digits((ds (list int)) (base int) (acc int)) (Option int)
+  (if (is_empty ds)
+      (Some acc)
+      (let v (hex_val (head ds))
+        (if (if (lt v 0) true (ge v base))
+            ((None int))
+            (xml_digits (tail ds) base (add (mul acc base) v))))))
+
+; A code as UTF-8's bytes.
+(def xml_utf8 ((c int)) (list int)
+  (if (lt c 128)
+      (cons c (nil int))
+      (if (lt c 2048)
+          (cons (bit_or 192 (bit_shr c 6)) (cons (xml_cont c 0) (nil int)))
+          (if (lt c 65536)
+              (cons (bit_or 224 (bit_shr c 12)) (cons (xml_cont c 6) (cons (xml_cont c 0) (nil int))))
+              (cons (bit_or 240 (bit_shr c 18)) (cons (xml_cont c 12) (cons (xml_cont c 6) (cons (xml_cont c 0) (nil int)))))))))
+
+; A continuation byte: c's six bits from bit at.
+(def xml_cont ((c int) (at int)) int (bit_or 128 (bit_and (bit_shr c at) 63)))

@@ -4,8 +4,8 @@
 # opens the process monitor (user/apps/procmon) in a window, learns where it is
 # from run windows, and checks, by QEMU's screendump:
 #
-#   1. its title bar, an Adwaita header bar in front, ebebeb
-#   2. the toolbar on the window's ground, fafafa; the grid's header's
+#   1. its title bar, an Adwaita header bar in front, dark, 303030
+#   2. the toolbar on the window's ground, 242424; the grid's header's
 #      line under it; End Process faded, with no row selected
 #   3. a row of its own, pid 7, the seventh by pid, its state's dot drawn;
 #      and no eighth row; and under the grid the memory's line, its level
@@ -136,8 +136,8 @@ shows() {
 # is the row's ground. The window is 840 wide, and under the grid's 400
 # rows is the memory's line.
 bar=46
-headerbar="235 235 235"; ground="250 250 250"; line="224 224 224"; white="255 255 255"
-selected="205 224 248"; red="224 27 36"; faded="237 139 143"
+headerbar="48 48 48"; ground="36 36 36"; line="64 64 64"; view="30 30 30"
+selected="36 56 80"; red="224 27 36"; faded="130 32 36"
 
 waits_for "^l0s> "
 printf 'run procmon &\n' >&3
@@ -151,7 +151,7 @@ endx=$((cx + 730)); endy=$((cy + 22))
 shows "its header bar" "$((w_x + 6)) $((w_y + 6)) $headerbar"
 shows "the toolbar, the grid's header, End Process faded" \
   "$((cx + 100)) $((cy + 3)) $ground" "$((cx + 5)) $((cy + 78)) $line" "$endx $endy $faded"
-shows "its own row, the seventh, and no eighth" "$(dot 7) !$white" "$(dot 8) $white"
+shows "its own row, the seventh, and no eighth" "$(dot 7) !$view" "$(dot 8) $view"
 
 # The memory's line under the grid's 400 rows and their line: 6 down,
 # Memory in bold, 49 wide, from 12, then 12 on its level bar, 8 high
@@ -167,7 +167,7 @@ for try in $(seq 1 30); do
   [ "$try" = 30 ] && fail "nap never started; it showed:"
   sleep 1
 done
-shows "nap's row, the eighth, read by itself" "$(dot 8) !$white"
+shows "nap's row, the eighth, read by itself" "$(dot 8) !$view"
 
 click $((cx + 800)) $(($(row 8) + 15))
 shows "a click selected nap's row, and End Process woke" \
@@ -175,7 +175,7 @@ shows "a click selected nap's row, and End Process woke" \
 
 click $((endx + 20)) $endy
 shows "End Process ended nap: its row gone, End Process faded" \
-  "$((cx + 800)) $(($(row 8) + 1)) $white" "$(dot 8) $white" "$endx $endy $faded"
+  "$((cx + 800)) $(($(row 8) + 1)) $view" "$(dot 8) $view" "$endx $endy $faded"
 
 from=$(($(wc -c < "$out") + 1))
 printf 'ps\n' >&3
@@ -189,21 +189,21 @@ echo "ok - procmon: ps lists no nap"
 # of the 300, 230 long, so it travels 70. At the top it is from 81 to 307,
 # 2 in from each end of its 230, and at the end, three rows on, from 151
 # to 377. At rest it is 6 wide, 3 in from the grid's right edge at 840,
-# from x 831, the text at 40% on white, adadad; with the pointer on its
-# strip, 8 wide, from 829, at 60%, 848484.
+# from x 831, the text, white, at 40% on the view's 1e1e1e, 787878;
+# with the pointer on its strip, 8 wide, from 829, at 60%, a5a5a5.
 for n in 1 2 3 4 5 6; do printf 'run nap 600000 &\n' >&3; sleep 1; done
 gx=$((cx + 833)); wide=$((cx + 830))
-slider="173 173 173"; slider_hot="132 132 132"
-shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $white"
+slider="120 120 120"; slider_hot="165 165 165"
+shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $view"
 
 # The pointer in the middle of the fifth row, on its empty detail: the
-# row under it is tinted, 4% of the text on white, 247, before the
-# wheel turns and after, though another row is under it then.
-hovered="247 247 247"
+# row under it is tinted, 4% of the text on the view's ground, 39,
+# before the wheel turns and after, though another row is under it then.
+hovered="39 39 39"
 events "$(at $((cx + 800)) $(($(row 5) + 15)))"; sleep 1
 events "$(wheel wheel-down)"; sleep 1
 shows "a step of the wheel scrolled to the end, the row now under the pointer tinted" \
-  "$gx $((cy + 100)) $white" "$gx $((cy + 360)) $slider" "$((cx + 800)) $(($(row 5) + 15)) $hovered" "$((cx + 800)) $(($(row 2) + 15)) $white"
+  "$gx $((cy + 100)) $view" "$gx $((cy + 360)) $slider" "$((cx + 800)) $(($(row 5) + 15)) $hovered" "$((cx + 800)) $(($(row 2) + 15)) $view"
 
 events "$(at $gx $((cy + 360)))"; sleep 1
 shows "the pointer on the strip: the slider wide and dark" "$wide $((cy + 360)) $slider_hot"
@@ -212,4 +212,4 @@ events "$(button true)"; sleep 1
 events "$(at $gx $((cy + 230)))"; sleep 1
 events "$(at $gx $((cy + 100)))"; sleep 1
 events "$(button false)"; sleep 1
-shows "the slider dragged back to the top" "$gx $((cy + 100)) $slider_hot" "$gx $((cy + 360)) $white"
+shows "the slider dragged back to the top" "$gx $((cy + 100)) $slider_hot" "$gx $((cy + 360)) $view"

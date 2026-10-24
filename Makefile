@@ -156,6 +156,12 @@ PATHS  := user/lib/format/uuid.l0 user/lib/proto/fs.l0 user/lib/sys/paths.l0
 PPM     := user/lib/format/ppm.l0
 RECT    := user/lib/gfx/rect.l0
 RENDER  := $(PPM) $(RECT) user/lib/gfx/render.l0
+# Outlines to coverage, and SVG read into them: XML, path data, and the
+# document, which need RENDER's points; linked by the host tools that
+# draw icons at build time.
+RASTER  := user/lib/gfx/raster.l0
+XML     := user/lib/format/xml.l0
+SVG     := $(XML) $(RASTER) user/lib/gfx/svg_path.l0 user/lib/gfx/svg.l0
 DISPLAY := user/lib/proto/display.l0
 DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
@@ -234,9 +240,10 @@ LIBS_files      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS) $(APPLIB)
 # each goes in the initramfs: user/bin/NAME, a command, in /bin;
 # user/sbin/NAME, a driver or a service, in /sbin; and user/apps/NAME,
 # an app, in a bundle, /Applications/APP.app, whose source is the
-# directory user/apps/NAME/APP.app, holding its manifest and its
-# icon.draw, which tools/mkicon draws as its icon.ppm. BUNDLE_NAME is the
-# bundle's name.
+# directory user/apps/NAME/APP.app, holding its manifest and its icon:
+# icon.svg, the app's own GNOME icon, or icon.draw, drawing commands,
+# which tools/mkicon draws as its icon.ppm. BUNDLE_NAME is the bundle's
+# name, and ICON_NAME its icon's source.
 BIN      := $(notdir $(wildcard user/bin/*))
 SBIN     := $(notdir $(wildcard user/sbin/*))
 APPS     := $(notdir $(wildcard user/apps/*))
@@ -245,6 +252,7 @@ $(foreach p,$(BIN),$(eval DIR_$(p) := user/bin/$(p)))
 $(foreach p,$(SBIN),$(eval DIR_$(p) := user/sbin/$(p)))
 $(foreach p,$(APPS),$(eval DIR_$(p) := user/apps/$(p)))
 $(foreach p,$(APPS),$(eval BUNDLE_$(p) := $(notdir $(wildcard user/apps/$(p)/*.app))))
+$(foreach p,$(APPS),$(eval ICON_$(p) := $(firstword $(wildcard user/apps/$(p)/$(BUNDLE_$(p))/icon.svg) user/apps/$(p)/$(BUNDLE_$(p))/icon.draw)))
 
 # A program's own sources, SRCS_NAME: every .l0 in its directory but its
 # main.l0 and its tests, NAME.l0 first; and its tests, TESTS_NAME, each
@@ -256,8 +264,9 @@ $(foreach p,$(PROGRAMS),$(eval TESTS_$(p) := $(wildcard $(DIR_$(p))/*_test.l0)))
 MKSPLASH := $(BASE) $(CLI) $(PPM) tools/mksplash/mksplash.l0
 L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
 MKFS     := $(COMMON) $(CLI) $(PARTS) $(L0FS) tools/mkfs/mkfs.l0
-MKICON   := $(ULIB) $(RENDER) $(UI_CORE) tools/mkicon/mkicon.l0
-MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) tools/mkfont/raster.l0 tools/mkfont/ttf.l0 tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
+MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
+MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
+MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/ttf.l0 tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 ICONS    := $(APPS:%=$(BUILD)/icons/%.ppm)
 ICONS2X  := $(APPS:%=$(BUILD)/icons/%2x.ppm)
@@ -277,7 +286,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test check-each test-each test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp
+.PHONY: FORCE all check test check-each test-each test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp icon-sheet
 
 all: check test test-virt e2e
 
@@ -322,6 +331,7 @@ $(call l0_check,$(L0SDOC) tools/l0sdoc/main.l0)
 $(call l0_check,$(MKFS) tools/mkfs/main.l0)
 $(call l0_check,$(MKICON) tools/mkicon/main.l0)
 $(call l0_check,$(MKFONT) tools/mkfont/main.l0)
+$(call l0_check,$(MKICONS) tools/mkicons/main.l0)
 
 # That every form is documented, but those DOC_GAPS lists.
 $(BUILD)/check/doc.ok: $(BUILD)/l0sdoc $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
@@ -388,6 +398,7 @@ $(call l0_test,$(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)
 $(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
+$(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
 $(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(call l0_test,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(t))))
@@ -395,7 +406,11 @@ $(call l0_test,$(MKSPLASH) tools/mksplash/mksplash_test.l0)
 $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
 $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
-$(foreach t,raster ttf shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
+$(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
+$(foreach t,ttf shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
+$(call l0_test,$(ULIB) $(RENDER) $(RASTER) user/lib/gfx/raster_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_path_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_test.l0)
 
 # The MCP server's tests, of its pure parts.
 $(BUILD)/test/l0s-mcp.ok: $(wildcard tools/l0s-mcp/*.py)
@@ -454,31 +469,53 @@ $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 	$(L0) build $(MKICON) tools/mkicon/main.l0 -o $@
 
 # The face the desktop draws text, icons and the pointer with at scale 2,
-# /etc/face2x: Source Code Pro's glyphs and fonts/icons.paths, rasterized.
+# /etc/face2x: Source Code Pro's glyphs and fonts/cursors.paths, rasterized.
 FACE := $(BUILD)/face2x
 FONT_TTFS := fonts/SourceCodePro-Regular.ttf fonts/SourceCodePro-Bold.ttf
 
 $(BUILD)/mkfont: $(MKFONT) tools/mkfont/main.l0 | $(BUILD)
 	$(L0) build $(MKFONT) tools/mkfont/main.l0 -o $@
 
-$(FACE): $(BUILD)/mkfont $(FONT_TTFS) fonts/icons.paths
-	$(BUILD)/mkfont $(FONT_TTFS) fonts/icons.paths $@.tmp && mv $@.tmp $@
+$(FACE): $(BUILD)/mkfont $(FONT_TTFS) fonts/cursors.paths
+	$(BUILD)/mkfont $(FONT_TTFS) fonts/cursors.paths $@.tmp && mv $@.tmp $@
 
-# Each app's icon, drawn from its bundle's icon.draw. mkicon draws on the
+# The toolkit's symbolic icons, /etc/icons, at every scale: GNOME's SVGs
+# under icons/, rasterized by mkicons. make icon-sheet draws them all
+# into build/icon-sheet.ppm, to look at.
+ICON_FACE := $(BUILD)/icons.face
+SYMBOLIC  := $(sort $(wildcard icons/*/symbolic/*-symbolic.svg))
+
+$(BUILD)/mkicons: $(MKICONS) tools/mkicons/main.l0 | $(BUILD)
+	$(L0) build $(MKICONS) tools/mkicons/main.l0 -o $@
+
+$(ICON_FACE): $(BUILD)/mkicons $(SYMBOLIC)
+	$(BUILD)/mkicons $@.tmp $(SYMBOLIC) && mv $@.tmp $@
+
+icon-sheet: $(BUILD)/mkicons $(SYMBOLIC)
+	$(BUILD)/mkicons --sheet $(BUILD)/icon-sheet.ppm $(SYMBOLIC)
+
+# Each app's icon, drawn from its bundle's icon.svg or icon.draw, and
+# an icon.svg's images for Files, icon.face. mkicon draws on the
 # theme's colors, so an icon is drawn again when they change.
 define ICON_RULE
-$(BUILD)/icons/$(1).ppm: $(DIR_$(1))/$(BUNDLE_$(1))/icon.draw $(BUILD)/mkicon | $(BUILD)/icons
-	$(BUILD)/mkicon $$< > $$@.tmp && mv $$@.tmp $$@
+$(BUILD)/icons/$(1).ppm: $(ICON_$(1)) $(BUILD)/mkicon $(ICON_FACE) | $(BUILD)/icons
+	$(BUILD)/mkicon $$< $(ICON_FACE) > $$@.tmp && mv $$@.tmp $$@
 
-$(BUILD)/icons/$(1)2x.ppm: $(DIR_$(1))/$(BUNDLE_$(1))/icon.draw $(BUILD)/mkicon $(FACE) | $(BUILD)/icons
-	$(BUILD)/mkicon $$< $(FACE) > $$@.tmp && mv $$@.tmp $$@
+$(BUILD)/icons/$(1)2x.ppm: $(ICON_$(1)) $(BUILD)/mkicon $(ICON_FACE) $(FACE) | $(BUILD)/icons
+	$(BUILD)/mkicon $$< $(ICON_FACE) $(FACE) > $$@.tmp && mv $$@.tmp $$@
+
+$(BUILD)/icons/$(1).face: $(ICON_$(1)) $(BUILD)/mkicon | $(BUILD)/icons
+	$(BUILD)/mkicon --image $$< $$@.tmp && mv $$@.tmp $$@
 endef
 $(foreach p,$(APPS),$(eval $(call ICON_RULE,$(p))))
+SVG_APPS := $(foreach p,$(APPS),$(if $(filter %.svg,$(ICON_$(p))),$(p)))
+IMAGES_FACE := $(SVG_APPS:%=$(BUILD)/icons/%.face)
 
 # The initramfs's programs, staged in build/root as the archive holds
 # them: /bin, /sbin, and each app's bundle, its program, manifest and
-# icon, at both scales and as the drawing commands it was drawn from,
-# which Files paints on any ground. Made anew each time, so that a program that moves leaves nothing
+# icon, at both scales, and as what Files paints on any ground: an
+# icon.svg's images, icon.face, or the drawing commands of an icon.draw.
+# Made anew each time, so that a program that moves leaves nothing
 # where it was.
 define STAGE_APP
 mkdir -p $(ROOT)/Applications/$(BUNDLE_$(1)) && \
@@ -486,10 +523,10 @@ install -m 755 $(BUILD)/bin/$(1).img $(ROOT)/Applications/$(BUNDLE_$(1))/$(1) &&
 install -m 644 $(DIR_$(1))/$(BUNDLE_$(1))/manifest $(ROOT)/Applications/$(BUNDLE_$(1))/manifest && \
 install -m 644 $(BUILD)/icons/$(1).ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon.ppm && \
 install -m 644 $(BUILD)/icons/$(1)2x.ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon2x.ppm && \
-install -m 644 $(DIR_$(1))/$(BUNDLE_$(1))/icon.draw $(ROOT)/Applications/$(BUNDLE_$(1))/icon.draw
+$(if $(filter %.svg,$(ICON_$(1))),install -m 644 $(BUILD)/icons/$(1).face $(ROOT)/Applications/$(BUNDLE_$(1))/icon.face,install -m 644 $(ICON_$(1)) $(ROOT)/Applications/$(BUNDLE_$(1))/icon.draw)
 endef
 
-root: $(IMAGES) $(ICONS) $(ICONS2X)
+root: $(IMAGES) $(ICONS) $(ICONS2X) $(IMAGES_FACE)
 	rm -rf $(ROOT) && mkdir -p $(ROOT)/bin $(ROOT)/sbin $(ROOT)/Applications
 	$(foreach p,$(BIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/bin/$(p) && ) true
 	$(foreach p,$(SBIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/sbin/$(p) && ) true
@@ -516,8 +553,8 @@ mcp: $(MCP_VENV)/.installed
 # for scale 2, staged together as the archive's /etc.
 FONT     := fonts/l0s-8x16.txt
 SPLASH2X := $(if $(filter $(BUILD)/splash.ppm,$(SPLASH)),$(BUILD)/splash2x.ppm)
-ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FONT) $(FACE)
-stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FONT) $(1)/font.txt && cp $(FACE) $(1)/face2x \
+ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FONT) $(FACE) $(ICON_FACE)
+stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FONT) $(1)/font.txt && cp $(FACE) $(1)/face2x && cp $(ICON_FACE) $(1)/icons \
             $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm)
 
 initramfs: images root $(ETC_DEPS)

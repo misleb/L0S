@@ -64,9 +64,10 @@ There are two shells in all:
   Adwaita style by the toolkit in [user/lib/ui](user/lib/ui/README.md):
   rounded corners and a header bar with a bold, centered title, and a
   thin border of the header bar's color down the sides and along the
-  foot. Keys typed in QEMU's window go to the one in front, whose header
-  bar and border are `ebebeb`; the other's are lighter, in the backdrop,
-  its title dimmed.
+  foot, in Adwaita's dark style (the theme's `ui_style`, the one place a
+  setting for it will be read). Keys typed in QEMU's window go to the
+  one in front, whose header bar and border are `303030`; the other's
+  are darker, `242424`, in the backdrop, its title dimmed.
   - Click a window to bring it to the front. Drag it by its title bar to
     move it.
   - Click the round close button at the right end of its title bar to
@@ -171,13 +172,14 @@ run keys echoes what the keyboard driver sees, until Esc.
 L0S shell, on an L0 microkernel. Type help for the commands.
 l0s> ls
   /Applications/Disks.app/disks
-  /Applications/Disks.app/icon.draw
+  /Applications/Disks.app/icon.face
   /Applications/Disks.app/icon.ppm
   /Applications/Disks.app/manifest
   ...
   /bin/cat
   ...
   /etc/font.txt
+  /etc/icons
   /etc/inittab
   /etc/motd
   /etc/splash.ppm
@@ -614,7 +616,7 @@ Adwaita header bar, laid out and painted by the toolkit
 Under the content is the window's frame, a buffer of `wm`'s 4 pixels
 wider than the content and 2 higher, the content 2 pixels in from its
 left: the 2-pixel border down the content's sides and along its foot,
-painted in the title bar's ground, `ebebeb` in front and `fafafa` in the
+painted in the title bar's ground, `303030` in front and `242424` in the
 backdrop, and repainted with it. The content covers the rest of the
 frame, which is never painted. So a window W×H is W + 4 wide and
 46 + H + 2 high; `windows` gives its top left and W and H, its
@@ -833,23 +835,31 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   bar, the launcher, the pointer, `draw`'s shapes and the protocol's
   numbers. Its buffers, and its clients', are twice as wide and high.
   `display.l0` makes its places the screen's on the way to the driver.
-- **The toolkit** paints its ops twice the size (`paint.l0`). Text, icons
-  and the pointer come from the face, `/etc/face2x`
-  ([user/lib/ui/face.l0](user/lib/ui/face.l0)): coverage, how much of each
-  pixel a shape covers, 0 to 15. Each pixel is mixed with what is under
-  it by that much, since layers do not blend.
+- **The toolkit** paints its ops twice the size (`paint.l0`). Text and
+  the pointer come from the face, `/etc/face2x`, and icons, at every
+  scale, from `/etc/icons` ([user/lib/ui/face.l0](user/lib/ui/face.l0)):
+  coverage, how much of each pixel a shape covers, 0 to 15. Each pixel
+  is mixed with what is under it by that much, since layers do not
+  blend.
 - **[tools/mkfont](tools/mkfont/mkfont.l0)** makes the face at build time.
   It reads Source Code Pro's TrueType outlines (`ttf.l0`), and the
-  icons' and pointer's in [fonts/icons.paths](fonts/icons.paths)
-  (`shape.l0`). It rasterizes them (`raster.l0`), curves, arcs and
-  strokes worked out in `float`s and rounded to nearest: 16
+  pointers' in [fonts/cursors.paths](fonts/cursors.paths)
+  (`shape.l0`). It rasterizes them (`user/lib/gfx/raster.l0`), curves,
+  arcs and strokes worked out in `float`s and rounded to nearest: 16
   samples a pixel row, each crossing to 1/256 of a pixel, by the
   nonzero rule. Glyphs come out 16×32 for text, 32×64 for large text, in
-  regular and bold; icons at 32, 64, 96 and 128.
+  regular and bold.
+- **[tools/mkicons](tools/mkicons/mkicons.l0)** makes `/etc/icons`: the
+  toolkit's symbolic icons are GNOME's own SVGs, under [icons/](icons)
+  (Adwaita's, and System Monitor's, each with its license and a `SOURCE`
+  saying where it came from), drawn by the SVG library (`svg.l0`) at
+  16, 32, 48, 64, 96 and 128. `make icon-sheet` draws them all into
+  `build/icon-sheet.ppm` to look at. A new icon is its SVG copied there
+  and its name in `icons.l0`'s `ui_icon_names`.
 - **`vt`**'s cells are still 8×16 of the desktop's pixels; it scrolls by
   32 of its buffer's rows.
 - **The launcher** shows each app's `icon2x.ppm`, which `tools/mkicon`
-  draws at 96×96 from the same `icon.draw`.
+  draws at 96×96 from the same `icon.svg` or `icon.draw`.
 
 The GPU composes the screen as it does at scale 1, from the buffers
 where they are. It does not draw: the installed QEMU has no virgl, so
@@ -1646,19 +1656,27 @@ summary A terminal in a window, with its own shell
 A bundle's name is one word, as the shell and the inittab split at
 spaces; an app's name may be several. Its source is the directory beside
 its program's, `user/apps/vt/Terminal.app`, holding the manifest and
-`icon.draw`, the icon as lines of `run draw`'s commands, which
-[tools/mkicon](tools/mkicon/mkicon.l0) draws at build time, on the
-launcher's ground, into the 48×48 PPM, with the desktop's own drawing on
-a canvas over an array: a rounded square and a symbolic
-icon at twice its size (`round 0 0 48 48 10 dark_3`,
-`icon 8 8 utilities-terminal 2 white`). It draws the same again at scale
-2, `icon2x.ppm`, 96×96, its icon from the face, for a large screen.
-The bundle keeps `icon.draw` too, which Files paints the app's icon
-from, on its own ground, as the PPMs, drawn on the launcher's, cannot
-be shown on another with no alpha; a bundle without one, as one copied
-in by hand, shows the generic app icon there. Making an app is making
-that directory; the Makefile finds it, and the
-launcher finds the bundle.
+its icon, which [tools/mkicon](tools/mkicon/mkicon.l0) draws at build
+time, on the launcher's ground, into the 48×48 PPM, and again at scale
+2, `icon2x.ppm`, 96×96, for a large screen. The icon is one of:
+
+- **`icon.svg`**, the app's own GNOME icon, full color: Terminal's is
+  GNOME Console's, System Monitor's, Disks' and Files' their GNOME
+  apps', each under its project's license ([icons/](icons) has them and
+  where each came from). mkicon draws it with the SVG library, and also
+  into `icon.face`, its images at 16, 32, 48 and 96 with their alpha
+  (`face.l0`'s `image.N`), which the bundle keeps for Files to paint on
+  its own ground (`UiPImage`), as the PPMs, drawn on the launcher's,
+  cannot be shown on another with no alpha.
+- **`icon.draw`**, the icon as lines of `run draw`'s commands, drawn with
+  the desktop's own drawing on a canvas over an array: Widgets' is a
+  rounded square and a symbolic icon at twice its size (`round 0 0 48
+  48 10 purple_3`, `icon 8 8 view-app-grid 2 white`). The bundle keeps
+  it, and Files paints the icon from it.
+
+A bundle with neither, as one copied in by hand, shows the generic app
+icon in Files. Making an app is making that directory; the Makefile
+finds it, and the launcher finds the bundle.
 
 The kernel keeps the whole archive in memory, parses its entries
 ([common/initramfs.l0](common/initramfs.l0)), and reads `/etc/inittab`
@@ -2198,9 +2216,12 @@ name in a library is taken in every program that links it.
 | [format/gpt.l0](user/lib/format/gpt.l0) | the GUID partition table, as bytes: the protective MBR, the header and entries and their backup, checked by CRC-32; the partitions and the free space between them, in order (`gpt_layout`); and where a new partition fits | `fs`, `disks`, `tools/mkfs` |
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
+| [format/xml.l0](user/lib/format/xml.l0) | just enough XML to read SVG, in place from its bytes: elements, their attributes with entities replaced, and their children, comments, processing instructions, a doctype and CDATA skipped, errors by line (`XML`, in `SVG`) | `tools/mkicons`, `tools/mkicon` |
 | [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, its place at a scale (`rect_scaled`), and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
 | [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `files`, `tools/mkicon` |
-| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's look: theme, icons, the face it draws text, icons and the pointer with at scale 2 (`face.l0`), painting at either scale, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, a window's own header bar (`UiCsdBar`), a path bar and a toggle group (`nav.l0`), an icon view (`icon_view.l0`), a popover menu (`menu.l0`), the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`), their own decorations, double clicks and right clicks too | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks`, `files` (both) |
+| [gfx/raster.l0](user/lib/gfx/raster.l0) | outlines to coverage: contours of lines and Bézier curves, in 1/256 pixel, flattened and sampled 16 times a row, filled by the nonzero or the even-odd rule, as exact sums (`rast_sums`) or levels 0 to 15 packed 16 to a word; strokes as polygons, their ends butt, round or square (`RASTER`) | `tools/mkfont`, and with `SVG` |
+| [gfx/svg_path.l0](user/lib/gfx/svg_path.l0), [svg.l0](user/lib/gfx/svg.l0) | SVG drawn n by n with smooth edges: path data with every command, arcs as cubics, transforms, numbers as SVG runs them together; shapes, `use`, styles inherited, colors, linear and radial gradients, opacity, clip paths and masks, composited in premultiplied floats; out as coverage (`svg_cover`, a symbolic icon) or ARGB (`svg_argb`); filters, text, images, style sheets, dashes and markers refused by name (`SVG`, with `XML` and `RASTER`) | `tools/mkicons`, `tools/mkicon` |
+| [ui/](user/lib/ui/README.md) | the toolkit, in Adwaita's dark look: theme, icons (GNOME's, `icons.l0`), the face it draws them, text at scale 2 and the pointer with (`face.l0`), painting at either scale, the data grid and a page of one, panes (a sidebar, a segment bar, property rows, an alert dialog, and one that asks for something), a text entry with a cursor, a window's own header bar (`UiCsdBar`), a path bar and a toggle group (`nav.l0`), an icon view (`icon_view.l0`), a popover menu (`menu.l0`), the desktop's drawing commands (`UI_CORE`), and client windows (`UI_WINDOW`), their own decorations, double clicks and right clicks too | `wm`, `vt`, `draw` (`UI_CORE`); `widgets`, `procmon`, `disks`, `files` (both) |
 
 ## Tests
 
@@ -2418,8 +2439,8 @@ vt-initramfs`), every shell running, but with two Terminals whatever the
 demo's `/etc/system` starts after its first ([tests/vt/etc/system](tests/vt/etc/system)), on its USB keyboard and mouse (`QEMU_INPUT=usb`), with QMP on a socket as well, to work the mouse, which it moves into the screen's top left corner before each move to a pixel. Which `vt`
 opens first, and so where each window is, varies, so it learns where they
 are from `run windows` at the serial shell. Then:
-- the title bars: the front window's header bar active, `ebebeb`, the
-  other's in the backdrop, `fafafa`; and the front window's top left
+- the title bars: the front window's header bar active, `303030`, the
+  other's in the backdrop, `242424`; and the front window's top left
   pixel, cut by its shape, showing what is under it;
 - once the front window's prompt's cursor is drawn, `echo hi`, typed with
   `sendkey`: the screendump shows the `h` of the answer on its row 8,

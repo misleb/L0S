@@ -119,7 +119,7 @@ for try in $(seq 1 30); do
 done
 [ -n "$w_x" ] || fail "run windows never listed the gallery's window; it showed:"
 mid=$((w_x + 322)); x0=$(((mid - 28) * 2)); x1=$(((mid + 28) * 2)); row=$(((w_y + 23) * 2))
-shows "the gallery's header bar" "$(((w_x + 20) * 2)) $row 235 235 235"
+shows "the gallery's header bar" "$(((w_x + 20) * 2)) $row 48 48 48"
 n=$(colors $x0 $x1 $row)
 if [ "$n" -gt 4 ]; then
   echo "ok - hidpi: the title is smooth, $n colors along it"

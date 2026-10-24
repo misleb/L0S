@@ -5,11 +5,12 @@
 # shell, which opens Disks (user/apps/disks) in a window, learns where it is
 # from run windows, and checks, by QEMU's screendump:
 #
-#   1. the sidebar's ground, ebebed, and its drive's row selected, d9d9da
+#   1. the sidebar's ground, 2e2e32, and its drive's row selected, 434347
 #   2. the bar of volumes: data, the first volume, selected in the accent;
-#      the free space before it on the window's ground; scratch on white
+#      the free space before it on the window's ground; scratch on the
+#      view's
 #   3. a click of the tablet, through QMP, on scratch: it is selected,
-#      and data on white
+#      and data on the view's ground
 #   4. a click on Format Volume...: the dialog, its Format button red,
 #      over the window dimmed, the sidebar's ground mixed with black
 #   5. Esc, through the monitor's sendkey: the dialog gone
@@ -131,8 +132,8 @@ said() {
 # 520, from 280, 182; its buttons' row from 280, 34 high, each in a half
 # of the 272 inside it, 12 apart, its Format button, 68 wide, from 477.
 bar=46
-sidebar="235 235 237"; side_sel="217 217 218"; ground="250 250 250"; white="255 255 255"
-accent="53 132 228"; red="224 27 36"; side_dim="165 165 166"
+sidebar="46 46 50"; side_sel="67 67 71"; ground="36 36 36"; view="30 30 30"
+accent="53 132 228"; red="224 27 36"; side_dim="32 32 35"
 
 waits_for "^l0s> "
 said 'write /Volumes/data/hello hi' > /dev/null
@@ -147,10 +148,10 @@ format_x=$((cx + 300)); format_y=$((cy + 257))
 
 shows "the sidebar, its drive selected" "$((cx + 100)) $((cy + 300)) $sidebar" "$((cx + 200)) $((cy + 50)) $side_sel"
 shows "data selected, free space before it, scratch after" \
-  "$data_x $segy $accent" "$free_x $segy $ground" "$scratch_x $segy $white"
+  "$data_x $segy $accent" "$free_x $segy $ground" "$scratch_x $segy $view"
 
 click $scratch_x $((cy + 200))
-shows "a click selected scratch" "$scratch_x $segy $accent" "$data_x $segy $white"
+shows "a click selected scratch" "$scratch_x $segy $accent" "$data_x $segy $view"
 
 click $data_x $((cy + 200))
 click $format_x $format_y

@@ -4,8 +4,8 @@
 # opens the toolkit's gallery (user/apps/widgets) in a window, learns where it
 # is from run windows, and checks, by QEMU's screendump:
 #
-#   1. its title bar, an Adwaita header bar in front, ebebeb
-#   2. the toolbar on the window's ground, fafafa; the grid's header's
+#   1. its title bar, an Adwaita header bar in front, dark, 303030
+#   2. the toolbar on the window's ground, 242424; the grid's header's
 #      line under it; End Process faded, with no row selected
 #   3. a click of the tablet, through QMP, on the second row: the
 #      pointer's press and release forwarded to the window, the row
@@ -105,8 +105,8 @@ shows() {
 # its rows, 30 each, sorted by pid. A row's Name column runs from 70 to
 # 300, its text at its start.
 bar=46
-headerbar="235 235 235"; ground="250 250 250"; line="224 224 224"
-selected="205 224 248"; red="224 27 36"; faded="237 139 143"
+headerbar="48 48 48"; ground="36 36 36"; line="64 64 64"
+selected="36 56 80"; red="224 27 36"; faded="130 32 36"
 
 waits_for "^l0s> "
 printf 'run widgets &\n' >&3

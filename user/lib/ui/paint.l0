@@ -23,12 +23,16 @@
 
 ; One thing to paint, in the desktop's pixels, colors as 0xRRGGBB, each
 ; field as beside it: a filled rectangle, one with rounded corners, a
-; line of text, or a symbolic icon.
+; line of text, a symbolic icon, or an image of its own colors, such as
+; an app's icon from its icon.svg: n square, from whichever of its
+; tables (face.l0's image.N, ARGB) is the screen's size, dimmed as under
+; a dialog if it says so.
 (data UiPaint
   (UiPFill Rect int)                                 ; rect, color
   (UiPRound Rect int int int)                        ; rect, radius, color, color under the corners or -1
   (UiPText Rect (list int) UiAlign int bool int)     ; rect, text, align, color, bold, scale
-  (UiPIcon int int (list int) int int))                ; x, y, icon name, color, scale
+  (UiPIcon int int (list int) int int)               ; x, y, icon name, color, scale
+  (UiPImage int int int bool (list UiCov)))          ; x, y, n, dimmed, tables
 
 ; Each of rs filled with color c.
 (def ui_fills ((rs (list Rect)) (c int)) (list UiPaint)
@@ -43,7 +47,8 @@
               ((UiPFill r c) (UiPFill (rect_moved r dx dy) c))
               ((UiPRound r rad c u) (UiPRound (rect_moved r dx dy) rad c u))
               ((UiPText r s a c b sc) (UiPText (rect_moved r dx dy) s a c b sc))
-              ((UiPIcon x y n c sc) (UiPIcon (add x dx) (add y dy) n c sc)))
+              ((UiPIcon x y n c sc) (UiPIcon (add x dx) (add y dy) n c sc))
+              ((UiPImage x y n d ts) (UiPImage (add x dx) (add y dy) n d ts)))
             (ui_ops_offset (tail ops) dx dy))))
 
 ; ------------------------------------------------------------------- text
@@ -151,7 +156,8 @@
       ((UiPRound r radius color under)
         (ui_round c k (rect_scaled r s) (mul s (ui_fit_radius radius (rect_w r) (rect_h r))) color under))
       ((UiPText r t a color bold scale) (ui_text_at c face k r t a color bold scale))
-      ((UiPIcon x y name color scale) (ui_icon_at c face k x y name color scale)))))
+      ((UiPIcon x y name color scale) (ui_icon_at c face k x y name color scale))
+      ((UiPImage x y n dimmed ts) (ui_image_at c k (mul x s) (mul y s) (mul n s) dimmed ts)))))
 
 ; r filled, as much of it as is in k.
 (def ui_fill ((c Canvas) (k Rect) (r Rect) (color int)) Canvas
@@ -334,21 +340,46 @@
 (def ui_dot ((c Canvas) (k Rect) (x int) (y int) (color int) (scale int)) Canvas
   (if (eq scale 1) (ui_put c k x y color) (ui_fill c k (Rect x y scale scale) color)))
 
-; Icon name at x, y of the desktop's pixels, at the face's scale: at 2,
-; the face's icon of its size, or, if it has none, the bitmap doubled.
+; Icon name at x, y of the desktop's pixels, at the face's scale: the
+; face's icon of its size, smooth, in color; nothing if it has none.
 (def ui_icon_at ((c Canvas) (face UiFace) (k Rect) (x int) (y int) (name (list int)) (color int) (scale int)) Canvas
   (let s (ui_face_scale face)
     (let n (mul (mul (ui_icon_size) scale) s)
-      (match (if (eq s 1) ((None UiCov)) (ui_face_table face (ui_icon_table name n)))
+      (match (ui_face_table face (ui_icon_table name n))
         ((Some cov) (ui_cov_blit c k cov (mul x s) (mul y s) 0 n color))
-        ((None) (ui_icon c k (mul x s) (mul y s) (ui_icon_rows name) color (mul scale s) 0))))))
+        ((None) c)))))
 
-; An icon's bitmap rows, from row r, at x, y, each pixel scale square,
-; cut to k.
-(def ui_icon ((c Canvas) (k Rect) (x int) (y int) (rows (list int)) (color int) (scale int) (r int)) Canvas
-  (if (is_empty rows)
+; An image n square at x, y of the screen's pixels: the table of its
+; tables n wide, or else the first, each pixel the nearest of it; each
+; mixed with what is there by its alpha. Nothing for no table.
+(def ui_image_at ((c Canvas) (k Rect) (x int) (y int) (n int) (dimmed bool) (ts (list UiCov))) Canvas
+  (if (is_empty ts)
       c
-      (ui_icon (ui_bits c k x (add y (mul r scale)) (head rows) (ui_icon_size) color scale 0) k x y (tail rows) color scale (add r 1))))
+      (ui_image_px c k x y n dimmed (ui_image_table_of ts n (head ts)) 0)))
+
+; The table of ts n wide, or fallback.
+(def ui_image_table_of ((ts (list UiCov)) (n int) (fallback UiCov)) UiCov
+  (if (is_empty ts)
+      fallback
+      (match (head ts) ((UiCov w h words) (if (eq w n) (head ts) (ui_image_table_of (tail ts) n fallback))))))
+
+; ui_image_at's loop: pixel i on, of n · n.
+(def ui_image_px ((c Canvas) (k Rect) (x int) (y int) (n int) (dimmed bool) (t UiCov) (i int)) Canvas
+  (if (ge i (mul n n))
+      c
+      (match t
+        ((UiCov w h words)
+          (let px (mod i n)
+            (let py (div i n)
+              (let v (array_get words (add (mul (div (mul py h) n) w) (div (mul px w) n)))
+                (let a (bit_and (bit_shr v 24) 255)
+                  (let rgb (if dimmed (ui_scrim (bit_and v 16777215)) (bit_and v 16777215))
+                    (ui_image_px (if (eq a 0)
+                                     c
+                                     (if (eq a 255)
+                                         (ui_put c k (add x px) (add y py) rgb)
+                                         (ui_blend c k (add x px) (add y py) rgb (div (add (mul a 100) 127) 255) -1)))
+                                 k x y n dimmed t (add i 1)))))))))))
 
 ; ----------------------------------------------------------------- buffers
 
@@ -414,7 +445,7 @@
       ((Some cov) (match cov ((UiCov w h words) (ui_cursor_px clear words (min w (canvas_w c)) (min h (canvas_h c)) w 0)))))))
 
 ; The face's table of the pointer called name: cursor for the arrow, else
-; cursor.NAME, as tools/mkfont makes them from fonts/icons.paths.
+; cursor.NAME, as tools/mkfont makes them from fonts/cursors.paths.
 (def ui_cursor_table ((name (list int))) (list int)
   (if (is_empty name) "cursor" (append "cursor." name)))
 

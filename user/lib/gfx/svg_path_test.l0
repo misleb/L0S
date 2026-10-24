@@ -1,0 +1,120 @@
+; svg_path_test.l0 -- tests of SVG's path data, numbers and transforms.
+
+; Segments as text, a letter and its numbers each.
+(def segs_text ((ss (list RastSeg))) (list int) (unwords (segs_words ss (nil (list int)))))
+
+(def segs_words ((ss (list RastSeg)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ss)
+      (rev acc)
+      (segs_words (tail ss) (cons (seg_text (head ss)) acc))))
+
+(def seg_text ((s RastSeg)) (list int)
+  (match s
+    ((RastMove x y) (nums "M" (cons x (cons y (nil int)))))
+    ((RastLine x y) (nums "L" (cons x (cons y (nil int)))))
+    ((RastQuad a b x y) (nums "Q" (cons a (cons b (cons x (cons y (nil int)))))))
+    ((RastCubic a b c d x y) (nums "C" (cons a (cons b (cons c (cons d (cons x (cons y (nil int)))))))))
+    ((RastClose) "Z")))
+
+(def nums ((k (list int)) (ns (list int))) (list int)
+  (if (is_empty ns) k (nums (append k (append " " (digits_signed (head ns)))) (tail ns))))
+
+(def digits_signed ((n int)) (list int) (if (lt n 0) (cons 45 (digits (neg n))) (digits n)))
+
+; A path in whole units, mapped by m, as text; or its error.
+(def path_with ((d (list int)) (m SvgMatrix)) (list int)
+  (match (svg_path d m)
+    ((Ok ss) (segs_text ss))
+    ((Err why) why)))
+
+(def path ((d (list int))) (list int) (path_with d (svg_identity)))
+
+(def test_lines () int
+  (check_str "M L H V Z" (path "M 1 2 L 3 4 H 5 V 6 Z") "M 1 2 L 3 4 L 5 4 L 5 6 L 1 2 Z"))
+
+(def test_relative () int
+  (check_str "m l h v" (path "m1 2l3 4h5v6z") "M 1 2 L 4 6 L 9 6 L 9 12 L 1 2 Z"))
+
+; Numbers run together: a sign or a second point starts the next.
+(def test_run_together () int
+  (check_str "packed" (path "M10-20L.5.5 1e1,2E1") "M 10 -20 L 1 1 L 10 20"))
+
+; Pairs after a move are lines; after a line, more lines.
+(def test_repeats () int
+  (check_str "implicit" (path "M 0 0 10 0 10 10 l 1 1 1 1") "M 0 0 L 10 0 L 10 10 L 11 11 L 12 12"))
+
+; S reflects the last cubic's second control point; T a quadratic's.
+(def test_smooth () int
+  (add (check_str "S" (path "M 0 0 C 0 10 10 10 10 0 S 20 -10 20 0") "M 0 0 C 0 10 10 10 10 0 C 10 -10 20 -10 20 0")
+       (check_str "T" (path "M 0 0 Q 5 10 10 0 T 20 0") "M 0 0 Q 5 10 10 0 Q 15 -10 20 0")))
+
+; A Z then a relative command goes on from where the subpath began.
+(def test_after_close () int
+  (check_str "back at 5 5" (path "M 5 5 L 9 5 z l 0 4") "M 5 5 L 9 5 L 5 5 Z L 5 9"))
+
+; A half circle of radius 100 from 0, 0 to 200, 0, sweeping down the
+; screen: two quarter turns, through 100, 100.
+(def test_arc_half () int
+  (check_str "two cubics" (path "M 0 0 A 100 100 0 0 0 200 0")
+             "M 0 0 C 0 55 45 100 100 100 C 155 100 200 55 200 0"))
+
+; The same with the sweep flag set goes up instead.
+(def test_arc_sweep () int
+  (check_str "through -100" (path "M 0 0 A 100 100 0 0 1 200 0")
+             "M 0 0 C 0 -55 45 -100 100 -100 C 155 -100 200 -55 200 0"))
+
+; Flags run together with what follows, as Inkscape writes them; a
+; radius too small grows until it reaches.
+(def test_arc_packed () int
+  (check_str "packed" (path "M0 0a1 1 0 00200 0") (path "M 0 0 A 100 100 0 0 0 200 0")))
+
+(def test_arc_zero_radius () int
+  (check_str "a line" (path "M 0 0 A 0 5 0 0 0 10 0") "M 0 0 L 10 0"))
+
+(def test_errors () int
+  (add (check_str "no command" (path "1 2") "path data with no command before it")
+       (add (check_str "short" (path "M 1") "M wants 2")
+            (check_str "bad arc" (path "M 0 0 A 1 1 0 2 0 1 1") "A wants 7 numbers"))))
+
+; A matrix maps every point: scaled by 256, into 1/256 of a pixel.
+(def test_mapped () int
+  (check_str "x256" (path_with "M 1 0.5" (svg_scale 256.0 256.0)) "M 256 128"))
+
+(def transform_text ((s (list int))) (list int)
+  (match (svg_transform s)
+    ((Ok m) (match (svg_apply m 1.0 0.0) ((Point x y) (append (digits_signed x) (append " " (digits_signed y))))))
+    ((Err why) why)))
+
+; Where 1, 0 goes: translate, scale, rotate a quarter, and both in turn,
+; the last applied first.
+(def test_transforms () int
+  (add (check_str "translate" (transform_text "translate(10, 20)") "11 20")
+       (add (check_str "scale" (transform_text "scale(3)") "3 0")
+            (add (check_str "rotate" (transform_text "rotate(90)") "0 1")
+                 (check_str "composed" (transform_text "translate(10 0) scale(2)") "12 0")))))
+
+(def test_transform_matrix () int
+  (add (check_str "matrix" (transform_text "matrix(1 2 3 4 5 6)") "6 8")
+       (check_str "about a point" (transform_text "rotate(180 2 0)") "3 0")))
+
+(def test_transform_errors () int
+  (add (check_str "unknown" (transform_text "spin(3)") "no transform spin")
+       (check_str "no paren" (transform_text "scale 3") "no ( after scale")))
+
+(def test_numbers () int
+  (match (svg_numbers "0 0 16,16")
+    ((Some ns) (check_int "four" (length ns) 4))
+    ((None) (fail_because "numbers" "none"))))
+
+(def test_length () int
+  (add (check_true "16px" (eq (svg_length "16px") (Some 16.0)))
+       (check_true "16%" (eq (svg_length "16%") ((None float))))))
+
+; atan2 in each quadrant, to 1e-6.
+(def near ((a float) (b float)) bool (float_lt (svg_fabs (float_sub a b)) 0.000001))
+
+(def test_atan2 () int
+  (add (check_true "45" (near (svg_atan2 1.0 1.0) 0.7853981633974483))
+       (add (check_true "135" (near (svg_atan2 1.0 -1.0) 2.356194490192345))
+            (add (check_true "-135" (near (svg_atan2 -1.0 -1.0) -2.356194490192345))
+                 (check_true "steep" (near (svg_atan2 1000.0 1.0) 1.569796327128))))))

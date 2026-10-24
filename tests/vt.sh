@@ -148,13 +148,13 @@ back_title() {
   echo "$x $y"
 }
 
-# The title bars are Adwaita's header bars, 46 rows: ebebeb in front,
-# fafafa in the backdrop. Each window's frame is a border of their
+# The title bars are Adwaita's dark header bars, 46 rows: 303030 in
+# front, 242424 in the backdrop. Each window's frame is a border of their
 # color, 2 pixels down its content's sides and along its foot, so its
 # content is 2 in from its left. The terminal is GNOME Console's, white
 # on 1e1e1e, its cursor white too.
 bar=46; edge=2
-active="235 235 235"; backdrop="250 250 250"; ink="255 255 255"; cursor="255 255 255"
+active="48 48 48"; backdrop="36 36 36"; ink="255 255 255"; cursor="255 255 255"
 
 waits_for "^l0s> "
 windows

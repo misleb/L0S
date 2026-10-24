@@ -129,21 +129,22 @@ shows() {
 # The geometry is launcher.sh's. Five apps, Disks, Files, System
 # Monitor, Terminal and Widgets, are cells 136 wide from (1280 - 5 *
 # 136) / 2 = 300, so the second cell starts at 436, its icon, 48 square,
-# 44 in, at 480, and its pixel 436, 112 is the page's; Terminal, the
-# fourth, at 708, has its icon at 752, so 776, 112 is on it. A sixth app,
-# the volume's listing being sorted by name, Disks, Extra, Files, System
-# Monitor, Terminal, Widgets, moves the grid to start at (1280 - 6 *
-# 136) / 2 = 232: Extra's cell is 368 across, its icon, Terminal's, at
-# 412, so 436, 112 is on it, and Terminal's, the fifth, at 776 across,
-# has its at 820, so 844, 112 is on that, and 776, 112 is the page's.
-page="36 36 36"; square="61 56 70"; desk="8 19 26"; headerbar="235 235 235"; ink="255 255 255"
+# 44 in, at 480, and its pixel 444, 138 is the page's; Terminal, the
+# fourth, at 708, has its icon at 752, so 784, 138, 32 in and 30 down,
+# is on its screen, 241f31. A sixth app, the volume's listing being
+# sorted by name, Disks, Extra, Files, System Monitor, Terminal,
+# Widgets, moves the grid to start at (1280 - 6 * 136) / 2 = 232:
+# Extra's cell is 368 across, its icon, Terminal's, at 412, so 444, 138
+# is on it, and Terminal's, the fifth, at 776 across, has its at 820, so
+# 852, 138 is on that, and 776, 138 is the page's.
+page="36 36 36"; screen="36 31 49"; desk="8 19 26"; headerbar="48 48 48"; ink="255 255 255"
 
 waits_for "^l0s> "
 shows "closed, at the start" "8 16 0 0 0" "0 32 $desk"
 
 click 60 16
 shows "five apps: Terminal's icon, and none at the second cell's edge" \
-  "0 32 $page" "776 112 $square" "436 112 $page"
+  "0 32 $page" "784 138 $screen" "444 138 $page"
 
 monitor "sendkey esc"
 shows "Esc closed it" "8 16 0 0 0" "0 32 $desk"
@@ -158,7 +159,7 @@ echo "ok - launcher-install: Extra.app installed from the shell"
 
 click 60 16
 shows "opened again: Extra's icon in the second cell, Terminal's in the fifth" \
-  "0 32 $page" "436 112 $square" "844 112 $square" "776 112 $page"
+  "0 32 $page" "444 138 $screen" "852 138 $screen" "776 138 $page"
 
 click 436 150
 window

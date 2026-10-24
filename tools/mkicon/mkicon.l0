@@ -1,13 +1,18 @@
-; mkicon.l0 -- draws an app's icon: reads a source of the desktop's
-; drawing commands, a line each, as run draw takes them, and writes the
-; icon they draw, 48 by 48, as a binary PPM, on the launcher's ground.
+; mkicon.l0 -- draws an app's icon, 48 by 48, as a binary PPM, on the
+; launcher's ground: from its icon.svg, its GNOME icon, with the SVG
+; library (svg.l0); or from an icon.draw, a source of the desktop's
+; drawing commands, a line each, as run draw takes them. With --image,
+; an icon.svg's images with their alpha, for Files' icon.face:
 ;
-;   mkicon user/apps/vt/Terminal.app/icon.draw > icon.ppm
-;   mkicon user/apps/vt/Terminal.app/icon.draw build/face2x > icon2x.ppm
+;   mkicon --image user/apps/vt/Terminal.app/icon.svg icon.face
 ;
-; The second draws it at scale 2, 96 by 96, as the launcher shows it on a
-; large screen: the same commands, each twice the size, its icons from
-; the face (face.l0) at their size, smooth, not doubled.
+;   mkicon user/apps/widgets/Widgets.app/icon.draw build/icons.face > icon.ppm
+;   mkicon user/apps/widgets/Widgets.app/icon.draw build/icons.face build/face2x > icon2x.ppm
+;
+; Its symbolic icons come from the icons file mkicons wrote (face.l0's
+; /etc/icons). The second draws it at scale 2, 96 by 96, as the launcher
+; shows it on a large screen: the same commands, each twice the size,
+; its icons at their size, smooth, not doubled.
 ;
 ; A # line is a comment. It draws on a canvas over an array (render.l0's
 ; canvas_new) with the drawing wm does on the desktop, render.l0's and
@@ -99,26 +104,96 @@
 ; Says why on standard error: status 1.
 (def mkicon_complain ((why (list int))) int (complain_as "mkicon" why))
 
-; The program: the icon of the source argv names, on standard output; at
-; scale 2 if a face file is named after it.
+; The program: the icon of the source argv names, its symbolic icons
+; from the icons file after it, on standard output; at scale 2 if a
+; face file is named after that.
 (def mkicon ((argv (list (list int)))) int
-  (if (if (lt (length argv) 1) true (gt (length argv) 2))
-      (mkicon_complain "usage: mkicon SOURCE [FACE] > icon.ppm")
-      (match (mkicon_face (tail argv))
-        ((Err why) (mkicon_complain why))
-        ((Ok face)
-          (match (read_whole (head argv))
-            ((Err why) (mkicon_complain (append (head argv) (append ": " why))))
-            ((Ok b) (mkicon_written (head argv) (mkicon_draw_at (bytes_to_list b) face))))))))
+  (if (if (eq (length argv) 3) (eq (head argv) "--image") false)
+      (mkicon_image (nth argv 1) (nth argv 2))
+      (if (if (lt (length argv) 2) true (gt (length argv) 3))
+          (mkicon_complain "usage: mkicon SOURCE ICONS [FACE] > icon.ppm | mkicon --image ICON.svg OUT")
+          (match (mkicon_face (tail argv))
+            ((Err why) (mkicon_complain why))
+            ((Ok face)
+              (match (read_whole (head argv))
+                ((Err why) (mkicon_complain (append (head argv) (append ": " why))))
+                ((Ok b)
+                  (mkicon_written (head argv)
+                    (if (ends_with (head argv) ".svg")
+                        (mkicon_svg b (ui_face_scale face))
+                        (mkicon_draw_at (bytes_to_list b) face))))))))))
 
-; The face to draw with: none named is scale 1 with no font; one named is
-; scale 2 with its tables.
+; ------------------------------------------------------------------ SVG
+
+; An icon.svg drawn at scale s on the launcher's ground, or why not.
+(def mkicon_svg ((b bytes) (s int)) (Result Canvas (list int))
+  (let n (mul s (mkicon_size))
+    (match (svg_read b)
+      ((Err why) ((Err Canvas (list int)) why))
+      ((Ok root)
+        (match (svg_argb root n)
+          ((Err why) ((Err Canvas (list int)) why))
+          ((Ok words) (mkicon_ok (mkicon_over (mkicon_new s) words n 0))))))))
+
+; ARGB words n by n, pixel i on, over the canvas: each mixed with what
+; is there by its alpha.
+(def mkicon_over ((f Canvas) (words (array int)) (n int) (i int)) Canvas
+  (if (ge i (mul n n))
+      f
+      (let w (array_get words i)
+        (let a (bit_and (bit_shr w 24) 255)
+          (let x (mod i n)
+            (let y (div i n)
+              (mkicon_over (if (eq a 0) f (put f x y (ui_mix (bit_and w 16777215) (canvas_pixel f x y) (div (add (mul a 100) 127) 255))))
+                           words n (add i 1))))))))
+
+; The sizes an app's image is drawn at for Files: a list's 16 and a
+; tile's 48, at scales 1 and 2.
+(def mkicon_image_sizes () (list int) (cons 16 (cons 32 (cons 48 (cons 96 (nil int))))))
+
+; An icon.svg's images, ARGB at each size, written to out as a face
+; file (face.l0's image.N tables), which Files paints on any ground.
+(def mkicon_image ((src (list int)) (out (list int))) int
+  (match (read_whole src)
+    ((Err why) (mkicon_complain (append src (append ": " why))))
+    ((Ok b)
+      (match (svg_read b)
+        ((Err why) (mkicon_complain (append src (append ": " why))))
+        ((Ok root)
+          (match (mkicon_images root (mkicon_image_sizes) (nil UiNamedCov))
+            ((Err why) (mkicon_complain (append src (append ": " why))))
+            ((Ok ts)
+              (let e (write_whole out (ui_face_file ts))
+                (if (is_empty e) 0 (mkicon_complain (append out (append ": " e))))))))))))
+
+; The document at each of sizes, onto acc, in order.
+(def mkicon_images ((root XmlEl) (sizes (list int)) (acc (list UiNamedCov))) (Result (list UiNamedCov) (list int))
+  (if (is_empty sizes)
+      ((Ok (list UiNamedCov) (list int)) (rev acc))
+      (let n (head sizes)
+        (match (svg_argb root n)
+          ((Err why) ((Err (list UiNamedCov) (list int)) why))
+          ((Ok words) (mkicon_images root (tail sizes) (cons (UiNamedCov (ui_image_table n) (UiCov n n words)) acc)))))))
+
+; The face to draw with, no font in it: the icons file's icons at scale
+; 1; with a face file after it, at scale 2, with its tables too.
 (def mkicon_face ((rest (list (list int)))) (Result UiFace (list int))
-  (if (is_empty rest)
-      ((Ok UiFace (list int)) (ui_face_1x (array_new 0 0)))
-      (match (read_whole (head rest))
-        ((Err why) ((Err UiFace (list int)) (append (head rest) (append ": " why))))
-        ((Ok b) ((Ok UiFace (list int)) (UiFace 2 (array_new 0 0) (ui_face_tables b)))))))
+  (let s (if (is_empty (tail rest)) 1 2)
+    (match (mkicon_tables (head rest) (ui_icon_sizes s) ((MapEmpty (list int) UiCov)))
+      ((Err why) ((Err UiFace (list int)) why))
+      ((Ok icons)
+        (if (eq s 1)
+            ((Ok UiFace (list int)) (UiFace 1 (array_new 0 0) icons))
+            (match (mkicon_tables (head (tail rest)) (nil int) icons)
+              ((Err why) ((Err UiFace (list int)) why))
+              ((Ok ts) ((Ok UiFace (list int)) (UiFace 2 (array_new 0 0) ts)))))))))
+
+; The tables of the face file at path put into m, icons' at the sizes
+; given; or why not.
+(def mkicon_tables ((path (list int)) (sizes (list int)) (m (Map (list int) UiCov))) (Result (Map (list int) UiCov) (list int))
+  (match (read_whole path)
+    ((Err why) ((Err (Map (list int) UiCov) (list int)) (append path (append ": " why))))
+    ((Ok b) ((Ok (Map (list int) UiCov) (list int)) (ui_face_kept b sizes m)))))
 
 ; The icon drawn from src written, or why it could not be drawn.
 (def mkicon_written ((src (list int)) (r (Result Canvas (list int)))) int

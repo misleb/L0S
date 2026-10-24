@@ -1,0 +1,162 @@
+; svg_test.l0 -- tests of drawing SVG: coverage, colors, styles and
+; their inheritance, transforms, shapes, gradients, layers, and what is
+; refused.
+
+; A document from its text, or its error as an element of that name.
+(def root ((s (list int))) XmlEl
+  (match (svg_read (bytes_from_list s))
+    ((Ok e) e)
+    ((Err why) (XmlEl why (nil XmlAttr) (nil XmlEl)))))
+
+; Coverage levels n by n as text, or the error.
+(def cover ((s (list int)) (n int)) (list int)
+  (match (svg_cover (root s) n)
+    ((Ok a) (unwords (ints a 0 (nil (list int)))))
+    ((Err why) why)))
+
+(def ints ((a (array int)) (i int) (acc (list (list int)))) (list (list int))
+  (if (ge i (array_len a)) (rev acc) (ints a (add i 1) (cons (digits (array_get a i)) acc))))
+
+; The level of pixel x, y of n by n.
+(def level ((s (list int)) (n int) (x int) (y int)) int
+  (match (svg_cover (root s) n)
+    ((Ok a) (array_get a (add (mul y n) x)))
+    ((Err why) -1)))
+
+; Pixel x, y of n by n as ARGB in hex, or the error.
+(def argb ((s (list int)) (n int) (x int) (y int)) (list int)
+  (match (svg_argb (root s) n)
+    ((Ok a) (hex_digits (array_get a (add (mul y n) x)) 8))
+    ((Err why) why)))
+
+(def in4 ((body (list int))) (list int) (append "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 4\">" (append body "</svg>")))
+
+(def test_rect () int
+  (check_str "a 2 by 2 square" (cover (in4 "<rect x=\"1\" y=\"1\" width=\"2\" height=\"2\"/>") 4)
+             "0 0 0 0 0 15 15 0 0 15 15 0 0 0 0 0"))
+
+; The same document twice the size: each unit two pixels.
+(def test_scaled () int
+  (add (check_int "inside" (level (in4 "<rect x=\"1\" y=\"1\" width=\"2\" height=\"2\"/>") 8 2 2) 15)
+       (check_int "outside" (level (in4 "<rect x=\"1\" y=\"1\" width=\"2\" height=\"2\"/>") 8 1 1) 0)))
+
+; A viewBox twice as wide as high is fitted whole and centered: a
+; quarter of the square above and below it is empty.
+(def test_centered () int
+  (check_str "rows 1 and 2"
+    (cover "<svg viewBox=\"0 0 2 1\"><rect width=\"2\" height=\"1\"/></svg>" 4)
+    "0 0 0 0 15 15 15 15 15 15 15 15 0 0 0 0"))
+
+; With no viewBox, width and height are the units.
+(def test_width_height () int
+  (check_int "full" (level "<svg width=\"16px\" height=\"16px\"><rect width=\"16\" height=\"16\"/></svg>" 4 3 3) 15))
+
+; Half opacity is level 8 of 15, 7.5 rounded; two halves over each
+; other are three quarters, 11.
+(def test_opacity () int
+  (add (check_int "half" (level (in4 "<rect width=\"4\" height=\"4\" fill-opacity=\"0.5\"/>") 4 0 0) 8)
+       (check_int "twice" (level (in4 "<rect width=\"4\" height=\"4\" fill-opacity=\"0.5\"/><rect width=\"4\" height=\"4\" style=\"fill-opacity:.5\"/>") 4 0 0) 11)))
+
+; A group's opacity is of what it draws together: where two of its
+; shapes overlap, half, not three quarters.
+(def test_group_opacity () int
+  (check_int "half" (level (in4 "<g opacity=\"0.5\"><rect width=\"4\" height=\"4\"/><rect width=\"4\" height=\"4\"/></g>") 4 0 0) 8))
+
+(def test_evenodd () int
+  (add (check_int "a hole" (level (in4 "<path fill-rule=\"evenodd\" d=\"M0 0h4v4H0zM1 1h2v2H1z\"/>") 4 1 1) 0)
+       (check_int "nonzero fills it" (level (in4 "<path d=\"M0 0h4v4H0zM1 1h2v2H1z\"/>") 4 1 1) 15)))
+
+(def test_colors () int
+  (add (check_str "#rrggbb" (argb (in4 "<rect width=\"4\" height=\"4\" fill=\"#3584e4\"/>") 4 0 0) "ff3584e4")
+       (add (check_str "#rgb" (argb (in4 "<rect width=\"4\" height=\"4\" fill=\"#f80\"/>") 4 0 0) "ffff8800")
+            (add (check_str "rgb()" (argb (in4 "<rect width=\"4\" height=\"4\" fill=\"rgb(255, 0, 50%)\"/>") 4 0 0) "ffff0080")
+                 (check_str "named" (argb (in4 "<rect width=\"4\" height=\"4\" fill=\"lime\"/>") 4 0 0) "ff00ff00")))))
+
+(def test_current_color () int
+  (check_str "the color" (argb (in4 "<g color=\"#ff0000\"><rect width=\"4\" height=\"4\" fill=\"currentColor\"/></g>") 4 0 0) "ffff0000"))
+
+; style wins over the attribute; a group's fill is inherited.
+(def test_style_and_inheritance () int
+  (add (check_str "style" (argb (in4 "<rect width=\"4\" height=\"4\" fill=\"red\" style=\"font-family:x; fill: #0000ff\"/>") 4 0 0) "ff0000ff")
+       (check_str "inherited" (argb (in4 "<g style=\"fill:#00ff00\"><g><rect width=\"4\" height=\"4\"/></g></g>") 4 0 0) "ff00ff00")))
+
+(def test_transform () int
+  (add (check_int "moved" (level (in4 "<rect width=\"1\" height=\"1\" transform=\"translate(2 3)\"/>") 4 2 3) 15)
+       (check_int "not here" (level (in4 "<g transform=\"scale(2)\"><rect width=\"1\" height=\"1\"/></g>") 4 2 2) 0)))
+
+(def test_hidden () int
+  (add (check_int "display" (level (in4 "<g display=\"none\"><rect width=\"4\" height=\"4\"/></g>") 4 0 0) 0)
+       (check_int "visibility" (level (in4 "<rect width=\"4\" height=\"4\" visibility=\"hidden\"/>") 4 0 0) 0)))
+
+; A circle covers its middle and not its corners, and is the same left
+; and right.
+(def test_circle () int
+  (let s (in4 "<circle cx=\"2\" cy=\"2\" r=\"2\"/>")
+    (add (check_int "middle" (level s 8 3 3) 15)
+         (add (check_int "corner" (level s 8 0 0) 0)
+              (check_int "mirrored" (level s 8 1 4) (level s 8 6 4))))))
+
+(def test_ellipse_and_rounded () int
+  (add (check_int "ellipse" (level (in4 "<ellipse cx=\"2\" cy=\"2\" rx=\"2\" ry=\"1\"/>") 4 0 0) 0)
+       (add (check_int "a rounded corner" (level (in4 "<rect width=\"4\" height=\"4\" rx=\"2\"/>") 8 0 0) 0)
+            (check_int "its middle" (level (in4 "<rect width=\"4\" height=\"4\" rx=\"2\"/>") 8 4 4) 15))))
+
+(def test_polygon () int
+  (check_str "a square" (cover (in4 "<polygon points=\"0,0 4,0 4,2 0,2\"/>") 2) "15 15 0 0"))
+
+; A line 2 wide from 1 to 3 across the middle: butt ends stop there.
+(def test_stroke () int
+  (check_str "two rows" (cover (in4 "<line x1=\"1\" y1=\"2\" x2=\"3\" y2=\"2\" stroke=\"#000\" stroke-width=\"2\"/>") 4)
+             "0 0 0 0 0 15 15 0 0 15 15 0 0 0 0 0"))
+
+; Black to white along x, across 4 pixels: the middles of the first and
+; last at t = 1/8 and 7/8, 32 and 223.
+(def test_linear () int
+  (let s (in4 "<linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" x2=\"4\"><stop offset=\"0\" stop-color=\"#000\"/><stop offset=\"1\" stop-color=\"#fff\"/></linearGradient><rect width=\"4\" height=\"4\" fill=\"url(#g)\"/>")
+    (add (check_str "first" (argb s 4 0 0) "ff202020")
+         (check_str "last" (argb s 4 3 0) "ffdfdfdf"))))
+
+; By the box, as it is when no units are given, x2 100% is the box's
+; right; its stops may come from the gradient its href names.
+(def test_linear_box_href () int
+  (let s (in4 "<defs><linearGradient id=\"a\"><stop offset=\"0\" style=\"stop-color:#000000\"/><stop offset=\"100%\" stop-color=\"#ffffff\"/></linearGradient><linearGradient id=\"g\" xlink:href=\"#a\"/></defs><rect x=\"2\" width=\"2\" height=\"4\" fill=\"url(#g)\"/>")
+    (add (check_str "left" (argb s 4 2 0) "ff404040")
+         (check_str "right" (argb s 4 3 0) "ffbfbfbf"))))
+
+; Past its ends a gradient holds, repeats or reflects.
+(def test_spread () int
+  (add (check_true "pad" (float_le (svg_spread_t 0 1.25) 1.0))
+       (add (check_true "repeat" (float_le (svg_fabs (float_sub (svg_spread_t 2 1.25) 0.25)) 0.0001))
+            (check_true "reflect" (float_le (svg_fabs (float_sub (svg_spread_t 1 1.25) 0.75)) 0.0001)))))
+
+; A radial gradient white in the middle, black at its edge.
+(def test_radial () int
+  (let s (in4 "<radialGradient id=\"g\"><stop offset=\"0\" stop-color=\"#fff\"/><stop offset=\"1\" stop-color=\"#000\"/></radialGradient><rect width=\"4\" height=\"4\" fill=\"url(#g)\"/>")
+    (check_true "lighter inside" (lt (compare (argb s 4 0 0) (argb s 4 1 1)) 0))))
+
+(def test_clip () int
+  (let s (in4 "<clipPath id=\"c\"><rect width=\"2\" height=\"4\"/></clipPath><rect width=\"4\" height=\"4\" clip-path=\"url(#c)\"/>")
+    (check_str "the left half" (cover s 2) "15 0 15 0")))
+
+; A mask's luminance: white shows, black hides.
+(def test_mask () int
+  (let s (in4 "<mask id=\"m\"><rect width=\"4\" height=\"2\" fill=\"#fff\"/><rect y=\"2\" width=\"4\" height=\"2\" fill=\"#000\"/></mask><rect width=\"4\" height=\"4\" mask=\"url(#m)\"/>")
+    (check_str "the top half" (cover s 2) "15 15 0 0")))
+
+(def test_use () int
+  (check_str "moved by x" (cover (in4 "<defs><rect id=\"r\" width=\"2\" height=\"4\"/></defs><use href=\"#r\" x=\"2\"/>") 2) "0 15 0 15"))
+
+; Metadata, Inkscape's own elements and text between elements change
+; nothing.
+(def test_let_be () int
+  (check_str "drawn" (cover (in4 "<metadata><rdf:RDF/></metadata><sodipodi:namedview/>text<rect width=\"4\" height=\"4\"/>") 1) "15"))
+
+(def test_refused () int
+  (add (check_str "text" (cover (in4 "<text>hi</text>") 4) "cannot draw <text>")
+       (add (check_str "filter" (cover (in4 "<rect width=\"4\" height=\"4\" filter=\"url(#f)\"/>") 4) "cannot draw a filter, on <rect>")
+            (check_str "dashes" (cover (in4 "<rect width=\"4\" height=\"4\" stroke=\"#000\" stroke-dasharray=\"1 1\"/>") 4) "cannot draw dashes"))))
+
+(def test_errors () int
+  (add (check_str "no size" (cover "<svg><rect/></svg>" 4) "no viewBox, width or height")
+       (add (check_str "not svg" (xml_name (root "<html/>")) "the root is <html> not <svg>")
+            (check_str "bad paint" (cover (in4 "<rect width=\"4\" height=\"4\" fill=\"url(#nope)\"/>") 4) "no paint url(#nope)"))))

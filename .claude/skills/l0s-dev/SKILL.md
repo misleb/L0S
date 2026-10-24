@@ -45,7 +45,7 @@ the `;` comment block directly above each form, so write yours that way
 | `user/sbin/wm/launcher.l0` | the compositor's launcher, GNOME Shell's grid of apps: its layout, painting and clicks |
 | `demo/etc/` | the demo's `inittab` (stage 1: `boot`, the drivers, `fs`), `system` (what `boot` starts: `sh`, `wm`, the `vt`s), `motd`; `tests/screen/etc/` the screen tests' |
 | `build/root` | `make root`: every program staged as the initramfs holds it, `bin/`, `sbin/`, `Applications/APP.app/`, which `tools/mkinitramfs OUT ETC ROOT [IMAGE...]` archives with an `etc` |
-| `tools/` | `mkicon/` (an L0 tool: an app's `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`, and with a face given, its 96×96 `icon2x.ppm`), `mkfont/` (an L0 tool: TrueType outlines and `fonts/icons.paths`, rasterized (in floats, rounded to 1/256 pixel) into `/etc/face2x`, the face for scale 2: `ttf.l0`, `shape.l0`, `raster.l0`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, `QEMU_DISK` as a virtio-blk, and `QEMU_GPU` the GPU's options, such as `xres=3840,yres=2160`), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, or of any layout, partitioned and formatted by `mkfs/`, an L0 host tool, which fills a volume from a cpio too), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
+| `tools/` | `mkicon/` (an L0 tool: an app's `icon.svg` or `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`, and with a face given, its 96×96 `icon2x.ppm`; `--image` an `icon.svg`'s `icon.face` for Files), `mkicons/` (an L0 tool: GNOME's symbolic SVGs under `icons/` rasterized into `/etc/icons`; `make icon-sheet`), `mkfont/` (an L0 tool: TrueType outlines and `fonts/cursors.paths`, rasterized by `user/lib/gfx/raster.l0` into `/etc/face2x`, the face for scale 2: `ttf.l0`, `shape.l0`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, `QEMU_DISK` as a virtio-blk, and `QEMU_GPU` the GPU's options, such as `xres=3840,yres=2160`), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, or of any layout, partitioned and formatted by `mkfs/`, an L0 host tool, which fills a volume from a cpio too), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `resize.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 
@@ -95,9 +95,11 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
    and its tests, and its check, test, image and initramfs rules follow.
 3. **An app** (a program with a window the desktop starts) is a bundle
    too: `user/apps/NAME/APP.app/manifest` (`name`, `exec NAME`, `icon
-   icon.ppm`, `summary`; `app.l0`) and `icon.draw`, `run draw`'s
-   commands for its 48×48 icon on the launcher's ground (a `round 0 0 48
-   48 10 COLOR` and an `icon 8 8 NAME 2 COLOR`; a new glyph goes in
+   icon.ppm`, `summary`; `app.l0`) and its icon: `icon.svg`, its GNOME
+   app's icon copied in (its license and source under `icons/PROJECT/`),
+   or `icon.draw`, `run draw`'s commands for its 48×48 icon on the
+   launcher's ground (a `round 0 0 48 48 10 COLOR` and an `icon 8 8 NAME
+   2 COLOR`; a new symbolic icon is an SVG under `icons/` and a name in
    `ui/icons.l0`). The Makefile finds the directory: the program goes in
    `/Applications/APP.app/NAME`, and the launcher shows it. APP is one
    word; add the bundle to `app_test.l0`'s `test_app_sources`.

@@ -1,12 +1,12 @@
 ; face.l0 -- what the toolkit draws text, icons and the pointer from, at
-; the desktop's scale. At scale 1 that is the 8 by 16 bitmap font
-; (render.l0's, /etc/font.txt) and icons.l0's 16 by 16 art, as it has
-; always been. At scale 2 every logical pixel is 2 by 2 of the screen's,
-; and doubling the bitmaps would be blocky, so the face holds coverage
-; tools/mkfont rasterized from vector outlines, Source Code Pro's glyphs
-; and icons' paths: how much of each pixel a shape covers, 0 to 15, which
-; painting mixes the color with what is under it by. It is read from
-; /etc/face2x, written by mkfont:
+; the desktop's scale. Icons, at every scale, are GNOME's SVGs as
+; tools/mkicons rasterized them, /etc/icons: how much of each pixel an
+; icon covers, 0 to 15, which painting mixes the color with what is
+; under it by. Text at scale 1 is the 8 by 16 bitmap font (render.l0's,
+; /etc/font.txt). At scale 2 every logical pixel is 2 by 2 of the
+; screen's, and doubling the bitmap would be blocky, so the face also
+; holds coverage tools/mkfont rasterized from Source Code Pro's glyphs,
+; and the pointer, from /etc/face2x. Both files are written alike:
 ;
 ;   "L0SF", a u32 version (1), a u32 count of tables, then each table:
 ;   a u32 name length, the name, u32 width, height, and word count, and
@@ -23,26 +23,40 @@
 (data UiCov (UiCov int int (array int)))
 
 ; A face: its scale, the bitmap font (empty if it could not be read),
-; and at scale 2 the tables by name.
+; and its tables by name: its icons', and at scale 2 its glyphs' too.
 (data UiFace (UiFace int (array int) (Map (list int) UiCov)))
 
-; Where the face for scale 2 is, as mkfont wrote it.
+; Where the face for scale 2 is, as mkfont wrote it, and the icons, as
+; mkicons did.
 (def ui_face_path () (list int) "/etc/face2x")
+(def ui_icons_path () (list int) "/etc/icons")
 
-; A face of the bitmap font alone, at scale 1: what a program with no
-; scale, and every host test, draws with.
+; A face of the bitmap font alone, at scale 1, with no icons: what a
+; host test draws text with.
 (def ui_face_1x ((font (array int))) UiFace (UiFace 1 font ((MapEmpty (list int) UiCov))))
 
-; The face at scale s: at 2, its tables too, if /etc/face2x can be read.
-; With none, text and icons at 2 are the bitmaps doubled.
+; The face at scale s: its icons, if /etc/icons can be read, at the
+; sizes that scale paints; and at 2, the tables of /etc/face2x too. With
+; no face2x, text at 2 is the bitmap doubled; with no icons, none is
+; drawn. Either missing is said on standard error.
 (def ui_face_load ((s int)) UiFace
   (let font (load_font (font_path))
-    (if (lt s 2)
-        (ui_face_1x font)
-        (match (read_whole (ui_face_path))
-          ((Err why) (let w (write_err (append (ui_face_path) (append ": " (append why "; text drawn doubled\n"))))
-                       (UiFace s font ((MapEmpty (list int) UiCov)))))
-          ((Ok b) (UiFace s font (ui_face_tables b)))))))
+    (let icons (ui_face_file_tables (ui_icons_path) "no icons drawn" (ui_icon_sizes s) ((MapEmpty (list int) UiCov)))
+      (UiFace s font
+        (if (lt s 2) icons (ui_face_file_tables (ui_face_path) "text drawn doubled" (nil int) icons))))))
+
+; The sizes icons are painted at, at scale s: 16 · k · s for the scales
+; k 1 to 4 a widget asks for.
+(def ui_icon_sizes ((s int)) (list int)
+  (cons (mul 16 s) (cons (mul 32 s) (cons (mul 48 s) (cons (mul 64 s) (nil int))))))
+
+; The tables of the file at path put into m, those of icons only at the
+; sizes given (all, for none); m alone, and why said, if it cannot be
+; read.
+(def ui_face_file_tables ((path (list int)) (then (list int)) (sizes (list int)) (m (Map (list int) UiCov))) (Map (list int) UiCov)
+  (match (read_whole path)
+    ((Err why) (let w (write_err (append path (append ": " (append why (append "; " (append then "\n")))))) m))
+    ((Ok b) (ui_face_kept b sizes m))))
 
 ; Its scale, and its bitmap font.
 (def ui_face_scale ((f UiFace)) int (match f ((UiFace s font ts) s)))
@@ -79,17 +93,32 @@
 (def ui_icon_table ((name (list int)) (n int)) (list int)
   (append "icon." (append name (append "." (digits n)))))
 
+; The name of an app's image n by n, in its bundle's icon.face: a word a
+; pixel, its alpha, red, green and blue, as the pointer's.
+(def ui_image_table ((n int)) (list int) (append "image." (digits n)))
+
 ; ------------------------------------------------------------- the file
 
 ; The tables a face file holds; none if it is not one.
 (def ui_face_tables ((b bytes)) (Map (list int) UiCov)
-  (if (if (has b 0 12) (bytes_is_at b 0 "L0SF") false)
-      (ui_face_read b 12 (le_u32 b 8) ((MapEmpty (list int) UiCov)))
-      ((MapEmpty (list int) UiCov))))
+  (ui_face_kept b (nil int) ((MapEmpty (list int) UiCov))))
 
-; ui_face_tables's loop: the n tables left from byte at, each put in m by
-; its name; it stops, keeping those before, at one the bytes cut short.
-(def ui_face_read ((b bytes) (at int) (n int) (m (Map (list int) UiCov))) (Map (list int) UiCov)
+; The tables a face file holds put into m, those of icons only at the
+; sizes given, or all for none.
+(def ui_face_kept ((b bytes) (sizes (list int)) (m (Map (list int) UiCov))) (Map (list int) UiCov)
+  (if (if (has b 0 12) (bytes_is_at b 0 "L0SF") false)
+      (ui_face_read b 12 (le_u32 b 8) sizes m)
+      m))
+
+; Whether a table is kept: any but an icon's, and an icon's if it is one
+; of the sizes, or there are none.
+(def ui_face_keeps ((name (list int)) (w int) (sizes (list int))) bool
+  (if (if (is_empty sizes) true (not (starts_with name "icon."))) true (any_eq w sizes)))
+
+; ui_face_kept's loop: the n tables left from byte at, each kept put in
+; m by its name; it stops, keeping those before, at one the bytes cut
+; short.
+(def ui_face_read ((b bytes) (at int) (n int) (sizes (list int)) (m (Map (list int) UiCov))) (Map (list int) UiCov)
   (if (if (le n 0) true (not (has b at 4)))
       m
       (let nl (le_u32 b at)
@@ -100,8 +129,10 @@
                 (let k (le_u32 b (add p 8))
                   (if (not (has b (add p 12) (mul k 8)))
                       m
-                      (ui_face_read b (add (add p 12) (mul k 8)) (sub n 1)
-                        (map_put m name (UiCov (le_u32 b p) (le_u32 b (add p 4)) (ui_face_words b (add p 12) 0 k (array_new k 0)))))))))))))
+                      (ui_face_read b (add (add p 12) (mul k 8)) (sub n 1) sizes
+                        (if (ui_face_keeps name (le_u32 b p) sizes)
+                            (map_put m name (UiCov (le_u32 b p) (le_u32 b (add p 4)) (ui_face_words b (add p 12) 0 k (array_new k 0))))
+                            m))))))))))
 
 ; Words i up to k of a table, read from b at at, 8 bytes each, least
 ; significant first, into out.

@@ -4,7 +4,8 @@
 # tablet, through QMP, and checks, by QEMU's screendump:
 #
 #   1. the launcher open: Applications on its pill, the page's ground,
-#      and Terminal's icon, its dark square, in the grid's fourth cell
+#      and Terminal's icon, GNOME Console's dark screen, in the grid's
+#      fourth cell
 #   2. Esc, on the virtio keyboard, closes it: the desktop shows again
 #   3. a click on the page, away from the apps, closes it too
 #   4. a click on Terminal starts it: run windows, typed at the serial
@@ -113,19 +114,20 @@ shows() {
 # and Widgets, in the archive's order, are one row of cells 136 wide from
 # (1280 - 5 * 136) / 2 = 300, 64 below the bar: Terminal's cell is 708 to
 # 844 across and 96 to 200 down on the screen, its icon 48 square at 752,
-# 108, a rounded square of dark_3, 3d3846, its prompt's glyph from 8 in.
+# 108, GNOME Console's (its icon.svg): its screen, 241f31, holds 784, 138,
+# 32 in and 30 down, below its prompt.
 # The desktop's wallpaper at 0, 32 is 8 19 26, as gpu-screen.sh pins it.
 # The front window's app's name starts at 120, 8 down: T's crossbar is
 # lit along row 2 of its glyph, from column 0, so 121, 10 is white.
-pill="64 64 64"; page="36 36 36"; square="61 56 70"; desk="8 19 26"
-headerbar="235 235 235"; ink="255 255 255"
+pill="64 64 64"; page="36 36 36"; screen="36 31 49"; desk="8 19 26"
+headerbar="48 48 48"; ink="255 255 255"
 
 waits_for "^l0s> "
 shows "closed, at the start" "8 16 0 0 0" "0 32 $desk"
 
 click 60 16
 shows "Applications opened it: the pill, the page, Terminal's icon" \
-  "8 16 $pill" "100 700 $page" "0 32 $page" "776 112 $square"
+  "8 16 $pill" "100 700 $page" "0 32 $page" "784 138 $screen"
 
 monitor "sendkey esc"
 shows "Esc closed it" "8 16 0 0 0" "0 32 $desk"
@@ -136,7 +138,7 @@ click 100 700
 shows "a click on the page closed it" "8 16 0 0 0" "0 32 $desk"
 
 click 60 16
-shows "opened a third time" "776 112 $square"
+shows "opened a third time" "784 138 $screen"
 click 776 150
 window
 [ "$w_front" = "front" ] || fail "vt1's window opened, but not in front"

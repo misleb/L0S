@@ -124,7 +124,7 @@ shows() {
 # end, 6 in, in the middle of the toolbar's 46 rows: faded, with no row
 # selected. The window is 4 wider than its content, and 48 higher.
 bar=46
-ground="250 250 250"; faded="237 139 143"
+ground="36 36 36"; faded="130 32 36"
 
 waits_for "^l0s> "
 printf 'run widgets &\n' >&3

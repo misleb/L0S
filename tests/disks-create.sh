@@ -150,10 +150,10 @@ said() {
 # its Volume Name, the names' column 88 wide, so the entry from 394; its
 # buttons from 314, each in a half of 292: Format, 68 wide, from 482.
 #
-# On a card's white the entry's ring, the accent at half, is 154 194 242,
+# On a card's 363636 the entry's ring, the accent at half, is 54 93 141,
 # as is a suggested button faded.
 bar=46
-ground="250 250 250"; sidebar="235 235 237"; accent="53 132 228"; faded="154 194 242"
+ground="36 36 36"; sidebar="46 46 50"; accent="53 132 228"; faded="54 93 141"
 
 waits_for "^l0s> "
 printf 'run disks &\n' >&3

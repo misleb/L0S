@@ -6,7 +6,7 @@ description: UI conventions for L0S. The toolkit in user/lib/ui (GNOME HIG and l
 # UI in L0S
 
 The look is GNOME's: the [HIG](https://developer.gnome.org/hig/) and
-libadwaita's Adwaita style, light. `user/lib/ui/README.md` describes the
+libadwaita's Adwaita style, dark. `user/lib/ui/README.md` describes the
 toolkit for people; the README's "The desktop" section, the compositor and
 display. This is the working summary, with the rules.
 
@@ -38,12 +38,14 @@ display. This is the working summary, with the rules.
 ## The theme (`theme.l0`)
 
 - **Semantic colors take the style**:
-  `(ui_headerbar_bg (ui_style) front)` is `ebebeb` in front and `fafafa`
-  in the backdrop. Others: `ui_window_bg`, `ui_view_bg`, `ui_fg`, `ui_dim_fg
+  `(ui_headerbar_bg (ui_style) front)` is `303030` in front and `242424`
+  in the backdrop (light: `ebebeb` and `fafafa`). Others: `ui_window_bg`, `ui_view_bg`, `ui_fg`, `ui_dim_fg
   s bg`, `ui_border s bg`, `ui_headerbar_fg`, `ui_headerbar_shade`,
   `ui_selected_bg bg`, `ui_focus_ring bg`, `ui_accent_bg`, the terminal's
   `ui_term_bg`, `ui_term_fg` (GNOME Console's `1e1e1e` and white), and
-  `ui_desktop_bg`. `(ui_style)` is light; dark is there but unused.
+  `ui_desktop_bg`. `(ui_style)` is dark, and is the one place a light/dark
+  setting will be read: never pick a style anywhere else. Host tests that
+  pin a style's colors pass `(UiLight)` or `(UiDark)` themselves.
 - **Named colors** are libadwaita's palette, in the string `ui_palette`
   (`blue_3`, `dark_4`, `accent`...), found by `ui_color_named`. A color used
   in code also gets a one-line def, `(def ui_blue_3 () int (ui_hex "3584e4"))`.
@@ -87,8 +89,13 @@ display. This is the working summary, with the rules.
   `tools/mkicon`.
 - **Text** is the 8×16 bitmap font (`ui_char_w`, `ui_char_h`), ASCII only.
   `ui_text_w s bold scale` measures.
-- **Icons** are 16×16 `#`/`.` art in `icons.l0`, named as GNOME's symbolic
-  icons (`window-close`, `view-refresh`...).
+- **Icons** are GNOME's own SVGs under `icons/` (Adwaita's symbolic
+  ones, each project's license and `SOURCE` beside them), named in
+  `icons.l0`'s `ui_icon_names` (`window-close`, `view-refresh`...), drawn
+  by the SVG library (`user/lib/gfx/svg.l0`) at build time by
+  `tools/mkicons` into `/etc/icons`, smooth at every scale. No icon is
+  drawn by hand. `UiPImage` paints a full-color image with alpha, an
+  app's `icon.face` (mkicon draws it from the bundle's `icon.svg`).
 - **`widget.l0`**: a `UiWidget` tree (`UiLabel`, `UiButton`, `UiBox`,
   `UiExpand`, `UiPad`, `UiSeparator`, `UiHeaderBar`, `UiView`, `UiLevel`,
   `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`, and `panes.l0`'s
@@ -202,7 +209,7 @@ driver composes them.
   over edges or while they are dragged, the arrow `""` elsewhere. `Ptr`
   keeps its canvas and name; `windows` reports the name. A new pointer
   needs its 1x art in `ui_cursor_art`, its hot spot, and its shapes as
-  `cursor NAME` in `fonts/icons.paths`.
+  `cursor NAME` in `fonts/cursors.paths`.
 - **Layers**, bottom first (`layers ws shown`): the desktop; each window from the back,
   its chrome at `x, y`, its content at `x + edge, y + 46`; then the top
   bar over everything. While the launcher is shown: the desktop, the
@@ -335,13 +342,19 @@ way; buffers and painting are in the screen's.
   (places, rectangles, top rows, radii and moves ×s; a buffer's W H are its
   own pixels); `draw_cmd.l0`'s `ui_draw_*` (render.l0's shapes, s thick);
   `vt` (cells ×s, `top` ÷ s for the protocol); the launcher's `icon2x.ppm`.
-- **The face**, a `UiFace`: scale, the 1x bitmap font, and at 2 the
-  tables of `/etc/face2x` (coverage 0–15, 16 levels a word):
-  `glyph.regular.32`, `glyph.bold.32`, `.64` for text scale 2, `icon.NAME.N`
-  for N = 32, 64, 96, 128, and `cursor`. A pixel is mixed with what is under
-  it by its level (`ui_cov_put`); a missing table falls back to the bitmap
-  doubled. Host tests make one with `ui_face_1x` or `(UiFace 2 font map)`.
+- **The face**, a `UiFace`: scale, the 1x bitmap font, the icons of
+  `/etc/icons` at the sizes the scale paints (`icon.NAME.N`, N = 16·k·s,
+  `ui_icon_sizes`), and at 2 the tables of `/etc/face2x` (coverage 0–15,
+  16 levels a word): `glyph.regular.32`, `glyph.bold.32`, `.64` for text
+  scale 2, and `cursor`. A pixel is mixed with what is under it by its
+  level (`ui_cov_put`); a missing glyph table falls back to the bitmap
+  doubled, a missing icon is not drawn. Host tests make one with
+  `ui_face_1x` (no icons) or `(UiFace s font map)` with tables of their
+  own (`paint_test.l0`'s `box_face`).
 - **Bold at 2** is the bold face, not a double strike; widths are still the
   logical `ui_text_w`.
-- **A new icon** needs its 16×16 art in `icons.l0` and its shapes in
-  `fonts/icons.paths` (`tools/mkfont/shape.l0`'s language).
+- **A new icon** is GNOME's SVG of it copied unchanged into
+  `icons/adwaita/symbolic/NAME-symbolic.svg` (listed in that `SOURCE`), or
+  another GNOME project's `icons/PROJECT/symbolic/` with its license, and
+  NAME added to `ui_icon_names`. `make icon-sheet` shows it at every
+  size. If the SVG library refuses it, it names what it cannot draw.

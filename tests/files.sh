@@ -7,7 +7,7 @@
 # x, y: wm draws no title bar for it), and checks, by QEMU's screendump,
 # the tablet through QMP, and the keyboard through the monitor:
 #
-#   1. its own header bars' ground, ebebeb, the sidebar's, Computer's
+#   1. its own header bars' ground, 303030, the sidebar's, Computer's
 #      row selected, and /'s folders' tiles, in the accent
 #   2. a click on data's row: it selected, and Computer's not; a double
 #      click on its file shows the file's text, and Esc goes back
@@ -166,8 +166,8 @@ said_holds() {
 # down. Under it the place, from 46, to the line of what was done: its
 # tiles 5 across, 112 by 96, from 270, 58, each's icon 48 square 32 in
 # and 12 down; or its list, a header of 32, then rows of 30.
-header="235 235 235"; sidebar="235 235 237"; side_sel="217 217 218"; white="255 255 255"
-accent="53 132 228"; line="224 224 224"
+header="48 48 48"; sidebar="46 46 50"; side_sel="67 67 71"; view="30 30 30"
+accent="53 132 228"; line="64 64 64"
 
 waits_for "^l0s> "
 said 'write /Volumes/data/hello hi' > /dev/null
@@ -177,12 +177,13 @@ waits_for "\[pid [0-9]+ running\]"
 window || fail "run windows never listed Files's window; it showed:"
 cx=$w_x; cy=$w_y
 
-# Applications, the first of /'s folders: its folder's case, a full row
-# 5 of its art, 3 high at scale 3, from 85.
+# Applications, the first of /'s folders: its icon, Adwaita's folder at
+# 48, from 302, 70; its case's left side covers 0 to 6 across and 15 to
+# 36 down of it, so 305, 94 wholly.
 shows "its own header bars, the sidebar, Computer selected, /'s folders" \
   "$((cx + 100)) $((cy + 3)) $header" "$((cx + 300)) $((cy + 3)) $header" \
   "$((cx + 100)) $((cy + 400)) $sidebar" "$((cx + 200)) $((cy + 76)) $side_sel" \
-  "$((cx + 320)) $((cy + 86)) $accent"
+  "$((cx + 305)) $((cy + 94)) $accent"
 
 click $((cx + 100)) $((cy + 172))
 shows "data selected, Computer not" "$((cx + 200)) $((cy + 172)) $side_sel" "$((cx + 200)) $((cy + 76)) $sidebar"
@@ -193,7 +194,7 @@ shows "data selected, Computer not" "$((cx + 200)) $((cy + 172)) $side_sel" "$((
 dbl $((cx + 326)) $((cy + 100))
 shows "a double click showed the file" "$((cx + 600)) $((cy + 77)) $line"
 keys esc
-shows "Esc went back to the tiles" "$((cx + 600)) $((cy + 77)) $white"
+shows "Esc went back to the tiles" "$((cx + 600)) $((cy + 77)) $view"
 
 drag $((cx + 350)) $((cy + 20)) 100 80
 window || fail "run windows lost Files's window; it showed:"
@@ -202,7 +203,7 @@ echo "ok - files: its header bar dragged the window"
 cx=$w_x; cy=$w_y
 
 click $((cx + 787)) $((cy + 22))
-shows "the list, its header's line" "$((cx + 400)) $((cy + 77)) $line" "$((cx + 400)) $((cy + 120)) $white"
+shows "the list, its header's line" "$((cx + 400)) $((cy + 77)) $line" "$((cx + 400)) $((cy + 120)) $view"
 
 # hello, the list's first row, 78 to 108: its menu from where it was
 # clicked, 6 in: Open, a line, Rename..., Delete.

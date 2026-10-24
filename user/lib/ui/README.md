@@ -10,10 +10,10 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 
 | File | What it is | GTK / libadwaita |
 |---|---|---|
-| `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends only on `ppm.l0`'s colors and `render.l0`'s glyph. | `@window_bg_color`, `@accent_bg_color`, … |
-| `icons.l0` | 16×16 symbolic icons, kept as `#`/`.` art: window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer. | `*-symbolic` icons |
-| `face.l0` | The face: at scale 1 the bitmap font; at scale 2 also the coverage `tools/mkfont` rasterized into `/etc/face2x`, Source Code Pro's glyphs, regular and bold, at two sizes, the icons at four, and the pointer. | the font and icon theme at a scale factor |
-| `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
+| `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Programs draw in the dark style: `ui_style` says so, the one place a setting for it will be read. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends only on `ppm.l0`'s colors and `render.l0`'s glyph. | `@window_bg_color`, `@accent_bg_color`, … |
+| `icons.l0` | The names of the symbolic icons, 16×16 at scale 1, GNOME's own: each is its SVG under [icons/](../../../icons) (Adwaita's, and System Monitor's for utilities-system-monitor), which `tools/mkicons` rasterizes into `/etc/icons` at the build. window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer. | `*-symbolic` icons |
+| `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; at scale 1 the bitmap font; at scale 2 also the coverage `tools/mkfont` rasterized into `/etc/face2x`, Source Code Pro's glyphs, regular and bold, at two sizes, and the pointer. An app's `icon.face` is the same format, its images' tables `image.N`. | the font and icon theme at a scale factor |
+| `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon, an image of its own colors with alpha, `UiPImage`, as an app's `icon.svg` makes), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
 | `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, entry.l0's entry, a window's own header bar, nav.l0's path bar and toggle group, icon_view.l0's icon view and menu.l0's popover); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). `UiCsdBar START TITLE END CLOSES` is the header bar of a window that draws its own (`ui_open_csd`): any widget as its title, in the bar's middle as far as there is room, the window's close button at its end if CLOSES (`ui_close_action`), and its ground the window's to drag (`ui_move_action`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
 | `grid.l0` | A data grid: columns, typed cells (text, number, size, as `format_size` says it and sorted by its bytes, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. `ui_grid_page`, a toolbar of Refresh, a status line and End Process over a grid, as `widgets` and `procmon` are, and `ui_selected_line`. | `GtkColumnView`, `GtkScrolledWindow` |
 | `panes.l0` | A window of panes: `UiSidebar`, rows of an icon, a title and a line, one selected; `UiSegmentBar`, a whole in parts each as wide as its share by weight (`ui_shares`), each plain or muted (`UiSegPlain`, `UiSegMuted`), at any height: a title over a line at `ui_segbar_h`, the title alone lower, no text as a usage bar; one part selected and moved along by Left and Right (`ui_segbar_key`), or, with prefix `""`, none and no targets; `UiProps`, a dimmed name before each value, which is any widget; `UiModal` and `ui_alert`, an alert dialog on a card over everything beneath, which is dimmed (`ui_scrim`) and no longer a target, and `ui_alert_form`, one with widgets, such as properties holding entries, between its lines and its buttons. Rows and parts carry `PREFIX.select.KEY`, read back by `ui_select_key`. | `AdwNavigationSplitView`'s sidebar, `GtkListBox` `.navigation-sidebar`, GNOME Disks' volume grid and Usage's storage bar, `AdwAlertDialog` and its extra child |
@@ -104,7 +104,7 @@ to `l0` are one namespace, and a duplicate is a compile error.
   (`ui_space_s/m/l`).
 - **Header bars** are 46 px with a centered bold title, controls packed 6 px
   from either edge, and a shade line underneath. In the backdrop they're
-  lighter with a dimmed title.
+  darker, the window's own ground, with a dimmed title.
 - **Buttons** are 34 px tall (24 px round title buttons) with a 6 px radius.
   The ground goes from 10% to 15% to 30% of the text color for rest, hover
   and pressed. Flat buttons have no ground until hovered. Suggested buttons
@@ -139,8 +139,9 @@ to `l0` are one namespace, and a duplicate is a compile error.
   (`-1`). Window corners are rounded by the display's shaped layers, which
   cut whole pixels, so they aren't antialiased. There are no window
   shadows.
-- One bitmap font and one size of icon at scale 1; at 2, one monospaced
-  face and the icons' four sizes. Icons and text scale by whole numbers,
+- One bitmap font at scale 1; at 2, one monospaced face. Icons are
+  smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
+  the build, never at run time. Icons and text scale by whole numbers,
   and the face is ASCII only, as the font is. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.
 - Scrolling is by whole rows: the wheel's steps are counted, not its
