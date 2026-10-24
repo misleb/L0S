@@ -400,7 +400,11 @@ input, and `(file_read_all f)` the rest of a file, as `bytes` (spec section
 line or a field goes out by position without becoming a list. Pass
 `(IoFile 1)` to write to standard output. `(bytes_to_list b)` and
 `(bytes_from_list s)` convert, which is how bytes meet string literals, in
-tests especially. Nothing changes a bytes value.
+tests especially. Nothing changes a bytes value. `(bytes_slice b i j)` is
+bytes `i` up to `j` as bytes of their own, and `(bytes_concat bs)` joins a
+`(list bytes)` into one, each copying only the bytes it returns: so a
+header and a body become one message, or a field is kept from a large
+input, without either going through a list.
 
 **Reading in pieces.** To stream a file of any size, copying it or checking
 it without holding it, `(file_read_some f n)` gives the next piece, at least
@@ -566,7 +570,8 @@ phase, instead of one build per phase timed from outside.
 
 Factor reads into small functions freely. A parameter of list, data, array,
 or bytes type costs no reference counting to pass when the function only
-reads it: with `is_empty`, `array_len`, `bytes_len`, `bytes_get`, or `head`
+reads it: with `is_empty`, `array_len`, `bytes_len`, `bytes_get`,
+`bytes_slice`, `bytes_concat`, or `head`
 or `array_get` of an int or bool element, by matching on it and reading its
 fields the same way, or by passing that same parameter on to another
 function that only reads it. So an index loop over an array or bytes, which
