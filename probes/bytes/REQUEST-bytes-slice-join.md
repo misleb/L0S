@@ -1,6 +1,12 @@
 # Feature request: slicing and joining bytes
 
-Status: asked
+Status: answered. L0 added both (spec 6.6, newlang 97e1c54, roadmap
+0107), and L0S uses them at each place in the table below, which records
+what it was. `want.l0` checks against L0S's helpers
+(`l0 check common/abi.l0 common/text.l0 probes/bytes/want.l0`). Two
+kinds of list remain: device memory, which is read a byte at a time
+(a disk's buffer and a received frame, `get_bytes`), and TCP's data,
+which its reassembly holds as lists, so `tcp_notify` converts it once.
 Project: L0S, a microkernel in L0 for QEMU's virt board, heading for the
 Raspberry Pi 5
 

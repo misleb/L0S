@@ -57,18 +57,19 @@
 (def store_name ((s Store)) (list int)
   (match s ((StoreDisk d b) (disk_name_of d)) ((StoreMem m n r fl) (disk_name 0)) ((StoreRam m n) "tmp")))
 
-; Sectors read, and the store after; or why not.
-(data Got (Got Store (list int)) (GotNot Store (list int)))
+; Sectors read, as bytes, and the store after; or why not.
+(data Got (Got Store bytes) (GotNot Store (list int)))
 
-; count sectors from sector, at most a cluster's.
+; count sectors from sector, at most a cluster's. A disk's come out of
+; its buffer a byte at a time, the one way a region is read.
 (def store_read ((s Store) (sector int) (count int)) Got
   (match s
-    ((StoreMem m n r fl) (Got (StoreMem m n (add r 1) fl) (mem_sectors m sector count (nil int))))
-    ((StoreRam m n) (Got s (ram_sectors m sector count (nil int))))
+    ((StoreMem m n r fl) (Got (StoreMem m n (add r 1) fl) (bytes_from_list (mem_sectors m sector count (nil int)))))
+    ((StoreRam m n) (Got s (bytes_concat (ram_sectors m sector count (nil bytes)))))
     ((StoreDisk d b)
       (let why (disk_read d b sector count)
         (if (is_empty why)
-            (Got s (disk_get b (mul count (vol_sector_size))))
+            (Got s (bytes_from_list (disk_get b (mul count (vol_sector_size)))))
             (GotNot s why))))))
 
 ; Sectors count to 1 from sector of m, onto acc: those never written are
@@ -83,39 +84,39 @@
                            acc))))
 
 ; Sectors count to 1 from sector of m, a RAM file system's, onto acc, as
-; mem_sectors does, as bytes in a list.
-(def ram_sectors ((m (Map int bytes)) (sector int) (count int) (acc (list int))) (list int)
+; mem_sectors does, each the bytes it holds, to be joined once.
+(def ram_sectors ((m (Map int bytes)) (sector int) (count int) (acc (list bytes))) (list bytes)
   (if (le count 0)
       acc
       (ram_sectors m sector (sub count 1)
-                   (append (match (map_get m (add sector (sub count 1)))
-                             ((Some b) (bytes_to_list b))
-                             ((None) (zeros (vol_sector_size))))
-                           acc))))
+                   (cons (match (map_get m (add sector (sub count 1)))
+                           ((Some b) b)
+                           ((None) (bytes_from_list (zeros (vol_sector_size)))))
+                         acc))))
 
 ; Every one of count sectors from sector, a cluster's at a time.
 (def store_read_all ((s Store) (sector int) (count int)) Got
-  (store_read_from s sector count (nil int)))
+  (store_read_from s sector count (nil bytes)))
 
-(def store_read_from ((s Store) (sector int) (count int) (acc (list int))) Got
+(def store_read_from ((s Store) (sector int) (count int) (acc (list bytes))) Got
   (if (le count 0)
-      (Got s (rev acc))
+      (Got s (bytes_concat (rev acc)))
       (let k (min count (vol_cluster_sectors))
         (match (store_read s sector k)
           ((GotNot s2 why) (GotNot s2 why))
-          ((Got s2 bs) (store_read_from s2 (add sector k) (sub count k) (rev_onto bs acc)))))))
+          ((Got s2 bs) (store_read_from s2 (add sector k) (sub count k) (cons bs acc)))))))
 
 ; The store after a write, or why it failed.
 (data Put (Put Store) (PutNot Store (list int)))
 
-; bs, whole sectors, at most a cluster's, written from sector.
-(def store_write ((s Store) (sector int) (bs (list int))) Put
+; b, whole sectors, at most a cluster's, written from sector.
+(def store_write ((s Store) (sector int) (b bytes)) Put
   (match s
-    ((StoreMem m n r fl) (Put (StoreMem (mem_put m sector bs) n (add r 1) fl)))
-    ((StoreRam m n) (Put (StoreRam (ram_put m sector bs) n)))
-    ((StoreDisk d b)
-      (let p (disk_put b bs)
-        (let why (disk_write d b sector (div (length bs) (vol_sector_size)))
+    ((StoreMem m n r fl) (Put (StoreMem (mem_put m sector (bytes_to_list b)) n (add r 1) fl)))
+    ((StoreRam m n) (Put (StoreRam (ram_put m sector b 0) n)))
+    ((StoreDisk d buf)
+      (let p (disk_put_range buf 0 b 0 (bytes_len b))
+        (let why (disk_write d buf sector (div (bytes_len b) (vol_sector_size)))
           (if (is_empty why) (Put s) (PutNot s why)))))))
 
 ; Every write made so far on the disk itself, out of its cache, so that
@@ -133,19 +134,27 @@
       m
       (mem_put (map_put m sector (take bs (vol_sector_size))) (add sector 1) (drop_n bs (vol_sector_size)))))
 
-; bs, whole sectors, written from sector into m, a RAM file system's.
-(def ram_put ((m (Map int bytes)) (sector int) (bs (list int))) (Map int bytes)
-  (if (is_empty bs)
+; The sectors of b from i on, whole ones, written from sector into m, a
+; RAM file system's, each sliced from b.
+(def ram_put ((m (Map int bytes)) (sector int) (b bytes) (i int)) (Map int bytes)
+  (if (ge i (bytes_len b))
       m
-      (ram_put (map_put m sector (bytes_from_list (take bs (vol_sector_size)))) (add sector 1) (drop_n bs (vol_sector_size)))))
+      (let j (min (bytes_len b) (add i (vol_sector_size)))
+        (ram_put (map_put m sector (bytes_slice b i j)) (add sector 1) b j))))
 
-; bs, whole sectors, written from sector, a cluster's at a time.
+; bs, whole sectors, written from sector, a cluster's at a time: made
+; bytes once, and each cluster sliced from them.
 (def store_write_all ((s Store) (sector int) (bs (list int))) Put
-  (if (is_empty bs)
+  (store_write_from s sector (bytes_from_list bs) 0))
+
+; store_write_all's loop, over the bytes of b from i.
+(def store_write_from ((s Store) (sector int) (b bytes) (i int)) Put
+  (if (ge i (bytes_len b))
       (Put s)
-      (match (store_write s sector (take bs (vol_cluster_size)))
-        ((PutNot s2 why) (PutNot s2 why))
-        ((Put s2) (store_write_all s2 (add sector (vol_cluster_sectors)) (drop_n bs (vol_cluster_size)))))))
+      (let j (min (bytes_len b) (add i (vol_cluster_size)))
+        (match (store_write s sector (bytes_slice b i j))
+          ((PutNot s2 why) (PutNot s2 why))
+          ((Put s2) (store_write_from s2 (add sector (vol_cluster_sectors)) b j))))))
 
 ; ---------------------------------------------------------------- the state
 
@@ -175,9 +184,9 @@
 (def holds ((h Held) (a VolAt) (need int)) bool
   (match h ((Held b bs) (if (eq b a) (ge (bytes_len bs) need) false)) ((HeldPlace b) false) ((HeldNone) false)))
 
-; The bytes h holds from i up to j.
-(def held_range ((h Held) (i int) (j int)) (list int)
-  (match h ((Held a bs) (bytes_range bs i j)) ((HeldPlace a) (nil int)) ((HeldNone) (nil int))))
+; The bytes h holds from i up to j, sliced, as bytes.
+(def held_range ((h Held) (i int) (j int)) bytes
+  (match h ((Held a bs) (bytes_slice bs i j)) ((HeldPlace a) (bytes_from_list (nil int))) ((HeldNone) (bytes_from_list (nil int)))))
 
 ; What h holds once its file is written to: the place, not the bytes.
 (def held_written ((h Held)) Held
@@ -334,7 +343,7 @@
       (Put s)
       (match (head rs)
         ((VolRun first n)
-          (match (store_write s (add start first) (vol_run_bytes v (head rs)))
+          (match (store_write s (add start first) (bytes_from_list (vol_run_bytes v (head rs))))
             ((PutNot s2 why) (PutNot s2 why))
             ((Put s2) (write_runs s2 start v (tail rs))))))))
 
@@ -391,8 +400,9 @@
 
 ; ------------------------------------------------------------- answering
 
-; f after a request, and its reply: the word and the bytes after it.
-(data Answered (Answered Fs int (list int)))
+; f after a request, and its reply: the word and the bytes after it, as
+; text, or as a file's bytes read.
+(data Answered (Answered Fs int (list int)) (AnsweredData Fs int bytes))
 
 (def word ((f Fs) (w int)) Answered (Answered f w (nil int)))
 
@@ -540,11 +550,12 @@
         ((Handle p vi ei off mode held)
           (if (not (eq mode 1))
               (word f -5)
-              (read_on f h x (min n (sub (max_message) 4)) (nil int))))))))
+              (read_on f h x (min n (sub (max_message) 4)) (nil bytes))))))))
 
-; Handle h, x, read on for n bytes more, a cluster's at a time, onto acc,
-; reversed: the bytes, once the file or n ends, and x moved past them.
-(def read_on ((f Fs) (h int) (x Handle) (n int) (acc (list int))) Answered
+; Handle h, x, read on for n bytes more, a cluster's at a time, each
+; piece sliced from the cluster held onto acc, reversed: the bytes,
+; joined once the file or n ends, and x moved past them.
+(def read_on ((f Fs) (h int) (x Handle) (n int) (acc (list bytes))) Answered
   (match x
     ((Handle p vi ei off mode held)
       (match (if (le n 0) ((None VolSpan)) (vol_read_span (fs_vol f vi) ei off n (held_at held)))
@@ -552,13 +563,14 @@
         ((Some span) (read_piece f h x n acc span))))))
 
 ; The bytes read, acc reversed, and handle h moved to x.
-(def read_done ((f Fs) (h int) (x Handle) (acc (list int))) Answered
-  (Answered (with_handles f (map_put (fs_handles f) h x)) (length acc) (rev acc)))
+(def read_done ((f Fs) (h int) (x Handle) (acc (list bytes))) Answered
+  (let d (bytes_concat (rev acc))
+    (AnsweredData (with_handles f (map_put (fs_handles f) h x)) (bytes_len d) d)))
 
 ; The bytes of span read on from what x holds, or its cluster read and
 ; held in its place; -5 if the disk fails before any bytes are read, and
 ; those read if after.
-(def read_piece ((f Fs) (h int) (x Handle) (n int) (acc (list int)) (span VolSpan)) Answered
+(def read_piece ((f Fs) (h int) (x Handle) (n int) (acc (list bytes)) (span VolSpan)) Answered
   (match x
     ((Handle p vi ei off mode held)
       (match span
@@ -567,7 +579,7 @@
             ((FetchFailed f2) (if (is_empty acc) (word f2 -5) (read_done f2 h x acc)))
             ((Fetched f2 held2)
               (read_on f2 h (Handle p vi ei (add off k) mode held2) (sub n k)
-                       (rev_onto (held_range held2 at (add at k)) acc)))))))))
+                       (cons (held_range held2 at (add at k)) acc)))))))))
 
 ; What holds cluster a of the file at ei of volume vi, need bytes of it:
 ; held, if it holds them, or else the file's bytes in the cluster read
@@ -582,7 +594,7 @@
           (let bytes_in (vol_held (fs_vol f vi) ei k)
             (match (store_read (vol_store f vi) (vol_cluster_sector (fs_start f vi) c) (ceil_div bytes_in (vol_sector_size)))
               ((GotNot s2 why) (FetchFailed (with_vol_store f vi s2)))
-              ((Got s2 bs) (Fetched (with_vol_store f vi s2) (Held a (bytes_from_list (take bs bytes_in)))))))))))
+              ((Got s2 bs) (Fetched (with_vol_store f vi s2) (Held a (bytes_slice bs 0 (min bytes_in (bytes_len bs))))))))))))
 
 ; ----------------------------------------------------------------- write
 
@@ -668,19 +680,21 @@
                 (let p (disk_put_range buf at b i j)
                   (let why2 (disk_write d buf sector count)
                     (if (is_empty why2) (Put s) (PutNot s why2))))))))
-      ((StoreMem m sn r fl) (store_spliced s sector count keep at (bytes_range b i j)))
-      ((StoreRam m sn) (store_spliced s sector count keep at (bytes_range b i j))))))
+      ((StoreMem m sn r fl) (store_spliced s sector count keep at (bytes_slice b i j)))
+      ((StoreRam m sn) (store_spliced s sector count keep at (bytes_slice b i j))))))
 
 ; store_patch's in memory: the sectors read, or zeros, with piece put in
 ; at at, and written back.
-(def store_spliced ((s Store) (sector int) (count int) (keep bool) (at int) (piece (list int))) Put
-  (match (if keep (store_read s sector count) (Got s (zeros (mul count (vol_sector_size)))))
+(def store_spliced ((s Store) (sector int) (count int) (keep bool) (at int) (piece bytes)) Put
+  (match (if keep (store_read s sector count) (Got s (bytes_from_list (zeros (mul count (vol_sector_size))))))
     ((GotNot s2 why) (PutNot s2 why))
     ((Got s2 old) (store_write s2 sector (splice old at piece)))))
 
-; old with piece in place of its bytes from i.
-(def splice ((old (list int)) (i int) (piece (list int))) (list int)
-  (append (take old i) (append piece (drop_n old (add i (length piece))))))
+; old with piece in place of its bytes from i, joined once.
+(def splice ((old bytes) (i int) (piece bytes)) bytes
+  (bytes_concat (cons (bytes_slice old 0 i)
+                      (cons piece
+                            (cons (bytes_slice old (add i (bytes_len piece)) (bytes_len old)) (nil bytes))))))
 
 ; ----------------------------------------------------- rename and remove
 
@@ -947,7 +961,7 @@
 (def relabel_written ((f Fs) (vi int) (label (list int))) Answered
   (let old (vol_label (fs_vol f vi))
     (let v2 (vol_relabel (fs_vol f vi) label)
-      (match (flushed_after (store_write (vol_store f vi) (fs_start f vi) (vol_super label (vol_layout_of v2))))
+      (match (flushed_after (store_write (vol_store f vi) (fs_start f vi) (bytes_from_list (vol_super label (vol_layout_of v2)))))
         ((PutNot s2 why) (relabel_undone (with_vol_store f vi s2) label why))
         ((Put s2)
           (match (relabel_table (with_vol_store f vi s2) vi label)
@@ -1143,7 +1157,7 @@
             (match (write_table (fs_store_at f di) (GptDisk du (append parts (cons p (nil GptPart)))))
               ((PutNot s2 why) (Answered (with_store_at f di s2) -5 why))
               ((Put s2)
-                (match (store_write s2 at (zeros (vol_sector_size)))
+                (match (store_write s2 at (bytes_from_list (zeros (vol_sector_size))))
                   ((PutNot s3 why) (Answered (with_store_at f di s3) -5 why))
                   ((Put s3) (Answered (with_store_at f di s3) 0 (uuid_text (gpt_part_uuid p)))))))))))))
 
@@ -1329,7 +1343,7 @@
         ((UnmountBadLabel) (let w (complain (append (head labels) (append ": " (unmounting_why (UnmountBadLabel))))) (unmount_gone port (tail labels)))))))
 
 ; f after the request a answers.
-(def after_answer ((a Answered)) Fs (match a ((Answered f w bs) f)))
+(def after_answer ((a Answered)) Fs (match a ((Answered f w bs) f) ((AnsweredData f w b) f)))
 
 ; Each label mounted from port, with its UUID, as vols has it. One
 ; mounted already is fs's from before, served again; any other failure is
@@ -1359,7 +1373,8 @@
           (if (eq from 0)
               (serve f port)
               (match (obey_msg f from b)
-                ((Answered f2 w bs) (let s (msg_answer b (fs_reply_bytes w bs)) (serve f2 port))))))))))
+                ((Answered f2 w bs) (let s (msg_answer b (fs_reply_bytes w bs)) (serve f2 port)))
+                ((AnsweredData f2 w d) (let s (msg_answer_bytes b (fs_reply_data w d)) (serve f2 port))))))))))
 
 ; ---------------------------------------------------------------- starting
 
@@ -1449,14 +1464,14 @@
   (match (store_read s sector 1)
     ((GotNot s2 why) (BadTable s2 why))
     ((Got s2 hb)
-      (match (gpt_header_of (bytes_from_list hb))
+      (match (gpt_header_of hb)
         ((GptNone) (NoTable s2 "no partition table on the disk"))
         ((GptNotHeader why) (BadTable s2 why))
         ((GptHeader disk at count ecrc)
           (match (store_read_all s2 at (gpt_entries_sectors count))
             ((GotNot s3 why) (BadTable s3 why))
             ((Got s3 es)
-              (match (gpt_disk_of (GptHeader disk at count ecrc) (bytes_from_list es))
+              (match (gpt_disk_of (GptHeader disk at count ecrc) es)
                 ((GptBad why) (BadTable s3 why))
                 ((GptGot d) (Table s3 d))))))))))
 
@@ -1486,7 +1501,7 @@
           (match (store_read s start 1)
             ((GotNot s2 why) (load_vols s2 di (tail parts) (cons_not acc start why)))
             ((Got s2 bs)
-              (match (vol_super_of (bytes_from_list bs))
+              (match (vol_super_of bs)
                 ((VolNotSuper why) (load_vols s2 di (tail parts) (cons_not acc start why)))
                 ((VolSuper label l) (load_meta s2 di (tail parts) acc start (uuid_text u) count label l)))))))))
 
@@ -1498,7 +1513,7 @@
       (match (store_read_all s start (vol_meta_sectors l))
         ((GotNot s2 why) (load_vols s2 di parts (cons_not acc start why)))
         ((Got s2 bs)
-          (match (vol_base label l (bytes_from_list bs))
+          (match (vol_base label l bs)
             ((VolBad why) (load_vols s2 di parts (cons_not acc start why)))
             ((VolGot v)
               (match (load_dirs s2 start v (cons (vol_root v) (nil int)))
@@ -1513,21 +1528,21 @@
 (def load_dirs ((s Store) (start int) (v Vol) (dcs (list int))) Dirs
   (if (is_empty dcs)
       (Dirs s v)
-      (match (read_clusters s start (vol_dir_clusters v (head dcs)) (nil int))
+      (match (read_clusters s start (vol_dir_clusters v (head dcs)) (nil bytes))
         ((GotNot s2 why) (DirsNot s2 why))
         ((Got s2 bs)
-          (match (vol_add_dir v (head dcs) (bytes_from_list bs))
+          (match (vol_add_dir v (head dcs) bs)
             ((VolBad why) (DirsNot s2 why))
             ((VolGot v2) (load_dirs s2 start v2 (append (vol_subdirs v2 (head dcs)) (tail dcs)))))))))
 
 ; The clusters cs of the partition from start, in order, after acc,
-; reversed.
-(def read_clusters ((s Store) (start int) (cs (list int)) (acc (list int))) Got
+; reversed, joined once.
+(def read_clusters ((s Store) (start int) (cs (list int)) (acc (list bytes))) Got
   (if (is_empty cs)
-      (Got s (rev acc))
+      (Got s (bytes_concat (rev acc)))
       (match (store_read s (vol_cluster_sector start (head cs)) (vol_cluster_sectors))
         ((GotNot s2 why) (GotNot s2 why))
-        ((Got s2 bs) (read_clusters s2 start (tail cs) (rev_onto bs acc))))))
+        ((Got s2 bs) (read_clusters s2 start (tail cs) (cons bs acc))))))
 
 ; acc, having said why the partition at start is not served.
 (def cons_not ((acc (list FsVol)) (start int) (why (list int))) (list FsVol)

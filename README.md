@@ -1776,7 +1776,9 @@ There is one event loop, `schedule` in `kernel/kernel.l0`. Each turn:
 3. Arm the timer for a 10 ms slice, and `user_run` the process until it
    traps.
 4. Handle the trap:
-   - a system call is answered;
+   - a system call is answered; a spawn's caller is given a fresh
+     slice, since loading the child's image is the kernel's time, not
+     the caller's;
    - a touch of an unmapped heap, stack or bss page gets a zeroed frame;
    - any other fault kills the process (status 139, with a line on stderr);
    - a timer interrupt preempts the process;
@@ -2080,9 +2082,13 @@ see `request` and `msg_reply` in `l0s.l0`, `msg_answer` in `server.l0`,
 and `user/sbin/echo`, which sends each request's body back from the
 bytes it came in. A message stays the bytes it came as: a server reads
 what it needs where it is, and makes a list of a payload only to read it
-as text. L0 cannot yet slice or join bytes, so a header and a body that
-must become one message still go through a list
-([probes/bytes](probes/bytes/REQUEST-bytes-slice-join.md)).
+as text. A header and a body that must become one message are joined
+with `bytes_concat`, and a part of one is cut with `bytes_slice`, so
+neither goes through a list
+([probes/bytes](probes/bytes/REQUEST-bytes-slice-join.md)). What still
+does: a device's memory, read a byte at a time (a disk's buffer, a
+frame a card received), and TCP's data, which its reassembly holds as
+lists.
 
 When a process exits or is killed, its ports, names, interrupt bindings and
 open files go with it. Whoever waits for it is woken with its status, and

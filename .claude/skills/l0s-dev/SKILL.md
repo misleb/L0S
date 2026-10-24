@@ -221,9 +221,9 @@ Make a list only to parse text or to build output, and convert once.
   and `crc32 b i j`, `crc32_zeroed`, `sum16_bytes` over a range. Never
   `(eq (bytes_range ...) "lit")`, and never `bytes_from_list` a list
   just to read a field from it; a list's own field reads with `nth`.
-- **Pass (bytes, start, end), not a slice.** L0 has no builtin to slice
-  or join `bytes` (`probes/bytes/REQUEST-bytes-slice-join.md`), so a
-  reader takes the whole value and its range: `udp_of src dst b i j`,
+- **Pass (bytes, start, end) to read; slice only to keep.**
+  `(bytes_slice b i j)` copies, it is not a view, so a reader takes the
+  whole value and its range: `udp_of src dst b i j`,
   `tcp_of`, `icmp_of`, `decode_args_in`, `ipv4_of b off` and its `Ipv4`,
   which keeps its payload as the frame's bytes and two offsets.
 - **Messages**: a `Message`, and an `Asked`, hold the bytes received,
@@ -239,9 +239,14 @@ Make a list only to parse text or to build output, and convert once.
   (a message's payload as it came, as `wm` passes keys on and `echo`
   answers); to a device, `put_bytes_range` and `disk_put_range`, the
   frame or the file's bytes copied from the message in place.
-- **Joining waits for L0.** A header and a body that must become one
-  value go through a list: build it once with `push`/`rev`, and note
-  the place in the request's table.
+- **Join with `bytes_concat`.** A header and a body that must become
+  one value: the header made bytes once, then
+  `(bytes_concat (cons hdr (cons body (nil bytes))))`, as
+  `spawn_image_bytes`, `ask_fs_data`, `fs_reply_data` and inet's udp
+  notices do; a piece kept from a value is `bytes_slice` (fs's held
+  cluster, a datagram's data). `msg_answer_bytes` and
+  `listeners_tell_bytes` send bytes made once. Only a device's memory
+  (read a byte at a time) and TCP's reassembly still make lists.
 
 ## What a driver says
 

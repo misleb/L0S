@@ -788,7 +788,7 @@
     ((CReceive port buf max wait) (do_receive k p port buf max wait))
     ((CRegister port buf len) (do_register k p port buf len))
     ((CLookup buf len) (do_lookup k p buf len))
-    ((CSpawn m) (match (spawn k m (proc_pid p) ((None (list (list int)))) (proc_tty_port p)) ((Spawned k2 pid) (resume_with (k_child_cwd k2 pid (proc_cwd p)) p pid))))
+    ((CSpawn m) (match (spawn k m (proc_pid p) ((None (list (list int)))) (proc_tty_port p)) ((Spawned k2 pid) (spawn_answered k2 p pid))))
     ((CSpawnArgs m buf len) (do_spawn_args k p m buf len))
     ((CProcInfo pid buf max) (do_proc_info k p pid buf max))
     ((CDmaAlloc n) (if (proc_dev k p) (k_dma_alloc k p n) (resume_with k p (err_denied))))
@@ -1075,9 +1075,14 @@
 ; if the server's queue is full, p blocked until there is room, to make
 ; its call again; or -5 if the server has gone.
 (def ask_fs ((k Kernel) (p Proc) (server int) (op int) (buf int) (n int) (body (list int))) Step
+  (ask_fs_data k p server op buf n body (bytes_from_list (nil int))))
+
+; ask_fs with tail_bytes, copied from p, after body's text: joined once,
+; with no list of them.
+(def ask_fs_data ((k Kernel) (p Proc) (server int) (op int) (buf int) (n int) (body (list int)) (tail_bytes bytes)) Step
   (match (ipc_port_new (k_ipc k) (proc_pid p))
     ((NewPort r i2)
-      (match (k_send (with_ipc k i2) server (Msg (proc_pid p) (bytes_from_list (request_to r body))))
+      (match (k_send (with_ipc k i2) server (Msg (proc_pid p) (bytes_concat (cons (bytes_from_list (request_to r body)) (cons tail_bytes (nil bytes))))))
         ((KSent k2 code)
           (if (eq code 0)
               (Park k2 (proc_set_state p (AwaitingFs server r op buf n)))
@@ -1106,7 +1111,7 @@
         (let cnt (min n (sub (sub (max_message) 4) (length prefix)))
           (match (proc_copy_out p buf cnt)
             ((CopyOutBad q) (resume_with k q -5))
-            ((CopiedOut q b) (ask_fs k q server (fs_op_write) 0 cnt (append prefix (bytes_to_list b)))))))))
+            ((CopiedOut q b) (ask_fs_data k q server (fs_op_write) 0 cnt prefix b)))))))
 
 ; q, waiting for the server at server, given its reply on reply now that
 ; one has come: from the server's owner, or else dropped and q left
@@ -1275,7 +1280,17 @@
 (def spawned_image ((k Kernel) (p Proc) (b bytes) (path (list int)) (args (list (list int))) (start int)) Step
   (match (spawn_from k -1 (proc_pid p) args (proc_tty_port p) b start (bytes_len b))
     ((Spawned k2 pid)
-      (resume_with (k_child_cwd (if (gt pid 0) (k_name_put k2 pid path) k2) pid (proc_cwd p)) p pid))))
+      (spawn_answered (if (gt pid 0) (k_name_put k2 pid path) k2) p pid))))
+
+; p answered with the pid of the child it spawned, which gets p's
+; current directory, or with the refusal pid is; and p given a slice
+; from now. Loading an image takes the kernel long, under TCG most of a
+; slice, and that is not p's time: charged to it, p would lose the
+; processor as the call returned, and its child run before p's next
+; step, as often as not a line saying what it started.
+(def spawn_answered ((k Kernel) (p Proc) (pid int)) Step
+  (let t (timer_at (slice_deadline (k_sleepers k) (clock_ns)))
+    (resume_with (k_child_cwd k pid (proc_cwd p)) p pid)))
 
 ; k with the new process pid's current directory cwd, its parent's; as
 ; it was if pid is an error, not a process.
@@ -1352,7 +1367,7 @@
     (match (proc_copy_out p buf cnt)
       ((CopyOutBad q) (resume_with k q -5))
       ((CopiedOut q b)
-        (match (k_send k t (Msg (proc_pid q) (bytes_from_list (append (u32_le 0) (cons 119 (bytes_to_list b))))))
+        (match (k_send k t (Msg (proc_pid q) (bytes_concat (cons (bytes_from_list (append (u32_le 0) "w")) (cons b (nil bytes))))))
           ((KSent k2 code)
             (if (eq code 0)
                 (resume_with k2 q cnt)
@@ -1459,7 +1474,7 @@
                 ((None) (resume_with k q (err_fault)))
                 ((Some args)
                   (match (spawn k m (proc_pid q) (Some args) (proc_tty_port q))
-                    ((Spawned k2 pid) (resume_with (k_child_cwd k2 pid (proc_cwd q)) q pid))))))))))
+                    ((Spawned k2 pid) (spawn_answered k2 q pid))))))))))
 
 ; The len bytes at buf logged as a message of p's, at level: the number
 ; it was given, or err_fault for a level that is none, or a buffer p may
