@@ -305,9 +305,19 @@
         ((Free) (put_slot k2 pid (Free)))
         ((Dead st) (put_slot k2 pid (Dead st)))))))
 
-; Each of pids woken, in order, with 0 as its call's result.
+; Each of pids woken, in order, with 0 as its call's result; a negative
+; one is an alarm (alarm_key), whose port is sent the alarm notice.
 (def wake_all ((k Kernel) (pids (list int))) Kernel
-  (if (is_empty pids) k (wake_all (wake k (head pids) 0) (tail pids))))
+  (if (is_empty pids)
+      k
+      (wake_all (if (lt (head pids) 0) (alarm_sent k (sub 0 (head pids))) (wake k (head pids) 0))
+                (tail pids))))
+
+; k with the alarm notice sent to port, which is dropped if its queue is
+; full or it is gone.
+(def alarm_sent ((k Kernel) (port int)) Kernel
+  (match (k_send k port (Msg 0 (bytes_from_list (alarm_notice))))
+    ((KSent k2 code) k2)))
 
 ; k with every sleeper whose time has come by now woken, with 0.
 (def wake_sleepers ((k Kernel) (now int)) Kernel
@@ -832,6 +842,7 @@
     ((CIrqAck irq) (do_irq_ack k p irq))
     ((CModuleName i buf max) (do_module_name k p i buf max))
     ((CEntrySize i) (do_entry_size k p i))
+    ((CAlarm port t) (do_alarm k p port t))
     ((CKill pid) (do_kill k p pid))
     ((CWatch pid port) (do_watch k p pid port))
     ((CUnknown n) (resume_with k p -5))))
@@ -1764,6 +1775,17 @@
       (resume_with k p 0)
       (Park (with_sleepers k (sleep_add (k_sleepers k) t (proc_pid p)))
             (proc_set_state (proc_answer p 0) (Sleeping)))))
+
+; The alarm for port, p's, set to send its notice at t on the clock, in
+; place of any it had, or at once if t has come: 0, or err_no_port if the
+; port is not p's.
+(def do_alarm ((k Kernel) (p Proc) (port int) (t int)) Step
+  (if (not (eq (ipc_owner (k_ipc k) port) (proc_pid p)))
+      (resume_with k p (err_no_port))
+      (let k1 (with_sleepers k (sleep_remove (k_sleepers k) (alarm_key port)))
+        (if (le t (clock_ns))
+            (resume_with (alarm_sent k1 port) p 0)
+            (resume_with (with_sleepers k1 (sleep_add (k_sleepers k1) t (alarm_key port))) p 0)))))
 
 ; Interrupt irq enabled and bound to port, p's, its notices sent there:
 ; 0, or err_denied if p may not drive devices or irq is below 1,

@@ -6,9 +6,12 @@
 ; protocol, user/lib/proto/nic.l0, as nic, as virtio-net does on QEMU.
 ; Its module must be flagged dev.
 ;
-; It takes no interrupt, which L0's runtime does not give for RP1: it
-; polls the receive ring between requests, every millisecond when there
-; is nothing to do, and the PHY's link every half second; a link coming
+; It takes the GEM's interrupt, RP1's MSI-X vector 6, level-triggered
+; (rp1.l0 routes it): on each it reads the receive ring, acknowledges the
+; GEM's and RP1's, and waits for the next message, the kernel's alarm
+; (call 297) waking it to look at the PHY's link every half second. If the
+; interrupt cannot be had it polls the receive ring between requests,
+; every millisecond when there is nothing to do, as before. A link coming
 ; up sets the GEM's speed and duplex, lays the rings out afresh and
 ; starts it, as Linux's macb_mac_link_up does. A frame travels in a
 ; message, both ways: one received is copied out of its buffer into a
@@ -244,7 +247,38 @@
             (if (not (is_empty n))
                 (complain n)
                 (let l (info_as "gem" (card_line mac id))
-                  (serve (Gem hw (LinkDown) 0 0 (nil int) (NicCounts 0 0 0) 0) port)))))))))
+                  (let ic (irq_taken r port)
+                    (let i (info_as "gem" (irq_text ic))
+                      (serve (Gem hw (LinkDown) 0 0 (nil int) (NicCounts 0 0 0) 0) port ic)))))))))))
+
+; How the GEM's interrupt came to the driver: taken, with RP1's window
+; opened, for the acknowledgement, and the vector; or not, and why.
+(data GemIrq (GemIrq IoDevice int) (NoIrq (list int)))
+
+; RP1's vector for the Ethernet MAC, level-triggered (its device tree's
+; ethernet@100000 interrupts).
+(def eth_vector () int 6)
+
+; The GEM's interrupt routed through RP1, bound to port, and its causes
+; unmasked; or why not. Its status is read first, to clear what was
+; pending.
+(def irq_taken ((r IoDevice) (port int)) GemIrq
+  (match (open_device (rp1_window) (rp1_window_bytes))
+    ((DeviceFailed fault why) (NoIrq (append "no RP1 window: " why)))
+    ((DeviceOpened w)
+      (let q (rp1_msi_route w (eth_vector) true)
+        (let why (irq_bind_or_why (rp1_irq (eth_vector)) port)
+          (if (is_empty why)
+              (let c (device_read32 r (gem_isr))
+                (let e (device_write32 r (gem_ier) (gem_irq_mask))
+                  (GemIrq w (eth_vector))))
+              (let z (close_device w) (NoIrq why))))))))
+
+; What the driver says of its interrupt.
+(def irq_text ((ic GemIrq)) (list int)
+  (match ic
+    ((GemIrq w v) (append "interrupt " (append (digits (rp1_irq v)) ", RP1 vector 6")))
+    ((NoIrq why) (append "polled, as " why))))
 
 ; What the driver says once it serves nic: the card's address, where the
 ; GEM is, and its PHY.
@@ -310,8 +344,54 @@
             (match hw
               ((Hw r m va bus base qs mac)
                 (let l (link_now r)
-                  (let g2 (Gem hw link rxi txi ls c (add now (link_poll_ns)))
-                    (if (eq l link) g2 (relinked g2 l)))))))))))
+                  (let dg (diag_said g now)
+                   (let g2 (Gem hw link rxi txi ls c (add now (link_poll_ns)))
+                    (if (eq l link) g2 (relinked g2 l))))))))))))
+
+; What the GEM says of itself, for a board's first runs: frames it sent
+; and received, those lost for want of a buffer or to an overrun, its
+; transmit and receive statuses, the next receive descriptor read, and
+; that descriptor's two words.
+(def diag_text ((tx int) (rx int) (rre int) (roe int) (tsr int) (rsr int) (rxi int) (w0 int) (w1 int)) (list int)
+  (join_with ", "
+    (cons (append "sent " (digits tx))
+    (cons (append "received " (digits rx))
+    (cons (append "no buffer " (digits rre))
+    (cons (append "overrun " (digits roe))
+    (cons (append "TSR 0x" (hex_digits tsr 0))
+    (cons (append "RSR 0x" (hex_digits rsr 0))
+    (cons (append "next rx " (digits rxi))
+    (cons (append "its words 0x" (append (hex_digits w0 8) (append " 0x" (hex_digits w1 8))))
+    (nil (list int))))))))))))
+
+; The GEM's configuration said, to compare with what was written: NCR,
+; NCFGR, DMACFG, the receive queue's base, high and low, and the driver's
+; own counts.
+(def regs_text ((ncr int) (ncfgr int) (dmacfg int) (rbqph int) (rbqp int) (counts (list int))) (list int)
+  (join_with ", "
+    (cons (append "NCR 0x" (hex_digits ncr 0))
+    (cons (append "NCFGR 0x" (hex_digits ncfgr 0))
+    (cons (append "DMACFG 0x" (hex_digits dmacfg 0))
+    (cons (append "RBQP 0x" (append (hex_digits rbqph 0) (hex_digits rbqp 8)))
+    (cons (append "driver " counts)
+    (nil (list int)))))))))
+
+; The GEM's own counts said, as a debug line, every fourth look at the
+; link: 0.
+(def diag_said ((g Gem) (now int)) int
+  (if (not (eq (mod (div now (link_poll_ns)) 4) 0))
+      0
+      (match g
+        ((Gem hw link rxi txi ls c due)
+          (match hw
+            ((Hw r m va bus base qs mac)
+              (let s (dma_sync va 1 (dma_from_device))
+               (let rg (debug_as "gem" (regs_text (device_read32 r (gem_ncr)) (device_read32 r (gem_ncfgr))
+                         (device_read32 r (gem_dmacfg)) (device_read32 r (gem_rbqph)) (device_read32 r (gem_rbqp))
+                         (nic_counts_text c)))
+                (debug_as "gem" (diag_text (device_read32 r (gem_txcnt)) (device_read32 r (gem_rxcnt))
+                  (device_read32 r (gem_rre)) (device_read32 r (gem_roe)) (device_read32 r (gem_tsr))
+                  (device_read32 r (gem_rsr)) rxi (device_read32 m (rx_desc rxi)) (device_read32 m (add (rx_desc rxi) 4))))))))))))
 
 ; g with the link l, said.
 (def relinked ((g Gem) (l Link)) Gem
@@ -338,15 +418,58 @@
 
 ; ---------------------------------------------------------------- serving
 
-; Each request waiting answered; with none, every frame received told,
-; and with none of those, a nap and a look at the link.
-(def serve ((g Gem) (port int)) int
+; Each message handled as it comes; with none, every frame received told,
+; and with none of those, with the interrupt taken, the next message
+; waited for, with the link looked at on the alarm, or else a nap and a
+; look at the link.
+(def serve ((g Gem) (port int) (ic GemIrq)) int
   (match (port_try_receive port)
-    ((Message from b) (serve (requested g b) port))
+    ((Message from b) (serve (noticed g from b port ic) port ic))
     ((RecvFailed)
       (match (drained g 0)
         ((Drained g2 n)
-          (if (gt n 0) (serve g2 port) (let z (sleep_ns (poll_ns)) (serve (link_watched g2) port))))))))
+          (if (gt n 0)
+              (serve g2 port ic)
+              (match ic
+                ((GemIrq w v) (serve_waiting g2 port ic))
+                ((NoIrq why) (let z (sleep_ns (poll_ns)) (serve (link_watched g2) port ic))))))))))
+
+; With the interrupt taken, the alarm set for the link, and a message
+; waited for.
+(def serve_waiting ((g Gem) (port int) (ic GemIrq)) int
+  (let a (alarm_at port (gem_due g))
+    (match (port_receive port)
+      ((RecvFailed) (complain "lost its port"))
+      ((Message from b) (serve (noticed g from b port ic) port ic)))))
+
+; When the link is next to be looked at.
+(def gem_due ((g Gem)) int (match g ((Gem hw link rxi txi ls c due) due)))
+
+; A message handled: the kernel's interrupt notice, the GEM's cause read
+; and cleared, both it and RP1's acknowledged, the frames left to the
+; next drain; the alarm, the link looked at; or a request.
+(def noticed ((g Gem) (from int) (b bytes) (port int) (ic GemIrq)) Gem
+  (if (if (eq from 0) (msg_starts b "irq") false)
+      (irq_handled g ic)
+      (if (if (eq from 0) (msg_starts b "alarm") false)
+          (link_watched g)
+          (requested g b))))
+
+; g after the GEM's interrupt: its status read and written back, which
+; clears whichever way the GEM clears it, RP1's interrupt acknowledged,
+; and the kernel's ended so that it can come again.
+(def irq_handled ((g Gem) (ic GemIrq)) Gem
+  (match ic
+    ((NoIrq why) g)
+    ((GemIrq w v)
+      (match g
+        ((Gem hw link rxi txi ls c due)
+          (match hw
+            ((Hw r m va bus base qs mac)
+              (let s (device_read32 r (gem_isr))
+                (let k (device_write32 r (gem_isr) s)
+                  (let a (rp1_msi_ack w v)
+                    (let d (irq_ack (rp1_irq v)) g)))))))))))
 
 ; A request, its message's bytes b, answered: send puts a frame on the
 ; wire, copied from b in place; listen adds the reply port to those told

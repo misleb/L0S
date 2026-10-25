@@ -1536,8 +1536,11 @@ not seen; nor is anything behind a hub.
 [The Raspberry Pi 5](#the-raspberry-pi-5)): the
 firmware must leave RP1 set up (`pciex4_reset=0` in `config.txt`); the
 DWC3s are put in host mode, their PHYs kept from suspending, as RP1's
-device tree's quirks say; and a device reaches memory 0x10_0000_0000
-above the CPU's address (bcm2712's `dma-ranges` for RP1). The first run
+device tree's quirks say; and a device reaches memory at the CPU's own
+address (the firmware's PCIe controller maps PCI 0 to 64 GB onto RAM; the
+0x10_0000_0000 of Linux's `dma-ranges` did not work for `gem` on a
+board, and this is untried for USB). Both controllers take their
+interrupts as RP1 MSI-X vectors 31 and 36 (interrupts 191 and 196). The first run
 should check, on the serial line: that each controller's line comes
 (HCIVERSION, ports, slots, scratchpads, contexts' size), that a key
 plugged in gives a `device` line, and that those agree with Linux's view
@@ -1707,8 +1710,12 @@ a Broadcom BCM54213PE PHY at MDIO address 1
 ([phy.l0](user/sbin/gem/phy.l0)). It:
 
 - knows the GEM by its module ID and checks that it takes 64-bit
-  addresses, since RP1 reaches the Pi's memory 0x10_0000_0000 above the
-  CPU's addresses. With no RP1, as on QEMU, it says so and exits 0
+  addresses, since RP1 reaches the Pi's memory at the CPU's addresses (not
+  0x10_0000_0000 above them, which went nowhere on a board). It takes
+  the GEM's interrupt, RP1's MSI-X vector 6, level-triggered (interrupt
+  166), and wakes on the kernel's alarm (call 297) to look at the link;
+  on a board `inet` got a DHCP lease through it. With no RP1, as on
+  QEMU, it says so and exits 0
 - takes the board's Ethernet address from the firmware,
   `GET_BOARD_MAC_ADDRESS` through the mailbox
   ([mailbox.l0](user/lib/sys/mailbox.l0), shared with `rtc`), or else
@@ -2208,6 +2215,7 @@ otherwise as its type's first failure.
 | 294 | `log_write level text` | `Logging`: `Logged n`, `LogTooLong`, `LogRefused` | puts text, a line, in the kernel's log (see [The kernel's log](#the-kernels-log)) as the caller's, at level 0 error, 1 warning, 2 info or 3 debug, stamped with the time and the caller's pid: its number, or -4 for over 512 bytes, -5 for another level or a buffer the caller may not give. A newline in the text is a space, and one at its end is dropped. Any process may. Any level but debug is written to the kernel's standard error too, a line each |
 | 295 | `log_read seq`, `log_all` | `(list LogRecord)` | the messages in the log numbered seq or more, as many whole ones as 4096 bytes hold, oldest first, as `klog.l0` lays each out: a u64 number, a u64 time in ns since boot, a u16 pid, a byte of level, a u16 length, then the text. From the oldest kept if seq is older; none past the last. `log_all` reads them all, a read at a time. Any process may |
 | 296 | `entry_size_of e` | `int` | how many bytes entry e of the initramfs holds, 0 for a directory, as Files shows its files' sizes; -1 (`err_no_port`) if there is no entry e or the initramfs has been given up, as 269 refuses it. Any process may |
+| 297 | `alarm_at port t`, `is_alarm_notice m` | `int` | sends `port`, the caller's, the notice `alarm` from pid 0 when `clock_ns` reaches t, at once if it has; it replaces the port's earlier alarm, so there is at most one for a port. A driver that waits on its port for interrupts uses it to wake to do something on a time, as `gem` rechecks its link; 0, or -1 (`err_no_port`) if the port is not the caller's |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or

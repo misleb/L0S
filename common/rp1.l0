@@ -5,8 +5,10 @@
 ; without a fault (spec 10.3). rp1_up sets the root port's bus numbers
 ; and memory window, RP1's BAR1 and the outbound window, as a board run
 ; did to read RP1's chip ID, and turns on memory and bus mastering on
-; both, for RP1's DMA. It writes only when the chip ID does not already
-; answer, so every driver of RP1 calls it first, in any order.
+; both, for RP1's DMA, and sets BAR0 and BAR2 and enables MSI-X so that
+; its interrupts, vectors routed with rp1_msi_route, come as interrupts
+; 160 + v. It writes only when the chip ID and the MSI-X table do not
+; already answer, so every driver of RP1 calls it first, in any order.
 ;
 ; A network boot leaves RP1's Ethernet receiving into the firmware's
 ; buffers, in memory L0 gives as frames, and pciex4_reset=0 keeps it so:
@@ -38,13 +40,69 @@
 ; 0x1F00000000 (0x400C, 0x4080, 0x4084).
 (def rp1_writes () (list Rp1Write)
   (cons (Rp1Write 24 65792)
-  (cons (Rp1Write 32 3145728)
+  (cons (Rp1Write 32 4194304)
   (cons (Rp1Write (pcie_cfg_index) (rp1_bdf))
   (cons (Rp1Write (add (pcie_cfg_data) 20) 0)
+  (cons (Rp1Write (add (pcie_cfg_data) 24) 4194304)
+  (cons (Rp1Write (add (pcie_cfg_data) 16) 4259840)
   (cons (Rp1Write 16396 0)
   (cons (Rp1Write 16512 31)
   (cons (Rp1Write 16516 31)
-  (nil Rp1Write)))))))))
+  (nil Rp1Write)))))))))))
+
+; RP1's MSI-X capability's first word, in its configuration space, whose
+; bit 31 enables MSI-X: a read, with the bit set, written back.
+(def rp1_msix_cap () int 176)            ; 0xB0
+(def rp1_msix_on () int 2147483648)      ; bit 31
+
+; A capability word with MSI-X enabled.
+(def rp1_msix_word ((v int)) int (bit_or v (rp1_msix_on)))
+
+; Where RP1's MSI-X table is in its window, and the bytes of the window
+; that reach it and its BARs (spec 10.3): table entry v is 16 bytes at
+; 16 v.
+(def rp1_msix_table () int 4259840)      ; 0x410000
+(def rp1_window_bytes () int 4276224)    ; 0x414000
+
+; The word at vector v's MSIX_CFG, set alias, in RP1's window: 0x108808 +
+; 4 v; the clear alias is 0x400 above.
+(def rp1_msix_cfg ((v int)) int (add 1083400 (mul 4 v)))
+
+; The interrupt RP1's vector v raises, 160 + v, since the MSI writes n = v.
+(def rp1_irq ((v int)) int (add 160 v))
+
+; A table entry's four words for vector v: the doorbell's address,
+; 0xFF_FFFFF000, low and high, the number, and 0 to unmask it.
+(def rp1_msix_entry ((v int)) (list int)
+  (cons 4294963200 (cons 255 (cons v (cons 0 (nil int))))))
+
+; The MSIX_CFG word that enables v: ENABLE, bit 0, and IACK_EN, bit 3,
+; for a level-triggered source.
+(def rp1_msix_enable ((level bool)) int (if level 9 1))
+
+; The MSIX_CFG word that acknowledges a level interrupt, IACK, bit 2.
+(def rp1_msix_ack () int 4)
+
+; Vector v routed through w, RP1's window opened with rp1_window_bytes:
+; its table entry written, then enabled, level-triggered or edge. 0.
+(def rp1_msi_route ((w IoDevice) (v int) (level bool)) int
+  (let e (rp1_msi_put w (add (rp1_msix_table) (mul 16 v)) (rp1_msix_entry v))
+    (device_write32 w (rp1_msix_cfg v) (rp1_msix_enable level))))
+
+; Each of ws written to w from byte off, a word each: 0.
+(def rp1_msi_put ((w IoDevice) (off int) (ws (list int))) int
+  (if (is_empty ws)
+      0
+      (let x (device_write32 w off (head ws)) (rp1_msi_put w (add off 4) (tail ws)))))
+
+; v's level interrupt acknowledged, so RP1 sends the next: 0.
+(def rp1_msi_ack ((w IoDevice) (v int)) int
+  (device_write32 w (rp1_msix_cfg v) (rp1_msix_ack)))
+
+; Whether the table, in w's first words, answers, rather than reading the
+; 0xDEADDEAD an unset window does.
+(def rp1_table_answers ((w IoDevice)) bool
+  (not (eq (device_read32 w (rp1_msix_table)) 3735936685)))
 
 ; Whether RP1 answers, or why not.
 (data Rp1 (Rp1Up) (Rp1Down (list int)))
@@ -52,11 +110,16 @@
 ; RP1's window made to answer, if it does not already: Rp1Up once its
 ; chip ID reads right, else why not.
 (def rp1_up () Rp1
-  (match (open_device (rp1_window) 4096)
+  (match (open_device (rp1_window) (rp1_window_bytes))
     ((DeviceFailed fault why) (Rp1Down (append "no RP1 window on the board: " why)))
     ((DeviceOpened w)
-      (let up (if (eq (device_read32 w 0) (rp1_chip_id)) (Rp1Up) (rp1_set_up w))
+      (let up (if (rp1_set w) (Rp1Up) (rp1_set_up w))
         (let c (close_device w) up)))))
+
+; Whether the window is set up already, as far as MSI-X: the chip ID
+; reads, and so does the table.
+(def rp1_set ((w IoDevice)) bool
+  (if (eq (device_read32 w 0) (rp1_chip_id)) (rp1_table_answers w) false))
 
 ; The controller set up, and RP1's chip ID read again through w.
 (def rp1_set_up ((w IoDevice)) Rp1
@@ -67,11 +130,18 @@
         (let b (rp1_master r 4)
           (let i (device_write32 r (pcie_cfg_index) (rp1_bdf))
             (let d (rp1_master r (add (pcie_cfg_data) 4))
-              (let c (close_device r)
-                (let id (device_read32 w 0)
-                  (if (eq id (rp1_chip_id))
-                      (Rp1Up)
-                      (Rp1Down (rp1_dead_text id))))))))))))
+              (let m (rp1_msix_enabled r)
+                (let c (close_device r)
+                  (let id (device_read32 w 0)
+                    (if (eq id (rp1_chip_id))
+                        (Rp1Up)
+                        (Rp1Down (rp1_dead_text id)))))))))))))
+
+; MSI-X enabled in RP1's capability, through the index already naming RP1:
+; 0.
+(def rp1_msix_enabled ((r IoDevice)) int
+  (let off (add (pcie_cfg_data) (rp1_msix_cap))
+    (device_write32 r off (rp1_msix_word (device_read32 r off)))))
 
 ; Each of ws written to r, in order: 0.
 (def rp1_write_all ((r IoDevice) (ws (list Rp1Write))) int
