@@ -27,8 +27,9 @@ make demo-system                          # the same, from build/system.img's Sy
 make demo SCREEN=3840x2160                # on a 4K screen, the desktop drawn at scale 2
 make all                                  # type check, host tests, board tests, end-to-end
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
-make pi5-card                             # build/pi5-card: the boot partition's files for a Raspberry Pi 5, untried
+make pi5-card                             # build/pi5-card: the boot partition's files for a Raspberry Pi 5
 make pi5-netboot PI5_BOOT=DIR             # build/pi5-tftp: the same as a TFTP root, to boot a Pi 5 over the network
+tools/pi5-boot [--console]                 # build that, check dnsmasq serves it, and read the Pi 5's UART while it boots
 make -s doc Q=port_send                   # the libraries' documentation, as l0 doc gives the standard library's
 make -s doc Q=sbin/wm/wm                  # a file by the end of its path; names and searches reach the programs too
 ```
@@ -410,7 +411,11 @@ raw sectors only, has no volumes, and `fs` says so and serves none: remove it, a
 `make demo` makes a new one. One made before L0FS had directories is made
 again, once, by itself. `QEMU_APPEND` gives the kernel boot arguments, as
 `-append` does, which `make demo ROOT_UUID=UUID` sets to `root=UUID`.
-`QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
+Two are the kernel's own, for finding what goes wrong on a board:
+`debug` writes its debug lines, each process it starts among them, to
+the serial line as it does the rest, and `noshare` gives each process
+its own copy of its read-only segments rather than sharing them with
+other processes of the same bytes. `QEMU_MONITOR` and `QEMU_QMP` put QEMU's monitor and
 QMP on sockets, as the screen tests do, to type keys, move the pointer,
 and dump the screen.
 
@@ -1528,7 +1533,7 @@ the boot report's, or a key outside the boot keyboard's 104 usages is
 not seen; nor is anything behind a hub.
 
 **On the Pi 5** (`xhci rp1`, which `pi5/etc/inittab` starts; see
-[The Raspberry Pi 5](#the-raspberry-pi-5), untried): the
+[The Raspberry Pi 5](#the-raspberry-pi-5)): the
 firmware must leave RP1 set up (`pciex4_reset=0` in `config.txt`); the
 DWC3s are put in host mode, their PHYs kept from suspending, as RP1's
 device tree's quirks say; and a device reaches memory 0x10_0000_0000
@@ -1573,7 +1578,10 @@ with `bsdtar --format newc`, in order of path:
 make pi5-card     # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt
 ```
 
-L0S builds for the Pi 5, but has never booted on one. `make pi5-card`
+L0S builds for the Pi 5 and has booted on one over the network, to the
+shell on the debug UART, the compositor and the Ethernet link at 1000
+Mb/s, though not every boot is stable yet (the display's IOMMU is the
+suspect) and `inet` gets no DHCP answer. `make pi5-card`
 does three things:
 - builds the kernel with `--target pi5`, as `build/kernel-pi5.img`
 - builds the initramfs from `pi5/etc` and the same programs as QEMU's,
@@ -1633,7 +1641,19 @@ The board's EEPROM must try the network: `BOOT_ORDER=0xf21`, from
 the network. The network's DHCP server must name the TFTP server, as a
 proxy can for an existing network; with dnsmasq that is
 `dhcp-range=192.168.1.0,proxy`, `pxe-service=0,"Raspberry Pi Boot"`,
-`enable-tftp` and `tftp-root=build/pi5-tftp`. Once booted, L0S has its
+`enable-tftp` and `tftp-root=build/pi5-tftp`.
+
+`tools/pi5-boot` is the cycle for a board that network boots, with a
+DHCP server already naming this machine (option 66): it fetches the
+device trees once into `build/pi5-dtb`, runs `make pi5-netboot` with
+them, checks that a dnsmasq serves `build/pi5-tftp` (printing the `sudo
+dnsmasq` command to run once if not, as port 69 needs root), and reads
+the debug UART, `/dev/ttyUSB0` or `PI5_SERIAL`, into
+`build/pi5-serial.log` while the board is power-cycled. `--until REGEX`
+stops at a line, as `--until 'l0s>'` at the shell's prompt, `--wait`
+after so many seconds, `--no-build` serves what was built, and
+`--console` opens the line in picocom to type to the shell. `PI5_ARGS`
+gives the kernel's boot arguments, as `PI5_ARGS=debug`, to both. Once booted, L0S has its
 own driver for the same port, `gem` (see [The network on the Raspberry
 Pi 5](#the-network-on-the-raspberry-pi-5)).
 
@@ -2288,6 +2308,7 @@ name in a library is taken in every program that links it.
 | [common/abi.l0](common/abi.l0) | what the kernel and its processes agree on: the calls' numbers, error codes, limits, the address space, bytes least significant first, the arguments' encoding, a volume's label, lists to arrays and back | the kernel, every program, the host tools |
 | [common/text.l0](common/text.l0) | lists and strings as the standard library lacks them: `nth`, `take`, `drop`, `last`, `concat`, `repeat`, joining and splitting words and lines, `up_to`, padding, `is_number` and `word_number`, `ceil_div`, `format_size` (a size as GNOME says it, `782.3 kB`) | the kernel, every program, the host tools |
 | [common/initramfs.l0](common/initramfs.l0), [queue.l0](common/queue.l0) | the cpio archive the kernel boots with; a queue | the kernel, every program |
+| [common/rp1.l0](common/rp1.l0) | the Raspberry Pi 5's RP1 window made to answer (`rp1_up`), and its Ethernet stopped at boot (`rp1_quiet`) (`RP1`) | the kernel, `xhci`, `gem` |
 | [common/klog.l0](common/klog.l0) | the kernel's log: a record's levels, its bytes as `log_read` gives them, and `dmesg`'s lines (`[    1.234567] TEXT`) | the kernel, every program |
 | [sys/l0s.l0](user/lib/sys/l0s.l0) | the call wrappers; a message's payload read in place (`msg_len`, `msg_u32`, `msg_is`, `msg_text`), and sent as a range (`port_send_bytes`, `port_forward`); requests, and asking a server (`port_ask`, `reply_why`); shared memory (`shm_region`, `shm_region_free`, `shm_share_to`); `KeyEvent`, `PointerEvent`, `PointerMotion`, `WheelEvent` and listening for them; the compositor's leave and focus notices; `name_wait`, which waits for a server to register; `fs_mount`, `fs_unmount` and the mount table; the boot arguments, `root_switch` and `spawn_image` | every program |
 | [sys/paths.l0](user/lib/sys/paths.l0) | the files of `/`, wherever it is: `root_paths` lists them, `program_found` finds a program among them, `path_is_program` says whether a file is one, and `spawn_path` starts one, from the initramfs's entry or a volume's file (`PATHS`, with `proto/fs.l0` and `uuid.l0`) | `sh`, `init`, `install`, `boot`, `wm`, `vt` |
@@ -2753,11 +2774,11 @@ a bad buffer, and wait on nothing.
   planes' rows also share half of 256 KB of line memory, about 8 rows
   1920 wide, or 4 at 3840. A screen past either is refused. Corners are
   square there.
-- **L0S has never booted on a Raspberry Pi 5** (see
+- **L0S on a Raspberry Pi 5 is not yet stable** (see
   [The Raspberry Pi 5](#the-raspberry-pi-5)): `make pi5-card` builds its
-  card, and `make pi5-netboot` a TFTP root, both untried. There it has
-  no disk and no network, as L0 gives no region over the Pi's SD
-  controller or Ethernet, and reaches its RTC only through the
+  card, and `make pi5-netboot` a TFTP root, which has booted it to a
+  shell and the compositor, though some boots corrupt memory or lose
+  power. It has no disk, and reaches its RTC only through the
   firmware. Its
   kernel's heap of 768 MB records about 9 GB of pages given at once.
   Nothing yet stops a process taking more on a 16 GB board, and the

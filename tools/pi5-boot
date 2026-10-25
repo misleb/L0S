@@ -1,0 +1,145 @@
+#!/bin/sh
+# pi5-boot -- boot L0S on a Raspberry Pi 5 that network boots, and read its
+# debug UART.
+#
+# Usage: tools/pi5-boot [OPTION ...]
+#
+# Builds build/pi5-tftp with make pi5-netboot, checks that the TFTP server
+# serves it, and reads the serial line while the board is power-cycled: the
+# whole line goes to build/pi5-serial.log and to standard output as it comes.
+# The board's device trees are fetched once from raspberrypi/firmware into
+# build/pi5-dtb, which PI5_BOOT, a directory holding them, replaces.
+#
+# Options:
+#   --no-build       serve build/pi5-tftp as it is
+#   --wait SECONDS   read the line for at most this long, default 180
+#   --until REGEX    stop once a line of the log matches REGEX (an
+#                    extended regex, as grep -E takes), as "l0s>" for the
+#                    shell's prompt; the exit status is 1 if none did
+#   --console        once built, open the line in picocom, to type to the
+#                    shell, logging to build/pi5-serial.log too; Ctrl-A
+#                    Ctrl-X quits
+#
+# Environment:
+#   PI5_SERIAL       the serial device, default /dev/ttyUSB0, at 115200
+#   PI5_BOOT         a directory holding bcm2712*-rpi-5-b.dtb
+#   PI5_ARGS         the kernel's boot arguments, as "debug", which echoes
+#                    its debug lines (each process it starts) to the UART
+#   L0_VIRT_LD       an ld.lld, as l0 build takes it; ld.lld on PATH when
+#                    there is no docker
+#
+# The Pi's firmware fetches its files from the server DHCP option 66 names,
+# on port 69, which only root may bind, so the server is a step this script
+# cannot take: it prints the dnsmasq command when no server serves
+# build/pi5-tftp. The board halts or reboots when L0S ends; power is the
+# user's to cycle, and the script waits for it.
+
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BUILD="$ROOT/build"
+TFTP="$BUILD/pi5-tftp"
+LOG="$BUILD/pi5-serial.log"
+DTB_DIR=${PI5_BOOT:-$BUILD/pi5-dtb}
+DTB_URL="https://github.com/raspberrypi/firmware/raw/stable/boot"
+SERIAL=${PI5_SERIAL:-/dev/ttyUSB0}
+
+die() {
+    echo "pi5-boot: $*" >&2
+    exit 2
+}
+
+wait_s=180
+build=1
+until_re=
+console=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --no-build) build=0; shift ;;
+        --wait)
+            [ $# -ge 2 ] || die "--wait takes a number of seconds"
+            wait_s=$2; shift 2 ;;
+        --until)
+            [ $# -ge 2 ] || die "--until takes a regex"
+            until_re=$2; shift 2 ;;
+        --console) console=1; shift ;;
+        *) die "unknown argument $1; see the header of tools/pi5-boot" ;;
+    esac
+done
+case $wait_s in
+    "" | *[!0-9]*) die "--wait takes a number of seconds, not '$wait_s'" ;;
+esac
+
+if [ "$build" = 1 ]; then
+    if ! ls "$DTB_DIR"/bcm2712*-rpi-5-b.dtb > /dev/null 2>&1; then
+        [ -z "${PI5_BOOT:-}" ] || die "no bcm2712*-rpi-5-b.dtb in $PI5_BOOT"
+        command -v curl > /dev/null 2>&1 || die "curl is needed to fetch the device trees, once"
+        mkdir -p "$DTB_DIR"
+        for dtb in bcm2712-rpi-5-b.dtb bcm2712d0-rpi-5-b.dtb; do
+            echo "pi5-boot: fetching $dtb, once" >&2
+            curl -fsSL -o "$DTB_DIR/$dtb.part" "$DTB_URL/$dtb" || die "could not fetch $DTB_URL/$dtb"
+            mv "$DTB_DIR/$dtb.part" "$DTB_DIR/$dtb"
+        done
+    fi
+    if [ -z "${L0_VIRT_LD:-}" ] && ! command -v docker > /dev/null 2>&1; then
+        L0_VIRT_LD=$(command -v ld.lld) || die "no docker and no ld.lld to link the board's images with"
+        export L0_VIRT_LD
+    fi
+    make -s -C "$ROOT" pi5-netboot PI5_BOOT="$DTB_DIR" PI5_ARGS="${PI5_ARGS:-}" > /dev/null || die "the build failed"
+elif [ ! -f "$TFTP/config.txt" ]; then
+    die "--no-build, and $TFTP holds no boot files yet"
+fi
+
+# The server must serve this tree: one serving another would boot whatever
+# that holds.
+served=$(ps -eo args 2> /dev/null | awk '
+    $1 ~ /(^|\/)dnsmasq$/ { for (i = 2; i <= NF; i++) if ($i ~ /^--tftp-root=/) { sub(/^--tftp-root=/, "", $i); print $i; exit } }')
+if [ "$served" != "$TFTP" ] && [ "$served" != "$TFTP/" ]; then
+    {
+        if [ -n "$served" ]; then
+            echo "pi5-boot: dnsmasq serves $served, not $TFTP; stop it, and run"
+        else
+            echo "pi5-boot: no dnsmasq serves $TFTP. Port 69 needs root, so run this"
+        fi
+        echo "once, in a terminal of its own; it serves every build after:"
+        echo
+        echo "  sudo dnsmasq -d --port=0 --enable-tftp --tftp-root=$TFTP \\"
+        echo "    --user=$(id -un) --log-facility=-"
+    } >&2
+    exit 2
+fi
+
+[ -c "$SERIAL" ] || die "$SERIAL is not a serial device; set PI5_SERIAL"
+[ -r "$SERIAL" ] && [ -w "$SERIAL" ] || die "$SERIAL is not readable and writable by $(id -un); it belongs to a group, usually uucp"
+
+if [ "$console" = 1 ]; then
+    command -v picocom > /dev/null 2>&1 || die "--console uses picocom, which is not installed"
+    echo "pi5-boot: power-cycle the Pi now; Ctrl-A Ctrl-X quits" >&2
+    exec picocom -q -b 115200 --imap lfcrlf --logfile "$LOG" "$SERIAL"
+fi
+
+stty -F "$SERIAL" 115200 raw -echo || die "could not set up $SERIAL"
+: > "$LOG"
+timeout "$wait_s" cat "$SERIAL" > "$LOG" &
+reader=$!
+tail -n +1 -f "$LOG" &
+shower=$!
+trap 'kill "$reader" "$shower" 2> /dev/null || true' EXIT INT TERM
+
+echo "pi5-boot: reading $SERIAL for up to $wait_s s into $LOG; power-cycle the Pi now" >&2
+
+# Once the OS has started, the firmware's "Halt:" means it has ended.
+status=1
+while kill -0 "$reader" 2> /dev/null; do
+    if [ -n "$until_re" ] && tr -d '\r' < "$LOG" | grep -Eq -- "$until_re"; then
+        status=0
+        break
+    fi
+    if tr -d '\r' < "$LOG" | awk '/Starting OS/ { os = 1 } os && /Halt:/ { f = 1 } END { exit !f }'; then
+        [ -n "$until_re" ] || status=0
+        break
+    fi
+    sleep 1
+done
+sleep 1
+exit "$status"

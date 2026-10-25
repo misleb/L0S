@@ -1,0 +1,120 @@
+; rp1.l0 -- RP1's window on the Raspberry Pi 5, made to answer. RP1, the
+; chip with the USB, Ethernet and GPIO, is behind the PCIe controller at
+; 0x1000120000, and the firmware leaves that controller set for another
+; address, so the window at 0x1F00000000 reads 0xDEADDEAD throughout,
+; without a fault (spec 10.3). rp1_up sets the root port's bus numbers
+; and memory window, RP1's BAR1 and the outbound window, as a board run
+; did to read RP1's chip ID, and turns on memory and bus mastering on
+; both, for RP1's DMA. It writes only when the chip ID does not already
+; answer, so every driver of RP1 calls it first, in any order.
+;
+; A network boot leaves RP1's Ethernet receiving into the firmware's
+; buffers, in memory L0 gives as frames, and pciex4_reset=0 keeps it so:
+; every frame on the wire is then written over whatever is there. The
+; kernel calls rp1_quiet first thing, before it takes any memory, to stop
+; it. Linked by the kernel and by the Makefile's RP1.
+
+; The window onto RP1's peripherals, and RP1's chip ID at its start.
+(def rp1_window () int 133143986176)     ; 0x1F00000000
+(def rp1_chip_id () int 536877351)       ; 0x20001927
+
+; The PCIe controller RP1 is behind, and its bytes (spec 10.3).
+(def rp1_pcie () int 68720656384)        ; 0x1000120000
+(def rp1_pcie_bytes () int 37648)        ; 0x9310
+
+; The controller's configuration index, and its data window: a device's
+; register reg is at data plus reg once the index names the device, as
+; bus << 20 | device << 15 | function << 12. RP1 is bus 1, device 0.
+(def pcie_cfg_index () int 36864)        ; 0x9000
+(def pcie_cfg_data () int 32768)         ; 0x8000
+(def rp1_bdf () int 1048576)             ; 0x100000
+
+; A register's offset in the controller and the word written there.
+(data Rp1Write (Rp1Write int int))
+
+; What makes the window answer, in order: the root port's bus numbers 0,
+; 1, 1 (0x18); its memory window 0 up to 0x3FFFFF (0x20); RP1's BAR1 0
+; (its 0x14, through the index); and the outbound window PCI 0 from CPU
+; 0x1F00000000 (0x400C, 0x4080, 0x4084).
+(def rp1_writes () (list Rp1Write)
+  (cons (Rp1Write 24 65792)
+  (cons (Rp1Write 32 3145728)
+  (cons (Rp1Write (pcie_cfg_index) (rp1_bdf))
+  (cons (Rp1Write (add (pcie_cfg_data) 20) 0)
+  (cons (Rp1Write 16396 0)
+  (cons (Rp1Write 16512 31)
+  (cons (Rp1Write 16516 31)
+  (nil Rp1Write)))))))))
+
+; Whether RP1 answers, or why not.
+(data Rp1 (Rp1Up) (Rp1Down (list int)))
+
+; RP1's window made to answer, if it does not already: Rp1Up once its
+; chip ID reads right, else why not.
+(def rp1_up () Rp1
+  (match (open_device (rp1_window) 4096)
+    ((DeviceFailed fault why) (Rp1Down (append "no RP1 window on the board: " why)))
+    ((DeviceOpened w)
+      (let up (if (eq (device_read32 w 0) (rp1_chip_id)) (Rp1Up) (rp1_set_up w))
+        (let c (close_device w) up)))))
+
+; The controller set up, and RP1's chip ID read again through w.
+(def rp1_set_up ((w IoDevice)) Rp1
+  (match (open_device (rp1_pcie) (rp1_pcie_bytes))
+    ((DeviceFailed fault why) (Rp1Down (append "no PCIe controller for RP1: " why)))
+    ((DeviceOpened r)
+      (let a (rp1_write_all r (rp1_writes))
+        (let b (rp1_master r 4)
+          (let i (device_write32 r (pcie_cfg_index) (rp1_bdf))
+            (let d (rp1_master r (add (pcie_cfg_data) 4))
+              (let c (close_device r)
+                (let id (device_read32 w 0)
+                  (if (eq id (rp1_chip_id))
+                      (Rp1Up)
+                      (Rp1Down (rp1_dead_text id))))))))))))
+
+; Each of ws written to r, in order: 0.
+(def rp1_write_all ((r IoDevice) (ws (list Rp1Write))) int
+  (if (is_empty ws)
+      0
+      (match (head ws)
+        ((Rp1Write off v) (let x (device_write32 r off v) (rp1_write_all r (tail ws)))))))
+
+; The command register at off turned to answer memory and master the
+; bus, bits 1 and 2, its status half written as 0, which clears nothing.
+(def rp1_master ((r IoDevice) (off int)) int
+  (device_write32 r off (rp1_command (device_read32 r off))))
+
+; A command and status word's command with memory and bus mastering on.
+(def rp1_command ((v int)) int (bit_or (bit_and v 65535) 6))
+
+; RP1's Ethernet MAC, a Cadence GEM, through the window (rp1.dtsi's
+; ethernet@100000), and its network control register's word with
+; receiving and sending off and the management port on.
+(def rp1_gem_base () int 133145034752)   ; 0x1F00100000
+(def rp1_gem_idle () int 16)             ; NCR's MPE
+
+; RP1's Ethernet stopped from writing to memory, if the board has RP1:
+; its network control register as it was found, or -1 if there is no RP1
+; or its window will not answer.
+(def rp1_quiet () int
+  (match (rp1_up)
+    ((Rp1Down why) -1)
+    ((Rp1Up)
+      (match (open_device (rp1_gem_base) 4096)
+        ((DeviceFailed fault why) -1)
+        ((DeviceOpened g)
+          (let ncr (device_read32 g 0)
+            (let w (device_write32 g 0 (rp1_gem_idle))
+              (let c (close_device g) ncr))))))))
+
+; What the kernel says of RP1's Ethernet, its control register found ncr:
+; whether it was receiving, bit 2, or sending, bit 3, until stopped.
+(def rp1_quiet_text ((ncr int)) (list int)
+  (append "l0s: RP1's Ethernet found " (append
+    (if (eq (bit_and ncr 12) 0) "idle" "receiving or sending, and stopped")
+    (append " (NCR 0x" (append (hex_digits ncr 0) ")")))))
+
+; Why RP1 is down when its chip ID read id after the set up.
+(def rp1_dead_text ((id int)) (list int)
+  (append "RP1's window reads 0x" (append (hex_digits id 8) ", not its chip ID, after the PCIe controller was set up")))

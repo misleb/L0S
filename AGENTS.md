@@ -109,11 +109,72 @@ one, and any QEMU options there are added to how `l0 boot`, `l0 run`, and
 operating system, which no emulator runs, so `l0 boot` refuses it. `l0 card
 IMAGE DIR ARG ... < input` writes the files its SD card's boot partition
 needs, beside the firmware's own: the image, `config.txt`, `cmdline.txt`
-for the arguments, and the input as an initramfs. Its standard output and
-error are its debug UART; a status that is not 0 is written there, and the
-board is powered off. Nothing of it has run on a board yet (changelog, "The
-Raspberry Pi 5"), and its DMA is not coherent, so `frame_sync` matters
-there. RP1's peripherals, its USB controllers among them, are a region.
+for the arguments, with `--l0-args` first so that the firmware's own, which
+it puts before them, are not given to the program, and the input as an
+initramfs. Its standard output and error are its debug UART; a status that
+is not 0 is written there, and the board is powered off. It has run on a
+Pi 5 (changelog, "The Raspberry Pi 5"), and its DMA is not coherent, so
+`frame_sync` matters there.
+
+Driving a Pi 5's devices, as seen on a 2 GB board (spec section 10.3 has
+the tables; the values below were read there, through the regions):
+
+- RP1, the chip with the USB, Ethernet, GPIO, and serial ports, is behind
+  the PCIe controller at 0x1000120000, which is a region. Its window, at
+  0x1F00000000, reads `0xdeaddead` until a driver sets, in the
+  controller's registers: the root port's bus numbers, 0x00010100 at
+  offset 0x18; its memory window, 0x00300000 at 0x20; RP1's BAR1 to 0,
+  by writing 0x100000 (bus 1) to the configuration index at 0x9000 and 0
+  to 0x8014, the data window's 0x8000 plus the register; and the
+  outbound window, 0 at 0x400C and 0x1F at 0x4080 and at 0x4084. Then
+  0x1F00000000 reads RP1's chip ID, 0x20001927. The link itself is up
+  (status 0x3E0B0 at 0x4068); do not reset it.
+- Any device's configuration space behind that controller is read and
+  written the same way: bus << 20 | device << 15 | function << 12 at
+  0x9000, then the register at 0x8000 plus its offset. The root port's
+  own is at the controller's offset 0 (14e4:2712); RP1 is bus 1 device 0
+  (1de4:0001).
+- A device on RP1 reaches RAM at a bus address 0x1000000000 above the
+  CPU's: a driver adds it to `frame_address` before giving it to the
+  device.
+- The VideoCore firmware answers property requests on the mailbox, at
+  0x107C013880: write a request into a frame (little-endian words: total
+  size, 0, then tags, each its ID, its value's size, 0, and the value;
+  a 0 tag ends it), `(frame_sync f 1)`, wait while bit 31 of 0x38 is
+  set, write the frame's address plus 8, the channel, to 0x20, wait
+  while bit 30 of 0x18 is set, read 0x00, `(frame_sync f 2)`, and read
+  the reply over the request: word 1 is 0x80000000 on success. The
+  frame's address is the firmware's bus address, unchanged. Tag
+  0x00010002 gives the board's revision.
+- The HVS, the display's compositor, answers only if a monitor was on
+  HDMI0 when the board booted (the firmware's log says `hotplug 1`).
+  Without one, the first read of its registers hangs the board, with no
+  fault and nothing printed.
+- The system timer's four compare channels, registers at 0x0C to 0x18 of
+  its region, raise interrupts 96 to 99; a write of 1 << channel to its
+  offset 0 clears the match, before `interrupt_done`. All four are free.
+- The debug UART is a real PL011 with its FIFOs on: its transmit
+  interrupt comes only as the FIFO drains through its trigger level, not
+  after each byte as on QEMU. A driver that waits for it after every byte
+  first waits for the UART to be idle (UARTFR, 0x18, reads 0x80 under
+  mask 0x88) and turns the FIFOs off (clear bit 4 of UARTLCR_H, 0x2C).
+- RP1's interrupts come as MSIs, interrupts 160 to 223, edge-triggered:
+  a write of n to bus address 0xFF_FFFFF000 is interrupt 160 + n, which
+  the host has set up. To reach RP1's MSI-X table, also write 0x00400000
+  to the root's memory window at 0x20, 0x400000 to BAR2 (0x8018), and
+  0x410000 to BAR0 (0x8010); the table is then at 0x1F00410000. For RP1's
+  vector v (its interrupt number, 0 to 60): write at 0x1F00410000 + 16 v
+  the words 0xFFFFF000, 0xFF, n, and 0; OR 0x80000000 into
+  configuration word 0xB0; then write 1 (enable), or 9 (enable and level)
+  for a level-triggered source, to 0x1F00108808 + 4 v. After handling a
+  level one, write 4 there to acknowledge it, or RP1 sends no more of it.
+  These are set bits: the same at 0x1F00108C08 + 4 v clears them.
+  Writing 2 there raises v as a test, which stays set until cleared.
+- A kernel written in L0 runs on a Pi 5 as on QEMU, its processes'
+  images in its standard input, which `l0 card` puts in the initramfs:
+  `tests/virt/user/kernel.l0` has run there with its processes, the
+  serial driver among them given the UART at 0x107D001000 and interrupt
+  153.
 
 `l0 build --target proc` builds a program as a process for a kernel on
 aarch64, or riscv64 with `--arch riscv64`, in an address space of its own, reaching the kernel through the

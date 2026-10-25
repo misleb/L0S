@@ -37,11 +37,15 @@
 (def poll_ns () int 1000000)
 (def link_poll_ns () int 500000000)
 
-; The driver: the GEM found, and set up; no RP1 or no GEM is no failure.
+; The driver: the GEM found, and set up, once RP1's window answers; no
+; RP1 or no GEM is no failure.
 (def gem () int
   (match (open_device (rp1_eth) (rp1_eth_bytes))
     ((DeviceFailed fault why) (info_as "gem" "no RP1 on the board"))
-    ((DeviceOpened r) (identified r))))
+    ((DeviceOpened r)
+      (match (rp1_up)
+        ((Rp1Down why) (complain why))
+        ((Rp1Up) (identified r))))))
 
 ; A GEM, by its module ID, that takes 64-bit addresses, quieted and given
 ; its address.
@@ -52,8 +56,8 @@
           (complain "the GEM takes no 64-bit addresses, and RP1 reaches memory only above 64 GB")
           (let q (quieted r)
             (match (card_mac r)
-              ((None) (complain "no Ethernet address: neither the firmware nor the GEM gives one"))
-              ((Some mac) (addressed r mac)))))))
+              ((Err why) (complain (append "no Ethernet address: " why)))
+              ((Ok mac) (addressed r mac)))))))
 
 ; The GEM stopped, as macb_reset_hw leaves it: receiving and sending off,
 ; the management port on, its statistics, statuses and interrupts cleared.
@@ -65,22 +69,43 @@
           (device_read32 r (gem_isr)))))))
 
 ; The card's address: the board's, which the firmware keeps, or else what
-; the GEM's first specific address holds, as a network boot may leave it.
-(def card_mac ((r IoDevice)) (Option (list int))
-  (let fw (firmware_mac)
-    (if (mac_usable fw)
-        (Some fw)
-        (let sa (sa_mac (device_read32 r (gem_sa1b)) (device_read32 r (gem_sa1t)))
-          (if (mac_usable sa) (Some sa) ((None (list int))))))))
+; the GEM's first specific address holds, as a network boot may leave it;
+; or why neither gives one.
+(def card_mac ((r IoDevice)) (Result (list int) (list int))
+  (match (firmware_mac)
+    ((Ok fw) ((Ok (list int) (list int)) fw))
+    ((Err why)
+      (let sa (sa_mac (device_read32 r (gem_sa1b)) (device_read32 r (gem_sa1t)))
+        (if (mac_usable sa)
+            ((Ok (list int) (list int)) sa)
+            ((Err (list int) (list int)) (no_mac_text why sa)))))))
 
-; The board's address, as the firmware answers for it; empty if it does not.
-(def firmware_mac () (list int)
+; Why there is no address: the firmware's why, and the GEM's sa.
+(def no_mac_text ((why (list int)) (sa (list int))) (list int)
+  (append "the firmware " (append why (append ", and the GEM holds " (mac_text sa)))))
+
+; The board's address, as the firmware answers for it; or why not.
+(def firmware_mac () (Result (list int) (list int))
   (match (mailbox_open)
-    ((NoMbox why) (nil int))
+    ((NoMbox why) ((Err (list int) (list int)) (append "has no mailbox: " why)))
     ((MboxOpen mb)
       (match (mailbox_ask mb (mac_request) 8)
-        ((None) (nil int))
-        ((Some ws) (mac_reply ws))))))
+        ((None) ((Err (list int) (list int)) (append "did not answer, " (mailbox_page_text mb))))
+        ((Some ws) (mac_answer ws))))))
+
+; The address in ws, the firmware's answer, if usable; or what it said.
+(def mac_answer ((ws (list int))) (Result (list int) (list int))
+  (let mac (mac_reply ws)
+    (if (mac_usable mac)
+        ((Ok (list int) (list int)) mac)
+        ((Err (list int) (list int)) (append "answered " (answer_text ws))))))
+
+; ws, an answer, as hex words, a space between.
+(def answer_text ((ws (list int))) (list int)
+  (if (is_empty ws)
+      ""
+      (append (hex_digits (head ws) 1)
+              (if (is_empty (tail ws)) "" (append " " (answer_text (tail ws)))))))
 
 ; RPI_FIRMWARE_GET_BOARD_MAC_ADDRESS, whose value is the address's six
 ; bytes, in order.

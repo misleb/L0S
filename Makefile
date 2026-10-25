@@ -126,18 +126,20 @@ NET_DEVICE   := -netdev $(NET),id=net0 -device virtio-net-device,netdev=net0,mac
 BASE   := common/abi.l0 common/text.l0
 COMMON := $(BASE) common/initramfs.l0
 KERNEL := $(COMMON) common/queue.l0 common/klog.l0 kernel/log.l0 kernel/memory.l0 kernel/elf.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/inittab.l0 \
-          kernel/sched.l0 kernel/pids.l0 kernel/syscall.l0 kernel/process.l0 kernel/kernel.l0
+          kernel/sched.l0 kernel/pids.l0 kernel/syscall.l0 kernel/process.l0 kernel/kernel.l0 common/rp1.l0
 CLI    := user/lib/sys/cli.l0
 ULIB   := $(COMMON) common/queue.l0 common/klog.l0 $(CLI) user/lib/sys/l0s.l0 user/lib/sys/server.l0
 
 # A terminal's line editing, for the terminals; the virtio-mmio
 # transports and queues, for the virtio drivers; and the US keyboard's
 # layout, for the keyboards' drivers; and the Raspberry Pi 5's VideoCore
-# mailbox, for the drivers that ask its firmware.
+# mailbox, for the drivers that ask its firmware; and its RP1's window,
+# made to answer, for RP1's drivers.
 TTY    := user/lib/sys/tty.l0
 VIRTIO := user/lib/sys/virtio.l0
 KEYMAP := user/lib/sys/keymap.l0
 MAILBOX := user/lib/sys/mailbox.l0
+RP1     := common/rp1.l0
 
 # The process table as ps and procmon show it.
 PROCS  := user/lib/sys/procs.l0
@@ -206,16 +208,16 @@ UI_WINDOW := user/lib/ui/window.l0
 UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
-LIBS_hvs        := $(VIRTIO) $(RECT) $(DISPLAY_SERVER)
+LIBS_hvs        := $(VIRTIO) $(RECT) $(DISPLAY_SERVER) $(MAILBOX)
 LIBS_virtio-input := $(VIRTIO) $(KEYMAP)
 LIBS_pcie       := $(PCILIB)
-LIBS_xhci       := $(USBLIB) $(PCILIB)
+LIBS_xhci       := $(USBLIB) $(PCILIB) $(RP1)
 LIBS_usb-hid    := $(USBLIB) $(KEYMAP)
 LIBS_lsusb      := $(USBLIB)
 LIBS_sdhci      := $(PCILIB) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-blk := $(VIRTIO) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-net := $(VIRTIO) $(NICLIB)
-LIBS_gem        := $(NICLIB) $(MAILBOX)
+LIBS_gem        := $(NICLIB) $(MAILBOX) $(RP1)
 LIBS_virtio-rng := $(VIRTIO) $(RANDOM)
 LIBS_inet       := $(INETLIB) $(CLOCK)
 LIBS_net        := $(INETLIB)
@@ -279,7 +281,7 @@ ROOT     := $(BUILD)/root
 # Every library, which make doc reads the documentation of: common's, the
 # kernel's parts, and everything under user/lib.
 LIB_SRCS := $(wildcard user/lib/*/*.l0)
-DOC_SRCS := $(filter-out %_test.l0,$(wildcard common/*.l0)) $(filter-out $(COMMON) common/queue.l0 common/klog.l0,$(KERNEL)) \
+DOC_SRCS := $(filter-out %_test.l0,$(wildcard common/*.l0)) $(filter-out $(COMMON) common/queue.l0 common/klog.l0 common/rp1.l0,$(KERNEL)) \
             $(filter-out %_test.l0,$(LIB_SRCS))
 # Every program's own sources, and the host tools' and the kernel's board
 # tests' assembler: make doc Q=... finds names there too, after the
@@ -381,6 +383,7 @@ $(call l0_test,$(ULIB) $(VIRTIO) user/lib/sys/virtio_test.l0)
 $(call l0_test,$(ULIB) $(TTY) user/lib/sys/tty_test.l0)
 $(call l0_test,$(BASE) $(KEYMAP) user/lib/sys/keymap_test.l0)
 $(call l0_test,$(ULIB) $(MAILBOX) user/lib/sys/mailbox_test.l0)
+$(call l0_test,$(BASE) $(RP1) common/rp1_test.l0)
 $(call l0_test,$(ULIB) $(RECT) user/lib/gfx/rect_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) user/lib/gfx/render_test.l0)
 $(call l0_test,$(ULIB) $(CLOCK) user/lib/proto/clock_test.l0)
@@ -664,8 +667,8 @@ demo-system: sysdisk
 # The Raspberry Pi 5, which nothing here can boot: the kernel built for
 # it, its initramfs, every program with pi5/etc, and the files its SD
 # card's boot partition needs beside the firmware's own, which l0 card
-# writes into build/pi5-card: the image, config.txt, cmdline.txt (no
-# boot arguments) and the initramfs. Copy them onto a card that holds
+# writes into build/pi5-card: the image, config.txt, cmdline.txt (the
+# boot arguments PI5_ARGS, as debug or root=UUID) and the initramfs. Copy them onto a card that holds
 # Raspberry Pi's firmware. The programs are the same images as on QEMU.
 #
 # The kernel's heap keeps a record of every page it gives, about 285
@@ -674,6 +677,7 @@ demo-system: sysdisk
 # about 9 GB of pages given at once.
 .PHONY: pi5-initramfs pi5-card
 
+PI5_ARGS            ?=
 PI5_KERNEL_HEAP_MB  ?= 768
 PI5_KERNEL_STACK_MB ?= 16
 PI5_KERNEL_LAYOUT   := --heap-mb $(PI5_KERNEL_HEAP_MB) --stack-mb $(PI5_KERNEL_STACK_MB)
@@ -697,7 +701,7 @@ pi5-initramfs: images root $(ETC_DEPS) $(BUILD)/kernel-pi5.img
 
 pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs
 	rm -rf $(BUILD)/pi5-card && mkdir -p $(BUILD)/pi5-card
-	$(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-card < $(BUILD)/pi5.cpio
+	$(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-card $(PI5_ARGS) < $(BUILD)/pi5.cpio
 	@echo "build/pi5-card: copy its files onto the boot partition of a card with Raspberry Pi's firmware"
 
 # The same booted over the network: build/pi5-tftp, a TFTP server's root,
