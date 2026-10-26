@@ -31,6 +31,45 @@ name is used. The l0s MCP server's `doc` tool runs the same. The docs are
 the `;` comment block directly above each form, so write yours that way
 (below).
 
+## What connects to a name: the graph
+
+`make -s doc` says what a name is. For who calls it, what a change to it
+reaches, or what a program is built from, ask the knowledge graph in
+`graphify-out/` (built by `/graphify`, kept current by `make graph` and
+the hook `make graph-hook` installs; see the Makefile's header) instead
+of opening file after file:
+
+```bash
+graphify explain "request_numbers()"   # a name, its file and line, every caller and callee
+graphify affected "request_numbers()"  # what depends on it, two levels out: before changing it
+graphify affected Rect                 # a type: everything that names it
+graphify explain user_sbin_hvs_hvs_handle   # a name defined in several files, by its node id
+```
+
+A def is `NAME()`, a type or constructor is bare `NAME`. A name more than
+one file defines (`handle()`, `complain()`, `main()`) prints each match's
+node id, which is the file's path with `_` for `/` and `.l0` dropped, then
+the name. Each edge gives the file and line it was read at.
+
+What it is and is not:
+
+- Calls, references to a type, constructors' uses, and which file holds
+  each form, read from the L0 itself (`tools/graphify-l0`), plus the
+  scripts and Python, and concepts from the README, skills, rules and
+  probes linked to the files they name.
+- **Not run-time messages.** Programs reach each other through ports, so
+  `graphify path "usb_hid()" "wm()"` finds nothing: that path is the
+  README's table of who talks to whom. `path --undirected` finds one
+  through a doc instead, which is no call at all.
+- **A name defined in several places is not linked** where a caller could
+  mean either, rather than guessed. A missing caller is possible, so
+  grep before deleting a name.
+- The communities and their names in `GRAPH_REPORT.md` are clustering, a
+  rough map, not the design; `graphify query` is a loose search, weaker
+  than `explain`.
+- Docs change it only through `/graphify --update`. If `graphify-out/`
+  is missing, nothing here works: say so and use `make -s doc` and grep.
+
 ## Where things are
 
 | Path | What |
@@ -45,7 +84,7 @@ the `;` comment block directly above each form, so write yours that way
 | `user/sbin/wm/launcher.l0` | the compositor's launcher, GNOME Shell's grid of apps: its layout, painting and clicks |
 | `demo/etc/` | the demo's `inittab` (stage 1: `boot`, the drivers, `fs`), `system` (what `boot` starts: `sh`, `wm`, the `vt`s), `motd`; `tests/screen/etc/` the screen tests' |
 | `build/root` | `make root`: every program staged as the initramfs holds it, `bin/`, `sbin/`, `Applications/APP.app/`, which `tools/mkinitramfs OUT ETC ROOT [IMAGE...]` archives with an `etc` |
-| `tools/` | `mkicon/` (an L0 tool: an app's `icon.svg` or `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`, and with a face given, its 96×96 `icon2x.ppm`; `--image` an `icon.svg`'s `icon.face` for Files), `mkicons/` (an L0 tool: GNOME's symbolic SVGs under `icons/` rasterized into `/etc/icons`; `make icon-sheet`), `mkfont/` (an L0 tool: TrueType outlines and `fonts/cursors.paths`, rasterized by `user/lib/gfx/raster.l0` into `/etc/face`, the text's glyphs at every scale and the pointers: `ttf.l0`, `shape.l0`), `pi5-boot` (a real Pi 5 over TFTP: builds `build/pi5-tftp`, checks dnsmasq serves it, reads the UART into `build/pi5-serial.log`; `--until`, `--console`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, `QEMU_DISK` as a virtio-blk, and `QEMU_GPU` the GPU's options, such as `xres=3840,yres=2160`), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, or of any layout, partitioned and formatted by `mkfs/`, an L0 host tool, which fills a volume from a cpio too; `fat32` or `fat32=CPIO` as a volume's archive makes it FAT32, and `mbr` first an MBR in place of the GPT), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`) |
+| `tools/` | `mkicon/` (an L0 tool: an app's `icon.svg` or `icon.draw`, `run draw`'s commands, drawn into its 48×48 `icon.ppm`, and with a face given, its 96×96 `icon2x.ppm`; `--image` an `icon.svg`'s `icon.face` for Files), `mkicons/` (an L0 tool: GNOME's symbolic SVGs under `icons/` rasterized into `/etc/icons`; `make icon-sheet`), `mkfont/` (an L0 tool: TrueType outlines and `fonts/cursors.paths`, rasterized by `user/lib/gfx/raster.l0` into `/etc/face`, the text's glyphs at every scale and the pointers: `ttf.l0`, `shape.l0`), `pi5-boot` (a real Pi 5 over TFTP: builds `build/pi5-tftp`, checks dnsmasq serves it, reads the UART into `build/pi5-serial.log`; `--until`, `--console`), `qemu-boot.sh` (boots with the serial line on a terminal, monitor and QMP sockets, `QEMU_DISK` as a virtio-blk, and `QEMU_GPU` the GPU's options, such as `xres=3840,yres=2160`), `mkinitramfs`, `mkdisk` (a fresh 1 MB disk image, or of any layout, partitioned and formatted by `mkfs/`, an L0 host tool, which fills a volume from a cpio too; `fat32` or `fat32=CPIO` as a volume's archive makes it FAT32, and `mbr` first an MBR in place of the GPT), `deadline` (timeout, macOS has none), `slowtype`, `mksplash/` (an L0 tool), `l0sdoc/` (`make doc`), `l0s-mcp/` (the MCP server that boots and drives L0S, in Python; `make mcp`), `graphify-l0/` (the knowledge graph's L0 parser and its rebuild, in Python; `make graph`, `make graph-hook`) |
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `resize.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 

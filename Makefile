@@ -49,6 +49,11 @@
 #   make mcp         build/mcp/venv, the Python with the MCP SDK that
 #                    .mcp.json runs tools/l0s-mcp in: the MCP server
 #                    that boots and drives L0S for agents
+#   make graph       graphify-out/ rebuilt from the code as it is: the L0
+#                    sources (tools/graphify-l0), scripts and Python, the
+#                    docs' nodes kept; once /graphify has built it
+#   make graph-hook  .git/hooks/post-commit runs make graph after each
+#                    commit, in the background (graphify-out/rebuild.log)
 #
 # Images for the board are linked in Docker, as l0 does when L0_VIRT_LD
 # is unset.
@@ -294,7 +299,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test check-each test-each test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp icon-sheet
+.PHONY: FORCE all check test check-each test-each test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -428,6 +433,11 @@ $(BUILD)/test/l0s-mcp.ok: $(wildcard tools/l0s-mcp/*.py)
 	@mkdir -p $(@D)
 	@$(call logged,python3 tools/l0s-mcp/test_board.py,tools/l0s-mcp/test_board.py)
 
+# The graph's L0 parser's tests.
+$(BUILD)/test/graphify-l0.ok: $(wildcard tools/graphify-l0/*.py)
+	@mkdir -p $(@D)
+	@$(call logged,python3 tools/graphify-l0/test_l0_graph.py,tools/graphify-l0/test_l0_graph.py)
+
 # Every host test, and then how many passed in all, those run before
 # among them. A failure is shown as it happens, and the count still given.
 test:
@@ -435,7 +445,7 @@ test:
 	cat $(TESTS:.ok=.log) 2> /dev/null | awk '/^# [0-9]+ passed, [0-9]+ failed$$/ { p += $$2; f += $$4 } \
 	  END { print "make test: " p " passed, " f " failed, of $(words $(TESTS)) files" }'; exit $$st
 
-test-each: $(TESTS) $(BUILD)/test/l0s-mcp.ok
+test-each: $(TESTS) $(BUILD)/test/l0s-mcp.ok $(BUILD)/test/graphify-l0.ok
 
 test-virt:
 	$(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
@@ -559,6 +569,16 @@ $(MCP_VENV)/.installed: tools/l0s-mcp/requirements.txt
 	touch $@
 
 mcp: $(MCP_VENV)/.installed
+
+# The knowledge graph, which /graphify built first: graphify's own Python,
+# as it wrote it down, rebuilds it with the L0 sources it cannot read.
+GRAPHIFY_PY = $(shell cat graphify-out/.graphify_python 2> /dev/null)
+graph:
+	@test -n "$(GRAPHIFY_PY)" || { echo 'make graph: no graphify-out/; run /graphify once first'; exit 1; }
+	PYTHONHASHSEED=0 $(GRAPHIFY_PY) tools/graphify-l0/rebuild.py .
+
+graph-hook:
+	tools/graphify-l0/install-hook
 
 # demo/etc, the splash at both scales, and the face, staged together as
 # the archive's /etc.
