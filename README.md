@@ -2338,6 +2338,7 @@ otherwise as its type's first failure.
 | 295 | `log_read seq`, `log_all` | `(list LogRecord)` | the messages in the log numbered seq or more, as many whole ones as 4096 bytes hold, oldest first, as `klog.l0` lays each out: a u64 number, a u64 time in ns since boot, a u16 pid, a byte of level, a u16 length, then the text. From the oldest kept if seq is older; none past the last. `log_all` reads them all, a read at a time. Any process may |
 | 296 | `entry_size_of e` | `int` | how many bytes entry e of the initramfs holds, 0 for a directory, as Files shows its files' sizes; -1 (`err_no_port`) if there is no entry e or the initramfs has been given up, as 269 refuses it. Any process may |
 | 297 | `alarm_at port t`, `is_alarm_notice m` | `int` | sends `port`, the caller's, the notice `alarm` from pid 0 when `clock_ns` reaches t, at once if it has; it replaces the port's earlier alarm, so there is at most one for a port. A driver that waits on its port for interrupts uses it to wake to do something on a time, as `gem` rechecks its link; 0, or -1 (`err_no_port`) if the port is not the caller's |
+| 298 | `board_restart` | `(list int)`, why not | restarts the board by L0's `board_reset`, after the kernel logs `l0s: restarting the board, as NAME (pid N) asked`, ending every process with no word, as sh's `reboot` and wm's Restart ask. It does not return where the board restarts (the Pi 5, QEMU's aarch64 virt board); elsewhere -6 (`err_denied`), and the kernel logs a warning. Any process may |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -2361,7 +2362,6 @@ lists.
 When a process exits or is killed, its ports, names, interrupt bindings and
 open files go with it. Whoever waits for it is woken with its status, and
 every port watching it gets a notice. Waiting with `watch` instead of `wait`
-| 298 | `board_restart` | `(list int)`, why not | restarts the board by L0's `board_reset`, after the kernel logs `l0s: restarting the board, as NAME (pid N) asked`, ending every process with no word, as sh's `reboot` and wm's Restart ask. It does not return where the board restarts (the Pi 5, QEMU's aarch64 virt board); elsewhere -6 (`err_denied`), and the kernel logs a warning. Any process may |
 lets a process hear about an exit and other messages on one port. That is
 how the shell waits for a job and for Ctrl-C at the same time.
 
@@ -2549,6 +2549,10 @@ Ctrl-C as a person would:
   and `kill` of the shell's own job and of a driver, which is refused;
 - `kill` ends `spin`, which the inittab started, not the shell, and is
   refused `uart`, a driver;
+- `reboot` restarts the board: the kernel says so on its standard
+  error, and QEMU, run with `-no-reboot` (`QEMU_NO_REBOOT=1`, which
+  every typed case has), ends with status 0, nothing typed after it
+  answered;
 - `args` runs programs with arguments and without, by name and by path, in
   the foreground and the background, and `cat`s a file;
 - `draw` sends the compositor, over the display driver, a line, `size`,
@@ -2572,10 +2576,6 @@ Ctrl-C as a person would:
   may use, and be refused one past the disk's end;
 - `fs`, on a disk of its own, starts the file server and has the shell
   show `df` and `ls /Volumes`; `write` a file and `cat` it back, `append`
-- `reboot` restarts the board: the kernel says so on its standard
-  error, and QEMU, run with `-no-reboot` (`QEMU_NO_REBOOT=1`, which
-  every typed case has), ends with status 0, nothing typed after it
-  answered;
   to it and read it with `run cat`, a program, so through the kernel;
   `cp` it into the other volume, `mv` it within a volume and across
   volumes, `ls` everything, `rm` it; be refused a `write` to the
