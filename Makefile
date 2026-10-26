@@ -433,10 +433,10 @@ $(BUILD)/test/l0s-mcp.ok: $(wildcard tools/l0s-mcp/*.py)
 	@mkdir -p $(@D)
 	@$(call logged,python3 tools/l0s-mcp/test_board.py,tools/l0s-mcp/test_board.py)
 
-# The graph's L0 parser's tests.
-$(BUILD)/test/graphify-l0.ok: $(wildcard tools/graphify-l0/*.py)
+# The tests of the graph's L0 parser and of graph-usage.
+$(BUILD)/test/graphify-l0.ok: $(wildcard tools/graphify-l0/*.py) tools/graphify-l0/graph-usage
 	@mkdir -p $(@D)
-	@$(call logged,python3 tools/graphify-l0/test_l0_graph.py,tools/graphify-l0/test_l0_graph.py)
+	@$(call logged,{ python3 tools/graphify-l0/test_l0_graph.py && python3 tools/graphify-l0/test_graph_usage.py; },tools/graphify-l0's tests)
 
 # Every host test, and then how many passed in all, those run before
 # among them. A failure is shown as it happens, and the count still given.

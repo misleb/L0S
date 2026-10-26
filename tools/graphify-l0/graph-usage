@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""graph-usage -- which Claude Code sessions asked the knowledge graph.
+
+  tools/graphify-l0/graph-usage [-v] [SESSION...]
+
+Reads this project's session transcripts, which Claude Code keeps in
+~/.claude/projects/ (or $CLAUDE_CONFIG_DIR/projects/), the subagents'
+with their session's. Counts, for each session, oldest first:
+
+  explain, affected, query, path   graphify commands run through Bash
+  mcp                              calls to a graphify MCP tool
+  read                             graphify-out/ files read directly
+
+-v lists each call as well. SESSION is an id or its start, to look at
+those only. Only what an agent ran is counted, never text that merely
+mentions graphify, as a skill or a message does.
+"""
+import json
+import os
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+
+COMMANDS = ('explain', 'affected', 'query', 'path')
+# A command where a shell would run one: at the start, or after ; & | ( or
+# a newline, and followed by its arguments, not by prose's punctuation.
+COMMAND_RE = re.compile(r'(?:^|[;&|(\n])\s*(graphify\s+(' + '|'.join(COMMANDS) + r')(?=\s|$)[^;&|\n<>]*)')
+# The graph's own outputs; the build's .graphify_* files are not using it.
+READ_RE = re.compile(r'graphify-out/(graph\.json|GRAPH_REPORT\.md)')
+VIEWER_RE = re.compile(r'(^|[|;&(]\s*)(cat|head|tail|less|grep|rg|jq|sed)\b')
+
+
+def projects_dir(repo):
+    """Where Claude Code keeps repo's transcripts: its path with every
+    character but letters and digits made '-'."""
+    base = Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude'))
+    return base / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', str(repo))
+
+
+def tool_uses(path):
+    """Each tool call in a transcript, as (name, input)."""
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            msg = entry.get('message')
+            if entry.get('type') != 'assistant' or not isinstance(msg, dict):
+                continue
+            content = msg.get('content')
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'tool_use':
+                    yield block.get('name', ''), block.get('input') or {}
+
+
+def graph_calls(uses):
+    """The graph calls among tool uses, as (kind, what) pairs."""
+    for name, inp in uses:
+        if 'graphify' in name.lower() and name.startswith('mcp__'):
+            yield 'mcp', name
+        elif name == 'Bash':
+            cmd = inp.get('command', '')
+            found = False
+            for m in COMMAND_RE.finditer(cmd):
+                found = True
+                yield m.group(2), re.sub(r'\s+\d*$', '', m.group(1))
+            if not found and VIEWER_RE.search(cmd):
+                for m in READ_RE.finditer(cmd):
+                    yield 'read', m.group(0)
+        elif name in ('Read', 'Grep'):
+            target = str(inp.get('file_path') or inp.get('path') or '')
+            if READ_RE.search(target):
+                yield 'read', target
+
+
+def session_files(pdir, session):
+    """A session's main transcript and its subagents'."""
+    files = [pdir / f'{session}.jsonl']
+    files += sorted((pdir / session / 'subagents').glob('*.jsonl'))
+    return [f for f in files if f.is_file()]
+
+
+def title_of(pdir, session):
+    """The session's title, if it was given one."""
+    try:
+        return json.loads((pdir / session / 'custom-title.json').read_text()).get('customTitle', '')
+    except (OSError, ValueError):
+        return ''
+
+
+def main(argv):
+    verbose = '-v' in argv
+    wanted = [a for a in argv if a != '-v']
+    repo = Path(__file__).resolve().parents[2]
+    pdir = projects_dir(repo)
+    if not pdir.is_dir():
+        print(f'graph-usage: no transcripts at {pdir}', file=sys.stderr)
+        return 1
+    sessions = sorted(pdir.glob('*.jsonl'), key=lambda p: p.stat().st_mtime)
+    sessions = [p.stem for p in sessions if not wanted or any(p.stem.startswith(w) for w in wanted)]
+    total = 0
+    for s in sessions:
+        calls = [c for f in session_files(pdir, s) for c in graph_calls(tool_uses(f))]
+        total += len(calls)
+        counts = Counter(k for k, _ in calls)
+        summary = ', '.join(f'{k} {counts[k]}' for k in (*COMMANDS, 'mcp', 'read') if counts[k]) or 'none'
+        print(f'{s[:8]}  {title_of(pdir, s) or "(untitled)"}: {summary}')
+        if verbose:
+            for _, what in calls:
+                print(f'    {what}')
+    print(f'{total} graph calls in {len(sessions)} sessions')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

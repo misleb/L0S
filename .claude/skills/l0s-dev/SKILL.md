@@ -70,6 +70,9 @@ What it is and is not:
 - Docs change it only through `/graphify --update`. If `graphify-out/`
   is missing, nothing here works: say so and use `make -s doc` and grep.
 
+`tools/graphify-l0/graph-usage [-v] [SESSION...]` says which sessions
+asked the graph, and how, from their transcripts.
+
 ## Where things are
 
 | Path | What |
