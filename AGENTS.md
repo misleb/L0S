@@ -18,16 +18,24 @@ in `.claude/` (Cursor sees the same files through symlinks in `.cursor/`):
 
 ## Learning the code
 
-Ask before reading. Each question has its tool, and opening file after
-file is none of them:
+Ask before reading. Each question has its tool, and grepping the tree and
+opening file after file is none of them:
 
 | Question | Ask |
 |---|---|
+| Where is X done? What code is about X? | `make -s doc Q=WORD`: every form's comment is searched, so one call names each def and type about X, with its file and what it does |
 | What is NAME, what does it take and say? | `make -s doc Q=NAME` (L0S), `l0 doc NAME` (L0's library) |
 | Who calls it, what does it call, where is it? | `graphify explain "NAME()"` |
 | What does a change to it reach? Ask before changing a name others use | `graphify affected "NAME()"` |
 | Which program talks to which, at run time? | the README's table under "The interactive demo" |
-| Where does this text appear? | grep |
+| Where does this exact string, number or message appear? | grep |
+
+So start any exploration with `make -s doc Q=WORD`, not `grep -rn`. Asked
+where windows' corners are rounded, `Q=corner` names `display_shape`,
+`Corners` and `corner_cut`, and `graphify explain "corner_cut()"` then
+shows virtio-gpu and wm calling it and hvs not: two calls, where a grep
+and the files it leads to take a dozen. Then read only the lines those
+answers give, not whole files.
 
 A def is `"NAME()"`, a type or constructor bare `NAME`. A name several
 files define prints each match's node id (the file's path with `_` for

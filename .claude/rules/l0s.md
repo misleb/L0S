@@ -17,7 +17,9 @@ changing code.
   any other `Q=TEXT` searches. Queries reach the programs' and tools' own
   sources too, after the libraries'. `l0 doc` does the same for the L0
   standard library. Use both before writing a helper, and before grepping
-  for a name. For who calls a name and what a change to it reaches, ask
+  for anything: `Q=WORD` searches every form's comment, so it answers
+  "where is X done" in one call that `grep -rn` and a dozen reads do
+  not. For who calls a name and what a change to it reaches, ask
   the knowledge graph, `graphify explain "NAME()"` and `graphify affected
   "NAME()"` (AGENTS.md's "Learning the code"), before opening files; grep
   is for text, and for what the graph cannot resolve.
