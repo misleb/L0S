@@ -1,0 +1,206 @@
+; corners.l0 -- a rounded buffer's corners cut by its pixels' alpha. A
+; plane is a rectangle, and the HVS has too few of them to give each row
+; a corner cuts its own, so a layer with rounded corners is a plane with
+; its pixels' own alpha (pieces.l0), and the driver writes the alpha of
+; the pixels its corners cut 0, where virtio-gpu leaves them out of its
+; rows: the same pixels, by render.l0's corner_cut. Every other pixel a
+; client draws is opaque, its fourth byte 0xff (render.l0's
+; canvas_opaque). Only that byte is written, never a pixel, so a client's
+; own write is never lost, and putting a corner back, when its layer's
+; top row or shape changes, is writing 0xff there again.
+
+; A shown buffer's corners as cut in its pages: its id, where this
+; process sees its pages, and how many; its width, height and stride in
+; pixels; its corners; and the row of it its layer shows first, the top
+; of its ring.
+(data Stamp (Stamp int int int int int int Corners int))
+
+; One row a corner cuts: the buffer's row, and how many pixels are cut at
+; its left and at its right.
+(data CutRow (CutRow int int int))
+
+; ---------------------------------------------------------------- stamps
+
+; The stamps of layers ls over bufs: one for each layer whose buffer is
+; rounded, its top made a row of it.
+(def stamps_of ((ls (list Layer)) (bufs (Map int Buffer))) (list Stamp)
+  (if (is_empty ls)
+      (nil Stamp)
+      (match (head ls)
+        ((Layer id lx ly top)
+          (match (map_get bufs id)
+            ((None) (stamps_of (tail ls) bufs))
+            ((Some b)
+              (match b
+                ((Buffer bw bh sd va pages addr cs)
+                  (if (is_square cs)
+                      (stamps_of (tail ls) bufs)
+                      (cons (Stamp id va pages bw bh sd cs (mod (add (mod top bh) bh) bh)) (stamps_of (tail ls) bufs)))))))))))
+
+; The rows stamp s's corners cut, top corners first: a top corner's row
+; dy is the buffer's row top plus dy, a bottom one's the row above top
+; less dy, each round the ring, as the layer shows them.
+(def stamp_rows ((s Stamp)) (list CutRow)
+  (match s
+    ((Stamp id va pages bw bh sd cs top)
+      (match cs
+        ((Corners tl tr bl br)
+          (rev (band_rows bh top -1 bl br 0 (max bl br)
+                 (band_rows bh top 1 tl tr 0 (max tl tr) (nil CutRow)))))))))
+
+; Rows dy up to n of a band whose corners are l and r at its ends, its row
+; dy the buffer's row from + step times dy (step 1 down from top, -1 up
+; from the row above it), round a ring of bh rows, those cut, reversed
+; onto acc.
+(def band_rows ((bh int) (from int) (step int) (l int) (r int) (dy int) (n int) (acc (list CutRow))) (list CutRow)
+  (if (ge dy n)
+      acc
+      (let cl (corner_cut l dy)
+        (let cr (corner_cut r dy)
+          (let row (mod (add (add from (if (lt step 0) (sub bh 1) 0)) (add (mul step dy) bh)) bh)
+            (band_rows bh from step l r (add dy 1) n
+              (if (if (eq cl 0) (eq cr 0) false) acc (cons (CutRow row cl cr) acc))))))))
+
+; The byte offsets in s's pages of the alpha of each pixel rows cuts:
+; the fourth byte of each, since the HVS reads b, g, r, then alpha.
+(def alpha_offsets ((s Stamp) (rows (list CutRow))) (list int)
+  (match s
+    ((Stamp id va pages bw bh sd cs top)
+      (rev (row_offsets bw sd rows (nil int))))))
+
+; alpha_offsets' loop: each of rows' offsets, reversed onto acc.
+(def row_offsets ((bw int) (sd int) (rows (list CutRow)) (acc (list int))) (list int)
+  (if (is_empty rows)
+      acc
+      (match (head rows)
+        ((CutRow row l r)
+          (let at (mul row sd)
+            (row_offsets bw sd (tail rows)
+              (cols_offsets at (sub bw r) bw (cols_offsets at 0 l acc))))))))
+
+; The alpha offsets of columns c up to n of the row whose first pixel is
+; at, reversed onto acc.
+(def cols_offsets ((at int) (c int) (n int) (acc (list int))) (list int)
+  (if (ge c n) acc (cols_offsets at (add c 1) n (cons (add (mul 4 (add at c)) 3) acc))))
+
+; Those of rows that are rows y up to y + n.
+(def rows_between ((rows (list CutRow)) (y int) (n int)) (list CutRow)
+  (if (is_empty rows)
+      (nil CutRow)
+      (match (head rows)
+        ((CutRow row l r)
+          (if (if (ge row y) (lt row (add y n)) false)
+              (cons (head rows) (rows_between (tail rows) y n))
+              (rows_between (tail rows) y n))))))
+
+; The pages of s that rows are in, each once, in order.
+(def rows_pages ((s Stamp) (rows (list CutRow))) (list int)
+  (match s
+    ((Stamp id va pages bw bh sd cs top)
+      (distinct_sorted (row_pages sd bw rows (nil int))))))
+
+; Each of rows' first and last pages, rows sd pixels apart and bw wide,
+; onto acc.
+(def row_pages ((sd int) (bw int) (rows (list CutRow)) (acc (list int))) (list int)
+  (if (is_empty rows)
+      acc
+      (match (head rows)
+        ((CutRow row l r)
+          (let at (mul 4 (mul row sd))
+            (row_pages sd bw (tail rows)
+              (cons (div at (page_size)) (cons (div (sub (add at (mul 4 bw)) 1) (page_size)) acc))))))))
+
+; A run of pages: the first, and how many.
+(data PageRun (PageRun int int))
+
+; Pages ps, in order, as runs, onto the reversed acc.
+(def page_runs ((ps (list int)) (acc (list PageRun))) (list PageRun)
+  (if (is_empty ps)
+      (rev acc)
+      (if (is_empty acc)
+          (page_runs (tail ps) (cons (PageRun (head ps) 1) acc))
+          (match (head acc)
+            ((PageRun p n)
+              (if (eq (head ps) (add p n))
+                  (page_runs (tail ps) (cons (PageRun p (add n 1)) (tail acc)))
+                  (page_runs (tail ps) (cons (PageRun (head ps) 1) acc))))))))
+
+; ---------------------------------------------------------------- writing
+
+; The alpha of the pixels rows of s cuts written a, 0 to cut them or 255
+; to put them back, and their pages cleaned out of the caches for the
+; HVS: 0. Said and skipped if the pages cannot be opened.
+(def stamped ((s Stamp) (rows (list CutRow)) (a int)) int
+  (if (is_empty rows)
+      0
+      (match s
+        ((Stamp id va pages bw bh sd cs top)
+          (match (dma_open va pages)
+            ((DeviceFailed fault why) (warn_as "hvs" (append "a buffer's corners are not cut: " why)))
+            ((DeviceOpened r)
+              (let w (bytes_written8 r (alpha_offsets s rows) a)
+                (let c (close_device r)
+                  (runs_synced va (page_runs (rows_pages s rows) (nil PageRun)))))))))))
+
+; Each of offs in r written a: 0.
+(def bytes_written8 ((r IoDevice) (offs (list int)) (a int)) int
+  (if (is_empty offs) 0 (let w (device_write8 r (head offs) a) (bytes_written8 r (tail offs) a))))
+
+; Each run of pages from va cleaned out of the caches: 0.
+(def runs_synced ((va int) (runs (list PageRun))) int
+  (if (is_empty runs)
+      0
+      (match (head runs)
+        ((PageRun p n) (let c (dma_synced (add va (mul p (page_size))) n) (runs_synced va (tail runs)))))))
+
+; The corners of the stamps old put back where new does not cut them,
+; and new's cut: those not in old, and any in pages one put back was in,
+; since two buffers in the same pages, as a window's two banks are
+; across a resize, may cut the same pixels. Nothing if they are the
+; same, as while a layer only moves: 0.
+(def restamped ((old (list Stamp)) (new (list Stamp))) int
+  (if (eq old new)
+      0
+      (let gone (stamps_not_in old new)
+        (let p (stamps_written gone 255)
+          (stamps_written (stamps_cut_again new old (stamps_vas gone)) 0)))))
+
+; Those of ss not in others.
+(def stamps_not_in ((ss (list Stamp)) (others (list Stamp))) (list Stamp)
+  (if (is_empty ss)
+      (nil Stamp)
+      (if (any_eq (head ss) others)
+          (stamps_not_in (tail ss) others)
+          (cons (head ss) (stamps_not_in (tail ss) others)))))
+
+; Those of new to cut: not in old, or in pages at one of vas.
+(def stamps_cut_again ((new (list Stamp)) (old (list Stamp)) (vas (list int))) (list Stamp)
+  (if (is_empty new)
+      (nil Stamp)
+      (if (if (any_eq (head new) old) (not (any_eq (stamp_va (head new)) vas)) false)
+          (stamps_cut_again (tail new) old vas)
+          (cons (head new) (stamps_cut_again (tail new) old vas)))))
+
+; Where each of ss's pages are.
+(def stamps_vas ((ss (list Stamp))) (list int)
+  (if (is_empty ss) (nil int) (cons (stamp_va (head ss)) (stamps_vas (tail ss)))))
+
+; Where stamp s's pages are.
+(def stamp_va ((s Stamp)) int (match s ((Stamp id va pages bw bh sd cs top) va)))
+
+; Each of ss's corners written a: 0.
+(def stamps_written ((ss (list Stamp)) (a int)) int
+  (if (is_empty ss)
+      0
+      (let w (stamped (head ss) (stamp_rows (head ss)) a) (stamps_written (tail ss) a))))
+
+; The corners of the stamps of buffer id cut again in its rows y up to
+; y + n, which its client has drawn opaque: before the rows are cleaned
+; for the HVS, so the corner never shows: 0.
+(def damage_restamped ((ss (list Stamp)) (id int) (y int) (n int)) int
+  (if (is_empty ss)
+      0
+      (match (head ss)
+        ((Stamp sid va pages bw bh sd cs top)
+          (let w (if (eq sid id) (stamped (head ss) (rows_between (stamp_rows (head ss)) y n) 0) 0)
+            (damage_restamped (tail ss) id y n))))))

@@ -24,7 +24,9 @@
 ;   pixel every frame, so a damaged rectangle is only a cleaning of the
 ;   pages its rows are in.
 ; - The pointer is a plane on top with its pixels' own alpha.
-; - Corners are not cut yet: shape is kept, and the window shows whole.
+; - A layer with rounded corners is a plane with its pixels' own alpha,
+;   which the driver writes 0 where its corners cut (corners.l0), and
+;   which the toolkit writes opaque everywhere else.
 ;
 ; L0 gives the HVS and both IOMMUs as regions on the Pi 5 (L0 roadmap
 ; 0105); on QEMU there are none, and the driver says there is no HVS and
@@ -581,13 +583,14 @@
             (iommu_cleared hw)))))))
 
 ; The driver with buffer b as id: the screen shown again if it shows id,
-; since its planes fetch from the old one.
+; since its planes fetch from the old one, and the old one's corners put
+; back.
 (def with_buffer ((v Drv) (id int) (b Buffer)) (Served Drv)
   (match v
     ((Drv hw w h bufs layers cur ap live al)
       (let nbufs (map_put bufs id b)
         (if (if (in_layers layers id) true (eq (cursor_id cur) id))
-            (shown_as (Drv hw w h nbufs layers cur ap live al) layers cur)
+            (shown_as (Drv hw w h nbufs layers cur ap live al) layers cur (stamps_of layers bufs))
             (served_ok (Drv hw w h nbufs layers cur ap live al)))))))
 
 ; The buffer the pointer's image is, -1 for none.
@@ -633,8 +636,9 @@
             (let u (shm_unmap_count va n)
               (aperture_give ap va))))))))
 
-; shape ID TL TR BL BR: the corners kept, to be cut once the toolkit gives
-; its corners alpha; the HVS shows the buffer whole until then.
+; shape ID TL TR BL BR: the buffer's corners rounded to those radii, its
+; pixels there clear, and the screen shown again if it shows the buffer,
+; whose planes then have alpha, or no longer.
 (def shaped ((v Drv) (id int) (cs Corners)) (Served Drv)
   (match v
     ((Drv hw w h bufs layers cur ap live al)
@@ -644,21 +648,23 @@
           (match b
             ((Buffer bw bh sd va n addr old)
               (if (corners_fit cs bw bh)
-                  (served_ok (Drv hw w h (map_put bufs id (Buffer bw bh sd va n addr cs)) layers cur ap live al))
+                  (let nv (Drv hw w h (map_put bufs id (Buffer bw bh sd va n addr cs)) layers cur ap live al)
+                    (if (in_layers layers id) (shown_as nv layers cur (stamps_of layers bufs)) (served_ok nv)))
                   (refused v "a corner's radius must be from 0 to half the buffer's width and height")))))))))
 
 ; --------------------------------------------------------------- showing
 
 ; layers ID X Y TOP ...: the screen shown from new layers.
 (def stacked ((v Drv) (ls (list Layer))) (Served Drv)
-  (match v ((Drv hw w h bufs layers cur ap live al) (shown_as v ls cur))))
+  (match v ((Drv hw w h bufs layers cur ap live al) (shown_as v ls cur (stamps_of layers bufs)))))
 
-; The screen shown as layers ls and pointer cur: their planes written as
-; a list in the half the channel is not fetching, and the channel moved to
-; it, or over the firmware's lists if it keeps the channel. If they
-; cannot be one list beside the one shown, refused, and the screen left
-; as it was.
-(def shown_as ((v Drv) (ls (list Layer)) (cur Cursor)) (Served Drv)
+; The screen shown as layers ls and pointer cur: the corners cut as they
+; show, where stamps had cut them before (corners.l0), then their planes
+; written as a list in the half the channel is not fetching, and the
+; channel moved to it, or over the firmware's lists if it keeps the
+; channel. If they cannot be one list beside the one shown, refused, and
+; the screen and its corners left as they were.
+(def shown_as ((v Drv) (ls (list Layer)) (cur Cursor) (stamps (list Stamp))) (Served Drv)
   (match v
     ((Drv hw w h bufs layers old ap live al)
       (let k (if (eq live 0) 1 0)
@@ -667,7 +673,7 @@
           ((Planned ps nal)
             (match hw
               ((Hw d g mmu cache t tva addrs)
-                (let ws (list_words g ps)
+                (let ws (let r (restamped stamps (stamps_of ls bufs)) (list_words g ps))
                   (if (lt live 0)
                       (let f (fw_lists_written d g ws)
                         (let he (handle_error_said d ps) (served_ok (Drv hw w h bufs ls cur ap live nal))))
@@ -738,7 +744,8 @@
 
 ; damage ID X Y W H ...: the HVS reads the buffers every frame, so each
 ; damaged rectangle's rows need only be cleaned out of the caches, for it
-; to read what the client wrote. Nothing more is shown.
+; to read what the client wrote, once the corners it drew over are cut
+; again. Nothing more is shown.
 (def damaged ((v Drv) (ns (list int))) (Served Drv)
   (match v
     ((Drv hw w h bufs layers cur ap live al)
@@ -747,8 +754,9 @@
           (match (map_get bufs (head ns))
             ((None) (refused v (append "no buffer " (digits (head ns)))))
             ((Some b)
-              (let c (rows_cleaned b (nth ns 2) (nth ns 4))
-                (damaged v (drop_n ns 5)))))))))
+              (let s (damage_restamped (stamps_of layers bufs) (head ns) (nth ns 2) (nth ns 4))
+                (let c (rows_cleaned b (nth ns 2) (nth ns 4))
+                  (damaged v (drop_n ns 5))))))))))
 
 ; Rows y up to y + n of b cleaned, those it has: 0.
 (def rows_cleaned ((b Buffer) (y int) (n int)) int
@@ -781,7 +789,7 @@
                   (refused v "a cursor is 64 by 64")
                   (let c (dma_synced va n)
                     (match cur
-                      ((Cursor old px py ohx ohy) (shown_as v layers (Cursor id px py hx hy)))))))))))))
+                      ((Cursor old px py ohx ohy) (shown_as v layers (Cursor id px py hx hy) (stamps_of layers bufs)))))))))))))
 
 ; move X Y: the pointer there, the list written again with its plane
 ; moved.
@@ -792,4 +800,4 @@
         ((Cursor id px py hx hy)
           (if (lt id 0)
               (served_ok (Drv hw w h bufs layers (Cursor id x y hx hy) ap live al))
-              (shown_as v layers (Cursor id x y hx hy))))))))
+              (shown_as v layers (Cursor id x y hx hy) (stamps_of layers bufs))))))))

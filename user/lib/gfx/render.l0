@@ -454,8 +454,16 @@
 ; a test draws, the canvas is a value like any other. So every drawing
 ; function returns the canvas drawn on: over a region it is the same one,
 ; and over an array it is the only one holding what was drawn, so pass it
-; on and keep no other.
+; on and keep no other. Over a region every pixel is written opaque, its
+; fourth byte 0xff (canvas_opaque), since the Pi 5's display reads that
+; byte as alpha where it cuts a window's corners; put_argb alone writes
+; a pixel's alpha as given, as the pointer's image needs. Over an array
+; the color is kept as given, 24 bits.
 (data Canvas (Canvas IoDevice int int int) (ArrayCanvas (array int) int int int))
+
+; The alpha of an opaque pixel, its fourth byte 0xff, which a region
+; canvas ORs into every pixel it writes.
+(def canvas_opaque () int 4278190080)    ; 0xff000000
 
 ; A canvas over an array, w by h, every pixel color c.
 (def canvas_new ((w int) (h int) (c int)) Canvas (ArrayCanvas (array_new (mul w h) c) w h 0))
@@ -472,22 +480,32 @@
 (def row_start ((f Canvas) (y int)) int
   (mul (row_at (canvas_top f) (canvas_h f) y) (canvas_w f)))
 
-; Pixels i up to n of the frame, by index, all color.
+; Pixels i up to n of the frame, by index, all color, opaque over a
+; region.
 (def canvas_fill ((f Canvas) (c int) (i int) (n int)) Canvas
   (match f
-    ((Canvas fb w h top) (let k (fill fb c i n) f))
+    ((Canvas fb w h top) (let k (fill fb (bit_or c (canvas_opaque)) i n) f))
     ((ArrayCanvas px w h top) (ArrayCanvas (fill_cells px c i n) w h top))))
 
 ; Cells i up to n of px, all c.
 (def fill_cells ((px (array int)) (c int) (i int) (n int)) (array int)
   (if (ge i n) px (fill_cells (array_set px i c) c (add i 1) n)))
 
-; The pixel at x, y, which must be on the canvas, color c.
+; The pixel at x, y, which must be on the canvas, color c, opaque over a
+; region.
 (def put ((f Canvas) (x int) (y int) (c int)) Canvas
   (let i (add (row_start f y) x)
     (match f
-      ((Canvas fb w h top) (let k (device_write32 fb (mul i 4) c) f))
+      ((Canvas fb w h top) (let k (device_write32 fb (mul i 4) (bit_or c (canvas_opaque))) f))
       ((ArrayCanvas px w h top) (ArrayCanvas (array_set px i c) w h top)))))
+
+; The pixel at x, y, which must be on the canvas, the word argb as it is,
+; its alpha too: for the pointer's image, whose clear pixels are 0.
+(def put_argb ((f Canvas) (x int) (y int) (argb int)) Canvas
+  (let i (add (row_start f y) x)
+    (match f
+      ((Canvas fb w h top) (let k (device_write32 fb (mul i 4) argb) f))
+      ((ArrayCanvas px w h top) (ArrayCanvas (array_set px i argb) w h top)))))
 
 ; The color of the pixel at x, y, which must be on the canvas.
 (def canvas_pixel ((f Canvas) (x int) (y int)) int
@@ -627,14 +645,23 @@
         ((Canvas fb cw ch top) (let k (copy_px fb i (add i w) (sub j i)) f))
         ((ArrayCanvas px cw ch top) (ArrayCanvas (copy_cells px i (add i w) (sub j i)) cw ch top))))))
 
-; Pixels i up to n of the region fb, each made the pixel off past it: two
-; at a time where both are 8-aligned, as they are together when off is
-; even, eight a step while eight are left; else one at a time.
+; The pixel at byte off of the region fb, opaque: what a copy writes, so
+; that a corner the Pi 5's display cut is never moved into a window.
+(def px_opaque ((fb IoDevice) (off int)) int (bit_or (device_read32 fb off) (canvas_opaque)))
+
+; The two pixels at byte off of the region fb, both opaque.
+(def pair_opaque ((fb IoDevice) (off int)) int
+  (bit_or (device_read64 fb off) (bit_or (canvas_opaque) (bit_shl (canvas_opaque) 32))))
+
+; Pixels i up to n of the region fb, each made the pixel off past it,
+; opaque: two at a time where both are 8-aligned, as they are together
+; when off is even, eight a step while eight are left; else one at a
+; time.
 (def copy_px ((fb IoDevice) (i int) (n int) (off int)) int
   (if (ge i n)
       0
       (if (if (eq (mod off 2) 0) (eq (mod i 2) 1) false)
-          (let w (device_write32 fb (mul i 4) (device_read32 fb (mul (add i off) 4))) (copy_px fb (add i 1) n off))
+          (let w (device_write32 fb (mul i 4) (px_opaque fb (mul (add i off) 4))) (copy_px fb (add i 1) n off))
           (if (eq (mod off 2) 0)
               (copy_pairs fb i n off)
               (copy_singles fb i n off)))))
@@ -645,21 +672,21 @@
   (if (le (add i 8) n)
       (let o (mul i 4)
         (let s (mul (add i off) 4)
-          (let a (device_write64 fb o (device_read64 fb s))
-            (let b (device_write64 fb (add o 8) (device_read64 fb (add s 8)))
-              (let c (device_write64 fb (add o 16) (device_read64 fb (add s 16)))
-                (let e (device_write64 fb (add o 24) (device_read64 fb (add s 24)))
+          (let a (device_write64 fb o (pair_opaque fb s))
+            (let b (device_write64 fb (add o 8) (pair_opaque fb (add s 8)))
+              (let c (device_write64 fb (add o 16) (pair_opaque fb (add s 16)))
+                (let e (device_write64 fb (add o 24) (pair_opaque fb (add s 24)))
                   (copy_pairs fb (add i 8) n off)))))))
       (if (le (add i 2) n)
-          (let a (device_write64 fb (mul i 4) (device_read64 fb (mul (add i off) 4))) (copy_pairs fb (add i 2) n off))
-          (if (lt i n) (device_write32 fb (mul i 4) (device_read32 fb (mul (add i off) 4))) 0))))
+          (let a (device_write64 fb (mul i 4) (pair_opaque fb (mul (add i off) 4))) (copy_pairs fb (add i 2) n off))
+          (if (lt i n) (device_write32 fb (mul i 4) (px_opaque fb (mul (add i off) 4))) 0))))
 
 ; Pixels i up to n a pixel at a time, as when i and i + off cannot both
 ; be 8-aligned.
 (def copy_singles ((fb IoDevice) (i int) (n int) (off int)) int
   (if (ge i n)
       0
-      (let w (device_write32 fb (mul i 4) (device_read32 fb (mul (add i off) 4))) (copy_singles fb (add i 1) n off))))
+      (let w (device_write32 fb (mul i 4) (px_opaque fb (mul (add i off) 4))) (copy_singles fb (add i 1) n off))))
 
 ; Cells i up to n of px, each made the cell off past it.
 (def copy_cells ((px (array int)) (i int) (n int) (off int)) (array int)
@@ -682,11 +709,12 @@
     ((Canvas fb w h top) (let k (blit_run fb (mul (add (row_start f y) x) 4) b off iw percent sx sy 0 cw) f))
     ((ArrayCanvas px w h top) (blit_cells f x y b off iw percent sx sy 0 cw))))
 
-; Columns c up to cw of image row y from column sx, to the region from at.
+; Columns c up to cw of image row y from column sx, to the region from at,
+; opaque.
 (def blit_run ((fb IoDevice) (at int) (b bytes) (off int) (iw int) (percent int) (sx int) (y int) (c int) (cw int)) int
   (if (ge c cw)
       0
-      (let w (device_write32 fb (add at (mul c 4)) (dim (pixel_at b off iw (add sx c) y) percent))
+      (let w (device_write32 fb (add at (mul c 4)) (bit_or (dim (pixel_at b off iw (add sx c) y) percent) (canvas_opaque)))
         (blit_run fb at b off iw percent sx y (add c 1) cw))))
 
 ; Columns c up to cw of image row sy from column sx, to the canvas's row y

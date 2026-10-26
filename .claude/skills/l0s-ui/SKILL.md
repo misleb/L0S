@@ -330,9 +330,12 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   from the client's pages through the IOMMU, so `damage` is only a cache
   clean there. What every display driver reads from requests alike
   (`Layer`, `Corners`, `scale_of`, `info_reply`) is
-  `user/lib/proto/display_server.l0`. A screen is at most 16 planes and
-  its corners aren't cut yet: another layer per window costs more there
-  than in 2D mode.
+  `user/lib/proto/display_server.l0`. A screen is at most 16 planes, so
+  another layer per window costs more there than in 2D mode. A rounded
+  layer is a plane with pixel alpha: every pixel a region canvas writes
+  is opaque, 0xff in its fourth byte (`render.l0`'s `canvas_opaque`;
+  `put_argb` alone keeps an alpha, for the pointer), and `hvs` writes
+  that byte 0 in the pixels `corner_cut` cuts (`hvs/corners.l0`).
 - **No GPU drawing.** The GPU only composes (2D mode: the host; 3D mode:
   copies). Every pixel is the guest's.
 

@@ -215,7 +215,7 @@ UI_WINDOW := user/lib/ui/window.l0
 UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
-LIBS_hvs        := $(VIRTIO) $(RECT) $(DISPLAY_SERVER) $(MAILBOX)
+LIBS_hvs        := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER) $(MAILBOX)
 LIBS_virtio-input := $(VIRTIO) $(KEYMAP)
 LIBS_pcie       := $(PCILIB)
 LIBS_xhci       := $(USBLIB) $(PCILIB) $(RP1)
