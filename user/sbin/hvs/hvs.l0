@@ -3,9 +3,12 @@
 ; compositor, user/sbin/wm, draws the screen through, as virtio-gpu does
 ; on QEMU. Its module must be flagged dev.
 ;
-; The firmware brings HDMI0 up at its mode and leaves the BCM2712's HVS
-; scanning channel 0. The driver takes the channel over without
-; resetting anything: it never copies a pixel, but writes display lists,
+; The firmware brings HDMI0 up at 1920x1080 and leaves the BCM2712's HVS
+; scanning channel 0. The driver reads the monitor's EDID from it
+; (edid.l0) and sets HDMI0 to the monitor's preferred mode itself, its
+; PHY, timings and pixel valve, through the regions L0 gives for them
+; (hdmi.l0, modeset.l0; the boot argument hdmi= chooses otherwise), then
+; takes the channel over without resetting it: it never copies a pixel, but writes display lists,
 ; one plane for each piece of each layer (pieces.l0), each fetched by the
 ; HVS straight from the client's pages:
 ;
@@ -32,9 +35,16 @@
 ; argument, each stage doing all the one before it does and then
 ; exiting, which is still how to look at the HVS:
 ;
-;   hvs probe   reads the firmware's displays and clocks, the HVS's and
-;               the IOMMU's registers and the firmware's list, tells the
-;               firmware the display is ours, and reads the clocks again
+;   hvs probe   reads the firmware's displays, the monitor's EDID and
+;               the clocks, the HVS's and the IOMMU's registers and the
+;               firmware's list, asks the firmware's display tags, tells
+;               the firmware the display is ours, and reads the clocks
+;               again; its EDID's bytes too
+;   hvs mode    an experiment: asks the firmware, by firmware KMS's
+;               SET_TIMING, for the monitor's preferred mode, and says
+;               what the mode is after
+;   hvs hdmi    reads HDMI0's controller, PHY, pixel valve and DDC, M2MC
+;               made sure of first, and the mode they say, writing none
 ;   hvs list    the display released, its clocks made sure of, and the
 ;               channel moved to an empty list of the driver's own
 ;   hvs iommu   the IOMMU then set up as bcm2712_iommu_init does
@@ -54,11 +64,16 @@
 
 ; How far the driver goes before it stops (the file's header): each stage
 ; does all the one before it does.
-(data Stage (StageProbe) (StageList) (StageIommu) (StageFull))
+; StageMode, mode, is an experiment beside them, which asks the firmware
+; for the monitor's preferred mode and stops (edid.l0's mode_tried).
+; StageHdmi, hdmi, reads HDMI0's controller, PHY and pixel valve and
+; stops (hdmi.l0's hdmi_probed).
+(data Stage (StageProbe) (StageList) (StageIommu) (StageFull) (StageMode) (StageHdmi))
 
-; Its place in that order, 0 for probe to 3 for serving.
+; Its place in that order, 0 for probe to 3 for serving; mode is -1 and
+; hdmi -2, before them all.
 (def stage_rank ((s Stage)) int
-  (match s ((StageProbe) 0) ((StageList) 1) ((StageIommu) 2) ((StageFull) 3)))
+  (match s ((StageProbe) 0) ((StageList) 1) ((StageIommu) 2) ((StageFull) 3) ((StageMode) -1) ((StageHdmi) -2)))
 
 ; Whether stage s stops at stage t, having done it.
 (def stops_at ((s Stage) (t Stage)) bool (eq (stage_rank s) (stage_rank t)))
@@ -77,7 +92,9 @@
   (if (eq a "probe") (Some (StageProbe))
   (if (eq a "list") (Some (StageList))
   (if (eq a "iommu") (Some (StageIommu))
-  ((None Stage))))))
+  (if (eq a "mode") (Some (StageMode))
+  (if (eq a "hdmi") (Some (StageHdmi))
+  ((None Stage))))))))
 
 ; A step said before it is taken, so that if it hangs the board it is the
 ; last line on the serial line; as debug, kept and not printed, once the
@@ -85,10 +102,10 @@
 (def step ((s Stage) (what (list int))) int
   (if (stops_at s (StageFull)) (debug_as "hvs" what) (info_as "hvs" what)))
 
-; hvs [probe | list | iommu], from main.
+; hvs [probe | list | iommu | mode | hdmi], from main.
 (def hvs_main ((as (list (list int)))) int
   (match (stage_of as)
-    ((None) (complain "usage: hvs [probe | list | iommu]"))
+    ((None) (complain "usage: hvs [probe | list | iommu | mode | hdmi]"))
     ((Some s) (hvs s))))
 
 ; ---------------------------------------------------------------- start
@@ -112,23 +129,29 @@
       ((Some n)
         (if (eq n 0)
             (info_as "hvs" "no monitor on HDMI0 at boot; the HVS is unclocked")
-            (let c (clocks_said mb "at boot")
-              (let r (step s "reading the HVS's version")
-                (with_hvs d mb s))))))))
+            (let e (monitor_said mb s)
+              (let c (clocks_said mb "at boot")
+                (let r (step s "reading the HVS's version")
+                  (with_hvs d mb s)))))))))
 
-; The HVS opened as d: its layout, and HDMI0's channel's mode. A channel
-; that does not run is no screen, which is no failure.
+; The HVS opened as d: its layout, and HDMI0's channel's mode, once the
+; firmware has been asked for the monitor's preferred one (edid.l0). A
+; channel that does not run is no screen, which is no failure.
 (def with_hvs ((d IoDevice) (mb Mailbox) (s Stage)) int
   (let v (device_read32 d (hvs_version))
     (match (hvs_gen_of v)
       ((None) (complain (append "an HVS of version 0x" (append (hex_digits v 8) " this driver does not know"))))
       ((Some g)
+        (if (stops_at s (StageHdmi))
+            (hdmi_probed mb)
+        (if (stops_at s (StageMode))
+            (mode_tried d g mb)
         (if (stops_at s (StageProbe))
             (probed d g mb)
-            (let c (device_read32 d (disp_ctrl0 g (hdmi0_channel)))
+            (let c (mode_preferred d g mb s (device_read32 d (disp_ctrl0 g (hdmi0_channel))))
               (if (ctrl0_enabled c)
                   (taken_over d g mb s (ctrl0_width c) (ctrl0_height c))
-                  (info_as "hvs" "no screen on HDMI0: the firmware left its channel off"))))))))
+                  (info_as "hvs" "no screen on HDMI0: the firmware left its channel off"))))))))))
 
 ; The display released, its clocks made sure of, and the channel on an
 ; empty list of the driver's own; then, past stage list, the IOMMU.
@@ -152,13 +175,25 @@
 ; The registers probe reads of the HVS: its version and HDMI0's channel's.
 (def hvs_regs ((g HvsGen)) (list NamedReg)
   (cons (NamedReg "VERSION" (hvs_version))
+  (append (hvs_sizes)
   (cons (NamedReg "DISP0 CTRL0" (disp_ctrl0 g (hdmi0_channel)))
   (cons (NamedReg "DISP0 CTRL1" (disp_ctrl1 g (hdmi0_channel)))
   (cons (NamedReg "DISP0 BGND" (disp_bgnd g (hdmi0_channel)))
   (cons (NamedReg "DISP0 LPTRS" (disp_lptrs g (hdmi0_channel)))
   (cons (NamedReg "DISP0 STATUS" (disp_status g (hdmi0_channel)))
   (cons (NamedReg "DISP0 DL" (disp_dl g (hdmi0_channel)))
-  (nil NamedReg)))))))))
+  (nil NamedReg))))))))))
+
+; The HVS's memories' sizes, the same on C0 and D0 (vc4_regs.h's
+; SCALER6_CXM_SIZE to COB_SIZE), and its HANDLE_ERROR: Linux reads none
+; of them and takes the UPM, the UBM, to be 1,024 units of 256 bytes.
+(def hvs_sizes () (list NamedReg)
+  (cons (NamedReg "CXM_SIZE" 4)
+  (cons (NamedReg "LBM_SIZE" 8)
+  (cons (NamedReg "UBM_SIZE" 12)
+  (cons (NamedReg "COB_SIZE" 20)
+  (cons (NamedReg "HANDLE_ERROR" 44)
+  (nil NamedReg)))))))
 
 ; The registers probe and stage iommu read of the IOMMU in front of the HVS.
 (def iommu_regs () (list NamedReg)
@@ -182,6 +217,34 @@
             (let s (info_as "hvs" (reg_line name off (device_read32 d off)))
               (regs_said d (tail rs))))))))
 
+; Registers rs read and said on one line after acc: 0.
+(def sizes_said ((d IoDevice) (rs (list NamedReg)) (acc (list int))) int
+  (if (is_empty rs)
+      (info_as "hvs" (append "the HVS's memories:" acc))
+      (match (head rs)
+        ((NamedReg name off)
+          (sizes_said d (tail rs) (append acc (append " " (append name (append " 0x" (hex_digits (device_read32 d off) 8))))))))))
+
+; If HANDLE_ERROR is not 0 after a list of planes ps was written, it
+; said, with how far the planes' UPM reaches: 0. (The channel's STATUS
+; EMPTY, bit 22, is no sign of the HVS running dry: on a board it sets
+; with three planes, at line 0, and reading it every list slowed the
+; pointer.)
+(def handle_error_said ((d IoDevice) (ps (list Plane))) int
+  (let e (device_read32 d 44)
+    (if (eq e 0)
+        0
+        (warn_as "hvs" (append "HANDLE_ERROR 0x" (append (hex_digits e 8)
+          (append " with " (append (digits (length ps)) (append " planes, UPM to unit " (digits (upm_reach ps 0)))))))))))
+
+; How far the UPM of planes ps reaches, at least to r.
+(def upm_reach ((ps (list Plane)) (r int)) int
+  (if (is_empty ps)
+      r
+      (match (head ps)
+        ((Plane x y w h addr pitch upm handle alpha)
+          (upm_reach (tail ps) (max r (add upm (upm_for (mul 4 w)))))))))
+
 ; The words of list memory from word i to the end marker, at most n: 0.
 (def dlist_said ((d IoDevice) (i int) (n int)) int
   (if (if (le n 0) true (ge i (dlist_words)))
@@ -191,16 +254,18 @@
           (if (eq (bit_and w (dlist_end)) (dlist_end)) 0 (dlist_said d (add i 1) (sub n 1)))))))
 
 ; Stage probe: the HVS's registers and the firmware's list, the IOMMU's
-; and its cache's, all read; then the display released and the clocks
-; read again, touching the HVS no more. 0.
+; and its cache's, all read; the firmware's display tags asked (fw.l0);
+; then the display released and the clocks read again, touching the HVS
+; no more. 0.
 (def probed ((d IoDevice) (g HvsGen) (mb Mailbox)) int
   (let a (info_as "hvs" (append "an HVS " (hvs_gen_name g)))
     (let b (regs_said d (hvs_regs g))
       (let c (dlist_said d (dl_active (device_read32 d (disp_dl g (hdmi0_channel)))) 64)
         (let e (iommus_said)
-          (let r (display_released_by mb)
-            (let k (clocks_said mb "released")
-              (info_as "hvs" "probe done"))))))))
+          (let t (display_tags_said mb (display_asks))
+            (let r (display_released_by mb)
+              (let k (clocks_said mb "released")
+                (info_as "hvs" "probe done")))))))))
 
 ; The IOMMU's registers and its cache's word 0, read and said: 0.
 (def iommus_said () int
@@ -232,7 +297,8 @@
 
 ; The channel's background black, then the channel moved to a list of the
 ; driver's own holding only its end, in the half the firmware's list is
-; not in, before the IOMMU changes under it: that half, 0 or 1.
+; not in, before the IOMMU changes under it: that half, 0 or 1; or, if
+; the firmware keeps the channel (fw_lists_written), -1.
 (def own_list ((d IoDevice) (g HvsGen) (s Stage)) int
   (let a (step s "writing HDMI0's background black")
     (let b (background_black d g)
@@ -240,7 +306,7 @@
         (let c (step s (append "writing an empty list at word " (digits (dlist_half_start k))))
           (let wr (words_written d (dlist_half_start k) (list_words g (nil Plane)))
             (let e (step s "moving HDMI0's channel to it")
-              (let m (list_switched d g (dlist_half_start k)) k))))))))
+              (if (list_switched d g (dlist_half_start k) (list_words g (nil Plane))) k -1))))))))
 
 ; The channel's background black and filled in where no plane is: 0.
 (def background_black ((d IoDevice) (g HvsGen)) int
@@ -294,7 +360,7 @@
           ((Hw d g mmu cache t tva addrs)
             (let r (regs_said mmu (iommu_regs))
               (channel_said d g "under the IOMMU"))))
-        (start_serving (Drv hw w h ((MapEmpty int Buffer)) (nil Layer) (no_cursor) (aperture_new) k)))))
+        (start_serving (Drv hw w h ((MapEmpty int Buffer)) (nil Layer) (no_cursor) (aperture_new) k (nil Alloc))))))
 
 ; Each second-level table entered in the first, the tables cleaned out of
 ; the caches for the IOMMU to read, then the IOMMU's registers in the
@@ -374,9 +440,12 @@
 ; --------------------------------------------------------------- the driver
 
 ; The driver: its hardware, the screen's width and height, the buffers
-; shared with it, the layers, the pointer, the aperture, and the half of
-; the list memory the channel fetches from.
-(data Drv (Drv Hw int int (Map int Buffer) (list Layer) Cursor Aperture int))
+; shared with it, the layers, the pointer, the aperture, the half of
+; the list memory the channel fetches from, or -1 once the firmware is
+; found keeping the channel on its own two lists, over which each list
+; is then written (fw_lists_written); and the UPM of the list shown's
+; planes, which the next list keeps or keeps clear of (pieces.l0).
+(data Drv (Drv Hw int int (Map int Buffer) (list Layer) Cursor Aperture int (list Alloc)))
 
 ; What the driver says as it starts serving: the screen, where, and how.
 (def screen_line ((g HvsGen) (w int) (h int) (s int)) (list int)
@@ -393,12 +462,18 @@
     (let r (name_register_or_why port "display")
       (if (is_empty r)
           (match v
-            ((Drv hw w h bufs layers cur ap live)
+            ((Drv hw w h bufs layers cur ap live al)
               (match hw
                 ((Hw d g mmu cache t tva addrs)
                   (let n (info_as "hvs" (screen_line g w h (scale_of w h (boot_args))))
-                    (serve v port))))))
+                    (let z (sizes_said d (hvs_sizes) "")
+                      (serve v port)))))))
           (complain r)))))
+
+; A request refused for why, said as a warning too, since its client
+; may not say it: the state as it was.
+(def refused ((v Drv) (why (list int))) (Served Drv)
+  (let w (warn_as "hvs" (append "refused: " why)) (served_error v why)))
 
 ; Each request on port answered, for as long as the port lasts.
 (def serve ((v Drv) (port int)) int
@@ -413,7 +488,7 @@
 ; A request's body, its op and then its numbers, answered.
 (def handle ((v Drv) (body (list int))) (Served Drv)
   (match (request_numbers body)
-    ((ReqBad why) (served_error v why))
+    ((ReqBad why) (refused v why))
     ((ReqNums op ns) (requested v op ns (length ns)))))
 
 ; Request op with its n numbers ns: the buffers and layers, or the
@@ -432,12 +507,12 @@
   (if (if (eq op "shape") (eq n 5) false) (shaped v (nth ns 0) (Corners (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)))
   (if (if (eq op "cursor") (eq n 3) false) (pointer_image v (nth ns 0) (nth ns 1) (nth ns 2))
   (if (if (eq op "move") (eq n 2) false) (moved v (nth ns 0) (nth ns 1))
-  (served_error v (append "no request " op))))))
+  (refused v (append "no request " op))))))
 
 ; info: the screen's size, its own pointer, and the scale.
 (def info((v Drv)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (Served v (info_reply w h (scale_of w h (boot_args)))))))
 
 ; -------------------------------------------------------------- buffers
@@ -448,31 +523,31 @@
 ; out of the caches for the HVS to read.
 (def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
   (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
-      (served_error v "a buffer has no pixels, or its stride is less than its width")
+      (refused v "a buffer has no pixels, or its stride is less than its width")
       (let n (buffer_shared_pages sd bh pages)
         (match (page_addresses va n)
-          ((None) (served_error v "the buffer is not shared with the display"))
+          ((None) (refused v "the buffer is not shared with the display"))
           ((Some addrs) (mapped_for v id bw bh sd va n addrs))))))
 
 ; The buffer's n pages at va, at addrs, given a place in the aperture.
 (def mapped_for ((v Drv) (id int) (bw int) (bh int) (sd int) (va int) (n int) (addrs (array int))) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (match (aperture_mapped ap va)
         ((Some m)
           (match m
             ((Mapped first k)
               (if (lt k n)
-                  (served_error v "the buffer's pages are already mapped, fewer of them")
+                  (refused v "the buffer's pages are already mapped, fewer of them")
                   (let c (dma_synced va n)
                     (with_buffer v id (Buffer bw bh sd va n (aperture_address first) (square))))))))
         ((None)
           (match (aperture_take ap va n)
-            ((NoRoom) (served_error v "no room left in the IOMMU's aperture"))
+            ((NoRoom) (refused v "no room left in the IOMMU's aperture"))
             ((Taken ap2 first)
               (let e (ptes_written hw first addrs 0)
                 (let c (dma_synced va n)
-                  (with_buffer (Drv hw w h bufs layers cur ap2 live) id
+                  (with_buffer (Drv hw w h bufs layers cur ap2 live al) id
                     (Buffer bw bh sd va n (aperture_address first) (square))))))))))))
 
 ; The aperture's pages from first mapped to the pages at addrs, from i,
@@ -509,11 +584,11 @@
 ; since its planes fetch from the old one.
 (def with_buffer ((v Drv) (id int) (b Buffer)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (let nbufs (map_put bufs id b)
         (if (if (in_layers layers id) true (eq (cursor_id cur) id))
-            (shown_as (Drv hw w h nbufs layers cur ap live) layers cur)
-            (served_ok (Drv hw w h nbufs layers cur ap live)))))))
+            (shown_as (Drv hw w h nbufs layers cur ap live al) layers cur)
+            (served_ok (Drv hw w h nbufs layers cur ap live al)))))))
 
 ; The buffer the pointer's image is, -1 for none.
 (def cursor_id ((cur Cursor)) int (match cur ((Cursor id px py hx hy) id)))
@@ -523,18 +598,18 @@
 ; on the screen or is the pointer's, since the HVS still reads it.
 (def forgot ((v Drv) (id int)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (match (map_get bufs id)
         ((None) (served_ok v))
         ((Some b)
           (if (if (in_layers layers id) true (eq (cursor_id cur) id))
-              (served_error v (append "buffer " (append (digits id) " is in use")))
+              (refused v (append "buffer " (append (digits id) " is in use")))
               (match b
                 ((Buffer bw bh sd va n addr cs)
                   (let rest (map_remove bufs id)
                     (if (buffer_at rest va)
-                        (served_ok (Drv hw w h rest layers cur ap live))
-                        (served_ok (Drv hw w h rest layers cur (unmapped hw ap va) live))))))))))))
+                        (served_ok (Drv hw w h rest layers cur ap live al))
+                        (served_ok (Drv hw w h rest layers cur (unmapped hw ap va) live al))))))))))))
 
 ; Whether any of bufs is in the pages at va.
 (def buffer_at ((bufs (Map int Buffer)) (va int)) bool
@@ -562,37 +637,43 @@
 ; its corners alpha; the HVS shows the buffer whole until then.
 (def shaped ((v Drv) (id int) (cs Corners)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (match (map_get bufs id)
-        ((None) (served_error v (append "no buffer " (digits id))))
+        ((None) (refused v (append "no buffer " (digits id))))
         ((Some b)
           (match b
             ((Buffer bw bh sd va n addr old)
               (if (corners_fit cs bw bh)
-                  (served_ok (Drv hw w h (map_put bufs id (Buffer bw bh sd va n addr cs)) layers cur ap live))
-                  (served_error v "a corner's radius must be from 0 to half the buffer's width and height")))))))))
+                  (served_ok (Drv hw w h (map_put bufs id (Buffer bw bh sd va n addr cs)) layers cur ap live al))
+                  (refused v "a corner's radius must be from 0 to half the buffer's width and height")))))))))
 
 ; --------------------------------------------------------------- showing
 
 ; layers ID X Y TOP ...: the screen shown from new layers.
 (def stacked ((v Drv) (ls (list Layer))) (Served Drv)
-  (match v ((Drv hw w h bufs layers cur ap live) (shown_as v ls cur))))
+  (match v ((Drv hw w h bufs layers cur ap live al) (shown_as v ls cur))))
 
 ; The screen shown as layers ls and pointer cur: their planes written as
 ; a list in the half the channel is not fetching, and the channel moved to
-; it. If they cannot be one list, refused, and the screen left as it was.
+; it, or over the firmware's lists if it keeps the channel. If they
+; cannot be one list beside the one shown, refused, and the screen left
+; as it was.
 (def shown_as ((v Drv) (ls (list Layer)) (cur Cursor)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers old ap live)
+    ((Drv hw w h bufs layers old ap live al)
       (let k (if (eq live 0) 1 0)
-        (match (screen_planes w h ls bufs cur k)
-          ((Unplannable why) (served_error v why))
-          ((Planned ps)
+        (match (screen_planes w h ls bufs cur al)
+          ((Unplannable why) (refused v why))
+          ((Planned ps nal)
             (match hw
               ((Hw d g mmu cache t tva addrs)
-                (let wr (words_written d (dlist_half_start k) (list_words g ps))
-                  (let s (list_switched d g (dlist_half_start k))
-                    (served_ok (Drv hw w h bufs ls cur ap k))))))))))))
+                (let ws (list_words g ps)
+                  (if (lt live 0)
+                      (let f (fw_lists_written d g ws)
+                        (let he (handle_error_said d ps) (served_ok (Drv hw w h bufs ls cur ap live nal))))
+                      (let wr (words_written d (dlist_half_start k) ws)
+                        (let nl (if (list_switched d g (dlist_half_start k) ws) k -1)
+                          (let he (handle_error_said d ps) (served_ok (Drv hw w h bufs ls cur ap nl nal)))))))))))))))
 
 ; ws written into the list memory from word i: 0.
 (def words_written ((d IoDevice) (i int) (ws (list int))) int
@@ -601,14 +682,52 @@
       (let w (device_write32 d (dlist_word_offset i) (head ws))
         (words_written d (add i 1) (tail ws)))))
 
-; HDMI0's channel pointed at the list from word start, and waited for
-; until it fetches it, as it does from its next frame, up to 50 ms: 0.
-(def list_switched ((d IoDevice) (g HvsGen) (start int)) int
+; HDMI0's channel pointed at the list ws, written from word start, and
+; waited for until it fetches it, as it does from its next frame, up to
+; 50 ms: whether it did. If it did not, the firmware has the channel:
+; ws is written over its lists (fw_lists_written), and said.
+(def list_switched ((d IoDevice) (g HvsGen) (start int) (ws (list int))) bool
   (let l (device_read32 d (disp_lptrs g (hdmi0_channel)))
     (let w (device_write32 d (disp_lptrs g (hdmi0_channel)) (lptrs_with_head l start))
       (if (list_taken d g start 50)
-          0
-          (warn_as "hvs" "HDMI0's channel has not taken its new list")))))
+          true
+          (let a (fw_lists_written d g ws)
+            (let b (warn_as "hvs" (untaken_line start (device_read32 d (disp_lptrs g (hdmi0_channel)))
+                                                  (device_read32 d (disp_dl g (hdmi0_channel)))
+                                                  (device_read32 d (disp_status g (hdmi0_channel)))))
+              false))))))
+
+; The firmware's two lists, at words 32 and 672 of the list memory. Once
+; it has set a mode by SET_TIMING it moves the channel to one or the
+; other every frame, however often the driver moves it to its own (a
+; board run), but never rewrites them; so the driver writes its list
+; over both, and the screen is the driver's all the same.
+(def fw_list_a () int 32)
+(def fw_list_b () int 672)
+
+; ws written over both of the firmware's lists, never the one the
+; channel is fetching: the HVS reads a list through its frame, so a list
+; rewritten under it shows half of each, and the planes whose UPM moved
+; garbled (white columns, on a board).
+; So the list the channel is not on first, then, once the firmware has
+; moved the channel to it, up to 50 ms on, the other. 0.
+(def fw_lists_written ((d IoDevice) (g HvsGen) (ws (list int))) int
+  (let live (dl_active (device_read32 d (disp_dl g (hdmi0_channel))))
+    (let first (if (eq live (fw_list_b)) (fw_list_a) (fw_list_b))
+      (let a (words_written d first ws)
+        (let t (list_taken d g first 50)
+          (words_written d (if (eq first (fw_list_a)) (fw_list_b) (fw_list_a)) ws))))))
+
+; What the driver says of a list the channel has not taken from word
+; start: what LPTRS, DL and STATUS read then, to tell whether another
+; has moved the channel to a list of its own, or the channel has stalled.
+(def untaken_line ((start int) (lp int) (dl int) (st int)) (list int)
+  (append "HDMI0's channel has not taken its new list at word "
+    (append (digits start)
+      (append ": LPTRS 0x"
+        (append (hex_digits lp 8)
+          (append ", DL 0x" (append (hex_digits dl 8) (append ", STATUS 0x" (append (hex_digits st 8)
+            "; the firmware keeps it, so the driver's lists are written over the firmware's")))))))))
 
 ; Whether the channel fetches the list from word start, read up to n
 ; more times, a millisecond apart.
@@ -622,11 +741,11 @@
 ; to read what the client wrote. Nothing more is shown.
 (def damaged ((v Drv) (ns (list int))) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (if (is_empty ns)
           (served_ok v)
           (match (map_get bufs (head ns))
-            ((None) (served_error v (append "no buffer " (digits (head ns)))))
+            ((None) (refused v (append "no buffer " (digits (head ns)))))
             ((Some b)
               (let c (rows_cleaned b (nth ns 2) (nth ns 4))
                 (damaged v (drop_n ns 5)))))))))
@@ -645,27 +764,32 @@
 
 ; ---------------------------------------------------------------- pointer
 
-; cursor ID HX HY: the pointer's image, 64 by 64, a plane on top.
+; cursor ID HX HY: the pointer's image, 64 by 64, a plane on top, its
+; pages cleaned out of the caches first: wm paints a new shape into the
+; same buffer and then asks, and the HVS, which does not see the caches,
+; showed the rows already written back beside the old ones, torn, until
+; the rest were (a board run, at each change to a resize pointer).
 (def pointer_image ((v Drv) (id int) (hx int) (hy int)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (match (map_get bufs id)
-        ((None) (served_error v (append "no buffer " (digits id))))
+        ((None) (refused v (append "no buffer " (digits id))))
         ((Some b)
           (match b
             ((Buffer bw bh sd va n addr cs)
               (if (not (if (eq bw 64) (eq bh 64) false))
-                  (served_error v "a cursor is 64 by 64")
-                  (match cur
-                    ((Cursor old px py ohx ohy) (shown_as v layers (Cursor id px py hx hy))))))))))))
+                  (refused v "a cursor is 64 by 64")
+                  (let c (dma_synced va n)
+                    (match cur
+                      ((Cursor old px py ohx ohy) (shown_as v layers (Cursor id px py hx hy)))))))))))))
 
 ; move X Y: the pointer there, the list written again with its plane
 ; moved.
 (def moved ((v Drv) (x int) (y int)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live)
+    ((Drv hw w h bufs layers cur ap live al)
       (match cur
         ((Cursor id px py hx hy)
           (if (lt id 0)
-              (served_ok (Drv hw w h bufs layers (Cursor id x y hx hy) ap live))
+              (served_ok (Drv hw w h bufs layers (Cursor id x y hx hy) ap live al))
               (shown_as v layers (Cursor id x y hx hy))))))))

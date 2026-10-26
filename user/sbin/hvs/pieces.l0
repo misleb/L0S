@@ -1,8 +1,9 @@
 ; pieces.l0 -- the screen as HVS planes: each layer over its buffer cut
 ; into the pieces the HVS fetches row by row from one run of addresses,
 ; those on the screen, less those hidden whole, and the pointer on top;
-; then each given its share of the UPM, or the screen refused as more
-; than one list can hold. Purely.
+; then each given its UPM, kept from the list shown where the plane is
+; still there and as wide, or the screen refused as more than the UPM can
+; hold beside the list shown. Purely.
 
 ; A buffer a client shared: its width and height in pixels; its stride,
 ; how many pixels apart its rows are; where this process sees its pages,
@@ -19,8 +20,11 @@
 
 ; A piece of the screen: the rectangle it covers, where its top left
 ; pixel is fetched from, how many bytes apart its rows are, and whether
-; it has alpha of its own, as only the pointer has.
-(data Piece (Piece Rect int int bool))
+; it has alpha of its own, as only the pointer has; and its key, which
+; names it from one list to the next: its buffer's id times 16, plus 8
+; for the part of a ring under the wrap, plus 0 to 3 for a part of a
+; piece cut to what shows of it (shown_pieces).
+(data Piece (Piece Rect int int bool int))
 
 ; --------------------------------------------------------------- pieces
 
@@ -28,7 +32,11 @@
 ; pointer, each less what lies off the screen, and without those the
 ; layers above hide.
 (def screen_pieces ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (cur Cursor)) (list Piece)
-  (shown_pieces (cursor_pieces w h bufs cur (layers_pieces w h ls bufs (nil Piece))) (nil Rect) (nil Piece)))
+  (screen_pieces_cut w h ls bufs cur (cut_for w)))
+
+; The same, cut to what shows of them as cut says (shown_pieces).
+(def screen_pieces_cut ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (cur Cursor) (cut bool)) (list Piece)
+  (shown_pieces (cursor_pieces w h bufs cur (layers_pieces w h ls bufs (nil Piece))) (nil Rect) cut (nil Piece)))
 
 ; The pieces of layers ls onto acc, the topmost first.
 (def layers_pieces ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (acc (list Piece))) (list Piece)
@@ -38,7 +46,7 @@
         ((Layer id lx ly top)
           (match (map_get bufs id)
             ((None) (layers_pieces w h (tail ls) bufs acc))
-            ((Some b) (layers_pieces w h (tail ls) bufs (buffer_pieces w h b lx ly top false acc))))))))
+            ((Some b) (layers_pieces w h (tail ls) bufs (buffer_pieces w h b lx ly top false (mul 16 id) acc))))))))
 
 ; The pointer's piece onto acc, if it has an image.
 (def cursor_pieces ((w int) (h int) (bufs (Map int Buffer)) (cur Cursor) (acc (list Piece))) (list Piece)
@@ -46,21 +54,22 @@
     ((Cursor id px py hx hy)
       (match (map_get bufs id)
         ((None) acc)
-        ((Some b) (buffer_pieces w h b (sub px hx) (sub py hy) 0 true acc))))))
+        ((Some b) (buffer_pieces w h b (sub px hx) (sub py hy) 0 true (mul 16 id) acc))))))
 
 ; Buffer b at lx, ly, its rows read from row top as a ring, as pieces onto
-; acc: its rows from top to its end, then, if top is not its first, those
-; above top under them, each cut to the screen.
-(def buffer_pieces ((w int) (h int) (b Buffer) (lx int) (ly int) (top int) (alpha bool) (acc (list Piece))) (list Piece)
+; acc: its rows from top to its end, keyed key, then, if top is not its
+; first, those above top under them, keyed key plus 8, each cut to the
+; screen.
+(def buffer_pieces ((w int) (h int) (b Buffer) (lx int) (ly int) (top int) (alpha bool) (key int) (acc (list Piece))) (list Piece)
   (match b
     ((Buffer bw bh sd va pages addr cs)
       (let t (mod (add (mod top bh) bh) bh)
-        (let a (part_onto w h b lx ly (sub bh t) t alpha acc)
-          (if (eq t 0) a (part_onto w h b lx (add ly (sub bh t)) t 0 alpha a)))))))
+        (let a (part_onto w h b lx ly (sub bh t) t alpha key acc)
+          (if (eq t 0) a (part_onto w h b lx (add ly (sub bh t)) t 0 alpha (add key 8) a)))))))
 
 ; Rows r0 on of b, n of them, at lx, sy on the screen, cut to it, as a
-; piece onto acc; acc if none of it is on the screen.
-(def part_onto ((w int) (h int) (b Buffer) (lx int) (sy int) (n int) (r0 int) (alpha bool) (acc (list Piece))) (list Piece)
+; piece keyed key onto acc; acc if none of it is on the screen.
+(def part_onto ((w int) (h int) (b Buffer) (lx int) (sy int) (n int) (r0 int) (alpha bool) (key int) (acc (list Piece))) (list Piece)
   (match b
     ((Buffer bw bh sd va pages addr cs)
       (let k (rect_clip (Rect lx sy bw n) (Rect 0 0 w h))
@@ -68,45 +77,185 @@
             acc
             (match k
               ((Rect kx ky kw kh)
-                (cons (Piece k (add addr (mul 4 (add (mul (add r0 (sub ky sy)) sd) (sub kx lx)))) (mul 4 sd) alpha) acc))))))))
+                (cons (Piece k (add addr (mul 4 (add (mul (add r0 (sub ky sy)) sd) (sub kx lx)))) (mul 4 sd) alpha key) acc))))))))
 
 ; pieces, the topmost first, without those wholly under the opaque ones
-; above them, covered, bottom first again onto acc.
-(def shown_pieces ((pieces (list Piece)) (covered (list Rect)) (acc (list Piece))) (list Piece)
+; above them, covered, bottom first again onto acc. With cut, an opaque
+; piece at least half hidden whose rest is at most four rectangles is
+; those rectangles, a piece each, keyed its key plus 0 to 3: the HVS
+; fetches every pixel of a plane on every line, hidden or not, and on a
+; 4K screen a window's frame, under its content all but its title bar
+; and edges, is what makes it fall behind (a board run, at five
+; windows), while a piece shown in many places, as the desktop is,
+; would take more of the 32 handles than it saves.
+(def shown_pieces ((pieces (list Piece)) (covered (list Rect)) (cut bool) (acc (list Piece))) (list Piece)
   (if (is_empty pieces)
       acc
       (match (head pieces)
-        ((Piece r addr pitch alpha)
-          (if (is_empty (rects_minus (cons r (nil Rect)) covered))
-              (shown_pieces (tail pieces) covered acc)
-              (shown_pieces (tail pieces) (if alpha covered (cons r covered)) (cons (head pieces) acc)))))))
+        ((Piece r addr pitch alpha key)
+          (let vis (rects_minus (cons r (nil Rect)) covered)
+            (if (is_empty vis)
+                (shown_pieces (tail pieces) covered cut acc)
+                (shown_pieces (tail pieces) (if alpha covered (cons r covered)) cut
+                  (if (if cut (if (not alpha) (if (le (length vis) 4) (le (mul 2 (rects_area vis 0)) (rect_size r)) false) false) false)
+                      (subpieces_onto (head pieces) vis 0 acc)
+                      (cons (head pieces) acc)))))))))
+
+; The area of rectangle r.
+(def rect_size ((r Rect)) int (match r ((Rect x y w h) (mul w h))))
+
+; The areas of rs, summed onto s.
+(def rects_area ((rs (list Rect)) (s int)) int
+  (if (is_empty rs) s (rects_area (tail rs) (add s (rect_size (head rs))))))
+
+; Each of rs, within piece p, as a piece of its own onto acc, keyed p's
+; key plus i on.
+(def subpieces_onto ((p Piece) (rs (list Rect)) (i int) (acc (list Piece))) (list Piece)
+  (if (is_empty rs)
+      acc
+      (subpieces_onto p (tail rs) (add i 1) (cons (subpiece p (head rs) i) acc))))
+
+; The part s of piece p as a piece, keyed p's key plus i: its first
+; pixel moved down and right by where s is in p.
+(def subpiece ((p Piece) (s Rect) (i int)) Piece
+  (match p
+    ((Piece r addr pitch alpha key)
+      (match r
+        ((Rect x y w h)
+          (match s
+            ((Rect sx sy sw sh)
+              (Piece s (add addr (add (mul (sub sy y) pitch) (mul 4 (sub sx x)))) pitch alpha (add key i)))))))))
+
+; Whether pieces are cut to what shows on a screen w wide: on one of
+; 2560 or more, where a line's fetching, not the handles, runs out first.
+(def cut_for ((w int)) bool (ge w 2560))
 
 ; --------------------------------------------------------------- planes
 
-; The screen's planes for list half k, or why it cannot be one list.
-(data Planned (Planned (list Plane)) (Unplannable (list int)))
+; A plane's UPM: the key of the piece it is, its first unit, how many
+; units, and its handle.
+(data Alloc (Alloc int int int int))
 
-; Each piece a plane, with its own UPM handle and units from half k's.
-(def pieces_planes ((pieces (list Piece)) (k int)) Planned
-  (planes_from pieces (mul k (upm_half_handles)) (mul k (upm_half_units)) 0 0 (nil Plane)))
+; The screen's planes and their UPM, or why it cannot be one list.
+(data Planned (Planned (list Plane) (list Alloc)) (Unplannable (list int)))
 
-; The rest of pieces as planes, n of them made and u units taken, the
-; handles from h0 and the units from u0.
-(def planes_from ((pieces (list Piece)) (h0 int) (u0 int) (n int) (u int) (acc (list Plane))) Planned
+; The UPM given one plane, or why there is none.
+(data Got (Got Alloc) (NoUnits) (NoHandle))
+
+; Each piece a plane, with UPM that the planes of the list shown, whose
+; UPM is shown, are not fetching with: as vc6_plane_allocate_upm keeps
+; it, a piece still there as wide keeps its plane's units and handle,
+; and any other takes units and a handle that neither the list shown
+; nor the planes before it in this one use, the lowest free, out of all
+; the UPM. So the list shown and the one written may share it whole,
+; where a list once had only half.
+(def pieces_planes ((pieces (list Piece)) (shown (list Alloc))) Planned
+  (planes_from pieces shown (nil Alloc) (nil Plane)))
+
+; The rest of pieces as planes after the reversed acc, taken the UPM
+; given those.
+(def planes_from ((pieces (list Piece)) (shown (list Alloc)) (taken (list Alloc)) (acc (list Plane))) Planned
   (if (is_empty pieces)
-      (Planned (rev acc))
+      (Planned (rev acc) (rev taken))
       (match (head pieces)
-        ((Piece r addr pitch alpha)
+        ((Piece r addr pitch alpha key)
           (match r
             ((Rect x y pw ph)
-              (let need (upm_for (mul 4 pw))
-                (if (ge n (upm_half_handles))
-                    (Unplannable "the screen has too many layers for the HVS")
-                    (if (gt (add u need) (upm_half_units))
-                        (Unplannable "the screen's layers are too wide for the HVS's line memory")
-                        (planes_from (tail pieces) h0 u0 (add n 1) (add u need)
-                          (cons (Plane x y pw ph addr pitch (add u0 u) (add h0 n) alpha) acc)))))))))))
+              (match (upm_got key (upm_for (mul 4 pw)) shown taken)
+                ((NoHandle) (Unplannable "the screen has too many layers for the HVS"))
+                ((NoUnits) (Unplannable "the screen's layers are too wide for the HVS's line memory"))
+                ((Got a)
+                  (match a
+                    ((Alloc k u n hd)
+                      (planes_from (tail pieces) shown (cons a taken)
+                        (cons (Plane x y pw ph addr pitch u hd alpha) acc))))))))))))
 
-; The screen w by h as planes for half k: its pieces, then their planes.
-(def screen_planes ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (cur Cursor) (k int)) Planned
-  (pieces_planes (screen_pieces w h ls bufs cur) k))
+; The UPM for the piece keyed key needing need units: what the list shown
+; gave it, if as many and its handle not yet taken again; else the
+; lowest units and handle free of both lists.
+(def upm_got ((key int) (need int) (shown (list Alloc)) (taken (list Alloc))) Got
+  (match (upm_kept key need shown taken)
+    ((Some a) (Got a))
+    ((None)
+      (let u (upm_free_at 0 need shown taken)
+        (if (gt (add u need) (upm_units))
+            (NoUnits)
+            (let hd (handle_free_at 0 shown taken)
+              (if (ge hd (upm_handles)) (NoHandle) (Got (Alloc key u need hd)))))))))
+
+; The first of as keyed key of need units whose handle taken does not
+; use.
+(def upm_kept ((key int) (need int) (as (list Alloc)) (taken (list Alloc))) (Option Alloc)
+  (if (is_empty as)
+      ((None Alloc))
+      (match (head as)
+        ((Alloc k u n hd)
+          (if (if (eq k key) (if (eq n need) (not (handle_used hd taken)) false) false)
+              (Some (head as))
+              (upm_kept key need (tail as) taken))))))
+
+; The lowest unit from u on where need units overlap no allocation of
+; shown or taken; past the UPM's end if none fits.
+(def upm_free_at ((u int) (need int) (shown (list Alloc)) (taken (list Alloc))) int
+  (let e (overlap_end u need shown)
+    (if (ge e 0)
+        (upm_free_at e need shown taken)
+        (let f (overlap_end u need taken)
+          (if (ge f 0) (upm_free_at f need shown taken) u)))))
+
+; Where the first of as that overlaps units u up to u plus n ends, or -1
+; if none does.
+(def overlap_end ((u int) (n int) (as (list Alloc))) int
+  (if (is_empty as)
+      -1
+      (match (head as)
+        ((Alloc k s m hd)
+          (if (if (lt s (add u n)) (gt (add s m) u) false)
+              (add s m)
+              (overlap_end u n (tail as)))))))
+
+; The lowest handle from hd on that neither shown nor taken uses; the
+; handles' count if none is free.
+(def handle_free_at ((hd int) (shown (list Alloc)) (taken (list Alloc))) int
+  (if (ge hd (upm_handles))
+      hd
+      (if (if (handle_used hd shown) true (handle_used hd taken))
+          (handle_free_at (add hd 1) shown taken)
+          hd)))
+
+; Whether any of as has handle hd.
+(def handle_used ((hd int) (as (list Alloc))) bool
+  (if (is_empty as)
+      false
+      (match (head as) ((Alloc k u n h) (if (eq h hd) true (handle_used hd (tail as)))))))
+
+; The screen w by h as planes beside the list shown, whose UPM is
+; shown: its pieces, then their planes. If its pieces cut to what shows
+; (cut_for) take more handles or units than are free, it is planned
+; again with them whole, as on a smaller screen: cut, a window's frame is
+; four planes, so a handful of windows takes the 32 handles (a board
+; run, at five), and whole the HVS fetches more but shows them. A whole
+; frame is keyed as its title band, the first of its parts, and as wide,
+; so it keeps its UPM.
+(def screen_planes ((w int) (h int) (ls (list Layer)) (bufs (Map int Buffer)) (cur Cursor) (shown (list Alloc))) Planned
+  (match (pieces_planes (screen_pieces w h ls bufs cur) shown)
+    ((Planned ps as)
+      (if (if (cut_for w) (not (within_half as)) false)
+          (pieces_planes (screen_pieces_cut w h ls bufs cur false) shown)
+          (Planned ps as)))
+    ((Unplannable why)
+      (if (cut_for w)
+          (pieces_planes (screen_pieces_cut w h ls bufs cur false) shown)
+          (Unplannable why)))))
+
+; Whether planes given as take at most half the UPM's units and handles.
+; A list cut to what shows is taken only then: a cut frame's bottom edge
+; is a plane as wide as its title bar, and the UPM is by width, so a cut
+; frame takes twice a whole one's; a list past half would leave the next,
+; which must keep clear of it, no room (a board run, at five windows).
+(def within_half ((as (list Alloc))) bool
+  (if (le (mul 2 (length as)) (upm_handles)) (le (mul 2 (allocs_units as 0)) (upm_units)) false))
+
+; The units of as, summed onto s.
+(def allocs_units ((as (list Alloc)) (s int)) int
+  (if (is_empty as) s (match (head as) ((Alloc k u n hd) (allocs_units (tail as) (add s n))))))

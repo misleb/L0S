@@ -2,13 +2,14 @@
 
 ; A screen 100 by 80 of buffers: 0, the desktop, 100 by 80, from address
 ; 1000000; 1, a window 30 by 20, its rows 40 pixels apart, from 2000000;
-; 2, the pointer, 64 by 64, from 3000000; 3, a strip 1920 by 10.
+; 2, the pointer, 64 by 64, from 3000000; 3 and 4, strips 1920 by 10.
 (def bufs () (Map int Buffer)
-  (map_put (map_put (map_put (map_put ((MapEmpty int Buffer))
+  (map_put (map_put (map_put (map_put (map_put ((MapEmpty int Buffer))
     0 (Buffer 100 80 100 0 8 1000000 (square)))
     1 (Buffer 30 20 40 0 1 2000000 (square)))
     2 (Buffer 64 64 64 0 4 3000000 (square)))
-    3 (Buffer 1920 10 1920 0 19 4000000 (square))))
+    3 (Buffer 1920 10 1920 0 19 4000000 (square)))
+    4 (Buffer 1920 10 1920 0 19 5000000 (square))))
 
 (def desktop () Layer (Layer 0 0 0 0))
 
@@ -17,7 +18,7 @@
   (if (is_empty ps)
       ""
       (match (head ps)
-        ((Piece r addr pitch alpha)
+        ((Piece r addr pitch alpha key)
           (match r
             ((Rect x y w h)
               (append (digits x) (append "," (append (digits y) (append " " (append (digits w) (append "x" (append (digits h)
@@ -91,36 +92,139 @@
 
 (def planned_text ((p Planned)) (list int)
   (match p
-    ((Planned ps) (append "planes " (digits (length ps))))
+    ((Planned ps as) (append "planes " (digits (length ps))))
     ((Unplannable why) why)))
 
-(def test_sixteen_planes () int
-  (check_str "a list's handles"
-    (planned_text (screen_planes 100 80 (staggered 16 (nil Layer)) (bufs) (no_cursor) 0)) "planes 16"))
+; Each plane's UPM as KEY:UNIT+UNITS#HANDLE.
+(def allocs_text ((as (list Alloc))) (list int)
+  (if (is_empty as)
+      ""
+      (match (head as)
+        ((Alloc k u n hd)
+          (append (digits k) (append ":" (append (digits u) (append "+" (append (digits n)
+            (append "#" (append (digits hd) (append " " (allocs_text (tail as))))))))))))))
 
-(def test_seventeen_refused () int
+; The UPM a screen's planes are given beside the list shown, or why none.
+(def planned_allocs ((p Planned)) (list int)
+  (match p ((Planned ps as) (allocs_text as)) ((Unplannable why) why)))
+
+; The UPM given layers ls on a screen 100 by 80, beside nothing shown.
+(def allocs_of ((ls (list Layer))) (list Alloc)
+  (match (screen_planes 100 80 ls (bufs) (no_cursor) (nil Alloc))
+    ((Planned ps as) as)
+    ((Unplannable why) (nil Alloc))))
+
+; With nothing shown a list has all 32 handles.
+(def test_thirty_two_planes () int
+  (check_str "the handles"
+    (planned_text (screen_planes 100 80 (staggered 32 (nil Layer)) (bufs) (no_cursor) (nil Alloc))) "planes 32"))
+
+(def test_thirty_three_refused () int
   (check_str "one too many"
-    (planned_text (screen_planes 100 80 (staggered 17 (nil Layer)) (bufs) (no_cursor) 0))
+    (planned_text (screen_planes 100 80 (staggered 33 (nil Layer)) (bufs) (no_cursor) (nil Alloc)))
     "the screen has too many layers for the HVS"))
 
-; n strips 1920 wide, one under the next: each takes 61 units, and nine,
-; 549, are more than a half's 512.
+; n strips 1920 wide, one under the next: each takes 61 units, so 16,
+; 976, fit in 1,024, and 17 do not.
 (def strips ((n int) (acc (list Layer))) (list Layer)
   (if (eq n 0) acc (strips (sub n 1) (cons (Layer 3 0 (mul 10 (sub n 1)) 0) acc))))
 
 (def test_upm_refused () int
-  (add (check_str "eight fit"
-         (planned_text (screen_planes 1920 100 (strips 8 (nil Layer)) (bufs) (no_cursor) 0)) "planes 8")
-       (check_str "nine do not"
-         (planned_text (screen_planes 1920 100 (strips 9 (nil Layer)) (bufs) (no_cursor) 0))
+  (add (check_str "sixteen fit"
+         (planned_text (screen_planes 1920 200 (strips 16 (nil Layer)) (bufs) (no_cursor) (nil Alloc))) "planes 16")
+       (check_str "seventeen do not"
+         (planned_text (screen_planes 1920 200 (strips 17 (nil Layer)) (bufs) (no_cursor) (nil Alloc)))
          "the screen's layers are too wide for the HVS's line memory")))
 
-; Half 1's planes take handles from 16 and units from 512.
-(def test_second_half () int
-  (match (screen_planes 100 80 (two (desktop) (Layer 1 10 5 0)) (bufs) (no_cursor) 1)
-    ((Unplannable why) (fail_because "planned" why))
-    ((Planned ps)
-      (match (head (tail ps))
-        ((Plane x y w h addr pitch upm handle alpha)
-          (add (check_int "handle" handle 17)
-               (check_int "units after the desktop's 4" upm 516)))))))
+; The desktop, buffer 0 100 wide, takes 4 units (upm_for 400) and the
+; window, buffer 1 30 wide, 2 (upm_for 120), each the lowest free, keyed
+; by id times 16.
+(def test_first_allocs () int
+  (check_str "allocs" (allocs_text (allocs_of (two (desktop) (Layer 1 10 5 0)))) "0:0+4#0 16:4+2#1 "))
+
+; The same screen again beside itself keeps every plane's UPM.
+(def test_kept () int
+  (let shown (allocs_of (two (desktop) (Layer 1 10 5 0)))
+    (check_str "kept" (planned_allocs (screen_planes 100 80 (two (desktop) (Layer 1 50 40 0)) (bufs) (no_cursor) shown))
+      "0:0+4#0 16:4+2#1 ")))
+
+; A plane not in the list shown keeps clear of all it uses: the strip,
+; 1920 wide cut to 100, takes 4 units, from 6, past the desktop's and the
+; window's, and handle 2, though the window is gone from the new list.
+(def test_fresh_beside_shown () int
+  (let shown (allocs_of (two (desktop) (Layer 1 10 5 0)))
+    (check_str "fresh" (planned_allocs (screen_planes 100 80 (two (desktop) (Layer 3 0 0 0)) (bufs) (no_cursor) shown))
+      "0:0+4#0 48:6+4#2 ")))
+
+; A list that only fits once the list shown's UPM is free is refused:
+; nine strips shown, 549 units, then nine others, keyed apart, beside
+; them need 549 more.
+(def test_refused_beside_shown () int
+  (let shown (match (screen_planes 1920 200 (strips 9 (nil Layer)) (bufs) (no_cursor) (nil Alloc))
+               ((Planned ps as) as) ((Unplannable why) (nil Alloc)))
+    (check_str "refused" (planned_text (screen_planes 1920 200 (moved_strips 9 (nil Layer)) (bufs) (no_cursor) shown))
+      "the screen's layers are too wide for the HVS's line memory")))
+
+; n strips of buffer 4, 1920 by 10 as buffer 3, so keyed apart from those.
+(def moved_strips ((n int) (acc (list Layer))) (list Layer)
+  (if (eq n 0) acc (moved_strips (sub n 1) (cons (Layer 4 0 (mul 10 (sub n 1)) 0) acc))))
+
+; ------------------------------------------------------------- cutting
+
+; A frame and its content on a screen 2560 wide: buffer 5, a frame 100
+; by 80 from 6000000, under buffer 6, content 96 by 60 at 2, 18 in it
+; from 7000000; and the same on one 1920 wide.
+(def framed_bufs () (Map int Buffer)
+  (map_put (map_put ((MapEmpty int Buffer))
+    5 (Buffer 100 80 100 0 8 6000000 (square)))
+    6 (Buffer 96 60 96 0 6 7000000 (square))))
+
+(def framed ((w int)) (list int)
+  (pieces_text (screen_pieces w 1000 (two (Layer 5 0 0 0) (Layer 6 2 18 0)) (framed_bufs) (no_cursor))))
+
+; On 2560 the frame is what shows of it: the title band, 18 rows, the
+; edges each side of the content, 2 wide, and the 2 rows under it, each
+; fetched from where it is in the frame's rows of 400 bytes: the left
+; edge from row 18, 6000000 + 18 * 400; the right from column 98, 392
+; bytes more; the bottom from row 78.
+(def test_frame_cut () int
+  (check_str "cut" (framed 2560)
+    "98,18 2x60 @6007592 /400 0,18 2x60 @6007200 /400 0,78 100x2 @6031200 /400 0,0 100x18 @6000000 /400 2,18 96x60 @7000000 /384 "))
+
+; On 1920 it is one plane, as before.
+(def test_frame_whole () int
+  (check_str "whole" (framed 1920)
+    "0,0 100x80 @6000000 /400 2,18 96x60 @7000000 /384 "))
+
+; The cut parts are keyed the frame's 80 plus 0 to 3, in the order
+; rects_minus gives them, last first.
+(def test_frame_cut_keys () int
+  (check_str "keys" (keys_text (screen_pieces 2560 1000 (two (Layer 5 0 0 0) (Layer 6 2 18 0)) (framed_bufs) (no_cursor)))
+    "83 82 81 80 96 "))
+
+; Each piece's key.
+(def keys_text ((ps (list Piece))) (list int)
+  (if (is_empty ps)
+      ""
+      (match (head ps) ((Piece r addr pitch alpha key) (append (digits key) (append " " (keys_text (tail ps))))))))
+
+; n frames, each under its content, 200 apart, on a screen 2560 wide.
+; Eight cut would be 8 times 5, 40 planes, more than the 32 handles, so
+; the screen is planned whole: 16 planes.
+(def framed_layers ((n int) (acc (list Layer))) (list Layer)
+  (if (eq n 0) acc (framed_layers (sub n 1) (cons (Layer 5 (mul 200 n) 0 0) (cons (Layer 6 (add (mul 200 n) 2) 18 0) acc)))))
+
+(def test_whole_when_cut_is_too_many () int
+  (check_str "whole" (planned_text (screen_planes 2560 1000 (framed_layers 8 (nil Layer)) (framed_bufs) (no_cursor) (nil Alloc)))
+    "planes 16"))
+
+; n allocations of u units each.
+(def allocs_n ((n int) (u int) (acc (list Alloc))) (list Alloc)
+  (if (eq n 0) acc (allocs_n (sub n 1) u (cons (Alloc n (mul n u) u n) acc))))
+
+; Half is 16 handles and 512 units: 16 of 32 units are within it, 17
+; planes or 16 of 33 units are not.
+(def test_within_half () int
+  (add (check_bool "16 of 32" (within_half (allocs_n 16 32 (nil Alloc))) true)
+       (add (check_bool "17 planes" (within_half (allocs_n 17 1 (nil Alloc))) false)
+            (check_bool "528 units" (within_half (allocs_n 16 33 (nil Alloc))) false))))

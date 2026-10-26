@@ -1,0 +1,283 @@
+; modeset.l0 -- HDMI0's mode set by the driver itself, through the
+; regions hdmi.l0 opens, in place of firmware KMS's SET_TIMING, after
+; which the firmware keeps the HVS's channel. From the mode the firmware
+; leaves it changes only what the mode decides: the pixel valve stopped,
+; the HVS channel's size, the PHY's PLL for the new TMDS rate (Linux's
+; vc6_hdmi_phy_init), the HDMI core's timings (vc5_hdmi_set_timings),
+; the pixel valve's (vc4_crtc_config_pv), the pixel valve started again
+; and the HDMI FIFO recentred. Everything else stays as the firmware set
+; it, as stage hdmi read it on a board: the pixel valve's control bits,
+; at two pixels a clock as the firmware runs it, where Linux runs one;
+; the CSC, the colour depth and the clocks, M2MC at 648 MHz and
+; PIXEL_BVB at 324 MHz, each past what 3840x2160 needs. Past 340 MHz of
+; TMDS the monitor is told over DDC to expect scrambling, and the core
+; scrambles. The words are built purely and tested.
+
+; ------------------------------------------------------------- the mode
+
+; A timing's parts as the registers take them: from Dtd's active,
+; blanking, sync offset and width, the front porch, sync and back porch.
+(def dtd_hfp ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) ho)))
+(def dtd_hsync ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) hw)))
+(def dtd_hbp ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) (sub hb (add ho hw)))))
+(def dtd_vfp ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) vo)))
+(def dtd_vsync ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) vw)))
+(def dtd_vbp ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) (sub vb (add vo vw)))))
+(def dtd_htotal ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) (add ha hb))))
+(def dtd_clock_khz ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) c)))
+(def dtd_hpos ((d Dtd)) bool (match d ((Dtd c ha hb ho hw va vb vo vw f) (eq (bit_and f 26) 26))))
+(def dtd_vpos ((d Dtd)) bool (match d ((Dtd c ha hb ho hw va vb vo vw f) (eq (bit_and f 28) 28))))
+
+; ------------------------------------------------------------ the core
+
+; HORZA: the syncs' polarities, VPOS bit 15 and HPOS 14; the front porch
+; in 28 to 16; the active pixels in 13 to 0.
+(def core_horza_of ((d Dtd)) int
+  (bit_or (bit_or (if (dtd_vpos d) 32768 0) (if (dtd_hpos d) 16384 0))
+    (bit_or (bit_shl (dtd_hfp d) 16) (dtd_width d))))
+
+; HORZB: the back porch in 26 to 16, the sync in 10 to 0.
+(def core_horzb_of ((d Dtd)) int (bit_or (bit_shl (dtd_hbp d) 16) (dtd_hsync d)))
+
+; VERTA0 and VERTA1: the sync in 28 to 24, the front porch in 22 to 16,
+; the active lines in 12 to 0.
+(def core_verta_of ((d Dtd)) int
+  (bit_or (bit_shl (dtd_vsync d) 24) (bit_or (bit_shl (dtd_vfp d) 16) (dtd_height d))))
+
+; VERTB0, the even field's: the back porch; VERTB1 the same with VSPO,
+; half the line, in 29 to 16.
+(def core_vertb0_of ((d Dtd)) int (dtd_vbp d))
+(def core_vertb1_of ((d Dtd)) int (bit_or (bit_shl (bit_shr (dtd_htotal d) 1) 16) (dtd_vbp d)))
+
+; --------------------------------------------------------- pixel valve
+
+; The pixels pixel valve 0 moves a clock, as the firmware runs it.
+(def pv_ppc () int 2)
+
+; HORZA: the back porch in 31 to 16 and the sync in 15 to 0, each in
+; clocks; HORZB the front porch and the active pixels the same way.
+(def pv_horza_of ((d Dtd)) int
+  (bit_or (bit_shl (div (dtd_hbp d) (pv_ppc)) 16) (div (dtd_hsync d) (pv_ppc))))
+(def pv_horzb_of ((d Dtd)) int
+  (bit_or (bit_shl (div (dtd_hfp d) (pv_ppc)) 16) (div (dtd_width d) (pv_ppc))))
+
+; VERTA: the back porch over the sync; VERTB the front porch over the
+; active lines.
+(def pv_verta_of ((d Dtd)) int (bit_or (bit_shl (dtd_vbp d) 16) (dtd_vsync d)))
+(def pv_vertb_of ((d Dtd)) int (bit_or (bit_shl (dtd_vfp d) 16) (dtd_height d)))
+
+; ----------------------------------------------------------------- PHY
+
+; The PHY's settings for a TMDS rate: CTL_0 to 2's word, CTL_CK's, the
+; rate manager's offset, VCOCLK_DIV's and TMDS_CLK_WORD_SEL's.
+(data PhyRate (PhyRate int int int int int))
+
+; Them for a TMDS rate of khz, as vc6_hdmi_phy_init computes them: the
+; lane words of vc6_hdmi_phy_settings' row for the rate (on a board the
+; 148.5 MHz row's are what the firmware writes); the VCO a divider of
+; the rate times 10, midway between those in 8 to 12 GHz; the offset
+; that VCO over the 54 MHz reference, in 9.22 with bit 31.
+(def phy_rate ((khz int)) PhyRate
+  (let hz (mul khz 1000)
+    (let dv (vco_div hz)
+      (let vco (mul (mul hz dv) 10)
+        (PhyRate (phy_lane_word khz false) (phy_lane_word khz true)
+                 (bit_or 2147483648 (bit_shr (div (bit_shl (mul vco 2) 22) 54000000) 2))
+                 (bit_or 1024 dv)
+                 (if (ge khz 340000) 3 0))))))
+
+; The lane word of the row for khz, the clock lane's if ck.
+(def phy_lane_word ((khz int) (ck bool)) int
+  (if (le khz 222000)
+      2156037888                                 ; 0x80828700
+      (if (le khz 297000)
+          (if ck 3230074880 3230072832)          ; 0xC0870800, 0xC0870000
+          (if ck 2225049344 2223998720))))       ; 0x849F8F00, 0x848F8700
+
+; The VCO divider for a TMDS rate of hz, midway between the least that
+; makes the VCO 8 GHz or more and the most that keeps it under 12.
+(def vco_div ((hz int)) int
+  (let lo (div_up_to hz 0 8000000000)
+    (let hi (div_under hz lo 12000000000)
+      (add lo (div (sub hi lo) 2)))))
+
+; The least divider from n on with hz times it times 10 at least f.
+(def div_up_to ((hz int) (n int) (f int)) int
+  (if (ge (mul (mul hz n) 10) f) n (div_up_to hz (add n 1) f)))
+
+; The most divider from n on with hz times one more, times 10, under f.
+(def div_under ((hz int) (n int) (f int)) int
+  (if (lt (mul (mul hz (add n 1)) 10) f) (div_under hz (add n 1) f) n))
+
+; --------------------------------------------------------------- order
+
+; The HVS channel's CTRL0 for a screen w by h: ENB, and the width and
+; height less one.
+(def ctrl0_for ((w int) (h int)) int
+  (bit_or 2147483648 (bit_or (bit_shl (sub w 1) 16) (sub h 1))))
+
+; The value written, said before it is.
+(def written ((s Stage) (what (list int)) (dev IoDevice) (off int) (v int)) int
+  (let w (step s (append "writing " (append what (append " 0x" (hex_digits v 8)))))
+    (device_write32 dev off v)))
+
+; HDMI0 set to timing d, by the regions of hm and the HVS hv of layout g
+; at channel 0, each write said first: empty, or why not.
+(def mode_set_own ((hm Hdmi) (hv IoDevice) (g HvsGen) (s Stage) (d Dtd)) (list int)
+  (let e (mode_timed hm hv g s d)
+    (if (lt (dtd_clock_khz d) 340000)
+        e
+        (match hm ((Hdmi b hd pv ddc) (scrambled s b ddc))))))
+
+; Past 340 MHz of TMDS, scrambling, as vc4_hdmi_enable_scrambling does
+; once the mode runs: the monitor's SCDC TMDS_Config, register 0x20 at
+; I2C address 0x54, given its clock ratio of 1/40, bit 1, and
+; scrambling, bit 0, over DDC0; then the core's SCRAMBLER_CTL's enable,
+; bit 0. Empty, or why not.
+(def scrambled ((s Stage) (b IoDevice) (ddc IoDevice)) (list int)
+  (let w (info_as "hvs" "telling the monitor over DDC to expect scrambling")
+    (let e (ddc_written ddc 84 32 3)
+      (if (not (is_empty e))
+          e
+          (let off (add (at_core) 484)
+            (let x (written s "SCRAMBLER_CTL" b off (bit_or (device_read32 b off) 1)) ""))))))
+
+; ---------------------------------------------------------------- DDC
+
+; Byte v written to register r of the I2C device at address a on DDC0, as
+; i2c-brcmstb.c sends a message of two bytes, polling: the device's
+; address shifted for a write in CHIP_ADDRESS, ACKs looked for (CTLHI's
+; IGNORE_ACK, bit 1, clear), CTL's transfer a write (DTF, bits 1 and 0,
+; 0) with its interrupt off (bit 6), the two bytes counted in CNT and
+; given, the first lowest, in DATA_IN0, and IIC_ENABLE's ENABLE set with
+; no restart and a stop; then its INTRP, bit 1, waited for, up to 100
+; ms, and its NOACK, bit 2, looked at, before CNT and IIC_ENABLE are
+; cleared. Empty, or why not.
+(def ddc_written ((ddc IoDevice) (a int) (r int) (v int)) (list int)
+  (if (not (ddc_idle ddc 100))
+      "DDC0 stayed busy"
+      (let c0 (device_write32 ddc 0 (bit_shl a 1))
+        (let c1 (device_write32 ddc 80 (bit_and (device_read32 ddc 80) (bit_xor 2 -1)))
+          (let c2 (device_write32 ddc 40 (bit_and (device_read32 ddc 40) (bit_xor 67 -1)))
+            (let c3 (device_write32 ddc 36 2)
+              (let c4 (device_write32 ddc 4 (bit_or r (bit_shl v 8)))
+                (let c5 (device_write32 ddc 44 1)
+                  (let done (ddc_done ddc 100)
+                    (let nak (eq (bit_and (device_read32 ddc 44) 4) 4)
+                      (let c6 (device_write32 ddc 36 0)
+                        (let c7 (device_write32 ddc 44 0)
+                          (if (not done)
+                              "DDC0's write did not finish"
+                              (if nak "the monitor did not acknowledge DDC0's write" ""))))))))))))))
+
+; Whether DDC0 is idle, INTRP clear, read up to n more times a ms apart.
+(def ddc_idle ((ddc IoDevice) (n int)) bool
+  (if (eq (bit_and (device_read32 ddc 44) 2) 0)
+      true
+      (if (le n 0) false (let z (sleep_ns 1000000) (ddc_idle ddc (sub n 1))))))
+
+; Whether DDC0's transfer is done, INTRP set, read up to n more times.
+(def ddc_done ((ddc IoDevice) (n int)) bool
+  (if (eq (bit_and (device_read32 ddc 44) 2) 2)
+      true
+      (if (le n 0) false (let z (sleep_ns 1000000) (ddc_done ddc (sub n 1))))))
+
+; HDMI0 timed for d, scrambling aside: mode_set_own's steps but the
+; last. Empty, or why not.
+(def mode_timed ((hm Hdmi) (hv IoDevice) (g HvsGen) (s Stage) (d Dtd)) (list int)
+      (match hm
+        ((Hdmi b hd pv ddc)
+          (let pc (device_read32 pv 0)
+            (let a (written s "PV_CONTROL, stopped," pv 0 (bit_and pc (bit_xor 1 -1)))
+              (let vc (device_read32 pv 4)
+                (let c (written s "PV_V_CONTROL, video off," pv 4 (bit_and vc (bit_xor 1 -1)))
+                  (let e (written s "the HVS channel's CTRL0, reset," hv (disp_ctrl0 g (hdmi0_channel)) 1073741824)
+                    (let f (written s "the HVS channel's CTRL0" hv (disp_ctrl0 g (hdmi0_channel)) (ctrl0_for (dtd_width d) (dtd_height d)))
+                      (let p (phy_set s b (phy_rate (dtd_clock_khz d)))
+                        (let t (core_timed s b d)
+                          (let q (pv_timed s pv d)
+                            (let r (written s "PV_CONTROL, FIFO cleared," pv 0 (bit_or (bit_and pc (bit_xor 1 -1)) 2))
+                              (let u (written s "PV_CONTROL, running," pv 0 (bit_or pc 1))
+                                (let x (written s "PV_V_CONTROL, video on," pv 4 (bit_or vc 1))
+                                  (fifo_recentred s b))))))))))))))))
+
+; The PHY reset and set for rate r, as vc6_hdmi_phy_init does: 0.
+(def phy_set ((s Stage) (b IoDevice) (r PhyRate)) int
+  (match r
+    ((PhyRate ctl ck rm vd ws)
+      (let p (add (at_phy) 0)
+        (let a (written s "PHY_RESET_CTL" b p 0)
+          (let a2 (written s "PHY_POWERUP_CTL" b (add p 4) 0)
+            (let a3 (written s "PLL_POST_KDIV, bypass," b (add p 40) 16)
+              (let m (phy_misc_written s b 0 (phy_misc))
+                (let c (written s "PLL_REFCLK" b (add p 28) 8246)       ; 0x2036: CMOS, 54 MHz
+                  (let c2 (written s "PHY_RESET_CTL" b p 127)
+                    (let c3 (written s "RM_OFFSET" b (add (at_rm) 24) rm)
+                      (let c4 (written s "PLL_VCOCLK_DIV" b (add p 44) vd)
+                        (let c5 (written s "PLL_CFG" b (add p 68) 0)
+                          (let c6 (written s "PLL_POST_KDIV" b (add p 40) 9)
+                            (let l0 (written s "PHY_CTL_0" b (add p 8) ctl)
+                              (let l1 (written s "PHY_CTL_1" b (add p 12) ctl)
+                                (let l2 (written s "PHY_CTL_2" b (add p 16) ctl)
+                                  (let lk (written s "PHY_CTL_CK" b (add p 20) ck)
+                                    (phy_started s b ws)))))))))))))))))))
+
+; The rest of phy_init: the word select, power up, the PLL powered and
+; taken out of reset: 0.
+(def phy_started ((s Stage) (b IoDevice) (ws int)) int
+  (let p (at_phy)
+    (let a (written s "TMDS_CLK_WORD_SEL" b (add p 84) ws)
+      (let c (written s "PHY_POWERUP_CTL" b (add p 4) 463)          ; 0x1CF
+        (let e (written s "PLL_POWERUP_CTL" b (add p 404) 1)
+          (let r (device_read32 b (add p 400))
+            (let f (written s "PLL_RESET_CTL, in reset," b (add p 400) (bit_and r (bit_xor 1 -1)))
+              (written s "PLL_RESET_CTL, out of reset," b (add p 400) (bit_or (device_read32 b (add p 400)) 1)))))))))
+
+; PLL_MISC_0 to 8, as Linux writes them and the firmware leaves them.
+(def phy_misc () (list int)
+  (cons 2165071872 (cons 12108881 (cons 1178611249 (cons 12107781 (cons 1111556705
+    (cons 3422687233 (cons 3358596224 (cons 2961196100 (cons 4161765376 (nil int)))))))))))
+
+; PLL_MISC_i on from ws: 0.
+(def phy_misc_written ((s Stage) (b IoDevice) (i int) (ws (list int))) int
+  (if (is_empty ws)
+      0
+      (let w (written s (append "PLL_MISC_" (digits i)) b (add (at_phy) (add 96 (mul 4 i))) (head ws))
+        (phy_misc_written s b (add i 1) (tail ws)))))
+
+; The HDMI core's timings for d: 0.
+(def core_timed ((s Stage) (b IoDevice) (d Dtd)) int
+  (let c (at_core)
+    (let a (written s "HORZA" b (add c 236) (core_horza_of d))
+      (let e (written s "HORZB" b (add c 240) (core_horzb_of d))
+        (let f (written s "VERTA0" b (add c 244) (core_verta_of d))
+          (let g (written s "VERTA1" b (add c 256) (core_verta_of d))
+            (let h (written s "VERTB0" b (add c 248) (core_vertb0_of d))
+              (written s "VERTB1" b (add c 260) (core_vertb1_of d)))))))))
+
+; Pixel valve 0's timings for d: 0.
+(def pv_timed ((s Stage) (pv IoDevice) (d Dtd)) int
+  (let a (written s "PV_HORZA" pv 12 (pv_horza_of d))
+    (let e (written s "PV_HORZB" pv 16 (pv_horzb_of d))
+      (let f (written s "PV_VERTA" pv 20 (pv_verta_of d))
+        (written s "PV_VERTB" pv 24 (pv_vertb_of d))))))
+
+; The HDMI FIFO recentred, as vc4_hdmi_recenter_fifo does: RECENTER,
+; bit 6, cleared and set twice a millisecond apart, then RECENTER_DONE,
+; bit 14, waited for, up to 10 ms. Empty, or why not.
+(def fifo_recentred ((s Stage) (b IoDevice)) (list int)
+  (let off (add (at_core) 124)
+    (let dr (bit_and (device_read32 b off) 61439)              ; 0xEFFF
+      (let a (written s "FIFO_CTL" b off (bit_and dr (bit_xor 64 -1)))
+        (let c (written s "FIFO_CTL, recentring," b off (bit_or dr 64))
+          (let z (sleep_ns 1000000)
+            (let e (device_write32 b off (bit_and dr (bit_xor 64 -1)))
+              (let f (device_write32 b off (bit_or dr 64))
+                (if (fifo_done b off 10) "" "the HDMI FIFO did not recentre")))))))))
+
+; Whether FIFO_CTL at off shows RECENTER_DONE, read up to n more times a
+; millisecond apart.
+(def fifo_done ((b IoDevice) (off int) (n int)) bool
+  (if (eq (bit_and (device_read32 b off) 16384) 16384)
+      true
+      (if (le n 0) false (let z (sleep_ns 1000000) (fifo_done b off (sub n 1))))))

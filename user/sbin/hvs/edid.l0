@@ -1,0 +1,633 @@
+; edid.l0 -- the monitor's EDID, asked of the VideoCore firmware over the
+; mailbox (fw.l0), which read it over HDMI0's DDC at boot, and what it
+; says: the monitor's name, its detailed timings (the first is its
+; preferred mode), and from its CTA-861 extensions the video codes it
+; takes, the HDMI ones, those it takes only as YCbCr 4:2:0, and the
+; fastest TMDS it takes; all to tell whether it offers 3840x2160, and at
+; what refresh rates. The tags are Linux's
+; include/soc/bcm2835/raspberrypi-firmware.h, the reply's layout
+; vc4_firmware_kms.c's; the bytes' meaning is VESA's EDID 1.4 and
+; CTA-861-G. Purely, but for the asking.
+
+; ---------------------------------------------------------------- asking
+
+; RPI_FIRMWARE_GET_EDID_BLOCK, the display the firmware calls its own:
+; the block, a status word, 0 once read, and its 128 bytes; and
+; GET_EDID_BLOCK_DISPLAY: the block, the display's number, and its 128
+; bytes.
+(def tag_get_edid_block () int 196640)          ; 0x00030020
+(def tag_get_edid_block_display () int 196643)  ; 0x00030023
+
+; HDMI0 as the firmware numbers its displays: 2, as its log's "HDMI0/2"
+; and vc4_firmware_kms.c's display_number for HDMI0 have it.
+(def hdmi0_display () int 2)
+
+; Where an EDID came from: the tag and its second value word, the
+; display or the status.
+(data EdidFrom (EdidFrom int int))
+
+; What a source is, as the driver says it.
+(def edid_from_text ((f EdidFrom)) (list int)
+  (match f
+    ((EdidFrom tag second)
+      (if (eq tag (tag_get_edid_block_display))
+          (append "the firmware's display " (digits second))
+          "the firmware's own display"))))
+
+; n zeros.
+(def edid_zeros ((n int)) (list int)
+  (if (le n 0) (nil int) (cons 0 (edid_zeros (sub n 1)))))
+
+; The request for block k from f: the block, the second word, and 32
+; words for the bytes.
+(def edid_request ((f EdidFrom) (k int)) (list int)
+  (match f
+    ((EdidFrom tag second) (fw_request tag (cons k (cons second (edid_zeros 32)))))))
+
+; Its words: five of header, 34 of value, and the end.
+(def edid_request_words () int 40)
+
+; The 128 bytes in ws, the firmware's reply to a request from f, if it
+; answered and, for the tag with a status, said 0.
+(def edid_reply_bytes ((f EdidFrom) (ws (list int))) (Option bytes)
+  (match f
+    ((EdidFrom tag second)
+      (if (if (property_answered ws) (ge (length ws) 39) false)
+          (if (if (eq tag (tag_get_edid_block)) (not (eq (nth ws 6) 0)) false)
+              ((None bytes))
+              (Some (bytes_from_list (words_bytes (take (drop ws 7) 32) (nil int)))))
+          ((None bytes))))))
+
+; Words ws as their bytes, each least significant first, after the
+; reversed acc.
+(def words_bytes ((ws (list int)) (acc (list int))) (list int)
+  (if (is_empty ws)
+      (rev acc)
+      (let w (head ws)
+        (words_bytes (tail ws)
+          (cons (bit_and (bit_shr w 24) 255)
+            (cons (bit_and (bit_shr w 16) 255)
+              (cons (bit_and (bit_shr w 8) 255) (cons (bit_and w 255) acc))))))))
+
+; Block k of the EDID from f, if the firmware gave it.
+(def edid_block_from ((mb Mailbox) (f EdidFrom) (k int)) (Option bytes)
+  (match (mailbox_ask mb (edid_request f k) (edid_request_words))
+    ((None) ((None bytes)))
+    ((Some ws) (edid_reply_bytes f ws))))
+
+; The EDID read: where from, and its blocks as one; or that no tag gave it.
+(data EdidRead (EdidRead EdidFrom bytes) (NoEdid))
+
+; The sources tried, in order: HDMI0 by number, then the firmware's own.
+(def edid_sources () (list EdidFrom)
+  (cons (EdidFrom (tag_get_edid_block_display) (hdmi0_display))
+    (cons (EdidFrom (tag_get_edid_block) 0) (nil EdidFrom))))
+
+; The monitor's EDID from the first of fs to give block 0 a valid header,
+; with as many of its extensions as it names, up to three.
+(def edid_read_from ((mb Mailbox) (fs (list EdidFrom))) EdidRead
+  (if (is_empty fs)
+      (NoEdid)
+      (match (edid_block_from mb (head fs) 0)
+        ((None) (edid_read_from mb (tail fs)))
+        ((Some b0)
+          (if (edid_ok b0)
+              (EdidRead (head fs) (edid_extended mb (head fs) b0 1 (min 3 (bytes_get b0 126)) (cons b0 (nil bytes))))
+              (edid_read_from mb (tail fs)))))))
+
+; The EDID's blocks k to n from f after the reversed acc, as one; up to
+; the first the firmware does not give.
+(def edid_extended ((mb Mailbox) (f EdidFrom) (b0 bytes) (k int) (n int) (acc (list bytes))) bytes
+  (if (gt k n)
+      (bytes_concat (rev acc))
+      (match (edid_block_from mb f k)
+        ((None) (bytes_concat (rev acc)))
+        ((Some b) (edid_extended mb f b0 (add k 1) n (cons b acc))))))
+
+; The monitor's EDID.
+(def edid_read ((mb Mailbox)) EdidRead (edid_read_from mb (edid_sources)))
+
+; ------------------------------------------------------------ the base
+
+; Whether b starts with a base block: 128 bytes, the header 00 FF FF FF
+; FF FF FF 00, and summing to 0 mod 256.
+(def edid_ok ((b bytes)) bool
+  (if (lt (bytes_len b) 128)
+      false
+      (if (eq (edid_header_bad b 0) 0) (eq (mod (bytes_sum b 0 128 0) 256) 0) false)))
+
+; How many of the header's eight bytes from i are wrong.
+(def edid_header_bad ((b bytes) (i int)) int
+  (if (ge i 8)
+      0
+      (let want (if (if (eq i 0) true (eq i 7)) 0 255)
+        (add (if (eq (bytes_get b i) want) 0 1) (edid_header_bad b (add i 1))))))
+
+; The bytes of b from i up to j, summed onto s.
+(def bytes_sum ((b bytes) (i int) (j int) (s int)) int
+  (if (ge i j) s (bytes_sum b (add i 1) j (add s (bytes_get b i)))))
+
+; How many blocks b holds.
+(def edid_blocks ((b bytes)) int (div (bytes_len b) 128))
+
+; The manufacturer's three letters, bytes 8 and 9 big-endian, five bits
+; each from 'A' as 1.
+(def edid_maker ((b bytes)) (list int)
+  (let v (bit_or (bit_shl (bytes_get b 8) 8) (bytes_get b 9))
+    (cons (add 64 (bit_and (bit_shr v 10) 31))
+      (cons (add 64 (bit_and (bit_shr v 5) 31)) (cons (add 64 (bit_and v 31)) (nil int))))))
+
+; The product code, bytes 10 and 11 little-endian.
+(def edid_product ((b bytes)) int (le_u16_at b 10))
+
+; The monitor's name, from the base block's descriptor tagged 0xFC, up to
+; its newline; empty if none.
+(def edid_name ((b bytes)) (list int) (edid_name_at b 54))
+
+; The name from the descriptor at off or one after it.
+(def edid_name_at ((b bytes) (off int)) (list int)
+  (if (gt off 108)
+      ""
+      (if (if (eq (le_u16_at b off) 0) (eq (bytes_get b (add off 3)) 252) false)
+          (descriptor_text b (add off 5) (add off 18) (nil int))
+          (edid_name_at b (add off 18)))))
+
+; A descriptor's text from i up to j, ending at a newline, after the
+; reversed acc, its trailing spaces gone.
+(def descriptor_text ((b bytes) (i int) (j int) (acc (list int))) (list int)
+  (if (if (ge i j) true (eq (bytes_get b i) 10))
+      (rev (drop_spaces acc))
+      (descriptor_text b (add i 1) j (cons (bytes_get b i) acc))))
+
+; acc without the spaces at its head.
+(def drop_spaces ((acc (list int))) (list int)
+  (if (is_empty acc) acc (if (eq (head acc) 32) (drop_spaces (tail acc)) acc)))
+
+; --------------------------------------------------------------- timings
+
+; A detailed timing: its pixel clock in kHz; the horizontal active pixels,
+; blanking, sync offset and sync width; the same vertically, in lines; and
+; its flags byte: bit 7 interlaced, and with bits 4 and 3 set, digital
+; separate sync, bit 2 the vertical sync positive, bit 1 the horizontal.
+(data Dtd (Dtd int int int int int int int int int int))
+
+; The detailed timing at off, if it is one: a descriptor's clock is 0.
+(def dtd_at ((b bytes) (off int)) (Option Dtd)
+  (let clock (le_u16_at b off)
+    (if (eq clock 0)
+        ((None Dtd))
+        (let g (fn_byte b off)
+          (Some (Dtd (mul clock 10)
+                     (bit_or (bytes_get b (add off 2)) (bit_shl (bit_shr (bytes_get b (add off 4)) 4) 8))
+                     (bit_or (bytes_get b (add off 3)) (bit_shl (bit_and (bytes_get b (add off 4)) 15) 8))
+                     (bit_or (bytes_get b (add off 8)) (bit_shl (bit_and (bit_shr g 6) 3) 8))
+                     (bit_or (bytes_get b (add off 9)) (bit_shl (bit_and (bit_shr g 4) 3) 8))
+                     (bit_or (bytes_get b (add off 5)) (bit_shl (bit_shr (bytes_get b (add off 7)) 4) 8))
+                     (bit_or (bytes_get b (add off 6)) (bit_shl (bit_and (bytes_get b (add off 7)) 15) 8))
+                     (bit_or (bit_shr (bytes_get b (add off 10)) 4) (bit_shl (bit_and (bit_shr g 2) 3) 4))
+                     (bit_or (bit_and (bytes_get b (add off 10)) 15) (bit_shl (bit_and g 3) 4))
+                     (bytes_get b (add off 17))))))))
+
+; A timing's byte 11, the high bits of its syncs.
+(def fn_byte ((b bytes) (off int)) int (bytes_get b (add off 11)))
+
+; A timing's width and height in pixels.
+(def dtd_width ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) ha)))
+(def dtd_height ((d Dtd)) int (match d ((Dtd c ha hb ho hw va vb vo vw f) va)))
+
+; Whether it is interlaced.
+(def dtd_interlaced ((d Dtd)) bool (match d ((Dtd c ha hb ho hw va vb vo vw f) (eq (bit_and f 128) 128))))
+
+; Its refresh rate, in Hz to the nearest: the clock over the total pixels
+; of a frame, twice that for an interlaced one's fields.
+(def dtd_hz ((d Dtd)) int
+  (match d
+    ((Dtd c ha hb ho hw va vb vo vw f)
+      (let t (mul (add ha hb) (add va vb))
+        (if (eq t 0)
+            0
+            (let hz (div (add (mul c 1000) (div t 2)) t)
+              (if (dtd_interlaced d) (mul hz 2) hz)))))))
+
+; A timing as the driver says it: its size and rate, its clock, and the
+; horizontal and vertical active, sync start, sync end and total, as
+; Linux's modelines give them, and its sync polarities.
+(def dtd_line ((d Dtd)) (list int)
+  (match d
+    ((Dtd c ha hb ho hw va vb vo vw f)
+      (append (mode_text ha va (dtd_hz d))
+        (append (if (dtd_interlaced d) " interlaced, " ", ")
+          (append (digits c)
+            (append " kHz, h "
+              (append (join_with " " (cons (digits ha) (cons (digits (add ha ho)) (cons (digits (add (add ha ho) hw)) (cons (digits (add ha hb)) (nil (list int)))))))
+                (append ", v "
+                  (append (join_with " " (cons (digits va) (cons (digits (add va vo)) (cons (digits (add (add va vo) vw)) (cons (digits (add va vb)) (nil (list int)))))))
+                    (sync_text f)))))))))))
+
+; A size and a rate: 3840x2160 at 60 Hz.
+(def mode_text ((w int) (h int) (hz int)) (list int)
+  (append (digits w) (append "x" (append (digits h) (append " at " (append (digits hz) " Hz"))))))
+
+; The polarities of a timing's flags, for digital separate sync.
+(def sync_text ((f int)) (list int)
+  (if (eq (bit_and f 24) 24)
+      (append (if (eq (bit_and f 2) 2) ", +hsync" ", -hsync") (if (eq (bit_and f 4) 4) " +vsync" " -vsync"))
+      ", composite sync"))
+
+; The detailed timings in block k's 18-byte slots from off up to the
+; block's checksum byte, onto the reversed acc.
+(def dtds_from ((b bytes) (k int) (off int) (acc (list Dtd))) (list Dtd)
+  (if (gt (add off 18) (add (mul k 128) 127))
+      acc
+      (match (dtd_at b off)
+        ((None) (dtds_from b k (add off 18) acc))
+        ((Some d) (dtds_from b k (add off 18) (cons d acc))))))
+
+; The base block's detailed timings, the preferred one first.
+(def base_dtds ((b bytes)) (list Dtd) (rev (dtds_from b 0 54 (nil Dtd))))
+
+; ----------------------------------------------------------------- CTA
+
+; What the CTA-861 extensions say: their detailed timings; their video
+; codes (VICs); the HDMI VICs of HDMI's vendor block; the VICs taken
+; only as YCbCr 4:2:0; and the fastest TMDS in MHz the vendor blocks
+; give, 0 if none.
+(data Cta (Cta (list Dtd) (list int) (list int) (list int) int))
+
+; Nothing said yet.
+(def cta_none () Cta (Cta (nil Dtd) (nil int) (nil int) (nil int) 0))
+
+; What blocks k up to n of b say, onto c.
+(def cta_of ((b bytes) (k int) (n int) (c Cta)) Cta
+  (if (ge k n)
+      c
+      (cta_of b (add k 1) n
+        (if (eq (bytes_get b (mul k 128)) 2) (cta_block b (mul k 128) c) c))))
+
+; A CTA block at base onto c: its data blocks, from byte 4 up to where
+; its detailed timings start, byte 2's offset, then those timings.
+(def cta_block ((b bytes) (base int) (c Cta)) Cta
+  (let d (bytes_get b (add base 2))
+    (let c2 (if (lt d 4) c (data_blocks b (add base 4) (add base d) c))
+      (if (lt d 4)
+          c2
+          (match c2
+            ((Cta ds vs hv v420 tmds)
+              (Cta (dtds_from b (div base 128) (add base d) ds) vs hv v420 tmds)))))))
+
+; The data blocks from i up to j onto c, each a header byte, its tag in
+; bits 7 to 5 and its length in 4 to 0, then that many bytes.
+(def data_blocks ((b bytes) (i int) (j int) (c Cta)) Cta
+  (if (ge i j)
+      c
+      (let h (bytes_get b i)
+        (let n (bit_and h 31)
+          (data_blocks b (add (add i 1) n) j
+            (if (gt (add (add i 1) n) j) c (data_block b (bit_shr h 5) (add i 1) n c)))))))
+
+; One data block of tag t, its n bytes at p, onto c: tag 2 video, 3 a
+; vendor's, 7 an extended one.
+(def data_block ((b bytes) (t int) (p int) (n int) (c Cta)) Cta
+  (if (eq t 2)
+      (match c ((Cta ds vs hv v420 tmds) (Cta ds (svds_onto b p (add p n) vs) hv v420 tmds)))
+      (if (eq t 3)
+          (vendor_block b p n c)
+          (if (if (eq t 7) (gt n 0) false)
+              (if (eq (bytes_get b p) 14)
+                  (match c ((Cta ds vs hv v420 tmds) (Cta ds vs hv (svds_onto b (add p 1) (add p n) v420) tmds)))
+                  c)
+              c))))
+
+; The VICs of short video descriptors from i up to j onto vs: a byte of
+; 129 to 192 is its VIC with bit 7 marking it native; any other byte is
+; its VIC.
+(def svds_onto ((b bytes) (i int) (j int) (vs (list int))) (list int)
+  (if (ge i j)
+      vs
+      (let v (bytes_get b i)
+        (svds_onto b (add i 1) j (cons (if (if (gt v 128) (le v 192) false) (sub v 128) v) vs)))))
+
+; Whether the n bytes at p start with the OUI o0 o1 o2, least significant
+; first as the blocks keep it.
+(def oui_is ((b bytes) (p int) (n int) (o0 int) (o1 int) (o2 int)) bool
+  (if (lt n 3)
+      false
+      (if (eq (bytes_get b p) o0)
+          (if (eq (bytes_get b (add p 1)) o1) (eq (bytes_get b (add p 2)) o2) false)
+          false)))
+
+; A vendor block onto c: HDMI's, OUI 00-0C-03, gives its fastest TMDS at
+; byte 6, in 5 MHz, and its HDMI VICs; HDMI Forum's, C4-5D-D8, a faster
+; one at byte 4.
+(def vendor_block ((b bytes) (p int) (n int) (c Cta)) Cta
+  (match c
+    ((Cta ds vs hv v420 tmds)
+      (if (oui_is b p n 3 12 0)
+          (Cta ds vs (hdmi_vics b p n hv)
+               v420 (if (ge n 7) (max tmds (mul 5 (bytes_get b (add p 6)))) tmds))
+          (if (if (oui_is b p n 216 93 196) (ge n 5) false)
+              (Cta ds vs hv v420 (max tmds (mul 5 (bytes_get b (add p 4)))))
+              c)))))
+
+; HDMI's vendor block's VICs onto hv: past byte 7's flags, two bytes of
+; latency if bit 7, two more if bit 6; then, if bit 5, a byte of 3D
+; flags, a byte whose bits 7 to 5 count the VICs, and the VICs.
+(def hdmi_vics ((b bytes) (p int) (n int) (hv (list int))) (list int)
+  (if (lt n 8)
+      hv
+      (let f (bytes_get b (add p 7))
+        (let j (add 8 (add (if (eq (bit_and f 128) 128) 2 0) (if (eq (bit_and f 64) 64) 2 0)))
+          (if (if (eq (bit_and f 32) 32) (lt (add j 1) n) false)
+              (let k (bit_shr (bytes_get b (add p (add j 1))) 5)
+                (svds_onto b (add p (add j 2)) (add p (min n (add j (add 2 k)))) hv))
+              hv)))))
+
+; What all of b's extensions say.
+(def edid_cta ((b bytes)) Cta (cta_of b 1 (edid_blocks b) (cta_none)))
+
+; ---------------------------------------------------------------- 4K
+
+; The rate in Hz of a CTA VIC that is 3840x2160, 16:9 or 64:27, or 0.
+(def vic_uhd_hz ((v int)) int
+  (if (and (ge v 93) (le v 97)) (nth (cons 24 (cons 25 (cons 30 (cons 50 (cons 60 (nil int)))))) (sub v 93))
+  (if (and (ge v 103) (le v 107)) (nth (cons 24 (cons 25 (cons 30 (cons 50 (cons 60 (nil int)))))) (sub v 103))
+  (if (any_eq v (cons 114 (cons 116 (nil int)))) 48
+  (if (any_eq v (cons 117 (cons 119 (nil int)))) 100
+  (if (any_eq v (cons 118 (cons 120 (nil int)))) 120
+  0))))))
+
+; The rate of an HDMI VIC that is 3840x2160: 1 is 30, 2 is 25, 3 is 24.
+(def hdmi_vic_uhd_hz ((v int)) int
+  (if (eq v 1) 30 (if (eq v 2) 25 (if (eq v 3) 24 0))))
+
+; The 3840x2160 rates of VICs vs onto acc; hdmi says they are HDMI VICs.
+(def vics_uhd ((vs (list int)) (hdmi bool) (acc (list int))) (list int)
+  (if (is_empty vs)
+      acc
+      (let hz (if hdmi (hdmi_vic_uhd_hz (head vs)) (vic_uhd_hz (head vs)))
+        (vics_uhd (tail vs) hdmi (if (gt hz 0) (cons hz acc) acc)))))
+
+; The 3840x2160 rates of timings ds onto acc.
+(def dtds_uhd ((ds (list Dtd)) (acc (list int))) (list int)
+  (if (is_empty ds)
+      acc
+      (let d (head ds)
+        (dtds_uhd (tail ds)
+          (if (if (eq (dtd_width d) 3840) (if (eq (dtd_height d) 2160) (not (dtd_interlaced d)) false) false)
+              (cons (dtd_hz d) acc)
+              acc)))))
+
+; xs sorted, each once.
+(def distinct_sorted ((xs (list int))) (list int) (uniq_sorted (sort xs) (nil int)))
+
+; A sorted list without repeats, after the reversed acc.
+(def uniq_sorted ((xs (list int)) (acc (list int))) (list int)
+  (if (is_empty xs)
+      (rev acc)
+      (uniq_sorted (tail xs)
+        (if (if (is_empty acc) false (eq (head acc) (head xs))) acc (cons (head xs) acc)))))
+
+; The rates at which the monitor whose EDID is b takes 3840x2160 in full,
+; RGB or 4:4:4: its detailed timings', its VICs' and its HDMI VICs'.
+(def uhd_rates ((b bytes)) (list int)
+  (match (edid_cta b)
+    ((Cta ds vs hv v420 tmds)
+      (distinct_sorted (dtds_uhd (base_dtds b) (dtds_uhd ds (vics_uhd vs false (vics_uhd hv true (nil int)))))))))
+
+; Those at which it takes 3840x2160 only as YCbCr 4:2:0.
+(def uhd_420_rates ((b bytes)) (list int)
+  (match (edid_cta b) ((Cta ds vs hv v420 tmds) (distinct_sorted (vics_uhd v420 false (nil int))))))
+
+; --------------------------------------------------------------- saying
+
+; Numbers, ", " between.
+(def numbers_text ((ns (list int))) (list int) (join_with ", " (numbers_digits ns (nil (list int)))))
+
+; Each of ns in decimal, after the reversed acc.
+(def numbers_digits ((ns (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ns) (rev acc) (numbers_digits (tail ns) (cons (digits (head ns)) acc))))
+
+; The monitor, as the driver first says it: its name, maker and product,
+; and where its EDID came from and how many blocks.
+(def monitor_line ((f EdidFrom) (b bytes)) (list int)
+  (let name (edid_name b)
+    (append "monitor "
+      (append (if (is_empty name) "with no name" name)
+        (append ", "
+          (append (edid_maker b)
+            (append " 0x"
+              (append (hex_digits (edid_product b) 4)
+                (append ": an EDID of "
+                  (append (digits (edid_blocks b))
+                    (append " blocks from " (edid_from_text f))))))))))))
+
+; Its preferred mode, the base block's first detailed timing.
+(def preferred_line ((b bytes)) (list int)
+  (let ds (base_dtds b)
+    (if (is_empty ds) "monitor's preferred mode: none given" (append "monitor's preferred mode: " (dtd_line (head ds))))))
+
+; Whether it offers 3840x2160, and at what rates.
+(def uhd_line ((b bytes)) (list int)
+  (let full (uhd_rates b)
+    (let only (uhd_420_rates b)
+      (append (if (is_empty full)
+                  "the monitor does not offer 3840x2160 in RGB"
+                  (append "the monitor offers 3840x2160 at " (append (numbers_text full) " Hz")))
+        (if (is_empty only) "" (append "; as YCbCr 4:2:0 only at " (append (numbers_text only) " Hz")))))))
+
+; The fastest TMDS it takes, which 3840x2160 at 60 Hz in RGB needs 594
+; MHz of, and its CTA video codes.
+(def cta_line ((b bytes)) (list int)
+  (match (edid_cta b)
+    ((Cta ds vs hv v420 tmds)
+      (append "monitor's TMDS up to "
+        (append (if (eq tmds 0) "an unsaid" (digits tmds))
+          (append " MHz; VICs "
+            (append (numbers_text (rev vs))
+              (append "; HDMI VICs "
+                (append (if (is_empty hv) "none" (numbers_text (rev hv)))
+                  (append "; 4:2:0 only " (if (is_empty v420) "none" (numbers_text (rev v420)))))))))))))
+
+; Bytes i up to j of b in hex.
+(def bytes_hex ((b bytes) (i int) (j int) (acc (list int))) (list int)
+  (if (ge i j) (rev acc) (bytes_hex b (add i 1) j (rev_onto (hex_digits (bytes_get b i) 2) acc))))
+
+; Line k of the EDID's bytes, 32 to a line, as "edid 0x040: HEX".
+(def edid_hex_line ((b bytes) (k int)) (list int)
+  (append "edid 0x" (append (hex_digits (mul k 32) 3) (append ": " (bytes_hex b (mul k 32) (min (bytes_len b) (mul (add k 1) 32)) (nil int))))))
+
+; The EDID's bytes from line k on, each said as a step of stage s, so
+; that the stages print them and serving only keeps them: 0.
+(def edid_hex_said ((b bytes) (s Stage) (k int)) int
+  (if (ge (mul k 32) (bytes_len b))
+      0
+      (let w (step s (edid_hex_line b k)) (edid_hex_said b s (add k 1)))))
+
+; ----------------------------------------------------- the firmware's mode
+
+; RPI_FIRMWARE_SET_TIMING and GET_DISPLAY_TIMING, firmware KMS's
+; (vc4_firmware_kms.c): a struct set_timings of nine words, packed little
+; endian: the display and a pad byte, the VIC; the clock in kHz; the
+; horizontal active, sync start, sync end, total and skew; the vertical
+; active, sync start, sync end, total and scan; the refresh rate and a
+; pad; and the flags.
+(def tag_set_timing () int 294935)          ; 0x00048017
+(def tag_get_display_timing () int 262167)  ; 0x00040017
+
+; The CTA VIC of a mode, for the 3840x2160 and 1920x1080 ones the firmware
+; might be asked for; 0 for any other.
+(def mode_vic ((w int) (h int) (hz int)) int
+  (if (if (eq w 3840) (eq h 2160) false)
+      (if (eq hz 60) 97 (if (eq hz 30) 95 0))
+      (if (if (eq w 1920) (if (eq h 1080) (eq hz 60) false) false) 16 0)))
+
+; Two 16-bit halves as a word, lo first.
+(def halves ((lo int) (hi int)) int (bit_or (bit_and lo 65535) (bit_shl (bit_and hi 65535) 16)))
+
+; Timing d as set_timings for display n: its syncs' polarities in flags
+; bits 0 and 1, and 16:9 in bits 7 to 4.
+(def timing_words ((n int) (d Dtd)) (list int)
+  (match d
+    ((Dtd c ha hb ho hw va vb vo vw f)
+      (let hz (dtd_hz d)
+        (cons (halves n (mode_vic ha va hz))
+          (cons c
+            (cons (halves ha (add ha ho))
+              (cons (halves (add (add ha ho) hw) (add ha hb))
+                (cons (halves 0 va)
+                  (cons (halves (add va vo) (add (add va vo) vw))
+                    (cons (halves (add va vb) 0)
+                      (cons hz
+                        (cons (bit_or 32 (bit_or (if (eq (bit_and f 2) 2) 1 0) (if (eq (bit_and f 4) 4) 2 0)))
+                          (nil int))))))))))))))
+
+; A tag asked with value vs and its answer said: 0.
+(def tag_said ((mb Mailbox) (tag int) (vs (list int))) int
+  (let rq (fw_request tag vs)
+    (match (mailbox_ask mb rq (length rq))
+      ((None) (warn_as "hvs" (append "the firmware did not answer tag 0x" (hex_digits tag 8))))
+      ((Some ws) (info_as "hvs" (fw_raw_line tag vs ws))))))
+
+; Stage mode, an experiment: the firmware asked, by firmware KMS's
+; SET_TIMING, to drive HDMI0 at the monitor's preferred mode; then, two
+; seconds on, what the firmware and the HVS's channel say the mode is.
+; Nothing else is touched. 0.
+(def mode_tried ((d IoDevice) (g HvsGen) (mb Mailbox)) int
+  (match (edid_read mb)
+    ((NoEdid) (warn_as "hvs" "no EDID, so no mode to ask for"))
+    ((EdidRead f b)
+      (let ds (base_dtds b)
+        (if (is_empty ds)
+            (warn_as "hvs" "the EDID gives no preferred mode")
+            (let w (info_as "hvs" (append "asking the firmware for HDMI0 at " (dtd_line (head ds))))
+              (let s (tag_said mb (tag_set_timing) (timing_words (hdmi0_display) (head ds)))
+                (let z (sleep_ns 2000000000)
+                  (let t (tag_said mb (tag_get_display_timing) (cons (hdmi0_display) (edid_zeros 8)))
+                    (let p (tag_said mb 262147 (edid_zeros 2))
+                      (let c (device_read32 d (disp_ctrl0 g (hdmi0_channel)))
+                        (info_as "hvs" (append "mode done: DISP0 CTRL0 0x" (append (hex_digits c 8)
+                          (append ", " (append (digits (ctrl0_width c)) (append "x" (digits (ctrl0_height c)))))))))))))))))))
+
+; The first hdmi= boot argument's value, or empty if none: none, or
+; preferred, asks for the monitor's preferred mode, boot keeps the
+; firmware's, and a number asks for the preferred size at that refresh
+; rate.
+(def hdmi_arg ((args (list (list int)))) (list int)
+  (if (is_empty args)
+      ""
+      (if (starts_with (head args) "hdmi=") (drop_n (head args) 5) (hdmi_arg (tail args)))))
+
+; Every detailed timing of the EDID b: the base block's, the preferred
+; first, then its extensions'.
+(def all_dtds ((b bytes)) (list Dtd)
+  (match (edid_cta b) ((Cta ds vs hv v420 tmds) (append (base_dtds b) (rev ds)))))
+
+; The first of ds w by h at hz, not interlaced.
+(def dtd_at_rate ((ds (list Dtd)) (w int) (h int) (hz int)) (Option Dtd)
+  (if (is_empty ds)
+      ((None Dtd))
+      (let d (head ds)
+        (if (if (eq (dtd_width d) w) (if (eq (dtd_height d) h) (if (eq (dtd_hz d) hz) (not (dtd_interlaced d)) false) false) false)
+            (Some d)
+            (dtd_at_rate (tail ds) w h hz)))))
+
+; The mode wanted, for the EDID b and hdmi='s value a: the preferred
+; one, unless a is a rate, at which the preferred size is then wanted if
+; the EDID has a timing of it, or another word, such as boot, which keeps
+; the firmware's; none too if the EDID gives no timing.
+(def mode_wanted ((b bytes) (a (list int))) (Option Dtd)
+  (let ds (base_dtds b)
+    (if (is_empty ds)
+        ((None Dtd))
+        (if (if (is_empty a) true (eq a "preferred"))
+            (Some (head ds))
+            (match (word_number a)
+              ((None) ((None Dtd)))
+              ((Some hz) (dtd_at_rate (all_dtds b) (dtd_width (head ds)) (dtd_height (head ds)) hz)))))))
+
+; HDMI0's channel's CTRL0 once HDMI0 is at the mode mode_wanted gives,
+; if c, the channel's CTRL0 now, is not of its size, or a rate was asked
+; for: set by the driver (modeset.l0) if L0 gives HDMI0's regions and
+; M2MC is on; else, only if hdmi= asked, by the firmware's SET_TIMING,
+; which it never marks answered but obeys: two seconds on, the channel
+; runs at the mode asked for, so the channel is read again; but then the
+; firmware keeps the channel on lists of its own, whether told the
+; display is the driver's before SET_TIMING, as here, or after (board
+; runs; fw_lists_written in hvs.l0), so past a few windows the pointer
+; flickers. An interlaced mode or none is not set, and c stands. Each
+; step said as one of stage s.
+(def mode_preferred ((d IoDevice) (g HvsGen) (mb Mailbox) (s Stage) (c int)) int
+  (match (edid_read mb)
+    ((NoEdid) c)
+    ((EdidRead f b)
+      (match (mode_wanted b (hdmi_arg (boot_args)))
+        ((None) (let w (info_as "hvs" "keeping the firmware's mode on HDMI0") c))
+        ((Some m)
+              (if (if (dtd_interlaced m) true (if (eq (dtd_width m) (ctrl0_width c)) (if (eq (dtd_height m) (ctrl0_height c)) (is_none (word_number (hdmi_arg (boot_args)))) false) false))
+                  c
+                  (match (if (m2mc_ready mb) (hdmi_open) (NoHdmi "M2MC is off"))
+                    ((HdmiOpen hm) (mode_set_by_driver d g mb s c hm m))
+                    ((NoHdmi why)
+                      (if (is_empty (hdmi_arg (boot_args)))
+                          (let w (info_as "hvs" (append "keeping the firmware's mode on HDMI0: no HDMI0 regions, " why)) c)
+                      (let w (info_as "hvs" (append "asking the firmware for HDMI0 at " (append (dtd_line m) (append ", since it has no HDMI0 regions: " why))))
+                        (let t (let r (display_released_by mb) (mode_asked mb (timing_words (hdmi0_display) m)))
+                          (let z (sleep_ns 2000000000)
+                            (let r (step s "reading HDMI0's channel's mode again")
+                              (device_read32 d (disp_ctrl0 g (hdmi0_channel))))))))))))))))
+
+; Whether o is none.
+(def (is_none T) ((o (Option T))) bool (match o ((None) true) ((Some v) false)))
+
+; HDMI0 set to timing m by the driver (modeset.l0), the display told the
+; driver's first so the firmware leaves it be: the channel's CTRL0
+; after.
+(def mode_set_by_driver ((d IoDevice) (g HvsGen) (mb Mailbox) (s Stage) (c int) (hm Hdmi) (m Dtd)) int
+  (let w (info_as "hvs" (append "setting HDMI0 to " (dtd_line m)))
+    (let r (display_released_by mb)
+      (let e (mode_set_own hm d g s m)
+        (let x (if (is_empty e) 0 (warn_as "hvs" e))
+          (let z (sleep_ns 100000000)
+            (let q (step s "reading HDMI0's channel's mode again")
+              (device_read32 d (disp_ctrl0 g (hdmi0_channel))))))))))
+
+; SET_TIMING of the words ws sent, its answer not looked at, since the
+; firmware never marks it: 0.
+(def mode_asked ((mb Mailbox) (ws (list int))) int
+  (let rq (fw_request (tag_set_timing) ws)
+    (match (mailbox_ask mb rq (length rq)) ((None) 0) ((Some r) 0))))
+
+; What the monitor offers, asked of the firmware and said: the monitor,
+; its preferred mode, whether it offers 3840x2160, its TMDS and codes,
+; and, at stage s, its EDID's bytes. 0, with a warning if the firmware
+; gave no EDID.
+(def monitor_said ((mb Mailbox) (s Stage)) int
+  (let w (info_as "hvs" "asking the firmware for the monitor's EDID")
+    (match (edid_read mb)
+      ((NoEdid) (warn_as "hvs" "the firmware gave no EDID for HDMI0"))
+      ((EdidRead f b)
+        (let a (info_as "hvs" (monitor_line f b))
+          (let p (info_as "hvs" (preferred_line b))
+            (let u (info_as "hvs" (uhd_line b))
+              (let c (info_as "hvs" (cta_line b))
+                (edid_hex_said b s 0)))))))))

@@ -1,0 +1,134 @@
+; edid_test.l0 -- tests of reading the monitor's EDID, on one made up as a
+; 4K monitor's: a base block preferring 3840x2160 at 60 Hz and named TEST
+; 4K, and a CTA-861 block with VICs 16, 97, 95 and 93, HDMI's vendor block
+; with HDMI VIC 1 and 600 MHz, HDMI Forum's, VIC 96 as 4:2:0 only, and
+; a 1920x1080 timing.
+
+; The bytes hex spells, two digits each, spaces skipped.
+(def hex_bytes ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s)
+      (rev acc)
+      (if (eq (head s) 32)
+          (hex_bytes (tail s) acc)
+          (hex_bytes (tail (tail s)) (cons (add (mul 16 (hex_val (head s))) (hex_val (head (tail s)))) acc)))))
+
+; A block: bs padded with zeros to 127 bytes, then the byte that makes it
+; sum to 0 mod 256.
+(def block_of ((bs (list int))) (list int)
+  (let p (append bs (edid_zeros (sub 127 (length bs))))
+    (append p (cons (mod (sub 256 (mod (list_sum p) 256)) 256) (nil int)))))
+
+; The sum of xs.
+(def list_sum ((xs (list int))) int (if (is_empty xs) 0 (add (head xs) (list_sum (tail xs)))))
+
+; The base block: the header, maker DEL (0x10AC), product 0x4321, one
+; extension, 3840x2160 at 594 MHz, and the name.
+(def base_block () (list int)
+  (block_of (append (hex_bytes "00ffffffffffff00 10ac 2143 00000000 0000 0103" (nil int))
+    (append (edid_zeros 34)
+    (append (hex_bytes "08e8 00 30 f2 70 5a 80 b0 58 8a 00 0000000000 1e" (nil int))
+      (append (hex_bytes "000000fc00 5445535420344b0a2020202020" (nil int))
+        (append (edid_zeros 36) (hex_bytes "01" (nil int)))))))))
+
+; The CTA block: tag 2, revision 3, timings from byte 32.
+(def cta_bytes () (list int)
+  (block_of (append (hex_bytes "02 03 20 00 44 90 61 5f 5d 6b 030c00 1000 00 78 20 00 20 01 67 d85dc4 01 78 00 00 e2 0e 60" (nil int))
+    (hex_bytes "023a 80 18 71 38 2d 40 58 2c 45 00 0000000000 1e" (nil int)))))
+
+; The whole EDID.
+(def edid_4k () bytes (bytes_from_list (append (base_block) (cta_bytes))))
+
+(def test_edid_ok () int
+  (add (check_bool "ok" (edid_ok (edid_4k)) true)
+       (check_int "blocks" (edid_blocks (edid_4k)) 2)))
+
+; One byte off breaks the checksum.
+(def test_edid_bad_sum () int
+  (check_bool "bad" (edid_ok (bytes_from_list (append (take (base_block) 20) (cons 1 (drop (base_block) 21))))) false))
+
+(def test_edid_name () int
+  (add (check_str "name" (edid_name (edid_4k)) "TEST 4K")
+       (check_str "maker" (edid_maker (edid_4k)) "DEL")))
+
+(def test_preferred () int
+  (check_str "line" (preferred_line (edid_4k))
+    "monitor's preferred mode: 3840x2160 at 60 Hz, 594000 kHz, h 3840 4016 4104 4400, v 2160 2168 2178 2250, +hsync +vsync"))
+
+(def test_cta_timing () int
+  (match (edid_cta (edid_4k))
+    ((Cta ds vs hv v420 tmds)
+      (if (is_empty ds)
+          (fail_because "timing" "none")
+          (check_str "timing" (dtd_line (head ds))
+            "1920x1080 at 60 Hz, 148500 kHz, h 1920 2008 2052 2200, v 1080 1084 1089 1125, +hsync +vsync")))))
+
+(def test_cta_line () int
+  (check_str "line" (cta_line (edid_4k))
+    "monitor's TMDS up to 600 MHz; VICs 16, 97, 95, 93; HDMI VICs 1; 4:2:0 only 96"))
+
+(def test_uhd_line () int
+  (check_str "line" (uhd_line (edid_4k))
+    "the monitor offers 3840x2160 at 24, 30, 60 Hz; as YCbCr 4:2:0 only at 50 Hz"))
+
+; A monitor of the base block alone, without its extension.
+(def test_uhd_none () int
+  (check_str "line" (uhd_line (bytes_from_list (block_of (take (append (hex_bytes "00ffffffffffff00" (nil int)) (edid_zeros 120)) 126))))
+    "the monitor does not offer 3840x2160 in RGB"))
+
+(def test_monitor_line () int
+  (check_str "line" (monitor_line (EdidFrom (tag_get_edid_block_display) 2) (edid_4k))
+    "monitor TEST 4K, DEL 0x4321: an EDID of 2 blocks from the firmware's display 2"))
+
+; A request for block 1 of HDMI0: 40 words, 160 bytes, the tag, 136
+; bytes of value, the block and the display.
+(def test_edid_request () int
+  (let ws (edid_request (EdidFrom (tag_get_edid_block_display) 2) 1)
+    (add (check_int "words" (length ws) 40)
+         (check_bool "head" (eq (take ws 7) (cons 160 (cons 0 (cons 196643 (cons 136 (cons 0 (cons 1 (cons 2 (nil int))))))))) true))))
+
+; A reply: answered, status 0, and the bytes 00 ff ff ff in its first word.
+(def edid_reply ((status int)) (list int)
+  (append (cons 164 (cons 2147483648 (cons 196640 (cons 136 (cons 2147483784 (cons 0 (cons status (cons 4294967040 (nil int)))))))))
+    (edid_zeros 33)))
+
+(def test_edid_reply_bytes () int
+  (match (edid_reply_bytes (EdidFrom (tag_get_edid_block) 0) (edid_reply 0))
+    ((None) (fail_because "bytes" "none"))
+    ((Some b) (add (check_int "len" (bytes_len b) 128)
+                   (check_str "first" (bytes_hex b 0 4 (nil int)) "00ffffff")))))
+
+; A status not 0 is no block.
+(def test_edid_reply_status () int
+  (check_bool "none" (eq (edid_reply_bytes (EdidFrom (tag_get_edid_block) 0) (edid_reply 1)) ((None bytes))) true))
+
+(def test_edid_hex_line () int
+  (check_str "line" (take (edid_hex_line (edid_4k) 0) 28) "edid 0x000: 00ffffffffffff00"))
+
+; The preferred timing as set_timings for display 2: VIC 97 beside 2,
+; 594000 kHz, 3840 and 4016, 4104 and 4400, 2160 high, 2168 and 2178,
+; 2250, 60 Hz, and both syncs positive with 16:9, 0x23.
+(def test_timing_words () int
+  (let ds (base_dtds (edid_4k))
+    (check_str "words" (words_hex (timing_words 2 (head ds)) (nil (list int)))
+      "0x00610002 0x00091050 0x0fb00f00 0x11301008 0x08700000 0x08820878 0x000008ca 0x0000003c 0x00000023")))
+
+; The mode asked for, as a line, or "none".
+(def wanted_text ((a (list int))) (list int)
+  (match (mode_wanted (edid_4k) a) ((None) "none") ((Some d) (mode_text (dtd_width d) (dtd_height d) (dtd_hz d)))))
+
+; No hdmi= is the preferred mode, as preferred is; boot, as any other
+; word, keeps the firmware's.
+(def test_mode_wanted () int
+  (add (check_str "none given" (wanted_text "") "3840x2160 at 60 Hz")
+       (add (check_str "preferred" (wanted_text "preferred") "3840x2160 at 60 Hz")
+            (check_str "boot" (wanted_text "boot") "none"))))
+
+; A rate the EDID has no 3840x2160 timing of is none; the made-up EDID
+; has only 60.
+(def test_mode_wanted_rate () int
+  (add (check_str "60" (wanted_text "60") "3840x2160 at 60 Hz")
+       (check_str "30" (wanted_text "30") "none")))
+
+(def test_hdmi_arg () int
+  (add (check_str "given" (hdmi_arg (cons "debug" (cons "hdmi=30" (nil (list int))))) "30")
+       (check_str "none" (hdmi_arg (cons "debug" (nil (list int)))) "")))

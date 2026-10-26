@@ -780,7 +780,9 @@ GPU: it only copies.
 ### The display on the Raspberry Pi 5
 
 On the Pi 5 the display protocol is served by `hvs` (`user/sbin/hvs/`), a
-first draft that has shown the desktop on HDMI0 at 1920×1080. L0 gives the HVS
+first draft that has shown the desktop on HDMI0 at 1920×1080, and at
+3840×2160 and 60 Hz at scale 2 on a 4K monitor, the mode set by `hvs`
+itself, steady with five windows (below). L0 gives the HVS
 (0x107C580000), `iommu4` and `iommuc` as regions there (L0 roadmap 0105).
 On QEMU it gets none, and says "no HVS on the board" and exits 0.
 `pi5/etc/inittab` starts it, with `dev /sbin/hvs`. Before the guard,
@@ -808,7 +810,9 @@ exits:
 
 | Stage | What it does |
 |---|---|
-| `hvs probe` | reads only: the firmware's displays and both clocks; the HVS's version and channel 0's `CTRL0`, `CTRL1`, `BGND`, `LPTRS`, `STATUS` and `DL`; the firmware's list, from `DL.LACT` to its end; and `iommu4`'s and `iommuc`'s registers. Then it releases the display and reads the clocks again, touching the HVS no more |
+| `hvs mode` | an experiment beside the others: asks the firmware for the monitor's preferred mode (below) and says what the firmware and channel 0's `CTRL0` say after, then exits |
+| `hvs hdmi` | beside the others: M2MC made sure of, then reads only HDMI0's regions: the HDMI core's, DVP's, PHY's, rate manager's and CSC's registers, the HD block's, pixel valve 0's and DDC0's, and says the mode the core and the pixel valve give |
+| `hvs probe` | reads only: the firmware's displays, the monitor's EDID (and its bytes) and both clocks; the HVS's version and channel 0's `CTRL0`, `CTRL1`, `BGND`, `LPTRS`, `STATUS` and `DL`; the firmware's list, from `DL.LACT` to its end; and `iommu4`'s and `iommuc`'s registers; and what the firmware's display tags answer (`FRAMEBUFFER_GET_*`, `GET_DISPLAY_SETTINGS`, `GET_DISPLAY_TIMING`, `GET_DISPLAY_CFG`), raw. Then it releases the display and reads the clocks again, touching the HVS no more |
 | `hvs list` | releases the display, makes sure of the clocks, sets the background to black, and moves channel 0 to an empty list of its own. Then it says the channel's status and list |
 | `hvs iommu` | then sets up `iommu4` as `bcm2712_iommu_init` does, and says its registers |
 | `hvs` | all that, then serves `display` |
@@ -821,10 +825,32 @@ driver those lines are debug, kept for `dmesg` but not printed.
 It is virtio-gpu's 2D mode done by the BCM2712's HVS, the Hardware Video
 Scaler (SCALER6), so no pixel is copied:
 
-1. **The screen is the firmware's.** The firmware brings HDMI0 up and
-   leaves the HVS scanning channel 0. `hvs` reads the mode from the
-   channel's `CTRL0`, never resets anything, and only sets the channel's
-   background to black.
+1. **The mode is the monitor's.** The firmware brings HDMI0 up, always
+   at 1920×1080, whatever the monitor and `config.txt` say, and leaves
+   the HVS scanning channel 0. `hvs` reads the monitor's EDID from the
+   firmware (`GET_EDID_BLOCK_DISPLAY` for display 2, HDMI0, in
+   `edid.l0`) and says its name, preferred mode, whether it offers
+   3840×2160 and at what rates, and its fastest TMDS. Then it sets HDMI0
+   to the preferred mode itself, through the regions L0 gives for
+   HDMI0's controller, PHY, pixel valve and DDC (L0 roadmap 0120, asked
+   for in [probes/display](probes/display/REQUEST-pi5-hdmi-mode.md)),
+   in Linux `vc4`'s order but changing only what the mode decides
+   (`modeset.l0`): the pixel valve stopped, the HVS channel's size, the
+   PHY's PLL for the TMDS rate, the HDMI core's and the pixel valve's
+   timings, the pixel valve started and the HDMI FIFO recentred; past
+   340 MHz, the monitor told over DDC (SCDC, I2C address 0x54) to expect
+   scrambling and the core's scrambler on. The rest stays as the
+   firmware left it, as `hvs hdmi` read it: the pixel valve at two
+   pixels a clock, the CSC, and the clocks, M2MC at 648 MHz and
+   PIXEL_BVB at 324 MHz, past what 4K at 60 Hz needs. The boot
+   argument `hdmi=boot` keeps the firmware's mode, and `hdmi=30` asks
+   for the preferred size at 30 Hz, if the EDID has a timing of it.
+   Without HDMI0's regions, as under an older L0, `hvs` keeps the
+   firmware's mode unless `hdmi=` asks, and then asks the firmware with
+   firmware KMS's `SET_TIMING`, which it never marks answered but obeys;
+   but the firmware then keeps the channel (item 3), so past a few
+   windows the pointer flickers. `hvs` never resets the HVS, and only
+   sets the channel's background to black.
 2. **A list of planes.** Each layer is one plane, fetched unscaled from
    the client's pages (`plane.l0`). A ring read from a row other than
    its first is two planes, one each side of the wrap, and a layer
@@ -833,7 +859,19 @@ Scaler (SCALER6), so no pixel is copied:
 3. **Two lists.** Each restack writes the half of the list memory the
    channel isn't fetching (words 32 to 2063, or 2064 to 4095), points the
    channel's `LPTRS` at it, and waits up to 50 ms for `DL` to show it was
-   taken.
+   taken. After a `SET_TIMING`, though, the firmware keeps the channel:
+   whatever `LPTRS` is given, from the next frame it is back at one of
+   the firmware's two lists, words 32 and 672, between which it flips
+   every frame or so, without rewriting them, whether it was told the
+   display was the driver's before or after. So once a switch is not
+   taken, `hvs` writes each list over the firmware's two instead, the
+   one the channel is not fetching first, and the other once the
+   firmware has flipped to the first: a list rewritten while the HVS
+   reads it shows half of each, and its planes' UPM garbled, as white
+   columns. Either way the new list's planes take line memory (UPM)
+   beside the list shown's: a plane still there as wide keeps its
+   units and handle, and any other takes free ones, out of all 1,024
+   units and 32 handles (`pieces.l0`).
 4. **The IOMMU.** A plane reads one run of addresses, and a client's
    pages are scattered. So each buffer's pages are mapped one after
    another in a 512 MB aperture of `iommu4` at 40 GB (`iommu.l0`).
@@ -851,11 +889,13 @@ Scaler (SCALER6), so no pixel is copied:
    the Pi's DMA does not see the CPU's caches. So `damage` only cleans the
    pages of the damaged rows, and `buffer` cleans all of a new buffer's.
 6. **The pointer is a plane on top** with its pixels' own alpha. A move
-   writes the list again.
+   writes the list again. A new image, which `wm` paints into the same
+   buffer, has its pages cleaned when `cursor` names it; before, the HVS
+   showed it torn, old rows beside new, until the caches wrote back.
 
 **Not yet:** corners are not cut. `shape` is kept, but a window shows
 whole, its corners square. Cutting them a row at a time would cost a
-plane per row of each corner, and a list has at most 16 (see
+plane per row of each corner, and the HVS has 32 handles (see
 [Limits](#limits)); the way is the toolkit painting its corners with
 alpha. The HVS's end-of-frame interrupts are not taken either.
 
@@ -1756,7 +1796,7 @@ That is enough for about 9 GB of pages given at once (see
 | `boot` | pid 1, then `/etc/system`: `sh` on the console, `wm`, a Terminal |
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
 | `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](#usb)) |
-| `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
+| `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode` and `hdmi` beside them), at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
 | `fs ram` | a volume in memory, `/Volumes/tmp`, since L0 gives no region over the Pi's SD controller |
 | `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). It keeps time over a power cut only with a battery on the RTC connector |
 | `gem`, `inet dhcp` | the Ethernet port, RP1's GEM, serving `nic`, and the IPv4 stack over it at the address DHCP gives (see [The network on the Raspberry Pi 5](#the-network-on-the-raspberry-pi-5)) |
@@ -2357,7 +2397,7 @@ every `.l0` in its directory is part of it.
 | `nap` | sleeps for N ms and checks that the time passed |
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc`. Its clock is a PL031 where the kernel gives one whose ID registers say so, or else the Raspberry Pi 5's RTC, asked of the firmware through the mailbox (`firmware.l0` over `mailbox.l0`, see [The Raspberry Pi 5](#the-raspberry-pi-5)); with neither it says so and exits 0 |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
-| `hvs` | the Raspberry Pi 5's display driver, a first draft that has shown the desktop, brought up a stage at a time by its argument (`probe`, `list`, `iommu`; none serves), serving the display protocol as `display` as `virtio-gpu` does (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)). It takes HDMI0's channel of the BCM2712's HVS at the mode the firmware left. It shows the layers as one display list of planes fetched straight from the clients' pages, each buffer made one run of addresses by the IOMMU in front of the HVS. It writes each list in the half of the list memory the channel isn't fetching, then moves the channel to it. A `damage` cleans the damaged rows' pages out of the caches, and the pointer is a plane on top. Corners are not cut yet. It asks the firmware first whether a display was brought up, since the HVS is otherwise unclocked, and makes sure of its clocks (`fw.l0`). With no region over the HVS, as on QEMU, or no monitor on HDMI0 at boot, it says so and exits 0 |
+| `hvs` | the Raspberry Pi 5's display driver, a first draft that has shown the desktop, brought up a stage at a time by its argument (`probe`, `list`, `iommu`; none serves; `mode` and `hdmi` beside them), serving the display protocol as `display` as `virtio-gpu` does (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)). It reads the monitor's EDID from the firmware (`edid.l0`), sets HDMI0 to the monitor's preferred mode itself, PHY, timings, pixel valve and, past 340 MHz, scrambling over DDC (`hdmi.l0`, `modeset.l0`; the boot argument `hdmi=` chooses otherwise), and takes HDMI0's channel of the BCM2712's HVS at that mode; without HDMI0's regions, an `hdmi=` is asked of the firmware by `SET_TIMING`, after which it keeps the channel on its own two lists, and `hvs` writes its lists over those. It shows the layers as one display list of planes fetched straight from the clients' pages, each buffer made one run of addresses by the IOMMU in front of the HVS. It writes each list in the half of the list memory the channel isn't fetching, then moves the channel to it. A `damage` cleans the damaged rows' pages out of the caches, and the pointer is a plane on top. Corners are not cut yet. It asks the firmware first whether a display was brought up, since the HVS is otherwise unclocked, and makes sure of its clocks (`fw.l0`). With no region over the HVS, as on QEMU, or no monitor on HDMI0 at boot, it says so and exits 0 |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
 | `pcie` | the PCIe bus's server, `pcie virt`, for QEMU's virt board (see [USB](#usb)): reads every function of bus 0 through the ECAM, sizes each memory BAR, puts it in the 32-bit MMIO window, turns on memory space and bus mastering, and serves the pci protocol as `pci`: every function, or those of a class, and an MSI for a driver that asks, set up through the function's MSI or MSI-X capability |
 | `sdhci` | a driver for SD cards behind SD Host Controllers, `sdhci pci` those `pcie` finds, QEMU's `sdhci-pci` (see [The disk](#the-disk)): it brings each card up, standard or high-capacity, and serves each as the first `diskN` free, all on one port, telling `fs` of each. Blocks move through the controller's buffer into and out of the client's pages, no DMA; it waits on the controller's interrupt, an MSI or else its INTx line, for what is not done at once, and polls a slot with none. A slot with no card, or no controller on the bus, is said so on stderr, and exits 0 |
@@ -2865,13 +2905,21 @@ a bad buffer, and wait on nothing.
   guest's CPU, at scale 2 four times as many. Nothing is blended.
 - **The Pi 5's display is new** (see
   [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)):
-  it has shown the desktop on one board, at 1920×1080. A screen is at
-  most 16 planes, half the HVS's 32 UPM handles, since each of the
-  driver's two lists keeps its own half. Every layer is one plane, a
-  scrolled ring two, and a layer hidden whole by those above is none. The
-  planes' rows also share half of 256 KB of line memory, about 8 rows
-  1920 wide, or 4 at 3840. A screen past either is refused. Corners are
-  square there.
+  it has shown the desktop on one board, at 1920×1080 and at 3840×2160.
+  Every layer is one plane, a scrolled ring two, and a layer hidden
+  whole by those above is none. The planes share the HVS's 32 UPM
+  handles and 256 KB of line memory (1,024 units) with the list shown:
+  a plane still there as wide keeps its own, and any other takes some
+  that list does not use, as Linux's `vc6_plane_allocate_upm` does. A
+  row 1920 wide takes 61 units and one 3840 wide 121, so a screen holds
+  about 16 rows of 1920, or 8 of 3840: at 3840×2160 the desktop and the
+  top bar take 242 units, and a window about W/8 for a width of W at
+  scale 2, its content and its frame. A screen past either is refused.
+  On a screen 2560 wide or more a window's frame is fetched only where
+  it shows, while that leaves half the handles and line memory free.
+  At 3840×2160 and 60 Hz the HVS has shown five windows steady; with
+  more the planes it fetches each line may outrun it (black lines,
+  seen when the frames were fetched whole). Corners are square there.
 - **L0S on a Raspberry Pi 5 is not yet stable** (see
   [The Raspberry Pi 5](#the-raspberry-pi-5)): `make pi5-card` builds its
   card, and `make pi5-netboot` a TFTP root, which has booted it to a
