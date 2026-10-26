@@ -100,7 +100,9 @@ aarch64 board, for a driver that finds and sets up a PCIe device
 itself. `(frame_free_count)` says how
 many pages are left for frames and tables, so it can refuse work that would
 not fit; the pages standard input was loaded into join them once a read
-reaches its end. The board's own devices
+reaches its end. `(board_reset)` restarts the board, on the
+Pi 5 and the aarch64 board, and is -3 elsewhere, where `exit` is all there
+is. The board's own devices
 include no virtio device; `L0_QEMU_ARGS="-device virtio-gpu-device"` adds
 one, and any QEMU options there are added to how `l0 boot`, `l0 run`, and
 `l0 test` start the board.

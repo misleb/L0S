@@ -41,7 +41,13 @@
 # root=UUID to boot from that system volume. QEMU_INPUT=usb gives the
 # board a qemu-xhci on PCIe with a USB keyboard and mouse on it, for
 # pcie, xhci and usb-hid, in place of the virtio keyboard and tablet.
+# QEMU_NO_REBOOT=1 makes a reset of the board, as sh's reboot asks, end
+# QEMU with status 0, as l0 boot's -no-reboot does, rather than boot the
+# board again: the tests that reboot it use it.
 #
+# The board has its virtualization extension on, as l0 boot gives it, so
+# that it is entered at EL2 as the Pi 5 is, and PSCI, which reboot's
+# board_reset calls by SMC, answers.
 # This copies how l0's virt_boot loads a program's standard input: its
 # bytes at 0x50000000 and their count in the word below, which is what the
 # board's runtime reads. If l0 changes that, change this with it.
@@ -67,6 +73,8 @@ if [ -n "${QEMU_NET:-}" ]; then
 fi
 append=()
 if [ -n "${QEMU_APPEND:-}" ]; then append=(-append "$QEMU_APPEND"); fi
+noreboot=()
+if [ "${QEMU_NO_REBOOT:-}" = 1 ]; then noreboot=(-no-reboot); fi
 # The keyboard and pointer: virtio's, or with QEMU_INPUT=usb a USB
 # keyboard and mouse on a qemu-xhci, for pcie, xhci and usb-hid.
 input=(-device virtio-keyboard-device -device virtio-tablet-device)
@@ -88,7 +96,7 @@ else
 fi
 gpu=$gpudev${QEMU_GPU:+,$QEMU_GPU}
 len=$(wc -c < "$initramfs" | tr -d ' ')
-exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
+exec "$qemu" -M virt,virtualization=on -cpu cortex-a72 -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=localtime \
   -global virtio-mmio.force-legacy=false \
   -device "$gpu" "${input[@]}" -device virtio-rng-device \
@@ -99,4 +107,5 @@ exec "$qemu" -M virt -cpu cortex-a72 -m 2G -display "$display" -monitor "$monito
   -device loader,addr=0x4FFFFFF8,data="$len",data-len=8 \
   -device loader,file="$initramfs",addr=0x50000000,force-raw=on \
   ${append[@]+"${append[@]}"} \
+  ${noreboot[@]+"${noreboot[@]}"} \
   -kernel "$kernel"

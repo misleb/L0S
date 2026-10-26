@@ -242,8 +242,15 @@ echo "ok - vt: exit closed $front, its vt gone, $other left in front"
 vt=$((16 + ${other#vt}))
 from=$(($(wc -c < "$out") + 1))
 printf 'ps\n' >&3
-waits_for "^ +[0-9]+ +$vt  sh "
-shell=$(tail -c +$from "$out" | grep -aE "^ +[0-9]+ +$vt  sh " | tail -1 | awk '{print $1}')
+# Its shell's line in this ps's output, not an earlier one's: without it
+# the check below would match every line.
+shell=""
+for try in $(seq 1 30); do
+  shell=$(tail -c +$from "$out" | grep -aE "^ +[0-9]+ +$vt  sh " | tail -1 | awk '{print $1}')
+  [ -n "$shell" ] && break
+  sleep 1
+done
+[ -n "$shell" ] || fail "ps never showed $other's shell, a child of its vt, pid $vt; it showed:"
 cx=$((f_x + f_w + 2 * edge - 18)); cy=$((f_y + 22))
 point $cx $cy; sleep 1
 events "$(button true)"; sleep 1

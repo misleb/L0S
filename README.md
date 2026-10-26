@@ -30,7 +30,7 @@ make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, no
 make pi5-card                             # build/pi5-card: the boot partition's files for a Raspberry Pi 5
 make pi5-netboot PI5_BOOT=DIR             # build/pi5-tftp: the same as a TFTP root, to boot a Pi 5 over the network
 make pi5-shell                            # as make demo, on the Pi 5: build the TFTP root without hvs (PI5_SHELL_NO), then picocom on /dev/ttyUSB0 to its shell
-tools/pi5-boot [--console]                 # build that, check dnsmasq serves it, and read the Pi 5's UART while it boots
+tools/pi5-boot [--console] [--reboot]      # build that, check dnsmasq serves it, and read the Pi 5's UART while it boots; --reboot types reboot at the running board's shell instead of a power-cycle
 make -s doc Q=port_send                   # the libraries' documentation, as l0 doc gives the standard library's
 make -s doc Q=sbin/wm/wm                  # a file by the end of its path; names and searches reach the programs too
 ```
@@ -209,7 +209,7 @@ one running in the background:
   along as an argument.
 
 Any other word must be one of the shell's own commands (`help`, `ps`,
-`wait`, `kill`, `sleep`, `echo`, `exit`, `cd`, `pwd`, `dmesg`, and those on files
+`wait`, `kill`, `sleep`, `echo`, `exit`, `reboot`, `cd`, `pwd`, `dmesg`, and those on files
 below), so a
 program can never be mistaken for a command. Here `echo` is both a
 command and a program: the command prints, and `run echo &` starts the
@@ -381,6 +381,11 @@ Job control:
 Editing, on any terminal: Backspace erases a character and Ctrl-U erases
 the line. Arrow keys are ignored. Ctrl-D on an empty line ends input. In
 a window, Ctrl-C, Ctrl-D and Ctrl-U are the keyboard's own.
+
+`reboot`, at any shell, restarts the board as its reset would, with
+nothing told first, as Shut Down: on QEMU the board boots again (or QEMU
+ends, run with `-no-reboot`), and a Pi 5's bootloader starts as at
+power-on, fetching a new build over the network.
 
 `exit [STATUS]` at the serial shell stops the system, since `boot`, pid 1,
 waits for it and exits with its status; at a window's shell it ends that shell, and with it the window's `vt`,
@@ -589,12 +594,13 @@ launcher opens or closes, and when the clock says a minute has begun.
 the logo, `branding/logo.svg`'s mark painted flat in 22×22 pixels, in the
 bar's first 32 columns, as the Apple menu is in macOS's. A click on it,
 acting on its release over it, lights it with a pill and drops a card, 200
-by 84, 4 in from the screen's edge and under the bar, in its own buffer
+by 114, 4 in from the screen's edge and under the bar, in its own buffer
 (id 100000, a layer over the windows and under the bar, in the display's
-layers only while it is shown): **About L0S**, which starts the About app,
-and **Shut Down**, which kills pid 1 (`proc_kill 1`), so `boot` exits and
-the kernel halts. It tells nothing first, a stand-in for a safer
-shutdown. Esc, a click outside the card or on the bar closes it. While it
+layers only while it is shown): **About L0S**, which starts the About app;
+**Shut Down**, which kills pid 1 (`proc_kill 1`), so `boot` exits and
+the kernel halts; and **Restart**, which restarts the board as `reboot`
+does (`board_restart`). Neither tells anything first, a stand-in for a
+safer shutdown. Esc, a click outside the card or on the bar closes it. While it
 is open no window is told of the pointer or the keys
 (`tests/logo-menu.sh`).
 
@@ -1722,7 +1728,17 @@ the debug UART, `/dev/ttyUSB0` or `PI5_SERIAL`, into
 stops at a line, as `--until 'l0s>'` at the shell's prompt, `--wait`
 after so many seconds, `--no-build` serves what was built, and
 `--console` opens the line in picocom to type to the shell. `PI5_ARGS`
-gives the kernel's boot arguments, as `PI5_ARGS=debug`, to both. Once booted, L0S has its
+gives the kernel's boot arguments, as `PI5_ARGS=debug`, to both.
+`--reboot` types `reboot` at the shell of the L0S already running on
+the board, so the board restarts (L0's `board_reset`, PSCI
+`SYSTEM_RESET`) and its bootloader fetches the new build, with nobody at
+the board, as long as that boot's console still answers; it says when
+the kernel's `l0s: restarting the board` line did not come, and the
+board must be power-cycled as before. `exit` at the shell halts the
+board instead (PSCI `SYSTEM_OFF`, which the bootloader shows as
+`Halt:`), and a board that hangs needs its power cycled
+([probes/driver](probes/driver/REQUEST-pi5-reboot.md) asked for the
+reset, landed in L0). Once booted, L0S has its
 own driver for the same port, `gem` (see [The network on the Raspberry
 Pi 5](#the-network-on-the-raspberry-pi-5)).
 
@@ -2306,6 +2322,7 @@ lists.
 When a process exits or is killed, its ports, names, interrupt bindings and
 open files go with it. Whoever waits for it is woken with its status, and
 every port watching it gets a notice. Waiting with `watch` instead of `wait`
+| 298 | `board_restart` | `(list int)`, why not | restarts the board by L0's `board_reset`, after the kernel logs `l0s: restarting the board, as NAME (pid N) asked`, ending every process with no word, as sh's `reboot` and wm's Restart ask. It does not return where the board restarts (the Pi 5, QEMU's aarch64 virt board); elsewhere -6 (`err_denied`), and the kernel logs a warning. Any process may |
 lets a process hear about an exit and other messages on one port. That is
 how the shell waits for a job and for Ctrl-C at the same time.
 
@@ -2328,7 +2345,7 @@ every `.l0` in its directory is part of it.
 | Program | What it does |
 |---|---|
 | `boot` | the first stage's end, pid 1 of a two-stage inittab (see [Booting from a volume](#booting-from-a-volume)): given `root=UUID`, waits for that volume, makes it `/` if it holds `/etc/system`, and says so or why not; given `root=tmpfs`, has `install` fill the RAM file system first; starts `/etc/system`'s programs by path, and exits with the first one's status |
-| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format`, `unmount` and `relabel`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo`, `exit` and `dmesg`, which prints the kernel's log, a line for each message with its time since boot. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
+| `sh` | the shell, on the terminal its argument names, `console` unless given (`sh vt1` is a window's): reads commands from it; runs programs by name or path, from `/` wherever it is or from a volume, on its terminal, and waits for them, with Ctrl-C for the foreground job; has busybox's commands on files, `ls`, `cat`, `write`, `append`, `cp`, `mv`, `rm`, `mkdir`, `df`, `format`, `unmount` and `relabel`, on the initramfs and the volumes alike; also `ps`, `kill`, `sleep`, `echo`, `exit`, `reboot` and `dmesg`, which prints the kernel's log, a line for each message with its time since boot. Shows `/etc/motd` at start. Exits with status 129 if its terminal's process exits |
 | `install` | `install VOLUME`: copies every directory and file of `/` but `/Volumes` onto the volume, a label or `/Volumes/LABEL`, marking each program's copy a program, and says the volume's UUID, for `root=`; refused for a volume not mounted, and for `/`'s own. `install --boot VOLUME [FROM]` makes a FAT32 volume a Raspberry Pi 5's boot partition instead: FROM's files, `/boot` unless given, copied onto it, and `input.bin` written, an initramfs of `/` but `/Volumes`, a file at a time; it says so if the card has no device tree (see [The Raspberry Pi 5](#the-raspberry-pi-5)) |
 | `uart` | the serial line's terminal, `console`: a driver for the PL011 serial port. L0 says nothing of the board, so it finds its port: of the places a PL011 is on L0's boards, QEMU's at 0x09000000 and the Raspberry Pi 5's debug UART at 0x107D001000, the first the kernel gives whose ID registers say PL011. It takes that port's receive interrupt, 33 or 153, edits lines, echoes them (unless given `noecho`), and hands a line to each process that asks. Ctrl-C drops unread input and sends a lone byte 3 to the port that asked to hear of it. What it is sent to write, it writes to the serial line |
 | `vt` | Terminal, a terminal in a window, `vt [COLS ROWS]`, 80×24 unless given. First thing, it registers as NAME, the first of `vt1`, `vt2`, and so on that no one has, which is also its window's title. Once its window is open it starts its own shell, `sh NAME`, and watches it: when the shell exits, `vt` closes the window and exits with the shell's status. The same line editing as `uart`'s, fed the characters of the keys `wm` sends while its window is in front. What it is sent to write, and the echo, it draws into its window's buffer, shared with `wm`, in the 8×16 font (at scale 2, cells of 16×32 in the face's Source Code Pro), in the toolkit's terminal colors, GNOME Console's white on `1e1e1e`. It scrolls by moving the buffer's top row, with `top`, and so copies nothing. Its cursor is a line along the last row of a cell, which no glyph uses. Each batch drawn is one `damage` |
@@ -2444,7 +2461,9 @@ Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
 - `expected`, its standard output; or `pattern`, for output that
   differs every boot, an extended regular expression its one line must
-  match whole;
+  match whole; or `contains`, lines each of which must be somewhere in
+  it, for output of which part is the board's or the start order's, such
+  as the port a driver waits on (`usb`, `dmesg`);
 - `status`, if not 0;
 - `stderr`, a line standard error must hold;
 - `typed`, keys to type at the serial line;
@@ -2483,7 +2502,7 @@ past the card's end, and reads its last sector.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
 `etc`, boots it, and compares; given case names, as `tests/e2e.sh cwd`,
-only those. Twenty-six cases type a session through
+only those. Thirty-five cases type a session through
 [tools/slowtype](tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -2514,6 +2533,10 @@ Ctrl-C as a person would:
   may use, and be refused one past the disk's end;
 - `fs`, on a disk of its own, starts the file server and has the shell
   show `df` and `ls /Volumes`; `write` a file and `cat` it back, `append`
+- `reboot` restarts the board: the kernel says so on its standard
+  error, and QEMU, run with `-no-reboot` (`QEMU_NO_REBOOT=1`, which
+  every typed case has), ends with status 0, nothing typed after it
+  answered;
   to it and read it with `run cat`, a program, so through the kernel;
   `cp` it into the other volume, `mv` it within a volume and across
   volumes, `ls` everything, `rm` it; be refused a `write` to the
@@ -2773,8 +2796,9 @@ naming its partition.
 
 [tests/logo-menu.sh](tests/logo-menu.sh) boots the screen tests' initramfs
 and clicks the top bar's logo: the pill and the card show, Esc closes
-them, About L0S opens the About window (`run windows` lists it), and
-Shut Down stops the board.
+them, About L0S opens the About window (`run windows` lists it),
+Restart resets the board, which the kernel says and QEMU boots again,
+and Shut Down stops the board.
 
 [tests/launcher.sh](tests/launcher.sh) boots the screen tests' initramfs
 and clicks the top bar's Applications with the tablet: the launcher

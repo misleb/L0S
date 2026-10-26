@@ -6,6 +6,9 @@
 #   expected   what standard output must be
 #   pattern    or, for output that differs every boot, an extended
 #              regular expression its one line must match whole
+#   contains   or lines each of which must be somewhere in it, for
+#              output of which some is the board's or the order's
+#              (a time, a port number)
 #   status     the exit status, 0 if there is no such file
 #   stderr     a line standard error must hold, if there is such a file
 #
@@ -156,7 +159,7 @@ for dir in "${cases[@]}"; do
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$typed" |
-      QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_NO_REBOOT=1 QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
     L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi
@@ -185,6 +188,7 @@ for dir in "${cases[@]}"; do
       grep -qF -- "$want" "$out" || { why="standard output lacks: $want"$'\n'"$(head -c 600 "$out")"; break; }
     done < "$dir/contains"
     [ -z "$why" ] && [ "$status" != "$want_status" ] && why="exit status $status, wanted $want_status"
+    [ -z "$why" ] && [ -f "$dir/stderr" ] && ! grep -qF "$(cat "$dir/stderr")" "$err" && why="standard error lacks: $(cat "$dir/stderr")"
   elif ! diff -u "$dir/expected" "$out" > "$BUILD/e2e/$name.diff"; then
     why="standard output differs:"$'\n'"$(cat "$BUILD/e2e/$name.diff")"
   elif [ "$status" != "$want_status" ]; then

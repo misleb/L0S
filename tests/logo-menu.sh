@@ -6,7 +6,8 @@
 #   1. the menu open: the logo on its pill, the card's ground under the bar
 #   2. Esc, on the virtio keyboard, closes it
 #   3. About L0S starts the About window: run windows lists it
-#   4. Shut Down kills pid 1: QEMU exits by itself
+#   4. Restart resets the board: the kernel says so, and boots again
+#   5. Shut Down kills pid 1: QEMU exits by itself
 #
 # The serial line is typed through a FIFO. Run from the top of the
 # project, after make screen-initramfs.
@@ -117,8 +118,26 @@ about_window
 echo "ok - logo-menu: About L0S opened its window"
 shows "the menu closed" "3 16 0 0 0"
 
+# Restart, the card's third row, 110 to 140 on the screen: the board
+# resets and QEMU boots it again, its banner a second time.
 click 16 16
 shows "opened a third time" "3 16 $pill"
+click 100 124
+waits_for "l0s: restarting the board, as wm \(pid [0-9]+\) asked"
+for try in $(seq 1 30); do
+  [ "$(grep -c '^l0s: aarch64' "$out")" -ge 2 ] && break
+  sleep 1
+done
+[ "$(grep -c '^l0s: aarch64' "$out")" -ge 2 ] || fail "Restart did not boot the board again; it showed:"
+echo "ok - logo-menu: Restart reset the board, and it booted again"
+for try in $(seq 1 30); do
+  [ "$(grep -c '^l0s> ' "$out")" -ge 2 ] && break
+  sleep 1
+done
+shows "the desktop again, the menu closed" "3 16 0 0 0"
+
+click 16 16
+shows "opened after the restart" "3 16 $pill"
 click 100 92
 for try in $(seq 1 30); do
   kill -0 $qemu 2> /dev/null || { echo "ok - logo-menu: Shut Down stopped the board"; exit 0; }

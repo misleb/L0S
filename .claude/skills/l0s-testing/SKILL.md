@@ -105,6 +105,7 @@ case's `etc`, and compares. A case is a directory:
 | `etc/inittab` | what runs; any other files of `/etc` beside it |
 | `expected` | the boot's whole standard output, exactly |
 | `pattern` | instead of `expected`, for output that differs every boot: an extended regular expression its one line must match whole (BSD grep: no repeat over 255) (`virtio-rng`) |
+| `contains` | instead of `expected`, for output of which part is the board's or the start order's (a time, the port a driver waits on): lines each of which must be somewhere in standard output; `status` and `stderr` are still checked (`dmesg`, `usb`) |
 | `status` | the kernel's exit status, if not 0 (the first `start`'s, pid 1's) |
 | `stderr` | one line standard error must contain |
 | `typed` | lines typed at the serial line by `tools/slowtype`, with pauses |
@@ -251,3 +252,22 @@ keep working still goes in a test.
   and remove the sockets afterwards.
 - A boot that hangs is killed after a minute by `tools/deadline`; a kernel
   that finds nothing can wake anyone reports a deadlock and exits 124 itself.
+
+## Booting the Raspberry Pi 5
+
+`tools/pi5-boot` builds the TFTP root, checks dnsmasq serves it, and reads
+the debug UART into `build/pi5-serial.log` (header of the script for its
+options; without Docker, set `L0_VIRT_LD=/usr/bin/ld.lld`).
+
+- **Reboot it yourself while its console answers**: `tools/pi5-boot
+  --reboot` types `reboot` at the shell of the L0S already running there,
+  the board restarts (`board_reset`, PSCI `SYSTEM_RESET`) and fetches the
+  new build. It says whether the kernel's `l0s: restarting the board`
+  line came; if not, the console is dead and the user must power-cycle,
+  so ask them then, and only then.
+- A boot that hung the board, or ended with `exit` or Shut Down (a halt,
+  `Halt:` in the firmware's log), leaves no console to type at: that one
+  needs a power-cycle by hand.
+- `--until REGEX` stops at a line; `--wait` bounds the read. Save
+  `build/pi5-serial.log` under another name before the next boot
+  overwrites it.
