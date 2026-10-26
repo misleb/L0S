@@ -4,8 +4,10 @@
   tools/graphify-l0/graph-usage [-v] [SESSION...]
 
 Reads this project's session transcripts, which Claude Code keeps in
-~/.claude/projects/ (or $CLAUDE_CONFIG_DIR/projects/), the subagents'
-with their session's. Counts, for each session, oldest first:
+~/.claude/projects/ (or $CLAUDE_CONFIG_DIR/projects/), a directory for
+the main checkout and one for each worktree, the subagents' with their
+session's. Run from the main checkout or any worktree, it reads them
+all. Counts, for each session, oldest first:
 
   explain, affected, query, path   graphify commands run through Bash
   mcp                              calls to a graphify MCP tool
@@ -18,6 +20,7 @@ mentions graphify, as a skill or a message does.
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -32,10 +35,38 @@ VIEWER_RE = re.compile(r'(^|[|;&(]\s*)(cat|head|tail|less|grep|rg|jq|sed)\b')
 
 
 def projects_dir(repo):
-    """Where Claude Code keeps repo's transcripts: its path with every
-    character but letters and digits made '-'."""
+    """Where Claude Code keeps a checkout's transcripts: its path with
+    every character but letters and digits made '-'."""
     base = Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude'))
     return base / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', str(repo))
+
+
+def checkouts(here):
+    """The main checkout of the repository here is in, and every worktree
+    git lists for it, main first."""
+    def git(*args):
+        return subprocess.run(['git', '-C', str(here), *args], capture_output=True,
+                              text=True, check=True).stdout
+    main = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').strip()).parent
+    trees = [Path(line[len('worktree '):]) for line in git('worktree', 'list', '--porcelain').splitlines()
+             if line.startswith('worktree ')]
+    return [main] + [t for t in trees if t != main]
+
+
+def transcript_dirs(main, trees):
+    """The directories holding transcripts of main and its worktrees, as
+    (directory, worktree name or ''): those git lists, and those of
+    worktrees under main that are gone, whose transcripts are kept."""
+    out = {}
+    for t in trees:
+        d = projects_dir(t)
+        if d.is_dir():
+            out[d] = '' if t == main else t.name
+    base = projects_dir(main)
+    for d in sorted(base.parent.glob(base.name + '--*')):
+        if d.is_dir() and d not in out:
+            out[d] = d.name[len(base.name):].lstrip('-').split('-worktrees-')[-1]
+    return list(out.items())
 
 
 def tool_uses(path):
@@ -95,20 +126,23 @@ def title_of(pdir, session):
 def main(argv):
     verbose = '-v' in argv
     wanted = [a for a in argv if a != '-v']
-    repo = Path(__file__).resolve().parents[2]
-    pdir = projects_dir(repo)
-    if not pdir.is_dir():
-        print(f'graph-usage: no transcripts at {pdir}', file=sys.stderr)
+    trees = checkouts(Path(__file__).resolve().parent)
+    dirs = transcript_dirs(trees[0], trees)
+    if not dirs:
+        print(f'graph-usage: no transcripts at {projects_dir(trees[0])}', file=sys.stderr)
         return 1
-    sessions = sorted(pdir.glob('*.jsonl'), key=lambda p: p.stat().st_mtime)
-    sessions = [p.stem for p in sessions if not wanted or any(p.stem.startswith(w) for w in wanted)]
+    sessions = sorted(((p, d, tree) for d, tree in dirs for p in d.glob('*.jsonl')),
+                      key=lambda s: s[0].stat().st_mtime)
+    sessions = [(p.stem, d, tree) for p, d, tree in sessions
+                if not wanted or any(p.stem.startswith(w) for w in wanted)]
     total = 0
-    for s in sessions:
+    for s, pdir, tree in sessions:
         calls = [c for f in session_files(pdir, s) for c in graph_calls(tool_uses(f))]
         total += len(calls)
         counts = Counter(k for k, _ in calls)
         summary = ', '.join(f'{k} {counts[k]}' for k in (*COMMANDS, 'mcp', 'read') if counts[k]) or 'none'
-        print(f'{s[:8]}  {title_of(pdir, s) or "(untitled)"}: {summary}')
+        where = f' [worktree {tree}]' if tree else ''
+        print(f'{s[:8]}  {title_of(pdir, s) or "(untitled)"}{where}: {summary}')
         if verbose:
             for _, what in calls:
                 print(f'    {what}')

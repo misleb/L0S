@@ -67,8 +67,23 @@ What it is and is not:
 - The communities and their names in `GRAPH_REPORT.md` are clustering, a
   rough map, not the design; `graphify query` is a loose search, weaker
   than `explain`.
-- Docs change it only through `/graphify --update`. If `graphify-out/`
-  is missing, nothing here works: say so and use `make -s doc` and grep.
+- Docs change it only through `/graphify --update`.
+
+**In a worktree** (`.claude/worktrees/NAME`) there is no `graphify-out/`:
+it is ignored by git and built in the main checkout only. Ask the main
+checkout's graph instead, with `--graph` on every command:
+
+```bash
+G="$(git rev-parse --path-format=absolute --git-common-dir)/../graphify-out/graph.json"
+graphify explain "request_numbers()" --graph "$G"
+graphify affected Rect --graph "$G"
+```
+
+That graph is `main`'s as last committed there, not this branch's: a
+name the branch added, moved or renamed is missing or in its old place,
+and its new callers are not there. For those, grep. If neither checkout
+has `graphify-out/`, nothing here works: say so and use `make -s doc`
+and grep.
 
 `tools/graphify-l0/graph-usage [-v] [SESSION...]` says which sessions
 asked the graph, and how, from their transcripts.

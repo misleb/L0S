@@ -2,6 +2,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +59,27 @@ class GraphUsageTest(unittest.TestCase):
 
     def test_projects_dir(self):
         self.assertEqual(gu.projects_dir('/home/u/projects/L0S').name, '-home-u-projects-L0S')
+
+    def test_transcript_dirs(self):
+        main = Path('/home/u/L0S')
+        live = main / '.claude/worktrees/live-one'
+        with tempfile.TemporaryDirectory() as d:
+            old = os.environ.get('CLAUDE_CONFIG_DIR')
+            os.environ['CLAUDE_CONFIG_DIR'] = d
+            try:
+                for name in ('-home-u-L0S', '-home-u-L0S--claude-worktrees-live-one',
+                             '-home-u-L0S--claude-worktrees-gone-two', '-home-u-L0Sx'):
+                    (Path(d) / 'projects' / name).mkdir(parents=True)
+                got = {tree: p.name for p, tree in gu.transcript_dirs(main, [main, live])}
+            finally:
+                if old is None:
+                    del os.environ['CLAUDE_CONFIG_DIR']
+                else:
+                    os.environ['CLAUDE_CONFIG_DIR'] = old
+        # The main checkout, a listed worktree, one since removed; not a
+        # project whose name merely starts the same.
+        self.assertEqual(got, {'': '-home-u-L0S', 'live-one': '-home-u-L0S--claude-worktrees-live-one',
+                               'gone-two': '-home-u-L0S--claude-worktrees-gone-two'})
 
 
 if __name__ == '__main__':
