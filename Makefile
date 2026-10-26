@@ -177,6 +177,10 @@ DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
 CLOCK   := user/lib/proto/clock.l0
 DISKLIB := user/lib/proto/disk.l0
+# Sound: the audio protocol, its server's side, and WAV files.
+AUDIOLIB := user/lib/proto/audio.l0
+AUDIO_SERVER := $(AUDIOLIB) user/lib/proto/audio_server.l0
+WAV     := user/lib/format/wav.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
 L0FS    := user/lib/format/l0fs.l0
@@ -233,6 +237,8 @@ LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(INETLIB)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
+LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
+LIBS_play       := $(AUDIOLIB) $(WAV)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(PATHS)
 LIBS_init       := $(PATHS)
@@ -399,6 +405,8 @@ $(call l0_test,$(ULIB) $(RECT) $(DISPLAY) user/lib/proto/display_test.l0)
 $(call l0_test,$(ULIB) $(RECT) $(DISPLAY_SERVER) user/lib/proto/display_server_test.l0)
 $(call l0_test,$(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0)
 $(call l0_test,$(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0)
+$(call l0_test,$(ULIB) $(AUDIOLIB) user/lib/proto/audio_test.l0)
+$(call l0_test,$(ULIB) $(AUDIO_SERVER) user/lib/proto/audio_server_test.l0)
 $(call l0_test,$(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0)
 $(call l0_test,$(ULIB) $(NICLIB) user/lib/proto/nic_test.l0)
 $(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)
@@ -415,6 +423,7 @@ $(call l0_test,$(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)
 $(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
+$(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)
 $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
@@ -681,12 +690,12 @@ demo: initramfs $(DISK) $(SD)
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The Pi 5 as demo is QEMU: build its TFTP root without the display
-# driver (PI5_SHELL_NO), check that dnsmasq serves it, and open
+# driver and the sound driver after it (PI5_SHELL_NO), check that dnsmasq serves it, and open
 # /dev/ttyUSB0 (PI5_SERIAL) in picocom to type to the shell once the
 # board is power-cycled; Ctrl-A Ctrl-X quits. PI5_ARGS=debug as for
 # tools/pi5-boot.
 .PHONY: pi5-shell
-PI5_SHELL_NO ?= /sbin/hvs
+PI5_SHELL_NO ?= /sbin/hvs /sbin/hdmi-audio
 pi5-shell:
 	@PI5_NO="$(PI5_SHELL_NO)" tools/pi5-boot --console
 

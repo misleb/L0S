@@ -1,0 +1,163 @@
+; mai.l0 -- HDMI0's audio on the Raspberry Pi 5: where each register
+; Linux's vc4 plays sound through is (vc4_hdmi_regs.h's
+; vc6_hdmi_hdmi0_fields, vc4_regs.h), and the words vc4_hdmi_audio_prepare
+; writes there for a rate, built purely and tested against Linux's own.
+; The MAI, the audio FIFO, and its divider are in the HD block both HDMIs
+; share; the audio packets, the clock regeneration's N and CTS, and the
+; packet RAM the audio infoframe goes in are in HDMI0's run, which hvs's
+; hdmi.l0 opens too.
+
+; ---------------------------------------------------------------- regions
+
+; HDMI0's run of blocks and the HD block (bcm2712.dtsi's hdmi0), as hvs
+; opens them; and the HVS, for its version word only. CPU addresses.
+(def hdmi_run_base () int 70807191552)      ; 0x107C700000
+(def hdmi_run_bytes () int 18432)           ; 0x4800
+(def hd_base () int 70807322624)            ; 0x107C720000
+(def hd_bytes () int 256)                   ; 0x100
+(def hvs_base () int 70805618688)           ; 0x107C580000
+(def hvs_bytes () int 256)
+
+; The HD block's MAI registers: MAI_CTL, MAI_THR, MAI_FMT, MAI_DATA and
+; MAI_SMP.
+(def mai_ctl () int 16)                     ; 0x10
+(def mai_thr () int 20)                     ; 0x14
+(def mai_fmt () int 24)                     ; 0x18
+(def mai_data () int 28)                    ; 0x1C
+(def mai_smp () int 32)                     ; 0x20
+
+; The run's: DVP_MISC_CONFIG, whose bit 3 gates the audio's 108 MHz
+; clock (clk-bcm2711-dvp.c's hdmi0-108MHz, set to stop it); the core's,
+; from 0x1400; packet RAM, from 0x3800; and the PHY's RM_OFFSET and
+; PLL_VCOCLK_DIV, which say the TMDS rate.
+(def dvp_misc_config () int 8)
+(def core_at ((off int)) int (add 5120 off))     ; 0x1400
+(def mai_channel_map () int (core_at 164))       ; 0xA4
+(def mai_config () int (core_at 168))            ; 0xA8
+(def audio_packet_config () int (core_at 192))   ; 0xC0
+(def ram_packet_config () int (core_at 196))     ; 0xC4
+(def ram_packet_status () int (core_at 204))     ; 0xCC
+(def crp_cfg () int (core_at 208))               ; 0xD0
+(def cts_0 () int (core_at 212))                 ; 0xD4
+(def cts_1 () int (core_at 216))                 ; 0xD8
+(def scheduler_control () int (core_at 232))     ; 0xE8
+(def packet_ram () int 14336)                    ; 0x3800
+(def rm_offset () int 8216)                      ; 0x2000 + 0x18
+(def pll_vcoclk_div () int 7468)                 ; 0x1D00 + 0x2C
+
+; Packet RAM's slots: 0x24 bytes apart, the audio infoframe's 4, its
+; type 0x84 less 0x80 (vc4_hdmi_write_infoframe).
+(def packet_stride () int 36)
+(def audio_slot () int 4)
+(def slot_at ((n int)) int (add (packet_ram) (mul n (packet_stride))))
+
+; ------------------------------------------------------------ MAI_CTL
+
+; MAI_CTL's words: at startup, RESET, ERRORF, ERRORE, FLUSH and DLATE,
+; the error bits written to clear them; to play, ENABLE, CHNUM 2,
+; WHOLSMP and CHALIGN; at shutdown, the error bits cleared; and its
+; DLATE, set when the FIFO ran dry, and ERRORE, an underflow.
+(def mai_ctl_startup () int 33287)          ; 0x8207
+(def mai_ctl_play () int 12328)             ; 0x3028
+(def mai_ctl_shutdown () int 32774)         ; 0x8006
+(def mai_dlate ((w int)) bool (eq (bit_and w 32768) 32768))
+(def mai_errore ((w int)) bool (eq (bit_and w 4) 4))
+
+; ------------------------------------------------------------ the rate
+
+; MAI_FMT's sample rate codes for the rates played.
+(def mai_rate_code ((rate int)) int
+  (if (eq rate 32000) 7 (if (eq rate 44100) 8 (if (eq rate 48000) 9 0))))
+
+; MAI_FMT for rate: AUDIO_FORMAT 2, PCM, in 23 to 16, the rate's code in
+; 15 to 8.
+(def mai_fmt_for ((rate int)) int
+  (bit_or (bit_shl 2 16) (bit_shl (mai_rate_code rate) 8)))
+
+; The audio clock, a fixed 108 MHz (bcm2712.dtsi's clk_108MHz).
+(def audio_clock_hz () int 108000000)
+
+; MAI_SMP for rate: the period of a sample, 108 MHz over rate, as N over
+; M + 1 cycles, N in 31 to 8 and M in 7 to 0, which
+; rational_best_approximation finds exactly for every rate played: the
+; fraction in lowest terms, its denominator at most 256. None if it is
+; not exact so.
+(def mai_smp_for ((rate int)) (Option int)
+  (let g (gcd (audio_clock_hz) rate)
+    (let n (div (audio_clock_hz) g)
+      (let m (div rate g)
+        (if (if (le m 256) (lt n 16777216) false)
+            (Some (bit_or (bit_shl n 8) (sub m 1)))
+            ((None int)))))))
+
+; The greatest common divisor of a and b.
+(def gcd ((a int) (b int)) int (if (eq b 0) a (gcd b (mod a b))))
+
+; MAI_THR, the FIFO's DREQ and panic thresholds, as vc4 sets them on a
+; BCM2712: on the D0, the VC6_D layout's 0x10, 0x10, 0x1c, 0x1c in 29 to
+; 23, 21 to 15, 13 to 7 and 6 to 0; on the C0 the older layout's, in 29
+; to 24, 21 to 16, 13 to 8 and 5 to 0.
+(def mai_thr_for ((d0 bool)) int
+  (if d0 134745628 269491228))               ; 0x08080E1C, 0x10101C1C
+
+; Whether the HVS's SCALER6_VERSION says the BCM2712 is a D0: 0x54 in
+; its low byte, where the C0's is 0x53 (vc4_hvs.c).
+(def version_is_d0 ((v int)) bool (eq (bit_and v 255) 84))
+
+; MAI_CONFIG: BIT_REVERSE, FORMAT_REVERSE, and channels 0 and 1.
+(def mai_config_stereo () int 201326595)     ; 0x0C000003
+
+; MAI_CHANNEL_MAP: channel i to i, a nibble each (vc5_hdmi_channel_map).
+(def mai_channel_map_stereo () int 16)       ; 0x10
+
+; AUDIO_PACKET_CONFIG: ZERO_DATA_ON_SAMPLE_FLAT, ZERO_DATA_ON_INACTIVE_CHANNELS,
+; B_FRAME_IDENTIFIER 8, the Z preamble iec958.l0 starts a block with, and
+; CEA_MASK channels 0 and 1.
+(def audio_packet_config_stereo () int 553656323)   ; 0x21002003
+
+; N for rate, 128 rate / 1000 as vc4_hdmi_set_n_cts reckons it: 6144 at
+; 48 kHz.
+(def acr_n ((rate int)) int (div (mul 128 rate) 1000))
+
+; CRP_CFG: EXTERNAL_CTS_EN, bit 24, the hardware making CTS from N and
+; the clocks, and N in 19 to 0.
+(def crp_cfg_for ((rate int)) int (bit_or 16777216 (acr_n rate)))
+
+; CTS for rate at a pixel clock of hz: hz N / (128 rate), as vc4 writes
+; it to CTS_0 and CTS_1 beside EXTERNAL_CTS_EN.
+(def acr_cts ((hz int) (rate int)) int
+  (div (mul hz (acr_n rate)) (mul 128 rate)))
+
+; The TMDS rate, the pixel clock at 8 bits a colour, in Hz, from the
+; PHY's RM_OFFSET and PLL_VCOCLK_DIV as hvs's phy_rate writes them: the
+; VCO, the offset's 31 bits times 54 MHz over 2^21, over 10 times the
+; divider in VCOCLK_DIV's low 10 bits. 0 if the divider is 0.
+(def tmds_hz ((rm int) (vd int)) int
+  (let d (bit_and vd 1023)
+    (if (eq d 0)
+        0
+        (div (div (mul (bit_and rm 2147483647) 54000000) 2097152) (mul 10 d)))))
+
+; ------------------------------------------------------------ infoframe
+
+; The audio infoframe for two channels of PCM, as packet RAM holds it,
+; nine words: the header, type 0x84, version 1, length 10, in the first;
+; then the checksum, 0x70, and PB1, 0x01 for two channels with the
+; stream's own coding, size and rate; the rest 0
+; (hdmi_audio_infoframe_pack, vc4_hdmi_write_infoframe's layout).
+(def audio_infoframe () (list int)
+  (cons 655748 (cons 368 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (nil int))))))))))) ; 0x000A0184, 0x00000170
+
+; SCHEDULER_CONTROL's MODE_HDMI, bit 0, and HDMI_ACTIVE, bit 1: HDMI0
+; sends HDMI, not DVI, which has no audio.
+(def mode_hdmi ((w int)) bool (eq (bit_and w 3) 3))
+
+; RAM_PACKET_CONFIG's RAM_PACKET_ENABLE, bit 16, and slot n's bit.
+(def ram_packet_enable () int 65536)
+(def slot_bit ((n int)) int (bit_shl 1 n))
+
+; What the driver says of a MAI_CTL word: its DLATE and ERRORE.
+(def mai_ctl_text ((w int)) (list int)
+  (append "MAI_CTL 0x"
+    (append (hex_digits w 8)
+      (append (if (mai_dlate w) ", ran dry" "") (if (mai_errore w) ", underflowed" "")))))

@@ -1,0 +1,65 @@
+; play.l0 -- plays a WAV file of 16-bit PCM, one channel or two, at
+; 32, 44.1 or 48 kHz, through the audio driver (audio.l0): the driver set
+; to the file's rate, then its samples offered a buffer at a time
+; through pages shared with the driver, each offer again from where the
+; driver stopped taking, until all are taken and played. A file it
+; cannot play, or no driver, is said on standard error, and it exits 1.
+
+; What ends play, said as play on standard error: 1.
+(def complain ((why (list int))) int (complain_as "play" why))
+
+; Pages in the buffer the samples go through: 16 KB, 4096 stereo frames.
+(def play_pages () int 4)
+
+; How long it waits while the driver has no room, in ns: about a period.
+(def play_wait_ns () int 10000000)
+
+; Plays the file its one argument names.
+(def play_main ((as (list (list int)))) int
+  (if (not (eq (length as) 1))
+      (complain "usage: play FILE")
+      (match (read_whole (head as))
+        ((Err why) (complain (append (head as) (append ": " why))))
+        ((Ok b) (play_wav b (parse_wav b))))))
+
+; The sound w of b played: 0, or 1 if it cannot be.
+(def play_wav ((b bytes) (w Wav)) int
+  (match w
+    ((WavBad why) (complain why))
+    ((Wav rate chans s e)
+      (if (not (audio_rate_ok rate))
+          (complain (append "a WAV file at " (append (digits rate) (append " Hz; the driver plays " (audio_rates)))))
+          (match (audio_open)
+            ((NoAudio why) (complain why))
+            ((Audio port rp pid) (play_at (Audio port rp pid) b rate chans s e)))))))
+
+; The samples of b from s up to e played at rate.
+(def play_at ((a Audio) (b bytes) (rate int) (chans int) (s int) (e int)) int
+  (let why (audio_start a rate)
+    (if (not (is_empty why))
+        (complain why)
+        (match (audio_buffer a (play_pages))
+          ((NoAudioBuf why2) (complain why2))
+          ((AudioBuf va n there r)
+            (offered a (AudioBuf va n there r) b chans s e))))))
+
+; The samples from i up to e offered, again from wherever the driver
+; stopped taking, then the end waited for.
+(def offered ((a Audio) (buf AudioBuf) (b bytes) (chans int) (i int) (e int)) int
+  (if (ge i e)
+      (drained a)
+      (match (audio_play a buf b i e chans)
+        ((Err why) (complain why))
+        ((Ok k)
+          (if (eq k 0)
+              (let z (sleep_ns (play_wait_ns)) (offered a buf b chans i e))
+              (offered a buf b chans (add i (mul k (wav_frame_bytes chans))) e))))))
+
+; 0 once the driver has played all it was given.
+(def drained ((a Audio)) int
+  (match (audio_info a)
+    ((Err why) (complain why))
+    ((Ok i)
+      (match i
+        ((AudioInfo rate queued room)
+          (if (eq queued 0) 0 (let z (sleep_ns (play_wait_ns)) (drained a))))))))

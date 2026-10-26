@@ -1,6 +1,11 @@
 # Feature request: a channel of the BCM2712's 40-bit DMA controller, and its interrupt, on the Raspberry Pi 5, so L0S can play sound on HDMI0
 
-Status: asked, not yet on L0's roadmap
+Status: landed (L0 roadmap 0122, commit 1f4584d): channel 6 as asked,
+0x1000010600 for 0x100 bytes, and its interrupt, 118. `hdmi-audio`
+(`user/sbin/hdmi-audio/`) uses it, and on a board (2026-10-26) played
+a WAV on HDMI0 at 48 kHz. One correction to what is asked below: on
+the D0 stepping HDMI0's DREQ is 12 (`bcm2712d0-rpi-5-b.dts`), not 10,
+so `TI` is 0x9805 there.
 Project: L0S, a microkernel in L0, booting on a Raspberry Pi 5 (2 GB,
 serial 1b08af2e, EEPROM 2026/05/26) by TFTP
 

@@ -1,0 +1,92 @@
+; dma40.l0 -- channel 6 of the BCM2712's 40-bit DMA controller, dma40,
+; which L0 gives as a region on the Raspberry Pi 5 with its interrupt
+; (L0 roadmap 0122, asked for in probes/audio): where it is, its
+; registers (bcm2835-dma.c's BCM2711_DMA40_*), and the control blocks
+; that play a ring of periods into HDMI0's MAI cyclically, as Linux's
+; bcm2835_dma_prep_dma_cyclic builds them for vc4's audio. The words are
+; built purely and tested. A frame's address is the channel's (spec
+; 10.3: identity dma-ranges), so no offset is added.
+
+; ---------------------------------------------------------------- region
+
+; The channel, its bytes and its interrupt (GIC SPI 86).
+(def dma_ch6_base () int 68719543808)       ; 0x1000010600
+(def dma_ch_bytes () int 256)
+(def dma_ch6_irq () int 118)
+
+; Its registers: CS, the control block it is on, DEBUG, and the block's
+; words as it runs them, TI to NEXT_CB.
+(def dma_cs () int 0)
+(def dma_cb () int 4)
+(def dma_debug () int 12)
+(def dma_ti () int 16)
+(def dma_len () int 36)
+
+; ------------------------------------------------------------------- CS
+
+; CS to start, ACTIVE with PROT and the QOS 10 and PANIC_QOS 15 Linux
+; gives HDMI0's audio (its dmas cell's 10 << 16 and 15 << 20); the same
+; with INT, bit 2, which acknowledges the interrupt; PROT alone, the
+; default; and TRANSACTIONS, bit 25, still outstanding while it stops.
+(def cs_start () int 16384769)              ; 0x00FA0301
+(def cs_ack () int 16384773)                ; 0x00FA0305
+(def cs_prot () int 768)                    ; 0x300
+(def cs_transactions ((w int)) bool (eq (bit_and w 33554432) 33554432))
+
+; DEBUG's RESET, bit 23.
+(def debug_reset () int 8388608)            ; 0x800000
+
+; ------------------------------------------------------- control blocks
+
+; A control block's bytes: 8 words, and its alignment.
+(def cb_bytes () int 32)
+
+; HDMI0's MAI's DREQ: 12 on the D0 (bcm2712d0-rpi-5-b.dts's hdmi0
+; dmas), 10 on the C0 (bcm2712-rpi.dtsi's). With the C0's on a D0 the
+; channel waits for a DREQ that never comes, as a board showed.
+(def hdmi0_dreq ((d0 bool)) int (if d0 12 10))
+
+; TI for a period: WAIT_RESP, PER_MAP dreq in 13 to 9, D_DREQ, and
+; INTEN, an interrupt as each period ends.
+(def cb_ti ((dreq int)) int (bit_or 32773 (bit_shl (bit_and dreq 31) 9)))   ; 0x8005
+
+; SRCI for a source at addr: INC, 128-bit reads, bursts of 4, and the
+; address's bits 39 to 32.
+(def cb_srci ((addr int)) int (bit_or 21248 (bit_and (bit_shr addr 32) 255)))   ; 0x5300
+
+; DEST and DESTI: MAI_DATA, 0x107C72001C, its low word and its bits 39
+; to 32 with bursts of 4, not incremented.
+(def cb_dest () int 2087845916)             ; 0x7C72001C
+(def cb_desti () int 784)                   ; 0x310
+
+; A block or a block's next, as the channel takes them: the address over
+; 32.
+(def cb_addr_word ((addr int)) int (bit_shr addr 5))
+
+; The block for len bytes from src at DREQ dreq, then next: TI, SRC,
+; SRCI, DEST, DESTI, LEN, NEXT_CB and a reserved 0.
+(def cb_words ((src int) (len int) (next int) (dreq int)) (list int)
+  (cons (cb_ti dreq) (cons (bit_and src 4294967295) (cons (cb_srci src)
+    (cons (cb_dest) (cons (cb_desti) (cons len (cons (cb_addr_word next) (cons 0 (nil int))))))))))
+
+; The ring's blocks at cbs, one for each period, of bytes each, at the
+; addresses at, each pointing at the next and the last at the first, at
+; DREQ dreq. A period is a page, as DMA pages are given one by one, not
+; together.
+(def ring_cb_words ((cbs int) (at (array int)) (bytes int) (dreq int)) (list int)
+  (ring_cbs_from cbs at bytes dreq 0 (nil int)))
+
+; ring_cb_words's loop: block i on, after the reversed acc.
+(def ring_cbs_from ((cbs int) (at (array int)) (bytes int) (dreq int) (i int) (acc (list int))) (list int)
+  (let periods (array_len at)
+    (if (ge i periods)
+        (rev acc)
+        (let next (add cbs (mul (cb_bytes) (mod (add i 1) periods)))
+          (ring_cbs_from cbs at bytes dreq (add i 1)
+            (rev_onto (cb_words (array_get at i) bytes next dreq) acc))))))
+
+; The period the channel is on, from its CB register cb and the blocks'
+; address cbs: -1 if cb is none of them, as when it is idle, 0.
+(def period_of_cb ((cb int) (cbs int) (periods int)) int
+  (let i (div (sub (bit_shl cb 5) cbs) (cb_bytes))
+    (if (if (ge i 0) (lt i periods) false) i -1)))

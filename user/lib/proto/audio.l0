@@ -1,0 +1,149 @@
+; audio.l0 -- the audio protocol: what a sound driver (hdmi-audio)
+; serves under the name audio, and a client of it, such as play:
+;
+;   info                    audio RATE QUEUED ROOM: the rate it plays
+;                           at, in Hz; the frames queued and not yet
+;                           played; and how many more it would take now
+;   start RATE              ok once it plays at RATE, 32000, 44100 or
+;                           48000; what was queued at another rate is
+;                           dropped
+;   play VA FRAMES CHANS    played N: up to FRAMES frames of 16-bit
+;                           samples, CHANS of them a frame, 1 or 2, least
+;                           significant byte first, taken from the
+;                           client's pages shared with the driver at VA
+;                           there (shm_share); N, as many as there was
+;                           room for, may be 0, and the client offers
+;                           the rest again once some have played
+;
+; Each is a request (l0s.l0), its words separated by spaces; the reply is
+; as said above, or error: WHY. No sample travels in a message. Linked
+; into the driver and the programs that play sound, by the Makefile's
+; LIBS_ lists.
+
+; The name the driver registers.
+(def audio_name () (list int) "audio")
+
+; The rates a driver plays at, and whether r is one.
+(def audio_rates () (list int) "32000 44100 48000")
+(def audio_rate_ok ((r int)) bool (any_eq (digits r) (split_spaces (audio_rates))))
+
+; ------------------------------------------------------------------ replies
+
+; info's reply: the rate, the frames queued, and the room for more.
+(def audio_info_reply ((rate int) (queued int) (room int)) (list int)
+  (append "audio " (append (digits rate) (append " " (append (digits queued) (append " " (digits room)))))))
+
+; What info's reply says: the rate, the frames queued, and the room.
+(data AudioInfo (AudioInfo int int int))
+
+; What info's reply r says, or none if it is not that reply.
+(def audio_info_of ((r (list int))) (Option AudioInfo)
+  (let ws (split_spaces r)
+    (if (if (eq (length ws) 4) (eq (head ws) "audio") false)
+        (match (audio_numbers (tail ws) (nil int))
+          ((None) ((None AudioInfo)))
+          ((Some ns) (Some (AudioInfo (nth ns 0) (nth ns 1) (nth ns 2)))))
+        ((None AudioInfo)))))
+
+; play's reply: played N.
+(def audio_played_reply ((n int)) (list int) (append "played " (digits n)))
+
+; The frames play's reply r says were taken, or none if it is not that
+; reply.
+(def audio_played_of ((r (list int))) (Option int)
+  (let ws (split_spaces r)
+    (if (if (eq (length ws) 2) (eq (head ws) "played") false)
+        (word_number (nth ws 1))
+        ((None int)))))
+
+; The words ws as numbers, after the reversed acc; none if one is not.
+(def audio_numbers ((ws (list (list int))) (acc (list int))) (Option (list int))
+  (if (is_empty ws)
+      (Some (rev acc))
+      (match (word_number (head ws))
+        ((None) ((None (list int))))
+        ((Some n) (audio_numbers (tail ws) (cons n acc))))))
+
+; ------------------------------------------------------------------ asking
+
+; The sound driver, as a client holds it: its port, a port for its
+; replies, and its pid, to share buffers with.
+(data Audio (Audio int int int) (NoAudio (list int)))
+
+; The driver, if one has registered audio; asked info, to learn its pid.
+(def audio_open () Audio
+  (match (name_lookup (audio_name))
+    ((NotFound) (NoAudio "no audio; is hdmi-audio running?"))
+    ((Found port)
+      (let rp (port_new)
+        (match (port_ask port rp "info" "the audio driver")
+          ((AskFailed why) (NoAudio why))
+          ((Asked from b)
+            (match (audio_info_of (msg_text b))
+              ((None) (NoAudio (audio_error (msg_text b))))
+              ((Some i) (Audio port rp from)))))))))
+
+; The reply to body, or error: WHY if none came.
+(def audio_reply ((a Audio) (body (list int))) (list int)
+  (match a
+    ((NoAudio why) (error_reply why))
+    ((Audio port rp pid)
+      (match (port_ask port rp body "the audio driver")
+        ((Asked from b) (msg_text b))
+        ((AskFailed why) (error_reply why))))))
+
+; A reply as an error's reason, or empty for ok.
+(def audio_error ((r (list int))) (list int) (reply_why r "the audio driver"))
+
+; The driver set to play at rate: empty, or why not.
+(def audio_start ((a Audio) (rate int)) (list int)
+  (audio_error (audio_reply a (append "start " (digits rate)))))
+
+; What the driver says of itself, or why it did not.
+(def audio_info ((a Audio)) (Result AudioInfo (list int))
+  (let r (audio_reply a "info")
+    (match (audio_info_of r)
+      ((Some i) ((Ok AudioInfo (list int)) i))
+      ((None) ((Err AudioInfo (list int)) (audio_error r))))))
+
+; ----------------------------------------------------------------- buffers
+
+; A buffer of shared memory to hand samples through: its address here,
+; its pages, its address at the driver, and the region to write it with;
+; or why there is none.
+(data AudioBuf (AudioBuf int int int IoDevice) (NoAudioBuf (list int)))
+
+; A buffer of n pages, shared with the driver. It opens a region, of
+; which a process may have only so many, so a client makes one and
+; keeps it.
+(def audio_buffer ((a Audio) (n int)) AudioBuf
+  (match a
+    ((NoAudio why) (NoAudioBuf why))
+    ((Audio port rp pid)
+      (match (shm_region n "a sound buffer")
+        ((NoShmRegion why) (NoAudioBuf why))
+        ((ShmRegion va r)
+          (match (shm_share_to va n pid "the audio driver")
+            ((Ok there) (AudioBuf va n there r))
+            ((Err why) (NoAudioBuf why))))))))
+
+; Its bytes.
+(def audio_buf_bytes ((b AudioBuf)) int
+  (match b ((AudioBuf va n there r) (mul n (page_size))) ((NoAudioBuf why) 0)))
+
+; play's request for frames frames of chans channels at va.
+(def audio_play_request ((va int) (frames int) (chans int)) (list int)
+  (append "play " (append (digits va) (append " " (append (digits frames) (append " " (digits chans)))))))
+
+; The bytes of src from i up to j, whole frames of chans channels, put in
+; b and offered to the driver: how many frames it took, or why none.
+(def audio_play ((a Audio) (b AudioBuf) (src bytes) (i int) (j int) (chans int)) (Result int (list int))
+  (match b
+    ((NoAudioBuf why) ((Err int (list int)) why))
+    ((AudioBuf va n there r)
+      (let e (min j (add i (mul n (page_size))))
+        (let w (put_bytes_range r 0 src i e)
+          (let r2 (audio_reply a (audio_play_request there (div (sub e i) (mul 2 chans)) chans))
+            (match (audio_played_of r2)
+              ((Some k) ((Ok int (list int)) k))
+              ((None) ((Err int (list int)) (audio_error r2))))))))))

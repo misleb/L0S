@@ -1,0 +1,121 @@
+; audio_server.l0 -- the audio protocol, as a driver serves it: what
+; every sound driver reads from its requests and keeps of what it plays,
+; whatever its hardware does with the samples. audio.l0 is the client's
+; side and says what each request means, and its replies are built
+; there. Linked into hdmi-audio, by the Makefile's AUDIO_SERVER, with
+; audio.l0.
+;
+; A driver plays from a ring of periods its device reads cyclically,
+; each period frames long, and is told, by an interrupt or by asking the
+; device, as each one ends. Frames are counted from the start, so a
+; frame's place in the ring, and any position a format needs (iec958.l0's
+; block), follow from its number; the ring here is only those counts.
+
+; --------------------------------------------------------------- requests
+
+; A request, as a driver reads it: info; start RATE; play VA FRAMES
+; CHANS; or one refused, and why.
+(data AudioAsk (AskInfo) (AskStart int) (AskPlay int int int) (AskRefused (list int)))
+
+; The request whose body is body.
+(def audio_ask_of ((body (list int))) AudioAsk
+  (match (request_numbers body)
+    ((ReqNums op ns)
+      (let n (length ns)
+        (if (if (eq op "info") (eq n 0) false) (AskInfo)
+        (if (if (eq op "start") (eq n 1) false) (audio_start_ask (head ns))
+        (if (if (eq op "play") (eq n 3) false) (audio_play_ask (nth ns 0) (nth ns 1) (nth ns 2))
+        (AskRefused (append "no request " op)))))))
+    ((ReqBad why) (AskRefused why))))
+
+; start RATE, if RATE is played.
+(def audio_start_ask ((rate int)) AudioAsk
+  (if (audio_rate_ok rate)
+      (AskStart rate)
+      (AskRefused (append "no rate " (append (digits rate) (append "; " (audio_rates)))))))
+
+; play VA FRAMES CHANS, if there are frames, of one channel or two.
+(def audio_play_ask ((va int) (frames int) (chans int)) AudioAsk
+  (if (if (eq chans 1) false (not (eq chans 2)))
+      (AskRefused "1 or 2 channels")
+      (if (lt frames 1)
+          (AskRefused "no frames")
+          (AskPlay va frames chans))))
+
+; The pages frames frames of chans channels from a client lie in.
+(def audio_play_pages ((frames int) (chans int)) int (pages_for (mul frames (mul 2 chans))))
+
+; ------------------------------------------------------------------- ring
+
+; The ring: its periods, the frames in each, the frame the period
+; playing now starts at, and the frame written up to, each counted from
+; the start.
+(data AudioRing (AudioRing int int int int))
+
+; A ring of periods periods of period frames, nothing played yet: the
+; first period plays as it is, silence, and writing starts after it.
+(def audio_ring_new ((periods int) (period int)) AudioRing
+  (AudioRing periods period 0 period))
+
+; Its periods and their frames.
+(def ring_periods ((r AudioRing)) int (match r ((AudioRing ps p played w) ps)))
+(def ring_period ((r AudioRing)) int (match r ((AudioRing ps p played w) p)))
+
+; The frame the period playing now starts at.
+(def ring_played ((r AudioRing)) int (match r ((AudioRing ps p played w) played)))
+
+; Where the next frame written goes: after what was written, but never
+; into the period playing now, which the device has begun.
+(def ring_next ((r AudioRing)) int
+  (match r ((AudioRing ps p played w) (max w (add played p)))))
+
+; The frames past the period playing that are written and not played.
+(def ring_queued ((r AudioRing)) int
+  (match r ((AudioRing ps p played w) (max 0 (sub w (add played p))))))
+
+; How many more frames can be written now: up to where the period
+; playing comes round again.
+(def ring_room ((r AudioRing)) int
+  (match r ((AudioRing ps p played w) (sub (add played (mul ps p)) (ring_next r)))))
+
+; The ring once n frames are written at ring_next.
+(def ring_wrote ((r AudioRing) (n int)) AudioRing
+  (match r ((AudioRing ps p played w) (AudioRing ps p played (add (ring_next r) n)))))
+
+; The period frame f is in, and where in it.
+(def ring_slot ((r AudioRing) (f int)) int (mod (div f (ring_period r)) (ring_periods r)))
+(def ring_offset ((r AudioRing) (f int)) int (mod f (ring_period r)))
+
+; Frame f's place in the ring's memory, as a frame: its period's frames
+; before it, then its own place in its period.
+(def ring_frame_at ((r AudioRing) (f int)) int
+  (add (mul (ring_slot r f) (ring_period r)) (ring_offset r f)))
+
+; The period playing now.
+(def ring_playing ((r AudioRing)) int (ring_slot r (ring_played r)))
+
+; How many periods ended since r, by the period the device is in now.
+(def ring_ended ((r AudioRing) (now int)) int
+  (mod (add (sub now (ring_playing r)) (ring_periods r)) (ring_periods r)))
+
+; The ring once the period playing has ended and the next plays. The one
+; that ended is the period that frame ring_played plus the ring's frames
+; goes in, the first not yet writable, which its driver fills with
+; silence before writing anything more.
+(def ring_advanced ((r AudioRing)) AudioRing
+  (match r ((AudioRing ps p played w) (AudioRing ps p (add played p) w))))
+
+; The frame the period that just ended will play next, which the driver
+; silences: the ring's frames past what played in it.
+(def ring_reused ((r AudioRing)) int
+  (add (ring_played r) (mul (ring_periods r) (ring_period r))))
+
+; ---------------------------------------------------------------- samples
+
+; Sample ch, 0 or 1, of frame i of chans channels in a client's pages m,
+; 0 to 65535 as its two bytes read it: a mono frame's one sample is both
+; channels'.
+(def audio_sample_at ((m IoDevice) (i int) (chans int) (ch int)) int
+  (if (eq chans 1)
+      (device_read16 m (mul 2 i))
+      (device_read16 m (add (mul 4 i) (mul 2 ch)))))

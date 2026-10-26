@@ -943,6 +943,63 @@ of them could be confirmed from Linux's source:
 - the pointer's alpha: not premultiplied, as the toolkit paints it
 - that the 9th word of a plane, which CTL0's NEXT counts, is skipped
 
+### Sound on the Raspberry Pi 5
+
+On the Pi 5, sound goes out on HDMI0, to the monitor's speakers, through
+`hdmi-audio` (`user/sbin/hdmi-audio/`), which serves the **audio
+protocol** ([user/lib/proto/audio.l0](user/lib/proto/audio.l0)) as
+`audio`. It is written from Linux's vc4, and has played `play
+/etc/chime.wav` on a 4K monitor's speakers at 48 kHz, with HDMI0 at
+3840×2160 and 60 Hz.
+On QEMU there is no channel, and it says so and exits 0.
+
+| Request | Reply |
+|---|---|
+| `info` | `audio RATE QUEUED ROOM`: the rate played, the frames queued and not played, and how many more it would take now |
+| `start RATE` | `ok` once it plays at `RATE`, 32000, 44100 or 48000; what was queued at another rate is dropped |
+| `play VA FRAMES CHANS` | `played N`: up to `FRAMES` frames of 16-bit samples, `CHANS` a frame, 1 or 2, from the client's pages shared with the driver at `VA` there; `N` may be 0 when the ring is full, and the client offers the rest again once some have played |
+
+As with the disk, no sample travels in a message. What every sound
+driver keeps alike, the requests and the ring's counts, is
+[audio_server.l0](user/lib/proto/audio_server.l0); the rest is HDMI's:
+
+1. **The MAI** is HDMI0's audio FIFO, in the HD block, and it takes
+   IEC958 subframes, a 32-bit word a sample with its preamble, the
+   channel status a bit a frame over blocks of 192, and parity, as
+   alsa-lib's iec958 plugin builds them for Linux (`iec958.l0`). Its
+   divider is set from a fixed 108 MHz audio clock, whose gate in
+   `DVP_MISC_CONFIG` the driver opens, and its thresholds as Linux sets
+   them on the D0 (`mai.l0`).
+2. **The packets**: the audio packets' config, N for the clock's
+   regeneration with the hardware making CTS (CTS written too, from the
+   TMDS rate the PHY's PLL is set to), and the audio infoframe in packet
+   RAM's slot 4, all as `vc4_hdmi_audio_prepare` writes them.
+3. **The DMA.** L0 gives channel 6 of the BCM2712's 40-bit DMA
+   controller, `dma40`, as a region with its interrupt, 118 (L0 roadmap
+   0122, asked for in [probes/audio](probes/audio/REQUEST-pi5-dma40.md)).
+   It plays a ring of 12 periods, a DMA page each, 512 frames, 10.7 ms
+   at 48 kHz, 128 ms in all, cyclically into `MAI_DATA`, one control
+   block a period, each raising the interrupt as it ends (`dma40.l0`).
+   The MAI asks for data on DREQ 12 on the D0, this board's stepping,
+   as `bcm2712d0-rpi-5-b.dts` says, and 10 on the C0: with 10 on the
+   D0 the channel moved 512 bytes and waited for good, the FIFO empty.
+   On it, the driver reads which block the channel is on, writes silence
+   into each period that ended, for its next turn, and cleans the ring
+   for the channel, so silence plays when no client does.
+4. **A client's frames** are written into the periods ahead of the one
+   playing, as IEC958 subframes, as many as there is room for, and the
+   reply says how many.
+
+It starts once `display` is served, since `hvs` sets HDMI0's mode and
+its M2MC clock, without which a read of HDMI0's registers stalls the
+CPU, and asks the firmware that M2MC runs all the same. It plays only if
+`SCHEDULER_CONTROL` says HDMI0 sends HDMI, not DVI. `hdmi-audio probe`
+reads the channel's registers and, once M2MC runs, the MAI's, the audio
+packets', the clock regeneration's and the PHY's, and the HVS's version,
+writing none. On the board it read back every word as written, the
+channel on another block at each read, and `MAI_CTL` 0x3028 after the
+chime: no `DLATE` or `ERRORE`, so the FIFO never ran dry.
+
 ### A large screen
 
 On a screen of 2560×1440 or more, such as `make demo SCREEN=3840x2160`
@@ -1809,6 +1866,7 @@ of pages given at once (see [Limits](#limits)). Build with
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
 | `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode` and `hdmi` beside them), at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
+| `hdmi-audio` | sound on HDMI0, served as `audio`, once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](#sound-on-the-raspberry-pi-5)); `play /etc/chime.wav` tries it. `make pi5-shell` leaves it out too |
 | `fs ram` | a volume in memory, `/Volumes/tmp`, since L0 gives no region over the Pi's SD controller |
 | `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). It keeps time over a power cut only with a battery on the RTC connector |
 | `gem`, `inet dhcp` | the Ethernet port, RP1's GEM, serving `nic`, and the IPv4 stack over it at the address DHCP gives (see [The network on the Raspberry Pi 5](#the-network-on-the-raspberry-pi-5)) |
@@ -1824,6 +1882,7 @@ boot should check these, on the debug UART (`dmesg` repeats them):
 - `xhci`'s lines and `usb-hid`'s (see [USB](#usb))
 - `hvs`'s lines: how many displays the firmware brought up, the clocks,
   and each step of its stage, the last of them before any hang
+- `hdmi-audio`'s line, and that `play /etc/chime.wav` is heard
 - `gem`'s line, its link line once a cable is in, and `inet`'s lease
   (see [The network on the Raspberry Pi 5](#the-network-on-the-raspberry-pi-5))
 
@@ -2385,12 +2444,12 @@ initramfs, so that the Makefile finds it there:
 
 | Directory | What | In the initramfs |
 |---|---|---|
-| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `lsusb`, `nap`, `net`, `ping`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
-| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `hvs`, `virtio-input`, `virtio-blk`, `virtio-net`, `gem`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
+| `user/bin/NAME` | a command: `sh`, `cat`, `disk`, `draw`, `hello`, `http`, `init`, `install`, `keys`, `lsusb`, `nap`, `net`, `ping`, `play`, `random`, `spin`, `tftp`, `windows` | `/bin/NAME` |
+| `user/sbin/NAME` | a driver or a service: `boot`, `uart`, `rtc`, `virtio-gpu`, `hvs`, `hdmi-audio`, `virtio-input`, `virtio-blk`, `virtio-net`, `gem`, `virtio-rng`, `pcie`, `xhci`, `usb-hid`, `sdhci`, `fs`, `inet`, `wm`, `echo` | `/sbin/NAME` |
 | `user/apps/NAME` | an app, with its bundle's source `APP.app/` beside it: `vt`, `procmon`, `widgets`, `disks`, `files` (see [Apps](#apps)) | `/Applications/APP.app/NAME` |
 
 A program may have more files of its own, each with its tests beside it,
-as `sh` has `files.l0`, `wm` `launcher.l0`, `files` `fsview.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `rtc` `firmware.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0`, `corners.l0`, `iommu.l0` and `fw.l0`, `gem` `regs.l0` and `phy.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
+as `sh` has `files.l0`, `wm` `launcher.l0`, `files` `fsview.l0`, `inet` `packet.l0`, `segment.l0`, `tcp.l0`, `tcpstack.l0`, `dhcp.l0` and `lease.l0`, `pcie` `cfg.l0`, `sdhci` `sd.l0`, `usb-hid` `hid.l0`, `rtc` `firmware.l0`, `hvs` `regs.l0`, `plane.l0`, `pieces.l0`, `corners.l0`, `iommu.l0` and `fw.l0`, `hdmi-audio` `mai.l0`, `iec958.l0` and `dma40.l0`, `gem` `regs.l0` and `phy.l0`, and `xhci` `trb.l0`, `ring.l0`, `ctx.l0`, `port.l0`, `regs.l0`, `core.l0`, `bus.l0` and `dwc3.l0`:
 every `.l0` in its directory is part of it.
 
 | Program | What it does |
@@ -2410,6 +2469,7 @@ every `.l0` in its directory is part of it.
 | `rtc` | a user-space driver for the PL031 real-time clock: it maps the device, sets an alarm, receives interrupt 34 as a message, and acks it. `rtc clock` instead serves `clock`, the time, to whoever asks, and at the start of every minute to each process listening, as `wm` does; it looks for both every quarter of a second, and leaves the interrupt to `rtc`. Its clock is a PL031 where the kernel gives one whose ID registers say so, or else the Raspberry Pi 5's RTC, asked of the firmware through the mailbox (`firmware.l0` over `mailbox.l0`, see [The Raspberry Pi 5](#the-raspberry-pi-5)); with neither it says so and exits 0 |
 | `virtio-gpu` | a user-space driver for QEMU's virtio-gpu, serving the display protocol as `display` (see [The desktop](#the-desktop)). It finds the device among the 32 virtio-mmio transports and sets up its control queue and cursor queue in DMA pages. It makes the screen resource 1 on scanout 0, at the mode the device offers, and builds its backing from the layers' buffers, so the host composes the screen. Its `info` says the scale, 2 on a screen of 2560×1440 or more, or as the boot argument `scale=` says (see [A large screen](#a-large-screen)). It keeps every row of the backing, so a `layers` request builds again only the rows a layer that moved, scrolled or changed covers, and writes the backing's runs straight into the queue's memory. A `damage` is a transfer and a flush of that rectangle. The pointer is the device's cursor, resource 2. Until it is given layers, the screen is black. With no virtio-gpu on the board it says so on stderr and exits 0. It polls the queues rather than taking interrupts. If the device offers virgl, as QEMU's `virtio-gpu-gl-device` does, it composes the screen on the host's GPU instead: a texture for each buffer and copies of them onto the screen (`gl.l0`, `compose.l0`, `virgl.l0`; see [The desktop](#the-desktop)) |
 | `hvs` | the Raspberry Pi 5's display driver, a first draft that has shown the desktop, brought up a stage at a time by its argument (`probe`, `list`, `iommu`; none serves; `mode` and `hdmi` beside them), serving the display protocol as `display` as `virtio-gpu` does (see [The display on the Raspberry Pi 5](#the-display-on-the-raspberry-pi-5)). It reads the monitor's EDID from the firmware (`edid.l0`), sets HDMI0 to the monitor's preferred mode itself, PHY, timings, pixel valve and, past 340 MHz, scrambling over DDC (`hdmi.l0`, `modeset.l0`; the boot argument `hdmi=` chooses otherwise), and takes HDMI0's channel of the BCM2712's HVS at that mode; without HDMI0's regions, an `hdmi=` is asked of the firmware by `SET_TIMING`, after which it keeps the channel on its own two lists, and `hvs` writes its lists over those. It shows the layers as one display list of planes fetched straight from the clients' pages, each buffer made one run of addresses by the IOMMU in front of the HVS. It writes each list in the half of the list memory the channel isn't fetching, then moves the channel to it. A `damage` cleans the damaged rows' pages out of the caches, and the pointer is a plane on top. A rounded layer's corners are cut by its pixels' alpha, which `hvs` writes 0 there (`corners.l0`). It asks the firmware first whether a display was brought up, since the HVS is otherwise unclocked, and makes sure of its clocks (`fw.l0`). With no region over the HVS, as on QEMU, or no monitor on HDMI0 at boot, it says so and exits 0 |
+| `hdmi-audio` | the Raspberry Pi 5's sound driver, which has played a WAV on a board: it serves the audio protocol as `audio` on HDMI0 (see [Sound on the Raspberry Pi 5](#sound-on-the-raspberry-pi-5)), feeding HDMI0's audio FIFO, the MAI, IEC958 subframes (`iec958.l0`) from a ring of DMA pages through channel 6 of the 40-bit DMA controller, `dma40` (`dma40.l0`), with the MAI, the audio packets and the infoframe set up as Linux's vc4 sets them (`mai.l0`). It waits for `display`, since `hvs` brings HDMI0 up, and plays nothing on a DVI sink. `hdmi-audio probe` reads the channel's and the audio registers, writing none. With no channel, as on QEMU, it says so and exits 0 |
 | `virtio-input` | a user-space driver for QEMU's virtio input devices, started once a device. It keeps the event queue's 16 buffers in a DMA page and takes the device's interrupt as a message. `virtio-input keyboard` finds the device whose name holds `Keyboard`, serves `keyboard`, and sends each key event to every port that asked it to `listen`: a `KeyEvent` of the Linux key code, pressed, released or repeated, and the character it types on a US layout, with Shift and Caps Lock, and Ctrl with a letter as its control character. `virtio-input tablet` finds `Tablet`, serves `pointer`, and at each report's end sends a `PointerEvent`: x and y, 0 to 32767, and the buttons; before it, if the scroll wheel turned in the report (`REL_WHEEL`, `REL_HWHEEL`), a `WheelEvent` of its steps, down and right positive. With no such device on the board it says so on stderr and exits 0. Its US layout is `keymap.l0`'s, which `usb-hid` shares |
 | `pcie` | the PCIe bus's server, `pcie virt`, for QEMU's virt board (see [USB](#usb)): reads every function of bus 0 through the ECAM, sizes each memory BAR, puts it in the 32-bit MMIO window, turns on memory space and bus mastering, and serves the pci protocol as `pci`: every function, or those of a class, and an MSI for a driver that asks, set up through the function's MSI or MSI-X capability |
 | `sdhci` | a driver for SD cards behind SD Host Controllers, `sdhci pci` those `pcie` finds, QEMU's `sdhci-pci` (see [The disk](#the-disk)): it brings each card up, standard or high-capacity, and serves each as the first `diskN` free, all on one port, telling `fs` of each. Blocks move through the controller's buffer into and out of the client's pages, no DMA; it waits on the controller's interrupt, an MSI or else its INTx line, for what is not done at once, and polls a slot with none. A slot with no card, or no controller on the bus, is said so on stderr, and exits 0 |
@@ -2436,6 +2496,7 @@ every `.l0` in its directory is part of it.
 | `procmon` | System Monitor, the process monitor, `run procmon &`: a toolkit window with the kernel's process table in a data grid (pid, program, state and its detail, parent, and its memory: its own, and what it shares or a device reaches), read again every second and on Refresh, sortable by any column, and under it the memory processes are given, from `mem_info`: how much is used of how much, with a level bar, and how much is available. When there are more rows than fit, the scroll wheel scrolls them, three a step, and so does dragging the overlay scrollbar's slider, or pressing its strip. End Process, sensitive with a row selected, ends that process as `kill` does; a driver cannot be ended |
 | `keys` | a client of `keyboard`, for checking `virtio-input` or `usb-hid keyboard`: echoes each printable character typed in QEMU's window to its terminal, Enter as a newline and Backspace as a rub-out, until Esc |
 | `lsusb` | a client of `usb`: a line for each device `xhci` brought up, its number, vendor and product ids, speed, and what each interface is (`keyboard`, `mouse`, `hub`, …) |
+| `play FILE` | a client of `audio`: plays a WAV file of 16-bit PCM, mono or stereo, at 32, 44.1 or 48 kHz, through pages shared with the driver, offering its samples again until all are taken, then waits for them to play; on the Pi 5, `play /etc/chime.wav`. A file it cannot play, or no `audio`, is said on standard error, and it exits 1 |
 
 The libraries are in `common/`, shared by the kernel, every program and
 the host tools, and in `user/lib/`, grouped by what they are: `sys/`, the
@@ -2460,11 +2521,13 @@ name in a library is taken in every program that links it.
 | [sys/procs.l0](user/lib/sys/procs.l0) | the live processes, and a state in words, as `ps` says it | `sh`, `procmon` |
 | [sys/tty.l0](user/lib/sys/tty.l0) | a terminal's line editing and protocol | `uart`, `vt` |
 | [sys/keymap.l0](user/lib/sys/keymap.l0) | the US keyboard's layout over Linux's key codes: what a key types alone, shifted, with Caps Lock and with Ctrl, and the modifiers each key event leaves held (`KEYMAP`) | `virtio-input`, `usb-hid` |
-| [sys/mailbox.l0](user/lib/sys/mailbox.l0) | the Raspberry Pi 5's VideoCore mailbox and the firmware's property interface over it: a page below 4 GB for the buffer, `mailbox_ask` with a buffer's words, and whether the firmware's answer succeeded (`property_answered`) (`MAILBOX`) | `rtc`, `gem` |
+| [sys/mailbox.l0](user/lib/sys/mailbox.l0) | the Raspberry Pi 5's VideoCore mailbox and the firmware's property interface over it: a page below 4 GB for the buffer, `mailbox_ask` with a buffer's words, and whether the firmware's answer succeeded (`property_answered`) (`MAILBOX`) | `rtc`, `gem`, `hvs`, `hdmi-audio` |
 | [sys/virtio.l0](user/lib/sys/virtio.l0) | the transports' registers, finding a device and making it ready (`virtio_probe`, and with the device's own features a driver wants, `virtio_probe_features`), a queue's memory and rings, offering it requests (`virtq_offer`) and waiting for them (`virtq_wait`), the used ring's entries, descriptors and runs of memory | `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net`, `virtio-rng` |
 | [proto/display.l0](user/lib/proto/display.l0) | the display protocol, as a client sends it, in the desktop's pixels, made the screen's at the scale `info` says; its rectangles are `rect.l0`'s | `wm` |
 | [proto/display_server.l0](user/lib/proto/display_server.l0) | the display protocol, as a driver serves it: a `Layer`, a buffer's `Corners` and the radii it may have, requests' numbers read (`layers_of`, a buffer's pages and stride), damage cut to the screen, and `info`'s answer with the scale (`scale_of`, `scale=`) | `virtio-gpu`, `hvs` |
 | [proto/wm.l0](user/lib/proto/wm.l0) | the compositor protocol, as a client sends it, a window its client decorates (`csd`) and its `move` too, and the scale `hello` says; its rectangles are `rect.l0`'s | `vt`, `windows`, `draw`, `widgets`, `procmon`, `disks`, `files` |
+| [proto/audio.l0](user/lib/proto/audio.l0) | the audio protocol: its replies, the rates played, and, as a client sends it, `info`, `start` and `play` through a buffer shared with the driver (`AUDIOLIB`) | `play`, and with `AUDIO_SERVER` |
+| [proto/audio_server.l0](user/lib/proto/audio_server.l0) | the audio protocol, as a driver serves it: requests read and refused (`audio_ask_of`), the ring of periods a device plays, as frame counts (`AudioRing`: where to write next, the room, what is queued, the periods that ended and the one to silence), and a client's samples read, mono as both channels (`AUDIO_SERVER`, with `audio.l0`) | `hdmi-audio` |
 | [proto/clock.l0](user/lib/proto/clock.l0) | the clock protocol, and the date and time as the top bar shows them | `rtc`, `wm`, `fs`, `inet` |
 | [proto/disk.l0](user/lib/proto/disk.l0) | the disk protocol: disks' names, `disk0` on, the disks there are, a driver's disk registered under the first name free and a request's disk read; as a client sends it, its flush too, and a buffer shared with the driver to move sectors through | `disk`, `fs`, `disks`, `virtio-blk`, `sdhci` |
 | [proto/random.l0](user/lib/proto/random.l0) | the random protocol: its request and reply, and `random_bytes` and `random_word`, which ask `virtio-rng` for bytes and do without when it is not there (`RANDOM`) | `virtio-rng`, `random`, `fs`, and with `INETLIB` |
@@ -2483,6 +2546,7 @@ name in a library is taken in every program that links it.
 | [format/fat.l0](user/lib/format/fat.l0) | FAT32, as bytes: the boot sector, FSInfo, the FAT as arrays of a sector's marks, directories as their slots, long names and their short aliases, mkfs's layout, paths walked ignoring case, making, renaming and removing, which clusters a read or a write touches, the sectors a change dirties as pieces to write, and every chain checked as a volume is read | `fs`, `disks`, `tools/mkfs` |
 | [format/l0fs.l0](user/lib/format/l0fs.l0) | the file system on a partition, as bytes: a volume's superblock, cluster table and directories, their layout, paths walked through directories, making, growing and removing them, allocating clusters, which clusters a read or a write touches, walking a chain on from a place in it, and which sectors of the metadata and directories a change touches | `fs`, `disks`, `tools/mkfs` |
 | [format/ppm.l0](user/lib/format/ppm.l0) | binary PPM images, read and written, and colors' channels | every program that draws, `tools/mksplash`, `tools/mkicon` |
+| [format/wav.l0](user/lib/format/wav.l0) | WAV files of 16-bit PCM, mono or stereo: the fmt chunk read, other chunks skipped, the data chunk found in place, and a header written (`WAV`) | `play` |
 | [format/xml.l0](user/lib/format/xml.l0) | just enough XML to read SVG, in place from its bytes: elements, their attributes with entities replaced, and their children, comments, processing instructions, a doctype and CDATA skipped, errors by line (`XML`, in `SVG`) | `tools/mkicons`, `tools/mkicon` |
 | [gfx/rect.l0](user/lib/gfx/rect.l0) | `Rect`, x, y, width and height, the one rectangle of the screen, the protocols and the toolkit: its clip, union, overlap and inset, whether it holds a point, its place at a scale (`rect_scaled`), and its numbers in a damage request; and damage's rectangles merged until no two overlap (`rect_merge`), as both a window and the display driver send and show them | with `render.l0` (`RENDER` holds `RECT`), and `windows`, which links `proto/wm.l0` alone |
 | [gfx/render.l0](user/lib/gfx/render.l0) | drawing on a canvas, a shared buffer of pixels or, for host tools and tests, an array (`canvas_new`), each drawing returning the canvas drawn on: shapes, the font, the wallpaper, a corner's cut, and `draw`'s commands | `virtio-gpu`, `wm`, `vt`, `draw`, `widgets`, `procmon`, `disks`, `files`, `tools/mkicon` |
@@ -2932,11 +2996,12 @@ a bad buffer, and wait on nothing.
   At 3840×2160 and 60 Hz the HVS has shown five windows steady; with
   more the planes it fetches each line may outrun it (black lines,
   seen when the frames were fetched whole). Corners are square there.
-- **No sound.** HDMI0's audio registers are regions on the Pi 5, but
-  its FIFO is fed by the BCM2712's 40-bit DMA controller, which L0 does
-  not give; a channel of it and its interrupt are asked for in
-  [probes/audio](probes/audio/REQUEST-pi5-dma40.md), for a driver,
-  `hdmi-audio`, and a WAV player, `play`.
+- **Sound is the Pi 5's HDMI0 alone, and new** (see
+  [Sound on the Raspberry Pi 5](#sound-on-the-raspberry-pi-5)): 16-bit
+  PCM, two channels, at 32, 44.1 or 48 kHz, through `dma40`'s channel 6,
+  the one L0 gives. It plays silence whenever no client does, so its
+  interrupt comes 94 times a second at 48 kHz even then. One client at
+  a time: two would interleave. QEMU has no sound device L0S drives.
 - **L0S on a Raspberry Pi 5 is not yet stable** (see
   [The Raspberry Pi 5](#the-raspberry-pi-5)): `make pi5-card` builds its
   card, and `make pi5-netboot` a TFTP root, which has booted it to a

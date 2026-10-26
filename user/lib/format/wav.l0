@@ -1,0 +1,97 @@
+; wav.l0 -- WAV files of PCM sound, as bytes: a RIFF WAVE file's fmt
+; chunk read and its data chunk found, in place, for 16-bit samples of
+; one or two channels; and a header written, for tests and tools. Pure,
+; linked by play and its tests.
+
+; ---------------------------------------------------------------- reading
+
+; A WAV file's sound: its rate in Hz, its channels, 1 or 2, and where
+; its samples are, from one byte up to another, a whole number of frames;
+; or why it cannot be played.
+(data Wav (Wav int int int int) (WavBad (list int)))
+
+; The WAV file b, its header read and checked against its bytes.
+(def parse_wav ((b bytes)) Wav
+  (if (not (if (bytes_is_at b 0 "RIFF") (bytes_is_at b 8 "WAVE") false))
+      (WavBad "not a WAV file: no RIFF WAVE")
+      (wav_chunks b 12 0 0)))
+
+; The chunks from byte i, with the fmt chunk's rate and channels once
+; read, 0 before: the data chunk's place once both are known.
+(def wav_chunks ((b bytes) (i int) (rate int) (chans int)) Wav
+  (if (gt (add i 8) (bytes_len b))
+      (WavBad (if (eq rate 0) "WAV file with no fmt chunk" "WAV file with no data chunk"))
+      (let size (le_u32 b (add i 4))
+        (let body (add i 8)
+          (if (bytes_is_at b i "fmt ")
+              (match (wav_format b body size)
+                ((WavBad why) (WavBad why))
+                ((Wav r c s e) (wav_chunks b (wav_next body size) r c)))
+              (if (bytes_is_at b i "data")
+                  (if (eq rate 0)
+                      (WavBad "WAV file with data before its fmt chunk")
+                      (wav_data rate chans body (min (add body size) (bytes_len b))))
+                  (wav_chunks b (wav_next body size) rate chans)))))))
+
+; Where the chunk after the one whose body is size bytes from body
+; starts: chunks are padded to an even size.
+(def wav_next ((body int) (size int)) int
+  (add body (add size (bit_and size 1))))
+
+; The fmt chunk of size bytes from i: PCM, as format 1 or as
+; WAVE_FORMAT_EXTENSIBLE, 0xFFFE, whose subformat's first word is 1; one
+; or two channels; 16 bits. Its rate and channels, no place yet.
+(def wav_format ((b bytes) (i int) (size int)) Wav
+  (if (lt size 16)
+      (WavBad "WAV fmt chunk too short")
+      (let fmt (le_u16_at b i)
+        (let chans (le_u16_at b (add i 2))
+          (let rate (le_u32 b (add i 4))
+            (let bits (le_u16_at b (add i 14))
+              (if (not (wav_is_pcm b i size fmt))
+                  (WavBad "WAV file not PCM")
+                  (if (eq bits 16)
+                      (if (if (eq chans 1) true (eq chans 2))
+                          (Wav rate chans 0 0)
+                          (WavBad (append "WAV file of " (append (digits chans) " channels; 1 or 2 are played"))))
+                      (WavBad (append "WAV file of " (append (digits bits) "-bit samples; 16 are played")))))))))))
+
+; Whether the fmt chunk at i, of size bytes and format fmt, is PCM.
+(def wav_is_pcm ((b bytes) (i int) (size int) (fmt int)) bool
+  (if (eq fmt 1)
+      true
+      (if (if (eq fmt 65534) (ge size 26) false)        ; 0xFFFE
+          (eq (le_u16_at b (add i 24)) 1)
+          false)))
+
+; The sound of rate and chans whose samples run from s up to e, cut to
+; a whole number of frames.
+(def wav_data ((rate int) (chans int) (s int) (e int)) Wav
+  (let fb (wav_frame_bytes chans)
+    (Wav rate chans s (sub e (mod (sub e s) fb)))))
+
+; A frame's bytes: two for each channel's sample.
+(def wav_frame_bytes ((chans int)) int (mul 2 chans))
+
+; How many frames w holds.
+(def wav_frames ((w Wav)) int
+  (match w
+    ((Wav r c s e) (div (sub e s) (wav_frame_bytes c)))
+    ((WavBad why) 0)))
+
+; ---------------------------------------------------------------- writing
+
+; The 44 bytes before n bytes of 16-bit samples, of chans channels at
+; rate: RIFF, WAVE, a fmt chunk of 16 bytes, and the data chunk's head.
+(def wav_header ((rate int) (chans int) (n int)) (list int)
+  (let fb (wav_frame_bytes chans)
+    (append "RIFF"
+      (append (u32_le (add n 36))
+        (append "WAVEfmt "
+          (append (u32_le 16)
+            (append (le16 1)
+              (append (le16 chans)
+                (append (u32_le rate)
+                  (append (u32_le (mul rate fb))
+                    (append (le16 fb)
+                      (append (le16 16) (append "data" (u32_le n))))))))))))))
