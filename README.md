@@ -2932,6 +2932,11 @@ a bad buffer, and wait on nothing.
   At 3840×2160 and 60 Hz the HVS has shown five windows steady; with
   more the planes it fetches each line may outrun it (black lines,
   seen when the frames were fetched whole). Corners are square there.
+- **No sound.** HDMI0's audio registers are regions on the Pi 5, but
+  its FIFO is fed by the BCM2712's 40-bit DMA controller, which L0 does
+  not give; a channel of it and its interrupt are asked for in
+  [probes/audio](probes/audio/REQUEST-pi5-dma40.md), for a driver,
+  `hdmi-audio`, and a WAV player, `play`.
 - **L0S on a Raspberry Pi 5 is not yet stable** (see
   [The Raspberry Pi 5](#the-raspberry-pi-5)): `make pi5-card` builds its
   card, and `make pi5-netboot` a TFTP root, which has booted it to a
