@@ -29,6 +29,7 @@ make all                                  # type check, host tests, board tests,
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
 make pi5-card                             # build/pi5-card: the boot partition's files for a Raspberry Pi 5
 make pi5-netboot PI5_BOOT=DIR             # build/pi5-tftp: the same as a TFTP root, to boot a Pi 5 over the network
+make pi5-shell                            # as make demo, on the Pi 5: build the TFTP root without hvs (PI5_SHELL_NO), then picocom on /dev/ttyUSB0 to its shell
 tools/pi5-boot [--console]                 # build that, check dnsmasq serves it, and read the Pi 5's UART while it boots
 make -s doc Q=port_send                   # the libraries' documentation, as l0 doc gives the standard library's
 make -s doc Q=sbin/wm/wm                  # a file by the end of its path; names and searches reach the programs too

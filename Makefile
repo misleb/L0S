@@ -39,6 +39,8 @@
 #   make pi5-netboot PI5_BOOT=DIR [PI5_TFTP_PREFIX=SERIAL]
 #                    build/pi5-tftp: the same, with the Pi 5's device
 #                    trees from DIR, as a TFTP root it network boots from
+#   make pi5-shell   pi5-netboot without hvs, then picocom on the Pi's
+#                    serial line to type to its shell (tools/pi5-boot)
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
 #                    L0's: every name, or Q a name, a file's stem or the
 #                    end of its path, or text, in the programs' too
@@ -657,6 +659,16 @@ demo: initramfs $(DISK) $(SD)
 	@GPU=$(GPU) QEMU_INPUT=usb QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_SD=$(SD) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
+# The Pi 5 as demo is QEMU: build its TFTP root without the display
+# driver (PI5_SHELL_NO), check that dnsmasq serves it, and open
+# /dev/ttyUSB0 (PI5_SERIAL) in picocom to type to the shell once the
+# board is power-cycled; Ctrl-A Ctrl-X quits. PI5_ARGS=debug as for
+# tools/pi5-boot.
+.PHONY: pi5-shell
+PI5_SHELL_NO ?= /sbin/hvs
+pi5-shell:
+	@PI5_NO="$(PI5_SHELL_NO)" tools/pi5-boot --console
+
 # The demo booted from the system disk, its System volume /: made anew
 # from the initramfs as it is now, so what was written to it goes.
 demo-system: sysdisk
@@ -678,6 +690,9 @@ demo-system: sysdisk
 .PHONY: pi5-initramfs pi5-card
 
 PI5_ARGS            ?=
+# Programs of pi5/etc/inittab's start lines left out of this build, as
+# PI5_NO="/sbin/hvs /sbin/gem".
+PI5_NO              ?=
 PI5_KERNEL_HEAP_MB  ?= 768
 PI5_KERNEL_STACK_MB ?= 16
 PI5_KERNEL_LAYOUT   := --heap-mb $(PI5_KERNEL_HEAP_MB) --stack-mb $(PI5_KERNEL_STACK_MB)
@@ -693,6 +708,7 @@ $(BUILD)/kernel-pi5.img: $(KERNEL) kernel/main.l0 $(L0_PI5RT) | $(BUILD)
 # card is given a byte of one, since with none it names none.
 pi5-initramfs: images root $(ETC_DEPS) $(BUILD)/kernel-pi5.img
 	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc
+	@for p in $(PI5_NO); do grep -v "^start $$p\( \|$$\)" $(BUILD)/pi5-etc/inittab > $(BUILD)/pi5-etc/inittab.new; mv $(BUILD)/pi5-etc/inittab.new $(BUILD)/pi5-etc/inittab; echo "pi5-initramfs: not starting $$p"; done
 	$(call stage_etc,$(BUILD)/pi5-etc)
 	rm -rf $(BUILD)/pi5-root && mkdir -p $(BUILD)/pi5-root/boot && cp -Rp $(ROOT)/. $(BUILD)/pi5-root/
 	printf x | $(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-root/boot
