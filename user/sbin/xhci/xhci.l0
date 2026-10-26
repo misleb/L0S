@@ -12,7 +12,8 @@
 ; It takes each controller's interrupt, an MSI it asks pcie for, or else
 ; its INTx line, as a message on its port, and on each reads that
 ; controller's events; RP1's two raise MSI-X vectors 31 and 36, which
-; rp1.l0 routes, as interrupts 191 and 196. A controller with none, or
+; rp1.l0 routes, level-triggered, as interrupts 191 and 196, and each
+; is acknowledged in RP1 as well as the kernel. A controller with none, or
 ; whose interrupt another driver has bound,
 ; leaves the driver polling every event ring between requests, every
 ; millisecond when there is nothing to do, which a keyboard or a mouse,
@@ -39,25 +40,51 @@
   (match (rp1_up)
     ((Rp1Down why) (complain why))
     ((Rp1Up)
-      (let irqs (rp1_usb_routed)
-        (started (cons (Place (rp1_usb0) (rp1_usb_bytes) (rp1_dma_offset) true (nth irqs 0))
-                 (cons (Place (rp1_usb1) (rp1_usb_bytes) (rp1_dma_offset) true (nth irqs 1)) (nil Place))))))))
+      (let ra (rp1_usb_routed)
+        (let irqs (acker_irqs ra)
+          (started (cons (Place (rp1_usb0) (rp1_usb_bytes) (rp1_dma_offset) true (nth irqs 0))
+                   (cons (Place (rp1_usb1) (rp1_usb_bytes) (rp1_dma_offset) true (nth irqs 1)) (nil Place)))
+                   ra))))))
 
 ; RP1's vectors for its two USB controllers (usb@200000 and usb@300000's
-; interrupts in its device tree), both edge-triggered.
+; interrupts in its device tree).
 (def rp1_usb0_vector () int 31)
 (def rp1_usb1_vector () int 36)
 
-; The two controllers' MSI-X vectors routed, and their interrupts, 160 +
-; v; 0 each if RP1's window cannot be opened, which leaves them polled.
-(def rp1_usb_routed () (list int)
+; Who acknowledges a controller's interrupt where it was raised, besides
+; the kernel: no one, for a PCI function's MSI; or RP1, through its
+; window, for each controller's vector, in order.
+(data Acker (NoAcker) (Rp1Acker IoDevice (list int)))
+
+; The two controllers' MSI-X vectors routed, RP1's window kept to
+; acknowledge them; or no one, if the window cannot be opened, which
+; leaves them polled. Level-triggered, as a DWC3's line is, high while
+; its interrupter's IP is set: RP1 then sends the vector again, once
+; acknowledged, for as long as the line is high, so an IP set again as
+; it is cleared is never missed, as an edge would be.
+(def rp1_usb_routed () Acker
   (match (open_device (rp1_window) (rp1_window_bytes))
-    ((DeviceFailed fault why) (cons 0 (cons 0 (nil int))))
+    ((DeviceFailed fault why) (NoAcker))
     ((DeviceOpened w)
-      (let a (rp1_msi_route w (rp1_usb0_vector) false)
-        (let b (rp1_msi_route w (rp1_usb1_vector) false)
-          (let c (close_device w)
-            (cons (rp1_irq (rp1_usb0_vector)) (cons (rp1_irq (rp1_usb1_vector)) (nil int)))))))))
+      (let a (rp1_msi_route w (rp1_usb0_vector) true)
+        (let b (rp1_msi_route w (rp1_usb1_vector) true)
+          (Rp1Acker w (cons (rp1_usb0_vector) (cons (rp1_usb1_vector) (nil int)))))))))
+
+; The interrupts an Acker's controllers raise, 160 + v; 0 each for two
+; controllers with no one, which leaves them polled.
+(def acker_irqs ((a Acker)) (list int)
+  (match a
+    ((NoAcker) (cons 0 (cons 0 (nil int))))
+    ((Rp1Acker w vs) (map_rp1_irqs vs))))
+(def map_rp1_irqs ((vs (list int))) (list int)
+  (if (is_empty vs) vs (cons (rp1_irq (head vs)) (map_rp1_irqs (tail vs)))))
+
+; Controller k's interrupt acknowledged where it was raised: RP1's vector
+; for it, so that RP1 sends it again if its line is still high.
+(def acked_at_source ((a Acker) (k int)) int
+  (match a
+    ((NoAcker) 0)
+    ((Rp1Acker w vs) (if (lt k (length vs)) (rp1_msi_ack w (nth vs k)) 0))))
 
 ; Where a controller is: its registers' base and bytes, what to add to a
 ; page's address for it to reach the page, whether it is a DWC3 to put
@@ -68,7 +95,7 @@
 (def from_pci () int
   (match (pci_find (pci_class_xhci))
     ((Err why) (complain why))
-    ((Ok fs) (if (is_empty fs) (info_as "xhci" "no xHCI on the bus") (started (pci_places fs (nil Place)))))))
+    ((Ok fs) (if (is_empty fs) (info_as "xhci" "no xHCI on the bus") (started (pci_places fs (nil Place)) (NoAcker))))))
 
 ; Where each function's BAR 0 is, and its interrupt, an MSI if pci
 ; gives it one, after the reversed acc.
@@ -93,8 +120,9 @@
 
 ; Every controller at ps brought up, and the usb name served: waiting
 ; for messages, its interrupts among them, if every controller's
-; interrupt is bound to its port, or else polling.
-(def started ((ps (list Place))) int
+; interrupt is bound to its port, or else polling. ra acknowledges each
+; interrupt where it was raised.
+(def started ((ps (list Place)) (ra Acker)) int
   (match (brought_up ps (bus_new) (nil Ctrl))
     ((Down why) (complain why))
     ((Up b cs)
@@ -102,8 +130,8 @@
         (let r (name_register_or_why port "usb")
           (if (not (is_empty r))
               (complain r)
-              (let is (bound_all cs (place_irqs ps) port 0)
-                (let s (ports_checked (Srv b cs (nil int) port is) 0)
+              (let is (bound_all cs (place_irqs ps) port 0 ra)
+                (let s (ports_checked (Srv b cs (nil int) port is ra) 0)
                   (if (all_bound is) (waits s) (serve s))))))))))
 
 ; Each controller at ps brought up, numbered on from cs's, onto b.
@@ -267,17 +295,17 @@
 
 ; The driver: the bus, the controllers, the ports listening, its port,
 ; and each controller's interrupt bound to it, 0 for one polled.
-(data Srv (Srv Bus (list Ctrl) (list int) int (list int)))
+(data Srv (Srv Bus (list Ctrl) (list int) int (list int) Acker))
 
 ; Its fields read, and two replaced.
-(def srv_bus ((s Srv)) Bus (match s ((Srv b cs ls port is) b)))
-(def srv_port ((s Srv)) int (match s ((Srv b cs ls port is) port)))
-(def srv_ctrl ((s Srv) (k int)) Ctrl (match s ((Srv b cs ls port is) (nth cs k))))
-(def srv_count ((s Srv)) int (match s ((Srv b cs ls port is) (length cs))))
-(def srv_irqs ((s Srv)) (list int) (match s ((Srv b cs ls port is) is)))
-(def srv_with_bus ((s Srv) (b2 Bus)) Srv (match s ((Srv b cs ls port is) (Srv b2 cs ls port is))))
-(def srv_with_listeners ((s Srv) (ls2 (list int))) Srv (match s ((Srv b cs ls port is) (Srv b cs ls2 port is))))
-(def srv_listeners ((s Srv)) (list int) (match s ((Srv b cs ls port is) ls)))
+(def srv_bus ((s Srv)) Bus (match s ((Srv b cs ls port is ra) b)))
+(def srv_port ((s Srv)) int (match s ((Srv b cs ls port is ra) port)))
+(def srv_ctrl ((s Srv) (k int)) Ctrl (match s ((Srv b cs ls port is ra) (nth cs k))))
+(def srv_count ((s Srv)) int (match s ((Srv b cs ls port is ra) (length cs))))
+(def srv_irqs ((s Srv)) (list int) (match s ((Srv b cs ls port is ra) is)))
+(def srv_with_bus ((s Srv) (b2 Bus)) Srv (match s ((Srv b cs ls port is ra) (Srv b2 cs ls port is ra))))
+(def srv_with_listeners ((s Srv) (ls2 (list int))) Srv (match s ((Srv b cs ls port is ra) (Srv b cs ls2 port is ra))))
+(def srv_listeners ((s Srv)) (list int) (match s ((Srv b cs ls port is ra) ls)))
 
 ; How long to sleep with nothing to do, polling.
 (def poll_ns () int 1000000)
@@ -319,11 +347,24 @@
 
 ; Controller k's interrupt: its pending cleared, so that an INTx line
 ; falls, every event read, and the interrupt ended, so it can come
-; again. One that comes while the events are read is noticed after.
+; again: first where it was raised (RP1, which sends it again if the
+; controller's line is still high), then the kernel's. One that comes
+; while the events are read is noticed after. ERDP is written with Event
+; Handler Busy cleared even when no event was read, as Linux's xhci_irq
+; does: an event read by an earlier pass, before interrupt moderation let
+; its IP and EHB be set, leaves EHB set with nothing new to read, and
+; while EHB is set the controller raises no interrupt at all; a board run
+; hung so, an event waiting, IP clear and EHB set.
 (def interrupted ((s Srv) (k int)) Srv
   (let c (pending_cleared (srv_ctrl s k))
     (match (drained s 0 false)
-      ((Drained s2 any) (let a (irq_ack (nth (srv_irqs s) k)) s2)))))
+      ((Drained s2 any)
+        (let s3 (dequeued_to s2 k)
+          (let r (acked_at_source (srv_acker s3) k)
+            (let a (irq_ack (nth (srv_irqs s3) k)) s3)))))))
+
+; Who acknowledges the controllers' interrupts where they are raised.
+(def srv_acker ((s Srv)) Acker (match s ((Srv b cs ls port is ra) ra)))
 
 ; A controller's interrupter 0 enabled, what it had pending cleared, and
 ; its interrupts on.
@@ -342,16 +383,22 @@
         (device_write32 r (add op (op_usbsts)) (sts_event))))))
 
 ; Each controller of cs, numbered from k, its interrupt of irqs bound to
-; port and turned on, and said: the interrupt bound, or 0 for one that
-; has none or could not be bound, which is polled.
-(def bound_all ((cs (list Ctrl)) (irqs (list int)) (port int) (k int)) (list int)
+; port and turned on, then acknowledged where it is raised, and said: the
+; interrupt bound, or 0 for one that has none or could not be bound,
+; which is polled. The acknowledgement matters on RP1: its vectors are
+; routed before the controllers are reset and their interrupts bound,
+; and one sent then, for whatever the firmware left pending, reached no
+; one and was never acknowledged, so RP1 sent none again; on a board run
+; no interrupt came at all, with an event waiting and IP set. Once
+; acknowledged, RP1 sends it again if the line is high, now to port.
+(def bound_all ((cs (list Ctrl)) (irqs (list int)) (port int) (k int) (ra Acker)) (list int)
   (if (if (is_empty cs) true (is_empty irqs))
       (nil int)
       (let n (head irqs)
         (let why (if (le n 0) "it raises none" (irq_bind_or_why n port))
           (let w (logged (irq_line k n why))
-            (let i (if (is_empty why) (let on (interrupts_on (head cs)) n) 0)
-              (cons i (bound_all (tail cs) (tail irqs) port (add k 1)))))))))
+            (let i (if (is_empty why) (let on (interrupts_on (head cs)) (let a (acked_at_source ra k) n)) 0)
+              (cons i (bound_all (tail cs) (tail irqs) port (add k 1) ra))))))))
 
 ; Whether every controller's interrupt was bound.
 (def all_bound ((is (list int))) bool
@@ -457,6 +504,7 @@
 ; controller k's, the rest by messages and on the serial line.
 (def run_act ((s Srv) (k int) (a Act)) Srv
   (match a
+    ((ActWait ms) (let z (sleep_ns (mul ms 1000000)) s))
     ((ActPut p ws) (let w (put_words (ctrl_memory (srv_ctrl s k)) p ws) (let f (page_flushed (ctrl_va (srv_ctrl s k)) p) s)))
     ((ActZero p) (let w (page_zeroed (ctrl_memory (srv_ctrl s k)) (mul 4096 p) 0) (let f (page_flushed (ctrl_va (srv_ctrl s k)) p) s)))
     ((ActBell slot target) (let w (rung (srv_ctrl s k) slot target) s))

@@ -27,8 +27,10 @@
 ; What the shell is to do: write u32s into a page, clear a page, ring
 ; slot's doorbell for target, write a port's PORTSC, read a port's PORTSC
 ; and tell hc_port, answer a request, send one port a notice, send every
-; listener one, or write a line.
+; listener one, write a line, or wait so many milliseconds, as USB's
+; timings ask between steps.
 (data Act
+  (ActWait int)
   (ActPut int (list W32))
   (ActZero int)
   (ActBell int int)
@@ -337,8 +339,7 @@
       (if (hc_busy h)
           (Did (hc_with_waiting h (append (without_int (hc_waiting h) p) (cons p (nil int)))) (nil Act))
           (port_begun h p v)))
-    ((PortReset)
-      (if (if (port_enabled v) (not (port_resetting v)) false) (port_slotting h p (port_speed v)) (Did h (nil Act))))
+    ((PortReset) (port_reset_seen h p v))
     ((PortSlotting sp) (Did h (nil Act)))
     ((PortHas slot)
       (if (port_connect_changed v)
@@ -348,11 +349,35 @@
 
 ; A device first seen on port p: given a slot if its port is enabled, as
 ; a USB 3 port is once its link is up, else reset, as a USB 2 port must
-; be.
+; be, once its connection has been steady for USB 2's debounce, 100 ms
+; (USB 2.0, 7.1.7.3; Linux's hub waits the same before a reset).
 (def port_begun ((h Hc) (p int) (v int)) Did
   (if (port_enabled v)
       (port_slotting h p (port_speed v))
-      (Did (hc_with_port h p (PortReset)) (cons (ActPort p (port_reset_write v)) (nil Act)))))
+      (Did (hc_with_port h p (PortReset))
+           (cons (port_line h p (append "connected, " (portsc_text v)))
+                 (cons (ActWait (debounce_ms)) (cons (ActPort p (port_reset_write v)) (nil Act)))))))
+
+; USB 2's timings, in milliseconds: a connection's debounce before its
+; port is reset; the recovery after a reset before the device is spoken
+; to, 10 ms by the spec and 50 by Linux's hub, which some devices need;
+; and the recovery after SET_ADDRESS, 2 ms by the spec and 10 by Linux's.
+(def debounce_ms () int 100)
+(def reset_recovery_ms () int 50)
+(def address_recovery_ms () int 10)
+
+; Port p, being reset, now v: once the reset is over, its device given a
+; slot after the reset's recovery if the port is enabled; given up if it
+; is not, as a reset that failed leaves it.
+(def port_reset_seen ((h Hc) (p int) (v int)) Did
+  (if (port_resetting v)
+      (Did h (nil Act))
+      (if (port_enabled v)
+          (then_acts (cons (port_line h p (append "reset, " (portsc_text v))) (cons (ActWait (reset_recovery_ms)) (nil Act)))
+                     (port_slotting h p (port_speed v)))
+          (if (port_reset_changed v)
+              (Did (hc_with_port h p (PortFailed)) (cons (port_line h p (append "reset, but not enabled: " (portsc_text v))) (nil Act)))
+              (Did h (nil Act))))))
 
 ; Port p's device, of speed, given a slot: Enable Slot sent.
 (def port_slotting ((h Hc) (p int) (speed int)) Did
@@ -566,7 +591,9 @@
       (if (not ok)
           (dev_failed h d why)
           (match s
-            ((DevAddressed) (dev_control h d (Ctl (ForDev8) (usb_get_descriptor (usb_desc_device) 0 8) (nil int) 8)))
+            ((DevAddressed)
+              (then_acts (cons (ActWait (address_recovery_ms)) (nil Act))
+                         (dev_control h d (Ctl (ForDev8) (usb_get_descriptor (usb_desc_device) 0 8) (nil int) 8))))
             ((DevEvaluated) (dev_control h d (Ctl (ForDev18) (usb_get_descriptor (usb_desc_device) 0 (usb_device_len)) (nil int) (usb_device_len)))))))))
 
 ; Set TR Dequeue done for endpoint dci of slot, past a TD that failed:

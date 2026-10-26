@@ -1568,8 +1568,10 @@ card, a virtio-net-pci, at 00:01.0, which moves the other functions down
 a slot, and so their INTx lines; the demo, on QEMU's user network, has
 none.
 
-`xhci` brings each device up alone: a USB 2 port is reset until it is
-enabled; Enable Slot gives it a slot, Address Device its address; then
+`xhci` brings each device up alone: a USB 2 port is reset, 100 ms after
+the device is seen (USB 2's debounce), until it is enabled; after 50 ms
+of the reset's recovery, Enable Slot gives it a slot, Address Device its
+address, and 10 ms more SET_ADDRESS's recovery; then
 GET_DESCRIPTOR reads 8 bytes, whose packet size Evaluate Context gives the
 default endpoint if it differs, then all 18, then 9 of the configuration
 and all wTotalLength (2 KB at most), and SET_CONFIGURATION chooses the
@@ -1577,7 +1579,16 @@ first. Commands go one at a time, and a stalled default endpoint is
 reset and sent past the transfer. Each ring is a DMA page, 127 TRBs a
 pass and its buffer in the second half, and a TD never straddles the
 Link TRB. A device costs 3 pages, an endpoint opened 1, from each
-controller's 64.
+controller's 64. After each interrupt `xhci` writes ERDP with Event
+Handler Busy cleared, even when it read no event, as Linux's `xhci_irq`
+does: an event read before interrupt moderation set its IP leaves EHB
+set with nothing new to read, and while EHB is set the controller
+raises no interrupt. On the Pi 5, RP1's vectors for the two controllers
+are routed level-triggered, as a DWC3's line is, and acknowledged in
+RP1 after each interrupt and once as each is bound: one RP1 sent before
+then, for what the firmware left pending, reached no one, and RP1 sent
+none again until acknowledged. Either left both devices hung after
+their ports' resets.
 
 `usb-hid` uses HID's boot protocol only: a keyboard's 8-byte reports,
 compared with the last to find what was pressed and let go (Linux's key
