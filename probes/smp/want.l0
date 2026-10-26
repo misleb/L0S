@@ -1,0 +1,76 @@
+; want.l0 -- CPU 0's loop in L0S's kernel, if L0 could run user threads
+; on the other CPUs (REQUEST-multiple-cpus.md): drain every trap they
+; posted, queue each thread that may go on, fill every CPU's ring from the
+; ready queue, and wait only when nothing came back. Processes stand for
+; the kernel's own here: a pid and its space, and a context for each.
+; l0 check rejects it today: cpu_count, cpu_run, cpu_trapped and cpu_wait
+; do not exist.
+
+; A thread to run: its pid, its space, and its context.
+(data Thread (Thread int int (array int)))
+
+; What a trap came back as: the CPU it ran on, its pid, and its context,
+; the context's own 104 words.
+(data Back (Back int int (array int)))
+
+; The trap cpu_trapped gave as a, its context first, then the CPU and
+; the tag.
+(def back_of ((a (array int))) Back
+  (let n (sub (array_len a) 2)
+    (Back (array_get a n) (array_get a (add n 1)) (array_resize a n 0))))
+
+; Every trap the other CPUs have posted, oldest first per CPU, each a
+; Back, drained in one pass; acc holds those taken so far, reversed.
+(def drain ((acc (list Back))) (list Back)
+  (let a (cpu_trapped)
+    (if (eq (array_len a) 0)
+        (rev acc)
+        (drain (cons (back_of a) acc)))))
+
+; Whether a thread whose trap is t may go on at once: a call answered
+; without waiting, here every call, or a page mapped on demand. A slice
+; ended or a fault goes back to the ready queue, so that any CPU with
+; room, not only this one, takes it next.
+(def goes_on ((t Trap)) bool
+  (match t
+    ((TrapCall n) true)
+    ((TrapMissing va) true)
+    ((TrapFault why va) false)
+    ((TrapInterrupt n) false)))
+
+; ts queued, first to last, on the CPUs from 1 below count, each on the
+; first CPU whose ring has room; those no ring had room for, to wait for
+; the next pass.
+(def fill ((ts (list Thread)) (cpu int) (count int) (deadline int)) (list Thread)
+  (if (or (is_empty ts) (ge cpu count))
+      ts
+      (match (head ts)
+        ((Thread pid s c)
+          (if (eq (cpu_run cpu s c deadline pid) 0)
+              (fill (tail ts) cpu count deadline)
+              (fill ts (add cpu 1) count deadline))))))
+
+; One pass of CPU 0's loop over the ready threads ts, with the space of
+; each pid in spaces: the traps handled as a batch, those that may go on
+; queued again on the CPU they ran on, the rest queued wherever there is
+; room, and a wait only when no trap came back. The threads left waiting.
+(def pass ((ts (list Thread)) (spaces (Map int int)) (slice int)) (list Thread)
+  (let bs (drain (nil Back))
+    (let deadline (add (clock_ns) slice)
+      (let left (fill (append ts (requeue bs spaces deadline)) 1 (cpu_count) deadline)
+        (if (is_empty bs)
+            (let w (cpu_wait) left)
+            left)))))
+
+; The threads of bs that go on queued again on their own CPU; those that
+; do not, or whose CPU has no room, given back to be queued anywhere.
+(def requeue ((bs (list Back)) (spaces (Map int int)) (deadline int)) (list Thread)
+  (if (is_empty bs)
+      (nil Thread)
+      (match (head bs)
+        ((Back cpu pid c)
+          (let s (match (map_get spaces pid) ((Some v) v) ((None) 0))
+            (let rest (requeue (tail bs) spaces deadline)
+              (if (if (goes_on (trap_of c)) (eq (cpu_run cpu s c deadline pid) 0) false)
+                  rest
+                  (cons (Thread pid s c) rest))))))))

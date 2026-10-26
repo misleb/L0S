@@ -2946,7 +2946,10 @@ a bad buffer, and wait on nothing.
   `tools/qemu-boot.sh`): `screendump` fails with "no surface" on a GL
   scanout. The 3D mode is tried by `make demo`.
 - One CPU, and round-robin scheduling with 10 ms slices. A process woken by
-  a message runs at the end of the current slice, not at once.
+  a message runs at the end of the current slice, not at once. L0 can't
+  start the board's other CPUs; running user threads on them, with the
+  kernel on CPU 0 and their traps passed back through rings in memory, is
+  asked for in [probes/smp](probes/smp/REQUEST-multiple-cpus.md).
 - **The SD card has run on QEMU only**, and slowly: `sdhci` moves every
   word through the controller's buffer, on one data line at 25 MHz, and
   polls. No DMA, no 4-bit bus, no high-speed modes, and a card is found
