@@ -111,7 +111,7 @@ def edge(src, tgt, relation, rel, line):
 
 def extract(root, files=None):
     """The extraction of the .l0 files under root (all git knows, unless
-    files names them): {'nodes', 'edges', 'stats'}."""
+    files names them): {'nodes', 'edges', 'stats', 'files'}."""
     root = Path(root)
     files = l0_files(root) if files is None else files
     nodes, edges = [], []
@@ -230,4 +230,23 @@ def extract(root, files=None):
     for nid, rel, body in bodies:
         walk(nid, rel, body, bound_names(body) if kinds[nid] == 'def' else set())
 
-    return {'nodes': nodes, 'edges': edges, 'stats': dict(stats)}
+    return {'nodes': nodes, 'edges': edges, 'stats': dict(stats), 'files': list(files)}
+
+
+def counted_as_code(det, root, files):
+    """graphify's detection det, with the .l0 files extracted here (files,
+    relative to root) moved from its unclassified ones into its code and
+    its totals, so the report counts them as in the graph. An .l0 file
+    git does not know stays unclassified, as it is not in the graph."""
+    root = Path(root).resolve()
+    ours = {str(root / f) for f in files}
+    moved = [p for p in det.get('unclassified') or [] if str(Path(p).resolve()) in ours]
+    if not moved:
+        return det
+    gone = set(moved)
+    words = sum(len(Path(p).read_text(encoding='utf-8', errors='replace').split()) for p in moved)
+    return {**det,
+            'files': {**det['files'], 'code': det['files'].get('code', []) + moved},
+            'unclassified': [p for p in det['unclassified'] if p not in gone],
+            'total_files': det['total_files'] + len(moved),
+            'total_words': det['total_words'] + words}

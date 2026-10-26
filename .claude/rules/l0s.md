@@ -5,8 +5,8 @@ alwaysApply: true
 
 # L0S rules
 
-L0S is a microkernel and its programs, in L0. Besides `AGENTS.md` (the L0
-language, which `l0 init` writes) there are three L0S skills: `l0s-dev` (the
+L0S is a microkernel and its programs, in L0. Besides `AGENTS.md` (L0S's
+overview, with the L0 language in the block `l0 init` writes) there are three L0S skills: `l0s-dev` (the
 map, checklists for adding programs, libraries, requests and system calls,
 pitfalls), `l0s-testing` and `l0s-ui`. Load the one that fits before
 changing code.
@@ -17,7 +17,10 @@ changing code.
   any other `Q=TEXT` searches. Queries reach the programs' and tools' own
   sources too, after the libraries'. `l0 doc` does the same for the L0
   standard library. Use both before writing a helper, and before grepping
-  for a name; grep is for finding where something is used.
+  for a name. For who calls a name and what a change to it reaches, ask
+  the knowledge graph, `graphify explain "NAME()"` and `graphify affected
+  "NAME()"` (AGENTS.md's "Learning the code"), before opening files; grep
+  is for text, and for what the graph cannot resolve.
 - **Done** means `make check` and `make test` pass, and also `make e2e` for
   anything that boots, drives a device, draws or takes input, and
   `make test-virt` for the kernel. Say which ran; never claim L0 code works
@@ -40,7 +43,7 @@ changing code.
   libraries, protocols, system calls, the demo's pids, tests, limits.
 - **Edit source with the editor tools**, not sed, awk or script rewrites.
 - **Commit** only when asked, and never `build/`.
-- **If `AGENTS.md` has lost its L0S block** (between `<!-- L0S begin -->`
-  and `<!-- L0S end -->`), `l0 init` has replaced it: restore the block from
-  git (`git log -p -- AGENTS.md`). The rest of that file is `l0 init`'s and is
-  not edited here.
+- **`AGENTS.md` is L0S's**, except the block between the
+  `<!-- l0 init: begin ... -->` and `<!-- l0 init: end -->` lines, which
+  `l0 init` rewrites and which is not edited here. Keep L0S's own text
+  outside those markers.

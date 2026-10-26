@@ -35,8 +35,7 @@ make -s doc Q=port_send                   # the libraries' documentation, as l0 
 make -s doc Q=sbin/wm/wm                  # a file by the end of its path; names and searches reach the programs too
 ```
 
-Agents working on L0S: see the L0S block at the end of
-[AGENTS.md](AGENTS.md), the skills in [.claude/skills](.claude/skills) and
+Agents working on L0S: see [AGENTS.md](AGENTS.md), the skills in [.claude/skills](.claude/skills) and
 the rules in [.claude/rules](.claude/rules).
 
 Requirements:

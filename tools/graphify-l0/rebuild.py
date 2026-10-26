@@ -101,6 +101,9 @@ def rebuild(root):
     # shrink guard is passed over: the docs' nodes are kept regardless.
     to_json(G, communities, str(graph_path), force=True, community_labels=labels)
     tokens = {'input': 0, 'output': 0}
+    # graphify's detection skips .l0, so its report would call the L0 not
+    # in the graph; count what l0_graph read as code instead.
+    det = l0_graph.counted_as_code(det, root, l0['files'])
     report = generate(G, communities, cohesion, labels, gods, surprises, det, tokens,
                       str(root), suggested_questions=questions)
     (out / 'GRAPH_REPORT.md').write_text(report, encoding='utf-8')

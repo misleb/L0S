@@ -1,3 +1,60 @@
+# L0S
+
+This project is L0S, a microkernel and its programs, in L0. This file is
+L0S's own; only the block between the `l0 init` markers below is `l0
+init`'s, which it rewrites and which is not edited here. L0S's guidance is
+in `.claude/` (Cursor sees the same files through symlinks in `.cursor/`):
+
+- **Skills**: load the one that fits before changing code. `l0-code` (the
+  language: syntax, idioms, the check loop), `l0s-dev` (where everything
+  is, how to add a program, library, request or system call, the
+  pitfalls, the knowledge graph), `l0s-testing` (what to run when,
+  writing tests, the screen tests, debugging on the board), `l0s-ui` (the
+  toolkit, the compositor, the display).
+- **Rules**: `.claude/rules/`, `l0s.md` always, the others by path.
+- **Done** means `make check` and `make test` pass, plus `make e2e` for
+  anything that boots, draws or takes input, and `make test-virt` for the
+  kernel.
+
+## Learning the code
+
+Ask before reading. Each question has its tool, and opening file after
+file is none of them:
+
+| Question | Ask |
+|---|---|
+| What is NAME, what does it take and say? | `make -s doc Q=NAME` (L0S), `l0 doc NAME` (L0's library) |
+| Who calls it, what does it call, where is it? | `graphify explain "NAME()"` |
+| What does a change to it reach? Ask before changing a name others use | `graphify affected "NAME()"` |
+| Which program talks to which, at run time? | the README's table under "The interactive demo" |
+| Where does this text appear? | grep |
+
+A def is `"NAME()"`, a type or constructor bare `NAME`. A name several
+files define prints each match's node id (the file's path with `_` for
+`/`, then the name), which `explain` takes in its place. Each edge gives
+the file and line, so read only those lines.
+
+**graphify does not read L0; this project does.** `tools/graphify-l0`
+parses the `.l0` files into graphify's graph, so:
+
+- Rebuild it with `make graph`, never `/graphify` on the code: graphify's
+  own pass would leave the L0 out. The post-commit hook (`make
+  graph-hook`) runs `make graph` after each commit. `/graphify --update`
+  is for the docs only, and `/graphify` itself only to build the graph
+  the first time.
+- The graph has the `.l0` files git knows. A new one is in it once it is
+  added and the graph rebuilt; until then `GRAPH_REPORT.md` lists it as
+  unclassified.
+- Prefer `explain` and `affected` to `graphify query`, which the
+  `graphify` skill reaches for first and which is only a loose search.
+- The graph has calls and type uses, not messages between programs, and
+  leaves out a call it cannot resolve to one definition rather than
+  guessing: grep before deleting a name.
+- In a worktree there is no `graphify-out/`; ask the main checkout's
+  with `--graph`, as `l0s-dev` shows, and grep for what the branch
+  changed.
+
+<!-- l0 init: begin 279358684-14062; l0 init replaces what is between these lines -->
 # Working with L0 in this project
 
 L0 is a statically typed language compiled to native code through LLVM.
@@ -243,23 +300,4 @@ nesting more than about four levels deep.
 
 The `l0-code` skill covers both in detail, along with the syntax that differs
 from what other languages would lead you to expect.
-
-<!-- L0S begin: everything above is l0 init's; restore this block from git if l0 init replaces the file -->
-## L0S
-
-This project is L0S, a microkernel and its programs, in L0. Its own
-guidance, which `l0 init` never touches, is in `.claude/` (Cursor sees the
-same files through symlinks in `.cursor/`):
-
-- **Skills**: `l0s-dev` (where everything is, how to add a program, library,
-  request or system call, the pitfalls), `l0s-testing` (what to run when,
-  writing tests, the screen tests, debugging on the board), `l0s-ui` (the
-  toolkit, the compositor, the display). Load the one that fits first.
-- **Rules**: `.claude/rules/`, `l0s.md` always, the others by path.
-- **Lookup**: `make -s doc [Q=NAME|FILE|TEXT]` is `l0 doc` for L0S's own
-  code, the libraries' first, then the programs' and tools'; the l0s MCP
-  server's `doc` tool is the same. Use it before grepping for a name.
-- **Done** means `make check` and `make test` pass, plus `make e2e` for
-  anything that boots, draws or takes input, and `make test-virt` for the
-  kernel.
-<!-- L0S end -->
+<!-- l0 init: end -->

@@ -85,6 +85,20 @@ class L0GraphTest(unittest.TestCase):
     def test_comments_and_strings_are_not_code(self):
         self.assertEqual(l0_graph.parse('; (def x)\n"(def y)" (def z () int 1)')[-1][2][0], 'z')
 
+    def test_extracted_files_count_as_code(self):
+        root = Path(self.tmp.name)
+        (root / 'new.l0').write_text('; not in git\n')
+        (root / 'Makefile').write_text('all:\n')
+        unclassified = [str(root / f) for f in ('lib/lib.l0', 'new.l0', 'Makefile')]
+        det = {'files': {'code': ['x.py']}, 'unclassified': unclassified,
+               'total_files': 4, 'total_words': 10}
+        got = l0_graph.counted_as_code(det, root, self.g['files'])
+        self.assertEqual(got['files']['code'], ['x.py', str(root / 'lib/lib.l0')])
+        self.assertEqual(got['unclassified'], [str(root / 'new.l0'), str(root / 'Makefile')])
+        self.assertEqual(got['total_files'], 5)
+        self.assertEqual(got['total_words'], 10 + len(LIB.split()))
+        self.assertEqual(det['total_files'], 4)
+
 
 if __name__ == '__main__':
     unittest.main()
