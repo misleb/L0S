@@ -1,0 +1,161 @@
+; fw.l0 -- what hvs asks the VideoCore firmware over the mailbox
+; (user/lib/sys/mailbox.l0): how many displays it brought up, which
+; tells whether the HVS is clocked at all; the state and rate of the two
+; clocks the HVS runs on; and that the display is the driver's now. The
+; requests are built and their replies read purely; the asking is
+; mailbox_ask. The tags and clock ids are Linux's
+; include/soc/bcm2835/raspberrypi-firmware.h, and the clocks the HVS's
+; (vc4_hvs_bind's core and disp).
+
+; ---------------------------------------------------------------- tags
+
+; RPI_FIRMWARE_GET_CLOCK_STATE, GET_CLOCK_RATE, GET_MAX_CLOCK_RATE,
+; SET_CLOCK_STATE, SET_CLOCK_RATE, GET_NUM_DISPLAYS and
+; NOTIFY_DISPLAY_DONE.
+(def tag_get_clock_state () int 196609)      ; 0x00030001
+(def tag_get_clock_rate () int 196610)       ; 0x00030002
+(def tag_get_max_clock_rate () int 196612)   ; 0x00030004
+(def tag_set_clock_state () int 229377)      ; 0x00038001
+(def tag_set_clock_rate () int 229378)       ; 0x00038002
+(def tag_get_num_displays () int 262163)     ; 0x00040013
+(def tag_notify_display_done () int 196710)  ; 0x00030066
+
+; The firmware's clocks the HVS runs on: CORE, 4, and DISP, 16.
+(def fw_clk_core () int 4)
+(def fw_clk_disp () int 16)
+
+; A clock's name, for what the driver says.
+(def fw_clock_name ((id int)) (list int)
+  (if (eq id (fw_clk_core)) "CORE" (if (eq id (fw_clk_disp)) "DISP" (append "clock " (digits id)))))
+
+; ------------------------------------------------------------ requests
+
+; A buffer of one tag with the value words vs: its size in bytes, the
+; request's code 0, the tag, its value's bytes, its own code 0, the
+; value, and the end tag.
+(def fw_request ((tag int) (vs (list int))) (list int)
+  (let n (length vs)
+    (cons (mul 4 (add n 6)) (cons 0 (cons tag (cons (mul 4 n) (cons 0 (append vs (cons 0 (nil int))))))))))
+
+; NOTIFY_DISPLAY_DONE, which has no value.
+(def display_done_request () (list int) (fw_request (tag_notify_display_done) (nil int)))
+
+; GET_NUM_DISPLAYS: one word, the answer.
+(def num_displays_request () (list int) (fw_request (tag_get_num_displays) (cons 0 (nil int))))
+
+; GET_CLOCK_STATE, GET_CLOCK_RATE and GET_MAX_CLOCK_RATE of clock id: its
+; id, and a word for the answer.
+(def clock_get_request ((tag int) (id int)) (list int)
+  (fw_request tag (cons id (cons 0 (nil int)))))
+
+; SET_CLOCK_STATE of clock id on: its id and the state, bit 0 on.
+(def clock_on_request ((id int)) (list int)
+  (fw_request (tag_set_clock_state) (cons id (cons 1 (nil int)))))
+
+; SET_CLOCK_RATE of clock id to rate: its id, the rate in Hz, and 0, to
+; let the firmware's turbo settings stand.
+(def clock_rate_request ((id int) (rate int)) (list int)
+  (fw_request (tag_set_clock_rate) (cons id (cons rate (cons 0 (nil int))))))
+
+; ------------------------------------------------------------- replies
+
+; Value word i of ws, a reply of one tag, if the firmware says it
+; answered and wrote that word.
+(def fw_value ((ws (list int)) (i int)) (Option int)
+  (if (if (property_answered ws) (lt (add 5 i) (length ws)) false)
+      (Some (nth ws (add 5 i)))
+      ((None int))))
+
+; A clock's state word: bit 0 on, bit 1 no such clock.
+(def clock_is_on ((state int)) bool (eq (bit_and state 1) 1))
+(def clock_missing ((state int)) bool (eq (bit_and state 2) 2))
+
+; What the driver says of a clock: its name, its state and its rate in
+; Hz, or that the firmware did not say.
+(def clock_line ((id int) (state (Option int)) (rate (Option int))) (list int)
+  (append (fw_clock_name id)
+    (append ": "
+      (append (match state
+                ((None) "state not given")
+                ((Some s) (if (clock_missing s) "no such clock" (if (clock_is_on s) "on" "off"))))
+        (append ", "
+          (match rate ((None) "rate not given") ((Some r) (append (digits r) " Hz"))))))))
+
+; ---------------------------------------------------------------- asking
+
+; The answer, value word i, to request ws of the mailbox mb, if it came.
+(def fw_asked ((mb Mailbox) (ws (list int)) (i int)) (Option int)
+  (match (mailbox_ask mb ws (length ws))
+    ((None) ((None int)))
+    ((Some r) (fw_value r i))))
+
+; How many displays the firmware brought up at boot, if it said.
+(def fw_displays ((mb Mailbox)) (Option int) (fw_asked mb (num_displays_request) 0))
+
+; Clock id's state word and rate in Hz, if the firmware said.
+(def fw_clock_state ((mb Mailbox) (id int)) (Option int)
+  (fw_asked mb (clock_get_request (tag_get_clock_state) id) 1))
+(def fw_clock_rate ((mb Mailbox) (id int)) (Option int)
+  (fw_asked mb (clock_get_request (tag_get_clock_rate) id) 1))
+(def fw_clock_max_rate ((mb Mailbox) (id int)) (Option int)
+  (fw_asked mb (clock_get_request (tag_get_max_clock_rate) id) 1))
+
+; What clock id is now, as the driver says it.
+(def clock_now ((mb Mailbox) (id int)) (list int)
+  (clock_line id (fw_clock_state mb id) (fw_clock_rate mb id)))
+
+; Clock id made sure of, as vc4_hvs_bind's clk_prepare_enable does: on,
+; if the firmware says it is off, and at its highest rate, if it reads
+; 0. Each change said before it is asked for. 0.
+(def clock_ensured ((mb Mailbox) (id int)) int
+  (let a (match (fw_clock_state mb id)
+           ((None) (warn_as "hvs" (append (fw_clock_name id) ": the firmware gave no state")))
+           ((Some s)
+             (if (clock_is_on s)
+                 0
+                 (let w (info_as "hvs" (append "turning on " (fw_clock_name id)))
+                   (match (fw_asked mb (clock_on_request id) 1)
+                     ((None) (warn_as "hvs" (append (fw_clock_name id) ": the firmware did not turn it on")))
+                     ((Some n) 0))))))
+    (match (fw_clock_rate mb id)
+      ((None) (warn_as "hvs" (append (fw_clock_name id) ": the firmware gave no rate")))
+      ((Some r) (if (gt r 0) 0 (clock_maxed mb id))))))
+
+; Clock id set to the highest rate the firmware gives it: 0.
+(def clock_maxed ((mb Mailbox) (id int)) int
+  (match (fw_clock_max_rate mb id)
+    ((None) (warn_as "hvs" (append (fw_clock_name id) ": the firmware gave no highest rate")))
+    ((Some m)
+      (let w (info_as "hvs" (append "setting " (append (fw_clock_name id) (append " to " (append (digits m) " Hz")))))
+        (match (fw_asked mb (clock_rate_request id m) 1)
+          ((None) (warn_as "hvs" (append (fw_clock_name id) ": the firmware did not set its rate")))
+          ((Some n) 0))))))
+
+; Both of the HVS's clocks made sure of, then what each is said: 0.
+(def clocks_ensured ((mb Mailbox)) int
+  (let a (clock_ensured mb (fw_clk_core))
+    (let b (clock_ensured mb (fw_clk_disp))
+      (clocks_said mb "clocks"))))
+
+; What both clocks are now, said after what: 0.
+(def clocks_said ((mb Mailbox) (what (list int))) int
+  (let a (info_as "hvs" (append what (append ": " (clock_now mb (fw_clk_core)))))
+    (info_as "hvs" (append what (append ": " (clock_now mb (fw_clk_disp)))))))
+
+; The firmware told the display is the driver's, as Linux's vc4 does
+; before it takes the HVS: until it is, the firmware goes on using the
+; HVS's IOMMU, and once the driver has set that IOMMU up anew, what the
+; firmware writes through it lands in memory L0 has given. 0, with a
+; warning if the firmware did not answer.
+(def display_released_by ((mb Mailbox)) int
+  (let w (info_as "hvs" "telling the firmware the display is ours")
+    (match (mailbox_ask mb (display_done_request) 6)
+      ((None) (warn_as "hvs" "the firmware did not answer that the display is ours"))
+      ((Some ws) 0))))
+
+; The same through a mailbox of its own: 0, with a warning if there is
+; none.
+(def display_released () int
+  (match (mailbox_open)
+    ((NoMbox why) (warn_as "hvs" (append "the firmware was not told the display is ours: " why)))
+    ((MboxOpen mb) (display_released_by mb))))

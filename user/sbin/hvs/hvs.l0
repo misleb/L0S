@@ -23,68 +23,250 @@
 ; - The pointer is a plane on top with its pixels' own alpha.
 ; - Corners are not cut yet: shape is kept, and the window shows whole.
 ;
-; None of this has run on a board: L0 gives no region over the HVS or
-; the IOMMUs yet (probes/display/REQUEST-pi5-hvs-iommu.md), so until it
-; does the driver says there is no HVS and exits 0, as it does on QEMU.
-; Raspberry Pi's Linux is the guide, and the README's first-run checklist
-; says what to look at on the first board.
+; L0 gives the HVS and both IOMMUs as regions on the Pi 5 (L0 roadmap
+; 0105); on QEMU there are none, and the driver says there is no HVS and
+; exits 0. The HVS answers only once the firmware has brought a monitor
+; up on HDMI0 at boot, and a read of it unclocked hangs the board with no
+; fault, so the driver asks the firmware first (fw.l0). It has shown
+; the desktop on a board. It was brought up a stage at a time, by its
+; argument, each stage doing all the one before it does and then
+; exiting, which is still how to look at the HVS:
+;
+;   hvs probe   reads the firmware's displays and clocks, the HVS's and
+;               the IOMMU's registers and the firmware's list, tells the
+;               firmware the display is ours, and reads the clocks again
+;   hvs list    the display released, its clocks made sure of, and the
+;               channel moved to an empty list of the driver's own
+;   hvs iommu   the IOMMU then set up as bcm2712_iommu_init does
+;   hvs         all that, then serving display
+;
+; Every step that could hang says so before it runs, and the kernel
+; writes that line out at once, so the last line names it. Raspberry
+; Pi's Linux is the guide, and the README's first-run checklist says what
+; to look at on the board.
 
 ; What ends the driver, said as hvs: 1.
 (def complain ((why (list int))) int (fail_as "hvs" why))
 
 ; ---------------------------------------------------------------- start
 
-; Finds the HVS and HDMI0's channel, takes the IOMMU, and serves.
-(def hvs () int
+; ---------------------------------------------------------------- stages
+
+; How far the driver goes before it stops (the file's header): each stage
+; does all the one before it does.
+(data Stage (StageProbe) (StageList) (StageIommu) (StageFull))
+
+; Its place in that order, 0 for probe to 3 for serving.
+(def stage_rank ((s Stage)) int
+  (match s ((StageProbe) 0) ((StageList) 1) ((StageIommu) 2) ((StageFull) 3)))
+
+; Whether stage s stops at stage t, having done it.
+(def stops_at ((s Stage) (t Stage)) bool (eq (stage_rank s) (stage_rank t)))
+
+; The stage hvs's arguments as name: none is serving, else probe, list or
+; iommu; anything else is none.
+(def stage_of ((as (list (list int)))) (Option Stage)
+  (if (is_empty as)
+      (Some (StageFull))
+      (if (not (is_empty (tail as)))
+          ((None Stage))
+          (stage_named (head as)))))
+
+; The stage called a, if one is.
+(def stage_named ((a (list int))) (Option Stage)
+  (if (eq a "probe") (Some (StageProbe))
+  (if (eq a "list") (Some (StageList))
+  (if (eq a "iommu") (Some (StageIommu))
+  ((None Stage))))))
+
+; A step said before it is taken, so that if it hangs the board it is the
+; last line on the serial line; as debug, kept and not printed, once the
+; driver serves, past the stages. 0.
+(def step ((s Stage) (what (list int))) int
+  (if (stops_at s (StageFull)) (debug_as "hvs" what) (info_as "hvs" what)))
+
+; hvs [probe | list | iommu], from main.
+(def hvs_main ((as (list (list int)))) int
+  (match (stage_of as)
+    ((None) (complain "usage: hvs [probe | list | iommu]"))
+    ((Some s) (hvs s))))
+
+; ---------------------------------------------------------------- start
+
+; Finds the HVS and HDMI0's channel, takes the IOMMU, and serves, or
+; stops after stage s.
+(def hvs ((s Stage)) int
   (match (open_device (hvs_base) (hvs_bytes))
     ((DeviceFailed fault why) (info_as "hvs" "no HVS on the board"))
-    ((DeviceOpened d) (with_hvs d))))
+    ((DeviceOpened d)
+      (match (mailbox_open)
+        ((NoMbox why) (complain (append "cannot ask the firmware whether the HVS is clocked: " why)))
+        ((MboxOpen mb) (guarded d mb s))))))
+
+; The HVS read only if the firmware brought a display up at boot: with
+; none, the HVS has no clock, and its first read hangs the board.
+(def guarded ((d IoDevice) (mb Mailbox) (s Stage)) int
+  (let w (info_as "hvs" "asking the firmware how many displays it brought up")
+    (match (fw_displays mb)
+      ((None) (complain "the firmware did not say how many displays it brought up"))
+      ((Some n)
+        (if (eq n 0)
+            (info_as "hvs" "no monitor on HDMI0 at boot; the HVS is unclocked")
+            (let c (clocks_said mb "at boot")
+              (let r (step s "reading the HVS's version")
+                (with_hvs d mb s))))))))
 
 ; The HVS opened as d: its layout, and HDMI0's channel's mode. A channel
 ; that does not run is no screen, which is no failure.
-(def with_hvs ((d IoDevice)) int
+(def with_hvs ((d IoDevice) (mb Mailbox) (s Stage)) int
   (let v (device_read32 d (hvs_version))
     (match (hvs_gen_of v)
-      ((None) (complain (append "an HVS of version 0x" (append (hex_digits v 2) " this driver does not know"))))
+      ((None) (complain (append "an HVS of version 0x" (append (hex_digits v 8) " this driver does not know"))))
       ((Some g)
-        (let c (device_read32 d (disp_ctrl0 g (hdmi0_channel)))
-          (if (ctrl0_enabled c)
-              (let r (display_released)
-                (with_iommus d g (ctrl0_width c) (ctrl0_height c)))
-              (info_as "hvs" "no screen on HDMI0: the firmware left its channel off")))))))
+        (if (stops_at s (StageProbe))
+            (probed d g mb)
+            (let c (device_read32 d (disp_ctrl0 g (hdmi0_channel)))
+              (if (ctrl0_enabled c)
+                  (taken_over d g mb s (ctrl0_width c) (ctrl0_height c))
+                  (info_as "hvs" "no screen on HDMI0: the firmware left its channel off"))))))))
 
-; The firmware told the display is the driver's, as Linux's vc4 does
-; before it takes the HVS: until it is, the firmware goes on using the
-; HVS's IOMMU, and once the driver has set that IOMMU up anew, what the
-; firmware writes through it lands in memory L0 has given. 0, with a
-; warning if the firmware did not answer.
-(def display_released () int
-  (match (mailbox_open)
-    ((NoMbox why) (warn_as "hvs" (append "the firmware was not told the display is ours: " why)))
-    ((MboxOpen mb)
-      (match (mailbox_ask mb (display_done_request) 6)
-        ((None) (warn_as "hvs" "the firmware did not answer that the display is ours"))
-        ((Some ws) 0)))))
+; The display released, its clocks made sure of, and the channel on an
+; empty list of the driver's own; then, past stage list, the IOMMU.
+(def taken_over ((d IoDevice) (g HvsGen) (mb Mailbox) (s Stage) (w int) (h int)) int
+  (let r (display_released_by mb)
+    (let c (clocks_ensured mb)
+      (let k (own_list d g s)
+        (if (stops_at s (StageList))
+            (channel_said d g "on its own list")
+            (with_iommus d g s k w h))))))
 
-; RPI_FIRMWARE_NOTIFY_DISPLAY_DONE, which has no value.
-(def tag_notify_display_done () int 196710)   ; 0x00030066
+; ----------------------------------------------------------------- probe
 
-; The buffer telling it: its size, the request's code, the tag, its
-; value's 0 bytes, its own code, and the end tag.
-(def display_done_request () (list int)
-  (cons 24 (cons 0 (cons (tag_notify_display_done) (cons 0 (cons 0 (cons 0 (nil int))))))))
+; A register's name, where it is, and the word read there.
+(def reg_line ((name (list int)) (off int) (w int)) (list int)
+  (append name (append " (0x" (append (hex_digits off 4) (append ") = 0x" (hex_digits w 8))))))
 
-; The IOMMU in front of the HVS and its cache opened, for a screen w by h.
-(def with_iommus ((d IoDevice) (g HvsGen) (w int) (h int)) int
+; A register of a device, by name and offset.
+(data NamedReg (NamedReg (list int) int))
+
+; The registers probe reads of the HVS: its version and HDMI0's channel's.
+(def hvs_regs ((g HvsGen)) (list NamedReg)
+  (cons (NamedReg "VERSION" (hvs_version))
+  (cons (NamedReg "DISP0 CTRL0" (disp_ctrl0 g (hdmi0_channel)))
+  (cons (NamedReg "DISP0 CTRL1" (disp_ctrl1 g (hdmi0_channel)))
+  (cons (NamedReg "DISP0 BGND" (disp_bgnd g (hdmi0_channel)))
+  (cons (NamedReg "DISP0 LPTRS" (disp_lptrs g (hdmi0_channel)))
+  (cons (NamedReg "DISP0 STATUS" (disp_status g (hdmi0_channel)))
+  (cons (NamedReg "DISP0 DL" (disp_dl g (hdmi0_channel)))
+  (nil NamedReg)))))))))
+
+; The registers probe and stage iommu read of the IOMMU in front of the HVS.
+(def iommu_regs () (list NamedReg)
+  (cons (NamedReg "iommu4 CTRL" (mmu_ctrl))
+  (cons (NamedReg "iommu4 PT_PA_BASE" (mmu_pt_pa_base))
+  (cons (NamedReg "iommu4 ADDR_CAP" (mmu_addr_cap))
+  (cons (NamedReg "iommu4 BYPASS_START" (mmu_bypass_start))
+  (cons (NamedReg "iommu4 BYPASS_END" (mmu_bypass_end))
+  (cons (NamedReg "iommu4 MISC" (mmu_misc))
+  (cons (NamedReg "iommu4 ILLEGAL_ADR" (mmu_illegal_adr))
+  (cons (NamedReg "iommu4 DEBUG_INFO" (mmu_debug_info))
+  (nil NamedReg))))))))))
+
+; Each of rs read from d and said, each said before it is read: 0.
+(def regs_said ((d IoDevice) (rs (list NamedReg))) int
+  (if (is_empty rs)
+      0
+      (match (head rs)
+        ((NamedReg name off)
+          (let w (info_as "hvs" (append "reading " name))
+            (let s (info_as "hvs" (reg_line name off (device_read32 d off)))
+              (regs_said d (tail rs))))))))
+
+; The words of list memory from word i to the end marker, at most n: 0.
+(def dlist_said ((d IoDevice) (i int) (n int)) int
+  (if (if (le n 0) true (ge i (dlist_words)))
+      0
+      (let w (device_read32 d (dlist_word_offset i))
+        (let s (info_as "hvs" (reg_line (append "dlist " (digits i)) (dlist_word_offset i) w))
+          (if (eq (bit_and w (dlist_end)) (dlist_end)) 0 (dlist_said d (add i 1) (sub n 1)))))))
+
+; Stage probe: the HVS's registers and the firmware's list, the IOMMU's
+; and its cache's, all read; then the display released and the clocks
+; read again, touching the HVS no more. 0.
+(def probed ((d IoDevice) (g HvsGen) (mb Mailbox)) int
+  (let a (info_as "hvs" (append "an HVS " (hvs_gen_name g)))
+    (let b (regs_said d (hvs_regs g))
+      (let c (dlist_said d (dl_active (device_read32 d (disp_dl g (hdmi0_channel)))) 64)
+        (let e (iommus_said)
+          (let r (display_released_by mb)
+            (let k (clocks_said mb "released")
+              (info_as "hvs" "probe done"))))))))
+
+; The IOMMU's registers and its cache's word 0, read and said: 0.
+(def iommus_said () int
+  (match (open_device (iommu4_base) (iommu_bytes))
+    ((DeviceFailed fault why) (warn_as "hvs" "no IOMMU in front of the HVS on the board"))
+    ((DeviceOpened mmu)
+      (let a (regs_said mmu (iommu_regs))
+        (let c (close_device mmu)
+          (match (open_device (iommuc_base) (iommu_bytes))
+            ((DeviceFailed fault why) (warn_as "hvs" "no IOMMU cache on the board"))
+            ((DeviceOpened cache)
+              (let b (regs_said cache (cons (NamedReg "iommuc 0" 0) (nil NamedReg)))
+                (let e (close_device cache) 0)))))))))
+
+; Where HDMI0's channel is, said after what: its status and its list. 0.
+(def channel_said ((d IoDevice) (g HvsGen) (what (list int))) int
+  (let st (device_read32 d (disp_status g (hdmi0_channel)))
+    (let dl (device_read32 d (disp_dl g (hdmi0_channel)))
+      (info_as "hvs" (append what (append ": " (channel_line st dl)))))))
+
+; The channel's status and list, as said: its mode, frame count and the
+; word its list starts at.
+(def channel_line ((st int) (dl int)) (list int)
+  (append "channel mode " (append (digits (status_mode st))
+    (append ", frame " (append (digits (status_frames st))
+      (append ", list at word " (digits (dl_active dl))))))))
+
+; -------------------------------------------------------------- own list
+
+; The channel's background black, then the channel moved to a list of the
+; driver's own holding only its end, in the half the firmware's list is
+; not in, before the IOMMU changes under it: that half, 0 or 1.
+(def own_list ((d IoDevice) (g HvsGen) (s Stage)) int
+  (let a (step s "writing HDMI0's background black")
+    (let b (background_black d g)
+      (let k (if (eq (live_half d g) 0) 1 0)
+        (let c (step s (append "writing an empty list at word " (digits (dlist_half_start k))))
+          (let wr (words_written d (dlist_half_start k) (list_words g (nil Plane)))
+            (let e (step s "moving HDMI0's channel to it")
+              (let m (list_switched d g (dlist_half_start k)) k))))))))
+
+; The channel's background black and filled in where no plane is: 0.
+(def background_black ((d IoDevice) (g HvsGen)) int
+  (let b (device_write32 d (disp_bgnd g (hdmi0_channel)) 0)
+    (let c (device_read32 d (disp_ctrl1 g (hdmi0_channel)))
+      (device_write32 d (disp_ctrl1 g (hdmi0_channel)) (ctrl1_with_background c)))))
+
+; The half of the list memory the channel fetches from now, 0 or 1, or
+; -1 if its list is in neither, as the firmware's may be.
+(def live_half ((d IoDevice) (g HvsGen)) int
+  (dlist_half_of (dl_active (device_read32 d (disp_dl g (hdmi0_channel))))))
+
+; ----------------------------------------------------------------- iommu
+
+; The IOMMU in front of the HVS and its cache opened, for a screen w by
+; h, the channel on its list in half k.
+(def with_iommus ((d IoDevice) (g HvsGen) (s Stage) (k int) (w int) (h int)) int
   (match (open_device (iommu4_base) (iommu_bytes))
     ((DeviceFailed fault why) (info_as "hvs" "no IOMMU in front of the HVS on the board"))
     ((DeviceOpened mmu)
       (match (open_device (iommuc_base) (iommu_bytes))
         ((DeviceFailed fault why) (info_as "hvs" "no IOMMU cache on the board"))
-        ((DeviceOpened cache) (with_tables d g mmu cache w h))))))
+        ((DeviceOpened cache) (with_tables d g mmu cache s k w h))))))
 
 ; The IOMMU's tables, in DMA pages of this driver's, opened to write.
-(def with_tables ((d IoDevice) (g HvsGen) (mmu IoDevice) (cache IoDevice) (w int) (h int)) int
+(def with_tables ((d IoDevice) (g HvsGen) (mmu IoDevice) (cache IoDevice) (s Stage) (k int) (w int) (h int)) int
   (match (dma_alloc (table_pages))
     ((DmaDenied) (complain "may not drive devices: it needs a dev line"))
     ((DmaTooMany) (complain "the IOMMU's tables are more pages than one allocation"))
@@ -95,36 +277,68 @@
         ((DeviceOpened t)
           (match (page_addresses va (table_pages))
             ((None) (complain "the IOMMU's tables are not DMA pages"))
-            ((Some addrs) (started (Hw d g mmu cache t va addrs) w h))))))))
+            ((Some addrs) (started (Hw d g mmu cache t va addrs) s k w h))))))))
 
 ; The hardware the driver keeps: the HVS, its layout, the IOMMU and its
 ; cache, and the IOMMU's tables, opened, where this process sees them,
 ; and where the IOMMU reaches each page.
 (data Hw (Hw IoDevice HvsGen IoDevice IoDevice IoDevice int (array int)))
 
-; The IOMMU on, what no plane covers black, and the driver serving: its
-; first list goes in the half the firmware's is not in.
-(def started ((hw Hw) (w int) (h int)) int
-  (let a (iommu_on hw)
-    (let b (background_black hw)
-      (start_serving (Drv hw w h ((MapEmpty int Buffer)) (nil Layer) (no_cursor) (aperture_new) (live_half hw))))))
+; The IOMMU on, under the channel's own list, which fetches no plane;
+; then, past stage iommu, the driver serving, the channel's list in half
+; k.
+(def started ((hw Hw) (s Stage) (k int) (w int) (h int)) int
+  (let a (iommu_on hw s)
+    (if (stops_at s (StageIommu))
+        (match hw
+          ((Hw d g mmu cache t tva addrs)
+            (let r (regs_said mmu (iommu_regs))
+              (channel_said d g "under the IOMMU"))))
+        (start_serving (Drv hw w h ((MapEmpty int Buffer)) (nil Layer) (no_cursor) (aperture_new) k)))))
 
 ; Each second-level table entered in the first, the tables cleaned out of
-; the caches for the IOMMU to read, then the IOMMU's registers as
-; bcm2712_iommu_init sets them: the tables' base, the aperture's end, and
-; everything below the aperture passed through, so the firmware's own
-; list still shows. Then its TLB and the cache cleared. 0.
-(def iommu_on ((hw Hw)) int
+; the caches for the IOMMU to read, then the IOMMU's registers in the
+; order bcm2712_iommu_init writes them: off, its sticky bits and TLB
+; cleared; two levels; the aperture's end; everything below the aperture
+; passed through, so what the firmware left still fetches; the tables'
+; base; and the default page. Then the cache flushed and the IOMMU on.
+; 0.
+(def iommu_on ((hw Hw) (s Stage)) int
   (match hw
     ((Hw d g mmu cache t tva addrs)
       (let e (l1_entries t addrs 0)
-        (let s (dma_synced tva (table_pages))
-          (let dbg (device_read32 mmu (mmu_debug_info))
-            (let p (device_write32 mmu (mmu_pt_pa_base) (pt_pa_base (array_get addrs 0)))
-              (let c (device_write32 mmu (mmu_addr_cap) (addr_cap))
-                (let b (device_write32 mmu (mmu_bypass_end) (bypass_end dbg))
-                  (let on (device_write32 mmu (mmu_ctrl) (mmu_ctrl_on))
-                    (iommu_cleared hw)))))))))))
+        (let y (dma_synced tva (table_pages))
+          (let r (step s "writing iommu4 CTRL off, its sticky bits and TLB cleared")
+            (let c (device_write32 mmu (mmu_ctrl) (mmu_ctrl_reset))
+              (let p (if (polled mmu (mmu_ctrl) 7 100) 0 (warn_as "hvs" "the IOMMU's TLB did not clear"))
+                (iommu_ranged hw s)))))))))
+
+; iommu_on's registers from MISC to ILLEGAL_ADR, each said first; then
+; the cache and CTRL. 0.
+(def iommu_ranged ((hw Hw) (s Stage)) int
+  (match hw
+    ((Hw d g mmu cache t tva addrs)
+      (let a (step s "writing iommu4 MISC, two levels")
+        (let m (device_write32 mmu (mmu_misc) (misc_two_level (device_read32 mmu (mmu_misc))))
+          (let b (step s "writing iommu4 ADDR_CAP and BYPASS_START")
+            (let c (device_write32 mmu (mmu_addr_cap) (addr_cap))
+              (let bs (device_write32 mmu (mmu_bypass_start) 0)
+                (let dbg (device_read32 mmu (mmu_debug_info))
+                  (let e (step s "writing iommu4 BYPASS_END, PT_PA_BASE and ILLEGAL_ADR")
+                    (let be (device_write32 mmu (mmu_bypass_end) (bypass_end dbg))
+                      (let p (device_write32 mmu (mmu_pt_pa_base) (pt_pa_base (array_get addrs 0)))
+                        (let i (device_write32 mmu (mmu_illegal_adr) (illegal_adr (array_get addrs (default_page))))
+                          (iommu_enabled hw s))))))))))))))
+
+; The IOMMU's cache flushed, then the IOMMU on: 0.
+(def iommu_enabled ((hw Hw) (s Stage)) int
+  (match hw
+    ((Hw d g mmu cache t tva addrs)
+      (let a (step s "flushing the IOMMU's cache")
+        (let f (device_write32 cache 0 (cache_flush))
+          (let p (if (polled cache 0 2 100) 0 (warn_as "hvs" "the IOMMU's cache did not flush"))
+            (let b (step s "writing iommu4 CTRL on")
+              (device_write32 mmu (mmu_ctrl) (mmu_ctrl_on)))))))))
 
 ; The first-level table's entries from table i on, each the page of the
 ; second-level table after it: 0.
@@ -156,21 +370,6 @@
   (if (le n 0)
       0
       (match (dma_sync va n 1) ((DmaSynced k) 0) ((DmaSyncDenied) 0) ((DmaSyncBad) 0))))
-
-; The channel's background black and filled in where no plane is: 0.
-(def background_black ((hw Hw)) int
-  (match hw
-    ((Hw d g mmu cache t tva addrs)
-      (let b (device_write32 d (disp_bgnd g (hdmi0_channel)) 0)
-        (let c (device_read32 d (disp_ctrl1 g (hdmi0_channel)))
-          (device_write32 d (disp_ctrl1 g (hdmi0_channel)) (ctrl1_with_background c)))))))
-
-; The half of the list memory the channel fetches from now, 0 or 1, or
-; -1 if its list is in neither, as the firmware's may be.
-(def live_half ((hw Hw)) int
-  (match hw
-    ((Hw d g mmu cache t tva addrs)
-      (dlist_half_of (dl_active (device_read32 d (disp_dl g (hdmi0_channel))))))))
 
 ; --------------------------------------------------------------- the driver
 

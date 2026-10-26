@@ -1,6 +1,6 @@
 # Feature request: the HVS and its IOMMU as regions on the Raspberry Pi 5, so L0S can show a screen
 
-Status: open
+Status: landed (L0 roadmap 0105)
 Project: L0S, a microkernel in L0 for QEMU's virt board, heading for the
 Raspberry Pi 5
 
