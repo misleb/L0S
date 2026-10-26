@@ -1791,11 +1791,15 @@ Pi 5](#the-network-on-the-raspberry-pi-5)).
 
 The kernel is the same source as QEMU's. Only the board under it is L0's
 other host: the GIC-400, the generic timer at 54 MHz, and the debug UART
-as the kernel's standard output and error. Its heap is 768 MB
-(`PI5_KERNEL_HEAP_MB`), against QEMU's 192, as the kernel keeps about
-285 bytes of record for each page it gives, and a Pi may have 16 GB.
-That is enough for about 9 GB of pages given at once (see
-[Limits](#limits)).
+as the kernel's standard output and error. The kernel keeps about 285
+bytes of record for each page it gives, and every page past its heap
+and stack is for processes, so its heap is sized to the board's RAM,
+`PI5_RAM_GB` (2 by default, the least a Pi 5 has): 64 MB and 72 for
+each GB, at most 1,008 MB, which `PI5_KERNEL_HEAP_MB` overrides. A 2 GB
+board's kernel has 208 MB, leaving about 1.8 GB to processes, as QEMU
+leaves at `-m 2G`; a 16 GB board's has 1,008 MB, enough for about 13 GB
+of pages given at once (see [Limits](#limits)). Build with
+`PI5_RAM_GB=N` for a board of more than 2 GB.
 
 `pi5/etc/inittab` starts what the board has a driver for:
 
@@ -2934,9 +2938,10 @@ a bad buffer, and wait on nothing.
   shell and the compositor, though some boots corrupt memory or lose
   power. It has no disk, and reaches its RTC only through the
   firmware. Its
-  kernel's heap of 768 MB records about 9 GB of pages given at once.
-  Nothing yet stops a process taking more on a 16 GB board, and the
-  kernel would then run out of heap.
+  kernel's heap is sized to `PI5_RAM_GB`, 2 by default, and records the
+  pages that much RAM has, or about 13 GB on a 16 GB board. Nothing yet
+  stops processes taking more on a board with more RAM than the kernel
+  was built for, and the kernel would then run out of heap.
 - **The screen tests run in 2D mode** (`GPU=2d`, the default of
   `tools/qemu-boot.sh`): `screendump` fails with "no surface" on a GL
   scanout. The 3D mode is tried by `make demo`.

@@ -35,7 +35,8 @@
 #   make pi5-card    build/pi5-card: the kernel built for the Raspberry
 #                    Pi 5, every program with pi5/etc, and what l0 card
 #                    writes for its SD card's boot partition; untried
-#                    on a board
+#                    on a board. PI5_RAM_GB=N for a board of more than
+#                    2 GB, here and for pi5-netboot
 #   make pi5-netboot PI5_BOOT=DIR [PI5_TFTP_PREFIX=SERIAL]
 #                    build/pi5-tftp: the same, with the Pi 5's device
 #                    trees from DIR, as a TFTP root it network boots from
@@ -704,21 +705,32 @@ demo-system: sysdisk
 # Raspberry Pi's firmware. The programs are the same images as on QEMU.
 #
 # The kernel's heap keeps a record of every page it gives, about 285
-# bytes a page, so the Pi's, which may have 16 GB, gets 768 MB of the
-# 1,024 MB its layout has for heap and stack (spec 10.3): records for
-# about 9 GB of pages given at once.
+# bytes a page, 72 MB for each GB, and every page past its heap and stack
+# is the frame pool processes are made of, so the heap is sized to the
+# board: PI5_RAM_GB, 2 by default, the least a Pi 5 has, gets 64 MB (as
+# QEMU's, the initramfs's copy and the rest) and 72 for each GB, at most
+# the 1,008 the layout's 1,024 MB has beside the stack (spec 10.3). A 2
+# GB board gets 208 MB, leaving about 1.8 GB to processes; a 16 GB one
+# 1,008, records for about 13 GB given at once. A kernel built for less
+# RAM than the board has runs out of heap once processes take more.
 .PHONY: pi5-initramfs pi5-card
 
 PI5_ARGS            ?=
 # Programs of pi5/etc/inittab's start lines left out of this build, as
 # PI5_NO="/sbin/hvs /sbin/gem".
 PI5_NO              ?=
-PI5_KERNEL_HEAP_MB  ?= 768
+PI5_RAM_GB          ?= 2
+PI5_KERNEL_HEAP_MB  ?= $(shell r=$$(( 64 + 72 * $(PI5_RAM_GB) )); [ $$r -gt 1008 ] && r=1008; echo $$r)
 PI5_KERNEL_STACK_MB ?= 16
 PI5_KERNEL_LAYOUT   := --heap-mb $(PI5_KERNEL_HEAP_MB) --stack-mb $(PI5_KERNEL_STACK_MB)
 L0_PI5RT := $(L0LIB)l0c $(wildcard $(L0LIB)pi5-aarch64/*.bc) $(L0LIB)pi5-aarch64/layout.ld
 
-$(BUILD)/kernel-pi5.img: $(KERNEL) kernel/main.l0 $(L0_PI5RT) | $(BUILD)
+# The Pi kernel's layout options as last built, as kernel.layout is
+# QEMU's, so that a new PI5_RAM_GB rebuilds it.
+$(BUILD)/kernel-pi5.layout: FORCE | $(BUILD)
+	@echo '$(PI5_KERNEL_LAYOUT)' | cmp -s - $@ || echo '$(PI5_KERNEL_LAYOUT)' > $@
+
+$(BUILD)/kernel-pi5.img: $(KERNEL) kernel/main.l0 $(L0_PI5RT) $(BUILD)/kernel-pi5.layout | $(BUILD)
 	$(L0) build --target pi5 $(PI5_KERNEL_LAYOUT) $(KERNEL) kernel/main.l0 -o $@
 
 # The Pi's initramfs holds its own boot files too, in /boot: the image,
