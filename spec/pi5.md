@@ -144,6 +144,8 @@ boot should check these, on the debug UART (`dmesg` repeats them):
   power. It has no disk, and reaches its RTC only through the
   firmware. Its
   kernel's heap is sized to `PI5_RAM_GB`, 2 by default, and records the
-  pages that much RAM has, or about 13 GB on a 16 GB board. Nothing yet
-  stops processes taking more on a board with more RAM than the kernel
-  was built for, and the kernel would then run out of heap.
+  pages that much RAM has, or about 13 GB on a 16 GB board. On a board
+  with more RAM than the kernel was built for, processes are refused
+  pages once its heap is down to its reserve (see
+  [The kernel](kernel.md)), so the RAM past what the heap records goes
+  unused.

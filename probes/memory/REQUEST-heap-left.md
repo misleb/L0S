@@ -1,6 +1,8 @@
 # Feature request: how much of its heap a program has left, so a kernel can refuse work before the heap runs out
 
-Status: asked, not yet on L0's roadmap
+Status: landed, as L0's roadmap 0124 (5617f17). L0S's `map_frame` refuses
+a page under a reserve of 64 MB: free bytes overstate what the heap can
+give once page records fragment it, and 32 MB was too little
 Project: L0S, a microkernel in L0 for QEMU's virt boards and the
 Raspberry Pi 5
 

@@ -414,11 +414,13 @@ add to that list. Documenting a listed form fails the check too, until
   `l0 build` and `l0 test --target virt`): every other page below the user
   range is frames. Build the kernel by hand without them and it gets L0's
   1,024 and 256, and a pool of 765 MB. The heap holds a record of every
-  page given (about 128 MB for the whole pool; at 96 MB
-  `test_frames_run_out` exhausts it) and the whole initramfs, so
-  `mkinitramfs` refuses one past `INITRAMFS_MAX`, 48 MB. Shrinking the heap
-  grows the pool, and so the records it must hold: never go below what a
-  full pool needs. Anything the kernel keeps per process, port, message or
+  page given (about 128 MB for the whole pool) and the whole initramfs, so
+  `mkinitramfs` refuses one past `INITRAMFS_MAX`, 48 MB. `map_frame`
+  refuses a page once `heap_left` is under `heap_reserve`, 64 MB, so a
+  heap too small for the pool refuses pages rather than crashing
+  (`make test-virt-heap`, 96 MB), but leaves that much of the pool
+  unused. `heap_left` counts free bytes, not the largest block: a
+  smaller reserve (32 MB) still ran out. Anything the kernel keeps per process, port, message or
   mapping must stay bounded, or a process can exhaust that heap; ports and
   a region shared into many processes are not yet.
   `kernel_virt_test.l0`'s `in_frame_pool` and `test_mem_info_total` pin

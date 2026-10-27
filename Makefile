@@ -80,8 +80,9 @@ JOBS ?= $(shell sysctl -n hw.ncpu 2> /dev/null || nproc 2> /dev/null || echo 1)
 # the RAM below the user range is the frame pool processes are made of,
 # about 1,840 MB at -m 2G, against 765 MB with L0's defaults of 1,024 and
 # 256. The kernel's heap holds a record of every page it has given, about
-# 128 MB once the whole pool is given (96 MB runs out, test-virt's
-# test_frames_run_out says), and its copy of the initramfs; the rest,
+# 128 MB once the whole pool is given, and its copy of the initramfs, and
+# it refuses pages once 64 MB is left (process.l0's heap_reserve; make
+# test-virt-heap shows a 96 MB heap refusing rather than running out); the rest,
 # 20.5 MB at the demo's peak with 65 processes, 12.3 MB of it that copy,
 # is small. Its stack stayed under 8 KB. So mkinitramfs refuses an
 # archive past INITRAMFS_MAX, the heap less 144 MB: 128 for the pool's
@@ -315,7 +316,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test check-each test-each test-virt e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp icon-sheet graph graph-hook
+.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -467,9 +468,16 @@ test:
 
 test-each: $(TESTS) $(BUILD)/test/l0s-mcp.ok $(BUILD)/test/graphify-l0.ok
 
-test-virt:
+test-virt: test-virt-heap
 	L0_QEMU_ARGS="-smp 1" $(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
 	L0_QEMU_ARGS="-smp $(VIRT_CPUS)" $(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
+
+# test_heap_runs_low on a kernel heap of 96 MB, too small to record every
+# page of the pool: the kernel refuses pages once its heap is down to its
+# reserve (process.l0's heap_has_room), rather than stopping with heap
+# exhausted.
+test-virt-heap:
+	L0_QEMU_ARGS="-smp 1" $(L0) test --target virt --heap-mb 96 --stack-mb $(KERNEL_STACK_MB) --match heap_runs_low $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
 
 $(BUILD) $(BUILD)/bin $(BUILD)/icons $(BUILD)/images:
 	mkdir -p $@

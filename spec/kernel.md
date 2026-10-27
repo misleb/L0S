@@ -264,6 +264,16 @@ A frame the host gives again is zeroed, so a process sees only zeroed
 memory, whatever ran before it. If the host runs out while a process is
 being made, what was made for it is freed again.
 
+The kernel's own heap holds a record of every page it gives, so it also
+refuses a page once its heap is down to a reserve of 64 MB
+(`heap_reserve` in `kernel/process.l0`, read with L0's `heap_left`), as
+if no frame were left: a fault ends the process, a `shm_alloc` or
+`dma_alloc` is refused, a spawn fails. The reserve finishes the call and
+ends the process. It is large because `heap_left` counts free bytes, and
+on a heap full of page records they lie in pieces that a new value of
+another size cannot use: on a 96 MB heap the kernel stopped with `heap
+exhausted` and 38 MB free behind a reserve of 32 MB.
+
 ## Limits
 
 - **The kernel has a heap of 192 MB and a stack of 16 MB**, the Makefile's
@@ -275,7 +285,10 @@ being made, what was made for it is freed again.
   12.3 MB of it that copy, and under 8 KB of stack. **An initramfs is at
   most 48 MB**, the heap less 144 MB, since the kernel keeps all of it:
   `mkinitramfs` refuses a larger one, and naming a larger
-  `KERNEL_HEAP_MB` raises both. Ports and the messages queued on them,
+  `KERNEL_HEAP_MB` raises both. With the heap's 64 MB reserve kept back
+  (see above), the 192 MB heap records fewer pages than the whole pool,
+  so the last of the pool is refused for want of heap, never given; a
+  smaller heap refuses more, and the kernel goes on. Ports and the messages queued on them,
   and the pages one shared region maps into many processes, are not yet
   bounded but by the heap, so a process that makes enough full ports, or
   shares one region with enough processes, can exhaust it.
