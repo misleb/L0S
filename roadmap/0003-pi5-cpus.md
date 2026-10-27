@@ -25,3 +25,8 @@ To be written once 0001 is done.
 ## Log
 
 - 2026-10-26: written from kernel.md's Limits.
+- 2026-10-26: the Pi 5 already runs the four-CPU kernel, as `cpu_count`
+  says four: seven warm reboots for 0001 each logged `l0s: 4 CPUs: the
+  kernel on CPU 0, processes on CPUs 1 to 3`, reached the compositor and
+  answered `ps`. So the Pi 5's Limit in kernel.md no longer holds as
+  written, and this goal may be mostly done once 0001 is.

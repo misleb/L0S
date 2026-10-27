@@ -5,9 +5,11 @@ make pi5-card     # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt
 ```
 
 L0S builds for the Pi 5 and has booted on one over the network, to the
-shell on the debug UART, the compositor and the Ethernet link at 1000
-Mb/s, though not every boot is stable yet (the display's IOMMU is the
-suspect) and `inet` gets no DHCP answer. `make pi5-card`
+shell on the debug UART, the compositor, and the Ethernet link at 1000
+Mb/s with an address from DHCP. Seventeen reboots in a row
+(`tools/pi5-boot --reboot`) each reached all of them, though boots from
+power have not been tried as often, and some earlier ones corrupted
+memory (the display's IOMMU was the suspect). `make pi5-card`
 does three things:
 - builds the kernel with `--target pi5`, as `build/kernel-pi5.img`
 - builds the initramfs from `pi5/etc` and the same programs as QEMU's,
