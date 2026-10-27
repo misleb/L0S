@@ -13,7 +13,7 @@ the full set before calling it done.
 | one module | `l0 test FILES... X_test.l0` | seconds | the logic of one file, on this Mac |
 | every host test | `make test` | about 90 seconds from nothing; seconds for what changed | every pure module, the libraries, each program's logic |
 | the kernel on the board | `make test-virt` | about 3 minutes | each test boots the kernel with hand-assembled threads, as many at once as this machine has CPUs; the whole suite twice, on a board of one CPU and of `VIRT_CPUS` (4) |
-| boots and the screen | `make e2e` | several minutes | real programs under the real kernel, then the screen tests |
+| boots and the screen | `make e2e` | about 4 minutes | real programs under the real kernel, then the screen tests (`tests/screens.sh`), each `E2E_JOBS` at once, half this machine's CPUs unless set; `E2E_JOBS=1` one at a time took 15 minutes |
 
 - **A board test must pass on one CPU and on several.** With several, the
   processes a test starts run at once, so one never relies on another
@@ -141,7 +141,9 @@ case's `etc`, and compares. A case is a directory:
   compositor rather than failing at once (`apps`).
 - An app's manifest is read on the host by `app_test.l0`'s
   `test_app_sources`, from its source directory.
-- Every boot is killed after 60 s by `tools/deadline`, which exits 124.
+- Every boot is killed after 120 s by `tools/deadline`, which exits 124.
+  The cases boot `E2E_JOBS` at once, so `install_boot`, 55 s alone,
+  takes longer beside the others.
 - **USB** (`pcie`, `xhci`, `usb-hid`): the e2e cases `pcie` and `usb`,
   and the screen test `tests/usb.sh` (`make usb-initramfs`, booted
   with `QEMU_INPUT=usb`), which types on the USB keyboard with `sendkey`
@@ -258,7 +260,11 @@ keep working still goes in a test.
   socket instead of one connection each. Then read the result with
   `run windows` typed at the serial line, or a screendump.
 - Put sockets and dumps in `build/` (socket paths must be under 104 bytes)
-  and remove the sockets afterwards.
+  and remove the sockets afterwards. Name every file a test writes for
+  the test (`build/NAME.sock`, `build/NAME-test.img`): `make e2e` runs
+  the screen tests several at once, so two that wrote one file would
+  break each other. A new screen test goes in the Makefile's
+  `SCREEN_TESTS`, longest first.
 - A boot that hangs is killed after a minute by `tools/deadline`; a kernel
   that finds nothing can wake anyone reports a deadlock and exits 124 itself.
 

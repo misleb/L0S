@@ -660,24 +660,16 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/launcher-install-etc)
 	tools/mkinitramfs $(BUILD)/launcher-install.cpio $(BUILD)/launcher-install-etc $(ROOT)
 
-e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs
+# The boot cases, then the screen tests, each E2E_JOBS at once (half
+# this machine's CPUs unless set; E2E_JOBS=1 runs one at a time). mkfs
+# is built first, as the tests that make disks would each build it. The
+# screen tests are listed longest first, so the last to start are short.
+SCREEN_TESTS := vt files disks-create resize logo-menu procmon disks launcher launcher-install \
+                partitions usb fat hidpi widgets keyboard gpu-screen
+
+e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs $(BUILD)/mkfs
 	tests/e2e.sh
-	tests/gpu-screen.sh
-	tests/hidpi.sh
-	tests/keyboard.sh
-	tests/usb.sh
-	tests/vt.sh
-	tests/widgets.sh
-	tests/resize.sh
-	tests/procmon.sh
-	tests/disks.sh
-	tests/disks-create.sh
-	tests/files.sh
-	tests/partitions.sh
-	tests/fat.sh
-	tests/launcher.sh
-	tests/logo-menu.sh
-	tests/launcher-install.sh
+	tests/screens.sh $(SCREEN_TESTS)
 
 boot: images root $(DISK) $(SD)
 	tools/mkinitramfs $(BUILD)/boot.cpio $(ETC) $(ROOT)

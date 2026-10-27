@@ -35,8 +35,9 @@
 # the board's keyboard and pointer are a USB keyboard and mouse on a
 # qemu-xhci, for pcie, xhci and usb-hid, not virtio's. If NAME/sd exists,
 # the board has an SD card in a sdhci-pci, a blank image of 64 MB made
-# for the boot, for pcie and sdhci. Every boot is killed after
-# a minute. Given case names as arguments, it runs only those. Run from
+# for the boot, for pcie and sdhci. Every boot is killed after two
+# minutes: install_boot takes about 55 s alone, and longer beside others
+# writing their disks. Given case names as arguments, it runs only those. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
 # programs go in /bin beside them. The board has a virtio-gpu,
@@ -89,9 +90,10 @@ if [ $# -gt 0 ]; then
   for n in "$@"; do cases+=("tests/e2e/$n/"); done
 fi
 
-pass=0; fail=0
-for dir in "${cases[@]}"; do
-  dir=${dir%/}
+# Boots one case and writes its result: ok, or not ok with why and its
+# standard error. Run in the background, so it keeps nothing.
+run_case() {
+  local dir=${1%/}
   name=$(basename "$dir")
   want_status=0
   [ -f "$dir/status" ] && want_status=$(cat "$dir/status")
@@ -102,7 +104,7 @@ for dir in "${cases[@]}"; do
     rm -rf "$etc" && cp -R "$dir/etc" "$etc" && cp "$BUILD/face" "$etc/face"
   fi
   if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
-    echo "not ok - $name: mkinitramfs failed"; fail=$((fail+1)); continue
+    echo "not ok - $name: mkinitramfs failed"; return
   fi
   cpus=${QEMU_CPUS:-1}
   [ -f "$dir/cpus" ] && cpus=$(cat "$dir/cpus")
@@ -130,7 +132,7 @@ for dir in "${cases[@]}"; do
       read -ra layout < <(sed "s|@|$cpio|g" "$dir/layout")
     fi
     if ! tools/mkdisk "$disk" ${layout[@]+"${layout[@]}"} > /dev/null; then
-      echo "not ok - $name: mkdisk failed"; fail=$((fail+1)); continue
+      echo "not ok - $name: mkdisk failed"; return
     fi
     ro=""
     [ -f "$dir/readonly" ] && ro=",readonly=on"
@@ -164,9 +166,9 @@ for dir in "${cases[@]}"; do
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$typed" |
-      QEMU_NO_REBOOT=1 QEMU_CPUS=$cpus QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_NO_REBOOT=1 QEMU_CPUS=$cpus QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 120 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
-    L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
+    L0_QEMU_ARGS=$qemu_args tools/deadline 120 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi
   status=$?
   why=""
@@ -202,10 +204,27 @@ for dir in "${cases[@]}"; do
     why="standard error lacks: $(cat "$dir/stderr")"
   fi
   if [ -z "$why" ]; then
-    echo "ok - $name"; pass=$((pass+1))
+    echo "ok - $name"
   else
-    echo "not ok - $name: $why"; sed 's/^/  # stderr: /' "$err"; fail=$((fail+1))
+    echo "not ok - $name: $why"; sed 's/^/  # stderr: /' "$err"
   fi
+}
+
+# E2E_JOBS cases boot at once, half the host's CPUs unless set: each
+# board is its own QEMU, with its own files under build/e2e, and much of
+# a boot is waiting. Their results are written in the cases' order.
+at_once=${E2E_JOBS:-$(( $(getconf _NPROCESSORS_ONLN) / 2 ))}
+[ "$at_once" -ge 1 ] || at_once=1
+for dir in "${cases[@]}"; do
+  while [ "$(jobs -rp | wc -l)" -ge "$at_once" ]; do sleep 0.2; done
+  run_case "$dir" > "$BUILD/e2e/$(basename "$dir").result" 2>&1 &
+done
+wait
+pass=0; fail=0
+for dir in "${cases[@]}"; do
+  result="$BUILD/e2e/$(basename "$dir").result"
+  cat "$result"
+  if head -1 "$result" | grep -q '^ok '; then pass=$((pass+1)); else fail=$((fail+1)); fi
 done
 
 # What is not an initramfs is refused.

@@ -33,5 +33,6 @@ The `l0s-testing` skill has the detail; load it before writing tests.
   `layout`
   (a fresh virtio-blk disk) as needed.
 - Screen tests keep sockets and dumps in `build/`, with relative paths
-  (sockets need paths under 104 bytes). Remove any debug output added to
+  (sockets need paths under 104 bytes), each named for its test, as
+  `make e2e` runs several at once; a new one joins `SCREEN_TESTS`. Remove any debug output added to
   find a failure.
