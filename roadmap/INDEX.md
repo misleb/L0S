@@ -33,7 +33,7 @@ move independently, so several can be active at once.
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
-| [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | active | 1/3 | – | desktop.md, toolkit.md |
+| [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | active | 2/3 | – | desktop.md, toolkit.md |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | idea | – | – | desktop.md, toolkit.md |
 | [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | blocked | – | 0012 | toolkit.md |
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |

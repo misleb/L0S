@@ -20,16 +20,13 @@ README's "Still to do" for client-side decorations.
 ## Steps
 
 - [x] Maximize and restore by a double click on the header bar.
-- [ ] A `resize` request from the client, started from inside its edge.
+- [x] A `resize` request from the client, started from inside its edge.
 - [ ] A double click on a title bar `wm` draws maximizes and restores
   that window too, by the same code as `maximize`.
 
 ## Spec changes
 
-- desktop.md: the compositor protocol's new request (`resize` from
-  inside the edge), and the Files limit loses "a press inside its edge
-  does not resize it"; the limit on `wm`'s own title bars goes.
-- toolkit.md: `UiCsdBar`'s edge.
+- desktop.md: the limit on `wm`'s own title bars goes.
 
 ## Log
 
@@ -45,3 +42,16 @@ README's "Still to do" for client-side decorations.
   click on a file had failed before this change too. Moved into the
   spec: desktop.md's `maximize`, and toolkit.md's double click. Found:
   `wm`'s own title bars do not maximize either (step 3).
+- 2026-10-27: `edges ID E` in the compositor protocol, as
+  `xdg_toplevel.resize`, named apart from `resize ID W H`, which is a
+  client's answer to a size notice: `wm` checks what it checks for
+  `move`, and that E is one side or two that meet, and starts the same
+  `Resizing` drag a press on the border outside does. The toolkit asks
+  it on a left press 3 deep inside a CSD window's edge (`ui_csd_edge`,
+  as far in as a scrollbar's slider is, so none is under it), both edges
+  within 20 of a corner, before whatever is under the press; `UiWin`
+  now knows whether it is a CSD window. `tests/files.sh` drags Files's
+  right side, its bottom left corner and its bottom from inside. Moved
+  into the spec: desktop.md's `edges` and the inside edge, toolkit.md's
+  window. Found: the pointer over the inside edge stays the arrow until
+  the press, since a client cannot ask for a shape (goal 0008).

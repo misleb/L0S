@@ -342,7 +342,11 @@ tablet through QMP, its right button too, and keys through the monitor:
 - a drag of the place's header bar's ground, which asks `wm` to `move`
   the window: `windows` says it is 100 right and 80 down; a double click
   there, which asks `wm` to `maximize` it: 1280 by 768 at 0, 32; and
-  another, which puts it back, at its place and size;
+  another, which puts it back, at its place and size; then drags from
+  inside its edges, which ask `wm` to resize it by `edges`: its right
+  side 60 right, 60 wider; its bottom left corner 60 right and 40 down,
+  its left side moved and 40 taller; and its bottom 40 up, its height
+  back;
 - the toggle to the list, its header's line;
 - a right click on the file, Rename..., a new name typed and Enter: `ls`
   at the serial shell lists the file so;

@@ -13,7 +13,9 @@
 #      click on its file shows the file's text, and Esc goes back
 #   3. a drag of the place's header bar's ground: wm moves the window,
 #      as the client's move request asks, and run windows says where;
-#      a double click there maximizes it, and another restores it
+#      a double click there maximizes it, and another restores it; and
+#      drags from inside its right edge, its bottom left corner and its
+#      bottom resize it, as the client's edges request asks
 #   4. the toggle to the list: its header's line
 #   5. a right click on the file, Rename..., a new name typed, Enter:
 #      ls /Volumes/data at the serial shell lists it so
@@ -230,6 +232,23 @@ echo "ok - files: a double click on its header bar maximized it"
 dbl 350 52
 max_at "$cx $cy $cw $ch" || fail "a second double click left the window at $w_x, $w_y, $w_w by $w_h, not $cx, $cy, $cw by $ch; it showed:"
 echo "ok - files: another restored it"
+
+# A press inside the window's edge, 3 deep, which the client asks wm to
+# resize it by: its right side, 2 in, dragged 60 right, makes it 60
+# wider; its bottom left, 2 in from the left and 15 up from the bottom,
+# clear of the corner wm cuts, dragged 60 right and 40 down, moves its
+# left side and makes it 40 taller; and its bottom, 2 up, 40 up, puts its
+# height back. None of these is in the border outside, which is wm's.
+drag $((cx + cw - 2)) $((cy + 300)) 60 0
+max_at "$cx $cy $((cw + 60)) $ch" || fail "a drag inside the right edge left the window at $w_x, $w_y, $w_w by $w_h, not $cx, $cy, $((cw + 60)) by $ch; it showed:"
+echo "ok - files: a drag inside its right edge widened it"
+drag $((cx + 2)) $((cy + ch - 15)) 60 40
+max_at "$((cx + 60)) $cy $cw $((ch + 40))" || fail "a drag inside the bottom left corner left the window at $w_x, $w_y, $w_w by $w_h, not $((cx + 60)), $cy, $cw by $((ch + 40)); it showed:"
+echo "ok - files: a drag inside its bottom left corner resized it"
+drag $((cx + 360)) $((cy + ch + 38)) 0 -40
+max_at "$((cx + 60)) $cy $cw $ch" || fail "a drag inside the bottom edge left the window at $w_x, $w_y, $w_w by $w_h, not $((cx + 60)), $cy, $cw by $ch; it showed:"
+echo "ok - files: a drag inside its bottom edge put its height back"
+cx=$((cx + 60))
 
 click $((cx + 787)) $((cy + 22))
 shows "the list, its header's line" "$((cx + 400)) $((cy + 77)) $line" "$((cx + 400)) $((cy + 120)) $view"

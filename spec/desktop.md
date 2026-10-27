@@ -33,6 +33,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
 | `top ID T` | the window's rows read from its buffer's row T on, as a ring: how a client scrolls |
 | `resize ID W H [VA N S]` | the window's content is now W×H: in the buffer it has, which must have room for it, its rows where they were, or in a new one at VA, N pages, its rows S of its own pixels apart, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
+| `edges ID E` | the window resized by its edges E with the pointer, from where it is, until the button is up, as by the border outside it, as xdg_toplevel's `resize` asks: what a client asks when the inside of its own edge is pressed. E adds the edges' bits, left 1, right 2, top 4, bottom 8: one side, or two that meet. As `move`, only the window's client may ask, while the left button is down after a press in the window and nothing else is dragged |
 | `maximize ID` | the window made to fill the screen under the top bar, from 0, 32, its place and size kept; or, if it is maximized, put back where it was, at its size: what a double click on a client's own header bar asks. `wm` asks the client for the size with a size notice, as a drag of its right and bottom edges does, and places the window once it answers. Only the window's client may ask |
 | `title ID TEXT` | a new title |
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
@@ -137,7 +138,10 @@ draws its own header bars, the toolkit's `UiCsdBar`, and a press on one's
 ground asks `wm` to `move` the window, which `wm` then drags as by its
 own title bar, and a second press there within 400 ms, a double click,
 asks it to `maximize` the window, or to restore it; its close button is the client's, which closes the window
-and exits. The 6-pixel border outside it, on all four sides, resizes it.
+and exits. The 6-pixel border outside it, on all four sides, resizes it,
+and so does the inside of its edge, 3 deep, within 20 of a corner both
+the edges that meet there: a left press there asks `wm` to resize the
+window by those `edges`, which `wm` then drags as by the border.
 
 Input:
 
@@ -290,8 +294,10 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   its first 64 KB, 2000 lines of 240 characters at most, ASCII; and a
   program it starts has no terminal. KeyEvent has no modifiers yet, so
   there is no Ctrl-C, Ctrl-V or Alt-Left. Its window, like every
-  client-decorated one, has no shadow, and a press inside its edge does
-  not resize it: only the border outside it does.
+  client-decorated one, has no shadow, and the pointer over the inside
+  of its edge is the arrow until it is pressed there: a client cannot
+  ask for a pointer's shape, so only the border outside shows the
+  resize pointer before a press.
 - A window `wm` decorates is not maximized by a double click on its
   title bar: only a client's own header bar asks `maximize`.
 - Only toolkit windows can be resized (`vt` and `draw` ignore the size
