@@ -108,7 +108,7 @@ refusal's word may be followed by why, in words.
 | `close H` | 0 |
 | `rename FROM TO` | 0, a file or a directory, to another directory too, a file named TO replaced, unless it is open, -4; a directory there is -8, a directory over a file -4, and into itself -5; both in one volume, else -10. Handles open on a file moved follow it |
 | `remove PATH` | 0, a file, unless it is open, or a directory with nothing in it, else -4 |
-| `list PATH` | the directory at PATH, a volume's root or any other: how many entries, then a line `NAME SIZE` for each, by name, a directory's NAME ending in `/` and its SIZE 0; -9 for a file |
+| `list PATH [FROM]` | the directory at PATH, a volume's root or any other, and nothing below it: how many entries it has, then a line `NAME SIZE` for each from the FROMth (0 unless given), by name, as many as fit in one message, a directory's NAME ending in `/` and its SIZE 0; none past the last; -9 for a file. `fs_list` asks again from where each reply ended until it has every entry, so a directory of any size is listed |
 | `mkdir PATH` | 0, an empty directory at PATH, of a cluster; -9 if its directory is missing, -4 if something is at PATH, -5 for a name a volume cannot hold, -6 with no room |
 | `stat PATH` | 0, then `dir`, or `file SIZE x` for a program and `file SIZE -` for any other file; -3 for nothing |
 | `chmod PATH +x` | 0, the file at PATH marked a program, or with `-x` not; -8 for a directory, and for any file of a FAT32 volume, which keeps no programs |

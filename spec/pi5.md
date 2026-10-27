@@ -116,7 +116,8 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 | `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](devices.md#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode` and `hdmi` beside them), at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
 | `hdmi-audio` | sound on HDMI0, served as `audio`, once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](sound.md#sound-on-the-raspberry-pi-5)); `play /etc/chime.wav` tries it. `make pi5-shell` leaves it out too |
-| `fs ram` | a volume in memory, `/Volumes/tmp`, since L0 gives no region over the Pi's SD controller |
+| `fs ram` | a volume in memory, `/Volumes/tmp`, registered as `tmpfs`, which keeps nothing over a power cut |
+| `sdhci pi5`, `fs` | the microSD card in the slot, through the BCM2712's own SD host controller, `sdio1`, at 0x1000FFF000, interrupt 305 (see [The disk](storage.md#the-disk)), served as a disk; `fs` mounts its volumes, a FAT32 boot partition among them (see [FAT32 volumes](fat32.md#fat32-volumes)). With no card in the slot `sdhci` says so and `fs` finds no disk, and both exit |
 | `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). It keeps time over a power cut only with a battery on the RTC connector |
 | `gem`, `inet dhcp` | the Ethernet port, RP1's GEM, serving `nic`, and the IPv4 stack over it at the address DHCP gives (see [The network on the Raspberry Pi 5](network.md#the-network-on-the-raspberry-pi-5)) |
 
@@ -132,13 +133,18 @@ boot should check these, on the debug UART (`dmesg` repeats them):
 - `hvs`'s lines: how many displays the firmware brought up, the clocks,
   and each step of its stage, the last of them before any hang
 - `hdmi-audio`'s line, and that `play /etc/chime.wav` is heard
+- `sdhci`'s lines: `sdio1`'s registers as the firmware left them, then
+  the card, its size and its interrupt; and `fs`'s, a line for each
+  volume it mounts
 - `gem`'s line, its link line once a cable is in, and `inet`'s lease
   (see [The network on the Raspberry Pi 5](network.md#the-network-on-the-raspberry-pi-5))
 
 ## Limits
 
-- **The Raspberry Pi 5 has no disk**, and reaches its RTC only through
-  the firmware. Its kernel's heap is sized to `PI5_RAM_GB`, 2 by default, and records the
+- **The Raspberry Pi 5 reaches its RTC only through the firmware**, and
+  boots only over the network or from a card `l0 card` wrote; its
+  microSD card is a disk once booted, but not where it boots from. Its
+  kernel's heap is sized to `PI5_RAM_GB`, 2 by default, and records the
   pages that much RAM has, or about 13 GB on a 16 GB board. On a board
   with more RAM than the kernel was built for, processes are refused
   pages once its heap is down to its reserve (see

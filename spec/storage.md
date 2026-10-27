@@ -41,14 +41,20 @@ past the disk's end, a write to a read-only disk, a buffer not shared
 with the driver, or the device's own failure.
 
 `run disk list` lists the disks there are; `run disk [NAME] info`, `run
-disk [NAME] read SECTOR [COUNT]` (shown as `hexdump -C` shows bytes) and
-`run disk [NAME] write SECTOR WORDS...` use one from a shell, `disk0`
-unless NAME is given. Sectors 1 to 7 of a disk `tools/mkdisk` makes
+disk [NAME] read SECTOR [COUNT]` (shown as `hexdump -C` shows bytes),
+`run disk [NAME] write SECTOR WORDS...` (one sector) and `run disk
+[NAME] zero SECTOR [COUNT]` (COUNT sectors of zeros in one request) use
+one from a shell, `disk0` unless NAME is given. Sectors 1 to 7 of a disk `tools/mkdisk` makes
 belong to no volume, so a `disk write` there harms no file.
 
 **The SD card.** `sdhci` ([user/sbin/sdhci](../user/sbin/sdhci/sdhci.l0))
-drives SD cards behind SD Host Controllers that `pcie` finds, QEMU's
-`sdhci-pci` (the demo's `build/sd.img`, a blank 256 MB, made once and
+drives SD cards behind SD Host Controllers: with `pci`, those `pcie`
+finds; with `pi5`, the Raspberry Pi 5's microSD slot, behind the
+BCM2712's own `sdio1` at 0x1000FFF000, whose card detect it points at
+the slot (its `cfg` block's pin select, as Linux's `sdhci-brcmstb`
+does), whose base clock is 200 MHz should its capabilities not say,
+and whose interrupt is 305; it has read and written a 64 GB card
+there. The QEMU one is `sdhci-pci` (the demo's `build/sd.img`, a blank 256 MB, made once and
 kept; `QEMU_SD` in `tools/qemu-boot.sh`). It brings each card up as the
 SD specifications say, at 400 kHz then its default speed, 25 MHz: CMD0,
 CMD8, ACMD41 until the card is ready, CMD2, CMD3 for its address, CMD9,
@@ -168,10 +174,10 @@ damaged disk is refused rather than followed.
 
 ## Limits
 
-- **The SD card has run on QEMU only**, and slowly: `sdhci` moves every
-  word through the controller's buffer, on one data line at 25 MHz, and
-  polls. No DMA, no 4-bit bus, no high-speed modes, and a card is found
-  only at boot. At most 16 disks, `disk0` to `disk15`, are named; a
+- **The SD card has run on QEMU and the Pi 5**, and slowly: `sdhci`
+  moves every word through the controller's buffer, on one data line at
+  25 MHz, and polls while it brings a card up. No DMA, no 4-bit bus, no
+  high-speed modes, and a card is found only at boot. At most 16 disks, `disk0` to `disk15`, are named; a
   disk's name is its driver's place in the order they register, so a
   driver that registers late gets a later name.
 - **The volumes are small and simple** (see [Volumes](#volumes)). Their

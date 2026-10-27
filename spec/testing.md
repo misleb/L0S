@@ -117,6 +117,9 @@ Ctrl-C as a person would:
 - `tmpfs`, with no disk and `fs ram`, writes, reads and lists in
   `/Volumes/tmp`, makes a directory there, copies `hello` onto it and runs
   it from there, and formats it;
+- `bigdir`, with `fs ram`, makes 80 directories of long names in one,
+  whose listing is more than a message holds, and `ls` shows them all,
+  in order, `fs` answering `list` a page at a time;
 - `rootboot_tmpfs`, with `fs ram` and `root=tmpfs`, has `boot` copy the
   initramfs onto the RAM file system and make it `/`: writes there,
   makes a directory, `cd`s to it, is refused a format of the system

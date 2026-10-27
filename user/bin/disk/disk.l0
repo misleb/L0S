@@ -11,9 +11,13 @@
 ;   disk [NAME] write SECTOR WORDS
 ;                              WORDS, spaced, and a newline, written as
 ;                              sector SECTOR, the rest of it zeros
+;   disk [NAME] zero SECTOR [COUNT]
+;                              COUNT sectors from SECTOR, 1 unless given,
+;                              written as zeros, in one request
 
+; How it is used.
 (def usage () (list int)
-  "usage: disk list | disk [NAME] info | disk [NAME] read SECTOR [COUNT] | disk [NAME] write SECTOR WORDS...\n")
+  "usage: disk list | disk [NAME] info | disk [NAME] read SECTOR [COUNT] | disk [NAME] write SECTOR WORDS... | disk [NAME] zero SECTOR [COUNT]\n")
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "disk" why))
@@ -21,8 +25,9 @@
 ; ---------------------------------------------------------------- commands
 
 ; What the arguments ask: the disk's size, count sectors from a sector,
-; text written as a sector; or why they ask nothing.
-(data DiskCmd (DInfo) (DRead int int) (DWrite int (list int)) (DBad (list int)))
+; text written as a sector, count sectors from a sector made zeros; or
+; why they ask nothing.
+(data DiskCmd (DInfo) (DRead int int) (DWrite int (list int)) (DZero int int) (DBad (list int)))
 
 ; The command argv, not empty, gives.
 (def command_of ((argv (list (list int)))) DiskCmd
@@ -31,17 +36,34 @@
       (if (if (eq op "info") (eq n 1) false) (DInfo)
       (if (if (eq op "read") (if (eq n 2) true (eq n 3)) false) (read_of (tail argv))
       (if (if (eq op "write") (ge n 3) false) (write_of (head (tail argv)) (tail (tail argv)))
-      (DBad (drop_last (usage)))))))))
+      (if (if (eq op "zero") (if (eq n 2) true (eq n 3)) false) (zero_of (tail argv))
+      (DBad (drop_last (usage))))))))))
 
 ; read SECTOR [COUNT].
 (def read_of ((ws (list (list int)))) DiskCmd
+  (match (sectors_of ws "a read")
+    ((Ok r) (match r ((SectorRun s k) (DRead s k))))
+    ((Err why) (DBad why))))
+
+; zero SECTOR [COUNT].
+(def zero_of ((ws (list (list int)))) DiskCmd
+  (match (sectors_of ws "zeros")
+    ((Ok r) (match r ((SectorRun s k) (DZero s k))))
+    ((Err why) (DBad why))))
+
+; Sectors in a row: the first, and how many.
+(data SectorRun (SectorRun int int))
+
+; SECTOR [COUNT] as the sectors, the count 1 unless given, of 1 to as
+; many as one request moves; or why not, what naming the request.
+(def sectors_of ((ws (list (list int))) (what (list int))) (Result SectorRun (list int))
   (let count (if (is_empty (tail ws)) "1" (head (tail ws)))
     (if (not (if (is_number (head ws)) (is_number count) false))
-        (DBad "a sector and a count are numbers")
+        ((Err SectorRun (list int)) "a sector and a count are numbers")
         (let k (int_prefix count 0)
           (if (if (lt k 1) true (gt k (disk_max_sectors)))
-              (DBad (append "a read is 1 to " (append (digits (disk_max_sectors)) " sectors")))
-              (DRead (int_prefix (head ws) 0) k))))))
+              ((Err SectorRun (list int)) (append what (append " is 1 to " (append (digits (disk_max_sectors)) " sectors"))))
+              ((Ok SectorRun (list int)) (SectorRun (int_prefix (head ws) 0) k)))))))
 
 ; write SECTOR WORDS..., the words spaced and ended by a newline.
 (def write_of ((sector (list int)) (words (list (list int)))) DiskCmd
@@ -129,7 +151,8 @@
     ((DBad why) (complain why))
     ((DInfo) (with_disk c (opened name)))
     ((DRead s k) (with_disk c (opened name)))
-    ((DWrite s text) (with_disk c (opened name)))))
+    ((DWrite s text) (with_disk c (opened name)))
+    ((DZero s k) (with_disk c (opened name)))))
 
 ; The disk name, or disk0, waited for, if empty.
 (def opened ((name (list int))) Disk
@@ -144,6 +167,7 @@
         ((DInfo) (write_str (append "disk: " (append (digits n) (append " sectors of " (append (digits (disk_sector_size)) " bytes\n"))))))
         ((DRead s k) (read_out d s k (disk_buffer d k)))
         ((DWrite s text) (written d s text (disk_buffer d 1)))
+        ((DZero s k) (zeroed d s k (disk_buffer d k)))
         ((DBad why) (complain why))))))
 
 ; k sectors from s read through b, and shown.
@@ -166,3 +190,18 @@
           (if (is_empty why)
               (write_str (append "disk: wrote sector " (append (digits s) "\n")))
               (complain why)))))))
+
+; k sectors from s written as zeros through b, in one request.
+(def zeroed ((d Disk) (s int) (k int) (b DiskBuf)) int
+  (match b
+    ((NoDiskBuf why) (complain why))
+    ((DiskBuf va n there r)
+      (let z (disk_zero b 0 (mul k (disk_sector_size)))
+        (let why (disk_write d b s k)
+          (if (is_empty why)
+              (write_str (zeroed_line s k))
+              (complain why)))))))
+
+; What zero says it did.
+(def zeroed_line ((s int) (k int)) (list int)
+  (append "disk: zeroed " (append (digits k) (append (if (eq k 1) " sector from " " sectors from ") (append (digits s) "\n")))))

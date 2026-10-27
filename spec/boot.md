@@ -198,8 +198,10 @@ entry or a volume's file, as the shell, `init`, `wm`, `vt` and `boot` do.
   `remove` and `chdir` take paths in the kernel; the file server's
   `list`, `mkdir`, `stat` and `chmod` are asked by programs, which make a
   relative path absolute themselves (`path_abs`). No call lists a directory: the initramfs's are `entry_paths`,
-  which lists everything, and a volume's its server's `list`; `root_paths`
-  lists `/` either way, a system volume a directory at a time.
+  which lists everything, and a volume's its server's `list`, a message
+  of entries at a time; `root_paths` lists `/` either way, a system
+  volume a directory at a time, every directory of it, which takes the
+  longer the more the volume holds.
 - **Booting from a volume needs the initramfs still.** The kernel comes
   from QEMU, and the drivers and `fs` from the initramfs, which are the
   only programs that may drive devices: a program started from a

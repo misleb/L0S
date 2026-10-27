@@ -121,22 +121,16 @@ DWC3s are put in host mode, their PHYs kept from suspending, as RP1's
 device tree's quirks say; and a device reaches memory at the CPU's own
 address (the firmware's PCIe controller maps PCI 0 to 64 GB onto RAM; the
 0x10_0000_0000 of Linux's `dma-ranges` did not work for `gem` on a
-board, and this is untried for USB). Both controllers take their
-interrupts as RP1 MSI-X vectors 31 and 36 (interrupts 191 and 196). The first run
-should check, on the serial line: that each controller's line comes
-(HCIVERSION, ports, slots, scratchpads, contexts' size), that a key
-plugged in gives a `device` line, and that those agree with Linux's view
-of the same board, its `dma-ranges` and its RP1 node's quirks, and read
-DWC3's GSNPSID (0xC120) to confirm the window reaches the controllers.
+board). Both controllers take their interrupts as RP1 MSI-X vectors 31
+and 36 (interrupts 191 and 196). A boot keyboard and a boot mouse on
+its root ports work there: each controller's line comes on the serial
+line, then a `device` line for each, then `usb-hid`'s, and the keys
+reach the shell and the windows and the mouse moves the pointer.
 
 ## Limits
 
-- **USB has run on QEMU only** (see [USB](#usb)), not on a Pi 5, where
-  L0S does not boot yet. Boot keyboards and mice only, on root ports
-  only, no hubs; `xhci` takes interrupts on the virt board, which L0's
-  runtime gives for PCIe since its roadmap 0106 (asked for in
-  [probes/usb](../probes/usb/REQUEST-pcie-interrupts.md)), but polls RP1's
-  controllers, whose interrupts it does not give yet; a control
+- **USB has run on QEMU and the Pi 5** (see [USB](#usb)): boot keyboards
+  and mice only, on root ports only, no hubs; a control
   transfer moves 2 KB at most, an endpoint's report 2 KB; and each
   controller has 64 pages for its devices, about 3 a device and 1 an
   endpoint opened.

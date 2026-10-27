@@ -5,6 +5,10 @@
 ;
 ;   sdhci pci    every SD host controller the pci server (pcie) found:
 ;                QEMU's sdhci-pci, with an sd-card in it
+;   sdhci pi5    the Raspberry Pi 5's microSD slot: the BCM2712's own
+;                SDHCI, sdio1, at a fixed address, its card detect
+;                pointed at the slot as Linux's sdhci-brcmstb does, its
+;                base clock 200 MHz should its capabilities not say
 ;
 ; It brings each card up as the specifications say (sd.l0): reset, a
 ; slow clock, CMD0, CMD8, ACMD41 until the card is ready, CMD2, CMD3 for
@@ -33,7 +37,9 @@
 (def sdhci () int
   (if (eq (args) (cons "pci" (nil (list int))))
       (from_pci)
-      (complain "usage: sdhci pci")))
+      (if (eq (args) (cons "pi5" (nil (list int))))
+          (from_pi5)
+          (complain "usage: sdhci pci | pi5"))))
 
 ; Every SD host controller the pci server knows of, its card brought up
 ; and served; none is no failure.
@@ -44,6 +50,40 @@
       (if (is_empty fs)
           (info_as "sdhci" "no SD host controller on the bus")
           (slots_up fs (nil SdSlot))))))
+
+; The Pi 5's sdio1 opened, said on the serial line, its card detect
+; pointed at the slot, and its card brought up and served; no region
+; there, as on any other board, is no failure.
+(def from_pi5 () int
+  (match (open_device (sdio1_base) (sdio1_bytes))
+    ((DeviceFailed fault why) (info_as "sdhci" (append "no sdio1 on this board: " why)))
+    ((DeviceOpened r)
+      (let w (info_as "sdhci" (sdio1_line (device_read16 r (reg_version)) (device_read32 r (reg_caps))
+                                          (device_read32 r (reg_present)) (device_read32 r (cfg_ctrl))
+                                          (device_read32 r (cfg_pin_sel))))
+        (let p (device_write32 r (cfg_pin_sel) (pin_sel_card (device_read32 r (cfg_pin_sel))))
+          (let s (settled r 100)
+            (match (card_up r (sdio1_base_mhz))
+              ((Err why) (info_as "sdhci" (append why (append ", present 0x" (hex_digits (device_read32 r (reg_present)) 8)))))
+              ((Ok c) (serving (cons (SdSlot r "" c (wait_for (sdio1_irq))) (nil SdSlot)))))))))))
+
+; Whether Present State says the card detect is stable within tries
+; milliseconds, as it is once debounced after the pin is chosen.
+(def settled ((r IoDevice) (tries int)) bool
+  (if (not (eq (bit_and (device_read32 r (reg_present)) (present_stable)) 0))
+      true
+      (if (le tries 0) false (let z (sleep_ns 1000000) (settled r (sub tries 1))))))
+
+; sdio1, in words: its SDHCI version, capabilities and present state,
+; and its cfg block's control and pin select, as the firmware left them.
+(def sdio1_line ((version int) (caps int) (present int) (ctrl int) (pins int)) (list int)
+  (append "sdio1 at 0x" (append (hex_digits (sdio1_base) 0)
+    (append ", irq " (append (digits (sdio1_irq))
+      (append ", version 0x" (append (hex_digits version 4)
+        (append ", caps 0x" (append (hex_digits caps 8)
+          (append ", present 0x" (append (hex_digits present 8)
+            (append ", cfg ctrl 0x" (append (hex_digits ctrl 8)
+              (append " pins 0x" (hex_digits pins 8)))))))))))))))
 
 ; ----------------------------------------------------------------- slots
 
@@ -68,7 +108,7 @@
         (match (open_device (pci_bar_base f 0) (pci_bar_size f 0))
           ((DeviceFailed fault why) (let w (info_as "sdhci" (append "no controller: " why)) (slots_up (tail fs) acc)))
           ((DeviceOpened r)
-            (match (let w (info_as "sdhci" (controller_line f)) (card_up r))
+            (match (let w (info_as "sdhci" (controller_line f)) (card_up r 0))
               ((Err why) (let w (info_as "sdhci" why) (slots_up (tail fs) acc)))
               ((Ok c) (slots_up (tail fs) (cons (SdSlot r "" c (wait_for (pci_interrupt f))) acc)))))))))
 
@@ -125,22 +165,23 @@
 ; --------------------------------------------------------------- bringing up
 
 ; The controller at r reset, powered and clocked slowly, and its card
-; brought up and clocked at its default speed; or why not.
-(def card_up ((r IoDevice)) (Result Card (list int))
+; brought up and clocked at its default speed, its base clock mhz should
+; its capabilities not say (0 if unknown); or why not.
+(def card_up ((r IoDevice) (mhz int)) (Result Card (list int))
   (if (not (was_reset r (reset_all)))
       ((Err Card (list int)) "the controller does not come out of reset")
       (let p (device_write8 r (reg_power) (power_on))
         (let e (device_write32 r (reg_status_enable) 4294967295)
           (let g (device_write32 r (reg_signal_enable) 0)
             (let t (device_write8 r (reg_timeout) (timeout_max))
-              (if (not (clocked r (init_khz)))
+              (if (not (clocked r (init_khz) mhz))
                   ((Err Card (list int)) "the controller's clock is not stable")
                   (if (eq (bit_and (device_read32 r (reg_present)) (present_card)) 0)
                       ((Err Card (list int)) "no card in the slot")
                       (match (identified r)
                         ((Err why) ((Err Card (list int)) why))
                         ((Ok c)
-                          (if (clocked r (data_khz))
+                          (if (clocked r (data_khz) mhz)
                               ((Ok Card (list int)) c)
                               ((Err Card (list int)) "the controller's clock is not stable"))))))))))))
 
@@ -155,12 +196,12 @@
       true
       (if (le tries 0) false (let z (sleep_ns 1000000) (bits_cleared r off bits (sub tries 1))))))
 
-; The card's clock at khz at most, from the controller's base: off, the
-; divisor set, the internal clock stable within 100 ms, then the card's
-; clock on.
-(def clocked ((r IoDevice) (khz int)) bool
+; The card's clock at khz at most, from the controller's base, or mhz if
+; its capabilities do not say: off, the divisor set, the internal clock
+; stable within 100 ms, then the card's clock on.
+(def clocked ((r IoDevice) (khz int) (mhz int)) bool
   (let w (device_write16 r (reg_clock) 0)
-    (let cw (clock_word (clock_divisor (caps_base_mhz (device_read32 r (reg_caps))) khz))
+    (let cw (clock_word (clock_divisor (base_mhz (device_read32 r (reg_caps)) mhz) khz))
       (let s (device_write16 r (reg_clock) cw)
         (if (stable r 100)
             (let on (device_write16 r (reg_clock) (bit_or cw (clock_card_on))) true)
