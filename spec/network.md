@@ -23,8 +23,9 @@ waited for, as `virtio-blk` waits. It serves **the nic protocol**
 | Request | Does |
 |---|---|
 | `info` | `nic MAC`: the card's Ethernet address, as `52:54:00:12:34:56` |
+| `link` | `link up` or `link down`: whether the card has a link; QEMU's always does |
 | `stats` | `rx N tx N dropped N`: frames taken and sent, and those lost |
-| `listen` | `ok`; then every frame taken comes to the reply port as a notice, `frm` and the frame, 14 to 1514 bytes |
+| `listen` | `ok`; then every frame taken comes to the reply port as a notice, `frm` and the frame, 14 to 1514 bytes, and each change of the link as `lnk up` or `lnk down` |
 | `send FRAME` | the frame, without its check sequence, put on the wire, padded to 60 bytes; answered only if the request names a reply port |
 
 On the Raspberry Pi 5 the same protocol is served by `gem`
@@ -131,8 +132,14 @@ server, for this card and this exchange's xid, is taken; the ACK of that
 address gives the stack its address, the netmask it names, or the
 address's class's, the first router it names, or none, and the first
 name server, or none; a NAK begins again. It sends again every 2
-seconds, 5 times in all, and if no server has answered says so and
-exits 1. Giving the demo another
+seconds, 5 times in all once the card has a link, and if no server has
+answered says so and exits 1. A DISCOVER sent with no link is lost, so
+`inet` asks the driver for the link (`link`) once it listens, counts
+tries only while the link is up, and when the driver's notice says the
+link has come up, sends at once and counts from one again; a link that
+has not come in 30 seconds it reports, and exits 1. A Pi 5's link comes
+up a few seconds after `gem` starts, which before this lost the boot's
+DHCP about one time in seven. Giving the demo another
 network, `make demo NET=user,net=192.168.7.0/24,dhcpstart=192.168.7.50`,
 shows the address it takes is the server's.
 
@@ -236,7 +243,8 @@ a Broadcom BCM54213PE PHY at MDIO address 1
   requests, every millisecond when idle, and the PHY's link every half
   second. A link coming up sets NCFGR's speed and duplex, lays the rings
   out afresh and enables the GEM, as `macb_mac_link_up` does; a link
-  going down disables it. Each is a line in the log
+  going down disables it. Each is a line in the log, and a `lnk up` or
+  `lnk down` notice to each listener
 - sends one frame at a time and waits up to 100 ms for the GEM to mark
   its descriptor used; a frame that fails or never goes restarts the
   GEM, whose transmit side stops at an error

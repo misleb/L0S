@@ -32,9 +32,15 @@
 (data Leasing (Leasing Stack Lease))
 
 ; How long to wait for an answer before sending again, and how many
-; times to send in all, at the start.
+; times to send in all, at the start, counted only while the card has a
+; link: a DISCOVER sent with none is lost.
 (def lease_retry_ns () int 2000000000)
 (def lease_tries () int 5)
+
+; How long to wait for the card's link at the start, before giving up:
+; a Pi 5's comes up a few seconds after its driver starts, and a card
+; with no cable never does.
+(def lease_link_wait_ns () int 30000000000)
 
 ; The xid of an exchange begun at time now by the card whose address is
 ; mac: 32 bits, from both.
@@ -300,25 +306,80 @@
 
 ; ------------------------------------------------------------------ waiting
 
-; s with its first DISCOVER sent, its answers waited for, and sent again
-; every lease_retry_ns, lease_tries times in all: s configured by a
-; server, and its lease, or none if no server answered. The queue is
-; sent after each step. Port 68 stays bound, for the lease's renewals.
-(def lease_run ((s Stack) (port int)) (Option Leasing)
-  (match (lease_start s port (lease_xid (stack_mac s) (clock_ns)))
-    ((Leasing s2 l) (lease_wait (sent_out s2) l port (add (clock_ns) (lease_retry_ns)) 1))))
+; How the start's asking stands: whether the card has a link, how many
+; times it has been asked with one, and when the wait ends, as clock_ns
+; counts: for an answer with a link, for the link without.
+(data Asking (Asking bool int int))
 
-; Waits for answers to l, which s's queue has sent, until due, the time
-; the try is over, the tries'th.
-(def lease_wait ((s Stack) (l Lease) (port int) (due int) (tries int)) (Option Leasing)
+; What the end of a wait calls for: wait on, ask again, or give up, with
+; no server having answered or with no link.
+(data AskingDue (AskWait) (AskAgain) (AskNoAnswer) (AskNoLink))
+
+; How a start's asking ended: with a lease, with no server answering, or
+; with the card never having a link.
+(data LeaseRun (LeaseGot Leasing) (LeaseNoAnswer) (LeaseNoLink))
+
+; The asking at time now, the first DISCOVER just sent, by a card whose
+; link is up or not: with a link, that DISCOVER counts.
+(def asking_new ((up bool) (now int)) Asking
+  (if up (Asking true 1 (add now (lease_retry_ns))) (Asking false 0 (add now (lease_link_wait_ns)))))
+
+; a once the link has come up or gone down at time now: come up, the
+; tries start again from one, sent at once; gone, they stop counting
+; until it comes back. A notice of the link as it was changes nothing.
+(def asking_relinked ((a Asking) (up bool) (now int)) Asking
+  (match a
+    ((Asking was n due)
+      (if (eq was up) a (asking_new up now)))))
+
+; Whether a link come up at a's asking calls for a DISCOVER at once.
+(def asking_sends ((a Asking) (up bool)) bool
+  (match a ((Asking was n due) (if was false up))))
+
+; What a calls for at time now.
+(def asking_due ((a Asking) (now int)) AskingDue
+  (match a
+    ((Asking up n due)
+      (if (lt now due)
+          (AskWait)
+          (if (not up) (AskNoLink) (if (ge n (lease_tries)) (AskNoAnswer) (AskAgain)))))))
+
+; a with one more try sent at time now.
+(def asking_again ((a Asking) (now int)) Asking
+  (match a ((Asking up n due) (Asking up (add n 1) (add now (lease_retry_ns))))))
+
+; s with its first DISCOVER sent, its answers waited for, and sent again
+; every lease_retry_ns, lease_tries times in all once the card has a
+; link, which up says it has now: s configured by a server, and its
+; lease; or no server answered, or no link came. A link that comes up
+; starts the tries again. The queue is sent after each step. Port 68
+; stays bound, for the lease's renewals.
+(def lease_run ((s Stack) (port int) (up bool)) LeaseRun
+  (match (lease_start s port (lease_xid (stack_mac s) (clock_ns)))
+    ((Leasing s2 l) (lease_wait (sent_out s2) l port (asking_new up (clock_ns))))))
+
+; Waits for answers to l, which s's queue has sent, and for the card's
+; link, as a says.
+(def lease_wait ((s Stack) (l Lease) (port int) (a Asking)) LeaseRun
   (if (lease_done l)
-      (Some (Leasing s l))
-      (if (ge (clock_ns) due)
-          (if (ge tries (lease_tries))
-              ((None Leasing))
-              (lease_wait (sent_out (lease_send s l)) l port (add (clock_ns) (lease_retry_ns)) (add tries 1)))
+      (LeaseGot (Leasing s l))
+      (match (asking_due a (clock_ns))
+        ((AskNoAnswer) (LeaseNoAnswer))
+        ((AskNoLink) (LeaseNoLink))
+        ((AskAgain) (lease_wait (sent_out (lease_send s l)) l port (asking_again a (clock_ns))))
+        ((AskWait)
           (match (port_try_receive port)
-            ((RecvFailed) (let z (sleep_ns 10000000) (lease_wait s l port due tries)))
-            ((Message from b)
-              (match (lease_hear s l from b (clock_ns))
-                ((Leasing s2 l2) (lease_wait (sent_out s2) l2 port due tries))))))))
+            ((RecvFailed) (let z (sleep_ns 10000000) (lease_wait s l port a)))
+            ((Message from b) (lease_heard_msg s l port a from b)))))))
+
+; lease_wait, once a message from pid from, its bytes b, has come: the
+; driver's link notice, which may send a DISCOVER at once, or anything
+; else, for the stack.
+(def lease_heard_msg ((s Stack) (l Lease) (port int) (a Asking) (from int) (b bytes)) LeaseRun
+  (let ln (if (eq from (stack_driver s)) (link_notice_of b) -1)
+    (if (lt ln 0)
+        (match (lease_hear s l from b (clock_ns))
+          ((Leasing s2 l2) (lease_wait (sent_out s2) l2 port a)))
+        (let up (eq ln 1)
+          (lease_wait (if (asking_sends a up) (sent_out (lease_send s l)) s) l port
+                      (asking_relinked a up (clock_ns)))))))
