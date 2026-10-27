@@ -220,6 +220,9 @@ GPTLIB  := user/lib/format/gpt.l0
 MBRLIB  := user/lib/format/mbr.l0
 PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB) $(MBRLIB)
 
+# SHA-256, which the Pi 5's bootloader checks its updates by.
+SHA256  := user/lib/format/sha256.l0
+
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
 # commands, which need only render.l0; and its client windows, which need
 # the compositor's protocol too.
@@ -247,6 +250,7 @@ LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(INETLIB)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
+LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
 LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
 LIBS_play       := $(AUDIOLIB) $(WAV)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB)
@@ -432,6 +436,7 @@ $(call l0_test,$(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0)
 $(call l0_test,$(BASE) $(DNSLIB) user/lib/format/dns_test.l0)
 $(call l0_test,$(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
+$(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)
 $(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
 $(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)

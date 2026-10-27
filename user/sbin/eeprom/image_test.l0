@@ -1,0 +1,173 @@
+; image_test.l0 -- tests of image.l0, on small images made here: a code
+; section filling the read-only 64 KiB, the configuration's file section
+; in the first partition, with sections after it or not, then erased
+; flash to 512 KiB. A release image is laid out the same way (the
+; roadmap's 0016 has one's sections).
+
+; A section of magic holding body, padded with 0xff to 8 bytes.
+(def sec ((magic int) (body (list int))) (list int)
+  (let n (length body)
+    (append (ee_be32_bytes magic)
+      (append (ee_be32_bytes n) (append body (ee_ffs (sub (ee_align8 n) n)))))))
+
+; A file section named name holding data.
+(def file_sec ((name (list int)) (body (list int))) (list int)
+  (sec (ee_file_magic) (append name (append (ee_zeros (sub 12 (length name))) (append (ee_zeros 4) body)))))
+
+; n of 0xff and of 0, as lists.
+(def ee_ffs ((n int)) (list int) (if (le n 0) (nil int) (cons 255 (ee_ffs (sub n 1)))))
+(def ee_zeros ((n int)) (list int) (if (le n 0) (nil int) (cons 0 (ee_zeros (sub n 1)))))
+
+; The code: a section of 8 + 65528 bytes, so the next is at 65536.
+(def code_bytes () bytes
+  (bytes_concat (cons (bytes_from_list (append (ee_be32_bytes (ee_magic)) (ee_be32_bytes 65528)))
+                  (cons (ee_ff 65528) (nil bytes)))))
+
+; The code, s, then erased flash to 512 KiB.
+(def image_of ((s (list int))) bytes
+  (bytes_concat (cons (code_bytes) (cons (bytes_from_list s) (cons (ee_ff (sub 458752 (length s))) (nil bytes))))))
+
+; s alone, then erased flash to 512 KiB.
+(def bare_image_of ((s (list int))) bytes
+  (bytes_concat (cons (bytes_from_list s) (cons (ee_ff (sub 524288 (length s))) (nil bytes)))))
+
+; The configuration last.
+(def img_last () bytes
+  (image_of (file_sec "bootconf.txt" "[all]\nBOOT_ORDER=0xf41\n")))
+
+; The configuration, then another file: the configuration's 31 bytes
+; end at 65536 + 24 + 31 = 65591, so the next section is at 65592.
+(def img_mid () bytes
+  (image_of (append (file_sec "bootconf.txt" "BOOT_ORDER=0xf41\nTFTP_PREFIX=0\n") (file_sec "pubkey.bin" "KEY"))))
+
+; As a release image has it: the configuration, a padding section of
+; 64 bytes, then another file, at 65592 + 72 = 65664.
+(def img_padded () bytes
+  (image_of (append (file_sec "bootconf.txt" "BOOT_ORDER=0xf41\nTFTP_PREFIX=0\n")
+              (append (sec (ee_pad_magic) (ee_ffs 64)) (file_sec "pubkey.bin" "KEY")))))
+
+(def config_text ((b bytes)) (list int)
+  (match (ee_config b)
+    ((Ok c) (bytes_to_list c))
+    ((Err why) (append "error: " why))))
+
+(def sections_of ((b bytes)) (list int)
+  (match (ee_sections b)
+    ((EeSections ss) (ee_sections_text ss))
+    ((EeBad why) (append "error: " why))))
+
+; The file's length is 16 of header and 23 of text, 39.
+(def test_sections () int
+  (check_str "sections" (sections_of (img_last))
+    "0 55aaf00f 65528 \n65536 55aaf11f 39 bootconf.txt\n"))
+
+(def test_config () int
+  (check_str "config" (config_text (img_last)) "[all]\nBOOT_ORDER=0xf41\n"))
+
+(def test_wrong_size () int
+  (check_str "size" (config_text (bytes_from_list (sec (ee_magic) "x")))
+    "error: an image is 512 KiB or 2 MiB, not 16 bytes"))
+
+(def test_bad_magic () int
+  (check_str "magic" (config_text (bare_image_of (append "\x12\x34\x56\x78" (ee_zeros 4))))
+    "error: no section's magic at byte 0"))
+
+(def test_no_config () int
+  (check_str "none" (config_text (image_of (sec (ee_magic) "code")))
+    "error: no bootconf.txt in the image"))
+
+(def replaced ((b bytes) (conf (list int))) (list int)
+  (match (ee_with_config b (bytes_from_list conf))
+    ((Ok img) (append (config_text img) (append "|" (digits (bytes_len img)))))
+    ((Err why) (append "error: " why))))
+
+(def test_replace_last () int
+  (check_str "last" (replaced (img_last) "[all]\nBOOT_ORDER=0xf21\nTFTP_PREFIX=1\n")
+    "[all]\nBOOT_ORDER=0xf21\nTFTP_PREFIX=1\n|524288"))
+
+; A configuration in the read-only 64 KiB is read, but not replaced.
+(def test_replace_read_only () int
+  (let b (bare_image_of (file_sec "bootconf.txt" "A=1\n"))
+    (add (check_str "read" (config_text b) "A=1\n")
+         (check_str "replaced" (replaced b "A=2\n") "error: no bootconf.txt in the image"))))
+
+; In the middle, the room ends at the next section: 65592 - 65560 = 32
+; bytes.
+(def test_replace_too_big () int
+  (check_str "big" (replaced (img_mid) (ee_ffs 33))
+    "error: the configuration is larger than its room's 32 bytes"))
+
+; Padding after the configuration is room too: up to the next file, at
+; 65664, 104 bytes.
+(def test_replace_padded_room () int
+  (add (check_str "fits" (replaced (img_padded) (ee_ffs 104)) (append (ee_ffs 104) "|524288"))
+       (check_str "big" (replaced (img_padded) (ee_ffs 105))
+         "error: the configuration is larger than its room's 104 bytes")))
+
+; The padding is made again over the rest of that room: 4 bytes end at
+; 65564, aligned to 65568, and a header leaves 88.
+(def test_replace_padded_sections () int
+  (match (ee_with_config (img_padded) (bytes_from_list "X=1\n"))
+    ((Ok img) (check_str "sections" (sections_of img)
+                "0 55aaf00f 65528 \n65536 55aaf11f 20 bootconf.txt\n65568 55aafeef 88 \n65664 55aaf11f 19 pubkey.bin\n"))
+    ((Err why) (fail_because "padded" why))))
+
+; Last, the room ends at the scratch block, 4096 bytes from the end.
+(def test_replace_last_room () int
+  (check_str "room" (replaced (img_last) (ee_ffs 2000))
+    (append (ee_ffs 2000) "|524288")))
+
+(def test_replace_over_max () int
+  (check_str "max" (replaced (img_last) (ee_ffs 4077))
+    "error: a configuration is at most 4076 bytes"))
+
+; In the middle, the rest of the old room up to the next section, at
+; 65592, becomes a padding section: the new config's 4 bytes end at 65564,
+; aligned to 65568, and padding's 8-byte header leaves 16.
+(def test_replace_mid_pads () int
+  (match (ee_with_config (img_mid) (bytes_from_list "X=1\n"))
+    ((Ok img) (check_str "sections" (sections_of img)
+                "0 55aaf00f 65528 \n65536 55aaf11f 20 bootconf.txt\n65568 55aafeef 16 \n65592 55aaf11f 19 pubkey.bin\n"))
+    ((Err why) (fail_because "mid" why))))
+
+; A gap of 8 bytes is a padding section of length 0, as
+; rpi-eeprom-config writes it: 24 bytes end at 65584, 8 short of the
+; next.
+(def test_replace_mid_small_gap () int
+  (match (ee_with_config (img_mid) (bytes_from_list "BOOT_ORDER=0xf21\nX=123\n\n"))
+    ((Ok img) (check_str "sections" (sections_of img)
+                "0 55aaf00f 65528 \n65536 55aaf11f 40 bootconf.txt\n65584 55aafeef 0 \n65592 55aaf11f 19 pubkey.bin\n"))
+    ((Err why) (fail_because "gap" why))))
+
+; Filling the room exactly leaves no gap.
+(def test_replace_mid_full () int
+  (check_str "full" (replaced (img_mid) (ee_ffs 32)) (append (ee_ffs 32) "|524288")))
+
+; The bytes outside the configuration's room are kept.
+(def test_replace_keeps_rest () int
+  (match (ee_with_config (img_mid) (bytes_from_list "X=1\n"))
+    ((Ok img) (add (check_true "code" (eq (bytes_slice img 0 65536) (code_bytes)))
+                   (check_true "next" (eq (bytes_slice (img_mid) 65592 524288) (bytes_slice img 65592 524288)))))
+    ((Err why) (fail_because "rest" why))))
+
+; Writing back what was there gives the same image, as
+; rpi-eeprom-config's loopback test does.
+(def test_replace_same () int
+  (match (ee_with_config (img_last) (bytes_from_list "[all]\nBOOT_ORDER=0xf41\n"))
+    ((Ok img) (check_true "same" (eq img (img_last))))
+    ((Err why) (fail_because "same" why))))
+
+(def test_sig () int
+  (check_str "sig" (ee_sig (bytes_from_list "abc") 1761523200)
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\nts: 1761523200\n"))
+
+(def test_update () int
+  (match (ee_update (img_last) (bytes_from_list "BOOT_ORDER=0xf21\n") 7)
+    ((Ok u) (match u ((EeUpdate img sig)
+              (add (check_str "config" (config_text img) "BOOT_ORDER=0xf21\n")
+                   (check_int "sig" (length sig) (add 64 7))))))
+    ((Err why) (fail_because "update" why))))
+
+(def test_ff () int
+  (let b (ee_ff 5000)
+    (add (check_int "len" (bytes_len b) 5000) (check_int "last" (bytes_get b 4999) 255))))

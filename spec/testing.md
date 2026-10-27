@@ -190,7 +190,10 @@ on a board with no disk, `fs_nodisk` the file server there,
 `inet_nocard` the stack with no driver, `virtio-rng_nodev` the
 entropy device's driver on a board with none, `hvs_nohvs` the Pi 5's
 display driver on a board with no HVS, and `gem_norp1` its network
-driver on a board with no RP1, none of which is a failure. `virtio-blk_ro` has `disk` write to a read-only disk, which the
+driver on a board with no RP1, none of which is a failure.
+`eeprom_nombox` asks for the Pi 5's bootloader configuration on a board
+with no mailbox, and `eeprom_show` reads a file that is no bootloader
+image, both of which fail, saying why. `virtio-blk_ro` has `disk` write to a read-only disk, which the
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
 of a line, which its `pattern` checks. `garbage`

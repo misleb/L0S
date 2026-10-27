@@ -65,7 +65,9 @@ its serial number, 8 hex digits, which `PI5_TFTP_PREFIX` makes, unless
 its EEPROM says `TFTP_PREFIX=1` with no `TFTP_PREFIX_STR`.
 
 The board's EEPROM must try the network: `BOOT_ORDER=0xf21`, from
-`rpi-eeprom-config --edit` on Raspberry Pi OS, tries the SD card, then
+`rpi-eeprom-config --edit` on Raspberry Pi OS, or from L0S itself with
+`eeprom update` (see [The bootloader's
+configuration](#the-bootloaders-configuration)), tries the SD card, then
 the network. The network's DHCP server must name the TFTP server, as a
 proxy can for an existing network; with dnsmasq that is
 `dhcp-range=192.168.1.0,proxy`, `pxe-service=0,"Raspberry Pi Boot"`,
@@ -119,6 +121,7 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 | `fs ram` | a volume in memory, `/Volumes/tmp`, registered as `tmpfs`, which keeps nothing over a power cut |
 | `sdhci pi5`, `fs` | the microSD card in the slot, through the BCM2712's own SD host controller, `sdio1`, at 0x1000FFF000, interrupt 305 (see [The disk](storage.md#the-disk)), served as a disk; `fs` mounts its volumes, a FAT32 boot partition among them (see [FAT32 volumes](fat32.md#fat32-volumes)). With no card in the slot `sdhci` says so and `fs` finds no disk, and both exit |
 | `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). It keeps time over a power cut only with a battery on the RTC connector |
+| `eeprom` | not started, but flagged `dev` for the mailbox, so that the shell can run it: the bootloader's configuration, read and changed (see [The bootloader's configuration](#the-bootloaders-configuration)) |
 | `gem`, `inet dhcp` | the Ethernet port, RP1's GEM, serving `nic`, and the IPv4 stack over it at the address DHCP gives (see [The network on the Raspberry Pi 5](network.md#the-network-on-the-raspberry-pi-5)) |
 
 Nothing else of the demo's has a device here: no virtio, so no `random`
@@ -139,6 +142,58 @@ boot should check these, on the debug UART (`dmesg` repeats them):
 - `gem`'s line, its link line once a cable is in, and `inet`'s lease
   (see [The network on the Raspberry Pi 5](network.md#the-network-on-the-raspberry-pi-5))
 
+## The bootloader's configuration
+
+The Pi 5's bootloader keeps its configuration, `BOOT_ORDER`,
+`TFTP_PREFIX` and the rest, as the file `bootconf.txt` inside its own
+image in the EEPROM. `eeprom` (`/sbin/eeprom`, flagged `dev` in
+`pi5/etc/inittab` for the mailbox) reads and changes it:
+
+```
+eeprom                                         # the configuration running now
+eeprom version                                 # the bootloader's version
+eeprom show IMAGE                              # the configuration in a pieeprom.bin
+eeprom update IMAGE CONFIG /Volumes/bootfs     # IMAGE with CONFIG, to flash next boot
+```
+
+`eeprom` and `eeprom version` ask the firmware's own command line,
+vcgencmd's `bootloader_config` and `bootloader_version`, through the
+VideoCore mailbox (`GET_GENCMD_RESULT`, 0x00030080, with vcgencmd's 1024
+bytes of room), which a board has answered. With no mailbox, as on
+QEMU, `eeprom` says so and fails.
+
+L0S never writes the EEPROM itself. `eeprom update` takes a release
+image, a `pieeprom.bin` from Raspberry Pi's rpi-eeprom (`firmware-2712/`)
+copied onto a volume, puts the file CONFIG in place of its
+`bootconf.txt` as `rpi-eeprom-config` does (`image.l0`: the image's
+sections walked by their big-endian magic and length; the first
+`bootconf.txt` in the first partition, from 64 KiB, rewritten, with room
+up to the next section that is not padding; then 0xff and, unless it is
+the last section, a padding section over the rest of that room), and
+writes `pieeprom.upd`, the new image, and
+`pieeprom.sig`, its SHA-256 in hex and a `ts:` line, the update's time,
+as `rpi-eeprom-digest` does, into the directory given, the card's boot
+partition. As the board next boots from that partition, or from a TFTP
+root the two files are put in for a board that boots over the network,
+the bootloader checks the image against the signature and flashes
+itself (`SELF-UPDATE`, `BOOT-EEPROM: UPDATED` on the debug UART), then
+restarts. It takes an
+update only if its time is later than the last one's, so the time
+`eeprom update` gives is the clock's or, if that is earlier, as on a
+board whose RTC has no battery and starts in 1970, the last update's
+(bootloader_version's `update-time`) and a second; with neither it
+refuses. An update whose time is not later is skipped, so one left in
+place is flashed only once. On a Pi 5, `eeprom update` wrote the same
+files as `rpi-eeprom-config` and `rpi-eeprom-digest` for the same image,
+configuration and time; flashed over the network, they gave the
+configuration it was given, which `eeprom` then printed. An image must be 512 KiB or 2 MiB,
+and a configuration at most 4076 bytes and no larger than its room;
+anything else is refused before a file is written. On the host, for the
+release image `pieeprom-2026-09-25.bin` and configurations of 0 to 3406
+bytes, `image.l0` wrote the same `pieeprom.upd` and `pieeprom.sig`, byte
+for byte, as `rpi-eeprom-config --config` and `rpi-eeprom-digest`, and
+the image's own configuration written back gave the image unchanged.
+
 ## Limits
 
 - **The Raspberry Pi 5 reaches its RTC only through the firmware**, and
@@ -150,3 +205,9 @@ boot should check these, on the debug UART (`dmesg` repeats them):
   pages once its heap is down to its reserve (see
   [The kernel](kernel.md)), so the RAM past what the heap records goes
   unused.
+- **The bootloader's configuration changes only through its own
+  update**: `eeprom` cannot read the EEPROM's image, only the
+  configuration the firmware reports, so an update starts from a
+  release image copied onto a volume, not from what is flashed, and is
+  flashed only on a boot from the partition it was written to, or
+  from a TFTP root it was copied to off the board.

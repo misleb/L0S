@@ -1,0 +1,232 @@
+; image.l0 -- the Raspberry Pi 5's bootloader image, pieeprom.bin, as
+; rpi-eeprom-config reads and changes it: a run of sections from the
+; start, each a big-endian magic and length, its contents, then padding
+; to 8 bytes, ending at a magic of 0 or all ones. A file section names
+; its file in the 12 bytes after its length, then 4 bytes, then the
+; file's bytes; the bootloader's configuration is the file bootconf.txt.
+; And the update the bootloader flashes itself from: pieeprom.upd, the
+; image, and pieeprom.sig, its SHA-256 and a timestamp
+; (rpi-eeprom-digest). Pure.
+
+; A section's magic, under its mask; a file's; padding's.
+(def ee_magic () int 1437265935)          ; 0x55aaf00f
+(def ee_magic_mask () int 4294963215)     ; 0xfffff00f
+(def ee_file_magic () int 1437266207)     ; 0x55aaf11f
+(def ee_pad_magic () int 1437269743)      ; 0x55aafeef
+
+; A file section's header past its magic and length: its name's 12 bytes
+; and 4 more, so its bytes start 24 bytes into the section.
+(def ee_name_len () int 12)
+(def ee_file_hdr () int 20)
+
+; The last erase block, which the bootloader keeps as scratch: no
+; section may reach it.
+(def ee_erase_block () int 4096)
+
+; The sizes an image may be: 512 KiB, the Pi 4's, and 2 MiB, the Pi 5's.
+(def ee_size_ok ((n int)) bool (if (eq n 524288) true (eq n 2097152)))
+
+; The largest configuration rpi-eeprom-config writes: a file and its
+; header in one erase block.
+(def ee_max_config () int 4076)
+
+; Where the configuration that an update replaces may be: in the first
+; of an A/B image's partitions, after its read-only 64 KiB and for 988
+; KiB. An image that is not A/B has its configuration there too.
+(def ee_part_start () int 65536)
+(def ee_part_end () int 1077248)
+
+; The file holding the configuration.
+(def ee_config_name () (list int) "bootconf.txt")
+
+; The u32 at byte i of b, most significant byte first.
+(def ee_be32 ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 24)
+    (bit_or (bit_shl (bytes_get b (add i 1)) 16)
+      (bit_or (bit_shl (bytes_get b (add i 2)) 8) (bytes_get b (add i 3))))))
+
+; x's low 4 bytes, most significant first.
+(def ee_be32_bytes ((x int)) (list int)
+  (cons (bit_and (bit_shr x 24) 255)
+    (cons (bit_and (bit_shr x 16) 255)
+      (cons (bit_and (bit_shr x 8) 255) (cons (bit_and x 255) (nil int))))))
+
+; n up to the next multiple of 8.
+(def ee_align8 ((n int)) int (bit_and (add n 7) -8))
+
+; ------------------------------------------------------------- sections
+
+; A section: its magic, where it starts, its length after the 8 bytes of
+; magic and length, and its file's name, empty if it is not a file.
+(data EeSection (EeSection int int int (list int)))
+
+; The image's sections, or why it is not one.
+(data EeSections (EeSections (list EeSection)) (EeBad (list int)))
+
+; The sections of b, an image, or why it is not one.
+(def ee_sections ((b bytes)) EeSections
+  (if (not (ee_size_ok (bytes_len b)))
+      (EeBad (append "an image is 512 KiB or 2 MiB, not " (append (digits (bytes_len b)) " bytes")))
+      (ee_sections_from b 0 (nil EeSection))))
+
+; The sections of b from offset off on, after the reversed acc.
+(def ee_sections_from ((b bytes) (off int) (acc (list EeSection))) EeSections
+  (if (gt (add off 8) (bytes_len b))
+      (EeSections (rev acc))
+      (let magic (ee_be32 b off)
+        (if (if (eq magic 0) true (eq magic 4294967295))
+            (EeSections (rev acc))
+            (if (not (eq (bit_and magic (ee_magic_mask)) (ee_magic)))
+                (EeBad (append "no section's magic at byte " (digits off)))
+                (let len (ee_be32 b (add off 4))
+                  (if (gt (add off (add 8 len)) (bytes_len b))
+                      (EeBad (append "the section at byte " (append (digits off) " runs past the end")))
+                      (ee_sections_from b (ee_align8 (add off (add 8 len)))
+                        (cons (EeSection magic off len (ee_file_name b magic off len)) acc)))))))))
+
+; The name of the file whose section, of magic and length len, is at off;
+; empty if it is no file. Its 12 bytes, without the zeros padding them.
+(def ee_file_name ((b bytes) (magic int) (off int) (len int)) (list int)
+  (if (if (eq magic (ee_file_magic)) (ge len (add (ee_name_len) 4)) false)
+      (ee_name_bytes b (add off 8) (add off 20) (nil int))
+      (nil int)))
+
+; The bytes of b from i up to j but its zeros, after the reversed acc.
+(def ee_name_bytes ((b bytes) (i int) (j int) (acc (list int))) (list int)
+  (if (ge i j)
+      (rev acc)
+      (let c (bytes_get b i)
+        (ee_name_bytes b (add i 1) j (if (eq c 0) acc (cons c acc))))))
+
+; The sections as text, one a line: where each starts, its magic and
+; length, and its file's name.
+(def ee_sections_text ((ss (list EeSection))) (list int)
+  (ee_sections_text_from ss (nil int)))
+
+; ee_sections_text's loop, after the reversed acc.
+(def ee_sections_text_from ((ss (list EeSection)) (acc (list int))) (list int)
+  (if (is_empty ss)
+      (rev acc)
+      (match (head ss)
+        ((EeSection magic off len name)
+          (let a (push " " (push (hex_digits magic 8) (push " " (push (digits off) acc))))
+            (ee_sections_text_from (tail ss)
+              (push "\n" (push name (push " " (push (digits len) a))))))))))
+
+; ------------------------------------------------------------- the file
+
+; A file found: where its section starts, its length, where its room
+; ends, and whether it is the last section.
+(data EeFile (EeFile int int int bool) (EeNoFile (list int)))
+
+; The file name in b, the first section of that name starting from lo
+; up to hi, as rpi-eeprom-config's find_file finds it. Its room ends at
+; the next section that is not padding, or, with none, at the scratch
+; block or hi, whichever is first.
+(def ee_find ((b bytes) (name (list int)) (lo int) (hi int)) EeFile
+  (match (ee_sections b)
+    ((EeBad why) (EeNoFile why))
+    ((EeSections ss) (ee_find_in ss name lo hi (min (sub (bytes_len b) (ee_erase_block)) hi)))))
+
+; The file name among ss, starting from lo up to hi; end is where its
+; room ends if no section after it does.
+(def ee_find_in ((ss (list EeSection)) (name (list int)) (lo int) (hi int) (end int)) EeFile
+  (if (is_empty ss)
+      (EeNoFile (append "no " (append name " in the image")))
+      (match (head ss)
+        ((EeSection magic off len n)
+          (if (if (eq magic (ee_file_magic)) (if (eq n name) (if (ge off lo) (lt off hi) false) false) false)
+              (EeFile off len (ee_room_end (tail ss) end) (is_empty (tail ss)))
+              (ee_find_in (tail ss) name lo hi end))))))
+
+; Where the first of ss that is not padding starts, or end if none.
+(def ee_room_end ((ss (list EeSection)) (end int)) int
+  (if (is_empty ss)
+      end
+      (match (head ss)
+        ((EeSection magic off len n)
+          (if (eq magic (ee_pad_magic)) (ee_room_end (tail ss) end) off)))))
+
+; The configuration in b, an image, or why there is none: the first
+; anywhere, as rpi-eeprom-config reads it.
+(def ee_config ((b bytes)) (Result bytes (list int))
+  (match (ee_find b (ee_config_name) 0 (bytes_len b))
+    ((EeNoFile why) ((Err bytes (list int)) why))
+    ((EeFile off len next last)
+      ((Ok bytes (list int)) (bytes_slice b (add off 24) (add off (add 8 len)))))))
+
+; ------------------------------------------------------------- replacing
+
+; b, an image, with conf in place of its configuration in the first
+; partition, as rpi-eeprom-config writes it: the section's length made
+; conf's, conf after its header, 0xff to 8 bytes, a padding section over
+; the rest of the room unless it is the last, and 0xff to the room's
+; end; or why not. Its room is checked to hold the file's 24 bytes of
+; header, where rpi-eeprom-config checks for 20 and so could write 4
+; bytes over the next section.
+(def ee_with_config ((b bytes) (conf bytes)) (Result bytes (list int))
+  (if (gt (bytes_len conf) (ee_max_config))
+      ((Err bytes (list int)) (append "a configuration is at most " (append (digits (ee_max_config)) " bytes")))
+      (match (ee_find b (ee_config_name) (ee_part_start) (ee_part_end))
+        ((EeNoFile why) ((Err bytes (list int)) why))
+        ((EeFile off len next last)
+          (if (gt (add off (add 24 (bytes_len conf))) next)
+              ((Err bytes (list int)) (append "the configuration is larger than its room's "
+                                        (append (digits (sub next (add off 24))) " bytes")))
+              ((Ok bytes (list int)) (ee_spliced b conf off next last)))))))
+
+; b with the configuration's section at off, up to next, holding conf.
+(def ee_spliced ((b bytes) (conf bytes) (off int) (next int) (last bool)) bytes
+  (let n (bytes_len conf)
+    (let head_len (bytes_from_list (ee_be32_bytes (add n (add (ee_name_len) 4))))
+      (let after (add off (add 24 n))
+        (let aligned (ee_align8 after)
+          (bytes_concat
+            (cons (bytes_slice b 0 (add off 4))
+              (cons head_len
+                (cons (bytes_slice b (add off 8) (add off 24))
+                  (cons conf
+                    (cons (ee_ff (sub aligned after))
+                      (cons (ee_padding (sub next aligned) last)
+                        (cons (bytes_slice b next (bytes_len b)) (nil bytes))))))))))))))
+
+; The n bytes from the configuration's end, aligned, to its room's end:
+; a padding section's header over them unless it is the last or there
+; are none, then 0xff. n is a multiple of 8, so a header fits whenever
+; there are any, of length 0 for exactly 8.
+(def ee_padding ((n int) (last bool)) bytes
+  (if (if last true (lt n 8))
+      (ee_ff n)
+      (bytes_concat
+        (cons (bytes_from_list (append (ee_be32_bytes (ee_pad_magic)) (ee_be32_bytes (sub n 8))))
+          (cons (ee_ff (sub n 8)) (nil bytes))))))
+
+; n bytes of 0xff, an erased flash's.
+(def ee_ff ((n int)) bytes
+  (if (le n 0)
+      (bytes_from_list (nil int))
+      (bytes_slice (ee_ff_doubled (bytes_from_list (cons 255 (nil int))) n) 0 n)))
+
+; b, all 0xff, doubled until it has at least n bytes.
+(def ee_ff_doubled ((b bytes) (n int)) bytes
+  (if (ge (bytes_len b) n)
+      b
+      (ee_ff_doubled (bytes_concat (cons b (cons b (nil bytes)))) n)))
+
+; ------------------------------------------------------------- the update
+
+; What the bootloader is given to flash: the image, pieeprom.upd, and
+; pieeprom.sig, its SHA-256 in hex and the update's time, which must be
+; later than the last update's for the bootloader to take it.
+(data EeUpdate (EeUpdate bytes (list int)))
+
+; The update of b, an image, to the configuration conf, made at ts
+; seconds since 1970; or why not.
+(def ee_update ((b bytes) (conf bytes) (ts int)) (Result EeUpdate (list int))
+  (match (ee_with_config b conf)
+    ((Err why) ((Err EeUpdate (list int)) why))
+    ((Ok img) ((Ok EeUpdate (list int)) (EeUpdate img (ee_sig img ts))))))
+
+; pieeprom.sig for img, made at ts.
+(def ee_sig ((img bytes) (ts int)) (list int)
+  (append (sha256_hex img 0 (bytes_len img)) (append "\nts: " (append (digits ts) "\n"))))

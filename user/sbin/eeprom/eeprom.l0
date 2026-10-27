@@ -1,0 +1,218 @@
+; eeprom.l0 -- the Raspberry Pi 5's bootloader configuration, which it
+; keeps in its EEPROM: read through the firmware, and changed by the
+; update the bootloader flashes itself from (image.l0). Its module must
+; be flagged dev, for the mailbox.
+;
+;   eeprom                          the configuration the bootloader is
+;                                   running, as vcgencmd
+;                                   bootloader_config says it
+;   eeprom version                  the bootloader's version, as
+;                                   vcgencmd bootloader_version says it
+;   eeprom show IMAGE               the configuration in IMAGE, a
+;                                   pieeprom.bin
+;   eeprom update IMAGE CONFIG DIR  IMAGE with the file CONFIG as its
+;                                   configuration, written to DIR as
+;                                   pieeprom.upd and pieeprom.sig, which
+;                                   the bootloader flashes on the next
+;                                   boot from DIR, the card's boot
+;                                   partition
+;
+; The update's time must be later than the last update's for the
+; bootloader to take it: it is the clock's, or the last update's and a
+; second if the clock is behind that, as with no battery on the RTC.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "eeprom" why))
+
+; What eeprom takes.
+(def eeprom_usage () (list int)
+  "usage: eeprom [version | show IMAGE | update IMAGE CONFIG DIR]")
+
+; eeprom with the arguments as: its exit status.
+(def eeprom_main ((as (list (list int)))) int
+  (if (is_empty as)
+      (ee_gencmd_say "bootloader_config")
+      (let w (head as)
+        (let n (length as)
+          (if (if (eq w "version") (eq n 1) false)
+              (ee_gencmd_say "bootloader_version")
+              (if (if (eq w "show") (eq n 2) false)
+                  (ee_show (nth as 1))
+                  (if (if (eq w "update") (eq n 4) false)
+                      (ee_update_files (nth as 1) (nth as 2) (nth as 3))
+                      (complain (eeprom_usage)))))))))
+
+; ------------------------------------------------------------- the firmware
+
+; RPI_FIRMWARE_GET_GENCMD_RESULT: a command for the firmware's own
+; command line, vcgencmd's, and its answer as text (vcgencmd.c).
+(def ee_tag_gencmd () int 196736)        ; 0x00030080
+
+; The room for the command, and for its answer: vcgencmd's.
+(def ee_gencmd_room () int 1024)
+
+; The words of the buffer asking the firmware's command line cmd: its
+; size in bytes, the request's code, the tag, its room, its own code,
+; the answer's error, cmd ending in a zero in the room, and the end tag.
+(def ee_gencmd_request ((cmd (list int))) (list int)
+  (let room (ee_gencmd_room)
+    (let body (ee_le_words (append cmd (ee_zero_bytes (sub room (length cmd)))) (nil int))
+      (cons (mul (add 7 (div room 4)) 4)
+        (cons 0 (cons (ee_tag_gencmd) (cons room (cons 0 (cons 0 (append body (cons 0 (nil int))))))))))))
+
+; How many words the request and its answer are.
+(def ee_gencmd_words () int (add 7 (div (ee_gencmd_room) 4)))
+
+; n zeros.
+(def ee_zero_bytes ((n int)) (list int)
+  (if (le n 0) (nil int) (cons 0 (ee_zero_bytes (sub n 1)))))
+
+; The bytes bs, a multiple of 4, as little-endian words, after the
+; reversed acc.
+(def ee_le_words ((bs (list int)) (acc (list int))) (list int)
+  (if (lt (length (take bs 4)) 4)
+      (rev acc)
+      (let w (bit_or (nth bs 0) (bit_or (bit_shl (nth bs 1) 8) (bit_or (bit_shl (nth bs 2) 16) (bit_shl (nth bs 3) 24))))
+        (ee_le_words (drop bs 4) (cons w acc)))))
+
+; What the firmware's command line answered, or why not.
+(data GenAnswer (GenText (list int)) (GenFailed (list int)))
+
+; The answer in ws, the buffer as the firmware wrote it back: the text
+; from its seventh word, little-endian, up to its first zero, if the
+; buffer and the tag say they succeeded and the command's error is 0.
+(def ee_gencmd_reply ((ws (list int))) GenAnswer
+  (if (not (eq (length ws) (ee_gencmd_words)))
+      (GenFailed "the firmware's answer is the wrong size")
+      (if (not (property_answered ws))
+          (GenFailed "the firmware did not take the command")
+          (if (not (eq (nth ws 5) 0))
+              (GenFailed (append "the firmware's command line says error " (digits (nth ws 5))))
+              (GenText (ee_text_of (drop ws 6) (nil int)))))))
+
+; The bytes of ws, little-endian, up to the first zero, after the
+; reversed acc.
+(def ee_text_of ((ws (list int)) (acc (list int))) (list int)
+  (if (is_empty ws)
+      (rev acc)
+      (ee_text_word (head ws) 0 (tail ws) acc)))
+
+; ee_text_of at byte k of w, the words after it rest.
+(def ee_text_word ((w int) (k int) (rest (list int)) (acc (list int))) (list int)
+  (if (ge k 4)
+      (ee_text_of rest acc)
+      (let c (bit_and (bit_shr w (mul k 8)) 255)
+        (if (eq c 0) (rev acc) (ee_text_word w (add k 1) rest (cons c acc))))))
+
+; The answer to cmd from the firmware's command line, over the mailbox.
+(def ee_gencmd ((cmd (list int))) GenAnswer
+  (if (ge (length cmd) (ee_gencmd_room))
+      (GenFailed "the command is too long")
+      (match (mailbox_open)
+        ((NoMbox why) (GenFailed why))
+        ((MboxOpen mb)
+          (match (mailbox_ask mb (ee_gencmd_request cmd) (ee_gencmd_words))
+            ((None) (GenFailed (append "the firmware did not answer, " (mailbox_page_text mb))))
+            ((Some ws) (ee_gencmd_reply ws)))))))
+
+; Says the answer to cmd on standard output, ending in a newline: 0, or
+; 1 if there is none.
+(def ee_gencmd_say ((cmd (list int))) int
+  (match (ee_gencmd cmd)
+    ((GenFailed why) (complain why))
+    ((GenText t) (let w (write_str (ee_with_newline t)) 0))))
+
+; s, ending in a newline if it is not empty.
+(def ee_with_newline ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (last_or s 0) 10) s (append s "\n"))))
+
+; The last of xs, or fallback if it is empty.
+(def (last_or T) ((xs (list T)) (fallback T)) T
+  (if (is_empty xs) fallback (last_or (tail xs) (head xs))))
+
+; ------------------------------------------------------------- images
+
+; Says the configuration in the image at path: 0, or 1 if it has none.
+(def ee_show ((path (list int))) int
+  (match (read_whole path)
+    ((Err why) (complain (append path (append ": " why))))
+    ((Ok b)
+      (match (ee_config b)
+        ((Err why) (complain (append path (append ": " why))))
+        ((Ok c) (let w (write_str (ee_with_newline (bytes_to_list c))) 0))))))
+
+; The update of the image at image to the configuration in the file
+; conf, written to dir: the image first, so that the bootloader never
+; finds a signature without it.
+(def ee_update_files ((image (list int)) (conf (list int)) (dir (list int))) int
+  (match (read_whole image)
+    ((Err why) (complain (append image (append ": " why))))
+    ((Ok b)
+      (match (read_whole conf)
+        ((Err why) (complain (append conf (append ": " why))))
+        ((Ok c)
+          (let ts (ee_update_ts (ee_clock_seconds) (ee_last_update))
+            (if (le ts 0)
+                (complain "no clock and no firmware: the update needs a time later than the last, for the bootloader to take it")
+                (match (ee_update b c ts)
+                  ((Err why) (complain (append image (append ": " why))))
+                  ((Ok u) (ee_write_update u dir))))))))))
+
+; Writes u's files to dir: 0, or 1 if either could not be.
+(def ee_write_update ((u EeUpdate) (dir (list int))) int
+  (match u
+    ((EeUpdate img sig)
+      (let upd (ee_path dir "pieeprom.upd")
+        (let sg (ee_path dir "pieeprom.sig")
+          (let w1 (write_whole upd img)
+            (if (not (is_empty w1))
+                (complain (append upd (append ": " w1)))
+                (let w2 (write_whole sg (bytes_from_list sig))
+                  (if (not (is_empty w2))
+                      (complain (append sg (append ": " w2)))
+                      (let w (write_str (ee_written_line upd sg)) 0))))))))))
+
+; dir/name, without a second slash.
+(def ee_path ((dir (list int)) (name (list int))) (list int)
+  (if (eq (last_or dir 0) 47) (append dir name) (append dir (append "/" name))))
+
+; What update says once it has written upd and sg.
+(def ee_written_line ((upd (list int)) (sg (list int))) (list int)
+  (append "eeprom: wrote " (append upd (append " and " (append sg
+    "; the bootloader flashes it as the board next boots from there\n")))))
+
+; The time to give an update: the clock's, now, but after last, the last
+; update's as the firmware says it, if it does. A Pi 5 with no battery
+; on its RTC starts its clock in 1970, which the bootloader would take
+; as older than its last update and ignore.
+(def ee_update_ts ((now int) (last (Option int))) int
+  (match last
+    ((None) now)
+    ((Some t) (max now (add t 1)))))
+
+; The last update's time, as bootloader_version's update-time line says
+; it; none if the firmware does not answer or has no such line.
+(def ee_last_update () (Option int)
+  (match (ee_gencmd "bootloader_version")
+    ((GenFailed why) ((None int)))
+    ((GenText t) (ee_update_time_of (lines t)))))
+
+; The number on the line of ls that is update-time N, if there is one.
+(def ee_update_time_of ((ls (list (list int)))) (Option int)
+  (if (is_empty ls)
+      ((None int))
+      (let ws (split_spaces (head ls))
+        (if (if (eq (length ws) 2) (eq (head ws) "update-time") false)
+            (match (word_number (nth ws 1))
+              ((Some n) (Some n))
+              ((None) (ee_update_time_of (tail ls))))
+            (ee_update_time_of (tail ls))))))
+
+; What the clock says the time is, in seconds; 0 if there is no clock.
+(def ee_clock_seconds () int
+  (match (name_lookup "clock")
+    ((NotFound) 0)
+    ((Found c)
+      (match (time_of (asked_reply (port_ask c (port_new) "time" "the clock")))
+        ((Some t) t)
+        ((None) 0)))))
