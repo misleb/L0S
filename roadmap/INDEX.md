@@ -38,12 +38,17 @@ move independently, so several can be active at once.
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
+| [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | ready | 0/5 | – | toolkit.md, programs.md, demo.md, syscalls.md |
+| [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | blocked | 0/6 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
 
 ## Ready
 
 - [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame
   interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
   find it needs L0 to give the interrupt.
+- [0019](0019-font-service.md) A font service that caches rasterized
+  glyphs, with Source Sans 3 beside Source Code Pro: on QEMU, its first
+  step fetching the font.
 
 ## Dependencies
 
@@ -52,6 +57,7 @@ graph LR
   0002[0002 faster with more CPUs] --> 0003[0003 Pi 5 CPUs]
   0005[0005 HVS frame interrupts] --> 0006[0006 paced display queue]
   0012[0012 key modifiers] --> 0013[0013 entry editing]
+  0019[0019 font service] --> 0020[0020 proportional text]
 ```
 
 ## Done
