@@ -121,8 +121,11 @@
 ; How a window is resized: the bank its buffers' ids are in, the edges the
 ; user last dragged (the bits edge_left, edge_right, edge_top and
 ; edge_bottom, which say which sides stay and which move), the size last
-; asked of its client, and whether an answer is awaited.
-(data Sizing (Sizing int int int int bool))
+; asked of its client, and whether an answer is awaited; then, while it
+; is maximized, the place and size it is restored to, and while a
+; maximize or a restore awaits the client's answer, the place and size it
+; goes to; rect_none for none of either.
+(data Sizing (Sizing int int int int bool Rect Rect))
 
 ; The bits of a window's edges: the left, the right, the top, the bottom.
 (def edge_left () int 1)
@@ -134,7 +137,18 @@
 (def has_edge ((e int) (b int)) bool (not (eq (bit_and e b) 0)))
 
 ; The bank of buffer ids a window's buffers are in.
-(def sz_bank ((sz Sizing)) int (match sz ((Sizing k e ww wh asking) k)))
+(def sz_bank ((sz Sizing)) int (match sz ((Sizing k e ww wh asking re go) k)))
+
+; Where window w is restored to, rect_none if it is not maximized.
+(def win_restore ((w Win)) Rect
+  (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
+    (match sz ((Sizing k e ww wh asking re go) re)))))
+
+; w with re to be restored to, and go the place and size it goes to once
+; its client answers.
+(def win_maxing ((w Win) (re Rect) (go Rect)) Win
+  (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
+    (match sz ((Sizing k e ww wh asking ore ogo) (Win id port pid x y cw ch top title tc cva tva bf app (Sizing k e ww wh asking re go) dc))))))
 
 ; The bank of buffer ids w's buffers are in.
 (def win_bank ((w Win)) int
@@ -143,7 +157,7 @@
 ; w with its size asked for, as the pointer's drag wants it.
 (def win_asked ((w Win) (edges int) (ww int) (wh int) (asking bool)) Win
   (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
-    (match sz ((Sizing k e ow oh oa) (Win id port pid x y cw ch top title tc cva tva bf app (Sizing k edges ww wh asking) dc))))))
+    (match sz ((Sizing k e ow oh oa re go) (Win id port pid x y cw ch top title tc cva tva bf app (Sizing k edges ww wh asking re go) dc))))))
 
 (def win_id ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz dc) id)))
 (def win_port ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz dc) port)))
@@ -780,7 +794,8 @@
   (if (if (eq op "top") (eq (length args) 2) false) (topped v (nth ns 0) (nth ns 1))
   (if (if (eq op "close") (eq (length args) 1) false) (closed v (nth ns 0))
   (if (if (eq op "move") (eq (length args) 1) false) (move_started v from (nth ns 0))
-  (refused v (append "no request " op))))))
+  (if (if (eq op "maximize") (eq (length args) 1) false) (maximize_asked v from (nth ns 0))
+  (refused v (append "no request " op)))))))
 
 ; damage ID X Y W H ...: each window's rectangle shown, five numbers each.
 (def requested_damage ((v Wm) (args (list (list int)))) (Served Wm)
@@ -837,7 +852,7 @@
                 (match (cascade n (ServerSide) cw ch w h)
                   ((Placed z x y top)
                     (let bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) pages dtva)
-                      (let win (Win n port from x y cw ch 0 title tc cva tva bf (client_app bar from) (Sizing 0 0 cw ch false) (ServerSide))
+                      (let win (Win n port from x y cw ch 0 title tc cva tva bf (client_app bar from) (Sizing 0 0 cw ch false (rect_none) (rect_none)) (ServerSide))
                         (let f (refocused ws (cons win ws))
                           (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))))))
 
@@ -852,7 +867,7 @@
         (match (cascade n (ClientSide) cw ch w h)
           ((Placed z x y top)
             (let bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) 0 0)
-              (let win (Win n port from x y cw ch 0 title (canvas_new 0 0 0) cva 0 bf (client_app bar from) (Sizing 0 0 cw ch false) (ClientSide))
+              (let win (Win n port from x y cw ch 0 title (canvas_new 0 0 0) cva 0 bf (client_app bar from) (Sizing 0 0 cw ch false (rect_none) (rect_none)) (ClientSide))
                 (let f (refocused ws (cons win ws))
                   (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))
 
@@ -973,7 +988,7 @@
   (match win
     ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
       (match sz
-        ((Sizing k e ww wh asking)
+        ((Sizing k e ww wh asking re go)
           (if (if asking (not (if (eq ww nw) (eq wh nh) false)) false)
               (let t (port_tell port (size_notice ww wh)) true)
               false))))))
@@ -1039,23 +1054,27 @@
 ; A buffer's side n with room to grow: a quarter more, and 64.
 (def grown ((n int)) int (add n (add (div n 4) 64)))
 
-; Win with its new buffers: their corners shaped, the window moved if
-; its left or top edge was dragged, and then the screen shown with them.
+; Win with its new buffers: their corners shaped, the window moved to
+; where a maximize or a restore takes it, else if its left or top edge
+; was dragged, and then the screen shown with them. Once no answer is
+; awaited, the goal is met.
 (def resize_shown ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int) (tc Canvas) (tva int) (tn int) (dtva int)) (Served Wm)
   (match v
     ((Wm d w h desk font bg ws n ptr drag kp pp bar)
       (match win
         ((Win id port pid x y cw ch top title otc ocva otva obf app sz dc)
           (match sz
-            ((Sizing ok edges ww wht asking)
+            ((Sizing ok edges ww wht asking re go)
               (match wh
                 ((Where cva cn csd)
                   (let k (sub 1 ok)
                     (let s (shape_window d id k dc nw nh)
                       (let again (if asking (not (if (eq ww nw) (eq wht nh) false)) false)
-                        (let nx (if (has_edge edges (edge_left)) (add x (sub cw nw)) x)
-                          (let ny (below_bar (if (has_edge edges (edge_top)) (add y (sub ch nh)) y))
-                            (resize_done v win (Win id port pid nx ny nw nh 0 title tc cva tva (Bufs cn there csd tn dtva) app (Sizing k edges ww wht again) dc))))))))))))))))
+                        (let goal (not (rect_empty go))
+                          (let nx (if goal (rect_x go) (if (has_edge edges (edge_left)) (add x (sub cw nw)) x))
+                            (let ny (below_bar (if goal (rect_y go) (if (has_edge edges (edge_top)) (add y (sub ch nh)) y)))
+                              (resize_done v win (Win id port pid nx ny nw nh 0 title tc cva tva (Bufs cn there csd tn dtva) app
+                                                      (Sizing k edges ww wht again re (if again go (rect_none))) dc)))))))))))))))))
 
 ; The window old replaced by nwin, whose new buffers were painted before
 ; the display had them, so it took their pixels with them: the screen
@@ -1523,6 +1542,52 @@
                         ((Win wid port pid wx wy cw ch top title tc cva tva bf app sz dc)
                           (okay (Wm d w h desk font bg ws n ptr (Dragging id (sub x wx) (sub y wy) 0) kp pp bar)))))))))))))
 
+; maximize ID, from from: window ID made to fill the screen under the
+; bar, or, if it is maximized, restored to where it was and its size, as
+; a double click on a header bar asks. Only the window's client may ask.
+(def maximize_asked ((v Wm) (from int) (id int)) (Served Wm)
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match (find_win ws id)
+        ((None) (refused v (append "no window " (digits id))))
+        ((Some win)
+          (if (not (eq (win_pid win) from))
+              (refused v "not that window's client")
+              (okay (maximize_toggled v win))))))))
+
+; v with win maximized, where and how big it is kept to restore it to, or
+; restored, if it is maximized.
+(def maximize_toggled ((v Wm) (win Win)) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (match win
+        ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
+          (let re (win_restore win)
+            (let go (if (rect_empty re) (maximized_rect dc w h) re)
+              (win_goes_to v (win_maxing win (if (rect_empty re) (Rect x y cw ch) (rect_none)) go) go))))))))
+
+; Where a window decorated as dc goes when maximized on a screen w by h,
+; and its content's size: all the screen under the top bar.
+(def maximized_rect ((dc Deco) (w int) (h int)) Rect
+  (Rect 0 (bar_h) (sub w (mul 2 (border dc))) (sub (sub h (bar_h)) (add (bar_rows dc) (border dc)))))
+
+; v with win going to go: its client asked for go's size, as a drag of
+; its right and bottom edges asks, the window placed at go once it
+; answers (resize_shown); or, if it is that size already, moved there.
+(def win_goes_to ((v Wm) (win Win) (go Rect)) Wm
+  (match win
+    ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
+      (if (if (eq (rect_w go) cw) (eq (rect_h go) ch) false)
+          (win_moved v (win_maxing win (win_restore win) (rect_none)) (rect_x go) (rect_y go))
+          (resize_asked v win (add (edge_right) (edge_bottom)) (rect_w go) (rect_h go))))))
+
+; v with win at x, y, below the bar, and the screen restacked.
+(def win_moved ((v Wm) (win Win) (x int) (y int)) Wm
+  (match v
+    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+      (let v2 (Wm d w h desk font bg (replaced ws (win_at win x (below_bar y))) n ptr drag kp pp bar)
+        (let e (restack v2) v2)))))
+
 ; Whether a client's move of window id may start: nothing dragged, the
 ; left button down in buttons b, and the pointer held for id.
 (def move_may ((drag Drag) (b int) (grab int) (id int)) bool
@@ -1607,7 +1672,7 @@
       (match win
         ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
           (match sz
-            ((Sizing k oe ww wh asking)
+            ((Sizing k oe ww wh asking re go)
               (let ask (if asking false (not (if (eq nw cw) (eq nh ch) false)))
                 (let t (if ask (port_tell port (size_notice nw nh)) 0)
                   (Wm d w h desk font bg (replaced ws (win_asked win e nw nh (if asking true ask))) n ptr drag kp pp bar))))))))))

@@ -1,6 +1,6 @@
 # 0011: Client-side decorations: maximize and resize
 
-Track: Desktop · Status: ready · Needs: – · Spec: desktop.md, toolkit.md
+Track: Desktop · Status: active · Needs: – · Spec: desktop.md, toolkit.md
 
 ## Why
 
@@ -19,15 +19,29 @@ README's "Still to do" for client-side decorations.
 
 ## Steps
 
-- [ ] Maximize and restore by a double click on the header bar.
+- [x] Maximize and restore by a double click on the header bar.
 - [ ] A `resize` request from the client, started from inside its edge.
+- [ ] A double click on a title bar `wm` draws maximizes and restores
+  that window too, by the same code as `maximize`.
 
 ## Spec changes
 
-- desktop.md: the compositor protocol's new request, and the Files limit
-  loses "is not maximized by a double click".
-- toolkit.md: `UiCsdBar`'s double click and edge.
+- desktop.md: the compositor protocol's new request (`resize` from
+  inside the edge), and the Files limit loses "a press inside its edge
+  does not resize it"; the limit on `wm`'s own title bars goes.
+- toolkit.md: `UiCsdBar`'s edge.
 
 ## Log
 
 - 2026-10-26: written from the toolkit README's "Still to do".
+- 2026-10-26: `maximize ID` in the compositor protocol: `wm` keeps the
+  place and size to restore in the window's `Sizing`, asks the client
+  for the size by a size notice, and places it once it answers. The
+  toolkit asks it on the second press of a double click on a `UiCsdBar`'s
+  ground, the press told as the click since `wm` takes its release.
+  `tests/files.sh` maximizes Files to 1280x768 at 0, 32 and restores it;
+  its `dbl` now sends its four button events on one QMP connection,
+  since four `nc -w 1` calls had stretched past 400 ms and its double
+  click on a file had failed before this change too. Moved into the
+  spec: desktop.md's `maximize`, and toolkit.md's double click. Found:
+  `wm`'s own title bars do not maximize either (step 3).

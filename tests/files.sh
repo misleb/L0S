@@ -12,7 +12,8 @@
 #   2. a click on data's row: it selected, and Computer's not; a double
 #      click on its file shows the file's text, and Esc goes back
 #   3. a drag of the place's header bar's ground: wm moves the window,
-#      as the client's move request asks, and run windows says where
+#      as the client's move request asks, and run windows says where;
+#      a double click there maximizes it, and another restores it
 #   4. the toggle to the list: its header's line
 #   5. a right click on the file, Rename..., a new name typed, Enter:
 #      ls /Volumes/data at the serial shell lists it so
@@ -70,10 +71,19 @@ click() {
   events "$(button false "${3:-left}")"; sleep 1
 }
 
-# A double click at x, y: two clicks well within 400 ms.
+# A double click at x, y: two clicks well within 400 ms, each press and
+# release its own input-send-event, so its own report, but all four on
+# one connection, since each nc may take up to its second to end.
 dbl() {
+  local b
   events "$(at "$1" "$2")"; sleep 1
-  events "$(button true)"; events "$(button false)"; events "$(button true)"; events "$(button false)"; sleep 1
+  {
+    printf '{"execute":"qmp_capabilities"}\n'
+    for b in true false true false; do
+      printf '{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$(button $b)"
+    done
+  } | nc -U -w 1 "$qmp" > /dev/null 2>&1
+  sleep 1
 }
 
 # A drag of the left button from x, y by dx, dy, in four steps.
@@ -96,8 +106,8 @@ waits_for() {
   fail "no line like '$1' on the serial line; it showed:"
 }
 
-# Where Files's window is, as run windows lists it: w_x, w_y; or none,
-# w_x empty, if it is not there.
+# Where Files's window is, as run windows lists it: w_x, w_y, and its
+# size, w_w, w_h; or none, w_x empty, if it is not there.
 window() {
   local try from line
   w_x=""
@@ -107,7 +117,7 @@ window() {
     sleep 1
     line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Files ' | head -1)
     if [ -n "$line" ]; then
-      read -r _ _ w_x w_y _ _ _ <<< "$line"
+      read -r _ _ w_x w_y w_w w_h _ <<< "$line"
       return 0
     fi
   done
@@ -202,7 +212,24 @@ drag $((cx + 350)) $((cy + 20)) 100 80
 window || fail "run windows lost Files's window; it showed:"
 [ "$w_x" = $((cx + 100)) ] && [ "$w_y" = $((cy + 80)) ] || fail "the drag left the window at $w_x, $w_y, not $((cx + 100)), $((cy + 80)); it showed:"
 echo "ok - files: its header bar dragged the window"
-cx=$w_x; cy=$w_y
+cx=$w_x; cy=$w_y; cw=$w_w; ch=$w_h
+
+# A double click on the header bar's ground maximizes the window: all of
+# the screen under the top bar, 1280 by 768 from 0, 32. Another, where
+# the ground is then, restores its place and size.
+max_at() {
+  local try
+  for try in $(seq 1 15); do
+    window 5 && [ "$w_x $w_y $w_w $w_h" = "$1" ] && return 0
+  done
+  return 1
+}
+dbl $((cx + 350)) $((cy + 20))
+max_at "0 32 1280 768" || fail "a double click on the header bar left the window at $w_x, $w_y, $w_w by $w_h, not maximized; it showed:"
+echo "ok - files: a double click on its header bar maximized it"
+dbl 350 52
+max_at "$cx $cy $cw $ch" || fail "a second double click left the window at $w_x, $w_y, $w_w by $w_h, not $cx, $cy, $cw by $ch; it showed:"
+echo "ok - files: another restored it"
 
 click $((cx + 787)) $((cy + 22))
 shows "the list, its header's line" "$((cx + 400)) $((cy + 77)) $line" "$((cx + 400)) $((cy + 120)) $view"
