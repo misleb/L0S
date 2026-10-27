@@ -40,6 +40,7 @@ move independently, so several can be active at once.
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
 | [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | ready | 0/5 | – | toolkit.md, programs.md, demo.md, syscalls.md |
 | [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | blocked | 0/6 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
+| [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
 
 ## Ready
 
@@ -49,6 +50,8 @@ move independently, so several can be active at once.
 - [0019](0019-font-service.md) A font service that caches rasterized
   glyphs, with Source Sans 3 beside Source Code Pro: on QEMU, its first
   step fetching the font.
+- [0021](0021-many-windows.md) An app with many windows, its events
+  told by window: on QEMU, starting with the window notice.
 
 ## Dependencies
 
