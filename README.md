@@ -180,6 +180,8 @@ l0s> ls
   ...
   /etc/face
   /etc/icons
+  /etc/images/computer.face
+  ...
   /etc/inittab
   /etc/motd
   /etc/splash.ppm
@@ -1039,6 +1041,16 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   16, 32, 48, 64, 96 and 128. `make icon-sheet` draws them all into
   `build/icon-sheet.ppm` to look at. A new icon is its SVG copied there
   and its name in `icons.l0`'s `ui_icon_names`.
+- **Full-color icons**, as Nautilus and GNOME Disks show things, are
+  Adwaita's SVGs under `icons/adwaita/scalable`: folder,
+  text-x-generic, application-x-executable, drive-harddisk,
+  drive-multidisk and computer (`icons.l0`'s `ui_image_names`).
+  `tools/mkicon --image` draws each into `/etc/images/NAME.face`, its
+  images at 16, 32, 48, 64 and 96 with their alpha. Files and Disks
+  load the ones they show, at the sizes their scale paints only
+  (`face.l0`'s `ui_images_load`), and paint them as `UiPImage`s, in the
+  grid, the list and the sidebar; a sidebar row or a tile whose image
+  is missing shows its symbolic icon.
 - **`vt`**'s cells are still 8×16 of the desktop's pixels; it scrolls by
   32 of its buffer's rows.
 - **The launcher** shows each app's `icon2x.ppm`, which `tools/mkicon`
@@ -1985,7 +1997,7 @@ time, on the launcher's ground, into the 48×48 PPM, and again at scale
   GNOME Console's, System Monitor's, Disks' and Files' their GNOME
   apps', each under its project's license ([icons/](icons) has them and
   where each came from). mkicon draws it with the SVG library, and also
-  into `icon.face`, its images at 16, 32, 48 and 96 with their alpha
+  into `icon.face`, its images at 16, 32, 48, 64 and 96 with their alpha
   (`face.l0`'s `image.N`), which the bundle keeps for Files to paint on
   its own ground (`UiPImage`), as the PPMs, drawn on the launcher's,
   cannot be shown on another with no alpha.

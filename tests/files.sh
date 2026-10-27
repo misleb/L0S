@@ -177,13 +177,15 @@ waits_for "\[pid [0-9]+ running\]"
 window || fail "run windows never listed Files's window; it showed:"
 cx=$w_x; cy=$w_y
 
-# Applications, the first of /'s folders: its icon, Adwaita's folder at
-# 48, from 302, 70; its case's left side covers 0 to 6 across and 15 to
-# 36 down of it, so 305, 94 wholly.
+# Applications, the first of /'s folders: its icon, Adwaita's full-color
+# folder at 48, from 302, 70, its front light blue at 326, 100; and the
+# Computer row's, Adwaita's computer at 32, from 14, 58, its screen blue
+# at 30, 73.
+folder="164 202 238"; computer="69 140 226"
 shows "its own header bars, the sidebar, Computer selected, /'s folders" \
   "$((cx + 100)) $((cy + 3)) $header" "$((cx + 300)) $((cy + 3)) $header" \
   "$((cx + 100)) $((cy + 400)) $sidebar" "$((cx + 200)) $((cy + 76)) $side_sel" \
-  "$((cx + 305)) $((cy + 94)) $accent"
+  "$((cx + 326)) $((cy + 100)) $folder" "$((cx + 30)) $((cy + 73)) $computer"
 
 click $((cx + 100)) $((cy + 172))
 shows "data selected, Computer not" "$((cx + 200)) $((cy + 172)) $side_sel" "$((cx + 200)) $((cy + 76)) $sidebar"

@@ -97,6 +97,17 @@ display. This is the working summary, with the rules.
   `tools/mkicons` into `/etc/icons`, smooth at every scale. No icon is
   drawn by hand. `UiPImage` paints a full-color image with alpha, an
   app's `icon.face` (mkicon draws it from the bundle's `icon.svg`).
+- **Full-color icons** (`icons.l0`'s `ui_image_names`: folder,
+  text-x-generic, application-x-executable, drive-harddisk,
+  drive-multidisk, computer) are Adwaita's `icons/adwaita/scalable/NAME.svg`,
+  drawn by `mkicon --image` into `/etc/images/NAME.face`. A program
+  loads the ones it shows once, `(ui_images_load names (ui_win_scale w))`
+  (only the sizes its scale paints: they are a word a pixel), keeps the
+  `UiImages`, and passes `(ui_image im NAME)` on: to `UiSideRow`'s last
+  field, a `UiCellImage`, or a `UiTileDrawn`'s `UiPImage`.
+  `ui_icon_or_image` falls back to the symbolic icon when none was
+  loaded, as on the host. Files and Disks do this; status pages stay
+  symbolic, as GNOME's are.
 - **`widget.l0`**: a `UiWidget` tree (`UiLabel`, `UiButton`, `UiBox`,
   `UiExpand`, `UiPad`, `UiSeparator`, `UiHeaderBar`, `UiView`, `UiLevel`,
   `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`, and `panes.l0`'s

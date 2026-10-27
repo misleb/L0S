@@ -471,7 +471,7 @@ test-virt:
 	L0_QEMU_ARGS="-smp 1" $(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
 	L0_QEMU_ARGS="-smp $(VIRT_CPUS)" $(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
 
-$(BUILD) $(BUILD)/bin $(BUILD)/icons:
+$(BUILD) $(BUILD)/bin $(BUILD)/icons $(BUILD)/images:
 	mkdir -p $@
 
 # The kernel's layout options as last built, rewritten only when they
@@ -535,6 +535,15 @@ $(ICON_FACE): $(BUILD)/mkicons $(SYMBOLIC)
 
 icon-sheet: $(BUILD)/mkicons $(SYMBOLIC)
 	$(BUILD)/mkicons --sheet $(BUILD)/icon-sheet.ppm $(SYMBOLIC)
+
+# The full-color icons Files and Disks show things with, /etc/images:
+# Adwaita's SVGs under icons/adwaita/scalable, each drawn by mkicon
+# --image into NAME.face, its images at every size, with their alpha.
+COLOR_SVGS  := $(sort $(wildcard icons/adwaita/scalable/*.svg))
+IMAGE_FACES := $(COLOR_SVGS:icons/adwaita/scalable/%.svg=$(BUILD)/images/%.face)
+
+$(BUILD)/images/%.face: icons/adwaita/scalable/%.svg $(BUILD)/mkicon | $(BUILD)/images
+	$(BUILD)/mkicon --image $< $@.tmp && mv $@.tmp $@
 
 # Each app's icon, drawn from its bundle's icon.svg or icon.draw, and
 # an icon.svg's images for Files, icon.face. mkicon draws on the
@@ -604,8 +613,9 @@ graph-hook:
 # demo/etc, the splash at both scales, and the face, staged together as
 # the archive's /etc.
 SPLASH2X := $(if $(filter $(BUILD)/splash.ppm,$(SPLASH)),$(BUILD)/splash2x.ppm)
-ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE)
+ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE) $(IMAGE_FACES)
 stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
+            && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/ \
             $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm)
 
 initramfs: images root $(ETC_DEPS)
