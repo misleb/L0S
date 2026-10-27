@@ -12,9 +12,18 @@ the full set before calling it done.
 |---|---|---|---|
 | one module | `l0 test FILES... X_test.l0` | seconds | the logic of one file, on this Mac |
 | every host test | `make test` | about 90 seconds from nothing; seconds for what changed | every pure module, the libraries, each program's logic |
-| the kernel on the board | `make test-virt` | about 20 seconds | each test boots the kernel with hand-assembled threads, as many at once as there are CPUs |
+| the kernel on the board | `make test-virt` | about 3 minutes | each test boots the kernel with hand-assembled threads, as many at once as this machine has CPUs; the whole suite twice, on a board of one CPU and of `VIRT_CPUS` (4) |
 | boots and the screen | `make e2e` | several minutes | real programs under the real kernel, then the screen tests |
 
+- **A board test must pass on one CPU and on several.** With several, the
+  processes a test starts run at once, so one never relies on another
+  having run first: it waits for what it needs, as `await_mount`,
+  `await_receiving`, `await_exited` and `told_reader` in
+  `kernel_virt_test.l0` do, with a loop of calls and `cbnz`. The e2e
+  cases and screen tests boot with `QEMU_CPUS` CPUs, 1 unless set, as
+  QEMU runs more slowly with more; `QEMU_CPUS=4 make e2e` tries four, and
+  a case whose output depends on which program runs first pins itself
+  to one with a `cpus` file.
 - **Done** means `make check` and `make test` pass. Run `make e2e` too for
   anything that boots, drives a device, draws, or takes input, and
   `make test-virt` for the kernel. Run long ones in the background.

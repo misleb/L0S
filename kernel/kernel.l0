@@ -32,59 +32,68 @@
 
 ; Every slot of the table, the pids ready to run in order, the ports, the
 ; sleepers, the bound interrupts, the initramfs, the pid each slot holds,
-; and how many mappings each shared frame has.
-(data Kernel (Kernel (array Slot) (Queue int) Ipc (list Sleeper) (Map int Irq) Boot Pids Mem))
+; how many mappings each shared frame has, and which processes the other
+; CPUs hold. A process out on another CPU stays Live in its slot, so that
+; other processes' calls find it; the one whose trap is being handled is
+; out of the table, as on one CPU.
+(data Kernel (Kernel (array Slot) (Queue int) Ipc (list Sleeper) (Map int Irq) Boot Pids Mem Cpus))
 
 ; What happens after a process traps: it goes on running; it goes back
 ; to the table, ready or waiting; it has gone; or the system stops.
 (data Step (Resume Kernel Proc) (Park Kernel Proc) (Next Kernel) (Halt int))
 
 ; The kernel at boot, before anything starts: every slot Free, nothing
-; ready, no ports, sleepers or interrupts, and the initramfs input, its
-; entries es, as the inittab's c configures them.
+; ready, no ports, sleepers or interrupts, the initramfs input, its
+; entries es, as the inittab's c configures them, and every CPU there is,
+; holding nothing.
 (def kernel_new ((input bytes) (es (array Entry)) (c Config)) Kernel
   (match c
     ((Config launches devs defaults stdin)
       (Kernel (array_new 256 (Free)) (Queue (nil int) (nil int)) (ipc_new) (nil Sleeper)
-              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int))) (klog_new)) (pids_new) (mem_new)))))
+              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int))) (klog_new)) (pids_new) (mem_new) (cpus_new (cpu_count))))))
 
 ; ------------------------------------------------------------- the fields
 
 ; k's ports, its sleepers, how many interrupts are bound, and its count
 ; of frames shared.
-(def k_ipc ((k Kernel)) Ipc (match k ((Kernel slots ready ipc ss irqs boot next mem) ipc)))
-(def k_sleepers ((k Kernel)) (list Sleeper) (match k ((Kernel slots ready ipc ss irqs boot next mem) ss)))
-(def k_irq_count ((k Kernel)) int (match k ((Kernel slots ready ipc ss irqs boot next mem) (map_size irqs))))
-(def k_mem ((k Kernel)) Mem (match k ((Kernel slots ready ipc ss irqs boot next mem) mem)))
+(def k_ipc ((k Kernel)) Ipc (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) ipc)))
+(def k_sleepers ((k Kernel)) (list Sleeper) (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) ss)))
+(def k_irq_count ((k Kernel)) int (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (map_size irqs))))
+(def k_mem ((k Kernel)) Mem (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) mem)))
+
+; What the other CPUs hold, and k with c in its place.
+(def k_cpus ((k Kernel)) Cpus (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) cpus)))
+(def with_cpus ((k Kernel) (c Cpus)) Kernel
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss irqs boot next mem c))))
 
 ; Entry i of the initramfs, which must be one (is_entry).
 (def k_entry ((k Kernel) (i int)) Entry
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) (array_get es i))))))
 
 ; Every entry of the initramfs.
 (def k_entries ((k Kernel)) (array Entry)
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) es)))))
 
 ; How many entries the initramfs has.
 (def k_entry_count ((k Kernel)) int
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) (array_len es))))))
 
 ; Whether the inittab lets entry i drive devices.
 (def k_entry_dev ((k Kernel) (i int)) bool
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) (array_get devs i))))))
 
 ; The arguments the inittab gives entry i when started without any.
 (def k_entry_args ((k Kernel) (i int)) (list (list int))
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) (array_get defaults i))))))
 
 ; The initramfs's bytes, none once a volume is /.
 (def k_input ((k Kernel)) bytes
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) input)))))
 
 ; Whether i is the index of an entry of the initramfs.
@@ -98,10 +107,10 @@
 ; k with the initramfs's bytes given up, and so its stdin file.
 (def k_free_initramfs ((k Kernel)) Kernel
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
         ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot (bytes_from_list (nil int)) es devs defaults -1 0 names klog) next mem))))))
+          (Kernel slots ready ipc ss irqs (Boot (bytes_from_list (nil int)) es devs defaults -1 0 names klog) next mem cpus))))))
 
 ; The path of p's program: its entry's, or its image's, as spawn_image
 ; was given it.
@@ -114,29 +123,29 @@
 
 ; The path of each process started from an image of its own, by pid.
 (def k_names ((k Kernel)) (Map int (list int))
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) names)))))
 
 ; k with pid's image's path forgotten, pid having ended.
 (def k_forget_name ((k Kernel) (pid int)) Kernel
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
         ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid) klog) next mem))))))
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid) klog) next mem cpus))))))
 
 ; The kernel's log of messages.
 (def k_log ((k Kernel)) KLog
-  (match k ((Kernel slots ready ipc ss irqs boot next mem)
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
     (match boot ((Boot input es devs defaults stdin cur names klog) klog)))))
 
 ; k with its log replaced.
 (def k_with_log ((k Kernel) (log KLog)) Kernel
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
         ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names log) next mem))))))
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names log) next mem cpus))))))
 
 ; k with a message logged by pid (0 for the kernel) at level, of text
 ; with no newline, stamped with the time. Any level but debug is written
@@ -164,35 +173,35 @@
 
 ; k with s as its sleepers.
 (def with_sleepers ((k Kernel) (s (list Sleeper))) Kernel
-  (match k ((Kernel slots ready ipc old irqs boot next mem) (Kernel slots ready ipc s irqs boot next mem))))
+  (match k ((Kernel slots ready ipc old irqs boot next mem cpus) (Kernel slots ready ipc s irqs boot next mem cpus))))
 
 ; k with interrupt n bound as b.
 (def with_irq ((k Kernel) (n int) (b Irq)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem) (Kernel slots ready ipc ss (map_put irqs n b) boot next mem))))
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss (map_put irqs n b) boot next mem cpus))))
 
 ; k with interrupt n bound to nothing.
 (def without_irq ((k Kernel) (n int)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem) (Kernel slots ready ipc ss (map_remove irqs n) boot next mem))))
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss (map_remove irqs n) boot next mem cpus))))
 
 ; What interrupt n is bound to, if anything.
 (def k_irq ((k Kernel) (n int)) (Option Irq)
-  (match k ((Kernel slots ready ipc ss irqs boot next mem) (map_get irqs n))))
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (map_get irqs n))))
 
 ; k with pid last on the ready queue.
 (def push_ready ((k Kernel) (pid int)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem) (Kernel slots (queue_push ready pid) ipc ss irqs boot next mem))))
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots (queue_push ready pid) ipc ss irqs boot next mem cpus))))
 
 ; Whether pid is the one its slot holds, or last held: a pid from an
 ; earlier turn of the slot, or never given, names nothing, so every
 ; function below takes it as a Free slot's, and changes nothing for it.
 (def k_current ((k Kernel) (pid int)) bool
-  (match k ((Kernel slots ready ipc ss irqs boot pids mem) (pid_current pids pid))))
+  (match k ((Kernel slots ready ipc ss irqs boot pids mem cpus) (pid_current pids pid))))
 
 ; k with s in pid's slot.
 (def put_slot ((k Kernel) (pid int) (s Slot)) Kernel
   (if (not (k_current k pid))
       k
-      (match k ((Kernel slots ready ipc ss irqs boot next mem) (Kernel (array_set slots (slot_of pid) s) ready ipc ss irqs boot next mem)))))
+      (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel (array_set slots (slot_of pid) s) ready ipc ss irqs boot next mem cpus)))))
 
 ; k with pid's slot taken out, left Free, and the slot.
 (data TakenSlot (TakenSlot Kernel Slot))
@@ -202,9 +211,9 @@
   (if (not (k_current k pid))
       (TakenSlot k (Free))
       (match k
-        ((Kernel slots ready ipc ss irqs boot next mem)
+        ((Kernel slots ready ipc ss irqs boot next mem cpus)
           (let s (array_get slots (slot_of pid))
-            (TakenSlot (Kernel (array_set slots (slot_of pid) (Free)) ready ipc ss irqs boot next mem) s))))))
+            (TakenSlot (Kernel (array_set slots (slot_of pid) (Free)) ready ipc ss irqs boot next mem cpus) s))))))
 
 ; What pid's slot holds, without taking it.
 (data Look (LookFree) (LookLive) (LookDead int))
@@ -215,7 +224,7 @@
   (if (not (k_current k pid))
       (LookFree)
       (match k
-        ((Kernel slots ready ipc ss irqs boot next mem)
+        ((Kernel slots ready ipc ss irqs boot next mem cpus)
           (match (array_get slots (slot_of pid))
             ((Free) (LookFree))
             ((Live p) (LookLive))
@@ -223,7 +232,7 @@
 
 ; The pid slot i holds, or last held, 0 for none yet.
 (def k_pid_at ((k Kernel) (i int)) int
-  (match k ((Kernel slots ready ipc ss irqs boot pids mem) (pid_at pids i))))
+  (match k ((Kernel slots ready ipc ss irqs boot pids mem cpus) (pid_at pids i))))
 
 ; p back in its slot, and on the ready queue if it is ready.
 (def park ((k Kernel) (p Proc)) Kernel
@@ -243,9 +252,9 @@
 ; their mappings, and k with those updated.
 (def k_dma_alloc ((k Kernel) (p Proc) (n int)) Step
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match (proc_dma_alloc mem p n)
-        ((Allocated m2 q) (Resume (Kernel slots ready ipc ss irqs boot next m2) q))))))
+        ((Allocated m2 q) (Resume (Kernel slots ready ipc ss irqs boot next m2 cpus) q))))))
 
 ; q with fs mapped at its next device pages, and its answer: where, or
 ; the code that says why not.
@@ -254,17 +263,17 @@
 ; proc_map_shared through k, as KShared says.
 (def k_map_shared ((k Kernel) (q Proc) (fs (list int))) KShared
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match (proc_map_shared mem q fs)
-        ((Shared m2 q2 v) (KShared (Kernel slots ready ipc ss irqs boot next m2) q2 v))
-        ((ShareRefused m2 q2 code) (KShared (Kernel slots ready ipc ss irqs boot next m2) q2 code))))))
+        ((Shared m2 q2 v) (KShared (Kernel slots ready ipc ss irqs boot next m2 cpus) q2 v))
+        ((ShareRefused m2 q2 code) (KShared (Kernel slots ready ipc ss irqs boot next m2 cpus) q2 code))))))
 
 ; k with p's space and frames freed, p having ended.
 (def k_release ((k Kernel) (p Proc)) Kernel
   (let dev (proc_dev k p)
     (match k
-      ((Kernel slots ready ipc ss irqs boot next mem)
-        (Kernel slots ready ipc ss irqs boot next (proc_release mem p dev))))))
+      ((Kernel slots ready ipc ss irqs boot next mem cpus)
+        (Kernel slots ready ipc ss irqs boot next (proc_release mem p dev) cpus)))))
 
 ; Whether a process in state s may run.
 (def is_ready ((s State)) bool
@@ -322,9 +331,9 @@
 ; k with every sleeper whose time has come by now woken, with 0.
 (def wake_sleepers ((k Kernel) (now int)) Kernel
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match (wake_due ss now)
-        ((Woken pids left) (wake_all (Kernel slots ready ipc left irqs boot next mem) pids))))))
+        ((Woken pids left) (wake_all (Kernel slots ready ipc left irqs boot next mem cpus) pids))))))
 
 ; ------------------------------------------------------------- messages
 
@@ -336,10 +345,10 @@
 ; queued.
 (def k_send ((k Kernel) (port int) (m Msg)) KSent
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match (ipc_enqueue ipc port m)
-        ((Sent i2) (KSent (notify (Kernel slots ready i2 ss irqs boot next mem) port) 0))
-        ((SendFailed code i2) (KSent (Kernel slots ready i2 ss irqs boot next mem) code))))))
+        ((Sent i2) (KSent (notify (Kernel slots ready i2 ss irqs boot next mem cpus) port) 0))
+        ((SendFailed code i2) (KSent (Kernel slots ready i2 ss irqs boot next mem cpus) code))))))
 
 ; The oldest message on port copied into p at buf, if one is waiting:
 ; the receive's result, the bytes written or an error, with the message
@@ -362,9 +371,9 @@
 ; process blocked for room there made ready to try again.
 (def with_ipc_dropped ((k Kernel) (port int)) Kernel
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match (ipc_unblock_all (ipc_drop ipc port) port)
-        ((Unblocked pids i2) (unblock_all (Kernel slots ready i2 ss irqs boot next mem) pids))))))
+        ((Unblocked pids i2) (unblock_all (Kernel slots ready i2 ss irqs boot next mem cpus) pids))))))
 
 ; The rest of try_take, the message dropped: its header, the sender from
 ; as a u32, and then payload, copied into p at buf; the bytes written, or
@@ -451,18 +460,18 @@
 ; err_fault if the host has no room for it.
 (def spawn_in ((k Kernel) (s int) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int) (img Image)) Spawned
   (match k
-    ((Kernel slots ready ipc ss irqs boot pids mem)
+    ((Kernel slots ready ipc ss irqs boot pids mem cpus)
       (let pid (pid_next_in pids s)
         (match (proc_create pid parent m args tty input start end img)
-          ((CreateFailed) (Spawned (Kernel slots ready ipc ss irqs boot pids mem) (err_fault)))
+          ((CreateFailed) (Spawned (Kernel slots ready ipc ss irqs boot pids mem cpus) (err_fault)))
           ((Created p0)
             (match (proc_share_image mem p0 img)
               ((Allocated m2 p)
-                (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) m2)
+                (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) m2 cpus)
                          pid)))))))))
 
 ; The pid each slot holds, or last held.
-(def k_pids ((k Kernel)) Pids (match k ((Kernel slots ready ipc ss irqs boot pids mem) pids)))
+(def k_pids ((k Kernel)) Pids (match k ((Kernel slots ready ipc ss irqs boot pids mem cpus) pids)))
 
 ; What each slot holds, as pick_slot sees it, while running runs.
 (def slot_kinds ((k Kernel) (running int)) (array int)
@@ -479,7 +488,7 @@
 ; kept otherwise.
 (def slot_kind ((k Kernel) (running int) (i int)) int
   (match k
-    ((Kernel slots ready ipc ss irqs boot pids mem)
+    ((Kernel slots ready ipc ss irqs boot pids mem cpus)
       (match (array_get slots i)
         ((Free) (kind_free))
         ((Live p) (kind_live))
@@ -526,11 +535,12 @@
   (let pid (proc_pid p)
     (let ws (proc_watchers p)
       (let ns (irq_numbers k)
-        (let k1 (release_irqs (k_forget_name (k_forget (k_release k p) pid) pid) pid ns)
+        (let k0 (with_cpus k (cpus_forget (k_cpus k) pid))
+        (let k1 (release_irqs (k_forget_name (k_forget (k_release k0 p) pid) pid) pid ns)
           (let k2 (with_sleepers k1 (sleep_remove (k_sleepers k1) pid))
             (let told (if (is_empty ws) (has_waiter k2 pid 1) true)
               (let k3 (wake_waiters (put_slot k2 pid (Dead (Gone status (proc_parent p) told))) pid (wait_word status) 1)
-                (tell_exit k3 ws pid status)))))))))
+                (tell_exit k3 ws pid status))))))))))
 
 ; Whether a process from slot i on waits for pid.
 (def has_waiter ((k Kernel) (pid int) (i int)) bool
@@ -541,7 +551,7 @@
 ; Whether the process in slot i is live and waiting for pid.
 (def waits_for ((k Kernel) (i int) (pid int)) bool
   (match k
-    ((Kernel slots ready ipc ss irqs boot pids mem)
+    ((Kernel slots ready ipc ss irqs boot pids mem cpus)
       (match (array_get slots i)
         ((Free) false)
         ((Dead g) false)
@@ -570,9 +580,9 @@
 ; every process waiting for one of them as a file server answered -5.
 (def k_forget ((k Kernel) (pid int)) Kernel
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (let gone (ipc_owned ipc pid)
-        (let k2 (unblock_all (Kernel slots ready (ipc_forget ipc pid) ss irqs boot next mem) (ipc_blocked_by ipc pid))
+        (let k2 (unblock_all (Kernel slots ready (ipc_forget ipc pid) ss irqs boot next mem cpus) (ipc_blocked_by ipc pid))
           (if (is_empty gone) k2 (end_reads k2 gone 1)))))))
 
 ; Each process from slot i on reading from a terminal whose port is among
@@ -611,7 +621,7 @@
 
 ; Every interrupt bound to a port.
 (def irq_numbers ((k Kernel)) (list int)
-  (match k ((Kernel slots ready ipc ss irqs boot next mem) (map_keys irqs))))
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (map_keys irqs))))
 
 ; k with each of the interrupts ns that pid bound released.
 (def release_irqs ((k Kernel) (pid int) (ns (list int))) Kernel
@@ -744,9 +754,9 @@
         ((None) (resume_with k p (err_fault)))
         ((Some fs)
           (match k
-            ((Kernel slots ready ipc ss irqs boot pids mem)
+            ((Kernel slots ready ipc ss irqs boot pids mem cpus)
               (match (proc_unmap mem p (page_of va) n)
-                ((Unmapped m2 q) (resume_with (Kernel slots ready ipc ss irqs boot pids m2) q 0)))))))))
+                ((Unmapped m2 q) (resume_with (Kernel slots ready ipc ss irqs boot pids m2 cpus) q 0)))))))))
 
 ; Every mapping pid has of p's n DMA or shared pages from va taken back:
 ; how many, or err_too_big for n as above, err_fault if any of them is not
@@ -775,10 +785,10 @@
           (if (proc_dev k2 q)
               (resume_with (restore k2 q) p (err_denied))
               (match k2
-                ((Kernel slots ready ipc ss irqs boot pids mem)
+                ((Kernel slots ready ipc ss irqs boot pids mem cpus)
                   (match (proc_revoke mem q fs)
                     ((Revoked m2 q2 count)
-                      (resume_with (restore (Kernel slots ready ipc ss irqs boot pids m2) q2) p count)))))))
+                      (resume_with (restore (Kernel slots ready ipc ss irqs boot pids m2 cpus) q2) p count)))))))
         ((Free) (resume_with (put_slot k2 pid (Free)) p (err_no_port)))
         ((Dead st) (resume_with (put_slot k2 pid (Dead st)) p (err_no_port)))))))
 
@@ -802,7 +812,7 @@
     ((CArgCount) (resume_with k p (length (proc_args p))))
     ((CArg i buf n) (do_arg k p i buf n))
     ((CRegion base len) (Resume k (do_region k p base len)))
-    ((CRelease base len) (resume_with k (proc_heap_release p base len) 0))
+    ((CRelease base len) (resume_with k (if (release_unmaps (frame_free_count) (div len (page_size))) (proc_heap_release p base len) p) 0))
     ((CUnregion addr len) (resume_with k (proc_unregion p addr len) 0))
     ((CYield) (Park k (proc_answer p 0)))
     ((CPid) (resume_with k p (proc_pid p)))
@@ -872,19 +882,19 @@
 ; stdin file; -5 if p may not take them at buf.
 (def read_stdin ((k Kernel) (p Proc) (buf int) (n int)) Step
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
         ((Boot input es devs defaults stdin cur names klog)
           (if (lt stdin 0)
-              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem) p 0)
+              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem cpus) p 0)
               (let e (array_get es stdin)
                 (let from (add (entry_start e) cur)
                   (let cnt (min n (min (io_chunk) (sub (entry_end e) from)))
                     (match (proc_copy_in p buf input from (add from cnt))
                       ((CopyInBad q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem) q -5))
+                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem cpus) q -5))
                       ((CopiedIn q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names klog) next mem)
+                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names klog) next mem cpus)
                                      q cnt))))))))))))
 
 ; A file of the initramfs, opened before it was given up, reads as at its
@@ -1323,7 +1333,7 @@
   (if (lt pid 1)
       k
       (match k
-        ((Kernel slots ready ipc ss irqs boot next mem)
+        ((Kernel slots ready ipc ss irqs boot next mem cpus)
           (match (array_get slots (slot_of pid))
             ((Live c) (put_slot k pid (Live (proc_set_cwd c cwd))))
             ((Free) k)
@@ -1332,10 +1342,10 @@
 ; k knowing pid's image's path.
 (def k_name_put ((k Kernel) (pid int) (path (list int))) Kernel
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
         ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_put names pid path) klog) next mem))))))
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_put names pid path) klog) next mem cpus))))))
 
 ; Where a device reaches each of p's DMA pages from va's on, copied to
 ; buf, as many as room holds, a u64 each, dma_limit at most: how many
@@ -1404,7 +1414,7 @@
 
 ; k with i as its ports.
 (def with_ipc ((k Kernel) (i Ipc)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem) (Kernel slots ready i ss irqs boot next mem))))
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready i ss irqs boot next mem cpus))))
 
 ; Standard input from p's terminal: what is left of the last line it
 ; sent, or the next, which p's terminal is asked for and p waits for. A
@@ -1541,16 +1551,16 @@
             ((Some r) (give_cut k p r buf max))))))
 
 ; The proc_info record of pid, a process in the table: a live one's,
-; then its path; an exited one's, state_exited and its status; or none,
+; running if it is out on another CPU, then its path; an exited one's, state_exited and its status; or none,
 ; if pid's slot is Free or now holds another.
 (def record_of ((k Kernel) (pid int)) (Option (list int))
   (if (not (k_current k pid))
       ((None (list int)))
       (match k
-        ((Kernel slots ready ipc ss irqs boot next mem)
+        ((Kernel slots ready ipc ss irqs boot next mem cpus)
           (match (array_get slots (slot_of pid))
             ((Free) ((None (list int))))
-            ((Live q) (Some (append (proc_info_record q mem false) (k_proc_path k q))))
+            ((Live q) (Some (append (proc_info_record q mem (cpus_out cpus pid)) (k_proc_path k q))))
             ((Dead g) (Some (proc_record (state_exited) 0 -1 (gone_status g) 0 0))))))))
 
 ; The frames processes have been given: each live process's own pages,
@@ -1559,7 +1569,7 @@
 ; as it ended.
 (def k_used_frames ((k Kernel) (p Proc)) int
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (used_from slots mem 0 (add (mem_shared_frames mem) (own_pages p mem))))))
 
 ; The mem_record mem_info gives p: the pages processes can have, those
@@ -1604,9 +1614,9 @@
 ; A new port that p owns: its number.
 (def do_port_new ((k Kernel) (p Proc)) Step
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match (ipc_port_new ipc (proc_pid p))
-        ((NewPort port i2) (resume_with (Kernel slots ready i2 ss irqs boot next mem) p port))))))
+        ((NewPort port i2) (resume_with (Kernel slots ready i2 ss irqs boot next mem cpus) p port))))))
 
 ; Whether pid could name a process: one of its slot's turns.
 (def is_pid ((pid int)) bool
@@ -1620,7 +1630,9 @@
       (resume_with k p (k_pid_at k i))))
 
 ; Ends pid, any process but p itself, with killed_status. A driver, a
-; program with a dev line, cannot be: the system needs its devices.
+; program with a dev line, cannot be: the system needs its devices. One
+; out on another CPU is marked, and ends when its thread comes back,
+; within its slice; p is answered 0 at once.
 (def do_kill ((k Kernel) (p Proc) (pid int)) Step
   (if (not (is_pid pid))
       (resume_with k p (err_no_port))
@@ -1634,7 +1646,9 @@
                 ((Live q)
                   (if (proc_dev k2 q)
                       (resume_with (restore k2 q) p (err_denied))
-                      (killed_by k2 p q)))
+                      (if (cpus_out (k_cpus k2) pid)
+                          (let k3 (restore k2 q) (resume_with (with_cpus k3 (cpus_doom (k_cpus k3) pid)) p 0))
+                          (killed_by k2 p q))))
                 ((Free) (resume_with (put_slot k2 pid (Free)) p (err_no_port)))
                 ((Dead st) (resume_with (put_slot k2 pid (Dead st)) p (err_no_port))))))))))
 
@@ -1748,9 +1762,9 @@
     ((NameBad q code) (resume_with k q code))
     ((Named q name)
       (match k
-        ((Kernel slots ready ipc ss irqs boot next mem)
+        ((Kernel slots ready ipc ss irqs boot next mem cpus)
           (match (ipc_register ipc (proc_pid q) port name)
-            ((Registered code i2) (resume_with (Kernel slots ready i2 ss irqs boot next mem) q code))))))))
+            ((Registered code i2) (resume_with (Kernel slots ready i2 ss irqs boot next mem cpus) q code))))))))
 
 ; The port registered as the name at buf, or err_no_port, or name_from's
 ; refusal.
@@ -1870,28 +1884,31 @@
 ; Runs the next ready process, or waits for something to make one ready,
 ; until pid 1 exits; and returns its status.
 (def schedule ((k Kernel)) int
-  (match (take_ready (wake_sleepers k (clock_ns)))
-    ((Picked k2 p)
-      (let t (timer_at (slice_deadline (k_sleepers k2) (clock_ns)))
-        (run_proc k2 p)))
-    ((NonePicked k2) (idle k2))))
+  (if (cpus_many (k_cpus k))
+      (many_schedule k)
+      (match (take_ready (wake_sleepers k (clock_ns)))
+        ((Picked k2 p)
+          (let t (timer_at (slice_deadline (k_sleepers k2) (clock_ns)))
+            (run_proc k2 p)))
+        ((NonePicked k2) (idle k2)))))
 
 ; The next process to run, taken out of the table, or none ready.
 (data Picked (Picked Kernel Proc) (NonePicked Kernel))
 
-; The first pid on the ready queue whose process is live and ready: one
-; that is not, or has gone, is dropped from the queue.
+; The first pid on the ready queue whose process is live and ready, and
+; not out on another CPU: one that is not, or has gone, is dropped from
+; the queue.
 (def take_ready ((k Kernel)) Picked
   (match k
-    ((Kernel slots ready ipc ss irqs boot next mem)
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match (queue_pop ready)
-        ((PopEmpty) (NonePicked (Kernel slots (Queue (nil int) (nil int)) ipc ss irqs boot next mem)))
+        ((PopEmpty) (NonePicked (Kernel slots (Queue (nil int) (nil int)) ipc ss irqs boot next mem cpus)))
         ((Popped pid rest)
-          (match (take_slot (Kernel slots rest ipc ss irqs boot next mem) pid)
+          (match (take_slot (Kernel slots rest ipc ss irqs boot next mem cpus) pid)
             ((TakenSlot k2 s)
               (match s
                 ((Live p)
-                  (if (is_ready (proc_state p))
+                  (if (if (is_ready (proc_state p)) (not (cpus_out (k_cpus k2) pid)) false)
                       (Picked k2 p)
                       (take_ready (restore k2 p))))
                 ((Free) (take_ready (put_slot k2 pid (Free))))
@@ -1918,8 +1935,7 @@
 ; ever come.
 (def idle ((k Kernel)) int
   (if (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false)
-      (let k2 (k_note k 0 (log_error) "l0s: deadlock: every process waits for something that cannot happen")
-        124)
+      (stuck k "l0s: deadlock: every process waits for something that cannot happen")
       (let t (timer_at (soonest (k_sleepers k)))
         (let n (interrupt_wait)
           (if (eq n 0)
@@ -1928,8 +1944,136 @@
                   (schedule k)))
               (if (gt n 0)
                   (schedule (device_irq k n))
-                  (let k2 (k_note k 0 (log_error) "l0s: no interrupt can come")
-                    124)))))))
+                  (stuck k "l0s: no interrupt can come")))))))
+
+; why logged as an error, and 124, the status the system stops with when
+; nothing can ever run again.
+(def stuck ((k Kernel) (why (list int))) int
+  (let k2 (k_note k 0 (log_error) why) 124))
+
+; ------------------------------------------------------------- other CPUs
+;
+; With more than one CPU (spec 6.18), CPU 0 runs no thread itself: it is
+; the kernel, and hands the others theirs. Each pass takes back every
+; thread they hold that has trapped, and handles the traps together; then
+; wakes the sleepers due, hands the ready processes to the CPUs that have
+; room, and waits for the next trap or interrupt. The traps come back
+; through the runtime's rings in memory, with no interrupt between CPUs.
+
+; One pass of CPU 0's loop, as above, until pid 1 exits; and its status.
+(def many_schedule ((k Kernel)) int
+  (let a (cpu_trapped)
+    (if (eq (array_len a) 0)
+        (many_fill (wake_sleepers k (clock_ns)))
+        (many_back k (cpu_trapped_of a)))))
+
+; The thread t taken back: its process, out of the table, given the
+; context it came back with, and on as many_trap says; or, if the kernel
+; handed no such pid out, nothing.
+(def many_back ((k Kernel) (t CpuTrapped)) int
+  (match t
+    ((CpuTrapped ctx cpu pid)
+      (match (cpus_back (k_cpus k) pid (clock_ns))
+        ((CpuNotOut c) (many_schedule (with_cpus k c)))
+        ((CpuBack c on)
+          (match (take_slot (with_cpus k c) pid)
+            ((TakenSlot k2 s)
+              (match s
+                ((Live p) (many_trap k2 (proc_ran p ctx) on))
+                ((Free) (many_schedule (put_slot k2 pid (Free))))
+                ((Dead st) (many_schedule (put_slot k2 pid (Dead st))))))))))))
+
+; p as it came back from running, its context ctx.
+(def proc_ran ((p Proc) (ctx (array int))) Proc
+  (match p ((Proc pid m s c pages dev st) (Proc pid m s ctx pages dev st))))
+
+; p's context.
+(def proc_context ((p Proc)) (array int)
+  (match p ((Proc pid m s c pages dev st) c)))
+
+; p back from the CPU on says, after its trap: ended, if it was killed
+; while out; its slice over, and parked, if that CPU's timer ended it,
+; an interrupt that CPU took and ended itself, so CPU 0 ends none; and
+; otherwise handled as on one CPU.
+(def many_trap ((k Kernel) (p Proc) (on OnCpu)) int
+  (if (on_cpu_doomed on)
+      (many_step (killed_out k p) on)
+      (let t (trap_of (proc_context p))
+        (if (trap_is_interrupt t)
+            (many_schedule (park k p))
+            (many_step (on_trap k p t) on)))))
+
+; Whether t is an interrupt's, not a call's or a fault's.
+(def trap_is_interrupt ((t Trap)) bool
+  (match t
+    ((TrapCall n) false)
+    ((TrapMissing va) false)
+    ((TrapFault esr far) false)
+    ((TrapInterrupt n) true)))
+
+; p, killed while out on another CPU, ended now it is back; or the system
+; stopped, if p is pid 1, as killed_by does.
+(def killed_out ((k Kernel) (p Proc)) Step
+  (let k2 (end_proc k p (killed_status))
+    (if (eq (proc_pid p) 1) (Halt (killed_status)) (Next k2))))
+
+; Carrying on after s, for a thread that ran where on says: one that goes
+; on handed again to a CPU with room, its own first, with what is left of
+; its slice, or put on the ready queue if none has room; then on with the
+; pass; or the status the system stops with.
+(def many_step ((s Step) (on OnCpu)) int
+  (match s
+    ((Resume k p)
+      (let i (cpus_pick (k_cpus k) (on_cpu_cpu on) (clock_ns))
+        (if (eq i 0)
+            (many_schedule (park k p))
+            (match (many_hand k p i (on_cpu_deadline on)) ((Handed k2 ok) (many_schedule k2))))))
+    ((Park k p) (many_schedule (park k p)))
+    ((Next k) (many_schedule k))
+    ((Halt status) status)))
+
+; k after handing p's thread to a CPU, back in its slot, and whether the
+; CPU took it; if it had no room after all, p parked instead.
+(data Handed (Handed Kernel bool))
+
+; p's thread handed to CPU i, to run until it traps or deadline, as
+; Handed says.
+(def many_hand ((k Kernel) (p Proc) (i int) (deadline int)) Handed
+  (match p
+    ((Proc pid m s c pages dev st)
+      (if (eq (cpu_run i s c deadline pid) 0)
+          (let cs (cpus_place (k_cpus k) i pid deadline (clock_ns))
+            (Handed (with_cpus (restore k (Proc pid m s c pages dev st)) cs) true))
+          (Handed (park k (Proc pid m s c pages dev st)) false)))))
+
+; The ready processes handed to the CPUs, while one has room, each with
+; a slice of its own; then a wait.
+(def many_fill ((k Kernel)) int
+  (let i (cpus_pick (k_cpus k) 0 (clock_ns))
+    (if (eq i 0)
+        (many_idle k)
+        (match (take_ready k)
+          ((NonePicked k2) (many_idle k2))
+          ((Picked k2 p)
+            (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
+              ((Handed k3 ok) (if ok (many_fill k3) (many_idle k3)))))))))
+
+; Nothing more to hand out: wait for a CPU's trap, the timer for the
+; soonest sleeper, or a device, unless nothing could ever come.
+(def many_idle ((k Kernel)) int
+  (if (if (cpus_busy (k_cpus k)) false (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false))
+      (stuck k "l0s: deadlock: every process waits for something that cannot happen")
+      (let t (timer_at (soonest (k_sleepers k)))
+        (let n (cpu_wait)
+          (if (eq n -1)
+              (many_schedule k)
+              (if (eq n 0)
+                  (let a (timer_at -1)
+                    (let d (interrupt_done 0)
+                      (many_schedule k)))
+                  (if (gt n 0)
+                      (many_schedule (device_irq k n))
+                      (stuck k "l0s: no interrupt can come"))))))))
 
 ; ------------------------------------------------------------------- boot
 
@@ -1971,14 +2115,16 @@
   (if (eq m 1) "aarch64" (if (eq m 2) "riscv64" "an unknown CPU")))
 
 ; The lines the kernel logs as it boots, each "l0s: ...": the CPU and
-; the boot arguments args, the pages of memory free, how processes' memory
-; is laid out, the kernel's limits, and the initramfs, of size bytes and
-; entries entries, with starts programs to start. All of it is what the
-; kernel can learn: L0 has no builtin for the board's RAM, its image, its
-; CPUs, its timer or its interrupt controller.
-(def banner_lines ((m int) (args (list (list int))) (free int) (size int) (entries int) (starts int)) (list (list int))
+; the boot arguments args, the pages of memory free, how many CPUs, n,
+; and which run processes, how processes' memory is laid out, the
+; kernel's limits, and the initramfs, of size bytes and entries entries,
+; with starts programs to start. All of it is what the kernel can learn:
+; L0 has no builtin for the board's RAM, its image, its timer or its
+; interrupt controller.
+(def banner_lines ((m int) (args (list (list int))) (free int) (n int) (size int) (entries int) (starts int)) (list (list int))
   (cons (append "l0s: " (append (cpu_name m) (boot_arguments_text args)))
   (cons (memory_text free)
+  (cons (cpus_text n)
   (cons (append "l0s: processes: images and heaps from 0x" (append (hex_digits (user_base) 0)
           (append " to 0x" (append (hex_digits (heap_limit) 0)
             (append ", stacks below 0x" (append (hex_digits (stack_top) 0)
@@ -1987,7 +2133,14 @@
           (append " ms slices, ports of " (append (digits (queue_limit)) (append " messages of up to " (append (digits (max_message)) " bytes"))))))))
   (cons (append "l0s: initramfs: " (append (format_size size) (append ", " (append (digits entries)
           (append " entries, " (append (digits starts) " programs to start"))))))
-  (nil (list int))))))))
+  (nil (list int)))))))))
+
+; The boot line for n CPUs: "l0s: 1 CPU, running every process", or
+; "l0s: N CPUs: the kernel on CPU 0, processes on CPUs 1 to N-1".
+(def cpus_text ((n int)) (list int)
+  (if (le n 1)
+      "l0s: 1 CPU, running every process"
+      (append "l0s: " (append (digits n) (append " CPUs: the kernel on CPU 0, processes on CPUs 1 to " (digits (sub n 1)))))))
 
 ; ", booted with ARGS" for boot arguments, or ", booted with no arguments".
 (def boot_arguments_text ((args (list (list int)))) (list int)
@@ -2017,7 +2170,7 @@
     ((Config launches devs defaults stdin)
       (let e (interrupt_enable 0)
         (let k (start_all (k_notes (kernel_new input es config)
-                            (banner_lines (machine) (boot_args) (frame_free_count) (bytes_len input) (array_len es) (length launches)))
+                            (banner_lines (machine) (boot_args) (frame_free_count) (cpu_count) (bytes_len input) (array_len es) (length launches)))
                           launches)
           (match (look k 1)
             ((LookLive) (schedule k))

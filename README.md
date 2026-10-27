@@ -25,6 +25,7 @@ messages.
 make demo                                 # boot to the shell on this terminal, and type at it
 make demo-system                          # the same, from build/system.img's System volume, a copy of it
 make demo SCREEN=3840x2160                # on a 4K screen, the desktop drawn at scale 2
+make demo CPUS=4                          # on a board of four CPUs, the kernel on CPU 0 and processes on the rest; 1 by default
 make all                                  # type check, host tests, board tests, end-to-end
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
 make pi5-card                             # build/pi5-card: the boot partition's files for a Raspberry Pi 5
@@ -2126,6 +2127,39 @@ When nothing is ready, the kernel waits for an interrupt. If there is no
 sleeper and no bound interrupt, nothing can ever wake anyone: it reports a
 deadlock and exits with 124.
 
+That is the loop on a board with one CPU. With more (spec §6.18; the
+aarch64 virt board has as many as `-smp` gives it: `make demo CPUS=4`,
+or `QEMU_CPUS=4` for `tools/qemu-boot.sh` and the tests), the kernel stays on CPU 0 and runs no process itself: it hands
+processes to the others with `cpu_run`, and they hand each back when it
+traps, through rings in memory, with no interrupt between CPUs. Each pass
+of `many_schedule`:
+
+1. Take back every process that has trapped (`cpu_trapped`), and handle
+   each trap as above. One a call lets go on is handed again, with the
+   rest of its slice, by the same choice as in step 3; a slice that ended
+   on its CPU's own timer puts it back on the ready queue.
+2. Wake any sleeper whose time has come.
+3. Hand ready processes, each with a 10 ms slice, to the CPUs with room;
+   each CPU holds at most two, one running and one to start the moment
+   the first traps. A CPU handed a thread or giving one back within the
+   last 500 µs, whose threads each last ran 1 ms or less, is chosen
+   first, the latest of them: its thread is passing messages and traps
+   soon, and the one queued behind it then starts at once, where an idle
+   CPU has stopped polling and must be woken. Failing that, an idle CPU
+   (`cpus_pick`). So processes that each wait on the next, as a file
+   written goes from `install` to `fs` to `virtio-blk`, take turns on one
+   CPU, and nothing waits behind a thread that has not run yet or last
+   ran long, which may be computing. There is one ready queue, so a
+   process runs on whichever CPU is chosen.
+4. If nothing more can be handed out, wait (`cpu_wait`) for a CPU's trap,
+   the timer for the soonest sleeper, or a device's interrupt, which all
+   come to CPU 0.
+
+A process out on another CPU stays in its slot, so other processes' calls
+reach it: memory shared into it is mapped while it runs, `proc_info`
+says it is running, and a kill marks it, to end it when it comes back,
+within its slice. `kernel/cpus.l0` keeps which process each CPU holds.
+
 **Nothing a process does can crash the kernel.** Every buffer, count,
 address, path and interrupt number is checked against the kernel's own
 records before it reaches a builtin that could raise a runtime error.
@@ -2145,6 +2179,7 @@ with random registers.
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
 | `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
+| `kernel/cpus.l0` | the other CPUs: which process each holds, with its slice's deadline, which CPU a process goes to next, a kill waiting for one to come back, and what `cpu_trapped` gives |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
 | `kernel/syscall.l0` | a trapped context decoded into a `Call` |
 | `kernel/process.l0` | creating a process from its ELF's segments, sharing its code and rodata with processes whose are the same, demand-paging, heap pages released, copying in and out of, mapping devices and DMA pages into, and the open files of a process |
@@ -2175,10 +2210,11 @@ held back for `uart`, and nothing is replayed when it starts. `dmesg` is
 how to read the rest, and what was said before a program started.
 
 The kernel says, as it boots (`banner_lines`): its CPU and boot
-arguments; the pages of memory free; how a process's memory is laid out,
-images and heaps, stacks, device and DMA pages; its limits; the
+arguments; the pages of memory free; how many CPUs, as `l0s: 4 CPUs: the
+kernel on CPU 0, processes on CPUs 1 to 3`; how a process's memory is
+laid out, images and heaps, stacks, device and DMA pages; its limits; the
 initramfs's size and entries. L0 has no builtin for the board's RAM,
-CPUs, timer or interrupt controller, so it says nothing of them. It logs
+timer or interrupt controller, so it says nothing of them. It logs
 at the debug level each process it starts, and at info each volume
 mounted or unmounted and `/` becoming a volume. Each driver says what it
 found as it starts to serve, as `sdhci` does (see the `l0s-dev` skill's
@@ -2217,7 +2253,7 @@ The layout is fixed by spec §10.3. A program's image is an ELF, as
 |---|---|---|
 | `0xC0000000` | the image's segments, code, rodata, and data, ending below `0xD0000000` | at load, the pages holding the file's bytes, each with its segment's flags: code readable and executable, rodata readable, data readable and writable; code and rodata the same frames as another live process's, where its are the same bytes (see Sharing below) |
 | the rest of a segment | its bss, zero | on first touch, with the segment's flags |
-| from the page after the image to `0xD8000000` | heap | on first touch, RW; unmapped again, its frame freed, when the runtime releases it (call 12) |
+| from the page after the image to `0xD8000000` | heap | on first touch, RW; unmapped again, its frame freed, when the runtime releases it (call 12) in a run of 16 MB or more, or with 128 MB or less of frames left |
 | to `0xE8000000` | stack, `sp` starting at the top | on first touch, RW |
 | `0xE8000000` up | device regions, DMA pages, and shared pages | by the `region` and `dma_alloc` calls, for programs with a `dev` line only; by `shm_alloc` and `shm_share`, for any |
 
@@ -2291,6 +2327,18 @@ touch of the page gets a zeroed frame again, as a first touch does. So a
 process holds the heap it uses now, not the most it ever used. Its servers
 run from boot to shutdown, so without this the frames they touched once
 would never come back.
+
+It does so for a run of 16 MB or more (`release_run_min`), or once the
+board has 128 MB of frames or less left (`release_floor`); a shorter run
+stays mapped. A runtime that frees a block mostly fills those pages again
+soon, and each unmapped page costs a fault when it is touched again and a
+TLB flush on every CPU when it is unmapped: `install`'s copy onto a RAM
+volume, unmapping every release, took 2 million faults, 50 s on one CPU
+and twice that on several, and keeping the short runs, 25 s on any. A
+page kept is named again when it next comes free, and none can be taken
+back later, as the runtime may have filled it since: so a process keeps
+the small blocks it freed while memory is plenty, and gives them back
+only as it frees them again once memory is low.
 
 **Sharing.** Processes running the same program share its code and
 rodata. Once a new process's image is loaded, each of its read-only
@@ -2560,7 +2608,7 @@ name in a library is taken in every program that links it.
 |---|---|
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`), and those of the knowledge graph's L0 parser and of `graph-usage` (`tools/graphify-l0/test_l0_graph.py`, `test_graph_usage.py`). Last, it says how many tests passed and failed, of how many files |
-| `make test-virt` | `l0 test --target virt`: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`, twice, on a board of one CPU and then of `VIRT_CPUS` (4): the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), the L0S menu, opened, closed, starting About and shutting the board down (`tests/logo-menu.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`) |
 
 `make check` and `make test` run each check and each test file as a
@@ -3015,11 +3063,37 @@ a bad buffer, and wait on nothing.
 - **The screen tests run in 2D mode** (`GPU=2d`, the default of
   `tools/qemu-boot.sh`): `screendump` fails with "no surface" on a GL
   scanout. The 3D mode is tried by `make demo`.
-- One CPU, and round-robin scheduling with 10 ms slices. A process woken by
-  a message runs at the end of the current slice, not at once. L0 can't
-  start the board's other CPUs; running user threads on them, with the
-  kernel on CPU 0 and their traps passed back through rings in memory, is
-  asked for in [probes/smp](probes/smp/REQUEST-multiple-cpus.md).
+- Round-robin scheduling with 10 ms slices, from one ready queue. A
+  process woken by a message runs once a CPU has room, which with every
+  CPU busy is the end of a slice, not at once.
+- **The kernel runs on CPU 0 alone**, as
+  [probes/smp](probes/smp/REQUEST-multiple-cpus.md) asked of L0: every
+  system call, and so every message, is handled there, one after another,
+  however many CPUs run processes. A process is one thread, so it uses
+  one CPU at most. A kill of a process out on another CPU takes effect
+  when it comes back, within its slice. L0's `cpu_wait` gives back a
+  CPU's trap before a device's interrupt, so a kernel kept busy by traps
+  takes interrupts late. Several CPUs have run on QEMU's aarch64 board
+  only: the Pi 5 has four, but L0S does not boot there yet, and L0 starts
+  no other CPU on the riscv64 board.
+- **On QEMU, more CPUs are no faster, and some boots slower**, so the
+  demo and the tests boot with one unless asked (`CPUS`, `QEMU_CPUS`).
+  A boot that installs a system onto a RAM volume (`rootboot_tmpfs`) took
+  47 s on one CPU and 3 min 42 s on four while L0's idle CPUs spun
+  through QEMU's global lock; with idle CPUs halting (L0's roadmap 0123,
+  [probes/smp](probes/smp/REQUEST-idle-cpus.md)) 50 s and about 110 s;
+  and with short releases kept (see Releasing), 25 s on one, two or four.
+  Writing to a disk is still slower on four: each hand-off to another
+  CPU costs more than a call on CPU 0, and most of all to a CPU that has
+  stopped polling. Keeping a chain of processes on one CPU (step 3 above)
+  wins some of it back: with the case's disk in memory, `install` takes
+  21 to 23 s on one and 26 to 27 s on four (32 to 33 s before), and
+  `install_boot` 37 s and 47 to 48 s (48 to 49 s before). Queuing behind
+  any thread, however long it runs, made them 25 and 44 s, but could
+  leave a process waiting a whole slice behind one computing. Nothing L0S
+  runs yet computes enough on its own to gain from more CPUs. With the disk in `build/`, as `make e2e` has
+  it, the host's own disk syncing it varies these by half or more.
+  `make test-virt` runs every board test on four too.
 - **The SD card has run on QEMU only**, and slowly: `sdhci` moves every
   word through the controller's buffer, on one data line at 25 MHz, and
   polls. No DMA, no 4-bit bus, no high-speed modes, and a card is found

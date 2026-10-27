@@ -1,8 +1,20 @@
 # Feature request: running user threads on the other CPUs, so a kernel in L0 uses every core
 
-Status: asked, not yet on L0's roadmap
+Status: landed, as L0's roadmap 0121 (51af6f5)
 Project: L0S, a microkernel in L0 for QEMU's virt boards and the
 Raspberry Pi 5
+
+> **Since landing:** L0 has the four builtins as asked (spec 6.18), with
+> `cpu_run` borrowing its context, a ring of 4 a CPU, and `not a CPU` a
+> runtime error rather than -3. The aarch64 virt board starts as many
+> CPUs as `-smp` gives it; the riscv64 board starts none yet, and a Pi 5
+> has not run it. L0S's kernel now uses them as "How L0S would use it"
+> says, with `kernel/cpus.l0` the table of what each CPU holds, and a
+> process out on a CPU kept `Live` in its slot rather than marked
+> otherwise. `make test-virt` runs the board tests on one CPU and on four.
+> One thing works out differently than asked: `cpu_wait` gives back a
+> trap before it takes an interrupt, so a kernel that always finds a trap
+> waiting takes devices' interrupts late.
 
 L0S runs every process on one CPU. A Raspberry Pi 5 has four Cortex-A76
 cores, and three of them never run anything: section 10.3 says that BL31

@@ -224,23 +224,36 @@
 (def test_shm_share_none () int
   (check_int "0 pages" (boot_words 0 (shm_words 1 (share_words 0 1))) (err_too_big)))
 
-; pid 1 stores 7 in its shared page, shares it with pid 2, and waits for
-; it; pid 2 loads its first device page, the same memory, and exits with
-; what it holds.
+; pid 1 stores 7 in its shared page, shares it with pid 2, tells it so,
+; and waits for it; pid 2 waits to be told, then loads its first device
+; page, the same memory, and exits with what it holds. The telling keeps
+; pid 2 from loading before the share, where both run at once.
 (def sharer () (list int)
   (shm_words 1 (cons (movz 0 7) (cons (mov_x1_x19) (cons (str_x0_x1) (share_and_wait))))))
 
+; Shares x19's page with pid 2, sends a byte of it to port 1, pid 2's, as
+; soon as that port is there, again until the send answers 0, then waits
+; for pid 2 and exits with its status.
 (def share_and_wait () (list int)
   (cons (mov_x0_x19) (cons (movz 1 1) (cons (movz 2 2)
-    (append (call_words (call_shm_share)) (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0))))))))
+    (append (call_words (call_shm_share))
+      (cons (movz 0 1) (cons (mov_x1_x19) (cons (movz 2 1) (append (call_words (call_send)) (cons (cbnz 0 -5)
+        (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0)))))))))))))
 
+; Makes port 1, waits for a message on it, into the heap, then reads.
+(def told_reader () (list int)
+  (append (call_words (call_port_new))
+    (cons (movz_hi 1 49216) (cons (movz 2 8) (append (call_words (call_receive)) (reader))))))   ; 0xC0400000
+
+; Loads its first device page and exits with what it holds: a fault, and
+; status 139, if nothing is shared there yet.
 (def reader () (list int)
   (cons (movz_hi 1 59392) (cons (ldr_x0_x1) (exit_x0))))   ; 0xE8000000
 
 (def test_shm_shared_between () int
   (check_int "pid 2 read what pid 1 wrote"
     (boot (raw_initramfs (cons (Raw (flag_boot) (code (sharer)))
-                               (cons (Raw (flag_boot) (code (reader))) (nil Raw)))))
+                               (cons (Raw (flag_boot) (code (told_reader))) (nil Raw)))))
     7))
 
 ; ---------------------------------------------------------------- terminals
@@ -703,7 +716,7 @@
 ; An exited process has no pages.
 (def test_info_exited_pages () int
   (check_int "none"
-    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (third_words)))))
+    (boot_mods (cons (first (append (spawn_words 1) (await_exited 2 (info_words 2 64 (third_words)))))
                      (cons (exits_with 7) (nil Raw))))
     0))
 
@@ -785,37 +798,62 @@
 (def test_info_self () int
   (check_int "running, from the kernel" (boot_words 0 (info_words 1 64 (first_words))) (words (state_running) 0)))
 
+; Pid 1 asks of pid 2, a spinner, at once. On one CPU pid 2 waits its
+; turn, ready; on more it may be out on another already, running.
 (def test_info_ready () int
-  (check_int "ready, from pid 1"
-    (boot_mods (cons (first (append (spawn_words 1) (info_words 2 64 (first_words))))
-                     (cons (spinner) (nil Raw))))
-    (words (state_ready) 1)))
+  (let r (boot_mods (cons (first (append (spawn_words 1) (info_words 2 64 (first_words))))
+                          (cons (spinner) (nil Raw))))
+    (if (gt (cpu_count) 1)
+        (check_true "ready or running" (or (eq r (words (state_ready) 1)) (eq r (words (state_running) 1))))
+        (check_int "ready, from pid 1" r (words (state_ready) 1)))))
 
-; Pid 2 waits on port 1; pid 1 yields to let it, then asks.
+; Pid 1 yields to pid 2, a spinner, then asks of it: on one CPU pid 2 has
+; had its slice and is ready again; on more, both were handed out
+; together, and pid 2 is running on another CPU as pid 1 asks.
+(def test_info_out_on_cpu () int
+  (check_int "running on another CPU, or ready"
+    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (first_words)))))
+                     (cons (spinner) (nil Raw))))
+    (words (if (gt (cpu_count) 1) (state_running) (state_ready)) 1)))
+
+; Pid 2 waits on port 1; pid 1 waits until it does, then asks.
 (def receiver () Raw
   (Raw 0 (code (append (call_words (call_port_new)) (cons (movz 2 8) (append (call_words (call_receive)) (exit_x0)))))))
 
+; Asks for pid's record until its detail, the second word's high half, is
+; not 0, as a process waiting on a port has its port there, then ws.
+(def await_receiving ((pid int) (ws (list int))) (list int)
+  (cons (movz 0 pid) (cons (movz_hi 1 49216) (cons (movz 2 64)
+    (append (call_words (call_proc_info))
+      (cons (ldr_x0_x1_8) (cons (subs_imm 9 0 1) (cons (cbnz 9 3) (cons (movz 10 1) (cons (cbnz 10 -9) ws))))))))))
+
+; Asks for pid's record until its first word is state_exited's, then ws.
+(def await_exited ((pid int) (ws (list int))) (list int)
+  (cons (movz 0 pid) (cons (movz_hi 1 49216) (cons (movz 2 64)
+    (append (call_words (call_proc_info))
+      (cons (ldr_x0_x1) (cons (subs_imm 9 0 (state_exited)) (cons (cbnz 9 -7) ws))))))))
+
 (def test_info_receiving () int
   (check_int "receiving"
-    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (first_words)))))
+    (boot_mods (cons (first (append (spawn_words 1) (await_receiving 2 (info_words 2 64 (first_words)))))
                      (cons (receiver) (nil Raw))))
     (words (state_receiving) 1)))
 
 (def test_info_receiving_detail () int
   (check_int "module 1, on port 1"
-    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (second_words)))))
+    (boot_mods (cons (first (append (spawn_words 1) (await_receiving 2 (info_words 2 64 (second_words)))))
                      (cons (receiver) (nil Raw))))
     (words 1 1)))
 
 (def test_info_exited () int
   (check_int "exited"
-    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (first_words)))))
+    (boot_mods (cons (first (append (spawn_words 1) (await_exited 2 (info_words 2 64 (first_words)))))
                      (cons (exits_with 7) (nil Raw))))
     (words (state_exited) 0)))
 
 (def test_info_exited_status () int
   (check_int "no module, status 7"
-    (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_yield)) (info_words 2 64 (second_words)))))
+    (boot_mods (cons (first (append (spawn_words 1) (await_exited 2 (info_words 2 64 (second_words)))))
                      (cons (exits_with 7) (nil Raw))))
     (words 4294967295 7)))
 
@@ -1029,8 +1067,16 @@
 (def test_open_routed_request () int
   (check_int "30 bytes"
     (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (exit_x0))) "data"))
-                               (cons (Raw (flag_boot) (with_data (append (open_words 0 15 1) (exit_x0)) "/Volumes/data/a")) (nil Raw)))))
+                               (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a")) (nil Raw)))))
     30))
+
+; Asks for mount 1's record until it is there, a volume another process
+; mounted, so not err_no_port, then ws: so that a volume's client never
+; asks before its server has mounted it, however many CPUs run them.
+(def await_mount ((ws (list int))) (list int)
+  (cons (movz 0 1) (cons (movz_hi 1 49216) (cons (movz 2 64)
+    (append (call_words (call_mount_at))
+      (cons (add_imm 9 0 1) (cons (cbnz 9 3) (cons (movz 10 1) (cons (cbnz 10 -8) ws)))))))))
 
 ; Receives on x19's port into the heap, then ws.
 (def receive_words ((ws (list int))) (list int)
@@ -1042,7 +1088,7 @@
 (def test_open_routed () int
   (check_int "stream 3"
     (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (answer_words 8))) (append (pad_to 8 "data") (u32_le 7))))
-                               (cons (Raw (flag_boot) (with_data (append (open_words 0 15 1) (exit_x0)) "/Volumes/data/a")) (nil Raw)))))
+                               (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a")) (nil Raw)))))
     3))
 
 ; The 4 bytes at data byte at sent to the reply port of the request in
@@ -1052,12 +1098,12 @@
     (append (data_words 1 at) (cons (movz 2 4) (append (call_words (call_send))
       (cons (movz 0 2) (append (call_words (call_wait)) (exit_x0)))))))))
 
-; pid 1 yields, so pid 2 mounts data first, then opens a file of it; pid
-; 2 takes the request and exits without answering, and pid 1's open is
+; pid 1 waits for pid 2 to mount data, then opens a file of it; pid 2
+; takes the request and exits without answering, and pid 1's open is
 ; answered -5.
 (def test_open_server_gone () int
   (check_int "-5"
-    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (append (call_words (call_yield)) (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a"))
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a"))
                                (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (cons (movz 0 0) (exit_x0)))) "data")) (nil Raw)))))
     -5))
 
@@ -1289,11 +1335,18 @@
     (boot_words 0 (store_9_words (release_words (movz_hi 0 49216) (movz 1 4096) (exit_x0))))
     0))
 
-; A page released is unmapped, and the next touch maps a zeroed one.
+; A page released in a run of 16 MB (release_run_min) is unmapped, and
+; the next touch maps a zeroed one.
 (def test_release_zeroes () int
   (check_int "read back"
-    (boot_words 0 (store_9_words (release_words (movz_hi 0 49216) (movz 1 4096) (load_heap_exit))))
+    (boot_words 0 (store_9_words (release_words (movz_hi 0 49216) (movz_hi 1 256) (load_heap_exit))))
     0))
+
+; A page released alone, with frames plenty, stays mapped as it was.
+(def test_release_keeps_short () int
+  (check_int "read back"
+    (boot_words 0 (store_9_words (release_words (movz_hi 0 49216) (movz 1 4096) (load_heap_exit))))
+    9))
 
 ; Only whole pages of the heap are released: 4095 bytes hold none, a
 ; length that wraps names nothing, and the code, bss and stack are
@@ -1312,7 +1365,7 @@
               5))))
 
 ; Released frames are the board's again. Pid 1 touches 256 MB of heap,
-; releases it, shares 368 MB, and spawns a chain, two hog_thens of 624 MB
+; releases it in one run, past release_run_min, shares 368 MB, and spawns a chain, two hog_thens of 624 MB
 ; and a last that touches 128 MB: 2,000 MB if pid 1's heap frames were
 ; kept, more than the pool's 1,839.5 MB (see test_frames_run_out), and
 ; 1,744 MB as they are given back, so the last exits 0 rather than being
@@ -1667,11 +1720,11 @@
 
 ; pid 1 mounts data and answers the one request pid 2's chdir makes with
 ; the len bytes at its data byte 8, the reply's word, 0, and what stat
-; says; pid 2 exits with chdir's answer, or, with getcwd, the length of
-; its directory after.
+; says; pid 2, once data is mounted, exits with chdir's answer, or, with
+; getcwd, the length of its directory after.
 (def chdir_served ((reply (list int)) (client (list int))) int
   (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (stat_answer_words (length reply)))) (append (pad_to 8 "data") reply)))
-                             (cons (Raw (flag_boot) (with_data client "/Volumes/data/a")) (nil Raw))))))
+                             (cons (Raw (flag_boot) (with_data (await_mount client) "/Volumes/data/a")) (nil Raw))))))
 
 ; The len bytes at data byte 8 sent to the reply port of the request in
 ; the heap, then pid 2 waited for, and its status the exit's.
@@ -1691,11 +1744,11 @@
 (def test_chdir_served_missing () int
   (check_int "the server says -3" (chdir_served (u32_le -3) (chdir_words 0 15 (exit_x0))) (wait_word -3)))
 
-; pid 1 yields, so pid 2 mounts data first; pid 2 takes pid 1's request
-; and exits without answering: pid 1's chdir is answered -5.
+; pid 1 waits for pid 2 to mount data; pid 2 takes pid 1's request and
+; exits without answering: pid 1's chdir is answered -5.
 (def test_chdir_server_gone () int
   (check_int "-5"
-    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (append (call_words (call_yield)) (chdir_words 0 15 (exit_x0))) "/Volumes/data/a"))
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (await_mount (chdir_words 0 15 (exit_x0))) "/Volumes/data/a"))
                                (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (cons (movz 0 0) (exit_x0)))) "data")) (nil Raw)))))
     -5))
 

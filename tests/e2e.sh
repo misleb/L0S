@@ -42,6 +42,9 @@
 # programs go in /bin beside them. The board has a virtio-gpu,
 # shown nowhere, a virtio keyboard and tablet, either way, and a
 # virtio-rng, unless NAME/norng exists, for a case that types nothing.
+# It has QEMU_CPUS CPUs, 1 if not set, as tools/qemu-boot.sh gives it, or
+# as many as NAME/cpus says, for a case whose output depends on the order
+# its programs run in, which several CPUs do not keep.
 set -u
 cd "$(dirname "$0")/.."
 L0=${L0:-l0}
@@ -101,7 +104,9 @@ for dir in "${cases[@]}"; do
   if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; fail=$((fail+1)); continue
   fi
-  disk=""; qemu_args=$L0_QEMU_ARGS; gpu=""
+  cpus=${QEMU_CPUS:-1}
+  [ -f "$dir/cpus" ] && cpus=$(cat "$dir/cpus")
+  disk=""; qemu_args="-smp $cpus $L0_QEMU_ARGS"; gpu=""
   [ -f "$dir/norng" ] && qemu_args=${qemu_args/ -device virtio-rng-device/}
   sd=""
   if [ -f "$dir/sd" ]; then
@@ -159,7 +164,7 @@ for dir in "${cases[@]}"; do
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$typed" |
-      QEMU_NO_REBOOT=1 QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_NO_REBOOT=1 QEMU_CPUS=$cpus QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 60 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
     L0_QEMU_ARGS=$qemu_args tools/deadline 60 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi

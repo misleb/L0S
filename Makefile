@@ -108,9 +108,18 @@ SCREEN       ?= 2560x1440
 GPU          ?= $(shell tools/qemu-gl)
 comma        := ,
 GPU_OPTS     := $(if $(SCREEN),xres=$(word 1,$(subst x, ,$(SCREEN)))$(comma)yres=$(word 2,$(subst x, ,$(SCREEN))))
+# CPUS is how many CPUs make boot, demo and e2e give the virt board: with
+# more than one, the kernel runs on CPU 0 and processes on the rest (spec
+# 6.18). It is 1, since on QEMU more are no faster, and a boot that
+# writes a disk a little slower (probes/smp/REQUEST-idle-cpus.md); make
+# demo CPUS=4 for four. make test-virt boots each test on one CPU and
+# then on VIRT_CPUS.
+CPUS         ?= 1
+VIRT_CPUS    ?= 4
+export QEMU_CPUS ?= $(CPUS)
 # make boot gives an etc both inputs: virtio's keyboard and tablet, and a
 # qemu-xhci with a USB keyboard and mouse, as the demo's inittab drives.
-DEVICES      := -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device \
+DEVICES      := -smp $(CPUS) -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device \
                 -device qemu-xhci -device usb-kbd -device usb-mouse -device virtio-rng-device
 DISK         := $(BUILD)/disk.img
 SYSDISK      := $(BUILD)/system.img
@@ -134,7 +143,7 @@ NET_DEVICE   := -netdev $(NET),id=net0 -device virtio-net-device,netdev=net0,mac
 BASE   := common/abi.l0 common/text.l0
 COMMON := $(BASE) common/initramfs.l0
 KERNEL := $(COMMON) common/queue.l0 common/klog.l0 kernel/log.l0 kernel/memory.l0 kernel/elf.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/inittab.l0 \
-          kernel/sched.l0 kernel/pids.l0 kernel/syscall.l0 kernel/process.l0 kernel/kernel.l0 common/rp1.l0
+          kernel/sched.l0 kernel/cpus.l0 kernel/pids.l0 kernel/syscall.l0 kernel/process.l0 kernel/kernel.l0 common/rp1.l0
 CLI    := user/lib/sys/cli.l0
 ULIB   := $(COMMON) common/queue.l0 common/klog.l0 $(CLI) user/lib/sys/l0s.l0 user/lib/sys/server.l0
 
@@ -384,6 +393,7 @@ $(call l0_test,$(BASE) kernel/mounts.l0 kernel/mounts_test.l0)
 $(call l0_test,$(BASE) common/queue.l0 kernel/mounts.l0 kernel/ipc.l0 kernel/ipc_test.l0)
 $(call l0_test,$(COMMON) kernel/inittab.l0 kernel/inittab_test.l0)
 $(call l0_test,$(BASE) kernel/sched.l0 kernel/sched_test.l0)
+$(call l0_test,$(BASE) kernel/cpus.l0 kernel/cpus_test.l0)
 $(call l0_test,$(BASE) kernel/pids.l0 kernel/pids_test.l0)
 $(call l0_test,$(BASE) kernel/syscall.l0 kernel/syscall_test.l0)
 $(call l0_test,$(KERNEL) kernel/asm.l0 kernel/kernel_test.l0)
@@ -458,7 +468,8 @@ test:
 test-each: $(TESTS) $(BUILD)/test/l0s-mcp.ok $(BUILD)/test/graphify-l0.ok
 
 test-virt:
-	$(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
+	L0_QEMU_ARGS="-smp 1" $(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
+	L0_QEMU_ARGS="-smp $(VIRT_CPUS)" $(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
 
 $(BUILD) $(BUILD)/bin $(BUILD)/icons:
 	mkdir -p $@

@@ -1,0 +1,104 @@
+; cpus_test.l0 -- the table of what the other CPUs hold: l0 test.
+
+; A time no CPU of a new table has been active near.
+(def later () int 1000000000)
+
+; c with pid handed to CPU i at t, and taken back at t2.
+(def ran_on ((c Cpus) (i int) (pid int) (t int) (t2 int)) Cpus
+  (match (cpus_back (cpus_place c i pid 0 t) pid t2)
+    ((CpuBack c2 p) c2)
+    ((CpuNotOut c2) c2)))
+
+(def test_one_cpu () int
+  (add (check_bool "one is not many" (cpus_many (cpus_new 1)) false)
+       (check_int "nothing to pick" (cpus_pick (cpus_new 1) 0 (later)) 0)))
+
+(def test_none_counts_as_one () int
+  (check_int "at least one" (cpus_count (cpus_new 0)) 1))
+
+(def test_pick_lowest_idle () int
+  (check_int "CPU 1" (cpus_pick (cpus_new 4) 0 (later)) 1))
+
+(def test_pick_prefers_its_own () int
+  (check_int "CPU 3" (cpus_pick (cpus_new 4) 3 (later)) 3))
+
+; An idle CPU is taken before the busy one the thread ran on.
+(def test_pick_idle_first () int
+  (check_int "CPU 2" (cpus_pick (cpus_place (cpus_new 4) 1 5 0 0) 1 (later)) 2))
+
+; Every CPU holds one: the second place goes to the one preferred.
+(def test_pick_second_place () int
+  (let c (cpus_place (cpus_place (cpus_place (cpus_new 4) 1 5 0 0) 2 6 0 0) 3 7 0 0)
+    (check_int "CPU 2" (cpus_pick c 2 (later)) 2)))
+
+(def test_pick_full () int
+  (let c (cpus_place (cpus_place (cpus_new 2) 1 5 0 0) 1 6 0 0)
+    (check_int "no room" (cpus_pick c 1 (later)) 0)))
+
+; Pid 5 last ran 100 µs, and is handed to CPU 1 again at 1,000,000: at
+; 1,100,000 the next goes behind it, before idle CPUs 2 and 3; 500 µs
+; and 1 ns after it was handed, CPU 1 is quiet, and idle CPU 3 is taken.
+(def test_pick_behind_brief () int
+  (let c (cpus_place (ran_on (cpus_new 4) 1 5 0 100000) 1 5 0 1000000)
+    (add (check_int "behind it" (cpus_pick c 3 1100000) 1)
+         (check_int "quiet" (cpus_pick c 3 1500001) 3))))
+
+; Nothing goes behind a thread with no run yet, or one that last ran
+; 1 ms and 1 ns, which may be computing.
+(def test_pick_not_behind_long () int
+  (let fresh (cpus_place (cpus_new 4) 1 5 0 1000000)
+    (let long (cpus_place (ran_on (cpus_new 4) 1 5 0 1000001) 1 5 0 1000000)
+      (add (check_int "no run yet" (cpus_pick fresh 3 1100000) 3)
+           (check_int "a long run" (cpus_pick long 3 1100000) 3)))))
+
+; Of two CPUs active within the window, the later; and one with no room
+; is passed over, however recent.
+(def test_pick_latest_with_room () int
+  (let c (ran_on (ran_on (cpus_new 4) 1 5 1000 2000) 2 6 2000 3000)
+    (add (check_int "the later" (cpus_pick c 0 3500) 2)
+         (check_int "full" (cpus_pick (cpus_place (cpus_place c 2 7 0 3000) 2 8 0 3000) 0 3500) 1))))
+
+(def test_last_run () int
+  (let c (ran_on (cpus_new 3) 2 9 1000 4000)
+    (add (check_int "3 µs" (cpus_last_run c 9) 3000)
+         (add (check_int "active" (cpus_active_at c 2) 4000)
+              (check_int "forgotten" (cpus_last_run (cpus_forget c 9) 9) -1)))))
+
+(def test_never () int
+  (add (check_int "never active" (cpus_active_at (cpus_new 3) 2) -1)
+       (check_int "never ran" (cpus_last_run (cpus_new 3) 9) -1)))
+
+(def test_place_out () int
+  (let c (cpus_place (cpus_new 3) 2 9 100 0)
+    (add (check_bool "out" (cpus_out c 9) true)
+         (add (check_int "held" (cpus_held c 2) 1)
+              (check_bool "busy" (cpus_busy c) true)))))
+
+(def test_back () int
+  (match (cpus_back (cpus_place (cpus_new 3) 2 9 100 0) 9 50)
+    ((CpuBack c p)
+      (add (check_int "its CPU" (on_cpu_cpu p) 2)
+           (add (check_int "its deadline" (on_cpu_deadline p) 100)
+                (add (check_bool "not out" (cpus_out c 9) false)
+                     (check_bool "idle" (cpus_busy c) false)))))
+    ((CpuNotOut c) (fail_because "back" "not out"))))
+
+(def test_back_not_out () int
+  (match (cpus_back (cpus_new 3) 9 0)
+    ((CpuBack c p) (fail_because "back" "out"))
+    ((CpuNotOut c) (check_bool "idle" (cpus_busy c) false))))
+
+(def test_doom () int
+  (match (cpus_back (cpus_doom (cpus_place (cpus_new 3) 1 4 0 0) 4) 4 0)
+    ((CpuBack c p) (check_bool "doomed" (on_cpu_doomed p) true))
+    ((CpuNotOut c) (fail_because "doom" "not out"))))
+
+(def test_doom_not_out () int
+  (check_bool "nothing out" (cpus_busy (cpus_doom (cpus_new 3) 4)) false))
+
+; A context of three words, then CPU 2 and tag 7.
+(def test_trapped_of () int
+  (match (cpu_trapped_of (array_from (cons 10 (cons 11 (cons 12 (cons 2 (cons 7 (nil int)))))) 0))
+    ((CpuTrapped ctx cpu tag)
+      (add (check_int "context" (array_len ctx) 3)
+           (add (check_int "cpu" cpu 2) (check_int "tag" tag 7))))))
