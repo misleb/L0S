@@ -155,7 +155,9 @@ Input:
 - **A left press** on a window brings it to the front. On its title bar,
   or on a header bar its client draws, whose client then asks `move`,
   the press starts a drag: the window follows the pointer until the
-  button is released. The screen is rebuilt for it once 20 ms have
+  button is released. A second press on the same title bar within
+  400 ms, a double click, instead maximizes the window, or restores it,
+  as `maximize` does for a client's header bar. The screen is rebuilt for it once 20 ms have
   passed since the last rebuild ended, timed from its end and not its
   start: a rebuild can take longer than the pointer takes to move
   (about 9 ms with two windows), so the moves that come in while one runs
@@ -298,10 +300,10 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   of its edge is the arrow until it is pressed there: a client cannot
   ask for a pointer's shape, so only the border outside shows the
   resize pointer before a press.
-- A window `wm` decorates is not maximized by a double click on its
-  title bar: only a client's own header bar asks `maximize`.
-- Only toolkit windows can be resized (`vt` and `draw` ignore the size
-  notice, since a terminal keeps no copy of its text to lay out again).
+- Only toolkit windows can be resized or maximized (`vt` and `draw`
+  ignore the size notice, since a terminal keeps no copy of its text to
+  lay out again, so a double click on their title bars leaves them as
+  they are).
   A client paints what changed for every size it is asked for, all of it
   when the size outgrows its buffer, and `wm` restacks the screen once:
   Disks's drag paints about 7 ms a size on QEMU, and the restack takes

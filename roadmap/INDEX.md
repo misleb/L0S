@@ -33,7 +33,6 @@ move independently, so several can be active at once.
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
-| [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | active | 2/3 | – | desktop.md, toolkit.md |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | idea | – | – | desktop.md, toolkit.md |
 | [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | blocked | – | 0012 | toolkit.md |
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
@@ -42,7 +41,8 @@ move independently, so several can be active at once.
 
 ## Ready
 
-None: [0011](0011-csd-complete.md) is active.
+None: every goal left is an `idea`, with no steps yet, or blocked on
+one. An idea becomes ready once its steps are written.
 
 ## Dependencies
 
@@ -58,6 +58,7 @@ graph LR
 |---|---|---|
 | [0001](0001-pi5-stable.md) The Pi 5 boots reliably | Pi 5 | 2026-10-26 |
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
+| [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 | [0016](0016-pi5-eeprom-config.md) The Pi 5's boot config, read and changed from L0S | Pi 5 | 2026-10-27 |
 

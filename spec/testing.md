@@ -284,7 +284,9 @@ QMP, checking `run windows` and, by screendump, what is shown:
   the content;
 - the top left corner grabbed just outside the window, by its rounded
   corner, and dragged 30 right and 20 down: the window that much smaller
-  and its top left that much further in.
+  and its top left that much further in;
+- a double click on `wm`'s own title bar: the window maximized, 1276 by
+  720 at 0, 32, and another: put back, at its place and size.
 
 [tests/procmon.sh](../tests/procmon.sh) boots the screen initramfs, types
 `run procmon &`, and learns where the monitor's window is. Then, by

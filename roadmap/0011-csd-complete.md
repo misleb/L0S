@@ -1,6 +1,6 @@
 # 0011: Client-side decorations: maximize and resize
 
-Track: Desktop · Status: active · Needs: – · Spec: desktop.md, toolkit.md
+Track: Desktop · Status: done · Needs: – · Spec: desktop.md, toolkit.md
 
 ## Why
 
@@ -21,12 +21,12 @@ README's "Still to do" for client-side decorations.
 
 - [x] Maximize and restore by a double click on the header bar.
 - [x] A `resize` request from the client, started from inside its edge.
-- [ ] A double click on a title bar `wm` draws maximizes and restores
+- [x] A double click on a title bar `wm` draws maximizes and restores
   that window too, by the same code as `maximize`.
 
 ## Spec changes
 
-- desktop.md: the limit on `wm`'s own title bars goes.
+All moved into the spec.
 
 ## Log
 
@@ -55,3 +55,12 @@ README's "Still to do" for client-side decorations.
   into the spec: desktop.md's `edges` and the inside edge, toolkit.md's
   window. Found: the pointer over the inside edge stays the arrow until
   the press, since a client cannot ask for a shape (goal 0008).
+- 2026-10-27: a second press on a title bar `wm` draws, on the same
+  window within the toolkit's `ui_double_ns`, maximizes or restores it
+  through `maximize_toggled`, the code `maximize` runs, in place of a
+  drag; `Ptr` keeps the last title press (`TitleClick`), forgotten once
+  it makes a double so a third press drags again. `tests/resize.sh`
+  maximizes the gallery to 1276 by 720 at 0, 32 and restores it. Moved
+  into the spec: desktop.md's title bar press, and its limit on `wm`'s
+  title bars folded into the one on windows that cannot be resized.
+  Done.

@@ -16,6 +16,8 @@
 #   4. the top left corner grabbed just outside the window, where its
 #      rounded corner is cut away, and dragged 30 right and 20 down: the
 #      window that much smaller, its top left that much further in
+#   5. a double click on wm's own title bar: the window maximized under
+#      the top bar, and another: put back, at its place and size
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
@@ -185,3 +187,32 @@ drag $((x1 - 2)) $((y1 - 2)) $((x1 + 28)) $((y1 + 18))
 window $((w2 - 30)) $((h2 - 20))
 [ "$w_x $w_y" = "$((x1 + 30)) $((y1 + 20))" ] || fail "the top left corner dragged put the window at $w_x $w_y, not $((x1 + 30)) $((y1 + 20))"
 echo "ok - resize: the top left corner dragged: ${w_w} by ${w_h} at ${w_x}, ${w_y}"
+
+# A double click at x, y: two clicks well within 400 ms, each press and
+# release its own input-send-event, so its own report, but all four on
+# one connection, since each nc may take up to its second to end.
+dbl() {
+  local b
+  events "$(at "$1" "$2")"; sleep 1
+  {
+    printf '{"execute":"qmp_capabilities"}\n'
+    for b in true false true false; do
+      printf '{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$(button $b)"
+    done
+  } | nc -U -w 1 "$qmp" > /dev/null 2>&1
+  sleep 1
+}
+
+# A double click on wm's own title bar, 100 in, maximizes the window:
+# from 0, 32 under the top bar, its content 1276 by 720, the screen's
+# 1280 by 768 less its frame's 2 each side, its title bar's 46 and its
+# foot's 2. Another there, 100 in and 20 down from 0, 32, restores it.
+x3=$w_x; y3=$w_y; w3=$w_w; h3=$w_h
+dbl $((x3 + 100)) $((y3 + 20))
+window 1276 720
+[ "$w_x $w_y" = "0 32" ] || fail "a double click on the title bar put the window at $w_x $w_y, not 0 32"
+echo "ok - resize: a double click on the title bar maximized it"
+dbl 100 52
+window $w3 $h3
+[ "$w_x $w_y" = "$x3 $y3" ] || fail "a second double click put the window at $w_x $w_y, not $x3 $y3"
+echo "ok - resize: another restored it"
