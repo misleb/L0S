@@ -7,8 +7,20 @@ description: Map of the L0S operating system (a microkernel and user programs wr
 
 L0S is a microkernel for QEMU's aarch64 `virt` board and the programs that
 run on it, all in L0. Read the `l0-code` skill for the language; this one is
-about the system. `README.md` is the full human description: go to it for
-detail, but use this skill and `make -s doc` to find things fast.
+about the system. `spec/` is the full human description, a page per area
+(`spec/README.md` maps them): go to it for detail, but use this skill and
+`make -s doc` to find things fast. `roadmap/INDEX.md` is where L0S is
+going: goals by track, their progress and what each needs.
+
+## The roadmap
+
+A goal is `roadmap/NNNN-slug.md` (template at the end of INDEX.md). Before
+working on one, read it and its Needs. As each step lands: tick it, move
+its "Spec changes" into the spec pages it names, add a Log line, and
+update the goal's row in INDEX (Status, Progress) and the Ready list. All
+of it goes in the same change as the code. When a goal is done, its row
+moves to Done. Limits found and future work go into a goal, a new `idea`
+if none fits, never into the spec as plans.
 
 ## Find things before reading files
 
@@ -55,11 +67,11 @@ What it is and is not:
 
 - Calls, references to a type, constructors' uses, and which file holds
   each form, read from the L0 itself (`tools/graphify-l0`), plus the
-  scripts and Python, and concepts from the README, skills, rules and
+  scripts and Python, and concepts from the spec, skills, rules and
   probes linked to the files they name.
 - **Not run-time messages.** Programs reach each other through ports, so
   `graphify path "usb_hid()" "wm()"` finds nothing: that path is the
-  README's table of who talks to whom. `path --undirected` finds one
+  table of who talks to whom in `spec/demo.md`. `path --undirected` finds one
   through a doc instead, which is no call at all.
 - **A name defined in several places is not linked** where a caller could
   mean either, rather than guessed. A missing caller is possible, so
@@ -106,8 +118,8 @@ asked the graph, and how, from their transcripts.
 | `tests/` | `e2e.sh` and `e2e/CASE/`, the screen tests `gpu-screen.sh`, `keyboard.sh`, `vt.sh`, `widgets.sh`, `resize.sh`, `procmon.sh` |
 | `build/` | everything make makes; ignored by git |
 
-Who talks to whom at run time is the table under "The interactive demo" in
-the README, and the desktop's diagram under "The desktop".
+Who talks to whom at run time is the table in `spec/demo.md`, and the
+desktop's diagram at the top of `spec/desktop.md`.
 
 ## Linking: one namespace
 
@@ -166,9 +178,10 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
    `demo/etc/system`, which `boot` starts, from the system volume when
    `/` is one, and so never with devices. PATH is where step 2 put it
    (`/bin/sh`, `/sbin/wm`, `/Applications/Terminal.app/vt`). Adding a
-   `start` line shifts later pids: update the README's pid table and `ps`
+   `start` line shifts later pids: update `spec/demo.md`'s pid table and `ps`
    sample, and check `tests/vt.sh`'s pid arithmetic.
-5. Its row in the README's programs table, and for an app, the Apps table.
+5. Its row in `spec/programs.md`'s programs table, and for an app, the Apps
+   table in `spec/boot.md`.
 
 **A library** in `user/lib/GROUP/` (`sys`, `proto`, `format`, `gfx`, `ui`)
 1. Its file header `; NAME.l0 -- summary`, a doc block on every def. Its
@@ -176,7 +189,7 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
 2. Makefile: a variable for it, added to each `LIBS_` that needs it (or to
    `ULIB`, if every program does); a `$(call l0_test,... user/lib/GROUP/NAME_test.l0)`
    line beside the others. `DOC_SRCS` finds it.
-3. Its row in the README's libraries table.
+3. Its row in `spec/programs.md`'s libraries table.
 
 **A request to a server** (the compositor; the display driver is alike)
 1. Server: `user/sbin/wm/wm.l0` `requested` takes word arguments (`hello`,
@@ -189,9 +202,9 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
 2. Client: a wrapper in `user/lib/proto/wm.l0` (`compositor_ask`, `ask_nums`,
    `wm_error`), and its line in that file's header table. Every client asks
    through `l0s.l0`'s `port_ask` and reads errors with `reply_why`.
-3. The README's compositor protocol table, and tests on both sides.
+3. `spec/desktop.md`'s compositor protocol table, and tests on both sides.
    For the display: `user/sbin/virtio-gpu/virtio-gpu.l0` `requested` /
-   `requested_pointer`, `user/lib/proto/display.l0`'s header, the README's
+   `requested_pointer`, `user/lib/proto/display.l0`'s header, `spec/display.md`'s
    display table.
 
 **A system call** (`shm_revoke`, 282, is a complete example)
@@ -209,13 +222,13 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
    constructor names are global, so prefix them with the call's.
 5. `kernel/kernel_virt_test.l0`: tests through `asm.l0`'s `call_words`, run
    by `make test-virt`; include refusals.
-6. The README's table of the kernel's own calls.
+6. `spec/syscalls.md`'s table of the kernel's own calls.
 
 ## Patterns to copy
 
 - **A call's answer is matched**, every constructor of it: `port_send`
   gives a `Sending`, `name_register` a `Registration`, `spawn_entry` a
-  `Spawn`, and so on (the README's table of calls lists them all). Handle
+  `Spawn`, and so on (`spec/syscalls.md`'s table of calls lists them all). Handle
   each arm; for a failure's message use its `X_why` (`sending_why`,
   `registration_why`, `spawn_why`, `irq_binding_why`, `dma_alloc_why`,
   `shm_share_why`). Only a send whose answer truly does not matter is
@@ -416,7 +429,7 @@ add to that list. Documenting a listed form fails the check too, until
 - **`main` cannot be tested**: keep it to one call.
 - **Edit source with the editor tools**, not sed, awk or scripts: a shell
   rewrite with a stale line number once overwrote the top of a file.
-- **The README's tables** (programs, libraries, protocols, calls, pids,
+- **The spec's tables** (programs, libraries, protocols, calls, pids,
   tests) are relied on by people and agents; update them in the same change.
 
 ## Done

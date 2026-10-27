@@ -1,4 +1,4 @@
-# user/lib/ui — the L0S toolkit
+# The toolkit (user/lib/ui)
 
 A small widget toolkit for L0S programs. It follows the
 [GNOME Human Interface Guidelines](https://developer.gnome.org/hig/) and
@@ -11,7 +11,7 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | File | What it is | GTK / libadwaita |
 |---|---|---|
 | `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Programs draw in the dark style: `ui_style` says so, the one place a setting for it will be read. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends only on `ppm.l0`'s colors and `render.l0`'s glyph. | `@window_bg_color`, `@accent_bg_color`, … |
-| `icons.l0` | The names of the symbolic icons, 16×16 at scale 1, GNOME's own: each is its SVG under [icons/](../../../icons) (Adwaita's, and System Monitor's for utilities-system-monitor), which `tools/mkicons` rasterizes into `/etc/icons` at the build. window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer. Also `ui_image_names`, the full-color icons Files and Disks show things with, Adwaita's under `icons/adwaita/scalable`, which `tools/mkicon --image` draws into `/etc/images/NAME.face`. | `*-symbolic` icons, and the full-color theme icons |
+| `icons.l0` | The names of the symbolic icons, 16×16 at scale 1, GNOME's own: each is its SVG under [icons/](../icons) (Adwaita's, and System Monitor's for utilities-system-monitor), which `tools/mkicons` rasterizes into `/etc/icons` at the build. window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer. Also `ui_image_names`, the full-color icons Files and Disks show things with, Adwaita's under `icons/adwaita/scalable`, which `tools/mkicon --image` draws into `/etc/images/NAME.face`. | `*-symbolic` icons, and the full-color theme icons |
 | `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; and the coverage `tools/mkfont` rasterized into `/etc/face`: Source Code Pro's glyphs, regular and bold, at three sizes (16, 32 and 64 tall), and the pointer. An app's `icon.face` is the same format, its images' tables `image.N`, and so is each full-color icon's `/etc/images/NAME.face`, which a program loads by name, at the sizes its scale paints, with `ui_images_load` into a `UiImages`, and finds with `ui_image`. | the font and icon theme at a scale factor |
 | `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon, an image of its own colors with alpha, `UiPImage`, as an app's `icon.svg` makes), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
 | `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, entry.l0's entry, a window's own header bar, nav.l0's path bar and toggle group, icon_view.l0's icon view and menu.l0's popover); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). `UiCsdBar START TITLE END CLOSES` is the header bar of a window that draws its own (`ui_open_csd`): any widget as its title, in the bar's middle as far as there is room, the window's close button at its end if CLOSES (`ui_close_action`), and its ground the window's to drag (`ui_move_action`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
@@ -147,43 +147,6 @@ to `l0` are one namespace, and a duplicate is a compile error.
 - Scrolling is by whole rows: the wheel's steps are counted, not its
   speed, and there is no kinetic scrolling. The wheel across, which the
   driver reports, scrolls nothing yet.
-- An entry does not scroll its text, which is cut short with `...`, and
-  has no selection, copying or pasting.
-
-## The display layer
-
-Two Wayland-style changes to the display layer (`user/lib/proto/display.l0`,
-`user/sbin/virtio-gpu/virtio-gpu.l0`) came with the toolkit:
-
-- **Shaped layers** (`shape ID TL TR BL BR`), like an opaque region. The
-  driver narrows a layer's runs on its corner rows, so a window's 12 px
-  corners show what's beneath with no blending. `wm` shapes every window,
-  and its hit test (`render.l0`'s `corner_cut`, as the driver cuts) lets a press in
-  a cut corner fall through.
-- **Batched damage and minimal restacks.** One `damage` takes many rects,
-  like `wl_surface.commit`, in the display protocol and the compositor's.
-  A `layers` change flushes only the bands of rows that changed, and the
-  driver builds again only the rows of the layers that changed.
-  `ui_present` sends its boxes in one request.
-
-### Later
-
-1. **Source viewports and subsurfaces** (`wp_viewporter`, `wl_subsurface`).
-   A grid body could scroll as a ring under a still header, and all title
-   bars could share one atlas buffer, easing the 64-region limit.
-2. **An interrupt-driven, pipelined virtio queue**, plus frame and
-   buffer-release callbacks, so clients can pace and double-buffer.
-3. **A cursor set** and `wp_cursor_shape`: an I-beam over text, switched
-   with one `UPDATE_CURSOR`.
-4. **Alpha layers** for shadows and antialiased window corners: small
-   strips composed by the driver.
-5. **Output events** for mode changes.
-
-Done since: **client-side decorations**, `wm`'s `csd` request and its
-`move ID` (`xdg_toplevel.move`), so a program draws its own header bars
-(`ui_open_csd`, `UiCsdBar`), as Files does; such a window has no chrome
-of `wm`'s, so it costs no layer or region of its own beyond its content.
-Still to do for them: maximizing by a double click on the header bar,
-and a resize of its own (`xdg_toplevel.resize`) from inside its edge.
-
-Outside the display layer: modifier state in `KeyEvent` (for Shift-Tab).
+- An entry does not scroll its text, which is cut short with `...`, so an
+  entry is made as wide as what it will hold, and has no selection,
+  copying or pasting.

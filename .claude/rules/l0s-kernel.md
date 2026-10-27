@@ -20,5 +20,5 @@ The `l0s-dev` skill has the checklist for adding a system call.
   (`make test-virt`, `kernel/kernel_virt_test.l0`), refusals included.
 - `common/` is linked into the kernel and into every program: a new name
   there must clash with neither.
-- A system call's number, decoding, handler, wrapper and README row change
+- A system call's number, decoding, handler, wrapper and `spec/syscalls.md` row change
   together.

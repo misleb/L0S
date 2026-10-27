@@ -41,8 +41,18 @@ changing code.
   `l0s-dev` skill's "Bytes, not lists" has the helpers.
 - **New library?** Add it to the Makefile's `DOC_SRCS`, an `l0_test` line, and
   the `LIBS_` lists that need it.
-- **Keep the README's tables true** in the same change: programs,
-  libraries, protocols, system calls, the demo's pids, tests, limits.
+- **Keep the spec true** in the same change. `spec/` says what L0S is
+  today, a page per area (`spec/README.md` maps them), each with its own
+  Limits: above all its tables of programs and libraries (`programs.md`),
+  protocols (`desktop.md`, `display.md` and each area's), system calls
+  (`syscalls.md`), the demo's pids (`demo.md`), tests (`testing.md`).
+  The spec never says what is planned; that is the roadmap's.
+- **Roadmap.** `roadmap/INDEX.md` lists the goals, each a
+  `roadmap/NNNN-slug.md`. Work toward a goal ticks its step in the goal
+  and updates INDEX's Status, Progress and Ready, and moves that step's
+  "Spec changes" into `spec/`, all in the same change. A limit noticed or
+  future work named goes into a goal (a new `idea` if none fits), not
+  into the spec.
 - **Edit source with the editor tools**, not sed, awk or script rewrites.
 - **Commit** only when asked, and never `build/`.
 - **`AGENTS.md` is L0S's**, except the block between the

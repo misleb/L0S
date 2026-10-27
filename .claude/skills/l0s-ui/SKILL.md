@@ -6,9 +6,9 @@ description: UI conventions for L0S. The toolkit in user/lib/ui (GNOME HIG and l
 # UI in L0S
 
 The look is GNOME's: the [HIG](https://developer.gnome.org/hig/) and
-libadwaita's Adwaita style, dark. `user/lib/ui/README.md` describes the
-toolkit for people; the README's "The desktop" section, the compositor and
-display. This is the working summary, with the rules.
+libadwaita's Adwaita style, dark. `spec/toolkit.md` describes the
+toolkit for people; `spec/desktop.md` the compositor, and `spec/display.md`
+the display. This is the working summary, with the rules.
 
 ## Rules
 
@@ -350,7 +350,7 @@ runs that the driver builds from the layers, so no guest code copies pixels.
 - **No GPU drawing.** The GPU only composes (2D mode: the host; 3D mode:
   copies). Every pixel is the guest's.
 
-## Scale (`face.l0`, the README's "A large screen")
+## Scale (`face.l0`, `spec/desktop.md`'s "A large screen")
 
 On a screen of 2560×1440 or more (or boot argument `scale=2`), `info`
 says scale 2. Layout is in the desktop's pixels, half the screen's each

@@ -12,6 +12,10 @@ in `.claude/` (Cursor sees the same files through symlinks in `.cursor/`):
   writing tests, the screen tests, debugging on the board), `l0s-ui` (the
   toolkit, the compositor, the display).
 - **Rules**: `.claude/rules/`, `l0s.md` always, the others by path.
+- **The spec**: `spec/`, what L0S is today, a page per area with its
+  limits; `spec/README.md` maps them. **The roadmap**: `roadmap/INDEX.md`,
+  the goals in flight, their progress and what each needs. A change
+  keeps the spec true, and work toward a goal updates the goal.
 - **Done** means `make check` and `make test` pass, plus `make e2e` for
   anything that boots, draws or takes input, and `make test-virt` for the
   kernel.
@@ -27,7 +31,7 @@ opening file after file is none of them:
 | What is NAME, what does it take and say? | `make -s doc Q=NAME` (L0S), `l0 doc NAME` (L0's library) |
 | Who calls it, what does it call, where is it? | `graphify explain "NAME()"` |
 | What does a change to it reach? Ask before changing a name others use | `graphify affected "NAME()"` |
-| Which program talks to which, at run time? | the README's table under "The interactive demo" |
+| Which program talks to which, at run time? | the table in `spec/demo.md` |
 | Where does this exact string, number or message appear? | grep |
 
 So start any exploration with `make -s doc Q=WORD`, not `grep -rn`. Asked
