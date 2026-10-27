@@ -39,7 +39,6 @@ move independently, so several can be active at once.
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | idea | – | – | desktop.md, toolkit.md |
 | [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | blocked | – | 0012 | toolkit.md |
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
-| [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | blocked | 0/2 | [REQUEST-proc-got-before-bss](../probes/link/REQUEST-proc-got-before-bss.md) | kernel.md, boot.md |
 
 ## Ready
 
@@ -53,13 +52,14 @@ graph LR
   0002[0002 faster with more CPUs] --> 0003
   0001 --> 0004[0004 Pi 5 USB, SD]
   0012[0012 key modifiers] --> 0013[0013 entry editing]
-  R1([probes/link REQUEST-proc-got-before-bss]) --> 0015[0015 proc images]
   R2([probes/memory REQUEST-heap-left]) --> 0001
 ```
 
 ## Done
 
-None yet.
+| Goal | Track | Done |
+|---|---|---|
+| [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 
 ## Template
 

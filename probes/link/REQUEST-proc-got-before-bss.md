@@ -1,6 +1,7 @@
 # Feature request: place `.got` in proc images' data, before `.bss`, so `.bss` stays out of the file
 
-Status: open
+Status: landed, as L0 commit cd59cf3 (`.got` named in `.data` in every
+layout, and an `elf_ok` check in L0's suite)
 Project: L0S, a microkernel in L0, whose 41 programs are `--target proc`
 images in its initramfs
 
