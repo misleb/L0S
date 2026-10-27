@@ -1,6 +1,6 @@
 # 0001: The Pi 5 boots reliably
 
-Track: Pi 5 · Status: active · Needs: – · Spec: pi5.md, kernel.md
+Track: Pi 5 · Status: done · Needs: – · Spec: pi5.md, kernel.md
 
 ## Why
 
@@ -22,9 +22,9 @@ Every other Pi 5 goal waits on this one.
   compositor and an address from DHCP, with `ps` answering after.
   Seventeen did, on the four-CPU kernel, the last ten in a row once
   `inet` waited for the link (log, 2026-10-26).
-- [ ] Cold boots: power-cycled by hand, ten in a row, each to the
+- [x] Cold boots: power-cycled by hand, ten in a row, each to the
   compositor. Only these can show the power loss, never yet seen in a
-  warm boot.
+  warm boot. Ten did, with no power lost (log, 2026-10-26).
 - [x] Once L0 gives `heap_left` (the request this goal needs): before
   `frame_new`, `map_frame` (`kernel/process.l0`) checks it against a
   reserve and answers as if no frame were left. `test_heap_runs_low`
@@ -61,3 +61,10 @@ Every other Pi 5 goal waits on this one.
   what ending a 600 MB process makes. 40 MB survived; the reserve is
   64 MB. Moved into the spec: kernel.md's refusal and its cost to the
   192 MB heap, pi5.md's "Nothing yet stops processes taking more".
+- 2026-10-26: ten cold boots in a row, the board's power cut and
+  restored by hand each time (the bootloader said `power-on-reset 1`),
+  of 0da88be served over the network: each reached `l0s>`, the
+  compositor at 3840x2160 and a DHCP lease, all four CPUs running, with
+  nothing faulting, corrupted or lost. Moved into the spec: pi5.md's
+  "not yet stable" limit goes, and kernel.md says the Pi 5 runs
+  processes on its CPUs. Done.

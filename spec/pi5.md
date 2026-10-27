@@ -7,9 +7,9 @@ make pi5-card     # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt
 L0S builds for the Pi 5 and has booted on one over the network, to the
 shell on the debug UART, the compositor, and the Ethernet link at 1000
 Mb/s with an address from DHCP. Seventeen reboots in a row
-(`tools/pi5-boot --reboot`) each reached all of them, though boots from
-power have not been tried as often, and some earlier ones corrupted
-memory (the display's IOMMU was the suspect). `make pi5-card`
+(`tools/pi5-boot --reboot`) and ten boots from power in a row each
+reached all of them, on all four CPUs, with no memory corrupted and no
+power lost. `make pi5-card`
 does three things:
 - builds the kernel with `--target pi5`, as `build/kernel-pi5.img`
 - builds the initramfs from `pi5/etc` and the same programs as QEMU's,
@@ -137,13 +137,8 @@ boot should check these, on the debug UART (`dmesg` repeats them):
 
 ## Limits
 
-- **L0S on a Raspberry Pi 5 is not yet stable** (see
-  [The Raspberry Pi 5](#the-raspberry-pi-5)): `make pi5-card` builds its
-  card, and `make pi5-netboot` a TFTP root, which has booted it to a
-  shell and the compositor, though some boots corrupt memory or lose
-  power. It has no disk, and reaches its RTC only through the
-  firmware. Its
-  kernel's heap is sized to `PI5_RAM_GB`, 2 by default, and records the
+- **The Raspberry Pi 5 has no disk**, and reaches its RTC only through
+  the firmware. Its kernel's heap is sized to `PI5_RAM_GB`, 2 by default, and records the
   pages that much RAM has, or about 13 GB on a 16 GB board. On a board
   with more RAM than the kernel was built for, processes are refused
   pages once its heap is down to its reserve (see

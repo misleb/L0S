@@ -321,8 +321,8 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
   when it comes back, within its slice. L0's `cpu_wait` gives back a
   CPU's trap before a device's interrupt, so a kernel kept busy by traps
   takes interrupts late. Several CPUs have run on QEMU's aarch64 board
-  only: the Pi 5 has four, but L0S does not boot there yet, and L0 starts
-  no other CPU on the riscv64 board.
+  and the Pi 5, whose four boot with processes on three; L0 starts no
+  other CPU on the riscv64 board.
 - **On QEMU, more CPUs are no faster, and some boots slower**, so the
   demo and the tests boot with one unless asked (`CPUS`, `QEMU_CPUS`).
   A boot that installs a system onto a RAM volume (`rootboot_tmpfs`) took

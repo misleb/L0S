@@ -1,6 +1,6 @@
 # 0003: All four of the Pi 5's CPUs
 
-Track: Pi 5 · Status: blocked · Needs: 0001, 0002 · Spec: pi5.md, kernel.md
+Track: Pi 5 · Status: blocked · Needs: 0002 · Spec: pi5.md, kernel.md
 
 ## Why
 

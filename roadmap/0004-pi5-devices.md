@@ -1,6 +1,6 @@
 # 0004: USB and the SD card on the Pi 5
 
-Track: Pi 5 · Status: blocked · Needs: 0001 · Spec: devices.md, storage.md, pi5.md
+Track: Pi 5 · Status: ready · Needs: – · Spec: devices.md, storage.md, pi5.md
 
 ## Why
 

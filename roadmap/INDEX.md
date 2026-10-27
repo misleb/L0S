@@ -25,10 +25,9 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0001](0001-pi5-stable.md) The Pi 5 boots reliably | Pi 5 | active | 2/3 | – | pi5.md, kernel.md |
 | [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | idea | – | – | kernel.md |
-| [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | blocked | – | 0001, 0002 | pi5.md, kernel.md |
-| [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | blocked | 0/3 | 0001 | devices.md, storage.md, pi5.md |
+| [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | blocked | – | 0002 | pi5.md, kernel.md |
+| [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | ready | 0/3 | – | devices.md, storage.md, pi5.md |
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | idea | – | – | display.md |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | idea | – | – | display.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
@@ -42,15 +41,13 @@ move independently, so several can be active at once.
 
 ## Ready
 
-None: [0011](0011-csd-complete.md) is active.
+- [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5
 
 ## Dependencies
 
 ```mermaid
 graph LR
-  0001[0001 Pi 5 stable] --> 0003[0003 Pi 5 CPUs]
-  0002[0002 faster with more CPUs] --> 0003
-  0001 --> 0004[0004 Pi 5 USB, SD]
+  0002[0002 faster with more CPUs] --> 0003[0003 Pi 5 CPUs]
   0012[0012 key modifiers] --> 0013[0013 entry editing]
 ```
 
@@ -58,6 +55,7 @@ graph LR
 
 | Goal | Track | Done |
 |---|---|---|
+| [0001](0001-pi5-stable.md) The Pi 5 boots reliably | Pi 5 | 2026-10-26 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 
 ## Template
