@@ -27,8 +27,8 @@ move independently, so several can be active at once.
 |---|---|---|---|---|---|
 | [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | idea | – | – | kernel.md |
 | [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | blocked | – | 0002 | pi5.md, kernel.md |
-| [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | idea | – | – | display.md |
-| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | idea | – | – | display.md, toolkit.md |
+| [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | ready | 0/5 | – | display.md, pi5.md |
+| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | blocked | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
@@ -41,14 +41,16 @@ move independently, so several can be active at once.
 
 ## Ready
 
-None: every goal left is an `idea`, with no steps yet, or blocked on
-one. An idea becomes ready once its steps are written.
+- [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame
+  interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
+  find it needs L0 to give the interrupt.
 
 ## Dependencies
 
 ```mermaid
 graph LR
   0002[0002 faster with more CPUs] --> 0003[0003 Pi 5 CPUs]
+  0005[0005 HVS frame interrupts] --> 0006[0006 paced display queue]
   0012[0012 key modifiers] --> 0013[0013 entry editing]
 ```
 
