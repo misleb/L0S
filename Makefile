@@ -273,6 +273,7 @@ LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_fontview   := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_random     := $(RANDOM)
@@ -745,7 +746,7 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
 SCREEN_TESTS := vt files disks-create resize logo-menu procmon disks launcher launcher-install \
-                partitions usb fat hidpi widgets keyboard gpu-screen
+                fontview partitions usb fat hidpi widgets keyboard gpu-screen
 
 e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs $(BUILD)/mkfs
 	tests/e2e.sh

@@ -38,7 +38,7 @@ move independently, so several can be active at once.
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
-| [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | active | 5/7 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
+| [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | active | 6/7 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
 | [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
 | [0026](0026-font-service-limits.md) The font service lets strikes go, and knows who holds them | Toolkit | idea | – | – | programs.md, toolkit.md |
@@ -51,8 +51,8 @@ move independently, so several can be active at once.
   interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
   find it needs L0 to give the interrupt.
 - [0020](0020-proportional-text.md) Proportional text where GNOME's
-  is: on QEMU, the interface in Source Sans 3 now, kerned; next,
-  Fonts, an app that previews the faces.
+  is: on QEMU, the interface in Source Sans 3 now, kerned, and Fonts;
+  next, the gallery's screen test of proportional labels.
 - [0021](0021-many-windows.md) An app with many windows, its events
   told by window: on QEMU, starting with the window notice.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,

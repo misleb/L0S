@@ -74,7 +74,7 @@ host test of a layout run without one. That must stay so.
   advances, and the sums take each pair's adjustment, in measuring and
   in drawing alike. Tests pin `AV` and `To` narrower than their
   advances.
-- [ ] Fonts, an app to preview them, as GNOME's Fonts
+- [x] Fonts, an app to preview them, as GNOME's Fonts
   (`gnome-font-viewer`) is: `user/apps/fontview`, `Fonts.app` in the
   launcher, its icon GNOME Fonts' own, as Disks' is GNOME Disks'. Its
   window shows every face `font` names (`faces`, so a font added to
@@ -192,3 +192,28 @@ host test of a layout run without one. That must stay so.
   `AV` is 14 units closer and `To` 66, each a pixel narrower at 16
   (`test_kerned_narrower`). Some widths fell a pixel: Disks' format
   card is 366, its Create button 56 wide.
+- 2026-10-28: step 6. Text at a program's own height is a third
+  `UiFont`, `UiFontAt FACE H`, which `UiPText` takes as it is, and a
+  widget, `UiText`, to lay it out: simpler than an op of its own, as
+  measuring, ellipsizing, drawing and damage all go through the font
+  already. It is measured by `metrics.l0`'s face of its name, so the
+  four faces are kerned as the interface is, and any other as Source
+  Code Pro's cells, the nearest a face with no metrics comes; its line
+  is H at every text scale. `ui_present` asks `font` for the strikes a
+  layout's `UiFontAt` text wants that the face has not (`font_open`
+  with no wait), and keeps them in the window's face; one `font` will
+  not give is kept as an empty strike, which is never drawn from, so it
+  is not asked for again each present. Fonts' page cannot scroll, as no
+  toolkit view of arbitrary widgets does, so each sample is one line
+  cut with "...", and all twelve fit in its 680 rows. Its pangram is
+  "Jackdaws love my big sphinx of quartz", whose m and i come early
+  enough to show at 64 in Source Code Pro, where only 22 characters
+  fit. The cards are the icon view's drawn tiles, a click opening the
+  face. GNOME Fonts' icon is `org.gnome.font-viewer.svg` from its
+  repository, tag 50.0, under `icons/gnome-font-viewer`, which the SVG
+  library draws as it is. A seventh app moved the launcher's grid:
+  `launcher.sh` and `launcher-install.sh` recomputed. `tests/fontview.sh`
+  reads the i and m's ink along a row of the pangram at 64: in Source
+  Sans 3 5 and 37 columns, each where the sums of advances and kerning
+  put its pen; in Source Code Pro each inside the cell of 32 that 14
+  and 18 cells along put it.
