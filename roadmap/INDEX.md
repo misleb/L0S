@@ -43,7 +43,6 @@ move independently, so several can be active at once.
 | [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
 | [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi 5's card needs | Pi 5 | active | 5/6 | – | pi5.md, programs.md, testing.md |
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
-| [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its scrollback, resizes, and has tabs | Desktop | ready | 0/6 | – | programs.md, desktop.md, toolkit.md, demo.md, testing.md |
 
 ## Ready
 
@@ -62,9 +61,6 @@ move independently, so several can be active at once.
   booted.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
   small requests first: 0023, which it needed, is done.
-- [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its
-  scrollback, resizes, and has tabs: on QEMU, starting with `vt`
-  keeping its cells, which changes nothing on the screen.
 
 ## Dependencies
 
@@ -87,6 +83,7 @@ graph LR
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 | [0016](0016-pi5-eeprom-config.md) The Pi 5's boot config, read and changed from L0S | Pi 5 | 2026-10-27 |
 | [0023](0023-file-data-shared.md) File data through shared memory, in runs of 64 KB | Storage | 2026-10-27 |
+| [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its scrollback, resizes, and has tabs | Desktop | 2026-10-27 |
 
 ## Template
 

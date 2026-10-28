@@ -111,8 +111,10 @@ the display. This is the working summary, with the rules.
 - **`widget.l0`**: a `UiWidget` tree (`UiLabel`, `UiButton`, `UiBox`,
   `UiExpand`, `UiPad`, `UiSeparator`, `UiHeaderBar`, `UiView`, `UiLevel`,
   `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`, and `panes.l0`'s
-  `UiSidebar`, `UiSegmentBar`, `UiProps`, `UiModal`, and `entry.l0`'s
-  `UiEntry`). `ui_layout widget rect
+  `UiSidebar`, `UiSegmentBar`, `UiProps`, `UiModal`, `entry.l0`'s
+  `UiEntry`, `nav.l0`'s `UiTabBar`, and `UiDrawingArea`, an area the
+  program paints itself, which the toolkit never paints or damages,
+  as `vt`'s terminal). `ui_layout widget rect
   state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them;
   `ui_hit nodes x y` gives the action under a point.
 - **`grid.l0`**: the data grid, typed cells, sorting, selection, keys,
@@ -219,7 +221,8 @@ driver composes them.
   the next `ui_present` paints what changed and the exposed strip, or all
   of a new buffer (`ui_swapped`). The canvas is the whole buffer, its
   stride its width; `UiMem` keeps the window's size. Apps need no code;
-  `vt` ignores the notice. The cost that matters is pages shared and
+  `vt`, which paints its terminal in a `UiDrawingArea` itself, rewraps
+  its cells and paints the area whole before `ui_present`. The cost that matters is pages shared and
   given up, not pixels: keep resizes in place.
 - **The pointer's image** (`pointer_shaped`, `pointer_wanted`,
   `resize_cursor`): buffer 1, painted again with `ui_paint_named_cursor`
@@ -312,8 +315,10 @@ runs that the driver builds from the layers, so no guest code copies pixels.
   changed rows, 3 on the run list and the attach (one backing, replaced
   whole), 1 showing. More layers make every restack dearer: think twice before adding one
   per window.
-- **Scrolling** is a ring: a client changes its window's `top` row instead of
-  copying (`vt` does).
+- **Scrolling** is a ring: a client can change its window's `top` row
+  instead of copying, but only one with no header bar of its own, which
+  would scroll too: `vt`, client-decorated, copies its rows with
+  `canvas_copy_rows`, once a batch of output.
 - **The cursor** is the device's own, 64×64, moved without touching the
   screen; a new image is a `cursor` request again, a few commands.
 - **The 64-region limit** (`l0s-dev`): at most 64 open at once. `wm`
@@ -363,7 +368,7 @@ way; buffers and painting are in the screen's.
   radius ×s, text and icons from the face); `ui_buffer_at w h s`; `display.l0`
   (places, rectangles, top rows, radii and moves ×s; a buffer's W H are its
   own pixels); `draw_cmd.l0`'s `ui_draw_*` (render.l0's shapes, s thick);
-  `vt` (cells ×s, `top` ÷ s for the protocol); the launcher's `icon2x.ppm`.
+  `vt` (cells ×s, its rows copied ×s); the launcher's `icon2x.ppm`.
 - **The face**, a `UiFace`: scale, the icons of `/etc/icons` at the
   sizes the scale paints (`icon.NAME.N`, N = 16·k·s, `ui_icon_sizes`),
   and the tables of `/etc/face` (coverage 0–15, 16 levels a word):

@@ -16,7 +16,7 @@ board's real-time clock, which QEMU sets to this machine's local time.
 There are two shells in all:
 
 - **The serial line**, in the terminal you ran `make demo` from.
-- **`vt1`**, the terminal's window. The windows are drawn in GNOME's
+- **`vt1`**, the Terminal window's tab. The windows are drawn in GNOME's
   Adwaita style by the toolkit in [user/lib/ui](toolkit.md):
   rounded corners and a header bar with a bold, centered title, and a
   thin border of the header bar's color down the sides and along the
@@ -27,10 +27,16 @@ There are two shells in all:
   - Click a window to bring it to the front. Drag it by its title bar to
     move it.
   - Click the round close button at the right end of its title bar to
-    close it. For `vt1` that kills its `vt`, and its shell goes with it.
-  - It is a terminal of 80 by 24 cells: white on GNOME Console's
-    `1e1e1e`, scrolling, with a cursor along the foot of its cell.
-    Start another from Applications, or with `run vt &`: it is `vt2`.
+    close it. For the Terminal that ends each tab's shell, and its `vt`.
+  - The Terminal draws its own header bar, as GNOME Console does, with
+    no border, and a button at its start that opens a tab, `vt2`, with
+    its own shell; with two tabs a tab bar shows under the header bar,
+    where a click selects a tab and its close button closes it. Each
+    tab is a terminal of 80 by 24 cells, or as many as the window holds
+    once its edge is dragged or it is maximized: white on GNOME
+    Console's `1e1e1e`, scrolling, with a cursor along the foot of its
+    cell. The wheel scrolls back through the last 10,000 lines.
+    Start another Terminal from Applications, or with `run vt &`.
 
 The other window, `Processes`, is the System Monitor (`procmon`): the
 kernel's processes in a grid, read again every second, and under it the
@@ -76,9 +82,10 @@ booted with `root=UUID`, or else from the initramfs.
 | 14 | `usb-hid mouse` | the mouse's driver. It serves `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
 | 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
 | 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 17 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 17 | `vt` | the Terminal window, Terminal's program, with a tab, `vt1`, the first name free. It edits the keys `wm` sends it into the selected tab's lines, as `uart` does what the serial line sends, and draws what is written to the tab into its window |
 | 18 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
-| 19 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
+| 19 | `vt tab` | the tab's relay, which the `vt` starts: it registers the tab's name, `vt1`, and passes on to the `vt` all that is sent to it. Each tab opened has its own relay and shell after the pids here |
+| 20 | `sh vt1` | the tab's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` closes its tab, and, as it is the last, the window, ending its `vt` |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](desktop.md#the-desktop).
@@ -246,7 +253,8 @@ Things to try:
      16       1  wm            waiting for a message on port 24
      17       1  vt            waiting for a message on port 14
      18       1  procmon       sleeping
-     19      17  sh            waiting for a message on port 30
+     19      17  vt            waiting for a message on port 30
+     20      17  sh            waiting for a message on port 31
   ```
 
   It lists the processes that have not exited. The shell asking is always
