@@ -28,6 +28,8 @@ host test of a layout run without one. That must stay so.
   L0S menu; `vt` stays in Source Code Pro, as GNOME Console does, and so
   does whatever must line up in columns.
 - Pairs such as `AV` and `To` are kerned, as the font's GPOS says.
+- Fonts, an app as GNOME's Fonts is, previews every face `font` has, at
+  heights from 12 to 64, and a screen test checks it.
 - The screen tests pass with their coordinates recomputed, and one of
   them shows a proportional label's pixels; `make check`, `make test`
   and `make e2e` pass.
@@ -72,6 +74,22 @@ host test of a layout run without one. That must stay so.
   advances, and the sums take each pair's adjustment, in measuring and
   in drawing alike. Tests pin `AV` and `To` narrower than their
   advances.
+- [ ] Fonts, an app to preview them, as GNOME's Fonts
+  (`gnome-font-viewer`) is: `user/apps/fontview`, `Fonts.app` in the
+  launcher, its icon GNOME Fonts' own, as Disks' is GNOME Disks'. Its
+  window shows every face `font` names (`faces`, so a font added to
+  `/etc/fonts` shows with no change here) as a grid of cards, each its
+  name and "Aa" in that face. A click on one opens it, with a back
+  button in the header bar: its name, its file, and a pangram and then
+  codes 32 to 126, at 12, 16, 24, 32, 48 and 64 tall, kerned as the
+  step before has it. Those heights are not the toolkit's, so the
+  toolkit gains text at a height its program names, the strike asked of
+  `font` on first use and kept for the window's life (a height in
+  `UiFont`, or an op of its own, whichever `UiPText` takes more simply).
+  Host tests of its layout and of that op; `tests/fontview.sh`, in
+  `SCREEN_TESTS`, opens it from the launcher, sees four cards, opens
+  Source Sans 3 and reads an `i` narrower than an `m` at 64, then
+  Source Code Pro and reads them the same width.
 - [ ] A screen test: the gallery's labels, read back from a
   `screendump`, are proportional (an `i` narrower than an `m`), and
   `vt`'s cells are as before. toolkit.md's **Text** and Limits say
@@ -81,12 +99,14 @@ host test of a layout run without one. That must stay so.
 
 - toolkit.md: **Text** says the interface is Source Sans 3 and terminals
   and columns Source Code Pro, measured by advance and kerned; `UiFont`
-  and `ui_text_w`'s font; `metrics.l0` in the table. The limit loses
-  "monospaced".
+  and `ui_text_w`'s font; `metrics.l0` in the table; text at a height
+  a program names. The limit loses "monospaced".
 - desktop.md: the title bars, top bar and launcher in Source Sans 3; the
   top bar's Applications measured.
-- programs.md: mkfont's `--metrics`.
-- testing.md: the screen test that reads proportional text.
+- programs.md: mkfont's `--metrics`; `fontview`, Fonts, in the
+  programs table.
+- testing.md: the screen test that reads proportional text, and
+  `tests/fontview.sh`.
 
 ## Log
 
@@ -102,3 +122,7 @@ host test of a layout run without one. That must stay so.
   Code Pro's cells imply, 5H/6. mkfont no longer reads TrueType at
   all (it makes the pointers only), so the first step's `--metrics`
   belongs in `tools/mkstrike` or a tool of its own, reading `ttf.l0`.
+- 2026-10-28: a step added for Fonts, an app that previews the faces,
+  after kerning so it shows text as the interface will. It is named
+  `fontview` because `fonts`, the command that lists the cache, has
+  the name already.
