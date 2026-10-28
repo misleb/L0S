@@ -123,12 +123,22 @@ to `l0` are one namespace, and a duplicate is a compile error.
   window's, a bold heading, its lines, and its buttons sharing a row; the
   window beneath is mixed 30% with black, since nothing can blend, and
   takes no press until the dialog is answered.
-- **Text** is Source Code Pro in cells 8×16, so text is ASCII only, ellipsized with
-  `...`, bold is the bold face, and large text is scaled 2×. At the
-  desktop's scale 2 it is the same cells, 16×32 of the
-  screen's pixels, smooth, bold its own weight. The glyphs are the font
+- **Text** is the interface's in Source Sans 3, as GNOME's is in its
+  proportional face, each character as wide as its advance: every
+  widget's (labels, buttons, header bars, sidebars, alerts, the path
+  bar, toggles, tabs, menus, status pages, entries, the icon view and
+  the grid's cells, numbers too), and `wm`'s title bars, top bar,
+  launcher and L0S menu. Source Code Pro, in cells 8×16, is the
+  terminal's, `vt`'s, as GNOME Console's is, and `draw`'s `char`'s:
+  what must line up in columns. Text is ASCII only, ellipsized with
+  `...`, bold is the bold face, and large text is twice the line, 32.
+  Both are 16 rows a line, at one em, 5/6 of the line. At the
+  desktop's scale 2 the line is 32 of the screen's pixels, smooth,
+  bold its own weight. The glyphs are the font
   service's strikes, in pages every program shares and reads in place:
-  each glyph only as wide as its ink, placed in its cell by its box.
+  each glyph only as wide as its ink, placed from its pen by its box.
+  An entry or a value that must hold n characters of any kind is made
+  `ui_chars_w` wide, n of the face's widest.
   A width is `ui_text_w s font bold scale`, `font` a `UiFont`, `UiMono`
   or `UiSans`: the sum of the characters' advances in font units
   (`metrics.l0`), turned into the desktop's pixels once and rounded up,
@@ -161,7 +171,7 @@ to `l0` are one namespace, and a duplicate is a compile error.
   shadows.
 - Two faces, Source Code Pro and Source Sans 3, each regular and bold,
   ASCII only, at any height from 8 to 128 on request; the toolkit draws
-  only Source Code Pro, in its cells. Icons are
+  them at lines of 16 and 32. Icons are
   smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
   the build, never at run time. Icons and text scale by whole numbers. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.

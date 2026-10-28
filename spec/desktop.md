@@ -56,10 +56,15 @@ the top bar over them all; while the launcher is open, the desktop, the
 launcher under the bar, and the bar, the windows left out.
 
 The top bar is GNOME Shell's: 32 rows across the screen, black, with
-the **L0S menu**'s logo at its left, then **Applications**, then the name of the front window's app in
+the **L0S menu**'s logo at its left, then **Applications**, a button its
+label's width in Source Sans 3 (`bar_apps_w`, measured as the toolkit
+measures text) and 12 either side, then the name of the front window's app in
 white, or its title if its client is no app, and the date and time,
 bold, in its middle, as GNOME shows them by default (`Oct 15  22:42`,
-on a 24-hour clock). An app's name is its bundle's manifest's: `wm`
+on a 24-hour clock). All of the bar's text is in Source Sans 3, as are
+the title bars', the launcher's names and the L0S menu's, as GNOME
+Shell's are in its interface font; the clock's digits are tabular, so
+it does not move as the minutes change. An app's name is its bundle's manifest's: `wm`
 reads every manifest in `/Applications` as it starts, and again each
 time the launcher opens if `/` is a volume and the bundles in
 `/Applications` are not those it knows, and names a window by where its
@@ -227,7 +232,8 @@ On a screen of 2560×1440 or more, such as `make demo SCREEN=3840x2160`
 GNOME's scale factor does: laid out in pixels of its own, half the
 screen's each way, so a 4K screen is a desktop of 1920×1080, and drawn
 at the screen's own resolution, each of its pixels 2×2 of the screen's.
-Nothing is doubled: text is Source Code Pro, icons and the pointer are
+Nothing is doubled: text is Source Sans 3, and Source Code Pro in
+terminals, each glyph placed in the screen's own pixels; icons and the pointer are
 outlines, and corners are rounded at twice the radius, all with smooth
 edges. The boot argument `scale=1` or `scale=2` chooses instead.
 
@@ -243,7 +249,7 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   ([user/lib/ui/face.l0](../user/lib/ui/face.l0)): coverage, how much of
   each pixel a shape covers, 0 to 15. Each pixel is mixed with what is
   under it by that much, since layers do not blend.
-- **The glyphs** are Source Code Pro's TrueType outlines
+- **The glyphs** are Source Sans 3's and Source Code Pro's TrueType outlines
   ([user/lib/format/ttf.l0](../user/lib/format/ttf.l0)) rasterized
   ([user/lib/gfx/glyphs.l0](../user/lib/gfx/glyphs.l0), with
   `user/lib/gfx/raster.l0`), curves worked out in `float`s and rounded to

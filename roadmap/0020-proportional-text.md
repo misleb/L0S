@@ -60,7 +60,7 @@ host test of a layout run without one. That must stay so.
   lookup would need). If they do not, the grid's number, size and level
   cells, Monitor's columns and the top bar's clock stay `UiMono`;
   written into toolkit.md either way.
-- [ ] The interface in Source Sans 3: every widget's text is `UiSans`
+- [x] The interface in Source Sans 3: every widget's text is `UiSans`
   but what the step before kept mono, `vt` and `draw`'s `char`; `wm`'s
   title bars, top bar (`bar_apps_w` measured, not 120 by its cells),
   launcher names and menu; Files', Disks' and the gallery's own text.
@@ -160,3 +160,20 @@ host test of a layout run without one. That must stay so.
   level cells, Monitor's columns and the clock all move to Source Sans
   3 in step 4, and no `tnum` lookup is read. Written into toolkit.md's
   Text.
+- 2026-10-28: step 4. `ui_text_font` is `UiSans`, so every widget's
+  text, the grid's numbers too, and `wm`'s title bars, top bar
+  (`bar_apps_w` now 94, measured), launcher and L0S menu, are Source
+  Sans 3; `vt`'s cells and `draw`'s `char` name `UiMono`. Bold Source
+  Code Pro lost its extra pixel: bold is its face's own advances in both.
+  Widths reserved by counting cells: Files' name entry and Disks'
+  label entry and Mounted At are now `ui_chars_w`, n of the face's
+  widest advance (`@`, 847 units), which mkmetrics writes as
+  `ui_m_FACE_widest`, so any name of that length fits, as an entry does
+  not scroll; Disks' format dialog is 367 wide, not 340. The path bar's
+  separator is the slash's width, not a cell's. Pinned widths in the
+  toolkit's, Disks' and `wm`'s host tests recomputed from Source Sans
+  3's advances, each comment saying how; of the screen tests,
+  `widgets`, `procmon` and `resize` look at End Process, now 88 wide;
+  `launcher` and `launcher-install` at the bar's title, now from 126,
+  its pixels read from the strike's glyphs; `disks-create` at its
+  dialogs' buttons, the cards now 320 and 367 wide.

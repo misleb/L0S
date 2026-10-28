@@ -139,18 +139,19 @@ said() {
 # the free space 152 and scratch the rest, 150. So the free space is from
 # 554 to 706; the button under the bar from 239, 240, 34 high.
 #
-# Create Partition's card is 362 by 224, in the middle of the window's
-# 880 by 520, from 259, 148, and its content 24 in, from 283, 172: its
-# heading, a line, and from 228 its Size, the names' column 160 wide,
-# "Free Space Following", so the entry 120 wide from 455, 34 high; under
-# it the space left, and from 314 its buttons, each in a half of the 314
-# across, 12 apart: Create, 68 wide, from 487.
+# Create Partition's card is 320 by 224, the alert's least, in the
+# middle of the window's 880 by 520, from 280, 148, and its content 24
+# in, from 304, 172: its heading, a line, and from 228 its Size, the
+# names' column 119 wide, "Free Space Following" in Source Sans 3, so
+# the entry 120 wide from 435, 34 high; under it the space left, and
+# from 314 its buttons, each in a half of the 272 across, 12 apart:
+# Create, its label 37 and 10 either side, 57 wide, from 482.
 #
-# Format's card is 340 by 264, from 270, 128, its content from 294, 152:
+# Format's card is 367 by 264, from 256, 128, its content from 280, 152:
 # its heading and line, then from 208 its Type, the toggles L0FS and
 # FAT32, a button high, and 6 under them its Volume Name, the names'
-# column 88 wide, so the entry from 394, 248; its buttons from 334, each
-# in a half of 292: Format, 68 wide, from 482.
+# column 79 wide, so the entry from 371, 248; its buttons from 334, each
+# in a half of 319: Format, 61 wide, from 491.
 #
 # On a card's 363636 the entry's ring, the accent at half, is 54 93 141,
 # as is a suggested button faded.
@@ -166,7 +167,7 @@ segy=$((cy + 172))
 data_x=$((cx + 420)); free_x=$((cx + 630))
 button_x=$((cx + 280)); button_y=$((cy + 257))
 # Each dialog's button, 4 in, before its label, which is 10 in.
-create_x=$((cx + 491)); format_x=$((cx + 486)); ok_y=$((cy + 331)); fmt_y=$((cy + 351))
+create_x=$((cx + 486)); format_x=$((cx + 495)); ok_y=$((cy + 331)); fmt_y=$((cy + 351))
 
 shows "data selected, the free space after it" "$data_x $segy $accent" "$free_x $segy $ground"
 

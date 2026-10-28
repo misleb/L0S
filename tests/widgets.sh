@@ -103,8 +103,9 @@ shows() {
 
 # The window's content starts under its 46-row header bar, 2 in from its
 # left, inside the frame's border. In it: the
-# toolbar, 46 rows, its End Process button 108 wide at its right end, 6
-# in; a line; then the grid, its header 32 rows, the last its line, and
+# toolbar, 46 rows, its End Process button at its right end, 6 in, its
+# label 68 wide in Source Sans 3 and 10 either side, 88, so from 546 and
+# its label from 556; a line; then the grid, its header 32 rows, the last its line, and
 # its rows, 30 each, sorted by pid. A row's Name column runs from 70 to
 # 300, its text at its start.
 bar=46
@@ -118,7 +119,7 @@ cx=$((w_x + 2)); cy=$((w_y + bar))
 
 shows "its header bar" "$((w_x + 6)) $((w_y + 6)) $headerbar"
 shows "the toolbar, the grid's header, End Process faded" \
-  "$((cx + 100)) $((cy + 3)) $ground" "$((cx + 5)) $((cy + 78)) $line" "$((cx + 530)) $((cy + 22)) $faded"
+  "$((cx + 100)) $((cy + 3)) $ground" "$((cx + 5)) $((cy + 78)) $line" "$((cx + 550)) $((cy + 22)) $faded"
 
 # The second row, pid 2, its Name column past its text.
 rx=$((cx + 240)); ry=$((cy + 79 + 30 + 15))
@@ -126,7 +127,7 @@ events "$(at $rx $ry)"; sleep 1
 events "$(button true)"; sleep 1
 events "$(button false)"; sleep 1
 shows "a click selected the second row, and End Process woke" \
-  "$rx $((cy + 79 + 30 + 1)) $selected" "$((cx + 530)) $((cy + 22)) $red"
+  "$rx $((cy + 79 + 30 + 1)) $selected" "$((cx + 550)) $((cy + 22)) $red"
 
 # The tab bar, the content's last 40 rows, from 400: the header bar's
 # ground, 303030, and three tabs 34 high from 403, sharing its 640, 6 in
