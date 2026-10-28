@@ -26,6 +26,23 @@ The reply is `ok`, `display W H cursor scale S` for `info`, or
 `error: WHY`. The driver counts the screen's own pixels; once `info` has
 said the scale, the client side, `display.l0`, counts the desktop's, and
 makes every place, rectangle, top row and radius the screen's on the way.
+A buffer's ID is from 0 to 1,000,000.
+
+**The first frame is the wallpaper.** As soon as its mode is set, a
+driver registers `display`, so that a client finds it at once and its
+first request waits on the port, and reads the wallpaper (`render.l0`'s
+`wallpaper_load`: `/etc/wallpaper.qoi`, or at scale 2
+`/etc/wallpaper2x.qoi`), draws it into pages of its own the screen's
+size, centered and cut to fit on its corner's color, as `wm` draws its
+desktop, and shows that buffer, ID 1,000,001, as the only layer. Every
+`layers` puts it under the client's, so what they leave uncovered is
+wallpaper, until a client's layer covers the whole screen, square: then
+it leaves the stack for good, and its pages are given up. `wm`'s first
+`layers` has its desktop, the same image, so the screen goes from the
+driver's wallpaper to the desktop with nothing black between. A missing
+or unreadable wallpaper is said once on standard error, and the first
+frame is black. Neither waits for sound, nor sound for it
+([Sound](sound.md)).
 
 ## virtio-gpu
 
@@ -221,6 +238,18 @@ Scaler (SCALER6), so no pixel is copied:
    rows are cleaned, and back to 0xff where a new `TOP` or shape no
    longer cuts. A rounded layer still hides what is under it between its
    corners, and is still cut to what shows of it.
+8. **The first frame is the wallpaper**, as in the protocol above: once
+   the channel is on the driver's list and the IOMMU is on, `hvs`
+   registers `display`, draws the wallpaper into `shm_alloc`'s pages of
+   its own, the screen's size (8 MB at 1920×1080, 33 MB at 3840×2160),
+   through a region it closes at once, so that it keeps none of the 64
+   open, and maps them in the aperture as a client's buffer is, cleaned
+   out of the caches. That buffer is one plane, under every client's
+   layers, over the black background, until a client's layer covers
+   the screen. Then the list without it is shown, two frames are waited
+   for, so that the channel fetches nothing from it, and its place in
+   the aperture is cleared and its pages unmapped. Not yet seen on a
+   board.
 
 **Not yet:** the HVS's end-of-frame interrupts are not taken.
 
@@ -262,6 +291,15 @@ of them could be confirmed from Linux's source:
 
 ## Limits
 
+- **The wallpaper is drawn at two sizes**, 1920×1080 and 3840×2160, at
+  the build. A screen of another size shows the one its scale picks,
+  centered and cut, or on its corner's color where the screen is the
+  larger: never scaled. Until it leaves the stack it holds the screen's
+  size in pages, 4 MB at 1280×800, 8 MB at 1920×1080, 33 MB at 4K, and
+  reading and drawing it delays the answer to the first request: about
+  0.1 s of decoding at 1920×1080 on this host's CPU, and some seconds
+  on QEMU's at 4K, where `tests/hidpi.sh` sees the desktop after 8 s
+  where it saw it after 4.
 - **A screen's backing is at most 15,870 runs**, what the virtio-gpu's
   control queue of 64 entries can carry in one request. A 4K desktop
   whose pages are all apart, with a 1280×800 window over it, at scale 2,

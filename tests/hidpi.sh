@@ -93,8 +93,10 @@ colors() {
 
 boot ""
 
-# 1, 2. The wallpaper's ground, 12 28 38 at 70%, and the bar over it.
-shows "a 4K screen, its bar 64 rows" "0 0 0 0 0" "3839 63 0 0 0" "0 64 8 19 26" "3839 2159 8 19 26"
+# 1, 2. The wallpaper drawn at 3840 by 2160 (build/wallpaper2x.qoi),
+# its grid's line down column 0, 20 32 43 at 0, 64, and the sky at its
+# foot, 36 31 49; and the bar over it.
+shows "a 4K screen, its bar 64 rows" "0 0 0 0 0" "3839 63 0 0 0" "0 64 20 32 43" "3839 2159 36 31 49"
 
 # 3.
 printf 'run draw size\n' >&3
@@ -151,7 +153,7 @@ fi
 cp "$dump" "$BUILD/hidpi-2x.ppm"
 stop
 
-# The same screen at scale=1: its bar 32 rows, the wallpaper's ground
-# just below.
+# The same screen at scale=1: its bar 32 rows, and just below it the
+# 1920 by 1080 wallpaper's ground around it, its corner's 12 28 38.
 boot "scale=1"
-shows "scale=1 at 4K, its bar 32 rows" "3839 31 0 0 0" "3839 32 8 19 26"
+shows "scale=1 at 4K, its bar 32 rows" "3839 31 0 0 0" "3839 32 12 28 38"

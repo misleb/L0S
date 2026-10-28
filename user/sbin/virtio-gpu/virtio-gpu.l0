@@ -665,10 +665,100 @@
 (def scanned_out ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
   (match (send g "set_scanout" (set_scanout w h) (resp_ok_nodata))
     ((NotCommanded why) (complain why))
-    ((Commanded g2)
-      (match (present g2 w h (Rect 0 0 w h))
+    ((Commanded g2) (start_serving (Drv g2 c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))))
+
+; The screen's first frame, as soon as its mode is set: the wallpaper,
+; stacked alone, if there is one; else black. Then display served on
+; port.
+(def first_frame ((v Drv) (port int)) int
+  (match v
+    ((Drv g c w h bufs layers attached cur zero rows)
+      (match (wall_buffer w h (scale_of w h (boot_args)))
+        ((None) (black_frame v port))
+        ((Some b)
+          (match (restacked v (wall_under (nil Layer) true) (map_put bufs (wall_id) b))
+            ((Served v2 reply)
+              (if (eq reply "ok")
+                  (serving v2 port)
+                  (let k (warn_as "virtio-gpu" (append "the wallpaper not shown: " reply))
+                    (serving v2 port))))))))))
+
+; The screen black, the zero page over and over, shown; then served.
+(def black_frame ((v Drv) (port int)) int
+  (match v
+    ((Drv g c w h bufs layers attached cur zero rows)
+      (match (present g w h (Rect 0 0 w h))
         ((NotCommanded why) (complain why))
-        ((Commanded g3) (start_serving (Drv g3 c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))))))
+        ((Commanded g2) (serving (Drv g2 c w h bufs layers attached cur zero rows) port))))))
+
+; ------------------------------------------------------------- wallpaper
+
+; The wallpaper at scale s drawn into w by h pixels of pages of the
+; driver's own, centered and cut as wm draws it, as a buffer the device
+; reaches; or none, said once on standard error, if it cannot be read
+; or there is no memory for it. Its region is closed once drawn, so it
+; holds none of the 64, but its pages stay until it leaves the stack.
+(def wall_buffer ((w int) (h int) (s int)) (Option Buffer)
+  (match (wallpaper_load s 100)
+    ((BgBad why) (wall_none why))
+    ((BgOk bg) (wall_drawn bg w h (pages_for (mul (mul w h) 4))))))
+
+; No wallpaper, for why: said on standard error.
+(def wall_none ((why (list int))) (Option Buffer)
+  (let k (warn_as "virtio-gpu" (append "no wallpaper: " why)) ((None Buffer))))
+
+; The background bg painted on n new pages, w by h.
+(def wall_drawn ((bg Background) (w int) (h int) (n int)) (Option Buffer)
+  (match (shm_region n "the wallpaper")
+    ((NoShmRegion why) (wall_none why))
+    ((ShmRegion va r)
+      (let f (paint_background (Canvas r w h 0) bg)
+        (let k (close_device r)
+          (match (page_addresses va n)
+            ((None) (wall_none "its pages are not the device's"))
+            ((Some addrs) (Some (buffer_plain w h addrs va (square))))))))))
+
+; Whether one of ls, a client's layers, covers the screen w by h whole,
+; square-cornered, so that nothing under it shows.
+(def screen_covered ((ls (list Layer)) (bufs (Map int Buffer)) (w int) (h int)) bool
+  (if (is_empty ls)
+      false
+      (if (layer_covering (head ls) bufs w h) true (screen_covered (tail ls) bufs w h))))
+
+; Whether layer l, a client's, covers the screen w by h whole.
+(def layer_covering ((l Layer) (bufs (Map int Buffer)) (w int) (h int)) bool
+  (match l
+    ((Layer id x y top)
+      (if (eq id (wall_id))
+          false
+          (match (map_get bufs id)
+            ((None) false)
+            ((Some b) (match b ((Buffer bw bh sd addrs va cs) (layer_covers x y bw bh (eq cs (square)) w h)))))))))
+
+; Whether the wallpaper is still on the stack: its buffer is kept.
+(def wall_shown ((bufs (Map int Buffer))) bool (map_has bufs (wall_id)))
+
+; The stack for a client's layers ls: the wallpaper under them while it
+; is shown and nothing of theirs covers the screen.
+(def wall_kept ((ls (list Layer)) (bufs (Map int Buffer)) (w int) (h int)) bool
+  (if (wall_shown bufs) (not (screen_covered ls bufs w h)) false))
+
+; After a restack r that left the wallpaper off the stack, its buffer
+; dropped and its pages given up; r as it is if it failed or kept it.
+(def wall_dropped ((r (Served Drv))) (Served Drv)
+  (match r
+    ((Served v reply)
+      (match v
+        ((Drv g c w h bufs layers attached cur zero rows)
+          (if (if (eq reply "ok") (not (in_layers layers (wall_id))) false)
+              (match (map_get bufs (wall_id))
+                ((None) r)
+                ((Some b)
+                  (match b
+                    ((Buffer bw bh sd addrs va cs)
+                      (let u (shm_unmap_count va (array_len addrs))
+                        (Served (Drv g c w h (map_remove bufs (wall_id)) layers attached cur zero rows) reply))))))
+              r))))))
 
 ; The pointer: whether its image is set, where it is, its hot spot, and
 ; the buffer its image is, -1 for none.
@@ -682,15 +772,21 @@
 
 ; ------------------------------------------------------------- serving
 
-; Registers as display, then answers each request, as display.l0 makes
-; them: ok, display W H cursor scale S, or error: WHY.
+; Registers as display, so that a client finds it at once, shows the
+; first frame while what the client asks waits on the port, then
+; answers each request, as display.l0 makes them: ok, display W H
+; cursor scale S, or error: WHY.
 (def start_serving ((v Drv)) int
   (let port (port_new)
     (let r (name_register_or_why port "display")
       (if (is_empty r)
-          (let n (screen_said v false)
-            (serve v port))
+          (first_frame v port)
           (complain r)))))
+
+; Says the screen, then serves it on port.
+(def serving ((v Drv) (port int)) int
+  (let n (screen_said v false)
+    (serve v port)))
 
 ; The screen_line for v, said as the driver starts serving it; host is
 ; whether the host's GPU composes it (gl.l0); 0.
@@ -741,9 +837,11 @@
 (def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
   (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
       (served_error v "a buffer has no pixels, or its stride is less than its width")
-      (match (page_addresses va (buffer_shared_pages sd bh pages))
-        ((None) (served_error v "the buffer is not shared with the display"))
-        ((Some addrs) (put_buffer v id (Buffer bw bh sd addrs va (square)))))))
+      (if (not (buffer_id_ok id))
+          (served_error v "a buffer's id is from 0 to 1000000")
+          (match (page_addresses va (buffer_shared_pages sd bh pages))
+            ((None) (served_error v "the buffer is not shared with the display"))
+            ((Some addrs) (put_buffer v id (Buffer bw bh sd addrs va (square))))))))
 
 ; Whether a buffer of bufs other than id is at va: another view of the
 ; same pages, as a buffer remade at another size is while the old one
@@ -802,10 +900,12 @@
 (def cursor_buffer ((cur Cursor)) int
   (match cur ((Cursor set px py hx hy id) id)))
 
-; layers ID X Y TOP ...: the screen rebuilt from new layers.
+; layers ID X Y TOP ...: the screen rebuilt from new layers, the
+; wallpaper under them until one covers the screen, when it leaves.
 (def stacked ((v Drv) (ls (list Layer)) ) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows) (restacked v ls bufs))))
+    ((Drv g c w h bufs layers attached cur zero rows)
+      (wall_dropped (restacked v (wall_under ls (wall_kept ls bufs w h)) bufs)))))
 
 ; The screen rebuilt from layers ls over buffers nbufs: its backing
 ; detached, the new one attached, and what that changed shown; all of it

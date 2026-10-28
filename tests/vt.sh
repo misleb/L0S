@@ -131,7 +131,8 @@ windows() {
     from=$(($(wc -c < "$out") + 1))
     printf 'run windows\n' >&3
     sleep 1
-    lines=$(tail -c +$from "$out" | grep -aE '^[0-9]+ vt[0-9] ')
+    # A prompt may come before a line, when the board is slow to answer.
+    lines=$(tail -c +$from "$out" | sed 's/^l0s> //' | grep -aE '^[0-9]+ vt[0-9] ')
     if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$n" ]; then
       [ "$n" = 0 ] && return 0
       read -r _ f_title f_x f_y f_w f_h f_front <<< "$(printf '%s\n' "$lines" | sed -n 1p)"

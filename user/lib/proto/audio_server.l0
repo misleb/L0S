@@ -3,7 +3,7 @@
 ; whatever its hardware does with the samples. audio.l0 is the client's
 ; side and says what each request means, and its replies are built
 ; there. Linked into hdmi-audio, by the Makefile's AUDIO_SERVER, with
-; audio.l0.
+; audio.l0 and wav.l0, for the chime every driver plays as it starts.
 ;
 ; A driver plays from a ring of periods its device reads cyclically,
 ; each period frames long, and is told, by an interrupt or by asking the
@@ -119,3 +119,84 @@
   (if (eq chans 1)
       (device_read16 m (mul 2 i))
       (device_read16 m (add (mul 4 i) (mul 2 ch)))))
+
+; Where a driver's frames come from: a client's pages, opened for a
+; play; or a file's bytes, frame 0 at byte at, as the chime's are.
+(data AudioSource (AudioPages IoDevice) (AudioBytes bytes int))
+
+; Sample ch of frame i of chans channels from src, read in place, as
+; audio_sample_at reads a client's.
+(def audio_source_sample ((src AudioSource) (i int) (chans int) (ch int)) int
+  (match src
+    ((AudioPages m) (audio_sample_at m i chans ch))
+    ((AudioBytes b at) (le_u16_at b (add at (if (eq chans 1) (mul 2 i) (add (mul 4 i) (mul 2 ch))))))))
+
+; ------------------------------------------------------------------ chime
+
+; Every sound driver plays /etc/chime.wav once, as soon as it serves
+; audio, as a client would play it: at the file's rate, its frames
+; written into the ring as there is room, again as each period ends,
+; until all are. It waits for nothing else, the screen least of all. A
+; client's start or play stops it there, and the client has the ring
+; from then on, what the chime wrote playing out ahead of it. Boot
+; argument chime=off plays none; a missing or unplayable file is said
+; once, and the driver serves all the same.
+
+; The chime still to play: its file's bytes, its rate and channels, the
+; byte its next frame starts at, and where its samples end; or none.
+(data AudioChime (AudioChime bytes int int int int) (ChimeDone))
+
+; The chime's file.
+(def audio_chime_path () (list int) "/etc/chime.wav")
+
+; Whether boot arguments args let the chime play: all but chime=off.
+(def audio_chime_wanted ((args (list (list int)))) bool
+  (not (any_eq "chime=off" args)))
+
+; The chime in b, a WAV file's bytes, if a driver plays its rate; or
+; why not.
+(def audio_chime_of ((b bytes)) (Result AudioChime (list int))
+  (match (parse_wav b)
+    ((WavBad why) ((Err AudioChime (list int)) why))
+    ((Wav rate chans s e)
+      (if (audio_rate_ok rate)
+          ((Ok AudioChime (list int)) (if (ge s e) (ChimeDone) (AudioChime b rate chans s e)))
+          ((Err AudioChime (list int)) (append "a WAV file at " (append (digits rate) (append " Hz; the driver plays " (audio_rates)))))))))
+
+; The chime driver name starts with: /etc/chime.wav, unless boot
+; argument chime=off; none if it is missing or cannot be played, which
+; is said once.
+(def audio_chime_load ((name (list int))) AudioChime
+  (if (not (audio_chime_wanted (boot_args)))
+      (ChimeDone)
+      (match (read_whole (audio_chime_path))
+        ((Err why) (audio_chime_none name why))
+        ((Ok b)
+          (match (audio_chime_of b)
+            ((Err why) (audio_chime_none name why))
+            ((Ok c) c))))))
+
+; No chime, for why, said as driver name: none.
+(def audio_chime_none ((name (list int)) (why (list int))) AudioChime
+  (let w (warn_as name (append "no chime: " (append (audio_chime_path) (append ": " why))))
+    (ChimeDone)))
+
+; The rate the chime plays at, or 0 once there is none.
+(def audio_chime_rate ((c AudioChime)) int
+  (match c ((AudioChime b rate chans s e) rate) ((ChimeDone) 0)))
+
+; What the chime gives a ring now: where its frames come from, their
+; channels, how many to write at the ring's ring_next, and the chime
+; after them.
+(data ChimeFeed (ChimeFeed AudioSource int int AudioChime))
+
+; The chime's next frames for ring r: as many as it has room for, as a
+; client's play would have written.
+(def audio_chime_feed ((c AudioChime) (r AudioRing)) ChimeFeed
+  (match c
+    ((ChimeDone) (ChimeFeed (AudioBytes (bytes_from_list "") 0) 2 0 (ChimeDone)))
+    ((AudioChime b rate chans s e)
+      (let fb (mul 2 chans)
+        (let k (min (div (sub e s) fb) (ring_room r))
+          (let s2 (add s (mul k fb))
+            (ChimeFeed (AudioBytes b s) chans k (if (ge s2 e) (ChimeDone) (AudioChime b rate chans s2 e)))))))))

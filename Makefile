@@ -20,7 +20,7 @@
 #                    the mouse moves relatively, so a click in QEMU's
 #                    window grabs the host's pointer, and Ctrl-Alt-G
 #                    (Ctrl-Option-G on macOS) lets it go
-#   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
+#   make demo WALLPAPER_SVG=picture.svg the same, another wallpaper
 #   make demo NET=user,tftp=DIR         the same, the network's gateway
 #                    serving DIR over TFTP, for tftp 10.0.2.2 FILE
 #   make demo ROOT_UUID=UUID            the same, booted with root=UUID:
@@ -175,8 +175,9 @@ PATHS  := user/lib/format/uuid.l0 user/lib/proto/fs.l0 user/lib/sys/paths.l0
 # toolkit. The protocols name rectangles with rect.l0's Rect, so DISPLAY
 # and WMLIB need RECT, which RENDER holds.
 PPM     := user/lib/format/ppm.l0
+QOI     := user/lib/format/qoi.l0
 RECT    := user/lib/gfx/rect.l0
-RENDER  := $(PPM) $(RECT) user/lib/gfx/render.l0
+RENDER  := $(PPM) $(QOI) $(RECT) user/lib/gfx/render.l0
 # Outlines to coverage, and SVG read into them: XML, path data, and the
 # document, which need RENDER's points; linked by the host tools that
 # draw icons at build time.
@@ -196,8 +197,8 @@ CLOCK   := user/lib/proto/clock.l0
 DISKLIB := user/lib/proto/disk.l0
 # Sound: the audio protocol, its server's side, and WAV files.
 AUDIOLIB := user/lib/proto/audio.l0
-AUDIO_SERVER := $(AUDIOLIB) user/lib/proto/audio_server.l0
 WAV     := user/lib/format/wav.l0
+AUDIO_SERVER := $(AUDIOLIB) $(WAV) user/lib/proto/audio_server.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
 # The font service's protocol: its faces, and strikes shared with the
@@ -313,6 +314,7 @@ L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
 MKFS     := $(COMMON) $(CLI) $(PARTS) $(FAT) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
 MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
+MKWALLPAPER := $(ULIB) $(RENDER) $(SVG) tools/mkwallpaper/mkwallpaper.l0
 MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
 MKSTRIKE := $(ULIB) $(RENDER) $(GLYPHS) tools/mkstrike/mkstrike.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
@@ -381,6 +383,7 @@ $(call l0_check,$(MKICON) tools/mkicon/main.l0)
 $(call l0_check,$(MKFONT) tools/mkfont/main.l0)
 $(call l0_check,$(MKSTRIKE) tools/mkstrike/main.l0)
 $(call l0_check,$(MKICONS) tools/mkicons/main.l0)
+$(call l0_check,$(MKWALLPAPER) tools/mkwallpaper/main.l0)
 
 # That every form is documented, but those DOC_GAPS lists.
 $(BUILD)/check/doc.ok: $(BUILD)/l0sdoc $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
@@ -455,6 +458,7 @@ $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)
 $(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
+$(call l0_test,$(BASE) $(PPM) $(QOI) user/lib/format/qoi_test.l0)
 $(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)
 $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
@@ -465,6 +469,7 @@ $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
 $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
 $(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
+$(call l0_test,$(MKWALLPAPER) tools/mkwallpaper/mkwallpaper_test.l0)
 $(foreach t,shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
 $(call l0_test,$(MKSTRIKE) tools/mkstrike/mkstrike_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(TTF) user/lib/format/ttf_test.l0)
@@ -541,6 +546,23 @@ $(BUILD)/mkfs: $(MKFS) tools/mkfs/main.l0 | $(BUILD)
 
 $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 	$(L0) build $(MKICON) tools/mkicon/main.l0 -o $@
+
+# The wallpaper, branding/wallpaper-dark.svg drawn as QOI by
+# tools/mkwallpaper at 1920 by 1080, and at 3840 by 2160 for a 4K
+# screen: /etc/wallpaper.qoi and /etc/wallpaper2x.qoi, which the
+# display drivers show first and wm draws its desktop on. make demo
+# WALLPAPER_SVG=picture.svg draws another.
+WALLPAPER_SVG ?= branding/wallpaper-dark.svg
+WALLPAPERS := $(BUILD)/wallpaper.qoi $(BUILD)/wallpaper2x.qoi
+
+$(BUILD)/mkwallpaper: $(MKWALLPAPER) tools/mkwallpaper/main.l0 | $(BUILD)
+	$(L0) build $(MKWALLPAPER) tools/mkwallpaper/main.l0 -o $@
+
+$(BUILD)/wallpaper.qoi: $(WALLPAPER_SVG) $(BUILD)/mkwallpaper
+	$(BUILD)/mkwallpaper $< 1920 1080 $@.tmp && mv $@.tmp $@
+
+$(BUILD)/wallpaper2x.qoi: $(WALLPAPER_SVG) $(BUILD)/mkwallpaper
+	$(BUILD)/mkwallpaper $< 3840 2160 $@.tmp && mv $@.tmp $@
 
 # The face the desktop draws the pointer with, /etc/face:
 # fonts/cursors.paths, rasterized.
@@ -668,7 +690,9 @@ ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE) $(IMAGE_FACES) $(ETC_FONT
 stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
             && mkdir -p $(1)/fonts && cp $(ETC_FONTS) $(STRIKES) $(1)/fonts/ \
             && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/ \
-            $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm)
+            $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm) \
+            && cp $(WALLPAPERS) $(1)/
+ETC_DEPS += $(WALLPAPERS)
 
 initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc

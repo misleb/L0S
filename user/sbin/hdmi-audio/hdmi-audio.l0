@@ -197,7 +197,8 @@
                   (complain why)
                   (serve_from hw)))))))))
 
-; audio registered, the interrupt bound, and the loop run.
+; audio registered, the interrupt bound, the chime started as the ring
+; runs, and the loop run.
 (def serve_from ((hw Hw)) int
   (let port (port_new)
     (let r (name_register_or_why port (audio_name))
@@ -207,7 +208,7 @@
             (if (not (is_empty b))
                 (complain b)
                 (let s (said (audio_line hw (first_rate)))
-                  (serve port (Drv hw (fresh_ring) (first_rate))))))))))
+                  (serve port (chime_started (Drv hw (fresh_ring) (first_rate) (audio_chime_load "hdmi-audio")))))))))))
 
 ; What it says once serving.
 (def audio_line ((hw Hw) (rate int)) (list int)
@@ -331,13 +332,13 @@
           (let a (device_write32 rm off (iec_subframe left 0 k rate))
             (device_write32 rm (add off 4) (iec_subframe right 1 k rate))))))))
 
-; n of the client's frames of chans channels in m, from its i on,
-; written from frame f on: 0.
-(def frames_put ((hw Hw) (r AudioRing) (m IoDevice) (i int) (chans int) (f int) (n int) (rate int)) int
+; n frames of chans channels from src, a client's pages or the chime's
+; bytes, from its i on, written from frame f on: 0.
+(def frames_put ((hw Hw) (r AudioRing) (src AudioSource) (i int) (chans int) (f int) (n int) (rate int)) int
   (if (le n 0)
       0
-      (let w (frame_put hw r f (audio_sample_at m i chans 0) (audio_sample_at m i chans 1) rate)
-        (frames_put hw r m (add i 1) chans (add f 1) (sub n 1) rate))))
+      (let w (frame_put hw r f (audio_source_sample src i chans 0) (audio_source_sample src i chans 1) rate)
+        (frames_put hw r src (add i 1) chans (add f 1) (sub n 1) rate))))
 
 ; The ring's pages cleaned for the channel: 0.
 (def ring_synced ((hw Hw)) int
@@ -345,17 +346,19 @@
 
 ; ---------------------------------------------------------------- serving
 
-; The driver: its hardware, its ring, and the rate it plays at.
-(data Drv (Drv Hw AudioRing int))
+; The driver: its hardware, its ring, the rate it plays at, and the
+; chime still to play (audio_server.l0), none once a client has asked.
+(data Drv (Drv Hw AudioRing int AudioChime))
 
-; Each message on port: the channel's interrupt, or a request.
+; Each message on port: the channel's interrupt, after which the chime
+; goes on into the room it made, or a request.
 (def serve ((port int) (v Drv)) int
   (let m (port_receive port)
     (match m
       ((RecvFailed) (complain "lost its port"))
       ((Message from b)
         (if (is_irq_notice m (dma_ch6_irq))
-            (serve port (period_ended v))
+            (serve port (chime_fed (period_ended v)))
             (match (handle v (msg_text_from b 4))
               ((Served v2 answer) (let a (msg_answer b answer) (serve port v2)))))))))
 
@@ -363,7 +366,7 @@
 ; since silenced for its next turn, and the interrupt ended.
 (def period_ended ((v Drv)) Drv
   (match v
-    ((Drv hw r rate)
+    ((Drv hw r rate chime)
       (match hw
         ((Hw ch run hd va rm at cva cm cbs d0 hz)
           (let a (device_write32 ch (dma_cs) (cs_ack))
@@ -371,7 +374,7 @@
               (let r2 (if (lt now 0) r (periods_reused hw r (ring_ended r now) rate))
                 (let s (ring_synced hw)
                   (let e (irq_ack (dma_ch6_irq))
-                    (Drv hw r2 rate)))))))))))
+                    (Drv hw r2 rate chime)))))))))))
 
 ; r after n periods ended, each silenced for its next turn.
 (def periods_reused ((hw Hw) (r AudioRing) (n int) (rate int)) AudioRing
@@ -380,39 +383,74 @@
       (let s (silenced hw r (ring_reused r) (ring_period r) rate)
         (periods_reused hw (ring_advanced r) (sub n 1) rate))))
 
-; A request's answer, and v after it.
+; A request's answer, and v after it. A start or a play ends the chime:
+; the client has the ring from there.
 (def handle ((v Drv) (body (list int))) (Served Drv)
   (match v
-    ((Drv hw r rate)
+    ((Drv hw r rate chime)
       (match (audio_ask_of body)
         ((AskInfo) (Served v (audio_info_reply rate (ring_queued r) (ring_room r))))
-        ((AskStart new) (restarted v new))
-        ((AskPlay va n chans) (played v va n chans))
+        ((AskStart new) (restarted (Drv hw r rate (ChimeDone)) new))
+        ((AskPlay va n chans) (played (Drv hw r rate (ChimeDone)) va n chans))
         ((AskRefused why) (served_error v why))))))
 
 ; start RATE: ok at once if it plays at rate; else the channel stopped,
 ; the MAI set up again for rate and the ring started anew, silent.
 (def restarted ((v Drv) (rate int)) (Served Drv)
   (match v
-    ((Drv hw r old)
+    ((Drv hw r old chime)
       (if (eq rate old)
           (served_ok v)
           (let s (match hw ((Hw ch run hd va rm at cva cm cbs d0 hz) (dma_stopped ch)))
             (let why (playing hw rate)
               (if (is_empty why)
-                  (served_ok (Drv hw (fresh_ring) rate))
-                  (served_error (Drv hw (fresh_ring) old) why))))))))
+                  (served_ok (Drv hw (fresh_ring) rate chime))
+                  (served_error (Drv hw (fresh_ring) old chime) why))))))))
 
 ; play VA FRAMES CHANS: as many frames as there is room for taken from
 ; the client's pages at va, opened for it and closed after.
 (def played ((v Drv) (va int) (n int) (chans int)) (Served Drv)
   (match v
-    ((Drv hw r rate)
+    ((Drv hw r rate chime)
       (match (dma_open va (audio_play_pages n chans))
         ((DeviceFailed f why) (served_error v "the samples are not shared with the audio driver"))
         ((DeviceOpened m)
           (let k (min n (ring_room r))
-            (let w (frames_put hw r m 0 chans (ring_next r) k rate)
+            (let w (frames_put hw r (AudioPages m) 0 chans (ring_next r) k rate)
               (let c (close_device m)
                 (let s (ring_synced hw)
-                  (Served (Drv hw (ring_wrote r k) rate) (audio_played_reply k)))))))))))
+                  (Served (Drv hw (ring_wrote r k) rate chime) (audio_played_reply k)))))))))))
+
+; ------------------------------------------------------------------ chime
+
+; The chime (audio_server.l0) started as a client's start and play
+; would be: the driver set to its rate, if it plays another, then its
+; first frames written. A rate it cannot be set to is said, and no
+; chime plays.
+(def chime_started ((v Drv)) Drv
+  (match v
+    ((Drv hw r rate chime)
+      (let cr (audio_chime_rate chime)
+        (if (if (eq cr 0) true (eq cr rate))
+            (chime_fed v)
+            (match (restarted v cr)
+              ((Served v2 reply)
+                (if (eq reply "ok")
+                    (chime_fed v2)
+                    (match v2
+                      ((Drv hw2 r2 rate2 c2)
+                        (let w (warn_as "hdmi-audio" (append "no chime: " reply))
+                          (Drv hw2 r2 rate2 (ChimeDone)))))))))))))
+
+; The chime's next frames written ahead of the period playing, as many
+; as the ring has room for, as a client's play writes them: v after.
+(def chime_fed ((v Drv)) Drv
+  (match v
+    ((Drv hw r rate chime)
+      (match (audio_chime_feed chime r)
+        ((ChimeFeed src chans k rest)
+          (if (eq k 0)
+              (Drv hw r rate rest)
+              (let w (frames_put hw r src 0 chans (ring_next r) k rate)
+                (let s (ring_synced hw)
+                  (Drv hw (ring_wrote r k) rate rest)))))))))

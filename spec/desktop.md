@@ -262,6 +262,13 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   16, 32, 48, 64, 96 and 128. `make icon-sheet` draws them all into
   `build/icon-sheet.ppm` to look at. A new icon is its SVG copied there
   and its name in `icons.l0`'s `ui_icon_names`.
+- **[tools/mkwallpaper](../tools/mkwallpaper/mkwallpaper.l0)** makes
+  the wallpaper: [branding/wallpaper-dark.svg](../branding/wallpaper-dark.svg)
+  drawn by the SVG library, opaque, at 1920×1080 into
+  `/etc/wallpaper.qoi` and at 3840×2160 into `/etc/wallpaper2x.qoi`, as
+  QOI ([user/lib/format/qoi.l0](../user/lib/format/qoi.l0)): 232 KB and
+  530 KB, where PPMs would be 6 MB and 25 MB, more than the initramfs
+  has room for. Every target's initramfs carries both.
 - **Full-color icons**, as Nautilus and GNOME Disks show things, are
   Adwaita's SVGs under `icons/adwaita/scalable`: folder,
   text-x-generic, application-x-executable, drive-harddisk,

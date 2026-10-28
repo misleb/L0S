@@ -117,10 +117,11 @@ shows() {
 # square at 820, 108, GNOME Console's (its icon.svg): its screen, 241f31,
 # holds 852, 138,
 # 32 in and 30 down, below its prompt.
-# The desktop's wallpaper at 0, 32 is 8 19 26, as gpu-screen.sh pins it.
+# The desktop's wallpaper at 0, 32 is 15 26 39, as gpu-screen.sh pins it.
 # The front window's app's name starts at 152, 8 down: T's crossbar is
 # lit along row 2 of its glyph, from column 0, so 153, 10 is white.
-pill="64 64 64"; page="36 36 36"; screen="36 31 49"; desk="8 19 26"
+pill="64 64 64"; page="36 36 36"; screen="36 31 49"
+desk="15 26 39"
 headerbar="48 48 48"; ink="255 255 255"
 
 waits_for "^l0s> "

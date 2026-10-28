@@ -214,24 +214,30 @@ file has a virtio-blk, and only one with a `net` file a virtio-net.
 [tests/screen/etc](../tests/screen/etc/inittab), the demo's without its
 windows, which would cover the wallpaper, with QEMU's monitor on a socket
 and the serial line on a FIFO. It checks pixels of a `screendump` at each
-step, all of them from the compositor's desktop buffer, composed by the
-host:
-- the wallpaper: the corner, its ground color, and a pixel of the L of
-  "L0S", where centering on a 1280×800 screen puts it, both at 70%;
+step, composed by the host:
+- first, booted from a copy of that initramfs with no `wm`, the
+  display driver's own first frame: the wallpaper, where the top bar
+  will be and on the L of "L0S";
+- then, booted as it is, the compositor's desktop buffer: the
+  wallpaper, the sky just under the bar and the same pixel of the L,
+  where centering `build/wallpaper.qoi` on a 1280×800 screen puts them,
+  at full brightness;
 - after typing `run draw line 0 32 1279 799 red`, both of the line's ends;
 - after typing `run draw circle 640 400 300 cyan`, its left and right
   edges.
 
 [tests/hidpi.sh](../tests/hidpi.sh) boots the same on a 4K virtio-gpu,
 3840×2160, and by screendump checks:
-- the screen is the mode's size, and the top bar is 64 rows, twice its 32;
+- the screen is the mode's size, and the top bar is 64 rows, twice its 32,
+  over the wallpaper drawn at 3840×2160;
 - `run draw size` says 1920x1080, the desktop's;
 - `run draw line 0 32 1919 1079 red` ends in dots of 2×2;
 - after `run widgets &`, the gallery's bold title is smooth: a row through
   it has more colors than its ground and its text;
 - after `run Terminal &`, `vt1`'s text, which `vt` draws itself, is smooth
   the same way;
-- booted again with `scale=1`, the same screen has a bar of 32 rows.
+- booted again with `scale=1`, the same screen has a bar of 32 rows, and
+  the 1920×1080 wallpaper centered on its corner's color.
 
 It keeps the screen at scale 2 in `build/hidpi-2x.ppm`, to look at.
 

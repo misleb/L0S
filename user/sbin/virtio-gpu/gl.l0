@@ -75,20 +75,37 @@
         ((NotCommanded why) (NotCommanded why))
         ((Commanded g3) (send g3 "set_scanout" (set_scanout w h) (resp_ok_nodata)))))))
 
-; The screen black, then served.
+; The driver in 3D, served.
 (def gl_serve ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
-  (let v (Drv g c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))
-    (match (gl_show v (cons (Rect 0 0 w h) (nil Rect)))
-      ((Served v2 reply)
-        (if (eq reply "ok") (gl_start v2) (complain reply))))))
+  (gl_start (Drv g c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))
 
-; Registers as display, as start_serving does, then serves in 3D.
+; The wallpaper, as 2D mode's first_frame has it, made a texture and
+; composed alone; black if there is none, or it cannot be.
+(def gl_first ((v Drv)) (Served Drv)
+  (match v
+    ((Drv g c w h bufs layers attached cur zero rows)
+      (match (wall_buffer w h (scale_of w h (boot_args)))
+        ((None) (gl_show v (cons (Rect 0 0 w h) (nil Rect))))
+        ((Some b)
+          (match (gl_put_buffer v (wall_id) b)
+            ((Served v2 reply)
+              (if (eq reply "ok")
+                  (gl_stacked v2 (nil Layer))
+                  (let k (warn_as "virtio-gpu" (append "the wallpaper not shown: " reply))
+                    (gl_show v (cons (Rect 0 0 w h) (nil Rect))))))))))))
+
+; Registers as display, as start_serving does, shows the first frame,
+; the wallpaper or else black, then serves in 3D.
 (def gl_start ((v Drv)) int
   (let port (port_new)
     (let r (name_register_or_why port "display")
       (if (is_empty r)
-          (let n (screen_said v true)
-            (gl_loop v port))
+          (match (gl_first v)
+            ((Served v2 reply)
+              (if (eq reply "ok")
+                  (let n (screen_said v2 true)
+                    (gl_loop v2 port))
+                  (complain reply))))
           (complain r)))))
 
 ; Answers each request on port, as serve does in 2D mode.
@@ -126,10 +143,6 @@
 
 ; ------------------------------------------------------------- buffers
 
-; The largest buffer id: its texture is that from 16, in the device's
-; 32 bits.
-(def max_buffer_id () int 1000000)
-
 ; buffer ID W H VA [PAGES [STRIDE]]: the w by h pixels a client shared,
 ; at va here, in the pages it shared (buffer_shared_pages), its rows sd
 ; apart, made a texture sd wide, so that its backing's rows are its own,
@@ -137,7 +150,7 @@
 (def gl_shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
   (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
       (served_error v "a buffer has no pixels, or its stride is less than its width")
-      (if (if (lt id 0) true (gt id (max_buffer_id)))
+      (if (not (buffer_id_ok id))
           (served_error v "a buffer's id is from 0 to 1000000")
           (match (page_addresses va (buffer_shared_pages sd bh pages))
             ((None) (served_error v "the buffer is not shared with the display"))
@@ -184,11 +197,26 @@
                       (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
                         (served_ok (Drv g2 c w h (map_remove bufs id) layers attached cur zero rows)))))))))))))
 
-; layers ID X Y TOP ...: the screen composed from new layers.
+; layers ID X Y TOP ...: the screen composed from new layers, the
+; wallpaper under them until one covers the screen, when it leaves.
 (def gl_stacked ((v Drv) (ls (list Layer))) (Served Drv)
   (match v
     ((Drv g c w h bufs layers attached cur zero rows)
-      (gl_show (Drv g c w h bufs ls attached cur zero rows) (cons (Rect 0 0 w h) (nil Rect))))))
+      (let ls2 (wall_under ls (wall_kept ls bufs w h))
+        (gl_wall_dropped (gl_show (Drv g c w h bufs ls2 attached cur zero rows) (cons (Rect 0 0 w h) (nil Rect))))))))
+
+; After composing without the wallpaper, its texture and its pages
+; given up, as 2D mode's wall_dropped does; r as it is otherwise.
+(def gl_wall_dropped ((r (Served Drv))) (Served Drv)
+  (match r
+    ((Served v reply)
+      (match v
+        ((Drv g c w h bufs layers attached cur zero rows)
+          (if (if (eq reply "ok") (if (wall_shown bufs) (not (in_layers layers (wall_id))) false) false)
+              (match (gl_unref g (buffer_res (wall_id)))
+                ((NotCommanded why) r)
+                ((Commanded g2) (wall_dropped (Served (Drv g2 c w h bufs layers attached cur zero rows) reply))))
+              r))))))
 
 ; shape ID TL TR BL BR: the buffer's corners rounded to those radii, and
 ; the screen composed again if it shows the buffer.

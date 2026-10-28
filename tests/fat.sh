@@ -100,6 +100,9 @@ said() {
 }
 
 boot
+# The volume may be mounted after the prompt, while the display draws
+# its wallpaper.
+waits_for "/Volumes/MACFAT mounted"
 said 'ls /Volumes' | grep -aq "MACFAT/" || fail "the host's volume is not mounted; it showed:"
 if [ "$host" = mac ]; then
   said 'cat /Volumes/MACFAT/config.txt' | grep -aq "kernel=l0.img" || fail "its config.txt was not read; it showed:"

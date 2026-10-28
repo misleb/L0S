@@ -15,8 +15,27 @@ On QEMU there is no channel, and it says so and exits 0.
 | `play VA FRAMES CHANS` | `played N`: up to `FRAMES` frames of 16-bit samples, `CHANS` a frame, 1 or 2, from the client's pages shared with the driver at `VA` there; `N` may be 0 when the ring is full, and the client offers the rest again once some have played |
 
 As with the disk, no sample travels in a message. What every sound
-driver keeps alike, the requests and the ring's counts, is
-[audio_server.l0](../user/lib/proto/audio_server.l0); the rest is HDMI's:
+driver keeps alike, the requests, the ring's counts and the chime, is
+[audio_server.l0](../user/lib/proto/audio_server.l0); the rest is HDMI's.
+
+**The chime.** A sound driver plays `/etc/chime.wav` once, as soon as it
+serves `audio` and its ring runs, as a client would play it: at the
+file's rate, set first if the driver plays another, its frames written
+ahead of the period playing as far as there is room, and more as each
+period ends, until all are (`audio_chime_load`, `audio_chime_feed`;
+WAV read by `wav.l0`, as `play` reads one). It waits for nothing else:
+not for the screen, which shows its wallpaper as soon as its own mode is
+set ([The display](display.md#the-display-protocol)), nor the screen for
+it. A client's `start` or `play` meanwhile is answered as always, and
+ends the chime there: what it already wrote plays out ahead of the
+client's frames, or, for a `start` at another rate, is dropped with the
+rest of the ring. The boot argument `chime=off` plays none. A missing
+or unplayable file is said once on standard error, `no chime:` and why,
+and the driver serves all the same. On the Pi 5 the chime is
+`pi5/etc/chime.wav`, 0.6 s at 48 kHz, and plays as `hdmi-audio` starts,
+once `hvs` serves `display`, which is when HDMI0's audio exists.
+
+HDMI's part:
 
 1. **The MAI** is HDMI0's audio FIFO, in the HD block, and it takes
    IEC958 subframes, a 32-bit word a sample with its preamble, the
@@ -63,3 +82,6 @@ chime: no `DLATE` or `ERRORE`, so the FIFO never ran dry.
   the one L0 gives. It plays silence whenever no client does, so its
   interrupt comes 94 times a second at 48 kHz even then. One client at
   a time: two would interleave. QEMU has no sound device L0S drives.
+- **The chime is one file, played whole at boot** unless `chime=off`:
+  held in the driver's memory while it plays (115 KB on the Pi 5), and
+  at a rate the driver plays, or not at all. Not yet heard on a board.

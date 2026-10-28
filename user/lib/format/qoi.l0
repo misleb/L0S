@@ -1,0 +1,207 @@
+; qoi.l0 -- QOI images ("the Quite OK Image format", qoiformat.org's
+; specification 1.0), as bytes: writing one from pixels, and reading one
+; back into a PPM's pixels, three bytes each, red, green, blue, row after
+; row. Pure, so host tools link it too: tools/mkwallpaper writes the
+; wallpaper this way, since a screen's PPM, 6 MB at 1920 by 1080 and 25
+; MB at 3840 by 2160, would not fit the initramfs, while its smooth
+; gradients cost QOI a byte a pixel or less. render.l0's load_background
+; reads either.
+;
+; A QOI file is a header of 14 bytes ("qoif", width and height most
+; significant byte first, 3 or 4 channels, a colorspace), then chunks,
+; each one or more pixels, then 7 zeros and a 1. A chunk is a whole
+; pixel, one of 64 seen before by a hash of it, a small change from the
+; pixel before, or a run of it. Alpha is kept as the encoder had it but
+; dropped by qoi_rgb: images here are opaque.
+
+; ------------------------------------------------------------------- header
+
+; A QOI image's width and height, and where its chunks start; or why it
+; is none.
+(data Qoi (Qoi int int int) (QoiBad (list int)))
+
+; Whether b starts as a QOI image does.
+(def qoi_is ((b bytes)) bool
+  (if (lt (bytes_len b) 14) false (bytes_is_at b 0 "qoif")))
+
+; The u32 at byte i of b, most significant byte first.
+(def qoi_be32_at ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 24)
+    (bit_or (bit_shl (bytes_get b (add i 1)) 16)
+      (bit_or (bit_shl (bytes_get b (add i 2)) 8) (bytes_get b (add i 3))))))
+
+; v as 4 bytes, most significant first, pushed onto acc reversed.
+(def qoi_push_be32 ((v int) (acc (list int))) (list int)
+  (cons (bit_and v 255) (cons (bit_and (bit_shr v 8) 255)
+    (cons (bit_and (bit_shr v 16) 255) (cons (bit_and (bit_shr v 24) 255) acc)))))
+
+; b's header, read and checked: its magic, a size of at least a pixel
+; and at most 16384 each way, 3 or 4 channels.
+(def qoi_header ((b bytes)) Qoi
+  (if (not (qoi_is b))
+      (QoiBad "not a QOI image")
+      (let w (qoi_be32_at b 4)
+        (let h (qoi_be32_at b 8)
+          (if (if (lt w 1) true (if (lt h 1) true (if (gt w 16384) true (gt h 16384))))
+              (QoiBad "a QOI image of no size, or too large")
+              (if (any_eq (bytes_get b 12) (cons 3 (cons 4 (nil int))))
+                  (Qoi w h 14)
+                  (QoiBad "a QOI image of neither 3 nor 4 channels")))))))
+
+; ------------------------------------------------------------------ pixels
+
+; A pixel as QOI keeps it: 0xRRGGBBAA.
+(def qoi_px ((r int) (g int) (b int) (a int)) int
+  (bit_or (bit_shl r 24) (bit_or (bit_shl g 16) (bit_or (bit_shl b 8) a))))
+
+; Its channels.
+(def qoi_r ((p int)) int (bit_and (bit_shr p 24) 255))
+(def qoi_g ((p int)) int (bit_and (bit_shr p 16) 255))
+(def qoi_b ((p int)) int (bit_and (bit_shr p 8) 255))
+(def qoi_a ((p int)) int (bit_and p 255))
+
+; Where a pixel goes among the 64 seen: (3r + 5g + 7b + 11a) mod 64.
+(def qoi_hash ((p int)) int
+  (mod (add (mul 3 (qoi_r p)) (add (mul 5 (qoi_g p)) (add (mul 7 (qoi_b p)) (mul 11 (qoi_a p))))) 64))
+
+; The pixel before the first: black, opaque.
+(def qoi_start () int 255)
+
+; ----------------------------------------------------------------- writing
+
+; An opaque image w by h as QOI, its pixels 0xRRGGBB words row after
+; row, as 3 channels in sRGB.
+(def qoi_encode ((px (array int)) (w int) (h int)) bytes
+  (let hdr (cons 0 (cons 3 (qoi_push_be32 h (qoi_push_be32 w (rev "qoif")))))
+    (bytes_from_list (rev (qoi_end (qoi_chunks px 0 (mul w h) (qoi_start) 0 (array_new 64 0) hdr))))))
+
+; The end: 7 zeros and a 1, onto acc.
+(def qoi_end ((acc (list int))) (list int) (cons 1 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 acc)))))))))
+
+; qoi_encode's loop: pixel i on of n, the one before prev, a run of run
+; of it not yet written, the index of those seen, onto acc reversed.
+(def qoi_chunks ((px (array int)) (i int) (n int) (prev int) (run int) (seen (array int)) (acc (list int))) (list int)
+  (if (ge i n)
+      (qoi_run_out run acc)
+      (let p (bit_or (bit_shl (bit_and (array_get px i) 16777215) 8) 255)
+        (if (eq p prev)
+            (if (eq run 61)
+                (qoi_chunks px (add i 1) n prev 0 seen (qoi_run_out 62 acc))
+                (qoi_chunks px (add i 1) n prev (add run 1) seen acc))
+            (let k (qoi_hash p)
+              (if (eq (array_get seen k) p)
+                  (qoi_chunks px (add i 1) n p 0 seen (cons k (qoi_run_out run acc)))
+                  (let seen2 (array_set seen k p)
+                    (qoi_chunks px (add i 1) n p 0 seen2 (qoi_change prev p (qoi_run_out run acc))))))))))
+
+; A run of n of the pixel before written, if any: 0xC0 + n - 1.
+(def qoi_run_out ((n int) (acc (list int))) (list int)
+  (if (eq n 0) acc (cons (add 192 (sub n 1)) acc)))
+
+; The difference of a and b, -128 to 127.
+(def qoi_delta ((a int) (b int)) int
+  (let d (bit_and (sub a b) 255) (if (gt d 127) (sub d 256) d)))
+
+; Pixel p written as a change from prev: small, 0x40 and 2 bits a
+; channel; luma, 0x80 and green's 6 bits, then red's and blue's 4 from
+; green's; or whole, 0xFE and its 3 channels. Alpha never changes here.
+(def qoi_change ((prev int) (p int) (acc (list int))) (list int)
+  (let dr (qoi_delta (qoi_r p) (qoi_r prev))
+    (let dg (qoi_delta (qoi_g p) (qoi_g prev))
+      (let db (qoi_delta (qoi_b p) (qoi_b prev))
+        (if (if (qoi_within dr -2 1) (if (qoi_within dg -2 1) (qoi_within db -2 1) false) false)
+            (cons (add 64 (add (mul 16 (add dr 2)) (add (mul 4 (add dg 2)) (add db 2)))) acc)
+            (let rg (sub dr dg)
+              (let bg (sub db dg)
+                (if (if (qoi_within dg -32 31) (if (qoi_within rg -8 7) (qoi_within bg -8 7) false) false)
+                    (cons (add (mul 16 (add rg 8)) (add bg 8)) (cons (add 128 (add dg 32)) acc))
+                    (cons (qoi_b p) (cons (qoi_g p) (cons (qoi_r p) (cons 254 acc))))))))))))
+
+; Whether lo <= v <= hi.
+(def qoi_within ((v int) (lo int) (hi int)) bool (if (lt v lo) false (le v hi)))
+
+; ----------------------------------------------------------------- reading
+
+; Where reading is: the next chunk's byte, the pixel before, how many
+; more of it a run still holds, and the 64 seen.
+(data QoiAt (QoiAt int int int (array int)))
+
+; One pixel read: it and where reading is after it; or why the image
+; ends too soon.
+(data QoiPx (QoiPx int QoiAt) (QoiShort))
+
+; The next pixel from at, in b, whose chunks end at stop.
+(def qoi_next ((b bytes) (stop int) (at QoiAt)) QoiPx
+  (match at
+    ((QoiAt i prev run seen)
+      (if (gt run 0)
+          (QoiPx prev (QoiAt i prev (sub run 1) seen))
+          (if (ge i stop)
+              (QoiShort)
+              (qoi_chunk b stop i prev seen (bytes_get b i)))))))
+
+; The chunk at i, whose first byte is c: its pixel, kept among those
+; seen.
+(def qoi_chunk ((b bytes) (stop int) (i int) (prev int) (seen (array int)) (c int)) QoiPx
+  (if (eq c 254)
+      (if (gt (add i 4) stop)
+          (QoiShort)
+          (qoi_seen (qoi_px (bytes_get b (add i 1)) (bytes_get b (add i 2)) (bytes_get b (add i 3)) (qoi_a prev)) (add i 4) 0 seen))
+      (if (eq c 255)
+          (if (gt (add i 5) stop)
+              (QoiShort)
+              (qoi_seen (qoi_px (bytes_get b (add i 1)) (bytes_get b (add i 2)) (bytes_get b (add i 3)) (bytes_get b (add i 4))) (add i 5) 0 seen))
+          (qoi_chunk_small b stop i prev seen c))))
+
+; A chunk of one byte, or luma's two, by the top two bits of c.
+(def qoi_chunk_small ((b bytes) (stop int) (i int) (prev int) (seen (array int)) (c int)) QoiPx
+  (let tag (bit_shr c 6)
+    (if (eq tag 0)
+        (qoi_seen (array_get seen (bit_and c 63)) (add i 1) 0 seen)
+        (if (eq tag 1)
+            (qoi_seen (qoi_moved prev (sub (bit_and (bit_shr c 4) 3) 2) (sub (bit_and (bit_shr c 2) 3) 2) (sub (bit_and c 3) 2)) (add i 1) 0 seen)
+            (if (eq tag 3)
+                (qoi_seen prev (add i 1) (bit_and c 63) seen)
+                (if (gt (add i 2) stop)
+                    (QoiShort)
+                    (let dg (sub (bit_and c 63) 32)
+                      (let d (bytes_get b (add i 1))
+                        (qoi_seen (qoi_moved prev (add dg (sub (bit_shr d 4) 8)) dg (add dg (sub (bit_and d 15) 8))) (add i 2) 0 seen)))))))))
+
+; prev with its red, green and blue moved by dr, dg and db, wrapping.
+(def qoi_moved ((prev int) (dr int) (dg int) (db int)) int
+  (qoi_px (bit_and (add (qoi_r prev) dr) 255) (bit_and (add (qoi_g prev) dg) 255)
+          (bit_and (add (qoi_b prev) db) 255) (qoi_a prev)))
+
+; Pixel p read, the next chunk at i, run more of it to come, kept among
+; those seen.
+(def qoi_seen ((p int) (i int) (run int) (seen (array int))) QoiPx
+  (QoiPx p (QoiAt i p run (array_set seen (qoi_hash p) p))))
+
+; The image's pixels, red, green and blue a byte each, row after row,
+; as a PPM's follow its header; or why not.
+(def qoi_rgb ((b bytes)) (Result bytes (list int))
+  (match (qoi_header b)
+    ((QoiBad why) ((Err bytes (list int)) why))
+    ((Qoi w h off)
+      (qoi_rows b (max off (sub (bytes_len b) 8)) w h 0 (QoiAt off (qoi_start) 0 (array_new 64 0)) (nil bytes)))))
+
+; qoi_rgb's loop: row y on of h, each made bytes once, onto rows
+; reversed.
+(def qoi_rows ((b bytes) (stop int) (w int) (h int) (y int) (at QoiAt) (rows (list bytes))) (Result bytes (list int))
+  (if (ge y h)
+      ((Ok bytes (list int)) (bytes_concat (rev rows)))
+      (match (qoi_row b stop w 0 at (nil int))
+        ((QoiRowShort) ((Err bytes (list int)) (append "a QOI image cut short in row " (digits y))))
+        ((QoiRow row at2) (qoi_rows b stop w h (add y 1) at2 (cons row rows))))))
+
+; A row read: its bytes and where reading is after it; or cut short.
+(data QoiRow (QoiRow bytes QoiAt) (QoiRowShort))
+
+; One row's pixels from x on, onto acc reversed.
+(def qoi_row ((b bytes) (stop int) (w int) (x int) (at QoiAt) (acc (list int))) QoiRow
+  (if (ge x w)
+      (QoiRow (bytes_from_list (rev acc)) at)
+      (match (qoi_next b stop at)
+        ((QoiShort) (QoiRowShort))
+        ((QoiPx p at2) (qoi_row b stop w (add x 1) at2 (cons (qoi_b p) (cons (qoi_g p) (cons (qoi_r p) acc))))))))
