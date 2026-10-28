@@ -238,6 +238,18 @@ Scaler (SCALER6), so no pixel is copied:
    rows are cleaned, and back to 0xff where a new `TOP` or shape no
    longer cuts. A rounded layer still hides what is under it between its
    corners, and is still cut to what shows of it.
+8. **The first frame is the wallpaper**, as in the protocol above: once
+   the channel is on the driver's list and the IOMMU is on, `hvs`
+   registers `display`, draws the wallpaper into `shm_alloc`'s pages of
+   its own, the screen's size (8 MB at 1920×1080, 33 MB at 3840×2160),
+   through a region it closes at once, so that it keeps none of the 64
+   open, and maps them in the aperture as a client's buffer is, cleaned
+   out of the caches. That buffer is one plane, under every client's
+   layers, over the black background, until a client's layer covers
+   the screen. Then the list without it is shown, two frames are waited
+   for, so that the channel fetches nothing from it, and its place in
+   the aperture is cleared and its pages unmapped. Not yet seen on a
+   board.
 
 **Not yet:** the HVS's end-of-frame interrupts are not taken.
 

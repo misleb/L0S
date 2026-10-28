@@ -57,10 +57,11 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   from the stack once a client's buffer covers the screen. Scaled or
   centered on a mode that isn't 1080p or 4K. `gpu-screen` checks it
   before `wm` starts.
-- [ ] `hvs` the same, in a plane under the others, in place of the
+- [x] `hvs` the same, in a plane under the others, in place of the
   black background. It needs DMA pages for the frame (8 MB at 1080p)
   and must not get in the way of the 64-region limit. Seen on a Pi 5
-  with a monitor on HDMI0.
+  with a monitor on HDMI0. Written and host-tested; the board check
+  (the Log's 2026-10-28 step 5 entry) is still to do.
 - [ ] `audio_server.l0` plays the chime: once a driver's ring runs, it
   reads `/etc/chime.wav` (`play`'s WAV parsing, moved into a library
   both use) and queues its frames as a client's would be, at the
@@ -146,3 +147,31 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   `wm`'s first request waits on the port instead. `gpu-screen` boots
   first a copy of its initramfs with no `wm` and reads the driver's
   own frame.
+- 2026-10-28: step 5, written with no board here. `hvs` registers
+  `display` once the channel is on its own list and the IOMMU is on,
+  then draws the wallpaper into an `shm_region` the screen's size (2,025
+  pages at 1080p, 8,100 at 4K: one allocation each, as virtio-gpu's at
+  4K on QEMU was), closes the region at once, so it keeps none of the
+  64 open, and gives the pages to `mapped_for`, the path every client
+  buffer takes: mapped in the aperture (512 MB, room enough) and
+  cleaned out of the caches. The first list is that one plane. `layers`
+  keeps it under the client's until one covers the screen square; the
+  list without it is then shown, 40 ms (two frames at 50 Hz) waited,
+  so the channel can be fetching none of it, and its PTEs cleared and
+  pages unmapped (`unmapped`, as `forget` does). `buffer` refuses ids
+  past 1,000,000 there too. Host tests: `screen_covered`, `wall_kept`,
+  and the pieces of the first frame and of a window over it.
+  **On a Pi 5 (`make pi5-netboot`, a monitor on HDMI0), look for:** the
+  serial log's `hvs` lines up to `a screen of WxH on HDMI0 ...,
+  serving display` with no `no wallpaper:` or `the wallpaper not
+  shown:` warning (`dmesg` shows the debug lines `drawing the
+  wallpaper` and `showing the wallpaper` too); on the monitor, black
+  from the firmware's handover, then the L0S wallpaper (gold "L0S"
+  over a dark blue-violet grid, the hub and six boxes), whole at
+  1920×1080 or at 4K, its grid lines crisp; then `wm`'s top bar and
+  desktop over the same image with no black frame and no flash
+  between; no `HANDLE_ERROR` warning; and the board still answering
+  at the shell afterwards (the pages given up without a hang). A hang
+  right after `showing the wallpaper` would point at the wallpaper's
+  plane, one past `drawing the wallpaper` at the region or the
+  painting.

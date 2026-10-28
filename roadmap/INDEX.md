@@ -42,7 +42,7 @@ move independently, so several can be active at once.
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
 | [0026](0026-font-service-limits.md) The font service lets strikes go, and knows who holds them | Toolkit | idea | – | – | programs.md, toolkit.md |
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
-| [0028](0028-boot-chime-wallpaper.md) The chime as sound starts, the wallpaper as the screen does | Desktop | active | 4/6 | – | sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md |
+| [0028](0028-boot-chime-wallpaper.md) The chime as sound starts, the wallpaper as the screen does | Desktop | active | 5/6 | – | sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008, 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
 | [0030](0030-cpu-usage.md) How the CPUs are used, in `ps` and System Monitor | Kernel | idea | – | – | kernel.md, syscalls.md, programs.md, testing.md |
 
@@ -59,8 +59,9 @@ move independently, so several can be active at once.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
   small requests first: 0023, which it needed, is done.
 - [0028](0028-boot-chime-wallpaper.md) The chime as sound starts, the
-  wallpaper as the screen does: next `hvs` showing the wallpaper as
-  its first frame, written on the host and then seen on a Pi 5.
+  wallpaper as the screen does: next `audio_server.l0` playing the
+  chime. Still to do on a Pi 5: `hvs`'s wallpaper seen before the
+  desktop (the goal's Log says what to look for).
 
 ## Dependencies
 

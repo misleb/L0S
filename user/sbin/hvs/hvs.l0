@@ -457,20 +457,146 @@
         (append ", channel " (append (digits (hdmi0_channel))
           (append ", scale " (append (digits s) ", serving display")))))))))))))
 
-; Registers as display, then answers each request, as display.l0 makes
-; them: ok, display W H cursor scale S, or error: WHY.
+; Registers as display, so that a client finds it at once, shows the
+; first frame while what the client asks waits on the port, then
+; answers each request, as display.l0 makes them: ok, display W H
+; cursor scale S, or error: WHY.
 (def start_serving ((v Drv)) int
   (let port (port_new)
     (let r (name_register_or_why port "display")
       (if (is_empty r)
-          (match v
+          (match (first_frame v)
             ((Drv hw w h bufs layers cur ap live al)
               (match hw
                 ((Hw d g mmu cache t tva addrs)
                   (let n (info_as "hvs" (screen_line g w h (scale_of w h (boot_args))))
                     (let z (sizes_said d (hvs_sizes) "")
-                      (serve v port)))))))
+                      (serve (Drv hw w h bufs layers cur ap live al) port)))))))
           (complain r)))))
+
+; ------------------------------------------------------------- wallpaper
+
+; The screen's first frame, as soon as the channel is the driver's: the
+; wallpaper (render.l0's wallpaper_load) drawn into pages of the
+; driver's own the screen's size, centered and cut as wm draws it,
+; mapped in the aperture as a client's buffer is, and shown as the only
+; plane, in place of the black background. With no wallpaper, or if it
+; cannot be shown, said once, and the screen stays black.
+(def first_frame ((v Drv)) Drv
+  (match v
+    ((Drv hw w h bufs layers cur ap live al)
+      (let a (step (StageFull) "drawing the wallpaper")
+        (match (wall_pages w h (scale_of w h (boot_args)))
+          ((None) v)
+          ((Some wp)
+            (match wp
+              ((WallPages va n addrs)
+                (match (mapped_for v (wall_id) w h w va n addrs)
+                  ((Served v2 reply)
+                    (if (not (eq reply "ok"))
+                        (wall_unshown v reply va n)
+                        (wall_first_shown v2))))))))))))
+
+; The wallpaper, in the aperture, shown alone; if it cannot be, said,
+; and given up.
+(def wall_first_shown ((v Drv)) Drv
+  (match v
+    ((Drv hw w h bufs layers cur ap live al)
+      (let a (step (StageFull) "showing the wallpaper")
+        (match (wall_gone (shown_as v (wall_under (nil Layer) true) cur (nil Stamp)))
+          ((Served v2 reply)
+            (if (eq reply "ok")
+                v2
+                (let k (warn_as "hvs" (append "the wallpaper not shown: " reply))
+                  (wall_gone_now v2)))))))))
+
+; The wallpaper's pages, va and n of them, not mapped, given up, for
+; why, said: v as it was.
+(def wall_unshown ((v Drv) (why (list int)) (va int) (n int)) Drv
+  (let k (warn_as "hvs" (append "the wallpaper not shown: " why))
+    (let u (shm_unmap_count va n) v)))
+
+; The wallpaper drawn: its pages, where this process has them, how many,
+; and where the IOMMU reaches each.
+(data WallPages (WallPages int int (array int)))
+
+; The wallpaper at scale s drawn into w by h pixels of new shared pages,
+; their region closed once drawn, so that it holds none of the 64; or
+; none, said once, if it cannot be read or there is no memory for it.
+(def wall_pages ((w int) (h int) (s int)) (Option WallPages)
+  (match (wallpaper_load s 100)
+    ((BgBad why) (wall_none why))
+    ((BgOk bg)
+      (let n (pages_for (mul (mul w h) 4))
+        (match (shm_region n "the wallpaper")
+          ((NoShmRegion why) (wall_none why))
+          ((ShmRegion va r)
+            (let f (paint_background (Canvas r w h 0) bg)
+              (let k (close_device r)
+                (match (page_addresses va n)
+                  ((None) (let u (shm_unmap_count va n) (wall_none "its pages are not DMA pages")))
+                  ((Some addrs) (Some (WallPages va n addrs))))))))))))
+
+; No wallpaper, for why: said once.
+(def wall_none ((why (list int))) (Option WallPages)
+  (let k (warn_as "hvs" (append "no wallpaper: " why)) ((None WallPages))))
+
+; Whether one of ls, a client's layers, covers the screen w by h whole,
+; square-cornered, so that nothing under it shows.
+(def screen_covered ((ls (list Layer)) (bufs (Map int Buffer)) (w int) (h int)) bool
+  (if (is_empty ls)
+      false
+      (if (layer_covering (head ls) bufs w h) true (screen_covered (tail ls) bufs w h))))
+
+; Whether layer l, a client's, covers the screen w by h whole.
+(def layer_covering ((l Layer) (bufs (Map int Buffer)) (w int) (h int)) bool
+  (match l
+    ((Layer id x y top)
+      (if (eq id (wall_id))
+          false
+          (match (map_get bufs id)
+            ((None) false)
+            ((Some b) (match b ((Buffer bw bh sd va n addr cs) (layer_covers x y bw bh (eq cs (square)) w h)))))))))
+
+; Whether the wallpaper is still on the screen: its buffer is kept.
+(def wall_shown ((bufs (Map int Buffer))) bool (map_has bufs (wall_id)))
+
+; Whether the wallpaper stays under a client's layers ls: while it is
+; shown and nothing of theirs covers the screen.
+(def wall_kept ((ls (list Layer)) (bufs (Map int Buffer)) (w int) (h int)) bool
+  (if (wall_shown bufs) (not (screen_covered ls bufs w h)) false))
+
+; After showing r's list, if the wallpaper is no longer in it, its
+; pages given up (wall_gone_now); r as it is if it failed or kept it.
+(def wall_gone ((r (Served Drv))) (Served Drv)
+  (match r
+    ((Served v reply)
+      (match v
+        ((Drv hw w h bufs layers cur ap live al)
+          (if (if (eq reply "ok") (if (wall_shown bufs) (not (in_layers layers (wall_id))) false) false)
+              (Served (wall_gone_now v) reply)
+              r))))))
+
+; The wallpaper's buffer dropped and its pages given up, once the list
+; on the screen fetches none of them: two frames waited first, so that
+; whatever the channel may still fetch of the list before is fetched,
+; then its place in the aperture cleared and its pages unmapped.
+(def wall_gone_now ((v Drv)) Drv
+  (match v
+    ((Drv hw w h bufs layers cur ap live al)
+      (match (map_get bufs (wall_id))
+        ((None) v)
+        ((Some b)
+          (match b
+            ((Buffer bw bh sd va n addr cs)
+              (if (in_layers layers (wall_id))
+                  v
+                  (let z (sleep_ns (wall_wait_ns))
+                    (let rest (map_remove bufs (wall_id))
+                      (Drv hw w h rest layers cur (unmapped hw ap va) live al)))))))))))
+
+; Two frames at 50 Hz, the slowest mode HDMI0 is set to.
+(def wall_wait_ns () int 40000000)
 
 ; A request refused for why, said as a warning too, since its client
 ; may not say it: the state as it was.
@@ -526,10 +652,12 @@
 (def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
   (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
       (refused v "a buffer has no pixels, or its stride is less than its width")
-      (let n (buffer_shared_pages sd bh pages)
-        (match (page_addresses va n)
-          ((None) (refused v "the buffer is not shared with the display"))
-          ((Some addrs) (mapped_for v id bw bh sd va n addrs))))))
+      (if (not (buffer_id_ok id))
+          (refused v "a buffer's id is from 0 to 1000000")
+          (let n (buffer_shared_pages sd bh pages)
+            (match (page_addresses va n)
+              ((None) (refused v "the buffer is not shared with the display"))
+              ((Some addrs) (mapped_for v id bw bh sd va n addrs)))))))
 
 ; The buffer's n pages at va, at addrs, given a place in the aperture.
 (def mapped_for ((v Drv) (id int) (bw int) (bh int) (sd int) (va int) (n int) (addrs (array int))) (Served Drv)
@@ -654,9 +782,12 @@
 
 ; --------------------------------------------------------------- showing
 
-; layers ID X Y TOP ...: the screen shown from new layers.
+; layers ID X Y TOP ...: the screen shown from new layers, the
+; wallpaper under them until one covers the screen, when it leaves.
 (def stacked ((v Drv) (ls (list Layer))) (Served Drv)
-  (match v ((Drv hw w h bufs layers cur ap live al) (shown_as v ls cur (stamps_of layers bufs)))))
+  (match v
+    ((Drv hw w h bufs layers cur ap live al)
+      (wall_gone (shown_as v (wall_under ls (wall_kept ls bufs w h)) cur (stamps_of layers bufs))))))
 
 ; The screen shown as layers ls and pointer cur: the corners cut as they
 ; show, where stamps had cut them before (corners.l0), then their planes
