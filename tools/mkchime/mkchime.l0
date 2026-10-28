@@ -1,0 +1,176 @@
+; mkchime.l0 -- synthesizes L0S's chime at build time into a WAV file
+; (wav.l0): a soft G major chord as a piano plays it, G3, B3, D4 and
+; G4 rolled 30 ms apart, 2.5 s of 16-bit mono at 48 kHz, which every
+; sound driver plays once as it starts serving (audio_server.l0), as
+; the initramfs's /etc/chime.wav.
+;
+;   mkchime build/chime.wav
+;
+; Each note is six partials, each its harmonic of the note's frequency
+; stretched a little, as a piano string's are, with weights that fall
+; fast with the harmonic, so the tone is mellow, and each dying away
+; faster the higher it is. A note rises over 4 ms, as a soft hammer's
+; does, and the chord fades to nothing over its last 0.4 s, so it ends
+; without a click. The whole is scaled so its loudest sample is 0.25 of
+; full scale.
+
+; Says why on standard error: status 1.
+(def mkchime_complain ((why (list int))) int (complain_as "mkchime" why))
+
+; The program: argv is the file to write.
+(def mkchime ((argv (list (list int)))) int
+  (if (not (eq (length argv) 1))
+      (mkchime_complain "usage: mkchime OUT.wav")
+      (let e (write_whole (head argv) (chime_wav))
+        (if (is_empty e) 0 (mkchime_complain (append (head argv) (append ": " e)))))))
+
+; ------------------------------------------------------------------ the chord
+
+; The rate, in Hz.
+(def chime_rate () int 48000)
+
+; How long the chime is, in frames: 2.5 s.
+(def chime_frames () int 120000)
+
+; How long its fade is, at its end, in frames: 0.4 s.
+(def chime_fade_frames () int 19200)
+
+; How long a note takes to rise, in frames: 4 ms.
+(def chime_attack_frames () int 192)
+
+; The loudest sample, scaled to: 0.25 of 32767, softer than the chime
+; it replaced, whose loudest was 12436.
+(def chime_target () float 8192.0)
+
+; A note of the chord: its frequency in Hz, the frame it starts at, and
+; how loud it is, the lowest 1.
+(data ChimeNote (ChimeNote float int float))
+
+; G major, rolled from the bottom 30 ms (1440 frames) apart, the inner
+; notes and the top softer: G3, B3, D4, G4, in equal temperament from
+; A4 at 440 Hz.
+(def chime_notes () (list ChimeNote)
+  (cons (ChimeNote 195.9977179908746 0 1.0)
+    (cons (ChimeNote 246.9416506280621 1440 0.8)
+      (cons (ChimeNote 293.6647679174076 2880 0.8)
+        (cons (ChimeNote 391.9954359817493 4320 0.6) (nil ChimeNote))))))
+
+; The partials' weights, the first harmonic's on: mellow, few overtones.
+(def chime_weights () (list float)
+  (cons 1.0 (cons 0.45 (cons 0.22 (cons 0.12 (cons 0.06 (cons 0.03 (nil float))))))))
+
+; How many partials a note has.
+(def chime_partial_count () int 6)
+
+; Element i of xs, counting from 0; 0.0 past its end.
+(def chime_nth ((xs (list float)) (i int)) float
+  (if (is_empty xs) 0.0 (if (eq i 0) (head xs) (chime_nth (tail xs) (sub i 1)))))
+
+; How long partial h takes to fall to 1/e, in seconds: 1.6 s for the
+; first, shorter the higher.
+(def chime_tau ((h int)) float
+  (float_div 1.6 (float_add 1.0 (float_mul 0.6 (float_from_int (sub h 1))))))
+
+; Partial h's frequency for a note of f: h times f, stretched by
+; 1 + 0.00015 h², a piano string's inharmonicity.
+(def chime_partial_hz ((f float) (h int)) float
+  (let hf (float_from_int h)
+    (float_mul (float_mul f hf) (float_add 1.0 (float_mul 0.00015 (float_mul hf hf))))))
+
+; Partial h of a note of f, secs after the note starts.
+(def chime_partial ((f float) (h int) (secs float)) float
+  (let decay (chime_exp (float_neg (float_div secs (chime_tau h))))
+    (let wave (float_sin (float_mul (float_mul 6.283185307179586 (chime_partial_hz f h)) secs))
+      (float_mul (float_mul (chime_nth (chime_weights) (sub h 1)) decay) wave))))
+
+; Partials h on of a note of f, secs after it starts, added to acc.
+(def chime_partials ((f float) (h int) (secs float) (acc float)) float
+  (if (gt h (chime_partial_count))
+      acc
+      (chime_partials f (add h 1) secs (float_add acc (chime_partial f h secs)))))
+
+; How far a note u frames after it starts has risen: 0 to 1.
+(def chime_attack ((u int)) float
+  (if (ge u (chime_attack_frames))
+      1.0
+      (float_div (float_from_int u) (float_from_int (chime_attack_frames)))))
+
+; Note n at frame t: nothing before it starts.
+(def chime_note_at ((n ChimeNote) (t int)) float
+  (match n
+    ((ChimeNote f onset gain)
+      (if (lt t onset)
+          0.0
+          (let u (sub t onset)
+            (let secs (float_div (float_from_int u) (float_from_int (chime_rate)))
+              (float_mul (float_mul gain (chime_attack u)) (chime_partials f 1 secs 0.0))))))))
+
+; Notes ns at frame t, added to acc.
+(def chime_notes_at ((ns (list ChimeNote)) (t int) (acc float)) float
+  (if (is_empty ns)
+      acc
+      (chime_notes_at (tail ns) t (float_add acc (chime_note_at (head ns) t)))))
+
+; How much of the chord is left at frame t: 1 until its fade, then down
+; to 0 at its end.
+(def chime_fade ((t int)) float
+  (let left (sub (chime_frames) t)
+    (if (ge left (chime_fade_frames))
+        1.0
+        (float_div (float_from_int (max 0 left)) (float_from_int (chime_fade_frames))))))
+
+; The chord at frame t, before it is scaled.
+(def chime_value ((t int)) float
+  (float_mul (chime_fade t) (chime_notes_at (chime_notes) t 0.0)))
+
+; e to the x, for x from -30 to 0, within about 1e-12: e to x/1024 by
+; its series' first six terms, squared ten times.
+(def chime_exp ((x float)) float
+  (chime_squared (chime_series (float_div x 1024.0)) 10))
+
+; 1 + y + y²/2 + y³/6 + y⁴/24 + y⁵/120, by Horner's rule.
+(def chime_series ((y float)) float
+  (let a (float_add 0.04166666666666667 (float_mul y 0.008333333333333333))
+    (let b (float_add 0.1666666666666667 (float_mul y a))
+      (let c (float_add 0.5 (float_mul y b))
+        (float_add 1.0 (float_mul y (float_add 1.0 (float_mul y c))))))))
+
+; x squared k times.
+(def chime_squared ((x float) (k int)) float
+  (if (eq k 0) x (chime_squared (float_mul x x) (sub k 1))))
+
+; ------------------------------------------------------------------ the file
+
+; The chord's frames from t up to n into a, unscaled.
+(def chime_values ((a (array float)) (t int) (n int)) (array float)
+  (if (ge t n) a (chime_values (array_set a t (chime_value t)) (add t 1) n)))
+
+; The largest magnitude in a from i on, p the largest so far.
+(def chime_peak ((a (array float)) (i int) (p float)) float
+  (if (ge i (array_len a))
+      p
+      (let v (array_get a i)
+        (let m (if (float_lt v 0.0) (float_neg v) v)
+          (chime_peak a (add i 1) (if (float_gt m p) m p))))))
+
+; Frame v scaled to a 16-bit sample, truncated toward 0.
+(def chime_sample ((v float) (scale float)) int
+  (float_to_int (float_mul v scale)))
+
+; a's frames from i on, scaled, as 16-bit little-endian samples consed
+; onto acc reversed.
+(def chime_bytes ((a (array float)) (scale float) (i int) (acc (list int))) (list int)
+  (if (ge i (array_len a))
+      acc
+      (let s (bit_and (chime_sample (array_get a i) scale) 65535)
+        (chime_bytes a scale (add i 1) (cons (bit_shr s 8) (cons (bit_and s 255) acc))))))
+
+; The chime as a WAV file: the chord drawn, its loudest sample scaled to
+; chime_target.
+(def chime_wav () bytes
+  (let a (chime_values (array_new (chime_frames) 0.0) 0 (chime_frames))
+    (let p (chime_peak a 0 0.0)
+      (let scale (if (float_gt p 0.0) (float_div (chime_target) p) 0.0)
+        (bytes_from_list
+          (append (wav_header (chime_rate) 1 (mul 2 (chime_frames)))
+                  (rev (chime_bytes a scale 0 (nil int)))))))))

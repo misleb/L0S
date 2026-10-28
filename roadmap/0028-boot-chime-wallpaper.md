@@ -234,3 +234,10 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   waits on the monitor, not on another driver, so the decision above
   stands. A sound driver now says `playing the chime, ...` at info as it
   starts, so the log shows it played. Still to hear on the board.
+- 2026-10-28: with 2 s, heard on one boot of three, though each logged
+  `playing the chime`. The lead-in is now 3 s. And the chime is the
+  user's choice of a softer piano G major chord, G3, B3, D4 and G4
+  rolled 30 ms apart, 2.5 s mono at 48 kHz, its loudest sample 8192
+  where the old one's was 12436: `tools/mkchime` synthesizes it at the
+  build, six stretched partials a note, each dying away faster the
+  higher it is, so `pi5/etc/chime.wav` is gone from the tree.

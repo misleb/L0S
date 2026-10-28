@@ -32,14 +32,19 @@ client's frames, or, for a `start` at another rate, is dropped with the
 rest of the ring. The boot argument `chime=off` plays none. A missing
 or unplayable file is said once on standard error, `no chime:` and why,
 and the driver serves all the same; one that plays is said as it starts,
-at info, as `playing the chime, /etc/chime.wav, 600 ms at 48000 Hz`
-(`audio_chime_said`), so the log shows it was played. On the Pi 5 the chime is
-`pi5/etc/chime.wav`, 0.6 s at 48 kHz. `hdmi-audio` starts once `hvs`
-serves `display`, which is when HDMI0's audio exists, and holds the
-chime back 2 s from then (`chime_lead_ms`, `audio_chime_after`), its
-ring playing silence, since a monitor takes a second or more to lock
-onto the new mode and unmute: played at once, the chime ended unheard.
-The `playing the chime` line comes as it starts.
+at info, as `playing the chime, /etc/chime.wav, 2500 ms at 48000 Hz`
+(`audio_chime_said`), so the log shows it was played. On the Pi 5 the
+chime is a soft piano G major chord, G3, B3, D4 and G4 rolled 30 ms
+apart, 2.5 s of mono at 48 kHz, its loudest sample a quarter of full
+scale, which [tools/mkchime](../tools/mkchime/mkchime.l0) synthesizes
+at the build into `build/chime.wav`, staged as the Pi's
+`/etc/chime.wav`. `hdmi-audio` starts once `hvs` serves `display`,
+which is when HDMI0's audio exists, and holds the chime back 3 s from
+then (`chime_lead_ms`, `audio_chime_after`), its ring playing silence,
+since a monitor takes a second or more to lock onto the new mode and
+unmute: played at once, the chime ended unheard, and after 2 s it was
+heard on one boot of three. The `playing the chime` line comes as it
+starts.
 
 HDMI's part:
 
@@ -89,5 +94,8 @@ chime: no `DLATE` or `ERRORE`, so the FIFO never ran dry.
   interrupt comes 94 times a second at 48 kHz even then. One client at
   a time: two would interleave. QEMU has no sound device L0S drives.
 - **The chime is one file, played whole at boot** unless `chime=off`:
-  held in the driver's memory while it plays (115 KB on the Pi 5), and
-  at a rate the driver plays, or not at all. Not yet heard on a board.
+  held in the driver's memory while it plays (240 KB on the Pi 5), and
+  at a rate the driver plays, or not at all. How long to hold it back
+  for the monitor is a guess, the same for every monitor: the old chime
+  was heard on one boot of three after 2 s; the chord, after 3 s, is
+  not yet heard on a board.

@@ -313,6 +313,7 @@ MKFS     := $(COMMON) $(CLI) $(PARTS) $(FAT) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
 MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
 MKWALLPAPER := $(ULIB) $(RENDER) $(SVG) tools/mkwallpaper/mkwallpaper.l0
+MKCHIME  := $(ULIB) $(WAV) tools/mkchime/mkchime.l0
 MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
 MKSTRIKE := $(ULIB) $(RENDER) $(GLYPHS) tools/mkstrike/mkstrike.l0
 MKMETRICS := $(ULIB) $(RENDER) $(TTF) tools/mkmetrics/mkmetrics.l0
@@ -383,6 +384,7 @@ $(call l0_check,$(MKSTRIKE) tools/mkstrike/main.l0)
 $(call l0_check,$(MKMETRICS) tools/mkmetrics/main.l0)
 $(call l0_check,$(MKICONS) tools/mkicons/main.l0)
 $(call l0_check,$(MKWALLPAPER) tools/mkwallpaper/main.l0)
+$(call l0_check,$(MKCHIME) tools/mkchime/main.l0)
 
 # That every form is documented, but those DOC_GAPS lists.
 $(BUILD)/check/doc.ok: $(BUILD)/l0sdoc $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
@@ -481,6 +483,7 @@ $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
 $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
 $(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
 $(call l0_test,$(MKWALLPAPER) tools/mkwallpaper/mkwallpaper_test.l0)
+$(call l0_test,$(MKCHIME) tools/mkchime/mkchime_test.l0)
 $(foreach t,shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
 $(call l0_test,$(MKSTRIKE) tools/mkstrike/mkstrike_test.l0)
 $(call l0_test,$(MKMETRICS) tools/mkmetrics/mkmetrics_test.l0)
@@ -567,6 +570,17 @@ $(BUILD)/wallpaper.qoi: $(WALLPAPER_SVG) $(BUILD)/mkwallpaper
 
 $(BUILD)/wallpaper2x.qoi: $(WALLPAPER_SVG) $(BUILD)/mkwallpaper
 	$(BUILD)/mkwallpaper $< 3840 2160 $@.tmp && mv $@.tmp $@
+
+# The chime a sound driver plays as it starts, /etc/chime.wav on the
+# Pi 5, the only board with one: a soft piano G major chord, which
+# tools/mkchime synthesizes.
+CHIME := $(BUILD)/chime.wav
+
+$(BUILD)/mkchime: $(MKCHIME) tools/mkchime/main.l0 | $(BUILD)
+	$(L0) build $(MKCHIME) tools/mkchime/main.l0 -o $@
+
+$(CHIME): $(BUILD)/mkchime
+	$(BUILD)/mkchime $@.tmp && mv $@.tmp $@
 
 # The face the desktop draws the pointer with, /etc/face:
 # fonts/cursors.paths, rasterized.
@@ -884,8 +898,8 @@ endif
 # size, so any will do; l0 card is given a byte of one, since with none
 # it names none. The device trees go in first, so that l0 card finds
 # them there and does not say the card lacks them.
-pi5-initramfs: images root $(ETC_DEPS) $(BUILD)/kernel-pi5.img $(PI5_DTBS)
-	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc
+pi5-initramfs: images root $(ETC_DEPS) $(CHIME) $(BUILD)/kernel-pi5.img $(PI5_DTBS)
+	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc && cp $(CHIME) $(BUILD)/pi5-etc/chime.wav
 	@for p in $(PI5_NO); do grep -v "^start $$p\( \|$$\)" $(BUILD)/pi5-etc/inittab > $(BUILD)/pi5-etc/inittab.new; mv $(BUILD)/pi5-etc/inittab.new $(BUILD)/pi5-etc/inittab; echo "pi5-initramfs: not starting $$p"; done
 	$(call stage_etc,$(BUILD)/pi5-etc)
 	rm -rf $(BUILD)/pi5-root && mkdir -p $(BUILD)/pi5-root/boot && cp -Rp $(ROOT)/. $(BUILD)/pi5-root/
