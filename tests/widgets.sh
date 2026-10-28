@@ -10,6 +10,9 @@
 #   3. a click of the tablet, through QMP, on the second row: the
 #      pointer's press and release forwarded to the window, the row
 #      selected, in the accent's tint, and End Process its own red
+#   4. the tab bar along its foot, AdwTabBar's: three tabs, the first
+#      raised; a click on the third raises it instead, and a click on
+#      the second's close button closes it, the two left sharing the bar
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
@@ -124,3 +127,24 @@ events "$(button true)"; sleep 1
 events "$(button false)"; sleep 1
 shows "a click selected the second row, and End Process woke" \
   "$rx $((cy + 79 + 30 + 1)) $selected" "$((cx + 530)) $((cy + 22)) $red"
+
+# The tab bar, the content's last 40 rows, from 400: the header bar's
+# ground, 303030, and three tabs 34 high from 403, sharing its 640, 6 in
+# from each side and 3 apart, 207 each, from 6, 216 and 426. The
+# selected one is raised, white at 10% over the bar, 454545; under the
+# pointer, 13%, 4b4b4b.
+tab_on="69 69 69"; tab_hover="75 75 75"
+ty=$((cy + 420))
+shows "the tab bar, its first tab raised" "$((cx + 14)) $ty $tab_on" "$((cx + 224)) $ty $headerbar" "$((cx + 434)) $ty $headerbar"
+events "$(at $((cx + 500)) $ty)"; sleep 1
+events "$(button true)"; sleep 1
+events "$(button false)"; sleep 1
+shows "a click raised the third tab" "$((cx + 14)) $ty $headerbar" "$((cx + 434)) $ty $tab_hover"
+# The second's close button, 24 square, 5 in from its end: 216 + 207 -
+# 29 = 394 to 418. The two left share the bar, 312 each, from 6 and 321,
+# the third still raised; the pointer then taken off the bar.
+events "$(at $((cx + 406)) $ty)"; sleep 1
+events "$(button true)"; sleep 1
+events "$(button false)"; sleep 1
+events "$(at $((cx + 300)) $((cy + 200)))"; sleep 1
+shows "the second tab closed, the third raised" "$((cx + 329)) $ty $tab_on" "$((cx + 14)) $ty $headerbar" "$((cx + 316)) $ty $headerbar"
