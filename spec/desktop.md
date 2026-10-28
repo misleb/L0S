@@ -235,21 +235,24 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   bar, the launcher, the pointer, `draw`'s shapes and the protocol's
   numbers. Its buffers, and its clients', are twice as wide and high.
   `display.l0` makes its places the screen's on the way to the driver.
-- **The toolkit** paints its ops twice the size (`paint.l0`). Text and
-  the pointer come from the face, `/etc/face`, and icons, at every
-  scale, from `/etc/icons` ([user/lib/ui/face.l0](../user/lib/ui/face.l0)):
-  coverage, how much of each pixel a shape covers, 0 to 15. Each pixel
-  is mixed with what is under it by that much, since layers do not
-  blend.
-- **[tools/mkfont](../tools/mkfont/mkfont.l0)** makes the face at build time.
-  It reads Source Code Pro's TrueType outlines
-  ([user/lib/format/ttf.l0](../user/lib/format/ttf.l0)), and the
-  pointers' in [fonts/cursors.paths](../fonts/cursors.paths)
-  (`shape.l0`). It rasterizes them (`user/lib/gfx/raster.l0`), curves,
-  arcs and strokes worked out in `float`s and rounded to nearest: 16
-  samples a pixel row, each crossing to 1/256 of a pixel, by the
-  nonzero rule. Glyphs come out 16×32 for text, 32×64 for large text, in
-  regular and bold.
+- **The toolkit** paints its ops twice the size (`paint.l0`). Text comes
+  from the font service's strikes, at 32 and 64 tall, the pointer from
+  the face, `/etc/face`, and icons, at every scale, from `/etc/icons`
+  ([user/lib/ui/face.l0](../user/lib/ui/face.l0)): coverage, how much of
+  each pixel a shape covers, 0 to 15. Each pixel is mixed with what is
+  under it by that much, since layers do not blend.
+- **The glyphs** are Source Code Pro's TrueType outlines
+  ([user/lib/format/ttf.l0](../user/lib/format/ttf.l0)) rasterized
+  ([user/lib/gfx/glyphs.l0](../user/lib/gfx/glyphs.l0), with
+  `user/lib/gfx/raster.l0`), curves worked out in `float`s and rounded to
+  nearest: 16 samples a pixel row, each crossing to 1/256 of a pixel, by
+  the nonzero rule, into strikes, regular and bold, 32 tall for text and
+  64 for large text: by [tools/mkstrike](../tools/mkstrike/mkstrike.l0) at
+  the build for the sizes scales 1 and 2 draw, by `font` on the board for
+  any other.
+- **[tools/mkfont](../tools/mkfont/mkfont.l0)** makes the face at build time:
+  the pointers' outlines in [fonts/cursors.paths](../fonts/cursors.paths)
+  (`shape.l0`), rasterized the same way, arcs and strokes too.
 - **[tools/mkicons](../tools/mkicons/mkicons.l0)** makes `/etc/icons`: the
   toolkit's symbolic icons are GNOME's own SVGs, under [icons/](../icons)
   (Adwaita's, and System Monitor's, each with its license and a `SOURCE`

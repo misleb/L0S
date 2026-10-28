@@ -75,7 +75,7 @@ booted with `root=UUID`, or else from the initramfs.
 | 13 | `usb-hid keyboard` | the keyboard's driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 14 | `usb-hid mouse` | the mouse's driver. It serves `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
 | 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 16 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height rasterized once, on the first ask, into pages it shares with each asker |
+| 16 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in pages it shares with each asker, the desktop's made at the build, any other rasterized once, on its first ask |
 | 17 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
 | 18 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
 | 19 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
@@ -87,9 +87,13 @@ How the display, the compositor and its clients fit together is under
 The text font is Source Code Pro,
 [fonts/SourceCodePro-Regular.ttf](../fonts/SourceCodePro-Regular.ttf) and
 its bold: printable ASCII in cells 8×16, rasterized with smooth edges by
-[tools/mkfont](../tools/mkfont/mkfont.l0) at every size the desktop draws it
-(see [A large screen](desktop.md#a-large-screen)) into `/etc/face`, which the
-initramfs carries.
+the font service, `font`, which every program with a window asks for
+the sizes it draws (see [A large screen](desktop.md#a-large-screen)), and
+which shares each with all of them. The sizes the desktop draws at
+scales 1 and 2 come rasterized already, by
+[tools/mkstrike](../tools/mkstrike/mkstrike.l0) at the build, into
+`/etc/fonts` beside the fonts, Source Sans 3's too, which the initramfs
+carries; `/etc/face` holds the pointers.
 
 The wallpaper is the splash, drawn by
 [tools/mksplash](../tools/mksplash/mksplash.l0) into `build/splash.ppm`, at

@@ -7,17 +7,17 @@
 #   1. its title bar, an Adwaita header bar in front, dark, 303030
 #   2. the toolbar on the window's ground, 242424; the grid's header's
 #      line under it; End Process faded, with no row selected
-#   3. a row of its own, pid 7, the seventh by pid, its state's dot drawn;
-#      and no eighth row; and under the grid the memory's line, its level
+#   3. a row of its own, pid 8, the eighth by pid, its state's dot drawn;
+#      and no ninth row; and under the grid the memory's line, its level
 #      bar filled in the accent
-#   4. after run nap 600000 & at the shell, an eighth row, nap's (run
+#   4. after run nap 600000 & at the shell, a ninth row, nap's (run
 #      windows's processes have exited, so are not listed), with nothing
 #      pressed: the table is read again by itself
 #   5. a click of the tablet, through QMP, on that row: it is selected, in
 #      the accent's tint, and End Process its own red
 #   6. a click on End Process: the row gone, End Process faded again, and
 #      ps at the shell listing no nap
-#   7. after six more naps, thirteen rows, more than the ten that fit: the
+#   7. after five more naps, thirteen rows, more than the ten that fit: the
 #      overlay scrollbar's slider, at the top
 #   8. a step of the wheel, through QMP, over the rows: three rows
 #      scrolled, as far as they go, the slider at the end
@@ -141,7 +141,7 @@ selected="36 56 80"; red="224 27 36"; faded="130 32 36"
 
 waits_for "^l0s> "
 printf 'run procmon &\n' >&3
-waits_for "\[pid 7 running\]"
+waits_for "\[pid 8 running\]"
 window
 cx=$((w_x + 2)); cy=$((w_y + bar))
 row() { echo $((cy + 79 + 30 * ($1 - 1))); }
@@ -151,7 +151,7 @@ endx=$((cx + 730)); endy=$((cy + 22))
 shows "its header bar" "$((w_x + 6)) $((w_y + 6)) $headerbar"
 shows "the toolbar, the grid's header, End Process faded" \
   "$((cx + 100)) $((cy + 3)) $ground" "$((cx + 5)) $((cy + 78)) $line" "$endx $endy $faded"
-shows "its own row, the seventh, and no eighth" "$(dot 7) !$view" "$(dot 8) $view"
+shows "its own row, the eighth, and no ninth" "$(dot 8) !$view" "$(dot 9) $view"
 
 # The memory's line under the grid's 400 rows and their line: 6 down,
 # Memory in bold, 49 wide, from 12, then 12 on its level bar, 8 high
@@ -167,15 +167,15 @@ for try in $(seq 1 30); do
   [ "$try" = 30 ] && fail "nap never started; it showed:"
   sleep 1
 done
-shows "nap's row, the eighth, read by itself" "$(dot 8) !$view"
+shows "nap's row, the ninth, read by itself" "$(dot 9) !$view"
 
-click $((cx + 800)) $(($(row 8) + 15))
+click $((cx + 800)) $(($(row 9) + 15))
 shows "a click selected nap's row, and End Process woke" \
-  "$((cx + 800)) $(($(row 8) + 1)) $selected" "$endx $endy $red"
+  "$((cx + 800)) $(($(row 9) + 1)) $selected" "$endx $endy $red"
 
 click $((endx + 20)) $endy
 shows "End Process ended nap: its row gone, End Process faded" \
-  "$((cx + 800)) $(($(row 8) + 1)) $view" "$(dot 8) $view" "$endx $endy $faded"
+  "$((cx + 800)) $(($(row 9) + 1)) $view" "$(dot 9) $view" "$endx $endy $faded"
 
 from=$(($(wc -c < "$out") + 1))
 printf 'ps\n' >&3
@@ -191,7 +191,7 @@ echo "ok - procmon: ps lists no nap"
 # to 377. At rest it is 6 wide, 3 in from the grid's right edge at 840,
 # from x 831, the text, white, at 40% on the view's 1e1e1e, 787878;
 # with the pointer on its strip, 8 wide, from 829, at 60%, a5a5a5.
-for n in 1 2 3 4 5 6; do printf 'run nap 600000 &\n' >&3; sleep 1; done
+for n in 1 2 3 4 5; do printf 'run nap 600000 &\n' >&3; sleep 1; done
 gx=$((cx + 833)); wide=$((cx + 830))
 slider="120 120 120"; slider_hot="165 165 165"
 shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $view"

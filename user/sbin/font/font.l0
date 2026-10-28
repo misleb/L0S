@@ -3,7 +3,9 @@
 ; height is rasterized into a strike (format/strike.l0) the first time
 ; any program asks for it, in pages of its own, and kept, never freed
 ; while it runs; each asker after is given the same pages, shared, so a
-; strike costs its pages once however many programs draw with it.
+; strike costs its pages once however many programs draw with it. The
+; desktop's strikes come made, from the build; a face's font is read
+; only when a strike of it must be made.
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "font" why))
@@ -15,8 +17,8 @@
 ; A process given a strike, and where it sees it.
 (data Holder (Holder int int))
 
-; The service: its faces by name, the strikes it has made by face and
-; height, and how many it has made.
+; The service: the faces' fonts read so far, by name, the strikes it
+; keeps by face and height, and how many it has made.
 (data Font (Font (Map (list int) Ttf) (Map (list int) Cached) int))
 
 ; The key a strike is kept by: FACE H.
@@ -24,44 +26,44 @@
 
 ; ---------------------------------------------------------------- faces
 
-; The faces of fs whose files can be read and are fonts, into m; one
-; that cannot is said, and left out.
-(def faces_read ((fs (list (list int))) (m (Map (list int) Ttf))) (Map (list int) Ttf)
-  (if (is_empty fs)
-      m
-      (let path (font_file (head fs))
-        (match (read_whole path)
-          ((Err why) (let w (warn_as "font" (append path (append ": " why))) (faces_read (tail fs) m)))
-          ((Ok b)
-            (match (ttf_read b)
-              ((Err why) (let w (warn_as "font" (append path (append ": " why))) (faces_read (tail fs) m)))
-              ((Ok f) (faces_read (tail fs) (map_put m (head fs) f)))))))))
+; What came of reading a face's font: the service after, and the font;
+; or why it cannot be read.
+(data FaceRead (FaceRead Font Ttf) (FaceUnread Font (list int)))
 
-; The names of the faces it has, in font_faces' order.
-(def faces_had ((fs (list (list int))) (m (Map (list int) Ttf))) (list (list int))
-  (if (is_empty fs)
-      (nil (list int))
-      (if (map_has m (head fs)) (cons (head fs) (faces_had (tail fs) m)) (faces_had (tail fs) m))))
+; Face's font, read from its file the first time, then kept in s.
+(def face_read ((s Font) (face (list int))) FaceRead
+  (match s
+    ((Font fs cache builds)
+      (match (map_get fs face)
+        ((Some f) (FaceRead s f))
+        ((None)
+          (let path (font_file face)
+            (match (read_whole path)
+              ((Err why) (FaceUnread s (append path (append ": " why))))
+              ((Ok b)
+                (match (ttf_read b)
+                  ((Err why) (FaceUnread s (append path (append ": " why))))
+                  ((Ok f) (FaceRead (Font (map_put fs face f) cache builds) f)))))))))))
 
-; What it says once it serves: its faces.
-(def serving_line ((faces (list (list int)))) (list int)
-  (append (digits (length faces)) (append " faces from /etc/fonts, " (append (unwords faces) ", serving font"))))
+; What it says once it serves: its faces, and how many strikes it keeps
+; already.
+(def serving_line ((n int)) (list int)
+  (append "faces " (append (unwords (font_faces)) (append " from /etc/fonts, " (append (digits n) " strikes stored, serving font")))))
 
 ; ---------------------------------------------------------------- serving
 
-; The service: its faces read, the desktop's strikes made, registered as
-; font, then each request answered.
+; The service: the desktop's strikes kept as stored, registered as font,
+; then each request answered.
 (def font () int
   (let port (port_new)
     (if (lt port 0)
         (complain "no port")
-        (let faces (faces_read (font_faces) ((MapEmpty (list int) Ttf)))
-          (let s (prebuild (Font faces ((MapEmpty (list int) Cached)) 0) (prebuilt))
-            (let r (name_register_or_why port "font")
-              (if (not (is_empty r))
-                  (complain r)
-                  (let i (info_as "font" (serving_line (faces_had (font_faces) faces)))
-                    (serve s port)))))))))
+        (let s (stored_kept (Font ((MapEmpty (list int) Ttf)) ((MapEmpty (list int) Cached)) 0) (stored))
+          (let r (name_register_or_why port "font")
+            (if (not (is_empty r))
+                (complain r)
+                (let i (info_as "font" (serving_line (match s ((Font fs cache builds) (map_size cache)))))
+                  (serve s port))))))))
 
 ; Each request on port answered, one at a time.
 (def serve ((s Font) (port int)) int
@@ -79,15 +81,12 @@
       (served_error s "an empty request")
       (let op (head ws)
         (if (eq op "faces")
-            (Served s (unwords (cons "faces" (faces_had (font_faces) (font_ttfs s)))))
+            (Served s (unwords (cons "faces" (font_faces))))
             (if (eq op "stats")
                 (Served s (stats_text s))
                 (if (if (eq op "strike") (eq (length ws) 3) false)
                     (strike_asked s from (nth ws 1) (nth ws 2))
                     (served_error s (append "no request " op))))))))
-
-; The faces' fonts.
-(def font_ttfs ((s Font)) (Map (list int) Ttf) (match s ((Font fs cache builds) fs)))
 
 ; strike FACE H, asked by from: the strike, made if no one has asked for
 ; it, shared with from if it has not been.
@@ -107,36 +106,55 @@
 (data Built (Built Font Cached) (NotBuilt Font (list int)))
 
 ; Face at height h: the strike kept, or one made and counted if there is
-; none.
+; none, its font read first if it has not been.
 (def strike_had ((s Font) (face (list int)) (h int)) Built
   (match s
-    ((Font fs cache builds)
-      (match (map_get cache (strike_key face h))
+    ((Font fs0 cache0 builds0)
+      (match (map_get cache0 (strike_key face h))
         ((Some c) (Built s c))
         ((None)
-          (match (map_get fs face)
-            ((None) (NotBuilt s (append "no font for " face)))
-            ((Some f)
+          (match (face_read s face)
+            ((FaceUnread s2 why) (NotBuilt s2 why))
+            ((FaceRead s2 f)
               (match (cached face f h)
-                ((Err why) (NotBuilt s why))
-                ((Ok c) (Built (Font fs (map_put cache (strike_key face h) c) (add builds 1)) c))))))))))
+                ((Err why) (NotBuilt s2 why))
+                ((Ok c)
+                  (match s2
+                    ((Font fs cache builds) (Built (Font fs (map_put cache (strike_key face h) c) (add builds 1)) c))))))))))))
 
-; The strikes the desktop's text is drawn from at scale 1, Source Code
-; Pro's regular and bold at 16 and 32, made before font registers, so
-; that no window's first paint waits for one: FACE H each.
-(def prebuilt () (list (list int)) (cons "code 16" (cons "code-bold 16" (cons "code 32" (cons "code-bold 32" (nil (list int)))))))
+; The strikes the desktop's text is drawn from, Source Code Pro's regular
+; and bold at 16, 32 and 64, the heights scales 1 and 2 paint: FACE H
+; each. tools/mkstrike makes them at the build, from the same fonts with
+; the same code, into /etc/fonts, as rasterizing them here would take
+; every boot most of a second on QEMU before any window could paint.
+(def stored () (list (list int))
+  (split_on 44 "code 16,code-bold 16,code 32,code-bold 32,code 64,code-bold 64"))
 
-; The strikes keys name made, each one that cannot be said.
-(def prebuild ((s Font) (keys (list (list int)))) Font
+; Where a stored strike is: /etc/fonts/FACE-H.strike.
+(def stored_path ((face (list int)) (h int)) (list int)
+  (append (font_dir) (append face (append "-" (append (digits h) ".strike")))))
+
+; The stored strikes keys name kept, each that is there and is the strike
+; it is named for; one that is not is built on its first ask, as any
+; other is.
+(def stored_kept ((s Font) (keys (list (list int)))) Font
   (if (is_empty keys)
       s
       (let ws (split_spaces (head keys))
         (match (word_number (nth ws 1))
-          ((None) (prebuild s (tail keys)))
-          ((Some h)
-            (match (strike_had s (head ws) h)
-              ((NotBuilt s2 why) (let w (warn_as "font" (append (head keys) (append ": " why))) (prebuild s2 (tail keys))))
-              ((Built s2 c) (prebuild s2 (tail keys)))))))))
+          ((None) (stored_kept s (tail keys)))
+          ((Some h) (stored_kept (stored_one s (head ws) h) (tail keys)))))))
+
+; One stored strike, face at h, kept if its file is there and holds it.
+(def stored_one ((s Font) (face (list int)) (h int)) Font
+  (match (read_whole (stored_path face h))
+    ((Err why) (let d (debug_as "font" (append (stored_path face h) (append ": " why))) s))
+    ((Ok b)
+      (if (if (strike_ok b) (eq (strike_height b) h) false)
+          (match (in_pages b)
+            ((Err why) (let w (warn_as "font" (append (stored_path face h) (append ": " why))) s))
+            ((Ok c) (with_cached s (strike_key face h) c)))
+          (let w (warn_as "font" (append (stored_path face h) (append ": not a strike " (append (digits h) " tall")))) s)))))
 
 ; Face f at height h made a strike, in pages of its own, and how long
 ; that took said for dmesg; or why not.
@@ -144,13 +162,19 @@
   (let t0 (clock_ns)
     (let b (strike_make f h)
       (let d (debug_as "font" (built_line face h (bytes_len b) (sub (clock_ns) t0)))
-        (let n (pages_for (bytes_len b))
-          (match (shm_region n "a strike")
-            ((NoShmRegion why) ((Err Cached (list int)) why))
-            ((ShmRegion va r)
-              (let w (device_write_bytes r 0 b 0 (bytes_len b))
-                (let c (close_device r)
-                  ((Ok Cached (list int)) (Cached va n (bytes_len b) (nil Holder))))))))))))
+        (in_pages b)))))
+
+; Strike b in pages of its own, written once, its region closed again so
+; that the cache keeps none of the 64 a process may have open; or why
+; not.
+(def in_pages ((b bytes)) (Result Cached (list int))
+  (let n (pages_for (bytes_len b))
+    (match (shm_region n "a strike")
+      ((NoShmRegion why) ((Err Cached (list int)) why))
+      ((ShmRegion va r)
+        (let w (device_write_bytes r 0 b 0 (bytes_len b))
+          (let c (close_device r)
+            ((Ok Cached (list int)) (Cached va n (bytes_len b) (nil Holder)))))))))
 
 ; What it says of a strike it built: FACE H, its bytes, the time taken.
 (def built_line ((face (list int)) (h int) (len int) (ns int)) (list int)

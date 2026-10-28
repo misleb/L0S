@@ -79,7 +79,7 @@ and was set aside because it does not match the monospace already used.
   faces and the cache; an e2e case asks a strike twice and sees one
   build. The start line shifts later pids: `spec/demo.md`'s table and
   `ps` sample, and `tests/vt.sh`'s arithmetic.
-- [ ] The toolkit asks for its text: `ui_face_load` asks `font` for
+- [x] The toolkit asks for its text: `ui_face_load` asks `font` for
   Source Code Pro's regular and bold at the heights its scale paints,
   and draws from the shared pages in place, with no copy; with no
   `font`, it draws no text and says so once, as it does now with no
@@ -155,3 +155,42 @@ and was set aside because it does not match the monospace already used.
   `tests/e2e/fonts` asks Source Sans 3 at 32 from two processes and
   sees `strikes built` go from 4 to 5. The e2e harness's `font` file
   now also stages `/etc/fonts`.
+- 2026-10-27: step 4. `ui_face_load` asks `font` (waiting up to 20 s for
+  it) for `code` and `code-bold` at 16·s and 32·s, opens each with
+  `dma_open` and draws from it in place (`UiStrike`, a glyph's entry
+  read with `device_read32`, its rows a word at a time with
+  `device_read64`), four of a process's 64 regions. vt needed no change:
+  it calls `ui_face_load`. `strike.l0` split: the layout and readers
+  stay (in `UI_CORE`), the making moved to `gfx/glyphs.l0`, so no
+  window's program links the rasterizer. mkfont makes only the
+  pointers, and only `wm` reads them (`ui_face_pointers`), only at
+  scale 2, where it draws them; window programs read no `/etc/face`
+  at all. Every boot that starts `wm` starts `font` first (the screen
+  tests' etcs, the draw and virtio-gpu cases); `procmon.sh` counts one
+  process more, so it runs five naps, not six, for its thirteen rows.
+  Every screen test passes with its pixels unchanged.
+
+  Measured on QEMU (TCG, one CPU), a boot of the drivers, `rtc clock`,
+  `wm`, a vt and the gallery, three or four runs each; "today" is this
+  branch at step 2, before any `font`:
+
+  | | today | after |
+  |---|---|---|
+  | `wm`'s own pages (4 KB) | 243 | 34 |
+  | `vt`'s own pages | 241 | 31 |
+  | widgets' own pages | 250 | 38 |
+  | `font`'s own / shared pages | – | 35 / 89 |
+  | vt's first damage, from boot | 0.549–0.596 s | 0.540–0.584 s |
+  | widgets' first damage, from boot | 0.631–0.650 s | 0.619–0.622 s |
+  | `ui_face_load` in `wm` | 17 ms | 10 ms |
+
+  The design call that got there: step 3's strikes made as `font`
+  started put 0.7 s of rasterizing on every boot's path to the first
+  paint (vt's first damage at 1.33–1.39 s). So the desktop's strikes,
+  `code` and `code-bold` at 16, 32 and 64, are made at the build by
+  `tools/mkstrike`, with the same `glyphs.l0`, and staged in
+  `/etc/fonts` as `FACE-H.strike`; `font` keeps them as it starts and
+  makes any other on request, reading a face's TTF only then, which
+  took its own pages from 357 to 35. A missing stored strike is made
+  on its first ask, so nothing depends on them but the time. That made
+  asking the display for its scale unneeded, and it was dropped.

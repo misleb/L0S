@@ -12,7 +12,7 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 |---|---|---|
 | `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Programs draw in the dark style: `ui_style` says so, the one place a setting for it will be read. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends only on `ppm.l0`'s colors and `render.l0`'s glyph. | `@window_bg_color`, `@accent_bg_color`, … |
 | `icons.l0` | The names of the symbolic icons, 16×16 at scale 1, GNOME's own: each is its SVG under [icons/](../icons) (Adwaita's, and System Monitor's for utilities-system-monitor), which `tools/mkicons` rasterizes into `/etc/icons` at the build. window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer. Also `ui_image_names`, the full-color icons Files and Disks show things with, Adwaita's under `icons/adwaita/scalable`, which `tools/mkicon --image` draws into `/etc/images/NAME.face`. | `*-symbolic` icons, and the full-color theme icons |
-| `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; and the coverage `tools/mkfont` rasterized into `/etc/face`: Source Code Pro's glyphs, regular and bold, at three sizes (16, 32 and 64 tall), and the pointer. An app's `icon.face` is the same format, its images' tables `image.N`, and so is each full-color icon's `/etc/images/NAME.face`, which a program loads by name, at the sizes its scale paints, with `ui_images_load` into a `UiImages`, and finds with `ui_image`. | the font and icon theme at a scale factor |
+| `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; the text's glyphs, Source Code Pro's regular and bold at 16 and 32 times the scale, each a strike (`format/strike.l0`) asked of the font service, `font`, which shares its pages with every program that asks, read in place (`UiStrike`), never copied; and, for the compositor alone at scale 2 (`ui_face_pointers`), the pointers `tools/mkfont` rasterized into `/etc/face`, which holds nothing else. With no `font`, no text is drawn, said once on standard error. An app's `icon.face` is the same format, its images' tables `image.N`, and so is each full-color icon's `/etc/images/NAME.face`, which a program loads by name, at the sizes its scale paints, with `ui_images_load` into a `UiImages`, and finds with `ui_image`. | the font and icon theme at a scale factor |
 | `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon, an image of its own colors with alpha, `UiPImage`, as an app's `icon.svg` makes), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
 | `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, entry.l0's entry, a window's own header bar, nav.l0's path bar and toggle group, icon_view.l0's icon view and menu.l0's popover); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). `UiCsdBar START TITLE END CLOSES` is the header bar of a window that draws its own (`ui_open_csd`): any widget as its title, in the bar's middle as far as there is room, the window's close button at its end if CLOSES (`ui_close_action`), and its ground the window's to drag (`ui_move_action`), or, with a double click, to maximize and restore. | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment` |
 | `grid.l0` | A data grid: columns, typed cells (text, number, size, as `format_size` says it and sorted by its bytes, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. `ui_grid_page`, a toolbar of Refresh, a status line and End Process over a grid, as `widgets` and `procmon` are, and `ui_selected_line`. | `GtkColumnView`, `GtkScrolledWindow` |
@@ -126,7 +126,9 @@ to `l0` are one namespace, and a duplicate is a compile error.
 - **Text** is Source Code Pro in cells 8×16, so text is ASCII only, ellipsized with
   `...`, bold is the bold face, and large text is scaled 2×. At the
   desktop's scale 2 it is the same cells, 16×32 of the
-  screen's pixels, smooth, bold its own weight.
+  screen's pixels, smooth, bold its own weight. The glyphs are the font
+  service's strikes, in pages every program shares and reads in place:
+  each glyph only as wide as its ink, placed in its cell by its box.
 - **Scale 2**, on a large screen, is GNOME's scale factor: everything is
   laid out in the desktop's pixels, as at 1, and painted at twice the size
   at the screen's resolution. A program does nothing for it: `ui_open`
@@ -139,10 +141,11 @@ to `l0` are one namespace, and a duplicate is a compile error.
   (`-1`). Window corners are rounded by the display's shaped layers, which
   cut whole pixels, so they aren't antialiased. There are no window
   shadows.
-- One monospaced face, smooth at every scale. Icons are
+- Two faces, Source Code Pro and Source Sans 3, each regular and bold,
+  ASCII only, at any height from 8 to 128 on request; the toolkit draws
+  only Source Code Pro, in its cells. Icons are
   smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
-  the build, never at run time. Icons and text scale by whole numbers,
-  and the face is ASCII only, as the font is. Text's edges are mixed with
+  the build, never at run time. Icons and text scale by whole numbers. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.
 - Scrolling is by whole rows: the wheel's steps are counted, not its
   speed, and there is no kinetic scrolling. The wheel across, which the
