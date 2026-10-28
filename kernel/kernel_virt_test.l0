@@ -1061,12 +1061,12 @@
     (files_boot (mount_words 0 4 (append (open_words 8 15 1) (exit_x0))) (append (pad_to 8 "data") "/Volumes/data/a") "")
     124))
 
-; pid 1 mounts data and receives the request pid 2's open makes, then
-; exits with its length: the sender's pid, the reply port, and open 1
-; /Volumes/data/a.
+; pid 1 mounts data and receives the request pid 2's open makes, after
+; the kernel's notice of pid 2's window, then exits with its length: the
+; sender's pid, the reply port, and open 1 /Volumes/data/a.
 (def test_open_routed_request () int
   (check_int "30 bytes"
-    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (exit_x0))) "data"))
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (receive_words (exit_x0)))) "data"))
                                (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a")) (nil Raw)))))
     30))
 
@@ -1082,12 +1082,12 @@
 (def receive_words ((ws (list int))) (list int)
   (cons (mov_x0_x19) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_receive)) ws)))))
 
-; The server, pid 1, answers handle 7, the u32 at its data byte 8, to the
-; reply port the request names, then waits for pid 2 and exits with its
-; status: the new stream, 3.
+; The server, pid 1, passes over the window notice, answers handle 7,
+; the u32 at its data byte 8, to the reply port the request names, then
+; waits for pid 2 and exits with its status: the new stream, 3.
 (def test_open_routed () int
   (check_int "stream 3"
-    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (answer_words 8))) (append (pad_to 8 "data") (u32_le 7))))
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (receive_words (answer_words 8)))) (append (pad_to 8 "data") (u32_le 7))))
                                (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a")) (nil Raw)))))
     3))
 
@@ -1106,6 +1106,138 @@
     (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a"))
                                (cons (Raw (flag_boot) (with_data (mount_words 0 4 (receive_words (cons (movz 0 0) (exit_x0)))) "data")) (nil Raw)))))
     -5))
+
+; ----------------------------------------------------------- file windows
+
+; pid 1 serves data with ws once it has mounted it; pid 2 opens
+; /Volumes/data/a, then does then.
+(def window_boot ((ws (list int)) (then (list int))) int
+  (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 ws) (append (pad_to 8 "data") (u32_le 7))))
+                             (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) then)) "/Volumes/data/a")) (nil Raw))))))
+
+; The 8 bytes received at byte off of the heap loaded into x0.
+(def heap_load ((off int)) (list int)
+  (cons (movz_hi 1 49216) (cons (if (eq off 0) (ldr_x0_x1) (ldr_x0_x1_8)) (nil int))))
+
+; The server's first message is the kernel's: from pid 0, wndw.
+(def test_window_notice () int
+  (check_int "pid 0, wndw"
+    (window_boot (receive_words (append (heap_load 0) (exit_x0))) (exit_x0))
+    (words 0 (le_u32 (bytes_from_list "wndw") 0))))
+
+; It names pid 2, the client, and a page of the server's device pages.
+(def test_window_notice_names () int
+  (let x (window_boot (receive_words (append (heap_load 8) (exit_x0))) (exit_x0))
+    (add (check_int "pid 2" (bit_and x 4294967295) 2)
+         (check_true "a device page" (ge (bit_shr x 32) 3892314112)))))
+
+; Once the request has come, the server holds the window's 16 pages
+; among its shared pages, as proc_info says of it: with an image page the
+; two share, at least 16.
+(def test_window_shared () int
+  (check_true "16 pages or more"
+    (ge (bit_shr (window_boot (receive_words (receive_words (info_words 1 64 (third_words)))) (exit_x0)) 32) 16)))
+
+; The server gives the window back as fs does once its client exits,
+; shm_unmap of the 16 pages at the address the notice names, its u32 at
+; byte 12: they are its shared pages, so 0.
+(def test_window_unmapped () int
+  (check_int "given back"
+    (window_boot (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 8) (cons (ldr_w0_x1_4)
+                   (cons (movz 1 16) (append (call_words (call_shm_unmap)) (exit_x0)))))))
+                 (exit_x0))
+    0))
+
+; A second open makes no second window: once the first is answered, the
+; server's next message is the second open's request, 30 bytes, not a
+; notice of 20.
+(def test_window_once () int
+  (check_int "the request"
+    (window_boot (receive_words (receive_words (send_answer 8 (receive_words (exit_x0)))))
+                 (append (open_words 0 15 1) (exit_x0)))
+    30))
+
+; The 4 bytes at data byte at sent to the reply port of the request in
+; the heap, then ws.
+(def send_answer ((at int) (ws (list int))) (list int)
+  (cons (movz_hi 1 49216) (cons (ldr_w0_x1_4)
+    (append (data_words 1 at) (cons (movz 2 4) (append (call_words (call_send)) ws))))))
+
+; A server whose device pages are all given, 24 shares of 16 MB, has no
+; room for a window: the open is refused err_fault, as dma_alloc is when
+; they have run out, and no request is sent. pid 1 is the client here, so
+; its status is the open's answer.
+(def test_window_no_room () int
+  (check_int "refused"
+    (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (exit_x0))) "/Volumes/data/a"))
+                               (cons (Raw (flag_boot) (with_data (shm_16s 24 (mount_words 0 4 (receive_words (exit_x0)))) "data")) (nil Raw)))))
+    (err_fault)))
+
+; pid 1 serves data, its handle 7 at data byte 8 and the u32 8 at 12,
+; with ws once it has mounted it; pid 2, its data cdata, opens
+; /Volumes/data/a, its stream in x19, then does then.
+(def window_io_boot ((ws (list int)) (cdata (list int)) (then (list int))) int
+  (boot (raw_initramfs (cons (Raw (flag_boot) (with_data (mount_words 0 4 ws) (append (pad_to 8 "data") (append (u32_le 7) (u32_le 8)))))
+                             (cons (Raw (flag_boot) (with_data (await_mount (append (open_words 0 15 1) (cons (mov_x19_x0) then))) cdata)) (nil Raw))))))
+
+; The server's first steps: the window notice received and its pages'
+; address kept in x20; the open received and answered handle 7; then
+; the next request received, and ws.
+(def window_served ((ws (list int))) (list int)
+  (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 8) (cons (ldr_w0_x1_4) (cons (mov_reg 20 0)
+    (receive_words (send_answer 8 (receive_words ws)))))))))
+
+; The client's write of the 8 bytes at its data byte 16 to stream x19.
+(def write_8_words () (list int)
+  (cons (mov_x0_x19) (append (data_words 1 16) (cons (movz 2 8) (call_words (sys_write))))))
+
+; A write's 8 bytes are in the server's window once its request comes,
+; the first 8 there, which it exits with.
+(def test_window_write () int
+  (check_int "hellowin"
+    (window_io_boot (window_served (cons (mov_reg 1 20) (cons (ldr_x0_x1) (exit_x0))))
+                    (append (pad_to 16 "/Volumes/data/a") "hellowin")
+                    (append (write_8_words) (exit_x0)))
+    (le_u64_at (bytes_from_list "hellowin") 0)))
+
+; Its request carries no bytes: the pid, the reply port, and writew 7 8,
+; 18 bytes.
+(def test_window_write_request () int
+  (check_int "18 bytes"
+    (window_io_boot (window_served (exit_x0))
+                    (append (pad_to 16 "/Volumes/data/a") "hellowin")
+                    (append (write_8_words) (exit_x0)))
+    18))
+
+; A server that gives its window up before its client writes, shm_unmap
+; of its 16 pages, has the kernel forget it: the write comes as before,
+; in the message, the pid, the reply port and write 7 hellowin, 24
+; bytes, and the kernel writes into no page the server no longer has.
+(def test_window_given_up () int
+  (check_int "24 bytes"
+    (window_io_boot (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 8) (cons (ldr_w0_x1_4)
+                      (cons (movz 1 16) (append (call_words (call_shm_unmap))
+                        (receive_words (send_answer 8 (receive_words (exit_x0))))))))))
+                    (append (pad_to 16 "/Volumes/data/a") "hellowin")
+                    (append (write_8_words) (exit_x0)))
+    24))
+
+; The server answers a read by storing 0x1234 at its window's start and
+; answering 8, the u32 at its data byte 12, then waits for the client:
+; the client's read gives 8, and its 8 bytes are 0x1234.
+(def window_read_served () (list int)
+  (window_served (cons (movz 0 4660) (cons (mov_reg 1 20) (cons (str_x0_x1) (answer_words 12))))))
+
+(def test_window_read () int
+  (check_int "0x1234"
+    (window_io_boot (window_read_served) "/Volumes/data/a"
+                    (append (read_x19) (cons (movz_hi 1 49216) (cons (ldr_x0_x1) (exit_x0)))))
+    4660))
+
+(def test_window_read_count () int
+  (check_int "8 bytes"
+    (window_io_boot (window_read_served) "/Volumes/data/a" (append (read_x19) (exit_x0)))
+    8))
 
 ; ----------------------------------------------------------------- freeing
 

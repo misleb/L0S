@@ -1,7 +1,7 @@
 # The Raspberry Pi 5
 
 ```
-make pi5-card     # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt
+make pi5-card     # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt, the device trees
 ```
 
 L0S builds for the Pi 5 and has booted on one over the network, to the
@@ -14,16 +14,21 @@ does three things:
 - builds the kernel with `--target pi5`, as `build/kernel-pi5.img`
 - builds the initramfs from `pi5/etc` and the same programs as QEMU's,
   as `build/pi5.cpio`, with the boot files in `/boot` too (below)
-- has `l0 card` write the boot partition's files into `build/pi5-card`
+- puts the board's device trees in `build/pi5-card` (see [Over the
+  network](#over-the-network) for where they come from), and has `l0
+  card` write the boot partition's other files beside them
 
-Copy them onto the boot partition of an SD card that holds Raspberry Pi's
-firmware, from Raspberry Pi OS. `l0 card`'s `config.txt` loads the image
+The firmware itself is in the Pi 5's EEPROM, so these are all the files
+a card's boot partition needs: copy them onto a FAT32 one, or onto the
+boot partition of a card Raspberry Pi OS made. A card holding only them
+has not yet been booted from (cards made so far also had Raspberry Pi
+OS's files). `l0 card`'s `config.txt` loads the image
 at 0x80000 and the initramfs at 0x10000000, leaves RP1 set up
 (`pciex4_reset=0`) and forces HDMI's hotplug.
 
 **Making a card from a running L0S.** The Pi 5's initramfs holds its own
 boot files in `/boot`, `l0.img`, `config.txt` and `cmdline.txt` as `l0
-card` writes them, so a running system, from its initramfs or a system
+card` writes them and the two device trees, so a running system, from its initramfs or a system
 volume, can make a card boot it, with no other computer, on any disk it
 can write ([FAT32 volumes](fat32.md#fat32-volumes)):
 
@@ -32,8 +37,7 @@ l0s> partition disk1 1048576 2048
 0199c82c-c07b-7123-8456-0123456789ab
 l0s> mkfs 0199c82c-c07b-7123-8456-0123456789ab BOOT fat32
 l0s> run install --boot BOOT
-install: 3 boot files and input.bin, an initramfs of 70 files, written to /Volumes/BOOT
-install: /Volumes/BOOT: no bcm2712-rpi-5-b.dtb; copy the Pi 5's device trees there from Raspberry Pi OS's boot partition
+install: 5 boot files and input.bin, an initramfs of 87 files, written to /Volumes/BOOT
 ```
 
 or Disks' Create Partition... and Format... with FAT32 chosen. `install
@@ -41,26 +45,52 @@ or Disks' Create Partition... and Format... with FAT32 chosen. `install
 volume, and writes `input.bin` beside them, an initramfs of every
 directory and file of `/` but `/Volumes`, a file at a time, so the card
 boots the system running now, `/boot` and all. The firmware is in the
-Pi 5's EEPROM, but it loads the board's device tree from the card, so
-`bcm2712-rpi-5-b.dtb` (C1) and `bcm2712d0-rpi-5-b.dtb` (D0), Raspberry
-Pi's, must be copied there too, as `install` says when they are not.
-Onto a card Raspberry Pi OS made, whose `bootfs` on its MBR holds them
-already, `run install --boot bootfs` is all; and its `config.txt` or
+Pi 5's EEPROM, but it loads the board's device tree from the card,
+`bcm2712-rpi-5-b.dtb` (C1) or `bcm2712d0-rpi-5-b.dtb` (D0), which
+`/boot` holds with the rest. A FROM without them is copied all the
+same, and `install` then says the volume has no device tree, to be
+copied there from Raspberry Pi OS's boot partition. Onto a card
+Raspberry Pi OS made, `run install --boot bootfs` writes over its
+device trees with `/boot`'s; and its `config.txt` or
 `cmdline.txt` can be changed in place with `write`, as on any volume.
+
+**A card that boots a system volume.** `install --boot VOLUME [FROM]
+--root ROOT` makes the card's `cmdline.txt` say `root=` and ROOT's
+UUID, after its other arguments, which it keeps, replacing any `root=`
+it had, so that `boot` makes ROOT `/` (see [Booting from a
+volume](boot.md#booting-from-a-volume)). ROOT is a volume `install
+ROOT` filled, on the same card or another disk; it is checked before
+anything is written. On a card Raspberry Pi OS made, its ext4 `rootfs`
+can be made L0FS first, by Disks' Format... or `mkfs` (see [FAT32
+volumes](fat32.md#fat32-volumes)):
+
+```
+l0s> mkfs 12345678-0000-0000-0000-000000000002 root
+l0s> run install root
+l0s> run install --boot bootfs --root root
+install: 5 boot files and input.bin, an initramfs of 87 files, written to /Volumes/bootfs
+install: /Volumes/bootfs/cmdline.txt boots /Volumes/root, root=12345678-0000-0000-0000-000000000002
+```
+
+A card made so has not yet been booted from.
 
 **Over the network.** The Pi 5 keeps its firmware in its EEPROM and can
 fetch the rest by TFTP:
 
 ```
-make pi5-netboot PI5_BOOT=DIR [PI5_TFTP_PREFIX=SERIAL]   # build/pi5-tftp
+make pi5-netboot [PI5_BOOT=DIR] [PI5_TFTP_PREFIX=SERIAL]   # build/pi5-tftp
 ```
 
 This copies the card's files and the board's device trees into
 `build/pi5-tftp`, the root a TFTP server serves. The device trees are
 `bcm2712-rpi-5-b.dtb` for the C1 stepping and `bcm2712d0-rpi-5-b.dtb`
-for D0. They are Raspberry Pi's, so `PI5_BOOT` names a directory that
-holds them: Raspberry Pi OS's boot partition, or `boot/` of
-raspberrypi/firmware. The Pi's bootloader asks in a directory named for
+for D0. They are Raspberry Pi's, built from Linux's sources (GPL-2.0),
+so the build fetches them once into `build/pi5-dtb`, from
+raspberrypi/firmware's `boot/` at the commit the Makefile pins
+(`PI5_DTB_COMMIT`), and keeps each only if its SHA-256 is the one
+`pi5/dtb.sha256` names, so every build has the same ones. `PI5_BOOT`
+names another directory holding both instead, as Raspberry Pi OS's
+boot partition, and nothing is fetched. The Pi's bootloader asks in a directory named for
 its serial number, 8 hex digits, which `PI5_TFTP_PREFIX` makes, unless
 its EEPROM says `TFTP_PREFIX=1` with no `TFTP_PREFIX_STR`.
 
@@ -74,9 +104,8 @@ proxy can for an existing network; with dnsmasq that is
 `enable-tftp` and `tftp-root=build/pi5-tftp`.
 
 `tools/pi5-boot` is the cycle for a board that network boots, with a
-DHCP server already naming this machine (option 66): it fetches the
-device trees once into `build/pi5-dtb`, runs `make pi5-netboot` with
-them, checks that a dnsmasq serves `build/pi5-tftp` (printing the `sudo
+DHCP server already naming this machine (option 66): it runs `make
+pi5-netboot`, with `PI5_BOOT` if given, checks that a dnsmasq serves `build/pi5-tftp` (printing the `sudo
 dnsmasq` command to run once if not, as port 69 needs root), and reads
 the debug UART, `/dev/ttyUSB0` or `PI5_SERIAL`, into
 `build/pi5-serial.log` while the board is power-cycled. `--until REGEX`

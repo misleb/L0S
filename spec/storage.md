@@ -115,7 +115,9 @@ removed could change, nor by the label of its volume, which a format
 could. The disk has one too. An entry holds the partition's type's
 UUID, its own, its first and last sectors, and a name of 36 characters,
 its volume's label for one `mkfs` or `tools/mkfs` made. L0FS's type is
-`4c304653-0001-4000-8000-4c30534c3046`, `L0FS` in its first field. The
+`4c304653-0001-4000-8000-4c30534c3046`, `L0FS` in its first field, and
+in an MBR, which only a disk made elsewhere has, `7F` (see [FAT32
+volumes](fat32.md#fat32-volumes)). The
 header and its entries are checked by CRC-32
 ([user/lib/format/crc32.l0](../user/lib/format/crc32.l0)), and copied in the disk's last
 33 sectors, which `fs` reads if the first copy is bad; it writes both,
@@ -191,17 +193,26 @@ damaged disk is refused rather than followed.
   FAT12, FAT16 or exFAT, nor a disk that is one FAT volume with no
   table; a name with a space, or past ASCII, is kept but unreachable,
   since a path cannot hold one; it holds no programs; and an MBR is
-  read, never written, its extended partitions not followed. One
+  read, its extended partitions not followed, and written only to
+  change a partition's type when `mkfs` makes a volume on it: L0S
+  makes no partitions in one. One
   file server, `fs`, serves the first disk's volumes, one request at a
-  time, and a read moves at most 4092 bytes, what a reply holds. A
-  write is as safe as the order it is made in, its data, a flush, and
-  then the metadata, and no more: a crash between the two loses the
-  write's changes to the file's size and chain; on a volume whose
-  metadata is more than a cluster, a crash between the table's sector
-  and the directory's leaves the two disagreeing, and `fs` refuses the
+  time, and a read or a write moves at most 64 KB, what a client's
+  file window holds (see [File windows](kernel.md#a-processs-memory)),
+  which `fs` copies in and out of with L0's `device_read_bytes` and
+  `device_write_bytes`, as it does its disk's buffer. A
+  file's writes are written as data alone, its clusters one after
+  another on the disk joined into requests of up to 32 KB, and the
+  metadata they change, the file's size and chain, is kept in `fs`'s
+  memory until the file is closed, or its client exits, when the disk is
+  flushed and then the metadata written. So a crash while a file is
+  open loses every write since it was opened, the data on the disk but
+  nothing pointing at it, which a reader of the file sees in the
+  meantime from `fs`'s memory. A crash during the close, on a volume
+  whose metadata is more than a cluster, between the table's sector and
+  the directory's, leaves the two disagreeing, and `fs` refuses the
   volume rather than follow it; and nothing flushes the metadata after
-  it, so a write answered may still be in the disk's cache. A flush
-  each write costs what the host's sync does. A file open
+  it, so a close answered may still be in the disk's cache. A file open
   cannot be removed or renamed over, where Unix would let it go once
   closed. Any process may mount a label no one has, as any may register
   a name. `unmount`, as a rescan, is refused while any file is open, on

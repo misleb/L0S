@@ -33,13 +33,14 @@
 #                    made anew
 #   make boot ETC=tests/e2e/hello/etc   boot every program with that etc
 #   make pi5-card    build/pi5-card: the kernel built for the Raspberry
-#                    Pi 5, every program with pi5/etc, and what l0 card
-#                    writes for its SD card's boot partition; untried
-#                    on a board. PI5_RAM_GB=N for a board of more than
+#                    Pi 5, every program with pi5/etc, its device trees,
+#                    and what l0 card writes for its SD card's boot
+#                    partition. PI5_RAM_GB=N for a board of more than
 #                    2 GB, here and for pi5-netboot
-#   make pi5-netboot PI5_BOOT=DIR [PI5_TFTP_PREFIX=SERIAL]
+#   make pi5-netboot [PI5_BOOT=DIR] [PI5_TFTP_PREFIX=SERIAL]
 #                    build/pi5-tftp: the same, with the Pi 5's device
-#                    trees from DIR, as a TFTP root it network boots from
+#                    trees, fetched once and checked, or from DIR, as a
+#                    TFTP root it network boots from
 #   make pi5-shell   pi5-netboot without hvs, then picocom on the Pi's
 #                    serial line to type to its shell (tools/pi5-boot)
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
@@ -734,10 +735,12 @@ demo-system: sysdisk
 
 # The Raspberry Pi 5, which nothing here can boot: the kernel built for
 # it, its initramfs, every program with pi5/etc, and the files its SD
-# card's boot partition needs beside the firmware's own, which l0 card
-# writes into build/pi5-card: the image, config.txt, cmdline.txt (the
-# boot arguments PI5_ARGS, as debug or root=UUID) and the initramfs. Copy them onto a card that holds
-# Raspberry Pi's firmware. The programs are the same images as on QEMU.
+# card's boot partition needs, in build/pi5-card: the board's device
+# trees (below), and what l0 card writes, the image, config.txt,
+# cmdline.txt (the boot arguments PI5_ARGS, as debug or root=UUID) and the
+# initramfs. The firmware itself is in the Pi 5's EEPROM, so copied onto
+# a FAT32 partition, they are all a card needs. The programs are the same
+# images as on QEMU.
 #
 # The kernel's heap keeps a record of every page it gives, about 285
 # bytes a page, 72 MB for each GB, and every page past its heap and stack
@@ -768,24 +771,60 @@ $(BUILD)/kernel-pi5.layout: FORCE | $(BUILD)
 $(BUILD)/kernel-pi5.img: $(KERNEL) kernel/main.l0 $(L0_PI5RT) $(BUILD)/kernel-pi5.layout | $(BUILD)
 	$(L0) build --target pi5 $(PI5_KERNEL_LAYOUT) $(KERNEL) kernel/main.l0 -o $@
 
+# The board's device trees, bcm2712-rpi-5-b.dtb for the C1 stepping and
+# bcm2712d0-rpi-5-b.dtb for D0, which its firmware loads from the card or
+# the TFTP root: fetched once into build/pi5-dtb from
+# raspberrypi/firmware's boot/ at PI5_DTB_COMMIT, its stable branch on
+# 2026-06-01 (kernel 6.18.33), the same bytes the board has booted with.
+# Each is kept only if its SHA-256 is pi5/dtb.sha256's, so every build
+# has the same ones; a new pin changes both. They are built from Linux's
+# device tree sources, GPL-2.0 (boot/COPYING.linux beside them there),
+# and go onto the board as they are. PI5_BOOT names another directory
+# holding both, Raspberry Pi OS's boot partition or
+# raspberrypi/firmware's boot/, and nothing is fetched.
+PI5_BOOT       ?=
+PI5_DTB_COMMIT := 12eeaa12865869b07db760f4bbb7507ec6f1976c
+PI5_DTB_URL    := https://raw.githubusercontent.com/raspberrypi/firmware/$(PI5_DTB_COMMIT)/boot
+PI5_DTB_NAMES  := bcm2712-rpi-5-b.dtb bcm2712d0-rpi-5-b.dtb
+PI5_DTB_DIR    := $(if $(PI5_BOOT),$(PI5_BOOT),$(BUILD)/pi5-dtb)
+PI5_DTBS       := $(addprefix $(PI5_DTB_DIR)/,$(PI5_DTB_NAMES))
+
+$(BUILD)/pi5-dtb/%.dtb: pi5/dtb.sha256 | $(BUILD)
+	@mkdir -p $(@D)
+	@command -v curl > /dev/null 2>&1 || { echo "pi5-dtb: curl is needed to fetch $*.dtb, once" >&2; exit 1; }
+	curl -fsSL -o $@.part $(PI5_DTB_URL)/$*.dtb
+	@echo "$$(grep ' $*.dtb$$' pi5/dtb.sha256 | cut -d' ' -f1)  $@.part" | sha256sum -c --quiet - \
+	  || { rm -f $@.part; echo "pi5-dtb: $*.dtb from $(PI5_DTB_URL) is not the one pi5/dtb.sha256 names" >&2; exit 1; }
+	mv $@.part $@
+
+# Given PI5_BOOT, its own device trees, and nothing fetched.
+ifneq ($(PI5_BOOT),)
+$(PI5_DTBS):
+	@test -f $@ || { echo "pi5: no $(notdir $@) in $(PI5_BOOT)" >&2; exit 1; }
+endif
+
 # The Pi's initramfs holds its own boot files too, in /boot: the image,
-# config.txt and cmdline.txt, as l0 card writes them, for install --boot
-# to make a card's boot partition of, input.bin and all, from the system
-# running. config.txt names input.bin and no size, so any will do; l0
-# card is given a byte of one, since with none it names none.
-pi5-initramfs: images root $(ETC_DEPS) $(BUILD)/kernel-pi5.img
+# config.txt and cmdline.txt, as l0 card writes them, and the device
+# trees, for install --boot to make a card's boot partition of, input.bin
+# and all, from the system running. config.txt names input.bin and no
+# size, so any will do; l0 card is given a byte of one, since with none
+# it names none. The device trees go in first, so that l0 card finds
+# them there and does not say the card lacks them.
+pi5-initramfs: images root $(ETC_DEPS) $(BUILD)/kernel-pi5.img $(PI5_DTBS)
 	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc
 	@for p in $(PI5_NO); do grep -v "^start $$p\( \|$$\)" $(BUILD)/pi5-etc/inittab > $(BUILD)/pi5-etc/inittab.new; mv $(BUILD)/pi5-etc/inittab.new $(BUILD)/pi5-etc/inittab; echo "pi5-initramfs: not starting $$p"; done
 	$(call stage_etc,$(BUILD)/pi5-etc)
 	rm -rf $(BUILD)/pi5-root && mkdir -p $(BUILD)/pi5-root/boot && cp -Rp $(ROOT)/. $(BUILD)/pi5-root/
+	cp $(PI5_DTBS) $(BUILD)/pi5-root/boot/
 	printf x | $(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-root/boot
 	rm -f $(BUILD)/pi5-root/boot/input.bin && chmod 644 $(BUILD)/pi5-root/boot/*
 	tools/mkinitramfs $(BUILD)/pi5.cpio $(BUILD)/pi5-etc $(BUILD)/pi5-root
 
-pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs
+pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs $(PI5_DTBS)
 	rm -rf $(BUILD)/pi5-card && mkdir -p $(BUILD)/pi5-card
+	cp $(PI5_DTBS) $(BUILD)/pi5-card/
 	$(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-card $(PI5_ARGS) < $(BUILD)/pi5.cpio
-	@echo "build/pi5-card: copy its files onto the boot partition of a card with Raspberry Pi's firmware"
+	@echo "build/pi5-card: copy its files onto a FAT32 partition of an SD card for a Pi 5"
 
 # The same booted over the network: build/pi5-tftp, a TFTP server's root,
 # holding what the Pi 5's bootloader fetches by TFTP once DHCP names the
@@ -795,19 +834,14 @@ pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs
 # in a directory named for the board's serial number unless its EEPROM
 # says TFTP_PREFIX=1 with an empty TFTP_PREFIX_STR: PI5_TFTP_PREFIX is
 # that directory, the 8 hex digits, or empty for the root. The device
-# trees, bcm2712-rpi-5-b.dtb for the C1 stepping and bcm2712d0-rpi-5-b.dtb
-# for D0, are Raspberry Pi's: PI5_BOOT names a directory holding them,
-# Raspberry Pi OS's boot partition or raspberrypi/firmware's boot/.
+# trees are the card's, as above.
 .PHONY: pi5-netboot
-PI5_BOOT        ?=
 PI5_TFTP_PREFIX ?=
 PI5_TFTP        := $(BUILD)/pi5-tftp$(if $(PI5_TFTP_PREFIX),/$(PI5_TFTP_PREFIX))
 
 pi5-netboot: pi5-card
-	@test -n "$(PI5_BOOT)" || { echo "pi5-netboot: give PI5_BOOT=DIR, a directory holding bcm2712-rpi-5-b.dtb: Raspberry Pi OS's boot partition, or raspberrypi/firmware's boot/" >&2; exit 1; }
-	@ls $(PI5_BOOT)/bcm2712*-rpi-5-b.dtb > /dev/null 2>&1 || { echo "pi5-netboot: no bcm2712*-rpi-5-b.dtb in $(PI5_BOOT)" >&2; exit 1; }
 	rm -rf $(BUILD)/pi5-tftp && mkdir -p $(PI5_TFTP)
-	cp $(BUILD)/pi5-card/* $(PI5_BOOT)/bcm2712*-rpi-5-b.dtb $(PI5_TFTP)/
+	cp $(BUILD)/pi5-card/* $(PI5_TFTP)/
 	@echo "$(PI5_TFTP): serve $(BUILD)/pi5-tftp as a TFTP root, with DHCP naming it (option 66), to a Pi 5 whose BOOT_ORDER tries the network"
 
 clean:

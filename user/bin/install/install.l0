@@ -9,11 +9,15 @@
 ; install --boot VOLUME [FROM] makes VOLUME, a FAT32 volume, a Raspberry
 ; Pi 5's boot partition instead: the files of FROM, /boot unless given,
 ; which the Pi 5's initramfs holds as l0 card writes them (l0.img,
-; config.txt, cmdline.txt), copied onto its root, and input.bin written
+; config.txt, cmdline.txt) with the board's device trees, copied onto
+; its root, and input.bin written
 ; beside them, an initramfs of every directory and file of / but
 ; /Volumes, written a file at a time, so that the card boots the system
 ; running now, /boot and all. With Raspberry Pi's firmware on the card's
-; EEPROM, as a Pi 5's is, that is all a card needs.
+; EEPROM, as a Pi 5's is, that is all a card needs. --root ROOT, a
+; volume install VOLUME filled, anywhere after VOLUME, makes the card's
+; cmdline.txt say root= and ROOT's UUID, its other words kept, so that
+; boot makes ROOT /; it is checked before anything is written.
 
 ; Says why, as install, and fails.
 (def complain ((why (list int))) int (complain_as "install" why))
@@ -170,8 +174,10 @@
 ; The Raspberry Pi 5's boot partition made of vol: each file of from
 ; copied onto it, the image, config.txt and cmdline.txt as l0 card
 ; writes them, and input.bin, an initramfs of every directory and file
-; of / but /Volumes, so that the card boots the system running now.
-(def boot_on ((vol (list int)) (from (list int))) int
+; of / but /Volumes, so that the card boots the system running now;
+; with u, a root's UUID, not empty, its cmdline.txt made to boot root,
+; root=u.
+(def boot_on ((vol (list int)) (from (list int)) (root (list int)) (u (list int))) int
   (let why (volume_why vol)
     (if (not (is_empty why))
         (complain why)
@@ -181,10 +187,15 @@
                 (complain (append (drop_last from) ": no boot files; the Raspberry Pi 5's initramfs has them in /boot"))
                 (match (boot_copied vol files 0)
                   ((CopyStopped why2) (complain why2))
-                  ((Copied n) (boot_archived vol n (to_copy paths))))))))))
+                  ((Copied n)
+                    (let why3 (if (is_empty u) "" (root_set vol u))
+                      (if (is_empty why3)
+                          (boot_archived vol n (to_copy paths) (if (is_empty u) "" (root_line vol root u)))
+                          (complain why3)))))))))))
 
-; input.bin written to vol, of paths, once n boot files are copied.
-(def boot_archived ((vol (list int)) (n int) (paths (list (list int)))) int
+; input.bin written to vol, of paths, once n boot files are copied, and
+; then said, with rooted, what was said of the root, after.
+(def boot_archived ((vol (list int)) (n int) (paths (list (list int))) (rooted (list int))) int
   (let out (append vol "/input.bin")
     (match (open_out out)
       ((IoFailed fault why) (complain (append out (append ": " why))))
@@ -194,7 +205,7 @@
           ((Archived size)
             (let why (done_why (file_close f))
               (if (is_empty why)
-                  (let w (say (append (boot_line vol n (file_count paths)) (dtb_note vol (has_dtb (vol_names vol))))) 0)
+                  (let w (say (append (boot_line vol n (file_count paths)) (append rooted (dtb_note vol (has_dtb (vol_names vol)))))) 0)
                   (complain (append out (append ": " why)))))))))))
 
 ; The names in vol's root, a directory's with its final /.
@@ -209,7 +220,7 @@
       (if (if (starts_with (head names) "bcm2712") (ends_with (head names) ".dtb") false) true (has_dtb (tail names)))))
 
 ; What install --boot says of vol's device tree: nothing if it has one;
-; else that it must be copied there, as onto any card l0 card makes.
+; else that it must be copied there, as from a FROM that had none.
 (def dtb_note ((vol (list int)) (has bool)) (list int)
   (if has
       ""
@@ -217,15 +228,97 @@
 
 ; ---------------------------------------------------------------- running
 
-; install VOLUME, or install --boot VOLUME [FROM], as the arguments say.
+; install VOLUME, or install --boot VOLUME [FROM] [--root ROOT], as the
+; arguments say.
 (def install () int
   (if (if (ge (arg_count) 2) (eq (arg 0) "--boot") false)
-      (if (gt (arg_count) 3)
-          (complain "usage: install --boot VOLUME [FROM]")
-          (boot_on (volume_named (arg 1)) (boot_dir (if (eq (arg_count) 3) (arg 2) "/boot"))))
+      (match (boot_words (args_list 1))
+        ((BootBad) (complain "usage: install --boot VOLUME [FROM] [--root ROOT]"))
+        ((BootArgs vol from root) (boot_rooted (volume_named vol) (boot_dir from) root)))
       (if (not (eq (arg_count) 1))
-          (complain "usage: install VOLUME, or install --boot VOLUME [FROM]")
+          (complain "usage: install VOLUME, or install --boot VOLUME [FROM] [--root ROOT]")
           (install_on (volume_named (arg 0))))))
+
+; The arguments from i on, as a list.
+(def args_list ((i int)) (list (list int))
+  (if (ge i (arg_count)) (nil (list int)) (cons (arg i) (args_list (add i 1)))))
+
+; What install --boot's words after --boot ask: the volume, FROM, /boot
+; unless given, and the root volume named by --root, empty for none,
+; which may come anywhere after the volume.
+(data BootAsked (BootArgs (list int) (list int) (list int)) (BootBad))
+
+; What ws, the words after --boot, ask.
+(def boot_words ((ws (list (list int)))) BootAsked
+  (boot_words_from ws (nil (list int)) ""))
+
+; boot_words, with the words not --root's, plain, and root so far.
+(def boot_words_from ((ws (list (list int))) (plain (list (list int))) (root (list int))) BootAsked
+  (if (is_empty ws)
+      (let ps (rev plain)
+        (if (is_empty ps)
+            (BootBad)
+            (if (gt (length ps) 2)
+                (BootBad)
+                (BootArgs (head ps) (if (is_empty (tail ps)) "/boot" (nth ps 1)) root))))
+      (if (eq (head ws) "--root")
+          (if (if (is_empty (tail ws)) true (not (is_empty root)))
+              (BootBad)
+              (boot_words_from (tail (tail ws)) plain (head (tail ws))))
+          (boot_words_from (tail ws) (cons (head ws) plain) root))))
+
+; A card's cmdline.txt, text, made to boot the volume whose UUID is u:
+; its words kept but any root=, which root=u replaces, after them;
+; --l0-args first if it had none, so that the firmware's own arguments,
+; which it puts before the file's, are not the kernel's.
+(def cmdline_rooted ((text (list int)) (u (list int))) (list int)
+  (let ws (not_root (split_spaces (trim_line text)))
+    (append (unwords (append (if (any_eq "--l0-args" ws) ws (cons "--l0-args" ws))
+                             (cons (append "root=" u) (nil (list int)))))
+            "\n")))
+
+; ws without any root= word.
+(def not_root ((ws (list (list int)))) (list (list int))
+  (if (is_empty ws)
+      ws
+      (if (starts_with (head ws) "root=") (not_root (tail ws)) (cons (head ws) (not_root (tail ws))))))
+
+; text without its line ends, which split_spaces would keep in a word.
+(def trim_line ((text (list int))) (list int)
+  (if (is_empty text)
+      text
+      (cons (if (any_eq (head text) (cons 10 (cons 13 (nil int)))) 32 (head text)) (trim_line (tail text)))))
+
+; What install --boot says of the root it set: the file, the volume and
+; its UUID.
+(def root_line ((vol (list int)) (root (list int)) (u (list int))) (list int)
+  (append "install: " (append vol (append "/cmdline.txt boots " (append root (append ", root=" (append u "\n")))))))
+
+; Why root may not be the root the card boots, or empty: a mounted
+; volume with a UUID, not vol, the boot partition itself.
+(def root_why ((vol (list int)) (root (list int)) (u (list int))) (list int)
+  (if (eq root vol)
+      (append root ": the boot volume; the root is another, which install VOLUME fills")
+      (if (eq (fs_port_of root) 0)
+          (append root ": no such volume is mounted")
+          (if (is_empty u) (append root ": it has no partition UUID to boot it by") ""))))
+
+; boot_on, and with a root, cmdline.txt made to boot it: the root
+; checked first, before anything is written.
+(def boot_rooted ((vol (list int)) (from (list int)) (root (list int))) int
+  (if (is_empty root)
+      (boot_on vol from "" "")
+      (let r (volume_named root)
+        (let u (uuid_of (mount_list) r)
+          (let why (root_why vol r u)
+            (if (is_empty why) (boot_on vol from r u) (complain why)))))))
+
+; vol's cmdline.txt, or none, made to boot root=u: why not, or empty.
+(def root_set ((vol (list int)) (u (list int))) (list int)
+  (let p (append vol "/cmdline.txt")
+    (let old (match (read_whole p) ((Err why) "") ((Ok b) (bytes_to_list b)))
+      (let why (write_whole p (bytes_from_list (cmdline_rooted old u)))
+        (if (is_empty why) "" (append p (append ": " why)))))))
 
 ; Why install may not write to vol, or empty: it must be a mounted
 ; volume, and not /.

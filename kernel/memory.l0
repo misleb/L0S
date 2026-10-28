@@ -336,25 +336,26 @@
 
 ; For each frame mapped at device pages or shared as an image's, how many
 ; mappings of it live processes have, a driver's device pages counting
-; for good; and the image segments shared, by the hash of their bytes.
-(data Mem (Mem (Map int int) (Map int (list ImageSeg))))
+; for good; the image segments shared, by the hash of their bytes; and
+; the file windows.
+(data Mem (Mem (Map int int) (Map int (list ImageSeg)) (list Window)))
 
 ; The counts before any process maps a device page: none.
-(def mem_new () Mem (Mem ((MapEmpty int int)) ((MapEmpty int (list ImageSeg)))))
+(def mem_new () Mem (Mem ((MapEmpty int int)) ((MapEmpty int (list ImageSeg))) (nil Window)))
 
 ; How many frames m counts mappings of: every shared, DMA and image frame
 ; shared still given, each once, however many processes map it.
-(def mem_shared_frames ((m Mem)) int (match m ((Mem counts imgs) (map_size counts))))
+(def mem_shared_frames ((m Mem)) int (match m ((Mem counts imgs wins) (map_size counts))))
 
 ; How many mappings of frame f m counts, 0 for a frame it does not know.
 (def mem_count ((m Mem) (f int)) int
-  (match m ((Mem counts imgs) (match (map_get counts f) ((Some n) n) ((None) 0)))))
+  (match m ((Mem counts imgs wins) (match (map_get counts f) ((Some n) n) ((None) 0)))))
 
 ; m with one more mapping of f at a live process's device pages, or of
 ; an image segment's.
 (def mem_share ((m Mem) (f int)) Mem
   (let n (mem_count m f)
-    (match m ((Mem counts imgs) (Mem (map_put counts f (add n 1)) imgs)))))
+    (match m ((Mem counts imgs wins) (Mem (map_put counts f (add n 1)) imgs wins)))))
 
 ; m with one more mapping of each of fs.
 (def mem_share_all ((m Mem) (fs (list int))) Mem
@@ -367,7 +368,7 @@
 ; the kernel compares to be sure.
 (def mem_image_candidates ((m Mem) (key int) (va int) (len int) (perm int)) (list ImageSeg)
   (match m
-    ((Mem counts imgs)
+    ((Mem counts imgs wins)
       (match (map_get imgs key)
         ((None) (nil ImageSeg))
         ((Some segs) (segs_at segs va len perm (nil ImageSeg)))))))
@@ -393,10 +394,10 @@
 ; mapping more of each.
 (def mem_image_join ((m Mem) (key int) (g ImageSeg) (s int)) Mem
   (match (mem_share_all m (image_seg_frames g))
-    ((Mem counts imgs)
+    ((Mem counts imgs wins)
       (match (map_get imgs key)
-        ((None) (Mem counts imgs))
-        ((Some segs) (Mem counts (map_put imgs key (segs_joined segs g s (nil ImageSeg)))))))))
+        ((None) (Mem counts imgs wins))
+        ((Some segs) (Mem counts (map_put imgs key (segs_joined segs g s (nil ImageSeg))) wins))))))
 
 ; segs onto acc, in order, with s among the spaces of the one that is g.
 (def segs_joined ((segs (list ImageSeg)) (g ImageSeg) (s int) (acc (list ImageSeg))) (list ImageSeg)
@@ -412,16 +413,16 @@
 ; with perm, its pages' frames fs, which space s alone maps so far.
 (def mem_image_new ((m Mem) (key int) (va int) (len int) (perm int) (fs (list int)) (s int)) Mem
   (match (mem_share_all m fs)
-    ((Mem counts imgs)
+    ((Mem counts imgs wins)
       (let segs (match (map_get imgs key) ((None) (nil ImageSeg)) ((Some gs) gs))
-        (Mem counts (map_put imgs key (cons (ImageSeg va len perm fs (cons s (nil int))) segs)))))))
+        (Mem counts (map_put imgs key (cons (ImageSeg va len perm fs (cons s (nil int))) segs)) wins)))))
 
 ; m once space s maps no segment: s taken from each, and a segment no
 ; space maps any more forgotten. Its frames' counts are mem_release's.
 (def mem_image_leave ((m Mem) (s int)) Mem
   (match m
-    ((Mem counts imgs)
-      (Mem counts (images_without imgs (map_keys imgs) s)))))
+    ((Mem counts imgs wins)
+      (Mem counts (images_without imgs (map_keys imgs) s) wins))))
 
 ; imgs with s taken from the segments at keys, and a key with none left
 ; dropped.
@@ -446,7 +447,7 @@
 
 ; How many segments m shares.
 (def mem_image_count ((m Mem)) int
-  (match m ((Mem counts imgs) (sum_lengths (map_values imgs) 0))))
+  (match m ((Mem counts imgs wins) (sum_lengths (map_values imgs) 0))))
 
 ; n and the lengths of each of ls.
 (def sum_lengths ((ls (list (list ImageSeg))) (n int)) int
@@ -493,7 +494,122 @@
 (def mem_unshare ((m Mem) (f int)) Unshared
   (let n (mem_count m f)
     (match m
-      ((Mem counts imgs)
+      ((Mem counts imgs wins)
         (if (gt n 1)
-            (Unshared (Mem (map_put counts f (sub n 1)) imgs) false)
-            (Unshared (Mem (map_remove counts f) imgs) true))))))
+            (Unshared (Mem (map_put counts f (sub n 1)) imgs wins) false)
+            (Unshared (Mem (map_remove counts f) imgs wins) true))))))
+
+; ---------------------------------------------------------------- windows
+
+; A file window: pages the kernel maps into a file server's device pages
+; for one client's file calls to it, which the kernel copies a call's
+; bytes through (spec, The kernel). Its client's pid, the server's pid
+; and port, where the server reaches it, and the server's space. The
+; server unmaps it once told its client has exited; the kernel forgets it
+; then, when the server ends, and when the server unmaps any page of it
+; or has one taken back, so that a window the kernel keeps is always
+; mapped whole, in a space still the server's, for space_read and
+; space_write, which reach only what is mapped. The copies need no look
+; at the server's record, which is out of the table while it makes the
+; call that answers a read.
+(data Window (Window int int int int int))
+
+; The pages of a window: 64 KB, as many as a disk request moves.
+(def window_pages () int 16)
+
+; m's windows.
+(def mem_windows ((m Mem)) (list Window) (match m ((Mem counts imgs wins) wins)))
+
+; m with its windows ws.
+(def mem_with_windows ((m Mem) (ws (list Window))) Mem
+  (match m ((Mem counts imgs wins) (Mem counts imgs ws))))
+
+; Where the server at port reaches client's window, or -1 if client has
+; none to it.
+(def mem_window_at ((m Mem) (client int) (port int)) int
+  (window_va (mem_windows m) client port))
+
+; The rest of mem_window_at, among ws.
+(def window_va ((ws (list Window)) (client int) (port int)) int
+  (if (is_empty ws)
+      -1
+      (match (head ws)
+        ((Window c sp p va s) (if (if (eq c client) (eq p port) false) va (window_va (tail ws) client port))))))
+
+; The server's pid client's window to port has, or -1 if it has none.
+(def mem_window_server ((m Mem) (client int) (port int)) int
+  (window_server (mem_windows m) client port))
+
+; The rest of mem_window_server, among ws.
+(def window_server ((ws (list Window)) (client int) (port int)) int
+  (if (is_empty ws)
+      -1
+      (match (head ws)
+        ((Window c sp p va s) (if (if (eq c client) (eq p port) false) sp (window_server (tail ws) client port))))))
+
+; The space of the server of client's window to port, or -1 if it has
+; none.
+(def mem_window_space ((m Mem) (client int) (port int)) int
+  (window_space_of (mem_windows m) client port))
+
+; The rest of mem_window_space, among ws.
+(def window_space_of ((ws (list Window)) (client int) (port int)) int
+  (if (is_empty ws)
+      -1
+      (match (head ws)
+        ((Window c sp p va s) (if (if (eq c client) (eq p port) false) s (window_space_of (tail ws) client port))))))
+
+; The bytes a window holds.
+(def window_bytes () int (mul (window_pages) 4096))
+
+; m without the windows server sp no longer maps whole in pages, which
+; it has unmapped a page of, or had one taken back.
+(def mem_windows_mapped ((m Mem) (sp int) (pages (Map int int))) Mem
+  (mem_with_windows m (windows_mapped (mem_windows m) sp pages)))
+
+; The rest of mem_windows_mapped, among ws.
+(def windows_mapped ((ws (list Window)) (sp int) (pages (Map int int))) (list Window)
+  (if (is_empty ws)
+      ws
+      (match (head ws)
+        ((Window c s2 p va s)
+          (if (if (eq s2 sp) (not (pages_all pages va (window_pages))) false)
+              (windows_mapped (tail ws) sp pages)
+              (cons (head ws) (windows_mapped (tail ws) sp pages)))))))
+
+; Whether pages maps each of the n pages from va.
+(def pages_all ((pages (Map int int)) (va int) (n int)) bool
+  (if (le n 0) true (if (map_has pages va) (pages_all pages (add va (page_size)) (sub n 1)) false)))
+
+; m with w.
+(def mem_window_add ((m Mem) (w Window)) Mem
+  (mem_with_windows m (cons w (mem_windows m))))
+
+; m without client's window to port, taken back before its server knew.
+(def mem_window_drop ((m Mem) (client int) (port int)) Mem
+  (mem_with_windows m (window_without (mem_windows m) client port)))
+
+; ws without client's window to port.
+(def window_without ((ws (list Window)) (client int) (port int)) (list Window)
+  (if (is_empty ws)
+      ws
+      (match (head ws)
+        ((Window c sp p va s)
+          (if (if (eq c client) (eq p port) false)
+              (tail ws)
+              (cons (head ws) (window_without (tail ws) client port)))))))
+
+; m without the windows pid is the client or the server of, pid having
+; ended.
+(def mem_windows_forget ((m Mem) (pid int)) Mem
+  (mem_with_windows m (windows_not (mem_windows m) pid)))
+
+; ws without those pid is the client or the server of.
+(def windows_not ((ws (list Window)) (pid int)) (list Window)
+  (if (is_empty ws)
+      ws
+      (match (head ws)
+        ((Window c sp p va s)
+          (if (if (eq c pid) true (eq sp pid))
+              (windows_not (tail ws) pid)
+              (cons (head ws) (windows_not (tail ws) pid)))))))

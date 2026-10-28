@@ -12,11 +12,11 @@ volume once `/` is one, sends them to the volume's file server, as
 
 | Call | What the kernel does |
 |---|---|
-| open | modes 1 to 3, else -5. In the initramfs, to read: a new stream (3 and up), or -3 no such file, -8 a directory, -5 if the process has 16 open. To write: -8 a directory, -4 where the directory exists, -9 where it does not. In a volume: a new stream, once its server opens the file. A relative path is taken from the current directory (calls 290, 291), `/` to begin with, and its `.` and `..` taken out; one over 1024 bytes once made absolute is -5 |
-| read | stream 0 reads a line from the process's terminal, if it has one (see Terminals), and otherwise the inittab's `stdin` file, with one cursor for everyone, until the initramfs is given up. Other streams read the file opened on them, from where the process left off, 0 at the end; a volume's at most 4092 bytes a call; one of the initramfs's, once it is given up, reads as at its end |
+| open | modes 1 to 3, else -5. In the initramfs, to read: a new stream (3 and up), or -3 no such file, -8 a directory, -5 if the process has 16 open. To write: -8 a directory, -4 where the directory exists, -9 where it does not. In a volume: a new stream, once its server opens the file; -5 if the process's first file window to that server cannot be made (see [File windows](kernel.md#a-processs-memory)). A relative path is taken from the current directory (calls 290, 291), `/` to begin with, and its `.` and `..` taken out; one over 1024 bytes once made absolute is -5 |
+| read | stream 0 reads a line from the process's terminal, if it has one (see Terminals), and otherwise the inittab's `stdin` file, with one cursor for everyone, until the initramfs is given up. Other streams read the file opened on them, from where the process left off, 0 at the end; a volume's at most 64 KB a call, through the process's file window to its server, or 4092 bytes, in the reply, with none; one of the initramfs's, once it is given up, reads as at its end |
 | close | 0, or -5 for a stream that isn't open; a volume's file is closed by its server too |
 | rename, remove | in the initramfs, -3 if there's no such file; otherwise -4 (-8 to remove a directory). In a volume, as its server says; between two file systems, -10 |
-| write | streams 1 and 2 go to the process's terminal, if it has one, at most 4091 bytes per call, waiting while its queue is full; otherwise to the kernel's stdout and stderr, at most 64 KiB per call. A stream open on a volume's file is written by its server, a message's worth a call; any other is -5 |
+| write | streams 1 and 2 go to the process's terminal, if it has one, at most 4091 bytes per call, waiting while its queue is full; otherwise to the kernel's stdout and stderr, at most 64 KiB per call. A stream open on a volume's file is written by its server, up to 64 KB a call through the process's file window to it, or a message's worth with none; any other is -5 |
 | exit | the process ends with that status |
 | arg_count, arg | the process's arguments: those it was spawned with by `spawn_entry_with` or `spawn_image`, or else the inittab's `args` for its path |
 | region | maps device registers for programs with a `dev` line, so `open_device` works, or for a range of the caller's DMA pages, returns where they are; -3 for any other |
@@ -99,10 +99,13 @@ what it needs where it is, and makes a list of a payload only to read it
 as text. A header and a body that must become one message are joined
 with `bytes_concat`, and a part of one is cut with `bytes_slice`, so
 neither goes through a list
-([probes/bytes](../probes/bytes/REQUEST-bytes-slice-join.md)). What still
-does: a device's memory, read a byte at a time (a disk's buffer, a
-frame a card received), and TCP's data, which its reassembly holds as
-lists.
+([probes/bytes](../probes/bytes/REQUEST-bytes-slice-join.md)), and memory
+a process shares or gives a device, a disk's buffer, a file window, a
+frame a card received, is copied to and from bytes at once
+(`get_bytes_in`, `put_bytes_range`;
+[probes/bytes](../probes/bytes/REQUEST-region-bytes.md)). What still
+goes through a list: a device's registers, read a byte at a time, and
+TCP's data, which its reassembly holds as lists.
 
 When a process exits or is killed, its ports, names, interrupt bindings and
 open files go with it. Whoever waits for it is woken with its status, and

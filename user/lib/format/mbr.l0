@@ -10,9 +10,10 @@
 ;                   sector at 8 and the sectors at 12, u32s
 ;   bytes 510-511   55 AA
 ;
-; Extended partitions (05, 0F) are not followed. L0S never writes an MBR
-; but GPT's protective one (gpt.l0). Linked with common/abi.l0 and
-; user/lib/format/uuid.l0.
+; Extended partitions (05, 0F) are not followed. L0S never makes an MBR
+; but GPT's protective one (gpt.l0); of one made elsewhere it changes
+; only a partition's type byte, when mkfs makes a volume there
+; (mbr_with_type). Linked with common/abi.l0 and user/lib/format/uuid.l0.
 
 ; Where the signature and the entries are, and how many entries.
 (def mbr_sig_at () int 440)
@@ -25,6 +26,12 @@
 ; The types of a FAT32 partition: 0B, CHS; 0C, LBA; and EF, an EFI
 ; system partition.
 (def mbr_fat_types () (list int) (cons 11 (cons 12 (cons 239 (nil int)))))
+
+; The types mkfs gives a partition it makes a volume on: FAT32's 0C,
+; LBA; and L0FS's 7F, the type set aside for an operating system of
+; one's own, which no other system mounts.
+(def mbr_fat_lba_type () int 12)
+(def mbr_l0fs_type () int 127)
 
 ; A partition: its number in the table, from 1; its type; its first
 ; sector; and its sectors.
@@ -89,6 +96,31 @@
           (cons (head ps) (mbr_fat_parts (tail ps)))
           (mbr_fat_parts (tail ps)))))
 
+; The partitions of ps of type ty, in order.
+(def mbr_typed ((ps (list MbrPart)) (ty int)) (list MbrPart)
+  (if (is_empty ps)
+      (nil MbrPart)
+      (if (eq (mbr_part_type (head ps)) ty)
+          (cons (head ps) (mbr_typed (tail ps) ty))
+          (mbr_typed (tail ps) ty))))
+
+; The partition of ps, of a disk whose signature is sig, known by u, as
+; mbr_part_uuid makes it; None if none is.
+(def mbr_part_of ((ps (list MbrPart)) (sig int) (u Uuid)) (Option MbrPart)
+  (if (is_empty ps)
+      ((None MbrPart))
+      (if (eq (mbr_part_uuid sig (mbr_part_number (head ps))) u)
+          (Some (head ps))
+          (mbr_part_of (tail ps) sig u))))
+
+; Sector 0, b, with partition k's type ty, every other byte as it was:
+; the boot code, the signature, and the other entries kept.
+(def mbr_with_type ((b bytes) (k int) (ty int)) bytes
+  (let at (add (mbr_entries_at) (add (mul (sub k 1) 16) 4))
+    (bytes_concat (cons (bytes_slice b 0 at)
+                    (cons (bytes_from_list (cons ty (nil int)))
+                      (cons (bytes_slice b (add at 1) (bytes_len b)) (nil bytes)))))))
+
 ; The UUID a partition of a disk whose signature is sig, number k, is
 ; known by: the signature's four bytes, most significant first, then
 ; zeros, and k in the last byte, as SSSSSSSS-0000-0000-0000-0000000000KK.
@@ -101,11 +133,13 @@
                       (cons (bit_and sig 255) (nil int)))))
                 (append (zeros 11) (cons (bit_and k 255) (nil int))))))
 
-; The name of a partition's type, for Disks: FAT32's and EFI's in words,
-; any other in hexadecimal.
+; The name of a partition's type, for Disks: FAT32's, EFI's and L0FS's
+; in words, any other in hexadecimal.
 (def mbr_type_text ((ty int)) (list int)
   (if (any_eq ty (cons 11 (cons 12 (nil int))))
       (append "FAT32 (0x" (append (hex_digits ty 2) ")"))
       (if (eq ty 239)
           "EFI system (0xEF)"
-          (append "MBR type 0x" (hex_digits ty 2)))))
+          (if (eq ty (mbr_l0fs_type))
+              "L0FS (0x7f)"
+              (append "MBR type 0x" (hex_digits ty 2))))))

@@ -28,3 +28,10 @@ To be written. The limit's own measurements are the starting point.
 ## Log
 
 - 2026-10-26: written from kernel.md's Limits.
+- 2026-10-27: most of what this measures, writing to a disk, is file
+  data in 4 KB messages, a round trip of hand-offs between CPUs each
+  (caller, kernel, `fs`, the disk driver, and back). 0023 moves it in
+  requests of 64 KB through shared pages, about a sixteenth as many
+  hand-offs, and times `install` and `install_boot` on one CPU and on
+  four before and after; its numbers will be logged here too. Measure
+  again once it lands, before working on this.

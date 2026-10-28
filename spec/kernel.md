@@ -212,6 +212,34 @@ buffers, the content's and the chrome's: the driver once the screen
 no longer shows them, on `forget`, and `wm` after that. So a closed
 window's memory is freed once its `vt` has ended too.
 
+**File windows.** The first time a process opens a file on a volume
+whose server is another live process, the kernel maps 16 fresh pages,
+64 KB, into that server's device pages, the process's window to it
+([kernel/memory.l0](../kernel/memory.l0)'s `Window`). It tells the
+server first, by a `window_notice` from pid 0 on the server's port
+(`wndw`, then the client's pid, the pages' address and their count,
+u32s), which no process can send, so the server never takes a page it
+was not given for one. The notice is queued before the open's request,
+on the same port. A queue with no room for it has the window taken back
+at once, and the open waits for room as any request does. Later opens
+reuse the window, one a client per server. A server with no device
+pages left, or a kernel out of frames or near its heap's reserve, has
+the open refused -5. The server gives the window back with `shm_unmap`
+once its client exits, which it watches: `fs` does. The kernel forgets
+the window then, and when the server ends, its pages freed with its
+other shared pages, so it never writes into a pid given again. It also
+forgets a window once the server unmaps any page of it, or has one
+taken back, so one it keeps is always mapped whole.
+
+A file `write` of the process to that server copies up to 64 KB of its
+buffer into the window (`space_write`) and sends `writew H N`, with no
+bytes in the message; a `read` sends `readw H N`, and once the server
+answers how many bytes it put at the window's start, copies those into
+the process's buffer (`space_read`). A call of more is answered with
+what one request moved, as before, and the runtime asks again. With no
+window, as for a server that is the caller itself or gave its window
+up, both go in messages as they did, 4 KB a request.
+
 **Releasing.** While a process runs, its runtime names the whole heap
 pages that its allocator has freed by call 12, `release` (spec §10.3).
 The kernel unmaps each one it has mapped and frees its frame, and a later

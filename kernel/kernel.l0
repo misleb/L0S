@@ -268,6 +268,88 @@
         ((Shared m2 q2 v) (KShared (Kernel slots ready ipc ss irqs boot next m2 cpus) q2 v))
         ((ShareRefused m2 q2 code) (KShared (Kernel slots ready ipc ss irqs boot next m2 cpus) q2 code))))))
 
+; k with its counts and windows m.
+(def with_mem ((k Kernel) (m Mem)) Kernel
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss irqs boot next m cpus))))
+
+; ------------------------------------------------------------ file windows
+
+; A file window (memory.l0's Window) is made for a client the first time
+; it opens a file on a volume whose server is another live process: its
+; pages mapped into the server, and the server told by a window_notice,
+; before the open's request, on the same port. The kernel will copy the
+; client's file data through it (roadmap 0023). The server unmaps it once
+; the client exits, which it watches; the kernel forgets it then, and when
+; the server ends.
+
+; What making a client's window to a server came to: k, ready for the
+; client's request; or the code its open is refused with.
+(data Windowed (WinReady Kernel) (WinRefused Kernel int))
+
+; p's window to the server at port server, made if it has none and needs
+; one: none is made for a port no live process owns, whose request fails
+; anyway, nor for p's own, whose request waits for itself.
+(def windowed ((k Kernel) (p Proc) (server int)) Windowed
+  (let owner (ipc_owner (k_ipc k) server)
+    (if (if (lt owner 1) true (eq owner (proc_pid p)))
+        (WinReady k)
+        (if (ge (mem_window_at (k_mem k) (proc_pid p) server) 0)
+            (WinReady k)
+            (window_made k (proc_pid p) owner server)))))
+
+; client's window mapped into owner, the server at port server, and told
+; to it; err_fault if owner has no room for it, or the kernel is out of
+; frames or near its heap's reserve; ready, with none, if owner is not
+; live.
+(def window_made ((k Kernel) (client int) (owner int) (server int)) Windowed
+  (match (take_slot k owner)
+    ((TakenSlot k2 s)
+      (match s
+        ((Free) (WinReady (put_slot k2 owner (Free))))
+        ((Dead g) (WinReady (put_slot k2 owner (Dead g))))
+        ((Live q)
+          (match (proc_window_alloc (k_mem k2) q (window_pages))
+            ((ShareRefused m2 q2 code) (WinRefused (restore (with_mem k2 m2) q2) code))
+            ((Shared m2 q2 va)
+              (window_told (restore (with_mem k2 (mem_window_add m2 (Window client owner server va (proc_space q2)))) q2)
+                           client owner server va))))))))
+
+; k once the server at port server is sent client's window notice: or,
+; if its queue has no room or it has gone, the window taken back, so
+; that the open's request, which fails as the notice did, finds none.
+(def window_told ((k Kernel) (client int) (owner int) (server int) (va int)) Windowed
+  (match (k_send k server (Msg 0 (bytes_from_list (window_notice client va (window_pages)))))
+    ((KSent k2 code)
+      (if (eq code 0) (WinReady k2) (WinReady (window_undone k2 client owner server va))))))
+
+; client's window at va of owner, the server at port server, unmapped
+; from owner and forgotten.
+(def window_undone ((k Kernel) (client int) (owner int) (server int) (va int)) Kernel
+  (let k1 (with_mem k (mem_window_drop (k_mem k) client server))
+    (match (take_slot k1 owner)
+      ((TakenSlot k2 s)
+        (match s
+          ((Live q)
+            (match (proc_unmap (k_mem k2) q va (window_pages))
+              ((Unmapped m2 q2) (restore (with_mem k2 m2) q2))))
+          ((Free) (put_slot k2 owner (Free)))
+          ((Dead g) (put_slot k2 owner (Dead g))))))))
+
+; Where client's window to the server at port is: the server's space and
+; the window's first page; or none. A window the kernel keeps is mapped
+; whole (memory.l0's Window), so space_read and space_write reach it.
+(data WinSpace (WinSpace int int) (NoWinSpace))
+
+; client's window to port, as WinSpace says.
+(def window_space ((k Kernel) (client int) (port int)) WinSpace
+  (let s (mem_window_space (k_mem k) client port)
+    (if (lt s 0) (NoWinSpace) (WinSpace s (mem_window_at (k_mem k) client port)))))
+
+; k without the windows q serves that it no longer maps whole, once it
+; has unmapped pages or had them taken back.
+(def windows_kept ((k Kernel) (q Proc)) Kernel
+  (with_mem k (mem_windows_mapped (k_mem k) (proc_pid q) (proc_pages q))))
+
 ; k with p's space and frames freed, p having ended.
 (def k_release ((k Kernel) (p Proc)) Kernel
   (let dev (proc_dev k p)
@@ -529,13 +611,14 @@
     (append ") exited with status " (digits status)))))))
 
 ; k with p ended: its slot Dead with status, its space and frames kept to
-; give again, its ports, names, sleep, and interrupts gone, those waiting
-; for it woken, and those watching told.
+; give again, its ports, names, sleep, and interrupts gone, its windows
+; forgotten, those it was the client of and those it served, those
+; waiting for it woken, and those watching told.
 (def end_proc ((k Kernel) (p Proc) (status int)) Kernel
   (let pid (proc_pid p)
     (let ws (proc_watchers p)
       (let ns (irq_numbers k)
-        (let k0 (with_cpus k (cpus_forget (k_cpus k) pid))
+        (let k0 (with_cpus (with_mem k (mem_windows_forget (k_mem k) pid)) (cpus_forget (k_cpus k) pid))
         (let k1 (release_irqs (k_forget_name (k_forget (k_release k0 p) pid) pid) pid ns)
           (let k2 (with_sleepers k1 (sleep_remove (k_sleepers k1) pid))
             (let told (if (is_empty ws) (has_waiter k2 pid 1) true)
@@ -746,7 +829,8 @@
 ; other process maps it: 0, or err_too_big for n below 1 or over
 ; dma_limit, err_fault if any of them is not p's, when none is unmapped.
 ; A driver may give its pages up too: that it does says its device is
-; done with them.
+; done with them. A file window of p's with a page among them is
+; forgotten, as one taken back from p by shm_revoke is.
 (def do_shm_unmap ((k Kernel) (p Proc) (va int) (n int)) Step
   (if (if (lt n 1) true (gt n (dma_limit)))
       (resume_with k p (err_too_big))
@@ -756,7 +840,7 @@
           (match k
             ((Kernel slots ready ipc ss irqs boot pids mem cpus)
               (match (proc_unmap mem p (page_of va) n)
-                ((Unmapped m2 q) (resume_with (Kernel slots ready ipc ss irqs boot pids m2 cpus) q 0)))))))))
+                ((Unmapped m2 q) (resume_with (windows_kept (Kernel slots ready ipc ss irqs boot pids m2 cpus) q) q 0)))))))))
 
 ; Every mapping pid has of p's n DMA or shared pages from va taken back:
 ; how many, or err_too_big for n as above, err_fault if any of them is not
@@ -788,7 +872,7 @@
                 ((Kernel slots ready ipc ss irqs boot pids mem cpus)
                   (match (proc_revoke mem q fs)
                     ((Revoked m2 q2 count)
-                      (resume_with (restore (Kernel slots ready ipc ss irqs boot pids m2 cpus) q2) p count)))))))
+                      (resume_with (restore (windows_kept (Kernel slots ready ipc ss irqs boot pids m2 cpus) q2) q2) p count)))))))
         ((Free) (resume_with (put_slot k2 pid (Free)) p (err_no_port)))
         ((Dead st) (resume_with (put_slot k2 pid (Dead st)) p (err_no_port)))))))
 
@@ -1101,6 +1185,7 @@
 (def fs_op_close () int 4)
 (def fs_op_word () int 5)
 (def fs_op_cd () int 6)       ; its buf and n the path's, which a directory makes the new current one
+(def fs_op_wread () int 7)    ; a read whose bytes the server put in the client's window
 
 ; The most bytes a read reply carries: a message, less its word.
 (def fs_chunk () int (sub (max_message) 4))
@@ -1125,28 +1210,56 @@
                 (if (eq code (err_full)) (block_on k3 p server) (resume_with k3 p -5)))))))))
 
 ; A volume's file opened: a stream, once its server says, or -5 if p has
-; open_limit open already.
+; open_limit open already; p's window to the server made first, if it
+; has none, or the code why not.
 (def open_remote ((k Kernel) (p Proc) (server int) (path (list int)) (mode int)) Step
   (if (proc_files_full p)
       (resume_with k p -5)
-      (ask_fs k p server (fs_op_open) 0 0 (append "open " (append (digits mode) (cons 32 path))))))
+      (match (windowed k p server)
+        ((WinRefused k2 code) (resume_with k2 p code))
+        ((WinReady k2) (ask_fs k2 p server (fs_op_open) 0 0 (append "open " (append (digits mode) (cons 32 path))))))))
 
-; At most n bytes of handle h read into buf, as the server gives them.
+; At most n bytes of handle h read into buf, as the server gives them:
+; through p's window to it, up to 64 KB, the server putting them there
+; and the kernel copying them to buf once it answers; or, with no window,
+; in the reply, at most a message's worth.
 (def read_remote ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
   (if (eq n 0)
       (resume_with k p 0)
-      (ask_fs k p server (fs_op_read) buf n
-              (append "read " (append (digits h) (cons 32 (digits (min n (fs_chunk)))))))))
+      (match (window_space k (proc_pid p) server)
+        ((WinSpace s va)
+          (ask_fs k p server (fs_op_wread) buf (min n (window_bytes))
+                  (append "readw " (append (digits h) (cons 32 (digits (min n (window_bytes))))))))
+        ((NoWinSpace)
+          (ask_fs k p server (fs_op_read) buf n
+                  (append "read " (append (digits h) (cons 32 (digits (min n (fs_chunk)))))))))))
 
-; As much of the n bytes at buf as a request holds written to handle h.
+; As much of the n bytes at buf as a request holds written to handle h:
+; up to 64 KB copied into p's window to the server, which takes them from
+; there; or, with no window, a message's worth after the request's text.
 (def write_remote ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
   (if (eq n 0)
       (resume_with k p 0)
-      (let prefix (append "write " (append (digits h) " "))
-        (let cnt (min n (sub (sub (max_message) 4) (length prefix)))
-          (match (proc_copy_out p buf cnt)
-            ((CopyOutBad q) (resume_with k q -5))
-            ((CopiedOut q b) (ask_fs_data k q server (fs_op_write) 0 cnt prefix b)))))))
+      (match (window_space k (proc_pid p) server)
+        ((WinSpace s va) (write_windowed k p server h buf n s va))
+        ((NoWinSpace) (write_messaged k p server h buf n)))))
+
+; write_remote through the window at va of the server's space s.
+(def write_windowed ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int) (s int) (va int)) Step
+  (let cnt (min n (window_bytes))
+    (match (proc_copy_out p buf cnt)
+      ((CopyOutBad q) (resume_with k q -5))
+      ((CopiedOut q b)
+        (let w (space_write s va b 0 cnt)
+          (ask_fs k q server (fs_op_write) 0 cnt (append "writew " (append (digits h) (cons 32 (digits cnt))))))))))
+
+; write_remote in the request's message.
+(def write_messaged ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
+  (let prefix (append "write " (append (digits h) " "))
+    (let cnt (min n (sub (sub (max_message) 4) (length prefix)))
+      (match (proc_copy_out p buf cnt)
+        ((CopyOutBad q) (resume_with k q -5))
+        ((CopiedOut q b) (ask_fs_data k q server (fs_op_write) 0 cnt prefix b))))))
 
 ; q, waiting for the server at server, given its reply on reply now that
 ; one has come: from the server's owner, or else dropped and q left
@@ -1160,7 +1273,28 @@
           (if (not (eq from (ipc_owner (k_ipc k) server)))
               (restore (with_ipc k (ipc_drop (k_ipc k) reply)) q)
               (park (with_ipc k (ipc_close (k_ipc k) (proc_pid q) reply))
-                    (proc_set_state (fs_answered q server op buf n payload) (Ready)))))))))
+                    (proc_set_state (if (eq op (fs_op_wread))
+                                        (fs_wread_in k q server buf n payload)
+                                        (fs_answered q server op buf n payload))
+                                    (Ready)))))))))
+
+; q answered for a read through its window to the server, whose reply b
+; says how many bytes it put there: those copied from the window to buf,
+; at most n; -5 if the reply is not one, or the window is gone.
+(def fs_wread_in ((k Kernel) (q Proc) (server int) (buf int) (n int) (b bytes)) Proc
+  (if (lt (bytes_len b) 4)
+      (proc_answer q -5)
+      (let w (s32 (le_u32 b 0))
+        (if (lt w 1)
+            (proc_answer q (if (lt w -10) -5 w))
+            (if (gt w n)
+                (proc_answer q -5)
+                (match (window_space k (proc_pid q) server)
+                  ((NoWinSpace) (proc_answer q -5))
+                  ((WinSpace s va)
+                    (match (proc_copy_in q buf (space_read s va w) 0 w)
+                      ((CopyInBad r) (proc_answer r -5))
+                      ((CopiedIn r) (proc_answer r w))))))))))
 
 ; q answered as the server's reply b says, for op: -5 if it is not one.
 ; A close's stream goes whatever the answer.

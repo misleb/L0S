@@ -16,9 +16,14 @@ change one, `config.txt` or `cmdline.txt`, made by anything else.
   each primary partition of type `0B`, `0C` or `EF`. An MBR has no
   UUIDs, so `fs` mounts its volumes by one it makes of the disk's
   signature and the partition's number, `SSSSSSSS-0000-0000-0000-0000000000NN`.
-  L0S reads MBRs but never writes one: `partition` on such a disk is -5,
-  `mkfs` finds no partition by its UUID there (-3), and Disks offers
-  only Format Volume on it; `format` and `relabel` work on its volumes.
+  L0S makes no partitions in an MBR: `partition` on such a disk is -5,
+  and Disks offers no Create Partition there. `mkfs UUID LABEL
+  [fat32]` makes a volume on any of its partitions, as Raspberry Pi OS's
+  ext4 rootfs, by that UUID, and changes only the partition's type
+  byte in sector 0, the boot code, the signature and the other entries
+  kept: `0C` for FAT32, and `7F`, the type set aside for an operating
+  system of one's own, for L0FS, whose volumes `fs` mounts from an MBR
+  by that type. `format` and `relabel` work on its volumes.
 - **The volume.** `mkfs` lays it out as mkfs.fat does: clusters of a
   sector below 260 MB, 4 KB below 8 GB and larger after, 32 reserved
   sectors holding the boot sector and FSInfo and their backups at 6 and

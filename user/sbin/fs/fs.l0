@@ -65,8 +65,8 @@
 ; Sectors read, as bytes, and the store after; or why not.
 (data Got (Got Store bytes) (GotNot Store (list int)))
 
-; count sectors from sector, at most store_chunk's. A disk's come out of
-; its buffer a byte at a time, the one way a region is read.
+; count sectors from sector, at most store_chunk's. A disk's are copied
+; out of its buffer at once.
 (def store_read ((s Store) (sector int) (count int)) Got
   (match s
     ((StoreMem m n r fl) (Got (StoreMem m n (add r 1) fl) (bytes_from_list (mem_sectors m sector count (nil int)))))
@@ -74,7 +74,7 @@
     ((StoreDisk d b)
       (let why (disk_read d b sector count)
         (if (is_empty why)
-            (Got s (bytes_from_list (disk_get b (mul count (vol_sector_size)))))
+            (Got s (disk_get_bytes b (mul count (vol_sector_size))))
             (GotNot s why))))))
 
 ; Sectors count to 1 from sector of m, onto acc: those never written are
@@ -210,21 +210,36 @@
 
 ; The server: its stores, a disk each, in the order it found them, its
 ; port, its volumes, the open files by handle, the next handle to give,
-; the pids it watches, and a port of its own the clock answers on, 0
-; until it is first asked the time.
-(data Fs (Fs (array Store) int (array FsVol) (Map int Handle) int (list int) int))
+; the pids it watches, a port of its own the clock answers on, 0 until
+; it is first asked the time, each client's file window, by its pid, and
+; the metadata each handle's writes have changed and not yet written.
+(data Fs (Fs (array Store) int (array FsVol) (Map int Handle) int (list int) int (Map int FsWin) (Map int Pending)))
+
+; What a handle's writes changed of its volume's metadata, kept in
+; memory until it is closed or its client exits, when it is written,
+; after a flush, so that the disk holds the data before the metadata
+; that points at it: the clusters whose marks changed, and the entries.
+; On FAT the volume counts its dirty sectors itself, and any commit
+; writes them all, so these matter for L0FS's (volume.l0's fv_pieces).
+(data Pending (Pending (list int) (list VolRef)))
+
+; A client's file window, as the kernel's window_notice says: where fs
+; reaches its pages, and how many there are. fs unmaps them once the
+; client exits.
+(data FsWin (FsWin int int))
 
 ; A server of vols on one store, on port, with nothing open; and of vols
 ; on the stores ss.
 (def fs_new ((s Store) (port int) (vols (array FsVol))) Fs
   (fs_new_on (cons s (nil Store)) port vols))
 (def fs_new_on ((ss (list Store)) (port int) (vols (array FsVol))) Fs
-  (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0)) port vols ((MapEmpty int Handle)) 1 (nil int) 0))
+  (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0)) port vols ((MapEmpty int Handle)) 1 (nil int) 0 ((MapEmpty int FsWin)) ((MapEmpty int Pending))))
 
-; Its volumes and handles; volume vi, the disk it is on, and the sector
-; its partition starts at.
-(def fs_vols ((f Fs)) (array FsVol) (match f ((Fs s port vols hs next ws cp) vols)))
-(def fs_handles ((f Fs)) (Map int Handle) (match f ((Fs s port vols hs next ws cp) hs)))
+; Its volumes, handles and clients' windows; volume vi, the disk it is
+; on, and the sector its partition starts at.
+(def fs_vols ((f Fs)) (array FsVol) (match f ((Fs s port vols hs next ws cp wins dirty) vols)))
+(def fs_handles ((f Fs)) (Map int Handle) (match f ((Fs s port vols hs next ws cp wins dirty) hs)))
+(def fs_windows ((f Fs)) (Map int FsWin) (match f ((Fs s port vols hs next ws cp wins dirty) wins)))
 
 ; Volume vi, the place of its disk among the stores, its partition's
 ; start, and its UUID.
@@ -235,20 +250,25 @@
 
 ; Its stores; store di, and f with s2 in its place; volume vi's store,
 ; and f with s2 in its place.
-(def fs_stores ((f Fs)) (array Store) (match f ((Fs s port vols hs next ws cp) s)))
+(def fs_stores ((f Fs)) (array Store) (match f ((Fs s port vols hs next ws cp wins dirty) s)))
 (def fs_store_at ((f Fs) (di int)) Store (array_get (fs_stores f) di))
 (def with_store_at ((f Fs) (di int) (s2 Store)) Fs
-  (match f ((Fs s port vols hs next ws cp) (Fs (array_set s di s2) port vols hs next ws cp))))
+  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs (array_set s di s2) port vols hs next ws cp wins dirty))))
 (def vol_store ((f Fs) (vi int)) Store (fs_store_at f (fs_vol_disk f vi)))
 (def with_vol_store ((f Fs) (vi int) (s2 Store)) Fs (with_store_at f (fs_vol_disk f vi) s2))
 
 ; f with other handles.
 (def with_handles ((f Fs) (h2 (Map int Handle))) Fs
-  (match f ((Fs s port vols hs next ws cp) (Fs s port vols h2 next ws cp))))
+  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs s port vols h2 next ws cp wins dirty))))
+
+; Each handle's pending metadata, and f with d2 in its place.
+(def fs_dirty ((f Fs)) (Map int Pending) (match f ((Fs s port vols hs next ws cp wins dirty) dirty)))
+(def with_dirty ((f Fs) (d2 (Map int Pending))) Fs
+  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs s port vols hs next ws cp wins d2))))
 
 ; f serving vols in place of its volumes.
 (def with_vols ((f Fs) (vols2 (list FsVol))) Fs
-  (match f ((Fs s port vols hs next ws cp) (Fs s port (vols_array vols2) hs next ws cp))))
+  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs s port (vols_array vols2) hs next ws cp wins dirty))))
 
 ; vols as an array, which may be empty.
 (def vols_array ((vols (list FsVol))) (array FsVol)
@@ -256,7 +276,7 @@
 
 ; f with v as volume vi, in memory only.
 (def with_vol ((f Fs) (vi int) (v Fv)) Fs
-  (match f ((Fs s port vols hs next ws cp) (Fs s port (array_set vols vi (FsVol (fs_vol_disk f vi) (fs_start f vi) (fs_uuid f vi) v)) hs next ws cp))))
+  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs s port (array_set vols vi (FsVol (fs_vol_disk f vi) (fs_start f vi) (fs_uuid f vi) v)) hs next ws cp wins dirty))))
 
 ; f with handle h open, from pid, on entry ei of volume vi; and h. pid is
 ; watched from its first open, so its handles go when it exits.
@@ -264,9 +284,9 @@
 
 (def open_handle ((f Fs) (pid int) (vi int) (ei VolRef) (mode int)) Opened
   (match f
-    ((Fs s port vols hs next ws cp)
+    ((Fs s port vols hs next ws cp wins dirty)
       (let ws2 (if (any_eq pid ws) ws (watched pid port ws))
-        (Opened (Fs s port vols (map_put hs next (Handle pid vi ei 0 mode (HeldNone))) (add next 1) ws2 cp) next)))))
+        (Opened (Fs s port vols (map_put hs next (Handle pid vi ei 0 mode (HeldNone))) (add next 1) ws2 cp wins dirty) next)))))
 
 ; ws, with pid if it can be watched.
 (def watched ((pid int) (port int) (ws (list int))) (list int)
@@ -296,11 +316,94 @@
         ((Handle p v e off mode held)
           (if (if (eq v vi) (if any true (eq e ei)) false) true (any_open (tail hs) vi ei any))))))
 
-; f without pid's handles, pid having exited.
+; f without pid's handles, pid having exited, what each had written and
+; not yet committed committed first, as a close would; and its window
+; unmapped.
 (def forget_pid ((f Fs) (pid int)) Fs
+  (match (settled_all (fs_handles f) (map_keys (fs_handles f)) pid f)
+    ((Fs s port vols hs next ws cp wins dirty)
+      (let u (window_unmapped wins pid)
+        (Fs s port vols (drop_handles hs (map_keys hs) pid) next (drop_int ws pid) cp (map_remove wins pid) dirty)))))
+
+; f with the pending metadata of each of the handles keys that pid
+; opened written, among hs.
+(def settled_all ((hs (Map int Handle)) (keys (list int)) (pid int) (f Fs)) Fs
+  (if (is_empty keys)
+      f
+      (settled_all hs (tail keys) pid
+        (match (map_get hs (head keys))
+          ((Some x) (match x ((Handle p vi ei off mode held) (if (eq p pid) (settled_fs (settled f (head keys) vi)) f))))
+          ((None) f)))))
+
+; ------------------------------------------------------- pending metadata
+
+; What settling a handle's metadata came to: f after it, and whether the
+; disk took it.
+(data Settled (Settled Fs bool))
+
+; The f of s.
+(def settled_fs ((s Settled)) Fs (match s ((Settled f ok) f)))
+
+; Handle h's pending metadata, on volume vi, written: the disk flushed,
+; so that its data is down, then the clusters' marks and entries that
+; changed; the handle's record of them gone either way. Nothing to do
+; for a handle with none.
+(def settled ((f Fs) (h int) (vi int)) Settled
+  (match (map_get (fs_dirty f) h)
+    ((None) (Settled f true))
+    ((Some pd)
+      (let f1 (with_dirty f (map_remove (fs_dirty f) h))
+        (match (flushed_after (Put (vol_store f1 vi)))
+          ((PutNot s2 why) (Settled (with_vol_store f1 vi s2) false))
+          ((Put s2)
+            (match pd
+              ((Pending cs es)
+                (match (commit_some (with_vol_store f1 vi s2) vi (fs_vol f1 vi) cs es)
+                  ((CommitFailed f2) (Settled f2 false))
+                  ((Committed f2) (Settled f2 true)))))))))))
+
+; f with handle h's pending metadata grown by the clusters cs and the
+; entries es.
+(def pending_more ((f Fs) (h int) (cs (list int)) (es (list VolRef))) Fs
+  (with_dirty f
+    (map_put (fs_dirty f) h
+      (match (map_get (fs_dirty f) h)
+        ((None) (Pending cs (refs_new es (nil VolRef))))
+        ((Some pd) (match pd ((Pending cs0 es0) (Pending (append cs cs0) (refs_new es es0)))))))))
+
+; es onto have, those not there already.
+(def refs_new ((es (list VolRef)) (have (list VolRef))) (list VolRef)
+  (if (is_empty es)
+      have
+      (refs_new (tail es) (if (any_eq (head es) have) have (cons (head es) have)))))
+
+; pid's window among wins, if it has one, given back to the kernel: 0.
+(def window_unmapped ((wins (Map int FsWin)) (pid int)) int
+  (match (map_get wins pid)
+    ((None) 0)
+    ((Some w) (match w ((FsWin va n) (match (shm_unmap va n) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))))))
+
+; The window a message from pid 0 tells of, if it is a window_notice:
+; the client's pid and its window.
+(data WindowTold (WindowTold int FsWin) (NotWindow))
+
+; What the message b from from tells of a window, as WindowTold says.
+(def window_told_of ((from int) (b bytes)) WindowTold
+  (if (if (eq from 0) (if (eq (msg_len b) 16) (msg_starts b "wndw") false) false)
+      (WindowTold (msg_u32 b 4) (FsWin (msg_u32 b 8) (msg_u32 b 12)))
+      (NotWindow)))
+
+; f with pid's window w, watched so that it is unmapped once pid exits:
+; at once, if pid has exited already; and any window pid had before
+; given back, as one whose exit notice was lost.
+(def window_kept ((f Fs) (pid int) (w FsWin)) Fs
   (match f
-    ((Fs s port vols hs next ws cp)
-      (Fs s port vols (drop_handles hs (map_keys hs) pid) next (drop_int ws pid) cp))))
+    ((Fs s port vols hs next ws cp wins dirty)
+      (let u (window_unmapped wins pid)
+        (match (proc_watch pid port)
+          ((Watched) (Fs s port vols hs next (if (any_eq pid ws) ws (cons pid ws)) cp (map_put wins pid w) dirty))
+          ((WatchNoProc) (let u2 (window_unmapped (map_put wins pid w) pid) (Fs s port vols hs next ws cp (map_remove wins pid) dirty)))
+          ((WatchFull) (Fs s port vols hs next ws cp (map_put wins pid w) dirty)))))))
 
 (def drop_handles ((hs (Map int Handle)) (keys (list int)) (pid int)) (Map int Handle)
   (if (is_empty keys)
@@ -481,10 +584,11 @@
   (let n (length ws)
     (if (if (eq op "open") (eq n 2) false) (obey_open f pid (head ws) (head (tail ws)))
     (if (if (eq op "read") (eq n 2) false) (obey_read f pid (head ws) (head (tail ws)))
+    (if (if (any_eq op (split_spaces "readw writew")) (eq n 2) false) (obey_windowed f pid op (head ws) (head (tail ws)))
     (if (if (eq op "close") (eq n 1) false) (obey_close f pid (head ws))
     (if (if (eq op "rename") (eq n 2) false) (do_rename f (head ws) (head (tail ws)))
     (if (if (eq op "chmod") (eq n 2) false) (do_chmod f (head ws) (head (tail ws)))
-    (obey_volumes f op ws))))))))
+    (obey_volumes f op ws)))))))))
 
 (def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
   (if (if (store_is_ram (fs_store_at f 0)) (any_eq op (split_spaces "partition mkfs rescan attach relabel")) false)
@@ -547,7 +651,12 @@
       (word f -5)
       (match (handle_of f pid (int_prefix h 0))
         ((None) (word f -5))
-        ((Some x) (word (with_handles f (map_remove (fs_handles f) (int_prefix h 0))) 0)))))
+        ((Some x)
+          (match x
+            ((Handle p vi ei off mode held)
+              (match (settled f (int_prefix h 0) vi)
+                ((Settled f2 ok)
+                  (word (with_handles f2 (map_remove (fs_handles f2) (int_prefix h 0))) (if ok 0 -5))))))))))
 
 ; ------------------------------------------------------------------ open
 
@@ -591,6 +700,10 @@
 ; on, so that reads of as much as a reply holds go on a whole reply at a
 ; time, rather than one ending each cluster with the few bytes left.
 (def do_read ((f Fs) (pid int) (h int) (n int)) Answered
+  (read_upto f pid h (min n (sub (max_message) 4))))
+
+; At most n bytes of pid's handle h read, as do_read reads them.
+(def read_upto ((f Fs) (pid int) (h int) (n int)) Answered
   (match (handle_of f pid h)
     ((None) (word f -5))
     ((Some x)
@@ -598,7 +711,63 @@
         ((Handle p vi ei off mode held)
           (if (not (eq mode 1))
               (word f -5)
-              (read_on f h x (min n (sub (max_message) 4)) (nil bytes))))))))
+              (read_on f h x n (nil bytes))))))))
+
+; ---------------------------------------------------------------- windows
+
+; readw H N and writew H N: a read or write of pid's handle h whose
+; bytes are in pid's file window (FsWin), as the kernel copies them, not
+; in the message. A read puts up to N bytes, at most the window's, at
+; its start, and answers how many; a write takes N from there. -5 for a
+; pid with no window, or an N past it.
+(def obey_windowed ((f Fs) (pid int) (op (list int)) (h (list int)) (n (list int))) Answered
+  (if (not (if (is_number h) (is_number n) false))
+      (word f -5)
+      (match (map_get (fs_windows f) pid)
+        ((None) (word f -5))
+        ((Some w)
+          (if (eq op "readw")
+              (read_windowed f pid (int_prefix h 0) (int_prefix n 0) w)
+              (write_windowed f pid (int_prefix h 0) (int_prefix n 0) w))))))
+
+; The bytes a window holds.
+(def win_bytes ((w FsWin)) int (match w ((FsWin va n) (mul n 4096))))
+
+; Up to n bytes of h read into window w, and their count answered.
+(def read_windowed ((f Fs) (pid int) (h int) (n int) (w FsWin)) Answered
+  (match (read_upto f pid h (min n (win_bytes w)))
+    ((Answered f2 code bs) (Answered f2 code bs))
+    ((AnsweredData f2 count d)
+      (if (window_put w d) (Answered f2 count "") (word f2 -5)))))
+
+; n bytes taken from window w and written to h, as a message's are.
+(def write_windowed ((f Fs) (pid int) (h int) (n int) (w FsWin)) Answered
+  (if (if (lt n 1) true (gt n (win_bytes w)))
+      (word f -5)
+      (match (window_got w n)
+        ((None) (word f -5))
+        ((Some b) (do_write f pid h b 0)))))
+
+; d put at the start of window w: whether it could be opened.
+(def window_put ((w FsWin) (d bytes)) bool
+  (match w
+    ((FsWin va n)
+      (match (dma_open va n)
+        ((DeviceFailed fault why) false)
+        ((DeviceOpened r)
+          (let p (put_bytes_range r 0 d 0 (bytes_len d))
+            (let c (close_device r) true)))))))
+
+; The first n bytes of window w, if it could be opened, copied out at
+; once.
+(def window_got ((w FsWin) (n int)) (Option bytes)
+  (match w
+    ((FsWin va pages)
+      (match (dma_open va pages)
+        ((DeviceFailed fault why) ((None bytes)))
+        ((DeviceOpened r)
+          (let b (get_bytes_in r 0 n)
+            (let c (close_device r) (Some b))))))))
 
 ; Handle h, x, read on for n bytes more, a cluster's at a time, each
 ; piece sliced from the cluster held onto acc, reversed: the bytes,
@@ -666,53 +835,89 @@
                       ((FvNoSpace) (word f -6))
                       ((FvWrote v2 spans fresh marked) (written f h x at size b i v2 spans fresh marked))))))))))))
 
-; The spans written and flushed, then the metadata that changed, the
-; marks of the clusters linked and the entry, if its size or first
-; cluster did; the handle moved past the bytes, holding the place of the
-; cluster it wrote last, for the next write to walk on from, and the
-; file's readers holding none of its bytes. The flush keeps the disk from
-; putting the metadata down before the data it points at.
+; The spans written, the data and nothing else: the metadata that
+; changed, the marks of the clusters linked and the entry, if its size
+; or first cluster did, kept in memory in v2 and owed by handle h
+; (Pending), for its close to write after a flush, so that a run of
+; writes costs the disk only their data. The handle moved past the
+; bytes, holding the place of the cluster it wrote last, for the next
+; write to walk on from, and the file's readers holding none of its
+; bytes; they read v2, so they see the new size at once.
 (def written ((f Fs) (h int) (x Handle) (at int) (size int) (b bytes) (i int) (v2 Fv) (spans (list VolSpan)) (fresh (list int)) (marked (list int))) Answered
   (match x
     ((Handle p vi ei off mode held)
       (let n (sub (bytes_len b) i)
-      (match (flushed_after (write_spans (vol_store f vi) v2 (fs_start f vi) spans b i fresh at size))
+      (match (write_spans (vol_store f vi) v2 (fs_start f vi) spans b i fresh at size)
         ((PutNot s2 why) (word (unheld (with_vol_store f vi s2) vi ei false) -5))
         ((Put s2)
-          (match (commit_some (unheld (with_vol_store f vi s2) vi ei false) vi v2 marked
-                              (if (eq (fv_entry v2 ei) (fv_entry (fs_vol f vi) ei)) (nil VolRef) (one ei)))
-            ((CommitFailed f2) (word f2 -5))
-            ((Committed f2)
-              (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at n) mode (HeldPlace (fv_spans_end v2 spans at n)))))
-                    n)))))))))
+          (let f2 (pending_more (with_vol (unheld (with_vol_store f vi s2) vi ei false) vi v2) h marked
+                                (if (eq (fv_entry v2 ei) (fv_entry (fs_vol f vi) ei)) (nil VolRef) (one ei)))
+            (word (with_handles f2 (map_put (fs_handles f2) h (Handle p vi ei (add at n) mode (HeldPlace (fv_spans_end v2 spans at n)))))
+                  n))))))))
 
 ; The store flushed once p's writes have been made; p, if they failed.
 (def flushed_after ((p Put)) Put
   (match p ((Put s) (store_flush s)) ((PutNot s why) p)))
 
-; Each span of data written, the bytes of the file from at. A span's
-; sectors are read first only where they hold the file's bytes that
-; stay: before it in its first sector, or after it in its last, within
-; the old size; never in a cluster just taken.
+; Each span of data written, the bytes of the file from at: spans whose
+; clusters lie one after another on the disk joined into one write, of
+; up to store_chunk's sectors, so that a run of 64 KB is two requests,
+; not one a cluster. A run's sectors are read first only where they hold
+; the file's bytes that stay: before it in its first sector, or after it
+; in its last, within the old size; never in a cluster just taken.
 (def write_spans ((s Store) (v Fv) (start int) (spans (list VolSpan)) (b bytes) (i int) (fresh (list int)) (at int) (size int)) Put
   (if (is_empty spans)
       (Put s)
       (match (head spans)
         ((VolSpan c off k)
-          (match (write_span s v start c off b i (add i k) (any_eq c fresh) (lt (add at k) size))
-            ((PutNot s2 why) (PutNot s2 why))
-            ((Put s2) (write_spans s2 v start (tail spans) b (add i k) fresh (add at k) size)))))))
+          (let n (run_spans v start (tail spans) c (add off k) 1)
+            (let run (take spans n)
+              (let bk (spans_bytes run 0)
+                (match (write_run s v start run b i fresh (lt (add at bk) size))
+                  ((PutNot s2 why) (PutNot s2 why))
+                  ((Put s2) (write_spans s2 v start (drop spans n) b (add i bk) fresh (add at bk) size))))))))))
 
-; The piece, the bytes of b from i up to j, written at off in cluster c
-; of v.
-(def write_span ((s Store) (v Fv) (start int) (c int) (off int) (b bytes) (i int) (j int) (fresh bool) (more bool)) Put
-  (let ss (vol_sector_size)
-    (let s0 (div off ss)
-      (let end (add off (sub j i))
-        (let count (add (sub (div (sub end 1) ss) s0) 1)
-          (let sector (add (fv_cluster_sector v start c) s0)
-            (let keep (if fresh false (if (not (eq (mod off ss) 0)) true (if more (not (eq (mod end ss) 0)) false)))
-              (store_patch s sector count keep (sub off (mul s0 ss)) b i j))))))))
+; How many spans, n of them taken already, ending end bytes into the run
+; from its first cluster's start, at cluster c, the run takes on with:
+; each next a whole cluster's start, the one after c on the disk, while
+; the run stays within store_chunk's sectors.
+(def run_spans ((v Fv) (start int) (rest (list VolSpan)) (c int) (end int) (n int)) int
+  (if (is_empty rest)
+      n
+      (match (head rest)
+        ((VolSpan c2 off2 k2)
+          (if (if (eq off2 0)
+                  (if (eq (mod end (fv_csize v)) 0)
+                      (if (eq (fv_cluster_sector v start c2) (add (fv_cluster_sector v start c) (div (fv_csize v) (vol_sector_size))))
+                          (le (add end k2) (mul (store_chunk) (vol_sector_size)))
+                          false)
+                      false)
+                  false)
+              (run_spans v start (tail rest) c2 (add end k2) (add n 1))
+              n)))))
+
+; The bytes spans move, onto n.
+(def spans_bytes ((spans (list VolSpan)) (n int)) int
+  (if (is_empty spans) n (match (head spans) ((VolSpan c off k) (spans_bytes (tail spans) (add n k))))))
+
+; The run of spans, the bytes of b from i on, written in one patch from
+; the first's cluster: its first sector read first if the first span
+; starts in one and its cluster is not fresh, or its last if the last
+; ends in one, the file goes on past it (more), and its cluster is not
+; fresh.
+(def write_run ((s Store) (v Fv) (start int) (run (list VolSpan)) (b bytes) (i int) (fresh (list int)) (more bool)) Put
+  (match (head run)
+    ((VolSpan c off k)
+      (match (last run)
+        ((VolSpan cl offl kl)
+          (let ss (vol_sector_size)
+            (let s0 (div off ss)
+              (let bk (spans_bytes run 0)
+                (let end (add off bk)
+                  (let count (add (sub (div (sub end 1) ss) s0) 1)
+                    (let keep (or (if (any_eq c fresh) false (not (eq (mod off ss) 0)))
+                                  (if (any_eq cl fresh) false (if more (not (eq (mod (add offl kl) ss) 0)) false)))
+                      (store_patch s (add (fv_cluster_sector v start c) s0) count keep (sub off (mul s0 ss)) b i (add i bk)))))))))))))
 
 ; count sectors from sector with the bytes of b from i up to j at at in
 ; them: what was there before kept around them if keep, and zeros if
@@ -939,7 +1144,7 @@
     ((Some m)
       (match m
         ((MountInfo path port u)
-          (if (eq port (match f ((Fs s p vols hs next ws cp) p))) (eq u (fs_uuid f vi)) false))))))
+          (if (eq port (match f ((Fs s p vols hs next ws cp wins dirty) p))) (eq u (fs_uuid f vi)) false))))))
 
 ; The volume emptied, unless a file on it is open, or it is /.
 (def do_format ((f Fs) (path (list int))) Answered
@@ -963,7 +1168,7 @@
         (if (if (gt (map_size (fs_handles f)) 0) true (is_system f vi))
             (word f -4)
             (let label (fv_label (fs_vol f vi))
-              (match (fs_unmount label (match f ((Fs s port vols hs next ws cp) port)))
+              (match (fs_unmount label (match f ((Fs s port vols hs next ws cp wins dirty) port)))
                 ((Unmounted) (word (without_vol f vi) 0))
                 ((UnmountNotMounted) (word (without_vol f vi) 0))
                 ((UnmountDenied) (word f -4))
@@ -992,7 +1197,7 @@
                         (relabel_mounting f vi label (fs_mount label (fs_uuid f vi) (fs_port f))))))))))
 
 ; The port fs serves on.
-(def fs_port ((f Fs)) int (match f ((Fs s port vols hs next ws cp) port)))
+(def fs_port ((f Fs)) int (match f ((Fs s port vols hs next ws cp wins dirty) port)))
 
 ; do_relabel once the kernel was asked to mount label: refused if it is
 ; mounted already, or no label; else written. With no kernel, as under
@@ -1087,7 +1292,7 @@
 
 ; f with the stores ss in place of its own.
 (def with_stores ((f Fs) (ss (list Store))) Fs
-  (match f ((Fs s port vols hs next ws cp) (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0)) port vols hs next ws cp))))
+  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0)) port vols hs next ws cp wins dirty))))
 
 ; attach DISK: the disk registered as DISK taken on, as its driver asks
 ; once it has registered it, and its volumes mounted and served, after
@@ -1108,10 +1313,10 @@
 ; 0 and how many.
 (def vols_joined ((f Fs) (vols (list FsVol))) Answered
   (match f
-    ((Fs s port old hs next ws cp)
+    ((Fs s port old hs next ws cp wins dirty)
       (let vols2 (vols_array (append (array_to_list old) vols))
         (let m (mount_new port vols2 (labels_of vols (nil (list int))))
-          (Answered (Fs s port vols2 hs next ws cp) 0 (digits (length vols))))))))
+          (Answered (Fs s port vols2 hs next ws cp wins dirty) 0 (digits (length vols))))))))
 
 ; The labels of vols, after the reversed acc.
 (def labels_of ((vols (list FsVol)) (acc (list (list int)))) (list (list int))
@@ -1143,9 +1348,9 @@
 ; f, and the time now, as Timed says.
 (def now_ms ((f Fs)) Timed
   (match f
-    ((Fs s port vols hs next ws cp)
+    ((Fs s port vols hs next ws cp wins dirty)
       (let cp2 (if (eq cp 0) (port_new) cp)
-        (Timed (Fs s port vols hs next ws cp2)
+        (Timed (Fs s port vols hs next ws cp2 wins dirty)
                (add (mul (clock_seconds cp2) 1000) (mod (div (clock_ns) 1000000) 1000)))))))
 
 ; What the clock says the time is, in seconds, its answer to rp; 0 if
@@ -1163,7 +1368,7 @@
 ; random, the clock's mixer's, salted with salt.
 (def fresh_uuid ((f Fs) (ms int) (salt int)) Uuid
   (match f
-    ((Fs s port vols hs next ws cp)
+    ((Fs s port vols hs next ws cp wins dirty)
       (match (random_bytes cp 10)
         ((Ok noise) (uuid_v7 ms noise))
         ((Err why) (uuid_new ms salt))))))
@@ -1218,7 +1423,9 @@
 ; mkfs UUID LABEL [fat32]: a new, empty volume labelled label on the
 ; partition whose UUID is ut, L0FS's, or FAT32's if fat, the partition
 ; named label in the table, of L0FS's type or the basic data type, and
-; the volume mounted at /Volumes/LABEL and served. Refused -5 for a UUID
+; the volume mounted at /Volumes/LABEL and served. In an MBR, whose
+; partitions fs knows by mbr_part_uuid, only the partition's type byte
+; changes, to 7F or 0C, since an MBR has no names. Refused -5 for a UUID
 ; or a label that is not one, a FAT32 label of more than 11, or a bad
 ; table; -4 if label is served, or the partition's volume is (format
 ; empties that instead); -3 if no partition has that UUID; -6 if the
@@ -1241,7 +1448,13 @@
   (if (ge di (array_len (fs_stores f)))
       (Answered f -3 "no partition has that UUID")
       (match (read_table (fs_store_at f di))
-        ((NoTable s2 why) (mkfs_from (with_store_at f di s2) (add di 1) u label fat))
+        ((NoTable s2 why)
+          (match (read_mbr s2)
+            ((MbrHas s3 m)
+              (match (mbr_part_of (mbr_parts m) (mbr_sig m) u)
+                ((None) (mkfs_from (with_store_at f di s3) (add di 1) u label fat))
+                ((Some p) (mkfs_mbr (with_store_at f di s3) di p u label fat))))
+            ((MbrHasNot s3) (mkfs_from (with_store_at f di s3) (add di 1) u label fat))))
         ((BadTable s2 why) (mkfs_from (with_store_at f di s2) (add di 1) u label fat))
         ((Table s2 d)
           (match (gpt_part_of (gpt_parts d) u)
@@ -1260,16 +1473,52 @@
                 (Answered f -6 "the partition is too small for a volume")
                 (made_on f di d u label (gpt_part_start p) (FvL0 (vol_new label l)) (gpt_l0fs_type)))))))
 
-; A FAT32 volume made on partition p, u, of disk di: its serial the
-; last four bytes of a fresh UUID, its times from the clock's now.
+; A FAT32 volume made on partition p, u, of disk di.
 (def mkfs_fat ((f Fs) (di int) (d GptDisk) (p GptPart) (u Uuid) (label (list int))) Answered
+  (match (fat_fresh f (gpt_part_start p) (gpt_part_sectors p) label)
+    ((FreshNot f2 why) (Answered f2 -6 why))
+    ((Fresh f2 v) (made_on f2 di d u label (gpt_part_start p) v (gpt_basic_type)))))
+
+; A new FAT32 volume for a partition, and f after; or why the partition
+; cannot hold one.
+(data FatFresh (Fresh Fs Fv) (FreshNot Fs (list int)))
+
+; A FAT32 volume of count sectors from start, labelled label: its serial
+; the last four bytes of a fresh UUID, its times from the clock's now.
+(def fat_fresh ((f Fs) (start int) (count int) (label (list int))) FatFresh
   (match (now_ms f)
     ((Timed f2 ms)
-      (let g (fat_layout (gpt_part_sectors p) (le_u32 (bytes_from_list (uuid_bytes (fresh_uuid f2 ms 0))) 12))
+      (let g (fat_layout count (le_u32 (bytes_from_list (uuid_bytes (fresh_uuid f2 ms 0))) 12))
         (if (not (fat_layout_ok g))
-            (Answered f2 -6 (append "the partition is " (fat_layout_why g)))
-            (made_on f2 di d u label (gpt_part_start p)
-                     (fv_dated (FvFat (fat_new g (gpt_part_start p) label ms)) ms) (gpt_basic_type)))))))
+            (FreshNot f2 (append "the partition is " (fat_layout_why g)))
+            (Fresh f2 (fv_dated (FvFat (fat_new g start label ms)) ms)))))))
+
+; The volume made on partition p, u, of disk di, whose table is an MBR,
+; if it can be: L0FS's, or FAT32's if fat.
+(def mkfs_mbr ((f Fs) (di int) (p MbrPart) (u Uuid) (label (list int)) (fat bool)) Answered
+  (if (served_at (fs_vols f) di (mbr_part_start p) 0)
+      (Answered f -4 "its volume is served; format empties it")
+      (if fat
+          (match (fat_fresh f (mbr_part_start p) (mbr_part_sectors p) label)
+            ((FreshNot f2 why) (Answered f2 -6 why))
+            ((Fresh f2 v) (made_mbr f2 di p u v (mbr_fat_lba_type))))
+          (let l (vol_layout (mbr_part_sectors p))
+            (if (not (vol_layout_ok l))
+                (Answered f -6 "the partition is too small for a volume")
+                (made_mbr f di p u (FvL0 (vol_new label l)) (mbr_l0fs_type)))))))
+
+; v written on disk di's partition p, u, the partition's type in the
+; MBR made ty, the disk flushed, and v mounted.
+(def made_mbr ((f Fs) (di int) (p MbrPart) (u Uuid) (v Fv) (ty int)) Answered
+  (match (write_pieces_at (fs_store_at f di) (mbr_part_start p) (fv_all_pieces v))
+    ((PutNot s2 why) (Answered (with_store_at f di s2) -5 why))
+    ((Put s2)
+      (match (store_read s2 0 1)
+        ((GotNot s3 why) (Answered (with_store_at f di s3) -5 why))
+        ((Got s3 b)
+          (match (flushed_after (store_write s3 0 (mbr_with_type b (mbr_part_number p) ty)))
+            ((PutNot s4 why) (Answered (with_store_at f di s4) -5 why))
+            ((Put s4) (mounted_new (with_store_at f di s4) (FsVol di (mbr_part_start p) (uuid_text u) v)))))))))
 
 ; v written at start of disk di, its partition named in the table, of
 ; type ty, and v mounted.
@@ -1305,12 +1554,12 @@
 ; and its label, the volume made though it cannot be mounted.
 (def mounted_new ((f Fs) (fv FsVol)) Answered
   (match f
-    ((Fs s port vols hs next ws cp)
+    ((Fs s port vols hs next ws cp wins dirty)
       (match fv
         ((FsVol di start u v)
           (let vols2 (vols_array (append (array_to_list vols) (cons fv (nil FsVol))))
             (let m (mount_new port vols2 (cons (fv_label v) (nil (list int))))
-              (Answered (Fs s port vols2 hs next ws cp) 0 (fv_label v)))))))))
+              (Answered (Fs s port vols2 hs next ws cp wins dirty) 0 (fv_label v)))))))))
 
 ; ---------------------------------------------------------------- rescan
 
@@ -1357,8 +1606,10 @@
           ((NoTable s2 why)
             (match (read_mbr s2)
               ((MbrHas s3 m)
-                (match (load_fats s3 di (mbr_fat_parts (mbr_parts m)) (mbr_sig m) (nil FsVol))
-                  ((Loaded s4 vols) (disks_loaded (with_store_at f di s4) (add di 1) (rev_onto vols acc) say))))
+                (match (load_vols s3 di (mbr_as_gpt (mbr_sig m) (mbr_typed (mbr_parts m) (mbr_l0fs_type))) (nil FsVol))
+                  ((Loaded s4 lvols)
+                    (match (load_fats s4 di (mbr_fat_parts (mbr_parts m)) (mbr_sig m) (nil FsVol))
+                      ((Loaded s5 vols) (disks_loaded (with_store_at f di s5) (add di 1) (rev_onto vols (rev_onto lvols acc)) say))))))
               ((MbrHasNot s3)
                 (let w (if say (warn_as "fs" (append name (append ": " (append why "; partition makes a table, and a rescan serves any volume made")))) 0)
                   (disks_loaded (with_store_at f di s3) (add di 1) acc say)))))
@@ -1406,7 +1657,7 @@
 (def do_rescan ((f Fs)) Answered
   (match (rescan f)
     ((Rescanned a labels gone)
-      (let port (match f ((Fs s port vols hs next ws cp) port))
+      (let port (match f ((Fs s port vols hs next ws cp wins dirty) port))
         (let u (unmount_gone port gone)
           (let m (mount_new port (fs_vols (after_answer a)) labels) a))))))
 
@@ -1441,7 +1692,8 @@
 ; ---------------------------------------------------------------- serving
 
 ; Every message on the port: a request answered to its reply port, if it
-; has one, or an exit notice, its pid's handles dropped.
+; has one; an exit notice, its pid's handles dropped and its window given
+; back; or a window notice, the client's window kept.
 (def serve ((f Fs) (port int)) int
   (match (port_receive port)
     ((RecvFailed) (complain "lost its port"))
@@ -1450,7 +1702,9 @@
         ((Exited pid status) (serve (forget_pid f pid) port))
         ((NotExit)
           (if (eq from 0)
-              (serve f port)
+              (match (window_told_of from b)
+                ((WindowTold pid w) (serve (window_kept f pid w) port))
+                ((NotWindow) (serve f port)))
               (match (obey_msg f from b)
                 ((Answered f2 w bs) (let s (reply_sent b (bytes_from_list (fs_reply_bytes w bs))) (serve f2 port)))
                 ((AnsweredData f2 w d) (let s (reply_sent b (fs_reply_data w d)) (serve f2 port))))))))))
@@ -1644,6 +1898,15 @@
             ((FatNotLoaded s2 why) (load_gpt_fats s2 di (tail parts) (cons_not acc start why)))
             ((FatLoaded s2 v) (load_gpt_fats s2 di (tail parts) (cons (FsVol di start (uuid_text u) (FvFat v)) acc))))))))
 
+; An MBR's partitions ps, of a disk whose signature is sig, as GPT's of
+; L0FS's type, for load_vols: each known by mbr_part_uuid, with no name.
+(def mbr_as_gpt ((sig int) (ps (list MbrPart))) (list GptPart)
+  (if (is_empty ps)
+      (nil GptPart)
+      (match (head ps)
+        ((MbrPart k ty start count)
+          (cons (GptPart (gpt_l0fs_type) (mbr_part_uuid sig k) start count "") (mbr_as_gpt sig (tail ps)))))))
+
 ; The FAT32 volumes of MBR's partitions parts, of disk di, its
 ; signature sig, onto acc: each known by mbr_part_uuid.
 (def load_fats ((s Store) (di int) (parts (list MbrPart)) (sig int) (acc (list FsVol))) Loaded
@@ -1757,8 +2020,8 @@
       (let r (name_register_or_why port name)
         (if (is_empty r)
             (match f
-              ((Fs s p vs hs next ws cp)
-                (let f2 (Fs s port (vols_array vols) hs next ws cp)
+              ((Fs s p vs hs next ws cp wins dirty)
+                (let f2 (Fs s port (vols_array vols) hs next ws cp wins dirty)
                   (serve (if late (late_disks f2 (disk_names)) f2) port))))
             (complain r))))))
 

@@ -34,3 +34,9 @@ To be written: first find where it stops, with `PI5_ARGS=debug` and
 
 - 2026-10-27: written after the hang, met while testing 0016's
   `eeprom update` on a board.
+- 2026-10-27: a lead, from a survey of bulk data in messages: `tftp`
+  (`user/bin/tftp/tftp.l0`, `blocked`) gathers the whole file as a
+  `(list int)`, a cons cell a byte, so a 2 MiB file is tens of MB of
+  heap, against "bytes, not lists"; then writes it with `write_whole`,
+  through `fs` 4 KB a message (0023), and polls its port with 1 ms
+  sleeps. Any of these may be the hang, or make it look like one.
