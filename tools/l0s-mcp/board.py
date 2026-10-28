@@ -347,9 +347,10 @@ def resolve_image(image):
         face = BUILD / "face"
         if not (etc / "face").exists() and face.exists():
             shutil.copy(face, etc / "face")
-        splash = BUILD / "splash.ppm"
-        if not (etc / "splash.ppm").exists() and splash.exists():
-            shutil.copy(splash, etc / "splash.ppm")
+        for name in ("wallpaper.qoi", "wallpaper2x.qoi"):
+            wallpaper = BUILD / name
+            if not (etc / name).exists() and wallpaper.exists():
+                shutil.copy(wallpaper, etc / name)
         out = STATE / "custom.cpio"
         made = subprocess.run([str(ROOT / "tools" / "mkinitramfs"), str(out), str(etc), str(tree)],
                               cwd=ROOT, capture_output=True, text=True)

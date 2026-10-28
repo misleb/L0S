@@ -10,10 +10,10 @@
 #   make all         all three, after type checking
 #   make initramfs   build/initramfs.cpio: every program, in /bin, /sbin
 #                    and /Applications as make root stages them in
-#                    build/root, demo/etc, and the splash screen as
-#                    /etc/splash.ppm
+#                    build/root, demo/etc, and the wallpaper as
+#                    /etc/wallpaper.qoi
 #   make demo        boot it to the shell, on this terminal: type help;
-#                    the splash shows in QEMU's window, and build/disk.img
+#                    the desktop shows in QEMU's window, and build/disk.img
 #                    is the disk, made once, so what is written to it stays;
 #                    build/sd.img, blank until Disks formats it, the SD card;
 #                    the keyboard and mouse are USB's, on a qemu-xhci, and
@@ -93,10 +93,8 @@ KERNEL_STACK_MB ?= 16
 KERNEL_LAYOUT   := --heap-mb $(KERNEL_HEAP_MB) --stack-mb $(KERNEL_STACK_MB)
 export INITRAMFS_MAX := $(shell echo $$(( ($(KERNEL_HEAP_MB) - 144) * 1048576 )))
 
-# The splash screen the gpu driver shows, and where QEMU shows it: cocoa
-# is macOS's window; sdl elsewhere (gtk is scaled on Wayland), none for no
-# window.
-SPLASH       ?= $(BUILD)/splash.ppm
+# Where QEMU shows the screen: cocoa is macOS's window; sdl elsewhere
+# (gtk is scaled on Wayland), none for no window.
 QEMU_DISPLAY ?= $(if $(filter Darwin,$(shell uname -s)),cocoa,sdl)
 # SCREEN, WxH, is the virtio-gpu's mode, QEMU's 1280x800 if not given. A
 # screen of 2560x1440 or more is drawn at scale 2: make demo
@@ -310,7 +308,6 @@ $(foreach p,$(PROGRAMS),$(eval SRCS_$(p) := $(DIR_$(p))/$(p).l0 \
     $(filter-out $(DIR_$(p))/$(p).l0 $(DIR_$(p))/main.l0 %_test.l0,$(wildcard $(DIR_$(p))/*.l0))))
 $(foreach p,$(PROGRAMS),$(eval TESTS_$(p) := $(wildcard $(DIR_$(p))/*_test.l0)))
 
-MKSPLASH := $(BASE) $(CLI) $(PPM) tools/mksplash/mksplash.l0
 L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
 MKFS     := $(COMMON) $(CLI) $(PARTS) $(FAT) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
@@ -378,7 +375,6 @@ l0_test = $(eval $(call L0_TEST,$(1)))
 
 $(call l0_check,$(KERNEL) kernel/main.l0)
 $(foreach p,$(PROGRAMS),$(call l0_check,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(DIR_$(p))/main.l0))
-$(call l0_check,$(MKSPLASH) tools/mksplash/main.l0)
 $(call l0_check,$(L0SDOC) tools/l0sdoc/main.l0)
 $(call l0_check,$(MKFS) tools/mkfs/main.l0)
 $(call l0_check,$(MKICON) tools/mkicon/main.l0)
@@ -480,7 +476,6 @@ $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
 $(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(call l0_test,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(t))))
-$(call l0_test,$(MKSPLASH) tools/mksplash/mksplash_test.l0)
 $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
 $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
@@ -545,14 +540,6 @@ endef
 $(foreach p,$(PROGRAMS),$(eval $(call PROGRAM_RULE,$(p))))
 
 images: $(BUILD)/kernel.img $(IMAGES)
-
-$(BUILD)/splash.ppm: $(MKSPLASH) tools/mksplash/main.l0 | $(BUILD)
-	$(L0) run $(MKSPLASH) tools/mksplash/main.l0 > $@.tmp && mv $@.tmp $@
-
-# The same at scale 2, which the desktop shows on a large screen; none
-# for a SPLASH of another's, which is shown at scale 2 as it is.
-$(BUILD)/splash2x.ppm: $(MKSPLASH) tools/mksplash/main.l0 | $(BUILD)
-	$(L0) run $(MKSPLASH) tools/mksplash/main.l0 -- 2 > $@.tmp && mv $@.tmp $@
 
 $(BUILD)/l0sdoc: $(L0SDOC) tools/l0sdoc/main.l0 | $(BUILD)
 	$(L0) build $(L0SDOC) tools/l0sdoc/main.l0 -o $@
@@ -712,16 +699,12 @@ graph:
 graph-hook:
 	tools/graphify-l0/install-hook
 
-# demo/etc, the splash at both scales, and the face, staged together as
-# the archive's /etc.
-SPLASH2X := $(if $(filter $(BUILD)/splash.ppm,$(SPLASH)),$(BUILD)/splash2x.ppm)
-ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE) $(IMAGE_FACES) $(ETC_FONTS) $(STRIKES)
-stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
+# demo/etc, the wallpaper at both scales, the face, the icons and the
+# fonts, staged together as the archive's /etc.
+ETC_DEPS := $(WALLPAPERS) $(FACE) $(ICON_FACE) $(IMAGE_FACES) $(ETC_FONTS) $(STRIKES)
+stage_etc = cp $(WALLPAPERS) $(1)/ && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
             && mkdir -p $(1)/fonts && cp $(ETC_FONTS) $(STRIKES) $(1)/fonts/ \
-            && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/ \
-            $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm) \
-            && cp $(WALLPAPERS) $(1)/
-ETC_DEPS += $(WALLPAPERS)
+            && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/
 
 initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc
@@ -729,7 +712,7 @@ initramfs: images root $(ETC_DEPS)
 	tools/mkinitramfs $(BUILD)/initramfs.cpio $(BUILD)/etc $(ROOT)
 
 # What the screen and keyboard tests boot: tests/screen/etc, with the
-# splash, font and face as the demo has them, but no vt.
+# wallpaper, fonts and face as the demo has them, but no vt.
 screen-initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/screen-etc && cp -R tests/screen/etc $(BUILD)/screen-etc
 	$(call stage_etc,$(BUILD)/screen-etc)
@@ -750,8 +733,8 @@ vt-initramfs: images root $(ETC_DEPS)
 	tools/mkinitramfs $(BUILD)/vt.cpio $(BUILD)/vt-etc $(ROOT)
 
 # What tests/disks.sh and tests/files.sh boot: tests/disks/etc, the
-# screen tests' with the disk's driver and file server, with the splash,
-# font and face.
+# screen tests' with the disk's driver and file server, with the
+# wallpaper, fonts and face.
 disks-initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/disks-etc && cp -R tests/disks/etc $(BUILD)/disks-etc
 	$(call stage_etc,$(BUILD)/disks-etc)

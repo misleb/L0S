@@ -220,3 +220,17 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   `tools/mksplash`, the Makefile's `SPLASH`, `SPLASH2X` and their
   `stage_etc` lines, and `tools/l0s-mcp`'s copy of the splash can go,
   3.4 MB off every initramfs.
+- 2026-10-28: they are gone, all of them. `/etc/face` stays: it holds
+  the pointers, which `wm` reads (`ui_face_pointers`), until goal 0008's
+  cursor set replaces them. `draw splash` keeps its name, and draws the
+  wallpaper as it did.
+- 2026-10-28: on a Pi 5 with an LG 4K monitor the chime was not heard
+  at boot, though `play /etc/chime.wav` was after, and no `no chime:`
+  was said. It played as soon as `hvs` served `display`, right after
+  HDMI0's mode and scrambling were set, before the monitor had locked
+  on and unmuted. The user decided on a lead-in: `hdmi-audio` holds the
+  chime back 2 s (`chime_lead_ms`; `audio_chime_after` and
+  `audio_chime_due` in the library, a held chime feeding nothing). This
+  waits on the monitor, not on another driver, so the decision above
+  stands. A sound driver now says `playing the chime, ...` at info as it
+  starts, so the log shows it played. Still to hear on the board.

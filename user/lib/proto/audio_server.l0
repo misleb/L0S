@@ -143,8 +143,10 @@
 ; once, and the driver serves all the same.
 
 ; The chime still to play: its file's bytes, its rate and channels, the
-; byte its next frame starts at, and where its samples end; or none.
-(data AudioChime (AudioChime bytes int int int int) (ChimeDone))
+; byte its next frame starts at, and where its samples end; or one held
+; back until clock_ns reaches a time, for a driver whose output the
+; listener's end takes a while to take up; or none.
+(data AudioChime (AudioChime bytes int int int int) (ChimeAfter AudioChime int) (ChimeDone))
 
 ; The chime's file.
 (def audio_chime_path () (list int) "/etc/chime.wav")
@@ -183,7 +185,52 @@
 
 ; The rate the chime plays at, or 0 once there is none.
 (def audio_chime_rate ((c AudioChime)) int
-  (match c ((AudioChime b rate chans s e) rate) ((ChimeDone) 0)))
+  (match c ((AudioChime b rate chans s e) rate) ((ChimeAfter c2 at) (audio_chime_rate c2)) ((ChimeDone) 0)))
+
+; Chime c held back ms from now, a clock_ns time: as it is if there is
+; none or ms is not more than 0.
+(def audio_chime_after ((c AudioChime) (ms int) (now int)) AudioChime
+  (match c
+    ((AudioChime b rate chans s e) (if (le ms 0) c (ChimeAfter c (add now (mul ms 1000000)))))
+    ((ChimeAfter c2 at) c)
+    ((ChimeDone) c)))
+
+; Whether chime c is held back still.
+(def audio_chime_waiting ((c AudioChime)) bool
+  (match c ((ChimeAfter c2 at) true) ((AudioChime b rate chans s e) false) ((ChimeDone) false)))
+
+; Chime c at now, a clock_ns time: the chime itself once its time has
+; come; as it is otherwise.
+(def audio_chime_due ((c AudioChime) (now int)) AudioChime
+  (match c
+    ((ChimeAfter c2 at) (if (ge now at) c2 c))
+    ((AudioChime b rate chans s e) c)
+    ((ChimeDone) c)))
+
+; How long chime c plays, in ms, rounded down: its frames of chans 16-bit
+; samples at its rate; 0 once there is none.
+(def audio_chime_ms ((c AudioChime)) int
+  (match c
+    ((AudioChime b rate chans s e)
+      (if (or (le rate 0) (le chans 0))
+          0
+          (div (mul (div (sub e s) (mul 2 chans)) 1000) rate)))
+    ((ChimeAfter c2 at) (audio_chime_ms c2))
+    ((ChimeDone) 0)))
+
+; What a driver says as chime c starts: the file, how long, at what rate.
+(def audio_chime_line ((c AudioChime)) (list int)
+  (append "playing the chime, " (append (audio_chime_path)
+    (append ", " (append (digits (audio_chime_ms c))
+      (append " ms at " (append (digits (audio_chime_rate c)) " Hz")))))))
+
+; Chime c, said by driver name as it starts, unless there is none or it
+; is held back still.
+(def audio_chime_said ((name (list int)) (c AudioChime)) AudioChime
+  (match c
+    ((ChimeDone) c)
+    ((ChimeAfter c2 at) c)
+    ((AudioChime b rate chans s e) (let k (info_as name (audio_chime_line c)) c))))
 
 ; What the chime gives a ring now: where its frames come from, their
 ; channels, how many to write at the ring's ring_next, and the chime
@@ -191,10 +238,11 @@
 (data ChimeFeed (ChimeFeed AudioSource int int AudioChime))
 
 ; The chime's next frames for ring r: as many as it has room for, as a
-; client's play would have written.
+; client's play would have written; none while it is held back.
 (def audio_chime_feed ((c AudioChime) (r AudioRing)) ChimeFeed
   (match c
     ((ChimeDone) (ChimeFeed (AudioBytes (bytes_from_list "") 0) 2 0 (ChimeDone)))
+    ((ChimeAfter c2 at) (ChimeFeed (AudioBytes (bytes_from_list "") 0) 2 0 c))
     ((AudioChime b rate chans s e)
       (let fb (mul 2 chans)
         (let k (min (div (sub e s) fb) (ring_room r))
