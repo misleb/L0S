@@ -53,7 +53,7 @@ and was set aside because it does not match the monospace already used.
   mkfont links from there. Tests that Source Sans 3 reads: its cmap
   finds every ASCII code, its advances differ (`i` narrower than `m`),
   and a composite glyph's outline is whole.
-- [ ] A strike as bytes, pure (`user/lib/format/strike.l0`): one face at
+- [x] A strike as bytes, pure (`user/lib/format/strike.l0`): one face at
   line height H, codes 32 to 126, written once and read in place. A
   header (magic, H, the baseline, the face's advance in font units and
   its units per em), then each code's advance in 1/64 pixel, its box
@@ -118,3 +118,19 @@ and was set aside because it does not match the monospace already used.
   documented rather than relisted. It reads Source Sans 3 as it is:
   1000 units per em, every ASCII code mapped, `i` (a composite, stem
   and dot) narrower than `m`.
+- 2026-10-27: step 2. `strike.l0`: magic `L0ST`, a 24-byte header,
+  95 entries of 24 bytes, coverage from 2304 in u64 words, so a reader
+  over shared pages reads a word with one aligned 64-bit access. The
+  baseline is kept in 1/64 pixel; "the face's advance" is its `M`'s
+  (600 for Source Code Pro), as the header needs one number. A glyph
+  is rasterized in a grid its advance wide and H tall with a margin of
+  H/4 all round, then cut to its ink, so no face loses ink at a cell's
+  edge; the placement is mkfont's numbers scaled by 1000/upm, which
+  for a face of 1000 units gives the same floats exactly. Source Code
+  Pro's strikes cover `/etc/face`'s cells pixel for pixel at 16 and 32,
+  regular and bold, and no glyph's ink leaves its cell, so drawing
+  from a strike unclipped draws what today's cells do. On the host
+  (x86-64, one core) a strike takes 11 ms at 16, 28 ms at 32 and
+  47 ms at 64 (Source Code Pro), 9 and 20 ms for Source Sans 3 at 16
+  and 32; it is 9.2 KB at 16, 15.3 KB at 32 and 49.7 KB at 64, against
+  `/etc/face`'s 431 KB for all six tables.

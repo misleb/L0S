@@ -185,6 +185,8 @@ XML     := user/lib/format/xml.l0
 SVG     := $(XML) $(RASTER) user/lib/gfx/svg_path.l0 user/lib/gfx/svg.l0
 # TrueType outlines, read as the rasterizer's segments.
 TTF     := $(RASTER) user/lib/format/ttf.l0
+# A face at a height, its glyphs rasterized, as bytes read in place.
+STRIKE  := $(TTF) user/lib/format/strike.l0
 DISPLAY := user/lib/proto/display.l0
 DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
@@ -454,6 +456,7 @@ $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
 $(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
 $(foreach t,shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(TTF) user/lib/format/ttf_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) $(STRIKE) user/lib/format/strike_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(RASTER) user/lib/gfx/raster_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_path_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_test.l0)

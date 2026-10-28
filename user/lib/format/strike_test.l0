@@ -1,0 +1,129 @@
+; strike_test.l0 -- tests of strikes, made from the fonts in fonts/: the
+; header and entries as written, and Source Code Pro's strikes beside
+; the cells tools/mkfont rasterized its glyphs into for /etc/face, which
+; they must cover pixel for pixel. Run from the top of the project.
+
+; The font at path, or an empty one.
+(def font_at ((path (list int))) Ttf
+  (match (read_whole path)
+    ((Err why) (Ttf (bytes_from_list "") 0 false 0 0 0 0 0 0))
+    ((Ok b) (match (ttf_read b) ((Ok f) f) ((Err why) (Ttf b 0 false 0 0 0 0 0 0))))))
+
+(def code_regular () Ttf (font_at "fonts/SourceCodePro-Regular.ttf"))
+(def code_bold () Ttf (font_at "fonts/SourceCodePro-Bold.ttf"))
+(def sans_regular () Ttf (font_at "fonts/SourceSans3-Regular.ttf"))
+
+(def test_header () int
+  (let b (strike_make (code_regular) 16)
+    (add (check_true "a strike" (strike_ok b))
+         (add (check_int "height" (strike_height b) 16)
+              (check_str "fields" (strike_fields b)
+                "baseline 736 advance 600 upm 1000")))))
+
+; The header's other fields as text.
+(def strike_fields ((b bytes)) (list int)
+  (unwords (cons "baseline" (cons (digits (strike_baseline b)) (cons "advance" (cons (digits (strike_face_advance b))
+    (cons "upm" (cons (digits (strike_upm b)) (nil (list int))))))))))
+
+; Source Code Pro's 600 units are 8 pixels at 16, 512 in 1/64.
+(def test_mono_advance () int
+  (let b (strike_make (code_regular) 16)
+    (add (check_int "M" (strike_advance b 77) 512)
+         (check_int "i" (strike_advance b 105) 512))))
+
+; A space has no ink, so no box and no coverage.
+(def test_space_empty () int
+  (let b (strike_make (code_regular) 16)
+    (add (check_int "width" (strike_width b 32) 0)
+         (check_int "rows" (strike_rows b 32) 0))))
+
+; Source Sans 3 is proportional: i narrower than m.
+(def test_sans_advances () int
+  (let b (strike_make (sans_regular) 16)
+    (check_true "i narrower than m" (lt (strike_advance b 105) (strike_advance b 109)))))
+
+; Each glyph's coverage starts where the one before ends, after the
+; entries.
+(def test_layout () int
+  (let b (strike_make (code_regular) 16)
+    (add (check_int "first" (strike_cov_at b 32) (strike_cov_start))
+         (check_int "the end" (bytes_len b)
+           (add (strike_cov_at b 126) (mul 8 (mul (strike_rows b 126) (strike_wpr (strike_width b 126)))))))))
+
+; A code outside the strike reads as a space.
+(def test_outside () int
+  (let b (strike_make (code_regular) 16)
+    (check_int "the advance of 200" (strike_advance b 200) (strike_advance b 32))))
+
+(def test_not_a_strike () int
+  (check_true "text" (not (strike_ok (bytes_from_list "L0ST too short")))))
+
+; ----------------------------------------------------- as /etc/face's cells
+
+; A glyph as tools/mkfont rasterized it into /etc/face: its outline
+; placed so that the font's advance is the cell's width, h / 2, and its
+; baseline 23/32 of h down, in a cell h / 2 by h.
+(def cell ((f Ttf) (h int) (code int)) (array int)
+  (let w (div h 2)
+    (let g (ttf_glyph_index f code)
+      (let place (TtfPlace (mul w (rast_one)) (ttf_advance f g) 0 (div (mul (mul h 23) (rast_one)) 32))
+        (rast_cover (rast_polygons (ttf_segs (ttf_contours f g) place)) w h)))))
+
+; Pixel x, y of the cell as the strike's glyph covers it, its box placed
+; from the pen at the cell's left and the line's top.
+(def from_strike ((b bytes) (code int) (x int) (y int)) int
+  (let bx (sub x (strike_left b code))
+    (let by (sub y (strike_top b code))
+      (if (if (lt bx 0) true (if (lt by 0) true (if (ge bx (strike_width b code)) true (ge by (strike_rows b code)))))
+          0
+          (strike_level b code bx by)))))
+
+; How many pixels of the cells of codes from code on differ from the
+; strike's, onto n.
+(def differing ((f Ttf) (b bytes) (h int) (code int) (n int)) int
+  (if (gt code 126)
+      n
+      (differing f b h (add code 1) (add n (cell_differs (cell f h code) b code (div h 2) 0)))))
+
+; How many pixels from i on of a cell w wide differ.
+(def cell_differs ((c (array int)) (b bytes) (code int) (w int) (i int)) int
+  (if (ge i (array_len c))
+      0
+      (add (if (eq (array_get c i) (from_strike b code (mod i w) (div i w))) 0 1)
+           (cell_differs c b code w (add i 1)))))
+
+; How many glyphs from code on have ink outside their cell, h / 2 by h,
+; which /etc/face cut off.
+(def outside ((b bytes) (h int) (code int) (n int)) int
+  (if (gt code 126)
+      n
+      (let l (strike_left b code)
+        (let t (strike_top b code)
+          (let out (if (eq (strike_width b code) 0) false
+                     (if (lt l 0) true (if (lt t 0) true
+                       (if (gt (add l (strike_width b code)) (div h 2)) true (gt (add t (strike_rows b code)) h)))))
+            (outside b h (add code 1) (if out (add n 1) n)))))))
+
+(def test_regular_16_as_face () int
+  (let f (code_regular)
+    (let b (strike_make f 16)
+      (add (check_int "pixels differing" (differing f b 16 32 0) 0)
+           (check_int "glyphs past their cell" (outside b 16 32 0) 0)))))
+
+(def test_bold_16_as_face () int
+  (let f (code_bold)
+    (let b (strike_make f 16)
+      (add (check_int "pixels differing" (differing f b 16 32 0) 0)
+           (check_int "glyphs past their cell" (outside b 16 32 0) 0)))))
+
+(def test_regular_32_as_face () int
+  (let f (code_regular)
+    (let b (strike_make f 32)
+      (add (check_int "pixels differing" (differing f b 32 32 0) 0)
+           (check_int "glyphs past their cell" (outside b 32 32 0) 0)))))
+
+(def test_bold_32_as_face () int
+  (let f (code_bold)
+    (let b (strike_make f 32)
+      (add (check_int "pixels differing" (differing f b 32 32 0) 0)
+           (check_int "glyphs past their cell" (outside b 32 32 0) 0)))))
