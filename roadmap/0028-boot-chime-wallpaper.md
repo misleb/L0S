@@ -52,7 +52,7 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
 - [x] `wm` takes the new wallpaper in place of the splash
   (`wallpaper`, `wallpaper_2x`, `load_wallpaper`). Screen tests' pinned
   wallpaper pixels and `demo.md`'s description change with it.
-- [ ] `virtio-gpu` shows the wallpaper as its first frame: read once,
+- [x] `virtio-gpu` shows the wallpaper as its first frame: read once,
   a layer of its own, shown under every client's layers and dropped
   from the stack once a client's buffer covers the screen. Scaled or
   centered on a mode that isn't 1080p or 4K. `gpu-screen` checks it
@@ -129,3 +129,20 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   `WALLPAPER_SVG=`. Nothing on the board reads `/etc/splash.ppm` or
   `splash2x.ppm` any more; `mksplash` and the splash are left as they
   were, for a later change to remove with `SPLASH`.
+- 2026-10-28: step 4. What every driver does alike is in
+  `display_server.l0`: the wallpaper's buffer id, 1,000,001, past a
+  client's (buffer now refuses ids outside 0 to 1,000,000 in 2D mode
+  too, as 3D mode did), `wall_under` (the stack for a client's layers)
+  and `layer_covers`. `render.l0`'s `wallpaper_load` picks the file by
+  scale, for the drivers and `wm` alike. `virtio-gpu` draws the image
+  into an `shm_region` of its own, closes the region at once (it holds
+  none of the 64), and shows that buffer as the only layer; then every
+  `layers` stacks it under the client's until a client's layer covers
+  the screen square, when it leaves and its pages are unmapped. In 3D
+  mode it is a texture, given up the same way. Not scaled: centered and
+  cut, as `wm` draws it, so the change to `wm`'s desktop shows nothing.
+  The driver registers `display` before it draws, since at 4K on QEMU
+  decoding and painting took longer than `wm`'s 5 s wait for the name;
+  `wm`'s first request waits on the port instead. `gpu-screen` boots
+  first a copy of its initramfs with no `wm` and reads the driver's
+  own frame.
