@@ -20,8 +20,9 @@ the full set before calling it done.
   having run first: it waits for what it needs, as `await_mount`,
   `await_receiving`, `await_exited` and `told_reader` in
   `kernel_virt_test.l0` do, with a loop of calls and `cbnz`. The e2e
-  cases and screen tests boot with `QEMU_CPUS` CPUs, 1 unless set, as
-  QEMU runs more slowly with more; `QEMU_CPUS=4 make e2e` tries four, and
+  cases and screen tests boot with `QEMU_CPUS` CPUs, which `make` sets
+  to `CPUS`, 4 (the scripts run by hand default to 1);
+  `QEMU_CPUS=1 make e2e` tries one, and
   a case whose output depends on which program runs first pins itself
   to one with a `cpus` file.
 - **Done** means `make check` and `make test` pass. Run `make e2e` too for

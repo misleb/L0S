@@ -187,6 +187,26 @@
 (def k_irq ((k Kernel) (n int)) (Option Irq)
   (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (map_get irqs n))))
 
+; Whether the ready queue holds a pid, one it will drop included.
+(def k_waiting ((k Kernel)) bool
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (not (queue_is_empty ready)))))
+
+; Whether pid runs on CPU 0, as cpus_here says, with k's ready queue.
+(def k_here ((k Kernel) (pid int)) bool
+  (cpus_here (k_cpus k) pid (k_waiting k)))
+
+; How many pids the ready queue holds, those it will drop included.
+(def k_ready_count ((k Kernel)) int
+  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (queue_size ready))))
+
+; Whether a pid on the ready queue would be handed to another CPU, and
+; one has room for it: read from the queue and the CPUs' table alone,
+; with no slot taken or put back, as many_spread does for each.
+(def k_spreads ((k Kernel)) bool
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
+      (match ready ((Queue front back) (cpus_spreads cpus front back))))))
+
 ; k with pid last on the ready queue.
 (def push_ready ((k Kernel) (pid int)) Kernel
   (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots (queue_push ready pid) ipc ss irqs boot next mem cpus))))
@@ -2089,19 +2109,23 @@
 
 ; ------------------------------------------------------------- other CPUs
 ;
-; With more than one CPU (spec 6.18), CPU 0 runs no thread itself: it is
-; the kernel, and hands the others theirs. Each pass takes back every
-; thread they hold that has trapped, and handles the traps together; then
-; wakes the sleepers due, hands the ready processes to the CPUs that have
-; room, and waits for the next trap or interrupt. The traps come back
-; through the runtime's rings in memory, with no interrupt between CPUs.
+; With more than one CPU (spec 6.18), CPU 0 is the kernel, and hands the
+; others their threads. Each pass takes back every thread they hold that
+; has trapped, and handles the traps together; then wakes the sleepers
+; due, hands the ready processes to the CPUs that have room, and waits for
+; the next trap or interrupt. The traps come back through the runtime's
+; rings in memory, with no interrupt between CPUs. A brief thread, one
+; passing messages, CPU 0 runs itself between passes (cpus_keeps), as on
+; one CPU, since a call there costs less than a hand-off and back.
 
 ; One pass of CPU 0's loop, as above, until pid 1 exits; and its status.
 (def many_schedule ((k Kernel)) int
-  (let a (cpu_trapped)
-    (if (eq (array_len a) 0)
-        (many_fill (wake_sleepers k (clock_ns)))
-        (many_back k (cpu_trapped_of a)))))
+  (if (cpus_busy (k_cpus k))
+      (let a (cpu_trapped)
+        (if (eq (array_len a) 0)
+            (many_fill (wake_sleepers k (clock_ns)))
+            (many_back k (cpu_trapped_of a))))
+      (many_fill (wake_sleepers k (clock_ns)))))
 
 ; The thread t taken back: its process, out of the table, given the
 ; context it came back with, and on as many_trap says; or, if the kernel
@@ -2133,11 +2157,24 @@
 ; otherwise handled as on one CPU.
 (def many_trap ((k Kernel) (p Proc) (on OnCpu)) int
   (if (on_cpu_doomed on)
-      (many_step (killed_out k p) on)
+      (let n (cpus_out_count (k_cpus k)) (many_step (killed_out k p) on n))
       (let t (trap_of (proc_context p))
         (if (trap_is_interrupt t)
             (many_schedule (park k p))
-            (many_step (on_trap k p t) on)))))
+            (let n (cpus_out_count (k_cpus k)) (many_step (on_trap k p t) on n))))))
+
+; status, the system's, once the n threads out on other CPUs have come
+; back, each at its trap or its slice's end, and been taken back: so a
+; kernel that stops leaves no thread running for the next boot to take
+; back as its own, as the board tests boot the kernel again and again in
+; one program.
+(def many_halt ((n int) (status int)) int
+  (if (le n 0)
+      status
+      (let a (cpu_trapped)
+        (if (eq (array_len a) 0)
+            (let w (cpu_wait) (many_halt n status))
+            (many_halt (sub n 1) status)))))
 
 ; Whether t is an interrupt's, not a call's or a fault's.
 (def trap_is_interrupt ((t Trap)) bool
@@ -2154,19 +2191,106 @@
     (if (eq (proc_pid p) 1) (Halt (killed_status)) (Next k2))))
 
 ; Carrying on after s, for a thread that ran where on says: one that goes
-; on handed again to a CPU with room, its own first, with what is left of
-; its slice, or put on the ready queue if none has room; then on with the
-; pass; or the status the system stops with.
-(def many_step ((s Step) (on OnCpu)) int
+; on as many_go says, with what is left of its slice; then on with the
+; pass; or the status the system stops with, once the n threads out on
+; other CPUs as the trap came are back (many_halt).
+(def many_step ((s Step) (on OnCpu) (n int)) int
   (match s
-    ((Resume k p)
-      (let i (cpus_pick (k_cpus k) (on_cpu_cpu on) (clock_ns))
-        (if (eq i 0)
-            (many_schedule (park k p))
-            (match (many_hand k p i (on_cpu_deadline on)) ((Handed k2 ok) (many_schedule k2))))))
+    ((Resume k p) (many_go k p (on_cpu_cpu on) (Turn (on_cpu_deadline on) -1 0)))
     ((Park k p) (many_schedule (park k p)))
     ((Next k) (many_schedule k))
-    ((Halt status) status)))
+    ((Halt status) (many_halt n status))))
+
+; A process's time to run: the end of its slice, then, for a turn on CPU
+; 0, the turn's end, which CPU 0's timer is set to, and when it began; or
+; -1 and 0 if it has no turn there yet.
+(data Turn (Turn int int int))
+
+; p, which goes on, in its turn: put on the ready queue if its slice or
+; its turn on CPU 0 is over; run on CPU 0 if cpus_here says, once the
+; ready processes that are not brief are handed out (many_spread), unless
+; another CPU's thread has trapped meanwhile, which is taken back first,
+; p queued; or else handed to a CPU with room, prefer first, or queued if
+; none has.
+(def many_go ((k Kernel) (p Proc) (prefer int) (turn Turn)) int
+  (match turn
+    ((Turn deadline own start)
+      (let now (clock_ns)
+        (if (if (ge now deadline) true (if (ge own 0) (ge now own) false))
+            (many_schedule (park k p))
+            (if (k_here k (proc_pid p))
+                (let k2 (many_spread_some k)
+                  (let a (cpu_trapped)
+                    (if (eq (array_len a) 0)
+                        (if (lt own 0) (many_own_turn k2 p deadline) (many_own k2 p turn))
+                        (many_back (park k2 p) (cpu_trapped_of a)))))
+                (let i (cpus_pick (k_cpus k) prefer now)
+                  (if (eq i 0)
+                      (many_schedule (park k p))
+                      (match (many_hand k p i deadline) ((Handed k2 ok) (many_schedule k2)))))))))))
+
+; k with a run of t ns by pid's thread on CPU 0 kept, if it is news
+; (cpus_run_news); else k itself, rebuilt not at all.
+(def k_ran ((k Kernel) (pid int) (t int)) Kernel
+  (if (cpus_run_news (k_cpus k) pid t) (with_cpus k (cpus_ran (k_cpus k) pid t)) k))
+
+; p given a turn on CPU 0 from now, CPU 0's timer set to its end, as
+; cpus_own_deadline says, its slice's end at deadline at the latest; and
+; run there.
+(def many_own_turn ((k Kernel) (p Proc) (deadline int)) int
+  (let now (clock_ns)
+    (let own (cpus_own_deadline now deadline (soonest (k_sleepers k)))
+      (let t (timer_at own)
+        (many_own k p (Turn deadline own now))))))
+
+; p run on CPU 0 itself, in its turn there, until it traps, or CPU 0's
+; timer ends the turn; and on from there as many_own_step says. Nothing
+; else is looked at or kept for a run that traps of itself, as on one
+; CPU: each look at the clock or the kernel's record costs on QEMU, and
+; a process passing messages runs thousands of times a second. Only a
+; turn the timer ended says how long p ran, all the turn's runs together
+; (k_ran): one of cpus_keep_ns or more, and p is handed out next if
+; another process waits for CPU 0. The timer is set once a turn, not
+; before each run: setting it costs a few µs on QEMU.
+(def many_own ((k Kernel) (p Proc) (turn Turn)) int
+  (match p
+    ((Proc pid m s c pages dev st)
+      (let r (user_run s c)
+        (let t (trap_of r)
+          (let n (cpus_out_count (k_cpus k))
+            (many_own_step (on_trap (many_timed k pid t turn) (Proc pid m s r pages dev st) t) turn n)))))))
+
+; k with how long pid ran in its turn kept, if t, its trap, is the
+; timer's, which ended it; else k.
+(def many_timed ((k Kernel) (pid int) (t Trap) (turn Turn)) Kernel
+  (match t
+    ((TrapInterrupt n)
+      (if (eq n 0) (match turn ((Turn deadline own start) (k_ran k pid (sub (clock_ns) start)))) k))
+    ((TrapCall n) k)
+    ((TrapMissing va) k)
+    ((TrapFault esr far) k)))
+
+; Carrying on after s, for a thread CPU 0 ran itself in its turn: run
+; again at once if no CPU holds a thread, as on one CPU, since none can
+; have trapped meanwhile; else as many_go says, CPU 0 preferred by none;
+; or on with the pass; or the status the system stops with, once the n
+; threads out on other CPUs are back (many_halt). n is counted before the
+; trap is handled, not the kernel kept to count it after: a value that
+; still holds the kernel's record while on_trap rebuilds it makes every
+; change copy the record's arrays whole, which cost t-ping 0.3 s. A run
+; the timer ended was parked by on_trap, its interrupt ended. A process
+; woken meanwhile that would be handed out waits for p to stop, or its
+; turn to end: each look at the ready queue costs a µs or more, and p may
+; make thousands of calls.
+(def many_own_step ((s Step) (turn Turn) (n int)) int
+  (match s
+    ((Resume k p)
+      (if (cpus_busy (k_cpus k))
+          (many_go k p 0 turn)
+          (many_own k p turn)))
+    ((Park k p) (many_schedule (park k p)))
+    ((Next k) (many_schedule k))
+    ((Halt status) (many_halt n status))))
 
 ; k after handing p's thread to a CPU, back in its slot, and whether the
 ; CPU took it; if it had no room after all, p parked instead.
@@ -2182,17 +2306,76 @@
             (Handed (with_cpus (restore k (Proc pid m s c pages dev st)) cs) true))
           (Handed (park k (Proc pid m s c pages dev st)) false)))))
 
-; The ready processes handed to the CPUs, while one has room, each with
-; a slice of its own; then a wait.
+; The ready processes, each with a slice of its own: the first that
+; cpus_here keeps run on CPU 0, and every other handed to a CPU with
+; room, those before it as cpus_here says and those after it all
+; (many_spread_all), so that processes ready together run together; then
+; a wait. Each pid on the queue as the pass began is looked at once, so
+; one behind others no CPU has room for still runs.
 (def many_fill ((k Kernel)) int
-  (let i (cpus_pick (k_cpus k) 0 (clock_ns))
-    (if (eq i 0)
-        (many_idle k)
-        (match (take_ready k)
-          ((NonePicked k2) (many_idle k2))
-          ((Picked k2 p)
-            (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
-              ((Handed k3 ok) (if ok (many_fill k3) (many_idle k3)))))))))
+  (many_fill_from k (k_ready_count k)))
+
+; k after many_spread over its whole ready queue, if k_spreads says one
+; would be handed out; else k, at no cost, as it is between most of a
+; brief thread's calls: taking each pid off the queue and putting it
+; back costs several µs on QEMU, more than the call.
+(def many_spread_some ((k Kernel)) Kernel
+  (if (k_spreads k) (many_spread k (k_ready_count k)) k))
+
+; k with the ready processes that are not brief handed to the CPUs with
+; room, each with a slice of its own, n pids of the queue looked at; the
+; rest queued again in the order they were. So a process woken to compute
+; starts on another CPU at once, not once CPU 0's own run ends.
+(def many_spread ((k Kernel) (n int)) Kernel
+  (if (le n 0)
+      k
+      (match (take_ready k)
+        ((NonePicked k2) k2)
+        ((Picked k2 p)
+          (if (cpus_keeps (k_cpus k2) (proc_pid p))
+              (many_spread (park k2 p) (sub n 1))
+              (let i (cpus_pick (k_cpus k2) 0 (clock_ns))
+                (if (eq i 0)
+                    (many_spread (park k2 p) (sub n 1))
+                    (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
+                      ((Handed k3 ok) (many_spread k3 (sub n 1)))))))))))
+
+; The rest of many_fill, n pids of the queue left to look at.
+(def many_fill_from ((k Kernel) (n int)) int
+  (if (le n 0)
+      (many_idle k)
+      (match (take_ready k)
+        ((NonePicked k2) (many_idle k2))
+        ((Picked k2 p)
+          (if (k_here k2 (proc_pid p))
+              (many_own_turn (many_spread_rest k2) p (add (clock_ns) (slice_ns)))
+              (let i (cpus_pick (k_cpus k2) 0 (clock_ns))
+                (if (eq i 0)
+                    (many_fill_from (park k2 p) (sub n 1))
+                    (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
+                      ((Handed k3 ok) (if ok (many_fill_from k3 (sub n 1)) (many_idle k3)))))))))))
+
+; k with every process on its ready queue handed to a CPU with room, if
+; any is ready and any has room, as many_spread_all does; else k.
+(def many_spread_rest ((k Kernel)) Kernel
+  (if (k_waiting k)
+      (if (cpus_room (k_cpus k)) (many_spread_all k (k_ready_count k)) k)
+      k))
+
+; k with each of n pids of its ready queue handed to a CPU with room, by
+; cpus_pick, brief or not, each with a slice of its own; those no CPU has
+; room for queued again in the order they were.
+(def many_spread_all ((k Kernel) (n int)) Kernel
+  (if (le n 0)
+      k
+      (match (take_ready k)
+        ((NonePicked k2) k2)
+        ((Picked k2 p)
+          (let i (cpus_pick (k_cpus k2) 0 (clock_ns))
+            (if (eq i 0)
+                (many_spread_all (park k2 p) (sub n 1))
+                (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
+                  ((Handed k3 ok) (many_spread_all k3 (sub n 1))))))))))
 
 ; Nothing more to hand out: wait for a CPU's trap, the timer for the
 ; soonest sleeper, or a device, unless nothing could ever come.
@@ -2272,11 +2455,12 @@
   (nil (list int)))))))))
 
 ; The boot line for n CPUs: "l0s: 1 CPU, running every process", or
-; "l0s: N CPUs: the kernel on CPU 0, processes on CPUs 1 to N-1".
+; "l0s: N CPUs: the kernel and brief processes on CPU 0, the rest on
+; CPUs 1 to N-1".
 (def cpus_text ((n int)) (list int)
   (if (le n 1)
       "l0s: 1 CPU, running every process"
-      (append "l0s: " (append (digits n) (append " CPUs: the kernel on CPU 0, processes on CPUs 1 to " (digits (sub n 1)))))))
+      (append "l0s: " (append (digits n) (append " CPUs: the kernel and brief processes on CPU 0, the rest on CPUs 1 to " (digits (sub n 1)))))))
 
 ; ", booted with ARGS" for boot arguments, or ", booted with no arguments".
 (def boot_arguments_text ((args (list (list int)))) (list int)

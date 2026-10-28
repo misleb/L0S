@@ -20,37 +20,56 @@ sleeper and no bound interrupt, nothing can ever wake anyone: it reports a
 deadlock and exits with 124.
 
 That is the loop on a board with one CPU. With more (spec §6.18; the
-aarch64 virt board has as many as `-smp` gives it: `make demo CPUS=4`,
-or `QEMU_CPUS=4` for `tools/qemu-boot.sh` and the tests), the kernel stays on CPU 0 and runs no process itself: it hands
-processes to the others with `cpu_run`, and they hand each back when it
-traps, through rings in memory, with no interrupt between CPUs. Each pass
-of `many_schedule`:
+aarch64 virt board has as many as `-smp` gives it: four for `make demo`
+and the tests, `CPUS`, and `QEMU_CPUS` for `tools/qemu-boot.sh`), the kernel stays on CPU 0. It runs
+a process there itself, as on one CPU, while that process passes
+messages, and hands one that computes to the others with `cpu_run`,
+which hand each back when it traps, through rings in memory, with no
+interrupt between CPUs. A call made on CPU 0 is a trap into the kernel
+there; one made on another CPU is a trip through the rings to CPU 0 and
+back, which on QEMU costs more than the call. Each pass of
+`many_schedule`:
 
 1. Take back every process that has trapped (`cpu_trapped`), and handle
-   each trap as above. One a call lets go on is handed again, with the
-   rest of its slice, by the same choice as in step 3; a slice that ended
-   on its CPU's own timer puts it back on the ready queue.
+   each trap as above. One a call lets go on goes where step 3 says,
+   with the rest of its slice; a slice that ended on its CPU's own timer
+   puts it back on the ready queue. With no process out on another CPU,
+   there is nothing to take back, and nothing is looked for.
 2. Wake any sleeper whose time has come.
-3. Hand ready processes, each with a 10 ms slice, to the CPUs with room;
-   each CPU holds at most two, one running and one to start the moment
-   the first traps. A CPU handed a thread or giving one back within the
-   last 500 µs, whose threads each last ran 1 ms or less, is chosen
-   first, the latest of them: its thread is passing messages and traps
-   soon, and the one queued behind it then starts at once, where an idle
-   CPU has stopped polling and must be woken. Failing that, an idle CPU
-   (`cpus_pick`). So processes that each wait on the next, as a file
-   written goes from `install` to `fs` to `virtio-blk`, take turns on one
-   CPU, and nothing waits behind a thread that has not run yet or last
-   ran long, which may be computing. There is one ready queue, so a
-   process runs on whichever CPU is chosen.
-4. If nothing more can be handed out, wait (`cpu_wait`) for a CPU's trap,
-   the timer for the soonest sleeper, or a device's interrupt, which all
-   come to CPU 0.
+3. Hand out or run the ready processes, each with a 10 ms slice. The
+   first whose last run was 2 ms or less (`cpus_keeps`) CPU 0 runs
+   itself, in a turn of at most 4 ms, its own timer set to the turn's
+   end: it is passing messages, and traps soon. While no other CPU holds
+   a process, one a call lets go on runs again at once, as on one CPU,
+   with nothing else looked at; otherwise each trap is a pass. Every
+   other ready process goes to another CPU with room, so that processes
+   ready together run together; and so does one that has not run yet,
+   or whose last run was longer, which may be computing, unless it is
+   the only one ready and no other CPU holds a process, when nothing
+   waits for CPU 0 and it runs there too (`cpus_here`). A turn the
+   timer ends counts as the process's run, so one that computes on CPU
+   0 is handed out at its next pass. Each
+   other CPU holds at most two processes, one running and one to start
+   the moment the first traps. A CPU handed a thread or giving one back
+   within the last 500 µs, whose threads each last ran 1 ms or less, is
+   chosen first, the latest of them: its thread traps soon, and the one
+   queued behind it then starts at once, where an idle CPU has stopped
+   polling and must be woken. Failing that, an idle CPU (`cpus_pick`).
+   So processes that each wait on the next, as a file written goes from
+   `install` to `fs` to `virtio-blk`, take turns on CPU 0, and those that
+   compute run beside them, each on a CPU of its own. There is one ready
+   queue, so a process runs on whichever CPU is chosen.
+4. If nothing more can be handed out or run, wait (`cpu_wait`) for a
+   CPU's trap, the timer for the soonest sleeper, or a device's
+   interrupt, which all come to CPU 0.
 
 A process out on another CPU stays in its slot, so other processes' calls
 reach it: memory shared into it is mapped while it runs, `proc_info`
 says it is running, and a kill marks it, to end it when it comes back,
 within its slice. `kernel/cpus.l0` keeps which process each CPU holds.
+When the system stops, the kernel first takes back every thread still
+out, each at its trap or its slice's end (`many_halt`), so it leaves no
+thread running: the board tests boot it again and again in one program.
 
 **Nothing a process does can crash the kernel.** Every buffer, count,
 address, path and interrupt number is checked against the kernel's own
@@ -103,7 +122,7 @@ how to read the rest, and what was said before a program started.
 
 The kernel says, as it boots (`banner_lines`): its CPU and boot
 arguments; the pages of memory free; how many CPUs, as `l0s: 4 CPUs: the
-kernel on CPU 0, processes on CPUs 1 to 3`; how a process's memory is
+kernel and brief processes on CPU 0, the rest on CPUs 1 to 3`; how a process's memory is
 laid out, images and heaps, stacks, device and DMA pages; its limits; the
 initramfs's size and entries. L0 has no builtin for the board's RAM,
 timer or interrupt controller, so it says nothing of them. It logs
@@ -352,25 +371,30 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
   when it comes back, within its slice. L0's `cpu_wait` gives back a
   CPU's trap before a device's interrupt, so a kernel kept busy by traps
   takes interrupts late. Several CPUs have run on QEMU's aarch64 board
-  and the Pi 5, whose four boot with processes on three; L0 starts no
-  other CPU on the riscv64 board.
-- **On QEMU, more CPUs are no faster, and some boots slower**, so the
-  demo and the tests boot with one unless asked (`CPUS`, `QEMU_CPUS`).
-  A boot that installs a system onto a RAM volume (`rootboot_tmpfs`) took
-  47 s on one CPU and 3 min 42 s on four while L0's idle CPUs spun
-  through QEMU's global lock; with idle CPUs halting (L0's roadmap 0123,
-  [probes/smp](../probes/smp/REQUEST-idle-cpus.md)) 50 s and about 110 s;
-  and with short releases kept (see Releasing), 25 s on one, two or four.
-  Each hand-off to another CPU costs more than a call on CPU 0, and most
-  of all to a CPU that has stopped polling, which made writing to a disk
-  slower on four while a file's data went 4 KB a message. Through file
-  windows, 64 KB a request (see File windows), it no longer is: the
-  e2e case `install` takes about 3.3 s on one CPU and 2.9 s on four, and
-  `install_boot` 2.9 s and 2.8 s, where they took 14.6 and 18.1 s, and
-  25.4 and 32.2 s, before. Nothing L0S runs yet computes enough on its
-  own to gain from more CPUs. With the disk in `build/`, as `make e2e` has
-  it, the host's own disk syncing it varies these by half or more.
-  `make test-virt` runs every board test on four too.
+  and the Pi 5, whose four booted with processes on three before CPU 0
+  ran brief processes too; the Pi 5 has not booted since that change.
+  L0 starts no other CPU on the riscv64 board.
+- **On QEMU, more CPUs gain only where processes compute.** A call made
+  on another CPU is a trip through the rings to CPU 0 and back, which
+  costs more than the call, so processes passing messages run on CPU 0,
+  one at a time, as on one CPU, and four CPUs are no faster at it than
+  one, and a little slower. Timed with
+  [tools/cputimes](../tools/cputimes) (roadmap 0002's log has the
+  method), on one CPU and on four: the e2e case `install` 2.76 s and
+  2.80 s, `install_boot` 3.26 s and 3.35 s, which overlap from run to
+  run; 9,000 pings between two processes 2.41 s and 2.65 s, about 2 µs a
+  round trip more, from the kernel's own steps between CPU 0's runs,
+  and less on a quiet host; three processes that compute beside one
+  passing messages 18.7 s and 0.53 s; the demo's desktop on the screen
+  1.3 s and 1.0 to 1.1 s. Before CPU 0 ran processes itself, four took
+  3.55 s, 4.40 s, 3.35 s and 2.9 to 23 s of those. The demo and the
+  tests boot with four (`CPUS`, `QEMU_CPUS`; `CPUS=1` for one). Every
+  step of CPU 0's own between a process's runs costs on QEMU, a read of
+  the kernel's record a quarter of a µs, so the path between them does
+  as few as it can (step 3 of the loop, at the top). With the disk in
+  `build/`, as `make e2e` has it, the host's own disk syncing it varies
+  these by half or more, and a busy host slows four CPUs more than one.
+  `make test-virt` runs every board test on one CPU and on four.
 - Images are copied from the archive, or a volume's file, into fresh
   frames for every process that runs them, before its code and rodata
   are found to be another's and those frames freed again, so starting a

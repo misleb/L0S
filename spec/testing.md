@@ -452,6 +452,13 @@ of a few aarch64 instructions each, each an ELF of one code segment it
 writes with `printf`, for what L0 code cannot do on purpose: fault, pass
 a bad buffer, and wait on nothing.
 
+[tools/cputimes](../tools/cputimes) times boots on one CPU and on four,
+for roadmap 0002, and is no test: e2e cases, or its own in
+`tools/cputimes.d` (`install` alone, `install --boot` three times, 9,000
+pings, and pings beside three `spin`s), each booted by `tests/e2e.sh`
+several times, interleaved, with each CPU count and each kernel image it
+is given, and their medians printed.
+
 ## Limits
 
 - **The screen tests run in 2D mode** (`GPU=2d`, the default of

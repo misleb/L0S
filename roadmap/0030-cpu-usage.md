@@ -5,15 +5,15 @@ Track: Kernel · Status: idea · Needs: – · Spec: kernel.md, syscalls.md, pro
 ## Why
 
 Nothing says what the CPUs are doing. The kernel's boot banner says how
-many there are (`l0s: 4 CPUs: the kernel on CPU 0, processes on CPUs 1
-to 3`), and `Cpus` knows, in the moment, which pid is out on which CPU
+many there are (`l0s: 4 CPUs: the kernel and brief processes on CPU 0,
+the rest on CPUs 1 to 3`, since 0002), and `Cpus` knows, in the moment, which pid is out on which CPU
 and how long each pid's thread was last out (`cpus_last_run`). But it
 keeps no totals, and `proc_info` gives none. So `ps` and System Monitor
 show each process's state and memory and nothing of its CPU: not where
 it runs, not how much of a CPU it takes, not whether the system is busy.
 That 0003's processes ran on CPUs 1 to 3 had to be argued from the
-scheduler's code rather than read off the screen. Goal 0002, which makes
-more CPUs faster, also needs a way to see the CPUs used.
+scheduler's code rather than read off the screen, and since 0002 which
+runs where depends on how long each runs, which nothing shows either.
 
 Nor does anything say what a process serves. A server registers its
 port under a name (`name_register`, `compositor`, `font`, `vt1`), and
@@ -55,8 +55,9 @@ show the load averages.
   bar, CPU 0 marked as the kernel's, and the load averages, read again
   every second.
 - On QEMU with `-smp 4` a test sees a busy process's % CPU near 100 on
-  a CPU from 1 to 3 and CPU 0's share small. On the Pi 5, `ps` shows
-  processes on CPUs 1 to 3, which 0003's Log could only argue. An e2e
+  a CPU from 1 to 3 (0002's `tools/cputimes.d/t-spin` is such a case),
+  and one passing messages on CPU 0. On the Pi 5, `ps` shows which
+  processes run on which CPU, which 0003's Log could only argue. An e2e
   case sees `ps` and `names` agree on who serves `compositor` and
   `console`, and a name gone once its owner exits. `make
   check`, `make test`, `make e2e` and `make test-virt` pass.

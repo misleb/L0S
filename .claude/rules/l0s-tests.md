@@ -26,7 +26,7 @@ The `l0s-testing` skill has the detail; load it before writing tests.
   `status`, `stderr`, `typed` (then start `uart noecho`), `font`, `bootargs`,
   `cpus` (the board's CPUs, 1 for a case whose output depends on which
   program runs first, whatever `QEMU_CPUS` asks; otherwise `QEMU_CPUS`,
-  1 unless set),
+  which `make` sets to `CPUS`, 4),
   `gpu` (the virtio-gpu's options, such as a 4K mode), `net` (a
   virtio-net on the QEMU network it names; `serve` and `peer`, host
   commands for the boot, with `@PORT@` a free port), or `disk` with its

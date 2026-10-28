@@ -35,6 +35,9 @@
 ; Whether pid's thread is out on a CPU.
 (def cpus_out ((c Cpus) (pid int)) bool (match c ((Cpus n held placed act ran) (map_has placed pid))))
 
+; How many threads the CPUs hold, handed and not yet taken back.
+(def cpus_out_count ((c Cpus)) int (match c ((Cpus n held placed act ran) (map_size placed))))
+
 ; Whether any CPU holds a thread.
 (def cpus_busy ((c Cpus)) bool (match c ((Cpus n held placed act ran) (gt (map_size placed) 0))))
 
@@ -130,6 +133,91 @@
             i
             (let b (cpus_held c best)
               (if (lt h b) i (if (if (eq h b) (eq i prefer) false) i best)))))))
+
+; ------------------------------------------------------ CPU 0's own runs
+
+; How long CPU 0, the kernel's, runs a thread itself at most before its
+; timer takes it back, a turn: 4 ms, twice cpus_keep_ns, so a thread that
+; runs that long goes to another CPU next.
+(def cpus_own_ns () int 4000000)
+
+; How long a thread's last run may have been for it to run on CPU 0: 2
+; ms. fs, copying a file's 64 KB windows, runs 1 to 2 ms at a time, and
+; is cheaper on CPU 0 than handed out and back each time.
+(def cpus_keep_ns () int 2000000)
+
+; Whether pid's thread runs on CPU 0 itself, between the kernel's passes,
+; rather than being handed to another CPU: it last ran within
+; cpus_keep_ns, so it is passing messages, and traps soon. A call made on
+; CPU 0 is a trap into the kernel there, where one made on another CPU
+; goes through the rings to CPU 0 and its answer back, and on QEMU that
+; round trip costs more than the run itself: install took 2.5 s on one
+; CPU and 3.1 s on four handing every thread out. A thread whose last run
+; was long may be computing, and goes to another CPU, and so does one
+; that has not run yet, which may: a desktop's programs starting
+; together, each drawing at first, reached the screen in 1.3 s started
+; on CPU 0, as on one CPU, and in 1.0 s started on CPUs of their own.
+(def cpus_keeps ((c Cpus) (pid int)) bool
+  (match c ((Cpus n held placed act ran) (cpus_brief_in ran pid))))
+
+; Whether ran, runs by pid, keeps one within cpus_keep_ns for pid.
+(def cpus_brief_in ((ran (Map int int)) (pid int)) bool
+  (match (map_get ran pid) ((None) false) ((Some t) (le t (cpus_keep_ns)))))
+
+; Whether pid's thread runs on CPU 0 when waiting says whether another
+; process is ready: if cpus_keeps keeps it; or, though its last run was
+; long, if no other process is ready and no CPU holds a thread, so that
+; nothing waits for CPU 0 while it runs, as fs copying a large file runs
+; alone. CPU 0's turns, and the interrupts that end a run there, bound
+; how long anything woken meanwhile waits for it.
+(def cpus_here ((c Cpus) (pid int) (waiting bool)) bool
+  (match c
+    ((Cpus n held placed act ran)
+      (if (cpus_brief_in ran pid)
+          true
+          (if waiting false (eq (map_size placed) 0))))))
+
+; Whether any of the ready pids front and back is one cpus_keeps does not
+; keep on CPU 0 while a CPU from 1 has room for it: one the kernel would
+; hand out. With no thread out, every CPU has room.
+(def cpus_spreads ((c Cpus) (front (list int)) (back (list int))) bool
+  (match c
+    ((Cpus n held placed act ran)
+      (if (if (cpus_any_out ran front) true (cpus_any_out ran back))
+          (if (eq (map_size placed) 0) (gt n 1) (cpus_room c))
+          false))))
+
+; Whether any of pids is one cpus_brief_in does not keep, by ran.
+(def cpus_any_out ((ran (Map int int)) (pids (list int))) bool
+  (if (is_empty pids)
+      false
+      (if (cpus_brief_in ran (head pids)) (cpus_any_out ran (tail pids)) true)))
+
+; Whether a CPU from 1 has room for another thread.
+(def cpus_room ((c Cpus)) bool (gt (cpus_pick_from c 0 1 0) 0))
+
+; Whether a run of t ns by pid's thread on CPU 0 is news to c: it has no
+; run kept yet, or this one is within cpus_keep_ns where that was not, or
+; the other way round. Only news need be kept (cpus_ran), as nothing reads
+; a run on CPU 0 but cpus_keeps, and cpus_pick of one handed out, which
+; only one over cpus_keep_ns is; and keeping one copies the table of runs
+; whole while the kernel's record still holds it.
+(def cpus_run_news ((c Cpus) (pid int) (t int)) bool
+  (let was (cpus_last_run c pid)
+    (if (lt was 0) true (not (eq (le was (cpus_keep_ns)) (le t (cpus_keep_ns)))))))
+
+; c with pid's thread's last run, on CPU 0, kept as t ns long.
+(def cpus_ran ((c Cpus) (pid int) (t int)) Cpus
+  (match c ((Cpus n held placed act ran) (Cpus n held placed act (map_put ran pid (max 0 t))))))
+
+; When CPU 0's timer must take back a thread it runs from now: its
+; slice's end, deadline, or cpus_own_ns from now, or soonest, the
+; soonest sleeper's time, -1 for none, whichever comes first.
+(def cpus_own_deadline ((now int) (deadline int) (soonest int)) int
+  (let d (min deadline (add now (cpus_own_ns)))
+    (if (lt soonest 0) d (min d soonest))))
+
+; ------------------------------------------------------------ hand-offs
 
 ; c with pid's thread handed to CPU i at now, its slice ending at deadline.
 (def cpus_place ((c Cpus) (i int) (pid int) (deadline int) (now int)) Cpus

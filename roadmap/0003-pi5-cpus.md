@@ -39,3 +39,7 @@ None were needed: the four-CPU kernel already ran there (Log).
   the other three. The need on 0002 was dropped: that goal makes more
   CPUs faster, which this never asked. Seeing how the CPUs are used, in
   `ps` and System Monitor, is goal [0030](0030-cpu-usage.md).
+- 2026-10-28: 0002, done the same day, changed what the entry above
+  argues from: CPU 0 now runs brief processes too, and hands only those
+  that compute, or are ready alongside, to CPUs 1 to 3. The boots above
+  ran the kernel before that; the Pi 5 has not booted the new one yet.

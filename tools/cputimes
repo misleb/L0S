@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# cputimes [-n RUNS] [-c "CPUS..."] [-k "KERNEL..."] [CASE...] -- times boots
+# on boards of different CPU counts, for roadmap 0002: each CASE, an e2e
+# case directory of tools/cputimes.d (t-install, t-boot, t-ping, t-spin;
+# all of them if none is named) or a name of tests/e2e, booted by
+# tests/e2e.sh RUNS times (5 unless -n) with each count of CPUS (1 and 4
+# unless -c) and each kernel image (build/kernel.img unless -k, which
+# names images to compare, each copied over build/kernel.img in turn, and
+# build/kernel.img as it was put back at the end), the boots interleaved
+# so that a busy
+# host slows each alike. Prints every boot's wall time, from tests/e2e.sh's
+# start to its end, mkinitramfs, QEMU's start and typing delays included,
+# which are the same whatever the CPUs, and then the median of each count
+# and kernel. Timing on a busy host is noisy: run nothing else meanwhile,
+# and read the load printed with each boot. Run from the top of the
+# project after make root, as tests/e2e.sh is.
+set -u
+cd "$(dirname "$0")/.."
+runs=5; counts="1 4"; kernels=""
+while getopts n:c:k: o; do
+  case $o in
+    n) runs=$OPTARG ;;
+    c) counts=$OPTARG ;;
+    k) kernels=$OPTARG ;;
+    *) exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+cases=("$@")
+[ ${#cases[@]} -eq 0 ] && cases=(t-install t-boot t-ping t-spin)
+if [ -n "$kernels" ]; then
+  saved=build/cputimes-kernel.img
+  cp build/kernel.img "$saved"
+fi
+now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
+load() { uptime | sed 's/.*load averages*: *//; s/,.*//'; }
+for c in "${cases[@]}"; do
+  arg=$c
+  [ -d "tools/cputimes.d/$c" ] && arg=../../tools/cputimes.d/$c
+  times=$(mktemp)
+  for i in $(seq "$runs"); do
+    for k in ${kernels:-build/kernel.img}; do
+      [ -n "$kernels" ] && cp "$k" build/kernel.img
+      for n in $counts; do
+        s=$(now)
+        r=$(QEMU_CPUS=$n tests/e2e.sh "$arg" 2>&1 | grep -E '^(not )?ok' | head -1)
+        e=$(now)
+        t=$(perl -e "printf '%.2f', $e - $s")
+        echo "$c $k cpus=$n run=$i ${t}s load=$(load) $r"
+        echo "$k $n $t" >> "$times"
+      done
+    done
+  done
+  for k in ${kernels:-build/kernel.img}; do
+    for n in $counts; do
+      m=$(awk -v k="$k" -v n="$n" '$1 == k && $2 == n { print $3 }' "$times" | sort -n |
+          awk '{ a[NR] = $1 } END { print a[int((NR + 1) / 2)] }')
+      echo "median $c $k cpus=$n ${m}s"
+    done
+  done
+  rm -f "$times"
+done
+if [ -n "$kernels" ]; then
+  cp "$saved" build/kernel.img
+  rm -f "$saved"
+fi
