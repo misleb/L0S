@@ -78,7 +78,7 @@ So L0S spends processes to hold names:
   the keyboard and pointer screen tests, and on the Pi 5 with a USB
   keyboard and mouse, written in the Log. (On QEMU; the Pi 5's check is
   still to be made, as the Log says.)
-- [ ] More of it: look through the servers for others that hold a name
+- [x] More of it: look through the servers for others that hold a name
   by a process of their own, poll with `port_try_receive`, or would
   serve better from one process waiting on several ports (`fs`' names
   per volume, `xhci`'s two controllers on RP1, `inet`, `wm`'s clients),
@@ -191,3 +191,40 @@ So L0S spends processes to hold names:
   open), the `usb` e2e case, and the demo's inittab booted with USB
   input, whose `ps` is `spec/demo.md`'s sample. `make check`, `make
   test` 2875 passed.
+- 2026-10-28: step 5, the servers looked through, for a name held by a
+  process of its own, a poll with `port_try_receive` and a nap, or one
+  that would serve better waiting on several ports:
+  - `usb-hid`'s held key, polled every 2 ms: done in step 4, by the
+    kernel's alarm.
+  - `vt`'s tab relays, a process each to hold `vtN`: step 3's, which
+    waits for 0021, below.
+  - `fs`' names per volume: there are none. `fs` registers `fs` once,
+    and each volume is a mount the kernel routes by path to `fs`' one
+    port (`fs_mount`), so nothing is held by a process. But `fs ram` is
+    a second `fs` process holding `tmpfs` beside it: written up in
+    [0034](0034-servers-wait-not-poll.md).
+  - The disk drivers register every disk, `diskN`, on one port, and
+    tell the disks apart by a request's first word (`disk_asked`):
+    nothing to change.
+  - `xhci`'s two controllers on RP1 are one process, one port and both
+    interrupts bound to it; it polls, napping 1 ms, only while no
+    interrupt is bound. Nothing to change while every board it runs on
+    gives interrupts; in 0034 should one not.
+  - `inet` naps 1 ms between looks at TCP's timers for as long as a
+    connection is open, and its lease 10 ms while it waits for DHCP;
+    `gem` naps between looks at the link. An alarm at the next due time
+    would do for each: 0034.
+  - `wm` takes requests, input and the display's notices on one port,
+    and `port_try_receive`s to put pointer moves together; System
+    Monitor refreshes by a poll and a nap. Both are 0021's and 0033's
+    to change (`wm`'s notices, the toolkit's loop), so 0034 names them
+    and leaves them.
+  The rest of the servers (`echo`, `font`, `pcie`, `rtc`, `uart`,
+  `virtio-*`, `hvs`, `hdmi-audio`, `sdhci`) serve one name on one port
+  and wait on it, their naps being for their devices' registers, not
+  for messages.
+- 2026-10-28: step 3, Terminal's tabs without relays, waits: another
+  goal, 0021, is changing `vt` now. It follows once 0021 has merged,
+  with the calls of steps 1 and 2 (`port_set`, `port_receive_set`,
+  `name_unregister`) as they are. `tests/vt.sh`'s `vt_base` is 16 after
+  step 4, and its arithmetic will change again as the relays go.
