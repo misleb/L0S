@@ -370,14 +370,19 @@ way; buffers and painting are in the screen's.
   own pixels); `draw_cmd.l0`'s `ui_draw_*` (render.l0's shapes, s thick);
   `vt` (cells ×s, its rows copied ×s); the launcher's `icon2x.ppm`.
 - **The face**, a `UiFace`: scale, the icons of `/etc/icons` at the
-  sizes the scale paints (`icon.NAME.N`, N = 16·k·s, `ui_icon_sizes`),
-  and the tables of `/etc/face` (coverage 0–15, 16 levels a word):
+  sizes the scale paints (`icon.NAME.N`, N = 16·k·s, `ui_icon_sizes`;
+  coverage 0–15, 16 levels a word), and the text's strikes, asked of the
+  font service `font` (`user/sbin/font`, `proto/font.l0`):
   `glyph.regular.H` and `glyph.bold.H`, H = 16·text scale·s (16, 32, 64),
-  and `cursor`. A pixel is mixed with what is under it by its level
-  (`ui_cov_put`); a missing glyph table or icon is not drawn
-  (`ui_face_has_text`, and a window that cannot say so does not open).
-  Host tests make one with `ui_face_none` (no tables) or `(UiFace s map)`
-  with tables of their own (`paint_test.l0`'s `box_face`, `face1_glyphs`).
+  each a `UiStrike` over the pages `font` shares, read in place, each
+  glyph its ink's box (`format/strike.l0`). Only `wm` adds `/etc/face`'s
+  `cursor` tables, at scale 2 (`ui_face_pointers`). A pixel is mixed with
+  what is under it by its level (`ui_cov_put`); a missing strike or icon
+  is not drawn (`ui_face_has_text`, and a window that cannot say so does
+  not open). A boot that starts `wm` starts `/sbin/font` before it.
+  Host tests make one with `ui_face_none` (no tables) or `(UiFace s
+  tables strikes)` with their own (`paint_test.l0`'s `box_face`, and
+  `face1_glyphs`, a strike as bytes, `UiStrikeBytes`).
 - **Bold at 2** is the bold face, not a double strike; widths are still the
   logical `ui_text_w`.
 - **A new icon** is GNOME's SVG of it copied unchanged into

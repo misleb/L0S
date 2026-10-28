@@ -14,8 +14,10 @@
 #
 # If NAME/typed exists, it is typed at the board's serial line, through
 # tools/qemu-boot.sh, a line at a time as tools/slowtype types, for the
-# console driver to read. If NAME/font exists, the face (the text's
-# glyphs) is added to the case's etc as /etc/face, for vt. If NAME/disk exists, the
+# console driver to read. If NAME/font exists, the face (the pointers)
+# is added to the case's etc as /etc/face, and the fonts and the
+# desktop's strikes as /etc/fonts, for the font service, which draws the
+# text. If NAME/disk exists, the
 # board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
 # case: of its own layout, if NAME/layout holds one, SECTORS then each
 # volume as mkfs takes them, in which @ is the case's own initramfs, to
@@ -101,7 +103,8 @@ run_case() {
   etc="$dir/etc"
   if [ -f "$dir/font" ]; then
     etc="$BUILD/e2e/$name.etc"
-    rm -rf "$etc" && cp -R "$dir/etc" "$etc" && cp "$BUILD/face" "$etc/face"
+    rm -rf "$etc" && cp -R "$dir/etc" "$etc" && cp "$BUILD/face" "$etc/face" \
+      && mkdir -p "$etc/fonts" && cp fonts/*.ttf "$BUILD"/strikes/*.strike "$etc/fonts/"
   fi
   if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; return

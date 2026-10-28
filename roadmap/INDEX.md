@@ -38,20 +38,20 @@ move independently, so several can be active at once.
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
-| [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | ready | 0/5 | – | toolkit.md, programs.md, demo.md, syscalls.md |
-| [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | blocked | 0/6 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
+| [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | ready | 0/6 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
 | [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
 | [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi 5's card needs | Pi 5 | active | 5/6 | – | pi5.md, programs.md, testing.md |
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
+| [0026](0026-font-service-limits.md) The font service lets strikes go, and knows who holds them | Toolkit | idea | – | – | programs.md, toolkit.md |
 
 ## Ready
 
 - [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame
   interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
   find it needs L0 to give the interrupt.
-- [0019](0019-font-service.md) A font service that caches rasterized
-  glyphs, with Source Sans 3 beside Source Code Pro: on QEMU, its first
-  step fetching the font.
+- [0020](0020-proportional-text.md) Proportional text where GNOME's
+  is: on QEMU, `font` giving Source Sans 3, starting with the advances
+  as a pure table.
 - [0021](0021-many-windows.md) An app with many windows, its events
   told by window: on QEMU, starting with the window notice.
 - [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi
@@ -82,6 +82,7 @@ graph LR
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 | [0016](0016-pi5-eeprom-config.md) The Pi 5's boot config, read and changed from L0S | Pi 5 | 2026-10-27 |
+| [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | 2026-10-27 |
 | [0023](0023-file-data-shared.md) File data through shared memory, in runs of 64 KB | Storage | 2026-10-27 |
 | [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its scrollback, resizes, and has tabs | Desktop | 2026-10-27 |
 

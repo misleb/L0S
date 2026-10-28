@@ -200,7 +200,10 @@ with no mailbox, and `eeprom_show` reads a file that is no bootloader
 image, both of which fail, saying why. `virtio-blk_ro` has `disk` write to a read-only disk, which the
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
-of a line, which its `pattern` checks. `garbage`
+of a line, which its `pattern` checks. `fonts` has `fonts` ask the font
+service for its faces and the six strikes the build made, which it keeps
+and has built none of, then for Source Sans 3 at 32 twice, from two
+processes, which it builds once and shares with both. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
 shows, a virtio keyboard, a virtio tablet, and a virtio-rng unless the
@@ -254,7 +257,7 @@ header bar. Then:
   under the motd, the banner and the prompt;
 - `run nap 30000 &`: `ps` at the serial shell shows `nap`, its parent
   that window's shell, whose parent is the window's `vt`, one of the two
-  `/etc/system` started, pids 17 and 18;
+  `/etc/system` started, pids 18 and 19;
 - a click on the other window's header bar, through QMP's
   `input-send-event`: it comes to the front, as `run windows` and its
   header bar's color show;

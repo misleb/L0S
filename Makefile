@@ -183,6 +183,12 @@ RENDER  := $(PPM) $(RECT) user/lib/gfx/render.l0
 RASTER  := user/lib/gfx/raster.l0
 XML     := user/lib/format/xml.l0
 SVG     := $(XML) $(RASTER) user/lib/gfx/svg_path.l0 user/lib/gfx/svg.l0
+# TrueType outlines, read as the rasterizer's segments.
+TTF     := $(RASTER) user/lib/format/ttf.l0
+# A face at a height, its glyphs rasterized, as bytes read in place:
+# the layout, which the toolkit reads; and its making, from a TTF.
+STRIKE  := user/lib/format/strike.l0
+GLYPHS  := $(TTF) $(STRIKE) user/lib/gfx/glyphs.l0
 DISPLAY := user/lib/proto/display.l0
 DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
@@ -194,7 +200,10 @@ AUDIO_SERVER := $(AUDIOLIB) user/lib/proto/audio_server.l0
 WAV     := user/lib/format/wav.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
-L0FS    := user/lib/format/l0fs.l0
+# The font service's protocol: its faces, and strikes shared with the
+# asker.
+FONTLIB := user/lib/proto/font.l0
+L0FS   := user/lib/format/l0fs.l0
 FAT     := $(L0FS) user/lib/format/fat.l0
 
 # The network: nic, the driver's frames and Ethernet's addresses; and
@@ -225,9 +234,10 @@ PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB) $(MBRLIB)
 SHA256  := user/lib/format/sha256.l0
 
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
-# commands, which need only render.l0; and its client windows, which need
-# the compositor's protocol too.
-UI_CORE   := user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
+# commands, which need only render.l0, and the font service's protocol
+# and strikes, which its text is drawn from; and its client windows,
+# which need the compositor's protocol too.
+UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
              user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0
 UI_WINDOW := user/lib/ui/window.l0
@@ -266,6 +276,8 @@ LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_random     := $(RANDOM)
+LIBS_font       := $(RENDER) $(GLYPHS) $(FONTLIB)
+LIBS_fonts      := $(FONTLIB)
 LIBS_fs         := $(DISKLIB) $(PARTS) $(FAT) $(FSLIB) $(CLOCK) $(RANDOM)
 LIBS_sh         := $(PROCS) $(PATHS) $(APPLIB)
 LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(FAT) $(FSLIB)
@@ -301,7 +313,8 @@ L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
 MKFS     := $(COMMON) $(CLI) $(PARTS) $(FAT) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
 MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
-MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/ttf.l0 tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
+MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
+MKSTRIKE := $(ULIB) $(RENDER) $(GLYPHS) tools/mkstrike/mkstrike.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 ICONS    := $(APPS:%=$(BUILD)/icons/%.ppm)
 ICONS2X  := $(APPS:%=$(BUILD)/icons/%2x.ppm)
@@ -366,6 +379,7 @@ $(call l0_check,$(L0SDOC) tools/l0sdoc/main.l0)
 $(call l0_check,$(MKFS) tools/mkfs/main.l0)
 $(call l0_check,$(MKICON) tools/mkicon/main.l0)
 $(call l0_check,$(MKFONT) tools/mkfont/main.l0)
+$(call l0_check,$(MKSTRIKE) tools/mkstrike/main.l0)
 $(call l0_check,$(MKICONS) tools/mkicons/main.l0)
 
 # That every form is documented, but those DOC_GAPS lists.
@@ -421,6 +435,7 @@ $(call l0_test,$(ULIB) $(RECT) $(DISPLAY) user/lib/proto/display_test.l0)
 $(call l0_test,$(ULIB) $(RECT) $(DISPLAY_SERVER) user/lib/proto/display_server_test.l0)
 $(call l0_test,$(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0)
 $(call l0_test,$(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0)
+$(call l0_test,$(ULIB) $(FONTLIB) user/lib/proto/font_test.l0)
 $(call l0_test,$(ULIB) $(AUDIOLIB) user/lib/proto/audio_test.l0)
 $(call l0_test,$(ULIB) $(AUDIO_SERVER) user/lib/proto/audio_server_test.l0)
 $(call l0_test,$(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0)
@@ -450,7 +465,10 @@ $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
 $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
 $(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
-$(foreach t,ttf shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
+$(foreach t,shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
+$(call l0_test,$(MKSTRIKE) tools/mkstrike/mkstrike_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) $(TTF) user/lib/format/ttf_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) $(GLYPHS) user/lib/format/strike_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(RASTER) user/lib/gfx/raster_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_path_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_test.l0)
@@ -524,16 +542,35 @@ $(BUILD)/mkfs: $(MKFS) tools/mkfs/main.l0 | $(BUILD)
 $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 	$(L0) build $(MKICON) tools/mkicon/main.l0 -o $@
 
-# The face the desktop draws text and the pointer with, /etc/face: Source
-# Code Pro's glyphs, at every scale, and fonts/cursors.paths, rasterized.
+# The face the desktop draws the pointer with, /etc/face:
+# fonts/cursors.paths, rasterized.
 FACE := $(BUILD)/face
-FONT_TTFS := fonts/SourceCodePro-Regular.ttf fonts/SourceCodePro-Bold.ttf
+# The fonts the font service reads, /etc/fonts: Source Code Pro's and
+# Source Sans 3's, regular and bold.
+ETC_FONTS := fonts/SourceCodePro-Regular.ttf fonts/SourceCodePro-Bold.ttf \
+             fonts/SourceSans3-Regular.ttf fonts/SourceSans3-Bold.ttf
 
 $(BUILD)/mkfont: $(MKFONT) tools/mkfont/main.l0 | $(BUILD)
 	$(L0) build $(MKFONT) tools/mkfont/main.l0 -o $@
 
-$(FACE): $(BUILD)/mkfont $(FONT_TTFS) fonts/cursors.paths
-	$(BUILD)/mkfont $(FONT_TTFS) fonts/cursors.paths $@.tmp && mv $@.tmp $@
+$(FACE): $(BUILD)/mkfont fonts/cursors.paths
+	$(BUILD)/mkfont fonts/cursors.paths $@.tmp && mv $@.tmp $@
+
+# The strikes the desktop draws its text from at scales 1 and 2, Source
+# Code Pro's regular and bold at 16, 32 and 64, which the font service
+# keeps as it starts, staged with the fonts in /etc/fonts.
+STRIKES := $(foreach h,16 32 64,$(BUILD)/strikes/code-$(h).strike $(BUILD)/strikes/code-bold-$(h).strike)
+
+$(BUILD)/mkstrike: $(MKSTRIKE) tools/mkstrike/main.l0 | $(BUILD)
+	$(L0) build $(MKSTRIKE) tools/mkstrike/main.l0 -o $@
+
+$(BUILD)/strikes/code-bold-%.strike: $(BUILD)/mkstrike fonts/SourceCodePro-Bold.ttf
+	@mkdir -p $(@D)
+	$(BUILD)/mkstrike fonts/SourceCodePro-Bold.ttf $* $@.tmp && mv $@.tmp $@
+
+$(BUILD)/strikes/code-%.strike: $(BUILD)/mkstrike fonts/SourceCodePro-Regular.ttf
+	@mkdir -p $(@D)
+	$(BUILD)/mkstrike fonts/SourceCodePro-Regular.ttf $* $@.tmp && mv $@.tmp $@
 
 # The toolkit's symbolic icons, /etc/icons, at every scale: GNOME's SVGs
 # under icons/, rasterized by mkicons. make icon-sheet draws them all
@@ -627,8 +664,9 @@ graph-hook:
 # demo/etc, the splash at both scales, and the face, staged together as
 # the archive's /etc.
 SPLASH2X := $(if $(filter $(BUILD)/splash.ppm,$(SPLASH)),$(BUILD)/splash2x.ppm)
-ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE) $(IMAGE_FACES)
+ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE) $(IMAGE_FACES) $(ETC_FONTS) $(STRIKES)
 stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
+            && mkdir -p $(1)/fonts && cp $(ETC_FONTS) $(STRIKES) $(1)/fonts/ \
             && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/ \
             $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm)
 

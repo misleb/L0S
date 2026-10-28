@@ -225,21 +225,22 @@ typekeys "echo hi"
 # over the terminal's ground, as the smooth 8 by 16 glyph has it.
 shows "echo hi typed and answered in $f_title" "$((f_x + 1)) $((f_y + bar + 8 * 16 + 8)) $stem"
 
-# The two windows' vts are pids 17 and 18: boot, pid 1, starts
-# /etc/system's programs after the inittab's fourteen, sh 15, wm 16, then
-# the two vts. Each starts a relay for its tab's name, and the tab's
-# shell; nap's parent is the front window's shell, whose parent is its
-# vt.
+# The two windows' vts are pids 18 and 19: boot, pid 1, starts
+# /etc/system's programs after the inittab's fourteen, sh 15, font 16,
+# wm 17, then the two vts, vt_base + 1 and vt_base + 2. Each starts a
+# relay for its tab's name, and the tab's shell; nap's parent is the
+# front window's shell, whose parent is its vt.
+vt_base=17
 typekeys "run nap 30000 &"
 sleep 2
 lines=$(ps_lines)
 shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  nap " | tail -1 | awk '{print $2}')
 [ -n "$shell" ] || fail "ps showed no nap; it showed:"
 vt=$(printf '%s\n' "$lines" | grep -aE "^ +$shell +[0-9]+  sh " | tail -1 | awk '{print $2}')
-[ "$vt" = $((16 + 1)) ] || [ "$vt" = $((16 + 2)) ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not a window's vt"
+[ "$vt" = $((vt_base + 1)) ] || [ "$vt" = $((vt_base + 2)) ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not a window's vt"
 echo "ok - vt: $f_title's shell, pid $shell, started by its window's vt, pid $vt, ran nap"
 # The other window's vt is the other of the two.
-other_vt=$((16 + 1)); [ "$vt" = "$other_vt" ] && other_vt=$((16 + 2))
+other_vt=$((vt_base + 1)); [ "$vt" = "$other_vt" ] && other_vt=$((vt_base + 2))
 
 # A click on the back window's header bar brings it to the front.
 front=$b_title; front_vt=$other_vt; other=$f_title; other_vt=$vt

@@ -81,11 +81,12 @@ booted with `root=UUID`, or else from the initramfs.
 | 13 | `usb-hid keyboard` | the keyboard's driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 14 | `usb-hid mouse` | the mouse's driver. It serves `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
 | 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 17 | `vt` | the Terminal window, Terminal's program, with a tab, `vt1`, the first name free. It edits the keys `wm` sends it into the selected tab's lines, as `uart` does what the serial line sends, and draws what is written to the tab into its window |
-| 18 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
-| 19 | `vt tab` | the tab's relay, which the `vt` starts: it registers the tab's name, `vt1`, and passes on to the `vt` all that is sent to it. Each tab opened has its own relay and shell after the pids here |
-| 20 | `sh vt1` | the tab's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` closes its tab, and, as it is the last, the window, ending its `vt` |
+| 16 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in pages it shares with each asker, the desktop's made at the build, any other rasterized once, on its first ask |
+| 17 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 18 | `vt` | the Terminal window, Terminal's program, with a tab, `vt1`, the first name free. It edits the keys `wm` sends it into the selected tab's lines, as `uart` does what the serial line sends, and draws what is written to the tab into its window |
+| 19 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
+| 20 | `vt tab` | the tab's relay, which the `vt` starts: it registers the tab's name, `vt1`, and passes on to the `vt` all that is sent to it. Each tab opened has its own relay and shell after the pids here |
+| 21 | `sh vt1` | the tab's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` closes its tab, and, as it is the last, the window, ending its `vt` |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](desktop.md#the-desktop).
@@ -93,9 +94,13 @@ How the display, the compositor and its clients fit together is under
 The text font is Source Code Pro,
 [fonts/SourceCodePro-Regular.ttf](../fonts/SourceCodePro-Regular.ttf) and
 its bold: printable ASCII in cells 8×16, rasterized with smooth edges by
-[tools/mkfont](../tools/mkfont/mkfont.l0) at every size the desktop draws it
-(see [A large screen](desktop.md#a-large-screen)) into `/etc/face`, which the
-initramfs carries.
+the font service, `font`, which every program with a window asks for
+the sizes it draws (see [A large screen](desktop.md#a-large-screen)), and
+which shares each with all of them. The sizes the desktop draws at
+scales 1 and 2 come rasterized already, by
+[tools/mkstrike](../tools/mkstrike/mkstrike.l0) at the build, into
+`/etc/fonts` beside the fonts, Source Sans 3's too, which the initramfs
+carries; `/etc/face` holds the pointers.
 
 The wallpaper is the splash, drawn by
 [tools/mksplash](../tools/mksplash/mksplash.l0) into `build/splash.ppm`, at
@@ -250,11 +255,12 @@ Things to try:
      13       0  usb-hid       waiting for a message on port 18
      14       0  usb-hid       waiting for a message on port 20
      15       1  sh            running
-     16       1  wm            waiting for a message on port 24
-     17       1  vt            waiting for a message on port 14
-     18       1  procmon       sleeping
-     19      17  vt            waiting for a message on port 30
-     20      17  sh            waiting for a message on port 31
+     16       1  font          waiting for a message on port 24
+     17       1  wm            waiting for a message on port 26
+     18       1  vt            waiting for a message on port 14
+     19       1  procmon       sleeping
+     20      18  vt            waiting for a message on port 32
+     21      18  sh            waiting for a message on port 33
   ```
 
   It lists the processes that have not exited. The shell asking is always

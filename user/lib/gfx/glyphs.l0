@@ -1,0 +1,140 @@
+; glyphs.l0 -- a face's glyphs rasterized into a strike
+; (format/strike.l0): each of codes 32 to 126 placed from its TrueType
+; outline (format/ttf.l0) at the em a line height implies, rasterized
+; (raster.l0), cut to its ink and packed, then the whole written as the
+; strike's bytes. What the font service makes, once per face and height.
+; The placement is tools/mkfont's for Source Code Pro's cells, scaled by
+; 1000 / units per em, so a face of 1000 units gives the same floats.
+
+; A glyph made: its advance in 1/64 pixel, its box's left, top, width and
+; height, and its coverage, packed as the strike keeps it.
+(data StrikeGlyph (StrikeGlyph int int int int int (array int)))
+
+; The ink's box in a grid of levels: its left, top, right and bottom,
+; the last two past it.
+(data StrikeBox (StrikeBox int int int int))
+
+; Face f at line height h, as a strike.
+(def strike_make ((f Ttf) (h int)) bytes
+  (strike_write f h (strike_glyphs f h (strike_first) (nil StrikeGlyph))))
+
+; The glyphs of codes from code to the last, onto acc reversed, in order.
+(def strike_glyphs ((f Ttf) (h int) (code int) (acc (list StrikeGlyph))) (list StrikeGlyph)
+  (if (ge code (add (strike_first) (strike_count)))
+      (rev acc)
+      (strike_glyphs f h (add code 1) (cons (strike_glyph f h code) acc))))
+
+; Font units to the rasterizer's 1/256 pixel at line height h: h · 500
+; / (600 · upm) pixels a unit, times 256, as a TtfPlace's num and den.
+(def strike_num ((h int)) int (mul (mul h 256) 500))
+(def strike_den ((f Ttf)) int (mul 600 (ttf_upm f)))
+
+; The baseline at line height h, in 1/256 pixel down: 23/32 of it.
+(def strike_baseline_256 ((h int)) int (div (mul (mul h 23) 256) 32))
+
+; The margin round the cell a glyph is rasterized in, so that no ink is
+; cut off, in pixels.
+(def strike_margin ((h int)) int (max 2 (div h 4)))
+
+; Code's glyph at line height h: rasterized in a grid its advance wide
+; and h tall with the margin all round, then cut to its ink.
+(def strike_glyph ((f Ttf) (h int) (code int)) StrikeGlyph
+  (let g (ttf_glyph_index f code)
+    (let adv (ttf_advance f g)
+      (let m (strike_margin h)
+        (let gw (add (ceil_div (mul adv (mul h 500)) (strike_den f)) (mul 2 m))
+          (let gh (add h (mul 2 m))
+            (let place (TtfPlace (strike_num h) (strike_den f) (mul m 256) (add (strike_baseline_256 h) (mul m 256)))
+              (let cov (rast_cover (rast_polygons (ttf_segs (ttf_contours f g) place)) gw gh)
+                (strike_cut (ttf_scaled adv (mul (mul h 64) 500) (strike_den f)) m cov gw
+                            (strike_ink cov gw gh 0 (StrikeBox gw gh 0 0)))))))))))
+
+; A glyph's coverage cut to its box, which is empty if it has no ink;
+; its place from the margin m, its advance adv64.
+(def strike_cut ((adv64 int) (m int) (cov (array int)) (gw int) (box StrikeBox)) StrikeGlyph
+  (match box
+    ((StrikeBox x0 y0 x1 y1)
+      (if (ge x0 x1)
+          (StrikeGlyph adv64 0 0 0 0 (array_new 0 0))
+          (StrikeGlyph adv64 (sub x0 m) (sub y0 m) (sub x1 x0) (sub y1 y0) (strike_pack cov gw box))))))
+
+; strike_glyph's box: pixels i on of a grid w by h, the box grown to each
+; one covered at all.
+(def strike_ink ((cov (array int)) (w int) (h int) (i int) (box StrikeBox)) StrikeBox
+  (if (ge i (mul w h))
+      box
+      (if (eq (array_get cov i) 0)
+          (strike_ink cov w h (add i 1) box)
+          (match box
+            ((StrikeBox x0 y0 x1 y1)
+              (let x (mod i w)
+                (let y (div i w)
+                  (strike_ink cov w h (add i 1)
+                    (StrikeBox (min x0 x) (min y0 y) (max x1 (add x 1)) (max y1 (add y 1)))))))))))
+
+; The coverage in box of a grid gw wide, packed, row after row.
+(def strike_pack ((cov (array int)) (gw int) (box StrikeBox)) (array int)
+  (match box
+    ((StrikeBox x0 y0 x1 y1)
+      (let wpr (strike_wpr (sub x1 x0))
+        (strike_pack_at cov gw box wpr 0 (mul wpr (sub y1 y0)) (array_new (mul wpr (sub y1 y0)) 0))))))
+
+; strike_pack's loop: words i up to n, into out.
+(def strike_pack_at ((cov (array int)) (gw int) (box StrikeBox) (wpr int) (i int) (n int) (out (array int))) (array int)
+  (if (ge i n)
+      out
+      (match box
+        ((StrikeBox x0 y0 x1 y1)
+          (let v (strike_word cov gw (add y0 (div i wpr)) (add x0 (mul 16 (mod i wpr))) x1 0 0)
+            (strike_pack_at cov gw box wpr (add i 1) n (array_set out i v)))))))
+
+; The 16 levels of row y from column x, those from x1 on 0, as a word, k
+; of them done.
+(def strike_word ((cov (array int)) (gw int) (y int) (x int) (x1 int) (k int) (acc int)) int
+  (if (eq k 16)
+      acc
+      (let px (add x k)
+        (strike_word cov gw y x x1 (add k 1)
+          (bit_or (bit_shl acc 4) (if (lt px x1) (array_get cov (add (mul y gw) px)) 0))))))
+
+; ---------------------------------------------------------------- writing
+
+; The strike of glyphs gs, face f at height h: the header, the entries,
+; then the coverage.
+(def strike_write ((f Ttf) (h int) (gs (list StrikeGlyph))) bytes
+  (let head (bytes_from_list (rev (strike_entries gs (strike_cov_start) (strike_header f h))))
+    (bytes_concat (cons head (strike_covs gs (nil bytes))))))
+
+; The header's bytes, reversed.
+(def strike_header ((f Ttf) (h int)) (list int)
+  (let m (ttf_advance f (ttf_glyph_index f 77))
+    (push (u32_le (strike_count))
+      (push (u32_le (ttf_upm f))
+        (push (u32_le m)
+          (push (u32_le (div (strike_baseline_256 h) 4))
+            (push (u32_le h) (push (strike_magic) (nil int)))))))))
+
+; Each glyph's entry onto acc, reversed, its coverage at at and the next
+; after it.
+(def strike_entries ((gs (list StrikeGlyph)) (at int) (acc (list int))) (list int)
+  (if (is_empty gs)
+      acc
+      (match (head gs)
+        ((StrikeGlyph adv l t w h words)
+          (strike_entries (tail gs) (add at (mul 8 (array_len words)))
+            (push (u32_le at) (push (u32_le h) (push (u32_le w)
+              (push (u32_le t) (push (u32_le l) (push (u32_le adv) acc)))))))))))
+
+; Each glyph's coverage as bytes, in order.
+(def strike_covs ((gs (list StrikeGlyph)) (acc (list bytes))) (list bytes)
+  (if (is_empty gs)
+      (rev acc)
+      (match (head gs)
+        ((StrikeGlyph adv l t w h words)
+          (strike_covs (tail gs) (cons (bytes_from_list (rev (strike_words words 0 (nil int)))) acc))))))
+
+; Words i on, 8 bytes each, onto acc, reversed.
+(def strike_words ((words (array int)) (i int) (acc (list int))) (list int)
+  (if (ge i (array_len words))
+      acc
+      (strike_words words (add i 1) (push (le64 (array_get words i)) acc))))

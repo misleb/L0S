@@ -1,0 +1,87 @@
+; strike.l0 -- one face at one line height, its glyphs rasterized, as
+; bytes written once and read in place: what the font service shares
+; with every program that draws text. Codes 32 to 126. All numbers are
+; least significant byte first:
+;
+;   0   "L0ST"
+;   4   u32 H, the line height in pixels
+;   8   u32 the baseline, in 1/64 pixel down from the line's top
+;   12  u32 the face's advance, in font units (its M's)
+;   16  u32 the face's units per em
+;   20  u32 how many glyphs, 95
+;   24  each glyph's entry, 24 bytes, code 32 first:
+;         u32 its advance, in 1/64 pixel
+;         i32 its box's left, in pixels from the pen
+;         i32 its box's top, in pixels down from the line's top
+;         u32 its box's width and u32 its height, in pixels
+;         u32 where its coverage starts, from the strike's start
+;   2304 the coverage, each glyph's rows, each row as many u64 words as
+;        its box's width has 16s, 16 pixels a word, each how much of
+;        the pixel the glyph covers, 0 to 15, the leftmost in the
+;        highest four bits, as the face's tables are; a glyph with no
+;        ink (a space) has none
+;
+; The em is what Source Code Pro's cells were made at: its 600 units
+; wide are H / 2 pixels, so a face's em is 5H/6 pixels, and the
+; baseline 23/32 of H down. gfx/glyphs.l0 makes a strike; this file is
+; its layout, and reads one held as bytes. Every coverage word is at a
+; multiple of 8, so one over shared pages, as the toolkit reads it, is
+; read a word at a time.
+
+; The strike's magic, its header's length, an entry's, and where the
+; coverage starts.
+(def strike_magic () (list int) "L0ST")
+(def strike_header_len () int 24)
+(def strike_entry_len () int 24)
+(def strike_cov_start () int 2304)
+
+; The first code a strike has, and how many.
+(def strike_first () int 32)
+(def strike_count () int 95)
+
+; Where code's entry is: the code clamped to those there are, so any code
+; finds one.
+(def strike_entry ((code int)) int
+  (add (strike_header_len) (mul (strike_index code) (strike_entry_len))))
+
+; Code's glyph's number in the strike, 0 for one outside it, a space.
+(def strike_index ((code int)) int
+  (if (if (lt code (strike_first)) true (ge code (add (strike_first) (strike_count)))) 0 (sub code (strike_first))))
+
+; A u32 read as signed.
+(def strike_i32 ((v int)) int (if (ge v 2147483648) (sub v 4294967296) v))
+
+; The words a row w pixels wide takes.
+(def strike_wpr ((w int)) int (div (add w 15) 16))
+
+; ---------------------------------------------------------------- reading
+
+; Whether b is a strike: its magic, and its header and entries all there.
+(def strike_ok ((b bytes)) bool
+  (if (lt (bytes_len b) (strike_cov_start)) false (bytes_is_at b 0 (strike_magic))))
+
+; The header's fields: the line height, the baseline in 1/64 pixel, the
+; face's advance and its units per em.
+(def strike_height ((b bytes)) int (le_u32 b 4))
+(def strike_baseline ((b bytes)) int (le_u32 b 8))
+(def strike_face_advance ((b bytes)) int (le_u32 b 12))
+(def strike_upm ((b bytes)) int (le_u32 b 16))
+
+; Code's entry's fields: its advance in 1/64 pixel, its box's left and
+; top, width and height, and where its coverage is.
+(def strike_advance ((b bytes) (code int)) int (le_u32 b (strike_entry code)))
+(def strike_left ((b bytes) (code int)) int (strike_i32 (le_u32 b (add (strike_entry code) 4))))
+(def strike_top ((b bytes) (code int)) int (strike_i32 (le_u32 b (add (strike_entry code) 8))))
+(def strike_width ((b bytes) (code int)) int (le_u32 b (add (strike_entry code) 12)))
+(def strike_rows ((b bytes) (code int)) int (le_u32 b (add (strike_entry code) 16)))
+(def strike_cov_at ((b bytes) (code int)) int (le_u32 b (add (strike_entry code) 20)))
+
+; How much of pixel x, y of its box code's glyph covers, 0 to 15.
+(def strike_level ((b bytes) (code int) (x int) (y int)) int
+  (let wpr (strike_wpr (strike_width b code))
+    (let word (le_u64_at b (add (strike_cov_at b code) (mul 8 (add (mul y wpr) (div x 16)))))
+      (bit_and (bit_shr word (mul 4 (sub 15 (mod x 16)))) 15))))
+
+; The width of text t in 1/64 pixel: its glyphs' advances.
+(def strike_text_w ((b bytes) (t (list int))) int
+  (if (is_empty t) 0 (add (strike_advance b (head t)) (strike_text_w b (tail t)))))

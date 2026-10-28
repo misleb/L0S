@@ -187,7 +187,10 @@ pages at its next device pages, with no `dev` line needed.
 `shm_share va n pid` maps n of the caller's shared or DMA pages from va
 into pid's next device pages as well. They are the same frames, so a
 write by either is seen by both. It returns where pid sees them, for the
-caller to tell pid. A `region` over one's own shared pages works without
+caller to tell pid. `shm_share_read va n pid` maps them into pid read
+only: a write of pid's there faults, which ends pid, and leaves the
+pages and their owner as they were; the font service shares its strikes
+so. A `region` over one's own shared pages works without
 a `dev` line too, so any process reads and writes them with `dma_open`.
 `dma_address` stays for drivers alone: only they learn where a device
 reaches memory.
