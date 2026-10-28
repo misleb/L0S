@@ -77,7 +77,7 @@ the toolkit lets an app open, route and close windows by id.
   counts against the process's 64 (`l0s-dev`'s pitfalls): `ui_app_open`
   refuses a window past what is left, and says so. Tested on the host
   with two windows' events and their damage kept apart.
-- [ ] Files' New Window: in its menu, beside New Folder..., a window at
+- [x] Files' New Window: in its menu, beside New Folder..., a window at
   the same folder, each with its own place, selection, view and menus,
   kept in Files' state by window id; `win.close` closes that one, and
   the last ends Files. Files' launcher entry still starts a new Files.
@@ -90,7 +90,6 @@ the toolkit lets an app open, route and close windows by id.
 
 ## Spec changes
 
-- programs.md: Files' New Window.
 - testing.md: files.sh's second window.
 
 ## Log
@@ -162,3 +161,13 @@ the toolkit lets an app open, route and close windows by id.
   `ui_app_next`, before `ui_app_event`. An app's step stays its own
   (`fl_loop` in Files), as L0 has no function values to hand the
   toolkit an update with.
+- 2026-10-28: step 5. Files is a `UiApp`; its loop (`fl_loop`,
+  `fl_stepped`) keeps a `Files` state a window in a `Map` by id and
+  hands each window's event to that state alone, the code that changes
+  a state (`fl_acted`) as it was. New Window is the menu button's second
+  item, after New Folder..., so the screen test's New Folder... stays
+  where it was; it opens a window in front at the same place, its view
+  kept but nothing selected, open or over it, and no Back (`fl_twin`,
+  `fl_at`), as Nautilus's New Window does. `win.close` closes the
+  window it came from, and Files returns 0 with its last. The full-color
+  icons stay one set, in every window's state, loaded once.
