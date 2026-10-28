@@ -198,7 +198,10 @@ AUDIO_SERVER := $(AUDIOLIB) user/lib/proto/audio_server.l0
 WAV     := user/lib/format/wav.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
-L0FS    := user/lib/format/l0fs.l0
+# The font service's protocol: its faces, and strikes shared with the
+# asker.
+FONTLIB := user/lib/proto/font.l0
+L0FS   := user/lib/format/l0fs.l0
 FAT     := $(L0FS) user/lib/format/fat.l0
 
 # The network: nic, the driver's frames and Ethernet's addresses; and
@@ -270,6 +273,8 @@ LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
 LIBS_random     := $(RANDOM)
+LIBS_font       := $(RENDER) $(STRIKE) $(FONTLIB)
+LIBS_fonts      := $(FONTLIB)
 LIBS_fs         := $(DISKLIB) $(PARTS) $(FAT) $(FSLIB) $(CLOCK) $(RANDOM)
 LIBS_sh         := $(PROCS) $(PATHS) $(APPLIB)
 LIBS_disks      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(DISKLIB) $(PARTS) $(FAT) $(FSLIB)
@@ -425,6 +430,7 @@ $(call l0_test,$(ULIB) $(RECT) $(DISPLAY) user/lib/proto/display_test.l0)
 $(call l0_test,$(ULIB) $(RECT) $(DISPLAY_SERVER) user/lib/proto/display_server_test.l0)
 $(call l0_test,$(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0)
 $(call l0_test,$(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0)
+$(call l0_test,$(ULIB) $(FONTLIB) user/lib/proto/font_test.l0)
 $(call l0_test,$(ULIB) $(AUDIOLIB) user/lib/proto/audio_test.l0)
 $(call l0_test,$(ULIB) $(AUDIO_SERVER) user/lib/proto/audio_server_test.l0)
 $(call l0_test,$(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0)
@@ -534,6 +540,9 @@ $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 # Code Pro's glyphs, at every scale, and fonts/cursors.paths, rasterized.
 FACE := $(BUILD)/face
 FONT_TTFS := fonts/SourceCodePro-Regular.ttf fonts/SourceCodePro-Bold.ttf
+# The fonts the font service reads, /etc/fonts: Source Code Pro's and
+# Source Sans 3's, regular and bold.
+ETC_FONTS := $(FONT_TTFS) fonts/SourceSans3-Regular.ttf fonts/SourceSans3-Bold.ttf
 
 $(BUILD)/mkfont: $(MKFONT) tools/mkfont/main.l0 | $(BUILD)
 	$(L0) build $(MKFONT) tools/mkfont/main.l0 -o $@
@@ -633,8 +642,9 @@ graph-hook:
 # demo/etc, the splash at both scales, and the face, staged together as
 # the archive's /etc.
 SPLASH2X := $(if $(filter $(BUILD)/splash.ppm,$(SPLASH)),$(BUILD)/splash2x.ppm)
-ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE) $(IMAGE_FACES)
+ETC_DEPS := $(SPLASH) $(SPLASH2X) $(FACE) $(ICON_FACE) $(IMAGE_FACES) $(ETC_FONTS)
 stage_etc = cp $(SPLASH) $(1)/splash.ppm && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
+            && mkdir -p $(1)/fonts && cp $(ETC_FONTS) $(1)/fonts/ \
             && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/ \
             $(if $(SPLASH2X),&& cp $(SPLASH2X) $(1)/splash2x.ppm)
 

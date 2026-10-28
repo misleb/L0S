@@ -75,10 +75,11 @@ booted with `root=UUID`, or else from the initramfs.
 | 13 | `usb-hid keyboard` | the keyboard's driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
 | 14 | `usb-hid mouse` | the mouse's driver. It serves `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
 | 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 17 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
-| 18 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
-| 19 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
+| 16 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height rasterized once, on the first ask, into pages it shares with each asker |
+| 17 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 18 | `vt` | the window's terminal, Terminal's program, which names itself `vt1`, the first name free. It edits the keys `wm` sends it into lines, as `uart` does what the serial line sends, and draws what is written to it into its window |
+| 19 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
+| 20 | `sh vt1` | the window's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` ends its `vt` too, and closes its window |
 
 How the display, the compositor and its clients fit together is under
 [The desktop](desktop.md#the-desktop).
@@ -243,10 +244,11 @@ Things to try:
      13       0  usb-hid       waiting for a message on port 18
      14       0  usb-hid       waiting for a message on port 20
      15       1  sh            running
-     16       1  wm            waiting for a message on port 24
-     17       1  vt            waiting for a message on port 14
-     18       1  procmon       sleeping
-     19      17  sh            waiting for a message on port 30
+     16       1  font          waiting for a message on port 24
+     17       1  wm            waiting for a message on port 26
+     18       1  vt            waiting for a message on port 14
+     19       1  procmon       sleeping
+     20      18  sh            waiting for a message on port 32
   ```
 
   It lists the processes that have not exited. The shell asking is always

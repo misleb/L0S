@@ -200,7 +200,10 @@ with no mailbox, and `eeprom_show` reads a file that is no bootloader
 image, both of which fail, saying why. `virtio-blk_ro` has `disk` write to a read-only disk, which the
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
-of a line, which its `pattern` checks. `garbage`
+of a line, which its `pattern` checks. `fonts` has `fonts` ask the font
+service for its faces and the strikes it made before it registered, then
+for Source Sans 3 at 32 twice, from two processes, which it builds once
+and shares with both. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
 shows, a virtio keyboard, a virtio tablet, and a virtio-rng unless the

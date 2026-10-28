@@ -64,7 +64,7 @@ and was set aside because it does not match the monospace already used.
   H 16), so Source Code Pro's strikes cover the same pixels as
   `/etc/face`'s glyphs, which a test compares glyph by glyph at 16 and
   32. Timed on the host per strike, to know what the first ask costs.
-- [ ] The service: `user/sbin/font`, registered as `font`, started in
+- [x] The service: `user/sbin/font`, registered as `font`, started in
   `demo/etc/system` before `wm`, reading `/etc/fonts/*.ttf` (the
   Makefile stages `fonts/`'s four there). `faces` names them
   (`code`, `code-bold`, `sans`, `sans-bold`); `strike FACE H`
@@ -134,3 +134,24 @@ and was set aside because it does not match the monospace already used.
   47 ms at 64 (Source Code Pro), 9 and 20 ms for Source Sans 3 at 16
   and 32; it is 9.2 KB at 16, 15.3 KB at 32 and 49.7 KB at 64, against
   `/etc/face`'s 431 KB for all six tables.
+- 2026-10-27: step 3. `font` reads the four faces as it starts (1.1 MB
+  of TTF in its heap, kept: a strike needs its outlines) and
+  answers `faces`, `strike FACE H` (`VA N`) and `stats`. A strike is
+  made into `shm_region` pages, written once with `device_write_bytes`,
+  its region closed at once so the cache never holds one of the 64; it
+  is shared with a pid once, and asked again by the same pid answers
+  where that pid already sees it. "How many have it" counts the
+  processes it was given to, the dead too: nothing tells the service a
+  client exited, and a count is all `stats` promises. Heights are 8 to
+  128. On QEMU (TCG, one CPU) the build logged at debug: Source Code
+  Pro 305 ms at 16, 578 ms at 32, 1225 ms at 64; its bold 207 and
+  433 ms at 16 and 32; Source Sans 3 217 and 702 ms. So the four the
+  desktop paints at scale 1 (regular and bold at 16 and 32, about
+  1.5 s) are made before `font` registers, and `wm`, which waits for
+  the name, never waits for a build in its first paint. At scale 2,
+  64 is made on the first ask. `font` starts after `sh`, before `wm`:
+  pid 16, and `wm`, the vts, procmon and the window's shell move up
+  one (`spec/demo.md`, and `tests/vt.sh`'s one base, 16 to 17).
+  `tests/e2e/fonts` asks Source Sans 3 at 32 from two processes and
+  sees `strikes built` go from 4 to 5. The e2e harness's `font` file
+  now also stages `/etc/fonts`.

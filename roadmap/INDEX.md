@@ -38,7 +38,7 @@ move independently, so several can be active at once.
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
-| [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | active | 2/5 | – | toolkit.md, programs.md, demo.md, syscalls.md |
+| [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | active | 3/5 | – | toolkit.md, programs.md, demo.md, syscalls.md |
 | [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | blocked | 0/6 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
 | [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
 | [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi 5's card needs | Pi 5 | active | 4/5 | – | pi5.md, programs.md, testing.md |
@@ -52,7 +52,8 @@ move independently, so several can be active at once.
   find it needs L0 to give the interrupt.
 - [0019](0019-font-service.md) A font service that caches rasterized
   glyphs, with Source Sans 3 beside Source Code Pro: on QEMU, the fonts
-  fetched and strikes made; next, the service.
+  fetched, strikes made, `font` serving them; next, the toolkit asks
+  it for its text.
 - [0021](0021-many-windows.md) An app with many windows, its events
   told by window: on QEMU, starting with the window notice.
 - [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi
