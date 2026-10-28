@@ -91,15 +91,17 @@ booted with `root=UUID`, or else from the initramfs.
 How the display, the compositor and its clients fit together is under
 [The desktop](desktop.md#the-desktop).
 
-The text font is Source Code Pro,
-[fonts/SourceCodePro-Regular.ttf](../fonts/SourceCodePro-Regular.ttf) and
-its bold: printable ASCII in cells 8×16, rasterized with smooth edges by
-the font service, `font`, which every program with a window asks for
-the sizes it draws (see [A large screen](desktop.md#a-large-screen)), and
+The interface's font is Source Sans 3,
+[fonts/SourceSans3-Regular.ttf](../fonts/SourceSans3-Regular.ttf) and
+its bold, each character its own width, and the terminals' is Source
+Code Pro, [fonts/SourceCodePro-Regular.ttf](../fonts/SourceCodePro-Regular.ttf)
+and its bold, in cells 8×16: printable ASCII, rasterized with smooth
+edges by the font service, `font`, which every program with a window
+asks for the sizes it draws (see [A large screen](desktop.md#a-large-screen)), and
 which shares each with all of them. The sizes the desktop draws at
 scales 1 and 2 come rasterized already, by
 [tools/mkstrike](../tools/mkstrike/mkstrike.l0) at the build, into
-`/etc/fonts` beside the fonts, Source Sans 3's too, which the initramfs
+`/etc/fonts` beside the fonts, which the initramfs
 carries; `/etc/face` holds the pointers.
 
 The wallpaper is L0S's own,

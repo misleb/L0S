@@ -4,7 +4,7 @@ A small widget toolkit for L0S programs. It follows the
 [GNOME Human Interface Guidelines](https://developer.gnome.org/hig/) and
 draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 `vt`'s colors, `draw`'s commands, the `widgets` gallery, `procmon`,
-`disks` and `files` are built on it.
+`disks`, `files` and `fontview` are built on it.
 
 ## Files
 
@@ -12,8 +12,9 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 |---|---|---|
 | `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Programs draw in the dark style: `ui_style` says so, the one place a setting for it will be read. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends only on `ppm.l0`'s colors and `render.l0`'s glyph. | `@window_bg_color`, `@accent_bg_color`, … |
 | `icons.l0` | The names of the symbolic icons, 16×16 at scale 1, GNOME's own: each is its SVG under [icons/](../icons) (Adwaita's, and System Monitor's for utilities-system-monitor), which `tools/mkicons` rasterizes into `/etc/icons` at the build. window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer, and Terminal's tab-new. Also `ui_image_names`, the full-color icons Files and Disks show things with, Adwaita's under `icons/adwaita/scalable`, which `tools/mkicon --image` draws into `/etc/images/NAME.face`. | `*-symbolic` icons, and the full-color theme icons |
-| `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; the text's glyphs, Source Code Pro's regular and bold at 16 and 32 times the scale, each a strike (`format/strike.l0`) asked of the font service, `font`, which shares its pages with every program that asks, read in place (`UiStrike`), never copied; and, for the compositor alone at scale 2 (`ui_face_pointers`), the pointers `tools/mkfont` rasterized into `/etc/face`, which holds nothing else. With no `font`, no text is drawn, said once on standard error. An app's `icon.face` is the same format, its images' tables `image.N`, and so is each full-color icon's `/etc/images/NAME.face`, which a program loads by name, at the sizes its scale paints, with `ui_images_load` into a `UiImages`, and finds with `ui_image`. | the font and icon theme at a scale factor || `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon, an image of its own colors with alpha, `UiPImage`, as an app's `icon.svg` makes), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
-| `widget.l0` | `UiWidget` (label, button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, entry.l0's entry, a window's own header bar, nav.l0's path bar, toggle group and tab bar, icon_view.l0's icon view, menu.l0's popover, and a drawing area); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). `UiCsdBar START TITLE END CLOSES` is the header bar of a window that draws its own (`ui_open_csd`): any widget as its title, in the bar's middle as far as there is room, the window's close button at its end if CLOSES (`ui_close_action`), and its ground the window's to drag (`ui_move_action`), or, with a double click, to maximize and restore. `UiDrawingArea NAME W H` is an area the program paints itself, as `vt` paints its terminal: its node sets off `NAME.drawing`, has no ops, and nothing of the toolkit's is painted or damaged there, not even the window's ground (`ui_drawn`, `ui_drawing_rect`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment`, `GtkDrawingArea` |
+| `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; the text's glyphs, Source Code Pro's and Source Sans 3's regular and bold at 16 and 32 times the scale, kept as `glyph.FACE.H` (`code`, `code-bold`, `sans`, `sans-bold`), each a strike (`format/strike.l0`) asked of the font service, `font`, which shares its pages with every program that asks, read in place (`UiStrike`), never copied; and, for the compositor alone at scale 2 (`ui_face_pointers`), the pointers `tools/mkfont` rasterized into `/etc/face`, which holds nothing else. With no `font`, no text is drawn, said once on standard error. An app's `icon.face` is the same format, its images' tables `image.N`, and so is each full-color icon's `/etc/images/NAME.face`, which a program loads by name, at the sizes its scale paints, with `ui_images_load` into a `UiImages`, and finds with `ui_image`. | the font and icon theme at a scale factor || `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon, an image of its own colors with alpha, `UiPImage`, as an app's `icon.svg` makes), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
+| `metrics.l0` | Each face's units per em, the advance of each of codes 32 to 126, the widest of them, and the kerning of each pair of them GPOS adjusts, in font units, as defs (`ui_m_sans_adv`, `ui_m_sans_kern` and the rest), which `tools/mkmetrics` writes from the fonts at the build and `make check` compares: so text is measured with no face and no file, and `ui_layout` and its host tests need neither. | Pango's font metrics |
+| `widget.l0` | `UiWidget` (label, text in a face and height a program names (`UiText`), button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, entry.l0's entry, a window's own header bar, nav.l0's path bar, toggle group and tab bar, icon_view.l0's icon view, menu.l0's popover, and a drawing area); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). `UiCsdBar START TITLE END CLOSES` is the header bar of a window that draws its own (`ui_open_csd`): any widget as its title, in the bar's middle as far as there is room, the window's close button at its end if CLOSES (`ui_close_action`), and its ground the window's to drag (`ui_move_action`), or, with a double click, to maximize and restore. `UiDrawingArea NAME W H` is an area the program paints itself, as `vt` paints its terminal: its node sets off `NAME.drawing`, has no ops, and nothing of the toolkit's is painted or damaged there, not even the window's ground (`ui_drawn`, `ui_drawing_rect`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment`, `GtkDrawingArea` |
 | `grid.l0` | A data grid: columns, typed cells (text, number, size, as `format_size` says it and sorted by its bytes, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. `ui_grid_page`, a toolbar of Refresh, a status line and End Process over a grid, as `widgets` and `procmon` are, and `ui_selected_line`. | `GtkColumnView`, `GtkScrolledWindow` |
 | `panes.l0` | A window of panes: `UiSidebar`, rows of an icon, a title and a line, one selected; `UiSegmentBar`, a whole in parts each as wide as its share by weight (`ui_shares`), each plain or muted (`UiSegPlain`, `UiSegMuted`), at any height: a title over a line at `ui_segbar_h`, the title alone lower, no text as a usage bar; one part selected and moved along by Left and Right (`ui_segbar_key`), or, with prefix `""`, none and no targets; `UiProps`, a dimmed name before each value, which is any widget; `UiModal` and `ui_alert`, an alert dialog on a card over everything beneath, which is dimmed (`ui_scrim`) and no longer a target, and `ui_alert_form`, one with widgets, such as properties holding entries, between its lines and its buttons. Rows and parts carry `PREFIX.select.KEY`, read back by `ui_select_key`. | `AdwNavigationSplitView`'s sidebar, `GtkListBox` `.navigation-sidebar`, GNOME Disks' volume grid and Usage's storage bar, `AdwAlertDialog` and its extra child |
 | `entry.l0` | `UiEntry NAME TEXT PLACEHOLDER WIDTH`, a line of text: `UiEntryText`, its text and cursor, kept by the program; `ui_entry_keyed`, typing at the cursor, Backspace, Delete, Left, Right, Home and End; drawn on the text's color at 10%, with the accent's ring and a cursor while it has the focus, the placeholder dimmed while it is empty. | `GtkEntry` |
@@ -122,12 +123,51 @@ to `l0` are one namespace, and a duplicate is a compile error.
   window's, a bold heading, its lines, and its buttons sharing a row; the
   window beneath is mixed 30% with black, since nothing can blend, and
   takes no press until the dialog is answered.
-- **Text** is Source Code Pro in cells 8×16, so text is ASCII only, ellipsized with
-  `...`, bold is the bold face, and large text is scaled 2×. At the
-  desktop's scale 2 it is the same cells, 16×32 of the
-  screen's pixels, smooth, bold its own weight. The glyphs are the font
+- **Text** is the interface's in Source Sans 3, as GNOME's is in its
+  proportional face, each character as wide as its advance: every
+  widget's (labels, buttons, header bars, sidebars, alerts, the path
+  bar, toggles, tabs, menus, status pages, entries, the icon view and
+  the grid's cells, numbers too), and `wm`'s title bars, top bar,
+  launcher and L0S menu. Source Code Pro, in cells 8×16, is the
+  terminal's, `vt`'s, as GNOME Console's is, and `draw`'s `char`'s:
+  what must line up in columns. Text is ASCII only, ellipsized with
+  `...`, bold is the bold face, and large text is twice the line, 32.
+  Both are 16 rows a line, at one em, 5/6 of the line. At the
+  desktop's scale 2 the line is 32 of the screen's pixels, smooth,
+  bold its own weight. The glyphs are the font
   service's strikes, in pages every program shares and reads in place:
-  each glyph only as wide as its ink, placed in its cell by its box.
+  each glyph only as wide as its ink, placed from its pen by its box.
+  An entry or a value that must hold n characters of any kind is made
+  `ui_chars_w` wide, n of the face's widest.
+  A program may also show text in any face `font` names at a line height
+  of its own, `UiFontAt FACE H` (8 to 128 of the screen's pixels), as
+  Fonts does: the widget `UiText TEXT FONT ALIGN`, in the text's color,
+  or a `UiPText` of it. It is measured by `metrics.l0`'s face of that
+  name, or as Source Code Pro if there is none, at that line; its strike,
+  `glyph.FACE.H·s`, is asked of `font` by `ui_present` the first time
+  a layout shows it, and kept in the window's face for its life, one
+  region each; one `font` will not give is kept as none, not asked for
+  again, and its text not drawn.
+  A width is `ui_text_w s font bold scale`, `font` a `UiFont`, `UiMono`
+  or `UiSans`: the sum of the characters' advances in font units
+  (`metrics.l0`), each pair kerned as the font's GPOS says (its `kern`
+  feature's pair adjustments, `ui_font_kern`; Source Sans 3's `AV` is
+  14 units closer, `To` 66), turned into the desktop's pixels once and rounded up,
+  so it never depends on where the text starts; `ui_ellipsized` cuts by
+  it. `ui_text_font` is the face the interface's text is in. A
+  `UiPText` carries its `UiFont`, and each glyph is drawn with its pen
+  at the sum of the advances before it, turned into the screen's pixels
+  at the face's scale and rounded, and its box at the strike's bearing
+  from the pen: so text at scale 2 is placed in the screen's own pixels,
+  not doubled from 1's. Bold is the bold face's own advances. An
+  entry's cursor and the character a press is before are found by the
+  same sums (`ui_text_pen`). A change of face is damage.
+  Source Sans 3's default figures are tabular: every digit is one
+  advance, 497 units, bold 528, so numbers line up in columns in it
+  as they do in Source Code Pro, right-aligned in a grid's number,
+  size and level cells, in Monitor's columns, and in the top bar's
+  clock, which keeps its place as the minutes change. No glyph
+  substitution (`tnum`) is needed, and none is read.
 - **Scale 2**, on a large screen, is GNOME's scale factor: everything is
   laid out in the desktop's pixels, as at 1, and painted at twice the size
   at the screen's resolution. A program does nothing for it: `ui_open`
@@ -140,9 +180,14 @@ to `l0` are one namespace, and a duplicate is a compile error.
   (`-1`). Window corners are rounded by the display's shaped layers, which
   cut whole pixels, so they aren't antialiased. There are no window
   shadows.
-- Two faces, Source Code Pro and Source Sans 3, each regular and bold,
-  ASCII only, at any height from 8 to 128 on request; the toolkit draws
-  only Source Code Pro, in its cells. Icons are
+- Two faces, Source Sans 3 for the interface and Source Code Pro for
+  terminals and columns, each regular and bold, ASCII only, at any
+  height from 8 to 128 on request; the toolkit draws them at lines of 16
+  and 32, and at a program's own height with `UiFontAt`. Text is placed
+  by advances and GPOS's pair kerning only: no ligatures, no glyph
+  substitution (`tnum`, `onum`, small caps), no hinting, and pens on
+  whole pixels. A face `metrics.l0` has no table for is measured as
+  Source Code Pro's cells. Icons are
   smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
   the build, never at run time. Icons and text scale by whole numbers. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.

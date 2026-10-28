@@ -5,7 +5,7 @@
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](../tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`), and those of the knowledge graph's L0 parser and of `graph-usage` (`tools/graphify-l0/test_l0_graph.py`, `test_graph_usage.py`). Last, it says how many tests passed and failed, of how many files |
 | `make test-virt` | `l0 test --target virt`, twice, on a board of one CPU and then of `VIRT_CPUS` (4), after `make test-virt-heap`, which runs `test_heap_runs_low` alone on a kernel heap of 96 MB, too small to record the pool, which is refused pages rather than stopping: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, file windows (the server's notice from pid 0 naming the client and its pages, made once a client, given back by `shm_unmap`, an open refused when the server has no device pages left, a write's bytes found in the window and a read's taken from it, and a window given up early that writes go back to messages for), the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), the L0S menu, opened, closed, starting About and shutting the board down (`tests/logo-menu.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`). The cases, then the screen tests (`tests/screens.sh`), boot `E2E_JOBS` at once, half this machine's CPUs unless set: about 4 minutes on 8, where one at a time took 15 |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing and a USB mouse clicking the launcher open, through `pcie`, `xhci` and `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Fonts, proportional and monospaced text read from the screen (`tests/fontview.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume (`tests/files.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), the L0S menu, opened, closed, starting About and shutting the board down (`tests/logo-menu.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`). The cases, then the screen tests (`tests/screens.sh`), boot `E2E_JOBS` at once, half this machine's CPUs unless set: about 4 minutes on 8, where one at a time took 15 |
 
 `make check` and `make test` run each check and each test file as a
 target of its own, `build/check/FILE.ok` or `build/test/FILE.ok`, made once
@@ -201,8 +201,8 @@ image, both of which fail, saying why. `virtio-blk_ro` has `disk` write to a rea
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
 of a line, which its `pattern` checks. `fonts` has `fonts` ask the font
-service for its faces and the six strikes the build made, which it keeps
-and has built none of, then for Source Sans 3 at 32 twice, from two
+service for its faces and the twelve strikes the build made, which it keeps
+and has built none of, then for Source Sans 3 at 24 twice, from two
 processes, which it builds once and shares with both. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
@@ -302,6 +302,12 @@ header bar. Then:
 - its header bar, active;
 - the toolbar on the window's ground, the line under the grid's header,
   and End Process faded, with no row selected;
+- the toolbar's line, "Select a process from the list", read back
+  along a row through its x-height: proportional, the `i` of "list" 2
+  pixels of ink and the `m` of "from" 10, each where the sums of Source
+  Sans 3's advances and kerning put its pen (`widgets_test.l0`'s
+  `test_status_line` pins them); `vt.sh` still finds the terminal's
+  cells 8×16, in Source Code Pro;
 - a click on the second row, through QMP: the press and release go
   through `wm` to the window, and the row is tinted with the accent and
   End Process turns red;
@@ -414,17 +420,28 @@ and Shut Down stops the board.
 [tests/launcher.sh](../tests/launcher.sh) boots the screen tests' initramfs
 and clicks the top bar's Applications with the tablet: the launcher
 opens, Applications on its pill and the page's ground showing, and
-Terminal's icon, its dark square, in the grid's fourth cell. Esc closes
+Terminal's icon, its dark square, in the grid's sixth cell. Esc closes
 it, and so does a click on the page. A click on Terminal starts it: `run
 windows` lists `vt1`'s window, in front, and the top bar names it
-Terminal, a lit pixel of the `T`, where its title, `vt1`, would show none.
+Terminal, a pixel of the `T` lit as Source Sans 3's glyph covers it,
+where its title, `vt1`, would show none.
 
 [tests/launcher-install.sh](../tests/launcher-install.sh) boots a system
-volume (`root=`) with `wm` and no window, opens the launcher with five
-apps, and installs a sixth from the shell, a bundle `Extra.app` of a copy
+volume (`root=`) with `wm` and no window, opens the launcher with seven
+apps, and installs an eighth from the shell, a bundle `Extra.app` of a copy
 of Terminal's program and icon and a manifest `write` and `append` make.
-Opened again, the launcher shows it in the second cell, and a click on it
+Opened again, the launcher shows it in the third cell, and a click on it
 starts it, the top bar naming it Extra.
+
+[tests/fontview.sh](../tests/fontview.sh) boots the screen tests'
+initramfs and opens Fonts from the launcher: four cards, each its face's
+"Aa" inked, and no fifth; a click on Source Sans 3's opens its page,
+where, in the pangram at 64, the `i` of "big" inks 5 columns of a row
+through the x-height and the `m` of "my" 37, each where the sums of
+the advances and kerning put its pen; Back, then Source Code Pro's card,
+where the same `m` and `i` each ink only the cell of 32 that 14 and 18
+cells along put them in: the same width. It reads proportional text's
+pixels, as `launcher.sh` reads the top bar's.
 
 Every boot is killed after two minutes by [tools/deadline](../tools/deadline),
 since macOS has no `timeout`. The longest, `install_boot`, takes about

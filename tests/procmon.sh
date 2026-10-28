@@ -127,8 +127,8 @@ shows() {
 
 # The window's content starts under its 46-row header bar, 2 in from its
 # left, inside the frame's border. In it: the
-# toolbar, 46 rows, its End Process button 108 wide at its right end, 6
-# in; a line; then the grid, its header 32 rows, the last its line, and
+# toolbar, 46 rows, its End Process button 88 wide at its right end, 6
+# in, from 746, its label, 68 wide in Source Sans 3, from 756; a line; then the grid, its header 32 rows, the last its line, and
 # its rows, 30 each, sorted by pid, from 79. The State column runs from
 # 190, its dot 8 across from 199, 11 down a row; Memory and Shared from
 # 380 and 480; the Detail column from 580, empty for a sleeping process,
@@ -146,7 +146,7 @@ window
 cx=$((w_x + 2)); cy=$((w_y + bar))
 row() { echo $((cy + 79 + 30 * ($1 - 1))); }
 dot() { echo "$((cx + 203)) $(($(row $1) + 15))"; }
-endx=$((cx + 730)); endy=$((cy + 22))
+endx=$((cx + 750)); endy=$((cy + 22))
 
 shows "its header bar" "$((w_x + 6)) $((w_y + 6)) $headerbar"
 shows "the toolbar, the grid's header, End Process faded" \

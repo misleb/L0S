@@ -30,7 +30,7 @@
 (data UiPaint
   (UiPFill Rect int)                                 ; rect, color
   (UiPRound Rect int int int)                        ; rect, radius, color, color under the corners or -1
-  (UiPText Rect (list int) UiAlign int bool int)     ; rect, text, align, color, bold, scale
+  (UiPText Rect (list int) UiAlign int UiFont bool int) ; rect, text, align, color, face, bold, scale
   (UiPIcon int int (list int) int int)               ; x, y, icon name, color, scale
   (UiPImage int int int bool (list UiCov)))          ; x, y, n, dimmed, tables
 
@@ -46,7 +46,7 @@
       (cons (match (head ops)
               ((UiPFill r c) (UiPFill (rect_moved r dx dy) c))
               ((UiPRound r rad c u) (UiPRound (rect_moved r dx dy) rad c u))
-              ((UiPText r s a c b sc) (UiPText (rect_moved r dx dy) s a c b sc))
+              ((UiPText r s a c f b sc) (UiPText (rect_moved r dx dy) s a c f b sc))
               ((UiPIcon x y n c sc) (UiPIcon (add x dx) (add y dy) n c sc))
               ((UiPImage x y n d ts) (UiPImage (add x dx) (add y dy) n d ts)))
             (ui_ops_offset (tail ops) dx dy))))
@@ -58,17 +58,145 @@
 
 ; ------------------------------------------------------------------- text
 
-; How wide text is, in the font's cells, bold a pixel wider.
-(def ui_text_w ((s (list int)) (bold bool) (scale int)) int
-  (if (is_empty s) 0 (add (mul (mul (length s) (ui_char_w)) scale) (if bold 1 0))))
+; Which face text is in: Source Code Pro, whose characters are all one
+; advance and line up in columns, as a terminal's; or Source Sans 3, the
+; interface's, each character its own, each with a bold face too, in
+; lines of 16 and 32; or a face the font service names, at a line
+; height the program names, in the desktop's pixels, as Fonts shows
+; them (its bold is in its name, so an op's bold does not change it).
+(data UiFont (UiMono) (UiSans) (UiFontAt (list int) int))
 
-; As much of s as fits in w pixels: all of it, or its start and "...".
-(def ui_ellipsized ((s (list int)) (w int) (scale int)) (list int)
-  (let cw (mul (ui_char_w) scale)
-    (if (le (mul (length s) cw) w)
-        s
-        (let n (div w cw)
-          (if (le n 3) (take "..." n) (append (take s (sub n 3)) "..."))))))
+; The face the interface's text is in: every widget's, and wm's title
+; bars, top bar and launcher. What must line up in columns, as a
+; terminal's cells, names UiMono itself.
+(def ui_text_font () UiFont (UiSans))
+
+; The font service's name for the face, bold or regular: code,
+; code-bold, sans or sans-bold, or the name a UiFontAt gives.
+(def ui_font_face ((f UiFont) (bold bool)) (list int)
+  (match f
+    ((UiMono) (if bold "code-bold" "code"))
+    ((UiSans) (if bold "sans-bold" "sans"))
+    ((UiFontAt name h) name)))
+
+; How tall a line of text in the face is, in the desktop's pixels, at
+; text scale scale: 16 a scale, or a UiFontAt's own height.
+(def ui_font_line ((f UiFont) (scale int)) int
+  (match f
+    ((UiMono) (mul (ui_char_h) scale))
+    ((UiSans) (mul (ui_char_h) scale))
+    ((UiFontAt name h) h)))
+
+; Which of metrics.l0's faces measures the face: 0 code, 1 code-bold, 2
+; sans, 3 sans-bold, by its name; a face of another name is measured as
+; code, in cells, which is as near as a face with no metrics comes.
+(def ui_font_metric ((f UiFont) (bold bool)) int
+  (let i (ui_index_of (ui_font_face f bold) (split_spaces "code code-bold sans sans-bold") 0)
+    (if (lt i 0) 0 i)))
+
+; Where x is in xs, from i; -1 if it is not there.
+(def ui_index_of ((x (list int)) (xs (list (list int))) (i int)) int
+  (if (is_empty xs) -1 (if (eq (head xs) x) i (ui_index_of x (tail xs) (add i 1)))))
+
+; The face's units per em, which its advances are in (metrics.l0).
+(def ui_font_upm ((f UiFont) (bold bool)) int
+  (let m (ui_font_metric f bold)
+    (if (eq m 0) (ui_m_code_upm) (if (eq m 1) (ui_m_code_bold_upm) (if (eq m 2) (ui_m_sans_upm) (ui_m_sans_bold_upm))))))
+
+; How far code c moves the pen, in the face's units: the advance of the
+; glyph it is drawn as (render.l0's drawable, ? for one there is none
+; of).
+(def ui_font_adv ((f UiFont) (bold bool) (c int)) int
+  (let d (drawable c)
+    (let m (ui_font_metric f bold)
+      (if (eq m 0) (ui_m_code_adv d) (if (eq m 1) (ui_m_code_bold_adv d) (if (eq m 2) (ui_m_sans_adv d) (ui_m_sans_bold_adv d)))))))
+
+; How much further the pen moves after code l when code r follows, in
+; the face's units: the font's kerning of the pair (metrics.l0), each as
+; it is drawn.
+(def ui_font_kern ((f UiFont) (bold bool) (l int) (r int)) int
+  (let a (drawable l)
+    (let b (drawable r)
+      (let m (ui_font_metric f bold)
+        (if (eq m 0) (ui_m_code_kern a b)
+          (if (eq m 1) (ui_m_code_bold_kern a b) (if (eq m 2) (ui_m_sans_kern a b) (ui_m_sans_bold_kern a b))))))))
+
+; How far a character moves the pen, in the face's units: its advance,
+; and its pair's kerning with the one after it, if there is one.
+(def ui_char_units ((s (list int)) (f UiFont) (bold bool)) int
+  (let c (head s)
+    (let t (tail s)
+      (add (ui_font_adv f bold c) (if (is_empty t) 0 (ui_font_kern f bold c (head t)))))))
+
+; The sum of s's advances, each pair's kerning taken, in font units,
+; onto acc.
+(def ui_text_units ((s (list int)) (f UiFont) (bold bool) (acc int)) int
+  (if (is_empty s) acc (ui_text_units (tail s) f bold (add acc (ui_char_units s f bold)))))
+
+; Font units u of a face of upm units per em, in pixels at line height
+; h, rounded up: the em is 5h/6 pixels, as the strikes are made
+; (format/strike.l0), so Source Code Pro's 600 units are h / 2.
+(def ui_units_px ((u int) (upm int) (h int)) int
+  (ceil_div (mul u (mul h 5)) (mul 6 upm)))
+
+; How wide s is in face f at text scale scale, in the desktop's pixels:
+; its advances summed in font units and turned into pixels once, rounded
+; up, so a width never depends on where the text starts. Bold is the
+; bold face's own advances.
+(def ui_text_w ((s (list int)) (f UiFont) (bold bool) (scale int)) int
+  (ui_text_px s f bold scale))
+
+; How wide n characters of face f at text scale 1 may be, at most: n of
+; its widest, as an entry is made wide enough for what it is to hold.
+(def ui_chars_w ((n int) (f UiFont) (bold bool)) int
+  (ui_units_px (mul n (ui_font_widest f bold)) (ui_font_upm f bold) (ui_font_line f 1)))
+
+; The widest advance of codes 32 to 126 in the face, in its units.
+(def ui_font_widest ((f UiFont) (bold bool)) int
+  (let m (ui_font_metric f bold)
+    (if (eq m 0) (ui_m_code_widest) (if (eq m 1) (ui_m_code_bold_widest) (if (eq m 2) (ui_m_sans_widest) (ui_m_sans_bold_widest))))))
+
+; Where character i of s is drawn, at text scale 1: its pen, the sum of
+; the advances before it, in the desktop's pixels from the text's start,
+; rounded to nearest, as ui_strike_chars places it.
+(def ui_text_pen ((s (list int)) (f UiFont) (bold bool) (i int)) int
+  (ui_pen_px (ui_prefix_units s f bold i 0) (ui_font_upm f bold) (ui_font_line f 1)))
+
+; How far the first i characters of s move the pen, in font units, the
+; last's kerning with the one after it taken, onto acc.
+(def ui_prefix_units ((s (list int)) (f UiFont) (bold bool) (i int) (acc int)) int
+  (if (if (le i 0) true (is_empty s))
+      acc
+      (ui_prefix_units (tail s) f bold (sub i 1) (add acc (ui_char_units s f bold)))))
+
+; s's advances in the desktop's pixels at text scale scale, rounded up.
+(def ui_text_px ((s (list int)) (f UiFont) (bold bool) (scale int)) int
+  (ui_units_px (ui_text_units s f bold 0) (ui_font_upm f bold) (ui_font_line f scale)))
+
+; As much of s in face f as fits in w pixels: all of it; or its longest
+; start that fits with "..." after it, and that; or as much of "..." as
+; fits.
+(def ui_ellipsized ((s (list int)) (w int) (f UiFont) (bold bool) (scale int)) (list int)
+  (if (le (ui_text_px s f bold scale) w)
+      s
+      (if (gt (ui_text_px "..." f bold scale) w)
+          (ui_fitting "..." w f bold scale (nil int))
+          (append (ui_fitting_before s "..." w f bold scale (nil int)) "..."))))
+
+; The longest start of s that fits in w pixels, after acc, which is the
+; start of it already taken, reversed.
+(def ui_fitting ((s (list int)) (w int) (f UiFont) (bold bool) (scale int) (acc (list int))) (list int)
+  (ui_fitting_before s "" w f bold scale acc))
+
+; The longest start of s that fits in w pixels with after after it,
+; acc the start of it already taken, reversed.
+(def ui_fitting_before ((s (list int)) (after (list int)) (w int) (f UiFont) (bold bool) (scale int) (acc (list int))) (list int)
+  (if (is_empty s)
+      (rev acc)
+      (let next (cons (head s) acc)
+        (if (gt (ui_text_px (rev_onto next after) f bold scale) w)
+            (rev acc)
+            (ui_fitting_before (tail s) after w f bold scale next)))))
 
 ; Where something w wide starts along a span from x, n wide.
 (def ui_aligned ((x int) (n int) (w int) (a UiAlign)) int
@@ -160,7 +288,7 @@
       ((UiPFill r color) (ui_fill c k (rect_scaled r s) color))
       ((UiPRound r radius color under)
         (ui_round c k (rect_scaled r s) (mul s (ui_fit_radius radius (rect_w r) (rect_h r))) color under))
-      ((UiPText r t a color bold scale) (ui_text_at c face k r t a color bold scale))
+      ((UiPText r t a color font bold scale) (ui_text_at c face k r t a color font bold scale))
       ((UiPIcon x y name color scale) (ui_icon_at c face k x y name color scale))
       ((UiPImage x y n dimmed ts) (ui_image_at c k (mul x s) (mul y s) (mul n s) dimmed ts)))))
 
@@ -234,29 +362,48 @@
           (let l (ui_blend c k (add x i) (add y dy) color pct under)
             (ui_blend l k (sub (add x (sub w 1)) i) (add y dy) color pct under))))))
 
-; Text in r from the face's glyphs at its scale, the cells 8 by 16 of the
-; desktop's pixels at text scale 1; none is drawn if it has none.
-(def ui_text_at ((c Canvas) (face UiFace) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (bold bool) (scale int)) Canvas
+; The name of the strike text in font at text scale scale is drawn from
+; on a face of scale s: its face's, at its line's height in the screen's
+; pixels.
+(def ui_text_strike ((font UiFont) (bold bool) (scale int) (s int)) (list int)
+  (ui_glyph_table (ui_font_face font bold) (mul (ui_font_line font scale) s)))
+
+; Text in r in face font from the face's strike of it at its scale, a
+; line 16 of the desktop's pixels tall at text scale 1, or as tall as a
+; UiFontAt says; none is drawn if it has none.
+(def ui_text_at ((c Canvas) (face UiFace) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (font UiFont) (bold bool) (scale int)) Canvas
   (let s (ui_face_scale face)
-    (match (ui_face_strike face (ui_glyph_table bold (mul (mul (ui_char_h) scale) s)))
-      ((Some g) (ui_text_smooth c g k r t a color bold scale s))
+    (match (ui_face_strike face (ui_text_strike font bold scale s))
+      ((Some g) (if (ui_strike_whole g) (ui_text_smooth c g k r t a color font bold scale s) c))
       ((None) c))))
+
+; How far into the text a glyph's pen is, the sum u of the advances
+; before it, in the screen's pixels at line height h: u at the em the
+; strikes are made at, rounded to nearest.
+(def ui_pen_px ((u int) (upm int) (h int)) int
+  (div (add (mul u (mul h 5)) (mul 3 upm)) (mul 6 upm)))
 
 ; Text placed in the desktop's pixels, along r as a says, in its middle up
 ; and down, cut short with "..." if it is too wide, then drawn from
-; strike g at scale s, bold from the bold face's.
-(def ui_text_smooth ((c Canvas) (g UiStrike) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (bold bool) (scale int) (s int)) Canvas
-  (let shown (ui_ellipsized t (sub (rect_w r) (if bold 1 0)) scale)
-    (let x (ui_aligned (rect_x r) (rect_w r) (ui_text_w shown bold scale) a)
-      (let y (add (rect_y r) (div (sub (rect_h r) (mul (ui_char_h) scale)) 2))
-        (ui_strike_chars c g k (mul x s) (mul y s) shown color (mul (mul (ui_char_w) scale) s))))))
+; strike g at scale s: each glyph's pen at the sum of the advances
+; before it, turned into the screen's pixels, so text at scale 2 is
+; placed in its own pixels, not doubled from 1's.
+(def ui_text_smooth ((c Canvas) (g UiStrike) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (font UiFont) (bold bool) (scale int) (s int)) Canvas
+  (let shown (ui_ellipsized t (rect_w r) font bold scale)
+    (let x (ui_aligned (rect_x r) (rect_w r) (ui_text_w shown font bold scale) a)
+      (let y (add (rect_y r) (div (sub (rect_h r) (ui_font_line font scale)) 2))
+        (ui_strike_chars c g k (mul x s) (mul y s) shown color font bold (mul (ui_font_line font scale) s) 0)))))
 
-; Characters t from x, y of the screen's pixels, the line's top, cw
-; apart, each its glyph of g, ? for one g lacks.
-(def ui_strike_chars ((c Canvas) (g UiStrike) (k Rect) (x int) (y int) (t (list int)) (color int) (cw int)) Canvas
+; Characters t from pen x, y of the screen's pixels, the line's top, in
+; face font at line height h, u the units of the advances already
+; drawn, each pair's kerning taken; each its glyph of g, ? for one g
+; lacks.
+(def ui_strike_chars ((c Canvas) (g UiStrike) (k Rect) (x int) (y int) (t (list int)) (color int) (font UiFont) (bold bool) (h int) (u int)) Canvas
   (if (is_empty t)
       c
-      (ui_strike_chars (ui_strike_glyph c g k x y (drawable (head t)) color) g k (add x cw) y (tail t) color cw)))
+      (let px (add x (ui_pen_px u (ui_font_upm font bold) h))
+        (ui_strike_chars (ui_strike_glyph c g k px y (drawable (head t)) color) g k x y (tail t) color font bold h
+                         (add u (ui_char_units t font bold))))))
 
 ; Glyph code of g drawn with its pen at x and the line's top at y: its
 ; box placed as its entry says, read in place; nothing for one with no

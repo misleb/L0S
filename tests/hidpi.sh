@@ -108,8 +108,9 @@ printf 'run draw line 0 32 1919 1079 red\n' >&3
 shows "a line's ends, 2 by 2" "0 64 255 0 0" "1 65 255 0 0" "3838 2158 255 0 0" "3839 2159 255 0 0"
 
 # 5. The gallery's window, where run windows lists it, in the desktop's
-# pixels; its title, 7 bold characters of 8, 57 wide, in the middle of
-# its title bar, 644 wide and 46 high; the row through its middle.
+# pixels; its title, Widgets in bold Source Sans 3, 48 wide, in the
+# middle of its title bar, 644 wide and 46 high; the row through its
+# middle, 28 either side of it.
 printf 'run widgets &\n' >&3
 w_x=""
 for try in $(seq 1 30); do

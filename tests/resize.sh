@@ -122,9 +122,10 @@ shows() {
 }
 
 # The window's content starts under its 46-row header bar, 2 in from its
-# left, and its toolbar's End Process is 108 wide at the content's right
+# left, and its toolbar's End Process is 88 wide at the content's right
 # end, 6 in, in the middle of the toolbar's 46 rows: faded, with no row
-# selected. The window is 4 wider than its content, and 48 higher.
+# selected; 90 in from the end is its ground, before its label, which is
+# 10 in. The window is 4 wider than its content, and 48 higher.
 bar=46
 ground="36 36 36"; faded="130 32 36"
 
@@ -134,7 +135,7 @@ window
 x0=$w_x; y0=$w_y; w0=$w_w; h0=$w_h
 cx=$((x0 + 2)); cy=$((y0 + bar))
 shows "the toolbar, End Process at the content's right end" \
-  "$((cx + w0 - 60)) $((cy + 22)) $faded"
+  "$((cx + w0 - 90)) $((cy + 22)) $faded"
 
 # The lower right corner, just inside the frame, 100 right and 60 down.
 drag $((x0 + w0 + 3)) $((y0 + bar + h0 + 1)) $((x0 + w0 + 103)) $((y0 + bar + h0 + 61))
@@ -142,7 +143,7 @@ window $((w0 + 100)) $((h0 + 60))
 [ "$w_x $w_y" = "$x0 $y0" ] || fail "a corner dragged moved the window to $w_x $w_y, not $x0 $y0"
 echo "ok - resize: the corner dragged: ${w_w} by ${w_h}"
 shows "End Process 100 further right, the toolbar's ground where it was" \
-  "$((cx + w0 + 100 - 60)) $((cy + 22)) $faded" "$((cx + w0 - 60)) $((cy + 22)) $ground"
+  "$((cx + w0 + 100 - 90)) $((cy + 22)) $faded" "$((cx + w0 - 90)) $((cy + 22)) $ground"
 
 # The left edge, in the frame's side 100 rows down, 30 left.
 w1=$w_w; h_before=$w_h
@@ -155,7 +156,7 @@ echo "ok - resize: the left edge dragged: ${w_w} by ${w_h} at ${w_x}"
 # toolbar's ground where it was, nothing shifted or torn.
 lx=$((w_x + 2))
 shows "in place: End Process at the right end, the toolbar's ground before it" \
-  "$((lx + w_w - 60)) $((cy + 22)) $faded" "$((lx + w_w - 200)) $((cy + 22)) $ground"
+  "$((lx + w_w - 90)) $((cy + 22)) $faded" "$((lx + w_w - 200)) $((cy + 22)) $ground"
 
 # The pointer at x, y: waits up to 30 s for run windows to name it as
 # shown, nothing for the arrow.

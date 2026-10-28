@@ -48,6 +48,7 @@ summary A terminal in a window, with its own shell
 | `Widgets.app` | `widgets` | Widgets |
 | `Disks.app` | `disks` | Disks |
 | `Files.app` | `files` | Files |
+| `Fonts.app` | `fontview` | Fonts |
 | `About.app` | `about` | About |
 
 A bundle's name is one word, as the shell and the inittab split at
