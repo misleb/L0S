@@ -43,6 +43,7 @@ move independently, so several can be active at once.
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
 | [0026](0026-font-service-limits.md) The font service lets strikes go, and knows who holds them | Toolkit | idea | – | – | programs.md, toolkit.md |
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
+| [0028](0028-boot-chime-wallpaper.md) The chime as sound starts, the wallpaper as the screen does | Desktop | ready | 0/6 | – | sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md |
 
 ## Ready
 
@@ -56,6 +57,9 @@ move independently, so several can be active at once.
   told by window: on QEMU, starting with the window notice.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
   small requests first: 0023, which it needed, is done.
+- [0028](0028-boot-chime-wallpaper.md) The chime as sound starts, the
+  wallpaper as the screen does: on QEMU, starting with `svg.l0`'s
+  `<pattern>` and a W-by-H document.
 
 ## Dependencies
 
