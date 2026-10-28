@@ -41,7 +41,7 @@ move independently, so several can be active at once.
 | [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | ready | 0/5 | – | toolkit.md, programs.md, demo.md, syscalls.md |
 | [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | blocked | 0/6 | 0019 | toolkit.md, desktop.md, programs.md, testing.md |
 | [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
-| [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi 5's card needs | Pi 5 | active | 4/5 | – | pi5.md, programs.md, testing.md |
+| [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi 5's card needs | Pi 5 | active | 5/6 | – | pi5.md, programs.md, testing.md |
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
 | [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its scrollback, resizes, and has tabs | Desktop | ready | 0/6 | – | programs.md, desktop.md, toolkit.md, demo.md, testing.md |
 
@@ -56,9 +56,10 @@ move independently, so several can be active at once.
 - [0021](0021-many-windows.md) An app with many windows, its events
   told by window: on QEMU, starting with the window notice.
 - [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi
-  5's card needs: the build fetches the device trees, pinned and
-  checked, into `/boot` and `build/pi5-card`. Its last step needs the
-  board and a blank card.
+  5's card needs: a card L0S installed has booted the board, but kept
+  Raspberry Pi OS's `overlays/`. Left, on the board: the card erased
+  (Format Disk...), partitioned and installed from scratch, then
+  booted.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
   small requests first: 0023, which it needed, is done.
 - [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its

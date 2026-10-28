@@ -55,6 +55,10 @@ already fetches the two device trees for the network boot
   kept, so a card boots a system volume `install ROOT` filled; ROOT
   checked before anything is written. Host tests of the words and the
   file's text; `install_boot` with `--root data`.
+- [x] `fs`'s `erase DISK`, the shell's `erase` and Disks' Format
+  Disk...: a drive given a new, empty GPT in place of its table, an
+  MBR's too, its volumes unmounted first, so a card Raspberry Pi OS
+  made can be started over as one of L0S's own.
 - [ ] On a board: a card with no partitions, partitioned and formatted
   from L0S, `install --boot` onto it, and `eeprom update` to
   `BOOT_ORDER=0xf21` if the board tries only the network; it boots to
