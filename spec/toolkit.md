@@ -227,6 +227,13 @@ to `l0` are one namespace, and a duplicate is a compile error.
   smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
   the build, never at run time. Icons and text scale by whole numbers. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.
+- An app's regions are counted by the toolkit, not asked of the
+  kernel, which has no call for it: `ui_app_open` knows its windows and
+  its face's strikes, and keeps 8 for the rest, so a program that opens
+  more of its own than that can still run out. An app's loop does one
+  message a step, a window's whole step each time, and a program ends
+  only by returning from `main`, so one that does nothing with a close
+  is ended by the compositor at its asking (`end`).
 - Scrolling is by whole rows: the wheel's steps are counted, not its
   speed, and there is no kinetic scrolling. The wheel across, which the
   driver reports, scrolls nothing yet.

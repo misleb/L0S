@@ -1,6 +1,6 @@
 # 0021: An app with many windows, its events told by window
 
-Track: Desktop · Status: active · Needs: – · Spec: desktop.md, toolkit.md, programs.md, testing.md
+Track: Desktop · Status: done · Needs: – · Spec: desktop.md, toolkit.md, programs.md, testing.md
 
 ## Why
 
@@ -81,7 +81,7 @@ the toolkit lets an app open, route and close windows by id.
   the same folder, each with its own place, selection, view and menus,
   kept in Files' state by window id; `win.close` closes that one, and
   the last ends Files. Files' launcher entry still starts a new Files.
-- [ ] The screen test and the spec: `tests/files.sh` opens a second
+- [x] The screen test and the spec: `tests/files.sh` opens a second
   window from the menu, sends a click to each and sees each change
   alone (`run windows`: two windows, one client), closes the first by
   its close button and sees the second stay; desktop.md's notices and
@@ -90,7 +90,11 @@ the toolkit lets an app open, route and close windows by id.
 
 ## Spec changes
 
-- testing.md: files.sh's second window.
+All moved into the spec: desktop.md (the window notice, many windows
+on one port, the close notice and the kill 2 seconds after, `end`,
+`windows`' pid), toolkit.md (`UiApp`, `win.close`, `ui_open` as one
+window of an app), programs.md (Files' New Window, `uiapp.l0`),
+testing.md (`widgets.sh`'s close button, `files.sh`'s second window).
 
 ## Log
 
@@ -171,3 +175,12 @@ the toolkit lets an app open, route and close windows by id.
   `fl_at`), as Nautilus's New Window does. `win.close` closes the
   window it came from, and Files returns 0 with its last. The full-color
   icons stay one set, in every window's state, loaded once.
+- 2026-10-28: step 6, and done. `files.sh` takes the first window to
+  0, 32 and the second to 400, 240, so the first's sidebar and close
+  button show beside and above the second, whatever `cascade` gave
+  it; a click on each sidebar changes that window alone, the second
+  checked again once a press on its sidebar's empty foot brings it
+  back; the first's close button leaves the second; the second's ends
+  Files. `make check`, `make test` and `make e2e` pass. Left as they
+  are, for 0033: a second window's strikes are the app's now, but each
+  window still lays out and paints its whole step per message.
