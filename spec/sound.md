@@ -98,4 +98,7 @@ chime: no `DLATE` or `ERRORE`, so the FIFO never ran dry.
   at a rate the driver plays, or not at all. How long to hold it back
   for the monitor is a guess, the same for every monitor: the old chime
   was heard on one boot of three after 2 s; the chord, after 3 s, is
-  not yet heard on a board.
+  heard on every boot on an LG 4K monitor. So on the Pi 5 it comes at
+  about the time `wm`'s desktop does, not with the wallpaper, the
+  first frame: the monitor takes that long to play sound after a mode
+  is set, and nothing HDMI0 sees says when it is ready.

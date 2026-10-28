@@ -1,6 +1,6 @@
 # 0028: The chime as sound starts, the wallpaper as the screen does
 
-Track: Desktop · Status: active · Needs: – · Spec: sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md
+Track: Desktop · Status: done · Needs: – · Spec: sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md
 
 ## Why
 
@@ -60,15 +60,13 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
 - [x] `hvs` the same, in a plane under the others, in place of the
   black background. It needs DMA pages for the frame (8 MB at 1080p)
   and must not get in the way of the 64-region limit. Seen on a Pi 5
-  with a monitor on HDMI0. Written and host-tested; the board check
-  (the Log's 2026-10-28 step 5 entry) is still to do.
+  with a monitor on HDMI0: seen, 2026-10-28.
 - [x] `audio_server.l0` plays the chime: once a driver's ring runs, it
   reads `/etc/chime.wav` (`play`'s WAV parsing, moved into a library
   both use) and queues its frames as a client's would be, at the
   file's rate. `hdmi-audio` needs no code of its own beyond the
-  library. Heard on a Pi 5, and `audio_server_test` pins the frames.
-  Written and host-tested; the board check (the Log's 2026-10-28
-  step 6 entry) is still to do.
+  library. Heard on a Pi 5, and `audio_server_test` pins the frames:
+  heard, every boot, 2026-10-28, after the 3 s lead-in.
 
 ## Spec changes
 
@@ -241,3 +239,9 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   where the old one's was 12436: `tools/mkchime` synthesizes it at the
   build, six stretched partials a note, each dying away faster the
   higher it is, so `pi5/etc/chime.wav` is gone from the tree.
+- 2026-10-28: done. On the Pi 5 the wallpaper shows as `hvs` serves,
+  before the desktop, and the chord is heard reliably, at about the
+  time `wm`'s desktop comes up, not as the wallpaper first shows: the
+  monitor is not ready for sound until then, and nothing the source
+  sees says when it is, so a chime with the first frame may not be
+  possible there. Written into sound.md's Limits.

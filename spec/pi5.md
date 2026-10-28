@@ -172,11 +172,11 @@ boot should check these, on the debug UART (`dmesg` repeats them):
   and each step of its stage, the last of them before any hang; then
   the screen: black from the firmware's handover, then the wallpaper,
   `branding/wallpaper-dark.svg`, as `hvs` serves, before `wm`'s desktop
-  comes over the same image, with nothing black between (not yet seen
-  on a board)
-- `hdmi-audio`'s line, the chime heard as it starts, with no `no
-  chime:` warning (not yet heard on a board; `chime=off` silences it),
-  and that `play /etc/chime.wav` is heard again
+  comes over the same image, with nothing black between
+- `hdmi-audio`'s line, then 3 s later `playing the chime`, the chord
+  heard as it starts, at about the time the desktop comes up, with no
+  `no chime:` warning (`chime=off` silences it), and that `play
+  /etc/chime.wav` is heard again
 - `sdhci`'s lines: `sdio1`'s registers as the firmware left them, then
   the card, its size and its interrupt; and `fs`'s, a line for each
   volume it mounts

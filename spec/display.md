@@ -248,8 +248,8 @@ Scaler (SCALER6), so no pixel is copied:
    layers, over the black background, until a client's layer covers
    the screen. Then the list without it is shown, two frames are waited
    for, so that the channel fetches nothing from it, and its place in
-   the aperture is cleared and its pages unmapped. Not yet seen on a
-   board.
+   the aperture is cleared and its pages unmapped. Seen on a Pi 5,
+   before the desktop.
 
 **Not yet:** the HVS's end-of-frame interrupts are not taken.
 
