@@ -155,7 +155,8 @@ To make a system volume:
   writes System's UUID to `build/system.uuid`; `make demo-system` makes it
   anew and boots from it.
 - **In L0S**, `run install VOLUME` copies every directory and file of `/`
-  but `/Volumes` onto the volume, marking each program's copy a program,
+  but `/Volumes` and `/boot` (the Pi 5's boot files, which `install
+  --boot` puts on the card's FAT32 partition) onto the volume, marking each program's copy a program,
   and says its UUID for `root=`. It copies from the initramfs, or from
   another system volume, never onto the one `/` is.
 

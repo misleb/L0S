@@ -20,9 +20,9 @@ does three things:
 
 The firmware itself is in the Pi 5's EEPROM, so these are all the files
 a card's boot partition needs: copy them onto a FAT32 one, or onto the
-boot partition of a card Raspberry Pi OS made. A card holding only them
-has not yet been booted from: the one that booted also had Raspberry Pi
-OS's `overlays/` (see "A card that boots a system volume"). `l0 card`'s `config.txt` loads the image
+boot partition of a card Raspberry Pi OS made. A card holding only them,
+partitioned by L0S, has booted the board (see "A card that boots a
+system volume"). `l0 card`'s `config.txt` loads the image
 at 0x80000 and the initramfs at 0x10000000, leaves RP1 set up
 (`pciex4_reset=0`) and forces HDMI's hotplug.
 
@@ -74,10 +74,11 @@ install: /Volumes/bootfs/cmdline.txt boots /Volumes/root, root=12345678-0000-000
 
 A card made so has booted the board, its bootloader reading
 `config.txt`, `input.bin`, the device tree, `cmdline.txt` and `l0.img`
-from `bootfs`, and `boot` making `System` `/`. That card kept Raspberry
-Pi OS's `overlays/`, which the firmware also read, applying
-`bcm2712d0.dtbo` to the C1 device tree on a D0 board; a card with no
-`overlays/`, or partitioned by L0S's GPT, has not yet booted one.
+from `bootfs`, and `boot` making `System` `/`. So has one with nothing
+of Raspberry Pi OS's: erased by Format Disk..., given L0S's GPT, a
+FAT32 `bootfs` and an L0FS `System`, and filled by `install System` and
+`install --boot bootfs --root System`. The bootloader finds `bootfs` by
+its partition type, looks for `overlays/` and goes on without it.
 
 **Over the network.** The Pi 5 keeps its firmware in its EEPROM and can
 fetch the rest by TFTP:
@@ -147,7 +148,7 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 
 | Program | What it does there |
 |---|---|
-| `boot` | pid 1, then `/etc/system`: `sh` on the console, `wm`, a Terminal |
+| `boot` | pid 1, then `/etc/system`: `sh` on the console, `font`, `wm`, a Terminal |
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
 | `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](devices.md#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode` and `hdmi` beside them), at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
@@ -231,8 +232,8 @@ the image's own configuration written back gave the image unchanged.
 ## Limits
 
 - **The Raspberry Pi 5 reaches its RTC only through the firmware**, and
-  boots only over the network or from a card `l0 card` wrote; its
-  microSD card is a disk once booted, but not where it boots from. Its
+  boots only over the network or from a card `l0 card` or `install
+  --boot` wrote. Its
   kernel's heap is sized to `PI5_RAM_GB`, 2 by default, and records the
   pages that much RAM has, or about 13 GB on a 16 GB board. On a board
   with more RAM than the kernel was built for, processes are refused

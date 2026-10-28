@@ -1,6 +1,6 @@
 # 0022: `install --boot` writes all a Pi 5's card needs
 
-Track: Pi 5 · Status: active · Needs: – · Spec: pi5.md, programs.md, testing.md
+Track: Pi 5 · Status: done · Needs: – · Spec: pi5.md, programs.md, testing.md
 
 ## Why
 
@@ -59,7 +59,7 @@ already fetches the two device trees for the network boot
   Disk...: a drive given a new, empty GPT in place of its table, an
   MBR's too, its volumes unmounted first, so a card Raspberry Pi OS
   made can be started over as one of L0S's own.
-- [ ] On a board: a card with no partitions, partitioned and formatted
+- [x] On a board: a card with no partitions, partitioned and formatted
   from L0S, `install --boot` onto it, and `eeprom update` to
   `BOOT_ORDER=0xf21` if the board tries only the network; it boots to
   the shell. This checks what nothing on QEMU can: that the bootloader
@@ -165,3 +165,20 @@ already fetches the two device trees for the network boot
   a hang: `fs` makes about 4 disk requests and a flush for each 4 KB of
   a file, which a card makes slow. That is 0023; the board step can go
   ahead before it, given the time.
+- 2026-10-28: step 6 done, by the user, and the goal with it: the card
+  erased by Format Disk..., given L0S's GPT, a FAT32 `bootfs` and an
+  L0FS `System`, filled by `install System` and `install --boot bootfs
+  --root System`, booted the board with nothing of Raspberry Pi OS's
+  left. The bootloader's log: the protective MBR's one 0xEE entry, the
+  GPT's partition 0 of type ebd0a0a2 (basic data) matched as the boot
+  partition, `bootfs` FAT32; `config.txt`, `input.bin` (19,800,380
+  bytes), `bcm2712-rpi-5-b.dtb`; `overlays/overlay_map.dtb` and
+  `bcm2712d0.dtbo` looked for and not read; `cmdline.txt`'s `root=`,
+  `l0.img`, and L0S made `System` `/`. Nothing more was needed, so the
+  first two steps' files stand. Moved into the spec: pi5.md's first
+  section, "A card that boots a system volume" and its Limit. Also:
+  `install VOLUME` no longer copies `/boot`, the boot files, onto the
+  system volume, where nothing boots from them (programs.md, boot.md);
+  `input.bin` still holds them, so a board booted from the initramfs
+  can still `install --boot` another card. Formalizing the whole
+  installation is [0027](0027-installer.md).
