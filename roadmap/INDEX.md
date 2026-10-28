@@ -25,7 +25,7 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | idea | – | – | kernel.md |
+| [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | active | 2/4 | – | kernel.md, demo.md, testing.md |
 | [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | blocked | – | 0002 | pi5.md, kernel.md |
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | ready | 0/5 | – | display.md, pi5.md |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | blocked | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
