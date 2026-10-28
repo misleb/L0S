@@ -57,7 +57,7 @@ the toolkit lets an app open, route and close windows by id.
   key to the front one told with its id, the pointer to the one under
   it), and written into desktop.md's protocol table. `windows` shows
   each window's client's pid, so a test can see two of one client.
-- [ ] Close asked, not forced: the close button sends the window's
+- [x] Close asked, not forced: the close button sends the window's
   client a close notice (`win ID` then `clo`), as `xdg_toplevel.close`,
   and kills it only if the window is still open 2 seconds later, on
   wm's alarm, as today's `close_pressed` does at once. The toolkit
@@ -90,10 +90,7 @@ the toolkit lets an app open, route and close windows by id.
 
 ## Spec changes
 
-- desktop.md: the close button's close notice, and the kill 2 seconds
-  after.
-- toolkit.md: `UiApp` and its calls, and the `win.close` action;
-  `ui_open` as one window of them.
+- toolkit.md: `UiApp` and its calls; `ui_open` as one window of them.
 - programs.md: Files' New Window.
 - testing.md: files.sh's second window.
 
@@ -123,3 +120,21 @@ the toolkit lets an app open, route and close windows by id.
   `front` or `-`, so the screen tests' `read`s gained a trailing `_`
   (`launcher.sh`, `launcher-install.sh`, `vt.sh`), the l0s MCP server's
   parser a `pid`, and the `virtio-gpu` e2e case its vt's pid, 8.
+- 2026-10-28: step 3. `wm` keeps the closes it asked in `Wm`'s second
+  field, a `Closing` (window, client, when) each, and sets its alarm for
+  the soonest (`close_alarm`); at the alarm it kills the client of each
+  due window still open and still that client's (`closes_due`,
+  `still_open`). An app that does nothing with `win.close` cannot be
+  ended by the toolkit from inside it: L0 has no exit but returning
+  from `main`, and the kernel answers a process's kill of itself with
+  no such process (its slot is out while it calls), and the kernel is
+  not this goal's to change. So the toolkit keeps the window as asked to
+  close (`UiWin`'s last field, `ui_win_close_asked`), and when the
+  program presents it again, having done nothing with it, `ui_present`
+  closes it and asks `wm` to `end` the program, a new request that
+  kills its asker (`compositor_end`); every app closes at once, as it
+  did. One that wants to keep its window calls `ui_win_close_kept`. The
+  window's own close button (`UiCsdBar`'s) sets off the same and is
+  kept the same, so the two buttons are one path. `vt` needed nothing:
+  it already ended on `ui_close_action`. `widgets.sh` gained the title
+  bar's close button: the gallery goes before wm's 2 seconds.

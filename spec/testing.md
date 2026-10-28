@@ -313,7 +313,10 @@ header bar. Then:
   End Process turns red;
 - the tab bar along its foot, three tabs, the first raised; a click on
   the third raises it, and a click on the second's close button closes
-  it, the two left sharing the bar, the third still raised.
+  it, the two left sharing the bar, the third still raised;
+- a click on the title bar's close button: `wm` asks the gallery to
+  close, the gallery does nothing with `win.close`, and the toolkit
+  closes its window and has `wm` end it, so `run windows` lists none.
 
 [tests/resize.sh](../tests/resize.sh) boots the screen initramfs, types
 `run widgets &`, and drags the gallery's edges with the tablet, through

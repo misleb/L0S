@@ -22,7 +22,7 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `icon_view.l0` | `UiIconView`, a grid of `UiTile`s, an icon 48 square at three times the size, in the accent or dimmed, and a name under it, as many across as fit, in the middle; one selected, rounded in the selection's tint, by a press or the keys (`ui_icon_key`: the arrows, a row for Up and Down, Home, End, Page Up and Page Down, its columns from `ui_win_icon_cols`), a press between them selecting none (`ui_icon_action`); a scroller by rows of tiles, with the grid's overlay scrollbar (`ui_scrollbar_on`). | `GtkGridView` |
 | `menu.l0` | `UiPopover BASE MENU`, a popover menu over the window: a `UiMenu` of `UiItem`s, insensitive ones dimmed, and `UiItemSep`s, on a card, under the node of an action (`UiBelow`) or at a point (`UiAt`, as for a right click), kept inside the window; nothing beneath is a target while it is open, and a press outside it sets off `PREFIX.dismiss`. | `GtkPopoverMenu` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`. Used by `draw` to check a command, by `wm` to draw it, and by `tools/mkicon` to draw an app's icon. | — |
-| `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus), `ui_present` (repaints only what changed; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_canvas` and `ui_win_face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
+| `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `ui_win_close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_canvas` and `ui_win_face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
 
 The Makefile links either `UI_CORE` (every file but `window.l0`; needs only
 `RENDER`: `ppm.l0`, `rect.l0` and `render.l0`) or `UI_CORE` plus `UI_WINDOW`
@@ -52,6 +52,20 @@ and its loop is:
 ```
 
 `user/apps/widgets/widgets.l0` is that loop in full, with a toolbar and a data grid.
+
+**Closing.** `ui_event_of` takes the compositor's window notices of its
+own window only (any other is `UiOther`). The compositor's close button
+comes as `UiCloseAsked`, and the window's own (`UiCsdBar`'s, which sets
+off `ui_close_action`) as a click: either way `ui_route` sets off
+`win.close`, as GTK's `close-request`, and keeps the window as asked
+to close (`ui_win_close_asked`). A program answers by closing the window
+(`ui_close`) and ending, as Files, Fonts and Terminal do; one that keeps
+it, as one asking first whether to save would, calls
+`ui_win_close_kept`. One that does nothing with it presents the window
+again, and `ui_present` closes it instead and asks the compositor to
+`end` the program (`compositor_end`), since L0 has no call that ends a
+program but returning from `main`: so the gallery, System Monitor,
+Disks and About close as they did when the close button killed them.
 
 ### Scrolling
 

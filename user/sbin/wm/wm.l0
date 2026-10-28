@@ -470,7 +470,7 @@
 ; The bar painted, for the windows and the time now, and shown.
 (def draw_bar ((v Wm)) int
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match bar
         ((Bar c cp t apps l m)
           (let shown (launcher_shown l)
@@ -480,10 +480,10 @@
 ; The clock's notice that a minute has begun: the bar shows it.
 (def ticked ((v Wm) (t int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match bar
         ((Bar c cp old apps l m)
-          (let v2 (Wm d w h desk font bg ws n ptr drag kp pp (Bar c cp t apps l m))
+          (let v2 (Wm d cl w h desk font bg ws n ptr drag kp pp (Bar c cp t apps l m))
             (let b (draw_bar v2) v2)))))))
 
 ; The name of the app pid is, from where its program is: "" if it is no
@@ -541,12 +541,21 @@
 ; left and content size then; or none.
 (data Drag (Dragging int int int int) (Resizing int int int int int int int int) (NoDrag))
 
-; The compositor: the display and the desktop's size, the desktop's
-; canvas, the face, at the display's scale, the wallpaper, the windows,
-; front first, the next window's number, the pointer and its drag, the
-; keyboard and pointer drivers' pids, which their events come from, and
-; the top bar.
-(data Wm (Wm Display int int Canvas UiFace Background (list Win) int Ptr Drag int int Bar))
+; The compositor: the display, the windows whose close it has asked of
+; their clients, the desktop's size, the desktop's canvas, the face, at
+; the display's scale, the wallpaper, the windows, front first, the next
+; window's number, the pointer and its drag, the keyboard and pointer
+; drivers' pids, which their events come from, and the top bar.
+(data Wm (Wm Display (list Closing) int int Canvas UiFace Background (list Win) int Ptr Drag int int Bar))
+
+; A close asked, as xdg_toplevel's close asks it: window id's client,
+; pid, sent the close notice, and killed at t, on clock_ns, if the window
+; is still open then.
+(data Closing (Closing int int int))
+
+; How long a client has to close a window its close button asked it to:
+; 2 seconds.
+(def close_wait_ns () int 2000000000)
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "wm" why))
@@ -563,7 +572,7 @@
 ; The desktop_line of v, given the clock c found, said; 0.
 (def desktop_said ((v Wm) (c Clocked)) int
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match c
         ((Clocked cp t)
           (info_as "wm" (desktop_line w h (display_scale d) (length (bar_apps bar)) (ge cp 0))))))))
@@ -611,7 +620,7 @@
         (let e2 (if (is_empty e) (display_layers d (layers (nil Win) false)) e)
           (if (not (is_empty e2))
               (complain e2)
-              (listening (Wm d w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1 ac "" (TitleClick -1 0)) (NoDrag) 0 0
+              (listening (Wm d (nil Closing) w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1 ac "" (TitleClick -1 0)) (NoDrag) 0 0
                              (Bar c -1 -1 (app_bundles) (NoLauncher) (NoMenu))))))))))
 
 ; Listens to the keyboard, the pointer and the clock, then serves
@@ -657,10 +666,10 @@
 
 (def with_drivers ((v Wm) (k int) (p int) (c Clocked)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag ok op bar)
+    ((Wm d cl w h desk font bg ws n ptr drag ok op bar)
       (match bar
         ((Bar bc ocp secs apps l m)
-          (match c ((Clocked cp t) (Wm d w h desk font bg ws n ptr drag k p (Bar bc cp t apps l m)))))))))
+          (match c ((Clocked cp t) (Wm d cl w h desk font bg ws n ptr drag k p (Bar bc cp t apps l m)))))))))
 
 ; --------------------------------------------------------------- serving
 
@@ -694,7 +703,7 @@
 ; pointer's driver and it is one.
 (def motion_from ((v Wm) (from int) (b bytes)) (Option PointerMotion)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (if (if (eq from pp) (gt pp 0) false) (pointer_motion_of (Message from b)) ((None PointerMotion))))))
 
 ; Whether a motion may join others: one that turns no wheel, since a
@@ -715,15 +724,17 @@
 ; time, or a request. Keys and the pointer are read in place.
 (def received ((v Wm) (port int) (from int) (b bytes)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (if (if (eq from kp) (gt kp 0) false)
           (keyed v b)
           (if (if (eq from pp) (gt pp 0) false)
               (pointer_received v (Message from b))
               (if (eq from 0)
-                  (match (exit_of (Message from b))
-                    ((Exited pid status) (gone v pid))
-                    ((NotExit) v))
+                  (if (is_alarm_notice (Message from b))
+                      (closes_due v port (clock_ns))
+                      (match (exit_of (Message from b))
+                        ((Exited pid status) (gone v pid))
+                        ((NotExit) v)))
                   (if (eq from (bar_clock bar))
                       (match (time_of (msg_text b))
                         ((Some t) (ticked v t))
@@ -747,7 +758,7 @@
 ; came; or the launcher's, while it is shown.
 (def keyed ((v Wm) (b bytes)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (if (menu_shown (bar_menu bar))
           (menu_keyed v (key_event_of (Message kp b)))
           (if (launcher_shown (bar_launcher bar))
@@ -773,7 +784,7 @@
 
 ; The desktop's scale: how many of the screen's pixels each way one of
 ; its is.
-(def wm_scale ((v Wm)) int (match v ((Wm d w h desk font bg ws n ptr drag kp pp bar) (display_scale d))))
+(def wm_scale ((v Wm)) int (match v ((Wm d cl w h desk font bg ws n ptr drag kp pp bar) (display_scale d))))
 
 (def okay ((v Wm)) (Served Wm) (served_ok v))
 (def refused ((v Wm) (why (list int))) (Served Wm) (served_error v why))
@@ -790,9 +801,10 @@
           (if (eq op "desktop") (drew v args)
           (if (eq op "title") (requested_title v args)
           (if (eq op "apps") (okay (apps_refreshed v))
+          (if (eq op "end") (ended v from)
           (match (word_numbers (take args 4))
             ((None) (refused v (append op "'s numbers are not numbers")))
-            ((Some ns) (requested_window v from op ns args))))))))))))
+            ((Some ns) (requested_window v from op ns args)))))))))))))
 
 ; title ID WORDS...: window ID's title made the words.
 (def requested_title ((v Wm) (args (list (list int)))) (Served Wm)
@@ -828,7 +840,7 @@
 ; decorated as dc.
 (def opened ((v Wm) (from int) (ns (list int)) (title (list int)) (dc Deco)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (let cw (nth ns 0)
         (let ch (nth ns 1)
           (if (if (lt cw 1) true (if (lt ch 1) true (gt (outer_w dc cw) w)))
@@ -860,7 +872,7 @@
 ; window's corners rounded (shape_window), then it is shown in front.
 (def watched_window ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (dcva int) (title (list int))) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (ui_buffer_at (outer_w (ServerSide) cw) (chrome_h (ServerSide) ch) (display_scale d))
         ((UiNoBuf why) (refused v why))
         ((UiBuf tva pages tc)
@@ -873,7 +885,7 @@
                     (let bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) pages dtva)
                       (let win (Win n port from x y cw ch 0 title tc cva tva bf (client_app bar from) (Sizing 0 0 cw ch false (rect_none) (rect_none)) (ServerSide))
                         (let f (refocused ws (cons win ws))
-                          (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))))))
+                          (shown_front (Wm d cl w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))))))
 
 ; A window for from that its client decorates, its content at cva here
 ; and dcva in the display: no chrome, and its content's four corners
@@ -881,14 +893,14 @@
 ; pages none.
 (def watched_bare ((v Wm) (from int) (port int) (cw int) (ch int) (cva int) (dcva int) (title (list int))) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (let s (shape_window d n 0 (ClientSide) cw ch)
         (match (cascade n (ClientSide) cw ch w h)
           ((Placed z x y top)
             (let bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) 0 0)
               (let win (Win n port from x y cw ch 0 title (canvas_new 0 0 0) cva 0 bf (client_app bar from) (Sizing 0 0 cw ch false (rect_none) (rect_none)) (ClientSide))
                 (let f (refocused ws (cons win ws))
-                  (shown_front (Wm d w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))
+                  (shown_front (Wm d cl w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))
 
 ; Window i's buffers in bank k shaped, its content cw by ch, decorated as
 ; dc: the chrome's top corners as the title bar's, its bottom ones as the
@@ -951,7 +963,7 @@
 ; size fits the screen; or why not.
 (def resize_checked ((v Wm) (from int) (ns (list int))) (Result Win (list int))
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (find_win ws (nth ns 0))
         ((None) ((Err Win (list int)) (append "no window " (digits (nth ns 0)))))
         ((Some win)
@@ -979,7 +991,7 @@
 ; client asked for the next size, and the rest made.
 (def resize_content ((v Wm) (win Win) (nw int) (nh int) (wh Where) (payload (list int))) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match wh
         ((Where va given sd)
           (match (win_bufs win)
@@ -1045,7 +1057,7 @@
 ; resize_chrome's chrome, wm's own title bar and frame.
 (def resize_chrome_made ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match win
         ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
           (match bf
@@ -1079,7 +1091,7 @@
 ; awaited, the goal is met.
 (def resize_shown ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int) (tc Canvas) (tva int) (tn int) (dtva int)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match win
         ((Win id port pid x y cw ch top title otc ocva otva obf app sz dc)
           (match sz
@@ -1100,8 +1112,8 @@
 ; shown with them, and the old ones forgotten by the display and given up.
 (def resize_done ((v Wm) (old Win) (nwin Win)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (let v2 (Wm d w h desk font bg (replaced ws nwin) n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (let v2 (Wm d cl w h desk font bg (replaced ws nwin) n ptr drag kp pp bar)
         (let e (restack v2)
           (let u (resize_old_given_up d old nwin)
             (okay v2)))))))
@@ -1152,7 +1164,7 @@
       (if (is_empty e) (Served v (append "window " (digits id))) (refused v e)))))
 
 (def restack ((v Wm)) (list int)
-  (match v ((Wm d w h desk font bg ws n ptr drag kp pp bar) (display_layers d (menu_layered (layers ws (launcher_shown (bar_launcher bar))) (menu_shown (bar_menu bar)))))))
+  (match v ((Wm d cl w h desk font bg ws n ptr drag kp pp bar) (display_layers d (menu_layered (layers ws (launcher_shown (bar_launcher bar))) (menu_shown (bar_menu bar)))))))
 
 ; ls, the bar last, with the menu's card under the bar, if it is shown.
 (def menu_layered ((ls (list Placed)) (shown bool)) (list Placed)
@@ -1164,7 +1176,7 @@
 ; Every title bar drawn, the front one active, the rest in the backdrop;
 ; and the top bar, with the front one's title.
 (def titles ((v Wm)) int
-  (match v ((Wm d w h desk font bg ws n ptr drag kp pp bar) (let t (draw_titles d font ws true) (draw_bar v)))))
+  (match v ((Wm d cl w h desk font bg ws n ptr drag kp pp bar) (let t (draw_titles d font ws true) (draw_bar v)))))
 
 (def draw_titles ((d Display) (font UiFace) (ws (list Win)) (front bool)) int
   (if (is_empty ws)
@@ -1215,7 +1227,7 @@
 ; request, so they are shown together.
 (def damaged ((v Wm) (ns (list int)) (acc (list Dirty))) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (if (is_empty ns)
           (let e (display_damage_many d (rev acc)) (if (is_empty e) (okay v) (refused v e)))
           (let id (nth ns 0)
@@ -1239,26 +1251,26 @@
 ; top ID T: the window's buffer read from row T.
 (def topped ((v Wm) (id int) (top int)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (find_win ws id)
         ((None) (refused v (append "no window " (digits id))))
         ((Some win)
-          (let v2 (Wm d w h desk font bg (replaced ws (win_top win top)) n ptr drag kp pp bar)
+          (let v2 (Wm d cl w h desk font bg (replaced ws (win_top win top)) n ptr drag kp pp bar)
             (let e (restack v2) (if (is_empty e) (okay v2) (refused v2 e)))))))))
 
 (def retitled ((v Wm) (id int) (title (list int))) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (find_win ws id)
         ((None) (refused v (append "no window " (digits id))))
         ((Some win)
-          (let v2 (Wm d w h desk font bg (replaced ws (win_titled win title)) n ptr drag kp pp bar)
+          (let v2 (Wm d cl w h desk font bg (replaced ws (win_titled win title)) n ptr drag kp pp bar)
             (let t (titles v2) (okay v2))))))))
 
 (def closed ((v Wm) (id int)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (let v2 (Wm d w h desk font bg (without_win ws id) n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (let v2 (Wm d cl w h desk font bg (without_win ws id) n ptr drag kp pp bar)
         (let e (restack v2)
           (let t (if (is_empty (without_win ws id)) 0 (refocused ws (without_win ws id)))
             (let t2 (titles v2)
@@ -1293,7 +1305,7 @@
 ; Every window of pid, which has exited, closed.
 (def gone ((v Wm) (pid int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (close_all v (of_pid ws pid)))))
 
 (def close_all ((v Wm) (ws (list Win))) Wm
@@ -1301,7 +1313,7 @@
 
 (def window_lines ((v Wm)) (list int)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match ptr
         ((Ptr px py b over grab ac shape tc)
           (append (win_lines ws true) (append "pointer " (append (digits px) (append " " (append (digits py) (if (is_empty shape) "" (append " " shape))))))))))))
@@ -1333,11 +1345,11 @@
 
 ; One of the toolkit's commands, done on the desktop.
 (def wm_draw ((v Wm) (dc UiDraw)) Canvas
-  (match v ((Wm d w h desk font bg ws n ptr drag kp pp bar) (ui_draw_exec desk font dc))))
+  (match v ((Wm d cl w h desk font bg ws n ptr drag kp pp bar) (ui_draw_exec desk font dc))))
 
 (def painted_desktop ((v Wm) (cmd Command)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match cmd
         ((CmdSize) (Served v (append "size " (append (digits w) (append " " (digits h))))))
         ((CmdFont) (Served v (append "font " (append (digits (glyph_w)) (append " " (digits (glyph_h)))))))
@@ -1345,7 +1357,7 @@
         ((CmdSplash percent)
           (match (load_wallpaper (display_scale d) percent)
             ((BgBad why) (refused v why))
-            ((BgOk bg2) (desk_shown (Wm d w h desk font bg2 ws n ptr drag kp pp bar) (paint_background desk bg2)))))
+            ((BgOk bg2) (desk_shown (Wm d cl w h desk font bg2 ws n ptr drag kp pp bar) (paint_background desk bg2)))))
         ((CmdRestore x y rw rh) (desk_shown v (restore_rect desk bg (rect_scaled (Rect x y rw rh) (display_scale d)))))
         ((CmdChar x y code c) (desk_shown v (ui_draw_text desk font x y c -1 (cons code (nil int)))))
         ((CmdText x y fg bgc cs) (desk_shown v (ui_draw_text desk font x y fg bgc cs)))
@@ -1360,7 +1372,7 @@
 ; one drawn on is the one v holds.
 (def desk_shown ((v Wm) (drawn Canvas)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (let e (display_damage d (desktop_id) (Rect 0 0 w h))
         (if (is_empty e) (okay v) (refused v e))))))
 
@@ -1369,7 +1381,7 @@
 ; A tablet's report: the pointer at its place, scaled to the screen.
 (def pointed ((v Wm) (ev PointerEvent)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match ev
         ((PointerEvent px py buttons) (pointer_at v (scaled px w) (scaled py h) buttons))))))
 
@@ -1377,7 +1389,7 @@
 ; then the pointer moved by it, a pixel a count, kept on the screen.
 (def nudged ((v Wm) (ev PointerMotion)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match ptr
         ((Ptr x y b over grab ac shape tc)
           (match ev
@@ -1392,12 +1404,12 @@
 ; it is over or dragging told, and its shape as what it is over says.
 (def pointer_at ((v Wm) (x int) (y int) (buttons int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (let m (display_move d x y)
         (match ptr
           ((Ptr ox oy was over grab ac shape tc)
             (pointer_shaped
-              (forwarded (moved (Wm d w h desk font bg ws n (Ptr x y buttons over grab ac shape tc) drag kp pp bar)
+              (forwarded (moved (Wm d cl w h desk font bg ws n (Ptr x y buttons over grab ac shape tc) drag kp pp bar)
                                 x y (bit_and was 1) (bit_and buttons 1))
                          was))))))))
 
@@ -1407,7 +1419,7 @@
 ; changes.
 (def pointer_shaped ((v Wm)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match ptr
         ((Ptr x y b over grab ac shape tc)
           (let want (pointer_wanted v x y)
@@ -1415,13 +1427,13 @@
                 v
                 (let p (ui_paint_named_cursor ac font want)
                   (let e (display_cursor d (arrow_id) (ui_cursor_hot_x want (display_scale d)) (ui_cursor_hot_y want (display_scale d)))
-                    (Wm d w h desk font bg ws n (Ptr x y b over grab ac want tc) drag kp pp bar))))))))))
+                    (Wm d cl w h desk font bg ws n (Ptr x y b over grab ac want tc) drag kp pp bar))))))))))
 
 ; Which pointer x, y wants: the resize pointer of the edges being
 ; dragged, or of those it is over, as edges_at says; else the arrow, "".
 (def pointer_wanted ((v Wm) (x int) (y int)) (list int)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match drag
         ((Resizing id e px py wx wy cw ch) (resize_cursor e))
         ((Dragging id ox oy when) "")
@@ -1452,14 +1464,14 @@
 ; is down, none does.
 (def forwarded ((v Wm) (was int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match ptr
         ((Ptr x y b over grab ac shape tc)
           (let target (if (pointer_held v) ((None Win)) (pointer_target ws drag x y grab))
             (let tid (match target ((None) -1) ((Some t) (win_id t)))
               (let l (if (if (ge over 0) (not (eq over tid)) false) (told_left ws over) 0)
                 (let s (match target ((None) 0) ((Some t) (win_tell t (pointer_notice (relative t x y b)))))
-                  (Wm d w h desk font bg ws n (Ptr x y b tid (if (eq b 0) -1 (if (eq was 0) tid grab)) ac shape tc) drag kp pp bar))))))))))
+                  (Wm d cl w h desk font bg ws n (Ptr x y b tid (if (eq b 0) -1 (if (eq was 0) tid grab)) ac shape tc) drag kp pp bar))))))))))
 
 (def pointer_target ((ws (list Win)) (drag Drag) (x int) (y int) (grab int)) (Option Win)
   (match drag
@@ -1487,7 +1499,7 @@
 ; the pointer event of the same report, so the place is the turn's own.
 (def wheeled ((v Wm) (ev WheelEvent)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match ev
         ((WheelEvent px py dx dy) (wheel_at v (scaled px w) (scaled py h) dx dy))))))
 
@@ -1495,7 +1507,7 @@
 ; screen.
 (def wheel_at ((v Wm) (x int) (y int) (dx int) (dy int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (if (pointer_held v) ((None Win)) (pointer_target ws drag x y (ptr_grab ptr)))
         ((None) v)
         ((Some t) (let s (win_tell t (wheel_notice (wheel_relative t x y (WheelEvent x y dx dy)))) v))))))
@@ -1529,7 +1541,7 @@
 
 (def pressed_below ((v Wm) (x int) (y int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (hit ws x y)
         ((OnDesktop) v)
         ((OnClose win) (close_pressed v win))
@@ -1541,7 +1553,7 @@
             ((Win id port pid wx wy cw ch top title tc cva tva bf app sz dc)
               (let ws2 (raised (replaced ws (win_asked win e cw ch false)) id)
                 (let f (refocused ws ws2)
-                  (fronted (Wm d w h desk font bg ws2 n ptr (Resizing id e x y wx wy cw ch) kp pp bar)
+                  (fronted (Wm d cl w h desk font bg ws2 n ptr (Resizing id e x y wx wy cw ch) kp pp bar)
                            (eq id (win_id (head ws)))))))))))))
 
 ; A press at x, y on win's title bar: win raised, and dragged, held where
@@ -1549,7 +1561,7 @@
 ; maximized, or restored, by the same code as maximize, and not dragged.
 (def title_pressed ((v Wm) (win Win) (x int) (y int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match ptr
         ((Ptr px py b over grab ac shape tc)
           (match win
@@ -1559,7 +1571,7 @@
                   (let p2 (Ptr px py b over grab ac shape (if double (TitleClick -1 0) (TitleClick id now)))
                     (let ws2 (raised ws id)
                       (let f (refocused ws ws2)
-                        (let v2 (fronted (Wm d w h desk font bg ws2 n p2 (if double (NoDrag) (Dragging id (sub x wx) (sub y wy) 0)) kp pp bar)
+                        (let v2 (fronted (Wm d cl w h desk font bg ws2 n p2 (if double (NoDrag) (Dragging id (sub x wx) (sub y wy) 0)) kp pp bar)
                                          (eq id (win_id (head ws))))
                           (if double (maximize_toggled v2 win) v2))))))))))))))
 
@@ -1570,7 +1582,7 @@
 ; press in its content, and nothing else is dragged: else refused.
 (def move_started ((v Wm) (from int) (id int)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (find_win ws id)
         ((None) (refused v (append "no window " (digits id))))
         ((Some win)
@@ -1582,7 +1594,7 @@
                       (refused v "not pressed")
                       (match win
                         ((Win wid port pid wx wy cw ch top title tc cva tva bf app sz dc)
-                          (okay (Wm d w h desk font bg ws n ptr (Dragging id (sub x wx) (sub y wy) 0) kp pp bar)))))))))))))
+                          (okay (Wm d cl w h desk font bg ws n ptr (Dragging id (sub x wx) (sub y wy) 0) kp pp bar)))))))))))))
 
 ; edges ID E, from from: the user resizes window ID by its edges E from
 ; inside them, which its client draws, as xdg_toplevel's resize asks;
@@ -1592,7 +1604,7 @@
 ; are edges one can drag together: else refused.
 (def edges_started ((v Wm) (from int) (id int) (e int)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (find_win ws id)
         ((None) (refused v (append "no window " (digits id))))
         ((Some win)
@@ -1606,7 +1618,7 @@
                           (refused v "not pressed")
                           (match win
                             ((Win wid port pid wx wy cw ch top title tc cva tva bf app sz dc)
-                              (okay (pointer_shaped (Wm d w h desk font bg (replaced ws (win_asked win e cw ch false)) n ptr
+                              (okay (pointer_shaped (Wm d cl w h desk font bg (replaced ws (win_asked win e cw ch false)) n ptr
                                                         (Resizing id e x y wx wy cw ch) kp pp bar)))))))))))))))
 
 ; Whether edges e can be dragged together: one side, or two that meet at
@@ -1623,7 +1635,7 @@
 ; a double click on a header bar asks. Only the window's client may ask.
 (def maximize_asked ((v Wm) (from int) (id int)) (Served Wm)
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (find_win ws id)
         ((None) (refused v (append "no window " (digits id))))
         ((Some win)
@@ -1635,7 +1647,7 @@
 ; restored, if it is maximized.
 (def maximize_toggled ((v Wm) (win Win)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match win
         ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
           (let re (win_restore win)
@@ -1660,8 +1672,8 @@
 ; v with win at x, y, below the bar, and the screen restacked.
 (def win_moved ((v Wm) (win Win) (x int) (y int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (let v2 (Wm d w h desk font bg (replaced ws (win_at win x (below_bar y))) n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (let v2 (Wm d cl w h desk font bg (replaced ws (win_at win x (below_bar y))) n ptr drag kp pp bar)
         (let e (restack v2) v2)))))
 
 ; Whether a client's move or resize of window id may start: nothing
@@ -1675,18 +1687,101 @@
 ; A press on win's content or frame: win brought to the front.
 (def raised_by ((v Wm) (win Win)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (let f (refocused ws (raised ws (win_id win)))
-        (fronted (Wm d w h desk font bg (raised ws (win_id win)) n ptr drag kp pp bar) (eq (win_id win) (win_id (head ws))))))))
+        (fronted (Wm d cl w h desk font bg (raised ws (win_id win)) n ptr drag kp pp bar) (eq (win_id win) (win_id (head ws))))))))
 
-; The close button pressed: the window's client killed. Its exit closes
-; its windows, as any client's does. If it cannot be killed, a driver,
-; or has already gone, the window is closed here.
+; The close button pressed: the window's client asked to close it, with
+; the close notice, as xdg_toplevel's close asks, and the window kept to
+; be closed by force if it is still open close_wait_ns from now, on wm's
+; alarm.
 (def close_pressed ((v Wm) (win Win)) Wm
+  (match v
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (let s (win_tell win (close_notice))
+        (let v2 (Wm d (cons (Closing (win_id win) (win_pid win) (add (clock_ns) (close_wait_ns))) cl) w h desk font bg ws n ptr drag kp pp bar)
+          (let a (close_alarm v2) v2))))))
+
+; wm's alarm set for the first close asked that is due, if one is: on
+; the port it serves, so the alarm notice comes with its requests.
+(def close_alarm ((v Wm)) int
+  (match v
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (let t (close_next cl -1)
+        (if (lt t 0)
+            0
+            (match (wm_port v) ((Found port) (alarm_at port t)) ((NotFound) 0)))))))
+
+; When the first of cs is due, on clock_ns, or first if it is sooner and
+; not -1; -1 for none.
+(def close_next ((cs (list Closing)) (first int)) int
+  (if (is_empty cs)
+      first
+      (match (head cs)
+        ((Closing id pid t) (close_next (tail cs) (if (if (lt first 0) true (lt t first)) t first))))))
+
+; The closes asked of cs that are due at now, and those that are not.
+(data Closes (Closes (list Closing) (list Closing)))
+
+; cs split at now into those due, onto due, and those not, onto later,
+; each in its order.
+(def closes_split ((cs (list Closing)) (now int) (due (list Closing)) (later (list Closing))) Closes
+  (if (is_empty cs)
+      (Closes (rev due) (rev later))
+      (match (head cs)
+        ((Closing id pid t)
+          (if (le t now)
+              (closes_split (tail cs) now (cons (head cs) due) later)
+              (closes_split (tail cs) now due (cons (head cs) later)))))))
+
+; wm's alarm at now: each close asked that is due ended, the client killed
+; if the window is still open and still its; the alarm set again for the
+; rest. port is wm's own.
+(def closes_due ((v Wm) (port int) (now int)) Wm
+  (match v
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (match (closes_split cl now (nil Closing) (nil Closing))
+        ((Closes due later)
+          (let v2 (closes_forced (Wm d later w h desk font bg ws n ptr drag kp pp bar) due)
+            (let a (close_alarm v2) v2)))))))
+
+; Each of due whose window is still open, and its client's: the client
+; killed. Its exit closes its windows, as any client's does. If it cannot
+; be killed, a driver, or has already gone, the window is closed here.
+(def closes_forced ((v Wm) (due (list Closing))) Wm
+  (if (is_empty due)
+      v
+      (match (head due)
+        ((Closing id pid t)
+          (closes_forced (match (still_open (wm_wins v) id pid) ((None) v) ((Some win) (close_forced v win))) (tail due))))))
+
+; Window id, if it is open and still pid's.
+(def still_open ((ws (list Win)) (id int) (pid int)) (Option Win)
+  (match (find_win ws id)
+    ((None) ((None Win)))
+    ((Some win) (if (eq (win_pid win) pid) (Some win) ((None Win))))))
+
+; The windows, front first.
+(def wm_wins ((v Wm)) (list Win) (match v ((Wm d cl w h desk font bg ws n ptr drag kp pp bar) ws)))
+
+; win's client killed, as the close button killed it before it asked:
+; or, if it cannot be, the window closed here.
+(def close_forced ((v Wm) (win Win)) Wm
   (match (proc_kill (win_pid win))
     ((Killed) v)
     ((KillDenied) (closed_here v win))
     ((KillNoProc) (closed_here v win))))
+
+; end, from from: from killed, as a client asks once it has closed what
+; its user closed and has nothing left to do (the toolkit, for an app
+; that did nothing with a close), since a program cannot end itself but
+; by returning from main. Its windows close with its exit. Refused for a
+; process wm may not kill.
+(def ended ((v Wm) (from int)) (Served Wm)
+  (match (proc_kill from)
+    ((Killed) (okay v))
+    ((KillDenied) (refused v "may not end a driver"))
+    ((KillNoProc) (okay v))))
 
 ; v with win closed by wm itself, its client not to be killed.
 (def closed_here ((v Wm) (win Win)) Wm
@@ -1698,15 +1793,15 @@
 
 (def released ((v Wm)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match drag
         ((NoDrag) v)
         ((Dragging id ox oy last)
           (let v2 (dragged v (ptr_x ptr) (ptr_y ptr) true)
-            (match v2 ((Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 drag2 kp2 pp2 bar2) (Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 (NoDrag) kp2 pp2 bar2)))))
+            (match v2 ((Wm d2 cl2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 drag2 kp2 pp2 bar2) (Wm d2 cl2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 (NoDrag) kp2 pp2 bar2)))))
         ((Resizing id e px py wx wy cw ch)
           (let v2 (dragged v (ptr_x ptr) (ptr_y ptr) true)
-            (match v2 ((Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 drag2 kp2 pp2 bar2) (Wm d2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 (NoDrag) kp2 pp2 bar2)))))))))
+            (match v2 ((Wm d2 cl2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 drag2 kp2 pp2 bar2) (Wm d2 cl2 w2 h2 desk2 font2 bg2 ws2 n2 ptr2 (NoDrag) kp2 pp2 bar2)))))))))
 
 (def ptr_x ((p Ptr)) int (match p ((Ptr x y b over grab ac shape tc) x)))
 (def ptr_y ((p Ptr)) int (match p ((Ptr x y b over grab ac shape tc) y)))
@@ -1719,7 +1814,7 @@
 ; and the window would fall further behind the pointer with every one.
 (def dragged ((v Wm) (x int) (y int) (last bool)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match drag
         ((NoDrag) v)
         ((Dragging id ox oy when)
@@ -1729,8 +1824,8 @@
               (let moved_ws (replaced ws (win_at win (sub x ox) (below_bar (sub y oy))))
                 (if (if last true (ge (sub (clock_ns) when) (drag_ns)))
                     (let e (display_layers d (layers moved_ws false))
-                      (Wm d w h desk font bg moved_ws n ptr (Dragging id ox oy (clock_ns)) kp pp bar))
-                    (Wm d w h desk font bg moved_ws n ptr drag kp pp bar))))))
+                      (Wm d cl w h desk font bg moved_ws n ptr (Dragging id ox oy (clock_ns)) kp pp bar))
+                    (Wm d cl w h desk font bg moved_ws n ptr drag kp pp bar))))))
         ((Resizing id e px py wx wy cw ch)
           (match (find_win ws id)
             ((None) v)
@@ -1744,19 +1839,19 @@
 ; answers. The size asked for is kept.
 (def resize_asked ((v Wm) (win Win) (e int) (nw int) (nh int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match win
         ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
           (match sz
             ((Sizing k oe ww wh asking re go)
               (let ask (if asking false (not (if (eq nw cw) (eq nh ch) false)))
                 (let t (if ask (port_tell port (win_notice id (size_notice nw nh))) 0)
-                  (Wm d w h desk font bg (replaced ws (win_asked win e nw nh (if asking true ask))) n ptr drag kp pp bar))))))))))
+                  (Wm d cl w h desk font bg (replaced ws (win_asked win e nw nh (if asking true ask))) n ptr drag kp pp bar))))))))))
 
 ; ------------------------------------------------------------ the launcher
 
 ; The top bar, and the launcher with it.
-(def wm_bar ((v Wm)) Bar (match v ((Wm d w h desk font bg ws n ptr drag kp pp bar) bar)))
+(def wm_bar ((v Wm)) Bar (match v ((Wm d cl w h desk font bg ws n ptr drag kp pp bar) bar)))
 
 ; Says why on standard error, at once: wm never exits, so nothing else
 ; would flush it.
@@ -1768,7 +1863,7 @@
 ; of a buffer, as the GL one does, learns of its pixels only by damage. Without it, wm goes on with no launcher.
 (def with_launcher ((v Wm)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (let lh (sub h (bar_h))
         (match (ui_buffer_at w lh (display_scale d))
           ((UiNoBuf why) (let s (wm_says (append "no launcher: " why)) v))
@@ -1778,7 +1873,7 @@
                   (let s (wm_says (append "no launcher: " e)) v)
                   (let p (launcher_paint c font w lh (bar_apps bar))
                     (let dm (display_damage d (launcher_id) (Rect 0 0 w lh))
-                    (Wm d w h desk font bg ws n ptr drag kp pp (bar_launched bar (Launcher c false (launcher_none))))))))))))))
+                    (Wm d cl w h desk font bg ws n ptr drag kp pp (bar_launched bar (Launcher c false (launcher_none))))))))))))))
 
 ; Whether the launcher takes the pointer: while it is shown, and from a
 ; press on Applications until the button is let go.
@@ -1792,7 +1887,7 @@
 ; goes on with no menu.
 (def with_menu ((v Wm)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match (ui_buffer_at (menu_w) (menu_h) (display_scale d))
         ((UiNoBuf why) (let s (wm_says (append "no menu: " why)) v))
         ((UiBuf va pages c)
@@ -1802,7 +1897,7 @@
                 (let p (menu_paint c font)
                   (let sh (display_shape d (menu_id) (ui_window_radius) (ui_window_radius) (ui_window_radius) (ui_window_radius))
                     (let dm (display_damage d (menu_id) (Rect 0 0 (menu_w) (menu_h)))
-                      (Wm d w h desk font bg ws n ptr drag kp pp (bar_menued bar (Menu c false (menu_none))))))))))))))
+                      (Wm d cl w h desk font bg ws n ptr drag kp pp (bar_menued bar (Menu c false (menu_none))))))))))))))
 
 ; Whether the pointer is the menu's or the launcher's, and no window's.
 (def pointer_held ((v Wm)) bool
@@ -1817,8 +1912,8 @@
 ; v with the menu shown or not, and the last press on it.
 (def with_menu_state ((v Wm) (shown bool) (pressed int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (Wm d w h desk font bg ws n ptr drag kp pp (bar_menued bar (menu_with (bar_menu bar) shown pressed))))))
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (Wm d cl w h desk font bg ws n ptr drag kp pp (bar_menued bar (menu_with (bar_menu bar) shown pressed))))))
 
 ; What x, y on the screen is on, to the menu.
 (def menu_target_at ((x int) (y int)) int (menu_target (bar_h) x y))
@@ -1883,14 +1978,14 @@
 ; v with the launcher shown or not, and the last press on it.
 (def with_launcher_state ((v Wm) (shown bool) (pressed int)) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
-      (Wm d w h desk font bg ws n ptr drag kp pp (bar_launched bar (launcher_with (bar_launcher bar) shown pressed))))))
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (Wm d cl w h desk font bg ws n ptr drag kp pp (bar_launched bar (launcher_with (bar_launcher bar) shown pressed))))))
 
 ; What x, y on the screen is on, to the launcher: Applications, the rest
 ; of the bar, and, while it is shown, an app or its page.
 (def launcher_target ((v Wm) (x int) (y int)) int
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (if (on_apps_button x y)
           (launcher_button)
           (if (on_bar y)
@@ -1938,15 +2033,15 @@
 ; buffer learns of its pixels only by damage.
 (def with_apps ((v Wm) (apps (list App))) Wm
   (match v
-    ((Wm d w h desk font bg ws n ptr drag kp pp bar)
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (let bar2 (bar_with_apps bar apps)
         (let lh (sub h (bar_h))
           (match (bar_launcher bar2)
-            ((NoLauncher) (Wm d w h desk font bg ws n ptr drag kp pp bar2))
+            ((NoLauncher) (Wm d cl w h desk font bg ws n ptr drag kp pp bar2))
             ((Launcher c shown pressed)
               (let p (launcher_paint c font w lh apps)
                 (let dm (display_damage d (launcher_id) (Rect 0 0 w lh))
-                  (Wm d w h desk font bg ws n ptr drag kp pp bar2))))))))))
+                  (Wm d cl w h desk font bg ws n ptr drag kp pp bar2))))))))))
 
 ; The launcher shown, or not, and the screen and the bar made so.
 (def launcher_set ((v Wm) (shown bool)) Wm
