@@ -23,10 +23,12 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `menu.l0` | `UiPopover BASE MENU`, a popover menu over the window: a `UiMenu` of `UiItem`s, insensitive ones dimmed, and `UiItemSep`s, on a card, under the node of an action (`UiBelow`) or at a point (`UiAt`, as for a right click), kept inside the window; nothing beneath is a target while it is open, and a press outside it sets off `PREFIX.dismiss`. | `GtkPopoverMenu` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`. Used by `draw` to check a command, by `wm` to draw it, and by `tools/mkicon` to draw an app's icon. | — |
 | `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `ui_win_close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_canvas` and `ui_win_face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
+| `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's buffer one, a resize one more, each strike one, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. | `GApplication`'s windows, `GtkWindow` |
 
-The Makefile links either `UI_CORE` (every file but `window.l0`; needs only
-`RENDER`: `ppm.l0`, `rect.l0` and `render.l0`) or `UI_CORE` plus `UI_WINDOW`
-(`window.l0`; needs `user/lib/proto/wm.l0` too).
+The Makefile links either `UI_CORE` (every file but `window.l0` and
+`uiapp.l0`; needs only `RENDER`: `ppm.l0`, `rect.l0` and `render.l0`) or
+`UI_CORE` plus `UI_WINDOW` (`window.l0` and `uiapp.l0`; needs
+`user/lib/proto/wm.l0` too).
 
 ## How a program uses it
 
@@ -52,6 +54,26 @@ and its loop is:
 ```
 
 `user/apps/widgets/widgets.l0` is that loop in full, with a toolbar and a data grid.
+
+**Many windows.** An app of more than one window starts a `UiApp` and
+opens each on its port; its loop is:
+
+```
+(match (ui_app_start) ...)                                  once
+(ui_app_open_csd app "Title" 880 560)  -> (UiAppOpened app2 id), and more
+(ui_app_next app)                      -> (UiAppEvent id event)   id -1 for none
+(ui_app_route app id event)            -> (UiAppRouted app2 action)
+(update state id action event)         -> state2                  the window's own
+(ui_app_present app2 id (view state2 id))                         paints what changed
+(ui_app_close app id)                                             on win.close
+```
+
+Each window has its own widgets' state, nodes, damage and buffer, so an
+event of one changes and repaints that one alone; Files keeps its own
+state for each by the window's id. `ui_app_next` and `ui_app_event` are
+the one place the loop takes its messages. A window an app presents again
+with its close unanswered is closed by `ui_app_present`, and the app
+ended with its last, as `ui_present` does.
 
 **Closing.** `ui_event_of` takes the compositor's window notices of its
 own window only (any other is `UiOther`). The compositor's close button

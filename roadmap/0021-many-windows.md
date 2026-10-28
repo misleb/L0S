@@ -65,7 +65,7 @@ the toolkit lets an app open, route and close windows by id.
   nothing with it is closed by the toolkit, its window first, then,
   as its last, the program, so every app behaves as today. `vt`
   closes on it as on its shell's exit.
-- [ ] The toolkit's many windows (`window.l0`, or `app.l0` in
+- [x] The toolkit's many windows (`window.l0`, or `app.l0` in
   `user/lib/ui` beside it): a `UiApp`, the port and its `UiWin`s by
   id; `ui_app_open` and `ui_app_open_csd` open one more on the app's
   port; `ui_app_event` takes a message to `(UiAppEvent ID EVENT)`, the
@@ -90,7 +90,6 @@ the toolkit lets an app open, route and close windows by id.
 
 ## Spec changes
 
-- toolkit.md: `UiApp` and its calls; `ui_open` as one window of them.
 - programs.md: Files' New Window.
 - testing.md: files.sh's second window.
 
@@ -138,3 +137,28 @@ the toolkit lets an app open, route and close windows by id.
   kept the same, so the two buttons are one path. `vt` needed nothing:
   it already ended on `ui_close_action`. `widgets.sh` gained the title
   bar's close button: the gallery goes before wm's 2 seconds.
+- 2026-10-28: step 4, in `user/lib/ui/uiapp.l0`, not `app.l0`, since
+  `user/lib/proto/app.l0` has that stem and `make doc Q=` needs each
+  library's unique. A `UiApp` is the compositor, the port, one face and
+  the `UiWin`s by id (a `Map`). The face is the app's, not each
+  window's: every strike is a region kept open (`ui_strike_open`'s
+  `dma_open`), eight at load, so a face a window would have cost eight
+  regions a window; `ui_app_present` paints a window with the app's face
+  and keeps the face it comes back with, so a strike one window asks
+  for is the others' too (`ui_app_put` keeps the app's face after a
+  route, `ui_app_put_faced` takes the window's after a present). The
+  regions: no call says how many a process has open, so `ui_app_regions`
+  counts them, a window's buffer each, one for a resize's second buffer,
+  and the face's strikes over pages (`ui_face_regions`), and
+  `ui_regions_room` keeps 8 of the 64 for the program's own; 48 left
+  after the eight strikes is 47 windows, which no app nears. `ui_open`
+  is `ui_app_start` and one `ui_app_open_as` (`ui_win_open` makes the
+  window, and now gives its buffer back if wm refuses it), so the apps
+  of one window did not change. **Where the loop is**, for 0032 and
+  0033: `uiapp.l0`'s section "the loop", `ui_app_next` (the receive)
+  and `ui_app_event` (what a message is, of which window); 0032's
+  `open` request comes in there as a message of no window, today
+  `UiAppEvent -1 (UiOther ...)`, and 0033's putting together belongs in
+  `ui_app_next`, before `ui_app_event`. An app's step stays its own
+  (`fl_loop` in Files), as L0 has no function values to hand the
+  toolkit an update with.

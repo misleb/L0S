@@ -239,11 +239,12 @@ SHA256  := user/lib/format/sha256.l0
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
 # commands, which need only render.l0, and the font service's protocol
 # and strikes, which its text is drawn from; and its client windows,
-# which need the compositor's protocol too.
+# which need the compositor's protocol too, and an app's many windows on
+# one port, uiapp.l0, which every window is opened through.
 UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/metrics.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
              user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0
-UI_WINDOW := user/lib/ui/window.l0
+UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0
 UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
@@ -481,6 +482,7 @@ $(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)
 $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/uiapp_test.l0)
 $(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(call l0_test,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(t))))
 $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
