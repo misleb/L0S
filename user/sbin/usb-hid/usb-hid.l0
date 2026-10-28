@@ -4,7 +4,9 @@
 ; protocol, opens its interrupt endpoint, and tells each process
 ; listening what its reports say, as virtio-input does, so the
 ; compositor and the terminals take either. It drives no device itself.
-; One process serves both, started with no argument:
+; Started with no argument, one process serves both; usb-hid keyboard or
+; usb-hid mouse serves one, as the inittabs start it while wm tells a
+; keyboard's notices from a pointer's by their sender's pid:
 ;
 ;   keyboard   every boot keyboard: each key, as a KeyEvent (l0s.l0)
 ;              with the character it types on a US keyboard, held keys
@@ -40,18 +42,32 @@
 (def kind_of_protocol ((protocol int)) (Option Kind)
   (if (eq protocol 1) (Some (Keyboards)) (if (eq protocol 2) (Some (Mice)) ((None Kind)))))
 
-; No arguments, then the usb server found and listened to.
+; The kinds the arguments say to drive: both with none, or one, keyboard
+; or mouse; none for any other arguments.
+(def kinds_of ((argv (list (list int)))) (Option (list Kind))
+  (if (is_empty argv)
+      (Some (cons (Keyboards) (cons (Mice) (nil Kind))))
+      (if (eq argv (cons "keyboard" (nil (list int))))
+          (Some (cons (Keyboards) (nil Kind)))
+          (if (eq argv (cons "mouse" (nil (list int)))) (Some (cons (Mice) (nil Kind))) ((None (list Kind)))))))
+
+; Whether ks holds k.
+(def kinds_hold ((ks (list Kind)) (k Kind)) bool
+  (if (is_empty ks) false (if (eq (head ks) k) true (kinds_hold (tail ks) k))))
+
+; What to drive, then the usb server found and listened to.
 (def usb_hid () int
-  (if (not (is_empty (args)))
-      (complain "usage: usb-hid")
+  (match (kinds_of (args))
+    ((None) (complain "usage: usb-hid [keyboard|mouse]"))
+    ((Some ks)
       (match (name_wait "usb" 5000000000)
         ((NotFound) (complain "no usb; is xhci running?"))
-        ((Found usb) (listened usb (port_new))))))
+        ((Found usb) (listened ks usb (port_new)))))))
 
 ; Listening to the usb server at usb, its answers and notices to port:
 ; the first message there is its answer, since no one else knows port
-; yet, and says its pid. Then the names served.
-(def listened ((usb int) (port int)) int
+; yet, and says its pid. Then the names of the kinds ks served.
+(def listened ((ks (list Kind)) (usb int) (port int)) int
   (match (port_send usb (request port "listen"))
     ((Sent)
       (match (port_receive port)
@@ -59,20 +75,21 @@
         ((Message from b)
           (if (not (msg_is b "ok"))
               (complain (reply_why (msg_text b) "usb"))
-              (named (HidPorts port (port_new) (port_new)) usb from)))))
+              (named (HidPorts port (port_new) (port_new) ks) usb from)))))
     ((SendNoPort) (complain "usb is gone"))
     ((SendFull) (complain "usb is busy"))
     ((SendTooBig) (complain "listen is too big"))))
 
-; keyboard and pointer registered, each on its own port, and the three
-; ports made the set it waits on; then served.
+; keyboard and pointer registered, each on its own port, those of the
+; kinds served, and the three ports made the set it waits on; then
+; served.
 (def named ((ps HidPorts) (usb int) (pid int)) int
   (match ps
-    ((HidPorts own kp pp)
-      (let r (name_register_or_why kp "keyboard")
+    ((HidPorts own kp pp ks)
+      (let r (if (kinds_hold ks (Keyboards)) (name_register_or_why kp "keyboard") "")
         (if (not (is_empty r))
             (complain r)
-            (let r2 (name_register_or_why pp "pointer")
+            (let r2 (if (kinds_hold ks (Mice)) (name_register_or_why pp "pointer") "")
               (if (not (is_empty r2))
                   (complain r2)
                   (match (port_set (cons own (cons kp (cons pp (nil int)))))
@@ -83,8 +100,8 @@
 ; ------------------------------------------------------------------ state
 
 ; Its ports: its own, for the usb server and the alarms, and keyboard's
-; and pointer's, where their clients ask.
-(data HidPorts (HidPorts int int int))
+; and pointer's, where their clients ask; and the kinds it drives.
+(data HidPorts (HidPorts int int int (list Kind)))
 
 ; A device driven: what it is, its number, its endpoint, and, for a
 ; keyboard, what it last said it held.
@@ -97,7 +114,11 @@
 (data Hid (Hid HidPorts int int (list int) (list int) (list Board) int Repeat (list Message)))
 
 ; Its own port, the key repeating, and the messages kept.
-(def hid_port ((h Hid)) int (match h ((Hid ps usb pid kls pls bs mods r kept) (match ps ((HidPorts own kp pp) own)))))
+(def hid_port ((h Hid)) int (match h ((Hid ps usb pid kls pls bs mods r kept) (match ps ((HidPorts own kp pp ks) own)))))
+
+; Whether it drives k.
+(def hid_drives ((h Hid) (k Kind)) bool
+  (match h ((Hid ps usb pid kls pls bs mods r kept) (match ps ((HidPorts own kp pp ks) (kinds_hold ks k))))))
 (def hid_repeat ((h Hid)) Repeat (match h ((Hid ps usb pid kls pls bs mods r kept) r)))
 (def hid_kept ((h Hid)) (list Message) (match h ((Hid ps usb pid kls pls bs mods r kept) kept)))
 
@@ -130,7 +151,7 @@
   (match h
     ((Hid ps usb pid kls pls bs mods r kept)
       (match ps
-        ((HidPorts own kp pp)
+        ((HidPorts own kp pp ks)
           (match m
             ((RecvFailed) h)
             ((Message from b)
@@ -245,9 +266,11 @@
           (match (kind_of_protocol protocol)
             ((None) h)
             ((Some k)
-              (match (usb_endpoint_in es (usb_ep_interrupt))
-                ((None) h)
-                ((Some e) (claimed h k dev n (usb_endpoint_addr e))))))
+              (if (not (hid_drives h k))
+                  h
+                  (match (usb_endpoint_in es (usb_ep_interrupt))
+                    ((None) h)
+                    ((Some e) (claimed h k dev n (usb_endpoint_addr e)))))))
           h))))
 
 ; Interface n of dev, a k, claimed, set up, and its endpoint ep opened;

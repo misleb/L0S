@@ -70,7 +70,7 @@ class Mouse(unittest.TestCase):
     def test_uses_usb(self):
         with tempfile.TemporaryDirectory() as d:
             usb, virtio = Path(d) / "usb.cpio", Path(d) / "virtio.cpio"
-            usb.write_bytes(b"...start /sbin/xhci pci\nstart /sbin/usb-hid\n...")
+            usb.write_bytes(b"...start /sbin/xhci pci\nstart /sbin/usb-hid mouse\n...")
             virtio.write_bytes(b"...start /sbin/virtio-input tablet\n# usb-hid\n...")
             self.assertTrue(uses_usb(usb))
             self.assertFalse(uses_usb(virtio))

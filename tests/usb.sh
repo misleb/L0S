@@ -4,8 +4,7 @@
 #
 #   1. run keys, typed at the serial shell, echoes keys pressed on the
 #      USB keyboard through QEMU's monitor (sendkey), through xhci and
-#      usb-hid, which serves keyboard and pointer in one process: "hi! A",
-#      shift included; then z held, repeated
+#      usb-hid keyboard: "hi! A", shift included; then z held, repeated
 #   2. the USB mouse, moved through QMP's input-send-event with relative
 #      axes, as a mouse moves, from where the pointer starts, 0, 0, to
 #      the top bar's Applications, 60, 16, and clicked, opens the

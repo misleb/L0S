@@ -71,13 +71,15 @@ So L0S spends processes to hold names:
   as the tab closes; `vt tab` goes. `spec/demo.md`'s pids and `ps`
   sample, `tests/vt.sh`'s arithmetic, and 0025's design in
   `programs.md` follow.
-- [x] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
+- [ ] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
   on their endpoints' ports and on `keyboard`'s and `pointer`'s, and
   serves both. The inittabs start one; `devices.md`'s USB section,
   `programs.md`'s row and `demo.md`'s pids follow. Checked on QEMU by
   the keyboard and pointer screen tests, and on the Pi 5 with a USB
-  keyboard and mouse, written in the Log. (On QEMU; the Pi 5's check is
-  still to be made, as the Log says.)
+  keyboard and mouse, written in the Log. (The driver serves both with
+  no argument; the inittabs still start one a kind, until `wm` tells a
+  key's notice from a pointer's by what it says, not by its sender's
+  pid: the Log says why, and what is left.)
 - [x] More of it: look through the servers for others that hold a name
   by a process of their own, poll with `port_try_receive`, or would
   serve better from one process waiting on several ports (`fs`' names
@@ -228,3 +230,44 @@ So L0S spends processes to hold names:
   with the calls of steps 1 and 2 (`port_set`, `port_receive_set`,
   `name_unregister`) as they are. `tests/vt.sh`'s `vt_base` is 16 after
   step 4, and its arithmetic will change again as the relays go.
+- 2026-10-28: step 4 taken back in part, and left unticked. With one
+  `usb-hid`, `make e2e`'s `tests/vt.sh` failed at "the wheel scrolled
+  vt1 back", every run, and passed with the old two drivers in its
+  place. The cause is `wm`'s, not the driver's: `wm` listens to
+  `keyboard` and `pointer` and tells their notices apart by the sender's
+  pid (`received` and `motion_from` in `wm.l0` test `from` against the
+  keyboard driver's pid first), so with one pid serving both, a mouse's
+  motion that turns the wheel, which `wm` does not join with other
+  moves, went to `keyed` and was forwarded to the front window as a
+  key. Moves and clicks happened to take the other path. A debug line
+  showed the driver sending the wheel's report rightly. Fixing it is a
+  few lines in `wm` (test the payload, a key notice or a pointer's,
+  before or beside the pid), but `wm` is 0021's while 0021 is in
+  flight, so it was not changed here. What is in:
+  - `usb-hid` serves both names from one process with no argument
+    (sets of ports, a port a name, the alarm), and one kind, as before,
+    with `keyboard` or `mouse`; the inittabs start the two as they did,
+    so the pids are as they were (`spec/demo.md`, `tests/vt.sh`), and
+    each `usb-hid` waits on its three ports ("waiting for a message on
+    3 ports" in `ps`, and in the `usb` e2e case's `contains`).
+  - The alarm for a held key, and `tests/usb.sh`'s held z, are in
+    either way.
+  What is left, once 0021 has merged: `wm` routes a notice from its
+  input drivers by what it is (`key_event_of`, `pointer_motion_of`,
+  `pointer_event_of`, `wheel_event_of`), not by which pid sent it;
+  then the inittabs start one `usb-hid` with no argument, the later
+  pids move down one (`spec/demo.md`'s table and `ps` sample, `sh` 14,
+  `font` 15, `wm` 16, and `tests/vt.sh`'s `vt_base` 16: these were
+  made and tested once, `tests/vt.sh` passing its pid checks before the
+  wheel), the `usb` e2e case's `contains` lists one `usb-hid`, and
+  `devices.md`, `programs.md` and `pi5.md` say one process.
+  **On the Pi 5, to check now** on a netboot (`tools/pi5-boot`) with a
+  USB keyboard and a USB mouse on RP1's ports: `usb-hid`'s two lines,
+  "device N, interface 0: a keyboard, serving keyboard" and "... a
+  mouse, serving pointer", each from its own `usb-hid`; `ps` at the
+  serial shell shows both "waiting for a message on 3 ports"; keys
+  typed reach `run keys` and the front window; a held key repeats
+  (after 500 ms, then about 30 a second, now by the kernel's alarm)
+  and stops when let go; the mouse moves the pointer, clicks, and its
+  wheel scrolls a Terminal back. Once the inittab starts one
+  `usb-hid`, the same again, with both lines from one pid.
