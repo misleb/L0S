@@ -3,7 +3,8 @@
 ; ASCII needs: the tables head, maxp, hhea, hmtx, cmap's format 4, loca
 ; and glyf, and glyphs simple and composite, the latter with offsets and
 ; any of their three kinds of scale. No hinting: a glyph is drawn as its
-; outline says. Numbers in a font are big-endian.
+; outline says. And GPOS's pair adjustments, its kerning, read where they
+; are. Numbers in a font are big-endian.
 
 ; ---------------------------------------------------------------- numbers
 
@@ -371,3 +372,178 @@
       (match ctrl
         ((None) (cons (RastLine (ttf_x p x) (ttf_y p y)) acc))
         ((Some c) (match c ((TtfPt cx cy con) (cons (RastQuad (ttf_x p cx) (ttf_y p cy) (ttf_x p x) (ttf_y p y)) acc))))))))
+
+; ---------------------------------------------------------------- kerning
+
+; How much further the pen moves after glyph l when glyph r follows it,
+; in font units, by the GPOS lookups kern (ttf_kern_lookups): each
+; lookup's adjustment of the pair, summed; 0 for a font with none.
+(def ttf_kern ((f Ttf) (kern (list int)) (l int) (r int)) int
+  (match f
+    ((Ttf b upm long n nh cm loca glyf hmtx)
+      (let gpos (ttf_table b "GPOS")
+        (if (lt gpos 0) 0 (ttf_kern_sum b gpos kern l r 0))))))
+
+; The lookups of the kern feature of GPOS's default script's default
+; language system, DFLT's, or latn's if it has none, each once, in the
+; lookup list's order; none if the font has no GPOS, or no kern there.
+(def ttf_kern_lookups ((f Ttf)) (list int)
+  (match f
+    ((Ttf b upm long n nh cm loca glyf hmtx)
+      (let gpos (ttf_table b "GPOS")
+        (if (lt gpos 0)
+            (nil int)
+            (let ls (ttf_default_langsys b gpos)
+              (if (lt ls 0)
+                  (nil int)
+                  (sort (ttf_once (ttf_langsys_kern b gpos ls 0 (ttf_u16 b (add ls 4)) (nil int)))))))))))
+
+; Where the default language system of the default script is, in GPOS
+; at gpos: DFLT's, or else latn's; -1 if neither has one.
+(def ttf_default_langsys ((b bytes) (gpos int)) int
+  (let sl (add gpos (ttf_u16 b (add gpos 4)))
+    (let d (ttf_script_at b sl "DFLT" 0 (ttf_u16 b sl))
+      (if (ge d 0) d (ttf_script_at b sl "latn" 0 (ttf_u16 b sl))))))
+
+; The default language system of script tag in the script list at sl,
+; from its n records from i; -1 if it has no such script, or the script
+; none.
+(def ttf_script_at ((b bytes) (sl int) (tag (list int)) (i int) (n int)) int
+  (if (ge i n)
+      -1
+      (let rec (add sl (add 2 (mul 6 i)))
+        (if (eq (ttf_tag b rec) tag)
+            (let s (add sl (ttf_u16 b (add rec 4)))
+              (let d (ttf_u16 b s)
+                (if (eq d 0) -1 (add s d))))
+            (ttf_script_at b sl tag (add i 1) n)))))
+
+; The lookups of each of the language system at ls's features, i up to
+; n, whose tag is kern, onto acc.
+(def ttf_langsys_kern ((b bytes) (gpos int) (ls int) (i int) (n int) (acc (list int))) (list int)
+  (if (ge i n)
+      acc
+      (let fl (add gpos (ttf_u16 b (add gpos 6)))
+        (let rec (add fl (add 2 (mul 6 (ttf_u16 b (add ls (add 6 (mul 2 i)))))))
+          (if (eq (ttf_tag b rec) "kern")
+              (let ft (add fl (ttf_u16 b (add rec 4)))
+                (ttf_langsys_kern b gpos ls (add i 1) n (ttf_u16s b (add ft 4) (ttf_u16 b (add ft 2)) acc)))
+              (ttf_langsys_kern b gpos ls (add i 1) n acc))))))
+
+; The n u16s from at, onto acc.
+(def ttf_u16s ((b bytes) (at int) (n int) (acc (list int))) (list int)
+  (if (le n 0) acc (ttf_u16s b (add at 2) (sub n 1) (cons (ttf_u16 b at) acc))))
+
+; xs with each value once.
+(def ttf_once ((xs (list int))) (list int)
+  (if (is_empty xs) xs (if (any_eq (head xs) (tail xs)) (ttf_once (tail xs)) (cons (head xs) (ttf_once (tail xs))))))
+
+; Each of lookups' adjustment of the pair l, r, summed onto acc.
+(def ttf_kern_sum ((b bytes) (gpos int) (lookups (list int)) (l int) (r int) (acc int)) int
+  (if (is_empty lookups)
+      acc
+      (let ll (add gpos (ttf_u16 b (add gpos 8)))
+        (let lk (add ll (ttf_u16 b (add ll (add 2 (mul 2 (head lookups))))))
+          (ttf_kern_sum b gpos (tail lookups) l r
+            (add acc (ttf_lookup_pair b lk (ttf_u16 b lk) 0 (ttf_u16 b (add lk 4)) l r)))))))
+
+; A lookup at lk's adjustment of the pair: its subtables i up to n tried
+; in order, the first that covers the pair giving it, an extension's
+; (type 9) as the subtable it points to; 0 if none does, or the lookup
+; is not of pairs (type 2).
+(def ttf_lookup_pair ((b bytes) (lk int) (kind int) (i int) (n int) (l int) (r int)) int
+  (if (ge i n)
+      0
+      (let st (add lk (ttf_u16 b (add lk (add 6 (mul 2 i)))))
+        (let at (if (eq kind 9) (add st (ttf_u32 b (add st 4))) st)
+          (let k (if (eq kind 9) (ttf_u16 b (add st 2)) kind)
+            (match (if (eq k 2) (ttf_pair_pos b at l r) ((None int)))
+              ((Some v) v)
+              ((None) (ttf_lookup_pair b lk kind (add i 1) n l r))))))))
+
+; The pair positioning subtable at at's x advance for the pair l, r:
+; format 1's for the pair, if it lists it; format 2's for the pair's
+; classes, if l is covered; None if it does not cover the pair.
+(def ttf_pair_pos ((b bytes) (at int) (l int) (r int)) (Option int)
+  (let ci (ttf_coverage b (add at (ttf_u16 b (add at 2))) l)
+    (if (lt ci 0)
+        ((None int))
+        (let vf1 (ttf_u16 b (add at 4))
+          (let vf2 (ttf_u16 b (add at 6))
+            (if (eq (ttf_u16 b at) 1)
+                (let ps (add at (ttf_u16 b (add at (add 10 (mul 2 ci)))))
+                  (ttf_pair_set b ps vf1 vf2 r 0 (ttf_u16 b ps)))
+                (if (eq (ttf_u16 b at) 2)
+                    (Some (ttf_class_pair b at vf1 vf2 l r))
+                    ((None int)))))))))
+
+; Format 2's x advance for the classes of l and r, its records a row a
+; class of l, each a value pair a class of r.
+(def ttf_class_pair ((b bytes) (at int) (vf1 int) (vf2 int) (l int) (r int)) int
+  (let c1 (ttf_class b (add at (ttf_u16 b (add at 8))) l)
+    (let c2 (ttf_class b (add at (ttf_u16 b (add at 10))) r)
+      (let n2 (ttf_u16 b (add at 14))
+        (if (if (ge c1 (ttf_u16 b (add at 12))) true (ge c2 n2))
+            0
+            (ttf_x_advance b (add at (add 16 (mul (add (mul c1 n2) c2) (add (ttf_vr_len vf1) (ttf_vr_len vf2))))) vf1))))))
+
+; Format 1's pair set at ps: the record of second glyph r, of i up to
+; n, its first value's x advance; None if it has none.
+(def ttf_pair_set ((b bytes) (ps int) (vf1 int) (vf2 int) (r int) (i int) (n int)) (Option int)
+  (if (ge i n)
+      ((None int))
+      (let rec (add ps (add 2 (mul i (add 2 (add (ttf_vr_len vf1) (ttf_vr_len vf2))))))
+        (if (eq (ttf_u16 b rec) r)
+            (Some (ttf_x_advance b (add rec 2) vf1))
+            (ttf_pair_set b ps vf1 vf2 r (add i 1) n)))))
+
+; How long a value record of format vf is: 2 bytes a field it has.
+(def ttf_vr_len ((vf int)) int (mul 2 (bit_count (bit_and vf 255))))
+
+; A value record's x advance, at rec, of format vf: the field after any
+; x and y placement; 0 if it has none.
+(def ttf_x_advance ((b bytes) (rec int) (vf int)) int
+  (if (eq (bit_and vf 4) 0) 0 (ttf_i16 b (add rec (mul 2 (bit_count (bit_and vf 3)))))))
+
+; Glyph g's index in the coverage table at at, -1 if it is not in it.
+(def ttf_coverage ((b bytes) (at int) (g int)) int
+  (if (eq (ttf_u16 b at) 1)
+      (ttf_cov1 b at g 0 (ttf_u16 b (add at 2)))
+      (if (eq (ttf_u16 b at) 2) (ttf_cov2 b at g 0 (ttf_u16 b (add at 2))) -1)))
+
+; Format 1, a sorted list of glyphs: g's place among those from lo up
+; to hi, by halving.
+(def ttf_cov1 ((b bytes) (at int) (g int) (lo int) (hi int)) int
+  (if (ge lo hi)
+      -1
+      (let mid (div (add lo hi) 2)
+        (let v (ttf_u16 b (add at (add 4 (mul 2 mid))))
+          (if (eq v g) mid (if (lt v g) (ttf_cov1 b at g (add mid 1) hi) (ttf_cov1 b at g lo mid)))))))
+
+; Format 2, ranges of glyphs, each its first's coverage index: g's, in
+; the range of i up to n that holds it.
+(def ttf_cov2 ((b bytes) (at int) (g int) (i int) (n int)) int
+  (if (ge i n)
+      -1
+      (let rec (add at (add 4 (mul 6 i)))
+        (if (if (ge g (ttf_u16 b rec)) (le g (ttf_u16 b (add rec 2))) false)
+            (add (ttf_u16 b (add rec 4)) (sub g (ttf_u16 b rec)))
+            (ttf_cov2 b at g (add i 1) n)))))
+
+; Glyph g's class in the class definition at at, 0 if it gives none.
+(def ttf_class ((b bytes) (at int) (g int)) int
+  (if (eq (ttf_u16 b at) 1)
+      (let first (ttf_u16 b (add at 2))
+        (if (if (ge g first) (lt g (add first (ttf_u16 b (add at 4)))) false)
+            (ttf_u16 b (add at (add 6 (mul 2 (sub g first)))))
+            0))
+      (if (eq (ttf_u16 b at) 2) (ttf_class2 b at g 0 (ttf_u16 b (add at 2))) 0)))
+
+; Format 2's ranges, i up to n: the class of the one that holds g.
+(def ttf_class2 ((b bytes) (at int) (g int) (i int) (n int)) int
+  (if (ge i n)
+      0
+      (let rec (add at (add 4 (mul 6 i)))
+        (if (if (ge g (ttf_u16 b rec)) (le g (ttf_u16 b (add rec 2))) false)
+            (ttf_u16 b (add rec 4))
+            (ttf_class2 b at g (add i 1) n)))))

@@ -68,7 +68,7 @@ host test of a layout run without one. That must stay so.
   recomputed, as `l0s-ui`'s rule 5 says: drawing, hit test and tests
   together. Widths a program reserved by counting cells, such as
   entries' and Disks' dialogs', checked against the new measure.
-- [ ] Kerning: `ttf.l0` reads GPOS's pair adjustments (lookup type 2,
+- [x] Kerning: `ttf.l0` reads GPOS's pair adjustments (lookup type 2,
   formats 1 and 2, the `kern` feature of the default script) for the
   ASCII pairs, mkmetrics writes them into `metrics.l0` beside the
   advances, and the sums take each pair's adjustment, in measuring and
@@ -177,3 +177,18 @@ host test of a layout run without one. That must stay so.
   `launcher` and `launcher-install` at the bar's title, now from 126,
   its pixels read from the strike's glyphs; `disks-create` at its
   dialogs' buttons, the cards now 320 and 367 wide.
+- 2026-10-28: step 5. Source Sans 3's kern feature is one lookup, of
+  type 9, an extension, over 17 pair subtables (one of format 1 and
+  sixteen of format 2), so `ttf.l0` reads extensions too, beside type
+  2's formats 1 and 2. The default script is DFLT's default language
+  system, or latn's if a font has no DFLT. A lookup's first subtable
+  that covers the pair gives its adjustment, as OpenType has it, and
+  only the first value's x advance is read, the only field these fonts
+  use. mkmetrics writes `ui_m_FACE_kern`, a tree of comparisons over
+  the 872 pairs of codes 32 to 126 the regular face adjusts and the
+  bold's 861, by key l · 128 + r; Source Code Pro's is 0. A
+  character's units are its advance and its kerning with the one after
+  it, in measuring, ellipsizing, drawing and an entry's pens alike.
+  `AV` is 14 units closer and `To` 66, each a pixel narrower at 16
+  (`test_kerned_narrower`). Some widths fell a pixel: Disks' format
+  card is 366, its Create button 56 wide.
