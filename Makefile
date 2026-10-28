@@ -197,8 +197,8 @@ CLOCK   := user/lib/proto/clock.l0
 DISKLIB := user/lib/proto/disk.l0
 # Sound: the audio protocol, its server's side, and WAV files.
 AUDIOLIB := user/lib/proto/audio.l0
-AUDIO_SERVER := $(AUDIOLIB) user/lib/proto/audio_server.l0
 WAV     := user/lib/format/wav.l0
+AUDIO_SERVER := $(AUDIOLIB) $(WAV) user/lib/proto/audio_server.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
 # The font service's protocol: its faces, and strikes shared with the

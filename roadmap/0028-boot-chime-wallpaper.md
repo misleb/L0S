@@ -62,11 +62,13 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   and must not get in the way of the 64-region limit. Seen on a Pi 5
   with a monitor on HDMI0. Written and host-tested; the board check
   (the Log's 2026-10-28 step 5 entry) is still to do.
-- [ ] `audio_server.l0` plays the chime: once a driver's ring runs, it
+- [x] `audio_server.l0` plays the chime: once a driver's ring runs, it
   reads `/etc/chime.wav` (`play`'s WAV parsing, moved into a library
   both use) and queues its frames as a client's would be, at the
   file's rate. `hdmi-audio` needs no code of its own beyond the
   library. Heard on a Pi 5, and `audio_server_test` pins the frames.
+  Written and host-tested; the board check (the Log's 2026-10-28
+  step 6 entry) is still to do.
 
 ## Spec changes
 
@@ -175,3 +177,30 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   right after `showing the wallpaper` would point at the wallpaper's
   plane, one past `drawing the wallpaper` at the region or the
   painting.
+- 2026-10-28: step 6, written with no board here. `play`'s WAV parsing
+  was already a library, `wav.l0`; `AUDIO_SERVER` now links it.
+  `audio_server.l0` reads the chime (`audio_chime_load`) and says what
+  to write as the ring has room (`audio_chime_feed`), and samples come
+  from an `AudioSource`, a client's pages or a file's bytes, so the
+  driver writes the chime's frames with the same `frames_put` as a
+  client's. L0 has no function values, so the library cannot call the
+  driver's hardware writes itself: `hdmi-audio`'s own part is a field
+  in its `Drv` for the chime, `chime_started` as it serves (its rate
+  set as a client's `start` would) and `chime_fed` after each period's
+  interrupt, about twenty lines. A client's `start` or `play` ends the
+  chime there. Decided, the second open question: **a boot argument,
+  `chime=off`, turns the chime off**; anything else plays it. It costs
+  one word, and on a board netbooted for work (`PI5_ARGS=chime=off`)
+  silence wants no rebuild; a setting that lasts is the Settings app's
+  (0029). `audio_server_test` pins the first feed's frames and
+  samples, the ring after it with a client's place behind the chime's,
+  the feed after a period ends, mono, refusals, and
+  `pi5/etc/chime.wav` itself: 28,800 stereo frames at 48 kHz, 5,632 in
+  the first feed.
+  **On a Pi 5 (`make pi5-netboot`, a monitor with speakers on HDMI0),
+  listen for:** the chime, 0.6 s, once, right after `hdmi-audio`'s
+  `HDMI0 at 48000 Hz, ... serving audio` line, whatever is on the
+  screen then; no `no chime:` warning; whole, with no click, gap or
+  repeat (the ring refilled across about fifty periods); then `play
+  /etc/chime.wav` at the shell still plays it again. Booted with
+  `PI5_ARGS=chime=off`, nothing at boot.

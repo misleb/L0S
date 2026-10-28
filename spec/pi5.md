@@ -152,7 +152,7 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
 | `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](devices.md#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode` and `hdmi` beside them), at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
-| `hdmi-audio` | sound on HDMI0, served as `audio`, once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](sound.md#sound-on-the-raspberry-pi-5)); `play /etc/chime.wav` tries it. `make pi5-shell` leaves it out too |
+| `hdmi-audio` | sound on HDMI0, served as `audio`, once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](sound.md#sound-on-the-raspberry-pi-5)); it plays `/etc/chime.wav` as it starts, unless the boot argument `chime=off`, and `play /etc/chime.wav` tries it again. `make pi5-shell` leaves it out too |
 | `fs ram` | a volume in memory, `/Volumes/tmp`, registered as `tmpfs`, which keeps nothing over a power cut |
 | `sdhci pi5`, `fs` | the microSD card in the slot, through the BCM2712's own SD host controller, `sdio1`, at 0x1000FFF000, interrupt 305 (see [The disk](storage.md#the-disk)), served as a disk; `fs` mounts its volumes, a FAT32 boot partition among them (see [FAT32 volumes](fat32.md#fat32-volumes)). With no card in the slot `sdhci` says so and `fs` finds no disk, and both exit |
 | `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). It keeps time over a power cut only with a battery on the RTC connector |
@@ -174,7 +174,9 @@ boot should check these, on the debug UART (`dmesg` repeats them):
   `branding/wallpaper-dark.svg`, as `hvs` serves, before `wm`'s desktop
   comes over the same image, with nothing black between (not yet seen
   on a board)
-- `hdmi-audio`'s line, and that `play /etc/chime.wav` is heard
+- `hdmi-audio`'s line, the chime heard as it starts, with no `no
+  chime:` warning (not yet heard on a board; `chime=off` silences it),
+  and that `play /etc/chime.wav` is heard again
 - `sdhci`'s lines: `sdio1`'s registers as the firmware left them, then
   the card, its size and its interrupt; and `fs`'s, a line for each
   volume it mounts

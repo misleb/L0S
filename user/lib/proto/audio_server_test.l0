@@ -57,3 +57,100 @@
 
 (def test_play_pages () int
   (check_int "pages" (audio_play_pages 1025 2) 2))
+
+; ------------------------------------------------------------------ chime
+
+; A WAV file at rate of chans channels whose n frames' samples count up
+; from 1, frame i's channel c sample chans·i + c + 1.
+(def counting_wav ((rate int) (chans int) (n int)) bytes
+  (bytes_from_list (append (wav_header rate chans (mul n (mul 2 chans))) (counting (mul n chans) 1 (nil int)))))
+
+; The 16-bit samples from k on, n of them, onto acc reversed.
+(def counting ((n int) (k int) (acc (list int))) (list int)
+  (if (eq n 0) (rev acc) (counting (sub n 1) (add k 1) (rev_onto (le16 k) acc))))
+
+; The chime of b, or ChimeDone with why said in a test's failure.
+(def chime_of ((b bytes)) AudioChime
+  (match (audio_chime_of b) ((Ok c) c) ((Err why) (ChimeDone))))
+
+; A feed as text: frames to write, channels, its first frames' samples,
+; and what the chime has left.
+(def feed_text ((f ChimeFeed)) (list int)
+  (match f
+    ((ChimeFeed src chans k rest)
+      (append "write " (append (digits k) (append " of " (append (digits chans)
+        (append ", first " (append (samples_text src chans (min k 2))
+          (append ", then " (chime_text rest)))))))))))
+
+; The first n frames' samples of src, spaced.
+(def samples_text ((src AudioSource) (chans int) (n int)) (list int)
+  (if (eq n 0)
+      "none"
+      (unwords (frame_samples src chans 0 n (nil (list int))))))
+
+(def frame_samples ((src AudioSource) (chans int) (i int) (n int) (acc (list (list int)))) (list (list int))
+  (if (ge i n)
+      (rev acc)
+      (frame_samples src chans (add i 1) n
+        (cons (append (digits (audio_source_sample src i chans 0)) (append "/" (digits (audio_source_sample src i chans 1)))) acc))))
+
+(def chime_text ((c AudioChime)) (list int)
+  (match c
+    ((ChimeDone) "done")
+    ((AudioChime b rate chans s e) (append (digits (div (sub e s) (mul 2 chans))) (append " frames at " (digits rate))))))
+
+; A ring of 4 periods of 100 has room for 300 frames: a chime of 1000
+; stereo frames gives those first, frame 0's samples 1 and 2, frame 1's
+; 3 and 4, and keeps 700.
+(def test_chime_first_frames () int
+  (check_str "first" (feed_text (audio_chime_feed (chime_of (counting_wav 48000 2 1000)) (audio_ring_new 4 100)))
+             "write 300 of 2, first 1/2 3/4, then 700 frames at 48000"))
+
+; The chime's frames go into the ring before any client's: once they
+; are written, ring_next is past them, where a client's play writes.
+(def test_chime_before_clients () int
+  (let r (audio_ring_new 4 100)
+    (match (audio_chime_feed (chime_of (counting_wav 48000 2 1000)) r)
+      ((ChimeFeed src chans k rest)
+        (check_str "ring" (ring_text (ring_wrote r k)) "next 400 queued 300 room 0")))))
+
+; Once a period ends, its room takes the next 100: frames 300 and 301,
+; samples 601 to 604.
+(def test_chime_goes_on () int
+  (let r (audio_ring_new 4 100)
+    (match (audio_chime_feed (chime_of (counting_wav 48000 2 1000)) r)
+      ((ChimeFeed src chans k rest)
+        (check_str "next" (feed_text (audio_chime_feed rest (ring_advanced (ring_wrote r k))))
+                   "write 100 of 2, first 601/602 603/604, then 600 frames at 48000")))))
+
+; The last frames end it; a mono chime's one sample is both channels'.
+(def test_chime_ends_mono () int
+  (check_str "mono" (feed_text (audio_chime_feed (chime_of (counting_wav 32000 1 50)) (audio_ring_new 4 100)))
+             "write 50 of 1, first 1/1 2/2, then done"))
+
+; Nothing to play once done; a rate no driver plays is refused.
+(def test_chime_done_and_refused () int
+  (add (check_str "done" (feed_text (audio_chime_feed (ChimeDone) (audio_ring_new 4 100))) "write 0 of 2, first none, then done")
+       (check_str "11 kHz" (match (audio_chime_of (counting_wav 11025 2 10)) ((Ok c) "played") ((Err why) why))
+                  "a WAV file at 11025 Hz; the driver plays 32000 44100 48000")))
+
+; Its rate, for the driver to start at; and chime=off.
+(def test_chime_rate_and_off () int
+  (add (check_int "rate" (audio_chime_rate (chime_of (counting_wav 44100 2 10))) 44100)
+       (add (check_bool "off" (audio_chime_wanted (split_spaces "root=x chime=off")) false)
+            (check_bool "on" (audio_chime_wanted (split_spaces "scale=2")) true))))
+
+; The Pi 5's own chime, pi5/etc/chime.wav, plays as it is: 28,800
+; stereo frames at 48 kHz, 0.6 s, its first 5,632 into the ring of 12
+; periods of 512 hdmi-audio starts with, 11 periods' room.
+(def test_pi5_chime () int
+  (match (read_whole "pi5/etc/chime.wav")
+    ((Err why) (fail_because "read" why))
+    ((Ok b)
+      (match (audio_chime_feed (chime_of b) (audio_ring_new 12 512))
+        ((ChimeFeed src chans k rest)
+          (check_str "chime" (chime_text rest) "23168 frames at 48000"))))))
+
+; Under an operating system there is no /etc/chime.wav: none, said.
+(def test_chime_load_none () int
+  (check_int "rate" (audio_chime_rate (audio_chime_load "test")) 0))
