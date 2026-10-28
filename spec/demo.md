@@ -9,17 +9,18 @@ It has four CPUs (`CPUS`; `make demo CPUS=1` for one): the kernel on CPU
 compute on CPUs 1 to 3 ([kernel.md](kernel.md)).
 The mouse moves relatively, as a real one does, so a click in the window
 grabs your pointer, and Ctrl-Alt-G (Ctrl-Option-G on a Mac) lets it go.
-The window shows a desktop, the compositor's: a wallpaper, a top bar,
-and two windows that overlap, each with a title bar: a terminal with a
-shell, and the System Monitor. The top bar is GNOME Shell's, black across
-the top of the screen: the L0S logo and **Applications** at its left, then the name of the
+The window shows a desktop, the compositor's: a wallpaper and a top bar,
+and no windows, since `/etc/system` starts the system's services and no
+app. The top bar is GNOME Shell's, black across the top of the screen:
+the L0S logo and **Applications** at its left, then the name of the
 front window's app (`Terminal`, `System Monitor`), or its title if it is
 no app's, and the date and time in its middle, `Oct 15  22:42`, from the
 board's real-time clock, which QEMU sets to this machine's local time.
-There are two shells in all:
+There is one shell at boot, and one more for each Terminal opened:
 
 - **The serial line**, in the terminal you ran `make demo` from.
-- **`vt1`**, the Terminal window's tab. The windows are drawn in GNOME's
+- **`vt1`**, the tab of the first Terminal opened from **Applications**
+  (or with `run vt &`). The windows are drawn in GNOME's
   Adwaita style by the toolkit in [user/lib/ui](toolkit.md):
   rounded corners and a header bar with a bold, centered title, and a
   thin border of the header bar's color down the sides and along the
@@ -41,7 +42,7 @@ There are two shells in all:
     cell. The wheel scrolls back through the last 10,000 lines.
     Start another Terminal from Applications, or with `run vt &`.
 
-The other window, `Processes`, is the System Monitor (`procmon`): the
+The System Monitor (`procmon`), opened the same way, shows the
 kernel's processes in a grid, read again every second, and under it the
 memory processes are given and how much of it is free (see
 [The programs](programs.md#the-programs)).
@@ -86,10 +87,16 @@ booted with `root=UUID`, or else from the initramfs.
 | 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
 | 16 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in pages it shares with each asker, the desktop's made at the build, any other rasterized once, on its first ask |
 | 17 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 18 | `vt` | the Terminal window, Terminal's program, with a tab, `vt1`, the first name free. It edits the keys `wm` sends it into the selected tab's lines, as `uart` does what the serial line sends, and draws what is written to the tab into its window |
-| 19 | `procmon` | the System Monitor, a window of the kernel's processes and the memory they are given, read again every second |
-| 20 | `vt tab` | the tab's relay, which the `vt` starts: it registers the tab's name, `vt1`, and passes on to the `vt` all that is sent to it. Each tab opened has its own relay and shell after the pids here |
-| 21 | `sh vt1` | the tab's shell, which the `vt` starts, not `/etc/system`, after any program run before it gets there. Its `exit` closes its tab, and, as it is the last, the window, ending its `vt` |
+
+An app opened then takes the next pids. A Terminal, the first opened,
+is three: `vt`, its window, with a tab, `vt1`, the first name free,
+which edits the keys `wm` sends it into the selected tab's lines, as
+`uart` does what the serial line sends, and draws what is written to
+the tab into its window; `vt tab`, the tab's relay, which the `vt`
+starts, which registers the tab's name and passes on to the `vt` all
+that is sent to it; and `sh vt1`, the tab's shell, which the `vt`
+starts, whose `exit` closes its tab, and, as it is the last, the
+window, ending its `vt`. Each tab opened has its own relay and shell.
 
 How the display, the compositor and its clients fit together is under
 [The desktop](desktop.md#the-desktop).
@@ -265,10 +272,6 @@ Things to try:
      15       1  sh            running
      16       1  font          waiting for a message on port 24
      17       1  wm            waiting for a message on port 26
-     18       1  vt            waiting for a message on port 14
-     19       1  procmon       sleeping
-     20      18  vt            waiting for a message on port 32
-     21      18  sh            waiting for a message on port 33
   ```
 
   It lists the processes that have not exited. The shell asking is always
@@ -281,7 +284,8 @@ Things to try:
 - `run rtc`, a driver taking an interrupt.
 - `run windows`, to list the windows, front first, and where the pointer
   is. Each line gives a window's id, title, x, y, width and height, and
-  `front` for the one in front:
+  `front` for the one in front. With a Terminal and then the System
+  Monitor opened from Applications:
 
   ```
   l0s> run windows
@@ -290,7 +294,7 @@ Things to try:
   pointer 0 0
   ```
 
-  Which of the two opens first, and so which is in front, varies.
+  At boot there are none, and it lists only the pointer.
 - `run draw`, to draw on the desktop, behind the windows. Each change
   shows before the shell's next prompt. Pixels count from 0, 0 at the top
   left of the 1280×800 desktop, and a shape may run off its edge:

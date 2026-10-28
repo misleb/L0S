@@ -148,7 +148,7 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 
 | Program | What it does there |
 |---|---|
-| `boot` | pid 1, then `/etc/system`: `sh` on the console, `font`, `wm`, a Terminal |
+| `boot` | pid 1, then `/etc/system`: `sh` on the console, `font` and `wm`; no app, so the desktop starts empty |
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
 | `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](devices.md#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode` and `hdmi` beside them), at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |

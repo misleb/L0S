@@ -100,8 +100,9 @@ the initramfs. The demo grants it to `uart`,
 `rtc`, `virtio-gpu`, `virtio-input`, `virtio-blk`, `virtio-net` and `virtio-rng`, so the shell can start `rtc`
 without having it itself. `wm`, `vt`, `fs` and `inet` have none: they reach only
 memory they share, and messages. In the demo's inittab, then, the drivers' and
-services' paths are `/sbin/...`, and in its `/etc/system` the terminals'
-`/Applications/Terminal.app/vt`.
+services' paths are `/sbin/...`, as are those of its `/etc/system`, which
+starts the system's services and no app: an app, such as
+`/Applications/Terminal.app/vt`, is started from the launcher.
 
 ## Booting from a volume
 
