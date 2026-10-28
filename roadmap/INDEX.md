@@ -44,6 +44,7 @@ move independently, so several can be active at once.
 | [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi 5's card needs | Pi 5 | active | 4/5 | – | pi5.md, programs.md, testing.md |
 | [0023](0023-file-data-shared.md) File data through shared memory, in runs of 64 KB | Storage | active | 3/4 | – | syscalls.md, storage.md, kernel.md, programs.md, testing.md |
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | blocked | 0/4 | 0023 | storage.md, testing.md |
+| [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its scrollback, resizes, and has tabs | Desktop | ready | 0/6 | – | programs.md, desktop.md, toolkit.md, demo.md, testing.md |
 
 ## Ready
 
@@ -63,6 +64,9 @@ move independently, so several can be active at once.
   runs of 64 KB: reads and writes go through the window, and `fs`
   writes a file's metadata at close; left, the timings, on QEMU and on
   the Pi 5's card, where `install --boot` took minutes.
+- [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its
+  scrollback, resizes, and has tabs: on QEMU, starting with `vt`
+  keeping its cells, which changes nothing on the screen.
 
 ## Dependencies
 
