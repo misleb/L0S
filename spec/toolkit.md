@@ -180,9 +180,14 @@ to `l0` are one namespace, and a duplicate is a compile error.
   (`-1`). Window corners are rounded by the display's shaped layers, which
   cut whole pixels, so they aren't antialiased. There are no window
   shadows.
-- Two faces, Source Code Pro and Source Sans 3, each regular and bold,
-  ASCII only, at any height from 8 to 128 on request; the toolkit draws
-  them at lines of 16 and 32. Icons are
+- Two faces, Source Sans 3 for the interface and Source Code Pro for
+  terminals and columns, each regular and bold, ASCII only, at any
+  height from 8 to 128 on request; the toolkit draws them at lines of 16
+  and 32, and at a program's own height with `UiFontAt`. Text is placed
+  by advances and GPOS's pair kerning only: no ligatures, no glyph
+  substitution (`tnum`, `onum`, small caps), no hinting, and pens on
+  whole pixels. A face `metrics.l0` has no table for is measured as
+  Source Code Pro's cells. Icons are
   smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
   the build, never at run time. Icons and text scale by whole numbers. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.

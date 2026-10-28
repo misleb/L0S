@@ -6,7 +6,9 @@
 #
 #   1. its title bar, an Adwaita header bar in front, dark, 303030
 #   2. the toolbar on the window's ground, 242424; the grid's header's
-#      line under it; End Process faded, with no row selected
+#      line under it; End Process faded, with no row selected; and the
+#      toolbar's line in Source Sans 3, its i narrower than its m, each
+#      where the sums of the advances put it
 #   3. a click of the tablet, through QMP, on the second row: the
 #      pointer's press and release forwarded to the window, the row
 #      selected, in the accent's tint, and End Process its own red
@@ -120,6 +122,30 @@ cx=$((w_x + 2)); cy=$((w_y + bar))
 shows "its header bar" "$((w_x + 6)) $((w_y + 6)) $headerbar"
 shows "the toolbar, the grid's header, End Process faded" \
   "$((cx + 100)) $((cy + 3)) $ground" "$((cx + 5)) $((cy + 78)) $line" "$((cx + 550)) $((cy + 22)) $faded"
+
+# The toolbar's line, "Select a process from the list", dimmed, in
+# Source Sans 3, 11888 units, 159 wide, in the middle of its 494 from
+# 46, so from 213, its line's top 15 down: the pens of from's m
+# and the space after it are 107 and 118, of list's i and s 145 and
+# 149, the advances and kerning summed (ui_text_pen); row 8 of the line
+# crosses both, where the strike's m inks 108 to 117 and its i 146 to
+# 147. So the i is narrower than the m: proportional, not cells of 8.
+ink() {
+  local x first="" last=""
+  for x in $(seq $1 $(($2 - 1))); do
+    if [ "$(pixel $x $3)" != "$ground" ]; then
+      [ -z "$first" ] && first=$x
+      last=$x
+    fi
+  done
+  if [ -z "$first" ]; then echo none; else echo "$first $last"; fi
+}
+ly=$((cy + 15 + 8)); lx=$((cx + 213))
+rm -f "$dump"; monitor "screendump $dump"
+m_ink=$(ink $((lx + 107)) $((lx + 118)) $ly); i_ink=$(ink $((lx + 145)) $((lx + 149)) $ly)
+[ "$m_ink" = "$((lx + 108)) $((lx + 117))" ] && [ "$i_ink" = "$((lx + 146)) $((lx + 147))" ] \
+  || { echo "not ok - widgets: the toolbar's line is not proportional: m inks $m_ink, i $i_ink, wanted $((lx + 108)) $((lx + 117)) and $((lx + 146)) $((lx + 147))"; exit 1; }
+echo "ok - widgets: the toolbar's line is proportional: its i 2 wide, its m 10"
 
 # The second row, pid 2, its Name column past its text.
 rx=$((cx + 240)); ry=$((cy + 79 + 30 + 15))

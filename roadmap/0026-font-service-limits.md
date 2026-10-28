@@ -36,3 +36,9 @@ limits ([programs.md](../spec/programs.md), `font`'s row):
 ## Log
 
 - 2026-10-27: written from 0019's limits.
+- 2026-10-28: since 0020 every window holds eight regions for its
+  strikes, both faces' regular and bold at 16 and 32 times its scale,
+  not four, and a program that shows text at heights of its own
+  (`UiFontAt`, as Fonts does) one more for each face and height it has
+  shown, kept for the window's life: Fonts, every face opened, holds 32.
+  One region for all of a program's strikes would matter more now.

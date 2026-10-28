@@ -296,6 +296,12 @@ header bar. Then:
 - its header bar, active;
 - the toolbar on the window's ground, the line under the grid's header,
   and End Process faded, with no row selected;
+- the toolbar's line, "Select a process from the list", read back
+  along a row through its x-height: proportional, the `i` of "list" 2
+  pixels of ink and the `m` of "from" 10, each where the sums of Source
+  Sans 3's advances and kerning put its pen (`widgets_test.l0`'s
+  `test_status_line` pins them); `vt.sh` still finds the terminal's
+  cells 8×16, in Source Code Pro;
 - a click on the second row, through QMP: the press and release go
   through `wm` to the window, and the row is tinted with the accent and
   End Process turns red;

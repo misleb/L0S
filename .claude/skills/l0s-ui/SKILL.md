@@ -87,10 +87,18 @@ the display. This is the working summary, with the rules.
   holding the pixels, so pass it on and keep no other. Host tests draw
   this way (`paint_test.l0`, `render_test.l0`), and so does
   `tools/mkicon`.
-- **Text** is Source Code Pro in cells 8×16 (`ui_char_w`, `ui_char_h`),
-  smooth at every scale, ASCII only.
-  `ui_text_w s font bold scale` measures, `font` a `UiFont`, by the
-  advances in `metrics.l0`.
+- **Text** is Source Sans 3, proportional and kerned, in every widget
+  and `wm`'s title bars, top bar, launcher and menu (`ui_text_font`,
+  `UiSans`); Source Code Pro in cells 8×16 (`ui_char_w`, `ui_char_h`) only
+  where columns must line up, `vt`'s terminal and `draw`'s `char`
+  (`UiMono`); a program's own face and height is `UiFontAt FACE H`
+  (`UiText`, as Fonts uses). Lines of 16, smooth at every scale, ASCII
+  only. `ui_text_w s font bold scale` measures, by the advances and
+  kerning in `metrics.l0` (written by `tools/mkmetrics`, `make
+  metrics`); never count characters times a cell for a width: an entry
+  that must hold n of anything is `ui_chars_w n font bold` wide. A
+  pixel pinned in a screen test through text comes from the strike's
+  glyphs at the pen `ui_text_pen` gives.
 - **Icons** are GNOME's own SVGs under `icons/` (Adwaita's symbolic
   ones, each project's license and `SOURCE` beside them), named in
   `icons.l0`'s `ui_icon_names` (`window-close`, `view-refresh`...), drawn

@@ -1,6 +1,6 @@
 # 0020: Proportional text where GNOME's is
 
-Track: Toolkit · Status: ready · Needs: 0019 · Spec: toolkit.md, desktop.md, programs.md, testing.md
+Track: Toolkit · Status: done · Needs: 0019 · Spec: toolkit.md, desktop.md, programs.md, testing.md
 
 ## Why
 
@@ -90,7 +90,7 @@ host test of a layout run without one. That must stay so.
   `SCREEN_TESTS`, opens it from the launcher, sees four cards, opens
   Source Sans 3 and reads an `i` narrower than an `m` at 64, then
   Source Code Pro and reads them the same width.
-- [ ] A screen test: the gallery's labels, read back from a
+- [x] A screen test: the gallery's labels, read back from a
   `screendump`, are proportional (an `i` narrower than an `m`), and
   `vt`'s cells are as before. toolkit.md's **Text** and Limits say
   which face is where, and `l0s-ui`'s text line follows.
@@ -217,3 +217,15 @@ host test of a layout run without one. That must stay so.
   Sans 3 5 and 37 columns, each where the sums of advances and kerning
   put its pen; in Source Code Pro each inside the cell of 32 that 14
   and 18 cells along put it.
+- 2026-10-28: step 7, and done. The gallery's labels had no i and m in
+  one line, so its toolbar's line is now "Select a process from the
+  list" (Monitor's keeps "Select a process"); `widgets.sh` reads it
+  back along a row of its x-height, the i of "list" 2 columns of ink
+  and the m of "from" 10, each where `ui_text_pen` puts it, which
+  `widgets_test.l0` pins; `vt.sh`, unchanged, still finds the
+  terminal's 8×16 cells. toolkit.md's Text and Limits say which face is
+  where and what text placement does not do (no ligatures, no glyph
+  substitution, no hinting, whole-pixel pens), and `l0s-ui`'s text line
+  follows. Beyond the pages named: boot.md's apps table gains Fonts,
+  demo.md's font paragraph names both faces, and the `fonts` e2e case
+  asks for Sans at 24, as Sans at 32 is now stored.
