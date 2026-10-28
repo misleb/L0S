@@ -237,7 +237,7 @@ SHA256  := user/lib/format/sha256.l0
 # commands, which need only render.l0, and the font service's protocol
 # and strikes, which its text is drawn from; and its client windows,
 # which need the compositor's protocol too.
-UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
+UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/metrics.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
              user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0
 UI_WINDOW := user/lib/ui/window.l0
@@ -315,6 +315,7 @@ MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
 MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
 MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
 MKSTRIKE := $(ULIB) $(RENDER) $(GLYPHS) tools/mkstrike/mkstrike.l0
+MKMETRICS := $(ULIB) $(RENDER) $(TTF) tools/mkmetrics/mkmetrics.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 ICONS    := $(APPS:%=$(BUILD)/icons/%.ppm)
 ICONS2X  := $(APPS:%=$(BUILD)/icons/%2x.ppm)
@@ -334,7 +335,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune mcp icon-sheet graph graph-hook
+.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -380,6 +381,7 @@ $(call l0_check,$(MKFS) tools/mkfs/main.l0)
 $(call l0_check,$(MKICON) tools/mkicon/main.l0)
 $(call l0_check,$(MKFONT) tools/mkfont/main.l0)
 $(call l0_check,$(MKSTRIKE) tools/mkstrike/main.l0)
+$(call l0_check,$(MKMETRICS) tools/mkmetrics/main.l0)
 $(call l0_check,$(MKICONS) tools/mkicons/main.l0)
 
 # That every form is documented, but those DOC_GAPS lists.
@@ -387,6 +389,19 @@ $(BUILD)/check/doc.ok: $(BUILD)/l0sdoc $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
 	@mkdir -p $(@D)
 	@$(call logged,$(BUILD)/l0sdoc --check $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS),the documentation check)
 CHECKS += $(BUILD)/check/doc.ok
+
+# That the toolkit's metrics, user/lib/ui/metrics.l0, are what mkmetrics
+# writes from the fonts now; make metrics writes them again.
+METRICS := user/lib/ui/metrics.l0
+METRICS_FACES := code=fonts/SourceCodePro-Regular.ttf code-bold=fonts/SourceCodePro-Bold.ttf \
+                 sans=fonts/SourceSans3-Regular.ttf sans-bold=fonts/SourceSans3-Bold.ttf
+$(BUILD)/check/metrics.ok: $(BUILD)/mkmetrics $(METRICS) $(wildcard fonts/*.ttf)
+	@mkdir -p $(@D)
+	@$(call logged,sh -c '$(BUILD)/mkmetrics $(METRICS_FACES) $(BUILD)/metrics.l0 && cmp $(BUILD)/metrics.l0 $(METRICS)',the metrics check (make metrics writes them))
+CHECKS += $(BUILD)/check/metrics.ok
+
+metrics: $(BUILD)/mkmetrics
+	$(BUILD)/mkmetrics $(METRICS_FACES) $(METRICS)
 
 check:
 	@$(MAKE) -s -k -j$(JOBS) check-each
@@ -467,6 +482,7 @@ $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
 $(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
 $(foreach t,shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
 $(call l0_test,$(MKSTRIKE) tools/mkstrike/mkstrike_test.l0)
+$(call l0_test,$(MKMETRICS) tools/mkmetrics/mkmetrics_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(TTF) user/lib/format/ttf_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(GLYPHS) user/lib/format/strike_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(RASTER) user/lib/gfx/raster_test.l0)
@@ -563,6 +579,9 @@ STRIKES := $(foreach h,16 32 64,$(BUILD)/strikes/code-$(h).strike $(BUILD)/strik
 
 $(BUILD)/mkstrike: $(MKSTRIKE) tools/mkstrike/main.l0 | $(BUILD)
 	$(L0) build $(MKSTRIKE) tools/mkstrike/main.l0 -o $@
+
+$(BUILD)/mkmetrics: $(MKMETRICS) tools/mkmetrics/main.l0 | $(BUILD)
+	$(L0) build $(MKMETRICS) tools/mkmetrics/main.l0 -o $@
 
 $(BUILD)/strikes/code-bold-%.strike: $(BUILD)/mkstrike fonts/SourceCodePro-Bold.ttf
 	@mkdir -p $(@D)

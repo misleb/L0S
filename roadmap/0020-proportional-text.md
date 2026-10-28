@@ -36,10 +36,10 @@ host test of a layout run without one. That must stay so.
 
 ## Steps
 
-- [ ] The advances, pure: `tools/mkfont --metrics` writes
+- [x] The advances, pure: `tools/mkmetrics` writes
   `user/lib/ui/metrics.l0`, both faces' advances of codes 32 to 126 in
   font units and their units per em, as defs; it is checked in, and
-  `make check` fails if it differs from what mkfont would write now.
+  `make check` fails if it differs from what mkmetrics would write now.
   A `UiFont` (`UiMono`, `UiSans`) and `ui_text_w s font bold scale`:
   the sum of the advances, in font units, turned into desktop pixels
   once, rounded up, so a width never depends on where text starts.
@@ -70,7 +70,7 @@ host test of a layout run without one. That must stay so.
   entries' and Disks' dialogs', checked against the new measure.
 - [ ] Kerning: `ttf.l0` reads GPOS's pair adjustments (lookup type 2,
   formats 1 and 2, the `kern` feature of the default script) for the
-  ASCII pairs, mkfont writes them into `metrics.l0` beside the
+  ASCII pairs, mkmetrics writes them into `metrics.l0` beside the
   advances, and the sums take each pair's adjustment, in measuring and
   in drawing alike. Tests pin `AV` and `To` narrower than their
   advances.
@@ -103,7 +103,7 @@ host test of a layout run without one. That must stay so.
   a program names. The limit loses "monospaced".
 - desktop.md: the title bars, top bar and launcher in Source Sans 3; the
   top bar's Applications measured.
-- programs.md: mkfont's `--metrics`; `fontview`, Fonts, in the
+- programs.md: `tools/mkmetrics`; `fontview`, Fonts, in the
   programs table.
 - testing.md: the screen test that reads proportional text, and
   `tests/fontview.sh`.
@@ -126,3 +126,17 @@ host test of a layout run without one. That must stay so.
   after kerning so it shows text as the interface will. It is named
   `fontview` because `fonts`, the command that lists the cache, has
   the name already.
+- 2026-10-28: step 1. mkfont reads no TrueType since 0019, so the
+  metrics are a tool of their own, `tools/mkmetrics FACE=FONT.ttf...
+  OUT`, reading `ttf.l0`, and the steps say so where they said mkfont.
+  `make metrics` writes `metrics.l0`; `make check`'s `metrics.ok`
+  writes it into `build/` and compares. Each advance is a def of a code,
+  a tree of comparisons that is a single number where a range of codes
+  shares one (Source Code Pro's is `600`), as L0 has no constant
+  arrays a pure function could read without building. A width is the
+  sum in font units turned into pixels once, at the em the strikes are
+  made at, 5H/6 of the line, rounded up; Source Code Pro's 600 units
+  are then 8 pixels exactly, so every width is as before, bold Source
+  Code Pro still a pixel wider, as it was. `ui_text_font` names the
+  face the interface's text is in, one def to change in step 4, and
+  every width the toolkit and `wm` measure asks it.
