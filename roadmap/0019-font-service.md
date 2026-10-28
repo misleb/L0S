@@ -1,6 +1,6 @@
 # 0019: A font service that caches rasterized glyphs
 
-Track: Toolkit · Status: active · Needs: – · Spec: toolkit.md, programs.md, demo.md, syscalls.md
+Track: Toolkit · Status: done · Needs: – · Spec: toolkit.md, programs.md, demo.md, syscalls.md
 
 ## Why
 
@@ -87,7 +87,7 @@ and was set aside because it does not match the monospace already used.
   those. `vt` asks the same way. Every screen test passes unchanged;
   `ps`'s memory and the time to a window's first paint, before and
   after, go in the Log.
-- [ ] Read-only sharing: `shm_share` gains a read-only form (a new call,
+- [x] Read-only sharing: `shm_share` gains a read-only form (a new call,
   by the system call checklist, or a flag in its arguments, whichever
   the kernel's `Call` takes more simply), which maps the pages into the
   receiver without write permission; a write there faults the writer,
@@ -194,3 +194,20 @@ and was set aside because it does not match the monospace already used.
   took its own pages from 357 to 35. A missing stored strike is made
   on its first ask, so nothing depends on them but the time. That made
   asking the display for its scale unneeded, and it was dropped.
+- 2026-10-27: step 5, and done. A new call rather than a flag:
+  `shm_share_read`, 299, the same arguments and answers as
+  `shm_share`, decoded to its own `CShmShareRead`, handled by
+  `do_shm_share` with a perm, which reaches `space_map` as 0, read
+  only, where `shm_share` passes 1 (`process.l0`'s `share_ro` and
+  `share_rw`). A write there is a permission fault the kernel has no
+  page to map for, so it ends the writer, status 139, as any bad
+  access does; the owner's mapping is its own and untouched. `font`
+  shares every strike so. `kernel_virt_test.l0` tests it to itself,
+  its refusals (no such pid, pages not the caller's, none), a reader
+  seeing the owner's 7, a writer ended with 139, and the owner reading
+  its 7 after. Two of `syscall_test.l0`'s checks used 299 as the first
+  unknown call; they use 300. `make check`, `make test`, `make e2e`
+  and `make test-virt` pass. Left: Source Sans 3 in the interface is
+  0020's (its Log says what 0019 gives it); strikes never freed,
+  holders counted dead or alive, four regions a window program, and
+  one request at a time are idea 0026.

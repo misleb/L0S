@@ -1,6 +1,6 @@
 # 0020: Proportional text where GNOME's is
 
-Track: Toolkit · Status: blocked · Needs: 0019 · Spec: toolkit.md, desktop.md, programs.md, testing.md
+Track: Toolkit · Status: ready · Needs: 0019 · Spec: toolkit.md, desktop.md, programs.md, testing.md
 
 ## Why
 
@@ -91,3 +91,14 @@ host test of a layout run without one. That must stay so.
 ## Log
 
 - 2026-10-27: written, after 0019, which gives it the face.
+- 2026-10-27: 0019 is done, and leaves this: the toolkit asks `font`
+  only for `code` and `code-bold` (face.l0's `ui_text_names`); `sans`
+  and `sans-bold` are there on request, made on the board, 0.2 to
+  0.7 s each on QEMU, unless added to the strikes made at the build
+  (font.l0's `stored`, the Makefile's `STRIKES`, `tools/mkstrike`),
+  which the first step that draws them should do, or a window's first
+  paint waits. A strike already holds each glyph's advance in 1/64
+  pixel and its box's bearing (`format/strike.l0`), at the em Source
+  Code Pro's cells imply, 5H/6. mkfont no longer reads TrueType at
+  all (it makes the pointers only), so the first step's `--metrics`
+  belongs in `tools/mkstrike` or a tool of its own, reading `ttf.l0`.
