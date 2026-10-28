@@ -1,6 +1,6 @@
 # 0031: A process waits on several ports, and lets a name go
 
-Track: Kernel · Status: ready · Needs: – · Spec: syscalls.md, kernel.md, programs.md, devices.md, demo.md, testing.md
+Track: Kernel · Status: active · Needs: – · Spec: syscalls.md, kernel.md, programs.md, devices.md, demo.md, testing.md
 
 ## Why
 
@@ -58,13 +58,13 @@ So L0S spends processes to hold names:
 
 ## Steps
 
-- [ ] Waiting on several ports: the call, by the system call checklist
+- [x] Waiting on several ports: the call, by the system call checklist
   (`l0s-dev`), the next free number (300 on), with its try form, its
   wrapper in `user/lib/sys/l0s.l0` returning the port with the message,
   and `ps`'s detail. The kernel's wait records the list, so a send to
   any of them wakes the process, and a port closed meanwhile is dropped
   from it. Board tests, refusals included.
-- [ ] Unregistering a name: the call, its wrapper and its board tests.
+- [x] Unregistering a name: the call, its wrapper and its board tests.
   A name's owner exiting still frees it as now.
 - [ ] Terminal without relays: `vt` waits on its window's port and a
   port per tab, registers `vtN` on the tab's port, and unregisters it
@@ -86,14 +86,10 @@ So L0S spends processes to hold names:
 
 ## Spec changes
 
-- syscalls.md: both calls' rows, and what a receive on several ports
-  answers.
-- kernel.md: a process waiting on several ports, and a name unregistered.
 - programs.md: `vt`'s row without relays; `usb-hid`'s row, one process
   serving both.
 - devices.md: USB's diagram and text, one `usb-hid`.
 - demo.md: the pids and the `ps` sample.
-- testing.md: the new board tests.
 
 ## Log
 
@@ -101,3 +97,52 @@ So L0S spends processes to hold names:
   hold and let go of a name. The user had already meant to make one
   `usb-hid` of the keyboard's and the mouse's. When it is taken up, look
   for more such places (the last step).
+- 2026-10-28: steps 1 and 2, calls 300 to 303 (310 and up are left for
+  0030). The design calls:
+  - **A set, not a list each call.** L0's `supervisor_receive` hands
+    the kernel one range of bytes, which the kernel fills, and
+    `supervisor_send` one it reads: no call can both give a list and
+    take a message. So `port_set` (300, a send of the ports as u32s)
+    names the caller's set, up to `port_set_limit`, 32, and is refused
+    whole before anything changes (a port not the caller's -1; none,
+    more than 32, or a part of a u32 -4; a bad buffer -5); then
+    `port_receive_set` (301) waits on it and `port_try_receive_set`
+    (302) does not. A set is kept until the next `port_set` or the
+    process's exit, so a loop whose ports stay the same, as a server's
+    do, pays for the list once, not once a message, as epoll's sets do;
+    `port_receive_any ports` does both for a loop whose ports change.
+    `Ipc` keeps the sets by pid (no change to `Proc`), and a port closed
+    (`ipc_close`) leaves its owner's set, which goes with its process.
+  - **The port after the message.** A receive on a set writes the
+    sender, the payload and then the port, a u32; the wrapper reads the
+    port from the end and gives `(SetMessage port m)`, `m` a `Message`
+    as `port_receive` gives one, so every `msg_` reader works on it.
+    That costs one copy of the message in the process (`bytes_slice`,
+    at most 4 KB), where a port first would have cost the same and a
+    second call to ask the port would have cost a trip to CPU 0; the
+    kernel's word cannot be returned beside the bytes.
+  - **Oldest first.** Every message queued on any port is numbered as it
+    is queued (`QMsg`, the counter in `Ipc`), and the set's receive
+    takes the lowest of the messages first in their queues, so a busy
+    port starves none (`test_receive_set_oldest`, `test_oldest_across`).
+  - **What `ps` says.** A process waiting on its set is `ReceivingSet`,
+    `proc_info`'s new `state_receiving_set`, 10, its detail the set's
+    count; `ps` says "waiting for a message on N ports", and System
+    Monitor tones it as any wait.
+  - **One set a process.** For 0033: the toolkit's loop sets its
+    windows' port and its reply port once, and sets again only as a
+    window opens or closes; an app that wants ports of its own beside
+    them must go through the same set (kernel.md's Limits). Sets
+    numbered by a handle could lift that if an app ever needs two.
+  - **Letting a name go** is `name_unregister name` (303), a send of
+    the name alone, as `name_lookup` is: the name's port must be the
+    caller's (-6 otherwise), and a name not registered is -1. It is free
+    at once; an owner's exit still frees its names
+    (`test_name_freed_on_exit`).
+  Tests: 20 board tests (sets: made, counted, the port given, oldest
+  first, only the set's ports, woken by another's send, deadlock, try
+  empty, no set, too little room with the message kept, not the
+  caller's, sizes, faults, `proc_info`; names: let go, found no more,
+  registered again, not registered, twice, bad names, another's, freed
+  on exit), host tests of `ipc.l0`'s sets and names and of the
+  wrappers' `_of`s. `make test-virt` 258 on one CPU and on four.

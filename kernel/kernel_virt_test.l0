@@ -935,6 +935,184 @@
 (def test_info_too_small () int
   (check_int "max 8" (boot_words 0 (info_words 1 8 (nil int))) (err_too_big)))
 
+; ------------------------------------------------------- sets of ports
+
+; movk xd, #imm, lsl 32: bits 32 to 47 of xd set to imm, the rest kept.
+(def movk_32 ((d int) (imm int)) int
+  (bit_or 4072669184 (bit_or (bit_shl (bit_and imm 65535) 5) d)))         ; 0xF2C00000
+
+; Ports 1 and 2, the process's first two.
+(def two_ports () (list int) (append (call_words (call_port_new)) (call_words (call_port_new))))
+
+; 8 bytes of the code sent to port.
+(def send_to ((port int)) (list int)
+  (cons (movz 0 port) (cons (movz_hi 1 49152) (cons (movz 2 8) (call_words (call_send))))))
+
+; The set of ports a and b, written to the heap as two u32s, len bytes of
+; them given to port_set.
+(def set_words ((a int) (b int) (len int)) (list int)
+  (cons (movz 0 a) (cons (movk_32 0 b) (cons (movz_hi 1 49216) (cons (str_x0_x1)
+    (cons (movz 0 0) (cons (movz 2 len) (call_words (call_port_set)))))))))
+
+; Ports a and b, as the set.
+(def set_of_two ((a int) (b int)) (list int) (set_words a b 8))
+
+; A receive on the set into the heap with room for max, by call n.
+(def receive_set_words ((n int) (max int)) (list int)
+  (cons (movz_hi 1 49216) (cons (movz 2 max) (call_words n))))
+
+; The port a receive on a set wrote after an 8-byte message: the u32 at
+; byte 12 of the heap, after the sender and the payload.
+(def port_at_12 () (list int)
+  (cons (movz_hi 1 49216) (cons (add_imm 1 1 8) (cons (ldr_w0_x1_4) (nil int)))))
+
+(def test_port_set () int
+  (check_int "made" (boot_words 0 (append (two_ports) (append (set_of_two 1 2) (exit_x0)))) 0))
+
+; The sender's 4 bytes, the 8 of the message, and the port's 4.
+(def test_receive_set_count () int
+  (check_int "16 bytes"
+    (boot_words 0 (append (two_ports) (append (send_to 2) (append (set_of_two 1 2)
+      (append (receive_set_words (call_receive_set) 64) (exit_x0))))))
+    16))
+
+(def test_receive_set_port () int
+  (check_int "port 2"
+    (boot_words 0 (append (two_ports) (append (send_to 2) (append (set_of_two 1 2)
+      (append (receive_set_words (call_receive_set) 64) (append (port_at_12) (exit_x0)))))))
+    2))
+
+; Port 2's message was sent first, so it comes first, though port 1 is
+; first in the set; then port 1's.
+(def test_receive_set_oldest () int
+  (let ws (append (two_ports) (append (send_to 2) (append (send_to 1) (append (set_of_two 1 2)
+            (receive_set_words (call_receive_set) 64)))))
+    (add (check_int "port 2 first" (boot_words 0 (append ws (append (port_at_12) (exit_x0)))) 2)
+         (check_int "then port 1"
+           (boot_words 0 (append ws (append (receive_set_words (call_receive_set) 64) (append (port_at_12) (exit_x0)))))
+           1))))
+
+; A port not in the set is not received from: port 2's message waits.
+(def test_receive_set_only_set () int
+  (check_int "nothing on port 1"
+    (boot_words 0 (append (two_ports) (append (send_to 2) (append (set_words 1 0 4)
+      (append (receive_set_words (call_try_receive_set) 64) (exit_x0))))))
+    (err_taken)))
+
+; Pid 2 sends to pid 1's port 2 while pid 1 waits on its set.
+(def test_receive_set_wakes () int
+  (check_int "woken on port 2"
+    (boot_mods (cons (first (append (two_ports) (append (set_of_two 1 2) (append (spawn_words 1)
+                       (append (receive_set_words (call_receive_set) 64) (append (port_at_12) (exit_x0)))))))
+               (cons (Raw 0 (code (append (send_to 2) (cons (movz 0 0) (exit_x0))))) (nil Raw))))
+    2))
+
+(def test_receive_set_deadlock () int
+  (check_int "deadlock"
+    (boot_words 0 (append (two_ports) (append (set_of_two 1 2) (append (receive_set_words (call_receive_set) 64) (exit_x0)))))
+    124))
+
+(def test_try_receive_set_empty () int
+  (check_int "nothing waiting"
+    (boot_words 0 (append (two_ports) (append (set_of_two 1 2) (append (receive_set_words (call_try_receive_set) 64) (exit_x0)))))
+    (err_taken)))
+
+(def test_receive_set_none () int
+  (add (check_int "no set" (boot_words 0 (append (receive_set_words (call_receive_set) 64) (exit_x0))) (err_no_port))
+       (check_int "no set, try" (boot_words 0 (append (receive_set_words (call_try_receive_set) 64) (exit_x0))) (err_no_port))))
+
+; Room for 15 of the 16 bytes: refused, and the message kept for a
+; receive with room.
+(def test_receive_set_too_small () int
+  (let ws (append (two_ports) (append (send_to 2) (append (set_of_two 1 2) (receive_set_words (call_receive_set) 15))))
+    (add (check_int "too big" (boot_words 0 (append ws (exit_x0))) (err_too_big))
+         (check_int "kept" (boot_words 0 (append ws (append (receive_set_words (call_receive_set) 64) (exit_x0)))) 16))))
+
+(def test_port_set_not_yours () int
+  (add (check_int "no port 5" (boot_words 0 (append (two_ports) (append (set_of_two 1 5) (exit_x0)))) (err_no_port))
+       (check_int "none of its own" (boot_words 0 (append (set_of_two 1 2) (exit_x0))) (err_no_port))))
+
+; None, a part of a u32, and one past port_set_limit's 32.
+(def test_port_set_sizes () int
+  (add (check_int "none" (boot_words 0 (append (two_ports) (append (set_words 1 2 0) (exit_x0)))) (err_too_big))
+       (add (check_int "6 bytes" (boot_words 0 (append (two_ports) (append (set_words 1 2 6) (exit_x0)))) (err_too_big))
+            (check_int "33 ports" (boot_words 0 (append (two_ports) (append (set_words 1 2 132) (exit_x0)))) (err_too_big)))))
+
+(def test_port_set_fault () int
+  (add (check_int "from 0x10"
+         (boot_words 0 (append (two_ports) (cons (movz 0 0) (cons (movz 1 16) (cons (movz 2 4) (append (call_words (call_port_set)) (exit_x0)))))))
+         (err_fault))
+       (check_int "a negative length"
+         (boot_words 0 (append (two_ports) (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movn 2 0) (append (call_words (call_port_set)) (exit_x0)))))))
+         (err_fault))))
+
+; ------------------------------------------------------- names let go
+
+; The name "ab" written to the heap: x1 its address, x2 its length.
+(def name_ab () (list int)
+  (cons (movz 0 25185) (cons (movz_hi 1 49216) (cons (str_x0_x1) (cons (movz 2 2) (nil int))))))
+
+; A new port, kept in x19, registered as "ab".
+(def register_ab () (list int)
+  (append (call_words (call_port_new)) (cons (mov_x19_x0) (append (name_ab) (cons (mov_x0_x19) (call_words (call_register)))))))
+
+(def unregister_ab () (list int) (append (name_ab) (call_words (call_unregister))))
+(def lookup_ab () (list int) (append (name_ab) (call_words (call_lookup))))
+
+(def test_unregister () int
+  (check_int "let go" (boot_words 0 (append (register_ab) (append (unregister_ab) (exit_x0)))) 0))
+
+; Once let go, the name is found no more, and is free to register again.
+(def test_unregister_frees () int
+  (add (check_int "not found" (boot_words 0 (append (register_ab) (append (unregister_ab) (append (lookup_ab) (exit_x0))))) (err_no_port))
+       (check_int "registered again"
+         (boot_words 0 (append (register_ab) (append (unregister_ab) (append (name_ab) (cons (mov_x0_x19) (append (call_words (call_register)) (exit_x0)))))))
+         0)))
+
+(def test_unregister_not_registered () int
+  (add (check_int "no such name" (boot_words 0 (append (unregister_ab) (exit_x0))) (err_no_port))
+       (check_int "twice" (boot_words 0 (append (register_ab) (append (unregister_ab) (append (unregister_ab) (exit_x0))))) (err_no_port))))
+
+(def test_unregister_bad_name () int
+  (add (check_int "from 0x10" (boot_words 0 (cons (movz 1 16) (cons (movz 2 2) (append (call_words (call_unregister)) (exit_x0))))) (err_fault))
+       (check_int "257 bytes" (boot_words 0 (cons (movz_hi 1 49152) (cons (movz 2 257) (append (call_words (call_unregister)) (exit_x0))))) (err_too_big))))
+
+; Pid 2 registers "ab" and waits; pid 1 may not let it go, and finds it.
+(def name_holder () Raw
+  (Raw 0 (code (append (register_ab) (cons (mov_x0_x19) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_receive)) (exit_x0)))))))))
+
+(def test_unregister_another () int
+  (add (check_int "denied"
+         (boot_mods (cons (first (append (spawn_words 1) (await_receiving 2 (append (unregister_ab) (exit_x0)))))
+                          (cons (name_holder) (nil Raw))))
+         (err_denied))
+       (check_int "still pid 2's port 1"
+         (boot_mods (cons (first (append (spawn_words 1) (await_receiving 2 (append (unregister_ab) (append (lookup_ab) (exit_x0))))))
+                          (cons (name_holder) (nil Raw))))
+         1)))
+
+; A name's owner exiting still lets it go: pid 2 registers "ab" and
+; exits, and pid 1 registers it after.
+(def test_name_freed_on_exit () int
+  (check_int "registered after"
+    (boot_mods (cons (first (append (spawn_words 1) (await_exited 2 (append (register_ab) (exit_x0)))))
+                     (cons (Raw 0 (code (append (register_ab) (cons (movz 0 0) (exit_x0))))) (nil Raw))))
+    0))
+
+; Pid 2 waits on its set of two; proc_info says so, with the count.
+(def set_receiver () Raw
+  (Raw 0 (code (append (two_ports) (append (set_of_two 1 2) (append (receive_set_words (call_receive_set) 64) (exit_x0)))))))
+
+(def test_info_receiving_set () int
+  (add (check_int "receiving on a set"
+         (boot_mods (cons (first (append (spawn_words 1) (await_receiving 2 (info_words 2 64 (first_words)))))
+                          (cons (set_receiver) (nil Raw))))
+         (words (state_receiving_set) 1))
+       (check_int "module 1, two ports"
+         (boot_mods (cons (first (append (spawn_words 1) (await_receiving 2 (info_words 2 64 (second_words)))))
+                          (cons (set_receiver) (nil Raw))))
+         (words 1 2))))
+
 ; ------------------------------------------------------------- files
 
 ; A program of these instructions, padded to 1024 bytes, then data: the

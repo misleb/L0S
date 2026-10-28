@@ -379,7 +379,7 @@
 
 ; Whether a process in state s may run.
 (def is_ready ((s State)) bool
-  (match s ((Ready) true) ((Receiving port buf max) false) ((Waiting pid) false) ((Sleeping) false)
+  (match s ((Ready) true) ((Receiving port buf max) false) ((ReceivingSet n buf max) false) ((Waiting pid) false) ((Sleeping) false)
            ((Blocked port) false) ((ReadingTty reply buf n) false) ((AwaitingFs server reply op buf n) false)))
 
 ; pid, if it is blocked for room on a port, made ready to make its call
@@ -393,6 +393,7 @@
             ((Blocked port) (park k2 (proc_set_state p (Ready))))
             ((Ready) (restore k2 p))
             ((Receiving port buf max) (restore k2 p))
+            ((ReceivingSet n buf max) (restore k2 p))
             ((Waiting on) (restore k2 p))
             ((Sleeping) (restore k2 p))
             ((ReadingTty reply buf n) (restore k2 p))
@@ -488,6 +489,34 @@
         ((CopyInBad r) (Took k r (err_fault)))
         ((CopiedIn r) (Took k r (add (header_len) (bytes_len payload))))))))
 
+; A receive into p of the oldest message waiting on any port of p's set,
+; as try_take answers, with the port it came on after the payload, a
+; u32: err_too_big, the message kept, if the three are over max.
+(def try_take_set ((k Kernel) (p Proc) (buf int) (max int)) Taking
+  (match (ipc_oldest (k_ipc k) (ipc_set_of (k_ipc k) (proc_pid p)))
+    ((None) (NoMessage k p))
+    ((Some port)
+      (match (ipc_peek (k_ipc k) port)
+        ((None) (NoMessage k p))
+        ((Some m)
+          (match m
+            ((Msg from payload)
+              (if (gt (add (mul 2 (header_len)) (bytes_len payload)) max)
+                  (Took k p (err_too_big))
+                  (match (take_into (with_ipc_dropped k port) p buf from payload)
+                    ((NoMessage k2 q) (NoMessage k2 q))
+                    ((Took k2 q v) (port_after k2 q buf v port)))))))))))
+
+; The rest of try_take_set: port written as a u32 at buf plus v, after
+; the v bytes take_into wrote, if it wrote them; the bytes written in
+; all, or err_fault.
+(def port_after ((k Kernel) (p Proc) (buf int) (v int) (port int)) Taking
+  (if (lt v 0)
+      (Took k p v)
+      (match (proc_copy_in p (add buf v) (bytes_from_list (u32_le port)) 0 (header_len))
+        ((CopyInBad q) (Took k q (err_fault)))
+        ((CopiedIn q) (Took k q (add v (header_len)))))))
+
 ; port's owner, if it is waiting on port, given what waits there.
 (def notify ((k Kernel) (port int)) Kernel
   (let owner (ipc_owner (k_ipc k) port)
@@ -501,7 +530,8 @@
               ((Dead st) (put_slot k2 owner (Dead st)))))))))
 
 ; The rest of notify, for the owner q, out of its slot: given the
-; message if it is receiving on port, its line if it reads its terminal
+; message if it is receiving on port, or on a set that holds port (the
+; oldest across the set, which may be another's), its line if it reads its terminal
 ; with port as the reply port, or its answer if it awaits a file server
 ; with it; put back as it was otherwise.
 (def notify_proc ((k Kernel) (q Proc) (port int)) Kernel
@@ -509,6 +539,12 @@
     ((Receiving on buf max)
       (if (eq on port)
           (match (try_take k q port buf max)
+            ((Took k2 r v) (park k2 (proc_set_state (proc_answer r v) (Ready))))
+            ((NoMessage k2 r) (restore k2 r)))
+          (restore k q)))
+    ((ReceivingSet n buf max)
+      (if (any_eq port (ipc_set_of (k_ipc k) (proc_pid q)))
+          (match (try_take_set k q buf max)
             ((Took k2 r v) (park k2 (proc_set_state (proc_answer r v) (Ready))))
             ((NoMessage k2 r) (restore k2 r)))
           (restore k q)))
@@ -716,6 +752,7 @@
                   (restore k2 q)))
             ((Ready) (restore k2 q))
             ((Receiving port buf max) (restore k2 q))
+            ((ReceivingSet n buf max) (restore k2 q))
             ((Waiting on) (restore k2 q))
             ((Sleeping) (restore k2 q))
             ((Blocked port) (restore k2 q))))
@@ -775,6 +812,7 @@
           (restore k q)))
     ((Ready) (restore k q))
     ((Receiving port buf max) (restore k q))
+    ((ReceivingSet n buf max) (restore k q))
     ((Sleeping) (restore k q))
     ((Blocked port) (restore k q))
     ((ReadingTty reply buf n) (restore k q))
@@ -924,6 +962,9 @@
     ((CPortNew) (do_port_new k p))
     ((CSend port buf len) (do_send k p port buf len))
     ((CReceive port buf max wait) (do_receive k p port buf max wait))
+    ((CPortSet buf len) (do_port_set k p buf len))
+    ((CReceiveSet buf max wait) (do_receive_set k p buf max wait))
+    ((CUnregister buf len) (do_unregister k p buf len))
     ((CRegister port buf len) (do_register k p port buf len))
     ((CLookup buf len) (do_lookup k p buf len))
     ((CSpawn m) (match (spawn k m (proc_pid p) ((None (list (list int)))) (proc_tty_port p)) ((Spawned k2 pid) (spawn_answered k2 p pid))))
@@ -1896,6 +1937,50 @@
           (if wait
               (Park k2 (proc_set_state q (Receiving port buf max)))
               (resume_with k2 q (err_taken)))))))
+
+; p's set of ports to wait on, the len bytes at buf, a u32 each, in place
+; of any it had: 0; err_fault for a negative len or bytes p may not give;
+; err_too_big for none, more than port_set_limit, or a len not a whole
+; number of u32s; or ipc_set_ports' refusal, the set as it was.
+(def do_port_set ((k Kernel) (p Proc) (buf int) (len int)) Step
+  (if (lt len 0)
+      (resume_with k p (err_fault))
+      (if (if (lt len 4) true (if (gt len (mul 4 (port_set_limit))) true (not (eq (mod len 4) 0))))
+          (resume_with k p (err_too_big))
+          (match (proc_copy_out p buf len)
+            ((CopyOutBad q) (resume_with k q (err_fault)))
+            ((CopiedOut q b)
+              (match (ipc_set_ports (k_ipc k) (proc_pid q) (u32s_of b 0 (nil int)))
+                ((Registered code i2) (resume_with (with_ipc k i2) q code))))))))
+
+; The u32s of b from byte i on, in order, after the reversed acc.
+(def u32s_of ((b bytes) (i int) (acc (list int))) (list int)
+  (if (gt (add i 4) (bytes_len b))
+      (rev acc)
+      (u32s_of b (add i 4) (cons (le_u32 b i) acc))))
+
+; The oldest message on any port of p's set copied to buf, as
+; try_take_set says; or, with none waiting, p waiting for one if wait,
+; and err_taken at once if not; err_no_port if p has no set.
+(def do_receive_set ((k Kernel) (p Proc) (buf int) (max int) (wait bool)) Step
+  (let n (length (ipc_set_of (k_ipc k) (proc_pid p)))
+    (if (eq n 0)
+        (resume_with k p (err_no_port))
+        (match (try_take_set k p buf max)
+          ((Took k2 q v) (resume_with k2 q v))
+          ((NoMessage k2 q)
+            (if wait
+                (Park k2 (proc_set_state q (ReceivingSet n buf max)))
+                (resume_with k2 q (err_taken))))))))
+
+; The name at buf unregistered, if a port of p's holds it: as
+; ipc_unregister answers, or name_from's refusal.
+(def do_unregister ((k Kernel) (p Proc) (buf int) (len int)) Step
+  (match (name_from p buf len)
+    ((NameBad q code) (resume_with k q code))
+    ((Named q name)
+      (match (ipc_unregister (k_ipc k) (proc_pid q) name)
+        ((Registered code i2) (resume_with (with_ipc k i2) q code))))))
 
 ; A name, copied out of p, or why not.
 (data Named (Named Proc (list int)) (NameBad Proc int))

@@ -88,7 +88,7 @@ with random registers.
 | `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; which heap pages a release names; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; the code and rodata processes share, by their bytes' hash; which frames to free when a process ends |
 | `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
-| `kernel/ipc.l0` | ports, their message queues, names, and the mount table, whose volumes go with their ports |
+| `kernel/ipc.l0` | ports, their message queues, each message numbered as it is queued, names, registered and let go, each process's set of ports to wait on and which of them holds the oldest message, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
 | `kernel/cpus.l0` | the other CPUs: which process each holds, with its slice's deadline, which CPU a process goes to next, a kill waiting for one to come back, and what `cpu_trapped` gives |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
@@ -98,6 +98,27 @@ with random registers.
 
 All of these except `process.l0` and `kernel.l0` are pure and tested on the
 host. The kernel itself is tested on the board.
+
+## Ports, sets and names
+
+A process waits on one port (`port_receive`) or on its *set*, up to 32
+ports of its own that `port_set` names (calls 300 to 302, in
+[System calls](syscalls.md)). The kernel keeps each process's set in
+`Ipc`, by pid, and numbers every message as it is queued on any port,
+so a receive on the set takes the lowest numbered of the messages first
+in their ports' queues, the oldest across them, and a busy port starves
+none. A process waiting on its set is `ReceivingSet`, which `proc_info`
+gives as `state_receiving_set`, 10, its detail how many ports the set
+holds, and `ps` as "waiting for a message on N ports". A send to any
+port of the set wakes it, given the oldest message, which may be
+another port's; a send to a port outside it does not. A port closed
+leaves its owner's set, and a set goes with its process. The kernel
+writes the message as a receive on one port does, the sender's pid and
+the payload, and then the port, a u32.
+
+A name stays registered until its owner exits, or lets it go with
+`name_unregister` (call 303), which only a process owning the name's
+port may do; it is free for `name_register` at once.
 
 ## The kernel's log
 
@@ -412,6 +433,12 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
   after an image is loaded: neither the kernel nor L0 has a way to.
   QEMU keeps the two coherent, so this is fine there, but a board that
   does not would run stale instructions.
+- **A process has one set of ports**, of at most 32: a library that
+  waits on ports of its own beside a program's must share the program's
+  set, and a set changed is given whole again. A receive on a set
+  copies the message once in the process, to drop the port after it
+  (`set_message_of`), since `supervisor_receive` gives back one range of
+  bytes and no word beside it.
 - A failed receive reports no reason. `supervisor_receive` gives no bytes
   when the kernel's word is negative (spec §6.15), so `RecvFailed` stands
   for every failure, and for no message yet.

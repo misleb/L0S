@@ -1,24 +1,30 @@
 ; ipc.l0 -- ports, their queues of messages, the names they are
-; registered under, and the volumes mounted from them. Pure: the kernel
-; copies messages in and out of processes, and this decides what is
-; where.
+; registered under, the volumes mounted from them, and the sets of ports
+; processes wait on. Pure: the kernel copies messages in and out of
+; processes, and this decides what is where.
 
 ; A message: the pid that sent it, 0 for the kernel, and its payload.
 (data Msg (Msg int bytes))
 
+; A message as a port's queue holds it: the number it was queued as,
+; counting every message queued on any port, so the oldest waiting
+; across several ports is the lowest; and the message.
+(data QMsg (QMsg int Msg))
+
 ; A port: the pid that owns it, the only one that may receive on it, the
 ; messages waiting, oldest first, and the pids waiting for room in its
 ; queue, to write to it as a terminal.
-(data Port (Port int (Queue Msg) (list int)))
+(data Port (Port int (Queue QMsg) (list int)))
 
 ; Every live port by number, every name's port, the mount table
-; (mounts.l0), and the next number.
-(data Ipc (Ipc (Map int Port) (Map (list int) int) (list Mount) int))
+; (mounts.l0), the next port's number, the next message's, and each
+; process's set of ports to wait on, by pid.
+(data Ipc (Ipc (Map int Port) (Map (list int) int) (list Mount) int int (Map int (list int))))
 
-; The state at boot: no ports, no names, the initramfs alone mounted, and
-; port 1 next.
+; The state at boot: no ports, no names, the initramfs alone mounted,
+; port 1 next, message 1 next, and no sets.
 (def ipc_new () Ipc
-  (Ipc ((MapEmpty int Port)) ((MapEmpty (list int) int)) (mounts_new) 1))
+  (Ipc ((MapEmpty int Port)) ((MapEmpty (list int) int)) (mounts_new) 1 1 ((MapEmpty int (list int)))))
 
 ; A port made: its number, and ipc with it.
 (data NewPort (NewPort int Ipc))
@@ -26,13 +32,13 @@
 ; A new empty port that owner owns, numbered next.
 (def ipc_port_new ((ipc Ipc) (owner int)) NewPort
   (match ipc
-    ((Ipc ports names mounts next)
-      (NewPort next (Ipc (map_put ports next (Port owner (Queue (nil Msg) (nil Msg)) (nil int))) names mounts (add next 1))))))
+    ((Ipc ports names mounts next seq sets)
+      (NewPort next (Ipc (map_put ports next (Port owner (Queue (nil QMsg) (nil QMsg)) (nil int))) names mounts (add next 1) seq sets)))))
 
 ; The pid owning port, or -1 if there is no such port.
 (def ipc_owner ((ipc Ipc) (port int)) int
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (map_get ports port)
         ((Some p) (match p ((Port owner q bs) owner)))
         ((None) -1)))))
@@ -41,57 +47,64 @@
 ; with ipc as it was, code err_no_port or err_full.
 (data Sent (Sent Ipc) (SendFailed int Ipc))
 
-; Adding msg to port's queue: refused if there is no such port, or if it
-; already holds queue_limit messages.
+; Adding msg to port's queue, numbered the next message: refused if there
+; is no such port, or if it already holds queue_limit messages.
 (def ipc_enqueue ((ipc Ipc) (port int) (msg Msg)) Sent
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (map_get ports port)
-        ((None) (SendFailed (err_no_port) (Ipc ports names mounts next)))
+        ((None) (SendFailed (err_no_port) (Ipc ports names mounts next seq sets)))
         ((Some p)
           (match p
             ((Port owner q bs)
               (if (ge (queue_size q) (queue_limit))
-                  (SendFailed (err_full) (Ipc ports names mounts next))
-                  (Sent (Ipc (map_put ports port (Port owner (queue_push q msg) bs)) names mounts next))))))))))
+                  (SendFailed (err_full) (Ipc ports names mounts next seq sets))
+                  (Sent (Ipc (map_put ports port (Port owner (queue_push q (QMsg seq msg)) bs)) names mounts next (add seq 1) sets))))))))))
 
-; The oldest message waiting on port, if there is one.
-(def ipc_peek ((ipc Ipc) (port int)) (Option Msg)
+; The oldest message waiting on port, with the number it was queued as,
+; if there is one.
+(def ipc_peek_q ((ipc Ipc) (port int)) (Option QMsg)
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (map_get ports port)
-        ((None) ((None Msg)))
+        ((None) ((None QMsg)))
         ((Some p)
           (match p
             ((Port owner q bs)
               (match (queue_pop q)
                 ((Popped m rest) (Some m))
-                ((PopEmpty) ((None Msg)))))))))))
+                ((PopEmpty) ((None QMsg)))))))))))
+
+; The oldest message waiting on port, if there is one.
+(def ipc_peek ((ipc Ipc) (port int)) (Option Msg)
+  (match (ipc_peek_q ipc port)
+    ((Some qm) (match qm ((QMsg n m) (Some m))))
+    ((None) ((None Msg)))))
 
 ; ipc without the oldest message waiting on port.
 (def ipc_drop ((ipc Ipc) (port int)) Ipc
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (map_get ports port)
-        ((None) (Ipc ports names mounts next))
+        ((None) (Ipc ports names mounts next seq sets))
         ((Some p)
           (match p
             ((Port owner q bs)
               (match (queue_pop q)
-                ((Popped m rest) (Ipc (map_put ports port (Port owner rest bs)) names mounts next))
-                ((PopEmpty) (Ipc ports names mounts next))))))))))
+                ((Popped m rest) (Ipc (map_put ports port (Port owner rest bs)) names mounts next seq sets))
+                ((PopEmpty) (Ipc ports names mounts next seq sets))))))))))
 
 ; ipc with pid waiting for room in port's queue; as it was if there is no
 ; such port.
 (def ipc_block ((ipc Ipc) (port int) (pid int)) Ipc
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (map_get ports port)
-        ((None) (Ipc ports names mounts next))
+        ((None) (Ipc ports names mounts next seq sets))
         ((Some p)
           (match p
             ((Port owner q bs)
-              (Ipc (map_put ports port (Port owner q (if (any_eq pid bs) bs (cons pid bs)))) names mounts next))))))))
+              (Ipc (map_put ports port (Port owner q (if (any_eq pid bs) bs (cons pid bs)))) names mounts next seq sets))))))))
 
 ; The pids waiting for room in port's queue, oldest first, and ipc with
 ; none waiting.
@@ -101,24 +114,24 @@
 ; no such port.
 (def ipc_unblock_all ((ipc Ipc) (port int)) Unblocked
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (map_get ports port)
-        ((None) (Unblocked (nil int) (Ipc ports names mounts next)))
+        ((None) (Unblocked (nil int) (Ipc ports names mounts next seq sets)))
         ((Some p)
           (match p
             ((Port owner q bs)
               (if (is_empty bs)
-                  (Unblocked bs (Ipc ports names mounts next))
-                  (Unblocked (rev bs) (Ipc (map_put ports port (Port owner q (nil int))) names mounts next))))))))))
+                  (Unblocked bs (Ipc ports names mounts next seq sets))
+                  (Unblocked (rev bs) (Ipc (map_put ports port (Port owner q (nil int))) names mounts next seq sets))))))))))
 
 ; The ports pid owns.
 (def ipc_owned ((ipc Ipc) (pid int)) (list int)
-  (match ipc ((Ipc ports names mounts next) (owned_by ports (map_keys ports) pid (nil int)))))
+  (match ipc ((Ipc ports names mounts next seq sets) (owned_by ports (map_keys ports) pid (nil int)))))
 
 ; The pids waiting for room on any port pid owns.
 (def ipc_blocked_by ((ipc Ipc) (pid int)) (list int)
   (match ipc
-    ((Ipc ports names mounts next) (blocked_on ports (owned_by ports (map_keys ports) pid (nil int)) (nil int)))))
+    ((Ipc ports names mounts next seq sets) (blocked_on ports (owned_by ports (map_keys ports) pid (nil int)) (nil int)))))
 
 ; The pids waiting for room on each of the ports keys, onto acc.
 (def blocked_on ((ports (Map int Port)) (keys (list int)) (acc (list int))) (list int)
@@ -128,6 +141,8 @@
                   (match (map_get ports (head keys))
                     ((Some p) (match p ((Port owner q bs) (append bs acc))))
                     ((None) acc)))))
+
+; ------------------------------------------------------------- names
 
 ; Registering name for port on behalf of pid: the call's result, and ipc
 ; after it.
@@ -139,38 +154,120 @@
   (if (not (eq (ipc_owner ipc port) pid))
       (Registered (err_no_port) ipc)
       (match ipc
-        ((Ipc ports names mounts next)
+        ((Ipc ports names mounts next seq sets)
           (if (map_has names name)
-              (Registered (err_taken) (Ipc ports names mounts next))
-              (Registered 0 (Ipc ports (map_put names name port) mounts next)))))))
+              (Registered (err_taken) (Ipc ports names mounts next seq sets))
+              (Registered 0 (Ipc ports (map_put names name port) mounts next seq sets)))))))
+
+; name unregistered on behalf of pid, free at once for ipc_register: 0,
+; err_no_port if no port is registered as name, or err_denied if its
+; port is not pid's.
+(def ipc_unregister ((ipc Ipc) (pid int) (name (list int))) Registered
+  (match ipc
+    ((Ipc ports names mounts next seq sets)
+      (match (map_get names name)
+        ((None) (Registered (err_no_port) (Ipc ports names mounts next seq sets)))
+        ((Some port)
+          (if (eq (ipc_owner (Ipc ports names mounts next seq sets) port) pid)
+              (Registered 0 (Ipc ports (map_remove names name) mounts next seq sets))
+              (Registered (err_denied) (Ipc ports names mounts next seq sets))))))))
 
 ; The port registered as name, or err_no_port.
 (def ipc_lookup ((ipc Ipc) (name (list int))) int
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (map_get names name)
         ((Some port) port)
         ((None) (err_no_port))))))
 
-; ipc without pid's ports, their messages, and the names and volumes
-; they had.
+; ------------------------------------------------------------- sets
+
+; pid's set of ports to wait on, given as ports: 0, err_too_big if it
+; holds none or more than port_set_limit, or err_no_port if any of them
+; is not pid's, the set then as it was.
+(def ipc_set_ports ((ipc Ipc) (pid int) (set (list int))) Registered
+  (if (if (is_empty set) true (gt (length set) (port_set_limit)))
+      (Registered (err_too_big) ipc)
+      (if (not (all_owned ipc pid set))
+          (Registered (err_no_port) ipc)
+          (match ipc
+            ((Ipc ports names mounts next seq sets)
+              (Registered 0 (Ipc ports names mounts next seq (map_put sets pid set))))))))
+
+; Whether every port of set is pid's.
+(def all_owned ((ipc Ipc) (pid int) (set (list int))) bool
+  (if (is_empty set)
+      true
+      (if (eq (ipc_owner ipc (head set)) pid) (all_owned ipc pid (tail set)) false)))
+
+; pid's set of ports to wait on, empty if it has none.
+(def ipc_set_of ((ipc Ipc) (pid int)) (list int)
+  (match ipc
+    ((Ipc ports names mounts next seq sets)
+      (match (map_get sets pid)
+        ((Some set) set)
+        ((None) (nil int))))))
+
+; Which of the ports set holds the oldest message waiting across them,
+; the lowest numbered; None if no message waits on any.
+(def ipc_oldest ((ipc Ipc) (set (list int))) (Option int)
+  (oldest_of ipc set -1 -1))
+
+; The rest of ipc_oldest: best the port with the oldest message so far,
+; numbered n, -1 for none yet.
+(def oldest_of ((ipc Ipc) (set (list int)) (best int) (n int)) (Option int)
+  (if (is_empty set)
+      (if (lt best 0) ((None int)) (Some best))
+      (match (ipc_peek_q ipc (head set))
+        ((None) (oldest_of ipc (tail set) best n))
+        ((Some qm)
+          (match qm
+            ((QMsg m msg)
+              (if (if (lt best 0) true (lt m n))
+                  (oldest_of ipc (tail set) (head set) m)
+                  (oldest_of ipc (tail set) best n))))))))
+
+; sets with port dropped from pid's set, which goes when it is left
+; empty.
+(def set_without ((sets (Map int (list int))) (pid int) (port int)) (Map int (list int))
+  (match (map_get sets pid)
+    ((None) sets)
+    ((Some set)
+      (let left (filter_ne set port (nil int))
+        (if (is_empty left) (map_remove sets pid) (map_put sets pid left))))))
+
+; xs without every x equal to port, in order, onto the reversed acc.
+(def filter_ne ((xs (list int)) (port int) (acc (list int))) (list int)
+  (if (is_empty xs)
+      (rev acc)
+      (filter_ne (tail xs) port (if (eq (head xs) port) acc (cons (head xs) acc)))))
+
+; ------------------------------------------------------------- endings
+
+; ipc without pid's ports, their messages, the names and volumes they
+; had, and pid's set.
 (def ipc_forget ((ipc Ipc) (pid int)) Ipc
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (let dead (owned_by ports (map_keys ports) pid (nil int))
-        (Ipc (remove_ports ports dead) (remove_names names (map_keys names) dead) (mounts_without mounts dead) next)))))
+        (Ipc (remove_ports ports dead) (remove_names names (map_keys names) dead) (mounts_without mounts dead) next seq
+             (map_remove sets pid))))))
 
-; ipc without port, which pid owns, and its messages: a port the kernel
-; made for pid to take one reply on. As it was if pid does not own it.
+; ipc without port, which pid owns, and its messages, and with it dropped
+; from pid's set: a port the kernel made for pid to take one reply on.
+; As it was if pid does not own it.
 (def ipc_close ((ipc Ipc) (pid int) (port int)) Ipc
   (if (not (eq (ipc_owner ipc port) pid))
       ipc
       (match ipc
-        ((Ipc ports names mounts next) (Ipc (map_remove ports port) names mounts next)))))
+        ((Ipc ports names mounts next seq sets)
+          (Ipc (map_remove ports port) names mounts next seq (set_without sets pid port))))))
+
+; ------------------------------------------------------------- volumes
 
 ; The mount table.
 (def ipc_mounts ((ipc Ipc)) (list Mount)
-  (match ipc ((Ipc ports names mounts next) mounts)))
+  (match ipc ((Ipc ports names mounts next seq sets) mounts)))
 
 ; Mounting the volume label, of the partition uuid, from port on behalf
 ; of pid: the call's result, 0, err_no_port if the port is not pid's, or
@@ -179,10 +276,10 @@
   (if (not (eq (ipc_owner ipc port) pid))
       (Registered (err_no_port) ipc)
       (match ipc
-        ((Ipc ports names mounts next)
+        ((Ipc ports names mounts next seq sets)
           (match (mount_add mounts label uuid port)
-            ((MountAdded m2) (Registered 0 (Ipc ports names m2 next)))
-            ((MountRefused code) (Registered code (Ipc ports names mounts next))))))))
+            ((MountAdded m2) (Registered 0 (Ipc ports names m2 next seq sets)))
+            ((MountRefused code) (Registered code (Ipc ports names mounts next seq sets))))))))
 
 ; Unmounting the volume label, mounted from port, on behalf of pid: the
 ; call's result, 0, err_no_port if the port is not pid's, or
@@ -191,18 +288,18 @@
   (if (not (eq (ipc_owner ipc port) pid))
       (Registered (err_no_port) ipc)
       (match ipc
-        ((Ipc ports names mounts next)
+        ((Ipc ports names mounts next seq sets)
           (match (mount_remove mounts label port)
-            ((MountAdded m2) (Registered 0 (Ipc ports names m2 next)))
-            ((MountRefused code) (Registered code (Ipc ports names mounts next))))))))
+            ((MountAdded m2) (Registered 0 (Ipc ports names m2 next seq sets)))
+            ((MountRefused code) (Registered code (Ipc ports names mounts next seq sets))))))))
 
 ; The volume label made /: 0, or mount_root's refusal; and ipc after it.
 (def ipc_root ((ipc Ipc) (label (list int))) Registered
   (match ipc
-    ((Ipc ports names mounts next)
+    ((Ipc ports names mounts next seq sets)
       (match (mount_root mounts label)
-        ((MountAdded m2) (Registered 0 (Ipc ports names m2 next)))
-        ((MountRefused code) (Registered code (Ipc ports names mounts next)))))))
+        ((MountAdded m2) (Registered 0 (Ipc ports names m2 next seq sets)))
+        ((MountRefused code) (Registered code (Ipc ports names mounts next seq sets)))))))
 
 ; Those of the ports keys that pid owns, onto acc.
 (def owned_by ((ports (Map int Port)) (keys (list int)) (pid int) (acc (list int))) (list int)
