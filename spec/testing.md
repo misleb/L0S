@@ -258,6 +258,10 @@ are from `run windows` at the serial shell. Then:
   pointer did;
 - `run cat /etc/inittab` typed into it three times, more than its 24
   rows: it scrolls, and the prompt's cursor ends on its last row;
+- a step of the wheel up over it: the view goes three rows back, drawn
+  from its cells, with the toolkit's overlay scrollbar along its right;
+  Backspace typed brings it back to the bottom, the slider gone and the
+  cursor on the last row again;
 - `exit` typed into it: its shell ends, and so does its `vt`, which
   closes the window. `run windows` shows only the other, in front, and
   `ps` shows neither process;

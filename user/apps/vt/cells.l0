@@ -1,0 +1,133 @@
+; cells.l0 -- what a terminal shows, kept as bytes: its screen, a row of
+; cells each, a cell a byte, a space where nothing is; a mark on each row
+; that a wrap ended, not a newline; and a ring of the rows scrolled off
+; its top, the last ring_max of them, oldest first. vt.l0's ops change
+; them as they change the window's pixels, so that what scrolled away can
+; be shown again, and wrapped again at another width.
+
+; The most rows kept once scrolled off the screen.
+(def ring_max () int 10000)
+
+; The rows scrolled off: ring_max slots, the oldest's slot, and how many
+; there are. Each is a row as ring_row_of keeps it.
+(data Ring (Ring (array bytes) int int))
+
+; No row scrolled off yet.
+(def ring_new () Ring (Ring (array_new (ring_max) (bytes_from_list "")) 0 0))
+
+; How many rows the ring holds.
+(def ring_count ((r Ring)) int (match r ((Ring slots start n) n)))
+
+; r with row added after its newest, the oldest dropped once it is full.
+(def ring_push ((r Ring) (row bytes)) Ring
+  (match r
+    ((Ring slots start n)
+      (if (lt n (ring_max))
+          (Ring (array_set slots (mod (add start n) (ring_max)) row) start (add n 1))
+          (Ring (array_set slots start row) (mod (add start 1) (ring_max)) n)))))
+
+; Row i of r, 0 the oldest, as ring_row_of keeps it.
+(def ring_get ((r Ring) (i int)) bytes
+  (match r ((Ring slots start n) (array_get slots (mod (add start i) (ring_max))))))
+
+; A row as the ring keeps it: its mark first, 1 if a wrap ended it, then
+; its cells, all of them if it was wrapped, else up to its last that is
+; not a space, since a newline's row ends where its text does.
+(def ring_row_of ((row bytes) (wrapped bool)) bytes
+  (if wrapped
+      (bytes_concat (cons (bytes_from_list (cons 1 (nil int))) (cons row (nil bytes))))
+      (bytes_concat (cons (bytes_from_list (cons 0 (nil int))) (cons (bytes_slice row 0 (row_used row)) (nil bytes))))))
+
+; How many of row's cells are used: up to its last that is not a space.
+(def row_used ((row bytes)) int (row_used_from row (bytes_len row)))
+
+; row_used's loop: the cells before n are all that may be used.
+(def row_used_from ((row bytes) (n int)) int
+  (if (eq n 0) 0 (if (eq (bytes_get row (sub n 1)) 32) (row_used_from row (sub n 1)) n)))
+
+; ---------------------------------------------------------------- screen
+
+; The cells: columns and rows; the screen's rows, each cols bytes, in
+; slots that are a ring of their own, so scrolling moves none: row r is in
+; slot (top + r) mod rows; each slot's mark, 1 if a wrap ended its row;
+; top; and the ring of rows scrolled off.
+(data Cells (Cells int int (array bytes) (array int) int Ring))
+
+; A blank row of n cells.
+(def blank_row ((n int)) bytes (bytes_from_list (spaces n)))
+
+; A screen cols by rows, blank, with nothing scrolled off.
+(def cells_new ((cols int) (rows int)) Cells
+  (Cells cols rows (array_new rows (blank_row cols)) (array_new rows 0) 0 (ring_new)))
+
+; Its columns, its rows, and how many rows have scrolled off.
+(def cells_cols ((c Cells)) int (match c ((Cells cols rows slots marks top ring) cols)))
+(def cells_rows ((c Cells)) int (match c ((Cells cols rows slots marks top ring) rows)))
+(def cells_back ((c Cells)) int (match c ((Cells cols rows slots marks top ring) (ring_count ring))))
+
+; The slot of screen row r.
+(def cells_slot ((c Cells) (r int)) int
+  (match c ((Cells cols rows slots marks top ring) (mod (add top r) rows))))
+
+; Screen row r's cells, all cols of them, and whether a wrap ended it.
+(def cells_row ((c Cells) (r int)) bytes
+  (match c ((Cells cols rows slots marks top ring) (array_get slots (mod (add top r) rows)))))
+(def cells_wrapped ((c Cells) (r int)) bool
+  (match c ((Cells cols rows slots marks top ring) (eq (array_get marks (mod (add top r) rows)) 1))))
+
+; c with run's characters in row r from column col, as many as fit.
+(def cells_put ((c Cells) (col int) (r int) (run (list int))) Cells
+  (match c
+    ((Cells cols rows slots marks top ring)
+      (if (if (ge col cols) true (if (lt r 0) true (ge r rows)))
+          (Cells cols rows slots marks top ring)
+          (let s (mod (add top r) rows)
+            (let n (min (length run) (sub cols col))
+              (let old (array_get slots s)
+                (let row (bytes_concat (cons (bytes_slice old 0 col)
+                                       (cons (bytes_from_list (take run n))
+                                       (cons (bytes_slice old (add col n) cols) (nil bytes)))))
+                  (Cells cols rows (array_set slots s row) marks top ring)))))))))
+
+; c with row r ended: by a wrap if wrapped, else by a newline.
+(def cells_end ((c Cells) (r int) (wrapped bool)) Cells
+  (match c
+    ((Cells cols rows slots marks top ring)
+      (if (if (lt r 0) true (ge r rows))
+          (Cells cols rows slots marks top ring)
+          (Cells cols rows slots (array_set marks (mod (add top r) rows) (if wrapped 1 0)) top ring)))))
+
+; c scrolled a row up: its top row, with its mark, onto the ring, and a
+; blank row at its foot in its slot.
+(def cells_scroll ((c Cells)) Cells
+  (match c
+    ((Cells cols rows slots marks top ring)
+      (let row (array_get slots top)
+        (let m (array_get marks top)
+          (Cells cols rows (array_set slots top (blank_row cols)) (array_set marks top 0) (mod (add top 1) rows)
+                 (ring_push ring (ring_row_of row (eq m 1)))))))))
+
+; ------------------------------------------------------------------ lines
+
+; A row of all the cells have, scrolled off or on the screen: its
+; characters, as line_chars says, and whether a wrap ended it.
+(data Line (Line bytes bool))
+
+; Row i of every row the cells have, the oldest scrolled off first, the
+; screen's after them: cells_back of them, then cells_rows.
+(def cells_line ((c Cells) (i int)) Line
+  (let n (cells_back c)
+    (if (lt i n)
+        (match c
+          ((Cells cols rows slots marks top ring)
+            (let b (ring_get ring i)
+              (Line (bytes_slice b 1 (bytes_len b)) (eq (bytes_get b 0) 1)))))
+        (let row (cells_row c (sub i n))
+          (if (cells_wrapped c (sub i n))
+              (Line row true)
+              (Line (bytes_slice row 0 (row_used row)) false))))))
+
+; A line's characters, all its cells if a wrap ended it, else those it
+; uses; and whether a wrap ended it.
+(def line_chars ((l Line)) bytes (match l ((Line b w) b)))
+(def line_wrapped ((l Line)) bool (match l ((Line b w) w)))

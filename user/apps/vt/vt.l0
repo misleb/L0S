@@ -17,7 +17,8 @@
 ; it: the display shows it from where vt draws. Scrolling moves the
 ; buffer's top row, so it copies nothing either. At the desktop's scale
 ; 2 a cell is still 8 by 16 of the desktop's pixels, 16 by 32 of its
-; buffer's, and its characters are the face's (face.l0), smooth.
+; buffer's, and its characters are the face's (face.l0), smooth. What it
+; draws it also keeps, as cells (cells.l0), with the rows scrolled off.
 
 ; Its colors are the toolkit's for a terminal, GNOME Console's.
 (def ground () int (ui_term_bg))
@@ -35,8 +36,9 @@
 
 ; What drawing bytes written at the terminal takes, in the window's own
 ; cells: a run of characters from a cell, a cell blanked, a line scrolled
-; up, and the cursor drawn or erased at a cell.
-(data Op (OpText int int (list int)) (OpBlank int int) (OpScroll) (OpCursor int int bool))
+; up, the cursor drawn or erased at a cell, and a row ended, by a wrap if
+; true, else by a newline, which draws nothing but marks the cells.
+(data Op (OpText int int (list int)) (OpBlank int int) (OpScroll) (OpCursor int int bool) (OpEnd int bool))
 
 ; The ops that show bytes, and where the cursor is after them.
 (data Rendered (Rendered Term (list Op)))
@@ -59,7 +61,7 @@
               (wrapped t b rest run start ops)
               (render_onto (Term (add col 1) row cols rows) rest (cons b run) (if (is_empty run) col start) ops))
           (let done (flush_run t run start ops)
-            (if (eq b 10) (newline t rest done)
+            (if (eq b 10) (newline t rest done false)
             (if (eq b 13) (render_onto (Term 0 row cols rows) rest (nil int) 0 done)
             (if (eq b 9) (render_onto t (append (spaces (sub 8 (mod col 8))) rest) (nil int) 0 done)
             (if (eq b 8) (backed t rest done)
@@ -67,15 +69,17 @@
 
 ; Past the last column: the next line, then the character.
 (def wrapped ((t Term) (b int) (rest (list int)) (run (list int)) (start int) (ops (list Op))) Rendered
-  (newline t (cons b rest) (flush_run t run start ops)))
+  (newline t (cons b rest) (flush_run t run start ops) true))
 
-; The next line's start, scrolling a line up from the last.
-(def newline ((t Term) (rest (list int)) (ops (list Op))) Rendered
+; The next line's start, scrolling a line up from the last; the row left
+; ended by a wrap if wrap, else by a newline.
+(def newline ((t Term) (rest (list int)) (ops (list Op)) (wrap bool)) Rendered
   (match t
     ((Term col row cols rows)
-      (if (ge (add row 1) rows)
-          (render_onto (Term 0 row cols rows) rest (nil int) 0 (cons (OpScroll) ops))
-          (render_onto (Term 0 (add row 1) cols rows) rest (nil int) 0 ops)))))
+      (let ended (cons (OpEnd row wrap) ops)
+        (if (ge (add row 1) rows)
+            (render_onto (Term 0 row cols rows) rest (nil int) 0 (cons (OpScroll) ended))
+            (render_onto (Term 0 (add row 1) cols rows) rest (nil int) 0 ended))))))
 
 ; Back one column, and that cell blanked, as a Backspace's echo needs.
 (def backed ((t Term) (rest (list int)) (ops (list Op))) Rendered
@@ -121,7 +125,88 @@
       ((OpScroll) (scrolled c (mul (cell_h) s) (ground)))
       ((OpCursor col row on)
         (ui_draw_fill c (Rect (mul col (cell_w)) (add (mul row (cell_h)) (sub (cell_h) 1)) (cell_w) 1)
-                      (if on (cursor_color) (ground)) s)))))
+                      (if on (cursor_color) (ground)) s))
+      ((OpEnd row wrap) c))))
+
+; The cells after ops: what they draw kept, and rows' ends marked.
+(def cells_after ((cl Cells) (ops (list Op))) Cells
+  (if (is_empty ops)
+      cl
+      (cells_after
+        (match (head ops)
+          ((OpText col row cs) (cells_put cl col row cs))
+          ((OpBlank col row) (cells_put cl col row " "))
+          ((OpScroll) (cells_scroll cl))
+          ((OpCursor col row on) cl)
+          ((OpEnd row wrap) (cells_end cl row wrap)))
+        (tail ops))))
+
+; How many rows ops scroll up.
+(def scrolls ((ops (list Op))) int (scrolls_onto ops 0))
+
+; scrolls's loop: n so far.
+(def scrolls_onto ((ops (list Op)) (n int)) int
+  (if (is_empty ops)
+      n
+      (scrolls_onto (tail ops)
+        (match (head ops)
+          ((OpScroll) (add n 1))
+          ((OpText col row cs) n) ((OpBlank col row) n) ((OpCursor col row on) n) ((OpEnd row wrap) n)))))
+
+; ---------------------------------------------------------------- the view
+
+; How many rows a step of the wheel scrolls.
+(def wheel_rows () int 3)
+
+; How far back the view is after dy steps of the wheel, down positive,
+; from back: wheel_rows a step, no further than the cells have rows
+; scrolled off, nor past the bottom.
+(def wheeled_back ((back int) (dy int) (most int)) int
+  (max 0 (min most (sub back (mul dy (wheel_rows))))))
+
+; How far back the view is once the screen has scrolled n rows under it,
+; as output does while it is back: as far again, so that it shows what it
+; did, unless that has gone from the ring.
+(def kept_back ((back int) (n int) (most int)) int
+  (if (eq back 0) 0 (min most (add back n))))
+
+; The view back rows above the screen drawn from the cells, as many rows
+; as the screen has; the cursor, if its row is in view; and, while the
+; view is back, the toolkit's overlay scrollbar along its right.
+(def view_drawn ((c Canvas) (face UiFace) (cl Cells) (t Term) (back int)) Canvas
+  (let c2 (rows_drawn c face cl back 0 (cells_rows cl))
+    (let c3 (if (lt (add (term_row t) back) (cells_rows cl))
+                (draw_op c2 face (OpCursor (term_col t) (add (term_row t) back) true))
+                c2)
+      (if (eq back 0) c3 (scrollbar_drawn c3 face cl back)))))
+
+; The view's rows from v up to n drawn.
+(def rows_drawn ((c Canvas) (face UiFace) (cl Cells) (back int) (v int) (n int)) Canvas
+  (if (ge v n) c (rows_drawn (row_drawn c face cl back v) face cl back (add v 1) n)))
+
+; Row v of the view drawn: its ground, then the characters of the row of
+; the cells it shows.
+(def row_drawn ((c Canvas) (face UiFace) (cl Cells) (back int) (v int)) Canvas
+  (let l (cells_line cl (add (sub (cells_back cl) back) v))
+    (let y (mul v (cell_h))
+      (let c2 (ui_draw_fill c (Rect 0 y (mul (cells_cols cl) (cell_w)) (cell_h)) (ground) (ui_face_scale face))
+        (ui_draw_text c2 face 0 y (ink) -1 (bytes_to_list (line_chars l)))))))
+
+; The toolkit's overlay scrollbar (grid.l0's ui_scrollbar_on) painted
+; over the view's right edge: its slider as long as the share of the rows
+; the view shows, as far down as the view is.
+(def scrollbar_drawn ((c Canvas) (face UiFace) (cl Cells) (back int)) Canvas
+  (let rows (cells_rows cl)
+    (let w (mul (cells_cols cl) (cell_w))
+      (nodes_painted c face (Rect 0 0 w (mul rows (cell_h)))
+        (ui_scrollbar_on "term" 0 w 0 (cell_h) (add (cells_back cl) rows) rows (sub (cells_back cl) back)
+                         (ui_state_new (ui_style)) (ground) (nil UiNode))))))
+
+; Each of ns's ops painted, cut to clip.
+(def nodes_painted ((c Canvas) (face UiFace) (clip Rect) (ns (list UiNode))) Canvas
+  (if (is_empty ns)
+      c
+      (match (head ns) ((UiNode r ops a f) (nodes_painted (ui_paint c face clip ops) face clip (tail ns))))))
 
 ; The window's top row, as the compositor counts it: the desktop's.
 (def logical_top ((c Canvas) (face UiFace)) int (div (canvas_top c) (ui_face_scale face)))
@@ -129,8 +214,9 @@
 ; ---------------------------------------------------------------- serving
 
 ; The terminal: the compositor, its window's id, the window's canvas, the
-; face, the cursor, and the line editing.
-(data Vt (Vt Compositor int Canvas UiFace Term Console))
+; face, the cursor, the cells (cells.l0), how many rows above the screen
+; the view is, 0 at the bottom, and the line editing.
+(data Vt (Vt Compositor int Canvas UiFace Term Cells int Console))
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "vt" why))
@@ -204,7 +290,10 @@
     ((WindowOpened id)
       (match (shell_started name port)
         ((NoShell why) (let x (window_close c id) (complain why)))
-        ((ShellRunning sh) (serve port sh (shown_v (Vt c id canvas font t (console_new)) (nil int))))))))
+        ((ShellRunning sh) (serve port sh (shown_v (Vt c id canvas font t (term_cells t) 0 (console_new)) (nil int))))))))
+
+; Blank cells as many as t has columns and rows.
+(def term_cells ((t Term)) Cells (match t ((Term col row cols rows) (cells_new cols rows))))
 
 ; What starting the shell came to: its pid, watched; or why not.
 (data Shell (ShellRunning int) (NoShell (list int)))
@@ -238,48 +327,84 @@
       ((RecvFailed) (complain "lost its port"))
       ((Message from b)
         (if (eq from (vt_wm_pid v))
-            (match (key_event_of m)
-              ((Some ev) (serve port sh (keyed v ev)))
-              ((None) (serve port sh v)))
+            (serve port sh (from_wm v m))
             (match (exit_of m)
               ((Exited pid status)
                 (if (eq pid sh) (closed v status) (serve port sh v)))
               ((NotExit) (serve port sh (requested v (msg_text b))))))))))
 
 (def closed ((v Vt) (status int)) int
-  (match v ((Vt c id canvas font t con) (let x (window_close c id) status))))
+  (match v ((Vt c id canvas font t cl back con) (let x (window_close c id) status))))
 
-(def vt_wm_pid ((v Vt)) int (match v ((Vt c id canvas font t con) (compositor_pid c))))
+(def vt_wm_pid ((v Vt)) int (match v ((Vt c id canvas font t cl back con) (compositor_pid c))))
+
+; What the compositor sent, m: a key, or the wheel; anything else does
+; nothing.
+(def from_wm ((v Vt) (m Message)) Vt
+  (match (key_event_of m)
+    ((Some ev) (keyed v ev))
+    ((None)
+      (match (wheel_event_of m)
+        ((Some e) (match e ((WheelEvent x y dx dy) (scrolled_back v dy))))
+        ((None) v)))))
+
+; v with the view dy steps of the wheel further down, up below 0: drawn
+; from the cells and the window told, if it moved.
+(def scrolled_back ((v Vt) (dy int)) Vt
+  (match v
+    ((Vt c id canvas font t cl back con)
+      (let b (wheeled_back back dy (cells_back cl))
+        (if (eq b back) v (viewed (Vt c id canvas font t cl b con)))))))
+
+; v's view drawn from its cells, and the window told of all of it.
+(def viewed ((v Vt)) Vt
+  (match v
+    ((Vt c id canvas font t cl back con)
+      (let canvas2 (view_drawn canvas font cl t back)
+        (let d (window_damage c id (Rect 0 0 (ui_logical_w canvas2 font) (ui_logical_h canvas2 font)))
+          (Vt c id canvas2 font t cl back con))))))
 
 ; A key's character fed to the line editing, its echo shown, and any line
-; finished delivered. Esc is not fed: the editing would take it for the
-; start of an escape sequence, and drop the key after it.
+; finished delivered; the view first brought back to the bottom, if it is
+; not there. Esc is not fed: the editing would take it for the start of
+; an escape sequence, and drop the key after it.
 (def keyed ((v Vt) (ev KeyEvent)) Vt
   (match ev
     ((KeyEvent code value ch)
       (if (if (eq value 0) true (if (eq ch 0) true (eq ch 27)))
           v
-          (match v
-            ((Vt c id canvas font t con)
+          (match (at_bottom v)
+            ((Vt c id canvas font t cl back con)
               (match (feed con ch)
-                ((Fed con2 e) (shown_v (Vt c id canvas font t (deliver con2)) e)))))))))
+                ((Fed con2 e) (shown_v (Vt c id canvas font t cl back (deliver con2)) e)))))))))
+
+; v with its view at the bottom, drawn again if it was not.
+(def at_bottom ((v Vt)) Vt
+  (match v
+    ((Vt c id canvas font t cl back con)
+      (if (eq back 0) v (viewed (Vt c id canvas font t cl 0 con))))))
 
 (def requested ((v Vt) (payload (list int))) Vt
   (match v
-    ((Vt c id canvas font t con)
+    ((Vt c id canvas font t cl back con)
       (match (tty_request con payload)
-        ((TtyAsk con2) (Vt c id canvas font t (deliver con2)))
+        ((TtyAsk con2) (Vt c id canvas font t cl back (deliver con2)))
         ((TtyWrite bs) (shown_v v bs))
         ((TtyAnswer to body) (let s (port_send to body) v))))))
 
-; v with bs drawn, the cursor moved, and the window told: its new top if
-; it scrolled, and its damage, the whole of it.
+; v with bs kept in its cells, the cursor moved, and, with the view at
+; the bottom, drawn and the window told: its new top if it scrolled, and
+; its damage, the whole of it. With the view back, nothing is drawn, and
+; the view stays on the rows it shows.
 (def shown_v ((v Vt) (bs (list int))) Vt
   (match v
-    ((Vt c id canvas font t con)
+    ((Vt c id canvas font t cl back con)
       (match (shown_bytes t bs)
         ((Rendered t2 ops)
-          (let canvas2 (drawn canvas font ops)
-            (let s (if (eq (canvas_top canvas2) (canvas_top canvas)) "" (window_top c id (logical_top canvas2 font)))
-              (let d (window_damage c id (Rect 0 0 (ui_logical_w canvas2 font) (ui_logical_h canvas2 font)))
-                (Vt c id canvas2 font t2 con)))))))))
+          (let cl2 (cells_after cl ops)
+            (if (gt back 0)
+                (Vt c id canvas font t2 cl2 (kept_back back (scrolls ops) (cells_back cl2)) con)
+                (let canvas2 (drawn canvas font ops)
+                  (let s (if (eq (canvas_top canvas2) (canvas_top canvas)) "" (window_top c id (logical_top canvas2 font)))
+                    (let d (window_damage c id (Rect 0 0 (ui_logical_w canvas2 font) (ui_logical_h canvas2 font)))
+                      (Vt c id canvas2 font t2 cl2 back con)))))))))))

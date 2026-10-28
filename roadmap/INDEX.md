@@ -43,7 +43,7 @@ move independently, so several can be active at once.
 | [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
 | [0022](0022-pi5-card-complete.md) `install --boot` writes all a Pi 5's card needs | Pi 5 | active | 4/5 | – | pi5.md, programs.md, testing.md |
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
-| [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its scrollback, resizes, and has tabs | Desktop | ready | 0/6 | – | programs.md, desktop.md, toolkit.md, demo.md, testing.md |
+| [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its scrollback, resizes, and has tabs | Desktop | active | 2/6 | – | programs.md, desktop.md, toolkit.md, demo.md, testing.md |
 
 ## Ready
 
@@ -62,8 +62,8 @@ move independently, so several can be active at once.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
   small requests first: 0023, which it needed, is done.
 - [0025](0025-vt-scrollback-resize-tabs.md) Terminal keeps its
-  scrollback, resizes, and has tabs: on QEMU, starting with `vt`
-  keeping its cells, which changes nothing on the screen.
+  scrollback, resizes, and has tabs: on QEMU; `vt` keeps its cells and
+  scrolls back by the wheel, and its own header bar is next.
 
 ## Dependencies
 

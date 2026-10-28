@@ -1,6 +1,6 @@
 # 0025: Terminal keeps its scrollback, resizes, and has tabs
 
-Track: Desktop · Status: ready · Needs: – · Spec: programs.md, desktop.md, toolkit.md, demo.md, testing.md
+Track: Desktop · Status: active · Needs: – · Spec: programs.md, desktop.md, toolkit.md, demo.md, testing.md
 
 ## Why
 
@@ -47,12 +47,12 @@ to put a button in, and the toolkit has no tab bar.
 
 ## Steps
 
-- [ ] The cells: `vt` keeps its screen as rows of bytes, a cell a byte,
+- [x] The cells: `vt` keeps its screen as rows of bytes, a cell a byte,
   with a mark on each row that a wrap, not a newline, ended, and a ring
   of the 10,000 rows scrolled off; `render`'s ops change them as well
   as the buffer. Drawing at the bottom still scrolls by `top`, copying
   nothing. Host tests in `vt_test`; nothing on the screen changes.
-- [ ] Scrollback: the wheel moves the view back through the ring and
+- [x] Scrollback: the wheel moves the view back through the ring and
   forward to the bottom, the view drawn from the cells when it is not
   at the bottom, with `ui_scrollbar`'s overlay while there is more than
   fits; a key typed returns to the bottom; output while scrolled back
@@ -101,3 +101,26 @@ to put a button in, and the toolkit has no tab bar.
   gains that when one does. Tabs are one window, so 0021's windows are
   not needed. A tab is a terminal registered as `vtN`, as a window is
   now, so `sh NAME` and `ps` work on it unchanged.
+- 2026-10-27: the cells (`user/apps/vt/cells.l0`). The screen is an
+  `(array bytes)` of rows, each `cols` bytes, a space for a blank, in
+  slots that are a ring of their own, so a scroll moves no row; each
+  slot's mark in an `(array int)`. The ring of rows scrolled off is
+  `ring_max` (10,000) slots of bytes, each row as it scrolled off: its
+  mark as its first byte, then its cells, all of them if a wrap ended
+  it, else up to its last that is not a space. `render` marks a row's
+  end with a new op, `OpEnd ROW WRAP`, which draws nothing; the ops
+  are applied to the cells in order, as to the canvas. `cells_test`
+  checks, over 200 random texts, that the lines joined at the marks
+  are the lines written.
+- 2026-10-27: scrollback. The view is `back` rows above the screen; the
+  wheel moves it 3 rows a step, as far as the ring goes, and a view
+  that is back is drawn whole from the cells. Its overlay scrollbar is
+  grid.l0's `ui_scrollbar_on`, its node's ops painted by `vt` itself,
+  shown only while the view is back, as GTK's overlay indicator shows
+  only while scrolling; its slider is not dragged, as the goal asks
+  only the wheel. Output while back moves `back` on by the rows it
+  scrolled, so the view keeps its rows; a key with a character brings
+  it back to the bottom and draws it whole. `tests/vt.sh` scrolls the
+  window that has `cat` three times back a step and checks the slider,
+  then Backspace and the cursor. Steps 1 and 2 are one commit, since
+  they share `vt.l0`'s state.

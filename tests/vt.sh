@@ -20,7 +20,9 @@
 #   5. a drag of its title bar: run windows shows it moved as far as the
 #      pointer did
 #   6. run cat /etc/inittab, typed three times into it, more than its 24
-#      rows: it scrolls, and its prompt's cursor is on its last row
+#      rows: it scrolls, and its prompt's cursor is on its last row; a
+#      step of the wheel up shows three rows back, with the overlay
+#      scrollbar, and Backspace typed brings it back to the bottom
 #   7. exit, typed into it: its shell ends, and so its vt, which closes
 #      the window, leaving the other in front
 #   8. a click on that one's close button: its vt is killed, the window
@@ -82,6 +84,8 @@ by() {
 # adds up one batch's moves, so the two are sent apart.
 point() { events "$(by -4000 -4000)"; sleep 1; events "$(by "$1" "$2")"; }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
+# A step of the wheel, wheel-down or wheel-up, as the mouse reports it.
+wheel() { echo "{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"$1\"}},{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"$1\"}}"; }
 
 # Waits up to 30 s for the serial line to show a line matching a pattern.
 waits_for() {
@@ -155,6 +159,9 @@ back_title() {
 # on 1e1e1e, its cursor white too.
 bar=46; edge=2
 active="48 48 48"; backdrop="36 36 36"; ink="255 255 255"; cursor="255 255 255"; stem="194 194 194"
+# The overlay scrollbar's slider: white at 40% over the terminal's
+# 1e1e1e, (255 * 40 + 30 * 60 + 50) / 100.
+thumb="120 120 120"
 
 waits_for "^l0s> "
 windows
@@ -221,6 +228,19 @@ echo "ok - vt: a drag moved $front to $f_x, $f_y"
 # scrolls, and the prompt's cursor is on the last row, row 23.
 for n in 1 2 3; do typekeys "run cat /etc/inittab"; sleep 2; done
 shows "$front scrolled, the prompt on its last row" "$((f_x + edge + 40)) $((f_y + bar + 383)) $cursor"
+
+# A step of the wheel up over it shows the rows scrolled off, three of
+# them, drawn from its cells: the toolkit's overlay scrollbar shows along
+# its right, its slider 6 wide, 3 in, white at 40% over the ground, near
+# its foot, as the view is only three rows back; the cursor's row is now
+# out of view. A key typed, Backspace on the empty line, brings the view
+# back to the bottom: the slider gone, the cursor back.
+point $((f_x + edge + 300)) $((f_y + bar + 200)); sleep 1
+events "$(wheel wheel-up)"; sleep 1
+slider="$((f_x + edge + f_w - 6)) $((f_y + bar + 330))"
+shows "the wheel scrolled $front back, its scrollbar shown" "$slider $thumb"
+monitor "sendkey backspace"
+shows "a key brought $front back to the bottom" "$slider 30 30 30" "$((f_x + edge + 40)) $((f_y + bar + 383)) $cursor"
 
 # exit at its shell ends the shell, and so its vt, which closes its
 # window: the other is left, in front, and ps shows neither process.
