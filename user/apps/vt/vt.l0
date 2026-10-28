@@ -1,24 +1,36 @@
-; vt.l0 -- a terminal in a window: keys typed while its window is in
-; front, which the compositor, user/wm, sends it, edited into lines as the
-; serial line's are, and what is written to it, drawn into the window's
-; buffer in the font's 8 by 16 cells, light on a dark ground, scrolling up
-; a line at the bottom.
+; vt.l0 -- Terminal: terminals in a window, as GNOME Console's, each in a
+; tab of its own. Keys typed while the window is in front, which the
+; compositor, user/wm, sends it, go to the selected tab, edited into lines
+; as the serial line's are; what is written to a tab is kept in its cells
+; (cells.l0) and, if it is the one shown, drawn into the window in the
+; font's 8 by 16 cells, light on a dark ground, scrolling up a line at the
+; bottom.
 ;
-;   vt [COLS ROWS]          80 by 24 cells unless given
+;   vt [COLS ROWS]          a window of 80 by 24 cells unless given
+;   vt tab PORT PID         a tab's relay, which vt starts itself
 ;
-; It names itself, as it starts, the first of vt1, vt2, and so on that no
-; one has registered, and registers as NAME, which is also its title: a
-; terminal as user/lib/tty.l0 says, the same as uart's console: "r" for
-; a line, "i" for Ctrl-C notices, "w" to write. It registers before
-; anything else, so vts the inittab starts take their names in order.
-; Once its window is open it starts its own shell, sh NAME, on it, and
-; when the shell exits, closes the window and exits with its status.
-; Its buffer is memory it shares with the compositor, which never copies
-; it: the display shows it from where vt draws. Scrolling moves the
-; buffer's top row, so it copies nothing either. At the desktop's scale
-; 2 a cell is still 8 by 16 of the desktop's pixels, 16 by 32 of its
-; buffer's, and its characters are the face's (face.l0), smooth. What it
-; draws it also keeps, as cells (cells.l0), with the rows scrolled off.
+; The window draws its own decorations (window.l0's ui_open_csd): the
+; toolkit's header bar, with the selected tab's name as its title and a
+; button that opens a tab, and under it, once there are two tabs or
+; more, a tab bar (nav.l0's UiTabBar), a click on a tab selecting it and
+; its close button closing it. Under them is the terminal, a drawing area
+; vt paints itself. Its edges and its header bar resize and maximize it as
+; any toolkit window's do, and the terminal is then as many cells as fit,
+; every tab's cells wrapped again at the new width (cells_rewrapped).
+;
+; Each tab is a terminal as user/lib/tty.l0 says, the same as uart's
+; console: "r" for a line, "i" for Ctrl-C notices, "w" to write. Its name
+; is the first of vt1, vt2, and so on that no one has registered, held by
+; its relay, a vt of its own that registers it and passes all that is
+; sent to it on to this one, which knows the tab by its relay's pid: a
+; process can wait on only one port, and a name goes only with the process
+; that registered it. Once the relay says its name, vt starts the tab's
+; shell, sh NAME, and watches it: when the shell exits the tab closes, and
+; the window with its last, vt then exiting with that shell's status.
+; The wheel scrolls the selected tab back through what scrolled off it.
+; At the desktop's scale 2 a cell is still 8 by 16 of the desktop's
+; pixels, 16 by 32 of its buffer's, and its characters are the face's
+; (face.l0), smooth.
 
 ; Its colors are the toolkit's for a terminal, GNOME Console's.
 (def ground () int (ui_term_bg))
@@ -34,11 +46,10 @@
 ; Where the next character goes, and how many columns and rows fit.
 (data Term (Term int int int int))
 
-; What drawing bytes written at the terminal takes, in the window's own
-; cells: a run of characters from a cell, a cell blanked, a line scrolled
-; up, the cursor drawn or erased at a cell, and a row ended, by a wrap if
-; true, else by a newline, which draws nothing but marks the cells.
-(data Op (OpText int int (list int)) (OpBlank int int) (OpScroll) (OpCursor int int bool) (OpEnd int bool))
+; What bytes written at the terminal do to its cells: a run of characters
+; from a cell, a cell blanked, a line scrolled up, and a row ended, by a
+; wrap if true, else by a newline.
+(data Op (OpText int int (list int)) (OpBlank int int) (OpScroll) (OpEnd int bool))
 
 ; The ops that show bytes, and where the cursor is after them.
 (data Rendered (Rendered Term (list Op)))
@@ -100,35 +111,8 @@
 (def term_col ((t Term)) int (match t ((Term col row cols rows) (min col (sub cols 1)))))
 (def term_row ((t Term)) int (match t ((Term col row cols rows) row)))
 
-; Everything bytes written take: the cursor erased, the bytes, and the
-; cursor drawn where they leave it.
-(def shown_bytes ((t Term) (bs (list int))) Rendered
-  (match (render t bs)
-    ((Rendered t2 ops)
-      (Rendered t2 (cons (OpCursor (term_col t) (term_row t) false)
-                         (append ops (cons (OpCursor (term_col t2) (term_row t2) true) (nil Op))))))))
-
-; ------------------------------------------------------------------- draw
-
-; Ops done on the window's canvas, which scrolling moves the top of, at
-; the face's scale.
-(def drawn ((c Canvas) (face UiFace) (ops (list Op))) Canvas
-  (if (is_empty ops)
-      c
-      (drawn (draw_op c face (head ops)) face (tail ops))))
-
-(def draw_op ((c Canvas) (face UiFace) (op Op)) Canvas
-  (let s (ui_face_scale face)
-    (match op
-      ((OpText col row cs) (ui_draw_text c face (mul col (cell_w)) (mul row (cell_h)) (ink) (ground) cs))
-      ((OpBlank col row) (ui_draw_fill c (Rect (mul col (cell_w)) (mul row (cell_h)) (cell_w) (cell_h)) (ground) s))
-      ((OpScroll) (scrolled c (mul (cell_h) s) (ground)))
-      ((OpCursor col row on)
-        (ui_draw_fill c (Rect (mul col (cell_w)) (add (mul row (cell_h)) (sub (cell_h) 1)) (cell_w) 1)
-                      (if on (cursor_color) (ground)) s))
-      ((OpEnd row wrap) c))))
-
-; The cells after ops: what they draw kept, and rows' ends marked.
+; The cells after ops: what they write kept, rows scrolled, and rows'
+; ends marked.
 (def cells_after ((cl Cells) (ops (list Op))) Cells
   (if (is_empty ops)
       cl
@@ -137,7 +121,6 @@
           ((OpText col row cs) (cells_put cl col row cs))
           ((OpBlank col row) (cells_put cl col row " "))
           ((OpScroll) (cells_scroll cl))
-          ((OpCursor col row on) cl)
           ((OpEnd row wrap) (cells_end cl row wrap)))
         (tail ops))))
 
@@ -151,7 +134,7 @@
       (scrolls_onto (tail ops)
         (match (head ops)
           ((OpScroll) (add n 1))
-          ((OpText col row cs) n) ((OpBlank col row) n) ((OpCursor col row on) n) ((OpEnd row wrap) n)))))
+          ((OpText col row cs) n) ((OpBlank col row) n) ((OpEnd row wrap) n)))))
 
 ; ---------------------------------------------------------------- the view
 
@@ -170,37 +153,55 @@
 (def kept_back ((back int) (n int) (most int)) int
   (if (eq back 0) 0 (min most (add back n))))
 
-; The view back rows above the screen drawn from the cells, as many rows
-; as the screen has; the cursor, if its row is in view; and, while the
-; view is back, the toolkit's overlay scrollbar along its right.
-(def view_drawn ((c Canvas) (face UiFace) (cl Cells) (t Term) (back int)) Canvas
-  (let c2 (rows_drawn c face cl back 0 (cells_rows cl))
-    (let c3 (if (lt (add (term_row t) back) (cells_rows cl))
-                (draw_op c2 face (OpCursor (term_col t) (add (term_row t) back) true))
-                c2)
-      (if (eq back 0) c3 (scrollbar_drawn c3 face cl back)))))
+; ------------------------------------------------------------------- draw
+
+; Where the terminal is in a window ww by wh with n tabs: all of it under
+; the header bar, and under the tab bar once there are two tabs or more.
+(def term_area ((ww int) (wh int) (n int)) Rect
+  (let top (add (ui_headerbar_h) (if (ge n 2) (ui_tabbar_h) 0))
+    (Rect 0 top ww (max 0 (sub wh top)))))
+
+; How many columns and rows of cells fit in the area a, at least one.
+(def area_cols ((a Rect)) int (max 1 (div (rect_w a) (cell_w))))
+(def area_rows ((a Rect)) int (max 1 (div (rect_h a) (cell_h))))
+
+; The tab's view drawn whole in the area a: each row; the ground below the
+; last, where no whole row fits; and, while the view is back, the
+; toolkit's overlay scrollbar along its right.
+(def view_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab)) Canvas
+  (let rows (cells_rows (tab_cells t))
+    (let c2 (rows_drawn c face a t 0 rows)
+      (let under (mul rows (cell_h))
+        (let c3 (ui_draw_fill c2 (Rect (rect_x a) (add (rect_y a) under) (rect_w a) (max 0 (sub (rect_h a) under))) (ground) (ui_face_scale face))
+          (if (eq (tab_back t) 0) c3 (scrollbar_drawn c3 face a t)))))))
 
 ; The view's rows from v up to n drawn.
-(def rows_drawn ((c Canvas) (face UiFace) (cl Cells) (back int) (v int) (n int)) Canvas
-  (if (ge v n) c (rows_drawn (row_drawn c face cl back v) face cl back (add v 1) n)))
+(def rows_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (v int) (n int)) Canvas
+  (if (ge v n) c (rows_drawn (row_drawn c face a t v) face a t (add v 1) n)))
 
-; Row v of the view drawn: its ground, then the characters of the row of
-; the cells it shows.
-(def row_drawn ((c Canvas) (face UiFace) (cl Cells) (back int) (v int)) Canvas
-  (let l (cells_line cl (add (sub (cells_back cl) back) v))
-    (let y (mul v (cell_h))
-      (let c2 (ui_draw_fill c (Rect 0 y (mul (cells_cols cl) (cell_w)) (cell_h)) (ground) (ui_face_scale face))
-        (ui_draw_text c2 face 0 y (ink) -1 (bytes_to_list (line_chars l)))))))
+; Row v of the view drawn across the area a: its ground, the characters
+; of the row of the cells it shows, and the cursor, a line along the
+; cell's last row, which no glyph uses, if it is on that row.
+(def row_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (v int)) Canvas
+  (let cl (tab_cells t)
+    (let l (cells_line cl (add (sub (cells_back cl) (tab_back t)) v))
+      (let y (add (rect_y a) (mul v (cell_h)))
+        (let s (ui_face_scale face)
+          (let c2 (ui_draw_fill c (Rect (rect_x a) y (rect_w a) (cell_h)) (ground) s)
+            (let c3 (ui_draw_text c2 face (rect_x a) y (ink) -1 (bytes_to_list (line_chars l)))
+              (if (eq v (add (term_row (tab_term t)) (tab_back t)))
+                  (ui_draw_fill c3 (Rect (add (rect_x a) (mul (term_col (tab_term t)) (cell_w))) (add y (sub (cell_h) 1)) (cell_w) 1) (cursor_color) s)
+                  c3))))))))
 
 ; The toolkit's overlay scrollbar (grid.l0's ui_scrollbar_on) painted
-; over the view's right edge: its slider as long as the share of the rows
-; the view shows, as far down as the view is.
-(def scrollbar_drawn ((c Canvas) (face UiFace) (cl Cells) (back int)) Canvas
-  (let rows (cells_rows cl)
-    (let w (mul (cells_cols cl) (cell_w))
-      (nodes_painted c face (Rect 0 0 w (mul rows (cell_h)))
-        (ui_scrollbar_on "term" 0 w 0 (cell_h) (add (cells_back cl) rows) rows (sub (cells_back cl) back)
-                         (ui_state_new (ui_style)) (ground) (nil UiNode))))))
+; over the area's right edge: its slider as long as the share of the
+; rows the view shows, as far down as the view is.
+(def scrollbar_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab)) Canvas
+  (let cl (tab_cells t)
+    (let rows (cells_rows cl)
+      (nodes_painted c face a
+        (ui_scrollbar_on "term" (rect_x a) (rect_w a) (rect_y a) (cell_h) (add (cells_back cl) rows) rows
+                         (sub (cells_back cl) (tab_back t)) (ui_state_new (ui_style)) (ground) (nil UiNode))))))
 
 ; Each of ns's ops painted, cut to clip.
 (def nodes_painted ((c Canvas) (face UiFace) (clip Rect) (ns (list UiNode))) Canvas
@@ -208,15 +209,30 @@
       c
       (match (head ns) ((UiNode r ops a f) (nodes_painted (ui_paint c face clip ops) face clip (tail ns))))))
 
-; The window's top row, as the compositor counts it: the desktop's.
-(def logical_top ((c Canvas) (face UiFace)) int (div (canvas_top c) (ui_face_scale face)))
+; What output that scrolled k rows did to the view at the bottom, drawn:
+; the area's rows moved k up, as they are copied, not drawn again, and
+; then the rows from the cursor's before, as moved, to its after drawn
+; again; or all of the view, if it scrolled a whole screen or more.
+(def output_drawn ((c Canvas) (face UiFace) (a Rect) (before Term) (t Tab) (k int)) Canvas
+  (let rows (cells_rows (tab_cells t))
+    (if (ge k rows)
+        (view_drawn c face a t)
+        (let s (ui_face_scale face)
+          (let moved (if (eq k 0) c (canvas_copy_rows c (rect_scaled (rows_rect a rows) s) (mul (mul k (cell_h)) s)))
+            (rows_drawn moved face a t (max 0 (sub (term_row before) k)) (add (term_row (tab_term t)) 1)))))))
 
-; ---------------------------------------------------------------- serving
+; What output_drawn changed: the rows it moved, or the rows it drew.
+(def output_damage ((a Rect) (before Term) (t Tab) (k int)) Rect
+  (let rows (cells_rows (tab_cells t))
+    (if (gt k 0)
+        (if (ge k rows) a (rows_rect a rows))
+        (let lo (term_row before)
+          (Rect (rect_x a) (add (rect_y a) (mul lo (cell_h))) (rect_w a) (mul (add (sub (term_row (tab_term t)) lo) 1) (cell_h)))))))
 
-; The terminal: the compositor, its window's id, the window's canvas, the
-; face, the cursor, the cells (cells.l0), how many rows above the screen
-; the view is, 0 at the bottom, and the line editing.
-(data Vt (Vt Compositor int Canvas UiFace Term Cells int Console))
+; The area's first n rows of cells, across all of it.
+(def rows_rect ((a Rect) (n int)) Rect (Rect (rect_x a) (rect_y a) (rect_w a) (mul n (cell_h))))
+
+; -------------------------------------------------------------- naming
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "vt" why))
@@ -254,46 +270,233 @@
       (Term 0 0 (max 8 (min 158 (int_prefix (head argv) 0)))
                 (max 2 (min 46 (int_prefix (head (tail argv)) 0))))))
 
+; A window, or, given tab PORT PID, a tab's relay.
 (def vt () int
+  (let argv (args)
+    (if (if (ge (length argv) 3) (eq (head argv) "tab") false)
+        (relay (int_prefix (nth argv 1) 0) (int_prefix (nth argv 2) 0))
+        (windowed (vt_cells argv)))))
+
+; ---------------------------------------------------------------- relay
+
+; A tab's relay: its own port registered as the first vtN free, the
+; window's vt, pid parent, told the name on port to as "tab NAME", and
+; then everything sent to the name passed on to it, as it came, until
+; the window's vt exits or is gone.
+(def relay ((to int) (parent int)) int
   (let port (port_new)
     (match (vt_register port 1)
       ((VtUnnamed why) (complain why))
-      ((VtNamed name) (named name port)))))
+      ((VtNamed name)
+        (match (proc_watch parent port)
+          ((WatchNoProc) 0)
+          ((WatchFull) (complain "cannot watch its window's vt"))
+          ((Watched)
+            (match (port_send to (append "tab " name))
+              ((Sent) (relayed port to parent))
+              ((SendFull) (relayed port to parent))
+              ((SendNoPort) 0)
+              ((SendTooBig) (complain "its name is too long")))))))))
 
-; The terminal, registered as name on port: its face loaded, at the
-; desktop's scale, and its window made.
-(def named ((name (list int)) (port int)) int
-  (match (compositor_open)
-    ((NoCompositor why) (let w (write_err (append "vt: " (append why "\n"))) 0))
-    ((Compositor cp rp pid s)
-      (let face (ui_face_load s)
-        (if (not (ui_face_has_text face))
-            (complain "no font")
-            (with_buffer (Compositor cp rp pid s) face (vt_cells (args)) name port))))))
+; The relay's loop: each message on port passed on to to, until the
+; window's vt, parent, exits.
+(def relayed ((port int) (to int) (parent int)) int
+  (match (port_receive port)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from b)
+      (match (exit_of (Message from b))
+        ((Exited pid status) (if (eq pid parent) 0 (relayed port to parent)))
+        ((NotExit) (if (passed_on to b) (relayed port to parent) 0))))))
 
-(def with_buffer ((c Compositor) (face UiFace) (t Term) (name (list int)) (port int)) int
+; A message's bytes b passed on to port to as they came, waiting while
+; its queue is full; false if it is gone.
+(def passed_on ((to int) (b bytes)) bool
+  (match (port_forward to b)
+    ((Sent) true)
+    ((SendFull) (let s (sleep_ns 1000000) (passed_on to b)))
+    ((SendNoPort) false)
+    ((SendTooBig) true)))
+
+; What a relay says first: the name it registered, if m's payload,
+; payload, is "tab NAME".
+(def relay_name ((payload (list int))) (list int)
+  (if (starts_with payload "tab ") (drop_n payload 4) ""))
+
+; ---------------------------------------------------------------- serving
+
+; The window: the toolkit's window, the tabs, the status of the last
+; shell to exit, the title wm was last told, and what was last drawn
+; whole in the terminal's area.
+(data Vt (Vt UiWin Tabs int (list int) Shown))
+
+; What was last drawn whole: the area, the canvas, the tab shown, by its
+; relay, and how far back its view was. A view that differs in any of
+; them from what is to be shown is drawn whole again.
+(data Shown (Shown Rect Canvas int int))
+
+; What a message does: the window goes on, or vt ends with a status.
+(data Step (Go Vt) (Stop int))
+
+; A window t's cells big opened, a header bar's height more, and its
+; first tab opened in it.
+(def windowed ((t Term)) int
   (match t
     ((Term col row cols rows)
-      (let w (mul cols (cell_w))
-        (let h (mul rows (cell_h))
-          (match (ui_buffer_at w h (ui_face_scale face))
-            ((UiNoBuf why) (complain (append "no memory for the window: " why)))
-            ((UiBuf va n canvas)
-              (let k (fill_rect canvas 0 0 (canvas_w canvas) (canvas_h canvas) (ground))
-                (registered c face t canvas va n name port)))))))))
+      (match (ui_open_csd "Terminal" (mul cols (cell_w)) (add (ui_headerbar_h) (mul rows (cell_h))))
+        ((UiOpenFailed why) (complain why))
+        ((UiOpenedWin w)
+          (serve (refreshed (tab_opened (Vt w (tabs_none) 0 "Terminal" (Shown (Rect 0 0 0 0) (ui_win_canvas w) 0 0))))))))))
 
-; The terminal, registered as name on port: its window opened, in the
-; desktop's pixels, and its shell started.
-(def registered ((c Compositor) (font UiFace) (t Term) (canvas Canvas) (va int) (n int) (name (list int)) (port int)) int
-  (match (window_open c (ui_logical_w canvas font) (ui_logical_h canvas font) va n port name)
-    ((WindowFailed why) (complain why))
-    ((WindowOpened id)
-      (match (shell_started name port)
-        ((NoShell why) (let x (window_close c id) (complain why)))
-        ((ShellRunning sh) (serve port sh (shown_v (Vt c id canvas font t (term_cells t) 0 (console_new)) (nil int))))))))
+; The window, its tabs, and the last status.
+(def vt_win ((v Vt)) UiWin (match v ((Vt w ts st title sh) w)))
+(def vt_tabs ((v Vt)) Tabs (match v ((Vt w ts st title sh) ts)))
 
-; Blank cells as many as t has columns and rows.
-(def term_cells ((t Term)) Cells (match t ((Term col row cols rows) (cells_new cols rows))))
+; v with other tabs.
+(def vt_tabbed ((v Vt) (ts Tabs)) Vt (match v ((Vt w old st title sh) (Vt w ts st title sh))))
+
+; Serves the window until its last tab closes, or its close button is
+; clicked.
+(def serve ((v Vt)) int
+  (match (port_receive (ui_win_port (vt_win v)))
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from b)
+      (match (received v (Message from b) from b)
+        ((Go v2) (serve v2))
+        ((Stop status) status)))))
+
+; What a message m, bytes b from from, does: the compositor's is the
+; window's event; a relay's is its tab's; an exit notice closes a tab.
+(def received ((v Vt) (m Message) (from int) (b bytes)) Step
+  (if (eq from (ui_win_wm_pid (vt_win v)))
+      (from_wm v m)
+      (match (tabs_by_relay (vt_tabs v) from)
+        ((Some t) (Go (from_relay v t (msg_text b))))
+        ((None)
+          (match (exit_of m)
+            ((Exited pid status) (exited v pid status))
+            ((NotExit) (Go v)))))))
+
+; What the compositor sent, m: a key, to the selected tab; the wheel, over
+; the terminal, scrolling it; anything else routed by the toolkit.
+(def from_wm ((v Vt) (m Message)) Step
+  (match (key_event_of m)
+    ((Some k) (Go (keyed v k)))
+    ((None)
+      (match (wheel_event_of m)
+        ((Some e)
+          (match e
+            ((WheelEvent x y dx dy)
+              (if (rect_has (vt_area v) x y) (Go (refreshed (wheeled v dy))) (Go v)))))
+        ((None)
+          (match (ui_route (vt_win v) (ui_event_of (vt_win v) m))
+            ((UiRouted w2 action) (acted (vt_windowed v w2) action))))))))
+
+; v with the window w.
+(def vt_windowed ((v Vt) (w UiWin)) Vt (match v ((Vt old ts st title sh) (Vt w ts st title sh))))
+
+; The terminal's area in the window as it is.
+(def vt_area ((v Vt)) Rect
+  (let w (vt_win v) (term_area (ui_win_w w) (ui_win_h w) (tabs_count (vt_tabs v)))))
+
+; What an action set off does: the close button closes the window and
+; every tab; the new-tab button opens a tab; a tab clicked is selected;
+; a tab's close button ends its shell, which closes it.
+(def acted ((v Vt) (action (list int))) Step
+  (if (eq action (ui_close_action))
+      (Stop (closed_all v))
+      (if (eq action "tab.new")
+          (Go (refreshed (tab_opened v)))
+          (let sel (ui_select_key "tabs" action)
+            (if (not (is_empty sel))
+                (Go (refreshed (vt_tabbed v (tabs_select (vt_tabs v) (int_prefix sel 0)))))
+                (let k (ui_tab_close_key "tabs" action)
+                  (if (not (is_empty k))
+                      (Go (refreshed (tab_ended v (int_prefix k 0))))
+                      (Go (refreshed v)))))))))
+
+; v with a tab opened, and selected: its relay started, and watched, to
+; say its name; or v as it was, if it cannot start, saying why.
+(def tab_opened ((v Vt)) Vt
+  (let port (ui_win_port (vt_win v))
+    (match (spawn_path (proc_path (l0s_pid)) (Some (cons "tab" (cons (digits port) (cons (digits (l0s_pid)) (nil (list int)))))))
+      ((Spawned pid)
+        (match (proc_watch pid port)
+          ((Watched) (vt_tabbed v (tabs_add (vt_tabs v) (tab_new pid 80 24))))
+          ((WatchNoProc) v)
+          ((WatchFull) (let k (proc_kill pid) v))))
+      ((SpawnNoEntry) (said v "no program to start a tab's relay"))
+      ((SpawnNotProgram) (said v (cannot_relay (SpawnNotProgram))))
+      ((SpawnTooBig) (said v (cannot_relay (SpawnTooBig))))
+      ((SpawnNoRoom) (said v (cannot_relay (SpawnNoRoom)))))))
+
+; Why a tab's relay did not start, as spawning it answered s.
+(def cannot_relay ((s Spawn)) (list int) (append "cannot open a tab: " (spawn_why s)))
+
+; v, why said on standard error.
+(def said ((v Vt) (why (list int))) Vt
+  (let w (write_err (append "vt: " (append why "\n"))) (let f (file_flush (IoFile 2)) v)))
+
+; The tab whose relay is pid ended: its shell, if it has one, killed, and
+; the tab closed once its exit is told; else its relay killed.
+(def tab_ended ((v Vt) (pid int)) Vt
+  (match (tabs_by_relay (vt_tabs v) pid)
+    ((None) v)
+    ((Some t) (let k (proc_kill (if (eq (tab_shell t) 0) (tab_relay t) (tab_shell t))) v))))
+
+; Every tab's shell and relay ended, and the window closed: 0.
+(def closed_all ((v Vt)) int
+  (let k (killed (tabs_pids (vt_tabs v)))
+    (let c (ui_close (vt_win v)) 0)))
+
+; Each of pids killed.
+(def killed ((pids (list int))) int
+  (if (is_empty pids) 0 (let k (proc_kill (head pids)) (killed (tail pids)))))
+
+; A process watched, pid, exited with status: if it is a tab's shell, the
+; tab closes, its relay killed; if a tab's relay, the tab closes, its
+; shell killed. With no tab left the window closes and vt ends with the
+; last shell's status.
+(def exited ((v Vt) (pid int) (status int)) Step
+  (match v
+    ((Vt w ts st title sh)
+      (match (tabs_by_shell ts pid)
+        ((Some t) (tab_closed (Vt w ts status title sh) (tab_relay t) (tab_relay t)))
+        ((None)
+          (match (tabs_by_relay ts pid)
+            ((Some t) (tab_closed v pid (tab_shell t)))
+            ((None) (Go v))))))))
+
+; The tab whose relay is relay closed, other, its relay or shell still
+; running, killed; the window closed with the last.
+(def tab_closed ((v Vt) (relay int) (other int)) Step
+  (let k (if (eq other 0) 0 (match (proc_kill other) ((Killed) 0) ((KillNoProc) 0) ((KillDenied) 0)))
+    (match v
+      ((Vt w ts st title sh)
+        (let ts2 (tabs_drop ts relay)
+          (if (eq (tabs_count ts2) 0)
+              (let c (ui_close w) (Stop st))
+              (Go (refreshed (Vt w ts2 st title sh)))))))))
+
+; What a tab's relay passed on, payload: first its name, then the tab's
+; requests as a terminal takes them.
+(def from_relay ((v Vt) (t Tab) (payload (list int))) Vt
+  (if (is_empty (tab_name t))
+      (tab_named v t (relay_name payload))
+      (match t
+        ((Tab r sh name term cl back con)
+          (match (tty_request con payload)
+            ((TtyAsk con2) (vt_tabbed v (tabs_put (vt_tabs v) (Tab r sh name term cl back (deliver con2)))))
+            ((TtyWrite bs) (output v t bs))
+            ((TtyAnswer to body) (let s (port_send to body) v)))))))
+
+; The tab t named name by its relay: its shell started, sh NAME; or, if
+; it cannot start, the tab closed, its relay killed, saying why.
+(def tab_named ((v Vt) (t Tab) (name (list int))) Vt
+  (match (shell_started name (ui_win_port (vt_win v)))
+    ((ShellRunning pid) (refreshed (vt_tabbed v (tabs_put (vt_tabs v) (tab_started t name pid)))))
+    ((NoShell why)
+      (let k (proc_kill (tab_relay t))
+        (said (vt_tabbed v (tabs_drop (vt_tabs v) (tab_relay t))) why)))))
 
 ; What starting the shell came to: its pid, watched; or why not.
 (data Shell (ShellRunning int) (NoShell (list int)))
@@ -319,92 +522,99 @@
 (def cannot_shell ((s Spawn)) (list int)
   (append "cannot start /bin/sh: " (spawn_why s)))
 
-; Serves the terminal until sh, its shell, exits: then closes the window,
-; and gives the shell's status.
-(def serve ((port int) (sh int) (v Vt)) int
-  (let m (port_receive port)
-    (match m
-      ((RecvFailed) (complain "lost its port"))
-      ((Message from b)
-        (if (eq from (vt_wm_pid v))
-            (serve port sh (from_wm v m))
-            (match (exit_of m)
-              ((Exited pid status)
-                (if (eq pid sh) (closed v status) (serve port sh v)))
-              ((NotExit) (serve port sh (requested v (msg_text b))))))))))
-
-(def closed ((v Vt) (status int)) int
-  (match v ((Vt c id canvas font t cl back con) (let x (window_close c id) status))))
-
-(def vt_wm_pid ((v Vt)) int (match v ((Vt c id canvas font t cl back con) (compositor_pid c))))
-
-; What the compositor sent, m: a key, or the wheel; anything else does
-; nothing.
-(def from_wm ((v Vt) (m Message)) Vt
-  (match (key_event_of m)
-    ((Some ev) (keyed v ev))
-    ((None)
-      (match (wheel_event_of m)
-        ((Some e) (match e ((WheelEvent x y dx dy) (scrolled_back v dy))))
-        ((None) v)))))
-
-; v with the view dy steps of the wheel further down, up below 0: drawn
-; from the cells and the window told, if it moved.
-(def scrolled_back ((v Vt) (dy int)) Vt
-  (match v
-    ((Vt c id canvas font t cl back con)
-      (let b (wheeled_back back dy (cells_back cl))
-        (if (eq b back) v (viewed (Vt c id canvas font t cl b con)))))))
-
-; v's view drawn from its cells, and the window told of all of it.
-(def viewed ((v Vt)) Vt
-  (match v
-    ((Vt c id canvas font t cl back con)
-      (let canvas2 (view_drawn canvas font cl t back)
-        (let d (window_damage c id (Rect 0 0 (ui_logical_w canvas2 font) (ui_logical_h canvas2 font)))
-          (Vt c id canvas2 font t cl back con))))))
-
-; A key's character fed to the line editing, its echo shown, and any line
-; finished delivered; the view first brought back to the bottom, if it is
-; not there. Esc is not fed: the editing would take it for the start of
-; an escape sequence, and drop the key after it.
-(def keyed ((v Vt) (ev KeyEvent)) Vt
-  (match ev
+; A key's character fed to the selected tab's line editing, its echo
+; shown, and any line finished delivered; its view first brought back to
+; the bottom, if it is not there. Esc is not fed: the editing would take
+; it for the start of an escape sequence, and drop the key after it.
+(def keyed ((v Vt) (k KeyEvent)) Vt
+  (match k
     ((KeyEvent code value ch)
       (if (if (eq value 0) true (if (eq ch 0) true (eq ch 27)))
           v
-          (match (at_bottom v)
-            ((Vt c id canvas font t cl back con)
-              (match (feed con ch)
-                ((Fed con2 e) (shown_v (Vt c id canvas font t cl back (deliver con2)) e)))))))))
+          (match (tabs_selected (vt_tabs v))
+            ((None) v)
+            ((Some t)
+              (let v2 (if (eq (tab_back t) 0) v (refreshed (vt_tabbed v (tabs_put (vt_tabs v) (tab_backed t 0)))))
+                (match (tabs_selected (vt_tabs v2))
+                  ((None) v2)
+                  ((Some t2)
+                    (match t2
+                      ((Tab r sh name term cl back con)
+                        (match (feed con ch)
+                          ((Fed con2 e) (output v2 (Tab r sh name term cl back (deliver con2)) e))))))))))))))
 
-; v with its view at the bottom, drawn again if it was not.
-(def at_bottom ((v Vt)) Vt
-  (match v
-    ((Vt c id canvas font t cl back con)
-      (if (eq back 0) v (viewed (Vt c id canvas font t cl 0 con))))))
+; v with the selected tab's view dy steps of the wheel further down, up
+; below 0.
+(def wheeled ((v Vt) (dy int)) Vt
+  (match (tabs_selected (vt_tabs v))
+    ((None) v)
+    ((Some t) (vt_tabbed v (tabs_put (vt_tabs v) (tab_backed t (wheeled_back (tab_back t) dy (cells_back (tab_cells t)))))))))
 
-(def requested ((v Vt) (payload (list int))) Vt
-  (match v
-    ((Vt c id canvas font t cl back con)
-      (match (tty_request con payload)
-        ((TtyAsk con2) (Vt c id canvas font t cl back (deliver con2)))
-        ((TtyWrite bs) (shown_v v bs))
-        ((TtyAnswer to body) (let s (port_send to body) v))))))
-
-; v with bs kept in its cells, the cursor moved, and, with the view at
-; the bottom, drawn and the window told: its new top if it scrolled, and
-; its damage, the whole of it. With the view back, nothing is drawn, and
-; the view stays on the rows it shows.
-(def shown_v ((v Vt) (bs (list int))) Vt
-  (match v
-    ((Vt c id canvas font t cl back con)
-      (match (shown_bytes t bs)
-        ((Rendered t2 ops)
+; v with bs written at the tab t: kept in its cells, the cursor moved,
+; and, if the tab is shown with its view at the bottom, drawn and the
+; window told. Otherwise nothing is drawn, and a view that is back stays
+; on the rows it shows.
+(def output ((v Vt) (t Tab) (bs (list int))) Vt
+  (match t
+    ((Tab r sh name term cl back con)
+      (match (render term bs)
+        ((Rendered term2 ops)
           (let cl2 (cells_after cl ops)
-            (if (gt back 0)
-                (Vt c id canvas font t2 cl2 (kept_back back (scrolls ops) (cells_back cl2)) con)
-                (let canvas2 (drawn canvas font ops)
-                  (let s (if (eq (canvas_top canvas2) (canvas_top canvas)) "" (window_top c id (logical_top canvas2 font)))
-                    (let d (window_damage c id (Rect 0 0 (ui_logical_w canvas2 font) (ui_logical_h canvas2 font)))
-                      (Vt c id canvas2 font t2 cl2 back con)))))))))))
+            (let k (scrolls ops)
+              (let t2 (Tab r sh name term2 cl2 (kept_back back k (cells_back cl2)) con)
+                (let v2 (vt_tabbed v (tabs_put (vt_tabs v) t2))
+                  (if (if (eq back 0) (tabs_is_selected (vt_tabs v) t) false)
+                      (output_shown v2 term t2 k)
+                      v2))))))))))
+
+; The tab t, shown, with output drawn that moved its cursor from before
+; and scrolled k rows, and the window told.
+(def output_shown ((v Vt) (before Term) (t Tab) (k int)) Vt
+  (let w (vt_win v)
+    (let a (vt_area v)
+      (let c (output_drawn (ui_win_canvas w) (ui_win_face w) a before t k)
+        (let d (ui_win_damaged w (cons (output_damage a before t k) (nil Rect))) v)))))
+
+; v with its window up to date with its tabs: every tab as many cells as
+; fit the terminal's area; the selected tab's view drawn whole, if it is
+; not what was last drawn whole there; the title told, if it changed; and
+; the window's header bar and tab bar painted where they changed. If the
+; window is not the size or buffer it was after that, as when wm would
+; not have a resize, all of it again.
+(def refreshed ((v Vt)) Vt
+  (match v
+    ((Vt w ts st title shown)
+      (let a (term_area (ui_win_w w) (ui_win_h w) (tabs_count ts))
+        (let ts2 (tabs_resized ts (area_cols a) (area_rows a))
+          (let title2 (tabs_title ts2)
+            (let t (if (eq title2 title) 0 (ui_win_titled w title2))
+              (let shown2 (view_shown w ts2 a shown)
+                (let w2 (ui_present w (vt_view ts2 title2))
+                  (let d (if (eq shown2 shown) 0 (ui_win_damaged w2 (cons a (nil Rect))))
+                    (let v2 (Vt w2 ts2 st title2 shown2)
+                      (if (if (eq (ui_win_canvas w2) (ui_win_canvas w)) (if (eq (ui_win_w w2) (ui_win_w w)) (eq (ui_win_h w2) (ui_win_h w)) false) false)
+                          v2
+                          (refreshed v2)))))))))))))
+
+; What is shown whole in the area a after the selected tab's view is
+; drawn whole there, if what was, shown, is not it; as it was if it is.
+(def view_shown ((w UiWin) (ts Tabs) (a Rect) (shown Shown)) Shown
+  (match (tabs_selected ts)
+    ((None) shown)
+    ((Some t)
+      (let want (Shown a (ui_win_canvas w) (tab_relay t) (tab_back t))
+        (if (eq want shown)
+            shown
+            (let c (view_drawn (ui_win_canvas w) (ui_win_face w) a t) want))))))
+
+; What the window shows: the header bar, its title and the button that
+; opens a tab; the tab bar, with two tabs or more; and the terminal.
+(def vt_view ((ts Tabs) (title (list int))) UiWidget
+  (let header (UiCsdBar (cons (UiButton "tab.new" "tab-new" "" (UiBtnFlat) true) (nil UiWidget))
+                        (UiLabel title (UiHeading) (UiCenter)) (nil UiWidget) true)
+    (let term (UiExpand (UiDrawingArea "term" 0 0))
+      (UiBox (UiV) 0
+        (cons header
+              (if (ge (tabs_count ts) 2)
+                  (cons (UiTabBar "tabs" (tabs_shown ts) (tabs_selected_key ts)) (cons term (nil UiWidget)))
+                  (cons term (nil UiWidget))))))))

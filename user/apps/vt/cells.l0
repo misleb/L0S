@@ -131,3 +131,101 @@
 ; uses; and whether a wrap ended it.
 (def line_chars ((l Line)) bytes (match l ((Line b w) b)))
 (def line_wrapped ((l Line)) bool (match l ((Line b w) w)))
+
+; ---------------------------------------------------------- wrapping again
+
+; Cells wrapped again at another size, and where the cursor is in them:
+; its column, the columns' count while a wrap is pending, and its row.
+(data Rewrapped (Rewrapped Cells int int))
+
+; The cells c, the cursor at col, row, wrapped again at ncols by nrows:
+; every row, scrolled off or on the screen up to the cursor's or the last
+; used, joined into lines where a wrap ended them, and each line cut again
+; every ncols, a wrap marking each row but its last. The cursor keeps its
+; place in its line. The screen's top is as high as keeps the cursor's
+; row on it, the rows above going to the ring, its oldest dropped past
+; ring_max; any after the screen's last are dropped.
+(def cells_rewrapped ((c Cells) (col int) (row int) (ncols int) (nrows int)) Rewrapped
+  (let n (cells_back c)
+    (match (rows_rewrapped c 0 (add n (max row (last_used_row c (sub (cells_rows c) 1)))) (add n row) col
+                           (max 1 ncols) (nil bytes) 0 -1 (Wrap (nil Line) 0 0 0))
+      ((Wrap rows k crow ccol)
+        (let s (max 0 (sub (add crow 1) nrows))
+          (Rewrapped (cells_of_rows (rev rows) 0 s (max 1 ncols) nrows
+                                    (ring_new) (array_new nrows (blank_row (max 1 ncols))) (array_new nrows 0))
+                     ccol (sub crow s)))))))
+
+; The last screen row from r up that has anything in it or that a wrap
+; ended, -1 if none has.
+(def last_used_row ((c Cells) (r int)) int
+  (if (lt r 0)
+      -1
+      (if (if (cells_wrapped c r) true (gt (row_used (cells_row c r)) 0)) r (last_used_row c (sub r 1)))))
+
+; The rows wrapped so far, the last first, and how many; and where the
+; cursor is among them, its row and its column.
+(data Wrap (Wrap (list Line) int int int))
+
+; Every row from i up to last, of all the cells have, wrapped again at
+; ncols onto w: pieces, the last first, are the cells of the line so far,
+; len characters; off is where the cursor is in it, or -1. The cursor is
+; at column ccol of row crow of them all.
+(def rows_rewrapped ((c Cells) (i int) (last int) (crow int) (ccol int) (ncols int)
+                     (pieces (list bytes)) (len int) (off int) (w Wrap)) Wrap
+  (if (gt i last)
+      w
+      (let l (cells_line c i)
+        (let o (if (eq i crow) (add len ccol) off)
+          (let ps (cons (line_chars l) pieces)
+            (let len2 (add len (bytes_len (line_chars l)))
+              (if (if (line_wrapped l) (lt i last) false)
+                  (rows_rewrapped c (add i 1) last crow ccol ncols ps len2 o w)
+                  (rows_rewrapped c (add i 1) last crow ccol ncols (nil bytes) 0 -1
+                                  (line_cut (padded (bytes_concat (rev ps)) o) o ncols w)))))))))
+
+; text with spaces after it as far as off, if it is shorter.
+(def padded ((text bytes) (off int)) bytes
+  (if (le off (bytes_len text))
+      text
+      (bytes_concat (cons text (cons (blank_row (sub off (bytes_len text))) (nil bytes))))))
+
+; A line, text, cut every ncols onto w, a wrap ending each row but its
+; last; the cursor placed at off in it, if off is not -1: at the end of
+; its last row, a wrap pending, when it is just past a row that is full.
+(def line_cut ((text bytes) (off int) (ncols int) (w Wrap)) Wrap
+  (let len (bytes_len text)
+    (let k (if (eq len 0) 1 (div (add len (sub ncols 1)) ncols))
+      (match w
+        ((Wrap rows n crow ccol)
+          (let placed (if (lt off 0)
+                          w
+                          (if (if (gt off 0) (if (eq off len) (eq (mod off ncols) 0) false) false)
+                              (Wrap rows n (add n (sub (div off ncols) 1)) ncols)
+                              (Wrap rows n (add n (div off ncols)) (mod off ncols))))
+            (line_rows text 0 k ncols placed)))))))
+
+; Rows j up to k of text cut every ncols, onto w.
+(def line_rows ((text bytes) (j int) (k int) (ncols int) (w Wrap)) Wrap
+  (if (ge j k)
+      w
+      (match w
+        ((Wrap rows n crow ccol)
+          (let from (mul j ncols)
+            (let row (bytes_slice text from (min (bytes_len text) (add from ncols)))
+              (line_rows text (add j 1) k ncols (Wrap (cons (Line row (lt j (sub k 1))) rows) (add n 1) crow ccol))))))))
+
+; Cells ncols by nrows of rows, from row i of them on, the screen's top
+; at row s: those before it onto ring, the last ring_max of them, and
+; those from it in the screen's slots and marks, as many as fit.
+(def cells_of_rows ((rows (list Line)) (i int) (s int) (ncols int) (nrows int)
+                    (ring Ring) (slots (array bytes)) (marks (array int))) Cells
+  (if (if (is_empty rows) true (ge i (add s nrows)))
+      (Cells ncols nrows slots marks 0 ring)
+      (match (head rows)
+        ((Line chars wrapped)
+          (if (lt i s)
+              (cells_of_rows (tail rows) (add i 1) s ncols nrows
+                             (if (lt i (sub s (ring_max))) ring (ring_push ring (ring_row_of chars wrapped))) slots marks)
+              (cells_of_rows (tail rows) (add i 1) s ncols nrows ring
+                             (array_set slots (sub i s) (padded chars ncols))
+                             (array_set marks (sub i s) (if wrapped 1 0))))))))

@@ -129,7 +129,7 @@ and the frame's bottom corners to Adwaita's 12-pixel radius, and the
 content's bottom corners to 10, inside the frame's, and a press in a
 cut corner falls through to what is beneath.
 
-A window its client decorates (`csd`), as Files is, has none of that:
+A window its client decorates (`csd`), as Files and Terminal (`vt`) are, has none of that:
 no chrome, no buffer or layer of `wm`'s for it, so one fewer layer in
 every restack and one fewer region of `wm`'s. It is its content alone,
 W×H at its top left, `windows` giving that place; its four corners are
@@ -195,7 +195,9 @@ Input:
   a size past that room makes a new buffer, painted whole. `wm`'s chrome
   keeps room the same way, so a resize that fits shares and gives up no
   page, which is what costs most. A client that ignores the notice, such
-  as `vt`, keeps its size.
+  as `draw`, keeps its size. `vt` is a toolkit window too: a resize gives
+  it the cells that fit its terminal, every tab's lines wrapped again at
+  the new width, and it paints its terminal whole.
 - **Repainting** (`ui_changed` in
   [user/lib/ui/window.l0](../user/lib/ui/window.l0)): a window paints only
   where what it paints differs from what it painted last, as GTK diffs
@@ -267,7 +269,7 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   grid, the list and the sidebar; a sidebar row or a tile whose image
   is missing shows its symbolic icon.
 - **`vt`**'s cells are still 8×16 of the desktop's pixels; it scrolls by
-  32 of its buffer's rows.
+  copying 32 of its buffer's rows a line.
 - **The launcher** shows each app's `icon2x.ppm`, which `tools/mkicon`
   draws at 96×96 from the same `icon.svg` or `icon.draw`.
 
@@ -300,10 +302,18 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   of its edge is the arrow until it is pressed there: a client cannot
   ask for a pointer's shape, so only the border outside shows the
   resize pointer before a press.
-- Only toolkit windows can be resized or maximized (`vt` and `draw`
-  ignore the size notice, since a terminal keeps no copy of its text to
-  lay out again, so a double click on their title bars leaves them as
-  they are).
+- Only toolkit windows can be resized or maximized (`draw` ignores the
+  size notice, so a double click on its title bar leaves it as it is).
+- **Terminal (`vt`) is a terminal of lines, not a screen.** KeyEvent has
+  no modifiers yet, so there are no shortcuts: no Shift-PgUp to scroll
+  back, no Ctrl-Shift-T for a tab; the wheel and the buttons do it all.
+  There is no selecting, copying or pasting; no escape sequence moves
+  the cursor, colors text or clears the screen (the line editing drops
+  them); and a program is not told the terminal's size, so nothing it
+  writes is laid out for it. Its scrollbar shows only while the view is
+  back, and its slider is not dragged. Each tab's name costs a process, its
+  relay, since a process waits on one port and a name goes only with
+  the process that registered it.
   A client paints what changed for every size it is asked for, all of it
   when the size outgrows its buffer, and `wm` restacks the screen once:
   Disks's drag paints about 7 ms a size on QEMU, and the restack takes

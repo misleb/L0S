@@ -242,19 +242,23 @@ and that after Esc the shell runs the next command typed.
 vt-initramfs`), every shell running, but with two Terminals whatever the
 demo's `/etc/system` starts after its first ([tests/vt/etc/system](../tests/vt/etc/system)), on its USB keyboard and mouse (`QEMU_INPUT=usb`), with QMP on a socket as well, to work the mouse, which it moves into the screen's top left corner before each move to a pixel. Which `vt`
 opens first, and so where each window is, varies, so it learns where they
-are from `run windows` at the serial shell. Then:
-- the title bars: the front window's header bar active, `303030`, the
-  other's in the backdrop, `242424`; and the front window's top left
-  pixel, cut by its shape, showing what is under it;
+are from `run windows` at the serial shell. Each window draws its own
+header bar, so `run windows` gives all of it, the terminal under its
+header bar. Then:
+- the header bars: the front window's active, `303030`, the other's in
+  the backdrop, `242424`; the front window's top left pixel, cut by its
+  shape, showing what is under it; and the terminal's ground under its
+  header bar;
 - once the front window's prompt's cursor is drawn, `echo hi`, typed with
   `sendkey`: the screendump shows the `h` of the answer on its row 8,
   under the motd, the banner and the prompt;
 - `run nap 30000 &`: `ps` at the serial shell shows `nap`, its parent
-  that window's shell, whose parent is the window's `vt`;
-- a click on the other window's title bar, through QMP's
+  that window's shell, whose parent is the window's `vt`, one of the two
+  `/etc/system` started, pids 17 and 18;
+- a click on the other window's header bar, through QMP's
   `input-send-event`: it comes to the front, as `run windows` and its
-  title bar's color show;
-- a drag of its title bar: `run windows` shows it moved as far as the
+  header bar's color show;
+- a drag of its header bar: `run windows` shows it moved as far as the
   pointer did;
 - `run cat /etc/inittab` typed into it three times, more than its 24
   rows: it scrolls, and the prompt's cursor ends on its last row;
@@ -262,12 +266,26 @@ are from `run windows` at the serial shell. Then:
   from its cells, with the toolkit's overlay scrollbar along its right;
   Backspace typed brings it back to the bottom, the slider gone and the
   cursor on the last row again;
-- `exit` typed into it: its shell ends, and so does its `vt`, which
-  closes the window. `run windows` shows only the other, in front, and
-  `ps` shows neither process;
+- a line of 50 columns typed and not entered, then the window's right
+  edge dragged in to 320, 40 columns: the line is wrapped again, the
+  cursor 10 into the last row; dragged out to 640, it is whole again,
+  the cursor 50 in;
+- a click on the new-tab button: `run windows` shows the window titled
+  `vt3`, the new tab's name, and the tab bar shows under the header
+  bar, the new tab raised; `echo hi` typed in it is answered in it, and
+  `ps` shows both tabs' shells started by the window's `vt`;
+- a click on the first tab: the title is its name again, its prompt on
+  its last row, 21 rows under the tab bar, and `echo hi` typed is
+  answered in it;
+- a click on the second tab's close button: its shell ends, the tab
+  bar goes and the terminal is under the header bar again;
+- `exit` typed into the tab left: its shell ends, and with the last tab
+  the window closes and its `vt` exits. `run windows` shows only the
+  other, in front, and `ps` shows neither the `vt` nor anything it
+  started;
 - a click on that one's close button: `run windows` shows no window, and
-  `ps` shows neither its `vt`, which was killed, nor its shell, which
-  hung up.
+  `ps` shows neither its `vt` nor its tab's relay and shell, which it
+  ended.
 
 [tests/widgets.sh](../tests/widgets.sh) boots the screen initramfs, types
 `run widgets &`, and learns where the gallery's window is from
@@ -277,7 +295,10 @@ are from `run windows` at the serial shell. Then:
   and End Process faded, with no row selected;
 - a click on the second row, through QMP: the press and release go
   through `wm` to the window, and the row is tinted with the accent and
-  End Process turns red.
+  End Process turns red;
+- the tab bar along its foot, three tabs, the first raised; a click on
+  the third raises it, and a click on the second's close button closes
+  it, the two left sharing the bar, the third still raised.
 
 [tests/resize.sh](../tests/resize.sh) boots the screen initramfs, types
 `run widgets &`, and drags the gallery's edges with the tablet, through

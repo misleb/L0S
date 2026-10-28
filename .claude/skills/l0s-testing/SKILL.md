@@ -222,8 +222,9 @@ Their helpers, copied in each script:
   and the cursor unless that is what is checked: a point in a corner is cut
   to show what is beneath.
 - `vt.sh` relies on pids from the demo's inittab and `tests/vt/etc/system`
-  (`vt=$((15 + ...))`):
-  a `start` line added there shifts them.
+  (the windows' `vt`s are `$((16 + 1))` and `$((16 + 2))`; which is
+  which it learns from `nap`'s shell's parent): a `start` line added
+  there shifts them.
 
 ## Trying things on a running board: the l0s MCP server
 

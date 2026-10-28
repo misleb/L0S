@@ -1,0 +1,168 @@
+; tabs.l0 -- a Terminal's tabs, each a terminal of its own: its name, its
+; shell, its cells and its line editing, and which tab is selected. Each
+; tab's name is registered by a relay, a vt of its own (vt.l0's
+; relay), which passes on to the window's vt all that is sent to it, so
+; the window's vt knows a tab by its relay's pid, the sender of what it
+; is passed. A tab is in the list as soon as its relay starts, unnamed
+; until the relay says the name it registered.
+
+; A tab: its relay's pid; its shell's, 0 until it starts; its name, ""
+; until the relay has registered one; the cursor; the cells; how many
+; rows above the screen its view is, 0 at the bottom; and its line
+; editing.
+(data Tab (Tab int int (list int) Term Cells int Console))
+
+; A tab whose relay is pid, unnamed and with no shell yet, its cells
+; cols by rows and blank.
+(def tab_new ((relay int) (cols int) (rows int)) Tab
+  (Tab relay 0 "" (Term 0 0 cols rows) (cells_new cols rows) 0 (console_new)))
+
+; Its relay's pid, its shell's, its name, its cursor, its cells, how far
+; back its view is, and its line editing.
+(def tab_relay ((t Tab)) int (match t ((Tab r sh name term cl back con) r)))
+(def tab_shell ((t Tab)) int (match t ((Tab r sh name term cl back con) sh)))
+(def tab_name ((t Tab)) (list int) (match t ((Tab r sh name term cl back con) name)))
+(def tab_term ((t Tab)) Term (match t ((Tab r sh name term cl back con) term)))
+(def tab_cells ((t Tab)) Cells (match t ((Tab r sh name term cl back con) cl)))
+(def tab_back ((t Tab)) int (match t ((Tab r sh name term cl back con) back)))
+
+; What a tab is called, on the tab bar and as the window's title: its
+; name, or Terminal until it has one.
+(def tab_title ((t Tab)) (list int) (let n (tab_name t) (if (is_empty n) "Terminal" n)))
+
+; t named name, its shell pid.
+(def tab_started ((t Tab) (name (list int)) (pid int)) Tab
+  (match t ((Tab r sh old term cl back con) (Tab r pid name term cl back con))))
+
+; t with its view back rows above the screen.
+(def tab_backed ((t Tab) (b int)) Tab
+  (match t ((Tab r sh name term cl old con) (Tab r sh name term cl b con))))
+
+; t's cells and cursor wrapped again at cols by rows, as cells.l0's
+; cells_rewrapped does, its view no further back than its cells now
+; have rows scrolled off; as it was if it is that size already.
+(def tab_resized ((t Tab) (cols int) (rows int)) Tab
+  (match t
+    ((Tab r sh name term cl back con)
+      (match term
+        ((Term col row tc tr)
+          (if (if (eq tc cols) (eq tr rows) false)
+              t
+              (match (cells_rewrapped cl col row cols rows)
+                ((Rewrapped cl2 col2 row2)
+                  (Tab r sh name (Term col2 row2 cols rows) cl2 (min back (cells_back cl2)) con)))))))))
+
+; ------------------------------------------------------------------ tabs
+
+; The tabs, in order, and the selected one's relay, 0 if there is none.
+(data Tabs (Tabs (list Tab) int))
+
+; No tabs.
+(def tabs_none () Tabs (Tabs (nil Tab) 0))
+
+; How many there are.
+(def tabs_count ((ts Tabs)) int (match ts ((Tabs l sel) (length l))))
+
+; ts with t added after the others, and selected.
+(def tabs_add ((ts Tabs) (t Tab)) Tabs
+  (match ts ((Tabs l sel) (Tabs (append l (cons t (nil Tab))) (tab_relay t)))))
+
+; The tab whose relay is pid, if one is.
+(def tabs_by_relay ((ts Tabs) (pid int)) (Option Tab)
+  (match ts ((Tabs l sel) (tab_where l pid true))))
+
+; The tab whose shell is pid, if one is.
+(def tabs_by_shell ((ts Tabs) (pid int)) (Option Tab)
+  (if (eq pid 0) ((None Tab)) (match ts ((Tabs l sel) (tab_where l pid false)))))
+
+; The first of l whose relay, or if not by_relay whose shell, is pid.
+(def tab_where ((l (list Tab)) (pid int) (by_relay bool)) (Option Tab)
+  (if (is_empty l)
+      ((None Tab))
+      (if (eq (if by_relay (tab_relay (head l)) (tab_shell (head l))) pid)
+          (Some (head l))
+          (tab_where (tail l) pid by_relay))))
+
+; The selected tab, if there is one.
+(def tabs_selected ((ts Tabs)) (Option Tab)
+  (match ts ((Tabs l sel) (tab_where l sel true))))
+
+; Whether t is the selected tab.
+(def tabs_is_selected ((ts Tabs) (t Tab)) bool
+  (match ts ((Tabs l sel) (eq sel (tab_relay t)))))
+
+; ts with the tab whose relay is pid selected, if there is one.
+(def tabs_select ((ts Tabs) (pid int)) Tabs
+  (match (tabs_by_relay ts pid)
+    ((None) ts)
+    ((Some t) (match ts ((Tabs l sel) (Tabs l pid))))))
+
+; ts with t in place of the tab with its relay.
+(def tabs_put ((ts Tabs) (t Tab)) Tabs
+  (match ts ((Tabs l sel) (Tabs (tabs_put_onto l t (nil Tab)) sel))))
+
+; tabs_put's loop, onto the reversed acc.
+(def tabs_put_onto ((l (list Tab)) (t Tab) (acc (list Tab))) (list Tab)
+  (if (is_empty l)
+      (rev acc)
+      (tabs_put_onto (tail l) t (cons (if (eq (tab_relay (head l)) (tab_relay t)) t (head l)) acc))))
+
+; ts without the tab whose relay is pid. If it was selected, the one
+; after it is, or the one before it if it was the last, as GNOME
+; Console selects when a tab closes.
+(def tabs_drop ((ts Tabs) (pid int)) Tabs
+  (match ts
+    ((Tabs l sel)
+      (let kept (tabs_without l pid (nil Tab))
+        (Tabs kept (if (eq sel pid) (tab_after l pid 0) sel))))))
+
+; l without the tab whose relay is pid, onto the reversed acc.
+(def tabs_without ((l (list Tab)) (pid int) (acc (list Tab))) (list Tab)
+  (if (is_empty l)
+      (rev acc)
+      (tabs_without (tail l) pid (if (eq (tab_relay (head l)) pid) acc (cons (head l) acc)))))
+
+; The relay of the tab after the one whose relay is pid in l, or of the
+; one before it, before, if it is the last; 0 if it is alone.
+(def tab_after ((l (list Tab)) (pid int) (before int)) int
+  (if (is_empty l)
+      before
+      (if (eq (tab_relay (head l)) pid)
+          (if (is_empty (tail l)) before (tab_relay (head (tail l))))
+          (tab_after (tail l) pid (tab_relay (head l))))))
+
+; Every tab's cells and cursor wrapped again at cols by rows.
+(def tabs_resized ((ts Tabs) (cols int) (rows int)) Tabs
+  (match ts ((Tabs l sel) (Tabs (tabs_resized_onto l cols rows (nil Tab)) sel))))
+
+; tabs_resized's loop, onto the reversed acc.
+(def tabs_resized_onto ((l (list Tab)) (cols int) (rows int) (acc (list Tab))) (list Tab)
+  (if (is_empty l) (rev acc) (tabs_resized_onto (tail l) cols rows (cons (tab_resized (head l) cols rows) acc))))
+
+; The window's title: the selected tab's, or Terminal with none.
+(def tabs_title ((ts Tabs)) (list int)
+  (match (tabs_selected ts) ((None) "Terminal") ((Some t) (tab_title t))))
+
+; The tabs as the tab bar shows them: each its relay's pid as its key,
+; and its title.
+(def tabs_shown ((ts Tabs)) (list UiTab)
+  (match ts ((Tabs l sel) (tabs_shown_onto l (nil UiTab)))))
+
+; tabs_shown's loop, onto the reversed acc.
+(def tabs_shown_onto ((l (list Tab)) (acc (list UiTab))) (list UiTab)
+  (if (is_empty l) (rev acc) (tabs_shown_onto (tail l) (cons (UiTab (digits (tab_relay (head l))) (tab_title (head l))) acc))))
+
+; The selected tab's key on the tab bar.
+(def tabs_selected_key ((ts Tabs)) (list int) (match ts ((Tabs l sel) (digits sel))))
+
+; Every tab's relay and shell, the shells first, those not yet started
+; left out: the processes to end when the window closes.
+(def tabs_pids ((ts Tabs)) (list int)
+  (match ts ((Tabs l sel) (append (tab_pids_of l false) (tab_pids_of l true)))))
+
+; Each of l's shells, or relays if relays, but none that is 0.
+(def tab_pids_of ((l (list Tab)) (relays bool)) (list int)
+  (if (is_empty l)
+      (nil int)
+      (let p (if relays (tab_relay (head l)) (tab_shell (head l)))
+        (if (eq p 0) (tab_pids_of (tail l) relays) (cons p (tab_pids_of (tail l) relays))))))
