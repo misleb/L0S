@@ -141,6 +141,12 @@ to `l0` are one namespace, and a duplicate is a compile error.
   not doubled from 1's. Bold is the bold face's own advances. An
   entry's cursor and the character a press is before are found by the
   same sums (`ui_text_pen`). A change of face is damage.
+  Source Sans 3's default figures are tabular: every digit is one
+  advance, 497 units, bold 528, so numbers line up in columns in it
+  as they do in Source Code Pro, right-aligned in a grid's number,
+  size and level cells, in Monitor's columns, and in the top bar's
+  clock, which keeps its place as the minutes change. No glyph
+  substitution (`tnum`) is needed, and none is read.
 - **Scale 2**, on a large screen, is GNOME's scale factor: everything is
   laid out in the desktop's pixels, as at 1, and painted at twice the size
   at the screen's resolution. A program does nothing for it: `ui_open`

@@ -55,7 +55,7 @@ host test of a layout run without one. That must stay so.
   so a change of face is damage. Still all `UiMono`, so the screen is
   as today; host tests draw `UiSans` text onto an array canvas and pin
   its pixels.
-- [ ] Which digits line up: whether Source Sans 3's digits share one
+- [x] Which digits line up: whether Source Sans 3's digits share one
   advance (its default figures, or `tnum`'s, which a glyph-substitution
   lookup would need). If they do not, the grid's number, size and level
   cells, Monitor's columns and the top bar's clock stay `UiMono`;
@@ -153,3 +153,10 @@ host test of a layout run without one. That must stay so.
   first text op, so the window needs no copy of the entry's text.
   Bold Source Sans 3 is its own advances; bold Source Code Pro keeps
   its extra pixel until step 4, so that the screen is as it was.
+- 2026-10-28: step 3. Source Sans 3's default figures are tabular:
+  hmtx gives every digit 497 units, bold 528 (`paint_test.l0`'s
+  `test_sans_digits_line_up` pins it, from `metrics.l0`). So nothing
+  stays in Source Code Pro for its digits: the grid's number, size and
+  level cells, Monitor's columns and the clock all move to Source Sans
+  3 in step 4, and no `tnum` lookup is read. Written into toolkit.md's
+  Text.
