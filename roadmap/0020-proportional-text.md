@@ -45,7 +45,7 @@ host test of a layout run without one. That must stay so.
   once, rounded up, so a width never depends on where text starts.
   `ui_ellipsized` cuts by that width. Nothing calls it with `UiSans`
   yet, and every width is as today, which the tests pin.
-- [ ] Drawing by advance: `UiPText` carries its `UiFont`, and
+- [x] Drawing by advance: `UiPText` carries its `UiFont`, and
   `ui_text_at` places each glyph at its sum of advances turned into the
   screen's pixels at the face's scale, offset by the strike's bearing,
   so text at scale 2 is placed in the screen's pixels, not doubled from
@@ -140,3 +140,16 @@ host test of a layout run without one. That must stay so.
   Code Pro still a pixel wider, as it was. `ui_text_font` names the
   face the interface's text is in, one def to change in step 4, and
   every width the toolkit and `wm` measure asks it.
+- 2026-10-28: step 2. A strike is kept as `glyph.FACE.H`, FACE the
+  font service's own name (`ui_font_face`), and a window asks for all
+  four faces at 16 and 32 times its scale, eight regions where it had
+  four; the build makes Source Sans 3's six strikes beside Source Code
+  Pro's (`STRIKES`, font.l0's `stored`), so no window waits for one,
+  and the `fonts` e2e case asks for Sans at 24, which is not stored,
+  to still see one built once and shared. A pen is the sum of the
+  advances before it at the strike's em, rounded to nearest, in the
+  screen's pixels; a width stays rounded up, so the last glyph's ink
+  never passes it. An entry finds a press's character from its node's
+  first text op, so the window needs no copy of the entry's text.
+  Bold Source Sans 3 is its own advances; bold Source Code Pro keeps
+  its extra pixel until step 4, so that the screen is as it was.

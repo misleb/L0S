@@ -89,7 +89,8 @@ the display. This is the working summary, with the rules.
   `tools/mkicon`.
 - **Text** is Source Code Pro in cells 8×16 (`ui_char_w`, `ui_char_h`),
   smooth at every scale, ASCII only.
-  `ui_text_w s bold scale` measures.
+  `ui_text_w s font bold scale` measures, `font` a `UiFont`, by the
+  advances in `metrics.l0`.
 - **Icons** are GNOME's own SVGs under `icons/` (Adwaita's symbolic
   ones, each project's license and `SOURCE` beside them), named in
   `icons.l0`'s `ui_icon_names` (`window-close`, `view-refresh`...), drawn
@@ -373,7 +374,8 @@ way; buffers and painting are in the screen's.
   sizes the scale paints (`icon.NAME.N`, N = 16·k·s, `ui_icon_sizes`;
   coverage 0–15, 16 levels a word), and the text's strikes, asked of the
   font service `font` (`user/sbin/font`, `proto/font.l0`):
-  `glyph.regular.H` and `glyph.bold.H`, H = 16·text scale·s (16, 32, 64),
+  `glyph.FACE.H`, FACE `code`, `code-bold`, `sans` or `sans-bold`
+  (`ui_font_face`), H = 16·text scale·s (16, 32, 64),
   each a `UiStrike` over the pages `font` shares, read in place, each
   glyph its ink's box (`format/strike.l0`). Only `wm` adds `/etc/face`'s
   `cursor` tables, at scale 2 (`ui_face_pointers`). A pixel is mixed with
@@ -384,7 +386,8 @@ way; buffers and painting are in the screen's.
   tables strikes)` with their own (`paint_test.l0`'s `box_face`, and
   `face1_glyphs`, a strike as bytes, `UiStrikeBytes`).
 - **Bold at 2** is the bold face, not a double strike; widths are still the
-  logical `ui_text_w`.
+  logical `ui_text_w`, and each glyph's pen is placed in the screen's
+  pixels from the sum of the advances (`ui_strike_chars`).
 - **A new icon** is GNOME's SVG of it copied unchanged into
   `icons/adwaita/symbolic/NAME-symbolic.svg` (listed in that `SOURCE`), or
   another GNOME project's `icons/PROJECT/symbolic/` with its license, and

@@ -201,8 +201,8 @@ image, both of which fail, saying why. `virtio-blk_ro` has `disk` write to a rea
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
 of a line, which its `pattern` checks. `fonts` has `fonts` ask the font
-service for its faces and the six strikes the build made, which it keeps
-and has built none of, then for Source Sans 3 at 32 twice, from two
+service for its faces and the twelve strikes the build made, which it keeps
+and has built none of, then for Source Sans 3 at 24 twice, from two
 processes, which it builds once and shares with both. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window

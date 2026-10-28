@@ -30,7 +30,7 @@
 (data UiPaint
   (UiPFill Rect int)                                 ; rect, color
   (UiPRound Rect int int int)                        ; rect, radius, color, color under the corners or -1
-  (UiPText Rect (list int) UiAlign int bool int)     ; rect, text, align, color, bold, scale
+  (UiPText Rect (list int) UiAlign int UiFont bool int) ; rect, text, align, color, face, bold, scale
   (UiPIcon int int (list int) int int)               ; x, y, icon name, color, scale
   (UiPImage int int int bool (list UiCov)))          ; x, y, n, dimmed, tables
 
@@ -46,7 +46,7 @@
       (cons (match (head ops)
               ((UiPFill r c) (UiPFill (rect_moved r dx dy) c))
               ((UiPRound r rad c u) (UiPRound (rect_moved r dx dy) rad c u))
-              ((UiPText r s a c b sc) (UiPText (rect_moved r dx dy) s a c b sc))
+              ((UiPText r s a c f b sc) (UiPText (rect_moved r dx dy) s a c f b sc))
               ((UiPIcon x y n c sc) (UiPIcon (add x dx) (add y dy) n c sc))
               ((UiPImage x y n d ts) (UiPImage (add x dx) (add y dy) n d ts)))
             (ui_ops_offset (tail ops) dx dy))))
@@ -67,6 +67,13 @@
 ; bars, top bar and launcher. What must line up in columns, as a
 ; terminal's cells, names UiMono itself.
 (def ui_text_font () UiFont (UiMono))
+
+; The font service's name for the face, bold or regular: code,
+; code-bold, sans or sans-bold.
+(def ui_font_face ((f UiFont) (bold bool)) (list int)
+  (match f
+    ((UiMono) (if bold "code-bold" "code"))
+    ((UiSans) (if bold "sans-bold" "sans"))))
 
 ; The face's units per em, which its advances are in (metrics.l0).
 (def ui_font_upm ((f UiFont) (bold bool)) int
@@ -103,6 +110,12 @@
       0
       (add (ui_text_px s f bold scale)
            (match f ((UiMono) (if bold 1 0)) ((UiSans) 0)))))
+
+; Where character i of s is drawn, at text scale 1: its pen, the sum of
+; the advances before it, in the desktop's pixels from the text's start,
+; rounded to nearest, as ui_strike_chars places it.
+(def ui_text_pen ((s (list int)) (f UiFont) (bold bool) (i int)) int
+  (ui_pen_px (ui_text_units (take s i) f bold 0) (ui_font_upm f bold) (ui_char_h)))
 
 ; s's advances in the desktop's pixels at text scale scale, rounded up.
 (def ui_text_px ((s (list int)) (f UiFont) (bold bool) (scale int)) int
@@ -223,7 +236,7 @@
       ((UiPFill r color) (ui_fill c k (rect_scaled r s) color))
       ((UiPRound r radius color under)
         (ui_round c k (rect_scaled r s) (mul s (ui_fit_radius radius (rect_w r) (rect_h r))) color under))
-      ((UiPText r t a color bold scale) (ui_text_at c face k r t a color bold scale))
+      ((UiPText r t a color font bold scale) (ui_text_at c face k r t a color font bold scale))
       ((UiPIcon x y name color scale) (ui_icon_at c face k x y name color scale))
       ((UiPImage x y n dimmed ts) (ui_image_at c k (mul x s) (mul y s) (mul n s) dimmed ts)))))
 
@@ -297,29 +310,42 @@
           (let l (ui_blend c k (add x i) (add y dy) color pct under)
             (ui_blend l k (sub (add x (sub w 1)) i) (add y dy) color pct under))))))
 
-; Text in r from the face's glyphs at its scale, the cells 8 by 16 of the
-; desktop's pixels at text scale 1; none is drawn if it has none.
-(def ui_text_at ((c Canvas) (face UiFace) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (bold bool) (scale int)) Canvas
+; Text in r in face font from the face's strike of it at its scale, a
+; line 16 of the desktop's pixels tall at text scale 1; none is drawn if
+; it has none.
+(def ui_text_at ((c Canvas) (face UiFace) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (font UiFont) (bold bool) (scale int)) Canvas
   (let s (ui_face_scale face)
-    (match (ui_face_strike face (ui_glyph_table bold (mul (mul (ui_char_h) scale) s)))
-      ((Some g) (ui_text_smooth c g k r t a color bold scale s))
+    (match (ui_face_strike face (ui_glyph_table (ui_font_face font bold) (mul (mul (ui_char_h) scale) s)))
+      ((Some g) (ui_text_smooth c g k r t a color font bold scale s))
       ((None) c))))
+
+; How far into the text a glyph's pen is, the sum u of the advances
+; before it, in the screen's pixels at line height h: u at the em the
+; strikes are made at, rounded to nearest.
+(def ui_pen_px ((u int) (upm int) (h int)) int
+  (div (add (mul u (mul h 5)) (mul 3 upm)) (mul 6 upm)))
 
 ; Text placed in the desktop's pixels, along r as a says, in its middle up
 ; and down, cut short with "..." if it is too wide, then drawn from
-; strike g at scale s, bold from the bold face's.
-(def ui_text_smooth ((c Canvas) (g UiStrike) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (bold bool) (scale int) (s int)) Canvas
-  (let shown (ui_ellipsized t (sub (rect_w r) (if bold 1 0)) (ui_text_font) bold scale)
-    (let x (ui_aligned (rect_x r) (rect_w r) (ui_text_w shown (ui_text_font) bold scale) a)
-      (let y (add (rect_y r) (div (sub (rect_h r) (mul (ui_char_h) scale)) 2))
-        (ui_strike_chars c g k (mul x s) (mul y s) shown color (mul (mul (ui_char_w) scale) s))))))
+; strike g at scale s: each glyph's pen at the sum of the advances
+; before it, turned into the screen's pixels, so text at scale 2 is
+; placed in its own pixels, not doubled from 1's.
+(def ui_text_smooth ((c Canvas) (g UiStrike) (k Rect) (r Rect) (t (list int)) (a UiAlign) (color int) (font UiFont) (bold bool) (scale int) (s int)) Canvas
+  (let wide (match font ((UiMono) (if bold 1 0)) ((UiSans) 0))
+    (let shown (ui_ellipsized t (sub (rect_w r) wide) font bold scale)
+      (let x (ui_aligned (rect_x r) (rect_w r) (ui_text_w shown font bold scale) a)
+        (let y (add (rect_y r) (div (sub (rect_h r) (mul (ui_char_h) scale)) 2))
+          (ui_strike_chars c g k (mul x s) (mul y s) shown color font bold (mul (mul (ui_char_h) scale) s) 0))))))
 
-; Characters t from x, y of the screen's pixels, the line's top, cw
-; apart, each its glyph of g, ? for one g lacks.
-(def ui_strike_chars ((c Canvas) (g UiStrike) (k Rect) (x int) (y int) (t (list int)) (color int) (cw int)) Canvas
+; Characters t from pen x, y of the screen's pixels, the line's top, in
+; face font at line height h, u the units of the advances already
+; drawn; each its glyph of g, ? for one g lacks.
+(def ui_strike_chars ((c Canvas) (g UiStrike) (k Rect) (x int) (y int) (t (list int)) (color int) (font UiFont) (bold bool) (h int) (u int)) Canvas
   (if (is_empty t)
       c
-      (ui_strike_chars (ui_strike_glyph c g k x y (drawable (head t)) color) g k (add x cw) y (tail t) color cw)))
+      (let px (add x (ui_pen_px u (ui_font_upm font bold) h))
+        (ui_strike_chars (ui_strike_glyph c g k px y (drawable (head t)) color) g k x y (tail t) color font bold h
+                         (add u (ui_font_adv font bold (head t)))))))
 
 ; Glyph code of g drawn with its pen at x and the line's top at y: its
 ; box placed as its entry says, read in place; nothing for one with no

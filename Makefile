@@ -573,9 +573,10 @@ $(FACE): $(BUILD)/mkfont fonts/cursors.paths
 	$(BUILD)/mkfont fonts/cursors.paths $@.tmp && mv $@.tmp $@
 
 # The strikes the desktop draws its text from at scales 1 and 2, Source
-# Code Pro's regular and bold at 16, 32 and 64, which the font service
-# keeps as it starts, staged with the fonts in /etc/fonts.
-STRIKES := $(foreach h,16 32 64,$(BUILD)/strikes/code-$(h).strike $(BUILD)/strikes/code-bold-$(h).strike)
+# Code Pro's and Source Sans 3's regular and bold at 16, 32 and 64,
+# which the font service keeps as it starts, staged with the fonts in
+# /etc/fonts.
+STRIKES := $(foreach h,16 32 64,$(foreach f,code code-bold sans sans-bold,$(BUILD)/strikes/$(f)-$(h).strike))
 
 $(BUILD)/mkstrike: $(MKSTRIKE) tools/mkstrike/main.l0 | $(BUILD)
 	$(L0) build $(MKSTRIKE) tools/mkstrike/main.l0 -o $@
@@ -590,6 +591,14 @@ $(BUILD)/strikes/code-bold-%.strike: $(BUILD)/mkstrike fonts/SourceCodePro-Bold.
 $(BUILD)/strikes/code-%.strike: $(BUILD)/mkstrike fonts/SourceCodePro-Regular.ttf
 	@mkdir -p $(@D)
 	$(BUILD)/mkstrike fonts/SourceCodePro-Regular.ttf $* $@.tmp && mv $@.tmp $@
+
+$(BUILD)/strikes/sans-bold-%.strike: $(BUILD)/mkstrike fonts/SourceSans3-Bold.ttf
+	@mkdir -p $(@D)
+	$(BUILD)/mkstrike fonts/SourceSans3-Bold.ttf $* $@.tmp && mv $@.tmp $@
+
+$(BUILD)/strikes/sans-%.strike: $(BUILD)/mkstrike fonts/SourceSans3-Regular.ttf
+	@mkdir -p $(@D)
+	$(BUILD)/mkstrike fonts/SourceSans3-Regular.ttf $* $@.tmp && mv $@.tmp $@
 
 # The toolkit's symbolic icons, /etc/icons, at every scale: GNOME's SVGs
 # under icons/, rasterized by mkicons. make icon-sheet draws them all
