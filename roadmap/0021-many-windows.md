@@ -1,6 +1,6 @@
 # 0021: An app with many windows, its events told by window
 
-Track: Desktop · Status: ready · Needs: – · Spec: desktop.md, toolkit.md, programs.md, testing.md
+Track: Desktop · Status: active · Needs: – · Spec: desktop.md, toolkit.md, programs.md, testing.md
 
 ## Why
 
@@ -42,9 +42,9 @@ the toolkit lets an app open, route and close windows by id.
 
 ## Steps
 
-- [ ] Notices name their window: `wm` sends each window notice as the tag
+- [x] Notices name their window: `wm` sends each window notice as the tag
   `win`, the window's id as a u32, then the notice as today
-  (`l0s.l0`'s `window_notice`; `window_notice_of` reads the id and
+  (`l0s.l0`'s `win_notice`; `win_notice_of` reads the id and
   where the inner notice starts, in place, as bytes). The drivers'
   notices to `wm` stay as they are; `wm` wraps them as it forwards
   them, and wraps its own leave, focus and size notices. The toolkit's
@@ -90,8 +90,7 @@ the toolkit lets an app open, route and close windows by id.
 
 ## Spec changes
 
-- desktop.md: the window notice, `win ID` before every notice to a
-  client; many windows of one client on one port; the close button's
+- desktop.md: many windows of one client on one port; the close button's
   close notice, and the kill 2 seconds after; `windows`' client pid.
 - toolkit.md: `UiApp` and its calls, and the `win.close` action;
   `ui_open` as one window of them.
@@ -101,3 +100,16 @@ the toolkit lets an app open, route and close windows by id.
 ## Log
 
 - 2026-10-27: written.
+- 2026-10-28: step 1. The notice is `win_notice`, not `window_notice`:
+  `common/abi.l0` already has `window_notice` (the kernel's notice of a
+  client's file window to `fs`), and abi.l0 is in every program.
+  `win_notice_of` gives a `WinNotice ID AT`, AT the payload's offset of
+  the notice inside (7); each reader gained an `_at` form
+  (`key_event_at`, `pointer_event_at`, `wheel_event_at`,
+  `is_leave_notice_at`, `focus_notice_at`, `size_notice_at`, over
+  `tagged_u32s_at`), and the old `X_of` is `X_at` at 0, so the notice
+  is read where it is in the message and nothing is sliced to read it.
+  `wm` passes a driver's key on with `port_forward_win`, the head and
+  the key joined once as bytes; every other notice to a client goes
+  through `win_tell` (`told_of`, tested in `wm_test.l0`). The toolkit
+  gives a notice of another window, or a bare one, as `UiOther`.

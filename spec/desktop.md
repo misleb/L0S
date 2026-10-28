@@ -27,7 +27,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | Request | Does |
 |---|---|
 | `hello` | `compositor scale S`, so the client learns `wm`'s pid, to share with, and the scale to make its buffer at: S times W×H. Every other number, a window's size, place and damage, its top row, and the pointer, is the desktop's pixels |
-| `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT. The reply is `window ID` |
+| `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT, each a window notice naming ID. The reply is `window ID` |
 | `csd W H VA PORT TITLE` | a window as `window` makes one, but one its client decorates, as GNOME's own apps do: `wm` draws no title bar or frame for it, all of it is the client's content, its four corners rounded to 12, and the border round it, its top's too, resizes it. The reply is `window ID` |
 | `move ID` | the window dragged with the pointer from where it is, held where the pointer holds it, until the button is up: what a client that draws its own header bar asks as it is pressed, xdg_toplevel's move. Only while the left button is down after a press in that window, and nothing else is dragged (`not pressed`); only the window's client may ask |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
@@ -150,6 +150,16 @@ window by those `edges`, which `wm` then drags as by the border.
 
 Input:
 
+- **Every notice names its window.** Whatever `wm` sends a client about
+  a window, a key, the pointer, the wheel, a leave, a focus or a size
+  notice, goes as a window notice, as Wayland names the surface in each
+  event: `win`, the window's id as a u32, then the notice as below
+  (`win_notice` in [user/lib/sys/l0s.l0](../user/lib/sys/l0s.l0);
+  `win_notice_of` reads the id and where the notice starts, in place,
+  and `key_event_at` and the rest read the notice there). The drivers'
+  notices to `wm` are as they were; `wm` puts the window before them as
+  it passes them on. The toolkit's `ui_event_of` takes only its own
+  window's, any other as `UiOther`; `vt` likewise.
 - **Keys** go to the front window's client, as the `KeyEvent` notices
   the keyboard driver sends.
 - **The pointer**'s place, 0 to 32767 on each axis from the tablet, is

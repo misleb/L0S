@@ -36,7 +36,7 @@ move independently, so several can be active at once.
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
-| [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | ready | 0/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
+| [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | active | 1/6 | – | desktop.md, toolkit.md, programs.md, testing.md |
 | [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | ready | 0/4 | 0023 | storage.md, testing.md |
 | [0026](0026-font-service-limits.md) The font service lets strikes go, and knows who holds them | Toolkit | idea | – | – | programs.md, toolkit.md |
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
@@ -52,7 +52,8 @@ move independently, so several can be active at once.
   interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
   find it needs L0 to give the interrupt.
 - [0021](0021-many-windows.md) An app with many windows, its events
-  told by window: on QEMU, starting with the window notice.
+  told by window: on QEMU; the window notice is in, next many windows
+  on one port in `wm`.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
   small requests first: 0023, which it needed, is done.
 - [0031](0031-many-ports.md) A process waits on several ports, and lets
