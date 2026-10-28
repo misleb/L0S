@@ -1,6 +1,6 @@
 # 0019: A font service that caches rasterized glyphs
 
-Track: Toolkit · Status: ready · Needs: – · Spec: toolkit.md, programs.md, demo.md, syscalls.md
+Track: Toolkit · Status: active · Needs: – · Spec: toolkit.md, programs.md, demo.md, syscalls.md
 
 ## Why
 
@@ -45,7 +45,7 @@ and was set aside because it does not match the monospace already used.
 
 ## Steps
 
-- [ ] The fonts and the reader as a library: Source Sans 3's
+- [x] The fonts and the reader as a library: Source Sans 3's
   `SourceSans3-Regular.ttf` and `-Bold.ttf` from `adobe-fonts/source-sans`'
   release into `fonts/`, with `SourceSans3-LICENSE.txt` and where they
   came from. `tools/mkfont/ttf.l0` moves to `user/lib/format/ttf.l0`
@@ -110,3 +110,11 @@ and was set aside because it does not match the monospace already used.
 
 - 2026-10-27: written. Source Sans 3 chosen as Source Code Pro's
   companion face.
+- 2026-10-27: step 1. Source Sans 3 3.052R's Regular and Bold TTFs,
+  unmodified, from the release's `TTF-source-sans-3.052R.zip`, with
+  its LICENSE.md, in `fonts/` (`SourceSans3-LICENSE.txt` says where
+  from, and the zip's SHA-256). `ttf.l0` is `user/lib/format/ttf.l0`
+  (`TTF`); its forms the undocumented list named by the old path are
+  documented rather than relisted. It reads Source Sans 3 as it is:
+  1000 units per em, every ASCII code mapped, `i` (a composite, stem
+  and dot) narrower than `m`.

@@ -242,7 +242,8 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   is mixed with what is under it by that much, since layers do not
   blend.
 - **[tools/mkfont](../tools/mkfont/mkfont.l0)** makes the face at build time.
-  It reads Source Code Pro's TrueType outlines (`ttf.l0`), and the
+  It reads Source Code Pro's TrueType outlines
+  ([user/lib/format/ttf.l0](../user/lib/format/ttf.l0)), and the
   pointers' in [fonts/cursors.paths](../fonts/cursors.paths)
   (`shape.l0`). It rasterizes them (`user/lib/gfx/raster.l0`), curves,
   arcs and strokes worked out in `float`s and rounded to nearest: 16

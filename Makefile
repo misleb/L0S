@@ -183,6 +183,8 @@ RENDER  := $(PPM) $(RECT) user/lib/gfx/render.l0
 RASTER  := user/lib/gfx/raster.l0
 XML     := user/lib/format/xml.l0
 SVG     := $(XML) $(RASTER) user/lib/gfx/svg_path.l0 user/lib/gfx/svg.l0
+# TrueType outlines, read as the rasterizer's segments.
+TTF     := $(RASTER) user/lib/format/ttf.l0
 DISPLAY := user/lib/proto/display.l0
 DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
@@ -301,7 +303,7 @@ L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
 MKFS     := $(COMMON) $(CLI) $(PARTS) $(FAT) tools/mkfs/mkfs.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
 MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
-MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(RASTER) tools/mkfont/ttf.l0 tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
+MKFONT   := $(ULIB) $(RENDER) $(UI_CORE) $(TTF) tools/mkfont/shape.l0 tools/mkfont/mkfont.l0
 IMAGES   := $(PROGRAMS:%=$(BUILD)/bin/%.img)
 ICONS    := $(APPS:%=$(BUILD)/icons/%.ppm)
 ICONS2X  := $(APPS:%=$(BUILD)/icons/%2x.ppm)
@@ -450,7 +452,8 @@ $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
 $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
 $(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
-$(foreach t,ttf shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
+$(foreach t,shape mkfont,$(call l0_test,$(MKFONT) tools/mkfont/$(t)_test.l0))
+$(call l0_test,$(ULIB) $(RENDER) $(TTF) user/lib/format/ttf_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(RASTER) user/lib/gfx/raster_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_path_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(SVG) user/lib/gfx/svg_test.l0)
