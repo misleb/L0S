@@ -4,9 +4,10 @@
 # QEMU's screendump: the compositor's desktop, which the driver composes
 # from the compositor's own buffer.
 #
-#   1. the wallpaper: the splash, centered, on its own ground color,
-#      both at 70%; and the compositor's top bar over it, black, its
-#      first 32 rows, with no clock running and so no time on it
+#   1. the wallpaper: branding/wallpaper-dark.svg as
+#      build/wallpaper.qoi holds it, centered; and the compositor's top
+#      bar over it, black, its first 32 rows, with no clock running and
+#      so no time on it
 #   2. after run draw line 0 32 1279 799 red, typed at the shell, which
 #      draw sends the compositor for the desktop, both of the line's
 #      ends, the first just below the bar
@@ -14,8 +15,7 @@
 #
 # Commands are typed through a FIFO, one once the screen shows what the
 # one before it drew. The board keeps running until this kills it. Run
-# from the top of the project, after make screen-initramfs, with
-# build/splash.ppm the splash it holds.
+# from the top of the project, after make screen-initramfs.
 set -u
 cd "$(dirname "$0")/.."
 BUILD=build
@@ -58,10 +58,11 @@ shows() {
   exit 1
 }
 
-# The splash is 640 by 360, centered at 320, 220: its 0, 0 is ground,
-# 12 28 38 at full brightness, and its 190, 100 is on the L's stem,
-# 231 196 78, 9 of 64 parts dimmed; the compositor shows both at 70%.
-shows "wallpaper" "0 32 8 19 26" "510 320 161 137 54"
+# The wallpaper is 1920 by 1080, centered and cut to 1280 by 800: the
+# screen's 0, 0 is its 320, 140. Its 320, 172 is the sky, 15 26 39, and
+# its 576, 440, the screen's 256, 300, is on the L's stem, 184 141 67,
+# as build/wallpaper.qoi holds them, at full brightness.
+shows "wallpaper" "0 32 15 26 39" "256 300 184 141 67"
 shows "top bar" "0 0 0 0 0" "640 16 0 0 0" "1279 31 0 0 0"
 
 printf 'run draw line 0 32 1279 799 red\n' >&3

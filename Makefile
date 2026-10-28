@@ -20,7 +20,7 @@
 #                    the mouse moves relatively, so a click in QEMU's
 #                    window grabs the host's pointer, and Ctrl-Alt-G
 #                    (Ctrl-Option-G on macOS) lets it go
-#   make demo SPLASH=picture.ppm        the same, showing another P6 PPM
+#   make demo WALLPAPER_SVG=picture.svg the same, another wallpaper
 #   make demo NET=user,tftp=DIR         the same, the network's gateway
 #                    serving DIR over TFTP, for tftp 10.0.2.2 FILE
 #   make demo ROOT_UUID=UUID            the same, booted with root=UUID:
@@ -550,16 +550,18 @@ $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 # The wallpaper, branding/wallpaper-dark.svg drawn as QOI by
 # tools/mkwallpaper at 1920 by 1080, and at 3840 by 2160 for a 4K
 # screen: /etc/wallpaper.qoi and /etc/wallpaper2x.qoi, which the
-# display drivers show first and wm draws its desktop on.
+# display drivers show first and wm draws its desktop on. make demo
+# WALLPAPER_SVG=picture.svg draws another.
+WALLPAPER_SVG ?= branding/wallpaper-dark.svg
 WALLPAPERS := $(BUILD)/wallpaper.qoi $(BUILD)/wallpaper2x.qoi
 
 $(BUILD)/mkwallpaper: $(MKWALLPAPER) tools/mkwallpaper/main.l0 | $(BUILD)
 	$(L0) build $(MKWALLPAPER) tools/mkwallpaper/main.l0 -o $@
 
-$(BUILD)/wallpaper.qoi: branding/wallpaper-dark.svg $(BUILD)/mkwallpaper
+$(BUILD)/wallpaper.qoi: $(WALLPAPER_SVG) $(BUILD)/mkwallpaper
 	$(BUILD)/mkwallpaper $< 1920 1080 $@.tmp && mv $@.tmp $@
 
-$(BUILD)/wallpaper2x.qoi: branding/wallpaper-dark.svg $(BUILD)/mkwallpaper
+$(BUILD)/wallpaper2x.qoi: $(WALLPAPER_SVG) $(BUILD)/mkwallpaper
 	$(BUILD)/mkwallpaper $< 3840 2160 $@.tmp && mv $@.tmp $@
 
 # The face the desktop draws the pointer with, /etc/face:

@@ -102,13 +102,15 @@ scales 1 and 2 come rasterized already, by
 `/etc/fonts` beside the fonts, Source Sans 3's too, which the initramfs
 carries; `/etc/face` holds the pointers.
 
-The wallpaper is the splash, drawn by
-[tools/mksplash](../tools/mksplash/mksplash.l0) into `build/splash.ppm`, at
-70% of its brightness, so that what is drawn over it reads; at scale 2,
-`build/splash2x.ppm`, the same drawn twice the size.
-`make demo SPLASH=picture.ppm` shows any other binary PPM (P6, maxval 255)
-instead, centered and cut to fit the screen, on the color of its
-top-left pixel.
+The wallpaper is L0S's own,
+[branding/wallpaper-dark.svg](../branding/wallpaper-dark.svg): the
+splash's block letters and colors over a grid, the kernel and its
+processes as a hub and ports. [tools/mkwallpaper](../tools/mkwallpaper/mkwallpaper.l0)
+draws it at the build into `build/wallpaper.qoi`, 1920×1080, and at
+scale 2, `build/wallpaper2x.qoi`, 3840×2160, which `wm` shows at full
+brightness, centered and cut to fit the screen, on the color of its
+top-left pixel. `make demo WALLPAPER_SVG=picture.svg` draws another SVG
+the SVG library can draw instead.
 
 The window is macOS's (`cocoa`) there and SDL's (`sdl`) elsewhere, as on
 Linux. `QEMU_DISPLAY=gtk` picks another (on Wayland it scales the window),
@@ -151,6 +153,8 @@ l0s> ls
   /etc/inittab
   /etc/motd
   /etc/splash.ppm
+  /etc/wallpaper.qoi
+  /etc/wallpaper2x.qoi
   /sbin/echo
   ...
   /Volumes/data/notes

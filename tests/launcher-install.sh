@@ -137,7 +137,8 @@ shows() {
 # Extra's cell is 436 across, its icon, Terminal's, at 480, so 512, 138
 # is on it, and Terminal's, the sixth, at 844 across, has its at 888, so
 # 920, 138 is on that, and 844, 138 is the page's.
-page="36 36 36"; screen="36 31 49"; desk="8 19 26"; headerbar="48 48 48"; ink="255 255 255"
+page="36 36 36"; screen="36 31 49"; headerbar="48 48 48"; ink="255 255 255"
+desk="15 26 39"
 
 waits_for "^l0s> "
 shows "closed, at the start" "40 16 0 0 0" "0 32 $desk"

@@ -49,7 +49,7 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   3840×2160 for 4K modes, in the initramfs of every target. The
   Makefile staging (`stage_etc`) carries them. `mksplash` and the
   splash stay for `draw splash`, until nothing uses them.
-- [ ] `wm` takes the new wallpaper in place of the splash
+- [x] `wm` takes the new wallpaper in place of the splash
   (`wallpaper`, `wallpaper_2x`, `load_wallpaper`). Screen tests' pinned
   wallpaper pixels and `demo.md`'s description change with it.
 - [ ] `virtio-gpu` shows the wallpaper as its first frame: read once,
@@ -116,3 +116,16 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   `/etc/wallpaper.qoi` and `/etc/wallpaper2x.qoi`, in every target's
   initramfs through `stage_etc` (the Makefile's `WALLPAPERS`), and QOI
   is in `RENDER`, for whatever draws the wallpaper on the board.
+- 2026-10-28: step 3. `render.l0`'s `load_background` reads a QOI as
+  well as a PPM, by its magic, into a PPM's pixels once, so `wm`'s
+  `Background`, `restore` and `draw splash` are unchanged. `wm` draws
+  `/etc/wallpaper.qoi`, or `wallpaper2x.qoi` at scale 2, at 100%, not
+  the splash's 70%: the drivers show it at full brightness, and the
+  image is dark already, so nothing changes under the desktop as `wm`
+  comes. On QEMU's 1280×800 it is the middle of the 1920×1080 image;
+  at 4K and scale 1, the 1920×1080 image centered on its corner's
+  color. The pinned pixels in `gpu-screen`, `hidpi`, `launcher` and
+  `launcher-install` are the image's. `make demo SPLASH=` gave way to
+  `WALLPAPER_SVG=`. Nothing on the board reads `/etc/splash.ppm` or
+  `splash2x.ppm` any more; `mksplash` and the splash are left as they
+  were, for a later change to remove with `SPLASH`.
