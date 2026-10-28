@@ -26,7 +26,6 @@ move independently, so several can be active at once.
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
 | [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | idea | – | – | kernel.md |
-| [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | blocked | – | 0002 | pi5.md, kernel.md |
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | ready | 0/5 | – | display.md, pi5.md |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | blocked | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
@@ -45,6 +44,7 @@ move independently, so several can be active at once.
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
 | [0028](0028-boot-chime-wallpaper.md) The chime as sound starts, the wallpaper as the screen does | Desktop | ready | 0/6 | – | sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008, 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
+| [0030](0030-cpu-usage.md) How the CPUs are used, in `ps` and System Monitor | Kernel | idea | – | – | kernel.md, syscalls.md, programs.md, testing.md |
 
 ## Ready
 
@@ -66,7 +66,6 @@ move independently, so several can be active at once.
 
 ```mermaid
 graph LR
-  0002[0002 faster with more CPUs] --> 0003[0003 Pi 5 CPUs]
   0005[0005 HVS frame interrupts] --> 0006[0006 paced display queue]
   0012[0012 key modifiers] --> 0013[0013 entry editing]
   0019[0019 font service] --> 0020[0020 proportional text]
@@ -81,6 +80,7 @@ graph LR
 | Goal | Track | Done |
 |---|---|---|
 | [0001](0001-pi5-stable.md) The Pi 5 boots reliably | Pi 5 | 2026-10-26 |
+| [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | 2026-10-28 |
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |

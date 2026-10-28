@@ -1,6 +1,6 @@
 # 0003: All four of the Pi 5's CPUs
 
-Track: Pi 5 · Status: blocked · Needs: 0002 · Spec: pi5.md, kernel.md
+Track: Pi 5 · Status: done · Needs: – · Spec: pi5.md, kernel.md
 
 ## Why
 
@@ -15,7 +15,7 @@ L0S does not boot reliably there yet
 
 ## Steps
 
-To be written once 0001 is done.
+None were needed: the four-CPU kernel already ran there (Log).
 
 ## Spec changes
 
@@ -30,3 +30,12 @@ To be written once 0001 is done.
   kernel on CPU 0, processes on CPUs 1 to 3`, reached the compositor and
   answered `ps`. So the Pi 5's Limit in kernel.md no longer holds as
   written, and this goal may be mostly done once 0001 is.
+- 2026-10-28: done. 0001 is, and kernel.md's Limits already name the
+  Pi 5 ("whose four boot with processes on three"). That every process
+  there ran on CPUs 1 to 3 follows from the kernel: with more than one
+  CPU, `schedule` takes `many_schedule`, which hands each ready thread
+  to the CPU `cpus_pick` names, always from 1, or waits; CPU 0 runs
+  only the kernel. So a desktop reached on four CPUs ran all of it on
+  the other three. The need on 0002 was dropped: that goal makes more
+  CPUs faster, which this never asked. Seeing how the CPUs are used, in
+  `ps` and System Monitor, is goal [0030](0030-cpu-usage.md).
