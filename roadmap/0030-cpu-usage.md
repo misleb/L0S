@@ -1,6 +1,6 @@
-# 0030: How the CPUs are used, in `ps` and System Monitor
+# 0030: How the CPUs are used, and what each process serves, in `ps` and System Monitor
 
-Track: Kernel · Status: idea · Needs: – · Spec: kernel.md, syscalls.md, programs.md, testing.md
+Track: Kernel · Status: idea · Needs: – · Spec: kernel.md, syscalls.md, programs.md, demo.md, testing.md
 
 ## Why
 
@@ -14,6 +14,14 @@ it runs, not how much of a CPU it takes, not whether the system is busy.
 That 0003's processes ran on CPUs 1 to 3 had to be argued from the
 scheduler's code rather than read off the screen. Goal 0002, which makes
 more CPUs faster, also needs a way to see the CPUs used.
+
+Nor does anything say what a process serves. A server registers its
+port under a name (`name_register`, `compositor`, `font`, `vt1`), and
+clients find it with `name_lookup`. The kernel knows each name's port,
+and each port's owner, but no call lists them. So `ps` shows `wm` and
+not that it is `compositor`, and which `vt` is `vt2`, or which of two
+`usb-hid` is `keyboard`, can only be guessed from the order things
+started, as `tests/vt.sh` and `spec/demo.md` do with pids.
 
 GNOME System Monitor shows each process's % CPU in its Processes tab,
 and each CPU's use over time in its Resources tab. `top` and `uptime`
@@ -32,16 +40,25 @@ show the load averages.
   `ProcInfo`, or a call of its own), and the CPUs' busy times and the
   load. These are checked against the kernel's records, with board tests
   in `kernel_virt_test.l0`, refusals included.
-- `ps` shows each process's CPU and its % of one CPU since the last
-  `ps`, or over its life the first time. `uptime`, or a line of `ps`,
+- A system call lists the names registered, each with its port and the
+  pid that owns it, or a process's own names given its pid. It is
+  bounded as `proc_slot` is, a slot at a time or into a buffer the
+  caller gives, and checked against the kernel's records.
+- `ps` shows each process's CPU, its % of one CPU since the last `ps`
+  (or over its life, the first time), and the names it serves, comma
+  separated, `-` for none: `wm` shows `compositor`, each `usb-hid` its
+  `keyboard` or `pointer`. A `names` command lists every name, its port
+  and its owner. `uptime`, or a line of `ps`,
   shows the load averages and each CPU's % busy.
-- System Monitor has CPU and % CPU columns in its process grid, sortable
-  like the others. Under the grid, beside memory, each CPU's % busy is a
+- System Monitor has CPU, % CPU and Provides columns in its process
+  grid, sortable like the others, Provides being the names it serves. Under the grid, beside memory, each CPU's % busy is a
   bar, CPU 0 marked as the kernel's, and the load averages, read again
   every second.
 - On QEMU with `-smp 4` a test sees a busy process's % CPU near 100 on
   a CPU from 1 to 3 and CPU 0's share small. On the Pi 5, `ps` shows
-  processes on CPUs 1 to 3, which 0003's Log could only argue. `make
+  processes on CPUs 1 to 3, which 0003's Log could only argue. An e2e
+  case sees `ps` and `names` agree on who serves `compositor` and
+  `console`, and a name gone once its owner exits. `make
   check`, `make test`, `make e2e` and `make test-virt` pass.
 
 ## Steps
@@ -53,12 +70,16 @@ the totals should cost an add each.
 ## Spec changes
 
 - kernel.md: what the kernel counts, and the load averages.
-- syscalls.md: the call, or `ProcInfo`'s new fields.
-- programs.md: `ps`'s columns, `uptime`'s row if it is a program,
-  System Monitor's CPU columns and bars.
+- syscalls.md: the CPU call, or `ProcInfo`'s new fields, and the call
+  that lists names.
+- programs.md: `ps`'s columns, `names`' row, `uptime`'s row if it is a
+  program, System Monitor's CPU and Provides columns and its bars.
+- demo.md: the `ps` sample with its new columns.
 - testing.md: the tests that read them.
 
 ## Log
 
 - 2026-10-28: written when 0003 was closed, which showed that the CPUs'
   use could be argued from the code but not seen.
+- 2026-10-28: widened to the names each process serves, which `ps` and
+  System Monitor should show beside its CPU.
