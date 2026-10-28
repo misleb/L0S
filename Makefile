@@ -111,12 +111,16 @@ GPU          ?= $(shell tools/qemu-gl)
 comma        := ,
 GPU_OPTS     := $(if $(SCREEN),xres=$(word 1,$(subst x, ,$(SCREEN)))$(comma)yres=$(word 2,$(subst x, ,$(SCREEN))))
 # CPUS is how many CPUs make boot, demo and e2e give the virt board: with
-# more than one, the kernel runs on CPU 0 and processes on the rest (spec
-# 6.18). It is 1, since on QEMU more are no faster, and a boot that
-# writes a disk a little slower (probes/smp/REQUEST-idle-cpus.md); make
-# demo CPUS=4 for four. make test-virt boots each test on one CPU and
-# then on VIRT_CPUS.
-CPUS         ?= 1
+# more than one, the kernel runs on CPU 0, with the processes that pass
+# messages, and hands those that compute to the rest (spec 6.18,
+# spec/kernel.md). It is 4: on QEMU four are as fast as one at writing a
+# disk, nearly at passing messages, and far faster beside a process that
+# computes (roadmap 0002's log; tools/cputimes times them); make demo
+# CPUS=1 for one. QEMU_CPUS, which tools/qemu-boot.sh and the e2e and
+# screen tests read, follows it; an e2e case whose output depends on
+# which program runs first keeps to one with a cpus file. make test-virt
+# boots each test on one CPU and then on VIRT_CPUS.
+CPUS         ?= 4
 VIRT_CPUS    ?= 4
 export QEMU_CPUS ?= $(CPUS)
 # make boot gives an etc both inputs: virtio's keyboard and tablet, and a

@@ -12,7 +12,7 @@ of an operating system around it.
 make demo                                 # boot to the shell on this terminal, and type at it
 make demo-system                          # the same, from build/system.img's System volume, a copy of it
 make demo SCREEN=3840x2160                # on a 4K screen, the desktop drawn at scale 2
-make demo CPUS=4                          # on a board of four CPUs, the kernel on CPU 0 and processes on the rest; 1 by default
+make demo CPUS=1                          # on a board of one CPU; 4 by default, the kernel and processes passing messages on CPU 0, those computing on the rest
 make all                                  # type check, host tests, board tests, end-to-end
 make boot ETC=tests/e2e/ipc/etc           # boot every program with that etc, non-interactively
 make pi5-card                             # build/pi5-card: the boot partition's files for a Raspberry Pi 5

@@ -20,8 +20,8 @@ sleeper and no bound interrupt, nothing can ever wake anyone: it reports a
 deadlock and exits with 124.
 
 That is the loop on a board with one CPU. With more (spec §6.18; the
-aarch64 virt board has as many as `-smp` gives it: `make demo CPUS=4`,
-or `QEMU_CPUS=4` for `tools/qemu-boot.sh` and the tests), the kernel stays on CPU 0. It runs
+aarch64 virt board has as many as `-smp` gives it: four for `make demo`
+and the tests, `CPUS`, and `QEMU_CPUS` for `tools/qemu-boot.sh`), the kernel stays on CPU 0. It runs
 a process there itself, as on one CPU, while that process passes
 messages, and hands one that computes to the others with `cpu_run`,
 which hand each back when it traps, through rings in memory, with no
@@ -377,7 +377,7 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
   on another CPU is a trip through the rings to CPU 0 and back, which
   costs more than the call, so processes passing messages run on CPU 0,
   one at a time, as on one CPU, and four CPUs are no faster at it than
-  one, nor slower beyond the noise. Timed with
+  one, and a little slower. Timed with
   [tools/cputimes](../tools/cputimes) (roadmap 0002's log has the
   method), on one CPU and on four: the e2e case `install` 2.76 s and
   2.80 s, `install_boot` 3.26 s and 3.35 s, which overlap from run to
@@ -386,14 +386,14 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
   and less on a quiet host; three processes that compute beside one
   passing messages 18.7 s and 0.53 s; the demo's desktop on the screen
   1.3 s and 1.0 to 1.1 s. Before CPU 0 ran processes itself, four took
-  3.55 s, 4.40 s, 3.35 s and 2.9 to 23 s of those. The demo and the tests
-  boot with one unless asked (`CPUS`, `QEMU_CPUS`). Every step of CPU 0's own between
-  a process's runs costs on QEMU, a read of the kernel's record a
-  quarter of a µs, so the path between them does as few as it can (step
-  3 of the loop, at the top). With the disk in `build/`, as `make e2e` has it, the host's
-  own disk syncing it varies these by half or more, and a busy host
-  slows four CPUs more than one. `make test-virt` runs every board test
-  on one CPU and on four.
+  3.55 s, 4.40 s, 3.35 s and 2.9 to 23 s of those. The demo and the
+  tests boot with four (`CPUS`, `QEMU_CPUS`; `CPUS=1` for one). Every
+  step of CPU 0's own between a process's runs costs on QEMU, a read of
+  the kernel's record a quarter of a µs, so the path between them does
+  as few as it can (step 3 of the loop, at the top). With the disk in
+  `build/`, as `make e2e` has it, the host's own disk syncing it varies
+  these by half or more, and a busy host slows four CPUs more than one.
+  `make test-virt` runs every board test on one CPU and on four.
 - Images are copied from the archive, or a volume's file, into fresh
   frames for every process that runs them, before its code and rodata
   are found to be another's and those frames freed again, so starting a

@@ -25,7 +25,6 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | active | 2/4 | – | kernel.md, demo.md, testing.md |
 | [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | blocked | – | 0002 | pi5.md, kernel.md |
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | ready | 0/5 | – | display.md, pi5.md |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | blocked | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
@@ -73,6 +72,7 @@ graph LR
 | Goal | Track | Done |
 |---|---|---|
 | [0001](0001-pi5-stable.md) The Pi 5 boots reliably | Pi 5 | 2026-10-26 |
+| [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | 2026-10-28 |
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |

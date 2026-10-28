@@ -4,6 +4,9 @@
 and boots it on QEMU. The board's serial line is on your terminal, and
 its virtio-gpu is in a QEMU window, with a USB keyboard and mouse on a
 `qemu-xhci` (see [USB](devices.md#usb)); its virtio-net is on QEMU's user network.
+It has four CPUs (`CPUS`; `make demo CPUS=1` for one): the kernel on CPU
+0, running there too the processes that pass messages, and those that
+compute on CPUs 1 to 3 ([kernel.md](kernel.md)).
 The mouse moves relatively, as a real one does, so a click in the window
 grabs your pointer, and Ctrl-Alt-G (Ctrl-Option-G on a Mac) lets it go.
 The window shows a desktop, the compositor's: a wallpaper, a top bar,

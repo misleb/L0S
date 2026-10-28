@@ -1,6 +1,6 @@
 # 0002: More CPUs make L0S faster
 
-Track: Kernel · Status: active · Needs: – · Spec: kernel.md, demo.md, testing.md
+Track: Kernel · Status: done · Needs: – · Spec: kernel.md, demo.md, testing.md
 
 ## Why
 
@@ -26,20 +26,17 @@ boot with one CPU unless asked.
   and hands only those that compute to the other CPUs; processes ready
   together, or new, still go to CPUs of their own. Host tests in
   `cpus_test.l0`; the board tests pass on one CPU and on four.
-- [ ] The demo's `CPUS` is 4, and the tests' `QEMU_CPUS` follows it; e2e
+- [x] The demo's `CPUS` is 4, and the tests' `QEMU_CPUS` follows it; e2e
   cases whose output depends on which program runs first pinned to one
   CPU.
-- [ ] kernel.md's Limit says the default; demo.md and the README say
+- [x] kernel.md's Limit says the new timings; demo.md and the README say
   the new default.
 
 ## Spec changes
 
-- kernel.md: the Limit says the demo and the tests boot with four.
-- demo.md: the default `CPUS`.
-
-(Moved with steps 1 and 2: kernel.md's loop, CPU 0 running processes
-itself and a kernel that stops taking its threads back, its banner line
-and its Limit's timings; testing.md's `tools/cputimes`.)
+All moved: kernel.md's loop (CPU 0 running processes itself, a kernel
+that stops taking its threads back), its banner line and its Limit;
+demo.md's CPUs; testing.md's `tools/cputimes`.
 
 ## Log
 
@@ -172,6 +169,21 @@ and its Limit's timings; testing.md's `tools/cputimes`.)
   what the steps above that are left cost, about 2 µs a round trip;
   and thirty to forty times as fast with processes that compute beside
   one passing messages. The first "Done when" holds.
+- 2026-10-28: steps 3 and 4. The Makefile's `CPUS` is 4, so `make demo`
+  and `make boot` have four CPUs, and `QEMU_CPUS`, which follows it,
+  gives the e2e cases and the screen tests four too: they then test the
+  board the demo is, they passed on four every time once `pcie` and
+  `virtio-input_tablet` kept to one, and `make e2e` took 5 min 27 s on
+  four against 5 min 24 s on one, `E2E_JOBS` boots at once either way.
+  `tests/e2e.sh` and `tools/qemu-boot.sh` run by hand still default to
+  one. Once, before those two cases had a `cpus` file, `jobs` failed on
+  four in a full run, and passed every time alone and in every run since
+  (eight alone, nine full runs); its output depends on Ctrl-C and `kill`
+  reaching a job between typed lines, and if it fails again it should
+  keep to one CPU too. All suites at the end: `make check`; `make test`
+  2761 passed; `make test-virt` 238 on one CPU and 238 on four; `make e2e`
+  64 cases and 16 screen tests on four (the default) and on one.
+  Both "Done when" lines hold.
 - For 0030 (CPU usage): processes now run on CPU 0 as well as on 1 to
   3, so "CPU 0's share small" holds only of a computing process, which
   is handed out; one passing messages runs on CPU 0. And clock reads
