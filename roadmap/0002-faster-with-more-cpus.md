@@ -35,3 +35,9 @@ To be written. The limit's own measurements are the starting point.
   hand-offs, and times `install` and `install_boot` on one CPU and on
   four before and after; its numbers will be logged here too. Measure
   again once it lands, before working on this.
+- 2026-10-27: 0023 landed on QEMU. Before it, `install` took 14.6 s on
+  one CPU and 18.1 s on four, `install_boot` 25.4 s and 32.2 s; after,
+  3.3 s and 2.9 s, 2.9 s and 2.8 s (0023's log has the method). Writing
+  to a disk is no longer slower on four CPUs. kernel.md's Limit, which
+  says it is, should be measured again with something that is not
+  file data before this goal is worked on, or it may be done.

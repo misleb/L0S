@@ -36,8 +36,8 @@
 # qemu-xhci, for pcie, xhci and usb-hid, not virtio's. If NAME/sd exists,
 # the board has an SD card in a sdhci-pci, a blank image of 64 MB made
 # for the boot, for pcie and sdhci. Every boot is killed after two
-# minutes: install_boot takes about 55 s alone, and longer beside others
-# writing their disks. Given case names as arguments, it runs only those. Run from
+# minutes: install_boot, the longest, takes about 3 s alone, and longer
+# beside others writing their disks. Given case names as arguments, it runs only those. Run from
 # the top of the project, after make root, which stages every program in
 # build/root as /bin, /sbin and /Applications; this script's hand-made
 # programs go in /bin beside them. The board has a virtio-gpu,

@@ -21,8 +21,8 @@ does three things:
 The firmware itself is in the Pi 5's EEPROM, so these are all the files
 a card's boot partition needs: copy them onto a FAT32 one, or onto the
 boot partition of a card Raspberry Pi OS made. A card holding only them
-has not yet been booted from (cards made so far also had Raspberry Pi
-OS's files). `l0 card`'s `config.txt` loads the image
+has not yet been booted from: the one that booted also had Raspberry Pi
+OS's `overlays/` (see "A card that boots a system volume"). `l0 card`'s `config.txt` loads the image
 at 0x80000 and the initramfs at 0x10000000, leaves RP1 set up
 (`pciex4_reset=0`) and forces HDMI's hotplug.
 
@@ -72,7 +72,12 @@ install: 5 boot files and input.bin, an initramfs of 87 files, written to /Volum
 install: /Volumes/bootfs/cmdline.txt boots /Volumes/root, root=12345678-0000-0000-0000-000000000002
 ```
 
-A card made so has not yet been booted from.
+A card made so has booted the board, its bootloader reading
+`config.txt`, `input.bin`, the device tree, `cmdline.txt` and `l0.img`
+from `bootfs`, and `boot` making `System` `/`. That card kept Raspberry
+Pi OS's `overlays/`, which the firmware also read, applying
+`bcm2712d0.dtbo` to the C1 device tree on a D0 board; a card with no
+`overlays/`, or partitioned by L0S's GPT, has not yet booted one.
 
 **Over the network.** The Pi 5 keeps its firmware in its EEPROM and can
 fetch the rest by TFTP:

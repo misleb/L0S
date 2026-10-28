@@ -122,6 +122,39 @@ already fetches the two device trees for the network boot
   programs.md's `install` row, testing.md's `install_boot`. pi5.md says
   such a card has not yet been booted from, which the board step
   settles.
+- 2026-10-27: with 0023's windows `install_boot` takes about 3 s, not
+  55, so it has the run step 2 left out: first from `/etc/nodtb`, with
+  no device tree, and the note; then `/etc/boot`'s, with none.
+- 2026-10-27: on the board, network booted, with 0023's windows: `run
+  install System` onto the card's rootfs, made L0FS by Disks, in just
+  under a minute, and `run install --boot bootfs --root System` in
+  about 15 s. Not yet booted from: the board's `BOOT_ORDER` is 0xf2,
+  the network only, so the last step needs `eeprom update` to 0xf21
+  first.
+- 2026-10-27: booted from the card, by the user, its EEPROM changed to
+  try the card. The bootloader's log: `autoboot.txt` and `pieeprom.upd`
+  not found; `config.txt` read (179 bytes); `input.bin` loaded at
+  0x10000000 (19,751,068 bytes); `dtb_file 'bcm2712-rpi-5-b.dtb'`
+  (78,679 bytes), then `/overlays/overlay_map.dtb` and
+  `/overlays/bcm2712d0.dtbo`, Raspberry Pi OS's, still on `bootfs`;
+  `cmdline.txt`'s `--l0-args root=f5d35b74-0000-0000-0000-000000000002`;
+  `l0.img`; Starting OS at 19.3 s. Then L0S `booted with root=…`,
+  mounted `System` at sector 1064960 and said `/ is the volume System,
+  and the initramfs is given up`, and the shell's prompt came. So an
+  L0S-installed card boots, root and all. Not shown: a card with only
+  L0S's files (the firmware read `overlays/` to fit the C1 tree to this
+  D0 board, and with none may want `bcm2712d0-rpi-5-b.dtb`, which
+  `/boot` has too), nor one on L0S's GPT. Step 5 stays open for those:
+  renaming `bootfs`'s `overlays` and booting again answers the first.
+- 2026-10-27: for step 5 on a card with nothing of Raspberry Pi OS's,
+  as the user asked: `fs`'s `erase DISK`, the shell's `erase` and
+  Disks' Format Disk... give a drive a new, empty GPT in place of its
+  table, an MBR's too, its volumes unmounted first. Then Create
+  Partition and Format... make `bootfs` FAT32 and `System` L0FS on it,
+  so the user can network boot, erase the card, and install from
+  scratch. Tests: `fs_test`'s `test_erase`, `_mbr`, `_refused`; Disks'
+  `test_erase_dialog`, `_button`; `sh`'s `test_erase`; and `fat_mbr`,
+  which now ends erasing its MBR card.
 - 2026-10-27: on the board, with the card's rootfs made L0FS `System`
   by Disks: `install System` wrote, but slowly, and `install --boot
   bootfs --root System` was stopped after minutes, still writing. Not

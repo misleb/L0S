@@ -358,15 +358,14 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
   through QEMU's global lock; with idle CPUs halting (L0's roadmap 0123,
   [probes/smp](../probes/smp/REQUEST-idle-cpus.md)) 50 s and about 110 s;
   and with short releases kept (see Releasing), 25 s on one, two or four.
-  Writing to a disk is still slower on four: each hand-off to another
-  CPU costs more than a call on CPU 0, and most of all to a CPU that has
-  stopped polling. Keeping a chain of processes on one CPU (step 3 above)
-  wins some of it back: with the case's disk in memory, `install` takes
-  21 to 23 s on one and 26 to 27 s on four (32 to 33 s before), and
-  `install_boot` 37 s and 47 to 48 s (48 to 49 s before). Queuing behind
-  any thread, however long it runs, made them 25 and 44 s, but could
-  leave a process waiting a whole slice behind one computing. Nothing L0S
-  runs yet computes enough on its own to gain from more CPUs. With the disk in `build/`, as `make e2e` has
+  Each hand-off to another CPU costs more than a call on CPU 0, and most
+  of all to a CPU that has stopped polling, which made writing to a disk
+  slower on four while a file's data went 4 KB a message. Through file
+  windows, 64 KB a request (see File windows), it no longer is: the
+  e2e case `install` takes about 3.3 s on one CPU and 2.9 s on four, and
+  `install_boot` 2.9 s and 2.8 s, where they took 14.6 and 18.1 s, and
+  25.4 and 32.2 s, before. Nothing L0S runs yet computes enough on its
+  own to gain from more CPUs. With the disk in `build/`, as `make e2e` has
   it, the host's own disk syncing it varies these by half or more.
   `make test-virt` runs every board test on four too.
 - Images are copied from the archive, or a volume's file, into fresh

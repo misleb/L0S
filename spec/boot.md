@@ -163,8 +163,8 @@ To make a system volume:
 `fs` or the only one, serves no disk but one volume, `tmp`, in its own
 memory (32 MB unless given, at most 255), mounted at `/Volumes/tmp` with
 the UUID `00000000-0000-7000-8000-000000000000` and registered as
-`tmpfs`, not `fs`. It has no partition table, so `partition`, `mkfs` and
-`rescan` are refused (-5), and nothing in it outlives it: a board
+`tmpfs`, not `fs`. It has no partition table, so `partition`, `erase`,
+`mkfs` and `rescan` are refused (-5), and nothing in it outlives it: a board
 that has a disk too still starts the disk's `fs` as before. A program can
 use it as any volume, as the shell does (`cp /bin/hello /Volumes/tmp/bin`,
 `run /Volumes/tmp/bin/hello`). Booted with `root=tmpfs`, `boot` has

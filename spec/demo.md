@@ -199,6 +199,7 @@ which refuse every change (`permission denied`), and the disk's, under
 | `unmount VOLUME` | takes a volume away: `fs` stops serving it and the kernel unmounts it, until a rescan (Disks' Refresh) finds it again; refused while any file is open, and for the system volume |
 | `relabel VOLUME LABEL` | renames a volume: `fs` writes LABEL in its superblock and as its partition's name in the GPT, and the kernel mounts it at `/Volumes/LABEL` in place of where it was; its open files stay open. Refused for a label served or mounted already, one that is no label, and the system volume. A process whose current directory was on it under its old name is left there, as after `unmount` |
 | `partition [DISK] SECTORS [START]` | a new partition of SECTORS in the GPT of DISK, `disk0` unless named, from START or where it first fits, and says its UUID (see [Volumes](storage.md#volumes)) |
+| `erase DISK` | DISK, always named, given a new, empty GPT in place of every partition it had, its volumes unmounted first (see [FAT32 volumes](fat32.md#fat32-volumes)) |
 | `mkfs UUID LABEL [fat32]` | a new, empty volume on the partition with that UUID, mounted at `/Volumes/LABEL`: L0FS, or FAT32 with `fat32`, which a Raspberry Pi boots from (see [FAT32 volumes](fat32.md#fat32-volumes)) |
 
 ```

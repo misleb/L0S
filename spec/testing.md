@@ -133,10 +133,10 @@ Ctrl-C as a person would:
   runs `hello` from it, and is refused a volume not mounted and no volume;
 - `install_boot`, on a disk whose BOOT is FAT32, made by `tools/mkfs`,
   has `install --boot` make it a Pi 5's boot partition from stand-in boot
-  files in `/etc/boot`, a device tree among them: their copies and
-  `input.bin`, and no note that it lacks a device tree (`install_test`
-  has the note), and with `--root data`, an L0FS volume of a fixed
-  UUID, its `cmdline.txt` saying `root=` it; then it is refused no boot
+  files: from `/etc/nodtb`, their copies and `input.bin`, and the note
+  that it lacks a device tree; then from `/etc/boot`, a device tree
+  among them, with no note, and with `--root data`, an L0FS volume of a
+  fixed UUID, its `cmdline.txt` saying `root=` it; then it is refused no boot
   files, no volume, and the boot volume as its own root;
 - `fat` unmounts scratch, an L0FS volume of 33 MB, and has `mkfs ...
   fat32` make it FAT32, BOOT: a file written and read back by its name
@@ -146,7 +146,8 @@ Ctrl-C as a person would:
 - `fat_mbr`, on a disk with an MBR and bootfs on it, FAT32 of type 0C
   filled from the initramfs, as Raspberry Pi's Imager makes a card:
   served, its files read, `config.txt` written and read back, and a
-  `partition` refused;
+  `partition` refused; then `erase disk0` gives it a new, empty GPT,
+  and bootfs is unmounted;
 - `rootboot` boots with `root=` System's UUID, System filled from the
   case's own initramfs: `boot` makes it `/`, and the shell, started from
   it, lists `/` and `/Volumes`, writes in `/etc` and reads that back, from
@@ -392,9 +393,10 @@ Opened again, the launcher shows it in the second cell, and a click on it
 starts it, the top bar naming it Extra.
 
 Every boot is killed after two minutes by [tools/deadline](../tools/deadline),
-since macOS has no `timeout`: `install_boot` takes about 55 s alone,
-mostly QEMU syncing its disk image, and longer beside other boots
-writing theirs. `tests/e2e.sh` also builds three programs
+since macOS has no `timeout`. The longest, `install_boot`, takes about
+3 s alone, and longer beside other boots writing their disks: it took
+25 s on one CPU, and 55 s on a busier host, before file data went
+through windows (roadmap 0023's log has the timings). `tests/e2e.sh` also builds three programs
 of a few aarch64 instructions each, each an ELF of one code segment it
 writes with `printf`, for what L0 code cannot do on purpose: fault, pass
 a bad buffer, and wait on nothing.

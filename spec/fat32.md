@@ -17,7 +17,9 @@ change one, `config.txt` or `cmdline.txt`, made by anything else.
   UUIDs, so `fs` mounts its volumes by one it makes of the disk's
   signature and the partition's number, `SSSSSSSS-0000-0000-0000-0000000000NN`.
   L0S makes no partitions in an MBR: `partition` on such a disk is -5,
-  and Disks offers no Create Partition there. `mkfs UUID LABEL
+  and Disks offers no Create Partition there. `erase DISK` (Disks'
+  Format Disk...) replaces the whole table with a new, empty GPT, its
+  volumes unmounted first, after which the disk is partitioned as any. `mkfs UUID LABEL
   [fat32]` makes a volume on any of its partitions, as Raspberry Pi OS's
   ext4 rootfs, by that UUID, and changes only the partition's type
   byte in sector 0, the boot code, the signature and the other entries
@@ -123,6 +125,7 @@ refusal's word may be followed by why, in words.
 | `relabel VOLUME LABEL` | 0, then LABEL: the volume called LABEL, written in its superblock and as its partition's name in the GPT, mounted at `/Volumes/LABEL` with `fs_mount` first, so that a label mounted already by any server changes nothing, and then unmounted from its old place; it keeps its place among the volumes, so open files stay open. -5 for a label that is none, -4 for one served or mounted already and for the system volume, whose label the kernel keeps, -3 for a volume not served; -5 on a RAM file system, and if the disk cannot be written, the old label kept |
 | `rescan` | every disk taken on, those registered since too, and each one's partition table and every volume read again, as at the start, and served in place of those before, each new label mounted and each that has gone unmounted: how many volumes there are now, then a line `LABEL` for each; -4 while any file is open. A disk whose table is bad has no volumes, and is said so on stderr. The system volume's label stays mounted though it has gone, and is answered as a volume not served: -3, or -9 to write |
 | `partition DISK COUNT [START]` | a new partition of COUNT sectors in the GPT of the disk DISK (`disk1`, say), both its copies, from START or where it first fits, of L0FS's type, with a new UUID, its first sector zeroed so that no old volume is found there: 0, then the UUID; -6 and why if there is no room or no entry left; -5 if the table is bad, or the disk has an MBR's, which L0S never writes over; -3 if there is no such disk. A disk with no table gets one |
+| `erase DISK` | the disk DISK given a new, empty GPT, both copies and its protective MBR, in place of its table, a GPT's or an MBR's, every volume on it unmounted first, and the disk flushed: 0. What the volumes held stays on the disk, named by nothing, and a partition made over it zeroes its first sector. -4 while any file is open, or if the disk holds the system volume; -3 if there is no such disk |
 | `attach DISK` | the disk DISK taken on, and its volumes mounted and served after those before: 0, then how many; 0 and 0 for a disk taken on already; -3 if there is no such disk. A driver asks it, with no reply port, once it has registered a disk |
 | `mkfs UUID LABEL [l0fs\|fat32]` | a new, empty volume labelled LABEL on the partition with that UUID, on whichever disk's GPT has it, L0FS's unless `fat32` is asked for, the partition named LABEL and given L0FS's type or the basic data type, mounted at `/Volumes/LABEL` and served: 0, then LABEL; -3 if no partition has the UUID, -4 if LABEL is served or the partition's volume is (`format` empties that), -5 for a bad UUID or label, or a FAT32 label of more than 11, -6 if the partition is too small (FAT32 needs 33 MB) |
 

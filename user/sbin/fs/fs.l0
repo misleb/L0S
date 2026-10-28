@@ -591,17 +591,18 @@
     (obey_volumes f op ws)))))))))
 
 (def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
-  (if (if (store_is_ram (fs_store_at f 0)) (any_eq op (split_spaces "partition mkfs rescan attach relabel")) false)
+  (if (if (store_is_ram (fs_store_at f 0)) (any_eq op (split_spaces "partition erase mkfs rescan attach relabel")) false)
       (Answered f -5 "a RAM file system has no partition table")
       (obey_volumes_disk f op ws)))
 
 ; The same on a disk.
 (def obey_volumes_disk ((f Fs) (op (list int)) (ws (list (list int)))) Answered
   (if (eq op "partition") (obey_partition f ws)
+  (if (eq op "erase") (obey_erase f ws)
   (if (eq op "attach") (if (eq (length ws) 1) (do_attach f (head ws)) (word f -5))
   (if (eq op "mkfs") (obey_mkfs f ws)
   (if (eq op "relabel") (if (eq (length ws) 2) (do_relabel f (head ws) (head (tail ws))) (word f -5))
-  (obey_volume f op ws))))))
+  (obey_volume f op ws)))))))
 
 ; mkfs UUID LABEL [l0fs|fat32]: L0FS's unless fat32 is asked for.
 (def obey_mkfs ((f Fs) (ws (list (list int)))) Answered
@@ -1386,6 +1387,46 @@
               ((NotAttached f2 why) (Answered f2 -3 why))
               ((Attached f2 di)
                 (do_partition f2 di (int_prefix (head ns) 0) (if (is_empty (tail ns)) -1 (int_prefix (head (tail ns)) 0)))))))))
+
+; erase DISK: the disk registered as DISK given a new, empty GPT, both
+; copies and its protective MBR, in place of whatever table it had, a
+; GPT's or an MBR's, every volume on it unmounted first, and the disk
+; flushed: 0. The volumes' data stays where it was, but nothing names it,
+; and a partition made over it zeroes its first sector. Refused -4 while
+; any file is open, since a handle names its volume by where it is among
+; fs's, as unmount is, and when the disk holds the system volume; -3 for
+; no such disk.
+(def obey_erase ((f Fs) (ws (list (list int)))) Answered
+  (if (not (eq (length ws) 1))
+      (word f -5)
+      (match (attached f (head ws))
+        ((NotAttached f2 why) (Answered f2 -3 why))
+        ((Attached f2 di)
+          (if (gt (map_size (fs_handles f2)) 0)
+              (Answered f2 -4 "a file is open")
+              (if (system_on f2 di 0)
+                  (Answered f2 -4 "the disk holds /, the system volume")
+                  (match (now_ms (unmounted_all f2 di 0))
+                    ((Timed f3 ms)
+                      (match (flushed_after (write_table (fs_store_at f3 di) (GptDisk (fresh_uuid f3 ms 0) (nil GptPart))))
+                        ((PutNot s2 why) (Answered (with_store_at f3 di s2) -5 why))
+                        ((Put s2) (Answered (with_store_at f3 di s2) 0 "")))))))))))
+
+; Whether any of f's volumes from vi on is on disk di and is /.
+(def system_on ((f Fs) (di int) (vi int)) bool
+  (if (ge vi (array_len (fs_vols f)))
+      false
+      (if (if (eq (fs_vol_disk f vi) di) (is_system f vi) false) true (system_on f di (add vi 1)))))
+
+; f without its volumes on disk di from vi on, each unmounted from
+; /Volumes as it goes.
+(def unmounted_all ((f Fs) (di int) (vi int)) Fs
+  (if (ge vi (array_len (fs_vols f)))
+      f
+      (if (eq (fs_vol_disk f vi) di)
+          (let u (fs_unmount (fv_label (fs_vol f vi)) (fs_port f))
+            (unmounted_all (without_vol f vi) di vi))
+          (unmounted_all f di (add vi 1)))))
 
 ; A new partition of L0FS's type and count sectors, with a new UUID of
 ; version 7, written into the table, both its copies, and its first

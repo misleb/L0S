@@ -1,6 +1,6 @@
 # 0023: File data through shared memory, in runs of 64 KB
 
-Track: Storage · Status: ready · Needs: – · Spec: syscalls.md, storage.md, kernel.md, programs.md, testing.md
+Track: Storage · Status: done · Needs: – · Spec: syscalls.md, storage.md, kernel.md, programs.md, testing.md
 
 ## Why
 
@@ -71,7 +71,7 @@ sectors (64 KB) in one request, through a buffer shared with it
   that lie one after another into one disk write. storage.md's crash
   ordering then says that a crash while a file is open loses what was
   written since it was opened.
-- [ ] Measure: the host counts in `fs_test`; `install` of the initramfs
+- [x] Measure: the host counts in `fs_test`; `install` of the initramfs
   onto an SD volume on QEMU (`sdhci pci`) and onto a virtio disk, the
   e2e cases `install` and `install_boot`, and a boot from a system
   volume, each timed with `QEMU_CPUS=1` and `QEMU_CPUS=4`; and on the Pi
@@ -151,3 +151,32 @@ sectors (64 KB) in one request, through a buffer shared with it
   disk buffer, Disks' reads, both network drivers' frames and every
   `put_bytes_range` now copy at once, so the window's 64 KB no longer
   costs `fs` 65,536 calls and as many cons cells.
+- 2026-10-27: timed on QEMU, e2509aa (before this goal) against
+  4cc5acf, on this machine one after the other, each case twice, the
+  wall time of `tests/e2e.sh CASE` with `QEMU_CPUS` 1 and 4, boot and
+  typing delays included, which are the same in both; and `install` of
+  the initramfs (69 files) onto an L0FS volume of an SD card through
+  `sdhci pci`, from boot to the shell's exit. The medians:
+
+  | | before, 1 CPU | before, 4 | after, 1 | after, 4 |
+  |---|---|---|---|---|
+  | `install` | 14.6 s | 18.1 s | 3.3 s | 2.9 s |
+  | `install_boot` | 25.4 s | 32.2 s | 2.9 s | 2.8 s |
+  | `install` onto SD | 16.1 s | 16.5 s | 4.7 s | 5.3 s |
+  | `rootboot` | 3.8 s | 3.8 s | 3.8 s | 3.8 s |
+
+  `install_boot`, which writes its 14 MB `input.bin` as one file, is
+  nine times as fast, and four CPUs are no longer slower than one at
+  writing a disk (0002). `rootboot` reads and writes a few small files
+  between fixed delays, so it shows nothing either way; a boot from a
+  volume's starting of programs is in it, but small. Left of the step:
+  `install` and `install --boot` on the Pi 5's card, timed, which
+  needs the board.
+- 2026-10-27: on the Pi 5 (2 GB, network booted, its 64 GB card's
+  rootfs made L0FS `System` by Disks), timed by the user by hand: `run
+  install System` just under a minute, and `run install --boot bootfs
+  --root System` about 15 s, where before this goal the first was slow
+  and the second was stopped after minutes, still writing. Done. The
+  card's writes are still the cost: `install` of about 20 MB in a
+  minute is about 350 KB/s, a file of small writes at a time, and 0024
+  is next on this track.

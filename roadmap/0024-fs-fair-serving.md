@@ -1,6 +1,6 @@
 # 0024: `fs` serves its clients fairly, small requests first
 
-Track: Storage · Status: blocked · Needs: 0023 · Spec: storage.md, testing.md
+Track: Storage · Status: ready · Needs: 0023 · Spec: storage.md, testing.md
 
 ## Why
 
