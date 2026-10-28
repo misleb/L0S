@@ -259,12 +259,12 @@ def parse_windows(text):
         if len(parts) in (3, 4) and parts[0] == "pointer" and parts[1].isdigit() and parts[2].isdigit():
             pointer = {"x": int(parts[1]), "y": int(parts[2]),
                        "cursor": parts[3] if len(parts) == 4 else "default"}
-        elif (len(parts) >= 7 and parts[0].isdigit() and parts[-1] in ("front", "-")
-              and all(p.isdigit() for p in parts[-5:-1])):
-            x, y, w, h = (int(p) for p in parts[-5:-1])
-            wins.append({"id": int(parts[0]), "title": " ".join(parts[1:-5]),
+        elif (len(parts) >= 8 and parts[0].isdigit() and parts[-2] in ("front", "-")
+              and parts[-1].isdigit() and all(p.isdigit() for p in parts[-6:-2])):
+            x, y, w, h = (int(p) for p in parts[-6:-2])
+            wins.append({"id": int(parts[0]), "title": " ".join(parts[1:-6]),
                          "x": x, "y": y, "width": w, "height": h,
-                         "front": parts[-1] == "front"})
+                         "front": parts[-2] == "front", "pid": int(parts[-1])})
         elif line.startswith("windows: "):
             errors.append(line[len("windows: "):])
     return {"windows": wins, "pointer": pointer, "errors": errors}

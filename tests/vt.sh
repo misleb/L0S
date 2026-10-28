@@ -135,8 +135,8 @@ windows() {
     lines=$(tail -c +$from "$out" | sed 's/^l0s> //' | grep -aE '^[0-9]+ vt[0-9] ')
     if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$n" ]; then
       [ "$n" = 0 ] && return 0
-      read -r _ f_title f_x f_y f_w f_h f_front <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
-      read -r _ b_title b_x b_y b_w b_h b_front <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
+      read -r _ f_title f_x f_y f_w f_h f_front _ <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
+      read -r _ b_title b_x b_y b_w b_h b_front _ <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
       [ "$f_front" = front ] || fail "the first window listed is not in front"
       [ -z "$want" ] || [ "$f_title" = "$want" ] && return 0
     fi

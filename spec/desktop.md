@@ -27,7 +27,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | Request | Does |
 |---|---|
 | `hello` | `compositor scale S`, so the client learns `wm`'s pid, to share with, and the scale to make its buffer at: S times W×H. Every other number, a window's size, place and damage, its top row, and the pointer, is the desktop's pixels |
-| `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT, each a window notice naming ID. The reply is `window ID` |
+| `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT, each a window notice naming ID. A client may open any number of windows, `window` or `csd`, and give each the same PORT, as a GTK app keeps its windows on one connection: the notices tell them apart. The reply is `window ID` |
 | `csd W H VA PORT TITLE` | a window as `window` makes one, but one its client decorates, as GNOME's own apps do: `wm` draws no title bar or frame for it, all of it is the client's content, its four corners rounded to 12, and the border round it, its top's too, resizes it. The reply is `window ID` |
 | `move ID` | the window dragged with the pointer from where it is, held where the pointer holds it, until the button is up: what a client that draws its own header bar asks as it is pressed, xdg_toplevel's move. Only while the left button is down after a press in that window, and nothing else is dragged (`not pressed`); only the window's client may ask |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
@@ -38,7 +38,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `title ID TEXT` | a new title |
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
-| `windows` | a line a window, front first, then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
+| `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
 | `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`

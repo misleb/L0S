@@ -283,14 +283,14 @@ Things to try:
   `waiting for the file server on port N`.
 - `run rtc`, a driver taking an interrupt.
 - `run windows`, to list the windows, front first, and where the pointer
-  is. Each line gives a window's id, title, x, y, width and height, and
-  `front` for the one in front. With a Terminal and then the System
-  Monitor opened from Applications:
+  is. Each line gives a window's id, title, x, y, width and height,
+  `front` for the one in front or `-`, and its client's pid. With a
+  Terminal and then the System Monitor opened from Applications:
 
   ```
   l0s> run windows
-  1 Processes 100 90 840 429 front
-  0 vt1 40 40 640 384 -
+  1 Processes 100 90 840 429 front 21
+  0 vt1 40 40 640 384 - 18
   pointer 0 0
   ```
 

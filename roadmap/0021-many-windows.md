@@ -51,7 +51,7 @@ the toolkit lets an app open, route and close windows by id.
   `ui_event_of` unwraps them and takes only its own window's; `vt`
   likewise. No app changes. Tests on both sides, and every screen test
   passes as it is.
-- [ ] Many windows on one port, in `wm`: what it already allows, a
+- [x] Many windows on one port, in `wm`: what it already allows, a
   second `window` or `csd` from one client naming the port the first
   did, checked and tested (`wm_test.l0`: two windows of one client, a
   key to the front one told with its id, the pointer to the one under
@@ -90,8 +90,8 @@ the toolkit lets an app open, route and close windows by id.
 
 ## Spec changes
 
-- desktop.md: many windows of one client on one port; the close button's
-  close notice, and the kill 2 seconds after; `windows`' client pid.
+- desktop.md: the close button's close notice, and the kill 2 seconds
+  after.
 - toolkit.md: `UiApp` and its calls, and the `win.close` action;
   `ui_open` as one window of them.
 - programs.md: Files' New Window.
@@ -113,3 +113,13 @@ the toolkit lets an app open, route and close windows by id.
   the key joined once as bytes; every other notice to a client goes
   through `win_tell` (`told_of`, tested in `wm_test.l0`). The toolkit
   gives a notice of another window, or a bare one, as `UiOther`.
+- 2026-10-28: step 2. `wm` needed nothing to allow it: a window keeps
+  the PORT its request named and nothing ties one window's port to
+  another's, so the check is the tests, `wm_test.l0`'s `one_client`
+  (`key_window`, split from `keyed`, and `pointer_target`, each told
+  with `told_of`). wm cannot check that PORT is the client's own, since
+  no call says who owns a port; a wrong one only loses that client's
+  notices, as before. `windows` gives the client's pid last, after
+  `front` or `-`, so the screen tests' `read`s gained a trailing `_`
+  (`launcher.sh`, `launcher-install.sh`, `vt.sh`), the l0s MCP server's
+  parser a `pid`, and the `virtio-gpu` e2e case its vt's pid, 8.

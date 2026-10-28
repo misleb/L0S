@@ -154,7 +154,8 @@ def dmesg() -> dict:
 @tool
 def windows() -> dict:
     """The compositor's windows, front first (id, title, x, y, width and
-    height of the content, front), and where the pointer is, from run
+    height of the content, front, and its client's pid), and where the
+    pointer is, from run
     windows at the serial shell. A window's title bar is the 46 rows
     above y, and its frame 2 pixels around the content."""
     reply = board.shell("run windows")
