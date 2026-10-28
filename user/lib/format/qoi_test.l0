@@ -1,0 +1,96 @@
+; qoi_test.l0 -- tests of QOI: the chunks each kind of pixel is written
+; as, reading back what was written, and images refused.
+
+; Pixels, 0xRRGGBB, as the array qoi_encode takes.
+(def pxs ((xs (list int))) (array int) (array_from xs 0))
+
+; Bytes as their numbers, spaced, for comparing.
+(def nums ((b bytes)) (list int) (unwords (nums_from b 0 (nil (list int)))))
+
+(def nums_from ((b bytes) (i int) (acc (list (list int)))) (list (list int))
+  (if (ge i (bytes_len b)) (rev acc) (nums_from b (add i 1) (cons (digits (bytes_get b i)) acc))))
+
+; An image's chunks, between the header's 14 bytes and the end's 8.
+(def chunks ((px (list int)) (w int)) (list int)
+  (let b (qoi_encode (pxs px) w (div (length px) w))
+    (nums (bytes_slice b 14 (sub (bytes_len b) 8)))))
+
+; The header: magic, width 2 and height 1 most significant first, 3
+; channels, sRGB; and the end, 7 zeros and a 1.
+(def test_header_and_end () int
+  (let b (qoi_encode (pxs(cons 0 (cons 0 (nil int)))) 2 1)
+    (add (check_str "header" (nums (bytes_slice b 0 14)) "113 111 105 102 0 0 0 2 0 0 0 1 3 0")
+         (check_str "end" (nums (bytes_slice b (sub (bytes_len b) 8) (bytes_len b))) "0 0 0 0 0 0 0 1"))))
+
+; Black, the pixel before the first, is a run from the start: 0xC0 + 1
+; for two of it.
+(def test_run () int
+  (check_str "two black" (chunks (cons 0 (cons 0 (nil int))) 2) "193"))
+
+; 62 at most a run: 64 black are runs of 62 and 2, 253 and 193.
+(def test_long_run () int
+  (check_str "64 black" (chunks (array_to_list (array_new 64 0)) 64) "253 193"))
+
+; A small change, +1 red from black: 0x40 + 3·16 + 2·4 + 2 = 122.
+(def test_small_change () int
+  (check_str "+1 red" (chunks (cons 65536 (nil int)) 1) "122"))
+
+; A luma change, +10 each from black, too far for a small one: 0x80 +
+; 10 + 32 = 170, then red less green and blue less green, 0 + 8 each,
+; 8 · 16 + 8 = 136.
+(def test_luma () int
+  (check_str "+10 each" (chunks (cons 657930 (nil int)) 1) "170 136"))
+
+; A pixel far from the one before is written whole: 0xFE, r, g, b.
+(def test_whole () int
+  (check_str "far" (chunks (cons 16744448 (nil int)) 1) "254 255 128 0"))
+
+; A pixel seen before is its place among the 64: white, then black,
+; then white again at (3 + 5 + 7 + 11) · 255 mod 64 = 38. The first two
+; are small changes, -1 each from black, 0x40 + 16 + 4 + 1 = 85, and +1
+; each back, 0x40 + 48 + 12 + 3 = 127.
+(def test_index () int
+  (check_str "white again" (chunks (cons 16777215 (cons 0 (cons 16777215 (nil int)))) 3)
+             "85 127 38"))
+
+; What is written reads back as it was, red, green and blue a byte each.
+(def test_read_back () int
+  (match (qoi_rgb (qoi_encode (pxs(cons 16744448 (cons 0 (cons 657930 (cons 16777215 (nil int)))))) 2 2))
+    ((Ok b) (check_str "pixels" (nums b) "255 128 0 0 0 0 10 10 10 255 255 255"))
+    ((Err why) (fail_because "pixels" why))))
+
+; Seeded pixels near each other and far, read back the same, 300 of
+; them in rows of 20.
+(def test_round_trip () int
+  (let px (seeded 300 7 (nil int))
+    (match (qoi_rgb (qoi_encode (pxs px) 20 15))
+      ((Ok b) (check_str "all" (nums b) (nums (bytes_from_list (rgb_bytes px (nil int))))))
+      ((Err why) (fail_because "all" why)))))
+
+; n pixels from seed s: a third the one before, a third near it, a third
+; anything.
+(def seeded ((n int) (s int) (acc (list int))) (list int)
+  (if (eq n 0)
+      (rev acc)
+      (let r (rand_next s)
+        (let prev (if (is_empty acc) 0 (head acc))
+          (let k (mod r 3)
+            (let p (if (eq k 0) prev (if (eq k 1) (bit_xor prev (mod (div r 3) 8)) (mod (div r 3) 16777216)))
+              (seeded (sub n 1) r (cons p acc))))))))
+
+; Pixels as their bytes, red, green and blue.
+(def rgb_bytes ((px (list int)) (acc (list int))) (list int)
+  (if (is_empty px)
+      (rev acc)
+      (rgb_bytes (tail px) (cons (rgb_blue (head px)) (cons (rgb_green (head px)) (cons (rgb_red (head px)) acc))))))
+
+(def test_header_read () int
+  (match (qoi_header (qoi_encode (array_new 6 0) 3 2))
+    ((Qoi w h off) (check_str "size" (unwords (cons (digits w) (cons (digits h) (cons (digits off) (nil (list int)))))) "3 2 14"))
+    ((QoiBad why) (fail_because "size" why))))
+
+(def test_refused () int
+  (add (check_str "not one" (match (qoi_rgb (bytes_from_list "P6 1 1 255 abc")) ((Ok b) "read") ((Err why) why)) "not a QOI image")
+       (check_str "cut short"
+         (match (qoi_rgb (bytes_slice (qoi_encode (pxs(cons 16744448 (cons 255 (nil int)))) 2 1) 0 18)) ((Ok b) "read") ((Err why) why))
+         "a QOI image cut short in row 0")))

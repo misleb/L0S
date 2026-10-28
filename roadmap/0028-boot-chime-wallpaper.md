@@ -43,7 +43,7 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   mapped whole and centered, as now), and `<pattern>` with
   `patternUnits` both ways and `patternTransform`, tiled under the
   shape it fills. Tests in `svg_test`.
-- [ ] A build step (`tools/mkicon --image`'s way, or a new
+- [x] A build step (`tools/mkicon --image`'s way, or a new
   `tools/mkwallpaper`) that renders `branding/wallpaper-dark.svg` to
   `/etc/wallpaper.ppm` at 1920×1080, plus `/etc/wallpaper2x.ppm` at
   3840×2160 for 4K modes, in the initramfs of every target. The
@@ -105,3 +105,14 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   `wallpaper-dark.svg` uses neither. Drawn at 1920 by 1080 the wallpaper
   takes 1.6 s on this host and differs from `rsvg-convert`'s by an RMS
   of 0.16%; at 3840 by 2160, 7 s.
+- 2026-10-28: step 2, a new `tools/mkwallpaper`, and QOI, not PPM. As
+  PPMs the two images would be 6.2 MB and 24.9 MB, 31 MB on an
+  initramfs of 20.7 MB (21.6 on the Pi 5) whose limit is
+  `INITRAMFS_MAX`, 48 MB: they do not fit, and raising the kernel's
+  heap to make room would take pages from every process. As QOI
+  (qoiformat.org, `user/lib/format/qoi.l0`), whose runs and small
+  differences suit the wallpaper's gradients, they are 232 KB and 530
+  KB, and read back in 110 ms and 470 ms on this host. So the files are
+  `/etc/wallpaper.qoi` and `/etc/wallpaper2x.qoi`, in every target's
+  initramfs through `stage_etc` (the Makefile's `WALLPAPERS`), and QOI
+  is in `RENDER`, for whatever draws the wallpaper on the board.
