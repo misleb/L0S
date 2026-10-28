@@ -83,6 +83,9 @@ waits_for "l0s> "
 
 printf 'run keys\n' >&3
 waits_for "keys: type in QEMU's window; Esc ends"
+# wm says it serves once the display has drawn the wallpaper, which may
+# come after the prompt: wait, so its line is not among the keys.
+waits_for "serving compositor"
 for k in h i shift-1 spc shift-a ret; do monitor "sendkey $k"; done
 waits_for "hi! A"
 echo "ok - usb: the USB keyboard typed 'hi! A'"

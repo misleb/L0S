@@ -204,3 +204,19 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
   repeat (the ring refilled across about fifty periods); then `play
   /etc/chime.wav` at the shell still plays it again. Booted with
   `PI5_ARGS=chime=off`, nothing at boot.
+- 2026-10-28: `make e2e` whole. Drawing the wallpaper first moves
+  `virtio-gpu`'s and so `wm`'s lines a second or two later on QEMU's
+  one CPU, after the shell's prompt, which three screen tests had
+  counted on: `keyboard` and `usb` now wait for `wm`'s `serving
+  compositor` before pressing keys, so its line is not among them;
+  `fat` waits for its volume's `mounted` before `ls`; and `vt`'s
+  `windows` reads a listing whose line a late prompt comes before.
+  `paint_background` no longer fills the screen with the corner's color
+  first when the image covers it, as the wallpaper does every screen up
+  to its size.
+- 2026-10-28: left over, for an idea goal of its own (not numbered
+  here, since other goals were being written in parallel): nothing on
+  the board reads `/etc/splash.ppm` or `splash2x.ppm` now, so
+  `tools/mksplash`, the Makefile's `SPLASH`, `SPLASH2X` and their
+  `stage_etc` lines, and `tools/l0s-mcp`'s copy of the splash can go,
+  3.4 MB off every initramfs.
