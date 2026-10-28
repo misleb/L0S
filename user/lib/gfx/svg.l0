@@ -1,6 +1,7 @@
-; svg.l0 -- an SVG document drawn n by n pixels, with smooth edges: the
-; icons GNOME draws (adwaita-icon-theme's symbolic ones, and its apps'
-; full-color ones), read at build time by tools/mkicons and tools/mkicon.
+; svg.l0 -- an SVG document drawn n by n pixels, or w by h, with smooth
+; edges: the icons GNOME draws (adwaita-icon-theme's symbolic ones, and
+; its apps' full-color ones), read at build time by tools/mkicons and
+; tools/mkicon, and L0S's wallpaper, by tools/mkwallpaper.
 ;
 ; It reads the document with xml.l0, its paths with svg_path.l0, and
 ; makes their coverage with raster.l0, then composites each shape over
@@ -13,7 +14,11 @@
 ;   paint     fill and stroke: none, currentColor, #rgb, #rrggbb, rgb(),
 ;             the basic named colors, and url(#id) of a linearGradient
 ;             or radialGradient (stops, href, gradientUnits both ways,
-;             gradientTransform, spreadMethod, a focus)
+;             gradientTransform, spreadMethod, a focus), or of a
+;             pattern (x, y, width, height, href, patternUnits both
+;             ways, patternTransform; its content in the user's units,
+;             with no viewBox), its tile drawn once at the canvas's
+;             resolution and repeated under the shape
 ;   style     presentation attributes and style="...", inherited as CSS
 ;             does: fill-opacity, fill-rule, stroke-width,
 ;             stroke-opacity, stroke-linecap, color, visibility,
@@ -26,25 +31,31 @@
 ; drawn (filter, text, image, a <style> sheet, dashes, markers) is
 ; refused with its name, never left out; what changes nothing (Inkscape's
 ; and Sodipodi's elements, metadata, title, fonts' properties) is let be.
-; The document maps into the square as preserveAspectRatio's default
-; does: whole, centered.
+; The document maps into the square, or the canvas w by h, as
+; preserveAspectRatio's default does: whole, centered.
 
 ; ----------------------------------------------------------------- types
 
 ; Style properties by name, as their text.
 (data SvgProps (SvgProps (Map (list int) (list int))))
 
-; What drawing needs of the document: its elements by id, the side n of
-; the square, the viewport's width and height (what a percentage is of),
-; and how deep in uses it is.
-(data SvgDoc (SvgDoc (Map (list int) XmlEl) int float float int))
+; What drawing needs of the document: its elements by id, the width and
+; height of the canvas in pixels, the viewport's width and height (what
+; a percentage is of), and how deep in uses it is.
+(data SvgDoc (SvgDoc (Map (list int) XmlEl) int int float float int))
 
-; Where the document's units go: into 1/256 of the square's pixels, and
+; Where the document's units go: into 1/256 of the canvas's pixels, and
 ; the viewport's size.
 (data SvgView (SvgView SvgMatrix float float))
 
-; A box on the square, in 1/256 pixel: its least and most x and y.
+; A box on the canvas, in 1/256 pixel: its least and most x and y.
 (data SvgBox (SvgBox float float float float))
+
+; A pattern's tile, drawn: the map from the canvas's 256ths back to the
+; pattern's own units, the tile's x, y, width and height there, its
+; pixels' width and height, and those pixels, premultiplied, as a
+; canvas has them.
+(data SvgTile (SvgTile SvgMatrix float float float float int int (array float)))
 
 ; A gradient's stop: where, 0 to 1, and its color, red, green, blue and
 ; alpha each 0 to 1.
@@ -53,11 +64,13 @@
 ; How a shape is painted: one color, not premultiplied; or a gradient,
 ; with the map from the square's 256ths back to the gradient's own
 ; units, its line or its circle and focus, how it spreads (0 pad, 1
-; reflect, 2 repeat), and its stops.
+; reflect, 2 repeat), and its stops; or a pattern, its tile repeated,
+; at an opacity.
 (data SvgPainter
   (SvgSolid float float float float)
   (SvgLinear SvgMatrix float float float float int (list SvgStop))
-  (SvgRadial SvgMatrix float float float float float int (list SvgStop)))
+  (SvgRadial SvgMatrix float float float float float int (list SvgStop))
+  (SvgTiled SvgTile float))
 
 ; --------------------------------------------------------------- entries
 
@@ -73,17 +86,22 @@
 ; The document drawn n by n: n · n pixels, four premultiplied floats
 ; each; or why not.
 (def svg_render ((root XmlEl) (n int)) (Result (array float) (list int))
-  (match (svg_view root n)
+  (svg_render_wh root n n))
+
+; The document drawn w by h: w · h pixels, row after row, four
+; premultiplied floats each; or why not.
+(def svg_render_wh ((root XmlEl) (w int) (h int)) (Result (array float) (list int))
+  (match (svg_view root w h)
     ((Err why) ((Err (array float) (list int)) why))
     ((Ok v)
       (match v
         ((SvgView m vw vh)
-          (svg_el (SvgDoc (svg_ids root ((MapEmpty (list int) XmlEl))) n vw vh 0) root m
+          (svg_el (SvgDoc (svg_ids root ((MapEmpty (list int) XmlEl))) w h vw vh 0) root m
                   (SvgProps ((MapEmpty (list int) (list int))))
-                  (svg_canvas n)))))))
+                  (svg_canvas w h)))))))
 
-; A canvas n by n with nothing on it.
-(def svg_canvas ((n int)) (array float) (array_new (mul 4 (mul n n)) 0.0))
+; A canvas w by h with nothing on it.
+(def svg_canvas ((w int) (h int)) (array float) (array_new (mul 4 (mul w h)) 0.0))
 
 ; How much of each pixel the document covers, 0 to 15, row after row,
 ; whatever its colors: a symbolic icon, which is drawn in the color of
@@ -106,9 +124,13 @@
 ; The document as n · n words of alpha, red, green and blue, 8 bits
 ; each, not premultiplied, as the pointer's table has them (face.l0).
 (def svg_argb ((root XmlEl) (n int)) (Result (array int) (list int))
-  (match (svg_render root n)
+  (svg_argb_wh root n n))
+
+; The document as w · h words, row after row, as svg_argb's.
+(def svg_argb_wh ((root XmlEl) (w int) (h int)) (Result (array int) (list int))
+  (match (svg_render_wh root w h)
     ((Err why) ((Err (array int) (list int)) why))
-    ((Ok cv) ((Ok (array int) (list int)) (svg_words cv 0 (array_new (mul n n) 0))))))
+    ((Ok cv) ((Ok (array int) (list int)) (svg_words cv 0 (array_new (mul w h) 0))))))
 
 ; svg_argb's loop: pixel i unpremultiplied as a word, into out.
 (def svg_words((cv (array float)) (i int) (out (array int))) (array int)
@@ -125,22 +147,23 @@
 
 ; ------------------------------------------------------------ the viewport
 
-; Where the root's viewBox, or else its width and height, go in the
-; square: scaled to fit whole and centered.
-(def svg_view ((root XmlEl) (n int)) (Result SvgView (list int))
+; Where the root's viewBox, or else its width and height, go on a
+; canvas cw by ch: scaled to fit whole and centered.
+(def svg_view ((root XmlEl) (cw int) (ch int)) (Result SvgView (list int))
   (match (svg_view_box root)
     ((None) ((Err SvgView (list int)) "no viewBox, width or height"))
     ((Some box)
       (let x (nth box 0) (let y (nth box 1) (let w (nth box 2) (let h (nth box 3)
         (if (if (float_le w 0.0) true (float_le h 0.0))
             ((Err SvgView (list int)) "an empty viewBox")
-            (let side (float_of (mul n 256))
-              (let s (if (float_lt (float_div side w) (float_div side h)) (float_div side w) (float_div side h))
-                ((Ok SvgView (list int))
-                  (SvgView (SvgMatrix s 0.0 0.0 s
-                                      (float_sub (float_div (float_sub side (float_mul w s)) 2.0) (float_mul x s))
-                                      (float_sub (float_div (float_sub side (float_mul h s)) 2.0) (float_mul y s)))
-                           w h))))))))))))
+            (let sw (float_of (mul cw 256))
+              (let sh (float_of (mul ch 256))
+                (let s (svg_fmin (float_div sw w) (float_div sh h))
+                  ((Ok SvgView (list int))
+                    (SvgView (SvgMatrix s 0.0 0.0 s
+                                        (float_sub (float_div (float_sub sw (float_mul w s)) 2.0) (float_mul x s))
+                                        (float_sub (float_div (float_sub sh (float_mul h s)) 2.0) (float_mul y s)))
+                             w h)))))))))))))
 
 ; The viewBox's four numbers, or 0, 0, width and height.
 (def svg_view_box ((root XmlEl)) (Option (list float))
@@ -398,13 +421,13 @@
     ((None) ((None XmlEl)))
     ((Some h)
       (if (starts_with h "#")
-          (match d ((SvgDoc ids n vw vh depth) (map_get ids (tail h))))
+          (match d ((SvgDoc ids cw ch vw vh depth) (map_get ids (tail h))))
           ((None XmlEl))))))
 
 ; A use: its element drawn moved by its x and y, at most 16 uses deep.
 (def svg_use ((d SvgDoc) (e XmlEl) (m SvgMatrix) (props SvgProps) (cv (array float))) (Result (array float) (list int))
   (match d
-    ((SvgDoc ids n vw vh depth)
+    ((SvgDoc ids cw ch vw vh depth)
       (if (gt depth 16)
           (svg_err "uses within uses too deep")
           (match (svg_href d e)
@@ -413,7 +436,7 @@
               (match (svg_numbers_of d e (split_spaces "x y") (cons 0.0 (cons 0.0 (nil float))))
                 ((Err why) (svg_err why))
                 ((Ok xy)
-                  (let inner (SvgDoc ids n vw vh (add depth 1))
+                  (let inner (SvgDoc ids cw ch vw vh (add depth 1))
                     (let m2 (svg_mul m (svg_translate (nth xy 0) (nth xy 1)))
                       (if (eq (xml_name target) "symbol")
                           (svg_children inner (xml_children target) m2 props cv)
@@ -425,8 +448,8 @@
 ; through its clip and its mask.
 (def svg_layer ((d SvgDoc) (e XmlEl) (name (list int)) (m SvgMatrix) (props SvgProps) (own SvgProps) (op float) (cv (array float))) (Result (array float) (list int))
   (match d
-    ((SvgDoc ids n vw vh depth)
-      (match (svg_content d e name m props (svg_canvas n))
+    ((SvgDoc ids cw ch vw vh depth)
+      (match (svg_content d e name m props (svg_canvas cw ch))
         ((Err why) (svg_err why))
         ((Ok layer)
           (match (svg_ref_layer d own "clip-path" "clipPath" m)
@@ -434,7 +457,7 @@
             ((Ok clip)
               (match (svg_ref_layer d own "mask" "mask" m)
                 ((Err why) (svg_err why))
-                ((Ok mask) (svg_ok (svg_composite cv layer op clip mask 0 (mul n n))))))))))))
+                ((Ok mask) (svg_ok (svg_composite cv layer op clip mask 0 (mul cw ch))))))))))))
 
 ; What a clip-path or mask property refers to, drawn: a clipPath's
 ; children drawn opaque, whose alpha clips; a mask's, whose luminance
@@ -451,8 +474,8 @@
                 ((Err why) ((Err (Option (array float)) (list int)) why))
                 ((Ok tm)
                   (match d
-                    ((SvgDoc ids n vw vh depth)
-                      (match (svg_children d (xml_children target) tm (svg_ref_props kind (svg_own target)) (svg_canvas n))
+                    ((SvgDoc ids cw ch vw vh depth)
+                      (match (svg_children d (xml_children target) tm (svg_ref_props kind (svg_own target)) (svg_canvas cw ch))
                         ((Err why) ((Err (Option (array float)) (list int)) why))
                         ((Ok drawn) ((Ok (Option (array float)) (list int)) (Some drawn)))))))))))))
 
@@ -467,7 +490,7 @@
 ; The element url(#id) names; text after it, a fallback, is let be.
 (def svg_url_target ((d SvgDoc) (v (list int))) (Option XmlEl)
   (if (starts_with v "url(#")
-      (match d ((SvgDoc ids n vw vh depth) (map_get ids (svg_until_paren (drop_n v 5) (nil int)))))
+      (match d ((SvgDoc ids cw ch vw vh depth) (map_get ids (svg_until_paren (drop_n v 5) (nil int)))))
       ((None XmlEl))))
 
 ; How much of a layer's pixel i shows: its opacity, by the clip's alpha
@@ -522,7 +545,7 @@
             ((None) ((Err (list float) (list int)) (append (head names) (append " is " v))))
             ((Some f)
               (svg_numbers_onto_of d e (tail names) (tail defaults)
-                (cons (if (ends_with v "%") (match d ((SvgDoc ids n vw vh depth) (float_mul f vw))) f) acc))))))))
+                (cons (if (ends_with v "%") (match d ((SvgDoc ids cw ch vw vh depth) (float_mul f vw))) f) acc))))))))
 
 ; A shape's outline, mapped by m.
 (def svg_segs ((d SvgDoc) (e XmlEl) (name (list int)) (m SvgMatrix)) (Result (list RastSeg) (list int))
@@ -660,8 +683,8 @@
               ((Err why) (svg_err why))
               ((Ok p)
                 (match d
-                  ((SvgDoc ids n vw vh depth)
-                    (svg_ok (svg_paint cv (rast_sums polys n n (svg_rule (svg_get props "fill-rule" "nonzero"))) p n 0)))))))))))
+                  ((SvgDoc ids cw ch vw vh depth)
+                    (svg_ok (svg_paint cv (rast_sums polys cw ch (svg_rule (svg_get props "fill-rule" "nonzero"))) p cw 0)))))))))))
 
 ; A stroke-linecap's value as raster.l0's cap.
 (def svg_cap((v (list int))) RastCap
@@ -686,9 +709,9 @@
                         ((Err why) (svg_err why))
                         ((Ok p)
                           (match d
-                            ((SvgDoc ids n vw vh depth)
+                            ((SvgDoc ids cw ch vw vh depth)
                               (let polys (rast_stroke (rast_polylines segs) w (svg_cap (svg_get props "stroke-linecap" "butt")))
-                                (svg_ok (svg_paint cv (rast_sums polys n n (RastNonzero)) p n 0))))))))))))))))
+                                (svg_ok (svg_paint cv (rast_sums polys cw ch (RastNonzero)) p cw 0))))))))))))))))
 
 ; Coverage sums painted over cv by p, pixel i on.
 (def svg_paint ((cv (array float)) (sums (array int)) (p SvgPainter) (n int) (i int)) (array float)
@@ -713,7 +736,7 @@
 (def svg_painter ((d SvgDoc) (paint (list int)) (props SvgProps) (op float) (m SvgMatrix) (box SvgBox)) (Result SvgPainter (list int))
   (if (starts_with paint "url(")
       (match (svg_url_target d paint)
-        ((Some g) (svg_gradient d g op m box))
+        ((Some g) (if (eq (xml_name g) "pattern") (svg_pattern d g op m box) (svg_gradient d g op m box)))
         ((None)
           (let fallback (svg_trim (drop_n paint (add 1 (length (svg_until_paren paint (nil int))))))
             (if (is_empty fallback)
@@ -759,7 +782,7 @@
   (if (is_empty names)
       ((Ok (list float) (list int)) (rev acc))
       (match d
-        ((SvgDoc ids n vw vh depth)
+        ((SvgDoc ids cw ch vw vh depth)
           (let side (if (any_eq (head names) (split_spaces "x1 x2 cx fx")) vw
                       (if (any_eq (head names) (split_spaces "y1 y2 cy fy")) vh
                         (float_sqrt (float_div (float_add (float_mul vw vw) (float_mul vh vh)) 2.0))))
@@ -855,7 +878,8 @@
     ((SvgLinear inv x1 y1 x2 y2 spread stops)
       (svg_stop_at stops (svg_spread_t spread (svg_linear_t inv x y x1 y1 x2 y2))))
     ((SvgRadial inv cx cy r fx fy spread stops)
-      (svg_stop_at stops (svg_spread_t spread (svg_radial_t inv x y cx cy r fx fy))))))
+      (svg_stop_at stops (svg_spread_t spread (svg_radial_t inv x y cx cy r fx fy))))
+    ((SvgTiled t op) (svg_tile_at t x y op))))
 
 ; Where m maps x, y, along x, and along y, unrounded.
 (def svg_map_x((m SvgMatrix) (x float) (y float)) float
@@ -925,3 +949,123 @@
 
 ; k of the way from a to b.
 (def svg_lerp((a float) (b float) (k float)) float (float_add a (float_mul (float_sub b a) k)))
+
+; --------------------------------------------------------------- patterns
+
+; A pattern as a painter at opacity op, for a shape in box whose units m
+; maps: its tile drawn once, at the canvas's resolution there, and
+; repeated under the shape. Its x, y, width and height are of the
+; shape's box (patternUnits objectBoundingBox, the default) or the user's
+; units (userSpaceOnUse), then patternTransform; its content is in the
+; user's units from the tile's corner. A tile of no area paints nothing.
+(def svg_pattern ((d SvgDoc) (g XmlEl) (op float) (m SvgMatrix) (box SvgBox)) (Result SvgPainter (list int))
+  (if (eq (svg_gattr d g "patternContentUnits" 0) (Some "objectBoundingBox"))
+      ((Err SvgPainter (list int)) "cannot draw a pattern's content in its box's units")
+      (if (not (eq (svg_gattr d g "viewBox" 0) ((None (list int)))))
+          ((Err SvgPainter (list int)) "cannot draw a pattern's viewBox")
+          (match (svg_el_matrix_attr (svg_gattr d g "patternTransform" 0))
+            ((Err why) ((Err SvgPainter (list int)) why))
+            ((Ok t)
+              (match (svg_tile_rect d g (svg_user_box m box))
+                ((Err why) ((Err SvgPainter (list int)) why))
+                ((Ok r) (svg_pattern_in d g op (svg_mul m t) r))))))))
+
+; The pattern's tile r, x, y, width and height in the pattern's units,
+; which mp maps onto the canvas, drawn and made a painter.
+(def svg_pattern_in((d SvgDoc) (g XmlEl) (op float) (mp SvgMatrix) (r (list float))) (Result SvgPainter (list int))
+  (let tw (nth r 2)
+    (let th (nth r 3)
+      (if (if (float_le tw 0.0) true (float_le th 0.0))
+          ((Ok SvgPainter (list int)) (SvgSolid 0.0 0.0 0.0 0.0))
+          (match d
+            ((SvgDoc ids cw ch vw vh depth)
+              (if (gt depth 16)
+                  ((Err SvgPainter (list int)) "patterns within patterns too deep")
+                  (let k (float_div (svg_scale_of mp) 256.0)
+                    (let pw (svg_tile_px (float_mul tw k) cw)
+                      (let ph (svg_tile_px (float_mul th k) ch)
+                        (match (svg_children (SvgDoc ids pw ph vw vh (add depth 1)) (svg_pattern_els d g 0)
+                                             (svg_scale (float_div (float_of (mul pw 256)) tw) (float_div (float_of (mul ph 256)) th))
+                                             (svg_inherit (SvgProps ((MapEmpty (list int) (list int)))) (svg_own g))
+                                             (svg_canvas pw ph))
+                          ((Err why) ((Err SvgPainter (list int)) why))
+                          ((Ok px) ((Ok SvgPainter (list int))
+                                    (SvgTiled (SvgTile (svg_invert mp) (nth r 0) (nth r 1) tw th pw ph px) op))))))))))))))
+
+; A tile's side in pixels: v rounded, at least 1, at most twice the
+; canvas's side.
+(def svg_tile_px((v float) (side int)) int (max 1 (min (mul 2 (max side 1)) (float_round v))))
+
+; A pattern's children: its own, or else those of the pattern it names.
+(def svg_pattern_els ((d SvgDoc) (g XmlEl) (depth int)) (list XmlEl)
+  (if (if (is_empty (xml_children g)) (le depth 8) false)
+      (match (svg_href d g) ((Some h) (svg_pattern_els d h (add depth 1))) ((None) (xml_children g)))
+      (xml_children g)))
+
+; The box of the canvas's 256ths, b, back in the user's units of m: exact
+; unless m turns.
+(def svg_user_box ((m SvgMatrix) (b SvgBox)) SvgBox
+  (let inv (svg_invert m)
+    (match b
+      ((SvgBox x0 y0 x1 y1)
+        (let ax (svg_map_x inv x0 y0) (let ay (svg_map_y inv x0 y0)
+          (let bx (svg_map_x inv x1 y1) (let by (svg_map_y inv x1 y1)
+            (SvgBox (svg_fmin ax bx) (svg_fmin ay by) (svg_fmax ax bx) (svg_fmax ay by))))))))))
+
+; A pattern's tile, x, y, width and height: fractions of the user's box
+; ub, or the user's units, a percentage then of the viewport.
+(def svg_tile_rect ((d SvgDoc) (g XmlEl) (ub SvgBox)) (Result (list float) (list int))
+  (let bbox (not (eq (svg_gattr d g "patternUnits" 0) (Some "userSpaceOnUse")))
+    (svg_tile_nums d g (split_spaces "x y width height") bbox ub 0 (nil float))))
+
+; svg_tile_rect's loop: its ith number on, onto acc.
+(def svg_tile_nums((d SvgDoc) (g XmlEl) (names (list (list int))) (bbox bool) (ub SvgBox) (i int) (acc (list float))) (Result (list float) (list int))
+  (if (is_empty names)
+      ((Ok (list float) (list int)) (rev acc))
+      (let v (match (svg_gattr d g (head names) 0) ((Some v) v) ((None) "0"))
+        (match (svg_fraction_of v)
+          ((None) ((Err (list float) (list int)) (append (head names) (append " is " v))))
+          ((Some f)
+            (svg_tile_nums d g (tail names) bbox ub (add i 1)
+              (cons (if bbox (svg_of_box ub i f) (svg_of_view d v i f)) acc)))))))
+
+; The ith of a tile's numbers (x, y, width, height) as fraction f of box
+; b: a place in it, or a part of its side.
+(def svg_of_box((b SvgBox) (i int) (f float)) float
+  (match b
+    ((SvgBox x0 y0 x1 y1)
+      (let side (if (eq (mod i 2) 0) (float_sub x1 x0) (float_sub y1 y0))
+        (float_add (if (lt i 2) (if (eq i 0) x0 y0) 0.0) (float_mul f side))))))
+
+; The ith of a tile's numbers in the user's units: f, or a percentage of
+; the viewport's width or height.
+(def svg_of_view((d SvgDoc) (v (list int)) (i int) (f float)) float
+  (if (ends_with v "%")
+      (match d ((SvgDoc ids cw ch vw vh depth) (float_mul f (if (eq (mod i 2) 0) vw vh))))
+      f))
+
+; a, wrapped into 0 up to w.
+(def svg_wrap((a float) (w float)) float
+  (float_sub a (float_mul w (float_of (float_floor (float_div a w))))))
+
+; A tiled pattern's color at x, y in the canvas's 256ths, not
+; premultiplied, its alpha by op: its tile's pixel there, wherever the
+; repeat puts it.
+(def svg_tile_at ((t SvgTile) (x float) (y float) (op float)) SvgStop
+  (match t
+    ((SvgTile inv tx ty tw th pw ph px)
+      (let u (svg_wrap (float_sub (svg_map_x inv x y) tx) tw)
+        (let v (svg_wrap (float_sub (svg_map_y inv x y) ty) th)
+          (let i (add (mul (svg_cell v th ph) pw) (svg_cell u tw pw))
+            (svg_unpremul (array_get px (mul 4 i)) (array_get px (add (mul 4 i) 1))
+                          (array_get px (add (mul 4 i) 2)) (array_get px (add (mul 4 i) 3)) op)))))))
+
+; Which of n pixels across a side s long the place u falls in.
+(def svg_cell((u float) (s float) (n int)) int
+  (max 0 (min (sub n 1) (float_floor (float_div (float_mul u (float_of n)) s)))))
+
+; A premultiplied pixel as a stop's color, its alpha by op.
+(def svg_unpremul((r float) (g float) (b float) (a float) (op float)) SvgStop
+  (if (float_le a 0.0)
+      (SvgStop 0.0 0.0 0.0 0.0 0.0)
+      (SvgStop 0.0 (float_div r a) (float_div g a) (float_div b a) (float_mul a op))))

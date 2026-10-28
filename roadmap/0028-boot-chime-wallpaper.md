@@ -1,6 +1,6 @@
 # 0028: The chime as sound starts, the wallpaper as the screen does
 
-Track: Desktop · Status: ready · Needs: – · Spec: sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md
+Track: Desktop · Status: active · Needs: – · Spec: sound.md, display.md, desktop.md, demo.md, pi5.md, programs.md, testing.md
 
 ## Why
 
@@ -39,7 +39,7 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
 
 ## Steps
 
-- [ ] `svg.l0` draws a document W by H, not only n by n (its viewBox
+- [x] `svg.l0` draws a document W by H, not only n by n (its viewBox
   mapped whole and centered, as now), and `<pattern>` with
   `patternUnits` both ways and `patternTransform`, tiled under the
   shape it fills. Tests in `svg_test`.
@@ -84,3 +84,24 @@ refuses, and it draws only a square, n by n, not a 1920×1080 screen.
 - 2026-10-28: written. Open: whether the chime waits for the screen to
   show the wallpaper (on the Pi 5 `hdmi-audio` already starts only
   after `hvs` serves), and whether a boot argument turns it off.
+- 2026-10-28: the user decided the first open question: neither the
+  chime nor the wallpaper waits for the other. Each driver acts as soon
+  as its own hardware is ready: a sound driver plays the chime the
+  moment its ring runs, a display driver shows the wallpaper the moment
+  its mode is set, with no ordering or handshake between them. On the
+  Pi 5 `hdmi-audio` still starts after `hvs` serves, since that is when
+  HDMI's audio exists: the hardware being ready, not a wait for the
+  chime.
+- 2026-10-28: step 1. `svg_render_wh` and `svg_argb_wh` draw W by H;
+  `svg_render` and `svg_argb` are them at n by n. A pattern is drawn
+  as a painter, like a gradient: its tile once, in pixels of its own at
+  the canvas's resolution there (the scale `patternTransform` and the
+  shape's matrix give), then each pixel under the shape takes the tile's
+  pixel its place maps back to, wrapped. So at the wallpaper's 1:1 and
+  2:1 the grid is exact. With `patternUnits` objectBoundingBox (the
+  default) the tile is a fraction of the shape's box, measured on the
+  screen and mapped back, as gradients' boxes are. A pattern's `viewBox`
+  and `patternContentUnits` objectBoundingBox are refused by name;
+  `wallpaper-dark.svg` uses neither. Drawn at 1920 by 1080 the wallpaper
+  takes 1.6 s on this host and differs from `rsvg-convert`'s by an RMS
+  of 0.16%; at 3840 by 2160, 7 s.
