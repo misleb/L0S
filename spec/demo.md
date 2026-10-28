@@ -81,12 +81,11 @@ booted with `root=UUID`, or else from the initramfs.
 | 9 | `virtio-rng` | the entropy device's driver. It serves `random`, the host's randomness, which `fs` makes UUIDs of and `inet` keys TCP's first sequence numbers with |
 | 10 | `pcie virt` | the PCIe bus's server. It puts each device's registers in the bus's window, and serves `pci`, telling `sdhci` and `xhci` where the SD host controller and the USB one are, and the interrupt each raises |
 | 11 | `sdhci pci` | the SD card's driver. It serves `disk1`, reading and writing the sectors of `build/sd.img`, blank until Disks formats it, waiting on its controller's INTx line, interrupt 37 |
-| 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard and the mouse on its ports, and serves `usb`, telling each `usb-hid` of its device's reports. It takes the controller's interrupt, MSI 80, which `pcie` sets up for it (see [USB](devices.md#usb)) |
-| 13 | `usb-hid keyboard` | the keyboard's driver. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window |
-| 14 | `usb-hid mouse` | the mouse's driver. It serves `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
-| 15 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 16 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in pages it shares with each asker, the desktop's made at the build, any other rasterized once, on its first ask |
-| 17 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard and the mouse on its ports, and serves `usb`, telling `usb-hid` of its devices' reports. It takes the controller's interrupt, MSI 80, which `pcie` sets up for it (see [USB](devices.md#usb)) |
+| 13 | `usb-hid` | the keyboard's and the mouse's driver, one process waiting on three ports. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window, and `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
+| 14 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
+| 15 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in pages it shares with each asker, the desktop's made at the build, any other rasterized once, on its first ask |
+| 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
 
 An app opened then takes the next pids. A Terminal, the first opened,
 is three: `vt`, its window, with a tab, `vt1`, the first name free,
@@ -255,24 +254,28 @@ Things to try:
 
   ```
     PID  PARENT  PROGRAM       STATE
-      1       0  boot          waiting for pid 15
-      2       0  uart          waiting for a message on port 1
-      3       0  virtio-gpu    waiting for a message on port 19
+      1       0  boot          waiting for pid 14
+      2       0  uart          waiting for a message on port 7
+      3       0  virtio-gpu    waiting for a message on port 24
       4       0  rtc           sleeping
-      5       0  virtio-blk    waiting for a message on port 4
-      6       0  fs            waiting for a message on port 25
+      5       0  virtio-blk    waiting for a message on port 5
+      6       0  fs            waiting for a message on port 22
       7       0  virtio-net    waiting for a message on port 6
-      8       0  inet          waiting for a message on port 7
-      9       0  virtio-rng    waiting for a message on port 9
-     10       0  pcie          waiting for a message on port 10
-     11       0  sdhci         waiting for a message on port 22
-     12       0  xhci          waiting for a message on port 17
-     13       0  usb-hid       waiting for a message on port 18
-     14       0  usb-hid       waiting for a message on port 20
-     15       1  sh            running
-     16       1  font          waiting for a message on port 24
-     17       1  wm            waiting for a message on port 26
+      8       0  inet          waiting for a message on port 9
+      9       0  virtio-rng    waiting for a message on port 10
+     10       0  pcie          waiting for a message on port 1
+     11       0  sdhci         waiting for a message on port 17
+     12       0  xhci          waiting for a message on port 20
+     13       0  usb-hid       waiting for a message on 3 ports
+     14       1  sh            running
+     15       1  font          waiting for a message on port 19
+     16       1  wm            waiting for a message on port 29
   ```
+
+  Ports are numbered as the drivers make them, which on four CPUs
+  differs from boot to boot. A process waiting on a set of ports, as
+  `usb-hid` waits on its own and `keyboard`'s and `pointer`'s, says how
+  many.
 
   It lists the processes that have not exited. The shell asking is always
   `running`, since `ps` runs inside it. Every driver waits, for a request
@@ -356,9 +359,9 @@ Job control:
   programs with a `dev` line, can't be killed, since the system would
   lose their devices, so `uart`, `rtc`, `virtio-gpu`, `virtio-blk`,
   `virtio-net`, `virtio-rng`, `pcie`, `sdhci` and `xhci` stay. The
-  `usb-hid`s drive no device, so killing one takes the keyboard or the
+  `usb-hid` drives no device, so killing it takes the keyboard and the
   mouse away until the next boot.
-  Killing pid 15, the serial shell, from a window's shell stops the
+  Killing pid 14, the serial shell, from a window's shell stops the
   system, as its `exit` does: `boot`, pid 1, waiting for it, exits too.
 
 Editing, on any terminal: Backspace erases a character and Ctrl-U erases

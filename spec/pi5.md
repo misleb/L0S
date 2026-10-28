@@ -150,7 +150,7 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 |---|---|
 | `boot` | pid 1, then `/etc/system`: `sh` on the console, `font` and `wm`; no app, so the desktop starts empty |
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
-| `xhci rp1`, `usb-hid keyboard`, `usb-hid mouse` | RP1's two USB controllers, a keyboard and a mouse (see [USB](devices.md#usb)) |
+| `xhci rp1`, `usb-hid` | RP1's two USB controllers, and every boot keyboard and mouse on them, served by one `usb-hid` (see [USB](devices.md#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode` and `hdmi` beside them), at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
 | `hdmi-audio` | sound on HDMI0, served as `audio`, once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](sound.md#sound-on-the-raspberry-pi-5)); it plays `/etc/chime.wav` as it starts, unless the boot argument `chime=off`, and `play /etc/chime.wav` tries it again. `make pi5-shell` leaves it out too |
 | `fs ram` | a volume in memory, `/Volumes/tmp`, registered as `tmpfs`, which keeps nothing over a power cut |

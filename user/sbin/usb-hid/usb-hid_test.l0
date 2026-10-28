@@ -1,21 +1,39 @@
 ; usb-hid_test.l0 -- the driver's state, handled without a usb server.
 
-; A keyboard driver whose usb server is pid 3, with device 7's keyboard,
-; at endpoint 0x81, holding nothing.
-(def kbd () Hid (Hid (Keyboards) 10 11 3 (nil int) (cons (Board 7 129 (held_none)) (nil Board)) 0 (NoRepeat) (nil Message)))
+; The driver's ports: its own 10, keyboard's 12 and pointer's 13.
+(def ports () HidPorts (HidPorts 10 12 13))
 
-(def report_msg ((bytes (list int))) Message (message_new 3 (usb_report_notice (UsbReport 7 129 bytes))))
+; A driver whose usb server is pid 3, with device 7's keyboard at
+; endpoint 0x81 and its mouse at 0x82, holding nothing, and port 20
+; listening to keyboard and 21 to pointer.
+(def kbd () Hid
+  (Hid (ports) 11 3 (cons 20 (nil int)) (cons 21 (nil int))
+       (cons (Board (Keyboards) 7 129 (held_none)) (cons (Board (Mice) 7 130 (held_none)) (nil Board)))
+       0 (NoRepeat) (nil Message)))
+
+; A report of device 7's endpoint ep, from the usb server, on its own port.
+(def report_at ((ep int) (bytes (list int))) Message (message_new 3 (usb_report_notice (UsbReport 7 ep bytes))))
+(def report_msg ((bytes (list int))) Message (report_at 129 bytes))
+
+; h after m on its own port.
+(def on_own ((h Hid) (m Message)) Hid (handled_on h 10 m))
 
 (def keys ((u int) (mods int)) (list int) (cons mods (cons 0 (cons u (zeros 5)))))
 
-(def mods_of ((h Hid)) int (match h ((Hid k port usb pid ls bs mods r kept) mods)))
+(def mods_of ((h Hid)) int (match h ((Hid ps usb pid kls pls bs mods r kept) mods)))
 
 (def repeat_code ((h Hid)) int (match (hid_repeat h) ((Repeating c at) c) ((NoRepeat) 0)))
 
-(def test_kinds () int
-  (add (check_bool "keyboard" (eq (kind_of (split_spaces "keyboard")) (Some (Keyboards))) true)
-       (add (check_bool "mouse" (eq (kind_of (split_spaces "mouse")) (Some (Mice))) true)
-            (check_bool "other" (eq (kind_of (split_spaces "tablet")) ((None Kind))) true))))
+; The boards driven, as "dev:ep" each.
+(def boards_text ((h Hid)) (list int)
+  (match h ((Hid ps usb pid kls pls bs mods r kept) (boards_line bs))))
+(def boards_line ((bs (list Board))) (list int)
+  (if (is_empty bs) "" (match (head bs) ((Board k d e held) (append (digits d) (append ":" (append (digits e) (append " " (boards_line (tail bs))))))))))
+
+(def test_protocols () int
+  (add (check_bool "keyboard" (eq (kind_of_protocol 1) (Some (Keyboards))) true)
+       (add (check_bool "mouse" (eq (kind_of_protocol 2) (Some (Mice))) true)
+            (check_bool "other" (eq (kind_of_protocol 0) ((None Kind))) true))))
 
 (def test_names () int
   (add (check_str "keyboard" (kind_name (Keyboards)) "keyboard")
@@ -23,27 +41,62 @@
 
 ; Shift held, by the modifier byte's bit 1: the modifiers say so.
 (def test_shift_report () int
-  (check_int "left shift" (mods_of (handled (kbd) (report_msg (keys 0 2)))) 1))
+  (check_int "left shift" (mods_of (on_own (kbd) (report_msg (keys 0 2)))) 1))
 
 ; a pressed repeats; let go, it stops.
 (def test_repeat () int
-  (let h (handled (kbd) (report_msg (keys 4 0)))
+  (let h (on_own (kbd) (report_msg (keys 4 0)))
     (add (check_int "a repeats" (repeat_code h) 30)
-         (check_int "let go" (repeat_code (handled h (report_msg (keys 0 0)))) 0))))
+         (check_int "let go" (repeat_code (on_own h (report_msg (keys 0 0)))) 0))))
 
-; Unplugged with a key held: let go, and the device forgotten.
+; The same bytes from the mouse's endpoint are a motion, not a key.
+(def test_mouse_endpoint () int
+  (check_int "no key" (repeat_code (on_own (kbd) (report_at 130 (keys 4 0)))) 0))
+
+; Unplugged with a key held: let go, and both its boards forgotten.
 (def test_unplugged () int
-  (let h (handled (handled (kbd) (report_msg (keys 4 0))) (message_new 3 (usb_detach_notice 7)))
+  (let h (on_own (on_own (kbd) (report_msg (keys 4 0))) (message_new 3 (usb_detach_notice 7)))
     (add (check_int "no repeat" (repeat_code h) 0)
-         (check_bool "forgotten" (eq (board_of h 7) ((None Board))) true))))
+         (check_str "forgotten" (boards_text h) ""))))
 
 ; A report of another device is passed over.
 (def test_other_device () int
-  (check_int "nothing" (repeat_code (handled (kbd) (message_new 3 (usb_report_notice (UsbReport 8 129 (keys 4 0)))))) 0))
+  (check_int "nothing" (repeat_code (on_own (kbd) (message_new 3 (usb_report_notice (UsbReport 8 129 (keys 4 0)))))) 0))
 
-; A message from anyone else is a request, not a notice.
+; A message on its own port from anyone but the usb server is passed over.
 (def test_not_from_usb () int
-  (check_int "passed over" (repeat_code (handled (kbd) (message_new 4 (usb_report_notice (UsbReport 7 129 (keys 4 0)))))) 0))
+  (check_int "passed over" (repeat_code (on_own (kbd) (message_new 4 (usb_report_notice (UsbReport 7 129 (keys 4 0)))))) 0))
+
+; A usb notice on keyboard's port is a client's request, not a notice.
+(def test_notice_on_client_port () int
+  (check_int "not a report" (repeat_code (handled_on (kbd) 12 (report_msg (keys 4 0)))) 0))
+
+; An alarm with no key repeating does nothing; one before the repeat is
+; due leaves it; one after, repeats it, due again later.
+(def test_alarm () int
+  (let h (on_own (kbd) (report_msg (keys 4 0)))
+    (match (hid_repeat h)
+      ((NoRepeat) (check_true "repeating" false))
+      ((Repeating code at)
+        (add (check_bool "early" (eq (hid_repeat (alarm_rang h (sub at 1))) (hid_repeat h)) true)
+             (check_bool "due" (eq (hid_repeat (alarm_rang h at)) (Repeating 30 (add at (repeat_every_ns)))) true))))))
+
+(def test_alarm_no_repeat () int
+  (check_bool "nothing" (eq (hid_repeat (alarm_rang (kbd) 5)) (NoRepeat)) true))
+
+; The listeners of each name, by the port the listen came on: under no
+; kernel the answer's send is -3, a full queue, which listener_add keeps,
+; so reply port 30 joins keyboard's listeners and 31 pointer's.
+(def test_requests_by_port () int
+  (let h (handled_on (handled_on (kbd) 12 (message_new 5 (request 30 "listen"))) 13 (message_new 6 (request 31 "listen")))
+    (match h
+      ((Hid ps usb pid kls pls bs mods r kept)
+        (add (check_str "keyboard's" (ports_text kls) "20 30 ")
+             (check_str "pointer's" (ports_text pls) "21 31 "))))))
+
+; Ports, each followed by a space.
+(def ports_text ((ns (list int))) (list int)
+  (if (is_empty ns) "" (append (digits (head ns)) (append " " (ports_text (tail ns))))))
 
 ; The bytes of a message from the usb server, pid 3, with payload.
 (def usb_msg ((payload (list int))) bytes

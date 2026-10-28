@@ -71,12 +71,13 @@ So L0S spends processes to hold names:
   as the tab closes; `vt tab` goes. `spec/demo.md`'s pids and `ps`
   sample, `tests/vt.sh`'s arithmetic, and 0025's design in
   `programs.md` follow.
-- [ ] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
+- [x] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
   on their endpoints' ports and on `keyboard`'s and `pointer`'s, and
   serves both. The inittabs start one; `devices.md`'s USB section,
   `programs.md`'s row and `demo.md`'s pids follow. Checked on QEMU by
   the keyboard and pointer screen tests, and on the Pi 5 with a USB
-  keyboard and mouse, written in the Log.
+  keyboard and mouse, written in the Log. (On QEMU; the Pi 5's check is
+  still to be made, as the Log says.)
 - [ ] More of it: look through the servers for others that hold a name
   by a process of their own, poll with `port_try_receive`, or would
   serve better from one process waiting on several ports (`fs`' names
@@ -86,10 +87,9 @@ So L0S spends processes to hold names:
 
 ## Spec changes
 
-- programs.md: `vt`'s row without relays; `usb-hid`'s row, one process
-  serving both.
-- devices.md: USB's diagram and text, one `usb-hid`.
-- demo.md: the pids and the `ps` sample.
+- programs.md: `vt`'s row without relays.
+- demo.md: a Terminal's pids without its relays, and the `ps` sample's
+  if it shows one.
 
 ## Log
 
@@ -146,3 +146,48 @@ So L0S spends processes to hold names:
   registered again, not registered, twice, bad names, another's, freed
   on exit), host tests of `ipc.l0`'s sets and names and of the
   wrappers' `_of`s. `make test-virt` 258 on one CPU and on four.
+- 2026-10-28: step 4, one `usb-hid`, with no argument, in every
+  inittab (the demo's, the Pi 5's, `tests/usb`'s and the `usb` e2e
+  case's). The design calls:
+  - **Three ports, not one an endpoint.** The usb server sends every
+    endpoint's reports as notices to the one port that listened, each
+    naming its device and endpoint, so "their endpoints' ports" is that
+    one port: `usb-hid`'s own, where the server's answers and notices
+    come. Beside it a port for `keyboard` and one for `pointer`, each
+    registered on its own, and the three are its set; a listen is
+    added to the keyboard's or the pointer's listeners by the port it
+    came on. A device is a `Board` with its kind, so a device with a
+    keyboard and a mouse interface is two boards, by endpoint, and both
+    go when it is unplugged. Other HID kinds join as kinds of `Board`.
+  - **An alarm for a held key, not a poll.** While a key was held the
+    old loop took a message if there was one, else napped 2 ms
+    (`poll_ns`) and looked again. Now the repeat sets the kernel's alarm
+    (`alarm_at`, on its own port) for when it is due, as the repeat
+    changes, and the alarm's notice repeats the key; an alarm a
+    replaced repeat had set, ringing early, sets it again. Found in this
+    goal's own files, so done here (step 5's kind of finding).
+  - **Waiting for an answer** from the usb server receives on its own
+    port alone (`port_receive`), so clients' listens wait on their
+    ports meanwhile rather than being kept; the server's notices that
+    come first are kept as before.
+  The pids after it each move down one: the demo's `sh` is 14, `font`
+  15, `wm` 16 (`spec/demo.md`'s table and `ps` sample), and
+  `tests/vt.sh`'s `vt_base` is 16. No e2e case's expected output
+  listed the demo's pids; the `usb` case's `contains` lists one
+  `usb-hid`, "waiting for a message on 3 ports".
+  **The Pi 5, still to check** on a netboot (`tools/pi5-boot`) with a
+  USB keyboard and a USB mouse on RP1's ports: on the serial line (or
+  `dmesg`), `xhci`'s lines for both controllers, a `device` line for
+  each device, then `usb-hid`'s two lines, "device N, interface 0: a
+  keyboard, serving keyboard" and "... a mouse, serving pointer", from
+  one pid; `ps` at the serial shell shows one `usb-hid`, "waiting for a
+  message on 3 ports"; keys typed reach the serial shell's `run keys`
+  and the front window, a held key repeats (500 ms, then about 30 a
+  second) and stops when let go; the mouse moves the pointer and
+  clicks.
+  Checked on QEMU, four CPUs: `tests/usb.sh` (the USB keyboard typing
+  "hi! A", and now a z held 900 ms, typed 13 times: once, then every
+  33 ms from 500 ms, by the alarm; the mouse clicking the launcher
+  open), the `usb` e2e case, and the demo's inittab booted with USB
+  input, whose `ps` is `spec/demo.md`'s sample. `make check`, `make
+  test` 2875 passed.
