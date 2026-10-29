@@ -240,6 +240,8 @@ header="48 48 48"; sidebar="46 46 50"; side_sel="67 67 71"; view="30 30 30"
 accent="53 132 228"; line="64 64 64"
 
 waits_for "^l0s> "
+# The volumes are mounted after the shell starts; write once data is.
+waits_for "/Volumes/data mounted"
 said 'write /Volumes/data/hello hi' > /dev/null
 said 'ls /Volumes/data' | grep -q "hello" || fail "the file was not written; it showed:"
 printf 'run files &\n' >&3

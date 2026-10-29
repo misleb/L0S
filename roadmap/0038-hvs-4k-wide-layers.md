@@ -56,18 +56,30 @@ clean at 1920×1080:
   watch`. `make test-virt` with tests of the counts against a walk.
   (Log: System Monitor's read from 71 ms to 4.4 ms, and no frame over
   25 ms.)
-- [ ] The driver late: a resize's buffer mapped and synced, and any
+- [x] The driver late: a resize's buffer mapped and synced, and any
   other step `hvs` takes over a frame, timed and taken out of the
-  frame's way.
-- [ ] Layers too wide: the pointer's move shown whatever the windows'
+  frame's way. (Log: `hvs` cleans only a buffer's pixels' pages; the
+  kernel's shared-memory calls were the rest, and the kernel keeps a
+  pool of zeroed frames for them, made while idle.)
+- [x] Layers too wide: the pointer's move shown whatever the windows'
   width, and a screen past the line memory shown, by fetching less of
-  it, not refused.
+  it, not refused. (Log: the lowest pieces left out until the rest fit,
+  said once; the `forget` storm gone with the refusal.)
+- [ ] The 4K memory budget: at scale 2 a big window's buffers, its two
+  contents with their room to grow and `wm`'s two frames for it, take
+  about 140 MB of the 384 MB of device pages `hvs` has (spec §10.3's
+  user range, L0's), so with two or three big windows a buffer more has
+  no room and that window is not shown at its new size. Share only the
+  pages a buffer's pixels are in, make `wm`'s frames the title bar and
+  edges, not the whole window, and show the HVS's background in the
+  wallpaper's color, not black, where pieces are left out. Five windows
+  dragged and resized at 4K for five minutes, none left unshown.
 - [ ] The board run of "Done when", at 4K and at 1920×1080.
 
 ## Spec changes
 
-- display.md: what `hvs` does with layers too wide for the line memory,
-  and the stall gone from its Limits.
+- display.md: the memory budget's Limits once step 6 has lowered it;
+  toolkit.md and desktop.md if the buffers and frames change shape.
 
 ## Log
 
@@ -122,3 +134,35 @@ clean at 1920×1080:
   gap of about 101 ms was before. The user: moving windows and widgets
   responsive; resizing and scrolling large views still a little choppy,
   which steps 4 and 5 and goals 0039 and 0040 are for.
+- 2026-10-29: steps 4 and 5, on the Pi 5 at 3840×2160, scale 2, with
+  `hvs`'s requests over 4 ms said (`slow_request`) and, for the run,
+  each kernel call over 4 ms. A resize's `buffer` took 32 to 41 ms,
+  cleaning all 11,664 pages its client shared, room to grow included;
+  cleaning only the pixels' 3,310 took it to 7 to 13 ms, 25 ms for a
+  window near the screen's size. The gaps left came with no `hvs`
+  request in them: the kernel's `shm_alloc`, `shm_unmap` and `shm_share`
+  of 8,000 to 13,000 pages, tens of ms each on CPU 0. Timed per page at
+  boot over 8,192: `frame_new` 2.75 us (L0's zeroing, about 1.5 GB/s),
+  the share counts' map 0.9 us and a rehash of the whole of it each
+  time its size crosses a power of two, `pages_put` 0.4 us, `space_map`
+  0.05 us. So the kernel keeps a pool of up to 16,384 zeroed frames,
+  made 128 at a time while CPU 0 is idle; the screen's buffer's
+  `shm_alloc` went from 29 to 11.4 ms, `wm`'s from 37 to 12.6. Asked of
+  L0: a faster `frame_new`, a larger user range, `Map` hysteresis, and
+  a warning for a map read after a put, which copies it whole (made
+  twice here: in `pages_put`, which made mapping quadratic until fixed,
+  and in a timing line that held a process during its call).
+  Layers too wide were refused, and every list after them, and `wm`
+  then asked again and again to forget buffers still on the screen
+  shown, each refusal a 6 ms line on the UART, until the pointer froze;
+  now the lowest pieces are left out until the rest fit, which shows
+  as black where the wallpaper's lower pieces were while windows are
+  that wide. Then windows froze after resizes: their next buffer's
+  share was refused, silently and retried each present, as the
+  compositor had no room: `wm` with 84,000 of its 98,304 device pages
+  given, its largest gap 5,592 where 11,387 were asked. `wm` now keeps
+  one page of each client buffer, and the toolkit says a refused share
+  once; a first version gave up a trimmed buffer's whole range, taking
+  other buffers placed in it since, which the e2e's Files maximize
+  caught. `hvs`, which must map every buffer to clean it and cut its
+  corners, then ran out the same way (83,000 given): step 6.

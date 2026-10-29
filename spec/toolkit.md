@@ -367,6 +367,11 @@ to `l0` are one namespace, and a duplicate is a compile error.
   drag on QEMU. A window whose program paints a drawing area itself, as
   `vt`'s terminal, is painted in the buffer shown, unpaced, so a frame
   may show it half painted.
+- A window whose next buffer cannot be shared with the compositor, which
+  has no room for it (at 4K, see [display.md, Limits](display.md#limits)),
+  stays as the compositor shows it: said once, as a warning, and not
+  shared again until a resize makes another buffer. A buffer keeps a
+  quarter more of each side, and 64 pixels, as room to grow.
 - An app's regions are counted by the toolkit, not asked of the
   kernel, which has no call for it: `ui_app_open` knows its windows and
   its face's strikes, and keeps 8 for the rest, so a program that opens

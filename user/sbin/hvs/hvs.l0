@@ -838,7 +838,16 @@
 (def handle ((v Drv) (body (list int))) (Served Drv)
   (match (request_numbers body)
     ((ReqBad why) (refused v why))
-    ((ReqNums op ns) (requested v op ns (length ns)))))
+    ((ReqNums op ns) (timed_request v op ns (clock_ns)))))
+
+; Request op with its numbers ns, begun at t0, answered, and said as
+; debug if it took long enough to hold a frame back (watch.l0's
+; slow_request, roadmap 0038).
+(def timed_request ((v Drv) (op (list int)) (ns (list int)) (t0 int)) (Served Drv)
+  (let r (requested v op ns (length ns))
+    (match (slow_request op ns (sub (clock_ns) t0))
+      ((None) r)
+      ((Some line) (let s (debug_as "hvs" line) r)))))
 
 ; Request op with its n numbers ns: the buffers and layers, or the
 ; corners and pointer next.
@@ -899,16 +908,23 @@
             ((Mapped first k)
               (if (lt k n)
                   (refused v "the buffer's pages are already mapped, fewer of them")
-                  (let c (dma_synced va n)
+                  (let c (dma_synced va (pixel_pages sd bh))
                     (with_buffer v id (Buffer bw bh sd va n (aperture_address first) (square))))))))
         ((None)
           (match (aperture_take ap va n)
             ((NoRoom) (refused v "no room left in the IOMMU's aperture"))
             ((Taken ap2 first)
               (let e (ptes_written hw first addrs 0)
-                (let c (dma_synced va n)
+                (let c (dma_synced va (pixel_pages sd bh))
                   (with_buffer (Drv hw w h bufs layers cur ap2 lists) id
                     (Buffer bw bh sd va n (aperture_address first) (square))))))))))))
+
+; The pages a buffer of bh rows sd pixels apart has its pixels in, all the
+; HVS reads of it, and so all that is cleaned out of the caches when it is
+; shared, not the room its client kept past them to grow into: at 4K a
+; window's buffer keeps three times its pixels' pages, which took 35 ms a
+; resize to clean (roadmap 0038).
+(def pixel_pages ((sd int) (bh int)) int (buffer_shared_pages sd bh 0))
 
 ; The aperture's pages from first mapped to the pages at addrs, from i,
 ; the tables they are in cleaned for the IOMMU, which then forgets what
@@ -1110,20 +1126,26 @@
 ; beside, and the request answered at once: the list written and the
 ; channel pointed at it now if the last list pointed at has been taken,
 ; else kept as the screen wanted and written at the end of frame that
-; shows that one taken (list_shown). If they cannot be one list beside
-; it, refused, and the screen and its corners left as they were.
+; shows that one taken (list_shown). If they are too wide for the line
+; memory beside it, the lowest of them are left out until they fit, said
+; once as that begins and once as it ends (pieces.l0's screen_fit and
+; fit_change); refused, and the screen and its corners left as they
+; were, only if even the topmost cannot be.
 (def shown_as ((v Drv) (ls (list Layer)) (cur Cursor) (stamps (list Stamp))) (Served Drv)
   (match v
     ((Drv hw w h bufs layers old ap lists)
-      (match (screen_planes w h ls bufs cur (lists_allocs lists))
-        ((Unplannable why) (refused v why))
-        ((Planned ps nal)
-          (match hw
-            ((Hw d g mmu cache t tva addrs fr)
-              (let ws (let r (restamped stamps (stamps_of ls bufs)) (list_words g ps))
-                (let v2 (list_shown (Drv hw w h bufs ls cur ap lists) (Listed ws nal ls (screen_vas ls cur bufs)))
-                  (let he (handle_error_said d ps)
-                    (served_ok v2)))))))))))
+      (match (screen_fit w h ls bufs cur (lists_allocs lists))
+        ((Fit p lo)
+          (match p
+            ((Unplannable why) (refused v why))
+            ((Planned ps nal)
+              (match hw
+                ((Hw d g mmu cache t tva addrs fr)
+                  (let ws (let r (restamped stamps (stamps_of ls bufs)) (list_words g ps))
+                    (let said (match (fit_change (listed_left_out (lists_latest lists)) lo) ((None) 0) ((Some line) (info_as "hvs" line)))
+                      (let v2 (list_shown (Drv hw w h bufs ls cur ap lists) (Listed ws nal ls (screen_vas ls cur bufs) lo))
+                        (let he (handle_error_said d ps)
+                          (served_ok v2))))))))))))))
 
 ; List s, the screen asked, shown. With the channel the driver's and
 ; ends of frame to wait by, at once if nothing is pointed at or what is

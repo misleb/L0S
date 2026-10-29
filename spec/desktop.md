@@ -13,7 +13,10 @@ Pixels never travel in messages. They move by sharing pages:
 
 1. A client, such as `vt`, allocates its window's buffer with
    `shm_alloc`, shares it with `wm` with `shm_share`, and draws into it.
-2. `wm` shares the same pages on to the display driver.
+2. `wm` shares the same pages on to the display driver, then gives up
+   all but the first page of its own mapping: it never reads a client's
+   pixels, and the first page keeps the address that names the buffer in
+   `attach` and `resize` (`wm.l0`'s `client_trimmed`).
 3. The driver builds the screen from the buffers where they are.
 
 What goes over IPC is only which buffers there are, where each goes, and

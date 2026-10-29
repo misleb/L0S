@@ -930,8 +930,9 @@
         (let ch (nth ns 1)
           (if (if (lt cw 1) true (if (lt ch 1) true (gt (outer_w dc cw) w)))
               (refused v "a window must fit the screen")
-              (match (display_buffer_shared d (content_id n 0) (mul cw (display_scale d)) (mul ch (display_scale d)) (mul cw (display_scale d))
-                                            (nth ns 2) (content_pages cw ch (display_scale d)))
+              (match (client_trimmed (display_buffer_shared d (content_id n 0) (mul cw (display_scale d)) (mul ch (display_scale d)) (mul cw (display_scale d))
+                                                            (nth ns 2) (content_pages cw ch (display_scale d)))
+                                     (nth ns 2) (content_pages cw ch (display_scale d)))
                 ((Err e) (refused v e))
                 ((Ok dcva) (titled_window v from (nth ns 3) cw ch (nth ns 2) dcva title dc)))))))))
 
@@ -1066,11 +1067,12 @@
                   ((Ok Win (list int)) win))))))))
 
 ; A resize refused for why, and the window as it was: the client's new
-; buffer at wh, which wm mapped, given up again, if it is a new one.
-(def resize_refused ((v Wm) (win Win) (wh Where) (why (list int))) (Served Wm)
+; buffer at wh, which wm mapped, given up again, if it is a new one;
+; trimmed if the display had it (client_trimmed).
+(def resize_refused ((v Wm) (win Win) (wh Where) (why (list int)) (trimmed bool)) (Served Wm)
   (match wh
     ((Where va pages sd)
-      (let u (if (if (eq va (win_cva win)) true (eq va (spare_va (win_spare win)))) 0 (match (shm_unmap va pages) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
+      (let u (if (if (eq va (win_cva win)) true (eq va (spare_va (win_spare win)))) 0 (client_given_up va pages trimmed))
         (refused v why)))))
 
 ; Where in wm a window's other buffer is, -1 for none; its pages; and
@@ -1086,7 +1088,27 @@
     ((NoSpare) 0)
     ((Spare va n dva sd sw sh pend)
       (let f (display_forget d (win_spare_id win))
-        (match (shm_unmap va n) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0))))))
+        (client_given_up va n true)))))
+
+; A client's buffer at va, n pages, once the display has it, given up by
+; wm but for its first page, which keeps va wm's name for the buffer, as
+; attach and resize name it, so that no other share is given it: the
+; result r of sharing it with the display, as it was. wm never reads a
+; client's pixels, and at 4K holding them all took wm's 384 MB of device
+; pages, so a window's next buffer had no room (roadmap 0038).
+(def client_trimmed ((r (Result int (list int))) (va int) (n int)) (Result int (list int))
+  (match r
+    ((Err e) r)
+    ((Ok there)
+      (if (le n 1)
+          r
+          (match (shm_unmap (add va (page_size)) (sub n 1)) ((ShmUnmapped) r) ((ShmUnmapNotYours) r) ((ShmUnmapTooMany) r))))))
+
+; A client's buffer at va, n pages, given up by wm: its first page alone
+; if client_trimmed gave the rest up, which other buffers may since have
+; been given, else all n. 0.
+(def client_given_up ((va int) (n int) (trimmed bool)) int
+  (match (shm_unmap va (if trimmed 1 n)) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
 
 ; Where in wm a window's content's buffer is, and its buffers as shared.
 (def win_cva ((w Win)) int (match w ((Win id port pid x y cw ch top title tc cva tva bf app sz dc) cva)))
@@ -1111,15 +1133,15 @@
                   (let spared (eq va (spare_va sp))
                     (let pages (if (eq va (win_cva win)) cn (if spared (spare_pages sp) (max given need)))
                       (if (if (lt pages need) true (lt sd (mul nw s)))
-                          (answered (resize_refused v win wh "the buffer is too small for the size") payload)
+                          (answered (resize_refused v win wh "the buffer is too small for the size" false) payload)
                           (let cid (win_spare_id win)
                             (let dropped (if spared 0 (spare_dropped d win))
                               (match (if (if (eq va (win_cva win)) true spared)
                                          (let at (if spared (spare_dva sp) dcva)
                                            (let e (display_buffer_at d cid (mul nw s) (mul nh s) sd at pages)
                                              (if (is_empty e) ((Ok int (list int)) at) ((Err int (list int)) e))))
-                                         (display_buffer_shared d cid (mul nw s) (mul nh s) sd va pages))
-                            ((Err e) (answered (resize_refused v win wh e) payload))
+                                         (client_trimmed (display_buffer_shared d cid (mul nw s) (mul nh s) sd va pages) va pages))
+                            ((Err e) (answered (resize_refused v win wh e false) payload))
                             ((Ok there)
                               (let a (answered (okay v) payload)
                                 (let next (resize_ask_next win nw nh)
@@ -1185,14 +1207,14 @@
                               (let tc2 (paint_chrome tc font title nw nh front)
                                 (let e (display_buffer_at d tid tw th (canvas_w tc2) dtva tn)
                                   (if (not (is_empty e))
-                                      (let f (display_forget d cid) (resize_refused v win wh e))
+                                      (let f (display_forget d cid) (resize_refused v win wh e true))
                                       (resize_shown v win nw nh wh there tc2 tva tn dtva))))
                               (match (ui_buffer_at (grown (outer_w dc nw)) (grown (chrome_h dc nh)) s)
-                                ((UiNoBuf why) (let f (display_forget d cid) (resize_refused v win wh why)))
+                                ((UiNoBuf why) (let f (display_forget d cid) (resize_refused v win wh why true)))
                                 ((UiBuf tva2 pages big)
                                   (let tc2 (paint_chrome big font title nw nh front)
                                     (match (display_buffer_shared d tid tw th (canvas_w tc2) tva2 pages)
-                                      ((Err e) (let f (display_forget d cid) (let u (ui_buffer_free tva2 pages big) (resize_refused v win wh e))))
+                                      ((Err e) (let f (display_forget d cid) (let u (ui_buffer_free tva2 pages big) (resize_refused v win wh e true))))
                                       ((Ok dtva2) (resize_shown v win nw nh wh there tc2 tva2 pages dtva2))))))))))))))))))))
 
 ; A buffer's side n with room to grow: a quarter more, and 64.
@@ -1259,7 +1281,7 @@
               ((Win oid port pid x y cw ch top title tc cva tva bf app sz dc)
                 (match bf
                   ((Bufs cn dcva csd tn dtva fw ck sp nt)
-                    (let a (if (if kept true (eq cva (win_cva nwin))) 0 (match (shm_unmap cva cn) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
+                    (let a (if (if kept true (eq cva (win_cva nwin))) 0 (client_given_up cva cn true))
                       (if (eq tva (win_tva nwin)) 0 (ui_buffer_free tva tn tc)))))))))))))
 
 ; Where in wm a window's chrome's buffer is.
@@ -1464,8 +1486,8 @@
       (let s (display_scale d)
         (let cid (win_spare_id win)
           (let dr (spare_dropped d win)
-            (match (display_buffer_shared d cid (mul cw s) (mul ch s) sd va pages)
-              ((Err e) (let u (shm_unmap va pages) ((Err Spare (list int)) e)))
+            (match (client_trimmed (display_buffer_shared d cid (mul cw s) (mul ch s) sd va pages) va pages)
+              ((Err e) (let u (client_given_up va pages false) ((Err Spare (list int)) e)))
               ((Ok dva) (let k (shape_content d cid dc cw ch) ((Ok Spare (list int)) (Spare va pages dva sd cw ch true)))))))))))
 
 ; Window win's client told its other buffer is released, if the display
@@ -1583,7 +1605,7 @@
         ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
           (match bf
             ((Bufs cn dcva csd tn dtva fw ck sp nt)
-              (let a (shm_unmap cva cn)
+              (let a (client_given_up cva cn true)
                 (let b (if (has_chrome dc) (ui_buffer_free tva tn tc) 0)
                   (give_up (tail ws) s)))))))))
 

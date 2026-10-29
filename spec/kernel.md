@@ -223,7 +223,11 @@ closed (`close_device`, or `shm_region_free` for shared pages) frees its
 place for another.
 
 **Shared memory.** `shm_alloc n` is `dma_alloc` for any process: n zeroed
-pages at its next device pages, with no `dev` line needed.
+pages at its next device pages, with no `dev` line needed. Both take
+their frames from the kernel's pool of zeroed frames first, which it
+makes while it has nothing else to run (`memory.l0`'s pool), so a
+large buffer is mapped without waiting for L0's `frame_new` to zero
+each page; a file window's pages come from it too.
 `shm_share va n pid` maps n of the caller's shared or DMA pages from va
 into pid's next device pages as well. They are the same frames, so a
 write by either is seen by both. It returns where pid sees them, for the
@@ -379,8 +383,17 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
 - **A process has 384 MB of device pages**, its shared, DMA and device
   memory mapped at once. Pages it gives up are given again, but a
   request's pages must lie together, so 384 MB in holes too small for it
-  is still refused. `virtio-gpu` maps every window's buffers, four times
-  as many pages at scale 2.
+  is still refused. `virtio-gpu` and `hvs` map every window's buffers,
+  four times as many pages at scale 2, and at 4K two or three big
+  windows fill `hvs`'s (see [display.md, Limits](display.md#limits));
+  `wm` keeps only the first page of each client buffer once the display
+  has it, which names the buffer, and gives up the rest.
+- **The pool of zeroed frames holds at most 64 MB** (16,384 frames,
+  `memory.l0`'s `pool_cap`), made while CPU 0 has nothing to run, 128 at
+  a time, only while 128 MB of frames are left and the heap has 32 MB
+  past its reserve, and given back as fewer than 64 MB are left. A
+  call that maps more pages than the pool holds makes the rest as it
+  needs them, at 2.75 µs a page on a Pi 5, all on CPU 0.
 - Round-robin scheduling with 10 ms slices, from one ready queue. A
   process woken by a message runs once a CPU has room, which with every
   CPU busy is the end of a slice, not at once.

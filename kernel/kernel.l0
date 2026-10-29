@@ -1781,13 +1781,13 @@
       (used_from slots mem 0 (add (mem_shared_frames mem) (own_pages p mem))))))
 
 ; The mem_record mem_info gives p: the pages processes can have, those
-; given and those the host has left (spec 6.13's frame_free_count), and
-; how many are given. The host's page tables take from what is left, so
-; the total moves as they come and go, and grows once the initramfs's
-; raw copy joins the pool.
+; given and those the host has left (spec 6.13's frame_free_count) or
+; the pool holds zeroed, and how many are given. The host's page tables
+; take from what is left, so the total moves as they come and go, and
+; grows once the initramfs's raw copy joins the pool.
 (def k_mem_record ((k Kernel) (p Proc)) (list int)
   (let used (k_used_frames k p)
-    (mem_record (add used (max 0 (frame_free_count))) used)))
+    (mem_record (add used (add (max 0 (frame_free_count)) (mem_pooled (k_mem k)))) used)))
 
 ; n and the own pages of every live process from slot i on.
 (def used_from ((slots (array Slot)) (mem Mem) (i int) (n int)) int
@@ -2109,8 +2109,10 @@
 ; What follows p's trap t: a call dispatched; a page touched that is not
 ; mapped, mapped on demand, or p killed if it may not be; a fault, p
 ; killed; the timer, p's slice over; a device's interrupt, its notice
-; sent, and p parked.
-(def on_trap ((k Kernel) (p Proc) (t Trap)) Step
+; sent, and p parked. The pool of zeroed frames is given back first if
+; frames are running short (k_pool_kept).
+(def on_trap ((k0 Kernel) (p Proc) (t Trap)) Step
+  (let k (k_pool_kept k0)
   (match t
     ((TrapCall n) (dispatch k p (proc_decode p n)))
     ((TrapMissing va)
@@ -2124,7 +2126,41 @@
           (let a (timer_at -1)
             (let d (interrupt_done 0)
               (Park k p)))
-          (Park (device_irq k n) p)))))
+          (Park (device_irq k n) p))))))
+
+; k with its pool of zeroed frames given back, each frame freed, once
+; fewer frames are left than the pool's floor (memory.l0's
+; pool_released), so that the pool never holds what a process needs.
+(def k_pool_kept ((k Kernel)) Kernel
+  (if (pool_released (mem_pooled (k_mem k)) (frame_free_count))
+      (match (mem_pool_drain (k_mem k))
+        ((PoolDrained m2 fs) (let f (free_frames fs) (with_mem k m2))))
+      k))
+
+; Whether k has frames to make for its pool while it is idle: only with
+; pool_heap_room past its heap's reserve, so that on a small heap the
+; pool is never made, and what runs out first, and is refused, is as it
+; would be without one (test_heap_runs_low).
+(def k_pool_wants ((k Kernel)) bool
+  (if (ge (heap_left) (add (heap_reserve) (pool_heap_room)))
+      (gt (pool_wanted (mem_pooled (k_mem k)) (frame_free_count)) 0)
+      false))
+
+; The heap past its reserve the pool is made with: 32 MB.
+(def pool_heap_room () int 33554432)
+
+; k with a chunk of zeroed frames made for its pool, as many as
+; pool_wanted says, or fewer if the host runs out.
+(def k_pool_filled ((k Kernel)) Kernel
+  (let fs (frames_made (pool_wanted (mem_pooled (k_mem k)) (frame_free_count)) (nil int))
+    (with_mem k (mem_pool_put (k_mem k) fs (length fs)))))
+
+; n zeroed frames made onto acc, or as many as the host had.
+(def frames_made ((n int) (acc (list int))) (list int)
+  (if (le n 0)
+      acc
+      (let f (frame_new)
+        (if (lt f 0) acc (frames_made (sub n 1) (cons f acc))))))
 
 ; Interrupt n, taken: a notice to the port it is bound to, and taken until
 ; its driver acks it; or, its driver gone or none ever, held taken until
@@ -2197,15 +2233,17 @@
 (def idle ((k Kernel)) int
   (if (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false)
       (stuck k "l0s: deadlock: every process waits for something that cannot happen")
-      (let t (timer_at (soonest (k_sleepers k)))
-        (let n (interrupt_wait)
-          (if (eq n 0)
-              (let a (timer_at -1)
-                (let d (interrupt_done 0)
-                  (schedule k)))
-              (if (gt n 0)
-                  (schedule (device_irq k n))
-                  (stuck k "l0s: no interrupt can come")))))))
+      (if (k_pool_wants k)
+          (schedule (k_pool_filled k))
+          (let t (timer_at (soonest (k_sleepers k)))
+            (let n (interrupt_wait)
+              (if (eq n 0)
+                  (let a (timer_at -1)
+                    (let d (interrupt_done 0)
+                      (schedule k)))
+                  (if (gt n 0)
+                      (schedule (device_irq k n))
+                      (stuck k "l0s: no interrupt can come"))))))))
 
 ; why logged as an error, and 124, the status the system stops with when
 ; nothing can ever run again.
@@ -2487,17 +2525,19 @@
 (def many_idle ((k Kernel)) int
   (if (if (cpus_busy (k_cpus k)) false (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false))
       (stuck k "l0s: deadlock: every process waits for something that cannot happen")
-      (let t (timer_at (soonest (k_sleepers k)))
-        (let n (cpu_wait)
-          (if (eq n -1)
-              (many_schedule k)
-              (if (eq n 0)
-                  (let a (timer_at -1)
-                    (let d (interrupt_done 0)
-                      (many_schedule k)))
-                  (if (gt n 0)
-                      (many_schedule (device_irq k n))
-                      (stuck k "l0s: no interrupt can come"))))))))
+      (if (k_pool_wants k)
+          (many_schedule (k_pool_filled k))
+          (let t (timer_at (soonest (k_sleepers k)))
+            (let n (cpu_wait)
+              (if (eq n -1)
+                  (many_schedule k)
+                  (if (eq n 0)
+                      (let a (timer_at -1)
+                        (let d (interrupt_done 0)
+                          (many_schedule k)))
+                      (if (gt n 0)
+                          (many_schedule (device_irq k n))
+                          (stuck k "l0s: no interrupt can come")))))))))
 
 ; ------------------------------------------------------------------- boot
 

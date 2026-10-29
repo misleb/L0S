@@ -475,17 +475,28 @@ of them could be confirmed from Linux's source:
   row 1920 wide takes 61 units and one 3840 wide 121, so a screen holds
   about 16 rows of 1920, or 8 of 3840: at 3840×2160 the desktop and the
   top bar take 242 units, and a window about W/8 for a width of W at
-  scale 2, its content and its frame. A screen past either is refused,
-  and so is every list after it, the pointer's moves among them, so the
-  pointer shown stops while `wm`'s moves on, until a window shrinks or
-  closes (seen with one widened to 3032 pixels at 4K). Resizing windows
-  at 4K has also brought gaps of up to a second with no end of frame,
-  the HVS's own frame count barely moving, as if the channel stalled;
-  more than 63 frames in one leave `hvs`'s count short. With five
-  windows opened and moved at 4K, stalls of about 117 ms (two or three
-  frames where seven were due) came again and again, at multiples of
-  about 1.2 s, and the desktop slowed with them. Neither was seen at
-  1920×1080.
+  scale 2, its content and its frame. A screen past either is shown
+  without its lowest pieces, the wallpaper's first, left out one at a
+  time until the rest fit (`pieces.l0`'s `screen_fit`), so the pointer
+  and the windows on top go on, over the HVS's black background where
+  the pieces left out were; `hvs` says so once as it begins and once as
+  it fits again. Only a screen whose topmost piece alone cannot be one
+  list is refused.
+  Resizing windows at 4K still brings gaps of 100 to 170 ms with no end
+  of frame now and then, the HVS making frames meanwhile: the kernel's
+  calls that allocate, share and give up a window's buffers of 8,000
+  to 13,000 pages take tens of ms each on CPU 0, which holds every
+  CPU's calls. More than 63 frames in one gap leave `hvs`'s count
+  short. `hvs` says, as debug, any request it takes over 4 ms to answer
+  (`watch.l0`'s `slow_request`), and cleans out of the caches only the
+  pages a buffer's pixels are in, not the room its client keeps past
+  them.
+  At 4K and scale 2 `hvs` maps every buffer on the screen, a window's
+  two contents and `wm`'s two frames for it, about 140 MB for a big
+  window, in a process's 384 MB of device pages (spec §10.3's user
+  range): with two or three big windows a buffer more has no room, the
+  share is refused, and that window is not shown at its new size (its
+  client says so once, the toolkit's `ui_back_given`).
   A restack is answered before it is shown, and shown by the third end
   of frame after it at the latest, as one list a frame is pointed at:
   only while the channel is the driver's and ends of frame come. Where

@@ -378,26 +378,100 @@
 ; For each frame mapped at device pages or shared as an image's, how many
 ; mappings of it live processes have, a driver's device pages counting
 ; for good; the image segments shared, by the hash of their bytes; and
-; the file windows.
-(data Mem (Mem (Map int int) (Map int (list ImageSeg)) (list Window)))
+; the file windows; and the pool of zeroed frames.
+(data Mem (Mem (Map int int) (Map int (list ImageSeg)) (list Window) Pool))
 
-; The counts before any process maps a device page: none.
-(def mem_new () Mem (Mem ((MapEmpty int int)) ((MapEmpty int (list ImageSeg))) (nil Window)))
+; The counts before any process maps a device page: none, and an empty
+; pool.
+(def mem_new () Mem (Mem ((MapEmpty int int)) ((MapEmpty int (list ImageSeg))) (nil Window) (Pool (nil int) 0)))
+
+; ----------------------------------------------------------------- pool
+;
+; Frames made zeroed while the kernel has nothing else to do, for
+; shm_alloc and file windows to take, as frame_new would give them: on a
+; Pi 5 frame_new takes 2.75 us a page, so a 4K window's buffer of 12,800
+; pages held every CPU's calls for 35 ms of it (roadmap 0038). No process
+; maps a frame in the pool; mem_info counts them as left.
+
+; Frames in the pool, and how many.
+(data Pool (Pool (list int) int))
+
+; The most frames the pool holds: 16,384, 64 MB, the most one shm_alloc
+; takes (dma_limit).
+(def pool_cap () int 16384)
+
+; How many frames are made at a time while the kernel is idle: 128, about
+; 0.35 ms on a Pi 5, so a trap waits no longer than that for CPU 0.
+(def pool_chunk () int 128)
+
+; Below this many frames left, the pool holds none, so that it never
+; keeps the memory a process needs: as many as it holds at most.
+(def pool_floor () int (pool_cap))
+
+; How many frames m's pool holds.
+(def mem_pooled ((m Mem)) int (match m ((Mem counts imgs wins pool) (match pool ((Pool fs n) n)))))
+
+; How many frames to make for the pool now, with free left: a chunk, or
+; what fills it, while free stays above the floor with the pool full;
+; else none.
+(def pool_wanted ((pooled int) (free int)) int
+  (if (lt free (add (pool_floor) (add (pool_cap) (pool_chunk))))
+      0
+      (max 0 (min (pool_chunk) (sub (pool_cap) pooled)))))
+
+; Whether a pool of pooled frames is given back with free left: once
+; free is below the floor.
+(def pool_released ((pooled int) (free int)) bool
+  (if (gt pooled 0) (lt free (pool_floor)) false))
+
+; A frame taken from the pool: m without it, and the frame, or -1 if the
+; pool is empty.
+(data PoolTook (PoolTook Mem int))
+
+; A frame of m's pool, as PoolTook says.
+(def mem_pool_take ((m Mem)) PoolTook
+  (match m
+    ((Mem counts imgs wins pool)
+      (match pool
+        ((Pool fs n)
+          (if (is_empty fs)
+              (PoolTook m -1)
+              (PoolTook (Mem counts imgs wins (Pool (tail fs) (sub n 1))) (head fs))))))))
+
+; m with frames fs, n of them, zeroed and mapped by no process, in its
+; pool.
+(def mem_pool_put ((m Mem) (fs (list int)) (n int)) Mem
+  (match m
+    ((Mem counts imgs wins pool)
+      (match pool ((Pool ps k) (Mem counts imgs wins (Pool (append_rev fs ps) (add k n))))))))
+
+; xs reversed onto ys.
+(def append_rev ((xs (list int)) (ys (list int))) (list int)
+  (if (is_empty xs) ys (append_rev (tail xs) (cons (head xs) ys))))
+
+; m with its pool emptied, and the frames that were in it.
+(data PoolDrained (PoolDrained Mem (list int)))
+
+; m's pool given up, as PoolDrained says.
+(def mem_pool_drain ((m Mem)) PoolDrained
+  (match m
+    ((Mem counts imgs wins pool)
+      (match pool ((Pool fs n) (PoolDrained (Mem counts imgs wins (Pool (nil int) 0)) fs))))))
 
 ; How many frames m counts mappings of: every shared, DMA and image frame
 ; shared still given, each once, however many processes map it.
-(def mem_shared_frames ((m Mem)) int (match m ((Mem counts imgs wins) (map_size counts))))
+(def mem_shared_frames ((m Mem)) int (match m ((Mem counts imgs wins pool) (map_size counts))))
 
 ; How many mappings of frame f m counts, 0 for a frame it does not know.
 (def mem_count ((m Mem) (f int)) int
-  (match m ((Mem counts imgs wins) (match (map_get counts f) ((Some n) n) ((None) 0)))))
+  (match m ((Mem counts imgs wins pool) (match (map_get counts f) ((Some n) n) ((None) 0)))))
 
 ; How many of pages, a process's in space s, are of an image segment s
 ; shares, outside its device pages, and frames m counts: the only shared
 ; pages a process has but its device pages, as only those and image
 ; segments' frames are counted.
 (def mem_image_pages ((m Mem) (s int) (pages (Map int int))) int
-  (match m ((Mem counts imgs wins) (seg_lists_pages (map_values imgs) s pages m 0))))
+  (match m ((Mem counts imgs wins pool) (seg_lists_pages (map_values imgs) s pages m 0))))
 
 ; n and the pages of space s's segments among lists, as mem_image_pages.
 (def seg_lists_pages ((lists (list (list ImageSeg))) (s int) (pages (Map int int)) (m Mem) (n int)) int
@@ -426,7 +500,7 @@
 ; an image segment's.
 (def mem_share ((m Mem) (f int)) Mem
   (let n (mem_count m f)
-    (match m ((Mem counts imgs wins) (Mem (map_put counts f (add n 1)) imgs wins)))))
+    (match m ((Mem counts imgs wins pool) (Mem (map_put counts f (add n 1)) imgs wins pool)))))
 
 ; m with one more mapping of each of fs.
 (def mem_share_all ((m Mem) (fs (list int))) Mem
@@ -439,7 +513,7 @@
 ; the kernel compares to be sure.
 (def mem_image_candidates ((m Mem) (key int) (va int) (len int) (perm int)) (list ImageSeg)
   (match m
-    ((Mem counts imgs wins)
+    ((Mem counts imgs wins pool)
       (match (map_get imgs key)
         ((None) (nil ImageSeg))
         ((Some segs) (segs_at segs va len perm (nil ImageSeg)))))))
@@ -465,10 +539,10 @@
 ; mapping more of each.
 (def mem_image_join ((m Mem) (key int) (g ImageSeg) (s int)) Mem
   (match (mem_share_all m (image_seg_frames g))
-    ((Mem counts imgs wins)
+    ((Mem counts imgs wins pool)
       (match (map_get imgs key)
-        ((None) (Mem counts imgs wins))
-        ((Some segs) (Mem counts (map_put imgs key (segs_joined segs g s (nil ImageSeg))) wins))))))
+        ((None) (Mem counts imgs wins pool))
+        ((Some segs) (Mem counts (map_put imgs key (segs_joined segs g s (nil ImageSeg))) wins pool))))))
 
 ; segs onto acc, in order, with s among the spaces of the one that is g.
 (def segs_joined ((segs (list ImageSeg)) (g ImageSeg) (s int) (acc (list ImageSeg))) (list ImageSeg)
@@ -484,16 +558,16 @@
 ; with perm, its pages' frames fs, which space s alone maps so far.
 (def mem_image_new ((m Mem) (key int) (va int) (len int) (perm int) (fs (list int)) (s int)) Mem
   (match (mem_share_all m fs)
-    ((Mem counts imgs wins)
+    ((Mem counts imgs wins pool)
       (let segs (match (map_get imgs key) ((None) (nil ImageSeg)) ((Some gs) gs))
-        (Mem counts (map_put imgs key (cons (ImageSeg va len perm fs (cons s (nil int))) segs)) wins)))))
+        (Mem counts (map_put imgs key (cons (ImageSeg va len perm fs (cons s (nil int))) segs)) wins pool)))))
 
 ; m once space s maps no segment: s taken from each, and a segment no
 ; space maps any more forgotten. Its frames' counts are mem_release's.
 (def mem_image_leave ((m Mem) (s int)) Mem
   (match m
-    ((Mem counts imgs wins)
-      (Mem counts (images_without imgs (map_keys imgs) s) wins))))
+    ((Mem counts imgs wins pool)
+      (Mem counts (images_without imgs (map_keys imgs) s) wins pool))))
 
 ; imgs with s taken from the segments at keys, and a key with none left
 ; dropped.
@@ -518,7 +592,7 @@
 
 ; How many segments m shares.
 (def mem_image_count ((m Mem)) int
-  (match m ((Mem counts imgs wins) (sum_lengths (map_values imgs) 0))))
+  (match m ((Mem counts imgs wins pool) (sum_lengths (map_values imgs) 0))))
 
 ; n and the lengths of each of ls.
 (def sum_lengths ((ls (list (list ImageSeg))) (n int)) int
@@ -565,10 +639,10 @@
 (def mem_unshare ((m Mem) (f int)) Unshared
   (let n (mem_count m f)
     (match m
-      ((Mem counts imgs wins)
+      ((Mem counts imgs wins pool)
         (if (gt n 1)
-            (Unshared (Mem (map_put counts f (sub n 1)) imgs wins) false)
-            (Unshared (Mem (map_remove counts f) imgs wins) true))))))
+            (Unshared (Mem (map_put counts f (sub n 1)) imgs wins pool) false)
+            (Unshared (Mem (map_remove counts f) imgs wins pool) true))))))
 
 ; ---------------------------------------------------------------- windows
 
@@ -589,11 +663,11 @@
 (def window_pages () int 16)
 
 ; m's windows.
-(def mem_windows ((m Mem)) (list Window) (match m ((Mem counts imgs wins) wins)))
+(def mem_windows ((m Mem)) (list Window) (match m ((Mem counts imgs wins pool) wins)))
 
 ; m with its windows ws.
 (def mem_with_windows ((m Mem) (ws (list Window))) Mem
-  (match m ((Mem counts imgs wins) (Mem counts imgs ws))))
+  (match m ((Mem counts imgs wins pool) (Mem counts imgs ws pool))))
 
 ; Where the server at port reaches client's window, or -1 if client has
 ; none to it.
