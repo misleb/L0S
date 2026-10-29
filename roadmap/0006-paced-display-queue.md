@@ -75,7 +75,7 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   end of each frame 0005's bookkeeping says showed a change, and
   `release` once a list that no longer names a buffer is taken, since
   the HVS reads every pixel of a buffer it shows every frame.
-- [ ] The screen test: a window's frames told and its buffers swapped,
+- [x] The screen test: a window's frames told and its buffers swapped,
   `run windows` saying which buffer each window shows; the Disks drag
   timed against today's; the limit goes from desktop.md, and
   toolkit.md says how `ui_present` paces itself.
@@ -84,7 +84,6 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
 
 - display.md: in the Pi 5's section, when `hvs` sends `frame N` and
   `release`.
-- desktop.md: `run windows` saying which buffer each window shows.
 
 ## Log
 
@@ -158,3 +157,16 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   fewer sizes, 133 where 159 were shown in the same scripted drag, as
   the window paints the next only once the restack released the other
   buffer; a third buffer would overlap them again (0039).
+- 2026-10-29: step 6. `run windows` ends each window's line with
+  `buffer B frames F`, the display's id of the content it shows and the
+  frames `wm` has told its client, and `tests/widgets.sh` checks that
+  each of two Tabs shows the gallery from its other buffer (6, 4, 6)
+  and tells a frame (3, 4, 5). The test is in `widgets.sh`, not a
+  script of its own, as the gallery's Tabs are one change each. The
+  Disks drag was timed by a script kept out of the tree, as a timing
+  that varies with the host makes a poor pass or fail: the numbers are
+  in step 4's line above. The limit went from desktop.md, and
+  toolkit.md says how `ui_present` paces itself, with step 4. `launch.sh`
+  and `files.sh` (which the first `make e2e` caught reading the pid as
+  the line's last word), the `virtio-gpu` e2e case and the MCP server's
+  `parse_windows` read the longer lines.

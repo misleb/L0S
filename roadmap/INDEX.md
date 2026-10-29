@@ -25,7 +25,7 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | active | 4/6 | 0005 | display.md, desktop.md, toolkit.md |
+| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | active | 5/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
@@ -49,8 +49,8 @@ move independently, so several can be active at once.
 
 - [0006](0006-paced-display-queue.md) A paced, pipelined display
   queue, active: toolkit windows paint the buffer not shown, paced by
-  the frames and releases `virtio-gpu` tells; step 6, the screen test,
-  is QEMU's, and 5, `hvs`'s, needs the board.
+  the frames and releases `virtio-gpu` tells, which `widgets.sh`
+  checks; step 5, `hvs`'s, needs the board.
 
 ## Dependencies
 

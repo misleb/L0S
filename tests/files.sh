@@ -301,8 +301,8 @@ files_windows() {
     sleep 1
     lines=$(tail -c +$from "$out" | sed 's/^l0s> //' | grep -aE '^[0-9]+ Files ')
     if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$1" ]; then
-      read -r f_id _ f_x f_y _ _ _ f_pid <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
-      read -r b_id _ b_x b_y _ _ _ b_pid <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
+      read -r f_id _ f_x f_y _ _ _ f_pid _ <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
+      read -r b_id _ b_x b_y _ _ _ b_pid _ <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
       return 0
     fi
   done

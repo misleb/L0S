@@ -80,7 +80,7 @@ listed() {
   from=$(($(wc -c < "$out") + 1))
   printf 'run windows\n' >&3
   sleep 2
-  wins=$(tail -c +$from "$out" | tr -d '\r' | grep -aE '^[0-9]+ [^ ]+ -?[0-9]+ -?[0-9]+ [0-9]+ [0-9]+ (front|-) [0-9]+$')
+  wins=$(tail -c +$from "$out" | tr -d '\r' | grep -aE '^[0-9]+ [^ ]+ -?[0-9]+ -?[0-9]+ [0-9]+ [0-9]+ (front|-) [0-9]+ buffer [0-9]+ frames [0-9]+$')
 }
 
 # How many windows titled $1 there are, and how many clients they have.
@@ -88,7 +88,7 @@ count() { printf '%s\n' "$wins" | grep -cE "^[0-9]+ $1 " ; }
 clients() { printf '%s\n' "$wins" | grep -E "^[0-9]+ $1 " | awk '{print $8}' | sort -u | grep -c . ; }
 
 # The front window's title.
-front() { printf '%s\n' "$wins" | grep -E ' front [0-9]+$' | awk '{print $2}'; }
+front() { printf '%s\n' "$wins" | grep -E ' front [0-9]+ ' | awk '{print $2}'; }
 
 # Waits up to 40 s for run windows to list n windows titled t, of one
 # client, the front one titled f.
@@ -182,7 +182,7 @@ echo "ok - launch: the same Disks, pid $disks_pid"
 # 4. open files /Volumes: a third window of the one Files, there.
 printf 'run open files /Volumes\n' >&3
 expects "open files /Volumes: a third Files window, in front" Files 3 Files
-line=$(printf '%s\n' "$wins" | grep -E ' front [0-9]+$')
+line=$(printf '%s\n' "$wins" | grep -E ' front [0-9]+ ')
 read -r _ _ fx fy _ <<< "$line"
 shows "at /Volumes: its Volumes row selected, Computer's not" \
   "$((fx + 200)) $((fy + 124)) $side_sel" "$((fx + 200)) $((fy + 76)) $sidebar"
@@ -197,7 +197,7 @@ click $apps_x 16; click $terminal_x $icon_y
 for try in $(seq 1 20); do
   listed
   n=$(printf '%s\n' "$wins" | awk -v p="$term_pid" '$8 == p' | grep -c .)
-  fp=$(printf '%s\n' "$wins" | grep -E ' front [0-9]+$' | awk '{print $8}')
+  fp=$(printf '%s\n' "$wins" | grep -E ' front [0-9]+ ' | awk '{print $8}')
   [ "$n" = 2 ] && [ "$fp" = "$term_pid" ] && break
 done
 if [ "$n" != 2 ] || [ "$fp" != "$term_pid" ]; then
