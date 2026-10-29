@@ -79,7 +79,7 @@ make the slow path visible, and write down how an app stays answering.
   on the port (`port_try_receive`), keeps the last pointer move and
   size notice and the wheel's sum, and handles every press, release, key
   and request in order. Host tests with a queue of mixed events.
-- [ ] Keyed layout: a widget keyed by a value keeps the layout and the
+- [x] Keyed layout: a widget keyed by a value keeps the layout and the
   paint of the last view while its key and its place are the same;
   Fonts' page and the grids of Files and System Monitor keyed. Host tests
   that a hover lays out only what it lights.
@@ -241,3 +241,48 @@ make the slow path visible, and write down how an app stays answering.
   gap between them were 8 steps (a debug line a step, since taken
   out), where each was one before; sent 5 ms apart, 34, as a step of
   6.5 ms leaves little to put together. `tests/fontview.sh` passes.
+- 2026-10-28: step 4, keyed layout. The design calls:
+  - **`UiKeyed KEY CHILD`, a widget**, the key text the program gives,
+    as GTK's widgets are kept across frames and only what is queued
+    for layout is laid out again. What is kept is found from the last
+    layout itself, the nodes the window keeps, so nothing new is kept
+    beside them: each part is laid after a mark, a node of no place and
+    no ops (nothing hits it, nothing paints it, no focus), whose action
+    `ui.kept.N.X.Y.W.H.SIG.KEY` says how many nodes follow, where they
+    were laid out and against what (`ui_kept_mark`, `ui_kept_of`). The
+    window gives them to the layout in the state, its new last field
+    (`ui_st_keeping`), as the state is what every layout function
+    already takes; the window keeps its own state without them.
+  - **When a part is kept**: its key, its place and its signature are
+    the same. The signature (`ui_key_sig`) hashes the ground, the
+    backdrop, the style, and the actions under the pointer, pressed and
+    focused, each only if it is one of the part's own nodes', so the
+    pointer moving anywhere else keeps it and over one of its own
+    buttons lays it out again. A part laid where x or y is below 0 is
+    laid out again each time (its place is written as whole numbers
+    from 0), which only scrolled parts are.
+  - **Keyed by what it shows.** `ui_keyed_self NAME W` keys W by its own
+    hash, cheaper than laying it out (no text is measured), which
+    `ui_grid_page` does for its grid, so System Monitor's and the
+    gallery's; Files keys its tiles or rows by their folder, names,
+    kinds and sizes and its views' state (`fl_items_key`), not by the
+    tiles, whose images a hash would read whole; Fonts keys its page by
+    the face. A part's paint is kept too, as `ui_changed` finds its ops
+    the same.
+  Host tests: `widget_test.l0`'s keyed parts (found again by key, a
+  mark not hit, a hover elsewhere keeping the page, one over its own
+  button laying it out again, moved or another key laid out again, the
+  backdrop, keys with dots), told apart from a fresh layout by kept
+  nodes of an action of their own; `files_test.l0`'s key;
+  `uiloop_test.l0`'s `test_parts_same`.
+  - **Kept parts out of the diff.** Measured on QEMU (every step's line
+    said for the run, since put back): keying Fonts' page alone took a
+    hover's step from 6.5 ms to 5.6, its layout 1.5 ms but the paint
+    stage, `ui_changed` keying all the page's ops again, 4.2. So
+    `ui_presented` leaves out of `ui_changed`, on both sides, the parts
+    whose marks old and new share (`ui_parts_same`, `ui_parts_out`):
+    their nodes are the same. Leaving them out can only paint more,
+    never less, as a fill they hold no longer covers another's change.
+    A hover's step over Fonts' page is then 2.0 to 2.4 ms: route 0.0,
+    update and view 0.1, layout 1.5 (the page still measured, as a box
+    measures each child, and the marks read), paint 0.3.
