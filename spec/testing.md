@@ -16,6 +16,10 @@ one for each CPU unless `JOBS=N` says otherwise. Nothing of what passes is
 shown; a failure shows its whole output, and the rest still run. To run
 everything again, `rm -rf build/check build/test`.
 
+`user/sbin/fs/turns_test.l0` pins the order `fs` serves what waits on
+its port in: notices before every request, and an exited pid's
+requests dropped.
+
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;
 - `expected`, its standard output; or `pattern`, for output that

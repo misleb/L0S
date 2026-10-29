@@ -1,6 +1,6 @@
 # 0024: `fs` serves its clients fairly, small requests first
 
-Track: Storage · Status: ready · Needs: 0023 · Spec: storage.md, testing.md
+Track: Storage · Status: active · Needs: 0023 · Spec: storage.md, testing.md
 
 ## Why
 
@@ -34,7 +34,7 @@ its own), but none is needed: `fs` can take every message waiting with
   client moving 64 KB a request and one asking `stat`s share its turns;
   a client's queued requests are bounded, and those past the bound
   refused, not left to fill the queue.
-- `fs_test` pins the order: a `stat` behind a run of large writes from
+- `turns_test` pins the order: a `stat` behind a run of large writes from
   another pid is served within one write; a pid with many requests
   waiting cannot keep another's from being served; notices go first.
 - `make test-virt` and `make e2e` pass; `install` onto a volume is no
@@ -42,18 +42,22 @@ its own), but none is needed: `fs` can take every message waiting with
 
 ## Steps
 
-- [ ] `fs`'s loop takes every message waiting (`port_try_receive` until
+- [x] `fs`'s loop takes every message waiting (`port_try_receive` until
   none) into a pending list of its own, and serves notices before
-  requests; requests still in the order they came. No change in what
-  any test sees.
+  requests; requests still in the order they came. An exit notice drops
+  its pid's requests still waiting. No change in what any test sees.
 - [ ] Requests chosen by deficit round robin over pids: each pid a
-  budget of bytes a round, a request's cost its `N` for `read` and
-  `write`, a sector's worth for the rest, and those the size of a
-  volume (`format`, `mkfs`, `partition`) last of their pid's. Host
-  tests in `fs_test` of the order.
+  budget of bytes a round, a request's cost its `N` for `readw`,
+  `writew` and `read`, its bytes for `write`, a sector's worth for the
+  rest, and those the size of a volume (`format`, `mkfs`, `partition`,
+  `erase`, `rescan`) 16 runs of 64 KB, so that other pids' are served
+  first; a pid's own requests stay in the order they came. Host tests
+  of the order in `turns_test`.
 - [ ] A bound on a pid's pending requests in `fs`, past which it
-  answers at once with a refusal the client's call reports; storage.md
-  says what.
+  answers at once with a refusal the client's call reports, -5 and
+  why, as for any other failure; a `close` is never refused, since
+  the kernel lets go of a stream whatever its answer; storage.md says
+  what.
 - [ ] Measure on QEMU: `install` onto a volume, and an `ls` of a
   directory while it runs, before and after; in the log.
 
@@ -63,7 +67,7 @@ its own), but none is needed: `fs` can take every message waiting with
   by pid in turn by bytes; the bound on a client's pending requests and
   its refusal; Limits: a request is still served to its end, its disk
   request included, so a small one may wait for one run of 64 KB.
-- testing.md: the order tests in `fs_test`.
+- testing.md: the order tests in `turns_test`.
 
 ## Log
 
@@ -75,3 +79,22 @@ its own), but none is needed: `fs` can take every message waiting with
   kernel, which would split the rule between them; small-first alone
   rejected, since a stream of `stat`s would starve a copy. Serving
   other requests while a disk request is out is left for after.
+- 2026-10-28: started. 0031's port sets change nothing here: `fs`
+  still serves one port, its clock's reply port being one it asks on
+  and waits for, not one it serves, so the order stays all its own,
+  as written. Steps adjusted: the order is kept in a file of its own,
+  `user/sbin/fs/turns.l0`, pure, and tested in `turns_test.l0` beside
+  it rather than in `fs_test`; a pid's requests are never reordered
+  among themselves, since a client's later request may rest on its
+  earlier one, so a volume's request is given a large cost instead of
+  being moved last; the refusal is -5 with why, the word every client
+  and the kernel's `fs_answered` already report, and never of a
+  `close`, whose stream the kernel drops whatever the answer, so a
+  refused one would leave `fs` a handle. An exit notice, now served
+  before requests that came ahead of it, drops its pid's waiting
+  requests: served after it, an `open` would make a handle no exit
+  would drop.
+- 2026-10-28: step 1 landed. `serve` takes every message waiting into
+  a `Turns`, notices and requests each a queue, and serves the next of
+  it each time round; it blocks on `port_receive` only with nothing
+  waiting.
