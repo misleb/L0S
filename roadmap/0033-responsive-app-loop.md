@@ -66,7 +66,7 @@ make the slow path visible, and write down how an app stays answering.
 
 ## Steps
 
-- [ ] Find out: time each stage of Fonts' step with `clock_ns` (the
+- [x] Find out: time each stage of Fonts' step with `clock_ns` (the
   `l0s-testing` skill's timing on the board), with the page open and the
   pointer moving over the back button, and count the messages waiting
   on its port. Write the cause and the numbers in the Log, and fix what
@@ -129,3 +129,41 @@ make the slow path visible, and write down how an app stays answering.
   second window of an app (0021) asks for its strikes again, which
   `font` answers from its cache, a round trip each; the replies step
   could keep them once for the app.
+- 2026-10-28: step 1, measured. Fonts' loop was timed with `clock_ns`
+  on QEMU (four CPUs), Source Sans 3's page open, and 39 pointer moves
+  sent 5 ms apart across the header bar onto the back button: each
+  stage printed (route, update and view, `ui_present`; inside it the
+  layout, the strikes wanted, `ui_changed`, the paint and the damage),
+  and the messages waiting on the port counted by taking them all
+  (`port_try_receive`) before each step. Every move was a step of 366
+  ms: route 0.0, update and view 0.1 to 0.2, layout 53, strikes 0 (none
+  asked: `font` is not it, as the Log said), `ui_changed` 312, paint and
+  damage 0 (nothing differed: a hover of the header bar's ground lights
+  nothing). The queue held 32, the port's most, at the second step, so
+  the moves after were dropped and the 32 waiting were 12 seconds of
+  steps; a hover of a second or two is a few moves' worth. The cause is
+  the toolkit's measuring of text, not Fonts': `ui_changed` keys each
+  text op by what it shows (`ui_op_key`, its `ui_ellipsized`), old and
+  new, so the page's twelve lines, eleven of them wider than the window,
+  were ellipsized 24 times a step, and `ui_fitting_before` measured the
+  whole start again for each character it added, the square of 95
+  characters a line; and each character's measure looked its face up by
+  `ui_font_metric`, which made the list `split_spaces "code code-bold
+  sans sans-bold"` and searched it, twice a character (advance and
+  kerning). The layout's 53 ms was the same measure, by `ui_measure`,
+  of every text, at each box above it. On the host the page's
+  `ui_changed` took 27 ms and its layout 4.4.
+  Fixed in the toolkit (`paint.l0`), so every app has it: the face is
+  found from the font itself (`ui_font_metric` matches `UiMono`,
+  `UiSans`, or a `UiFontAt`'s name against each literal), once a string
+  (`ui_units_m`, `ui_char_units_m`, `ui_prefix_units_m`, `ui_metric_adv`,
+  `ui_metric_kern`), and the fitting adds each character's advance and
+  kerning once (`ui_fit_walk`), its result the same as measuring each
+  start whole (`paint_test.l0`'s `test_fitting_agrees`, 300 seeded
+  strings, faces and widths, and `test_fitting_codes`). After: a move's
+  step is 6.5 ms on QEMU (layout 2.5, `ui_changed` 3.5), the queue at
+  most 5, and the button lit in the first screendump taken after the
+  burst; on the host the page's layout and diff are 0.1 and 0.2 ms.
+  Nothing was Fonts' own: its view is small and asks nothing. What is
+  left for the later steps is the layout and diff done again for every
+  move (step 4) and the moves not put together (step 3).
