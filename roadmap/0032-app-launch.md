@@ -55,7 +55,7 @@ running, if one is.
   argument length-prefixed so a path may hold spaces; the answer,
   `shown ID`; the name of an app's port, `app.` and its `exec`. Read
   and written in place, with host tests, refusals included.
-- [ ] The toolkit's side: a `UiApp` (0021) registers `app.EXEC` on its
+- [x] The toolkit's side: a `UiApp` (0021) registers `app.EXEC` on its
   port, and gives the app an `open` as the action `app.open` with its
   arguments, through `ui_app_event` as any other. An app that does not
   take it answers `shown 0`, so every app comes forward and none opens
@@ -116,3 +116,22 @@ running, if one is.
   arguments are made a list each, once, as they are text (paths). The
   answer is `shown ID` (`app_shown`, `app_shown_of`), text, as wm's
   protocol is.
+- 2026-10-28: step 2. `ui_app_start` registers `app.EXEC` on the app's
+  port, EXEC the file name of `proc_path (l0s_pid)`, so every toolkit
+  program, `ui_open`'s too, has its name with no code of its own; a
+  second of a program, from `run`, finds it taken and goes without. The
+  open is a new event, `UiOpen REPLY ARGS`, read by one
+  `ui_message_event` (exit, open, or `UiOther`) that `ui_event_of` and
+  `ui_app_event` share, so it comes the same way from the compositor,
+  which sends it, or from anyone. The default is GApplication's: routing
+  it sets off `app.open` and answers `shown 0` at once, in
+  `ui_app_route` (id -1) and in `ui_route` for a program of one window,
+  so About, Disks, Fonts, System Monitor and the gallery need nothing.
+  `UiApp` gained a last field, whether the app answers its opens itself
+  (`ui_app_opening`), then with `ui_app_shown`; the default needs no
+  state held across a step, unlike the close's, as the answer is sent as
+  the open is routed. Every answer is a `port_tell`, so 0033's loop can
+  send it without waiting. Terminal (`vt`) registers `app.vt` through
+  `ui_open_csd`, but its own loop drops a notice from the compositor
+  that names no window of its (`from_wm`), so it never answers an open:
+  see step 5.

@@ -22,8 +22,15 @@
 ;
 ; The loop's messages are taken in one place, "the loop" below:
 ; ui_app_next waits for the next and ui_app_event says what it is and of
-; which window. What an app is asked by others (an open, roadmap 0032)
-; and events put together before a step (roadmap 0033) are added there.
+; which window. Events put together before a step (roadmap 0033) are
+; added there.
+;
+; The app's port is registered as its name, app.EXEC (appopen.l0), and a
+; launch of it while it runs comes as an open, an event of no window,
+; UiAppEvent -1 (UiOpen REPLY ARGS); ui_app_route sets off app.open for
+; it and answers shown 0, so the app's front window comes forward. An app
+; that opens something for it says so once, ui_app_opening, and answers
+; each itself, ui_app_shown, with the window to bring forward.
 ;
 ; Every window takes a region of the 64 a process may have open (its
 ; buffer), and a resize one more for a moment; the face's strikes one
@@ -33,9 +40,10 @@
 ; ------------------------------------------------------------------ model
 
 ; An app: the compositor, the port its windows' events come to, the face
-; they are painted with, as the window presented last left it, and its
-; windows by id.
-(data UiApp (UiApp Compositor int UiFace (Map int UiWin)))
+; they are painted with, as the window presented last left it, its
+; windows by id, and whether it answers an open itself (ui_app_opening),
+; or the toolkit answers it shown 0 as it routes it.
+(data UiApp (UiApp Compositor int UiFace (Map int UiWin) bool))
 
 ; An app started, or why not.
 (data UiAppStarted (UiAppStarted UiApp) (UiAppFailed (list int)))
@@ -53,8 +61,9 @@
 (data UiAppRouted (UiAppRouted UiApp (list int)))
 
 ; An app with no window yet: the compositor found, its face loaded at the
-; desktop's scale, and a port made for its windows' events; or why not,
-; as there is no compositor, or no font to draw text with.
+; desktop's scale, and a port made for its windows' events, registered
+; as the app's name (ui_app_named); or why not, as there is no
+; compositor, or no font to draw text with.
 (def ui_app_start () UiAppStarted
   (match (compositor_open)
     ((NoCompositor why) (UiAppFailed why))
@@ -62,33 +71,56 @@
       (let face (ui_face_load s)
         (if (not (ui_face_has_text face))
             (UiAppFailed "no font")
-            (UiAppStarted (UiApp (Compositor cport rp pid s) (port_new) face ((MapEmpty int UiWin)))))))))
+            (let port (port_new)
+              (let n (ui_app_named port)
+                (UiAppStarted (UiApp (Compositor cport rp pid s) port face ((MapEmpty int UiWin)) false)))))))))
+
+; port registered as the app's name, app.EXEC (appopen.l0), EXEC the
+; file name of this process's program, so that a launch of the app finds
+; it running and asks it to open (wm's launch) rather than starting it
+; again. A second of the same program, started by run, finds the name
+; taken, and goes without: 0 either way.
+(def ui_app_named ((port int)) int
+  (let path (proc_path (l0s_pid))
+    (if (is_empty path) 0 (let r (name_register port (app_port_name path)) 0))))
+
+; The app, answering each open itself, with ui_app_shown, once its
+; action, app.open, is set off: as Files opens a window for one. An app
+; that does not say so has every open answered shown 0 as it is routed,
+; its front window brought forward and nothing more opened.
+(def ui_app_opening ((a UiApp)) UiApp
+  (match a ((UiApp c port f ws o) (UiApp c port f ws true))))
+
+; The open ev answered: window id to bring forward, 0 for the app's front
+; one; told, never waited on.
+(def ui_app_shown ((a UiApp) (ev UiEvent) (id int)) UiApp
+  (let t (ui_open_answer ev id) a))
 
 ; The port the app's windows' events come to, and the compositor.
-(def ui_app_port ((a UiApp)) int (match a ((UiApp c port f ws) port)))
-(def ui_app_compositor ((a UiApp)) Compositor (match a ((UiApp c port f ws) c)))
+(def ui_app_port ((a UiApp)) int (match a ((UiApp c port f ws o) port)))
+(def ui_app_compositor ((a UiApp)) Compositor (match a ((UiApp c port f ws o) c)))
 
 ; The scale its windows are painted at, its face's: what a program loads
 ; its full-color icons at (face.l0's ui_images_load).
-(def ui_app_scale ((a UiApp)) int (match a ((UiApp c port f ws) (ui_face_scale f))))
+(def ui_app_scale ((a UiApp)) int (match a ((UiApp c port f ws o) (ui_face_scale f))))
 
 ; How many windows the app has open, and their ids, in order.
-(def ui_app_count ((a UiApp)) int (match a ((UiApp c port f ws) (map_size ws))))
-(def ui_app_ids ((a UiApp)) (list int) (match a ((UiApp c port f ws) (sort (map_keys ws)))))
+(def ui_app_count ((a UiApp)) int (match a ((UiApp c port f ws o) (map_size ws))))
+(def ui_app_ids ((a UiApp)) (list int) (match a ((UiApp c port f ws o) (sort (map_keys ws)))))
 
 ; Window id of the app, if it is open.
-(def ui_app_win ((a UiApp) (id int)) (Option UiWin) (match a ((UiApp c port f ws) (map_get ws id))))
+(def ui_app_win ((a UiApp) (id int)) (Option UiWin) (match a ((UiApp c port f ws o) (map_get ws id))))
 
 ; The app with w put back by its id, the app's face kept: what a program
 ; does with a window it took out with ui_app_win and routed or changed
 ; itself.
 (def ui_app_put ((a UiApp) (w UiWin)) UiApp
-  (match a ((UiApp c port f ws) (UiApp c port f (map_put ws (ui_win_id w) w)))))
+  (match a ((UiApp c port f ws o) (UiApp c port f (map_put ws (ui_win_id w) w) o))))
 
 ; The same, w just presented with the app's face: its face, which holds
 ; any strike that presenting asked for, the app's from now on.
 (def ui_app_put_faced ((a UiApp) (w UiWin)) UiApp
-  (match a ((UiApp c port f ws) (UiApp c port (ui_win_face w) (map_put ws (ui_win_id w) w)))))
+  (match a ((UiApp c port f ws o) (UiApp c port (ui_win_face w) (map_put ws (ui_win_id w) w) o))))
 
 ; ---------------------------------------------------------------- windows
 
@@ -103,7 +135,7 @@
 ; A window opened, decorated by its client if csd.
 (def ui_app_open_as ((a UiApp) (title (list int)) (w int) (h int) (csd bool)) UiAppOpened
   (match a
-    ((UiApp c port f ws)
+    ((UiApp c port f ws o)
       (let used (ui_app_regions a)
         (if (not (ui_regions_room used))
             (UiAppRefused a (ui_regions_full_why used))
@@ -115,10 +147,10 @@
 ; it was if it has no such window.
 (def ui_app_close ((a UiApp) (id int)) UiApp
   (match a
-    ((UiApp c port f ws)
+    ((UiApp c port f ws o)
       (match (map_get ws id)
         ((None) a)
-        ((Some w) (let x (ui_close w) (UiApp c port f (map_remove ws id))))))))
+        ((Some w) (let x (ui_close w) (UiApp c port f (map_remove ws id) o)))))))
 
 ; The app ended by the compositor, as the toolkit ends one that did
 ; nothing with the close of its last window (window.l0's
@@ -138,7 +170,7 @@
 ; buffer; and one more, for the buffer a resize makes before it gives up
 ; the old.
 (def ui_app_regions ((a UiApp)) int
-  (match a ((UiApp c port f ws) (add (ui_face_regions f) (add (map_size ws) 1)))))
+  (match a ((UiApp c port f ws o) (add (ui_face_regions f) (add (map_size ws) 1)))))
 
 ; How many of face f's strikes are regions.
 (def ui_face_regions ((f UiFace)) int
@@ -168,17 +200,12 @@
 
 ; What a message m to the app's port is: of the window the compositor's
 ; window notice names (window.l0's ui_event_of of it), if it is the
-; app's; else of none, -1: an exit, or anything else as UiOther.
+; app's; else of none, -1: an exit, an open (the app launched again), or
+; anything else as UiOther (window.l0's ui_message_event).
 (def ui_app_event ((a UiApp) (m Message)) UiAppEvent
   (match (ui_app_window_of a m)
     ((Some w) (UiAppEvent (ui_win_id w) (ui_event_of w m)))
-    ((None)
-      (match m
-        ((RecvFailed) (UiAppEvent -1 (UiOther -1 "")))
-        ((Message from b)
-          (match (exit_of m)
-            ((Exited pid status) (UiAppEvent -1 (UiExit pid status)))
-            ((NotExit) (UiAppEvent -1 (UiOther from (msg_text b))))))))))
+    ((None) (UiAppEvent -1 (ui_message_event m)))))
 
 ; Whether e says the app's port is gone, as a receive that failed gives:
 ; the loop has nothing more to wait for.
@@ -187,7 +214,8 @@
     ((UiAppEvent id ev)
       (if (lt id 0) (match ev ((UiOther from p) (lt from 0)) ((UiKey k) false) ((UiPress x y b) false) ((UiRelease x y b) false)
                               ((UiMotion x y b) false) ((UiContext x y b) false) ((UiLeave) false) ((UiFocus f) false)
-                              ((UiScroll x y dx dy) false) ((UiResize w h) false) ((UiCloseAsked) false) ((UiExit p s) false))
+                              ((UiScroll x y dx dy) false) ((UiResize w h) false) ((UiCloseAsked) false) ((UiExit p s) false)
+                              ((UiOpen r args) false))
           false))))
 
 ; The app's window m, a window notice from the compositor, is of, if it
@@ -204,10 +232,23 @@
 
 ; Window id's event ev routed, as window.l0's ui_route does, the window
 ; put back: the app, and the action set off, "" for none or no window.
+; An open, of no window, sets off app.open (ui_open_action), its
+; arguments ui_open_args's, and is answered shown 0 here unless the app
+; answers opens itself (ui_app_opening).
 (def ui_app_route ((a UiApp) (id int) (ev UiEvent)) UiAppRouted
-  (match (ui_app_win a id)
-    ((None) (UiAppRouted a ""))
-    ((Some w) (match (ui_route w ev) ((UiRouted w2 action) (UiAppRouted (ui_app_put a w2) action))))))
+  (if (ge (ui_open_reply ev) 0)
+      (UiAppRouted (ui_app_open_routed a ev) (ui_open_action))
+      (match (ui_app_win a id)
+        ((None) (UiAppRouted a ""))
+        ((Some w) (match (ui_route w ev) ((UiRouted w2 action) (UiAppRouted (ui_app_put a w2) action)))))))
+
+; The app after an open, ev, is routed: answered shown 0, unless the app
+; answers its opens itself.
+(def ui_app_open_routed ((a UiApp) (ev UiEvent)) UiApp
+  (match a ((UiApp c port f ws o) (if o a (ui_app_shown a ev 0)))))
+
+; Whether the app answers its opens itself.
+(def ui_app_answers_opens ((a UiApp)) bool (match a ((UiApp c port f ws o) o)))
 
 ; Window id showing widget, as window.l0's ui_present paints it, with the
 ; app's face, which it keeps any strike it is given in, so the next
@@ -221,4 +262,4 @@
       (if (ui_win_close_asked w)
           (let a2 (ui_app_close a id)
             (if (eq (ui_app_count a2) 0) (let e (ui_app_end a2) a2) a2))
-          (match a ((UiApp c port f ws) (ui_app_put_faced a (ui_present (ui_win_faced w f) widget))))))))
+          (match a ((UiApp c port f ws o) (ui_app_put_faced a (ui_present (ui_win_faced w f) widget))))))))

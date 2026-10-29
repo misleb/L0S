@@ -247,7 +247,7 @@ SHA256  := user/lib/format/sha256.l0
 UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/metrics.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
              user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0
-UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0
+UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0 $(APPOPEN)
 UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
