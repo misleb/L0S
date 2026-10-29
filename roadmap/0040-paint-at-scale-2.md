@@ -27,3 +27,6 @@ icons at scale 2, from the `slow step` lines and a timing of each.
 ## Log
 
 - 2026-10-29: written from 0006's board run at 4K.
+- 2026-10-29: after 0038's step 3 took out the 1.2 s stall, the user
+  at 4K: moving windows and widgets responsive, resizing and scrolling
+  large views still a little choppy.

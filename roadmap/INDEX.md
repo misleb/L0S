@@ -41,7 +41,7 @@ move independently, so several can be active at once.
 | [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | idea | – | 0033 | programs.md, toolkit.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
-| [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 2/6 | – | display.md, kernel.md |
+| [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 3/6 | – | display.md, kernel.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
 | [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | idea | – | – | network.md, programs.md |
@@ -56,9 +56,9 @@ move independently, so several can be active at once.
 
 ## Ready
 
-- [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K, active: its stall
-  is System Monitor's refresh, the kernel walking every process's pages
-  for `mem_info` and `proc_info`; step 3 counts them as they are mapped.
+- [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K, active: the 1.2 s
+  stall is gone, the kernel counting pages as they are mapped; step 4
+  is the driver late over a resize, timed and taken out of the frame.
 
 ## Dependencies
 

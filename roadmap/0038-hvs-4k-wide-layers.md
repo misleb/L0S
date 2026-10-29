@@ -49,11 +49,13 @@ clean at 1920×1080:
   planes, the 1.2 s rhythm 0038's Log found). The fix's steps are
   written from that. (Log: System Monitor's refresh, the kernel
   counting every process's pages.)
-- [ ] The kernel counts a process's own and shared pages as they are
+- [x] The kernel counts a process's own and shared pages as they are
   mapped and unmapped, so `proc_info` and `mem_info` answer without
   walking every page of every process; timed on the board before and
   after, with System Monitor open at 4K, by 0005's gap line and `hvs
   watch`. `make test-virt` with tests of the counts against a walk.
+  (Log: System Monitor's read from 71 ms to 4.4 ms, and no frame over
+  25 ms.)
 - [ ] The driver late: a resize's buffer mapped and synced, and any
   other step `hvs` takes over a frame, timed and taken out of the
   frame's way.
@@ -104,3 +106,19 @@ clean at 1920×1080:
   `dmesg`'s 64 KiB written to the UART at 115200 baud held `hvs` from
   its ends of frame for 350 to 770 ms at a time, so a stall is timed
   with no `dmesg` running.
+- 2026-10-29: step 3. Each process's pages are kept as `Pages`
+  (`memory.l0`), the map and how many of them are at its device pages,
+  counted as each is put and removed; its shared image pages are
+  counted from the image segments it shares (`mem_image_pages`), not
+  from its pages. A first version read the map again after putting to
+  it, so every put copied the whole map (an L0 map is changed in place
+  only when nothing else holds it): the Pi was unusable and
+  `test_frames_run_out` did not end in an hour. Counted before the put,
+  that test takes 14 s, as before. On the Pi 5 at 3840×2160, scale 2,
+  with Files, Fonts, Disks, System Monitor and Terminal open, System
+  Monitor's read each second (its `proc_info` rows, then `mem_info`)
+  went from 71 and 35 ms to 4.4 and 1.3 ms; `hvs watch 30` at rest:
+  1800 frames, none over 25 ms, the longest 16.6 ms, where the 1.19 s
+  gap of about 101 ms was before. The user: moving windows and widgets
+  responsive; resizing and scrolling large views still a little choppy,
+  which steps 4 and 5 and goals 0039 and 0040 are for.

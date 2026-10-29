@@ -46,6 +46,47 @@
 (def in_device_area ((va int)) bool
   (if (ge va (stack_top)) (lt va (user_limit)) false))
 
+; A process's pages: the frame each page of it maps, and how many of
+; them are at its device pages, counted as pages are put and removed, so
+; that its shared pages are counted without walking them all; at 4K a
+; process maps tens of thousands, and walking them for proc_info and
+; mem_info held every CPU's calls for 100 ms (roadmap 0038).
+(data Pages (Pages (Map int int) int))
+
+; No pages.
+(def pages_new () Pages (Pages ((MapEmpty int int)) 0))
+
+; The pages of map m, its device pages counted once.
+(def pages_from_map ((m (Map int int))) Pages (Pages m (device_keys (map_keys m) 0)))
+
+; n and how many of vas are at device pages.
+(def device_keys ((vas (list int)) (n int)) int
+  (if (is_empty vas) n (device_keys (tail vas) (if (in_device_area (head vas)) (add n 1) n))))
+
+; The page -> frame map of ps, and how many of them are at device pages.
+(def pages_map ((ps Pages)) (Map int int) (match ps ((Pages m n) m)))
+(def pages_device ((ps Pages)) int (match ps ((Pages m n) n)))
+
+; The frame ps has at page va, if any, and whether it has one.
+(def pages_get ((ps Pages) (va int)) (Option int) (map_get (pages_map ps) va))
+(def pages_has ((ps Pages) (va int)) bool (map_has (pages_map ps) va))
+
+; ps with frame f at page va, in place of any it had there. The count is
+; taken before the put, so the put is the map's last use and changes it in
+; place rather than copying it whole.
+(def pages_put ((ps Pages) (va int) (f int)) Pages
+  (match ps
+    ((Pages m n)
+      (let n2 (if (map_has m va) n (if (in_device_area va) (add n 1) n))
+        (Pages (map_put m va f) n2)))))
+
+; ps without page va, the count taken first as pages_put's is.
+(def pages_remove ((ps Pages) (va int)) Pages
+  (match ps
+    ((Pages m n)
+      (let n2 (if (map_has m va) (if (in_device_area va) (sub n 1) n) n)
+        (Pages (map_remove m va) n2)))))
+
 ; The address of the page holding va: va rounded down to a page.
 (def page_of ((va int)) int
   (bit_and va (bit_xor (sub (page_size) 1) -1)))
@@ -350,6 +391,36 @@
 ; How many mappings of frame f m counts, 0 for a frame it does not know.
 (def mem_count ((m Mem) (f int)) int
   (match m ((Mem counts imgs wins) (match (map_get counts f) ((Some n) n) ((None) 0)))))
+
+; How many of pages, a process's in space s, are of an image segment s
+; shares, outside its device pages, and frames m counts: the only shared
+; pages a process has but its device pages, as only those and image
+; segments' frames are counted.
+(def mem_image_pages ((m Mem) (s int) (pages (Map int int))) int
+  (match m ((Mem counts imgs wins) (seg_lists_pages (map_values imgs) s pages m 0))))
+
+; n and the pages of space s's segments among lists, as mem_image_pages.
+(def seg_lists_pages ((lists (list (list ImageSeg))) (s int) (pages (Map int int)) (m Mem) (n int)) int
+  (if (is_empty lists) n (seg_lists_pages (tail lists) s pages m (segs_pages (head lists) s pages m n))))
+
+; n and the pages of those of segs space s shares.
+(def segs_pages ((segs (list ImageSeg)) (s int) (pages (Map int int)) (m Mem) (n int)) int
+  (if (is_empty segs)
+      n
+      (segs_pages (tail segs) s pages m
+        (match (head segs)
+          ((ImageSeg va len perm fs ss)
+            (if (any_eq s ss) (seg_pages_from pages m (page_of va) (add va len) n) n))))))
+
+; n and how many pages from page va up to end pages maps, outside the
+; device pages, to a frame m counts.
+(def seg_pages_from ((pages (Map int int)) (m Mem) (va int) (end int) (n int)) int
+  (if (ge va end)
+      n
+      (seg_pages_from pages m (add va (page_size)) end
+        (if (in_device_area va)
+            n
+            (match (map_get pages va) ((Some f) (if (gt (mem_count m f) 0) (add n 1) n)) ((None) n))))))
 
 ; m with one more mapping of f at a live process's device pages, or of
 ; an image segment's.
