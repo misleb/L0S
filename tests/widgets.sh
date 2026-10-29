@@ -46,14 +46,14 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - widgets: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
@@ -62,43 +62,61 @@ at() {
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
+# A click at x, y: there, pressed, let go. What it does is waited for
+# by what checks it, not here.
+click() {
+  events "$(at $1 $2)"; sleep 0.1
+  events "$(button true)"; sleep 0.1
+  events "$(button false)"
+}
+
+# What run windows lists, from the serial line, in $got: typed, and
+# read up to the shell's next prompt, waited for up to 5 s.
+listed() {
+  local from end=$((SECONDS + 5))
+  from=$(($(wc -c < "$out") + 1))
+  printf 'run windows\n' >&3
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+  got=$(tail -c +$from "$out")
+}
+
 # Where the gallery's window is, as run windows lists it: w_x, w_y.
+# Waits up to 30 s for it to be listed.
 window() {
-  local try from line
-  for try in $(seq 1 30); do
-    from=$(($(wc -c < "$out") + 1))
-    printf 'run windows\n' >&3
-    sleep 1
-    line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Widgets ' | head -1)
+  local line end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    listed
+    line=$(printf '%s\n' "$got" | grep -aE '^[0-9]+ Widgets ' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y _ _ _ <<< "$line"
       return 0
     fi
+    sleep 0.2
   done
   fail "run windows never listed the gallery's window; it showed:"
 }
 
 # The buffer the gallery's window shows and the frames its client has
-# been told, as run windows lists them: w_buf, w_frames.
+# been told, as run windows lists them: w_buf, w_frames. Waits up to 30 s
+# for them to be listed.
 paced() {
-  local try from line
-  for try in $(seq 1 30); do
-    from=$(($(wc -c < "$out") + 1))
-    printf 'run windows\n' >&3
-    sleep 1
-    line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Widgets .* buffer [0-9]+ frames [0-9]+' | head -1)
+  local line end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    listed
+    line=$(printf '%s\n' "$got" | grep -aE '^[0-9]+ Widgets .* buffer [0-9]+ frames [0-9]+' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ _ _ _ _ _ _ _ w_buf _ w_frames _ <<< "$line"
       return 0
     fi
+    sleep 0.2
   done
   fail "run windows never listed the gallery's buffer and frames; it showed:"
 }
@@ -109,8 +127,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -122,7 +140,7 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - widgets: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - widgets: $name: got$got, wanted $*"
   exit 1
@@ -174,9 +192,7 @@ echo "ok - widgets: the toolbar's line is proportional: its i 2 wide, its m 10"
 
 # The second row, pid 2, its Name column past its text.
 rx=$((cx + 240)); ry=$((cy + 79 + 30 + 15))
-events "$(at $rx $ry)"; sleep 1
-events "$(button true)"; sleep 1
-events "$(button false)"; sleep 1
+click $rx $ry
 shows "a click selected the second row, and End Process woke" \
   "$rx $((cy + 79 + 30 + 1)) $selected" "$((cx + 550)) $((cy + 22)) $red"
 
@@ -221,17 +237,13 @@ shows "Esc took the focus away" "$((cx + 6)) $((cy + 22)) $ground"
 tab_on="69 69 69"; tab_hover="75 75 75"
 ty=$((cy + 420))
 shows "the tab bar, its first tab raised" "$((cx + 14)) $ty $tab_on" "$((cx + 224)) $ty $headerbar" "$((cx + 434)) $ty $headerbar"
-events "$(at $((cx + 500)) $ty)"; sleep 1
-events "$(button true)"; sleep 1
-events "$(button false)"; sleep 1
+click $((cx + 500)) $ty
 shows "a click raised the third tab" "$((cx + 14)) $ty $headerbar" "$((cx + 434)) $ty $tab_hover"
 # The second's close button, 24 square, 5 in from its end: 216 + 207 -
 # 29 = 394 to 418. The two left share the bar, 312 each, from 6 and 321,
 # the third still raised; the pointer then taken off the bar.
-events "$(at $((cx + 406)) $ty)"; sleep 1
-events "$(button true)"; sleep 1
-events "$(button false)"; sleep 1
-events "$(at $((cx + 300)) $((cy + 200)))"; sleep 1
+click $((cx + 406)) $ty; sleep 0.1
+events "$(at $((cx + 300)) $((cy + 200)))"
 shows "the second tab closed, the third raised" "$((cx + 329)) $ty $tab_on" "$((cx + 14)) $ty $headerbar" "$((cx + 316)) $ty $headerbar"
 
 # The title bar's close button, 24 square, 6 in from the window's right,
@@ -239,17 +251,14 @@ shows "the second tab closed, the third raised" "$((cx + 329)) $ty $tab_on" "$((
 # the gallery to close with the close notice; the gallery does nothing
 # with win.close, so the toolkit closes its window and has wm end it:
 # run windows lists no gallery.
-events "$(at $((w_x + 626)) $((w_y + 22)))"; sleep 0.3
-events "$(button true)"; sleep 0.3
-events "$(button false)"
-for try in $(seq 1 30); do
-  from=$(($(wc -c < "$out") + 1))
-  printf 'run windows\n' >&3
-  sleep 1
-  got=$(tail -c +$from "$out")
+click $((w_x + 626)) $((w_y + 22))
+end=$((SECONDS + 30))
+until [ $SECONDS -ge $end ]; do
+  listed
   if printf '%s\n' "$got" | grep -aq '^pointer ' && ! printf '%s\n' "$got" | grep -aqE '^[0-9]+ Widgets '; then
     echo "ok - widgets: the close button closed the gallery"
     exit 0
   fi
+  sleep 0.2
 done
 fail "the close button left the gallery open; it showed:"

@@ -55,78 +55,109 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - files: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # Each key named typed, as the monitor's sendkey names them.
-keys() { local k; for k in "$@"; do monitor "sendkey $k"; sleep 0.3; done; }
+keys() { local k; for k in "$@"; do monitor "sendkey $k"; sleep 0.1; done; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
   echo "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$(axis "$1" 1280)}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$(axis "$2" 800)}}"
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"${2:-left}\"}}"; }
+# A click at x, y, of the left button or the one named. What it does is
+# waited for by what checks it, not here.
 click() {
-  events "$(at "$1" "$2")"; sleep 1
-  events "$(button true "${3:-left}")"; sleep 1
-  events "$(button false "${3:-left}")"; sleep 1
+  events "$(at "$1" "$2")"; sleep 0.1
+  events "$(button true "${3:-left}")"; sleep 0.1
+  events "$(button false "${3:-left}")"
 }
 
 # A double click at x, y: two clicks well within 400 ms, each press and
-# release its own input-send-event, so its own report, but all four on
-# one connection, since each nc may take up to its second to end.
+# release its own input-send-event, so its own report, all four on one
+# connection.
 dbl() {
   local b
-  events "$(at "$1" "$2")"; sleep 1
+  events "$(at "$1" "$2")"; sleep 0.1
   {
     printf '{"execute":"qmp_capabilities"}\n'
     for b in true false true false; do
       printf '{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$(button $b)"
     done
-  } | nc -U -w 1 "$qmp" > /dev/null 2>&1
-  sleep 1
+  } | tools/qsock "$qmp" > /dev/null 2>&1
 }
 
 # A drag of the left button from x, y by dx, dy, in four steps.
 drag() {
   local i
-  events "$(at "$1" "$2")"; sleep 1
-  events "$(button true)"; sleep 1
+  events "$(at "$1" "$2")"; sleep 0.2
+  events "$(button true)"; sleep 0.2
   for i in 1 2 3 4; do
-    events "$(at $(($1 + $3 * i / 4)) $(($2 + $4 * i / 4)))"; sleep 0.5
+    events "$(at $(($1 + $3 * i / 4)) $(($2 + $4 * i / 4)))"; sleep 0.2
   done
-  events "$(button false)"; sleep 1
+  events "$(button false)"
 }
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
+# What the serial shell prints for a command, up to its next prompt,
+# waited for up to 5 s, so that no answer comes late into the next's.
+said() {
+  local from end=$((SECONDS + 5))
+  from=$(($(wc -c < "$out") + 1))
+  printf '%s\n' "$1" >&3
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+  tail -c +$from "$out"
+}
+
 # Where Files's window is, as run windows lists it: w_x, w_y, and its
-# size, w_w, w_h; or none, w_x empty, if it is not there.
+# size, w_w, w_h; or none, w_x empty, if it is not there. Asks for up
+# to 30 s until it is.
 window() {
-  local try from line
+  local line end=$((SECONDS + 30))
   w_x=""
-  for try in $(seq 1 ${1:-30}); do
-    from=$(($(wc -c < "$out") + 1))
-    printf 'run windows\n' >&3
-    sleep 1
-    line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Files ' | head -1)
+  until [ $SECONDS -ge $end ]; do
+    line=$(said 'run windows' | sed 's/^l0s> //' | grep -aE '^[0-9]+ Files ' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y w_w w_h _ <<< "$line"
       return 0
     fi
+    sleep 0.2
+  done
+  return 1
+}
+
+# Waits up to 30 s for Files's window to be at "X Y", or at and as big
+# as "X Y W H".
+window_at() {
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    window && { [ "$w_x $w_y $w_w $w_h" = "$1" ] || [ "$w_x $w_y" = "$1" ]; } && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Waits up to 10 s for run windows to list no Files window.
+no_window() {
+  local end=$((SECONDS + 10))
+  until [ $SECONDS -ge $end ]; do
+    said 'run windows' | grep -aqE '^(l0s> )?[0-9]+ Files ' || return 0
+    sleep 0.2
   done
   return 1
 }
@@ -137,8 +168,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -150,26 +181,48 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - files: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - files: $name: got$got, wanted $*"
   exit 1
 }
 
-# What the serial shell prints for a command.
-said() {
-  local from
-  from=$(($(wc -c < "$out") + 1))
-  printf '%s\n' "$1" >&3
-  sleep 2
-  tail -c +$from "$out"
+# Pixel x, y of the screen as it is now, in $seen.
+look() { rm -f "$dump"; monitor "screendump $dump"; seen=$(pixel "$1" "$2"); }
+
+# Waits up to 30 s for pixel x, y to be other than R G B: something,
+# such as a menu or a dialog, drawn over it.
+leaves() {
+  local name=$1 px py r g b end=$((SECONDS + 30))
+  read -r px py r g b <<< "$2"
+  until [ $SECONDS -ge $end ]; do
+    look $px $py
+    [ -n "$seen" ] && [ "$seen" != "$r $g $b" ] && return 0
+    sleep 0.2
+  done
+  fail "$name: ($px,$py) stayed $r $g $b; it showed:"
 }
+
+# A click at x, y that opens a menu, then, once the menu shows at ix,
+# iy, a click on its item there.
+menu() {
+  look "$3" "$4"
+  local was=$seen
+  click "$1" "$2" "${5:-left}"
+  leaves "a menu at $1, $2" "$3 $4 $was"
+  click "$3" "$4"
+}
+
+# Waits up to 30 s for a dialog over the window at cx, cy: its header
+# bar dimmed beneath it.
+dialog() { leaves "a dialog" "$((cx + 100)) $((cy + 3)) $header"; }
 
 # Waits up to 20 s for a command's output to hold a line like $2.
 said_holds() {
-  local try
-  for try in $(seq 1 10); do
+  local end=$((SECONDS + 20))
+  until [ $SECONDS -ge $end ]; do
     said "$1" | grep -qE "$2" && return 0
+    sleep 0.2
   done
   return 1
 }
@@ -216,26 +269,18 @@ keys esc
 shows "Esc went back to the tiles" "$((cx + 600)) $((cy + 77)) $view"
 
 drag $((cx + 350)) $((cy + 20)) 100 80
-window || fail "run windows lost Files's window; it showed:"
-[ "$w_x" = $((cx + 100)) ] && [ "$w_y" = $((cy + 80)) ] || fail "the drag left the window at $w_x, $w_y, not $((cx + 100)), $((cy + 80)); it showed:"
+window_at "$((cx + 100)) $((cy + 80))" || fail "the drag left the window at $w_x, $w_y, not $((cx + 100)), $((cy + 80)); it showed:"
 echo "ok - files: its header bar dragged the window"
 cx=$w_x; cy=$w_y; cw=$w_w; ch=$w_h
 
 # A double click on the header bar's ground maximizes the window: all of
 # the screen under the top bar, 1280 by 768 from 0, 32. Another, where
 # the ground is then, restores its place and size.
-max_at() {
-  local try
-  for try in $(seq 1 15); do
-    window 5 && [ "$w_x $w_y $w_w $w_h" = "$1" ] && return 0
-  done
-  return 1
-}
 dbl $((cx + 350)) $((cy + 20))
-max_at "0 32 1280 768" || fail "a double click on the header bar left the window at $w_x, $w_y, $w_w by $w_h, not maximized; it showed:"
+window_at "0 32 1280 768" || fail "a double click on the header bar left the window at $w_x, $w_y, $w_w by $w_h, not maximized; it showed:"
 echo "ok - files: a double click on its header bar maximized it"
 dbl 350 52
-max_at "$cx $cy $cw $ch" || fail "a second double click left the window at $w_x, $w_y, $w_w by $w_h, not $cx, $cy, $cw by $ch; it showed:"
+window_at "$cx $cy $cw $ch" || fail "a second double click left the window at $w_x, $w_y, $w_w by $w_h, not $cx, $cy, $cw by $ch; it showed:"
 echo "ok - files: another restored it"
 
 # A press inside the window's edge, 3 deep, which the client asks wm to
@@ -245,13 +290,13 @@ echo "ok - files: another restored it"
 # left side and makes it 40 taller; and its bottom, 2 up, 40 up, puts its
 # height back. None of these is in the border outside, which is wm's.
 drag $((cx + cw - 2)) $((cy + 300)) 60 0
-max_at "$cx $cy $((cw + 60)) $ch" || fail "a drag inside the right edge left the window at $w_x, $w_y, $w_w by $w_h, not $cx, $cy, $((cw + 60)) by $ch; it showed:"
+window_at "$cx $cy $((cw + 60)) $ch" || fail "a drag inside the right edge left the window at $w_x, $w_y, $w_w by $w_h, not $cx, $cy, $((cw + 60)) by $ch; it showed:"
 echo "ok - files: a drag inside its right edge widened it"
 drag $((cx + 2)) $((cy + ch - 15)) 60 40
-max_at "$((cx + 60)) $cy $cw $((ch + 40))" || fail "a drag inside the bottom left corner left the window at $w_x, $w_y, $w_w by $w_h, not $((cx + 60)), $cy, $cw by $((ch + 40)); it showed:"
+window_at "$((cx + 60)) $cy $cw $((ch + 40))" || fail "a drag inside the bottom left corner left the window at $w_x, $w_y, $w_w by $w_h, not $((cx + 60)), $cy, $cw by $((ch + 40)); it showed:"
 echo "ok - files: a drag inside its bottom left corner resized it"
 drag $((cx + 360)) $((cy + ch + 38)) 0 -40
-max_at "$((cx + 60)) $cy $cw $ch" || fail "a drag inside the bottom edge left the window at $w_x, $w_y, $w_w by $w_h, not $((cx + 60)), $cy, $cw by $ch; it showed:"
+window_at "$((cx + 60)) $cy $cw $ch" || fail "a drag inside the bottom edge left the window at $w_x, $w_y, $w_w by $w_h, not $((cx + 60)), $cy, $cw by $ch; it showed:"
 echo "ok - files: a drag inside its bottom edge put its height back"
 cx=$((cx + 60))
 
@@ -260,16 +305,16 @@ shows "the list, its header's line" "$((cx + 400)) $((cy + 77)) $line" "$((cx + 
 
 # hello, the list's first row, 78 to 108: its menu from where it was
 # clicked, 6 in: Open, a line, Rename..., Delete.
-click $((cx + 300)) $((cy + 93)) right
-click $((cx + 350)) $((cy + 157))
+menu $((cx + 300)) $((cy + 93)) $((cx + 350)) $((cy + 157)) right
+dialog
 keys backspace backspace backspace backspace backspace g r e e t i n g ret
 said_holds 'ls /Volumes/data' "greeting" || fail "Rename... did not rename hello; it showed:"
 echo "ok - files: Rename... renamed the file"
 
 # The menu button's menu, 160 wide, kept 6 in from the window's right,
 # from 714, under the button, from 43: New Folder... its first row.
-click $((cx + 827)) $((cy + 22))
-click $((cx + 750)) $((cy + 64))
+menu $((cx + 827)) $((cy + 22)) $((cx + 750)) $((cy + 64))
+dialog
 keys d o c s ret
 said_holds 'ls /Volumes/data' "docs" || fail "New Folder... made no folder; it showed:"
 echo "ok - files: New Folder... made a folder"
@@ -278,33 +323,40 @@ echo "ok - files: New Folder... made a folder"
 # Delete, and Enter presses it; the folder, empty, is gone, and
 # greeting stays.
 keys delete
-sleep 1
+dialog
 keys tab tab ret
 said_holds 'ls /Volumes/data' "^  greeting" || fail "greeting went too; it showed:"
 if said 'ls /Volumes/data' | grep -q "docs"; then fail "Delete left the folder; it showed:"; fi
 echo "ok - files: Delete deleted the folder"
 
-# In /Volumes: data's tile, then scratch's, from 382.
+# In /Volumes, still a list: Volumes's row in the sidebar, then
+# scratch's, the list's second, 108 to 138, selected, in the selection's
+# tint once the pointer is off it, before F2.
+row_sel="36 56 80"
 click $((cx + 100)) $((cy + 124))
-click $((cx + 438)) $((cy + 100))
-keys f2 backspace backspace backspace backspace backspace backspace backspace n o t e s ret
+shows "Volumes selected" "$((cx + 200)) $((cy + 124)) $side_sel"
+click $((cx + 438)) $((cy + 123))
+events "$(at $((cx + 100)) $((cy + 400)))"
+shows "scratch's row selected" "$((cx + 600)) $((cy + 123)) $row_sel" "$((cx + 600)) $((cy + 93)) $view"
+keys f2
+dialog
+keys backspace backspace backspace backspace backspace backspace backspace n o t e s ret
 said_holds 'ls /Volumes' "notes" || fail "F2 did not relabel scratch; it showed:"
 echo "ok - files: F2 relabelled a volume"
 
 # Every Files window listed, front first: n_lines of them, f_* the
-# front one's id, place, size and client's pid, b_* the one behind's.
+# front one's id, place, size and client's pid, b_* the one behind's;
+# and if "X Y" is given, the front one there. Asks for up to 30 s.
 files_windows() {
-  local try from lines
-  for try in $(seq 1 30); do
-    from=$(($(wc -c < "$out") + 1))
-    printf 'run windows\n' >&3
-    sleep 1
-    lines=$(tail -c +$from "$out" | sed 's/^l0s> //' | grep -aE '^[0-9]+ Files ')
+  local lines end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    lines=$(said 'run windows' | sed 's/^l0s> //' | grep -aE '^[0-9]+ Files ')
     if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$1" ]; then
       read -r f_id _ f_x f_y _ _ _ f_pid _ <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
       read -r b_id _ b_x b_y _ _ _ b_pid _ <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
-      return 0
+      [ -z "${2:-}" ] || [ "$f_x $f_y" = "$2" ] && return 0
     fi
+    sleep 0.2
   done
   return 1
 }
@@ -314,11 +366,9 @@ files_windows() {
 # New Folder..., opens one more in front, of the same client, at the
 # same place.
 drag $((cx + 350)) $((cy + 20)) $((0 - cx)) $((32 - cy))
-window || fail "run windows lost Files's window; it showed:"
-[ "$w_x $w_y" = "0 32" ] || fail "the drag left the window at $w_x, $w_y, not 0, 32; it showed:"
+window_at "0 32" || fail "the drag left the window at $w_x, $w_y, not 0, 32; it showed:"
 cx=0; cy=32
-click $((cx + 827)) $((cy + 22))
-click $((cx + 750)) $((cy + 94))
+menu $((cx + 827)) $((cy + 22)) $((cx + 750)) $((cy + 94))
 files_windows 2 || fail "New Window did not make two Files windows; it showed:"
 [ "$f_pid" = "$b_pid" ] || fail "the two windows are of pids $f_pid and $b_pid, not one client; it showed:"
 [ "$b_x $b_y" = "0 32" ] || fail "the first window is not behind the new one; it showed:"
@@ -328,8 +378,7 @@ first=$b_id
 # The new one taken to 400, 240, over the first's right and foot: the
 # first's sidebar shows left of it, its close button above it.
 drag $((f_x + 350)) $((f_y + 20)) $((400 - f_x)) $((240 - f_y))
-files_windows 2 || fail "run windows lost a Files window; it showed:"
-[ "$f_x $f_y" = "400 240" ] || fail "the drag left the new window at $f_x, $f_y, not 400, 240; it showed:"
+files_windows 2 "400 240" || fail "the drag left the new window at $f_x, $f_y, not 400, 240; it showed:"
 nx=400; ny=240
 shows "both at /Volumes, its row selected in each" \
   "$((nx + 200)) $((ny + 124)) $side_sel" "$((cx + 200)) $((cy + 124)) $side_sel"
@@ -358,5 +407,5 @@ echo "ok - files: the first's close button closed it, and the new one stayed"
 cx=$nx; cy=$ny
 
 click $((cx + 862)) $((cy + 22))
-if window 5; then fail "the close button left the window; it showed:"; fi
+no_window || fail "the close button left the window; it showed:"
 echo "ok - files: its own close button closed its last window"

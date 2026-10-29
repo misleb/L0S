@@ -47,20 +47,21 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # what NAME showed, and stops at the first that does not.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
-    sleep 1
+  local p ok got="" px py r g b start=$SECONDS end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    sleep 0.2
     [ -S "$sock" ] || continue
     rm -f "$dump"
-    printf 'screendump %s\n' "$dump" | nc -U -w 1 "$sock" > /dev/null 2>&1
-    [ -s "$dump" ] || continue
+    printf 'screendump %s\n' "$dump" | tools/qsock "$sock" > /dev/null 2>&1
+    # Until the driver sets its mode, QEMU's screen is a smaller one.
+    [ -s "$dump" ] && [ "$(wc -c < "$dump")" = $((16 + 1280 * 800 * 3)) ] || continue
     ok=1; got=""
     for p in "$@"; do
       read -r px py r g b <<< "$p"
       got="$got ($px,$py)=$(pixel $px $py)"
       [ "$(pixel $px $py)" = "$r $g $b" ] || ok=0
     done
-    if [ "$ok" = 1 ]; then echo "ok - gpu-screen: $name after ${try}s"; return 0; fi
+    if [ "$ok" = 1 ]; then echo "ok - gpu-screen: $name after $((SECONDS - start))s"; return 0; fi
   done
   echo "not ok - gpu-screen: $name: got$got, wanted $*"
   exit 1

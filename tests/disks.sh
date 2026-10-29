@@ -42,47 +42,59 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - disks: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
   echo "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$(axis "$1" 1280)}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$(axis "$2" 800)}}"
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
+# A click at x, y: there, pressed, let go. What it does is waited for
+# by what checks it, not here.
 click() {
-  events "$(at "$1" "$2")"; sleep 1
-  events "$(button true)"; sleep 1
-  events "$(button false)"; sleep 1
+  events "$(at "$1" "$2")"; sleep 0.1
+  events "$(button true)"; sleep 0.1
+  events "$(button false)"
 }
 
+# Waits up to 30 s for a line like the regex on the serial line.
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
-# Where Disks's window is, as run windows lists it: w_x, w_y.
+# Waits up to 5 s for the shell's prompt on the serial line after byte
+# offset from.
+prompt_after() {
+  local end=$((SECONDS + 5))
+  until [ $SECONDS -ge $end ] || tail -c +$1 "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+}
+
+# Where Disks's window is, as run windows lists it: w_x, w_y. Asks for
+# up to 30 s.
 window() {
-  local try from line
-  for try in $(seq 1 30); do
+  local from line end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     from=$(($(wc -c < "$out") + 1))
     printf 'run windows\n' >&3
-    sleep 1
+    prompt_after $from
     line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Disks ' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y _ _ _ <<< "$line"
       return 0
     fi
+    sleep 0.2
   done
   fail "run windows never listed Disks's window; it showed:"
 }
@@ -93,8 +105,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -106,18 +118,18 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - disks: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - disks: $name: got$got, wanted $*"
   exit 1
 }
 
-# What the serial shell prints for a command.
+# What the serial shell prints for a command, up to its next prompt.
 said() {
   local from
   from=$(($(wc -c < "$out") + 1))
   printf '%s\n' "$1" >&3
-  sleep 2
+  prompt_after $from
   tail -c +$from "$out"
 }
 
@@ -136,6 +148,8 @@ sidebar="46 46 50"; side_sel="67 67 71"; ground="36 36 36"; view="30 30 30"
 accent="53 132 228"; red="224 27 36"; side_dim="32 32 35"
 
 waits_for "^l0s> "
+# The prompt can come before the disk's volumes are mounted.
+waits_for "/Volumes/data mounted"
 said 'write /Volumes/data/hello hi' > /dev/null
 said 'ls /Volumes/data' | grep -q "hello" || fail "the file was not written; it showed:"
 printf 'run disks &\n' >&3

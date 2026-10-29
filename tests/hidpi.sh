@@ -50,16 +50,16 @@ pixel() { od -An -tu1 -j $((17 + ($2 * W + $1) * 3)) -N3 "$dump" | tr -s ' ' | s
 
 dumped() {
   rm -f "$dump"
-  printf 'screendump %s\n' "$dump" | nc -U -w 1 "$sock" > /dev/null 2>&1
+  printf 'screendump %s\n' "$dump" | tools/qsock "$sock" > /dev/null 2>&1
   [ -s "$dump" ]
 }
 
 # Waits up to 30 s for each "X Y R G B" to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
-    sleep 1
+  local p ok got="" px py r g b start=$SECONDS end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    sleep 0.2
     [ -S "$sock" ] || continue
     dumped || continue
     [ "$(head -c 17 "$dump")" = "$(header)" ] || continue
@@ -69,7 +69,7 @@ shows() {
       got="$got ($px,$py)=$(pixel $px $py)"
       [ "$(pixel $px $py)" = "$r $g $b" ] || ok=0
     done
-    if [ "$ok" = 1 ]; then echo "ok - hidpi: $name after ${try}s"; return 0; fi
+    if [ "$ok" = 1 ]; then echo "ok - hidpi: $name after $((SECONDS - start))s"; return 0; fi
   done
   echo "not ok - hidpi: $name: got$got, wanted $*"
   [ -s "$dump" ] && echo "  # the screendump's header: $(head -c 17 "$dump" | tr '\n' ' ')"
@@ -77,10 +77,10 @@ shows() {
 }
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qaE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
@@ -89,6 +89,23 @@ waits_for() {
 colors() {
   od -An -tu1 -v -j $((17 + ($3 * W + $1) * 3)) -N $((($2 - $1) * 3)) "$dump" | tr -s ' ' '\n' | grep -v '^$' \
     | paste - - - | sort -u | wc -l | tr -d ' '
+}
+
+# The line run windows lists for the window titled $1, in $line, empty
+# if none: run windows typed until it lists one, for up to 30 s, each
+# time read up to the shell's next prompt, waited for up to 5 s.
+listed() {
+  local from end=$((SECONDS + 30)) prompt
+  line=""
+  until [ $SECONDS -ge $end ]; do
+    from=$(($(wc -c < "$out") + 1))
+    printf 'run windows\n' >&3
+    prompt=$((SECONDS + 5))
+    until [ $SECONDS -ge $prompt ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+    line=$(tail -c +$from "$out" | grep -aE "^[0-9]+ $1 " | head -1)
+    [ -n "$line" ] && return 0
+    sleep 0.2
+  done
 }
 
 boot ""
@@ -113,13 +130,8 @@ shows "a line's ends, 2 by 2" "0 64 255 0 0" "1 65 255 0 0" "3838 2158 255 0 0" 
 # middle, 28 either side of it.
 printf 'run widgets &\n' >&3
 w_x=""
-for try in $(seq 1 30); do
-  from=$(($(wc -c < "$out") + 1))
-  printf 'run windows\n' >&3
-  sleep 1
-  line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Widgets ' | head -1)
-  if [ -n "$line" ]; then read -r _ _ w_x w_y _ _ _ <<< "$line"; break; fi
-done
+listed Widgets
+[ -n "$line" ] && read -r _ _ w_x w_y _ _ _ <<< "$line"
 [ -n "$w_x" ] || fail "run windows never listed the gallery's window; it showed:"
 mid=$((w_x + 322)); x0=$(((mid - 28) * 2)); x1=$(((mid + 28) * 2)); row=$(((w_y + 23) * 2))
 shows "the gallery's header bar" "$(((w_x + 20) * 2)) $row 48 48 48"
@@ -134,13 +146,8 @@ fi
 # smooth on its ground, 1e1e1e, as the gallery's title is.
 printf 'run Terminal &\n' >&3
 v_x=""
-for try in $(seq 1 30); do
-  from=$(($(wc -c < "$out") + 1))
-  printf 'run windows\n' >&3
-  sleep 1
-  line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ vt1 ' | head -1)
-  if [ -n "$line" ]; then read -r _ _ v_x v_y _ _ _ <<< "$line"; break; fi
-done
+listed vt1
+[ -n "$line" ] && read -r _ _ v_x v_y _ _ _ <<< "$line"
 [ -n "$v_x" ] || fail "run windows never listed vt1's window; it showed:"
 trow=$(((v_y + 46 + 8) * 2))
 shows "the terminal's ground" "$(((v_x + 2 + 636) * 2)) $trow 30 30 30"

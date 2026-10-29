@@ -30,14 +30,14 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - logo-menu: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
@@ -45,18 +45,19 @@ at() {
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
-# A click at x, y: there, pressed, let go.
+# A click at x, y: there, pressed, let go. What it does is waited for
+# by what checks it, not here.
 click() {
-  events "$(at $1 $2)"; sleep 1
-  events "$(button true)"; sleep 1
-  events "$(button false)"; sleep 1
+  events "$(at $1 $2)"; sleep 0.1
+  events "$(button true)"; sleep 0.1
+  events "$(button false)"
 }
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
@@ -67,8 +68,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -80,20 +81,23 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - logo-menu: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - logo-menu: $name: got$got, wanted $*"
   exit 1
 }
 
-# Waits up to 30 s for run windows to list a window titled About L0S.
+# Waits up to 30 s for run windows to list a window titled About L0S,
+# and up to 5 s each time for the shell's prompt after the list.
 about_window() {
-  local try from
-  for try in $(seq 1 30); do
+  local from prompt end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     from=$(($(wc -c < "$out") + 1))
     printf 'run windows\n' >&3
-    sleep 1
+    prompt=$((SECONDS + 5))
+    until [ $SECONDS -ge $prompt ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
     tail -c +$from "$out" | grep -aq 'About L0S' && return 0
+    sleep 0.2
   done
   fail "run windows never listed the About window; it showed:"
 }
@@ -103,6 +107,9 @@ about_window() {
 pill="64 64 64"; card="36 36 36"
 
 waits_for "^l0s> "
+# wm says it serves once the display has drawn the wallpaper, which may
+# come after the prompt: wait, so the logo's click reaches it.
+waits_for "serving compositor"
 shows "closed, at the start" "3 16 0 0 0"
 
 click 16 16
@@ -124,23 +131,28 @@ click 16 16
 shows "opened a third time" "3 16 $pill"
 click 100 124
 waits_for "l0s: restarting the board, as wm \(pid [0-9]+\) asked"
-for try in $(seq 1 30); do
+end=$((SECONDS + 30))
+until [ $SECONDS -ge $end ]; do
   [ "$(grep -c '^l0s: aarch64' "$out")" -ge 2 ] && break
-  sleep 1
+  sleep 0.2
 done
 [ "$(grep -c '^l0s: aarch64' "$out")" -ge 2 ] || fail "Restart did not boot the board again; it showed:"
 echo "ok - logo-menu: Restart reset the board, and it booted again"
-for try in $(seq 1 30); do
-  [ "$(grep -c '^l0s> ' "$out")" -ge 2 ] && break
-  sleep 1
+# The second boot's prompt, and its wm serving, up to 30 s, before the
+# next click.
+end=$((SECONDS + 30))
+until [ $SECONDS -ge $end ]; do
+  [ "$(grep -c '^l0s> ' "$out")" -ge 2 ] && [ "$(grep -c 'serving compositor' "$out")" -ge 2 ] && break
+  sleep 0.2
 done
 shows "the desktop again, the menu closed" "3 16 0 0 0"
 
 click 16 16
 shows "opened after the restart" "3 16 $pill"
 click 100 92
-for try in $(seq 1 30); do
+end=$((SECONDS + 30))
+until [ $SECONDS -ge $end ]; do
   kill -0 $qemu 2> /dev/null || { echo "ok - logo-menu: Shut Down stopped the board"; exit 0; }
-  sleep 1
+  sleep 0.2
 done
 fail "Shut Down left the board running"

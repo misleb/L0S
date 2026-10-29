@@ -82,20 +82,21 @@ stop() { kill $qemu 2> /dev/null; wait $qemu 2> /dev/null; exec 3>&-; }
 trap 'kill $qemu 2> /dev/null; rm -f "$fifo"' EXIT
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
-# What the serial shell prints for a command.
+# What the serial shell prints for a command, up to its next prompt,
+# waited for up to 5 s.
 said() {
-  local from
+  local from end=$((SECONDS + 5))
   from=$(($(wc -c < "$out") + 1))
   printf '%s\n' "$1" >&3
-  sleep 2
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
   tail -c +$from "$out"
 }
 

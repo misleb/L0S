@@ -60,34 +60,39 @@ at() {
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
 # A click at x, y: there, pressed, let go, on the QMP line kept open
-# (open_lines), as QEMU's sockets take one client at a time.
+# (open_lines), as QEMU's sockets take one client at a time. What it
+# does is waited for by what checks it, not here.
 click() {
-  moved $1 $2; sleep 1
-  sent "$(button true)"; sleep 1
-  sent "$(button false)"; sleep 1
+  moved $1 $2; sleep 0.1
+  sent "$(button true)"; sleep 0.1
+  sent "$(button false)"
 }
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qaE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
 # Where the window titled $1 is, as run windows lists it: w_x, w_y.
+# Waits up to 30 s for it to be listed, each run windows read up to the
+# shell's next prompt, waited for up to 5 s.
 window() {
-  local try from line
-  for try in $(seq 1 30); do
+  local from line end=$((SECONDS + 30)) prompt
+  until [ $SECONDS -ge $end ]; do
     from=$(($(wc -c < "$out") + 1))
     printf 'run windows\n' >&3
-    sleep 1
+    prompt=$((SECONDS + 5))
+    until [ $SECONDS -ge $prompt ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
     line=$(tail -c +$from "$out" | grep -aE "^[0-9]+ $1 " | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y _ <<< "$line"
       return 0
     fi
+    sleep 0.2
   done
   fail "run windows never listed $1's window; it showed:"
 }
@@ -97,13 +102,30 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 
 # Waits up to 30 s for pixel x, y to be r g b.
 shows() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     dumped
     [ -s "$dump" ] && [ "$(pixel $1 $2)" = "$3" ] && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "$4: pixel $1,$2 is $(pixel $1 $2), not $3"
+}
+
+# Waits up to 30 s for Fonts' grid of cards drawn: the view's ground,
+# 30 30 30, at g, y, and some ink, anything else, from x0 up to x1 of
+# row y. Arguments x0 x1 y g.
+cards() {
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    dumped
+    if [ -s "$dump" ] && [ "$(pixel $4 $3)" = "30 30 30" ] \
+      && od -An -tu1 -v -j $((16 + ($3 * 1280 + $1) * 3)) -N $((($2 - $1) * 3)) "$dump" \
+        | tr -s ' ' '\n' | grep -v '^$' | paste - - - | grep -qv '^30	30	30$'; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "Fonts never drew its cards"
 }
 
 now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
@@ -118,7 +140,7 @@ open_lines() {
   nc -U "$sock" < "$BUILD/responsive.min" > "$BUILD/responsive.mout" 2>&1 &
   exec 5> "$BUILD/responsive.qin" 6> "$BUILD/responsive.min"
   printf '{"execute":"qmp_capabilities"}\n' >&5
-  sleep 1
+  answered "$BUILD/responsive.qout" 0 '"return"' || fail "QMP never answered qmp_capabilities"
 }
 
 # Waits until file $1 holds more than $2 lines saying $3.
@@ -194,10 +216,17 @@ header="48 48 48"; lit="62 62 62"
 waits_for "^l0s> "
 waits_for "serving compositor"
 open_lines
+# Applications clicked, and the launcher's pill, 404040 at 40, 16, waited
+# for (launcher.sh) before Fonts' icon is.
 click 60 16
+shows 40 16 "64 64 64" "the launcher's pill"
 click 640 130
 window Fonts
 fx=$w_x; fy=$w_y
+# Its cards drawn (fontview.sh): the third's Aa, from 294 to 342, 100
+# down, inked on the view's ground, at 20 left of the first tile; then
+# that card clicked.
+cards $((fx + 294)) $((fx + 342)) $((fy + 100)) $((fx + 20))
 click $((fx + 318)) $((fy + 106))
 shows $((fx + 9)) $((fy + 22)) "$header" "Source Sans 3's page and its Back"
 sleep 3
@@ -216,10 +245,11 @@ echo "ok - responsive: Files' menu button lit $quick ms after the pointer came, 
 
 # The folder listed: its first tile's icon, 48 square from 302, 70 of
 # the window (files.sh), drawn on the view's ground, 30 30 30.
-for try in $(seq 1 30); do
+end=$((SECONDS + 30))
+until [ $SECONDS -ge $end ]; do
   dumped
   [ -s "$dump" ] && [ "$(pixel $((cx + 326)) $((cy + 100)))" != "30 30 30" ] && break
-  sleep 1
+  sleep 0.2
 done
 [ "$(pixel $((cx + 326)) $((cy + 100)))" != "30 30 30" ] || fail "Files never showed the folder's files"
 echo "ok - responsive: Files listed the folder of 400 files"

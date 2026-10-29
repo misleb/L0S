@@ -65,7 +65,7 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - vt: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # Each key of a line, as sendkey names them, and no Enter.
 keys() {
@@ -89,69 +89,107 @@ events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 # A move of dx, dy, a pixel a count, as a mouse moves.
 by() {
   echo "{\"type\":\"rel\",\"data\":{\"axis\":\"x\",\"value\":$1}},{\"type\":\"rel\",\"data\":{\"axis\":\"y\",\"value\":$2}}"
 }
-# The pointer to screen pixel x, y: into the top left corner first, where
-# wm keeps it however far past it the mouse goes, then from there. QEMU
-# adds up one batch's moves, so the two are sent apart.
-point() { events "$(by -4000 -4000)"; sleep 1; events "$(by "$1" "$2")"; }
+# What the serial shell prints for a command typed there, in $said:
+# waits up to 5 s for its next prompt, so that each command's answer is
+# whole, and no answer comes late into the next's.
+say() {
+  local from end=$((SECONDS + 5))
+  from=$(($(wc -c < "$out") + 1))
+  printf '%s\n' "$1" >&3
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+  said=$(tail -c +$from "$out")
+}
+
+# Where run windows says the pointer is: p_x, p_y.
+pointer() {
+  local line
+  say 'run windows'
+  line=$(printf '%s\n' "$said" | sed 's/^l0s> //' | grep -aE '^pointer -?[0-9]+ -?[0-9]+' | tail -1)
+  read -r _ p_x p_y _ <<< "$line"
+}
+
+# The pointer to screen pixel x, y: moved from where wm says it is, as
+# far as it is from there, and waited for there, up to 10 s, so that no
+# button or move after it is added to it. QEMU adds up the moves the
+# board has not yet read.
+point() {
+  local end=$((SECONDS + 10))
+  pointer
+  [ -n "$p_x" ] || fail "run windows said nothing of the pointer; it showed:"
+  events "$(by $(($1 - p_x)) $(($2 - p_y)))"
+  until [ $SECONDS -ge $end ]; do
+    pointer
+    [ "$p_x $p_y" = "$1 $2" ] && return 0
+    sleep 0.1
+  done
+  fail "the pointer went to $p_x, $p_y, not $1, $2; it showed:"
+}
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 # A step of the wheel, wheel-down or wheel-up, as the mouse reports it.
 wheel() { echo "{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"$1\"}},{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"$1\"}}"; }
-# A click at x, y.
-click() { point "$1" "$2"; sleep 1; events "$(button true)"; sleep 1; events "$(button false)"; sleep 1; }
-# A drag from x, y by dx, dy, in two moves.
+# A click at x, y. What it does is waited for by what checks it, not
+# here.
+click() { point "$1" "$2"; events "$(button true)"; sleep 0.1; events "$(button false)"; }
+# A drag from x, y by dx, dy, in two moves, each its own report.
 drag() {
-  point "$1" "$2"; sleep 1
-  events "$(button true)"; sleep 1
-  events "$(by $(($3 / 2)) $(($4 / 2)))"; sleep 1
-  events "$(by $(($3 - $3 / 2)) $(($4 - $4 / 2)))"; sleep 1
-  events "$(button false)"; sleep 1
+  point "$1" "$2"
+  events "$(button true)"; sleep 0.2
+  events "$(by $(($3 / 2)) $(($4 / 2)))"; sleep 0.2
+  events "$(by $(($3 - $3 / 2)) $(($4 - $4 / 2)))"; sleep 0.2
+  events "$(button false)"
 }
 
 # Waits up to 30 s for the serial line to show a line matching a pattern.
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
 # The windows, as run windows lists them, in front, f_* and in back,
-# b_*: title, x, y, width, height. Asks until there are N titled vtN, 2
-# unless given, and, if given, the front one titled T.
+# b_*: title, x, y, width, height. Asks for up to 30 s until there are
+# N, 2 unless given, every one titled vtN, the first listed in front,
+# and, if T is given, titled T. A vt's window is titled Terminal until
+# its tab has a name.
 windows() {
-  local n=${1:-2} want=${2:-} try lines from
-  for try in $(seq 1 30); do
-    from=$(($(wc -c < "$out") + 1))
-    printf 'run windows\n' >&3
-    sleep 1
+  local n=${1:-2} want=${2:-} lines end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    say 'run windows'
     # A prompt may come before a line, when the board is slow to answer.
-    lines=$(tail -c +$from "$out" | sed 's/^l0s> //' | grep -aE '^[0-9]+ vt[0-9] ')
-    if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$n" ]; then
+    lines=$(printf '%s\n' "$said" | sed 's/^l0s> //' | grep -aE '^[0-9]+ [^ ]+ -?[0-9]+ -?[0-9]+ [0-9]+ [0-9]+ (front|-) ')
+    if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$n" ] &&
+       [ "$(printf '%s\n' "$lines" | grep -acE '^[0-9]+ vt[0-9] ')" = "$n" ]; then
       [ "$n" = 0 ] && return 0
       read -r _ f_title f_x f_y f_w f_h f_front _ <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
       read -r _ b_title b_x b_y b_w b_h b_front _ <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
-      [ "$f_front" = front ] || fail "the first window listed is not in front"
-      [ -z "$want" ] || [ "$f_title" = "$want" ] && return 0
+      [ "$f_front" = front ] && { [ -z "$want" ] || [ "$f_title" = "$want" ]; } && return 0
     fi
+    sleep 0.2
   done
-  fail "run windows never listed $n windows${want:+, $want in front}; it showed:"
+  fail "run windows never listed $n vt windows, the first in front${want:+, $want}; last it listed: $(printf '%s' "$lines" | tr '\n' ';'); it showed:"
 }
 
 # The lines of ps, typed at the serial shell, after it is typed.
-ps_lines() {
-  local from
-  from=$(($(wc -c < "$out") + 1))
-  printf 'ps\n' >&3
-  sleep 2
-  tail -c +$from "$out"
+ps_lines() { say ps; printf '%s\n' "$said"; }
+
+# Waits up to 10 s for ps to show neither vt pid P nor a process it
+# started, as a vt ends a moment after its window closes.
+gone() {
+  local end=$((SECONDS + 10))
+  until [ $SECONDS -ge $end ]; do
+    ps_lines | grep -aqE "^ +$1 +1  vt |^ +[0-9]+ +$1  " || return 0
+    sleep 0.2
+  done
+  return 1
 }
 
 # Pixel x, y of the screendump, a 1280 by 800 PPM whose header is 16 bytes.
@@ -160,8 +198,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -173,7 +211,7 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - vt: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - vt: $name: got$got, wanted $*"
   exit 1
@@ -212,7 +250,7 @@ shows "both windows, $f_title in front" "$((f_x + 60)) $((f_y + 6)) $active" "$b
 
 # The front window's corners are rounded by its shape: its top left pixel
 # shows what is under it, as the pixel left of it does.
-rm -f "$dump"; monitor "screendump $dump"; sleep 1
+rm -f "$dump"; monitor "screendump $dump"
 [ -s "$dump" ] && [ "$(pixel $f_x $f_y)" = "$(pixel $((f_x - 1)) $f_y)" ] && [ "$(pixel $f_x $f_y)" != "$active" ] ||
   fail "the top left corner of $f_title shows $(pixel $f_x $f_y), not what is under it, $(pixel $((f_x - 1)) $f_y)"
 echo "ok - vt: $f_title's corners are rounded"
@@ -235,8 +273,13 @@ shows "echo hi typed and answered in $f_title" "$((f_x + 1)) $((f_y + bar + 8 * 
 # shell, whose parent is its vt.
 vt_base=16
 typekeys "run nap 30000 &"
-sleep 2
-lines=$(ps_lines)
+# Up to 10 s for ps to show nap.
+end=$((SECONDS + 10))
+until [ $SECONDS -ge $end ]; do
+  lines=$(ps_lines)
+  printf '%s\n' "$lines" | grep -aqE "^ +[0-9]+ +[0-9]+  nap " && break
+  sleep 0.2
+done
 shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  nap " | tail -1 | awk '{print $2}')
 [ -n "$shell" ] || fail "ps showed no nap; it showed:"
 vt=$(printf '%s\n' "$lines" | grep -aE "^ +$shell +[0-9]+  sh " | tail -1 | awk '{print $2}')
@@ -265,7 +308,9 @@ echo "ok - vt: a drag moved $front to $f_x, $f_y"
 
 # The inittab three times over is more than the window's 24 rows: it
 # scrolls, and the prompt's cursor is on the last row, row 23.
-for n in 1 2 3; do typekeys "run cat /etc/inittab"; sleep 2; done
+# Its output is not on the serial line: each is given a second to run
+# before the next is typed.
+for n in 1 2 3; do typekeys "run cat /etc/inittab"; sleep 1; done
 shows "$front scrolled, the prompt on its last row" "$((f_x + 40)) $((f_y + bar + 383)) $cursor"
 
 # A step of the wheel up over it shows the rows scrolled off, three of
@@ -273,8 +318,8 @@ shows "$front scrolled, the prompt on its last row" "$((f_x + 40)) $((f_y + bar 
 # its right, its slider 6 wide, 3 in, near its foot, as the view is only
 # three rows back. A key typed, Backspace on the empty line, brings the
 # view back to the bottom: the slider gone, the cursor back.
-point $((f_x + 300)) $((f_y + bar + 200)); sleep 1
-events "$(wheel wheel-up)"; sleep 1
+point $((f_x + 300)) $((f_y + bar + 200))
+events "$(wheel wheel-up)"
 slider="$((f_x + f_w - 6)) $((f_y + bar + 330))"
 shows "the wheel scrolled $front back, its scrollbar shown" "$slider $thumb"
 monitor "sendkey backspace"
@@ -357,7 +402,7 @@ windows 2 "$first"
 typekeys "exit"
 windows 1
 [ "$f_title" = "$other" ] || fail "after exit in $first, $f_title is left, not $other"
-ps_lines | grep -aqE "^ +$front_vt +1  vt |^ +[0-9]+ +$front_vt  " &&
+gone $front_vt ||
   fail "after exit in $first, ps still shows its vt, pid $front_vt, or a process it started"
 echo "ok - vt: exit closed $first, its vt gone, $other left in front"
 
@@ -365,7 +410,6 @@ echo "ok - vt: exit closed $first, its vt gone, $other left in front"
 # window's vt ends its tab's shell, and closes the window.
 click $((f_x + f_w - 18)) $((f_y + 23))
 windows 0
-sleep 1
-ps_lines | grep -aqE "^ +$other_vt +1  vt |^ +[0-9]+ +$other_vt  " &&
+gone $other_vt ||
   fail "after the close button, ps still shows $other's vt, pid $other_vt, or a process it started"
 echo "ok - vt: the close button ended $other's vt and its shell"

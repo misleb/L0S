@@ -41,14 +41,14 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - resize: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
@@ -57,43 +57,52 @@ at() {
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
+# What run windows lists, from the serial line, in $got: typed, and
+# read up to the shell's next prompt, waited for up to 5 s.
+listed() {
+  local from end=$((SECONDS + 5))
+  from=$(($(wc -c < "$out") + 1))
+  printf 'run windows\n' >&3
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+  got=$(tail -c +$from "$out")
+}
+
 # Where the gallery's window is, as run windows lists it, and how big its
-# content: w_x, w_y, w_w, w_h. With arguments, waits up to 30 s for it to
-# be that size, W H.
+# content: w_x, w_y, w_w, w_h. Waits up to 30 s for it to be listed and,
+# with arguments, to be that size, W H.
 window() {
-  local try from line
-  for try in $(seq 1 30); do
-    from=$(($(wc -c < "$out") + 1))
-    printf 'run windows\n' >&3
-    sleep 1
-    line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Widgets ' | head -1)
+  local line end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
+    listed
+    line=$(printf '%s\n' "$got" | grep -aE '^[0-9]+ Widgets ' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y w_w w_h _ <<< "$line"
       [ $# -eq 0 ] && return 0
       [ "$w_w" = "$1" ] && [ "$w_h" = "$2" ] && return 0
     fi
+    sleep 0.2
   done
   fail "run windows never listed the gallery's window as ${1:-any} by ${2:-any}; it last said: ${line:-nothing}"
 }
 
 # The tablet taken from x0, y0 to x1, y1 with the left button held, in
-# steps, as a hand would.
+# steps, as a hand would. What it does is waited for by what checks it.
 drag() {
   local i
-  events "$(at $1 $2)"; sleep 1
-  events "$(button true)"; sleep 1
+  events "$(at $1 $2)"; sleep 0.2
+  events "$(button true)"; sleep 0.2
   for i in 1 2 3 4; do
-    events "$(at $(( $1 + ($3 - $1) * i / 4 )) $(( $2 + ($4 - $2) * i / 4 )))"; sleep 1
+    events "$(at $(( $1 + ($3 - $1) * i / 4 )) $(( $2 + ($4 - $2) * i / 4 )))"; sleep 0.2
   done
-  events "$(button false)"; sleep 1
+  events "$(button false)"
 }
 
 # Pixel x, y of the screendump, a 1280 by 800 PPM whose header is 16 bytes.
@@ -102,8 +111,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -115,7 +124,7 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - resize: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - resize: $name: got$got, wanted $*"
   exit 1
@@ -161,18 +170,17 @@ shows "in place: End Process at the right end, the toolbar's ground before it" \
 # The pointer at x, y: waits up to 30 s for run windows to name it as
 # shown, nothing for the arrow.
 pointer_is() {
-  local try from line want
+  local line want end=$((SECONDS + 30))
   want="^pointer [0-9]+ [0-9]+${3:+ $3}\$"
-  events "$(at $1 $2)"; sleep 1
-  for try in $(seq 1 30); do
-    from=$(($(wc -c < "$out") + 1))
-    printf 'run windows\n' >&3
-    sleep 1
-    line=$(tail -c +$from "$out" | grep -aE '^pointer ' | head -1 | tr -d '\r')
+  events "$(at $1 $2)"
+  until [ $SECONDS -ge $end ]; do
+    listed
+    line=$(printf '%s\n' "$got" | grep -aE '^pointer ' | head -1 | tr -d '\r')
     if echo "$line" | grep -qE "$want"; then
       echo "ok - resize: the pointer at $1, $2: ${3:-the arrow}"
       return 0
     fi
+    sleep 0.2
   done
   fail "the pointer at $1, $2 was not ${3:-the arrow}; run windows last said: ${line:-nothing}"
 }
@@ -190,18 +198,17 @@ window $((w2 - 30)) $((h2 - 20))
 echo "ok - resize: the top left corner dragged: ${w_w} by ${w_h} at ${w_x}, ${w_y}"
 
 # A double click at x, y: two clicks well within 400 ms, each press and
-# release its own input-send-event, so its own report, but all four on
-# one connection, since each nc may take up to its second to end.
+# release its own input-send-event, so its own report, all four on one
+# connection. What it does is waited for by what checks it.
 dbl() {
   local b
-  events "$(at "$1" "$2")"; sleep 1
+  events "$(at "$1" "$2")"; sleep 0.1
   {
     printf '{"execute":"qmp_capabilities"}\n'
     for b in true false true false; do
       printf '{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$(button $b)"
     done
-  } | nc -U -w 1 "$qmp" > /dev/null 2>&1
-  sleep 1
+  } | tools/qsock "$qmp" > /dev/null 2>&1
 }
 
 # A double click on wm's own title bar, 100 in, maximizes the window:

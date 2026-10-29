@@ -163,7 +163,23 @@ GL device (`GPU=gl`) QEMU's `screendump` says "no surface". To look at
 virgl's 3D mode, boot headless with `GPU=gl QEMU_DISPLAY=none` and read the
 screen back from inside the driver (a temporary `TRANSFER_FROM_HOST_3D` of
 the screen into a page, sampled and printed), or `make demo` and look. They
-also need `nc` (netcat), which is not on every machine.
+also need `python3`, for `tools/qsock`, and `responsive.sh` needs `nc`
+(netcat), which is not on every machine.
+
+**Wait on what is checked, never on the clock.** Every monitor command and
+input event goes through `tools/qsock SOCKET`, which returns once QEMU has
+carried it out (a screendump is whole), in some 20 ms; `nc -U -w 1`, which
+these used, waited out its second on every call, as QEMU keeps the
+connection open, and so made one click 6 s. A click sleeps 0.1 s between
+its events and none after; what it does is waited for by the check after
+it (`shows`, `waits_for`, `listed`), each polling every 0.2 s against a
+deadline in seconds (`end=$((SECONDS + 30))`), not a count of tries. A
+click that needs the last one's effect, an icon in the launcher just
+opened, waits for that effect first (`launches` in `launch.sh` waits for
+the launcher's pill). `run windows` typed at the serial shell is read
+once the shell's next `l0s> ` follows it. A fixed sleep is left only
+where nothing can be seen to wait for: a check that something does *not*
+happen, or a settle right after boot.
 
 These boot with QEMU's monitor and QMP on Unix sockets and check pixels of a
 `screendump`. Each can be run alone from the top of the project once its
@@ -204,7 +220,7 @@ Their helpers, copied in each script:
 
 | Helper | Does |
 |---|---|
-| `monitor CMD` | a monitor command, e.g. `sendkey h`, `screendump PATH` |
+| `monitor CMD` | a monitor command through `tools/qsock`, e.g. `sendkey h`, `screendump PATH`, done when it returns |
 | `pixel X Y` | the R G B of a 1280×800 dump, its header 16 bytes |
 | `shows NAME "X Y R G B"...` | retries for 30 s until every pixel matches; `procmon.sh` also takes `!R G B`, any other color |
 | `waits_for REGEX` | waits for the serial line to show a line |
@@ -261,8 +277,8 @@ keep working still goes in a test.
   `(div (sub t1 t0) 100000)`, tenths of a millisecond.
 - **Drive the pointer from a script**: copy `events`, `at` and `button` from
   `tests/vt.sh`. To send many events quickly, pipe a sequence of
-  `input-send-event` commands, with short sleeps, into one `nc -U` on the QMP
-  socket instead of one connection each. Then read the result with
+  `input-send-event` commands, with short sleeps, into one `tools/qsock` on
+  the QMP socket instead of one connection each. Then read the result with
   `run windows` typed at the serial line, or a screendump.
 - Put sockets and dumps in `build/` (socket paths must be under 104 bytes)
   and remove the sockets afterwards. Name every file a test writes for

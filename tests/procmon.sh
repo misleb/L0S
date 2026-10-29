@@ -46,14 +46,14 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - procmon: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
@@ -63,33 +63,57 @@ button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}";
 # A step of the wheel, wheel-down or wheel-up: QEMU's tablet reports the
 # press as REL_WHEEL.
 wheel() { echo "{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"$1\"}},{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"$1\"}}"; }
+# A click at x, y: there, pressed, let go. What it does is waited for
+# by what checks it, not here.
 click() {
-  events "$(at "$1" "$2")"; sleep 1
-  events "$(button true)"; sleep 1
-  events "$(button false)"; sleep 1
+  events "$(at "$1" "$2")"; sleep 0.1
+  events "$(button true)"; sleep 0.1
+  events "$(button false)"
 }
 
+# Waits up to 30 s for a line like the regex on the serial line.
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
+# Waits up to 5 s for the shell's prompt on the serial line after byte
+# offset from.
+prompt_after() {
+  local end=$((SECONDS + 5))
+  until [ $SECONDS -ge $end ] || tail -c +$1 "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+}
+
+# Types a command at the serial shell that runs in the background, and
+# waits up to 30 s for the shell to say it started.
+started() {
+  local from end=$((SECONDS + 30))
+  from=$(($(wc -c < "$out") + 1))
+  printf '%s\n' "$1" >&3
+  until tail -c +$from "$out" | grep -qE "\[pid [0-9]+ running\]"; do
+    [ $SECONDS -ge $end ] && fail "'$1' never started; it showed:"
+    sleep 0.2
+  done
+}
+
 # Where the monitor's window is, as run windows lists it: w_x, w_y.
+# Asks for up to 30 s.
 window() {
-  local try from line
-  for try in $(seq 1 30); do
+  local from line end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     from=$(($(wc -c < "$out") + 1))
     printf 'run windows\n' >&3
-    sleep 1
+    prompt_after $from
     line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Processes ' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y _ _ _ <<< "$line"
       return 0
     fi
+    sleep 0.2
   done
   fail "run windows never listed the monitor's window; it showed:"
 }
@@ -101,8 +125,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # for "X Y !R G B", for that pixel to be any other color.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b want
-  for try in $(seq 1 30); do
+  local p ok got px py r g b want end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -119,7 +143,7 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - procmon: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - procmon: $name: got$got, wanted $*"
   exit 1
@@ -160,13 +184,7 @@ shows "its own row, the eighth, and no ninth" "$(dot 8) !$view" "$(dot 9) $view"
 accent="53 132 228"
 shows "the memory's line, its level bar filled in the accent" "$((cx + 76)) $((cy + 415)) $accent"
 
-from=$(($(wc -c < "$out") + 1))
-printf 'run nap 600000 &\n' >&3
-for try in $(seq 1 30); do
-  tail -c +$from "$out" | grep -qE "\[pid [0-9]+ running\]" && break
-  [ "$try" = 30 ] && fail "nap never started; it showed:"
-  sleep 1
-done
+started 'run nap 600000 &'
 shows "nap's row, the ninth, read by itself" "$(dot 9) !$view"
 
 click $((cx + 800)) $(($(row 9) + 15))
@@ -179,7 +197,7 @@ shows "End Process ended nap: its row gone, End Process faded" \
 
 from=$(($(wc -c < "$out") + 1))
 printf 'ps\n' >&3
-sleep 2
+prompt_after $from
 listing=$(tail -c +$from "$out")
 echo "$listing" | grep -q "PID  PARENT" || fail "ps listed nothing; it showed:"
 if echo "$listing" | grep -q " nap "; then fail "ps still lists nap; it showed:"; fi
@@ -191,7 +209,7 @@ echo "ok - procmon: ps lists no nap"
 # to 377. At rest it is 6 wide, 3 in from the grid's right edge at 840,
 # from x 831, the text, white, at 40% on the view's 1e1e1e, 787878;
 # with the pointer on its strip, 8 wide, from 829, at 60%, a5a5a5.
-for n in 1 2 3 4 5; do printf 'run nap 600000 &\n' >&3; sleep 1; done
+for n in 1 2 3 4 5; do started 'run nap 600000 &'; done
 gx=$((cx + 833)); wide=$((cx + 830))
 slider="120 120 120"; slider_hot="165 165 165"
 shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $view"
@@ -200,16 +218,16 @@ shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $(
 # row under it is tinted, 4% of the text on the view's ground, 39,
 # before the wheel turns and after, though another row is under it then.
 hovered="39 39 39"
-events "$(at $((cx + 800)) $(($(row 5) + 15)))"; sleep 1
-events "$(wheel wheel-down)"; sleep 1
+events "$(at $((cx + 800)) $(($(row 5) + 15)))"; sleep 0.1
+events "$(wheel wheel-down)"
 shows "a step of the wheel scrolled to the end, the row now under the pointer tinted" \
   "$gx $((cy + 100)) $view" "$gx $((cy + 360)) $slider" "$((cx + 800)) $(($(row 5) + 15)) $hovered" "$((cx + 800)) $(($(row 2) + 15)) $view"
 
-events "$(at $gx $((cy + 360)))"; sleep 1
+events "$(at $gx $((cy + 360)))"
 shows "the pointer on the strip: the slider wide and dark" "$wide $((cy + 360)) $slider_hot"
 
-events "$(button true)"; sleep 1
-events "$(at $gx $((cy + 230)))"; sleep 1
-events "$(at $gx $((cy + 100)))"; sleep 1
-events "$(button false)"; sleep 1
+events "$(button true)"; sleep 0.2
+events "$(at $gx $((cy + 230)))"; sleep 0.2
+events "$(at $gx $((cy + 100)))"; sleep 0.2
+events "$(button false)"
 shows "the slider dragged back to the top" "$gx $((cy + 100)) $slider_hot" "$gx $((cy + 360)) $view"

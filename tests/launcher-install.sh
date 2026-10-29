@@ -40,14 +40,14 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - launcher-install: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
@@ -55,18 +55,19 @@ at() {
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
-# A click at x, y: there, pressed, let go.
+# A click at x, y: there, pressed, let go. What it does is waited for
+# by what checks it, not here.
 click() {
-  events "$(at $1 $2)"; sleep 1
-  events "$(button true)"; sleep 1
-  events "$(button false)"; sleep 1
+  events "$(at $1 $2)"; sleep 0.1
+  events "$(button true)"; sleep 0.1
+  events "$(button false)"
 }
 
 waits_for() {
-  local try
-  for try in $(seq 1 60); do
+  local end=$((SECONDS + 60))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
@@ -74,29 +75,32 @@ waits_for() {
 # Types a line at the serial shell, and waits for it to answer with its
 # prompt again, up to 60 s.
 typed() {
-  local before try
+  local before end=$((SECONDS + 60))
   before=$(grep -ac '^l0s> ' "$out")
   printf '%s\n' "$1" >&3
-  for try in $(seq 1 60); do
+  until [ $SECONDS -ge $end ]; do
     [ "$(grep -ac '^l0s> ' "$out")" -gt "$before" ] && return 0
-    sleep 1
+    sleep 0.1
   done
   fail "the shell did not answer '$1' with a prompt; it showed:"
 }
 
 # Where vt1's window is, as run windows lists it, and whether it is in
-# front: w_x, w_y, w_front.
+# front: w_x, w_y, w_front. Waits up to 30 s for it to be listed, and
+# up to 5 s each time for the shell's prompt after the list.
 window() {
-  local try from line
-  for try in $(seq 1 30); do
+  local from line prompt end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     from=$(($(wc -c < "$out") + 1))
     printf 'run windows\n' >&3
-    sleep 1
+    prompt=$((SECONDS + 5))
+    until [ $SECONDS -ge $prompt ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
     line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ vt1 ' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y _ _ w_front _ <<< "$line"
       return 0
     fi
+    sleep 0.2
   done
   fail "run windows never listed vt1's window; it showed:"
 }
@@ -107,8 +111,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -120,7 +124,7 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - launcher-install: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - launcher-install: $name: got$got, wanted $*"
   exit 1
@@ -142,6 +146,9 @@ page="36 36 36"; screen="36 31 49"; headerbar="48 48 48"; ink="255 255 255"
 desk="15 26 39"
 
 waits_for "^l0s> "
+# wm says it serves once the display has drawn the wallpaper, which may
+# come after the prompt: wait, so the launcher's click reaches it.
+waits_for "serving compositor"
 shows "closed, at the start" "40 16 0 0 0" "0 32 $desk"
 
 click 60 16

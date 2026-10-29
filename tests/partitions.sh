@@ -39,27 +39,30 @@ stop() { kill $qemu 2> /dev/null; wait $qemu 2> /dev/null; exec 3>&-; }
 trap 'kill $qemu 2> /dev/null; rm -f "$fifo"' EXIT
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
-# What the serial shell prints for a command.
+# What the serial shell prints for a command, up to its next prompt,
+# waited for up to 5 s.
 said() {
-  local from
+  local from end=$((SECONDS + 5))
   from=$(($(wc -c < "$out") + 1))
   printf '%s\n' "$1" >&3
-  sleep 2
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
   tail -c +$from "$out"
 }
 
 ok() { echo "ok - partitions: $1"; }
 
 boot
-uuid=$(said 'partition 400' | grep -aoE '[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' | head -1)
+# The file server's lines of the volumes it mounts as the board boots,
+# each with its UUID, may come among partition's: they are left out.
+uuid=$(said 'partition 400' | grep -av '^fs: ' | grep -aoE '[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' | head -1)
 [ -n "$uuid" ] || fail "partition said no UUID of version 7; it showed:"
 # Its first 48 bits are the clock's time in milliseconds: after 2020.
 ms=$((16#$(echo "$uuid" | tr -d - | cut -c1-12)))
@@ -67,6 +70,8 @@ ms=$((16#$(echo "$uuid" | tr -d - | cut -c1-12)))
 ok "partition 400 made $uuid, of the clock's time"
 
 said "mkfs $uuid made" | grep -aq "sh: mkfs" && fail "mkfs refused; it showed:"
+# The volume is mounted once mkfs is done, and may be after its prompt.
+waits_for "/Volumes/made mounted"
 said 'ls /Volumes' | grep -aq "made/" || fail "/Volumes has no made; it showed:"
 said 'write /Volumes/made/hello hi there' > /dev/null
 said 'cat /Volumes/made/hello' | grep -aq "hi there" || fail "the file on made was not read back; it showed:"
@@ -79,6 +84,8 @@ ok "a second mkfs of it is refused"
 
 stop
 boot
+# The shell's prompt may come before the volumes are mounted.
+waits_for "/Volumes/made mounted"
 said 'ls /Volumes' | grep -aq "made/" || fail "made was not mounted at boot; it showed:"
 said 'cat /Volumes/made/hello' | grep -aq "hi there" || fail "made's file is gone; it showed:"
 said "mkfs $uuid again" | grep -aq "its volume is served" || fail "the UUID no longer names the partition; it showed:"

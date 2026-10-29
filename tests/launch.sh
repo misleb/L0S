@@ -42,14 +42,14 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - launch: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The tablet, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 axis() { echo $(( $1 * 32767 / ($2 - 1) )); }
 at() {
@@ -57,29 +57,44 @@ at() {
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
-# A click at x, y: there, pressed, let go.
+# A click at x, y: there, pressed, let go. What it does is waited for
+# by what checks it, not here.
 click() {
-  events "$(at $1 $2)"; sleep 1
-  events "$(button true)"; sleep 1
-  events "$(button false)"; sleep 1
+  events "$(at $1 $2)"; sleep 0.1
+  events "$(button true)"; sleep 0.1
+  events "$(button false)"
+}
+
+# A click on the launcher's app at x, $icon_y: Applications clicked,
+# and the launcher's pill waited for (launcher.sh), then the app.
+launches() {
+  local end=$((SECONDS + 30))
+  click $apps_x 16
+  until [ $SECONDS -ge $end ]; do
+    rm -f "$dump"; monitor "screendump $dump"
+    [ -s "$dump" ] && [ "$(pixel 40 16)" = "64 64 64" ] && break
+    sleep 0.2
+  done
+  click $1 $icon_y
 }
 
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qE "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no line like '$1' on the serial line; it showed:"
 }
 
 # The windows, as run windows lists them, front first: each line ID
 # TITLE X Y W H front-or-- PID, the pointer's line left out; in $wins.
+# Waits up to 5 s for the shell's prompt after them.
 listed() {
-  local from
+  local from end=$((SECONDS + 5))
   from=$(($(wc -c < "$out") + 1))
   printf 'run windows\n' >&3
-  sleep 2
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
   wins=$(tail -c +$from "$out" | tr -d '\r' | grep -aE '^[0-9]+ [^ ]+ -?[0-9]+ -?[0-9]+ [0-9]+ [0-9]+ (front|-) [0-9]+ buffer [0-9]+ frames [0-9]+$')
 }
 
@@ -93,13 +108,14 @@ front() { printf '%s\n' "$wins" | grep -E ' front [0-9]+ ' | awk '{print $2}'; }
 # Waits up to 40 s for run windows to list n windows titled t, of one
 # client, the front one titled f.
 expects() {
-  local name=$1 t=$2 n=$3 f=$4 try
-  for try in $(seq 1 20); do
+  local name=$1 t=$2 n=$3 f=$4 end=$((SECONDS + 40))
+  until [ $SECONDS -ge $end ]; do
     listed
     if [ "$(count "$t")" = "$n" ] && [ "$(clients "$t")" = 1 ] && [ "$(front)" = "$f" ]; then
       echo "ok - launch: $name"
       return 0
     fi
+    sleep 0.2
   done
   echo "not ok - launch: $name: run windows listed:"
   printf '%s\n' "$wins" | sed 's/^/  # /'
@@ -112,8 +128,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -125,7 +141,7 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - launch: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - launch: $name: got$got, wanted $*"
   exit 1
@@ -150,30 +166,32 @@ waits_for "serving compositor"
 sleep 2
 
 # 1. Files, twice: one client, two windows.
-click $apps_x 16; click $files_x $icon_y
+launches $files_x
 expects "Files launched: its window, in front" Files 1 Files
-click $apps_x 16; click $files_x $icon_y
+launches $files_x
 expects "Files again: two windows of one client, the new one in front" Files 2 Files
 
 # 2. Disks, twice: one window.
-click $apps_x 16; click $disks_x $icon_y
+launches $disks_x
 expects "Disks launched: its window, in front" Disks 1 Disks
-click $apps_x 16; click $disks_x $icon_y
+launches $disks_x
 sleep 2
 expects "Disks again: still one window, in front" Disks 1 Disks
 
 # 3. Terminal over Disks, then Disks again: Disks in front, with the
 # keyboard's focus, which goes to the front window.
-click $apps_x 16; click $terminal_x $icon_y
-for try in $(seq 1 20); do
+launches $terminal_x
+end=$((SECONDS + 40))
+until [ $SECONDS -ge $end ]; do
   listed
   f=$(front)
   [ -n "$f" ] && [ "$f" != Disks ] && [ "$f" != Files ] && break
+  sleep 0.2
 done
 [ -n "$f" ] && [ "$f" != Disks ] && [ "$f" != Files ] || fail "Terminal's window never came in front"
 echo "ok - launch: Terminal launched, its window over Disks"
 disks_pid=$(printf '%s\n' "$wins" | grep -E '^[0-9]+ Disks ' | awk '{print $8}')
-click $apps_x 16; click $disks_x $icon_y
+launches $disks_x
 expects "Disks again, from behind Terminal: in front, one window" Disks 1 Disks
 now_pid=$(printf '%s\n' "$wins" | grep -E '^[0-9]+ Disks ' | awk '{print $8}')
 [ "$now_pid" = "$disks_pid" ] || fail "Disks is pid $now_pid now, not $disks_pid: it was started again"
@@ -193,12 +211,14 @@ shows "at /Volumes: its Volumes row selected, Computer's not" \
 # step).
 term_pid=$(printf '%s\n' "$wins" | grep -vE '^[0-9]+ (Files|Disks) ' | awk '{print $8}' | sort -u | head -1)
 [ -n "$term_pid" ] || fail "no Terminal window listed"
-click $apps_x 16; click $terminal_x $icon_y
-for try in $(seq 1 20); do
+launches $terminal_x
+end=$((SECONDS + 40))
+until [ $SECONDS -ge $end ]; do
   listed
   n=$(printf '%s\n' "$wins" | awk -v p="$term_pid" '$8 == p' | grep -c .)
   fp=$(printf '%s\n' "$wins" | grep -E ' front [0-9]+ ' | awk '{print $8}')
   [ "$n" = 2 ] && [ "$fp" = "$term_pid" ] && break
+  sleep 0.2
 done
 if [ "$n" != 2 ] || [ "$fp" != "$term_pid" ]; then
   echo "not ok - launch: Terminal again: run windows listed:"

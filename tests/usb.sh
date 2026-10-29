@@ -31,25 +31,26 @@ exec 3> "$fifo"
 
 fail() { echo "not ok - usb: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
-monitor() { printf '%s\n' "$1" | nc -U -w 1 "$sock" > /dev/null 2>&1; }
+monitor() { printf '%s\n' "$1" | tools/qsock "$sock" > /dev/null 2>&1; }
 
 # The mouse, through QMP: each argument an input event.
 events() {
   local list
   list=$(IFS=,; echo "$*")
   printf '{"execute":"qmp_capabilities"}\n{"execute":"input-send-event","arguments":{"events":[%s]}}\n' "$list" \
-    | nc -U -w 1 "$qmp" > /dev/null 2>&1
+    | tools/qsock "$qmp" > /dev/null 2>&1
 }
 by() {
   echo "{\"type\":\"rel\",\"data\":{\"axis\":\"x\",\"value\":$1}},{\"type\":\"rel\",\"data\":{\"axis\":\"y\",\"value\":$2}}"
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
 
+# Waits up to 30 s for the text on the serial line.
 waits_for() {
-  local try
-  for try in $(seq 1 30); do
+  local end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     grep -qF "$1" "$out" 2> /dev/null && return 0
-    sleep 1
+    sleep 0.2
   done
   fail "no '$1' on the serial line; it showed:"
 }
@@ -60,8 +61,8 @@ pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' 
 # Waits up to 30 s for each "X Y R G B" given to be on the screen.
 shows() {
   local name=$1; shift
-  local try p ok got px py r g b
-  for try in $(seq 1 30); do
+  local p ok got px py r g b end=$((SECONDS + 30))
+  until [ $SECONDS -ge $end ]; do
     rm -f "$dump"
     monitor "screendump $dump"
     if [ -s "$dump" ]; then
@@ -73,7 +74,7 @@ shows() {
       done
       [ "$ok" = 1 ] && { echo "ok - usb: $name"; return 0; }
     fi
-    sleep 1
+    sleep 0.2
   done
   echo "not ok - usb: $name: got$got, wanted $*"
   exit 1
@@ -106,7 +107,7 @@ monitor "sendkey esc"
 # pill behind Applications 404040 once it is open.
 pill="64 64 64"
 shows "the launcher closed" "40 16 0 0 0"
-events "$(by 60 16)"; sleep 1
-events "$(button true)"; sleep 1
-events "$(button false)"; sleep 1
+events "$(by 60 16)"; sleep 0.1
+events "$(button true)"; sleep 0.1
+events "$(button false)"
 shows "the mouse moved to Applications and clicked it open" "40 16 $pill"
