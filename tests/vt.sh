@@ -40,7 +40,7 @@
 #  11. exit, typed into it: its shell ends, and so its tab and, the last,
 #      the window, and its vt, leaving the other window in front
 #  12. a click on that one's close button: its vt ends its tab's shell
-#      and relay and closes the window
+#      and closes the window
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
@@ -228,9 +228,10 @@ shows "echo hi typed and answered in $f_title" "$((f_x + 1)) $((f_y + bar + 8 * 
 
 # The two windows' vts are pids 17 and 18: boot, pid 1, starts
 # /etc/system's programs after the inittab's thirteen, sh 14, font 15,
-# wm 16, then the two vts, vt_base + 1 and vt_base + 2. Each starts a
-# relay for its tab's name, and the tab's shell; nap's parent is the
-# front window's shell, whose parent is its vt.
+# wm 16, then the two vts, vt_base + 1 and vt_base + 2. Each registers
+# its tab's name itself and starts the tab's shell, with no relay, so
+# ps shows no vt but those two; nap's parent is the front window's
+# shell, whose parent is its vt.
 vt_base=16
 typekeys "run nap 30000 &"
 sleep 2
@@ -240,6 +241,9 @@ shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  nap " | tail -1 | 
 vt=$(printf '%s\n' "$lines" | grep -aE "^ +$shell +[0-9]+  sh " | tail -1 | awk '{print $2}')
 [ "$vt" = $((vt_base + 1)) ] || [ "$vt" = $((vt_base + 2)) ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not a window's vt"
 echo "ok - vt: $f_title's shell, pid $shell, started by its window's vt, pid $vt, ran nap"
+vts=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  vt " | awk '{print $1}' | sort -n | tr '\n' ' ')
+[ "$vts" = "$((vt_base + 1)) $((vt_base + 2)) " ] || fail "ps shows vts ${vts:-none}, not the windows' two, $((vt_base + 1)) and $((vt_base + 2)), and no relay"
+echo "ok - vt: the windows' two vts and no relay"
 # The other window's vt is the other of the two.
 other_vt=$((vt_base + 1)); [ "$vt" = "$other_vt" ] && other_vt=$((vt_base + 2))
 
@@ -347,10 +351,10 @@ ps_lines | grep -aqE "^ +$front_vt +1  vt |^ +[0-9]+ +$front_vt  " &&
 echo "ok - vt: exit closed $first, its vt gone, $other left in front"
 
 # A click on the close button, at the right end of the header bar: the
-# window's vt ends its tab's shell and relay, and closes the window.
+# window's vt ends its tab's shell, and closes the window.
 click $((f_x + f_w - 18)) $((f_y + 23))
 windows 0
 sleep 1
 ps_lines | grep -aqE "^ +$other_vt +1  vt |^ +[0-9]+ +$other_vt  " &&
   fail "after the close button, ps still shows $other's vt, pid $other_vt, or a process it started"
-echo "ok - vt: the close button ended $other's vt, its shell and its relay"
+echo "ok - vt: the close button ended $other's vt and its shell"

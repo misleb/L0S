@@ -263,7 +263,8 @@ header bar. Then:
   under the motd, the banner and the prompt;
 - `run nap 30000 &`: `ps` at the serial shell shows `nap`, its parent
   that window's shell, whose parent is the window's `vt`, one of the two
-  `/etc/system` started, pids 18 and 19;
+  `/etc/system` started, pids 17 and 18, and no other `vt`, as a tab
+  has no relay;
 - a click on the other window's header bar, through QMP's
   `input-send-event`: it comes to the front, as `run windows` and its
   header bar's color show;
@@ -293,8 +294,7 @@ header bar. Then:
   other, in front, and `ps` shows neither the `vt` nor anything it
   started;
 - a click on that one's close button: `run windows` shows no window, and
-  `ps` shows neither its `vt` nor its tab's relay and shell, which it
-  ended.
+  `ps` shows neither its `vt` nor its tab's shell, which it ended.
 
 [tests/widgets.sh](../tests/widgets.sh) boots the screen initramfs, types
 `run widgets &`, and learns where the gallery's window is from

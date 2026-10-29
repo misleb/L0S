@@ -1,6 +1,6 @@
 # 0031: A process waits on several ports, and lets a name go
 
-Track: Kernel · Status: active · Needs: – · Spec: syscalls.md, kernel.md, programs.md, devices.md, demo.md, testing.md
+Track: Kernel · Status: done · Needs: – · Spec: syscalls.md, kernel.md, programs.md, devices.md, demo.md, testing.md
 
 ## Why
 
@@ -66,7 +66,7 @@ So L0S spends processes to hold names:
   from it. Board tests, refusals included.
 - [x] Unregistering a name: the call, its wrapper and its board tests.
   A name's owner exiting still frees it as now.
-- [ ] Terminal without relays: `vt` waits on its window's port and a
+- [x] Terminal without relays: `vt` waits on its window's port and a
   port per tab, registers `vtN` on the tab's port, and unregisters it
   as the tab closes; `vt tab` goes. `spec/demo.md`'s pids and `ps`
   sample, `tests/vt.sh`'s arithmetic, and 0025's design in
@@ -88,9 +88,12 @@ So L0S spends processes to hold names:
 
 ## Spec changes
 
-- programs.md: `vt`'s row without relays.
-- demo.md: a Terminal's pids without its relays, and the `ps` sample's
-  if it shows one.
+All moved into the spec: programs.md (`vt`'s row without relays, at
+most 31 tabs; `usb-hid`'s, one process), demo.md (a Terminal is a `vt`
+and a shell a tab; the pids with one `usb-hid`, the `ps` sample, which
+shows no Terminal), desktop.md (`wm` telling its input apart by what it
+says; `vt`'s limit, a relay a tab, gone, its 31 tabs said), devices.md
+and pi5.md (one `usb-hid`), testing.md (`vt.sh`'s pids, no relay).
 
 ## Log
 
@@ -303,3 +306,36 @@ So L0S spends processes to hold names:
   repeats (after 500 ms, then about 30 a second) and stops when let go;
   the mouse moves the pointer and clicks; and its wheel scrolls a
   Terminal back, not typing into it, which is what `wm`'s change fixed.
+- 2026-10-28: step 3, Terminal's tabs without relays, and the goal
+  done. `vt tab` is gone: a Terminal is one `vt`, and each tab one more
+  process, its shell. The design calls:
+  - **A port a tab, named there by `vt` itself.** Opening a tab takes a
+    port, registers the first `vtN` free on it (`vt_register`, as the
+    relay did), starts `sh NAME` watched on the window's port, and adds
+    the tab, all at once: no tab waits unnamed for a relay to say its
+    name. A tab is known by its port (`Tab`'s first field, `tab_port`,
+    `tabs_by_port`; the tab bar's keys are ports), the window's port
+    still takes `wm`'s notices and the shells' exits.
+  - **One set, made as the tabs change.** `vt` waits with
+    `port_receive_set` on its window's port and every tab's
+    (`vt_ports`); `vt_waiting` makes the set again after a tab opens or
+    closes, not every message. A window therefore has at most 31 tabs
+    (`tabs_most`, `port_set_limit` less the window's), and a 32nd is
+    refused, said on stderr: desktop.md's Limits.
+  - **A closed tab's port is kept, not leaked.** No call gives a port
+    back, so the tab's port goes on `Vt`'s list of free ports and the
+    next tab takes it, emptied first (`port_drained`) of what the old
+    shell sent last. A tab's name is let go as it closes
+    (`name_let_go`, `name_unregister`), so `vt3` closed is `vt3` free.
+  - **Terminal's `open`** (0032: a new window in the first Terminal's
+    process) goes in `from_window` in `vt.l0`, where everything that
+    comes on the window's port is taken: an `open` request there would
+    open a second window. `Vt` holds one `UiWin` and its tabs; for many
+    windows it becomes a window's `Vt` per `UiApp` id, the tabs' ports
+    joining one set across them (`vt_ports` over every window), within
+    the same 32.
+  Tests: `tabs_test.l0` keyed by port (`test_ports`, `test_not_found`,
+  `test_pids` shells alone), `vt_test.l0`'s `test_tabs_most`;
+  `tests/vt.sh` checks `ps` shows the windows' two `vt`s and no other
+  (the pids as step 4 left them, `vt_base` 16). Checked on QEMU, four
+  CPUs: `tests/vt.sh` and `tests/launcher.sh`.

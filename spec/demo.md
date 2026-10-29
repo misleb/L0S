@@ -88,14 +88,14 @@ booted with `root=UUID`, or else from the initramfs.
 | 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
 
 An app opened then takes the next pids. A Terminal, the first opened,
-is three: `vt`, its window, with a tab, `vt1`, the first name free,
+is two: `vt`, its window, with a tab, `vt1`, the first name free,
+which it registers on a port of its own and waits on with its window's,
 which edits the keys `wm` sends it into the selected tab's lines, as
 `uart` does what the serial line sends, and draws what is written to
-the tab into its window; `vt tab`, the tab's relay, which the `vt`
-starts, which registers the tab's name and passes on to the `vt` all
-that is sent to it; and `sh vt1`, the tab's shell, which the `vt`
-starts, whose `exit` closes its tab, and, as it is the last, the
-window, ending its `vt`. Each tab opened has its own relay and shell.
+the tab into its window; and `sh vt1`, the tab's shell, which the `vt`
+starts, whose `exit` closes its tab, letting its name go, and, as it
+is the last, the window, ending its `vt`. Each tab opened is one more
+process, its shell.
 
 How the display, the compositor and its clients fit together is under
 [The desktop](desktop.md#the-desktop).

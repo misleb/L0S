@@ -7,7 +7,6 @@
 ; bottom.
 ;
 ;   vt [COLS ROWS]          a window of 80 by 24 cells unless given
-;   vt tab PORT PID         a tab's relay, which vt starts itself
 ;
 ; The window draws its own decorations (window.l0's ui_open_csd): the
 ; toolkit's header bar, with the selected tab's name as its title and a
@@ -19,14 +18,16 @@
 ; every tab's cells wrapped again at the new width (cells_rewrapped).
 ;
 ; Each tab is a terminal as user/lib/tty.l0 says, the same as uart's
-; console: "r" for a line, "i" for Ctrl-C notices, "w" to write. Its name
-; is the first of vt1, vt2, and so on that no one has registered, held by
-; its relay, a vt of its own that registers it and passes all that is
-; sent to it on to this one, which knows the tab by its relay's pid: a
-; process can wait on only one port, and a name goes only with the process
-; that registered it. Once the relay says its name, vt starts the tab's
-; shell, sh NAME, and watches it: when the shell exits the tab closes, and
-; the window with its last, vt then exiting with that shell's status.
+; console: "r" for a line, "i" for Ctrl-C notices, "w" to write. Each tab
+; has a port of its own, on which vt registers its name, the first of
+; vt1, vt2, and so on that no one has registered, and vt waits on the
+; window's port and every tab's at once, a set of ports (port_set), so it
+; knows a tab by the port a message came on. With its name registered vt
+; starts the tab's shell, sh NAME, and watches it: when the shell exits
+; the tab closes, its name let go (name_unregister) and its port kept for
+; the next tab, and the window closes with its last, vt then exiting with
+; that shell's status. A window has at most tabs_most tabs, as a set
+; holds port_set_limit ports.
 ; The wheel scrolls the selected tab back through what scrolled off it.
 ; At the desktop's scale 2 a cell is still 8 by 16 of the desktop's
 ; pixels, 16 by 32 of its buffer's, and its characters are the face's
@@ -270,67 +271,43 @@
       (Term 0 0 (max 8 (min 158 (int_prefix (head argv) 0)))
                 (max 2 (min 46 (int_prefix (head (tail argv)) 0))))))
 
-; A window, or, given tab PORT PID, a tab's relay.
-(def vt () int
-  (let argv (args)
-    (if (if (ge (length argv) 3) (eq (head argv) "tab") false)
-        (relay (int_prefix (nth argv 1) 0) (int_prefix (nth argv 2) 0))
-        (windowed (vt_cells argv)))))
+; A window of the cells the arguments give.
+(def vt () int (windowed (vt_cells (args))))
 
-; ---------------------------------------------------------------- relay
+; ---------------------------------------------------------------- ports
 
-; A tab's relay: its own port registered as the first vtN free, the
-; window's vt, pid parent, told the name on port to as "tab NAME", and
-; then everything sent to the name passed on to it, as it came, until
-; the window's vt exits or is gone.
-(def relay ((to int) (parent int)) int
-  (let port (port_new)
-    (match (vt_register port 1)
-      ((VtUnnamed why) (complain why))
-      ((VtNamed name)
-        (match (proc_watch parent port)
-          ((WatchNoProc) 0)
-          ((WatchFull) (complain "cannot watch its window's vt"))
-          ((Watched)
-            (match (port_send to (append "tab " name))
-              ((Sent) (relayed port to parent))
-              ((SendFull) (relayed port to parent))
-              ((SendNoPort) 0)
-              ((SendTooBig) (complain "its name is too long")))))))))
+; The most tabs a window has: a set holds port_set_limit ports, the
+; window's one of them.
+(def tabs_most () int (sub (port_set_limit) 1))
 
-; The relay's loop: each message on port passed on to to, until the
-; window's vt, parent, exits.
-(def relayed ((port int) (to int) (parent int)) int
-  (match (port_receive port)
-    ((RecvFailed) (complain "lost its port"))
-    ((Message from b)
-      (match (exit_of (Message from b))
-        ((Exited pid status) (if (eq pid parent) 0 (relayed port to parent)))
-        ((NotExit) (if (passed_on to b) (relayed port to parent) 0))))))
+; port, every message waiting on it taken and dropped, as a closed tab's
+; port is before another tab has it: what its old shell sent last.
+(def port_drained ((port int)) int
+  (match (port_try_receive port)
+    ((RecvFailed) port)
+    ((Message from b) (port_drained port))))
 
-; A message's bytes b passed on to port to as they came, waiting while
-; its queue is full; false if it is gone.
-(def passed_on ((to int) (b bytes)) bool
-  (match (port_forward to b)
-    ((Sent) true)
-    ((SendFull) (let s (sleep_ns 1000000) (passed_on to b)))
-    ((SendNoPort) false)
-    ((SendTooBig) true)))
-
-; What a relay says first: the name it registered, if m's payload,
-; payload, is "tab NAME".
-(def relay_name ((payload (list int))) (list int)
-  (if (starts_with payload "tab ") (drop_n payload 4) ""))
+; name, a closed tab's, let go: free for the next tab, or for anyone,
+; at once. One already gone, or not vt's, is let be: the tab goes
+; either way.
+(def name_let_go ((name (list int))) int
+  (if (is_empty name)
+      0
+      (match (name_unregister name)
+        ((Unregistered) 0)
+        ((UnregisterNoName) 0)
+        ((UnregisterNotYours) 0))))
 
 ; ---------------------------------------------------------------- serving
 
 ; The window: the toolkit's window, the tabs, the status of the last
-; shell to exit, the title wm was last told, and what was last drawn
-; whole in the terminal's area.
-(data Vt (Vt UiWin Tabs int (list int) Shown))
+; shell to exit, the title wm was last told, what was last drawn whole
+; in the terminal's area, and the ports of tabs closed, kept for the
+; next tabs, since a port is never given back.
+(data Vt (Vt UiWin Tabs int (list int) Shown (list int)))
 
 ; What was last drawn whole: the area, the canvas, the tab shown, by its
-; relay, and how far back its view was. A view that differs in any of
+; port, and how far back its view was. A view that differs in any of
 ; them from what is to be shown is drawn whole again.
 (data Shown (Shown Rect Canvas int int))
 
@@ -345,36 +322,58 @@
       (match (ui_open_csd "Terminal" (mul cols (cell_w)) (add (ui_headerbar_h) (mul rows (cell_h))))
         ((UiOpenFailed why) (complain why))
         ((UiOpenedWin w)
-          (serve (refreshed (tab_opened (Vt w (tabs_none) 0 "Terminal" (Shown (Rect 0 0 0 0) (ui_win_canvas w) 0 0))))))))))
+          (serve (refreshed (vt_waiting (tab_opened (Vt w (tabs_none) 0 "Terminal" (Shown (Rect 0 0 0 0) (ui_win_canvas w) 0 0) (nil int)))))))))))
 
 ; The window, its tabs, and the last status.
-(def vt_win ((v Vt)) UiWin (match v ((Vt w ts st title sh) w)))
-(def vt_tabs ((v Vt)) Tabs (match v ((Vt w ts st title sh) ts)))
+(def vt_win ((v Vt)) UiWin (match v ((Vt w ts st title sh free) w)))
+(def vt_tabs ((v Vt)) Tabs (match v ((Vt w ts st title sh free) ts)))
 
 ; v with other tabs.
-(def vt_tabbed ((v Vt) (ts Tabs)) Vt (match v ((Vt w old st title sh) (Vt w ts st title sh))))
+(def vt_tabbed ((v Vt) (ts Tabs)) Vt (match v ((Vt w old st title sh free) (Vt w ts st title sh free))))
+
+; What vt waits on: its window's port, then every tab's.
+(def vt_ports ((v Vt)) (list int) (cons (ui_win_port (vt_win v)) (tabs_ports (vt_tabs v))))
+
+; v, its set of ports made its window's and its tabs', as they are after
+; a tab opens or closes; saying why not if the kernel refuses it, which
+; tabs_most keeps from happening.
+(def vt_waiting ((v Vt)) Vt
+  (match (port_set (vt_ports v))
+    ((PortSetMade) v)
+    ((PortSetNotYours) (said v (port_setting_why (PortSetNotYours))))
+    ((PortSetSize) (said v (port_setting_why (PortSetSize))))))
 
 ; Serves the window until its last tab closes, or its close button is
-; clicked.
+; clicked, waiting on its set of ports.
 (def serve ((v Vt)) int
-  (match (port_receive (ui_win_port (vt_win v)))
-    ((RecvFailed) (complain "lost its port"))
-    ((Message from b)
-      (match (received v (Message from b) from b)
-        ((Go v2) (serve v2))
-        ((Stop status) status)))))
+  (match (port_receive_set)
+    ((SetRecvFailed) (complain "lost its ports"))
+    ((SetMessage port m)
+      (match m
+        ((RecvFailed) (complain "lost its ports"))
+        ((Message from b)
+          (match (received v port m from b)
+            ((Go v2) (serve v2))
+            ((Stop status) status)))))))
 
-; What a message m, bytes b from from, does: the compositor's is the
-; window's event; a relay's is its tab's; an exit notice closes a tab.
-(def received ((v Vt) (m Message) (from int) (b bytes)) Step
+; What a message m, bytes b from from, that came on port does: on the
+; window's port, the window's; on a tab's, the tab's terminal's.
+(def received ((v Vt) (port int) (m Message) (from int) (b bytes)) Step
+  (if (eq port (ui_win_port (vt_win v)))
+      (from_window v m from)
+      (match (tabs_by_port (vt_tabs v) port)
+        ((Some t) (Go (from_tab v t (msg_text b))))
+        ((None) (Go v)))))
+
+; What came on the window's port, m from from: the compositor's notice,
+; the window's event; or a shell's exit, which closes its tab. Whatever
+; a Terminal is asked as an app comes here too.
+(def from_window ((v Vt) (m Message) (from int)) Step
   (if (eq from (ui_win_wm_pid (vt_win v)))
       (from_wm v m)
-      (match (tabs_by_relay (vt_tabs v) from)
-        ((Some t) (Go (from_relay v t (msg_text b))))
-        ((None)
-          (match (exit_of m)
-            ((Exited pid status) (exited v pid status))
-            ((NotExit) (Go v)))))))
+      (match (exit_of m)
+        ((Exited pid status) (exited v pid status))
+        ((NotExit) (Go v)))))
 
 ; What the compositor sent, m, a window notice about vt's window: a key,
 ; to the selected tab; the wheel, over the terminal, scrolling it;
@@ -403,7 +402,7 @@
             ((UiRouted w2 action) (acted (vt_windowed v w2) action))))))))
 
 ; v with the window w.
-(def vt_windowed ((v Vt) (w UiWin)) Vt (match v ((Vt old ts st title sh) (Vt w ts st title sh))))
+(def vt_windowed ((v Vt) (w UiWin)) Vt (match v ((Vt old ts st title sh free) (Vt w ts st title sh free))))
 
 ; The terminal's area in the window as it is.
 (def vt_area ((v Vt)) Rect
@@ -416,7 +415,7 @@
   (if (eq action (ui_close_action))
       (Stop (closed_all v))
       (if (eq action "tab.new")
-          (Go (refreshed (tab_opened v)))
+          (Go (refreshed (vt_waiting (tab_opened v))))
           (let sel (ui_select_key "tabs" action)
             (if (not (is_empty sel))
                 (Go (refreshed (vt_tabbed v (tabs_select (vt_tabs v) (int_prefix sel 0)))))
@@ -425,36 +424,51 @@
                       (Go (refreshed (tab_ended v (int_prefix k 0))))
                       (Go (refreshed v)))))))))
 
-; v with a tab opened, and selected: its relay started, and watched, to
-; say its name; or v as it was, if it cannot start, saying why.
+; v with a tab opened, and selected: a port for it, a closed tab's or a
+; new one, its name registered there and its shell started; or v as it
+; was, the port kept, if either cannot be, or it has tabs_most tabs
+; already, saying why. The caller then waits on the tab's port too
+; (vt_waiting).
 (def tab_opened ((v Vt)) Vt
-  (let port (ui_win_port (vt_win v))
-    (match (spawn_path (proc_path (l0s_pid)) (Some (cons "tab" (cons (digits port) (cons (digits (l0s_pid)) (nil (list int)))))))
-      ((Spawned pid)
-        (match (proc_watch pid port)
-          ((Watched) (vt_tabbed v (tabs_add (vt_tabs v) (tab_new pid 80 24))))
-          ((WatchNoProc) v)
-          ((WatchFull) (let k (proc_kill pid) v))))
-      ((SpawnNoEntry) (said v "no program to start a tab's relay"))
-      ((SpawnNotProgram) (said v (cannot_relay (SpawnNotProgram))))
-      ((SpawnTooBig) (said v (cannot_relay (SpawnTooBig))))
-      ((SpawnNoRoom) (said v (cannot_relay (SpawnNoRoom)))))))
+  (if (ge (tabs_count (vt_tabs v)) (tabs_most))
+      (said v (append "cannot open a tab: a window has at most " (digits (tabs_most))))
+      (match v
+        ((Vt w ts st title sh free)
+          (if (is_empty free)
+              (tab_on v (port_new))
+              (tab_on (Vt w ts st title sh (tail free)) (port_drained (head free))))))))
 
-; Why a tab's relay did not start, as spawning it answered s.
-(def cannot_relay ((s Spawn)) (list int) (append "cannot open a tab: " (spawn_why s)))
+; v with a tab on port, its name the first vtN free registered there.
+(def tab_on ((v Vt) (port int)) Vt
+  (match (vt_register port 1)
+    ((VtUnnamed why) (said (vt_freed v port) why))
+    ((VtNamed name) (tab_named v port name))))
+
+; v with a tab on port, named name: its shell started, sh NAME, and the
+; tab added and selected; or, if the shell cannot start, its name let
+; go and its port kept, saying why.
+(def tab_named ((v Vt) (port int) (name (list int))) Vt
+  (match (shell_started name (ui_win_port (vt_win v)))
+    ((ShellRunning pid) (vt_tabbed v (tabs_add (vt_tabs v) (tab_started (tab_new port 80 24) name pid))))
+    ((NoShell why) (let u (name_let_go name) (said (vt_freed v port) why)))))
+
+; v with port kept for a later tab, if it is a port.
+(def vt_freed ((v Vt) (port int)) Vt
+  (match v ((Vt w ts st title sh free) (if (gt port 0) (Vt w ts st title sh (cons port free)) v))))
 
 ; v, why said on standard error.
 (def said ((v Vt) (why (list int))) Vt
   (let w (write_err (append "vt: " (append why "\n"))) (let f (file_flush (IoFile 2)) v)))
 
-; The tab whose relay is pid ended: its shell, if it has one, killed, and
-; the tab closed once its exit is told; else its relay killed.
-(def tab_ended ((v Vt) (pid int)) Vt
-  (match (tabs_by_relay (vt_tabs v) pid)
+; The tab on port ended: its shell killed, and the tab closed once its
+; exit is told.
+(def tab_ended ((v Vt) (port int)) Vt
+  (match (tabs_by_port (vt_tabs v) port)
     ((None) v)
-    ((Some t) (let k (proc_kill (if (eq (tab_shell t) 0) (tab_relay t) (tab_shell t))) v))))
+    ((Some t) (let k (killed (cons (tab_shell t) (nil int))) v))))
 
-; Every tab's shell and relay ended, and the window closed: 0.
+; Every tab's shell ended, and the window closed: 0. Its names go as vt
+; exits.
 (def closed_all ((v Vt)) int
   (let k (killed (tabs_pids (vt_tabs v)))
     (let c (ui_close (vt_win v)) 0)))
@@ -464,50 +478,34 @@
   (if (is_empty pids) 0 (let k (proc_kill (head pids)) (killed (tail pids)))))
 
 ; A process watched, pid, exited with status: if it is a tab's shell, the
-; tab closes, its relay killed; if a tab's relay, the tab closes, its
-; shell killed. With no tab left the window closes and vt ends with the
+; tab closes. With no tab left the window closes and vt ends with the
 ; last shell's status.
 (def exited ((v Vt) (pid int) (status int)) Step
-  (match v
-    ((Vt w ts st title sh)
-      (match (tabs_by_shell ts pid)
-        ((Some t) (tab_closed (Vt w ts status title sh) (tab_relay t) (tab_relay t)))
-        ((None)
-          (match (tabs_by_relay ts pid)
-            ((Some t) (tab_closed v pid (tab_shell t)))
-            ((None) (Go v))))))))
+  (match (tabs_by_shell (vt_tabs v) pid)
+    ((Some t) (tab_closed v t status))
+    ((None) (Go v))))
 
-; The tab whose relay is relay closed, other, its relay or shell still
-; running, killed; the window closed with the last.
-(def tab_closed ((v Vt) (relay int) (other int)) Step
-  (let k (if (eq other 0) 0 (match (proc_kill other) ((Killed) 0) ((KillNoProc) 0) ((KillDenied) 0)))
+; The tab t closed, its shell having exited with status: its name let
+; go, its port kept for the next tab and no longer waited on; the window
+; closed with the last.
+(def tab_closed ((v Vt) (t Tab) (status int)) Step
+  (let u (name_let_go (tab_name t))
     (match v
-      ((Vt w ts st title sh)
-        (let ts2 (tabs_drop ts relay)
+      ((Vt w ts st title sh free)
+        (let ts2 (tabs_drop ts (tab_port t))
           (if (eq (tabs_count ts2) 0)
-              (let c (ui_close w) (Stop st))
-              (Go (refreshed (Vt w ts2 st title sh)))))))))
+              (let c (ui_close w) (Stop status))
+              (Go (refreshed (vt_waiting (Vt w ts2 status title sh (cons (tab_port t) free)))))))))))
 
-; What a tab's relay passed on, payload: first its name, then the tab's
-; requests as a terminal takes them.
-(def from_relay ((v Vt) (t Tab) (payload (list int))) Vt
-  (if (is_empty (tab_name t))
-      (tab_named v t (relay_name payload))
-      (match t
-        ((Tab r sh name term cl back con)
-          (match (tty_request con payload)
-            ((TtyAsk con2) (vt_tabbed v (tabs_put (vt_tabs v) (Tab r sh name term cl back (deliver con2)))))
-            ((TtyWrite bs) (output v t bs))
-            ((TtyAnswer to body) (let s (port_send to body) v)))))))
-
-; The tab t named name by its relay: its shell started, sh NAME; or, if
-; it cannot start, the tab closed, its relay killed, saying why.
-(def tab_named ((v Vt) (t Tab) (name (list int))) Vt
-  (match (shell_started name (ui_win_port (vt_win v)))
-    ((ShellRunning pid) (refreshed (vt_tabbed v (tabs_put (vt_tabs v) (tab_started t name pid)))))
-    ((NoShell why)
-      (let k (proc_kill (tab_relay t))
-        (said (vt_tabbed v (tabs_drop (vt_tabs v) (tab_relay t))) why)))))
+; What came on the tab t's port, payload: its requests as a terminal
+; takes them.
+(def from_tab ((v Vt) (t Tab) (payload (list int))) Vt
+  (match t
+    ((Tab r sh name term cl back con)
+      (match (tty_request con payload)
+        ((TtyAsk con2) (vt_tabbed v (tabs_put (vt_tabs v) (Tab r sh name term cl back (deliver con2)))))
+        ((TtyWrite bs) (output v t bs))
+        ((TtyAnswer to body) (let s (port_send to body) v))))))
 
 ; What starting the shell came to: its pid, watched; or why not.
 (data Shell (ShellRunning int) (NoShell (list int)))
@@ -594,7 +592,7 @@
 ; not have a resize, all of it again.
 (def refreshed ((v Vt)) Vt
   (match v
-    ((Vt w ts st title shown)
+    ((Vt w ts st title shown free)
       (let a (term_area (ui_win_w w) (ui_win_h w) (tabs_count ts))
         (let ts2 (tabs_resized ts (area_cols a) (area_rows a))
           (let title2 (tabs_title ts2)
@@ -602,7 +600,7 @@
               (let shown2 (view_shown w ts2 a shown)
                 (let w2 (ui_present w (vt_view ts2 title2))
                   (let d (if (eq shown2 shown) 0 (ui_win_damaged w2 (cons a (nil Rect))))
-                    (let v2 (Vt w2 ts2 st title2 shown2)
+                    (let v2 (Vt w2 ts2 st title2 shown2 free)
                       (if (if (eq (ui_win_canvas w2) (ui_win_canvas w)) (if (eq (ui_win_w w2) (ui_win_w w)) (eq (ui_win_h w2) (ui_win_h w)) false) false)
                           v2
                           (refreshed v2)))))))))))))
@@ -613,7 +611,7 @@
   (match (tabs_selected ts)
     ((None) shown)
     ((Some t)
-      (let want (Shown a (ui_win_canvas w) (tab_relay t) (tab_back t))
+      (let want (Shown a (ui_win_canvas w) (tab_port t) (tab_back t))
         (if (eq want shown)
             shown
             (let c (view_drawn (ui_win_canvas w) (ui_win_face w) a t) want))))))
