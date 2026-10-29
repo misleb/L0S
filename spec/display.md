@@ -356,6 +356,21 @@ frames in one would go uncounted.
 **Seen** on a Pi 5 at 3840×2160 at 60 Hz: frames 600, 1200 and 1800
 said 10.000 s apart, every change shown, none left pending.
 
+**Frames and releases** (the protocol's `frames`; written, not yet run
+on a board). `hvs` keeps the ports `frames` names (`frames.l0`), and at
+each end of frame that shows a change, by the bookkeeping above
+(`shown.l0`'s `changes_shown`), tells them first a `release` of each
+buffer the lists it shows left out, then `frame N`, N counting the
+frames that showed a change from 1. A `layers` notes the buffers its
+list leaves out with the switch (`changes_releasing`), so they are
+released at the end of the frame after the one that took it, as the
+HVS reads every pixel of a buffer it shows every frame. A `damage` is a
+frame two ends of frame on, as its clean is shown; a pointer's move,
+which writes the list again, is one too. Unlike `virtio-gpu`'s, these
+notices come after the reply, at the end of the frame. Where the board
+gives no end of frame, and `hvs` polls, it tells a frame as each change
+is made and a release as its list is taken.
+
 **The first runs** go one boot a stage, `probe`, `list`, `iommu` and
 then the whole driver, each with `tools/pi5-boot --until 'l0s>'` and its
 log kept from `build/pi5-serial.log`. They should check these on the

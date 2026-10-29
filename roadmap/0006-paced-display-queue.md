@@ -82,8 +82,9 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
 
 ## Spec changes
 
-- display.md: in the Pi 5's section, when `hvs` sends `frame N` and
-  `release`.
+- display.md: the Pi 5's "Frames and releases", written with step 5's
+  code, says what a board showed of them, in place of "not yet run on
+  a board".
 
 ## Log
 
@@ -170,3 +171,18 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   and `files.sh` (which the first `make e2e` caught reading the pid as
   the line's last word), the `virtio-gpu` e2e case and the MCP server's
   `parse_windows` read the longer lines.
+- 2026-10-29: step 5's code, not run on a board, so the step stays
+  open. `hvs` answers `frames PORT`; `shown.l0` notes with each list
+  switched the buffers it leaves out (`changes_releasing`), and at each
+  end of frame says what it showed (`changes_shown`): the frame's
+  number among those that showed a change, and the buffers released,
+  which `frames.l0`'s `frames_taken` tells, releases first. Polling,
+  with no end of frame, it tells at once. `layers_left` moved to
+  `display_server.l0`, shared with `virtio-gpu`. Host-tested
+  (`shown_test.l0`, `frames_test.l0`). To check on the board: with
+  the desktop up, open Widgets and move the pointer over its buttons:
+  each hover shows at once, not 100 ms late, and `run windows` shows
+  the gallery's `buffer` flipping between its two ids and `frames`
+  growing with each change; `dmesg` shows no `refused:` from `hvs` and
+  the every-600th-frame line still `0 pending`; and a drag of a
+  window's edge shows no torn window.
