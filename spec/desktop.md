@@ -303,7 +303,11 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   the face, `/etc/face`, and icons, at every scale, from `/etc/icons`
   ([user/lib/ui/face.l0](../user/lib/ui/face.l0)): coverage, how much of
   each pixel a shape covers, 0 to 15. Each pixel is mixed with what is
-  under it by that much, since layers do not blend.
+  under it by that much, since layers do not blend. A strike a window
+  lacks is asked of `font` without waiting: the window answers the
+  pointer and the keys while `font` makes it, and its text is drawn when
+  it comes ([toolkit.md](toolkit.md), replies, not waits). So does a
+  Files window while its folder's file server lists it.
 - **The glyphs** are Source Sans 3's and Source Code Pro's TrueType outlines
   ([user/lib/format/ttf.l0](../user/lib/format/ttf.l0)) rasterized
   ([user/lib/gfx/glyphs.l0](../user/lib/gfx/glyphs.l0), with

@@ -73,7 +73,9 @@
             (UiAppFailed "no font")
             (let port (port_new)
               (let n (ui_app_named port)
-                (UiAppStarted (UiApp (Compositor cport rp pid s) port face ((MapEmpty int UiWin)) false (ui_loop_new))))))))))
+                (let rport (port_new)
+                  (let aport (port_new)
+                    (UiAppStarted (UiApp (Compositor cport rp pid s) port face ((MapEmpty int UiWin)) false (ui_loop_ports rport aport))))))))))))
 
 ; port registered as the app's name, app.EXEC (appopen.l0), EXEC the
 ; file name of this process's program, so that a launch of the app finds
@@ -141,7 +143,7 @@
             (UiAppRefused a (ui_regions_full_why used))
             (match (ui_win_open c f port title w h csd)
               ((UiOpenFailed why) (UiAppRefused a why))
-              ((UiOpenedWin win) (UiAppOpened (ui_app_put a win) (ui_win_id win)))))))))
+              ((UiOpenedWin win) (UiAppOpened (ui_app_put a (ui_win_ported win (ui_loop_rport lp) (ui_loop_aport lp))) (ui_win_id win)))))))))
 
 ; Window id closed, and its buffers given up, and the app without it; as
 ; it was if it has no such window.
@@ -180,7 +182,7 @@
 (def ui_strikes_in ((ks (list UiStrike)) (n int)) int
   (if (is_empty ks)
       n
-      (ui_strikes_in (tail ks) (match (head ks) ((UiStrikeIn r) (add n 1)) ((UiStrikeBytes b) n)))))
+      (ui_strikes_in (tail ks) (match (head ks) ((UiStrikeIn r) (add n 1)) ((UiStrikeBytes b) n) ((UiStrikeAsked t) n)))))
 
 ; Whether a window, one region more, fits with used held: within the
 ; process's 64, ui_app_reserve kept.
@@ -206,9 +208,44 @@
   (match a
     ((UiApp c port f ws o lp)
       (match (ui_loop_take lp port (compositor_pid c) (ui_app_held (map_values ws) ((MapEmpty int int))))
-        ((UiTaken lp2 m)
+        ((UiTaken lp2 got)
           (let a2 (UiApp c port f ws o lp2)
-            (UiAppNext a2 (ui_app_event a2 m))))))))
+            (match got
+              ((UiGotMsg m) (UiAppNext a2 (ui_app_event a2 m)))
+              ((UiGotStrike payload) (ui_app_struck a2 payload))
+              ((UiGotReply tag m) (UiAppNext a2 (UiAppEvent -1 (UiReply tag m))))
+              ((UiGotIdle) (UiAppNext a2 (UiAppEvent -1 (UiIdle))))
+              ((UiGotRedraw id) (UiAppNext a2 (UiAppEvent id (UiReply -1 (RecvFailed)))))
+              ((UiGotLost) (UiAppNext a2 (UiAppEvent -1 (UiOther -1 "")))))))))))
+
+; a once font answered a strike it asked for, payload: the strike taken
+; into the app's face, every window's text from it to be painted again
+; (window.l0's ui_win_restruck), and each window told, UiReply -1, the
+; first now and the rest by the steps after (the loop's redraws), so
+; that the app presents each.
+(def ui_app_struck ((a UiApp) (payload (list int))) UiAppNext
+  (match a
+    ((UiApp c port f ws o lp)
+      (match (ui_face_answered f payload)
+        ((UiAnswered f2 name)
+          (let ids (sort (map_keys ws))
+            (let a2 (UiApp c port f2 (ui_wins_restruck ws (map_values ws) name) o (ui_loop_redrawing lp (if (is_empty ids) ids (tail ids))))
+              (UiAppNext a2 (UiAppEvent (if (is_empty ids) -1 (head ids)) (UiReply -1 (RecvFailed)))))))))))
+
+; ws with each of wins restruck by name.
+(def ui_wins_restruck ((ws (Map int UiWin)) (wins (list UiWin)) (name (list int))) (Map int UiWin)
+  (if (is_empty wins) ws (ui_wins_restruck (map_put ws (ui_win_id (head wins)) (ui_win_restruck (head wins) name)) (tail wins) name)))
+
+; a after it asked port body, the answer to come as an event of no
+; window, UiReply tag: sent, never waited on (uiloop.l0's ui_loop_ask),
+; as Files lists a folder.
+(def ui_app_ask ((a UiApp) (tag int) (port int) (body (list int))) UiApp
+  (match a ((UiApp c p f ws o lp) (UiApp c p f ws o (ui_loop_ask lp tag port body)))))
+
+; a with idle work, so ui_app_next hands out UiIdle, of no window, while
+; nothing waits; or with none, so it waits.
+(def ui_app_idling ((a UiApp) (idle bool)) UiApp
+  (match a ((UiApp c p f ws o lp) (UiApp c p f ws o (ui_loop_idling lp idle)))))
 
 ; Each of wins's buttons as last told, by its id, onto m.
 (def ui_app_held ((wins (list UiWin)) (m (Map int int))) (Map int int)

@@ -83,7 +83,7 @@ make the slow path visible, and write down how an app stays answering.
   paint of the last view while its key and its place are the same;
   Fonts' page and the grids of Files and System Monitor keyed. Host tests
   that a hover lays out only what it lights.
-- [ ] Replies, not waits: the toolkit asks `font` for a strike and goes
+- [x] Replies, not waits: the toolkit asks `font` for a strike and goes
   on, the strike coming as a `UiReply` on its second port (0031), the
   text drawn once it is; `UiReply` for an app's own requests, Files'
   listing of a folder first. Idle work: a queue of bounded pieces the
@@ -286,3 +286,54 @@ make the slow path visible, and write down how an app stays answering.
     A hover's step over Fonts' page is then 2.0 to 2.4 ms: route 0.0,
     update and view 0.1, layout 1.5 (the page still measured, as a box
     measures each child, and the marks read), paint 0.3.
+- 2026-10-28: step 5, replies and idle work. The design calls:
+  - **Two reply ports beside the window's, one set.** `ui_app_start`
+    makes the toolkit's reply port, for strikes, and the program's, for
+    its own asks, and the loop makes the three the process's set the
+    first time it takes a message (`ui_loop_set`, `port_receive_set`),
+    falling back to the window's port alone if the set is refused. Two
+    ports, not one, as the toolkit's asks are made by `ui_present`, a
+    window's, and the program's by the program, and each port's answers
+    come in the order asked of one server, so neither needs to know of
+    the other's. A program of one window has them through `ui_open`'s
+    app (`ui_win_ported`).
+  - **A strike asked is kept as asked** (`UiStrikeAsked T`, a new
+    constructor of `UiStrike`, drawn as none), so it is not asked again,
+    and its answer is the oldest asked's (`ui_face_answered`), as `font`
+    answers one client in order. The face is the app's, so the answer
+    is the app's: every window's text from the strike is forgotten as
+    painted, and every keyed part laid out again, as a kept part may
+    hold that text (`ui_win_restruck`), and each window is handed
+    `UiReply -1` in turn (the loop's redraws), so the app presents it.
+  - **`UiReply TAG MESSAGE`** for the program's asks (`ui_win_ask`,
+    `ui_app_ask`), tags matched in order, and `UiIdle` for idle work's
+    turn, two new events. Idle work is the program's, as L0 has no
+    function values: it says it has some (`ui_app_idling`), the loop
+    hands out `UiIdle` while nothing waits, and the program does one
+    piece. An ask that cannot be sent is answered at once, `RecvFailed`,
+    so no state waits forever.
+  - **Files** asks a volume's folder of its file server (`fl_go` makes
+    the state `FlListing`, a new `FlOver`, and the loop asks it after
+    the step, `fl_asking`), and takes each reply as it comes, asking for
+    more from where the last ended as `fs_list` does
+    (`fl_listing_reply`); a reply of an older listing, by its tag (the
+    window's id and a count), changes nothing. The place shows what it
+    did meanwhile. Once listed, every document and app is shown at
+    once, as a document and an app with no icon, and then looked at as
+    idle work, a thing a piece (`fl_looked`: whether a document is a
+    program, an app's icon), in `Files`' new last field; before, the
+    listing stat'ed every file before showing any. Left blocking, and
+    said so in step 6's look through the apps: `/Volumes`' sizes, each
+    volume's `df`; a refresh after a change; the listing of an open's
+    folder; the changes themselves (make, rename, delete), one request
+    each, which the user asked for.
+  On QEMU, Fonts opened: its first step's wait on `font` went from
+  1391.5 ms to 1.7 (`slow step: 70.9 ms: ... wait 1.7, paint 39.4`), and
+  the page's from 231.5 to 0.5; the text comes a moment after.
+  `tests/fontview.sh`, `files.sh`, `launch.sh` and `disks.sh` pass.
+  Host tests: the face's answers in order and a strike asked drawn as
+  none, a window's text forgotten as painted once its strike comes
+  (`window_test.l0`); an ask that cannot be sent answered, redraws
+  first, idle's turn, nothing (`uiloop_test.l0`); Files' listing asked,
+  its request, its tag, a reply shown with work to do, and an older
+  reply ignored (`files_test.l0`).

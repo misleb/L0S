@@ -243,6 +243,8 @@
   (UiCloseAsked)                 ; the compositor's close button asks the window to close
   (UiExit int int)               ; a process watched has exited: its pid, its status
   (UiOpen int (list (list int))) ; the app launched again (appopen.l0): the reply port, the arguments
+  (UiReply int Message)          ; an answer to the program's ask (ui_win_ask), its tag, or -1 for the toolkit's own, a strike that came
+  (UiIdle)                       ; nothing waits, and the program said it has idle work: do a piece of it
   (UiOther int (list int)))      ; anything else: who sent it, and what
 
 ; The key event ev is, or none if it is something else.
@@ -253,7 +255,8 @@
     ((UiContext x y b) ((None KeyEvent)))
     ((UiLeave) ((None KeyEvent))) ((UiFocus f) ((None KeyEvent))) ((UiScroll x y dx dy) ((None KeyEvent)))
     ((UiResize rw rh) ((None KeyEvent))) ((UiCloseAsked) ((None KeyEvent)))
-    ((UiExit p s) ((None KeyEvent))) ((UiOpen r args) ((None KeyEvent))) ((UiOther f p) ((None KeyEvent)))))
+    ((UiExit p s) ((None KeyEvent))) ((UiOpen r args) ((None KeyEvent))) ((UiOther f p) ((None KeyEvent)))
+    ((UiReply t m) ((None KeyEvent))) ((UiIdle) ((None KeyEvent)))))
 
 ; The code of the key ev presses, or holds down so that it repeats; -1
 ; for a release, and for anything that is not a key.
@@ -270,14 +273,73 @@
 ; what waits first and puts it together, the pointer's moves and the
 ; wheel's turns that follow one another made one, so that a step slower
 ; than the pointer is not a queue of steps. What it is, as ui_event_of
-; says; a port gone is UiOther from -1.
+; says; a port gone is UiOther from -1. An answer to one of the
+; program's asks (ui_win_ask) is UiReply TAG MESSAGE; a strike font
+; answered with is taken into the window's face, its text to be painted
+; again, and is UiReply -1, so the program presents the window; with
+; idle work (ui_win_idling) and nothing waiting, UiIdle.
 (def ui_win_next ((w UiWin)) UiWinNext
   (match w
     ((UiWin c id cv port font st ns b g k m csd cl lp)
       (match (ui_loop_take lp port (compositor_pid c) (map_put ((MapEmpty int int)) id b))
-        ((UiTaken lp2 msg)
+        ((UiTaken lp2 got)
           (let w2 (UiWin c id cv port font st ns b g k m csd cl lp2)
-            (UiWinNext w2 (ui_event_of w2 msg))))))))
+            (match got
+              ((UiGotMsg msg) (UiWinNext w2 (ui_event_of w2 msg)))
+              ((UiGotStrike payload)
+                (match (ui_face_answered font payload)
+                  ((UiAnswered f2 name) (UiWinNext (ui_win_restruck (ui_win_faced w2 f2) name) (UiReply -1 (RecvFailed))))))
+              ((UiGotReply tag msg) (UiWinNext w2 (UiReply tag msg)))
+              ((UiGotIdle) (UiWinNext w2 (UiIdle)))
+              ((UiGotRedraw i) (UiWinNext w2 (UiReply -1 (RecvFailed))))
+              ((UiGotLost) (UiWinNext w2 (UiOther -1 ""))))))))))
+
+; w, a program of one window, after it asked port body, the answer to
+; come as UiReply tag: sent, never waited on (uiloop.l0's ui_loop_ask).
+(def ui_win_ask ((w UiWin) (tag int) (port int) (body (list int))) UiWin
+  (match w ((UiWin c id cv port0 font st ns b g k m csd cl lp) (UiWin c id cv port0 font st ns b g k m csd cl (ui_loop_ask lp tag port body)))))
+
+; w with idle work, so ui_win_next hands out UiIdle while nothing
+; waits, or with none, so it waits.
+(def ui_win_idling ((w UiWin) (idle bool)) UiWin
+  (match w ((UiWin c id cv port font st ns b g k m csd cl lp) (UiWin c id cv port font st ns b g k m csd cl (ui_loop_idling lp idle)))))
+
+; w with its loop's reply ports rport and aport, as its app's.
+(def ui_win_ported ((w UiWin) (rport int) (aport int)) UiWin
+  (match w ((UiWin c id cv port font st ns b g k m csd cl lp) (UiWin c id cv port font st ns b g k m csd cl (ui_loop_ports rport aport)))))
+
+; w once strike name has come: the text drawn from it no longer counted
+; as painted, so the next present paints it, and every keyed part laid
+; out again (its marks forgotten), as its nodes may hold such text.
+(def ui_win_restruck ((w UiWin) (name (list int))) UiWin
+  (if (is_empty name)
+      w
+      (match w
+        ((UiWin c id cv port font st ns b g k m csd cl lp)
+          (UiWin c id cv port font st (ui_nodes_restruck ns name (ui_face_scale font) (nil UiNode)) b g k m csd cl lp)))))
+
+; Each of ns with its text from strike name, at face scale s, left out,
+; and no mark, onto the reversed acc.
+(def ui_nodes_restruck ((ns (list UiNode)) (name (list int)) (s int) (acc (list UiNode))) (list UiNode)
+  (if (is_empty ns)
+      (rev acc)
+      (match (head ns)
+        ((UiNode r ops a f)
+          (ui_nodes_restruck (tail ns) name s
+            (cons (UiNode r (ui_ops_without ops name s (nil UiPaint)) (if (starts_with a "ui.kept.") "" a) f) acc))))))
+
+; ops but the text drawn from strike name at face scale s, onto the
+; reversed acc.
+(def ui_ops_without ((ops (list UiPaint)) (name (list int)) (s int) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty ops)
+      (rev acc)
+      (ui_ops_without (tail ops) name s
+        (match (head ops)
+          ((UiPText r t a c font b sc) (if (eq (ui_text_strike font b sc s) name) acc (cons (head ops) acc)))
+          ((UiPFill r c) (cons (head ops) acc))
+          ((UiPRound r rad c u) (cons (head ops) acc))
+          ((UiPIcon x y n c sc) (cons (head ops) acc))
+          ((UiPImage x y n d ts) (cons (head ops) acc))))))
 
 ; Whether ev says the port is gone, as a receive that failed gives
 ; (UiOther from -1): the loop has nothing more to wait for.
@@ -286,7 +348,7 @@
     ((UiOther from p) (lt from 0)) ((UiKey k) false) ((UiPress x y b) false) ((UiRelease x y b) false)
     ((UiMotion x y b) false) ((UiContext x y b) false) ((UiLeave) false) ((UiFocus f) false)
     ((UiScroll x y dx dy) false) ((UiResize w h) false) ((UiCloseAsked) false) ((UiExit p s) false)
-    ((UiOpen r args) false)))
+    ((UiOpen r args) false) ((UiReply t m) false) ((UiIdle) false)))
 
 ; What a message to the window's port is. The compositor names the window
 ; each of its notices is about (l0s.l0's win_notice): one about another
@@ -331,7 +393,8 @@
     ((UiKey k) (nil (list int))) ((UiPress x y b) (nil (list int))) ((UiRelease x y b) (nil (list int)))
     ((UiMotion x y b) (nil (list int))) ((UiContext x y b) (nil (list int))) ((UiLeave) (nil (list int)))
     ((UiFocus f) (nil (list int))) ((UiScroll x y dx dy) (nil (list int))) ((UiResize rw rh) (nil (list int)))
-    ((UiCloseAsked) (nil (list int))) ((UiExit p s) (nil (list int))) ((UiOther f p) (nil (list int)))))
+    ((UiCloseAsked) (nil (list int))) ((UiExit p s) (nil (list int))) ((UiOther f p) (nil (list int)))
+    ((UiReply t m) (nil (list int))) ((UiIdle) (nil (list int)))))
 
 ; The port an open, ev, wants its answer on; -1 for any other event.
 (def ui_open_reply ((ev UiEvent)) int
@@ -339,7 +402,30 @@
     ((UiOpen r args) r)
     ((UiKey k) -1) ((UiPress x y b) -1) ((UiRelease x y b) -1) ((UiMotion x y b) -1) ((UiContext x y b) -1)
     ((UiLeave) -1) ((UiFocus f) -1) ((UiScroll x y dx dy) -1) ((UiResize rw rh) -1) ((UiCloseAsked) -1)
-    ((UiExit p s) -1) ((UiOther f p) -1)))
+    ((UiExit p s) -1) ((UiOther f p) -1) ((UiReply t m) -1) ((UiIdle) -1)))
+
+; A reply to the program's ask: its tag and message; or none.
+(data UiReplyOf (UiReplyTo int Message) (UiNoReply))
+
+; The tag and message of a reply, ev, to the program's ask (ui_win_ask,
+; ui_app_ask), if it is one; none for the toolkit's own, a strike, and
+; any other event.
+(def ui_reply_of ((ev UiEvent)) UiReplyOf
+  (match ev
+    ((UiReply t m) (if (ge t 0) (UiReplyTo t m) (UiNoReply)))
+    ((UiOpen r args) (UiNoReply)) ((UiKey k) (UiNoReply)) ((UiPress x y b) (UiNoReply)) ((UiRelease x y b) (UiNoReply))
+    ((UiMotion x y b) (UiNoReply)) ((UiContext x y b) (UiNoReply)) ((UiLeave) (UiNoReply)) ((UiFocus f) (UiNoReply))
+    ((UiScroll x y dx dy) (UiNoReply)) ((UiResize rw rh) (UiNoReply)) ((UiCloseAsked) (UiNoReply)) ((UiExit p s) (UiNoReply))
+    ((UiOther f p) (UiNoReply)) ((UiIdle) (UiNoReply))))
+
+; Whether ev is idle work's turn.
+(def ui_is_idle ((ev UiEvent)) bool
+  (match ev
+    ((UiIdle) true)
+    ((UiReply t m) false) ((UiOpen r args) false) ((UiKey k) false) ((UiPress x y b) false) ((UiRelease x y b) false)
+    ((UiMotion x y b) false) ((UiContext x y b) false) ((UiLeave) false) ((UiFocus f) false)
+    ((UiScroll x y dx dy) false) ((UiResize rw rh) false) ((UiCloseAsked) false) ((UiExit p s) false)
+    ((UiOther f p) false)))
 
 ; The open ev answered: window id to be brought forward, 0 for the app's
 ; front one, told to its reply port, whatever came of it, so that it
@@ -452,6 +538,8 @@
             ((UiKey k) (ui_keyed w k))
             ((UiExit pid status) (UiRouted w ""))
             ((UiOpen r args) (let t (ui_open_answer ev 0) (UiRouted w (ui_open_action))))
+            ((UiReply t m) (UiRouted w ""))
+            ((UiIdle) (UiRouted w ""))
             ((UiOther from payload) (UiRouted w ""))))))))
 
 ; ---------------------------------------------------------- context menus
@@ -719,7 +807,7 @@
             (let ns (ui_layout_window widget ww wh (ui_st_keeping st (ui_kept_of old)))
               (let l (clock_ns)
                 (let full (Rect 0 0 ww wh)
-                  (let w2 (UiWin c id canvas port (ui_face_with_strikes font (ui_strikes_wanted font ns (nil (list int)))) st ns held g k m csd cl lp)
+                  (let w2 (UiWin c id canvas port (ui_face_asking font (ui_strikes_wanted font ns (nil (list int))) (ui_loop_rport lp)) st ns held g k m csd cl lp)
                     (let s (clock_ns)
                       (ui_win_stepped
                         (match swap

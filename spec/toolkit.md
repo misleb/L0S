@@ -113,6 +113,31 @@ by a cheaper value, as Files keys its items by their names, kinds and
 sizes and its views' state (`fl_items_key`), and Fonts its page by the
 face.
 
+**Replies, not waits.** A window's loop waits on three ports of its
+app's, as the process's set (`port_set`, made by the loop the first
+time): the window's, the toolkit's reply port, and the program's.
+`ui_present` asks `font` for a strike it lacks (`ui_face_asking`), its
+answer to the toolkit's reply port, and goes on: the strike is kept as
+asked (`UiStrikeAsked`) and its text drawn as none. When the answer
+comes the loop takes it into the face (`ui_face_answered`, in the
+order asked, as `font` answers in order), forgets the text from it as
+painted in each window, and their keyed parts (`ui_win_restruck`), and
+hands each window `UiReply -1`, so the program presents it and the
+text is drawn. A program asks a server the same way, `ui_win_ask W TAG
+PORT BODY` or `ui_app_ask`: the request sent with the program's reply
+port and never waited on, and its answer handed out as `UiReply TAG
+MESSAGE` (of no window, for an app), the tags in the order asked;
+`ui_reply_of` reads one. One that cannot be sent is answered at once,
+the message `RecvFailed`. Files lists a folder on a volume so.
+
+**Idle work.** A program with work too long for one step says so,
+`ui_win_idling W true` or `ui_app_idling`, and does it a bounded piece
+at a time: while nothing waits on its ports, the loop hands out
+`UiIdle` (`ui_is_idle`) rather than wait, and the program does one
+piece and presents; any message that comes is taken first. Files looks
+at a listed folder's files and apps so, a thing a piece, and says it has
+none left.
+
 **A slow step said.** A step is what one message does: routed
 (`ui_route`), the program's update and view, then `ui_present`'s
 layout, any wait on a server (a strike asked of `font`), paint, and
@@ -304,7 +329,15 @@ to `l0` are one namespace, and a duplicate is a compile error.
   message a step, after putting together what waits, a window's whole
   step each time; only a run of one window's moves and turns, with
   nothing else of it between, is put together, so moves of a window
-  with a key between them are two steps. A program ends
+  with a key between them are two steps. The toolkit cannot keep a
+  program from blocking itself: a request it waits on in its update,
+  or a piece of idle work longer than a frame, stops its windows as
+  long, which the slow step's line then says. Its own requests, the
+  strikes, are replies; a program that waits on a set of its own, as
+  `vt` does, takes no replies, so a `UiFontAt` it shows is never drawn
+  (`vt` shows none). Replies are matched to asks in the order asked, so
+  a program's asks go to servers that answer in order, as `fs` does
+  one client's. A program ends
   only by returning from `main`, so one that does nothing with a close
   is ended by the compositor at its asking (`end`).
 - Scrolling is by whole rows: the wheel's steps are counted, not its
