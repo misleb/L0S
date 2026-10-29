@@ -1,6 +1,6 @@
 # 0033: An app's loop that keeps its window answering
 
-Track: Toolkit · Status: blocked · Needs: 0021, 0031, 0032 · Spec: toolkit.md, desktop.md, programs.md, testing.md
+Track: Toolkit · Status: active · Needs: 0021, 0031, 0032 · Spec: toolkit.md, desktop.md, programs.md, testing.md
 
 ## Why
 

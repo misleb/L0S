@@ -14,6 +14,9 @@
 #   4. run open files /Volumes: a third Files window, of the same
 #      client, in front, at /Volumes, its sidebar's Volumes row selected
 #      and Computer's not
+#   5. Terminal clicked again: a second window of the same vt, in
+#      front, titled with its own tab's name, and wm never said an app
+#      did not answer its open
 #
 # Pids are read from run windows, never fixed. The serial line is typed
 # through a FIFO, and the board keeps running until this kills it. Run
@@ -183,3 +186,27 @@ line=$(printf '%s\n' "$wins" | grep -E ' front [0-9]+$')
 read -r _ _ fx fy _ <<< "$line"
 shows "at /Volumes: its Volumes row selected, Computer's not" \
   "$((fx + 200)) $((fy + 124)) $side_sel" "$((fx + 200)) $((fy + 76)) $sidebar"
+
+# 5. Terminal again: a second window of the one vt, in front, with a
+# tab of its own (so a title of its own, its tab's name), and no wait on
+# wm's 2 seconds for an open vt never answered (roadmap 0032's last
+# step).
+term_pid=$(printf '%s\n' "$wins" | grep -vE '^[0-9]+ (Files|Disks) ' | awk '{print $8}' | sort -u | head -1)
+[ -n "$term_pid" ] || fail "no Terminal window listed"
+click $apps_x 16; click $terminal_x $icon_y
+for try in $(seq 1 20); do
+  listed
+  n=$(printf '%s\n' "$wins" | awk -v p="$term_pid" '$8 == p' | grep -c .)
+  fp=$(printf '%s\n' "$wins" | grep -E ' front [0-9]+$' | awk '{print $8}')
+  [ "$n" = 2 ] && [ "$fp" = "$term_pid" ] && break
+done
+if [ "$n" != 2 ] || [ "$fp" != "$term_pid" ]; then
+  echo "not ok - launch: Terminal again: run windows listed:"
+  printf '%s\n' "$wins" | sed 's/^/  # /'
+  exit 1
+fi
+titles=$(printf '%s\n' "$wins" | awk -v p="$term_pid" '$8 == p {print $2}' | sort -u | grep -c .)
+[ "$titles" = 2 ] || fail "Terminal's two windows share one title, so one tab name"
+echo "ok - launch: Terminal again: two windows of one vt, pid $term_pid, the new one in front"
+grep -q "did not answer its open" "$out" && fail "wm waited on an open no app answered"
+echo "ok - launch: every open answered"

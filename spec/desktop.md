@@ -383,9 +383,11 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   the cursor, colors text or clears the screen (the line editing drops
   them); and a program is not told the terminal's size, so nothing it
   writes is laid out for it. Its scrollbar shows only while the view is
-  back, and its slider is not dragged. A window has at most 31 tabs, as
-  `vt` waits on a port a tab and its window's, a set of at most 32; a
-  closed tab's port is kept for the next, since no call gives one back.
+  back, and its slider is not dragged. A Terminal's windows, all in one
+  `vt`, have at most 31 tabs between them, as `vt` waits on a port a
+  tab and its app's one port, which every window's notices share, a set
+  of at most 32; a closed tab's port, of any window, is kept for the
+  next, since no call gives one back.
   A client paints what changed for every size it is asked for, all of it
   when the size outgrows its buffer, and `wm` restacks the screen once:
   Disks's drag paints about 7 ms a size on QEMU, and the restack takes
