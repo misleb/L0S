@@ -175,7 +175,8 @@ image exists: `make vt-initramfs` for `vt.sh` (the demo, with
 `tests/screen/etc`; `launcher.sh` clicks Applications, checks the
 launcher's page and Terminal's icon, closes it by Esc and by a click,
 and starts Terminal from it, the top bar then naming it), and
-`make disks-initramfs` for `disks.sh`, `disks-create.sh` and
+`make disks-initramfs` for `disks.sh`, `disks-create.sh`, `files.sh`,
+`launch.sh` (apps launched while they run, and `run open`) and
 `partitions.sh` (that with the clock and the disk's driver and file
 server, `tests/disks/etc`, on a disk each makes itself, from
 `tools/mkdisk` or `build/mkfs`, and passes as `QEMU_DISK`), and

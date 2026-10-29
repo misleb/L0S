@@ -777,7 +777,7 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # this machine's CPUs unless set; E2E_JOBS=1 runs one at a time). mkfs
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
-SCREEN_TESTS := vt files disks-create resize logo-menu procmon disks launcher launcher-install \
+SCREEN_TESTS := vt files launch disks-create resize logo-menu procmon disks launcher launcher-install \
                 fontview partitions usb fat hidpi widgets keyboard gpu-screen
 
 e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs $(BUILD)/mkfs

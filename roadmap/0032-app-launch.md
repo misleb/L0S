@@ -79,7 +79,7 @@ running, if one is.
   first started. `vt` keeps its tabs: a new window is a window of its
   own, with one tab. It follows 0031's rewrite of `vt` (its relays
   gone), once both have merged.
-- [ ] The screen test (`tests/launch.sh`, in `SCREEN_TESTS`): Files
+- [x] The screen test (`tests/launch.sh`, in `SCREEN_TESTS`): Files
   clicked twice in the launcher, `run windows` showing two windows of
   one client; Disks clicked twice, one window, then a Terminal over it
   and Disks clicked again, Disks in front with the focus; `open files
@@ -193,3 +193,18 @@ running, if one is.
   `wm` says `vt did not answer its open within 2 seconds`; no second
   Terminal is started. A Terminal's tabs are its new terminals until
   then.
+- 2026-10-28: step 6. `tests/launch.sh` boots the disks' initramfs, on
+  a fresh disk, as `files.sh` does, since Files lists `/Volumes` only
+  with `fs` running; it waits for `wm`'s `serving compositor` before its
+  first click, as the shell's prompt comes first. Every check reads `run
+  windows`: windows by title, their clients by the pid it gives last,
+  never a fixed pid, so 0031's shift of the demo's pids does not touch
+  it. Disks is checked to be the same pid after it is clicked from
+  behind Terminal; `/Volumes` by the third window's sidebar, its
+  Volumes row selected. A limit seen: an app's name is its exec's, so
+  two bundles of one program, as `launcher-install.sh`'s copy of
+  Terminal would be with the same file name, share one name, and the
+  second launched is asked of the first. `/bin/open` is one file more
+  in the `install`, `install_boot` and `rootboot_tmpfs` cases' counts,
+  which this step's run of `make e2e` found. `make check`, `make test` and
+  `make e2e` pass; the goal is done but for Terminal's answer.
