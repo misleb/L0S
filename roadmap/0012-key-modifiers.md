@@ -48,7 +48,7 @@ passing the bytes on untouched, and the readers take one word more.
 - [x] Shift-Tab: `ui_route` moves the focus to the target before it
   (`ui_focus_prev`), round to the last. Host tests in `widget_test` and
   `window_test`; `widgets.sh` checks the ring.
-- [ ] Files' Alt-Left and Alt-Right, Back and Forward, through the
+- [x] Files' Alt-Left and Alt-Right, Back and Forward, through the
   toolkit's `ui_key_mods`; Ctrl-C and Ctrl-V written as goal 0036.
   Host tests in `files_test`.
 - [ ] Terminal's shortcuts: Ctrl-Shift-T a new tab, Shift-Page Up and
@@ -57,11 +57,9 @@ passing the bytes on untouched, and the readers take one word more.
 
 ## Spec changes
 
-- desktop.md: Files' limit loses its "no modifiers" sentence, keeping
-  that it has no copy; Terminal's limit loses its, and says its
-  shortcuts.
-- toolkit.md: `ui_key_mods`.
-- programs.md: Files' and Terminal's keys.
+- desktop.md: Terminal's limit loses its "no modifiers" sentence, and
+  says its shortcuts.
+- programs.md: Terminal's keys.
 - testing.md: what `vt.sh` checks.
 
 ## Log
@@ -74,3 +72,6 @@ passing the bytes on untouched, and the readers take one word more.
   `usb.sh` type on each keyboard. An entry types nothing with Alt held.
 - 2026-10-28: step 2: Shift-Tab, `ui_focus_prev`; `widgets.sh` sees the
   ring go from Refresh to End Process and back.
+- 2026-10-28: step 3: Files' Alt-Left and Alt-Right (`fl_keyed`, the
+  toolkit's `ui_key_mods`). Ctrl-C and Ctrl-V need a copy Files does
+  not have, which is more than a key: written as 0036.

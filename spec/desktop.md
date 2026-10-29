@@ -379,8 +379,8 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   when it goes there and after it changes something, not when another
   program does, until Refresh. A file is shown as text only,
   its first 64 KB, 2000 lines of 240 characters at most, ASCII; and a
-  program it starts has no terminal. KeyEvent has no modifiers yet, so
-  there is no Ctrl-C, Ctrl-V or Alt-Left. Its window, like every
+  program it starts has no terminal. With nothing to copy, Ctrl-C and
+  Ctrl-V do nothing. Its window, like every
   client-decorated one, has no shadow, and the pointer over the inside
   of its edge is the arrow until it is pressed there: a client cannot
   ask for a pointer's shape, so only the border outside shows the
