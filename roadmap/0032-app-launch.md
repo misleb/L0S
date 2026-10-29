@@ -60,7 +60,7 @@ running, if one is.
   arguments, through `ui_app_event` as any other. An app that does not
   take it answers `shown 0`, so every app comes forward and none opens
   more, until it says otherwise. Host tests.
-- [ ] `wm`'s launch: a launch looks up the app's name; found, it sends
+- [x] `wm`'s launch: a launch looks up the app's name; found, it sends
   `open` and waits on the answer, on its alarm, 2 seconds at most;
   not, it starts the program with the arguments and keeps the app as
   starting until the name is registered, holding any launch meanwhile
@@ -68,7 +68,7 @@ running, if one is.
   app's front window, comes to the front with the focus, as a press on
   it would bring it. The launcher calls it. The choice is a pure
   function of what `wm` knows, tested in `wm_test.l0`.
-- [ ] `open APP [ARG ...]`: the compositor protocol's `launch NAME ARG
+- [x] `open APP [ARG ...]`: the compositor protocol's `launch NAME ARG
   ...` and a shell command, `user/bin/open`, that sends it, `APP` an
   app's name as the launcher shows it or its `exec`. desktop.md's
   protocol table, programs.md's row.
@@ -135,3 +135,39 @@ running, if one is.
   `ui_open_csd`, but its own loop drops a notice from the compositor
   that names no window of its (`from_wm`), so it never answers an open:
   see step 5.
+- 2026-10-28: steps 3 and 4, in one change, as the compositor's
+  `launch` is `wm`'s launch asked by another. The pure part is
+  `user/sbin/wm/launching.l0` and its tests, not `wm.l0` and
+  `wm_test.l0`, to keep it apart from 0031's changes to `wm.l0`
+  (`wm_test.l0` tests the window a launch brings forward,
+  `launch_window`, and `port_client`). `launch_choice` takes the
+  launches waited on, the exec and the name's lookup: `LaunchAsk PORT`
+  if it is registered, `LaunchHold` if the app is starting, else
+  `LaunchStart`. A `Launch` is `LaunchAsked EXEC PID PORT DUE` or
+  `LaunchStarting EXEC PID DUE HELD`, kept in `Bar`'s new last field,
+  not `Wm`'s, which every function of `wm` matches. The open's answer
+  comes to `wm`'s own port, so `received`, which 0031 changes, is not
+  touched: `replied` takes `shown ID` first (`app_shown_of`; a
+  request's first four bytes are its reply port, and "show" read as one
+  is no port), and matches it to the open asked of its sender, or else
+  the oldest asked of an app with no window known. The alarm is the one
+  wm has: `close_alarm` sets it for the soonest close or launch, and
+  `closes_due` gives up the launches due too (`launches_late`). An
+  answer brings forward the window named, if it is the sender's, else
+  its front window, with `raised_by`, as a press does. "Registered" is
+  seen as the app's first window: the toolkit registers before it opens
+  one, so `window`'s and `csd`'s reply (`window_came`) ends the start
+  and launches each held one again, which then asks it; a program that
+  never registers is started again for them, as before. A start has 10
+  seconds (`launch_start_ns`), as an app loads its face and icons
+  first; past it, held launches go to the app if its name is there by
+  then, or are dropped, never started again, and `wm` says so. An exit
+  ends whatever was waited on of the process (`gone`). The L0S menu's
+  About L0S launches the same way. `launch NAME ARG ...` is words, as
+  every request of `wm`'s is: `requested` reads them split at spaces,
+  and the shell splits `open`'s arguments at spaces already, so no
+  argument from it holds one; the open sent on is length-prefixed, so
+  another client could pass one. NAME is the app's name, its bundle's
+  or its exec (`launch_named`); `ok` comes once launched, not once the
+  window is up. `open` is `user/bin/open` (`run open files /Volumes`);
+  `/bin/open` joined the `fs` and `shell` e2e cases' listings.

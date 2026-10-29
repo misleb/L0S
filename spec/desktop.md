@@ -40,6 +40,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `end` | the client asking it killed, its windows closing with its exit: what the toolkit asks for a program that did nothing with the close of its last window, since a program cannot end itself but by returning from `main`. Refused for a driver |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
 | `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
+| `launch NAME ARG ...` | the app NAME launched with the ARGs, as the launcher launches it (below), the launcher closed: NAME its name as the launcher shows it, its bundle's name, or its exec, the first app of one kind that matches, the apps read again if none does; the ARGs words, each an argument of the `open` sent on. `ok` once it is launched, or `error: no app NAME`; what `open` asks |
 | `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
@@ -94,10 +95,8 @@ over it, lights the button with a pill and shows a page under the bar,
 `242424`, of each app's 48×48 icon with its name under it, in cells
 136×104, in rows from 64 below the bar, in the middle of the screen, in
 the archive's order, or, once `/` is a volume, the name order its file
-server lists them in. A click on an app closes the page and starts the
-app's program, which `wm` watches, as it does any client, so its slot
-is free once it exits; it gets the inittab's arguments for it, and
-`wm`'s terminal, the serial line. Esc, a click on the page, or
+server lists them in. A click on an app closes the page and launches
+the app (below), as the L0S menu's About L0S does. Esc, a click on the page, or
 Applications again closes it. While it is open no window is told of
 the pointer, the wheel or the keys. Its page is one buffer, painted
 when `wm` starts and again when opening it finds a changed set of
@@ -114,6 +113,30 @@ none, each its length as a u16, least significant byte first, then its
 bytes, so one may hold spaces, the whole within one message. The answer,
 to REPLY, is `shown ID`: the window to bring to the front, 0 for the
 app's front one. What an open does is the app's own.
+
+**Launching** ([user/sbin/wm/launching.l0](../user/sbin/wm/launching.l0))
+goes one way, whatever asks it: the launcher, the L0S menu's About L0S,
+or the compositor's `launch`, which the command `open` asks. `wm` looks
+the app's name up. Found, the
+app is running: `wm` sends it `open` with the launch's arguments, its
+answer to `wm`'s own port, and waits for it on its alarm, 2 seconds at
+most; then the window the answer names, or the app's front window if it
+names 0 or none of the app's, comes to the front with the focus, as a
+press on it would bring it. An app that does not answer in time has its
+front window brought forward all the same, and `wm` says so once
+(`disks did not answer its open within 2 seconds`). Not found, `wm`
+starts the app's program, with the arguments if there are any and
+otherwise the inittab's for it, watching it as it does any client so
+that its slot is free once it exits, and `wm`'s terminal, the serial
+line, as its own; and keeps the app as starting until its first window
+opens, which the toolkit opens only once the name is registered, 10
+seconds at most. A launch while it is starting is held, and launched
+again, so sent to the app, once that window has opened: two quick
+clicks start one process. A program that never registers its name is
+started again for a launch held meanwhile, as before there were names;
+one that opens no window in its time has its held launches sent if its
+name is registered by then, and dropped if not, and `wm` says so. An
+exit gives up whatever `wm` waited on the process for.
 The clock is
 `rtc clock` ([user/sbin/rtc](../user/sbin/rtc/rtc.l0)), which serves `clock`
 ([user/lib/proto/clock.l0](../user/lib/proto/clock.l0)): `listen` replies `time S`, S
