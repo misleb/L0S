@@ -15,7 +15,7 @@ pixels, and draw the pointer as a top layer.
 |---|---|
 | `info` | `display W H cursor scale S`: the screen's size in its own pixels, `cursor` if the driver moves a pointer itself, and the desktop's scale, 1 or 2 (none means 1) |
 | `buffer ID W H VA [N [S]]` | a buffer of W×H 4-byte pixels (b, g, r, and unused, or alpha for a cursor), at VA in the driver, shared there with `shm_share`, its rows S pixels apart (W if not given); N its pages, if more than S×H takes. The same pages may be given again under another ID at another size, as `wm` does to resize a window without sharing anything anew, and with the same S each row stays where it was |
-| `forget ID` | the buffer dropped, and the driver's mapping of it given up with `shm_unmap` once no other buffer is in its pages; refused while it is on the screen or is the pointer's |
+| `forget ID` | the buffer dropped, and the driver's mapping of it given up with `shm_unmap` once no other buffer is in its pages; refused while it is on the screen or is the pointer's. A driver that answers a restack before the screen shows it (`hvs`) keeps the pages until no list it may still read names them |
 | `layers ID X Y TOP ...` | the screen, bottom first: each buffer at X, Y, its rows read from row TOP on, as a ring. The bottom layer covers the screen. Only the bands of rows whose pixels changed are transferred and flushed; the first `layers` shows the whole screen |
 | `damage ID X Y W H ...` | each rectangle of its buffer changed, one or more groups of five: shown wherever they are visible, all together, with boxes that overlap transferred and flushed as one |
 | `shape ID TL TR BL BR` | the buffer's corners rounded, top left, top right, bottom left, bottom right, each radius from 0 (square) to half its width and height. virtio-gpu cannot blend, so it narrows the layer's rows within a corner, and `hvs` writes the alpha of the pixels there 0; either way the layer beneath shows there. A buffer is square when shared; if it is on the screen, the screen is rebuilt |
@@ -241,16 +241,32 @@ Scaler (SCALER6), so no pixel is copied:
    its first is two planes, one each side of the wrap, and a layer
    hidden whole by those above is none. A plane partly off the screen is
    cut, and the cut moves into its address (`pieces.l0`).
-3. **Two lists.** Each restack writes the half of the list memory the
-   channel isn't fetching (words 32 to 2063, or 2064 to 4095), points the
-   channel's `LPTRS` at it, and waits for the end of frame after which
-   `DL` shows it was taken (`frames.l0`): `hvs` binds channel 0's end of
-   frame (below) to a port of its own as it starts serving, waits on it
-   and its `display` port as one set, and counts each frame. After each
-   end of frame it reads `DL`, polling 2 ms more; a wait no end of frame
-   answers in 50 ms is said once and polled once more, and on a board
-   that gives no such interrupt it polls `DL` a millisecond apart for up
-   to 50 ms, as before. After a `SET_TIMING`, though, the firmware keeps the channel:
+3. **Two lists.** A list is written into the half of the list memory
+   the channel isn't fetching (words 32 to 2063, or 2064 to 4095), and
+   the channel's `LPTRS` pointed at it, which the channel takes from its
+   next frame, as `DL` then shows (`frames.l0`): `hvs` binds channel 0's
+   end of frame (below) to a port of its own as it starts serving, waits
+   on it and its `display` port as one set, and counts each frame.
+   **A restack is answered at once** (`pending.l0`): `layers`, `move`,
+   `shape`, `cursor`, and a `buffer` given again under an id the screen
+   shows, are planned as they come (their planes, their line memory,
+   their corners; a screen that cannot be one list is refused then), and
+   their list is written and pointed at now if the last list pointed at
+   has been taken (`DL` names it, read as the request comes). If it has
+   not, the screen asked is kept, over any kept before, and written at
+   the end of frame that shows that one taken, after which `DL` is read,
+   polling 2 ms more. So a list is never written into a half the channel
+   fetches or may fetch next, at most one list a frame is pointed at,
+   requests that come between are coalesced into the latest, and that
+   one is the screen shown once frames go by. A list pointed at and not
+   taken by an end of frame within 50 ms (an alarm on the same port
+   wakes `hvs` for it) is said once and `DL` read once more; if it was
+   not taken, the firmware is taken to keep the channel. On a board
+   that gives no end-of-frame interrupt, and once the firmware keeps
+   the channel, each restack is still written and waited for as it
+   comes, its reply sent after: `DL` polled a millisecond apart for up
+   to 50 ms, or the firmware's lists written below. After a
+   `SET_TIMING`, though, the firmware keeps the channel:
    whatever `LPTRS` is given, from the next frame it is back at one of
    the firmware's two lists, words 32 and 672, between which it flips
    every frame or so, without rewriting them, whether it was told the
@@ -262,7 +278,19 @@ Scaler (SCALER6), so no pixel is copied:
    columns. Either way the new list's planes take line memory (UPM)
    beside the list shown's: a plane still there as wide keeps its
    units and handle, and any other takes free ones, out of all 1,024
-   units and 32 handles (`pieces.l0`).
+   units and 32 handles (`pieces.l0`). The list beside it is the one
+   the channel will be fetching when the new one is written: the list
+   pointed at, if one is, else the list fetched.
+   **Forgotten pages wait for the lists.** As a restack's reply no
+   longer means the list before it is no longer read, a `forget` (or a
+   buffer given again under its id in other pages, or the wallpaper
+   leaving the stack) drops the buffer from what `hvs` answers from at
+   once, but unmaps its pages from the aperture and gives them up only
+   once no list names them that the channel fetches, is pointed at, or
+   is wanted next, nor the list it fetched before the one it fetches,
+   until that one is shown: at once if none does, else at the end of
+   the frame that shows a list leaving them out. A buffer given again
+   in those pages meanwhile keeps them.
 4. **The IOMMU.** A plane reads one run of addresses, and a client's
    pages are scattered. So each buffer's pages are mapped one after
    another in a 512 MB aperture of `iommu4` at 40 GB (`iommu.l0`).
@@ -303,13 +331,13 @@ Scaler (SCALER6), so no pixel is copied:
    open, and maps them in the aperture as a client's buffer is, cleaned
    out of the caches. That buffer is one plane, under every client's
    layers, over the black background, until a client's layer covers
-   the screen. Then the list without it is shown, two frames are waited
-   for, so that the channel fetches nothing from it, and its place in
-   the aperture is cleared and its pages unmapped. Seen on a Pi 5,
-   before the desktop.
+   the screen. Then it leaves the stack, and its pages are given up as a
+   forgotten buffer's are (item 3): once the list without it is shown,
+   its place in the aperture cleared and its pages unmapped. Seen on a
+   Pi 5, before the desktop.
 
-**The end of frame.** `hvs` waits on channel 0's to change a list
-(above, Two lists). What is known of it, from Raspberry Pi's Linux
+**The end of frame.** `hvs` takes channel 0's to point the channel at
+the next list (above, Two lists). What is known of it, from Raspberry Pi's Linux
 (rpi-6.12.y: `bcm2712.dtsi`, `vc4_hvs.c`, `irq-brcmstb-l2.c`) and,
 where it says so, the board:
 
@@ -344,8 +372,9 @@ at each end of frame it reads channel 0's `STATUS` and carries its
 count on by the 6-bit frame count's step, so the frames that pass while
 it serves a request, its interrupt taken and not yet acked, count too
 (up to 63 at once). Each change is noted with a number and the frame it
-is shown by: a list switched, at the end of the frame after the one in
-which it was taken; a `damage`'s clean, a frame later still, as the
+is shown by: a list switched, once `DL` shows it taken, at the end of
+the frame after the count then (`STATUS`'s, as the request comes, so
+an end of frame not yet taken counts); a `damage`'s clean, a frame later still, as the
 frame being fetched may have read some rows before. At each end of
 frame the changes due are marked shown, and `hvs` keeps the latest
 shown. Every 600th frame it says the count and the changes at the debug
@@ -361,10 +390,12 @@ on a board). `hvs` keeps the ports `frames` names (`frames.l0`), and at
 each end of frame that shows a change, by the bookkeeping above
 (`shown.l0`'s `changes_shown`), tells them first a `release` of each
 buffer the lists it shows left out, then `frame N`, N counting the
-frames that showed a change from 1. A `layers` notes the buffers its
-list leaves out with the switch (`changes_releasing`), so they are
-released at the end of the frame after the one that took it, as the
-HVS reads every pixel of a buffer it shows every frame. A `damage` is a
+frames that showed a change from 1. A list seen taken notes the
+buffers the list before it showed and it leaves out
+(`changes_releasing`), so they are released at the end of the frame
+after the one that took it, as the HVS reads every pixel of a buffer
+it shows every frame; a screen asked and coalesced away before it was
+written releases nothing. A `damage` is a
 frame two ends of frame on, as its clean is shown; a pointer's move,
 which writes the list again, is one too. Unlike `virtio-gpu`'s, these
 notices come after the reply, at the end of the frame. Where the board
@@ -447,6 +478,12 @@ of them could be confirmed from Linux's source:
   the HVS's own frame count barely moving, as if the channel stalled;
   more than 63 frames in one leave `hvs`'s count short. Neither was seen
   at 1920×1080.
+  A restack is answered before it is shown, and shown by the third end
+  of frame after it at the latest, as one list a frame is pointed at:
+  only while the channel is the driver's and ends of frame come. Where
+  the board gives none, or the firmware keeps the channel, each restack
+  is waited for as it comes, up to 50 ms or a frame, and `wm`, which
+  waits for each reply, with it.
   On a screen 2560 wide or more a window's frame is fetched only where
   it shows, while that leaves half the handles and line memory free.
   At 3840×2160 and 60 Hz the HVS has shown five windows steady; with

@@ -186,3 +186,22 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   growing with each change; `dmesg` shows no `refused:` from `hvs` and
   the every-600th-frame line still `0 pending`; and a drag of a
   window's edge shows no torn window.
+- 2026-10-29: the board run found the desktop slower: every present
+  now swaps a buffer and restacks, and `hvs` answered each `layers`,
+  `move`, `shape` and `cursor` only once an end of frame showed its
+  list taken, so `wm`, which waits for each reply, did one restack a
+  frame (the toolkit's `slow step` present, 22 ms mean before 0006,
+  74 to 123 ms after, 83 of 281 over 100 ms; pointer and drags behind).
+  So `hvs` now answers them at once (`pending.l0`, pure and tested on
+  the host, with a property test against a model of the channel): a
+  list is written and pointed at now if the last one pointed at is
+  taken, else the latest screen asked is kept and written at the end
+  of frame that shows that one taken; its change and releases are
+  noted when it is seen taken; and a buffer forgotten, given again in
+  other pages, or the wallpaper leaving, keeps its pages until no list
+  the channel fetches, is pointed at, is wanted or fetched just before
+  names them, in place of the 40 ms the wallpaper's waited. A list not
+  taken in 50 ms falls back as before. Where the firmware keeps the
+  channel, or with no ends of frame, restacks are still waited for.
+  Not yet run on a board: step 5's check above holds, and the board
+  run should see the `slow step` presents back near 22 ms.
