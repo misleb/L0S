@@ -146,6 +146,7 @@ exits:
 |---|---|
 | `hvs mode` | an experiment beside the others: asks the firmware for the monitor's preferred mode (below) and says what the firmware and channel 0's `CTRL0` say after, then exits |
 | `hvs hdmi` | beside the others: M2MC made sure of, then reads only HDMI0's regions: the HDMI core's, DVP's, PHY's, rate manager's and CSC's registers, the HD block's, pixel valve 0's and DDC0's, and says the mode the core and the pixel valve give |
+| `hvs eof` | beside the others, writing no HVS register, so it runs while `hvs` serves (`run hvs eof`): if the firmware brought a display up, opens the display's interrupt controller and binds its interrupt, 129 (below), saying if the board gives neither; masks and clears every line, unmasks channel 0's, counts its ends of frame for two seconds, clearing the line before each `irq_ack`, and puts the mask back. It says the count, the rate and channel 0's `STATUS` frame count before and after |
 | `hvs probe` | reads only: the firmware's displays, the monitor's EDID (and its bytes) and both clocks; the HVS's version and channel 0's `CTRL0`, `CTRL1`, `BGND`, `LPTRS`, `STATUS` and `DL`; the firmware's list, from `DL.LACT` to its end; and `iommu4`'s and `iommuc`'s registers; and what the firmware's display tags answer (`FRAMEBUFFER_GET_*`, `GET_DISPLAY_SETTINGS`, `GET_DISPLAY_TIMING`, `GET_DISPLAY_CFG`), raw. Then it releases the display and reads the clocks again, touching the HVS no more |
 | `hvs list` | releases the display, makes sure of the clocks, sets the background to black, and moves channel 0 to an empty list of its own. Then it says the channel's status and list |
 | `hvs iommu` | then sets up `iommu4` as `bcm2712_iommu_init` does, and says its registers |
@@ -192,8 +193,14 @@ Scaler (SCALER6), so no pixel is copied:
    cut, and the cut moves into its address (`pieces.l0`).
 3. **Two lists.** Each restack writes the half of the list memory the
    channel isn't fetching (words 32 to 2063, or 2064 to 4095), points the
-   channel's `LPTRS` at it, and waits up to 50 ms for `DL` to show it was
-   taken. After a `SET_TIMING`, though, the firmware keeps the channel:
+   channel's `LPTRS` at it, and waits for the end of frame after which
+   `DL` shows it was taken (`frames.l0`): `hvs` binds channel 0's end of
+   frame (below) to a port of its own as it starts serving, waits on it
+   and its `display` port as one set, and counts each frame. After each
+   end of frame it reads `DL`, polling 2 ms more; a wait no end of frame
+   answers in 50 ms is said once and polled once more, and on a board
+   that gives no such interrupt it polls `DL` a millisecond apart for up
+   to 50 ms, as before. After a `SET_TIMING`, though, the firmware keeps the channel:
    whatever `LPTRS` is given, from the next frame it is back at one of
    the firmware's two lists, words 32 and 672, between which it flips
    every frame or so, without rewriting them, whether it was told the
@@ -251,7 +258,39 @@ Scaler (SCALER6), so no pixel is copied:
    the aperture is cleared and its pages unmapped. Seen on a Pi 5,
    before the desktop.
 
-**Not yet:** the HVS's end-of-frame interrupts are not taken.
+**The end of frame.** `hvs` waits on channel 0's to change a list
+(above, Two lists). What is known of it, from Raspberry Pi's Linux
+(rpi-6.12.y: `bcm2712.dtsi`, `vc4_hvs.c`, `irq-brcmstb-l2.c`) and,
+where it says so, the board:
+
+- The SCALER6 HVS has no interrupt enable or status of its own for a
+  channel's end of frame: `vc4_hvs.c` enables and disables the line at
+  the display's interrupt controller, `disp_intr`
+  (`interrupt-controller@7c502000`, 0x30 bytes, `brcm,bcm2711-l2-intc`,
+  on a page of its own beside `mop` and `moplet`).
+- Channel 0's end of frame is that controller's line 2 (`ch0-eof`),
+  channel 1's line 9, channel 2's line 16. Its registers, level
+  triggered: the lines raised at 0x00, a write of 1s clearing them at
+  0x08, the mask at 0x0C, a write of 1s masking at 0x10 and one of 1s
+  unmasking at 0x14.
+- The controller raises GIC SPI 97, the GIC's ID 129, at the GIC-400.
+- L0 gives both since its roadmap 0127
+  ([probes/display/REQUEST-pi5-hvs-eof.md](../probes/display/REQUEST-pi5-hvs-eof.md)),
+  the controller as a region and 129 as a level interrupt, setting
+  neither up.
+- **Seen** on a Pi 5 at 3840×2160 at 60 Hz, the desktop up (`run hvs
+  eof`): the firmware leaves every line unmasked (mask 0). Two seconds
+  took 121 interrupts, 120 of them with line 2 raised, 59.9 Hz, and
+  `STATUS`'s 6-bit frame count went from 14 to 6, 120 frames on.
+- **Seen** with `hvs` serving on it: the wallpaper, and windows opened
+  and stacked, every switch taken by an end of frame, none said to have
+  waited 50 ms.
+- A process that enabled 129 and left a line unmasked as it exited hung
+  a Pi 5: the stage now masks every line as it ends, and the kernel
+  holds an interrupt nobody binds taken (syscalls.md).
+
+**Not yet:** `hvs` counts the frames it sees, but doesn't yet know
+which frame showed each change.
 
 **The first runs** go one boot a stage, `probe`, `list`, `iommu` and
 then the whole driver, each with `tools/pi5-boot --until 'l0s>'` and its

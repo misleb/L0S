@@ -1,0 +1,95 @@
+; frames.l0 -- channel 0's ends of frame, as the serving driver takes
+; them: through the display's interrupt controller, disp_intr, and its
+; interrupt, 129, bound to a port of the driver's own (regs.l0 has the
+; words). The driver counts every frame, and a list it points the
+; channel at is waited for by them, not by polling DL; where the board
+; gives neither, or a frame brings no interrupt within 50 ms, it polls
+; as before.
+
+; The ends of frame: the controller, the port its interrupt comes to,
+; the frames counted so far, and whether a frame that brought none in
+; 50 ms has been said; or none, and the driver polls.
+(data Frames (Frames IoDevice int int bool) (NoFrames))
+
+; The controller opened and its interrupt bound, every line masked and
+; cleared but channel 0's, unmasked, said; or none, said, if the board
+; gives neither. Only once the HVS answers, as its clock is the HVS's.
+(def frames_started () Frames
+  (match (open_device (disp_intr_base) (disp_intr_bytes))
+    ((DeviceFailed fault why)
+      (frames_none (append "the display's interrupt controller is not given: " why)))
+    ((DeviceOpened l2)
+      (let port (port_new)
+        (let why (irq_bind_or_why (disp_intr_irq) port)
+          (if (not (is_empty why))
+              (frames_none why)
+              (let m (device_write32 l2 (l2_mask_set) (l2_all))
+                (let c (device_write32 l2 (l2_clear) (l2_all))
+                  (let u (device_write32 l2 (l2_mask_clear) (eof_bit 0))
+                    (let s (info_as "hvs" "ends of frame by interrupt 129, line 2 of disp_intr")
+                      (Frames l2 port 0 false)))))))))))
+
+; No ends of frame, for why: said, and the driver polls.
+(def frames_none ((why (list int))) Frames
+  (let s (info_as "hvs" (append "ends of frame polled: " why)) (NoFrames)))
+
+; The port ends of frame come to, or -1 for none.
+(def frames_port ((f Frames)) int
+  (match f ((Frames l2 port n said) port) ((NoFrames) -1)))
+
+; The frames counted, 0 with none.
+(def frames_count ((f Frames)) int
+  (match f ((Frames l2 port n said) n) ((NoFrames) 0)))
+
+; An end of frame taken: channel 0's line cleared, then the interrupt
+; ended, and the frame counted.
+(def frames_taken ((f Frames)) Frames
+  (match f
+    ((NoFrames) f)
+    ((Frames l2 port n said)
+      (let c (device_write32 l2 (l2_clear) (eof_bit 0))
+        (let k (irq_ack (disp_intr_irq))
+          (Frames l2 port (add n 1) said))))))
+
+; Message m, come to the ends of frame's port, taken if it is one: f
+; then, else f as it was (an alarm a wait set and no longer wants).
+(def frames_noticed ((f Frames) (m Message)) Frames
+  (if (is_irq_notice m (disp_intr_irq)) (frames_taken f) f))
+
+; Whether a list was taken, and the ends of frame after the wait.
+(data TakenBy (TakenBy bool Frames))
+
+; Whether HDMI0's channel fetches the list from word start, waited for by
+; ends of frame up to 50 ms, or with none, polled a millisecond apart as
+; long. A frame that brings no interrupt in that time is said once, and
+; the channel polled once more.
+(def taken_by ((f Frames) (d IoDevice) (g HvsGen) (start int)) TakenBy
+  (match f
+    ((NoFrames) (TakenBy (list_taken d g start 50) f))
+    ((Frames l2 port n said)
+      (let due (add (clock_ns) 50000000)
+        (let a (alarm_at port due)
+          (frames_awaited f d g start due))))))
+
+; taken_by's wait on f's port until due: after each end of frame the
+; channel is read, and polled for 2 ms more, as it may take the list
+; just after the end of the frame.
+(def frames_awaited ((f Frames) (d IoDevice) (g HvsGen) (start int) (due int)) TakenBy
+  (let m (port_receive (frames_port f))
+    (if (is_irq_notice m (disp_intr_irq))
+        (let f2 (frames_taken f)
+          (if (list_taken d g start 2) (TakenBy true f2) (frames_awaited f2 d g start due)))
+        (if (if (is_alarm_notice m) (ge (clock_ns) due) false)
+            (TakenBy (list_taken d g start 0) (frames_unanswered f))
+            (frames_awaited f d g start due)))))
+
+; A wait that no end of frame answered in 50 ms, said the first time: f
+; marked said.
+(def frames_unanswered ((f Frames)) Frames
+  (match f
+    ((NoFrames) f)
+    ((Frames l2 port n said)
+      (if said
+          f
+          (let w (warn_as "hvs" "no end of frame in 50 ms: the channel polled instead")
+            (Frames l2 port n true))))))

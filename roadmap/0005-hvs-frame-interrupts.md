@@ -1,6 +1,6 @@
 # 0005: The HVS's end-of-frame interrupts
 
-Track: Display · Status: ready · Needs: – · Spec: display.md, pi5.md
+Track: Display · Status: active · Needs: probes/display/REQUEST-pi5-hvs-eof.md · Spec: display.md, pi5.md
 
 ## Why
 
@@ -29,20 +29,21 @@ channel is on.
 
 ## Steps
 
-- [ ] Find the interrupt: which of the BCM2712's interrupts channel 0's
+- [x] Find the interrupt: which of the BCM2712's interrupts channel 0's
   end of frame raises, which SCALER6 register enables it and which
   clears it, from Linux's `vc4_hvs.c` (its `SCALER6_DISP_*` and
   `SCALER6_CONTROL` handling) and the bcm2712 device tree; and whether
   `irq_bind` may take it on the Pi 5. Written into the Pi 5 section of
   display.md as what is known. If L0 does not give that interrupt, an
-  open `probes/display/REQUEST-pi5-hvs-irq.md` to L0, which this goal
+  open `probes/display/REQUEST-pi5-hvs-eof.md` to L0, which this goal
   then needs.
-- [ ] A stage `hvs eof`, beside `mode` and `hdmi`: does what `list`
+- [x] A stage `hvs eof`, beside `mode` and `hdmi`: does what `list`
   does, turns channel 0's end-of-frame interrupt on, binds it, counts
   the interrupts for two seconds, clearing each, and says the rate and
   `STATUS`'s frame count beside it. Run on the board; its register
-  words built by pure functions, tested on the host.
-- [ ] The full driver binds the interrupt to its own port and keeps a
+  words built by pure functions, tested on the host. Done without
+  `list`'s part, beside the serving driver (Log).
+- [x] The full driver binds the interrupt to its own port and keeps a
   frame count. A restack writes the list not shown and points `LPTRS`
   at it as now, but the reply waits for the next end of frame, not a
   poll of `DL`; the firmware's-two-lists case writes the second list at
@@ -74,3 +75,62 @@ channel is on.
 - 2026-10-27: steps written. Every step but the first runs on a Pi 5
   with a monitor on HDMI0, which no emulator stands in for; the first
   may find this goal needs L0 to give the interrupt.
+- 2026-10-28: step 1 done, and it does. On SCALER6 the end of frame has
+  no HVS register: it is line 2 (channel 0; 9 and 16 the others) of the
+  display's interrupt controller `disp_intr`, a `bcm2711-l2-intc` at
+  0x107C502000, 0x30 bytes, level, cleared at 0x08 and unmasked at 0x14,
+  which raises GIC SPI 97, the host's 129 (`bcm2712.dtsi`, `vc4_hvs.c`,
+  `irq-brcmstb-l2.c`, rpi-6.12.y; in display.md and `regs.l0`). The
+  first part of step 2's stage, `hvs eof`, asks for both and touches
+  nothing else, so it runs beside the serving driver. Run with `run hvs
+  eof` on the Pi 5 (3840×2160, desktop up, over the network boot and
+  the UART with no one at the board): `the display's interrupt
+  controller, 0x107c502000, is not given: no device there` and `cannot
+  bind interrupt 129: the board has no such interrupt`. Asked of L0 in
+  probes/display/REQUEST-pi5-hvs-eof.md, which this goal now needs. The
+  request names pixel valve 0's own interrupt, SPI 101 (133), whose
+  registers are already a region, as a smaller alternative for pacing
+  alone. Steps 2 to 5 wait for it.
+- 2026-10-29: L0 roadmap 0127 gave both (the region and 129, level; not
+  the pixel valve's), installed the same day. Step 2 done: `hvs eof`
+  does not do `list`'s part, since a channel already scanning shows its
+  ends of frame without being moved, and leaving the HVS alone lets it
+  run beside the serving driver, over the UART, with no one at the
+  board. Its words (the mask's restore, the rate) are pure and tested.
+  On the Pi 5 at 3840×2160 at 60 Hz with the desktop up: the
+  controller's mask 0 as the firmware leaves it, 121 interrupts in 2000
+  ms, 120 with line 2 raised, 59.9 Hz; STATUS's frame count 14 to 6, so
+  120 frames on (134 mod 64). One interrupt came without line 2,
+  likely another line latched before the stage cleared them all.
+- 2026-10-29: the board hung within moments of that run: the shell's
+  prompt came back, then nothing, and `reboot` was never echoed. The
+  stage had put the mask back as the firmware left it, every line
+  unmasked, and exited. 129 stays enabled once enabled, as L0 disables
+  none, and the kernel ended an interrupt bound to nobody at once, so
+  with a line raised and no one to clear it 129 came again for ever and
+  CPU 0 ran nothing else. Two fixes: the stage leaves every line masked
+  and cleared; and the kernel holds an interrupt its driver let go
+  taken, not ended, until the next driver binds it, which ends it
+  (syscalls.md; a board test binds one again after its driver exits).
+  The board needs a power-cycle by hand before step 3 can be run.
+- 2026-10-29: step 3 written, not yet run on the board: `frames.l0`
+  binds 129 to a port of the driver's own as it starts serving, masks
+  every line but channel 0's, and waits on its display port and that one
+  as one set, counting each end of frame (clear, then `irq_ack`). A
+  restack, and the firmware's-lists case, wait for the end of frame
+  after which `DL` names the new list, polling 2 ms more after each, as
+  the list may be taken just after it; no frame in 50 ms is said once
+  and polled once more. With no controller or interrupt it polls as
+  before. While the driver is in a step the interrupt is taken and not
+  acked, so frames pass uncounted: the count is of frames the driver
+  saw, which step 4 must allow for (STATUS's 6-bit count may fill it).
+- 2026-10-29: the Pi 5 was power-cycled and booted step 3's driver on
+  the kernel before the fix, then was rebooted from the UART onto the
+  fixed kernel. On both, at 3840×2160: `ends of frame by interrupt
+  129`, the wallpaper shown, Files and Fonts opened and stacked (`run
+  windows`), and no `no end of frame in 50 ms` in `dmesg`, so every
+  switch was taken by an end of frame. `hvs eof` beside it now says 129
+  is bound and touches nothing. Step 3 done. Not seen: the firmware's-
+  two-lists case, which needs an `hdmi=` without HDMI0's regions; the
+  50 ms fallback; and a restack's time against the poll, which step 5's
+  run measures.

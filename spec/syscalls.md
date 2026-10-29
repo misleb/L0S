@@ -113,7 +113,10 @@ goes through a list: a device's registers, read a byte at a time, and
 TCP's data, which its reassembly holds as lists.
 
 When a process exits or is killed, its ports, names, interrupt bindings and
-open files go with it. Whoever waits for it is woken with its status, and
+open files go with it. An interrupt it let go stays enabled, as none can be
+disabled: if it comes again with no driver, the kernel holds it taken, not
+ended, so a device left raising a level interrupt can't take CPU 0 for
+ever, and the next process to bind it ends it first. Whoever waits for it is woken with its status, and
 every port watching it gets a notice. Waiting with `watch` instead of `wait`
 lets a process hear about an exit and other messages on one port. That is
 how the shell waits for a job and for Ctrl-C at the same time.

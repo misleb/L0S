@@ -51,6 +51,9 @@
 ;               channel moved to an empty list of the driver's own
 ;   hvs iommu   the IOMMU then set up as bcm2712_iommu_init does
 ;   hvs         all that, then serving display
+;   hvs eof     beside them all, touching no HVS register: asks for the
+;               end of frame's interrupt controller and interrupt, and
+;               says whether the board gives each
 ;
 ; Every step that could hang says so before it runs, and the kernel
 ; writes that line out at once, so the last line names it. Raspberry
@@ -69,19 +72,21 @@
 ; StageMode, mode, is an experiment beside them, which asks the firmware
 ; for the monitor's preferred mode and stops (edid.l0's mode_tried).
 ; StageHdmi, hdmi, reads HDMI0's controller, PHY and pixel valve and
-; stops (hdmi.l0's hdmi_probed).
-(data Stage (StageProbe) (StageList) (StageIommu) (StageFull) (StageMode) (StageHdmi))
+; stops (hdmi.l0's hdmi_probed). StageEof, eof, asks for the end of
+; frame's interrupt controller and interrupt, touching no HVS register,
+; and says which the board gives (eof_asked).
+(data Stage (StageProbe) (StageList) (StageIommu) (StageFull) (StageMode) (StageHdmi) (StageEof))
 
-; Its place in that order, 0 for probe to 3 for serving; mode is -1 and
-; hdmi -2, before them all.
+; Its place in that order, 0 for probe to 3 for serving; mode is -1,
+; hdmi -2 and eof -3, before them all.
 (def stage_rank ((s Stage)) int
-  (match s ((StageProbe) 0) ((StageList) 1) ((StageIommu) 2) ((StageFull) 3) ((StageMode) -1) ((StageHdmi) -2)))
+  (match s ((StageProbe) 0) ((StageList) 1) ((StageIommu) 2) ((StageFull) 3) ((StageMode) -1) ((StageHdmi) -2) ((StageEof) -3)))
 
 ; Whether stage s stops at stage t, having done it.
 (def stops_at ((s Stage) (t Stage)) bool (eq (stage_rank s) (stage_rank t)))
 
-; The stage hvs's arguments as name: none is serving, else probe, list or
-; iommu; anything else is none.
+; The stage hvs's arguments as name: none is serving, else probe, list,
+; iommu, mode, hdmi or eof; anything else is none.
 (def stage_of ((as (list (list int)))) (Option Stage)
   (if (is_empty as)
       (Some (StageFull))
@@ -96,7 +101,8 @@
   (if (eq a "iommu") (Some (StageIommu))
   (if (eq a "mode") (Some (StageMode))
   (if (eq a "hdmi") (Some (StageHdmi))
-  ((None Stage))))))))
+  (if (eq a "eof") (Some (StageEof))
+  ((None Stage)))))))))
 
 ; A step said before it is taken, so that if it hangs the board it is the
 ; last line on the serial line; as debug, kept and not printed, once the
@@ -104,11 +110,97 @@
 (def step ((s Stage) (what (list int))) int
   (if (stops_at s (StageFull)) (debug_as "hvs" what) (info_as "hvs" what)))
 
-; hvs [probe | list | iommu | mode | hdmi], from main.
+; hvs [probe | list | iommu | mode | hdmi | eof], from main.
 (def hvs_main ((as (list (list int)))) int
   (match (stage_of as)
-    ((None) (complain "usage: hvs [probe | list | iommu | mode | hdmi]"))
-    ((Some s) (hvs s))))
+    ((None) (complain "usage: hvs [probe | list | iommu | mode | hdmi | eof]"))
+    ((Some s) (if (stops_at s (StageEof)) (eof_asked) (hvs s)))))
+
+; Stage eof: channel 0's ends of frame counted for two seconds, through
+; the display's interrupt controller and its interrupt, bound to a port
+; of the stage's own, each said refused if the board does not give it.
+; It writes no HVS register and reads only channel 0's STATUS, so it runs
+; beside the driver that serves; the controller is clocked as the HVS
+; is, so it is read only if the firmware brought a display up. 0.
+(def eof_asked () int
+  (match (mailbox_open)
+    ((NoMbox why) (complain (append "cannot ask the firmware whether the display is clocked: " why)))
+    ((MboxOpen mb)
+      (match (fw_displays mb)
+        ((None) (complain "the firmware did not say how many displays it brought up"))
+        ((Some n)
+          (if (eq n 0)
+              (info_as "hvs" "eof: no monitor on HDMI0 at boot; the display is unclocked")
+              (eof_opened)))))))
+
+; The controller opened, or why not.
+(def eof_opened () int
+  (match (open_device (disp_intr_base) (disp_intr_bytes))
+    ((DeviceFailed fault why)
+      (info_as "hvs" (append "eof: the display's interrupt controller, 0x107c502000, is not given: " why)))
+    ((DeviceOpened l2)
+      (let port (port_new)
+        (let why (irq_bind_or_why (disp_intr_irq) port)
+          (if (is_empty why)
+              (eof_bound l2 port)
+              (info_as "hvs" (append "eof: " why))))))))
+
+; The interrupt bound to port: the HVS opened to read STATUS by, every
+; line masked and cleared, channel 0's unmasked, the count taken, and
+; every line masked and cleared again. Not the mask as it was (the
+; firmware's 0, all unmasked): once the stage has enabled 129, which
+; stays enabled, a line left unmasked with nothing to clear it raised
+; it for ever and hung a Pi 5's kernel (roadmap 0005's Log).
+(def eof_bound ((l2 IoDevice) (port int)) int
+  (match (open_device (hvs_base) (hvs_bytes))
+    ((DeviceFailed fault why) (complain (append "eof: no HVS: " why)))
+    ((DeviceOpened d)
+      (match (hvs_gen_of (device_read32 d (hvs_version)))
+        ((None) (complain "eof: an HVS of a version this driver does not know"))
+        ((Some g)
+          (let saved (device_read32 l2 (l2_mask_status))
+            (let s (info_as "hvs" (reg_line "eof: the controller's mask" (l2_mask_status) saved))
+              (let m (device_write32 l2 (l2_mask_set) (l2_all))
+                (let c (device_write32 l2 (l2_clear) (l2_all))
+                  (let u (device_write32 l2 (l2_mask_clear) (eof_bit 0))
+                    (let t0 (clock_ns)
+                      (let a (alarm_at port (add t0 2000000000))
+                        (let f0 (status_frames (device_read32 d (disp_status g 0)))
+                          (let r (eof_counted l2 port 0 0)
+                            (let t1 (clock_ns)
+                              (let f1 (status_frames (device_read32 d (disp_status g 0)))
+                                (let b (device_write32 l2 (l2_mask_set) (l2_all))
+                                  (let c2 (device_write32 l2 (l2_clear) (l2_all))
+                                    (eof_said r (sub t1 t0) f0 f1)))))))))))))))))))
+
+; How many interrupts came, and of them how many had channel 0's line
+; raised.
+(data EofCount (EofCount int int))
+
+; Interrupts taken on port until its alarm, each with channel 0's line
+; cleared before it is acked; n of them so far, e with the line raised.
+(def eof_counted ((l2 IoDevice) (port int) (n int) (e int)) EofCount
+  (let m (port_receive port)
+    (if (is_alarm_notice m)
+        (EofCount n e)
+        (if (is_irq_notice m (disp_intr_irq))
+            (let st (device_read32 l2 (l2_status))
+              (let c (device_write32 l2 (l2_clear) (eof_bit 0))
+                (let k (irq_ack (disp_intr_irq))
+                  (eof_counted l2 port (add n 1)
+                    (if (eq (bit_and st (eof_bit 0)) 0) e (add e 1))))))
+            (eof_counted l2 port n e)))))
+
+; The count said: the interrupts, those of channel 0's end of frame, the
+; rate, and STATUS's 6-bit frame count before and after. 0.
+(def eof_said ((r EofCount) (ns int) (f0 int) (f1 int)) int
+  (match r
+    ((EofCount n e)
+      (let t (eof_tenths_hz e ns)
+        (info_as "hvs" (append "eof: " (append (digits n) (append " interrupts in " (append (digits (div ns 1000000))
+          (append " ms, " (append (digits e) (append " of them channel 0's end of frame: "
+          (append (digits (div t 10)) (append "." (append (digits (mod t 10))
+          (append " Hz; STATUS's frame count " (append (digits f0) (append " to " (digits f1)))))))))))))))))))
 
 ; ---------------------------------------------------------------- start
 
@@ -308,7 +400,8 @@
         (let c (step s (append "writing an empty list at word " (digits (dlist_half_start k))))
           (let wr (words_written d (dlist_half_start k) (list_words g (nil Plane)))
             (let e (step s "moving HDMI0's channel to it")
-              (if (list_switched d g (dlist_half_start k) (list_words g (nil Plane))) k -1))))))))
+              (match (list_switched (NoFrames) d g (dlist_half_start k) (list_words g (nil Plane)))
+                ((TakenBy ok f) (if ok k -1))))))))))
 
 ; The channel's background black and filled in where no plane is: 0.
 (def background_black ((d IoDevice) (g HvsGen)) int
@@ -345,12 +438,13 @@
         ((DeviceOpened t)
           (match (page_addresses va (table_pages))
             ((None) (complain "the IOMMU's tables are not DMA pages"))
-            ((Some addrs) (started (Hw d g mmu cache t va addrs) s k w h))))))))
+            ((Some addrs) (started (Hw d g mmu cache t va addrs (NoFrames)) s k w h))))))))
 
 ; The hardware the driver keeps: the HVS, its layout, the IOMMU and its
 ; cache, and the IOMMU's tables, opened, where this process sees them,
-; and where the IOMMU reaches each page.
-(data Hw (Hw IoDevice HvsGen IoDevice IoDevice IoDevice int (array int)))
+; and where the IOMMU reaches each page; and the ends of frame, counted
+; (frames.l0), none until the driver serves.
+(data Hw (Hw IoDevice HvsGen IoDevice IoDevice IoDevice int (array int) Frames))
 
 ; The IOMMU on, under the channel's own list, which fetches no plane;
 ; then, past stage iommu, the driver serving, the channel's list in half
@@ -359,7 +453,7 @@
   (let a (iommu_on hw s)
     (if (stops_at s (StageIommu))
         (match hw
-          ((Hw d g mmu cache t tva addrs)
+          ((Hw d g mmu cache t tva addrs fr)
             (let r (regs_said mmu (iommu_regs))
               (channel_said d g "under the IOMMU"))))
         (start_serving (Drv hw w h ((MapEmpty int Buffer)) (nil Layer) (no_cursor) (aperture_new) k (nil Alloc))))))
@@ -373,7 +467,7 @@
 ; 0.
 (def iommu_on ((hw Hw) (s Stage)) int
   (match hw
-    ((Hw d g mmu cache t tva addrs)
+    ((Hw d g mmu cache t tva addrs fr)
       (let e (l1_entries t addrs 0)
         (let y (dma_synced tva (table_pages))
           (let r (step s "writing iommu4 CTRL off, its sticky bits and TLB cleared")
@@ -385,7 +479,7 @@
 ; the cache and CTRL. 0.
 (def iommu_ranged ((hw Hw) (s Stage)) int
   (match hw
-    ((Hw d g mmu cache t tva addrs)
+    ((Hw d g mmu cache t tva addrs fr)
       (let a (step s "writing iommu4 MISC, two levels")
         (let m (device_write32 mmu (mmu_misc) (misc_two_level (device_read32 mmu (mmu_misc))))
           (let b (step s "writing iommu4 ADDR_CAP and BYPASS_START")
@@ -401,7 +495,7 @@
 ; The IOMMU's cache flushed, then the IOMMU on: 0.
 (def iommu_enabled ((hw Hw) (s Stage)) int
   (match hw
-    ((Hw d g mmu cache t tva addrs)
+    ((Hw d g mmu cache t tva addrs fr)
       (let a (step s "flushing the IOMMU's cache")
         (let f (device_write32 cache 0 (cache_flush))
           (let p (if (polled cache 0 2 100) 0 (warn_as "hvs" "the IOMMU's cache did not flush"))
@@ -420,7 +514,7 @@
 ; the tables now say is what it reads; each waited for. 0.
 (def iommu_cleared ((hw Hw)) int
   (match hw
-    ((Hw d g mmu cache t tva addrs)
+    ((Hw d g mmu cache t tva addrs fr)
       (let c (device_write32 mmu (mmu_ctrl) (mmu_tlb_clear (mmu_ctrl_on)))
         (let a (if (polled mmu (mmu_ctrl) 7 100) 0 (warn_as "hvs" "the IOMMU's TLB did not clear"))
           (let f (device_write32 cache 0 (cache_flush))
@@ -457,22 +551,45 @@
         (append ", channel " (append (digits (hdmi0_channel))
           (append ", scale " (append (digits s) ", serving display")))))))))))))
 
-; Registers as display, so that a client finds it at once, shows the
-; first frame while what the client asks waits on the port, then
-; answers each request, as display.l0 makes them: ok, display W H
-; cursor scale S, or error: WHY.
+; Registers as display, so that a client finds it at once, takes the
+; ends of frame, shows the first frame while what the client asks waits
+; on the port, then answers each request, as display.l0 makes them: ok,
+; display W H cursor scale S, or error: WHY.
 (def start_serving ((v Drv)) int
   (let port (port_new)
     (let r (name_register_or_why port "display")
       (if (is_empty r)
-          (match (first_frame v)
+          (match (first_frame (frames_kept v (frames_started)))
             ((Drv hw w h bufs layers cur ap live al)
               (match hw
-                ((Hw d g mmu cache t tva addrs)
+                ((Hw d g mmu cache t tva addrs fr)
                   (let n (info_as "hvs" (screen_line g w h (scale_of w h (boot_args))))
                     (let z (sizes_said d (hvs_sizes) "")
-                      (serve (Drv hw w h bufs layers cur ap live al) port)))))))
+                      (serving (Drv hw w h bufs layers cur ap live al) port)))))))
           (complain r)))))
+
+; The driver with its ends of frame f.
+(def frames_kept ((v Drv) (f Frames)) Drv
+  (match v
+    ((Drv hw w h bufs layers cur ap live al)
+      (match hw
+        ((Hw d g mmu cache t tva addrs fr)
+          (Drv (Hw d g mmu cache t tva addrs f) w h bufs layers cur ap live al))))))
+
+; The driver's ends of frame.
+(def drv_frames ((v Drv)) Frames
+  (match v ((Drv hw w h bufs layers cur ap live al) (match hw ((Hw d g mmu cache t tva addrs fr) fr)))))
+
+; Serving on port, and on the ends of frame's port beside it as one set
+; if there are ends of frame; with none, on port alone.
+(def serving ((v Drv) (port int)) int
+  (let fp (frames_port (drv_frames v))
+    (if (lt fp 0)
+        (serve v port)
+        (match (port_set (cons port (cons fp (nil int))))
+          ((PortSetMade) (serve_set v port))
+          ((PortSetNotYours) (complain "its ports are not its own"))
+          ((PortSetSize) (complain "cannot wait on two ports"))))))
 
 ; ------------------------------------------------------------- wallpaper
 
@@ -613,6 +730,22 @@
           (let r (msg_answer mb reply)
             (serve v2 port)))))))
 
+; serve on the set of port and the ends of frame's port: an end of frame
+; counted, each request answered.
+(def serve_set ((v Drv) (port int)) int
+  (match (port_receive_set)
+    ((SetRecvFailed) (complain "lost its ports"))
+    ((SetMessage p m)
+      (if (eq p port)
+          (match m
+            ((RecvFailed) (serve_set v port))
+            ((Message from mb)
+              (match (handle v (msg_text_from mb 4))
+                ((Served v2 reply)
+                  (let r (msg_answer mb reply)
+                    (serve_set v2 port))))))
+          (serve_set (frames_kept v (frames_noticed (drv_frames v) m)) port)))))
+
 ; A request's body, its op and then its numbers, answered.
 (def handle ((v Drv) (body (list int))) (Served Drv)
   (match (request_numbers body)
@@ -685,7 +818,7 @@
 ; it read of them before: 0.
 (def ptes_written ((hw Hw) (first int) (addrs (array int)) (i int)) int
   (match hw
-    ((Hw d g mmu cache t tva taddrs)
+    ((Hw d g mmu cache t tva taddrs fr)
       (if (lt i (array_len addrs))
           (let e (device_write32 t (pte_offset (add first i)) (pte (array_get addrs i)))
             (ptes_written hw first addrs (add i 1)))
@@ -694,7 +827,7 @@
 ; The aperture's n pages from first unmapped: 0.
 (def ptes_cleared ((hw Hw) (first int) (n int) (i int)) int
   (match hw
-    ((Hw d g mmu cache t tva taddrs)
+    ((Hw d g mmu cache t tva taddrs fr)
       (if (lt i n)
           (let e (device_write32 t (pte_offset (add first i)) 0)
             (ptes_cleared hw first n (add i 1)))
@@ -704,7 +837,7 @@
 ; out of the caches, and the IOMMU's own copies of them cleared: 0.
 (def tables_synced ((hw Hw) (first int) (n int)) int
   (match hw
-    ((Hw d g mmu cache t tva taddrs)
+    ((Hw d g mmu cache t tva taddrs fr)
       (let p0 (div (pte_offset first) (page_size))
         (let p1 (div (pte_offset (add first (sub (max n 1) 1))) (page_size))
           (let s (dma_synced (add tva (mul p0 (page_size))) (add (sub p1 p0) 1))
@@ -803,14 +936,17 @@
           ((Unplannable why) (refused v why))
           ((Planned ps nal)
             (match hw
-              ((Hw d g mmu cache t tva addrs)
+              ((Hw d g mmu cache t tva addrs fr)
                 (let ws (let r (restamped stamps (stamps_of ls bufs)) (list_words g ps))
                   (if (lt live 0)
-                      (let f (fw_lists_written d g ws)
-                        (let he (handle_error_said d ps) (served_ok (Drv hw w h bufs ls cur ap live nal))))
+                      (let f (fw_lists_written fr d g ws)
+                        (let he (handle_error_said d ps)
+                          (served_ok (Drv (Hw d g mmu cache t tva addrs f) w h bufs ls cur ap live nal))))
                       (let wr (words_written d (dlist_half_start k) ws)
-                        (let nl (if (list_switched d g (dlist_half_start k) ws) k -1)
-                          (let he (handle_error_said d ps) (served_ok (Drv hw w h bufs ls cur ap nl nal)))))))))))))))
+                        (match (list_switched fr d g (dlist_half_start k) ws)
+                          ((TakenBy ok f)
+                            (let he (handle_error_said d ps)
+                              (served_ok (Drv (Hw d g mmu cache t tva addrs f) w h bufs ls cur ap (if ok k -1) nal))))))))))))))))
 
 ; ws written into the list memory from word i: 0.
 (def words_written ((d IoDevice) (i int) (ws (list int))) int
@@ -820,19 +956,22 @@
         (words_written d (add i 1) (tail ws)))))
 
 ; HDMI0's channel pointed at the list ws, written from word start, and
-; waited for until it fetches it, as it does from its next frame, up to
-; 50 ms: whether it did. If it did not, the firmware has the channel:
-; ws is written over its lists (fw_lists_written), and said.
-(def list_switched ((d IoDevice) (g HvsGen) (start int) (ws (list int))) bool
+; waited for until it fetches it, as it does from its next frame, by the
+; ends of frame f (taken_by), up to 50 ms: whether it did, and f after.
+; If it did not, the firmware has the channel: ws is written over its
+; lists (fw_lists_written), and said.
+(def list_switched ((f Frames) (d IoDevice) (g HvsGen) (start int) (ws (list int))) TakenBy
   (let l (device_read32 d (disp_lptrs g (hdmi0_channel)))
     (let w (device_write32 d (disp_lptrs g (hdmi0_channel)) (lptrs_with_head l start))
-      (if (list_taken d g start 50)
-          true
-          (let a (fw_lists_written d g ws)
-            (let b (warn_as "hvs" (untaken_line start (device_read32 d (disp_lptrs g (hdmi0_channel)))
-                                                  (device_read32 d (disp_dl g (hdmi0_channel)))
-                                                  (device_read32 d (disp_status g (hdmi0_channel)))))
-              false))))))
+      (match (taken_by f d g start)
+        ((TakenBy ok f2)
+          (if ok
+              (TakenBy true f2)
+              (let a (fw_lists_written f2 d g ws)
+                (let b (warn_as "hvs" (untaken_line start (device_read32 d (disp_lptrs g (hdmi0_channel)))
+                                                      (device_read32 d (disp_dl g (hdmi0_channel)))
+                                                      (device_read32 d (disp_status g (hdmi0_channel)))))
+                  (TakenBy false a)))))))))
 
 ; The firmware's two lists, at words 32 and 672 of the list memory. Once
 ; it has set a mode by SET_TIMING it moves the channel to one or the
@@ -847,13 +986,15 @@
 ; rewritten under it shows half of each, and the planes whose UPM moved
 ; garbled (white columns, on a board).
 ; So the list the channel is not on first, then, once the firmware has
-; moved the channel to it, up to 50 ms on, the other. 0.
-(def fw_lists_written ((d IoDevice) (g HvsGen) (ws (list int))) int
+; moved the channel to it, waited for by the ends of frame f up to 50 ms
+; on, the other: f after.
+(def fw_lists_written ((f Frames) (d IoDevice) (g HvsGen) (ws (list int))) Frames
   (let live (dl_active (device_read32 d (disp_dl g (hdmi0_channel))))
     (let first (if (eq live (fw_list_b)) (fw_list_a) (fw_list_b))
       (let a (words_written d first ws)
-        (let t (list_taken d g first 50)
-          (words_written d (if (eq first (fw_list_a)) (fw_list_b) (fw_list_a)) ws))))))
+        (match (taken_by f d g first)
+          ((TakenBy ok f2)
+            (let b (words_written d (if (eq first (fw_list_a)) (fw_list_b) (fw_list_a)) ws) f2)))))))
 
 ; What the driver says of a list the channel has not taken from word
 ; start: what LPTRS, DL and STATUS read then, to tell whether another

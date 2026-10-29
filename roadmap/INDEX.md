@@ -25,7 +25,7 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | ready | 0/5 | – | display.md, pi5.md |
+| [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | active | 3/5 | probes/display/REQUEST-pi5-hvs-eof.md (landed) | display.md, pi5.md |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | blocked | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
@@ -47,8 +47,8 @@ move independently, so several can be active at once.
 ## Ready
 
 - [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame
-  interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
-  find it needs L0 to give the interrupt.
+  interrupts: L0 gives them (L0 roadmap 0127), and `hvs` waits on them
+  on a Pi 5; next, which frame showed each change.
 
 ## Dependencies
 
