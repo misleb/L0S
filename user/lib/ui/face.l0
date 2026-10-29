@@ -25,8 +25,10 @@
 (data UiCov (UiCov int int (array int)))
 
 ; A strike, one face at one line height, read in place: over the pages
-; the font service shared, or, as a host tool or a test has one, bytes.
-(data UiStrike (UiStrikeIn IoDevice) (UiStrikeBytes bytes))
+; the font service shared, or, as a host tool or a test has one, bytes;
+; or asked of font, at clock_ns T, its answer to come to the loop as a
+; reply (ui_face_asking), drawn as none until then.
+(data UiStrike (UiStrikeIn IoDevice) (UiStrikeBytes bytes) (UiStrikeAsked int))
 
 ; A face: its scale, its tables by name, its icons' and the pointers',
 ; and its strikes by name, its glyphs'.
@@ -137,23 +139,73 @@
 (def ui_strike_whole ((k UiStrike)) bool
   (match k
     ((UiStrikeIn r) true)
-    ((UiStrikeBytes b) (strike_ok b))))
+    ((UiStrikeBytes b) (strike_ok b))
+    ((UiStrikeAsked t) false)))
 
-; The face f with the strikes names, those its text in a face a program
-; names wants, asked of font as each is first needed and kept for the
-; window's life; one font does not give is kept as none, so that it is
-; not asked for again, and its text is not drawn.
-(def ui_face_with_strikes ((f UiFace) (names (list (list int)))) UiFace
+; The face f with the strikes names asked of font, none waited for: each
+; request sent with its answer to rport, the loop's port for the
+; toolkit's replies (uiloop.l0), and the strike kept as asked, so it is
+; not asked again, and drawn as none until its answer comes
+; (ui_face_answered). With no font, or no rport, each is kept as none.
+(def ui_face_asking ((f UiFace) (names (list (list int))) (rport int)) UiFace
   (if (is_empty names)
       f
       (match f
         ((UiFace s ts ks)
-          (match (font_open 0)
-            ((NoFontPort why) (UiFace s ts (ui_strikes_none_of names ks)))
-            ((FontPort port rp) (UiFace s ts (ui_strikes_asked (FontPort port rp) names true (ui_strikes_none_of names ks)))))))))
+          (if (le rport 0)
+              (UiFace s ts (ui_strikes_none_of names ks))
+              (match (name_wait "font" 0)
+                ((NotFound) (UiFace s ts (ui_strikes_none_of names ks)))
+                ((Found port) (UiFace s ts (ui_strikes_sent port rport names ks)))))))))
 
-; ks with each of names kept as no strike, as ui_strikes_asked then
-; replaces with the one font gives.
+; Each of names asked of font, on port, its answer to rport, and kept in
+; ks as asked; one whose request is refused, as none.
+(def ui_strikes_sent ((port int) (rport int) (names (list (list int))) (ks (Map (list int) UiStrike))) (Map (list int) UiStrike)
+  (if (is_empty names)
+      ks
+      (let n (head names)
+        (match (port_send port (request rport (font_strike_request (ui_strike_face n) (ui_strike_h n))))
+          ((Sent) (ui_strikes_sent port rport (tail names) (map_put ks n (UiStrikeAsked (clock_ns)))))
+          ((SendNoPort) (ui_strikes_sent port rport (tail names) (map_put ks n (UiStrikeBytes (bytes_from_list "")))))
+          ((SendFull) (ui_strikes_sent port rport (tail names) (map_put ks n (UiStrikeBytes (bytes_from_list "")))))
+          ((SendTooBig) (ui_strikes_sent port rport (tail names) (map_put ks n (UiStrikeBytes (bytes_from_list "")))))))))
+
+; The strike f asked of font first of those it is still waiting for, by
+; name: font answers in order, so an answer is that one's; "" if none.
+(def ui_face_oldest_ask ((f UiFace)) (list int)
+  (match f ((UiFace s ts ks) (ui_oldest_ask (map_keys ks) ks "" -1))))
+
+; ui_face_oldest_ask's loop over names: best, asked at at, so far.
+(def ui_oldest_ask ((names (list (list int))) (ks (Map (list int) UiStrike)) (best (list int)) (at int)) (list int)
+  (if (is_empty names)
+      best
+      (match (map_get ks (head names))
+        ((Some k)
+          (match k
+            ((UiStrikeAsked t) (if (if (lt at 0) true (lt t at)) (ui_oldest_ask (tail names) ks (head names) t) (ui_oldest_ask (tail names) ks best at)))
+            ((UiStrikeIn r) (ui_oldest_ask (tail names) ks best at))
+            ((UiStrikeBytes b) (ui_oldest_ask (tail names) ks best at))))
+        ((None) (ui_oldest_ask (tail names) ks best at)))))
+
+; A face after an answer from font, and the strike's name the answer
+; was to, "" for none.
+(data UiAnswered (UiAnswered UiFace (list int)))
+
+; f with font's answer, payload, to the oldest strike it asked for:
+; opened to read in place, or kept as none if font would not give it or
+; it cannot be opened, so its text is not drawn; and that strike's name,
+; "" if f asked for none.
+(def ui_face_answered ((f UiFace) (payload (list int))) UiAnswered
+  (let name (ui_face_oldest_ask f)
+    (if (is_empty name)
+        (UiAnswered f "")
+        (match f
+          ((UiFace s ts ks)
+            (match (ui_strike_open (font_strike_of payload))
+              ((Err why) (UiAnswered (UiFace s ts (map_put ks name (UiStrikeBytes (bytes_from_list "")))) name))
+              ((Ok k) (UiAnswered (UiFace s ts (map_put ks name k)) name))))))))
+
+; ks with each of names kept as no strike.
 (def ui_strikes_none_of ((names (list (list int))) (ks (Map (list int) UiStrike))) (Map (list int) UiStrike)
   (if (is_empty names) ks (ui_strikes_none_of (tail names) (map_put ks (head names) (UiStrikeBytes (bytes_from_list ""))))))
 
@@ -161,11 +213,13 @@
 (def ui_strike_u32 ((k UiStrike) (off int)) int
   (match k
     ((UiStrikeIn r) (device_read32 r off))
-    ((UiStrikeBytes b) (le_u32 b off))))
+    ((UiStrikeBytes b) (le_u32 b off))
+    ((UiStrikeAsked t) 0)))
 (def ui_strike_u64 ((k UiStrike) (off int)) int
   (match k
     ((UiStrikeIn r) (device_read64 r off))
-    ((UiStrikeBytes b) (le_u64_at b off))))
+    ((UiStrikeBytes b) (le_u64_at b off))
+    ((UiStrikeAsked t) 0)))
 
 ; The sizes icons are painted at, at scale s: 16 · k · s for the scales
 ; k 1 to 4 a widget asks for.

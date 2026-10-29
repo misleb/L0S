@@ -95,7 +95,10 @@ which edits the keys `wm` sends it into the selected tab's lines, as
 the tab into its window; and `sh vt1`, the tab's shell, which the `vt`
 starts, whose `exit` closes its tab, letting its name go, and, as it
 is the last, the window, ending its `vt`. Each tab opened is one more
-process, its shell.
+process, its shell. Terminal launched again, from the launcher or with
+`run open Terminal`, is a second window of the same `vt`, with a tab
+of its own: one process more, its shell; `vt` ends with its last
+window.
 
 How the display, the compositor and its clients fit together is under
 [The desktop](desktop.md#the-desktop).

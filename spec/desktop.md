@@ -303,7 +303,11 @@ edges. The boot argument `scale=1` or `scale=2` chooses instead.
   the face, `/etc/face`, and icons, at every scale, from `/etc/icons`
   ([user/lib/ui/face.l0](../user/lib/ui/face.l0)): coverage, how much of
   each pixel a shape covers, 0 to 15. Each pixel is mixed with what is
-  under it by that much, since layers do not blend.
+  under it by that much, since layers do not blend. A strike a window
+  lacks is asked of `font` without waiting: the window answers the
+  pointer and the keys while `font` makes it, and its text is drawn when
+  it comes ([toolkit.md](toolkit.md), replies, not waits). So does a
+  Files window while its folder's file server lists it.
 - **The glyphs** are Source Sans 3's and Source Code Pro's TrueType outlines
   ([user/lib/format/ttf.l0](../user/lib/format/ttf.l0)) rasterized
   ([user/lib/gfx/glyphs.l0](../user/lib/gfx/glyphs.l0), with
@@ -383,9 +387,11 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   the cursor, colors text or clears the screen (the line editing drops
   them); and a program is not told the terminal's size, so nothing it
   writes is laid out for it. Its scrollbar shows only while the view is
-  back, and its slider is not dragged. A window has at most 31 tabs, as
-  `vt` waits on a port a tab and its window's, a set of at most 32; a
-  closed tab's port is kept for the next, since no call gives one back.
+  back, and its slider is not dragged. A Terminal's windows, all in one
+  `vt`, have at most 31 tabs between them, as `vt` waits on a port a
+  tab and its app's one port, which every window's notices share, a set
+  of at most 32; a closed tab's port, of any window, is kept for the
+  next, since no call gives one back.
   A client paints what changed for every size it is asked for, all of it
   when the size outgrows its buffer, and `wm` restacks the screen once:
   Disks's drag paints about 7 ms a size on QEMU, and the restack takes

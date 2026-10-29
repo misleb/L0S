@@ -1,6 +1,6 @@
 # 0032: Apps launched one way: a running app is asked, not started again
 
-Track: Desktop · Status: active · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
+Track: Desktop · Status: done · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
 
 ## Why
 
@@ -75,7 +75,7 @@ running, if one is.
 - [x] The apps: Files takes `app.open` as a new window, at the folder
   its first argument names, if it is one; the others come forward
   only. Each app's choice in programs.md.
-- [ ] Terminal's answer: `app.open` as a new window, in the process the
+- [x] Terminal's answer: `app.open` as a new window, in the process the
   first started. `vt` keeps its tabs: a new window is a window of its
   own, with one tab. It follows 0031's rewrite of `vt` (its relays
   gone), once both have merged.
@@ -208,3 +208,43 @@ running, if one is.
   in the `install`, `install_boot` and `rootboot_tmpfs` cases' counts,
   which this step's run of `make e2e` found. `make check`, `make test` and
   `make e2e` pass; the goal is done but for Terminal's answer.
+- 2026-10-28: Terminal's answer, and the goal done. The design calls:
+  - **`vt` is a `UiApp`.** `windowed` starts the app (`ui_app_start`,
+    which registers `app.vt`) and opens its first window with
+    `ui_app_open_csd`; a `Vts` holds the app, each window's `Vt` by its
+    id (a `Map`), the ports of closed tabs, the set last waited on, and
+    the cells new windows are opened at (the arguments'). A `Vt` is one
+    window and its tabs as before; its loop's code is unchanged but for
+    the top: `serve` takes a message on the app's port or a tab's and
+    `vts_received` finds its window, by the notice's id (the
+    compositor's), by the tab whose port it came on, or by the tab whose
+    shell exited (`vts_holding`), and asks it (`Ask`: `AskWm`, `AskTab`,
+    `AskExit`, `vt_asked`). An open (`ui_message_event`'s `UiOpen`),
+    which comes from `wm`'s pid but names no window, opens a window
+    more with one tab (`vts_opened`) and answers with its id
+    (`ui_open_answer`), or 0 with why on stderr.
+  - **Lent, not shared.** A step of one window may take or give back
+    closed tabs' ports, and must know how many tabs the other windows
+    have, as the set is the app's: so the app lends the window its free
+    ports and that count for the step (`Lent`, `vt_lent`) and takes the
+    ports back after (`vts_kept`), rather than every function of a
+    window taking the app. A window closing (`Step`'s `Stop V STATUS`)
+    gives its tabs' ports back too (`closed_all` lets each tab's name go
+    and frees its port; its shells' exits, told later, find no tab).
+  - **One set, made by the app.** `vt_waiting` went from inside a
+    window's step to the loop: after every message `vts_waiting` makes
+    the set again only if its ports (`vts_ports`: the app's port, then
+    every window's tabs') are not those it waits on. Terminal's windows
+    have at most 31 tabs between them (`tabs_room`), as a set holds 32
+    ports (desktop.md's Limits).
+  - **One face.** A window is painted with the app's face for its step
+    and its face, with any strike it asked for, is the app's after
+    (`ui_app_put_faced`), as `ui_app_present` does; a closed window goes
+    with `ui_app_close`, which the window's own step no longer calls.
+  `vt` ends with its last window, with the status of the shell whose
+  exit closed it, or 0 for a close button. `tests/launch.sh` gained a
+  fifth check: Terminal launched again is a second window of the same
+  pid, in front, titled with its own tab's name, and `wm` never said an
+  app did not answer its open. Host tests: `test_tabs_room`,
+  `test_lent`, `test_term_win`, `tabs_test.l0`'s `test_first_port`.
+  `tests/launch.sh` and `tests/vt.sh` pass, four CPUs.
