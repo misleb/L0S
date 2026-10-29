@@ -21,9 +21,33 @@ pixels, and draw the pointer as a top layer.
 | `shape ID TL TR BL BR` | the buffer's corners rounded, top left, top right, bottom left, bottom right, each radius from 0 (square) to half its width and height. virtio-gpu cannot blend, so it narrows the layer's rows within a corner, and `hvs` writes the alpha of the pixels there 0; either way the layer beneath shows there. A buffer is square when shared; if it is on the screen, the screen is rebuilt |
 | `cursor ID HX HY` | the pointer's image, a 64×64 buffer, and its hot spot |
 | `move X Y` | the pointer's hot spot at X, Y |
+| `frames PORT` | from now on, PORT told the display's notices: `frame N` after each frame that showed a change, N counting from 1, and `release ID` once buffer ID is no longer read, having left the stack |
 
 The reply is `ok`, `display W H cursor scale S` for `info`, or
-`error: WHY`. The driver counts the screen's own pixels; once `info` has
+`error: WHY`.
+
+**The notices** are sent from the driver to each port `frames` named,
+as notices are, a tag of three bytes and u32s, little-endian
+(`l0s.l0`'s `shown_notice` and `release_notice`, read with
+`display_frame_of` and `display_release_of`):
+
+| Notice | Bytes | Says |
+|---|---|---|
+| `frame N` | `frm`, N | the Nth frame that showed a change is on the screen: what every `damage` and `layers` answered before it changed |
+| `release ID` | `rel`, ID | buffer ID, which a `layers` took off the stack, is read no more: its pages may be painted again |
+
+Both are sent before the reply to the request that caused them, so a
+client that waits for the reply, as `wm` does, finds them waiting on
+its port after it. `virtio-gpu` counts a frame for each `damage` and
+each `layers`, once its commands are answered: its `RESOURCE_FLUSH`es
+in 2D mode, or the flushes after its `SUBMIT_3D` in 3D mode. One whose
+change shows nowhere, a window's damage under another window, counts
+too, so that a client waiting for a frame is never left waiting for a
+change of someone else's. It releases a buffer when the `layers` that
+left it out is answered: in 2D mode the screen's backing no longer has
+its rows, so no transfer reads it again, and in 3D mode no copy reads
+its texture, which only a `damage` would bring up to date from its
+pages. The driver counts the screen's own pixels; once `info` has
 said the scale, the client side, `display.l0`, counts the desktop's, and
 makes every place, rectangle, top row and radius the screen's on the way.
 A buffer's ID is from 0 to 1,000,000.
@@ -66,6 +90,32 @@ so that the guest copies no pixels at all:
 
 So `vt` scrolls by changing its window's `top`, with no copying anywhere,
 and draws only the new row.
+
+**Commands in flight, waited for by the interrupt.** `virtio-gpu` binds
+its virtio-mmio transport's interrupt (`irq_bind`, 48 plus the
+transport) to a port of its own as it starts, and waits on it and
+`display` as one set (`port_set`). A request's commands go into the
+control queue as it is handled, each a chain of descriptors over its
+place in the request pages and a response slot of its own, as many at
+once as the ring's 64 descriptors and the 62 request pages have room for
+(`flight.l0`): a long request, a backing of thousands of runs, waits for
+the commands before it to free the pages it needs. The device is told
+of them once the request is handled, or when the driver must wait for
+room. The driver then takes the next request; its reply is sent once
+every command made before it is answered, so replies keep their
+requests' order, and one whose request made no command goes as soon as
+those before it have. Each interrupt is acknowledged, the device's
+status and then the kernel's, and the used ring read: the commands used
+are retired in the order they were made, whatever order the device
+used them in, and a command answered with other than it wants makes
+its request's reply an error. The cursor queue's commands are put in
+flight the same way, 16 at most, a `move`'s reply waiting for its
+command to be used; a new cursor image waits for the control queue's
+commands, which the cursor's update names, to be answered first. Before
+the driver gives up pages of its own, the wallpaper's, every command in
+flight is waited for. An interrupt for a command already seen used is
+ended like any other, and a command the device never uses leaves the
+driver waiting.
 
 **virtio-gpu's 3D mode.** If the device offers `VIRTIO_GPU_F_VIRGL`, as
 QEMU's `virtio-gpu-gl-device` does, the driver (`gl.l0`) composes the
@@ -305,6 +355,21 @@ of frame taken for 714 ms, frames 19310 to 19311`), as more than 63
 frames in one would go uncounted.
 **Seen** on a Pi 5 at 3840×2160 at 60 Hz: frames 600, 1200 and 1800
 said 10.000 s apart, every change shown, none left pending.
+
+**Frames and releases** (the protocol's `frames`; written, not yet run
+on a board). `hvs` keeps the ports `frames` names (`frames.l0`), and at
+each end of frame that shows a change, by the bookkeeping above
+(`shown.l0`'s `changes_shown`), tells them first a `release` of each
+buffer the lists it shows left out, then `frame N`, N counting the
+frames that showed a change from 1. A `layers` notes the buffers its
+list leaves out with the switch (`changes_releasing`), so they are
+released at the end of the frame after the one that took it, as the
+HVS reads every pixel of a buffer it shows every frame. A `damage` is a
+frame two ends of frame on, as its clean is shown; a pointer's move,
+which writes the list again, is one too. Unlike `virtio-gpu`'s, these
+notices come after the reply, at the end of the frame. Where the board
+gives no end of frame, and `hvs` polls, it tells a frame as each change
+is made and a release as its list is taken.
 
 **The first runs** go one boot a stage, `probe`, `list`, `iommu` and
 then the whole driver, each with `tools/pi5-boot --until 'l0s>'` and its

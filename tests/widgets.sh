@@ -14,7 +14,10 @@
 #      selected, in the accent's tint, and End Process its own red; then
 #      the focus ring, on Refresh after Tab, on End Process after Tab
 #      again, and back on Refresh after Shift-Tab, the key's modifier
-#      come through wm and the toolkit
+#      come through wm and the toolkit; and, as run windows lists them,
+#      each Tab's change shown from the window's other buffer, its id
+#      flipping between 4 and 6, and a frame told for each (roadmap
+#      0006)
 #   4. the tab bar along its foot, AdwTabBar's: three tabs, the first
 #      raised; a click on the third raises it instead, and a click on
 #      the second's close button closes it, the two left sharing the bar
@@ -81,6 +84,23 @@ window() {
     fi
   done
   fail "run windows never listed the gallery's window; it showed:"
+}
+
+# The buffer the gallery's window shows and the frames its client has
+# been told, as run windows lists them: w_buf, w_frames.
+paced() {
+  local try from line
+  for try in $(seq 1 30); do
+    from=$(($(wc -c < "$out") + 1))
+    printf 'run windows\n' >&3
+    sleep 1
+    line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ Widgets .* buffer [0-9]+ frames [0-9]+' | head -1)
+    if [ -n "$line" ]; then
+      read -r _ _ _ _ _ _ _ _ _ w_buf _ w_frames _ <<< "$line"
+      return 0
+    fi
+  done
+  fail "run windows never listed the gallery's buffer and frames; it showed:"
 }
 
 # Pixel x, y of the screendump, a 1280 by 800 PPM whose header is 16 bytes.
@@ -168,10 +188,26 @@ shows "a click selected the second row, and End Process woke" \
 # to Refresh, Tab again to End Process, and Shift-Tab back to Refresh,
 # End Process its own red again; Esc takes the focus away.
 ring="45 84 132"
+paced; buf0=$w_buf; frames0=$w_frames
 monitor "sendkey tab"
 shows "Tab put the focus on Refresh" "$((cx + 6)) $((cy + 22)) $ring" "$((cx + 546)) $((cy + 22)) $red"
+paced; buf1=$w_buf; frames1=$w_frames
 monitor "sendkey tab"
 shows "Tab moved it on to End Process" "$((cx + 6)) $((cy + 22)) $ground" "$((cx + 546)) $((cy + 22)) $ring"
+paced; buf2=$w_buf; frames2=$w_frames
+
+# Each change is painted in the buffer the screen did not show, which
+# then shows: the window's content flips between its two ids, 4 and 6
+# for window 0, at each, and wm tells its client a frame for each.
+case "$buf0 $buf1 $buf2" in
+  "4 6 4"|"6 4 6") echo "ok - widgets: each change shown from the other buffer, $buf0, $buf1, $buf2" ;;
+  *) fail "the buffers shown were $buf0, $buf1, $buf2, not each the other" ;;
+esac
+if [ "$frames1" -gt "$frames0" ] && [ "$frames2" -gt "$frames1" ] && [ "$frames0" -gt 0 ]; then
+  echo "ok - widgets: frames told, $frames0, $frames1, $frames2"
+else
+  fail "frames told were $frames0, $frames1, $frames2, not more at each change"
+fi
 monitor "sendkey shift-tab"
 shows "Shift-Tab moved it back to Refresh" "$((cx + 6)) $((cy + 22)) $ring" "$((cx + 546)) $((cy + 22)) $red"
 monitor "sendkey esc"

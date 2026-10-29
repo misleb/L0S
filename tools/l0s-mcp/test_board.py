@@ -160,6 +160,12 @@ class Shell(unittest.TestCase):
         got = parse_windows("3 Files 100 90 880 560 front 19\n2 Files 40 40 880 560 - 19\n")
         self.assertEqual([w["pid"] for w in got["windows"]], [19, 19])
 
+    def test_windows_buffer_frames(self):
+        got = parse_windows("2 my window 1 2 3 4 - 7 buffer 14 frames 3\n")
+        self.assertEqual(got["windows"][0], {"id": 2, "title": "my window", "x": 1, "y": 2,
+                                             "width": 3, "height": 4, "front": False, "pid": 7,
+                                             "buffer": 14, "frames": 3})
+
     def test_window_title_with_spaces(self):
         got = parse_windows("2 my window 1 2 3 4 - 7\n")
         self.assertEqual(got["windows"][0]["title"], "my window")

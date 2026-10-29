@@ -90,7 +90,26 @@
 ; to grow into: its rows are as far apart as it is wide, whatever size
 ; the window is, so what is painted keeps its place as the window grows
 ; and shrinks in it, and only what changed is painted again.
-(data UiMem (UiMem int int int int UiSwap))
+; Last, its second buffer and its pacing (UiDb).
+(data UiMem (UiMem int int int int UiSwap UiDb))
+
+; A window's second buffer, and its pacing, as Wayland's clients keep
+; theirs: where wm has the buffer shown, its address there; the buffer
+; not shown, if one is made yet; whether the window waits for the
+; display's next frame, and for the buffer not shown to be released; and
+; since when it waits, in clock_ns. A window paints only the buffer not
+; shown, once neither is awaited, and gives it to wm (attach), so no
+; frame shows it half painted, and it paints at most once a frame.
+(data UiDb (UiDb int UiBack bool bool int))
+
+; The buffer not shown: its address here, its pages, its canvas, all of
+; it, its address in wm, 0 until it is shared, and the boxes of the
+; desktop's pixels in which the buffer shown has what it has not.
+(data UiBack (UiBack int int Canvas int (list Rect)) (UiNoBack))
+
+; How long a window waits for a frame or a release before it paints all
+; the same: 100 ms, a few frames, should a display tell neither.
+(def ui_pace_ns () int 100000000)
 
 ; What a resize did that wm is yet to be told of: made a new buffer, the
 ; old one's address, pages and canvas kept until wm has the new one, with
@@ -101,8 +120,8 @@
 (data UiSwap (UiSwap int int Canvas int int) (UiInPlace int int) (UiNoSwap))
 
 ; The window's width and height, the desktop's pixels.
-(def ui_win_w ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g k m csd cl lp) (match m ((UiMem va n ww wh swap) ww)))))
-(def ui_win_h ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g k m csd cl lp) (match m ((UiMem va n ww wh swap) wh)))))
+(def ui_win_w ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g k m csd cl lp) (match m ((UiMem va n ww wh swap db) ww)))))
+(def ui_win_h ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g k m csd cl lp) (match m ((UiMem va n ww wh swap db) wh)))))
 
 ; A window opened, or why not.
 (data UiOpened (UiOpenedWin UiWin) (UiOpenFailed (list int)))
@@ -200,26 +219,35 @@
     ((UiBuf va n canvas)
       (match (if csd (window_open_csd c w h va n port title) (window_open c w h va n port title))
         ((WindowFailed why) (let u (ui_buffer_free va n canvas) (UiOpenFailed why)))
-        ((WindowOpened id)
-          (UiOpenedWin (UiWin c id canvas port f (ui_state_new (ui_style)) (nil UiNode) 0 0 (ui_click_none) (UiMem va n w h (UiNoSwap)) csd false (ui_loop_new))))))))
+        ((WindowOpened id there)
+          (UiOpenedWin (UiWin c id canvas port f (ui_state_new (ui_style)) (nil UiNode) 0 0 (ui_click_none) (UiMem va n w h (UiNoSwap) (ui_db_new there)) csd false (ui_loop_new))))))))
+
+; A window's second buffer and pacing as it opens, its buffer at there in
+; wm: no buffer not shown yet, and nothing awaited.
+(def ui_db_new ((there int)) UiDb (UiDb there (UiNoBack) false false 0))
 
 ; w painted with face f from now on, as an app's windows share its face.
 (def ui_win_faced ((w UiWin) (f UiFace)) UiWin
   (match w ((UiWin c id cv port old st ns b g k m csd cl lp) (UiWin c id cv port f st ns b g k m csd cl lp))))
 
-; The window closed, and its buffer, and any a resize has not yet
-; replaced, given up.
+; The window closed, and its buffer, its buffer not shown, and any a
+; resize has not yet replaced, given up.
 (def ui_close ((w UiWin)) int
   (match w
     ((UiWin c id cv port font st ns b g k m csd cl lp)
       (match m
-        ((UiMem va n ww wh swap)
+        ((UiMem va n ww wh swap db)
           (let x (window_close c id)
             (let f (ui_buffer_free va n cv)
-              (match swap
-                ((UiNoSwap) 0)
-                ((UiInPlace ow oh) 0)
-                ((UiSwap ova on ocv ow oh) (ui_buffer_free ova on ocv))))))))))
+              (let fb (match db ((UiDb there bk fr rl since) (ui_back_free bk)))
+                (match swap
+                  ((UiNoSwap) 0)
+                  ((UiInPlace ow oh) 0)
+                  ((UiSwap ova on ocv ow oh) (ui_buffer_free ova on ocv)))))))))))
+
+; A buffer not shown given up, if there is one: 0.
+(def ui_back_free ((b UiBack)) int
+  (match b ((UiBack bva bn bcv bt stale) (ui_buffer_free bva bn bcv)) ((UiNoBack) 0)))
 
 ; A buffer's side n of the desktop's pixels with room to grow: a quarter
 ; more, and 64.
@@ -504,7 +532,18 @@
     ((None)
       (match (size_notice_at m at)
         ((Some ns) (UiResize (nth ns 0) (nth ns 1)))
-        ((None) (UiOther from (msg_text b)))))))
+        ((None)
+          (if (ge (shown_notice_at m at) 0)
+              (UiOther from (ui_frame_told))
+              (if (ge (release_notice_at m at) 0)
+                  (UiOther from (ui_release_told))
+                  (UiOther from (msg_text b)))))))))
+
+; What a frame notice of the window, and a release of its buffer not
+; shown, are as events: UiOther from the compositor, saying so, which
+; ui_route takes, so the next ui_present paints what is waiting.
+(def ui_frame_told () (list int) "ui.frame")
+(def ui_release_told () (list int) "ui.release")
 
 ; The window after an event, and the action it set off, or "".
 (data UiRouted (UiRouted UiWin (list int)))
@@ -562,7 +601,34 @@
             ((UiOpen r args) (let t (ui_open_answer ev 0) (UiRouted w (ui_open_action))))
             ((UiReply t m) (UiRouted w ""))
             ((UiIdle) (UiRouted w ""))
-            ((UiOther from payload) (UiRouted w ""))))))))
+            ((UiOther from payload)
+              (UiRouted (if (eq payload (ui_frame_told)) (ui_win_paced_by w true false)
+                            (if (eq payload (ui_release_told)) (ui_win_paced_by w false true) w))
+                        ""))))))))
+
+; w once its frame came, if frame, and its buffer not shown was
+; released, if released: no longer waiting for either.
+(def ui_win_paced_by ((w UiWin) (frame bool) (released bool)) UiWin
+  (match w
+    ((UiWin c id cv port font st ns b g k m csd cl lp)
+      (match m
+        ((UiMem va n ww wh swap db)
+          (match db
+            ((UiDb there bk fr rl since)
+              (UiWin c id cv port font st ns b g k
+                     (UiMem va n ww wh swap (UiDb there bk (if frame false fr) (if released false rl) since)) csd cl lp))))))))
+
+; Whether the window waits still, at now, for its frame or the release
+; of its buffer not shown, so ui_present paints nothing yet: not past
+; ui_pace_ns of waiting.
+(def ui_win_waits ((w UiWin) (now int)) bool
+  (match w
+    ((UiWin c id cv port font st ns b g k m csd cl lp)
+      (match m
+        ((UiMem va n ww wh swap db)
+          (match db
+            ((UiDb there bk fr rl since)
+              (if (if fr true rl) (lt (sub now since) (ui_pace_ns)) false))))))))
 
 ; ---------------------------------------------------------- context menus
 
@@ -808,8 +874,17 @@
 ; that buffer in place of the old one. A window asked to close
 ; (ui_win_close_asked) that the program presents again did nothing with
 ; the close: it is closed instead (ui_closed_unasked).
+;
+; A window paces itself (ui_double_presented): it paints the buffer the
+; screen does not show, gives it to wm in place of the one shown, and
+; paints no more until the display's next frame and the release of the
+; buffer it gave up, keeping what changed meanwhile, which the next
+; ui_present paints. One whose program paints a drawing area itself,
+; as vt does, is painted as before, in the buffer shown.
 (def ui_present ((w UiWin) (widget UiWidget)) UiWin
-  (if (ui_win_close_asked w) (ui_closed_unasked w) (ui_presented_now w widget)))
+  (if (ui_win_close_asked w)
+      (ui_closed_unasked w)
+      (if (ui_win_waits w (clock_ns)) w (ui_presented_now w widget))))
 
 ; A window whose close the program did nothing with, closed for it, as
 ; the compositor's close button did before it asked: the window first,
@@ -830,7 +905,7 @@
   (match w
     ((UiWin c id canvas port font st old held g k m csd cl lp)
       (match m
-        ((UiMem va n ww wh swap)
+        ((UiMem va n ww wh swap db)
           (let p0 (clock_ns)
             (let ns (ui_layout_window widget ww wh (ui_st_keeping st (ui_kept_of old)))
               (let l (clock_ns)
@@ -838,12 +913,205 @@
                   (let w2 (UiWin c id canvas port (ui_face_asking font (ui_strikes_wanted font ns (nil (list int))) (ui_loop_rport lp)) st ns held g k m csd cl lp)
                     (let s (clock_ns)
                       (ui_win_stepped
-                        (match swap
-                          ((UiNoSwap) (ui_presented w2 old ns full))
-                          ((UiInPlace ow oh)
-                            (ui_swapped w2 (ui_changed_onto old ns full (rects_minus (cons full (nil Rect)) (cons (Rect 0 0 ow oh) (nil Rect))))))
-                          ((UiSwap ova on ocv ow oh) (ui_swapped w2 (cons full (nil Rect)))))
+                        (if (is_empty (ui_drawn ns))
+                            (ui_double_presented w2 old ns full)
+                            (ui_single_presented w2 old ns full))
                         p0 l s))))))))))))
+
+; w, showing ns, painted in the buffer the screen shows, as a window
+; whose program paints a drawing area does: where they differ from old,
+; and after a resize what was exposed, or all of a new buffer.
+(def ui_single_presented ((w UiWin) (old (list UiNode)) (ns (list UiNode)) (full Rect)) UiWin
+  (match (ui_win_swap w)
+    ((UiNoSwap) (ui_presented w old ns full))
+    ((UiInPlace ow oh)
+      (ui_swapped w (ui_changed_onto old ns full (rects_minus (cons full (nil Rect)) (cons (Rect 0 0 ow oh) (nil Rect))))))
+    ((UiSwap ova on ocv ow oh) (ui_swapped w (cons full (nil Rect))))))
+
+; What a resize did that wm is yet to be told of.
+(def ui_win_swap ((w UiWin)) UiSwap
+  (match w ((UiWin c id cv port font st ns b g k m csd cl lp) (match m ((UiMem va n ww wh swap db) swap)))))
+
+; Whether a resize has done nothing wm is yet to be told of.
+(def ui_swap_none ((s UiSwap)) bool
+  (match s ((UiNoSwap) true) ((UiInPlace ow oh) false) ((UiSwap ova on ocv ow oh) false)))
+
+; The part of the window the buffer shown has, the desktop's pixels: all
+; of it but after a resize, the size it had.
+(def ui_shown_size ((s UiSwap) (ww int) (wh int)) Rect
+  (match s ((UiNoSwap) (Rect 0 0 ww wh)) ((UiInPlace ow oh) (Rect 0 0 ow oh)) ((UiSwap ova on ocv ow oh) (Rect 0 0 ow oh))))
+
+; What a present paints, what of the window it changes, and how a
+; scroll moved what an area shows, if it did.
+(data UiPlan (UiPlan (list Rect) (list Rect) UiScrollMove))
+
+; The plan for showing ns, where old was painted last, within full: what
+; differs (ui_changed), what a scroll did not move in (ui_scrolled_changed),
+; or, after a resize, what differs and what the window grew by.
+(def ui_plan ((old (list UiNode)) (ns (list UiNode)) (full Rect) (swap UiSwap)) UiPlan
+  (match swap
+    ((UiInPlace ow oh)
+      (let b (ui_undrawn ns (ui_changed_onto old ns full (rects_minus (cons full (nil Rect)) (cons (Rect 0 0 ow oh) (nil Rect)))))
+        (UiPlan b b (UiNoScrollMove))))
+    ((UiSwap ova on ocv ow oh) (UiPlan (cons full (nil Rect)) (cons full (nil Rect)) (UiNoScrollMove)))
+    ((UiNoSwap)
+      (match (ui_scroll_moved ns old)
+        ((UiNoScrollMove)
+          (let same (ui_parts_same old ns)
+            (let b (ui_undrawn ns (ui_changed (ui_parts_out old same) (ui_parts_out ns same) full))
+              (UiPlan b b (UiNoScrollMove)))))
+        ((UiScrollMove area dy)
+          (let b (ui_undrawn ns (ui_scrolled_changed old ns full area dy))
+            (UiPlan b (ui_merged (cons area b) full) (UiScrollMove area dy))))))))
+
+; w, showing ns, paced (ui_present): what the plan says painted in the
+; buffer not shown, made first if there is none or it is too small,
+; once what it lacks of the shown one is copied over (ui_back_painted),
+; and given to wm in place of the one shown (ui_back_given). Nothing is
+; painted or asked if nothing changed; and if there is no memory for a
+; buffer not shown, the window is painted as before, in the one shown.
+(def ui_double_presented ((w UiWin) (old (list UiNode)) (ns (list UiNode)) (full Rect)) UiWin
+  (match w
+    ((UiWin c id canvas port font st nodes held g k m csd cl lp)
+      (match m
+        ((UiMem va n ww wh swap db)
+          (match (ui_plan old ns full swap)
+            ((UiPlan paint told mv)
+              (if (if (is_empty told) (ui_swap_none swap) false)
+                  (ui_win_painted w (clock_ns))
+                  (match db
+                    ((UiDb there bk fr rl since)
+                      (match (ui_back_for bk ww wh (ui_face_scale font))
+                        ((UiNoBack) (ui_single_presented w old ns full))
+                        ((UiBack bva bn bcv bt stale)
+                          (ui_back_painted w (UiPlan paint told mv) (UiBack bva bn bcv bt stale) (ui_shown_size swap ww wh))))))))))))))
+
+; The buffer not shown, for a window ww by wh of the desktop's pixels at
+; scale s: b if it holds that; else a new one, b given up, with room to
+; grow, lacking all of the shown one, and not yet shared with wm; none
+; if there is no memory for it.
+(def ui_back_for ((b UiBack) (ww int) (wh int) (s int)) UiBack
+  (match b
+    ((UiBack bva bn bcv bt stale)
+      (if (if (le (mul ww s) (canvas_w bcv)) (le (mul wh s) (canvas_h bcv)) false)
+          b
+          (let f (ui_buffer_free bva bn bcv) (ui_back_new ww wh s))))
+    ((UiNoBack) (ui_back_new ww wh s))))
+
+; A new buffer not shown for a window ww by wh at scale s, as ui_back_for
+; makes it.
+(def ui_back_new ((ww int) (wh int) (s int)) UiBack
+  (match (ui_buffer_at (ui_grown ww) (ui_grown wh) s)
+    ((UiNoBuf why) (UiNoBack))
+    ((UiBuf va n cv) (UiBack va n cv 0 (cons (Rect 0 0 (ui_grown ww) (ui_grown wh)) (nil Rect))))))
+
+; The buffer not shown, b, brought up to what w shows and then painted as
+; plan says: what it lacks copied over from the buffer shown, within
+; shown, the part that has it, but for what is painted anyway; a scroll's
+; rows moved; then the boxes painted. Then given to wm (ui_back_given),
+; with the damage that shows it: what it lacked, and what changed.
+(def ui_back_painted ((w UiWin) (plan UiPlan) (b UiBack) (shown Rect)) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g k m csd cl lp)
+      (match m
+        ((UiMem va n ww wh swap db)
+          (match plan
+            ((UiPlan paint told mv)
+              (match b
+                ((UiNoBack) w)
+                ((UiBack bva bn bcv bt stale)
+                  (let s (ui_face_scale font)
+                    (let copied (ui_copied_over bcv canvas (ui_copy_boxes stale paint mv shown) s)
+                      (let moved (match mv ((UiNoScrollMove) copied) ((UiScrollMove area dy) (canvas_copy_rows copied (rect_scaled area s) (mul dy s))))
+                        (let p (ui_paint_boxes moved font ns paint)
+                          (let at (clock_ns)
+                            (ui_back_given w (UiBack bva bn p bt stale) (ui_merged (append stale told) (Rect 0 0 ww wh)) told at)))))))))))))))
+
+; What of stale, what a buffer not shown lacks, to copy over from the one
+; shown, within shown: all of it if a scroll moves rows, which may be
+; read from anywhere in the area, else but what is painted anyway.
+(def ui_copy_boxes ((stale (list Rect)) (paint (list Rect)) (mv UiScrollMove) (shown Rect)) (list Rect)
+  (ui_merged (match mv ((UiNoScrollMove) (rects_minus stale paint)) ((UiScrollMove area dy) stale)) shown))
+
+; Each of boxes, the desktop's pixels, of src copied to the same place in
+; dst, at scale s: dst, which has them.
+(def ui_copied_over ((dst Canvas) (src Canvas) (boxes (list Rect)) (s int)) Canvas
+  (if (is_empty boxes)
+      dst
+      (let r (rect_clip (rect_clip (rect_scaled (head boxes) s) (Rect 0 0 (canvas_w dst) (canvas_h dst))) (Rect 0 0 (canvas_w src) (canvas_h src)))
+        (ui_copied_over (if (rect_empty r) dst (ui_rows_copied dst src (rect_x r) (rect_w r) (rect_y r) (rect_y1 r))) src (tail boxes) s))))
+
+; Rows y up to end of src, w pixels from column x, copied into dst.
+(def ui_rows_copied ((dst Canvas) (src Canvas) (x int) (w int) (y int) (end int)) Canvas
+  (if (ge y end) dst (ui_rows_copied (ui_row_copied dst src x w y) src x w (add y 1) end)))
+
+; Row y of src, w pixels from column x, copied into dst: between two
+; regions in one copy, read as bytes and written as a range; over arrays
+; a cell at a time.
+(def ui_row_copied ((dst Canvas) (src Canvas) (x int) (w int) (y int)) Canvas
+  (match dst
+    ((Canvas dfb dw dh dtop)
+      (match src
+        ((Canvas sfb sw sh stop)
+          (let row (device_read_bytes sfb (mul (add (row_start src y) x) 4) (mul w 4))
+            (let p (put_bytes_range dfb (mul (add (row_start dst y) x) 4) row 0 (mul w 4)) dst)))
+        ((ArrayCanvas px sw sh stop) (ui_cells_copied dst src x (add x w) y))))
+    ((ArrayCanvas px dw dh dtop) (ui_cells_copied dst src x (add x w) y))))
+
+; Pixels x up to end of src's row y copied into dst's, one at a time.
+(def ui_cells_copied ((dst Canvas) (src Canvas) (x int) (end int) (y int)) Canvas
+  (if (ge x end)
+      dst
+      (let i (add (row_start dst y) x)
+        (ui_cells_copied (canvas_fill dst (canvas_pixel src x y) i (add i 1)) src (add x 1) end y))))
+
+; The buffer not shown, b, painted at at, given to wm: the next frame
+; asked for (window_frame), then, after a resize, the resize's new
+; buffer, else attach and the damage dmg, which shows it, what it lacked
+; and what changed. Once wm has it, it is the window's, the one shown
+; before is the buffer not shown, lacking told, and the window waits for
+; the frame, if wm took that ask, and for the release. If wm will not
+; have it, the window is as wm shows it (ui_back_kept).
+(def ui_back_given ((w UiWin) (b UiBack) (dmg (list Rect)) (told (list Rect)) (at int)) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g k m csd cl lp)
+      (match m
+        ((UiMem va n ww wh swap db)
+          (match db
+            ((UiDb there bk fr rl since)
+              (match b
+                ((UiNoBack) (ui_win_painted w at))
+                ((UiBack bva bn bcv bt stale)
+                  (match (if (gt bt 0) ((Ok int (list int)) bt) (shm_share_to bva bn (compositor_pid c) "the compositor"))
+                    ((Err why) (ui_win_painted (ui_back_kept w b) at))
+                    ((Ok bt2)
+                      (let f (window_frame c id)
+                        (let e (if (ui_swap_none swap)
+                                   (let a (window_attach c id bt2 bn (canvas_w bcv)) (if (is_empty a) (window_damage_many c id dmg) a))
+                                   (window_resize_at c id ww wh bt2 bn (canvas_w bcv)))
+                          (ui_win_painted
+                            (if (is_empty e)
+                                (UiWin c id bcv port font st ns held g k
+                                       (UiMem bva bn ww wh (UiNoSwap) (UiDb bt2 (UiBack va n canvas there told) (is_empty f) true (clock_ns))) csd cl lp)
+                                (ui_back_kept w (UiBack bva bn bcv bt2 (cons (Rect 0 0 (canvas_w bcv) (canvas_h bcv)) (nil Rect)))))
+                            at))))))))))))))
+
+; w as wm shows it, after wm would not have its buffer not shown, b,
+; kept: at the size it had, nothing awaited, and its nodes forgotten so
+; that all of it is painted next.
+(def ui_back_kept ((w UiWin) (b UiBack)) UiWin
+  (match w
+    ((UiWin c id canvas port font st ns held g k m csd cl lp)
+      (match m
+        ((UiMem va n ww wh swap db)
+          (match db
+            ((UiDb there bk fr rl since)
+              (UiWin c id canvas port font st (nil UiNode) held g k
+                     (match swap
+                       ((UiInPlace ow oh) (UiMem va n ow oh (UiNoSwap) (UiDb there b false false since)))
+                       ((UiSwap ova on ocv ow oh) (UiMem va n ww wh swap (UiDb there b false false since)))
+                       ((UiNoSwap) (UiMem va n ww wh swap (UiDb there b false false since))))
+                     csd cl lp))))))))
 
 ; w at the end of its step's present, which started at p0, was laid out
 ; by l and had its waits done by s: the step's stages taken from its
@@ -957,7 +1225,7 @@
   (match w
     ((UiWin c id canvas port font st ns held g k m csd cl lp)
       (match m
-        ((UiMem va n ww wh swap)
+        ((UiMem va n ww wh swap db)
           (let p (ui_paint_boxes canvas font ns (ui_undrawn ns boxes))
             (let at (clock_ns)
               (let e (match swap
@@ -971,9 +1239,9 @@
   (match w
     ((UiWin c id canvas port font st ns held g k m csd cl lp)
       (match m
-        ((UiMem va n ww wh swap)
+        ((UiMem va n ww wh swap db)
           (let f (match swap ((UiSwap ova on ocv ow oh) (ui_buffer_free ova on ocv)) ((UiInPlace ow oh) 0) ((UiNoSwap) 0))
-            (UiWin c id canvas port font st ns held g k (UiMem va n ww wh (UiNoSwap)) csd cl lp)))))))
+            (UiWin c id canvas port font st ns held g k (UiMem va n ww wh (UiNoSwap) db) csd cl lp)))))))
 
 ; w once wm has refused its resize: as wm shows it, at the size it had, in
 ; the same buffer or the old one, the new one given up; nothing painted,
@@ -982,16 +1250,18 @@
   (match w
     ((UiWin c id canvas port font st ns held g k m csd cl lp)
       (match m
-        ((UiMem va n ww wh swap)
+        ((UiMem va n ww wh swap db)
           (match swap
-            ((UiInPlace ow oh) (UiWin c id canvas port font st (nil UiNode) held g k (UiMem va n ow oh (UiNoSwap)) csd cl lp))
+            ((UiInPlace ow oh) (UiWin c id canvas port font st (nil UiNode) held g k (UiMem va n ow oh (UiNoSwap) db) csd cl lp))
             ((UiSwap ova on ocv ow oh)
               (let f (ui_buffer_free va n canvas)
-                (UiWin c id ocv port font st (nil UiNode) held g k (UiMem ova on ow oh (UiNoSwap)) csd cl lp)))
+                (UiWin c id ocv port font st (nil UiNode) held g k (UiMem ova on ow oh (UiNoSwap) db) csd cl lp)))
             ((UiNoSwap) w)))))))
 
-; The window asked to be rw by rh: in the buffer it has, if its canvas
-; holds that, what was painted kept where it is for the next ui_present to
+; The window asked to be rw by rh: a window that paces itself only keeps
+; the size, the size it had kept too, for ui_present to paint its buffer
+; not shown at it (ui_double_presented); any other, in the buffer it has,
+; if its canvas holds that, what was painted kept where it is for the next ui_present to
 ; paint only what changed; else in a new one with room to grow, the old
 ; one kept until wm has the new one, and its nodes forgotten so that all
 ; of it is painted. A buffer that wm has never been told of is given up,
@@ -1001,13 +1271,13 @@
   (match w
     ((UiWin c id canvas port font st ns held g k m csd cl lp)
       (match m
-        ((UiMem va n ww wh swap)
+        ((UiMem va n ww wh swap db)
           (if (if (lt rw 1) true (if (lt rh 1) true (if (eq rw ww) (eq rh wh) false)))
               w
               (let s (ui_face_scale font)
-                (if (if (le (mul rw s) (canvas_w canvas)) (le (mul rh s) (canvas_h canvas)) false)
+                (if (if (is_empty (ui_drawn ns)) true (if (le (mul rw s) (canvas_w canvas)) (le (mul rh s) (canvas_h canvas)) false))
                     (UiWin c id canvas port font st ns held g k
-                           (UiMem va n rw rh (match swap ((UiNoSwap) (UiInPlace ww wh)) ((UiInPlace ow oh) swap) ((UiSwap ova on ocv ow oh) swap))) csd cl lp)
+                           (UiMem va n rw rh (match swap ((UiNoSwap) (UiInPlace ww wh)) ((UiInPlace ow oh) swap) ((UiSwap ova on ocv ow oh) swap)) db) csd cl lp)
                     (match (ui_buffer_at (ui_grown rw) (ui_grown rh) s)
                       ((UiNoBuf why) w)
                       ((UiBuf nva nn big) (ui_swapped_in w nva nn big rw rh)))))))))))
@@ -1019,13 +1289,13 @@
   (match w
     ((UiWin c id canvas port font st ns held g k m csd cl lp)
       (match m
-        ((UiMem cva cn ww wh swap)
+        ((UiMem cva cn ww wh swap db)
           (match swap
-            ((UiNoSwap) (UiWin c id ncv port font st (nil UiNode) held g k (UiMem va n rw rh (UiSwap cva cn canvas ww wh)) csd cl lp))
-            ((UiInPlace ow oh) (UiWin c id ncv port font st (nil UiNode) held g k (UiMem va n rw rh (UiSwap cva cn canvas ow oh)) csd cl lp))
+            ((UiNoSwap) (UiWin c id ncv port font st (nil UiNode) held g k (UiMem va n rw rh (UiSwap cva cn canvas ww wh) db) csd cl lp))
+            ((UiInPlace ow oh) (UiWin c id ncv port font st (nil UiNode) held g k (UiMem va n rw rh (UiSwap cva cn canvas ow oh) db) csd cl lp))
             ((UiSwap ova on ocv ow oh)
               (let f (ui_buffer_free cva cn canvas)
-                (UiWin c id ncv port font st (nil UiNode) held g k (UiMem va n rw rh swap) csd cl lp)))))))))
+                (UiWin c id ncv port font st (nil UiNode) held g k (UiMem va n rw rh swap db) csd cl lp)))))))))
 
 ; Each of boxes painted, then each of told, where pixels have changed,
 ; told to wm in one damage request: when the painting ended, in

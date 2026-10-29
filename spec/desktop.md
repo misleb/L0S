@@ -32,6 +32,8 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `move ID` | the window dragged with the pointer from where it is, held where the pointer holds it, until the button is up: what a client that draws its own header bar asks as it is pressed, xdg_toplevel's move. Only while the left button is down after a press in that window, and nothing else is dragged (`not pressed`); only the window's client may ask |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
 | `top ID T` | the window's rows read from its buffer's row T on, as a ring: how a client scrolls |
+| `attach ID VA N S` | the window's content from now on the buffer at VA in `wm`, N pages, shared there with `shm_share`, its rows S of its own pixels apart, at the window's size: shown in place of the one shown at the next `damage`, which commits it, as `wl_surface.attach` is shown at a commit. `wm` gives it the display under the content's other bank's id once, and keeps it as the window's other buffer: attached again, it is given again only if the window's size has changed. The buffer given up stays the window's other buffer, whose release `wm` tells the client (below), and which it may name in the next `attach`, or in a `resize` as its new buffer. Only the window's client may ask |
+| `frame ID` | the window's client told, by a frame notice (below), once the display shows the next frame: what a client asks once for a change, before the `damage` that shows it, as `wl_surface.frame` is asked before a commit. Only the window's client may ask |
 | `resize ID W H [VA N S]` | the window's content is now W×H: in the buffer it has, which must have room for it, its rows where they were, or in a new one at VA, N pages, its rows S of its own pixels apart, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
 | `edges ID E` | the window resized by its edges E with the pointer, from where it is, until the button is up, as by the border outside it, as xdg_toplevel's `resize` asks: what a client asks when the inside of its own edge is pressed. E adds the edges' bits, left 1, right 2, top 4, bottom 8: one side, or two that meet. As `move`, only the window's client may ask, while the left button is down after a press in the window and nothing else is dragged |
 | `maximize ID` | the window made to fill the screen under the top bar, from 0, 32, its place and size kept; or, if it is maximized, put back where it was, at its size: what a double click on a client's own header bar asks. `wm` asks the client for the size with a size notice, as a drag of its right and bottom edges does, and places the window once it answers. Only the window's client may ask |
@@ -39,7 +41,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
 | `end` | the client asking it killed, its windows closing with its exit: what the toolkit asks for a program that did nothing with the close of its last window, since a program cannot end itself but by returning from `main`. Refused for a driver |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
-| `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
+| `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it, then `buffer B frames F`, the display's id of the content it shows and how many frames its client has been told; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
 | `launch NAME ARG ...` | the app NAME launched with the ARGs, as the launcher launches it (below), the launcher closed: NAME its name as the launcher shows it, its bundle's name, or its exec, the first app of one kind that matches, the apps read again if none does; the ARGs words, each an argument of the `open` sent on. `ok` once it is launched, or `error: no app NAME`; what `open` asks |
 | `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
 
@@ -49,10 +51,13 @@ pointer), 1; the top bar, 2; the launcher's page, 3; the L0S menu's card,
 100000; and each window's
 chrome, its title bar with the frame under it, one buffer as big as the
 window: window i's content and chrome being 4 + 4i + 2k and 5 + 4i + 2k,
-k a bank, 0 or 1. A resize gives the display a window's buffers at
-their new size under the other bank's ids, shows them, and only then
-forgets the old ones, since the display refuses to forget a buffer that
-is on the screen. The layers it gives the driver are the desktop, then
+k a bank, 0 or 1, the content's and the chrome's each its own. A resize
+gives the display a window's buffers at their new size under the other
+bank's ids, shows them, and only then forgets the old ones, since the
+display refuses to forget a buffer that is on the screen; the content
+of a client that has attached a second buffer is kept, as that one,
+under its id. A commit shows the attached buffer under the content's
+other bank, and flips the content's bank alone. The layers it gives the driver are the desktop, then
 each window from back to front, its chrome and then its content, then
 the top bar over them all; while the launcher is open, the desktop, the
 launcher under the bar, and the bar, the windows left out.
@@ -286,6 +291,24 @@ Input:
   as the action `win.close`, and closes the window itself, and asks
   `wm` to `end` the program, if the program does nothing with it (see
   [the toolkit](toolkit.md)), so every app closes at once, as before.
+- **Frames**, as `wl_surface.frame`'s done: `wm` asks the display for
+  its notices with `frames` as it starts (see [the display
+  protocol](display.md#the-display-protocol)), and says so if it will
+  not, its clients then told no frame. A client asks `frame ID` once
+  for a change, before the `damage` that shows it; `wm` tells it, as a
+  window notice of ID, `frm` and N (`shown_notice`), when the display
+  tells its next frame, N being the display's. A frame the display told
+  while `wm` was answering something else, before the client asked, may
+  tell it a little early; none comes late, as the display counts one
+  for every `damage`.
+- **Releases**, as `wl_buffer.release`: once the display says the
+  window's other buffer, which a commit or a resize took off the
+  screen, is read no more (its `release` of that id), `wm` tells the
+  client, as a window notice, `rel` and 0 (`release_notice`); the
+  client paints that buffer again only then. A window has two content
+  ids, its banks: the content's bank flips at each commit, and at a
+  resize with the chrome's, so the content shown and the other buffer
+  are each always under an id of their own.
 
 ## A large screen
 
@@ -401,12 +424,13 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   next, since no call gives one back.
   A client paints what changed for every size it is asked for, all of it
   when the size outgrows its buffer, and `wm` restacks the screen once:
-  Disks's drag paints about 7 ms a size on QEMU, and the restack takes
-  9. A layout whose parts all move with the width, as a grid whose
-  columns stretch does, paints most of itself all the same. A client
-  paints into the buffer the screen shows, so a frame can be shown half
-  painted; its rows never move, as they did when a buffer's stride was
-  its width, which tore a width drag in 2D mode. `wm` opens a region for each window, its
+  on this host's QEMU Disks's drag paints about 13 ms a size, and the
+  restack takes 11.5. A layout whose parts all move with the width, as
+  a grid whose columns stretch does, paints most of itself all the
+  same. A toolkit window paints the buffer the screen does not show, and
+  the next size only once the restack has released the other (see
+  [the toolkit](toolkit.md)); `vt`'s terminal, which its program paints,
+  is painted in the buffer shown, so a frame can show it half painted. `wm` opens a region for each window, its
   chrome's, and closes it when the window closes; the proc runtime keeps
   at most 64 open at once, so `wm`, which keeps four of its own (the
   desktop, the pointer, the top bar and the launcher), can have 60

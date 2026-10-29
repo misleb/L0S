@@ -179,6 +179,14 @@ from `user/apps/widgets/widgets.l0`:
 (ui_present w2 (gallery_view g2))           repaints and damages only what changed
 ```
 
+`ui_present` paces the window (roadmap 0006): it paints the buffer not
+shown (`UiDb`'s `UiBack`, what it lacks copied over first), asks `frame
+ID`, gives it to `wm` with `attach` and a `damage` (or a `resize`
+naming it), and paints nothing more until `wm` tells the frame and the
+release of the other, which `ui_route` takes (`ui.frame`,
+`ui.release`). A window with a `UiDrawingArea` (`vt`) is painted in the
+buffer shown, as before.
+
 Events are `UiKey`, `UiPress`, `UiRelease`, `UiMotion` (window coordinates),
 `UiLeave`, `UiFocus front`, `UiScroll x y dx dy` (the wheel, in steps, down
 and right positive), `UiExit pid status`, `UiOpen`, `UiReply tag message`

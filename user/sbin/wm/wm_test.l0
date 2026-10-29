@@ -5,13 +5,26 @@
 
 (def app_win ((i int) (x int) (y int) (app (list int))) Win
   (Win i 9 7 x y 100 50 0 (append "w" (digits i)) (Canvas (IoDevice 0) 104 98 0) 3892314112 3892346880
-       (Bufs 5 4026531840 100 10 4026552320) app (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ServerSide)))
+       (Bufs 5 4026531840 100 10 4026552320 false 0 (NoSpare) 0) app (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ServerSide)))
 
 ; The same window, but its client decorates it: no chrome, and its
 ; content at x, y.
 (def csd_win ((i int) (x int) (y int)) Win
   (Win i 9 7 x y 100 50 0 (append "c" (digits i)) (canvas_new 0 0 0) 3892314112 0
-       (Bufs 5 4026531840 100 0 0) "" (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ClientSide)))
+       (Bufs 5 4026531840 100 0 0 false 0 (NoSpare) 0) "" (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ClientSide)))
+
+; Which of ws want a frame, as their ids, and which do not.
+(def wanting ((ws (list Win))) (list int)
+  (if (is_empty ws) "" (append (if (win_frame_wanted (head ws)) (append (digits (win_id (head ws))) " ") "") (wanting (tail ws)))))
+
+; Frame 4 told: window 2, which asked, is told and asks no more; window
+; 3, which did not, is left, and the order kept.
+(def test_frames_told () int
+  (let ws (cons (win_framing (win 2 0 0) true) (cons (win 3 0 0) (nil Win)))
+    (let ws2 (frames_told ws 4 (nil Win))
+      (add (check_str "asked" (wanting ws) "2 ")
+           (add (check_str "told" (wanting ws2) "")
+                (check_int "order" (win_id (head ws2)) 2))))))
 
 ; What wm tells window 6's client of it names window 6, the notice after:
 ; read back as the client reads it, from wm's pid, 3.
@@ -61,7 +74,7 @@
 ; Both are the client's, and run windows says so: each line ends in pid 7.
 (def test_one_client_two_windows () int
   (add (check_int "of pid 7" (length (of_pid (one_client) 7)) 2)
-       (check_str "windows" (win_lines (one_client) true) "1 w1 0 40 100 50 front 7\n2 w2 300 40 100 50 - 7\n")))
+       (check_str "windows" (win_lines (one_client) true) "1 w1 0 40 100 50 front 7 buffer 8 frames 0\n2 w2 300 40 100 50 - 7 buffer 12 frames 0\n")))
 
 ; A key goes to the front window, 1, told with its id.
 (def test_one_client_key_to_front () int
@@ -265,13 +278,56 @@
 ; from those: window 0's, 7 and 6.
 (def test_layers_bank () int
   (check_str "the other bank"
-    (placed_text (layers (cons (win_in_bank (win 0 10 20) 1) (nil Win)) false))
+    (placed_text (layers (cons (win_in_bank (win 0 10 20) 1 1) (nil Win)) false))
     "0@0,0/0 7@10,20/0 6@12,66/0 2@0,0/0 "))
 
-(def win_in_bank ((w Win) (k int)) Win
+; One whose content alone an attach has moved to its other bank: its
+; chrome 5, its content 6.
+(def test_layers_content_bank () int
+  (check_str "the content's bank"
+    (placed_text (layers (cons (win_in_bank (win 0 10 20) 0 1) (nil Win)) false))
+    "0@0,0/0 5@10,20/0 6@12,66/0 2@0,0/0 "))
+
+; w with its chrome's ids in bank k and its content's in bank kc.
+(def win_in_bank ((w Win) (k int) (kc int)) Win
   (match w
     ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
-      (Win id port pid x y cw ch top title tc cva tva bf app (Sizing k 0 cw ch false (rect_none) (rect_none)) dc))))
+      (match bf
+        ((Bufs cn dcva csd tn dtva fw ck sp nt)
+          (Win id port pid x y cw ch top title tc cva tva (Bufs cn dcva csd tn dtva fw kc sp nt) app (Sizing k 0 cw ch false (rect_none) (rect_none)) dc))))))
+
+; Window 2 with another buffer attached at 0xE9000000, 5 pages, as wm
+; keeps it until a damage commits it.
+(def pending_win () Win (win_with_spare (win 2 0 0) (Spare 3909091328 5 4026600000 100 100 50 true)))
+
+; A commit shows the attached buffer: its address the content's, under
+; the other bank, 4 + 4·2 + 2 = 14; the one shown before kept as the
+; other buffer, under bank 0's id, 12, and no longer attached.
+(def test_win_swapped () int
+  (let w2 (win_swapped (pending_win))
+    (add (check_int "content" (win_cva w2) 3909091328)
+         (add (check_int "its id" (win_content_id w2) 14)
+              (add (check_int "the other's id" (win_spare_id w2) 12)
+                   (check_bool "not attached" (win_pending w2) false))))))
+
+; A window with nothing attached stays as it is.
+(def test_win_swapped_none () int
+  (check_int "content" (win_cva (win_swapped (win 2 0 0))) 3892314112))
+
+; Whether any window has its other buffer attached, waiting for the
+; damage that commits it.
+(def test_pending () int
+  (add (check_bool "one" (any_pending (cons (win 1 0 0) (cons (pending_win) (nil Win)))) true)
+       (check_bool "none" (any_pending (cons (win 1 0 0) (nil Win))) false)))
+
+; A resize into the other buffer keeps the content it had as the other
+; buffer, of its size then; one into the buffer it has keeps none.
+(def test_resized_bufs () int
+  (let obf (win_bufs (pending_win))
+    (add (check_int "kept" (spare_va (match (resized_bufs obf 3892314112 100 50 3909091328 5 4026600000 100 10 4026552320)
+                                        ((Bufs cn dcva csd tn dtva fw ck sp nt) sp))) 3892314112)
+         (check_int "in place" (spare_va (match (resized_bufs obf 3892314112 100 50 3892314112 5 4026531840 100 10 4026552320)
+                                           ((Bufs cn dcva csd tn dtva fw ck sp nt) sp))) -1))))
 
 (def test_layers_top () int
   (check_str "the content's row"
@@ -558,7 +614,15 @@
 (def test_window_lines () int
   (check_str "front first"
     (win_lines (two) true)
-    "1 w1 50 60 100 50 front 7\n0 w0 10 20 100 50 - 7\n"))
+    "1 w1 50 60 100 50 front 7 buffer 8 frames 0\n0 w0 10 20 100 50 - 7 buffer 4 frames 0\n"))
+
+; A window told a frame counts it, and its line says so; after a commit
+; it shows its other buffer, under the other bank: 14 for window 2.
+(def test_window_line_frames () int
+  (add (check_str "told" (win_lines (frames_told (cons (win_framing (win 2 0 0) true) (nil Win)) 3 (nil Win)) false)
+                  "2 w2 0 0 100 50 - 7 buffer 12 frames 1\n")
+       (check_str "swapped" (win_lines (cons (win_swapped (pending_win)) (nil Win)) false)
+                  "2 w2 0 0 100 50 - 7 buffer 14 frames 0\n")))
 
 ; Under an operating system there is no display.
 (def test_no_display () int

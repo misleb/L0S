@@ -22,8 +22,8 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `icon_view.l0` | `UiIconView`, a grid of `UiTile`s, an icon 48 square at three times the size, in the accent or dimmed, and a name under it, as many across as fit, in the middle; one selected, rounded in the selection's tint, by a press or the keys (`ui_icon_key`: the arrows, a row for Up and Down, Home, End, Page Up and Page Down, its columns from `ui_win_icon_cols`), a press between them selecting none (`ui_icon_action`); a scroller by rows of tiles, with the grid's overlay scrollbar (`ui_scrollbar_on`). | `GtkGridView` |
 | `menu.l0` | `UiPopover BASE MENU`, a popover menu over the window: a `UiMenu` of `UiItem`s, insensitive ones dimmed, and `UiItemSep`s, on a card, under the node of an action (`UiBelow`) or at a point (`UiAt`, as for a right click), kept inside the window; nothing beneath is a target while it is open, and a press outside it sets off `PREFIX.dismiss`. | `GtkPopoverMenu` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`. Used by `draw` to check a command, by `wm` to draw it, and by `tools/mkicon` to draw an app's icon. | — |
-| `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab and Shift-Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `ui_win_close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_canvas` and `ui_win_face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is, and `ui_key_mods`, the Shift, Ctrl and Alt held with it. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
-| `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's buffer one, a resize one more, each strike one, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message, put together (`UiAppNext`), and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. `ui_app_start` registers the app's port as its name, `app.EXEC`, EXEC its program's file name (`ui_app_named`; a second of the same program goes without); a launch of the app while it runs (`wm`'s, an `open`, [desktop.md](desktop.md)) is an event of no window, `UiOpen REPLY ARGS`, and routing it sets off the action `app.open` (`ui_open_action`, its arguments `ui_open_args`) and answers `shown 0`, so the app's front window comes forward and nothing more opens; an app that opens something for it says so with `ui_app_opening` and answers each itself with `ui_app_shown`, the window to bring forward. A program of one window routing with `ui_route` has the same default. The answer is told, never waited on. | `GApplication`'s windows, `GtkWindow`, its name, activate and open |
+| `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab and Shift-Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `ui_win_close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed, in the buffer the screen does not show, which it then gives the compositor, and no more until the frame shows it and the other is released, `UiDb`; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_canvas` and `ui_win_face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is, and `ui_key_mods`, the Shift, Ctrl and Alt held with it. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
+| `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's two buffers two, a resize one more, each strike one, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message, put together (`UiAppNext`), and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. `ui_app_start` registers the app's port as its name, `app.EXEC`, EXEC its program's file name (`ui_app_named`; a second of the same program goes without); a launch of the app while it runs (`wm`'s, an `open`, [desktop.md](desktop.md)) is an event of no window, `UiOpen REPLY ARGS`, and routing it sets off the action `app.open` (`ui_open_action`, its arguments `ui_open_args`) and answers `shown 0`, so the app's front window comes forward and nothing more opens; an app that opens something for it says so with `ui_app_opening` and answers each itself with `ui_app_shown`, the window to bring forward. A program of one window routing with `ui_route` has the same default. The answer is told, never waited on. | `GApplication`'s windows, `GtkWindow`, its name, activate and open |
 
 | `uiloop.l0` | The loop a window and an app keep, `UiLoop`: the messages taken and not yet handed out, what waits taken before each step and put together (`ui_loop_take`, `ui_together`: a run's last move, its wheel's turns as one, a window's last size); each step's times (`UiTimes`: routed, painted), its stages (`UiStages`: route, update and view, layout, wait, paint, present), and the slow step's line, said at the debug level once a step is over a frame (`ui_frame_ns`, 16 ms; `ui_slow_line`, `ui_slow_due`, `ui_times_stepped`) | GLib's main loop, and GTK's frame clock's timings |
 
@@ -75,6 +75,34 @@ keys, presses, releases, an open, an exit, another window's notices and
 anything not the compositor's stay as they came. So a step slower than
 the pointer takes the last of the moves that came meanwhile, not each
 in turn. `ui_event_lost` says the port is gone.
+
+**Paced, in two buffers.** A window has two buffers, as a Wayland
+client keeps two: the one the screen shows, and the one `ui_present`
+paints (`UiDb`, its `UiBack`), made at the first present that changes
+something, with room to grow, and made again only if the window
+outgrows it. `ui_present` lays the view out, finds what changed
+(`ui_plan`: as below, or what a scroll did not move in, or after a
+resize what changed and what the window grew by), copies over from the
+buffer shown what the other lacks, the boxes it changed since that one
+was painted, but for what it paints now (`ui_copy_boxes`,
+`ui_copied_over`, a row at a time, read as bytes and written as a
+range), moves a scroll's rows, and paints. It then asks the compositor
+for the next frame (`frame ID`, before the damage, as `wl_surface.frame`
+is), and gives it the buffer: `attach ID VA N S` and a `damage` of what
+it lacked and what changed, which shows it in the place of the one
+shown; or, after a resize, `resize ID W H VA N S` naming it. The buffer
+given up is the one painted next, lacking what changed. Until the
+compositor tells the window its frame (`frm`) and the release of the
+buffer given up (`rel`), which come as events `ui_route` takes
+(`UiOther` saying `ui.frame` and `ui.release`), `ui_present` paints
+nothing, and what changes meanwhile is painted at the next present, all
+at once, since its damage is found from the nodes painted last. So a
+window paints at most once a frame, and never into a buffer the screen
+reads. A display that tells neither within `ui_pace_ns`, 100 ms, is
+waited for no longer. A window whose program paints a drawing area
+itself (`UiDrawingArea`, as `vt`'s terminal) paints the buffer shown, as
+before, unpaced, as its program paints that buffer between presents.
+Each window then holds two regions of the process's 64 (`ui_app_regions`).
 
 **Many windows.** An app of more than one window starts a `UiApp` and
 opens each on its port; its loop is:
@@ -330,6 +358,15 @@ to `l0` are one namespace, and a duplicate is a compile error.
   smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
   the build, never at run time. Icons and text scale by whole numbers. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.
+- A window paces itself with two buffers, not three: the one it gave up
+  is released only once the compositor's restack that shows the new one
+  is answered, so during a drag of its edge it paints a size, waits for
+  that restack, and only then paints the next, where in one buffer it
+  painted the next while the compositor restacked. Copying over what the
+  buffer painted lacks costs about half a millisecond a size of Disks's
+  drag on QEMU. A window whose program paints a drawing area itself, as
+  `vt`'s terminal, is painted in the buffer shown, unpaced, so a frame
+  may show it half painted.
 - An app's regions are counted by the toolkit, not asked of the
   kernel, which has no call for it: `ui_app_open` knows its windows and
   its face's strikes, and keeps 8 for the rest, so a program that opens
