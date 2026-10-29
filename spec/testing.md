@@ -18,7 +18,10 @@ everything again, `rm -rf build/check build/test`.
 
 `user/sbin/fs/turns_test.l0` pins the order `fs` serves what waits on
 its port in: notices before every request, and an exited pid's
-requests dropped.
+requests dropped; a `stat` behind another pid's run of 64 KB writes
+served within one of them, two writers taking turns, a pid with 200
+requests waiting served 128 before another's, a volume's request after
+15 of another pid's writes, and each request's cost.
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;

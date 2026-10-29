@@ -36,7 +36,7 @@ move independently, so several can be active at once.
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
-| [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | active | 1/4 | 0023 | storage.md, testing.md |
+| [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly, small requests first | Storage | active | 2/4 | 0023 | storage.md, testing.md |
 | [0026](0026-font-service-limits.md) The font service lets strikes go, and knows who holds them | Toolkit | idea | – | – | programs.md, toolkit.md |
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008, 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
@@ -50,7 +50,7 @@ move independently, so several can be active at once.
   interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
   find it needs L0 to give the interrupt.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
-  small requests first: active, step 2 next, deficit round robin.
+  small requests first: active, step 3 next, a bound on a pid's requests.
 
 ## Dependencies
 

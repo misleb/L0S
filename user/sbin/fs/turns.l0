@@ -1,62 +1,164 @@
 ; turns.l0 -- the order fs serves what waits on its port. Each time round
 ; it takes every message waiting, and serves the notices, from pid 0,
-; first, then the requests in the order they came. Pure: fs's serve
-; receives, and these choose.
+; first; then the requests, by deficit round robin over the pids that
+; sent them: each pid in its turn is given a budget of bytes, a run of
+; 64 KB, and served its requests, in the order they came, while their
+; costs fit what it has, so that one moving 64 KB a request and one
+; asking stats take turns. Pure: fs's serve receives, and these choose.
 
-; What waits to be served: the notices, from pid 0, and the requests,
-; each in the order it came.
-(data Turns (Turns (Queue Message) (Queue Message)))
+; What waits to be served: the notices, from pid 0, in the order they
+; came; each pid's requests, with what it has of its budget; and the pids
+; with requests waiting, in the order their turns come.
+(data Turns (Turns (Queue Message) (Map int Asks) (Queue int)))
+
+; A pid's requests waiting, in the order they came, and the bytes of
+; budget it has left.
+(data Asks (Asks (Queue Message) int))
 
 ; Nothing waiting.
 (def turns_new () Turns
-  (Turns (queue_empty (RecvFailed)) (queue_empty (RecvFailed))))
+  (Turns (queue_empty (RecvFailed)) ((MapEmpty int Asks)) (queue_empty 0)))
+
+; The budget a pid is given each turn: a run of 64 KB, the most a read or
+; a write moves.
+(def turn_bytes () int 65536)
+
+; What a request costs that moves no file's bytes: a sector's worth.
+(def turn_small () int 512)
+
+; What a request of a whole volume or disk costs, format, mkfs,
+; partition, erase, rescan and attach, and the most any costs: 16 runs,
+; so that their pid's turn comes 16 times, and every other pid's with
+; it, before one is served.
+(def turn_volume () int (mul 16 (turn_bytes)))
 
 ; t with m, a message received, waiting: a notice if it is from pid 0,
-; and otherwise a request.
+; and otherwise a request of its pid's, which is given a turn, last, and
+; a budget, if it had none waiting.
 (def turns_add ((t Turns) (m Message)) Turns
   (match m
     ((RecvFailed) t)
     ((Message from b)
       (match t
-        ((Turns ns rs)
+        ((Turns ns asks pids)
           (if (eq from 0)
-              (Turns (queue_push ns m) rs)
-              (Turns ns (queue_push rs m))))))))
+              (Turns (queue_push ns m) asks pids)
+              (match (map_get asks from)
+                ((Some a) (match a ((Asks q d) (Turns ns (map_put asks from (Asks (queue_push q m) d)) pids))))
+                ((None) (Turns ns (map_put asks from (Asks (queue_push (queue_empty (RecvFailed)) m) (turn_bytes))) (queue_push pids from))))))))))
 
 ; What to serve next, and what waits after it: the first notice, if
-; any waits; else the first request; else nothing.
+; any waits; else the request whose turn it is; else nothing.
 (data Turn (TurnNotice Message Turns) (TurnRequest Message Turns) (TurnNone))
 
 ; The next of t to serve, as Turn says.
 (def turns_next ((t Turns)) Turn
   (match t
-    ((Turns ns rs)
+    ((Turns ns asks pids)
       (match (queue_pop ns)
-        ((Popped m ns2) (TurnNotice m (Turns ns2 rs)))
-        ((PopEmpty)
-          (match (queue_pop rs)
-            ((Popped m rs2) (TurnRequest m (Turns ns rs2)))
-            ((PopEmpty) (TurnNone))))))))
+        ((Popped m ns2) (TurnNotice m (Turns ns2 asks pids)))
+        ((PopEmpty) (turn_of ns asks pids))))))
 
-; t without pid's requests, once pid has exited: none is served for it.
+; The request whose turn it is, of the pid first in pids: its first, if
+; what it has left covers that one's cost. Otherwise, for a request
+; dearer than a turn's budget, the pid is given a budget more and put
+; last, and it is the next pid's turn. No cost is more than turn_volume,
+; so a request is found within 16 times round.
+(def turn_of ((ns (Queue Message)) (asks (Map int Asks)) (pids (Queue int))) Turn
+  (match (queue_pop pids)
+    ((PopEmpty) (TurnNone))
+    ((Popped pid rest)
+      (match (map_get asks pid)
+        ((None) (turn_of ns asks rest))
+        ((Some a)
+          (match a
+            ((Asks q d)
+              (match (queue_pop q)
+                ((PopEmpty) (turn_of ns (map_remove asks pid) rest))
+                ((Popped m q2)
+                  (let c (request_cost m)
+                    (if (gt c d)
+                        (turn_of ns (map_put asks pid (Asks q (add d (turn_bytes)))) (queue_push rest pid))
+                        (TurnRequest m (turn_after ns asks pid q2 (sub d c) rest)))))))))))))
+
+; What waits once pid's request is served, its requests left q and its
+; budget left d, the other pids rest: the pid keeping its turn, first, if
+; d covers its next; last, if it does not, given its next turn's budget
+; now, so that it is served as soon as that turn comes; and with none
+; left, out of the turns, its budget gone with them.
+(def turn_after ((ns (Queue Message)) (asks (Map int Asks)) (pid int) (q (Queue Message)) (d int) (rest (Queue int))) Turns
+  (match (queue_pop q)
+    ((PopEmpty) (Turns ns (map_remove asks pid) rest))
+    ((Popped m q2)
+      (if (gt (request_cost m) d)
+          (Turns ns (map_put asks pid (Asks q (add d (turn_bytes)))) (queue_push rest pid))
+          (Turns ns (map_put asks pid (Asks q d)) (queue_front rest pid))))))
+
+; q with x first.
+(def (queue_front T) ((q (Queue T)) (x T)) (Queue T)
+  (match q ((Queue front back) (Queue (cons x front) back))))
+
+; What the request m costs, read from its bytes in place: the N of a
+; readw H N, writew H N or read H N; a write H BYTES's message's length;
+; turn_volume for one of a whole volume or disk; turn_small for the
+; rest, and at least that for any.
+(def request_cost ((m Message)) int
+  (match m
+    ((RecvFailed) (turn_small))
+    ((Message from b) (max (turn_small) (min (turn_volume) (cost_at b (add (header_len) 4)))))))
+
+; The cost of the request whose body is at i of b, as request_cost says.
+(def cost_at ((b bytes) (i int)) int
+  (if (bytes_is_at b i "write ") (sub (bytes_len b) i)
+  (if (bytes_is_at b i "readw ") (count_at b (add i 6))
+  (if (bytes_is_at b i "writew ") (count_at b (add i 7))
+  (if (bytes_is_at b i "read ") (count_at b (add i 5))
+  (if (volume_wide b i) (turn_volume) (turn_small)))))))
+
+; Whether the request at i of b is of a whole volume or disk.
+(def volume_wide ((b bytes) (i int)) bool
+  (if (bytes_is_at b i "format ") true
+  (if (bytes_is_at b i "mkfs ") true
+  (if (bytes_is_at b i "partition ") true
+  (if (bytes_is_at b i "erase ") true
+  (if (bytes_is_at b i "attach ") true (bytes_is_at b i "rescan")))))))
+
+; The N of H N, H's digits from i of b, read in place: 0 if it is not a
+; number.
+(def count_at ((b bytes) (i int)) int
+  (decimal_at b (add (space_from b i) 1) 0))
+
+; The decimal digits from i of b after the value acc, until one is not,
+; and no more once acc is past turn_volume, which bounds any cost.
+(def decimal_at ((b bytes) (i int) (acc int)) int
+  (if (if (ge i (bytes_len b)) true (gt acc (turn_volume)))
+      acc
+      (let c (bytes_get b i)
+        (if (if (lt c 48) true (gt c 57))
+            acc
+            (decimal_at b (add i 1) (add (mul acc 10) (sub c 48)))))))
+
+; t without pid's requests, once pid has exited: none is served for it,
+; and its turn goes.
 (def turns_drop ((t Turns) (pid int)) Turns
   (match t
-    ((Turns ns rs) (Turns ns (msgs_not_from rs pid (queue_empty (RecvFailed)))))))
-
-; The messages of q not from pid, in order, after acc.
-(def msgs_not_from ((q (Queue Message)) (pid int) (acc (Queue Message))) (Queue Message)
-  (match (queue_pop q)
-    ((PopEmpty) acc)
-    ((Popped m q2)
-      (msgs_not_from q2 pid (if (eq (msg_from m) pid) acc (queue_push acc m))))))
-
-; The pid a message is from; -1 for none.
-(def msg_from ((m Message)) int
-  (match m ((Message from b) from) ((RecvFailed) -1)))
+    ((Turns ns asks pids) (Turns ns (map_remove asks pid) (queue_remove pids pid)))))
 
 ; How many requests t holds.
 (def turns_requests ((t Turns)) int
-  (match t ((Turns ns rs) (queue_size rs))))
+  (match t ((Turns ns asks pids) (asks_count asks (map_keys asks) 0))))
+
+; How many requests the pids ks have waiting among asks, after n.
+(def asks_count ((asks (Map int Asks)) (ks (list int)) (n int)) int
+  (if (is_empty ks)
+      n
+      (asks_count asks (tail ks) (add n (turns_of_pid asks (head ks))))))
+
+; How many requests pid has waiting among asks.
+(def turns_of_pid ((asks (Map int Asks)) (pid int)) int
+  (match (map_get asks pid)
+    ((None) 0)
+    ((Some a) (match a ((Asks q d) (queue_size q))))))
 
 ; t with every message waiting on port added, as port_try_receive gives
 ; them, until none is.

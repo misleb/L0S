@@ -46,7 +46,7 @@ its own), but none is needed: `fs` can take every message waiting with
   none) into a pending list of its own, and serves notices before
   requests; requests still in the order they came. An exit notice drops
   its pid's requests still waiting. No change in what any test sees.
-- [ ] Requests chosen by deficit round robin over pids: each pid a
+- [x] Requests chosen by deficit round robin over pids: each pid a
   budget of bytes a round, a request's cost its `N` for `readw`,
   `writew` and `read`, its bytes for `write`, a sector's worth for the
   rest, and those the size of a volume (`format`, `mkfs`, `partition`,
@@ -98,3 +98,15 @@ its own), but none is needed: `fs` can take every message waiting with
   a `Turns`, notices and requests each a queue, and serves the next of
   it each time round; it blocks on `port_receive` only with nothing
   waiting.
+- 2026-10-28: step 2 landed. `Turns` keeps each pid's requests and its
+  budget in a map, and the pids in turn in a queue. A pid is given its
+  run of 64 KB as it comes and again each time it goes last, not when
+  its turn comes round, so that a pid whose budget is spent is served
+  as soon as its turn is back rather than a round later: written the
+  first way, a writer of runs was served every other round. Costs are
+  read in place (`cost_at`, `count_at`): the N up to 16 runs, which
+  bounds how many rounds a choice takes. `attach` and `rescan` count as
+  a volume's too, since each reads tables and loads volumes whole.
+  Kernel clients have one request out each, so for them this is round
+  robin by pid in the order they came, as before; it orders requests
+  only when one pid has several waiting.

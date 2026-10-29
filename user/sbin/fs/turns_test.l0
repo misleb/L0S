@@ -43,6 +43,76 @@
     (order (added (turns_new) (ms3 (req 5 "stat /Volumes/a") (exit_note 7) (req 6 "stat /Volumes/b"))))
     "N|5:stat /Volumes/a|6:stat /Volumes/b"))
 
+; ms with n more of m after them.
+(def times ((ms (list Message)) (m Message) (n int)) (list Message)
+  (if (eq n 0) ms (times (cons m ms) m (sub n 1))))
+
+; A write of a run, by pid.
+(def run_write ((pid int)) Message (req pid "writew 1 65536"))
+
+; With nothing else waiting, a pid's requests are served in the order
+; they came.
+(def test_one_pid_in_order () int
+  (check_str "order"
+    (order (added (turns_new) (ms3 (req 5 "open 1 /Volumes/a/x") (run_write 5) (req 5 "close 1"))))
+    "5:open 1 /Volumes/a/x|5:writew 1 65536|5:close 1"))
+
+; A stat behind a run of large writes from another pid is served after
+; one of them: each pid is given 64 KB as it comes, pid 5's first write
+; takes all it has, and so pid 6's turn comes next.
+(def test_stat_within_one_write () int
+  (check_str "order"
+    (order (added (turns_new) (times (cons (req 6 "stat /Volumes/a") (nil Message)) (run_write 5) 3)))
+    "5:writew 1 65536|6:stat /Volumes/a|5:writew 1 65536|5:writew 1 65536"))
+
+; Two pids writing runs take turns, a write each.
+(def test_writers_alternate () int
+  (let ws (times (nil Message) (run_write 6) 2)
+    (check_str "order"
+      (order (added (turns_new) (times ws (run_write 5) 2)))
+      "5:writew 1 65536|6:writew 1 65536|5:writew 1 65536|6:writew 1 65536")))
+
+; A pid with many requests waiting cannot keep another's from being
+; served: pid 5's 200 stats cost 512 each, 128 a turn of 64 KB, so pid
+; 6's stat comes 129th, and 5's other 72 after it.
+(def test_many_cannot_starve () int
+  (let ts (added (turns_new) (rev (cons (req 6 "stat /Volumes/b") (times (nil Message) (req 5 "stat /Volumes/a") 200))))
+    (check_int "pid 6's place" (place_of ts 6 1) 129)))
+
+; The place, from n, of the first request from pid that ts serves; 0 if
+; none is.
+(def place_of ((ts Turns) (pid int) (n int)) int
+  (match (turns_next ts)
+    ((TurnNone) 0)
+    ((TurnNotice m ts2) (place_of ts2 pid n))
+    ((TurnRequest m ts2) (if (eq (from_of m) pid) n (place_of ts2 pid (add n 1))))))
+
+; The pid a message is from; -1 for none.
+(def from_of ((m Message)) int
+  (match m ((Message from b) from) ((RecvFailed) -1)))
+
+; n bytes of x.
+(def filler ((n int) (acc (list int))) (list int)
+  (if (eq n 0) acc (filler (sub n 1) (cons 120 acc))))
+
+; A volume's request costs 16 runs, so another pid's writes are served
+; before it, 15 of them: pid 5 comes with a run and is given one more
+; each time round, 15 times to reach 16, and pid 6 spends its run each
+; time on a write.
+(def test_volume_waits () int
+  (let ts (added (turns_new) (cons (req 5 "format /Volumes/a") (times (nil Message) (run_write 6) 20)))
+    (check_int "format's place" (place_of ts 5 1) 16)))
+
+; What a request costs, read from its bytes: the N of readw, writew and
+; read, a write's bytes, at least a sector, at most 16 runs.
+(def test_costs () int
+  (add (check_int "readw" (request_cost (req 5 "readw 3 65536")) 65536)
+  (add (check_int "read" (request_cost (req 5 "read 3 4092")) 4092)
+  (add (check_int "small" (request_cost (req 5 "stat /Volumes/a")) 512)
+  (add (check_int "write" (request_cost (req 5 (append "write 3 " (filler 2000 (nil int))))) 2008)
+  (add (check_int "huge" (request_cost (req 5 "readw 3 99999999999999999999")) 1048576)
+       (check_int "rescan" (request_cost (req 5 "rescan")) 1048576)))))))
+
 ; A pid's requests are dropped once it has exited, and only its.
 (def test_turns_drop () int
   (let ts (added (turns_new) (ms4 (req 5 "close 1") (req 6 "close 2") (req 5 "close 3") (exit_note 5)))
