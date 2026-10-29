@@ -113,11 +113,19 @@
 (def step ((s Stage) (what (list int))) int
   (if (stops_at s (StageFull)) (debug_as "hvs" what) (info_as "hvs" what)))
 
-; hvs [probe | list | iommu | mode | hdmi | eof], from main.
+; hvs [probe | list | iommu | mode | hdmi | eof | watch [SECONDS]], from
+; main.
 (def hvs_main ((as (list (list int)))) int
-  (match (stage_of as)
-    ((None) (complain "usage: hvs [probe | list | iommu | mode | hdmi | eof]"))
-    ((Some s) (if (stops_at s (StageEof)) (eof_asked) (hvs s)))))
+  (if (if (is_empty as) false (eq (head as) "watch"))
+      (match (arg_number (tail as) 30)
+        ((None) (complain (hvs_usage)))
+        ((Some secs) (if (le secs 0) (complain (hvs_usage)) (watch_asked secs))))
+      (match (stage_of as)
+        ((None) (complain (hvs_usage)))
+        ((Some s) (if (stops_at s (StageEof)) (eof_asked) (hvs s))))))
+
+; How hvs is run.
+(def hvs_usage () (list int) "usage: hvs [probe | list | iommu | mode | hdmi | eof | watch [SECONDS]]")
 
 ; Stage eof: channel 0's ends of frame counted for two seconds, through
 ; the display's interrupt controller and its interrupt, bound to a port
@@ -204,6 +212,89 @@
           (append " ms, " (append (digits e) (append " of them channel 0's end of frame: "
           (append (digits (div t 10)) (append "." (append (digits (mod t 10))
           (append " Hz; STATUS's frame count " (append (digits f0) (append " to " (digits f1)))))))))))))))))))
+
+; ---------------------------------------------------------------- watch
+
+; watch SECONDS: channel 0 watched for that long beside the serving
+; driver (watch.l0), every frame over 25 ms said as it ends, and what the
+; HVS says of itself said while one goes on past 25 ms. It reads only,
+; and only once the firmware says a display is clocked, as eof does
+; (roadmap 0038). 0.
+(def watch_asked ((secs int)) int
+  (match (mailbox_open)
+    ((NoMbox why) (complain (append "cannot ask the firmware whether the display is clocked: " why)))
+    ((MboxOpen mb)
+      (match (fw_displays mb)
+        ((None) (complain "the firmware did not say how many displays it brought up"))
+        ((Some n)
+          (if (eq n 0)
+              (info_as "hvs" "watch: no monitor on HDMI0 at boot; the display is unclocked")
+              (watch_opened secs)))))))
+
+; The HVS opened and watched for secs seconds, the end said. 0.
+(def watch_opened ((secs int)) int
+  (match (open_device (hvs_base) (hvs_bytes))
+    ((DeviceFailed fault why) (complain (append "watch: no HVS: " why)))
+    ((DeviceOpened d)
+      (match (hvs_gen_of (device_read32 d (hvs_version)))
+        ((None) (complain "watch: an HVS of a version this driver does not know"))
+        ((Some g)
+          (let s (info_as "hvs" (append "watch: channel 0 sampled for " (append (digits secs) " s, each frame over 25 ms said")))
+            (let w (watched d g (watch_new) (add (clock_ns) (mul secs 1000000000)))
+              (info_as "hvs" (watch_line w secs)))))))))
+
+; A frame taking longer than this is a stall: 25 ms, a frame and a half
+; at 60 Hz.
+(def stall_limit () int 25000000)
+
+; w sampled as fast as it can be until end: the watch then. Not by
+; sleep_ns between samples, which on a board slept 13 to 30 ms for 1.
+(def watched ((d IoDevice) (g HvsGen) (w ChWatch) (end int)) ChWatch
+  (let t (clock_ns)
+    (if (ge t end)
+        w
+        (let st (device_read32 d (disp_status g (hdmi0_channel)))
+          (let dl (device_read32 d (disp_dl g (hdmi0_channel)))
+            (let o (if (watch_overdue w t (stall_limit)) (regs_named d (watch_regs g) "watch: in a long frame:") 0)
+              (match (watch_sample w t st dl (stall_limit))
+                ((ChWatched w2 s)
+                  (let p (match s ((None) 0) ((Some x) (info_as "hvs" (stall_line x))))
+                    (watched d g w2 end))))))))))
+
+; What the HVS says of itself that watch reads in a long frame, all in
+; Linux's dump of the same HVS (vc4_hvs.c's vc6_hvs_regs and
+; vc6_d_hvs_regs): on D0 its control, fetchers, errors, list status and
+; channel 0's run, QoS and profile words; on C0 its BAD_ registers.
+(def watch_regs ((g HvsGen)) (list NamedReg)
+  (match g
+    ((HvsD0)
+      (cons (NamedReg "CONTROL" 32)
+      (cons (NamedReg "FETCHER_STATUS" 36)
+      (cons (NamedReg "FETCH_STATUS" 40)
+      (cons (NamedReg "HANDLE_ERROR" 44)
+      (cons (NamedReg "EOLN" 48)
+      (cons (NamedReg "DL_STATUS" 52)
+      (cons (NamedReg "DISP0_LPTRS" 272)
+      (cons (NamedReg "DISP0_COB" 276)
+      (cons (NamedReg "DISP0_STATUS" 280)
+      (cons (NamedReg "DISP0_RUN" 288)
+      (cons (NamedReg "QOS0" 292)
+      (cons (NamedReg "PROF0" 296)
+      (nil NamedReg))))))))))))))
+    ((HvsC0)
+      (cons (NamedReg "BAD_COB" 548)
+      (cons (NamedReg "BAD_LBM" 552)
+      (cons (NamedReg "BAD_UPM" 556)
+      (cons (NamedReg "BAD_AXI" 560)
+      (nil NamedReg))))))))
+
+; Registers rs read from d and said on one line after acc: 0.
+(def regs_named ((d IoDevice) (rs (list NamedReg)) (acc (list int))) int
+  (if (is_empty rs)
+      (info_as "hvs" acc)
+      (match (head rs)
+        ((NamedReg name off)
+          (regs_named d (tail rs) (append acc (append " " (append name (append " 0x" (hex_digits (device_read32 d off) 8))))))))))
 
 ; ---------------------------------------------------------------- start
 

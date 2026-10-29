@@ -1,0 +1,97 @@
+; watch_test.l0 -- tests of hvs watch's record of channel 0's frames.
+
+; STATUS as the channel reads it: frame count fr, mode m, line y.
+(def wt_st ((fr int) (m int) (y int)) int
+  (bit_or (bit_shl (bit_and fr 63) 16) (bit_or (bit_shl m 13) y)))
+
+; 25 ms, the watch's limit.
+(def wt_limit () int 25000000)
+
+; The watch after samples every ms from t, for n of them, each frame
+; frame_ms long and running.
+(def wt_sampled ((w ChWatch) (t int) (n int) (frame_ms int)) ChWatch
+  (if (le n 0)
+      w
+      (let fr (div t (mul frame_ms 1000000))
+        (match (watch_sample w t (wt_st fr 2 (mod (div t 1000000) 2160)) 64 (wt_limit))
+          ((ChWatched w2 s) (wt_sampled w2 (add t 1000000) (sub n 1) frame_ms))))))
+
+; The watch after a sample at t of STATUS st, DL dl.
+(def wt_at ((w ChWatch) (t int) (st int) (dl int)) ChWatch
+  (match (watch_sample w t st dl (wt_limit)) ((ChWatched w2 s) w2)))
+
+; The stall a sample at t of STATUS st, DL dl ends, as its line, or "".
+(def wt_ended ((w ChWatch) (t int) (st int) (dl int)) (list int)
+  (match (watch_sample w t st dl (wt_limit))
+    ((ChWatched w2 s) (match s ((None) "") ((Some x) (stall_line x))))))
+
+; The watch after a sample every ms from t to end, each of STATUS st.
+(def wt_held ((w ChWatch) (t int) (end int) (st int)) ChWatch
+  (if (gt t end) w (wt_held (wt_at w t st 64) (add t 1000000) end st)))
+
+; A frame begun at 0 at line 1200, still there at 117 ms, sampled every
+; ms.
+(def wt_stuck () ChWatch
+  (wt_held (watch_new) 0 117000000 (wt_st 3 2 1200)))
+
+; The same frame sampled only at 0 and 117 ms, and ending at 118: no
+; stall, as it may have ended at any time in the gap.
+(def test_gap_no_stall () int
+  (check_str "none" (wt_ended (wt_at (wt_at (watch_new) 0 (wt_st 3 2 1200) 64) 117000000 (wt_st 3 2 1200) 64) 118000000 (wt_st 4 2 0) 640) ""))
+
+; YLINE is bits 12 to 0.
+(def test_status_line () int
+  (add (check_int "line 2159" (status_line (wt_st 5 2 2159)) 2159)
+       (check_int "mode and count not read" (status_line (wt_st 63 3 0)) 0)))
+
+; A second of 16 ms frames: frames 0 to 62 began, 62 ended, none over
+; 25 ms.
+(def test_frames_steady () int
+  (let w (wt_sampled (watch_new) 0 1000 16)
+    (add (check_int "frames" (watch_frames w) 62)
+         (check_int "no stall" (watch_stalls w) 0))))
+
+; The first sample begins a frame and ends none.
+(def test_first_sample () int
+  (add (check_int "no frames" (watch_frames (wt_at (watch_new) 5 (wt_st 9 2 100) 64)) 0)
+       (check_str "no stall" (wt_ended (watch_new) 5 (wt_st 9 2 100) 64) "")))
+
+; Its end at 118 ms, the next frame begun: a stall of 118 ms, one frame
+; counted, stuck at line 1200, running, samples 1 ms apart.
+(def test_stall_stuck () int
+  (check_str "stall" (wt_ended (wt_stuck) 118000000 (wt_st 4 2 0) 640)
+    "watch: a frame of 118.0 ms at 0.000 s, 1 counted; lines 1200 to 1200, run; samples up to 1.0 ms apart; STATUS 0x000344b0 to 0x00044000, DL 0x00000040 to 0x00000280"))
+
+; It is counted, and is the longest.
+(def test_stall_counted () int
+  (let w (wt_at (wt_stuck) 118000000 (wt_st 4 2 0) 640)
+    (add (check_int "one stall" (watch_stalls w) 1) (check_int "longest" (watch_longest w) 118000000))))
+
+; Two frames counted in 34 ms is no stall: 17 ms a frame.
+(def test_two_frames_no_stall () int
+  (let w0 (wt_at (watch_new) 0 (wt_st 3 2 0) 64)
+    (add (check_str "none" (wt_ended w0 34000000 (wt_st 5 2 0) 64) "")
+         (check_int "two" (watch_frames (wt_at w0 34000000 (wt_st 5 2 0) 64)) 2))))
+
+; The count across its wrap, 62 to 1, is three frames.
+(def test_frames_wrap () int
+  (check_int "62 to 1" (frames_on 62 1) 3))
+
+; Overdue once, at the first sample past the limit.
+(def test_overdue_once () int
+  (let w1 (wt_at (wt_at (watch_new) 0 (wt_st 3 2 0) 64) 20000000 (wt_st 3 2 900) 64)
+    (add (check_bool "not at 24 ms" (watch_overdue w1 24000000 (wt_limit)) false)
+    (add (check_bool "at 26 ms" (watch_overdue w1 26000000 (wt_limit)) true)
+         (check_bool "not again" (watch_overdue (wt_at w1 26000000 (wt_st 3 2 900) 64) 27000000 (wt_limit)) false)))))
+
+; Modes by name, and the times as said.
+(def test_texts () int
+  (add (check_str "modes" (modes_text 12) "run/eof")
+  (add (check_str "ms" (ms_text 117450000) "117.4")
+       (check_str "secs" (secs_text 352747882000) "352.747"))))
+
+; A stall's line: 2 frames counted, from line 0 to 2159, run then eof.
+(def test_stall_line () int
+  (check_str "line"
+    (stall_line (Stall 352747000000 117000000 2 40000000 (wt_st 3 2 0) (wt_st 5 3 2159) 640 64 0 2159 12))
+    "watch: a frame of 117.0 ms at 352.747 s, 2 counted; lines 0 to 2159, run/eof; samples up to 40.0 ms apart; STATUS 0x00034000 to 0x0005686f, DL 0x00000280 to 0x00000040"))

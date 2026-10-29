@@ -1,6 +1,6 @@
 # 0038: `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls
 
-Track: Display · Status: idea · Needs: – · Spec: display.md
+Track: Display · Status: active · Needs: – · Spec: display.md, kernel.md
 
 ## Why
 
@@ -25,16 +25,42 @@ clean at 1920×1080:
 
 ## Done when
 
-To be written: at least, a list too wide for the line memory never
-stops the pointer, and a resize at 4K brings no gap over a frame or
-two, said by 0005's gap line.
+- A list too wide for the line memory never stops the pointer: the
+  pointer's moves are shown, and the screen with the widest layers is
+  still shown in some form, said once, not refused for good.
+- On a Pi 5 at 3840×2160, scale 2, five windows opened, dragged and
+  resized for five minutes bring no gap over two frames in 0005's gap
+  line, and `hvs watch` sees no frame over 25 ms.
+- `make check` and `make test` pass, with the watch's and any new
+  layout's rules tested on the host.
 
 ## Steps
 
-To be written. First: log `STATUS`, `DL` and `HANDLE_ERROR` at a gap,
-to tell a stalled channel from one the driver left; and find what of a
-resize (a buffer of about 10 MB mapped and the old unmapped, a list of
-large planes) it follows.
+- [x] `hvs watch [SECONDS]`, a stage beside the serving driver, reading
+  only: channel 0's STATUS and DL as fast as it can, and for each frame
+  over 25 ms, less the longest time between two of its samples, one
+  line: when it began, how long it took, the lines STATUS's YLINE went
+  through, the modes it was in, and the registers before and after.
+  Its record of samples pure and tested on the host.
+- [x] Run it on the Pi 5 at 4K with five windows dragged and resized,
+  and log what a stall is: the channel stopped in its frame (YLINE
+  stuck, the HVS's fetch behind), at its end (the pixel valve or HDMI),
+  or not running; and what it follows (a resize, a restack, a number of
+  planes, the 1.2 s rhythm 0038's Log found). The fix's steps are
+  written from that. (Log: System Monitor's refresh, the kernel
+  counting every process's pages.)
+- [ ] The kernel counts a process's own and shared pages as they are
+  mapped and unmapped, so `proc_info` and `mem_info` answer without
+  walking every page of every process; timed on the board before and
+  after, with System Monitor open at 4K, by 0005's gap line and `hvs
+  watch`. `make test-virt` with tests of the counts against a walk.
+- [ ] The driver late: a resize's buffer mapped and synced, and any
+  other step `hvs` takes over a frame, timed and taken out of the
+  frame's way.
+- [ ] Layers too wide: the pointer's move shown whatever the windows'
+  width, and a screen past the line memory shown, by fetching less of
+  it, not refused.
+- [ ] The board run of "Done when", at 4K and at 1920×1080.
 
 ## Spec changes
 
@@ -55,3 +81,26 @@ large planes) it follows.
   against what runs each second (System Monitor's refresh, the clock).
   In the other 11 the count moved as it should, so the driver was late,
   likely mapping a resized window's buffer.
+- 2026-10-29: steps written; step 1, `hvs watch`, built and run on the
+  Pi 5 at 3840×2160 with Files, Fonts, Disks, System Monitor and
+  Terminal open. Sleeping 1 ms between samples slept 13 to 30 ms, so
+  it samples as fast as it can, and counts a frame long only past the
+  largest gap between its samples. At rest for 20 s: 1198 frames, 59.9
+  Hz, none long. With the user dragging and resizing for four minutes:
+  16 frames of 47 to 53 ms, one frame counted in each, YLINE moving
+  (400 to 872, 4 to 1079), always running, HANDLE_ERROR 0, DL steady:
+  the channel slowed, not stopped, and `hvs`'s own gaps of 100 to 170
+  ms every 1.2 to 1.3 s beside them, the watch's own samples held off
+  at the same times. Idle, with no one at the board: a gap of about
+  101 ms every 1.19 s (STATUS 2 to 6 frames in it), and none in 40 s
+  once System Monitor was closed. Step 2: the stall is System Monitor's
+  refresh, each second: its `mem_info` makes the kernel walk every page
+  every live process maps (`k_used_frames` to `proc_page_counts`, a
+  `map_keys` of each process's pages and a lookup of each), and its
+  `proc_info` of each process the same again, all on CPU 0, which holds
+  every other CPU's calls; at 4K `wm`, `hvs` and each app map every
+  window's buffers, twice since 0006, tens of thousands of pages. The
+  HVS slowing with it is likely that walk's memory traffic. Also seen:
+  `dmesg`'s 64 KiB written to the UART at 115200 baud held `hvs` from
+  its ends of frame for 350 to 770 ms at a time, so a stall is timed
+  with no `dmesg` running.

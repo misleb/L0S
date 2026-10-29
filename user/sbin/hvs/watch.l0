@@ -1,0 +1,136 @@
+; watch.l0 -- hvs watch's record of channel 0, sampled as fast as it can
+; be beside the serving driver: each frame from one change of STATUS's
+; frame count to the next, and those that took too long, kept as stalls
+; with what the channel did in them (roadmap 0038). Pure; hvs.l0 reads
+; the registers and says the lines.
+
+; STATUS's YLINE, bits 12 to 0: the line of its frame the channel is
+; on (vc4_regs.h's SCALER6_DISPX_STATUS_YLINE).
+(def status_line ((w int)) int (bits_of w 0 13))
+
+; A frame being watched: when its first sample was taken and its latest,
+; the longest time between two of its samples, STATUS and DL at its
+; first sample, the lowest and highest line seen in it, and the modes
+; seen, a bit for each of STATUS's MODE (1 << mode).
+(data WFrame (WFrame int int int int int int int int))
+
+; A frame that took too long: when it began, how long it took, how many
+; frames STATUS counted in that time, the longest time between two
+; samples, STATUS and DL at its start and at its end, the lowest and
+; highest line seen, and the modes seen. Times in ns.
+(data Stall (Stall int int int int int int int int int int int))
+
+; The watch: STATUS's frame count last sampled, -1 before the first
+; sample; the frame being watched; the frames counted; the stalls; and
+; the longest frame, in ns.
+(data ChWatch (ChWatch int WFrame int int int))
+
+; A sample taken: the watch after it, and the stall it ended, if any.
+(data ChWatched (ChWatched ChWatch (Option Stall)))
+
+; A watch before its first sample.
+(def watch_new () ChWatch (ChWatch -1 (WFrame 0 0 0 0 0 0 0 0) 0 0 0))
+
+; A frame begun by a sample at t of STATUS st and DL dl.
+(def wframe_at ((t int) (st int) (dl int)) WFrame
+  (let y (status_line st) (WFrame t t 0 st dl y y (bit_shl 1 (status_mode st)))))
+
+; Frame f with a sample at t of STATUS st.
+(def wframe_seen ((f WFrame) (t int) (st int)) WFrame
+  (match f
+    ((WFrame t0 tl gap st0 dl0 lo hi modes)
+      (let y (status_line st)
+        (WFrame t0 t (max gap (sub t tl)) st0 dl0 (min lo y) (max hi y) (bit_or modes (bit_shl 1 (status_mode st))))))))
+
+; How many frames STATUS's 6-bit count went on from a to b.
+(def frames_on ((a int) (b int)) int (mod (add (sub b a) 64) 64))
+
+; The watch w after a sample at t of STATUS st and DL dl: the frame it
+; ends, if STATUS's frame count moved, a stall if it took over limit ns
+; a frame, counting the frames STATUS counted in it.
+(def watch_sample ((w ChWatch) (t int) (st int) (dl int) (limit int)) ChWatched
+  (match w
+    ((ChWatch fr f n stalls longest)
+      (let fr2 (status_frames st)
+        (if (lt fr 0)
+            (ChWatched (ChWatch fr2 (wframe_at t st dl) 0 0 0) ((None Stall)))
+            (if (eq fr fr2)
+                (ChWatched (ChWatch fr (wframe_seen f t st) n stalls longest) ((None Stall)))
+                (watch_ended w t st dl limit)))))))
+
+; The watch w after a sample at t of STATUS st and DL dl that moved the
+; frame count on: the frame watched ended, and a stall if it took over
+; limit ns a frame even less the longest time between two of its
+; samples, as the watch may itself be kept from sampling (a board run
+; saw samples 30 ms apart) and the frame may have ended at any time in
+; such a gap.
+(def watch_ended ((w ChWatch) (t int) (st int) (dl int) (limit int)) ChWatched
+  (match w
+    ((ChWatch fr f n stalls longest)
+      (match f
+        ((WFrame t0 tl gap st0 dl0 lo hi modes)
+          (let k (frames_on fr (status_frames st))
+            (let ns (sub t t0)
+              (if (gt (div (sub ns (max gap (sub t tl))) k) limit)
+                  (ChWatched (ChWatch (status_frames st) (wframe_at t st dl) (add n k) (add stalls 1) (max longest ns))
+                           (Some (Stall t0 ns k (max gap (sub t tl)) st0 st dl0 dl lo hi modes)))
+                  (ChWatched (ChWatch (status_frames st) (wframe_at t st dl) (add n k) stalls (max longest ns)) ((None Stall)))))))))))
+
+; Whether the frame being watched has gone on past limit ns at t, and
+; this sample is the first past it: when to read what the HVS says of
+; itself, while the frame still stalls.
+(def watch_overdue ((w ChWatch) (t int) (limit int)) bool
+  (match w
+    ((ChWatch fr f n stalls longest)
+      (match f
+        ((WFrame t0 tl gap st0 dl0 lo hi modes)
+          (if (lt fr 0) false (if (gt (sub t t0) limit) (le (sub tl t0) limit) false)))))))
+
+; The frames counted, the stalls, and the longest frame, in ns.
+(def watch_frames ((w ChWatch)) int (match w ((ChWatch fr f n stalls longest) n)))
+(def watch_stalls ((w ChWatch)) int (match w ((ChWatch fr f n stalls longest) stalls)))
+(def watch_longest ((w ChWatch)) int (match w ((ChWatch fr f n stalls longest) longest)))
+
+; MODE's name: off, init, run or eof.
+(def mode_name ((m int)) (list int)
+  (if (eq m 0) "off" (if (eq m 1) "init" (if (eq m 2) "run" "eof"))))
+
+; The modes of bits, by name, joined by "/".
+(def modes_text ((bits int)) (list int)
+  (join_with "/" (modes_named bits 0)))
+
+; The names of the modes from m up whose bit bits has.
+(def modes_named ((bits int) (m int)) (list (list int))
+  (if (gt m 3)
+      (nil (list int))
+      (if (eq (bit_and bits (bit_shl 1 m)) 0)
+          (modes_named bits (add m 1))
+          (cons (mode_name m) (modes_named bits (add m 1))))))
+
+; ns as milliseconds, with one decimal.
+(def ms_text ((ns int)) (list int)
+  (let t (div ns 100000) (append (digits (div t 10)) (append "." (digits (mod t 10))))))
+
+; ns as seconds, with three decimals, as dmesg's stamps are.
+(def secs_text ((ns int)) (list int)
+  (let m (div ns 1000000) (append (digits (div m 1000)) (append "." (zeros_before (digits (mod m 1000)) 3)))))
+
+; s with 0s before it, to w characters.
+(def zeros_before ((s (list int)) (w int)) (list int)
+  (if (ge (length s) w) s (zeros_before (cons 48 s) w)))
+
+; What the watch says of a stall.
+(def stall_line ((s Stall)) (list int)
+  (match s
+    ((Stall t0 ns k gap st0 st1 dl0 dl1 lo hi modes)
+      (append "watch: a frame of " (append (ms_text ns) (append " ms at " (append (secs_text t0)
+        (append " s, " (append (digits k) (append " counted; lines " (append (digits lo) (append " to "
+        (append (digits hi) (append ", " (append (modes_text modes) (append "; samples up to "
+        (append (ms_text gap) (append " ms apart; STATUS 0x" (append (hex_digits st0 8) (append " to 0x"
+        (append (hex_digits st1 8) (append ", DL 0x" (append (hex_digits dl0 8) (append " to 0x" (hex_digits dl1 8)))))))))))))))))))))))))
+
+; What the watch says at its end, after secs seconds.
+(def watch_line ((w ChWatch) (secs int)) (list int)
+  (append "watch: " (append (digits (watch_frames w)) (append " frames in " (append (digits secs)
+    (append " s, " (append (digits (watch_stalls w)) (append " over 25 ms, the longest "
+    (append (ms_text (watch_longest w)) " ms")))))))))
