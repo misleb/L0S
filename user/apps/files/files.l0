@@ -11,7 +11,10 @@
 ; other file shown, its text, as a page over the place, until Back or
 ; Esc. A right click opens a menu of what can be done with what it is
 ; on, Open, Rename... and Delete, or with the place, New Folder...; the
-; menu button's has New Folder..., Refresh and the other view. F2
+; menu button's has New Folder..., New Window, Refresh and the other
+; view. New Window opens another window at the same place, which then
+; goes its own way; each window's state is kept by its id, all of them
+; on one port (uiapp.l0), and Files ends as its last closes. F2
 ; renames, Delete deletes, Backspace goes back. Renaming a volume in
 ; /Volumes relabels it (fsview.l0's fv_rename), and what is shown under
 ; its old name is shown under its new. Each change is made by the file
@@ -273,13 +276,15 @@
     ((FlMainMenu) (UiPopover page (UiMenu (fl_menu) (UiBelow "app.menu") (fl_main_items m))))
     ((FlContext x y k) (UiPopover page (UiMenu (fl_menu) (UiAt x y) (fl_context_items m k))))))
 
-; The menu button's: New Folder..., Refresh, and the view not shown.
+; The menu button's: New Folder..., New Window, Refresh, and the view not
+; shown.
 (def fl_main_items ((m Files)) (list UiMenuItem)
   (cons (UiItem "app.newfolder" "New Folder..." (is_empty (fv_fixed_why (fl_dir m))))
+        (cons (UiItem "app.newwindow" "New Window" true)
         (cons (UiItemSep)
               (cons (UiItem "app.refresh" "Refresh" true)
                     (cons (UiItem "app.view" (match (fl_view_of m) ((FlGrid) "Show as List") ((FlList) "Show as Grid")) true)
-                          (nil UiMenuItem))))))
+                          (nil UiMenuItem)))))))
 
 ; A right click's, for the thing named k, or the place for "": Open,
 ; Rename... and Delete, each only where it can be done; or New Folder...
@@ -741,28 +746,71 @@
 ; why said on standard error, and a failure.
 (def fl_complain ((why (list int))) int (complain_as "files" why))
 
-; The window opened, decorated by itself, the full-color icons loaded, /
-; listed, and the window served until its close button is clicked.
-(def files () int
-  (match (ui_open_csd "Files" 880 560)
-    ((UiOpenFailed why) (fl_complain why))
-    ((UiOpenedWin w)
-      (let im (ui_images_load (ui_image_names) (ui_win_scale w))
-        (let m (match (fv_list "/")
-                 ((FvListed es) (fl_new es (fl_rows_now im) im))
-                 ((FvNotListed why) (fl_said (fl_new (nil FvEntry) (fl_rows_now im) im) why)))
-          (fl_loop (ui_present w (fl_view m)) m))))))
+; How big a window of Files opens.
+(def fl_win_w () int 880)
+(def fl_win_h () int 560)
 
-; Each event routed, the state changed, and the window repainted, until
-; the window's own close button closes it.
-(def fl_loop ((w UiWin) (m Files)) int
-  (match (port_receive (ui_win_port w))
-    ((RecvFailed) (fl_complain "lost its port"))
-    ((Message from b)
-      (let ev (ui_event_of w (Message from b))
-        (match (ui_route w ev)
-          ((UiRouted w2 action)
-            (if (eq action (ui_close_action))
-                (ui_close w2)
-                (let m2 (fl_acted m action ev w2)
-                  (fl_loop (ui_present (fl_focused w2 m m2) (fl_view m2)) m2)))))))))
+; Files started as an app (uiapp.l0), its first window opened, decorated
+; by itself, the full-color icons loaded, / listed, and its windows
+; served until the last is closed.
+(def files () int
+  (match (ui_app_start)
+    ((UiAppFailed why) (fl_complain why))
+    ((UiAppStarted a)
+      (match (ui_app_open_csd a "Files" (fl_win_w) (fl_win_h))
+        ((UiAppRefused a2 why) (fl_complain why))
+        ((UiAppOpened a2 id)
+          (let im (ui_images_load (ui_image_names) (ui_app_scale a2))
+            (let m (match (fv_list "/")
+                     ((FvListed es) (fl_new es (fl_rows_now im) im))
+                     ((FvNotListed why) (fl_said (fl_new (nil FvEntry) (fl_rows_now im) im) why)))
+              (fl_loop (ui_app_present a2 id (fl_view m)) (map_put ((MapEmpty int Files)) id m)))))))))
+
+; Each event of a window routed, that window's state changed, and it
+; repainted, each window's state in ms by its id; until the last window
+; is closed.
+(def fl_loop ((a UiApp) (ms (Map int Files))) int
+  (let e (ui_app_next a)
+    (if (ui_app_event_lost e)
+        (fl_complain "lost its port")
+        (match e
+          ((UiAppEvent id ev)
+            (match (map_get ms id)
+              ((None) (fl_loop a ms))
+              ((Some m)
+                (match (ui_app_route a id ev)
+                  ((UiAppRouted a2 action) (fl_stepped a2 ms id m action ev))))))))))
+
+; Window id's action, set off with ev, its state m: win.close closes it,
+; and with the last Files ends; New Window opens one more; anything else
+; changes the window's state, and it is painted again.
+(def fl_stepped ((a UiApp) (ms (Map int Files)) (id int) (m Files) (action (list int)) (ev UiEvent)) int
+  (if (eq action (ui_close_action))
+      (let a2 (ui_app_close a id)
+        (if (eq (ui_app_count a2) 0) 0 (fl_loop a2 (map_remove ms id))))
+      (if (eq action "app.newwindow")
+          (fl_new_window a ms id m)
+          (match (ui_app_win a id)
+            ((None) (fl_loop a ms))
+            ((Some w)
+              (let m2 (fl_acted m action ev w)
+                (fl_loop (ui_app_present (ui_app_put a (fl_focused w m m2)) id (fl_view m2)) (map_put ms id m2))))))))
+
+; New Window, from window id showing m: its menu closed, and a window
+; opened in front at the same place, as Nautilus's New Window opens one,
+; with a state of its own; or, if there is no room for one, m saying
+; why.
+(def fl_new_window ((a UiApp) (ms (Map int Files)) (id int) (m Files)) int
+  (let m1 (fl_with_menu m (FlNoMenu))
+    (match (ui_app_open_csd (ui_app_present a id (fl_view m1)) "Files" (fl_win_w) (fl_win_h))
+      ((UiAppRefused a2 why)
+        (let m2 (fl_said m1 why) (fl_loop (ui_app_present a2 id (fl_view m2)) (map_put ms id m2))))
+      ((UiAppOpened a2 nid)
+        (let n (fl_twin m1)
+          (fl_loop (ui_app_present a2 nid (fl_view n)) (map_put (map_put ms id m1) nid n)))))))
+
+; A new window's state at the place m shows: its things, view, sidebar
+; and icons, but nothing selected, over it or open, and no Back or
+; Forward.
+(def fl_twin ((m Files)) Files
+  (fl_at m (fl_dir m) (fl_entries m) (nil (list int)) (nil (list int))))

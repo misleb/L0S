@@ -24,7 +24,12 @@
 #      was made, gone
 #   8. Volumes, scratch selected, F2, notes, Enter: ls /Volumes lists
 #      notes, the volume relabelled
-#   9. the header bar's own close button: run windows lists no Files
+#   9. the window taken to 0, 32, and the menu button's New Window: run
+#      windows lists two Files windows of one client; the new one taken
+#      to 400, 240; a click on each, the new one's Computer and the
+#      first's data, changes that one alone
+#  10. the first's own close button: the new one stays
+#  11. the new one's close button: run windows lists no Files
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
@@ -286,6 +291,72 @@ keys f2 backspace backspace backspace backspace backspace backspace backspace n 
 said_holds 'ls /Volumes' "notes" || fail "F2 did not relabel scratch; it showed:"
 echo "ok - files: F2 relabelled a volume"
 
+# Every Files window listed, front first: n_lines of them, f_* the
+# front one's id, place, size and client's pid, b_* the one behind's.
+files_windows() {
+  local try from lines
+  for try in $(seq 1 30); do
+    from=$(($(wc -c < "$out") + 1))
+    printf 'run windows\n' >&3
+    sleep 1
+    lines=$(tail -c +$from "$out" | sed 's/^l0s> //' | grep -aE '^[0-9]+ Files ')
+    if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$1" ]; then
+      read -r f_id _ f_x f_y _ _ _ f_pid <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
+      read -r b_id _ b_x b_y _ _ _ b_pid <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The window taken to the top left, 0, 32, so that a second can be put
+# where both show: New Window, the menu button's second row, 30 under
+# New Folder..., opens one more in front, of the same client, at the
+# same place.
+drag $((cx + 350)) $((cy + 20)) $((0 - cx)) $((32 - cy))
+window || fail "run windows lost Files's window; it showed:"
+[ "$w_x $w_y" = "0 32" ] || fail "the drag left the window at $w_x, $w_y, not 0, 32; it showed:"
+cx=0; cy=32
+click $((cx + 827)) $((cy + 22))
+click $((cx + 750)) $((cy + 94))
+files_windows 2 || fail "New Window did not make two Files windows; it showed:"
+[ "$f_pid" = "$b_pid" ] || fail "the two windows are of pids $f_pid and $b_pid, not one client; it showed:"
+[ "$b_x $b_y" = "0 32" ] || fail "the first window is not behind the new one; it showed:"
+echo "ok - files: New Window opened a second window, of the same client, pid $f_pid"
+first=$b_id
+
+# The new one taken to 400, 240, over the first's right and foot: the
+# first's sidebar shows left of it, its close button above it.
+drag $((f_x + 350)) $((f_y + 20)) $((400 - f_x)) $((240 - f_y))
+files_windows 2 || fail "run windows lost a Files window; it showed:"
+[ "$f_x $f_y" = "400 240" ] || fail "the drag left the new window at $f_x, $f_y, not 400, 240; it showed:"
+nx=400; ny=240
+shows "both at /Volumes, its row selected in each" \
+  "$((nx + 200)) $((ny + 124)) $side_sel" "$((cx + 200)) $((cy + 124)) $side_sel"
+
+# A click on the new one's Computer: it goes to /, and the first stays.
+click $((nx + 100)) $((ny + 76))
+shows "the new window went to /, the first did not" \
+  "$((nx + 200)) $((ny + 76)) $side_sel" "$((nx + 200)) $((ny + 124)) $sidebar" \
+  "$((cx + 200)) $((cy + 124)) $side_sel" "$((cx + 200)) $((cy + 76)) $sidebar"
+
+# A click on the first's data: it comes to the front and goes there, and
+# the new one stays at /, seen once a press on its sidebar's empty foot,
+# under the first, brings it back.
+click $((cx + 100)) $((cy + 172))
+shows "the first went to data, in front" "$((cx + 200)) $((cy + 172)) $side_sel" "$((cx + 200)) $((cy + 124)) $sidebar"
+click $((nx + 100)) $((ny + 500))
+shows "the new window still at /, the first still at data" \
+  "$((nx + 200)) $((ny + 76)) $side_sel" "$((nx + 200)) $((ny + 172)) $sidebar" "$((cx + 200)) $((cy + 172)) $side_sel"
+
+# The first's own close button, 862, 22 in it, above the new one: it
+# closes, and the new one stays.
+click $((cx + 862)) $((cy + 22))
+files_windows 1 || fail "the first's close button did not leave one Files window; it showed:"
+[ "$f_id $f_x $f_y" != "$first 0 32" ] || fail "the close button closed the new window, not the first; it showed:"
+echo "ok - files: the first's close button closed it, and the new one stayed"
+cx=$nx; cy=$ny
+
 click $((cx + 862)) $((cy + 22))
 if window 5; then fail "the close button left the window; it showed:"; fi
-echo "ok - files: its own close button closed it"
+echo "ok - files: its own close button closed its last window"

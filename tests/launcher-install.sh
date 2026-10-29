@@ -94,7 +94,7 @@ window() {
     sleep 1
     line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ vt1 ' | head -1)
     if [ -n "$line" ]; then
-      read -r _ _ w_x w_y _ _ w_front <<< "$line"
+      read -r _ _ w_x w_y _ _ w_front _ <<< "$line"
       return 0
     fi
   done

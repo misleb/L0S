@@ -15,6 +15,8 @@
 #   4. the tab bar along its foot, AdwTabBar's: three tabs, the first
 #      raised; a click on the third raises it instead, and a click on
 #      the second's close button closes it, the two left sharing the bar
+#   5. the title bar's close button: wm asks the gallery to close, the
+#      toolkit closes it for the gallery, and run windows lists none
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
@@ -175,3 +177,23 @@ events "$(button true)"; sleep 1
 events "$(button false)"; sleep 1
 events "$(at $((cx + 300)) $((cy + 200)))"; sleep 1
 shows "the second tab closed, the third raised" "$((cx + 329)) $ty $tab_on" "$((cx + 14)) $ty $headerbar" "$((cx + 316)) $ty $headerbar"
+
+# The title bar's close button, 24 square, 6 in from the window's right,
+# 644 wide, and 10 down: 614 to 637 across, its middle 626, 22. wm asks
+# the gallery to close with the close notice; the gallery does nothing
+# with win.close, so the toolkit closes its window and has wm end it:
+# run windows lists no gallery.
+events "$(at $((w_x + 626)) $((w_y + 22)))"; sleep 0.3
+events "$(button true)"; sleep 0.3
+events "$(button false)"
+for try in $(seq 1 30); do
+  from=$(($(wc -c < "$out") + 1))
+  printf 'run windows\n' >&3
+  sleep 1
+  got=$(tail -c +$from "$out")
+  if printf '%s\n' "$got" | grep -aq '^pointer ' && ! printf '%s\n' "$got" | grep -aqE '^[0-9]+ Widgets '; then
+    echo "ok - widgets: the close button closed the gallery"
+    exit 0
+  fi
+done
+fail "the close button left the gallery open; it showed:"

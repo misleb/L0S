@@ -1,6 +1,6 @@
 # 0032: Apps launched one way: a running app is asked, not started again
 
-Track: Desktop · Status: blocked · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
+Track: Desktop · Status: ready · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
 
 ## Why
 

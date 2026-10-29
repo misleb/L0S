@@ -189,6 +189,16 @@ is the code of a key pressed or repeated, -1 for anything else, and
 Linking a window needs `RENDER`, `UI_CORE`, `UI_WINDOW` and `WMLIB`
 (`LIBS_widgets`).
 
+Every notice `wm` sends names its window (`l0s.l0`'s `win_notice`,
+read in place with `win_notice_of` and the `_at` readers). An app of
+many windows is a `UiApp` (`uiapp.l0`): `ui_app_open`, `ui_app_next` ->
+`(UiAppEvent ID EVENT)`, `ui_app_route`, `ui_app_present` and
+`ui_app_close` by id, its state per window kept by the app (Files'
+`fl_loop`); `ui_open` is a `UiApp` of one window. A close, `wm`'s button
+or the window's own, is the action `win.close`: close the window, or
+`ui_win_close_kept`; one presented again unanswered is closed by the
+toolkit, which asks `wm` to `end` the program.
+
 ## The compositor (`user/sbin/wm/wm.l0`)
 
 It owns the screen through the display protocol and keeps windows for its
@@ -292,8 +302,9 @@ driver composes them.
 - **Input**: keys go to the front window's port. The pointer goes, relative
   to the content, to the window whose content it is in, or to the one a press
   in its content grabbed until every button is up, with a leave notice when
-  it goes. A title bar press raises and starts a drag; the close button kills
-  the client (`close_pressed`); the frame and content raise. The wheel
+  it goes. A title bar press raises and starts a drag; the close button asks
+  the client with the close notice, and kills it 2 s later if the window
+  is still open (`close_pressed`, `closes_due` on wm's alarm); the frame and content raise. The wheel
   (`wheeled`) goes to the window the pointer would. The tablet's driver
   sends a report's `WheelEvent` before its `PointerEvent`, so a client has
   scrolled before the pointer's next place is hit-tested, and the hover

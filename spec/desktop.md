@@ -27,7 +27,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | Request | Does |
 |---|---|
 | `hello` | `compositor scale S`, so the client learns `wm`'s pid, to share with, and the scale to make its buffer at: S times W×H. Every other number, a window's size, place and damage, its top row, and the pointer, is the desktop's pixels |
-| `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT. The reply is `window ID` |
+| `window W H VA PORT TITLE` | a window of W×H pixels, its buffer at VA in `wm`, shared there with `shm_share`. It opens in front, cascading from 40, 40. Keys typed while it is in front, the pointer in it, and the notices below go to PORT, each a window notice naming ID. A client may open any number of windows, `window` or `csd`, and give each the same PORT, as a GTK app keeps its windows on one connection: the notices tell them apart. The reply is `window ID` |
 | `csd W H VA PORT TITLE` | a window as `window` makes one, but one its client decorates, as GNOME's own apps do: `wm` draws no title bar or frame for it, all of it is the client's content, its four corners rounded to 12, and the border round it, its top's too, resizes it. The reply is `window ID` |
 | `move ID` | the window dragged with the pointer from where it is, held where the pointer holds it, until the button is up: what a client that draws its own header bar asks as it is pressed, xdg_toplevel's move. Only while the left button is down after a press in that window, and nothing else is dragged (`not pressed`); only the window's client may ask |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
@@ -37,8 +37,9 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `maximize ID` | the window made to fill the screen under the top bar, from 0, 32, its place and size kept; or, if it is maximized, put back where it was, at its size: what a double click on a client's own header bar asks. `wm` asks the client for the size with a size notice, as a drag of its right and bottom edges does, and places the window once it answers. Only the window's client may ask |
 | `title ID TEXT` | a new title |
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
+| `end` | the client asking it killed, its windows closing with its exit: what the toolkit asks for a program that did nothing with the close of its last window, since a program cannot end itself but by returning from `main`. Refused for a driver |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
-| `windows` | a line a window, front first, then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
+| `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
 | `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
@@ -150,6 +151,16 @@ window by those `edges`, which `wm` then drags as by the border.
 
 Input:
 
+- **Every notice names its window.** Whatever `wm` sends a client about
+  a window, a key, the pointer, the wheel, a leave, a focus or a size
+  notice, goes as a window notice, as Wayland names the surface in each
+  event: `win`, the window's id as a u32, then the notice as below
+  (`win_notice` in [user/lib/sys/l0s.l0](../user/lib/sys/l0s.l0);
+  `win_notice_of` reads the id and where the notice starts, in place,
+  and `key_event_at` and the rest read the notice there). The drivers'
+  notices to `wm` are as they were; `wm` puts the window before them as
+  it passes them on. The toolkit's `ui_event_of` takes only its own
+  window's, any other as `UiOther`; `vt` likewise.
 - **Keys** go to the front window's client, as the `KeyEvent` notices
   the keyboard driver sends.
 - **The pointer**'s place, 0 to 32767 on each axis from the tablet, is
@@ -221,9 +232,16 @@ Input:
   copy of an area did, and paints only the rows that came into view and
   the scrollbar's slider, about a third of the rows.
 - **A left press on the close button**, the round button at a title
-  bar's right end, kills the window's client with `proc_kill`. Its exit
-  then closes its windows, as any client's does. If the client cannot be
-  killed, being a driver or already gone, `wm` closes the window itself.
+  bar's right end, asks the window's client to close it, as
+  `xdg_toplevel.close` does: a window notice of the window, then `clo`
+  (`close_notice`). If the window is still open, and still that
+  client's, 2 seconds later, on `wm`'s alarm, `wm` kills the client
+  with `proc_kill`, and its exit closes its windows, as any client's
+  does; if it cannot be killed, being a driver or already gone, `wm`
+  closes the window itself. The toolkit gives the notice to its program
+  as the action `win.close`, and closes the window itself, and asks
+  `wm` to `end` the program, if the program does nothing with it (see
+  [the toolkit](toolkit.md)), so every app closes at once, as before.
 
 ## A large screen
 
@@ -345,7 +363,9 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   windows open at once, and open them for ever; a resize past a buffer's
   room holds one more for a moment, and is refused if there is none. The
   pointer's image is painted again and given to the display whenever it
-  changes between the arrow and a resize pointer. The close button kills its client at
-  once: the client is not asked first, and cannot refuse. The pointer has
+  changes between the arrow and a resize pointer. The close button asks
+  its client to close the window, and gives it 2 seconds to, however
+  long it needs, as a dialog asking to save would: then it is killed,
+  whatever it is doing. The pointer has
   one button that does anything, the left: `wm` passes the others on to
   the window under the pointer, and the toolkit drops them.
