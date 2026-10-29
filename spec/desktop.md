@@ -4,8 +4,8 @@
  sh ─tty─ vt1 ─┐ compositor protocol                display protocol
      procmon ──┼──────────────────▶ wm ─────────────────────────▶ virtio-gpu ──▶ QEMU
        draw ───┘ (shared buffers)   ▲ ▲                           (or another driver)
-                                    │ └── pointer ◀── usb-hid mouse ◀──┐ usb
-                                    └──── keyboard ◀── usb-hid keyboard ◀─ xhci
+                                    │ └── pointer ◀──┐
+                                    └──── keyboard ◀─┴ usb-hid ◀─usb─ xhci
                                              (or virtio-input tablet and keyboard)
 ```
 
@@ -161,11 +161,15 @@ Input:
   notices to `wm` are as they were; `wm` puts the window before them as
   it passes them on. The toolkit's `ui_event_of` takes only its own
   window's, any other as `UiOther`; `vt` likewise.
+- **What the drivers send** is told apart by what it says, a key's
+  notice or the pointer's, not by which of them sent it: one process
+  may serve `keyboard` and `pointer` both, as `usb-hid` does. Only a
+  message from a driver `wm` listens to is taken as input.
 - **Keys** go to the front window's client, as the `KeyEvent` notices
   the keyboard driver sends.
 - **The pointer**'s place, 0 to 32767 on each axis from the tablet, is
   scaled to the screen and sent to the driver as a `move`. A mouse's
-  report, a `PointerMotion` from `usb-hid mouse`, moves it instead from
+  report, a `PointerMotion` from `usb-hid`, moves it instead from
   where it is, a pixel a count, kept on the screen; its wheel's turn is
   told first, where the pointer was (see [USB](devices.md#usb)).
 - **A left press** on a window brings it to the front. On its title bar,

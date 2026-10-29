@@ -71,15 +71,14 @@ So L0S spends processes to hold names:
   as the tab closes; `vt tab` goes. `spec/demo.md`'s pids and `ps`
   sample, `tests/vt.sh`'s arithmetic, and 0025's design in
   `programs.md` follow.
-- [ ] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
+- [x] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
   on their endpoints' ports and on `keyboard`'s and `pointer`'s, and
   serves both. The inittabs start one; `devices.md`'s USB section,
   `programs.md`'s row and `demo.md`'s pids follow. Checked on QEMU by
-  the keyboard and pointer screen tests, and on the Pi 5 with a USB
-  keyboard and mouse, written in the Log. (The driver serves both with
-  no argument; the inittabs still start one a kind, until `wm` tells a
-  key's notice from a pointer's by what it says, not by its sender's
-  pid: the Log says why, and what is left.)
+  the keyboard and pointer screen tests; `wm` tells a key's notice from
+  a pointer's by what it says, not by its sender's pid. The Pi 5's
+  check, with a USB keyboard and mouse, is the user's, on a netboot, as
+  the Log's last entry for this step writes it out: not yet done.
 - [x] More of it: look through the servers for others that hold a name
   by a process of their own, poll with `port_try_receive`, or would
   serve better from one process waiting on several ports (`fs`' names
@@ -271,3 +270,36 @@ So L0S spends processes to hold names:
   and stops when let go; the mouse moves the pointer, clicks, and its
   wheel scrolls a Terminal back. Once the inittab starts one
   `usb-hid`, the same again, with both lines from one pid.
+- 2026-10-28: step 4 finished, after 0021's merge. `wm` routes its
+  input by what a notice says: `input_kind` takes a message from either
+  input driver (`from_input`: the keyboard's pid or the pointer's, 0
+  until `wm` listens, so nothing from pid 0 or a client counts) and
+  makes it a key if `key_event_of` reads one, else the pointer's
+  (`pointer_received` then tells a place, a motion and a wheel's turn
+  apart, as before); `motion_from`, which joins queued motions, takes a
+  motion from either driver the same way. Everything else
+  (`received_other`) is as it was. The design call: keep the pid test
+  beside the payload, so a client cannot pass itself off as the
+  keyboard by sending a `key` notice; and keep `wm`'s two pids, `kp`
+  and `pp`, since a board may still have two drivers (virtio-input's
+  keyboard and tablet). Host tests: `test_input_one_driver` (one pid's
+  key, wheel and motion), `test_input_two_drivers` (another pid's, and
+  the kernel's before `wm` listens, are no input).
+  Then the inittabs start one `usb-hid` with no argument (the demo's,
+  the Pi 5's, `tests/usb`'s and the `usb` e2e case's), and the pids move
+  down one as the earlier entry said: `sh` 14, `font` 15, `wm` 16
+  (`spec/demo.md`'s table and `ps` sample), `tests/vt.sh`'s `vt_base`
+  16, the `usb` case's `contains` one `usb-hid`, and `devices.md`,
+  `programs.md`, `pi5.md` and `desktop.md` say one process. `usb-hid
+  keyboard` and `usb-hid mouse` still serve one kind alone, for trying
+  one by hand. Checked on QEMU, four CPUs: `tests/usb.sh` and
+  `tests/vt.sh`, whose wheel now scrolls vt1 back with one `usb-hid`.
+  **The Pi 5, for the user to check** on a netboot (`tools/pi5-boot`)
+  with a USB keyboard and a USB mouse on RP1's ports: `usb-hid`'s two
+  lines, "device N, interface 0: a keyboard, serving keyboard" and "...
+  a mouse, serving pointer", from one pid; `ps` at the serial shell
+  shows one `usb-hid`, "waiting for a message on 3 ports", and `sh` at
+  14; keys typed reach `run keys` and the front window; a held key
+  repeats (after 500 ms, then about 30 a second) and stops when let go;
+  the mouse moves the pointer and clicks; and its wheel scrolls a
+  Terminal back, not typing into it, which is what `wm`'s change fixed.

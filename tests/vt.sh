@@ -226,12 +226,12 @@ typekeys "echo hi"
 # over the terminal's ground, as the smooth 8 by 16 glyph has it.
 shows "echo hi typed and answered in $f_title" "$((f_x + 1)) $((f_y + bar + 8 * 16 + 8)) $stem"
 
-# The two windows' vts are pids 18 and 19: boot, pid 1, starts
-# /etc/system's programs after the inittab's fourteen, sh 15, font 16,
-# wm 17, then the two vts, vt_base + 1 and vt_base + 2. Each starts a
+# The two windows' vts are pids 17 and 18: boot, pid 1, starts
+# /etc/system's programs after the inittab's thirteen, sh 14, font 15,
+# wm 16, then the two vts, vt_base + 1 and vt_base + 2. Each starts a
 # relay for its tab's name, and the tab's shell; nap's parent is the
 # front window's shell, whose parent is its vt.
-vt_base=17
+vt_base=16
 typekeys "run nap 30000 &"
 sleep 2
 lines=$(ps_lines)
