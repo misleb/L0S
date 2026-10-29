@@ -340,7 +340,12 @@ to `l0` are one namespace, and a duplicate is a compile error.
   long, which the slow step's line then says. Its own requests, the
   strikes, are replies; a program that waits on a set of its own, as
   `vt` does, takes no replies, so a `UiFontAt` it shows is never drawn
-  (`vt` shows none). Replies are matched to asks in the order asked, so
+  (`vt` shows none). Disks still reads its drives in its step, and Files
+  asks a volume's size, a refresh, a change and a file's text so. The
+  slow step's line is wall time, the time from the route to the
+  present's end, not the process's own: a step another process shares
+  its CPU with, or the first after the board idles, is longer than it
+  would be alone. Replies are matched to asks in the order asked, so
   a program's asks go to servers that answer in order, as `fs` does
   one client's. A program ends
   only by returning from `main`, so one that does nothing with a close
