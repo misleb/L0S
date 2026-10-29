@@ -85,6 +85,10 @@ otherwise as its type's first failure.
 | 297 | `alarm_at port t`, `is_alarm_notice m` | `int` | sends `port`, the caller's, the notice `alarm` from pid 0 when `clock_ns` reaches t, at once if it has; it replaces the port's earlier alarm, so there is at most one for a port. A driver that waits on its port for interrupts uses it to wake to do something on a time, as `gem` rechecks its link; 0, or -1 (`err_no_port`) if the port is not the caller's |
 | 298 | `board_restart` | `(list int)`, why not | restarts the board by L0's `board_reset`, after the kernel logs `l0s: restarting the board, as NAME (pid N) asked`, ending every process with no word, as sh's `reboot` and wm's Restart ask. It does not return where the board restarts (the Pi 5, QEMU's aarch64 virt board); elsewhere -6 (`err_denied`), and the kernel logs a warning. Any process may |
 | 299 | `shm_share_read va n pid` | `ShmShare`, as `shm_share` | as `shm_share`, but the pages are mapped into pid read only: a write of pid's there faults it, which ends it with status 139, and leaves the pages and their owner as they were. The font service shares its strikes so, that no client can change another's text. Its refusals are `shm_share`'s |
+| 300 | `port_set ports` | `PortSetting`: `PortSetMade`, `PortSetNotYours`, `PortSetSize` | the caller's set of ports to wait on, given as a u32 each, in place of any it had: 0, or -1 a port not the caller's, -4 none, more than `port_set_limit` (32), or a length not a whole number of u32s, -5 bytes the caller may not give. Refused before anything changes |
+| 301 | `port_receive_set` | `SetMessage`: `SetMessage`, `SetRecvFailed` | waits; `(SetMessage port m)`, the oldest message waiting on any port of the set and the port it came on, `m` as `port_receive` gives it. The kernel writes the sender, the payload and then the port, a u32; -1 the caller has no set, -4 no room for them, the message kept. `port_receive_any ports` is `port_set` and then this |
+| 302 | `port_try_receive_set` | `SetMessage` | the same, or `(SetRecvFailed)` at once if no message is waiting (-2) |
+| 303 | `name_unregister name` | `Unregistration`: `Unregistered`, `UnregisterNoName`, `UnregisterNotYours` | the name let go, free at once for `name_register`, and `name_lookup` no longer finds it: 0, or -1 no port holds it, -6 its port is not the caller's, -5 or -4 a name the caller may not give or over 256 bytes |
 
 Listening to a driver, `keyboard_listen`, `pointer_listen` and
 `input_listen`, gives a `Listen`: `Listening`, `NoDriver` or
@@ -113,3 +117,16 @@ open files go with it. Whoever waits for it is woken with its status, and
 every port watching it gets a notice. Waiting with `watch` instead of `wait`
 lets a process hear about an exit and other messages on one port. That is
 how the shell waits for a job and for Ctrl-C at the same time.
+
+A process that serves on several ports waits on all of them at once
+with a *set*: `port_set` names them, up to 32 of its own, once, and
+each `port_receive_set` answers with the oldest message waiting on any
+of them and the port it came on. Every message queued on any port is
+numbered as it is queued, so a busy port does not starve the others. A
+send to any port of the set wakes the process; a port of it closed
+leaves the set. A process has one set, kept until it sets another or
+exits, so a loop whose ports stay the same sets them once. The message
+comes as `port_receive` would give it, copied once from the kernel's
+bytes to drop the port after it. A name a process registered goes when
+it exits, or before, with `name_unregister`, so one process can hold a
+name for a while on a port of its own and let it go.

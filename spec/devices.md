@@ -106,6 +106,17 @@ then, for what the firmware left pending, reached no one, and RP1 sent
 none again until acknowledged. Either left both devices hung after
 their ports' resets.
 
+A `usb-hid` waits on three ports at once, a set (`port_set`): its own,
+where the usb server's answers and notices come, every endpoint's
+reports among them, each naming its device and endpoint, and the
+kernel's alarms, which time a held key's repeats; and one each for
+`keyboard` and `pointer`, where their clients ask to `listen`, told
+apart by the port they came on. Started with no argument, one process
+claims every boot keyboard and every boot mouse and serves both names;
+`usb-hid keyboard` and `usb-hid mouse` serve one each, and the
+inittabs start those two, since `wm` tells a key's notice from a
+pointer's by its sender's pid, and so cannot take both from one.
+
 `usb-hid` uses HID's boot protocol only: a keyboard's 8-byte reports,
 compared with the last to find what was pressed and let go (Linux's key
 codes, then `keymap.l0`'s characters), and a mouse's buttons, movement

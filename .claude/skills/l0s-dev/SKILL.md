@@ -269,8 +269,15 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
   `fs_attach_disk`. Clients find disks with `disk_names` and
   `disk_open_named`; `disk_open` waits for `disk0`.
 - **Waiting for a message or a time.** A receive cannot time out. Either a
-  device interrupt arrives as a message (`irq_bind`), or the loop polls with
-  `port_try_receive` and `sleep_ns` (`rtc clock`, `procmon`).
+  device interrupt arrives as a message (`irq_bind`), or an alarm does
+  (`alarm_at port t`, the kernel's notice at `t`, as `usb-hid` times a
+  held key's repeats), or the loop polls with `port_try_receive` and
+  `sleep_ns` (`rtc clock`, `procmon`).
+- **Waiting on several ports.** `port_set ports` once, then
+  `port_receive_set` gives `(SetMessage port m)`, the oldest message
+  across them and the port it came on: a server with a port per name
+  tells its clients apart by the port (`usb-hid`'s `keyboard` and
+  `pointer`). `name_unregister` lets a name go before the process ends.
 - **Failing.** Each program has
   `(def complain ((why (list int))) int (complain_as "NAME" why))`
   (`cli.l0`). A driver whose device is absent says so with `note_as` and

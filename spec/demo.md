@@ -267,12 +267,17 @@ Things to try:
      10       0  pcie          waiting for a message on port 10
      11       0  sdhci         waiting for a message on port 22
      12       0  xhci          waiting for a message on port 17
-     13       0  usb-hid       waiting for a message on port 18
-     14       0  usb-hid       waiting for a message on port 20
+     13       0  usb-hid       waiting for a message on 3 ports
+     14       0  usb-hid       waiting for a message on 3 ports
      15       1  sh            running
      16       1  font          waiting for a message on port 24
      17       1  wm            waiting for a message on port 26
   ```
+
+  Ports are numbered as the drivers make them, which on four CPUs
+  differs from boot to boot. A process waiting on a set of ports, as
+  each `usb-hid` waits on its own and on `keyboard`'s and `pointer`'s,
+  says how many.
 
   It lists the processes that have not exited. The shell asking is always
   `running`, since `ps` runs inside it. Every driver waits, for a request

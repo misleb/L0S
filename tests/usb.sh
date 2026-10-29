@@ -4,7 +4,7 @@
 #
 #   1. run keys, typed at the serial shell, echoes keys pressed on the
 #      USB keyboard through QEMU's monitor (sendkey), through xhci and
-#      usb-hid keyboard: "hi! A", shift included
+#      usb-hid keyboard: "hi! A", shift included; then z held, repeated
 #   2. the USB mouse, moved through QMP's input-send-event with relative
 #      axes, as a mouse moves, from where the pointer starts, 0, 0, to
 #      the top bar's Applications, 60, 16, and clicked, opens the
@@ -89,6 +89,11 @@ waits_for "serving compositor"
 for k in h i shift-1 spc shift-a ret; do monitor "sendkey $k"; done
 waits_for "hi! A"
 echo "ok - usb: the USB keyboard typed 'hi! A'"
+# z held 900 ms: usb-hid repeats it from 500 ms, every 33 ms, timed by
+# the kernel's alarm, so a dozen z's; four at least.
+monitor "sendkey z 900"
+waits_for "zzzz"
+echo "ok - usb: a held key repeated"
 monitor "sendkey esc"
 
 # As launcher.sh pins them: the top bar's 8, 16 black, the launcher's
