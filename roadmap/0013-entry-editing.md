@@ -1,6 +1,6 @@
 # 0013: Entries that scroll, select, copy and paste
 
-Track: Toolkit · Status: blocked · Needs: 0012 · Spec: toolkit.md
+Track: Toolkit · Status: idea · Needs: 0012 · Spec: toolkit.md
 
 ## Why
 
@@ -26,3 +26,5 @@ To be written.
 ## Log
 
 - 2026-10-26: written from toolkit.md's Limits.
+- 2026-10-28: 0012 is done: a `KeyEvent` carries Shift, Ctrl and Alt
+  (`ui_key_mods`), so an idea until it has steps.

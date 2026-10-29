@@ -387,9 +387,9 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   resize pointer before a press.
 - Only toolkit windows can be resized or maximized (`draw` ignores the
   size notice, so a double click on its title bar leaves it as it is).
-- **Terminal (`vt`) is a terminal of lines, not a screen.** KeyEvent has
-  no modifiers yet, so there are no shortcuts: no Shift-PgUp to scroll
-  back, no Ctrl-Shift-T for a tab; the wheel and the buttons do it all.
+- **Terminal (`vt`) is a terminal of lines, not a screen.** Its only
+  shortcuts are Ctrl-Shift-T for a tab and Shift-Page Up and Down for a
+  page of the scrollback.
   There is no selecting, copying or pasting; no escape sequence moves
   the cursor, colors text or clears the screen (the line editing drops
   them); and a program is not told the terminal's size, so nothing it

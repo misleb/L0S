@@ -1,6 +1,6 @@
 # 0012: Modifier state in `KeyEvent`
 
-Track: Desktop · Status: active · Needs: – · Spec: desktop.md, toolkit.md, programs.md, testing.md
+Track: Desktop · Status: done · Needs: – · Spec: desktop.md, toolkit.md, programs.md, testing.md
 
 ## Why
 
@@ -51,16 +51,13 @@ passing the bytes on untouched, and the readers take one word more.
 - [x] Files' Alt-Left and Alt-Right, Back and Forward, through the
   toolkit's `ui_key_mods`; Ctrl-C and Ctrl-V written as goal 0036.
   Host tests in `files_test`.
-- [ ] Terminal's shortcuts: Ctrl-Shift-T a new tab, Shift-Page Up and
+- [x] Terminal's shortcuts: Ctrl-Shift-T a new tab, Shift-Page Up and
   Shift-Page Down a page of the scrollback. Host tests in `vt_test`;
   `vt.sh` opens a tab with Ctrl-Shift-T.
 
 ## Spec changes
 
-- desktop.md: Terminal's limit loses its "no modifiers" sentence, and
-  says its shortcuts.
-- programs.md: Terminal's keys.
-- testing.md: what `vt.sh` checks.
+All moved into the spec.
 
 ## Log
 
@@ -75,3 +72,8 @@ passing the bytes on untouched, and the readers take one word more.
 - 2026-10-28: step 3: Files' Alt-Left and Alt-Right (`fl_keyed`, the
   toolkit's `ui_key_mods`). Ctrl-C and Ctrl-V need a copy Files does
   not have, which is more than a key: written as 0036.
+- 2026-10-28: step 4: Terminal's Ctrl-Shift-T and Shift-Page Up and
+  Down (`shortcut_of`, `paged`); `vt.sh` opens a tab with Ctrl-Shift-T
+  on the USB keyboard. Ctrl with a letter was already its control
+  character, so Terminal's Ctrl-C was already 3. Done; 0013, which
+  needed it, has no steps yet, so is an idea.

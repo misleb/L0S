@@ -31,8 +31,7 @@ move independently, so several can be active at once.
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
-| [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | active | 3/4 | – | desktop.md, toolkit.md, programs.md, testing.md |
-| [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | blocked | – | 0012 | toolkit.md |
+| [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | idea | – | 0012 | toolkit.md |
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
@@ -50,10 +49,6 @@ move independently, so several can be active at once.
 - [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame
   interrupts: on a Pi 5 with a monitor on HDMI0. Its first step may
   find it needs L0 to give the interrupt.
-- [0012](0012-key-modifiers.md) Modifier state in `KeyEvent`: on QEMU;
-  the key notice carries the modifiers, and Shift-Tab moves the focus
-  back, and Files has Alt-Left and Alt-Right; next, Terminal's
-  shortcuts.
 - [0024](0024-fs-fair-serving.md) `fs` serves its clients fairly,
   small requests first: 0023, which it needed, is done.
 
@@ -84,6 +79,7 @@ graph LR
 | [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | 2026-10-28 |
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
+| [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 | [0016](0016-pi5-eeprom-config.md) The Pi 5's boot config, read and changed from L0S | Pi 5 | 2026-10-27 |
 | [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | 2026-10-27 |

@@ -291,6 +291,8 @@ header bar. Then:
   answered in it;
 - a click on the second tab's close button: its shell ends, the tab
   bar goes and the terminal is under the header bar again;
+- Ctrl-Shift-T, on the USB keyboard through `wm`: a tab opened as by
+  the button, the tab bar back, which its close button closes again;
 - `exit` typed into the tab left: its shell ends, and with the last tab
   the window closes and its `vt` exits. `run windows` shows only the
   other, in front, and `ps` shows neither the `vt` nor anything it
