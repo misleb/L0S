@@ -46,7 +46,7 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   `virtq_wait`, acknowledging the device's interrupt status. One
   request in flight still; the same answers, timed against today's
   restack.
-- [ ] Requests in flight: commands go into the control queue as they
+- [x] Requests in flight: commands go into the control queue as they
   come, up to the ring's room, each display request's reply sent once
   its last command is answered, while the driver goes on taking
   requests; the cursor queue likewise. Replies keep their requests'
@@ -110,3 +110,20 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   queue alike, in place of `virtq_wait`'s yields and sleeps; one
   request in flight still. Timed again: a size 12.5 ms, its restack
   11.5, a move's restack 20.0, so no slower.
+- 2026-10-29: step 2. `flight.l0` keeps what is in flight, pure and
+  tested on the host: each command's chain from a ring of the 64
+  descriptors, its request in a ring over the 62 request pages, its
+  response in a 64-byte slot by its first descriptor; commands retired
+  in the order made, whatever order they are used in; replies waiting,
+  each for the last command made before it on both queues. The device is
+  told once a request is handled, so a damage of five boxes is ten
+  commands and one notify. The driver waits on `display` and its
+  interrupt port as a set. What could not stay asynchronous: the
+  startup's commands, whose answers decide what it does (`send_now`); a
+  new cursor image, which the cursor queue's update must not overtake;
+  and giving up the wallpaper's pages, which waits for every command.
+  Timed: a size 12.6 ms, its restack 11.4, a move's restack 18.3. `wm`
+  still waits for each reply, so the gain is within a request. The
+  first `make e2e` caught the first frame never shown: its commands
+  were made before any request, so nothing told the device of them;
+  the driver now tells it as it starts serving.

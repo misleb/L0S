@@ -101,16 +101,6 @@
 (def pages_runs ((addrs (array int))) (list VirtqRun)
   (rev (virtq_page_runs addrs 0 (mul (array_len addrs) (page_size)) (nil VirtqRun))))
 
-; ------------------------------------------------------------ descriptors
-
-; The descriptor table for a request of len bytes from off of the
-; driver's memory, whose pages the device reaches at addrs, as runs
-; chained in order from descriptor 0; then the response, which the device
-; writes.
-(def descriptors ((off int) (len int) (addrs (array int)) (resp_off int) (resp_len int)) (list int)
-  (rev (push (descriptor (device_at addrs resp_off) resp_len (desc_write) 0)
-             (virtq_push_chain (rev (virtq_page_runs addrs off len (nil VirtqRun))) (desc_next) 1 (nil int)))))
-
 ; ---------------------------------------------------------------- layers
 
 ; A buffer a client shared: its width and height in pixels, its stride,
@@ -498,13 +488,15 @@
     ((VirtioReady t2)
       (match (virtq_mem (queue_pages) "the queue")
         ((NoVirtqMem why) (complain why))
-        ((VirtqMem va q addrs) (with_cursor_queue (Gpu d t q addrs 0 -1)))))))
+        ((VirtqMem va q addrs) (with_cursor_queue d t q addrs))))))
 
 ; The control queue's memory: page 0 the ring, descriptors at 0, the
-; available ring at 1024, the used ring at 2048; page 1 a response; the
-; rest a request, which may be long, for a backing of many runs. QEMU's
-; control queue takes 64 entries, so the request's 62 pages and the
-; response are as many descriptors as it holds.
+; available ring at 1024, the used ring at 2048; page 1 the responses, a
+; slot of 64 bytes for each descriptor a chain may start at; the rest
+; requests, as many at once as fit (flight.l0), one of them as long as
+; them all, for a backing of many runs. QEMU's control queue takes 64
+; entries, so a request of all 62 pages and its response are as many
+; descriptors as it holds.
 (def queue_pages () int 64)
 (def ring_size () int 64)
 (def avail_off () int (virtq_avail_off (ring_size)))
@@ -512,37 +504,51 @@
 (def resp_off () int 4096)
 (def req_off () int 8192)
 
+; Where the request pages end.
+(def req_end () int (mul (queue_pages) (page_size)))
+
+; Where the response to the chain from descriptor h goes. Only info's,
+; asked first and alone, is longer than its slot, and runs over those
+; after it.
+(def resp_at ((h int)) int (add (resp_off) (mul 64 (mod h (ring_size)))))
+
 ; The most runs one backing may have: what the request's pages hold.
-(def max_runs () int (div (sub (sub (mul (queue_pages) (page_size)) (req_off)) 32) 16))
+(def max_runs () int (div (sub (sub (req_end) (req_off)) 32) 16))
 
 ; The driver: the transports' registers and the GPU's transport, the
-; queue's memory and where the device reaches each page of it, how
-; many requests it has made, and the port the transport's interrupt
-; comes to, -1 until it is bound.
-(data Gpu (Gpu IoDevice int IoDevice (array int) int int))
+; queue's memory and where the device reaches each page of it, what it
+; has in flight on both queues (flight.l0), the port the transport's
+; interrupt comes to, and the cursor queue.
+(data Gpu (Gpu IoDevice int IoDevice (array int) Flight int Curq))
 
 ; The cursor queue, queue 1, in one page, as the control queue's first
-; but of 16, with its request at 1024; and the zero page after it, black
-; for what no layer covers.
-(data Curq (Curq IoDevice int int))
+; but of 16, with a slot of 64 bytes for each entry's request from 1024;
+; and where the device reaches it. The zero page after it is black for
+; what no layer covers.
+(data Curq (Curq IoDevice int))
 
 (def cursor_ring () int 16)
 (def cursor_avail () int (virtq_avail_off (cursor_ring)))
 (def cursor_used () int (virtq_used_off (cursor_ring)))
 (def cursor_req () int 1024)
 
-(def with_cursor_queue ((g Gpu)) int
+; Where entry i of the cursor queue has its request.
+(def cursor_slot ((i int)) int (add (cursor_req) (mul 64 i)))
+
+; The cursor queue's memory, and the zero page, made; then both queues
+; started.
+(def with_cursor_queue ((d IoDevice) (t int) (q IoDevice) (addrs (array int))) int
   (match (virtq_mem 2 "the cursor queue")
     ((NoVirtqMem why) (complain why))
-    ((VirtqMem va cq at) (ready_queues g (Curq cq (array_get at 0) 0) (array_get at 1)))))
+    ((VirtqMem va cq at) (ready_queues (Gpu d t q addrs (fl_new (req_off)) -1 (Curq cq (array_get at 0))) (array_get at 1)))))
 
 ; Both queues started, the transport's interrupt bound to a port of the
 ; driver's own, then the device told the driver is ready.
-(def ready_queues ((g Gpu) (c Curq) (zero int)) int
+(def ready_queues ((g Gpu) (zero int)) int
   (match g
-    ((Gpu d t q addrs n old)
+    ((Gpu d t q addrs f old c)
       (match c
-        ((Curq cq ca cn)
+        ((Curq cq ca)
           (let s (start_queue d t 0 (ring_size) (device_at addrs 0) (device_at addrs (avail_off)) (device_at addrs (used_off)))
             (let s1 (start_queue d t 1 (cursor_ring) ca (add ca (cursor_avail)) (add ca (cursor_used)))
               (let ip (port_new)
@@ -550,54 +556,103 @@
                   (if (not (is_empty why))
                       (complain why)
                       (let o (driver_ok d t)
-                        (display_info (Gpu d t q addrs n ip) c zero))))))))))))
+                        (display_info (Gpu d t q addrs f ip c) zero))))))))))))
 
 ; ------------------------------------------------------------- requests
 
-; The outcome of a request: the response's type, and the driver after it.
-(data Answer (Answer int Gpu) (NoAnswer (list int)))
+; Commands go into the control queue as they come, as many as its ring
+; and request pages have room for, and the device is told of them once a
+; request is handled, or when the driver must wait for room. The driver
+; goes on taking requests while they are in flight; each request's reply
+; is sent once every command made before it is answered, so replies keep
+; their requests' order (flight.l0). It waits for the device by the
+; transport's interrupt, which the driver binds to a port of its own,
+; acknowledging the device's interrupt status and then the kernel's; an
+; interrupt for a command already seen used is ended like any other. A
+; command the device never uses leaves the driver waiting.
 
-; Sends req, with room for resp_len bytes of response, and waits for the
-; device to answer it.
-(def submit ((g Gpu) (req (list int)) (resp_len int)) Answer
+; Where a request is to go: the driver, once there is room for it, and
+; where in the queue's memory to write it; or why it never can.
+(data Room (Room Gpu int) (NoRoom (list int)))
+
+; Room for a request of len bytes, waited for while commands in flight
+; hold it.
+(def gpu_room ((g Gpu) (len int)) Room
+  (if (fl_fits len (req_off) (req_end))
+      (gpu_room_wait g len)
+      (NoRoom "a request is longer than the control queue holds")))
+
+; gpu_room's wait: an interrupt at a time until the room is there.
+(def gpu_room_wait ((g Gpu) (len int)) Room
   (match g
-    ((Gpu d t q addrs n ip)
-      (let w (put_bytes q (req_off) req)
-        (queued g (length req) resp_len)))))
+    ((Gpu d t q addrs f ip c)
+      (let off (fl_room f len (req_off) (req_end))
+        (if (ge off 0)
+            (Room g off)
+            (match (gpu_waited g)
+              ((Some g2) (gpu_room_wait g2 len))
+              ((None) (NoRoom (gpu_port_gone)))))))))
 
-; The request of len bytes already at req_off made: its descriptors
-; written and the device told, then its answer waited for.
-(def queued ((g Gpu) (len int) (resp_len int)) Answer
+; Why the driver cannot wait for the device: its interrupt port is gone.
+(def gpu_port_gone () (list int) "the virtio-gpu's interrupt port is gone")
+
+; The command whose request of len bytes is at off made: its chain's
+; descriptors written from the next head, its response's slot last, and
+; its head put in the available ring, the device not yet told; what it
+; is, and the response type that means it is done, kept for its answer.
+(def gpu_offer ((g Gpu) (off int) (len int) (what (list int)) (want int) (resp_len int)) Gpu
   (match g
-    ((Gpu d t q addrs n ip)
-      (let ds (put_bytes q 0 (descriptors (req_off) len addrs (resp_off) resp_len))
-        (let n2 (virtq_offer d t 0 q (avail_off) (ring_size) n 0)
-          (answered (Gpu d t q addrs n2 ip)))))))
+    ((Gpu d t q addrs f ip c)
+      (let h (fl_next_head f)
+        (let runs (rev (virtq_page_runs addrs off len (nil VirtqRun)))
+          (let w (put_descs q h (chain_descs h runs (device_at addrs (resp_at h)) resp_len))
+            (let s (virtq_slot q (avail_off) (ring_size) (fl_made f) h)
+              (Gpu d t q addrs (fl_offered f off len (add (length runs) 1) what want) ip c))))))))
 
-; Waits for the used ring's index to reach the requests made, by the
-; transport's interrupt, then reads the response's type.
-(def answered ((g Gpu)) Answer
+; The descriptors of a chain from descriptor h: one for each of runs, a
+; request's, each chained to the next round the ring, then its
+; response's, resp_len bytes at resp, which the device writes.
+(def chain_descs ((h int) (runs (list VirtqRun)) (resp int) (resp_len int)) (list (list int))
+  (if (is_empty runs)
+      (cons (descriptor resp resp_len (desc_write) 0) (nil (list int)))
+      (match (head runs)
+        ((VirtqRun a n)
+          (cons (descriptor a n (desc_next) (mod (add h 1) (ring_size))) (chain_descs (add h 1) (tail runs) resp resp_len))))))
+
+; Each of ds written to the descriptor table from h, round the ring.
+(def put_descs ((q IoDevice) (h int) (ds (list (list int)))) int
+  (if (is_empty ds)
+      0
+      (let w (put_bytes q (mul 16 (mod h (ring_size))) (head ds))
+        (put_descs q (add h 1) (tail ds)))))
+
+; The device told of every command made, if any is new to it.
+(def gpu_kick ((g Gpu)) Gpu
   (match g
-    ((Gpu d t q addrs n ip)
-      (if (gpu_wait d t ip q (used_off) n)
-          (Answer (device_read32 q (resp_off)) g)
-          (NoAnswer "the virtio-gpu's interrupt port is gone")))))
+    ((Gpu d t q addrs f ip c)
+      (if (eq (fl_told f) (fl_made f))
+          g
+          (let p (virtq_publish d t 0 q (avail_off) (fl_made f))
+            (Gpu d t q addrs (fl_all_told f) ip c))))))
 
-; Whether the used ring at used_off of q has reached n, the requests
-; made: looked at, and while it has not, the next interrupt of transport
-; t waited for on port ip, the device's status and the kernel's
-; interrupt acknowledged, and looked at again. An interrupt for a
-; request already seen used may be waiting, and is ended like any other.
-; A request the device never uses leaves the driver waiting.
-(def gpu_wait ((d IoDevice) (t int) (ip int) (q IoDevice) (used_off int) (n int)) bool
-  (let b (barrier)
-    (if (eq (virtq_used_index q used_off) (bit_and n 65535))
-        (let b2 (barrier) true)
+; The device told of every command made, then its next interrupt waited
+; for and ended, and what it has used since read (gpu_collected); none if
+; the port is gone.
+(def gpu_waited ((g Gpu)) (Option Gpu)
+  (let g2 (gpu_kick g)
+    (match g2
+      ((Gpu d t q addrs f ip c)
         (match (port_receive ip)
-          ((RecvFailed) false)
-          ((Message from mb)
-            (let e (if (is_irq_notice (Message from mb) (transport_irq t)) (gpu_interrupted d t) 0)
-              (gpu_wait d t ip q used_off n)))))))
+          ((RecvFailed) ((None Gpu)))
+          ((Message from mb) (Some (gpu_irq g2 (Message from mb)))))))))
+
+; m, a message on the interrupt port: the interrupt ended, if it is the
+; transport's, and what the device has used read.
+(def gpu_irq ((g Gpu) (m Message)) Gpu
+  (match g
+    ((Gpu d t q addrs f ip c)
+      (let e (if (is_irq_notice m (transport_irq t)) (gpu_interrupted d t) 0)
+        (gpu_collected g)))))
 
 ; Transport t's interrupt ended: the device's status acknowledged, then
 ; the kernel's.
@@ -607,34 +662,137 @@
       (let br (barrier)
         (match (irq_ack (transport_irq t)) ((IrqAcked) 0) ((IrqNotPending) 0))))))
 
-; The response's u32 at off, from the queue's memory.
-(def resp_word ((g Gpu) (off int)) int
-  (match g ((Gpu d t q addrs n ip) (device_read32 q (add (resp_off) off)))))
+; What the device has used since last read: each new entry of the
+; control queue's used ring, with the response type in its chain's slot,
+; and the cursor queue's index; then every reply that no longer waits
+; sent.
+(def gpu_collected ((g Gpu)) Gpu
+  (match g
+    ((Gpu d t q addrs f ip c)
+      (match c
+        ((Curq cq ca)
+          (let b (barrier)
+            (let f2 (used_read q f (fl_unread f (virtq_used_index q (used_off))))
+              (let f3 (fl_cursor_index f2 (virtq_used_index cq (cursor_used)))
+                (let b2 (barrier)
+                  (gpu_answer (Gpu d t q addrs f3 ip c)))))))))))
 
-; Sends req, and goes on with the driver if the answer is want.
+; The next n used entries of the control queue read into f: each
+; chain's first descriptor, and the response type in its slot.
+(def used_read ((q IoDevice) (f Flight) (n int)) Flight
+  (if (le n 0)
+      f
+      (let h (mod (virtq_used_id q (used_off) (ring_size) (fl_used f)) (ring_size))
+        (used_read q (fl_answered f h (device_read32 q (resp_at h))) (sub n 1)))))
+
+; Every reply that no longer waits sent, in order.
+(def gpu_answer ((g Gpu)) Gpu
+  (match g
+    ((Gpu d t q addrs f ip c)
+      (match (fl_due f)
+        ((FlDue f2 as) (let s (answers_sent as) (Gpu d t q addrs f2 ip c)))))))
+
+; Each of as sent to its request's reply port: 0.
+(def answers_sent ((as (list FlAnswer))) int
+  (if (is_empty as)
+      0
+      (match (head as) ((FlAnswer mb r fr) (let s (msg_answer mb r) (answers_sent (tail as)))))))
+
+; The reply to the request whose message is mb registered, to go once
+; every command made before it is answered, the device told of them,
+; and every reply due sent.
+(def gpu_replied ((g Gpu) (mb bytes) (reply (list int))) Gpu
+  (match g
+    ((Gpu d t q addrs f ip c)
+      (gpu_answer (gpu_kick (Gpu d t q addrs (fl_reply f mb reply false) ip c))))))
+
+; Every command in flight, on both queues, answered: the driver then, or
+; none if the interrupt port is gone.
+(def gpu_drained ((g Gpu)) (Option Gpu)
+  (match g
+    ((Gpu d t q addrs f ip c)
+      (if (fl_busy f)
+          (match (gpu_waited g) ((Some g2) (gpu_drained g2)) ((None) ((None Gpu))))
+          (Some g)))))
+
+; The outcome of a request asked and waited for: its response's type,
+; where in the queue's memory its response is, and the driver after it.
+(data Answer (Answer int int Gpu) (NoAnswer (list int)))
+
+; req made, with room for resp_len bytes of response, and every command
+; in flight waited for; any failure of one no reply waits on forgotten,
+; as the response is read here.
+(def submit ((g Gpu) (req (list int)) (resp_len int)) Answer
+  (match (gpu_room g (length req))
+    ((NoRoom why) (NoAnswer why))
+    ((Room g2 off)
+      (match g2
+        ((Gpu d t q addrs f ip c)
+          (let h (fl_next_head f)
+            (let w (put_bytes q off req)
+              (match (gpu_drained (gpu_offer g2 off (length req) "a request" -1 resp_len))
+                ((None) (NoAnswer (gpu_port_gone)))
+                ((Some g3) (Answer (device_read32 q (resp_at h)) (resp_at h) (gpu_fault_cleared g3)))))))))))
+
+; g with no failure kept for the next reply.
+(def gpu_fault_cleared ((g Gpu)) Gpu
+  (match g ((Gpu d t q addrs f ip c) (Gpu d t q addrs (fl_fault_cleared f) ip c))))
+
+; The u32 at off of the response at slot, from the queue's memory.
+(def resp_word ((g Gpu) (slot int) (off int)) int
+  (match g ((Gpu d t q addrs f ip c) (device_read32 q (add slot off)))))
+
+; A command made: the driver after it; or why it could not be.
 (data Commanded (Commanded Gpu) (NotCommanded (list int)))
 
+; req made as a command, what it is, the answer want meaning it is done:
+; put in the queue, once there is room for it, and not waited for. If it
+; is answered otherwise, the reply it is before is an error.
 (def send ((g Gpu) (what (list int)) (req (list int)) (want int)) Commanded
-  (sent_as what (submit g req 24) want))
+  (match (gpu_room g (length req))
+    ((NoRoom why) (NotCommanded why))
+    ((Room g2 off)
+      (match g2
+        ((Gpu d t q addrs f ip c)
+          (let w (put_bytes q off req)
+            (Commanded (gpu_offer g2 off (length req) what want 24))))))))
 
-(def sent_as ((what (list int)) (a Answer) (want int)) Commanded
-  (match a
-    ((NoAnswer why) (NotCommanded why))
-    ((Answer type g2)
-      (if (eq type want)
-          (Commanded g2)
-          (NotCommanded (append what (append " answered 0x" (hex_digits type 4))))))))
+; What sending a command and waiting for every one in flight came to:
+; the driver, and why one failed, empty if none did.
+(data Settled (Settled Gpu (list int)))
+
+; req sent as send does, then every command in flight waited for: as the
+; driver starts, when what is answered decides what it does next.
+(def send_now ((g Gpu) (what (list int)) (req (list int)) (want int)) Settled
+  (match (send g what req want)
+    ((NotCommanded why) (Settled g why))
+    ((Commanded g2) (gpu_settled g2))))
+
+; Every command in flight waited for, and why one failed, which no reply
+; waits on, then forgotten.
+(def gpu_settled ((g Gpu)) Settled
+  (match (gpu_drained g)
+    ((None) (Settled g (gpu_port_gone)))
+    ((Some g2) (match g2 ((Gpu d t q addrs f ip c) (Settled (gpu_fault_cleared g2) (fl_fault f)))))))
+
+; A Settled as a Commanded: a failure is NotCommanded.
+(def settled_cmd ((s Settled)) Commanded
+  (match s ((Settled g why) (if (is_empty why) (Commanded g) (NotCommanded why)))))
 
 ; attach_backing's request for runs, n of them, sent: written into the
 ; queue's memory as it goes, four words a run, as attach_backing lays
 ; them out, rather than made as a list of bytes first, which for a
 ; screen of 2500 runs is 40 KB, and then written a byte at a time.
 (def send_attach ((g Gpu) (id int) (runs (list VirtqRun)) (n int)) Commanded
-  (match g
-    ((Gpu d t q addrs k ip)
-      (let hd (put_bytes q (req_off) (append (header (cmd_resource_attach_backing)) (append (u32_le id) (u32_le n))))
-        (let rs (put_runs q (add (req_off) 32) runs)
-          (sent_as "attach_backing" (queued g (add 32 (mul 16 n)) 24) (resp_ok_nodata)))))))
+  (let len (add 32 (mul 16 n))
+    (match (gpu_room g len)
+      ((NoRoom why) (NotCommanded why))
+      ((Room g2 off)
+        (match g2
+          ((Gpu d t q addrs f ip c)
+            (let hd (put_bytes q off (append (header (cmd_resource_attach_backing)) (append (u32_le id) (u32_le n))))
+              (let rs (put_runs q (add off 32) runs)
+                (Commanded (gpu_offer g2 off len "attach_backing" (resp_ok_nodata) 24))))))))))
 
 (def put_runs ((q IoDevice) (off int) (runs (list VirtqRun))) int
   (if (is_empty runs)
@@ -650,60 +808,66 @@
 (def put_words ((q IoDevice) (off int) (ws (list int))) int
   (if (is_empty ws) 0 (let w (device_write32 q off (head ws)) (put_words q (add off 4) (tail ws)))))
 
-; Sends a cursor request, which has no response, and waits for the device
-; to take it.
-(def cursor_send ((g Gpu) (c Curq) (req (list int))) Curq
+; A cursor request, which has no response, put in the cursor queue once
+; it has room, and the device told at once; not waited for. The device
+; uses the cursor queue's entries in order, so its used ring's index
+; says how many are done.
+(def cursor_send ((g Gpu) (req (list int))) Gpu
   (match g
-    ((Gpu d t q addrs n ip)
-      (match c
-        ((Curq cq ca cn)
-          (let w (put_bytes cq (cursor_req) req)
-            (let ds (put_bytes cq 0 (descriptor (add ca (cursor_req)) (length req) 0 0))
-              (let cn2 (virtq_offer d t 1 cq (cursor_avail) (cursor_ring) cn 0)
-                (let k (gpu_wait d t ip cq (cursor_used) cn2)
-                  (Curq cq ca cn2))))))))))
+    ((Gpu d t q addrs f ip c)
+      (if (not (fl_cursor_room f))
+          (match (gpu_waited g) ((Some g2) (cursor_send g2 req)) ((None) g))
+          (match c
+            ((Curq cq ca)
+              (let i (mod (fl_cursor_made f) (cursor_ring))
+                (let w (put_bytes cq (cursor_slot i) req)
+                  (let ds (put_bytes cq (mul 16 i) (descriptor (add ca (cursor_slot i)) (length req) 0 0))
+                    (let n2 (virtq_offer d t 1 cq (cursor_avail) (cursor_ring) (fl_cursor_made f) i)
+                      (Gpu d t q addrs (fl_cursor_offered f) ip c)))))))))))
 
 ; ------------------------------------------------------------- the screen
 
-(def display_info ((g Gpu) (c Curq) (zero int)) int
+; The display's modes asked for, and the screen made in the first's,
+; with virgl if the device offers it.
+(def display_info ((g Gpu) (zero int)) int
   (match (submit g (get_display_info) (display_info_len))
     ((NoAnswer why) (complain why))
-    ((Answer type g2)
+    ((Answer type slot g2)
       (if (not (eq type (resp_ok_display_info)))
           (complain (append "display info answered 0x" (hex_digits type 4)))
-          (let w (resp_word g2 32)                    ; the first mode's width, then height
-            (let h (resp_word g2 36)
+          (let w (resp_word g2 slot 32)                    ; the first mode's width, then height
+            (let h (resp_word g2 slot 36)
               (if (if (lt w 1) true (lt h 1))
                   (complain "scanout 0 has no mode")
-                  (if (virgl_offered g2) (gl_create g2 c zero w h) (create g2 c zero w h)))))))))
+                  (if (virgl_offered g2) (gl_create g2 zero w h) (create g2 zero w h)))))))))
 
 ; Whether the device offers virgl, which the driver asked for in
 ; negotiating, so that it composes the screen on the host's GPU (gl.l0).
 (def virgl_offered ((g Gpu)) bool
-  (match g ((Gpu d t q addrs n ip) (not (eq (bit_and (device_features d t 0) (feature_virgl)) 0)))))
+  (match g ((Gpu d t q addrs f ip c) (not (eq (bit_and (device_features d t 0) (feature_virgl)) 0)))))
 
 ; The screen, resource 1, black, shown on scanout 0; then display served.
 ; A scanout must have a backing, so until layers come it is the zero page,
 ; over and over.
-(def create ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
+(def create ((g Gpu) (zero int) (w int) (h int)) int
   (match (send g "resource_create_2d" (resource_create_2d (screen_res) (format_b8g8r8x8) w h) (resp_ok_nodata))
     ((NotCommanded why) (complain why))
     ((Commanded g2)
       (match (send g2 "attach_backing" (attach_backing (screen_res) (backing_runs w h (nil Layer) ((MapEmpty int Buffer)) zero)) (resp_ok_nodata))
         ((NotCommanded why) (complain why))
-        ((Commanded g3) (scanned_out g3 c zero w h))))))
+        ((Commanded g3) (scanned_out g3 zero w h))))))
 
-(def scanned_out ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
-  (match (send g "set_scanout" (set_scanout w h) (resp_ok_nodata))
+(def scanned_out ((g Gpu) (zero int) (w int) (h int)) int
+  (match (settled_cmd (send_now g "set_scanout" (set_scanout w h) (resp_ok_nodata)))
     ((NotCommanded why) (complain why))
-    ((Commanded g2) (start_serving (Drv g2 c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))))
+    ((Commanded g2) (start_serving (Drv g2 w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))))
 
 ; The screen's first frame, as soon as its mode is set: the wallpaper,
 ; stacked alone, if there is one; else black. Then display served on
 ; port.
 (def first_frame ((v Drv) (port int)) int
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (wall_buffer w h (scale_of w h (boot_args)))
         ((None) (black_frame v port))
         ((Some b)
@@ -717,10 +881,10 @@
 ; The screen black, the zero page over and over, shown; then served.
 (def black_frame ((v Drv) (port int)) int
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (present g w h (Rect 0 0 w h))
         ((NotCommanded why) (complain why))
-        ((Commanded g2) (serving (Drv g2 c w h bufs layers attached cur zero rows) port))))))
+        ((Commanded g2) (serving (Drv g2 w h bufs layers attached cur zero rows) port))))))
 
 ; ------------------------------------------------------------- wallpaper
 
@@ -775,31 +939,35 @@
   (if (wall_shown bufs) (not (screen_covered ls bufs w h)) false))
 
 ; After a restack r that left the wallpaper off the stack, its buffer
-; dropped and its pages given up; r as it is if it failed or kept it.
+; dropped and its pages given up, once no command in flight can read
+; them; r as it is if it failed or kept it.
 (def wall_dropped ((r (Served Drv))) (Served Drv)
   (match r
     ((Served v reply)
       (match v
-        ((Drv g c w h bufs layers attached cur zero rows)
+        ((Drv g w h bufs layers attached cur zero rows)
           (if (if (eq reply "ok") (not (in_layers layers (wall_id))) false)
               (match (map_get bufs (wall_id))
                 ((None) r)
                 ((Some b)
                   (match b
                     ((Buffer bw bh sd addrs va cs)
-                      (let u (shm_unmap_count va (array_len addrs))
-                        (Served (Drv g c w h (map_remove bufs (wall_id)) layers attached cur zero rows) reply))))))
+                      (match (gpu_drained g)
+                        ((None) (served_error v (gpu_port_gone)))
+                        ((Some g2)
+                          (let u (shm_unmap_count va (array_len addrs))
+                            (Served (Drv g2 w h (map_remove bufs (wall_id)) layers attached cur zero rows) reply))))))))
               r))))))
 
 ; The pointer: whether its image is set, where it is, its hot spot, and
 ; the buffer its image is, -1 for none.
 (data Cursor (Cursor bool int int int int int))
 
-; The driver: the control queue, the cursor queue, the screen's width and
-; height, the buffers shared with it, the layers, whether the screen has
-; a backing, the pointer, the zero page, and each row of the screen as
-; the backing has it, or none.
-(data Drv (Drv Gpu Curq int int (Map int Buffer) (list Layer) bool Cursor int (array Row)))
+; The driver: the queues, the screen's width and height, the buffers
+; shared with it, the layers, whether the screen has a backing, the
+; pointer, the zero page, and each row of the screen as the backing has
+; it, or none.
+(data Drv (Drv Gpu int int (Map int Buffer) (list Layer) bool Cursor int (array Row)))
 
 ; ------------------------------------------------------------- serving
 
@@ -817,25 +985,52 @@
 ; Says the screen, then serves it on port.
 (def serving ((v Drv) (port int)) int
   (let n (screen_said v false)
-    (serve v port)))
+    (serve_set v port false)))
 
 ; The screen_line for v, said as the driver starts serving it; host is
 ; whether the host's GPU composes it (gl.l0); 0.
 (def screen_said ((v Drv) (host bool)) int
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match g
-        ((Gpu d t q addrs reqs ip)
+        ((Gpu d t q addrs f ip c)
           (info_as "virtio-gpu" (screen_line t w h (scale_of w h (boot_args)) host)))))))
 
-(def serve ((v Drv) (port int)) int
-  (match (port_receive port)
-    ((RecvFailed) (complain "lost its port"))
-    ((Message from mb)
-      (match (handle v (msg_text_from mb 4))
-        ((Served v2 reply)
-          (let r (msg_answer mb reply)
-            (serve v2 port)))))))
+; The driver's interrupt port.
+(def drv_irq_port ((v Drv)) int
+  (match v ((Drv g w h bufs layers attached cur zero rows) (match g ((Gpu d t q addrs f ip c) ip)))))
+
+; Serves port and the interrupt port as one set, in 3D if gl, the device
+; first told of the first frame's commands.
+(def serve_set ((v Drv) (port int) (gl bool)) int
+  (match (port_set (cons port (cons (drv_irq_port v) (nil int))))
+    ((PortSetMade) (serve (drv_with v (gpu_kick (drv_gpu v))) port gl))
+    ((PortSetNotYours) (complain "cannot wait on its ports as a set"))
+    ((PortSetSize) (complain "cannot wait on its ports as a set"))))
+
+; Each request on port handled as it comes, its commands put in flight,
+; and its reply sent once they are answered; each interrupt ended, and
+; the replies it lets go sent.
+(def serve ((v Drv) (port int) (gl bool)) int
+  (match (port_receive_set)
+    ((SetRecvFailed) (complain "lost its ports"))
+    ((SetMessage p m)
+      (match m
+        ((RecvFailed) (complain "lost its port"))
+        ((Message from mb)
+          (if (eq p port)
+              (serve (drv_replied (if gl (gl_handle v (msg_text_from mb 4)) (handle v (msg_text_from mb 4))) mb) port gl)
+              (serve (drv_with v (gpu_irq (drv_gpu v) m)) port gl)))))))
+
+; The driver's queues, and v with g as them.
+(def drv_gpu ((v Drv)) Gpu (match v ((Drv g w h bufs layers attached cur zero rows) g)))
+(def drv_with ((v Drv) (g Gpu)) Drv
+  (match v ((Drv old w h bufs layers attached cur zero rows) (Drv g w h bufs layers attached cur zero rows))))
+
+; A request served, s, whose message was mb: its reply registered, to go
+; once its commands are answered.
+(def drv_replied ((s (Served Drv)) (mb bytes)) Drv
+  (match s ((Served v reply) (drv_with v (gpu_replied (drv_gpu v) mb reply)))))
 
 ; A request's body, its op and then its numbers, answered.
 (def handle ((v Drv) (body (list int))) (Served Drv)
@@ -859,7 +1054,7 @@
 
 (def info ((v Drv)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (Served v (info_reply w h (scale_of w h (boot_args)))))))
 
 ; buffer ID W H VA [PAGES [STRIDE]]: the w by h pixels a client shared,
@@ -893,16 +1088,16 @@
 ; its backing reads the old one's pages, or its corners have changed.
 (def put_buffer ((v Drv) (id int) (b Buffer)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (if (if attached (in_layers layers id) false)
           (restacked v layers (map_put bufs id b))
-          (served_ok (Drv g c w h (map_put bufs id b) layers attached cur zero rows))))))
+          (served_ok (Drv g w h (map_put bufs id b) layers attached cur zero rows))))))
 
 ; shape ID TL TR BL BR: the buffer's corners rounded to those radii, each
 ; from 0, square, up to half the buffer's width and height.
 (def shaped ((v Drv) (id int) (cs Corners)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (map_get bufs id)
         ((None) (served_error v (append "no buffer " (digits id))))
         ((Some b)
@@ -917,7 +1112,7 @@
 ; on the screen or is the pointer's, since the device still reads it.
 (def forgot ((v Drv) (id int)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (map_get bufs id)
         ((None) (served_ok v))
         ((Some b)
@@ -926,7 +1121,7 @@
               (match b
                 ((Buffer bw bh sd addrs va cs)
                   (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
-                    (served_ok (Drv g c w h (map_remove bufs id) layers attached cur zero rows)))))))))))
+                    (served_ok (Drv g w h (map_remove bufs id) layers attached cur zero rows)))))))))))
 
 (def cursor_buffer ((cur Cursor)) int
   (match cur ((Cursor set px py hx hy id) id)))
@@ -935,7 +1130,7 @@
 ; wallpaper under them until one covers the screen, when it leaves.
 (def stacked ((v Drv) (ls (list Layer)) ) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (wall_dropped (restacked v (wall_under ls (wall_kept ls bufs w h)) bufs)))))
 
 ; The screen rebuilt from layers ls over buffers nbufs: its backing
@@ -945,12 +1140,12 @@
 ; the rest are the backing's already.
 (def restacked ((v Drv) (ls (list Layer)) (nbufs (Map int Buffer))) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (if (if attached (if (not (is_empty layers)) (eq (array_len rows) h) false) false)
                  (rows_restacked (Restack w h layers bufs ls nbufs (changed_ids ls bufs nbufs (nil int))) zero rows)
                  (Restacked (screen_rows w h ls nbufs zero) (cons (Rect 0 0 w h) (nil Rect))))
         ((Restacked rows2 dmg)
-          (backed (Drv g c w h bufs layers attached cur zero (no_rows)) ls nbufs rows2 dmg))))))
+          (backed (Drv g w h bufs layers attached cur zero (no_rows)) ls nbufs rows2 dmg))))))
 
 ; The backing rows2 make attached in place of the old one, and dmg shown:
 ; the driver then has layers ls over nbufs, and rows2. If it cannot be,
@@ -958,7 +1153,7 @@
 ; every row again.
 (def backed ((v Drv) (ls (list Layer)) (nbufs (Map int Buffer)) (rows2 (array Row)) (dmg (list Rect))) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero none)
+    ((Drv g w h bufs layers attached cur zero none)
       (let runs (rows_runs rows2)
         (let n (length runs)
           (if (gt n (max_runs))
@@ -967,15 +1162,15 @@
                 ((NotCommanded why) (served_error v why))
                 ((Commanded g2)
                   (match (send_attach g2 (screen_res) runs n)
-                    ((NotCommanded why) (served_error (Drv g2 c w h bufs layers false cur zero none) why))
-                    ((Commanded g3) (shown_boxes (Drv g3 c w h nbufs ls true cur zero rows2) dmg)))))))))))
+                    ((NotCommanded why) (served_error (Drv g2 w h bufs layers false cur zero none) why))
+                    ((Commanded g3) (shown_boxes (Drv g3 w h nbufs ls true cur zero rows2) dmg)))))))))))
 
 ; damage ID X Y W H ...: each rectangle of its buffer shown wherever it
 ; is on the screen, boxes that overlap shown as one; nothing shown if a
 ; buffer is unknown.
 (def damaged ((v Drv) (ns (list int)) (acc (list Rect))) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (if (is_empty ns)
           (if attached (shown_boxes v (rect_merge (clipped acc w h (nil Rect)))) (served_ok v))
           (match (map_get bufs (head ns))
@@ -991,10 +1186,10 @@
   (if (is_empty boxes)
       (served_ok v)
       (match v
-        ((Drv g c w h bufs layers attached cur zero rows)
+        ((Drv g w h bufs layers attached cur zero rows)
           (match (present g w h (head boxes))
             ((NotCommanded why) (served_error v why))
-            ((Commanded g2) (shown_boxes (Drv g2 c w h bufs layers attached cur zero rows) (tail boxes))))))))
+            ((Commanded g2) (shown_boxes (Drv g2 w h bufs layers attached cur zero rows) (tail boxes))))))))
 
 ; Has the device copy part of the screen's backing and show it.
 (def present ((g Gpu) (w int) (h int) (d Rect)) Commanded
@@ -1010,10 +1205,12 @@
 
 ; ---------------------------------------------------------------- pointer
 
-; cursor ID HX HY: the pointer's image, 64 by 64, as resource 2.
+; cursor ID HX HY: the pointer's image, 64 by 64, as resource 2, which
+; the cursor queue's update names only once the control queue has the
+; image: the two queues are not answered in any order of each other's.
 (def pointer_image ((v Drv) (id int) (hx int) (hy int)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (map_get bufs id)
         ((None) (served_error v (append "no buffer " (digits id))))
         ((Some b)
@@ -1027,7 +1224,7 @@
   (match cur
     ((Cursor set px py ohx ohy oid)
       (match v
-        ((Drv g c w h bufs layers attached old zero rows)
+        ((Drv g w h bufs layers attached old zero rows)
           (match (if set (send g "detach_backing" (detach_backing (cursor_res)) (resp_ok_nodata))
                          (send g "resource_create_2d" (resource_create_2d (cursor_res) (format_b8g8r8a8) (cursor_size) (cursor_size)) (resp_ok_nodata)))
             ((NotCommanded why) (served_error v why))
@@ -1039,14 +1236,17 @@
                                (transfer_to_host_2d_at (cursor_res) 0 0 (cursor_size) (cursor_size) 0) (resp_ok_nodata))
                     ((NotCommanded why) (served_error v why))
                     ((Commanded g4)
-                      (served_ok (Drv g4 (cursor_send g4 c (cursor_cmd (cmd_update_cursor) px py hx hy))
-                               w h bufs layers attached (Cursor true px py hx hy id) zero rows)))))))))))))
+                      (match (gpu_drained g4)
+                        ((None) (served_error v (gpu_port_gone)))
+                        ((Some g5)
+                          (served_ok (Drv (cursor_send g5 (cursor_cmd (cmd_update_cursor) px py hx hy))
+                                          w h bufs layers attached (Cursor true px py hx hy id) zero rows)))))))))))))))
 
 ; move X Y: the pointer there.
 (def moved ((v Drv) (x int) (y int)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match cur
         ((Cursor set px py hx hy id)
-          (served_ok (Drv g (if set (cursor_send g c (cursor_cmd (cmd_move_cursor) x y hx hy)) c)
+          (served_ok (Drv (if set (cursor_send g (cursor_cmd (cmd_move_cursor) x y hx hy)) g)
                    w h bufs layers attached (Cursor set x y hx hy id) zero rows)))))))

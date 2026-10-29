@@ -55,13 +55,17 @@
 ; The screen in 3D: a context, the screen as texture 1, scanned out, and
 ; the black texture, then the driver serving. If the device gives no
 ; context, 2D mode instead.
-(def gl_create ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
-  (match (send g "ctx_create" (ctx_create (virgl_ctx) "l0s") (resp_ok_nodata))
-    ((NotCommanded why) (create g c zero w h))
-    ((Commanded g2)
-      (match (gl_screen g2 zero w h)
-        ((NotCommanded why) (complain why))
-        ((Commanded g3) (gl_serve g3 c zero w h))))))
+(def gl_create ((g Gpu) (zero int) (w int) (h int)) int
+  (match (send_now g "ctx_create" (ctx_create (virgl_ctx) "l0s") (resp_ok_nodata))
+    ((Settled g2 why)
+      (if (not (is_empty why))
+          (create g2 zero w h)
+          (match (gl_screen g2 zero w h)
+            ((NotCommanded why2) (complain why2))
+            ((Commanded g3)
+              (match (settled_cmd (gpu_settled g3))
+                ((NotCommanded why3) (complain why3))
+                ((Commanded g4) (gl_serve g4 zero w h)))))))))
 
 ; The screen, and the black texture, which is w wide and as many rows as
 ; compose.l0 copies from at once, backed by the zero page, over and over.
@@ -76,14 +80,14 @@
         ((Commanded g3) (send g3 "set_scanout" (set_scanout w h) (resp_ok_nodata)))))))
 
 ; The driver in 3D, served.
-(def gl_serve ((g Gpu) (c Curq) (zero int) (w int) (h int)) int
-  (gl_start (Drv g c w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))
+(def gl_serve ((g Gpu) (zero int) (w int) (h int)) int
+  (gl_start (Drv g w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))
 
 ; The wallpaper, as 2D mode's first_frame has it, made a texture and
 ; composed alone; black if there is none, or it cannot be.
 (def gl_first ((v Drv)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (wall_buffer w h (scale_of w h (boot_args)))
         ((None) (gl_show v (cons (Rect 0 0 w h) (nil Rect))))
         ((Some b)
@@ -104,19 +108,9 @@
             ((Served v2 reply)
               (if (eq reply "ok")
                   (let n (screen_said v2 true)
-                    (gl_loop v2 port))
+                    (serve_set v2 port true))
                   (complain reply))))
           (complain r)))))
-
-; Answers each request on port, as serve does in 2D mode.
-(def gl_loop ((v Drv) (port int)) int
-  (match (port_receive port)
-    ((RecvFailed) (complain "lost its port"))
-    ((Message from mb)
-      (match (gl_handle v (msg_text_from mb 4))
-        ((Served v2 reply)
-          (let r (msg_answer mb reply)
-            (gl_loop v2 port)))))))
 
 ; A request's body, its op and then its numbers, answered.
 (def gl_handle ((v Drv) (body (list int))) (Served Drv)
@@ -160,20 +154,20 @@
 ; made and filled, and the screen composed again if it shows id.
 (def gl_put_buffer ((v Drv) (id int) (b Buffer)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (gl_drop g bufs id)
         ((NotCommanded why) (served_error v why))
         ((Commanded g2)
           (match b
             ((Buffer bw bh sd addrs va cs)
               (match (gl_texture g2 (buffer_res id) sd bh (bind_texture) (pages_runs addrs))
-                ((NotCommanded why) (served_error (Drv g2 c w h (map_remove bufs id) layers attached cur zero rows) why))
-                ((Commanded g3) (gl_changed (Drv g3 c w h (map_put bufs id b) layers attached cur zero rows) id))))))))))
+                ((NotCommanded why) (served_error (Drv g2 w h (map_remove bufs id) layers attached cur zero rows) why))
+                ((Commanded g3) (gl_changed (Drv g3 w h (map_put bufs id b) layers attached cur zero rows) id))))))))))
 
 ; The screen composed again, if it shows buffer id; else v.
 (def gl_changed ((v Drv) (id int)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (if (in_layers layers id)
           (gl_show v (cons (Rect 0 0 w h) (nil Rect)))
           (served_ok v)))))
@@ -183,7 +177,7 @@
 ; Refused while it is on the screen or is the pointer's.
 (def gl_forgot ((v Drv) (id int)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (map_get bufs id)
         ((None) (served_ok v))
         ((Some b)
@@ -195,15 +189,15 @@
                   (match b
                     ((Buffer bw bh sd addrs va cs)
                       (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
-                        (served_ok (Drv g2 c w h (map_remove bufs id) layers attached cur zero rows)))))))))))))
+                        (served_ok (Drv g2 w h (map_remove bufs id) layers attached cur zero rows)))))))))))))
 
 ; layers ID X Y TOP ...: the screen composed from new layers, the
 ; wallpaper under them until one covers the screen, when it leaves.
 (def gl_stacked ((v Drv) (ls (list Layer))) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (let ls2 (wall_under ls (wall_kept ls bufs w h))
-        (gl_wall_dropped (gl_show (Drv g c w h bufs ls2 attached cur zero rows) (cons (Rect 0 0 w h) (nil Rect))))))))
+        (gl_wall_dropped (gl_show (Drv g w h bufs ls2 attached cur zero rows) (cons (Rect 0 0 w h) (nil Rect))))))))
 
 ; After composing without the wallpaper, its texture and its pages
 ; given up, as 2D mode's wall_dropped does; r as it is otherwise.
@@ -211,25 +205,25 @@
   (match r
     ((Served v reply)
       (match v
-        ((Drv g c w h bufs layers attached cur zero rows)
+        ((Drv g w h bufs layers attached cur zero rows)
           (if (if (eq reply "ok") (if (wall_shown bufs) (not (in_layers layers (wall_id))) false) false)
               (match (gl_unref g (buffer_res (wall_id)))
                 ((NotCommanded why) r)
-                ((Commanded g2) (wall_dropped (Served (Drv g2 c w h bufs layers attached cur zero rows) reply))))
+                ((Commanded g2) (wall_dropped (Served (Drv g2 w h bufs layers attached cur zero rows) reply))))
               r))))))
 
 ; shape ID TL TR BL BR: the buffer's corners rounded to those radii, and
 ; the screen composed again if it shows the buffer.
 (def gl_shaped ((v Drv) (id int) (cs Corners)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (map_get bufs id)
         ((None) (served_error v (append "no buffer " (digits id))))
         ((Some b)
           (match b
             ((Buffer bw bh sd addrs va old)
               (if (corners_fit cs bw bh)
-                  (gl_changed (Drv g c w h (map_put bufs id (Buffer bw bh sd addrs va cs)) layers attached cur zero rows) id)
+                  (gl_changed (Drv g w h (map_put bufs id (Buffer bw bh sd addrs va cs)) layers attached cur zero rows) id)
                   (served_error v "a corner's radius must be from 0 to half the buffer's width and height")))))))))
 
 ; damage ID X Y W H ...: each rectangle of its buffer sent to its texture,
@@ -237,7 +231,7 @@
 ; boxes that overlap as one.
 (def gl_damaged ((v Drv) (ns (list int)) (acc (list Rect))) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (if (is_empty ns)
           (gl_show v (rect_merge (clipped acc w h (nil Rect))))
           (match (map_get bufs (head ns))
@@ -252,7 +246,7 @@
 ; then the rest.
 (def gl_damaged_rect ((v Drv) (ns (list int)) (acc (list Rect)) (bw int) (bh int) (sd int)) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (let k (rect_clip (Rect (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)) (Rect 0 0 bw bh))
         (if (rect_empty k)
             (gl_damaged v (drop_n ns 5) acc)
@@ -262,7 +256,7 @@
                          (resp_ok_nodata))
               ((NotCommanded why) (served_error v why))
               ((Commanded g2)
-                (gl_damaged (Drv g2 c w h bufs layers attached cur zero rows) (drop_n ns 5)
+                (gl_damaged (Drv g2 w h bufs layers attached cur zero rows) (drop_n ns 5)
                   (rev_onto (damage_boxes layers (nth ns 0) bh (rect_x k) (rect_y k) (rect_w k) (rect_h k)) acc)))))))))
 
 ; ----------------------------------------------------------- composing
@@ -270,10 +264,10 @@
 ; The screen composed again within each of boxes, and flushed.
 (def gl_show ((v Drv) (boxes (list Rect))) (Served Drv)
   (match v
-    ((Drv g c w h bufs layers attached cur zero rows)
+    ((Drv g w h bufs layers attached cur zero rows)
       (match (gl_submit g (boxes_plan w h layers bufs boxes))
         ((NotCommanded why) (served_error v why))
-        ((Commanded g2) (gl_flush (Drv g2 c w h bufs layers attached cur zero rows) boxes))))))
+        ((Commanded g2) (gl_flush (Drv g2 w h bufs layers attached cur zero rows) boxes))))))
 
 ; The copies that compose each of boxes, one box's after another's.
 (def boxes_plan ((w int) (h int) (layers (list Layer)) (bufs (Map int Buffer)) (boxes (list Rect))) (list Copy)
@@ -296,23 +290,26 @@
 ; One submit_3d of the copies cs: its head and then their words, written
 ; into the request's pages.
 (def gl_submit_some ((g Gpu) (cs (list Copy))) Commanded
-  (match g
-    ((Gpu d t q addrs n ip)
-      (let ws (rev (copies_words_onto cs (nil int)))
-        (let size (mul 4 (length ws))
-          (let hd (put_bytes q (req_off) (submit_3d_head size))
-            (let body (put_words q (add (req_off) 32) ws)
-              (sent_as "submit_3d" (queued g (add 32 size) 24) (resp_ok_nodata)))))))))
+  (let ws (rev (copies_words_onto cs (nil int)))
+    (let size (mul 4 (length ws))
+      (match (gpu_room g (add 32 size))
+        ((NoRoom why) (NotCommanded why))
+        ((Room g2 off)
+          (match g2
+            ((Gpu d t q addrs f ip c)
+              (let hd (put_bytes q off (submit_3d_head size))
+                (let body (put_words q (add off 32) ws)
+                  (Commanded (gpu_offer g2 off (add 32 size) "submit_3d" (resp_ok_nodata) 24)))))))))))
 
 ; Each of boxes of the screen flushed to the display, if it is on it.
 (def gl_flush ((v Drv) (boxes (list Rect))) (Served Drv)
   (if (is_empty boxes)
       (served_ok v)
       (match v
-        ((Drv g c w h bufs layers attached cur zero rows)
+        ((Drv g w h bufs layers attached cur zero rows)
           (let k (rect_clip (head boxes) (Rect 0 0 w h))
             (if (rect_empty k)
                 (gl_flush v (tail boxes))
                 (match (send g "resource_flush" (resource_flush_at (rect_x k) (rect_y k) (rect_w k) (rect_h k)) (resp_ok_nodata))
                   ((NotCommanded why) (served_error v why))
-                  ((Commanded g2) (gl_flush (Drv g2 c w h bufs layers attached cur zero rows) (tail boxes))))))))))
+                  ((Commanded g2) (gl_flush (Drv g2 w h bufs layers attached cur zero rows) (tail boxes))))))))))

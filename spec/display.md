@@ -67,13 +67,31 @@ so that the guest copies no pixels at all:
 So `vt` scrolls by changing its window's `top`, with no copying anywhere,
 and draws only the new row.
 
-**The queue is waited for by its interrupt.** `virtio-gpu` binds its
-virtio-mmio transport's interrupt (`irq_bind`, 48 plus the transport) to
-a port of its own as it starts, and waits for a command to be used by
-receiving there, acknowledging the device's interrupt status and then
-the kernel's, rather than spinning on the used ring. An interrupt for a
-command already seen used is ended like any other. A command the device
-never uses leaves the driver waiting.
+**Commands in flight, waited for by the interrupt.** `virtio-gpu` binds
+its virtio-mmio transport's interrupt (`irq_bind`, 48 plus the
+transport) to a port of its own as it starts, and waits on it and
+`display` as one set (`port_set`). A request's commands go into the
+control queue as it is handled, each a chain of descriptors over its
+place in the request pages and a response slot of its own, as many at
+once as the ring's 64 descriptors and the 62 request pages have room for
+(`flight.l0`): a long request, a backing of thousands of runs, waits for
+the commands before it to free the pages it needs. The device is told
+of them once the request is handled, or when the driver must wait for
+room. The driver then takes the next request; its reply is sent once
+every command made before it is answered, so replies keep their
+requests' order, and one whose request made no command goes as soon as
+those before it have. Each interrupt is acknowledged, the device's
+status and then the kernel's, and the used ring read: the commands used
+are retired in the order they were made, whatever order the device
+used them in, and a command answered with other than it wants makes
+its request's reply an error. The cursor queue's commands are put in
+flight the same way, 16 at most, a `move`'s reply waiting for its
+command to be used; a new cursor image waits for the control queue's
+commands, which the cursor's update names, to be answered first. Before
+the driver gives up pages of its own, the wallpaper's, every command in
+flight is waited for. An interrupt for a command already seen used is
+ended like any other, and a command the device never uses leaves the
+driver waiting.
 
 **virtio-gpu's 3D mode.** If the device offers `VIRTIO_GPU_F_VIRGL`, as
 QEMU's `virtio-gpu-gl-device` does, the driver (`gl.l0`) composes the
