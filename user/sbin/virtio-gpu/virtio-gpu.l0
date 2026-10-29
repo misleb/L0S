@@ -498,7 +498,7 @@
     ((VirtioReady t2)
       (match (virtq_mem (queue_pages) "the queue")
         ((NoVirtqMem why) (complain why))
-        ((VirtqMem va q addrs) (with_cursor_queue (Gpu d t q addrs 0)))))))
+        ((VirtqMem va q addrs) (with_cursor_queue (Gpu d t q addrs 0 -1)))))))
 
 ; The control queue's memory: page 0 the ring, descriptors at 0, the
 ; available ring at 1024, the used ring at 2048; page 1 a response; the
@@ -516,9 +516,10 @@
 (def max_runs () int (div (sub (sub (mul (queue_pages) (page_size)) (req_off)) 32) 16))
 
 ; The driver: the transports' registers and the GPU's transport, the
-; queue's memory and where the device reaches each page of it, and how
-; many requests it has made.
-(data Gpu (Gpu IoDevice int IoDevice (array int) int))
+; queue's memory and where the device reaches each page of it, how
+; many requests it has made, and the port the transport's interrupt
+; comes to, -1 until it is bound.
+(data Gpu (Gpu IoDevice int IoDevice (array int) int int))
 
 ; The cursor queue, queue 1, in one page, as the control queue's first
 ; but of 16, with its request at 1024; and the zero page after it, black
@@ -535,15 +536,21 @@
     ((NoVirtqMem why) (complain why))
     ((VirtqMem va cq at) (ready_queues g (Curq cq (array_get at 0) 0) (array_get at 1)))))
 
+; Both queues started, the transport's interrupt bound to a port of the
+; driver's own, then the device told the driver is ready.
 (def ready_queues ((g Gpu) (c Curq) (zero int)) int
   (match g
-    ((Gpu d t q addrs n)
+    ((Gpu d t q addrs n old)
       (match c
         ((Curq cq ca cn)
           (let s (start_queue d t 0 (ring_size) (device_at addrs 0) (device_at addrs (avail_off)) (device_at addrs (used_off)))
             (let s1 (start_queue d t 1 (cursor_ring) ca (add ca (cursor_avail)) (add ca (cursor_used)))
-              (let o (driver_ok d t)
-                (display_info g c zero)))))))))
+              (let ip (port_new)
+                (let why (irq_bind_or_why (transport_irq t) ip)
+                  (if (not (is_empty why))
+                      (complain why)
+                      (let o (driver_ok d t)
+                        (display_info (Gpu d t q addrs n ip) c zero))))))))))))
 
 ; ------------------------------------------------------------- requests
 
@@ -554,7 +561,7 @@
 ; device to answer it.
 (def submit ((g Gpu) (req (list int)) (resp_len int)) Answer
   (match g
-    ((Gpu d t q addrs n)
+    ((Gpu d t q addrs n ip)
       (let w (put_bytes q (req_off) req)
         (queued g (length req) resp_len)))))
 
@@ -562,23 +569,47 @@
 ; written and the device told, then its answer waited for.
 (def queued ((g Gpu) (len int) (resp_len int)) Answer
   (match g
-    ((Gpu d t q addrs n)
+    ((Gpu d t q addrs n ip)
       (let ds (put_bytes q 0 (descriptors (req_off) len addrs (resp_off) resp_len))
         (let n2 (virtq_offer d t 0 q (avail_off) (ring_size) n 0)
-          (answered (Gpu d t q addrs n2) (clock_ns)))))))
+          (answered (Gpu d t q addrs n2 ip)))))))
 
-; Waits for the used ring's index to reach the requests made, as
-; virtq_wait does, then reads the response's type.
-(def answered ((g Gpu) (since int)) Answer
+; Waits for the used ring's index to reach the requests made, by the
+; transport's interrupt, then reads the response's type.
+(def answered ((g Gpu)) Answer
   (match g
-    ((Gpu d t q addrs n)
-      (if (virtq_wait q (used_off) n since)
+    ((Gpu d t q addrs n ip)
+      (if (gpu_wait d t ip q (used_off) n)
           (Answer (device_read32 q (resp_off)) g)
-          (NoAnswer "the virtio-gpu did not answer")))))
+          (NoAnswer "the virtio-gpu's interrupt port is gone")))))
+
+; Whether the used ring at used_off of q has reached n, the requests
+; made: looked at, and while it has not, the next interrupt of transport
+; t waited for on port ip, the device's status and the kernel's
+; interrupt acknowledged, and looked at again. An interrupt for a
+; request already seen used may be waiting, and is ended like any other.
+; A request the device never uses leaves the driver waiting.
+(def gpu_wait ((d IoDevice) (t int) (ip int) (q IoDevice) (used_off int) (n int)) bool
+  (let b (barrier)
+    (if (eq (virtq_used_index q used_off) (bit_and n 65535))
+        (let b2 (barrier) true)
+        (match (port_receive ip)
+          ((RecvFailed) false)
+          ((Message from mb)
+            (let e (if (is_irq_notice (Message from mb) (transport_irq t)) (gpu_interrupted d t) 0)
+              (gpu_wait d t ip q used_off n)))))))
+
+; Transport t's interrupt ended: the device's status acknowledged, then
+; the kernel's.
+(def gpu_interrupted ((d IoDevice) (t int)) int
+  (let st (device_read32 d (treg t (reg_interrupt_status)))
+    (let a (device_write32 d (treg t (reg_interrupt_ack)) st)
+      (let br (barrier)
+        (match (irq_ack (transport_irq t)) ((IrqAcked) 0) ((IrqNotPending) 0))))))
 
 ; The response's u32 at off, from the queue's memory.
 (def resp_word ((g Gpu) (off int)) int
-  (match g ((Gpu d t q addrs n) (device_read32 q (add (resp_off) off)))))
+  (match g ((Gpu d t q addrs n ip) (device_read32 q (add (resp_off) off)))))
 
 ; Sends req, and goes on with the driver if the answer is want.
 (data Commanded (Commanded Gpu) (NotCommanded (list int)))
@@ -600,7 +631,7 @@
 ; screen of 2500 runs is 40 KB, and then written a byte at a time.
 (def send_attach ((g Gpu) (id int) (runs (list VirtqRun)) (n int)) Commanded
   (match g
-    ((Gpu d t q addrs k)
+    ((Gpu d t q addrs k ip)
       (let hd (put_bytes q (req_off) (append (header (cmd_resource_attach_backing)) (append (u32_le id) (u32_le n))))
         (let rs (put_runs q (add (req_off) 32) runs)
           (sent_as "attach_backing" (queued g (add 32 (mul 16 n)) 24) (resp_ok_nodata)))))))
@@ -623,13 +654,13 @@
 ; to take it.
 (def cursor_send ((g Gpu) (c Curq) (req (list int))) Curq
   (match g
-    ((Gpu d t q addrs n)
+    ((Gpu d t q addrs n ip)
       (match c
         ((Curq cq ca cn)
           (let w (put_bytes cq (cursor_req) req)
             (let ds (put_bytes cq 0 (descriptor (add ca (cursor_req)) (length req) 0 0))
               (let cn2 (virtq_offer d t 1 cq (cursor_avail) (cursor_ring) cn 0)
-                (let k (virtq_wait cq (cursor_used) cn2 (clock_ns))
+                (let k (gpu_wait d t ip cq (cursor_used) cn2)
                   (Curq cq ca cn2))))))))))
 
 ; ------------------------------------------------------------- the screen
@@ -649,7 +680,7 @@
 ; Whether the device offers virgl, which the driver asked for in
 ; negotiating, so that it composes the screen on the host's GPU (gl.l0).
 (def virgl_offered ((g Gpu)) bool
-  (match g ((Gpu d t q addrs n) (not (eq (bit_and (device_features d t 0) (feature_virgl)) 0)))))
+  (match g ((Gpu d t q addrs n ip) (not (eq (bit_and (device_features d t 0) (feature_virgl)) 0)))))
 
 ; The screen, resource 1, black, shown on scanout 0; then display served.
 ; A scanout must have a backing, so until layers come it is the zero page,
@@ -794,7 +825,7 @@
   (match v
     ((Drv g c w h bufs layers attached cur zero rows)
       (match g
-        ((Gpu d t q addrs reqs)
+        ((Gpu d t q addrs reqs ip)
           (info_as "virtio-gpu" (screen_line t w h (scale_of w h (boot_args)) host)))))))
 
 (def serve ((v Drv) (port int)) int

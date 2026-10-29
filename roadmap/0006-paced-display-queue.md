@@ -1,6 +1,6 @@
 # 0006: A paced, pipelined display queue
 
-Track: Display · Status: ready · Needs: 0005 · Spec: display.md, desktop.md, toolkit.md
+Track: Display · Status: active · Needs: 0005 · Spec: display.md, desktop.md, toolkit.md
 
 ## Why
 
@@ -40,7 +40,7 @@ virtio-gpu's own; `hvs` has none, its `damage` only a cache clean.
 
 Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
 
-- [ ] `virtio-gpu` waits by its interrupt: it binds the virtio-mmio
+- [x] `virtio-gpu` waits by its interrupt: it binds the virtio-mmio
   transport's interrupt (`irq_bind`, its `dev` line already there) to a
   port of its own and receives on it in place of spinning in
   `virtq_wait`, acknowledging the device's interrupt status. One
@@ -83,8 +83,8 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
 ## Spec changes
 
 - display.md: the display protocol's `frames` and its `frame N` and
-  `release` notices; virtio-gpu's queue, in flight and waited for by
-  its interrupt; and in the Pi 5's section, when `hvs` sends them.
+  `release` notices; virtio-gpu's queue in flight; and in the Pi 5's
+  section, when `hvs` sends them.
 - desktop.md: the wm protocol's `frame ID` and `attach`; the "shown half
   painted" limit goes.
 - toolkit.md: how `ui_present` paces itself, and a window's two
@@ -97,3 +97,16 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   from the end-of-frame interrupts of 0005, which it now needs.
 - 2026-10-27: steps written, QEMU's first and `hvs`'s fifth, the only
   one that needs 0005.
+- 2026-10-29: active. Measured first, on this host's QEMU (4 CPUs, 2D,
+  1280×800), with temporary timing lines in `wm` and the toolkit and a
+  script dragging Disks's right edge 240 pixels in and out twice, 6 at a
+  step 30 ms apart, then its header bar: a size's step in Disks, from
+  its start to its painting's end, median 12.6 ms; the restack after a
+  size, `wm`'s `layers` asked and answered, 12.1 ms; a move drag's
+  restack 20.9 ms. The goal's 7 and 9 ms were measured on another
+  machine; these are the ones each step is held to here.
+- 2026-10-29: step 1. `virtio-gpu` binds its transport's interrupt and
+  receives on it in `gpu_wait`, for the control queue and the cursor
+  queue alike, in place of `virtq_wait`'s yields and sleeps; one
+  request in flight still. Timed again: a size 12.5 ms, its restack
+  11.5, a move's restack 20.0, so no slower.

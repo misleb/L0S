@@ -67,6 +67,14 @@ so that the guest copies no pixels at all:
 So `vt` scrolls by changing its window's `top`, with no copying anywhere,
 and draws only the new row.
 
+**The queue is waited for by its interrupt.** `virtio-gpu` binds its
+virtio-mmio transport's interrupt (`irq_bind`, 48 plus the transport) to
+a port of its own as it starts, and waits for a command to be used by
+receiving there, acknowledging the device's interrupt status and then
+the kernel's, rather than spinning on the used ring. An interrupt for a
+command already seen used is ended like any other. A command the device
+never uses leaves the driver waiting.
+
 **virtio-gpu's 3D mode.** If the device offers `VIRTIO_GPU_F_VIRGL`, as
 QEMU's `virtio-gpu-gl-device` does, the driver (`gl.l0`) composes the
 screen on the host's GPU instead, with virgl but without a shader:

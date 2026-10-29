@@ -25,7 +25,7 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | ready | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
+| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | active | 1/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
@@ -47,8 +47,8 @@ move independently, so several can be active at once.
 ## Ready
 
 - [0006](0006-paced-display-queue.md) A paced, pipelined display
-  queue: 0005 is done, so `hvs` can tell frames and releases; steps 1
-  to 4 are QEMU's.
+  queue, active: `virtio-gpu` waits by its interrupt; steps 2 to 4
+  and 6 are QEMU's, and 5, `hvs`'s, needs the board.
 
 ## Dependencies
 
