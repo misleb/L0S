@@ -1,6 +1,6 @@
 # 0006: A paced, pipelined display queue
 
-Track: Display · Status: active · Needs: 0005 · Spec: display.md, desktop.md, toolkit.md
+Track: Display · Status: done · Needs: 0005 · Spec: display.md, desktop.md, toolkit.md
 
 ## Why
 
@@ -71,7 +71,7 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   changed since the other was shown are copied over first, so only
   what changed is painted, as now. `widgets`, `procmon`, Files and
   Disks need no code.
-- [ ] `hvs` tells frames and releases (needs 0005): `frame N` at the
+- [x] `hvs` tells frames and releases (needs 0005): `frame N` at the
   end of each frame 0005's bookkeeping says showed a change, and
   `release` once a list that no longer names a buffer is taken, since
   the HVS reads every pixel of a buffer it shows every frame.
@@ -186,6 +186,20 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   growing with each change; `dmesg` shows no `refused:` from `hvs` and
   the every-600th-frame line still `0 pending`; and a drag of a
   window's edge shows no torn window.
+- 2026-10-29: step 5 run on the Pi 5 at 1920×1080 (`hdmi=boot`), the
+  user at the board with Files, Widgets, Fonts, System Monitor and
+  Terminal. It works: `wm` said nothing of the display telling no
+  frames, `run windows` showed Files flip from buffer 10 to 8 at frame
+  2 as Widgets opened over it, and later System Monitor at frame 97;
+  every 600th-frame line `0 pending`, 8350 changes shown, no `refused:`,
+  one gap (601 ms at 49 s, as a window was ended). But a window waits
+  longer to present: in the `slow step` lines (steps over 16 ms), the
+  present's mean was 22 ms before (Files 22.4, System Monitor 22.1,
+  Fonts 16.1, 2 of 448 over 100 ms) and 74 to 123 ms now (Files 75.9,
+  Widgets 74.3, System Monitor 123.5, Fonts 72.2; 83 of 281 over 100
+  ms, median of those 148, at most 382), in whole frames (66.7, 116.6,
+  166.7). Terminal, not paced (0039), is unchanged at 21 ms; at the
+  board, drags slow and hover highlights behind the pointer, no tearing.
 - 2026-10-29: the board run found the desktop slower: every present
   now swaps a buffer and restacks, and `hvs` answered each `layers`,
   `move`, `shape` and `cursor` only once an end of frame showed its
@@ -205,3 +219,18 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   channel, or with no ends of frame, restacks are still waited for.
   Not yet run on a board: step 5's check above holds, and the board
   run should see the `slow step` presents back near 22 ms.
+- 2026-10-29: step 5 done, on the Pi 5 with that change, the user at
+  the board. At 1920×1080: very smooth, hovers and drags with the
+  pointer; the `slow step` presents 6.5 (Files) to 13.2 ms (Widgets),
+  none over 100 ms; every 600th-frame line `0 pending` to frame 18600,
+  no `refused:`, no fallback, no gap, no torn or garbled window. At
+  3840×2160, scale 2, with Files, Fonts, Disks, System Monitor and
+  Terminal: smooth at first, sluggish later as more windows were opened
+  and moved, never a glitch. The presents stayed short (Files 22.6 ms
+  mean, System Monitor 11.4, Fonts 10.3); the slowness was not the
+  pacing's: 41 gaps of 100 to 156 ms between ends of frame, 30 of them
+  with STATUS's count moving 2 or 3 frames in about 117 ms (the HVS
+  itself stalled, 0038's, now recurring at multiples of about 1.2 s)
+  and 11 the driver late; and painting at scale 2 (Files 5 to 36 ms,
+  once 181; Widgets once 149), goal 0040. One `no end of frame in 50
+  ms` at 52 s, the list then found taken, so no fallback. Done.

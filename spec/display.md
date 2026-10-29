@@ -385,8 +385,7 @@ frames in one would go uncounted.
 **Seen** on a Pi 5 at 3840×2160 at 60 Hz: frames 600, 1200 and 1800
 said 10.000 s apart, every change shown, none left pending.
 
-**Frames and releases** (the protocol's `frames`; written, not yet run
-on a board). `hvs` keeps the ports `frames` names (`frames.l0`), and at
+**Frames and releases** (the protocol's `frames`). `hvs` keeps the ports `frames` names (`frames.l0`), and at
 each end of frame that shows a change, by the bookkeeping above
 (`shown.l0`'s `changes_shown`), tells them first a `release` of each
 buffer the lists it shows left out, then `frame N`, N counting the
@@ -401,6 +400,11 @@ which writes the list again, is one too. Unlike `virtio-gpu`'s, these
 notices come after the reply, at the end of the frame. Where the board
 gives no end of frame, and `hvs` polls, it tells a frame as each change
 is made and a release as its list is taken.
+**Seen** on a Pi 5 at 1920×1080 with five windows: each window's
+buffer swapped and its frames told (`run windows`), the toolkit's
+slowest presents 6.5 to 13 ms, none over 100 ms, nothing torn or
+garbled, no fallback; at 3840×2160 the presents as short, the desktop
+slowed by the HVS's stalls (Limits) and by painting at scale 2.
 
 **The first runs** go one boot a stage, `probe`, `list`, `iommu` and
 then the whole driver, each with `tools/pi5-boot --until 'l0s>'` and its
@@ -476,8 +480,11 @@ of them could be confirmed from Linux's source:
   closes (seen with one widened to 3032 pixels at 4K). Resizing windows
   at 4K has also brought gaps of up to a second with no end of frame,
   the HVS's own frame count barely moving, as if the channel stalled;
-  more than 63 frames in one leave `hvs`'s count short. Neither was seen
-  at 1920×1080.
+  more than 63 frames in one leave `hvs`'s count short. With five
+  windows opened and moved at 4K, stalls of about 117 ms (two or three
+  frames where seven were due) came again and again, at multiples of
+  about 1.2 s, and the desktop slowed with them. Neither was seen at
+  1920×1080.
   A restack is answered before it is shown, and shown by the third end
   of frame after it at the latest, as one list a frame is pointed at:
   only while the channel is the driver's and ends of frame come. Where

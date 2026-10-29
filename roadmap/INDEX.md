@@ -25,7 +25,6 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | active | 5/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
@@ -44,13 +43,11 @@ move independently, so several can be active at once.
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | idea | – | – | display.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
+| [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
 
 ## Ready
 
-- [0006](0006-paced-display-queue.md) A paced, pipelined display
-  queue, active: toolkit windows paint the buffer not shown, paced by
-  the frames and releases `virtio-gpu` tells, which `widgets.sh`
-  checks; step 5, `hvs`'s, needs the board.
+- None: every open goal is an `idea`, its steps yet to be written.
 
 ## Dependencies
 
@@ -79,6 +76,7 @@ graph LR
 | [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | 2026-10-28 |
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | 2026-10-29 |
+| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | 2026-10-29 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |

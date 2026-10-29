@@ -44,3 +44,14 @@ large planes) it follows.
 ## Log
 
 - 2026-10-29: written from 0005's step 5 board run.
+- 2026-10-29: seen again in 0006's board run at 3840×2160, scale 2,
+  with `hvs` answering restacks at once: smooth at first, then sluggish
+  as Files, Fonts, Disks, System Monitor and Terminal were opened and
+  moved, never a glitch. 41 gaps of 100 to 156 ms between ends of frame
+  in nine minutes, from about four minutes in. In 30, STATUS's count
+  moved 2 or 3 frames in about 117 ms where 7 were due, so the HVS
+  itself made no frames; they came at multiples of about 1.2 s
+  (352.75 and 353.96 s, 446.31 and 447.53 s), a rhythm worth matching
+  against what runs each second (System Monitor's refresh, the clock).
+  In the other 11 the count moved as it should, so the driver was late,
+  likely mapping a resized window's buffer.
