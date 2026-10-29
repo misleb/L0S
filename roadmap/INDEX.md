@@ -25,7 +25,7 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | active | 3/6 | 0005 | display.md, desktop.md, toolkit.md |
+| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | active | 4/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
@@ -43,13 +43,14 @@ move independently, so several can be active at once.
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | idea | – | – | display.md |
+| [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 
 ## Ready
 
 - [0006](0006-paced-display-queue.md) A paced, pipelined display
-  queue, active: `virtio-gpu` keeps commands in flight and tells
-  frames and releases, which `wm` passes on; steps 4 and 6 are QEMU's,
-  and 5, `hvs`'s, needs the board.
+  queue, active: toolkit windows paint the buffer not shown, paced by
+  the frames and releases `virtio-gpu` tells; step 6, the screen test,
+  is QEMU's, and 5, `hvs`'s, needs the board.
 
 ## Dependencies
 

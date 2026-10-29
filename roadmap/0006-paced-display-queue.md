@@ -60,7 +60,7 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   a client asks once per change, and `wm` sends it a frame notice when
   the display's next frame after that window's damage is told, as
   `wl_surface.frame`'s done does.
-- [ ] Paced, double-buffered toolkit windows: `ui_present` asks `frame`
+- [x] Paced, double-buffered toolkit windows: `ui_present` asks `frame`
   with each change, and paints no more until it is told, keeping what
   changed meanwhile for the next. A window has two buffers, as
   `UiSwap` already makes during a resize; it paints into the one not
@@ -84,10 +84,7 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
 
 - display.md: in the Pi 5's section, when `hvs` sends `frame N` and
   `release`.
-- desktop.md: the wm protocol's `attach`; the "shown half painted"
-  limit goes.
-- toolkit.md: how `ui_present` paces itself, and a window's two
-  buffers.
+- desktop.md: `run windows` saying which buffer each window shows.
 
 ## Log
 
@@ -140,3 +137,24 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   `damage`, as Wayland's frame comes before its commit: asked after,
   the frame `wm` tells may already have gone by. Both notices go
   before the reply, so `wm`, which waits on the reply, finds them next.
+- 2026-10-29: step 4, with three changes to its design. `attach ID VA
+  N S` does not show the buffer at once: it is shown at the next
+  `damage`, which commits it, as Wayland's attach waits for a commit,
+  since in 3D mode the buffer's texture must take what changed before
+  it is composed. A window's content has a bank of its own, which a
+  commit flips, apart from the chrome's, which only a resize flips with
+  it; the buffer given up keeps its id, so the next attach gives the
+  display nothing new unless the size changed. And a window with a
+  drawing area, `vt`'s, stays in one buffer, unpaced: its program
+  paints the area between presents, into the canvas it is given, and
+  tells `wm` itself; goal 0039 takes that on, so the "shown half
+  painted" limit is gone for every other window, not for `vt`'s
+  terminal. `wm` tells a client a release as `rel` and 0. A window
+  waits no longer than 100 ms for a frame or a release. Timed: a size
+  13.2 ms (12.6 before 0006), its restack 11.4 (12.1), a move's restack
+  19.5 (20.9). The size is half a millisecond slower: the copy over of
+  what the buffer painted lacks, 0.58 ms median, measured; reading the
+  box's rows in one span instead was slower, 1.8 ms. And a drag shows
+  fewer sizes, 133 where 159 were shown in the same scripted drag, as
+  the window paints the next only once the restack released the other
+  buffer; a third buffer would overlap them again (0039).
