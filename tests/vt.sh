@@ -265,13 +265,13 @@ typekeys "echo hi"
 # over the terminal's ground, as the smooth 8 by 16 glyph has it.
 shows "echo hi typed and answered in $f_title" "$((f_x + 1)) $((f_y + bar + 8 * 16 + 8)) $stem"
 
-# The two windows' vts are pids 17 and 18: boot, pid 1, starts
-# /etc/system's programs after the inittab's thirteen, sh 14, font 15,
-# wm 16, then the two vts, vt_base + 1 and vt_base + 2. Each registers
-# its tab's name itself and starts the tab's shell, with no relay, so
-# ps shows no vt but those two; nap's parent is the front window's
-# shell, whose parent is its vt.
-vt_base=16
+# The two windows' vts: boot, pid 1, starts /etc/system's programs after
+# the inittab's, sh, font and wm, then the two vts, whose pids follow
+# but not always one after the other, as a brief process may take one
+# between them (17 and 19, seen once in seven runs). Each registers its
+# tab's name itself and starts the tab's shell, with no relay, so ps
+# shows no vt but those two, boot's; nap's parent is the front window's
+# shell, whose parent is one of them.
 typekeys "run nap 30000 &"
 # Up to 10 s for ps to show nap.
 end=$((SECONDS + 10))
@@ -283,13 +283,16 @@ done
 shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  nap " | tail -1 | awk '{print $2}')
 [ -n "$shell" ] || fail "ps showed no nap; it showed:"
 vt=$(printf '%s\n' "$lines" | grep -aE "^ +$shell +[0-9]+  sh " | tail -1 | awk '{print $2}')
-[ "$vt" = $((vt_base + 1)) ] || [ "$vt" = $((vt_base + 2)) ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not a window's vt"
+vts=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +1  vt " | awk '{print $1}' | sort -n | tr '\n' ' ')
+set -- $vts
+[ $# -eq 2 ] && [ -z "$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  vt " | grep -avE "^ +[0-9]+ +1  vt ")" ] \
+  || fail "ps shows vts ${vts:-none}, not the windows' two, boot's, and no relay"
+vt_a=$1; vt_b=$2
+[ "$vt" = "$vt_a" ] || [ "$vt" = "$vt_b" ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not a window's vt, $vt_a or $vt_b"
 echo "ok - vt: $f_title's shell, pid $shell, started by its window's vt, pid $vt, ran nap"
-vts=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  vt " | awk '{print $1}' | sort -n | tr '\n' ' ')
-[ "$vts" = "$((vt_base + 1)) $((vt_base + 2)) " ] || fail "ps shows vts ${vts:-none}, not the windows' two, $((vt_base + 1)) and $((vt_base + 2)), and no relay"
 echo "ok - vt: the windows' two vts and no relay"
 # The other window's vt is the other of the two.
-other_vt=$((vt_base + 1)); [ "$vt" = "$other_vt" ] && other_vt=$((vt_base + 2))
+other_vt=$vt_a; [ "$vt" = "$other_vt" ] && other_vt=$vt_b
 
 # A click on the back window's header bar brings it to the front.
 front=$b_title; front_vt=$other_vt; other=$f_title; other_vt=$vt

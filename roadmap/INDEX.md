@@ -41,7 +41,7 @@ move independently, so several can be active at once.
 | [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | idea | – | 0033 | programs.md, toolkit.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
-| [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 5/7 | – | display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md |
+| [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 6/8 | – | display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
 | [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | idea | – | – | network.md, programs.md |
@@ -53,19 +53,21 @@ move independently, so several can be active at once.
 | [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
 | [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
 | [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | idea | – | 0043 | agent.md, programs.md, desktop.md, testing.md |
+| [0050](0050-hvs-crowded-lines.md) `hvs` at 4K: lines crowded with planes still shown | Display | idea | – | 0038 | display.md |
 
 ## Ready
 
-- [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K, active: stalls cut
-  and too-wide screens shown, not refused; step 6 moves shared memory
-  to L0's new 128 GB high user range, so a 4K window's buffers no longer
-  fill `hvs`'s 384 MB.
+- [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K, active: stalls cut,
+  too-wide screens shown, and window buffers in L0's 128 GB high user
+  range, so none freezes; step 7 is the flicker as lists alternate
+  while a big window is dragged off the bottom.
 
 ## Dependencies
 
 ```mermaid
 graph LR
   0005[0005 HVS frame interrupts] --> 0006[0006 paced display queue]
+  0038[0038 hvs at 4K] --> 0050[0050 crowded lines]
   0012[0012 key modifiers] --> 0013[0013 entry editing]
   0019[0019 font service] --> 0020[0020 proportional text]
   0023[0023 file data shared] --> 0024[0024 fs fair serving]

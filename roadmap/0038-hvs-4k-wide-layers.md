@@ -65,50 +65,33 @@ clean at 1920×1080:
   width, and a screen past the line memory shown, by fetching less of
   it, not refused. (Log: the lowest pieces left out until the rest fit,
   said once; the `forget` storm gone with the refusal.)
-- [ ] The 4K memory budget: at scale 2 a big window's buffers, its two
-  contents with their room to grow and `wm`'s two frames for it, take
+- [x] The 4K memory budget: at scale 2 a big window's buffers took
   about 140 MB of the 384 MB of device pages above a process's stack,
-  so with two or three big windows a buffer more has no room in `hvs`
-  and that window is not shown at its new size. L0 now gives every space
-  a high user range, 0x2000000000 up to 0x4000000000, 128 GB (spec
-  §10.3, L0 roadmap 0128), beside the old one, nothing in which moves.
-  - The kernel gives shared memory there: `shm_alloc`'s pages and the
-    pages `shm_share` maps into another process come from a pool of
-    device pages in the high range, as large as it, while `dma_alloc`,
-    `region`, file windows and the 0xE8000000 part stay as they are
-    (a driver's DMA and registers keep their addresses). `in_device_area`
-    and the page counts (`Pages`) take in both parts; a copy in or out
-    of a process, as `space_read` and `space_write` do, stays within one
-    part, and one across the gap between them is refused, as before.
-  - Its tables are made a gigabyte at a time as pages there are first
-    mapped, and given back with the space: board tests of a share past
-    384 MB, one across a gigabyte, and a process's end giving them all
-    back, on QEMU and on the Pi 5, which L0 has not run it on.
-  - `dma_limit`'s 64 MB a call, and the toolkit's room to grow, are
-    looked at again with the room to spare; `wm` keeps trimming its
-    clients' buffers only if it still saves anything.
-  - Where pieces are left out for the line memory, the HVS's background
-    shows the wallpaper's color, not black.
-  - The CPU clock the firmware leaves the Pi 5 at read through the
-    mailbox (tag 0x00030047, the measured rate of clock 3, against
-    0x00030004's maximum), and, if it is below the rated 2.4 GHz,
-    `arm_freq=2400` in the card's `config.txt` and the boot benchmark
-    of `frame_new` run again: L0 found zeroing past the caches costs
-    about 1.5 GB/s of DRAM writes whatever instruction does it, so the
-    pool stays, but the clock may be part of it.
-  - Done: five windows opened, dragged and resized at 4K for five
-    minutes, none left unshown and no "next buffer is not shown" said.
+  so with two or three big windows a buffer more had no room in `hvs`.
+  Every device page, region, DMA and shared, now lies in L0's high user
+  range, 0x2000000000 up to 0x4000000000, 128 GB (spec §10.3, L0's
+  0128), and the 384 MB above the stack is mapped by nothing; a copy in
+  or out of a process stays in one range; the file-window notice's
+  address is a u64. Board tests of 1,136 MB of device pages past a
+  gigabyte, the same frames read back across it, and a process's
+  tables over it given back as it ends. The HVS's background takes the
+  wallpaper's corner's color where pieces are left out, and `hvs` says
+  the CPU's and RAM's clocks. `dma_limit` and the toolkit's room to grow
+  are as they were, and `wm` still trims, which keeps the kernel's page
+  records down. (Log: no window unshown at 4K; the CPU at its full 2.4
+  GHz.)
+- [ ] The fit without flicker: a list must fit beside the one shown, so
+  while a big window is dragged off the screen's bottom edge beside
+  others, lists alternate frame by frame between most of the screen
+  left out and none of it. Leave out first the pieces that need line
+  memory the list shown does not give them, the moving window's, not
+  the lowest, or hold the list shown a frame more; tested on the host
+  with the alternation the board showed.
 - [ ] The board run of "Done when", at 4K and at 1920×1080.
 
 ## Spec changes
 
-- kernel.md: the high user range in the layout table, shared memory
-  given there, its tables made and given back, and the device pages'
-  Limit; syscalls.md's `shm_alloc` and `shm_share` rows.
-- display.md: the memory budget gone from its Limits, and the
-  background's color where pieces are left out; desktop.md if `wm`
-  stops trimming its clients' buffers.
-- pi5.md: the CPU clock seen, and `arm_freq` if the card sets it.
+- display.md: the flicker gone from its Limits once step 7 is done.
 
 ## Log
 
@@ -210,3 +193,19 @@ clean at 1920×1080:
   queued), which keeping a count off the boundary avoids. The hidden
   copy is documented in `l0 doc Map` and the l0-code skill (0131);
   `L0_ARRAY_STATS=1` counts the copies.
+- 2026-10-29: step 6 on the Pi 5 at 3840×2160, scale 2: the kernel's
+  layout line says device, DMA and shared pages from 0x2000000000, and
+  five big windows resized hard left none unshown, no "next buffer is
+  not shown", no fault, where before two or three froze. The firmware
+  measures the ARM clock at 2400 MHz, its most (set 1500), and SDRAM at
+  250 MHz (set 0, at most 400); Raspberry Pi documents no SDRAM clock
+  for the Pi 4 on, so zeroing frames past the caches costs what it
+  costs and the pool stays. The background register's bits, found by
+  writing it on the board: red asked as 10 bits from bit 20 showed
+  green, and bits 10 to 19 alone blue, so green, blue, red from the top.
+  With a big window dragged off the bottom beside others, the screen
+  below the top bar flickered to the background every other frame
+  (step 7), and a black band moved with it, lines the HVS could not
+  fetch (goal 0050). The vt screen test assumed its vts were pids 17
+  and 18; once in seven runs a brief process took 18, so it now reads
+  them from `ps`.

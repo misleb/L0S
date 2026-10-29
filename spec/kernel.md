@@ -187,7 +187,8 @@ The layout is fixed by spec §10.3. A program's image is an ELF, as
 | the rest of a segment | its bss, zero | on first touch, with the segment's flags |
 | from the page after the image to `0xD8000000` | heap | on first touch, RW; unmapped again, its frame freed, when the runtime releases it (call 12) in a run of 16 MB or more, or with 128 MB or less of frames left |
 | to `0xE8000000` | stack, `sp` starting at the top | on first touch, RW |
-| `0xE8000000` up | device regions, DMA pages, and shared pages | by the `region` and `dma_alloc` calls, for programs with a `dev` line only; by `shm_alloc` and `shm_share`, for any |
+| `0xE8000000` to `0x100000000` | nothing: a touch faults, and a buffer there is refused | never |
+| `0x2000000000` to `0x4000000000` | the high user range (spec §10.3), 128 GB: device regions, DMA pages, and shared pages | by the `region` and `dma_alloc` calls, for programs with a `dev` line only; by `shm_alloc` and `shm_share`, for any. A copy in or out of a process lies wholly in this range or wholly in the low one |
 
 A process starts at its image's `e_entry`. The kernel starts only an ELF
 of spec §10.3's for this CPU: static, `ET_EXEC`, at most three
@@ -206,7 +207,8 @@ kernel mapped, so a buffer there is accepted.
 **DMA.** A device such as the virtio-gpu reads and writes memory itself,
 at addresses it is given in its registers. `dma_alloc n` maps n fresh
 frames at the caller's next device pages and returns the first one's
-address. A process's device pages, the 384 MB above its stack, are
+address. A process's device pages, the high user range from
+`0x2000000000`, are
 given out as a pool: its next ones are the first run of pages it gave
 up that holds them, highest first, or else the pages above all it was
 ever given. `dma_address va` gives where the device reaches the page
@@ -380,14 +382,22 @@ exhausted` and 38 MB free behind a reserve of 32 MB.
   pages it frees are released, by call 12 (see
   [Releasing](#a-processs-memory)), and only shared and DMA pages are
   given up or taken back otherwise.
-- **A process has 384 MB of device pages**, its shared, DMA and device
-  memory mapped at once. Pages it gives up are given again, but a
-  request's pages must lie together, so 384 MB in holes too small for it
-  is still refused. `virtio-gpu` and `hvs` map every window's buffers,
-  four times as many pages at scale 2, and at 4K two or three big
-  windows fill `hvs`'s (see [display.md, Limits](display.md#limits));
-  `wm` keeps only the first page of each client buffer once the display
-  has it, which names the buffer, and gives up the rest.
+- **A process has 128 GB of device pages**, its shared, DMA and device
+  memory mapped at once, in the high user range, whose page tables L0
+  makes a gigabyte at a time as pages there are first mapped and gives
+  back with the space. Pages it gives up are given again, but a
+  request's pages must lie together, so pages in holes too small for it
+  are passed over for fresh ones above them. `virtio-gpu` and `hvs` map
+  every window's buffers, four times as many pages at scale 2, about
+  140 MB for a big window at 4K, which the 384 MB above the stack, where
+  device pages were before L0 gave the high range, could not hold for
+  more than two or three; `wm` keeps only the first page of each client
+  buffer once the display has it, which names the buffer, and gives up
+  the rest. The kernel's file-window notice carries its address as a
+  u64 (`abi.l0`'s `window_notice`).
+- **A region's base in the high range is a process's own DMA pages
+  only if it maps that page**; any other base there is a device's, so a
+  board's registers may lie in it.
 - **The pool of zeroed frames holds at most 64 MB** (16,384 frames,
   `memory.l0`'s `pool_cap`), made while CPU 0 has nothing to run, 128 at
   a time, only while 128 MB of frames are left and the heap has 32 MB

@@ -3,8 +3,8 @@
 ; decides, and process.l0 maps.
 
 ; The parts of a process's address range, from the bottom: its image, its
-; heap, its stack, its device pages, and outside, below user_base or from
-; user_limit.
+; heap, its stack, its device pages in the high user range, and outside,
+; below user_base, from stack_top, or past the high range.
 (data Area (AreaImage) (AreaHeap) (AreaStack) (AreaDevice) (AreaOutside))
 
 ; Where a process's image lies, its ELF's segments (spec section 10.3):
@@ -30,21 +30,26 @@
         ((Span from to perm)
           (if (if (ge va from) (lt va to) false) perm (perm_in (tail spans) va))))))
 
-; Which part of a process laid out as l address va is in.
+; Which part of a process laid out as l address va is in: its device
+; pages are the high user range; the 384 MB above its stack in the low
+; one are outside, mapped by nothing.
 (def area_of ((l Layout) (va int)) Area
-  (if (lt va (user_base))
-      (AreaOutside)
-      (if (lt va (layout_heap l))
-          (AreaImage)
-          (if (lt va (heap_limit))
-              (AreaHeap)
-              (if (lt va (stack_top))
-                  (AreaStack)
-                  (if (lt va (user_limit)) (AreaDevice) (AreaOutside)))))))
+  (if (in_device_area va)
+      (AreaDevice)
+      (if (lt va (user_base))
+          (AreaOutside)
+          (if (lt va (layout_heap l))
+              (AreaImage)
+              (if (lt va (heap_limit))
+                  (AreaHeap)
+                  (if (lt va (stack_top)) (AreaStack) (AreaOutside)))))))
 
-; Whether va is above the stack, where only devices and DMA pages are.
+; Whether va is in the high user range, where only devices, DMA and
+; shared pages are: spec 10.3's 128 GB from dev_base, where a 4K
+; compositor's windows fit, as they did not in the 384 MB above the
+; stack (roadmap 0038).
 (def in_device_area ((va int)) bool
-  (if (ge va (stack_top)) (lt va (user_limit)) false))
+  (if (ge va (dev_base)) (lt va (dev_limit)) false))
 
 ; A process's pages: the frame each page of it maps, and how many of
 ; them are at its device pages, counted as pages are put and removed, so
@@ -179,9 +184,17 @@
       (PlanBad)
       (if (eq n 0)
           (PlanMap (nil int))
-          (if (if (lt va (user_base)) true (gt n (sub (user_limit) va)))
+          (if (not (within_a_range va n))
               (PlanBad)
               (plan_pages l pages (range_pages va n) write (nil int))))))
+
+; Whether the n bytes from va lie wholly in the low user range or wholly
+; in the high one: a copy across the gap between them, or past either,
+; is refused, as spec 10.3's space_read and space_write keep to one.
+(def within_a_range ((va int) (n int)) bool
+  (if (if (ge va (user_base)) (le n (sub (user_limit) va)) false)
+      true
+      (if (ge va (dev_base)) (le n (sub (dev_limit) va)) false)))
 
 ; The rest of range_plan, page by page through ps: each unmapped page onto
 ; acc, or a refusal at the first the copy may not write or no page may be
@@ -199,7 +212,7 @@
 
 ; ------------------------------------------------------------ device pages
 
-; A process's device pages, from stack_top up to user_limit, as given
+; A process's device pages, from dev_base up to dev_limit, as given
 ; and given up: top, the first page never given, and below it the runs
 ; of pages given up again, each the pages from a page up to another,
 ; highest first, none touching another or ending at top. Pages given up
@@ -209,7 +222,7 @@
 (data DevPages (DevPages int (list DevRun)))
 
 ; A new process's device pages: none given yet.
-(def dev_pages_new () DevPages (DevPages (stack_top) (nil DevRun)))
+(def dev_pages_new () DevPages (DevPages (dev_base) (nil DevRun)))
 
 ; The first page of pool never given.
 (def dev_top ((pool DevPages)) int (match pool ((DevPages top runs) top)))
@@ -218,7 +231,7 @@
 (def dev_run_count ((pool DevPages)) int (match pool ((DevPages top runs) (length runs))))
 
 ; span bytes of pages taken from a pool: the first, and the pool without
-; them; or none, no run nor the pages from top below user_limit holding
+; them; or none, no run nor the pages from top below dev_limit holding
 ; them.
 (data DevTake (DevTaken int DevPages) (DevFull))
 
@@ -230,7 +243,7 @@
       (match (take_run runs span (nil DevRun))
         ((RunTaken va rest) (DevTaken va (DevPages top rest)))
         ((RunNone)
-          (if (gt (add top span) (user_limit))
+          (if (gt (add top span) (dev_limit))
               (DevFull)
               (DevTaken top (DevPages (add top span) runs))))))))
 

@@ -478,10 +478,17 @@ of them could be confirmed from Linux's source:
   scale 2, its content and its frame. A screen past either is shown
   without its lowest pieces, the wallpaper's first, left out one at a
   time until the rest fit (`pieces.l0`'s `screen_fit`), so the pointer
-  and the windows on top go on, over the HVS's black background where
-  the pieces left out were; `hvs` says so once as it begins and once as
-  it fits again. Only a screen whose topmost piece alone cannot be one
-  list is refused.
+  and the windows on top go on, over the HVS's background where the
+  pieces left out were, which `hvs` sets to the wallpaper's corner's
+  color (its register holds 10 bits each of green, blue and red, from
+  bit 20 down); `hvs` says so once as it begins and once as it fits
+  again. Only a screen whose topmost piece alone cannot be one list is
+  refused. A list must fit beside the one shown, so while a big window
+  is dragged off the screen's bottom edge beside others, lists alternate
+  frame by frame between most of the screen left out, the background
+  below the top bar, and all of it: a flicker. Lines where many big
+  windows overlap can also show black as the HVS fails to fetch them in
+  time, which moves with the window that crowds them.
   Resizing windows at 4K still brings gaps of 100 to 170 ms with no end
   of frame now and then, the HVS making frames meanwhile: the kernel's
   calls that allocate, share and give up a window's buffers of 8,000
@@ -493,10 +500,10 @@ of them could be confirmed from Linux's source:
   them.
   At 4K and scale 2 `hvs` maps every buffer on the screen, a window's
   two contents and `wm`'s two frames for it, about 140 MB for a big
-  window, in a process's 384 MB of device pages (spec §10.3's user
-  range): with two or three big windows a buffer more has no room, the
-  share is refused, and that window is not shown at its new size (its
-  client says so once, the toolkit's `ui_back_given`).
+  window, in its device pages, the high user range's 128 GB (see
+  [kernel.md](kernel.md)): five big windows resized for minutes have
+  had room. A share refused all the same leaves that window as it was,
+  its client saying so once (the toolkit's `ui_back_given`).
   A restack is answered before it is shown, and shown by the third end
   of frame after it at the latest, as one list a frame is pointed at:
   only while the channel is the driver's and ends of frame come. Where

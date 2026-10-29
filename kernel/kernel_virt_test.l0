@@ -26,6 +26,13 @@
 
 (def test_device_buffer () int
   (check_int "write from a device page"
+    (boot_words 0 (cons (movz 0 1) (cons (movz_hi32 1 32) (cons (movz 2 1) (append (call_words 2) (exit_x0))))))
+    -5))
+
+; Above the stack, where device pages were before the high user range,
+; nothing is: a write from there is refused too.
+(def test_above_stack_buffer () int
+  (check_int "write from above the stack"
     (boot_words 0 (cons (movz 0 1) (cons (movz_hi 1 59392) (cons (movz 2 1) (append (call_words 2) (exit_x0))))))
     -5))
 
@@ -45,7 +52,8 @@
 (def test_open_no_files () int
   (check_int "open to read" (boot_words 0 (cons (movz 2 1) (append (call_words 4) (exit_x0)))) -3))
 
-; The PL031's registers, 0x09010000, mapped above 0xE8000000.
+; The PL031's registers, 0x09010000, mapped at the high user range's
+; first device page.
 (def region_words () (list int)
   (cons (movz_hi 0 2305) (cons (movz 1 4096) (append (call_words 10) (exit_x0)))))
 
@@ -53,7 +61,7 @@
   (check_int "nodev" (boot_words 0 (region_words)) -3))
 
 (def test_region_dev () int
-  (check_int "dev" (boot_words (flag_dev) (region_words)) (stack_top)))
+  (check_int "dev" (boot_words (flag_dev) (region_words)) (dev_base)))
 
 ; The PL031's region, then unregion of len bytes at what it gave, kept
 ; in x19, then words.
@@ -66,7 +74,7 @@
 (def test_unregion_reused () int
   (check_int "the same page again"
     (boot_words (flag_dev) (unregion_words 4096 (cons (movz_hi 0 2305) (cons (movz 1 4096) (append (call_words 10) (exit_x0))))))
-    (stack_top)))
+    (dev_base)))
 
 ; Unregion answers 0, of a region's whole length or not.
 (def test_unregion_answer () int
@@ -88,7 +96,7 @@
     (boot_words (flag_dev) (dma_words 1 (cons (mov_x0_x19) (cons (movz 1 4096) (append (call_words 10)
       (cons (mov_x0_x19) (cons (movz 1 4096) (append (call_words 13)
         (cons (movz 0 1) (append (call_words (call_dma_alloc)) (exit_x0)))))))))))
-    (add (stack_top) 4096)))
+    (add (dev_base) 4096)))
 
 ; --------------------------------------------------------------------- DMA
 
@@ -100,7 +108,7 @@
   (check_int "nodev" (boot_words 0 (dma_words 1 (cons (mov_x0_x19) (exit_x0)))) (err_denied)))
 
 (def test_dma_alloc () int
-  (check_int "at the first device page" (boot_words (flag_dev) (dma_words 2 (cons (mov_x0_x19) (exit_x0)))) (stack_top)))
+  (check_int "at the first device page" (boot_words (flag_dev) (dma_words 2 (cons (mov_x0_x19) (exit_x0)))) (dev_base)))
 
 (def test_dma_alloc_none () int
   (check_int "0 pages" (boot_words (flag_dev) (dma_words 0 (cons (mov_x0_x19) (exit_x0)))) (err_too_big)))
@@ -188,14 +196,14 @@
   (cons (mov_x0_x19) (cons (movz 1 len) (append (call_words 10) (exit_x0)))))
 
 (def test_dma_region () int
-  (check_int "where it is" (boot_words (flag_dev) (dma_words 2 (dma_region_words 8192))) (stack_top)))
+  (check_int "where it is" (boot_words (flag_dev) (dma_words 2 (dma_region_words 8192))) (dev_base)))
 
 (def test_dma_region_past () int
   (check_int "one page too many" (boot_words (flag_dev) (dma_words 1 (dma_region_words 8192))) -3))
 
 (def test_dma_region_none () int
   (check_int "no DMA pages"
-    (boot_words (flag_dev) (cons (movz_hi 0 59392) (cons (movz 1 4096) (append (call_words 10) (exit_x0)))))   ; 0xE8000000
+    (boot_words (flag_dev) (cons (movz_hi32 0 32) (cons (movz 1 4096) (append (call_words 10) (exit_x0)))))   ; 0x2000000000
     -3))
 
 ; ----------------------------------------------------------- shared memory
@@ -205,7 +213,7 @@
   (cons (movz 0 n) (append (call_words (call_shm_alloc)) (cons (mov_x19_x0) ws))))
 
 (def test_shm_alloc_nodev () int
-  (check_int "any process" (boot_words 0 (shm_words 1 (cons (mov_x0_x19) (exit_x0)))) (stack_top)))
+  (check_int "any process" (boot_words 0 (shm_words 1 (cons (mov_x0_x19) (exit_x0)))) (dev_base)))
 
 ; shm_share of x19's n pages with pid, then the answer as the status.
 (def share_words ((n int) (pid int)) (list int)
@@ -213,7 +221,7 @@
 
 (def test_shm_share_self () int
   (check_int "a second view, at the next device page"
-    (boot_words 0 (shm_words 1 (share_words 1 1))) (add (stack_top) 4096)))
+    (boot_words 0 (shm_words 1 (share_words 1 1))) (add (dev_base) 4096)))
 
 (def test_shm_share_no_pid () int
   (check_int "no pid 9" (boot_words 0 (shm_words 1 (share_words 1 9))) (err_no_port)))
@@ -248,7 +256,7 @@
 ; Loads its first device page and exits with what it holds: a fault, and
 ; status 139, if nothing is shared there yet.
 (def reader () (list int)
-  (cons (movz_hi 1 59392) (cons (ldr_x0_x1) (exit_x0))))   ; 0xE8000000
+  (cons (movz_hi32 1 32) (cons (ldr_x0_x1) (exit_x0))))   ; 0x2000000000
 
 (def test_shm_shared_between () int
   (check_int "pid 2 read what pid 1 wrote"
@@ -264,7 +272,7 @@
 
 (def test_shm_share_read_self () int
   (check_int "a second view, at the next device page"
-    (boot_words 0 (shm_words 1 (share_read_words 1 1))) (add (stack_top) 4096)))
+    (boot_words 0 (shm_words 1 (share_read_words 1 1))) (add (dev_base) 4096)))
 
 ; Refused as shm_share is: no such pid, pages not its own, none.
 (def test_shm_share_read_refused () int
@@ -287,7 +295,7 @@
 (def told_writer () (list int)
   (append (call_words (call_port_new))
     (cons (movz_hi 1 49216) (cons (movz 2 8) (append (call_words (call_receive))   ; 0xC0400000
-      (cons (movz_hi 1 59392) (cons (movz 0 9) (cons (str_x0_x1) (exit_x0))))))))) ; 0xE8000000
+      (cons (movz_hi32 1 32) (cons (movz 0 9) (cons (str_x0_x1) (exit_x0))))))))) ; 0x2000000000
 
 ; Pid 2 reads what pid 1 wrote, through its read-only view.
 (def test_shm_read_shared () int
@@ -1404,7 +1412,7 @@
 
 ; The 8 bytes received at byte off of the heap loaded into x0.
 (def heap_load ((off int)) (list int)
-  (cons (movz_hi 1 49216) (cons (if (eq off 0) (ldr_x0_x1) (ldr_x0_x1_8)) (nil int))))
+  (cons (movz_hi 1 49216) (cons (if (eq off 0) (ldr_x0_x1) (if (eq off 8) (ldr_x0_x1_8) (ldr_x0_x1_16))) (nil int))))
 
 ; The server's first message is the kernel's: from pid 0, wndw.
 (def test_window_notice () int
@@ -1412,11 +1420,14 @@
     (window_boot (receive_words (append (heap_load 0) (exit_x0))) (exit_x0))
     (words 0 (le_u32 (bytes_from_list "wndw") 0))))
 
-; It names pid 2, the client, and a page of the server's device pages.
+; It names pid 2, the client, and a page of the server's device pages,
+; in the high user range: the u64 at bytes 12 to 19, whose high word,
+; the low half of the load at 16, is at least 0x20.
 (def test_window_notice_names () int
   (let x (window_boot (receive_words (append (heap_load 8) (exit_x0))) (exit_x0))
-    (add (check_int "pid 2" (bit_and x 4294967295) 2)
-         (check_true "a device page" (ge (bit_shr x 32) 3892314112)))))
+    (let y (window_boot (receive_words (append (heap_load 16) (exit_x0))) (exit_x0))
+      (add (check_int "pid 2" (bit_and x 4294967295) 2)
+           (check_true "a device page" (ge (bit_and y 4294967295) (bit_shr (dev_base) 32)))))))
 
 ; Once the request has come, the server holds the window's 16 pages
 ; among its shared pages, as proc_info says of it: with an image page the
@@ -1426,11 +1437,11 @@
     (ge (bit_shr (window_boot (receive_words (receive_words (info_words 1 64 (third_words)))) (exit_x0)) 32) 16)))
 
 ; The server gives the window back as fs does once its client exits,
-; shm_unmap of the 16 pages at the address the notice names, its u32 at
+; shm_unmap of the 16 pages at the address the notice names, its u64 at
 ; byte 12: they are its shared pages, so 0.
 (def test_window_unmapped () int
   (check_int "given back"
-    (window_boot (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 8) (cons (ldr_w0_x1_4)
+    (window_boot (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 12) (cons (ldr_x0_x1)
                    (cons (movz 1 16) (append (call_words (call_shm_unmap)) (exit_x0)))))))
                  (exit_x0))
     0))
@@ -1471,7 +1482,7 @@
 ; address kept in x20; the open received and answered handle 7; then
 ; the next request received, and ws.
 (def window_served ((ws (list int))) (list int)
-  (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 8) (cons (ldr_w0_x1_4) (cons (mov_reg 20 0)
+  (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 12) (cons (ldr_x0_x1) (cons (mov_reg 20 0)
     (receive_words (send_answer 8 (receive_words ws)))))))))
 
 ; The client's write of the 8 bytes at its data byte 16 to stream x19.
@@ -1502,7 +1513,7 @@
 ; bytes, and the kernel writes into no page the server no longer has.
 (def test_window_given_up () int
   (check_int "24 bytes"
-    (window_io_boot (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 8) (cons (ldr_w0_x1_4)
+    (window_io_boot (receive_words (cons (movz_hi 1 49216) (cons (add_imm 1 1 12) (cons (ldr_x0_x1)
                       (cons (movz 1 16) (append (call_words (call_shm_unmap))
                         (receive_words (send_answer 8 (receive_words (exit_x0))))))))))
                     (append (pad_to 16 "/Volumes/data/a") "hellowin")
@@ -1627,23 +1638,65 @@
 (def test_device_pages_suffice () int
   (check_int "368 MB of device pages"
     (boot_words 0 (append (repeat_words 23 (cons (movz 0 4096) (call_words (call_shm_alloc)))) (exit_x0)))
-    (add (stack_top) (mul 22 16777216))))
+    (add (dev_base) (mul 22 16777216))))
 
 ; One call shares as much as dma_limit, 64 MB, the most a 4K screen's
 ; buffer needs; a page more is refused.
 (def test_shm_alloc_limit () int
   (add (check_int "64 MB"
          (boot_words 0 (cons (movz 0 16384) (append (call_words (call_shm_alloc)) (exit_x0))))
-         (stack_top))
+         (dev_base))
        (check_int "a page more"
          (boot_words 0 (cons (movz 0 16385) (append (call_words (call_shm_alloc)) (exit_x0))))
          (err_too_big))))
 
+; x19's n pages shared again with this process, pid, at its next device
+; pages: the view's address in x0.
+(def self_share_words ((n int) (pid int)) (list int)
+  (cons (mov_x0_x19) (cons (movz 1 n) (cons (movz 2 pid) (call_words (call_shm_share))))))
+
+; 16 MB shared, written 7 at its start, then shared with itself 70 times:
+; 1,136 MB of device pages on 16 MB of frames, past the 384 MB the old
+; place above the stack held, its last view at 1,120 MB past dev_base,
+; in the high range's second gigabyte; then ws.
+(def gigabyte_words ((pid int) (ws (list int))) (list int)
+  (shm_words 4096 (cons (movz 0 7) (cons (mov_x1_x19) (cons (str_x0_x1)
+    (append (repeat_words 70 (self_share_words 4096 pid)) ws))))))
+
+(def test_device_pages_past_a_gigabyte () int
+  (check_int "the 70th view"
+    (boot_words 0 (gigabyte_words 1 (exit_x0)))
+    (add (dev_base) (mul 70 16777216))))
+
+; The last view, across the gigabyte, is of the same frames: it holds
+; the 7 written through the first.
+(def test_device_pages_same_frames () int
+  (check_int "7"
+    (boot_words 0 (gigabyte_words 1 (cons (mov_reg 1 0) (cons (ldr_x0_x1) (exit_x0)))))
+    7))
+
+; mem_info's total, which the host's page tables take from, once pid 1
+; has spawned module 1, child, and waited for it.
+(def total_after ((child Raw)) int
+  (bit_and (boot_mods (cons (first (append (spawn_words 1) (append (call_words (call_wait)) (mem_words 8 (first_words)))))
+                            (cons child (nil Raw))))
+           4294967295))
+
+; A process's tables over the high range are given back as it ends: the
+; total after a child that mapped across a gigabyte is the total after
+; one that mapped nothing.
+(def test_device_tables_given_back () int
+  (check_int "as after nothing mapped"
+    (total_after (Raw 0 (code (gigabyte_words 2 (exit_x0)))))
+    (total_after (Raw 0 (code (exit_x0))))))
+
 ; The same with shared frames: thirty-two processes that share 64 MB each.
+; The last one's address comes up through waits, which keep a status's
+; low 32 bits (wait_word).
 (def test_freed_shared_suffices () int
   (check_int "the last one's last 16 MB"
     (boot_mods (cons (first (spawn_wait_times 32 1)) (cons (shm_hog) (nil Raw))))
-    (add (stack_top) (mul 3 16777216))))
+    (wait_word (add (dev_base) (mul 3 16777216)))))
 
 ; Spaces are given back: 300 processes in a row that each share a page,
 ; more than the board's 255 spaces, all run, and the last is pid 303.
@@ -1692,7 +1745,7 @@
 
 (def test_shm_unmap_refused () int
   (add (check_int "not its pages"
-         (boot_words 0 (cons (movz_hi 0 59392) (cons (movz 1 1) (append (call_words (call_shm_unmap)) (exit_x0)))))
+         (boot_words 0 (cons (movz_hi32 0 32) (cons (movz 1 1) (append (call_words (call_shm_unmap)) (exit_x0)))))
          (err_fault))
        (check_int "no pages" (boot_words 0 (shm_words 1 (unmap_words 0 (exit_x0)))) (err_too_big))))
 
@@ -1703,7 +1756,7 @@
 (def test_shm_unmap_frees_memory () int
   (check_int "the 60th 16 MB"
     (boot_words 0 (append (repeat_words 60 (shm_words 4096 (unmap_words 4096 (nil int)))) (cons (mov_x0_x19) (exit_x0))))
-    (stack_top)))
+    (dev_base)))
 
 ; The same given up out of order: each time 16 MB, then a page above it
 ; kept, then the 16 MB given up, 60 times over. Were only the last pages
@@ -1714,7 +1767,7 @@
   (check_int "the 60th 16 MB, under the pages kept"
     (boot_words 0 (append (repeat_words 60 (shm_words 4096 (cons (mov_reg 20 19) (shm_words 1 (cons (mov_reg 19 20) (unmap_words 4096 (nil int)))))))
                           (cons (mov_x0_x19) (exit_x0))))
-    (stack_top)))
+    (dev_base)))
 
 ; Pid 1 shares a page with pid 2, then takes it back.
 (def sharing_revoker ((pid int) (ws (list int))) Raw
