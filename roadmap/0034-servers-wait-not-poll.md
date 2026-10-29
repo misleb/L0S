@@ -28,7 +28,9 @@ still doing one or the other (0031's Log has the survey):
 - **`fs ram`** is a second `fs` process, registered as `tmpfs`, beside
   the disks' `fs`: one `fs` could serve both names, on a port each,
   waiting on both with a set, as `usb-hid` serves `keyboard` and
-  `pointer`.
+  `pointer`. Its loop (0024's `serve`, `drained`) would then take what
+  waits with `port_try_receive_set` and wait with `port_receive_set`,
+  and turns.l0's order, by pid, would cover both ports as it is.
 - **System Monitor** (`procmon`) refreshes by `port_try_receive` and
   naps; its loop is the toolkit's to change, with 0033's.
 - **`wm`** takes every client's request, the keyboard's and pointer's

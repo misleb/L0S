@@ -1,6 +1,6 @@
 # 0024: `fs` serves its clients fairly, small requests first
 
-Track: Storage · Status: active · Needs: 0023 · Spec: storage.md, testing.md
+Track: Storage · Status: done · Needs: 0023 · Spec: storage.md, testing.md
 
 ## Why
 
@@ -58,7 +58,7 @@ its own), but none is needed: `fs` can take every message waiting with
   why, as for any other failure; a `close` is never refused, since
   the kernel lets go of a stream whatever its answer; storage.md says
   what.
-- [ ] Measure on QEMU: `install` onto a volume, and an `ls` of a
+- [x] Measure on QEMU: `install` onto a volume, and an `ls` of a
   directory while it runs, before and after; in the log.
 
 ## Spec changes
@@ -82,7 +82,9 @@ its own), but none is needed: `fs` can take every message waiting with
 - 2026-10-28: started. 0031's port sets change nothing here: `fs`
   still serves one port, its clock's reply port being one it asks on
   and waits for, not one it serves, so the order stays all its own,
-  as written. Steps adjusted: the order is kept in a file of its own,
+  as written. 0034's idea of one `fs` serving `fs` and `tmpfs` on a
+  port each would only change how the loop takes and waits (a note
+  there says how); the order, by pid, would cover both. Steps adjusted: the order is kept in a file of its own,
   `user/sbin/fs/turns.l0`, pure, and tested in `turns_test.l0` beside
   it rather than in `fs_test`; a pid's requests are never reordered
   among themselves, since a client's later request may rest on its
@@ -119,3 +121,39 @@ its own), but none is needed: `fs` can take every message waiting with
   `fs_ask` returns the -5 and its why as any refusal. Nothing on the
   board sends to `fs` without waiting, so no e2e case or board test
   meets the bound; `turns_test` pins it.
+- 2026-10-28: step 4, timed on QEMU, and done. `fs` of 9dc273e (before
+  this goal; its `fs.l0` is 3c9c731's) built against this branch's
+  libraries, and this branch's, the rest of the initramfs and the
+  kernel the same, the e2e `install` case's inittab and disk (System
+  of 56000 sectors, a fresh `tools/mkdisk` image each boot), `run
+  install System` of 77 files: from the line typed to install's own
+  line back, timed on the host from the serial line. Alone, and in the
+  background with `ls /Volumes/System` typed every 0.1 s, each ls
+  timed from when it was typed, or the prompt before it if later, to
+  its prompt. The medians of 3 boots (2 for those alone on 4 CPUs and
+  with ls's on 1); an ls's are the medians of each boot's median and
+  worst:
+
+  | | before, 1 CPU | before, 4 | after, 1 | after, 4 |
+  |---|---|---|---|---|
+  | `install` alone | 1.54 s | 1.59 s | 1.41 s | 1.43 s |
+  | `install` with the ls's | 1.58 s | 1.70 s | 1.46 s | 1.54 s |
+  | an ls during it, median | 7 ms | 18 ms | 7 ms | 18 ms |
+  | an ls during it, worst | 17 ms | 40 ms | 12 ms | 41 ms |
+
+  `install` is no slower, a little faster even: the loop that takes
+  what waits with `port_try_receive` costs less than it saves. An ls
+  waits as long as before, as expected: install and the shell each
+  have one request out at a time, so before as after a `list` waits
+  for at most the write in progress, which on QEMU's virtio-blk is a
+  few milliseconds. The machine was shared, and a boot in three or four
+  came out half again as slow throughout (2.40 s and 2.13 s alone,
+  2.36 s and 2.27 s with ls's), on either side, which the medians
+  leave out; the same was timed first on 3c9c731, before rebasing on
+  9dc273e, and came out alike (1.37 s against 1.24 s alone on 1 CPU,
+  an ls 7 ms either way). What the goal
+  changes, a client with several requests waiting, no program on the
+  board does yet; `turns_test` is where it shows. On a slow card, where
+  a run takes longer, the wait for the one in progress is the limit
+  storage.md names; serving while a disk request is out is 0037, an
+  idea written for it.
