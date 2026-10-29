@@ -31,8 +31,7 @@ move independently, so several can be active at once.
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
-| [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | idea | – | – | desktop.md, toolkit.md |
-| [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | blocked | – | 0012 | toolkit.md |
+| [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | idea | – | 0012 | toolkit.md |
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
 | [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
@@ -43,6 +42,7 @@ move independently, so several can be active at once.
 | [0030](0030-cpu-usage.md) How the CPUs are used, and what each process serves, in `ps` and System Monitor | Kernel | idea | – | – | kernel.md, syscalls.md, programs.md, demo.md, testing.md |
 | [0034](0034-servers-wait-not-poll.md) Servers that wait for their time and their ports, not poll | Kernel | idea | – | – | programs.md, network.md, storage.md, demo.md |
 | [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | idea | – | 0033 | programs.md, toolkit.md |
+| [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 
 ## Ready
 
@@ -79,6 +79,7 @@ graph LR
 | [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | 2026-10-28 |
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
+| [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 | [0016](0016-pi5-eeprom-config.md) The Pi 5's boot config, read and changed from L0S | Pi 5 | 2026-10-27 |
 | [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | 2026-10-27 |

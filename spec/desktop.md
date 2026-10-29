@@ -199,7 +199,14 @@ Input:
   may serve `keyboard` and `pointer` both, as `usb-hid` does. Only a
   message from a driver `wm` listens to is taken as input.
 - **Keys** go to the front window's client, as the `KeyEvent` notices
-  the keyboard driver sends.
+  the keyboard driver sends, their bytes passed on as they came after
+  the window notice's id: `key` and four u32s, the Linux key code; 1
+  pressed, 0 released, 2 repeated; the character it types (`keymap.l0`,
+  with Shift, Caps Lock, and Ctrl with a letter as its control
+  character); and the modifiers held as it went, not counting itself,
+  Shift 1, Ctrl 2 and Alt 4 (`key_mod_shift` and the rest), either side
+  of each the same. Both keyboards send them alike, `virtio-input`'s
+  and `usb-hid`'s from its reports' modifier byte.
 - **The pointer**'s place, 0 to 32767 on each axis from the tablet, is
   scaled to the screen and sent to the driver as a `move`. A mouse's
   report, a `PointerMotion` from `usb-hid`, moves it instead from
@@ -372,17 +379,17 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   when it goes there and after it changes something, not when another
   program does, until Refresh. A file is shown as text only,
   its first 64 KB, 2000 lines of 240 characters at most, ASCII; and a
-  program it starts has no terminal. KeyEvent has no modifiers yet, so
-  there is no Ctrl-C, Ctrl-V or Alt-Left. Its window, like every
+  program it starts has no terminal. With nothing to copy, Ctrl-C and
+  Ctrl-V do nothing. Its window, like every
   client-decorated one, has no shadow, and the pointer over the inside
   of its edge is the arrow until it is pressed there: a client cannot
   ask for a pointer's shape, so only the border outside shows the
   resize pointer before a press.
 - Only toolkit windows can be resized or maximized (`draw` ignores the
   size notice, so a double click on its title bar leaves it as it is).
-- **Terminal (`vt`) is a terminal of lines, not a screen.** KeyEvent has
-  no modifiers yet, so there are no shortcuts: no Shift-PgUp to scroll
-  back, no Ctrl-Shift-T for a tab; the wheel and the buttons do it all.
+- **Terminal (`vt`) is a terminal of lines, not a screen.** Its only
+  shortcuts are Ctrl-Shift-T for a tab and Shift-Page Up and Down for a
+  page of the scrollback.
   There is no selecting, copying or pasting; no escape sequence moves
   the cursor, colors text or clears the screen (the line editing drops
   them); and a program is not told the terminal's size, so nothing it

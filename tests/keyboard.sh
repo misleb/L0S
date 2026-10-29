@@ -3,7 +3,8 @@
 # run keys at the serial shell, then presses keys on the board's virtio
 # keyboard through QEMU's monitor (sendkey), as typing in QEMU's window
 # would, and checks that keys echoed them to its terminal, the serial
-# line, and that Esc ended it. The serial line is typed through a FIFO,
+# line, with Ctrl and Alt as the KeyEvents' modifiers say, and that Esc
+# ended it. The serial line is typed through a FIFO,
 # and the board keeps running until this kills it. Run from the top of
 # the project, after make screen-initramfs.
 set -u
@@ -45,6 +46,10 @@ waits_for "serving compositor"
 
 for k in h i shift-1 spc shift-a ret; do monitor "sendkey $k"; done
 waits_for "hi! A"
+# The modifiers, in each KeyEvent: Ctrl-K echoed ^K, Alt-X M-x, and
+# Shift-Alt-X M-X.
+for k in ctrl-k alt-x shift-alt-x ret; do monitor "sendkey $k"; done
+waits_for "^KM-xM-X"
 
 # Once Esc has ended keys, the next line typed is the shell's again.
 monitor "sendkey esc"
@@ -54,4 +59,4 @@ waits_for "l0s> echo done"
 for try in $(seq 1 30); do grep -qx "done" "$out" && break; sleep 1; done
 grep -qx "done" "$out" || { echo "not ok - keyboard: the shell did not run echo done"; exit 1; }
 
-echo "ok - keyboard: keys echoed 'hi! A', and Esc ended it"
+echo "ok - keyboard: keys echoed 'hi! A' and '^KM-xM-X', and Esc ended it"

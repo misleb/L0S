@@ -245,7 +245,9 @@ It keeps the screen at scale 2 in `build/hidpi-2x.ppm`, to look at.
 `run keys` at the serial line, then presses `h`, `i`, Shift-1, Space,
 Shift-A and Enter on the virtio keyboard with the monitor's `sendkey`, as
 typing in the window would. It checks that the serial line shows `hi! A`,
-and that after Esc the shell runs the next command typed.
+then, for Ctrl-K, Alt-X and Shift-Alt-X, `^KM-xM-X`, the modifiers the
+key events carried, and that after Esc the shell runs the next command
+typed. `tests/usb.sh` types the same on the USB keyboard.
 
 [tests/vt.sh](../tests/vt.sh) boots the demo's own initramfs (`make
 vt-initramfs`), every shell running, but with two Terminals whatever the
@@ -289,6 +291,8 @@ header bar. Then:
   answered in it;
 - a click on the second tab's close button: its shell ends, the tab
   bar goes and the terminal is under the header bar again;
+- Ctrl-Shift-T, on the USB keyboard through `wm`: a tab opened as by
+  the button, the tab bar back, which its close button closes again;
 - `exit` typed into the tab left: its shell ends, and with the last tab
   the window closes and its `vt` exits. `run windows` shows only the
   other, in front, and `ps` shows neither the `vt` nor anything it
@@ -311,6 +315,9 @@ header bar. Then:
 - a click on the second row, through QMP: the press and release go
   through `wm` to the window, and the row is tinted with the accent and
   End Process turns red;
+- the focus ring, typed with `sendkey`: on Refresh after Tab, on End
+  Process after Tab again, back on Refresh after Shift-Tab, the
+  modifier come through `wm` and the toolkit, and gone after Esc;
 - the tab bar along its foot, three tabs, the first raised; a click on
   the third raises it, and a click on the second's close button closes
   it, the two left sharing the bar, the third still raised;

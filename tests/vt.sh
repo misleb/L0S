@@ -36,7 +36,8 @@
 #   9. a click on the first tab: it is shown again, the title its name,
 #      and echo hi typed is answered in it
 #  10. a click on the second tab's close button: its shell ends, the tab
-#      bar goes, and the title is the first tab's
+#      bar goes, and the title is the first tab's; then Ctrl-Shift-T
+#      opens a tab as the button did, which its close button closes
 #  11. exit, typed into it: its shell ends, and so its tab and, the last,
 #      the window, and its vt, leaving the other window in front
 #  12. a click on that one's close button: its vt ends its tab's shell
@@ -339,6 +340,16 @@ windows 2 "$first"
 shows "vt3 closed, the tab bar gone" "$((f_x + 639)) $((f_y + bar + 20)) $ground"
 ps_lines | grep -aqE "^ +$tab_shell +$front_vt  sh " && fail "after its tab closed, vt3's shell, pid $tab_shell, is still there"
 echo "ok - vt: vt3's close button ended its shell and closed it"
+
+# Ctrl-Shift-T, on the USB keyboard through wm, opens a tab as the
+# button does: the tab bar again, the new second tab raised; its close
+# button closes it, as before.
+monitor "sendkey ctrl-shift-t"
+shows "Ctrl-Shift-T opened a tab" "$((f_x + 329)) $((f_y + bar + 20)) $tab_on" \
+  "$((f_x + 14)) $((f_y + bar + 20)) $active"
+click $((f_x + 616)) $((f_y + bar + 20))
+shows "its close button closed it, the tab bar gone" "$((f_x + 639)) $((f_y + bar + 20)) $ground"
+windows 2 "$first"
 
 # exit at its shell ends the shell, and so its tab, the window's last,
 # so the window closes and its vt ends: the other is left, in front, and

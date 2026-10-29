@@ -5,7 +5,7 @@
 #   1. run keys, typed at the serial shell, echoes keys pressed on the
 #      USB keyboard through QEMU's monitor (sendkey), through xhci and
 #      usb-hid, which serves keyboard and pointer in one process: "hi! A",
-#      shift included; then z held, repeated
+#      shift included; Ctrl and Alt, "^KM-xM-X"; then z held, repeated
 #   2. the USB mouse, moved through QMP's input-send-event with relative
 #      axes, as a mouse moves, from where the pointer starts, 0, 0, to
 #      the top bar's Applications, 60, 16, and clicked, opens the
@@ -90,6 +90,11 @@ waits_for "serving compositor"
 for k in h i shift-1 spc shift-a ret; do monitor "sendkey $k"; done
 waits_for "hi! A"
 echo "ok - usb: the USB keyboard typed 'hi! A'"
+# The report's modifier byte, in each KeyEvent: Ctrl-K echoed ^K, Alt-X
+# M-x, and Shift-Alt-X M-X.
+for k in ctrl-k alt-x shift-alt-x ret; do monitor "sendkey $k"; done
+waits_for "^KM-xM-X"
+echo "ok - usb: Ctrl and Alt came with the keys, as ^KM-xM-X"
 # z held 900 ms: usb-hid repeats it from 500 ms, every 33 ms, timed by
 # the kernel's alarm, so a dozen z's; four at least.
 monitor "sendkey z 900"

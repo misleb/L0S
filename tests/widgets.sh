@@ -11,7 +11,10 @@
 #      where the sums of the advances put it
 #   3. a click of the tablet, through QMP, on the second row: the
 #      pointer's press and release forwarded to the window, the row
-#      selected, in the accent's tint, and End Process its own red
+#      selected, in the accent's tint, and End Process its own red; then
+#      the focus ring, on Refresh after Tab, on End Process after Tab
+#      again, and back on Refresh after Shift-Tab, the key's modifier
+#      come through wm and the toolkit
 #   4. the tab bar along its foot, AdwTabBar's: three tabs, the first
 #      raised; a click on the third raises it instead, and a click on
 #      the second's close button closes it, the two left sharing the bar
@@ -156,6 +159,23 @@ events "$(button true)"; sleep 1
 events "$(button false)"; sleep 1
 shows "a click selected the second row, and End Process woke" \
   "$rx $((cy + 79 + 30 + 1)) $selected" "$((cx + 550)) $((cy + 22)) $red"
+
+# The focus, by the keyboard: the targets in order are Refresh, End
+# Process, then the tabs and their close buttons. The ring is a button's
+# outer 2 pixels, the accent mixed half with the toolbar's ground:
+# 3584e4 and 242424 make 2d5484. Refresh is 34 square from 6, so its
+# ring's left side is at 6; End Process's at 546. Tab from nothing goes
+# to Refresh, Tab again to End Process, and Shift-Tab back to Refresh,
+# End Process its own red again; Esc takes the focus away.
+ring="45 84 132"
+monitor "sendkey tab"
+shows "Tab put the focus on Refresh" "$((cx + 6)) $((cy + 22)) $ring" "$((cx + 546)) $((cy + 22)) $red"
+monitor "sendkey tab"
+shows "Tab moved it on to End Process" "$((cx + 6)) $((cy + 22)) $ground" "$((cx + 546)) $((cy + 22)) $ring"
+monitor "sendkey shift-tab"
+shows "Shift-Tab moved it back to Refresh" "$((cx + 6)) $((cy + 22)) $ring" "$((cx + 546)) $((cy + 22)) $red"
+monitor "sendkey esc"
+shows "Esc took the focus away" "$((cx + 6)) $((cy + 22)) $ground"
 
 # The tab bar, the content's last 40 rows, from 400: the header bar's
 # ground, 303030, and three tabs 34 high from 403, sharing its 640, 6 in
