@@ -104,6 +104,16 @@ when `wm` starts and again when opening it finds a changed set of
 bundles: the apps of the initramfs never change, but an app copied into
 `/Applications` on a system volume, a bundle `mkdir`, `cp`, `write` and
 `append` make, is there the next time it opens (`tests/launcher-install.sh`).
+
+**An app's name and its open** ([user/lib/proto/appopen.l0](../user/lib/proto/appopen.l0)),
+as a `GApplication` owns its name on the session bus: an app's name is
+`app.EXEC`, EXEC its manifest's `exec` (`app.files`, `app.vt`), and a
+running app is launched again by the request `REPLY open ARG ...` to
+the port registered as that name: its arguments, paths or URLs, or
+none, each its length as a u16, least significant byte first, then its
+bytes, so one may hold spaces, the whole within one message. The answer,
+to REPLY, is `shown ID`: the window to bring to the front, 0 for the
+app's front one. What an open does is the app's own.
 The clock is
 `rtc clock` ([user/sbin/rtc](../user/sbin/rtc/rtc.l0)), which serves `clock`
 ([user/lib/proto/clock.l0](../user/lib/proto/clock.l0)): `listen` replies `time S`, S

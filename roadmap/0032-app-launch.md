@@ -1,6 +1,6 @@
 # 0032: Apps launched one way: a running app is asked, not started again
 
-Track: Desktop · Status: ready · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
+Track: Desktop · Status: active · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
 
 ## Why
 
@@ -50,7 +50,7 @@ running, if one is.
 
 ## Steps
 
-- [ ] The open request, pure (`user/lib/proto/app.l0`, beside the
+- [x] The open request, pure (`user/lib/proto/app.l0`, beside the
   manifest's reading): `open` and its arguments as bytes, each
   argument length-prefixed so a path may hold spaces; the answer,
   `shown ID`; the name of an app's port, `app.` and its `exec`. Read
@@ -101,3 +101,18 @@ running, if one is.
   It needs 0021's many windows on one port. 0031's wait on several
   ports is not needed, as the app's name can be registered on the port
   its windows use, but would let an app serve its name apart.
+- 2026-10-28: step 1, in `user/lib/proto/appopen.l0`, not `app.l0`:
+  app.l0 reads manifests and bundles through `PATHS` (`fs.l0`,
+  `paths.l0`), which the toolkit's apps do not all link (Disks links
+  `fs.l0` itself, so `PATHS` beside it would define its names twice),
+  and the toolkit needs the request. `appopen.l0` is pure and needs only
+  `ULIB` (`APPOPEN`). The name is `app.` and the program's file name
+  (`app_port_name`, of a path or a bare exec). The request is `REPLY
+  open` then each argument as a u16 length, least significant byte
+  first, and its bytes (`app_open_request`, refused past 65535 bytes an
+  argument or one message, 4096); `app_open_of` reads a message in
+  place, an `AppOpen`: `AppOpenAsked REPLY ARGS`, `AppOpenBad REPLY
+  WHY` for one whose lengths run past its end, or `NotAppOpen`. The
+  arguments are made a list each, once, as they are text (paths). The
+  answer is `shown ID` (`app_shown`, `app_shown_of`), text, as wm's
+  protocol is.

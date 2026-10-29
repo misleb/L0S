@@ -203,6 +203,9 @@ WAV     := user/lib/format/wav.l0
 AUDIO_SERVER := $(AUDIOLIB) $(WAV) user/lib/proto/audio_server.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
+# A running app launched again: its name, app.EXEC, the open request
+# and its answer; pure, for the toolkit, wm and open.
+APPOPEN := user/lib/proto/appopen.l0
 # The font service's protocol: its faces, and strikes shared with the
 # asker.
 FONTLIB := user/lib/proto/font.l0
@@ -467,6 +470,7 @@ $(call l0_test,$(ULIB) $(RANDOM) user/lib/proto/random_test.l0)
 $(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
 $(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)
 $(call l0_test,$(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0)
+$(call l0_test,$(ULIB) $(APPOPEN) user/lib/proto/appopen_test.l0)
 $(call l0_test,$(BASE) $(L0FS) user/lib/format/l0fs_test.l0)
 $(call l0_test,$(BASE) $(FAT) user/lib/format/fat_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/mbr_test.l0)
