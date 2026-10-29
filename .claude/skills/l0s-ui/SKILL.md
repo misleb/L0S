@@ -173,26 +173,78 @@ from `user/apps/widgets/widgets.l0`:
 
 ```
 (match (ui_open "Widgets" 640 400) ...)     once: UiOpenedWin or UiOpenFailed
-(port_receive (ui_win_port w))              a message
-(ui_route w (ui_event_of w message))        (UiRouted w2 action), action "" for none
+(ui_win_next w)                             (UiWinNext w1 event), put together
+(ui_route w1 event)                         (UiRouted w2 action), action "" for none
 (gallery_update g action event)             the new state
 (ui_present w2 (gallery_view g2))           repaints and damages only what changed
 ```
 
 Events are `UiKey`, `UiPress`, `UiRelease`, `UiMotion` (window coordinates),
 `UiLeave`, `UiFocus front`, `UiScroll x y dx dy` (the wheel, in steps, down
-and right positive), `UiExit pid status` and `UiOther`. A window that
-must also refresh on a timer polls instead (`user/apps/procmon/procmon.l0`: a
-`port_try_receive`, and an idle branch that sleeps). `ui_key_pressed ev`
+and right positive), `UiExit pid status`, `UiOpen`, `UiReply tag message`
+(an answer to the program's ask, tag -1 the toolkit's own: a strike
+came, present again), `UiIdle` (idle work's turn) and `UiOther`;
+`ui_event_lost` says the port is gone. A window that must also refresh
+on a timer sets an alarm on its port (`ui_win_alarm`) and takes it as an
+event (`ui_is_alarm`), as System Monitor does. `ui_key_pressed ev`
 is the code of a key pressed or repeated, -1 for anything else, and
 `ui_grid_page` the toolbar-over-grid page `widgets` and `procmon` share.
 Linking a window needs `RENDER`, `UI_CORE`, `UI_WINDOW` and `WMLIB`
 (`LIBS_widgets`).
 
+## A responsive app (`uiloop.l0`, roadmap 0033)
+
+A window answers only as fast as one step: the message routed, the
+app's update and view, the layout, the paint and the present. GTK keeps
+its windows answering with a main loop that compresses motion, lays out
+only what changed, and takes servers' answers as events; the toolkit's
+loop does the same, and an app keeps to these:
+
+- **Take messages through the toolkit**: `ui_win_next`, or `ui_app_next`
+  for a `UiApp`, never `port_receive` on the window's port. The loop
+  takes everything waiting first and puts it together: a window's run of
+  pointer moves is its last, its wheel's turns one summed, its sizes the
+  last; presses, releases, keys and everything else stay in order. It
+  also waits on the toolkit's reply ports, so strikes come, and hands
+  out replies and idle work's turn. A program that must wait on ports
+  of its own (`vt`'s tabs) puts its window's messages together itself,
+  with `ui_together`, and shows no `UiFontAt` text, whose strikes it
+  would never take.
+- **A step makes no request that waits on a server**: no `port_ask`, no
+  `fs_list`, no `font_open`'s ask, nothing whose answer could take long.
+  Ask with `ui_win_ask w TAG PORT BODY` (or `ui_app_ask`) and take the
+  answer as `UiReply TAG MESSAGE` (`ui_reply_of`), keeping in the state
+  what the step was waiting for (Files' `FlListing`, its tag the
+  window's id and a count, so an older answer is told apart). The
+  toolkit's own strikes are asked so already: text in a strike not yet
+  come is drawn once it does.
+- **Work too long for a step goes to idle work**, a bounded piece each:
+  keep what is left in the state, say `ui_win_idling w true` (or
+  `ui_app_idling`), do one piece on `UiIdle` and present, and say false
+  when none is left (Files' `fl_looked`, a file stat'ed or an app's icon
+  read a piece). A piece is short: a message waiting is taken before
+  the next.
+- **Key what is big and changes seldom**: a part of the view that shows
+  the same while the pointer moves elsewhere is `UiKeyed KEY CHILD`, KEY
+  what it shows (Fonts' page, `face.NAME`), or `ui_keyed_self NAME W` to
+  key it by its own hash (`ui_grid_page`'s grid). It keeps its layout
+  and paint while its key, its place and the state its look depends on
+  are the same, and is left out of the diff. Never hash images: key a
+  part holding them by what it shows (Files' `fl_items_key`). Keys are
+  unique in a window.
+- **Read the slow step's line**: a step over 16 ms is said once at the
+  debug level, in `dmesg`, as `NAME: slow step: T ms: route R, update
+  and view U, layout L, wait W, paint P, present E`. Update and view is
+  the app's own code (with `fv_view` and the like); layout and paint are
+  the toolkit's, high when a big part is not keyed, or text is measured
+  over and over; wait is a request the toolkit made in the step (a
+  strike, before 0033); present is the damage told, or a resize. A
+  first present that is slow says so too.
+
 Every notice `wm` sends names its window (`l0s.l0`'s `win_notice`,
 read in place with `win_notice_of` and the `_at` readers). An app of
 many windows is a `UiApp` (`uiapp.l0`): `ui_app_open`, `ui_app_next` ->
-`(UiAppEvent ID EVENT)`, `ui_app_route`, `ui_app_present` and
+`(UiAppNext app (UiAppEvent ID EVENT))`, `ui_app_route`, `ui_app_present` and
 `ui_app_close` by id, its state per window kept by the app (Files'
 `fl_loop`); `ui_open` is a `UiApp` of one window. A close, `wm`'s button
 or the window's own, is the action `win.close`: close the window, or

@@ -88,7 +88,7 @@ make the slow path visible, and write down how an app stays answering.
   text drawn once it is; `UiReply` for an app's own requests, Files'
   listing of a folder first. Idle work: a queue of bounded pieces the
   loop runs while no message waits.
-- [ ] The conventions written: the `l0s-ui` skill's "A responsive app"
+- [x] The conventions written: the `l0s-ui` skill's "A responsive app"
   and the rule in `.claude/rules/l0s-ui.md`; every app in `user/apps`
   checked against them and changed where it does not follow them.
 - [ ] The screen test (`tests/responsive.sh`, in `SCREEN_TESTS`): Fonts'
@@ -337,3 +337,35 @@ make the slow path visible, and write down how an app stays answering.
   first, idle's turn, nothing (`uiloop_test.l0`); Files' listing asked,
   its request, its tag, a reply shown with work to do, and an older
   reply ignored (`files_test.l0`).
+- 2026-10-28: step 6, the conventions. The `l0s-ui` skill's "A
+  responsive app" says them: take messages through `ui_win_next` or
+  `ui_app_next`; a step makes no request that waits on a server, but
+  asks (`ui_win_ask`, `ui_app_ask`) and takes `UiReply`; work too long
+  for a step is idle work, a bounded piece on each `UiIdle`; key what is
+  big and changes seldom (`UiKeyed`, `ui_keyed_self`, never hashing
+  images); and how to read the slow step's line. The rule in
+  `.claude/rules/l0s-ui.md`: an app's step makes no request that waits
+  on a server, takes its messages through the toolkit, and hands long
+  work to `UiIdle`. Every app in `user/apps` checked:
+  - **About, the gallery, Fonts**: follow them (steps 3 to 5). About
+    reads the kernel's process table each step, calls, not a server.
+  - **System Monitor** polled: `port_try_receive`, and with nothing a
+    nap of 20 ms, to refresh each second. It now takes `ui_win_next`
+    and an alarm on its window's port (`ui_win_alarm`, the kernel's
+    `alarm_at`; `ui_is_alarm` tells its notice), set again at each
+    refresh, so it waits for either, as 0034 named.
+  - **Terminal** (`vt`) waits on its own set, its tabs' ports beside
+    the app's, which the toolkit's loop does not take. It now takes
+    what waits with each message and puts the app's port's together
+    with `ui_together`, the tabs' first, so a burst of moves over its
+    header bar or tab bar is one step. Its shells' output is the tabs'
+    own and stays in order. It shows no `UiFontAt`, whose strike it
+    would never take.
+  - **Files** asks its listings (step 5), and now an open's folder on a
+    volume too, its window opening at once (`FlOpenListing`, the loop
+    asking it after `files` starts and after `fl_open_asked`), where
+    before it listed the folder, every file stat'ed, before the window
+    opened. **Disks** reads its drives and makes its changes in the
+    step, as Files still asks `df`, its refreshes and changes and a
+    file's text: written up as [0035](0035-apps-ask-not-wait.md), with
+    `vt`'s own set.

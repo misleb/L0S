@@ -130,6 +130,11 @@ MESSAGE` (of no window, for an app), the tags in the order asked;
 `ui_reply_of` reads one. One that cannot be sent is answered at once,
 the message `RecvFailed`. Files lists a folder on a volume so.
 
+**A timer.** A window that refreshes on a timer asks the kernel's alarm
+for its port, `ui_win_alarm W T`, and takes it as an event
+(`ui_is_alarm`), asking the next, as System Monitor reads its table
+each second: the loop waits for a message or the alarm, never polls.
+
 **Idle work.** A program with work too long for one step says so,
 `ui_win_idling W true` or `ui_app_idling`, and does it a bounded piece
 at a time: while nothing waits on its ports, the loop hands out

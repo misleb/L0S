@@ -41,8 +41,9 @@ move independently, so several can be active at once.
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008, 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
 | [0030](0030-cpu-usage.md) How the CPUs are used, and what each process serves, in `ps` and System Monitor | Kernel | idea | – | – | kernel.md, syscalls.md, programs.md, demo.md, testing.md |
-| [0033](0033-responsive-app-loop.md) An app's loop that keeps its window answering | Toolkit | active | 5/7 | 0021, 0031, 0032 | toolkit.md, desktop.md, programs.md, testing.md |
+| [0033](0033-responsive-app-loop.md) An app's loop that keeps its window answering | Toolkit | active | 6/7 | 0021, 0031, 0032 | toolkit.md, desktop.md, programs.md, testing.md |
 | [0034](0034-servers-wait-not-poll.md) Servers that wait for their time and their ports, not poll | Kernel | idea | – | – | programs.md, network.md, storage.md, demo.md |
+| [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | idea | – | 0033 | programs.md, toolkit.md |
 
 ## Ready
 
@@ -57,8 +58,9 @@ move independently, so several can be active at once.
   step said at the debug level (`uiloop.l0`), and the pointer's moves
   and the wheel's turns waiting put together before a step, and parts
   of a view keyed by what they show kept, and strikes and Files'
-  listings as replies, not waits, with idle work; next, the
-  conventions written and every app checked against them.
+  listings as replies, not waits, with idle work, and the conventions
+  written and the apps brought under them; next, the screen test of a
+  hover answered within 50 ms.
 
 ## Dependencies
 
@@ -73,6 +75,7 @@ graph LR
   0020 --> 0029
   0021[0021 many windows] --> 0032[0032 apps launched one way]
   0032 --> 0033[0033 responsive app loop]
+  0033 --> 0035[0035 apps ask, not wait]
   0031[0031 many ports] --> 0033
   0021 --> 0033
 ```
