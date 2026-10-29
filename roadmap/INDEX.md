@@ -25,8 +25,7 @@ move independently, so several can be active at once.
 
 | Goal | Track | Status | Progress | Needs | Spec |
 |---|---|---|---|---|---|
-| [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | active | 3/5 | probes/display/REQUEST-pi5-hvs-eof.md (landed) | display.md, pi5.md |
-| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | blocked | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
+| [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | ready | 0/6 | 0005 | display.md, desktop.md, toolkit.md |
 | [0007](0007-viewports-subsurfaces.md) Source viewports and subsurfaces | Display | idea | – | – | display.md, desktop.md |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | idea | – | – | display.md, desktop.md, toolkit.md |
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
@@ -43,12 +42,13 @@ move independently, so several can be active at once.
 | [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | idea | – | 0033 | programs.md, toolkit.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
+| [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | idea | – | – | display.md |
 
 ## Ready
 
-- [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame
-  interrupts: L0 gives them (L0 roadmap 0127), and `hvs` waits on them
-  on a Pi 5; next, which frame showed each change.
+- [0006](0006-paced-display-queue.md) A paced, pipelined display
+  queue: 0005 is done, so `hvs` can tell frames and releases; steps 1
+  to 4 are QEMU's.
 
 ## Dependencies
 
@@ -76,6 +76,7 @@ graph LR
 | [0002](0002-faster-with-more-cpus.md) More CPUs make L0S faster | Kernel | 2026-10-28 |
 | [0003](0003-pi5-cpus.md) All four of the Pi 5's CPUs | Pi 5 | 2026-10-28 |
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
+| [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | 2026-10-29 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |

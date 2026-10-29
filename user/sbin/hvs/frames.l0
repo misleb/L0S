@@ -7,9 +7,11 @@
 ; as before.
 
 ; The ends of frame: the controller, the port its interrupt comes to,
-; the frames counted so far, and whether a frame that brought none in
-; 50 ms has been said; or none, and the driver polls.
-(data Frames (Frames IoDevice int int bool) (NoFrames))
+; the frames counted so far, whether a frame that brought none in 50 ms
+; has been said, which frame showed each change (shown.l0), and when the
+; latest end of frame was taken, by clock_ns, 0 before the first; or
+; none, and the driver polls.
+(data Frames (Frames IoDevice int int bool Changes int) (NoFrames))
 
 ; The controller opened and its interrupt bound, every line masked and
 ; cleared but channel 0's, unmasked, said; or none, said, if the board
@@ -27,7 +29,7 @@
                 (let c (device_write32 l2 (l2_clear) (l2_all))
                   (let u (device_write32 l2 (l2_mask_clear) (eof_bit 0))
                     (let s (info_as "hvs" "ends of frame by interrupt 129, line 2 of disp_intr")
-                      (Frames l2 port 0 false)))))))))))
+                      (Frames l2 port 0 false (changes_new) 0)))))))))))
 
 ; No ends of frame, for why: said, and the driver polls.
 (def frames_none ((why (list int))) Frames
@@ -35,26 +37,62 @@
 
 ; The port ends of frame come to, or -1 for none.
 (def frames_port ((f Frames)) int
-  (match f ((Frames l2 port n said) port) ((NoFrames) -1)))
+  (match f ((Frames l2 port n said ch last) port) ((NoFrames) -1)))
 
 ; The frames counted, 0 with none.
 (def frames_count ((f Frames)) int
-  (match f ((Frames l2 port n said) n) ((NoFrames) 0)))
+  (match f ((Frames l2 port n said ch last) n) ((NoFrames) 0)))
 
-; An end of frame taken: channel 0's line cleared, then the interrupt
-; ended, and the frame counted.
-(def frames_taken ((f Frames)) Frames
+; Which frame showed each change, none with no ends of frame.
+(def frames_changes ((f Frames)) Changes
+  (match f ((Frames l2 port n said ch last) ch) ((NoFrames) (changes_new))))
+
+; An end of frame taken, channel 0's STATUS st read at it: the line
+; cleared, then the interrupt ended, and the count carried on to
+; STATUS's (frame_extended), so frames passed while the driver was busy
+; count too; the changes pending for it shown. Every 600th frame, ten
+; seconds at 60 Hz, said at the debug level.
+(def frames_taken ((f Frames) (st int)) Frames
   (match f
     ((NoFrames) f)
-    ((Frames l2 port n said)
+    ((Frames l2 port n said ch last)
       (let c (device_write32 l2 (l2_clear) (eof_bit 0))
         (let k (irq_ack (disp_intr_irq))
-          (Frames l2 port (add n 1) said))))))
+          (let n2 (frame_extended n (status_frames st))
+            (let ch2 (changes_at ch n2)
+              (let s (if (gt (div n2 600) (div n 600)) (frames_said n2 ch2) 0)
+                (let now (clock_ns)
+                  (let gap (frames_gap_said last now n n2)
+                    (Frames l2 port n2 said ch2 now)))))))))))
 
-; Message m, come to the ends of frame's port, taken if it is one: f
-; then, else f as it was (an alarm a wait set and no longer wants).
-(def frames_noticed ((f Frames) (m Message)) Frames
-  (if (is_irq_notice m (disp_intr_irq)) (frames_taken f) f))
+; A gap of over 100 ms between the end of frame taken at last and this
+; one, at now, from frame n to n2, said at the debug level, as more than
+; 63 frames in one would go uncounted; none before the first: 0.
+(def frames_gap_said ((last int) (now int) (n int) (n2 int)) int
+  (if (if (gt last 0) (gt (sub now last) 100000000) false)
+      (debug_as "hvs" (append "no end of frame taken for " (append (digits (div (sub now last) 1000000))
+        (append " ms, frames " (append (digits n) (append " to " (digits n2)))))))
+      0))
+
+; The frames counted and the changes, said at the debug level: 0.
+(def frames_said ((n int) (ch Changes)) int
+  (debug_as "hvs" (append "frame " (append (digits n)
+    (append ": changes shown to " (append (digits (changes_latest ch))
+      (append " of " (append (digits (changes_last ch))
+        (append ", " (append (digits (changes_pending ch)) " pending"))))))))))
+
+; f with a change noted at its count, shown after more frames
+; (list_frames, damage_frames).
+(def frames_changed ((f Frames) (after int)) Frames
+  (match f
+    ((NoFrames) f)
+    ((Frames l2 port n said ch last) (Frames l2 port n said (change_noted ch n after) last))))
+
+; Message m, come to the ends of frame's port, taken if it is one, with
+; channel 0's STATUS st: f then, else f as it was (an alarm a wait set
+; and no longer wants).
+(def frames_noticed ((f Frames) (m Message) (st int)) Frames
+  (if (is_irq_notice m (disp_intr_irq)) (frames_taken f st) f))
 
 ; Whether a list was taken, and the ends of frame after the wait.
 (data TakenBy (TakenBy bool Frames))
@@ -66,7 +104,7 @@
 (def taken_by ((f Frames) (d IoDevice) (g HvsGen) (start int)) TakenBy
   (match f
     ((NoFrames) (TakenBy (list_taken d g start 50) f))
-    ((Frames l2 port n said)
+    ((Frames l2 port n said ch last)
       (let due (add (clock_ns) 50000000)
         (let a (alarm_at port due)
           (frames_awaited f d g start due))))))
@@ -77,7 +115,7 @@
 (def frames_awaited ((f Frames) (d IoDevice) (g HvsGen) (start int) (due int)) TakenBy
   (let m (port_receive (frames_port f))
     (if (is_irq_notice m (disp_intr_irq))
-        (let f2 (frames_taken f)
+        (let f2 (frames_taken f (device_read32 d (disp_status g (hdmi0_channel))))
           (if (list_taken d g start 2) (TakenBy true f2) (frames_awaited f2 d g start due)))
         (if (if (is_alarm_notice m) (ge (clock_ns) due) false)
             (TakenBy (list_taken d g start 0) (frames_unanswered f))
@@ -88,8 +126,8 @@
 (def frames_unanswered ((f Frames)) Frames
   (match f
     ((NoFrames) f)
-    ((Frames l2 port n said)
+    ((Frames l2 port n said ch last)
       (if said
           f
           (let w (warn_as "hvs" "no end of frame in 50 ms: the channel polled instead")
-            (Frames l2 port n true))))))
+            (Frames l2 port n true ch last))))))

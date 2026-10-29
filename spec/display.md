@@ -289,8 +289,22 @@ where it says so, the board:
   a Pi 5: the stage now masks every line as it ends, and the kernel
   holds an interrupt nobody binds taken (syscalls.md).
 
-**Not yet:** `hvs` counts the frames it sees, but doesn't yet know
-which frame showed each change.
+**Which frame showed what** (`shown.l0`). `hvs` counts every frame:
+at each end of frame it reads channel 0's `STATUS` and carries its
+count on by the 6-bit frame count's step, so the frames that pass while
+it serves a request, its interrupt taken and not yet acked, count too
+(up to 63 at once). Each change is noted with a number and the frame it
+is shown by: a list switched, at the end of the frame after the one in
+which it was taken; a `damage`'s clean, a frame later still, as the
+frame being fetched may have read some rows before. At each end of
+frame the changes due are marked shown, and `hvs` keeps the latest
+shown. Every 600th frame it says the count and the changes at the debug
+level (`hvs: frame 1200: changes shown to 189 of 189, 0 pending`),
+and any gap of over 100 ms between ends of frame it took (`hvs: no end
+of frame taken for 714 ms, frames 19310 to 19311`), as more than 63
+frames in one would go uncounted.
+**Seen** on a Pi 5 at 3840×2160 at 60 Hz: frames 600, 1200 and 1800
+said 10.000 s apart, every change shown, none left pending.
 
 **The first runs** go one boot a stage, `probe`, `list`, `iommu` and
 then the whole driver, each with `tools/pi5-boot --until 'l0s>'` and its
@@ -360,7 +374,14 @@ of them could be confirmed from Linux's source:
   row 1920 wide takes 61 units and one 3840 wide 121, so a screen holds
   about 16 rows of 1920, or 8 of 3840: at 3840×2160 the desktop and the
   top bar take 242 units, and a window about W/8 for a width of W at
-  scale 2, its content and its frame. A screen past either is refused.
+  scale 2, its content and its frame. A screen past either is refused,
+  and so is every list after it, the pointer's moves among them, so the
+  pointer shown stops while `wm`'s moves on, until a window shrinks or
+  closes (seen with one widened to 3032 pixels at 4K). Resizing windows
+  at 4K has also brought gaps of up to a second with no end of frame,
+  the HVS's own frame count barely moving, as if the channel stalled;
+  more than 63 frames in one leave `hvs`'s count short. Neither was seen
+  at 1920×1080.
   On a screen 2560 wide or more a window's frame is fetched only where
   it shows, while that leaves half the handles and line memory free.
   At 3840×2160 and 60 Hz the HVS has shown five windows steady; with

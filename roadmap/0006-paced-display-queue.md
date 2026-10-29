@@ -1,6 +1,6 @@
 # 0006: A paced, pipelined display queue
 
-Track: Display · Status: blocked · Needs: 0005 · Spec: display.md, desktop.md, toolkit.md
+Track: Display · Status: ready · Needs: 0005 · Spec: display.md, desktop.md, toolkit.md
 
 ## Why
 

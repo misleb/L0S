@@ -1,6 +1,6 @@
 # 0005: The HVS's end-of-frame interrupts
 
-Track: Display · Status: active · Needs: probes/display/REQUEST-pi5-hvs-eof.md · Spec: display.md, pi5.md
+Track: Display · Status: done · Needs: probes/display/REQUEST-pi5-hvs-eof.md · Spec: display.md, pi5.md
 
 ## Why
 
@@ -50,12 +50,12 @@ channel is on.
   the end of the frame that took the first, not on a guess. A frame
   with no interrupt within 50 ms is said once and falls back to today's
   poll, so a missing interrupt cannot hang the desktop.
-- [ ] Which frame showed what: each change (a restack, a `damage`'s
+- [x] Which frame showed what: each change (a restack, a `damage`'s
   clean, a pointer move) is noted with the frame count it is pending
   for, and marked shown at the end of that frame; `hvs` keeps the
   latest shown, which 0006's notices read. Tested on the host as a pure
   record of pending and shown changes against frame numbers.
-- [ ] A board run with five windows, a drag and a scroll at 1920×1080
+- [x] A board run with five windows, a drag and a scroll at 1920×1080
   and at 3840×2160, the frame rate and any fallbacks in `dmesg`, kept
   in the Log; the Pi 5 section says how a frame is paced, and "Not yet"
   goes.
@@ -134,3 +134,34 @@ channel is on.
   two-lists case, which needs an `hdmi=` without HDMI0's regions; the
   50 ms fallback; and a restack's time against the poll, which step 5's
   run measures.
+- 2026-10-29: step 4 done, as `shown.l0`, pure and tested on the host
+  (the 6-bit carry against counting one by one over 300 seeded cases;
+  changes shown in turn, late, out of order). The count is carried on
+  by STATUS's frame count at each end of frame, which settles step 3's
+  frames passing uncounted while the interrupt is taken. A switched
+  list is shown by the end of the frame after the count it was taken
+  at, a `damage`'s clean a frame later; a pointer move is a switched
+  list. On the Pi 5 at 3840×2160, Files, Fonts and Terminal opened:
+  `frame 600: changes shown to 188 of 188, 0 pending` at 12.66 s, 1200
+  at 22.66 s, 1800 at 32.66 s, 600 frames each 10.000 s.
+- 2026-10-29: step 5, on the Pi 5 with five windows (Files, Fonts,
+  Terminal, Disks, System Monitor), the user dragging, scrolling and
+  resizing at the board, `dmesg` read over the UART:
+  - 3840×2160, scale 2: a drag and a scroll clean, a line every 10.000
+    s for two minutes, 3863 changes all shown, none pending, no
+    fallback. A first run had lost 64 frames, so `hvs` now says any gap
+    over 100 ms between ends of frame taken. Resizing then showed gaps
+    of up to 1087 ms in which STATUS's own count barely moved (one
+    frame in 714 ms), the HVS seemingly stalled; and a window widened
+    to 3032 pixels made every list refused, too wide for the line
+    memory, so the pointer stopped moving on the screen until the
+    window was closed. Both are 4K's alone and older than this goal's
+    work: goal 0038.
+  - 1920×1080, scale 1 (`hdmi=boot`): drag, scroll and resizes all
+    clean, smoother at the board, frames 600 to 7200 each 10.000 s
+    (one line 15 ms early, a frame's jitter), 3865 changes all shown,
+    no gap, no refusal.
+  Done: the rate counted is the mode's at both, and the desktop steady
+  with five windows as before, but for 0038's resizes at 4K. A
+  restack's time against the poll was not taken apart from the frames:
+  0006's queue, now ready, is where it matters.
