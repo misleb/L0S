@@ -203,6 +203,9 @@ WAV     := user/lib/format/wav.l0
 AUDIO_SERVER := $(AUDIOLIB) $(WAV) user/lib/proto/audio_server.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
+# A running app launched again: its name, app.EXEC, the open request
+# and its answer; pure, for the toolkit, wm and open.
+APPOPEN := user/lib/proto/appopen.l0
 # The font service's protocol: its faces, and strikes shared with the
 # asker.
 FONTLIB := user/lib/proto/font.l0
@@ -244,7 +247,7 @@ SHA256  := user/lib/format/sha256.l0
 UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/metrics.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
              user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0
-UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0
+UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0 $(APPOPEN)
 UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
@@ -268,13 +271,14 @@ LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
 LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
 LIBS_play       := $(AUDIOLIB) $(WAV)
-LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB)
+LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS)
 LIBS_init       := $(PATHS)
 LIBS_boot       := $(PATHS)
 LIBS_install    := $(PATHS)
 LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
+LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_fontview   := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
@@ -467,6 +471,7 @@ $(call l0_test,$(ULIB) $(RANDOM) user/lib/proto/random_test.l0)
 $(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
 $(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)
 $(call l0_test,$(ULIB) $(PATHS) $(APPLIB) user/lib/proto/app_test.l0)
+$(call l0_test,$(ULIB) $(APPOPEN) user/lib/proto/appopen_test.l0)
 $(call l0_test,$(BASE) $(L0FS) user/lib/format/l0fs_test.l0)
 $(call l0_test,$(BASE) $(FAT) user/lib/format/fat_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/mbr_test.l0)
@@ -772,7 +777,7 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # this machine's CPUs unless set; E2E_JOBS=1 runs one at a time). mkfs
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
-SCREEN_TESTS := vt files disks-create resize logo-menu procmon disks launcher launcher-install \
+SCREEN_TESTS := vt files launch disks-create resize logo-menu procmon disks launcher launcher-install \
                 fontview partitions usb fat hidpi widgets keyboard gpu-screen
 
 e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs $(BUILD)/mkfs

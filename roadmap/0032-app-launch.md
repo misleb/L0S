@@ -1,6 +1,6 @@
 # 0032: Apps launched one way: a running app is asked, not started again
 
-Track: Desktop · Status: ready · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
+Track: Desktop · Status: active · Needs: 0021 · Spec: desktop.md, toolkit.md, programs.md, testing.md
 
 ## Why
 
@@ -50,17 +50,17 @@ running, if one is.
 
 ## Steps
 
-- [ ] The open request, pure (`user/lib/proto/app.l0`, beside the
+- [x] The open request, pure (`user/lib/proto/app.l0`, beside the
   manifest's reading): `open` and its arguments as bytes, each
   argument length-prefixed so a path may hold spaces; the answer,
   `shown ID`; the name of an app's port, `app.` and its `exec`. Read
   and written in place, with host tests, refusals included.
-- [ ] The toolkit's side: a `UiApp` (0021) registers `app.EXEC` on its
+- [x] The toolkit's side: a `UiApp` (0021) registers `app.EXEC` on its
   port, and gives the app an `open` as the action `app.open` with its
   arguments, through `ui_app_event` as any other. An app that does not
   take it answers `shown 0`, so every app comes forward and none opens
   more, until it says otherwise. Host tests.
-- [ ] `wm`'s launch: a launch looks up the app's name; found, it sends
+- [x] `wm`'s launch: a launch looks up the app's name; found, it sends
   `open` and waits on the answer, on its alarm, 2 seconds at most;
   not, it starts the program with the arguments and keeps the app as
   starting until the name is registered, holding any launch meanwhile
@@ -68,16 +68,18 @@ running, if one is.
   app's front window, comes to the front with the focus, as a press on
   it would bring it. The launcher calls it. The choice is a pure
   function of what `wm` knows, tested in `wm_test.l0`.
-- [ ] `open APP [ARG ...]`: the compositor protocol's `launch NAME ARG
+- [x] `open APP [ARG ...]`: the compositor protocol's `launch NAME ARG
   ...` and a shell command, `user/bin/open`, that sends it, `APP` an
   app's name as the launcher shows it or its `exec`. desktop.md's
   protocol table, programs.md's row.
-- [ ] The apps: Files takes `app.open` as a new window, at the folder
-  its first argument names, if it is one; Terminal as a new window, in
-  the process the first started; the others come forward only. Each
-  app's choice in programs.md. `vt` keeps its tabs: a new window is a
-  window of its own, with one tab.
-- [ ] The screen test (`tests/launch.sh`, in `SCREEN_TESTS`): Files
+- [x] The apps: Files takes `app.open` as a new window, at the folder
+  its first argument names, if it is one; the others come forward
+  only. Each app's choice in programs.md.
+- [ ] Terminal's answer: `app.open` as a new window, in the process the
+  first started. `vt` keeps its tabs: a new window is a window of its
+  own, with one tab. It follows 0031's rewrite of `vt` (its relays
+  gone), once both have merged.
+- [x] The screen test (`tests/launch.sh`, in `SCREEN_TESTS`): Files
   clicked twice in the launcher, `run windows` showing two windows of
   one client; Disks clicked twice, one window, then a Terminal over it
   and Disks clicked again, Disks in front with the focus; `open files
@@ -101,3 +103,108 @@ running, if one is.
   It needs 0021's many windows on one port. 0031's wait on several
   ports is not needed, as the app's name can be registered on the port
   its windows use, but would let an app serve its name apart.
+- 2026-10-28: step 1, in `user/lib/proto/appopen.l0`, not `app.l0`:
+  app.l0 reads manifests and bundles through `PATHS` (`fs.l0`,
+  `paths.l0`), which the toolkit's apps do not all link (Disks links
+  `fs.l0` itself, so `PATHS` beside it would define its names twice),
+  and the toolkit needs the request. `appopen.l0` is pure and needs only
+  `ULIB` (`APPOPEN`). The name is `app.` and the program's file name
+  (`app_port_name`, of a path or a bare exec). The request is `REPLY
+  open` then each argument as a u16 length, least significant byte
+  first, and its bytes (`app_open_request`, refused past 65535 bytes an
+  argument or one message, 4096); `app_open_of` reads a message in
+  place, an `AppOpen`: `AppOpenAsked REPLY ARGS`, `AppOpenBad REPLY
+  WHY` for one whose lengths run past its end, or `NotAppOpen`. The
+  arguments are made a list each, once, as they are text (paths). The
+  answer is `shown ID` (`app_shown`, `app_shown_of`), text, as wm's
+  protocol is.
+- 2026-10-28: step 2. `ui_app_start` registers `app.EXEC` on the app's
+  port, EXEC the file name of `proc_path (l0s_pid)`, so every toolkit
+  program, `ui_open`'s too, has its name with no code of its own; a
+  second of a program, from `run`, finds it taken and goes without. The
+  open is a new event, `UiOpen REPLY ARGS`, read by one
+  `ui_message_event` (exit, open, or `UiOther`) that `ui_event_of` and
+  `ui_app_event` share, so it comes the same way from the compositor,
+  which sends it, or from anyone. The default is GApplication's: routing
+  it sets off `app.open` and answers `shown 0` at once, in
+  `ui_app_route` (id -1) and in `ui_route` for a program of one window,
+  so About, Disks, Fonts, System Monitor and the gallery need nothing.
+  `UiApp` gained a last field, whether the app answers its opens itself
+  (`ui_app_opening`), then with `ui_app_shown`; the default needs no
+  state held across a step, unlike the close's, as the answer is sent as
+  the open is routed. Every answer is a `port_tell`, so 0033's loop can
+  send it without waiting. Terminal (`vt`) registers `app.vt` through
+  `ui_open_csd`, but its own loop drops a notice from the compositor
+  that names no window of its (`from_wm`), so it never answers an open:
+  see step 5.
+- 2026-10-28: steps 3 and 4, in one change, as the compositor's
+  `launch` is `wm`'s launch asked by another. The pure part is
+  `user/sbin/wm/launching.l0` and its tests, not `wm.l0` and
+  `wm_test.l0`, to keep it apart from 0031's changes to `wm.l0`
+  (`wm_test.l0` tests the window a launch brings forward,
+  `launch_window`, and `port_client`). `launch_choice` takes the
+  launches waited on, the exec and the name's lookup: `LaunchAsk PORT`
+  if it is registered, `LaunchHold` if the app is starting, else
+  `LaunchStart`. A `Launch` is `LaunchAsked EXEC PID PORT DUE` or
+  `LaunchStarting EXEC PID DUE HELD`, kept in `Bar`'s new last field,
+  not `Wm`'s, which every function of `wm` matches. The open's answer
+  comes to `wm`'s own port, so `received`, which 0031 changes, is not
+  touched: `replied` takes `shown ID` first (`app_shown_of`; a
+  request's first four bytes are its reply port, and "show" read as one
+  is no port), and matches it to the open asked of its sender, or else
+  the oldest asked of an app with no window known. The alarm is the one
+  wm has: `close_alarm` sets it for the soonest close or launch, and
+  `closes_due` gives up the launches due too (`launches_late`). An
+  answer brings forward the window named, if it is the sender's, else
+  its front window, with `raised_by`, as a press does. "Registered" is
+  seen as the app's first window: the toolkit registers before it opens
+  one, so `window`'s and `csd`'s reply (`window_came`) ends the start
+  and launches each held one again, which then asks it; a program that
+  never registers is started again for them, as before. A start has 10
+  seconds (`launch_start_ns`), as an app loads its face and icons
+  first; past it, held launches go to the app if its name is there by
+  then, or are dropped, never started again, and `wm` says so. An exit
+  ends whatever was waited on of the process (`gone`). The L0S menu's
+  About L0S launches the same way. `launch NAME ARG ...` is words, as
+  every request of `wm`'s is: `requested` reads them split at spaces,
+  and the shell splits `open`'s arguments at spaces already, so no
+  argument from it holds one; the open sent on is length-prefixed, so
+  another client could pass one. NAME is the app's name, its bundle's
+  or its exec (`launch_named`); `ok` comes once launched, not once the
+  window is up. `open` is `user/bin/open` (`run open files /Volumes`);
+  `/bin/open` joined the `fs` and `shell` e2e cases' listings.
+- 2026-10-28: step 5, every app but Terminal; the step is split in two,
+  Terminal's answer its own step, which follows 0031's rewrite of `vt`
+  once both branches have merged (another agent owns `user/apps/vt`
+  meanwhile). Files says `ui_app_opening` and answers an open with a
+  window more, in front, at the folder its first argument names
+  (`fl_open_at`: an absolute path made normal, that `fv_list` lists),
+  else at `/`, keeping the view and sidebar of a window it has, as New
+  Window does, and answers with its id; with no room for a window, 0.
+  Started with an argument, as `wm` starts it for `open files
+  /Volumes` when it is not running, its first window is there
+  (`fl_placed`). Disks, System Monitor, Fonts, About and the gallery
+  route every message through `ui_route`, so the toolkit's `shown 0`
+  answers for them with no change. Until Terminal's step: Terminal is
+  started through `ui_open_csd`, so it registers `app.vt` and `wm`
+  asks it, but its loop drops the open (`vt`'s `from_wm` passes on
+  only notices naming its window), so a launch of Terminal while one
+  runs waits `wm`'s 2 seconds, then brings its front window forward and
+  `wm` says `vt did not answer its open within 2 seconds`; no second
+  Terminal is started. A Terminal's tabs are its new terminals until
+  then.
+- 2026-10-28: step 6. `tests/launch.sh` boots the disks' initramfs, on
+  a fresh disk, as `files.sh` does, since Files lists `/Volumes` only
+  with `fs` running; it waits for `wm`'s `serving compositor` before its
+  first click, as the shell's prompt comes first. Every check reads `run
+  windows`: windows by title, their clients by the pid it gives last,
+  never a fixed pid, so 0031's shift of the demo's pids does not touch
+  it. Disks is checked to be the same pid after it is clicked from
+  behind Terminal; `/Volumes` by the third window's sidebar, its
+  Volumes row selected. A limit seen: an app's name is its exec's, so
+  two bundles of one program, as `launcher-install.sh`'s copy of
+  Terminal would be with the same file name, share one name, and the
+  second launched is asked of the first. `/bin/open` is one file more
+  in the `install`, `install_boot` and `rootboot_tmpfs` cases' counts,
+  which this step's run of `make e2e` found. `make check`, `make test` and
+  `make e2e` pass; the goal is done but for Terminal's answer.

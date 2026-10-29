@@ -1,0 +1,97 @@
+; appopen.l0 -- launching an app that is running: its name, the open
+; request the compositor sends it, and its answer, as a GApplication is
+; activated through the name it owns on the session bus. Pure, so the
+; toolkit, wm and the shell's open link it without app.l0's files.
+;
+;   app.EXEC                    the name an app registers on the port its
+;                               windows' events come to, EXEC its
+;                               manifest's exec: app.files, app.vt
+;   REPLY open ARG ...          a request: the app is launched again, with
+;                               ARGs, paths or URLs, or none. Each ARG is
+;                               its length, a u16 least significant byte
+;                               first, then its bytes, so it may hold
+;                               spaces; the whole within max_message
+;   shown ID                    the answer, to REPLY: the window to bring
+;                               to the front, 0 for the app's front one
+;
+; What an open does is the app's: a window more, a file opened, or
+; nothing but coming forward.
+
+; The name an app whose program is at path, or is called exec, registers
+; its port as: app. and the program's file name, its path's last part.
+(def app_port_name ((path (list int))) (list int)
+  (append "app." (app_open_base path)))
+
+; path after its last /, all of it if it has none.
+(def app_open_base ((path (list int))) (list int)
+  (rev (up_to 47 (rev path))))
+
+; ----------------------------------------------------------------- asking
+
+; The open request, its answer to reply, with args; or why it cannot be
+; sent: an argument longer than a u16 holds, or the whole past one
+; message.
+(def app_open_request ((reply int) (args (list (list int)))) (Result bytes (list int))
+  (match (app_open_onto args (rev (append (u32_le reply) "open")))
+    ((Err why) ((Err bytes (list int)) why))
+    ((Ok acc)
+      (if (gt (length acc) (max_message))
+          ((Err bytes (list int)) (append "the open request is over " (append (digits (max_message)) " bytes")))
+          ((Ok bytes (list int)) (bytes_from_list (rev acc)))))))
+
+; Each of args, its length and its bytes, onto the reversed acc; or why
+; one is too long.
+(def app_open_onto ((args (list (list int))) (acc (list int))) (Result (list int) (list int))
+  (if (is_empty args)
+      ((Ok (list int) (list int)) acc)
+      (let n (length (head args))
+        (if (gt n 65535)
+            ((Err (list int) (list int)) "an argument is over 65535 bytes")
+            (app_open_onto (tail args) (rev_onto (head args) (rev_onto (le16 n) acc)))))))
+
+; ---------------------------------------------------------------- reading
+
+; What a message to an app's port is, as an open: one, with its reply
+; port and its arguments; one that does not read, its reply port and
+; why; or no open at all.
+(data AppOpen (AppOpenAsked int (list (list int))) (AppOpenBad int (list int)) (NotAppOpen))
+
+; Whether the payload of b, a message's bytes (Message's), is an open
+; request: a reply port, then open.
+(def app_open_is ((b bytes)) bool
+  (if (lt (msg_len b) 8) false (bytes_is_at b (add (header_len) 4) "open")))
+
+; The open m is, read in place: each argument's length checked against
+; what is left of the message.
+(def app_open_of ((m Message)) AppOpen
+  (match m
+    ((RecvFailed) (NotAppOpen))
+    ((Message from b)
+      (if (not (app_open_is b))
+          (NotAppOpen)
+          (app_open_args b (msg_reply b) (add (header_len) 8) (nil (list int)))))))
+
+; The arguments of b from byte i on, onto the reversed acc, of the open
+; whose reply port is reply.
+(def app_open_args ((b bytes) (reply int) (i int) (acc (list (list int)))) AppOpen
+  (let end (bytes_len b)
+    (if (eq i end)
+        (AppOpenAsked reply (rev acc))
+        (if (gt (add i 2) end)
+            (AppOpenBad reply "an argument's length is cut short")
+            (let n (le_u16_at b i)
+              (if (gt (add (add i 2) n) end)
+                  (AppOpenBad reply "an argument is longer than the request")
+                  (app_open_args b reply (add (add i 2) n) (cons (bytes_range b (add i 2) (add (add i 2) n)) acc))))))))
+
+; --------------------------------------------------------------- answering
+
+; The answer to an open: window id to bring forward, 0 for the front one.
+(def app_shown ((id int)) (list int) (append "shown " (digits id)))
+
+; The window an answer names, if payload is one: shown and a number.
+(def app_shown_of ((payload (list int))) (Option int)
+  (if (not (starts_with payload "shown "))
+      ((None int))
+      (let w (drop_n payload 6)
+        (if (is_number w) (word_number w) ((None int))))))

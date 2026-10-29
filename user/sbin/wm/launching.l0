@@ -1,0 +1,162 @@
+; launching.l0 -- wm's launches of apps, pure: whether a launch asks the
+; app that is running, starts it, or waits for one starting; and the
+; launches it waits on, an open's answer or an app's first window, until
+; each is due. wm.l0's section "the launcher" does what these decide.
+;
+; A launch of an app looks up its name, app.EXEC (appopen.l0). Found, wm
+; sends it open and waits for shown ID, at most launch_answer_ns. Not
+; found, and the app not starting, wm starts its program and waits for
+; its first window, which the toolkit opens only once the name is
+; registered, at most launch_start_ns; a launch meanwhile is held, and
+; sent once it has, so two quick clicks start one process.
+
+; A launch wm waits on: an open sent to the app whose program is EXEC,
+; its pid, -1 if no window of it was known, and the port its name is,
+; due at a time on clock_ns; or the app's program started, as pid, due
+; at a time, with the arguments of each launch held meanwhile, oldest
+; first.
+(data Launch
+  (LaunchAsked (list int) int int int)
+  (LaunchStarting (list int) int int (list (list (list int)))))
+
+; How long an app has to answer an open, 2 seconds; and to open its
+; first window once started, 10, as an app loads its face and its icons
+; first.
+(def launch_answer_ns () int 2000000000)
+(def launch_start_ns () int 10000000000)
+
+; What a launch does: ask the app at port, which is running; hold it for
+; the app starting; or start the app.
+(data LaunchChoice (LaunchAsk int) (LaunchHold) (LaunchStart))
+
+; The launch of the app whose program is exec, its name looked up as
+; found, with ls waited on: asked if the name is registered, held if the
+; app is starting, else started.
+(def launch_choice ((ls (list Launch)) (exec (list int)) (found Lookup)) LaunchChoice
+  (match found
+    ((Found port) (LaunchAsk port))
+    ((NotFound) (if (launch_is_starting ls exec) (LaunchHold) (LaunchStart)))))
+
+; Whether the app whose program is exec is starting, in ls.
+(def launch_is_starting ((ls (list Launch)) (exec (list int))) bool
+  (if (is_empty ls)
+      false
+      (match (head ls)
+        ((LaunchAsked e pid port t) (launch_is_starting (tail ls) exec))
+        ((LaunchStarting e pid t held) (if (eq e exec) true (launch_is_starting (tail ls) exec))))))
+
+; ls with a launch of exec, with args, held by the app's start.
+(def launch_held ((ls (list Launch)) (exec (list int)) (args (list (list int)))) (list Launch)
+  (if (is_empty ls)
+      ls
+      (match (head ls)
+        ((LaunchAsked e pid port t) (cons (head ls) (launch_held (tail ls) exec args)))
+        ((LaunchStarting e pid t held)
+          (if (eq e exec)
+              (cons (LaunchStarting e pid t (append held (cons args (nil (list (list int)))))) (tail ls))
+              (cons (head ls) (launch_held (tail ls) exec args)))))))
+
+; The app among apps that name means, as open names it: by its name, as
+; the launcher shows it (Files, System Monitor in one word only by its
+; exec), by its bundle's name (Monitor), or by its exec (procmon); the
+; first that matches, in that order of kinds.
+(def launch_named ((apps (list App)) (name (list int))) (Option App)
+  (match (launch_find apps name 0)
+    ((Some a) (Some a))
+    ((None)
+      (match (launch_find apps name 1)
+        ((Some a) (Some a))
+        ((None) (launch_find apps name 2))))))
+
+; The first of apps whose name (kind 0), bundle's name (1) or exec (2) is
+; name.
+(def launch_find ((apps (list App)) (name (list int)) (kind int)) (Option App)
+  (if (is_empty apps)
+      ((None App))
+      (if (eq (launch_key (head apps) kind) name)
+          (Some (head apps))
+          (launch_find (tail apps) name kind))))
+
+; App a's name, bundle's name or exec, as kind says.
+(def launch_key ((a App) (kind int)) (list int)
+  (if (eq kind 0)
+      (app_name a)
+      (let dir (app_open_base (app_dir_of (app_exec a)))
+        (if (eq kind 1)
+            (if (ends_with dir ".app") (take dir (sub (length dir) 4)) dir)
+            (app_open_base (app_exec a))))))
+
+; ------------------------------------------------------------- answered
+
+; A launch taken from those waited on, and the rest; or none.
+(data LaunchTaken (LaunchTook Launch (list Launch)) (LaunchNone))
+
+; The open an answer from pid answers: the one asked of pid, else the
+; oldest asked of an app with no window known; taken from ls.
+(def launch_answered ((ls (list Launch)) (pid int)) LaunchTaken
+  (match (launch_take ls pid true (nil Launch))
+    ((LaunchTook l rest) (LaunchTook l rest))
+    ((LaunchNone) (launch_take ls -1 true (nil Launch)))))
+
+; The first of ls that is an open asked of pid, if asked, or a start as
+; pid, if not; taken out, the rest in order, before which acc, reversed.
+(def launch_take ((ls (list Launch)) (pid int) (asked bool) (acc (list Launch))) LaunchTaken
+  (if (is_empty ls)
+      (LaunchNone)
+      (if (launch_of (head ls) pid asked)
+          (LaunchTook (head ls) (rev_onto acc (tail ls)))
+          (launch_take (tail ls) pid asked (cons (head ls) acc)))))
+
+; Whether l is an open asked of pid (asked) or a start as pid (not).
+(def launch_of ((l Launch) (pid int) (asked bool)) bool
+  (match l
+    ((LaunchAsked e p port t) (if asked (eq p pid) false))
+    ((LaunchStarting e p t held) (if asked false (eq p pid)))))
+
+; The start as pid, which has opened its first window, taken from ls.
+(def launch_started ((ls (list Launch)) (pid int)) LaunchTaken
+  (launch_take ls pid false (nil Launch)))
+
+; ls without what pid, which has exited, was waited on for.
+(def launches_gone ((ls (list Launch)) (pid int)) (list Launch)
+  (if (is_empty ls)
+      ls
+      (if (if (launch_of (head ls) pid true) true (launch_of (head ls) pid false))
+          (launches_gone (tail ls) pid)
+          (cons (head ls) (launches_gone (tail ls) pid)))))
+
+; ------------------------------------------------------------------ due
+
+; When a launch is due.
+(def launch_due ((l Launch)) int
+  (match l ((LaunchAsked e p port t) t) ((LaunchStarting e p t held) t)))
+
+; When the first of ls is due, or first if it is sooner and not -1; -1
+; for none.
+(def launch_next ((ls (list Launch)) (first int)) int
+  (if (is_empty ls)
+      first
+      (let t (launch_due (head ls))
+        (launch_next (tail ls) (if (if (lt first 0) true (lt t first)) t first)))))
+
+; The launches of ls due at now, and those not.
+(data LaunchesDue (LaunchesDue (list Launch) (list Launch)))
+
+; ls split at now, each part in its order.
+(def launches_due ((ls (list Launch)) (now int)) LaunchesDue
+  (launches_split ls now (nil Launch) (nil Launch)))
+
+; launches_due's loop, onto the reversed due and later.
+(def launches_split ((ls (list Launch)) (now int) (due (list Launch)) (later (list Launch))) LaunchesDue
+  (if (is_empty ls)
+      (LaunchesDue (rev due) (rev later))
+      (if (le (launch_due (head ls)) now)
+          (launches_split (tail ls) now (cons (head ls) due) later)
+          (launches_split (tail ls) now due (cons (head ls) later)))))
+
+; What wm says of a launch that came due unanswered: the open not
+; answered, or the app not started, in its time.
+(def launch_late_line ((l Launch)) (list int)
+  (match l
+    ((LaunchAsked e p port t) (append (app_open_base e) " did not answer its open within 2 seconds"))
+    ((LaunchStarting e p t held) (append (app_open_base e) " opened no window within 10 seconds of starting"))))

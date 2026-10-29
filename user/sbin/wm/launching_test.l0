@@ -1,0 +1,113 @@
+; launching_test.l0 -- wm's choice for a launch, and the launches it
+; waits on.
+
+(def files_exec () (list int) "/Applications/Files.app/files")
+(def disks_exec () (list int) "/Applications/Disks.app/disks")
+
+; One word of args, as a launch's arguments.
+(def one ((s (list int))) (list (list int)) (cons s (nil (list int))))
+
+; A choice as text.
+(def choice_text ((c LaunchChoice)) (list int)
+  (match c ((LaunchAsk port) (append "ask " (digits port))) ((LaunchHold) "hold") ((LaunchStart) "start")))
+
+; Launches as text, each a word: asked EXEC-NAME/PID/PORT/T, or
+; starting EXEC-NAME/PID/T/HELD, HELD the held launches' arguments,
+; each its arguments joined by +, the launches by ;.
+(def launches_text ((ls (list Launch))) (list int)
+  (unwords (launch_words ls)))
+
+(def launch_words ((ls (list Launch))) (list (list int))
+  (if (is_empty ls)
+      (nil (list int))
+      (cons (match (head ls)
+              ((LaunchAsked e pid port t) (join_with "/" (cons (append "asked " (app_open_base e)) (numbers_words (cons pid (cons port (cons t (nil int))))))))
+              ((LaunchStarting e pid t held)
+                (join_with "/" (cons (append "starting " (app_open_base e)) (append (numbers_words (cons pid (cons t (nil int)))) (cons (held_text held) (nil (list int))))))))
+            (launch_words (tail ls)))))
+
+(def held_text ((held (list (list (list int))))) (list int)
+  (if (is_empty held) "-" (join_with ";" (held_words held))))
+
+(def held_words ((held (list (list (list int))))) (list (list int))
+  (if (is_empty held) (nil (list int)) (cons (join_with "+" (head held)) (held_words (tail held)))))
+
+; Files starting as pid 20, due at 100; Disks asked as pid 30 at port
+; 7, due at 50.
+(def waiting () (list Launch)
+  (cons (LaunchStarting (files_exec) 20 100 (nil (list (list int))))
+    (cons (LaunchAsked (disks_exec) 30 7 50) (nil Launch))))
+
+; Registered: asked at its port, whatever else is waited on.
+(def test_launch_choice_ask () int
+  (add (check_str "running" (choice_text (launch_choice (nil Launch) (files_exec) (Found 12))) "ask 12")
+       (check_str "running, and starting" (choice_text (launch_choice (waiting) (files_exec) (Found 12))) "ask 12")))
+
+; Not registered: held while it is starting, else started; an app asked
+; is not one starting.
+(def test_launch_choice_start_or_hold () int
+  (add (check_str "starting" (choice_text (launch_choice (waiting) (files_exec) (NotFound))) "hold")
+       (add (check_str "not running" (choice_text (launch_choice (nil Launch) (files_exec) (NotFound))) "start")
+            (check_str "asked, gone since" (choice_text (launch_choice (waiting) (disks_exec) (NotFound))) "start"))))
+
+; Two quick launches of Files: the second held by the first's start, in
+; order, and with its arguments.
+(def test_launch_held () int
+  (check_str "held"
+    (launches_text (launch_held (launch_held (waiting) (files_exec) (nil (list int))) (files_exec) (one "/Volumes")))
+    "starting files/20/100/;/Volumes asked disks/30/7/50"))
+
+; An answer from 30 is Disks's open; from another, the oldest asked of
+; an app with no window known, else none.
+(def test_launch_answered () int
+  (add (match (launch_answered (waiting) 30)
+         ((LaunchTook l rest) (check_str "Disks's, taken" (launches_text rest) "starting files/20/100/-"))
+         ((LaunchNone) (fail_because "Disks's, taken" "none")))
+       (add (match (launch_answered (cons (LaunchAsked (files_exec) -1 9 60) (waiting)) 44)
+              ((LaunchTook l rest) (check_str "one with no window" (launches_text (cons l (nil Launch))) "asked files/-1/9/60"))
+              ((LaunchNone) (fail_because "one with no window" "none")))
+            (check_bool "none" (match (launch_answered (waiting) 44) ((LaunchTook l rest) true) ((LaunchNone) false)) false))))
+
+; Pid 20's first window ends the start it was waited on for, and only
+; that: Disks's open is still waited on.
+(def test_launch_started () int
+  (add (match (launch_started (waiting) 20)
+         ((LaunchTook l rest) (check_str "the rest" (launches_text rest) "asked disks/30/7/50"))
+         ((LaunchNone) (fail_because "the rest" "none")))
+       (check_bool "not 30, which was asked" (match (launch_started (waiting) 30) ((LaunchTook l rest) true) ((LaunchNone) false)) false)))
+
+; An exit gives up what was waited on of it.
+(def test_launches_gone () int
+  (add (check_str "Files gone" (launches_text (launches_gone (waiting) 20)) "asked disks/30/7/50")
+       (check_str "someone else" (launches_text (launches_gone (waiting) 5)) "starting files/20/100/- asked disks/30/7/50")))
+
+; Due: the soonest is 50, or an earlier close's; at 60 Disks's is due,
+; and at 100 both.
+(def test_launches_due () int
+  (add (check_int "next" (launch_next (waiting) -1) 50)
+       (add (check_int "a sooner close" (launch_next (waiting) 40) 40)
+            (match (launches_due (waiting) 60)
+              ((LaunchesDue due later)
+                (add (check_str "due at 60" (launches_text due) "asked disks/30/7/50")
+                     (check_str "later" (launches_text later) "starting files/20/100/-")))))))
+
+; Files and System Monitor, as the launcher has them.
+(def apps () (list App)
+  (cons (App "Files" (files_exec) "" "") (cons (App "System Monitor" "/Applications/Monitor.app/procmon" "" "") (nil App))))
+
+; The app a name means, by its exec, or "-" for none.
+(def named ((name (list int))) (list int)
+  (match (launch_named (apps) name) ((Some a) (app_open_base (app_exec a))) ((None) "-")))
+
+; open's NAME: an app's name, its bundle's, or its exec.
+(def test_launch_named () int
+  (add (check_str "its name" (named "Files") "files")
+       (add (check_str "its exec" (named "files") "files")
+            (add (check_str "its bundle's" (named "Monitor") "procmon")
+                 (add (check_str "System Monitor by exec" (named "procmon") "procmon")
+                      (check_str "none" (named "Paint") "-"))))))
+
+(def test_launch_late_line () int
+  (add (check_str "unanswered" (launch_late_line (LaunchAsked (disks_exec) 30 7 50)) "disks did not answer its open within 2 seconds")
+       (check_str "not started" (launch_late_line (LaunchStarting (files_exec) 20 100 (nil (list (list int)))))
+                  "files opened no window within 10 seconds of starting")))
