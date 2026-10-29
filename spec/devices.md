@@ -30,9 +30,9 @@ each an xHCI in host mode. QEMU has no Pi 5, but its virt board takes a
 and only how it finds its controllers differs:
 
 ```
- usb-hid keyboard --+                          +-- wm, vt, keys: keyboard and pointer,
- usb-hid mouse -----+  usb (proto/usb.l0)      |   as from virtio-input
-                    v                          |
+ usb-hid: keyboard and pointer, each on a port of its own --- wm, vt, keys,
+                    |  usb (proto/usb.l0)                 as from virtio-input
+                    v
                   xhci (dev): every controller, rings, ports, enumeration,
                     |         control transfers, IN endpoints polled
                     |  pci (proto/pci.l0), QEMU only
@@ -106,16 +106,14 @@ then, for what the firmware left pending, reached no one, and RP1 sent
 none again until acknowledged. Either left both devices hung after
 their ports' resets.
 
-A `usb-hid` waits on three ports at once, a set (`port_set`): its own,
-where the usb server's answers and notices come, every endpoint's
-reports among them, each naming its device and endpoint, and the
-kernel's alarms, which time a held key's repeats; and one each for
-`keyboard` and `pointer`, where their clients ask to `listen`, told
-apart by the port they came on. Started with no argument, one process
-claims every boot keyboard and every boot mouse and serves both names;
-`usb-hid keyboard` and `usb-hid mouse` serve one each, and the
-inittabs start those two, since `wm` tells a key's notice from a
-pointer's by its sender's pid, and so cannot take both from one.
+One `usb-hid` serves both names, started with no argument: it claims
+every boot keyboard and every boot mouse the usb server tells it of,
+and waits on three ports at once, a set (`port_set`): its own, where
+the usb server's answers and notices come, every endpoint's reports
+among them, each naming its device and endpoint, and the kernel's
+alarms, which time a held key's repeats; and one each for `keyboard`
+and `pointer`, where their clients ask to `listen`, told apart by the
+port they came on.
 
 `usb-hid` uses HID's boot protocol only: a keyboard's 8-byte reports,
 compared with the last to find what was pressed and let go (Linux's key

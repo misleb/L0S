@@ -1,6 +1,6 @@
 # 0031: A process waits on several ports, and lets a name go
 
-Track: Kernel · Status: active · Needs: – · Spec: syscalls.md, kernel.md, programs.md, devices.md, demo.md, testing.md
+Track: Kernel · Status: done · Needs: – · Spec: syscalls.md, kernel.md, programs.md, devices.md, demo.md, testing.md
 
 ## Why
 
@@ -66,20 +66,19 @@ So L0S spends processes to hold names:
   from it. Board tests, refusals included.
 - [x] Unregistering a name: the call, its wrapper and its board tests.
   A name's owner exiting still frees it as now.
-- [ ] Terminal without relays: `vt` waits on its window's port and a
+- [x] Terminal without relays: `vt` waits on its window's port and a
   port per tab, registers `vtN` on the tab's port, and unregisters it
   as the tab closes; `vt tab` goes. `spec/demo.md`'s pids and `ps`
   sample, `tests/vt.sh`'s arithmetic, and 0025's design in
   `programs.md` follow.
-- [ ] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
+- [x] One `usb-hid`: it claims every boot keyboard and boot mouse, waits
   on their endpoints' ports and on `keyboard`'s and `pointer`'s, and
   serves both. The inittabs start one; `devices.md`'s USB section,
   `programs.md`'s row and `demo.md`'s pids follow. Checked on QEMU by
-  the keyboard and pointer screen tests, and on the Pi 5 with a USB
-  keyboard and mouse, written in the Log. (The driver serves both with
-  no argument; the inittabs still start one a kind, until `wm` tells a
-  key's notice from a pointer's by what it says, not by its sender's
-  pid: the Log says why, and what is left.)
+  the keyboard and pointer screen tests; `wm` tells a key's notice from
+  a pointer's by what it says, not by its sender's pid. The Pi 5's
+  check, with a USB keyboard and mouse, is the user's, on a netboot, as
+  the Log's last entry for this step writes it out: not yet done.
 - [x] More of it: look through the servers for others that hold a name
   by a process of their own, poll with `port_try_receive`, or would
   serve better from one process waiting on several ports (`fs`' names
@@ -89,9 +88,12 @@ So L0S spends processes to hold names:
 
 ## Spec changes
 
-- programs.md: `vt`'s row without relays.
-- demo.md: a Terminal's pids without its relays, and the `ps` sample's
-  if it shows one.
+All moved into the spec: programs.md (`vt`'s row without relays, at
+most 31 tabs; `usb-hid`'s, one process), demo.md (a Terminal is a `vt`
+and a shell a tab; the pids with one `usb-hid`, the `ps` sample, which
+shows no Terminal), desktop.md (`wm` telling its input apart by what it
+says; `vt`'s limit, a relay a tab, gone, its 31 tabs said), devices.md
+and pi5.md (one `usb-hid`), testing.md (`vt.sh`'s pids, no relay).
 
 ## Log
 
@@ -271,3 +273,69 @@ So L0S spends processes to hold names:
   and stops when let go; the mouse moves the pointer, clicks, and its
   wheel scrolls a Terminal back. Once the inittab starts one
   `usb-hid`, the same again, with both lines from one pid.
+- 2026-10-28: step 4 finished, after 0021's merge. `wm` routes its
+  input by what a notice says: `input_kind` takes a message from either
+  input driver (`from_input`: the keyboard's pid or the pointer's, 0
+  until `wm` listens, so nothing from pid 0 or a client counts) and
+  makes it a key if `key_event_of` reads one, else the pointer's
+  (`pointer_received` then tells a place, a motion and a wheel's turn
+  apart, as before); `motion_from`, which joins queued motions, takes a
+  motion from either driver the same way. Everything else
+  (`received_other`) is as it was. The design call: keep the pid test
+  beside the payload, so a client cannot pass itself off as the
+  keyboard by sending a `key` notice; and keep `wm`'s two pids, `kp`
+  and `pp`, since a board may still have two drivers (virtio-input's
+  keyboard and tablet). Host tests: `test_input_one_driver` (one pid's
+  key, wheel and motion), `test_input_two_drivers` (another pid's, and
+  the kernel's before `wm` listens, are no input).
+  Then the inittabs start one `usb-hid` with no argument (the demo's,
+  the Pi 5's, `tests/usb`'s and the `usb` e2e case's), and the pids move
+  down one as the earlier entry said: `sh` 14, `font` 15, `wm` 16
+  (`spec/demo.md`'s table and `ps` sample), `tests/vt.sh`'s `vt_base`
+  16, the `usb` case's `contains` one `usb-hid`, and `devices.md`,
+  `programs.md`, `pi5.md` and `desktop.md` say one process. `usb-hid
+  keyboard` and `usb-hid mouse` still serve one kind alone, for trying
+  one by hand. Checked on QEMU, four CPUs: `tests/usb.sh` and
+  `tests/vt.sh`, whose wheel now scrolls vt1 back with one `usb-hid`.
+  **The Pi 5, for the user to check** on a netboot (`tools/pi5-boot`)
+  with a USB keyboard and a USB mouse on RP1's ports: `usb-hid`'s two
+  lines, "device N, interface 0: a keyboard, serving keyboard" and "...
+  a mouse, serving pointer", from one pid; `ps` at the serial shell
+  shows one `usb-hid`, "waiting for a message on 3 ports", and `sh` at
+  14; keys typed reach `run keys` and the front window; a held key
+  repeats (after 500 ms, then about 30 a second) and stops when let go;
+  the mouse moves the pointer and clicks; and its wheel scrolls a
+  Terminal back, not typing into it, which is what `wm`'s change fixed.
+- 2026-10-28: step 3, Terminal's tabs without relays, and the goal
+  done. `vt tab` is gone: a Terminal is one `vt`, and each tab one more
+  process, its shell. The design calls:
+  - **A port a tab, named there by `vt` itself.** Opening a tab takes a
+    port, registers the first `vtN` free on it (`vt_register`, as the
+    relay did), starts `sh NAME` watched on the window's port, and adds
+    the tab, all at once: no tab waits unnamed for a relay to say its
+    name. A tab is known by its port (`Tab`'s first field, `tab_port`,
+    `tabs_by_port`; the tab bar's keys are ports), the window's port
+    still takes `wm`'s notices and the shells' exits.
+  - **One set, made as the tabs change.** `vt` waits with
+    `port_receive_set` on its window's port and every tab's
+    (`vt_ports`); `vt_waiting` makes the set again after a tab opens or
+    closes, not every message. A window therefore has at most 31 tabs
+    (`tabs_most`, `port_set_limit` less the window's), and a 32nd is
+    refused, said on stderr: desktop.md's Limits.
+  - **A closed tab's port is kept, not leaked.** No call gives a port
+    back, so the tab's port goes on `Vt`'s list of free ports and the
+    next tab takes it, emptied first (`port_drained`) of what the old
+    shell sent last. A tab's name is let go as it closes
+    (`name_let_go`, `name_unregister`), so `vt3` closed is `vt3` free.
+  - **Terminal's `open`** (0032: a new window in the first Terminal's
+    process) goes in `from_window` in `vt.l0`, where everything that
+    comes on the window's port is taken: an `open` request there would
+    open a second window. `Vt` holds one `UiWin` and its tabs; for many
+    windows it becomes a window's `Vt` per `UiApp` id, the tabs' ports
+    joining one set across them (`vt_ports` over every window), within
+    the same 32.
+  Tests: `tabs_test.l0` keyed by port (`test_ports`, `test_not_found`,
+  `test_pids` shells alone), `vt_test.l0`'s `test_tabs_most`;
+  `tests/vt.sh` checks `ps` shows the windows' two `vt`s and no other
+  (the pids as step 4 left them, `vt_base` 16). Checked on QEMU, four
+  CPUs: `tests/vt.sh` and `tests/launcher.sh`.

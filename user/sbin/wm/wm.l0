@@ -699,12 +699,33 @@
         ((Some ev2) (if (motion_joins ev2) (if (same_buttons ev ev2) (gathered v port (motion_joined ev ev2)) (took (nudged v ev) port from b)) (took (nudged v ev) port from b)))
         ((None) (took (nudged v ev) port from b))))))
 
-; The mouse's motion a message from from, its bytes b, is, if from is the
-; pointer's driver and it is one.
+; The mouse's motion a message from from, its bytes b, is, if from is an
+; input driver's and it is one. One driver may serve both the keyboard
+; and the pointer, so the payload says what it is, not the pid.
 (def motion_from ((v Wm) (from int) (b bytes)) (Option PointerMotion)
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
-      (if (if (eq from pp) (gt pp 0) false) (pointer_motion_of (Message from b)) ((None PointerMotion))))))
+      (if (from_input kp pp from) (pointer_motion_of (Message from b)) ((None PointerMotion))))))
+
+; What a message is to wm's input: a key, the pointer's (a place, a
+; motion or a wheel's turn), or neither, from no input driver.
+(data InputKind (InputKey) (InputPointer) (NotInput))
+
+; Whether from is the keyboard's driver, kp, or the pointer's, pp, each
+; 0 until wm listens to it: possibly one process serving both.
+(def from_input ((kp int) (pp int) (from int)) bool
+  (if (gt from 0) (if (eq from kp) true (eq from pp)) false))
+
+; What m, from from, is to wm's input, with kp and pp the keyboard's and
+; the pointer's drivers: told apart by its payload, a key's notice or
+; not, since both may come from one pid (usb-hid serves both).
+(def input_kind ((kp int) (pp int) (m Message)) InputKind
+  (match m
+    ((RecvFailed) (NotInput))
+    ((Message from b)
+      (if (from_input kp pp from)
+          (match (key_event_of m) ((Some k) (InputKey)) ((None) (InputPointer)))
+          (NotInput)))))
 
 ; Whether a motion may join others: one that turns no wheel, since a
 ; turn goes where the pointer is when it comes.
@@ -721,25 +742,32 @@
   (match a ((PointerMotion ax ay ab awx awy) (match b ((PointerMotion bx by bb bwx bwy) (PointerMotion (add ax bx) (add ay by) bb 0 0))))))
 
 ; A message, its bytes b, from from: a key, the pointer, an exit, the
-; time, or a request. Keys and the pointer are read in place.
+; time, or a request. Keys and the pointer are read in place, told apart
+; by what they say (input_kind).
 (def received ((v Wm) (port int) (from int) (b bytes)) Wm
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
-      (if (if (eq from kp) (gt kp 0) false)
-          (keyed v b)
-          (if (if (eq from pp) (gt pp 0) false)
-              (pointer_received v (Message from b))
-              (if (eq from 0)
-                  (if (is_alarm_notice (Message from b))
-                      (closes_due v port (clock_ns))
-                      (match (exit_of (Message from b))
-                        ((Exited pid status) (gone v pid))
-                        ((NotExit) v)))
-                  (if (eq from (bar_clock bar))
-                      (match (time_of (msg_text b))
-                        ((Some t) (ticked v t))
-                        ((None) v))
-                      (replied v port from (msg_text b)))))))))
+      (match (input_kind kp pp (Message from b))
+        ((InputKey) (keyed v b))
+        ((InputPointer) (pointer_received v (Message from b)))
+        ((NotInput) (received_other v port from b))))))
+
+; A message, its bytes b, from from, that is no input: an exit, the
+; kernel's alarm, the time, or a request.
+(def received_other ((v Wm) (port int) (from int) (b bytes)) Wm
+  (match v
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (if (eq from 0)
+          (if (is_alarm_notice (Message from b))
+              (closes_due v port (clock_ns))
+              (match (exit_of (Message from b))
+                ((Exited pid status) (gone v pid))
+                ((NotExit) v)))
+          (if (eq from (bar_clock bar))
+              (match (time_of (msg_text b))
+                ((Some t) (ticked v t))
+                ((None) v))
+              (replied v port from (msg_text b)))))))
 
 ; What the pointer's driver sent: a tablet's place, a mouse's motion, or
 ; a wheel's turn.
