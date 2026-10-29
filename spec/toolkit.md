@@ -23,9 +23,9 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `menu.l0` | `UiPopover BASE MENU`, a popover menu over the window: a `UiMenu` of `UiItem`s, insensitive ones dimmed, and `UiItemSep`s, on a card, under the node of an action (`UiBelow`) or at a point (`UiAt`, as for a right click), kept inside the window; nothing beneath is a target while it is open, and a press outside it sets off `PREFIX.dismiss`. | `GtkPopoverMenu` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`. Used by `draw` to check a command, by `wm` to draw it, and by `tools/mkicon` to draw an app's icon. | — |
 | `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `ui_win_close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_canvas` and `ui_win_face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
-| `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's buffer one, a resize one more, each strike one, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. `ui_app_start` registers the app's port as its name, `app.EXEC`, EXEC its program's file name (`ui_app_named`; a second of the same program goes without); a launch of the app while it runs (`wm`'s, an `open`, [desktop.md](desktop.md)) is an event of no window, `UiOpen REPLY ARGS`, and routing it sets off the action `app.open` (`ui_open_action`, its arguments `ui_open_args`) and answers `shown 0`, so the app's front window comes forward and nothing more opens; an app that opens something for it says so with `ui_app_opening` and answers each itself with `ui_app_shown`, the window to bring forward. A program of one window routing with `ui_route` has the same default. The answer is told, never waited on. | `GApplication`'s windows, `GtkWindow`, its name, activate and open |
+| `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's buffer one, a resize one more, each strike one, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message, put together (`UiAppNext`), and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. `ui_app_start` registers the app's port as its name, `app.EXEC`, EXEC its program's file name (`ui_app_named`; a second of the same program goes without); a launch of the app while it runs (`wm`'s, an `open`, [desktop.md](desktop.md)) is an event of no window, `UiOpen REPLY ARGS`, and routing it sets off the action `app.open` (`ui_open_action`, its arguments `ui_open_args`) and answers `shown 0`, so the app's front window comes forward and nothing more opens; an app that opens something for it says so with `ui_app_opening` and answers each itself with `ui_app_shown`, the window to bring forward. A program of one window routing with `ui_route` has the same default. The answer is told, never waited on. | `GApplication`'s windows, `GtkWindow`, its name, activate and open |
 
-| `uiloop.l0` | The loop a window and an app keep, `UiLoop`: each step's times (`UiTimes`: routed, painted), its stages (`UiStages`: route, update and view, layout, wait, paint, present), and the slow step's line, said at the debug level once a step is over a frame (`ui_frame_ns`, 16 ms; `ui_slow_line`, `ui_slow_due`, `ui_times_stepped`) | GLib's main loop, and GTK's frame clock's timings |
+| `uiloop.l0` | The loop a window and an app keep, `UiLoop`: the messages taken and not yet handed out, what waits taken before each step and put together (`ui_loop_take`, `ui_together`: a run's last move, its wheel's turns as one, a window's last size); each step's times (`UiTimes`: routed, painted), its stages (`UiStages`: route, update and view, layout, wait, paint, present), and the slow step's line, said at the debug level once a step is over a frame (`ui_frame_ns`, 16 ms; `ui_slow_line`, `ui_slow_due`, `ui_times_stepped`) | GLib's main loop, and GTK's frame clock's timings |
 
 The Makefile links either `UI_CORE` (every file but `window.l0`,
 `uiapp.l0` and `uiloop.l0`; needs only `RENDER`: `ppm.l0`, `rect.l0` and
@@ -50,14 +50,31 @@ and its loop is:
 
 ```
 (match (ui_open "Title" 640 400) ...)                       once
-(port_receive (ui_win_port w))      -> message
-(ui_event_of w message)             -> event
-(ui_route w event)                  -> (UiRouted w2 action)  action may be ""
+(ui_win_next w)                     -> (UiWinNext w1 event)   the next, put together
+(ui_route w1 event)                 -> (UiRouted w2 action)  action may be ""
 (update state action event)         -> state2
 (ui_present w2 (view state2))       -> w3                     paints what changed
 ```
 
 `user/apps/widgets/widgets.l0` is that loop in full, with a toolbar and a data grid.
+
+**Put together.** `ui_win_next` (and `ui_app_next`, below) takes the
+next message through the window's loop (`uiloop.l0`'s `ui_loop_take`):
+first everything that waits on the port, up to 64 at once
+(`port_try_receive`), after what it holds already, then the whole put
+together (`ui_together`) as GTK compresses motion before a frame; if
+nothing waits, the next is waited for, and what came with it taken too.
+Of a window's run of pointer moves and wheel turns, no other message of
+that window between them (a press, a release, a key, a leave, a focus,
+or anything else, which ends the run), only the last move is kept, and
+one wheel turn, at the last's place, its steps the run's sum; of the
+sizes a window is asked, only the last. A move is a pointer notice whose
+buttons are the window's before it, as the toolkit last knew them, so a
+press or a release is never one. Nothing else is dropped or reordered:
+keys, presses, releases, an open, an exit, another window's notices and
+anything not the compositor's stay as they came. So a step slower than
+the pointer takes the last of the moves that came meanwhile, not each
+in turn. `ui_event_lost` says the port is gone.
 
 **Many windows.** An app of more than one window starts a `UiApp` and
 opens each on its port; its loop is:
@@ -65,7 +82,7 @@ opens each on its port; its loop is:
 ```
 (match (ui_app_start) ...)                                  once
 (ui_app_open_csd app "Title" 880 560)  -> (UiAppOpened app2 id), and more
-(ui_app_next app)                      -> (UiAppEvent id event)   id -1 for none
+(ui_app_next app)                      -> (UiAppNext app1 (UiAppEvent id event))   id -1 for none
 (ui_app_route app id event)            -> (UiAppRouted app2 action)
 (update state id action event)         -> state2                  the window's own
 (ui_app_present app2 id (view state2 id))                         paints what changed
@@ -75,7 +92,8 @@ opens each on its port; its loop is:
 Each window has its own widgets' state, nodes, damage and buffer, so an
 event of one changes and repaints that one alone; Files keeps its own
 state for each by the window's id. `ui_app_next` and `ui_app_event` are
-the one place the loop takes its messages. A window an app presents again
+the one place the loop takes its messages; the app's loop puts them
+together as a window's does, each window's runs by its own buttons. A window an app presents again
 with its close unanswered is closed by `ui_app_present`, and the app
 ended with its last, as `ui_present` does.
 
@@ -267,7 +285,10 @@ to `l0` are one namespace, and a duplicate is a compile error.
   kernel, which has no call for it: `ui_app_open` knows its windows and
   its face's strikes, and keeps 8 for the rest, so a program that opens
   more of its own than that can still run out. An app's loop does one
-  message a step, a window's whole step each time, and a program ends
+  message a step, after putting together what waits, a window's whole
+  step each time; only a run of one window's moves and turns, with
+  nothing else of it between, is put together, so moves of a window
+  with a key between them are two steps. A program ends
   only by returning from `main`, so one that does nothing with a close
   is ended by the compositor at its asking (`end`).
 - Scrolling is by whole rows: the wheel's steps are counted, not its

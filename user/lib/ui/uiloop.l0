@@ -20,15 +20,20 @@
 ; No step yet.
 (def ui_times_new () UiTimes (UiTimes 0 0 0 false))
 
-; The loop's state: its steps' times.
-(data UiLoop (UiLoop UiTimes))
+; The loop's state: its steps' times, and the messages taken from the
+; port and not yet handed out, put together (ui_together), in order.
+(data UiLoop (UiLoop UiTimes (list Message)))
 
 ; A loop with nothing taken yet.
-(def ui_loop_new () UiLoop (UiLoop (ui_times_new)))
+(def ui_loop_new () UiLoop (UiLoop (ui_times_new) (nil Message)))
 
 ; Its times, and the loop with others.
-(def ui_loop_times ((l UiLoop)) UiTimes (match l ((UiLoop t) t)))
-(def ui_loop_timed ((l UiLoop) (t UiTimes)) UiLoop (match l ((UiLoop old) (UiLoop t))))
+(def ui_loop_times ((l UiLoop)) UiTimes (match l ((UiLoop t q) t)))
+(def ui_loop_timed ((l UiLoop) (t UiTimes)) UiLoop (match l ((UiLoop old q) (UiLoop t q))))
+
+; The messages it holds, and the loop holding others.
+(def ui_loop_queue ((l UiLoop)) (list Message) (match l ((UiLoop t q) q)))
+(def ui_loop_queued ((l UiLoop) (q (list Message))) UiLoop (match l ((UiLoop t old) (UiLoop t q))))
 
 ; t with the route's start and end, a and b.
 (def ui_times_routed ((t UiTimes) (a int) (b int)) UiTimes
@@ -91,3 +96,210 @@
       (let total (ui_stages_total s)
         (let d (if (ui_slow_due total said) (debug_as (app_open_base (proc_path (l0s_pid))) (ui_slow_line s)) 0)
           (UiTimes 0 0 0 (gt total (ui_frame_ns))))))))
+
+; ---------------------------------------------------------------- taking
+
+; The loop after a message was taken, and the message: RecvFailed if
+; the port is gone.
+(data UiTaken (UiTaken UiLoop Message))
+
+; The most messages taken from the port at once before a step: more
+; than it holds, so a sender that keeps it full still waits for steps.
+(def ui_drain_most () int 64)
+
+; The next message for a step, from l's queue or port: what waits on the
+; port taken first, all of it, onto the queue, and the queue put
+; together (ui_together, cpid the compositor's pid and held each
+; window's buttons); if nothing waits, the next message waited for, and
+; what came with it taken too. The queue's first is the step's.
+(def ui_loop_take ((l UiLoop) (port int) (cpid int) (held (Map int int))) UiTaken
+  (let l2 (ui_loop_drained l port cpid held (nil Message))
+    (if (is_empty (ui_loop_queue l2)) (ui_loop_waited l2 port cpid held) (ui_loop_popped l2))))
+
+; ui_loop_take with nothing waiting: the next message waited for.
+(def ui_loop_waited ((l UiLoop) (port int) (cpid int) (held (Map int int))) UiTaken
+  (match (port_receive port)
+    ((RecvFailed) (UiTaken l (RecvFailed)))
+    ((Message from b) (ui_loop_popped (ui_loop_drained l port cpid held (cons (Message from b) (nil Message)))))))
+
+; l with first, then what waits on port, after its queue, put together.
+(def ui_loop_drained ((l UiLoop) (port int) (cpid int) (held (Map int int)) (first (list Message))) UiLoop
+  (ui_loop_queued l (ui_together (ui_drained_onto port (ui_drain_most) (rev_onto first (rev (ui_loop_queue l)))) cpid held)))
+
+; Up to n messages waiting on port taken, onto the reversed acc, and the
+; whole in order.
+(def ui_drained_onto ((port int) (n int) (acc (list Message))) (list Message)
+  (if (le n 0)
+      (rev acc)
+      (match (port_try_receive port)
+        ((RecvFailed) (rev acc))
+        ((Message from b) (ui_drained_onto port (sub n 1) (cons (Message from b) acc))))))
+
+; l's first message taken off its queue.
+(def ui_loop_popped ((l UiLoop)) UiTaken
+  (let q (ui_loop_queue l)
+    (if (is_empty q) (UiTaken l (RecvFailed)) (UiTaken (ui_loop_queued l (tail q)) (head q)))))
+
+; ------------------------------------------------------- putting together
+
+; What a message waiting is, to put together: of window ID, a move of
+; the pointer, its buttons as they were (a pure move, which a later
+; move of the window may stand for), a turn of the wheel, a size asked,
+; or anything else of the window, which nothing is put together across;
+; or of no window.
+(data UiKind (UiKindMove int) (UiKindWheel int) (UiKindSize int) (UiKindBarrier int) (UiKindNone))
+
+; A window's run of pure moves and wheel turns, between two of its other
+; messages: the window, and the run's number.
+(data UiRun (UiRun int int))
+
+; What a queue's runs come to: for each run, the place of its last move
+; and of its last wheel turn, and the wheel's steps summed; for each
+; window, the place of its last size; each message's run, -1 for none;
+; and each window's buttons as its last pointer notice said, and its
+; runs so far.
+(data UiRuns (UiRuns (Map UiRun int) (Map UiRun int) (Map UiRun UiSum) (Map int int) (list UiRun) (Map int int) (Map int int)))
+
+; Steps of the wheel summed, across and down.
+(data UiSum (UiSum int int))
+
+; ms, the messages waiting, in order, from the compositor, pid cpid, put
+; together before they are handed out, as GTK compresses motion before a
+; frame: of the pointer's moves of a window in a run (no other message
+; of the window between them, a press, a release, a key, or anything
+; else), only the last; of its wheel's turns in a run, one, the last, its
+; steps the run's sum; of the sizes it is asked, only the last. Every
+; other message is kept, in order. held is each window's buttons as the
+; toolkit last knew them, so that the first pointer notice of a window
+; that changes them is a press or a release, not a move.
+(def ui_together ((ms (list Message)) (cpid int) (held (Map int int))) (list Message)
+  (match (ui_runs_of ms cpid (UiRuns ((MapEmpty UiRun int)) ((MapEmpty UiRun int)) ((MapEmpty UiRun UiSum)) ((MapEmpty int int)) (nil UiRun) held ((MapEmpty int int))) 0)
+    ((UiRuns moves wheels sums sizes runs bs ns)
+      (ui_kept ms cpid (UiRuns moves wheels sums sizes (rev runs) bs ns) 0 (nil Message)))))
+
+; What m is, from the compositor, pid cpid, as ui_together sees it: a
+; pure move if its buttons are b's, the window's before it.
+(def ui_kind_of ((m Message) (cpid int) (b (Option int))) UiKind
+  (match m
+    ((RecvFailed) (UiKindNone))
+    ((Message from bs)
+      (if (not (eq from cpid))
+          (UiKindNone)
+          (match (win_notice_of m)
+            ((NoWinNotice) (UiKindNone))
+            ((WinNotice id at)
+              (match (pointer_event_at m at)
+                ((Some p) (match p ((PointerEvent x y pb) (if (eq (Some (bit_and pb 3)) b) (UiKindMove id) (UiKindBarrier id)))))
+                ((None)
+                  (if (not (is_empty (ui_opt_list (wheel_event_at m at))))
+                      (UiKindWheel id)
+                      (match (size_notice_at m at) ((Some s) (UiKindSize id)) ((None) (UiKindBarrier id))))))))))))
+
+; A wheel event as a list of it, none or one, to tell whether there is one.
+(def ui_opt_list ((o (Option WheelEvent))) (list WheelEvent)
+  (match o ((Some e) (cons e (nil WheelEvent))) ((None) (nil WheelEvent))))
+
+; The window a pointer notice m is of and the buttons it says, if it is
+; one.
+(def ui_pointer_buttons ((m Message)) (Option int)
+  (match (win_notice_of m)
+    ((NoWinNotice) ((None int)))
+    ((WinNotice id at) (match (pointer_event_at m at) ((Some p) (match p ((PointerEvent x y b) (Some (bit_and b 3))))) ((None) ((None int)))))))
+
+; r's runs counted through ms from place i on.
+(def ui_runs_of ((ms (list Message)) (cpid int) (r UiRuns) (i int)) UiRuns
+  (if (is_empty ms)
+      r
+      (ui_runs_of (tail ms) cpid (ui_run_step (head ms) cpid r i) (add i 1))))
+
+; r after message m, place i.
+(def ui_run_step ((m Message) (cpid int) (r UiRuns) (i int)) UiRuns
+  (match r
+    ((UiRuns moves wheels sums sizes runs bs ns)
+      (match (ui_kind_of m cpid (ui_held_of bs m))
+        ((UiKindNone) (UiRuns moves wheels sums sizes (cons (UiRun -1 -1) runs) bs ns))
+        ((UiKindBarrier id)
+          (UiRuns moves wheels sums sizes (cons (UiRun -1 -1) runs) (ui_buttons_after bs id m) (map_put ns id (add 1 (ui_run_n ns id)))))
+        ((UiKindSize id)
+          (UiRuns moves wheels sums (map_put sizes id i) (cons (UiRun -1 -1) runs) bs (map_put ns id (add 1 (ui_run_n ns id)))))
+        ((UiKindMove id)
+          (let k (UiRun id (ui_run_n ns id))
+            (UiRuns (map_put moves k i) wheels sums sizes (cons k runs) bs ns)))
+        ((UiKindWheel id)
+          (let k (UiRun id (ui_run_n ns id))
+            (UiRuns moves (map_put wheels k i) (map_put sums k (ui_sum_more (map_get sums k) m)) sizes (cons k runs) bs ns)))))))
+
+; Window id's run so far, 0 for its first.
+(def ui_run_n ((ns (Map int int)) (id int)) int (match (map_get ns id) ((Some n) n) ((None) 0)))
+
+; The buttons the window of pointer notice m had before it, as bs keeps
+; them; none if m is no pointer notice, or the window's are not known.
+(def ui_held_of ((bs (Map int int)) (m Message)) (Option int)
+  (match (win_notice_of m) ((NoWinNotice) ((None int))) ((WinNotice id at) (map_get bs id))))
+
+; bs with window id's buttons as m says them, if it is a pointer notice.
+(def ui_buttons_after ((bs (Map int int)) (id int) (m Message)) (Map int int)
+  (match (ui_pointer_buttons m) ((Some b) (map_put bs id b)) ((None) bs)))
+
+; A run's wheel sum, s if it has one, with m's steps added.
+(def ui_sum_more ((s (Option UiSum)) (m Message)) UiSum
+  (let base (match s ((Some u) u) ((None) (UiSum 0 0)))
+    (match (win_notice_of m)
+      ((NoWinNotice) base)
+      ((WinNotice id at)
+        (match (wheel_event_at m at)
+          ((None) base)
+          ((Some e) (match e ((WheelEvent x y dx dy) (match base ((UiSum sx sy) (UiSum (add sx dx) (add sy dy))))))))))))
+
+; ms from place i on, as r says to keep them, onto the reversed acc: a
+; move kept if it is its run's last, a wheel's turn if it is its run's
+; last, with the run's sum, a size if it is its window's last; the rest
+; as they are.
+(def ui_kept ((ms (list Message)) (cpid int) (r UiRuns) (i int) (acc (list Message))) (list Message)
+  (if (is_empty ms)
+      (rev acc)
+      (match r
+        ((UiRuns moves wheels sums sizes runs bs ns)
+          (let m (head ms)
+            (let rest (UiRuns moves wheels sums sizes (tail runs) bs ns)
+              (ui_kept (tail ms) cpid rest (add i 1) (ui_keep_onto m (head runs) r i acc))))))))
+
+; acc with m, place i in run k, as r says, if it is kept.
+(def ui_keep_onto ((m Message) (k UiRun) (r UiRuns) (i int) (acc (list Message))) (list Message)
+  (match r
+    ((UiRuns moves wheels sums sizes runs bs ns)
+      (match k
+        ((UiRun id n)
+          (if (ge id 0)
+              (if (eq (map_get moves k) (Some i))
+                  (cons m acc)
+                  (if (eq (map_get wheels k) (Some i))
+                      (cons (ui_wheel_summed m (map_get sums k)) acc)
+                      acc))
+              (match (ui_size_window m)
+                ((Some w) (if (eq (map_get sizes w) (Some i)) (cons m acc) acc))
+                ((None) (cons m acc)))))))))
+
+; The window size notice m is of, if it is one.
+(def ui_size_window ((m Message)) (Option int)
+  (match (win_notice_of m)
+    ((NoWinNotice) ((None int)))
+    ((WinNotice id at) (match (size_notice_at m at) ((Some s) (Some id)) ((None) ((None int)))))))
+
+; Wheel notice m with its steps made sum's, from the same sender to the
+; same window at its place: as it was if sum is none.
+(def ui_wheel_summed ((m Message) (sum (Option UiSum))) Message
+  (match m
+    ((RecvFailed) m)
+    ((Message from b)
+      (match (win_notice_of m)
+        ((NoWinNotice) m)
+        ((WinNotice id at)
+          (match (wheel_event_at m at)
+            ((None) m)
+            ((Some e)
+              (match e
+                ((WheelEvent x y dx dy)
+                  (match sum
+                    ((None) m)
+                    ((Some s) (match s ((UiSum sx sy) (message_new from (win_notice id (wheel_notice (WheelEvent x y sx sy)))))))))))))))))

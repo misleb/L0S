@@ -75,7 +75,7 @@ make the slow path visible, and write down how an app stays answering.
 - [x] The slow step said: the loop times its stages and says a step
   over 16 ms once at the debug level (and again only after one under
   it), in the toolkit, so every app has it. Host tests of the line.
-- [ ] Putting together: before a step, the loop takes what else waits
+- [x] Putting together: before a step, the loop takes what else waits
   on the port (`port_try_receive`), keeps the last pointer move and
   size notice and the wheel's sum, and handles every press, release, key
   and request in order. Host tests with a queue of mixed events.
@@ -197,3 +197,47 @@ make the slow path visible, and write down how an app stays answering.
   paint 72.1, present 1.5`: the wait on `font` for the cards' and the
   page's strikes, which step 5 takes out of the step; the moves over
   the page said nothing, each under a frame.
+- 2026-10-28: step 3, putting together. The design calls:
+  - **Messages, not events.** What waits is put together as it came,
+    before any of it is made an event, since an event needs the
+    buttons the window held before it (`ui_pointer_event`), which each
+    step before it may change. A pointer notice is a move if its
+    buttons are its window's before it: the window's own as the toolkit
+    last knew them (`UiWin`'s held, for every window of a `UiApp`) for
+    its first in the queue, else the last pointer notice's before it.
+    So a press or release is never dropped, and the first notice of a
+    window the toolkit does not know is kept.
+  - **Runs, one window at a time.** A window's run is its moves and
+    wheel turns with nothing else of that window between them; a key,
+    a press, a release, a leave, a focus or a size ends it. Of a run,
+    the last move is kept, and one wheel turn at the last turn's place
+    with the run's steps summed (`ui_wheel_summed`, made as a notice
+    again: the tablet sends a turn then a pointer notice for each
+    report, so turns are never next to each other, and runs must span
+    moves). Another window's messages, and anything not the
+    compositor's, end no run, as the order between windows does not
+    matter. Of a window's size notices only the last is kept (`wm` has
+    one size ask out at a time, so this is for safety).
+  - **Where.** The queue is the loop's, `UiLoop`'s second field: a
+    `UiApp`'s for its windows (`UiApp`'s new last field), a window's
+    own for a program of one (`ui_win_next`, the same loop in its
+    `UiWin`). `ui_loop_take` takes what waits on the port (up to 64,
+    so a sender that keeps the port full still waits for steps) after
+    what the queue holds, puts the whole together, and hands out the
+    first; with nothing waiting it waits for one, and takes what came
+    with it. `ui_app_next` now gives the app back too (`UiAppNext`),
+    as its loop changed; Files' `fl_loop` takes it. Fonts, Disks, About
+    and the gallery take `ui_win_next` in place of `port_receive` and
+    `ui_event_of`; `ui_event_lost` says the port is gone. System Monitor
+    polls with `port_try_receive` and `vt` waits on a set of its own:
+    step 6's to bring under the conventions.
+  Host tests (`uiloop_test.l0`): moves, a press and a release ending
+  runs, a release the window's held buttons make, a window not known,
+  wheel turns summed across moves, turns cancelling and a key ending a
+  run, a key between moves, two windows, sizes, others, and a property
+  test: 100 seeded queues of two windows' moves, presses, turns and
+  keys, whose keys, presses and releases come out the same and in
+  order. On QEMU, Fonts' page open: 39 moves sent through QMP with no
+  gap between them were 8 steps (a debug line a step, since taken
+  out), where each was one before; sent 5 ms apart, 34, as a step of
+  6.5 ms leaves little to put together. `tests/fontview.sh` passes.

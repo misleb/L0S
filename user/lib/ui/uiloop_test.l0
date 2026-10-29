@@ -43,6 +43,132 @@
   (UiWin (Compositor 1 2 9 1) 3 (Canvas (IoDevice 0) 100 34 0) 4 (ui_face_none) (ui_state_new (UiLight))
          (nil UiNode) 0 0 (ui_click_none) (UiMem 0 1 100 34 (UiNoSwap)) false false (ui_loop_new)))
 
+; ------------------------------------------------------- putting together
+
+; Notices from the compositor, pid 9, of window id: the pointer at x, y
+; with buttons b, the wheel's dy steps at x, y, a key, a size; and a
+; message from pid 30.
+(def mv ((id int) (x int) (y int) (b int)) Message (message_new 9 (win_notice id (pointer_notice (PointerEvent x y b)))))
+(def whl ((id int) (x int) (dy int)) Message (message_new 9 (win_notice id (wheel_notice (WheelEvent x 5 0 dy)))))
+(def ky ((id int)) Message (message_new 9 (win_notice id (key_notice (KeyEvent 30 1 97)))))
+(def sz ((id int) (w int)) Message (message_new 9 (win_notice id (size_notice w 100))))
+(def other () Message (message_new 30 "hello"))
+
+; A message as text, as ui_together leaves it.
+(def msg_text_of ((m Message)) (list int)
+  (match (win_notice_of m)
+    ((NoWinNotice) "other")
+    ((WinNotice id at)
+      (match (pointer_event_at m at)
+        ((Some p) (match p ((PointerEvent x y b) (append "ptr" (append (digits id) (append "@" (append (digits x) (append "b" (digits b)))))))))
+        ((None)
+          (match (wheel_event_at m at)
+            ((Some e) (match e ((WheelEvent x y dx dy) (append "whl" (append (digits id) (append "@" (append (digits x) (append "d" (digits dy)))))))))
+            ((None)
+              (match (size_notice_at m at)
+                ((Some s) (append "siz" (append (digits id) (append "w" (digits (head s))))))
+                ((None) (append "key" (digits id)))))))))))
+
+(def msgs_text ((ms (list Message))) (list int)
+  (if (is_empty ms) "" (append (msg_text_of (head ms)) (if (is_empty (tail ms)) "" (append " " (msgs_text (tail ms)))))))
+
+; Windows 3 and 5, no button held.
+(def held0 () (Map int int) (map_put (map_put ((MapEmpty int int)) 3 0) 5 0))
+
+(def together ((ms (list Message))) (list int) (msgs_text (ui_together ms 9 (held0))))
+
+(def l1 ((a Message)) (list Message) (cons a (nil Message)))
+(def l2 ((a Message) (b Message)) (list Message) (cons a (l1 b)))
+(def l3 ((a Message) (b Message) (c Message)) (list Message) (cons a (l2 b c)))
+(def l4 ((a Message) (b Message) (c Message) (d Message)) (list Message) (cons a (l3 b c d)))
+
+; Moves that follow one another: only the last.
+(def test_moves () int
+  (check_str "the last" (together (l3 (mv 3 1 1 0) (mv 3 2 1 0) (mv 3 3 1 0))) "ptr3@3b0"))
+
+; A press and a release stop a run: the move before the press, the
+; press, the last move while held, the release, the move after.
+(def test_press_release () int
+  (check_str "each kept"
+    (together (cons (mv 3 1 1 0) (cons (mv 3 2 1 1) (cons (mv 3 3 1 1) (cons (mv 3 4 1 1) (cons (mv 3 5 1 0) (l1 (mv 3 6 1 0))))))))
+    "ptr3@1b0 ptr3@2b1 ptr3@4b1 ptr3@5b0 ptr3@6b0"))
+
+; The first notice of a window whose buttons the toolkit knows held is a
+; release, kept, though a move with the same buttons follows.
+(def test_held_known () int
+  (check_str "a release"
+    (msgs_text (ui_together (l2 (mv 3 1 1 0) (mv 3 2 1 0)) 9 (map_put ((MapEmpty int int)) 3 1)))
+    "ptr3@1b0 ptr3@2b0"))
+
+; A window not known: its first pointer notice is kept.
+(def test_held_unknown () int
+  (check_str "kept" (msgs_text (ui_together (l2 (mv 7 1 1 0) (mv 7 2 1 0)) 9 ((MapEmpty int int)))) "ptr7@1b0 ptr7@2b0"))
+
+; The wheel's turns in a run, between moves as the tablet sends them:
+; one, at the last's place, their steps summed, and the last move.
+(def test_wheel_summed () int
+  (check_str "summed" (together (l4 (whl 3 1 1) (mv 3 1 1 0) (whl 3 2 2) (mv 3 2 1 0))) "whl3@2d3 ptr3@2b0"))
+
+; Up and down cancel, and a key stops the run: the turn before it kept.
+(def test_wheel_key () int
+  (add (check_str "cancelled" (together (l2 (whl 3 1 -2) (whl 3 1 2))) "whl3@1d0")
+       (check_str "a key between" (together (l3 (whl 3 1 1) (ky 3) (whl 3 1 1))) "whl3@1d1 key3 whl3@1d1")))
+
+; A key between moves keeps both: no key is dropped, none moved.
+(def test_key_between () int
+  (check_str "all three" (together (l3 (mv 3 1 1 0) (ky 3) (mv 3 2 1 0))) "ptr3@1b0 key3 ptr3@2b0"))
+
+; Two windows' moves, one after the other's: each window's last, as
+; another window's notice does not stop a run.
+(def test_two_windows () int
+  (check_str "each its last" (together (l4 (mv 3 1 1 0) (mv 5 1 1 0) (mv 3 2 1 0) (mv 5 2 1 0))) "ptr3@2b0 ptr5@2b0"))
+
+; Sizes asked: the last of a window's.
+(def test_sizes () int
+  (check_str "the last" (together (l3 (sz 3 100) (sz 5 50) (sz 3 200))) "siz5w50 siz3w200"))
+
+; Anything not the compositor's is kept, and stops nothing.
+(def test_others () int
+  (check_str "kept" (together (l3 (mv 3 1 1 0) (other) (mv 3 2 1 0))) "other ptr3@2b0"))
+
+; A property: a hundred seeded queues of moves, presses, wheels and keys
+; of two windows put together lose no key, press or release, and keep
+; them in order, as the queue with every move and wheel left out.
+(def rand_msg ((s int)) Message
+  (let id (if (eq (rand_below s 2) 0) 3 5)
+    (let k (rand_below (rand_next s) 6)
+      (if (lt k 2) (mv id (rand_below s 50) 1 0)
+        (if (eq k 2) (mv id 7 1 1)
+          (if (eq k 3) (whl id 1 1)
+            (ky id)))))))
+
+(def rand_queue ((s int) (n int) (acc (list Message))) (list Message)
+  (if (le n 0) acc (rand_queue (rand_next (rand_next s)) (sub n 1) (cons (rand_msg s) acc))))
+
+; Of ms, only the keys, and the pointer notices whose buttons are not
+; their window's before, in order: what must survive.
+(def barriers ((ms (list Message)) (bs (Map int int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ms)
+      (rev acc)
+      (let m (head ms)
+        (match (win_notice_of m)
+          ((NoWinNotice) (barriers (tail ms) bs acc))
+          ((WinNotice id at)
+            (match (pointer_event_at m at)
+              ((Some p) (match p ((PointerEvent x y b)
+                (if (eq (map_get bs id) (Some b)) (barriers (tail ms) bs acc) (barriers (tail ms) (map_put bs id b) (cons (msg_text_of m) acc))))))
+              ((None) (if (is_empty (ui_opt_list (wheel_event_at m at))) (barriers (tail ms) bs (cons (msg_text_of m) acc)) (barriers (tail ms) bs acc)))))))))
+
+(def together_agree ((s int) (i int) (bad int)) int
+  (if (ge i 100)
+      bad
+      (let q (rand_queue s (add 1 (rand_below s 30)) (nil Message))
+        (let ok (eq (barriers (ui_together q 9 (held0)) (held0) (nil (list int))) (barriers q (held0) (nil (list int))))
+          (together_agree (rand_next (rand_next (rand_next s))) (add i 1) (if ok bad (add bad 1)))))))
+
+(def test_together_keeps_order () int
+  (check_int "none differ" (together_agree 11 0 0) 0))
+
 ; After a slow step the next slow one is not said, and after one under a
 ; frame it is again; the route is forgotten either way. Under an
 ; operating system the line said goes nowhere.
