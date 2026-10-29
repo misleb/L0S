@@ -72,11 +72,13 @@ running, if one is.
   ...` and a shell command, `user/bin/open`, that sends it, `APP` an
   app's name as the launcher shows it or its `exec`. desktop.md's
   protocol table, programs.md's row.
-- [ ] The apps: Files takes `app.open` as a new window, at the folder
-  its first argument names, if it is one; Terminal as a new window, in
-  the process the first started; the others come forward only. Each
-  app's choice in programs.md. `vt` keeps its tabs: a new window is a
-  window of its own, with one tab.
+- [x] The apps: Files takes `app.open` as a new window, at the folder
+  its first argument names, if it is one; the others come forward
+  only. Each app's choice in programs.md.
+- [ ] Terminal's answer: `app.open` as a new window, in the process the
+  first started. `vt` keeps its tabs: a new window is a window of its
+  own, with one tab. It follows 0031's rewrite of `vt` (its relays
+  gone), once both have merged.
 - [ ] The screen test (`tests/launch.sh`, in `SCREEN_TESTS`): Files
   clicked twice in the launcher, `run windows` showing two windows of
   one client; Disks clicked twice, one window, then a Terminal over it
@@ -171,3 +173,23 @@ running, if one is.
   or its exec (`launch_named`); `ok` comes once launched, not once the
   window is up. `open` is `user/bin/open` (`run open files /Volumes`);
   `/bin/open` joined the `fs` and `shell` e2e cases' listings.
+- 2026-10-28: step 5, every app but Terminal; the step is split in two,
+  Terminal's answer its own step, which follows 0031's rewrite of `vt`
+  once both branches have merged (another agent owns `user/apps/vt`
+  meanwhile). Files says `ui_app_opening` and answers an open with a
+  window more, in front, at the folder its first argument names
+  (`fl_open_at`: an absolute path made normal, that `fv_list` lists),
+  else at `/`, keeping the view and sidebar of a window it has, as New
+  Window does, and answers with its id; with no room for a window, 0.
+  Started with an argument, as `wm` starts it for `open files
+  /Volumes` when it is not running, its first window is there
+  (`fl_placed`). Disks, System Monitor, Fonts, About and the gallery
+  route every message through `ui_route`, so the toolkit's `shown 0`
+  answers for them with no change. Until Terminal's step: Terminal is
+  started through `ui_open_csd`, so it registers `app.vt` and `wm`
+  asks it, but its loop drops the open (`vt`'s `from_wm` passes on
+  only notices naming its window), so a launch of Terminal while one
+  runs waits `wm`'s 2 seconds, then brings its front window forward and
+  `wm` says `vt did not answer its open within 2 seconds`; no second
+  Terminal is started. A Terminal's tabs are its new terminals until
+  then.
