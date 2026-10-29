@@ -52,7 +52,7 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   requests; the cursor queue likewise. Replies keep their requests'
   order. Pure bookkeeping of what is in flight and what each reply
   awaits, tested on the host.
-- [ ] Frame notices in the display protocol: `frames PORT` asks the
+- [x] Frame notices in the display protocol: `frames PORT` asks the
   driver to tell PORT `frame N` after each frame that showed a change,
   N counting from 1; virtio-gpu tells it when a `RESOURCE_FLUSH` (2D)
   or the flush after a `SUBMIT_3D` (3D) is answered. `display.l0` reads
@@ -82,11 +82,10 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
 
 ## Spec changes
 
-- display.md: the display protocol's `frames` and its `frame N` and
-  `release` notices; virtio-gpu's queue in flight; and in the Pi 5's
-  section, when `hvs` sends them.
-- desktop.md: the wm protocol's `frame ID` and `attach`; the "shown half
-  painted" limit goes.
+- display.md: in the Pi 5's section, when `hvs` sends `frame N` and
+  `release`.
+- desktop.md: the wm protocol's `attach`; the "shown half painted"
+  limit goes.
 - toolkit.md: how `ui_present` paces itself, and a window's two
   buffers.
 
@@ -127,3 +126,17 @@ Steps 1 to 4 are QEMU's alone; step 5 is the one that needs 0005.
   first `make e2e` caught the first frame never shown: its commands
   were made before any request, so nothing told the device of them;
   the driver now tells it as it starts serving.
+- 2026-10-29: step 3. The notices are binary, as every other notice
+  is: `frame N` is `frm` and N, `release ID` is `rel` and ID, each a
+  u32 (`l0s.l0`'s `shown_notice` and `release_notice`, so `wm` sends a
+  client the same `frm` as a window notice); `frames PORT` and `frame
+  ID` are text requests, as the protocols' others are. `virtio-gpu`
+  counts a frame for every `damage` and `layers`, not only those that
+  flushed something: a damage under another window shows nothing, and
+  a client waiting for its frame would wait for someone else's change.
+  `release` came with this step rather than the next, as it is a
+  notice of the same request: a buffer is released once the `layers`
+  that left it out is answered. A client asks `frame` before its
+  `damage`, as Wayland's frame comes before its commit: asked after,
+  the frame `wm` tells may already have gone by. Both notices go
+  before the reply, so `wm`, which waits on the reply, finds them next.

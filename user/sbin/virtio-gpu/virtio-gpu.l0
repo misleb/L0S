@@ -690,21 +690,44 @@
   (match g
     ((Gpu d t q addrs f ip c)
       (match (fl_due f)
-        ((FlDue f2 as) (let s (answers_sent as) (Gpu d t q addrs f2 ip c)))))))
+        ((FlDue f2 as) (Gpu d t q addrs (answers_sent f2 as) ip c))))))
 
-; Each of as sent to its request's reply port: 0.
-(def answers_sent ((as (list FlAnswer))) int
+; Each of as sent to its request's reply port, after the notices it
+; causes: a release for each buffer it took off the stack, then its
+; frame, if it is one, to each port frames named. f, with the ports
+; still there.
+(def answers_sent ((f Flight) (as (list FlAnswer))) Flight
   (if (is_empty as)
-      0
-      (match (head as) ((FlAnswer mb r fr) (let s (msg_answer mb r) (answers_sent (tail as)))))))
+      f
+      (match (head as)
+        ((FlAnswer mb r n rel)
+          (let ls (releases_told (fl_listeners f) rel)
+            (let ls2 (if (gt n 0) (listeners_tell ls (shown_notice n)) ls)
+              (let s (msg_answer mb r)
+                (answers_sent (fl_listening f ls2) (tail as)))))))))
+
+; Each of rel told to the ports ls as a release notice: those still
+; there.
+(def releases_told ((ls (list int)) (rel (list int))) (list int)
+  (if (is_empty rel) ls (releases_told (listeners_tell ls (release_notice (head rel))) (tail rel))))
 
 ; The reply to the request whose message is mb registered, to go once
-; every command made before it is answered, the device told of them,
-; and every reply due sent.
-(def gpu_replied ((g Gpu) (mb bytes) (reply (list int))) Gpu
+; every command made before it is answered, a frame if frame, releasing
+; the buffers rel; the device told of the commands, and every reply due
+; sent.
+(def gpu_replied ((g Gpu) (mb bytes) (reply (list int)) (frame bool) (rel (list int))) Gpu
   (match g
     ((Gpu d t q addrs f ip c)
-      (gpu_answer (gpu_kick (Gpu d t q addrs (fl_reply f mb reply false) ip c))))))
+      (gpu_answer (gpu_kick (Gpu d t q addrs (fl_reply f mb reply frame rel) ip c))))))
+
+; frames PORT: port told the frames and releases from now on, once.
+(def frames_asked ((v Drv) (port int)) (Served Drv)
+  (if (lt port 0)
+      (served_error v "frames takes a port")
+      (match (drv_gpu v)
+        ((Gpu d t q addrs f ip c)
+          (let ls (fl_listeners f)
+            (served_ok (drv_with v (Gpu d t q addrs (fl_listening f (if (any_eq port ls) ls (append ls (cons port (nil int))))) ip c))))))))
 
 ; Every command in flight, on both queues, answered: the driver then, or
 ; none if the interrupt port is gone.
@@ -1019,7 +1042,7 @@
         ((RecvFailed) (complain "lost its port"))
         ((Message from mb)
           (if (eq p port)
-              (serve (drv_replied (if gl (gl_handle v (msg_text_from mb 4)) (handle v (msg_text_from mb 4))) mb) port gl)
+              (serve (drv_replied v (if gl (gl_handle v (msg_text_from mb 4)) (handle v (msg_text_from mb 4))) mb) port gl)
               (serve (drv_with v (gpu_irq (drv_gpu v) m)) port gl)))))))
 
 ; The driver's queues, and v with g as them.
@@ -1027,10 +1050,32 @@
 (def drv_with ((v Drv) (g Gpu)) Drv
   (match v ((Drv old w h bufs layers attached cur zero rows) (Drv g w h bufs layers attached cur zero rows))))
 
-; A request served, s, whose message was mb: its reply registered, to go
-; once its commands are answered.
-(def drv_replied ((s (Served Drv)) (mb bytes)) Drv
-  (match s ((Served v reply) (drv_with v (gpu_replied (drv_gpu v) mb reply)))))
+; A request served, s, whose message was mb, by the driver as old was:
+; its reply registered, to go once its commands are answered; a frame
+; if it is a damage or a layers, and releasing the buffers its layers
+; took off the stack.
+(def drv_replied ((old Drv) (s (Served Drv)) (mb bytes)) Drv
+  (match s
+    ((Served v reply)
+      (let frame (if (asked_op_is mb "damage ") true (asked_op_is mb "layers "))
+        (drv_with v (gpu_replied (drv_gpu v) mb reply frame (layers_left (drv_layers old) (drv_layers v) (nil int))))))))
+
+; Whether the request in a message's bytes mb, after its reply port,
+; starts with op.
+(def asked_op_is ((mb bytes) (op (list int))) bool
+  (if (lt (bytes_len mb) (add (add (header_len) 4) (length op))) false (bytes_is_at mb (add (header_len) 4) op)))
+
+; The driver's layers.
+(def drv_layers ((v Drv)) (list Layer) (match v ((Drv g w h bufs layers attached cur zero rows) layers)))
+
+; The buffers of ols, but the wallpaper, that nls has not, onto acc: what
+; a restack from ols to nls released, each once.
+(def layers_left ((ols (list Layer)) (nls (list Layer)) (acc (list int))) (list int)
+  (if (is_empty ols)
+      (rev acc)
+      (let id (layer_id (head ols))
+        (layers_left (tail ols) nls
+          (if (if (in_layers nls id) true (if (eq id (wall_id)) true (any_eq id acc))) acc (cons id acc))))))
 
 ; A request's body, its op and then its numbers, answered.
 (def handle ((v Drv) (body (list int))) (Served Drv)
@@ -1050,7 +1095,8 @@
   (if (if (eq op "shape") (eq n 5) false) (shaped v (nth ns 0) (Corners (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)))
   (if (if (eq op "cursor") (eq n 3) false) (pointer_image v (nth ns 0) (nth ns 1) (nth ns 2))
   (if (if (eq op "move") (eq n 2) false) (moved v (nth ns 0) (nth ns 1))
-  (served_error v (append "no request " op))))))
+  (if (if (eq op "frames") (eq n 1) false) (frames_asked v (nth ns 0))
+  (served_error v (append "no request " op)))))))
 
 (def info ((v Drv)) (Served Drv)
   (match v

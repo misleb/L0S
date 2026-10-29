@@ -32,6 +32,7 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `move ID` | the window dragged with the pointer from where it is, held where the pointer holds it, until the button is up: what a client that draws its own header bar asks as it is pressed, xdg_toplevel's move. Only while the left button is down after a press in that window, and nothing else is dragged (`not pressed`); only the window's client may ask |
 | `damage ID X Y W H ...` | each rectangle of the window changed, ID X Y W H again for each, given to the display in one `damage` and shown together |
 | `top ID T` | the window's rows read from its buffer's row T on, as a ring: how a client scrolls |
+| `frame ID` | the window's client told, by a frame notice (below), once the display shows the next frame: what a client asks once for a change, before the `damage` that shows it, as `wl_surface.frame` is asked before a commit. Only the window's client may ask |
 | `resize ID W H [VA N S]` | the window's content is now W×H: in the buffer it has, which must have room for it, its rows where they were, or in a new one at VA, N pages, its rows S of its own pixels apart, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
 | `edges ID E` | the window resized by its edges E with the pointer, from where it is, until the button is up, as by the border outside it, as xdg_toplevel's `resize` asks: what a client asks when the inside of its own edge is pressed. E adds the edges' bits, left 1, right 2, top 4, bottom 8: one side, or two that meet. As `move`, only the window's client may ask, while the left button is down after a press in the window and nothing else is dragged |
 | `maximize ID` | the window made to fill the screen under the top bar, from 0, 32, its place and size kept; or, if it is maximized, put back where it was, at its size: what a double click on a client's own header bar asks. `wm` asks the client for the size with a size notice, as a drag of its right and bottom edges does, and places the window once it answers. Only the window's client may ask |
@@ -286,6 +287,16 @@ Input:
   as the action `win.close`, and closes the window itself, and asks
   `wm` to `end` the program, if the program does nothing with it (see
   [the toolkit](toolkit.md)), so every app closes at once, as before.
+- **Frames**, as `wl_surface.frame`'s done: `wm` asks the display for
+  its notices with `frames` as it starts (see [the display
+  protocol](display.md#the-display-protocol)), and says so if it will
+  not, its clients then told no frame. A client asks `frame ID` once
+  for a change, before the `damage` that shows it; `wm` tells it, as a
+  window notice of ID, `frm` and N (`shown_notice`), when the display
+  tells its next frame, N being the display's. A frame the display told
+  while `wm` was answering something else, before the client asked, may
+  tell it a little early; none comes late, as the display counts one
+  for every `damage`.
 
 ## A large screen
 
