@@ -1,0 +1,306 @@
+; pending_test.l0 -- tests of the display lists' pipeline: when a list is
+; written, when one is kept wanted, what is released and when forgotten
+; pages are given up; and a property test against a channel that takes
+; the list pointed at at an end of frame, or now and then a frame late.
+
+; A list tagged t over the buffers ids, each buffer's pages at its id.
+(def scr ((t int) (ids (list int))) Listed
+  (Listed (cons t (nil int)) (nil Alloc) (layers_at ids) ids))
+
+; A layer for each of ids.
+(def layers_at ((ids (list int))) (list Layer)
+  (if (is_empty ids) (nil Layer) (cons (Layer (head ids) 0 0 0) (layers_at (tail ids)))))
+
+; A list's tag, -1 for the list of nothing.
+(def tag_of ((l Listed)) int
+  (let ws (listed_words l) (if (is_empty ws) -1 (head ws))))
+
+; A step as text: the write, if any, as HALF:TAG, whether a list was
+; taken, the releases and the pages given up.
+(def step_text ((s ListsStep)) (list int)
+  (match s
+    ((ListsStep ls wr took rel free)
+      (append (match wr
+                ((None) "no write")
+                ((Some w) (match w ((ListWrite k l) (append "write " (append (digits k) (append ":" (digits (tag_of l)))))))))
+        (append (if took " took" "")
+          (append " rel" (append (unwords (cons "" (numbers_words rel)))
+            (append " free" (unwords (cons "" (numbers_words free)))))))))))
+
+; A pipeline as text: the half fetched, its list's tag, the list pointed
+; at's and the one wanted's, - for none, and the pages kept forgotten.
+(def lists_text ((ls Lists)) (list int)
+  (match ls
+    ((Lists k live prev upto pend due want dead)
+      (append "half " (append (digits k)
+        (append " live " (append (digits (tag_of live))
+          (append " pend " (append (opt_tag pend)
+            (append " want " (append (opt_tag want)
+              (append " dead" (unwords (cons "" (numbers_words dead)))))))))))))))
+
+; The tag of a list there may be, - for none.
+(def opt_tag ((o (Option Listed))) (list int)
+  (match o ((None) "-") ((Some l) (digits (tag_of l)))))
+
+; The pipeline of a step.
+(def step_lists ((s ListsStep)) Lists (match s ((ListsStep ls wr took rel free) ls)))
+
+; The numbers in s, words apart.
+(def nums ((s (list int))) (list int)
+  (match (word_numbers (split_spaces s)) ((Some ns) ns) ((None) (nil int))))
+
+; ---------------------------------------------------------------- asking
+
+; Nothing pointed at: a screen asked is written at once into the half the
+; channel is not on.
+(def test_asked_writes () int
+  (let s (lists_asked (lists_new 0) (scr 1 (nums "4")) false 10 0)
+    (add (check_str "step" (step_text s) "write 1:1 rel free")
+         (check_str "lists" (lists_text (step_lists s)) "half 0 live -1 pend 1 want - dead"))))
+
+; A list pointed at and not taken: the screen asked is kept, and a later
+; one replaces it.
+(def test_asked_coalesces () int
+  (let a (step_lists (lists_asked (lists_new 0) (scr 1 (nums "4")) false 10 0))
+    (let b (lists_asked a (scr 2 (nums "4")) false 10 0)
+      (let c (lists_asked (step_lists b) (scr 3 (nums "5")) false 10 0)
+        (add (check_str "kept" (step_text b) "no write rel free")
+             (check_str "latest" (lists_text (step_lists c)) "half 0 live -1 pend 1 want 3 dead"))))))
+
+; The list pointed at seen taken as a screen is asked: taken first, its
+; releases said, then the screen written into the half the channel left.
+(def test_asked_after_taken () int
+  (let a (step_lists (lists_asked (lists_new 0) (scr 1 (nums "4 5")) false 10 0))
+    (let b (step_lists (lists_took a true 11 0))
+      (let c (step_lists (lists_asked b (scr 2 (nums "4")) false 12 0))
+        (let d (lists_asked c (scr 3 (nums "6")) true 13 0)
+          (add (check_str "step" (step_text d) "write 1:3 took rel 5 free")
+               (check_str "lists" (lists_text (step_lists d)) "half 0 live 2 pend 3 want - dead")))))))
+
+; An end of frame that shows the list pointed at taken writes the screen
+; wanted into the half the channel left.
+(def test_taken_writes_wanted () int
+  (let a (step_lists (lists_asked (lists_new 0) (scr 1 (nums "4")) false 10 0))
+    (let b (step_lists (lists_asked a (scr 2 (nums "5")) false 10 0))
+      (let e (lists_ended b true 11 0 (nums "4 5"))
+        (add (check_str "step" (step_text e) "write 0:2 took rel free")
+             (check_str "lists" (lists_text (step_lists e)) "half 1 live 1 pend 2 want - dead"))))))
+
+; An end of frame that does not show it taken changes nothing.
+(def test_untaken_waits () int
+  (let a (step_lists (lists_asked (lists_new 0) (scr 1 (nums "4")) false 10 0))
+    (let e (lists_ended a false 11 0 (nums "4"))
+      (check_str "step" (step_text e) "no write rel free"))))
+
+; A new list keeps clear of the UPM of the list pointed at, else of the
+; list fetched.
+(def test_allocs () int
+  (let al (cons (Alloc 16 0 4 0) (nil Alloc))
+    (let a (step_lists (lists_asked (lists_new 0) (Listed (nil int) al (nil Layer) (nil int)) false 1 0))
+      (add (check_int "pointed" (length (lists_allocs a)) 1)
+           (check_int "fetched" (length (lists_allocs (lists_new 0))) 0)))))
+
+; Overdue once its 50 ms are up, and never with nothing pointed at.
+(def test_overdue () int
+  (let a (step_lists (lists_asked (lists_new 0) (scr 1 (nil int)) false 1 1000))
+    (add (check_bool "early" (lists_overdue a (add 1000 49999999)) false)
+         (add (check_bool "late" (lists_overdue a (add 1000 50000000)) true)
+              (check_bool "none" (lists_overdue (lists_new 0) 99999999999) false)))))
+
+; ------------------------------------------------------------ forgetting
+
+; Pages no list reads are given up at once; pages a buffer still holds
+; are not given up at all.
+(def test_forgot_unread () int
+  (add (check_str "unread" (step_text (lists_forgot (lists_new 0) 7 (nil int))) "no write rel free 7")
+       (check_str "held" (step_text (lists_forgot (lists_new 0) 7 (nums "7"))) "no write rel free")))
+
+; Pages the list fetched reads are kept until a list leaving them out is
+; taken and then shown: not at the end of frame that takes it, but at
+; the next.
+(def test_forgot_deferred () int
+  (let a (step_lists (lists_synced (lists_new 0) 0 (scr 1 (nums "7")) (nums "7")))
+    (let b (lists_forgot a 7 (nil int))
+      (let c (step_lists (lists_asked (step_lists b) (scr 2 (nil int)) false 20 0))
+        (let d (lists_ended c true 21 0 (nil int))
+          (let e (lists_ended (step_lists d) false 22 0 (nil int))
+            (add (check_str "kept" (step_text b) "no write rel free")
+                 (add (check_str "taken" (step_text d) "no write took rel 7 free")
+                      (check_str "shown" (step_text e) "no write rel free 7")))))))))
+
+; Pages kept forgotten and then held by a buffer again are no longer
+; forgotten.
+(def test_forgot_held_again () int
+  (let a (step_lists (lists_synced (lists_new 0) 0 (scr 1 (nums "7")) (nums "7")))
+    (let b (step_lists (lists_forgot a 7 (nil int)))
+      (let e (lists_ended b false 5 0 (nums "7"))
+        (check_str "dropped" (lists_text (step_lists e)) "half 0 live 1 pend - want - dead")))))
+
+; Pages a screen wanted reads are not given up.
+(def test_forgot_wanted () int
+  (let a (step_lists (lists_asked (lists_new 0) (scr 1 (nil int)) false 1 0))
+    (let b (step_lists (lists_asked a (scr 2 (nums "8")) false 1 0))
+      (check_str "kept" (step_text (lists_forgot b 8 (nil int))) "no write rel free"))))
+
+; Written and waited for: the list before it and the one pointed at
+; release what it leaves out, and nothing it does not read is kept.
+(def test_synced () int
+  (let a (step_lists (lists_asked (step_lists (lists_synced (lists_new 0) 0 (scr 1 (nums "4")) (nums "4 5"))) (scr 2 (nums "5")) false 1 0))
+    (let b (step_lists (lists_forgot a 4 (nums "5")))
+      (add (check_str "step" (step_text (lists_synced b -1 (scr 3 (nil int)) (nums "5"))) "no write took rel 4 5 free 4")
+           (check_bool "only" (lists_synced_only (step_lists (lists_synced b -1 (scr 3 (nil int)) (nil int)))) true)))))
+
+; --------------------------------------------------------------- property
+
+; The pipeline beside a model of the channel: the pipeline, the changes
+; (shown.l0), the frames counted, the half the channel fetches and the
+; one LPTRS points at, the list in each half, the pages buffers hold,
+; the pages mapped, the pages of the list the frame last ended fetched,
+; not given up until the frame after it is shown, the latest screen
+; asked, the next tag, and how many times a rule was broken.
+(data Sim (Sim Lists Changes int int int (array Listed) (list int) (list int) (list int) Listed int int))
+
+; The channel on an empty list in half 0, pointed there, no buffers.
+(def sim_new () Sim
+  (Sim (lists_new 0) (changes_new) 0 0 0 (array_new 2 (listed_none)) (nil int) (nil int) (nil int) (listed_none) 1 0))
+
+; A random screen over some of held, tagged t.
+(def random_ids ((seed int) (held (list int)) (acc (list int))) (list int)
+  (if (is_empty held)
+      (rev acc)
+      (let s (rand_next seed)
+        (random_ids s (tail held) (if (eq (rand_below s 2) 0) (cons (head held) acc) acc)))))
+
+; The step applied: a take's change noted at n, with its releases; its
+; write checked against the channel (never the half fetched, never with
+; a list pointed at and untaken) and made; its pages given up checked
+; (mapped, held by no buffer, read by no list the channel fetches or is
+; pointed at) and unmapped.
+(def sim_applied ((s Sim) (st ListsStep)) Sim
+  (match s
+    ((Sim ls0 ch n dl lp mem held mapped before latest t bad)
+      (match st
+        ((ListsStep ls wr took rel free)
+          (let ch2 (if took (changes_releasing (change_noted ch n (list_frames)) rel) ch)
+            (let wbad (match wr
+                        ((None) 0)
+                        ((Some w) (match w ((ListWrite k l) (if (if (eq k dl) true (not (eq lp dl))) 1 0)))))
+              (let mem2 (match wr ((None) mem) ((Some w) (match w ((ListWrite k l) (array_set mem k l)))))
+                (let lp2 (match wr ((None) lp) ((Some w) (match w ((ListWrite k l) k))))
+                  (let fbad (frees_bad free mapped held (append before (listed_vas (array_get mem2 dl))) (listed_vas (array_get mem2 lp2)))
+                    (Sim ls ch2 n dl lp2 mem2 held (vas_minus mapped free) before latest t (add bad (add wbad fbad)))))))))))))
+
+; How many of free break a rule.
+(def frees_bad ((free (list int)) (mapped (list int)) (held (list int)) (a (list int)) (b (list int))) int
+  (if (is_empty free)
+      0
+      (let v (head free)
+        (add (if (if (not (any_eq v mapped)) true (if (any_eq v held) true (if (any_eq v a) true (any_eq v b)))) 1 0)
+             (frees_bad (tail free) mapped held a b)))))
+
+; vs without those of out.
+(def vas_minus ((vs (list int)) (out (list int))) (list int)
+  (if (is_empty vs) vs (if (any_eq (head vs) out) (vas_minus (tail vs) out) (cons (head vs) (vas_minus (tail vs) out)))))
+
+; Whether the channel has taken the list pointed at, as the driver reads
+; DL: something pointed at, and the channel on its half.
+(def sim_taken ((s Sim)) bool
+  (match s
+    ((Sim ls ch n dl lp mem held mapped before latest t bad)
+      (match (lists_pending ls) ((None) false) ((Some p) (eq dl (lists_other ls)))))))
+
+; A screen asked, over some of the buffers.
+(def sim_ask ((s Sim) (seed int)) Sim
+  (match s
+    ((Sim ls ch n dl lp mem held mapped before latest t bad)
+      (let l (scr t (random_ids seed held (nil int)))
+        (let st (lists_asked ls l (sim_taken s) n 0)
+          (sim_applied (Sim ls ch n dl lp mem held mapped before l (add t 1) bad) st))))))
+
+; An end of frame: what it showed told, each release checked against the
+; list the frame fetched; the channel taking the list pointed at unless
+; latch is false; then the driver's end of frame.
+(def sim_eof ((s Sim) (latch bool)) Sim
+  (match s
+    ((Sim ls ch n dl lp mem held mapped before latest t bad)
+      (let n2 (add n 1)
+        (match (changes_shown ch n2)
+          ((Shown ch2 fr rel)
+            (let rbad (released_bad rel (listed_layers (array_get mem dl)))
+              (let dl2 (if latch lp dl)
+                (let s2 (Sim ls ch2 n2 dl2 lp mem held mapped (listed_vas (array_get mem dl)) latest t (add bad rbad))
+                  (sim_applied s2 (lists_ended ls (sim_taken s2) n2 0 held)))))))))))
+
+; How many of rel the layers ls, those of the frame that told them, show.
+(def released_bad ((rel (list int)) (ls (list Layer))) int
+  (if (is_empty rel) 0 (add (if (in_layers ls (head rel)) 1 0) (released_bad (tail rel) ls))))
+
+; A buffer forgotten: one held and not in the latest screen, as hvs
+; refuses to forget one the screen shows.
+(def sim_forget ((s Sim) (seed int)) Sim
+  (match s
+    ((Sim ls ch n dl lp mem held mapped before latest t bad)
+      (let cands (vas_minus held (listed_vas latest))
+        (if (is_empty cands)
+            s
+            (let v (nth_int cands (rand_below seed (length cands)))
+              (let h2 (vas_minus held (cons v (nil int)))
+                (sim_applied (Sim ls ch n dl lp mem h2 mapped before latest t bad) (lists_forgot ls v h2)))))))))
+
+; The ith of xs, from 0.
+(def nth_int ((xs (list int)) (i int)) int (if (eq i 0) (head xs) (nth_int (tail xs) (sub i 1))))
+
+; A buffer shared, its pages at v, mapped unless they are still.
+(def sim_share ((s Sim) (v int)) Sim
+  (match s
+    ((Sim ls ch n dl lp mem held mapped before latest t bad)
+      (if (any_eq v held)
+          s
+          (Sim ls ch n dl lp mem (cons v held) (if (any_eq v mapped) mapped (cons v mapped)) before latest t bad)))))
+
+; One random step.
+(def sim_step ((s Sim) (seed int)) Sim
+  (let r (rand_below seed 12)
+    (let s2 (rand_next seed)
+      (if (lt r 4) (sim_ask s s2)
+      (if (lt r 7) (sim_eof s true)
+      (if (lt r 8) (sim_eof s false)
+      (if (lt r 10) (sim_forget s s2)
+      (sim_share s (add 1 (rand_below s2 8))))))))))
+
+; i random steps from seed.
+(def sim_run ((s Sim) (seed int) (i int)) Sim
+  (if (le i 0) s (let s2 (rand_next seed) (sim_run (sim_step s s2) (rand_next s2) (sub i 1)))))
+
+; Ends of frame, each taking the list pointed at, k of them.
+(def sim_settled ((s Sim) (k int)) Sim
+  (if (le k 0) s (sim_settled (sim_eof s true) (sub k 1))))
+
+; After settling: how many rules broke, plus one if the channel does not
+; fetch the latest screen asked, one if anything is still pointed at,
+; wanted or kept forgotten, and one if a page is mapped that no buffer
+; holds.
+(def sim_judged ((s Sim)) int
+  (match s
+    ((Sim ls ch n dl lp mem held mapped before latest t bad)
+      (add bad
+        (add (if (eq (tag_of (array_get mem dl)) (tag_of latest)) 0 1)
+          (add (if (is_empty (lists_dead ls)) 0 1)
+            (add (match (lists_pending ls) ((None) 0) ((Some p) 1))
+              (if (eq (length (vas_minus mapped held)) 0) 0 1))))))))
+
+; Runs from seed on, n of them: how many went wrong.
+(def sims ((seed int) (n int) (wrong int)) int
+  (if (le n 0)
+      wrong
+      (let s (sim_settled (sim_run (sim_new) seed (add 5 (rand_below seed 60))) 4)
+        (sims (rand_next (rand_next seed)) (sub n 1) (if (eq (sim_judged s) 0) wrong (add wrong 1))))))
+
+; Over random requests, forgets, shares and ends of frame, some a frame
+; late taking their list: no list is written into a half fetched or with
+; a list pointed at untaken, no pages are given up that a list fetched,
+; pointed at or wanted reads or a buffer holds, every release is told at
+; the end of a frame whose list leaves it out, and once frames go by the
+; latest screen is the one fetched and every forgotten page given up.
+(def test_pipeline_property () int
+  (check_int "runs wrong" (sims 11 300 0) 0))

@@ -17,9 +17,12 @@
 ;   aperture of the IOMMU in front of the HVS (iommu.l0), and points its
 ;   planes there.
 ; - Two lists, each in its own half of the list memory, so that the one
-;   written is never the one shown: a restack writes the half the channel
-;   is not fetching, points the channel at it, and waits for the frame
-;   that takes it.
+;   written is never the one shown: a restack is answered at once, and
+;   its list written into the half the channel is not fetching, and the
+;   channel pointed at it, as soon as the list pointed at before has been
+;   taken, at the end of frame that shows it taken if not at once; only
+;   the latest screen asked is written (pending.l0). A buffer forgotten
+;   while a list may still read it keeps its pages until none does.
 ; - The Pi's DMA does not see the CPU's caches, and the HVS reads every
 ;   pixel every frame, so a damaged rectangle is only a cleaning of the
 ;   pages its rows are in.
@@ -456,7 +459,7 @@
           ((Hw d g mmu cache t tva addrs fr)
             (let r (regs_said mmu (iommu_regs))
               (channel_said d g "under the IOMMU"))))
-        (start_serving (Drv hw w h ((MapEmpty int Buffer)) (nil Layer) (no_cursor) (aperture_new) k (nil Alloc))))))
+        (start_serving (Drv hw w h ((MapEmpty int Buffer)) (nil Layer) (no_cursor) (aperture_new) (lists_new k))))))
 
 ; Each second-level table entered in the first, the tables cleaned out of
 ; the caches for the IOMMU to read, then the IOMMU's registers in the
@@ -536,12 +539,15 @@
 ; --------------------------------------------------------------- the driver
 
 ; The driver: its hardware, the screen's width and height, the buffers
-; shared with it, the layers, the pointer, the aperture, the half of
-; the list memory the channel fetches from, or -1 once the firmware is
-; found keeping the channel on its own two lists, over which each list
-; is then written (fw_lists_written); and the UPM of the list shown's
-; planes, which the next list keeps or keeps clear of (pieces.l0).
-(data Drv (Drv Hw int int (Map int Buffer) (list Layer) Cursor Aperture int (list Alloc)))
+; shared with it, the layers and the pointer last asked, the aperture,
+; and its display lists (pending.l0): the half of the list memory the
+; channel fetches from, or -1 once the firmware is found keeping the
+; channel on its own two lists, over which each list is then written
+; (fw_lists_written); the list fetched, the one pointed at and the
+; screen wanted, each with the UPM of its planes, which the next list
+; keeps or keeps clear of (pieces.l0); and the pages forgotten that a
+; list may still read.
+(data Drv (Drv Hw int int (Map int Buffer) (list Layer) Cursor Aperture Lists))
 
 ; What the driver says as it starts serving: the screen, where, and how.
 (def screen_line ((g HvsGen) (w int) (h int) (s int)) (list int)
@@ -560,25 +566,25 @@
     (let r (name_register_or_why port "display")
       (if (is_empty r)
           (match (first_frame (frames_kept v (frames_started)))
-            ((Drv hw w h bufs layers cur ap live al)
+            ((Drv hw w h bufs layers cur ap lists)
               (match hw
                 ((Hw d g mmu cache t tva addrs fr)
                   (let n (info_as "hvs" (screen_line g w h (scale_of w h (boot_args))))
                     (let z (sizes_said d (hvs_sizes) "")
-                      (serving (Drv hw w h bufs layers cur ap live al) port)))))))
+                      (serving (Drv hw w h bufs layers cur ap lists) port)))))))
           (complain r)))))
 
 ; The driver with its ends of frame f.
 (def frames_kept ((v Drv) (f Frames)) Drv
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (match hw
         ((Hw d g mmu cache t tva addrs fr)
-          (Drv (Hw d g mmu cache t tva addrs f) w h bufs layers cur ap live al))))))
+          (Drv (Hw d g mmu cache t tva addrs f) w h bufs layers cur ap lists))))))
 
 ; The driver's ends of frame.
 (def drv_frames ((v Drv)) Frames
-  (match v ((Drv hw w h bufs layers cur ap live al) (match hw ((Hw d g mmu cache t tva addrs fr) fr)))))
+  (match v ((Drv hw w h bufs layers cur ap lists) (match hw ((Hw d g mmu cache t tva addrs fr) fr)))))
 
 ; Serving on port, and on the ends of frame's port beside it as one set
 ; if there are ends of frame; with none, on port alone.
@@ -601,7 +607,7 @@
 ; cannot be shown, said once, and the screen stays black.
 (def first_frame ((v Drv)) Drv
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (let a (step (StageFull) "drawing the wallpaper")
         (match (wall_pages w h (scale_of w h (boot_args)))
           ((None) v)
@@ -618,7 +624,7 @@
 ; and given up.
 (def wall_first_shown ((v Drv)) Drv
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (let a (step (StageFull) "showing the wallpaper")
         (match (wall_gone (shown_as v (wall_under (nil Layer) true) cur (nil Stamp)))
           ((Served v2 reply)
@@ -689,31 +695,16 @@
   (match r
     ((Served v reply)
       (match v
-        ((Drv hw w h bufs layers cur ap live al)
+        ((Drv hw w h bufs layers cur ap lists)
           (if (if (eq reply "ok") (if (wall_shown bufs) (not (in_layers layers (wall_id))) false) false)
               (Served (wall_gone_now v) reply)
               r))))))
 
-; The wallpaper's buffer dropped and its pages given up, once the list
-; on the screen fetches none of them: two frames waited first, so that
-; whatever the channel may still fetch of the list before is fetched,
-; then its place in the aperture cleared and its pages unmapped.
+; The wallpaper's buffer dropped, once the layers asked leave it out, and
+; its pages given up as a forgotten buffer's are (dropped): once no
+; list that may still be read names them.
 (def wall_gone_now ((v Drv)) Drv
-  (match v
-    ((Drv hw w h bufs layers cur ap live al)
-      (match (map_get bufs (wall_id))
-        ((None) v)
-        ((Some b)
-          (match b
-            ((Buffer bw bh sd va n addr cs)
-              (if (in_layers layers (wall_id))
-                  v
-                  (let z (sleep_ns (wall_wait_ns))
-                    (let rest (map_remove bufs (wall_id))
-                      (Drv hw w h rest layers cur (unmapped hw ap va) live al)))))))))))
-
-; Two frames at 50 Hz, the slowest mode HDMI0 is set to.
-(def wall_wait_ns () int 40000000)
+  (if (in_layers (drv_layers v) (wall_id)) v (dropped v (wall_id))))
 
 ; A request refused for why, said as a warning too, since its client
 ; may not say it: the state as it was.
@@ -744,12 +735,12 @@
                 ((Served v2 reply)
                   (let r (msg_answer mb reply)
                     (serve_set v2 port))))))
-          (serve_set (frames_kept v (frames_noticed (drv_frames v) m (drv_status v))) port)))))
+          (serve_set (eof_served v m) port)))))
 
 ; Channel 0's STATUS, read now.
 (def drv_status ((v Drv)) int
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (match hw ((Hw d g mmu cache t tva addrs fr) (device_read32 d (disp_status g (hdmi0_channel))))))))
 
 ; A request's body, its op and then its numbers, answered.
@@ -788,7 +779,7 @@
 ; info: the screen's size, its own pointer, and the scale.
 (def info((v Drv)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (Served v (info_reply w h (scale_of w h (boot_args)))))))
 
 ; -------------------------------------------------------------- buffers
@@ -810,7 +801,7 @@
 ; The buffer's n pages at va, at addrs, given a place in the aperture.
 (def mapped_for ((v Drv) (id int) (bw int) (bh int) (sd int) (va int) (n int) (addrs (array int))) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (match (aperture_mapped ap va)
         ((Some m)
           (match m
@@ -825,7 +816,7 @@
             ((Taken ap2 first)
               (let e (ptes_written hw first addrs 0)
                 (let c (dma_synced va n)
-                  (with_buffer (Drv hw w h bufs layers cur ap2 live al) id
+                  (with_buffer (Drv hw w h bufs layers cur ap2 lists) id
                     (Buffer bw bh sd va n (aperture_address first) (square))))))))))))
 
 ; The aperture's pages from first mapped to the pages at addrs, from i,
@@ -860,45 +851,126 @@
 
 ; The driver with buffer b as id: the screen shown again if it shows id,
 ; since its planes fetch from the old one, and the old one's corners put
-; back.
+; back. An old one in other pages leaves them as a forgotten buffer
+; does (pages_left).
 (def with_buffer ((v Drv) (id int) (b Buffer)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (let nbufs (map_put bufs id b)
-        (if (if (in_layers layers id) true (eq (cursor_id cur) id))
-            (shown_as (Drv hw w h nbufs layers cur ap live al) layers cur (stamps_of layers bufs))
-            (served_ok (Drv hw w h nbufs layers cur ap live al)))))))
+        (match (if (if (in_layers layers id) true (eq (cursor_id cur) id))
+                   (shown_as (Drv hw w h nbufs layers cur ap lists) layers cur (stamps_of layers bufs))
+                   (served_ok (Drv hw w h nbufs layers cur ap lists)))
+          ((Served v2 reply)
+            (match (map_get bufs id)
+              ((None) (Served v2 reply))
+              ((Some old)
+                (if (eq (buffer_va old) (buffer_va b))
+                    (Served v2 reply)
+                    (Served (pages_left v2 (buffer_va old)) reply))))))))))
+
+; Where this process sees a buffer's pages.
+(def buffer_va ((b Buffer)) int (match b ((Buffer bw bh sd va n addr cs) va)))
 
 ; The buffer the pointer's image is, -1 for none.
 (def cursor_id ((cur Cursor)) int (match cur ((Cursor id px py hx hy) id)))
 
 ; forget ID: the buffer dropped, and once no other buffer is in its pages,
-; its place in the aperture and the pages given up. Refused while it is
-; on the screen or is the pointer's, since the HVS still reads it.
+; its place in the aperture and the pages given up (dropped). Refused
+; while it is on the screen asked or is the pointer's. The reply does
+; not wait for the screen asked to be shown, so a list the channel
+; fetches, or is pointed at, may still name the buffer: its pages are
+; then given up only once a list that leaves them out is shown.
 (def forgot ((v Drv) (id int)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
-      (match (map_get bufs id)
-        ((None) (served_ok v))
-        ((Some b)
-          (if (if (in_layers layers id) true (eq (cursor_id cur) id))
+    ((Drv hw w h bufs layers cur ap lists)
+      (if (if (in_layers layers id) true (eq (cursor_id cur) id))
+          (if (map_has bufs id)
               (refused v (append "buffer " (append (digits id) " is in use")))
-              (match b
-                ((Buffer bw bh sd va n addr cs)
-                  (let rest (map_remove bufs id)
-                    (if (buffer_at rest va)
-                        (served_ok (Drv hw w h rest layers cur ap live al))
-                        (served_ok (Drv hw w h rest layers cur (unmapped hw ap va) live al))))))))))))
+              (served_ok v))
+          (served_ok (dropped v id))))))
 
-; Whether any of bufs is in the pages at va.
-(def buffer_at ((bufs (Map int Buffer)) (va int)) bool
-  (any_at (map_values bufs) va))
+; Buffer id dropped, if the driver has it, and its pages left
+; (pages_left).
+(def dropped ((v Drv) (id int)) Drv
+  (match v
+    ((Drv hw w h bufs layers cur ap lists)
+      (match (map_get bufs id)
+        ((None) v)
+        ((Some b) (pages_left (Drv hw w h (map_remove bufs id) layers cur ap lists) (buffer_va b)))))))
 
-; Whether any of bs is in the pages at va.
-(def any_at((bs (list Buffer)) (va int)) bool
-  (if (is_empty bs)
-      false
-      (match (head bs) ((Buffer bw bh sd bva n addr cs) (if (eq bva va) true (any_at (tail bs) va))))))
+; The pages at va, which no buffer of the driver's may now be in: given
+; up at once if no list that may still be read names them, else once
+; none does (pending.l0's lists_forgot); kept if a buffer is in them.
+(def pages_left ((v Drv) (va int)) Drv
+  (stepped v (lists_forgot (drv_lists v) va (bufs_vas (drv_bufs v)))))
+
+; The driver's buffers.
+(def drv_bufs ((v Drv)) (Map int Buffer) (match v ((Drv hw w h bufs layers cur ap lists) bufs)))
+
+; The driver's lists.
+(def drv_lists ((v Drv)) Lists (match v ((Drv hw w h bufs layers cur ap lists) lists)))
+
+; Where each of bufs's pages are.
+(def bufs_vas ((bufs (Map int Buffer))) (list int)
+  (buffers_vas (map_values bufs) (nil int)))
+
+; Where each of bs's pages are, onto acc.
+(def buffers_vas ((bs (list Buffer)) (acc (list int))) (list int)
+  (if (is_empty bs) acc (buffers_vas (tail bs) (cons (buffer_va (head bs)) acc))))
+
+; The pages a list of layers ls and pointer cur over bufs reads: each
+; layer's buffer's and the pointer's.
+(def screen_vas ((ls (list Layer)) (cur Cursor) (bufs (Map int Buffer))) (list int)
+  (layers_vas ls bufs (match (map_get bufs (cursor_id cur)) ((None) (nil int)) ((Some b) (cons (buffer_va b) (nil int))))))
+
+; The pages of layers ls's buffers over bufs, onto acc.
+(def layers_vas ((ls (list Layer)) (bufs (Map int Buffer)) (acc (list int))) (list int)
+  (if (is_empty ls)
+      acc
+      (match (head ls)
+        ((Layer id x y top)
+          (layers_vas (tail ls) bufs (match (map_get bufs id) ((None) acc) ((Some b) (cons (buffer_va b) acc))))))))
+
+; The driver after a step of its lists (pending.l0): a list taken noted
+; as a change, shown a frame on (shown.l0's list_frames), with the
+; buffers it releases; a list to write written into its half, the
+; channel pointed at it, and the ends of frame's port given an alarm for
+; when it should have been taken; and the pages no list reads unmapped
+; and given up.
+(def stepped ((v Drv) (st ListsStep)) Drv
+  (match st
+    ((ListsStep ls wr took rel free)
+      (let v2 (if took (frames_kept v (frames_released (frames_changed_now (drv_frames v) (drv_status v) (list_frames)) rel)) v)
+        (let p (match wr ((None) 0) ((Some lw) (list_pointed v2 lw (lists_due ls))))
+          (pages_given_up (lists_kept v2 ls) free))))))
+
+; The driver with lists ls.
+(def lists_kept ((v Drv) (ls Lists)) Drv
+  (match v ((Drv hw w h bufs layers cur ap lists) (Drv hw w h bufs layers cur ap ls))))
+
+; List lw written into its half and the channel pointed at it, which it
+; takes from its next frame; an alarm set on the ends of frame's port
+; for due, so that a list never taken is noticed (overdue_checked): 0.
+(def list_pointed ((v Drv) (lw ListWrite) (due int)) int
+  (match v
+    ((Drv hw w h bufs layers cur ap lists)
+      (match hw
+        ((Hw d g mmu cache t tva addrs fr)
+          (match lw
+            ((ListWrite k l)
+              (let wr (words_written d (dlist_half_start k) (listed_words l))
+                (let lp (device_read32 d (disp_lptrs g (hdmi0_channel)))
+                  (let pw (device_write32 d (disp_lptrs g (hdmi0_channel)) (lptrs_with_head lp (dlist_half_start k)))
+                    (let port (frames_port fr)
+                      (if (lt port 0) 0 (let a (alarm_at port due) 0)))))))))))))
+
+; The pages at each of vas unmapped from the aperture and given up.
+(def pages_given_up ((v Drv) (vas (list int))) Drv
+  (if (is_empty vas)
+      v
+      (match v
+        ((Drv hw w h bufs layers cur ap lists)
+          (pages_given_up (Drv hw w h bufs layers cur (unmapped hw ap (head vas)) lists) (tail vas))))))
 
 ; The pages at va unmapped from the aperture and given up: the aperture
 ; without them.
@@ -917,14 +989,14 @@
 ; whose planes then have alpha, or no longer.
 (def shaped ((v Drv) (id int) (cs Corners)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (match (map_get bufs id)
         ((None) (refused v (append "no buffer " (digits id))))
         ((Some b)
           (match b
             ((Buffer bw bh sd va n addr old)
               (if (corners_fit cs bw bh)
-                  (let nv (Drv hw w h (map_put bufs id (Buffer bw bh sd va n addr cs)) layers cur ap live al)
+                  (let nv (Drv hw w h (map_put bufs id (Buffer bw bh sd va n addr cs)) layers cur ap lists)
                     (if (in_layers layers id) (shown_as nv layers cur (stamps_of layers bufs)) (served_ok nv)))
                   (refused v "a corner's radius must be from 0 to half the buffer's width and height")))))))))
 
@@ -932,44 +1004,132 @@
 
 ; layers ID X Y TOP ...: the screen shown from new layers, the
 ; wallpaper under them until one covers the screen, when it leaves. The
-; buffers the list shown leaves out are released once it is shown.
+; buffers a list leaves out are released once it is shown (shown_as).
 (def stacked ((v Drv) (ls (list Layer))) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
-      (match (wall_gone (shown_as v (wall_under ls (wall_kept ls bufs w h)) cur (stamps_of layers bufs)))
-        ((Served v2 reply)
-          (if (eq reply "ok")
-              (Served (frames_kept v2 (frames_released (drv_frames v2) (layers_left layers (drv_layers v2) (nil int)))) reply)
-              (Served v2 reply)))))))
+    ((Drv hw w h bufs layers cur ap lists)
+      (wall_gone (shown_as v (wall_under ls (wall_kept ls bufs w h)) cur (stamps_of layers bufs))))))
 
 ; The driver's layers.
-(def drv_layers ((v Drv)) (list Layer) (match v ((Drv hw w h bufs layers cur ap live al) layers)))
+(def drv_layers ((v Drv)) (list Layer) (match v ((Drv hw w h bufs layers cur ap lists) layers)))
 
 ; The screen shown as layers ls and pointer cur: the corners cut as they
 ; show, where stamps had cut them before (corners.l0), then their planes
-; written as a list in the half the channel is not fetching, and the
-; channel moved to it, or over the firmware's lists if it keeps the
-; channel. If they cannot be one list beside the one shown, refused, and
-; the screen and its corners left as they were.
+; made a list, kept clear of the UPM of the list it will be written
+; beside, and the request answered at once: the list written and the
+; channel pointed at it now if the last list pointed at has been taken,
+; else kept as the screen wanted and written at the end of frame that
+; shows that one taken (list_shown). If they cannot be one list beside
+; it, refused, and the screen and its corners left as they were.
 (def shown_as ((v Drv) (ls (list Layer)) (cur Cursor) (stamps (list Stamp))) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers old ap live al)
-      (let k (if (eq live 0) 1 0)
-        (match (screen_planes w h ls bufs cur al)
-          ((Unplannable why) (refused v why))
-          ((Planned ps nal)
-            (match hw
-              ((Hw d g mmu cache t tva addrs fr)
-                (let ws (let r (restamped stamps (stamps_of ls bufs)) (list_words g ps))
-                  (if (lt live 0)
-                      (let f (frames_changed (fw_lists_written fr d g ws) (list_frames))
-                        (let he (handle_error_said d ps)
-                          (served_ok (Drv (Hw d g mmu cache t tva addrs f) w h bufs ls cur ap live nal))))
-                      (let wr (words_written d (dlist_half_start k) ws)
-                        (match (list_switched fr d g (dlist_half_start k) ws)
-                          ((TakenBy ok f)
-                            (let he (handle_error_said d ps)
-                              (served_ok (Drv (Hw d g mmu cache t tva addrs (frames_changed f (list_frames))) w h bufs ls cur ap (if ok k -1) nal))))))))))))))))
+    ((Drv hw w h bufs layers old ap lists)
+      (match (screen_planes w h ls bufs cur (lists_allocs lists))
+        ((Unplannable why) (refused v why))
+        ((Planned ps nal)
+          (match hw
+            ((Hw d g mmu cache t tva addrs fr)
+              (let ws (let r (restamped stamps (stamps_of ls bufs)) (list_words g ps))
+                (let v2 (list_shown (Drv hw w h bufs ls cur ap lists) (Listed ws nal ls (screen_vas ls cur bufs)))
+                  (let he (handle_error_said d ps)
+                    (served_ok v2)))))))))))
+
+; List s, the screen asked, shown. With the channel the driver's and
+; ends of frame to wait by, at once if nothing is pointed at or what is
+; has been taken (DL names it), else at the end of frame that shows it
+; taken (pending.l0's lists_asked). Otherwise, as before it, written and
+; waited for until the channel fetches it (shown_synced).
+(def list_shown ((v Drv) (s Listed)) Drv
+  (if (lists_waited v)
+      (shown_synced v s)
+      (let taken (pending_taken v 0)
+        (let st (drv_status v)
+          (stepped v (lists_asked (drv_lists v) s taken (frames_now (drv_frames v) st) (clock_ns)))))))
+
+; Whether lists are written and waited for as they come: the firmware
+; keeps the channel, or there are no ends of frame to wait by.
+(def lists_waited ((v Drv)) bool
+  (if (lists_synced_only (drv_lists v)) true (lt (frames_port (drv_frames v)) 0)))
+
+; List s written and waited for until the channel fetches it: over the
+; firmware's lists if it keeps the channel, else in the half the channel
+; is not fetching, the channel moved to it, and, if it does not take it,
+; over the firmware's lists (list_switched). No list but it is read
+; after, so it is noted shown a frame on and releases what the one
+; before showed, and pages forgotten are given up (lists_synced).
+(def shown_synced ((v Drv) (s Listed)) Drv
+  (match v
+    ((Drv hw w h bufs layers cur ap lists)
+      (match hw
+        ((Hw d g mmu cache t tva addrs fr)
+          (let ws (listed_words s)
+            (if (lists_synced_only lists)
+                (synced_kept v (fw_lists_written fr d g ws) -1 s)
+                (let k (lists_other lists)
+                  (let wr (words_written d (dlist_half_start k) ws)
+                    (match (list_switched fr d g (dlist_half_start k) ws)
+                      ((TakenBy ok f) (synced_kept v f (if ok k -1) s))))))))))))
+
+; The driver with ends of frame f after list s was written and waited
+; for in half k, -1 for the firmware's lists.
+(def synced_kept ((v Drv) (f Frames) (k int) (s Listed)) Drv
+  (let v2 (frames_kept v f)
+    (stepped v2 (lists_synced (drv_lists v2) k s (bufs_vas (drv_bufs v2))))))
+
+; Whether the channel has taken the list pointed at, if one is: DL names
+; it, read now and up to n more times a millisecond apart.
+(def pending_taken ((v Drv) (n int)) bool
+  (match (lists_pending (drv_lists v))
+    ((None) false)
+    ((Some p)
+      (match v
+        ((Drv hw w h bufs layers cur ap lists)
+          (match hw
+            ((Hw d g mmu cache t tva addrs fr) (list_taken d g (dlist_half_start (lists_other lists)) n))))))))
+
+; An end of frame, as a message m on the ends of frame's port: counted,
+; and what it showed told (frames.l0's frames_taken); then the list
+; pointed at, if the channel takes it now or within 2 ms, taken, and
+; the screen wanted written; the pages no list reads given up; and if
+; the list pointed at should have been taken by now and is not, the
+; channel taken to be the firmware's (lists_fallen). An alarm is a
+; list's time up, if it is (overdue_checked); anything else nothing.
+(def eof_served ((v Drv) (m Message)) Drv
+  (if (is_irq_notice m (disp_intr_irq))
+      (let v2 (frames_kept v (frames_taken (drv_frames v) (drv_status v)))
+        (if (lists_synced_only (drv_lists v2))
+            v2
+            (let taken (pending_taken v2 2)
+              (let v3 (stepped v2 (lists_ended (drv_lists v2) taken (frames_count (drv_frames v2)) (clock_ns) (bufs_vas (drv_bufs v2))))
+                (overdue_checked v3)))))
+      (if (is_alarm_notice m) (overdue_checked v) v)))
+
+; If the list pointed at should have been taken by now, the driver after
+; lists_fallen; else as it is.
+(def overdue_checked ((v Drv)) Drv
+  (if (lists_overdue (drv_lists v) (clock_ns)) (lists_fallen v) v))
+
+; A list pointed at 50 ms ago and not seen taken: said once (frames.l0's
+; frames_unanswered), and the channel read once more. If it has taken
+; the list, taken; if not, the firmware keeps the channel, as roadmap
+; 0005 found, and the latest screen asked is written over its lists,
+; and every list after it (shown_synced).
+(def lists_fallen ((v Drv)) Drv
+  (let v2 (frames_kept v (frames_unanswered (drv_frames v)))
+    (let taken (pending_taken v2 0)
+      (let st (drv_status v2)
+      (if taken
+          (stepped v2 (lists_took (drv_lists v2) true (frames_now (drv_frames v2) st) (clock_ns)))
+          (match v2
+            ((Drv hw w h bufs layers cur ap lists)
+              (match hw
+                ((Hw d g mmu cache t tva addrs fr)
+                  (let b (warn_as "hvs" (untaken_line (dlist_half_start (lists_other lists))
+                                                       (device_read32 d (disp_lptrs g (hdmi0_channel)))
+                                                       (device_read32 d (disp_dl g (hdmi0_channel)))
+                                                       st))
+                    (let s (lists_latest lists)
+                      (synced_kept v2 (fw_lists_written fr d g (listed_words s)) -1 s))))))))))))
 
 ; ws written into the list memory from word i: 0.
 (def words_written ((d IoDevice) (i int) (ws (list int))) int
@@ -1044,7 +1204,7 @@
 ; on (shown.l0's damage_frames).
 (def damaged ((v Drv) (ns (list int))) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (if (is_empty ns)
           (served_ok (frames_kept v (frames_changed (drv_frames v) (damage_frames))))
           (match (map_get bufs (head ns))
@@ -1075,7 +1235,7 @@
 ; the rest were (a board run, at each change to a resize pointer).
 (def pointer_image ((v Drv) (id int) (hx int) (hy int)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (match (map_get bufs id)
         ((None) (refused v (append "no buffer " (digits id))))
         ((Some b)
@@ -1091,9 +1251,9 @@
 ; moved.
 (def moved ((v Drv) (x int) (y int)) (Served Drv)
   (match v
-    ((Drv hw w h bufs layers cur ap live al)
+    ((Drv hw w h bufs layers cur ap lists)
       (match cur
         ((Cursor id px py hx hy)
           (if (lt id 0)
-              (served_ok (Drv hw w h bufs layers (Cursor id x y hx hy) ap live al))
+              (served_ok (Drv hw w h bufs layers (Cursor id x y hx hy) ap lists))
               (shown_as v layers (Cursor id x y hx hy) (stamps_of layers bufs))))))))
