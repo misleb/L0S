@@ -41,7 +41,7 @@ move independently, so several can be active at once.
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008, 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
 | [0030](0030-cpu-usage.md) How the CPUs are used, and what each process serves, in `ps` and System Monitor | Kernel | idea | – | – | kernel.md, syscalls.md, programs.md, demo.md, testing.md |
-| [0033](0033-responsive-app-loop.md) An app's loop that keeps its window answering | Toolkit | active | 1/7 | 0021, 0031, 0032 | toolkit.md, desktop.md, programs.md, testing.md |
+| [0033](0033-responsive-app-loop.md) An app's loop that keeps its window answering | Toolkit | active | 2/7 | 0021, 0031, 0032 | toolkit.md, desktop.md, programs.md, testing.md |
 | [0034](0034-servers-wait-not-poll.md) Servers that wait for their time and their ports, not poll | Kernel | idea | – | – | programs.md, network.md, storage.md, demo.md |
 
 ## Ready
@@ -53,8 +53,9 @@ move independently, so several can be active at once.
   small requests first: 0023, which it needed, is done.
 - [0033](0033-responsive-app-loop.md) An app's loop that keeps its
   window answering: Fonts' slow back button measured and fixed (text
-  measured in the square of its length, in the toolkit); next, the
-  slow step said, then events put together before a step.
+  measured in the square of its length, in the toolkit), and a slow
+  step said at the debug level (`uiloop.l0`); next, events put
+  together before a step.
 
 ## Dependencies
 

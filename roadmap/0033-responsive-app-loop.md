@@ -72,7 +72,7 @@ make the slow path visible, and write down how an app stays answering.
   on its port. Write the cause and the numbers in the Log, and fix what
   is Fonts' own, so the rest of the goal is measured against an app that
   is not slow by itself.
-- [ ] The slow step said: the loop times its stages and says a step
+- [x] The slow step said: the loop times its stages and says a step
   over 16 ms once at the debug level (and again only after one under
   it), in the toolkit, so every app has it. Host tests of the line.
 - [ ] Putting together: before a step, the loop takes what else waits
@@ -167,3 +167,33 @@ make the slow path visible, and write down how an app stays answering.
   Nothing was Fonts' own: its view is small and asks nothing. What is
   left for the later steps is the layout and diff done again for every
   move (step 4) and the moves not put together (step 3).
+- 2026-10-28: step 2, the slow step said, in a new library,
+  `user/lib/ui/uiloop.l0` (`UI_WINDOW`), which steps 3 and 5 grow into
+  the loop itself. The design calls:
+  - **Timed where the toolkit already is.** An app's step is its own
+    code between the toolkit's calls, so the toolkit times what it
+    sees: `ui_route` keeps its start and end in the window (a new last
+    field of `UiWin`, its `UiLoop`, whose `UiTimes` are the step's), and
+    `ui_present` times the layout, the strikes asked of `font` (the
+    wait), the paint (`ui_repaint` gives when its painting ended, as
+    `ui_swapped` does) and the present, and adds the route and the
+    update and view, the time from the route's end to the present's
+    start. The update and the view are one stage: the view is an
+    argument of `ui_present`, made before it is called, so nothing of
+    the toolkit's runs between them. No app changed.
+  - **Once, then again after one under.** A step over 16 ms
+    (`ui_frame_ns`) is said if none was since the last step under it
+    (`ui_slow_due`), so a drag that is slow every step says so once.
+  - **At the debug level, in the program's name**, `debug_as` with the
+    file name of `proc_path`, asked only when it says: `dmesg` shows
+    it, the serial line does not, as every per-event line is kept.
+  Host tests (`uiloop_test.l0`): the line, its milliseconds, when it is
+  due, the stages from the times, a route timed, and the said flag
+  after a slow step and after a quick one. On QEMU, Fonts opened and a
+  face's page with it, `dmesg` said, of Fonts' first present and of the
+  page's: `fontview: slow step: 1440.3 ms: route 0.0, update and view
+  0.0, layout 8.6, wait 1391.5, paint 36.4, present 3.9` and `slow step:
+  330.1 ms: route 2.3, update and view 14.8, layout 8.0, wait 231.5,
+  paint 72.1, present 1.5`: the wait on `font` for the cards' and the
+  page's strikes, which step 5 takes out of the step; the moves over
+  the page said nothing, each under a frame.
