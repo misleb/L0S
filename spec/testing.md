@@ -21,7 +21,8 @@ its port in: notices before every request, and an exited pid's
 requests dropped; a `stat` behind another pid's run of 64 KB writes
 served within one of them, two writers taking turns, a pid with 200
 requests waiting served 128 before another's, a volume's request after
-15 of another pid's writes, and each request's cost.
+15 of another pid's writes, each request's cost, and the bound: a
+ninth request of a pid refused, and never a `close` or a notice.
 
 Each case of `tests/e2e/` is a directory:
 - `etc/`, with its `inittab` and any other files;

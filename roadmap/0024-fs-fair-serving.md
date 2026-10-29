@@ -53,7 +53,7 @@ its own), but none is needed: `fs` can take every message waiting with
   `erase`, `rescan`) 16 runs of 64 KB, so that other pids' are served
   first; a pid's own requests stay in the order they came. Host tests
   of the order in `turns_test`.
-- [ ] A bound on a pid's pending requests in `fs`, past which it
+- [x] A bound on a pid's pending requests in `fs`, past which it
   answers at once with a refusal the client's call reports, -5 and
   why, as for any other failure; a `close` is never refused, since
   the kernel lets go of a stream whatever its answer; storage.md says
@@ -110,3 +110,12 @@ its own), but none is needed: `fs` can take every message waiting with
   Kernel clients have one request out each, so for them this is round
   robin by pid in the order they came, as before; it orders requests
   only when one pid has several waiting.
+- 2026-10-28: step 3 landed. The bound is 8 (`turn_limit`), checked as
+  each message is taken, before it is kept (`taken` in fs.l0), so a
+  refused request costs `fs` nothing but its answer. The callers were
+  read, not changed: the kernel's `fs_answered` and `fs_wread_in` give
+  any word from -1 to -10 to the call as it is, so a refused `open`,
+  `read` or `write` fails with -5 as one out of resources does, and
+  `fs_ask` returns the -5 and its why as any refusal. Nothing on the
+  board sends to `fs` without waiting, so no e2e case or board test
+  meets the bound; `turns_test` pins it.

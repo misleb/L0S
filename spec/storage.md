@@ -99,7 +99,14 @@ message in place: the N of `readw H N`, `writew H N` and `read H N`, a
 `write H BYTES`'s length, 16 runs for one of a whole volume or disk
 (`format`, `mkfs`, `partition`, `erase`, `attach`, `rescan`), so that other pids'
 requests are served before it, and 512 bytes for any other. A pid's
-own requests are never reordered.
+own requests are never reordered. A pid has at most 8 requests
+waiting: one more is answered at once, -5 and `too many requests
+waiting from this process`, which the kernel gives the call as its -5
+and `fs_ask` as its reply, and is not kept; a `close` is never
+refused, since the kernel drops its stream whatever the answer. A
+client that waits for each answer, as the kernel's file calls and
+`fs_ask` do, has one waiting at most, so only one that sends without
+waiting meets the bound.
 
 The disk, as [tools/mkdisk](../tools/mkdisk) makes it with
 [tools/mkfs](../tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS MS
