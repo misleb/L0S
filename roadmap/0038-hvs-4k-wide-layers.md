@@ -1,6 +1,6 @@
 # 0038: `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls
 
-Track: Display · Status: active · Needs: – · Spec: display.md, kernel.md
+Track: Display · Status: active · Needs: – · Spec: display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md
 
 ## Why
 
@@ -67,19 +67,48 @@ clean at 1920×1080:
   said once; the `forget` storm gone with the refusal.)
 - [ ] The 4K memory budget: at scale 2 a big window's buffers, its two
   contents with their room to grow and `wm`'s two frames for it, take
-  about 140 MB of the 384 MB of device pages `hvs` has (spec §10.3's
-  user range, L0's), so with two or three big windows a buffer more has
-  no room and that window is not shown at its new size. Share only the
-  pages a buffer's pixels are in, make `wm`'s frames the title bar and
-  edges, not the whole window, and show the HVS's background in the
-  wallpaper's color, not black, where pieces are left out. Five windows
-  dragged and resized at 4K for five minutes, none left unshown.
+  about 140 MB of the 384 MB of device pages above a process's stack,
+  so with two or three big windows a buffer more has no room in `hvs`
+  and that window is not shown at its new size. L0 now gives every space
+  a high user range, 0x2000000000 up to 0x4000000000, 128 GB (spec
+  §10.3, L0 roadmap 0128), beside the old one, nothing in which moves.
+  - The kernel gives shared memory there: `shm_alloc`'s pages and the
+    pages `shm_share` maps into another process come from a pool of
+    device pages in the high range, as large as it, while `dma_alloc`,
+    `region`, file windows and the 0xE8000000 part stay as they are
+    (a driver's DMA and registers keep their addresses). `in_device_area`
+    and the page counts (`Pages`) take in both parts; a copy in or out
+    of a process, as `space_read` and `space_write` do, stays within one
+    part, and one across the gap between them is refused, as before.
+  - Its tables are made a gigabyte at a time as pages there are first
+    mapped, and given back with the space: board tests of a share past
+    384 MB, one across a gigabyte, and a process's end giving them all
+    back, on QEMU and on the Pi 5, which L0 has not run it on.
+  - `dma_limit`'s 64 MB a call, and the toolkit's room to grow, are
+    looked at again with the room to spare; `wm` keeps trimming its
+    clients' buffers only if it still saves anything.
+  - Where pieces are left out for the line memory, the HVS's background
+    shows the wallpaper's color, not black.
+  - The CPU clock the firmware leaves the Pi 5 at read through the
+    mailbox (tag 0x00030047, the measured rate of clock 3, against
+    0x00030004's maximum), and, if it is below the rated 2.4 GHz,
+    `arm_freq=2400` in the card's `config.txt` and the boot benchmark
+    of `frame_new` run again: L0 found zeroing past the caches costs
+    about 1.5 GB/s of DRAM writes whatever instruction does it, so the
+    pool stays, but the clock may be part of it.
+  - Done: five windows opened, dragged and resized at 4K for five
+    minutes, none left unshown and no "next buffer is not shown" said.
 - [ ] The board run of "Done when", at 4K and at 1920×1080.
 
 ## Spec changes
 
-- display.md: the memory budget's Limits once step 6 has lowered it;
-  toolkit.md and desktop.md if the buffers and frames change shape.
+- kernel.md: the high user range in the layout table, shared memory
+  given there, its tables made and given back, and the device pages'
+  Limit; syscalls.md's `shm_alloc` and `shm_share` rows.
+- display.md: the memory budget gone from its Limits, and the
+  background's color where pieces are left out; desktop.md if `wm`
+  stops trimming its clients' buffers.
+- pi5.md: the CPU clock seen, and `arm_freq` if the card sets it.
 
 ## Log
 
@@ -166,3 +195,18 @@ clean at 1920×1080:
   other buffers placed in it since, which the e2e's Files maximize
   caught. `hvs`, which must map every buffer to clean it and cut its
   corners, then ran out the same way (83,000 given): step 6.
+- 2026-10-29: L0 answered the four requests (its commits 863e263 and
+  449124f, installed here with `l0 init`). A high user range,
+  0x2000000000 up to 0x4000000000, beside the old one (its 0128),
+  tested on QEMU, not on a Pi 5: step 6 rewritten around it, in place
+  of shrinking the buffers to fit 384 MB. `frame_new` zeroes with `dc
+  zva` now (0129), but the old memset was already 32-byte stores: 2.67
+  us a fresh frame of 8,192 against 2.71, since past the caches the
+  zeros' writes to DRAM, about 1.5 GB/s, are the cost; the pool stays,
+  and the CPU clock the firmware leaves is worth reading. A new frame's
+  zeros reach a device that does not see the caches only after
+  `(frame_sync f 1)` (spec 6.13), as `hvs` already syncs a buffer it is
+  given. `Map` keeps rehashing across a power of two (0130 left
+  queued), which keeping a count off the boundary avoids. The hidden
+  copy is documented in `l0 doc Map` and the l0-code skill (0131);
+  `L0_ARRAY_STATS=1` counts the copies.
