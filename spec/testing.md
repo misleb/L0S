@@ -313,6 +313,9 @@ header bar. Then:
 - a click on the second row, through QMP: the press and release go
   through `wm` to the window, and the row is tinted with the accent and
   End Process turns red;
+- the focus ring, typed with `sendkey`: on Refresh after Tab, on End
+  Process after Tab again, back on Refresh after Shift-Tab, the
+  modifier come through `wm` and the toolkit, and gone after Esc;
 - the tab bar along its foot, three tabs, the first raised; a click on
   the third raises it, and a click on the second's close button closes
   it, the two left sharing the bar, the third still raised;

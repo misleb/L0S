@@ -45,7 +45,7 @@ passing the bytes on untouched, and the readers take one word more.
   field; `keys` echoes a key with Ctrl as `^X` and with Alt as `M-x`.
   Host tests in `l0s_test`, `keymap_test`, `keys_test`; `keyboard.sh`
   and `usb.sh` type Ctrl and Alt.
-- [ ] Shift-Tab: `ui_route` moves the focus to the target before it
+- [x] Shift-Tab: `ui_route` moves the focus to the target before it
   (`ui_focus_prev`), round to the last. Host tests in `widget_test` and
   `window_test`; `widgets.sh` checks the ring.
 - [ ] Files' Alt-Left and Alt-Right, Back and Forward, through the
@@ -60,9 +60,9 @@ passing the bytes on untouched, and the readers take one word more.
 - desktop.md: Files' limit loses its "no modifiers" sentence, keeping
   that it has no copy; Terminal's limit loses its, and says its
   shortcuts.
-- toolkit.md: Shift-Tab, and `ui_key_mods`.
+- toolkit.md: `ui_key_mods`.
 - programs.md: Files' and Terminal's keys.
-- testing.md: what `widgets.sh` and `vt.sh` check.
+- testing.md: what `vt.sh` checks.
 
 ## Log
 
@@ -72,3 +72,5 @@ passing the bytes on untouched, and the readers take one word more.
 - 2026-10-28: step 1: `KeyEvent`'s fourth field, from `keymap_event` in
   both drivers; `keys` echoes `^K` and `M-x`, which `keyboard.sh` and
   `usb.sh` type on each keyboard. An entry types nothing with Alt held.
+- 2026-10-28: step 2: Shift-Tab, `ui_focus_prev`; `widgets.sh` sees the
+  ring go from Refresh to End Process and back.
