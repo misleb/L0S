@@ -83,6 +83,31 @@ kernel sends every call on a file there to it, so every program reads
 and writes them with the ordinary `open_in`, `open_out` and the rest:
 `run cat /Volumes/data/notes` works as `run cat /etc/motd` does.
 
+**`fs` serves in turn** ([user/sbin/fs/turns.l0](../user/sbin/fs/turns.l0)).
+Each time round it takes every message waiting on its port, with
+`port_try_receive` until none is, into a list of its own, and serves
+the notices from pid 0 first, the kernel's exit and window notices, so
+that one never waits behind requests or finds the port's queue full.
+An exit drops the requests its pid still has waiting. Then it serves
+the requests, one each time round, by pid in turn, by bytes (deficit
+round robin): each pid with requests waiting is given a budget of a run
+of 64 KB a turn and is served its requests, in the order they came, while
+their costs fit what it has left, so that a client moving 64 KB a
+request and one asking `stat`s take turns, and a `stat` behind another
+pid's writes waits for one of them. A request's cost is read from its
+message in place: the N of `readw H N`, `writew H N` and `read H N`, a
+`write H BYTES`'s length, 16 runs for one of a whole volume or disk
+(`format`, `mkfs`, `partition`, `erase`, `attach`, `rescan`), so that other pids'
+requests are served before it, and 512 bytes for any other. A pid's
+own requests are never reordered. A pid has at most 8 requests
+waiting: one more is answered at once, -5 and `too many requests
+waiting from this process`, which the kernel gives the call as its -5
+and `fs_ask` as its reply, and is not kept; a `close` is never
+refused, since the kernel drops its stream whatever the answer. A
+client that waits for each answer, as the kernel's file calls and
+`fs_ask` do, has one waiting at most, so only one that sends without
+waiting meets the bound.
+
 The disk, as [tools/mkdisk](../tools/mkdisk) makes it with
 [tools/mkfs](../tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS MS
 LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, a host program, built into
@@ -197,7 +222,9 @@ damaged disk is refused rather than followed.
   change a partition's type when `mkfs` makes a volume on it: L0S
   makes no partitions in one. One
   file server, `fs`, serves the first disk's volumes, one request at a
-  time, and a read or a write moves at most 64 KB, what a client's
+  time, each to its end, its disk requests included, so a small request
+  may wait for one run of 64 KB (see [Volumes](#volumes)), and for the
+  whole of a `format`, `mkfs` or `partition` once that has begun; and a read or a write moves at most 64 KB, what a client's
   file window holds (see [File windows](kernel.md#a-processs-memory)),
   which `fs` copies in and out of with L0's `device_read_bytes` and
   `device_write_bytes`, as it does its disk's buffer. A

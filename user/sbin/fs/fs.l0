@@ -11,7 +11,8 @@
 ; once every volume is mounted, and serves though no disk has one. A
 ; rescan takes on any disk registered since, reads every disk's volumes
 ; again, and mounts any new label; so does a partition of a disk not
-; yet taken on.
+; yet taken on. What waits on the port is served in the order turns.l0
+; chooses: notices first, then requests, by pid in turn, by bytes.
 ;
 ; Started as fs ram [MB], it serves no disk but one volume, tmp, of MB
 ; megabytes (32 unless given), in its own memory, empty, at /Volumes/tmp,
@@ -1732,23 +1733,57 @@
 
 ; ---------------------------------------------------------------- serving
 
-; Every message on the port: a request answered to its reply port, if it
-; has one; an exit notice, its pid's handles dropped and its window given
-; back; or a window notice, the client's window kept.
-(def serve ((f Fs) (port int)) int
-  (match (port_receive port)
-    ((RecvFailed) (complain "lost its port"))
+; Every message on the port, in the order turns.l0 chooses: each time
+; round, every message waiting taken into t, and the next of them
+; served; or, with none waiting, the next to come waited for. A notice:
+; an exit, its pid's handles dropped, its window given back and its
+; requests still waiting dropped; or a window notice, the client's window
+; kept. A request: answered to its reply port, if it has one.
+(def serve ((f Fs) (port int) (t Turns)) int
+  (let t2 (drained t port)
+    (match (turns_next t2)
+      ((TurnNotice m t3) (serve_notice f port t3 m))
+      ((TurnRequest m t3) (serve (answered f m) port t3))
+      ((TurnNone)
+        (match (port_receive port)
+          ((RecvFailed) (complain "lost its port"))
+          ((Message from b) (serve f port (taken t2 from b))))))))
+
+; t with every message waiting on port taken, as port_try_receive gives
+; them, until none is.
+(def drained ((t Turns) (port int)) Turns
+  (match (port_try_receive port)
+    ((RecvFailed) t)
+    ((Message from b) (drained (taken t from b) port))))
+
+; t with the message b from from waiting; or, a request past its pid's
+; bound (turns_refuses), t as it was, the request answered at once -5,
+; and why.
+(def taken ((t Turns) (from int) (b bytes)) Turns
+  (if (turns_refuses t from b)
+      (let s (reply_sent b (bytes_from_list (fs_reply_bytes -5 (turns_refusal)))) t)
+      (turns_add t (Message from b))))
+
+; The notice m served, and then the rest, t.
+(def serve_notice ((f Fs) (port int) (t Turns) (m Message)) int
+  (match (exit_of m)
+    ((Exited pid status) (serve (forget_pid f pid) port (turns_drop t pid)))
+    ((NotExit)
+      (match m
+        ((RecvFailed) (serve f port t))
+        ((Message from b)
+          (match (window_told_of from b)
+            ((WindowTold pid w) (serve (window_kept f pid w) port t))
+            ((NotWindow) (serve f port t))))))))
+
+; f after the request m, answered to its reply port, if it names one.
+(def answered ((f Fs) (m Message)) Fs
+  (match m
+    ((RecvFailed) f)
     ((Message from b)
-      (match (exit_of (Message from b))
-        ((Exited pid status) (serve (forget_pid f pid) port))
-        ((NotExit)
-          (if (eq from 0)
-              (match (window_told_of from b)
-                ((WindowTold pid w) (serve (window_kept f pid w) port))
-                ((NotWindow) (serve f port)))
-              (match (obey_msg f from b)
-                ((Answered f2 w bs) (let s (reply_sent b (bytes_from_list (fs_reply_bytes w bs))) (serve f2 port)))
-                ((AnsweredData f2 w d) (let s (reply_sent b (fs_reply_data w d)) (serve f2 port))))))))))
+      (match (obey_msg f from b)
+        ((Answered f2 w bs) (let s (reply_sent b (bytes_from_list (fs_reply_bytes w bs))) f2))
+        ((AnsweredData f2 w d) (let s (reply_sent b (fs_reply_data w d)) f2))))))
 
 ; reply sent to the reply port of the request whose message's bytes are
 ; b, if it names one: 0. A client gone or slow is no matter, as for any
@@ -2063,7 +2098,7 @@
             (match f
               ((Fs s p vs hs next ws cp wins dirty)
                 (let f2 (Fs s port (vols_array vols) hs next ws cp wins dirty)
-                  (serve (if late (late_disks f2 (disk_names)) f2) port))))
+                  (serve (if late (late_disks f2 (disk_names)) f2) port (turns_new)))))
             (complain r))))))
 
 ; What fs says of a volume it mounted: where it is, the partition it is
