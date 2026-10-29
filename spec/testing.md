@@ -245,7 +245,9 @@ It keeps the screen at scale 2 in `build/hidpi-2x.ppm`, to look at.
 `run keys` at the serial line, then presses `h`, `i`, Shift-1, Space,
 Shift-A and Enter on the virtio keyboard with the monitor's `sendkey`, as
 typing in the window would. It checks that the serial line shows `hi! A`,
-and that after Esc the shell runs the next command typed.
+then, for Ctrl-K, Alt-X and Shift-Alt-X, `^KM-xM-X`, the modifiers the
+key events carried, and that after Esc the shell runs the next command
+typed. `tests/usb.sh` types the same on the USB keyboard.
 
 [tests/vt.sh](../tests/vt.sh) boots the demo's own initramfs (`make
 vt-initramfs`), every shell running, but with two Terminals whatever the

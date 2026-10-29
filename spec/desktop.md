@@ -199,7 +199,14 @@ Input:
   may serve `keyboard` and `pointer` both, as `usb-hid` does. Only a
   message from a driver `wm` listens to is taken as input.
 - **Keys** go to the front window's client, as the `KeyEvent` notices
-  the keyboard driver sends.
+  the keyboard driver sends, their bytes passed on as they came after
+  the window notice's id: `key` and four u32s, the Linux key code; 1
+  pressed, 0 released, 2 repeated; the character it types (`keymap.l0`,
+  with Shift, Caps Lock, and Ctrl with a letter as its control
+  character); and the modifiers held as it went, not counting itself,
+  Shift 1, Ctrl 2 and Alt 4 (`key_mod_shift` and the rest), either side
+  of each the same. Both keyboards send them alike, `virtio-input`'s
+  and `usb-hid`'s from its reports' modifier byte.
 - **The pointer**'s place, 0 to 32767 on each axis from the tablet, is
   scaled to the screen and sent to the driver as a `move`. A mouse's
   report, a `PointerMotion` from `usb-hid`, moves it instead from

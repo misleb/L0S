@@ -38,7 +38,7 @@ passing the bytes on untouched, and the readers take one word more.
 
 ## Steps
 
-- [ ] The modifiers in `KeyEvent`: a fourth field, `key_mod_shift`,
+- [x] The modifiers in `KeyEvent`: a fourth field, `key_mod_shift`,
   `key_mod_ctrl` and `key_mod_alt` bits, sent as the notice's fourth
   u32; `keymap.l0` keeps Alt held too and makes the event
   (`keymap_event`), which both drivers send; every reader takes the
@@ -57,17 +57,18 @@ passing the bytes on untouched, and the readers take one word more.
 
 ## Spec changes
 
-- desktop.md: the `KeyEvent` notice's fourth u32, the modifiers; Files'
-  limit loses its "no modifiers" sentence, keeping that it has no copy;
-  Terminal's limit loses its, and says its shortcuts.
+- desktop.md: Files' limit loses its "no modifiers" sentence, keeping
+  that it has no copy; Terminal's limit loses its, and says its
+  shortcuts.
 - toolkit.md: Shift-Tab, and `ui_key_mods`.
-- programs.md: `virtio-input`'s, `usb-hid`'s and `keys`' rows, and
-  `keymap.l0`'s, the modifiers; Files' and Terminal's keys.
-- testing.md: what `keyboard.sh`, `usb.sh`, `widgets.sh` and `vt.sh`
-  check.
+- programs.md: Files' and Terminal's keys.
+- testing.md: what `widgets.sh` and `vt.sh` check.
 
 ## Log
 
 - 2026-10-26: written from the toolkit README and desktop.md's Limits.
 - 2026-10-28: steps written; the modifiers go as a fourth u32 at the
   key notice's end, so `wm` passes it on unchanged and no field moves.
+- 2026-10-28: step 1: `KeyEvent`'s fourth field, from `keymap_event` in
+  both drivers; `keys` echoes `^K` and `M-x`, which `keyboard.sh` and
+  `usb.sh` type on each keyboard. An entry types nothing with Alt held.
