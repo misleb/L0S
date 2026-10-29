@@ -44,6 +44,15 @@ move independently, so several can be active at once.
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | idea | – | – | display.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
+| [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | idea | – | – | network.md, programs.md |
+| [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | idea | – | 0041 | network.md, testing.md |
+| [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | idea | – | 0042 | agent.md (new), programs.md, demo.md |
+| [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | idea | – | 0043 | agent.md, storage.md |
+| [0045](0045-agent-builder-mcp.md) The agent builds programs for itself, through an MCP server on the host | Agent | idea | – | 0043 | agent.md, programs.md, testing.md |
+| [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 | agent.md |
+| [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
+| [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
+| [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | idea | – | 0043 | agent.md, programs.md, desktop.md, testing.md |
 
 ## Ready
 
@@ -65,6 +74,14 @@ graph LR
   0033 --> 0035[0035 apps ask, not wait]
   0031[0031 many ports] --> 0033
   0021 --> 0033
+  0041[0041 HTTP, JSON, SSE] --> 0042[0042 API through a proxy]
+  0042 --> 0043[0043 agentd]
+  0043 --> 0044[0044 agent's home]
+  0043 --> 0045[0045 builder MCP]
+  0045 --> 0046[0046 self-knowledge]
+  0043 --> 0049[0049 agent chat app]
+  0041 --> 0048[0048 TLS client]
+  0047[0047 Pi 5 random] --> 0048
 ```
 
 ## Done
