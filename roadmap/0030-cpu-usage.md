@@ -1,6 +1,6 @@
 # 0030: How the CPUs are used, and what each process serves, in `ps` and System Monitor
 
-Track: Kernel · Status: active · Needs: – · Spec: kernel.md, syscalls.md, programs.md, demo.md, testing.md
+Track: Kernel · Status: done · Needs: – · Spec: kernel.md, syscalls.md, programs.md, demo.md, testing.md
 
 ## Why
 
@@ -98,7 +98,7 @@ show the load averages.
   100% on a CPU from 1 to 3; and `names`, where `ps` and `names` agree
   on who serves `compositor` and `console`, and a name goes once its
   owner is killed.
-- [ ] 6. On the Pi 5, `ps` and `uptime` show which processes run on
+- [x] 6. On the Pi 5, `ps` and `uptime` show which processes run on
   which CPU, booted by the user with `tools/pi5-boot`; its lines go in
   the Log.
 
@@ -143,3 +143,23 @@ tests, `procmon.sh`'s CPU bar).
   procmon on this machine, the grid scrolled back from its end within
   0.2 s of the wheel, so not this goal's; left for the merge's `make
   e2e` to show. Step 6, the Pi 5's board run, is the user's.
+- 2026-10-30: step 6, and the goal, done. Booted on a 2 GB Pi 5 with
+  `tools/pi5-boot --reboot`, at 4K. Idle, `ps` shows every process on
+  CPU 0 but `boot` (CPU 2, waiting for `sh`), %CPU 0.0 to 0.3, and what
+  each serves: `fs` `fs,tmpfs` on 2 ports, `usb-hid` `keyboard,pointer`
+  (wider than the column, which pushes its STATE on), `wm`
+  `compositor`, `hvs` `display`; `names` lists the 14 names and agrees.
+  With three `run spin &`, `ps` shows them on CPUs 2, 3 and 1 at 99.6,
+  99.5 and 99.5%, and `uptime`:
+
+  ```
+  up 0:01:17, load average: 0.62, 0.13, 0.04
+  CPU 0: 0.5% busy, the kernel 0.4%
+  CPU 1: 100.0% busy
+  CPU 2: 100.0% busy
+  CPU 3: 100.0% busy
+  ```
+
+  Once they are killed, CPUs 1 to 3 read 0.0% and the load decays from
+  1.11. So which process runs on which CPU, which 0003's Log could only
+  argue, is read off the board.
