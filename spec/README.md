@@ -48,6 +48,7 @@ only so far. A goal that lifts a limit links to it.
 | [pi5.md](pi5.md) | L0S on the Raspberry Pi 5: the card, netboot, what runs there |
 | [kernel.md](kernel.md) | The kernel's loop and scheduling, its log, processes and pids, a process's memory |
 | [syscalls.md](syscalls.md) | The system calls: the process ABI and the kernel's own calls |
+| [agent.md](agent.md) | `agentd`, the agent: its conversation and prompt caching |
 | [programs.md](programs.md) | Every program and library, where it lives and what it holds |
 | [testing.md](testing.md) | The tests: what each `make` target runs, the e2e cases, the screen tests |
 

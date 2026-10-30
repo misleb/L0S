@@ -1,0 +1,181 @@
+; conv.l0 -- agentd's conversation, pure: its turns, the person's and the
+; model's, each of blocks (a text, a tool's use, a tool's result), and
+; the last answer's usage; and the conversation as the Messages API's
+; JSON, with its prompt-caching breakpoints. Three cache_control marks
+; at most: the system prompt's one block, the last tool's definition,
+; and the last block of the last turn, so the prompt and tools are read
+; from the cache on every request, and the conversation so far too.
+
+; A turn's block: a text; a tool's use, its id, name and input; or a
+; tool's result, the use's id, the text, and whether it failed.
+(data Block (BText bytes) (BToolUse bytes bytes Json) (BToolResult bytes bytes bool))
+
+; A turn: the person's (true), whose blocks are texts and tools'
+; results, or the model's (false), texts and tools' uses.
+(data Turn (Turn bool (list Block)))
+
+; What an answer spent, in tokens: its input, its output, the cache
+; written, and the cache read; -1 for a count not yet said.
+(data Usage (Usage int int int int))
+
+; A conversation: its turns, newest first, and the last answer's usage.
+(data Conv (Conv (list Turn) Usage))
+
+; A conversation with nothing in it.
+(def conv_new () Conv (Conv (nil Turn) (Usage -1 -1 -1 -1)))
+
+; c's turns, newest first, and oldest first.
+(def conv_turns_newest ((c Conv)) (list Turn) (match c ((Conv ts u) ts)))
+(def conv_turns ((c Conv)) (list Turn) (rev (conv_turns_newest c)))
+
+; c's last answer's usage.
+(def conv_usage ((c Conv)) Usage (match c ((Conv ts u) u)))
+
+; c with t its newest turn. A turn of the same side as the newest is
+; joined onto it, its blocks after the newest's, since the API takes
+; the person's and the model's turns in turn; a turn of no blocks adds
+; nothing.
+(def conv_add ((c Conv) (t Turn)) Conv
+  (match c
+    ((Conv ts u)
+      (match t
+        ((Turn who bs)
+          (if (is_empty bs)
+              c
+              (if (is_empty ts)
+                  (Conv (cons t ts) u)
+                  (match (head ts)
+                    ((Turn who0 bs0)
+                      (if (eq who who0)
+                          (Conv (cons (Turn who (append bs0 bs)) (tail ts)) u)
+                          (Conv (cons t ts) u)))))))))))
+
+; c with its usage updated by what an MUsage said: each count that is
+; not -1 replaces the one before (message_start says them all, then
+; message_delta the output so far).
+(def conv_spent ((c Conv) (input int) (output int) (cwrite int) (cread int)) Conv
+  (match c
+    ((Conv ts u)
+      (match u
+        ((Usage i o w r)
+          (Conv ts (Usage (or_kept input i) (or_kept output o) (or_kept cwrite w) (or_kept cread r))))))))
+
+; n, unless it is -1, when kept.
+(def or_kept ((n int) (kept int)) int (if (eq n -1) kept n))
+
+; The tokens an answer's prompt took: its input, the cache written and
+; the cache read, a count not said taken as 0.
+(def usage_prompt ((u Usage)) int
+  (match u ((Usage i o w r) (add (max i 0) (add (max w 0) (max r 0))))))
+
+; --------------------------------------------------------------- as JSON
+
+; The cache_control field that marks a breakpoint.
+(def conv_cache () JField
+  (json_field "cache_control" (json_obj (cons (json_field "type" (json_str "ephemeral")) (nil JField)))))
+
+; c's turns as the API's messages, oldest first, the last block of the
+; last turn marked for the cache. An empty text block, which the API
+; refuses, is left out.
+(def conv_messages ((c Conv)) Json
+  (JArr (turns_json (conv_turns_newest c) true (nil Json))))
+
+; ts, newest first, onto acc, each as a message, so oldest first at the
+; end: the first (the newest) marked if last.
+(def turns_json ((ts (list Turn)) (last bool) (acc (list Json))) (list Json)
+  (if (is_empty ts)
+      acc
+      (turns_json (tail ts) false (cons (turn_json (head ts) last) acc))))
+
+; A turn as a message, its last block marked if last.
+(def turn_json ((t Turn) (last bool)) Json
+  (match t
+    ((Turn who bs)
+      (json_obj (cons (json_field "role" (json_str (if who "user" "assistant")))
+                  (cons (json_field "content" (JArr (blocks_json (kept_blocks bs (nil Block)) last (nil Json))))
+                        (nil JField)))))))
+
+; bs without their empty texts.
+(def kept_blocks ((bs (list Block)) (acc (list Block))) (list Block)
+  (if (is_empty bs)
+      (rev acc)
+      (kept_blocks (tail bs) (if (is_empty_text (head bs)) acc (cons (head bs) acc)))))
+
+; Whether b is a text of nothing.
+(def is_empty_text ((b Block)) bool
+  (match b
+    ((BText t) (eq (bytes_len t) 0))
+    ((BToolUse id n input) false)
+    ((BToolResult id t failed) false)))
+
+; bs as content blocks onto acc, reversed; the last marked if last.
+(def blocks_json ((bs (list Block)) (last bool) (acc (list Json))) (list Json)
+  (if (is_empty bs)
+      (rev acc)
+      (blocks_json (tail bs) last
+        (cons (block_json (head bs) (if last (is_empty (tail bs)) false)) acc))))
+
+; A block as a content block, marked for the cache if cached.
+(def block_json ((b Block) (cached bool)) Json
+  (let fs (block_fields b)
+    (json_obj (if cached (append fs (cons (conv_cache) (nil JField))) fs))))
+
+; A block's fields, in order.
+(def block_fields ((b Block)) (list JField)
+  (match b
+    ((BText t)
+      (cons (json_field "type" (json_str "text")) (cons (JField (bytes_from_list "text") (JStr t)) (nil JField))))
+    ((BToolUse id n input)
+      (cons (json_field "type" (json_str "tool_use"))
+        (cons (JField (bytes_from_list "id") (JStr id))
+          (cons (JField (bytes_from_list "name") (JStr n))
+            (cons (json_field "input" input) (nil JField))))))
+    ((BToolResult id t failed)
+      (let fs (cons (json_field "type" (json_str "tool_result"))
+                (cons (JField (bytes_from_list "tool_use_id") (JStr id))
+                  (cons (JField (bytes_from_list "content") (JStr t)) (nil JField))))
+        (if failed (append fs (cons (json_field "is_error" (JBool true)) (nil JField))) fs)))))
+
+; ---------------------------------------------------------- the prompt
+
+; The built-in part of the system prompt: where the agent is, L0S on
+; board; its home; its tools, by name; and that it answers at a console.
+(def conv_base ((board (list int)) (home (list int)) (tools (list (list int)))) (list int)
+  (rev (push "Your rules follow, from your home's CLAUDE.md. Follow them.\n"
+    (push "You answer the person at a console, in plain text: say briefly what you did and what you found.\n"
+      (push ".\n"
+        (push (join_with ", " tools)
+          (push ". Your tools: "
+            (push home
+              (push ". Your home, where a relative path starts and where your files belong, is "
+                (push board
+                  (push "You are an agent on L0S, a microkernel and its programs written in L0, running on "
+                    (nil int))))))))))))
+
+; The system prompt: one text block, the built-in part base and the
+; rules after it, marked for the cache.
+(def conv_system ((base (list int)) (rules bytes)) Json
+  (JArr (cons (block_json (BText (bytes_concat (cons (bytes_from_list base) (cons (bytes_from_list "\n") (cons rules (nil bytes)))))) true)
+              (nil Json))))
+
+; The tools' definitions, the last marked for the cache.
+(def conv_tools ((defs (list Json))) Json
+  (JArr (tools_marked defs (nil Json))))
+
+; defs onto acc, the last with cache_control.
+(def tools_marked ((defs (list Json)) (acc (list Json))) (list Json)
+  (if (is_empty defs)
+      (rev acc)
+      (tools_marked (tail defs)
+        (cons (if (is_empty (tail defs)) (json_marked (head defs)) (head defs)) acc))))
+
+; An object with cache_control after its fields; any other value as it is.
+(def json_marked ((v Json)) Json
+  (match v
+    ((JObj fs) (JObj (append fs (cons (conv_cache) (nil JField)))))
+    ((JNull) v)
+    ((JBool b) v)
+    ((JInt n) v)
+    ((JNum t) v)
+    ((JStr s) v)
+    ((JArr xs) v)))

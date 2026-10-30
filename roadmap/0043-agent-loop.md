@@ -77,7 +77,7 @@ What it is, as decided with the user:
   as now. For the `sh` tool, and any program. sh_test's parse of `-c`;
   the `shell` e2e case runs `run sh -c "ls /etc"`. programs.md's `sh`
   row.
-- [ ] **The conversation.** `user/sbin/agentd/conv.l0`, pure: `(data
+- [x] **The conversation.** `user/sbin/agentd/conv.l0`, pure: `(data
   Block (BText bytes) (BToolUse bytes bytes Json) (BToolResult bytes
   bytes bool))` (a text; a tool's use, its id, name and input; its
   result, the use's id, the text and whether it failed), `(data Turn
@@ -271,3 +271,19 @@ What it is, as decided with the user:
   and all; a program spawning `sh` passes the line as one argument.
   The status is `run`'s child's, 1 for a line the shell complains of
   (`sh: ...`), else 0.
+- 2026-10-29: step 2 done. The Makefile makes a program of any
+  directory under `user/sbin`, so `agentd` is one from this step, with
+  an entry point that says in the log it serves nothing yet and exits
+  1, and `/sbin/agentd` in the listings of the `shell`, `fs` and
+  `install` cases and the counts of `install`, `install_boot` and
+  `rootboot_tmpfs`; agent.md is
+  begun, and programs.md has its row. `LIBS_agentd` is `MODELLIB` (the
+  plan's `MODEL`) and `PATHS`; step 6 adds `AGENTLIB`. Beyond the
+  plan: a `Usage` (input, output, cache written, cache read) kept by
+  `conv_spent`, each count an `MUsage` says replacing the one before,
+  and `usage_prompt`, for compaction; a turn on the same side as the
+  newest joins it, and empty texts are left out, as the API refuses
+  both. The screen test `partitions` typed `partition` at the first
+  prompt, which can come before `fs` has the disk; with the larger
+  initramfs it did every time, so it now waits for the volumes'
+  mounting first.

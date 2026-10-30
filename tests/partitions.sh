@@ -60,6 +60,9 @@ said() {
 ok() { echo "ok - partitions: $1"; }
 
 boot
+# The shell's prompt may come before the file server has the disk, which
+# partition needs: its volumes mounted say it has.
+waits_for "/Volumes/scratch mounted"
 # The file server's lines of the volumes it mounts as the board boots,
 # each with its UUID, may come among partition's: they are left out.
 uuid=$(said 'partition 400' | grep -av '^fs: ' | grep -aoE '[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' | head -1)

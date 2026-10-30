@@ -1,0 +1,83 @@
+; conv_test.l0 -- the conversation: its turns, and as the API's JSON with
+; its cache breakpoints.
+
+; Bytes of a literal.
+(def bs ((s (list int))) bytes (bytes_from_list s))
+
+; A JSON value as its text.
+(def jtext ((v Json)) (list int) (bytes_to_list (json_bytes v)))
+
+; A conversation of the person's text, the model's use of a tool, and
+; its result.
+(def three () Conv
+  (conv_add
+    (conv_add
+      (conv_add (conv_new) (Turn true (cons (BText (bs "list it")) (nil Block))))
+      (Turn false (cons (BText (bs "Listing.")) (cons (BToolUse (bs "t1") (bs "list_dir") (json_obj (cons (json_field "path" (json_str ".")) (nil JField)))) (nil Block)))))
+    (Turn true (cons (BToolResult (bs "t1") (bs "a 3") false) (nil Block)))))
+
+(def test_messages () int
+  (check_str "json" (jtext (conv_messages (three)))
+    "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"list it\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Listing.\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"list_dir\",\"input\":{\"path\":\".\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a 3\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"))
+
+; How many times "cache_control" is in s.
+(def marks ((s (list int)) (n int)) int
+  (if (is_empty s) n (marks (tail s) (if (starts_with s "cache_control") (add n 1) n))))
+
+; The breakpoints: one on the last turn's last block, one on the system
+; prompt, one on the last tool; three in all.
+(def test_breakpoints () int
+  (let m (marks (jtext (conv_messages (three))) 0)
+    (let s (marks (jtext (conv_system "base" (bs "rules"))) 0)
+      (let t (marks (jtext (conv_tools (cons (tool_def "a") (cons (tool_def "b") (nil Json))))) 0)
+        (add (check_int "messages" m 1)
+             (add (check_int "system" s 1) (check_int "tools" t 1)))))))
+
+; A tool's definition, its name only.
+(def tool_def ((n (list int))) Json
+  (json_obj (cons (json_field "name" (json_str n)) (nil JField))))
+
+(def test_tools_last_marked () int
+  (check_str "json" (jtext (conv_tools (cons (tool_def "a") (cons (tool_def "b") (nil Json)))))
+    "[{\"name\":\"a\"},{\"name\":\"b\",\"cache_control\":{\"type\":\"ephemeral\"}}]"))
+
+(def test_no_tools () int
+  (check_str "json" (jtext (conv_tools (nil Json))) "[]"))
+
+(def test_system () int
+  (check_str "json" (jtext (conv_system "You are here." (bs "Keep your files in your home.")))
+    "[{\"type\":\"text\",\"text\":\"You are here.\\nKeep your files in your home.\",\"cache_control\":{\"type\":\"ephemeral\"}}]"))
+
+(def test_base () int
+  (check_str "base" (conv_base "a Raspberry Pi 5" "/Volumes/data/agent" (split_spaces "read_file sh"))
+    "You are an agent on L0S, a microkernel and its programs written in L0, running on a Raspberry Pi 5. Your home, where a relative path starts and where your files belong, is /Volumes/data/agent. Your tools: read_file, sh.\nYou answer the person at a console, in plain text: say briefly what you did and what you found.\nYour rules follow, from your home's CLAUDE.md. Follow them.\n"))
+
+(def test_failed_result () int
+  (check_str "json" (jtext (block_json (BToolResult (bs "t") (bs "no") true) false))
+    "{\"type\":\"tool_result\",\"tool_use_id\":\"t\",\"content\":\"no\",\"is_error\":true}"))
+
+; Two turns of the person's in a row are one turn.
+(def test_same_side_joined () int
+  (let c (conv_add (conv_add (conv_new) (Turn true (cons (BText (bs "a")) (nil Block))))
+                   (Turn true (cons (BText (bs "b")) (nil Block))))
+    (add (check_int "turns" (length (conv_turns c)) 1)
+         (check_str "json" (jtext (conv_messages c))
+           "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\"},{\"type\":\"text\",\"text\":\"b\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"))))
+
+(def test_empty_turn_adds_nothing () int
+  (check_int "turns" (length (conv_turns (conv_add (conv_new) (Turn false (nil Block))))) 0))
+
+; An empty text is left out, so the mark goes on the block before it.
+(def test_empty_text_left_out () int
+  (let c (conv_add (conv_new) (Turn false (cons (BText (bs "hi")) (cons (BText (bs "")) (nil Block)))))
+    (check_str "json" (jtext (conv_messages c))
+      "[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]")))
+
+; message_start says every count, message_delta only the output.
+(def test_spent () int
+  (let c (conv_spent (conv_spent (conv_new) 10 1 20 30) -1 7 -1 -1)
+    (match (conv_usage c)
+      ((Usage i o w r)
+        (add (check_int "input" i 10)
+             (add (check_int "output" o 7)
+                  (check_int "prompt" (usage_prompt (conv_usage c)) 60)))))))
