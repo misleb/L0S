@@ -204,13 +204,21 @@ answers, or another's; `run net ping HOST` and `run net send HOST PORT
 TEXT...` take names too, and `run net recv PORT` waits for a datagram
 and shows it.
 
-`run http [-i] [http://]HOST[:PORT][/PATH]` fetches a page over HTTP/1.0
-(RFC 1945), through TCP, and writes it, with its header first for `-i`.
-QEMU's user network reaches the host's loopback as 10.0.2.2, so a server
-on the host, say `python3 -m http.server 8000 --bind 127.0.0.1`, is
-fetched with `run http 10.0.2.2:8000/`. HOST is a name, resolved first,
-or an address. It does not follow a redirect; a status that is not
-2xx is said, after the page, and fails the command. `run net tcp` shows
+`run http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... [http://]HOST[:PORT][/PATH]`
+asks a server over HTTP/1.1, with the client library (below): a `GET`,
+or with `-d` a `POST` of BODY, as `application/json` unless a `-H`
+names the `Content-Type`. It writes the body as each piece comes, with
+`-i` the head first (the status and reason, then each header); with
+`-j` it reads the body as JSON and writes it back compact on one line,
+or says where it is not JSON and fails; with `-e` it reads it as an
+event stream and writes a line `EVENT DATA` for each event as it comes,
+its data's newlines as spaces. The shell does not quote, so BODY and a
+header are each one word. QEMU's user network reaches the host's
+loopback as 10.0.2.2, so a server on the host, say `python3 -m
+http.server 8000 --bind 127.0.0.1`, is fetched with `run http
+10.0.2.2:8000/`. HOST is a name, resolved first, or an address. It
+does not follow a redirect; a status that is not 2xx is said, after
+the body, and fails the command. `run net tcp` shows
 the connections, and `run net echo PORT` listens to TCP PORT, sends back
 what the first connection sends, and says how much, for a connection
 from the host to a port forwarded to the board
@@ -411,3 +419,9 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   by powers of ten in floats, which is the nearest float or within an
   ulp or two of it. An object's fields are a list, found by name one by
   one, which suits the handful an API's object has.
+- **HTTP is plain HTTP/1.1, a request at a time.** There is no TLS, so
+  only `http://`; a connection carries one request and then its
+  response, never several in flight; a head may be at most 16384 bytes;
+  no content coding (gzip) is asked for or read, and `http` follows no
+  redirect. A connection's notices go to one port, which `http_connect`
+  waits on alone, passing over another connection's.

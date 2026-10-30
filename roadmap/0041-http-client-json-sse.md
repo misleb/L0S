@@ -1,6 +1,6 @@
 # 0041: An HTTP/1.1 client library, with JSON and server-sent events
 
-Track: Agent · Status: active · Needs: – · Spec: network.md, programs.md, testing.md
+Track: Agent · Status: done · Needs: – · Spec: network.md, programs.md, testing.md
 
 ## Why
 
@@ -138,7 +138,7 @@ notice's bytes as one, so a body would go through a list both ways
   (up, data in three pieces of a chunked answer, fin, closed) gives the
   head, the body's pieces and the end; a `closed reset` mid-body is
   `HttpFailed`. programs.md's row; network.md.
-- [ ] **`http` on the library, and the e2e case.** `http` becomes
+- [x] **`http` on the library, and the e2e case.** `http` becomes
   `http [-i] [-j] [-e] [-d BODY] [-H 'NAME: VALUE']... URL`: HTTP/1.1,
   `GET`, or `POST` of BODY with `-d` (`Content-Type: application/json`
   unless a `-H` names one); `-i` writes the head first; `-j` reads the
@@ -220,3 +220,13 @@ notice's bytes as one, so a body would go through a list both ways
   headers body` builds the request for the connection's host. The
   waits use `alarm_at` on the notice port, so `http_connect` and
   `http_next` block rather than poll; a stale alarm is passed over.
+- 2026-10-29: step 6 landed, and the goal is done. The shell does not
+  quote, so a header is one word, `-H NAME:VALUE`, not `'NAME: VALUE'`,
+  and `-d`'s BODY has no spaces. `-i` writes the head as `STATUS
+  REASON` and its headers, since the reader keeps no version, and a
+  status not 2xx is said as `http: 404 Not Found`. The case cannot pin
+  in `expected` that the events' lines came before the stream ended;
+  that they do is what `-e`'s flush after each event and the server's
+  2 s hold after the last arrange, and the lines are what it checks.
+  `http` finishes its connection once the response ends, kept or not,
+  and `net tcp` still shows none left.

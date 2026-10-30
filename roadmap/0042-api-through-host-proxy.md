@@ -1,6 +1,6 @@
 # 0042: A model's API reached through a proxy on the host
 
-Track: Agent · Status: blocked · Needs: 0041 · Spec: network.md, programs.md, testing.md, pi5.md
+Track: Agent · Status: ready · Needs: 0041 · Spec: network.md, programs.md, testing.md, pi5.md
 
 ## Why
 

@@ -44,8 +44,7 @@ move independently, so several can be active at once.
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 6/8 | – | display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
-| [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | active | 5/6 | – | network.md, programs.md, testing.md |
-| [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | blocked | 0/5 | 0041 | network.md, programs.md, testing.md, pi5.md |
+| [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | ready | 0/5 | 0041 | network.md, programs.md, testing.md, pi5.md |
 | [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | blocked | 0/10 | 0042 | agent.md (new), programs.md, demo.md, testing.md |
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | idea | – | 0043 | agent.md, storage.md |
 | [0045](0045-agent-builder-mcp.md) The agent builds programs for itself, through an MCP server on the host | Agent | idea | – | 0043 | agent.md, programs.md, testing.md |
@@ -62,11 +61,9 @@ move independently, so several can be active at once.
   too-wide screens shown, and window buffers in L0's 128 GB high user
   range, so none freezes; step 7 is the flicker as lists alternate
   while a big window is dragged off the bottom.
-- [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library,
-  with JSON and server-sent events, active: `inet`'s writes go from
-  bytes, paced by `room`, JSON is read and written, and event streams
-  read, HTTP/1.1's messages, and the client over `inet`; next `http`
-  rebuilt on it, and its e2e case.
+- [0042](0042-api-through-host-proxy.md) A model's API reached through
+  a proxy on the host: 0041's HTTP/1.1 client, JSON and event reader
+  are in, so the proxy and `proto/model.l0` come next.
 
 ## Dependencies
 
@@ -121,6 +118,7 @@ graph LR
 | [0031](0031-many-ports.md) A process waits on several ports, and lets a name go | Kernel | 2026-10-28 |
 | [0032](0032-app-launch.md) Apps launched one way: a running app is asked, not started again | Desktop | 2026-10-28 |
 | [0033](0033-responsive-app-loop.md) An app's loop that keeps its window answering | Toolkit | 2026-10-28 |
+| [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | 2026-10-29 |
 
 ## Template
 

@@ -1,5 +1,5 @@
-; http_test.l0 -- tests of http.l0: the URLs it takes, the request it
-; sends, and the responses it reads.
+; http_test.l0 -- tests of http.l0: the URLs and options it takes, the
+; request it makes, and how it writes a head, an event and JSON.
 
 ; A URL as text: the server, port, path and host, or why not.
 (def url_text ((r (Result Url (list int)))) (list int)
@@ -19,7 +19,7 @@
        (check_str "no path" (url_text (url_of "10.0.2.2")) "10.0.2.2 80 / 10.0.2.2")))
 
 ; A name is kept, for inet's name server to resolve when the page is
-; fetched; and the request names it as the host.
+; fetched.
 (def test_url_name () int
   (check_str "a name" (url_text (url_of "http://example.com:8080/")) "example.com 8080 / example.com:8080"))
 
@@ -29,61 +29,83 @@
             (add (check_str "port 0" (url_text (url_of "10.0.2.2:0/")) "error: a port is 1 to 65535")
                  (check_str "not a port" (url_text (url_of "10.0.2.2:x/")) "error: not a port: x")))))
 
+; ------------------------------------------------------------------ options
+
+; Options as text: i j e for those given, the body, the headers, the URL.
+(def opts_text ((r (Result Opts (list int)))) (list int)
+  (match r
+    ((Err why) (append "error: " why))
+    ((Ok o)
+      (match o
+        ((Opts show json events body hs url)
+          (unwords (cons (if show "i" "-") (cons (if json "j" "-") (cons (if events "e" "-")
+            (cons (match body ((Some b) b) ((None) "none"))
+              (cons (digits (length hs)) (cons url (nil (list int))))))))))))))
+
+(def test_opts_plain () int
+  (check_str "a URL" (opts_text (opts_of (cons "10.0.2.2/x" (nil (list int))))) "- - - none 0 10.0.2.2/x"))
+
+(def test_opts_all () int
+  (check_str "each" (opts_text (opts_of (split_spaces "-i -j -e -d {\"a\":1} -H X-A:b -H X-B:c 10.0.2.2/x")))
+             "i j e {\"a\":1} 2 10.0.2.2/x"))
+
+(def test_opts_refused () int
+  (add (check_str "no URL" (opts_text (opts_of (split_spaces "-i"))) "error: http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... URL")
+       (add (check_str "no value" (opts_text (opts_of (split_spaces "x -d"))) "error: -d needs a value")
+            (add (check_str "no colon" (opts_text (opts_of (split_spaces "-H X x"))) "error: not NAME:VALUE: X")
+                 (check_str "two URLs" (opts_text (opts_of (split_spaces "a b"))) "error: http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... URL")))))
+
+; The options of a line of words, or none.
+(def opts_or ((s (list int))) Opts
+  (match (opts_of (split_spaces s)) ((Ok o) o) ((Err why) (Opts false false false ((None (list int))) (nil HttpHeader) why))))
+
+; ------------------------------------------------------------------ requests
+
+; GET, or POST with a body, as JSON unless a -H says otherwise.
 (def test_request () int
-  (match (url_of "http://10.0.2.2:8080/p")
-    ((Err why) (fail_because "url" why))
-    ((Ok u)
-      (check_str "the request" (request_text u)
-                 "GET /p HTTP/1.0\r\nHost: 10.0.2.2:8080\r\nUser-Agent: l0s-http\r\nConnection: close\r\n\r\n"))))
+  (add (check_str "GET" (bytes_to_list (http_request (opts_method (opts_or "h/p")) "h" "/p" (request_headers (opts_or "h/p")) (post_body (opts_or "h/p"))))
+                  "GET /p HTTP/1.1\r\nHost: h\r\nUser-Agent: l0s-http\r\n\r\n")
+       (check_str "POST" (bytes_to_list (http_request (opts_method (opts_or "-d [1] h/p")) "h" "/p" (request_headers (opts_or "-d [1] h/p")) (post_body (opts_or "-d [1] h/p"))))
+                  "POST /p HTTP/1.1\r\nHost: h\r\nUser-Agent: l0s-http\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n[1]")))
 
-; ------------------------------------------------------------------ responses
+(def test_request_typed () int
+  (check_str "the given type" (bytes_to_list (http_request "POST" "h" "/" (request_headers (opts_or "-H Content-Type:text/plain -d x h/")) (post_body (opts_or "-d x h/"))))
+             "POST / HTTP/1.1\r\nHost: h\r\nUser-Agent: l0s-http\r\nContent-Type: text/plain\r\nContent-Length: 1\r\n\r\nx"))
 
-(def test_head_end () int
-  (add (check_int "after CR LF CR LF" (head_end "HTTP/1.0 200 OK\r\nA: b\r\n\r\nbody" 0) 25)
-       (add (check_int "after LF LF" (head_end "HTTP/1.0 200 OK\n\nbody" 0) 17)
-            (check_int "not yet" (head_end "HTTP/1.0 200 OK\r\nA: b\r\n" 0) -1))))
+; ------------------------------------------------------------------ writing
 
-(def test_status_codes () int
-  (add (check_int "200" (status_of "HTTP/1.0 200 OK\r\n\r\n") 200)
-       (add (check_int "404" (status_of "HTTP/1.1 404 Not Found\r\nA: b\r\n\r\n") 404)
-            (add (check_int "not HTTP" (status_of "SSH-2.0-x\r\n") 0)
-                 (check_int "no code" (status_of "HTTP/1.0\r\n") 0)))))
+(def test_head_text () int
+  (check_str "the head" (head_text 200 "OK" (cons (HttpHeader "Content-Length" "2") (cons (HttpHeader "X-A" "b") (nil HttpHeader))))
+             "200 OK\nContent-Length: 2\nX-A: b\n\n"))
+
+; An event's line, its data's newlines as spaces.
+(def test_event_line () int
+  (check_str "a line" (event_line (SseEvent (bytes_from_list "tick") (bytes_from_list "a\nb"))) "tick a b\n"))
+
+(def test_json_line () int
+  (add (check_str "compact" (match (json_line (bytes_from_list "{ \"a\" : [1, 2] }")) ((Ok b) (bytes_to_list b)) ((Err why) why)) "{\"a\":[1,2]}\n")
+       (check_str "not JSON" (match (json_line (bytes_from_list "{\"a\":}")) ((Ok b) (bytes_to_list b)) ((Err why) why)) "not JSON: at 5: not a value")))
 
 (def test_served () int
   (add (check_bool "200" (served 200) true)
        (add (check_bool "299" (served 299) true)
-            (add (check_bool "301" (served 301) false)
-                 (check_bool "0" (served 0) false)))))
+            (check_bool "404" (served 404) false))))
 
-(def test_status_line () int
-  (check_str "the first line" (status_line "HTTP/1.0 404 Not Found\r\nA: b\r\n\r\n") "HTTP/1.0 404 Not Found"))
+; A part that says the response failed ends the command with 1.
+(def test_part_failed () int
+  (match (got_part (opts_or "h/") (Got 0 (nil int) (nil bytes) (sse_new)) (HttpFailed "the connection reset"))
+    ((Step g st) (check_int "failed" st 1))))
 
-; A response in two pieces, cut in the middle of the empty line: the header
-; is kept until it is complete, and its status is then known.
-(def test_page_pieces () int
-  (let p (page_more (page_more (Page false (nil int) false 0) "HTTP/1.0 200 OK\r\nA: b\r\n\r") "\nbody")
-    (add (check_bool "complete" (page_done p) true)
-         (add (check_int "status" (page_status p) 200)
-              (check_str "header" (page_head p) "HTTP/1.0 200 OK\r\nA: b\r\n\r\n")))))
+; For -j a body's pieces are kept, not written, until the end.
+(def test_part_json_kept () int
+  (match (got_part (opts_or "-j h/") (Got 200 "OK" (nil bytes) (sse_new)) (HttpBody (bytes_from_list "[1")))
+    ((Step g st)
+      (match g ((Got code reason pieces sse) (add (check_int "goes on" st -1) (check_int "kept" (length pieces) 1)))))))
 
-(def test_page_incomplete () int
-  (let p (page_more (Page false (nil int) false 0) "HTTP/1.0 200 OK\r\n")
-    (add (check_bool "not complete" (page_done p) false)
-         (check_int "no status" (page_status p) 0))))
-
-; Exit statuses: served, a status that is not 2xx, and no response.
-(def test_page_exit () int
-  (add (check_int "200" (page_exit (Page false "HTTP/1.0 200 OK\r\n\r\n" true 200)) 0)
-       (add (check_int "404" (page_exit (Page false "HTTP/1.0 404 Not Found\r\n\r\n" true 404)) 1)
-            (add (check_int "not HTTP" (page_exit (Page false (nil int) true 0)) 1)
-                 (check_int "nothing" (page_exit (Page false (nil int) false 0)) 1)))))
-
-; Why a connection ended: after a whole response, "closed" is the page, and
-; anything else is not; with no response, nothing is.
-(def test_ended () int
-  (add (check_int "closed" (ended (Page false "HTTP/1.0 200 OK\r\n\r\n" true 200) "closed") 0)
-       (add (check_int "reset after the header" (ended (Page false "HTTP/1.0 200 OK\r\n\r\n" true 200) "reset") 1)
-            (check_int "refused" (ended (Page false (nil int) false 0) "refused") 1))))
+; A status that is not 2xx fails, once the body is over.
+(def test_part_end_404 () int
+  (match (got_part (opts_or "h/") (Got 404 "Not Found" (nil bytes) (sse_new)) (HttpEnd true))
+    ((Step g st) (check_int "failed" st 1))))
 
 ; Under an operating system there is no network, nor l0 test's arguments a
 ; URL.
@@ -91,4 +113,4 @@
   (add (check_int "no arguments" (http) 1)
        (match (url_of "10.0.2.2/")
          ((Err why) (fail_because "url" why))
-         ((Ok u) (check_int "no inet" (fetch (inet_open) 0 u false) 1)))))
+         ((Ok u) (check_int "no inet" (fetch (inet_open) 0 (opts_or "10.0.2.2/") u) 1)))))

@@ -183,11 +183,16 @@ Ctrl-C as a person would:
   `net resolve` ask the host's for a name with an address, an alias of
   it, answered with a CNAME and then the address, a name with no
   address, and one it does not know; and take an address as it is;
-- `http`, with [a small server](../tests/e2e/http/server.py) on the host's
-  loopback, has `http` fetch a page, the same with its header, one of
-  300 lines, more than a window holds, and one that is not there, said
-  to be after the page, and be refused by a port nothing listens to; and
-  `net tcp` show no connection is left;
+- `http`, with [a small server](../tests/e2e/http/server.py) of
+  HTTP/1.1 on the host's loopback, has `http` fetch a page, the same
+  with its head, one of 300 lines, more than a window holds, and one
+  that is not there, said to be after the page, and be refused by a
+  port nothing listens to; fetch a page sent in chunks; post JSON to
+  `/echo` with `-j`, reading the answer as JSON and writing it back
+  compact; and read `/events` with `-e`, three events 200 ms apart with
+  a comment between, each a line as it comes, the server holding the
+  stream open 2 s after the last; and `net tcp` show no connection is
+  left;
 - `net_echo`, with a forward from a port of the host's loopback to port
   7000 of the board, has `net echo` listen to it, take the connection
   [a client on the host](../tests/e2e/net_echo/peer.py) makes, which sends

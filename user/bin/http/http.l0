@@ -1,24 +1,31 @@
-; http.l0 -- fetches a page over HTTP/1.0 (RFC 1945), through the network
-; stack's TCP, inet:
+; http.l0 -- asks a server over HTTP/1.1, through the network stack's
+; TCP, with the client library (proto/httpc.l0):
 ;
-;   http [-i] [http://]HOST[:PORT][/PATH]
-;                           the page at PATH (/ if none) of the server at
-;                           HOST, port 80 if none, written to standard
-;                           output; -i writes the response's header first
+;   http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... [http://]HOST[:PORT][/PATH]
+;                           GET of PATH (/ if none) of the server at
+;                           HOST, port 80 if none, or with -d a POST of
+;                           BODY, as application/json unless a -H names
+;                           the Content-Type; the body written to
+;                           standard output as each piece comes. -i
+;                           writes the head first; -j reads the body as
+;                           JSON and writes it back compact on one line,
+;                           or says where it is not JSON and fails; -e
+;                           reads it as an event stream, and writes a
+;                           line EVENT DATA for each event as it comes,
+;                           its data's newlines as spaces
 ;
 ; HOST is a name, which inet's name server resolves, or an address
-; dotted. It sends one request, with
-; Connection: close, and reads until the server closes, so the page is as
-; long as it is; it does not follow a redirect. A status other than 2xx
-; is said on standard error and fails the command, after the page.
+; dotted. A header is one word, NAME:VALUE, as the shell does not quote.
+; It sends one request and reads the one response, whose end, by its
+; length, its last chunk or the connection's close, ends it; it does not
+; follow a redirect. A status other than 2xx is said on standard error
+; and fails the command, after the body.
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "http" why))
 
-; How long to wait for the server to say anything, and how much of a
-; response's header to wait for the end of.
+; How long to wait for the server to say anything more.
 (def idle_ns () int 10000000000)
-(def head_limit () int 16384)
 
 ; ---------------------------------------------------------------------- URLs
 
@@ -50,154 +57,206 @@
                       ((Ok Url (list int)) (Url server port path hostport))
                       ((Err Url (list int)) "a port is 1 to 65535")))))))))
 
-; The request for a page: HTTP/1.0, which the server closes the connection
-; after answering, so that the answer's end is the connection's.
-(def request_text ((u Url)) (list int)
-  (match u
-    ((Url addr port path host)
-      (concat (cons "GET " (cons path (cons " HTTP/1.0\r\nHost: " (cons host (cons "\r\nUser-Agent: l0s-http\r\nConnection: close\r\n\r\n" (nil (list int)))))))))))
+; ------------------------------------------------------------------ options
 
-; ------------------------------------------------------------------ responses
+; What was asked: whether to write the head, read the body as JSON, or
+; as events; the body to post, if any; the headers given; and the URL.
+(data Opts (Opts bool bool bool (Option (list int)) (list HttpHeader) (list int)))
 
-; The index just past the empty line that ends a response's header, from i
-; on in xs, or -1 if it has not come.
-(def head_end ((xs (list int)) (i int)) int
-  (if (is_empty xs)
-      -1
-      (if (starts_with xs "\r\n\r\n")
-          (add i 4)
-          (if (starts_with xs "\n\n") (add i 2) (head_end (tail xs) (add i 1))))))
+; How the command is used.
+(def usage () (list int) "http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... URL")
 
-; The status code of a response whose header is head, or 0 if it does not
-; start with a status line: HTTP/1.0 200 OK.
-(def status_of ((head (list int))) int
-  (let ws (split_spaces (strip_cr (take_line head)))
-    (if (if (gt (length ws) 1) (starts_with (head ws) "HTTP/") false)
-        (match (word_number (nth ws 1))
-          ((None) 0)
-          ((Some code) code))
-        0)))
+; The options the words ws give, or why they give none.
+(def opts_of ((ws (list (list int)))) (Result Opts (list int))
+  (opts_from ws (Opts false false false ((None (list int))) (nil HttpHeader) (nil int))))
 
-; The status line of a response whose header is head, as a message.
-(def status_line ((head (list int))) (list int) (strip_cr (take_line head)))
+; The rest of opts_of, after o so far.
+(def opts_from ((ws (list (list int))) (o Opts)) (Result Opts (list int))
+  (match o
+    ((Opts show json events body hs url)
+      (if (is_empty ws)
+          (if (is_empty url) ((Err Opts (list int)) (usage)) ((Ok Opts (list int)) (Opts show json events body (rev hs) url)))
+          (let w (head ws)
+            (if (eq w "-i") (opts_from (tail ws) (Opts true json events body hs url))
+            (if (eq w "-j") (opts_from (tail ws) (Opts show true events body hs url))
+            (if (eq w "-e") (opts_from (tail ws) (Opts show json true body hs url))
+            (if (if (eq w "-d") true (eq w "-H")) (opts_valued w (tail ws) o)
+            (if (if (is_empty url) (not (starts_with w "-")) false) (opts_from (tail ws) (Opts show json events body hs w))
+            ((Err Opts (list int)) (usage))))))))))))
+
+; The option w, -d or -H, and its value, the first of ws.
+(def opts_valued ((w (list int)) (ws (list (list int))) (o Opts)) (Result Opts (list int))
+  (if (is_empty ws)
+      ((Err Opts (list int)) (append w " needs a value"))
+      (match o
+        ((Opts show json events body hs url)
+          (if (eq w "-d")
+              (opts_from (tail ws) (Opts show json events (Some (head ws)) hs url))
+              (let c (find_index 58 (head ws))
+                (if (le c 0)
+                    ((Err Opts (list int)) (append "not NAME:VALUE: " (head ws)))
+                    (opts_from (tail ws) (Opts show json events body (cons (HttpHeader (take (head ws) c) (http_trim (drop_n (head ws) (add c 1)))) hs) url)))))))))
+
+; The index of the first c in s, or -1.
+(def find_index ((c int) (s (list int))) int (find_from c s 0))
+(def find_from ((c int) (s (list int)) (i int)) int
+  (if (is_empty s) -1 (if (eq (head s) c) i (find_from c (tail s) (add i 1)))))
+
+; The method o asks with: POST with a body, GET without.
+(def opts_method ((o Opts)) (list int)
+  (match o ((Opts show json events body hs url) (match body ((Some b) "POST") ((None) "GET")))))
+
+; The headers o's request sends: a User-Agent, then a Content-Type of
+; application/json for a body unless one is given, then those given.
+(def request_headers ((o Opts)) (list HttpHeader)
+  (match o
+    ((Opts show json events body hs url)
+      (let typed (match body
+                   ((None) hs)
+                   ((Some b) (match (http_header hs "Content-Type")
+                               ((Some t) hs)
+                               ((None) (cons (HttpHeader "Content-Type" "application/json") hs)))))
+        (cons (HttpHeader "User-Agent" "l0s-http") typed)))))
+
+; o's body, as bytes; none is empty.
+(def post_body ((o Opts)) bytes
+  (match o ((Opts show json events body hs url) (match body ((Some b) (bytes_from_list b)) ((None) (bytes_from_list (nil int)))))))
+
+; ------------------------------------------------------------------ writing
+
+; A response's head as -i writes it: its status and reason, each header
+; NAME: VALUE, and a blank line.
+(def head_text ((code int) (reason (list int)) (hs (list HttpHeader))) (list int)
+  (rev (push "\n" (head_lines hs (push "\n" (push reason (push " " (push (digits code) (nil int)))))))))
+
+; Each of hs as a line, onto acc, reversed.
+(def head_lines ((hs (list HttpHeader)) (acc (list int))) (list int)
+  (if (is_empty hs)
+      acc
+      (match (head hs) ((HttpHeader n v) (head_lines (tail hs) (push "\n" (push v (push ": " (push n acc)))))))))
+
+; An event's line: its name, a space, its data with newlines as spaces.
+(def event_line ((e SseEvent)) (list int)
+  (append (bytes_to_list (sse_name e)) (cons 32 (append (spaced (bytes_to_list (sse_data e)) (nil int)) "\n"))))
+
+; s with each newline a space.
+(def spaced ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s) (rev acc) (spaced (tail s) (cons (if (eq (head s) 10) 32 (head s)) acc))))
+
+; The JSON body b, written back compact on a line; or why it is not JSON.
+(def json_line ((b bytes)) (Result bytes (list int))
+  (match (json_whole b 0 (bytes_len b))
+    ((Err why) ((Err bytes (list int)) (append "not JSON: " why)))
+    ((Ok v) ((Ok bytes (list int)) (bytes_concat (cons (json_bytes v) (cons (bytes_from_list "\n") (nil bytes))))))))
 
 ; Whether a status code says the request was served.
 (def served ((code int)) bool (if (ge code 200) (lt code 300) false))
 
+; s on standard output.
+(def out_text ((s (list int))) int (out_bytes (bytes_from_list s)))
+
+; b on standard output.
+(def out_bytes ((b bytes)) int (file_write_bytes (IoFile 1) b 0 (bytes_len b)))
+
+; What was written delivered, so it shows as it comes.
+(def out_flush () int (if (is_done (file_flush (IoFile 1))) 0 1))
+
 ; ---------------------------------------------------------------- the response
 
-; How far a response has come: whether to write its header, the header so
-; far, or all of it once it is complete; whether it is complete; and its
-; status.
-(data Page (Page bool (list int) bool int))
+; How far the response has come: its status and reason, 0 until its head
+; has come; the JSON body's pieces so far, reversed; and the event
+; stream's reader.
+(data Got (Got int (list int) (list bytes) Sse))
 
-; The page p after more bytes: while its header is not complete they are
-; kept; the header's end is found, the header is written if it is to be, and
-; what follows it; after that everything is written as it comes.
-(def page_more ((p Page) (chunk (list int))) Page
-  (match p
-    ((Page show head done status)
-      (if done
-          (let w (write_str chunk) p)
-          (let all (append head chunk)
-            (let e (head_end all 0)
-              (if (lt e 0)
-                  (if (gt (length all) (head_limit))
-                      (let w (write_str all) (Page show (nil int) true 0))
-                      (Page show all false 0))
-                  (let w (if show (write_str (take all e)) 0)
-                    (let w2 (write_str (drop_n all e))
-                      (Page show (take all e) true (status_of all)))))))))))
+; What a part did to the response: the response after it, and -1 while
+; more is to come, or the command's exit status once it is over.
+(data Step (Step Got int))
 
-; The header of a page that has one.
-(def page_head ((p Page)) (list int) (match p ((Page show head done status) head)))
+; g after part p, for o: the step, with -1 while more is to come, or the
+; exit status once the response is over.
+(def got_part ((o Opts) (g Got) (p HttpPart)) Step
+  (match g
+    ((Got code reason pieces sse)
+      (match p
+        ((HttpHead c r hs)
+          (let w (if (opts_show o) (out_text (head_text c r hs)) 0) (Step (Got c r pieces sse) -1)))
+        ((HttpBody d) (got_body o g d))
+        ((HttpEnd keep) (Step g (got_end o g)))
+        ((HttpBad why) (Step g (complain why)))
+        ((HttpFailed why) (Step g (complain why)))))))
 
-; The page's status: 0 if it is not a response, or has not come.
-(def page_status ((p Page)) int (match p ((Page show head done status) status)))
+; Whether o writes the head, reads JSON, reads events.
+(def opts_show ((o Opts)) bool (match o ((Opts show json events body hs url) show)))
+(def opts_json ((o Opts)) bool (match o ((Opts show json events body hs url) json)))
+(def opts_events ((o Opts)) bool (match o ((Opts show json events body hs url) events)))
 
-; Whether the page's header has come.
-(def page_done ((p Page)) bool (match p ((Page show head done status) done)))
+; A piece d of the body: kept for JSON, read for events, each event's
+; line written and delivered, or written as it is.
+(def got_body ((o Opts) (g Got) (d bytes)) Step
+  (match g
+    ((Got code reason pieces sse)
+      (if (opts_json o)
+          (Step (Got code reason (cons d pieces) sse) -1)
+          (if (opts_events o)
+              (match (sse_more sse d 0 (bytes_len d))
+                ((SseMore s2 es)
+                  (let w (write_events es)
+                    (Step (Got code reason pieces s2) -1))))
+              (let w (out_bytes d) (Step g -1)))))))
 
-; What the page came to, as an exit status: 0 if it was served, and
-; otherwise why not, said.
-(def page_exit ((p Page)) int
-  (if (not (page_done p))
-      (complain "no response")
-      (if (eq (page_status p) 0)
-          (complain "not an HTTP response")
-          (if (served (page_status p))
-              0
-              (complain (status_line (page_head p)))))))
+; Each of es's lines written, and delivered.
+(def write_events ((es (list SseEvent))) int
+  (if (is_empty es) (out_flush) (let w (out_text (event_line (head es))) (write_events (tail es)))))
 
-; ------------------------------------------------------------------- fetching
+; The response over: the JSON written, or why it is not; then the status
+; said if it is not 2xx.
+(def got_end ((o Opts) (g Got)) int
+  (match g
+    ((Got code reason pieces sse)
+      (let st (if (opts_json o)
+                  (match (json_line (bytes_concat (rev pieces)))
+                    ((Ok b) (out_bytes b))
+                    ((Err why) (let f (out_flush) (complain why))))
+                  0)
+        (let f (out_flush)
+          (if (not (eq st 0))
+              st
+              (if (served code) 0 (complain (append (digits code) (append " " reason))))))))))
 
-; The page the arguments name.
+; ------------------------------------------------------------------- asking
+
+; What the arguments ask.
 (def http () int
-  (let argv (args)
-    (let show (if (is_empty argv) false (eq (head argv) "-i"))
-      (let rest (if show (tail argv) argv)
-        (if (not (eq (length rest) 1))
-            (complain "http [-i] [http://]HOST[:PORT][/PATH]")
-            (match (url_of (head rest))
-              ((Err why) (complain why))
-              ((Ok u) (fetch (inet_open) (port_new) u show))))))))
+  (match (opts_of (args))
+    ((Err why) (complain why))
+    ((Ok o)
+      (match o
+        ((Opts show json events body hs u)
+          (match (url_of u)
+            ((Err why) (complain why))
+            ((Ok url) (fetch (inet_open) (port_new) o url))))))))
 
-; u fetched through inet n, its server's name resolved, its notices
-; coming to port np.
-(def fetch ((n Inet) (np int) (u Url) (show bool)) int
+; o asked of the server url names, through inet n, its notices to np.
+(def fetch ((n Inet) (np int) (o Opts) (u Url)) int
   (match u
     ((Url server port path host)
-      (match (inet_resolve n server)
+      (match (http_connect n np server port)
         ((Err why) (complain why))
-        ((Ok addr)
-          (match (tcp_connect n np addr port)
-            ((Err why) (complain why))
-            ((Ok id) (awaiting n np id u (Page show (nil int) false 0) (add (clock_ns) (idle_ns))))))))))
+        ((Ok c)
+          (match (http_ask c (opts_method o) path (request_headers o) (post_body o))
+            ((HttpGot c2 parts) (fed o c2 (Got 0 (nil int) (nil bytes) (sse_new)) parts))))))))
 
-; Notices of connection id, until it is gone: the request sent when it
-; opens, the response taken as it comes, and our end closed when the
-; server's is.
-(def awaiting ((n Inet) (np int) (id int) (u Url) (p Page) (deadline int)) int
-  (match (port_try_receive np)
-    ((RecvFailed)
-      (if (gt (clock_ns) deadline)
-          (let r (tcp_reset n id) (complain "the server did not answer"))
-          (let z (sleep_ns 1000000) (awaiting n np id u p deadline))))
-    ((Message from b)
-      (match (tcp_event_of (msg_text b))
-        ((None) (awaiting n np id u p deadline))
-        ((Some e) (heard n np id u p e (add (clock_ns) (idle_ns))))))))
-
-; The event e, if it is connection id's, dealt with.
-(def heard ((n Inet) (np int) (id int) (u Url) (p Page) (e TcpEvent) (deadline int)) int
-  (match e
-    ((TcpUp i)
-      (if (eq i id) (sent_request n np id u p deadline) (awaiting n np id u p deadline)))
-    ((TcpAccepted i src sport lport) (awaiting n np id u p deadline))
-    ((TcpRoom i room) (awaiting n np id u p deadline))
-    ((TcpDataAt i at) (awaiting n np id u p deadline))
-    ((TcpData i body)
-      (if (eq i id) (awaiting n np id u (page_more p body) deadline) (awaiting n np id u p deadline)))
-    ((TcpFin i)
-      (if (eq i id)
-          (let w (tcp_finish n id) (awaiting n np id u p deadline))
-          (awaiting n np id u p deadline)))
-    ((TcpClosed i why)
-      (if (eq i id) (ended p why) (awaiting n np id u p deadline)))))
-
-; The request written to connection id, now it is open.
-(def sent_request ((n Inet) (np int) (id int) (u Url) (p Page) (deadline int)) int
-  (let why (tcp_write n id (request_text u))
-    (if (is_empty why) (awaiting n np id u p deadline) (complain why))))
-
-; The fetch over, as the connection ended: closed after a response is the
-; page; anything else is why there is none.
-(def ended ((p Page) (why (list int))) int
-  (if (eq why "closed")
-      (page_exit p)
-      (if (page_done p) (page_exit_cut p why) (complain (append "the connection " why)))))
-
-; A response cut short by its connection's end: what came is written, and
-; this is said.
-(def page_exit_cut ((p Page) (why (list int))) int
-  (complain (append "the connection " (append why " before the page ended"))))
+; parts dealt with in order, then the next waited for, until the
+; response is over: the exit status.
+(def fed ((o Opts) (c HttpConn) (g Got) (parts (list HttpPart))) int
+  (if (is_empty parts)
+      (match (http_next c (add (clock_ns) (idle_ns)))
+        ((HttpGot c2 ps)
+          (if (is_empty ps)
+              (let r (http_close c2) (let f (out_flush) (complain "the server did not answer")))
+              (fed o c2 g ps))))
+      (match (got_part o g (head parts))
+        ((Step g2 st)
+          (if (lt st 0)
+              (fed o c g2 (tail parts))
+              (let r (http_close c) st))))))
