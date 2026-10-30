@@ -6,47 +6,86 @@
 ; handed and not yet taken back, by CPU; each pid handed out, with where;
 ; when each CPU was last handed a thread or gave one back, by CPU, -1 for
 ; never; and how long each pid's thread was last out, from its hand-off
-; to its trap, by pid, for those that have come back.
-(data Cpus (Cpus int (array int) (Map int OnCpu) (array int) (Map int int)))
+; to its trap, by pid, for those that have come back; and what usage.l0
+; counts of the CPUs' use.
+(data Cpus (Cpus int (array int) (Map int OnCpu) (array int) (Map int int) Usage))
 
 ; Where a pid's thread is: its CPU, the deadline its slice ends at,
 ; whether it was killed while out, to be ended once it comes back, and
 ; when it was handed out.
 (data OnCpu (OnCpu int int bool int))
 
-; The table for count CPUs, none holding anything.
-(def cpus_new ((count int)) Cpus
+; The table for count CPUs, none holding anything, counting their use
+; from 0.
+(def cpus_new ((count int)) Cpus (cpus_from count 0))
+
+; The table for count CPUs, none holding anything, counting their use
+; from now, the kernel's boot.
+(def cpus_from ((count int) (now int)) Cpus
   (Cpus (max count 1) (array_new (max count 1) 0) ((MapEmpty int OnCpu))
-        (array_new (max count 1) -1) ((MapEmpty int int))))
+        (array_new (max count 1) -1) ((MapEmpty int int)) (usage_new count now)))
+
+; What c counts of the CPUs' use.
+(def cpus_usage ((c Cpus)) Usage (match c ((Cpus n held placed act ran use) use)))
+
+; The CPU pid is on, if it is out on one, else the one it last ran on;
+; -1 if it has not run.
+(def cpus_where ((c Cpus) (pid int)) int
+  (match c
+    ((Cpus n held placed act ran use)
+      (match (map_get placed pid)
+        ((Some p) (on_cpu_cpu p))
+        ((None) (usage_last use pid))))))
+
+; c with pid started at now (usage_started).
+(def cpus_started ((c Cpus) (pid int) (now int)) Cpus
+  (match c ((Cpus n held placed act ran use) (Cpus n held placed act ran (usage_started use pid now)))))
+
+; c with t ns of pid's run on CPU cpu counted (usage_charge): a turn on
+; CPU 0, or a run on one CPU.
+(def cpus_charge ((c Cpus) (pid int) (cpu int) (t int)) Cpus
+  (match c ((Cpus n held placed act ran use) (Cpus n held placed act ran (usage_charge use pid cpu t)))))
+
+; c with t ns more of CPU 0 waiting counted.
+(def cpus_waited ((c Cpus) (t int)) Cpus
+  (match c ((Cpus n held placed act ran use) (Cpus n held placed act ran (usage_wait use t)))))
+
+; c with the load sampled at now, if due, with the threads ready, ready,
+; and those out on the CPUs (usage_tick).
+(def cpus_tick ((c Cpus) (now int) (ready int)) Cpus
+  (match c
+    ((Cpus n held placed act ran use)
+      (let out (map_size placed)
+        (Cpus n held placed act ran (usage_tick use now (add ready out)))))))
 
 ; How many threads the kernel hands one CPU at once: one running and one
 ; to start as soon as it traps, of the at least 2 the host takes.
 (def cpus_depth () int 2)
 
 ; How many CPUs there are, CPU 0's included.
-(def cpus_count ((c Cpus)) int (match c ((Cpus n held placed act ran) n)))
+(def cpus_count ((c Cpus)) int (match c ((Cpus n held placed act ran use) n)))
 
 ; Whether threads run on other CPUs, rather than on CPU 0 by user_run.
 (def cpus_many ((c Cpus)) bool (gt (cpus_count c) 1))
 
 ; How many threads CPU i holds.
-(def cpus_held ((c Cpus) (i int)) int (match c ((Cpus n held placed act ran) (array_get held i))))
+(def cpus_held ((c Cpus) (i int)) int (match c ((Cpus n held placed act ran use) (array_get held i))))
 
 ; Whether pid's thread is out on a CPU.
-(def cpus_out ((c Cpus) (pid int)) bool (match c ((Cpus n held placed act ran) (map_has placed pid))))
+(def cpus_out ((c Cpus) (pid int)) bool (match c ((Cpus n held placed act ran use) (map_has placed pid))))
 
 ; How many threads the CPUs hold, handed and not yet taken back.
-(def cpus_out_count ((c Cpus)) int (match c ((Cpus n held placed act ran) (map_size placed))))
+(def cpus_out_count ((c Cpus)) int (match c ((Cpus n held placed act ran use) (map_size placed))))
 
 ; Whether any CPU holds a thread.
-(def cpus_busy ((c Cpus)) bool (match c ((Cpus n held placed act ran) (gt (map_size placed) 0))))
+(def cpus_busy ((c Cpus)) bool (match c ((Cpus n held placed act ran use) (gt (map_size placed) 0))))
 
 ; When CPU i was last handed a thread or gave one back; -1 if never.
-(def cpus_active_at ((c Cpus) (i int)) int (match c ((Cpus n held placed act ran) (array_get act i))))
+(def cpus_active_at ((c Cpus) (i int)) int (match c ((Cpus n held placed act ran use) (array_get act i))))
 
 ; How long pid's thread was last out; -1 if it has not come back yet.
 (def cpus_last_run ((c Cpus) (pid int)) int
-  (match c ((Cpus n held placed act ran) (match (map_get ran pid) ((None) -1) ((Some t) t)))))
+  (match c ((Cpus n held placed act ran use) (match (map_get ran pid) ((None) -1) ((Some t) t)))))
 
 ; How recently a CPU must have been active, and how briefly each thread
 ; it holds last ran, for cpus_pick to queue a thread behind them: 500 µs
@@ -97,7 +136,7 @@
       false
       (if (lt (cpus_active_at c i) since)
           false
-          (match c ((Cpus n held placed act ran) (cpus_brief_on c i (map_keys placed)))))))
+          (match c ((Cpus n held placed act ran use) (cpus_brief_on c i (map_keys placed)))))))
 
 ; Whether each of pids out on CPU i last ran within cpus_brief_ns.
 (def cpus_brief_on ((c Cpus) (i int) (pids (list int))) bool
@@ -108,7 +147,7 @@
 ; Whether pid is not out on CPU i, or last ran within cpus_brief_ns.
 (def cpus_brief_pid ((c Cpus) (i int) (pid int)) bool
   (match c
-    ((Cpus n held placed act ran)
+    ((Cpus n held placed act ran use)
       (match (map_get placed pid)
         ((None) true)
         ((Some p)
@@ -158,7 +197,7 @@
 ; together, each drawing at first, reached the screen in 1.3 s started
 ; on CPU 0, as on one CPU, and in 1.0 s started on CPUs of their own.
 (def cpus_keeps ((c Cpus) (pid int)) bool
-  (match c ((Cpus n held placed act ran) (cpus_brief_in ran pid))))
+  (match c ((Cpus n held placed act ran use) (cpus_brief_in ran pid))))
 
 ; Whether ran, runs by pid, keeps one within cpus_keep_ns for pid.
 (def cpus_brief_in ((ran (Map int int)) (pid int)) bool
@@ -172,7 +211,7 @@
 ; how long anything woken meanwhile waits for it.
 (def cpus_here ((c Cpus) (pid int) (waiting bool)) bool
   (match c
-    ((Cpus n held placed act ran)
+    ((Cpus n held placed act ran use)
       (if (cpus_brief_in ran pid)
           true
           (if waiting false (eq (map_size placed) 0))))))
@@ -182,7 +221,7 @@
 ; hand out. With no thread out, every CPU has room.
 (def cpus_spreads ((c Cpus) (front (list int)) (back (list int))) bool
   (match c
-    ((Cpus n held placed act ran)
+    ((Cpus n held placed act ran use)
       (if (if (cpus_any_out ran front) true (cpus_any_out ran back))
           (if (eq (map_size placed) 0) (gt n 1) (cpus_room c))
           false))))
@@ -208,7 +247,7 @@
 
 ; c with pid's thread's last run, on CPU 0, kept as t ns long.
 (def cpus_ran ((c Cpus) (pid int) (t int)) Cpus
-  (match c ((Cpus n held placed act ran) (Cpus n held placed act (map_put ran pid (max 0 t))))))
+  (match c ((Cpus n held placed act ran use) (Cpus n held placed act (map_put ran pid (max 0 t)) use))))
 
 ; When CPU 0's timer must take back a thread it runs from now: its
 ; slice's end, deadline, or cpus_own_ns from now, or soonest, the
@@ -219,34 +258,37 @@
 
 ; ------------------------------------------------------------ hand-offs
 
-; c with pid's thread handed to CPU i at now, its slice ending at deadline.
+; c with pid's thread handed to CPU i at now, its slice ending at deadline;
+; running from now, for usage.l0, if the CPU held none.
 (def cpus_place ((c Cpus) (i int) (pid int) (deadline int) (now int)) Cpus
   (match c
-    ((Cpus n held placed act ran)
-      (Cpus n (array_set held i (add (array_get held i) 1))
-            (map_put placed pid (OnCpu i deadline false now)) (array_set act i now) ran))))
+    ((Cpus n held placed act ran use)
+      (let was (array_get held i)
+        (Cpus n (array_set held i (add was 1))
+              (map_put placed pid (OnCpu i deadline false now)) (array_set act i now) ran
+              (usage_placed use i now (eq was 0)))))))
 
 ; c with pid, out on a CPU, to be ended once its thread comes back; as it
 ; was if pid is not out.
 (def cpus_doom ((c Cpus) (pid int)) Cpus
   (match c
-    ((Cpus n held placed act ran)
+    ((Cpus n held placed act ran use)
       (match (map_get placed pid)
         ((None) c)
         ((Some p)
           (match p
             ((OnCpu i deadline doomed at)
-              (Cpus n held (map_put placed pid (OnCpu i deadline true at)) act ran))))))))
+              (Cpus n held (map_put placed pid (OnCpu i deadline true at)) act ran use))))))))
 
 ; A thread taken back: c without it, and where it was; or c as it was if
 ; its pid was not out.
 (data CpuBack (CpuBack Cpus OnCpu) (CpuNotOut Cpus))
 
 ; pid's thread taken back at now, as CpuBack says: its CPU active then,
-; and how long it was out kept for pid.
+; how long it was out kept for pid, and its run counted (usage_back).
 (def cpus_back ((c Cpus) (pid int) (now int)) CpuBack
   (match c
-    ((Cpus n held placed act ran)
+    ((Cpus n held placed act ran use)
       (match (map_get placed pid)
         ((None) (CpuNotOut c))
         ((Some p)
@@ -254,12 +296,13 @@
             ((OnCpu i deadline doomed at)
               (CpuBack (Cpus n (array_set held i (max 0 (sub (array_get held i) 1)))
                              (map_remove placed pid) (array_set act i now)
-                             (map_put ran pid (max 0 (sub now at))))
+                             (map_put ran pid (max 0 (sub now at)))
+                             (usage_back use pid i at now))
                        p))))))))
 
 ; c without what it kept of pid's runs, once pid has ended.
 (def cpus_forget ((c Cpus) (pid int)) Cpus
-  (match c ((Cpus n held placed act ran) (Cpus n held placed act (map_remove ran pid)))))
+  (match c ((Cpus n held placed act ran use) (Cpus n held placed act (map_remove ran pid) use))))
 
 ; Where a thread was, its deadline, and whether it was killed meanwhile.
 (def on_cpu_cpu ((p OnCpu)) int (match p ((OnCpu i deadline doomed at) i)))

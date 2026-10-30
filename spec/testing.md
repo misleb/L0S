@@ -4,7 +4,7 @@
 |---|---|
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](../tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks |
 | `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`), and those of the knowledge graph's L0 parser and of `graph-usage` (`tools/graphify-l0/test_l0_graph.py`, `test_graph_usage.py`). Last, it says how many tests passed and failed, of how many files |
-| `make test-virt` | `l0 test --target virt`, twice, on a board of one CPU and then of `VIRT_CPUS` (4), after `make test-virt-heap`, which runs `test_heap_runs_low` alone on a kernel heap of 96 MB, too small to record the pool, which is refused pages rather than stopping: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, receiving on a set of ports (the oldest message across them first, a waiter woken by a send to any of them, `proc_info`'s state and count, and every refusal: a port not the caller's, none or more than 32, a part of a u32, a bad buffer, no set, too little room), names let go (free again at once, found no more, refused for another's, one not registered, a bad name, and freed by their owner's exit), spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, file windows (the server's notice from pid 0 naming the client and its pages, made once a client, given back by `shm_unmap`, an open refused when the server has no device pages left, a write's bytes found in the window and a read's taken from it, and a window given up early that writes go back to messages for), the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
+| `make test-virt` | `l0 test --target virt`, twice, on a board of one CPU and then of `VIRT_CPUS` (4), after `make test-virt-heap`, which runs `test_heap_runs_low` alone on a kernel heap of 96 MB, too small to record the pool, which is refused pages rather than stopping: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, receiving on a set of ports (the oldest message across them first, a waiter woken by a send to any of them, `proc_info`'s state and count, and every refusal: a port not the caller's, none or more than 32, a part of a u32, a bad buffer, no set, too little room), names let go (free again at once, found no more, refused for another's, one not registered, a bad name, and freed by their owner's exit), how the CPUs are used (`cpu_usage`'s records, the system's and a process's, a spinner's time growing, on CPU 0 alone and on a CPU from 1 to 3 when there are several, and refusals) and the names listed (`name_list`'s whole records, from an index, and refusals), spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, file windows (the server's notice from pid 0 naming the client and its pages, made once a client, given back by `shm_unmap`, an open refused when the server has no device pages left, a write's bytes found in the window and a read's taken from it, and a window given up early that writes go back to messages for), the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
 | `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing, a key held there repeating, and a USB mouse clicking the launcher open, through `pcie`, `xhci` and one `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery, its changes painted in the buffer not shown and paced by frames (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Fonts, proportional and monospaced text read from the screen (`tests/fontview.sh`), Disks (`tests/disks.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, making, renaming and deleting files and relabelling a volume, and a second window of its own that goes its own way (`tests/files.sh`), apps launched while they run, Files opening a window more and Disks coming forward from behind Terminal, `open files /Volumes`, and Terminal launched again opening a second window of its one `vt`, with no open left unanswered (`tests/launch.sh`), a window answering the pointer at once, Fonts' Back lit under it with a face's page open and Files' menu button as Files lists a folder of 400 files on a volume, each within 250 ms of the move, screendumps and all (`tests/responsive.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), the L0S menu, opened, closed, starting About and shutting the board down (`tests/logo-menu.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`). The cases, then the screen tests (`tests/screens.sh`), boot `E2E_JOBS` at once, half this machine's CPUs unless set: about 4 minutes on 8, where one at a time took 15 |
 
 `make check` and `make test` run each check and each test file as a
@@ -31,6 +31,10 @@ Each case of `tests/e2e/` is a directory:
   match whole; or `contains`, lines each of which must be somewhere in
   it, for output of which part is the board's or the start order's, such
   as the port a driver waits on (`usb`, `dmesg`);
+- `filter`, a `sed -E` script standard output goes through before it is
+  compared, for columns that differ every boot: the cases that show `ps`
+  make its CPU and %CPU a `~` each, and `cpu_usage` names the ranges it
+  checks;
 - `status`, if not 0;
 - `stderr`, a line standard error must hold;
 - `typed`, keys to type at the serial line;
@@ -69,7 +73,7 @@ past the card's end, and reads its last sector.
 
 `tests/e2e.sh` builds each case's initramfs from every program and its
 `etc`, boots it, and compares; given case names, as `tests/e2e.sh cwd`,
-only those. Thirty-five cases type a session through
+only those. Thirty-nine cases type a session through
 [tools/slowtype](../tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
 - `shell` includes a backspace, Ctrl-U and an arrow key;
@@ -77,6 +81,15 @@ Ctrl-C as a person would:
   and `kill` of the shell's own job and of a driver, which is refused;
 - `kill` ends `spin`, which the inittab started, not the shell, and is
   refused `uart`, a driver;
+- `cpu_usage`, on four CPUs (`cpus`), runs three `spin`s and `echo`,
+  pings it 100 times, and after 4 s `ps` shows each spin at 90% or more
+  of a CPU from 1 to 3, and `echo` last on CPU 0, the kernel's, where
+  messages pass; `uptime` a load average above 0 and CPUs 1 to 3 each
+  90% busy or more;
+- `names`, on one CPU, with the display, input, font and compositor
+  started: `ps` and `names` agree that `wm` serves `compositor` and
+  `uart` `console`; `echo`, run from the shell, serves `echo`, and once
+  it is killed `names` no longer lists it;
 - `reboot` restarts the board: the kernel says so on its standard
   error, and QEMU, run with `-no-reboot` (`QEMU_NO_REBOOT=1`, which
   every typed case has), ends with status 0, nothing typed after it
@@ -362,8 +375,9 @@ QMP, checking `run windows` and, by screendump, what is shown:
 `run procmon &`, and learns where the monitor's window is. Then, by
 screendump:
 - its header bar, its toolbar, the grid's header, End Process faded, and
-  its own row, the seventh, with no eighth; and under the grid the
-  memory's line, its level bar filled in the accent;
+  its own row, the eighth, with no ninth; and under the grid the
+  memory's line, its level bar filled in the accent, and the CPUs',
+  CPU 0's bar filled in the accent;
 - after `run nap 600000 &`, nap's row, read again with nothing pressed;
 - a click on it, selecting it, then on End Process, which ends it: its
   row gone, and `ps` listing no `nap`;

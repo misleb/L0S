@@ -61,7 +61,7 @@
   (match c
     ((Config launches devs defaults stdin)
       (Kernel (array_new 256 (Free)) (Queue (nil int) (nil int)) (ipc_new) (nil Sleeper)
-              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int))) (klog_new)) (pids_new) (mem_new) (cpus_new (cpu_count))))))
+              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int))) (klog_new)) (pids_new) (mem_new) (cpus_from (cpu_count) (clock_ns))))))
 
 ; ------------------------------------------------------------- the fields
 
@@ -76,6 +76,43 @@
 (def k_cpus ((k Kernel)) Cpus (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) cpus)))
 (def with_cpus ((k Kernel) (c Cpus)) Kernel
   (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss irqs boot next mem c))))
+
+; ------------------------------------------------------------ CPU time
+;
+; What the kernel counts of the CPUs' use (usage.l0), each updated with
+; the record taken apart, so that its arrays change in place.
+
+; k with pid's run on CPU cpu, from since to now, counted: a turn on CPU
+; 0, its calls included, or a run on one CPU from its pick to its park.
+(def k_charge ((k Kernel) (pid int) (cpu int) (since int)) Kernel
+  (let t (sub (clock_ns) since)
+    (match k
+      ((Kernel slots ready ipc ss irqs boot next mem cpus)
+        (Kernel slots ready ipc ss irqs boot next mem (cpus_charge cpus pid cpu t))))))
+
+; k with CPU 0's wait, from since to now, counted.
+(def k_waited ((k Kernel) (since int)) Kernel
+  (let t (sub (clock_ns) since)
+    (match k
+      ((Kernel slots ready ipc ss irqs boot next mem cpus)
+        (Kernel slots ready ipc ss irqs boot next mem (cpus_waited cpus t))))))
+
+; k with its load sampled, if a tick is due at now: the ready queue and
+; the threads out on other CPUs. CPU 0 runs nothing as it samples.
+(def k_tick ((k Kernel) (now int)) Kernel
+  (if (usage_due (cpus_usage (k_cpus k)) now)
+      (let n (k_ready_count k)
+        (match k
+          ((Kernel slots ready ipc ss irqs boot next mem cpus)
+            (Kernel slots ready ipc ss irqs boot next mem (cpus_tick cpus now n)))))
+      k))
+
+; When the kernel's wait must end: at the soonest sleeper's time, or the
+; load's next tick, whichever comes first, so that a tick is not missed.
+(def k_wake_at ((k Kernel)) int
+  (let tick (usage_next_tick (cpus_usage (k_cpus k)))
+    (let s (soonest (k_sleepers k))
+      (if (lt s 0) tick (min s tick)))))
 
 ; Entry i of the initramfs, which must be one (is_entry).
 (def k_entry ((k Kernel) (i int)) Entry
@@ -616,7 +653,8 @@
           ((Created p0)
             (match (proc_share_image mem p0 img)
               ((Allocated m2 p)
-                (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) m2 cpus)
+                (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) m2
+                                 (cpus_started cpus pid (clock_ns)))
                          pid)))))))))
 
 ; The pid each slot holds, or last held.
@@ -1005,6 +1043,8 @@
     ((CGetCwd buf max) (give_record k p (proc_cwd p) buf max))
     ((CLogWrite level buf len) (do_log_write k p level buf len))
     ((CLogRead seq buf max) (do_log_read k p seq buf max))
+    ((CCpuUsage pid buf max) (do_cpu_usage k p pid buf max))
+    ((CNameList i buf max) (do_name_list k p i buf max))
     ((CWait pid) (do_wait k p pid))
     ((CSleepUntil t) (do_sleep k p t))
     ((CIrqBind irq port) (do_irq_bind k p irq port))
@@ -1736,6 +1776,30 @@
                 ((CopiedOut q b)
                   (resume_with (k_note k (proc_pid q) level (log_clean (bytes_to_list b))) q (klog_count (k_log k)))))))))
 
+; How the CPUs are used, copied to buf: with pid 0 the system's
+; cpu_record, else pid's proc_cpu_record, pid live or p itself; its
+; length, or err_no_port for no such live process, err_too_big if it is
+; over max, err_fault if p may not take it at buf.
+(def do_cpu_usage ((k Kernel) (p Proc) (pid int) (buf int) (max int)) Step
+  (if (eq pid 0)
+      (give_record k p (usage_record (cpus_usage (k_cpus k)) (clock_ns)) buf max)
+      (if (not (is_pid pid))
+          (resume_with k p (err_no_port))
+          (if (if (eq pid (proc_pid p)) true (eq (look k pid) (LookLive)))
+              (give_record k p (usage_proc_record (cpus_usage (k_cpus k)) pid (cpus_where (k_cpus k) pid) (clock_ns)) buf max)
+              (resume_with k p (err_no_port))))))
+
+; The names registered from the i-th on, in order, as many whole
+; name_records as max holds, copied to buf: their length, 0 past the
+; last, or err_fault for an i below 0 or a buf p may not take them at,
+; err_too_big for a max below 0.
+(def do_name_list ((k Kernel) (p Proc) (i int) (buf int) (max int)) Step
+  (if (lt i 0)
+      (resume_with k p (err_fault))
+      (if (lt max 0)
+          (resume_with k p (err_too_big))
+          (give_record k p (ipc_name_records (k_ipc k) i max) buf max))))
+
 ; The messages of the log numbered seq or more, as many whole ones as max
 ; holds, copied to buf as klog.l0 lays them out: their length, 0 if
 ; there are none, or err_too_big for a max below 0, err_fault if p may
@@ -2181,14 +2245,16 @@
 
 ; Runs the next ready process, or waits for something to make one ready,
 ; until pid 1 exits; and returns its status.
+; Its run counts from when it was picked (step).
 (def schedule ((k Kernel)) int
   (if (cpus_many (k_cpus k))
       (many_schedule k)
-      (match (take_ready (wake_sleepers k (clock_ns)))
-        ((Picked k2 p)
-          (let t (timer_at (slice_deadline (k_sleepers k2) (clock_ns)))
-            (run_proc k2 p)))
-        ((NonePicked k2) (idle k2)))))
+      (let now (clock_ns)
+        (match (take_ready (k_tick (wake_sleepers k now) now))
+          ((Picked k2 p)
+            (let t (timer_at (slice_deadline (k_sleepers k2) now))
+              (run_proc k2 p now)))
+          ((NonePicked k2) (idle k2))))))
 
 ; The next process to run, taken out of the table, or none ready.
 (data Picked (Picked Kernel Proc) (NonePicked Kernel))
@@ -2213,38 +2279,45 @@
                 ((Dead st) (take_ready (put_slot k2 pid (Dead st))))))))))))
 
 ; p run until it traps, and on from there: the status pid 1 exits with.
-(def run_proc ((k Kernel) (p Proc)) int
+; It was picked to run at since.
+(def run_proc ((k Kernel) (p Proc) (since int)) int
   (match p
     ((Proc pid m s c pages dev st)
       (let r (user_run s c)
         (let t (trap_of r)
-          (step (on_trap k (Proc pid m s r pages dev st) t)))))))
+          (step (on_trap k (Proc pid m s r pages dev st) t) pid since))))))
 
-; Carrying on after s: the same process run again, the next one
-; scheduled, or the status the system stops with.
-(def step ((s Step)) int
+; Carrying on after s, for pid, picked to run at since: the same process
+; run again, or the next one scheduled, pid's run from since counted as
+; on CPU 0, its calls included, with one look at the clock, not one a
+; trap; or the status the system stops with. A pid that ended meanwhile
+; is counted too, in a slot its next process starts afresh.
+(def step ((s Step) (pid int) (since int)) int
   (match s
-    ((Resume k p) (run_proc k p))
-    ((Park k p) (schedule (park k p)))
-    ((Next k) (schedule k))
+    ((Resume k p) (run_proc k p since))
+    ((Park k p) (schedule (park (k_charge k pid 0 since) p)))
+    ((Next k) (schedule (k_charge k pid 0 since)))
     ((Halt status) status)))
 
-; Nothing is ready: wait for the timer or a device, unless nothing could
-; ever come.
+; Nothing is ready: wait for the timer, for the soonest sleeper or the
+; load's tick, or a device, unless nothing could ever come; the wait
+; counted as CPU 0's.
 (def idle ((k Kernel)) int
   (if (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false)
       (stuck k "l0s: deadlock: every process waits for something that cannot happen")
       (if (k_pool_wants k)
           (schedule (k_pool_filled k))
-          (let t (timer_at (soonest (k_sleepers k)))
-            (let n (interrupt_wait)
-              (if (eq n 0)
-                  (let a (timer_at -1)
-                    (let d (interrupt_done 0)
-                      (schedule k)))
-                  (if (gt n 0)
-                      (schedule (device_irq k n))
-                      (stuck k "l0s: no interrupt can come"))))))))
+          (let t (timer_at (k_wake_at k))
+            (let t0 (clock_ns)
+              (let n (interrupt_wait)
+                (let k1 (k_waited k t0)
+                  (if (eq n 0)
+                      (let a (timer_at -1)
+                        (let d (interrupt_done 0)
+                          (schedule k1)))
+                      (if (gt n 0)
+                          (schedule (device_irq k1 n))
+                          (stuck k1 "l0s: no interrupt can come"))))))))))
 
 ; why logged as an error, and 124, the status the system stops with when
 ; nothing can ever run again.
@@ -2267,9 +2340,13 @@
   (if (cpus_busy (k_cpus k))
       (let a (cpu_trapped)
         (if (eq (array_len a) 0)
-            (many_fill (wake_sleepers k (clock_ns)))
+            (many_fill (k_woken k))
             (many_back k (cpu_trapped_of a))))
-      (many_fill (wake_sleepers k (clock_ns)))))
+      (many_fill (k_woken k))))
+
+; k with the sleepers due woken, and the load sampled if its tick is.
+(def k_woken ((k Kernel)) Kernel
+  (let now (clock_ns) (k_tick (wake_sleepers k now) now)))
 
 ; The thread t taken back: its process, out of the table, given the
 ; context it came back with, and on as many_trap says; or, if the kernel
@@ -2361,17 +2438,23 @@
     ((Turn deadline own start)
       (let now (clock_ns)
         (if (if (ge now deadline) true (if (ge own 0) (ge now own) false))
-            (many_schedule (park k p))
+            (many_schedule (park (k_turn_over k (proc_pid p) turn) p))
             (if (k_here k (proc_pid p))
                 (let k2 (many_spread_some k)
                   (let a (cpu_trapped)
                     (if (eq (array_len a) 0)
                         (if (lt own 0) (many_own_turn k2 p deadline) (many_own k2 p turn))
-                        (many_back (park k2 p) (cpu_trapped_of a)))))
+                        (many_back (park (k_turn_over k2 (proc_pid p) turn) p) (cpu_trapped_of a)))))
                 (let i (cpus_pick (k_cpus k) prefer now)
-                  (if (eq i 0)
-                      (many_schedule (park k p))
-                      (match (many_hand k p i deadline) ((Handed k2 ok) (many_schedule k2)))))))))))
+                  (let k1 (k_turn_over k (proc_pid p) turn)
+                    (if (eq i 0)
+                        (many_schedule (park k1 p))
+                        (match (many_hand k1 p i deadline) ((Handed k2 ok) (many_schedule k2))))))))))))
+
+; k with pid's turn on CPU 0 counted, from its start to now, if it had
+; one (own not -1); else k. A turn's calls are counted as its.
+(def k_turn_over ((k Kernel) (pid int) (turn Turn)) Kernel
+  (match turn ((Turn deadline own start) (if (lt own 0) k (k_charge k pid 0 start)))))
 
 ; k with a run of t ns by pid's thread on CPU 0 kept, if it is news
 ; (cpus_run_news); else k itself, rebuilt not at all.
@@ -2402,7 +2485,7 @@
       (let r (user_run s c)
         (let t (trap_of r)
           (let n (cpus_out_count (k_cpus k))
-            (many_own_step (on_trap (many_timed k pid t turn) (Proc pid m s r pages dev st) t) turn n)))))))
+            (many_own_step (on_trap (many_timed k pid t turn) (Proc pid m s r pages dev st) t) turn n pid)))))))
 
 ; k with how long pid ran in its turn kept, if t, its trap, is the
 ; timer's, which ended it; else k.
@@ -2425,15 +2508,16 @@
 ; the timer ended was parked by on_trap, its interrupt ended. A process
 ; woken meanwhile that would be handed out waits for p to stop, or its
 ; turn to end: each look at the ready queue costs a µs or more, and p may
-; make thousands of calls.
-(def many_own_step ((s Step) (turn Turn) (n int)) int
+; make thousands of calls. pid is p's: a turn that ends is counted as
+; its (k_turn_over), with one look at the clock.
+(def many_own_step ((s Step) (turn Turn) (n int) (pid int)) int
   (match s
     ((Resume k p)
       (if (cpus_busy (k_cpus k))
           (many_go k p 0 turn)
           (many_own k p turn)))
-    ((Park k p) (many_schedule (park k p)))
-    ((Next k) (many_schedule k))
+    ((Park k p) (many_schedule (park (k_turn_over k pid turn) p)))
+    ((Next k) (many_schedule (k_turn_over k pid turn)))
     ((Halt status) (many_halt n status))))
 
 ; k after handing p's thread to a CPU, back in its slot, and whether the
@@ -2522,23 +2606,26 @@
                   ((Handed k3 ok) (many_spread_all k3 (sub n 1))))))))))
 
 ; Nothing more to hand out: wait for a CPU's trap, the timer for the
-; soonest sleeper, or a device, unless nothing could ever come.
+; soonest sleeper or the load's tick, or a device, unless nothing could
+; ever come; the wait counted as CPU 0's.
 (def many_idle ((k Kernel)) int
   (if (if (cpus_busy (k_cpus k)) false (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false))
       (stuck k "l0s: deadlock: every process waits for something that cannot happen")
       (if (k_pool_wants k)
           (many_schedule (k_pool_filled k))
-          (let t (timer_at (soonest (k_sleepers k)))
-            (let n (cpu_wait)
-              (if (eq n -1)
-                  (many_schedule k)
-                  (if (eq n 0)
-                      (let a (timer_at -1)
-                        (let d (interrupt_done 0)
-                          (many_schedule k)))
-                      (if (gt n 0)
-                          (many_schedule (device_irq k n))
-                          (stuck k "l0s: no interrupt can come")))))))))
+          (let t (timer_at (k_wake_at k))
+            (let t0 (clock_ns)
+              (let n (cpu_wait)
+                (let k1 (k_waited k t0)
+                  (if (eq n -1)
+                      (many_schedule k1)
+                      (if (eq n 0)
+                          (let a (timer_at -1)
+                            (let d (interrupt_done 0)
+                              (many_schedule k1)))
+                          (if (gt n 0)
+                              (many_schedule (device_irq k1 n))
+                              (stuck k1 "l0s: no interrupt can come")))))))))))
 
 ; ------------------------------------------------------------------- boot
 

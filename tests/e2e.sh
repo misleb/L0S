@@ -11,6 +11,9 @@
 #              (a time, a port number)
 #   status     the exit status, 0 if there is no such file
 #   stderr     a line standard error must hold, if there is such a file
+#   filter     a sed -E script standard output goes through first, for
+#              columns that differ every boot, as ps's CPU and %CPU,
+#              which the cases that show ps make a ~ each
 #
 # If NAME/typed exists, it is typed at the board's serial line, through
 # tools/qemu-boot.sh, a line at a time as tools/slowtype types, for the
@@ -175,6 +178,10 @@ run_case() {
   fi
   status=$?
   why=""
+  if [ -f "$dir/filter" ]; then
+    # Columns that differ every boot (ps's CPU and %CPU) made the same.
+    sed -E -f "$dir/filter" "$out" > "$out.filtered" && mv "$out.filtered" "$out"
+  fi
   if [ -n "$serve_pid" ]; then kill "$serve_pid" 2> /dev/null; wait "$serve_pid" 2> /dev/null; fi
   if [ -n "$peer_pid" ]; then
     # The peer has had the whole boot; give it a moment more, then stop it.

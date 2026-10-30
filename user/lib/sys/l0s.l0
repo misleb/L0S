@@ -913,6 +913,90 @@
       ((None MemInfo))
       (Some (MemInfo (le_u32 b 0) (le_u32 b 4)))))
 
+; ------------------------------------------------------------- the CPUs
+
+; How the CPUs are used, as cpu_usage says with pid 0: the ns since boot,
+; the ns CPU 0 waited, the load averages over 1, 5 and 15 minutes in
+; fixed point of 2048 to 1.0, and each CPU's busy ns, CPU 0's first, its
+; turns running processes. The rest of CPU 0's time is the kernel's.
+(data CpuUsage (CpuUsage int int int int int (list int)))
+
+; What the kernel says of the CPUs, or none under another operating
+; system. Room for 64 CPUs.
+(def cpu_usage () (Option CpuUsage)
+  (cpu_usage_of (supervisor_receive (call_cpu_usage) 0 (add (cpu_record_len) 512))))
+
+; The CpuUsage a cpu_record in b says, or none if b is short of it.
+(def cpu_usage_of ((b bytes)) (Option CpuUsage)
+  (if (lt (bytes_len b) (cpu_record_len))
+      ((None CpuUsage))
+      (let n (le_u32 b 0)
+        (if (lt (bytes_len b) (add (cpu_record_len) (mul 8 n)))
+            ((None CpuUsage))
+            (Some (CpuUsage (le_u64_at b 16) (le_u64_at b 24) (le_u32 b 4) (le_u32 b 8) (le_u32 b 12)
+                            (u64s_at b (cpu_record_len) n (nil int))))))))
+
+; n u64s of b from i, after the reversed acc.
+(def u64s_at ((b bytes) (i int) (n int) (acc (list int))) (list int)
+  (if (le n 0) (rev acc) (u64s_at b (add i 8) (sub n 1) (cons (le_u64_at b i) acc))))
+
+; A process's use of the CPUs, as cpu_usage says: its CPU time in ns, the
+; CPU it is on or last ran on (-1 for none yet), and how long it has
+; existed in ns.
+(data ProcCpu (ProcCpu int int int))
+
+; What the kernel says of pid's CPU time, or none if no live process has
+; it, or under another operating system.
+(def proc_cpu ((pid int)) (Option ProcCpu)
+  (if (le pid 0)
+      ((None ProcCpu))
+      (proc_cpu_of (supervisor_receive (call_cpu_usage) pid (proc_cpu_record_len)))))
+
+; The ProcCpu a proc_cpu_record in b says, or none if b is short of it.
+(def proc_cpu_of ((b bytes)) (Option ProcCpu)
+  (if (lt (bytes_len b) (proc_cpu_record_len))
+      ((None ProcCpu))
+      (Some (ProcCpu (le_u64_at b 0) (s32 (le_u32 b 8)) (le_u64_at b 12)))))
+
+; ------------------------------------------------------------------ names
+
+; A name registered: the name, its port, and the pid owning the port.
+(data NameEntry (NameEntry (list int) int int))
+
+; Every name registered, in order, asked a message's worth at a time;
+; none under another operating system.
+(def names_registered () (list NameEntry)
+  (names_from 0 (nil NameEntry)))
+
+; names_registered's loop: those from the i-th on, after the reversed acc.
+(def names_from ((i int) (acc (list NameEntry))) (list NameEntry)
+  (let chunk (name_entries_of (supervisor_receive (call_name_list) i (max_message)) 0 (nil NameEntry))
+    (if (is_empty chunk)
+        (rev acc)
+        (names_from (add i (length chunk)) (rev_onto chunk acc)))))
+
+; The name_records in b from byte i on, as entries, after the reversed
+; acc; a record cut short ends them.
+(def name_entries_of ((b bytes) (i int) (acc (list NameEntry))) (list NameEntry)
+  (if (lt (bytes_len b) (add i (name_record_len)))
+      (rev acc)
+      (let e (add i (add (name_record_len) (le_u32 b (add i 8))))
+        (if (gt e (bytes_len b))
+            (rev acc)
+            (name_entries_of b e (cons (NameEntry (bytes_range b (add i (name_record_len)) e) (le_u32 b i) (le_u32 b (add i 4))) acc))))))
+
+; The names pid's ports are registered as, in order, of entries.
+(def names_of_pid ((entries (list NameEntry)) (pid int)) (list (list int))
+  (names_of_pid_onto entries pid (nil (list int))))
+
+; names_of_pid's loop: those of entries, after the reversed acc.
+(def names_of_pid_onto ((entries (list NameEntry)) (pid int) (acc (list (list int)))) (list (list int))
+  (if (is_empty entries)
+      (rev acc)
+      (match (head entries)
+        ((NameEntry name port owner)
+          (names_of_pid_onto (tail entries) pid (if (eq owner pid) (cons name acc) acc))))))
+
 ; ------------------------------------------------------------------ the log
 
 ; What logging a message did: it is in the kernel's log, as message

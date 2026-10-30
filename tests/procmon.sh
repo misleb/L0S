@@ -152,13 +152,13 @@ shows() {
 # The window's content starts under its 46-row header bar, 2 in from its
 # left, inside the frame's border. In it: the
 # toolbar, 46 rows, its End Process button 88 wide at its right end, 6
-# in, from 746, its label, 68 wide in Source Sans 3, from 756; a line; then the grid, its header 32 rows, the last its line, and
+# in, from 986, its label, 68 wide in Source Sans 3, from 996; a line; then the grid, its header 32 rows, the last its line, and
 # its rows, 30 each, sorted by pid, from 79. The State column runs from
-# 190, its dot 8 across from 199, 11 down a row; Memory and Shared from
-# 380 and 480; the Detail column from 580, empty for a sleeping process,
-# and at most 24 characters, to 781, for a receiving one, so from 800 it
-# is the row's ground. The window is 840 wide, and under the grid's 400
-# rows is the memory's line.
+# 190, its dot 8 across from 199, 11 down a row; % CPU and CPU from 310
+# and 380; Memory and Shared from 500 and 600; Provides from 700, at
+# most a name such as keyboard, to 760, so from 780 to the Detail
+# column's 820 it is the row's ground. The window is 1080 wide, and under
+# the grid's 400 rows is the memory's line, then the CPUs'.
 bar=46
 headerbar="48 48 48"; ground="36 36 36"; line="64 64 64"; view="30 30 30"
 selected="36 56 80"; red="224 27 36"; faded="130 32 36"
@@ -170,7 +170,7 @@ window
 cx=$((w_x + 2)); cy=$((w_y + bar))
 row() { echo $((cy + 79 + 30 * ($1 - 1))); }
 dot() { echo "$((cx + 203)) $(($(row $1) + 15))"; }
-endx=$((cx + 750)); endy=$((cy + 22))
+endx=$((cx + 990)); endy=$((cy + 22))
 
 shows "its header bar" "$((w_x + 6)) $((w_y + 6)) $headerbar"
 shows "the toolbar, the grid's header, End Process faded" \
@@ -183,6 +183,12 @@ shows "its own row, the eighth, and no ninth" "$(dot 8) !$view" "$(dot 9) $view"
 # the accent, at least 8 of it.
 accent="53 132 228"
 shows "the memory's line, its level bar filled in the accent" "$((cx + 76)) $((cy + 415)) $accent"
+
+# The CPUs' line under it, from 429, 28 high: CPUs in bold, then 0
+# (kernel), dimmed, and CPU 0's level bar, from 120, 8 high from 439;
+# any use rounds up to at least 8 of it in the accent. The screen tests
+# boot one CPU, so it is the only bar.
+shows "the CPUs' line, CPU 0's bar filled in the accent" "$((cx + 124)) $((cy + 443)) $accent"
 
 started 'run nap 600000 &'
 shows "nap's row, the ninth, read by itself" "$(dot 9) !$view"
@@ -206,11 +212,11 @@ echo "ok - procmon: ps lists no nap"
 # Thirteen rows, ten shown from y 79 to 379: the slider is ten thirteenths
 # of the 300, 230 long, so it travels 70. At the top it is from 81 to 307,
 # 2 in from each end of its 230, and at the end, three rows on, from 151
-# to 377. At rest it is 6 wide, 3 in from the grid's right edge at 840,
-# from x 831, the text, white, at 40% on the view's 1e1e1e, 787878;
-# with the pointer on its strip, 8 wide, from 829, at 60%, a5a5a5.
+# to 377. At rest it is 6 wide, 3 in from the grid's right edge at 1080,
+# from x 1071, the text, white, at 40% on the view's 1e1e1e, 787878;
+# with the pointer on its strip, 8 wide, from 1069, at 60%, a5a5a5.
 for n in 1 2 3 4 5; do started 'run nap 600000 &'; done
-gx=$((cx + 833)); wide=$((cx + 830))
+gx=$((cx + 1073)); wide=$((cx + 1070))
 slider="120 120 120"; slider_hot="165 165 165"
 shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $view"
 
