@@ -146,7 +146,7 @@ What it is, as decided with the user:
   the watch, tested on messages built with `message_new` (a write, two
   writes, an `r`, the exit notice, output past 64 KB). Under `l0 test`
   spawning fails, and the tool says so.
-- [ ] **`agentd`, the server.** `user/sbin/agentd/agentd.l0` and
+- [x] **`agentd`, the server.** `user/sbin/agentd/agentd.l0` and
   `main.l0`; `LIBS_agentd` is `MODEL`, `PATHS` and `AGENTLIB`. It reads
   `/etc/agent/config` (0042's, and its own keys: `home`, `compact`,
   `keep`, `run_timeout`) and `/etc/agent/token`; with neither it says
@@ -323,3 +323,18 @@ What it is, as decided with the user:
   unless the program exited 0; `tool_run` takes the terminal to give
   back to `agentd` after the spawn (`back`, 0 the kernel's). Not run
   on the board yet: that is step 8's e2e case.
+- 2026-10-29: step 6 done. `agentd` waits on its port, the HTTP
+  notices' port and one terminal port for every program its tools run
+  (one runs at a time), set once with `port_set`; `tool_run` and
+  `run_wait` gave way to `tool_run_start`, which starts the program
+  on that port, and `run_took`, which `agentd` feeds each message of it,
+  so a `stop` ends a program mid-run and a stream keeps flowing. The
+  terminal set back after a spawn is the one `tty_get` gives at its
+  start (step 5 thought there was no call to read it). A missing
+  config or token is the quiet exit 0; a wrong config is exit 1. A
+  request the loop asks while the last answer has not ended waits for
+  its end, so a connection kept alive never carries two at once; an
+  answer silent for 120 s fails the turn (an alarm on the notices'
+  port). A notice to a full queue is retried each millisecond for 2 s.
+  The system prompt names the board by its CPU, as nothing tells QEMU's
+  board from a Pi 5. Not on the board yet: steps 7 and 8.

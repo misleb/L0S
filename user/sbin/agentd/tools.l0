@@ -365,17 +365,23 @@
 (def is_run_tool ((name (list int))) bool
   (any_eq name (split_spaces "run sh")))
 
-; The tool run or sh done with input: the program started in home, its
-; terminal agentd's, back given back as agentd's own terminal after the
-; start (0 for the kernel's), and waited for, at most timeout seconds.
-(def tool_run ((home (list int)) (name (list int)) (input Json) (timeout int) (back int)) ToolAnswer
+; What starting run or sh came to: the program running, or the tool's
+; answer at once, a failure, as when no program is found.
+(data RunStart (RunGoing Run) (RunRefused ToolAnswer))
+
+; The tool run or sh begun with input: the program started in home, its
+; terminal port, agentd's, which is told of its exit and its deadline,
+; timeout seconds from now, and back given back as agentd's own terminal
+; after the start (0 for the kernel's). agentd then feeds what comes to
+; port to run_heard until the program has exited.
+(def tool_run_start ((home (list int)) (name (list int)) (input Json) (timeout int) (back int) (port int)) RunStart
   (if (eq name "sh")
       (match (tool_str input "command")
-        ((None) (tool_failed "command is missing, or not a string"))
-        ((Some line) (run_program home "/bin/sh" (cons "-c" (cons line (nil (list int)))) timeout back)))
+        ((None) (RunRefused (tool_failed "command is missing, or not a string")))
+        ((Some line) (run_program home "/bin/sh" (cons "-c" (cons line (nil (list int)))) timeout back port)))
       (match (tool_str input "program")
-        ((None) (tool_failed "program is missing, or not a string"))
-        ((Some p) (run_program home p (run_args input) timeout back)))))
+        ((None) (RunRefused (tool_failed "program is missing, or not a string")))
+        ((Some p) (run_program home p (run_args input) timeout back port)))))
 
 ; The args of run's input, its strings; none if there are none.
 (def run_args ((input Json)) (list (list int))
@@ -390,22 +396,21 @@
       (texts_of (tail vs) (match (json_text (head vs)) ((None) acc) ((Some t) (cons (bytes_to_list t) acc))))))
 
 ; The program what names found, a path from home if it holds a /, as the
-; shell's run finds it; then started and waited for.
-(def run_program ((home (list int)) (what (list int)) (args (list (list int))) (timeout int) (back int)) ToolAnswer
+; shell's run finds it; then started.
+(def run_program ((home (list int)) (what (list int)) (args (list (list int))) (timeout int) (back int) (port int)) RunStart
   (let path (program_found (if (any_eq 47 what) (tool_path home what) what) (root_paths))
     (if (is_empty path)
-        (tool_failed (append "no program " what))
-        (match (run_start home path args timeout back)
-          ((Err why) (tool_failed why))
-          ((Ok r) (run_result (run_wait r)))))))
+        (RunRefused (tool_failed (append "no program " what)))
+        (match (run_start home path args timeout back port)
+          ((Err why) (RunRefused (tool_failed why)))
+          ((Ok r) (RunGoing r))))))
 
 ; The program at path started with args, its current directory home,
-; its terminal a new port of agentd's, which is told of its exit and of
-; its deadline, timeout seconds from now; agentd's own terminal set back
-; to back after. Or why it could not be.
-(def run_start ((home (list int)) (path (list int)) (args (list (list int))) (timeout int) (back int)) (Result Run (list int))
-  (let port (port_new)
-    (match (tty_set port)
+; its terminal port, agentd's, which is told of its exit and of its
+; deadline, timeout seconds from now; agentd's own terminal set back to
+; back after. Or why it could not be.
+(def run_start ((home (list int)) (path (list int)) (args (list (list int))) (timeout int) (back int) (port int)) (Result Run (list int))
+  (match (tty_set port)
       ((TtyNoPort) ((Err Run (list int)) "no port to be its terminal"))
       ((TtySet)
         (let c (chdir home)
@@ -417,7 +422,7 @@
                     (let w (proc_watch pid port)
                       (let deadline (add (clock_ns) (mul timeout 1000000000))
                         (let a (alarm_at port deadline)
-                          ((Ok Run (list int)) (run_new pid port deadline))))))))))))))
+                          ((Ok Run (list int)) (run_new pid port deadline)))))))))))))
 
 ; The pid a spawn started, or -1.
 (def spawned_pid ((s Spawn)) int
@@ -428,21 +433,21 @@
     ((SpawnTooBig) -1)
     ((SpawnNoRoom) -1)))
 
-; r waited for until it exits: its terminal answered as it asks, and at
-; its deadline, the alarm, it is ended with proc_kill, and its exit then
-; waited for.
-(def run_wait ((r Run)) Run
-  (match (run_status r)
-    ((Some s) r)
-    ((None)
-      (let m (port_receive (run_port r))
-        (match m
-          ((RecvFailed) (run_lost r))
-          ((Message from b)
-            (if (is_alarm_notice m)
-                (let k (proc_kill (run_pid r)) (run_wait (run_ended r)))
-                (match (run_heard r m)
-                  ((RunHeard r2 sends) (let x (run_send sends) (run_wait r2)))))))))))
+; r after m came to its port, as agentd hears it: at its deadline, the
+; alarm, it is ended with proc_kill, and its exit then waited for (an
+; alarm before it, an earlier run's, is passed over); a
+; port that fails gives it up; anything else is run_heard's, and what
+; that says to send is sent.
+(def run_took ((r Run) (m Message)) Run
+  (match m
+    ((RecvFailed) (run_lost r))
+    ((Message from b)
+      (if (is_alarm_notice m)
+          (match (run_status r)
+            ((Some s) r)
+            ((None) (if (lt (clock_ns) (run_deadline r)) r (let k (proc_kill (run_pid r)) (run_ended r)))))
+          (match (run_heard r m)
+            ((RunHeard r2 sends) (let x (run_send sends) r2)))))))
 
 ; Each of sends sent; a terminal's answer that cannot go is dropped.
 (def run_send ((sends (list RunSend))) int

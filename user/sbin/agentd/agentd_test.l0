@@ -1,6 +1,94 @@
-; agentd_test.l0 -- agentd's entry point.
+; agentd_test.l0 -- agentd's configuration, its requests read, the
+; notices its loop's tells become, and its entry point.
 
-; Under an operating system there is no kernel, and agentd serves
-; nothing yet.
+(def bb ((s (list int))) bytes (bytes_from_list s))
+
+; n of byte c, onto acc.
+(def many_bytes ((c int) (n int) (acc (list int))) (list int)
+  (if (le n 0) acc (many_bytes c (sub n 1) (cons c acc))))
+
+; Under an operating system there is no kernel.
 (def test_entry () int
   (check_int "fails" (agentd) 1))
+
+(def test_own_default () int
+  (check_str "own" (own_text (own_of "api 10.0.2.2:8765\n"))
+    "home /Volumes/data/agent, run_timeout 60, compact 100000, keep 8"))
+
+(def test_own_given () int
+  (check_str "own" (own_text (own_of "api x:1\nhome /Volumes/work/me\ncompact 5000\nkeep 2\nrun_timeout 9\n"))
+    "home /Volumes/work/me, run_timeout 9, compact 5000, keep 2"))
+
+(def test_own_not_numbers () int
+  (check_str "own" (own_text (own_of "compact lots\nkeep -\n"))
+    "home /Volumes/data/agent, run_timeout 60, compact 100000, keep 8"))
+
+(def test_home_volume () int
+  (add (check_str "data" (home_volume "/Volumes/data/agent") "/Volumes/data")
+       (add (check_str "the volume itself" (home_volume "/Volumes/work") "/Volumes/work")
+            (check_str "not on one" (home_volume "/agent") ""))))
+
+; A request as agentd receives it, from pid 7, its reply to port 3.
+(def req_msg ((body (list int))) bytes
+  (match (message_new 7 (request 3 body)) ((Message from b) b) ((RecvFailed) (bb ""))))
+
+(def req_text ((r Req)) (list int)
+  (match r
+    ((ReqOpen n) (append "open " (digits n)))
+    ((ReqSay n t) (append "say " (append (digits n) (cons 124 (bytes_to_list t)))))
+    ((ReqStop n) (append "stop " (digits n)))
+    ((ReqClose n) (append "close " (digits n)))
+    ((ReqWrong why) (append "wrong: " why))))
+
+(def test_req_open () int
+  (check_str "open" (req_text (req_of (req_msg (agent_open_body 12)))) "open 12"))
+
+(def test_req_say () int
+  (add (check_str "say" (req_text (req_of (req_msg (agent_say_body 2 "make a file\nplease")))) "say 2|make a file\nplease")
+       (check_str "no text" (req_text (req_of (req_msg "say 2"))) "say 2|")))
+
+(def test_req_stop_close () int
+  (add (check_str "stop" (req_text (req_of (req_msg (agent_stop_body 4)))) "stop 4")
+       (check_str "close" (req_text (req_of (req_msg (agent_close_body 4)))) "close 4")))
+
+(def test_req_wrong () int
+  (add (check_str "unknown" (req_text (req_of (req_msg "sing 1"))) "wrong: no request sing")
+       (check_str "no id" (req_text (req_of (req_msg "say hello"))) "wrong: not open NPORT, say ID, stop ID or close ID")))
+
+; Notices as text, joined by |.
+(def notices_text ((ns (list bytes))) (list int)
+  (if (is_empty ns) "" (append (bytes_to_list (head ns)) (if (is_empty (tail ns)) "" (cons 124 (notices_text (tail ns)))))))
+
+(def test_tell_text () int
+  (check_str "text" (notices_text (tell_notices 1 (TellText (bb "Hi.")))) "agent 1 text\nHi."))
+
+; 9000 bytes of text are three notices: 4000, 4000 and 1000.
+(def test_tell_text_pieces () int
+  (let ns (tell_notices 1 (TellText (bytes_from_list (many_bytes 97 9000 (nil int)))))
+    (add (check_int "count" (length ns) 3)
+         (check_int "last" (bytes_len (last ns)) (add 1000 (length "agent 1 text\n"))))))
+
+; A cut moves back to where a character starts: 3999 a's and a two-byte
+; é cut after the a's.
+(def test_tell_text_utf8 () int
+  (let ns (tell_notices 1 (TellText (bytes_from_list (append (many_bytes 97 3999 (nil int)) (cons 195 (cons 169 (nil int)))))))
+    (check_int "first" (bytes_len (head ns)) (add 3999 (length "agent 1 text\n")))))
+
+(def test_tell_tool () int
+  (check_str "tool" (notices_text (tell_notices 2 (TellTool (bb "make_dir") (json_obj (cons (json_field "path" (json_str "notes")) (nil JField))))))
+    "agent 2 tool make_dir\n{\"path\":\"notes\"}"))
+
+; A result is cut to 1 KB.
+(def test_tell_result_cut () int
+  (let ns (tell_notices 2 (TellResult (bb "run") false (bytes_from_list (many_bytes 120 5000 (nil int)))))
+    (check_int "size" (bytes_len (head ns)) (add 1024 (length "agent 2 result run ok\n")))))
+
+(def test_tell_error () int
+  (check_str "error" (notices_text (tell_notices 3 (TellError (bb "Overloaded")))) "agent 3 error\nOverloaded"))
+
+(def test_usage_text () int
+  (check_str "usage" (usage_text (Usage 10 5 3 0)) "usage: input 10, output 5, cache written 3, cache read 0"))
+
+(def test_board () int
+  (add (check_str "aarch64" (board_text 1) "an aarch64 board (QEMU's virt board or a Raspberry Pi 5)")
+       (check_str "other" (board_text 9) "a board")))

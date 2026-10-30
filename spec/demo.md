@@ -86,6 +86,7 @@ booted with `root=UUID`, or else from the initramfs.
 | 14 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
 | 15 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in pages it shares with each asker, the desktop's made at the build, any other rasterized once, on its first ask |
 | 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
+| 17 | `agentd` | the agent's server ([agent.md](agent.md)), last. With no `/etc/agent/config` and token, as the demo has unless `make agent-etc` made them, it says so in the log and exits. Otherwise it waits for `fs` to mount its home's volume, `/Volumes/data`, and serves `agent`, for `run agent`: it asks the model through `inet`'s TCP and the host's proxy, reads and writes its files through `fs`, by the kernel, and starts the programs its `run` and `sh` tools run, their terminal a port of its own |
 
 An app opened then takes the next pids. A Terminal, the first opened,
 is two: `vt`, its window, with a tab, `vt1`, the first name free,
@@ -280,7 +281,8 @@ Things to try:
   `usb-hid` waits on its own and `keyboard`'s and `pointer`'s, says how
   many.
 
-  It lists the processes that have not exited. The shell asking is always
+  It lists the processes that have not exited: `agentd`, pid 17, only
+  with `/etc/agent` set up, waiting on 3 ports. The shell asking is always
   `running`, since `ps` runs inside it. Every driver waits, for a request
   or its device's interrupt, which comes as a message too. A process writing to a terminal
   whose queue is full shows `writing to port N`, one reading its
@@ -298,7 +300,7 @@ Things to try:
 
   ```
   l0s> run windows
-  1 Processes 100 90 840 429 front 21 buffer 10 frames 3
+  1 Processes 100 90 840 429 front 20 buffer 10 frames 3
   0 vt1 40 40 640 384 - 18 buffer 4 frames 0
   pointer 0 0
   ```

@@ -244,6 +244,8 @@ HTTP    := $(INETLIB) $(HTTPMSG) user/lib/proto/httpc.l0
 # A model's API, Anthropic's Messages API through the host's proxy: its
 # configuration, a request's bytes and its streamed events.
 MODELLIB := $(HTTP) $(JSON) $(SSE) user/lib/proto/model.l0
+# The agent protocol, agentd's, and its client.
+AGENTLIB := user/lib/proto/agent.l0
 
 # USB: its descriptors and requests, and the usb protocol, which the
 # host controller's driver serves to the class drivers, over them; and
@@ -292,7 +294,8 @@ LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(HTTP) $(JSON) $(SSE)
 LIBS_ask        := $(MODELLIB)
-LIBS_agentd     := $(MODELLIB) $(PATHS)
+LIBS_agent      := $(AGENTLIB)
+LIBS_agentd     := $(MODELLIB) $(PATHS) $(AGENTLIB)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
@@ -496,6 +499,7 @@ $(call l0_test,$(ULIB) $(NICLIB) user/lib/proto/nic_test.l0)
 $(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)
 $(call l0_test,$(ULIB) $(HTTP) user/lib/proto/httpc_test.l0)
 $(call l0_test,$(ULIB) $(MODELLIB) user/lib/proto/model_test.l0)
+$(call l0_test,$(ULIB) $(AGENTLIB) user/lib/proto/agent_test.l0)
 $(call l0_test,$(ULIB) $(RANDOM) user/lib/proto/random_test.l0)
 $(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
 $(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)
