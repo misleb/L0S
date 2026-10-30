@@ -192,7 +192,7 @@ What it is, as decided with the user:
   /etc/agent/config?)". The notices' text is a pure function, tested.
   programs.md's `agent` and `agentd` rows; agent.md, new: `agentd`, its
   home and rules, its protocol, its tools, `agent`.
-- [ ] **The e2e case.** The stand-in of 0042 runs a script whose
+- [x] **The e2e case.** The stand-in of 0042 runs a script whose
   answers ask for tools, and checks each request: the `tool_result`s
   answer the last answer's `tool_use` ids, in order, the
   `cache_control` breakpoints are there, and the system prompt holds
@@ -349,3 +349,18 @@ What it is, as decided with the user:
   joins the listings of the `shell`, `fs` and `install` cases and the
   counts of `install`, `install_boot` and `rootboot_tmpfs`. On the
   board from step 8's case.
+- 2026-10-29: step 8 done. The stand-in takes an answer that uses
+  tools written short (`{"tools": [...], "text": ...}`, `tool_events`,
+  each input sent in two pieces) and, given the case's `checks.json`,
+  checks each request (`checked`), answering 400 with why; beyond the
+  plan it also checks each tool's result holds what it should, so the
+  case shows `run` and `sh` really ran. The script answers in three
+  rounds of two tools, then a text: four requests. Found on the board:
+  the loop moves to its next round as soon as the last result is in,
+  while the response whose stop it read may still be ending, so
+  `agentd` now marks a response stopped once its stop comes, and its
+  end, after, ends nothing early; and a turn done before its response
+  ended resets the connection. `hello` read its line from the console
+  driver whatever its terminal, so under `agentd` it took the
+  console's next line (the case's `/exit`); it now reads its terminal
+  when it has one, and its inittab's console otherwise.

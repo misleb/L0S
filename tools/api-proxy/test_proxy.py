@@ -249,5 +249,60 @@ class Starting(unittest.TestCase):
         self.assertFalse(proxy.bearer_ok(TOKEN, TOKEN))
 
 
+def marked(block):
+    """block with a cache breakpoint."""
+    return dict(block, cache_control={"type": "ephemeral"})
+
+
+def good_request():
+    """A request that passes every check: a tool used and answered, the
+    breakpoints where they should be, the rules in the system prompt."""
+    return {"system": [marked({"type": "text", "text": "rules: keep your files in your home"})],
+            "tools": [{"name": "a"}, marked({"name": "b"})],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                         {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "a", "input": {}},
+                                                           {"type": "tool_use", "id": "t2", "name": "b", "input": {}}]},
+                         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x"},
+                                                      marked({"type": "tool_result", "tool_use_id": "t2", "content": "y"})]}]}
+
+
+ALL = {"tool_results": True, "cache_control": True, "system_contains": "keep your files"}
+
+
+class Checks(unittest.TestCase):
+    def test_good(self):
+        self.assertIsNone(standin.checked(good_request(), ALL, ["t1", "t2"]))
+
+    def test_results_out_of_order(self):
+        r = good_request()
+        r["messages"][2]["content"].reverse()
+        self.assertIn("do not answer", standin.checked(r, ALL, ["t1", "t2"]))
+
+    def test_not_the_last_sent(self):
+        self.assertIn("not those answered last", standin.checked(good_request(), ALL, ["t9"]))
+
+    def test_no_breakpoint(self):
+        r = good_request()
+        del r["tools"][1]["cache_control"]
+        self.assertEqual(standin.checked(r, ALL, []), "no cache_control on the last tool")
+
+    def test_rules_missing(self):
+        r = good_request()
+        r["system"][0]["text"] = "nothing"
+        self.assertIn("does not hold", standin.checked(r, ALL, []))
+
+    def test_results_contain(self):
+        self.assertIsNone(standin.checked(good_request(), {"results_contain": {"t2": "y"}}, []))
+        self.assertIn("does not hold", standin.checked(good_request(), {"results_contain": {"t1": "z"}}, []))
+
+    def test_tool_events(self):
+        ev = standin.tool_events([{"id": "t1", "name": "make_dir", "input": {"path": "notes"}}], text="Making it.")
+        pieces = "".join(e["data"]["delta"]["partial_json"] for e in ev
+                         if e["event"] == "content_block_delta" and e["data"]["delta"]["type"] == "input_json_delta")
+        self.assertEqual(json.loads(pieces), {"path": "notes"})
+        self.assertEqual(standin.tool_ids({"events": ev}), ["t1"])
+        self.assertEqual(ev[-2]["data"]["delta"]["stop_reason"], "tool_use")
+
+
 if __name__ == "__main__":
     unittest.main()

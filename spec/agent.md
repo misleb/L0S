@@ -48,7 +48,11 @@ a file tool is done at once; `run` and `sh` start their program, and
 the turn waits for its exit, its terminal answered meanwhile. An answer
 silent for 120 s is given up, and the turn fails; so does a refusal
 (`model_refusal`'s words), a connection lost mid-answer, or a stream
-that ends before its stop. Each turn's usage is a debug line in the
+that ends before its stop. A request the loop asks while the last
+response is still ending (its stop came, its end not yet) waits for
+that end, and a turn done before its response ended resets the
+connection, so a kept connection never carries the rest of one answer
+into the next request. Each turn's usage is a debug line in the
 log (`dmesg`). Conversations live as long as `agentd`.
 
 ## Its protocol

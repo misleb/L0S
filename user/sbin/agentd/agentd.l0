@@ -83,9 +83,10 @@
 (data Chat (Chat int Loop))
 
 ; Where a request's answer is: none in flight; or coming, its status (0
-; until its head), a refusal's body so far, reversed, and the event
-; stream's reader.
-(data Wire (WireIdle) (WireOn int (list bytes) Sse))
+; until its head), a refusal's body so far, reversed, the event
+; stream's reader, and whether its stop has come (after which the loop
+; may be on its next round while the response is still ending).
+(data Wire (WireIdle) (WireOn int (list bytes) Sse bool))
 
 ; A program a tool runs: the tool use's id, and the run.
 (data Running (Running bytes Run))
@@ -346,7 +347,7 @@
           (if (not (eq i id))
               s
               (let k (run_end r)
-                (let conn2 (match w ((WireIdle) conn) ((WireOn c ps sse) (conn_reset conn)))
+                (let conn2 (match w ((WireIdle) conn) ((WireOn c ps sse st) (conn_reset conn)))
                   (match (loop_cancel l)
                     ((Looped l2 acts2) (drive (Agentd u chats next (Busy i nport l2 acts2 (WireIdle) ((None Running)) 0) net conn2))))))))))))
 
@@ -376,22 +377,25 @@
               s
               (match (head acts)
                 ((ActTell t) (let x (notices_send nport (tell_notices id t)) (drive (Agentd u chats next (Busy id nport l (tail acts) w r dl) net conn))))
-                ((ActDone reason) (finished s id nport l reason))
+                ((ActDone reason) (finished s id nport l reason w))
                 ((ActAsk req) (if (is_wire_on w) s (turn_asked (Agentd u chats next (Busy id nport l (tail acts) w r dl) net conn) req)))
                 ((ActTool tid name input) (tooled (Agentd u chats next (Busy id nport l (tail acts) w r dl) net conn) tid name input)))))))))
 
 ; Whether a program is running, and an answer coming.
 (def is_running ((r (Option Running))) bool (match r ((None) false) ((Some x) true)))
-(def is_wire_on ((w Wire)) bool (match w ((WireIdle) false) ((WireOn c ps sse) true)))
+(def is_wire_on ((w Wire)) bool (match w ((WireIdle) false) ((WireOn c ps sse st) true)))
 
 ; The turn done, for reason: told, the answer's usage in the log, its
-; loop kept in its conversation, and agentd waiting.
-(def finished ((s Agentd) (id int) (nport int) (l Loop) (reason bytes)) Agentd
+; loop kept in its conversation, and agentd waiting. An answer whose
+; response w has not ended yet has its connection reset, so the next
+; request never meets the rest of it.
+(def finished ((s Agentd) (id int) (nport int) (l Loop) (reason bytes) (w Wire)) Agentd
   (match s
     ((Agentd u chats next doing net conn)
       (let x (notice_send nport (agent_done_notice id (bytes_to_list reason)) 2000)
         (let d (debug_as "agentd" (append "conversation " (append (digits id) (append " done " (append (bytes_to_list reason) (append ", " (usage_text (conv_usage (loop_conv l)))))))))
-          (Agentd u (if (map_has chats id) (map_put chats id (Chat nport l)) chats) next (Idle) net conn))))))
+          (let conn2 (if (is_wire_on w) (conn_reset conn) conn)
+            (Agentd u (if (map_has chats id) (map_put chats id (Chat nport l)) chats) next (Idle) net conn2)))))))
 
 ; s with its turn's loop after looped, whose acts come before those
 ; still to do: then driven on.
@@ -490,7 +494,7 @@
     ((Agentd u chats next doing net conn)
       (match doing
         ((Idle) s)
-        ((Busy id nport l acts w r d0) (Agentd u chats next (Busy id nport l acts (WireOn 0 (nil bytes) (sse_new)) r dl) net conn))))))
+        ((Busy id nport l acts w r d0) (Agentd u chats next (Busy id nport l acts (WireOn 0 (nil bytes) (sse_new) false) r dl) net conn))))))
 
 ; m, which came to the connections' notice port: the alarm, a silent
 ; answer given up; anything else fed to the connection, and its parts
@@ -549,44 +553,67 @@
         ((Busy id nport l acts w r dl)
           (match w
             ((WireIdle) s)
-            ((WireOn code pieces sse)
+            ((WireOn code pieces sse st)
               (match p
-                ((HttpHead c reason hs) (Agentd u chats next (Busy id nport l acts (WireOn c pieces sse) r dl) net conn))
+                ((HttpHead c reason hs) (Agentd u chats next (Busy id nport l acts (WireOn c pieces sse st) r dl) net conn))
                 ((HttpBody d)
                   (if (served code)
                       (match (sse_more sse d 0 (bytes_len d))
-                        ((SseMore s2 es) (wire_events (Agentd u chats next (Busy id nport l acts (WireOn code pieces s2) r dl) net conn) es)))
-                      (Agentd u chats next (Busy id nport l acts (WireOn code (cons d pieces) sse) r dl) net conn)))
-                ((HttpEnd keep) (wire_ended (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net conn) code (bytes_concat (rev pieces))))
-                ((HttpBad why) (wire_lost (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) why))
-                ((HttpFailed why) (wire_lost (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) why))))))))))
+                        ((SseMore s2 es) (wire_events (Agentd u chats next (Busy id nport l acts (WireOn code pieces s2 st) r dl) net conn) es)))
+                      (Agentd u chats next (Busy id nport l acts (WireOn code (cons d pieces) sse st) r dl) net conn)))
+                ((HttpEnd keep) (wire_ended (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net conn) code (bytes_concat (rev pieces)) st))
+                ((HttpBad why) (wire_lost (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) why st))
+                ((HttpFailed why) (wire_lost (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) why st))))))))))
 
 ; Whether a status code says the request was served.
 (def served ((code int)) bool (if (ge code 200) (lt code 300) false))
 
-; The stream's events es, each the model's events, told to the loop.
+; The stream's events es, each the model's events, told to the loop;
+; an answer's stop, or an error, marks the answer stopped first.
 (def wire_events ((s Agentd) (es (list SseEvent))) Agentd
-  (if (is_empty es) s (wire_events (told_all s (model_events (head es))) (tail es))))
+  (if (is_empty es)
+      s
+      (let ms (model_events (head es))
+        (wire_events (told_all (if (any_stop ms) (wire_stopped s) s) ms) (tail es)))))
+
+; Whether any of ms ends an answer: its stop, or an error.
+(def any_stop ((ms (list ModelEvent))) bool
+  (if (is_empty ms)
+      false
+      (match (head ms)
+        ((MStop r) true)
+        ((MError k m) true)
+        ((MText i t) (any_stop (tail ms)))
+        ((MToolStart i id n) (any_stop (tail ms)))
+        ((MToolInput i pj) (any_stop (tail ms)))
+        ((MBlockStop i) (any_stop (tail ms)))
+        ((MUsage a o w r) (any_stop (tail ms))))))
+
+; s with the answer coming marked stopped: what comes after is no more
+; of it, and its end ends nothing early.
+(def wire_stopped ((s Agentd)) Agentd
+  (match s
+    ((Agentd u chats next doing net conn)
+      (match doing
+        ((Idle) s)
+        ((Busy id nport l acts w r dl)
+          (match w
+            ((WireIdle) s)
+            ((WireOn code pieces sse st) (Agentd u chats next (Busy id nport l acts (WireOn code pieces sse true) r dl) net conn))))))))
 
 ; Each of ms told to the turn's loop.
 (def told_all ((s Agentd) (ms (list ModelEvent))) Agentd
   (if (is_empty ms) s (told_all (turn_told s (head ms)) (tail ms))))
 
-; The answer over, its status code and a refusal's body: a refusal, or
-; a stream that ended before its stop, fails the turn; otherwise what
-; was waiting for it goes on.
-(def wire_ended ((s Agentd) (code int) (body bytes)) Agentd
-  (match (turn_loop s)
-    ((None) s)
-    ((Some l)
-      (if (not (served code))
-          (turn_told s (failure (model_refusal code body)))
-          (if (loop_answering l)
-              (turn_told s (failure "the answer ended before it was done"))
-              (drive s))))))
+; The answer over, its status code, a refusal's body, and whether it
+; had stopped: a refusal, or a stream that ended before its stop, fails
+; the turn; otherwise what was waiting for it goes on.
+(def wire_ended ((s Agentd) (code int) (body bytes) (stopped bool)) Agentd
+  (if (not (served code))
+      (turn_told s (failure (model_refusal code body)))
+      (if stopped (drive s) (turn_told s (failure "the answer ended before it was done")))))
 
-; The connection lost, why: the turn fails if its answer was coming.
-(def wire_lost ((s Agentd) (why (list int))) Agentd
-  (match (turn_loop s)
-    ((None) s)
-    ((Some l) (if (loop_answering l) (turn_told s (failure (append "the proxy: " why))) (drive s)))))
+; The connection lost, why: the turn fails if its answer had not
+; stopped.
+(def wire_lost ((s Agentd) (why (list int)) (stopped bool)) Agentd
+  (if stopped (drive s) (turn_told s (failure (append "the proxy: " why)))))

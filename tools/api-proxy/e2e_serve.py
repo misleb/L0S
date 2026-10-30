@@ -3,7 +3,9 @@ front of it, for an e2e case that a board asks a model through: the
 stand-in, answering from CASE/script.json, on a free port of the
 loopback, with a key of its own; and the proxy on 127.0.0.1:PORT, which
 the board reaches as 10.0.2.2:PORT, taking the token in
-CASE/etc/agent/token and adding that key. Each request the stand-in gets
+CASE/etc/agent/token and adding that key. With CASE/checks.json, the
+stand-in checks each request as that says (standin.py's checked), and
+answers one that fails 400, saying why. Each request the stand-in gets
 and each usage line is written to standard output, which e2e.sh keeps
 in build/e2e/NAME.serve; the usage file is build/e2e/NAME.usage.jsonl.
 Runs until it is stopped. tests/e2e/ask's serve line runs it."""
@@ -29,7 +31,9 @@ async def run(port, case):
         print("e2e_serve: " + why, file=sys.stderr, flush=True)
         return 1
     say = lambda line: print(line, flush=True)  # noqa: E731
-    s = standin.Standin(standin.load_script(os.path.join(case, "script.json")), key=KEY, log=say)
+    checks_path = os.path.join(case, "checks.json")
+    checks = standin.load_script(checks_path) if os.path.exists(checks_path) else None
+    s = standin.Standin(standin.load_script(os.path.join(case, "script.json")), key=KEY, log=say, checks=checks)
     _, up_port = await standin.serve(s.app(), "127.0.0.1", 0)
     usage = os.path.join(HERE, "..", "..", "build", "e2e", name + ".usage.jsonl")
     if os.path.exists(usage):
