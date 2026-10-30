@@ -1,52 +1,125 @@
 ; font_test.l0 -- tests of font.l0: its requests answered, as far as
-; they go with no kernel and no /etc/fonts, and the stats it gives.
+; they go with no kernel and no /etc/fonts, strikes made a glyph a
+; turn, waiters that exit, and the stats it gives.
 
 ; Under an operating system there are no ports.
 (def test_no_port () int
   (check_int "fails" (font) 1))
 
 ; A service with no faces and no strikes.
-(def empty () Font (Font ((MapEmpty (list int) Ttf)) ((MapEmpty (list int) Cached)) 0))
+(def empty () Font (font_empty 3))
 
-; A service with strikes kept, made by hand.
-(def with_two () Font
-  (with_cached (with_cached (empty) "code 16" (Cached 4096 3 9224 (cons (Holder 5 8192) (cons (Holder 6 8192) (nil Holder)))))
-               "code 32" (Cached 16384 4 15328 (nil Holder))))
+; A request message from pid from, its reply port 0, which names none,
+; so answering it sends nothing.
+(def msg ((from int) (body (list int))) bytes
+  (match (message_new from (request 0 body)) ((Message f b) b) ((RecvFailed) (bytes_from_list ""))))
 
-(def answer ((s (Served Font))) (list int) (match s ((Served f r) r)))
+; The answer to body asked by pid from of s, "later" if it is to come.
+(def answer ((s Font) (from int) (body (list int))) (list int)
+  (match (requested s from (msg from body) (split_spaces body))
+    ((Turn f r) r)
+    ((TurnLater f) "later")))
+
+; A service keeping code 16, three pages at the start of an arena of
+; 128 at 4096, held by pid 6, which sees the arena at 8192.
+(def with_one () Font
+  (let st (store_shared (store_hold (store_put (store_arena_add (store_empty) 4096 128) "code 16" (Spot 0 0) 3 9224 true) "code 16" 6) 0 6 8192)
+    (with_store (empty) st)))
 
 ; It names the protocol's faces, read or not.
 (def test_faces () int
-  (check_str "faces" (answer (requested (empty) 5 (split_spaces "faces"))) "faces code code-bold sans sans-bold"))
+  (check_str "faces" (answer (empty) 5 "faces") "faces code code-bold sans sans-bold"))
 
+; A refusal names the strike it refuses.
 (def test_strike_refused () int
-  (add (check_str "no face" (answer (requested (empty) 5 (split_spaces "strike serif 16"))) "error: no face serif")
-       (check_str "not a height" (answer (requested (empty) 5 (split_spaces "strike code x"))) "error: not a height: x")))
+  (add (check_str "no face" (answer (empty) 5 "strike serif 16") "error: serif 16: no face serif")
+       (check_str "not a height" (answer (empty) 5 "strike code x") "error: code x: not a height: x")))
 
 ; A strike to make of a face whose font is not there: why, its path.
 (def test_strike_unread () int
   (check_true "not read"
-    (starts_with (answer (requested (empty) 5 (split_spaces "strike code 16"))) "error: /etc/fonts/SourceCodePro-Regular.ttf: ")))
+    (starts_with (answer (empty) 5 "strike code 16") "error: code 16: /etc/fonts/SourceCodePro-Regular.ttf: ")))
 
 (def test_no_such_request () int
-  (check_str "no request" (answer (requested (empty) 5 (split_spaces "draw"))) "error: no request draw"))
+  (check_str "no request" (answer (empty) 5 "draw") "error: no request draw"))
 
-; A strike already kept, asked again by a process given it: where that
-; process sees it, nothing made.
-(def test_shared_again () int
-  (check_str "the same pages" (answer (requested (with_two) 6 (split_spaces "strike code 16"))) "8192 3"))
+; A strike kept, asked again by a process given its arena: where that
+; process sees the arena, the strike's offset and pages, nothing made.
+(def test_given_again () int
+  (check_str "the same pages" (answer (with_one) 6 "strike code 16") "8192 128 0 3 code 16"))
 
 (def test_stats () int
-  (check_str "stats" (stats_text (with_two)) "builds 0\ncode 16 9224 2\ncode 32 15328 0"))
+  (check_str "stats" (stats_text (with_one)) "builds 0 pages 3 128\ncode 16 9224 1"))
 
 (def test_serving_line () int
   (check_str "line" (serving_line 6)
     "faces code code-bold sans sans-bold from /etc/fonts, 6 strikes stored, serving font"))
 
+; Source Sans 3, read from fonts/ as /etc/fonts would hold it.
+(def sans () Ttf
+  (match (read_whole "fonts/SourceSans3-Regular.ttf")
+    ((Err why) (Ttf (bytes_from_list "") 1000 false 0 0 0 0 0 0))
+    ((Ok b) (match (ttf_read b) ((Err why) (Ttf (bytes_from_list "") 1000 false 0 0 0 0 0 0)) ((Ok f) f)))))
+
+; A service with sans read, so a strike of it is made, not refused.
+(def with_sans () Font
+  (match (empty) ((Font fs st builds jobs port) (Font (map_put fs "sans" (sans)) st builds jobs port))))
+
+; A strike not kept is made: its asker answered later, and a second
+; asker waits for the same making.
+(def test_made_later () int
+  (match (requested (with_sans) 5 (msg 5 "strike sans 8") (split_spaces "strike sans 8"))
+    ((Turn f r) (fail_because "later" r))
+    ((TurnLater f)
+      (add (check_str "second" (answer f 6 "strike sans 8") "later")
+           (check_int "one job" (length (font_jobs f)) 1)))))
+
+; While a strike is being made, a kept one is answered at once.
+(def test_kept_meanwhile () int
+  (match (with_one)
+    ((Font fs st builds jobs port)
+      (let s (Font (map_put fs "sans" (sans)) st builds jobs port)
+        (match (requested s 5 (msg 5 "strike sans 8") (split_spaces "strike sans 8"))
+          ((Turn f r) (fail_because "later" r))
+          ((TurnLater f) (check_str "at once" (answer f 6 "strike code 16") "8192 128 0 3 code 16")))))))
+
+; s after n turns of making.
+(def turns ((s Font) (n int)) Font (if (le n 0) s (turns (job_turn s) (sub n 1))))
+
+; A strike is made a glyph a turn: 95 turns make its glyphs, the 96th
+; keeps it, which under no kernel fails, its asker told so, and counts
+; it made; nothing is kept for no one.
+(def test_made_by_turns () int
+  (match (requested (with_sans) 5 (msg 5 "strike sans 8") (split_spaces "strike sans 8"))
+    ((Turn f r) (fail_because "later" r))
+    ((TurnLater f)
+      (add (check_int "still making" (length (font_jobs (turns f 95))) 1)
+           (check_str "made" (stats_text (turns f 96)) "builds 1 pages 0 0")))))
+
+; Its only asker exits: the making is dropped.
+(def test_asker_exits () int
+  (match (requested (with_sans) 5 (msg 5 "strike sans 8") (split_spaces "strike sans 8"))
+    ((Turn f r) (fail_because "later" r))
+    ((TurnLater f) (check_int "no job" (length (font_jobs (font_exited f 5))) 0))))
+
+; One of two askers exits: the other still waits.
+(def test_one_asker_exits () int
+  (match (requested (with_sans) 5 (msg 5 "strike sans 8") (split_spaces "strike sans 8"))
+    ((Turn f r) (fail_because "later" r))
+    ((TurnLater f)
+      (match (requested f 6 (msg 6 "strike sans 8") (split_spaces "strike sans 8"))
+        ((Turn f2 r) (fail_because "later" r))
+        ((TurnLater f2) (check_int "the job" (length (font_jobs (font_exited f2 5))) 1))))))
+
+; The holder of a strike not stored exits, and it is let go.
+(def test_holder_exits () int
+  (let st (store_hold (store_put (store_arena_add (store_empty) 4096 128) "sans 24" (Spot 0 0) 3 12208 false) "sans 24" 6)
+    (check_str "stats" (stats_text (font_exited (with_store (empty) st) 6)) "builds 0 pages 0 128")))
+
 ; A face's font, once read, is kept: a second read reads no file.
 (def test_face_kept () int
   (let f (Ttf (bytes_from_list "") 1000 false 0 0 0 0 0 0)
-    (match (face_read (Font (map_put ((MapEmpty (list int) Ttf)) "sans" f) ((MapEmpty (list int) Cached)) 0) "sans")
+    (match (face_read (Font (map_put ((MapEmpty (list int) Ttf)) "sans" f) (store_empty) 0 (nil Job) 3) "sans")
       ((FaceUnread s why) (fail_because "read" why))
       ((FaceRead s g) (check_int "the font kept" (ttf_upm g) 1000)))))
 
@@ -56,7 +129,7 @@
 ; With no stored strikes there, as on this host, none is kept, and
 ; nothing counted as built.
 (def test_stored_none () int
-  (check_str "stats" (stats_text (stored_kept (empty) (stored))) "builds 0"))
+  (check_str "stats" (stats_text (stored_kept (empty) (stored))) "builds 0 pages 0 0"))
 
 ; The stored strikes: Source Code Pro and Source Sans 3, regular and
 ; bold, at scales 1 and 2's heights.

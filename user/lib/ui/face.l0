@@ -25,10 +25,12 @@
 (data UiCov (UiCov int int (array int)))
 
 ; A strike, one face at one line height, read in place: over the pages
-; the font service shared, or, as a host tool or a test has one, bytes;
-; or asked of font, at clock_ns T, its answer to come to the loop as a
-; reply (ui_face_asking), drawn as none until then.
-(data UiStrike (UiStrikeIn IoDevice) (UiStrikeBytes bytes) (UiStrikeAsked int))
+; the font service shared, the region over its arena, where the arena is
+; in this process, and the strike's offset in it, every strike of one
+; arena read through the same region; or, as a host tool or a test has
+; one, bytes; or asked of font, at clock_ns T, its answer to come to the
+; loop as a reply (ui_face_asking), drawn as none until then.
+(data UiStrike (UiStrikeIn IoDevice int int) (UiStrikeBytes bytes) (UiStrikeAsked int))
 
 ; A face: its scale, its tables by name, its icons' and the pointers',
 ; and its strikes by name, its glyphs'.
@@ -115,18 +117,41 @@
 (def ui_strikes_asked ((fp FontPort) (names (list (list int))) (said bool) (m (Map (list int) UiStrike))) (Map (list int) UiStrike)
   (if (is_empty names)
       m
-      (match (ui_strike_open (font_strike fp (ui_strike_face (head names)) (ui_strike_h (head names))))
+      (match (ui_strike_open m (font_strike fp (ui_strike_face (head names)) (ui_strike_h (head names))))
         ((Err why) (ui_strikes_asked fp (tail names) true (if said m (ui_no_text why m))))
         ((Ok k) (ui_strikes_asked fp (tail names) said (map_put m (head names) k))))))
 
-; A strike font gave, opened to read in place; or why not.
-(def ui_strike_open ((s FontStrike)) (Result UiStrike (list int))
+; A strike font gave, to read in place: through the region one of ks
+; already reads its arena through, or one opened over the arena; or why
+; not.
+(def ui_strike_open ((ks (Map (list int) UiStrike)) (s FontStrike)) (Result UiStrike (list int))
   (match s
     ((NoFontStrike why) ((Err UiStrike (list int)) why))
-    ((FontStrike va n)
-      (match (dma_open va n)
-        ((DeviceFailed fault why) ((Err UiStrike (list int)) why))
-        ((DeviceOpened r) ((Ok UiStrike (list int)) (UiStrikeIn r)))))))
+    ((FontStrike va n off m)
+      (match (ui_arena_region (map_values ks) va)
+        ((Some r) ((Ok UiStrike (list int)) (UiStrikeIn r va off)))
+        ((None)
+          (match (dma_open va n)
+            ((DeviceFailed fault why) ((Err UiStrike (list int)) why))
+            ((DeviceOpened r) ((Ok UiStrike (list int)) (UiStrikeIn r va off)))))))))
+
+; The region of the first of ks read through the arena at va, if one is.
+(def ui_arena_region ((ks (list UiStrike)) (va int)) (Option IoDevice)
+  (if (is_empty ks)
+      ((None IoDevice))
+      (match (head ks)
+        ((UiStrikeIn r at off) (if (eq at va) (Some r) (ui_arena_region (tail ks) va)))
+        ((UiStrikeBytes b) (ui_arena_region (tail ks) va))
+        ((UiStrikeAsked t) (ui_arena_region (tail ks) va)))))
+
+; How many regions ks are read through: one an arena.
+(def ui_strike_regions ((ks (list UiStrike)) (seen (list int))) int
+  (if (is_empty ks)
+      (length seen)
+      (match (head ks)
+        ((UiStrikeIn r va off) (ui_strike_regions (tail ks) (if (any_eq va seen) seen (cons va seen))))
+        ((UiStrikeBytes b) (ui_strike_regions (tail ks) seen))
+        ((UiStrikeAsked t) (ui_strike_regions (tail ks) seen)))))
 
 ; m, with why there is no text, or not all of it, said on standard error.
 (def ui_no_text ((why (list int)) (m (Map (list int) UiStrike))) (Map (list int) UiStrike)
@@ -138,7 +163,7 @@
 ; not.
 (def ui_strike_whole ((k UiStrike)) bool
   (match k
-    ((UiStrikeIn r) true)
+    ((UiStrikeIn r va off) true)
     ((UiStrikeBytes b) (strike_ok b))
     ((UiStrikeAsked t) false)))
 
@@ -171,7 +196,8 @@
           ((SendTooBig) (ui_strikes_sent port rport (tail names) (map_put ks n (UiStrikeBytes (bytes_from_list "")))))))))
 
 ; The strike f asked of font first of those it is still waiting for, by
-; name: font answers in order, so an answer is that one's; "" if none.
+; name, "" if none: what an answer that names no strike is taken to be
+; for.
 (def ui_face_oldest_ask ((f UiFace)) (list int)
   (match f ((UiFace s ts ks) (ui_oldest_ask (map_keys ks) ks "" -1))))
 
@@ -183,7 +209,7 @@
         ((Some k)
           (match k
             ((UiStrikeAsked t) (if (if (lt at 0) true (lt t at)) (ui_oldest_ask (tail names) ks (head names) t) (ui_oldest_ask (tail names) ks best at)))
-            ((UiStrikeIn r) (ui_oldest_ask (tail names) ks best at))
+            ((UiStrikeIn r va off) (ui_oldest_ask (tail names) ks best at))
             ((UiStrikeBytes b) (ui_oldest_ask (tail names) ks best at))))
         ((None) (ui_oldest_ask (tail names) ks best at)))))
 
@@ -191,19 +217,34 @@
 ; was to, "" for none.
 (data UiAnswered (UiAnswered UiFace (list int)))
 
-; f with font's answer, payload, to the oldest strike it asked for:
-; opened to read in place, or kept as none if font would not give it or
-; it cannot be opened, so its text is not drawn; and that strike's name,
-; "" if f asked for none.
+; f with font's answer, payload, to the strike it names, FACE H, if f
+; asked for that one, or else to the oldest it asked for: opened to read
+; in place, or kept as none if font would not give it or it cannot be
+; opened, so its text is not drawn; and that strike's name, "" if f
+; asked for none. font answers a strike once it is made, not in the
+; order asked, so the name is what tells the answers apart.
 (def ui_face_answered ((f UiFace) (payload (list int))) UiAnswered
-  (let name (ui_face_oldest_ask f)
+  (let name (ui_answer_name f payload)
     (if (is_empty name)
         (UiAnswered f "")
         (match f
           ((UiFace s ts ks)
-            (match (ui_strike_open (font_strike_of payload))
+            (match (ui_strike_open ks (font_strike_of payload))
               ((Err why) (UiAnswered (UiFace s ts (map_put ks name (UiStrikeBytes (bytes_from_list "")))) name))
               ((Ok k) (UiAnswered (UiFace s ts (map_put ks name k)) name))))))))
+
+; The name of the strike f asked for that answer payload is to: the one
+; it names, if f is waiting for it; else the oldest asked.
+(def ui_answer_name ((f UiFace) (payload (list int))) (list int)
+  (let key (font_reply_key payload)
+    (let named (if (is_empty key) "" (ui_glyph_table (up_to 32 key) (ui_strike_h_of key)))
+      (match (ui_face_strike f named)
+        ((Some k) (match k ((UiStrikeAsked t) named) ((UiStrikeIn r va off) (ui_face_oldest_ask f)) ((UiStrikeBytes b) (ui_face_oldest_ask f))))
+        ((None) (ui_face_oldest_ask f))))))
+
+; The height a key FACE H names, 0 for none.
+(def ui_strike_h_of ((key (list int))) int
+  (match (word_number (last (split_spaces key))) ((Some h) h) ((None) 0)))
 
 ; ks with each of names kept as no strike.
 (def ui_strikes_none_of ((names (list (list int))) (ks (Map (list int) UiStrike))) (Map (list int) UiStrike)
@@ -212,12 +253,12 @@
 ; A strike's u32 and u64 at off.
 (def ui_strike_u32 ((k UiStrike) (off int)) int
   (match k
-    ((UiStrikeIn r) (device_read32 r off))
+    ((UiStrikeIn r va at) (device_read32 r (add at off)))
     ((UiStrikeBytes b) (le_u32 b off))
     ((UiStrikeAsked t) 0)))
 (def ui_strike_u64 ((k UiStrike) (off int)) int
   (match k
-    ((UiStrikeIn r) (device_read64 r off))
+    ((UiStrikeIn r va at) (device_read64 r (add at off)))
     ((UiStrikeBytes b) (le_u64_at b off))
     ((UiStrikeAsked t) 0)))
 

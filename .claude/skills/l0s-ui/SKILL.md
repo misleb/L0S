@@ -456,7 +456,12 @@ way; buffers and painting are in the screen's.
   `glyph.FACE.H`, FACE `code`, `code-bold`, `sans` or `sans-bold`
   (`ui_font_face`), H = 16·text scale·s (16, 32, 64),
   each a `UiStrike` over the pages `font` shares, read in place, each
-  glyph its ink's box (`format/strike.l0`). Only `wm` adds `/etc/face`'s
+  glyph its ink's box (`format/strike.l0`): `UiStrikeIn REGION VA OFF`,
+  the region over the `font` arena at VA that holds it, opened once for
+  every strike in that arena, so strikes cost a region an arena, not a
+  strike (`ui_strike_regions`). `font` answers strikes as they are made,
+  not in the order asked, each answer naming its strike, which is how
+  `ui_face_answered` matches it. Only `wm` adds `/etc/face`'s
   `cursor` tables, at scale 2 (`ui_face_pointers`). A pixel is mixed with
   what is under it by its level (`ui_cov_put`); a missing strike or icon
   is not drawn (`ui_face_has_text`, and a window that cannot say so does

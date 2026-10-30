@@ -209,9 +209,13 @@ image, both of which fail, saying why. `virtio-blk_ro` has `disk` write to a rea
 driver refuses itself, having learnt it from the device, and
 `virtio-rng` has `random` ask the driver for 1024 bytes, 2048 hex digits
 of a line, which its `pattern` checks. `fonts` has `fonts` ask the font
-service for its faces and the twelve strikes the build made, which it keeps
-and has built none of, then for Source Sans 3 at 24 twice, from two
-processes, which it builds once and shares with both. `garbage`
+service for its faces and the twelve strikes the build made, which it keeps,
+in 80 of its first arena's 128 pages, held by none, and has built none
+of; then for Source Sans 3 at 24 twice from one process, which it builds
+once and lets go once that process has exited; then for Source Sans 3 at
+100 and Source Code Pro at 16 at once, the second answered first, while
+the first is made; a face it has not; and its stats again, the strike at
+100 let go too. `garbage`
 and `noinit` check that a boot without a valid archive or inittab is
 refused with a message. Every boot has a virtio-gpu, which no window
 shows, a virtio keyboard, a virtio tablet, and a virtio-rng unless the
@@ -470,7 +474,9 @@ through the x-height and the `m` of "my" 37, each where the sums of
 the advances and kerning put its pen; Back, then Source Code Pro's card,
 where the same `m` and `i` each ink only the cell of 32 that 14 and 18
 cells along put them in: the same width. It reads proportional text's
-pixels, as `launcher.sh` reads the top bar's.
+pixels, as `launcher.sh` reads the top bar's. Then `run fonts` at the
+serial line: Source Code Pro and Source Sans 3 at 12, made for Fonts,
+each held by one process, Fonts.
 
 [tests/responsive.sh](../tests/responsive.sh) boots the disks'
 initramfs on a disk whose data volume holds a folder of 400 files,
