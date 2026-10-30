@@ -80,18 +80,17 @@ clean at 1920×1080:
   are as they were, and `wm` still trims, which keeps the kernel's page
   records down. (Log: no window unshown at 4K; the CPU at its full 2.4
   GHz.)
-- [ ] The fit without flicker: a list must fit beside the one shown, so
+- [x] The fit without flicker: a list must fit beside the one shown, so
   while a big window is dragged off the screen's bottom edge beside
   others, lists alternate frame by frame between most of the screen
   left out and none of it. Leave out first the pieces that need line
   memory the list shown does not give them, the moving window's, not
   the lowest, or hold the list shown a frame more; tested on the host
-  with the alternation the board showed.
+  with the alternation the board showed. (Log: those left out first,
+  and a window's other buffer taking over the units of the one it
+  replaces; the fallback then only on resizes. A flash of the whole
+  screen remains now and then, not from the fallback: goal 0050.)
 - [ ] The board run of "Done when", at 4K and at 1920×1080.
-
-## Spec changes
-
-- display.md: the flicker gone from its Limits once step 7 is done.
 
 ## Log
 
@@ -209,3 +208,31 @@ clean at 1920×1080:
   fetch (goal 0050). The vt screen test assumed its vts were pids 17
   and 18; once in seven runs a brief process took 18, so it now reads
   them from `ps`.
+- 2026-10-29: step 7, on the Pi 5 at 3840×2160, scale 2, with each
+  list that left pieces out logged: its count, its planes, its units
+  beside the list shown's, and the pieces new to it. A full list took
+  700 to 750 of the 1,024 units, so one beside it had 250 to 300, in
+  pieces. Leaving out the lowest freed nothing, as the pieces still
+  there keep the list shown's units, and dropped the wallpaper and the
+  still windows before the dragged one; now those that need new units
+  go first. Still the screen flashed: the new pieces were the dragged
+  window's two, keyed anew every present, as a paced window gives its
+  other buffer each time (goal 0006), and needing about 110 units each
+  where none so many lay together. Such a piece now takes over the
+  units and handle of the one it replaces, if as many, as Linux keeps
+  a plane's over a page flip; then the fallback ran only on resizes, 5
+  times in a session. Keeping a handle's units for a plane of another
+  width, larger ones kept for one narrowed, blanked the whole screen
+  now and then, so a piece keeps or takes over units only of its own
+  size. A window dragged across the right edge changes width on the
+  screen, and so units, every frame; an experiment that did not cut
+  planes at the right edge, so their size held, made no clear
+  difference and fetches more, and was taken out. A whole-screen flash
+  of the background remains now and then with a few big windows, with
+  no list leaving pieces out and HANDLE_ERROR 0; STATUS's EMPTY bit and
+  the fetcher, fetch and list status words change every frame, so none
+  marks it: goal 0050. The kernel's pool, filled 128 frames at a time,
+  held an interrupt long enough on QEMU under load to reorder the e2e
+  case spawn's two processes (2 runs in 6 with every host CPU busy,
+  none with the pool off); 16 at a time, about 45 us on a Pi 5, none
+  in 10.

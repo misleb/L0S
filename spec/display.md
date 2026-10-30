@@ -475,20 +475,30 @@ of them could be confirmed from Linux's source:
   row 1920 wide takes 61 units and one 3840 wide 121, so a screen holds
   about 16 rows of 1920, or 8 of 3840: at 3840×2160 the desktop and the
   top bar take 242 units, and a window about W/8 for a width of W at
-  scale 2, its content and its frame. A screen past either is shown
-  without its lowest pieces, the wallpaper's first, left out one at a
-  time until the rest fit (`pieces.l0`'s `screen_fit`), so the pointer
-  and the windows on top go on, over the HVS's background where the
-  pieces left out were, which `hvs` sets to the wallpaper's corner's
-  color (its register holds 10 bits each of green, blue and red, from
-  bit 20 down); `hvs` says so once as it begins and once as it fits
-  again. Only a screen whose topmost piece alone cannot be one list is
-  refused. A list must fit beside the one shown, so while a big window
-  is dragged off the screen's bottom edge beside others, lists alternate
-  frame by frame between most of the screen left out, the background
-  below the top bar, and all of it: a flicker. Lines where many big
-  windows overlap can also show black as the HVS fails to fetch them in
-  time, which moves with the window that crowds them.
+  scale 2, its content and its frame. A list must fit beside the one
+  shown: a piece still there as wide keeps its units and handle, and a
+  piece new to the list takes over those of one the list shown has and
+  this one has not, if exactly as many, as a paced window's other buffer
+  does each present (Linux keeps a plane's UPM over a page flip); any
+  other takes free ones. Exactly: a handle's units kept for a plane of
+  another width blanked the whole screen now and then on a Pi 5. A
+  screen past either is shown without the pieces that need units the
+  list shown does not give them, the lowest first, and only if none
+  does without the lowest (`pieces.l0`'s `screen_fit`), so what is left
+  out for a frame is a window that has just changed size, not what was
+  there; the pointer and the windows on top go on, over the HVS's
+  background where the pieces left out were, which `hvs` sets to the
+  wallpaper's corner's color (its register holds 10 bits each of green,
+  blue and red, from bit 20 down); `hvs` says so once as it begins and
+  once as it fits again. Only a screen whose topmost piece alone cannot
+  be one list is refused. A window dragged across the screen's right or
+  left edge changes width on the screen as it goes, so with other big
+  windows open it may be left out a frame at a time. With a few big
+  windows the whole screen below the top bar still shows the background
+  now and then, for a frame, not from a list that left pieces out, no
+  HVS register saying why (goal 0050); and lines where many big windows
+  overlap can show black as the HVS fails to fetch them in time, which
+  moves with the window that crowds them.
   Resizing windows at 4K still brings gaps of 100 to 170 ms with no end
   of frame now and then, the HVS making frames meanwhile: the kernel's
   calls that allocate, share and give up a window's buffers of 8,000
