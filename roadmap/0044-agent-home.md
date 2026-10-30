@@ -17,7 +17,9 @@ it makes has to be seen and undone.
 
 ## Done when
 
-- The home's layout is fixed on the card, and `agentd` reads it in at
+- The home's layout is fixed in `/Volumes/data/agent` (0043's), on a
+  data volume so that it outlives a reinstall of the system volume,
+  and `agentd` reads it in at
   the start of every conversation: rules and the memory index whole,
   skills by their descriptions, the rest on demand.
 - A part of it the agent cannot change (its constitution, and the rules
@@ -37,8 +39,12 @@ differences, or a small git; the backup's way off the board (through
 ## Spec changes
 
 - agent.md: the home, its layout, what is fixed and its history.
-- storage.md: where on the card the home is, if a volume of its own.
+- storage.md: the home on the `data` volume, apart from the system's,
+  which a reinstall leaves as it was.
 
 ## Log
 
 - 2026-10-29: written, with 0041 to 0043 and 0045 to 0049.
+- 2026-10-29: the home's place settled in 0043: `/Volumes/data/agent`,
+  a data volume, so the agent's files outlive a reinstall; its rules
+  are the home's `CLAUDE.md` from 0043 on, which this goal grows.

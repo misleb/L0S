@@ -1,6 +1,6 @@
 # 0043: `agentd`, an agent's loop and its tools on L0S
 
-Track: Agent · Status: blocked · Needs: 0042, 0051 · Spec: agent.md (new), programs.md, demo.md, testing.md
+Track: Agent · Status: blocked · Needs: 0042 · Spec: agent.md (new), programs.md, demo.md, testing.md
 
 ## Why
 
@@ -12,12 +12,12 @@ Node. What makes an agent is small, and is written here in L0:
 
 - the loop: send the conversation and the tools, run each tool the
   answer asks for, send the results back, until the answer is done;
-- the context: the personality read in at the start (0044), prompt
-  caching so that it is not paid for on every turn, and the
-  conversation compacted when it grows long;
+- the context: its rules read in at the start (0044 grows them into a
+  personality), prompt caching so that they are not paid for on every
+  turn, and the conversation compacted when it grows long;
 - the tools, each a request to a server L0S already has: read, write,
-  list and make directories in the agent's home, run a program and
-  read what it wrote, a line at `sh`.
+  list and make directories, run a program and read what it wrote, a
+  line at `sh`.
 
 The model is Anthropic's, through 0042's proxy and its `model.l0`,
 which keeps the provider behind one interface. Running a model on the
@@ -27,17 +27,24 @@ What it is, as decided with the user:
 
 - **It only answers.** It acts when someone talks to it and at no other
   time; waking on its own, and what it did while no one watched, are
-  [0052](0052-agent-on-its-own.md)'s.
+  [0051](0051-agent-on-its-own.md)'s.
 - **The console talks to it**, `run agent` at a shell. The desktop is
   0049's; the network later.
-- **Nothing asks the person's yes.** Every tool runs freely, and safety
-  is confinement: the file tools reach only the agent's home,
-  `/home/agent`, and every program it runs is started confined to that
-  home ([0051](0051-confined-process.md)), from `/bin` or
-  `/Applications` (none of `/sbin`'s servers), with no `dev` line, no
-  port of `agentd`'s and no server's, its current directory the home.
-  Without 0051 a program it ran could open any file and ask any
-  server, which is why it is a Need.
+- **Its limits are soft.** Nothing asks the person's yes, and nothing
+  is enforced: the file tools take any path, and `run` and `sh` start
+  programs as a shell would. The board is dedicated to the agent, and
+  the worst it can do there is make the installed system unbootable,
+  which a reinstall fixes. What it should and should not do is said in
+  its rules, which the system prompt carries: keep its files in its
+  home, leave the system's alone, and the rest the person writes there.
+- **Its home is on a data volume, `/Volumes/data/agent`**, not on `/`.
+  The home keeps the agent's files apart from the system's, so that
+  they outlive a reinstall: `install VOLUME` writes only onto the
+  system volume it is given (and copies nothing of `/Volumes`), and a
+  reinstall formats that volume, so anything on `/` would go, while
+  another volume is left as it was. A Pi 5's card has a `data`
+  partition beside `bootfs` and `System` for it; `make sysdisk`'s disk
+  has one already.
 
 ## Done when
 
@@ -47,8 +54,11 @@ What it is, as decided with the user:
 - `run agent` talks to it from a shell, on QEMU and on a Pi 5, through
   the proxy to the real API.
 - Its tools are `read_file`, `write_file`, `list_dir`, `make_dir`,
-  `run` and `sh`. The file tools reach only its home; `run` and `sh`
-  start programs confined to it.
+  `run` and `sh`. A relative path is from its home; a program's output
+  is kept up to 64 KB, and one that runs too long is ended.
+- Its rules are its home's `CLAUDE.md`, made from a default at its
+  first start and read into the system prompt at the start of every
+  conversation.
 - The system prompt and tools are cached (`cache_control`), and a
   conversation past a configured size is compacted: the model
   summarizes the older turns, and the summary and the recent turns are
@@ -75,15 +85,15 @@ What it is, as decided with the user:
   the model's, and a `Conv`, the turns, newest first, and the last
   answer's usage. `conv_messages c`, the turns as the API's `messages`
   (`Json`), oldest first, with `cache_control: {"type": "ephemeral"}`
-  on the last block of the last turn; `conv_system text`, the system
-  prompt as one block with `cache_control`; and the tools' definitions
-  with `cache_control` on the last, so the prompt and tools are cached
-  and each turn reads the conversation so far from the cache. The
-  system prompt is built in: where it is (L0S, on what board), its home,
-  its tools, and that it answers at a console; 0044 reads its
-  personality from the home in its place. Tests: a conversation of a
-  text, a tool use and its result as JSON, compared as text; the
-  breakpoints where they should be, three at most with the system's.
+  on the last block of the last turn; `conv_system base rules`, the
+  system prompt as one block with `cache_control`: a built-in part
+  (where it is, L0S on what board; its home; its tools; that it
+  answers at a console) and its rules after; and the tools'
+  definitions with `cache_control` on the last, so the prompt and
+  tools are cached and each turn reads the conversation so far from
+  the cache. Tests: a conversation of a text, a tool use and its
+  result as JSON, compared as text; the breakpoints where they should
+  be, three at most with the system's.
 - [ ] **The loop.** `user/sbin/agentd/loop.l0`, pure: `(data Loop
   ...)`, the conversation, the answer being built from `ModelEvent`s
   (each block by its index: text appended, a tool's input's
@@ -104,68 +114,73 @@ What it is, as decided with the user:
   in order; a tool's input in pieces cut mid-string; a round that asks
   again and then ends; the round limit; an error event; a result that
   failed.
-- [ ] **The file tools.** `user/sbin/agentd/tools.l0`: the agent's
-  home from the configuration (`home PATH`, `/home/agent` if none), and
-  `home_path home p`, the absolute path p names from the home (as
-  `path_resolve` makes it, a relative path from the home), or none if
-  it is not the home or under it, is over 1024 bytes or holds a NUL.
-  `read_file {path}` (its text, at most 64 KB, saying so if cut),
-  `write_file {path, content}` (the file written anew; its directory
-  must be there), `list_dir {path}` (a line `NAME SIZE` each, a
-  directory's with a `/`, from `fs_list`), `make_dir {path}`
-  (`fs_mkdir`). Each answers a text, or a failure the model reads; each
-  definition's `input_schema` is JSON Schema. Tests: `home_path` on
-  `..` out of the home, an absolute path outside, `/home/agentx`, the
-  home itself; read and write in a directory under `build/` on this
-  host, as `l0 test` has files; a file over 64 KB cut; the definitions'
-  JSON compared as text; under `l0 test` `list_dir` and `make_dir`
-  fail and say so, as there is no `fs`.
+- [ ] **The file tools.** `user/sbin/agentd/tools.l0`: the home from
+  the configuration (`home PATH`, `/Volumes/data/agent` if none), and
+  `tool_path home p`, the absolute path p names, a relative one from
+  the home (`path_resolve`); any path is taken. `read_file {path}` (its
+  text, at most 64 KB, saying so if cut), `write_file {path, content}`
+  (the file written anew; its directory must be there), `list_dir
+  {path}` (a line `NAME SIZE` each, a directory's with a `/`, from
+  `fs_list`), `make_dir {path}` (`fs_mkdir`). Each answers a text, or a
+  failure the model reads; each definition's `input_schema` is JSON
+  Schema, its description saying a relative path is from the home.
+  Tests: `tool_path` on a relative path, `..`, an absolute path; read
+  and write in a directory under `build/` on this host, as `l0 test`
+  has files; a file over 64 KB cut; the definitions' JSON compared as
+  text; under `l0 test` `list_dir` and `make_dir` fail and say so, as
+  there is no `fs`.
 - [ ] **Running programs.** In tools.l0, `run {program, args}` and `sh
-  {command}`: the program found by name in `/bin` or `/Applications`
-  only (`program_found`, then refused if its path is not under one of
-  them, so no `/sbin/fs` and no path elsewhere); `sh` is `/bin/sh -c
-  COMMAND`. It is started with `spawn_path_confined` (0051), confined
-  to the home, its terminal a port `agentd` makes for it: `agentd`
-  answers that port as a terminal (`tty.l0`'s protocol), its `r` with
+  {command}`: the program found as the shell's `run` finds it
+  (`program_found`), `sh` being `/bin/sh -c COMMAND`, and started with
+  `spawn_path`, its current directory the home (`agentd` is in it), its
+  terminal a port `agentd` makes for it: `agentd` sets that port as
+  its terminal (`tty_set`) for the spawn and sets its own back after,
+  and answers it as a terminal (`tty.l0`'s protocol), its `r` with
   input's end at once, its `p` and `i`, and keeps what it writes, 64 KB
   at most, saying how much more was dropped. The program's exit comes
   by `proc_watch`; one still running after `run_timeout` seconds (the
-  configuration's, 60 if none) is killed with `proc_kill`, which 0051
-  lets `agentd` do, as it is not confined, and the result says so. The
-  result is `exit N`, then what it wrote. A `(data Run ...)` keeps the
-  pid, its terminal port, the output and the deadline, pure: `run_heard
-  r m` on what came to the terminal port or the watch, tested on
-  messages built with `message_new` (a write, two writes, an `r`, the
-  exit notice, output past 64 KB). Under `l0 test` spawning fails, and
-  the tool says so.
+  configuration's, 60 if none) is ended with `proc_kill`, and the
+  result says so. The result is `exit N`, then what it wrote. A `(data
+  Run ...)` keeps the pid, its terminal port, the output and the
+  deadline, pure: `run_heard r m` on what came to the terminal port or
+  the watch, tested on messages built with `message_new` (a write, two
+  writes, an `r`, the exit notice, output past 64 KB). Under `l0 test`
+  spawning fails, and the tool says so.
 - [ ] **`agentd`, the server.** `user/sbin/agentd/agentd.l0` and
   `main.l0`; `LIBS_agentd` is `MODEL`, `PATHS` and `AGENTLIB`. It reads
   `/etc/agent/config` (0042's, and its own keys: `home`, `compact`,
   `keep`, `run_timeout`) and `/etc/agent/token`; with neither it says
-  so in the log and exits 0, as a driver with no device does. It makes
-  its home if it is not there (`fs_mkdir`, each missing directory of
-  the path), registers `agent`, and waits on its port, the HTTP
-  connection's notice port and a running program's terminal and watch
-  ports, with `port_receive_set` (0031). The protocol, in
-  [proto/agent.l0](../user/lib/proto/agent.l0) (`AGENTLIB`), each a
-  request: `open NPORT` → `conv ID`, a conversation whose notices go
-  to NPORT; `say ID` and a newline and the text → `ok`, or `error:
-  busy` while it answers; `stop ID` → `ok`, the turn ended (the HTTP
-  connection reset, a program running killed) with `done stopped`;
-  `close ID` → `ok`. The notices, to NPORT: `agent ID text` and a
-  newline and a piece of the answer (at most 4000 bytes a notice);
-  `agent ID tool NAME` and a newline and its input (cut to 1 KB);
-  `agent ID result NAME ok|failed` and a newline and the start of what
-  it gave (1 KB); `agent ID compacted BEFORE AFTER` (tokens); `agent ID
-  done REASON`; `agent ID error` and a newline and why. One turn runs
-  at a time, of any conversation; conversations live as long as
-  `agentd`, which 0044 keeps. Each answer's usage is a debug line in
-  the log. `agent.l0`'s client: `agent_open`, `agent_say`,
-  `agent_stop`, `agent_close`, `agent_event_of` (an `AgentEvent`, read
-  in place); host tests of the requests and every notice's round trip.
-  agentd_test: its configuration read, the entry point's 1 under
-  `l0 test` (no kernel). `demo/etc/system` and `pi5/etc/system` start
-  `/sbin/agentd` last; demo.md's pids and table of who talks to whom.
+  so in the log and exits 0, as a driver with no device does. It waits
+  for the home's volume (`/Volumes/data` by default) as `boot` waits
+  for `fs`, and with none after 10 s says so and exits 1. It makes the
+  home if it is not there (`fs_mkdir`), and its `CLAUDE.md` from
+  `/etc/agent/CLAUDE.md`, the default rules L0S ships
+  (`demo/etc/agent/CLAUDE.md`, `pi5/etc/agent/CLAUDE.md`): keep your
+  files in your home, leave `/`'s alone, never format or partition a
+  disk, say what you ran. It then registers `agent` and waits on its
+  port, the HTTP connection's notice port and a running program's
+  terminal and watch ports, with `port_receive_set` (0031). Each
+  conversation reads `CLAUDE.md` afresh, so a change to it holds from
+  the next. The protocol, in [proto/agent.l0](../user/lib/proto/agent.l0)
+  (`AGENTLIB`), each a request: `open NPORT` → `conv ID`, a
+  conversation whose notices go to NPORT; `say ID` and a newline and
+  the text → `ok`, or `error: busy` while it answers; `stop ID` →
+  `ok`, the turn ended (the HTTP connection reset, a program running
+  ended) with `done stopped`; `close ID` → `ok`. The notices, to
+  NPORT: `agent ID text` and a newline and a piece of the answer (at
+  most 4000 bytes a notice); `agent ID tool NAME` and a newline and its
+  input (cut to 1 KB); `agent ID result NAME ok|failed` and a newline
+  and the start of what it gave (1 KB); `agent ID compacted BEFORE
+  AFTER` (tokens); `agent ID done REASON`; `agent ID error` and a
+  newline and why. One turn runs at a time, of any conversation;
+  conversations live as long as `agentd`, which 0044 keeps. Each
+  answer's usage is a debug line in the log. `agent.l0`'s client:
+  `agent_open`, `agent_say`, `agent_stop`, `agent_close`,
+  `agent_event_of` (an `AgentEvent`, read in place); host tests of the
+  requests and every notice's round trip. agentd_test: its
+  configuration read, the entry point's 1 under `l0 test` (no kernel).
+  `demo/etc/system` and `pi5/etc/system` start `/sbin/agentd` last;
+  demo.md's pids and table of who talks to whom.
 - [ ] **`agent`, at the console.** `user/bin/agent`: `run agent` opens
   a conversation, writes `> ` and reads a line, says it, and writes the
   notices as they come until `done`: text as it is, a tool as `[NAME
@@ -176,22 +191,23 @@ What it is, as decided with the user:
   and exits 0. No `agentd` is "the agent is not running (no
   /etc/agent/config?)". The notices' text is a pure function, tested.
   programs.md's `agent` and `agentd` rows; agent.md, new: `agentd`, its
-  protocol, its tools and their confinement, `agent`.
+  home and rules, its protocol, its tools, `agent`.
 - [ ] **The e2e case.** The stand-in of 0042 runs a script whose
   answers ask for tools, and checks each request: the `tool_result`s
-  answer the last answer's `tool_use` ids, in order, and the
-  `cache_control` breakpoints are there; a request that fails a check
-  is answered 400 with why, which the case would show. The case
-  `agent`: a disk; `net` user; `serve` `e2e_serve.py` with
-  `tests/e2e/agent/script.json`; `etc/agent/config` with `api
-  10.0.2.2:@PORT@` and `home /Volumes/data/agent`, the token, and an
-  inittab starting `agentd` after `fs` and `inet`. `typed`: `run
-  agent`, one line, to which the script answers with `make_dir notes`,
-  `write_file notes/today.txt`, `list_dir notes`, `run hello`, `sh
-  "cat notes/today.txt"` and `read_file /etc/motd` (refused: outside
-  the home), then a text; then `/exit`, and outside it `cat
-  /Volumes/data/agent/notes/today.txt`. `expected` follows. testing.md's
-  case.
+  answer the last answer's `tool_use` ids, in order, the
+  `cache_control` breakpoints are there, and the system prompt holds
+  the home's `CLAUDE.md`; a request that fails a check is answered 400
+  with why, which the case would show. The case `agent`: a disk, whose
+  `data` volume holds the home; `net` user; `serve` `e2e_serve.py`
+  with `tests/e2e/agent/script.json`; `etc/agent/config` with `api
+  10.0.2.2:@PORT@`, the token, the default `CLAUDE.md`, and an inittab
+  starting `agentd` after `fs` and `inet`. `typed`: `run agent`, one
+  line, to which the script answers with `make_dir notes`, `write_file
+  notes/today.txt`, `list_dir notes`, `run hello`, `sh "cat
+  notes/today.txt"` and `read_file /etc/motd`, then a text; then
+  `/exit`, and outside it `cat /Volumes/data/agent/notes/today.txt` and
+  `ls /Volumes/data/agent`, which shows `CLAUDE.md` made. `expected`
+  follows. testing.md's case.
 - [ ] **Compaction.** In conv.l0 and loop.l0: once an answer's usage
   (input, cache written and cache read) passes `compact` tokens (the
   configuration's, 100000 if none), before the next turn is sent the
@@ -206,21 +222,25 @@ What it is, as decided with the user:
   its result; a summary request that fails leaves the conversation as
   it was and says so. agent.md: compaction.
 - [ ] **On QEMU and a Pi 5, with the real API** (the user): `make
-  proxy-run`, then `run agent` on `make demo NET=user` with `make
-  agent-etc API=10.0.2.2:8765` and a system volume (`make
-  demo-system`), so the home is on `/`; and on a Pi 5 through the
-  proxy on the host's LAN address, as 0042's last step. A conversation
-  that makes a file in its home, runs a program and a line at `sh`,
-  and is refused outside the home. Logged when done, with its usage and
-  cost from the proxy's `--day`.
+  proxy-run`, then `run agent` on `make demo-system NET=user` with
+  `make agent-etc API=10.0.2.2:8765`, the home on the disk's `data`;
+  and on a Pi 5 through the proxy on the host's LAN address, as 0042's
+  last step, its card given a `data` partition (`partition`, `mkfs
+  UUID data`, or Disks) beside `bootfs` and `System`. A conversation
+  that makes a file in its home, runs a program and a line at `sh`;
+  then `System` reinstalled from a netboot's initramfs (`format
+  System`, `install System`, `/etc/agent` with it) and the home found
+  as it was. Logged when done, with its usage and cost
+  from the proxy's `--day`.
 
 ## Spec changes
 
-- agent.md (new): `agentd`, its configuration, its protocol and
-  notices, its tools and their confinement (0051), prompt caching,
-  compaction, and `agent`; Limits: one turn at a time, conversations
-  kept only while `agentd` runs (until 0044), a program's output cut
-  at 64 KB, the round limit, no person's yes for anything.
+- agent.md (new): `agentd`, its configuration, its home on a data
+  volume and why, its rules (`CLAUDE.md`), its protocol and notices,
+  its tools, prompt caching, compaction, and `agent`; Limits: its
+  limits are its rules only, nothing enforced; one turn at a time;
+  conversations kept only while `agentd` runs (until 0044); a
+  program's output cut at 64 KB; the round limit.
 - programs.md: `agentd`, `agent`, `sh -c`, and `proto/agent.l0`.
 - demo.md: `agentd`'s pid, and who it talks to (`inet`, `fs`, the
   programs it starts).
@@ -230,14 +250,16 @@ What it is, as decided with the user:
 
 - 2026-10-29: written, with 0041, 0042 and 0044 to 0049.
 - 2026-10-29: steps written, the open questions settled with the user:
-  it only answers (acting on its own is 0052, a new idea); the console
-  talks to it; nothing asks the person's yes, and confinement is the
-  safety: file tools only in `/home/agent`, programs from `/bin` and
-  `/Applications` started confined to it. L0S could not confine a
-  program, so that is 0051, a Need. The home is a path in
-  `/etc/agent/config`, `/home/agent` by default, on `/` once it is a
-  system volume, and made by `agentd` at its first start; a board
-  booted from the initramfs alone, whose `/` cannot be written, names a
-  volume's (the e2e case's is `/Volumes/data/agent`). Compaction is by
-  the model's summary of the older turns. The goal stays active until
-  its last step has run on a Pi 5 as well as on QEMU.
+  it only answers (acting on its own is 0051, a new idea); the console
+  talks to it; nothing asks the person's yes. Compaction is by the
+  model's summary of the older turns. The goal stays active until its
+  last step has run on a Pi 5 as well as on QEMU.
+- 2026-10-29: no confinement, the user's call: the limits on the agent
+  are soft, its rules in the system prompt, since the board is
+  dedicated to it and the worst it can do is make the installed system
+  unbootable, which a reinstall fixes. A kernel goal that would have
+  confined its programs to the home was written and dropped the same
+  day. The home is `/Volumes/data/agent`, on a data volume, so that the
+  agent's files outlive a reinstall of `System`, which `install`
+  writes and a reinstall formats; its rules are the home's
+  `CLAUDE.md`, as 0044's layout has them, made from L0S's default.
