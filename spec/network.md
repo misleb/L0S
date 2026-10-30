@@ -275,6 +275,24 @@ closes, which `http_closed` ends, refusing any other body cut short;
 reader reads the next response from what follows, so two may come back
 to back. `http_header` finds a header ignoring case.
 
+**The client**, in [httpc.l0](../user/lib/proto/httpc.l0), is those
+messages over `inet`'s TCP. An `HttpConn` is the stack, the client's
+port its connection's notices come to, the connection, its host and the
+reader of its responses. `http_connect n np host port` resolves the host
+and opens a connection, waiting up to 30 seconds for `up` (with
+`alarm_at` on the notice port); `http_send c req` writes a request's
+bytes with `tcp_write_bytes`, and `http_ask c method path headers body`
+makes the request for the connection's host first. A program that waits
+on several ports gives each message that comes to the notice port to
+`http_feed c b`, which reads it in place, `TcpDataAt`, into the parts of
+a response and sends nothing; one that waits on nothing else calls
+`http_next c deadline`, which receives there until parts come or the
+deadline passes. The server's `fin` ends a body that runs to the close;
+the connection's end in the middle of a response is `HttpFailed WHY`. A
+connection whose response ended with `keep` takes the next request, and
+`http_reuse c` opens one the server closed again; `http_close` finishes
+it.
+
 ## The network on the Raspberry Pi 5
 
 ```

@@ -1,0 +1,215 @@
+; httpc.l0 -- an HTTP/1.1 client over inet's TCP: a connection to a
+; server, requests written to it as bytes, paced by inet's room
+; (tcp_write_bytes), and its responses read as their pieces come
+; (format/http.l0's HttpRead), into parts: the head, the body's pieces,
+; the end. A connection the end says may be kept takes the next request;
+; one the server closed is opened again by http_reuse.
+;
+; The connection's notices come to a port of the client's, np. A program
+; that waits on nothing else calls http_next, which receives there until
+; parts come or a deadline passes. One that waits on several ports, with
+; port_receive_set, gives each message that comes to np to http_feed,
+; which sends nothing. Linked with INETLIB and format/http.l0, as the
+; Makefile's HTTP.
+
+; A connection: the stack, the port its notices come to, its number in
+; inet, the host's name as the request's Host says it, its address and
+; port, the reader of its responses, and its state (http_state_*).
+(data HttpConn (HttpConn Inet int int (list int) int int HttpRead int))
+
+; What a connection's notices or a request's writing gave: the connection
+; after them, and the parts of its responses, in order.
+(data HttpGot (HttpGot HttpConn (list HttpPart)))
+
+; A connection's states: being opened; open; the server will send no
+; more; gone.
+(def http_opening () int 0)
+(def http_open () int 1)
+(def http_finished () int 2)
+(def http_gone () int 3)
+
+; How long http_connect waits for a connection to open.
+(def http_connect_ns () int 30000000000)
+
+; ---------------------------------------------------------------- the parts
+
+; A connection's stack, notice port, number, Host, address, port, reader
+; and state.
+(def hc_inet ((c HttpConn)) Inet (match c ((HttpConn n np id host addr port r st) n)))
+(def hc_np ((c HttpConn)) int (match c ((HttpConn n np id host addr port r st) np)))
+(def hc_id ((c HttpConn)) int (match c ((HttpConn n np id host addr port r st) id)))
+(def hc_host ((c HttpConn)) (list int) (match c ((HttpConn n np id host addr port r st) host)))
+(def hc_reader ((c HttpConn)) HttpRead (match c ((HttpConn n np id host addr port r st) r)))
+(def hc_state ((c HttpConn)) int (match c ((HttpConn n np id host addr port r st) st)))
+
+; c with another reader, and in another state.
+(def hc_with_reader ((c HttpConn) (r HttpRead)) HttpConn
+  (match c ((HttpConn n np id host addr port old st) (HttpConn n np id host addr port r st))))
+(def hc_with_state ((c HttpConn) (s int)) HttpConn
+  (match c ((HttpConn n np id host addr port r old) (HttpConn n np id host addr port r s))))
+
+; The Host a request to host at port names: the name, and the port
+; unless it is 80.
+(def http_host_text ((host (list int)) (port int)) (list int)
+  (if (eq port 80) host (append host (cons 58 (digits port)))))
+
+; ----------------------------------------------------------------- opening
+
+; A connection to port at host, a name or an address, resolved first,
+; its notices to np, which must be this process's: once it is up, or why
+; it is not.
+(def http_connect ((n Inet) (np int) (host (list int)) (port int)) (Result HttpConn (list int))
+  (match (inet_resolve n host)
+    ((Err why) ((Err HttpConn (list int)) why))
+    ((Ok addr) (http_open_at n np (http_host_text host port) addr port))))
+
+; A connection opened to port at addr, named host, and waited for.
+(def http_open_at ((n Inet) (np int) (host (list int)) (addr int) (port int)) (Result HttpConn (list int))
+  (match (tcp_connect n np addr port)
+    ((Err why) ((Err HttpConn (list int)) why))
+    ((Ok id)
+      (http_wait_up (HttpConn n np id host addr port (http_read_new "GET") (http_opening)) (add (clock_ns) (http_connect_ns))))))
+
+; c once its up notice comes, before deadline; its closed notice, or the
+; deadline passing, is why not.
+(def http_wait_up ((c HttpConn) (deadline int)) (Result HttpConn (list int))
+  (let z (alarm_at (hc_np c) deadline)
+    (match (port_receive (hc_np c))
+      ((RecvFailed) ((Err HttpConn (list int)) "no notices came from inet"))
+      ((Message from b)
+        (match (tcp_event_in b)
+          ((None)
+            (if (ge (clock_ns) deadline)
+                (let r (tcp_reset (hc_inet c) (hc_id c)) ((Err HttpConn (list int)) "the server did not answer"))
+                (http_wait_up c deadline)))
+          ((Some e) (http_wait_heard c e deadline)))))))
+
+; What notice e means to c, which waits to be up.
+(def http_wait_heard ((c HttpConn) (e TcpEvent) (deadline int)) (Result HttpConn (list int))
+  (match e
+    ((TcpUp i) (if (eq i (hc_id c)) ((Ok HttpConn (list int)) (hc_with_state c (http_open))) (http_wait_up c deadline)))
+    ((TcpClosed i why) (if (eq i (hc_id c)) ((Err HttpConn (list int)) (append "the connection " why)) (http_wait_up c deadline)))
+    ((TcpAccepted i src sp lp) (http_wait_up c deadline))
+    ((TcpData i d) (http_wait_up c deadline))
+    ((TcpDataAt i at) (http_wait_up c deadline))
+    ((TcpFin i) (http_wait_up c deadline))
+    ((TcpRoom i k) (http_wait_up c deadline))))
+
+; c, if it may take another request; and otherwise a new connection to
+; the same server, the old one given up.
+(def http_reuse ((c HttpConn)) (Result HttpConn (list int))
+  (if (if (eq (hc_state c) (http_open)) (http_idle (hc_reader c)) false)
+      ((Ok HttpConn (list int)) c)
+      (match c
+        ((HttpConn n np id host addr port r st)
+          (let z (if (eq st (http_gone)) "" (tcp_reset n id))
+            (http_open_at n np host addr port))))))
+
+; c closed: told to inet, which finishes it once its data is sent: empty,
+; or why not.
+(def http_close ((c HttpConn)) (list int)
+  (if (eq (hc_state c) (http_gone)) "" (tcp_finish (hc_inet c) (hc_id c))))
+
+; ----------------------------------------------------------------- sending
+
+; The request req, a request's bytes (http_request), written to c, whose
+; response is not to a HEAD; and what notices came while it was written,
+; as parts. A connection that cannot take it is a part HttpFailed.
+(def http_send ((c HttpConn) (req bytes)) HttpGot
+  (http_send_as c "GET" req))
+
+; The same, for a request of method, which the reader is told.
+(def http_send_as ((c HttpConn) (method (list int)) (req bytes)) HttpGot
+  (if (not (eq (hc_state c) (http_open)))
+      (HttpGot c (cons (HttpFailed "the connection is not open") (nil HttpPart)))
+      (let c2 (hc_with_reader c (http_expect (hc_reader c) method))
+        (match (tcp_write_bytes (hc_inet c2) (hc_np c2) (hc_id c2) req 0 (bytes_len req))
+          ((TcpWrote kept why)
+            (match (http_feed_all c2 kept (nil HttpPart))
+              ((HttpGot c3 rparts) (http_sent c3 (rev rparts) why))))))))
+
+; c after a request was written, with the parts that came meanwhile, and
+; why the writing stopped short, if it did.
+(def http_sent ((c HttpConn) (parts (list HttpPart)) (why (list int))) HttpGot
+  (if (is_empty why)
+      (HttpGot c parts)
+      (HttpGot (hc_with_state c (http_gone)) (append parts (cons (HttpFailed why) (nil HttpPart))))))
+
+; Each of the messages ms fed to c in turn, the parts reversed onto acc.
+(def http_feed_all ((c HttpConn) (ms (list bytes)) (acc (list HttpPart))) HttpGot
+  (if (is_empty ms)
+      (HttpGot c acc)
+      (match (http_feed c (head ms))
+        ((HttpGot c2 ps) (http_feed_all c2 (tail ms) (rev_onto ps acc))))))
+
+; A request of method for path, with headers and body, to c's host,
+; written to c.
+(def http_ask ((c HttpConn) (method (list int)) (path (list int)) (headers (list HttpHeader)) (body bytes)) HttpGot
+  (http_send_as c method (http_request method (hc_host c) path headers body)))
+
+; ----------------------------------------------------------------- reading
+
+; A message that came to c's notice port, its bytes b as received: the
+; connection after it, and the parts of a response it gave. Data is read
+; in place; the server's end ends a body that runs to it; the
+; connection's end in the middle of a response is HttpFailed. Anything
+; that is not c's is passed over. Nothing is sent.
+(def http_feed ((c HttpConn) (b bytes)) HttpGot
+  (match (tcp_event_in b)
+    ((None) (HttpGot c (nil HttpPart)))
+    ((Some e)
+      (if (not (eq (http_event_id e) (hc_id c)))
+          (HttpGot c (nil HttpPart))
+          (http_feed_event c e b)))))
+
+; The connection a notice is of.
+(def http_event_id ((e TcpEvent)) int
+  (match e
+    ((TcpUp i) i) ((TcpAccepted i src sp lp) i) ((TcpData i d) i) ((TcpDataAt i at) i)
+    ((TcpFin i) i) ((TcpClosed i why) i) ((TcpRoom i k) i)))
+
+; c's notice e, which came in b.
+(def http_feed_event ((c HttpConn) (e TcpEvent) (b bytes)) HttpGot
+  (match e
+    ((TcpDataAt i at)
+      (match (http_more (hc_reader c) b at (bytes_len b))
+        ((HttpMore r ps) (HttpGot (hc_with_reader c r) ps))))
+    ((TcpData i d)
+      (let db (bytes_from_list d)
+        (match (http_more (hc_reader c) db 0 (bytes_len db))
+          ((HttpMore r ps) (HttpGot (hc_with_reader c r) ps)))))
+    ((TcpFin i)
+      (match (http_closed (hc_reader c))
+        ((HttpMore r ps) (HttpGot (hc_with_state (hc_with_reader c r) (http_finished)) ps))))
+    ((TcpClosed i why) (http_conn_ended c why))
+    ((TcpUp i) (HttpGot (hc_with_state c (http_open)) (nil HttpPart)))
+    ((TcpAccepted i src sp lp) (HttpGot c (nil HttpPart)))
+    ((TcpRoom i k) (HttpGot c (nil HttpPart)))))
+
+; c's connection gone, and why: as it should, a body that runs to the
+; close ends; otherwise, a response begun and not ended failed.
+(def http_conn_ended ((c HttpConn) (why (list int))) HttpGot
+  (let g (hc_with_state c (http_gone))
+    (if (eq why "closed")
+        (match (http_closed (hc_reader c))
+          ((HttpMore r ps) (HttpGot (hc_with_reader g r) ps)))
+        (if (http_idle (hc_reader c))
+            (HttpGot g (nil HttpPart))
+            (HttpGot (hc_with_reader g (http_read_new "GET"))
+                     (cons (HttpFailed (append "the connection " why)) (nil HttpPart)))))))
+
+; The parts of c's responses that come next, received on its notice port
+; until some do or deadline passes: none then. A connection gone with
+; nothing more to give, or a port that fails, is HttpFailed.
+(def http_next ((c HttpConn) (deadline int)) HttpGot
+  (if (eq (hc_state c) (http_gone))
+      (HttpGot c (cons (HttpFailed "the connection is closed") (nil HttpPart)))
+      (let z (alarm_at (hc_np c) deadline)
+        (match (port_receive (hc_np c))
+          ((RecvFailed) (HttpGot c (cons (HttpFailed "no notices came from inet") (nil HttpPart))))
+          ((Message from b)
+            (match (http_feed c b)
+              ((HttpGot c2 ps)
+                (if (not (is_empty ps))
+                    (HttpGot c2 ps)
+                    (if (ge (clock_ns) deadline) (HttpGot c2 ps) (http_next c2 deadline))))))))))

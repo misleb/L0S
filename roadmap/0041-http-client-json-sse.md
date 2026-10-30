@@ -120,7 +120,7 @@ notice's bytes as one, so a body would go through a list both ways
   offset giving the same body; two answers back to back on one stream,
   the second read after the first's `HttpEnd`; a body cut short; a head
   over the bound; `Connection: close` making `keep` false.
-- [ ] **The client.** [proto/httpc.l0](../user/lib/proto/httpc.l0),
+- [x] **The client.** [proto/httpc.l0](../user/lib/proto/httpc.l0),
   over `inet` (`HTTP` in the Makefile is `INETLIB` with `format/http.l0`
   and it): `(data HttpConn ...)`, the inet, the port its notices come
   to, the connection, its host, and the `HttpRead`. `http_connect n np
@@ -209,3 +209,14 @@ notice's bytes as one, so a body would go through a list both ways
   `HttpMore` too. `http_idle` says a reader is between responses, so a
   close there is no fault. The Makefile's variable for the file alone
   is `HTTPMSG`; `HTTP`, as planned, is the client's whole set.
+- 2026-10-29: step 5 landed. `HttpFailed WHY` is a constructor of
+  format/http.l0's `HttpPart`, so a client's parts are one type; the
+  reader never makes it. `http_feed c b` takes the message's bytes, as
+  `tcp_event_in` does, and gives an `HttpGot` (the connection and its
+  parts); `http_send` and `http_ask` give one too, of the notices
+  `tcp_write_bytes` kept while it waited for room, so none is lost.
+  `http_send c req` is for any request but HEAD, and `http_send_as c
+  METHOD req` tells the reader the method; `http_ask c method path
+  headers body` builds the request for the connection's host. The
+  waits use `alarm_at` on the notice port, so `http_connect` and
+  `http_next` block rather than poll; a stale alarm is passed over.

@@ -1,0 +1,108 @@
+; httpc_test.l0 -- tests of httpc.l0: with no inet nothing connects;
+; http_feed on notices built with message_new, as inet sends them, gives
+; a response's parts, and its connection's end what it means.
+
+; ---------------------------------------------------------------- helpers
+
+; An open connection, number 5, to h at port 80, its notices to port 9.
+(def conn () HttpConn (HttpConn (Inet 1 2) 9 5 "h" 167772674 80 (http_read_new "GET") (http_open)))
+
+; The bytes of the notice p from inet, pid 30, as received.
+(def notice ((p (list int))) bytes
+  (match (message_new 30 p) ((Message f b) b) ((RecvFailed) (bytes_from_list (nil int)))))
+
+; A data notice of connection 5 carrying d.
+(def data5 ((d (list int))) bytes (notice (append "tcp 5 data\n" d)))
+
+; The parts of each of ns fed to c in turn, as text, " | " between.
+(def fed_text ((c HttpConn) (ns (list bytes)) (acc (list (list int)))) (list int)
+  (if (is_empty ns)
+      (join_with " | " (rev acc))
+      (match (http_feed c (head ns))
+        ((HttpGot c2 ps) (fed_text c2 (tail ns) (rev_onto (parts_lines ps (nil (list int))) acc))))))
+
+; Each of ps as text.
+(def parts_lines ((ps (list HttpPart)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ps) (rev acc) (parts_lines (tail ps) (cons (http_part_text (head ps)) acc))))
+
+; The state c is in after each of ns.
+(def fed_state ((c HttpConn) (ns (list bytes))) int
+  (if (is_empty ns) (hc_state c) (match (http_feed c (head ns)) ((HttpGot c2 ps) (fed_state c2 (tail ns))))))
+
+(def one ((b bytes)) (list bytes) (cons b (nil bytes)))
+
+; ------------------------------------------------------------------ no inet
+
+; Under an operating system there is no inet: nothing connects.
+(def test_no_inet () int
+  (check_bool "connect" (eq (http_connect (inet_open) 9 "10.0.2.2" 80) ((Err HttpConn (list int)) "no network; is inet running?")) true))
+
+; A connection not open takes no request.
+(def test_send_not_open () int
+  (match (http_send (hc_with_state (conn) (http_gone)) (bytes_from_list "GET / HTTP/1.1\r\n\r\n"))
+    ((HttpGot c ps) (check_str "failed" (join_with " | " (parts_lines ps (nil (list int)))) "FAILED the connection is not open"))))
+
+; Waiting on a connection that is gone gives up at once; on a port that
+; fails, as every port does under l0 test, too.
+(def test_next_fails () int
+  (add (match (http_next (hc_with_state (conn) (http_gone)) 0)
+         ((HttpGot c ps) (check_str "gone" (join_with " | " (parts_lines ps (nil (list int)))) "FAILED the connection is closed")))
+       (match (http_next (conn) 0)
+         ((HttpGot c ps) (check_str "no port" (join_with " | " (parts_lines ps (nil (list int)))) "FAILED no notices came from inet")))))
+
+; The Host a request names: the port only if it is not 80.
+(def test_host_text () int
+  (add (check_str "80" (http_host_text "example.com" 80) "example.com")
+       (check_str "8000" (http_host_text "10.0.2.2" 8000) "10.0.2.2:8000")))
+
+; A request asked of c names c's host.
+(def test_ask_host () int
+  (check_str "Host" (bytes_to_list (http_request "GET" (hc_host (conn)) "/x" (nil HttpHeader) (bytes_from_list (nil int))))
+             "GET /x HTTP/1.1\r\nHost: h\r\n\r\n"))
+
+; ------------------------------------------------------------------ feeding
+
+; A chunked answer in three pieces of data, then the server's fin and the
+; connection's end: the head, the body's pieces, the end, and nothing
+; more.
+(def chunked_notices () (list bytes)
+  (cons (data5 "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel")
+  (cons (data5 "lo\r\n6\r\n worl")
+  (cons (data5 "d\r\n0\r\n\r\n")
+  (cons (notice "tcp 5 fin")
+  (cons (notice "tcp 5 closed closed") (nil bytes)))))))
+
+(def test_feed_chunked () int
+  (check_str "parts" (fed_text (conn) (chunked_notices) (nil (list int)))
+             "HEAD 200 OK | BODY hel | BODY lo | BODY  worl | BODY d | END keep"))
+
+; After the fin the connection takes no more requests; after closed it
+; is gone.
+(def test_feed_states () int
+  (add (check_int "finished" (fed_state (conn) (take (chunked_notices) 4)) (http_finished))
+       (check_int "gone" (fed_state (conn) (chunked_notices)) (http_gone))))
+
+; A body that runs to the close is ended by the server's fin.
+(def test_feed_to_close () int
+  (check_str "parts" (fed_text (conn) (cons (data5 "HTTP/1.1 200 OK\r\n\r\nall") (cons (notice "tcp 5 fin") (nil bytes))) (nil (list int)))
+             "HEAD 200 OK | BODY all | END close"))
+
+; A reset in the middle of a body: the response failed.
+(def test_feed_reset () int
+  (check_str "parts" (fed_text (conn) (cons (data5 "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhal") (cons (notice "tcp 5 closed reset") (nil bytes))) (nil (list int)))
+             "HEAD 200 OK | BODY hal | FAILED the connection reset"))
+
+; A reset between responses is no failure: nothing was asked.
+(def test_feed_reset_idle () int
+  (check_str "nothing" (fed_text (conn) (one (notice "tcp 5 closed reset")) (nil (list int))) ""))
+
+; Another connection's notices, and what is not a notice, are passed over.
+(def test_feed_others () int
+  (add (check_str "another's" (fed_text (conn) (one (notice "tcp 6 data\nHTTP/1.1 200 OK\r\n\r\n")) (nil (list int))) "")
+       (check_str "not a notice" (fed_text (conn) (one (notice "alarm")) (nil (list int))) "")))
+
+; Two answers on one connection, the second asked after the first ended.
+(def test_feed_kept () int
+  (check_str "both" (fed_text (conn) (cons (data5 "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\na")
+                                     (cons (data5 "HTTP/1.1 404 Not Found\r\nContent-Length: 1\r\n\r\nb") (nil bytes))) (nil (list int)))
+             "HEAD 200 OK | BODY a | END keep | HEAD 404 Not Found | BODY b | END keep"))

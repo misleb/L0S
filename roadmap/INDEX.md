@@ -44,7 +44,7 @@ move independently, so several can be active at once.
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 6/8 | – | display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
-| [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | active | 4/6 | – | network.md, programs.md, testing.md |
+| [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | active | 5/6 | – | network.md, programs.md, testing.md |
 | [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | blocked | 0/5 | 0041 | network.md, programs.md, testing.md, pi5.md |
 | [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | blocked | 0/10 | 0042 | agent.md (new), programs.md, demo.md, testing.md |
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | idea | – | 0043 | agent.md, storage.md |
@@ -65,7 +65,8 @@ move independently, so several can be active at once.
 - [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library,
   with JSON and server-sent events, active: `inet`'s writes go from
   bytes, paced by `room`, JSON is read and written, and event streams
-  read, and HTTP/1.1's messages too; next the client over `inet`.
+  read, HTTP/1.1's messages, and the client over `inet`; next `http`
+  rebuilt on it, and its e2e case.
 
 ## Dependencies
 
