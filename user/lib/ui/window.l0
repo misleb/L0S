@@ -18,7 +18,9 @@
 ; next target, and Enter or Space sets off the one it is on. It also
 ; scrolls what widget.l0 calls a scroller: the wheel over its area or its
 ; scrollbar, a press on the scrollbar's strip, and a drag of its slider
-; set off NAME.scrollto.N at once, as GTK's scrolled window moves.
+; set off NAME.scrollto.N at once, as GTK's scrolled window moves; and,
+; for a scroller wider than it shows, the wheel across and its scrollbar
+; across the same way, setting off NAME.acrossto.N.
 ;
 ; ui_present lays the view out, and paints only the parts that differ from
 ; what it painted last, telling the compositor of each.
@@ -159,10 +161,11 @@
 (def ui_win_with ((w UiWin) (st UiState) (b int)) UiWin
   (match w ((UiWin c id cv port font old ns ob g k m csd cl lp) (UiWin c id cv port font st ns b g k m csd cl lp))))
 
-; How far below a dragged slider's top the pointer holds it.
+; How far below a dragged slider's top the pointer holds it, or, for a
+; slider across, right of its left.
 (def ui_win_grab ((w UiWin)) int (match w ((UiWin c id cv port font st ns b g k m csd cl lp) g)))
 
-; w with its slider held g below its top.
+; w with its slider held g below its top, or right of its left.
 (def ui_win_grabbing ((w UiWin) (g int)) UiWin
   (match w ((UiWin c id cv port font st ns b old k m csd cl lp) (UiWin c id cv port font st ns b g k m csd cl lp))))
 
@@ -585,7 +588,7 @@
             ((UiCloseAsked) (UiRouted w (ui_close_action)))
             ((UiMotion x y b) (ui_motion_routed w st x y b))
             ((UiPress x y b) (ui_press_routed w st x y b))
-            ((UiScroll x y dx dy) (ui_wheel_routed w x y dy))
+            ((UiScroll x y dx dy) (if (eq dy 0) (ui_wheel_across_routed w x y dx) (ui_wheel_routed w x y dy)))
             ((UiRelease x y b)
               (let t (ui_hit ns x y)
                 (let p (ui_st_pressed st)
@@ -665,7 +668,11 @@
         (match (ui_scroll_of (ui_st_pressed st))
           ((UiScrollBar name f m sp sl) (UiRouted w2 (ui_slid_to (ui_win_nodes w) name (sub y (ui_win_grab w)))))
           ((UiScrollArea name f m s st) (UiRouted w2 ""))
-          ((UiNoScroll) (UiRouted w2 ""))))))
+          ((UiNoScroll)
+            (match (ui_across_of (ui_st_pressed st))
+              ((UiAcrossBar name l m sp sl) (UiRouted w2 (ui_across_slid_to (ui_win_nodes w) name (sub x (ui_win_grab w)))))
+              ((UiAcrossArea name l m) (UiRouted w2 ""))
+              ((UiNoAcross) (UiRouted w2 ""))))))))
 
 ; A press: its target shown pressed, and the focus gone, as GTK's does.
 ; On a scrollbar's slider, the slider is taken where it was pressed; on
@@ -680,7 +687,7 @@
             (if (eq t (ui_move_action))
                 (ui_press_move w st t b)
                 (if (is_empty (ui_entry_name_of t))
-                    (ui_press_target w st ns t y b)
+                    (ui_press_target w st ns t x y b)
                     (ui_press_entry w st ns t x b))))))))
 
 ; Whether the window has been asked to close, by the compositor's close
@@ -769,8 +776,9 @@
       found
       (ui_node_with_onto (tail ns) a (if (eq (ui_node_action (head ns)) a) (Some (head ns)) found))))
 
-; A press on anything else: shown pressed, and on a scrollbar, scrolled.
-(def ui_press_target ((w UiWin) (st UiState) (ns (list UiNode)) (t (list int)) (y int) (b int)) UiRouted
+; A press on anything else: shown pressed, and on a scrollbar, down or
+; across, scrolled.
+(def ui_press_target ((w UiWin) (st UiState) (ns (list UiNode)) (t (list int)) (x int) (y int) (b int)) UiRouted
   (let w2 (ui_win_with w (ui_st_focusing (ui_st_pressing (ui_st_hovering st t) t) "") b)
     (match (ui_scroll_of t)
       ((UiScrollBar name f m sp sl)
@@ -782,7 +790,24 @@
                   (UiRouted (ui_win_grabbing w2 (sub y top)) "")
                   (UiRouted (ui_win_grabbing w2 (div sl 2)) (ui_slid_to ns name (sub y (div sl 2)))))))))
       ((UiScrollArea name f m s st) (UiRouted w2 ""))
-      ((UiNoScroll) (UiRouted w2 "")))))
+      ((UiNoScroll) (ui_press_across w2 ns t x)))))
+
+; A press on a scrollbar across, as on one down: on its slider, the
+; slider taken where it was pressed; on its strip off the slider, the
+; slider brought there, its middle under the pointer, and taken by its
+; middle. A press on anything else, w as it is.
+(def ui_press_across ((w UiWin) (ns (list UiNode)) (t (list int)) (x int)) UiRouted
+  (match (ui_across_of t)
+    ((UiAcrossBar name l m sp sl)
+      (match (ui_acrossbar_named ns name)
+        ((None) (UiRouted w ""))
+        ((Some n)
+          (let left (ui_slider_top (rect_x (ui_node_rect n)) l m sp)
+            (if (if (ge x left) (lt x (add left sl)) false)
+                (UiRouted (ui_win_grabbing w (sub x left)) "")
+                (UiRouted (ui_win_grabbing w (div sl 2)) (ui_across_slid_to ns name (sub x (div sl 2)))))))))
+    ((UiAcrossArea name l m) (UiRouted w ""))
+    ((UiNoAcross) (UiRouted w ""))))
 
 ; The action that scrolls the scroller called name so that its slider's
 ; top is at top, as near as a whole row goes; "" if it is there already.
@@ -810,6 +835,33 @@
 ; m, dy steps of the wheel; "" if it cannot go that way.
 (def ui_wheeled_to ((name (list int)) (f int) (m int) (dy int)) (list int)
   (let to (ui_wheel_first f m dy) (if (eq to f) "" (ui_scrollto_action name to))))
+
+; The action that scrolls the scroller across called name so that its
+; slider's left is at left; "" if it is there already.
+(def ui_across_slid_to ((ns (list UiNode)) (name (list int)) (left int)) (list int)
+  (match (ui_acrossbar_named ns name)
+    ((None) "")
+    ((Some n)
+      (match (ui_across_of (ui_node_action n))
+        ((UiAcrossBar nm l m sp sl)
+          (let to (ui_slider_first left (rect_x (ui_node_rect n)) m sp)
+            (if (eq to l) "" (ui_acrossto_action name to))))
+        ((UiAcrossArea nm l m) "")
+        ((UiNoAcross) "")))))
+
+; The wheel turned dx steps across at x, y: the scroller across there
+; scrolled, if one is and it can go that way.
+(def ui_wheel_across_routed ((w UiWin) (x int) (y int) (dx int)) UiRouted
+  (UiRouted w
+    (match (ui_across_hit (ui_win_nodes w) x y)
+      ((UiAcrossArea name l m) (ui_wheeled_across name l m dx))
+      ((UiAcrossBar name l m sp sl) (ui_wheeled_across name l m dx))
+      ((UiNoAcross) ""))))
+
+; The action that scrolls the scroller across called name, l of most m
+; scrolled off, dx steps of the wheel; "" if it cannot go that way.
+(def ui_wheeled_across ((name (list int)) (l int) (m int) (dx int)) (list int)
+  (let to (ui_wheel_left l m dx) (if (eq to l) "" (ui_acrossto_action name to))))
 
 ; A key, pressed or repeated (a release does nothing): Tab moves the
 ; focus to the next target, Shift-Tab to the one before, Esc takes it

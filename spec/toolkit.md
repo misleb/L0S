@@ -15,7 +15,7 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; the text's glyphs, Source Code Pro's and Source Sans 3's regular and bold at 16 and 32 times the scale, kept as `glyph.FACE.H` (`code`, `code-bold`, `sans`, `sans-bold`), each a strike (`format/strike.l0`) asked of the font service, `font`, which shares its pages with every program that asks, read in place (`UiStrike`), never copied, through one region over each of `font`'s arenas the strikes are in, so the desktop's strikes and the first others a program shows take it one region (`ui_strike_open`, `ui_strike_regions`); and, for the compositor alone at scale 2 (`ui_face_pointers`), the pointers `tools/mkfont` rasterized into `/etc/face`, which holds nothing else. With no `font`, no text is drawn, said once on standard error. An app's `icon.face` is the same format, its images' tables `image.N`, and so is each full-color icon's `/etc/images/NAME.face`, which a program loads by name, at the sizes its scale paints, with `ui_images_load` into a `UiImages`, and finds with `ui_image`. | the font and icon theme at a scale factor || `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon, an image of its own colors with alpha, `UiPImage`, as an app's `icon.svg` makes), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
 | `metrics.l0` | Each face's units per em, the advance of each of codes 32 to 126, the widest of them, and the kerning of each pair of them GPOS adjusts, in font units, as defs (`ui_m_sans_adv`, `ui_m_sans_kern` and the rest), which `tools/mkmetrics` writes from the fonts at the build and `make check` compares: so text is measured with no face and no file, and `ui_layout` and its host tests need neither. | Pango's font metrics |
 | `widget.l0` | `UiWidget` (label, text in a face and height a program names (`UiText`), a part keyed by what it shows, its layout kept while that is the same (`UiKeyed`, `ui_keyed_self`), button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, entry.l0's entry, a window's own header bar, nav.l0's path bar, toggle group and tab bar, icon_view.l0's icon view, menu.l0's popover, and a drawing area); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). `UiCsdBar START TITLE END CLOSES` is the header bar of a window that draws its own (`ui_open_csd`): any widget as its title, in the bar's middle as far as there is room, the window's close button at its end if CLOSES (`ui_close_action`), and its ground the window's to drag (`ui_move_action`), or, with a double click, to maximize and restore. `UiDrawingArea NAME W H` is an area the program paints itself, as `vt` paints its terminal: its node sets off `NAME.drawing`, has no ops, and nothing of the toolkit's is painted or damaged there, not even the window's ground (`ui_drawn`, `ui_drawing_rect`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment`, `GtkDrawingArea` |
-| `grid.l0` | A data grid: columns, typed cells (text, number, size, as `format_size` says it and sorted by its bytes, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, and an overlay scrollbar whose slider drags. `ui_grid_page`, a toolbar of Refresh, a status line and End Process over a grid, as `widgets` and `procmon` are, and `ui_selected_line`. | `GtkColumnView`, `GtkScrolledWindow` |
+| `grid.l0` | A data grid: columns, typed cells (text, number, size, as `format_size` says it and sorted by its bytes, level, status, icon), sorting by column, selection, keyboard movement, scrolling by the wheel, down and, when its columns are wider than it, across, and overlay scrollbars down and across whose sliders drag. `ui_grid_page`, a toolbar of Refresh, a status line and End Process over a grid, as `widgets` and `procmon` are, and `ui_selected_line`. | `GtkColumnView`, `GtkScrolledWindow` |
 | `panes.l0` | A window of panes: `UiSidebar`, rows of an icon, a title and a line, one selected; `UiSegmentBar`, a whole in parts each as wide as its share by weight (`ui_shares`), each plain or muted (`UiSegPlain`, `UiSegMuted`), at any height: a title over a line at `ui_segbar_h`, the title alone lower, no text as a usage bar; one part selected and moved along by Left and Right (`ui_segbar_key`), or, with prefix `""`, none and no targets; `UiProps`, a dimmed name before each value, which is any widget; `UiModal` and `ui_alert`, an alert dialog on a card over everything beneath, which is dimmed (`ui_scrim`) and no longer a target, and `ui_alert_form`, one with widgets, such as properties holding entries, between its lines and its buttons. Rows and parts carry `PREFIX.select.KEY`, read back by `ui_select_key`. | `AdwNavigationSplitView`'s sidebar, `GtkListBox` `.navigation-sidebar`, GNOME Disks' volume grid and Usage's storage bar, `AdwAlertDialog` and its extra child |
 | `entry.l0` | `UiEntry NAME TEXT PLACEHOLDER WIDTH`, a line of text: `UiEntryText`, its text and cursor, kept by the program; `ui_entry_keyed`, typing at the cursor, Backspace, Delete, Left, Right, Home and End; drawn on the text's color at 10%, with the accent's ring and a cursor while it has the focus, the placeholder dimmed while it is empty. | `GtkEntry` |
 | `nav.l0` | What a window that goes from place to place puts in its header bar: `UiPathBar PREFIX LABELS`, a button for each part of a path on 10% of the text color, the last, where one is, bold and no target, each other going to its depth, `PREFIX.select.N`, the first ones folded into `...` when it is too narrow; and `UiToggleGroup PREFIX TOGGLES KEY`, linked `UiToggle`s, an icon or a label each, the active one raised on the card's ground, `PREFIX.select.KEY`; and `UiTabBar PREFIX TABS KEY`, a tab bar under a header bar, 40 high on its ground, its `UiTab`s, each a key and a title, sharing its width, 34 high, the selected one raised, the text's color at 10% (13% under the pointer, 7% for another), each its title in the middle and a round close button at its end: a tab sets off `PREFIX.select.KEY`, its close button `PREFIX.close.KEY` (`ui_tab_close_key`). | Nautilus' path bar, `AdwToggleGroup`, `AdwTabBar` |
@@ -241,6 +241,23 @@ The layout no longer keeps the selection in view on its own, so the wheel
 can scroll it away, as in GTK. A step of the wheel is three rows
 (`ui_wheel_rows`).
 
+A scroller wider than it shows scrolls across too. The grid is, when its
+columns add up to more than its width: it keeps how many pixels of them
+are scrolled off to the left in `UiGridState`'s last field, and lays its
+header and cells out that far to the left, cut to its edges. Two more
+nodes say so: all of it, beneath the rest, `NAME.across.LEFT.MOST`, and
+a strip along its bottom, short of the scrollbar down,
+`NAME.acrossbar.LEFT.MOST.SPAN.SLIDER`, with an overlay slider as long
+as the share of the columns shown. `ui_route` reads them as it reads
+the scroller's down: the wheel's steps across over either, a press on
+the strip off the slider, and a drag of the slider set off
+`NAME.acrossto.N`, N pixels to be scrolled off, which `ui_grid_action`
+keeps. A step across is 48 pixels (`ui_wheel_across`); a turn with
+steps down as well scrolls down. Since it scrolls across, a grid asks
+only 40 a column across of the box it is in, as GTK's scrolled window
+asks no more than its least, not its columns' widths. Files' preview of a file is a grid of
+one column as wide as its widest line, so a long line is scrolled to.
+
 ### Entries
 
 An entry's text and cursor are the program's, a `UiEntryText` in its
@@ -399,9 +416,15 @@ to `l0` are one namespace, and a duplicate is a compile error.
   one client's. A program ends
   only by returning from `main`, so one that does nothing with a close
   is ended by the compositor at its asking (`end`).
-- Scrolling is by whole rows: the wheel's steps are counted, not its
-  speed, and there is no kinetic scrolling. The wheel across, which the
-  driver reports, scrolls nothing yet.
+- Scrolling is by whole rows down and by 48 pixels across: the wheel's
+  steps are counted, not its speed, and there is no kinetic scrolling.
+  Only the grid scrolls across.
+- A node's ops are not cut to the node when painted, so the grid cuts
+  its own ops to its edges when scrolled across: a fill to its part
+  inside, a text to its characters wholly inside, and an icon, image,
+  level bar or status dot only if all of it is inside, so a cell's text
+  at the edge loses a character at a time and its icon or bar goes
+  whole.
 - An entry does not scroll its text, which is cut short with `...`, so an
   entry is made as wide as what it will hold, and has no selection,
   copying or pasting.

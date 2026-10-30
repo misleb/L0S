@@ -239,10 +239,15 @@ said_holds() {
 header="48 48 48"; sidebar="46 46 50"; side_sel="67 67 71"; view="30 30 30"
 accent="53 132 228"; line="64 64 64"
 
+# hello's one line: hi and 24 words of eight, a space before each, 1313
+# pixels in the interface's face, twice as wide as the preview shows.
+long="abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh abcdefgh"
+long="$long $long"
+
 waits_for "^l0s> "
 # The volumes are mounted after the shell starts; write once data is.
 waits_for "/Volumes/data mounted"
-said 'write /Volumes/data/hello hi' > /dev/null
+said "write /Volumes/data/hello hi $long" > /dev/null
 said 'ls /Volumes/data' | grep -q "hello" || fail "the file was not written; it showed:"
 printf 'run files &\n' >&3
 waits_for "\[pid [0-9]+ running\]"
@@ -267,6 +272,22 @@ shows "data selected, Computer not" "$((cx + 200)) $((cy + 172)) $side_sel" "$((
 # the header bar; Esc goes back to the tiles.
 dbl $((cx + 326)) $((cy + 100))
 shows "a double click showed the file" "$((cx + 600)) $((cy + 77)) $line"
+
+# Its one line is wider than the preview, from 221, 659 wide: the
+# column is the line's 1313 and a pad of 9 either side, 1331, so 672
+# can be scrolled off. The scrollbar across is along the preview's
+# bottom, which is 531 down: its slider 6 high from 522,
+# 659 * 659 / 1331, 326, long, drawn 4 shorter from 2 in, 223 to 545,
+# so it travels 333. QEMU's tablet sends no wheel across, so the slider
+# is dragged: taken at 400, 100 right, it is 100 further across, 202 of
+# the line scrolled off, from 323 to 645.
+slider="120 120 120"
+shows "the slider across at the start" \
+  "$((cx + 240)) $((cy + 524)) $slider" "$((cx + 600)) $((cy + 524)) $view"
+drag $((cx + 400)) $((cy + 524)) 100 0
+events "$(at $((cx + 500)) $((cy + 200)))"; sleep 1
+shows "a drag of the slider scrolled the line across" \
+  "$((cx + 300)) $((cy + 524)) $view" "$((cx + 620)) $((cy + 524)) $slider"
 keys esc
 shows "Esc went back to the tiles" "$((cx + 600)) $((cy + 77)) $view"
 
