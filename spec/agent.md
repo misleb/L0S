@@ -1,11 +1,11 @@
 # The agent
 
-`agentd` (`user/sbin/agentd`) is to be the home of an agent on L0S: a
-conversation with a model, reached through the host's proxy and
+`agentd` (`user/sbin/agentd`) is the agent's program: a conversation
+with a model, reached through the host's proxy and
 [proto/model.l0](../user/lib/proto/model.l0) ([network.md](network.md)),
-and tools that act on the board. What is written of it so far is its
-parts, each tested on the host; the program itself serves nothing, and,
-started, says so in the log and exits 1. No inittab starts it.
+and tools that act on the board. What it has today is its parts, each
+tested on the host; the program itself serves nothing, and, started,
+says so in the log and exits 1. No inittab starts it.
 
 ## The conversation
 
@@ -77,8 +77,36 @@ answers (each a list of `ModelEvent`s) and a table of tools' results by
 use id, and gives the requests sent, the notices told and how it ended:
 the loop's host tests are written with it.
 
+## The tools
+
+[tools.l0](../user/sbin/agentd/tools.l0). Each tool takes its input as
+JSON and answers a `ToolAnswer`, a text, or a failure the model reads.
+Its definition (`file_tool_defs`) is a name, a description and its
+input's JSON Schema, an object whose properties are all required.
+
+The agent's **home** is the configuration's `home PATH`
+(`/etc/agent/config`, a key `model_conf_of` passes over), or
+`/Volumes/data/agent`. A relative path is from the home (`tool_path`,
+by `path_resolve`, `..` included); any path is taken, as nothing is
+enforced here: what the agent should and should not touch is its
+rules'.
+
+| Tool | Input | Answers |
+|---|---|---|
+| `read_file` | `path` | the file's text, at most 64 KB, then a line `[cut: N more bytes]` if it was cut |
+| `write_file` | `path`, `content` | the file made anew to hold content (its directory must be there): `wrote N bytes to PATH` |
+| `list_dir` | `path` | a line for each entry, `NAME SIZE`, a directory's `NAME/`, from its file server; on the initramfs, while `/` is it, the names alone |
+| `make_dir` | `path` | the directory made, on a volume: `made PATH` |
+
+A failure is the path and why, in words. What goes to the model is
+UTF-8, as JSON's strings must be: a byte that is not part of UTF-8 is
+sent as `?`, and a cut moves back to where a character starts.
+
 ## Limits
 
 - `agentd` serves nothing yet: there is no protocol, no `agent` command,
   and no inittab starts it.
 - At most 32 rounds of tools in one turn.
+- Its limits are its rules only: the tools take any path.
+- `read_file` gives at most 64 KB of a file, and text only: a binary
+  file's bytes that are not UTF-8 come as `?`.

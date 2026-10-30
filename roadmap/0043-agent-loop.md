@@ -114,7 +114,7 @@ What it is, as decided with the user:
   in order; a tool's input in pieces cut mid-string; a round that asks
   again and then ends; the round limit; an error event; a result that
   failed.
-- [ ] **The file tools.** `user/sbin/agentd/tools.l0`: the home from
+- [x] **The file tools.** `user/sbin/agentd/tools.l0`: the home from
   the configuration (`home PATH`, `/Volumes/data/agent` if none), and
   `tool_path home p`, the absolute path p names, a relative one from
   the home (`path_resolve`); any path is taken. `read_file {path}` (its
@@ -301,3 +301,14 @@ What it is, as decided with the user:
   stand-in's run ends `script_ended` if the loop asks more often than
   the script answers. The stand-in's table of results is by the
   use's id.
+- 2026-10-29: step 4 done. A tool answers a `ToolAnswer` (text,
+  failed), the type the stand-in's table already had. `list_dir` on a
+  path of the initramfs (while `/` is it) lists its entries, without
+  sizes, as `ls` does, and `make_dir` there fails, as the initramfs
+  cannot change. Text sent to the model must be UTF-8, JSON's strings
+  being so: a byte that is not part of UTF-8 becomes `?`
+  (`tool_text`), and a cut at 64 KB moves back to where a character
+  starts. `tool_conf text key` reads agentd's own configuration keys,
+  which `model_conf_of` passes over. The host test writes and reads
+  `build/agentd_tools_test.txt` by its relative path, as the host's
+  files are not under the paths `tool_path` makes.

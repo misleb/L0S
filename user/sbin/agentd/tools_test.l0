@@ -1,0 +1,109 @@
+; tools_test.l0 -- the tools: the home and paths, the file tools on
+; this host's files under build/, and the definitions.
+
+(def bb ((s (list int))) bytes (bytes_from_list s))
+
+; An answer as text: ok or failed, then its text.
+(def answer_text ((a ToolAnswer)) (list int)
+  (match a ((ToolAnswer t f) (append (if f "failed: " "ok: ") (bytes_to_list t)))))
+
+; An input of string fields, given as names and values.
+(def input ((names (list (list int))) (values (list (list int)))) Json
+  (json_obj (input_fields names values)))
+
+(def input_fields ((names (list (list int))) (values (list (list int)))) (list JField)
+  (if (is_empty names)
+      (nil JField)
+      (cons (json_field (head names) (json_str (head values))) (input_fields (tail names) (tail values)))))
+
+(def test_home () int
+  (add (check_str "default" (tool_home "api 10.0.2.2:8765\n") "/Volumes/data/agent")
+       (add (check_str "given" (tool_home "api x:1\nhome /Volumes/work/me # mine\n") "/Volumes/work/me")
+            (check_str "made absolute" (tool_home "home a/b/\n") "/a/b"))))
+
+(def test_conf () int
+  (add (check_str "a key" (tool_conf "run_timeout 30\n" "run_timeout") "30")
+       (check_str "none" (tool_conf "# home x\n" "home") "")))
+
+(def test_path_relative () int
+  (add (check_str "a file" (tool_path "/Volumes/data/agent" "notes/today.txt") "/Volumes/data/agent/notes/today.txt")
+       (check_str "dot" (tool_path "/Volumes/data/agent" ".") "/Volumes/data/agent")))
+
+; .. is taken: any path is, the limits being the agent's rules.
+(def test_path_up () int
+  (add (check_str "up" (tool_path "/Volumes/data/agent" "../other") "/Volumes/data/other")
+       (check_str "past the top" (tool_path "/Volumes/data/agent" "../../../../etc/motd") "/etc/motd")))
+
+(def test_path_absolute () int
+  (check_str "absolute" (tool_path "/Volumes/data/agent" "/etc/motd") "/etc/motd"))
+
+; Written, then read back, in a file of this test's own under build/
+; (by its path from where l0 test runs: tool_path would make it
+; absolute, which this host's files are not under).
+(def test_write_read () int
+  (let w (write_file "build/agentd_tools_test.txt" (Some (json_str "hello\nthere")))
+    (let r (read_file "build/agentd_tools_test.txt")
+      (add (check_str "wrote" (answer_text w) "ok: wrote 11 bytes to build/agentd_tools_test.txt")
+           (check_str "read" (answer_text r) "ok: hello\nthere")))))
+
+; The dispatch: a read through tool_file, of a file that is not there.
+(def test_tool_file_reads () int
+  (check_true "failed" (starts_with (answer_text (tool_file "/Volumes/data/agent" "read_file" (input (split_spaces "path") (split_spaces "none.txt"))))
+                         "failed: /Volumes/data/agent/none.txt: ")))
+
+(def test_read_missing () int
+  (check_true "failed" (starts_with (answer_text (read_file "build/agentd_tools_test.none")) "failed: build/agentd_tools_test.none: ")))
+
+(def test_write_no_directory () int
+  (check_true "failed" (starts_with (answer_text (write_file "build/agentd_no_dir/x" (Some (json_str "x")))) "failed: build/agentd_no_dir/x: ")))
+
+(def test_missing_input () int
+  (add (check_str "no path" (answer_text (tool_file "/" "read_file" (json_obj (nil JField)))) "failed: path is missing, or not a string")
+       (check_str "no content" (answer_text (write_file "build/x" ((None Json)))) "failed: content is missing")))
+
+; A file over 64 KB is cut, saying how much more there was: 70000
+; bytes, 65536 kept, 4464 more.
+(def test_cut () int
+  (let big (bytes_from_list (repeat_byte 97 70000 (nil int)))
+    (let c (tool_cut big)
+      (add (check_int "kept" (bytes_len c) (add 65536 (length "\n[cut: 4464 more bytes]\n")))
+           (check_true "says so" (ends_with (bytes_to_list c) "\n[cut: 4464 more bytes]\n"))))))
+
+(def repeat_byte ((x int) (n int) (acc (list int))) (list int)
+  (if (eq n 0) acc (repeat_byte x (sub n 1) (cons x acc))))
+
+; A cut never splits a character: é is 195 169, and with 65535 bytes of
+; a before it, the cut goes before it, 65535 kept.
+(def test_cut_at_character () int
+  (let b (bytes_concat (cons (bytes_from_list (repeat_byte 97 65535 (nil int)))
+                         (cons (bytes_from_list (repeat_char 2000 (nil int))) (nil bytes))))
+    (check_true "cut before é" (starts_with (drop (bytes_to_list (tool_cut b)) 65535) "\n[cut: 4000 more bytes]"))))
+
+(def repeat_char ((n int) (acc (list int))) (list int)
+  (if (eq n 0) acc (repeat_char (sub n 1) (cons 195 (cons 169 acc)))))
+
+; Bytes that are not text become ?, as JSON's strings are UTF-8.
+(def test_text_cleaned () int
+  (add (check_str "bad" (bytes_to_list (tool_text (bb "a\xffb\xc3"))) "a?b?")
+       (check_str "good" (bytes_to_list (tool_text (bb "caf\xc3\xa9\n"))) "caf\xc3\xa9\n")))
+
+; Under an operating system there is no fs: list_dir and make_dir fail,
+; and say so.
+(def test_no_fs () int
+  (add (check_true "list" (starts_with (answer_text (list_dir "/Volumes/data/agent")) "failed: /Volumes/data/agent: "))
+       (check_true "mkdir" (starts_with (answer_text (make_dir "/Volumes/data/agent/notes")) "failed: /Volumes/data/agent/notes: "))))
+
+(def test_no_such_tool () int
+  (check_str "failed" (answer_text (tool_file "/" "erase" (input (split_spaces "path") (split_spaces "x")))) "failed: no tool erase"))
+
+(def test_stat_lines () int
+  (check_str "lines" (stat_lines (cons (FsStat "notes/" 0) (cons (FsStat "a.txt" 12) (nil FsStat))) (nil int))
+    "notes/\na.txt 12\n"))
+
+(def test_def () int
+  (check_str "json" (bytes_to_list (json_bytes (head (file_tool_defs))))
+    "{\"name\":\"read_file\",\"description\":\"Read a file's text, at most 64 KB of it; it says so if cut.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file; a relative path is from your home\"}},\"required\":[\"path\"]}}"))
+
+(def test_write_def () int
+  (check_str "json" (bytes_to_list (json_bytes (nth (file_tool_defs) 1)))
+    "{\"name\":\"write_file\",\"description\":\"Make a file hold content, anew; its directory must be there.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file; a relative path is from your home\"},\"content\":{\"type\":\"string\",\"description\":\"What the file is to hold\"}},\"required\":[\"path\",\"content\"]}}"))

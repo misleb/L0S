@@ -1,0 +1,228 @@
+; tools.l0 -- agentd's tools: their definitions, as the model is told
+; them, and the file tools, read_file, write_file, list_dir and
+; make_dir. Each takes its input as JSON and answers a text, or a
+; failure the model reads (a ToolAnswer). A relative path is from the
+; agent's home, the configuration's home (/Volumes/data/agent if none);
+; any path is taken, since the agent's limits are its rules, not
+; enforced here.
+
+; ------------------------------------------------------- configuration
+
+; Where the home is if the configuration says nothing.
+(def tool_home_default () (list int) "/Volumes/data/agent")
+
+; The configuration's value for key, the words after it on its line
+; (a # starting a comment), or empty if no line has it.
+(def tool_conf ((text (list int)) (key (list int))) (list int)
+  (tool_conf_in (lines text) key))
+
+; tool_conf's loop, through the lines ls.
+(def tool_conf_in ((ls (list (list int))) (key (list int))) (list int)
+  (if (is_empty ls)
+      (nil int)
+      (let ws (split_spaces (up_to 35 (head ls)))
+        (if (if (is_empty ws) false (eq (head ws) key))
+            (unwords (tail ws))
+            (tool_conf_in (tail ls) key)))))
+
+; The home the configuration text names, or the default.
+(def tool_home ((text (list int))) (list int)
+  (let h (tool_conf text "home")
+    (if (is_empty h) (tool_home_default) (path_resolve "/" h))))
+
+; The absolute path p names: a relative one from home.
+(def tool_path ((home (list int)) (p (list int))) (list int)
+  (path_resolve home p))
+
+; ------------------------------------------------------------ answering
+
+; The most a tool gives back of a file, or of what a program wrote.
+(def tool_max () int 65536)
+
+; An answer, of text, and a failure, of words.
+(def tool_ok ((text bytes)) ToolAnswer (ToolAnswer text false))
+(def tool_failed ((why (list int))) ToolAnswer (ToolAnswer (bytes_from_list why) true))
+
+; b as text the model can be sent: each byte that is not part of UTF-8
+; a question mark, since a JSON string must be UTF-8; b itself if it
+; all is.
+(def tool_text ((b bytes)) bytes
+  (if (utf8_from b 0 (bytes_len b))
+      b
+      (bytes_from_list (rev (utf8_clean b 0 (bytes_len b) (nil int))))))
+
+; Whether b from i to j is all text: ASCII or well-formed UTF-8.
+(def utf8_from ((b bytes) (i int) (j int)) bool
+  (if (ge i j)
+      true
+      (let n (utf8_len b i j)
+        (if (eq n 0) false (utf8_from b (add i n) j)))))
+
+; How many bytes the character at i is: 1 for ASCII, control characters
+; too (JSON escapes them), 2 to 4 for UTF-8's sequences; 0 if none.
+(def utf8_len ((b bytes) (i int) (j int)) int
+  (if (lt (bytes_get b i) 128) 1 (json_char_len b i j)))
+
+; b from i to j onto acc, reversed, each byte not of text a ?.
+(def utf8_clean ((b bytes) (i int) (j int) (acc (list int))) (list int)
+  (if (ge i j)
+      acc
+      (let n (utf8_len b i j)
+        (if (eq n 0)
+            (utf8_clean b (add i 1) j (cons 63 acc))
+            (utf8_clean b (add i n) j (rev_onto (bytes_to_list (bytes_slice b i (add i n))) acc))))))
+
+; b, at most tool_max bytes of it, cut where a character starts, and if
+; cut, a line saying how much more there was.
+(def tool_cut ((b bytes)) bytes
+  (let n (bytes_len b)
+    (if (le n (tool_max))
+        (tool_text b)
+        (let k (char_start b (tool_max))
+          (bytes_concat (cons (tool_text (bytes_slice b 0 k))
+                          (cons (bytes_from_list (append "\n[cut: " (append (digits (sub n k)) " more bytes]\n")))
+                                (nil bytes))))))))
+
+; k, or before it, where a character starts: not a UTF-8 continuation
+; byte, at most three back.
+(def char_start ((b bytes) (k int)) int
+  (char_back b k 3))
+
+; char_start's loop: back from k while it is a continuation byte, at
+; most left more.
+(def char_back ((b bytes) (k int) (left int)) int
+  (if (if (eq left 0) true (le k 0))
+      k
+      (if (eq (bit_and (bytes_get b k) 192) 128) (char_back b (sub k 1) (sub left 1)) k)))
+
+; ------------------------------------------------------------ the input
+
+; The string field name of input, or none.
+(def tool_str ((input Json) (name (list int))) (Option (list int))
+  (match (json_get input name)
+    ((None) ((None (list int))))
+    ((Some v) (match (json_text v) ((None) ((None (list int)))) ((Some t) (Some (bytes_to_list t)))))))
+
+; --------------------------------------------------------------- dispatch
+
+; Whether name is one of the file tools.
+(def is_file_tool ((name (list int))) bool
+  (any_eq name (split_spaces "read_file write_file list_dir make_dir")))
+
+; The file tool name done with input, its paths from home.
+(def tool_file ((home (list int)) (name (list int)) (input Json)) ToolAnswer
+  (match (tool_str input "path")
+    ((None) (tool_failed "path is missing, or not a string"))
+    ((Some p)
+      (let path (tool_path home p)
+        (if (eq name "read_file") (read_file path)
+        (if (eq name "write_file") (write_file path (json_get input "content"))
+        (if (eq name "list_dir") (list_dir path)
+        (if (eq name "make_dir") (make_dir path)
+        (tool_failed (append "no tool " name))))))))))
+
+; read_file: the file's text, cut at tool_max bytes.
+(def read_file ((path (list int))) ToolAnswer
+  (match (read_whole path)
+    ((Err why) (tool_failed (append path (append ": " why))))
+    ((Ok b) (tool_ok (tool_cut b)))))
+
+; write_file: the file made to hold content, anew; its directory must be
+; there.
+(def write_file ((path (list int)) (content (Option Json))) ToolAnswer
+  (match content
+    ((None) (tool_failed "content is missing"))
+    ((Some v)
+      (match (json_text v)
+        ((None) (tool_failed "content is not a string"))
+        ((Some b)
+          (let why (write_whole path b)
+            (if (is_empty why)
+                (tool_ok (bytes_from_list (append "wrote " (append (digits (bytes_len b)) (append " bytes to " path)))))
+                (tool_failed (append path (append ": " why))))))))))
+
+; list_dir: a line for each entry, NAME SIZE, a directory's NAME/; from
+; its file server on a volume, else the initramfs's.
+(def list_dir ((path (list int))) ToolAnswer
+  (if (on_initramfs path)
+      (list_root path (root_paths))
+      (match (fs_list path)
+        ((FsFiles files) (tool_ok (bytes_from_list (stat_lines files (nil int)))))
+        ((FsListRefused code) (tool_failed (append path (append ": " (io_error code))))))))
+
+; The entries' lines onto acc, reversed, then the whole in order.
+(def stat_lines ((files (list FsStat)) (acc (list int))) (list int)
+  (if (is_empty files)
+      (rev acc)
+      (match (head files)
+        ((FsStat name size)
+          (stat_lines (tail files)
+            (push "\n" (if (is_dir_name name) (push name acc) (push (digits size) (push " " (push name acc))))))))))
+
+; Whether a name is a directory's, ending in /.
+(def is_dir_name ((name (list int))) bool
+  (if (is_empty name) false (eq (last name) 47)))
+
+; A directory of the initramfs, among names: its entries, without sizes.
+(def list_root ((path (list int)) (names (list (list int)))) ToolAnswer
+  (let kids (entry_children names path)
+    (if (if (is_empty kids) (not (any_eq (append path "/") names)) false)
+        (tool_failed (append path ": no such directory"))
+        (tool_ok (bytes_from_list (join_lines kids))))))
+
+; Each of ws on a line.
+(def join_lines ((ws (list (list int)))) (list int)
+  (rev (join_lines_onto ws (nil int))))
+
+; join_lines's loop: each of ws and a newline onto acc, reversed.
+(def join_lines_onto ((ws (list (list int))) (acc (list int))) (list int)
+  (if (is_empty ws) acc (join_lines_onto (tail ws) (push "\n" (push (head ws) acc)))))
+
+; make_dir: a directory made at path, on a volume.
+(def make_dir ((path (list int))) ToolAnswer
+  (if (on_initramfs path)
+      (tool_failed (append path ": the initramfs cannot be changed"))
+      (let code (fs_mkdir path)
+        (if (eq code 0)
+            (tool_ok (bytes_from_list (append "made " path)))
+            (tool_failed (append path (append ": " (if (eq code -4) "it is there already, or cannot be made" (io_error code)))))))))
+
+; ------------------------------------------------------------ definitions
+
+; A tool's definition: its name, what it does, and its input's JSON
+; Schema, an object of the properties given, all of them required.
+(def tool_def ((name (list int)) (what (list int)) (props (list JField))) Json
+  (json_obj (cons (json_field "name" (json_str name))
+              (cons (json_field "description" (json_str what))
+                (cons (json_field "input_schema"
+                        (json_obj (cons (json_field "type" (json_str "object"))
+                                    (cons (json_field "properties" (json_obj props))
+                                      (cons (json_field "required" (JArr (prop_names props (nil Json)))) (nil JField))))))
+                      (nil JField))))))
+
+; The names of props, as JSON strings, in order.
+(def prop_names ((props (list JField)) (acc (list Json))) (list Json)
+  (if (is_empty props)
+      (rev acc)
+      (match (head props) ((JField n v) (prop_names (tail props) (cons (JStr n) acc))))))
+
+; A property of type ty, described.
+(def tool_prop ((name (list int)) (ty (list int)) (what (list int))) JField
+  (json_field name (json_obj (cons (json_field "type" (json_str ty))
+                               (cons (json_field "description" (json_str what)) (nil JField))))))
+
+; The path property, said of what it names.
+(def path_prop ((what (list int))) JField
+  (tool_prop "path" "string" (append what "; a relative path is from your home")))
+
+; The file tools' definitions.
+(def file_tool_defs () (list Json)
+  (cons (tool_def "read_file" "Read a file's text, at most 64 KB of it; it says so if cut."
+          (cons (path_prop "The file") (nil JField)))
+    (cons (tool_def "write_file" "Make a file hold content, anew; its directory must be there."
+            (cons (path_prop "The file") (cons (tool_prop "content" "string" "What the file is to hold") (nil JField))))
+      (cons (tool_def "list_dir" "List a directory: a line NAME SIZE for each file, NAME/ for each directory."
+              (cons (path_prop "The directory") (nil JField)))
+        (cons (tool_def "make_dir" "Make a directory, on a volume; the one it is in must be there."
+                (cons (path_prop "The directory") (nil JField)))
+              (nil Json))))))
