@@ -260,9 +260,9 @@ Things to try:
       1       0  boot          waiting for pid 14
       2       0  uart          waiting for a message on port 7
       3       0  virtio-gpu    waiting for a message on port 24
-      4       0  rtc           sleeping
+      4       0  rtc           waiting for a message on port 4
       5       0  virtio-blk    waiting for a message on port 5
-      6       0  fs            waiting for a message on port 22
+      6       0  fs            waiting for a message on 1 port
       7       0  virtio-net    waiting for a message on port 6
       8       0  inet          waiting for a message on port 9
       9       0  virtio-rng    waiting for a message on port 10
@@ -278,7 +278,8 @@ Things to try:
   Ports are numbered as the drivers make them, which on four CPUs
   differs from boot to boot. A process waiting on a set of ports, as
   `usb-hid` waits on its own and `keyboard`'s and `pointer`'s, says how
-  many.
+  many: `fs` waits on a set of one, `fs`'s, which `fs ram` makes two
+  with `tmpfs`'s.
 
   It lists the processes that have not exited. The shell asking is always
   `running`, since `ps` runs inside it. Every driver waits, for a request

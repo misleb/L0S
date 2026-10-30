@@ -162,13 +162,18 @@ To make a system volume:
   and says its UUID for `root=`. It copies from the initramfs, or from
   another system volume, never onto the one `/` is.
 
-**With no disk, `/` can be a RAM file system.** `fs ram [MB]`, a second
-`fs` or the only one, serves no disk but one volume, `tmp`, in its own
-memory (32 MB unless given, at most 255), mounted at `/Volumes/tmp` with
-the UUID `00000000-0000-7000-8000-000000000000` and registered as
-`tmpfs`, not `fs`. It has no partition table, so `partition`, `erase`,
-`mkfs` and `rescan` are refused (-5), and nothing in it outlives it: a board
-that has a disk too still starts the disk's `fs` as before. A program can
+**With no disk, `/` can be a RAM file system.** `fs ram [MB]` serves
+one volume, `tmp`, in its own memory (32 MB unless given, at most 255),
+mounted at `/Volumes/tmp` with the UUID
+`00000000-0000-7000-8000-000000000000` from a port registered as
+`tmpfs`, before anything else; then, as `fs` alone does, it waits up to
+5 seconds for `disk0` and mounts the disks' volumes from a port
+registered as `fs`, which it registers though there be no disk, and
+serves both ports as one set: one process, on a board with a disk or
+none. Until the disks are mounted, `tmp`'s requests wait. `tmp` has no
+partition table, so `partition`, `erase` and `attach` of the disk `tmp`
+and `relabel` of its volume are refused (-5), `mkfs` and `rescan` pass it
+over, and nothing in it outlives `fs`. A program can
 use it as any volume, as the shell does (`cp /bin/hello /Volumes/tmp/bin`,
 `run /Volumes/tmp/bin/hello`). Booted with `root=tmpfs`, `boot` has
 `install tmp` copy the initramfs onto it, which takes the moments of its

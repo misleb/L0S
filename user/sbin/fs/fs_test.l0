@@ -248,11 +248,11 @@
 (def with_store ((f Fs) (s Store)) Fs (with_store_at f 0 s))
 
 (def requests ((f Fs)) int
-  (match (fs_store f) ((StoreMem m n r fl) r) ((StoreDisk d b) -1) ((StoreRam m n) -1)))
+  (match (fs_store f) ((StoreMem m n r fl) r) ((StoreDisk d b) -1) ((StoreRam m n p) -1)))
 
 ; How many flushes f's store has been asked.
 (def flushes ((f Fs)) int
-  (match (fs_store f) ((StoreMem m n r fl) fl) ((StoreDisk d b) -1) ((StoreRam m n) -1)))
+  (match (fs_store f) ((StoreMem m n r fl) fl) ((StoreDisk d b) -1) ((StoreRam m n p) -1)))
 
 ; A write flushes nothing, its metadata kept for the close, which
 ; flushes once, so the data is down before the metadata that points at
@@ -999,13 +999,22 @@
 ; ----------------------------------------------------- RAM file system
 
 ; A RAM file system as fs ram makes it: tmp, 8 MB, from sector 0, on a
-; store of memory, the port 7.
-(def ram_fs () Fs
+; store of memory, mounted from port 8, tmpfs's; fs's port 7.
+(def ram_store_vol () Ran
   (let l (vol_layout 16384)
     (let v (vol_new "tmp" l)
-      (match (store_write_all (StoreRam ((MapEmpty int bytes)) 16384) 0 (vol_meta v))
-        ((PutNot s why) (blank_fs))
-        ((Put s) (fs_new s 7 (array_from (cons (FsVol 0 0 (ram_uuid) (FvL0 v)) (nil FsVol)) (FsVol 0 0 "" (FvL0 (vol_new "x" (vol_layout 16)))))))))))
+      (match (store_write_all (StoreRam ((MapEmpty int bytes)) 16384 8) 0 (vol_meta v))
+        ((PutNot s why) (Ran (blank_fs) why))
+        ((Put s) (Ran (fs_new s 7 (array_from (cons (FsVol 0 0 (ram_uuid) (FvL0 v)) (nil FsVol)) (FsVol 0 0 "" (FvL0 (vol_new "x" (vol_layout 16)))))) ""))))))
+
+(def ram_fs () Fs (ran_fs (ram_store_vol)))
+
+; The same, with a blank disk of 2048 sectors after it, disk0, as one fs
+; ram serves both: tmp on store 0, the disk on store 1.
+(def ram_and_disk () Fs
+  (let f (ram_fs)
+    (fs_new_on (cons (fs_store_at f 0) (cons (StoreMem ((MapEmpty int (list int))) 2048 0 0) (nil Store)))
+               7 (fs_vols f))))
 
 (def ram_answers ((reqs (list (list int)))) (list int)
   (ran_text (run (ram_fs) reqs)))
@@ -1040,11 +1049,45 @@
                (ram_answers (append (reqs4 "open 2 /Volumes/tmp/big" w w w) (reqs2 "close 1" "stat /Volumes/tmp/big")))
                "1:|3000:|3000:|3000:|0:|0:file 9000 -")))
 
+; What only a disk has is refused of tmp, the RAM file system's store.
 (def test_ram_refuses_tables () int
-  (add (check_str "partition" (ram_answers (reqs1 "partition disk0 100")) "-5:a RAM file system has no partition table")
-       (add (check_str "attach" (ram_answers (reqs1 "attach disk0")) "-5:a RAM file system has no partition table")
-       (add (check_str "rescan" (ram_answers (reqs1 "rescan")) "-5:a RAM file system has no partition table")
-            (check_str "mkfs" (ram_answers (reqs1 "mkfs 00000000-0000-7000-8000-000000000000 x")) "-5:a RAM file system has no partition table")))))
+  (add (check_str "partition" (ram_answers (reqs1 "partition tmp 100")) "-5:a RAM file system has no partition table")
+       (add (check_str "erase" (ram_answers (reqs1 "erase tmp")) "-5:a RAM file system has no partition table")
+            (check_str "attach" (ram_answers (reqs1 "attach tmp")) "-5:a RAM file system has no partition table"))))
+
+; Its volume keeps the label boot's root=tmpfs knows it by.
+(def test_ram_refuses_relabel () int
+  (check_str "relabel" (ram_answers (reqs1 "relabel /Volumes/tmp x")) "-5:a RAM file system has no partition table"))
+
+; mkfs and rescan pass it over: no partition is found on it, and a
+; rescan keeps its volume, with no disk to read.
+(def test_ram_passed_over () int
+  (add (check_str "mkfs" (ram_answers (reqs1 "mkfs 00000000-0000-7000-8000-000000000000 x")) "-3:no partition has that UUID")
+       (check_str "rescan" (rescan_text (rescan (ram_fs))) "1:tmp\n||")))
+
+; A disk beside it: a partition made and a volume on it, on store 1,
+; served with tmp, which a rescan keeps first.
+(def test_ram_and_disk () int
+  (let a (obey (ram_and_disk) 5 "partition disk0 1000")
+    (let b (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " new")))
+      (add (check_str "made" (answer_text b) "0:new")
+           (add (check_int "on disk 1" (fs_vol_disk (after b) 1) 1)
+                (check_str "rescanned" (rescan_text (rescan (after b))) "2:tmp\nnew\n||"))))))
+
+; Both volumes are written and read beside each other.
+(def test_ram_and_disk_files () int
+  (let a (obey (ram_and_disk) 5 "partition disk0 1000")
+    (let f (after (obey (after a) 5 (append "mkfs " (append (answer_bytes a) " new"))))
+      (check_str "each its own"
+                 (ran_text (run f (append (reqs4 "open 2 /Volumes/tmp/a" "write 1 one" "close 1" "open 2 /Volumes/new/b")
+                                          (reqs4 "write 2 two" "close 2" "stat /Volumes/tmp/a" "stat /Volumes/new/b"))))
+                 "1:|3:|0:|2:|3:|0:|0:file 3 -|0:file 3 -"))))
+
+; tmp is unmounted from tmpfs's port, its store's, and a disk's volume
+; from fs's.
+(def test_store_port () int
+  (add (check_int "tmpfs's" (store_port (fs_store_at (ram_fs) 0) 7) 8)
+       (check_int "fs's" (store_port (StoreMem ((MapEmpty int (list int))) 8 0 0) 7) 7)))
 
 ; A piece spliced in the middle, at the start and at the end of a
 ; sector's bytes, the rest kept.
@@ -1056,7 +1099,7 @@
 
 ; Its sectors are zeros until written, and what is written reads back.
 (def test_ram_store () int
-  (let s (StoreRam ((MapEmpty int bytes)) 16)
+  (let s (StoreRam ((MapEmpty int bytes)) 16 8)
     (match (store_write s 3 (bytes_from_list (zeros_plus 7)))
       ((PutNot s2 why) (fail_because "write" why))
       ((Put s2)
@@ -1071,7 +1114,7 @@
 (def zeros_plus ((b int)) (list int) (cons b (zeros 511)))
 
 (def test_ram_not_a_disk () int
-  (add (check_bool "ram" (store_is_ram (StoreRam ((MapEmpty int bytes)) 8)) true)
+  (add (check_bool "ram" (store_is_ram (StoreRam ((MapEmpty int bytes)) 8 8)) true)
        (check_bool "memory" (store_is_ram (StoreMem ((MapEmpty int (list int))) 8 0 0)) false)))
 
 (def test_volume_line () int
