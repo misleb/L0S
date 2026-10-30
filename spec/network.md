@@ -67,7 +67,7 @@ done, which is how its tests see it. It serves **the inet protocol**
 | `connect ADDR PORT NPORT` | a TCP connection opened to PORT at ADDR, its notices to the client's port NPORT: `connecting ID LPORT`, the connection's number and local port. It is open once a notice says so |
 | `listen PORT NPORT` | `listening PORT`: TCP connections to PORT are made, and told to NPORT; `listen 0` for a port `inet` picks, from 49152. Refused if PORT is listened to |
 | `unlisten PORT` | `ok`: no more are made; those made go on. Only by the process that listens |
-| `write ID` | then a newline and the data: given to connection ID, which sends it as the peer's window lets it; answered only if the request names a reply port. More than 16384 bytes not yet acknowledged resets the connection |
+| `write ID` | then a newline and the data: given to connection ID, which sends it as the peer's window lets it. A request that names a reply port is answered `ok HELD`, the bytes the connection now holds not yet acknowledged, or, if they would pass 16384, `error: full HELD`: the data is not taken, the connection is kept, and its notice port is told `tcp ID room N` once what it holds falls to half. One that names none is answered nothing, and more than 16384 resets the connection |
 | `finish ID` | `ok`: connection ID is closed once its data is sent (a FIN) |
 | `reset ID` | `ok`: connection ID is given up, with a reset |
 | `tcp` | a line `ID STATE LPORT ADDR:RPORT` for each connection, then `listen PORT` for each listener; `none` for neither |
@@ -109,10 +109,21 @@ come to another, named in `connect` and `listen`, so that an answer is never
 taken for a notice; it owns its connections by its pid. The notices, to that
 port, are `tcp ID up` (opened), `tcp ID accepted SRC SPORT LPORT` (to
 the listener, which is then the owner), `tcp ID data` and a newline and the data,
-`tcp ID fin` (the peer will send no more), and the last of each connection,
+`tcp ID fin` (the peer will send no more), `tcp ID room N` (a write
+refused as full may be made again, N bytes of it), and the last of each connection,
 `tcp ID closed WHY`: `closed`, `reset`, `refused`, `timeout`, `aborted` or
 `overflow`. A client whose port has gone, or is full, loses its
 connections, with a reset.
+
+A client writes a body of any length with `tcp_write_bytes`, which sends
+a range of bytes as `write` requests of at most 2048 bytes, each its head
+made once and joined to its piece as bytes, answered to its reply port;
+refused as full, it waits on the notice port for `room` and sends the
+piece again, keeping every other notice that comes meanwhile and giving
+them back, in order, so none is lost. `tcp_event_in` reads a notice in
+place from the bytes received, a data notice as `TcpDataAt ID START`,
+where in those bytes its data begins; `tcp_write` and `tcp_event_of`, on
+lists, are the older programs'.
 
 While it holds a connection `inet` looks at their timers every millisecond;
 with none, it waits for a message.
@@ -299,7 +310,8 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   and send from any port, bound or not.
 - **TCP has the essentials, and little else.** `inet` holds 32
   connections, each with at most 16384 bytes of the client's data not
-  yet acknowledged (more resets it), and offers a window of 8192 bytes
+  yet acknowledged (more is refused, or resets it if the write named no
+  reply port), and offers a window of 8192 bytes
   that never changes. At most 16 segments that arrive out of order are
   held, within the window; one more is dropped, and asked for again once
   those before it come. The retransmission timeout

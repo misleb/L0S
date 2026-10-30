@@ -863,14 +863,47 @@
 (def test_tcp_ownership () int
   (let s (tcp_up)
     (add (check_strs "another's write" (told (message s 31 (msg_from 31 (request 55 "write 1\nx")))) (cons "55: error: connection 1 is not yours" (nil (list int))))
-         (add (check_strs "its own" (told (message s 30 (msg_from 30 (request 55 "write 1\nx")))) (cons "55: ok" (nil (list int))))
+         (add (check_strs "its own" (told (message s 30 (msg_from 30 (request 55 "write 1\nx")))) (cons "55: ok 1" (nil (list int))))
               (check_strs "none such" (told (asked_of s (client) "finish 9")) (cons "55: error: no connection 9" (nil (list int))))))))
 
-; Too much waiting to be sent resets it.
+; A write with a reply port is answered with what the connection holds,
+; sent or not.
+(def test_tcp_write_held () int
+  (let s (asked_of (tcp_up) (client) "write 1\nhello")
+    (check_strs "ok and held" (told s) (cons "55: ok 5" (nil (list int))))))
+
+; Too much waiting to be sent, from a write with no reply port, resets it.
 (def test_tcp_overflow () int
-  (let s (asked_of (tcp_up) (client) (append "write 1\n" (repeat 16385 97)))
-    (add (check_strs "refused, and told" (told s) (cons "56: tcp 1 closed overflow" (cons "55: error: too much data waits to be sent" (nil (list int)))))
+  (let s (asked_of (tcp_up) 0 (append "write 1\n" (repeat 16385 97)))
+    (add (check_strs "told" (told s) (cons "56: tcp 1 closed overflow" (nil (list int))))
          (check_bool "gone" (tcp_busy s) false))))
+
+; A connection holding 16000 bytes, of which the gateway's window of 4096
+; let 4096 go, whose writer was refused 1000 more.
+(def tcp_held_full () Stack
+  (let s (cleared (asked_of (tcp_up) (client) (append "write 1\n" (repeat 16000 97))))
+    (asked_of s (client) (append "write 1\n" (repeat 1000 98)))))
+
+; With a reply port, the write past the bound is refused, and the
+; connection kept as it was.
+(def test_tcp_full () int
+  (let s (tcp_held_full)
+    (add (check_strs "refused" (told s) (cons "55: error: full 16000" (nil (list int))))
+         (add (check_str "kept" (conn_state_of s 1) "ESTABLISHED")
+              (check_int "nothing sent" (length (wire s)) 0)))))
+
+; The gateway's acknowledgement of all sent so far, offering 4096 more.
+(def peer_acked ((s Stack)) Seg (Seg 80 49152 5001 (conn_nxt s 1) (tcp_ack) 4096 0 (nil int)))
+
+; The first 4096 acknowledged leaves 11904, more than half: inet sends
+; the next 4096 and says nothing. Those acknowledged leave 7808: the
+; writer is told it may write 16384 - 7808 = 8576 more.
+(def test_tcp_room () int
+  (let s (tcp_held_full)
+    (let s2 (from_peer_seg (cleared s) (peer_acked s))
+      (let s3 (from_peer_seg (cleared s2) (peer_acked s2))
+        (add (check_int "not yet" (length (told s2)) 0)
+             (check_strs "room" (told s3) (cons "56: tcp 1 room 8576" (nil (list int)))))))))
 
 ; ----------------------------------------------------------------- listening
 

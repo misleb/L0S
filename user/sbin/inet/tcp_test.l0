@@ -32,7 +32,8 @@
     ((GotData d) (append "data " d))
     ((GotFin) "fin")
     ((ConnOver) "over")
-    ((ConnGone why) (if (is_empty why) "gone" (append "gone " why)))))
+    ((ConnGone why) (if (is_empty why) "gone" (append "gone " why)))
+    ((ConnRoom n) (append "room " (digits n)))))
 
 (def acts_lines ((as (list TcpAct)) (acc (list (list int)))) (list (list int))
   (if (is_empty as) (rev acc) (acts_lines (tail as) (cons (act_line (head as)) acc))))
@@ -190,6 +191,68 @@
     (let st (tcp_arrive c 500 (from_peer 5001 1003 (tcp_ack) 4096 (nil int)))
       (add (check_str "the rest kept" (c_queue (step_conn st)) "llo")
            (check_int "timer restarted" (c_deadline (step_conn st)) 1000000500)))))
+
+; ------------------------------------------------------------------- room
+
+; The room a step's acts tell the application of, or -1 if none does.
+(def room_told ((acts (list TcpAct))) int
+  (if (is_empty acts)
+      -1
+      (match (head acts)
+        ((ConnRoom n) n)
+        ((SendSeg a s) (room_told (tail acts)))
+        ((ConnUp) (room_told (tail acts)))
+        ((ConnAccepted) (room_told (tail acts)))
+        ((GotData d) (room_told (tail acts)))
+        ((GotFin) (room_told (tail acts)))
+        ((ConnOver) (room_told (tail acts)))
+        ((ConnGone w) (room_told (tail acts))))))
+
+; An open connection holding 12000 bytes, of which the peer's window of
+; 4096 has let 4096 be sent (1001 to 5097), whose next write was refused.
+(def held_full () Conn (step_conn (tcp_refuse (step_conn (tcp_send (established) 0 (repeat 12000 97))))))
+
+; Holding 12000, 16384 - 12000 = 4384 bytes more fit, and no more.
+(def test_fits () int
+  (let c (step_conn (tcp_send (established) 0 (repeat 12000 97)))
+    (add (check_bool "4384 fits" (tcp_fits c 4384) true)
+         (check_bool "4385 does not" (tcp_fits c 4385) false))))
+
+; Refused while it holds more than 8192: nothing said yet, and it waits.
+(def test_refused_waits () int
+  (let st (tcp_refuse (step_conn (tcp_send (established) 0 (repeat 12000 97))))
+    (add (check_str "no acts" (acts_text st) "")
+         (check_bool "waiting" (c_wait (step_conn st)) true))))
+
+; 4000 acknowledged leaves 8000, under half of 16384: the application is
+; told it may write 16384 - 8000 = 8384 more, and waits no longer.
+(def test_room_after_ack () int
+  (let st (tcp_arrive (held_full) 10 (from_peer 5001 5001 (tcp_ack) 4096 (nil int)))
+    (add (check_int "room" (room_told (step_acts st)) 8384)
+         (check_bool "not waiting" (c_wait (step_conn st)) false))))
+
+; 1000 acknowledged leaves 11000, more than half: not yet.
+(def test_no_room_yet () int
+  (let st (tcp_arrive (held_full) 10 (from_peer 5001 2001 (tcp_ack) 4096 (nil int)))
+    (add (check_int "no room" (room_told (step_acts st)) -1)
+         (check_bool "still waiting" (c_wait (step_conn st)) true))))
+
+; Once told, a later acknowledgement says nothing more.
+(def test_room_once () int
+  (let c (step_conn (tcp_arrive (held_full) 10 (from_peer 5001 5001 (tcp_ack) 4096 (nil int))))
+    (check_int "told once" (room_told (step_acts (tcp_arrive c 20 (from_peer 5001 5097 (tcp_ack) 4096 (nil int))))) -1)))
+
+; A connection that never refused a write says nothing of room.
+(def test_room_unasked () int
+  (let c (step_conn (tcp_send (established) 0 (repeat 12000 97)))
+    (check_int "silent" (room_told (step_acts (tcp_arrive c 10 (from_peer 5001 5001 (tcp_ack) 4096 (nil int))))) -1)))
+
+; Refused while it holds half or less (a write bigger than all the rest):
+; told at once.
+(def test_refused_room_at_once () int
+  (let st (tcp_refuse (step_conn (tcp_send (established) 0 "hello")))
+    (add (check_str "room" (acts_text st) "room 16379")
+         (check_bool "not waiting" (c_wait (step_conn st)) false))))
 
 ; The segment size is the peer's: 10 bytes in segments of 4, and the last
 ; with PSH.
@@ -486,6 +549,7 @@
         ((GotFin) (absorbed s (tail acts) out))
         ((ConnOver) (absorbed s (tail acts) out))
         ((ConnGone why) (absorbed s (tail acts) out))
+        ((ConnRoom n) (absorbed s (tail acts) out))
         ((GotData d) (match s ((Side c inbox got) (absorbed (Side c inbox (push d got)) (tail acts) out)))))))
 
 ; The end a took the step st of, and what it sends, to b.
@@ -550,7 +614,8 @@
         ((GotData d) (segs_of (tail acts) acc))
         ((GotFin) (segs_of (tail acts) acc))
         ((ConnOver) (segs_of (tail acts) acc))
-        ((ConnGone why) (segs_of (tail acts) acc)))))
+        ((ConnGone why) (segs_of (tail acts) acc))
+        ((ConnRoom n) (segs_of (tail acts) acc)))))
 
 ; n bytes of a pattern that repeats every 251, so that a block moved or
 ; lost shows.

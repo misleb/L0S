@@ -34,8 +34,12 @@
 ;   write ID                and then a newline and the data: given to
 ;                           connection ID, which sends it as the peer's
 ;                           window lets it. Answered only if the request
-;                           names a reply port, with ok or why not; more
-;                           than 16384 bytes unsent resets the connection
+;                           names a reply port: ok HELD, the bytes it now
+;                           holds not acknowledged, or error: full HELD
+;                           if they would pass 16384, the write not
+;                           taken and the connection kept, and a room
+;                           notice once there is room. With no reply
+;                           port, more than 16384 resets the connection
 ;   finish ID               ok: connection ID closed once its data is sent
 ;   reset ID                ok: connection ID given up, with a reset
 ;   tcp                     a line ID STATE LPORT ADDR:RPORT for each
@@ -59,6 +63,9 @@
 ;                           listens to, from SPORT at SRC, is open, as ID
 ;   tcp ID data             then a newline and the data that came
 ;   tcp ID fin              the peer will send no more
+;   tcp ID room N           a write refused as full may be made again:
+;                           what it holds has fallen to half, and N
+;                           bytes more may be written
 ;   tcp ID closed WHY       the end of connection ID, and WHY in a word:
 ;                           closed (it ended as it should, once both
 ;                           ends had closed), reset (the peer reset it),
@@ -376,11 +383,16 @@
 ; as a connection with this number; data that came; that the peer will send
 ; no more; or that the connection is gone, and why, in one word: closed (it
 ; ended as it should), reset, refused, timeout, aborted, or overflow (the
-; process did not take its notices fast enough).
-(data TcpEvent (TcpUp int) (TcpAccepted int int int int) (TcpData int (list int)) (TcpFin int) (TcpClosed int (list int)))
+; process did not take its notices fast enough); that a write refused
+; for want of room may be made again, so many bytes of it; or, read in
+; place by tcp_event_in, data that came, from an index into the bytes
+; received to their end.
+(data TcpEvent (TcpUp int) (TcpAccepted int int int int) (TcpData int (list int)) (TcpFin int) (TcpClosed int (list int))
+               (TcpRoom int int) (TcpDataAt int int))
 
 ; The tcp notice of e, as inet sends it to the port a connection's notices
-; go to.
+; go to; of TcpDataAt, only its first line, with its newline, which the
+; data follows.
 (def tcp_notice ((e TcpEvent)) (list int)
   (match e
     ((TcpUp id) (unwords (cons "tcp" (cons (digits id) (cons "up" (nil (list int)))))))
@@ -388,7 +400,9 @@
       (unwords (cons "tcp" (cons (digits id) (cons "accepted" (cons (ip_text src) (numbers_words (cons sport (cons lport (nil int))))))))))
     ((TcpData id body) (append (unwords (cons "tcp" (cons (digits id) (cons "data" (nil (list int)))))) (cons 10 body)))
     ((TcpFin id) (unwords (cons "tcp" (cons (digits id) (cons "fin" (nil (list int)))))))
-    ((TcpClosed id why) (unwords (cons "tcp" (cons (digits id) (cons "closed" (cons why (nil (list int))))))))))
+    ((TcpClosed id why) (unwords (cons "tcp" (cons (digits id) (cons "closed" (cons why (nil (list int))))))))
+    ((TcpRoom id n) (unwords (cons "tcp" (cons (digits id) (cons "room" (cons (digits n) (nil (list int))))))))
+    ((TcpDataAt id start) (append (unwords (cons "tcp" (cons (digits id) (cons "data" (nil (list int)))))) (cons 10 (nil int))))))
 
 ; The event a tcp notice holds, or none if payload is not one.
 (def tcp_event_of ((payload (list int))) (Option TcpEvent)
@@ -409,7 +423,38 @@
   (if (if (eq kind "data") (is_empty rest) false) (Some (TcpData id body))
   (if (eq kind "closed") (Some (TcpClosed id (unwords rest)))
   (if (if (eq kind "accepted") (eq (length rest) 3) false) (tcp_accepted_of id rest)
-  ((None TcpEvent))))))))
+  (if (eq kind "room") (tcp_room_of id rest)
+  ((None TcpEvent)))))))))
+
+; The room event of connection id, from the word N.
+(def tcp_room_of ((id int) (ws (list (list int)))) (Option TcpEvent)
+  (match (word_numbers ws)
+    ((None) ((None TcpEvent)))
+    ((Some ns) (if (eq (length ns) 1) (Some (TcpRoom id (head ns))) ((None TcpEvent))))))
+
+; The event a tcp notice holds, read in place from the bytes b of the
+; message it came in (a Message's, its sender first), or none if it is
+; not one. Only its first line is made a list, to read its words; data
+; is TcpDataAt, the index in b where it begins, to read or send from
+; there to b's end.
+(def tcp_event_in ((b bytes)) (Option TcpEvent)
+  (if (not (msg_starts b "tcp "))
+      ((None TcpEvent))
+      (let nl (bytes_index_of b (header_len) 10)
+        (let end (if (lt nl 0) (bytes_len b) nl)
+          (let ws (split_spaces (bytes_range b (header_len) end))
+            (if (lt (length ws) 3)
+                ((None TcpEvent))
+                (match (word_number (nth ws 1))
+                  ((None) ((None TcpEvent)))
+                  ((Some id)
+                    (if (eq (nth ws 2) "data")
+                        (if (if (lt nl 0) true (gt (length ws) 3)) ((None TcpEvent)) (Some (TcpDataAt id (add nl 1))))
+                        (tcp_event_words id (nth ws 2) (drop ws 3) (nil int)))))))))))
+
+; The index of the first byte c in b from i on, or -1 if there is none.
+(def bytes_index_of ((b bytes) (i int) (c int)) int
+  (if (ge i (bytes_len b)) -1 (if (eq (bytes_get b i) c) i (bytes_index_of b (add i 1) c))))
 
 ; The accepted event of connection id, from the words ADDR PORT LPORT.
 (def tcp_accepted_of ((id int) (ws (list (list int)))) (Option TcpEvent)
@@ -476,6 +521,76 @@
       (if (ge tries (tcp_write_tries))
           "inet does not take its requests"
           (let z (sleep_ns 1000000) (tcp_write_chunk port id chunk (add tries 1)))))))
+
+; What tcp_write_bytes did: the notices that came to the connection's
+; notice port while it waited for room, each the bytes of its message,
+; in order, for the caller to read as if it had received them; and why
+; it stopped short, empty if all was written.
+(data TcpWrote (TcpWrote (list bytes) (list int)))
+
+; The bytes of b from i up to j given to connection id, whose notices
+; come to np, in write requests of at most tcp_write_max bytes, each
+; answered to the client's reply port. Each request's head is made once
+; and joined to its piece as bytes. A write inet refuses as full is sent
+; again once a room notice says there is room, and every other notice
+; that comes to np meanwhile is kept and given back, so none is lost.
+(def tcp_write_bytes ((n Inet) (np int) (id int) (b bytes) (i int) (j int)) TcpWrote
+  (match n
+    ((NoInet why) (TcpWrote (nil bytes) why))
+    ((Inet port rp)
+      (let hdr (bytes_from_list (request rp (append "write " (append (digits id) (cons 10 (nil int))))))
+        (match (tcp_write_from port rp np id hdr b i j (nil bytes))
+          ((TcpWrote kept why) (TcpWrote (rev kept) why)))))))
+
+; The rest of tcp_write_bytes, from i on, the notices kept so far
+; reversed in kept, and given back so.
+(def tcp_write_from ((port int) (rp int) (np int) (id int) (hdr bytes) (b bytes) (i int) (j int) (kept (list bytes))) TcpWrote
+  (if (ge i j)
+      (TcpWrote kept "")
+      (let k (min j (add i (tcp_write_max)))
+        (let r (tcp_write_asked port rp (bytes_concat (cons hdr (cons (bytes_slice b i k) (nil bytes)))) 0)
+          (if (starts_with r "ok")
+              (tcp_write_from port rp np id hdr b k j kept)
+              (if (starts_with r "error: full")
+                  (match (tcp_room_wait np id kept)
+                    ((TcpWrote kept2 why)
+                      (if (is_empty why) (tcp_write_from port rp np id hdr b i j kept2) (TcpWrote kept2 why))))
+                  (TcpWrote kept (inet_error r))))))))
+
+; One write request, the message m, sent to inet, again after a
+; millisecond while its queue is full, tries of tcp_write_tries made
+; already; and its answer, which comes to rp, or error: WHY.
+(def tcp_write_asked ((port int) (rp int) (m bytes) (tries int)) (list int)
+  (match (port_send_bytes port m 0 (bytes_len m))
+    ((Sent)
+      (match (port_receive rp)
+        ((Message from a) (msg_text a))
+        ((RecvFailed) "error: no reply from inet")))
+    ((SendNoPort) "error: inet is gone")
+    ((SendTooBig) "error: a write is too big")
+    ((SendFull)
+      (if (ge tries (tcp_write_tries))
+          "error: inet does not take its requests"
+          (let z (sleep_ns 1000000) (tcp_write_asked port rp m (add tries 1)))))))
+
+; Waits on np for connection id's room notice, keeping, onto the reversed
+; kept, every other notice that comes first; the connection's end, or a
+; port that fails, stops it, with why.
+(def tcp_room_wait ((np int) (id int) (kept (list bytes))) TcpWrote
+  (match (port_receive np)
+    ((RecvFailed) (TcpWrote kept "no notice came from inet"))
+    ((Message from mb)
+      (match (tcp_event_in mb)
+        ((None) (tcp_room_wait np id (cons mb kept)))
+        ((Some e)
+          (match e
+            ((TcpRoom i n) (if (eq i id) (TcpWrote kept "") (tcp_room_wait np id (cons mb kept))))
+            ((TcpClosed i w) (if (eq i id) (TcpWrote (cons mb kept) (append "the connection closed: " w)) (tcp_room_wait np id (cons mb kept))))
+            ((TcpUp i) (tcp_room_wait np id (cons mb kept)))
+            ((TcpAccepted i src sp lp) (tcp_room_wait np id (cons mb kept)))
+            ((TcpData i d) (tcp_room_wait np id (cons mb kept)))
+            ((TcpDataAt i at) (tcp_room_wait np id (cons mb kept)))
+            ((TcpFin i) (tcp_room_wait np id (cons mb kept)))))))))
 
 ; Connection id told it will send no more, after its data: empty once inet
 ; has the request, or why not.

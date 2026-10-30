@@ -1,6 +1,6 @@
 # 0041: An HTTP/1.1 client library, with JSON and server-sent events
 
-Track: Agent · Status: ready · Needs: – · Spec: network.md, programs.md, testing.md
+Track: Agent · Status: active · Needs: – · Spec: network.md, programs.md, testing.md
 
 ## Why
 
@@ -44,7 +44,7 @@ notice's bytes as one, so a body would go through a list both ways
 
 ## Steps
 
-- [ ] **TCP writes from bytes, paced.** In
+- [x] **TCP writes from bytes, paced.** In
   [proto/inet.l0](../user/lib/proto/inet.l0): `tcp_write_bytes n id b
   i j`, the range sent as `write ID` requests of at most `tcp_write_max`
   bytes, each the header made once and the piece joined by
@@ -177,3 +177,13 @@ notice's bytes as one, so a body would go through a list both ways
   how fast an answer comes, which is enough for an API's streamed
   answers. JSON objects keep their fields in order, a list, not a
   `Map`: they are small, and are written back as they came.
+- 2026-10-29: step 1 landed. `tcp_write_bytes` takes the notice port
+  too, `tcp_write_bytes n np id b i j`, since it waits there for
+  `room`, and gives a `TcpWrote`: the notices it kept, each its
+  message's bytes, and why it stopped, if it did. `room N` says how
+  many bytes may be written now (16384 less what is held). A refused
+  write whose connection already holds half or less is told `room` at
+  once. The flag lives in tcp.l0's `Conn` (a ninth field), and the
+  notice is the act `ConnRoom`, so tcp_test.l0 tests it with the rest
+  of the machine; tcpstack's own tests are inet_test.l0's, as before.
+  `tcp_event_in` takes a message's bytes, the pid first, as received.

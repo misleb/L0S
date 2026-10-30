@@ -84,7 +84,49 @@
 
 (def events () (list TcpEvent)
   (cons (TcpUp 3) (cons (TcpAccepted 4 167772674 49999 7000) (cons (TcpData 5 "line\nmore") (cons (TcpData 5 "")
-  (cons (TcpFin 6) (cons (TcpClosed 7 "closed") (cons (TcpClosed 7 "timed out") (nil TcpEvent)))))))))
+  (cons (TcpFin 6) (cons (TcpClosed 7 "closed") (cons (TcpClosed 7 "timed out") (cons (TcpRoom 8 8576) (nil TcpEvent))))))))))
+
+(def test_tcp_room_notice () int
+  (add (check_str "room" (tcp_notice (TcpRoom 8 8576)) "tcp 8 room 8576")
+       (add (check_bool "no number" (eq (tcp_event_of "tcp 8 room") ((None TcpEvent))) true)
+            (check_bool "two" (eq (tcp_event_of "tcp 8 room 1 2") ((None TcpEvent))) true))))
+
+; ------------------------------------------------------------- in place
+
+; The bytes of a message from pid 30 with payload p, as received.
+(def notice_bytes ((p (list int))) bytes
+  (match (message_new 30 p) ((Message f b) b) ((RecvFailed) (bytes_from_list (nil int)))))
+
+; A data notice read in place: its data begins after the pid's 4 bytes
+; and "tcp 9 data\n"'s 11, at 15.
+(def test_tcp_event_in_data () int
+  (let b (notice_bytes "tcp 9 data\nhello\nworld")
+    (match (tcp_event_in b)
+      ((None) (fail_because "data" "not read"))
+      ((Some e)
+        (add (check_bool "at 15" (eq e (TcpDataAt 9 15)) true)
+             (check_str "the data" (bytes_range b 15 (bytes_len b)) "hello\nworld"))))))
+
+; Data that is empty is still data, at the end.
+(def test_tcp_event_in_empty () int
+  (check_bool "at the end" (eq (tcp_event_in (notice_bytes "tcp 9 data\n")) (Some (TcpDataAt 9 15))) true))
+
+; The other kinds read in place as tcp_event_of reads them.
+(def test_tcp_event_in_kinds () int
+  (add (check_bool "up" (eq (tcp_event_in (notice_bytes "tcp 3 up")) (Some (TcpUp 3))) true)
+       (add (check_bool "room" (eq (tcp_event_in (notice_bytes "tcp 8 room 8576")) (Some (TcpRoom 8 8576))) true)
+            (add (check_bool "closed" (eq (tcp_event_in (notice_bytes "tcp 7 closed reset")) (Some (TcpClosed 7 "reset"))) true)
+                 (check_bool "accepted" (eq (tcp_event_in (notice_bytes "tcp 4 accepted 10.0.2.2 49999 7000")) (Some (TcpAccepted 4 167772674 49999 7000))) true)))))
+
+; Not a tcp notice, data with no newline, data with more words: none.
+(def test_tcp_event_in_bad () int
+  (add (check_bool "udp" (eq (tcp_event_in (notice_bytes "udp 10.0.2.2 69 49152\nx")) ((None TcpEvent))) true)
+       (add (check_bool "no newline" (eq (tcp_event_in (notice_bytes "tcp 9 data")) ((None TcpEvent))) true)
+            (check_bool "more words" (eq (tcp_event_in (notice_bytes "tcp 9 data x\ny")) ((None TcpEvent))) true))))
+
+; A data notice's first line, which inet joins to the data as bytes.
+(def test_tcp_data_at_notice () int
+  (check_str "the head" (tcp_notice (TcpDataAt 9 15)) "tcp 9 data\n"))
 
 (def test_tcp_events_round_trip () int
   (check_int "all read back" (event_round_trips (events) 0) 0))
@@ -179,3 +221,21 @@
 ; tries as there are, and not a moment earlier.
 (def test_tcp_write_full () int
   (check_str "given up" (tcp_write_chunk 1 1 "x" (tcp_write_tries)) "inet does not take its requests"))
+
+; What tcp_write_bytes did, as text: the notices kept, then why.
+(def wrote_text ((w TcpWrote)) (list int)
+  (match w ((TcpWrote kept why) (append (digits (length kept)) (append " kept; " why)))))
+
+; Writing bytes: with no stack, why; nothing to write needs no one.
+(def test_tcp_write_bytes_none () int
+  (let b (bytes_from_list "hello")
+    (add (check_str "no inet" (wrote_text (tcp_write_bytes (NoInet "no network") 9 1 b 0 5)) "0 kept; no network")
+         (check_str "empty" (wrote_text (tcp_write_bytes (Inet 1 2) 9 1 b 3 3)) "0 kept; "))))
+
+; A request inet never takes is given up after its tries, as an error.
+(def test_tcp_write_asked_full () int
+  (check_str "given up" (tcp_write_asked 1 2 (bytes_from_list "x") (tcp_write_tries)) "error: inet does not take its requests"))
+
+; Waiting for room on a port that fails gives up, keeping what came.
+(def test_tcp_room_wait_fails () int
+  (check_str "no notice" (wrote_text (tcp_room_wait 9 1 (nil bytes))) "0 kept; no notice came from inet"))
