@@ -103,7 +103,7 @@ notice's bytes as one, so a body would go through a list both ways
   whole, then cut in two at every offset, then a byte at a time, each
   giving the same events (a property test); a comment and a `retry`
   between events. `SSE`, its test line, programs.md's row, network.md.
-- [ ] **HTTP/1.1 messages.** [format/http.l0](../user/lib/format/http.l0),
+- [x] **HTTP/1.1 messages.** [format/http.l0](../user/lib/format/http.l0),
   pure: `http_request method host path headers body`, the request's
   bytes, `Host`, `Content-Length` for a body, headers as given;
   `(data HttpRead ...)`, a response read as it comes: `http_more r b i
@@ -201,3 +201,11 @@ notice's bytes as one, so a body would go through a list both ways
   joined once the line ends, and a CR that ended a piece. `sse_name`
   and `sse_data` read an event. Beside the cuts at every offset and a
   byte at a time, 300 random cuts in three.
+- 2026-10-29: step 4 landed. A header is `(HttpHeader NAME VALUE)`, as
+  text; a reader is made for its request, `http_read_new METHOD`, and
+  `http_expect r METHOD` tells a kept one the next request's method,
+  since only HEAD's answer changes how a response is read. A part
+  `HttpBad WHY` says what is not a response; `http_closed` gives an
+  `HttpMore` too. `http_idle` says a reader is between responses, so a
+  close there is no fault. The Makefile's variable for the file alone
+  is `HTTPMSG`; `HTTP`, as planned, is the client's whole set.

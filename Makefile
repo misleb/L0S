@@ -225,6 +225,9 @@ INETLIB := $(NICLIB) $(DNSLIB) $(RANDOM) user/lib/proto/inet.l0
 JSON    := user/lib/format/json.l0
 # Server-sent events, read from a body that comes in pieces; pure.
 SSE     := user/lib/format/sse.l0
+# HTTP/1.1's messages, a request written and a response read as it
+# comes; pure.
+HTTPMSG := user/lib/format/http.l0
 
 # USB: its descriptors and requests, and the usb protocol, which the
 # host controller's driver serves to the class drivers, over them; and
@@ -493,6 +496,7 @@ $(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)
 $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(call l0_test,$(BASE) $(JSON) user/lib/format/json_test.l0)
 $(call l0_test,$(BASE) $(SSE) user/lib/format/sse_test.l0)
+$(call l0_test,$(BASE) $(HTTPMSG) user/lib/format/http_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/uiapp_test.l0)

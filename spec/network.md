@@ -254,6 +254,27 @@ starts with `:` is a comment; `id`, `retry` and any other field are
 passed over; a blank line ends an event, which is given if it has data,
 and one the stream ends inside is never given.
 
+**HTTP/1.1's messages** (RFC 9112), in
+[http.l0](../user/lib/format/http.l0), pure: `http_request method host
+path headers body` is a request's bytes, `METHOD PATH HTTP/1.1`, `Host`,
+the headers as given, and `Content-Length` for a body (or any `POST`,
+`PUT` or `PATCH`), its head made bytes once and joined to the body. An
+`HttpRead` reads the response as the connection gives it:
+`http_more r b i j` takes the next piece and gives the reader after it
+and the parts the piece gave, `HttpHead STATUS REASON HEADERS`,
+`HttpBody BYTES` as the body comes, and `HttpEnd KEEP`, whether the
+connection may carry the next request (not if the response said
+`Connection: close`, or was HTTP/1.0 without `keep-alive`, or its body
+ran to the close); `HttpBad WHY` for what is not a response, after
+which it reads nothing more. The head is read whole, up to 16384 bytes,
+its lines ended by CRLF or LF; a 1xx answer is passed over; the body is
+chunked (sizes in hex, extensions passed over, trailers read and
+dropped), or of a `Content-Length`, or what comes until the connection
+closes, which `http_closed` ends, refusing any other body cut short;
+`204`, `304` and the answer to `HEAD` have none. After an end the
+reader reads the next response from what follows, so two may come back
+to back. `http_header` finds a header ignoring case.
+
 ## The network on the Raspberry Pi 5
 
 ```

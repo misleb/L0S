@@ -1,0 +1,179 @@
+; http_test.l0 -- tests of http.l0: requests as bytes, RFC 9112's
+; examples of responses, a chunked body cut at every offset giving the
+; same body, two responses on one stream, bodies cut short or to the
+; close, a head past the bound, and whether a connection is kept.
+
+; ---------------------------------------------------------------- helpers
+
+; Parts as text, joined by " | ", the pieces of a body that come one
+; after another joined into one BODY, so that how a stream was cut does
+; not show.
+(def parts_text ((ps (list HttpPart))) (list int) (join_with " | " (part_lines ps (nil int) false (nil (list int)))))
+
+; The lines of ps, a body run so far reversed in body (open if inbody),
+; after acc, reversed.
+(def part_lines ((ps (list HttpPart)) (body (list int)) (inbody bool) (acc (list (list int)))) (list (list int))
+  (let acc2 (if (if inbody (if (is_empty ps) true (not (is_body (head ps)))) false) (cons (append "BODY " (rev body)) acc) acc)
+    (if (is_empty ps)
+        (rev acc2)
+        (let p (head ps)
+          (if (is_body p)
+              (part_lines (tail ps) (rev_onto (body_of p) (if inbody body (nil int))) true acc2)
+              (part_lines (tail ps) (nil int) false (cons (http_part_text p) acc2)))))))
+
+; Whether p is a piece of a body, and its bytes as a list.
+(def is_body ((p HttpPart)) bool
+  (match p ((HttpBody d) true) ((HttpHead c r h) false) ((HttpEnd k) false) ((HttpBad w) false)))
+(def body_of ((p HttpPart)) (list int)
+  (match p ((HttpBody d) (bytes_to_list d)) ((HttpHead c r h) (nil int)) ((HttpEnd k) (nil int)) ((HttpBad w) (nil int))))
+
+; The parts of s read whole by a reader of method's answer, and then,
+; if closed, the connection's close.
+(def read_all ((method (list int)) (s (list int)) (closed bool)) (list int)
+  (let b (bytes_from_list s)
+    (match (http_more (http_read_new method) b 0 (bytes_len b))
+      ((HttpMore r ps)
+        (if closed
+            (match (http_closed r) ((HttpMore r2 ps2) (parts_text (append ps ps2))))
+            (parts_text ps))))))
+
+; The parts of s read in pieces cut at each of cuts.
+(def read_cut ((s (list int)) (cuts (list int))) (list int)
+  (parts_text (fed (http_read_new "GET") (bytes_from_list s) 0 cuts (nil HttpPart))))
+
+; The parts of b from i on, cut at each of cuts, after acc, reversed.
+(def fed ((r HttpRead) (b bytes) (i int) (cuts (list int)) (acc (list HttpPart))) (list HttpPart)
+  (let j (if (is_empty cuts) (bytes_len b) (head cuts))
+    (let piece (bytes_slice b i j)
+      (match (http_more r piece 0 (bytes_len piece))
+        ((HttpMore r2 ps)
+          (let acc2 (rev_onto ps acc)
+            (if (is_empty cuts) (rev acc2) (fed r2 b j (tail cuts) acc2))))))))
+
+; ---------------------------------------------------------------- requests
+
+; RFC 9112's example request, with Host and a header of the caller's.
+(def test_request_get () int
+  (check_str "GET" (bytes_to_list (http_request "GET" "www.example.com" "/hello.txt"
+                                    (cons (HttpHeader "User-Agent" "curl/7.64.1") (nil HttpHeader)) (bytes_from_list (nil int))))
+             "GET /hello.txt HTTP/1.1\r\nHost: www.example.com\r\nUser-Agent: curl/7.64.1\r\n\r\n"))
+
+; A POST says its body's length, then the body.
+(def test_request_post () int
+  (check_str "POST" (bytes_to_list (http_request "POST" "10.0.2.2:8000" "/echo"
+                                     (cons (HttpHeader "Content-Type" "application/json") (nil HttpHeader)) (bytes_from_list "{\"a\":1}")))
+             "POST /echo HTTP/1.1\r\nHost: 10.0.2.2:8000\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\r\n{\"a\":1}"))
+
+; A POST with no body still says its length, 0.
+(def test_request_post_empty () int
+  (check_str "length 0" (bytes_to_list (http_request "POST" "h" "/" (nil HttpHeader) (bytes_from_list (nil int))))
+             "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n"))
+
+; --------------------------------------------------------------- responses
+
+; RFC 9112's example response, of a length.
+(def rfc_response () (list int)
+  "HTTP/1.1 200 OK\r\nDate: Mon, 27 Jul 2009 12:28:53 GMT\r\nServer: Apache\r\nLast-Modified: Wed, 22 Jul 2009 19:15:56 GMT\r\nETag: \"34aa387-d-1568eb00\"\r\nAccept-Ranges: bytes\r\nContent-Length: 51\r\nVary: Accept-Encoding\r\nContent-Type: text/plain\r\n\r\nHello World! My content includes a trailing CRLF.\r\n")
+
+(def test_rfc_response () int
+  (check_str "parts" (read_all "GET" (rfc_response) false)
+             "HEAD 200 OK | BODY Hello World! My content includes a trailing CRLF.\r\n | END keep"))
+
+; Its headers, found whatever their case.
+(def test_headers () int
+  (let b (bytes_from_list (rfc_response))
+    (match (http_more (http_read_new "GET") b 0 (bytes_len b))
+      ((HttpMore r ps)
+        (match (head ps)
+          ((HttpHead code reason hs)
+            (add (check_bool "content-type" (eq (http_header hs "content-type") (Some "text/plain")) true)
+                 (add (check_bool "ETag" (eq (http_header hs "ETAG") (Some "\"34aa387-d-1568eb00\"")) true)
+                      (check_bool "none" (eq (http_header hs "X-None") ((None (list int)))) true))))
+          ((HttpBody d) (fail_because "head" "a body first"))
+          ((HttpEnd k) (fail_because "head" "an end first"))
+          ((HttpBad w) (fail_because "head" w)))))))
+
+; A chunked body, RFC 9112 7.1's way: sizes in hex, an extension, a
+; trailer.
+(def chunked () (list int)
+  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n4\r\nWiki\r\n5;name=value\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\nExpires: never\r\n\r\n")
+
+(def test_chunked () int
+  (check_str "parts" (read_all "GET" (chunked) false) "HEAD 200 OK | BODY Wikipedia in\r\n\r\nchunks. | END keep"))
+
+; Of the cuts at 1 to n - 1, how many give other parts than whole.
+(def cut_mismatches ((s (list int)) (want (list int)) (k int) (n int) (bad int)) int
+  (if (ge k n)
+      bad
+      (cut_mismatches s want (add k 1) n (if (eq (read_cut s (cons k (nil int))) want) bad (add bad 1)))))
+
+; Cut in two at every offset: the same head, body and end.
+(def test_chunked_cut_everywhere () int
+  (let s (chunked)
+    (check_int "none differ" (cut_mismatches s (read_all "GET" s false) 1 (length s) 0) 0)))
+
+; A byte at a time too.
+(def every_from ((k int) (n int) (acc (list int))) (list int)
+  (if (ge k n) (rev acc) (every_from (add k 1) n (cons k acc))))
+
+(def test_chunked_byte_at_a_time () int
+  (let s (chunked)
+    (check_str "the same" (read_cut s (every_from 1 (length s) (nil int))) (read_all "GET" s false))))
+
+; Two responses back to back on one stream: the second read after the
+; first's end.
+(def test_two_responses () int
+  (check_str "both" (read_all "GET" (append "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi" (chunked)) false)
+             "HEAD 200 OK | BODY hi | END keep | HEAD 200 OK | BODY Wikipedia in\r\n\r\nchunks. | END keep"))
+
+; A body of a length cut short by the close.
+(def test_cut_short () int
+  (check_str "refused" (read_all "GET" "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello" true)
+             "HEAD 200 OK | BODY hello | BAD the connection closed before the body ended"))
+
+; A chunked body cut short too.
+(def test_chunked_cut_short () int
+  (check_str "refused" (read_all "GET" "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWi" true)
+             "HEAD 200 OK | BODY Wi | BAD the connection closed before the body ended"))
+
+; With no length, the body runs to the close, and the connection is not
+; kept.
+(def test_to_close () int
+  (check_str "to the close" (read_all "GET" "HTTP/1.1 200 OK\r\n\r\nall of it" true)
+             "HEAD 200 OK | BODY all of it | END close"))
+
+; A head past 16384 bytes is refused.
+(def test_head_over () int
+  (check_str "refused" (read_all "GET" (append "HTTP/1.1 200 OK\r\nX-Big: " (repeat 17000 97)) false)
+             "BAD a head of more than 16384 bytes"))
+
+; Connection: close is kept no more; HTTP/1.0 only with keep-alive.
+(def test_keep () int
+  (add (check_str "close" (read_all "GET" "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n" false) "HEAD 200 OK | END close")
+       (add (check_str "1.0" (read_all "GET" "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n" false) "HEAD 200 OK | END close")
+            (check_str "1.0 keep-alive" (read_all "GET" "HTTP/1.0 200 OK\r\nConnection: Keep-Alive\r\nContent-Length: 0\r\n\r\n" false) "HEAD 200 OK | END keep"))))
+
+; A 100 Continue is passed over; 204 and 304 have no body, nor does the
+; answer to HEAD, whatever its length says.
+(def test_no_bodies () int
+  (add (check_str "100" (read_all "POST" "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n" false) "HEAD 204 No Content | END keep")
+       (add (check_str "304" (read_all "GET" "HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n" false) "HEAD 304 Not Modified | END keep")
+            (check_str "HEAD" (read_all "HEAD" "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n" false) "HEAD 200 OK | END keep"))))
+
+; What is not a response.
+(def test_bad () int
+  (add (check_str "no status" (read_all "GET" "SSH-2.0-OpenSSH\r\n\r\n" false) "BAD not an HTTP/1.x status line")
+       (add (check_str "bad length" (read_all "GET" "HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n" false) "HEAD 200 OK | BAD a Content-Length that is not a number")
+            (check_str "bad size" (read_all "GET" "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n" false) "HEAD 200 OK | BAD a chunk's size that is not hex"))))
+
+; Bare LFs end lines as well.
+(def test_lf_only () int
+  (check_str "read" (read_all "GET" "HTTP/1.1 200 OK\nContent-Length: 2\n\nok" false) "HEAD 200 OK | BODY ok | END keep"))
+
+; Between responses the reader is idle, and a close there is no fault.
+(def test_idle () int
+  (let b (bytes_from_list "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+    (match (http_more (http_read_new "GET") b 0 (bytes_len b))
+      ((HttpMore r ps)
+        (add (check_bool "idle" (http_idle r) true)
+             (check_str "closed" (match (http_closed r) ((HttpMore r2 ps2) (parts_text ps2))) ""))))))
