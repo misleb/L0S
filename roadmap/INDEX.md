@@ -63,8 +63,10 @@ move independently, so several can be active at once.
   while a big window is dragged off the bottom.
 - [0042](0042-api-through-host-proxy.md) A model's API reached through
   a proxy on the host, active: the proxy (`make proxy-run`),
-  `proto/model.l0` and `ask` are in, tested against a stand-in; `make
-  agent-etc` and a run against the real API come next.
+  `proto/model.l0`, `ask` and `make agent-etc` are in, tested against
+  a stand-in; the runs against the real API, on QEMU (step 4) and on a
+  Pi 5 (step 5), are the user's, with a key: the goal's Log has the
+  commands.
 
 ## Dependencies
 

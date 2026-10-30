@@ -369,6 +369,20 @@ address on the LAN its DHCP lease is on, where the proxy must listen on
 that address (`make proxy-run PROXY_LISTEN=192.168.1.10:8765`, `api
 192.168.1.10:8765`).
 
+A board is given the proxy by `make agent-etc API=HOST:PORT
+[MODEL=NAME]`, which writes `build/agent-etc/config` (`api`, and
+`model` if given) and copies `build/proxy/token` beside it as `token`.
+While that directory is there, the demo's initramfs (`make initramfs`,
+`make demo`) and the Pi 5's (`make pi5-initramfs`, and so
+`pi5-netboot` and `pi5-card`) take it as `/etc/agent`, and `install`
+carries it onto a system volume with the rest of `/etc`; `rm -rf
+build/agent-etc` leaves it out again. On a `/` that can be written, a
+system volume, the two files may be written at a shell instead: `mkdir
+/etc/agent`, `write /etc/agent/config api HOST:PORT` and `write
+/etc/agent/token TOKEN`. The token is never in the source tree: it is
+made in `build/`, and the e2e case's is a test's own, which only the
+stand-in's proxy takes.
+
 ## The network on the Raspberry Pi 5
 
 ```

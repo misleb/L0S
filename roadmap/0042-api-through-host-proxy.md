@@ -203,3 +203,49 @@ request built, its streamed events read), which 0043's `agentd` uses.
   decompressor. The Makefile's library variable is `MODELLIB`, not
   `MODEL`, which step 4's `make agent-etc MODEL=NAME` takes. The case
   passes on 1 CPU and on 4; `make check`, `make test` pass.
+- 2026-10-29: step 4's build part: `make agent-etc API=HOST:PORT
+  [MODEL=NAME]` writes `build/agent-etc/config` (`api`, and `model` if
+  given) and copies `build/proxy/token` beside it, making the token
+  first if there is none; `stage_agent` puts that directory in the demo's
+  initramfs and `pi5-initramfs` as `/etc/agent` while it exists (the
+  test initramfses never take it); `rm -rf build/agent-etc` leaves it
+  out. network.md says how a board is given the proxy. Tried on QEMU
+  as the user will, against the stand-in in place of the API
+  (`e2e_serve.py 18765` with the build's token, `make agent-etc
+  API=10.0.2.2:18765`, `make initramfs`, a boot typing `run ask what is
+  L0S`): the answer streamed and the usage line was written. Not tried:
+  `pi5-initramfs` itself, which takes `/etc/agent` by the same line as
+  `initramfs`. `make e2e` passes, every case and the 19 screen tests,
+  once the cases that list `/bin` or count `/`'s files (`fs`, `shell`,
+  `install`, `install_boot`, `rootboot_tmpfs`) were told of step 3's
+  `/bin/ask`; `jobs` failed once under the full run's load, its
+  Ctrl-C missed, and passed alone and after. The step stays open for
+  the run against the real API, the user's, with a key:
+
+      make proxy                                 # once: the venv and build/proxy/token
+      export ANTHROPIC_API_KEY=sk-ant-...        # the host's key; never on the board
+      make proxy-run                             # the proxy on 127.0.0.1:8765; leave it running
+      # in another terminal:
+      make agent-etc API=10.0.2.2:8765           # MODEL=NAME for another than claude-sonnet-5-5
+      make demo NET=user                         # then, at the serial shell:
+      #   run ask what is a microkernel, in two sentences
+      build/proxy/venv/bin/python -I tools/api-proxy/proxy.py --day   # what today cost, UTC
+      rm -rf build/agent-etc                     # afterwards, to leave /etc/agent out again
+
+  Log here what `ask` wrote, the usage line from
+  `build/proxy/usage.jsonl` and `--day`'s totals.
+- 2026-10-29: step 5, the user's, on the Pi 5, with the host on the
+  LAN at 192.168.1.10 (its address on the network the Pi's DHCP lease
+  is on; `ip -4 addr` says it):
+
+      export ANTHROPIC_API_KEY=sk-ant-...
+      make proxy-run PROXY_LISTEN=192.168.1.10:8765    # a private address only; leave it running
+      make agent-etc API=192.168.1.10:8765
+      make pi5-netboot && tools/pi5-boot --console     # or make pi5-card, or install from it
+      # at the serial shell:
+      #   run net                    the lease, an address on 192.168.1.0/24
+      #   run ask what board are you running on
+      build/proxy/venv/bin/python -I tools/api-proxy/proxy.py --day
+
+  The host's firewall must let the Pi reach port 8765. Log what `ask`
+  wrote, the usage line, and anything `gem` or `inet` needed.
