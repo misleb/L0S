@@ -1,6 +1,6 @@
 # 0038: `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls
 
-Track: Display · Status: active · Needs: – · Spec: display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md
+Track: Display · Status: done · Needs: – · Spec: display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md
 
 ## Why
 
@@ -90,7 +90,8 @@ clean at 1920×1080:
   and a window's other buffer taking over the units of the one it
   replaces; the fallback then only on resizes. A flash of the whole
   screen remains now and then, not from the fallback: goal 0050.)
-- [ ] The board run of "Done when", at 4K and at 1920×1080.
+- [x] The board run of "Done when", at 4K and at 1920×1080. (Log:
+  18,000 frames in 300 s each, none over 25 ms, no gap line.)
 
 ## Log
 
@@ -236,3 +237,17 @@ clean at 1920×1080:
   case spawn's two processes (2 runs in 6 with every host CPU busy,
   none with the pool off); 16 at a time, about 45 us on a Pi 5, none
   in 10.
+- 2026-10-29: step 8, the board run of "Done when", on the Pi 5 from
+  commit 9101fd5, Files, Fonts, Disks, System Monitor and Terminal
+  opened, dragged and resized by the user for the five minutes of an
+  `hvs watch 300`. At 3840×2160, scale 2: 18,000 frames in 300 s, 60
+  Hz, none over 25 ms (the longest 62.6 ms before the watch's own
+  sampling gaps are taken off, which counted as none); no gap line in
+  dmesg from 136.8 s to the end at 367 s, the 70 s before that gone
+  from its 64 KiB under `hvs`'s slow-request lines; the screen too wide
+  three times, pieces left out each time for under 35 ms, the pointer
+  shown throughout. At 1920×1080, scale 1: 18,000 frames in 300 s, none
+  over 25 ms (the longest 26.7 ms), no gap line and nothing left out in
+  dmesg from 181 s to the end at 363 s. Done. A whole-screen flash
+  now and then with a few big windows at 4K, which no list's fit
+  explains, is goal 0050's.

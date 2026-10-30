@@ -41,7 +41,6 @@ move independently, so several can be active at once.
 | [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | idea | – | 0033 | programs.md, toolkit.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
-| [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 7/8 | – | display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
 | [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | idea | – | – | network.md, programs.md |
@@ -57,10 +56,10 @@ move independently, so several can be active at once.
 
 ## Ready
 
-- [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K, active: stalls cut,
-  too-wide screens shown, and window buffers in L0's 128 GB high user
-  range, so none freezes, and the fallback no longer flickers; step 8
-  is the closing board run, at 4K and at 1920×1080.
+None: every goal left is an `idea`, without steps. On the display,
+[0050](0050-hvs-crowded-lines.md) (crowded lines and the whole-screen
+flash at 4K), [0039](0039-paced-drawing-areas.md) and
+[0040](0040-paint-at-scale-2.md) follow from 0038's runs.
 
 ## Dependencies
 
@@ -114,6 +113,7 @@ graph LR
 | [0031](0031-many-ports.md) A process waits on several ports, and lets a name go | Kernel | 2026-10-28 |
 | [0032](0032-app-launch.md) Apps launched one way: a running app is asked, not started again | Desktop | 2026-10-28 |
 | [0033](0033-responsive-app-loop.md) An app's loop that keeps its window answering | Toolkit | 2026-10-28 |
+| [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | 2026-10-29 |
 
 ## Template
 
