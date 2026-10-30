@@ -98,7 +98,30 @@ rules'.
 | `list_dir` | `path` | a line for each entry, `NAME SIZE`, a directory's `NAME/`, from its file server; on the initramfs, while `/` is it, the names alone |
 | `make_dir` | `path` | the directory made, on a volume: `made PATH` |
 
-A failure is the path and why, in words. What goes to the model is
+| `run` | `program`, `args` (optional, an array of strings) | the program found as the shell's `run` finds it (`program_found`: `/bin/NAME`, `/sbin/NAME`, an app's, or a path, a relative one from the home), started with `args` in place of its own: `exit N`, then what it wrote |
+| `sh` | `command` | the line run as `/bin/sh -c COMMAND`: the same |
+
+A failure is the path and why, in words.
+
+### Running a program
+
+`run` and `sh` start the program with `spawn_path`, its current
+directory the home (`chdir`), and its terminal a new port of
+`agentd`'s: `agentd` makes that port its own terminal (`tty_set`) for
+the spawn, so the program inherits it as its standard input, output and
+error, and sets its own back after. It then answers that port as a
+terminal (`tty.l0`'s protocol): a write is kept, 64 KB at most, and
+what comes past that only counted; an `r` is answered at once with the
+end of input, so a program reading its input sees none; a `p` with
+`tty`; an `i` with nothing. The same port is told of the program's
+exit (`proc_watch`) and of its deadline (`alarm_at`), `run_timeout`
+seconds from its start (the configuration's, 60 if none): one still
+running then is ended with `proc_kill`, and its exit waited for. The
+answer is `exit N` and what it wrote, a line `[dropped: N more
+bytes]` after if any was, and before them `ended: still running when
+its time was up` for one ended; it is a failure unless it exited 0.
+A `Run` keeps all this, pure: `run_heard` takes each message that came
+to its port, and `run_result` gives the answer. What goes to the model is
 UTF-8, as JSON's strings must be: a byte that is not part of UTF-8 is
 sent as `?`, and a cut moves back to where a character starts.
 
@@ -110,3 +133,7 @@ sent as `?`, and a cut moves back to where a character starts.
 - Its limits are its rules only: the tools take any path.
 - `read_file` gives at most 64 KB of a file, and text only: a binary
   file's bytes that are not UTF-8 come as `?`.
+- A program `run` or `sh` starts has no input, and what it writes is
+  kept to 64 KB. While it runs, `agentd` waits for it alone. One that
+  `proc_kill` refuses to end, a driver, is waited for past its
+  deadline.

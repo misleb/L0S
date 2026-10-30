@@ -1,10 +1,12 @@
 ; tools.l0 -- agentd's tools: their definitions, as the model is told
-; them, and the file tools, read_file, write_file, list_dir and
-; make_dir. Each takes its input as JSON and answers a text, or a
-; failure the model reads (a ToolAnswer). A relative path is from the
-; agent's home, the configuration's home (/Volumes/data/agent if none);
-; any path is taken, since the agent's limits are its rules, not
-; enforced here.
+; them; the file tools, read_file, write_file, list_dir and make_dir;
+; and run and sh, which start a program, agentd its terminal, and give
+; back its exit status and what it wrote (a Run, pure, keeps that).
+; Each takes its input as JSON and answers a text, or a failure the
+; model reads (a ToolAnswer). A relative path is from the agent's home,
+; the configuration's home (/Volumes/data/agent if none); any path is
+; taken, and programs are started as a shell would, since the agent's
+; limits are its rules, not enforced here.
 
 ; ------------------------------------------------------- configuration
 
@@ -192,12 +194,16 @@
 ; A tool's definition: its name, what it does, and its input's JSON
 ; Schema, an object of the properties given, all of them required.
 (def tool_def ((name (list int)) (what (list int)) (props (list JField))) Json
+  (tool_def_needing name what props (prop_names props (nil Json))))
+
+; The same, needing only the properties named in required.
+(def tool_def_needing ((name (list int)) (what (list int)) (props (list JField)) (required (list Json))) Json
   (json_obj (cons (json_field "name" (json_str name))
               (cons (json_field "description" (json_str what))
                 (cons (json_field "input_schema"
                         (json_obj (cons (json_field "type" (json_str "object"))
                                     (cons (json_field "properties" (json_obj props))
-                                      (cons (json_field "required" (JArr (prop_names props (nil Json)))) (nil JField))))))
+                                      (cons (json_field "required" (JArr required)) (nil JField))))))
                       (nil JField))))))
 
 ; The names of props, as JSON strings, in order.
@@ -226,3 +232,221 @@
         (cons (tool_def "make_dir" "Make a directory, on a volume; the one it is in must be there."
                 (cons (path_prop "The directory") (nil JField)))
               (nil Json))))))
+
+; The definitions of run and sh.
+(def run_tool_defs () (list Json)
+  (cons (tool_def_needing "run"
+          "Run a program, as the shell's run finds it (/bin/NAME, /sbin/NAME, an app's, or a path), in your home, with args in place of its own; it gives exit N, then what it wrote, at most 64 KB. One still running after the time allowed is ended."
+          (cons (tool_prop "program" "string" "The program: a name, or a path, a relative one from your home")
+            (cons (json_field "args" (json_obj (cons (json_field "type" (json_str "array"))
+                                                 (cons (json_field "items" (json_obj (cons (json_field "type" (json_str "string")) (nil JField))))
+                                                   (cons (json_field "description" (json_str "Its arguments, each a word")) (nil JField))))))
+                  (nil JField)))
+          (cons (json_str "program") (nil Json)))
+    (cons (tool_def "sh"
+            "Run a line of the L0S shell's commands (help lists them; a program runs only as run NAME), as /bin/sh -c LINE, in your home; it gives exit N, then what it wrote, as run does."
+            (cons (tool_prop "command" "string" "The line") (nil JField)))
+          (nil Json))))
+
+; Every tool's definition: the file tools', then run's and sh's.
+(def tool_defs () (list Json)
+  (append (file_tool_defs) (run_tool_defs)))
+
+; Every tool's name, as the system prompt lists them.
+(def tool_names () (list (list int))
+  (split_spaces "read_file write_file list_dir make_dir run sh"))
+
+; ------------------------------------------------------ running programs
+
+; How long a program may run, in seconds, if the configuration says
+; nothing.
+(def run_timeout_default () int 60)
+
+; How long a program may run, the configuration text's run_timeout, or
+; the default.
+(def tool_run_timeout ((text (list int))) int
+  (let t (tool_conf text "run_timeout")
+    (if (is_number t) (int_prefix t 0) (run_timeout_default))))
+
+; A program running: its pid; the port that is its terminal and is told
+; of its exit; what it wrote, the pieces kept reversed, how many bytes
+; kept and how many dropped past tool_max; the time on clock_ns past
+; which it is ended; its exit status, once it has exited; and whether it
+; was ended for running too long.
+(data Run (Run int int (list bytes) int int int (Option int) bool))
+
+; A program just started as pid, its terminal port, to end at deadline.
+(def run_new ((pid int) (port int) (deadline int)) Run
+  (Run pid port (nil bytes) 0 0 deadline ((None int)) false))
+
+; A run's pid, port, deadline and exit status (none while running).
+(def run_pid ((r Run)) int (match r ((Run p t o k d dl st e) p)))
+(def run_port ((r Run)) int (match r ((Run p t o k d dl st e) t)))
+(def run_deadline ((r Run)) int (match r ((Run p t o k d dl st e) dl)))
+(def run_status ((r Run)) (Option int) (match r ((Run p t o k d dl st e) st)))
+
+; A message to send in answer, as a terminal answers: its port and
+; payload.
+(data RunSend (RunSend int (list int)))
+
+; What run_heard gives: the run after a message, and what to send.
+(data RunHeard (RunHeard Run (list RunSend)))
+
+; r after m, which came on its port: its exit notice, the status kept;
+; or a request to its terminal (tty.l0's protocol): w with no reply
+; port, what it wrote, kept; r, a line, answered with the end of input
+; at once; p answered tty, so the asker learns agentd's pid; i, Ctrl-C's
+; notices, of which none will come. Anything else is passed over.
+(def run_heard ((r Run) (m Message)) RunHeard
+  (match r
+    ((Run pid port out kept dropped dl st ended)
+      (match (exit_of m)
+        ((Exited p s)
+          (RunHeard (if (eq p pid) (Run pid port out kept dropped dl (Some s) ended) r) (nil RunSend)))
+        ((NotExit)
+          (match m
+            ((RecvFailed) (RunHeard r (nil RunSend)))
+            ((Message from b) (run_terminal r b))))))))
+
+; r after the request in a message's bytes b, to its terminal.
+(def run_terminal ((r Run) (b bytes)) RunHeard
+  (if (run_is_write b)
+      (RunHeard (run_kept r b (add (header_len) 5) (bytes_len b)) (nil RunSend))
+      (let reply (msg_reply b)
+        (if (if (lt reply 1) true (not (eq (msg_len b) 5)))
+            (RunHeard r (nil RunSend))
+            (let op (msg_byte b 4)
+              (if (eq op 114)
+                  (RunHeard r (cons (RunSend reply (nil int)) (nil RunSend)))
+                  (if (eq op 112)
+                      (RunHeard r (cons (RunSend reply "tty") (nil RunSend)))
+                      (RunHeard r (nil RunSend)))))))))
+
+; Whether a message's bytes b are bytes to write: no reply port, then w.
+(def run_is_write ((b bytes)) bool
+  (if (gt (msg_len b) 4) (if (eq (msg_u32 b 0) 0) (eq (msg_byte b 4) 119) false) false))
+
+; r with b's bytes from i to j kept, as many as fit in tool_max, the
+; rest counted as dropped.
+(def run_kept ((r Run) (b bytes) (i int) (j int)) Run
+  (match r
+    ((Run pid port out kept dropped dl st ended)
+      (let n (sub j i)
+        (let k (min n (max 0 (sub (tool_max) kept)))
+          (Run pid port (if (gt k 0) (cons (bytes_slice b i (add i k)) out) out)
+               (add kept k) (add dropped (sub n k)) dl st ended))))))
+
+; r ended for running past its deadline.
+(def run_ended ((r Run)) Run
+  (match r ((Run pid port out kept dropped dl st ended) (Run pid port out kept dropped dl st true))))
+
+; r given up on, its port failing: its status taken as -1.
+(def run_lost ((r Run)) Run
+  (match r ((Run pid port out kept dropped dl st ended) (Run pid port out kept dropped dl (Some -1) ended))))
+
+; A run's result: that it was ended if it ran too long, exit N, then what
+; it wrote, and how much more was dropped; failed unless it exited 0.
+(def run_result ((r Run)) ToolAnswer
+  (match r
+    ((Run pid port out kept dropped dl st ended)
+      (let status (match st ((Some s) s) ((None) -1))
+        (let head (append (if ended "ended: still running when its time was up\n" "")
+                          (append "exit " (append (digits status) "\n")))
+          (ToolAnswer
+            (bytes_concat (cons (bytes_from_list head)
+                            (cons (tool_text (bytes_concat (rev out)))
+                              (cons (bytes_from_list (if (gt dropped 0) (append "\n[dropped: " (append (digits dropped) " more bytes]\n")) ""))
+                                    (nil bytes)))))
+            (if ended true (not (eq status 0)))))))))
+
+; ------------------------------------------------- starting and waiting
+
+; Whether name is run or sh.
+(def is_run_tool ((name (list int))) bool
+  (any_eq name (split_spaces "run sh")))
+
+; The tool run or sh done with input: the program started in home, its
+; terminal agentd's, back given back as agentd's own terminal after the
+; start (0 for the kernel's), and waited for, at most timeout seconds.
+(def tool_run ((home (list int)) (name (list int)) (input Json) (timeout int) (back int)) ToolAnswer
+  (if (eq name "sh")
+      (match (tool_str input "command")
+        ((None) (tool_failed "command is missing, or not a string"))
+        ((Some line) (run_program home "/bin/sh" (cons "-c" (cons line (nil (list int)))) timeout back)))
+      (match (tool_str input "program")
+        ((None) (tool_failed "program is missing, or not a string"))
+        ((Some p) (run_program home p (run_args input) timeout back)))))
+
+; The args of run's input, its strings; none if there are none.
+(def run_args ((input Json)) (list (list int))
+  (match (json_get input "args")
+    ((None) (nil (list int)))
+    ((Some v) (texts_of (json_items v) (nil (list int))))))
+
+; The strings among vs, in order.
+(def texts_of ((vs (list Json)) (acc (list (list int)))) (list (list int))
+  (if (is_empty vs)
+      (rev acc)
+      (texts_of (tail vs) (match (json_text (head vs)) ((None) acc) ((Some t) (cons (bytes_to_list t) acc))))))
+
+; The program what names found, a path from home if it holds a /, as the
+; shell's run finds it; then started and waited for.
+(def run_program ((home (list int)) (what (list int)) (args (list (list int))) (timeout int) (back int)) ToolAnswer
+  (let path (program_found (if (any_eq 47 what) (tool_path home what) what) (root_paths))
+    (if (is_empty path)
+        (tool_failed (append "no program " what))
+        (match (run_start home path args timeout back)
+          ((Err why) (tool_failed why))
+          ((Ok r) (run_result (run_wait r)))))))
+
+; The program at path started with args, its current directory home,
+; its terminal a new port of agentd's, which is told of its exit and of
+; its deadline, timeout seconds from now; agentd's own terminal set back
+; to back after. Or why it could not be.
+(def run_start ((home (list int)) (path (list int)) (args (list (list int))) (timeout int) (back int)) (Result Run (list int))
+  (let port (port_new)
+    (match (tty_set port)
+      ((TtyNoPort) ((Err Run (list int)) "no port to be its terminal"))
+      ((TtySet)
+        (let c (chdir home)
+          (let s (spawn_path path (Some args))
+            (let t (tty_set back)
+              (let pid (spawned_pid s)
+                (if (lt pid 0)
+                    ((Err Run (list int)) (append "cannot start " (append path (append ": " (spawn_why s)))))
+                    (let w (proc_watch pid port)
+                      (let deadline (add (clock_ns) (mul timeout 1000000000))
+                        (let a (alarm_at port deadline)
+                          ((Ok Run (list int)) (run_new pid port deadline))))))))))))))
+
+; The pid a spawn started, or -1.
+(def spawned_pid ((s Spawn)) int
+  (match s
+    ((Spawned pid) pid)
+    ((SpawnNoEntry) -1)
+    ((SpawnNotProgram) -1)
+    ((SpawnTooBig) -1)
+    ((SpawnNoRoom) -1)))
+
+; r waited for until it exits: its terminal answered as it asks, and at
+; its deadline, the alarm, it is ended with proc_kill, and its exit then
+; waited for.
+(def run_wait ((r Run)) Run
+  (match (run_status r)
+    ((Some s) r)
+    ((None)
+      (let m (port_receive (run_port r))
+        (match m
+          ((RecvFailed) (run_lost r))
+          ((Message from b)
+            (if (is_alarm_notice m)
+                (let k (proc_kill (run_pid r)) (run_wait (run_ended r)))
+                (match (run_heard r m)
+                  ((RunHeard r2 sends) (let x (run_send sends) (run_wait r2)))))))))))
+
+; Each of sends sent; a terminal's answer that cannot go is dropped.
+(def run_send ((sends (list RunSend))) int
+  (if (is_empty sends)
+      0
+      (match (head sends)
+        ((RunSend port payload) (let s (port_tell port payload) (run_send (tail sends)))))))

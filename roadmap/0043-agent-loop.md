@@ -129,7 +129,7 @@ What it is, as decided with the user:
   has files; a file over 64 KB cut; the definitions' JSON compared as
   text; under `l0 test` `list_dir` and `make_dir` fail and say so, as
   there is no `fs`.
-- [ ] **Running programs.** In tools.l0, `run {program, args}` and `sh
+- [x] **Running programs.** In tools.l0, `run {program, args}` and `sh
   {command}`: the program found as the shell's `run` finds it
   (`program_found`), `sh` being `/bin/sh -c COMMAND`, and started with
   `spawn_path`, its current directory the home (`agentd` is in it), its
@@ -312,3 +312,14 @@ What it is, as decided with the user:
   which `model_conf_of` passes over. The host test writes and reads
   `build/agentd_tools_test.txt` by its relative path, as the host's
   files are not under the paths `tool_path` makes.
+- 2026-10-29: step 5 done. One port is the program's terminal and is
+  told of its exit and of its deadline (`alarm_at`), as the three are
+  told apart by their payloads. `tool_run` runs the program to its end
+  itself (`run_wait`, a loop on that port alone), so while a program
+  runs `agentd` hears nothing else: step 6, whose `stop` must end a
+  running program, either waits on that port among its others
+  (`port_receive_set`, feeding `run_heard`, as the plan has it) or
+  says it hears `stop` only between tools. A run's answer fails
+  unless the program exited 0; `tool_run` takes the terminal to give
+  back to `agentd` after the spawn (`back`, 0 the kernel's). Not run
+  on the board yet: that is step 8's e2e case.

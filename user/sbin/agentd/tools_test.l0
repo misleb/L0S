@@ -107,3 +107,97 @@
 (def test_write_def () int
   (check_str "json" (bytes_to_list (json_bytes (nth (file_tool_defs) 1)))
     "{\"name\":\"write_file\",\"description\":\"Make a file hold content, anew; its directory must be there.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file; a relative path is from your home\"},\"content\":{\"type\":\"string\",\"description\":\"What the file is to hold\"}},\"required\":[\"path\",\"content\"]}}"))
+
+; run's definition needs only program; args is an array of strings.
+(def test_run_def () int
+  (let t (bytes_to_list (json_bytes (head (run_tool_defs))))
+    (add (check_true "args" (contains_text t "\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}"))
+         (check_true "required" (ends_with t "\"required\":[\"program\"]}}")))))
+
+; Whether s holds t.
+(def contains_text ((s (list int)) (t (list int))) bool
+  (if (is_empty s) (is_empty t) (if (starts_with s t) true (contains_text (tail s) t))))
+
+(def test_all_defs () int
+  (add (check_int "six" (length (tool_defs)) 6)
+       (check_int "names" (length (tool_names)) 6)))
+
+(def test_run_timeout () int
+  (add (check_int "default" (tool_run_timeout "api x:1\n") 60)
+       (add (check_int "given" (tool_run_timeout "run_timeout 5\n") 5)
+            (check_int "not a number" (tool_run_timeout "run_timeout soon\n") 60))))
+
+; ---------------------------------------------------------------- a Run
+
+; A run of pid 9 on port 4, as it starts.
+(def run0 () Run (run_new 9 4 1000))
+
+; What a program writes to its terminal: w, no reply port.
+(def wrote ((s (list int))) Message (message_new 9 (request 0 (cons 119 s))))
+
+; r after each of ms.
+(def heard_all ((r Run) (ms (list Message))) Run
+  (if (is_empty ms) r (match (run_heard r (head ms)) ((RunHeard r2 sends) (heard_all r2 (tail ms))))))
+
+(def test_run_write () int
+  (let r (heard_all (run0) (cons (wrote "hello\n") (cons (message_new 0 (exit_notice 9 0)) (nil Message))))
+    (check_str "result" (answer_text (run_result r)) "ok: exit 0\nhello\n")))
+
+(def test_run_two_writes () int
+  (let r (heard_all (run0) (cons (wrote "a") (cons (wrote "b\n") (cons (message_new 0 (exit_notice 9 3)) (nil Message)))))
+    (check_str "result" (answer_text (run_result r)) "failed: exit 3\nab\n")))
+
+; Its r is answered at once with the end of input, empty, to its reply
+; port; p with tty; i with nothing.
+(def test_run_terminal_requests () int
+  (add (check_str "r" (sends_text (message_new 9 (request 7 "r"))) "7:")
+       (add (check_str "p" (sends_text (message_new 9 (request 7 "p"))) "7:tty")
+            (check_str "i" (sends_text (message_new 9 (request 7 "i"))) ""))))
+
+; What run0 sends in answer to m, as PORT:PAYLOAD.
+(def sends_text ((m Message)) (list int)
+  (match (run_heard (run0) m)
+    ((RunHeard r sends)
+      (if (is_empty sends) "" (match (head sends) ((RunSend p pl) (append (digits p) (append ":" pl))))))))
+
+; Its exit is kept; another's is not.
+(def test_run_exit () int
+  (add (check_bool "running" (is_none (run_status (heard_all (run0) (cons (message_new 0 (exit_notice 8 0)) (nil Message))))) true)
+       (match (run_status (heard_all (run0) (cons (message_new 0 (exit_notice 9 2)) (nil Message))))
+         ((Some s) (check_int "status" s 2))
+         ((None) (fail_because "status" "none")))))
+
+(def is_none ((o (Option int))) bool (match o ((Some x) false) ((None) true)))
+
+; Past 64 KB what it writes is dropped, counted: 3000 bytes 22 times,
+; 66000, of which 65536 are kept and 464 dropped.
+(def test_run_output_cut () int
+  (let r (heard_all (run0) (append (writes 22) (cons (message_new 0 (exit_notice 9 0)) (nil Message))))
+    (let t (answer_text (run_result r))
+      (add (check_int "kept" (length t) (add (length "ok: exit 0\n") (add 65536 (length "\n[dropped: 464 more bytes]\n"))))
+           (check_true "says so" (ends_with t "\n[dropped: 464 more bytes]\n"))))))
+
+; n writes of 3000 bytes each.
+(def writes ((n int)) (list Message)
+  (if (eq n 0) (nil Message) (cons (wrote (repeat_byte 120 3000 (nil int))) (writes (sub n 1)))))
+
+; One ended at its deadline says so, and fails.
+(def test_run_ended () int
+  (let r (heard_all (run_ended (run0)) (cons (message_new 0 (exit_notice 9 130)) (nil Message)))
+    (check_str "result" (answer_text (run_result r)) "failed: ended: still running when its time was up\nexit 130\n")))
+
+; Under an operating system there is no kernel: no program is found, so
+; neither run nor sh starts one, and each says so.
+(def test_run_no_kernel () int
+  (add (check_str "run" (answer_text (tool_run "/Volumes/data/agent" "run" (input (split_spaces "program") (split_spaces "hello")) 60 0))
+         "failed: no program hello")
+       (check_str "sh" (answer_text (tool_run "/Volumes/data/agent" "sh" (input (split_spaces "command") (cons "ls /etc" (nil (list int)))) 60 0))
+         "failed: no program /bin/sh")))
+
+(def test_run_missing_input () int
+  (add (check_str "run" (answer_text (tool_run "/" "run" (json_obj (nil JField)) 60 0)) "failed: program is missing, or not a string")
+       (check_str "sh" (answer_text (tool_run "/" "sh" (json_obj (nil JField)) 60 0)) "failed: command is missing, or not a string")))
+
+(def test_run_args () int
+  (check_str "args" (unwords (run_args (json_obj (cons (json_field "args" (JArr (cons (json_str "a") (cons (JInt 3) (cons (json_str "b") (nil Json)))))) (nil JField)))))
+    "a b"))
