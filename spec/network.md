@@ -301,6 +301,74 @@ connection whose response ended with `keep` takes the next request, and
 `http_reuse c` opens one the server closed again; `http_close` finishes
 it.
 
+## Reaching a model's API
+
+```
+ask ──HTTP──▶ inet ──▶ the host's proxy ──HTTPS, x-api-key──▶ api.anthropic.com
+    ◀─events──       ◀─ streamed as it comes ─
+```
+
+A model's API is HTTPS only, and L0S has no TLS, so a board reaches
+Anthropic's Messages API through a proxy on the development host,
+[tools/api-proxy](../tools/api-proxy/proxy.py), in Python with aiohttp
+in its own venv (`make proxy` makes `build/proxy/venv` and the boards'
+token, `build/proxy/token`, 32 random hex digits made once, mode 600).
+`make proxy-run [PROXY_LISTEN=ADDR:PORT]` runs it on 127.0.0.1:8765
+unless given, with that token and the host's `ANTHROPIC_API_KEY`,
+without which it will not start. It:
+
+- listens on the one address it is given, which must be loopback or
+  private (RFC 1918), never `0.0.0.0`, or it says so and exits;
+- takes `POST /v1/messages` and `/v1/messages/count_tokens` and nothing
+  else, any other path or method a 404, and refuses a request without
+  `Authorization: Bearer TOKEN`, compared in constant time, with a 401
+  whose message is "the proxy refused this board's token"; its own
+  refusals are JSON in the API's error form;
+- sends the body upstream as it came, `https://api.anthropic.com`
+  unless `--upstream` names another base URL, with the board's
+  `content-type`, `anthropic-version` and `anthropic-beta` and no other
+  header of the board's, and `x-api-key` added;
+- passes back the answer's status and `content-type`, and its body as
+  each piece comes, never gathered; an answer that breaks off upstream
+  closes the board's connection, so the board sees it cut short;
+- counts what is spent and refuses nothing for it: each answer's usage
+  (input, output, cache written, cache read, from `message_start` and
+  `message_delta`, or a JSON answer's) is a JSON line in
+  `build/proxy/usage.jsonl` with its time (UTC), path, model and status,
+  and `proxy.py --day [YYYY-MM-DD]` totals a day's.
+
+On the board, [proto/model.l0](../user/lib/proto/model.l0) is the
+provider behind one interface. It finds the proxy and the token in two
+files:
+
+- `/etc/agent/config`, a line each, `#` a comment: `api HOST:PORT`, the
+  proxy, which is needed; `model NAME`, `claude-sonnet-5-5` if none;
+  `max_tokens N`, 8192 if none; any other key is left for its program;
+- `/etc/agent/token`, the board's token, its first line.
+
+`model_request` makes a request's bytes, `POST /v1/messages` with the
+token as its bearer, `anthropic-version: 2023-06-01` and a body of
+`model`, `max_tokens`, `stream: true` and the `system`, `messages` and
+`tools` given as `Json`, so a caller adds `cache_control` where it
+wants it; `model_events` reads each event of the stream as
+`ModelEvent`s: `MText` (a block's text as it comes), `MToolStart` and
+`MToolInput` (a tool's use and its input's JSON in pieces),
+`MBlockStop`, `MStop` (why the answer stopped), `MUsage` (each count -1
+where the event does not say it) and `MError`; `ping` gives none.
+
+`ask TEXT...` ([user/bin/ask](../user/bin/ask/ask.l0)) asks it a
+question: it reads the configuration, opens `api`, posts the words as
+one user message, and writes each text piece as it comes, then a
+newline. A 401 says the proxy refused the board's token, any other
+refusal or an `error` event says the API's error message, and a
+missing configuration says which file is missing.
+
+A board on QEMU's user network reaches a proxy on the host's loopback
+as 10.0.2.2: `api 10.0.2.2:8765`. A Pi 5 reaches it at the host's
+address on the LAN its DHCP lease is on, where the proxy must listen on
+that address (`make proxy-run PROXY_LISTEN=192.168.1.10:8765`, `api
+192.168.1.10:8765`).
+
 ## The network on the Raspberry Pi 5
 
 ```
@@ -425,3 +493,9 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   no content coding (gzip) is asked for or read, and `http` follows no
   redirect. A connection's notices go to one port, which `http_connect`
   waits on alone, passing over another connection's.
+- **A model's API is the host's.** The key and the TLS are the host's
+  proxy's: the board speaks plain HTTP to it over the local network,
+  so a board is tied to a host that runs it, and anything on that
+  network that has the board's token can spend on the host's key. The
+  proxy knows one token, forwards to one base URL, and caps nothing it
+  counts; `ask` sends one message, with no system prompt and no tools.

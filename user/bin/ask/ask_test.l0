@@ -1,0 +1,101 @@
+; ask_test.l0 -- tests of ask.l0: the request it makes, and what it
+; writes and says for an answer's parts.
+
+; ---------------------------------------------------------------- fixtures
+
+; A configuration with its proxy.
+(def conf () ModelConf (ModelConf "10.0.2.2" 8765 "claude-sonnet-5-5" 8192 "tok"))
+
+; What the parts ps did, from an answer before its head: everything
+; written, then | and each complaint, then | and the status.
+(def run_text ((ps (list HttpPart))) (list int)
+  (run_from (answer_new) ps (nil bytes) (nil int)))
+
+; The rest of run_text: the answer a, the bytes written so far reversed,
+; and the complaints so far.
+(def run_from ((a Answer) (ps (list HttpPart)) (out (list bytes)) (why (list int))) (list int)
+  (if (is_empty ps)
+      (append (bytes_to_list (bytes_concat (rev out))) (append "|" (append why "|running")))
+      (match (answer_part a (head ps))
+        ((Step a2 o w st)
+          (if (lt st 0)
+              (run_from a2 (tail ps) (cons o out) (append why w))
+              (append (bytes_to_list (bytes_concat (rev (cons o out)))) (append "|" (append (append why w) (append "|" (digits st))))))))))
+
+; A body piece of the text s.
+(def body ((s (list int))) HttpPart (HttpBody (bytes_from_list s)))
+
+; A head of status code.
+(def head_of ((code int)) HttpPart (HttpHead code "" (nil HttpHeader)))
+
+; A text_delta event of the text s, as the stream has it.
+(def delta ((s (list int))) (list int)
+  (append "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\""
+    (append s "\"}}\n\n")))
+
+; ----------------------------------------------------------------- asking
+
+(def test_question () int
+  (add (check_str "words" (question (split_spaces "what is L0S?")) "what is L0S?")
+       (check_str "none" (question (nil (list int))) "")))
+
+; The request's body: one user message, no system prompt, no tools.
+(def test_request_body () int
+  (check_true "body"
+    (ends_with (bytes_to_list (ask_request (conf) "hi"))
+      "\r\n\r\n{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":8192,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}")))
+
+; --------------------------------------------------------------- answering
+
+; Text as it comes, a piece split between two bodies, and a newline at
+; the end.
+(def test_streamed_text () int
+  (let d (delta " world")
+    (check_str "text"
+      (run_text (cons (head_of 200) (cons (body (delta "Hello")) (cons (body (take d 30)) (cons (body (drop d 30))
+        (cons (HttpEnd true) (nil HttpPart)))))))
+      "Hello world\n||0")))
+
+; Each piece is written as its body comes, before the answer ends.
+(def test_written_as_it_comes () int
+  (check_str "first piece"
+    (run_text (cons (head_of 200) (cons (body (delta "one ")) (nil HttpPart))))
+    "one ||running"))
+
+; An error in the stream, after some text.
+(def test_stream_error () int
+  (check_str "overloaded"
+    (run_text (cons (head_of 200) (cons (body (delta "par"))
+      (cons (body "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
+        (cons (HttpEnd true) (nil HttpPart))))))
+    "par\n|Overloaded|1"))
+
+; A refusal: the API's message, from a body that comes in two pieces.
+(def test_refused_529 () int
+  (check_str "529"
+    (run_text (cons (head_of 529) (cons (body "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",")
+      (cons (body "\"message\":\"Overloaded\"}}") (cons (HttpEnd true) (nil HttpPart))))))
+    "|Overloaded|1"))
+
+; The proxy refusing the board's token, as the proxy says it, and a 401
+; with no message.
+(def test_refused_token () int
+  (add (check_str "proxy's"
+         (run_text (cons (head_of 401) (cons (body "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"the proxy refused this board's token\"}}")
+           (cons (HttpEnd true) (nil HttpPart)))))
+         "|the proxy refused this board's token|1")
+       (check_str "bare"
+         (run_text (cons (head_of 401) (cons (HttpEnd true) (nil HttpPart))))
+         "|the proxy refused this board's token|1")))
+
+; The connection failing in the middle.
+(def test_failed () int
+  (check_str "failed"
+    (run_text (cons (head_of 200) (cons (HttpFailed "the connection reset") (nil HttpPart))))
+    "|the connection reset|1"))
+
+; Under an operating system there is no /etc/agent, nor l0 test's
+; arguments a question, nor a network.
+(def test_no_network () int
+  (add (check_int "no question or configuration" (ask) 1)
+       (check_int "no inet" (ask_of (inet_open) 0 (conf) "hi") 1)))

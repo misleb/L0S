@@ -32,8 +32,9 @@
 # on the host for the length of the boot, a server the board reaches at
 # 10.0.2.2, and if NAME/peer does, its line is a command run from its
 # start that must exit 0 by the boot's end, a client of a port the board
-# listens to; @PORT@ in either, in NAME/net, and in NAME/typed is a free
-# port of the host's loopback, chosen for the boot. If NAME/usb exists,
+# listens to; @PORT@ in either, in NAME/net, in NAME/typed, and in any
+# file of NAME/etc (which is then copied, to build/e2e/NAME.etc) is a
+# free port of the host's loopback, chosen for the boot. If NAME/usb exists,
 # the board's keyboard and pointer are a USB keyboard and mouse on a
 # qemu-xhci, for pcie, xhci and usb-hid, not virtio's. If NAME/sd exists,
 # the board has an SD card in a sdhci-pci, a blank image of 64 MB made
@@ -106,6 +107,21 @@ run_case() {
     rm -rf "$etc" && cp -R "$dir/etc" "$etc" && cp "$BUILD/face" "$etc/face" \
       && mkdir -p "$etc/fonts" && cp fonts/*.ttf "$BUILD"/strikes/*.strike "$etc/fonts/"
   fi
+  # A free port of the host, for what names @PORT@, and the files it is in.
+  port=""
+  if [ -f "$dir/serve" ] || [ -f "$dir/peer" ] || grep -qs '@PORT@' "$dir/net" "$dir/typed" ||
+     grep -rqs '@PORT@' "$dir/etc"; then
+    port=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  fi
+  # @PORT@ in the case's etc made the port, in a copy, as in typed.
+  if grep -rqs '@PORT@' "$dir/etc"; then
+    if [ "$etc" = "$dir/etc" ]; then
+      etc="$BUILD/e2e/$name.etc"
+      rm -rf "$etc" && cp -R "$dir/etc" "$etc"
+    fi
+    grep -rlZ '@PORT@' "$etc" | xargs -0 sed -i.bak "s/@PORT@/$port/g"
+    find "$etc" -name '*.bak' -delete
+  fi
   if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; return
   fi
@@ -140,11 +156,6 @@ run_case() {
     ro=""
     [ -f "$dir/readonly" ] && ro=",readonly=on"
     qemu_args="$qemu_args -drive file=$disk,if=none,format=raw,id=disk0$ro -device virtio-blk-device,drive=disk0"
-  fi
-  # A free port of the host, for what names @PORT@, and the files it is in.
-  port=""
-  if [ -f "$dir/serve" ] || [ -f "$dir/peer" ] || grep -qs '@PORT@' "$dir/net" "$dir/typed"; then
-    port=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
   fi
   net=""
   if [ -f "$dir/net" ]; then

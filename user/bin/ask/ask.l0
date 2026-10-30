@@ -1,0 +1,148 @@
+; ask.l0 -- asks a model a question, through the host's proxy to its API
+; (proto/model.l0):
+;
+;   ask TEXT...        the words, joined by spaces, sent to the model as
+;                      one user message; its answer written to standard
+;                      output as each piece of text comes, then a newline
+;
+; The proxy and the token are /etc/agent/config's api and
+; /etc/agent/token; without them it says which file is missing. A 401 is
+; the proxy refusing this board's token; any other refusal, or an error
+; in the stream, is the API's error message, on standard error, and
+; fails the command.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "ask" why))
+
+; How long to wait for the model to say anything more: a long answer
+; pauses while it thinks.
+(def idle_ns () int 120000000000)
+
+; How the command is used.
+(def usage () (list int) "ask TEXT...")
+
+; ------------------------------------------------------------------ asking
+
+; The question the words ws make, joined by spaces; none is none.
+(def question ((ws (list (list int)))) (list int) (unwords ws))
+
+; The request asking q of the model c names: one user message, no
+; system prompt and no tools.
+(def ask_request ((c ModelConf) (q (list int))) bytes
+  (model_request c (JNull) (JArr (cons (model_message "user" q) (nil Json))) (JArr (nil Json))))
+
+; ---------------------------------------------------------------- answering
+
+; How far the answer has come: its status, 0 until its head has come;
+; a refusal's body so far, reversed; the event stream's reader; whether
+; any text was written; and the error the stream gave, if any.
+(data Answer (Answer int (list bytes) Sse bool (list int)))
+
+; An answer before its head.
+(def answer_new () Answer (Answer 0 (nil bytes) (sse_new) false (nil int)))
+
+; What a part did: the answer after it, the bytes to write, a complaint
+; to make (empty for none), and -1 while more is to come, or the exit
+; status once the answer is over.
+(data Step (Step Answer bytes (list int) int))
+
+; Nothing to write.
+(def no_bytes () bytes (bytes_from_list (nil int)))
+
+; Whether a status code says the request was served.
+(def served ((code int)) bool (if (ge code 200) (lt code 300) false))
+
+; The answer a after part p.
+(def answer_part ((a Answer) (p HttpPart)) Step
+  (match a
+    ((Answer code pieces sse wrote err)
+      (match p
+        ((HttpHead c r hs) (Step (Answer c pieces sse wrote err) (no_bytes) (nil int) -1))
+        ((HttpBody d)
+          (if (served code)
+              (match (sse_more sse d 0 (bytes_len d))
+                ((SseMore s2 es) (answer_events (Answer code pieces s2 wrote err) es (nil bytes))))
+              (Step (Answer code (cons d pieces) sse wrote err) (no_bytes) (nil int) -1)))
+        ((HttpEnd keep) (answer_end a))
+        ((HttpBad why) (Step a (no_bytes) why 1))
+        ((HttpFailed why) (Step a (no_bytes) why 1))))))
+
+; The events es read onto a, the text to write so far reversed in out.
+(def answer_events ((a Answer) (es (list SseEvent)) (out (list bytes))) Step
+  (if (is_empty es)
+      (Step a (bytes_concat (rev out)) (nil int) -1)
+      (answer_events_in a (model_events (head es)) (tail es) out)))
+
+; The model's events ms of one stream event read onto a, then the rest
+; of the stream's events es.
+(def answer_events_in ((a Answer) (ms (list ModelEvent)) (es (list SseEvent)) (out (list bytes))) Step
+  (if (is_empty ms)
+      (answer_events a es out)
+      (match a
+        ((Answer code pieces sse wrote err)
+          (match (head ms)
+            ((MText i t) (answer_events_in (Answer code pieces sse true err) (tail ms) es (cons t out)))
+            ((MError k m) (answer_events_in (Answer code pieces sse wrote (error_text k m)) (tail ms) es out))
+            ((MToolStart i id n) (answer_events_in a (tail ms) es out))
+            ((MToolInput i pj) (answer_events_in a (tail ms) es out))
+            ((MBlockStop i) (answer_events_in a (tail ms) es out))
+            ((MStop r) (answer_events_in a (tail ms) es out))
+            ((MUsage n o cw cr) (answer_events_in a (tail ms) es out)))))))
+
+; An error event's words: its message, or its kind if it has none.
+(def error_text ((kind bytes) (message bytes)) (list int)
+  (if (eq (bytes_len message) 0) (bytes_to_list kind) (bytes_to_list message)))
+
+; The answer over: a newline after the text, and 0; or the stream's
+; error, or the refusal's words, and 1.
+(def answer_end ((a Answer)) Step
+  (match a
+    ((Answer code pieces sse wrote err)
+      (let nl (bytes_from_list (if wrote "\n" (nil int)))
+        (if (not (served code))
+            (Step a (no_bytes) (model_refusal code (bytes_concat (rev pieces))) 1)
+            (if (is_empty err)
+                (Step a (bytes_from_list "\n") (nil int) 0)
+                (Step a nl err 1)))))))
+
+; ------------------------------------------------------------------ running
+
+; What the arguments ask.
+(def ask () int
+  (let q (question (args))
+    (if (is_empty q)
+        (complain (usage))
+        (match (model_conf_read)
+          ((Err why) (complain why))
+          ((Ok c) (ask_of (inet_open) (port_new) c q))))))
+
+; q asked of the model c names, through inet n, its notices to np.
+(def ask_of ((n Inet) (np int) (c ModelConf) (q (list int))) int
+  (match (http_connect n np (model_conf_host c) (model_conf_port c))
+    ((Err why) (complain (append "the proxy at " (append (model_conf_host c) (append ": " why)))))
+    ((Ok conn)
+      (match (http_send_as conn "POST" (ask_request c q))
+        ((HttpGot c2 parts) (fed c2 (answer_new) parts))))))
+
+; parts dealt with in order, each one's text written and delivered,
+; then the next waited for, until the answer is over: the exit status.
+(def fed ((c HttpConn) (a Answer) (parts (list HttpPart))) int
+  (if (is_empty parts)
+      (match (http_next c (add (clock_ns) (idle_ns)))
+        ((HttpGot c2 ps)
+          (if (is_empty ps)
+              (let r (http_close c2) (let f (out_flush) (complain "the proxy did not answer")))
+              (fed c2 a ps))))
+      (match (answer_part a (head parts))
+        ((Step a2 out why st)
+          (let w (if (gt (bytes_len out) 0) (let x (out_bytes out) (out_flush)) 0)
+            (if (lt st 0)
+                (fed c a2 (tail parts))
+                (let r (http_close c)
+                  (if (is_empty why) st (let x (complain why) st)))))))))
+
+; b on standard output.
+(def out_bytes ((b bytes)) int (file_write_bytes (IoFile 1) b 0 (bytes_len b)))
+
+; What was written delivered, so it shows as it comes.
+(def out_flush () int (if (is_done (file_flush (IoFile 1))) 0 1))

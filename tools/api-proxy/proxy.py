@@ -106,6 +106,8 @@ def make_app(token, upstream, key, usage_path, log=None):
         body = await request.read()
         headers = {h: request.headers[h] for h in PASSED if h in request.headers}
         headers["x-api-key"] = key
+        # No content coding, so each piece is passed on as it comes.
+        headers["Accept-Encoding"] = "identity"
         model = usage.request_model(body)
         url = upstream.rstrip("/") + request.path
         try:

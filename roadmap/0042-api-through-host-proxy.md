@@ -100,7 +100,7 @@ request built, its streamed events read), which 0043's `agentd` uses.
   by event; an `error` event; a request's JSON for a system prompt, two
   messages and a tool, compared as text; a config with comments and
   without `model`. programs.md's row.
-- [ ] **`ask`, and the e2e case.** `user/bin/ask`: `run ask TEXT...`
+- [x] **`ask`, and the e2e case.** `user/bin/ask`: `run ask TEXT...`
   reads the configuration, opens `api`, posts one user message, and
   writes each text piece as it comes, then a newline; a 401 is "the
   proxy refused this board's token", any other refusal the API's
@@ -189,3 +189,17 @@ request built, its streamed events read), which 0043's `agentd` uses.
   refused the board's token, else the status); the proxy's own 401
   carries that same message, so an upstream 401 for a bad key still
   says what it is. Its 16 tests pass.
+- 2026-10-29: step 3, `ask` and the e2e case `ask`, as planned:
+  `e2e.sh` copies a case's etc to `build/e2e/CASE.etc` when a file in
+  it holds `@PORT@`, and makes it the port; `e2e_serve.py PORT CASE`
+  runs the stand-in on a free port with a key of its own and the proxy
+  on `127.0.0.1:PORT` in front of it, writing each request and usage
+  line to `build/e2e/ask.serve` and the usage file to
+  `build/e2e/ask.usage.jsonl`. `ask` is written as `http` is, its parts
+  read by a pure `answer_part` that its tests drive: text written and
+  flushed as each body piece comes, an `error` event or a refusal said
+  with `model_refusal`'s words. The proxy now asks upstream for no
+  content coding (`Accept-Encoding: identity`), so nothing waits on a
+  decompressor. The Makefile's library variable is `MODELLIB`, not
+  `MODEL`, which step 4's `make agent-etc MODEL=NAME` takes. The case
+  passes on 1 CPU and on 4; `make check`, `make test` pass.

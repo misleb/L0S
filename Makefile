@@ -58,6 +58,10 @@
 #                    on ADDR:PORT, 127.0.0.1:8765 unless given, with that
 #                    token and ANTHROPIC_API_KEY; usage in
 #                    build/proxy/usage.jsonl
+#   make agent-etc API=HOST:PORT [MODEL=NAME]  build/agent-etc: the
+#                    agent's config, naming the proxy, and the token,
+#                    which the demo's and the Pi 5's initramfs then take
+#                    as /etc/agent
 #   make graph       graphify-out/ rebuilt from the code as it is: the L0
 #                    sources (tools/graphify-l0), scripts and Python, the
 #                    docs' nodes kept; once /graphify has built it
@@ -239,7 +243,7 @@ HTTPMSG := user/lib/format/http.l0
 HTTP    := $(INETLIB) $(HTTPMSG) user/lib/proto/httpc.l0
 # A model's API, Anthropic's Messages API through the host's proxy: its
 # configuration, a request's bytes and its streamed events.
-MODEL   := $(HTTP) $(JSON) $(SSE) user/lib/proto/model.l0
+MODELLIB := $(HTTP) $(JSON) $(SSE) user/lib/proto/model.l0
 
 # USB: its descriptors and requests, and the usb protocol, which the
 # host controller's driver serves to the class drivers, over them; and
@@ -287,6 +291,7 @@ LIBS_inet       := $(INETLIB) $(CLOCK)
 LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(HTTP) $(JSON) $(SSE)
+LIBS_ask        := $(MODELLIB)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
@@ -366,7 +371,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run icon-sheet graph graph-hook
+.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run agent-etc icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -489,7 +494,7 @@ $(call l0_test,$(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0)
 $(call l0_test,$(ULIB) $(NICLIB) user/lib/proto/nic_test.l0)
 $(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)
 $(call l0_test,$(ULIB) $(HTTP) user/lib/proto/httpc_test.l0)
-$(call l0_test,$(ULIB) $(MODEL) user/lib/proto/model_test.l0)
+$(call l0_test,$(ULIB) $(MODELLIB) user/lib/proto/model_test.l0)
 $(call l0_test,$(ULIB) $(RANDOM) user/lib/proto/random_test.l0)
 $(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
 $(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)
@@ -764,6 +769,22 @@ $(BUILD)/proxy/token:
 
 proxy: $(PROXY_VENV)/.installed $(BUILD)/proxy/token
 
+# The agent's etc for a board: build/agent-etc/config, naming the proxy
+# at API, HOST:PORT, and the model if MODEL names one, and the boards'
+# token beside it. While it is there, the demo's initramfs and the
+# Pi 5's take it as /etc/agent (stage_agent), and install carries it
+# onto a system volume with the rest of /etc. rm -rf build/agent-etc
+# leaves it out again.
+AGENT_ETC := $(BUILD)/agent-etc
+agent-etc: $(BUILD)/proxy/token
+	@test -n "$(API)" || { echo 'make agent-etc: API=HOST:PORT names the proxy, such as API=10.0.2.2:8765'; exit 1; }
+	@rm -rf $(AGENT_ETC) && mkdir -p $(AGENT_ETC)
+	@{ echo '# made by make agent-etc: the proxy, and the model'; echo 'api $(API)'; \
+	   if [ -n '$(MODEL)' ]; then echo 'model $(MODEL)'; fi; } > $(AGENT_ETC)/config
+	@cp $(BUILD)/proxy/token $(AGENT_ETC)/token
+	@echo "make agent-etc: $(AGENT_ETC), api $(API)$(if $(MODEL), and model $(MODEL)); make initramfs or pi5-initramfs takes it as /etc/agent"
+stage_agent = if [ -d $(AGENT_ETC) ]; then mkdir -p $(1)/agent && cp $(AGENT_ETC)/config $(AGENT_ETC)/token $(1)/agent/; fi
+
 PROXY_LISTEN ?= 127.0.0.1:8765
 proxy-run: proxy
 	$(PROXY_VENV)/bin/python -I tools/api-proxy/proxy.py --listen $(PROXY_LISTEN) --token-file $(BUILD)/proxy/token --usage $(BUILD)/proxy/usage.jsonl
@@ -788,6 +809,7 @@ stage_etc = cp $(WALLPAPERS) $(1)/ && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(
 initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc
 	$(call stage_etc,$(BUILD)/etc)
+	@$(call stage_agent,$(BUILD)/etc)
 	tools/mkinitramfs $(BUILD)/initramfs.cpio $(BUILD)/etc $(ROOT)
 
 # What the screen and keyboard tests boot: tests/screen/etc, with the
@@ -834,7 +856,7 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 SCREEN_TESTS := vt files launch responsive disks-create resize logo-menu procmon disks launcher launcher-install \
                 fontview partitions usb fat hidpi widgets keyboard gpu-screen
 
-e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs $(BUILD)/mkfs
+e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
 	tests/e2e.sh
 	tests/screens.sh $(SCREEN_TESTS)
 
@@ -967,6 +989,7 @@ pi5-initramfs: images root $(ETC_DEPS) $(CHIME) $(BUILD)/kernel-pi5.img $(PI5_DT
 	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc && cp $(CHIME) $(BUILD)/pi5-etc/chime.wav
 	@for p in $(PI5_NO); do grep -v "^start $$p\( \|$$\)" $(BUILD)/pi5-etc/inittab > $(BUILD)/pi5-etc/inittab.new; mv $(BUILD)/pi5-etc/inittab.new $(BUILD)/pi5-etc/inittab; echo "pi5-initramfs: not starting $$p"; done
 	$(call stage_etc,$(BUILD)/pi5-etc)
+	@$(call stage_agent,$(BUILD)/pi5-etc)
 	rm -rf $(BUILD)/pi5-root && mkdir -p $(BUILD)/pi5-root/boot && cp -Rp $(ROOT)/. $(BUILD)/pi5-root/
 	cp $(PI5_DTBS) $(BUILD)/pi5-root/boot/
 	printf x | $(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-root/boot

@@ -52,8 +52,10 @@ Each case of `tests/e2e/` is a directory:
 - `serve`, a command line run on the host for the length of the boot, a
   server the board reaches at 10.0.2.2, killed after; and `peer`, one run
   from its start that must exit 0, a client of a port the board listens
-  to. `@PORT@` in either, in `net` and in `typed` is a free port of the
-  host's loopback, chosen for the boot;
+  to. `@PORT@` in either, in `net`, in `typed` and in any file of the
+  case's `etc` (which is then copied into `build/e2e/CASE.etc` and made
+  the port there) is a free port of the host's loopback, chosen for the
+  boot;
 - `usb`, if the board's keyboard and pointer are to be a `usb-kbd` and a
   `usb-mouse` on a `qemu-xhci`, not virtio's;
 - `sd`, if the board is to have an SD card in a `sdhci-pci`, a blank
@@ -193,6 +195,15 @@ Ctrl-C as a person would:
   a comment between, each a line as it comes, the server holding the
   stream open 2 s after the last; and `net tcp` show no connection is
   left;
+- `ask`, with [e2e_serve.py](../tools/api-proxy/e2e_serve.py) running
+  the API proxy on the host's loopback in front of its stand-in for the
+  Messages API, which answers from the case's `script.json`, has `ask`
+  find the proxy at `10.0.2.2:@PORT@` in its `etc/agent/config`, with
+  the case's own token in `etc/agent/token`, which only that proxy
+  takes; it writes a stream of four text pieces, 200 ms apart, as they
+  come, and says the API's message for a 529 overloaded error. No key
+  and no network beyond the host's loopback are needed, and `make e2e`
+  makes the proxy's venv first;
 - `net_echo`, with a forward from a port of the host's loopback to port
   7000 of the board, has `net echo` listen to it, take the connection
   [a client on the host](../tests/e2e/net_echo/peer.py) makes, which sends
