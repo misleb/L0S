@@ -44,7 +44,7 @@ move independently, so several can be active at once.
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 6/8 | – | display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
-| [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | active | 1/5 | 0041 | network.md, programs.md, testing.md, pi5.md |
+| [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | active | 2/5 | 0041 | network.md, programs.md, testing.md, pi5.md |
 | [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | blocked | 0/10 | 0042 | agent.md (new), programs.md, demo.md, testing.md |
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | idea | – | 0043 | agent.md, storage.md |
 | [0045](0045-agent-builder-mcp.md) The agent builds programs for itself, through an MCP server on the host | Agent | idea | – | 0043 | agent.md, programs.md, testing.md |
@@ -62,8 +62,8 @@ move independently, so several can be active at once.
   range, so none freezes; step 7 is the flicker as lists alternate
   while a big window is dragged off the bottom.
 - [0042](0042-api-through-host-proxy.md) A model's API reached through
-  a proxy on the host, active: the proxy is in (`make proxy-run`), so
-  `proto/model.l0` comes next.
+  a proxy on the host, active: the proxy (`make proxy-run`) and
+  `proto/model.l0` are in, so `ask` and its e2e case come next.
 
 ## Dependencies
 

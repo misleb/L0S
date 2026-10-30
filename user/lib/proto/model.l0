@@ -1,0 +1,253 @@
+; model.l0 -- a model's API, the board's side, behind one interface:
+; where it is and with what token (ModelConf, from /etc/agent/config
+; and /etc/agent/token), a request's bytes (model_request), and its
+; streamed events read as ModelEvents (model_events). The provider is
+; Anthropic's Messages API, reached in plain HTTP through the host's
+; proxy (tools/api-proxy), which adds the key and the TLS: another
+; provider would be another model_request and model_events with the
+; same types. Linked with JSON, SSE and HTTP, as the Makefile's MODEL.
+;
+;   /etc/agent/config   a line each, # a comment:
+;                       api HOST:PORT    the proxy (needed)
+;                       model NAME       claude-sonnet-5-5 if none
+;                       max_tokens N     8192 if none
+;                       any other key is left for its program
+;   /etc/agent/token    the board's token for the proxy, its first line
+
+; Where the model is, and how it is asked: the proxy's host, a name or
+; an address dotted, and port; the model's name; the most tokens an
+; answer may have; and the board's token for the proxy.
+(data ModelConf (ModelConf (list int) int (list int) int (list int)))
+
+; What an event of a streamed answer says. A block's text as it comes
+; (MText index text); a tool's use begun (MToolStart index id name), its
+; input's JSON as it comes in pieces (MToolInput index partial); a block
+; ended (MBlockStop index); why the answer stopped (MStop reason:
+; end_turn, tool_use, max_tokens, ...); what it spent (MUsage input
+; output cache-written cache-read, each -1 where the event does not say
+; it: message_start says them all, message_delta the output's, which
+; counts the whole answer so far); and an error, its kind and message
+; (MError), as the API says it, or invalid_event for one not read.
+(data ModelEvent
+  (MText int bytes)
+  (MToolStart int bytes bytes)
+  (MToolInput int bytes)
+  (MBlockStop int)
+  (MStop bytes)
+  (MUsage int int int int)
+  (MError bytes bytes))
+
+; Where the configuration and the token are.
+(def model_conf_path () (list int) "/etc/agent/config")
+(def model_token_path () (list int) "/etc/agent/token")
+
+; The model asked if the configuration names none, the most tokens an
+; answer may have if it says none, and the API's version, as its
+; anthropic-version header.
+(def model_default () (list int) "claude-sonnet-5-5")
+(def model_default_max_tokens () int 8192)
+(def model_api_version () (list int) "2023-06-01")
+
+; ---------------------------------------------------------------- the conf
+
+; A configuration's proxy host and port, model, max_tokens and token.
+(def model_conf_host ((c ModelConf)) (list int) (match c ((ModelConf h p m n t) h)))
+(def model_conf_port ((c ModelConf)) int (match c ((ModelConf h p m n t) p)))
+(def model_conf_model ((c ModelConf)) (list int) (match c ((ModelConf h p m n t) m)))
+(def model_conf_max_tokens ((c ModelConf)) int (match c ((ModelConf h p m n t) n)))
+(def model_conf_token ((c ModelConf)) (list int) (match c ((ModelConf h p m n t) t)))
+
+; The configuration text names, with token, the first line of the token
+; file: or why it names none. Lines are KEY VALUE, a # starting a
+; comment; api is needed; a key not known is passed over.
+(def model_conf_of ((text (list int)) (token (list int))) (Result ModelConf (list int))
+  (let t (http_trim (strip_cr (up_to 10 token)))
+    (if (is_empty t)
+        ((Err ModelConf (list int)) (append (model_token_path) ": no token in it"))
+        (model_conf_lines (lines text) (ModelConf (nil int) 0 (model_default) (model_default_max_tokens) t)))))
+
+; The rest of model_conf_of: the lines ls read onto c so far.
+(def model_conf_lines ((ls (list (list int))) (c ModelConf)) (Result ModelConf (list int))
+  (if (is_empty ls)
+      (if (is_empty (model_conf_host c))
+          ((Err ModelConf (list int)) (append (model_conf_path) ": no api HOST:PORT line"))
+          ((Ok ModelConf (list int)) c))
+      (let ws (split_spaces (up_to 35 (strip_cr (head ls))))
+        (if (is_empty ws)
+            (model_conf_lines (tail ls) c)
+            (match (model_conf_line (head ws) (tail ws) c)
+              ((Err why) ((Err ModelConf (list int)) (append (model_conf_path) (append ": " why))))
+              ((Ok c2) (model_conf_lines (tail ls) c2)))))))
+
+; c with the line KEY VALUE... read: or why the line is wrong.
+(def model_conf_line ((key (list int)) (vs (list (list int))) (c ModelConf)) (Result ModelConf (list int))
+  (if (not (any_eq key (split_spaces "api model max_tokens")))
+      ((Ok ModelConf (list int)) c)
+      (if (not (eq (length vs) 1))
+          ((Err ModelConf (list int)) (append key " takes one value"))
+          (match c
+            ((ModelConf h p m n t)
+              (if (eq key "model")
+                  ((Ok ModelConf (list int)) (ModelConf h p (head vs) n t))
+                  (if (eq key "max_tokens")
+                      (match (word_number (head vs))
+                        ((None) ((Err ModelConf (list int)) (append "not a number: " (head vs))))
+                        ((Some k) (if (gt k 0)
+                                      ((Ok ModelConf (list int)) (ModelConf h p m k t))
+                                      ((Err ModelConf (list int)) "max_tokens is at least 1"))))
+                      (model_conf_api (head vs) c))))))))
+
+; c with its proxy at hostport, HOST:PORT: or why that is not one.
+(def model_conf_api ((hostport (list int)) (c ModelConf)) (Result ModelConf (list int))
+  (let host (up_to 58 hostport)
+    (let after (drop hostport (length host))
+      (if (if (is_empty host) true (is_empty after))
+          ((Err ModelConf (list int)) (append "api is HOST:PORT, not " hostport))
+          (match (word_number (tail after))
+            ((None) ((Err ModelConf (list int)) (append "not a port: " (tail after))))
+            ((Some port)
+              (if (if (ge port 1) (le port 65535) false)
+                  (match c ((ModelConf h p m n t) ((Ok ModelConf (list int)) (ModelConf host port m n t))))
+                  ((Err ModelConf (list int)) "a port is 1 to 65535"))))))))
+
+; The configuration and the token, read from their files: or why not,
+; naming the file that is missing.
+(def model_conf_read () (Result ModelConf (list int))
+  (match (read_whole (model_conf_path))
+    ((Err why) ((Err ModelConf (list int)) (append "no configuration: " why)))
+    ((Ok text)
+      (match (read_whole (model_token_path))
+        ((Err why) ((Err ModelConf (list int)) (append "no token: " why)))
+        ((Ok token) (model_conf_of (bytes_to_list text) (bytes_to_list token)))))))
+
+; ---------------------------------------------------------------- asking
+
+; A message of role, user or assistant, whose content is the text s.
+(def model_message ((role (list int)) (s (list int))) Json
+  (json_obj (cons (json_field "role" (json_str role))
+                  (cons (json_field "content" (json_str s)) (nil JField)))))
+
+; The request's body: model, max_tokens, system unless it is null,
+; messages, tools unless null or none, and stream true.
+(def model_body ((c ModelConf) (system Json) (messages Json) (tools Json)) bytes
+  (let fs (model_push_if (eq (length (json_items tools)) 0) (nil JField) (json_field "tools" tools))
+    (let fs2 (cons (json_field "stream" (JBool true)) fs)
+      (let fs3 (cons (json_field "messages" messages) (rev fs2))
+        (let fs4 (if (eq system (JNull)) fs3 (cons (json_field "system" system) fs3))
+          (json_bytes (json_obj (cons (json_field "model" (json_str (model_conf_model c)))
+                                      (cons (json_field "max_tokens" (JInt (model_conf_max_tokens c))) fs4)))))))))
+
+; f onto fs unless skip.
+(def model_push_if ((skip bool) (fs (list JField)) (f JField)) (list JField)
+  (if skip fs (cons f fs)))
+
+; A request of the model through c's proxy, as bytes: POST
+; /v1/messages, the board's token as its bearer, the API's version, and
+; the body's JSON, system, messages and tools as given (Json, so a
+; caller adds cache_control where it wants it).
+(def model_request ((c ModelConf) (system Json) (messages Json) (tools Json)) bytes
+  (http_request "POST" (http_host_text (model_conf_host c) (model_conf_port c)) "/v1/messages"
+    (cons (HttpHeader "Authorization" (append "Bearer " (model_conf_token c)))
+      (cons (HttpHeader "anthropic-version" (model_api_version))
+        (cons (HttpHeader "Content-Type" "application/json")
+          (cons (HttpHeader "Accept" "text/event-stream") (nil HttpHeader)))))
+    (model_body c system messages tools)))
+
+; ---------------------------------------------------------------- reading
+
+; An event of the answer's stream as ModelEvents: none for ping,
+; message_stop, and what is not known.
+(def model_events ((e SseEvent)) (list ModelEvent)
+  (let d (sse_data e)
+    (match (json_whole d 0 (bytes_len d))
+      ((Err why) (cons (MError (bytes_from_list "invalid_event") (bytes_from_list why)) (nil ModelEvent)))
+      ((Ok v) (model_events_of (bytes_to_list (sse_name e)) v)))))
+
+; The events an event named name, of data v, gives.
+(def model_events_of ((name (list int)) (v Json)) (list ModelEvent)
+  (if (eq name "content_block_delta") (model_delta v)
+  (if (eq name "content_block_start") (model_block_start v)
+  (if (eq name "content_block_stop") (cons (MBlockStop (model_index v)) (nil ModelEvent))
+  (if (eq name "message_start") (cons (model_usage (model_in (json_get v "message") "usage")) (nil ModelEvent))
+  (if (eq name "message_delta") (model_message_delta v)
+  (if (eq name "error") (cons (model_error_in v) (nil ModelEvent))
+  (nil ModelEvent))))))))
+
+; A block's index, 0 if it has none.
+(def model_index ((v Json)) int (model_int_or (json_get v "index") 0))
+
+; An int that may be missing, or fallback.
+(def model_int_or ((o (Option Json)) (fallback int)) int
+  (match o ((None) fallback) ((Some x) (match (json_int x) ((None) fallback) ((Some n) n)))))
+
+; A string that may be missing, as bytes, or empty.
+(def model_text_or ((o (Option Json))) bytes
+  (match o ((None) (bytes_from_list (nil int))) ((Some x) (match (json_text x) ((None) (bytes_from_list (nil int))) ((Some b) b)))))
+
+; The field name of an object that may be missing.
+(def model_in ((o (Option Json)) (name (list int))) (Option Json)
+  (match o ((None) ((None Json))) ((Some x) (json_get x name))))
+
+; The usage an object that may be missing says, -1 for each count not.
+(def model_usage ((u (Option Json))) ModelEvent
+  (MUsage (model_int_or (model_in u "input_tokens") -1)
+          (model_int_or (model_in u "output_tokens") -1)
+          (model_int_or (model_in u "cache_creation_input_tokens") -1)
+          (model_int_or (model_in u "cache_read_input_tokens") -1)))
+
+; content_block_start: a text block's text if it starts with some, or a
+; tool_use's id and name; nothing for any other block.
+(def model_block_start ((v Json)) (list ModelEvent)
+  (let i (model_index v)
+    (let b (json_get v "content_block")
+      (let kind (bytes_to_list (model_text_or (model_in b "type")))
+        (if (eq kind "tool_use")
+            (cons (MToolStart i (model_text_or (model_in b "id")) (model_text_or (model_in b "name"))) (nil ModelEvent))
+            (let t (model_text_or (model_in b "text"))
+              (if (if (eq kind "text") (gt (bytes_len t) 0) false)
+                  (cons (MText i t) (nil ModelEvent))
+                  (nil ModelEvent))))))))
+
+; content_block_delta: a text_delta's text, or an input_json_delta's
+; partial JSON; nothing for any other delta.
+(def model_delta ((v Json)) (list ModelEvent)
+  (let i (model_index v)
+    (let d (json_get v "delta")
+      (let kind (bytes_to_list (model_text_or (model_in d "type")))
+        (if (eq kind "text_delta")
+            (cons (MText i (model_text_or (model_in d "text"))) (nil ModelEvent))
+            (if (eq kind "input_json_delta")
+                (cons (MToolInput i (model_text_or (model_in d "partial_json"))) (nil ModelEvent))
+                (nil ModelEvent)))))))
+
+; message_delta: why the answer stopped, if it says, then its usage.
+(def model_message_delta ((v Json)) (list ModelEvent)
+  (let u (model_usage (json_get v "usage"))
+    (match (model_in (json_get v "delta") "stop_reason")
+      ((None) (cons u (nil ModelEvent)))
+      ((Some r)
+        (match (json_text r)
+          ((None) (cons u (nil ModelEvent)))
+          ((Some s) (cons (MStop s) (cons u (nil ModelEvent)))))))))
+
+; The error an error event or an error answer's JSON v holds: its kind
+; and message.
+(def model_error_in ((v Json)) ModelEvent
+  (MError (model_text_or (model_in (json_get v "error") "type")) (model_error_message v)))
+
+; The message of the error v holds, empty if none.
+(def model_error_message ((v Json)) bytes
+  (model_text_or (model_in (json_get v "error") "message")))
+
+; What a refused request means, its status code and its body as it
+; came: the API's error message if the body has one; for a 401
+; without, that the proxy refused the board's token; else the status.
+(def model_refusal ((code int) (body bytes)) (list int)
+  (let m (match (json_whole body 0 (bytes_len body))
+           ((Err why) (nil int))
+           ((Ok v) (bytes_to_list (model_error_message v))))
+    (if (not (is_empty m))
+        m
+        (if (eq code 401)
+            "the proxy refused this board's token"
+            (append "the API answered " (digits code))))))

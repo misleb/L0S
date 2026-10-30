@@ -77,7 +77,7 @@ request built, its streamed events read), which 0043's `agentd` uses.
   through with its body; usage lines for a stream and a JSON answer,
   and a day's totals; refusing `0.0.0.0` and starting without a key.
   testing.md's `make test` row.
-- [ ] **The board's side of the API.** [proto/model.l0](../user/lib/proto/model.l0)
+- [x] **The board's side of the API.** [proto/model.l0](../user/lib/proto/model.l0)
   (`MODEL` is `JSON`, `SSE` and `HTTP`), the provider behind one
   interface: `(data ModelConf ...)`, read by `model_conf_of text token`
   from `/etc/agent/config`, a line each, `#` a comment (`api HOST:PORT`,
@@ -176,3 +176,16 @@ request built, its streamed events read), which 0043's `agentd` uses.
   than ending its body, so the board sees it cut short. The usage file
   is `build/proxy/usage.jsonl` unless `--usage` is given, and times and
   `--day` are UTC. Its tests, 20, pass with `make test`.
+- 2026-10-29: step 2, `proto/model.l0`, as planned, with these choices:
+  text, ids, names and partial JSON stay `bytes` in `ModelEvent`s; an
+  `MUsage` count an event does not say is -1 (message_start says all
+  four, message_delta the output's, the answer's whole so far), so a
+  caller puts the later over the earlier; `system` is left out of the
+  body when it is `JNull`, and `tools` when it is not a non-empty
+  array; the request also sends `Accept: text/event-stream`. Added for
+  `ask` and 0043: `model_message role text`, a message's `Json`, and
+  `model_refusal code body`, a refused request's words (the API's error
+  `message` when the body has one, else for a 401 that the proxy
+  refused the board's token, else the status); the proxy's own 401
+  carries that same message, so an upstream 401 for a bad key still
+  says what it is. Its 16 tests pass.

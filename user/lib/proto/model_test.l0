@@ -1,0 +1,173 @@
+; model_test.l0 -- tests of model.l0: a configuration read, a request's
+; bytes, a streamed answer read event by event, and refusals.
+
+; ---------------------------------------------------------------- fixtures
+
+; A ModelEvent as a line of text, to compare.
+(def ev_text ((e ModelEvent)) (list int)
+  (match e
+    ((MText i t) (append "text " (append (digits i) (append " " (bytes_to_list t)))))
+    ((MToolStart i id n) (append "tool " (append (digits i) (append " " (append (bytes_to_list id) (append " " (bytes_to_list n)))))))
+    ((MToolInput i p) (append "input " (append (digits i) (append " " (bytes_to_list p)))))
+    ((MBlockStop i) (append "stop " (digits i)))
+    ((MStop r) (append "stopped " (bytes_to_list r)))
+    ((MUsage a b c d) (append "usage " (unwords (cons (num a) (cons (num b) (cons (num c) (cons (num d) (nil (list int)))))))))
+    ((MError k m) (append "error " (append (bytes_to_list k) (append ": " (bytes_to_list m)))))))
+
+; A number, -1 too.
+(def num ((n int)) (list int) (if (lt n 0) (append "-" (digits (neg n))) (digits n)))
+
+; The events of a stream's text s, read in pieces of n bytes, as lines
+; joined by |.
+(def stream_text ((s (list int)) (n int)) (list int)
+  (let b (bytes_from_list s)
+    (join_with "|" (events_lines (stream_events (sse_new) b 0 n (nil ModelEvent)) (nil (list int))))))
+
+; The ModelEvents of b from i on, n bytes a piece, reversed onto acc.
+(def stream_events ((s Sse) (b bytes) (i int) (n int) (acc (list ModelEvent))) (list ModelEvent)
+  (if (ge i (bytes_len b))
+      (rev acc)
+      (let j (min (add i n) (bytes_len b))
+        (match (sse_more s b i j)
+          ((SseMore s2 es) (stream_events s2 b j n (models_onto es acc)))))))
+
+; Each event's ModelEvents, reversed onto acc.
+(def models_onto ((es (list SseEvent)) (acc (list ModelEvent))) (list ModelEvent)
+  (if (is_empty es) acc (models_onto (tail es) (rev_onto (model_events (head es)) acc))))
+
+; Each event as its line.
+(def events_lines ((es (list ModelEvent)) (acc (list (list int)))) (list (list int))
+  (if (is_empty es) (rev acc) (events_lines (tail es) (cons (ev_text (head es)) acc))))
+
+; A stream as the Messages API's documentation lays one out: a text
+; block, a tool_use whose input comes in three pieces, the stop and its
+; usage.
+(def doc_stream () (list int)
+  (concat (cons "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-5-5\",\"stop_reason\":null,\"usage\":{\"input_tokens\":472,\"cache_creation_input_tokens\":12,\"cache_read_input_tokens\":30,\"output_tokens\":2}}}\n\n"
+    (cons "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+    (cons "event: ping\ndata: {\"type\": \"ping\"}\n\n"
+    (cons "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Okay, let's check\"}}\n\n"
+    (cons "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" the weather.\"}}\n\n"
+    (cons "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+    (cons "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01T1x\",\"name\":\"get_weather\",\"input\":{}}}\n\n"
+    (cons "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\n"
+    (cons "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\\\":\"}}\n\n"
+    (cons "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"San Fra\"}}\n\n"
+    (cons "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ncisco\\\"}\"}}\n\n"
+    (cons "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+    (cons "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":89}}\n\n"
+    (cons "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n" (nil (list int))))))))))))))))))
+
+; What the stream gives, as stream_text writes it.
+(def doc_events () (list int)
+  (join_with "|" (cons "usage 472 2 12 30"
+    (cons "text 0 Okay, let's check" (cons "text 0  the weather." (cons "stop 0"
+    (cons "tool 1 toolu_01T1x get_weather" (cons "input 1 " (cons "input 1 {\"location\":"
+    (cons "input 1  \"San Fra" (cons "input 1 ncisco\"}" (cons "stop 1"
+    (cons "stopped tool_use" (cons "usage -1 89 -1 -1" (nil (list int))))))))))))))))
+
+; A configuration with its proxy, a model and max_tokens.
+(def conf () ModelConf (ModelConf "10.0.2.2" 8765 "claude-sonnet-5-5" 1024 "abc123"))
+
+; -------------------------------------------------------------- the stream
+
+; The documentation's stream, in pieces of every size from 1 to 64:
+; the same events each time.
+(def test_doc_stream () int
+  (check_str "whole" (stream_text (doc_stream) 100000) (doc_events)))
+
+(def test_doc_stream_pieces () int
+  (add (check_str "byte by byte" (stream_text (doc_stream) 1) (doc_events))
+       (check_str "in 37s" (stream_text (doc_stream) 37) (doc_events))))
+
+; An error event, as the API sends one in a stream.
+(def test_error_event () int
+  (check_str "overloaded"
+    (stream_text "event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"Overloaded\"}}\n\n" 9)
+    "error overloaded_error: Overloaded"))
+
+; An event whose data is not JSON.
+(def test_invalid_event () int
+  (check_true "invalid" (starts_with (stream_text "event: content_block_delta\ndata: {nope\n\n" 100) "error invalid_event: ")))
+
+; A text block that starts with text, and a block of another kind.
+(def test_block_start_text () int
+  (add (check_str "text"
+         (stream_text "event: content_block_start\ndata: {\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"Hi\"}}\n\n" 100)
+         "text 2 Hi")
+       (check_str "thinking"
+         (stream_text "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" 100)
+         "")))
+
+; message_delta without a stop reason.
+(def test_delta_no_reason () int
+  (check_str "usage" (stream_text "event: message_delta\ndata: {\"delta\":{},\"usage\":{\"output_tokens\":5}}\n\n" 100)
+    "usage -1 5 -1 -1"))
+
+; ---------------------------------------------------------------- requests
+
+; A request for a system prompt, two messages and a tool, compared as
+; its text. The body is 253 bytes, as the last two strings are.
+(def test_request () int
+  (let tool (json_obj (cons (json_field "name" (json_str "get_time"))
+              (cons (json_field "description" (json_str "the time"))
+                (cons (json_field "input_schema" (json_obj (cons (json_field "type" (json_str "object")) (nil JField)))) (nil JField)))))
+    (let msgs (JArr (cons (model_message "user" "hi") (cons (model_message "assistant" "hello") (nil Json))))
+      (check_str "request"
+        (bytes_to_list (model_request (conf) (json_str "Be brief.") msgs (JArr (cons tool (nil Json)))))
+        (concat (cons "POST /v1/messages HTTP/1.1\r\nHost: 10.0.2.2:8765\r\nAuthorization: Bearer abc123\r\n"
+          (cons "anthropic-version: 2023-06-01\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\n"
+          (cons "Content-Length: 253\r\n\r\n"
+          (cons "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":1024,\"system\":\"Be brief.\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"hello\"}],"
+          (cons "\"tools\":[{\"name\":\"get_time\",\"description\":\"the time\",\"input_schema\":{\"type\":\"object\"}}],\"stream\":true}" (nil (list int))))))))))))
+
+; With no system prompt and no tools, neither is in the body.
+(def test_body_bare () int
+  (check_str "body"
+    (bytes_to_list (model_body (conf) (JNull) (JArr (cons (model_message "user" "hi") (nil Json))) (JArr (nil Json))))
+    "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":1024,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}"))
+
+; ------------------------------------------------------------ configuration
+
+; The configuration's text, as model_conf_of reads it, as one line.
+(def conf_text ((r (Result ModelConf (list int)))) (list int)
+  (match r
+    ((Err why) (append "error: " why))
+    ((Ok c) (unwords (cons (model_conf_host c) (cons (digits (model_conf_port c)) (cons (model_conf_model c)
+              (cons (digits (model_conf_max_tokens c)) (cons (model_conf_token c) (nil (list int)))))))))))
+
+; Comments, blank lines, a key for another program, no model: the default.
+(def test_conf_defaults () int
+  (check_str "conf"
+    (conf_text (model_conf_of "# the agent's\n\napi 10.0.2.2:8765   # the proxy\nhome /agent\n" "f00d\n"))
+    "10.0.2.2 8765 claude-sonnet-5-5 8192 f00d"))
+
+(def test_conf_given () int
+  (check_str "conf"
+    (conf_text (model_conf_of "model claude-opus-5-5\r\nmax_tokens 2048\r\napi proxy.lan:80\r\n" "  t0k3n  \r\nmore\n"))
+    "proxy.lan 80 claude-opus-5-5 2048 t0k3n"))
+
+(def test_conf_no_api () int
+  (check_str "no api" (conf_text (model_conf_of "model m\n" "t\n")) "error: /etc/agent/config: no api HOST:PORT line"))
+
+(def test_conf_no_token () int
+  (check_str "no token" (conf_text (model_conf_of "api a:1\n" "\n")) "error: /etc/agent/token: no token in it"))
+
+(def test_conf_bad () int
+  (add (check_str "port" (conf_text (model_conf_of "api a:99999\n" "t")) "error: /etc/agent/config: a port is 1 to 65535")
+    (add (check_str "no port" (conf_text (model_conf_of "api a\n" "t")) "error: /etc/agent/config: api is HOST:PORT, not a")
+         (check_str "max" (conf_text (model_conf_of "api a:1\nmax_tokens x\n" "t")) "error: /etc/agent/config: not a number: x"))))
+
+; Under an operating system there is no /etc/agent.
+(def test_conf_read_missing () int
+  (check_true "names the file" (starts_with (conf_text (model_conf_read)) "error: no configuration: ")))
+
+; ---------------------------------------------------------------- refusals
+
+(def test_refusal_message () int
+  (check_str "529" (model_refusal 529 (bytes_from_list "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"))
+    "Overloaded"))
+
+(def test_refusal_token () int
+  (add (check_str "401 bare" (model_refusal 401 (bytes_from_list "")) "the proxy refused this board's token")
+       (check_str "502 bare" (model_refusal 502 (bytes_from_list "<html>")) "the API answered 502")))

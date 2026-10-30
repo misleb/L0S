@@ -237,6 +237,9 @@ SSE     := user/lib/format/sse.l0
 HTTPMSG := user/lib/format/http.l0
 # The HTTP/1.1 client over inet's TCP: INETLIB, the messages, and it.
 HTTP    := $(INETLIB) $(HTTPMSG) user/lib/proto/httpc.l0
+# A model's API, Anthropic's Messages API through the host's proxy: its
+# configuration, a request's bytes and its streamed events.
+MODEL   := $(HTTP) $(JSON) $(SSE) user/lib/proto/model.l0
 
 # USB: its descriptors and requests, and the usb protocol, which the
 # host controller's driver serves to the class drivers, over them; and
@@ -486,6 +489,7 @@ $(call l0_test,$(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0)
 $(call l0_test,$(ULIB) $(NICLIB) user/lib/proto/nic_test.l0)
 $(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)
 $(call l0_test,$(ULIB) $(HTTP) user/lib/proto/httpc_test.l0)
+$(call l0_test,$(ULIB) $(MODEL) user/lib/proto/model_test.l0)
 $(call l0_test,$(ULIB) $(RANDOM) user/lib/proto/random_test.l0)
 $(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
 $(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)
