@@ -23,6 +23,8 @@
   (CmdCd (list int))                ; cd: the directory to make the current one
   (CmdPwd)
   (CmdPs)
+  (CmdNames)                        ; names: every name registered, and who serves it
+  (CmdUptime)                       ; uptime: the time since boot, the load, each CPU's use
   (CmdDmesg)                        ; dmesg: the kernel's log
   (CmdRun (list int) (list (list int)) bool)   ; run: a program by name or path, its
                                                ; arguments, and whether in the background
@@ -68,11 +70,13 @@
   (if (any_eq w (split_spaces "help ?")) (CmdHelp)
   (if (is_file_command w) (CmdFile w rest)
   (if (eq w "ps") (CmdPs)
+  (if (eq w "names") (CmdNames)
+  (if (eq w "uptime") (CmdUptime)
   (if (eq w "dmesg") (CmdDmesg)
   (if (eq w "echo") (CmdEcho rest)
   (if (eq w "exit") (parse_exit rest)
   (if (eq w "reboot") (if (is_empty rest) (CmdReboot) (CmdBad "reboot takes nothing"))
-  (parse_directory w rest)))))))))
+  (parse_directory w rest)))))))))))
 
 ; cd [DIR], / unless given, and pwd; any other word on to parse_numeric.
 (def parse_directory ((w (list int)) (rest (list (list int)))) Command
@@ -128,26 +132,84 @@
 
 ; ----------------------------------------------------------- processes
 
-(def ps_header () (list int) "  PID  PARENT  PROGRAM       STATE\n")
+(def ps_header () (list int) "  PID  PARENT  CPU  %CPU  PROGRAM       SERVES        STATE\n")
 
-; The line ps shows for pid, or nothing for one that has exited.
-(def ps_line ((pid int) (info ProcInfo) (name (list int))) (list int)
+; The line ps shows for pid, or nothing for one that has exited: its
+; parent, the CPU it is on or last ran on (cpu_text), its % of one CPU
+; in tenths, its program's name, the names it serves (serves_text), and
+; its state.
+(def ps_line ((pid int) (info ProcInfo) (name (list int)) (cpu int) (tenths int) (serves (list int))) (list int)
   (match info
     ((ProcInfo st parent m detail own shared)
       (if (eq st (state_exited))
           (nil int)
           (let a (push (pad_left (digits pid) 5) (nil int))
             (let b (push (pad_left (digits parent) 8) a)
-              (let c (push "  " b)
-                (let d (push (pad_right name 12) c)
-                  (rev (push "\n" (push (state_text st detail) (push "  " d))))))))))))
+              (let c (push (pad_left (cpu_text cpu) 5) b)
+                (let d (push (pad_left (tenths_text tenths) 6) c)
+                  (let e (push (pad_right name 12) (push "  " d))
+                    (let f (push (pad_right serves 12) (push "  " e))
+                      (rev (push "\n" (push (state_text st detail) (push "  " f))))))))))))))
 
-; Every live process's line, procs.l0's procs_live, onto acc, each named
-; by its program, as program_name says.
-(def ps_lines ((ps (list ProcLive)) (acc (list int))) (list int)
-  (if (is_empty ps)
+; How long ps watches the processes to say each one's % of a CPU: 250 ms.
+(def ps_window_ns () int 250000000)
+
+; Every live process's line, as ps shows them after acc: each process's
+; CPU time is read, and again ps_window_ns later, when the table is read
+; again, so its %CPU is its use over that time, or over its life if it
+; is newer; ps's own, though, is over its life, as it sleeps meanwhile.
+; procs is the table read before.
+(def ps_lines ((procs (list ProcLive)) (acc (list int))) (list int)
+  (let before (cpu_seen procs)
+    (let z (sleep_ns (ps_window_ns))
+      (let now (procs_live)
+        (ps_rows now before (cpu_seen now) (names_registered) acc)))))
+
+; The lines of procs, after acc, by what was seen before and after.
+(def ps_rows ((procs (list ProcLive)) (before CpuSeen) (after CpuSeen) (names (list NameEntry)) (acc (list int))) (list int)
+  (if (is_empty procs)
+      (rev_onto acc (nil int))
+      (match (head procs)
+        ((ProcLive pid info)
+          (let c (ps_cpu pid)
+            (match c
+              ((ProcCpu t cpu age)
+                (let tenths (if (eq pid (l0s_pid)) (cpu_tenths t age) (pid_tenths before after pid age))
+                  (ps_rows (tail procs) before after names
+                    (rev_onto (ps_line pid info (program_name pid) cpu tenths (serves_text (names_of_pid names pid))) acc))))))))))
+
+; What the kernel says of pid's CPU time, or nothing yet if it says none.
+(def ps_cpu ((pid int)) ProcCpu
+  (match (proc_cpu pid) ((None) (ProcCpu 0 -1 0)) ((Some c) c)))
+
+; What names says: every name registered, in order, its port, the pid
+; whose port it is, and that pid's program.
+(def names_text () (list int)
+  (append "NAME          PORT    PID  PROGRAM\n" (names_lines (names_registered) (nil int))))
+
+; The lines of entries, after the reversed acc.
+(def names_lines ((entries (list NameEntry)) (acc (list int))) (list int)
+  (if (is_empty entries)
       (rev acc)
-      (match (head ps) ((ProcLive pid info) (ps_lines (tail ps) (push (ps_line pid info (program_name pid)) acc))))))
+      (match (head entries)
+        ((NameEntry name port owner)
+          (names_lines (tail entries) (push (names_line name port owner (program_name owner)) acc))))))
+
+; One name's line, as names shows it.
+(def names_line ((name (list int)) (port int) (owner int) (program (list int))) (list int)
+  (append (pad_right name 12) (append (pad_left (digits port) 6) (append (pad_left (digits owner) 7)
+    (append "  " (append program "\n"))))))
+
+; What uptime says, the kernel asked twice, a second apart; or that it
+; does not say.
+(def uptime_said () (list int)
+  (match (cpu_usage)
+    ((None) "sh: uptime: the kernel does not say\n")
+    ((Some a)
+      (let z (sleep_ns 1000000000)
+        (match (cpu_usage)
+          ((None) "sh: uptime: the kernel does not say\n")
+          ((Some b) (uptime_text a b)))))))
 
 ; What dmesg prints: the kernel's log, a line to each message, as klog.l0
 ; says it, after a note of how many were dropped if any were.
@@ -155,7 +217,7 @@
   (log_lines (log_all)))
 
 (def help_text () (list int)
-  "  ls [PATH ...]   every file, or what is in each directory; programs are\n                  in /bin, services in /sbin, apps in /Applications, and\n                  the disk's volumes in /Volumes\n  cat FILE ...    show files\n  write FILE WORDS ...\n                  make FILE hold WORDS, a line; append adds the line\n  cp FROM TO      copy a file, into TO if it is a directory\n  mv FROM TO      rename or move a file\n  rm FILE ...     remove files, and directories with nothing in them\n  mkdir DIR ...   make directories, on a volume\n  cd [DIR]        make DIR the current directory, / if none: a path with\n                  no / at the start is from it; pwd says which it is\n  pwd             the current directory\n  df              each volume's size, and the room left on it\n  format VOLUME   empty a volume, /Volumes/LABEL or LABEL\n  unmount VOLUME  take a volume away, until the disk is rescanned\n  relabel VOLUME LABEL\n                  rename a volume, mounting it at /Volumes/LABEL\n  partition SECTORS [START]\n                  a new partition on the disk; says its UUID\n  mkfs UUID LABEL [fat32]\n                  a new volume on that partition, at /Volumes/LABEL;\n                  fat32 makes it FAT32, which a Raspberry Pi boots from\n  ps              the processes running, and what each is doing\n  dmesg           the kernel's log: what booted and what the drivers\n                  found, each line with its time since boot\n  run NAME [ARG ...] [&]\n                  run /bin/NAME, /sbin/NAME, or the program NAME in an\n                  app; an app, by its name, as run Terminal; or the\n                  program or app at NAME if it holds a /; with ARGs in\n                  place of its own; & leaves it running, and\n                  Ctrl-C ends one that is not\n  wait PID        wait for a process to exit; Ctrl-C stops waiting\n  kill PID        end a process, unless it is a driver\n  sleep MS        sleep for MS milliseconds\n  echo WORDS      print WORDS\n  exit [STATUS]   stop the system\n  reboot          restart the board, as its reset would\n")
+  "  ls [PATH ...]   every file, or what is in each directory; programs are\n                  in /bin, services in /sbin, apps in /Applications, and\n                  the disk's volumes in /Volumes\n  cat FILE ...    show files\n  write FILE WORDS ...\n                  make FILE hold WORDS, a line; append adds the line\n  cp FROM TO      copy a file, into TO if it is a directory\n  mv FROM TO      rename or move a file\n  rm FILE ...     remove files, and directories with nothing in them\n  mkdir DIR ...   make directories, on a volume\n  cd [DIR]        make DIR the current directory, / if none: a path with\n                  no / at the start is from it; pwd says which it is\n  pwd             the current directory\n  df              each volume's size, and the room left on it\n  format VOLUME   empty a volume, /Volumes/LABEL or LABEL\n  unmount VOLUME  take a volume away, until the disk is rescanned\n  relabel VOLUME LABEL\n                  rename a volume, mounting it at /Volumes/LABEL\n  partition SECTORS [START]\n                  a new partition on the disk; says its UUID\n  mkfs UUID LABEL [fat32]\n                  a new volume on that partition, at /Volumes/LABEL;\n                  fat32 makes it FAT32, which a Raspberry Pi boots from\n  ps              the processes running: the CPU each is on, its % of\n                  one CPU, the names it serves, and what it is doing\n  names           every name registered, its port, and who serves it\n  uptime          how long the system has run, its load, and each\n                  CPU's use over a second\n  dmesg           the kernel's log: what booted and what the drivers\n                  found, each line with its time since boot\n  run NAME [ARG ...] [&]\n                  run /bin/NAME, /sbin/NAME, or the program NAME in an\n                  app; an app, by its name, as run Terminal; or the\n                  program or app at NAME if it holds a /; with ARGs in\n                  place of its own; & leaves it running, and\n                  Ctrl-C ends one that is not\n  wait PID        wait for a process to exit; Ctrl-C stops waiting\n  kill PID        end a process, unless it is a driver\n  sleep MS        sleep for MS milliseconds\n  echo WORDS      print WORDS\n  exit [STATUS]   stop the system\n  reboot          restart the board, as its reset would\n")
 
 (def banner () (list int)
   "L0S shell, on an L0 microkernel. Type help for the commands.\n")
@@ -286,6 +348,8 @@
     ((CmdCd dir) (let w (say (cd_text dir)) (repl console reply tty names)))
     ((CmdPwd) (let w (say (append (getcwd) "\n")) (repl console reply tty names)))
     ((CmdPs) (let w (say (append (ps_header) (ps_lines (procs_live) (nil int)))) (repl console reply tty names)))
+    ((CmdNames) (let w (say (names_text)) (repl console reply tty names)))
+    ((CmdUptime) (let w (say (uptime_said)) (repl console reply tty names)))
     ((CmdDmesg) (let w (say (dmesg_text)) (repl console reply tty names)))
     ((CmdEcho ws) (let w (say (append (unwords ws) "\n")) (repl console reply tty names)))
     ((CmdSleep ms) (let s (sleep_ns (mul ms 1000000)) (repl console reply tty names)))

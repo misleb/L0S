@@ -1,0 +1,118 @@
+; usage_test.l0 -- what usage.l0 counts: processes' CPU time, CPUs' busy
+; time, CPU 0's waiting, the load averages, and the records.
+
+; Counts for 4 CPUs from 1000 ns on.
+(def u4 () Usage (usage_new 4 1000))
+
+(def test_new_counts_nothing () int
+  (let u (u4)
+    (add (check_int "time" (usage_time u 5) 0)
+    (add (check_int "no CPU" (usage_last u 5) -1)
+    (add (check_int "busy" (usage_busy u 2) 0)
+         (check_int "load" (usage_load u 0) 0))))))
+
+(def test_charge_adds_up () int
+  (let u (usage_charge (usage_charge (u4) 5 2 300) 5 2 200)
+    (add (check_int "time" (usage_time u 5) 500)
+    (add (check_int "last CPU" (usage_last u 5) 2)
+         (check_int "CPU 2 busy" (usage_busy u 2) 500)))))
+
+; Pid 261 is slot 5's second process.
+(def test_charge_by_slot () int
+  (let u (usage_charge (u4) 261 1 70)
+    (check_int "slot 5" (usage_time u 5) 70)))
+
+(def test_charge_refuses_nonsense () int
+  (let u (usage_charge (usage_charge (usage_charge (u4) 5 9 100) 5 -1 100) 5 1 -3)
+    (add (check_int "time" (usage_time u 5) 0)
+         (check_int "busy" (usage_busy u 1) 0))))
+
+(def test_started_resets () int
+  (let u (usage_started (usage_charge (u4) 5 1 400) 261 7000)
+    (add (check_int "time" (usage_time u 261) 0)
+    (add (check_int "no CPU" (usage_last u 261) -1)
+         (check_int "born" (usage_born u 261) 7000)))))
+
+(def test_busy_kept_after_start () int
+  (check_int "CPU 1 still busy" (usage_busy (usage_started (usage_charge (u4) 5 1 400) 261 7000) 1) 400))
+
+; Handed at 2000 to an idle CPU 1, back at 2500: 500 ns.
+(def test_back_from_handoff () int
+  (let u (usage_back (usage_placed (u4) 1 2000 true) 6 1 2000 2500)
+    (add (check_int "time" (usage_time u 6) 500)
+         (check_int "busy" (usage_busy u 1) 500))))
+
+; Pid 6 handed at 2000, pid 7 queued behind it at 2100; 6 back at 2500,
+; 7 at 2600: 7 ran 100 ns, not the 500 since its hand-off, and the CPU
+; was busy 600 ns.
+(def test_back_queued_behind () int
+  (let u (usage_placed (usage_placed (u4) 1 2000 true) 1 2100 false)
+    (let u2 (usage_back (usage_back u 6 1 2000 2500) 7 1 2100 2600)
+      (add (check_int "six" (usage_time u2 6) 500)
+      (add (check_int "seven" (usage_time u2 7) 100)
+           (check_int "busy" (usage_busy u2 1) 600))))))
+
+(def test_back_no_cpu () int
+  (check_int "nothing" (usage_time (usage_back (u4) 6 8 0 900) 6) 0))
+
+(def test_wait_adds_up () int
+  (check_int "waited" (usage_waited (usage_wait (usage_wait (u4) 300) -5)) 300))
+
+; ------------------------------------------------------------------- load
+
+(def test_load_next_rises () int
+  (add (check_int "one thread from 0" (load_next 0 1884 1) 164)
+       (check_int "steady at one" (load_next 2048 1884 1) 2048)))
+
+(def test_load_next_decays () int
+  (check_int "decays" (load_next 2048 1884 0) 1884))
+
+(def test_not_due_before_tick () int
+  (add (check_bool "not yet" (usage_due (u4) 5000000999) false)
+       (check_bool "due" (usage_due (u4) 5000001000) true)))
+
+(def test_tick_samples () int
+  (let u (usage_tick (u4) 5000001000 1)
+    (add (check_int "1 minute" (usage_load u 0) 164)
+    (add (check_int "5 minutes" (usage_load u 1) 34)
+         (check_int "next" (usage_next_tick u) 10000001000)))))
+
+(def test_tick_not_due () int
+  (let u (usage_tick (u4) 2000 3)
+    (add (check_int "nothing" (usage_load u 0) 0)
+         (check_int "next" (usage_next_tick u) 5000001000))))
+
+; Two ticks due at once are both sampled.
+(def test_tick_catches_up () int
+  (check_int "two" (usage_load (usage_tick (u4) 10000001000 1) 0) (load_next 164 1884 1)))
+
+; A minute of one busy thread brings the 1 minute average to about 0.63.
+(def test_minute_of_one () int
+  (let l (usage_load (usage_tick (u4) 60000001000 1) 0)
+    (add (check_true "above 0.6" (gt l 1228)) (check_true "below 0.7" (lt l 1434)))))
+
+; An hour behind: the averages caught up 180 ticks, 15 minutes, which
+; bring the 1 minute average to 1.0 and the 15 to 1 - 1/e, about 0.63;
+; then the next set after now.
+(def test_tick_far_behind () int
+  (let u (usage_tick (u4) 3600000001000 1)
+    (add (check_int "1 minute" (usage_load u 0) 2048)
+    (add (check_true "15 minutes near 0.63" (if (gt (usage_load u 2) 1228) (lt (usage_load u 2) 1360) false))
+         (check_int "next" (usage_next_tick u) (add 3600000001000 (usage_tick_ns)))))))
+
+; ---------------------------------------------------------------- records
+
+(def test_record_layout () int
+  (let b (bytes_from_list (usage_record (usage_charge (usage_wait (u4) 50) 5 3 70) 9000))
+    (add (check_int "length" (bytes_len b) (add (cpu_record_len) 32))
+    (add (check_int "CPUs" (le_u32 b 0) 4)
+    (add (check_int "up" (le_u64_at b 16) 8000)
+    (add (check_int "waited" (le_u64_at b 24) 50)
+         (check_int "CPU 3" (le_u64_at b 56) 70)))))))
+
+(def test_proc_record_layout () int
+  (let b (bytes_from_list (usage_proc_record (usage_charge (usage_started (u4) 5 3000) 5 2 400) 5 2 9000))
+    (add (check_int "length" (bytes_len b) (proc_cpu_record_len))
+    (add (check_int "time" (le_u64_at b 0) 400)
+    (add (check_int "CPU" (le_u32 b 8) 2)
+         (check_int "age" (le_u64_at b 12) 6000))))))

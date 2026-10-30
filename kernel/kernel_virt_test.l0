@@ -2286,3 +2286,90 @@
        (check_int "to 0x10"
          (boot_words 0 (cons (movz 0 0) (cons (movz 1 16) (cons (movz 2 4096) (append (call_words (call_log_read)) (exit_x0))))))
          (err_fault))))
+
+; ------------------------------------------------------------- cpu_usage
+
+; Asks for pid's CPU record, 0 the system's, into the heap with room for
+; max, then exits with the count, or with what load loads.
+(def usage_words ((pid int) (max int) (load (list int))) (list int)
+  (cons (movz 0 pid) (cons (movz_hi 1 49216) (cons (movz 2 max)
+    (append (call_words (call_cpu_usage)) (append load (exit_x0)))))))
+
+; The system's record: its 32 bytes, then 8 for each CPU.
+(def test_cpu_usage_length () int
+  (check_int "32 and 8 a CPU" (boot_words 0 (usage_words 0 512 (nil int))) (add (cpu_record_len) (mul 8 (cpu_count)))))
+
+; Its first u32 is how many CPUs there are; the time since boot, at 16,
+; has begun.
+(def test_cpu_usage_fields () int
+  (add (check_int "CPUs" (bit_and (boot_words 0 (usage_words 0 512 (first_words))) 4294967295) (cpu_count))
+       (check_true "up" (gt (boot_words 0 (usage_words 0 512 (third_words))) 0))))
+
+(def test_cpu_usage_too_small () int
+  (add (check_int "the system's" (boot_words 0 (usage_words 0 31 (nil int))) (err_too_big))
+       (check_int "a process's" (boot_words 0 (usage_words 1 19 (nil int))) (err_too_big))))
+
+; Its own record, after a yield has parked it once, and so counted its
+; time.
+(def test_cpu_usage_self () int
+  (add (check_int "20 bytes" (boot_words 0 (usage_words 1 64 (nil int))) (proc_cpu_record_len))
+       (check_true "some time"
+         (gt (boot_words 0 (append (call_words (call_yield)) (usage_words 1 64 (first_words)))) 0))))
+
+(def test_cpu_usage_refused () int
+  (add (check_int "no pid 9" (boot_words 0 (usage_words 9 64 (nil int))) (err_no_port))
+  (add (check_int "pid -1" (boot_words 0 (cons (movn 0 0) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_cpu_usage)) (exit_x0)))))) (err_no_port))
+       (check_int "from 0x10" (boot_words 0 (cons (movz 0 0) (cons (movz 1 16) (cons (movz 2 64) (append (call_words (call_cpu_usage)) (exit_x0)))))) (err_fault)))))
+
+; An exited child has no record.
+(def test_cpu_usage_exited () int
+  (check_int "gone"
+    (boot_mods (cons (first (cons (movz 0 1) (append (call_words (call_spawn)) (append (call_words (call_wait)) (usage_words 2 64 (nil int))))))
+                     (cons (exits_with 0) (nil Raw))))
+    (err_no_port)))
+
+; Pid 1 starts a spinner, pid 2, and yields until the spinner's CPU time
+; reaches 2^24 ns, about 17 ms: its record is written one byte into the
+; heap, so the u32 at the heap's byte 4 is the time's bytes 3 to 6. Then
+; it exits with the spinner's CPU, the u32 at the record's byte 8. The
+; loop is ten instructions, then a cbnz past the one that branches back
+; to its start, on x1, the heap's address, never 0.
+(def spin_watcher () (list int)
+  (append (cons (movz 0 1) (call_words (call_spawn)))
+  (append (call_words (call_yield))
+  (append (cons (movz 0 2) (cons (movz_hi 1 49216) (cons (add_imm 1 1 1) (cons (movz 2 64) (call_words (call_cpu_usage))))))
+  (cons (movz_hi 1 49216) (cons (ldr_w0_x1_4) (cons (cbnz 0 2) (cons (cbnz 1 -11)
+  (cons (movz_hi 1 49216) (cons (add_imm 1 1 5) (cons (ldr_w0_x1_4) (exit_x0))))))))))))
+
+; The spinner's time grows as it runs; one CPU runs it on CPU 0, and
+; several on one of the others, as it computes.
+(def test_cpu_usage_spinner () int
+  (let cpu (boot_mods (cons (first (spin_watcher)) (cons (spinner) (nil Raw))))
+    (if (gt (cpu_count) 1)
+        (check_true "CPU 1 to 3" (if (ge cpu 1) (lt cpu (cpu_count)) false))
+        (check_int "CPU 0" cpu 0))))
+
+; ------------------------------------------------------------- name_list
+
+; Lists the names from the i-th into the heap with room for max, then
+; exits with the count, or what load loads.
+(def names_words ((i int) (max int) (load (list int))) (list int)
+  (cons (movz 0 i) (cons (movz_hi 1 49216) (cons (movz 2 max)
+    (append (call_words (call_name_list)) (append load (exit_x0)))))))
+
+; "ab" registered: one record of 12 bytes and the name's 2, its owner
+; pid 1 after its port, and its length 2.
+(def test_name_list () int
+  (add (check_int "14 bytes" (boot_words 0 (append (register_ab) (names_words 0 64 (nil int)))) 14)
+  (add (check_int "owner" (bit_shr (boot_words 0 (append (register_ab) (names_words 0 64 (first_words)))) 32) 1)
+       (check_int "length" (bit_and (boot_words 0 (append (register_ab) (names_words 0 64 (second_words)))) 4294967295) 2))))
+
+; Past the last name, none; and none whole in 13 bytes.
+(def test_name_list_past () int
+  (add (check_int "from the second" (boot_words 0 (append (register_ab) (names_words 1 64 (nil int)))) 0)
+       (check_int "no room" (boot_words 0 (append (register_ab) (names_words 0 13 (nil int)))) 0)))
+
+(def test_name_list_refused () int
+  (add (check_int "from -1" (boot_words 0 (append (register_ab) (cons (movn 0 0) (cons (movz_hi 1 49216) (cons (movz 2 64) (append (call_words (call_name_list)) (exit_x0))))))) (err_fault))
+  (add (check_int "room -1" (boot_words 0 (append (register_ab) (cons (movz 0 0) (cons (movz_hi 1 49216) (cons (movn 2 0) (append (call_words (call_name_list)) (exit_x0))))))) (err_too_big))
+       (check_int "to 0x10" (boot_words 0 (append (register_ab) (cons (movz 0 0) (cons (movz 1 16) (cons (movz 2 64) (append (call_words (call_name_list)) (exit_x0))))))) (err_fault)))))

@@ -253,32 +253,38 @@ Things to try:
 - `run spin`, then Ctrl-C to interrupt it.
 - `run spin &`. Then run anything else: the shell stays responsive, because
   the timer takes the processor back from `spin`. `kill PID` ends it.
-- `ps`, to see what is running and what each process waits for:
+- `ps`, to see what is running, where, and what each process serves and
+  waits for:
 
   ```
-    PID  PARENT  PROGRAM       STATE
-      1       0  boot          waiting for pid 14
-      2       0  uart          waiting for a message on port 7
-      3       0  virtio-gpu    waiting for a message on port 24
-      4       0  rtc           sleeping
-      5       0  virtio-blk    waiting for a message on port 5
-      6       0  fs            waiting for a message on port 22
-      7       0  virtio-net    waiting for a message on port 6
-      8       0  inet          waiting for a message on port 9
-      9       0  virtio-rng    waiting for a message on port 10
-     10       0  pcie          waiting for a message on port 1
-     11       0  sdhci         waiting for a message on port 17
-     12       0  xhci          waiting for a message on port 20
-     13       0  usb-hid       waiting for a message on 3 ports
-     14       1  sh            running
-     15       1  font          waiting for a message on port 19
-     16       1  wm            waiting for a message on port 29
+    PID  PARENT  CPU  %CPU  PROGRAM       SERVES        STATE
+      1       0    3   0.0  boot          -             waiting for pid 14
+      2       0    0   0.0  uart          console       waiting for a message on port 7
+      3       0    0   0.4  virtio-gpu    display       waiting for a message on 2 ports
+      4       0    0   0.1  rtc           clock         sleeping
+      5       0    1   0.0  virtio-blk    disk0         waiting for a message on port 5
+      6       0    1   0.0  fs            fs            waiting for a message on port 22
+      7       0    2   0.0  virtio-net    nic           waiting for a message on port 6
+      8       0    0   0.0  inet          inet          waiting for a message on port 9
+      9       0    3   0.0  virtio-rng    random        waiting for a message on port 10
+     10       0    2   0.0  pcie          pci           waiting for a message on port 1
+     11       0    1   0.0  sdhci         -             waiting for a message on port 17
+     12       0    0   0.0  xhci          usb           waiting for a message on port 20
+     13       0    0   0.0  usb-hid       keyboard,pointer  waiting for a message on 3 ports
+     14       1    1   2.0  sh            -             running
+     15       1    0   0.0  font          font          waiting for a message on port 19
+     16       1    0   1.9  wm            compositor    waiting for a message on port 29
   ```
 
-  Ports are numbered as the drivers make them, which on four CPUs
-  differs from boot to boot. A process waiting on a set of ports, as
-  `usb-hid` waits on its own and `keyboard`'s and `pointer`'s, says how
-  many.
+  CPU is the CPU a process is on, or last ran on: drivers passing
+  messages run on CPU 0, the kernel's, beside its calls, and a process
+  that computes on one of the others. %CPU is its share of one CPU over
+  the quarter second `ps` watches, or over its life if it started
+  meanwhile; the shell's own is over its life. SERVES is the names its
+  ports are registered as, `-` for none. Ports are numbered as the
+  drivers make them, which on four CPUs differs from boot to boot. A
+  process waiting on a set of ports, as `usb-hid` waits on its own and
+  `keyboard`'s and `pointer`'s, says how many.
 
   It lists the processes that have not exited. The shell asking is always
   `running`, since `ps` runs inside it. Every driver waits, for a request
@@ -287,6 +293,19 @@ Things to try:
   standard input from a terminal `reading a line, to port N`, and one
   whose call on a file of a volume its server has yet to answer
   `waiting for the file server on port N`.
+- `names`, every name registered, in order, with its port and the pid
+  and program serving it; `uptime`, how long the system has run, its
+  load averages over 1, 5 and 15 minutes, and each CPU's use over a
+  second, CPU 0's with the kernel's own share:
+
+  ```
+  l0s> uptime
+  up 0:00:11, load average: 0.07, 0.02, 0.00
+  CPU 0: 13.5% busy, the kernel 4.3%
+  CPU 1: 0.4% busy
+  CPU 2: 0.0% busy
+  CPU 3: 0.0% busy
+  ```
 - `run rtc`, a driver taking an interrupt.
 - `run windows`, to list the windows, front first, and where the pointer
   is. Each line gives a window's id, title, x, y, width and height,

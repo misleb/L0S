@@ -36,7 +36,7 @@ move independently, so several can be active at once.
 | [0026](0026-font-service-limits.md) The font service lets strikes go, and knows who holds them | Toolkit | idea | – | – | programs.md, toolkit.md |
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008, 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
-| [0030](0030-cpu-usage.md) How the CPUs are used, and what each process serves, in `ps` and System Monitor | Kernel | idea | – | – | kernel.md, syscalls.md, programs.md, demo.md, testing.md |
+| [0030](0030-cpu-usage.md) How the CPUs are used, and what each process serves, in `ps` and System Monitor | Kernel | active | 5/6 | – | kernel.md, syscalls.md, programs.md, demo.md, testing.md |
 | [0034](0034-servers-wait-not-poll.md) Servers that wait for their time and their ports, not poll | Kernel | idea | – | – | programs.md, network.md, storage.md, demo.md |
 | [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | idea | – | 0033 | programs.md, toolkit.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
@@ -57,6 +57,10 @@ move independently, so several can be active at once.
 
 ## Ready
 
+- [0030](0030-cpu-usage.md) How the CPUs are used, active: the
+  kernel's counts, `cpu_usage` and `name_list`, `ps`, `names`, `uptime`
+  and System Monitor's columns and bars done on QEMU; step 6 is the
+  Pi 5's board run, `ps` and `uptime` there.
 - [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K, active: stalls cut,
   too-wide screens shown, and window buffers in L0's 128 GB high user
   range, so none freezes, and the fallback no longer flickers; step 8
