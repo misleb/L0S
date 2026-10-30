@@ -7,7 +7,8 @@
 ; or the one its argument names, such as vt, the display's: sh vt. That
 ; terminal is its standard input, output, and error, and those of every
 ; program it runs. As pid 1, exit stops the system. At its start it shows
-; /etc/motd, if there is one.
+; /etc/motd, if there is one. sh -c LINE runs one line and exits with
+; its status, as a program's helper (agentd's sh tool).
 ;
 ; A program runs only through run: a word that is not one of the shell's
 ; commands is an error, never a program, so no program can be mistaken
@@ -247,23 +248,87 @@
 (def tty_name ((argv (list (list int)))) (list int)
   (if (is_empty argv) "console" (head argv)))
 
+; How the shell was started: on a terminal, by its name, or with -c to
+; run one line and exit.
+(data Invocation (ShTty (list int)) (ShLine (list int)))
+
+; What argv asks for: sh -c LINE, the words after -c joined by spaces as
+; the line, one pair of double quotes around it taken off (the shell's
+; own run splits run sh -c "ls /etc" into words, quotes and all); else
+; the terminal tty_name says.
+(def invocation ((argv (list (list int)))) Invocation
+  (if (if (is_empty argv) false (eq (head argv) "-c"))
+      (ShLine (unquoted (unwords (tail argv))))
+      (ShTty (tty_name argv))))
+
+; s without one double quote at each end, if it has both.
+(def unquoted ((s (list int))) (list int)
+  (if (lt (length s) 2)
+      s
+      (if (and (eq (head s) 34) (eq (last s) 34))
+          (drop_last (tail s))
+          s)))
+
+; The shell, as its arguments say: one line with -c, else on a terminal.
+(def shell () int
+  (match (invocation (args))
+    ((ShLine line) (run_line line))
+    ((ShTty name) (shell_on name))))
+
+; sh -c LINE: runs the line as a command typed at the prompt would run,
+; with no /etc/motd and no prompt, on the standard input, output, and
+; error the shell was given, and exits with run's child's status, or 1
+; for a command that failed, or 0.
+(def run_line ((line (list int))) int
+  (obey_once (port_new) (parse_command (append line "\n"))))
+
+; Does cmd once, as obey does, and gives its status: a program's own, 1
+; for a command that failed (one the shell complains of, sh: ...), else
+; 0. exit gives its status; a terminal's commands are as at a prompt.
+(def obey_once ((reply int) (cmd Command)) int
+  (match cmd
+    ((CmdEnd) 0)
+    ((CmdExit status) status)
+    ((CmdReboot) (said (append "sh: reboot: " (append (board_restart) "\n"))))
+    ((CmdNothing) 0)
+    ((CmdHelp) (said (help_text)))
+    ((CmdFile op ws) (said (file_command op (path_args (getcwd) op ws) (root_paths))))
+    ((CmdCd dir) (said (cd_text dir)))
+    ((CmdPwd) (said (append (getcwd) "\n")))
+    ((CmdPs) (said (append (ps_header) (ps_lines (procs_live) (nil int)))))
+    ((CmdDmesg) (said (dmesg_text)))
+    ((CmdEcho ws) (said (append (unwords ws) "\n")))
+    ((CmdSleep ms) (let s (sleep_ns (mul ms 1000000)) 0))
+    ((CmdWait pid) (said (wait_for reply pid)))
+    ((CmdKill pid) (said (killed pid (proc_kill pid))))
+    ((CmdBad why) (said (append "sh: " (append why "\n"))))
+    ((CmdUnknown what) (said (unknown_line what (root_paths))))
+    ((CmdRun what argv bg) (run_module reply (run_name what) argv bg (root_paths)))))
+
+; Writes text, and gives the status of the command that said it.
+(def said ((text (list int))) int
+  (let w (say text) (said_status text)))
+
+; 1 if text is the shell's complaint, a line that starts sh: , else 0.
+(def said_status ((text (list int))) int
+  (if (starts_with text "sh: ") 1 0))
+
 ; Finds its terminal and makes it its standard input, output, and error,
 ; and so those of every program it runs, then reads commands from it,
 ; until its input ends or the terminal's process exits.
-(def shell () int
-  (let name (tty_name (args))
-    (match (name_wait name 10000000000)
-      ((NotFound) (let w (write_err (append "sh: no terminal " (append name "\n"))) 1))
-      ((Found console)
-        (match (tty_set console)
-          ((TtyNoPort) (let w (write_err (append "sh: terminal " (append name " is gone\n"))) 1))
-          ((TtySet)
-            (let port (port_new)
-              (let i (port_send console (request port "i"))
-                (let tty (terminal_pid console port)
-                  (let m (say (motd))
-                    (let w (say (banner))
-                      (repl console port tty (root_paths)))))))))))))
+(def shell_on ((name (list int))) int
+  (match (name_wait name 10000000000)
+    ((NotFound) (let w (write_err (append "sh: no terminal " (append name "\n"))) 1))
+    ((Found console)
+      (match (tty_set console)
+        ((TtyNoPort) (let w (write_err (append "sh: terminal " (append name " is gone\n"))) 1))
+        ((TtySet)
+          (let port (port_new)
+            (let i (port_send console (request port "i"))
+              (let tty (terminal_pid console port)
+                (let m (say (motd))
+                  (let w (say (banner))
+                    (repl console port tty (root_paths))))))))))))
 
 (def repl ((console int) (reply int) (tty int) (names (list (list int)))) int
   (let p (say (prompt))
@@ -333,20 +398,22 @@
 
 ; Runs the program what names, or the app's: program_found's, or else
 ; that of the app whose bundle what names; a path on a volume, even
-; while / is the initramfs.
+; while / is the initramfs. Gives the program's status, 0 for one left
+; running, or 1 if it could not be started.
 (def run_module ((port int) (what (list int)) (argv (list (list int))) (bg bool) (paths (list (list int)))) int
   (let path (app_program_path what paths)
     (if (is_empty path)
-        (say (append "sh: no program " (append (program_path_in what paths) "\n")))
+        (said (append "sh: no program " (append (program_path_in what paths) "\n")))
         (match (spawn_path path (if (is_empty argv) ((None (list (list int)))) (Some argv)))
           ((Spawned pid)
             (if bg
-                (say (started_line pid))
-                (say (exited_line pid (foreground port pid)))))
-          ((SpawnNoEntry) (say (cannot_start path (SpawnNoEntry))))
-          ((SpawnNotProgram) (say (cannot_start path (SpawnNotProgram))))
-          ((SpawnTooBig) (say (cannot_start path (SpawnTooBig))))
-          ((SpawnNoRoom) (say (cannot_start path (SpawnNoRoom))))))))
+                (let w (say (started_line pid)) 0)
+                (let st (foreground port pid)
+                  (let w (say (exited_line pid st)) st))))
+          ((SpawnNoEntry) (said (cannot_start path (SpawnNoEntry))))
+          ((SpawnNotProgram) (said (cannot_start path (SpawnNotProgram))))
+          ((SpawnTooBig) (said (cannot_start path (SpawnTooBig))))
+          ((SpawnNoRoom) (said (cannot_start path (SpawnNoRoom))))))))
 
 ; What to say of path not started, as spawning it answered s.
 (def cannot_start ((path (list int)) (s Spawn)) (list int)

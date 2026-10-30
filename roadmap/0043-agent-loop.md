@@ -1,6 +1,6 @@
 # 0043: `agentd`, an agent's loop and its tools on L0S
 
-Track: Agent · Status: blocked · Needs: 0042 · Spec: agent.md (new), programs.md, demo.md, testing.md
+Track: Agent · Status: active · Needs: 0042 · Spec: agent.md (new), programs.md, demo.md, testing.md
 
 ## Why
 
@@ -71,7 +71,7 @@ What it is, as decided with the user:
 
 ## Steps
 
-- [ ] **`sh -c`.** `sh -c LINE` runs one line of the shell's commands,
+- [x] **`sh -c`.** `sh -c LINE` runs one line of the shell's commands,
   with no `/etc/motd` and no prompt, and exits with its status (`run`'s
   child's, or 1 for a command that failed); `sh` alone and `sh TTY` are
   as now. For the `sh` tool, and any program. sh_test's parse of `-c`;
@@ -263,3 +263,11 @@ What it is, as decided with the user:
   agent's files outlive a reinstall of `System`, which `install`
   writes and a reinstall formats; its rules are the home's
   `CLAUDE.md`, as 0044's layout has them, made from L0S's default.
+- 2026-10-29: active, though 0042's runs against the real API (its
+  steps 4 and 5) are still the user's: nothing here needs them until
+  step 10. Step 1 done: `sh -c LINE` joins the words after `-c` with
+  spaces and takes off one pair of double quotes around them, since
+  the shell's own `run` splits `run sh -c "ls /etc"` into words, quotes
+  and all; a program spawning `sh` passes the line as one argument.
+  The status is `run`'s child's, 1 for a line the shell complains of
+  (`sh: ...`), else 0.

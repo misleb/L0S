@@ -74,7 +74,8 @@ past the card's end, and reads its last sector.
 only those. Thirty-five cases type a session through
 [tools/slowtype](../tools/slowtype), which pauses after each line and each
 Ctrl-C as a person would:
-- `shell` includes a backspace, Ctrl-U and an arrow key;
+- `shell` includes a backspace, Ctrl-U and an arrow key, and `run sh -c
+  "ls /etc"`, a line run by a shell of its own;
 - `jobs` covers Ctrl-C at a foreground job, at a `wait`, and at the prompt,
   and `kill` of the shell's own job and of a driver, which is refused;
 - `kill` ends `spin`, which the inittab started, not the shell, and is
