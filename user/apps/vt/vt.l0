@@ -21,8 +21,9 @@
 ; console: "r" for a line, "i" for Ctrl-C notices, "w" to write. Each tab
 ; has a port of its own, on which vt registers its name, the first of
 ; vt1, vt2, and so on that no one has registered, and vt waits on the
-; app's port and every tab's at once, a set of ports (port_set), so it
-; knows a tab by the port a message came on. With its name registered vt
+; app's port and every tab's at once, the tabs' ports the app's own in
+; the toolkit's loop's set (ui_app_ports, UiPort), so it knows a tab by
+; the port a message came on. With its name registered vt
 ; starts the tab's shell, sh NAME, and watches it: when the shell exits
 ; the tab closes, its name let go (name_unregister) and its port kept for
 ; the next tab, and the window closes with its last.
@@ -33,7 +34,8 @@
 ; window's id. Each window is a Vt of its own, its tabs its own; vt ends
 ; when its last window closes, with the status of the shell whose exit
 ; closed it, or 0 for a close button. Its windows have at most tabs_most
-; tabs between them, as one set holds port_set_limit ports.
+; tabs between them, as one set holds port_set_limit ports, the app's
+; and the toolkit's two reply ports among them.
 ; The wheel scrolls the selected tab back through what scrolled off it.
 ; At the desktop's scale 2 a cell is still 8 by 16 of the desktop's
 ; pixels, 16 by 32 of its buffer's, and its characters are the face's
@@ -282,9 +284,10 @@
 
 ; ---------------------------------------------------------------- ports
 
-; The most tabs a window has: a set holds port_set_limit ports, the
-; window's one of them.
-(def tabs_most () int (sub (port_set_limit) 1))
+; The most tabs the app's windows have between them: a set holds
+; port_set_limit ports, the app's and the toolkit's two reply ports
+; three of them.
+(def tabs_most () int (sub (port_set_limit) 3))
 
 ; port, every message waiting on it taken and dropped, as a closed tab's
 ; port is before another tab has it: what its old shell sent last.
@@ -335,15 +338,15 @@
 ; was at the end, with the status vt ends with if it was the last.
 (data Step (Go Vt) (Stop Vt int))
 
-; What a window is asked to do in a step: take the compositor's notice
-; m, at byte at of its payload; take what came on its tab's port; or
-; close the tab whose shell exited.
-(data Ask (AskWm Message int) (AskTab int (list int)) (AskExit int int))
+; What a window is asked to do in a step: take an event of its window,
+; as the toolkit's loop hands it out; take what came on its tab's port;
+; or close the tab whose shell exited.
+(data Ask (AskEvent UiEvent) (AskTab int (list int)) (AskExit int int))
 
 ; The step of window v asked q.
 (def vt_asked ((v Vt) (q Ask)) Step
   (match q
-    ((AskWm m at) (from_wm_at v m at))
+    ((AskEvent ev) (from_event v ev))
     ((AskTab port payload)
       (match (tabs_by_port (vt_tabs v) port)
         ((Some t) (Go (from_tab v t payload)))
@@ -352,9 +355,10 @@
 
 ; Terminal, an app of any number of windows on one port (uiapp.l0's
 ; UiApp): its windows' Vts by id, the ports of tabs closed, kept for the
-; next tabs of any window, the set of ports last waited on, and the cells
-; a new window has, the arguments'.
-(data Vts (Vts UiApp (Map int Vt) (list int) (list int) Term))
+; next tabs of any window, and the cells a new window has, the
+; arguments'. The tabs' ports are the app's own (ui_app_ports), waited
+; on by the toolkit's loop with the app's.
+(data Vts (Vts UiApp (Map int Vt) (list int) Term))
 
 ; What a message does to the app: it goes on, or vt ends with a status,
 ; its last window closed.
@@ -368,7 +372,7 @@
   (match (ui_app_start)
     ((UiAppFailed why) (complain why))
     ((UiAppStarted a)
-      (match (vts_opened (Vts a ((MapEmpty int Vt)) (nil int) (nil int) t))
+      (match (vts_opened (Vts a ((MapEmpty int Vt)) (nil int) t))
         ((VtsRefused vs why) (complain why))
         ((VtsOpened vs id) (serve (vts_waiting vs)))))))
 
@@ -380,18 +384,18 @@
 ; first tab opened in it.
 (def vts_opened ((vs Vts)) VtsOpen
   (match vs
-    ((Vts a wins free set t)
+    ((Vts a wins free t)
       (match (ui_app_open_csd a "Terminal" (term_win_w t) (term_win_h t))
-        ((UiAppRefused a2 why) (VtsRefused (Vts a2 wins free set t) why))
+        ((UiAppRefused a2 why) (VtsRefused (Vts a2 wins free t) why))
         ((UiAppOpened a2 id)
           (match (ui_app_win a2 id)
-            ((None) (VtsRefused (Vts a2 wins free set t) "no window"))
+            ((None) (VtsRefused (Vts a2 wins free t) "no window"))
             ((Some w)
               (let v (Vt w (tabs_none) 0 "Terminal" (Shown (Rect 0 0 0 0) (ui_win_canvas w) 0 0) (Lent free (vts_tab_count vs)))
-                (VtsOpened (vts_kept (Vts a2 wins free set t) id (refreshed (tab_opened v))) id)))))))))
+                (VtsOpened (vts_kept (Vts a2 wins free t) id (refreshed (tab_opened v))) id)))))))))
 
 ; The app's windows' Vts.
-(def vts_wins ((vs Vts)) (list Vt) (match vs ((Vts a wins free set t) (map_values wins))))
+(def vts_wins ((vs Vts)) (list Vt) (match vs ((Vts a wins free t) (map_values wins))))
 
 ; How many tabs the app's windows have, all together.
 (def vts_tab_count ((vs Vts)) int (vt_tab_count_onto (vts_wins vs) 0))
@@ -400,10 +404,10 @@
 (def vt_tab_count_onto ((l (list Vt)) (n int)) int
   (if (is_empty l) n (vt_tab_count_onto (tail l) (add n (tabs_count (vt_tabs (head l)))))))
 
-; What vt waits on: the app's port, where every window's notices and the
-; shells' exits come, then every window's tabs' ports.
+; The tabs' ports of every window, what vt waits on beside the app's
+; port and the toolkit's reply ports: the app's own ports.
 (def vts_ports ((vs Vts)) (list int)
-  (match vs ((Vts a wins free set t) (cons (ui_app_port a) (tabs_ports_all (map_values wins) (nil int))))))
+  (match vs ((Vts a wins free t) (tabs_ports_all (map_values wins) (nil int)))))
 
 ; Every tab's port of each of l's windows, onto the reversed acc.
 (def tabs_ports_all ((l (list Vt)) (acc (list int))) (list int)
@@ -411,128 +415,76 @@
       (rev acc)
       (tabs_ports_all (tail l) (rev_onto (tabs_ports (vt_tabs (head l))) acc))))
 
-; vs, its set of ports made its windows' and tabs', if they are not the
-; set it waits on already, as after a tab or a window opens or closes;
-; saying why not if the kernel refuses it, which tabs_room keeps from
-; happening.
+; vs with its tabs' ports given to the toolkit's loop as the app's own
+; (ui_app_ports), which waits on them with the app's in one set and
+; makes the set again when they change, as after a tab or a window
+; opens or closes; tabs_room keeps the set within what the kernel
+; allows.
 (def vts_waiting ((vs Vts)) Vts
-  (match vs
-    ((Vts a wins free set t)
-      (let want (vts_ports vs)
-        (if (eq want set)
-            vs
-            (let kept (Vts a wins free want t)
-              (match (port_set want)
-                ((PortSetMade) kept)
-                ((PortSetNotYours) (let s (said_why (port_setting_why (PortSetNotYours))) kept))
-                ((PortSetSize) (let s (said_why (port_setting_why (PortSetSize))) kept)))))))))
+  (match vs ((Vts a wins free t) (Vts (ui_app_ports a (vts_ports vs)) wins free t))))
 
-; Serves the windows until the last closes, waiting on the set of ports:
-; what waits taken with the message waited for, the tabs' first, in
-; order, then the app's port's, put together as the toolkit's loop puts
-; a window's (uiloop.l0's ui_together), so a burst of the pointer's
-; moves over a window is its last.
+; Serves the windows until the last closes: each event the toolkit's
+; loop hands out (ui_app_next), what waits taken first and the windows'
+; notices put together, so a burst of the pointer's moves over a window
+; is its last; a tab's message, on the tab's own port, comes as UiPort,
+; before the windows' notices.
 (def serve ((vs Vts)) int
-  (match (port_receive_set)
-    ((SetRecvFailed) (complain "lost its ports"))
-    ((SetMessage port m)
-      (match vs
-        ((Vts a wins free set t)
-          (let got (vt_drained (vt_drain_most) (cons (SetMessage port m) (nil SetMessage)))
-            (vts_batch vs (rev_onto (vt_on_port got (ui_app_port a) false (nil Message)) (nil Message))
-                          (ui_together (rev (vt_on_port got (ui_app_port a) true (nil Message)))
-                                       (compositor_pid (ui_app_compositor a)) (vts_held (map_values wins) ((MapEmpty int int))))
-                          (vt_tab_ports got (ui_app_port a) (nil int)))))))))
-
-; The most messages taken at once, more than a port holds.
-(def vt_drain_most () int 64)
-
-; Up to n more messages waiting on the set taken, after the reversed acc;
-; the whole in order.
-(def vt_drained ((n int) (acc (list SetMessage))) (list SetMessage)
-  (if (le n 0)
-      (rev acc)
-      (match (port_try_receive_set)
-        ((SetRecvFailed) (rev acc))
-        ((SetMessage p m) (vt_drained (sub n 1) (cons (SetMessage p m) acc))))))
-
-; The messages of got on port, if on, or on any other, reversed onto acc.
-(def vt_on_port ((got (list SetMessage)) (port int) (on bool) (acc (list Message))) (list Message)
-  (if (is_empty got)
-      acc
-      (match (head got)
-        ((SetMessage p m) (vt_on_port (tail got) port on (if (eq (eq p port) on) (cons m acc) acc)))
-        ((SetRecvFailed) (vt_on_port (tail got) port on acc)))))
-
-; The ports of got's messages on another port than port, in order, after
-; the reversed acc.
-(def vt_tab_ports ((got (list SetMessage)) (port int) (acc (list int))) (list int)
-  (if (is_empty got)
-      (rev acc)
-      (match (head got)
-        ((SetMessage p m) (vt_tab_ports (tail got) port (if (eq p port) acc (cons p acc))))
-        ((SetRecvFailed) (vt_tab_ports (tail got) port acc)))))
-
-; Each window's buttons as last told, by its id, onto m.
-(def vts_held ((l (list Vt)) (m (Map int int))) (Map int int)
-  (if (is_empty l) m (vts_held (tail l) (map_put m (ui_win_id (vt_win (head l))) (ui_win_held (vt_win (head l)))))))
-
-; vs after each of tabs, the tabs' messages, each on the port of ports
-; beside it, then each of ms, the app's port's, put together; vt ends
-; with the status of the step that closed its last window.
-(def vts_batch ((vs Vts) (tabs (list Message)) (ms (list Message)) (ports (list int))) int
-  (if (not (is_empty tabs))
-      (match (vts_one vs (head ports) (head tabs))
-        ((VtsGo vs2) (vts_batch vs2 (tail tabs) ms (tail ports)))
-        ((VtsEnd status) status))
-      (if (is_empty ms)
-          (serve (vts_waiting vs))
-          (match vs
-            ((Vts a wins free set t)
-              (match (vts_one vs (ui_app_port a) (head ms))
-                ((VtsGo vs2) (vts_batch vs2 tabs (tail ms) ports))
-                ((VtsEnd status) status)))))))
-
-; What message m on port does.
-(def vts_one ((vs Vts) (port int) (m Message)) VtsStep
-  (match m
-    ((RecvFailed) (VtsGo vs))
-    ((Message from b) (vts_received vs port m from b))))
-
-; What a message m, bytes b from from, that came on port does: on the
-; app's port, the app's (from_app); on a tab's, that tab's window's.
-(def vts_received ((vs Vts) (port int) (m Message) (from int) (b bytes)) VtsStep
   (match vs
-    ((Vts a wins free set t)
-      (if (eq port (ui_app_port a))
-          (from_app vs m from)
+    ((Vts a wins free t)
+      (match (ui_app_next a)
+        ((UiAppNext a2 e)
+          (if (ui_app_event_lost e)
+              (complain "lost its ports")
+              (match e
+                ((UiAppEvent id ev)
+                  (match (vts_event (Vts a2 wins free t) id ev)
+                    ((VtsGo vs2) (serve (vts_waiting vs2)))
+                    ((VtsEnd status) status))))))))))
+
+; What an event does to the app: of window id, that window's step; of
+; no window, a tab's message, that tab's window's; a shell's exit, its
+; window's, which closes its tab; an open, Terminal launched again, a
+; window more; anything else, nothing.
+(def vts_event ((vs Vts) (id int) (ev UiEvent)) VtsStep
+  (if (ge id 0)
+      (vts_step vs id (AskEvent ev))
+      (match (ui_port_of ev)
+        ((UiOnPort port m)
           (match (vts_holding vs port true)
-            ((Some id) (vts_step vs id (AskTab port (msg_text b))))
-            ((None) (VtsGo vs)))))))
+            ((Some wid) (vts_step vs wid (AskTab port (vt_payload m))))
+            ((None) (VtsGo vs))))
+        ((UiNoPort) (from_other vs ev)))))
 
-; What came on the app's port, m from from: the compositor's notice of a
-; window, that window's; a shell's exit, its window's, which closes its
-; tab; an open, Terminal launched again, a window more; anything else,
-; nothing.
-(def from_app ((vs Vts) (m Message) (from int)) VtsStep
-  (match vs
-    ((Vts a wins free set t)
-      (if (eq from (compositor_pid (ui_app_compositor a)))
-          (match (win_notice_of m)
-            ((WinNotice id at) (vts_step vs id (AskWm m at)))
-            ((NoWinNotice) (from_other vs m)))
-          (from_other vs m)))))
+; A message's payload as text, empty for one that failed.
+(def vt_payload ((m Message)) (list int)
+  (match m ((RecvFailed) "") ((Message from b) (msg_text b))))
 
-; from_app's message m that is no window's notice.
-(def from_other ((vs Vts) (m Message)) VtsStep
-  (match (exit_of m)
-    ((Exited pid status)
+; An event of no window that is no tab's: a shell's exit, or an open.
+(def from_other ((vs Vts) (ev UiEvent)) VtsStep
+  (match (vt_exit_of ev)
+    ((Some pid)
       (match (vts_holding vs pid false)
-        ((Some id) (vts_step vs id (AskExit pid status)))
+        ((Some id) (vts_step vs id (AskExit pid (vt_exit_status ev))))
         ((None) (VtsGo vs))))
-    ((NotExit)
-      (let ev (ui_message_event m)
-        (if (ge (ui_open_reply ev) 0) (VtsGo (vts_open_asked vs ev)) (VtsGo vs))))))
+    ((None)
+      (if (ge (ui_open_reply ev) 0) (VtsGo (vts_open_asked vs ev)) (VtsGo vs)))))
+
+; The pid a watched process's exit, ev, is of, if it is one; and its
+; status, -1 for any other event.
+(def vt_exit_of ((ev UiEvent)) (Option int)
+  (if (ge (vt_exit_status ev) 0) (Some (vt_exit_pid ev)) ((None int))))
+(def vt_exit_pid ((ev UiEvent)) int
+  (match ev
+    ((UiExit pid status) pid)
+    ((UiKey k) -1) ((UiPress x y b) -1) ((UiRelease x y b) -1) ((UiMotion x y b) -1) ((UiContext x y b) -1)
+    ((UiLeave) -1) ((UiFocus f) -1) ((UiScroll x y dx dy) -1) ((UiResize rw rh) -1) ((UiCloseAsked) -1)
+    ((UiOpen r args) -1) ((UiOther f p) -1) ((UiReply tg m) -1) ((UiIdle) -1) ((UiPort p m) -1)))
+(def vt_exit_status ((ev UiEvent)) int
+  (match ev
+    ((UiExit pid status) status)
+    ((UiKey k) -1) ((UiPress x y b) -1) ((UiRelease x y b) -1) ((UiMotion x y b) -1) ((UiContext x y b) -1)
+    ((UiLeave) -1) ((UiFocus f) -1) ((UiScroll x y dx dy) -1) ((UiResize rw rh) -1) ((UiCloseAsked) -1)
+    ((UiOpen r args) -1) ((UiOther f p) -1) ((UiReply tg m) -1) ((UiIdle) -1) ((UiPort p m) -1)))
 
 ; vs after an open, ev, Terminal launched again: a new window, in front,
 ; with one tab, answered with its id; or, if it cannot open, why said and
@@ -560,7 +512,7 @@
 ; face; nothing if it has no such window.
 (def vts_step ((vs Vts) (id int) (q Ask)) VtsStep
   (match vs
-    ((Vts a wins free set t)
+    ((Vts a wins free t)
       (match (map_get wins id)
         ((None) (VtsGo vs))
         ((Some v) (vts_stepped vs id (vt_asked (vt_lent v a free (sub (vts_tab_count vs) (tabs_count (vt_tabs v)))) q)))))))
@@ -580,19 +532,19 @@
     ((Go v) (VtsGo (vts_kept vs id v)))
     ((Stop v status)
       (match vs
-        ((Vts a wins free set t)
+        ((Vts a wins free t)
           (let a2 (ui_app_close (ui_app_put_faced a (vt_win v)) id)
             (let wins2 (map_remove wins id)
               (if (eq (map_size wins2) 0)
                   (VtsEnd status)
-                  (VtsGo (Vts a2 wins2 (lent_free (vt_lent_of v)) set t))))))))))
+                  (VtsGo (Vts a2 wins2 (lent_free (vt_lent_of v)) t))))))))))
 
 ; vs with window id as v left it: its window, and the face it painted
 ; with, the app's; the ports it was lent, as it left them, the app's.
 (def vts_kept ((vs Vts) (id int) (v Vt)) Vts
   (match vs
-    ((Vts a wins free set t)
-      (Vts (ui_app_put_faced a (vt_win v)) (map_put wins id v) (lent_free (vt_lent_of v)) set t))))
+    ((Vts a wins free t)
+      (Vts (ui_app_put_faced a (vt_win v)) (map_put wins id v) (lent_free (vt_lent_of v)) t))))
 
 ; What v was lent, as it has it now.
 (def vt_lent_of ((v Vt)) Lent (match v ((Vt w ts st title sh l) l)))
@@ -608,21 +560,32 @@
 ; v with other tabs.
 (def vt_tabbed ((v Vt) (ts Tabs)) Vt (match v ((Vt w old st title sh free) (Vt w ts st title sh free))))
 
-; The notice of v's window, m, at byte at of its payload: a key, to the
-; selected tab; the wheel, over the terminal, scrolling it; anything
-; else routed by the toolkit.
-(def from_wm_at ((v Vt) (m Message) (at int)) Step
-  (match (key_event_at m at)
+; An event of v's window, as the toolkit's loop hands it out: a key, to
+; the selected tab; the wheel, over the terminal, scrolling it; anything
+; else routed by the toolkit, a strike that came among them, which
+; refreshes the window.
+(def from_event ((v Vt) (ev UiEvent)) Step
+  (match (ui_key_of ev)
     ((Some k) (key_stepped v k))
     ((None)
-      (match (wheel_event_at m at)
+      (match (vt_wheel_of ev)
         ((Some e)
           (match e
             ((WheelEvent x y dx dy)
               (if (rect_has (vt_area v) x y) (Go (refreshed (wheeled v dy))) (Go v)))))
         ((None)
-          (match (ui_route (vt_win v) (ui_event_of (vt_win v) m))
+          (match (ui_route (vt_win v) ev)
             ((UiRouted w2 action) (acted (vt_windowed v w2) action))))))))
+
+; The wheel's turn ev is, if it is one.
+(def vt_wheel_of ((ev UiEvent)) (Option WheelEvent)
+  (match ev
+    ((UiScroll x y dx dy) (Some (WheelEvent x y dx dy)))
+    ((UiKey k) ((None WheelEvent))) ((UiPress x y b) ((None WheelEvent))) ((UiRelease x y b) ((None WheelEvent)))
+    ((UiMotion x y b) ((None WheelEvent))) ((UiContext x y b) ((None WheelEvent))) ((UiLeave) ((None WheelEvent)))
+    ((UiFocus f) ((None WheelEvent))) ((UiResize rw rh) ((None WheelEvent))) ((UiCloseAsked) ((None WheelEvent)))
+    ((UiExit p s) ((None WheelEvent))) ((UiOpen r args) ((None WheelEvent))) ((UiOther f p) ((None WheelEvent)))
+    ((UiReply tg m) ((None WheelEvent))) ((UiIdle) ((None WheelEvent))) ((UiPort p m) ((None WheelEvent)))))
 
 ; A key from wm: a shortcut's, done; any other, fed to the selected tab.
 (def key_stepped ((v Vt) (k KeyEvent)) Step

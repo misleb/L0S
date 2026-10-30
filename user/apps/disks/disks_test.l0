@@ -392,18 +392,222 @@
   (add (check_str "made" (dk_made_text (FsMade "made")) "New volume made, mounted at /Volumes/made")
        (check_str "refused" (dk_made_text (FsMkfsRefused -4 "that label is served already")) "Could not format the partition: that label is served already")))
 
-; With no file server, as under l0 test, each is refused and says so,
-; and the dialog closes; one that does not fit is not asked at all.
-(def test_created_no_server () int
-  (let m (dk_created (DkNoIo "no disk") (creating))
-    (add (check_str "closed" (dialog_of m) "none")
-         (add (check_str "refused" (match m ((Disks d sel dlg st) st)) "Could not create the partition: no file server")
-              (check_str "too big, not asked" (dialog_of (dk_created (DkNoIo "no disk") (with_size "300"))) "create 1040+496 300|3")))))
+; A disk of 2048 sectors, disk0, with no buffer, to name requests of.
+(def io0 () DkIo (DkIo (Disk "disk0" 7 8 9 2048) (NoDiskBuf "none")))
 
-(def test_made_no_server () int
-  (let m (dk_made (DkNoIo "no disk") (with_label "" "made"))
-    (add (check_str "closed" (dialog_of m) "none")
-         (check_bool "refused" (starts_with (match m ((Disks d sel dlg st) st)) "Could not format the partition: ") true))))
+; What a start asks, as text.
+(def start_text ((s DkStart)) (list int)
+  (match s
+    ((DkStartNone) "none")
+    ((DkStartRead) "read")
+    ((DkStartRescan) "rescan")
+    ((DkStartChange c a) (append "change: " (ask_text a)))))
+
+(def ask_text ((a DkAsk)) (list int)
+  (match a
+    ((DkAskDisk sector count) (append "disk " (append (digits sector) (append "+" (digits count)))))
+    ((DkAskVolume vol body) (append "volume " (append vol (append ": " body))))
+    ((DkAskFs body) (append "fs: " body))))
+
+; Create asks fs for the partition, the dialog closed; one that does not
+; fit is not asked at all, the dialog kept.
+(def test_created_asks () int
+  (match (dk_created (io0) (creating))
+    ((DkActed m s)
+      (add (check_str "closed" (dialog_of m) "none")
+           (add (check_str "asked" (start_text s) "change: fs: partition disk0 496 1040")
+                (match (dk_created (io0) (with_size "300"))
+                  ((DkActed m2 s2) (add (check_str "too big, not asked" (dialog_of m2) "create 1040+496 300|3")
+                                        (check_str "nothing" (start_text s2) "none")))))))))
+
+; Format... asks fs for the volume, by the partition's UUID.
+(def test_made_asks () int
+  (match (dk_made (io0) (with_label "" "made"))
+    ((DkActed m s)
+      (add (check_str "closed" (dialog_of m) "none")
+           (check_str "asked" (start_text s) (append "change: fs: mkfs " (append (uuid_text (gpt_part_uuid (gp 2 1536 479 "scratch"))) " made")))))))
+
+; Format Volume... asks the volume's own server; Format Disk... asks fs
+; to erase the disk.
+(def test_format_asks () int
+  (add (match (dk_acted (io0) (dk_update (demo) "app.format" (none)) "dialog.format" (none))
+         ((DkActed m s) (check_str "format" (start_text s) "change: volume /Volumes/data: format /Volumes/data")))
+       (match (dk_acted (io0) (dk_update (demo) "app.erase" (none)) "dialog.erase" (none))
+         ((DkActed m s) (check_str "erase" (start_text s) "change: fs: erase disk0")))))
+
+; --------------------------------------------------------------- reading
+
+; What a read does next, as text: its ask, or the drive's parts.
+(def next_text ((n DkNext)) (list int)
+  (match n
+    ((DkNextAsk r a) (append "ask " (ask_text a)))
+    ((DkNextDone d) (match d ((DkDrive s gpt segs) (append (digits gpt) (append ": " (segs_text segs)))) ((DkNoDrive why) why)))))
+
+; A read begins with the GPT's header, sector 1.
+(def test_read_begins () int
+  (check_str "sector 1" (next_text (dk_read_begin)) "ask disk 1+1"))
+
+; A sector that cannot be read: no GPT, so the MBR is asked; none
+; either, so the disk is all free space, with no table.
+(def test_read_no_table () int
+  (match (dk_read_sectors (DkReadHeader) 2048 "past the end" (bytes_from_list (nil int)))
+    ((DkNextAsk r a)
+      (add (check_str "the MBR" (ask_text a) "disk 0+1")
+           (check_str "all free" (next_text (dk_read_sectors r 2048 "past the end" (bytes_from_list (nil int)))) "0: free 34+1981, ")))
+    ((DkNextDone d) (fail_because "the MBR" "done at once"))))
+
+; The demo's GPT, as gpt.l0 writes it: its header at 1, its entries at 2.
+(def gpt_piece ((sector int)) bytes
+  (piece_of (gpt_pieces 2048 (GptDisk (uuid_v7 1760000000000 (uuid_noise 9 10)) (demo_parts))) sector))
+
+(def piece_of ((ps (list GptPiece)) (sector int)) bytes
+  (if (is_empty ps)
+      (bytes_from_list (nil int))
+      (match (head ps) ((GptPiece s b) (if (eq s sector) (bytes_from_list b) (piece_of (tail ps) sector))))))
+
+; A whole read of the demo's disk, a reply at a time: the header read
+; asks the entries, 32 sectors from 2; they ask data's first sector;
+; its superblock asks df of /Volumes/data; the space asks scratch's
+; first sector; its superblock asks its df; refused, the drive is read,
+; the demo's.
+(def test_read_gpt () int
+  (match (dk_read_sectors (DkReadHeader) 2048 "" (gpt_piece 1))
+    ((DkNextDone d) (fail_because "entries" "done at once"))
+    ((DkNextAsk r1 a1)
+      (add (check_str "the entries" (ask_text a1) "disk 2+32")
+           (match (dk_read_sectors r1 2048 "" (gpt_piece 2))
+             ((DkNextDone d) (fail_because "data" "done at once"))
+             ((DkNextAsk r2 a2)
+               (add (check_str "data's first sector" (ask_text a2) "disk 40+1")
+                    (read_data r2))))))))
+
+(def read_data ((r DkRead)) int
+  (match (dk_read_sectors r 2048 "" (bytes_from_list (vol_super "data" (vol_layout 1496))))
+    ((DkNextDone d) (fail_because "df" "done at once"))
+    ((DkNextAsk r3 a3)
+      (add (check_str "its df" (ask_text a3) "volume /Volumes/data: df /Volumes/data")
+           (match (dk_read_space r3 2048 (FsSpace 1528 190 160 2))
+             ((DkNextDone d) (fail_because "scratch" "done at once"))
+             ((DkNextAsk r4 a4)
+               (add (check_str "scratch's first sector" (ask_text a4) "disk 1536+1")
+                    (read_scratch r4))))))))
+
+(def read_scratch ((r DkRead)) int
+  (match (dk_read_sectors r 2048 "" (bytes_from_list (vol_super "scratch" (vol_layout 479))))
+    ((DkNextDone d) (fail_because "df" "done at once"))
+    ((DkNextAsk r5 a5)
+      (add (check_str "its df" (ask_text a5) "volume /Volumes/scratch: df /Volumes/scratch")
+           (match (dk_read_space r5 2048 (FsSpaceRefused -3))
+             ((DkNextAsk r6 a6) (fail_because "done" (ask_text a6)))
+             ((DkNextDone d) (check_true "the demo's drive" (eq d (demo_drive)))))))))
+
+; An MBR's sector: one partition of type 83 from 2048 for 1000, the
+; disk's signature 7, 55 AA at its end.
+(def mbr_sector () bytes
+  (bytes_from_list
+    (append (zeros 440) (append (u32_le 7) (append (zeros 2)
+      (append (cons 0 (cons 0 (cons 0 (cons 0 (cons 131 (cons 0 (cons 0 (cons 0 (nil int)))))))))
+        (append (u32_le 2048) (append (u32_le 1000) (append (zeros 48) (cons 85 (cons 170 (nil int))))))))))))
+
+; With no GPT and an MBR: its partition's first sector is asked, and
+; read as unknown, the drive has the MBR's table.
+(def test_read_mbr () int
+  (match (dk_read_sectors (DkReadMbr) 4096 "" (mbr_sector))
+    ((DkNextDone d) (fail_because "the partition" "done at once"))
+    ((DkNextAsk r a)
+      (add (check_str "its first sector" (ask_text a) "disk 2048+1")
+           (check_str "the table" (next_text (dk_read_sectors r 4096 "" (bytes_from_list (zeros 512)))) "2: free 34+2014, 1 2048+1000, free 3048+1015, ")))))
+
+; --------------------------------------------------------------- waiting
+
+; A start: the read's first ask, tagged; a rescan's; a change's; none
+; leaves the wait as it is.
+(def test_started () int
+  (add (match (dk_started (DkStartRead) (DkIdle) 5)
+         ((DkStarted w asks) (add (check_str "reads" (wait_text w) "reading 5") (check_str "sector 1" (asks_text asks) "disk 1+1"))))
+       (add (match (dk_started (DkStartRescan) (DkIdle) 6)
+              ((DkStarted w asks) (add (check_str "rescans" (wait_text w) "rescanning 6") (check_str "of fs" (asks_text asks) "fs: rescan"))))
+            (match (dk_started (DkStartNone) (DkRescanning 6 (DkAfterRescan)) 7)
+              ((DkStarted w asks) (add (check_str "as it was" (wait_text w) "rescanning 6") (check_str "nothing" (asks_text asks) "")))))))
+
+(def wait_text ((w DkWait)) (list int)
+  (match w
+    ((DkIdle) "idle")
+    ((DkReading t r a after) (append "reading " (digits t)))
+    ((DkChanging t c) (append "changing " (digits t)))
+    ((DkRescanning t after) (append "rescanning " (digits t)))))
+
+(def asks_text ((asks (list DkAsk))) (list int)
+  (if (is_empty asks) "" (ask_text (head asks))))
+
+; A change's reply says what it came to, and a rescan is asked; the
+; rescan's reply begins the read; with no disk, the read fails at once,
+; and the drive is shown with the change's line.
+(def test_reply_change () int
+  (match (dk_reply (DkNoIo "none") (demo) (DkChanging 3 (DkChgFormat "data")) 3 (message_new 2 (fs_reply_bytes 0 "")))
+    ((DkReplied m w asks)
+      (add (check_str "rescans" (wait_text w) "rescanning 3")
+           (add (check_str "of fs" (asks_text asks) "fs: rescan")
+                (match (dk_reply (DkNoIo "none") m w 3 (message_new 2 (fs_reply_bytes 2 "data\nscratch\n")))
+                  ((DkReplied m2 w2 asks2)
+                    (add (check_str "reads" (wait_text w2) "reading 3")
+                         (reply_read m2 w2)))))))))
+
+(def reply_read ((m Disks) (w DkWait)) int
+  (match (dk_reply (DkNoIo "none") m w 3 (RecvFailed))
+    ((DkReplied m2 w2 asks)
+      (add (check_str "the MBR" (asks_text asks) "disk 0+1")
+           (match (dk_reply (DkNoIo "none") m2 w2 3 (RecvFailed))
+             ((DkReplied m3 w3 asks3)
+               (add (check_str "done" (wait_text w3) "idle")
+                    (check_str "said" (match m3 ((Disks d sel dlg st) st)) "Formatted data"))))))))
+
+; A reply of an older ask, by its tag, changes nothing.
+(def test_reply_stale () int
+  (match (dk_reply (DkNoIo "none") (demo) (DkRescanning 3 (DkAfterRescan)) 2 (message_new 2 (fs_reply_bytes 0 "")))
+    ((DkReplied m w asks) (add (check_str "still" (wait_text w) "rescanning 3") (check_str "nothing asked" (asks_text asks) "")))))
+
+; A refusal is said, in fs's words or by its code; a created partition
+; is selected once read.
+(def test_change_said () int
+  (add (check_str "refused" (said_text (dk_change_said (DkChgFormat "data") (FsReply -4 ""))) "Could not format data: a file on it is open")
+       (add (check_str "no server" (said_text (dk_change_said (DkChgCreate 496) (FsReply -3 ""))) "Could not create the partition: no file server serves it")
+            (match (dk_change_said (DkChgCreate 496) (FsReply 0 (uuid_text (gpt_part_uuid (gp 3 1040 496 "")))))
+              ((DkAfterSay s us) (add (check_str "made" s "Created a partition of 254.0 kB") (check_int "to select" (length us) 1)))
+              ((DkAfterRescan) (fail_because "made" "the rescan's"))))))
+
+(def said_text ((a DkAfter)) (list int)
+  (match a ((DkAfterSay s us) s) ((DkAfterRescan) "rescan")))
+
+; What the window says it waits for; a change or a rescan locks it.
+(def test_wait_text () int
+  (add (check_str "reading" (dk_wait_text (DkReading 1 (DkReadHeader) (DkAskDisk 1 1) (DkAfterRescan)) "disk1") "Reading disk1...")
+       (add (check_str "formatting" (dk_wait_text (DkChanging 1 (DkChgFormat "data")) "disk1") "Formatting data...")
+            (add (check_str "nothing" (dk_wait_text (DkIdle) "disk1") "")
+                 (add (check_bool "a read is not locked" (dk_locked (DkReading 1 (DkReadHeader) (DkAskDisk 1 1) (DkAfterRescan))) false)
+                      (check_bool "a change is" (dk_locked (DkChanging 1 (DkChgErase))) true))))))
+
+; While the window waits, Refresh and the part's button are no targets
+; and the line says what for; with no drive yet, the page says it.
+(def test_view_busy () int
+  (let ns (ui_layout_window (dk_view_of (demo) (nil UiSideRow) "0" "disk0" "Reading disk0...") 880 520 (ui_state_new (UiLight)))
+    (add (check_bool "no refresh" (has_target ns "app.refresh") false)
+         (add (check_bool "no format" (has_target ns "app.format") false)
+              (add (check_bool "says so" (has_text (texts ns) "Reading disk0...|") true)
+                   (check_bool "no drive yet" (has_text (texts (ui_layout_window (dk_view_of (dk_new (DkNoDrive "")) (nil UiSideRow) "0" "disk1" "Reading disk1...") 880 520 (ui_state_new (UiLight)))) "disk1|") true))))))
+
+; A disk's first state has no drive yet and reads it; no disk's says
+; why and reads nothing.
+(def test_fresh () int
+  (add (match (dk_fresh (io0)) ((DkFresh m s) (check_str "reads" (start_text s) "read")))
+       (match (dk_fresh (DkNoIo "no disk")) ((DkFresh m s) (add (check_str "nothing" (start_text s) "none") (check_bool "why" (has_text (texts (laid m)) "no disk|") true))))))
+
+; A drive chosen is read; locked, the window keeps the one shown.
+(def test_choose_reads () int
+  (add (match (dk_stepped (cons (DkNoIo "no disk") (cons (io0) (nil DkIo))) 0 (dk_new (demo_drive)) "side.select.1" (none) false)
+         ((DkStepped ios i m s) (add (check_int "disk0" i 1) (check_str "read" (start_text s) "read"))))
+       (match (dk_stepped (cons (DkNoIo "no disk") (cons (io0) (nil DkIo))) 0 (dk_new (demo_drive)) "side.select.1" (none) true)
+         ((DkStepped ios i m s) (check_int "still 0" i 0)))))
 
 ; ----------------------------------------------------------------- drives
 
@@ -432,8 +636,8 @@
 
 ; A drive chosen that there is not leaves the one shown.
 (def test_choose_past () int
-  (match (dk_stepped (cons (DkNoIo "no disk") (nil DkIo)) 0 (dk_new (demo_drive)) "side.select.3" (none))
-    ((DkStepped ios i m) (check_int "still 0" i 0))))
+  (match (dk_stepped (cons (DkNoIo "no disk") (nil DkIo)) 0 (dk_new (demo_drive)) "side.select.3" (none) false)
+    ((DkStepped ios i m s) (check_int "still 0" i 0))))
 
 ; The drive's name is its Device.
 (def test_view_device () int

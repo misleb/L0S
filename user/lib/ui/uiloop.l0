@@ -31,19 +31,20 @@
 ; still to be answered, the oldest first; the replies taken and not yet
 ; handed out, with the port each came on; whether its ports are the
 ; process's set (port_set) yet; whether the program has idle work, so
-; that the loop hands out UiIdle rather than wait; and the windows still
-; to be told a strike came, so that each paints its text again.
-(data UiWaits (UiWaits int int (list int) (list UiReplied) bool bool (list int)))
+; that the loop hands out UiIdle rather than wait; the windows still
+; to be told a strike came, so that each paints its text again; and the
+; program's own ports, waited on in the set too (ui_loop_own).
+(data UiWaits (UiWaits int int (list int) (list UiReplied) bool bool (list int) (list int)))
 
 ; A reply taken: the port it came on, and the message.
 (data UiReplied (UiReplied int Message))
 
 ; A loop with nothing taken yet, and no ports beside its own.
-(def ui_loop_new () UiLoop (UiLoop (ui_times_new) (nil Message) (UiWaits 0 0 (nil int) (nil UiReplied) false false (nil int))))
+(def ui_loop_new () UiLoop (UiLoop (ui_times_new) (nil Message) (UiWaits 0 0 (nil int) (nil UiReplied) false false (nil int) (nil int))))
 
 ; A loop with nothing taken yet, its replies to rport and aport.
 (def ui_loop_ports ((rport int) (aport int)) UiLoop
-  (UiLoop (ui_times_new) (nil Message) (UiWaits rport aport (nil int) (nil UiReplied) false false (nil int))))
+  (UiLoop (ui_times_new) (nil Message) (UiWaits rport aport (nil int) (nil UiReplied) false false (nil int) (nil int))))
 
 ; Its times, and the loop with others.
 (def ui_loop_times ((l UiLoop)) UiTimes (match l ((UiLoop t q ws) t)))
@@ -58,16 +59,29 @@
 (def ui_loop_waiting ((l UiLoop) (ws UiWaits)) UiLoop (match l ((UiLoop t q old) (UiLoop t q ws))))
 
 ; Its port for the toolkit's replies, and for the program's.
-(def ui_loop_rport ((l UiLoop)) int (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw) r)))
-(def ui_loop_aport ((l UiLoop)) int (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw) a)))
+(def ui_loop_rport ((l UiLoop)) int (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw own) r)))
+(def ui_loop_aport ((l UiLoop)) int (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw own) a)))
 
 ; l with idle work, or none.
 (def ui_loop_idling ((l UiLoop) (idle bool)) UiLoop
-  (match (ui_loop_waits l) ((UiWaits r a asks rs set old redraw) (ui_loop_waiting l (UiWaits r a asks rs set idle redraw)))))
+  (match (ui_loop_waits l) ((UiWaits r a asks rs set old redraw own) (ui_loop_waiting l (UiWaits r a asks rs set idle redraw own)))))
+
+; l waiting on the program's own ports too, beside its port and its
+; reply ports, as one set: a message on one is handed out as UiGotPort,
+; before the port's own, as replies are. Given other ports than it has,
+; the set is made again at the next take, so a program adds or lets go a
+; port by giving the list again.
+(def ui_loop_own ((l UiLoop) (ports (list int))) UiLoop
+  (match (ui_loop_waits l)
+    ((UiWaits r a asks rs set idle redraw own)
+      (if (eq ports own) l (ui_loop_waiting l (UiWaits r a asks rs false idle redraw ports))))))
+
+; The program's own ports l waits on.
+(def ui_loop_own_ports ((l UiLoop)) (list int) (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw own) own)))
 
 ; l with ids to be told a strike came, after any it has.
 (def ui_loop_redrawing ((l UiLoop) (ids (list int))) UiLoop
-  (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw) (ui_loop_waiting l (UiWaits r a asks rs set idle (append redraw ids))))))
+  (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw own) (ui_loop_waiting l (UiWaits r a asks rs set idle (append redraw ids) own)))))
 
 ; ---------------------------------------------------------------- asking
 
@@ -78,11 +92,11 @@
 ; (RecvFailed), so the program's state does not wait for it.
 (def ui_loop_ask ((l UiLoop) (tag int) (port int) (body (list int))) UiLoop
   (match (ui_loop_waits l)
-    ((UiWaits r a asks rs set idle redraw)
+    ((UiWaits r a asks rs set idle redraw own)
       (let sent (if (le a 0) false (match (port_send port (request a body)) ((Sent) true) ((SendNoPort) false) ((SendFull) false) ((SendTooBig) false)))
         (if sent
-            (ui_loop_waiting l (UiWaits r a (append asks (cons tag (nil int))) rs set idle redraw))
-            (ui_loop_waiting l (UiWaits r a (append asks (cons tag (nil int))) (append rs (cons (UiReplied a (RecvFailed)) (nil UiReplied))) set idle redraw)))))))
+            (ui_loop_waiting l (UiWaits r a (append asks (cons tag (nil int))) rs set idle redraw own))
+            (ui_loop_waiting l (UiWaits r a (append asks (cons tag (nil int))) (append rs (cons (UiReplied a (RecvFailed)) (nil UiReplied))) set idle redraw own)))))))
 
 ; t with the route's start and end, a and b.
 (def ui_times_routed ((t UiTimes) (a int) (b int)) UiTimes
@@ -150,10 +164,11 @@
 
 ; What the loop took for a step: a message to the port; a strike's
 ; answer from font, its payload; a reply to one of the program's asks,
-; its tag and the message (RecvFailed if it could not be sent); idle
-; work's turn, nothing waiting; a window to be told a strike came; or
-; nothing, the port gone.
-(data UiGot (UiGotMsg Message) (UiGotStrike (list int)) (UiGotReply int Message) (UiGotIdle) (UiGotRedraw int) (UiGotLost))
+; its tag and the message (RecvFailed if it could not be sent); a
+; message on one of the program's own ports, the port and the message;
+; idle work's turn, nothing waiting; a window to be told a strike came;
+; or nothing, the port gone.
+(data UiGot (UiGotMsg Message) (UiGotStrike (list int)) (UiGotReply int Message) (UiGotPort int Message) (UiGotIdle) (UiGotRedraw int) (UiGotLost))
 
 ; The loop after it took something for a step, and what.
 (data UiTaken (UiTaken UiLoop UiGot))
@@ -168,14 +183,15 @@
 ; held each window's buttons), the replies onto theirs; then a reply,
 ; or the queue's first; with nothing, idle work's turn if the program
 ; has any, else the next waited for, and what came with it taken too.
-; The loop waits on its port and its two reply ports as the process's
-; set (port_set), made the first time; with no reply ports, or a set
-; refused, on its port alone.
+; The loop waits on its port, its two reply ports and the program's own
+; ports as the process's set (port_set), made the first time and again
+; when the own ports change; with no reply ports and no own ports, or a
+; set refused, on its port alone.
 (def ui_loop_take ((l UiLoop) (port int) (cpid int) (held (Map int int))) UiTaken
   (match (ui_loop_waits l)
-    ((UiWaits r a asks rs set idle redraw)
+    ((UiWaits r a asks rs set idle redraw own)
       (if (not (is_empty redraw))
-          (UiTaken (ui_loop_waiting l (UiWaits r a asks rs set idle (tail redraw))) (UiGotRedraw (head redraw)))
+          (UiTaken (ui_loop_waiting l (UiWaits r a asks rs set idle (tail redraw) own)) (UiGotRedraw (head redraw)))
           (let l2 (ui_loop_drained (ui_loop_set l port) port cpid held (nil UiReplied))
             (if (ui_loop_has l2)
                 (ui_loop_popped l2)
@@ -184,23 +200,38 @@
 ; Whether l holds a reply or a message.
 (def ui_loop_has ((l UiLoop)) bool
   (match (ui_loop_waits l)
-    ((UiWaits r a asks rs set idle redraw) (if (is_empty rs) (not (is_empty (ui_loop_queue l))) true))))
+    ((UiWaits r a asks rs set idle redraw own) (if (is_empty rs) (not (is_empty (ui_loop_queue l))) true))))
 
-; l with its port and reply ports made the process's set, once; with no
-; reply port, or the set refused, as it is, its ports none, so it waits
-; on port alone.
+; l with its port, its reply ports and the program's own ports made the
+; process's set, once, and again once the program's own ports change;
+; with no reply port and no own port, or the set refused, as it is, its
+; ports none, so it waits on port alone, said as a warning if it had
+; ports of its own, which are then never heard.
 (def ui_loop_set ((l UiLoop) (port int)) UiLoop
   (match (ui_loop_waits l)
-    ((UiWaits r a asks rs set idle redraw)
-      (if (if set true (le r 0))
+    ((UiWaits r a asks rs set idle redraw own)
+      (if (if set true (if (le r 0) (is_empty own) false))
           l
-          (match (port_set (cons port (cons r (if (gt a 0) (cons a (nil int)) (nil int)))))
-            ((PortSetMade) (ui_loop_waiting l (UiWaits r a asks rs true idle redraw)))
-            ((PortSetNotYours) (ui_loop_waiting l (UiWaits 0 0 asks rs false idle redraw)))
-            ((PortSetSize) (ui_loop_waiting l (UiWaits 0 0 asks rs false idle redraw))))))))
+          (match (port_set (ui_set_ports port r a own))
+            ((PortSetMade) (ui_loop_waiting l (UiWaits r a asks rs true idle redraw own)))
+            ((PortSetNotYours) (ui_loop_unset l (port_setting_why (PortSetNotYours))))
+            ((PortSetSize) (ui_loop_unset l (port_setting_why (PortSetSize)))))))))
+
+; The ports of a set: port, the reply ports r and a that are ports, and
+; the program's own.
+(def ui_set_ports ((port int) (r int) (a int) (own (list int))) (list int)
+  (cons port (append (if (gt r 0) (cons r (nil int)) (nil int)) (append (if (gt a 0) (cons a (nil int)) (nil int)) own))))
+
+; l waiting on its port alone, its set refused for why: said, as a
+; warning, if it had ports of its own.
+(def ui_loop_unset ((l UiLoop) (why (list int))) UiLoop
+  (match (ui_loop_waits l)
+    ((UiWaits r a asks rs set idle redraw own)
+      (let w (if (is_empty own) 0 (warn_as (app_open_base (proc_path (l0s_pid))) (append "cannot wait on its own ports: " why)))
+        (ui_loop_waiting l (UiWaits 0 0 asks rs false idle redraw (nil int)))))))
 
 ; Whether l waits on its set, not its port alone.
-(def ui_loop_on_set ((l UiLoop)) bool (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw) set)))
+(def ui_loop_on_set ((l UiLoop)) bool (match (ui_loop_waits l) ((UiWaits r a asks rs set idle redraw own) set)))
 
 ; ui_loop_take with nothing waiting: the next waited for.
 (def ui_loop_waited ((l UiLoop) (port int) (cpid int) (held (Map int int))) UiTaken
@@ -238,9 +269,9 @@
   (match l
     ((UiLoop t q ws)
       (match ws
-        ((UiWaits r a asks rs set idle redraw)
+        ((UiWaits r a asks rs set idle redraw own)
           (UiLoop t (ui_together (append q (rev (ui_on_port got port true (nil Message)))) cpid held)
-                  (UiWaits r a asks (append rs (ui_replies_of got port (nil UiReplied))) set idle redraw)))))))
+                  (UiWaits r a asks (append rs (ui_replies_of got port (nil UiReplied))) set idle redraw own)))))))
 
 ; The messages of got on port, reversed onto acc.
 (def ui_on_port ((got (list UiReplied)) (port int) (on bool) (acc (list Message))) (list Message)
@@ -257,22 +288,24 @@
       (match (head got)
         ((UiReplied p m) (ui_replies_of (tail got) port (if (eq p port) acc (cons (head got) acc)))))))
 
-; What l hands out first: a reply, as a strike's answer if it came on
-; the toolkit's port or the oldest ask's if on the program's; else the
-; queue's first message.
+; What l hands out first: a reply, as a message on one of the program's
+; own ports, a strike's answer if it came on the toolkit's port or the
+; oldest ask's if on the program's; else the queue's first message.
 (def ui_loop_popped ((l UiLoop)) UiTaken
   (match l
     ((UiLoop t q ws)
       (match ws
-        ((UiWaits r a asks rs set idle redraw)
+        ((UiWaits r a asks rs set idle redraw own)
           (if (is_empty rs)
               (if (is_empty q) (UiTaken l (UiGotLost)) (UiTaken (UiLoop t (tail q) ws) (UiGotMsg (head q))))
               (match (head rs)
                 ((UiReplied p m)
+                  (if (any_eq p own)
+                      (UiTaken (UiLoop t q (UiWaits r a asks (tail rs) set idle redraw own)) (UiGotPort p m))
                   (if (eq p r)
-                      (UiTaken (UiLoop t q (UiWaits r a asks (tail rs) set idle redraw)) (UiGotStrike (ui_reply_text m)))
-                      (UiTaken (UiLoop t q (UiWaits r a (if (is_empty asks) asks (tail asks)) (tail rs) set idle redraw))
-                               (UiGotReply (if (is_empty asks) -1 (head asks)) m)))))))))))
+                      (UiTaken (UiLoop t q (UiWaits r a asks (tail rs) set idle redraw own)) (UiGotStrike (ui_reply_text m)))
+                      (UiTaken (UiLoop t q (UiWaits r a (if (is_empty asks) asks (tail asks)) (tail rs) set idle redraw own))
+                               (UiGotReply (if (is_empty asks) -1 (head asks)) m))))))))))))
 
 ; A reply's payload as text: error: no answer for one that failed.
 (def ui_reply_text ((m Message)) (list int)

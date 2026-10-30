@@ -25,7 +25,7 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; the pointer's shape asked of the compositor as the pointer moves (`ui_pointer_at`: the I-beam over an entry, the resize pointer inside that edge); `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab and Shift-Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `ui_win_close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed, in the buffer the screen does not show, which it then gives the compositor, and no more until the frame shows it and the other is released, `UiDb`; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_canvas` and `ui_win_face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is, and `ui_key_mods`, the Shift, Ctrl and Alt held with it. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
 | `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's two buffers two, a resize one more, each of `font`'s arenas its strikes are in one, however many strikes it holds, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message, put together (`UiAppNext`), and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. `ui_app_start` registers the app's port as its name, `app.EXEC`, EXEC its program's file name (`ui_app_named`; a second of the same program goes without); a launch of the app while it runs (`wm`'s, an `open`, [desktop.md](desktop.md)) is an event of no window, `UiOpen REPLY ARGS`, and routing it sets off the action `app.open` (`ui_open_action`, its arguments `ui_open_args`) and answers `shown 0`, so the app's front window comes forward and nothing more opens; an app that opens something for it says so with `ui_app_opening` and answers each itself with `ui_app_shown`, the window to bring forward. A program of one window routing with `ui_route` has the same default. The answer is told, never waited on. | `GApplication`'s windows, `GtkWindow`, its name, activate and open |
 
-| `uiloop.l0` | The loop a window and an app keep, `UiLoop`: the messages taken and not yet handed out, what waits taken before each step and put together (`ui_loop_take`, `ui_together`: a run's last move, its wheel's turns as one, a window's last size); each step's times (`UiTimes`: routed, painted), its stages (`UiStages`: route, update and view, layout, wait, paint, present), and the slow step's line, said at the debug level once a step is over a frame (`ui_frame_ns`, 16 ms; `ui_slow_line`, `ui_slow_due`, `ui_times_stepped`) | GLib's main loop, and GTK's frame clock's timings |
+| `uiloop.l0` | The loop a window and an app keep, `UiLoop`: the messages taken and not yet handed out, what waits taken before each step and put together (`ui_loop_take`, `ui_together`: a run's last move, its wheel's turns as one, a window's last size); the ports it waits on as one set, the window's, the toolkit's reply port, the program's, and the program's own (`ui_loop_own`, `UiGotPort`); each step's times (`UiTimes`: routed, painted), its stages (`UiStages`: route, update and view, layout, wait, paint, present), and the slow step's line, said at the debug level once a step is over a frame (`ui_frame_ns`, 16 ms; `ui_slow_line`, `ui_slow_due`, `ui_times_stepped`) | GLib's main loop, and GTK's frame clock's timings |
 
 The Makefile links either `UI_CORE` (every file but `window.l0`,
 `uiapp.l0` and `uiloop.l0`; needs only `RENDER`: `ppm.l0`, `rect.l0` and
@@ -158,7 +158,24 @@ PORT BODY` or `ui_app_ask`: the request sent with the program's reply
 port and never waited on, and its answer handed out as `UiReply TAG
 MESSAGE` (of no window, for an app), the tags in the order asked;
 `ui_reply_of` reads one. One that cannot be sent is answered at once,
-the message `RecvFailed`. Files lists a folder on a volume so.
+the message `RecvFailed`. Files lists a folder on a volume so, and asks
+each volume's size, its refreshes, its changes, a file's text and its
+idle pieces the same, as Disks reads a drive and makes its changes,
+one request out at a time ([programs.md](programs.md)); the fs
+protocol's bodies and reply readers (`fs_list_body`, `fs_open_body`,
+`fs_df_of` and the rest, `user/lib/proto/fs.l0`) and the disk
+protocol's (`disk_read_body`) are what they ask with.
+
+**A program's own ports.** A program that has ports of its own to wait
+on gives them to the loop, `ui_win_ports W PORTS` or `ui_app_ports`,
+and they join the set: what comes on one is handed out as `UiPort PORT
+MESSAGE` (`ui_port_of`), before the windows' notices, as replies are.
+Given again with other ports, as one is added or let go, the set is
+made again at the next take. Terminal's tabs' ports are so: a set
+holds `port_set_limit` (32) ports, the app's and the toolkit's two
+reply ports among them, so its windows have at most 29 tabs between
+them. A set the kernel refuses is said as a warning, and the loop waits
+on the window's port alone.
 
 **A timer.** A window that refreshes on a timer asks the kernel's alarm
 for its port, `ui_win_alarm W T`, and takes it as an event
@@ -415,10 +432,15 @@ to `l0` are one namespace, and a duplicate is a compile error.
   program from blocking itself: a request it waits on in its update,
   or a piece of idle work longer than a frame, stops its windows as
   long, which the slow step's line then says. Its own requests, the
-  strikes, are replies; a program that waits on a set of its own, as
-  `vt` does, takes no replies, so a `UiFontAt` it shows is never drawn
-  (`vt` shows none). Disks still reads its drives in its step, and Files
-  asks a volume's size, a refresh, a change and a file's text so. The
+  strikes, are replies, and so are the apps' (Disks' reads and changes,
+  Files' listings, sizes, changes, previews and idle pieces); what each
+  still does in its step is a kernel call, or a request too small to
+  matter: Files reads an app's manifest as it starts the app, and Disks
+  asks a disk registered since its start its size, once, at Refresh. A
+  program's own asks go one at a time: Disks has one request out, and
+  Files one a window, a listing's, a file's or a change's, the next
+  asked as each answer comes, so a folder of many files is listed a
+  reply at a time, each reply a step. The
   slow step's line is wall time, the time from the route to the
   present's end, not the process's own: a step another process shares
   its CPU with, or the first after the board idles, is longer than it

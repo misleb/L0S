@@ -218,18 +218,30 @@ loop does the same, and an app keeps to these:
   pointer moves is its last, its wheel's turns one summed, its sizes the
   last; presses, releases, keys and everything else stay in order. It
   also waits on the toolkit's reply ports, so strikes come, and hands
-  out replies and idle work's turn. A program that must wait on ports
-  of its own (`vt`'s tabs) puts its window's messages together itself,
-  with `ui_together`, and shows no `UiFontAt` text, whose strikes it
-  would never take.
+  out replies and idle work's turn. A program with ports of its own
+  (`vt`'s tabs) gives them to the loop, `ui_win_ports w PORTS` or
+  `ui_app_ports`, again whenever they change, and takes what comes on
+  one as `UiPort PORT MESSAGE` (`ui_port_of`); it never makes a set of
+  its own. A set holds 32 ports, three of them the loop's.
 - **A step makes no request that waits on a server**: no `port_ask`, no
-  `fs_list`, no `font_open`'s ask, nothing whose answer could take long.
-  Ask with `ui_win_ask w TAG PORT BODY` (or `ui_app_ask`) and take the
-  answer as `UiReply TAG MESSAGE` (`ui_reply_of`), keeping in the state
-  what the step was waiting for (Files' `FlListing`, its tag the
-  window's id and a count, so an older answer is told apart). The
-  toolkit's own strikes are asked so already: text in a strike not yet
-  come is drawn once it does.
+  `fs_list`, no `fs_df`, no `read_whole` of a volume's file, no
+  `font_open`'s ask, nothing whose answer could take long. Ask with
+  `ui_win_ask w TAG PORT BODY` (or `ui_app_ask`) and take the answer as
+  `UiReply TAG MESSAGE` (`ui_reply_of`), keeping in the state what the
+  step was waiting for, its tag the window's id and a count (Files'
+  `fl_tag`), so an older answer is told apart. One request out at a
+  time, the next asked as each answer comes, as a data type of where
+  the chain is: Disks' `DkWait` and `DkRead` (the GPT's header, its
+  entries, each partition's first sector, each volume's `df`), Files'
+  `FlJobs` (a listing a reply at a time, `/Volumes` a `df` a volume, a
+  change then the refresh, a file as `open`, `read` a piece at a time
+  and `close`, told). The bodies and reply readers are the protocol
+  library's, `fs_list_body`, `fs_open_body`, `fs_read_of`, `fs_df_of`
+  and the rest, and `disk_read_body`, `disk_reply_why`; a port of 0, no
+  server, is answered `RecvFailed` at once. Meanwhile the window shows
+  what it had, or says what it waits for (Disks' "Reading disk0...",
+  its buttons insensitive). The toolkit's own strikes are asked so
+  already: text in a strike not yet come is drawn once it does.
 - **Work too long for a step goes to idle work**, a bounded piece each:
   keep what is left in the state, say `ui_win_idling w true` (or
   `ui_app_idling`), do one piece on `UiIdle` and present, and say false

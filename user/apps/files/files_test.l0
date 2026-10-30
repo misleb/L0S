@@ -29,7 +29,7 @@
   (let m (fl_update (start) "files.select.etc" (none))
     (add (check_str "selected" (fl_selected m) "etc")
          (add (check_str "the line" (fl_status m) "\"etc\" selected")
-              (check_str "the list's too" (ui_gs_selected (match m ((Files d es v is gs bk fw ov mn st pl ic wk) gs))) "etc")))))
+              (check_str "the list's too" (ui_gs_selected (match m ((Files d es v is gs bk fw ov mn st pl ic wk jb) gs))) "etc")))))
 
 ; A press between the tiles selects nothing.
 (def test_deselect () int
@@ -61,7 +61,6 @@
             (add (check_str "the ground" (menu_name (fl_update (start) (ui_context_action 30 40 "files.scroll.0.0.3.96") (none))) "context ")
                  (add (check_str "a volume" (menu_name (fl_update (start) (ui_context_action 30 40 "side.select./Volumes/data") (none))) "context /Volumes/data")
                       (check_str "a button" (menu_name (fl_update (start) (ui_context_action 30 40 "app.back") (none))) "none"))))))
-
 ; A dialog's entry takes what is typed: a, then b.
 (def test_typed () int
   (let m (fl_with_over (start) (FlNewFolder (UiEntryText "" 0)))
@@ -69,46 +68,228 @@
       (match (fl_over m2)
         ((FlNewFolder t) (check_str "typed" (ui_entry_text t) "ab"))
         ((FlNone) (fail_because "typed" "no dialog")) ((FlRename o t) (fail_because "typed" "rename"))
-        ((FlDelete n) (fail_because "typed" "delete")) ((FlPreview n l p) (fail_because "typed" "preview"))
-        ((FlListing d b f t got) (fail_because "typed" "listing"))))))
+        ((FlDelete n) (fail_because "typed" "delete")) ((FlPreview n l p) (fail_because "typed" "preview"))))))
 
-; A folder on a volume is listed by asking its file server: the state
-; waits for the reply, the place as it was; one of the initramfs is
-; listed at once.
+; What a window's jobs are, as text: the tag out, then each job.
+(def jobs_text ((m Files)) (list int)
+  (match (fl_jobs m) ((FlJobs tag jobs) (append (digits tag) (append ":" (each_job jobs))))))
+
+(def each_job ((jobs (list FlJob))) (list int)
+  (if (is_empty jobs) "" (append " " (append (job_text (head jobs)) (each_job (tail jobs))))))
+
+(def job_text ((j FlJob)) (list int)
+  (match j
+    ((FlJobList dir b f got then) (append "list " (append dir (append "/" (append (digits (length got)) (then_text then))))))
+    ((FlJobVolumes vols left sizes b f then) (append "volumes " (append (digits (length left)) (append "/" (append (digits (length sizes)) (then_text then))))))
+    ((FlJobSizes vols left frees) (append "sizes " (append (digits (length left)) (append "/" (digits (length frees))))))
+    ((FlJobChange c) (append "change " (change_text c)))
+    ((FlJobRead what path h pieces n) (append "read " (append (file_text what) (append " " (append path (append " " (append (digits h) (append " " (digits n)))))))))
+    ((FlJobStat dir name) (append "stat " (append dir (append " " name))))))
+
+(def then_text ((t FlThen)) (list int)
+  (match t ((FlShow) "") ((FlKeep sel said) (append " keep " (append sel (append " " said))))))
+
+(def change_text ((c FlChange)) (list int)
+  (match c
+    ((FlMkdir n) (append "mkdir " n)) ((FlRenaming o n) (append "rename " (append o (append " " n))))
+    ((FlRelabel o n) (append "relabel " (append o (append " " n)))) ((FlRemove n) (append "remove " n))))
+
+(def file_text ((f FlFile)) (list int)
+  (match f ((FlForText n) (append "text " n)) ((FlForFace d n) (append "face " n)) ((FlForDraw d n) (append "draw " n))))
+
+; A folder on a volume is listed by asking its file server, a job, the
+; place as it was; /Volumes by asking each volume its size; one of the
+; initramfs is listed at once.
 (def test_go_asks () int
   (add (check_bool "a volume's" (fl_by_server "/Volumes/data/docs") true)
-       (add (check_bool "/Volumes" (fl_by_server "/Volumes") false)
-            (check_str "waiting" (match (fl_over (fl_go (start) "/Volumes/data" (nil (list int)) (nil (list int))))
-                                   ((FlListing d b f t got) d) ((FlNone) "none") ((FlNewFolder e) "dialog") ((FlRename o e) "dialog")
-                                   ((FlDelete n) "dialog") ((FlPreview n l p) "preview"))
-                       "/Volumes/data"))))
-
-; The request of a listing, from the start and from entry 40.
-(def test_list_body () int
-  (add (check_str "first" (fl_list_body "/Volumes/data/docs" 0) "list /Volumes/data/docs")
-       (check_str "more" (fl_list_body "/Volumes/data/docs" 40) "list /Volumes/data/docs 40")))
+       (add (check_bool "/Volumes, not a server's" (fl_by_server "/Volumes") false)
+            (add (check_bool "but a job's" (fl_by_job "/Volumes") true)
+                 (add (check_str "a listing" (jobs_text (fl_go (start) "/Volumes/data" (nil (list int)) (nil (list int)))) "0: list /Volumes/data/0")
+                      (check_str "still at /" (fl_dir (fl_go (start) "/Volumes/data" (nil (list int)) (nil (list int)))) "/"))))))
 
 ; A tag says its window; two tags of a window differ by their count.
 (def test_tag () int
   (check_int "window 3" (fl_tag_window (fl_tag 3)) 3))
 
-; A reply to a listing: the entries, a folder, a document and an app,
-; shown, the document and the app still to look at, a piece of idle
-; work each, the folder not.
-(def listing () Files (fl_with_over (start) (FlListing "/Volumes/data" (nil (list int)) (nil (list int)) 77 (nil FsStat))))
+; A job replaces the jobs before it, a file being read excepted, which
+; finishes first, its handle closed; a queued job comes after.
+(def test_jobbed () int
+  (let reading (fl_with_jobs (start) (FlJobs 5 (cons (FlJobRead (FlForText "notes") "/Volumes/data/notes" 3 (nil bytes) 0) (cons (FlJobStat "/" "x") (nil FlJob)))))
+    (add (check_str "replaced" (jobs_text (fl_jobbed (fl_jobbed (start) (FlJobStat "/" "a")) (FlJobStat "/" "b"))) "0: stat / b")
+         (add (check_str "after the read" (jobs_text (fl_jobbed reading (FlJobStat "/" "b"))) "5: read text notes /Volumes/data/notes 3 0 stat / b")
+              (check_str "queued" (jobs_text (fl_queued (fl_jobbed (start) (FlJobStat "/" "a")) (FlJobStat "/" "b"))) "0: stat / a stat / b")))))
 
+; A listing's job, asked and tagged 77.
+(def listing () Files
+  (fl_with_jobs (start) (FlJobs 77 (cons (FlJobList "/Volumes/data" (nil (list int)) (nil (list int)) (nil FsStat) (FlShow)) (nil FlJob)))))
+
+; A reply to a listing, all of it: the entries, a folder, a document and
+; an app, shown, the document and the app still to look at, a piece of
+; idle work each, the folder not; no job left.
 (def test_listing_reply () int
-  (match (fl_listing_reply (files_app) (listing) 77 (message_new 30 (fs_reply_bytes 3 "docs/ 0\nnotes 12\nTerm.app/ 0\n")))
-    ((FlAsked a m)
-      (add (check_str "shown" (fl_dir m) "/Volumes/data")
-           (add (check_int "three things" (length (fl_entries m)) 3)
-                (check_bool "work to do" (fl_has_work m) true))))))
+  (let m (fl_replied_to (listing) 77 (message_new 30 (fs_reply_bytes 3 "docs/ 0\nnotes 12\nTerm.app/ 0\n")))
+    (add (check_str "shown" (fl_dir m) "/Volumes/data")
+         (add (check_int "three things" (length (fl_entries m)) 3)
+              (add (check_bool "work to do" (fl_has_work m) true)
+                   (check_str "no job" (jobs_text m) "0:"))))))
 
-; A reply of another listing's tag changes nothing.
+; A reply that brings fewer than the server's count asks for more, from
+; as many as came.
+(def test_listing_more () int
+  (let m (fl_replied_to (listing) 77 (message_new 30 (fs_reply_bytes 5 "a 1\nb 2\n")))
+    (add (check_str "more asked" (jobs_text m) "0: list /Volumes/data/2")
+         (check_str "still at /" (fl_dir m) "/"))))
+
+; A reply of another ask's tag changes nothing; a refusal is said, and
+; the listing dropped.
 (def test_listing_reply_stale () int
-  (match (fl_listing_reply (files_app) (listing) 78 (message_new 30 (fs_reply_bytes 1 "x 1\n")))
-    ((FlAsked a m) (check_str "still /" (fl_dir m) "/"))))
+  (add (check_str "stale" (jobs_text (fl_replied_to (listing) 78 (message_new 30 (fs_reply_bytes 1 "x 1\n")))) "77: list /Volumes/data/0")
+       (let m (fl_replied_to (listing) 77 (message_new 30 (fs_reply_bytes -9 "")))
+         (add (check_str "said" (fl_status m) "/Volumes/data: no such directory")
+              (check_str "dropped" (jobs_text m) "0:")))))
 
+; A listing's ask: the request, from where it got to; under l0 test no
+; server serves it, so it is said and the job dropped.
+(def test_list_ask () int
+  (match (fl_job_ask (start) (FlJobList "/Volumes/data" (nil (list int)) (nil (list int)) (nil FsStat) (FlShow)))
+    ((FlAsk port body) (fail_because "no server" "asked"))
+    ((FlNoAsk m next) (add (check_str "said" (fl_status m) "/Volumes/data: no file server serves it") (check_int "nothing after" (length next) 0)))))
+
+; /Volumes listed: each volume asked its size, the replies kept, and
+; with none left the volumes shown, their sizes beside them.
+(def test_volumes_job () int
+  (let j (FlJobVolumes (split_spaces "/Volumes/data /Volumes/scratch") (split_spaces "/Volumes/data /Volumes/scratch") (nil int) (nil (list int)) (nil (list int)) (FlShow))
+    (let m (fl_replied_to (fl_with_jobs (start) (FlJobs 9 (cons j (nil FlJob)))) 9 (message_new 30 (fs_reply_bytes 0 (fs_space_text 1528 190 160 2))))
+      (add (check_str "one more to ask" (jobs_text m) "0: volumes 1/1")
+           (let m2 (fl_replied_to (fl_with_jobs m (FlJobs 9 (match (fl_jobs m) ((FlJobs t js) js)))) 9 (RecvFailed))
+             (match (fl_job_ask m2 (match (fl_jobs m2) ((FlJobs t js) (head js))))
+               ((FlAsk port body) (fail_because "shown" "asked"))
+               ((FlNoAsk m3 next)
+                 (add (check_str "at /Volumes" (fl_dir m3) "/Volumes")
+                      (check_str "sizes" (sizes_text (fl_entries m3)) "data:778240 scratch:-1 ")))))))))
+
+(def sizes_text ((es (list FvEntry))) (list int)
+  (if (is_empty es) "" (append (fv_name (head es)) (append ":" (append (digits (fv_size (head es))) (append " " (sizes_text (tail es))))))))
+
+; The sidebar's job: each volume's free space, then the rows.
+(def test_sizes_job () int
+  (let j (FlJobSizes (split_spaces "/Volumes/data") (split_spaces "/Volumes/data") (nil (list int)))
+    (let m (fl_replied_to (fl_with_jobs (start) (FlJobs 9 (cons j (nil FlJob)))) 9 (message_new 30 (fs_reply_bytes 0 (fs_space_text 1528 190 160 2))))
+      (match (fl_job_ask m (match (fl_jobs m) ((FlJobs t js) (head js))))
+        ((FlAsk port body) (fail_because "rows" "asked"))
+        ((FlNoAsk m2 next) (check_str "data's row" (row_lines m2) "The system's files|1 volume|655.4 kB free|"))))))
+
+; A refresh's jobs continue after the job replied to, the change, not
+; after a listing the state had: the change's own jobs come first.
+(def test_change_continues () int
+  (let on_volume (fl_at (start) "/Volumes/data" (nil FvEntry) (nil (list int)) (nil (list int)))
+    (check_str "then the stat" (jobs_text (fl_replied_to (fl_with_jobs on_volume (FlJobs 4 (cons (FlJobChange (FlRemove "a")) (cons (FlJobStat "/Volumes/data" "b") (nil FlJob))))) 4 (message_new 30 (fs_reply_bytes 0 ""))))
+               "0: list /Volumes/data/0 keep  Deleted \"a\" stat /Volumes/data b")))
+
+(def row_lines ((m Files)) (list int)
+  (match m ((Files d es v is gs bk fw ov mn st pl ic wk jb) (each_row pl))))
+(def each_row ((rows (list UiSideRow))) (list int)
+  (if (is_empty rows) "" (match (head rows) ((UiSideRow k i t s ts) (append s (append "|" (each_row (tail rows))))))))
+
+; The dialog's button asks the change of the file server, the dialog
+; closed; the initramfs's files cannot be changed, said at once.
+(def test_answered_asks () int
+  (let on_volume (fl_at (start) "/Volumes/data" (cons (FvEntry "a" (FvText) 3) (nil FvEntry)) (nil (list int)) (nil (list int)))
+    (add (check_str "mkdir" (jobs_text (fl_answered (fl_with_over on_volume (FlNewFolder (UiEntryText "new" 3))))) "0: change mkdir new")
+         (add (check_str "rename" (jobs_text (fl_answered (fl_with_over on_volume (FlRename "a" (UiEntryText "b" 1))))) "0: change rename a b")
+              (add (check_str "delete" (jobs_text (fl_answered (fl_with_over on_volume (FlDelete "a")))) "0: change remove a")
+                   (add (check_str "relabel" (jobs_text (fl_answered (fl_with_over (fl_at (start) "/Volumes" (nil FvEntry) (nil (list int)) (nil (list int))) (FlRename "data" (UiEntryText "notes" 5))))) "0: change relabel data notes")
+                        (check_str "the initramfs" (fl_status (fl_answered (fl_with_over (start) (FlNewFolder (UiEntryText "new" 3))))) "the system's files cannot be changed")))))))
+
+; A change's request and port: the place's server, none under l0 test.
+(def test_change_body () int
+  (let on_volume (fl_at (start) "/Volumes/data" (nil FvEntry) (nil (list int)) (nil (list int)))
+    (add (check_str "mkdir" (fl_change_body on_volume (FlMkdir "new")) "mkdir /Volumes/data/new")
+         (add (check_str "rename" (fl_change_body on_volume (FlRenaming "a" "b")) "rename /Volumes/data/a /Volumes/data/b")
+              (add (check_str "relabel" (fl_change_body on_volume (FlRelabel "data" "notes")) "relabel /Volumes/data notes")
+                   (check_int "no port" (fl_change_port on_volume (FlMkdir "new")) 0))))))
+
+; A change done has the place listed again, keeping the thing made
+; selected and saying so; refused, why is said, in the server's words
+; for a relabel.
+(def test_change_reply () int
+  (let on_volume (fl_at (start) "/Volumes/data" (nil FvEntry) (nil (list int)) (nil (list int)))
+    (add (check_str "made" (jobs_text (fl_replied_to (fl_with_jobs on_volume (FlJobs 4 (cons (FlJobChange (FlMkdir "new")) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes 0 ""))))
+                    "0: list /Volumes/data/0 keep new Made \"new\"")
+         (add (check_str "refused" (fl_status (fl_replied_to (fl_with_jobs on_volume (FlJobs 4 (cons (FlJobChange (FlMkdir "new")) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes -4 ""))))
+                         "it is there already, or cannot be made")
+              (check_str "in its words" (fl_status (fl_replied_to (fl_with_jobs on_volume (FlJobs 4 (cons (FlJobChange (FlRelabel "data" "x")) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes -5 "that label is served already"))))
+                         "that label is served already")))))
+
+; A volume relabelled: the place shown and Back's paths under its old
+; name made its new, and /Volumes listed again.
+(def test_relabel_reply () int
+  (let m (fl_at (fl_at (start) "/Volumes/data/docs" (nil FvEntry) (nil (list int)) (nil (list int))) "/Volumes" (nil FvEntry) (cons "/Volumes/data/docs" (nil (list int))) (nil (list int)))
+    (let m2 (fl_replied_to (fl_with_jobs m (FlJobs 4 (cons (FlJobChange (FlRelabel "data" "notes")) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes 0 "notes")))
+      (add (check_str "Back under the new name" (head (fl_backs m2)) "/Volumes/notes/docs")
+           (check_str "listed again" (jobs_text m2) "0: volumes 0/0 keep notes Renamed \"data\" to \"notes\"")))))
+
+; Opening a document has its file read, a job, the line saying so.
+(def test_open_reads () int
+  (let m (fl_opened (fl_at (start) "/Volumes/data" (cons (FvEntry "notes" (FvText) 12) (nil FvEntry)) (nil (list int)) (nil (list int))) "notes")
+    (add (check_str "read" (jobs_text m) "0: read text notes /Volumes/data/notes 0 0")
+         (check_str "says so" (fl_status m) "Opening \"notes\"..."))))
+
+; A file read in pieces: the open's reply gives the handle, and the
+; first read is asked; a piece is kept and more asked; one of no bytes
+; ends it, the lines shown over the place.
+(def test_read_pieces () int
+  (let m (fl_at (start) "/Volumes/data" (nil FvEntry) (nil (list int)) (nil (list int)))
+    (let opened (fl_replied_to (fl_with_jobs m (FlJobs 4 (cons (FlJobRead (FlForText "notes") "/Volumes/data/notes" 0 (nil bytes) 0) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes 7 "")))
+      (add (check_str "the handle" (jobs_text opened) "0: read text notes /Volumes/data/notes 7 0")
+           (let piece (fl_replied_to (fl_with_jobs opened (FlJobs 4 (job_list opened))) 4 (message_new 30 (fs_reply_bytes 3 "ab\n")))
+             (add (check_str "kept" (jobs_text piece) "0: read text notes /Volumes/data/notes 7 3")
+                  (let done (fl_replied_to (fl_with_jobs piece (FlJobs 4 (job_list piece))) 4 (message_new 30 (fs_reply_bytes 0 "")))
+                    (add (check_str "shown" (fl_status done) "\"notes\" shown")
+                         (check_strs "its lines" (preview_lines done) (cons "ab" (nil (list int))))))))))))
+
+(def job_list ((m Files)) (list FlJob) (match (fl_jobs m) ((FlJobs t js) js)))
+
+(def preview_lines ((m Files)) (list (list int))
+  (match (fl_over m) ((FlPreview n l p) l) ((FlNone) (nil (list int))) ((FlNewFolder t) (nil (list int))) ((FlRename o t) (nil (list int))) ((FlDelete n) (nil (list int)))))
+
+; A read refused is said; an app's icon.face refused has its icon.draw
+; read instead, and that refused leaves the app with no icon, looked at.
+(def test_read_refused () int
+  (let m (fl_at (start) "/Volumes/data" (cons (FvEntry "T.app" (FvApp (FvDrawn (nil UiDraw))) -1) (nil FvEntry)) (nil (list int)) (nil (list int)))
+    (add (check_str "said" (fl_status (fl_replied_to (fl_with_jobs m (FlJobs 4 (cons (FlJobRead (FlForText "notes") "/Volumes/data/notes" 0 (nil bytes) 0) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes -3 ""))))
+                    "notes: no such file")
+         (add (check_str "icon.draw next" (jobs_text (fl_replied_to (fl_with_jobs m (FlJobs 4 (cons (FlJobRead (FlForFace "/Volumes/data" "T.app") "/Volumes/data/T.app/icon.face" 0 (nil bytes) 0) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes -3 ""))))
+                         "0: read draw T.app /Volumes/data/T.app/icon.draw 0 0")
+              (check_str "no icon" (jobs_text (fl_replied_to (fl_with_jobs m (FlJobs 4 (cons (FlJobRead (FlForDraw "/Volumes/data" "T.app") "/Volumes/data/T.app/icon.draw" 0 (nil bytes) 0) (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes -3 ""))))
+                         "0:")))))
+
+; Idle work's turn: a document still to look at is asked its stat, an
+; app its icon.face; with a job out there is no work to do.
+(def test_look_started () int
+  (let m (fl_looking (fl_at (start) "/Volumes/data" (cons (FvEntry "notes" (FvText) 12) (cons (FvEntry "T.app" (FvApp (FvDrawn (nil UiDraw))) -1) (nil FvEntry))) (nil (list int)) (nil (list int))) (split_spaces "notes T.app"))
+    (add (check_bool "work" (fl_has_work m) true)
+         (add (check_str "the stat" (jobs_text (fl_look_started m)) "0: stat /Volumes/data notes")
+              (add (check_str "then the icon" (jobs_text (fl_look_started (fl_with_jobs (fl_look_started m) (fl_jobs_none)))) "0: read face T.app /Volumes/data/T.app/icon.face 0 0")
+                   (check_bool "a job out, no work" (fl_has_work (fl_look_started m)) false))))))
+
+; A stat's reply marks a program; one of another folder, listed since,
+; marks nothing.
+(def test_stat_reply () int
+  (let m (fl_at (start) "/Volumes/data" (cons (FvEntry "run" (FvText) 12) (nil FvEntry)) (nil (list int)) (nil (list int)))
+    (add (check_str "a program" (kinds_text (fl_entries (fl_replied_to (fl_with_jobs m (FlJobs 4 (cons (FlJobStat "/Volumes/data" "run") (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes 0 "file 12 x"))))) "run:x ")
+         (check_str "another folder's" (kinds_text (fl_entries (fl_replied_to (fl_with_jobs m (FlJobs 4 (cons (FlJobStat "/Volumes/old" "run") (nil FlJob)))) 4 (message_new 30 (fs_reply_bytes 0 "file 12 x"))))) "run:f "))))
+
+(def kinds_text ((es (list FvEntry))) (list int)
+  (if (is_empty es) "" (append (fv_name (head es)) (append ":" (append (match (fv_kind (head es)) ((FvProgram) "x") ((FvText) "f") ((FvDir) "d") ((FvVolume) "v") ((FvApp i) "a")) (append " " (kinds_text (tail es))))))))
+
+; Refresh on a volume lists the place again, keeping the selection, and
+; then asks the sidebar's sizes; on the initramfs it is listed at once,
+; the sidebar's sizes asked.
+(def test_refresh () int
+  (let m (fl_selecting (fl_at (start) "/Volumes/data" (cons (FvEntry "a" (FvText) 3) (nil FvEntry)) (nil (list int)) (nil (list int))) "a")
+    (add (check_str "asked" (jobs_text (fl_refreshed m "" "a")) "0: list /Volumes/data/0 keep a ")
+         (check_str "the initramfs, at once" (jobs_text (fl_refreshed (start) "" "")) "0: sizes 0/0"))))
 ; An app of no windows, for the replies.
 (def files_app () UiApp (UiApp (Compositor 1 2 9 1) 4 (ui_face_none) ((MapEmpty int UiWin)) true (ui_loop_new)))
 
@@ -271,7 +452,7 @@
   (fl_at (start) "/etc" (cons (FvEntry "a" (FvText) 3) (nil FvEntry)) (cons "/" (nil (list int))) (nil (list int))))
 
 ; Whether m has no place to go Back to.
-(def no_back ((m Files)) bool (match m ((Files d es v is gs bk fw ov mn st pl ic wk) (is_empty bk))))
+(def no_back ((m Files)) bool (match m ((Files d es v is gs bk fw ov mn st pl ic wk jb) (is_empty bk))))
 
 ; Whether an open's arguments name a folder: none, a URL and a file do
 ; not, so the window opens at /.

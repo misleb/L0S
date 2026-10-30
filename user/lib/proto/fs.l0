@@ -4,7 +4,12 @@
 ; /Volumes/LABEL, as from that process; a program sends the rest itself,
 ; list, mkdir, stat, chmod, df, format, relabel and unmount to the port mount_at gives,
 ; rescan, partition, attach and mkfs to the port registered as fs. A refusal's
-; word may be followed by why, in words.
+; word may be followed by why, in words. A program that must not wait,
+; as an app's step must not (the toolkit's ui_win_ask), sends any of
+; them itself, the first six too, open, read, close, rename and remove,
+; with the bodies below (fs_open_body and the rest) and reads the
+; reply as it comes (fs_reply_msg, fs_read_of); its handles are its
+; own, as the kernel's would be.
 ;
 ;   open MODE PATH     opens PATH, 1 to read, 2 to write it anew, 3 to
 ;                      add to its end: a handle; a new file only in a
@@ -117,6 +122,78 @@
   (match (port_ask port rp body "the file server")
     ((Asked from b) (fs_reply_of b))
     ((AskFailed why) (FsReply -5 (nil int)))))
+
+; A reply as a program that asked without waiting takes it (the
+; toolkit's UiReply): the message's reply read in place, or -5 if none
+; came.
+(def fs_reply_msg ((m Message)) FsReply
+  (match m ((RecvFailed) (FsReply -5 (nil int))) ((Message from b) (fs_reply_of b))))
+
+; A read's reply as it came: its word, how many bytes, or the code it
+; refused with, and where the bytes are in the message's bytes b, from
+; i up to j, read in place.
+(data FsRead (FsRead int bytes int int))
+
+; The read's reply in the message's bytes b; -5 if it is too short to be
+; one, or none came.
+(def fs_read_of ((m Message)) FsRead
+  (match m
+    ((RecvFailed) (FsRead -5 (bytes_from_list (nil int)) 0 0))
+    ((Message from b)
+      (if (lt (msg_len b) 4)
+          (FsRead -5 b 0 0)
+          (FsRead (s32 (msg_u32 b 0)) b (add (header_len) 4) (bytes_len b))))))
+
+; The bytes a read's reply brought, kept as bytes of their own.
+(def fs_read_piece ((r FsRead)) bytes
+  (match r ((FsRead w b i j) (bytes_slice b i (max i j)))))
+
+; The port of the server registered as fs, 0 if there is none.
+(def fs_main_port () int
+  (match (name_lookup "fs") ((NotFound) 0) ((Found port) port)))
+
+; The port of the server of the volume path is on, as a request of path
+; is sent to it, or 0 if none serves it: a path in /Volumes/LABEL, or
+; any other when / is a volume.
+(def fs_path_port ((path (list int))) int
+  (fs_port_of (fs_volume_of (fs_server_path (path_abs path)))))
+
+; ---------------------------------------------------------------- bodies
+
+; The requests as they are sent, for a program that asks without waiting
+; and takes the reply as it comes (ui_win_ask, ui_app_ask): each the
+; words the server reads. A path is sent as its server knows it
+; (fs_server_path).
+(def fs_path_body ((op (list int)) (path (list int)) (more (list int))) (list int)
+  (append op (append " " (append (fs_server_path (path_abs path)) more))))
+(def fs_list_body ((path (list int)) (from int)) (list int)
+  (fs_path_body "list" path (if (eq from 0) "" (append " " (digits from)))))
+(def fs_stat_body ((path (list int))) (list int) (fs_path_body "stat" path ""))
+(def fs_mkdir_body ((path (list int))) (list int) (fs_path_body "mkdir" path ""))
+(def fs_remove_body ((path (list int))) (list int) (fs_path_body "remove" path ""))
+(def fs_rename_body ((old (list int)) (new (list int))) (list int)
+  (fs_path_body "rename" old (append " " (fs_server_path (path_abs new)))))
+(def fs_open_body ((path (list int))) (list int) (fs_path_body "open 1" path ""))
+(def fs_read_body ((h int) (n int)) (list int) (append "read " (append (digits h) (append " " (digits n)))))
+(def fs_close_body ((h int)) (list int) (append "close " (digits h)))
+(def fs_df_body ((volume (list int))) (list int) (append "df " volume))
+(def fs_format_body ((volume (list int))) (list int) (append "format " volume))
+(def fs_relabel_body ((volume (list int)) (label (list int))) (list int)
+  (append "relabel " (append volume (append " " label))))
+(def fs_rescan_body () (list int) "rescan")
+(def fs_erase_body ((disk (list int))) (list int) (append "erase " disk))
+(def fs_partition_body ((disk (list int)) (count int) (start int)) (list int)
+  (append "partition " (append disk (append " " (append (digits count) (if (lt start 0) "" (append " " (digits start))))))))
+(def fs_mkfs_body ((u Uuid) (label (list int)) (fat bool)) (list int)
+  (append "mkfs " (append (uuid_text u) (append " " (append label (if fat " fat32" ""))))))
+
+; The most bytes a read brings in one reply: a message less its word.
+(def fs_read_most () int (sub (max_message) 4))
+
+; A file's handle closed with no answer wanted, as a program that asked
+; without waiting ends its reads: told, never waited on.
+(def fs_close_told ((port int) (h int)) int
+  (port_tell port (request 0 (fs_close_body h))))
 
 ; ----------------------------------------------------------------- paths
 
@@ -313,8 +390,11 @@
   (let port (fs_port_of volume)
     (if (eq port 0)
         (FsSpaceRefused -3)
-        (match (fs_ask port rp (append "df " volume))
-          ((FsReply w rest) (if (lt w 0) (FsSpaceRefused w) (fs_space_of rest)))))))
+        (fs_df_of (fs_ask port rp (fs_df_body volume))))))
+
+; A df reply as what it said.
+(def fs_df_of ((r FsReply)) FsSpace
+  (match r ((FsReply w rest) (if (lt w 0) (FsSpaceRefused w) (fs_space_of rest)))))
 
 ; A df reply's words as a volume's space.
 (def fs_space_of ((s (list int))) FsSpace
@@ -338,7 +418,7 @@
   (let port (fs_port_of volume)
     (if (eq port 0)
         -3
-        (match (fs_ask port rp (append "format " volume)) ((FsReply w rest) w)))))
+        (match (fs_ask port rp (fs_format_body volume)) ((FsReply w rest) w)))))
 
 ; The volume at /Volumes/LABEL no longer served, nor mounted: 0, or the
 ; code it refused with.
@@ -359,8 +439,11 @@
   (let port (fs_port_of volume)
     (if (eq port 0)
         (FsRelabelRefused -3 "no file server serves it")
-        (match (fs_ask port rp (append "relabel " (append volume (append " " label))))
-          ((FsReply w rest) (if (lt w 0) (FsRelabelRefused w rest) (FsRelabelled rest)))))))
+        (fs_relabel_of (fs_ask port rp (fs_relabel_body volume label))))))
+
+; A relabel reply as what it said.
+(def fs_relabel_of ((r FsReply)) FsRelabel
+  (match r ((FsReply w rest) (if (lt w 0) (FsRelabelRefused w rest) (FsRelabelled rest)))))
 
 ; What rescan said: the labels of the volumes served now, LABEL each, in
 ; the disk's order; or the code it refused with.
@@ -380,7 +463,7 @@
 (def fs_rescan_on ((rp int)) FsRescan
   (match (name_lookup "fs")
     ((NotFound) (FsRescanRefused -3))
-    ((Found port) (fs_rescan_of (fs_ask port rp "rescan")))))
+    ((Found port) (fs_rescan_of (fs_ask port rp (fs_rescan_body))))))
 
 ; What partition said: the new partition's UUID; or the code it refused
 ; with, and why.
@@ -392,14 +475,17 @@
 (def fs_partition_on ((rp int) (disk (list int)) (count int) (start int)) FsPartition
   (match (name_lookup "fs")
     ((NotFound) (FsPartitionRefused -3 "no file server"))
-    ((Found port)
-      (match (fs_ask port rp (append "partition " (append disk (append " " (append (digits count) (if (lt start 0) "" (append " " (digits start))))))))
-        ((FsReply w rest)
-          (if (lt w 0)
-              (FsPartitionRefused w rest)
-              (match (uuid_of_text rest)
-                ((Some u) (FsPartitioned u))
-                ((None) (FsPartitionRefused -5 "the answer is not a UUID")))))))))
+    ((Found port) (fs_partition_of (fs_ask port rp (fs_partition_body disk count start))))))
+
+; A partition reply as what it said.
+(def fs_partition_of ((r FsReply)) FsPartition
+  (match r
+    ((FsReply w rest)
+      (if (lt w 0)
+          (FsPartitionRefused w rest)
+          (match (uuid_of_text rest)
+            ((Some u) (FsPartitioned u))
+            ((None) (FsPartitionRefused -5 "the answer is not a UUID")))))))
 
 ; What erase said: done; or the code it refused with, and why.
 (data FsErase (FsErased) (FsEraseRefused int (list int)))
@@ -409,9 +495,11 @@
 (def fs_erase_on ((rp int) (disk (list int))) FsErase
   (match (name_lookup "fs")
     ((NotFound) (FsEraseRefused -3 "no file server"))
-    ((Found port)
-      (match (fs_ask port rp (append "erase " disk))
-        ((FsReply w rest) (if (lt w 0) (FsEraseRefused w rest) (FsErased)))))))
+    ((Found port) (fs_erase_of (fs_ask port rp (fs_erase_body disk))))))
+
+; An erase reply as what it said.
+(def fs_erase_of ((r FsReply)) FsErase
+  (match r ((FsReply w rest) (if (lt w 0) (FsEraseRefused w rest) (FsErased)))))
 
 ; What mkfs said: the label it is served as; or the code it refused
 ; with, and why.
@@ -426,9 +514,11 @@
 (def fs_mkfs_as_on ((rp int) (u Uuid) (label (list int)) (fat bool)) FsMkfs
   (match (name_lookup "fs")
     ((NotFound) (FsMkfsRefused -3 "no file server"))
-    ((Found port)
-      (match (fs_ask port rp (append "mkfs " (append (uuid_text u) (append " " (append label (if fat " fat32" ""))))))
-        ((FsReply w rest) (if (lt w 0) (FsMkfsRefused w rest) (FsMade rest)))))))
+    ((Found port) (fs_mkfs_of (fs_ask port rp (fs_mkfs_body u label fat))))))
+
+; A mkfs reply as what it said.
+(def fs_mkfs_of ((r FsReply)) FsMkfs
+  (match r ((FsReply w rest) (if (lt w 0) (FsMkfsRefused w rest) (FsMade rest)))))
 
 ; A rescan reply as what it said.
 (def fs_rescan_of ((r FsReply)) FsRescan

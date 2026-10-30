@@ -81,7 +81,13 @@ L0S's own, L0FS ([user/lib/format/l0fs.l0](../user/lib/format/l0fs.l0)), or FAT3
 `fs` mounts each at `/Volumes/LABEL`, as macOS mounts disks, and the
 kernel sends every call on a file there to it, so every program reads
 and writes them with the ordinary `open_in`, `open_out` and the rest:
-`run cat /Volumes/data/notes` works as `run cat /etc/motd` does.
+`run cat /Volumes/data/notes` works as `run cat /etc/motd` does. A
+program that must not wait for an answer, an app in its step, sends
+the same requests itself, `open`, `read`, `close`, `rename` and
+`remove` among them, and takes each reply as it comes
+([proto/fs.l0](../user/lib/proto/fs.l0)'s bodies; the toolkit's
+`ui_win_ask`), its handles its own as the kernel's would be: Files
+reads a file's text and an app's icon so.
 
 **`fs` serves in turn** ([user/sbin/fs/turns.l0](../user/sbin/fs/turns.l0)).
 Each time round it takes every message waiting on its ports, `fs`'s and,
