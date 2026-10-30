@@ -65,7 +65,7 @@ notice's bytes as one, so a body would go through a list both ways
   after the acknowledgement; a write with no reply port still resets);
   inet_test's codec of `room` and of `tcp_event_in` on notices built
   with `message_new`. The `http` and `net_echo` e2e cases still pass.
-- [ ] **JSON.** [format/json.l0](../user/lib/format/json.l0), pure, for
+- [x] **JSON.** [format/json.l0](../user/lib/format/json.l0), pure, for
   the board and host tools alike: `(data Json (JNull) (JBool bool)
   (JInt int) (JNum (list int)) (JStr bytes) (JArr (list Json)) (JObj
   (list JField)))`, `(data JField (JField bytes Json))`. A number that
@@ -187,3 +187,12 @@ notice's bytes as one, so a body would go through a list both ways
   notice is the act `ConnRoom`, so tcp_test.l0 tests it with the rest
   of the machine; tcpstack's own tests are inet_test.l0's, as before.
   `tcp_event_in` takes a message's bytes, the pid first, as received.
+- 2026-10-29: step 2 landed. Beside the helpers named, `json_whole`
+  (a value with nothing but white space around it), `json_items`,
+  `json_fields`, `json_bool`, `json_field` and `json_str`; a `JsonAt`
+  is the value and the index after it, and errors read `at N: WHY`, N
+  from the start given. `json_float` gives an `Option float` (none for
+  a value that is not a number), from the first 19 digits scaled in
+  floats, within an ulp or two, not a correctly rounded conversion.
+  A string with no escape is sliced from the input as it is; one with
+  escapes is made once from a list of what they mean.

@@ -217,6 +217,30 @@ from the host to a port forwarded to the board
 (`make demo NET=user,hostfwd=tcp:127.0.0.1:7000-:7000`, then `nc 127.0.0.1
 7000`).
 
+## HTTP, JSON and server-sent events
+
+What a program says to a web service is plain code over `inet`'s TCP,
+in libraries any program links, each tested on the host.
+
+**JSON** (RFC 8259), in [json.l0](../user/lib/format/json.l0), pure:
+a value is a `Json`, `JNull`, `JBool`, `JInt` (a number that fits an
+`int`), `JNum` (any other number, its text as read, which `json_float`
+reads as a `float`), `JStr` (a string's bytes, UTF-8, its escapes
+replaced), `JArr`, or `JObj`, whose `JField`s keep the order they came
+in, so an object is written back as it was read. `json_read b i j`
+reads a value in place from a range of bytes and gives the index after
+it, `json_whole` one with nothing but white space around it; either says
+where it stopped and why, as `at N: WHY`. It refuses what the RFC does
+not allow: a trailing comma, a leading zero, a single quote, a string
+not closed, a control character in a string, bytes that are not UTF-8,
+a lone surrogate (a pair of `\u` escapes is one character, made UTF-8),
+and arrays and objects nested past 64. `json_bytes` writes a value
+compact, its pieces joined once, escaping in strings only the quote,
+the backslash and control characters. `json_get` (an object's first
+field of a name), `json_at`, `json_items`, `json_fields`, `json_text`,
+`json_int`, `json_bool` read what a program wants of a value, and
+`json_obj`, `json_field` and `json_str` make one to write.
+
 ## The network on the Raspberry Pi 5
 
 ```
@@ -329,3 +353,9 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   of the ends and the secret, which is no cryptographic hash, and on a
   board with no virtio-rng there is no secret, so the first sequence
   number is the clock's, and guessable.
+- **JSON is read whole, and its numbers roughly.** `json_read` reads a
+  value from bytes that hold all of it, so a body is gathered before it
+  is read; `json_float` reads a number's first 19 digits and scales them
+  by powers of ten in floats, which is the nearest float or within an
+  ulp or two of it. An object's fields are a list, found by name one by
+  one, which suits the handful an API's object has.

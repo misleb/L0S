@@ -220,6 +220,9 @@ RANDOM  := user/lib/proto/random.l0
 NICLIB  := user/lib/proto/nic.l0
 DNSLIB  := user/lib/format/dns.l0
 INETLIB := $(NICLIB) $(DNSLIB) $(RANDOM) user/lib/proto/inet.l0
+# JSON's values, read and written as bytes; pure, for the board and the
+# host tools alike.
+JSON    := user/lib/format/json.l0
 
 # USB: its descriptors and requests, and the usb protocol, which the
 # host controller's driver serves to the class drivers, over them; and
@@ -486,6 +489,7 @@ $(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
 $(call l0_test,$(BASE) $(PPM) $(QOI) user/lib/format/qoi_test.l0)
 $(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)
 $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
+$(call l0_test,$(BASE) $(JSON) user/lib/format/json_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/uiapp_test.l0)

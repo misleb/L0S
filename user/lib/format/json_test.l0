@@ -1,0 +1,317 @@
+; json_test.l0 -- tests of json.l0: RFC 8259's examples, JSONTestSuite's
+; kinds of case by name (y_ read, n_ refused), numbers, escapes both
+; ways, and a property test of reading what was written.
+
+; ---------------------------------------------------------------- helpers
+
+; The value text s holds, whole, or why not.
+(def rd ((s (list int))) (Result Json (list int))
+  (let b (bytes_from_list s) (json_whole b 0 (bytes_len b))))
+
+; s read and written again, compact, or "ERR why".
+(def again ((s (list int))) (list int)
+  (match (rd s)
+    ((Ok v) (bytes_to_list (json_bytes v)))
+    ((Err why) (append "ERR " why))))
+
+; Whether s is refused.
+(def refused ((s (list int))) bool
+  (match (rd s) ((Ok v) false) ((Err why) true)))
+
+; Why s is refused, or "read" if it is not.
+(def why_of ((s (list int))) (list int)
+  (match (rd s) ((Ok v) "read") ((Err why) why)))
+
+; The value s holds, or null if it holds none.
+(def val ((s (list int))) Json
+  (match (rd s) ((Ok v) v) ((Err why) (JNull))))
+
+; v written, as text.
+(def wr ((v Json)) (list int) (bytes_to_list (json_bytes v)))
+
+; ----------------------------------------------------------- RFC 8259, 13
+
+; Section 13's object, with spaces: written back compact, its fields in
+; the order they came.
+(def rfc_object () (list int)
+  "{\n  \"Image\": {\n    \"Width\":  800,\n    \"Height\": 600,\n    \"Title\":  \"View from 15th Floor\",\n    \"Thumbnail\": {\n      \"Url\":    \"http://www.example.com/image/481989943\",\n      \"Height\": 125,\n      \"Width\":  100\n    },\n    \"Animated\" : false,\n    \"IDs\": [116, 943, 234, 38793]\n  }\n}")
+
+(def test_rfc_object () int
+  (check_str "compact" (again (rfc_object))
+    "{\"Image\":{\"Width\":800,\"Height\":600,\"Title\":\"View from 15th Floor\",\"Thumbnail\":{\"Url\":\"http://www.example.com/image/481989943\",\"Height\":125,\"Width\":100},\"Animated\":false,\"IDs\":[116,943,234,38793]}}"))
+
+; Its fields found by name.
+(def test_rfc_object_get () int
+  (let img (match (json_get (val (rfc_object)) "Image") ((Some v) v) ((None) (JNull)))
+    (add (check_bool "width" (eq (json_int (match (json_get img "Width") ((Some v) v) ((None) (JNull)))) (Some 800)) true)
+         (add (check_bool "IDs' third" (eq (json_at (match (json_get img "IDs") ((Some v) v) ((None) (JNull))) 2) (Some (JInt 234))) true)
+              (check_bool "none such" (eq (json_get img "Depth") ((None Json))) true)))))
+
+; Section 13's array: its numbers with fractions are JNum, kept as read.
+(def rfc_array () (list int)
+  "[\n  {\n    \"precision\": \"zip\",\n    \"Latitude\":  37.7668,\n    \"Longitude\": -122.3959,\n    \"Address\":   \"\",\n    \"City\":      \"SAN FRANCISCO\",\n    \"State\":     \"CA\",\n    \"Zip\":       \"94107\",\n    \"Country\":   \"US\"\n  },\n  {\n    \"precision\": \"zip\",\n    \"Latitude\":  37.371991,\n    \"Longitude\": -122.026020,\n    \"Address\":   \"\",\n    \"City\":      \"SUNNYVALE\",\n    \"State\":     \"CA\",\n    \"Zip\":       \"94085\",\n    \"Country\":   \"US\"\n  }\n]")
+
+(def test_rfc_array () int
+  (check_str "compact" (again (rfc_array))
+    "[{\"precision\":\"zip\",\"Latitude\":37.7668,\"Longitude\":-122.3959,\"Address\":\"\",\"City\":\"SAN FRANCISCO\",\"State\":\"CA\",\"Zip\":\"94107\",\"Country\":\"US\"},{\"precision\":\"zip\",\"Latitude\":37.371991,\"Longitude\":-122.026020,\"Address\":\"\",\"City\":\"SUNNYVALE\",\"State\":\"CA\",\"Zip\":\"94085\",\"Country\":\"US\"}]"))
+
+(def test_rfc_array_num () int
+  (let first (match (json_at (val (rfc_array)) 0) ((Some v) v) ((None) (JNull)))
+    (check_bool "a JNum" (eq (json_get first "Longitude") (Some (JNum "-122.3959"))) true)))
+
+; Section 13's scalars, each a whole text.
+(def test_rfc_scalars () int
+  (add (check_str "a string" (again "\"Hello world!\"") "\"Hello world!\"")
+       (add (check_str "a number" (again "42") "42")
+            (check_str "true" (again "true") "true"))))
+
+; ---------------------------------------------------------------- y_ cases
+
+(def test_y_structure_lonely_null () int (check_str "null" (again " null ") "null"))
+(def test_y_array_empty () int (check_str "[]" (again "[ ]") "[]"))
+(def test_y_object_empty () int (check_str "{}" (again "{ }") "{}"))
+(def test_y_array_nested () int (check_str "nested" (again "[[[]],{\"a\":[{}]}]") "[[[]],{\"a\":[{}]}]"))
+
+; A field named twice: both kept, json_get finds the first.
+(def test_y_object_duplicated_key () int
+  (add (check_str "kept" (again "{\"a\":\"b\",\"a\":\"c\"}") "{\"a\":\"b\",\"a\":\"c\"}")
+       (check_bool "the first" (eq (json_get (val "{\"a\":\"b\",\"a\":\"c\"}") "a") (Some (json_str "b"))) true)))
+
+; Escapes read: \" \\ \/ \b \f \n \r \t and \u.
+(def test_y_string_escapes () int
+  (check_bool "each" (eq (val "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u0041\"") (JStr (bytes_from_list (cons 34 (cons 92 (cons 47 (cons 8 (cons 12 (cons 10 (cons 13 (cons 9 (cons 65 (nil int))))))))))))) true))
+
+; \u escapes as UTF-8: U+00E9 is C3 A9, U+20AC E2 82 AC.
+(def test_y_string_unicode () int
+  (add (check_bool "two bytes" (eq (val "\"\\u00e9\"") (JStr (bytes_from_list (cons 195 (cons 169 (nil int)))))) true)
+       (check_bool "three" (eq (val "\"\\u20AC\"") (JStr (bytes_from_list (cons 226 (cons 130 (cons 172 (nil int))))))) true)))
+
+; y_string_surrogates_U+1D11E_MUSICAL_SYMBOL_G_CLEF: \uD834\uDd1e is
+; U+1D11E, F0 9D 84 9E.
+(def test_y_string_surrogate_pair () int
+  (check_bool "four bytes" (eq (val "\"\\uD834\\uDd1e\"") (JStr (bytes_from_list (cons 240 (cons 157 (cons 132 (cons 158 (nil int)))))))) true))
+
+; UTF-8 in a string is taken as it is, and written as it came.
+(def test_y_string_utf8 () int
+  (let s (bytes_to_list (bytes_from_list (cons 34 (cons 226 (cons 130 (cons 172 (cons 34 (nil int))))))))
+    (check_str "as it came" (again s) s)))
+
+(def test_y_number_kinds () int
+  (add (check_bool "negative zero" (eq (val "-0") (JInt 0)) true)
+       (add (check_bool "1E22" (eq (val "1E22") (JNum "1E22")) true)
+            (add (check_bool "fraction" (eq (val "-0.5e+3") (JNum "-0.5e+3")) true)
+                 (check_bool "negative" (eq (val "-17") (JInt -17)) true)))))
+
+; ---------------------------------------------------------------- n_ cases
+
+(def test_n_array_trailing_comma () int
+  (add (check_bool "array" (refused "[1,]") true)
+       (check_bool "object" (refused "{\"a\":1,}") true)))
+
+(def test_n_number_leading_zero () int
+  (add (check_str "why" (why_of "[012]") "at 1: a number with a leading zero")
+       (check_bool "negative too" (refused "-01") true)))
+
+(def test_n_single_quote () int
+  (add (check_bool "a string" (refused "['a']") true)
+       (check_bool "a name" (refused "{'a':1}") true)))
+
+(def test_n_string_unclosed () int
+  (check_str "why" (why_of "[\"abc") "at 1: a string not closed"))
+
+(def test_n_lone_surrogate () int
+  (add (check_str "high alone" (why_of "[\"\\uD800\"]") "at 2: a lone surrogate")
+       (add (check_bool "low alone" (refused "\"\\uDC00\"") true)
+            (check_bool "high then not low" (refused "\"\\uD800\\u0041\"") true))))
+
+(def test_n_control_in_string () int
+  (check_str "a tab" (why_of (cons 34 (cons 9 (cons 34 (nil int))))) "at 1: a control character in a string"))
+
+; Bytes that are not UTF-8: FF; an overlong slash, C0 AF; a surrogate
+; encoded, ED A0 80; a sequence cut short.
+(def test_n_not_utf8 () int
+  (add (check_bool "FF" (refused (cons 34 (cons 255 (cons 34 (nil int))))) true)
+       (add (check_bool "overlong" (refused (cons 34 (cons 192 (cons 175 (cons 34 (nil int)))))) true)
+            (add (check_bool "surrogate" (refused (cons 34 (cons 237 (cons 160 (cons 128 (cons 34 (nil int))))))) true)
+                 (check_bool "cut" (refused (cons 34 (cons 226 (cons 130 (cons 34 (nil int)))))) true)))))
+
+(def test_n_numbers () int
+  (add (check_bool "minus alone" (refused "[-]") true)
+       (add (check_bool "point, no digits" (refused "[1.]") true)
+            (add (check_bool "no whole part" (refused "[.5]") true)
+                 (add (check_bool "exponent, no digits" (refused "[1e]") true)
+                      (check_bool "plus" (refused "[+1]") true))))))
+
+(def test_n_structure () int
+  (add (check_bool "nothing" (refused "") true)
+       (add (check_bool "two values" (refused "1 2") true)
+            (add (check_bool "unclosed array" (refused "[1") true)
+                 (add (check_bool "no colon" (refused "{\"a\" 1}") true)
+                      (check_bool "a bad escape" (refused "\"\\x\"") true))))))
+
+; n [s, then n ]s.
+(def nested ((n int)) (list int) (append (repeat n 91) (repeat n 93)))
+
+; Nesting: 64 deep is read, 65 refused.
+(def test_n_structure_too_deep () int
+  (add (check_bool "64" (refused (nested 64)) false)
+       (check_str "65" (why_of (nested 65)) "at 64: nested too deep")))
+
+; ------------------------------------------------------------- read in place
+
+; json_read gives the index after the value, from i, and what follows is
+; left; json_whole refuses it.
+(def test_read_at () int
+  (let b (bytes_from_list "xx  [1] tail")
+    (add (match (json_read b 2 (bytes_len b))
+           ((Ok a) (match a ((JsonAt v k) (add (check_int "after ]" k 7) (check_str "the value" (wr v) "[1]")))))
+           ((Err why) (fail_because "read" why)))
+         (check_bool "not whole" (match (json_whole b 2 (bytes_len b)) ((Ok v) false) ((Err why) true)) true))))
+
+; The end given bounds the reading: the value up to j only.
+(def test_read_bounded () int
+  (let b (bytes_from_list "[1,2]")
+    (check_bool "cut" (match (json_read b 0 3) ((Ok a) false) ((Err why) true)) true)))
+
+; ------------------------------------------------------------------ numbers
+
+(def test_int_bounds () int
+  (add (check_bool "max" (eq (val "9223372036854775807") (JInt 9223372036854775807)) true)
+       (add (check_bool "max + 1" (eq (val "9223372036854775808") (JNum "9223372036854775808")) true)
+            (check_bool "min" (eq (val "-9223372036854775808") (json_int_min)) true))))
+
+; The least int, written so that no literal needs it.
+(def json_int_min () Json (JInt (sub -9223372036854775807 1)))
+
+; Whether two floats are the same number.
+(def same_float ((a float) (b float)) bool (if (float_le a b) (float_le b a) false))
+
+; The float of a value, NaN-free 0 for none.
+(def fl ((s (list int))) float (match (json_float (val s)) ((Some f) f) ((None) 0.0)))
+
+(def test_float () int
+  (add (check_bool "1.5" (same_float (fl "1.5") 1.5) true)
+       (add (check_bool "0.1" (same_float (fl "0.1") 0.1) true)
+            (add (check_bool "-2.5e-3" (same_float (fl "-2.5e-3") -0.0025) true)
+                 (add (check_bool "1E22" (same_float (fl "1E22") (float_mul 100000000000.0 100000000000.0)) true)
+                      (check_bool "an int" (same_float (fl "7") 7.0) true))))))
+
+(def test_float_none () int
+  (check_bool "a string" (eq (json_float (json_str "1")) ((None float))) true))
+
+; ------------------------------------------------------------------ writing
+
+; Only the quote, the backslash and control characters are escaped; a
+; solidus and UTF-8 are not.
+(def test_write_escapes () int
+  (add (check_str "escaped" (wr (json_str (cons 97 (cons 34 (cons 92 (cons 10 (cons 1 (cons 47 (nil int))))))))) "\"a\\\"\\\\\\n\\u0001/\"")
+       (check_str "names too" (wr (json_obj (cons (json_field "a\"" (JNull)) (nil JField)))) "{\"a\\\"\":null}")))
+
+(def test_write_values () int
+  (check_str "each kind" (wr (JArr (cons (JNull) (cons (JBool true) (cons (JBool false) (cons (JInt -3) (cons (JNum "2.5") (cons (json_str "") (nil Json)))))))))
+             "[null,true,false,-3,2.5,\"\"]"))
+
+; ------------------------------------------------------------- the property
+
+; A value made, and the seed after it.
+(data Gen (Gen Json int))
+
+; A list of values made, and the seed after them.
+(data Gens (Gens (list Json) int))
+
+; A random value from seed s, nesting at most d deeper.
+(def gen ((s int) (d int)) Gen
+  (let s1 (rand_next s)
+    (let k (rand_below s1 (if (le d 0) 6 8))
+      (if (eq k 0) (Gen (JNull) s1)
+      (if (eq k 1) (Gen (JBool (eq (rand_below (rand_next s1) 2) 0)) (rand_next s1))
+      (if (eq k 2) (gen_int s1)
+      (if (eq k 3) (gen_num s1)
+      (if (lt k 6) (gen_str s1)
+      (if (eq k 6) (gen_arr s1 d)
+      (gen_obj s1 d))))))))))
+
+; A random int, of any size, either sign.
+(def gen_int ((s int)) Gen
+  (let s1 (rand_next s)
+    (let s2 (rand_next s1)
+      (let n (mul (rand_below s1 1000000007) (if (eq (rand_below s2 2) 0) 1 -1))
+        (Gen (JInt (if (eq (rand_below s2 7) 3) (mul n 9000000007) n)) s2)))))
+
+; A random number with a fraction and an exponent, as text.
+(def gen_num ((s int)) Gen
+  (let s1 (rand_next s)
+    (let s2 (rand_next s1)
+      (Gen (JNum (append (digits (rand_below s1 1000)) (append "." (append (digits (rand_below s2 1000)) "e-7")))) (rand_next s2)))))
+
+; Characters a string is made of: ASCII with its controls, quote and
+; backslash, and some of UTF-8's longer ones.
+(def gen_char ((s int)) (list int)
+  (let k (rand_below s 40)
+    (if (eq k 0) (cons 195 (cons 169 (nil int)))
+    (if (eq k 1) (cons 226 (cons 130 (cons 172 (nil int))))
+    (if (eq k 2) (cons 240 (cons 157 (cons 132 (cons 158 (nil int)))))
+    (if (eq k 3) (cons 34 (nil int))
+    (if (eq k 4) (cons 92 (nil int))
+    (if (eq k 5) (cons (rand_below (rand_next s) 32) (nil int))
+    (cons (add 32 (rand_below (rand_next s) 95)) (nil int))))))))))
+
+; A random string of up to 12 characters.
+(def gen_str ((s int)) Gen
+  (let s1 (rand_next s)
+    (gen_chars (rand_next s1) (rand_below s1 13) (nil int))))
+
+; n characters more after acc, reversed.
+(def gen_chars ((s int) (n int) (acc (list int))) Gen
+  (if (eq n 0)
+      (Gen (JStr (bytes_from_list (rev acc))) s)
+      (gen_chars (rand_next s) (sub n 1) (rev_onto (gen_char s) acc))))
+
+; A random array of up to 4 values.
+(def gen_arr ((s int) (d int)) Gen
+  (let s1 (rand_next s)
+    (match (gen_list (rand_next s1) (sub d 1) (rand_below s1 5) (nil Json))
+      ((Gens xs s2) (Gen (JArr xs) s2)))))
+
+; n values more after acc, reversed.
+(def gen_list ((s int) (d int) (n int) (acc (list Json))) Gens
+  (if (eq n 0)
+      (Gens (rev acc) s)
+      (match (gen s d) ((Gen v s2) (gen_list s2 d (sub n 1) (cons v acc))))))
+
+; A random object of up to 4 fields, its names random strings.
+(def gen_obj ((s int) (d int)) Gen
+  (let s1 (rand_next s)
+    (match (gen_list (rand_next s1) (sub d 1) (rand_below s1 5) (nil Json))
+      ((Gens xs s2) (gen_named xs s2 (nil JField))))))
+
+; Each of xs named, after acc, reversed.
+(def gen_named ((xs (list Json)) (s int) (acc (list JField))) Gen
+  (if (is_empty xs)
+      (Gen (JObj (rev acc)) s)
+      (match (gen_str s)
+        ((Gen k s2)
+          (match k
+            ((JStr name) (gen_named (tail xs) s2 (cons (JField name (head xs)) acc)))
+            ((JNull) (Gen (JNull) s2))
+            ((JBool x) (Gen (JNull) s2))
+            ((JInt n) (Gen (JNull) s2))
+            ((JNum t) (Gen (JNull) s2))
+            ((JArr ys) (Gen (JNull) s2))
+            ((JObj fs) (Gen (JNull) s2)))))))
+
+; Of n values from seed s, how many are not read back as they were
+; written.
+(def round_trips ((s int) (n int) (bad int)) int
+  (if (eq n 0)
+      bad
+      (match (gen s 4)
+        ((Gen v s2)
+          (let b (json_bytes v)
+            (round_trips s2 (sub n 1)
+              (match (json_whole b 0 (bytes_len b))
+                ((Ok w) (if (eq w v) bad (add bad 1)))
+                ((Err why) (add bad 1)))))))))
+
+(def test_round_trip_property () int
+  (check_int "300 values read back" (round_trips 20261029 300 0) 0))
