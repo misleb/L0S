@@ -1,6 +1,6 @@
 # 0042: A model's API reached through a proxy on the host
 
-Track: Agent · Status: ready · Needs: 0041 · Spec: network.md, programs.md, testing.md, pi5.md
+Track: Agent · Status: active · Needs: 0041 · Spec: network.md, programs.md, testing.md, pi5.md
 
 ## Why
 
@@ -41,7 +41,7 @@ request built, its streamed events read), which 0043's `agentd` uses.
 
 ## Steps
 
-- [ ] **The proxy.** `tools/api-proxy/`: `requirements.txt`
+- [x] **The proxy.** `tools/api-proxy/`: `requirements.txt`
   (`aiohttp`, its server and its client, both streaming), `proxy.py`,
   `usage.py` (pure: the usage of an event stream or a JSON answer, a
   log line, a day's totals) and `standin.py` (a stand-in API: answers
@@ -163,3 +163,16 @@ request built, its streamed events read), which 0043's `agentd` uses.
   active until its last step has run on a Pi 5 as well as on QEMU. An
   e2e case's etc gets `@PORT@`, so the board finds the stand-in's proxy
   at 10.0.2.2 on the boot's free port, as `typed` does.
+- 2026-10-29: step 1, the proxy: `tools/api-proxy/` in aiohttp 3, its
+  venv `build/proxy/venv` made by `make proxy` with the token, and
+  `make proxy-run`. Beyond the plan: the stand-in takes a third kind of
+  answer, `{"text": [pieces], "delay": S}`, made the events the API
+  streams for a text answer (`standin.text_events`), and with `--key`
+  refuses a request without that `x-api-key`, as the API does, so the
+  tests check the key reached it twice over; the proxy's own refusals
+  (401, 404, a 502 when the upstream cannot be reached) are JSON in the
+  API's error form, so a board reads them as it reads the API's; an
+  upstream answer that breaks off closes the board's connection rather
+  than ending its body, so the board sees it cut short. The usage file
+  is `build/proxy/usage.jsonl` unless `--usage` is given, and times and
+  `--day` are UTC. Its tests, 20, pass with `make test`.

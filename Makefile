@@ -51,6 +51,13 @@
 #   make mcp         build/mcp/venv, the Python with the MCP SDK that
 #                    .mcp.json runs tools/l0s-mcp in: the MCP server
 #                    that boots and drives L0S for agents
+#   make proxy       build/proxy/venv, the Python with aiohttp that the
+#                    API proxy runs in (tools/api-proxy), and
+#                    build/proxy/token, the boards' token, made once
+#   make proxy-run [PROXY_LISTEN=ADDR:PORT]  the proxy to Anthropic's API
+#                    on ADDR:PORT, 127.0.0.1:8765 unless given, with that
+#                    token and ANTHROPIC_API_KEY; usage in
+#                    build/proxy/usage.jsonl
 #   make graph       graphify-out/ rebuilt from the code as it is: the L0
 #                    sources (tools/graphify-l0), scripts and Python, the
 #                    docs' nodes kept; once /graphify has built it
@@ -356,7 +363,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp icon-sheet graph graph-hook
+.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -530,6 +537,13 @@ $(BUILD)/test/graphify-l0.ok: $(wildcard tools/graphify-l0/*.py) tools/graphify-
 	@mkdir -p $(@D)
 	@$(call logged,{ python3 tools/graphify-l0/test_l0_graph.py && python3 tools/graphify-l0/test_graph_usage.py; },tools/graphify-l0's tests)
 
+# The API proxy's tests, against its stand-in, with the venv's Python,
+# which has aiohttp: the first after a clean needs the network, for pip.
+PROXY_VENV := $(BUILD)/proxy/venv
+$(BUILD)/test/api-proxy.ok: $(wildcard tools/api-proxy/*.py) $(PROXY_VENV)/.installed
+	@mkdir -p $(@D)
+	@$(call logged,$(PROXY_VENV)/bin/python tools/api-proxy/test_proxy.py,tools/api-proxy/test_proxy.py)
+
 # Every host test, and then how many passed in all, those run before
 # among them. A failure is shown as it happens, and the count still given.
 test:
@@ -537,7 +551,7 @@ test:
 	cat $(TESTS:.ok=.log) 2> /dev/null | awk '/^# [0-9]+ passed, [0-9]+ failed$$/ { p += $$2; f += $$4 } \
 	  END { print "make test: " p " passed, " f " failed, of $(words $(TESTS)) files" }'; exit $$st
 
-test-each: $(TESTS) $(BUILD)/test/l0s-mcp.ok $(BUILD)/test/graphify-l0.ok
+test-each: $(TESTS) $(BUILD)/test/l0s-mcp.ok $(BUILD)/test/graphify-l0.ok $(BUILD)/test/api-proxy.ok
 
 test-virt: test-virt-heap
 	L0_QEMU_ARGS="-smp 1" $(L0) test --target virt $(KERNEL_LAYOUT) $(KERNEL) kernel/asm.l0 kernel/kernel_virt_test.l0
@@ -729,6 +743,26 @@ $(MCP_VENV)/.installed: tools/l0s-mcp/requirements.txt
 	touch $@
 
 mcp: $(MCP_VENV)/.installed
+
+# The API proxy's Python, with aiohttp, as the MCP server's; the token a
+# board gives it, 32 random hex digits made once, readable by no one
+# else; and the proxy run with them, on PROXY_LISTEN. PROXY_VENV is
+# set above, where its tests are.
+$(PROXY_VENV)/.installed: tools/api-proxy/requirements.txt
+	python3 -m venv $(PROXY_VENV)
+	$(PROXY_VENV)/bin/pip install -q --disable-pip-version-check -r tools/api-proxy/requirements.txt
+	touch $@
+
+$(BUILD)/proxy/token:
+	@mkdir -p $(@D)
+	@umask 077 && python3 -I -c 'import secrets; print(secrets.token_hex(16))' > $@.new && mv $@.new $@
+	@echo "make proxy: a new token in $@"
+
+proxy: $(PROXY_VENV)/.installed $(BUILD)/proxy/token
+
+PROXY_LISTEN ?= 127.0.0.1:8765
+proxy-run: proxy
+	$(PROXY_VENV)/bin/python -I tools/api-proxy/proxy.py --listen $(PROXY_LISTEN) --token-file $(BUILD)/proxy/token --usage $(BUILD)/proxy/usage.jsonl
 
 # The knowledge graph, which /graphify built first: graphify's own Python,
 # as it wrote it down, rebuilds it with the L0 sources it cannot read.
