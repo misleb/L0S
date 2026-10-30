@@ -1,0 +1,268 @@
+; store.l0 -- where the font service keeps its strikes: in arenas, runs
+; of pages it allocates and shares whole, read only, with each process
+; it gives a strike in one, so that a program reads all of its strikes
+; through one region an arena. A strike is a run of its arena's pages,
+; placed first fit; its holders are the processes it was given to that
+; have not exited, and one with none, not stored, is let go, its pages
+; free for the next. An arena with no strike, but the first, is let go
+; too. Pure: font.l0 makes the calls this bookkeeping stands for.
+
+; An arena: where it is in font, its pages, each page's use (1 used, 0
+; free), and where each process it was shared with sees it, by pid.
+(data Arena (Arena int int (array int) (Map int int)))
+
+; A strike kept: its arena, its first page there, its pages, its bytes,
+; the pids holding it, and whether it is one of the stored ones, kept
+; for good.
+(data Kept (Kept int int int int (list int) bool))
+
+; The store: the arenas by number, the number the next will have, and
+; the strikes by key, FACE H.
+(data Store (Store (Map int Arena) int (Map (list int) Kept)))
+
+; A place for a strike: its arena and its first page there.
+(data Spot (Spot int int))
+
+; The store after a sweep, and the arenas it let go, for font to unmap.
+(data Swept (Swept Store (list Arena)))
+
+; The pages an arena has, unless a strike needs more: 128, 512 KB, more
+; than the desktop's twelve stored strikes take, 80.
+(def arena_pages () int 128)
+
+; A store of nothing.
+(def store_empty () Store (Store ((MapEmpty int Arena)) 0 ((MapEmpty (list int) Kept))))
+
+; ---------------------------------------------------------------- arenas
+
+; s with an arena more, n pages at va in font, all free, shared with
+; none; it is the next number.
+(def store_arena_add ((s Store) (va int) (n int)) Store
+  (match s
+    ((Store as next ks) (Store (map_put as next (Arena va n (array_new n 0) ((MapEmpty int int)))) (add next 1) ks))))
+
+; Arena a, if s has it.
+(def store_arena ((s Store) (a int)) (Option Arena)
+  (match s ((Store as next ks) (map_get as a))))
+
+; Where arena a is in font, and its pages; 0 if there is no such arena.
+(def store_arena_va ((s Store) (a int)) int
+  (match (store_arena s a) ((Some r) (match r ((Arena va n used seen) va))) ((None) 0)))
+(def store_arena_n ((s Store) (a int)) int
+  (match (store_arena s a) ((Some r) (match r ((Arena va n used seen) n))) ((None) 0)))
+
+; Where pid sees arena a, if it was shared with pid.
+(def store_seen ((s Store) (a int) (pid int)) (Option int)
+  (match (store_arena s a)
+    ((Some r) (match r ((Arena va n used seen) (map_get seen pid))))
+    ((None) ((None int)))))
+
+; s with arena a shared with pid, which sees it at there.
+(def store_shared ((s Store) (a int) (pid int) (there int)) Store
+  (match s
+    ((Store as next ks)
+      (match (map_get as a)
+        ((None) (Store as next ks))
+        ((Some r) (match r ((Arena va n used seen) (Store (map_put as a (Arena va n used (map_put seen pid there))) next ks))))))))
+
+; Whether any arena was shared with pid: whether font has given it
+; anything, and so watches it.
+(def store_knows ((s Store) (pid int)) bool
+  (match s ((Store as next ks) (arenas_know (map_values as) pid))))
+
+; store_knows' loop over the arenas rs.
+(def arenas_know ((rs (list Arena)) (pid int)) bool
+  (if (is_empty rs)
+      false
+      (match (head rs) ((Arena va n used seen) (if (map_has seen pid) true (arenas_know (tail rs) pid))))))
+
+; ---------------------------------------------------------------- placing
+
+; Where a strike of pages fits: the first run of that many free pages in
+; the arenas, lowest numbered first; none if no arena has one.
+(def store_fit ((s Store) (pages int)) (Option Spot)
+  (match s ((Store as next ks) (fit_in as (sort (map_keys as)) pages))))
+
+; store_fit's loop over the arenas numbered ids.
+(def fit_in ((as (Map int Arena)) (ids (list int)) (pages int)) (Option Spot)
+  (if (is_empty ids)
+      ((None Spot))
+      (match (map_get as (head ids))
+        ((None) (fit_in as (tail ids) pages))
+        ((Some r)
+          (match r
+            ((Arena va n used seen)
+              (let at (run_free used 0 0 pages)
+                (if (ge at 0) (Some (Spot (head ids) at)) (fit_in as (tail ids) pages)))))))))
+
+; The first of a run of need free pages in used, from page i, run free
+; ones counted so far; -1 if there is none.
+(def run_free ((used (array int)) (i int) (run int) (need int)) int
+  (if (ge run need)
+      (sub i need)
+      (if (ge i (array_len used))
+          -1
+          (if (eq (array_get used i) 0)
+              (run_free used (add i 1) (add run 1) need)
+              (run_free used (add i 1) 0 need)))))
+
+; used with n pages from i set to v.
+(def pages_set ((used (array int)) (i int) (n int) (v int)) (array int)
+  (if (le n 0) used (pages_set (array_set used i v) (add i 1) (sub n 1) v)))
+
+; s with arena a's n pages from first set to v, 1 used or 0 free.
+(def arena_mark ((s Store) (a int) (first int) (n int) (v int)) Store
+  (match s
+    ((Store as next ks)
+      (match (map_get as a)
+        ((None) (Store as next ks))
+        ((Some r)
+          (match r
+            ((Arena va an used seen)
+              (Store (map_put (map_remove as a) a (Arena va an (pages_set used first n v) seen)) next ks))))))))
+
+; s with the strike key kept at place p, in pages of its own there, len
+; bytes, held by none yet; stored if it is one of the stored ones.
+(def store_put ((s Store) (key (list int)) (p Spot) (pages int) (len int) (stored bool)) Store
+  (match p
+    ((Spot a first)
+      (match (arena_mark s a first pages 1)
+        ((Store as next ks) (Store as next (map_put ks key (Kept a first pages len (nil int) stored))))))))
+
+; The strike kept as key, if s has it.
+(def store_get ((s Store) (key (list int))) (Option Kept)
+  (match s ((Store as next ks) (map_get ks key))))
+
+; Where strike key starts, in bytes from its arena's start.
+(def kept_offset ((k Kept)) int (match k ((Kept a first pages len hs st) (mul first (page_size)))))
+
+; s with pid holding strike key, once however often it is given it.
+(def store_hold ((s Store) (key (list int)) (pid int)) Store
+  (match s
+    ((Store as next ks)
+      (match (map_get ks key)
+        ((None) (Store as next ks))
+        ((Some k)
+          (match k
+            ((Kept a first pages len hs st)
+              (if (any_eq pid hs) (Store as next ks) (Store as next (map_put ks key (Kept a first pages len (cons pid hs) st)))))))))))
+
+; ---------------------------------------------------------------- exits
+
+; s once pid has exited: no strike held by it, no arena shared with it,
+; as the kernel took its mappings back.
+(def store_exited ((s Store) (pid int)) Store
+  (match s
+    ((Store as next ks)
+      (Store (arenas_without as (map_keys as) pid) next (kepts_without ks (map_keys ks) pid)))))
+
+; as with pid out of each arena's sharers, those of ids.
+(def arenas_without ((as (Map int Arena)) (ids (list int)) (pid int)) (Map int Arena)
+  (if (is_empty ids)
+      as
+      (match (map_get as (head ids))
+        ((None) (arenas_without as (tail ids) pid))
+        ((Some r)
+          (match r
+            ((Arena va n used seen)
+              (if (map_has seen pid)
+                  (arenas_without (map_put as (head ids) (Arena va n used (map_remove seen pid))) (tail ids) pid)
+                  (arenas_without as (tail ids) pid))))))))
+
+; ks with pid out of each strike's holders, those of keys.
+(def kepts_without ((ks (Map (list int) Kept)) (keys (list (list int))) (pid int)) (Map (list int) Kept)
+  (if (is_empty keys)
+      ks
+      (match (map_get ks (head keys))
+        ((None) (kepts_without ks (tail keys) pid))
+        ((Some k)
+          (match k
+            ((Kept a first pages len hs st)
+              (if (any_eq pid hs)
+                  (kepts_without (map_put ks (head keys) (Kept a first pages len (without_int hs pid) st)) (tail keys) pid)
+                  (kepts_without ks (tail keys) pid))))))))
+
+; xs without x.
+(def without_int ((xs (list int)) (x int)) (list int)
+  (if (is_empty xs) xs (if (eq (head xs) x) (without_int (tail xs) x) (cons (head xs) (without_int (tail xs) x)))))
+
+; s with every strike no one holds let go, but the stored ones, its
+; pages free in its arena; then every arena left with no strike, but
+; arena 0, let go, and those arenas.
+(def store_sweep ((s Store)) Swept
+  (match s
+    ((Store as next ks)
+      (arenas_swept (strikes_swept s (sort (map_keys ks))) (sort (map_keys as)) (nil Arena)))))
+
+; s with each of keys let go that no one holds and is not stored.
+(def strikes_swept ((s Store) (keys (list (list int)))) Store
+  (if (is_empty keys)
+      s
+      (match (store_get s (head keys))
+        ((None) (strikes_swept s (tail keys)))
+        ((Some k)
+          (match k
+            ((Kept a first pages len hs st)
+              (if (if st true (not (is_empty hs)))
+                  (strikes_swept s (tail keys))
+                  (strikes_swept (store_drop (arena_mark s a first pages 0) (head keys)) (tail keys)))))))))
+
+; s without strike key, its pages as they are.
+(def store_drop ((s Store) (key (list int))) Store
+  (match s ((Store as next ks) (Store as next (map_remove ks key)))))
+
+; s without each arena of ids, but 0, whose pages are all free, onto
+; gone, the arenas let go.
+(def arenas_swept ((s Store) (ids (list int)) (gone (list Arena))) Swept
+  (if (is_empty ids)
+      (Swept s (rev gone))
+      (match (store_arena s (head ids))
+        ((None) (arenas_swept s (tail ids) gone))
+        ((Some r)
+          (match r
+            ((Arena va n used seen)
+              (if (if (eq (head ids) 0) true (gt (pages_used used 0 0) 0))
+                  (arenas_swept s (tail ids) gone)
+                  (arenas_swept (arena_drop s (head ids)) (tail ids) (cons r gone)))))))))
+
+; s without arena a.
+(def arena_drop ((s Store) (a int)) Store
+  (match s ((Store as next ks) (Store (map_remove as a) next ks))))
+
+; ---------------------------------------------------------------- counts
+
+; How many of used's pages from i are used, onto n.
+(def pages_used ((used (array int)) (i int) (n int)) int
+  (if (ge i (array_len used)) n (pages_used used (add i 1) (add n (array_get used i)))))
+
+; The pages s's strikes take, and those its arenas have.
+(def store_used ((s Store)) int
+  (match s ((Store as next ks) (arenas_count (map_values as) true 0))))
+(def store_total ((s Store)) int
+  (match s ((Store as next ks) (arenas_count (map_values as) false 0))))
+
+; The pages of rs, used ones only if used, onto n.
+(def arenas_count ((rs (list Arena)) (only bool) (n int)) int
+  (if (is_empty rs)
+      n
+      (match (head rs)
+        ((Arena va an used seen) (arenas_count (tail rs) only (add n (if only (pages_used used 0 0) an)))))))
+
+; How many strikes s keeps.
+(def store_size ((s Store)) int (match s ((Store as next ks) (map_size ks))))
+
+; Each strike's line, FACE H BYTES HOLDERS, in order of key.
+(def store_lines ((s Store)) (list (list int))
+  (match s ((Store as next ks) (kept_lines ks (sort (map_keys ks))))))
+
+; The line of each strike keys names.
+(def kept_lines ((ks (Map (list int) Kept)) (keys (list (list int)))) (list (list int))
+  (if (is_empty keys)
+      (nil (list int))
+      (match (map_get ks (head keys))
+        ((None) (kept_lines ks (tail keys)))
+        ((Some k)
+          (match k
+            ((Kept a first pages len hs st)
+              (cons (unwords (cons (head keys) (cons (digits len) (cons (digits (length hs)) (nil (list int))))))
+                    (kept_lines ks (tail keys)))))))))

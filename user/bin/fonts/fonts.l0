@@ -1,25 +1,35 @@
 ; fonts.l0 -- what the font service has (user/lib/proto/font.l0): its
 ; faces, how many strikes it has built, and each it keeps, its size and
-; how many processes it was shared with. With strike FACE H, it asks for
-; that strike first, as a program that draws text does, and says how
-; many pages it came in.
+; how many live processes hold it. With strike FACE H ..., it asks for
+; those strikes, all at once, as a program that draws text does, and
+; says of each, as its answer comes, how many pages it came in: font
+; answers a strike already made at once, while one it must make is
+; being made.
 ;
 ;   fonts
-;   fonts strike FACE H
+;   fonts strike FACE H [FACE H ...]
 
 ; How long it waits for font to register: a second, which a service
 ; started at boot takes much less than.
 (def fonts_wait_ns () int 1000000000)
 
-; The table of what font's stats reply r says, a line each: the builds,
-; then each strike, FACE H, its size and its sharers.
+; The table of what font's stats reply r says, a line each: the builds
+; and the pages used of the arenas', then each strike, FACE H, its size
+; and its holders.
 (def stats_table ((r (list int))) (list int)
   (let ls (lines r)
     (if (if (is_empty ls) true (not (starts_with (head ls) "builds ")))
         ""
-        (append "strikes built: " (append (drop_n (head ls) 7) (append "\n" (strike_rows (tail ls) (nil int))))))))
+        (append (stats_head (split_spaces (head ls))) (append "\n" (strike_rows (tail ls) (nil int)))))))
 
-; Each strike's line as a row: FACE H, its bytes, its sharers; after
+; The first line, from builds B pages U T: the strikes built, and the
+; pages used of the arenas'.
+(def stats_head ((ws (list (list int)))) (list int)
+  (append "strikes built: "
+    (append (nth ws 1)
+      (if (lt (length ws) 5) "" (append ", pages used: " (append (nth ws 3) (append " of " (nth ws 4))))))))
+
+; Each strike's line as a row: FACE H, its bytes, its holders; after
 ; acc, reversed.
 (def strike_rows ((ls (list (list int))) (acc (list int))) (list int)
   (if (is_empty ls)
@@ -29,7 +39,7 @@
             (strike_rows (tail ls) acc)
             (strike_rows (tail ls)
               (push (append (pad_right (append (nth ws 0) (append " " (nth ws 1))) 16)
-                      (append (pad_right (append (nth ws 2) " bytes") 16) (append "shared with " (append (nth ws 3) "\n"))))
+                      (append (pad_right (append (nth ws 2) " bytes") 16) (append "held by " (append (nth ws 3) "\n"))))
                     acc))))))
 
 ; The lines fonts writes, from font's faces reply and its stats reply.
@@ -41,22 +51,77 @@
           ((Err (list int) (list int)) (reply_why stats "font"))
           ((Ok (list int) (list int)) (append "faces: " (append (unwords fs) (append "\n" (stats_table stats)))))))))
 
-; The line strike FACE H writes, from what came of asking.
-(def strike_line ((face (list int)) (h int) (s FontStrike)) (Result (list int) (list int))
-  (match s
+; The line an answer r to a strike writes, FACE H: its pages, from the
+; strike it names; or why there is none.
+(def strike_line ((r (list int))) (Result (list int) (list int))
+  (match (font_strike_of r)
     ((NoFontStrike why) ((Err (list int) (list int)) why))
-    ((FontStrike va n) ((Ok (list int) (list int)) (append face (append " " (append (digits h) (append ": " (append (digits n) " pages\n")))))))))
+    ((FontStrike va n off m) ((Ok (list int) (list int)) (append (font_reply_key r) (append ": " (append (digits m) " pages\n")))))))
 
-; fonts, or fonts strike FACE H.
+; The keys FACE H that words ws name, a face and a height each; none if
+; they do not pair so, or name none.
+(def strike_keys ((ws (list (list int)))) (Option (list (list int)))
+  (if (is_empty ws)
+      ((None (list (list int))))
+      (strike_keys_onto ws (nil (list int)))))
+
+; strike_keys' loop, onto acc reversed.
+(def strike_keys_onto ((ws (list (list int))) (acc (list (list int)))) (Option (list (list int)))
+  (if (is_empty ws)
+      (Some (rev acc))
+      (if (is_empty (tail ws))
+          ((None (list (list int))))
+          (match (word_number (nth ws 1))
+            ((None) ((None (list (list int)))))
+            ((Some h) (strike_keys_onto (tail (tail ws)) (cons (append (head ws) (append " " (nth ws 1))) acc)))))))
+
+; The usage line.
+(def fonts_usage () (list int) "usage: fonts [strike FACE H [FACE H ...]]")
+
+; fonts, or fonts strike FACE H ....
 (def fonts () int
   (let argv (args)
     (if (is_empty argv)
         (fonts_listed (font_open (fonts_wait_ns)))
-        (if (if (eq (head argv) "strike") (eq (length argv) 3) false)
-            (match (word_number (nth argv 2))
-              ((None) (complain_as "fonts" "usage: fonts [strike FACE H]"))
-              ((Some h) (fonts_written (strike_line (nth argv 1) h (font_strike (font_open (fonts_wait_ns)) (nth argv 1) h)))))
-            (complain_as "fonts" "usage: fonts [strike FACE H]")))))
+        (if (eq (head argv) "strike")
+            (match (strike_keys (tail argv))
+              ((None) (complain_as "fonts" (fonts_usage)))
+              ((Some keys) (fonts_asked (font_open (fonts_wait_ns)) keys)))
+            (complain_as "fonts" (fonts_usage))))))
+
+; Each strike keys names asked of font at once, then each answer said
+; as it comes: 0, or 1 if any was refused.
+(def fonts_asked ((fp FontPort) (keys (list (list int)))) int
+  (match fp
+    ((NoFontPort why) (complain_as "fonts" why))
+    ((FontPort port rp)
+      (let why (strikes_sent port rp keys)
+        (if (not (is_empty why))
+            (complain_as "fonts" why)
+            (strikes_told rp (length keys) 0))))))
+
+; Each of keys asked on port, its answer to rp: empty, or why one could
+; not be sent.
+(def strikes_sent ((port int) (rp int) (keys (list (list int)))) (list int)
+  (if (is_empty keys)
+      ""
+      (match (port_send port (request rp (append "strike " (head keys))))
+        ((Sent) (strikes_sent port rp (tail keys)))
+        ((SendNoPort) "font is gone")
+        ((SendFull) "font did not take the request: its queue is full")
+        ((SendTooBig) "the request is too big for font"))))
+
+; The next n answers on rp said as they come, status 1 once one is a
+; refusal.
+(def strikes_told ((rp int) (n int) (status int)) int
+  (if (le n 0)
+      status
+      (match (port_receive rp)
+        ((RecvFailed) (complain_as "fonts" "no reply from font"))
+        ((Message from b)
+          (match (strike_line (msg_text b))
+            ((Ok t) (let w (write_str t) (let f (file_flush (IoFile 1)) (strikes_told rp (sub n 1) status))))
+            ((Err why) (let c (complain_as "fonts" why) (strikes_told rp (sub n 1) 1))))))))
 
 ; The faces and the strikes listed.
 (def fonts_listed ((fp FontPort)) int

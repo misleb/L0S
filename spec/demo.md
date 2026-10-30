@@ -84,7 +84,7 @@ booted with `root=UUID`, or else from the initramfs.
 | 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard and the mouse on its ports, and serves `usb`, telling `usb-hid` of its devices' reports. It takes the controller's interrupt, MSI 80, which `pcie` sets up for it (see [USB](devices.md#usb)) |
 | 13 | `usb-hid` | the keyboard's and the mouse's driver, one process waiting on three ports. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window, and `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
 | 14 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
-| 15 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in pages it shares with each asker, the desktop's made at the build, any other rasterized once, on its first ask |
+| 15 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in an arena of pages it shares with each asker, the desktop's made at the build, any other rasterized on its first ask and let go once no process that asked for it is left, which it learns from the kernel's exit notices |
 | 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
 
 An app opened then takes the next pids. A Terminal, the first opened,
