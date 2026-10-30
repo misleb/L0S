@@ -94,7 +94,7 @@ What it is, as decided with the user:
   the cache. Tests: a conversation of a text, a tool use and its
   result as JSON, compared as text; the breakpoints where they should
   be, three at most with the system's.
-- [ ] **The loop.** `user/sbin/agentd/loop.l0`, pure: `(data Loop
+- [x] **The loop.** `user/sbin/agentd/loop.l0`, pure: `(data Loop
   ...)`, the conversation, the answer being built from `ModelEvent`s
   (each block by its index: text appended, a tool's input's
   `partial_json` pieces joined and read as JSON at `MBlockStop`), the
@@ -287,3 +287,17 @@ What it is, as decided with the user:
   prompt, which can come before `fs` has the disk; with the larger
   initramfs it did every time, so it now waits for the volumes'
   mounting first.
+- 2026-10-29: step 3 done. The notices the loop tells are a `Tell`:
+  `TellText`, `TellTool NAME INPUT` (before each `ActTool`),
+  `TellResult NAME FAILED TEXT` (as each result is taken), and
+  `TellError` (before `ActDone error` and `ActDone rounds`); step 6
+  turns them into the protocol's notices. The round limit counts
+  rounds of tools whose results are in: after the 32nd the turn stops
+  with the results kept, so the conversation stays whole. An answer
+  stopped for `max_tokens` (or any reason but `tool_use`) keeps only
+  its texts, as a tool use without its result would break the next
+  request. Beyond the plan: `loop_cancel`, for step 6's `stop`, which
+  answers each tool still awaited as failed, `stopped`; and the
+  stand-in's run ends `script_ended` if the loop asks more often than
+  the script answers. The stand-in's table of results is by the
+  use's id.

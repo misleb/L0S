@@ -1,0 +1,241 @@
+; loop_test.l0 -- the loop, driven by loop_standin against a script of
+; answers and a table of tools' results.
+
+; ---------------------------------------------------------------- fixtures
+
+(def b ((s (list int))) bytes (bytes_from_list s))
+
+; Where the model is, as a test has it.
+(def conf () ModelConf (ModelConf "10.0.2.2" 8765 "m" 100 "tok"))
+
+; A loop with a system prompt, one tool and nothing said yet.
+(def loop0 () Loop
+  (loop_new (conf) (conv_system "base" (b "rules"))
+    (conv_tools (cons (json_obj (cons (json_field "name" (json_str "read_file")) (nil JField))) (nil Json)))
+    (conv_new)))
+
+; An answer of the text t.
+(def says ((t (list int))) (list ModelEvent)
+  (cons (MText 0 (b t)) (cons (MBlockStop 0) (cons (MStop (b "end_turn")) (nil ModelEvent)))))
+
+; The events of a tool's use at index i, its input in the pieces given.
+(def use_at ((i int) (id (list int)) (name (list int)) (pieces (list (list int)))) (list ModelEvent)
+  (cons (MToolStart i (b id) (b name)) (append (inputs i pieces) (cons (MBlockStop i) (nil ModelEvent)))))
+
+(def inputs ((i int) (pieces (list (list int)))) (list ModelEvent)
+  (if (is_empty pieces) (nil ModelEvent) (cons (MToolInput i (b (head pieces))) (inputs i (tail pieces)))))
+
+; An answer that uses one tool, read_file of path p.
+(def reads ((id (list int)) (p (list int))) (list ModelEvent)
+  (append (use_at 0 id "read_file" (cons (append "{\"path\":\"" (append p "\"}")) (nil (list int))))
+          (cons (MStop (b "tool_use")) (nil ModelEvent))))
+
+; A table of results.
+(def table ((ids (list (list int))) (texts (list (list int))) (failed bool)) (Map bytes ToolAnswer)
+  (if (is_empty ids)
+      ((MapEmpty bytes ToolAnswer))
+      (map_put (table (tail ids) (tail texts) failed) (b (head ids)) (ToolAnswer (b (head texts)) failed))))
+
+(def no_tools () (Map bytes ToolAnswer) ((MapEmpty bytes ToolAnswer)))
+
+; A notice as text.
+(def tell_text ((t Tell)) (list int)
+  (match t
+    ((TellText s) (append "text " (bytes_to_list s)))
+    ((TellTool n v) (append "tool " (append (bytes_to_list n) (append " " (bytes_to_list (json_bytes v))))))
+    ((TellResult n f s) (append "result " (append (bytes_to_list n) (append (if f " failed " " ok ") (bytes_to_list s)))))
+    ((TellError s) (append "error " (bytes_to_list s)))))
+
+(def tells_text ((ts (list Tell))) (list int)
+  (join_with "|" (tells_list ts)))
+
+(def tells_list ((ts (list Tell))) (list (list int))
+  (if (is_empty ts) (nil (list int)) (cons (tell_text (head ts)) (tells_list (tail ts)))))
+
+; A run's notices, requests and reason.
+(def told ((s Standin)) (list int) (match s ((Standin rs ts why) (tells_text ts))))
+(def asked ((s Standin)) int (match s ((Standin rs ts why) (length rs))))
+(def ended ((s Standin)) (list int) (match s ((Standin rs ts why) (bytes_to_list why))))
+
+; Request n's body, as JSON.
+(def body_of ((s Standin) (n int)) Json
+  (match s
+    ((Standin rs ts why)
+      (let r (nth rs n)
+        (let at (add (body_start r 0) 4)
+          (match (json_whole r at (bytes_len r))
+            ((Ok v) v)
+            ((Err w) (JStr (b w)))))))))
+
+; Where a request's head ends: its blank line.
+(def body_start ((r bytes) (i int)) int
+  (if (ge (add i 4) (bytes_len r))
+      (bytes_len r)
+      (if (bytes_is_at r i "\r\n\r\n") i (body_start r (add i 1)))))
+
+; The last message of request n, as JSON text.
+(def last_message ((s Standin) (n int)) (list int)
+  (match (json_get (body_of s n) "messages")
+    ((None) "none")
+    ((Some ms) (bytes_to_list (json_bytes (last (json_items ms)))))))
+
+; ------------------------------------------------------------------- tests
+
+(def test_plain_answer () int
+  (let s (loop_standin (loop0) (b "hi") (cons (says "Hello.") (nil (list ModelEvent))) (no_tools))
+    (add (check_str "told" (told s) "text Hello.")
+         (add (check_int "asked" (asked s) 1) (check_str "reason" (ended s) "end_turn")))))
+
+; The first request: the person's text, marked for the cache, and the
+; system prompt and tools as given.
+(def test_first_request () int
+  (let s (loop_standin (loop0) (b "hi") (cons (says "Hello.") (nil (list ModelEvent))) (no_tools))
+    (add (check_str "message" (last_message s 0)
+           "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\",\"cache_control\":{\"type\":\"ephemeral\"}}]}")
+         (check_str "model" (match (json_get (body_of s 0) "model") ((Some v) (bytes_to_list (json_bytes v))) ((None) "none")) "\"m\""))))
+
+(def test_one_tool () int
+  (let s (loop_standin (loop0) (b "read a")
+           (cons (reads "t1" "a") (cons (says "Done.") (nil (list ModelEvent))))
+           (table (cons "t1" (nil (list int))) (cons "AAA" (nil (list int))) false))
+    (add (check_str "told" (told s) "tool read_file {\"path\":\"a\"}|result read_file ok AAA|text Done.")
+         (add (check_int "asked" (asked s) 2) (check_str "reason" (ended s) "end_turn")))))
+
+; The second request ends with the result, answering the use's id.
+(def test_result_sent () int
+  (let s (loop_standin (loop0) (b "read a")
+           (cons (reads "t1" "a") (cons (says "Done.") (nil (list ModelEvent))))
+           (table (cons "t1" (nil (list int))) (cons "AAA" (nil (list int))) false))
+    (check_str "message" (last_message s 1)
+      "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"AAA\",\"cache_control\":{\"type\":\"ephemeral\"}}]}")))
+
+; The model's turn is kept, its text and its use.
+(def test_model_turn_kept () int
+  (let s (loop_standin (loop0) (b "read a")
+           (cons (cons (MText 0 (b "Reading.")) (cons (MBlockStop 0) (reads1 "t1" "a"))) (cons (says "Done.") (nil (list ModelEvent))))
+           (table (cons "t1" (nil (list int))) (cons "AAA" (nil (list int))) false))
+    (match (json_get (body_of s 1) "messages")
+      ((None) (fail_because "messages" "none"))
+      ((Some ms) (check_str "turn" (bytes_to_list (json_bytes (nth (json_items ms) 1)))
+        "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Reading.\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"read_file\",\"input\":{\"path\":\"a\"}}]}")))))
+
+; reads, its block at index 1.
+(def reads1 ((id (list int)) (p (list int))) (list ModelEvent)
+  (append (use_at 1 id "read_file" (cons (append "{\"path\":\"" (append p "\"}")) (nil (list int))))
+          (cons (MStop (b "tool_use")) (nil ModelEvent))))
+
+; Two tools in one answer: each run, and the results sent in order.
+(def test_two_tools () int
+  (let s (loop_standin (loop0) (b "read a and b")
+           (cons (append (use_at 0 "t1" "read_file" (cons "{\"path\":\"a\"}" (nil (list int))))
+                         (append (use_at 1 "t2" "read_file" (cons "{\"path\":\"b\"}" (nil (list int))))
+                                 (cons (MStop (b "tool_use")) (nil ModelEvent))))
+                 (cons (says "Both.") (nil (list ModelEvent))))
+           (table (split_spaces "t1 t2") (split_spaces "A B") false))
+    (add (check_str "told" (told s) "tool read_file {\"path\":\"a\"}|tool read_file {\"path\":\"b\"}|result read_file ok A|result read_file ok B|text Both.")
+         (check_str "results" (last_message s 1)
+           "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"A\"},{\"type\":\"tool_result\",\"tool_use_id\":\"t2\",\"content\":\"B\",\"cache_control\":{\"type\":\"ephemeral\"}}]}"))))
+
+; The input in pieces cut inside a string, joined before it is read.
+(def test_input_in_pieces () int
+  (let s (loop_standin (loop0) (b "read")
+           (cons (append (use_at 0 "t1" "read_file" (cons "{\"pa" (cons "th\":\"a b" (cons "c\"}" (nil (list int))))))
+                         (cons (MStop (b "tool_use")) (nil ModelEvent)))
+                 (cons (says "Ok.") (nil (list ModelEvent))))
+           (table (cons "t1" (nil (list int))) (cons "X" (nil (list int))) false))
+    (check_str "told" (told s) "tool read_file {\"path\":\"a bc\"}|result read_file ok X|text Ok.")))
+
+; Two rounds of tools, then an answer: three requests.
+(def test_rounds_then_end () int
+  (let s (loop_standin (loop0) (b "go")
+           (cons (reads "t1" "a") (cons (reads "t2" "b") (cons (says "End.") (nil (list ModelEvent)))))
+           (table (split_spaces "t1 t2") (split_spaces "A B") false))
+    (add (check_int "asked" (asked s) 3)
+         (add (check_str "reason" (ended s) "end_turn")
+              (check_true "second result" (starts_with (last_message s 2) "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t2\""))))))
+
+; A script that asks for tools forever stops after the round limit.
+(def test_round_limit () int
+  (let s (loop_standin (loop0) (b "go") (forever 40) (no_tools))
+    (add (check_int "asked" (asked s) (loop_rounds_max))
+         (add (check_str "reason" (ended s) "rounds")
+              (check_true "said so" (ends_with (told s) "error stopped after 32 rounds of tools in one turn"))))))
+
+; n answers each using a tool.
+(def forever ((n int)) (list (list ModelEvent))
+  (if (eq n 0) (nil (list ModelEvent)) (cons (reads (append "t" (digits n)) "a") (forever (sub n 1)))))
+
+(def test_error_event () int
+  (let s (loop_standin (loop0) (b "hi")
+           (cons (cons (MText 0 (b "Hel")) (cons (MError (b "overloaded_error") (b "Overloaded")) (nil ModelEvent))) (nil (list ModelEvent)))
+           (no_tools))
+    (add (check_str "told" (told s) "text Hel|error Overloaded")
+         (check_str "reason" (ended s) "error"))))
+
+; A failed result is told as failed and sent with is_error.
+(def test_failed_result () int
+  (let s (loop_standin (loop0) (b "read")
+           (cons (reads "t1" "nope") (cons (says "Gone.") (nil (list ModelEvent))))
+           (table (cons "t1" (nil (list int))) (cons "no such file" (nil (list int))) true))
+    (add (check_str "told" (told s) "tool read_file {\"path\":\"nope\"}|result read_file failed no such file|text Gone.")
+         (check_str "sent" (last_message s 1)
+           "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"no such file\",\"is_error\":true,\"cache_control\":{\"type\":\"ephemeral\"}}]}"))))
+
+; An input that is not JSON is answered as failed, not run: the table
+; has no t1, which running it would have told as no such tool.
+(def test_bad_input_not_run () int
+  (let s (loop_standin (loop0) (b "read")
+           (cons (append (use_at 0 "t1" "read_file" (cons "{\"path\":" (nil (list int)))) (cons (MStop (b "tool_use")) (nil ModelEvent)))
+                 (cons (says "Hm.") (nil (list ModelEvent))))
+           (no_tools))
+    (add (check_true "told failed" (starts_with (told s) "tool read_file {}|result read_file failed its input is not JSON"))
+         (check_int "asked again" (asked s) 2))))
+
+; Cut off: done, max_tokens.
+(def test_max_tokens () int
+  (let s (loop_standin (loop0) (b "hi")
+           (cons (cons (MText 0 (b "Long")) (cons (MStop (b "max_tokens")) (nil ModelEvent))) (nil (list ModelEvent)))
+           (no_tools))
+    (add (check_str "told" (told s) "text Long") (check_str "reason" (ended s) "max_tokens"))))
+
+; A script shorter than the loop's requests.
+(def test_script_ended () int
+  (let s (loop_standin (loop0) (b "go") (cons (reads "t1" "a") (nil (list ModelEvent))) (no_tools))
+    (add (check_str "reason" (ended s) "script_ended") (check_int "asked" (asked s) 2))))
+
+; ------------------------------------------------------ the loop itself
+
+; Events while no answer is coming do nothing.
+(def test_idle_events () int
+  (match (loop_event (loop0) (MText 0 (b "x")))
+    ((Looped l acts) (add (check_int "acts" (length acts) 0) (check_bool "busy" (loop_busy l) false)))))
+
+; Stopped while a tool runs: the use answered as failed, so the next
+; request is whole, and done, stopped.
+(def test_cancel () int
+  (match (loop_say (loop0) (b "read"))
+    ((Looped l1 a1)
+      (match (feed l1 (reads "t1" "a"))
+        ((Looped l2 a2)
+          (match (loop_cancel l2)
+            ((Looped l3 a3)
+              (add (check_bool "busy before" (loop_busy l2) true)
+                   (add (check_bool "busy after" (loop_busy l3) false)
+                        (check_str "last" (bytes_to_list (json_bytes (last (json_items (conv_messages (loop_conv l3))))))
+                          "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"stopped\",\"is_error\":true,\"cache_control\":{\"type\":\"ephemeral\"}}]}"))))))))))
+
+(def feed ((l Loop) (es (list ModelEvent))) Looped (standin_feed l es (nil Act)))
+
+; The usage events keep the counts in the conversation.
+(def test_usage_kept () int
+  (match (loop_say (loop0) (b "hi"))
+    ((Looped l1 a1)
+      (match (feed l1 (cons (MUsage 5 1 100 200) (cons (MUsage -1 9 -1 -1) (says "x"))))
+        ((Looped l2 a2) (check_int "prompt" (usage_prompt (conv_usage (loop_conv l2))) 305))))))
+
+; A say asks once, with the request's bytes.
+(def test_say_asks () int
+  (match (loop_say (loop0) (b "hi"))
+    ((Looped l acts)
+      (add (check_int "acts" (length acts) 1)
+           (check_bool "busy" (loop_busy l) true)))))

@@ -1,0 +1,384 @@
+; loop.l0 -- agentd's loop, pure: the person says something, the model
+; is asked, its answer is built from the streamed ModelEvents, each tool
+; it used is run and its result taken, and the model is asked again
+; with the results, until it is done. Each step gives the loop after it
+; and its acts: a request to send (ActAsk), a notice to tell (ActTell),
+; a tool to run (ActTool), or the turn done (ActDone REASON). Nothing
+; here sends, runs or reads: agentd does each act, and loop_standin does
+; them against a script, for the tests.
+;
+; Reasons a turn is done: end_turn and stop_sequence (the answer is
+; over), max_tokens (cut off), error (an error event, told first),
+; rounds (loop_rounds_max rounds of tools in one turn, told first),
+; stopped (loop_cancel), or any other reason the API gives.
+
+; What the person is told: a piece of the answer's text; a tool used,
+; its name and input; its result, its name, whether it failed, and its
+; text; an error, why.
+(data Tell (TellText bytes) (TellTool bytes Json) (TellResult bytes bool bytes) (TellError bytes))
+
+; What the loop asks of agentd: a request of the model to send, its
+; bytes (model_request's); a notice to tell; a tool to run, its use's
+; id, name and input; or the turn done, and why.
+(data Act (ActAsk bytes) (ActTell Tell) (ActTool bytes bytes Json) (ActDone bytes))
+
+; A block of the answer as it is built, by its index: a text, its
+; pieces reversed; a tool's use, its id, name and its input's pieces
+; reversed; a block ended; or a tool's use whose input is not a JSON
+; object, its id, name and why.
+(data Part (PText int (list bytes)) (PTool int bytes bytes (list bytes)) (PDone int Block) (PBad int bytes bytes (list int)))
+
+; A tool the answer used, its id and name, and its result once it has
+; come.
+(data Use (Use bytes bytes (Option Block)))
+
+; The loop: where the model is; the system prompt and the tools, as
+; JSON; the conversation; the answer's parts, newest first; the tools
+; it used, in order; the rounds of tools in this turn; and whether an
+; answer is coming.
+(data Loop (Loop ModelConf Json Json Conv (list Part) (list Use) int bool))
+
+; A step's result: the loop after it, and its acts in order.
+(data Looped (Looped Loop (list Act)))
+
+; The most rounds of tools in one turn.
+(def loop_rounds_max () int 32)
+
+; A loop on conversation c, asking the model c names with system and
+; tools, waiting for the person.
+(def loop_new ((mc ModelConf) (system Json) (tools Json) (c Conv)) Loop
+  (Loop mc system tools c (nil Part) (nil Use) 0 false))
+
+; l's conversation.
+(def loop_conv ((l Loop) ) Conv
+  (match l ((Loop mc sy tl c ps us n on) c)))
+
+; Whether l is in a turn: an answer coming, or tools' results awaited.
+(def loop_busy ((l Loop)) bool
+  (match l ((Loop mc sy tl c ps us n on) (if on true (not (is_empty us))))))
+
+; The request asking the model of l's conversation so far.
+(def loop_request ((l Loop)) bytes
+  (match l ((Loop mc sy tl c ps us n on) (model_request mc sy (conv_messages c) tl))))
+
+; l with c its conversation, as when compaction replaces it.
+(def loop_with_conv ((l Loop) (c Conv)) Loop
+  (match l ((Loop mc sy tl c0 ps us n on) (Loop mc sy tl c ps us n on))))
+
+; The person says text: their turn added, and the model asked.
+(def loop_say ((l Loop) (text bytes)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (loop_ask (Loop mc sy tl (conv_add c (Turn true (cons (BText text) (nil Block)))) (nil Part) (nil Use) 0 true)
+                (nil Act)))))
+
+; l asking the model, after acts.
+(def loop_ask ((l Loop) (acts (list Act))) Looped
+  (Looped l (append acts (cons (ActAsk (loop_request l)) (nil Act)))))
+
+; An event of the answer, read onto l; none while no answer is coming.
+(def loop_event ((l Loop) (e ModelEvent)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (if (not on)
+          (Looped l (nil Act))
+          (match e
+            ((MText i t)
+              (Looped (Loop mc sy tl c (parts_with ps i (PText i (nil bytes)) t) us n on)
+                      (if (eq (bytes_len t) 0) (nil Act) (cons (ActTell (TellText t)) (nil Act)))))
+            ((MToolStart i id name) (Looped (Loop mc sy tl c (cons (PTool i id name (nil bytes)) ps) us n on) (nil Act)))
+            ((MToolInput i pj) (Looped (Loop mc sy tl c (parts_with ps i (PTool i (id_none) (id_none) (nil bytes)) pj) us n on) (nil Act)))
+            ((MBlockStop i) (Looped (Loop mc sy tl c (parts_done ps i) us n on) (nil Act)))
+            ((MUsage a o w r) (Looped (Loop mc sy tl (conv_spent c a o w r) ps us n on) (nil Act)))
+            ((MError kind msg) (loop_failed l (if (eq (bytes_len msg) 0) kind msg)))
+            ((MStop reason) (loop_stopped l reason)))))))
+
+; Nothing, for a part made before its start was heard.
+(def id_none () bytes (bytes_from_list (nil int)))
+
+; The answer failed: told why, and done; what had come of it dropped.
+(def loop_failed ((l Loop) (why bytes)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (Looped (Loop mc sy tl c (nil Part) (nil Use) n false)
+              (cons (ActTell (TellError why)) (cons (ActDone (bytes_from_list "error")) (nil Act)))))))
+
+; ------------------------------------------------------------- the parts
+
+; Which block a part is.
+(def part_index ((p Part)) int
+  (match p ((PText i ts) i) ((PTool i id n ps) i) ((PDone i b) i) ((PBad i id n why) i)))
+
+; ps with piece added to part i, or fresh with it, newest, if there is
+; no part i.
+(def parts_with ((ps (list Part)) (i int) (fresh Part) (piece bytes)) (list Part)
+  (if (is_empty ps)
+      (cons (part_piece fresh piece) ps)
+      (if (eq (part_index (head ps)) i)
+          (cons (part_piece (head ps) piece) (tail ps))
+          (cons (head ps) (parts_with (tail ps) i fresh piece)))))
+
+; A text's or a tool's input's next piece; an ended part as it was.
+(def part_piece ((p Part) (piece bytes)) Part
+  (match p
+    ((PText i ts) (PText i (cons piece ts)))
+    ((PTool i id n ps) (PTool i id n (cons piece ps)))
+    ((PDone i b) p)
+    ((PBad i id n why) p)))
+
+; ps with part i ended.
+(def parts_done ((ps (list Part)) (i int)) (list Part)
+  (if (is_empty ps)
+      ps
+      (if (eq (part_index (head ps)) i)
+          (cons (part_done (head ps)) (tail ps))
+          (cons (head ps) (parts_done (tail ps) i)))))
+
+; A part ended: a text joined; a tool's input joined and read as JSON,
+; none being {}.
+(def part_done ((p Part)) Part
+  (match p
+    ((PText i ts) (PDone i (BText (bytes_concat (rev ts)))))
+    ((PTool i id n ps) (tool_done i id n (bytes_concat (rev ps))))
+    ((PDone i b) p)
+    ((PBad i id n why) p)))
+
+; A tool's use ended, its input b: a JSON object, or bad.
+(def tool_done ((i int) (id bytes) (n bytes) (b bytes)) Part
+  (if (eq (bytes_len b) 0)
+      (PDone i (BToolUse id n (json_obj (nil JField))))
+      (match (json_whole b 0 (bytes_len b))
+        ((Err why) (PBad i id n (append "its input is not JSON: " why)))
+        ((Ok v) (if (is_object v) (PDone i (BToolUse id n v)) (PBad i id n "its input is not a JSON object"))))))
+
+; Whether v is an object.
+(def is_object ((v Json)) bool
+  (match v
+    ((JObj fs) true)
+    ((JNull) false) ((JBool b) false) ((JInt k) false) ((JNum t) false) ((JStr s) false) ((JArr xs) false)))
+
+; The block a part gives the model's turn: a bad tool's use as one of
+; input {}, which its failed result answers.
+(def part_block ((p Part)) Block
+  (match (part_done p)
+    ((PDone i b) b)
+    ((PBad i id n why) (BToolUse id n (json_obj (nil JField))))
+    ((PText i ts) (BText (bytes_concat (rev ts))))
+    ((PTool i id n ps) (BToolUse id n (json_obj (nil JField))))))
+
+; The answer's blocks, oldest first, from its parts, newest first.
+(def parts_blocks ((ps (list Part)) (acc (list Block))) (list Block)
+  (if (is_empty ps) acc (parts_blocks (tail ps) (cons (part_block (head ps)) acc))))
+
+; Only the texts of bs.
+(def texts_only ((bs (list Block)) (acc (list Block))) (list Block)
+  (if (is_empty bs)
+      (rev acc)
+      (texts_only (tail bs)
+        (match (head bs)
+          ((BText t) (cons (head bs) acc))
+          ((BToolUse id n v) acc)
+          ((BToolResult id t f) acc)))))
+
+; --------------------------------------------------------------- stopping
+
+; The answer stopped for reason. tool_use: its turn kept, and each tool
+; it used run, or answered at once as failed if its input was bad; any
+; other reason: its texts kept, and the turn done.
+(def loop_stopped ((l Loop) (reason bytes)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (let blocks (parts_blocks ps (nil Block))
+        (if (if (eq reason (bytes_from_list "tool_use")) (has_use blocks) false)
+            (let ended (ended_parts ps (nil Part))
+              (loop_tools (Loop mc sy tl (conv_add c (Turn false blocks)) (nil Part) (uses_of ended (nil Use)) n false)
+                          (tool_acts ended (nil Act))))
+            (Looped (Loop mc sy tl (conv_add c (Turn false (texts_only blocks (nil Block)))) (nil Part) (nil Use) n false)
+                    (cons (ActDone reason) (nil Act))))))))
+
+; Whether any of bs is a tool's use.
+(def has_use ((bs (list Block))) bool
+  (if (is_empty bs)
+      false
+      (match (head bs)
+        ((BToolUse id n v) true)
+        ((BText t) (has_use (tail bs)))
+        ((BToolResult id t f) (has_use (tail bs))))))
+
+; ps, newest first, each ended, onto acc: oldest first.
+(def ended_parts ((ps (list Part)) (acc (list Part))) (list Part)
+  (if (is_empty ps) acc (ended_parts (tail ps) (cons (part_done (head ps)) acc))))
+
+; The uses among parts, oldest first, a bad one with its failed result.
+(def uses_of ((parts (list Part)) (acc (list Use))) (list Use)
+  (if (is_empty parts)
+      (rev acc)
+      (uses_of (tail parts)
+        (match (head parts)
+          ((PDone i b)
+            (match b
+              ((BToolUse id n v) (cons (Use id n ((None Block))) acc))
+              ((BText t) acc)
+              ((BToolResult id t f) acc)))
+          ((PBad i id n why) (cons (Use id n (Some (BToolResult id (bytes_from_list why) true))) acc))
+          ((PText i ts) acc)
+          ((PTool i id n ps) acc)))))
+
+; The acts the uses among parts call for, onto acc: each tool told and
+; run; a bad one told and its failure told.
+(def tool_acts ((parts (list Part)) (acc (list Act))) (list Act)
+  (if (is_empty parts)
+      (rev acc)
+      (tool_acts (tail parts)
+        (match (head parts)
+          ((PDone i b)
+            (match b
+              ((BToolUse id n v) (cons (ActTool id n v) (cons (ActTell (TellTool n v)) acc)))
+              ((BText t) acc)
+              ((BToolResult id t f) acc)))
+          ((PBad i id n why)
+            (cons (ActTell (TellResult n true (bytes_from_list why)))
+                  (cons (ActTell (TellTool n (json_obj (nil JField)))) acc)))
+          ((PText i ts) acc)
+          ((PTool i id n ps) acc)))))
+
+; l with its tools started by acts: asking again at once if every result
+; is in already, as when every input was bad.
+(def loop_tools ((l Loop) (acts (list Act))) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (if (all_in us) (loop_round l acts) (Looped l acts)))))
+
+; Whether every use has its result.
+(def all_in ((us (list Use))) bool
+  (if (is_empty us)
+      true
+      (match (head us)
+        ((Use id n r) (match r ((Some b) (all_in (tail us))) ((None) false))))))
+
+; The tool whose use is id gave text, failed or not: told, and once every
+; result is in, the round over.
+(def loop_result ((l Loop) (id bytes) (text bytes) (failed bool)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (let name (use_name us id)
+        (if (is_empty name)
+            (Looped l (nil Act))
+            (loop_tools (Loop mc sy tl c ps (uses_given us id (BToolResult id text failed)) n on)
+                        (cons (ActTell (TellResult (bytes_from_list name) failed text)) (nil Act))))))))
+
+; The name of the use id awaiting its result, or empty if none is.
+(def use_name ((us (list Use)) (id bytes)) (list int)
+  (if (is_empty us)
+      (nil int)
+      (match (head us)
+        ((Use i n r)
+          (if (eq i id)
+              (match r ((Some b) (nil int)) ((None) (bytes_to_list n)))
+              (use_name (tail us) id))))))
+
+; us with use id's result b.
+(def uses_given ((us (list Use)) (id bytes) (b Block)) (list Use)
+  (if (is_empty us)
+      us
+      (match (head us)
+        ((Use i n r)
+          (if (eq i id)
+              (cons (Use i n (Some b)) (tail us))
+              (cons (head us) (uses_given (tail us) id b)))))))
+
+; The results of us, in order.
+(def results_of ((us (list Use)) (acc (list Block))) (list Block)
+  (if (is_empty us)
+      (rev acc)
+      (match (head us)
+        ((Use i n r) (results_of (tail us) (match r ((Some b) (cons b acc)) ((None) acc)))))))
+
+; Every result in: they are the person's turn, and the model is asked
+; again; or, after loop_rounds_max rounds, the turn stops, saying so.
+(def loop_round ((l Loop) (acts (list Act))) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (let c2 (conv_add c (Turn true (results_of us (nil Block))))
+        (if (ge (add n 1) (loop_rounds_max))
+            (Looped (Loop mc sy tl c2 (nil Part) (nil Use) (add n 1) false)
+                    (append acts (cons (ActTell (TellError (bytes_from_list (rounds_text))))
+                                       (cons (ActDone (bytes_from_list "rounds")) (nil Act)))))
+            (loop_ask (Loop mc sy tl c2 (nil Part) (nil Use) (add n 1) true) acts))))))
+
+; What is told when the rounds run out.
+(def rounds_text () (list int)
+  (append "stopped after " (append (digits (loop_rounds_max)) " rounds of tools in one turn")))
+
+; The turn stopped by the person: what had come of the answer dropped,
+; each tool still awaited answered as failed, so the conversation stays
+; whole, and done, stopped.
+(def loop_cancel ((l Loop)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on)
+      (let c2 (conv_add c (Turn true (results_of (uses_stopped us (nil Use)) (nil Block))))
+        (Looped (Loop mc sy tl c2 (nil Part) (nil Use) n false)
+                (cons (ActDone (bytes_from_list "stopped")) (nil Act)))))))
+
+; us, each awaited one given a failed result: stopped.
+(def uses_stopped ((us (list Use)) (acc (list Use))) (list Use)
+  (if (is_empty us)
+      (rev acc)
+      (match (head us)
+        ((Use i n r)
+          (uses_stopped (tail us)
+            (cons (match r
+                    ((Some b) (head us))
+                    ((None) (Use i n (Some (BToolResult i (bytes_from_list "stopped") true)))))
+                  acc))))))
+
+; ------------------------------------------------------------ the stand-in
+
+; A tool's result in the stand-in's table: its text, and whether it
+; failed.
+(data ToolAnswer (ToolAnswer bytes bool))
+
+; What a stand-in run gave: the requests sent, in order, the notices
+; told, and why it ended (the turn's reason, or script_ended if the loop
+; asked once more than the script answers, or idle if it waited on
+; nothing).
+(data Standin (Standin (list bytes) (list Tell) bytes))
+
+; The person says text to l, and the loop is driven to its end against
+; a stand-in model: script, an answer per request, each its events; and
+; tools, each tool's result by its use's id (a use not there failing,
+; no such tool).
+(def loop_standin ((l Loop) (text bytes) (script (list (list ModelEvent))) (tools (Map bytes ToolAnswer))) Standin
+  (match (loop_say l text)
+    ((Looped l2 acts) (standin_run l2 acts script tools (nil bytes) (nil Tell)))))
+
+; The acts done in order, each one's own acts after the rest.
+(def standin_run ((l Loop) (acts (list Act)) (script (list (list ModelEvent))) (tools (Map bytes ToolAnswer)) (reqs (list bytes)) (tells (list Tell))) Standin
+  (if (is_empty acts)
+      (Standin (rev reqs) (rev tells) (bytes_from_list "idle"))
+      (match (head acts)
+        ((ActDone r) (Standin (rev reqs) (rev tells) r))
+        ((ActTell t) (standin_run l (tail acts) script tools reqs (cons t tells)))
+        ((ActAsk r)
+          (if (is_empty script)
+              (Standin (rev (cons r reqs)) (rev tells) (bytes_from_list "script_ended"))
+              (match (standin_feed l (head script) (nil Act))
+                ((Looped l2 more) (standin_run l2 (append (tail acts) more) (tail script) tools (cons r reqs) tells)))))
+        ((ActTool id n v)
+          (match (standin_tool tools id)
+            ((ToolAnswer text failed)
+              (match (loop_result l id text failed)
+                ((Looped l2 more) (standin_run l2 (append (tail acts) more) script tools reqs tells)))))))))
+
+; The events es read onto l, their acts onto acc.
+(def standin_feed ((l Loop) (es (list ModelEvent)) (acc (list Act))) Looped
+  (if (is_empty es)
+      (Looped l acc)
+      (match (loop_event l (head es))
+        ((Looped l2 more) (standin_feed l2 (tail es) (append acc more))))))
+
+; The table's result for the use id.
+(def standin_tool ((tools (Map bytes ToolAnswer)) (id bytes)) ToolAnswer
+  (match (map_get tools id)
+    ((Some a) a)
+    ((None) (ToolAnswer (bytes_from_list "no such tool") true))))
