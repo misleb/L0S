@@ -242,7 +242,12 @@ names are the ones to watch: a program that declares its own `Done`,
 `NotDone`, `Some`, or `Ok` can no longer match what `file_close`, `map_get`,
 or a `Result` returns. Spec sections 7 and 7.1.
 
-## The one performance rule
+## Two performance traps
+
+Both give correct results and pass every small test, and are seen only as a
+program that slows to a crawl on real input.
+
+### Quadratic output
 
 **Build output as a reversed accumulator and reverse once at the end.**
 
@@ -262,6 +267,51 @@ passes every small test and then appears to hang on real input.
 short strings such as diagnostics. Nested pushes run innermost first:
 `(push "b" (push "a" acc))` adds `"a"`, then `"b"`, so write the nest with the
 first chunk deepest, or use a chain of `let`s as above.
+
+### The hidden whole copy
+
+**Read a map or array before you update it, never after.** `map_put`,
+`map_remove`, and `array_set` change their map or array in place only when
+nothing else still holds it; otherwise they copy it whole first (spec section
+6.5), so that every other holder sees the old one. A loop of such updates is
+then quadratic in the size of the map, with the same results: a program
+mapping 100,000 pages this way did not finish in an hour. Anything used
+after the update holds it, including a use you cannot see as a second name.
+The two shapes that bite:
+
+- **A read of the map in a later operand of the update's own expression.**
+  The put runs first and the read still needs the old map, so the put
+  copies it:
+
+```
+(Seen (map_put m k true) (if (map_has m k) n (add n 1)))   ; copies m every time
+
+(let fresh (not (map_has m k))                             ; right: read, then put
+  (Seen (map_put m k true) (if fresh (add n 1) n)))
+```
+
+- **A value used after a call that updates a map or array inside it.**
+  `space_put` puts into the map held in a `Space`; `s` is used again after
+  the call, so the call's update copies that map:
+
+```
+(let t (space_put s page frame)                            ; copies s's pages
+  (Mapped t (digits (space_number s))))
+
+(let id (space_number s)                                   ; right: read s first
+  (Mapped (space_put s page frame) (digits id)))
+```
+
+A read inside the update's own call is fine: an operand that is the
+variable itself, as `m` is to `map_put`, is taken after that call's other
+operands, so `(map_put m k (add 1 (map_size m)))` updates in place. So is a
+read in a `let` value before the update. What copies is a read that comes
+after it: in a later operand of an enclosing call, or in the body after the
+`let` that made the update. `L0_ARRAY_STATS=1` on a
+run reports on standard error how many updates copied, and maps count there
+too, since a map is arrays; any copy in a loop is this trap. `examples.l0`'s
+`see_key` and `map_logged` are both fixes, written out, and the sections on
+maps and arrays below list the other ways an array is held.
 
 ## Keep nesting shallow, or you will miscount parentheses
 
@@ -491,7 +541,8 @@ returns the map with `k` mapped to `v`, `(map_get m k)` an `Option`, and
 `map_has`, `map_remove`, `map_size`, `map_keys`, and `map_values` the rest.
 Any type can be a key. Like an array, a map changes in place while nothing
 else holds it and is copied whole when something does, so thread one map
-through a loop and keep no other name for the old one. `map_keys` lists in
+through a loop, keep no other name for the old one, and read it before
+updating it, never after (the hidden whole copy, above). `map_keys` lists in
 the table's order, the same on every run but not the order of insertion.
 See `word_counts`, `repeated_words`, and `distinct_count`, a map at a type
 parameter used as a set, in `l0 examples`.
@@ -519,7 +570,8 @@ fine. What copies, silently, with correct results:
 - **a read after an update in the same expression.** In `(array_set
   (array_set h 0 (array_get h k)) 1 (array_get h (add k 1)))` the second
   `array_get` still needs `h` when the inner `array_set` runs, so it copies
-  all of `h`, every time. Bind the reads first:
+  all of `h`, every time (the hidden whole copy, above). Bind the reads
+  first:
 
 ```
 (let a (array_get h k)

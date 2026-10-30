@@ -66,7 +66,7 @@ parses the `.l0` files into graphify's graph, so:
   with `--graph`, as `l0s-dev` shows, and grep for what the branch
   changed.
 
-<!-- l0 init: begin 4208957054-14874; l0 init replaces what is between these lines -->
+<!-- l0 init: begin 2710873271-15743; l0 init replaces what is between these lines -->
 # Working with L0 in this project
 
 L0 is a statically typed language compiled to native code through LLVM.
@@ -109,10 +109,10 @@ sort.
 **Read the examples before writing anything substantial.** `l0 examples
 --path` names two files: working programs covering recursion, strings, data
 types, `match`, returning several values, reporting failure, type
-parameters, maps and hashing, reading and writing, files and telling their
-failures apart, replacing and deleting files, reading in pieces, arrays and
-grids, bytes, bits, floats, ordering and sorting, timing, and driving a device,
-and tests of them.
+parameters, maps and hashing, updating a map without copying it, reading
+and writing, files and telling their failures apart, replacing and
+deleting files, reading in pieces, arrays and grids, bytes, bits, floats,
+ordering and sorting, timing, and driving a device, and tests of them.
 
 Everything these commands show comes from the installed toolchain, so it
 always describes the compiler that builds this project. Nothing of it is
@@ -264,7 +264,10 @@ system calls the spec's section 10.3 fixes. The kernel decides what the
 program gets: files, arguments, and devices, or none. The image is a
 static ELF, which section 10.3 lists: its code, rodata, and data are
 segments a kernel maps from 0xC0000000, each with its own permissions,
-and its heap starts at the page after them. A kernel written in L0 can
+and its heap starts at the page after them. What a kernel shares with a
+process it maps from 0xE8000000 up to 0x100000000, or, for more than
+that 384 MB, in the high user range, 128 GB from 0x2000000000 to
+0x4000000000, which no image, heap, or stack uses. A kernel written in L0 can
 take its processes' images from its own standard input, in a layout of
 its choosing, read their headers as bytes, and be booted with them by
 `l0 boot`. No kernel comes with the toolchain. Such a program also makes
@@ -310,17 +313,27 @@ were; values of any type can be compared, ordered, hashed, and sorted; and
 `float_sin` and `float_cos` in the library. A network, the environment, listing or
 creating directories do not exist yet. Floating point does, as `float`.
 
-## Two traps specific to L0
+## Three traps specific to L0
 
 **Quadratic output.** Building output by appending is quadratic; it passes
 every small test and then appears to hang on real input. Accumulate with
 `push` onto a reversed list and call `rev` exactly once at the end.
+
+**The hidden whole copy.** `map_put`, `map_remove`, and `array_set` update
+in place only when nothing else still holds the map or array, and otherwise
+copy it whole, with the same results, so a loop of them turns quadratic
+unseen. Two shapes do it with no second name in sight: reading the map in a
+later operand of the expression that updates it, as in `(Seen (map_put m k
+true) (if (map_has m k) ...))`, and using a value after a call that updates
+a map inside it, as in `(let t (space_put s ...) (... (space_number s)))`.
+Read first, with `let`, and update last; `L0_ARRAY_STATS=1` on a run counts
+the copies.
 
 **Deep nesting and parentheses.** Long `if` and `or` chains end in a dozen
 closing parens and are the most common source of parse errors. Use
 `split_spaces` with `any_eq` for membership tests, and split any function
 nesting more than about four levels deep.
 
-The `l0-code` skill covers both in detail, along with the syntax that differs
-from what other languages would lead you to expect.
+The `l0-code` skill covers all three in detail, along with the syntax that
+differs from what other languages would lead you to expect.
 <!-- l0 init: end -->
