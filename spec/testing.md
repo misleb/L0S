@@ -27,6 +27,9 @@ Each case of `tests/e2e/` is a directory:
 - `stderr`, a line standard error must hold;
 - `typed`, keys to type at the serial line;
 - `font`, if the console font is to be added to `etc`, for `vt`;
+- `filler`, `DIRS FILES`: that many directories of that many small
+  files each added to `etc`, as `/etc/filler/dD/fF`, for a volume filled
+  from the case's initramfs to hold many files besides its programs;
 - `disk`, if the board is to have a virtio-blk, a fresh disk from
   `tools/mkdisk` for each run;
 - `layout`, that disk's, if not mkdisk's own: SECTORS, then each volume
@@ -153,6 +156,13 @@ Ctrl-C as a person would:
   it, lists `/` and `/Volumes`, writes in `/etc` and reads that back, from
   `/` and from `/Volumes/System`, makes a directory in `/`, reads
   `/etc/system`, is refused a `format` of `/`, and runs `hello` from it;
+- `rootboot_full` boots from a System that holds 24,000 other files
+  besides its programs (`filler`, 600 directories of 40), on which a walk
+  of the whole volume takes about 2 s: the shell starts `nap 10000` in
+  the background, then runs, cats, lists, copies a program out of the
+  program directories and runs it from there, and is told of programs
+  and commands there are not, twenty commands in all, every one of them
+  answered before `nap`'s 10 s are up, as a walk for each would not be;
 - `rootboot_missing` boots with `root=` a UUID no partition has: `boot`
   says so and starts the initramfs's system, which still refuses a
   `write`;
