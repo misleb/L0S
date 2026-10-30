@@ -49,6 +49,7 @@ move independently, so several can be active at once.
 | [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | idea | – | 0043 | agent.md, programs.md, desktop.md, testing.md |
 | [0050](0050-hvs-crowded-lines.md) `hvs` at 4K: crowded lines and a whole-screen flash | Display | idea | – | 0038 | display.md |
 | [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
+| [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 
 ## Ready
 
