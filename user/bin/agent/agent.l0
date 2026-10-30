@@ -1,0 +1,140 @@
+; agent.l0 -- talks to the agent, agentd, at a console:
+;
+;   agent        a conversation: > , a line said, the answer written as
+;                it comes, then > again; Ctrl-C while it answers stops
+;                it; the input's end, or a line /exit, ends it
+;
+; The answer's text is written as it is; each tool it runs as [NAME
+; INPUT] on a line of its own, and its result [ok] or [failed: FIRST
+; LINE]; a compaction as [compacted]; an error as agent: WHY. With no
+; agentd running it says so and fails. Its notices, its terminal's lines
+; and Ctrl-C all come to one port, told apart by who sent them.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "agent" why))
+
+; The prompt.
+(def prompt () (list int) "> ")
+
+; ----------------------------------------------------------- the notices
+
+; What a notice comes to on the console: what to write, whether the
+; console is then at the start of a line, and whether the turn is done.
+(data Shown (Shown bytes bool bool))
+
+; A newline if the console is not at a line's start, else nothing.
+(def line_break ((at_start bool)) (list int) (if at_start "" "\n"))
+
+; The event e shown, the console at the start of a line or not.
+(def shown ((e AgentEvent) (at_start bool)) Shown
+  (match e
+    ((AgentText id t)
+      (let n (bytes_len t)
+        (Shown t (if (eq n 0) at_start (eq (bytes_get t (sub n 1)) 10)) false)))
+    ((AgentTool id name input)
+      (shown_line at_start (append "[" (append name (append " " (append (bytes_to_list input) "]"))))))
+    ((AgentResult id name failed t)
+      (shown_line at_start (if failed (append "[failed: " (append (first_line t) "]")) "[ok]")))
+    ((AgentCompacted id before after) (shown_line at_start "[compacted]"))
+    ((AgentError id why) (shown_line at_start (append "agent: " (bytes_to_list why))))
+    ((AgentDone id reason) (Shown (bytes_from_list (line_break at_start)) true true))
+    ((AgentNone) (Shown (bytes_from_list "") at_start false))))
+
+; A line of its own, after a newline if the console is not at a line's
+; start.
+(def shown_line ((at_start bool) (line (list int))) Shown
+  (Shown (bytes_from_list (append (line_break at_start) (append line "\n"))) true false))
+
+; The first line of b, without its newline.
+(def first_line ((b bytes)) (list int)
+  (take_line (bytes_to_list (bytes_slice b 0 (agent_line_end b 0)))))
+
+; What a line typed means: the end of the conversation (input's end, or
+; /exit); nothing to say (a blank line); or a text to say.
+(data Typed (TypedEnd) (TypedBlank) (TypedSay (list int)))
+
+; The line typed, with its newline, or empty at the input's end.
+(def typed_of ((line (list int))) Typed
+  (if (is_empty line)
+      (TypedEnd)
+      (let t (trim (take_line line))
+        (if (eq t "/exit") (TypedEnd) (if (is_empty t) (TypedBlank) (TypedSay (take_line line)))))))
+
+; s without spaces at either end.
+(def trim ((s (list int))) (list int) (rev (trim_front (rev (trim_front s)))))
+
+; s without spaces at its front.
+(def trim_front ((s (list int))) (list int)
+  (if (is_empty s) s (if (eq (head s) 32) (trim_front (tail s)) s)))
+
+; ------------------------------------------------------------- talking
+
+; The entry point: a conversation opened and held until it ends.
+(def agent () int
+  (let rp (port_new)
+    (if (lt rp 0)
+        (complain "no kernel to talk to the agent through")
+        (let np (port_new)
+          (match (terminal_port)
+            ((None) (complain "no terminal to talk on"))
+            ((Some term)
+              (match (agent_open rp np)
+                ((Err why) (complain why))
+                ((Ok c)
+                  (let i (port_send term (request np "i"))
+                    (talk c term np))))))))))
+
+; The terminal: this process's, or the console driver's.
+(def terminal_port () (Option int)
+  (match (tty_get)
+    ((Terminal p) (Some p))
+    ((KernelTerminal) (match (console_port) ((Found p) (Some p)) ((NotFound) ((None int)))))))
+
+; > written, and a line read from term, to np: then said, and the answer
+; shown; until the input ends or /exit, when the conversation is closed.
+(def talk ((c AgentConv) (term int) (np int)) int
+  (let p (say (prompt))
+    (match (port_send term (request np "r"))
+      ((Sent) (await_line c term np))
+      ((SendNoPort) (closing c))
+      ((SendFull) (closing c))
+      ((SendTooBig) (closing c)))))
+
+; The line asked for, waited for on np: a Ctrl-C drops what was typed,
+; and > is written again, the request still standing; a notice is
+; passed over.
+(def await_line ((c AgentConv) (term int) (np int)) int
+  (match (port_receive np)
+    ((RecvFailed) (closing c))
+    ((Message from b)
+      (if (eq from (agent_conv_pid c))
+          (await_line c term np)
+          (if (msg_is b (cons 3 (nil int)))
+              (let p (say (prompt)) (await_line c term np))
+              (match (typed_of (msg_text b))
+                ((TypedEnd) (closing c))
+                ((TypedBlank) (talk c term np))
+                ((TypedSay text)
+                  (let why (agent_say c text)
+                    (if (is_empty why)
+                        (answering c term np true)
+                        (let w (say (append "agent: " (append why "\n"))) (talk c term np)))))))))))
+
+; The answer's notices shown as they come, until it is done; a Ctrl-C
+; stops it; at_start, whether the console is at a line's start.
+(def answering ((c AgentConv) (term int) (np int) (at_start bool)) int
+  (match (port_receive np)
+    ((RecvFailed) (closing c))
+    ((Message from b)
+      (if (eq from (agent_conv_pid c))
+          (match (shown (agent_event_of b) at_start)
+            ((Shown out start2 done)
+              (let w (say_bytes out 0 (bytes_len out))
+                (if done (talk c term np) (answering c term np start2)))))
+          (if (msg_is b (cons 3 (nil int)))
+              (let s (agent_stop c) (answering c term np at_start))
+              (answering c term np at_start))))))
+
+; The conversation closed, and 0.
+(def closing ((c AgentConv)) int
+  (let w (agent_close c) 0))

@@ -181,7 +181,7 @@ What it is, as decided with the user:
   configuration read, the entry point's 1 under `l0 test` (no kernel).
   `demo/etc/system` and `pi5/etc/system` start `/sbin/agentd` last;
   demo.md's pids and table of who talks to whom.
-- [ ] **`agent`, at the console.** `user/bin/agent`: `run agent` opens
+- [x] **`agent`, at the console.** `user/bin/agent`: `run agent` opens
   a conversation, writes `> ` and reads a line, says it, and writes the
   notices as they come until `done`: text as it is, a tool as `[NAME
   INPUT]` on a line of its own, its result `[ok]` or `[failed: FIRST
@@ -338,3 +338,14 @@ What it is, as decided with the user:
   port). A notice to a full queue is retried each millisecond for 2 s.
   The system prompt names the board by its CPU, as nothing tells QEMU's
   board from a Pi 5. Not on the board yet: steps 7 and 8.
+- 2026-10-29: step 7 done. A terminal tells one port of Ctrl-C, the
+  last to ask (`i`), so `agent` asks in the shell's place, and the
+  shell now asks again at each prompt, taking Ctrl-C back from any
+  program that took it. `agent`'s notices, its terminal's lines and
+  Ctrl-C come to one port, told apart by the sender (`agentd`'s pid,
+  from `open`'s answer), and its requests' answers to another, so an
+  answer is never mistaken for a notice. It waits 15 s for `agent` to
+  register, as `agentd` may still be waiting for its volume. `/bin/agent`
+  joins the listings of the `shell`, `fs` and `install` cases and the
+  counts of `install`, `install_boot` and `rootboot_tmpfs`. On the
+  board from step 8's case.
