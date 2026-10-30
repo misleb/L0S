@@ -15,11 +15,14 @@
 #      as the client's move request asks, and run windows says where;
 #      a double click there maximizes it, and another restores it; and
 #      drags from inside its right edge, its bottom left corner and its
-#      bottom resize it, as the client's edges request asks
+#      bottom resize it, as the client's edges request asks; and with no
+#      button down, run windows names the resize pointer inside those
+#      edges, as the client's cursor request asks, and the arrow inside
 #   4. the toggle to the list: its header's line
 #   5. a right click on the file, Rename..., a new name typed, Enter:
 #      ls /Volumes/data at the serial shell lists it so
-#   6. the menu button's New Folder..., a name, Enter: the folder made
+#   6. the menu button's New Folder..., the I-beam over its entry, a
+#      name, Enter: the folder made
 #   7. Delete, and the dialog's Delete: the new folder, selected as it
 #      was made, gone
 #   8. Volumes, scratch selected, F2, notes, Enter: ls /Volumes lists
@@ -158,6 +161,24 @@ no_window() {
   until [ $SECONDS -ge $end ]; do
     said 'run windows' | grep -aqE '^(l0s> )?[0-9]+ Files ' || return 0
     sleep 0.2
+  done
+  return 1
+}
+
+# Whether the pointer moved to x, y comes to show the pointer named $3,
+# "" for the arrow, as run windows's last line, pointer X Y [NAME], says,
+# within 15 tries; p_name is what it said last.
+pointer_is() {
+  local try from line
+  events "$(at "$1" "$2")"; sleep 1
+  for try in $(seq 1 15); do
+    from=$(($(wc -c < "$out") + 1))
+    printf 'run windows\n' >&3
+    sleep 1
+    line=$(tail -c +$from "$out" | grep -aE '^pointer ' | head -1)
+    p_name=""
+    read -r _ _ _ p_name <<< "$line"
+    [ -n "$line" ] && [ "$p_name" = "$3" ] && return 0
   done
   return 1
 }
@@ -323,6 +344,17 @@ window_at "$((cx + 60)) $cy $cw $ch" || fail "a drag inside the bottom edge left
 echo "ok - files: a drag inside its bottom edge put its height back"
 cx=$((cx + 60))
 
+# With no button down, the pointer shows those edges before any press,
+# as the client asks wm with cursor: inside the right edge, 2 in, across;
+# inside the bottom left corner, up the other diagonal; and inside the
+# window, away from its edges and any entry, the arrow.
+pointer_is $((cx + cw - 2)) $((cy + 300)) ew-resize || fail "inside the right edge the pointer was '$p_name', not ew-resize; it showed:"
+echo "ok - files: inside its right edge, the pointer across"
+pointer_is $((cx + 2)) $((cy + ch - 15)) nesw-resize || fail "inside the bottom left corner the pointer was '$p_name', not nesw-resize; it showed:"
+echo "ok - files: inside its bottom left corner, the diagonal pointer"
+pointer_is $((cx + 400)) $((cy + 300)) "" || fail "inside the window the pointer was '$p_name', not the arrow; it showed:"
+echo "ok - files: inside it, the arrow"
+
 click $((cx + 787)) $((cy + 22))
 shows "the list, its header's line" "$((cx + 400)) $((cy + 77)) $line" "$((cx + 400)) $((cy + 120)) $view"
 
@@ -338,6 +370,10 @@ echo "ok - files: Rename... renamed the file"
 # from 714, under the button, from 43: New Folder... its first row.
 menu $((cx + 827)) $((cy + 22)) $((cx + 750)) $((cy + 64))
 dialog
+# The dialog's entry, 291 by 34 from 317, 245 of the window (its layout
+# by ui_alert_form at 880 by 560): the I-beam over its middle.
+pointer_is $((cx + 460)) $((cy + 262)) text || fail "over the dialog's entry the pointer was '$p_name', not text; it showed:"
+echo "ok - files: over an entry, the I-beam"
 keys d o c s ret
 said_holds 'ls /Volumes/data' "docs" || fail "New Folder... made no folder; it showed:"
 echo "ok - files: New Folder... made a folder"

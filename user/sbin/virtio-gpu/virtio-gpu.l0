@@ -16,8 +16,10 @@
 ;   rows a layer that moved, scrolled or changed covers, and compares
 ;   only those with what they were to find what to show again.
 ; - A damaged rectangle is a transfer and a flush of just that part.
-; - The pointer is the device's own cursor, resource 2, a 64 by 64 image
-;   moved on the cursor queue.
+; - The pointer is the device's own cursor, a 64 by 64 image moved on the
+;   cursor queue. Each buffer cursor names is made a resource of its own
+;   the first time and kept, a cursor set, so showing one again is a
+;   single UPDATE_CURSOR.
 ;
 ; The screen is the mode the device offers, in its own pixels. On a large
 ; one, 2560 by 1440 or more, info says the scale is 2, so the compositor
@@ -44,8 +46,12 @@
 (def format_b8g8r8a8 () int 1)           ; b, g, r, then alpha: the cursor's
 (def format_b8g8r8x8 () int 2)           ; b, g, r, then unused: the screen's
 (def screen_res () int 1)
-(def cursor_res () int 2)
 (def cursor_size () int 64)
+
+; The cursors' resources, one a buffer cursor has named: from 4 up, 12 of
+; them, below the textures 3D mode makes from 16 (compose.l0's buffer_res).
+(def cursor_first_res () int 4)
+(def cursor_slots () int 12)
 
 ; virtio_gpu_ctrl_hdr: type, flags, fence_id, ctx_id, ring_idx and padding.
 (def header ((type int)) (list int)
@@ -90,12 +96,12 @@
   (append (header (cmd_resource_detach_backing)) (append (u32_le id) (u32_le 0))))
 
 ; virtio_gpu_update_cursor: the header, the position (scanout, x, y), the
-; cursor's resource, and its hot spot. Moving it takes the same, the
+; cursor's resource res, and its hot spot. Moving it takes the same, the
 ; resource and hot spot unread.
-(def cursor_cmd ((type int) (x int) (y int) (hx int) (hy int)) (list int)
+(def cursor_cmd ((type int) (x int) (y int) (res int) (hx int) (hy int)) (list int)
   (append (header type)
     (append (u32_le 0) (append (u32_le x) (append (u32_le y) (append (u32_le 0)
-      (append (u32_le (cursor_res)) (append (u32_le hx) (append (u32_le hy) (u32_le 0))))))))))
+      (append (u32_le res) (append (u32_le hx) (append (u32_le hy) (u32_le 0))))))))))
 
 ; Every page whose device address is in addrs, as the fewest runs.
 (def pages_runs ((addrs (array int))) (list VirtqRun)
@@ -883,7 +889,7 @@
 (def scanned_out ((g Gpu) (zero int) (w int) (h int)) int
   (match (settled_cmd (send_now g "set_scanout" (set_scanout w h) (resp_ok_nodata)))
     ((NotCommanded why) (complain why))
-    ((Commanded g2) (start_serving (Drv g2 w h ((MapEmpty int Buffer)) (nil Layer) true (Cursor false 0 0 0 0 -1) zero (no_rows))))))
+    ((Commanded g2) (start_serving (Drv g2 w h ((MapEmpty int Buffer)) (nil Layer) true (cursor_none) zero (no_rows))))))
 
 ; The screen's first frame, as soon as its mode is set: the wallpaper,
 ; stacked alone, if there is one; else black. Then display served on
@@ -982,9 +988,13 @@
                             (Served (Drv g2 w h (map_remove bufs (wall_id)) layers attached cur zero rows) reply))))))))
               r))))))
 
-; The pointer: whether its image is set, where it is, its hot spot, and
-; the buffer its image is, -1 for none.
-(data Cursor (Cursor bool int int int int int))
+; The pointer: whether its image is set, where it is, its hot spot, the
+; buffer its image is, -1 for none, and the cursor set: the resource made
+; of each buffer cursor has named.
+(data Cursor (Cursor bool int int int int int (Map int int)))
+
+; No pointer yet, and no cursor made.
+(def cursor_none () Cursor (Cursor false 0 0 0 0 -1 ((MapEmpty int int))))
 
 ; The driver: the queues, the screen's width and height, the buffers
 ; shared with it, the layers, whether the screen has a backing, the
@@ -1096,15 +1106,18 @@
 
 ; buffer ID W H VA [PAGES [STRIDE]]: the w by h pixels a client shared,
 ; at va here, in the pages it shared, which may be more than they take,
-; its rows sd pixels apart.
+; its rows sd pixels apart. Refused for a buffer the cursor set has made
+; a cursor of, until it is forgotten.
 (def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
+  (if (drv_cursor_made v id)
+      (served_error v (cursor_kept_why id))
   (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
       (served_error v "a buffer has no pixels, or its stride is less than its width")
       (if (not (buffer_id_ok id))
           (served_error v "a buffer's id is from 0 to 1000000")
           (match (page_addresses va (buffer_shared_pages sd bh pages))
             ((None) (served_error v "the buffer is not shared with the display"))
-            ((Some addrs) (put_buffer v id (Buffer bw bh sd addrs va (square))))))))
+            ((Some addrs) (put_buffer v id (Buffer bw bh sd addrs va (square)))))))))
 
 ; Whether a buffer of bufs other than id is at va: another view of the
 ; same pages, as a buffer remade at another size is while the old one
@@ -1155,13 +1168,16 @@
         ((Some b)
           (if (if (in_layers layers id) true (eq (cursor_buffer cur) id))
               (served_error v (append "buffer " (append (digits id) " is in use")))
-              (match b
-                ((Buffer bw bh sd addrs va cs)
-                  (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
-                    (served_ok (Drv g w h (map_remove bufs id) layers attached cur zero rows)))))))))))
+              (match (cursor_unmade g cur id)
+                ((NotCommanded why) (served_error v why))
+                ((Commanded g2)
+                  (match b
+                    ((Buffer bw bh sd addrs va cs)
+                      (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
+                        (served_ok (Drv g2 w h (map_remove bufs id) layers attached (cursor_without cur id) zero rows)))))))))))))
 
 (def cursor_buffer ((cur Cursor)) int
-  (match cur ((Cursor set px py hx hy id) id)))
+  (match cur ((Cursor set px py hx hy id made) id)))
 
 ; layers ID X Y TOP ...: the screen rebuilt from new layers, the
 ; wallpaper under them until one covers the screen, when it leaves.
@@ -1242,9 +1258,10 @@
 
 ; ---------------------------------------------------------------- pointer
 
-; cursor ID HX HY: the pointer's image, 64 by 64, as resource 2, which
-; the cursor queue's update names only once the control queue has the
-; image: the two queues are not answered in any order of each other's.
+; cursor ID HX HY: the pointer's image, 64 by 64: the cursor set's
+; resource of the buffer, made the first time it is named, which the
+; cursor queue's update names only once the control queue has the image:
+; the two queues are not answered in any order of each other's.
 (def pointer_image ((v Drv) (id int) (hx int) (hy int)) (Served Drv)
   (match v
     ((Drv g w h bufs layers attached cur zero rows)
@@ -1255,35 +1272,89 @@
             ((Buffer bw bh sd addrs va cs)
               (if (not (if (eq bw (cursor_size)) (eq bh (cursor_size)) false))
                   (served_error v "a cursor is 64 by 64")
-                  (cursor_resource v cur id addrs hx hy)))))))))
+                  (match (cursor_made cur id)
+                    ((Some res) (cursor_shown v id res hx hy))
+                    ((None) (cursor_resource v cur id addrs hx hy)))))))))))
 
+; Buffer id made a cursor of the set: a resource of its own, backed by
+; its pages and filled from them, and the control queue drained, then
+; shown.
 (def cursor_resource ((v Drv) (cur Cursor) (id int) (addrs (array int)) (hx int) (hy int)) (Served Drv)
-  (match cur
-    ((Cursor set px py ohx ohy oid)
-      (match v
-        ((Drv g w h bufs layers attached old zero rows)
-          (match (if set (send g "detach_backing" (detach_backing (cursor_res)) (resp_ok_nodata))
-                         (send g "resource_create_2d" (resource_create_2d (cursor_res) (format_b8g8r8a8) (cursor_size) (cursor_size)) (resp_ok_nodata)))
-            ((NotCommanded why) (served_error v why))
-            ((Commanded g2)
-              (match (send g2 "attach_backing" (attach_backing (cursor_res) (pages_runs addrs)) (resp_ok_nodata))
-                ((NotCommanded why) (served_error v why))
-                ((Commanded g3)
-                  (match (send g3 "transfer_to_host_2d"
-                               (transfer_to_host_2d_at (cursor_res) 0 0 (cursor_size) (cursor_size) 0) (resp_ok_nodata))
-                    ((NotCommanded why) (served_error v why))
-                    ((Commanded g4)
-                      (match (gpu_drained g4)
-                        ((None) (served_error v (gpu_port_gone)))
-                        ((Some g5)
-                          (served_ok (Drv (cursor_send g5 (cursor_cmd (cmd_update_cursor) px py hx hy))
-                                          w h bufs layers attached (Cursor true px py hx hy id) zero rows)))))))))))))))
+  (let res (match cur ((Cursor set px py ohx ohy oid made) (cursor_free_res made (cursor_first_res))))
+    (if (lt res 0)
+        (served_error v "the cursor set is full: forget a cursor's buffer first")
+        (match v
+          ((Drv g w h bufs layers attached old zero rows)
+            (match (send g "resource_create_2d" (resource_create_2d res (format_b8g8r8a8) (cursor_size) (cursor_size)) (resp_ok_nodata))
+              ((NotCommanded why) (served_error v why))
+              ((Commanded g2)
+                (match (send g2 "attach_backing" (attach_backing res (pages_runs addrs)) (resp_ok_nodata))
+                  ((NotCommanded why) (served_error v why))
+                  ((Commanded g3)
+                    (match (send g3 "transfer_to_host_2d"
+                                 (transfer_to_host_2d_at res 0 0 (cursor_size) (cursor_size) 0) (resp_ok_nodata))
+                      ((NotCommanded why) (served_error v why))
+                      ((Commanded g4)
+                        (match (gpu_drained g4)
+                          ((None) (served_error v (gpu_port_gone)))
+                          ((Some g5) (cursor_shown (Drv g5 w h bufs layers attached cur zero rows) id res hx hy))))))))))))))
+
+; The pointer's image made res, the cursor set's resource of buffer id,
+; with its hot spot: one UPDATE_CURSOR, and nothing on the control queue.
+(def cursor_shown ((v Drv) (id int) (res int) (hx int) (hy int)) (Served Drv)
+  (match v
+    ((Drv g w h bufs layers attached cur zero rows)
+      (match cur
+        ((Cursor set px py ohx ohy oid made)
+          (served_ok (Drv (cursor_send g (cursor_cmd (cmd_update_cursor) px py res hx hy))
+                       w h bufs layers attached (Cursor true px py hx hy id (map_put made id res)) zero rows)))))))
+
+; The resource the cursor set has made of buffer id, if it has made one.
+(def cursor_made ((cur Cursor) (id int)) (Option int)
+  (match cur ((Cursor set px py hx hy cid made) (map_get made id))))
+
+; The resource the pointer shows, 0 for none.
+(def cursor_res_of ((cur Cursor)) int
+  (match cur ((Cursor set px py hx hy id made) (match (map_get made id) ((Some r) r) ((None) 0)))))
+
+; The first of the cursors' resources from res on that made does not
+; use, or -1 if it uses all cursor_slots of them.
+(def cursor_free_res ((made (Map int int)) (res int)) int
+  (if (ge res (add (cursor_first_res) (cursor_slots)))
+      -1
+      (if (any_eq res (map_values made)) (cursor_free_res made (add res 1)) res)))
+
+; cur with buffer id out of its set.
+(def cursor_without ((cur Cursor) (id int)) Cursor
+  (match cur ((Cursor set px py hx hy cid made) (Cursor set px py hx hy cid (map_remove made id)))))
+
+; The cursor set's resource of buffer id, if it has one, given up: its
+; backing detached, and unreferenced.
+(def cursor_unmade ((g Gpu) (cur Cursor) (id int)) Commanded
+  (match (cursor_made cur id)
+    ((None) (Commanded g))
+    ((Some res)
+      (match (send g "detach_backing" (detach_backing res) (resp_ok_nodata))
+        ((NotCommanded why) (NotCommanded why))
+        ((Commanded g2) (send g2 "resource_unref" (resource_unref res) (resp_ok_nodata)))))))
+
+; Whether buffer id is one the cursor set has made a cursor of, which
+; buffer does not give again until it is forgotten, since the set keeps
+; the pixels it read.
+(def drv_cursor_made ((v Drv) (id int)) bool
+  (match v
+    ((Drv g w h bufs layers attached cur zero rows)
+      (match (cursor_made cur id) ((Some r) true) ((None) false)))))
+
+; Why buffer id is not given again: it is a cursor's.
+(def cursor_kept_why ((id int)) (list int)
+  (append "buffer " (append (digits id) " is a cursor's: forget it first")))
 
 ; move X Y: the pointer there.
 (def moved ((v Drv) (x int) (y int)) (Served Drv)
   (match v
     ((Drv g w h bufs layers attached cur zero rows)
       (match cur
-        ((Cursor set px py hx hy id)
-          (served_ok (Drv (if set (cursor_send g (cursor_cmd (cmd_move_cursor) x y hx hy)) g)
-                   w h bufs layers attached (Cursor set x y hx hy id) zero rows)))))))
+        ((Cursor set px py hx hy id made)
+          (served_ok (Drv (if set (cursor_send g (cursor_cmd (cmd_move_cursor) x y (cursor_res_of cur) hx hy)) g)
+                   w h bufs layers attached (Cursor set x y hx hy id made) zero rows)))))))

@@ -307,14 +307,19 @@ driver composes them.
   `vt`, which paints its terminal in a `UiDrawingArea` itself, rewraps
   its cells and paints the area whole before `ui_present`. The cost that matters is pages shared and
   given up, not pixels: keep resizes in place.
-- **The pointer's image** (`pointer_shaped`, `pointer_wanted`,
-  `resize_cursor`): buffer 1, painted again with `ui_paint_named_cursor`
-  and given with `display_cursor` and its hot spot (`ui_cursor_hot_x`) only
-  when it changes: `ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize`
-  over edges or while they are dragged, the arrow `""` elsewhere. `Ptr`
-  keeps its canvas and name; `windows` reports the name. A new pointer
-  needs its 1x art in `ui_cursor_art`, its hot spot, and its shapes as
-  `cursor NAME` in `fonts/cursors.paths`.
+- **The pointers** (`with_pointers`, `pointer_shaped`, `pointer_wanted`,
+  `resize_cursor`): `ui_cursor_names`, each painted once at start into
+  one region (`ui_paint_cursor_at`) and given as a buffer of its own
+  (`pointer_id`: the arrow 1, the rest from 100001), the display's cursor
+  set; switching is one `display_cursor` with its hot spot
+  (`ui_cursor_hot_x`), only when it changes: `ew-resize`, `ns-resize`,
+  `nwse-resize`, `nesw-resize` over edges or while they are dragged,
+  over a content what its client asked with `cursor ID NAME` (`Ptr`'s
+  map; the toolkit asks `text` over an entry and the resize pointer
+  inside a CSD edge, `ui_pointer_at`), the arrow `""` elsewhere;
+  `windows` reports the name. A new pointer needs its name in
+  `ui_cursor_names`, its 1x art in `ui_cursor_art`, its hot spot, and
+  its shapes as `cursor NAME` in `fonts/cursors.paths`.
 - **Layers**, bottom first (`layers ws shown`): the desktop; each window from the back,
   its chrome at `x, y`, its content at `x + edge, y + 46`; then the top
   bar over everything. While the launcher is shown: the desktop, the

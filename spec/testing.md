@@ -448,11 +448,14 @@ tablet through QMP, its right button too, and keys through the monitor:
   inside its edges, which ask `wm` to resize it by `edges`: its right
   side 60 right, 60 wider; its bottom left corner 60 right and 40 down,
   its left side moved and 40 taller; and its bottom 40 up, its height
-  back;
+  back; and with no button down, `windows` names the pointer the client
+  asked for with `cursor`: `ew-resize` inside its right edge,
+  `nesw-resize` inside its bottom left corner, the arrow inside;
 - the toggle to the list, its header's line;
 - a right click on the file, Rename..., a new name typed and Enter: `ls`
   at the serial shell lists the file so;
-- the menu button's New Folder..., a name and Enter: the folder made;
+- the menu button's New Folder..., the pointer over its entry, which
+  `windows` names `text`, the I-beam, a name and Enter: the folder made;
   Delete, and the dialog's Delete: it gone again;
 - Volumes, scratch selected, F2, `notes` and Enter: `ls /Volumes` lists
   `notes`, relabelled;

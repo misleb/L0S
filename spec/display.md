@@ -19,7 +19,7 @@ pixels, and draw the pointer as a top layer.
 | `layers ID X Y TOP ...` | the screen, bottom first: each buffer at X, Y, its rows read from row TOP on, as a ring. The bottom layer covers the screen. Only the bands of rows whose pixels changed are transferred and flushed; the first `layers` shows the whole screen |
 | `damage ID X Y W H ...` | each rectangle of its buffer changed, one or more groups of five: shown wherever they are visible, all together, with boxes that overlap transferred and flushed as one |
 | `shape ID TL TR BL BR` | the buffer's corners rounded, top left, top right, bottom left, bottom right, each radius from 0 (square) to half its width and height. virtio-gpu cannot blend, so it narrows the layer's rows within a corner, and `hvs` writes the alpha of the pixels there 0; either way the layer beneath shows there. A buffer is square when shared; if it is on the screen, the screen is rebuilt |
-| `cursor ID HX HY` | the pointer's image, a 64×64 buffer, and its hot spot |
+| `cursor ID HX HY` | the pointer's image, a 64×64 buffer, and its hot spot. The driver reads a buffer's pixels the first time `cursor` names it and keeps them, its **cursor set**, so naming it again switches the pointer for the cost of one command; a buffer of the set is not given again by `buffer` until it is forgotten, which gives up what the driver made of it |
 | `move X Y` | the pointer's hot spot at X, Y |
 | `frames PORT` | from now on, PORT told the display's notices: `frame N` after each frame that showed a change, N counting from 1, and `release ID` once buffer ID is no longer read, having left the stack |
 
@@ -84,7 +84,11 @@ so that the guest copies no pixels at all:
    list, with `DETACH_BACKING` then `ATTACH_BACKING`.
 2. **A hardware cursor**, on the cursor queue: `UPDATE_CURSOR` with a
    64×64 resource, then `MOVE_CURSOR` for each move. Moving the pointer
-   costs one small command and no screen update.
+   costs one small command and no screen update. The cursor set is a
+   resource for each buffer `cursor` has named, 4 to 15, so 12 at most,
+   made, backed and transferred the first time `cursor` names it; after that `cursor` is one
+   `UPDATE_CURSOR` and nothing on the control queue, and `forget`
+   detaches and unreferences it.
 3. **Damage-only updates**: a transfer and a flush of just the rectangle
    that changed.
 
@@ -309,9 +313,11 @@ Scaler (SCALER6), so no pixel is copied:
    the Pi's DMA does not see the CPU's caches. So `damage` only cleans the
    pages of the damaged rows, and `buffer` cleans all of a new buffer's.
 6. **The pointer is a plane on top** with its pixels' own alpha. A move
-   writes the list again. A new image, which `wm` paints into the same
-   buffer, has its pages cleaned when `cursor` names it; before, the HVS
-   showed it torn, old rows beside new, until the caches wrote back.
+   writes the list again, and so does `cursor`, which only points the
+   plane at another buffer: every buffer is already the cursor set
+   there. A buffer's pages are cleaned when `cursor` names it, as when
+   it is given; before, a pointer painted again into the same buffer
+   showed torn, old rows beside new, until the caches wrote back.
 
 7. **Rounded corners are alpha.** Cutting them a row at a time would
    cost a plane per row of each corner, and the HVS has 32 handles (see
@@ -460,6 +466,9 @@ of them could be confirmed from Linux's source:
   takes 10,500; more windows over pages apart could reach the limit, and
   the driver then says the screen is in too many pieces. Pages given
   together usually lie together, and their runs join.
+- **virtio-gpu's cursor set holds 12 cursors**; a thirteenth buffer
+  named by `cursor` is refused until one of them is forgotten. `wm`
+  makes six.
 - **Nothing is drawn by the GPU.** With virgl (the GL device) it copies
   the layers into the screen, and in 2D mode the host composes them
   from the clients' pages, but every pixel in them is painted by the
