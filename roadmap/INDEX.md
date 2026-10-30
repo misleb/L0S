@@ -44,9 +44,9 @@ move independently, so several can be active at once.
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | active | 6/8 | – | display.md, kernel.md, syscalls.md, desktop.md, toolkit.md, pi5.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
-| [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | idea | – | – | network.md, programs.md |
-| [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | idea | – | 0041 | network.md, testing.md |
-| [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | idea | – | 0042 | agent.md (new), programs.md, demo.md |
+| [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | ready | 0/6 | – | network.md, programs.md, testing.md |
+| [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | blocked | 0/5 | 0041 | network.md, programs.md, testing.md, pi5.md |
+| [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | blocked | 0/10 | 0042, 0051 | agent.md (new), programs.md, demo.md, testing.md |
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | idea | – | 0043 | agent.md, storage.md |
 | [0045](0045-agent-builder-mcp.md) The agent builds programs for itself, through an MCP server on the host | Agent | idea | – | 0043 | agent.md, programs.md, testing.md |
 | [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 | agent.md |
@@ -54,6 +54,8 @@ move independently, so several can be active at once.
 | [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
 | [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | idea | – | 0043 | agent.md, programs.md, desktop.md, testing.md |
 | [0050](0050-hvs-crowded-lines.md) `hvs` at 4K: lines crowded with planes still shown | Display | idea | – | 0038 | display.md |
+| [0051](0051-confined-process.md) A process confined to a directory, reaching no server | Kernel | ready | 0/5 | – | kernel.md, syscalls.md, storage.md, programs.md, testing.md |
+| [0052](0052-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
 
 ## Ready
 
@@ -61,6 +63,12 @@ move independently, so several can be active at once.
   too-wide screens shown, and window buffers in L0's 128 GB high user
   range, so none freezes; step 7 is the flicker as lists alternate
   while a big window is dragged off the bottom.
+- [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library,
+  with JSON and server-sent events: on the host first, starting with
+  `inet`'s writes from bytes, paced, so a body of any length goes.
+- [0051](0051-confined-process.md) A process confined to a directory,
+  reaching no server: the kernel's, for 0043's agent, built beside
+  0041 and 0042, starting with `spawn_confined`.
 
 ## Dependencies
 
@@ -81,6 +89,8 @@ graph LR
   0021 --> 0033
   0041[0041 HTTP, JSON, SSE] --> 0042[0042 API through a proxy]
   0042 --> 0043[0043 agentd]
+  0051[0051 confined process] --> 0043
+  0043 --> 0052[0052 agent on its own]
   0043 --> 0044[0044 agent's home]
   0043 --> 0045[0045 builder MCP]
   0045 --> 0046[0046 self-knowledge]
