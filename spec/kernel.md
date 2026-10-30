@@ -71,6 +71,36 @@ When the system stops, the kernel first takes back every thread still
 out, each at its trap or its slice's end (`many_halt`), so it leaves no
 thread running: the board tests boot it again and again in one program.
 
+### How the CPUs are used
+
+The kernel counts the CPUs' use (`kernel/usage.l0`, kept in `Cpus`),
+and `cpu_usage` (call 304) gives it, to `ps`, `uptime` and System
+Monitor:
+
+- **A process's CPU time**, by slot, from its start, and the CPU it last
+  ran on. A thread out on CPU 1 to 3 is counted from the later of its
+  hand-off and the return of the thread before it there (a CPU holds two,
+  one queued behind the other) to its trap, as CPU 0 takes it back. A
+  turn on CPU 0, or on one CPU a run from its pick to its park, is
+  counted whole, its calls included, with one look at the clock as it
+  ends, not one a trap. A thread's run in progress is counted once it
+  comes back, within its slice.
+- **Each CPU's busy time**: the sum of its threads' runs. CPU 0's is its
+  turns running processes; the kernel also counts the time CPU 0 waits,
+  in `cpu_wait` or `interrupt_wait`, so CPU 0's time neither waiting nor
+  running a process is the kernel's own: its passes, the calls it
+  answers for the other CPUs, and interrupts.
+- **The load averages** over 1, 5 and 15 minutes, as Unix keeps them:
+  every 5 s the threads ready or out on a CPU are counted (CPU 0 runs
+  nothing as it counts), and each average decays toward the count as
+  Linux's `calc_load` does, in fixed point of 11 bits, 2048 to 1.0. The
+  kernel's wait ends for each tick, so none is missed while anything
+  runs; ticks missed while nothing could run are caught up, 180 at most.
+
+`name_list` (call 305) lists the names registered, in order, each with
+its port and the pid owning it, a buffer's worth from the i-th, for
+`ps`'s SERVES, `names`, and System Monitor's Provides.
+
 **Nothing a process does can crash the kernel.** Every buffer, count,
 address, path and interrupt number is checked against the kernel's own
 records before it reaches a builtin that could raise a runtime error.
@@ -88,9 +118,10 @@ with random registers.
 | `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; which heap pages a release names; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; the code and rodata processes share, by their bytes' hash; which frames to free when a process ends |
 | `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
-| `kernel/ipc.l0` | ports, their message queues, each message numbered as it is queued, names, registered and let go, each process's set of ports to wait on and which of them holds the oldest message, and the mount table, whose volumes go with their ports |
+| `kernel/ipc.l0` | ports, their message queues, each message numbered as it is queued, names, registered, let go and listed, each process's set of ports to wait on and which of them holds the oldest message, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
-| `kernel/cpus.l0` | the other CPUs: which process each holds, with its slice's deadline, which CPU a process goes to next, a kill waiting for one to come back, and what `cpu_trapped` gives |
+| `kernel/cpus.l0` | the other CPUs: which process each holds, with its slice's deadline, which CPU a process goes to next, a kill waiting for one to come back, and what `cpu_trapped` gives; and `usage.l0`'s counts beside them |
+| `kernel/usage.l0` | how the CPUs are used: each process's CPU time, last CPU and start, each CPU's busy time, CPU 0's waiting, the load averages, and the records `cpu_usage` gives |
 | `kernel/pids.l0` | which slot of the process table, and which pid, a new process gets |
 | `kernel/syscall.l0` | a trapped context decoded into a `Call` |
 | `kernel/process.l0` | creating a process from its ELF's segments, sharing its code and rodata with processes whose are the same, demand-paging, heap pages released, copying in and out of, mapping devices and DMA pages into, and the open files of a process |

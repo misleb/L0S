@@ -250,30 +250,40 @@
   (let r (name_register_or_why port "inet")
     (if (is_empty r)
         (let n (info_as "inet" (stack_line s l))
-          (serve s port l))
+          (serve s port l 0))
         (complain r))))
 
 ; ---------------------------------------------------------------- serving
 
-; Each message on port: a frame from the driver, a client's request, or
-; the clock's notice; then what it made inet send, sent. While a TCP
-; connection is open its timers must be looked at, so inet then takes a
-; message if there is one, and otherwise looks at them and waits
-; tcp_poll_ns; with none, it waits for a message. l is the lease.
-(def serve ((s Stack) (port int) (l Lease)) int
-  (if (tcp_busy s)
-      (match (port_try_receive port)
-        ((RecvFailed) (let z (sleep_ns (tcp_poll_ns)) (serve (sent_out (tcp_ticked s (clock_ns))) port l)))
-        ((Message from b) (served_message s port l from b)))
+; Each message on port, waited for: a frame from the driver, a client's
+; request, the clock's notice, or the kernel's alarm; then what it made
+; inet send, sent. TCP's timers are looked at when the alarm rings,
+; which is set for the soonest of them (tcp_due) whenever that changes,
+; as usb-hid times a held key's repeats: an idle connection, whose
+; timer is off, wakes inet for nothing. armed is when the alarm is set
+; for, 0 for none; one that rings for a timer since put off or stopped
+; looks at them for nothing. l is the lease.
+(def serve ((s Stack) (port int) (l Lease) (armed int)) int
+  (let due (tcp_due s)
+    (let armed2 (if (alarm_wanted due armed) (let a (alarm_at port due) due) armed)
       (match (port_receive port)
         ((RecvFailed) (complain "lost its port"))
-        ((Message from b) (served_message s port l from b)))))
+        ((Message from b)
+          (if (is_alarm_notice (Message from b))
+              (serve (sent_out (tcp_ticked s (clock_ns))) port l 0)
+              (served_message s port l from b armed2)))))))
+
+; Whether the alarm, set for armed (0 for none), must be set for due,
+; the timers' soonest deadline (0 for none): when there is one, and the
+; alarm is not set for it already.
+(def alarm_wanted ((due int) (armed int)) bool
+  (if (eq due 0) false (not (eq due armed))))
 
 ; A message from pid from, its bytes b, dealt with, what it made inet
-; send sent, and the next one served.
-(def served_message ((s Stack) (port int) (l Lease) (from int) (b bytes)) int
+; send sent, and the next one served, the alarm set for armed.
+(def served_message ((s Stack) (port int) (l Lease) (from int) (b bytes) (armed int)) int
   (match (leased_message s l from b (clock_ns))
-    ((Leasing s2 l2) (serve (sent_out s2) port l2))))
+    ((Leasing s2 l2) (serve (sent_out s2) port l2 armed))))
 
 ; A message, its bytes b, at time now, with the lease l: the clock's
 ; notice moves the lease on; anything else is message's, and a lease

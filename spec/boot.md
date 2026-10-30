@@ -162,13 +162,18 @@ To make a system volume:
   and says its UUID for `root=`. It copies from the initramfs, or from
   another system volume, never onto the one `/` is.
 
-**With no disk, `/` can be a RAM file system.** `fs ram [MB]`, a second
-`fs` or the only one, serves no disk but one volume, `tmp`, in its own
-memory (32 MB unless given, at most 255), mounted at `/Volumes/tmp` with
-the UUID `00000000-0000-7000-8000-000000000000` and registered as
-`tmpfs`, not `fs`. It has no partition table, so `partition`, `erase`,
-`mkfs` and `rescan` are refused (-5), and nothing in it outlives it: a board
-that has a disk too still starts the disk's `fs` as before. A program can
+**With no disk, `/` can be a RAM file system.** `fs ram [MB]` serves
+one volume, `tmp`, in its own memory (32 MB unless given, at most 255),
+mounted at `/Volumes/tmp` with the UUID
+`00000000-0000-7000-8000-000000000000` from a port registered as
+`tmpfs`, before anything else; then, as `fs` alone does, it waits up to
+5 seconds for `disk0` and mounts the disks' volumes from a port
+registered as `fs`, which it registers though there be no disk, and
+serves both ports as one set: one process, on a board with a disk or
+none. Until the disks are mounted, `tmp`'s requests wait. `tmp` has no
+partition table, so `partition`, `erase` and `attach` of the disk `tmp`
+and `relabel` of its volume are refused (-5), `mkfs` and `rescan` pass it
+over, and nothing in it outlives `fs`. A program can
 use it as any volume, as the shell does (`cp /bin/hello /Volumes/tmp/bin`,
 `run /Volumes/tmp/bin/hello`). Booted with `root=tmpfs`, `boot` has
 `install tmp` copy the initramfs onto it, which takes the moments of its
@@ -181,9 +186,18 @@ or with the volume missing, `boot` says so and starts the initramfs's own
 initramfs's, started before the switch, and a program started after it
 never drives a device.
 
-Programs never ask where `/` is: `root_paths` lists it, `program_found`
-finds a program in it, and `spawn_path` starts one, from the initramfs's
+Programs never ask where `/` is: `root_paths` lists it, `program_paths`
+lists the directories a program can be in, `program_found` finds a
+program among those, and `spawn_path` starts one, from the initramfs's
 entry or a volume's file, as the shell, `init`, `wm`, `vt` and `boot` do.
+On a system volume `program_paths` lists `/bin`, `/sbin`,
+`/Applications` and each bundle in it, a level each, and nothing else,
+so the shell's `run`, its unknown words and `init` take as long on a
+volume full of other files as on one without; a program run by a path
+elsewhere is asked of the file server (`fs_stat`). The apps
+(`app_bundles`) are a listing of `/Applications`, and a file command
+asks only for what it names; the shell's `ls` with no path, which lists
+every file, and `install` are all that walk `/`.
 
 ## Limits
 
@@ -204,7 +218,8 @@ entry or a volume's file, as the shell, `init`, `wm`, `vt` and `boot` do.
   which lists everything, and a volume's its server's `list`, a message
   of entries at a time; `root_paths` lists `/` either way, a system
   volume a directory at a time, every directory of it, which takes the
-  longer the more the volume holds.
+  longer the more the volume holds: the shell's `ls` with no path and
+  `install` do, and nothing that looks for a program or an app.
 - **Booting from a volume needs the initramfs still.** The kernel comes
   from QEMU, and the drivers and `fs` from the initramfs, which are the
   only programs that may drive devices: a program started from a

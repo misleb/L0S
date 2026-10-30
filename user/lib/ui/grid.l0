@@ -6,7 +6,9 @@
 ; more rows than fit, the wheel scrolls them, three rows a step, and an
 ; overlay scrollbar says where those shown are; its slider can be
 ; dragged, and a press on its strip off the slider brings the slider
-; there, as GTK's does.
+; there, as GTK's does. When its columns are wider than it, the wheel
+; across scrolls them, and a scrollbar along its bottom does the same
+; across.
 ;
 ; Its actions are named from a prefix the program gives, as PREFIX.sort.N
 ; for column N's title, PREFIX.select.KEY for the row whose key is KEY,
@@ -37,16 +39,18 @@
 (data UiRow (UiRow (list int) (list UiCell)))
 
 ; Which column the rows are sorted by, -1 for none, and whether
-; descending; the selected row's key, "" for none; and the first row
-; shown, as scrolling and the keys left it; the layout shows it, or the
-; last that can be first if it is past that.
-(data UiGridState (UiGridState int bool (list int) int))
+; descending; the selected row's key, "" for none; the first row shown,
+; as scrolling and the keys left it; and how many pixels of its columns
+; are scrolled off to the left, as the wheel across left it. The layout
+; shows them, or the most that can be if they are past it.
+(data UiGridState (UiGridState int bool (list int) int int))
 
-; A grid's state at first: unsorted, nothing selected, from the first row.
-(def ui_grid_state_new () UiGridState (UiGridState -1 false "" 0))
+; A grid's state at first: unsorted, nothing selected, from the first row
+; and the first column's start.
+(def ui_grid_state_new () UiGridState (UiGridState -1 false "" 0 0))
 
 ; The selected row's key, "" for none.
-(def ui_gs_selected ((s UiGridState)) (list int) (match s ((UiGridState c d k f) k)))
+(def ui_gs_selected ((s UiGridState)) (list int) (match s ((UiGridState c d k f l) k)))
 
 ; A grid to show: its actions' prefix, its columns, its rows, and its
 ; state.
@@ -85,7 +89,7 @@
 ; column, ascending or descending.
 (def ui_grid_shown ((rows (list UiRow)) (s UiGridState)) (list UiRow)
   (match s
-    ((UiGridState col desc sel first)
+    ((UiGridState col desc sel first left)
       (if (lt col 0)
           rows
           (let sorted (ui_sort_unkeyed (sort (ui_sort_keyed rows col (nil UiSortRow))) (nil UiRow))
@@ -112,15 +116,25 @@
     (let sel_p (append prefix ".select.")
       (let to_p (append prefix ".scrollto.")
         (match s
-          ((UiGridState col desc sel first)
+          ((UiGridState col desc sel first left)
             (if (starts_with action sort_p)
                 (let n (int_prefix (drop_n action (length sort_p)) 0)
-                  (if (eq n col) (UiGridState col (not desc) sel first) (UiGridState n false sel first)))
+                  (if (eq n col) (UiGridState col (not desc) sel first left) (UiGridState n false sel first left)))
                 (if (starts_with action sel_p)
-                    (UiGridState col desc (drop_n action (length sel_p)) first)
+                    (UiGridState col desc (drop_n action (length sel_p)) first left)
                     (if (starts_with action to_p)
-                        (UiGridState col desc sel (int_prefix (drop_n action (length to_p)) 0))
-                        s)))))))))
+                        (UiGridState col desc sel (int_prefix (drop_n action (length to_p)) 0) left)
+                        (ui_grid_across s prefix action))))))))))
+
+; The grid's state after action, if it is NAME.acrossto.N, prefix its
+; NAME: scrolled N pixels across; else s.
+(def ui_grid_across ((s UiGridState) (prefix (list int)) (action (list int))) UiGridState
+  (let p (append prefix ".acrossto.")
+    (if (not (starts_with action p))
+        s
+        (match s
+          ((UiGridState col desc sel first left)
+            (UiGridState col desc sel first (int_prefix (drop_n action (length p)) 0)))))))
 
 ; Linux's codes for the keys that move the selection.
 (def ui_key_up () int 103)
@@ -143,12 +157,12 @@
           (match sc
             ((UiScroller at most vis)
               (match s
-                ((UiGridState col desc sel first)
+                ((UiGridState col desc sel first left)
                   (let j (ui_moved (ui_index_of_key shown sel 0) n code (max 1 (sub vis 1)))
                     (if (if (lt j 0) true (eq n 0))
                         s
                         (UiGridState col desc (ui_row_key (nth_or shown j (UiRow "" (nil UiCell))))
-                                     (if (gt vis 0) (ui_grid_first at j n vis) first)))))))))))))
+                                     (if (gt vis 0) (ui_grid_first at j n vis) first) left))))))))))))
 
 ; Where the row whose key is k is among rows, counting from i; -1 if none
 ; is.
@@ -228,12 +242,14 @@
               (ui_widths_onto (tail cols) left n (add seen 1) (cons (ui_share left n seen) acc))
               (ui_widths_onto (tail cols) left n seen (cons w acc)))))))
 
-; A grid's natural size: its columns' own widths and 80 for each that
-; shares, across; its header and four rows, down.
+; A grid's natural size: 40 across for each column, the least a sharing
+; one is given, not their own widths, since it scrolls across what does
+; not fit, as GTK's scrolled window asks no more than its least across
+; for its child; its header and four rows, down.
 (def ui_grid_measure ((g UiGridView)) UiSize
   (match g
     ((UiGridView prefix cols rows s)
-      (UiSize (add (ui_fixed_sum cols 0) (mul 80 (ui_flex_count cols 0)))
+      (UiSize (mul 40 (length cols))
               (add (ui_grid_header_h) (mul (ui_row_h) 4))))))
 
 ; How many rows fit in a grid h tall, whole ones only.
@@ -241,9 +257,10 @@
 
 ; --------------------------------------------------------------- layout
 
-; The grid in r: its ground, its header, the area the wheel scrolls, the
-; rows that fit from the first the state asks for, and the scrollbar if
-; not all fit.
+; The grid in r: its ground, the area the wheel across scrolls if its
+; columns are wider than it, its header, the area the wheel scrolls, the
+; rows that fit from the first the state asks for, scrolled across as far
+; as it asks, and the scrollbars down and across if not all fit.
 (def ui_grid_lay ((g UiGridView) (r Rect) (st UiState) (acc (list UiNode))) (list UiNode)
   (match g
     ((UiGridView prefix cols rows s)
@@ -254,15 +271,132 @@
               (let n (length shown)
                 (let vis (ui_grid_visible (rect_h r))
                   (match s
-                    ((UiGridState col desc sel first)
+                    ((UiGridState col desc sel first left)
                       (let f (ui_grid_first first -1 n vis)
-                        (let a0 (ui_leaf r (cons (UiPFill r gbg) (nil UiPaint)) acc)
-                          (let a1 (ui_header_cells prefix cols ws col desc (rect_x r) (rect_y r) 0 st gbg a0)
-                            (let a2 (ui_leaf r (cons (UiPFill (Rect (rect_x r) (sub (add (rect_y r) (ui_grid_header_h)) 1) (rect_w r) 1)
-                                                              (ui_border style gbg)) (nil UiPaint)) a1)
-                              (let a3 (ui_grid_rows prefix cols ws (drop shown f) sel (rect_x r) (rect_w r)
-                                                    (add (rect_y r) (ui_grid_header_h)) vis st gbg (ui_scroll_area prefix r n vis f a2))
-                                (ui_scrollbar prefix r n vis f st gbg a3)))))))))))))))))
+                        (let cw (ui_ints_sum ws 0)
+                          (let most (max 0 (sub cw (rect_w r)))
+                            (let l (ui_clamp left 0 most)
+                              (let a0 (ui_across_area prefix r l most (ui_leaf r (cons (UiPFill r gbg) (nil UiPaint)) acc))
+                                (let a1 (ui_header_cells prefix cols ws col desc (sub (rect_x r) l) (rect_y r) 0 st gbg r a0)
+                                  (let a2 (ui_leaf r (cons (UiPFill (Rect (rect_x r) (sub (add (rect_y r) (ui_grid_header_h)) 1) (rect_w r) 1)
+                                                                    (ui_border style gbg)) (nil UiPaint)) a1)
+                                    (let a3 (ui_grid_rows prefix cols ws (drop shown f) sel r (sub (rect_x r) l)
+                                                          (add (rect_y r) (ui_grid_header_h)) vis st gbg (ui_scroll_area prefix r n vis f a2))
+                                      (ui_acrossbar prefix r cw l most (if (gt n vis) (ui_scrollbar_hit_w) 0) st gbg
+                                                    (ui_scrollbar prefix r n vis f st gbg a3)))))))))))))))))))))
+
+; The numbers of ns added up, after acc.
+(def ui_ints_sum ((ns (list int)) (acc int)) int
+  (if (is_empty ns) acc (ui_ints_sum (tail ns) (add acc (head ns)))))
+
+; The node of all of r that the wheel across scrolls, beneath the rest,
+; when its columns are wider than it, most pixels of them, left of which
+; are scrolled off; none if they are not.
+(def ui_across_area ((prefix (list int)) (r Rect) (left int) (most int) (acc (list UiNode))) (list UiNode)
+  (if (le most 0) acc (cons (UiNode r (nil UiPaint) (ui_across_action prefix left most) false) acc)))
+
+; The overlay scrollbar across, when columns cw wide are wider than r: a
+; strip along the bottom of r, short of the scrollbar down by inset, on
+; top of the rows, that takes the pointer, and in it the slider, as long
+; as the share of the columns shown and as far across as left is of the
+; most it can be. It is thicker and darker while the pointer is over the
+; strip or drags it.
+(def ui_acrossbar ((prefix (list int)) (r Rect) (cw int) (left int) (most int) (inset int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
+  (if (if (le most 0) true (le cw 0))
+      acc
+      (let track (max 0 (sub (rect_w r) inset))
+        (let sl (min track (max (ui_slider_min) (div (mul track (rect_w r)) cw)))
+          (let span (sub track sl)
+            (let bottom (rect_y1 r)
+              (let active (ui_acrossbar_active prefix st)
+                (let sw (if active (ui_slider_wide) (ui_slider_w))
+                  (let sr (Rect (add (ui_slider_top (rect_x r) left most span) 2) (sub bottom (add (ui_slider_margin) sw)) (sub sl 4) sw)
+                    (cons (UiNode (Rect (rect_x r) (sub bottom (ui_scrollbar_hit_w)) track (ui_scrollbar_hit_w))
+                                  (cons (UiPRound sr (div sw 2) (ui_slider_fg (ui_st_style st) gbg active) -1) (nil UiPaint))
+                                  (ui_acrossbar_action prefix left most span sl) false)
+                          acc))))))))))
+
+; Whether the pointer is over the grid's scrollbar across, or drags its
+; slider.
+(def ui_acrossbar_active ((prefix (list int)) (st UiState)) bool
+  (let p (append prefix ".acrossbar.")
+    (if (starts_with (ui_st_hover st) p) true (starts_with (ui_st_pressed st) p))))
+
+; ops cut to the columns from x0 up to x1, as a grid scrolled across
+; shows them: a fill to its part between them; a text to its whole
+; characters between them, as it would be drawn, from its first that
+; starts at or after x0 to its last that ends by x1; and an icon, image
+; or rounded rectangle only if all of it is between them.
+(def ui_cut_across ((ops (list UiPaint)) (x0 int) (x1 int)) (list UiPaint)
+  (rev (ui_cut_across_onto ops x0 x1 (nil UiPaint))))
+
+; ui_cut_across's loop: each op cut, if any of it is left, onto acc,
+; reversed.
+(def ui_cut_across_onto ((ops (list UiPaint)) (x0 int) (x1 int) (acc (list UiPaint))) (list UiPaint)
+  (if (is_empty ops)
+      acc
+      (ui_cut_across_onto (tail ops) x0 x1
+        (match (head ops)
+          ((UiPFill r c)
+            (let k (rect_clip r (Rect x0 (rect_y r) (sub x1 x0) (rect_h r)))
+              (if (rect_empty k) acc (cons (UiPFill k c) acc))))
+          ((UiPRound r rad c u) (if (ui_within_across (rect_x r) (rect_x1 r) x0 x1) (cons (head ops) acc) acc))
+          ((UiPText r t a c f b sc) (ui_text_cut_onto r t a c f b sc x0 x1 acc))
+          ((UiPIcon x y nm c sc) (if (ui_within_across x (add x (mul (ui_icon_size) sc)) x0 x1) (cons (head ops) acc) acc))
+          ((UiPImage x y nn d ts) (if (ui_within_across x (add x nn) x0 x1) (cons (head ops) acc) acc))))))
+
+; Whether a to b lies between x0 and x1.
+(def ui_within_across ((a int) (b int) (x0 int) (x1 int)) bool
+  (if (ge a x0) (le b x1) false))
+
+; A text op, rect r, text t aligned a, in color c, face f, bold b, at
+; scale sc, cut to whole characters between x0 and x1 onto acc: as it
+; would be drawn, cut short with "..." if r is too narrow; then, if any
+; of it is outside, the characters from the first whose pen is at or
+; after x0 to the last that ends by x1, from that first's pen, aligned to
+; their start in a rect just as wide; nothing if none is. The face's
+; advances are walked once, so a long line costs its length.
+(def ui_text_cut_onto ((r Rect) (t (list int)) (a UiAlign) (c int) (f UiFont) (b bool) (sc int)
+                       (x0 int) (x1 int) (acc (list UiPaint))) (list UiPaint)
+  (let shown (ui_ellipsized t (rect_w r) f b sc)
+    (let tw (ui_text_w shown f b sc)
+      (let tx (ui_aligned (rect_x r) (rect_w r) tw a)
+        (if (ui_within_across tx (add tx tw) x0 x1)
+            (cons (UiPText r t a c f b sc) acc)
+            (let m (ui_font_metric f b)
+              (let upm (ui_font_upm f b)
+                (let h (ui_font_line f sc)
+                  (match (ui_cut_start shown m upm h tx x0 0)
+                    ((UiCutStart nx from)
+                      (let rest (ui_cut_end from m upm h (sub x1 nx) 0 (nil int))
+                        (if (is_empty rest)
+                            acc
+                            (cons (UiPText (Rect nx (rect_y r) (ui_text_w rest f b sc) (rect_h r)) rest (UiStart) c f b sc) acc)))))))))))))
+
+; Where a text cut at its start begins: the pen of its first character
+; left, and the characters from it.
+(data UiCutStart (UiCutStart int (list int)))
+
+; The first of s, the rest of a text drawn from pen tx whose characters
+; before it moved the pen u units of face m (upm a em, lines h high),
+; whose pen is at or after x0, and the characters from it; none if no
+; character's is.
+(def ui_cut_start ((s (list int)) (m int) (upm int) (h int) (tx int) (x0 int) (u int)) UiCutStart
+  (if (is_empty s)
+      (UiCutStart tx (nil int))
+      (let pen (add tx (ui_pen_px u upm h))
+        (if (ge pen x0)
+            (UiCutStart pen s)
+            (ui_cut_start (tail s) m upm h tx x0 (add u (ui_char_units_m s m)))))))
+
+; As many of s from its start as are no wider than room, as ui_text_w
+; measures them, u the units of those taken, acc them reversed.
+(def ui_cut_end ((s (list int)) (m int) (upm int) (h int) (room int) (u int) (acc (list int))) (list int)
+  (if (is_empty s)
+      (rev acc)
+      (if (gt (ui_units_px (add u (ui_metric_adv m (head s))) upm h) room)
+          (rev acc)
+          (ui_cut_end (tail s) m upm h room (add u (ui_char_units_m s m)) (cons (head s) acc)))))
 
 ; The node of the area under the header that the wheel scrolls, beneath
 ; the rows, so that they still take presses; none if no row fits.
@@ -273,11 +407,12 @@
                     (nil UiPaint) (ui_scroll_area_action prefix first (max 0 (sub n vis)) vis (ui_row_h)) false)
             acc)))
 
-; The header's cells: each title, bold and dimmed, a sorted column's with
-; its arrow at its end, and a line between each and the next. A sortable
-; one is a target, and shows the pointer over it.
+; The header's cells from x: each title, bold and dimmed, a sorted
+; column's with its arrow at its end, and a line between each and the
+; next, each cut to the grid's own r across; one wholly outside it is
+; left out. A sortable one is a target, and shows the pointer over it.
 (def ui_header_cells ((prefix (list int)) (cols (list UiColumn)) (ws (list int)) (col int) (desc bool)
-                      (x int) (y int) (i int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
+                      (x int) (y int) (i int) (st UiState) (gbg int) (r Rect) (acc (list UiNode))) (list UiNode)
   (if (if (is_empty cols) true (is_empty ws))
       acc
       (match (head cols)
@@ -287,8 +422,10 @@
               (let hover (if sortable (eq (ui_st_hover st) action) false)
                 (let bg (if hover (ui_hover_bg (ui_st_style st) gbg) gbg)
                   (let cr (Rect x y cw (sub (ui_grid_header_h) 1))
-                    (let node (UiNode cr (ui_header_ops cr title align (eq col i) desc (is_empty (tail cols)) st gbg bg) action false)
-                      (ui_header_cells prefix (tail cols) (tail ws) col desc (add x cw) y (add i 1) st gbg (cons node acc))))))))))))
+                    (let kr (rect_clip cr r)
+                      (let ops (ui_cut_across (ui_header_ops cr title align (eq col i) desc (is_empty (tail cols)) st gbg bg) (rect_x r) (rect_x1 r))
+                        (ui_header_cells prefix (tail cols) (tail ws) col desc (add x cw) y (add i 1) st gbg r
+                                         (if (rect_empty kr) acc (cons (UiNode kr ops action false) acc))))))))))))))
 
 ; One title's ops in cr: its ground bg, the title bold and dimmed within
 ; the pads, the arrow up or down at its end if it is the sorted column,
@@ -310,19 +447,21 @@
                 (append ops2 (cons (UiPFill (Rect (sub (add (rect_x cr) (rect_w cr)) 1) (add (rect_y cr) 8) 1 (sub (rect_h cr) 16))
                                             (ui_border (ui_st_style st) gbg)) (nil UiPaint))))))))))
 
-; The rows that fit, from y: each a target selecting it, its ground the
-; selection's tint or the pointer's, then its cells.
+; The rows that fit, from y, across all of the grid's r: each a target
+; selecting it, its ground the selection's tint or the pointer's, then
+; its cells from cx, cut to r across.
 (def ui_grid_rows ((prefix (list int)) (cols (list UiColumn)) (ws (list int)) (rows (list UiRow)) (sel (list int))
-                   (x int) (w int) (y int) (left int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
+                   (r Rect) (cx int) (y int) (left int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
   (if (if (le left 0) true (is_empty rows))
       acc
       (match (head rows)
         ((UiRow k cells)
           (let action (append prefix (append ".select." k))
             (let bg (if (eq k sel) (ui_selected_bg gbg) (if (eq (ui_st_hover st) action) (ui_hover_bg (ui_st_style st) gbg) gbg))
-              (let rr (Rect x y w (ui_row_h))
-                (let node (UiNode rr (cons (UiPFill rr bg) (ui_cells_ops cols ws cells x y st bg (nil UiPaint))) action false)
-                  (ui_grid_rows prefix cols ws (tail rows) sel x w (add y (ui_row_h)) (sub left 1) st gbg (cons node acc))))))))))
+              (let rr (Rect (rect_x r) y (rect_w r) (ui_row_h))
+                (let cells_ops (ui_cut_across (ui_cells_ops cols ws cells cx y st bg (nil UiPaint)) (rect_x r) (rect_x1 r))
+                  (let node (UiNode rr (cons (UiPFill rr bg) cells_ops) action false)
+                    (ui_grid_rows prefix cols ws (tail rows) sel r cx (add y (ui_row_h)) (sub left 1) st gbg (cons node acc)))))))))))
 
 ; One row's cells from x, y, each in its column's width less its pads,
 ; aligned as its column says, after acc.

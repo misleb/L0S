@@ -2,11 +2,14 @@
 ; (user/lib/ui): the system's processes, from the kernel's process table,
 ; in a data grid under a toolbar. Each row is a live process: its pid, its
 ; program's name, its state, as ps words it, split into the state and its
-; detail, its parent, and its memory: its own pages, and those it shares
-; or a device reaches, which other processes may map too. The kernel
-; keeps no account of CPU time, so there is no CPU column. Under the grid,
-; the memory processes are given: how much there is, how much is used,
-; with a level bar, and how much is available.
+; detail, its % of one CPU since the grid was last read (over its life,
+; the first time) and the CPU it is on or last ran on, its parent, its
+; memory: its own pages, and those it shares or a device reaches, which
+; other processes may map too, and the names it provides, those its ports
+; are registered as. Under the grid, the memory processes are given: how
+; much there is, how much is used, with a level bar, and how much is
+; available; and under that each CPU's % busy since the last read, as a
+; level bar, CPU 0's the kernel's, and the load averages.
 ;
 ; The grid is read again every second, and when Refresh is pressed. A
 ; column's title sorts by it, and again the other way; a press on a row,
@@ -17,12 +20,20 @@
 ;
 ;   procmon          its window, until its close button is pressed
 
-; The grid's state, the rows it shows, the line the toolbar shows, and
-; what the kernel last said of its memory, if it said anything.
-(data Monitor (Monitor UiGridState (list UiRow) (list int) (Option MemInfo)))
+; The grid's state, the rows it shows, the line the toolbar shows, what
+; the kernel last said of its memory, if it said anything, and what it
+; last said of the CPUs.
+(data Monitor (Monitor UiGridState (list UiRow) (list int) (Option MemInfo) CpuView))
+
+; What the kernel said of the CPUs when the grid was read, and the time
+; before: each process's CPU time, and the CPUs' use then and before.
+(data CpuView (CpuView CpuSeen (Option CpuUsage) (Option CpuUsage)))
+
+; Nothing seen of the CPUs yet.
+(def cpu_view_none () CpuView (CpuView (CpuSeen 0 ((MapEmpty int int))) ((None CpuUsage)) ((None CpuUsage))))
 
 (def monitor_new ((rows (list UiRow)) (mem (Option MemInfo))) Monitor
-  (Monitor (UiGridState 0 false "" 0) rows "Select a process" mem))
+  (Monitor (UiGridState 0 false "" 0 0) rows "Select a process" mem (cpu_view_none)))
 
 (def monitor_prefix () (list int) "procs")
 
@@ -30,15 +41,18 @@
   (cons (UiColumn "PID" 70 (UiEnd) true)
   (cons (UiColumn "Name" 120 (UiStart) true)
   (cons (UiColumn "State" 120 (UiStart) true)
+  (cons (UiColumn "% CPU" 70 (UiEnd) true)
+  (cons (UiColumn "CPU" 50 (UiEnd) true)
   (cons (UiColumn "Parent" 70 (UiEnd) true)
   (cons (UiColumn "Memory" 100 (UiEnd) true)
   (cons (UiColumn "Shared" 100 (UiEnd) true)
-  (cons (UiColumn "Detail" 0 (UiStart) true) (nil UiColumn)))))))))
+  (cons (UiColumn "Provides" 120 (UiStart) true)
+  (cons (UiColumn "Detail" 0 (UiStart) true) (nil UiColumn))))))))))))
 
 ; The window's size: the columns with 260 for the detail, and ten rows
-; under the toolbar, with the memory's line beneath them.
-(def monitor_w () int 840)
-(def monitor_h () int 429)
+; under the toolbar, with the memory's line and the CPUs' beneath them.
+(def monitor_w () int 1080)
+(def monitor_h () int 457)
 
 ; How often the grid is read again: the window's alarm rings that often.
 (def refresh_ns () int 1000000000)
@@ -53,44 +67,73 @@
   (if (any_eq st (cons (state_sleeping) (cons (state_exited) (nil int)))) (UiNeutral)
   (UiWarn)))))
 
-; The row of process pid, whose program is called name.
-(def proc_row ((pid int) (info ProcInfo) (name (list int))) UiRow
+; The row of process pid, whose program is called name, using tenths of
+; a percent of one CPU, on CPU cpu, and providing names, as serves_text
+; says them.
+(def proc_row ((pid int) (info ProcInfo) (name (list int)) (tenths int) (cpu int) (names (list int))) UiRow
   (match info
     ((ProcInfo st parent m detail own shared)
       (UiRow (digits pid)
         (cons (UiCellNum pid "")
         (cons (UiCellText name)
         (cons (UiCellStatus (state_tone st) (state_word st))
+        (cons (UiCellNum (div tenths 10) "")
+        (cons (UiCellText (cpu_text cpu))
         (cons (UiCellNum parent "")
         (cons (UiCellSize (mul own (page_size)))
         (cons (UiCellSize (mul shared (page_size)))
-        (cons (UiCellText (state_detail st detail)) (nil UiCell))))))))))))
+        (cons (UiCellText names)
+        (cons (UiCellText (state_detail st detail)) (nil UiCell)))))))))))))))
 
-; Every live process's row, procs.l0's procs_live, in the table's order.
-(def rows_now () (list UiRow) (live_rows (procs_live) (nil UiRow)))
+; What a read of the table gives: the rows, and what was seen of the CPUs.
+(data Read (Read (list UiRow) CpuView))
 
-(def live_rows ((ps (list ProcLive)) (acc (list UiRow))) (list UiRow)
+; Every live process's row, procs.l0's procs_live, in the table's order,
+; its % CPU since before was seen; and what was seen now.
+(def read_now ((before CpuView)) Read
+  (match before
+    ((CpuView seen was cur)
+      (let ps (procs_live)
+        (let after (cpu_seen ps)
+          (let rows (live_rows ps seen after (names_registered) (nil UiRow))
+            (Read rows (CpuView after cur (cpu_usage)))))))))
+
+; Every live process's row, nothing seen before.
+(def rows_now () (list UiRow) (match (read_now (cpu_view_none)) ((Read rows cv) rows)))
+
+; The rows of ps, after the reversed acc, each one's % CPU from before to
+; after, and the names among names it provides.
+(def live_rows ((ps (list ProcLive)) (before CpuSeen) (after CpuSeen) (names (list NameEntry)) (acc (list UiRow))) (list UiRow)
   (if (is_empty ps)
       (rev acc)
       (match (head ps)
         ((ProcLive pid info)
-          (match info
-            ((ProcInfo st parent m detail own shared) (live_rows (tail ps) (cons (proc_row pid info (program_name pid)) acc))))))))
+          (match (proc_cpu pid)
+            ((None) (live_rows (tail ps) before after names (cons (proc_row pid info (program_name pid) 0 -1 (serves_text (names_of_pid names pid))) acc)))
+            ((Some c)
+              (match c
+                ((ProcCpu t cpu age)
+                  (live_rows (tail ps) before after names
+                    (cons (proc_row pid info (program_name pid) (pid_tenths before after pid age) cpu (serves_text (names_of_pid names pid))) acc))))))))))
 
 (def has_row ((rows (list UiRow)) (key (list int))) bool
   (if (is_empty rows) false (if (eq (ui_row_key (head rows)) key) true (has_row (tail rows) key))))
 
-; The monitor showing rows, and mem, and its selection kept only if its
-; process is still among them.
-(def monitor_rows ((m Monitor) (rows (list UiRow)) (mem (Option MemInfo))) Monitor
+; The monitor showing rows, mem, and cv, and its selection kept only if
+; its process is still among them.
+(def monitor_rows ((m Monitor) (rows (list UiRow)) (mem (Option MemInfo)) (cv CpuView)) Monitor
   (match m
-    ((Monitor gs old status was)
+    ((Monitor gs old status was cv0)
       (match gs
-        ((UiGridState col desc sel first)
-          (Monitor (UiGridState col desc (if (has_row rows sel) sel "") first) rows status mem))))))
+        ((UiGridState col desc sel first left)
+          (Monitor (UiGridState col desc (if (has_row rows sel) sel "") first left) rows status mem cv))))))
 
-; The monitor with the table and the memory read again.
-(def monitor_read ((m Monitor)) Monitor (monitor_rows m (rows_now) (mem_info)))
+; The monitor with the table, the memory and the CPUs read again.
+(def monitor_read ((m Monitor)) Monitor
+  (match m
+    ((Monitor gs rows status mem cv)
+      (match (read_now cv)
+        ((Read rows2 cv2) (monitor_rows (Monitor gs rows status mem cv) rows2 (mem_info) cv2))))))
 
 ; ---------------------------------------------------------------- memory
 
@@ -138,6 +181,75 @@
       (cons (UiExpand (UiLabel (mem_text mem) (UiDimmed) (UiStart)))
             (nil UiWidget)))))))
 
+; ------------------------------------------------------------------ CPUs
+
+; Each CPU's % busy from a to b, in whole percent, rounded up so that any
+; use shows: CPU 0's everything but its waiting, the kernel's and its
+; turns running processes; the others' their processes'.
+(def cpus_percent ((a CpuUsage) (b CpuUsage)) (list int)
+  (match a
+    ((CpuUsage up0 w0 x0 y0 z0 busy0)
+      (match b
+        ((CpuUsage up1 w1 x1 y1 z1 busy1)
+          (let all (sub up1 up0)
+            (cons (percent_up (sub all (sub w1 w0)) all)
+                  (others_percent (drop busy0 1) (drop busy1 1) all (nil int)))))))))
+
+; The CPUs' after the first, from their busy times before and after, onto
+; the reversed acc.
+(def others_percent ((before (list int)) (after (list int)) (all int) (acc (list int))) (list int)
+  (if (is_empty after)
+      (rev acc)
+      (others_percent (drop before 1) (tail after) all
+        (cons (percent_up (sub (head after) (nth_or before 0 0)) all) acc))))
+
+; used of all in whole percent, rounded up, at most 100; 0 of nothing.
+(def percent_up ((used int) (all int)) int
+  (if (le all 0) 0 (min 100 (max 0 (div (add (mul used 100) (sub all 1)) all)))))
+
+; What cv says of each CPU's % busy: since the read before, or since boot
+; at the first read; none if the kernel said nothing.
+(def cv_percents ((cv CpuView)) (list int)
+  (match cv
+    ((CpuView seen was cur)
+      (match cur
+        ((None) (nil int))
+        ((Some b)
+          (match was
+            ((None) (cpus_percent (CpuUsage 0 0 0 0 0 (nil int)) b))
+            ((Some a) (cpus_percent a b))))))))
+
+; The load averages cv's last read says, as uptime does; empty if none.
+(def cv_load ((cv CpuView)) (list int)
+  (match cv
+    ((CpuView seen was cur)
+      (match cur
+        ((None) "")
+        ((Some b)
+          (match b
+            ((CpuUsage up waited l1 l5 l15 busy)
+              (append "Load " (join_with ", " (cons (load_text l1) (cons (load_text l5) (cons (load_text l15) (nil (list int))))))))))))))
+
+; The CPUs' line, under the memory's: its title, each CPU's name and a
+; level bar of how busy it is, CPU 0 named the kernel's, and the load.
+(def cpus_line ((cv CpuView)) UiWidget
+  (UiPad (ui_space_m) (ui_space_s)
+    (UiBox (UiH) (ui_space_m)
+      (cons (UiLabel "CPUs" (UiHeading) (UiStart))
+        (cpu_bars (cv_percents cv) 0 (cons (UiExpand (UiLabel (cv_load cv) (UiDimmed) (UiStart))) (nil UiWidget)))))))
+
+; The labels and bars of the CPUs from i on, of their percents ps, before
+; rest.
+(def cpu_bars ((ps (list int)) (i int) (rest (list UiWidget))) (list UiWidget)
+  (if (is_empty ps)
+      rest
+      (cons (UiLabel (cpu_name i) (UiDimmed) (UiStart))
+        (cons (UiLevel (head ps) 80) (cpu_bars (tail ps) (add i 1) rest)))))
+
+; CPU i's name on its bar: CPU 0 is the kernel's.
+(def cpu_name ((i int)) (list int)
+  (if (eq i 0) "0 (kernel)" (digits i)))
+
 ; --------------------------------------------------------- ending one
 
 ; What came of ending pid, as proc_kill answered r.
@@ -158,11 +270,12 @@
 
 (def monitor_view ((m Monitor)) UiWidget
   (match m
-    ((Monitor gs rows status mem)
+    ((Monitor gs rows status mem cv)
       (UiBox (UiV) 0
         (cons (UiExpand (ui_grid_page status (UiGridView (monitor_prefix) (monitor_columns) rows gs)))
         (cons (UiSeparator (UiH))
-        (cons (mem_line mem) (nil UiWidget))))))))
+        (cons (mem_line mem)
+        (cons (cpus_line cv) (nil UiWidget)))))))))
 
 ; ---------------------------------------------------------------- update
 
@@ -172,36 +285,37 @@
 ; sort, and scroll it.
 (def monitor_update ((m Monitor) (action (list int)) (ev UiEvent) (sc UiScroller)) Monitor
   (match m
-    ((Monitor gs rows status mem)
+    ((Monitor gs rows status mem cv)
       (if (eq action "app.refresh")
-          (let now (rows_now)
-            (monitor_rows (Monitor gs rows (append "Refreshed: " (append (digits (length now)) " processes")) mem) now (mem_info)))
+          (match (read_now cv)
+            ((Read now cv2)
+              (monitor_rows (Monitor gs rows (append "Refreshed: " (append (digits (length now)) " processes")) mem cv) now (mem_info) cv2)))
           (if (eq action "app.end")
               (monitor_end m)
               (if (starts_with action (append (monitor_prefix) "."))
-                  (selected (Monitor (ui_grid_action gs (monitor_prefix) action) rows status mem))
+                  (selected (Monitor (ui_grid_action gs (monitor_prefix) action) rows status mem cv))
                   (monitor_key m ev sc)))))))
 
 (def monitor_end ((m Monitor)) Monitor
   (match m
-    ((Monitor gs rows status mem)
+    ((Monitor gs rows status mem cv)
       (if (is_empty (ui_gs_selected gs))
           m
           (let said (end_text (int_prefix (ui_gs_selected gs) 0) (l0s_pid))
-            (monitor_read (Monitor gs rows said mem)))))))
+            (monitor_read (Monitor gs rows said mem cv)))))))
 
 (def monitor_key ((m Monitor) (ev UiEvent) (sc UiScroller)) Monitor
   (match m
-    ((Monitor gs rows status mem)
+    ((Monitor gs rows status mem cv)
       (let code (ui_key_pressed ev)
         (if (lt code 0)
             m
-            (selected (Monitor (ui_grid_key (UiGridView (monitor_prefix) (monitor_columns) rows gs) code sc) rows status mem)))))))
+            (selected (Monitor (ui_grid_key (UiGridView (monitor_prefix) (monitor_columns) rows gs) code sc) rows status mem cv)))))))
 
 ; The monitor with its line saying what is selected, if anything is.
 (def selected ((m Monitor)) Monitor
   (match m
-    ((Monitor gs rows status mem) (Monitor gs rows (ui_selected_line gs status) mem))))
+    ((Monitor gs rows status mem cv) (Monitor gs rows (ui_selected_line gs status) mem cv))))
 
 ; ------------------------------------------------------------------ loop
 
@@ -212,7 +326,7 @@
   (match (ui_open "Processes" (monitor_w) (monitor_h))
     ((UiOpenFailed why) (complain why))
     ((UiOpenedWin w)
-      (let m (monitor_new (rows_now) (mem_info))
+      (let m (monitor_read (monitor_new (nil UiRow) ((None MemInfo))))
         (monitor_loop (ui_win_alarm (ui_present w (monitor_view m)) (add (clock_ns) (refresh_ns))) m)))))
 
 ; Each event answered as the toolkit's loop puts it together

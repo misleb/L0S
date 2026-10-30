@@ -1,4 +1,4 @@
-# 0051: The agent acts on its own: a time to wake, what it did, and a budget
+# 0053: The agent acts on its own: a time to wake, what it did, and a budget
 
 Track: Agent · Status: idea · Needs: 0043 · Spec: agent.md
 

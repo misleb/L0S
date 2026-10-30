@@ -180,13 +180,15 @@ windows() {
 
 # The lines of ps, typed at the serial shell, after it is typed.
 ps_lines() { say ps; printf '%s\n' "$said"; }
+# ps's CPU and %CPU columns, between PARENT and PROGRAM.
+cpu=' +[0-9-]+ +[0-9.-]+'
 
 # Waits up to 10 s for ps to show neither vt pid P nor a process it
 # started, as a vt ends a moment after its window closes.
 gone() {
   local end=$((SECONDS + 10))
   until [ $SECONDS -ge $end ]; do
-    ps_lines | grep -aqE "^ +$1 +1  vt |^ +[0-9]+ +$1  " || return 0
+    ps_lines | grep -aqE "^ +$1 +1$cpu  vt |^ +[0-9]+ +$1$cpu  " || return 0
     sleep 0.2
   done
   return 1
@@ -277,15 +279,15 @@ typekeys "run nap 30000 &"
 end=$((SECONDS + 10))
 until [ $SECONDS -ge $end ]; do
   lines=$(ps_lines)
-  printf '%s\n' "$lines" | grep -aqE "^ +[0-9]+ +[0-9]+  nap " && break
+  printf '%s\n' "$lines" | grep -aqE "^ +[0-9]+ +[0-9]+$cpu  nap " && break
   sleep 0.2
 done
-shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  nap " | tail -1 | awk '{print $2}')
+shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+$cpu  nap " | tail -1 | awk '{print $2}')
 [ -n "$shell" ] || fail "ps showed no nap; it showed:"
-vt=$(printf '%s\n' "$lines" | grep -aE "^ +$shell +[0-9]+  sh " | tail -1 | awk '{print $2}')
-vts=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +1  vt " | awk '{print $1}' | sort -n | tr '\n' ' ')
+vt=$(printf '%s\n' "$lines" | grep -aE "^ +$shell +[0-9]+$cpu  sh " | tail -1 | awk '{print $2}')
+vts=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +1$cpu  vt " | awk '{print $1}' | sort -n | tr '\n' ' ')
 set -- $vts
-[ $# -eq 2 ] && [ -z "$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+  vt " | grep -avE "^ +[0-9]+ +1  vt ")" ] \
+[ $# -eq 2 ] && [ -z "$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+$cpu  vt " | grep -avE "^ +[0-9]+ +1$cpu  vt ")" ] \
   || fail "ps shows vts ${vts:-none}, not the windows' two, boot's, and no relay"
 vt_a=$1; vt_b=$2
 [ "$vt" = "$vt_a" ] || [ "$vt" = "$vt_b" ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not a window's vt, $vt_a or $vt_b"
@@ -363,9 +365,9 @@ shows "vt3's shell is waiting" "$((f_x + 40)) $((f_y + top + 7 * 16 + 15)) $curs
 typekeys "echo hi"
 shows "echo hi typed and answered in vt3" "$((f_x + 1)) $((f_y + top + 8 * 16 + 8)) $stem"
 lines=$(ps_lines)
-n=$(printf '%s\n' "$lines" | grep -acE "^ +[0-9]+ +$front_vt  sh ")
+n=$(printf '%s\n' "$lines" | grep -acE "^ +[0-9]+ +$front_vt$cpu  sh ")
 [ "$n" = 2 ] || fail "ps shows $n shells started by $front's vt, pid $front_vt, not 2; it showed:"
-tab_shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +$front_vt  sh " | awk '{print $1}' | sort -n | tail -1)
+tab_shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +$front_vt$cpu  sh " | awk '{print $1}' | sort -n | tail -1)
 echo "ok - vt: a tab opened by the button, vt3, its own shell, pid $tab_shell"
 
 # A click on the first tab shows it: the title its name, the second tab
@@ -386,7 +388,7 @@ shows "echo hi typed and answered in $first" "$((f_x + 1)) $((f_y + top + 19 * 1
 click $((f_x + 616)) $((f_y + bar + 20))
 windows 2 "$first"
 shows "vt3 closed, the tab bar gone" "$((f_x + 639)) $((f_y + bar + 20)) $ground"
-ps_lines | grep -aqE "^ +$tab_shell +$front_vt  sh " && fail "after its tab closed, vt3's shell, pid $tab_shell, is still there"
+ps_lines | grep -aqE "^ +$tab_shell +$front_vt$cpu  sh " && fail "after its tab closed, vt3's shell, pid $tab_shell, is still there"
 echo "ok - vt: vt3's close button ended its shell and closed it"
 
 # Ctrl-Shift-T, on the USB keyboard through wm, opens a tab as the

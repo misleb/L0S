@@ -11,14 +11,16 @@
 ; once every volume is mounted, and serves though no disk has one. A
 ; rescan takes on any disk registered since, reads every disk's volumes
 ; again, and mounts any new label; so does a partition of a disk not
-; yet taken on. What waits on the port is served in the order turns.l0
+; yet taken on. What waits on its ports is served in the order turns.l0
 ; chooses: notices first, then requests, by pid in turn, by bytes.
 ;
-; Started as fs ram [MB], it serves no disk but one volume, tmp, of MB
-; megabytes (32 unless given), in its own memory, empty, at /Volumes/tmp,
-; and registers as tmpfs, not fs: a second server beside the disk's, or
-; on a board with no disk. It has no table: partition, mkfs and rescan
-; are refused, and nothing in it outlives it.
+; Started as fs ram [MB], it also serves a volume, tmp, of MB megabytes
+; (32 unless given), in its own memory, empty, at /Volumes/tmp, from a
+; port of its own registered as tmpfs, beside the disks' on fs's, and
+; waits on both ports as a set: one process for both, on a board with a
+; disk or none. tmp has no table: partition, erase, attach and relabel
+; of it are refused, mkfs and rescan pass it over, and nothing in it
+; outlives fs.
 ;
 ; Each volume's metadata is kept in memory and written back, after the
 ; data, whenever it changes: only the sectors that changed. Between a
@@ -42,22 +44,27 @@
 ; with its driver; or memory, by sector, for tests, with its sectors, how
 ; many reads and writes it has been asked, as the disk would, and how
 ; many flushes. Or the memory of a RAM file system, started as fs ram:
-; the sectors written, as bytes, those not written being zeros, and how
-; many sectors there are.
-(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int int int) (StoreRam (Map int bytes) int))
+; the sectors written, as bytes, those not written being zeros, how many
+; sectors there are, and the port its volume is mounted from, tmpfs's.
+(data Store (StoreDisk Disk DiskBuf) (StoreMem (Map int (list int)) int int int) (StoreRam (Map int bytes) int int))
 
 ; How many sectors the store has: the disk's, or the memory's.
 (def store_sectors ((s Store)) int
-  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n r fl) n) ((StoreRam m n) n)))
+  (match s ((StoreDisk d b) (disk_sectors d)) ((StoreMem m n r fl) n) ((StoreRam m n p) n)))
 
 ; Whether s is a RAM file system's, which has no partition table.
 (def store_is_ram ((s Store)) bool
-  (match s ((StoreDisk d b) false) ((StoreMem m n r fl) false) ((StoreRam m n) true)))
+  (match s ((StoreDisk d b) false) ((StoreMem m n r fl) false) ((StoreRam m n p) true)))
+
+; The port a volume on s is mounted from: a RAM file system's own, or
+; else fs's, port.
+(def store_port ((s Store) (port int)) int
+  (match s ((StoreDisk d b) port) ((StoreMem m n r fl) port) ((StoreRam m n p) p)))
 
 ; The name of the disk s is, as its driver registered it; disk0 for
 ; memory, as in tests, and tmp for a RAM file system.
 (def store_name ((s Store)) (list int)
-  (match s ((StoreDisk d b) (disk_name_of d)) ((StoreMem m n r fl) (disk_name 0)) ((StoreRam m n) "tmp")))
+  (match s ((StoreDisk d b) (disk_name_of d)) ((StoreMem m n r fl) (disk_name 0)) ((StoreRam m n p) "tmp")))
 
 ; The most sectors one read or write of the store moves, and its
 ; buffer with a disk's driver holds: 32 KB, FAT32's largest cluster.
@@ -71,7 +78,7 @@
 (def store_read ((s Store) (sector int) (count int)) Got
   (match s
     ((StoreMem m n r fl) (Got (StoreMem m n (add r 1) fl) (bytes_from_list (mem_sectors m sector count (nil int)))))
-    ((StoreRam m n) (Got s (bytes_concat (ram_sectors m sector count (nil bytes)))))
+    ((StoreRam m n p) (Got s (bytes_concat (ram_sectors m sector count (nil bytes)))))
     ((StoreDisk d b)
       (let why (disk_read d b sector count)
         (if (is_empty why)
@@ -119,7 +126,7 @@
 (def store_write ((s Store) (sector int) (b bytes)) Put
   (match s
     ((StoreMem m n r fl) (Put (StoreMem (mem_put m sector (bytes_to_list b)) n (add r 1) fl)))
-    ((StoreRam m n) (Put (StoreRam (ram_put m sector b 0) n)))
+    ((StoreRam m n p) (Put (StoreRam (ram_put m sector b 0) n p)))
     ((StoreDisk d buf)
       (let p (disk_put_range buf 0 b 0 (bytes_len b))
         (let why (disk_write d buf sector (div (bytes_len b) (vol_sector_size)))
@@ -130,7 +137,7 @@
 (def store_flush ((s Store)) Put
   (match s
     ((StoreMem m n r fl) (Put (StoreMem m n r (add fl 1))))
-    ((StoreRam m n) (Put s))
+    ((StoreRam m n p) (Put s))
     ((StoreDisk d b)
       (let why (disk_flush d)
         (if (is_empty why) (Put s) (PutNot s why))))))
@@ -234,7 +241,7 @@
 (def fs_new ((s Store) (port int) (vols (array FsVol))) Fs
   (fs_new_on (cons s (nil Store)) port vols))
 (def fs_new_on ((ss (list Store)) (port int) (vols (array FsVol))) Fs
-  (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0)) port vols ((MapEmpty int Handle)) 1 (nil int) 0 ((MapEmpty int FsWin)) ((MapEmpty int Pending))))
+  (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0 0)) port vols ((MapEmpty int Handle)) 1 (nil int) 0 ((MapEmpty int FsWin)) ((MapEmpty int Pending))))
 
 ; Its volumes, handles and clients' windows; volume vi, the disk it is
 ; on, and the sector its partition starts at.
@@ -592,9 +599,22 @@
     (obey_volumes f op ws)))))))))
 
 (def obey_volumes ((f Fs) (op (list int)) (ws (list (list int)))) Answered
-  (if (if (store_is_ram (fs_store_at f 0)) (any_eq op (split_spaces "partition erase mkfs rescan attach relabel")) false)
+  (if (ram_asked f op ws)
       (Answered f -5 "a RAM file system has no partition table")
       (obey_volumes_disk f op ws)))
+
+; Whether op, with its words ws, asks of the RAM file system what only a
+; disk has: a partition, an erase or an attach of the disk tmp, or a
+; relabel of its volume, whose label boot's root=tmpfs knows it by.
+; mkfs and rescan look only at the disks.
+(def ram_asked ((f Fs) (op (list int)) (ws (list (list int)))) bool
+  (if (is_empty ws)
+      false
+      (if (any_eq op (split_spaces "partition erase attach"))
+          (let di (disk_index f (head ws)) (if (lt di 0) false (store_is_ram (fs_store_at f di))))
+          (if (eq op "relabel")
+              (let vi (volume_at f (head ws)) (if (lt vi 0) false (store_is_ram (vol_store f vi))))
+              false))))
 
 ; The same on a disk.
 (def obey_volumes_disk ((f Fs) (op (list int)) (ws (list (list int)))) Answered
@@ -937,7 +957,7 @@
                   (let why2 (disk_write d buf sector count)
                     (if (is_empty why2) (Put s) (PutNot s why2))))))))
       ((StoreMem m sn r fl) (store_spliced s sector count keep at (bytes_slice b i j)))
-      ((StoreRam m sn) (store_spliced s sector count keep at (bytes_slice b i j))))))
+      ((StoreRam m sn p) (store_spliced s sector count keep at (bytes_slice b i j))))))
 
 ; store_patch's in memory: the sectors read, or zeros, with piece put in
 ; at at, and written back.
@@ -1170,7 +1190,7 @@
         (if (if (gt (map_size (fs_handles f)) 0) true (is_system f vi))
             (word f -4)
             (let label (fv_label (fs_vol f vi))
-              (match (fs_unmount label (match f ((Fs s port vols hs next ws cp wins dirty) port)))
+              (match (fs_unmount label (store_port (vol_store f vi) (fs_port f)))
                 ((Unmounted) (word (without_vol f vi) 0))
                 ((UnmountNotMounted) (word (without_vol f vi) 0))
                 ((UnmountDenied) (word f -4))
@@ -1294,7 +1314,7 @@
 
 ; f with the stores ss in place of its own.
 (def with_stores ((f Fs) (ss (list Store))) Fs
-  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0)) port vols hs next ws cp wins dirty))))
+  (match f ((Fs s port vols hs next ws cp wins dirty) (Fs (array_from ss (StoreRam ((MapEmpty int bytes)) 0 0)) port vols hs next ws cp wins dirty))))
 
 ; attach DISK: the disk registered as DISK taken on, as its driver asks
 ; once it has registered it, and its volumes mounted and served, after
@@ -1485,10 +1505,17 @@
                   (mkfs_from (attached_all f (disk_names)) 0 u label fat)))))))
 
 ; The volume made on the partition u of the first disk from di whose
-; table has it; -3 if none has.
+; table has it; -3 if none has. A RAM file system's store, which has no
+; table, is passed over.
 (def mkfs_from ((f Fs) (di int) (u Uuid) (label (list int)) (fat bool)) Answered
   (if (ge di (array_len (fs_stores f)))
       (Answered f -3 "no partition has that UUID")
+      (if (store_is_ram (fs_store_at f di))
+          (mkfs_from f (add di 1) u label fat)
+          (mkfs_at f di u label fat))))
+
+; mkfs_from's look at disk di.
+(def mkfs_at ((f Fs) (di int) (u Uuid) (label (list int)) (fat bool)) Answered
       (match (read_table (fs_store_at f di))
         ((NoTable s2 why)
           (match (read_mbr s2)
@@ -1501,7 +1528,7 @@
         ((Table s2 d)
           (match (gpt_part_of (gpt_parts d) u)
             ((None) (mkfs_from (with_store_at f di s2) (add di 1) u label fat))
-            ((Some p) (mkfs_on (with_store_at f di s2) di d p u label fat)))))))
+            ((Some p) (mkfs_on (with_store_at f di s2) di d p u label fat))))))
 
 ; The volume made on partition p, u, of disk di, whose table is d, if it
 ; can be.
@@ -1616,15 +1643,26 @@
 ; are now, then LABEL\n for each. Refused -4 while any file is open,
 ; since a handle names its volume by where it is among them. A disk with
 ; no table has no volumes, nor has one whose table is bad, which is said
-; why.
+; why. The RAM file system's volume, which no disk holds, is kept first.
 (def rescan ((f Fs)) Rescanned
   (if (gt (map_size (fs_handles f)) 0)
       (Rescanned (word f -4) (nil (list int)) (nil (list int)))
       (match (disks_loaded (attached_all f (disk_names)) 0 (nil FsVol) false)
-        ((DisksLoaded f2 vols)
-          (Rescanned (Answered (with_vols f2 vols) (length vols) (labels_text vols (nil int)))
-                     (new_labels (fs_vols f) vols)
-                     (gone_labels (array_to_list (fs_vols f)) (vols_array vols)))))))
+        ((DisksLoaded f2 found)
+          (let vols (append (ram_vols f2 (array_to_list (fs_vols f2))) found)
+            (Rescanned (Answered (with_vols f2 vols) (length vols) (labels_text vols (nil int)))
+                       (new_labels (fs_vols f) vols)
+                       (gone_labels (array_to_list (fs_vols f)) (vols_array vols))))))))
+
+; Those of vols on a RAM file system's store of f's, in order.
+(def ram_vols ((f Fs) (vols (list FsVol))) (list FsVol)
+  (if (is_empty vols)
+      vols
+      (match (head vols)
+        ((FsVol di start u v)
+          (if (store_is_ram (fs_store_at f di))
+              (cons (head vols) (ram_vols f (tail vols)))
+              (ram_vols f (tail vols)))))))
 
 ; f with every disk of names among its stores, those that can be.
 (def attached_all ((f Fs) (names (list (list int)))) Fs
@@ -1639,11 +1677,19 @@
 ; bad table, is said so; a bad table is said so whatever say is.
 (data DisksLoaded (DisksLoaded Fs (list FsVol)))
 
-; Disk di's table read, its volumes loaded, and the disks after it.
+; Disk di's table read, its volumes loaded, and the disks after it. A
+; RAM file system's store is no disk, and passed over: its volume is
+; kept as it is.
 (def disks_loaded ((f Fs) (di int) (acc (list FsVol)) (say bool)) DisksLoaded
   (if (ge di (array_len (fs_stores f)))
       (DisksLoaded f (rev acc))
-      (let name (store_name (fs_store_at f di))
+      (if (store_is_ram (fs_store_at f di))
+          (disks_loaded f (add di 1) acc say)
+          (disk_loaded f di acc say))))
+
+; disks_loaded's work on disk di.
+(def disk_loaded ((f Fs) (di int) (acc (list FsVol)) (say bool)) DisksLoaded
+  (let name (store_name (fs_store_at f di))
         (match (read_table (fs_store_at f di))
           ((NoTable s2 why)
             (match (read_mbr s2)
@@ -1665,7 +1711,7 @@
                   (match (load_vols s2 di parts (nil FsVol))
                     ((Loaded s3 vols)
                       (match (load_gpt_fats s3 di fats (nil FsVol))
-                        ((Loaded s4 fvols) (disks_loaded (with_store_at f di s4) (add di 1) (rev_onto fvols (rev_onto vols acc)) say)))))))))))))
+                        ((Loaded s4 fvols) (disks_loaded (with_store_at f di s4) (add di 1) (rev_onto fvols (rev_onto vols acc)) say))))))))))))
 
 ; The labels of old that none of vols has.
 (def gone_labels ((old (list FsVol)) (vols (array FsVol))) (list (list int))
@@ -1733,28 +1779,37 @@
 
 ; ---------------------------------------------------------------- serving
 
-; Every message on the port, in the order turns.l0 chooses: each time
+; Every message on fs's ports, its set (fs's own, and tmpfs's when it
+; serves a RAM file system), in the order turns.l0 chooses: each time
 ; round, every message waiting taken into t, and the next of them
-; served; or, with none waiting, the next to come waited for. A notice:
-; an exit, its pid's handles dropped, its window given back and its
-; requests still waiting dropped; or a window notice, the client's window
-; kept. A request: answered to its reply port, if it has one.
-(def serve ((f Fs) (port int) (t Turns)) int
-  (let t2 (drained t port)
+; served; or, with none waiting, the next to come waited for, on either
+; port. A notice: an exit, its pid's handles dropped, its window given
+; back and its requests still waiting dropped; or a window notice, the
+; client's window kept. A request: answered to its reply port, if it has
+; one. Which port a message came on does not matter: a request names
+; its volume or disk itself.
+(def serve ((f Fs) (t Turns)) int
+  (let t2 (drained t)
     (match (turns_next t2)
-      ((TurnNotice m t3) (serve_notice f port t3 m))
-      ((TurnRequest m t3) (serve (answered f m) port t3))
+      ((TurnNotice m t3) (serve_notice f t3 m))
+      ((TurnRequest m t3) (serve (answered f m) t3))
       ((TurnNone)
-        (match (port_receive port)
-          ((RecvFailed) (complain "lost its port"))
-          ((Message from b) (serve f port (taken t2 from b))))))))
+        (match (port_receive_set)
+          ((SetRecvFailed) (complain "lost its ports"))
+          ((SetMessage p m)
+            (match m
+              ((RecvFailed) (serve f t2))
+              ((Message from b) (serve f (taken t2 from b))))))))))
 
-; t with every message waiting on port taken, as port_try_receive gives
-; them, until none is.
-(def drained ((t Turns) (port int)) Turns
-  (match (port_try_receive port)
-    ((RecvFailed) t)
-    ((Message from b) (drained (taken t from b) port))))
+; t with every message waiting on fs's ports taken, as
+; port_try_receive_set gives them, oldest first, until none is.
+(def drained ((t Turns)) Turns
+  (match (port_try_receive_set)
+    ((SetRecvFailed) t)
+    ((SetMessage p m)
+      (match m
+        ((RecvFailed) t)
+        ((Message from b) (drained (taken t from b)))))))
 
 ; t with the message b from from waiting; or, a request past its pid's
 ; bound (turns_refuses), t as it was, the request answered at once -5,
@@ -1765,16 +1820,16 @@
       (turns_add t (Message from b))))
 
 ; The notice m served, and then the rest, t.
-(def serve_notice ((f Fs) (port int) (t Turns) (m Message)) int
+(def serve_notice ((f Fs) (t Turns) (m Message)) int
   (match (exit_of m)
-    ((Exited pid status) (serve (forget_pid f pid) port (turns_drop t pid)))
+    ((Exited pid status) (serve (forget_pid f pid) (turns_drop t pid)))
     ((NotExit)
       (match m
-        ((RecvFailed) (serve f port t))
+        ((RecvFailed) (serve f t))
         ((Message from b)
           (match (window_told_of from b)
-            ((WindowTold pid w) (serve (window_kept f pid w) port t))
-            ((NotWindow) (serve f port t))))))))
+            ((WindowTold pid w) (serve (window_kept f pid w) t))
+            ((NotWindow) (serve f t))))))))
 
 ; f after the request m, answered to its reply port, if it names one.
 (def answered ((f Fs) (m Message)) Fs
@@ -1847,24 +1902,49 @@
 ; The label the RAM file system is mounted at, /Volumes/tmp.
 (def ram_label () (list int) "tmp")
 
-; A volume of mb megabytes, empty, in memory, mounted at /Volumes/tmp and
-; served, registered as tmpfs: it has no disk, no partition table, and
-; nothing of it survives. Nothing in it is written to a disk.
+; A volume of mb megabytes, empty, in memory, mounted at /Volumes/tmp
+; from a port of its own, registered as tmpfs: it has no disk, no
+; partition table, and nothing of it survives. Nothing in it is written
+; to a disk. Then the disks, as fs alone serves them (fs_disk), on fs's
+; port, registered as fs, though there be none, so that a disk that
+; comes later is attached; and both ports served at once, as a set.
 (def fs_ram ((mb int)) int
   (let sectors (mul mb 2048)
     (let l (vol_layout sectors)
       (if (not (vol_layout_ok l))
           (complain "the RAM file system is too small")
           (let v (vol_new (ram_label) l)
-            (match (store_write_all (StoreRam ((MapEmpty int bytes)) sectors) 0 (vol_meta v))
-              ((PutNot s why) (complain why))
-              ((Put s) (found_as (fs_new s 0 (vols_array (nil FsVol))) (cons (FsVol 0 0 (ram_uuid) (FvL0 v)) (nil FsVol)) "tmpfs" false))))))))
+            (let tport (port_new)
+              (match (store_write_all (StoreRam ((MapEmpty int bytes)) sectors tport) 0 (vol_meta v))
+                ((PutNot s why) (complain why))
+                ((Put s) (ram_mounted s (FsVol 0 0 (ram_uuid) (FvL0 v)) tport)))))))))
+
+; The RAM file system's volume tv, on the store s, mounted from tport
+; and registered as tmpfs, at once, so that it is there for boot's
+; root=tmpfs while the disks are waited for; then the disks found and
+; served beside it. disk0 is waited for as fs_disk waits, meanwhile
+; nothing being served; with none, the RAM file system is served alone.
+(def ram_mounted ((s Store) (tv FsVol) (tport int)) int
+  (let tvs (cons tv (nil FsVol))
+    (let m (mount_all tport tvs)
+      (let r (name_register_or_why tport "tmpfs")
+        (if (not (is_empty r))
+            (complain r)
+            (let f (fs_new s 0 (vols_array (nil FsVol)))
+              (match (name_wait (disk_name 0) 5000000000)
+                ((NotFound) (found_with f tvs (nil FsVol) (cons tport (nil int))))
+                ((Found dp) (fs_on_with (attached_all f (disk_names)) tvs (cons tport (nil int)))))))))))
 
 ; f's disks' volumes found, mounted and served, each disk with no table
 ; or no volumes said so.
 (def fs_on ((f Fs)) int
+  (fs_on_with f (nil FsVol) (nil int)))
+
+; fs_on, after kept, the volumes served already from the ports others,
+; the RAM file system's.
+(def fs_on_with ((f Fs) (kept (list FsVol)) (others (list int))) int
   (match (disks_loaded f 0 (nil FsVol) true)
-    ((DisksLoaded f2 vols) (found f2 vols))))
+    ((DisksLoaded f2 vols) (found_with f2 kept vols others))))
 
 ; ----------------------------------------------------------------- table
 
@@ -2087,18 +2167,22 @@
 ; registered while they were loaded, whose driver could not yet ask fs to
 ; attach it, is attached then.
 (def found ((f Fs) (vols (list FsVol))) int
-  (found_as f vols "fs" true))
+  (found_with f (nil FsVol) vols (nil int)))
 
-; The same, registered as name, the late disks attached if late.
-(def found_as ((f Fs) (vols (list FsVol)) (name (list int)) (late bool)) int
+; The same, after kept, the volumes mounted already from the ports
+; others, the RAM file system's: every port of fs's waited on as a set.
+(def found_with ((f Fs) (kept (list FsVol)) (vols (list FsVol)) (others (list int))) int
   (let port (port_new)
     (let m (mount_all port vols)
-      (let r (name_register_or_why port name)
+      (let r (name_register_or_why port "fs")
         (if (is_empty r)
             (match f
               ((Fs s p vs hs next ws cp wins dirty)
-                (let f2 (Fs s port (vols_array vols) hs next ws cp wins dirty)
-                  (serve (if late (late_disks f2 (disk_names)) f2) port (turns_new)))))
+                (let f2 (Fs s port (vols_array (append kept vols)) hs next ws cp wins dirty)
+                  (match (port_set (cons port others))
+                    ((PortSetMade) (serve (late_disks f2 (disk_names)) (turns_new)))
+                    ((PortSetNotYours) (complain "its ports are not its own"))
+                    ((PortSetSize) (complain "too many ports"))))))
             (complain r))))))
 
 ; What fs says of a volume it mounted: where it is, the partition it is

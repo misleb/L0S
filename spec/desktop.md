@@ -40,18 +40,22 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `resize ID W H [VA N S]` | the window's content is now W×H: in the buffer it has, which must have room for it, its rows where they were, or in a new one at VA, N pages, its rows S of its own pixels apart, shared as a window's is: a client's answer to a size notice (below), or its own choice. `wm` gives the display the content and a chrome to fit under new ids, in the pages they had when they fit, shows them at once and forgets the old ids; the reply comes as soon as the display has the content, so the client paints the next size while `wm` finishes. The client frees an old buffer once the reply is ok. Only the window's client may ask |
 | `edges ID E` | the window resized by its edges E with the pointer, from where it is, until the button is up, as by the border outside it, as xdg_toplevel's `resize` asks: what a client asks when the inside of its own edge is pressed. E adds the edges' bits, left 1, right 2, top 4, bottom 8: one side, or two that meet. As `move`, only the window's client may ask, while the left button is down after a press in the window and nothing else is dragged |
 | `maximize ID` | the window made to fill the screen under the top bar, from 0, 32, its place and size kept; or, if it is maximized, put back where it was, at its size: what a double click on a client's own header bar asks. `wm` asks the client for the size with a size notice, as a drag of its right and bottom edges does, and places the window once it answers. Only the window's client may ask |
+| `cursor ID NAME` | the pointer shown while it is over the window's content, by name, as `wp_cursor_shape`'s `set_shape`: `default`, the arrow, `text`, the I-beam, or `ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize`. Kept until asked again or the window closes, and shown at once if the pointer is there. Only the window's client may ask. The toolkit asks it as the pointer moves (see [toolkit.md](toolkit.md)) |
 | `title ID TEXT` | a new title |
 | `close ID` | the window gone. A client's windows also go when it exits, since `wm` watches it |
 | `end` | the client asking it killed, its windows closing with its exit: what the toolkit asks for a program that did nothing with the close of its last window, since a program cannot end itself but by returning from `main`. Refused for a driver |
 | `desktop CMD ...` | a drawing command, as `draw` takes them, drawn on the desktop |
-| `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it, then `buffer B frames F`, the display's id of the content it shows and how many frames its client has been told; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges) |
+| `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it, then `buffer B frames F`, the display's id of the content it shows and how many frames its client has been told; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges, or what its client asked for over its content, such as `text`) |
 | `launch NAME ARG ...` | the app NAME launched with the ARGs, as the launcher launches it (below), the launcher closed: NAME its name as the launcher shows it, its bundle's name, or its exec, the first app of one kind that matches, the apps read again if none does; the ARGs words, each an argument of the `open` sent on. `ok` once it is launched, or `error: no app NAME`; what `open` asks |
 | `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
-draws), buffer 0; the pointer's image (Adwaita's arrow, or a resize
-pointer), 1; the top bar, 2; the launcher's page, 3; the L0S menu's card,
-100000; and each window's
+draws), buffer 0; the pointers, its cursor set, each made once at start
+(`with_pointers`): Adwaita's arrow, 1, and from 100001 the I-beam
+(`text`) and the four resize pointers, in `ui_cursor_names`'s order,
+all six painted one under another in one region and each given as a
+64×64 buffer of its own 4 pages; the top bar, 2; the launcher's page,
+3; the L0S menu's card, 100000; and each window's
 chrome, its title bar with the frame under it, one buffer as big as the
 window: window i's content and chrome being 4 + 4i + 2k and 5 + 4i + 2k,
 k a bank, 0 or 1, the content's and the chrome's each its own. A resize
@@ -249,7 +253,11 @@ Input:
   window's shape cuts away grab both edges that meet there. The pointer
   shows which: GNOME's `ew-resize`, `ns-resize`, `nwse-resize` and
   `nesw-resize` (`ui_paint_named_cursor`, smooth from the face at scale
-  2), the arrow elsewhere. Dragging asks the window's client for the size
+  2); over a window's content, what its client asked for with `cursor`
+  (the toolkit: the I-beam over an entry, and the resize pointer inside
+  a client-decorated window's edge, as the border outside shows); the
+  arrow elsewhere. Showing another is one `cursor` request to the
+  display, of a buffer it already has: nothing is painted again. Dragging asks the window's client for the size
   that gives (`size_notice`, "siz" and two u32s, in
   [user/lib/sys/l0s.l0](../user/lib/sys/l0s.l0)): the opposite edge stays,
   at least 200×100, and no further than the screen or the top bar. It
@@ -407,10 +415,7 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   its first 64 KB, 2000 lines of 240 characters at most, ASCII; and a
   program it starts has no terminal. With nothing to copy, Ctrl-C and
   Ctrl-V do nothing. Its window, like every
-  client-decorated one, has no shadow, and the pointer over the inside
-  of its edge is the arrow until it is pressed there: a client cannot
-  ask for a pointer's shape, so only the border outside shows the
-  resize pointer before a press.
+  client-decorated one, has no shadow.
 - Only toolkit windows can be resized or maximized (`draw` ignores the
   size notice, so a double click on its title bar leaves it as it is).
 - **Terminal (`vt`) is a terminal of lines, not a screen.** Its only
@@ -439,8 +444,8 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   desktop, the pointer, the top bar and the launcher), can have 60
   windows open at once, and open them for ever; a resize past a buffer's
   room holds one more for a moment, and is refused if there is none. The
-  pointer's image is painted again and given to the display whenever it
-  changes between the arrow and a resize pointer. The close button asks
+  pointers are the six `wm` makes: a client asks for one of them by name,
+  and cannot give an image of its own. The close button asks
   its client to close the window, and gives it 2 seconds to, however
   long it needs, as a dialog asking to save would: then it is killed,
   whatever it is doing. The pointer has

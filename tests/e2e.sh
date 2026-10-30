@@ -11,13 +11,19 @@
 #              (a time, a port number)
 #   status     the exit status, 0 if there is no such file
 #   stderr     a line standard error must hold, if there is such a file
+#   filter     a sed -E script standard output goes through first, for
+#              columns that differ every boot, as ps's CPU and %CPU,
+#              which the cases that show ps make a ~ each
 #
 # If NAME/typed exists, it is typed at the board's serial line, through
 # tools/qemu-boot.sh, a line at a time as tools/slowtype types, for the
 # console driver to read. If NAME/font exists, the face (the pointers)
 # is added to the case's etc as /etc/face, and the fonts and the
 # desktop's strikes as /etc/fonts, for the font service, which draws the
-# text. If NAME/disk exists, the
+# text. If NAME/filler holds DIRS FILES, the case's etc gets DIRS
+# directories of FILES small files each, /etc/filler/dD/fF, for a
+# volume filled from the initramfs to hold many files besides its
+# programs. If NAME/disk exists, the
 # board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
 # case: of its own layout, if NAME/layout holds one, SECTORS then each
 # volume as mkfs takes them, in which @ is the case's own initramfs, to
@@ -122,6 +128,18 @@ run_case() {
     grep -rlZ '@PORT@' "$etc" | xargs -0 sed -i.bak "s/@PORT@/$port/g"
     find "$etc" -name '*.bak' -delete
   fi
+  if [ -f "$dir/filler" ]; then
+    local dirs files d f
+    read -r dirs files < "$dir/filler"
+    if [ "$etc" = "$dir/etc" ]; then
+      etc="$BUILD/e2e/$name.etc"
+      rm -rf "$etc" && cp -R "$dir/etc" "$etc"
+    fi
+    for ((d = 0; d < dirs; d++)); do
+      mkdir -p "$etc/filler/d$d"
+      for ((f = 0; f < files; f++)); do echo "$d $f" > "$etc/filler/d$d/f$f"; done
+    done
+  fi
   if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; return
   fi
@@ -186,6 +204,10 @@ run_case() {
   fi
   status=$?
   why=""
+  if [ -f "$dir/filter" ]; then
+    # Columns that differ every boot (ps's CPU and %CPU) made the same.
+    sed -E -f "$dir/filter" "$out" > "$out.filtered" && mv "$out.filtered" "$out"
+  fi
   if [ -n "$serve_pid" ]; then kill "$serve_pid" 2> /dev/null; wait "$serve_pid" 2> /dev/null; fi
   if [ -n "$peer_pid" ]; then
     # The peer has had the whole boot; give it a moment more, then stop it.

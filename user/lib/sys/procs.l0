@@ -67,3 +67,108 @@
 (def program_name ((pid int)) (list int)
   (let path (if (lt pid 1) "" (proc_path pid))
     (if (is_empty path) "?" (base_name path))))
+
+; ----------------------------------------------------------------- the CPUs
+
+; How much CPU time each live process had at a time: the time, and each
+; pid's CPU time, both in ns, as cpu_usage says them.
+(data CpuSeen (CpuSeen int (Map int int)))
+
+; Each of procs' CPU time now; none of a process that has gone.
+(def cpu_seen ((procs (list ProcLive))) CpuSeen
+  (CpuSeen (clock_ns) (cpu_seen_onto procs ((MapEmpty int int)))))
+
+; cpu_seen's loop: the times of procs put in m.
+(def cpu_seen_onto ((procs (list ProcLive)) (m (Map int int))) (Map int int)
+  (if (is_empty procs)
+      m
+      (match (head procs)
+        ((ProcLive pid info)
+          (match (proc_cpu pid)
+            ((None) (cpu_seen_onto (tail procs) m))
+            ((Some c) (match c ((ProcCpu t cpu age) (cpu_seen_onto (tail procs) (map_put m pid t))))))))))
+
+; pid's CPU time when seen, -1 if it was not seen.
+(def seen_time ((s CpuSeen) (pid int)) int
+  (match s ((CpuSeen at m) (match (map_get m pid) ((None) -1) ((Some t) t)))))
+
+; When s was seen.
+(def seen_at ((s CpuSeen)) int (match s ((CpuSeen at m) at)))
+
+; A share in tenths of a percent: used of all, both in ns, at most 100%
+; (1000), 0 of nothing.
+(def cpu_tenths ((used int) (all int)) int
+  (if (le all 0) 0 (min 1000 (max 0 (div (mul used 1000) all)))))
+
+; pid's % of one CPU from before to after, in tenths: its CPU time's
+; growth over the time between; over its life, age ns, with its time
+; now, if before did not see it.
+(def pid_tenths ((before CpuSeen) (after CpuSeen) (pid int) (age int)) int
+  (let t1 (seen_time after pid)
+    (let t0 (seen_time before pid)
+      (if (lt t1 0)
+          0
+          (if (lt t0 0)
+              (cpu_tenths t1 age)
+              (cpu_tenths (sub t1 t0) (sub (seen_at after) (seen_at before))))))))
+
+; Tenths of a percent as ps says them: 12.3, 0.0, 100.0.
+(def tenths_text ((n int)) (list int)
+  (append (digits (div n 10)) (append "." (digits (mod n 10)))))
+
+; A CPU's number as ps says it, - for none yet.
+(def cpu_text ((cpu int)) (list int) (if (lt cpu 0) "-" (digits cpu)))
+
+; The names a process serves, comma separated, as ps and System Monitor
+; say them: - for none.
+(def serves_text ((names (list (list int)))) (list int)
+  (if (is_empty names) "-" (join_with "," names)))
+
+; The load average l, in fixed point of 2048 to 1.0, to two places, as
+; uptime says it: 0.12, 1.00.
+(def load_text ((l int)) (list int)
+  (let h (div (add (mul l 100) 1024) 2048)
+    (append (digits (div h 100)) (append "." (pad_zero (digits (mod h 100)) 2)))))
+
+; s with zeros before it, to w characters.
+(def pad_zero ((s (list int)) (w int)) (list int)
+  (if (ge (length s) w) s (pad_zero (cons 48 s) w)))
+
+; How long since boot as uptime says it, H:MM:SS, from ns.
+(def up_text ((ns int)) (list int)
+  (let s (div ns 1000000000)
+    (append (digits (div s 3600))
+      (append ":" (append (pad_zero (digits (mod (div s 60) 60)) 2) (append ":" (pad_zero (digits (mod s 60)) 2)))))))
+
+; What uptime says, from what the kernel said before and after a time
+; between: how long the system has run, the load averages, and each CPU's
+; % busy between them, CPU 0's with the kernel's own share.
+(def uptime_text ((a CpuUsage) (b CpuUsage)) (list int)
+  (match b
+    ((CpuUsage up waited l1 l5 l15 busy)
+      (let loads (join_with ", " (cons (load_text l1) (cons (load_text l5) (cons (load_text l15) (nil (list int))))))
+        (append "up " (append (up_text up) (append ", load average: " (append loads (append "\n" (cpus_lines a b))))))))))
+
+; The lines of each CPU's % busy from a to b, as uptime_text says them.
+(def cpus_lines ((a CpuUsage) (b CpuUsage)) (list int)
+  (match a
+    ((CpuUsage up0 w0 x0 y0 z0 busy0)
+      (match b
+        ((CpuUsage up1 w1 x1 y1 z1 busy1)
+          (let all (sub up1 up0)
+            (let ran0 (sub (nth_or busy1 0 0) (nth_or busy0 0 0))
+              (let k0 (max 0 (sub (sub all (sub w1 w0)) ran0))
+                (append (cpu_line 0 (add ran0 k0) all)
+                  (append (append ", the kernel " (append (tenths_text (cpu_tenths k0 all)) "%\n"))
+                    (others_lines (drop busy0 1) (drop busy1 1) 1 all (nil int))))))))))))
+
+; One CPU's line, without its end: "CPU i: N% busy".
+(def cpu_line ((i int) (used int) (all int)) (list int)
+  (append "CPU " (append (digits i) (append ": " (append (tenths_text (cpu_tenths used all)) "% busy")))))
+
+; The lines of the CPUs from i on, their busy times before and after.
+(def others_lines ((before (list int)) (after (list int)) (i int) (all int) (acc (list int))) (list int)
+  (if (is_empty after)
+      (rev acc)
+      (others_lines (if (is_empty before) before (tail before)) (tail after) (add i 1) all
+        (push "\n" (push (cpu_line i (sub (head after) (nth_or before 0 0)) all) acc)))))

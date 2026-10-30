@@ -175,3 +175,12 @@ click $((cx + 94)) $((cy + 106))
 got=$(ink_is $((18 + 576)) $((18 + 608)) $y "$((cx + 18 + 592)) $((cx + 18 + 597))" "Source Code Pro's i") || { echo "$got"; exit 1; }
 got=$(ink_is $((18 + 448)) $((18 + 480)) $y "$((cx + 18 + 451)) $((cx + 18 + 477))" "Source Code Pro's m") || { echo "$got"; exit 1; }
 echo "ok - fontview: Source Code Pro at 64, its i and m each in a cell of 32, the same width"
+
+# font's stats, asked at the serial line: the strikes Fonts asked for and
+# font made for it, at 12, held by Fonts alone, the one live process that
+# asked; and the pages they take, of how many arenas'.
+printf 'run fonts\n' >&3
+waits_for "^code 12 +[0-9]+ bytes +held by 1$"
+waits_for "^sans 12 +[0-9]+ bytes +held by 1$"
+waits_for "^strikes built: [0-9]+, pages used: [0-9]+ of [0-9]+$"
+echo "ok - fontview: font's made strikes held by Fonts, $(grep -a '^strikes built' "$out" | tail -1)"

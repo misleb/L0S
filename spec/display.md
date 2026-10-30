@@ -19,7 +19,7 @@ pixels, and draw the pointer as a top layer.
 | `layers ID X Y TOP ...` | the screen, bottom first: each buffer at X, Y, its rows read from row TOP on, as a ring. The bottom layer covers the screen. Only the bands of rows whose pixels changed are transferred and flushed; the first `layers` shows the whole screen |
 | `damage ID X Y W H ...` | each rectangle of its buffer changed, one or more groups of five: shown wherever they are visible, all together, with boxes that overlap transferred and flushed as one |
 | `shape ID TL TR BL BR` | the buffer's corners rounded, top left, top right, bottom left, bottom right, each radius from 0 (square) to half its width and height. virtio-gpu cannot blend, so it narrows the layer's rows within a corner, and `hvs` writes the alpha of the pixels there 0; either way the layer beneath shows there. A buffer is square when shared; if it is on the screen, the screen is rebuilt |
-| `cursor ID HX HY` | the pointer's image, a 64×64 buffer, and its hot spot |
+| `cursor ID HX HY` | the pointer's image, a 64×64 buffer, and its hot spot. The driver reads a buffer's pixels the first time `cursor` names it and keeps them, its **cursor set**, so naming it again switches the pointer for the cost of one command; a buffer of the set is not given again by `buffer` until it is forgotten, which gives up what the driver made of it |
 | `move X Y` | the pointer's hot spot at X, Y |
 | `frames PORT` | from now on, PORT told the display's notices: `frame N` after each frame that showed a change, N counting from 1, and `release ID` once buffer ID is no longer read, having left the stack |
 
@@ -84,7 +84,11 @@ so that the guest copies no pixels at all:
    list, with `DETACH_BACKING` then `ATTACH_BACKING`.
 2. **A hardware cursor**, on the cursor queue: `UPDATE_CURSOR` with a
    64×64 resource, then `MOVE_CURSOR` for each move. Moving the pointer
-   costs one small command and no screen update.
+   costs one small command and no screen update. The cursor set is a
+   resource for each buffer `cursor` has named, 4 to 15, so 12 at most,
+   made, backed and transferred the first time `cursor` names it; after that `cursor` is one
+   `UPDATE_CURSOR` and nothing on the control queue, and `forget`
+   detaches and unreferences it.
 3. **Damage-only updates**: a transfer and a flush of just the rectangle
    that changed.
 
@@ -309,9 +313,11 @@ Scaler (SCALER6), so no pixel is copied:
    the Pi's DMA does not see the CPU's caches. So `damage` only cleans the
    pages of the damaged rows, and `buffer` cleans all of a new buffer's.
 6. **The pointer is a plane on top** with its pixels' own alpha. A move
-   writes the list again. A new image, which `wm` paints into the same
-   buffer, has its pages cleaned when `cursor` names it; before, the HVS
-   showed it torn, old rows beside new, until the caches wrote back.
+   writes the list again, and so does `cursor`, which only points the
+   plane at another buffer: every buffer is already the cursor set
+   there. A buffer's pages are cleaned when `cursor` names it, as when
+   it is given; before, a pointer painted again into the same buffer
+   showed torn, old rows beside new, until the caches wrote back.
 
 7. **Rounded corners are alpha.** Cutting them a row at a time would
    cost a plane per row of each corner, and the HVS has 32 handles (see
@@ -460,6 +466,9 @@ of them could be confirmed from Linux's source:
   takes 10,500; more windows over pages apart could reach the limit, and
   the driver then says the screen is in too many pieces. Pages given
   together usually lie together, and their runs join.
+- **virtio-gpu's cursor set holds 12 cursors**; a thirteenth buffer
+  named by `cursor` is refused until one of them is forgotten. `wm`
+  makes six.
 - **Nothing is drawn by the GPU.** With virgl (the GL device) it copies
   the layers into the screen, and in 2D mode the host composes them
   from the clients' pages, but every pixel in them is painted by the
@@ -475,20 +484,30 @@ of them could be confirmed from Linux's source:
   row 1920 wide takes 61 units and one 3840 wide 121, so a screen holds
   about 16 rows of 1920, or 8 of 3840: at 3840×2160 the desktop and the
   top bar take 242 units, and a window about W/8 for a width of W at
-  scale 2, its content and its frame. A screen past either is shown
-  without its lowest pieces, the wallpaper's first, left out one at a
-  time until the rest fit (`pieces.l0`'s `screen_fit`), so the pointer
-  and the windows on top go on, over the HVS's background where the
-  pieces left out were, which `hvs` sets to the wallpaper's corner's
-  color (its register holds 10 bits each of green, blue and red, from
-  bit 20 down); `hvs` says so once as it begins and once as it fits
-  again. Only a screen whose topmost piece alone cannot be one list is
-  refused. A list must fit beside the one shown, so while a big window
-  is dragged off the screen's bottom edge beside others, lists alternate
-  frame by frame between most of the screen left out, the background
-  below the top bar, and all of it: a flicker. Lines where many big
-  windows overlap can also show black as the HVS fails to fetch them in
-  time, which moves with the window that crowds them.
+  scale 2, its content and its frame. A list must fit beside the one
+  shown: a piece still there as wide keeps its units and handle, and a
+  piece new to the list takes over those of one the list shown has and
+  this one has not, if exactly as many, as a paced window's other buffer
+  does each present (Linux keeps a plane's UPM over a page flip); any
+  other takes free ones. Exactly: a handle's units kept for a plane of
+  another width blanked the whole screen now and then on a Pi 5. A
+  screen past either is shown without the pieces that need units the
+  list shown does not give them, the lowest first, and only if none
+  does without the lowest (`pieces.l0`'s `screen_fit`), so what is left
+  out for a frame is a window that has just changed size, not what was
+  there; the pointer and the windows on top go on, over the HVS's
+  background where the pieces left out were, which `hvs` sets to the
+  wallpaper's corner's color (its register holds 10 bits each of green,
+  blue and red, from bit 20 down); `hvs` says so once as it begins and
+  once as it fits again. Only a screen whose topmost piece alone cannot
+  be one list is refused. A window dragged across the screen's right or
+  left edge changes width on the screen as it goes, so with other big
+  windows open it may be left out a frame at a time. With a few big
+  windows the whole screen below the top bar still shows the background
+  now and then, for a frame, not from a list that left pieces out, no
+  HVS register saying why (goal 0050); and lines where many big windows
+  overlap can show black as the HVS fails to fetch them in time, which
+  moves with the window that crowds them.
   Resizing windows at 4K still brings gaps of 100 to 170 ms with no end
   of frame now and then, the HVS making frames meanwhile: the kernel's
   calls that allocate, share and give up a window's buffers of 8,000

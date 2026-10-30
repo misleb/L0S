@@ -27,7 +27,7 @@ What it is, as decided with the user:
 
 - **It only answers.** It acts when someone talks to it and at no other
   time; waking on its own, and what it did while no one watched, are
-  [0051](0051-agent-on-its-own.md)'s.
+  [0053](0053-agent-on-its-own.md)'s.
 - **The console talks to it**, `run agent` at a shell. The desktop is
   0049's; the network later.
 - **Its limits are soft.** Nothing asks the person's yes, and nothing
@@ -250,7 +250,7 @@ What it is, as decided with the user:
 
 - 2026-10-29: written, with 0041, 0042 and 0044 to 0049.
 - 2026-10-29: steps written, the open questions settled with the user:
-  it only answers (acting on its own is 0051, a new idea); the console
+  it only answers (acting on its own is 0053, a new idea); the console
   talks to it; nothing asks the person's yes. Compaction is by the
   model's summary of the older turns. The goal stays active until its
   last step has run on a Pi 5 as well as on QEMU.

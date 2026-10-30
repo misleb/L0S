@@ -271,8 +271,9 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
 - **Waiting for a message or a time.** A receive cannot time out. Either a
   device interrupt arrives as a message (`irq_bind`), or an alarm does
   (`alarm_at port t`, the kernel's notice at `t`, as `usb-hid` times a
-  held key's repeats), or the loop polls with `port_try_receive` and
-  `sleep_ns` (`rtc clock`, `procmon`).
+  held key's repeats, `inet` its TCP timers and `rtc clock` the minute).
+  Only a driver with no interrupt polls, with `port_try_receive` and
+  `sleep_ns` (`xhci`, `gem` without theirs).
 - **Waiting on several ports.** `port_set ports` once, then
   `port_receive_set` gives `(SetMessage port m)`, the oldest message
   across them and the port it came on: a server with a port per name

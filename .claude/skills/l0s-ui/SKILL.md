@@ -127,7 +127,11 @@ the display. This is the working summary, with the rules.
   state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them;
   `ui_hit nodes x y` gives the action under a point.
 - **`grid.l0`**: the data grid, typed cells, sorting, selection, keys,
-  the wheel, and an overlay scrollbar whose slider drags.
+  the wheel, down and, when its columns are wider than it, across
+  (`NAME.across...`, `NAME.acrossbar...`, `NAME.acrossto.N`, how far in
+  `UiGridState`'s last field; its ops cut to its edges by
+  `ui_cut_across`), and overlay scrollbars whose sliders drag. QEMU's
+  tablet sends no wheel across: a screen test drags the slider.
 - **`panes.l0`**: what a window of panes needs:
   `UiSidebar` (rows of an icon, title and line on the sidebar's ground),
   `UiSegmentBar` (a whole in parts by weight, `ui_shares`, each part
@@ -303,14 +307,19 @@ driver composes them.
   `vt`, which paints its terminal in a `UiDrawingArea` itself, rewraps
   its cells and paints the area whole before `ui_present`. The cost that matters is pages shared and
   given up, not pixels: keep resizes in place.
-- **The pointer's image** (`pointer_shaped`, `pointer_wanted`,
-  `resize_cursor`): buffer 1, painted again with `ui_paint_named_cursor`
-  and given with `display_cursor` and its hot spot (`ui_cursor_hot_x`) only
-  when it changes: `ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize`
-  over edges or while they are dragged, the arrow `""` elsewhere. `Ptr`
-  keeps its canvas and name; `windows` reports the name. A new pointer
-  needs its 1x art in `ui_cursor_art`, its hot spot, and its shapes as
-  `cursor NAME` in `fonts/cursors.paths`.
+- **The pointers** (`with_pointers`, `pointer_shaped`, `pointer_wanted`,
+  `resize_cursor`): `ui_cursor_names`, each painted once at start into
+  one region (`ui_paint_cursor_at`) and given as a buffer of its own
+  (`pointer_id`: the arrow 1, the rest from 100001), the display's cursor
+  set; switching is one `display_cursor` with its hot spot
+  (`ui_cursor_hot_x`), only when it changes: `ew-resize`, `ns-resize`,
+  `nwse-resize`, `nesw-resize` over edges or while they are dragged,
+  over a content what its client asked with `cursor ID NAME` (`Ptr`'s
+  map; the toolkit asks `text` over an entry and the resize pointer
+  inside a CSD edge, `ui_pointer_at`), the arrow `""` elsewhere;
+  `windows` reports the name. A new pointer needs its name in
+  `ui_cursor_names`, its 1x art in `ui_cursor_art`, its hot spot, and
+  its shapes as `cursor NAME` in `fonts/cursors.paths`.
 - **Layers**, bottom first (`layers ws shown`): the desktop; each window from the back,
   its chrome at `x, y`, its content at `x + edge, y + 46`; then the top
   bar over everything. While the launcher is shown: the desktop, the
@@ -456,7 +465,12 @@ way; buffers and painting are in the screen's.
   `glyph.FACE.H`, FACE `code`, `code-bold`, `sans` or `sans-bold`
   (`ui_font_face`), H = 16·text scale·s (16, 32, 64),
   each a `UiStrike` over the pages `font` shares, read in place, each
-  glyph its ink's box (`format/strike.l0`). Only `wm` adds `/etc/face`'s
+  glyph its ink's box (`format/strike.l0`): `UiStrikeIn REGION VA OFF`,
+  the region over the `font` arena at VA that holds it, opened once for
+  every strike in that arena, so strikes cost a region an arena, not a
+  strike (`ui_strike_regions`). `font` answers strikes as they are made,
+  not in the order asked, each answer naming its strike, which is how
+  `ui_face_answered` matches it. Only `wm` adds `/etc/face`'s
   `cursor` tables, at scale 2 (`ui_face_pointers`). A pixel is mixed with
   what is under it by its level (`ui_cov_put`); a missing strike or icon
   is not drawn (`ui_face_has_text`, and a window that cannot say so does

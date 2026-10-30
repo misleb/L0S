@@ -7,7 +7,7 @@ Track: Agent · Status: idea · Needs: 0043 · Spec: agent.md, programs.md, desk
 0043's `run agent` is a shell's. On the desktop the agent wants an app
 of its own: a conversation that scrolls, an entry to write in, each
 tool it runs shown as it runs, and a way to see what it did while no
-one watched (0051). Nothing it does asks the person's yes (0043), so
+one watched (0053). Nothing it does asks the person's yes (0043), so
 the app asks none either.
 
 ## Done when

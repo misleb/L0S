@@ -1,6 +1,6 @@
 # 0030: How the CPUs are used, and what each process serves, in `ps` and System Monitor
 
-Track: Kernel · Status: idea · Needs: – · Spec: kernel.md, syscalls.md, programs.md, demo.md, testing.md
+Track: Kernel · Status: active · Needs: – · Spec: kernel.md, syscalls.md, programs.md, demo.md, testing.md
 
 ## Why
 
@@ -64,19 +64,55 @@ show the load averages.
 
 ## Steps
 
-To be written. Clock reads cost little on CPU 0, which the kernel
-already does on every hand-off and trap (`cpus_place`, `cpus_back`), so
-the totals should cost an add each.
+- [x] 1. The kernel counts: a pure `kernel/usage.l0`, kept in `Cpus`,
+  with each slot's CPU time, last CPU and start, each CPU's busy time,
+  CPU 0's time waiting, and the load averages, sampled every 5 s and
+  decayed as Linux's `calc_load` does (fixed point, 11 bits). A thread
+  out on CPU 1 to 3 is charged from the later of its hand-off and the
+  return of the one before it on that CPU, to its trap; a turn on CPU 0
+  (or a run on one CPU) from its start to its park, its calls
+  included. CPU 0's own time waiting is the time in `cpu_wait` or
+  `interrupt_wait`; the wait wakes for the load's tick. Host tests in
+  `usage_test.l0` and `cpus_test.l0`.
+- [x] 2. The calls: `cpu_usage` (304), a process's record (its CPU
+  time, the CPU it is on or last ran on, its start), or with pid 0 the
+  system's (uptime, CPU 0's waiting, each CPU's busy time, the load);
+  and `name_list` (305), the names registered from the i-th in order,
+  each with its port and owner, as many whole as the buffer holds. By
+  the system call checklist, with board tests in
+  `kernel_virt_test.l0`, refusals included.
+- [x] 3. `ps` with CPU, %CPU (over the quarter second `ps` watches, or
+  over the process's life if it is newer; see the Log) and SERVES
+  columns; `names`, every
+  name, its port, owner and program; `uptime`, how long the system has
+  run, the load averages, and each CPU's % busy over a second, CPU 0's
+  kernel share beside it. Shell builtins, with `procs.l0` holding what
+  `ps` and System Monitor share. The e2e cases that show `ps` mask its
+  CPU and %CPU, which differ every boot (`e2e.sh`'s `filter`).
+- [x] 4. System Monitor: CPU, % CPU and Provides columns, sortable;
+  under the grid, each CPU's % busy as a level bar, CPU 0 marked the
+  kernel's, and the load averages, read every second. `procmon.sh`
+  follows.
+- [x] 5. Tests on QEMU with `-smp 4`: an e2e case, `cpu_usage`, of
+  three spins beside `ping` to `echo`, where `ps` shows each spin near
+  100% on a CPU from 1 to 3; and `names`, where `ps` and `names` agree
+  on who serves `compositor` and `console`, and a name goes once its
+  owner is killed.
+- [ ] 6. On the Pi 5, `ps` and `uptime` show which processes run on
+  which CPU, booted by the user with `tools/pi5-boot`; its lines go in
+  the Log.
 
 ## Spec changes
 
-- kernel.md: what the kernel counts, and the load averages.
-- syscalls.md: the CPU call, or `ProcInfo`'s new fields, and the call
-  that lists names.
-- programs.md: `ps`'s columns, `names`' row, `uptime`'s row if it is a
-  program, System Monitor's CPU and Provides columns and its bars.
-- demo.md: the `ps` sample with its new columns.
-- testing.md: the tests that read them.
+All moved into the spec: kernel.md (How the CPUs are used: what the
+kernel counts, CPU 0's waiting and the kernel's share, the load
+averages; `usage.l0` in the files table), syscalls.md (calls 304
+`cpu_usage` and 305 `name_list`), programs.md (`sh`'s `ps` columns,
+`names` and `uptime`, builtins of the shell; System Monitor's % CPU,
+CPU and Provides columns, its CPUs' bars and the load; `procs.l0`),
+demo.md (the `ps` sample with its columns, `names` and `uptime`),
+testing.md (`filter`, the `cpu_usage` and `names` cases, the board
+tests, `procmon.sh`'s CPU bar).
 
 ## Log
 
@@ -84,3 +120,26 @@ the totals should cost an add each.
   use could be argued from the code but not seen.
 - 2026-10-28: widened to the names each process serves, which `ps` and
   System Monitor should show beside its CPU.
+- 2026-10-29: steps 1 to 5 done. The kernel counts in `kernel/usage.l0`,
+  kept in `Cpus`, at a look at the clock per park, hand-back or wait,
+  not per trap: a turn on CPU 0 is counted whole as it ends, its calls
+  included (`k_turn_over`, `step`). Calls 304 `cpu_usage` and 305
+  `name_list`, with board tests on 1 and 4 CPUs (`test_cpu_usage_*`,
+  `test_name_list*`; a spinner's time grows on CPU 0 alone, or on a CPU
+  from 1 to 3). `ps`, `names` and `uptime` are the shell's builtins.
+  `ps`'s %CPU is over a quarter second it watches, not "since the last
+  `ps`": that needs state the shell keeps between commands, threaded
+  through `repl` and `obey`, which goal 0017 rewrote at the same time;
+  the window says as much, as `top`'s first screen does. The e2e cases
+  that show `ps` mask its CPU and %CPU (`e2e.sh`'s new `filter`);
+  `cpu_usage` (three spins at 90%+ on CPUs 1 to 3, `echo` on CPU 0, a
+  load above 0) and `names` (`compositor` and `console` agreed on, `echo`
+  gone once killed) are new. System Monitor is 1080 wide for its % CPU,
+  CPU and Provides columns, with its CPUs' bars under the memory's.
+  `make check`, `make test`, `make test-virt` pass; e2e run for the
+  cases that show `ps`, `shell`, `cpu_usage` and `names`. `procmon.sh`
+  passes up to its last two checks, the slider wide under the pointer
+  and dragged: they fail the same with main's kernel, shell and
+  procmon on this machine, the grid scrolled back from its end within
+  0.2 s of the wheel, so not this goal's; left for the merge's `make
+  e2e` to show. Step 6, the Pi 5's board run, is the user's.

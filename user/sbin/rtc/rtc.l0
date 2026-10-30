@@ -6,9 +6,10 @@
 ;               message
 ;   rtc clock   maps the clock and serves clock (user/lib/clock.l0): the
 ;               time, to whoever asks, and at the start of every minute
-;               to each process listening. It looks for both every
-;               quarter of a second, and leaves the interrupt alone, so
-;               rtc can still take it
+;               to each process listening. It waits for requests,
+;               and for the kernel's alarm (call 297) at the start of
+;               the next minute, and leaves the interrupt alone, so rtc
+;               can still take it
 
 (def rtc_base () int 151060480)     ; 0x09010000
 (def rtc_irq () int 34)
@@ -72,8 +73,6 @@
           (rtc_clock)
           (complain "usage: rtc [clock]"))))
 
-(def poll_ns () int 250000000)
-
 ; The clock rtc clock serves: a PL031, or the Raspberry Pi 5's RTC,
 ; which only its firmware reaches (firmware.l0).
 (data Clock (Pl031Clock IoDevice) (FirmwareClock FwClock))
@@ -109,20 +108,37 @@
     (let r (name_register_or_why port "clock")
       (if (is_empty r)
           (let n (info_as "rtc" line)
-            (clock_serve c port (next_minute (clock_now c)) (nil int)))
+            (clock_serve c port (clock_alarmed c port) (nil int)))
           (complain r)))))
 
-; Every request waiting answered, then the listeners told the time if a
-; minute has begun, then a nap: due is when the next minute begins, and
-; ls the ports listening.
+; Each request answered as it comes, and the listeners told the time
+; when the kernel's alarm rings at the start of a minute: due is when the
+; next minute begins, as c counts, which the alarm is set for, and ls the
+; ports listening. An alarm that rings before c has reached due, as one
+; may if the board's clock and the kernel's drift apart, is set again.
 (def clock_serve ((c Clock) (port int) (due int) (ls (list int))) int
-  (match (port_try_receive port)
-    ((Message from b) (clock_serve c port due (clock_asked (clock_now c) (msg_text b) ls)))
-    ((RecvFailed)
-      (let t (clock_now c)
-        (if (lt t due)
-            (let z (sleep_ns (poll_ns)) (clock_serve c port due ls))
-            (let z (sleep_ns (poll_ns)) (clock_serve c port (next_minute t) (listeners_tell ls (time_notice t)))))))))
+  (match (port_receive port)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from b)
+      (if (is_alarm_notice (Message from b))
+          (let t (clock_now c)
+            (if (lt t due)
+                (let a (alarm_at port (minute_alarm (clock_ns) t due)) (clock_serve c port due ls))
+                (clock_serve c port (clock_alarmed c port) (listeners_tell ls (time_notice t)))))
+          (clock_serve c port due (clock_asked (clock_now c) (msg_text b) ls))))))
+
+; When the next minute begins, as c counts, the kernel's alarm set for
+; it on port.
+(def clock_alarmed ((c Clock) (port int)) int
+  (let t (clock_now c)
+    (let due (next_minute t)
+      (let a (alarm_at port (minute_alarm (clock_ns) t due)) due))))
+
+; The time on clock_ns, now there, when the clock that says t now says
+; due: the seconds between them later, and at least one, so an alarm
+; that rang early does not ring again at once.
+(def minute_alarm ((now int) (t int) (due int)) int
+  (add now (mul (max 1 (sub due t)) 1000000000)))
 
 ; A request at t, answered: listen adds its reply port to ls.
 (def clock_asked ((t int) (payload (list int)) (ls (list int))) (list int)

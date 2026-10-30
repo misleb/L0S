@@ -159,7 +159,7 @@ request built, its streamed events read), which 0043's `agentd` uses.
   URL; the board's token a file, `/etc/agent/token`, made on the host
   in `build/` and given to boards by `make agent-etc`; the budget
   counted only, logged per answer and per day, nothing refused for it
-  (an agent acting on its own, 0051, may want a cap). The goal stays
+  (an agent acting on its own, 0053, may want a cap). The goal stays
   active until its last step has run on a Pi 5 as well as on QEMU. An
   e2e case's etc gets `@PORT@`, so the board finds the stand-in's proxy
   at 10.0.2.2 on the boot's free port, as `typed` does.
