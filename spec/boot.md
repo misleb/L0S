@@ -186,9 +186,18 @@ or with the volume missing, `boot` says so and starts the initramfs's own
 initramfs's, started before the switch, and a program started after it
 never drives a device.
 
-Programs never ask where `/` is: `root_paths` lists it, `program_found`
-finds a program in it, and `spawn_path` starts one, from the initramfs's
+Programs never ask where `/` is: `root_paths` lists it, `program_paths`
+lists the directories a program can be in, `program_found` finds a
+program among those, and `spawn_path` starts one, from the initramfs's
 entry or a volume's file, as the shell, `init`, `wm`, `vt` and `boot` do.
+On a system volume `program_paths` lists `/bin`, `/sbin`,
+`/Applications` and each bundle in it, a level each, and nothing else,
+so the shell's `run`, its unknown words and `init` take as long on a
+volume full of other files as on one without; a program run by a path
+elsewhere is asked of the file server (`fs_stat`). The apps
+(`app_bundles`) are a listing of `/Applications`, and a file command
+asks only for what it names; the shell's `ls` with no path, which lists
+every file, and `install` are all that walk `/`.
 
 ## Limits
 
@@ -209,7 +218,8 @@ entry or a volume's file, as the shell, `init`, `wm`, `vt` and `boot` do.
   which lists everything, and a volume's its server's `list`, a message
   of entries at a time; `root_paths` lists `/` either way, a system
   volume a directory at a time, every directory of it, which takes the
-  longer the more the volume holds.
+  longer the more the volume holds: the shell's `ls` with no path and
+  `install` do, and nothing that looks for a program or an app.
 - **Booting from a volume needs the initramfs still.** The kernel comes
   from QEMU, and the drivers and `fs` from the initramfs, which are the
   only programs that may drive devices: a program started from a

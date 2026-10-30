@@ -20,7 +20,10 @@
 # console driver to read. If NAME/font exists, the face (the pointers)
 # is added to the case's etc as /etc/face, and the fonts and the
 # desktop's strikes as /etc/fonts, for the font service, which draws the
-# text. If NAME/disk exists, the
+# text. If NAME/filler holds DIRS FILES, the case's etc gets DIRS
+# directories of FILES small files each, /etc/filler/dD/fF, for a
+# volume filled from the initramfs to hold many files besides its
+# programs. If NAME/disk exists, the
 # board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
 # case: of its own layout, if NAME/layout holds one, SECTORS then each
 # volume as mkfs takes them, in which @ is the case's own initramfs, to
@@ -108,6 +111,18 @@ run_case() {
     etc="$BUILD/e2e/$name.etc"
     rm -rf "$etc" && cp -R "$dir/etc" "$etc" && cp "$BUILD/face" "$etc/face" \
       && mkdir -p "$etc/fonts" && cp fonts/*.ttf "$BUILD"/strikes/*.strike "$etc/fonts/"
+  fi
+  if [ -f "$dir/filler" ]; then
+    local dirs files d f
+    read -r dirs files < "$dir/filler"
+    if [ "$etc" = "$dir/etc" ]; then
+      etc="$BUILD/e2e/$name.etc"
+      rm -rf "$etc" && cp -R "$dir/etc" "$etc"
+    fi
+    for ((d = 0; d < dirs; d++)); do
+      mkdir -p "$etc/filler/d$d"
+      for ((f = 0; f < files; f++)); do echo "$d $f" > "$etc/filler/d$d/f$f"; done
+    done
   fi
   if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; return

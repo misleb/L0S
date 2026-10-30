@@ -31,7 +31,6 @@ move independently, so several can be active at once.
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
 | [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | idea | – | 0012 | toolkit.md |
 | [0014](0014-wheel-across.md) Scrolling by the wheel across | Toolkit | idea | – | – | toolkit.md |
-| [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | idea | – | – | boot.md, programs.md |
 | [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008, 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
@@ -106,6 +105,7 @@ graph LR
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |
 | [0015](0015-proc-image-got.md) Proc images without `.bss`'s zeros | Tooling | 2026-10-26 |
 | [0016](0016-pi5-eeprom-config.md) The Pi 5's boot config, read and changed from L0S | Pi 5 | 2026-10-27 |
+| [0017](0017-paths-without-walking.md) Find programs and apps without walking the whole of `/` | Storage | 2026-10-29 |
 | [0019](0019-font-service.md) A font service that caches rasterized glyphs | Toolkit | 2026-10-27 |
 | [0020](0020-proportional-text.md) Proportional text where GNOME's is | Toolkit | 2026-10-28 |
 | [0021](0021-many-windows.md) An app with many windows, its events told by window | Desktop | 2026-10-28 |
