@@ -57,7 +57,8 @@ Each case of `tests/e2e/` is a directory:
   QEMU's `-netdev` names one without its id, such as `user` or
   `user,tftp=DIR`;
 - `serve`, a command line run on the host for the length of the boot, a
-  server the board reaches at 10.0.2.2, killed after; and `peer`, one run
+  server the board reaches at 10.0.2.2, killed after, the board booted
+  once it holds its port, TCP or UDP, or after 10 s; and `peer`, one run
   from its start that must exit 0, a client of a port the board listens
   to. `@PORT@` in either, in `net`, in `typed` and in any file of the
   case's `etc` (which is then copied into `build/e2e/CASE.etc` and made

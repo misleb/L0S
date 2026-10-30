@@ -36,7 +36,7 @@
 # user,tftp=tests/e2e/NAME/tftp for QEMU's TFTP server at 10.0.2.2
 # serving that directory. If NAME/serve exists, its line is a command run
 # on the host for the length of the boot, a server the board reaches at
-# 10.0.2.2, and if NAME/peer does, its line is a command run from its
+# 10.0.2.2, the board booted once it holds its port, and if NAME/peer does, its line is a command run from its
 # start that must exit 0 by the boot's end, a client of a port the board
 # listens to; @PORT@ in either, in NAME/net, in NAME/typed, and in any
 # file of NAME/etc (which is then copied, to build/e2e/NAME.etc) is a
@@ -98,6 +98,28 @@ if [ $# -gt 0 ]; then
   cases=()
   for n in "$@"; do cases+=("tests/e2e/$n/"); done
 fi
+
+# Waits, up to 10 s, until a case's serve, process pid, holds the port, TCP
+# or UDP: until 127.0.0.1's port can no longer be bound, so the board asks
+# no server that is still starting, as a busy host's Python may be.
+serve_up() {
+  local port=$1 pid=$2 n
+  for ((n = 0; n < 100; n++)); do
+    kill -0 "$pid" 2> /dev/null || return
+    python3 -I -c '
+import socket, sys
+for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+    s = socket.socket(socket.AF_INET, kind)
+    try:
+        s.bind(("127.0.0.1", int(sys.argv[1])))
+    except OSError:
+        sys.exit(0)
+    finally:
+        s.close()
+sys.exit(1)' "$port" && return
+    sleep 0.1
+  done
+}
 
 # Boots one case and writes its result: ok, or not ok with why and its
 # standard error. Run in the background, so it keeps nothing.
@@ -189,6 +211,7 @@ run_case() {
   if [ -f "$dir/serve" ]; then
     bash -c "$(sed "s/@PORT@/$port/g" "$dir/serve")" > "$BUILD/e2e/$name.serve" 2>&1 &
     serve_pid=$!
+    serve_up "$port" "$serve_pid"
   fi
   if [ -f "$dir/peer" ]; then
     bash -c "$(sed "s/@PORT@/$port/g" "$dir/peer")" > "$BUILD/e2e/$name.peer" 2>&1 &
