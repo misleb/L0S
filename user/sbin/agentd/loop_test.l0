@@ -44,7 +44,8 @@
     ((TellText s) (append "text " (bytes_to_list s)))
     ((TellTool n v) (append "tool " (append (bytes_to_list n) (append " " (bytes_to_list (json_bytes v))))))
     ((TellResult n f s) (append "result " (append (bytes_to_list n) (append (if f " failed " " ok ") (bytes_to_list s)))))
-    ((TellError s) (append "error " (bytes_to_list s)))))
+    ((TellError s) (append "error " (bytes_to_list s)))
+    ((TellCompacted a z) (append "compacted " (append (digits a) (cons 32 (digits z)))))))
 
 (def tells_text ((ts (list Tell))) (list int)
   (join_with "|" (tells_list ts)))
@@ -239,3 +240,81 @@
     ((Looped l acts)
       (add (check_int "acts" (length acts) 1)
            (check_bool "busy" (loop_busy l) true)))))
+
+; ------------------------------------------------------------ compaction
+
+; Six turns, the last answer's prompt 500 tokens: the person's first,
+; an answer, the person's second, an answer that uses a tool, its
+; result, and the answer after it.
+(def long_conv () Conv
+  (conv_spent
+    (adds (conv_new)
+      (cons (Turn true (cons (BText (b "first")) (nil Block)))
+      (cons (Turn false (cons (BText (b "a1")) (nil Block)))
+      (cons (Turn true (cons (BText (b "second")) (nil Block)))
+      (cons (Turn false (cons (BToolUse (b "u1") (b "read_file") (json_obj (nil JField))) (nil Block)))
+      (cons (Turn true (cons (BToolResult (b "u1") (b "its text") false) (nil Block)))
+      (cons (Turn false (cons (BText (b "a2")) (nil Block)))
+            (nil Turn))))))))
+    400 10 50 50))
+
+; A loop on long_conv, compacting past size, keeping keep turns.
+(def long_loop ((size int) (keep int)) Loop
+  (loop_compacting (loop_with_conv (loop0) (long_conv)) size keep))
+
+; How many messages request n holds.
+(def message_count ((s Standin) (n int)) int
+  (match (json_get (body_of s n) "messages") ((None) -1) ((Some ms) (length (json_items ms)))))
+
+; Request n's message i, as JSON text.
+(def message_at ((s Standin) (n int) (i int)) (list int)
+  (match (json_get (body_of s n) "messages") ((None) "none") ((Some ms) (bytes_to_list (json_bytes (nth (json_items ms) i))))))
+
+; Whether request n names tools.
+(def has_tools ((s Standin) (n int)) bool
+  (match (json_get (body_of s n) "tools") ((None) false) ((Some v) true)))
+
+; Past the size, a say asks for a summary first, with no tools, then
+; says the text to the compacted conversation: keeping 2 turns, the cut
+; moves back from the tool's result to the person's second, so the
+; summary turn joins it and four turns are kept, then the third said.
+(def test_compacts () int
+  (let s (loop_standin (long_loop 100 2) (b "third") (cons (says "SUMMARY") (cons (says "ok") (nil (list ModelEvent)))) (no_tools))
+    (add (check_int "asked" (asked s) 2)
+         (add (check_bool "no tools" (has_tools s 0) false)
+              (add (check_int "messages" (message_count s 1) 5)
+                   (check_str "first" (message_at s 1 0)
+                     "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"The conversation so far, summarized:\\n\\nSUMMARY\"},{\"type\":\"text\",\"text\":\"second\"}]}"))))))
+
+; The tool's use and its result are both kept, next to each other.
+(def test_compact_keeps_tool_pair () int
+  (let s (loop_standin (long_loop 100 2) (b "third") (cons (says "SUMMARY") (cons (says "ok") (nil (list ModelEvent)))) (no_tools))
+    (add (check_str "use" (message_at s 1 1)
+           "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"u1\",\"name\":\"read_file\",\"input\":{}}]}")
+         (check_str "result" (message_at s 1 2)
+           "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"u1\",\"content\":\"its text\"}]}"))))
+
+; The summary is told to no one; compaction is, its tokens before (the
+; last prompt's, 500) and after, estimated; then the answer's text.
+(def test_compact_told () int
+  (let s (loop_standin (long_loop 100 2) (b "third") (cons (says "SUMMARY") (cons (says "ok") (nil (list ModelEvent)))) (no_tools))
+    (add (check_bool "compacted first" (starts_with (told s) "compacted 500 ") true)
+         (check_bool "then the text" (ends_with (told s) "|text ok") true))))
+
+; The summary request holds the older turns as a transcript.
+(def test_compact_request () int
+  (let s (loop_standin (long_loop 100 2) (b "third") (cons (says "SUMMARY") (cons (says "ok") (nil (list ModelEvent)))) (no_tools))
+    (check_bool "transcript" (contains (message_at s 0 0) "The person:\\nfirst\\n\\nYou:\\na1\\n\\n") true)))
+
+; Under the size, or with too few turns to cut, no summary is asked.
+(def test_no_compaction () int
+  (add (check_int "under" (asked (loop_standin (long_loop 1000 2) (b "third") (cons (says "ok") (nil (list ModelEvent))) (no_tools))) 1)
+       (check_int "too few" (asked (loop_standin (long_loop 100 8) (b "third") (cons (says "ok") (nil (list ModelEvent))) (no_tools))) 1)))
+
+; A summary that fails leaves the conversation whole, says so, and the
+; text is said to it: seven messages.
+(def test_compact_fails () int
+  (let s (loop_standin (long_loop 100 2) (b "third")
+           (cons (cons (MError (b "overloaded_error") (b "busy")) (nil ModelEvent)) (cons (says "ok") (nil (list ModelEvent)))) (no_tools))
+    (add (check_str "told" (told s) "error compaction failed, the conversation kept whole: busy|text ok")
+         (check_int "messages" (message_count s 1) 7))))

@@ -208,7 +208,7 @@ What it is, as decided with the user:
   `/exit`, and outside it `cat /Volumes/data/agent/notes/today.txt` and
   `ls /Volumes/data/agent`, which shows `CLAUDE.md` made. `expected`
   follows. testing.md's case.
-- [ ] **Compaction.** In conv.l0 and loop.l0: once an answer's usage
+- [x] **Compaction.** In conv.l0 and loop.l0: once an answer's usage
   (input, cache written and cache read) passes `compact` tokens (the
   configuration's, 100000 if none), before the next turn is sent the
   loop asks the model, with no tools, to summarize every turn but the
@@ -364,3 +364,74 @@ What it is, as decided with the user:
   driver whatever its terminal, so under `agentd` it took the
   console's next line (the case's `/exit`); it now reads its terminal
   when it has one, and its inittab's console otherwise.
+- 2026-10-29: step 9 done. The summary request has no tools and one
+  message, the ask and the older turns as a transcript (`[tool NAME
+  INPUT]`, results cut to 2000 bytes), not the turns themselves, since
+  a request holding tool blocks wants the tools it leaves out. The
+  summary turn and the first kept turn, both the person's, join, as
+  `conv_add` joins two of a side. `compacted`'s AFTER is an estimate,
+  BEFORE in proportion to the prompt's bytes, as the real count is
+  only known from the next answer. A `stop` while the summary comes
+  drops it and the text waiting for it. `loop_new` keeps its
+  signature; `loop_compacting` sets the size and the turns kept, which
+  `agentd` gives each conversation from its configuration. Host tests
+  with the stand-in: a compaction, its request with no tools and the
+  transcript, the next request holding the summary and the kept turns;
+  the cut moved back from a tool's result, so the use and its result
+  stay together; under the size and with too few turns, none; a summary
+  that fails, the conversation kept whole and the failure told. Not in
+  the e2e case, whose conversation is short.
+
+  Step 10 is the user's, with a key; nothing before it needs one. On
+  QEMU, the home on the system disk's `data`:
+
+      make proxy                                 # once: the venv and build/proxy/token
+      export ANTHROPIC_API_KEY=sk-ant-...        # the host's key; never on the board
+      make proxy-run                             # the proxy on 127.0.0.1:8765; leave it running
+      # in another terminal:
+      make agent-etc API=10.0.2.2:8765           # MODEL=NAME for another than claude-sonnet-5-5
+      make demo-system NET=user                  # a fresh build/system.img: System, and data
+      # at the serial shell (dmesg shows agentd's lines; ps shows it waiting on 3 ports):
+      #   run agent
+      #   > make a directory notes in your home, write today.txt there saying what board you are on, run hello, and at sh, cat notes/today.txt
+      #   (each tool shows as [NAME INPUT] and [ok]; Ctrl-C stops a turn)
+      #   > /exit
+      #   cat /Volumes/data/agent/notes/today.txt
+      #   exit
+      # a reinstall that keeps the home: the initramfs, the same disk
+      make demo NET=user DISK=build/system.img
+      #   format System
+      #   run install System                     # /etc/agent goes with /etc
+      #   ls /Volumes/data/agent                 # CLAUDE.md and notes/, as they were
+      #   exit
+      make demo NET=user DISK=build/system.img ROOT_UUID=$(cat build/system.uuid)
+      #   run agent
+      #   > what does notes/today.txt in your home say?
+      build/proxy/venv/bin/python -I tools/api-proxy/proxy.py --day   # what today cost, UTC
+      rm -rf build/agent-etc                     # afterwards, to leave /etc/agent out again
+
+  On a Pi 5, the proxy on the host's LAN address (192.168.1.10 here;
+  `ip -4 addr` says it) and the card in the slot, with `bootfs` and
+  `System` as 0022 left it:
+
+      make proxy-run PROXY_LISTEN=192.168.1.10:8765
+      make agent-etc API=192.168.1.10:8765
+      make pi5-netboot && tools/pi5-boot --console
+      # at the serial shell, once, if the card has no data partition:
+      #   partition disk1 SECTORS              # room after System; it says the UUID
+      #   mkfs UUID data
+      #   reboot                               # agentd gave up waiting for /Volumes/data
+      #   run agent                            # the same conversation as on QEMU, then /exit
+      # the reinstall, from the netboot's initramfs:
+      #   format System
+      #   run install System
+      #   run install --boot bootfs --root System
+      #   ls /Volumes/data/agent               # as it was
+      # then boot from the card (no netboot), and:
+      #   run agent
+      #   > what does notes/today.txt in your home say?
+      build/proxy/venv/bin/python -I tools/api-proxy/proxy.py --day
+
+  Log what `agent` wrote, the usage lines from
+  `build/proxy/usage.jsonl` (the second request of a turn should read
+  the cache: `cache_read_input_tokens` above 0) and `--day`'s totals.

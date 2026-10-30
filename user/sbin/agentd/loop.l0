@@ -14,8 +14,9 @@
 
 ; What the person is told: a piece of the answer's text; a tool used,
 ; its name and input; its result, its name, whether it failed, and its
-; text; an error, why.
-(data Tell (TellText bytes) (TellTool bytes Json) (TellResult bytes bool bytes) (TellError bytes))
+; text; an error, why; the conversation compacted, its prompt's tokens
+; before and, estimated, after.
+(data Tell (TellText bytes) (TellTool bytes Json) (TellResult bytes bool bytes) (TellError bytes) (TellCompacted int int))
 
 ; What the loop asks of agentd: a request of the model to send, its
 ; bytes (model_request's); a notice to tell; a tool to run, its use's
@@ -34,9 +35,19 @@
 
 ; The loop: where the model is; the system prompt and the tools, as
 ; JSON; the conversation; the answer's parts, newest first; the tools
-; it used, in order; the rounds of tools in this turn; and whether an
-; answer is coming.
-(data Loop (Loop ModelConf Json Json Conv (list Part) (list Use) int bool))
+; it used, in order; the rounds of tools in this turn; whether an
+; answer is coming; and compaction's settings and state.
+(data Loop (Loop ModelConf Json Json Conv (list Part) (list Use) int bool Compactor))
+
+; Compaction: the prompt's size in tokens past which the conversation
+; is compacted before the next turn is sent, the turns kept, and the
+; summary being asked for, if one is.
+(data Compactor (Compactor int int Summary))
+
+; A summary asked for: none; or coming, the person's text that waits
+; for it, how many turns it summarizes, the prompt's tokens before, and
+; its text's pieces so far, reversed.
+(data Summary (NoSummary) (Summarizing bytes int int (list bytes)))
 
 ; A step's result: the loop after it, and its acts in order.
 (data Looped (Looped Loop (list Act)))
@@ -44,58 +55,140 @@
 ; The most rounds of tools in one turn.
 (def loop_rounds_max () int 32)
 
+; Compaction's settings if none are given: past 100000 tokens, keeping
+; the last 8 turns.
+(def loop_compact_default () int 100000)
+(def loop_keep_default () int 8)
+
 ; A loop on conversation c, asking the model c names with system and
 ; tools, waiting for the person.
 (def loop_new ((mc ModelConf) (system Json) (tools Json) (c Conv)) Loop
-  (Loop mc system tools c (nil Part) (nil Use) 0 false))
+  (Loop mc system tools c (nil Part) (nil Use) 0 false
+        (Compactor (loop_compact_default) (loop_keep_default) (NoSummary))))
+
+; l compacting past size tokens, keeping keep turns.
+(def loop_compacting ((l Loop) (size int) (keep int)) Loop
+  (match l ((Loop mc sy tl c ps us n on cp) (Loop mc sy tl c ps us n on (Compactor size keep (NoSummary))))))
+
+; l with no summary coming.
+(def no_summary ((cp Compactor)) Compactor
+  (match cp ((Compactor size keep s) (Compactor size keep (NoSummary)))))
 
 ; l's conversation.
 (def loop_conv ((l Loop) ) Conv
-  (match l ((Loop mc sy tl c ps us n on) c)))
+  (match l ((Loop mc sy tl c ps us n on cp) c)))
 
 ; Whether l is in a turn: an answer coming, or tools' results awaited.
 (def loop_busy ((l Loop)) bool
-  (match l ((Loop mc sy tl c ps us n on) (if on true (not (is_empty us))))))
+  (match l ((Loop mc sy tl c ps us n on cp) (if on true (not (is_empty us))))))
 
 ; Whether an answer is coming to l: asked, and not yet stopped.
 (def loop_answering ((l Loop)) bool
-  (match l ((Loop mc sy tl c ps us n on) on)))
+  (match l ((Loop mc sy tl c ps us n on cp) on)))
 
 ; The request asking the model of l's conversation so far.
 (def loop_request ((l Loop)) bytes
-  (match l ((Loop mc sy tl c ps us n on) (model_request mc sy (conv_messages c) tl))))
+  (match l ((Loop mc sy tl c ps us n on cp) (model_request mc sy (conv_messages c) tl))))
 
 ; l with c its conversation, as when compaction replaces it.
 (def loop_with_conv ((l Loop) (c Conv)) Loop
-  (match l ((Loop mc sy tl c0 ps us n on) (Loop mc sy tl c ps us n on))))
+  (match l ((Loop mc sy tl c0 ps us n on cp) (Loop mc sy tl c ps us n on cp))))
 
-; The person says text: their turn added, and the model asked.
+; The person says text: if the last answer's prompt passed the
+; compaction size and there are turns to cut, a summary of the older
+; ones asked for first, the text waiting for it; otherwise their turn
+; added, and the model asked.
 (def loop_say ((l Loop) (text bytes)) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
-      (loop_ask (Loop mc sy tl (conv_add c (Turn true (cons (BText text) (nil Block)))) (nil Part) (nil Use) 0 true)
-                (nil Act)))))
+    ((Loop mc sy tl c ps us n on cp)
+      (match cp
+        ((Compactor size keep s)
+          (let before (usage_prompt (conv_usage c))
+            (let k (if (gt before size) (conv_cut c keep) 0)
+              (if (lt k 1)
+                  (loop_said l text (nil Act))
+                  (Looped (Loop mc sy tl c (nil Part) (nil Use) 0 true (Compactor size keep (Summarizing text k before (nil bytes))))
+                          (cons (ActAsk (model_request mc sy (conv_summary_messages c k) (JArr (nil Json)))) (nil Act)))))))))))
+
+; The person's text added as their turn, and the model asked, after
+; acts.
+(def loop_said ((l Loop) (text bytes) (acts (list Act))) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on cp)
+      (loop_ask (Loop mc sy tl (conv_add c (Turn true (cons (BText text) (nil Block)))) (nil Part) (nil Use) 0 true (no_summary cp))
+                acts))))
 
 ; l asking the model, after acts.
 (def loop_ask ((l Loop) (acts (list Act))) Looped
   (Looped l (append acts (cons (ActAsk (loop_request l)) (nil Act)))))
 
 ; An event of the answer, read onto l; none while no answer is coming.
+; While a summary is coming, the event is the summary's.
 (def loop_event ((l Loop) (e ModelEvent)) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
+    ((Loop mc sy tl c ps us n on cp)
       (if (not on)
           (Looped l (nil Act))
+          (match cp
+            ((Compactor size keep s)
+              (match s
+                ((Summarizing text k before pieces) (summary_event l text k before pieces e))
+                ((NoSummary) (answer_event l e)))))))))
+
+; An event of an answer, read onto l, which is answering.
+(def answer_event ((l Loop) (e ModelEvent)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on cp)
           (match e
             ((MText i t)
-              (Looped (Loop mc sy tl c (parts_with ps i (PText i (nil bytes)) t) us n on)
+              (Looped (Loop mc sy tl c (parts_with ps i (PText i (nil bytes)) t) us n on cp)
                       (if (eq (bytes_len t) 0) (nil Act) (cons (ActTell (TellText t)) (nil Act)))))
-            ((MToolStart i id name) (Looped (Loop mc sy tl c (cons (PTool i id name (nil bytes)) ps) us n on) (nil Act)))
-            ((MToolInput i pj) (Looped (Loop mc sy tl c (parts_with ps i (PTool i (id_none) (id_none) (nil bytes)) pj) us n on) (nil Act)))
-            ((MBlockStop i) (Looped (Loop mc sy tl c (parts_done ps i) us n on) (nil Act)))
-            ((MUsage a o w r) (Looped (Loop mc sy tl (conv_spent c a o w r) ps us n on) (nil Act)))
+            ((MToolStart i id name) (Looped (Loop mc sy tl c (cons (PTool i id name (nil bytes)) ps) us n on cp) (nil Act)))
+            ((MToolInput i pj) (Looped (Loop mc sy tl c (parts_with ps i (PTool i (id_none) (id_none) (nil bytes)) pj) us n on cp) (nil Act)))
+            ((MBlockStop i) (Looped (Loop mc sy tl c (parts_done ps i) us n on cp) (nil Act)))
+            ((MUsage a o w r) (Looped (Loop mc sy tl (conv_spent c a o w r) ps us n on cp) (nil Act)))
             ((MError kind msg) (loop_failed l (if (eq (bytes_len msg) 0) kind msg)))
-            ((MStop reason) (loop_stopped l reason)))))))
+            ((MStop reason) (loop_stopped l reason))))))
+
+; An event of the summary asked for before the person's text: its text
+; gathered, told to no one; at its stop the conversation compacted,
+; told, and the text said; an error, or a stop with no text, leaves the
+; conversation as it was, saying so, and the text is said all the same.
+(def summary_event ((l Loop) (text bytes) (k int) (before int) (pieces (list bytes)) (e ModelEvent)) Looped
+  (match l
+    ((Loop mc sy tl c ps us n on cp)
+      (match cp
+        ((Compactor size keep s)
+          (match e
+            ((MText i t) (Looped (Loop mc sy tl c ps us n on (Compactor size keep (Summarizing text k before (cons t pieces)))) (nil Act)))
+            ((MToolStart i id name) (Looped l (nil Act)))
+            ((MToolInput i pj) (Looped l (nil Act)))
+            ((MBlockStop i) (Looped l (nil Act)))
+            ((MUsage a o w r) (Looped l (nil Act)))
+            ((MError kind msg) (summary_failed l text (if (eq (bytes_len msg) 0) kind msg)))
+            ((MStop reason)
+              (let summary (bytes_concat (rev pieces))
+                (if (eq (bytes_len summary) 0)
+                    (summary_failed l text (bytes_from_list "the summary was empty"))
+                    (let c2 (conv_compacted c k summary)
+                      (loop_said (loop_with_conv l c2) text
+                        (cons (ActTell (TellCompacted before (compacted_size before sy tl c c2))) (nil Act)))))))))))))
+
+; The summary failed, why: told, and the person's text said to the
+; conversation as it was.
+(def summary_failed ((l Loop) (text bytes) (why bytes)) Looped
+  (loop_said l text
+    (cons (ActTell (TellError (bytes_concat (cons (bytes_from_list "compaction failed, the conversation kept whole: ") (cons why (nil bytes))))))
+          (nil Act))))
+
+; The prompt's tokens after compaction, estimated: before, in the
+; proportion of the new prompt's bytes (system, tools and turns as JSON)
+; to the old's.
+(def compacted_size ((before int) (sy Json) (tl Json) (old Conv) (new Conv)) int
+  (let fixed (add (bytes_len (json_bytes sy)) (bytes_len (json_bytes tl)))
+    (let was (add fixed (bytes_len (json_bytes (conv_messages old))))
+      (let now (add fixed (bytes_len (json_bytes (conv_messages new))))
+        (if (le was 0) before (div (mul before now) was))))))
 
 ; Nothing, for a part made before its start was heard.
 (def id_none () bytes (bytes_from_list (nil int)))
@@ -103,8 +196,8 @@
 ; The answer failed: told why, and done; what had come of it dropped.
 (def loop_failed ((l Loop) (why bytes)) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
-      (Looped (Loop mc sy tl c (nil Part) (nil Use) n false)
+    ((Loop mc sy tl c ps us n on cp)
+      (Looped (Loop mc sy tl c (nil Part) (nil Use) n false cp)
               (cons (ActTell (TellError why)) (cons (ActDone (bytes_from_list "error")) (nil Act)))))))
 
 ; ------------------------------------------------------------- the parts
@@ -191,13 +284,13 @@
 ; other reason: its texts kept, and the turn done.
 (def loop_stopped ((l Loop) (reason bytes)) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
+    ((Loop mc sy tl c ps us n on cp)
       (let blocks (parts_blocks ps (nil Block))
         (if (if (eq reason (bytes_from_list "tool_use")) (has_use blocks) false)
             (let ended (ended_parts ps (nil Part))
-              (loop_tools (Loop mc sy tl (conv_add c (Turn false blocks)) (nil Part) (uses_of ended (nil Use)) n false)
+              (loop_tools (Loop mc sy tl (conv_add c (Turn false blocks)) (nil Part) (uses_of ended (nil Use)) n false cp)
                           (tool_acts ended (nil Act))))
-            (Looped (Loop mc sy tl (conv_add c (Turn false (texts_only blocks (nil Block)))) (nil Part) (nil Use) n false)
+            (Looped (Loop mc sy tl (conv_add c (Turn false (texts_only blocks (nil Block)))) (nil Part) (nil Use) n false cp)
                     (cons (ActDone reason) (nil Act))))))))
 
 ; Whether any of bs is a tool's use.
@@ -250,7 +343,7 @@
 ; is in already, as when every input was bad.
 (def loop_tools ((l Loop) (acts (list Act))) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
+    ((Loop mc sy tl c ps us n on cp)
       (if (all_in us) (loop_round l acts) (Looped l acts)))))
 
 ; Whether every use has its result.
@@ -264,11 +357,11 @@
 ; result is in, the round over.
 (def loop_result ((l Loop) (id bytes) (text bytes) (failed bool)) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
+    ((Loop mc sy tl c ps us n on cp)
       (let name (use_name us id)
         (if (is_empty name)
             (Looped l (nil Act))
-            (loop_tools (Loop mc sy tl c ps (uses_given us id (BToolResult id text failed)) n on)
+            (loop_tools (Loop mc sy tl c ps (uses_given us id (BToolResult id text failed)) n on cp)
                         (cons (ActTell (TellResult (bytes_from_list name) failed text)) (nil Act))))))))
 
 ; The name of the use id awaiting its result, or empty if none is.
@@ -302,13 +395,13 @@
 ; again; or, after loop_rounds_max rounds, the turn stops, saying so.
 (def loop_round ((l Loop) (acts (list Act))) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
+    ((Loop mc sy tl c ps us n on cp)
       (let c2 (conv_add c (Turn true (results_of us (nil Block))))
         (if (ge (add n 1) (loop_rounds_max))
-            (Looped (Loop mc sy tl c2 (nil Part) (nil Use) (add n 1) false)
+            (Looped (Loop mc sy tl c2 (nil Part) (nil Use) (add n 1) false cp)
                     (append acts (cons (ActTell (TellError (bytes_from_list (rounds_text))))
                                        (cons (ActDone (bytes_from_list "rounds")) (nil Act)))))
-            (loop_ask (Loop mc sy tl c2 (nil Part) (nil Use) (add n 1) true) acts))))))
+            (loop_ask (Loop mc sy tl c2 (nil Part) (nil Use) (add n 1) true cp) acts))))))
 
 ; What is told when the rounds run out.
 (def rounds_text () (list int)
@@ -316,12 +409,13 @@
 
 ; The turn stopped by the person: what had come of the answer dropped,
 ; each tool still awaited answered as failed, so the conversation stays
-; whole, and done, stopped.
+; whole, and done, stopped. A summary coming is dropped, the
+; conversation as it was, and the person's text waiting for it unsaid.
 (def loop_cancel ((l Loop)) Looped
   (match l
-    ((Loop mc sy tl c ps us n on)
+    ((Loop mc sy tl c ps us n on cp)
       (let c2 (conv_add c (Turn true (results_of (uses_stopped us (nil Use)) (nil Block))))
-        (Looped (Loop mc sy tl c2 (nil Part) (nil Use) n false)
+        (Looped (Loop mc sy tl c2 (nil Part) (nil Use) n false (no_summary cp))
                 (cons (ActDone (bytes_from_list "stopped")) (nil Act)))))))
 
 ; us, each awaited one given a failed result: stopped.

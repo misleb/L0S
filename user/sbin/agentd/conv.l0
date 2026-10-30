@@ -179,3 +179,91 @@
     ((JNum t) v)
     ((JStr s) v)
     ((JArr xs) v)))
+
+; ------------------------------------------------------------ compaction
+
+; What the summary turn begins with.
+(def conv_summary_head () (list int) "The conversation so far, summarized:\n\n")
+
+; What the model is asked when it summarizes, before the transcript.
+(def conv_summary_ask () (list int)
+  "Summarize the conversation below, between you and the person, for yourself to go on from: what was asked, what you did and found, the files and programs involved, and what is still open. Write only the summary.\n\n")
+
+; Whether t is a turn of the person's own text: theirs, with a text,
+; and no tool's result, so that nothing before it awaits an answer in
+; it.
+(def is_person_text ((t Turn)) bool
+  (match t ((Turn who bs) (if who (if (has_text bs) (not (has_result bs)) false) false))))
+
+; Whether bs has a text, and a tool's result.
+(def has_text ((bs (list Block)) ) bool
+  (if (is_empty bs) false (match (head bs) ((BText s) true) ((BToolUse i n v) (has_text (tail bs))) ((BToolResult i s f) (has_text (tail bs))))))
+(def has_result ((bs (list Block))) bool
+  (if (is_empty bs) false (match (head bs) ((BText s) (has_result (tail bs))) ((BToolUse i n v) (has_result (tail bs))) ((BToolResult i s f) true))))
+
+; How many of c's turns, oldest first, compaction summarizes, keeping
+; the last keep: the cut moved earlier until the turn after it is the
+; person's own text, so a tool's use is never parted from its result;
+; 0 if there is no such cut, too few turns to cut.
+(def conv_cut ((c Conv) (keep int)) int
+  (let ts (conv_turns c)
+    (cut_back ts (sub (length ts) (max keep 0)))))
+
+; cut_back's walk: k, or before it, where the turn at k is the person's
+; own text; 0 once k is below 1.
+(def cut_back ((ts (list Turn)) (k int)) int
+  (if (lt k 1)
+      0
+      (if (is_person_text (nth ts k)) k (cut_back ts (sub k 1)))))
+
+; c's oldest k turns, as the transcript the model summarizes: who said
+; each, its texts, its tools' uses and results, each result cut to
+; conv_result_brief bytes.
+(def conv_transcript ((c Conv) (k int)) bytes
+  (bytes_concat (rev (transcript_turns (take (conv_turns c) k) (nil bytes)))))
+
+; The most of a result a transcript holds.
+(def conv_result_brief () int 2000)
+
+; ts onto acc, reversed, each a header line and its blocks.
+(def transcript_turns ((ts (list Turn)) (acc (list bytes))) (list bytes)
+  (if (is_empty ts)
+      acc
+      (match (head ts)
+        ((Turn who bs)
+          (transcript_turns (tail ts)
+            (transcript_blocks bs (cons (bytes_from_list (if who "The person:\n" "You:\n")) acc)))))))
+
+; bs onto acc, reversed, each on lines of its own.
+(def transcript_blocks ((bs (list Block)) (acc (list bytes))) (list bytes)
+  (if (is_empty bs)
+      (cons (bytes_from_list "\n") acc)
+      (transcript_blocks (tail bs)
+        (match (head bs)
+          ((BText t) (cons (bytes_from_list "\n") (cons t acc)))
+          ((BToolUse id n v)
+            (cons (bytes_from_list "]\n") (cons (json_bytes v) (cons (bytes_from_list " ") (cons n (cons (bytes_from_list "[tool ") acc))))))
+          ((BToolResult id t f)
+            (cons (bytes_from_list "\n")
+              (cons (if (le (bytes_len t) (conv_result_brief)) t (bytes_slice t 0 (conv_result_brief)))
+                (cons (bytes_from_list (if f "[result, failed]\n" "[result]\n")) acc))))))))
+
+; The messages of the request that asks for c's oldest k turns
+; summarized: one turn of the person's, the ask and the transcript.
+(def conv_summary_messages ((c Conv) (k int)) Json
+  (conv_messages (conv_add (conv_new)
+    (Turn true (cons (BText (bytes_concat (cons (bytes_from_list (conv_summary_ask)) (cons (conv_transcript c k) (nil bytes)))))
+                     (nil Block))))))
+
+; c with its oldest k turns replaced by summary: the person's turn,
+; conv_summary_head and the summary, then the turns kept, the first of
+; which, the person's own text, joins it; the usage not known until the
+; next answer says it.
+(def conv_compacted ((c Conv) (k int) (summary bytes)) Conv
+  (adds (conv_add (conv_new) (Turn true (cons (BText (bytes_concat (cons (bytes_from_list (conv_summary_head)) (cons summary (nil bytes)))))
+                                              (nil Block))))
+        (drop (conv_turns c) k)))
+
+; Each of ts added to c, in order.
+(def adds ((c Conv) (ts (list Turn))) Conv
+  (if (is_empty ts) c (adds (conv_add c (head ts)) (tail ts))))

@@ -183,6 +183,35 @@ answers (each a list of `ModelEvent`s) and a table of tools' results by
 use id, and gives the requests sent, the notices told and how it ended:
 the loop's host tests are written with it.
 
+### Compaction
+
+A conversation past a size is compacted before its next turn is sent.
+When the person says something and the last answer's prompt (its input,
+the cache written and the cache read: `usage_prompt`) passed `compact`
+tokens (the configuration's, 100000 if none), the loop first asks the
+model to summarize every turn but the last `keep` (8 if none). The cut
+(`conv_cut`) is moved earlier until the turn after it is the person's
+own text, a turn of theirs with a text and no tool's result, so a
+tool's use is never parted from its result; with no such cut, too few
+turns, there is no compaction, and the turn is sent as it is.
+
+The summary request has the same system prompt and no tools, and one
+message: the ask, then the older turns as a transcript
+(`conv_transcript`: who said each, its texts, each tool's use as `[tool
+NAME INPUT]` and its result, cut to 2000 bytes), since tool blocks need
+the tools the request leaves out. The summary's text is told to no one.
+At its stop, the older turns are replaced by one of the person's, "The
+conversation so far, summarized:" and the summary, which the first kept
+turn, the person's own text, joins (`conv_compacted`); the usage is
+unknown until the next answer says it. `compacted BEFORE AFTER` is
+told, BEFORE the last prompt's tokens and AFTER an estimate, BEFORE in
+the proportion of the new prompt's bytes (system, tools and turns as
+JSON) to the old's; then the person's text is said, and the turn goes
+on as any other. A summary that fails (an error, or no text) leaves the
+conversation as it was and says so (`error`, "compaction failed, the
+conversation kept whole: WHY"), and the text is said all the same; a
+`stop` while the summary comes drops it, the text unsaid.
+
 ## The tools
 
 [tools.l0](../user/sbin/agentd/tools.l0). Each tool takes its input as
@@ -250,3 +279,8 @@ sent as `?`, and a cut moves back to where a character starts.
   waited for past its deadline, until a `stop`.
 - The system prompt names the board by its CPU only: L0 has no call
   that tells QEMU's board from a Pi 5.
+- Compaction happens only as a turn begins, so one turn of many rounds
+  of tools can grow past the size until it ends; and the tokens after
+  it are an estimate, from bytes.
+- Not yet run against the real API, nor on a Pi 5: the e2e case runs
+  against the stand-in.
