@@ -114,8 +114,11 @@ the listener, which is then the owner), `tcp ID data` and a newline and the data
 `overflow`. A client whose port has gone, or is full, loses its
 connections, with a reset.
 
-While it holds a connection `inet` looks at their timers every millisecond;
-with none, it waits for a message.
+`inet` waits for a message, and looks at its connections' timers when
+the kernel's alarm (call 297) rings, which it sets for the soonest
+deadline of any timer that runs whenever that changes; an idle
+connection, whose timer is off, wakes it for nothing. While it waits
+for a DHCP server's answer, the alarm rings at the wait's end.
 
 **DHCP.** `inet dhcp` (the demo's line) starts with no address, and gets
 one as a DHCP client (RFC 2131) before it registers as `inet`, so that
@@ -239,9 +242,10 @@ a Broadcom BCM54213PE PHY at MDIO address 1
 - keeps a receive ring of 32 buffers of 2048 bytes and a transmit ring
   of 8, in 18 DMA pages, with 16-byte descriptors (`ADDR64`); the queues
   it does not use point at one descriptor marked used
-- polls, as L0 gives no interrupt for RP1: the receive ring between
-  requests, every millisecond when idle, and the PHY's link every half
-  second. A link coming up sets NCFGR's speed and duplex, lays the rings
+- reads the receive ring on each interrupt, and the PHY's link every
+  half second, on the alarm; only if the interrupt cannot be had does it
+  poll, the ring between requests, every millisecond when idle. A link
+  coming up sets NCFGR's speed and duplex, lays the rings
   out afresh and enables the GEM, as `macb_mac_link_up` does; a link
   going down disables it. Each is a line in the log, and a `lnk up` or
   `lnk down` notice to each listener
@@ -278,8 +282,7 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   its address, so it neither offloads checksums nor merges buffers.
   On the Pi 5, `gem` also sends one frame at a time, waiting up to
   100 ms, takes frames of up to 1536 bytes in one buffer each, no
-  jumbo frames and no multicast, and polls rather than taking
-  interrupts.
+  jumbo frames and no multicast.
   `inet` has one interface, set by its arguments or by DHCP, which
   takes no other options than the mask, the first router and the first
   name server. Its lease is looked at only when `rtc clock` tells it a

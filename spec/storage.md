@@ -84,8 +84,10 @@ and writes them with the ordinary `open_in`, `open_out` and the rest:
 `run cat /Volumes/data/notes` works as `run cat /etc/motd` does.
 
 **`fs` serves in turn** ([user/sbin/fs/turns.l0](../user/sbin/fs/turns.l0)).
-Each time round it takes every message waiting on its port, with
-`port_try_receive` until none is, into a list of its own, and serves
+Each time round it takes every message waiting on its ports, `fs`'s and,
+started `fs ram`, `tmpfs`'s, a set of ports, with `port_try_receive_set`
+until none is, oldest first, into a list of its own (waiting with
+`port_receive_set` when there is none), and serves
 the notices from pid 0 first, the kernel's exit and window notices, so
 that one never waits behind requests or finds the port's queue full.
 An exit drops the requests its pid still has waiting. Then it serves
