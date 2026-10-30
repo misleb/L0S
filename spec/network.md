@@ -241,6 +241,19 @@ field of a name), `json_at`, `json_items`, `json_fields`, `json_text`,
 `json_int`, `json_bool` read what a program wants of a value, and
 `json_obj`, `json_field` and `json_str` make one to write.
 
+**Server-sent events**, `text/event-stream` as the WHATWG's HTML
+standard reads it ("Interpreting an event stream"), in
+[sse.l0](../user/lib/format/sse.l0), pure: `sse_more s b i j` takes the
+next piece of a body, read in place, and gives the reader after it and
+the events the piece ended, each an `SseEvent` of its name (`message`
+if the stream gave none) and its data, the `data:` lines joined by
+newlines. A line ends at CR, LF or CRLF, a CRLF cut between two pieces
+included, and the part of a line a piece leaves is held until it ends,
+so the events are the same wherever the pieces are cut. A line that
+starts with `:` is a comment; `id`, `retry` and any other field are
+passed over; a blank line ends an event, which is given if it has data,
+and one the stream ends inside is never given.
+
 ## The network on the Raspberry Pi 5
 
 ```

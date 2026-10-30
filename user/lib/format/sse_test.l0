@@ -1,0 +1,146 @@
+; sse_test.l0 -- tests of sse.l0: the HTML standard's examples of an
+; event stream, a Messages API answer's stream fed whole, cut in two at
+; every offset and a byte at a time, each giving the same events, and
+; comments, retry and line ends of every kind.
+
+; ---------------------------------------------------------------- helpers
+
+; Events as text: NAME=DATA for each, joined by " | ".
+(def events_text ((es (list SseEvent))) (list int)
+  (join_with " | " (event_lines es (nil (list int)))))
+
+(def event_lines ((es (list SseEvent)) (acc (list (list int)))) (list (list int))
+  (if (is_empty es)
+      (rev acc)
+      (event_lines (tail es) (cons (append (bytes_to_list (sse_name (head es))) (cons 61 (bytes_to_list (sse_data (head es))))) acc))))
+
+; The events of the stream s fed as one piece.
+(def whole ((s (list int))) (list int)
+  (let b (bytes_from_list s)
+    (match (sse_more (sse_new) b 0 (bytes_len b)) ((SseMore r es) (events_text es)))))
+
+; The events of the stream s fed in pieces cut at each of cuts, in
+; order, each piece its own bytes.
+(def in_pieces ((s (list int)) (cuts (list int))) (list int)
+  (events_text (fed (sse_new) (bytes_from_list s) 0 cuts (nil SseEvent))))
+
+; The events of b from i on, cut at each of cuts, after acc, reversed.
+(def fed ((r Sse) (b bytes) (i int) (cuts (list int)) (acc (list SseEvent))) (list SseEvent)
+  (let j (if (is_empty cuts) (bytes_len b) (head cuts))
+    (let piece (bytes_slice b i j)
+      (match (sse_more r piece 0 (bytes_len piece))
+        ((SseMore r2 es)
+          (let acc2 (rev_onto es acc)
+            (if (is_empty cuts) (rev acc2) (fed r2 b j (tail cuts) acc2))))))))
+
+; Cuts after every byte of a stream of n.
+(def every_byte ((n int)) (list int) (every_from 1 n (nil int)))
+(def every_from ((k int) (n int) (acc (list int))) (list int)
+  (if (ge k n) (rev acc) (every_from (add k 1) n (cons k acc))))
+
+; ------------------------------------------------------------ the standard
+
+; Three data lines, one event.
+(def test_standard_stocks () int
+  (check_str "one" (whole "data: YHOO\ndata: +2\ndata: 10\n\n") "message=YHOO\n+2\n10"))
+
+; A comment first, ids passed over, and the last event never ended.
+(def test_standard_ids () int
+  (check_str "two" (whole ": test stream\n\ndata: first event\nid: 1\n\ndata:second event\nid\n\ndata:  third event\n")
+             "message=first event | message=second event"))
+
+; Empty data is an event; data with no colon is a line of nothing; the
+; last, cut, is dropped.
+(def test_standard_empty () int
+  (check_str "two" (whole "data\n\ndata\ndata\n\ndata:") "message= | message=\n"))
+
+; A space after the colon is taken off, one only.
+(def test_standard_space () int
+  (check_str "the same" (whole "data:test\n\ndata: test\n\ndata:  x\n\n") "message=test | message=test | message= x"))
+
+; An event's name, and the name's going back to message after.
+(def test_named () int
+  (check_str "named" (whole "event: add\ndata: 73857293\n\ndata: plain\n\n") "add=73857293 | message=plain"))
+
+; A blank line with no data gives nothing, and forgets the name.
+(def test_no_data () int
+  (check_str "nothing" (whole "event: x\n\ndata: y\n\n") "message=y"))
+
+; ------------------------------------------------------- line ends, fields
+
+(def test_cr_lines () int
+  (add (check_str "CR" (whole "data: a\r\rdata: b\r\r") "message=a | message=b")
+       (check_str "CRLF" (whole "data: a\r\n\r\ndata: b\r\n\r\n") "message=a | message=b")))
+
+; A CRLF cut between two pieces is one line end, not two.
+(def test_crlf_cut () int
+  (check_str "one end" (in_pieces "data: a\r\ndata: b\r\n\r\n" (cons 8 (nil int))) "message=a\nb"))
+
+; A comment and a retry between events change nothing.
+(def test_comment_retry () int
+  (check_str "two" (whole "data: one\n\n: keep alive\nretry: 3000\n\ndata: two\n\n") "message=one | message=two"))
+
+; Unknown fields are passed over.
+(def test_unknown_field () int
+  (check_str "data only" (whole "foo: bar\ndata: x\n\n") "message=x"))
+
+; --------------------------------------------------------- a Messages API
+
+; The stream of a Messages API answer, message_start to message_stop.
+(def api_stream () (list int)
+  (append "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[]}}\n\n"
+  (append "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+  (append "event: ping\ndata: {\"type\": \"ping\"}\n\n"
+  (append "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n"
+  (append "event: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"!\"}}\r\n\r\n"
+  (append "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+  (append "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+          "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))))))))
+
+; Its events' names, in order.
+(def names_text ((es (list SseEvent)) (acc (list (list int)))) (list int)
+  (if (is_empty es) (unwords (rev acc)) (names_text (tail es) (cons (bytes_to_list (sse_name (head es))) acc))))
+
+(def test_api_whole () int
+  (let b (bytes_from_list (api_stream))
+    (match (sse_more (sse_new) b 0 (bytes_len b))
+      ((SseMore r es)
+        (add (check_str "names" (names_text es (nil (list int)))
+                        "message_start content_block_start ping content_block_delta content_block_delta content_block_stop message_delta message_stop")
+             (check_str "a delta's data" (bytes_to_list (sse_data (nth es 3)))
+                        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}"))))))
+
+; Of the cuts at 1 to n - 1, how many give other events than whole.
+(def cut_mismatches ((s (list int)) (want (list int)) (k int) (n int) (bad int)) int
+  (if (ge k n)
+      bad
+      (cut_mismatches s want (add k 1) n (if (eq (in_pieces s (cons k (nil int))) want) bad (add bad 1)))))
+
+; Cut in two at every offset: the same events every time.
+(def test_api_cut_everywhere () int
+  (let s (api_stream)
+    (check_int "none differ" (cut_mismatches s (whole s) 1 (length s) 0) 0)))
+
+; A byte at a time: the same events.
+(def test_api_byte_at_a_time () int
+  (let s (api_stream)
+    (check_str "the same" (in_pieces s (every_byte (length s))) (whole s))))
+
+; Cut in three at random places, a few hundred times: the same events.
+(def random_cuts ((s (list int)) (want (list int)) (seed int) (n int) (bad int)) int
+  (if (eq n 0)
+      bad
+      (let s1 (rand_next seed)
+        (let s2 (rand_next s1)
+          (let a (rand_below s1 (length s))
+            (let b (rand_below s2 (length s))
+              (let cuts (cons (min a b) (cons (max a b) (nil int)))
+                (random_cuts s want s2 (sub n 1) (if (eq (in_pieces s cuts) want) bad (add bad 1))))))))))
+
+(def test_api_random_cuts () int
+  (let s (api_stream)
+    (check_int "none differ" (random_cuts s (whole s) 41 300 0) 0)))
+
+; The stream ending inside an event: it is not given.
+(def test_cut_off () int
+  (check_str "dropped" (whole "data: a\n\ndata: b\n") "message=a"))

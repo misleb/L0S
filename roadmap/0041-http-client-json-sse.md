@@ -89,7 +89,7 @@ notice's bytes as one, so a body would go through a list both ways
   `json_read` after `json_bytes` on a few hundred random values giving
   the value back. Makefile: `JSON`, its `l0_test` line, `DOC_SRCS`;
   programs.md's row; network.md's paragraph on JSON.
-- [ ] **Server-sent events.** [format/sse.l0](../user/lib/format/sse.l0),
+- [x] **Server-sent events.** [format/sse.l0](../user/lib/format/sse.l0),
   pure: `(data Sse ...)`, the line not yet ended (bytes), the event's
   name and its data lines so far; `sse_more s b i j` gives `(SseMore s
   events)`, each `(SseEvent name data)`, name `message` if none was
@@ -196,3 +196,8 @@ notice's bytes as one, so a body would go through a list both ways
   floats, within an ulp or two, not a correctly rounded conversion.
   A string with no escape is sliced from the input as it is; one with
   escapes is made once from a list of what they mean.
+- 2026-10-29: step 3 landed. The reader is `sse_new` and `sse_more`;
+  its state holds the unended line as a list of the pieces' bytes,
+  joined once the line ends, and a CR that ended a piece. `sse_name`
+  and `sse_data` read an event. Beside the cuts at every offset and a
+  byte at a time, 300 random cuts in three.
