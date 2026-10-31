@@ -167,7 +167,7 @@ and never over a table it found bad.
 The UUIDs are of **version 7** ([user/lib/format/uuid.l0](../user/lib/format/uuid.l0),
 RFC 9562): the time in Unix milliseconds in their first 48 bits, so they
 sort in the order they were made, then noise. `fs` asks `rtc clock` the
-time, and the board's clock keeps this machine's local time, not UTC
+time, which the board's clock counts in UTC, as a UUID's time is
 (see [The desktop](desktop.md#the-desktop)); with no clock, the time is 0. The
 noise is `random`'s, the entropy device's bytes (see
 [Randomness](devices.md#randomness)); on a board without the device it is
@@ -262,10 +262,10 @@ damaged disk is refused rather than followed.
   any volume, since a handle names its volume by where it is among
   `fs`'s; and the system volume is never unmounted, though a rescan no
   longer finds it. Nothing removes or resizes a partition.
-- **A UUID's time is local, and its noise needs the device.** The board's
-  clock, `rtc clock`, keeps this machine's local time, not UTC, so a
-  UUID's time is off by its zone; where no clock runs its seconds are 0,
-  and only the milliseconds of `clock_ns` are left. Its noise is the
+- **A UUID's time needs a clock, and its noise the device.** Where no
+  clock runs its seconds are 0, and only the milliseconds of `clock_ns`
+  are left; on a Pi 5 with no battery it is 1970's until `ntp` sets the
+  clock. Its noise is the
   entropy device's, but on a board with no virtio-rng a mixer's, seeded
   from the clock, which can be guessed.
 - **The disk is one virtio-blk, one request at a time.** `virtio-blk`

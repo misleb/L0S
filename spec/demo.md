@@ -15,7 +15,8 @@ app. The top bar is GNOME Shell's, black across the top of the screen:
 the L0S logo and **Applications** at its left, then the name of the
 front window's app (`Terminal`, `System Monitor`), or its title if it is
 no app's, and the date and time in its middle, `Oct 15  22:42`, from the
-board's real-time clock, which QEMU sets to this machine's local time.
+board's real-time clock, which QEMU sets to this machine's time in UTC,
+shown in US Pacific time, the zone `rtc clock` serves.
 There is one shell at boot, and one more for each Terminal opened:
 
 - **The serial line**, in the terminal you ran `make demo` from.

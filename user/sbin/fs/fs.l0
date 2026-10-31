@@ -543,13 +543,21 @@
 (def changes ((b bytes) (i int)) bool
   (or (bytes_is_at b i "open ") (or (bytes_is_at b i "mkdir ") (bytes_is_at b i "rename "))))
 
-; f with every FAT volume that has no epoch yet told the time, once the
-; clock says one; as it was while no clock does, or none needs it.
+; f with every FAT volume that has no epoch yet, or whose zone has
+; changed, told the time and the zone, once the clock says one; as it
+; was while no clock does, or none needs it.
 (def dated ((f Fs)) Fs
   (if (not (any_undated (.vols f) 0))
       f
       (match (now_ms f)
-        ((Timed f2 ms) (if (lt ms 1000000000000) f2 (dated_from f2 ms 0))))))
+        ((Timed f2 ms) (if (lt ms 1000000000000) f2 (dated_from f2 ms (zone_now (.cp f2)) 0))))))
+
+; The zone the clock says is in force, its answer to rp; UTC if there is
+; no clock.
+(def zone_now ((rp int)) ClockZone
+  (match (name_lookup "clock")
+    ((NotFound) (zone_utc))
+    ((Found c) (clock_zone c rp))))
 
 ; Whether any of vols from i has no epoch yet.
 (def any_undated ((vols (array FsVol)) (i int)) bool
@@ -557,12 +565,12 @@
       false
       (match (array_get vols i) ((FsVol di start u v) (if (fv_undated v) true (any_undated vols (add i 1)))))))
 
-; f with volumes i on told that Unix time ms is now, those with no
-; epoch.
-(def dated_from ((f Fs) (ms int) (i int)) Fs
+; f with volumes i on told that Unix time ms is now, in zone z, those
+; with no epoch or a stale zone.
+(def dated_from ((f Fs) (ms int) (z ClockZone) (i int)) Fs
   (if (ge i (array_len (.vols f)))
       f
-      (dated_from (if (fv_undated (fs_vol f i)) (with_vol f i (fv_dated (fs_vol f i) ms)) f) ms (add i 1))))
+      (dated_from (if (fv_undated (fs_vol f i)) (with_vol f i (fv_dated (fs_vol f i) ms z)) f) ms z (add i 1))))
 
 ; write H BYTES read from b in place, H's digits from i: the handle, then
 ; every byte after its space.
@@ -1509,14 +1517,16 @@
 (data FatFresh (Fresh Fs Fv) (FreshNot Fs (list int)))
 
 ; A FAT32 volume of count sectors from start, labelled label: its serial
-; the last four bytes of a fresh UUID, its times from the clock's now.
+; the last four bytes of a fresh UUID, its times from the clock's now,
+; in its zone.
 (def fat_fresh ((f Fs) (start int) (count int) (label (list int))) FatFresh
   (match (now_ms f)
     ((Timed f2 ms)
       (let g (fat_layout count (le_u32 (bytes_from_list (.bytes (fresh_uuid f2 ms 0))) 12))
         (if (not (fat_layout_ok g))
             (FreshNot f2 (append "the partition is " (fat_layout_why g)))
-            (Fresh f2 (fv_dated (FvFat (fat_new g start label ms)) ms)))))))
+            (let z (zone_now (.cp f2))
+              (Fresh f2 (fv_dated (FvFat (fat_new g start label (add ms (mul (.minutes z) 60000)))) ms z))))))))
 
 ; The volume made on partition p, u, of disk di, whose table is an MBR,
 ; if it can be: L0FS's, or FAT32's if fat.

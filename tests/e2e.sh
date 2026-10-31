@@ -54,11 +54,12 @@
 # virtio-rng, unless NAME/norng exists, for a case that types nothing.
 # It has QEMU_CPUS CPUs, 1 if not set, as tools/qemu-boot.sh gives it, or
 # as many as NAME/cpus says, for a case whose output depends on the order
-# its programs run in, which several CPUs do not keep.
+# its programs run in, which several CPUs do not keep. Its PL031 counts
+# UTC (-rtc base=utc), as tools/qemu-boot.sh's does.
 set -u
 cd "$(dirname "$0")/.."
 L0=${L0:-l0}
-export L0_QEMU_ARGS="-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device -device virtio-rng-device"
+export L0_QEMU_ARGS="-rtc base=utc -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device -device virtio-rng-device"
 BUILD=build
 mkdir -p "$BUILD/asm" "$BUILD/e2e"
 

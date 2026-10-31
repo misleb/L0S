@@ -397,10 +397,11 @@
 (def bar_fg () int (ui_white))
 
 ; The bar's canvas, the clock's pid, and the time it last said, each -1
-; for none: with no clock running, the bar shows no time. Then the apps
-; there are, which the launcher shows, the launcher, the L0S menu, and
-; the launches wm waits on (launching.l0).
-(data Bar (Bar (c Canvas) (clock int) (t int) (apps (list App)) (launcher Launcher) (menu Menu) (launches (list Launch))))
+; for none: with no clock running, the bar shows no time; and the zone
+; the clock said the time is shown in. Then the apps there are, which
+; the launcher shows, the launcher, the L0S menu, and the launches wm
+; waits on (launching.l0).
+(data Bar (Bar (c Canvas) (clock int) (t int) (zone ClockZone) (apps (list App)) (launcher Launcher) (menu Menu) (launches (list Launch))))
 
 ; Applications: its label, and how wide the bar's button for it is, 12
 ; either side. It starts after the logo's button, menu_logo_w in.
@@ -439,7 +440,9 @@
       ""
       (match (head ws) ((Win id port pid x y cw ch top title tc cva tva bf app sz dc) (if (is_empty app) title app)))))
 
-(def bar_clock_text ((t int)) (list int) (if (lt t 0) "" (clock_text t)))
+; The time the bar shows when the clock says t, in zone z: none for no
+; clock.
+(def bar_clock_text ((t int) (z ClockZone)) (list int) (if (lt t 0) "" (clock_text (zone_local z t))))
 
 ; The bar painted, for the windows and the time now, and shown: v with
 ; the canvas painted on, as a canvas is passed on once drawn.
@@ -447,19 +450,28 @@
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match bar
-        ((Bar c cp t apps l m ls)
+        ((Bar c cp t z apps l m ls)
           (let (shown (launcher_shown l)
-                p (ui_paint c font (Rect 0 0 w (bar_h)) (bar_ops w shown (menu_shown m) (bar_title ws shown) (bar_clock_text t)))
+                p (ui_paint c font (Rect 0 0 w (bar_h)) (bar_ops w shown (menu_shown m) (bar_title ws shown) (bar_clock_text t z)))
                 e (display_damage d (bar_id) (Rect 0 0 w (bar_h))))
-            (Wm d cl w h desk font bg ws n ptr drag kp pp (Bar p cp t apps l m ls))))))))
+            (Wm d cl w h desk font bg ws n ptr drag kp pp (Bar p cp t z apps l m ls))))))))
 
-; The clock's notice that a minute has begun: the bar shows it.
-(def ticked ((v Wm) (t int)) Wm
-  (match v
-    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
-      (match bar
-        ((Bar c cp old apps l m ls)
-          (draw_bar (Wm d cl w h desk font bg ws n ptr drag kp pp (Bar c cp t apps l m ls))))))))
+; The clock's notice that a minute has begun: the bar shows it. Once the
+; zone no longer holds, the clock is asked on port for the new one,
+; which zoned takes when it comes.
+(def ticked ((v Wm) (port int) (t int)) Wm
+  (let a (if (zone_holds (.zone (.bar v)) t) 0 (zone_asked port))
+    (draw_bar (.bar v (.t (.bar v) t)))))
+
+; The clock asked for its zone, its answer to port: 0.
+(def zone_asked ((port int)) int
+  (match (name_lookup "clock")
+    ((NotFound) 0)
+    ((Found c) (port_tell c (request port "zone")))))
+
+; The clock's answer to zone: the bar shows the time in z from now on.
+(def zoned ((v Wm) (z ClockZone)) Wm
+  (draw_bar (.bar v (.zone (.bar v) z))))
 
 ; The name of the app pid is, from where its program is: "" if it is no
 ; app's, or has gone.
@@ -550,7 +562,7 @@
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match c
-        ((Clocked cp t)
+        ((Clocked cp t z)
           (info_as "wm" (desktop_line w h (display_scale d) (length (.apps bar)) (ge cp 0))))))))
 
 ; The screen, laid out as a desktop of its size over its scale.
@@ -635,7 +647,7 @@
         (if (not (is_empty e2))
             (complain e2)
             (listening (Wm d (nil Closing) w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1 ((MapEmpty int (list int))) "" (TitleClick -1 0)) (NoDrag) 0 0
-                           (Bar c -1 -1 (app_bundles) (NoLauncher) (NoMenu) (nil Launch)))))))))
+                           (Bar c -1 -1 (zone_utc) (app_bundles) (NoLauncher) (NoMenu) (nil Launch)))))))))
 
 ; Listens to the keyboard, the pointer and the clock, then serves
 ; compositor.
@@ -661,9 +673,12 @@
       (let e (display_frames d port)
         (if (is_empty e) 0 (warn_as "wm" (append "the display tells no frames: " e)))))))
 
-; The clock's pid, and the time its reply gave; or -1 and -1, if no clock
-; registers within clock_wait_ns.
-(data Clocked (Clocked int int))
+; The clock's pid, the time its reply gave, and the zone it said; or -1,
+; -1 and UTC, if no clock registers within clock_wait_ns.
+(data Clocked (Clocked (pid int) (t int) (zone ClockZone)))
+
+; No clock.
+(def unclocked () Clocked (Clocked -1 -1 (zone_utc)))
 
 ; A system with no clock waits only this long for one: rtc clock starts
 ; with the drivers, so is long registered when one is running.
@@ -674,25 +689,46 @@
 ; nothing else can send to port until it is registered.
 (def clock_listen ((port int) (kp int) (pp int)) Clocked
   (match (name_wait "clock" (clock_wait_ns))
-    ((NotFound) (Clocked -1 -1))
-    ((Found c) (if (eq (port_send c (request port "listen")) (Sent)) (clock_reply port kp pp) (Clocked -1 -1)))))
+    ((NotFound) (unclocked))
+    ((Found c) (if (eq (port_send c (request port "listen")) (Sent)) (clock_reply port kp pp c) (unclocked)))))
 
-(def clock_reply ((port int) (kp int) (pp int)) Clocked
+; The clock at c's reply to listen, on port, then its zone asked.
+(def clock_reply ((port int) (kp int) (pp int) (c int)) Clocked
   (match (port_receive port)
-    ((RecvFailed) (Clocked -1 -1))
+    ((RecvFailed) (unclocked))
     ((Message from b)
       (if (or (eq from kp) (eq from pp))
-          (clock_reply port kp pp)
+          (clock_reply port kp pp c)
           (match (time_of (msg_text b))
-            ((Some t) (Clocked from t))
-            ((None) (Clocked -1 -1)))))))
+            ((Some t)
+              (if (eq (port_send c (request port "zone")) (Sent))
+                  (clock_zone_reply port kp pp (Clocked from t (zone_utc)))
+                  (Clocked from t (zone_utc))))
+            ((None) (unclocked)))))))
+
+; The clock's answer to zone, on port: got with the zone it says. A
+; minute's time that comes first is kept; anything else from the clock
+; leaves the zone UTC.
+(def clock_zone_reply ((port int) (kp int) (pp int) (got Clocked)) Clocked
+  (match (port_receive port)
+    ((RecvFailed) got)
+    ((Message from b)
+      (if (not (eq from (.pid got)))
+          (clock_zone_reply port kp pp got)
+          (let p (msg_text b)
+            (match (zone_of p)
+              ((Some z) (.zone got z))
+              ((None)
+                (match (time_of p)
+                  ((Some t) (clock_zone_reply port kp pp (.t got t)))
+                  ((None) got)))))))))
 
 (def with_drivers ((v Wm) (k int) (p int) (c Clocked)) Wm
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag ok op bar)
       (match bar
-        ((Bar bc ocp secs apps l m ls)
-          (match c ((Clocked cp t) (Wm d cl w h desk font bg ws n ptr drag k p (Bar bc cp t apps l m ls)))))))))
+        ((Bar bc ocp secs oz apps l m ls)
+          (match c ((Clocked cp t z) (Wm d cl w h desk font bg ws n ptr drag k p (Bar bc cp t z apps l m ls)))))))))
 
 ; --------------------------------------------------------------- serving
 
@@ -775,8 +811,19 @@
         ((InputPointer) (pointer_received v (Message from b)))
         ((NotInput) (received_other v port from b))))))
 
+; What the clock sent, p: the time at a minute's start, or its zone,
+; asked by ticked.
+(def clock_said ((v Wm) (port int) (p (list int))) Wm
+  (match (time_of p)
+    ((Some t) (ticked v port t))
+    ((None)
+      (match (zone_of p)
+        ((Some z) (zoned v z))
+        ((None) v)))))
+
 ; A message, its bytes b, from from, that is no input: an exit, the
-; kernel's alarm, the time, the display's notice, or a request.
+; kernel's alarm, the time or the zone, the display's notice, or a
+; request.
 (def received_other ((v Wm) (port int) (from int) (b bytes)) Wm
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
@@ -786,10 +833,7 @@
               (match (exit_of (Message from b))
                 ((Exited pid status) (gone v pid))
                 ((NotExit) v)))
-          (eq from (.clock bar))
-          (match (time_of (msg_text b))
-            ((Some t) (ticked v t))
-            ((None) v))
+          (eq from (.clock bar)) (clock_said v port (msg_text b))
           (eq from (display_pid d)) (display_noticed v (Message from b))
           (replied v port from (msg_text b))))))
 

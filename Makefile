@@ -135,8 +135,9 @@ CPUS         ?= 4
 VIRT_CPUS    ?= 4
 export QEMU_CPUS ?= $(CPUS)
 # make boot gives an etc both inputs: virtio's keyboard and tablet, and a
-# qemu-xhci with a USB keyboard and mouse, as the demo's inittab drives.
-DEVICES      := -smp $(CPUS) -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device \
+# qemu-xhci with a USB keyboard and mouse, as the demo's inittab drives,
+# and its PL031 counting UTC, as tools/qemu-boot.sh's does.
+DEVICES      := -smp $(CPUS) -rtc base=utc -device virtio-gpu-device$(if $(GPU_OPTS),$(comma)$(GPU_OPTS)) -device virtio-keyboard-device -device virtio-tablet-device \
                 -device qemu-xhci -device usb-kbd -device usb-mouse -device virtio-rng-device
 DISK         := $(BUILD)/disk.img
 SYSDISK      := $(BUILD)/system.img

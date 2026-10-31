@@ -23,6 +23,7 @@ changed by hand in a file or at the shell:
 - The network is whatever `inet`'s arguments in the inittab say, `dhcp`
   or a fixed address ([network.md](../spec/network.md)), set only by
   editing that line and booting again.
+- The time zone is US Pacific, fixed in `rtc clock` (0056).
 
 GNOME's answer is Settings: one app, a sidebar of panels, each panel
 changing one thing and saying what it changed.
@@ -38,6 +39,10 @@ changing one thing and saying what it changed.
     - **Network:** DHCP or a fixed address, netmask, gateway and name
       server, what `inet info` and `dns` say now, applied without
       booting again where `inet` can take it.
+    - **Date & Time:** the time zone. `rtc clock` serves it, fixed at
+      US Pacific time by 0056 until this panel can change it, in
+      `clock_zone_at` (`user/sbin/rtc/zone.l0`), the one place every
+      client asks; other zones' rules are 0057's.
     - **Boot:** the boot volume's `cmdline.txt` words (the root, and
       others), and what `/etc/system` starts.
     - **Raspberry Pi** (only on a Pi 5): the bootloader's settings
@@ -84,3 +89,5 @@ To be written with the steps.
   0008 for a cursor set to choose from, and 0020 for fonts to choose
   among; the Network and Raspberry Pi panels need none of these and
   could come first.
+- 2026-10-30: a Date & Time panel, for the time zone 0056 fixed at US
+  Pacific in `rtc clock`; any other zone needs 0057's rules.

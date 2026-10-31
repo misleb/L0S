@@ -45,7 +45,12 @@ change one, `config.txt` or `cmdline.txt`, made by anything else.
   program, `chmod` is -8, and `cp` copies a program there as a plain
   file. The system volume stays L0FS.
 - **Times.** What `fs` makes or writes is dated by the clock's time
-  once `rtc clock` answers; before that, 1980's first moment.
+  once `rtc clock` answers; before that, 1980's first moment. FAT keeps
+  local time, so the time is written in the zone `rtc clock` serves (US
+  Pacific, [desktop.md](desktop.md#the-desktop)), not UTC: `fs` asks the
+  clock its time and its zone once, keeps both with the volume, and
+  asks again once the zone's until has passed, at the next change it
+  dates, so a change of summer time is seen there.
 - **Kept in memory** as an L0FS volume is: the FAT as an array of a
   sector's 128 marks each, so a change copies a sector's, and every
   directory as its slots' bytes. A change writes the FAT's sectors it

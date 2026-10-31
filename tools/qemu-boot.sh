@@ -17,8 +17,8 @@
 # it nowhere; cocoa is a window on macOS.
 # QEMU_CPUS, 1 if not set, is how many CPUs the board has: with more than
 # one, the kernel runs on CPU 0, and processes on the others.
-# The PL031 real-time clock counts local time, not UTC, so that the
-# desktop's top bar, which shows it as it is, agrees with this machine's.
+# The PL031 real-time clock counts UTC, as a Pi 5's does once ntp sets
+# it; rtc clock serves the zone the top bar shows it in.
 # QEMU_DISK, unset unless given, is a raw disk image the board has as a
 # virtio-blk, for the virtio-blk driver; the demo's is build/disk.img.
 # QEMU_SD, unset unless given, is a raw image, of a power of 2 bytes, the
@@ -99,7 +99,7 @@ fi
 gpu=$gpudev${QEMU_GPU:+,$QEMU_GPU}
 len=$(wc -c < "$initramfs" | tr -d ' ')
 exec "$qemu" -M virt,virtualization=on -cpu cortex-a72 -smp "${QEMU_CPUS:-1}" -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
-  -rtc base=localtime \
+  -rtc base=utc \
   -global virtio-mmio.force-legacy=false \
   -device "$gpu" "${input[@]}" -device virtio-rng-device \
   ${disk[@]+"${disk[@]}"} \

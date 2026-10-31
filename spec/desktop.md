@@ -152,16 +152,30 @@ exit gives up whatever `wm` waited on the process for.
 The clock is
 `rtc clock` ([user/sbin/rtc](../user/sbin/rtc/rtc.l0)), which serves `clock`
 ([user/lib/proto/clock.l0](../user/lib/proto/clock.l0)): `listen` replies `time S`, S
-the board's count of seconds, and sends `time S` again at the start of
+the board's count of seconds since 1970 in UTC, and sends `time S` again at the start of
 every minute; `time` replies once; `set S` replies `ok`, and the clock
 says S from then on, the board's count with what the set moved it by
 added, and tells each listener `time S` at once, so the bar shows it
 then, and sets its alarm for the minute after S (on the Pi 5 it also
-writes S to the RTC, see [pi5.md](pi5.md)). `wm` waits a second for a clock as
-it starts, after the keyboard and the pointer; with none, the bar shows
-no time. The PL031 has no time zone, and QEMU, booted by
-`tools/qemu-boot.sh`, sets it to this machine's local time with `-rtc
-base=localtime`, so the bar shows the count as it is.
+writes S to the RTC, see [pi5.md](pi5.md)); `zone` replies `zone M U`,
+the zone the time is shown in, M minutes east of UTC, in force until
+the clock says U, when it next changes. `wm` waits a second for a clock as
+it starts, after the keyboard and the pointer, then asks its zone; with
+none, the bar shows no time. The clock counts UTC everywhere: QEMU
+starts the PL031 at this machine's time in UTC (`-rtc base=utc`, in
+`tools/qemu-boot.sh`, the e2e cases' `l0 boot` and `make boot`), and
+on a Pi 5 `ntp` sets it to UTC. The bar shows S in the zone, S plus M
+minutes, and once a minute's `time S` reaches U, `wm` asks the zone
+again and shows the time in the new one as its answer comes.
+
+The zone is `rtc clock`'s alone
+([user/sbin/rtc/zone.l0](../user/sbin/rtc/zone.l0)), so that every
+client asks the one place: US Pacific time, PST, UTC−8 (`zone -480`),
+and PDT, UTC−7 (`zone -420`) from 2:00 local time on the second Sunday
+of March (10:00 UTC) to 2:00 local time on the first Sunday of
+November (9:00 UTC), the US rule since 2007. `fs` dates FAT32's files
+in it ([fat32.md](fat32.md)); UUIDs, `rtc`'s and `ntp`'s log lines
+(which say `UTC`), and `inet`'s lease keep UTC.
 
 Windows open below the bar, and a drag stops a window's top at the
 bar's foot, so the bar never hides a title bar. A press on the bar does
@@ -459,3 +473,9 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   likes; `rtc clock` asks nothing of who sets it. What a set moved a
   PL031 by is kept only while `rtc clock` runs, so QEMU's board is back
   at the host's time after a reboot; only the Pi 5's RTC is written.
+- **The zone is fixed at US Pacific time.** Nothing chooses another,
+  on QEMU or a Pi 5, until a configuration tool can; there is no tz
+  database, only the US rule of 2007, taken for every year (before 2007
+  too, when the US changed on other Sundays). The bar does not say the
+  zone, and a minute's time that crosses a change is shown in the old
+  zone until `wm` has the new one's answer, a moment later.

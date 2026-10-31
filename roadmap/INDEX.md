@@ -45,7 +45,7 @@ move independently, so several can be active at once.
 | [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
-| [0056](0056-time-zones.md) Time zones | Desktop | idea | – | – | desktop.md, storage.md, fat32.md |
+| [0057](0057-tz-database.md) Any time zone, by the tz database's rules | Desktop | idea | – | 0029 | desktop.md, fat32.md, programs.md |
 ## Ready
 
 Every goal left is an `idea`, without steps. On the display,
@@ -65,6 +65,7 @@ graph LR
   0028[0028 chime and wallpaper] --> 0029[0029 Settings app]
   0008[0008 cursor shapes] --> 0029
   0020 --> 0029
+  0029 --> 0057[0057 tz database]
   0021[0021 many windows] --> 0032[0032 apps launched one way]
   0032 --> 0033[0033 responsive app loop]
   0033 --> 0035[0035 apps ask, not wait]
@@ -120,6 +121,7 @@ graph LR
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | 2026-10-30 |
 | [0054](0054-l0-adoption.md) L0S written in the L0 of roadmap 0132 to 0144 | Tooling | 2026-10-30 |
 | [0055](0055-network-time.md) The time from the network, once it comes up | Network | 2026-10-30 |
+| [0056](0056-time-zones.md) Time zones: the clock in UTC, shown in US Pacific time | Desktop | 2026-10-30 |
 
 ## Template
 

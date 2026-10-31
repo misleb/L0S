@@ -199,7 +199,9 @@ A kiss-o'-death (stratum 0), a server not synchronized (leap indicator
 3, or stratum past 15) or a transmit time of 0 ends the round refused.
 The time it takes, the transmit timestamp to the nearest second, is
 given `rtc clock` with `set S`, and said as `ntp: the time from SERVER
-(ADDR), Oct 30  00:00`. The next round is an hour later, or a minute
+(ADDR), Oct 30  00:00 UTC`: NTP's time is UTC, as the clock counts,
+and the top bar shows it in the zone `rtc clock` serves
+([desktop.md](desktop.md#the-desktop)). The next round is an hour later, or a minute
 after one that failed, which it warns of.
 
 `run net` uses it from a shell, as `ifconfig` and `ping` would, and
@@ -551,8 +553,7 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   correction for the time the answer took to arrive, no filtering
   across servers or rounds, no slewing (the clock jumps), and no
   authentication: anyone who can answer from the server's address and
-  port with the token sets the clock. NTP's time is UTC, so on a Pi 5
-  the top bar shows UTC (L0S has no time zones). With no `inet` within
+  port with the token sets the clock. With no `inet` within
   5 minutes of starting, `ntp` exits, and does not try again.
   redirect. A connection's notices go to one port, which `http_connect`
   waits on alone, passing over another connection's.

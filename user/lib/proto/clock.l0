@@ -1,17 +1,21 @@
 ; clock.l0 -- the clock protocol, as rtc clock serves it and a client of
-; it, such as wm, reads it; and the time of day, as wm's top bar shows it.
+; it, such as wm, reads it; the zone it is shown in; and the time of day,
+; as wm's top bar shows it.
 ;
 ;   listen      time S, the reply, then time S again to the request's
 ;               reply port at the start of every minute from then on
 ;   time        time S, once
 ;   set S       ok: the clock says S from now on, and each listener is
 ;               told time S at once; on the Pi 5 the RTC is set to it too
+;   zone        zone M U: the zone in force now, M minutes east of UTC
+;               (-480 for PST, -420 for PDT), until the clock says U,
+;               when it next changes and the client asks again
 ;
-; S is the board's count of seconds from 1970-01-01 00:00, a PL031's or
-; the Pi 5's RTC's, moved by the last set. QEMU sets a PL031 from the
-; host's clock, as local time when booted with -rtc base=localtime, as
-; tools/qemu-boot.sh boots it. L0S has no time zones, so the count is
-; shown as it is. Linked into rtc, wm, fs, inet and eeprom, by the
+; S is the board's count of seconds from 1970-01-01 00:00 UTC, a
+; PL031's or the Pi 5's RTC's, moved by the last set: QEMU is booted
+; with -rtc base=utc, and ntp sets the clock to UTC. The zone is rtc
+; clock's, in one place for every client: US Pacific time for now.
+; Linked into rtc, wm, fs, inet, ntp, eeprom, agent and agentd, by the
 ; Makefile's LIBS_ lists.
 
 ; The time s as the clock sends it: time S.
@@ -42,6 +46,46 @@
 
 ; The start of the minute after s.
 (def next_minute ((s int)) int (add (sub s (mod s 60)) 60))
+
+; ------------------------------------------------------------ the zone
+
+; A zone in force: how many minutes east of UTC its time is, negative
+; west of it, and until when, as the clock counts, when it changes.
+(data ClockZone (ClockZone (minutes int) (until int)))
+
+; A count past any the clock will reach, some 31 million years on: a
+; zone until then never changes.
+(def zone_never () int 1000000000000000)
+
+; UTC, which never changes: the zone with no clock to ask.
+(def zone_utc () ClockZone (ClockZone 0 (zone_never)))
+
+; The zone z as the clock answers zone: zone M U.
+(def zone_notice ((z ClockZone)) (list int)
+  (append "zone " (append (digits (.minutes z)) (cons 32 (digits (.until z))))))
+
+; The zone a zone answer holds, or none if payload is not one.
+(def zone_of ((payload (list int))) (Option ClockZone)
+  (let ws (split_spaces payload)
+    (if (and (eq (length ws) 3) (eq (head ws) "zone"))
+        (match (word_numbers (tail ws))
+          ((Some ns) (Some (ClockZone (head ns) (head (tail ns)))))
+          ((None) ((None ClockZone))))
+        ((None ClockZone)))))
+
+; The zone the clock at port says is in force, its answer to rp; UTC if
+; it gives none.
+(def clock_zone ((port int) (rp int)) ClockZone
+  (match (zone_of (asked_reply (port_ask port rp "zone" "the clock")))
+    ((Some z) z)
+    ((None) (zone_utc))))
+
+; Whether z still holds when the clock says s.
+(def zone_holds ((z ClockZone) (s int)) bool (lt s (.until z)))
+
+; The time of day in z when the clock says s, as seconds counted the
+; same way: what clock_text shows.
+(def zone_local ((z ClockZone) (s int)) int (add s (mul (.minutes z) 60)))
 
 ; ------------------------------------------------------------ the date
 
@@ -78,3 +122,7 @@
 (def clock_text ((s int)) (list int)
   (match (civil (div s 86400))
     ((Civil y m d) (append (month_name m) (append " " (append (digits d) (append "  " (hh_mm (mod s 86400)))))))))
+
+; S as clock_text shows it, in UTC and saying so, as the logs of the
+; programs that keep the clock say it: Oct 15  22:42 UTC.
+(def utc_text ((s int)) (list int) (append (clock_text s) " UTC"))

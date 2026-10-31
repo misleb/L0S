@@ -364,8 +364,9 @@ driver composes them.
   name (`Win`'s last field, from `client_app`: `proc_info`'s entry, its
   path, the manifest of the bundle it is in, `app.l0`), or its title if
   it is no app's (`bar_title`); and `clock_text` of the time, bold, in
-  its middle. `rtc clock` tells `wm` the time each minute
-  (`user/lib/proto/clock.l0`). `Bar` also keeps the apps, read once at start
+  its middle, in the zone `rtc clock` serves (`zone_local`, `Bar`'s
+  `zone`, asked again once a minute's time passes its until). `rtc
+  clock` tells `wm` the time, UTC, each minute (`user/lib/proto/clock.l0`). `Bar` also keeps the apps, read once at start
   (`app_bundles`), and the `Launcher`. Windows open below it (`cascade`
   starts at 40), and a drag keeps their top at `below_bar`.
 - **The launcher** (`user/sbin/wm/launcher.l0`, and wm's section "the
