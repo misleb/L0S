@@ -45,19 +45,10 @@ move independently, so several can be active at once.
 | [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
-| [0055](0055-network-time.md) The time from the network, once it comes up | Network | active | 5/6 | – | network.md, desktop.md, pi5.md, programs.md, demo.md, testing.md |
 | [0056](0056-time-zones.md) Time zones | Desktop | idea | – | – | desktop.md, storage.md, fat32.md |
 ## Ready
 
-- [0055](0055-network-time.md) The time from the network, active:
-  `format/ntp.l0`, SNTP's request and answer, `rtc clock`'s `set S`
-  and DHCP's option 42 (`inet`'s `ntp`) are in, and `ntp` itself,
-  started by the Pi 5's inittab, and the `ntp` e2e case runs it
-  against a stand-in server; left is step 6, the user's: a Pi 5 with
-  no battery, its time right once the link is up and after a reboot
-  (the goal's Log has what to look for).
-
-Every other goal left is an `idea`, without steps. On the display,
+Every goal left is an `idea`, without steps. On the display,
 [0050](0050-hvs-crowded-lines.md) (crowded lines and the whole-screen
 flash at 4K), [0039](0039-paced-drawing-areas.md) and
 [0040](0040-paint-at-scale-2.md) follow from 0038's runs.
@@ -128,6 +119,7 @@ graph LR
 | [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | 2026-10-30 |
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | 2026-10-30 |
 | [0054](0054-l0-adoption.md) L0S written in the L0 of roadmap 0132 to 0144 | Tooling | 2026-10-30 |
+| [0055](0055-network-time.md) The time from the network, once it comes up | Network | 2026-10-30 |
 
 ## Template
 

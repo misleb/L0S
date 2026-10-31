@@ -1,6 +1,6 @@
 # 0055: The time from the network, once it comes up
 
-Track: Network · Status: active · Needs: – · Spec: network.md, desktop.md, pi5.md, programs.md, demo.md, testing.md
+Track: Network · Status: done · Needs: – · Spec: network.md, desktop.md, pi5.md, programs.md, demo.md, testing.md
 
 ## Why
 
@@ -47,7 +47,7 @@ which it does once DHCP has given it an address.
 - [x] The e2e case: a stand-in SNTP server on the host (QEMU's user
   network takes 10.0.2.2 to it), `ntp 10.0.2.2:PORT`, and `rtc clock`'s
   time the one it sent.
-- [ ] On a Pi 5 with no battery (the user's): the top bar's time right
+- [x] On a Pi 5 with no battery (the user's): the top bar's time right
   a few seconds after the link comes up, and after a reboot.
 
 Open: whether QEMU's demo starts `ntp` too. Its board's clock is the
@@ -95,3 +95,8 @@ the Internet is milliseconds; the clock counts seconds.
   after the link comes up, `dmesg` holding `ntp: the time from ...`
   and `rtc: the clock set to ..., and the RTC to it`; and after
   `reboot`, `rtc`'s first line already the right time.
+- 2026-10-30: step 6, done: on a Pi 5 the user reported it works, the
+  time set from the network once the link was up. The RTC's write
+  through the firmware (`SET_RTC_REG`) has run there with it. Done;
+  the demo on QEMU keeps the host's time, as the Open note above
+  decided, until 0056.

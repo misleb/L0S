@@ -166,7 +166,8 @@ boot should check these, on the debug UART (`dmesg` repeats them):
 - `uart`'s line, and that what is typed reaches `sh`
 - `rtc`'s line and its time. The mailbox's message is given the page's
   own address, as the BCM2712's firmware node's identity `dma-ranges`
-  says, not the Pi 4's 0xC0000000 above it: unconfirmed
+  says, not the Pi 4's 0xC0000000 above it, which has run: the RTC is
+  read, and written once `ntp` sets the clock
 - `xhci`'s lines and `usb-hid`'s (see [USB](devices.md#usb))
 - `hvs`'s lines: how many displays the firmware brought up, the clocks,
   the CPU's and the RAM's speed as the firmware measures them (seen:
