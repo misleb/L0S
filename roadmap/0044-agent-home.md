@@ -1,6 +1,6 @@
 # 0044: The agent's home: its personality, its history, and a backup
 
-Track: Agent · Status: active · Needs: 0043 · Spec: agent.md, network.md, programs.md, storage.md, testing.md
+Track: Agent · Status: done · Needs: 0043 · Spec: agent.md, network.md, programs.md, storage.md, testing.md
 
 ## Why
 
@@ -103,7 +103,7 @@ it makes has to be seen and undone.
   refusals; the proxy's PUT, GET, 401 and 404 against a directory
   under a temporary one (`test_proxy.py`); `agent`'s archive of a list
   of files as bytes, read back by `parse_initramfs`.
-- [ ] **The e2e case, and a Pi 5.** The case `agent_home`, as 0043's
+- [x] **The e2e case, and a Pi 5.** The case `agent_home`, as 0043's
   `agent` case is: the stand-in's script writes `CLAUDE.md` anew,
   writes a memory and its index, and tries to write `CONSTITUTION.md`,
   which fails; the checks see the constitution, rules and index in the
@@ -176,3 +176,19 @@ it makes has to be seen and undone.
       # then a reinstall of System from the netboot (0043's Log), and:
       #   ls /Volumes/data/agent            as it was
       #   run agent                         its prompt with the new rules and the memory
+- 2026-10-30: step 6 done, on a Pi 5 by the user, through the proxy on
+  192.168.254.200:8765 restarted for `/backup`. In two conversations
+  the agent remembered a name for itself and the person's name: its
+  history, as backed up, is four entries, `memory/agent-name.md` and
+  `memory/user-name.md` new and `memory/MEMORY.md` changed twice, the
+  file before each change kept as `.history/2` and `.history/4`. The
+  first conversation's tag is `101101.1`, its times 1793424170: agentd
+  started while the Pi's clock still counted from 1970 (no battery;
+  0055's `ntp` set it later), so S, the start, is the clock's then, and
+  the tag still tells that start's conversations apart. `run agent
+  backup` put the home on the host, 5380 bytes as
+  `build/proxy/backup/archive/20261031T054515Z.cpio`, and
+  `build/proxy/backup/home` opened in Claude Code; `System` reinstalled
+  from a netboot, the home was found as it was. `proxy.py --day`, the
+  day's whole, both boards and every run: 29 answers, input 107, output
+  4941, cache written 36710, cache read 138740.

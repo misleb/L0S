@@ -1,6 +1,6 @@
 # 0043: `agentd`, an agent's loop and its tools on L0S
 
-Track: Agent · Status: active · Needs: 0042 · Spec: agent.md (new), programs.md, demo.md, testing.md
+Track: Agent · Status: done · Needs: 0042 · Spec: agent.md (new), programs.md, demo.md, testing.md
 
 ## Why
 
@@ -221,7 +221,7 @@ What it is, as decided with the user:
   the summary and the kept turns; the cut never parts a tool use and
   its result; a summary request that fails leaves the conversation as
   it was and says so. agent.md: compaction.
-- [ ] **On QEMU and a Pi 5, with the real API** (the user): `make
+- [x] **On QEMU and a Pi 5, with the real API** (the user): `make
   proxy-run`, then `run agent` on `make demo-system NET=user` with
   `make agent-etc API=10.0.2.2:8765`, the home on the disk's `data`;
   and on a Pi 5 through the proxy on the host's LAN address, as 0042's
@@ -452,3 +452,8 @@ What it is, as decided with the user:
   in `/Volumes/data/agent`, the card's data volume; its requests read
   the cache as on QEMU (1483, then 1563 tokens). Left of the step: the
   reinstall of `System` that keeps the home, on either board.
+- 2026-10-30: step 10 done: on the Pi 5, by the user, with 0044's home,
+  `System` reinstalled from a netboot's initramfs and the home on the
+  card's `data` volume found as it was, its memory and history with it
+  (0044's Log). The reinstall was run on the Pi 5 only, not on QEMU,
+  where the same `install` writes the same way.

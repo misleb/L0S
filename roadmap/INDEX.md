@@ -36,8 +36,6 @@ move independently, so several can be active at once.
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
-| [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | active | 9/10 | 0042 | agent.md (new), programs.md, demo.md, testing.md |
-| [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | active | 5/6 | 0043 | agent.md, network.md, programs.md, storage.md, testing.md |
 | [0045](0045-agent-builder-mcp.md) The agent builds programs for itself, through an MCP server on the host | Agent | idea | – | 0043 | agent.md, programs.md, testing.md |
 | [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 | agent.md |
 | [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
@@ -51,17 +49,6 @@ move independently, so several can be active at once.
 | [0056](0056-time-zones.md) Time zones | Desktop | idea | – | – | desktop.md, storage.md, fat32.md |
 ## Ready
 
-- [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools,
-  active: everything is in, and `run agent` has talked to the real API
-  on QEMU and on a Pi 5, its tools writing in its home; left of step 10
-  is a reinstall of `System` that keeps the home (the goal's Log has
-  the commands).
-- [0044](0044-agent-home.md) The agent's home, active: its layout in
-  Claude Code's conventions, the constitution it may not write, the
-  history of its writes with `agent history` and `undo`, and `agent
-  backup` and `restore` through the host's proxy are in, with the
-  `agent_home` e2e case; left is step 6's run on a Pi 5, the user's
-  (the goal's Log has the commands).
 - [0055](0055-network-time.md) The time from the network, active:
   `format/ntp.l0`, SNTP's request and answer, `rtc clock`'s `set S`
   and DHCP's option 42 (`inet`'s `ntp`) are in, and `ntp` itself,
@@ -138,6 +125,8 @@ graph LR
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | 2026-10-29 |
 | [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | 2026-10-29 |
 | [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | 2026-10-30 |
+| [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | 2026-10-30 |
+| [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | 2026-10-30 |
 | [0054](0054-l0-adoption.md) L0S written in the L0 of roadmap 0132 to 0144 | Tooling | 2026-10-30 |
 
 ## Template
