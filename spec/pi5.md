@@ -184,6 +184,10 @@ boot should check these, on the debug UART (`dmesg` repeats them):
   volume it mounts
 - `gem`'s line, its link line once a cable is in, and `inet`'s lease
   (see [The network on the Raspberry Pi 5](network.md#the-network-on-the-raspberry-pi-5))
+- with `/etc/agent` (`make agent-etc`), `agentd`'s serving line, naming
+  the proxy it reaches over the LAN, at the host's address on the
+  network of that lease ([Reaching a model's API](network.md)); `run
+  agent` then talks to the model, its home on the card's `data` volume
 
 ## The bootloader's configuration
 

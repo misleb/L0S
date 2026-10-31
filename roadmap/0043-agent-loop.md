@@ -435,3 +435,20 @@ What it is, as decided with the user:
   Log what `agent` wrote, the usage lines from
   `build/proxy/usage.jsonl` (the second request of a turn should read
   the cache: `cache_read_input_tokens` above 0) and `--day`'s totals.
+- 2026-10-30: step 10's conversations, against the real API, through
+  one proxy on the host's LAN address, 192.168.254.200:8765 (0042's
+  Log), which the QEMU board reaches as well. On QEMU, `make
+  demo-system NET=user`, 4 CPUs: `agentd` made
+  `/Volumes/data/agent/CLAUDE.md` and served; `run agent`, asked to
+  make `notes`, write `today.txt` there saying what board it is on, run
+  `hello` and `cat` it at `sh`, used `make_dir`, `run hello`, a `sh`
+  line that failed (`help; uname -a; cat /proc/cpuinfo`, exit 1), `sh
+  help`, `sh dmesg` to find the board, `write_file`, and `sh cat
+  notes/today.txt`, then said what each gave, naming the failure. Its
+  turn was five requests, each reading what the last cached: cache read
+  0, 1524, 1815, 2684, 4780, cache written 1524, 291, 869, 2096, 324,
+  input 2 to 4 each. On a Pi 5 (netboot), the user talked to it from a
+  vt on the desktop: questions, then `file.txt` holding "Blah" written
+  in `/Volumes/data/agent`, the card's data volume; its requests read
+  the cache as on QEMU (1483, then 1563 tokens). Left of the step: the
+  reinstall of `System` that keeps the home, on either board.

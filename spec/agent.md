@@ -282,5 +282,5 @@ sent as `?`, and a cut moves back to where a character starts.
 - Compaction happens only as a turn begins, so one turn of many rounds
   of tools can grow past the size until it ends; and the tokens after
   it are an estimate, from bytes.
-- Not yet run against the real API, nor on a Pi 5: the e2e case runs
-  against the stand-in.
+- Its tests run against the stand-in only: the real API has been
+  talked to by hand, on QEMU and on a Pi 5, never by a test.

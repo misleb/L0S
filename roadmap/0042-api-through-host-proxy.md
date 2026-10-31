@@ -1,6 +1,6 @@
 # 0042: A model's API reached through a proxy on the host
 
-Track: Agent · Status: active · Needs: 0041 · Spec: network.md, programs.md, testing.md, pi5.md
+Track: Agent · Status: done · Needs: 0041 · Spec: network.md, programs.md, testing.md, pi5.md
 
 ## Why
 
@@ -116,7 +116,7 @@ request built, its streamed events read), which 0043's `agentd` uses.
   a 529 overloaded error. `make e2e` depends on the proxy's venv.
   testing.md's case; network.md's "Reaching a model's API": the proxy,
   `/etc/agent`, `ask`; programs.md's `ask` row.
-- [ ] **The agent's etc on a board, and the real API on QEMU.** `make
+- [x] **The agent's etc on a board, and the real API on QEMU.** `make
   agent-etc API=HOST:PORT [MODEL=NAME]` writes `build/agent-etc/config`
   and copies `build/proxy/token` beside it; when that directory is
   there, the demo's initramfs (`stage_etc`) and `pi5-initramfs` take it
@@ -128,7 +128,7 @@ request built, its streamed events read), which 0043's `agentd` uses.
   proxy-run`, `make agent-etc API=10.0.2.2:8765`, `make demo NET=user`,
   `run ask` a question, and `proxy.py --day`; logged here with what it
   cost. network.md says how a board is given the proxy.
-- [ ] **The Pi 5** (the user, on the board): the proxy on the host's
+- [x] **The Pi 5** (the user, on the board): the proxy on the host's
   LAN address (`make proxy-run PROXY_LISTEN=192.168.1.10:8765`, the
   host's address on the network the Pi's DHCP lease is on), `make
   agent-etc API=192.168.1.10:8765`, a netboot (`make pi5-netboot`,
@@ -249,3 +249,21 @@ request built, its streamed events read), which 0043's `agentd` uses.
 
   The host's firewall must let the Pi reach port 8765. Log what `ask`
   wrote, the usage line, and anything `gem` or `inet` needed.
+- 2026-10-30: steps 4 and 5 done, against the real API, with one proxy
+  for both boards: `make proxy-run PROXY_LISTEN=192.168.254.200:8765`,
+  the host's address on the LAN the Pi's DHCP lease is on (the host has
+  a second, 192.168.1.10, which the Pi is not on), and `make agent-etc
+  API=192.168.254.200:8765`. QEMU's user network reaches the host's LAN
+  address as any other, so the QEMU board took the same `/etc/agent`
+  rather than `10.0.2.2`. On QEMU (`make demo-system NET=user`), `run
+  ask what is a microkernel, in two sentences` streamed its two
+  sentences, and the usage line was `claude-sonnet-5-5`, 200, input 21,
+  output 123, no cache. On the Pi 5 (`make pi5-netboot`, the netboot's
+  initramfs holding `/etc/agent`), the user talked to the model from a
+  vt on the desktop with `run agent` (0043), which goes through the same
+  `model.l0` and proxy as `ask`: questions, and a `write_file` of
+  `file.txt` holding "Blah" in `/Volumes/data/agent`, its two requests
+  logged at 04:40 UTC, the second reading the first's 1563 cached
+  tokens. Nothing in `gem` or `inet` needed changing. `ask` itself was
+  not typed on the Pi. `proxy.py --day` for the day, both boards: 10
+  answers, input 47, output 1264, cache written 8257, cache read 13849.

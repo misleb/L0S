@@ -370,7 +370,10 @@ A board on QEMU's user network reaches a proxy on the host's loopback
 as 10.0.2.2: `api 10.0.2.2:8765`. A Pi 5 reaches it at the host's
 address on the LAN its DHCP lease is on, where the proxy must listen on
 that address (`make proxy-run PROXY_LISTEN=192.168.1.10:8765`, `api
-192.168.1.10:8765`).
+192.168.1.10:8765`; `run net` shows the Pi's lease, and `ip -4 addr`
+the host's address on that network). QEMU's user network reaches the
+host's LAN address too, so one proxy there serves both boards with the
+same `/etc/agent`.
 
 A board is given the proxy by `make agent-etc API=HOST:PORT
 [MODEL=NAME]`, which writes `build/agent-etc/config` (`api`, and
