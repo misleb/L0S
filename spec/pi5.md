@@ -154,9 +154,10 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode`, `hdmi`, `eof` and `watch` beside them), waiting for its lists by channel 0's end of frame, interrupt 129 through `disp_intr`, at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
 | `hdmi-audio` | sound on HDMI0, served as `audio`, once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](sound.md#sound-on-the-raspberry-pi-5)); it plays `/etc/chime.wav` as it starts, unless the boot argument `chime=off`, and `play /etc/chime.wav` tries it again. `make pi5-shell` leaves it out too |
 | `sdhci pi5`, `fs ram` | the microSD card in the slot, through the BCM2712's own SD host controller, `sdio1`, at 0x1000FFF000, interrupt 305 (see [The disk](storage.md#the-disk)), served as a disk; one `fs`, started `fs ram`, serves a volume in memory, `/Volumes/tmp`, registered as `tmpfs`, which keeps nothing over a power cut, and mounts the card's volumes, a FAT32 boot partition among them (see [FAT32 volumes](fat32.md#fat32-volumes)), registered as `fs`, waiting on both names' ports as a set. With no card in the slot `sdhci` says so and exits, and `fs` serves `tmp` alone |
-| `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). It keeps time over a power cut only with a battery on the RTC connector |
+| `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). A `set S` writes S to the RTC with `SET_RTC_REG`, so a reboot without a power cut keeps it, and is kept by `rtc clock` itself if the firmware refuses it. It keeps time over a power cut only with a battery on the RTC connector |
 | `eeprom` | not started, but flagged `dev` for the mailbox, so that the shell can run it: the bootloader's configuration, read and changed (see [The bootloader's configuration](#the-bootloaders-configuration)) |
 | `gem`, `inet dhcp` | the Ethernet port, RP1's GEM, serving `nic`, and the IPv4 stack over it at the address DHCP gives (see [The network on the Raspberry Pi 5](network.md#the-network-on-the-raspberry-pi-5)) |
+| `ntp` | the time from the network, once `inet` registers: asked of the NTP server DHCP named, or `pool.ntp.org`, and given `rtc clock`, which writes it to the RTC; again every hour (see [The network](network.md#the-network)) |
 
 Nothing else of the demo's has a device here: no virtio, so no `random`
 for `inet`'s TCP, no PCIe for `pcie virt`, and no `sdhci pci`. The first
@@ -243,6 +244,10 @@ the image's own configuration written back gave the image unchanged.
 
 ## Limits
 
+- **A board with no battery on its RTC connector is in 1970** after a
+  power cut until `ntp` has set the clock, a few seconds after the link
+  comes up, and stays there with no network; what `fs` writes
+  meanwhile is dated from 1970.
 - **The Raspberry Pi 5 reaches its RTC only through the firmware**, and
   boots only over the network or from a card `l0 card` or `install
   --boot` wrote. Its

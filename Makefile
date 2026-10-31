@@ -233,6 +233,8 @@ RANDOM  := user/lib/proto/random.l0
 NICLIB  := user/lib/proto/nic.l0
 DNSLIB  := user/lib/format/dns.l0
 INETLIB := $(NICLIB) $(DNSLIB) $(RANDOM) user/lib/proto/inet.l0
+# SNTP's messages, the time asked of a server; pure.
+NTPLIB  := user/lib/format/ntp.l0
 # JSON's values, read and written as bytes; pure, for the board and the
 # host tools alike.
 JSON    := user/lib/format/json.l0
@@ -295,6 +297,7 @@ LIBS_inet       := $(INETLIB) $(CLOCK)
 LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(HTTP) $(JSON) $(SSE)
+LIBS_ntp        := $(INETLIB) $(CLOCK) $(NTPLIB)
 LIBS_ask        := $(MODELLIB)
 LIBS_agent      := $(AGENTLIB)
 LIBS_agentd     := $(MODELLIB) $(PATHS) $(AGENTLIB)
@@ -538,6 +541,7 @@ $(call l0_test,$(BASE) $(PPM) $(QOI) user/lib/format/qoi_test.l0)
 $(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)
 $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(call l0_test,$(BASE) $(JSON) user/lib/format/json_test.l0)
+$(call l0_test,$(BASE) $(NTPLIB) user/lib/format/ntp_test.l0)
 $(call l0_test,$(BASE) $(SSE) user/lib/format/sse_test.l0)
 $(call l0_test,$(BASE) $(HTTPMSG) user/lib/format/http_test.l0)
 $(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))

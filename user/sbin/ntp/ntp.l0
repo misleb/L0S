@@ -1,0 +1,188 @@
+; ntp.l0 -- the time from the network: an SNTP client (format/ntp.l0)
+; that waits for inet, which registers once it has an address, asks a
+; server the time over UDP, and has rtc clock take it (clock.l0's set).
+; It asks again every hour, and a minute after a round that failed.
+;
+;   ntp                 the NTP server DHCP named (inet's ntp), or else
+;                       pool.ntp.org
+;   ntp SERVER[:PORT]   that server, a name or dotted, at PORT, 123 if
+;                       not given
+;
+; With no inet within 5 minutes, or no clock, it says so and exits 0: no
+; network is no failure.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (fail_as "ntp" why))
+
+; A server to ask: its name, or its address dotted, and its port.
+(data Server (Server (name (list int)) (port int)))
+
+; ntp's state: the stack, whose answer port the datagrams come to; the
+; clock's port, and a port of its own for the clock's answers; and the
+; server the arguments named, if they named one.
+(data Ntp (Ntp (inet Inet) (clock int) (reply int) (given (Option Server))))
+
+; The server asked when neither the arguments nor DHCP name one.
+(def pool_server () (list int) "pool.ntp.org")
+
+; How long ntp waits for inet, which DHCP may keep a while, and for the
+; clock.
+(def inet_wait_ns () int 300000000000)
+(def clock_wait_ns () int 5000000000)
+
+; How long after a round the next one is: an hour once the clock is
+; set, a minute after a failure.
+(def round_ns () int 3600000000000)
+(def retry_ns () int 60000000000)
+
+; How long a request waits for its answer, and how many times it is sent.
+(def answer_wait_ns () int 2000000000)
+(def ntp_tries () int 3)
+
+; ---------------------------------------------------------------- starting
+
+; ntp with the arguments as: the rounds, once inet and the clock are
+; there; 1 if the arguments name no server.
+(def ntp_main ((as (list (list int)))) int
+  (match (server_of as)
+    ((Err why) (complain why))
+    ((Ok given) (ntp_started given))))
+
+; The server the arguments as name: none for none; or why they are not
+; one.
+(def server_of ((as (list (list int)))) (Result (Option Server) (list int))
+  (if (is_empty as) ((Ok (Option Server) (list int)) ((None Server)))
+      (not (is_empty (tail as))) ((Err (Option Server) (list int)) "usage: ntp [SERVER[:PORT]]")
+      (let (w (head as)
+            name (up_to 58 w)
+            rest (drop_n w (add (length name) 1)))
+        (if (is_empty name) ((Err (Option Server) (list int)) (append "no server in " w))
+            (eq (length name) (length w)) ((Ok (Option Server) (list int)) (Some (Server name (ntp_port))))
+            (match (word_number rest)
+              ((Some p) (if (and (ge p 1) (le p 65535))
+                            ((Ok (Option Server) (list int)) (Some (Server name p)))
+                            ((Err (Option Server) (list int)) (append "not a port: " rest))))
+              ((None) ((Err (Option Server) (list int)) (append "not a port: " rest))))))))
+
+; Once inet and the clock are there, the rounds; or, with either missing,
+; why, said, and 0.
+(def ntp_started ((given (Option Server))) int
+  (match (name_wait "inet" (inet_wait_ns))
+    ((NotFound) (info_as "ntp" "no network: inet never registered"))
+    ((Found ip)
+      (match (name_wait "clock" (clock_wait_ns))
+        ((NotFound) (info_as "ntp" "no clock to set"))
+        ((Found cp) (rounds (Ntp (Inet ip (port_new)) cp (port_new) given)))))))
+
+; ------------------------------------------------------------------ rounds
+
+; A round, its failure said, and the next one after round_ns, or retry_ns
+; if this one failed; for ever.
+(def rounds ((t Ntp)) int
+  (let (why (round t (chosen t))
+        w (if (is_empty why) 0 (warn_as "ntp" why))
+        s (rest_until t (add (clock_ns) (if (is_empty why) (round_ns) (retry_ns)))))
+    (rounds t)))
+
+; The server to ask: the one given; or else the one DHCP named; or else
+; the pool.
+(def chosen ((t Ntp)) Server
+  (match (.given t)
+    ((Some s) s)
+    ((None)
+      (match (inet_ntp (.inet t))
+        ((Ok a) (if (eq a 0) (Server (pool_server) (ntp_port)) (Server (ip_text a) (ntp_port))))
+        ((Err why) (Server (pool_server) (ntp_port)))))))
+
+; The time asked of s and given the clock: empty once it has it, or why
+; not.
+(def round ((t Ntp) (s Server)) (list int)
+  (match (inet_resolve (.inet t) (.name s))
+    ((Err why) (append "no address for " (append (.name s) (append ": " why))))
+    ((Ok addr)
+      (match (udp_bind (.inet t) 0)
+        ((Err why) why)
+        ((Ok p)
+          (let (r (asked t s addr p (token t) (ntp_tries))
+                u (udp_unbind (.inet t) p))
+            r))))))
+
+; A request's token: a word of random's, so that an answer is hard to
+; forge, or the clock's where there is none, below 2^62.
+(def token ((t Ntp)) int (bit_and (random_word (.reply t) (clock_ns)) 4611686018427387903))
+
+; The request of token sent from p to s at addr, and its answer taken;
+; sent again, tries times in all, while none comes.
+(def asked ((t Ntp) (s Server) (addr int) (p int) (tok int) (tries int)) (list int)
+  (if (eq tries 0)
+      (append (.name s) " did not answer")
+      (let why (udp_send (.inet t) p addr (.port s) (ntp_request tok))
+        (if (not (is_empty why))
+            why
+            (match (answer_wait t s addr p tok (add (clock_ns) (answer_wait_ns)))
+              ((None) (asked t s addr p tok (sub tries 1)))
+              ((Some a)
+                (match a
+                  ((NtpRefused r) (append (.name s) (append ": " r)))
+                  ((NtpTime secs) (taken t s addr secs)))))))))
+
+; The answer to the request of token, from s at addr to p, once it comes
+; before due; none if it does not. Anything else that comes is dropped.
+(def answer_wait ((t Ntp) (s Server) (addr int) (p int) (tok int) (due int)) (Option NtpAnswer)
+  (let (rp (inet_port (.inet t)) a (alarm_at rp due))
+    (answer_heard t s addr p tok due (port_receive rp))))
+
+; m, and what comes after it, until the answer or due.
+(def answer_heard ((t Ntp) (s Server) (addr int) (p int) (tok int) (due int) (m Message)) (Option NtpAnswer)
+  (match m
+    ((RecvFailed) ((None NtpAnswer)))
+    ((Message from b)
+      (if (is_alarm_notice m)
+          (if (ge (clock_ns) due)
+              ((None NtpAnswer))
+              (answer_heard t s addr p tok due (port_receive (inet_port (.inet t)))))
+          (match (answer_in b addr (.port s) p tok)
+            ((Some r) (Some r))
+            ((None) (answer_heard t s addr p tok due (port_receive (inet_port (.inet t))))))))))
+
+; What the message's bytes b say, if they are a udp notice from port at
+; addr to p that answers the request of token: its time, or why it is
+; refused.
+(def answer_in ((b bytes) (addr int) (port int) (p int) (tok int)) (Option NtpAnswer)
+  (match (datagram_at b)
+    ((None) ((None NtpAnswer)))
+    ((Some d)
+      (if (not (and (eq (.src d) addr) (and (eq (.sport d) port) (eq (.dport d) p))))
+          ((None NtpAnswer))
+          (match (ntp_answer b (.at d) (bytes_len b) tok)
+            ((NtpRefused why) (if (is_empty why) ((None NtpAnswer)) (Some (NtpRefused why))))
+            ((NtpTime secs) (Some (NtpTime secs))))))))
+
+; secs, from s at addr, given the clock and said: empty, or why the clock
+; did not take it.
+(def taken ((t Ntp) (s Server) (addr int) (secs int)) (list int)
+  (let why (clock_set (.clock t) (.reply t) secs)
+    (if (is_empty why)
+        (let n (info_as "ntp" (time_line s addr secs)) "")
+        (append "the clock refused the time: " why))))
+
+; What ntp says of the time secs it had from s at addr.
+(def time_line ((s Server) (addr int) (secs int)) (list int)
+  (append "the time from " (append (.name s)
+    (append (if (eq (.name s) (ip_text addr)) "" (append " (" (append (ip_text addr) ")")))
+      (append ", " (clock_text secs))))))
+
+; Until due: every message that comes to the stack's port meanwhile
+; dropped, an alarm for due set.
+(def rest_until ((t Ntp) (due int)) int
+  (let (rp (inet_port (.inet t)) a (alarm_at rp due))
+    (rest_heard t due (port_receive rp))))
+
+; m, and what comes after it, dropped until due.
+(def rest_heard ((t Ntp) (due int) (m Message)) int
+  (match m
+    ((RecvFailed) 0)
+    ((Message from b)
+      (if (and (is_alarm_notice m) (ge (clock_ns) due))
+          0
+          (rest_heard t due (port_receive (inet_port (.inet t))))))))

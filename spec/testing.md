@@ -211,6 +211,11 @@ Ctrl-C as a person would:
   `net resolve` ask the host's for a name with an address, an alias of
   it, answered with a CNAME and then the address, a name with no
   address, and one it does not know; and take an address as it is;
+- `ntp`, with [a stand-in SNTP server](../tests/e2e/ntp/server.py) on
+  the host's loopback that always answers 2030-01-01 12:00 UTC, starts
+  `ntp 10.0.2.2:PORT` beside `rtc clock` and `inet`, and holds that
+  `ntp` said it had that time, which it says only once `rtc clock` has
+  taken it with `set`;
 - `http`, with [a small server](../tests/e2e/http/server.py) of
   HTTP/1.1 on the host's loopback, has `http` fetch a page, the same
   with its head, one of 300 lines, more than a window holds, and one

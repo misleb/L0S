@@ -1,0 +1,76 @@
+; ntp_test.l0 -- tests of ntp.l0: its arguments, the answer read from a
+; notice, and what it says; under an operating system there is no inet.
+
+(def server_text ((r (Result (Option Server) (list int)))) (list int)
+  (match r
+    ((Err why) (append "error " why))
+    ((Ok o) (match o ((None) "none") ((Some s) (append (.name s) (append " " (digits (.port s)))))))))
+
+(def test_server_none () int
+  (check_str "none" (server_text (server_of (nil (list int)))) "none"))
+
+; A server alone is asked at 123; a port after a colon is its own.
+(def test_server_given () int
+  (add (check_str "a name" (server_text (server_of (split_spaces "time.example"))) "time.example 123")
+       (check_str "a port" (server_text (server_of (split_spaces "10.0.2.2:12345"))) "10.0.2.2 12345")))
+
+(def test_server_bad () int
+  (add (check_str "no port" (server_text (server_of (split_spaces "a:"))) "error not a port: ")
+       (add (check_str "past 65535" (server_text (server_of (split_spaces "a:65536"))) "error not a port: 65536")
+            (add (check_str "no name" (server_text (server_of (split_spaces ":123"))) "error no server in :123")
+                 (check_str "two" (server_text (server_of (split_spaces "a b"))) "error usage: ntp [SERVER[:PORT]]")))))
+
+; Under an operating system there is no inet to wait for: no network is
+; no failure.
+(def test_no_inet () int
+  (check_int "exits 0" (ntp_main (nil (list int))) 0))
+
+(def test_bad_args () int
+  (check_int "fails" (ntp_main (split_spaces "a b")) 1))
+
+; ------------------------------------------------------------ answers
+
+; A server's answer for token 7 at NTP seconds s (format/ntp.l0's
+; layout): mode 4, stratum 2, the origin 7, the transmit time s.
+(def answer_bytes ((s int)) (list int)
+  (append (cons 36 (cons 2 (zeros 22)))
+    (append (ntp_be32 0) (append (ntp_be32 7) (append (zeros 8) (append (ntp_be32 s) (ntp_be32 0)))))))
+
+; The message's bytes of a udp notice from port sport at src to 49152.
+(def notice ((src int) (sport int) (content (list int))) bytes
+  (match (message_new 30 (udp_notice (Datagram src sport 49152 content)))
+    ((Message f b) b)
+    ((RecvFailed) (bytes_from_list (nil int)))))
+
+(def heard_text ((o (Option NtpAnswer))) (list int)
+  (match o
+    ((None) "none")
+    ((Some a) (match a ((NtpTime t) (append "time " (digits t))) ((NtpRefused why) (append "refused " why))))))
+
+(def server () int (ip_of 10 0 2 2))
+
+; 4002307200 in NTP's seconds is 1793318400, 2026-10-30, in Unix's.
+(def test_answer_in () int
+  (check_str "the time" (heard_text (answer_in (notice (server) 123 (answer_bytes 4002307200)) (server) 123 49152 7))
+             "time 1793318400"))
+
+; From another address or port, to another port, or another token's, it
+; is not the answer.
+(def test_answer_in_not_ours () int
+  (let c (answer_bytes 4002307200)
+    (add (check_str "another address" (heard_text (answer_in (notice (ip_of 10 0 2 3) 123 c) (server) 123 49152 7)) "none")
+         (add (check_str "another port" (heard_text (answer_in (notice (server) 124 c) (server) 123 49152 7)) "none")
+              (add (check_str "to another" (heard_text (answer_in (notice (server) 123 c) (server) 123 49153 7)) "none")
+                   (check_str "another token" (heard_text (answer_in (notice (server) 123 c) (server) 123 49152 8)) "none"))))))
+
+; A refusal with a reason is the answer, which ends the round.
+(def test_answer_in_refused () int
+  (check_str "no time" (heard_text (answer_in (notice (server) 123 (answer_bytes 0)) (server) 123 49152 7))
+             "refused the server gives no time"))
+
+; A name says its address too; an address alone, once.
+(def test_time_line () int
+  (add (check_str "a name" (time_line (Server "pool.ntp.org" 123) (ip_of 1 2 3 4) 1793318400)
+                  "the time from pool.ntp.org (1.2.3.4), Oct 30  00:00")
+       (check_str "an address" (time_line (Server "10.0.2.2" 123) (server) 1793318400)
+                  "the time from 10.0.2.2, Oct 30  00:00")))

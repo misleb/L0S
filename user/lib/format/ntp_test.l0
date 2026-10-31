@@ -1,0 +1,68 @@
+; ntp_test.l0 -- tests of ntp.l0: the request byte by byte, and answers
+; built by hand as a server sends them, with what is refused.
+
+; The request with token 0x0102030405060708: 0x23, 39 zeros, and the
+; token in the transmit timestamp.
+(def test_request () int
+  (check_str "bytes" (ntp_request 72623859790382856)
+             (append (cons 35 (zeros 39)) (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 (cons 6 (cons 7 (cons 8 (nil int))))))))))))
+
+(def test_request_len () int
+  (check_int "48" (length (ntp_request 9)) (ntp_len)))
+
+; ------------------------------------------------------------ answers
+
+; A server's answer: first byte b0 (LI, VN, mode), stratum, reference id
+; ref, origin token, and transmit seconds s and fraction f.
+(def reply ((b0 int) (stratum int) (ref (list int)) (token int) (s int) (f int)) bytes
+  (bytes_from_list
+    (append (cons b0 (cons stratum (zeros 10)))
+      (append ref
+        (append (zeros 8)
+          (append (ntp_be32 (bit_shr token 32))
+            (append (ntp_be32 (bit_and token 4294967295))
+              (append (zeros 8) (append (ntp_be32 s) (ntp_be32 f))))))))))
+
+; A good answer: LI 0, VN 4, mode 4 is 0x24.
+(def good ((token int) (s int) (f int)) bytes (reply 36 2 "GPS." token s f))
+
+(def answer_text ((a NtpAnswer)) (list int)
+  (match a ((NtpTime t) (append "time " (digits t))) ((NtpRefused why) (append "refused " why))))
+
+(def whole ((b bytes) (token int)) NtpAnswer (ntp_answer b 0 (bytes_len b) token))
+
+; 2026-10-30 00:00:00 UTC is Unix 1793318400, NTP 4002307200.
+(def test_answer_time () int
+  (check_str "the time" (answer_text (whole (good 7 4002307200 0) 7)) "time 1793318400"))
+
+; A fraction of a half or more rounds up.
+(def test_answer_rounds () int
+  (add (check_str "under half" (answer_text (whole (good 7 4002307200 2147483647) 7)) "time 1793318400")
+       (check_str "half" (answer_text (whole (good 7 4002307200 2147483648) 7)) "time 1793318401")))
+
+; Era 1: NTP seconds 0 is 2036-02-07 06:28:16 UTC, Unix 2085978496
+; (2^32 less the offset), so 1 is a second later; 0 itself means no time.
+(def test_answer_era1 () int
+  (check_str "2036" (answer_text (whole (good 7 1 0) 7)) "time 2085978497"))
+
+; Read in place, from where a notice's datagram starts.
+(def test_answer_in_place () int
+  (let (head (bytes_from_list "udp 1.2.3.4 123 50000\n")
+        b (bytes_concat (cons head (cons (good 7 4002307200 0) (nil bytes))))
+        i (bytes_len head))
+    (check_str "past the head" (answer_text (ntp_answer b i (bytes_len b) 7)) "time 1793318400")))
+
+; Another request's answer, a client's request, and what is too short
+; are not the answer: no reason.
+(def test_answer_not_ours () int
+  (add (check_str "another token" (answer_text (whole (good 8 4002307200 0) 7)) "refused ")
+       (add (check_str "a request" (answer_text (whole (bytes_from_list (ntp_request 7)) 7)) "refused ")
+            (check_str "short" (answer_text (ntp_answer (good 7 4002307200 0) 0 47 7)) "refused "))))
+
+; A kiss-o'-death, stratum 0; a server not synchronized, LI 3 (0xE4) or
+; stratum 16; and a transmit time of 0.
+(def test_answer_refused () int
+  (add (check_str "kiss" (answer_text (whole (reply 36 0 "RATE" 7 4002307200 0) 7)) "refused the server says RATE")
+       (add (check_str "LI 3" (answer_text (whole (reply 228 2 "GPS." 7 4002307200 0) 7)) "refused the server is not synchronized")
+            (add (check_str "stratum 16" (answer_text (whole (reply 36 16 "GPS." 7 4002307200 0) 7)) "refused the server is not synchronized")
+                 (check_str "no time" (answer_text (whole (good 7 0 0) 7)) "refused the server gives no time")))))

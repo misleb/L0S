@@ -15,7 +15,7 @@
 (def client () int 55)
 
 (def stack0 () Stack
-  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3))))
+  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3) 0)))
 
 ; The bytes of a message from pid from with payload, as inet receives it.
 (def msg_from ((from int) (payload (list int))) bytes
@@ -148,7 +148,7 @@
 (def config_text ((r (Result Config (list int)))) (list int)
   (match r
     ((Err why) why)
-    ((Ok c) (match c ((Config a m g dns) (unwords (cons (ip_text a) (cons (ip_text m) (cons (ip_text g) (nil (list int)))))))))))
+    ((Ok c) (unwords (cons (ip_text (.addr c)) (cons (ip_text (.mask c)) (cons (ip_text (.gateway c)) (nil (list int)))))))))
 
 (def test_config_default () int
   (check_str "QEMU's" (config_text (config_of (nil (list int)))) "10.0.2.15 255.255.255.0 10.0.2.2"))
@@ -163,13 +163,13 @@
             (check_str "a bad gateway" (config_text (config_of (cons "10.0.0.1/8" (cons "x" (nil (list int)))))) "not an address: x"))))
 
 (def test_routes () int
-  (let c (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3))
+  (let c (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3) 0)
     (add (check_int "on the link" (next_hop c (ip_of 10 0 2 3)) (ip_of 10 0 2 3))
          (add (check_int "beyond it" (next_hop c (far)) (gw))
               (check_int "everyone" (next_hop c (ip_broadcast)) (ip_broadcast))))))
 
 (def test_broadcasts () int
-  (let c (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3))
+  (let c (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3) 0)
     (add (check_bool "the subnet's" (is_broadcast c (ip_of 10 0 2 255)) true)
          (add (check_bool "another's" (is_broadcast c (ip_of 10 0 3 255)) false)
               (check_bool "ours" (is_ours c (me)) true)))))
@@ -333,7 +333,7 @@
 ; Under an operating system there is no network card, which is no
 ; failure. (inet itself would read l0 test's arguments as its own.)
 (def test_no_card () int
-  (check_int "nothing to serve" (linked (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3)) 0) 0))
+  (check_int "nothing to serve" (linked (Config (me) (ip_mask 24) (gw) (ip_of 10 0 2 3) 0) 0) 0))
 
 ; Arguments that are not an interface fail.
 (def test_bad_arguments () int
@@ -343,7 +343,7 @@
 
 ; A stack with no address yet, and the xid of its exchange.
 (def bare () Stack
-  (fresh_stack (Link 100 (nic_pid) (my_mac)) (Config 0 0 0 0)))
+  (fresh_stack (Link 100 (nic_pid) (my_mac)) (no_config)))
 
 (def xid () int 777)
 
@@ -425,10 +425,8 @@
   (match (dhcp_of content)
     ((None) "not DHCP")
     ((Some m)
-      (match m
-        ((Dhcp op x type hw yi req mask router server lease dns)
-          (unwords (cons "type" (cons (digits type) (cons "xid" (cons (digits x)
-            (cons "asks" (cons (ip_text req) (cons "server" (cons (ip_text server) (nil (list int))))))))))))))))
+      (unwords (cons "type" (cons (digits (.type m)) (cons "xid" (cons (digits (.xid m))
+        (cons "asks" (cons (ip_text (.req m)) (cons "server" (cons (ip_text (.server m)) (nil (list int))))))))))))))
 
 ; What the stack of r has to put on the wire, as text.
 (def lease_wire ((r Leasing)) (list (list int))
@@ -653,6 +651,25 @@
 (def test_lease_no_dns () int
   (match (leased) ((Leasing s l) (check_str "dns" (dns_text s) "dns 0.0.0.0"))))
 
+; The NTP server an ACK names is the stack's too, and ntp says which.
+(def test_lease_ntp () int
+  (let o (append (std_options) (opt_bytes (opt_ntp) (be32 (ip_of 10 0 2 5))))
+    (match (heard (heard (started) (offer_frame)) (broadcast_of (server_msg (xid) 5 (me) o)))
+      ((Leasing s l) (check_str "ntp" (ntp_text s) "ntp 10.0.2.5")))))
+
+; With none named, and for an interface set by hand, there is none.
+(def test_lease_no_ntp () int
+  (add (match (leased) ((Leasing s l) (check_str "leased" (ntp_text s) "ntp 0.0.0.0")))
+       (check_str "by hand" (ntp_text (stack0)) "ntp 0.0.0.0")))
+
+; ntp is a request, answered, which takes no words.
+(def test_ntp_request () int
+  (add (check_str "asked" (served_text (handled (stack0) 7 5 "ntp")) "ntp 0.0.0.0")
+       (check_true "refused" (starts_with (served_text (handled (stack0) 7 5 "ntp x")) "error: "))))
+
+; A Served's answer.
+(def served_text ((r (Served Stack))) (list int) (match r ((Served s a) a)))
+
 ; The clock's notice is the lease's, not a request: with no lease it does
 ; nothing at all.
 (def test_time_notice () int
@@ -670,7 +687,7 @@
 
 ; A config's name server, or why there is none.
 (def config_dns_text ((r (Result Config (list int)))) (list int)
-  (match r ((Err why) why) ((Ok c) (match c ((Config a m g dns) (ip_text dns))))))
+  (match r ((Err why) why) ((Ok c) (ip_text (.dns c)))))
 
 (def test_lease_xid () int
   (add (check_int "from the card's last four bytes" (lease_xid (my_mac) 0) 1193046)
@@ -688,7 +705,7 @@
 
 ; With no card there is nothing to ask either.
 (def test_no_card_dhcp () int
-  (check_int "nothing to serve" (linked (Config 0 0 0 0) 0) 0))
+  (check_int "nothing to serve" (linked (no_config) 0) 0))
 
 ; -------------------------------------------------------------------- TCP
 
@@ -1094,3 +1111,9 @@
               "10.0.2.15/24 via 10.0.2.2, name server 10.0.2.3, card 52:54:00:12:34:56, set by hand, serving inet")
             (check_str "asking" (stack_line (stack0) (Selecting 1))
               "10.0.2.15/24 via 10.0.2.2, name server 10.0.2.3, card 52:54:00:12:34:56, serving inet"))))
+
+; A time server DHCP named is said after the name server.
+(def test_stack_line_ntp () int
+  (let s (.config (stack0) (.ntp (.config (stack0)) (ip_of 10 0 2 5)))
+    (check_str "with it" (stack_line s (Unleased))
+      "10.0.2.15/24 via 10.0.2.2, name server 10.0.2.3, time server 10.0.2.5, card 52:54:00:12:34:56, set by hand, serving inet")))

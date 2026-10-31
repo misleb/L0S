@@ -6,10 +6,12 @@
 ;               message
 ;   rtc clock   maps the clock and serves clock (user/lib/clock.l0): the
 ;               time, to whoever asks, and at the start of every minute
-;               to each process listening. It waits for requests,
-;               and for the kernel's alarm (call 297) at the start of
-;               the next minute, and leaves the interrupt alone, so rtc
-;               can still take it
+;               to each process listening, and set to a time asked, as
+;               ntp asks it, by adding to what the board's clock says
+;               and, on the Pi 5, writing the RTC. It waits for
+;               requests, and for the kernel's alarm (call 297) at the
+;               start of the next minute, and leaves the interrupt
+;               alone, so rtc can still take it
 
 (def rtc_base () int 151060480)     ; 0x09010000
 (def rtc_irq () int 34)
@@ -80,8 +82,29 @@
 (def pl031_part () int 49)               ; 0x031
 
 ; Seconds since 1970, as c says.
-(def clock_now ((c Clock)) int
+(def board_now ((c Clock)) int
   (match c ((Pl031Clock d) (region_get32 d (reg_data))) ((FirmwareClock f) (fw_time f))))
+
+; The clock rtc clock serves: the board's, and the seconds the last set
+; moved it by, which the clock adds to what the board says.
+(data Keeper (Keeper (board Clock) (moved int)))
+
+; Seconds since 1970, as k says.
+(def clock_now ((k Keeper)) int (add (board_now (.board k)) (.moved k)))
+
+; k set to s: the Pi 5's RTC written, if the firmware takes it, so that
+; a reboot keeps it, and moved by however far the board's clock still is
+; from s, nothing once the RTC has it; and the line rtc says of it.
+(def clock_set_to ((k Keeper) (s int)) Keeper
+  (let (was (clock_now k)
+        written (match (.board k) ((Pl031Clock d) false) ((FirmwareClock f) (fw_rtc_set f (rtc_time_reg) s)))
+        n (info_as "rtc" (set_line was s written)))
+    (.moved k (sub s (board_now (.board k))))))
+
+; What rtc says as the clock is set from was to s, the RTC written or not.
+(def set_line ((was int) (s int) (written bool)) (list int)
+  (append "the clock set to " (append (clock_text s)
+    (append ", from " (append (clock_text was) (if written ", and the RTC to it" ""))))))
 
 ; The board's clock, found: a PL031 where QEMU's virt board has one, if
 ; the kernel gives it and its ID registers say PL031; else the
@@ -105,16 +128,18 @@
 (def clock_started ((c Clock) (line (list int))) int
   (let (port (port_new) r (name_register_or_why port "clock"))
     (if (is_empty r)
-        (let n (info_as "rtc" line)
-          (clock_serve c port (clock_alarmed c port) (nil int)))
+        (let (n (info_as "rtc" line) k (Keeper c 0))
+          (clock_serve k port (clock_alarmed k port) (nil int)))
         (complain r))))
 
 ; Each request answered as it comes, and the listeners told the time
 ; when the kernel's alarm rings at the start of a minute: due is when the
 ; next minute begins, as c counts, which the alarm is set for, and ls the
 ; ports listening. An alarm that rings before c has reached due, as one
-; may if the board's clock and the kernel's drift apart, is set again.
-(def clock_serve ((c Clock) (port int) (due int) (ls (list int))) int
+; may if the board's clock and the kernel's drift apart, or the clock was
+; set back, is set again. A set answers ok, tells every listener the time
+; at once, and sets the alarm for the minute after the new time.
+(def clock_serve ((c Keeper) (port int) (due int) (ls (list int))) int
   (match (port_receive port)
     ((RecvFailed) (complain "lost its port"))
     ((Message from b)
@@ -123,11 +148,18 @@
             (if (lt t due)
                 (let a (alarm_at port (minute_alarm (clock_ns) t due)) (clock_serve c port due ls))
                 (clock_serve c port (clock_alarmed c port) (listeners_tell ls (time_notice t)))))
-          (clock_serve c port due (clock_asked (clock_now c) (msg_text b) ls))))))
+          (let p (msg_text b)
+            (match (clock_set_of (request_body p))
+              ((None) (clock_serve c port due (clock_asked (clock_now c) p ls)))
+              ((Some s)
+                (let (k (clock_set_to c s)
+                      a (request_answer p "ok")
+                      told (listeners_tell ls (time_notice (clock_now k))))
+                  (clock_serve k port (clock_alarmed k port) told)))))))))
 
 ; When the next minute begins, as c counts, the kernel's alarm set for
 ; it on port.
-(def clock_alarmed ((c Clock) (port int)) int
+(def clock_alarmed ((c Keeper) (port int)) int
   (let (t (clock_now c)
         due (next_minute t)
         a (alarm_at port (minute_alarm (clock_ns) t due)))

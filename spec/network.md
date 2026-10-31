@@ -58,6 +58,7 @@ done, which is how its tests see it. It serves **the inet protocol**
 |---|---|
 | `info` | `inet ADDR MASK GATEWAY MAC`: the interface |
 | `dns` | `dns ADDR`: the name server the interface has, `0.0.0.0` for none, which a client's `inet_resolve` asks |
+| `ntp` | `ntp ADDR`: the NTP server DHCP named, `0.0.0.0` for none or for an interface set by hand (`inet_ntp`) |
 | `stats` | `rx N tx N dropped N arp N`: frames taken and sent, those passed over or lost, and the neighbours known |
 | `arp` | a line `ADDR MAC` for each neighbour, by address |
 | `bind PORT` | `bound PORT`: UDP datagrams to PORT come to the reply port from now on, as notices `udp SRC SPORT DPORT`, a newline, and the data; `bind 0` for a port `inet` picks, from 49152. Refused if another client holds PORT |
@@ -144,8 +145,12 @@ to 255.255.255.255 port 67, as datagrams of its own, which wait in the
 same queue as every frame it sends. The OFFER of an address and a
 server, for this card and this exchange's xid, is taken; the ACK of that
 address gives the stack its address, the netmask it names, or the
-address's class's, the first router it names, or none, and the first
-name server, or none; a NAK begins again. It sends again every 2
+address's class's, the first router it names, or none, the first
+name server, or none, and the first NTP server (option 42), or none,
+which `inet`'s line names after the name server if there is one; a
+NAK begins again. Its DISCOVER and REQUEST list the mask, the router,
+the name servers and the NTP servers as the options it wants (option
+55). It sends again every 2
 seconds, 5 times in all once the card has a link, and if no server has
 answered says so and exits 1. A DISCOVER sent with no link is lost, so
 `inet` asks the driver for the link (`link`) once it listens, counts
@@ -176,6 +181,26 @@ seconds for the answer, asks 3 times in all, and drops anything else
 that comes to its port meanwhile. The query's id is 16 bits asked of
 `random`, or the clock's when there is none. `net`, `tftp` and `http`
 take names this way.
+
+**The time** (SNTP, RFC 4330). `ntp` ([user/sbin/ntp](../user/sbin/ntp/ntp.l0))
+sets the clock from the network, on the Pi 5, whose inittab starts it
+after `inet` (QEMU's board has the host's time already). It waits up to
+5 minutes for `inet` to register, which it does once DHCP has given it
+an address, and for `rtc clock`. The server it asks is its argument's,
+`ntp SERVER[:PORT]`, a name or dotted, at port 123 unless one is given;
+else the one DHCP named (`inet`'s `ntp`); else `pool.ntp.org`. A round
+resolves the server, binds a UDP port `inet` picks, and sends the
+48-byte request built in [ntp.l0](../user/lib/format/ntp.l0), a token of
+64 bits asked of `random` (or the clock's) in its transmit timestamp. It
+waits 2 seconds for the answer on the kernel's alarm, sends again, 3
+times in all, and takes only a datagram from the server's address and
+port to its own whose mode is a server's and whose origin is the token.
+A kiss-o'-death (stratum 0), a server not synchronized (leap indicator
+3, or stratum past 15) or a transmit time of 0 ends the round refused.
+The time it takes, the transmit timestamp to the nearest second, is
+given `rtc clock` with `set S`, and said as `ntp: the time from SERVER
+(ADDR), Oct 30  00:00`. The next round is an hour later, or a minute
+after one that failed, which it warns of.
 
 `run net` uses it from a shell, as `ifconfig` and `ping` would, and
 `run tftp HOST FILE [PATH]` fetches a file over TFTP, from QEMU's TFTP
@@ -464,8 +489,8 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   100 ms, takes frames of up to 1536 bytes in one buffer each, no
   jumbo frames and no multicast.
   `inet` has one interface, set by its arguments or by DHCP, which
-  takes no other options than the mask, the first router and the first
-  name server. Its lease is looked at only when `rtc clock` tells it a
+  takes no other options than the mask, the first router, the first
+  name server and the first NTP server. Its lease is looked at only when `rtc clock` tells it a
   minute has begun, so with no clock running it is never renewed, and
   a lease shorter than two minutes runs out before it is; one taken
   away leaves the clients' sockets and connections bound to an address
@@ -511,6 +536,14 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   only `http://`; a connection carries one request and then its
   response, never several in flight; a head may be at most 16384 bytes;
   no content coding (gzip) is asked for or read, and `http` follows no
+- **The time is one server's, to the second, and trusted.** `ntp` asks
+  one server a round and takes its transmit time as it comes, with no
+  correction for the time the answer took to arrive, no filtering
+  across servers or rounds, no slewing (the clock jumps), and no
+  authentication: anyone who can answer from the server's address and
+  port with the token sets the clock. NTP's time is UTC, so on a Pi 5
+  the top bar shows UTC (L0S has no time zones). With no `inet` within
+  5 minutes of starting, `ntp` exits, and does not try again.
   redirect. A connection's notices go to one port, which `http_connect`
   waits on alone, passing over another connection's.
 - **A model's API is the host's.** The key and the TLS are the host's

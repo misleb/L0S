@@ -1,0 +1,85 @@
+; ntp.l0 -- SNTP's messages (RFC 4330, NTPv4's client part, RFC 5905)
+; as bytes, for a client asking a server the time: the 48-byte request,
+; and the time read out of the server's answer, in place. Pure; a client
+; carries them in UDP, to port 123. A message is a byte of leap
+; indicator, version and mode, the stratum, the poll and precision, the
+; root's delay and dispersion, the reference's id, and four timestamps,
+; each 8 bytes, seconds since 1900-01-01 00:00 UTC and their fraction:
+; the reference's, the origin (the client's transmit time, which the
+; server copies back), when the server received the request, and when it
+; sent its answer.
+
+; The port a server listens on.
+(def ntp_port () int 123)
+
+; The bytes in a message with no extensions.
+(def ntp_len () int 48)
+
+; The seconds from 1900, NTP's epoch, to 1970, Unix's.
+(def ntp_unix_offset () int 2208988800)
+
+; The modes: a client's request, and a server's answer.
+(def ntp_mode_client () int 3)
+(def ntp_mode_server () int 4)
+
+; v as 4 bytes, most significant first.
+(def ntp_be32 ((v int)) (list int)
+  (cons (bit_and (bit_shr v 24) 255)
+    (cons (bit_and (bit_shr v 16) 255) (cons (bit_and (bit_shr v 8) 255) (cons (bit_and v 255) (nil int))))))
+
+; The u32 at byte i of b, most significant first.
+(def ntp_u32 ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 24)
+    (bit_or (bit_shl (bytes_get b (add i 1)) 16) (bit_or (bit_shl (bytes_get b (add i 2)) 8) (bytes_get b (add i 3))))))
+
+; The 8 bytes at i of b, a timestamp, as one int.
+(def ntp_u64 ((b bytes) (i int)) int
+  (bit_or (bit_shl (ntp_u32 b i) 32) (ntp_u32 b (add i 4))))
+
+; ---------------------------------------------------------------- the request
+
+; The request, its transmit timestamp token, 0 to 2^62: leap indicator
+; 0, version 4, mode client, and every other field 0. A client knows no
+; time it trusts, so it sends token there in place of one, which the
+; server copies into its answer's origin, and which ntp_answer looks for
+; to know the answer is to this request.
+(def ntp_request ((token int)) (list int)
+  (append (cons 35 (zeros 39))                    ; 0x23: LI 0, VN 4, mode 3
+    (append (ntp_be32 (bit_shr token 32)) (ntp_be32 (bit_and token 4294967295)))))
+
+; --------------------------------------------------------------- the answer
+
+; What an answer says: the Unix time the server sent it at, in whole
+; seconds; or why it is not taken, which for one not the answer to the
+; request is empty.
+(data NtpAnswer (NtpTime int) (NtpRefused (list int)))
+
+; What bytes i up to j of b say in answer to the request of token: not
+; the answer, with no reason, if it is too short, not a server's, or its
+; origin is not token; refused, saying why, if the server has no time to
+; give, or tells the client to go away.
+(def ntp_answer ((b bytes) (i int) (j int) (token int)) NtpAnswer
+  (if (lt (sub j i) (ntp_len)) (NtpRefused "")
+      (or (not (eq (bit_and (bytes_get b i) 7) (ntp_mode_server))) (not (eq (ntp_u64 b (add i 24)) token)))
+        (NtpRefused "")
+      (eq (bytes_get b (add i 1)) 0)
+        (NtpRefused (append "the server says " (ntp_kiss b (add i 12))))
+      (or (eq (bit_shr (bytes_get b i) 6) 3) (gt (bytes_get b (add i 1)) 15))
+        (NtpRefused "the server is not synchronized")
+      (eq (ntp_u32 b (add i 40)) 0)
+        (NtpRefused "the server gives no time")
+      (NtpTime (ntp_unix (ntp_u32 b (add i 40)) (ntp_u32 b (add i 44))))))
+
+; A kiss-o'-death's code, the 4 letters of the reference id at i of b,
+; such as RATE or DENY.
+(def ntp_kiss ((b bytes) (i int)) (list int)
+  (cons (bytes_get b i)
+    (cons (bytes_get b (add i 1)) (cons (bytes_get b (add i 2)) (cons (bytes_get b (add i 3)) (nil int))))))
+
+; The Unix time of NTP's seconds s and fraction f, to the nearest second.
+; A count with its top bit clear is of era 1, from 2036-02-07, when the
+; 32 bits of era 0 run out, as RFC 4330 reads it, so this holds to 2104.
+(def ntp_unix ((s int) (f int)) int
+  (let (era (if (eq (bit_shr s 31) 0) 4294967296 0)
+        half (if (eq (bit_shr f 31) 0) 0 1))
+    (add (sub (add s era) (ntp_unix_offset)) half)))

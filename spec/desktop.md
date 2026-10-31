@@ -152,8 +152,12 @@ exit gives up whatever `wm` waited on the process for.
 The clock is
 `rtc clock` ([user/sbin/rtc](../user/sbin/rtc/rtc.l0)), which serves `clock`
 ([user/lib/proto/clock.l0](../user/lib/proto/clock.l0)): `listen` replies `time S`, S
-the PL031's count of seconds, and sends `time S` again at the start of
-every minute; `time` replies once. `wm` waits a second for a clock as
+the board's count of seconds, and sends `time S` again at the start of
+every minute; `time` replies once; `set S` replies `ok`, and the clock
+says S from then on, the board's count with what the set moved it by
+added, and tells each listener `time S` at once, so the bar shows it
+then, and sets its alarm for the minute after S (on the Pi 5 it also
+writes S to the RTC, see [pi5.md](pi5.md)). `wm` waits a second for a clock as
 it starts, after the keyboard and the pointer; with none, the bar shows
 no time. The PL031 has no time zone, and QEMU, booted by
 `tools/qemu-boot.sh`, sets it to this machine's local time with `-rtc
@@ -451,3 +455,7 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   whatever it is doing. The pointer has
   one button that does anything, the left: `wm` passes the others on to
   the window under the pointer, and the toolkit drops them.
+- **Any process may set the clock**, with `set S`, as many times as it
+  likes; `rtc clock` asks nothing of who sets it. What a set moved a
+  PL031 by is kept only while `rtc clock` runs, so QEMU's board is back
+  at the host's time after a reboot; only the Pi 5's RTC is written.
