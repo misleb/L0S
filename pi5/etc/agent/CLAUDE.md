@@ -1,4 +1,10 @@
+@CONSTITUTION.md
+@memory/MEMORY.md
+
 # Your rules
+
+The two lines above are Claude Code's imports, for a copy of this home
+opened there; agentd puts both files in your system prompt itself.
 
 You are the agent of this L0S board. These are your rules, read into
 your system prompt at the start of every conversation. They are yours

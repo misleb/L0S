@@ -10,29 +10,8 @@
 
 ; ------------------------------------------------------- configuration
 
-; Where the home is if the configuration says nothing.
-(def tool_home_default () (list int) "/Volumes/data/agent")
-
-; The configuration's value for key, the words after it on its line
-; (a # starting a comment), or empty if no line has it.
-(def tool_conf ((text (list int)) (key (list int))) (list int)
-  (tool_conf_in (lines text) key))
-
-; tool_conf's loop, through the lines ls.
-(def tool_conf_in ((ls (list (list int))) (key (list int))) (list int)
-  (if (is_empty ls)
-      (nil int)
-      (let ws (split_spaces (up_to 35 (head ls)))
-        (if (and (not (is_empty ws)) (eq (head ws) key))
-            (unwords (tail ws))
-            (tool_conf_in (tail ls) key)))))
-
-; The home the configuration text names, or the default.
-(def tool_home ((text (list int))) (list int)
-  (let h (tool_conf text "home")
-    (if (is_empty h) (tool_home_default) (path_resolve "/" h))))
-
-; The absolute path p names: a relative one from home.
+; The absolute path p names: a relative one from home. The home itself
+; is the configuration's (agenthome.l0's home_of).
 (def tool_path ((home (list int)) (p (list int))) (list int)
   (path_resolve home p))
 
@@ -111,16 +90,20 @@
 (def is_file_tool ((name (list int))) bool
   (any_eq name (split_spaces "read_file write_file list_dir make_dir")))
 
-; The file tool name done with input, its paths from home.
-(def tool_file ((home (list int)) (name (list int)) (input Json)) ToolAnswer
+; The file tool name done with input, its paths from home; a write in
+; home kept in its history as conv's, at now. A write to the home's
+; fixed part is refused before anything is touched.
+(def tool_file ((home (list int)) (name (list int)) (input Json) (conv (list int)) (now int)) ToolAnswer
   (match (tool_str input "path")
     ((None) (tool_failed "path is missing, or not a string"))
     ((Some p)
-      (let path (tool_path home p)
-        (if (eq name "read_file") (read_file path)
-            (eq name "write_file") (write_file path (json_get input "content"))
+      (let (path (tool_path home p)
+            writes (any_eq name (split_spaces "write_file make_dir")))
+        (if (and writes (home_fixed home path)) (tool_failed (append path ": is fixed: the constitution and the history are not yours to change"))
+            (eq name "read_file") (read_file path)
+            (eq name "write_file") (write_file home path (json_get input "content") conv now)
             (eq name "list_dir") (list_dir path)
-            (eq name "make_dir") (make_dir path)
+            (eq name "make_dir") (make_dir home path conv now)
             (tool_failed (append "no tool " name)))))))
 
 ; read_file: the file's text, cut at tool_max bytes.
@@ -130,15 +113,15 @@
     ((Ok b) (tool_ok (tool_cut b)))))
 
 ; write_file: the file made to hold content, anew; its directory must be
-; there.
-(def write_file ((path (list int)) (content (Option Json))) ToolAnswer
+; there. In home, the write is kept in its history (agenthome.l0).
+(def write_file ((home (list int)) (path (list int)) (content (Option Json)) (conv (list int)) (now int)) ToolAnswer
   (match content
     ((None) (tool_failed "content is missing"))
     ((Some v)
       (match (json_text v)
         ((None) (tool_failed "content is not a string"))
         ((Some b)
-          (let why (write_whole path b)
+          (let why (home_write home path b conv now)
             (if (is_empty why)
                 (tool_ok (bytes_from_list (append "wrote " (append (digits (bytes_len b)) (append " bytes to " path)))))
                 (tool_failed (append path (append ": " why))))))))))
@@ -180,14 +163,15 @@
 (def join_lines_onto ((ws (list (list int))) (acc (list int))) (list int)
   (if (is_empty ws) acc (join_lines_onto (tail ws) (push "\n" (push (head ws) acc)))))
 
-; make_dir: a directory made at path, on a volume.
-(def make_dir ((path (list int))) ToolAnswer
+; make_dir: a directory made at path, on a volume; in home, kept in its
+; history.
+(def make_dir ((home (list int)) (path (list int)) (conv (list int)) (now int)) ToolAnswer
   (if (on_initramfs path)
       (tool_failed (append path ": the initramfs cannot be changed"))
-      (let code (fs_mkdir path)
-        (if (eq code 0)
+      (let why (home_mkdir home path conv now)
+        (if (is_empty why)
             (tool_ok (bytes_from_list (append "made " path)))
-            (tool_failed (append path (append ": " (if (eq code -4) "it is there already, or cannot be made" (io_error code)))))))))
+            (tool_failed (append path (append ": " why)))))))
 
 ; ------------------------------------------------------------ definitions
 
@@ -265,7 +249,7 @@
 ; How long a program may run, the configuration text's run_timeout, or
 ; the default.
 (def tool_run_timeout ((text (list int))) int
-  (let t (tool_conf text "run_timeout")
+  (let t (home_conf text "run_timeout")
     (if (is_number t) (int_prefix t 0) (run_timeout_default))))
 
 ; A program running: its pid; the port that is its terminal and is told

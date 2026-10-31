@@ -347,8 +347,9 @@ without which it will not start. It:
 
 - listens on the one address it is given, which must be loopback or
   private (RFC 1918), never `0.0.0.0`, or it says so and exits;
-- takes `POST /v1/messages` and `/v1/messages/count_tokens` and nothing
-  else, any other path or method a 404, and refuses a request without
+- takes `POST /v1/messages` and `/v1/messages/count_tokens`, and `PUT`
+  and `GET /backup`, and nothing else, any other path or method a 404,
+  and refuses a request without
   `Authorization: Bearer TOKEN`, compared in constant time, with a 401
   whose message is "the proxy refused this board's token"; its own
   refusals are JSON in the API's error form;
@@ -363,7 +364,16 @@ without which it will not start. It:
   (input, output, cache written, cache read, from `message_start` and
   `message_delta`, or a JSON answer's) is a JSON line in
   `build/proxy/usage.jsonl` with its time (UTC), path, model and status,
-  and `proxy.py --day [YYYY-MM-DD]` totals a day's.
+  and `proxy.py --day [YYYY-MM-DD]` totals a day's;
+- keeps the agent's home ([agent.md](agent.md#the-home)) in `--backup
+  DIR`, `build/proxy/backup` unless given, without going upstream: a
+  `PUT /backup`'s body, the home as a cpio archive (newc,
+  [cpio.py](../tools/api-proxy/cpio.py)), is unpacked into `DIR/home`,
+  which it replaces whole, and kept as `DIR/archive/STAMP.cpio`, STAMP
+  the time in UTC; one that is not an archive, or names a path that is
+  absolute or holds `..`, is a 400 and changes nothing. A `GET
+  /backup` answers `DIR/home` packed as it is now, so a copy edited on
+  the host goes back as it is; 404 if there is none.
 
 On the board, [proto/model.l0](../user/lib/proto/model.l0) is the
 provider behind one interface. It finds the proxy and the token in two

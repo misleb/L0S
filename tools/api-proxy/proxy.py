@@ -3,12 +3,24 @@
 over HTTPS with the host's key.
 
   proxy.py --listen ADDR:PORT --token-file FILE [--upstream URL] [--usage FILE]
+           [--backup DIR]
   proxy.py --day [YYYY-MM-DD] [--usage FILE]
 
 It listens on ADDR, which must be a loopback or a private (RFC 1918)
 address, never 0.0.0.0, and takes POST /v1/messages and
-/v1/messages/count_tokens and nothing else (404). A request without
-Authorization: Bearer TOKEN, the first line of the token file, is 401.
+/v1/messages/count_tokens, and PUT and GET /backup, and nothing else
+(404). A request without Authorization: Bearer TOKEN, the first line of
+the token file, is 401.
+
+/backup keeps the agent's home (roadmap 0044) in DIR, build/proxy/backup
+unless given: a PUT's body, the home as a cpio archive (cpio.py), is
+unpacked into DIR/home, replacing it whole, and kept as
+DIR/archive/STAMP.cpio; one that is not a home's archive, or names a
+path outside it, is 400 and changes nothing. A GET answers DIR/home
+packed as it is now, so a copy edited on the host goes back; 404 if
+there is none.
+
+For the API's paths:
 Otherwise its body goes upstream (https://api.anthropic.com unless given)
 as it is, with its content-type, anthropic-version and anthropic-beta and
 no other header of the board's, and x-api-key from ANTHROPIC_API_KEY,
@@ -26,14 +38,17 @@ import hmac
 import ipaddress
 import json
 import os
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python -I leaves the script's own directory out
 
+import cpio  # noqa: E402
 import usage  # noqa: E402
 
 DEFAULT_USAGE = os.path.join(HERE, "..", "..", "build", "proxy", "usage.jsonl")
+DEFAULT_BACKUP = os.path.join(HERE, "..", "..", "build", "proxy", "backup")
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 PATHS = ("/v1/messages", "/v1/messages/count_tokens")
 PASSED = ("content-type", "anthropic-version", "anthropic-beta")
@@ -81,10 +96,42 @@ def bearer_ok(header, token):
     return hmac.compare_digest(header[7:].strip().encode(), token.encode())
 
 
-def make_app(token, upstream, key, usage_path, log=None):
+def backup_put(root, body, when):
+    """The archive body, the agent's home, unpacked into root/home, which
+    it replaces whole, and kept as root/archive/STAMP.cpio, STAMP from the
+    time when: how many entries it held. ValueError, before anything is
+    written, if it is not a home's archive."""
+    entries = cpio.unpack(body)
+    home, new, old = (os.path.join(root, n) for n in ("home", "home.new", "home.old"))
+    for p in (new, old):
+        shutil.rmtree(p, ignore_errors=True)
+    cpio.write_tree(new, entries)
+    if os.path.isdir(home):
+        os.rename(home, old)
+    os.rename(new, home)
+    shutil.rmtree(old, ignore_errors=True)
+    archive = os.path.join(root, "archive")
+    os.makedirs(archive, exist_ok=True)
+    stamp = when.replace("-", "").replace(":", "")
+    with open(os.path.join(archive, stamp + ".cpio"), "wb") as f:
+        f.write(body)
+    return len(entries)
+
+
+def backup_get(root):
+    """root/home packed as an archive, as it is now, or None if there is
+    none."""
+    home = os.path.join(root, "home")
+    if not os.path.isdir(home):
+        return None
+    return cpio.pack(cpio.gather(home))
+
+
+def make_app(token, upstream, key, usage_path, log=None, backup_dir=None):
     """The proxy as an aiohttp application: the token boards must give,
     the upstream's base URL, the key it adds, and the usage file. log, if
-    given, is called with each usage line too."""
+    given, is called with each usage line too. With backup_dir, it also
+    keeps the agent's home there: PUT /backup and GET /backup."""
     from aiohttp import ClientError, ClientSession, ClientTimeout, web
     client = web.AppKey("client", ClientSession)
 
@@ -98,7 +145,24 @@ def make_app(token, upstream, key, usage_path, log=None):
     def refuse(status, kind, message):
         return web.Response(status=status, body=error_body(kind, message), content_type="application/json")
 
+    async def backup(request):
+        if not bearer_ok(request.headers.get("Authorization", ""), token):
+            return refuse(401, "authentication_error", "the proxy refused this board's token")
+        if request.method == "GET":
+            body = backup_get(backup_dir)
+            if body is None:
+                return refuse(404, "not_found_error", "the host has no backup of the agent's home")
+            return web.Response(status=200, body=body, content_type="application/octet-stream")
+        try:
+            n = backup_put(backup_dir, await request.read(), usage.stamp())
+        except ValueError as e:
+            return refuse(400, "invalid_request_error", "the backup is not a home's archive: %s" % e)
+        print("proxy: backup of %d entries in %s" % (n, os.path.join(backup_dir, "home")), file=sys.stderr, flush=True)
+        return web.Response(status=200, body=json.dumps({"entries": n}).encode(), content_type="application/json")
+
     async def handle(request):
+        if request.path == "/backup" and backup_dir and request.method in ("GET", "PUT"):
+            return await backup(request)
         if request.method != "POST" or request.path not in PATHS:
             return refuse(404, "not_found_error", "the proxy forwards only POST %s" % " and ".join(PATHS))
         if not bearer_ok(request.headers.get("Authorization", ""), token):
@@ -198,6 +262,7 @@ def main(argv):
     p.add_argument("--token-file")
     p.add_argument("--upstream", default=DEFAULT_UPSTREAM)
     p.add_argument("--usage", default=DEFAULT_USAGE)
+    p.add_argument("--backup", default=DEFAULT_BACKUP)
     p.add_argument("--day", nargs="?", const="", default=None, metavar="YYYY-MM-DD")
     a = p.parse_args(argv)
     if a.day is not None:
@@ -217,11 +282,12 @@ def main(argv):
     if token is None:
         print("proxy: " + why, file=sys.stderr)
         return 1
-    app = make_app(token, a.upstream, key, a.usage, log=lambda line: print(line, flush=True))
+    app = make_app(token, a.upstream, key, a.usage, log=lambda line: print(line, flush=True), backup_dir=a.backup)
 
     async def run():
         await serve(app, where[0], where[1])
-        print("proxy: on %s:%d, to %s, usage in %s" % (where[0], where[1], a.upstream, a.usage), flush=True)
+        print("proxy: on %s:%d, to %s, usage in %s, the agent's backup in %s"
+              % (where[0], where[1], a.upstream, a.usage, a.backup), flush=True)
         await asyncio.Event().wait()
 
     try:

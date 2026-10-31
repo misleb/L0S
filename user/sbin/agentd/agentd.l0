@@ -11,8 +11,10 @@
 ; own keys: home, compact, keep, run_timeout); with neither it says so
 ; and exits 0, as a driver with no device does. It waits for its home's
 ; volume, makes the home and its CLAUDE.md, the agent's rules, from
-; /etc/agent/CLAUDE.md, and registers agent. One turn runs at a time, of
-; any conversation; conversations live as long as agentd.
+; /etc/agent/CLAUDE.md, and the rest of the home's parts (agenthome.l0:
+; its constitution, memory, skills and history), and registers agent.
+; One turn runs at a time, of any conversation; conversations live as
+; long as agentd.
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "agentd" why))
@@ -38,7 +40,7 @@
 ; The configuration text's number for key, or fallback if it has none
 ; or it is not a number.
 (def conf_number ((text (list int)) (key (list int)) (fallback int)) int
-  (let v (tool_conf text key)
+  (let v (home_conf text key)
     (if (is_number v) (int_prefix v 0) fallback)))
 
 ; agentd's own settings, from the configuration text: the home, how long
@@ -47,7 +49,7 @@
 
 ; The settings text says.
 (def own_of ((text (list int))) Own
-  (Own (tool_home text) (tool_run_timeout text)
+  (Own (home_of text) (tool_run_timeout text)
        (conf_number text "compact" (compact_default)) (conf_number text "keep" (keep_default))))
 
 ; The settings as text, for the tests and the log.
@@ -78,7 +80,7 @@
 ; programs its tools run; where the model is; its own settings; the
 ; terminal to set back after starting a program (0 the kernel's); and
 ; the board, as the system prompt names it.
-(data Setup (Setup (port int) (np int) (rport int) (mc ModelConf) (o Own) (back int) (board (list int))))
+(data Setup (Setup (port int) (np int) (rport int) (mc ModelConf) (o Own) (back int) (board (list int)) (cport int) (start int)))
 
 ; A conversation: the port its notices go to, and its loop.
 (data Chat (Chat int Loop))
@@ -206,7 +208,7 @@
             (complain (append "no volume " (append v (append " for its home " home))))
             (let made (fs_mkdir home)
               (match (chdir home)
-                ((ChdirDone) (let r (rules_made home) (agentd_serve port mc o)))
+                ((ChdirDone) (let (r (rules_made home) h (home_said (home_setup home))) (agentd_serve port mc o)))
                 ((ChdirNoDir) (complain (append "cannot make its home " home)))
                 ((ChdirNotDir) (complain (append home " is a file, not a home")))
                 ((ChdirBad) (complain (append "cannot make its home " home))))))))))
@@ -242,11 +244,16 @@
                   (note (append "made " (append path (append " from " (rules_default_path)))))
                   (warn_as "agentd" (append path (append ": " w)))))))))))
 
+; Each of the lines the home's setup gave said in the log: 0.
+(def home_said ((ls (list (list int)))) int
+  (if (is_empty ls) 0 (let n (note (head ls)) (home_said (tail ls)))))
+
 ; agent served on port, once the ports it waits on are set and the name
 ; is registered.
 (def agentd_serve ((port int) (mc ModelConf) (o Own)) int
   (let (np (port_new)
-        rp (port_new))
+        rp (port_new)
+        cp (port_new))
     (match (port_set (cons port (cons np (cons rp (nil int)))))
       ((PortSetNotYours) (complain "cannot wait on its ports"))
       ((PortSetSize) (complain "cannot wait on its ports"))
@@ -256,7 +263,7 @@
               (complain why)
               (let n (note (append "serving agent: " (append (own_text o) (append ", the model " (append (.model mc)
                              (append " through " (append (.host mc) (cons 58 (digits (.port mc))))))))))
-                (serve (Agentd (Setup port np rp mc o (back_terminal) (board_text (machine)))
+                (serve (Agentd (Setup port np rp mc o (back_terminal) (board_text (machine)) cp (home_now cp))
                                ((MapEmpty int Chat)) 1 (Idle) (NoInet "not opened yet") ((None HttpConn)))))))))))
 
 ; The terminal to give back to agentd after starting a program.
@@ -304,16 +311,22 @@
             (Agentd u (map_put chats next (Chat nport l)) (add next 1) doing net conn))))))
 
 ; A new conversation's loop: the system prompt, its built-in part and
-; the home's rules, and the tools.
+; the home's (its constitution, rules, memory's index and skills, read
+; now: home_prompt), and the tools.
 (def loop_for ((u Setup)) Loop
   (match u
-    ((Setup p np rp mc o back board)
+    ((Setup p np rp mc o back board cp start)
       (let (home (setup_home u)
-            rules (match (read_whole (append home (append "/" (rules_name)))) ((Ok r) r) ((Err why) (bytes_from_list (nil int)))))
+            parts (home_prompt home))
         (match o
           ((Own h t size keep)
-            (loop_compacting (loop_new mc (conv_system (conv_base board home (tool_names)) rules) (conv_tools (tool_defs)) (conv_new))
+            (loop_compacting (loop_new mc (conv_system (conv_base board home (tool_names)) parts) (conv_tools (tool_defs)) (conv_new))
                              size keep)))))))
+
+; How the history names conversation id: S.ID, S the time agentd
+; started, so that a conversation is told from one of another start.
+(def conv_tag ((u Setup) (id int)) (list int)
+  (append (digits (.start u)) (cons 46 (digits id))))
 
 ; text said in conversation id: busy while any turn runs; else
 ; answered ok, and the turn begun.
@@ -430,11 +443,11 @@
         ((Busy id nport l acts w r dl)
           (let n (bytes_to_list name)
             (if (is_file_tool n)
-                (tool_answered s l tid (tool_file (setup_home u) n input))
+                (tool_answered s l tid (tool_file (setup_home u) n input (conv_tag u id) (home_now (.cport u))))
                 (not (is_run_tool n))
                 (tool_answered s l tid (tool_failed (append "no tool " n)))
                 (match u
-                  ((Setup p np rp mc o back board)
+                  ((Setup p np rp mc o back board cp start)
                     (match (tool_run_start (setup_home u) n input (match o ((Own h t c k) t)) back rp)
                       ((RunRefused a) (tool_answered s l tid a))
                       ((RunGoing run) (Agentd u chats next (Busy id nport l acts w (Some (Running tid run)) dl) net conn))))))))))))
@@ -486,7 +499,7 @@
 (def connection ((u Setup) (n Inet) (conn (Option HttpConn))) (Result HttpConn (list int))
   (match conn
     ((Some c) (http_reuse c))
-    ((None) (match u ((Setup p np rp mc o back board) (http_connect n np (.host mc) (.port mc)))))))
+    ((None) (match u ((Setup p np rp mc o back board cp start) (http_connect n np (.host mc) (.port mc)))))))
 
 ; An error event saying why, as a failure the loop tells and ends on.
 (def failure ((why (list int))) ModelEvent

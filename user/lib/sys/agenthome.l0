@@ -1,0 +1,385 @@
+; agenthome.l0 -- the agent's home (/Volumes/data/agent unless
+; configured), in Claude Code's conventions, so that a copy of it opens
+; there as it is:
+;
+;   CLAUDE.md                  its rules, the agent's and the person's
+;   CONSTITUTION.md            the fixed part, L0S's, written from
+;                              /etc/agent/CONSTITUTION.md at each start
+;   memory/MEMORY.md           the memory's index; memory/NAME.md a fact
+;   .claude/skills/NAME/SKILL.md   a skill, its frontmatter's description
+;                              read up front, its body when used
+;   .history/log               every write of the agent's to the home, a
+;                              line each; .history/N the file before
+;
+; The system prompt's part from the home (home_parts), what is fixed
+; (home_fixed), the history kept by each write (home_write, home_remove,
+; home_mkdir, home_rmdir) and an entry undone (home_undo). Linked into
+; agentd and agent, with PATHS and CLOCK.
+
+; ---------------------------------------------------------- where it is
+
+; Where the home is if the configuration says nothing.
+(def home_default () (list int) "/Volumes/data/agent")
+
+; The configuration's value for key, the words after it on its line
+; (a # starting a comment), or empty if no line has it: agentd's own keys
+; of /etc/agent/config, which model.l0's model_conf_of passes over.
+(def home_conf ((text (list int)) (key (list int))) (list int)
+  (home_conf_in (lines text) key))
+
+; home_conf's loop, through the lines ls.
+(def home_conf_in ((ls (list (list int))) (key (list int))) (list int)
+  (if (is_empty ls)
+      (nil int)
+      (let ws (split_spaces (up_to 35 (head ls)))
+        (if (and (not (is_empty ws)) (eq (head ws) key))
+            (unwords (tail ws))
+            (home_conf_in (tail ls) key)))))
+
+; The home the configuration text names, or the default.
+(def home_of ((text (list int))) (list int)
+  (let h (home_conf text "home")
+    (if (is_empty h) (home_default) (path_resolve "/" h))))
+
+; ------------------------------------------------------------------ parts
+
+; The parts' names in the home.
+(def home_rules_name () (list int) "CLAUDE.md")
+(def home_constitution_name () (list int) "CONSTITUTION.md")
+(def home_memory_dir () (list int) "memory")
+(def home_memory_index () (list int) "memory/MEMORY.md")
+(def home_claude_dir () (list int) ".claude")
+(def home_skills_dir () (list int) ".claude/skills")
+(def home_history_dir () (list int) ".history")
+(def home_log_name () (list int) ".history/log")
+
+; Where L0S's constitution is, which the home's copy is made from.
+(def home_constitution_default () (list int) "/etc/agent/CONSTITUTION.md")
+
+; The path of name, a part's, in home.
+(def home_in ((home (list int)) (name (list int))) (list int)
+  (append home (cons 47 name)))
+
+; Whether path, absolute, is in home or home itself.
+(def home_inside ((home (list int)) (path (list int))) bool
+  (or (eq path home) (starts_with path (append home "/"))))
+
+; Whether path, absolute, is a fixed part of home, which the agent may not
+; write: the constitution, and the history and all in it.
+(def home_fixed ((home (list int)) (path (list int))) bool
+  (let (h (home_in home (home_history_dir)))
+    (or (eq path (home_in home (home_constitution_name)))
+        (or (eq path h) (starts_with path (append h "/"))))))
+
+; What the memory's index holds at first.
+(def home_memory_start () (list int)
+  "# Memory\n\nNothing remembered yet. Each fact is a file of its own in memory/, with its frontmatter, and a line here: - [Title](file.md) -- what it is.\n")
+
+; ------------------------------------------------------------ the prompt
+
+; No bytes.
+(def home_none () bytes (bytes_from_list (nil int)))
+
+; The system prompt's part from the home: the constitution, the rules and
+; the memory's index, each whole under a heading, then a line for each
+; skill, of skills, its name, description and where its body is.
+(def home_parts ((constitution bytes) (rules bytes) (memory bytes) (skills (list (list int)))) bytes
+  (bytes_concat
+    (cons (bytes_from_list "# Your constitution (CONSTITUTION.md, fixed)\n\n")
+      (cons constitution
+        (cons (bytes_from_list "\n# Your rules (CLAUDE.md)\n\n")
+          (cons rules
+            (cons (bytes_from_list "\n# Your memory's index (memory/MEMORY.md)\n\n")
+              (cons memory
+                (cons (bytes_from_list (append "\n# Your skills (.claude/skills)\n\n"
+                                         (if (is_empty skills) "None yet.\n" (concat skills))))
+                      (nil bytes))))))))))
+
+; A skill's line in the prompt: its name, what it is for, and where its
+; body is.
+(def skill_line ((name (list int)) (what (list int))) (list int)
+  (append "- " (append name (append ": " (append (if (is_empty what) "(no description)" what)
+                                          (append " (read .claude/skills/" (append name "/SKILL.md before using it)\n")))))))
+
+; The description in a SKILL.md's frontmatter, the lines between a first
+; line --- and the next: its description: line's value; empty if none.
+(def skill_description ((text bytes)) (list int)
+  (let ls (lines (bytes_to_list text))
+    (if (and (not (is_empty ls)) (eq (home_trim (head ls)) "---"))
+        (front_value (tail ls) "description:")
+        (nil int))))
+
+; The value of key in the frontmatter lines ls, up to the line ---.
+(def front_value ((ls (list (list int))) (key (list int))) (list int)
+  (if (is_empty ls) (nil int)
+      (eq (home_trim (head ls)) "---") (nil int)
+      (starts_with (head ls) key) (home_trim (drop_n (head ls) (length key)))
+      (front_value (tail ls) key)))
+
+; s without the spaces, tabs and line ends at either end.
+(def home_trim ((s (list int))) (list int)
+  (rev (drop_blank (rev (drop_blank s)))))
+
+; s from its first byte that is not a space, tab or line end.
+(def drop_blank ((s (list int))) (list int)
+  (if (and (not (is_empty s)) (any_eq (head s) (cons 32 (cons 9 (cons 10 (cons 13 (nil int)))))))
+      (drop_blank (tail s))
+      s))
+
+; The file at path's bytes, or none if it cannot be read.
+(def home_read ((path (list int))) bytes
+  (match (read_whole path) ((Ok b) b) ((Err why) (home_none))))
+
+; Each skill's line, of the directories in home's skills directory that
+; hold a SKILL.md, in order.
+(def home_skills ((home (list int))) (list (list int))
+  (match (fs_list (home_in home (home_skills_dir)))
+    ((FsListRefused code) (nil (list int)))
+    ((FsFiles files) (skills_of home files (nil (list int))))))
+
+; skill_line for each directory among files onto acc, reversed, then in
+; order.
+(def skills_of ((home (list int)) (files (list FsStat)) (acc (list (list int)))) (list (list int))
+  (if (is_empty files)
+      (rev acc)
+      (match (head files)
+        ((FsStat name size)
+          (if (not (and (not (is_empty name)) (eq (last name) 47)))
+              (skills_of home (tail files) acc)
+              (let (n (take name (sub (length name) 1))
+                    p (home_in home (append (home_skills_dir) (append "/" (append n "/SKILL.md")))))
+                (match (read_whole p)
+                  ((Err why) (skills_of home (tail files) acc))
+                  ((Ok b) (skills_of home (tail files) (cons (skill_line n (skill_description b)) acc))))))))))
+
+; The home's part of a conversation's system prompt, read now.
+(def home_prompt ((home (list int))) bytes
+  (home_parts (home_read (home_in home (home_constitution_name)))
+              (home_read (home_in home (home_rules_name)))
+              (home_read (home_in home (home_memory_index)))
+              (home_skills home)))
+
+; ----------------------------------------------------------------- setup
+
+; What of home's parts is missing made, and its constitution written
+; from L0S's whenever the two differ: a line for each thing done, or why
+; it could not be.
+(def home_setup ((home (list int))) (list (list int))
+  (let (a (home_dir_made home (home_memory_dir))
+        b (home_dir_made home (home_claude_dir))
+        c (home_dir_made home (home_skills_dir))
+        d (home_dir_made home (home_history_dir))
+        m (home_index_made home))
+    (append (concat_lists (cons a (cons b (cons c (cons d (cons m (nil (list (list int)))))))))
+            (home_constitution_made home))))
+
+; The lists of lines ls, joined.
+(def concat_lists ((ls (list (list (list int))))) (list (list int))
+  (if (is_empty ls) (nil (list int)) (append (head ls) (concat_lists (tail ls)))))
+
+; The directory name of home made if it is not there: a line saying so, or
+; none if it was.
+(def home_dir_made ((home (list int)) (name (list int))) (list (list int))
+  (let code (fs_mkdir (home_in home name))
+    (if (eq code 0) (cons (append "made " (home_in home name)) (nil (list int)))
+        (eq code -4) (nil (list int))
+        (cons (append "cannot make " (append (home_in home name) (append ": " (io_error code)))) (nil (list int))))))
+
+; The memory's index made if it is not there.
+(def home_index_made ((home (list int))) (list (list int))
+  (let p (home_in home (home_memory_index))
+    (match (read_whole p)
+      ((Ok b) (nil (list int)))
+      ((Err why)
+        (let w (write_whole p (bytes_from_list (home_memory_start)))
+          (cons (if (is_empty w) (append "made " p) (append p (append ": " w))) (nil (list int))))))))
+
+; The home's constitution written from L0S's if the two differ.
+(def home_constitution_made ((home (list int))) (list (list int))
+  (match (read_whole (home_constitution_default))
+    ((Err why) (cons (append "no " (append (home_constitution_default) (append ": " why))) (nil (list int))))
+    ((Ok c)
+      (let (p (home_in home (home_constitution_name))
+            same (eq (home_read p) c))
+        (if same
+            (nil (list int))
+            (let w (write_whole p c)
+              (cons (if (is_empty w) (append "wrote " (append p (append " from " (home_constitution_default)))) (append p (append ": " w)))
+                    (nil (list int)))))))))
+
+; ---------------------------------------------------------------- history
+
+; An entry of the history: its number, from 1; the clock's seconds; the
+; conversation, or what else made it (undo:N, restore); its kind, new,
+; changed, removed, dir or rmdir; and the absolute path.
+(data HistEntry (HistEntry (n int) (time int) (conv (list int)) (kind (list int)) (path (list int))))
+
+; e as a line of the log, with its newline.
+(def hist_line ((e HistEntry)) (list int)
+  (append (digits (.n e))
+    (append " " (append (digits (.time e))
+      (append " " (append (.conv e)
+        (append " " (append (.kind e) (append " " (append (.path e) "\n"))))))))))
+
+; The entry a line of the log holds, or none: four words and the path,
+; which is the rest of the line and may hold spaces.
+(def hist_of ((line (list int))) (Option HistEntry)
+  (let ws (split_spaces line)
+    (if (or (lt (length ws) 5) (not (and (is_number (head ws)) (is_number (nth ws 1)))))
+        ((None HistEntry))
+        (Some (HistEntry (int_prefix (head ws) 0) (int_prefix (nth ws 1) 0) (nth ws 2) (nth ws 3)
+                         (words_dropped (take_line line) 4))))))
+
+; s after its first k words and the spaces after each.
+(def words_dropped ((s (list int)) (k int)) (list int)
+  (if (le k 0) s (words_dropped (spaces_dropped (word_dropped s)) (sub k 1))))
+
+; s after its first word; s after its leading spaces.
+(def word_dropped ((s (list int))) (list int)
+  (if (or (is_empty s) (eq (head s) 32)) s (word_dropped (tail s))))
+(def spaces_dropped ((s (list int))) (list int)
+  (if (and (not (is_empty s)) (eq (head s) 32)) (spaces_dropped (tail s)) s))
+
+; The entries of a log's text, in order; lines that are not one passed
+; over.
+(def hist_entries ((log bytes)) (list HistEntry)
+  (hist_entries_in (lines (bytes_to_list log)) (nil HistEntry)))
+
+; hist_entries's loop, onto acc reversed.
+(def hist_entries_in ((ls (list (list int))) (acc (list HistEntry))) (list HistEntry)
+  (if (is_empty ls)
+      (rev acc)
+      (hist_entries_in (tail ls) (match (hist_of (head ls)) ((None) acc) ((Some e) (cons e acc))))))
+
+; The next entry's number, after the log's: one more than the highest.
+(def hist_next ((log bytes)) int
+  (add 1 (hist_highest (hist_entries log) 0)))
+
+; The highest number among es, or n.
+(def hist_highest ((es (list HistEntry)) (n int)) int
+  (if (is_empty es) n (hist_highest (tail es) (max n (.n (head es))))))
+
+; The entry numbered n among es, or none.
+(def hist_find ((es (list HistEntry)) (n int)) (Option HistEntry)
+  (if (is_empty es) ((None HistEntry))
+      (eq (.n (head es)) n) (Some (head es))
+      (hist_find (tail es) n)))
+
+; Where entry n's file before is kept in home.
+(def hist_saved ((home (list int)) (n int)) (list int)
+  (home_in home (append (home_history_dir) (cons 47 (digits n)))))
+
+; The home's log, none if there is none yet.
+(def hist_read ((home (list int))) bytes
+  (home_read (home_in home (home_log_name))))
+
+; e added to the end of the log, which held log: nothing, or why not.
+(def hist_add ((home (list int)) (log bytes) (e HistEntry)) (list int)
+  (write_whole (home_in home (home_log_name))
+               (bytes_concat (cons log (cons (bytes_from_list (hist_line e)) (nil bytes))))))
+
+; e as agent history shows it: N, the date and time, the conversation,
+; the kind and the path.
+(def hist_shown ((e HistEntry)) (list int)
+  (append (digits (.n e))
+    (append "  " (append (hist_when (.time e))
+      (append "  " (append (.conv e) (append "  " (append (.kind e) (append "  " (.path e))))))))))
+
+; Seconds s as a date and a time, 2026-10-30 21:40; - if there was no
+; clock.
+(def hist_when ((s int)) (list int)
+  (if (le s 0)
+      "-"
+      (match (civil (div s 86400))
+        ((Civil y m d) (append (digits y) (cons 45 (append (two_digits m) (cons 45 (append (two_digits d) (cons 32 (hh_mm (mod s 86400))))))))))))
+
+; ----------------------------------------------------------------- writes
+
+; The clock's seconds, asked on rp; 0 if no clock answers.
+(def home_now ((rp int)) int
+  (match (name_lookup "clock")
+    ((NotFound) 0)
+    ((Found c)
+      (match (time_of (asked_reply (port_ask c rp "time" "the clock")))
+        ((Some t) t)
+        ((None) 0)))))
+
+; The file at path made to hold b: kept in home's history as conv's, at
+; now, if path is in home; nothing, or why not. A file that was there is
+; kept whole first, as the entry's.
+(def home_write ((home (list int)) (path (list int)) (b bytes) (conv (list int)) (now int)) (list int)
+  (if (not (home_inside home path))
+      (write_whole path b)
+      (let (log (hist_read home)
+            n (hist_next log))
+        (match (read_whole path)
+          ((Err why)
+            (let w (write_whole path b)
+              (if (is_empty w) (hist_add home log (HistEntry n now conv "new" path)) w)))
+          ((Ok old)
+            (let s (write_whole (hist_saved home n) old)
+              (if (not (is_empty s))
+                  (append "cannot keep the file before: " s)
+                  (let w (write_whole path b)
+                    (if (is_empty w) (hist_add home log (HistEntry n now conv "changed" path)) w)))))))))
+
+; The file at path removed, kept whole first in home's history: nothing,
+; or why not.
+(def home_remove ((home (list int)) (path (list int)) (conv (list int)) (now int)) (list int)
+  (match (read_whole path)
+    ((Err why) why)
+    ((Ok old)
+      (let (log (hist_read home)
+            n (hist_next log)
+            s (write_whole (hist_saved home n) old))
+        (if (not (is_empty s))
+            (append "cannot keep the file before: " s)
+            (let code (fs_removed path)
+              (if (eq code 0) (hist_add home log (HistEntry n now conv "removed" path)) (io_error code))))))))
+
+; The directory at path made, kept in home's history: nothing, or why
+; not.
+(def home_mkdir ((home (list int)) (path (list int)) (conv (list int)) (now int)) (list int)
+  (let code (fs_mkdir path)
+    (if (not (eq code 0))
+        (if (eq code -4) "it is there already, or cannot be made" (io_error code))
+        (if (home_inside home path)
+            (let log (hist_read home) (hist_add home log (HistEntry (hist_next log) now conv "dir" path)))
+            (nil int)))))
+
+; The directory at path removed if it is empty, kept in home's history:
+; nothing, or why not.
+(def home_rmdir ((home (list int)) (path (list int)) (conv (list int)) (now int)) (list int)
+  (let code (fs_removed path)
+    (if (eq code -4) "it is not empty"
+        (not (eq code 0)) (io_error code)
+        (let log (hist_read home) (hist_add home log (HistEntry (hist_next log) now conv "rmdir" path))))))
+
+; What fs said to removing path: 0, or the error's code.
+(def fs_removed ((path (list int))) int
+  (match (fs_path_ask "remove" path "") ((FsReply w rest) w)))
+
+; ------------------------------------------------------------------- undo
+
+; Entry n of home's history undone by its inverse, at now, itself kept
+; in the history as undo:N's: what was done, or why not.
+(def home_undo ((home (list int)) (n int) (now int)) (Result (list int) (list int))
+  (match (hist_find (hist_entries (hist_read home)) n)
+    ((None) ((Err (list int) (list int)) (append "no entry " (append (digits n) " in the history"))))
+    ((Some e) (undone home e (append "undo:" (digits n)) now))))
+
+; e undone as conv, at now.
+(def undone ((home (list int)) (e HistEntry) (conv (list int)) (now int)) (Result (list int) (list int))
+  (let (k (.kind e) p (.path e))
+    (if (eq k "new") (undo_said (home_remove home p conv now) (append "removed " p))
+        (eq k "dir") (undo_said (home_rmdir home p conv now) (append "removed the directory " p))
+        (eq k "rmdir") (undo_said (home_mkdir home p conv now) (append "made the directory " (append p " again")))
+        (or (eq k "changed") (eq k "removed"))
+        (match (read_whole (hist_saved home (.n e)))
+          ((Err why) ((Err (list int) (list int)) (append "the file before is gone: " why)))
+          ((Ok b) (undo_said (home_write home p b conv now) (append "wrote " (append p " as it was")))))
+        ((Err (list int) (list int)) (append "no undo for " k)))))
+
+; done, if why is empty, else why.
+(def undo_said ((why (list int)) (done (list int))) (Result (list int) (list int))
+  (if (is_empty why) ((Ok (list int) (list int)) done) ((Err (list int) (list int)) why)))

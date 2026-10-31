@@ -1,0 +1,254 @@
+; home.l0 -- agent's commands on the agent's home, done here, without
+; agentd (sys/agenthome.l0 has the home's parts and its history):
+;
+;   agent history [PATH]   the history of the agent's writes, the newest
+;                          last, or only PATH's (a relative path is from
+;                          the home)
+;   agent undo N           entry N undone, itself kept in the history
+;   agent backup           the home, all of it, sent to the host's proxy
+;                          as a cpio archive, PUT /backup
+;   agent restore          the backup taken back, GET /backup: .history
+;                          as it is, then every other file through the
+;                          history, as restore's
+;
+; The home is /etc/agent/config's home, or /Volumes/data/agent; the
+; proxy and its token, as ask's, that file's api and /etc/agent/token.
+
+; How the commands are used.
+(def home_usage () (list int) "agent [history [PATH] | undo N | backup | restore]")
+
+; How long to wait for the proxy to say anything more.
+(def proxy_idle_ns () int 30000000000)
+
+; The home the configuration names, or the default with none.
+(def home_here () (list int)
+  (match (read_whole (model_conf_path))
+    ((Err why) (home_default))
+    ((Ok text) (home_of (bytes_to_list text)))))
+
+; The command the words ws name, done: its exit status.
+(def home_command ((ws (list (list int)))) int
+  (let (op (head ws) rest (tail ws))
+    (if (and (eq op "history") (le (length rest) 1)) (history_said (home_here) rest)
+        (and (eq op "undo") (and (eq (length rest) 1) (is_number (head rest))))
+        (undo_done (home_here) (int_prefix (head rest) 0))
+        (and (eq op "backup") (is_empty rest)) (backup_done (home_here))
+        (and (eq op "restore") (is_empty rest)) (restore_done (home_here))
+        (complain (append "usage: " (home_usage))))))
+
+; ---------------------------------------------------------------- history
+
+; The lines of entries es shown, only those of path if it is not empty.
+(def history_lines ((es (list HistEntry)) (path (list int)) (acc (list int))) (list int)
+  (if (is_empty es)
+      (rev acc)
+      (history_lines (tail es) path
+        (if (or (is_empty path) (eq (.path (head es)) path)) (push "\n" (push (hist_shown (head es)) acc)) acc))))
+
+; The history written, of the path the words ws name if any: 0.
+(def history_said ((home (list int)) (ws (list (list int)))) int
+  (let (path (if (is_empty ws) (nil int) (path_resolve home (head ws)))
+        out (history_lines (hist_entries (hist_read home)) path (nil int)))
+    (say (if (is_empty out) (if (is_empty path) "no history yet\n" (append "no history of " (append path "\n"))) out))))
+
+; Entry n undone, and said: the exit status.
+(def undo_done ((home (list int)) (n int)) int
+  (match (home_undo home n (home_now (port_new)))
+    ((Err why) (complain why))
+    ((Ok done) (say (append "undid " (append (digits n) (append ": " (append done "\n"))))))))
+
+; --------------------------------------------------------------- archive
+
+; A file or directory of the home: its name from the home, and its bytes,
+; or none for a directory.
+(data Held (Held (name (list int)) (b (Option bytes))))
+
+; The archive of hs, newc, as install --boot writes one: a directory's
+; entry 040755, a file's 0100644 and its bytes, then the trailer.
+(def archive_of ((hs (list Held))) bytes
+  (bytes_concat (rev (cons (bytes_from_list (newc_trailer)) (archive_onto hs (nil bytes))))))
+
+; Each of hs's entries onto acc, reversed.
+(def archive_onto ((hs (list Held)) (acc (list bytes))) (list bytes)
+  (if (is_empty hs)
+      acc
+      (archive_onto (tail hs)
+        (match (.b (head hs))
+          ((None) (cons (newc_head (.name (head hs)) 16877 0) acc))
+          ((Some b) (cons (newc_padding (bytes_len b)) (cons b (cons (newc_head (.name (head hs)) 33188 (bytes_len b)) acc))))))))
+
+; Every directory and file of the home, each directory before what is
+; in it, or why one could not be read.
+(def home_held ((home (list int))) (Result (list Held) (list int))
+  (match (held_in home (nil int) (nil Held))
+    ((Err why) ((Err (list Held) (list int)) why))
+    ((Ok acc) ((Ok (list Held) (list int)) (rev acc)))))
+
+; The directory rel of home, and all in it, onto acc reversed.
+(def held_in ((home (list int)) (rel (list int)) (acc (list Held))) (Result (list Held) (list int))
+  (let p (if (is_empty rel) home (home_in home rel))
+    (match (fs_list p)
+      ((FsListRefused code) ((Err (list Held) (list int)) (append p (append ": " (io_error code)))))
+      ((FsFiles files) (held_files home rel files acc)))))
+
+; The entries files of the directory rel onto acc: a directory and what
+; is in it, a file and its bytes.
+(def held_files ((home (list int)) (rel (list int)) (files (list FsStat)) (acc (list Held))) (Result (list Held) (list int))
+  (if (is_empty files)
+      ((Ok (list Held) (list int)) acc)
+      (match (head files)
+        ((FsStat name size)
+          (let (dir (and (not (is_empty name)) (eq (last name) 47))
+                n (if dir (take name (sub (length name) 1)) name)
+                r (if (is_empty rel) n (append rel (cons 47 n))))
+            (if dir
+                (match (held_in home r (cons (Held r ((None bytes))) acc))
+                  ((Err why) ((Err (list Held) (list int)) why))
+                  ((Ok acc2) (held_files home rel (tail files) acc2)))
+                (match (read_whole (home_in home r))
+                  ((Err why) ((Err (list Held) (list int)) (append (home_in home r) (append ": " why))))
+                  ((Ok b) (held_files home rel (tail files) (cons (Held r (Some b)) acc))))))))))
+
+; How many of hs are files, and their bytes.
+(def held_files_count ((hs (list Held)) (n int)) int
+  (if (is_empty hs) n (held_files_count (tail hs) (match (.b (head hs)) ((None) n) ((Some b) (add n 1))))))
+
+; ----------------------------------------------------------------- proxy
+
+; A response read whole: its status and body.
+(data Fetched (Fetched (code int) (body bytes)))
+
+; method of path asked of the proxy c names, with body: the response,
+; or why there is none.
+(def proxy_fetch ((c ModelConf) (method (list int)) (path (list int)) (body bytes)) (Result Fetched (list int))
+  (match (http_connect (inet_open) (port_new) (.host c) (.port c))
+    ((Err why) ((Err Fetched (list int)) (append "the proxy at " (append (.host c) (append ": " why)))))
+    ((Ok conn)
+      (match (http_ask conn method path
+               (cons (HttpHeader "Authorization" (append "Bearer " (.token c)))
+                 (cons (HttpHeader "Content-Type" "application/octet-stream") (nil HttpHeader)))
+               body)
+        ((HttpGot c2 parts) (fetch_parts c2 parts 0 (nil bytes)))))))
+
+; parts read onto the status and the body's pieces, reversed, and more
+; waited for, until the response ends.
+(def fetch_parts ((c HttpConn) (parts (list HttpPart)) (code int) (pieces (list bytes))) (Result Fetched (list int))
+  (if (is_empty parts)
+      (match (http_next c (add (clock_ns) (proxy_idle_ns)))
+        ((HttpGot c2 ps)
+          (if (is_empty ps)
+              (let r (http_close c2) ((Err Fetched (list int)) "the proxy did not answer"))
+              (fetch_parts c2 ps code pieces))))
+      (match (head parts)
+        ((HttpHead st r hs) (fetch_parts c (tail parts) st pieces))
+        ((HttpBody d) (fetch_parts c (tail parts) code (cons d pieces)))
+        ((HttpEnd keep) (let r (http_close c) ((Ok Fetched (list int)) (Fetched code (bytes_concat (rev pieces))))))
+        ((HttpBad why) (let r (http_close c) ((Err Fetched (list int)) why)))
+        ((HttpFailed why) (let r (http_close c) ((Err Fetched (list int)) why))))))
+
+; ---------------------------------------------------------------- backup
+
+; The home packed and sent to the proxy: the exit status.
+(def backup_done ((home (list int))) int
+  (match (model_conf_read)
+    ((Err why) (complain why))
+    ((Ok c)
+      (match (home_held home)
+        ((Err why) (complain why))
+        ((Ok hs)
+          (let a (archive_of hs)
+            (match (proxy_fetch c "PUT" "/backup" a)
+              ((Err why) (complain why))
+              ((Ok f)
+                (if (not (and (ge (.code f) 200) (lt (.code f) 300)))
+                    (complain (model_refusal (.code f) (.body f)))
+                    (say (backup_line home (held_files_count hs 0) (sub (length hs) (held_files_count hs 0)) (bytes_len a))))))))))))
+
+; What backup says once the proxy has n files and d directories of home,
+; in an archive of size bytes.
+(def backup_line ((home (list int)) (n int) (d int) (size int)) (list int)
+  (append "backed up " (append home (append ": " (append (digits n) (append " files and " (append (digits d)
+    (append " directories, " (append (format_size size) " to the host\n")))))))))
+
+; --------------------------------------------------------------- restore
+
+; The backup fetched from the proxy and written into the home: the exit
+; status.
+(def restore_done ((home (list int))) int
+  (match (model_conf_read)
+    ((Err why) (complain why))
+    ((Ok c)
+      (match (proxy_fetch c "GET" "/backup" (bytes_from_list (nil int)))
+        ((Err why) (complain why))
+        ((Ok f)
+          (if (not (eq (.code f) 200))
+              (complain (model_refusal (.code f) (.body f)))
+              (match (parse_initramfs (.body f))
+                ((Err why) (complain (append "the backup is not an archive: " why)))
+                ((Ok es) (restored home (.body f) (array_to_list es))))))))))
+
+; What a restore came to: files written, files the same already,
+; directories made, and why it stopped, if it did.
+(data Restored (Restored (n int) (same int) (dirs int) (why (list int))))
+
+; The archive b's entries es written into home: the history's first, as
+; they are, then the rest through the history; then said, with the files
+; of the home the backup has not.
+(def restored ((home (list int)) (b bytes) (es (list Entry))) int
+  (let (now (home_now (port_new))
+        r1 (restore_entries home b es true now (Restored 0 0 0 (nil int)))
+        r2 (if (is_empty (.why r1)) (restore_entries home b es false now r1) r1))
+    (if (not (is_empty (.why r2)))
+        (complain (.why r2))
+        (let w (say (restore_line r2))
+          (match (home_held home)
+            ((Err why) 0)
+            ((Ok hs) (say (left_lines home hs (entry_names es (nil (list int))) (nil int)))))))))
+
+; Each of es in the history (history true) or not, written into home onto r.
+(def restore_entries ((home (list int)) (b bytes) (es (list Entry)) (history bool) (now int) (r Restored)) Restored
+  (if (or (is_empty es) (not (is_empty (.why r))))
+      r
+      (let (e (head es)
+            p (home_in home (drop_n (.path e) 1))
+            hist (home_fixed home p))
+        (restore_entries home b (tail es) history now
+          (if (or (eq (.path e) "/") (not (eq hist history))) r (restore_one home b e p hist now r))))))
+
+; The entry e, at p in home, written onto r: as it is if hist, else
+; through the history; a directory made if it is not there.
+(def restore_one ((home (list int)) (b bytes) (e Entry) (p (list int)) (hist bool) (now int) (r Restored)) Restored
+  (if (entry_is_dir e)
+      (if hist (let m (fs_mkdir p) r)
+          (not (dir_absent p)) r
+          (let w (home_mkdir home p "restore" now)
+            (if (is_empty w) (.dirs r (add (.dirs r) 1)) (.why r (append p (append ": " w))))))
+      (let (got (bytes_slice b (.start e) (.end e))
+            same (eq (home_read p) got))
+        (if same
+            (.same r (add (.same r) 1))
+            (let w (if hist (write_whole p got) (home_write home p got "restore" now))
+              (if (is_empty w) (.n r (add (.n r) 1)) (.why r (append p (append ": " w)))))))))
+
+; Whether nothing is at p, so that restore makes the directory there.
+(def dir_absent ((p (list int))) bool
+  (match (fs_stat p) ((FsIsDir) false) ((FsIsFile n x) false) ((FsNoKind code) true)))
+
+; What restore says it did.
+(def restore_line ((r Restored)) (list int)
+  (append "restored " (append (digits (.n r)) (append " files (" (append (digits (.same r))
+    (append " the same already) and " (append (digits (.dirs r)) " directories\n")))))))
+
+; The names of es, from the home, onto acc.
+(def entry_names ((es (list Entry)) (acc (list (list int)))) (list (list int))
+  (if (is_empty es) acc (entry_names (tail es) (cons (drop_n (.path (head es)) 1) acc))))
+
+; A line for each file of hs the backup's names has not, left as it was;
+; the history's own are not said, as the restore itself adds to them.
+(def left_lines ((home (list int)) (hs (list Held)) (names (list (list int))) (acc (list int))) (list int)
+  (if (is_empty hs)
+      (rev acc)
+      (left_lines home (tail hs) names
+        (if (or (any_eq (.name (head hs)) names) (home_fixed home (home_in home (.name (head hs)))))
+            acc
+            (push "\n" (push (home_in home (.name (head hs))) (push "left as it was, not in the backup: " acc)))))))

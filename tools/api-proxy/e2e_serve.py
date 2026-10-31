@@ -7,11 +7,13 @@ CASE/etc/agent/token and adding that key. With CASE/checks.json, the
 stand-in checks each request as that says (standin.py's checked), and
 answers one that fails 400, saying why. Each request the stand-in gets
 and each usage line is written to standard output, which e2e.sh keeps
-in build/e2e/NAME.serve; the usage file is build/e2e/NAME.usage.jsonl.
+in build/e2e/NAME.serve; the usage file is build/e2e/NAME.usage.jsonl,
+and the agent's backup (/backup) build/e2e/NAME.backup, emptied first.
 Runs until it is stopped. tests/e2e/ask's serve line runs it."""
 
 import asyncio
 import os
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +40,9 @@ async def run(port, case):
     usage = os.path.join(HERE, "..", "..", "build", "e2e", name + ".usage.jsonl")
     if os.path.exists(usage):
         os.remove(usage)
-    app = proxy.make_app(token, "http://127.0.0.1:%d" % up_port, KEY, usage, log=say)
+    backup = os.path.join(HERE, "..", "..", "build", "e2e", name + ".backup")
+    shutil.rmtree(backup, ignore_errors=True)
+    app = proxy.make_app(token, "http://127.0.0.1:%d" % up_port, KEY, usage, log=say, backup_dir=backup)
     await standin.serve(app, "127.0.0.1", port)
     say("e2e_serve: the proxy on 127.0.0.1:%d, the stand-in on %d" % (port, up_port))
     await asyncio.Event().wait()

@@ -34,7 +34,11 @@ At its start `agentd`:
    never format, partition or reinstall, say what it ran. The rules
    are the agent's and the person's to change; each conversation reads
    them afresh, so a change holds from the next.
-5. registers `agent` and waits on three ports at once
+5. makes what is missing of the home's other parts ([The
+   home](#the-home)), and writes its `CONSTITUTION.md` from
+   `/etc/agent/CONSTITUTION.md` whenever the two differ, saying each in
+   the log.
+6. registers `agent` and waits on three ports at once
    (`port_receive_set`): its own, for requests; the one its HTTP
    connections' notices come to; and the one that is the terminal of
    the program a tool runs. So a `stop` is heard, and acted on, while
@@ -54,6 +58,55 @@ that end, and a turn done before its response ended resets the
 connection, so a kept connection never carries the rest of one answer
 into the next request. Each turn's usage is a debug line in the
 log (`dmesg`). Conversations live as long as `agentd`.
+
+## The home
+
+The model is stateless: what makes the agent itself is its home's
+files. They are kept in Claude Code's conventions, so a copy of the
+home (`agent backup`) opens there as it is
+([sys/agenthome.l0](../user/lib/sys/agenthome.l0)):
+
+| Part | What it is |
+|---|---|
+| `CLAUDE.md` | its rules, the agent's and the person's to change; the default begins with `@CONSTITUTION.md` and `@memory/MEMORY.md`, Claude Code's imports |
+| `CONSTITUTION.md` | the fixed part, L0S's ([demo/etc/agent/CONSTITUTION.md](../demo/etc/agent/CONSTITUTION.md), the Pi 5's the same), written from `/etc/agent/CONSTITUTION.md` at each start when they differ: what the home is, what the agent may change (its rules, memory and skills, through its file tools) and what not |
+| `memory/MEMORY.md` | the memory's index, made at first saying it is empty; `memory/NAME.md` a fact each, with its frontmatter |
+| `.claude/skills/NAME/SKILL.md` | a skill each, its frontmatter's `description` read up front, its body read with `read_file` when used |
+| `.history/` | `log`, every write of the agent's file tools in the home; `N`, the file before entry N |
+
+**The system prompt** of each conversation is made when it opens: the
+built-in part, then the constitution, the rules and the memory's
+index, each whole under a heading, then a line for each skill, its
+name, its description and where its body is (`home_prompt`). The rest
+of the home is read on demand.
+
+**The fixed part** is the constitution, and `.history` and all in it
+(`home_fixed`): `write_file` and `make_dir` refuse such a path, by any
+spelling, before touching anything, saying it is fixed. It is read as
+any other.
+
+**The history.** Each write of `write_file` and `make_dir` inside the
+home is a line of `.history/log`, `N TIME CONV KIND PATH`: N from 1,
+one more than the highest; TIME the clock's seconds (`rtc clock`'s, 0
+with none); CONV `S.ID`, S the time `agentd` started and ID its
+conversation, or what else made it, `undo:N` or `restore`; KIND `new`
+(no file was there), `changed` (the file before kept whole as
+`.history/N`), `removed` (the same, the file gone), `dir` or `rmdir`.
+A write whose file is not written leaves no line; a write outside the
+home is not the home's and leaves none.
+
+**At a shell**, `agent` does these itself, without `agentd`:
+
+| Command | Does |
+|---|---|
+| `agent history [PATH]` | the log, the newest last, as `N DATE TIME CONV KIND PATH` (`-` for a time with no clock), only PATH's if given, a relative path from the home |
+| `agent undo N` | entry N undone by its inverse, itself kept (`undo:N`), so an undo is undone in turn: `new` by removing the file, `changed` and `removed` by writing `.history/N` back, `dir` by removing the directory if empty, `rmdir` by making it; `undid N: WHAT` |
+| `agent backup` | the home, every directory and file, `.history` with them, as a cpio archive (newc), `PUT /backup` to the proxy `/etc/agent/config` names, with its token: `backed up HOME: N files and D directories, SIZE to the host` |
+| `agent restore` | `GET /backup`, written into the home: `.history` first, as it is, then each other file that differs through the history (`restore`), a directory not there made; `restored N files (M the same already) and D directories`, and a line for each file of the home the backup has not, left as it was |
+
+The host keeps the backup ([network.md](network.md#reaching-a-models-api)):
+in `build/proxy/backup/home`, which Claude Code opens as it is, and
+which `restore` packs as it is then, edited on the host or not.
 
 ## Its protocol
 
@@ -229,9 +282,9 @@ rules'.
 | Tool | Input | Answers |
 |---|---|---|
 | `read_file` | `path` | the file's text, at most 64 KB, then a line `[cut: N more bytes]` if it was cut |
-| `write_file` | `path`, `content` | the file made anew to hold content (its directory must be there): `wrote N bytes to PATH` |
+| `write_file` | `path`, `content` | the file made anew to hold content (its directory must be there): `wrote N bytes to PATH`; in the home, kept in its history, and refused on its fixed part |
 | `list_dir` | `path` | a line for each entry, `NAME SIZE`, a directory's `NAME/`, from its file server; on the initramfs, while `/` is it, the names alone |
-| `make_dir` | `path` | the directory made, on a volume: `made PATH` |
+| `make_dir` | `path` | the directory made, on a volume: `made PATH`; in the home, kept and refused as `write_file` is |
 
 | `run` | `program`, `args` (optional, an array of strings) | the program found as the shell's `run` finds it (`program_found`: `/bin/NAME`, `/sbin/NAME`, an app's, or a path, a relative one from the home), started with `args` in place of its own: `exit N`, then what it wrote |
 | `sh` | `command` | the line run as `/bin/sh -c COMMAND`: the same |
@@ -282,5 +335,11 @@ sent as `?`, and a cut moves back to where a character starts.
 - Compaction happens only as a turn begins, so one turn of many rounds
   of tools can grow past the size until it ends; and the tokens after
   it are an estimate, from bytes.
+- The history keeps only the file tools' writes: one by `sh` or `run`
+  is not kept, which the constitution forbids for the home's parts but
+  nothing enforces. Its log is read and written whole at each write.
+- `agent backup` and `restore` hold the whole home in memory, and the
+  host keeps one backup to restore from, the last, with every archive
+  sent beside it. `restore` removes nothing the backup has not.
 - Its tests run against the stand-in only: the real API has been
   talked to by hand, on QEMU and on a Pi 5, never by a test.

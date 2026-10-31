@@ -15,6 +15,7 @@ sys.path.insert(0, HERE)
 
 import aiohttp  # noqa: E402
 
+import cpio  # noqa: E402
 import proxy  # noqa: E402
 import standin  # noqa: E402
 import usage  # noqa: E402
@@ -35,7 +36,8 @@ class Proxied(unittest.IsolatedAsyncioTestCase):
         self.usage = os.path.join(self.tmp.name, "usage.jsonl")
         self.standin = standin.Standin(self.script, key=KEY)
         self.up_runner, up_port = await standin.serve(self.standin.app(), "127.0.0.1", 0)
-        app = proxy.make_app(TOKEN, "http://127.0.0.1:%d" % up_port, KEY, self.usage)
+        self.backup = os.path.join(self.tmp.name, "backup")
+        app = proxy.make_app(TOKEN, "http://127.0.0.1:%d" % up_port, KEY, self.usage, backup_dir=self.backup)
         self.runner, port = await standin.serve(app, "127.0.0.1", 0)
         self.base = "http://127.0.0.1:%d" % port
         self.client = aiohttp.ClientSession()
@@ -295,6 +297,21 @@ class Checks(unittest.TestCase):
         self.assertIsNone(standin.checked(good_request(), {"results_contain": {"t2": "y"}}, []))
         self.assertIn("does not hold", standin.checked(good_request(), {"results_contain": {"t1": "z"}}, []))
 
+    def test_results_failed(self):
+        req = good_request()
+        self.assertIn("did not fail", standin.checked(req, {"results_failed": {"t2": "y"}}, []))
+
+    def test_system_contains_list(self):
+        req = good_request()
+        system = "".join(b["text"] for b in req["system"])
+        self.assertIsNone(standin.checked(req, {"system_contains": [system[:5], system[-5:]]}, []))
+        self.assertIn("does not hold", standin.checked(req, {"system_contains": [system[:5], "nowhere"]}, []))
+
+    def test_system_contains_at(self):
+        at = {"system_contains_at": {"2": ["nowhere"]}}
+        self.assertIsNone(standin.checked(good_request(), at, [], 1))
+        self.assertIn("request 2 does not hold", standin.checked(good_request(), at, [], 2))
+
     def test_tool_events(self):
         ev = standin.tool_events([{"id": "t1", "name": "make_dir", "input": {"path": "notes"}}], text="Making it.")
         pieces = "".join(e["data"]["delta"]["partial_json"] for e in ev
@@ -302,6 +319,87 @@ class Checks(unittest.TestCase):
         self.assertEqual(json.loads(pieces), {"path": "notes"})
         self.assertEqual(standin.tool_ids({"events": ev}), ["t1"])
         self.assertEqual(ev[-2]["data"]["delta"]["stop_reason"], "tool_use")
+
+
+HOME = [("CLAUDE.md", b"# Rules\n"), ("memory", None), ("memory/MEMORY.md", b"# Memory\n"),
+        (".history", None), (".history/log", b"1 0 c new /h/x\n")]
+
+
+class Cpio(unittest.TestCase):
+    def test_round_trip(self):
+        self.assertEqual(cpio.unpack(cpio.pack(HOME)), HOME)
+
+    def test_empty(self):
+        self.assertEqual(cpio.unpack(cpio.pack([])), [])
+
+    def test_refuses_outside(self):
+        for name in ("/etc/passwd", "../x", "memory/../../x"):
+            with self.assertRaises(ValueError):
+                cpio.unpack(cpio.pack([(name, b"x")]))
+
+    def test_refuses_not_one(self):
+        with self.assertRaises(ValueError):
+            cpio.unpack(b"not an archive")
+        with self.assertRaises(ValueError):
+            cpio.unpack(cpio.pack(HOME)[:200])
+
+    def test_gather_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            cpio.write_tree(os.path.join(d, "h"), HOME)
+            got = cpio.gather(os.path.join(d, "h"))
+        self.assertEqual(sorted(got, key=lambda e: e[0]), sorted(HOME, key=lambda e: e[0]))
+
+
+class Backup(Proxied):
+    script = []
+
+    async def test_put_then_get(self):
+        async with self.client.put(self.base + "/backup", data=cpio.pack(HOME), headers=self.auth()) as r:
+            self.assertEqual(r.status, 200)
+            self.assertEqual((await r.json())["entries"], 5)
+        with open(os.path.join(self.backup, "home", "memory", "MEMORY.md"), "rb") as f:
+            self.assertEqual(f.read(), b"# Memory\n")
+        self.assertEqual(len(os.listdir(os.path.join(self.backup, "archive"))), 1)
+        async with self.client.get(self.base + "/backup", headers=self.auth()) as r:
+            self.assertEqual(r.status, 200)
+            got = cpio.unpack(await r.read())
+        self.assertEqual(sorted(got, key=lambda e: e[0]), sorted(HOME, key=lambda e: e[0]))
+        self.assertEqual(self.standin.requests, [])
+
+    async def test_put_replaces(self):
+        for home in (HOME, [("CLAUDE.md", b"# New\n")]):
+            async with self.client.put(self.base + "/backup", data=cpio.pack(home), headers=self.auth()) as r:
+                self.assertEqual(r.status, 200)
+        self.assertEqual(os.listdir(os.path.join(self.backup, "home")), ["CLAUDE.md"])
+
+    async def test_edited_on_host(self):
+        async with self.client.put(self.base + "/backup", data=cpio.pack(HOME), headers=self.auth()) as r:
+            self.assertEqual(r.status, 200)
+        with open(os.path.join(self.backup, "home", "CLAUDE.md"), "wb") as f:
+            f.write(b"# Edited\n")
+        async with self.client.get(self.base + "/backup", headers=self.auth()) as r:
+            self.assertIn(("CLAUDE.md", b"# Edited\n"), cpio.unpack(await r.read()))
+
+    async def test_no_token(self):
+        async with self.client.put(self.base + "/backup", data=cpio.pack(HOME)) as r:
+            self.assertEqual(r.status, 401)
+        async with self.client.get(self.base + "/backup", headers=self.auth("f" * 32)) as r:
+            self.assertEqual(r.status, 401)
+        self.assertFalse(os.path.exists(self.backup))
+
+    async def test_none_yet(self):
+        async with self.client.get(self.base + "/backup", headers=self.auth()) as r:
+            self.assertEqual(r.status, 404)
+            self.assertIn("no backup", (await r.json())["error"]["message"])
+
+    async def test_bad_archive(self):
+        async with self.client.put(self.base + "/backup", data=cpio.pack([("../x", b"x")]), headers=self.auth()) as r:
+            self.assertEqual(r.status, 400)
+        self.assertFalse(os.path.exists(os.path.join(self.backup, "home")))
+
+    async def test_other_method(self):
+        async with self.client.post(self.base + "/backup", data=b"", headers=self.auth()) as r:
+            self.assertEqual(r.status, 404)
 
 
 if __name__ == "__main__":

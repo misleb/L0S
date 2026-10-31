@@ -116,6 +116,14 @@ client that waits for each answer, as the kernel's file calls and
 `fs_ask` do, has one waiting at most, so only one that sends without
 waiting meets the bound.
 
+**A data volume outlives a reinstall.** `install VOLUME` writes onto
+the system volume it is given and copies nothing of `/Volumes`, and a
+reinstall formats that volume first, so any other volume is left as it
+was. The agent's home is on one for this, `/Volumes/data/agent` unless
+`/etc/agent/config` says otherwise ([agent.md](agent.md#the-home)),
+`make sysdisk`'s `data` and a Pi 5 card's `data` partition beside
+`bootfs` and `System`.
+
 The disk, as [tools/mkdisk](../tools/mkdisk) makes it with
 [tools/mkfs](../tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS MS
 LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, a host program, built into

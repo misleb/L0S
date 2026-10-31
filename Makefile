@@ -250,6 +250,9 @@ HTTP    := $(INETLIB) $(HTTPMSG) user/lib/proto/httpc.l0
 MODELLIB := $(HTTP) $(JSON) $(SSE) user/lib/proto/model.l0
 # The agent protocol, agentd's, and its client.
 AGENTLIB := user/lib/proto/agent.l0
+# The agent's home: its parts, the system prompt's part from them, what
+# is fixed, and the history of its writes; over the files and the clock.
+AGENTHOME := $(PATHS) $(CLOCK) user/lib/sys/agenthome.l0
 
 # USB: its descriptors and requests, and the usb protocol, which the
 # host controller's driver serves to the class drivers, over them; and
@@ -299,8 +302,8 @@ LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(HTTP) $(JSON) $(SSE)
 LIBS_ntp        := $(INETLIB) $(CLOCK) $(NTPLIB)
 LIBS_ask        := $(MODELLIB)
-LIBS_agent      := $(AGENTLIB)
-LIBS_agentd     := $(MODELLIB) $(PATHS) $(AGENTLIB)
+LIBS_agent      := $(AGENTLIB) $(MODELLIB) $(AGENTHOME)
+LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
@@ -522,6 +525,12 @@ $(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)
 $(call l0_test,$(ULIB) $(HTTP) user/lib/proto/httpc_test.l0)
 $(call l0_test,$(ULIB) $(MODELLIB) user/lib/proto/model_test.l0)
 $(call l0_test,$(ULIB) $(AGENTLIB) user/lib/proto/agent_test.l0)
+$(call l0_test,$(ULIB) $(AGENTHOME) user/lib/sys/agenthome_test.l0)
+# agenthome's tests write a home's files and history under build/, as
+# this host has no fs to make its directories.
+$(BUILD)/test/user/lib/sys/agenthome_test.l0.ok: $(BUILD)/agenthome_test/.history
+$(BUILD)/agenthome_test/.history:
+	@mkdir -p $@
 $(call l0_test,$(ULIB) $(RANDOM) user/lib/proto/random_test.l0)
 $(call l0_test,$(ULIB) $(USBLIB) user/lib/proto/usb_test.l0)
 $(call l0_test,$(ULIB) $(PCILIB) user/lib/proto/pci_test.l0)

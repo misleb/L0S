@@ -31,8 +31,11 @@ the stand-in sent, in order ("tool_results": true); that its
 cache_control breakpoints are on the system prompt, the last tool and
 the last message, four at most ("cache_control": true); that a tool's
 result holds a text and did not fail, once it is there
-("results_contain": {ID: TEXT}); that the system
-prompt holds a text ("system_contains": TEXT). A request that fails is
+("results_contain": {ID: TEXT}), or holds one and failed
+("results_failed": {ID: TEXT}); that the system prompt holds a text, or
+each of a list ("system_contains": TEXT or [TEXT...]), and the Nth
+request's each of a list ("system_contains_at": {"N": [TEXT...]}), N
+counted from 1 as the script's answers are. A request that fails is
 answered 400, invalid_request_error, "stand-in: WHY", and the line
 "standin: check failed: WHY" logged. With
 --key, a request whose x-api-key is not KEY is 401, as the API's would be.
@@ -129,8 +132,9 @@ def tool_ids(answer):
     return out
 
 
-def checked(req, checks, last_ids):
-    """Why the request body req (JSON) fails checks, or None: tool_results,
+def checked(req, checks, last_ids, n=1):
+    """Why the request body req (JSON), the script's nth to answer, fails
+    checks, or None: tool_results,
     every assistant turn's tool_use ids answered, in order, by the user
     turn after it, and the last assistant turn's by those the stand-in
     sent last (last_ids); cache_control, a breakpoint on the system
@@ -179,13 +183,20 @@ def checked(req, checks, last_ids):
                 if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == tid:
                     if text not in str(b.get("content", "")) or b.get("is_error"):
                         return "the result of %s does not hold %r, or failed" % (tid, text)
+    for tid, text in checks.get("results_failed", {}).items():
+        for m in msgs:
+            for b in (m.get("content") if isinstance(m.get("content"), list) else []):
+                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == tid:
+                    if text not in str(b.get("content", "")) or not b.get("is_error"):
+                        return "the result of %s does not hold %r, or did not fail" % (tid, text)
+    system = req.get("system")
+    text = system if isinstance(system, str) else "".join(
+        b.get("text", "") for b in (system or []) if isinstance(b, dict))
     want = checks.get("system_contains")
-    if want:
-        system = req.get("system")
-        text = system if isinstance(system, str) else "".join(
-            b.get("text", "") for b in (system or []) if isinstance(b, dict))
-        if want not in text:
-            return "the system prompt does not hold %r" % want
+    wants = ([want] if isinstance(want, str) else want or []) + checks.get("system_contains_at", {}).get(str(n), [])
+    for w in wants:
+        if w not in text:
+            return "the system prompt of request %d does not hold %r" % (n, w)
     return None
 
 
@@ -236,7 +247,7 @@ class Standin:
                 return web.json_response({"input_tokens": len(body) // 4})
             if self.checks:
                 try:
-                    why = checked(json.loads(body), self.checks, self.last_ids)
+                    why = checked(json.loads(body), self.checks, self.last_ids, self.next + 1)
                 except ValueError as e:
                     why = "the body is not JSON: %s" % e
                 if why:
