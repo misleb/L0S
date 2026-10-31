@@ -1,0 +1,435 @@
+; decoder.l0 -- Whistle's decoder (roadmap 0060), purely, as
+; cactus-needle's whistle.py and architecture.py have it: Needle's
+; blocks on 4 residual lanes, mixed by mHC as the encoder's are, each
+; reading the encoder's rows through gated cross-attention, run a token
+; at a time with every layer's keys and values kept, as the engine runs
+; it. A block, each norm a zero-centred RMS norm of its own:
+;
+;   x + alpha engram value                     at an engram's layer only
+;   x + sigmoid(gate) norm(self-attention(norm x))     taps of 3, RoPE
+;   x + sigmoid(cross gate) norm(cross-attention(norm x))
+;   x + Hadamard MLP(norm x)
+;
+; Self-attention has 8 query heads and 2 key and value heads (48, 48
+; and 64 wide), each projection the sum of its last 3 rows' under its
+; taps; cross-attention 8 heads of each, over the memory: the encoder's
+; rows plus sigmoid(pe_gate) times sinusoids, quantized. An engram
+; hashes the last 2 and 3 tokens into 4 tables of 128 (CQ rows, read as
+; they are needed), and adds its value, under 4 taps 3 rows apart,
+; weighted by how like its key the row is. The logits are the lanes'
+; mean, normed and quantized, times the embedding. Greedy decoding starts
+; from BOS, takes a language tag first and text after, and stops at EOS.
+; Activations, queries, keys and values are quantized to int8 and back
+; where the engine does, as the encoder's. Linked as DECODER in the
+; Makefile, after ENCODER.
+
+; ----------------------------------------------------------- the weights
+
+; A layer: its five norms' scales, in the order it uses them (before
+; and after self-attention, before and after cross-attention, before the
+; MLP); self-attention's query, key and value matrices, their taps (3
+; rows of each's width), the queries' and keys' norms, the gate and out
+; matrices and the gate; its Hadamard MLP; and cross-attention's query,
+; key, value, gate and out matrices, the queries' and keys' norms and its
+; gate.
+(data DecLayer (DecLayer (norms (list (array float))) (q NnMat) (k NnMat) (v NnMat)
+                         (qt (array float)) (kt (array float)) (vt (array float))
+                         (qn (array float)) (kn (array float)) (g NnMat) (o NnMat) (gate float) (h Hmlp)
+                         (cq NnMat) (ck NnMat) (cv NnMat) (cg NnMat) (co NnMat)
+                         (cqn (array float)) (ckn (array float)) (cgate float)))
+
+; An engram: its tables, one CQ tensor of every table's rows after the
+; one before's; its key and value matrices; and its value's taps, 4 rows
+; of 512.
+(data Engram (Engram (table CactTensor) (key NnMat) (value NnMat) (taps (array float))))
+
+; The engrams' shape, from the header: each table's rows, their width,
+; the tables, the hashes an order (tables over orders), the stride of a
+; hash's seed between orders, the value taps' distance apart, and the
+; orders, the n-grams hashed.
+(data EngramGeo (EngramGeo (slots int) (sub int) (tables int) (heads int) (stride int) (dil int) (orders (list int))))
+
+; The decoder: the model, the embedding (8199 rows of 512: the text
+; tokens, then the language tags), the layers, mHC, the final norm's
+; scale, the Hadamard MLP's permutations, the engrams and the layers
+; they are at, their shape, pe_gate, the most tokens a clip may have,
+; and the text tokens, the tags after them.
+(data Decoder (Decoder (w Whistle) (emb NnMat) (layers (list DecLayer)) (mhc Mhc) (final (array float))
+                       (p1 (array int)) (p2 (array int)) (engrams (list Engram)) (sites (list int)) (geo EngramGeo)
+                       (pe float) (most int) (text int)))
+
+; The decoder of w, read and dequantized: after the embedding, each
+; layer's 27 tensors, mHC's 9, the two permutations, each engram's 4
+; and the final norm; each layer's cross-attention's 10 after the audio
+; manifest.
+(def decoder_of ((w Whistle)) Decoder
+  (let (c (.c w)
+        b (.b w)
+        n (cact_hdr c 10)
+        hp (whistle_hada_at w)
+        sites (cact_hdr c 31)
+        orders (dec_header c 27 (cact_hdr c 26) (nil int))
+        tables (cact_hdr c 22)
+        heads (div tables (max 1 (length orders))))
+    (Decoder w (nn_mat c b 0) (dec_layers_of w 0 n (nil DecLayer)) (mhc_of c b (add 1 (mul 27 n))) (nn_vector c b (add hp (add 2 (mul 4 sites))))
+             (enc_ints (nn_vector c b hp)) (enc_ints (nn_vector c b (add hp 1)))
+             (dec_engrams c b (add hp 2) 0 sites (nil Engram))
+             (dec_header c 32 sites (nil int))
+             (EngramGeo (cact_hdr c 20) (cact_hdr c 21) tables heads
+                        (if (gt (cact_hdr c 25) 0) (cact_hdr c 25) heads) (cact_hdr c 24) orders)
+             (array_get (nn_vector c b (whistle_pe_gate w)) 0)
+             (cact_hdr c 13)
+             (whistle_geometry w 2))))
+
+; n header words from k on, in order.
+(def dec_header ((c Cact) (k int) (n int) (acc (list int))) (list int)
+  (if (le n 0) (rev acc) (dec_header c (add k 1) (sub n 1) (cons (cact_hdr c k) acc))))
+
+; Layers i up to n of w.
+(def dec_layers_of ((w Whistle) (i int) (n int) (acc (list DecLayer))) (list DecLayer)
+  (if (ge i n)
+      (rev acc)
+      (dec_layers_of w (add i 1) n (cons (dec_layer_of (.c w) (.b w) (add 1 (mul 27 i)) (add (.audio w) (add 1 (mul 10 i)))) acc))))
+
+; The layer whose own tensors start at s (its norm, q, k, v, their taps,
+; the norms of q and k, gate, out, the post norm, the gate, the MLP's
+; norm and its 13) and its cross-attention's at x (its norm, q, k, v,
+; gate, out, the norms of q and k, the post norm, the gate).
+(def dec_layer_of ((c Cact) (b bytes) (s int) (x int)) DecLayer
+  (DecLayer (cons (nn_vector c b s) (cons (nn_vector c b (add s 11)) (cons (nn_vector c b x) (cons (nn_vector c b (add x 8)) (cons (nn_vector c b (add s 13)) (nil (array float)))))))
+            (nn_mat c b (add s 1)) (nn_mat c b (add s 2)) (nn_mat c b (add s 3))
+            (nn_vector c b (add s 4)) (nn_vector c b (add s 5)) (nn_vector c b (add s 6))
+            (nn_vector c b (add s 7)) (nn_vector c b (add s 8))
+            (nn_mat c b (add s 9)) (nn_mat c b (add s 10))
+            (array_get (nn_vector c b (add s 12)) 0)
+            (enc_hmlp c b (add s 14))
+            (nn_mat c b (add x 1)) (nn_mat c b (add x 2)) (nn_mat c b (add x 3)) (nn_mat c b (add x 4)) (nn_mat c b (add x 5))
+            (nn_vector c b (add x 6)) (nn_vector c b (add x 7))
+            (array_get (nn_vector c b (add x 9)) 0)))
+
+; Engrams s up to n, each's 4 tensors from at plus 4 s.
+(def dec_engrams ((c Cact) (b bytes) (at int) (s int) (n int) (acc (list Engram))) (list Engram)
+  (if (ge s n)
+      (rev acc)
+      (let e (add at (mul 4 s))
+        (dec_engrams c b at (add s 1) n (cons (Engram (cact_tensor c e) (nn_mat c b (add e 1)) (nn_mat c b (add e 2)) (nn_vector c b (add e 3))) acc)))))
+
+; Which engram, counted from s, is at layer l, or -1.
+(def dec_site ((sites (list int)) (l int) (s int)) int
+  (if (is_empty sites) -1 (eq (head sites) l) s (dec_site (tail sites) l (add s 1))))
+
+; ------------------------------------------------------------ the memory
+
+; Cross-attention's keys and values over the memory, for one layer: n
+; rows of 8 heads of 48, normed and quantized, and of 8 of 64, quantized.
+(data Cross (Cross (n int) (k (array float)) (v (array float))))
+
+; Every layer's keys and values over the encoder's rows enc: the
+; memory, enc plus sigmoid(pe_gate) times the sinusoids, quantized,
+; through each layer's key and value matrices. Once a clip.
+(def decoder_memory ((d Decoder) (enc Rows)) (list Cross)
+  (let (t (.n enc)
+        mem (nn_act_quant_rows (dec_sinusoids (.x enc) t (nn_sigmoid (.pe d)) 0 (array_new (mul t 512) 0.0)) t 512))
+    (dec_crosses (.layers d) mem t (nil Cross))))
+(def dec_crosses ((ls (list DecLayer)) (mem (array float)) (t int) (acc (list Cross))) (list Cross)
+  (if (is_empty ls)
+      (rev acc)
+      (let (l (head ls)
+            k (nn_quant_pieces (head_norms (nn_matmul (.ck l) mem t) (mul t 8) (.ckn l)) t 384 48)
+            v (nn_quant_pieces (nn_matmul (.cv l) mem t) t 512 64))
+        (dec_crosses (tail ls) mem t (cons (Cross t k v) acc)))))
+
+; x's t rows of 512 plus g times the sinusoids, from entry k: row r's
+; entry j sin(r f) for j under 256 and cos(r f) from 256, f being
+; 10000^(-i/255) for i of j mod 256.
+(def dec_sinusoids ((x (array float)) (t int) (g float) (k int) (out (array float))) (array float)
+  (if (ge k (mul t 512))
+      out
+      (let (r (div k 512)
+            j (mod k 512)
+            ang (float_mul (float_from_int r) (float_exp (float_mul (float_from_int (mod j 256)) (float_div (float_neg (float_ln 10000.0)) 255.0))))
+            s (if (lt j 256) (float_sin ang) (float_cos ang)))
+        (dec_sinusoids x t g (add k 1) (array_set out k (float_add (array_get x k) (float_mul g s)))))))
+
+; -------------------------------------------------------------- the state
+
+; Self-attention's rows so far, every layer's in one array each, layer
+; l's from l times the most tokens times the width: the raw query, key
+; and value projections, which the taps read, and the keys and values,
+; tapped, normed, turned and quantized.
+(data Kv (Kv (qr (array float)) (kr (array float)) (vr (array float)) (k (array float)) (v (array float))))
+
+; Decoding so far: the next token's place, the tokens, self-attention's
+; rows, and each engram's raw values, engram s's from s times the most
+; tokens times 512.
+(data DecState (DecState (pos int) (toks (array int)) (kv Kv) (ev (array float))))
+
+; The state before the first token.
+(def decoder_start ((d Decoder)) DecState
+  (let (m (.most d)
+        n (mul m (length (.layers d))))
+    (DecState 0 (array_new m 0)
+              (Kv (array_new (mul n 384) 0.0) (array_new (mul n 96) 0.0) (array_new (mul n 128) 0.0)
+                  (array_new (mul n 96) 0.0) (array_new (mul n 128) 0.0))
+              (array_new (mul (max 1 (length (.engrams d))) (mul m 512)) 0.0))))
+
+; A step's state after, and its row, the lanes' mean normed.
+(data DecStep (DecStep (st DecState) (row (array float))))
+
+; One token through the decoder at the state's place, over the memory.
+(def decoder_step ((d Decoder) (mem (list Cross)) (st DecState) (token int)) DecStep
+  (match st
+    ((DecState p toks kv ev)
+      (let (toks2 (array_set toks p token)
+            eng (dec_engrams_run d toks2 p (.engrams d) 0 ev (nil EngramOut))
+            lanes (enc_broadcast (dec_embed (.emb d) token) 1 0 (array_new 2048 0.0))
+            run (dec_run_layers d (.layers d) mem (.outs eng) 0 p lanes kv)
+            row (nn_norm_rows (enc_mean (.x run) 1 0 (array_new 512 0.0)) 1 512 (.final d) 0.000001))
+        (DecStep (DecState (add p 1) toks2 (.kv run) (.ev eng)) row)))))
+
+; The token's row of the embedding, times the square root of its width.
+(def dec_embed ((m NnMat) (token int)) (array float)
+  (dec_embed_from (.w m) (mul token (.cols m)) (.cols m) (float_sqrt (float_from_int (.cols m))) 0 (array_new (.cols m) 0.0)))
+(def dec_embed_from ((w bytes) (at int) (n int) (s float) (k int) (out (array float))) (array float)
+  (if (ge k n) out (dec_embed_from w at n s (add k 1) (array_set out k (float_mul s (bytes_get_f32 w (mul 4 (add at k))))))))
+
+; x's entries put into a from at, in place, from k.
+(def dec_put ((a (array float)) (at int) (x (array float)) (k int)) (array float)
+  (if (ge k (array_len x)) a (dec_put (array_set a (add at k) (array_get x k)) at x (add k 1))))
+
+; ------------------------------------------------------------- the lanes
+
+; The lanes after a layer, and self-attention's rows.
+(data DecRun (DecRun (x (array float)) (kv Kv)))
+
+; Layers li on of the lanes x, 4 of 512, at place p, as the encoder's
+; enc_layer, with each layer's block a decoder block.
+(def dec_run_layers ((d Decoder) (ls (list DecLayer)) (crs (list Cross)) (eos (list EngramOut)) (li int) (p int) (x (array float)) (kv Kv)) DecRun
+  (if (or (is_empty ls) (is_empty crs))
+      (DecRun x kv)
+      (let (m (.mhc d)
+            nx (nn_act_quant_rows (nn_norm_rows x 1 2048 (array_new 2048 0.0) 0.000001) 1 2048)
+            pre (nn_matmul_part (.pre m) nx 1 (mul li 4) 4)
+            post (nn_matmul_part (.post m) nx 1 (mul li 4) 4)
+            res (nn_matmul_part (.res m) nx 1 (mul li 16) 16)
+            u (enc_mix_in m li 1 x pre 0 (array_new 512 0.0))
+            s (dec_site (.sites d) li 0)
+            eo (if (lt s 0) ((None EngramOut)) (Some (nth eos s)))
+            at (dec_block d (head ls) li (head crs) eo u kv p))
+        (match at
+          ((Att ya kv2)
+            (let out (enc_mix_out m li 1 x post res (nn_add_into ya u -1.0) 0 (array_new 2048 0.0))
+              (dec_run_layers d (tail ls) (tail crs) eos (add li 1) p out kv2)))))))
+
+; ------------------------------------------------------------- a block
+
+; A block's or an attention's output row, and self-attention's rows.
+(data Att (Att (y (array float)) (kv Kv)))
+
+; Layer l, number li, over the row u at place p, with its memory cr and
+; its engram's key and value if it has one: a new row.
+(def dec_block ((d Decoder) (l DecLayer) (li int) (cr Cross) (eo (Option EngramOut)) (u (array float)) (kv Kv) (p int)) Att
+  (let (ns (.norms l)
+        x0 (dec_engram_add eo (enc_copy u 0 (array_new 512 0.0)))
+        at (dec_self l li (.most d) (nn_norm_rows x0 1 512 (nth ns 0) 0.000001) kv p)
+        x1 (nn_add_into x0 (nn_norm_rows (.y at) 1 512 (nth ns 1) 0.000001) (nn_sigmoid (.gate l)))
+        c (dec_cross l cr (nn_norm_rows x1 1 512 (nth ns 2) 0.000001))
+        x2 (nn_add_into x1 (nn_norm_rows c 1 512 (nth ns 3) 0.000001) (nn_sigmoid (.cgate l)))
+        x3 (nn_add_into x2 (hmlp_rows (.p1 d) (.p2 d) (.h l) (nn_norm_rows x2 1 512 (nth ns 4) 0.000001) 1) 1.0))
+    (Att x3 (.kv at))))
+
+; Self-attention over the row h, normed, at place p of layer li, m the
+; most places: h quantized; its raw query, key and value kept; each the
+; sum of the last 3 raw rows under its taps; the query's 8 heads and the
+; key's 2 normed and turned by RoPE at p; each head's row quantized; the
+; key and value kept; each query head h attending over places 0 to p of
+; key and value head h / 4; times the sigmoid of the gate's row;
+; quantized; out.
+(def dec_self ((l DecLayer) (li int) (m int) (h (array float)) (kv Kv) (p int)) Att
+  (match kv
+    ((Kv qr kr vr ks vs)
+      (let (xq (nn_act_quant h 0 512)
+            qb (mul li (mul m 384))
+            kb (mul li (mul m 96))
+            vb (mul li (mul m 128))
+            qr2 (dec_put qr (add qb (mul p 384)) (nn_matmul (.q l) xq 1) 0)
+            kr2 (dec_put kr (add kb (mul p 96)) (nn_matmul (.k l) xq 1) 0)
+            vr2 (dec_put vr (add vb (mul p 128)) (nn_matmul (.v l) xq 1) 0)
+            q (nn_quant_pieces (dec_rope (head_norms (dec_tapped qr2 qb p 384 (.qt l) 1) 8 (.qn l)) 8 p) 1 384 48)
+            k (nn_quant_pieces (dec_rope (head_norms (dec_tapped kr2 kb p 96 (.kt l) 1) 2 (.kn l)) 2 p) 1 96 48)
+            v (nn_quant_pieces (dec_tapped vr2 vb p 128 (.vt l) 1) 1 128 64)
+            ks2 (dec_put ks (add kb (mul p 96)) k 0)
+            vs2 (dec_put vs (add vb (mul p 128)) v 0)
+            a (dec_heads q ks2 kb 96 vs2 vb 128 (add p 1) 4 0 (array_new 512 0.0))
+            g (nn_matmul (.g l) xq 1)
+            out (nn_matmul (.o l) (nn_act_quant (gate_rows a g 0) 0 512) 1))
+        (Att out (Kv qr2 kr2 vr2 ks2 vs2))))))
+
+; Cross-attention over the row h, normed: h quantized; the query's 8
+; heads normed and quantized; head h attending over every memory row's
+; key and value head h; times the sigmoid of the gate's row; quantized;
+; out.
+(def dec_cross ((l DecLayer) (cr Cross) (h (array float))) (array float)
+  (let (xq (nn_act_quant h 0 512)
+        q (nn_quant_pieces (head_norms (nn_matmul (.cq l) xq 1) 8 (.cqn l)) 1 384 48)
+        a (dec_heads q (.k cr) 0 384 (.v cr) 0 512 (.n cr) 1 0 (array_new 512 0.0))
+        g (nn_matmul (.cg l) xq 1))
+    (nn_matmul (.co l) (nn_act_quant (gate_rows a g 0) 0 512) 1)))
+
+; The row of dim at place p of a from base, under taps (rows of dim)
+; dil places apart: entry e the sum over taps j of tap j's e times a's
+; row p - j dil, entry e, for the rows from 0 on.
+(def dec_tapped ((a (array float)) (base int) (p int) (dim int) (taps (array float)) (dil int)) (array float)
+  (dec_tap_from a base p dim taps dil 0 (array_new dim 0.0)))
+(def dec_tap_from ((a (array float)) (base int) (p int) (dim int) (taps (array float)) (dil int) (e int) (out (array float))) (array float)
+  (if (ge e dim)
+      out
+      (dec_tap_from a base p dim taps dil (add e 1) (array_set out e (dec_tap_sum a base p dim taps dil e 0 0.0)))))
+(def dec_tap_sum ((a (array float)) (base int) (p int) (dim int) (taps (array float)) (dil int) (e int) (j int) (s float)) float
+  (let r (sub p (mul j dil))
+    (if (or (ge (mul j dim) (array_len taps)) (lt r 0))
+        s
+        (dec_tap_sum a base p dim taps dil e (add j 1)
+          (float_add s (float_mul (array_get taps (add (mul j dim) e)) (array_get a (add base (add (mul r dim) e)))))))))
+
+; x's heads pieces of 48 each turned by RoPE at place p.
+(def dec_rope ((x (array float)) (heads int) (p int)) (array float)
+  (dec_rope_from x heads (float_from_int p) 0))
+(def dec_rope_from ((x (array float)) (heads int) (pos float) (hh int)) (array float)
+  (if (ge hh heads) x (dec_rope_from (rope_piece x (mul hh 48) pos 0) heads pos (add hh 1))))
+
+; Query heads hh on of q, 8 of 48, each attending over n rows of keys,
+; ks apart from kb, and values, vs apart from vb, of head hh / group,
+; scaled by one over the square root of 48: into out, 8 heads of 64.
+(def dec_heads ((q (array float)) (k (array float)) (kb int) (ks int) (v (array float)) (vb int) (vs int) (n int) (group int) (hh int) (out (array float))) (array float)
+  (if (ge hh 8)
+      out
+      (let (kv (div hh group)
+            sc (nn_softmax (dec_scores q (mul hh 48) k (add kb (mul kv 48)) ks n 0 (array_new n 0.0)) 0 n))
+        (dec_heads q k kb ks v vb vs n group (add hh 1) (dec_weighted v (add vb (mul kv 64)) vs sc n (mul hh 64) 0 out)))))
+
+; The query at qa's scores against the n keys from ka, ks apart, from j.
+(def dec_scores ((q (array float)) (qa int) (k (array float)) (ka int) (ks int) (n int) (j int) (s (array float))) (array float)
+  (if (ge j n)
+      s
+      (dec_scores q qa k ka ks n (add j 1) (array_set s j (float_div (dot48 q qa k (add ka (mul j ks)) 0 0.0) (float_sqrt 48.0))))))
+
+; Entries e on of the head's output at oa: the n values from va, vs
+; apart, entry e, weighted by the scores sc.
+(def dec_weighted ((v (array float)) (va int) (vs int) (sc (array float)) (n int) (oa int) (e int) (out (array float))) (array float)
+  (if (ge e 64)
+      out
+      (dec_weighted v va vs sc n oa (add e 1) (array_set out (add oa e) (dec_value_sum v (add va e) vs sc n 0 0.0)))))
+(def dec_value_sum ((v (array float)) (at int) (vs int) (sc (array float)) (n int) (j int) (s float)) float
+  (if (ge j n) s (dec_value_sum v at vs sc n (add j 1) (float_add s (float_mul (array_get sc j) (array_get v (add at (mul j vs))))))))
+
+; ------------------------------------------------------------- engrams
+
+; An engram's key and value at a place.
+(data EngramOut (EngramOut (k (array float)) (v (array float))))
+
+; Every engram's key and value at a place, and their raw values so far.
+(data Engrams (Engrams (outs (list EngramOut)) (ev (array float))))
+
+; Engrams from s on at place p of the tokens toks: each's tables' rows
+; for the n-grams ending at p, quantized; the key and the raw value of
+; that; the raw value kept, and the value its taps make of the raw
+; values so far.
+(def dec_engrams_run ((d Decoder) (toks (array int)) (p int) (es (list Engram)) (s int) (ev (array float)) (outs (list EngramOut))) Engrams
+  (if (is_empty es)
+      (Engrams (rev outs) ev)
+      (let (eg (head es)
+            g (.geo d)
+            e (nn_act_quant (dec_engram_rows d eg toks p 0 (array_new (mul (.tables g) (.sub g)) 0.0)) 0 (mul (.tables g) (.sub g)))
+            base (mul s (mul (.most d) 512))
+            ev2 (dec_put ev (add base (mul p 512)) (nn_matmul (.value eg) e 1) 0)
+            v (dec_tapped ev2 base p 512 (.taps eg) (.dil g))
+            k (nn_matmul (.key eg) e 1))
+        (dec_engrams_run d toks p (tail es) (add s 1) ev2 (cons (EngramOut k v) outs)))))
+
+; Tables i on: table i's row for the n-gram of its order ending at p,
+; hashed by its seed, into e at i times the width; none while p is
+; earlier than the n-gram's start.
+(def dec_engram_rows ((d Decoder) (eg Engram) (toks (array int)) (p int) (i int) (e (array float))) (array float)
+  (let g (.geo d)
+    (if (ge i (.tables g))
+        e
+        (let (oi (div i (.heads g))
+              order (nth (.orders g) oi)
+              e2 (if (lt p (sub order 1))
+                     e
+                     (let (seed (add (mul oi (.stride g)) (add (mod i (.heads g)) 1))
+                           row (add (mul i (.slots g)) (dec_slot toks p order seed (.slots g))))
+                       (dec_put e (mul i (.sub g)) (cq_row (.c (.w d)) (.b (.w d)) (.table eg) row) 0))))
+          (dec_engram_rows d eg toks p (add i 1) e2)))))
+
+; The slot of the order tokens ending at p, by hash n: from the seed
+; 0x9E3779B9 times n, each token's xor times the FNV prime 0x01000193,
+; in 32 bits, then the high half's xor, modulo the slots. A token before
+; the first is 0.
+(def dec_slot ((toks (array int)) (p int) (order int) (n int) (slots int)) int
+  (let a (dec_hash toks p order 0 (bit_and (mul 2654435769 n) 4294967295))
+    (mod (bit_xor a (bit_shr a 15)) slots)))
+(def dec_hash ((toks (array int)) (p int) (order int) (j int) (acc int)) int
+  (if (ge j order)
+      acc
+      (let tok (if (lt p j) 0 (array_get toks (sub p j)))
+        (dec_hash toks p order (add j 1) (bit_and (mul (bit_xor acc tok) 16777619) 4294967295)))))
+
+; x with an engram's value added, if there is one, weighted by the
+; sigmoid of x's and its key's unit RMS rows' dot product over the
+; square root of the width. In place.
+(def dec_engram_add ((eo (Option EngramOut)) (x (array float))) (array float)
+  (match eo
+    ((None) x)
+    ((Some e)
+      (let a (nn_sigmoid (float_div (dec_unit_dot x (.k e)) (float_sqrt (float_from_int (array_len x)))))
+        (nn_add_into x (.v e) a)))))
+
+; The dot product of a and b each over its root mean square, with 1e-6
+; under the root.
+(def dec_unit_dot ((a (array float)) (b (array float))) float
+  (let (n (float_from_int (array_len a))
+        ia (float_div 1.0 (float_sqrt (float_add (float_div (nn_squares a 0 (array_len a) 0.0) n) 0.000001)))
+        ib (float_div 1.0 (float_sqrt (float_add (float_div (nn_squares b 0 (array_len b) 0.0) n) 0.000001))))
+    (float_mul (float_mul (dec_dot a b 0 0.0) ia) ib)))
+
+; The dot product of a and b, from k, after s.
+(def dec_dot ((a (array float)) (b (array float)) (k int) (s float)) float
+  (if (ge k (array_len a)) s (dec_dot a b (add k 1) (float_add s (float_mul (array_get a k) (array_get b k))))))
+
+; ------------------------------------------------------------- decoding
+
+; BOS, which decoding starts from, and EOS, which ends it.
+(def dec_bos () int 2)
+(def dec_eos () int 1)
+
+; The logits of a step's row: a copy of it quantized, times the
+; embedding, a logit a token.
+(def decoder_logits ((d Decoder) (row (array float))) (array float)
+  (nn_matmul (.emb d) (nn_act_quant (enc_copy row 0 (array_new (array_len row) 0.0)) 0 (array_len row)) 1))
+
+; The token greedy decoding takes from the logits lg: the likeliest
+; language tag first, the likeliest text token after; the first of
+; equals.
+(def dec_pick ((lg (array float)) (first bool) (text int)) int
+  (if first (dec_most lg text (array_len lg) text) (dec_most lg 0 text 0)))
+(def dec_most ((a (array float)) (k int) (e int) (best int)) int
+  (if (ge k e) best (dec_most a (add k 1) e (if (float_gt (array_get a k) (array_get a best)) k best))))
+
+; A clip decoded: its tokens, the language tag first and EOS left out,
+; and each step's row, BOS's first.
+(data Decoded (Decoded (ids (list int)) (rows (list (array float)))))
+
+; The encoder's rows enc decoded greedily, from BOS until EOS, or until
+; the most tokens are taken.
+(def decoder_run ((d Decoder) (enc Rows)) Decoded
+  (dec_loop d (decoder_memory d enc) (decoder_start d) (dec_bos) (nil int) (nil (array float))))
+(def dec_loop ((d Decoder) (mem (list Cross)) (st DecState) (token int) (ids (list int)) (rows (list (array float)))) Decoded
+  (let (p (.pos st)
+        s (decoder_step d mem st token)
+        next (dec_pick (decoder_logits d (.row s)) (eq p 0) (.text d))
+        rows2 (cons (.row s) rows))
+    (if (or (eq next (dec_eos)) (ge p (sub (.most d) 2)))
+        (Decoded (rev ids) (rev rows2))
+        (dec_loop d mem (.st s) next (cons next ids) rows2))))

@@ -953,6 +953,7 @@
   (if (and (eq op "window") (ge (length args) 4)) (window_came (opened v from ns (unwords (drop args 4)) (ServerSide)) from)
       (and (eq op "csd") (ge (length args) 4)) (window_came (opened v from ns (unwords (drop args 4)) (ClientSide)) from)
       (eq op "damage") (requested_damage v args)
+      (and (or (eq op "place") (eq op "paste")) (eq (length args) 5)) (requested_five v op args)
       (requested_of_one v from op ns args)))
 
 ; A window or csd request served, s, for from: if it opened the window,
@@ -970,7 +971,44 @@
       (and (eq op "move") (eq (length args) 1)) (move_started v from (nth ns 0))
       (and (eq op "maximize") (eq (length args) 1)) (maximize_asked v from (nth ns 0))
       (and (eq op "edges") (eq (length args) 2)) (edges_started v from (nth ns 0) (nth ns 1))
+      (and (eq op "raise") (eq (length args) 1)) (raise_asked v (nth ns 0))
+      (and (eq op "dismiss") (eq (length args) 1)) (dismiss_asked v (nth ns 0))
       (refused v (append "no request " op))))
+
+; place ID X Y W H, or paste X Y W H VA: five numbers each.
+(def requested_five ((v Wm) (op (list int)) (args (list (list int)))) (Served Wm)
+  (match (word_numbers args)
+    ((None) (refused v (append op "'s numbers are not numbers")))
+    ((Some ns)
+      (if (eq op "place")
+          (place_asked v (nth ns 0) (Rect (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)))
+          (pasted v (Rect (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)) (nth ns 4))))))
+
+; raise ID: window ID brought to the front, with the focus, as a press
+; on it brings it; any client may ask, as a launcher or the agent does.
+(def raise_asked ((v Wm) (id int)) (Served Wm)
+  (match (find_win (.wins v) id)
+    ((None) (refused v (append "no window " (digits id))))
+    ((Some win) (okay (raised_by v win)))))
+
+; dismiss ID: window ID's client asked to close it, as its close button
+; asks, and closed by force if it is still open close_wait_ns later.
+(def dismiss_asked ((v Wm) (id int)) (Served Wm)
+  (match (find_win (.wins v) id)
+    ((None) (refused v (append "no window " (digits id))))
+    ((Some win) (okay (close_pressed v win)))))
+
+; place ID X Y W H: window ID's content made W by H, at X, Y, below the
+; bar: its client asked for the size, as a maximize asks, and the window
+; put there once it answers; or moved there at once if it is that size.
+; It is no longer maximized. The size must fit the screen.
+(def place_asked ((v Wm) (id int) (go Rect)) (Served Wm)
+  (match (find_win (.wins v) id)
+    ((None) (refused v (append "no window " (digits id))))
+    ((Some win)
+      (if (or (lt (.w go) 1) (or (lt (.h go) 1) (gt (outer_w (.deco win) (.w go)) (.w v))))
+          (refused v "a window must fit the screen")
+          (okay (win_goes_to v (win_maxing win (rect_none) go) go))))))
 
 ; damage ID X Y W H ...: each window's rectangle shown, five numbers each.
 (def requested_damage ((v Wm) (args (list (list int)))) (Served Wm)
@@ -1698,6 +1736,46 @@
         ((UiDrawRound x y rw rh r c) (desk_drawn v dc))
         ((UiDrawButton x y k label) (desk_drawn v dc))
         ((UiDrawIcon x y name sc c) (desk_drawn v dc))))))
+
+; paste X Y W H VA: the buffer a client shared with wm at VA, W by H of
+; the desktop's pixels, at its scale as many times wider and higher in
+; the screen's, ARGB words row after row, not premultiplied, drawn over
+; the desktop at X, Y by each pixel's alpha, and shown; the buffer then
+; given up. Pixels off the screen are left out.
+(def pasted ((v Wm) (r Rect) (va int)) (Served Wm)
+  (let (s (wm_scale v)
+        pw (mul (.w r) s)
+        ph (mul (.h r) s)
+        pages (pages_for (mul 4 (mul pw ph)))
+        shown (rect_clip r (Rect 0 0 (.w v) (.h v)))
+        d (.d v)
+        desk (.desk v))
+    (if (or (lt (.w r) 1) (or (lt (.h r) 1) (or (gt (.w r) (.w v)) (gt (.h r) (.h v)))))
+        (refused v "a paste must fit the screen")
+        (match (dma_open va pages)
+          ((IoRegionFailed fault why) (refused v (append "cannot read the buffer: " why)))
+          ((IoRegionOpened g)
+            (let (px (get_bytes_in g 0 (mul 4 (mul pw ph)))
+                  c (close_region g)
+                  u (client_given_up va pages false)
+                  drawn (desk_over desk px pw ph (mul (.x r) s) (mul (.y r) s) 0)
+                  e (if (rect_empty shown) "" (display_damage d (desktop_id) shown)))
+              (if (is_empty e) (okay v) (refused v e))))))))
+
+; desk with the pixels px, pw by ph, from i on, drawn over it at x, y by
+; their alpha; those off it left out.
+(def desk_over ((desk Canvas) (px bytes) (pw int) (ph int) (x int) (y int) (i int)) Canvas
+  (if (ge i (mul pw ph))
+      desk
+      (let (dx (add x (mod i pw))
+            dy (add y (div i pw))
+            word (le_u32 px (mul i 4))
+            a (bit_and (bit_shr word 24) 255))
+        (desk_over
+          (if (or (eq a 0) (or (lt dx 0) (or (lt dy 0) (or (ge dx (canvas_w desk)) (ge dy (canvas_h desk))))))
+              desk
+              (put desk dx dy (if (eq a 255) (bit_and word 16777215) (ui_mix (bit_and word 16777215) (canvas_pixel desk dx dy) (div (mul a 100) 255)))))
+          px pw ph x y (add i 1)))))
 
 ; One of the toolkit's commands, done on the desktop, which is shown
 ; again.

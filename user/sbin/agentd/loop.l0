@@ -44,10 +44,10 @@
 ; summary being asked for, if one is.
 (data Compactor (Compactor (size int) (keep int) (s Summary)))
 
-; A summary asked for: none; or coming, the person's text that waits
-; for it, how many turns it summarizes, the prompt's tokens before, and
+; A summary asked for: none; or coming, the person's blocks that wait
+; for it (conv_said_blocks: where they came from, then the text), how many turns it summarizes, the prompt's tokens before, and
 ; its text's pieces so far, reversed.
-(data Summary (NoSummary) (Summarizing bytes int int (list bytes)))
+(data Summary (NoSummary) (Summarizing (list Block) int int (list bytes)))
 
 ; A step's result: the loop after it, and its acts in order.
 (data Looped (Looped Loop (list Act)))
@@ -82,11 +82,11 @@
 (def loop_request ((l Loop)) bytes
   (match l ((Loop mc sy tl c ps us n on cp) (model_request mc sy (conv_messages c) tl))))
 
-; The person says text: if the last answer's prompt passed the
-; compaction size and there are turns to cut, a summary of the older
-; ones asked for first, the text waiting for it; otherwise their turn
-; added, and the model asked.
-(def loop_say ((l Loop) (text bytes)) Looped
+; The person says said, their turn's blocks (conv_said_blocks): if the
+; last answer's prompt passed the compaction size and there are turns
+; to cut, a summary of the older ones asked for first, the blocks
+; waiting for it; otherwise their turn added, and the model asked.
+(def loop_say ((l Loop) (said (list Block))) Looped
   (match l
     ((Loop mc sy tl c ps us n on cp)
       (match cp
@@ -94,16 +94,16 @@
           (let (before (usage_prompt (.usage c))
                 k (if (gt before size) (conv_cut c keep) 0))
             (if (lt k 1)
-                (loop_said l text (nil Act))
-                (Looped (Loop mc sy tl c (nil Part) (nil Use) 0 true (Compactor size keep (Summarizing text k before (nil bytes))))
+                (loop_said l said (nil Act))
+                (Looped (Loop mc sy tl c (nil Part) (nil Use) 0 true (Compactor size keep (Summarizing said k before (nil bytes))))
                         (cons (ActAsk (model_request mc sy (conv_summary_messages c k) (JArr (nil Json)))) (nil Act))))))))))
 
-; The person's text added as their turn, and the model asked, after
-; acts.
-(def loop_said ((l Loop) (text bytes) (acts (list Act))) Looped
+; The person's blocks said added as their turn, and the model asked,
+; after acts.
+(def loop_said ((l Loop) (said (list Block)) (acts (list Act))) Looped
   (match l
     ((Loop mc sy tl c ps us n on cp)
-      (loop_ask (Loop mc sy tl (conv_add c (Turn true (cons (BText text) (nil Block)))) (nil Part) (nil Use) 0 true (no_summary cp))
+      (loop_ask (Loop mc sy tl (conv_add c (Turn true said)) (nil Part) (nil Use) 0 true (no_summary cp))
                 acts))))
 
 ; l asking the model, after acts.
@@ -120,7 +120,7 @@
           (match cp
             ((Compactor size keep s)
               (match s
-                ((Summarizing text k before pieces) (summary_event l text k before pieces e))
+                ((Summarizing said k before pieces) (summary_event l said k before pieces e))
                 ((NoSummary) (answer_event l e)))))))))
 
 ; An event of an answer, read onto l, which is answering.
@@ -138,34 +138,35 @@
             ((MError kind msg) (loop_failed l (if (eq (bytes_len msg) 0) kind msg)))
             ((MStop reason) (loop_stopped l reason))))))
 
-; An event of the summary asked for before the person's text: its text
-; gathered, told to no one; at its stop the conversation compacted,
-; told, and the text said; an error, or a stop with no text, leaves the
-; conversation as it was, saying so, and the text is said all the same.
-(def summary_event ((l Loop) (text bytes) (k int) (before int) (pieces (list bytes)) (e ModelEvent)) Looped
+; An event of the summary asked for before the person's blocks said:
+; its text gathered, told to no one; at its stop the conversation
+; compacted, told, and the blocks said; an error, or a stop with no
+; text, leaves the conversation as it was, saying so, and the blocks
+; are said all the same.
+(def summary_event ((l Loop) (said (list Block)) (k int) (before int) (pieces (list bytes)) (e ModelEvent)) Looped
   (match l
     ((Loop mc sy tl c ps us n on cp)
       (match cp
         ((Compactor size keep s)
           (match e
-            ((MText i t) (Looped (Loop mc sy tl c ps us n on (Compactor size keep (Summarizing text k before (cons t pieces)))) (nil Act)))
+            ((MText i t) (Looped (Loop mc sy tl c ps us n on (Compactor size keep (Summarizing said k before (cons t pieces)))) (nil Act)))
             ((MToolStart i id name) (Looped l (nil Act)))
             ((MToolInput i pj) (Looped l (nil Act)))
             ((MBlockStop i) (Looped l (nil Act)))
             ((MUsage a o w r) (Looped l (nil Act)))
-            ((MError kind msg) (summary_failed l text (if (eq (bytes_len msg) 0) kind msg)))
+            ((MError kind msg) (summary_failed l said (if (eq (bytes_len msg) 0) kind msg)))
             ((MStop reason)
               (let summary (bytes_concat (rev pieces))
                 (if (eq (bytes_len summary) 0)
-                    (summary_failed l text (bytes_from_list "the summary was empty"))
+                    (summary_failed l said (bytes_from_list "the summary was empty"))
                     (let c2 (conv_compacted c k summary)
-                      (loop_said (.conv l c2) text
+                      (loop_said (.conv l c2) said
                         (cons (ActTell (TellCompacted before (compacted_size before sy tl c c2))) (nil Act)))))))))))))
 
-; The summary failed, why: told, and the person's text said to the
+; The summary failed, why: told, and the person's blocks said to the
 ; conversation as it was.
-(def summary_failed ((l Loop) (text bytes) (why bytes)) Looped
-  (loop_said l text
+(def summary_failed ((l Loop) (said (list Block)) (why bytes)) Looped
+  (loop_said l said
     (cons (ActTell (TellError (bytes_concat (cons (bytes_from_list "compaction failed, the conversation kept whole: ") (cons why (nil bytes))))))
           (nil Act))))
 
@@ -431,7 +432,7 @@
 ; tools, each tool's result by its use's id (a use not there failing,
 ; no such tool).
 (def loop_standin ((l Loop) (text bytes) (script (list (list ModelEvent))) (tools (Map bytes ToolAnswer))) Standin
-  (match (loop_say l text)
+  (match (loop_say l (cons (BText text) (nil Block)))
     ((Looped l2 acts) (standin_run l2 acts script tools (nil bytes) (nil Tell)))))
 
 ; The acts done in order, each one's own acts after the rest.

@@ -536,11 +536,27 @@ input, and `(file_read_all f)` the rest of a file, as `bytes` (spec section
 line or a field goes out by position without becoming a list. Pass
 `(IoFile 1)` to write to standard output. `(bytes_to_list b)` and
 `(bytes_from_list s)` convert, which is how bytes meet string literals, in
-tests especially. Nothing changes a bytes value. `(bytes_slice b i j)` is
+tests especially. Only `bytes_set_f32` and `bytes_axpy_f32`, below,
+change a bytes value, and they do it as `array_set` changes an array: in
+place when nothing else holds it, else after copying it whole, with the
+same hidden-copy trap and warning. `(bytes_slice b i j)` is
 bytes `i` up to `j` as bytes of their own, and `(bytes_concat bs)` joins a
 `(list bytes)` into one, each copying only the bytes it returns: so a
 header and a body become one message, or a field is kept from a large
-input, without either going through a list.
+input, without either going through a list. Four builtins read a range of
+bytes as numbers in one call, for the inner loop of a model or a signal,
+where a byte at a time costs a call and a check each: `(bytes_dot_i8 a i b
+j n)` is the exact sum of the products of `n` signed bytes of `a` from `i`
+and of `b` from `j`; `(bytes_dot_f32 a i b j n)` the dot product of `n`
+binary32s, computed in binary32 in an order the spec fixes, so it is the
+same on every machine; and `(bytes_get_f32 b i)` and `(bytes_get_f16 b i)`
+the binary32 or binary16 at byte `i`, least significant byte first, as a
+`float`. Two update a vector of binary32s held in bytes: `(bytes_set_f32
+b i x)` stores `x` rounded to binary32 at byte `i`, and `(bytes_axpy_f32
+y i a x j n)` makes the `n` binary32s of `y` from byte `i` each `y + a·x`
+with `x`'s from byte `j`; both give the bytes back, in place when nothing
+else holds them, and consume what they are given. The runtime uses the
+CPU's vector unit for all of these where it has one.
 
 **Reading in pieces.** To stream a file of any size, copying it or checking
 it without holding it, `(file_read_some f n)` gives the next piece, at least

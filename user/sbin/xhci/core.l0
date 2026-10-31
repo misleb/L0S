@@ -12,8 +12,11 @@
 ; bMaxPacketSize0 Evaluate Context gives the default endpoint, then all
 ; 18, then its first configuration, 9 bytes and then wTotalLength, which
 ; SET_CONFIGURATION chooses. Then it is ready: its clients are told, and
-; may make control transfers and open its IN endpoints, each of which
-; Configure Endpoint adds, keeping one transfer queued on it.
+; may make control transfers and open its endpoints, each of which
+; Configure Endpoint adds: an interrupt or bulk IN endpoint keeping one
+; transfer queued on it, an isochronous one a packet queued in each of
+; its buffer's slots, IN packets told in batches and OUT ones, for now,
+; silence.
 ;
 ; Commands go one at a time, in the order asked. Its memory is the DMA
 ; pages the shell gives it, by number: the DCBAA, the command ring and
@@ -64,9 +67,16 @@
 (data Ctl (Ctl Purpose (list int) (list int) int))
 
 ; An endpoint opened: its DCI, its descriptor, its ring, whose page's
-; second half is its buffer, the port told of its reports, and whether
-; it is configured and has a transfer queued.
-(data Pipe (Pipe (dci int) (ep UsbEndpoint) (ring Ring) (opener int) (run bool)))
+; second half is its buffer, the port told of its reports, whether it is
+; configured and has a transfer queued, and, if it is isochronous, its
+; packets.
+(data Pipe (Pipe (dci int) (ep UsbEndpoint) (ring Ring) (opener int) (run bool) (iso Iso)))
+
+; An isochronous pipe's packets: none, for any other pipe; or the pages
+; its buffer's slots are in, the slots queued on its ring, oldest first,
+; by number, and the bytes of the packets done since its opener was last
+; told, newest first, and how many packets.
+(data Iso (IsoNone) (Iso (bufs (list int)) (queued (list int)) (held (list (list int))) (count int)))
 
 ; A device: its number, its slot, its root hub port and speed, its input
 ; and output contexts' pages, its default endpoint's ring and largest
@@ -80,13 +90,14 @@
 ; slot's address; its default endpoint's packet size; an endpoint added,
 ; or dropped and its page given back, with the reply port to tell; an
 ; endpoint reset after a stall, and sent on past the TD that stalled; or
-; a slot given up, with its pages.
+; a slot given up, with its pages. A dropped endpoint gives back its
+; ring's page and its buffer's.
 (data Cmd
   (CmdEnable int)
   (CmdAddress int)
   (CmdEvaluate int)
   (CmdConfigure int int int)
-  (CmdDrop int int int int)
+  (CmdDrop int int (list int) int)
   (CmdResetEp int int)
   (CmdDequeue int int)
   (CmdDisable int (list int)))
@@ -184,9 +195,14 @@
 (def dev_pages ((d Dev)) (list int)
   (match d ((Dev n s p sp ip op r m rd ds cf cs st g ps e) (cons ip (cons op (cons (.page r) (pipe_pages ps (nil int))))))))
 
-; Each pipe's ring's page, after the reversed acc.
+; Each pipe's pages, after the reversed acc.
 (def pipe_pages ((ps (list Pipe)) (acc (list int))) (list int)
-  (if (is_empty ps) (rev acc) (pipe_pages (tail ps) (cons (.page (.ring (head ps))) acc))))
+  (if (is_empty ps) (rev acc) (pipe_pages (tail ps) (rev_onto (pipe_own_pages (head ps)) acc))))
+
+; The pages pp holds: its ring's, then its buffer's if it has one of its
+; own.
+(def pipe_own_pages ((pp Pipe)) (list int)
+  (cons (.page (.ring pp)) (match (.iso pp) ((IsoNone) (nil int)) ((Iso bufs q held n) bufs))))
 
 ; d with fields replaced: ready; its control transfers, whether the
 ; first is sent and how much it moved; its pipes and the last DCI they
@@ -398,7 +414,7 @@
     ((CmdAddress slot) (with_dev h slot (cmd_address h)))
     ((CmdEvaluate slot) (with_dev h slot (cmd_evaluate h)))
     ((CmdConfigure slot dci reply) (with_dev h slot (cmd_configure h dci)))
-    ((CmdDrop slot dci page reply) (with_dev h slot (cmd_drop h dci)))
+    ((CmdDrop slot dci pages reply) (with_dev h slot (cmd_drop h dci)))
     ((CmdResetEp slot dci) (Prep (nil Act) (reset_endpoint_command slot dci)))
     ((CmdDequeue slot dci) (with_dev h slot (cmd_dequeue dci)))
     ((CmdDisable slot ps) (Prep (nil Act) (disable_slot_command slot)))))
@@ -448,7 +464,7 @@
     ((None) (nil W32))
     ((Some pp)
       (match pp
-        ((Pipe d ep r o run)
+        ((Pipe d ep r o run iso)
           (match ep
             ((UsbEndpoint addr attrs mps ival)
               (let kind (bit_and attrs 3)
@@ -490,8 +506,8 @@
       ((CmdAddress s) (dev_step h s ok (append "address device failed: " (digits code)) (DevAddressed)))
       ((CmdEvaluate s) (dev_step h s ok (append "evaluate context failed: " (digits code)) (DevEvaluated)))
       ((CmdConfigure s dci reply) (pipe_configured h s dci reply ok code))
-      ((CmdDrop s dci page reply)
-        (Did (hc_give h (cons page (nil int))) (if (gt reply 0) (cons (ActAnswer reply "ok") (nil Act)) (nil Act))))
+      ((CmdDrop s dci pages reply)
+        (Did (hc_give h pages) (if (gt reply 0) (cons (ActAnswer reply "ok") (nil Act)) (nil Act))))
       ((CmdResetEp s dci) (Did h (nil Act)))
       ((CmdDequeue s dci) (dequeued h s dci))
       ((CmdDisable s ps)
@@ -720,39 +736,141 @@
           (if ok
               (then_acts (cons (ActAnswer reply "ok") (nil Act)) (pipe_queued h d (.run pp true)))
               (let ps (pipes_without (.pipes d) dci)
-                (Did (hc_give (hc_put_dev h (dev_with_pipes d ps (pipes_entries ps 1))) (cons (.page (pipe_ring (.pipes d) dci (ring_new 0 0 1))) (nil int)))
+                (Did (hc_give (hc_put_dev h (dev_with_pipes d ps (pipes_entries ps 1))) (pipe_own_pages pp))
                      (cons (ActAnswer reply (error_reply (append "configure endpoint failed: " (digits code)))) (nil Act))))))))))
 
-; A transfer of a packet queued on pp, and its doorbell rung; h then
+; A transfer of a packet queued on pp, and its doorbell rung; an
+; isochronous pipe's packets in each of its slots not queued; h then
 ; holds d with pp.
 (def pipe_queued ((h Hc) (d Dev) (pp Pipe)) Did
   (match pp
-    ((Pipe dci ep r o run)
-      (match (ring_queue r (cons (normal_trb (add (hc_bus h (.page r)) (buffer_at)) (endpoint_mps ep)) (nil Trb)))
-        ((Queued r2 ws addrs)
-          (Did (hc_put_dev h (dev_with_pipes d (pipes_put (.pipes d) (Pipe dci ep r2 o run)) (.entries d)))
-               (cons (ActPut (.page r) ws) (cons (ActBell (.slot d) dci) (nil Act)))))))))
+    ((Pipe dci ep r o run iso)
+      (match iso
+        ((Iso bufs q held n) (iso_queued h d pp))
+        ((IsoNone)
+          (match (ring_queue r (cons (normal_trb (add (hc_bus h (.page r)) (buffer_at)) (endpoint_mps ep)) (nil Trb)))
+            ((Queued r2 ws addrs)
+              (Did (hc_put_dev h (dev_with_pipes d (pipes_put (.pipes d) (Pipe dci ep r2 o run iso)) (.entries d)))
+                   (cons (ActPut (.page r) ws) (cons (ActBell (.slot d) dci) (nil Act)))))))))))
+
+; ----------------------------------------------------------- isochronous
+
+; The pages an isochronous pipe's buffer takes, beside its ring's.
+(def iso_pages () int 2)
+
+; The most bytes one packet's slot holds: a USB 2 isochronous packet's,
+; without the high-bandwidth packets a microframe may add.
+(def iso_slot_max () int 1024)
+
+; How many packets' bytes go in one notice to the opener: 10, a
+; full-speed endpoint's 10 ms, or as many as fit in a message.
+(def iso_batch ((size int)) int (max 1 (min 10 (div (sub (max_message) 11) (max size 1)))))
+
+; A slot's size for endpoint e, its slots in a page, and how many it has.
+(def iso_size ((e UsbEndpoint)) int (max 1 (min (iso_slot_max) (.m e))))
+(def iso_per_page ((e UsbEndpoint)) int (div (page_size) (iso_size e)))
+(def iso_slots ((e UsbEndpoint)) int (mul (iso_pages) (iso_per_page e)))
+
+; The page and offset of slot j of a pipe of endpoint e, its buffer in
+; bufs.
+(def iso_slot_page ((e UsbEndpoint) (bufs (list int)) (j int)) int (nth bufs (div j (iso_per_page e))))
+(def iso_slot_offset ((e UsbEndpoint) (j int)) int (mul (mod j (iso_per_page e)) (iso_size e)))
+
+; An isochronous pipe with a packet queued in every slot not queued, in
+; order, each a TD of one Isoch TRB, and its doorbell rung once.
+(def iso_queued ((h Hc) (d Dev) (pp Pipe)) Did
+  (match pp
+    ((Pipe dci ep r o run iso)
+      (match iso
+        ((IsoNone) (Did (hc_put_dev h d) (nil Act)))
+        ((Iso bufs q held n)
+          (let free (iso_free (iso_slots ep) q 0 (nil int))
+            (if (is_empty free)
+                (Did (hc_put_dev h d) (nil Act))
+                (match (iso_tds h ep bufs r free (nil W32))
+                  ((Queued r2 ws addrs)
+                    (Did (hc_put_dev h (dev_with_pipes d (pipes_put (.pipes d) (Pipe dci ep r2 o run (Iso bufs (append q free) held n))) (.entries d)))
+                         (cons (ActPut (.page r) ws) (cons (ActBell (.slot d) dci) (nil Act)))))))))))))
+
+; The slots from j below n that are not among q, in order, after the
+; reversed acc.
+(def iso_free ((n int) (q (list int)) (j int) (acc (list int))) (list int)
+  (if (ge j n) (rev acc) (iso_free n q (add j 1) (if (any_eq j q) acc (cons j acc)))))
+
+; Each of slots queued on r as a TD of one packet of endpoint e, its
+; u32s after acc's: the ring after them all.
+(def iso_tds ((h Hc) (e UsbEndpoint) (bufs (list int)) (r Ring) (slots (list int)) (acc (list W32))) Queued
+  (if (is_empty slots)
+      (Queued r acc (nil int))
+      (let j (head slots)
+        (match (ring_queue r (cons (isoch_trb (add (hc_bus h (iso_slot_page e bufs j)) (iso_slot_offset e j)) (iso_size e) (usb_ep_is_in (.addr e))) (nil Trb)))
+          ((Queued r2 ws addrs) (iso_tds h e bufs r2 (tail slots) (append acc ws)))))))
+
+; Whether code is an event of no TD: the ring found empty, IN or OUT,
+; which leaves the endpoint waiting for its next packet's doorbell.
+(def iso_no_td ((code int)) bool
+  (or (eq code (cc_ring_underrun)) (eq code (cc_ring_overrun))))
+
+; A transfer event of the isochronous pipe pp of d: the oldest packet
+; done, its bytes, if it moved any, kept, and once a batch is done, its
+; opener told them all, a uin of the bytes, which for OUT is none; the
+; slot queued again. A packet missed, or failed, is done with no bytes,
+; as isochronous ones are never retried; a ring found empty is queued
+; again.
+(def iso_event ((h Hc) (d Dev) (pp Pipe) (code int) (bytes (list int))) Did
+  (match pp
+    ((Pipe dci ep r o run iso)
+      (match iso
+        ((IsoNone) (Did (hc_put_dev h d) (nil Act)))
+        ((Iso bufs q held n)
+          (if (or (iso_no_td code) (is_empty q))
+              (iso_queued h d pp)
+              (let (moved (if (or (eq code (cc_success)) (eq code (cc_short_packet))) bytes (nil int))
+                    held2 (if (is_empty moved) held (cons moved held))
+                    full (ge (add n 1) (iso_batch (iso_size ep)))
+                    pp2 (Pipe dci ep r o run (Iso bufs (tail q) (if full (nil (list int)) held2) (if full 0 (add n 1))))
+                    tell (if full (cons (ActTell o (usb_report_notice (UsbReport (.num d) (.addr ep) (concat (rev held2))))) (nil Act)) (nil Act)))
+                (then_acts tell (iso_queued h (dev_with_pipes d (pipes_put (.pipes d) pp2) (.entries d)) pp2)))))))))
+
+; The bytes the shell is to read for the oldest packet of the
+; isochronous pipe pp done with code, residual of them not moved: an IN
+; packet's, from its slot.
+(def iso_want ((pp Pipe) (code int) (residual int)) Want
+  (match pp
+    ((Pipe dci ep r o run iso)
+      (match iso
+        ((IsoNone) (WantNothing))
+        ((Iso bufs q held n)
+          (if (and (usb_ep_is_in (.addr ep)) (and (not (is_empty q)) (or (eq code (cc_success)) (eq code (cc_short_packet)))))
+              (WantBytes (iso_slot_page ep bufs (head q)) (iso_slot_offset ep (head q)) (max 0 (sub (iso_size ep) residual)))
+              (WantNothing)))))))
 
 ; An endpoint's packet, at most the buffer.
 (def endpoint_mps ((e UsbEndpoint)) int (match e ((UsbEndpoint a t m i) (min m (buffer_max)))))
 
-; A transfer event of the pipe pp of d: its report told to its opener and
-; the next queued; or, failed, the endpoint reset and sent past it.
+; A transfer event of the pipe pp of d: an isochronous pipe's packet
+; (iso_event); else its report told to its opener and the next queued;
+; or, failed, the endpoint reset and sent past it.
 (def pipe_event ((h Hc) (d Dev) (pp Pipe) (code int) (bytes (list int))) Did
   (match pp
-    ((Pipe dci ep r o run)
-      (if (or (eq code (cc_success)) (eq code (cc_short_packet)))
+    ((Pipe dci ep r o run iso)
+      (if (is_iso pp)
+          (iso_event h d pp code bytes)
+          (or (eq code (cc_success)) (eq code (cc_short_packet)))
           (then_acts (cons (ActTell o (usb_report_notice (UsbReport (.num d) (.addr ep) bytes))) (nil Act))
                      (pipe_queued h d pp))
           (then_acts (cons (port_line h (.port d) (append "endpoint " (append (hex_digits (.addr ep) 2) (append " failed " (digits code))))) (nil Act))
                      (hc_command (hc_command_then h (CmdResetEp (.slot d) dci)) (CmdDequeue (.slot d) dci)))))))
 
 ; The bytes of pp's buffer the shell is to read for a transfer of it
-; done with code, residual of them not moved.
+; done with code, residual of them not moved; an isochronous pipe's,
+; its oldest packet's (iso_want).
 (def pipe_want ((pp Pipe) (code int) (residual int)) Want
   (match pp
-    ((Pipe dci ep r o run)
-      (if (or (eq code (cc_success)) (eq code (cc_short_packet)))
+    ((Pipe dci ep r o run iso)
+      (if (is_iso pp)
+          (iso_want pp code residual)
+          (or (eq code (cc_success)) (eq code (cc_short_packet)))
           (WantBytes (.page r) (buffer_at) (max 0 (sub (endpoint_mps ep) residual)))
           (WantNothing)))))
 
@@ -830,18 +948,24 @@
             ((None) (Did h (cons (ActAnswer o (error_reply "no such endpoint")) (nil Act))))
             ((Some e) (pipe_opened h d e o))))))))
 
-; hc_open's rest, for d's endpoint e.
+; Whether pp is isochronous.
+(def is_iso ((pp Pipe)) bool (match (.iso pp) ((IsoNone) false) ((Iso bufs q held n) true)))
+
+; hc_open's rest, for d's endpoint e: an IN endpoint, or an isochronous
+; one either way; an isochronous one takes its buffer's pages too.
 (def pipe_opened ((h Hc) (d Dev) (e UsbEndpoint) (o int)) Did
-  (let dci (dci_of (.addr e))
-    (if (or (not (usb_ep_is_in (.addr e))) (eq (usb_endpoint_kind e) (usb_ep_control)))
+  (let (dci (dci_of (.addr e))
+        iso (eq (usb_endpoint_kind e) (usb_ep_iso)))
+    (if (or (eq (usb_endpoint_kind e) (usb_ep_control)) (and (not iso) (not (usb_ep_is_in (.addr e)))))
         (Did h (cons (ActAnswer o (error_reply "not an IN endpoint")) (nil Act)))
         (match (pipe_at (.pipes d) dci)
           ((Some pp) (Did h (cons (ActAnswer o (error_reply "open already")) (nil Act))))
           ((None)
-            (match (hc_take h 1)
+            (match (hc_take h (if iso (add 1 (iso_pages)) 1))
               ((TakenNone) (Did h (cons (ActAnswer o (error_reply "no memory")) (nil Act))))
               ((Taken h2 ps zero)
-                (let (pp (Pipe dci e (ring_new (head ps) (hc_bus h2 (head ps)) (transfer_slots)) o false)
+                (let (pp (Pipe dci e (ring_new (head ps) (hc_bus h2 (head ps)) (transfer_slots)) o false
+                               (if iso (Iso (tail ps) (nil int) (nil (list int)) 0) (IsoNone)))
                       ps2 (pipes_put (.pipes d) pp))
                   (then_acts zero
                     (hc_command (hc_put_dev h2 (dev_with_pipes d ps2 (pipes_entries ps2 1))) (CmdConfigure (.slot d) dci o)))))))))))
@@ -858,7 +982,7 @@
           ((Some pp)
             (let ps (pipes_without (.pipes d) dci)
               (hc_command (hc_put_dev h (dev_with_pipes d ps (pipes_entries ps 1)))
-                          (CmdDrop (.slot d) dci (.page (pipe_ring (.pipes d) dci (ring_new 0 0 1))) reply)))))))))
+                          (CmdDrop (.slot d) dci (pipe_own_pages pp) reply)))))))))
 
 ; Every endpoint port o opened closed, as when o is gone.
 (def hc_opener_gone ((h Hc) (o int)) Did

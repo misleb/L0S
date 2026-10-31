@@ -22,19 +22,22 @@ clock alone. `run random [N]` writes N bytes.
 
 ## USB
 
-USB is how a keyboard and a mouse reach a Raspberry Pi 5, whose ports
-are on RP1, the southbridge behind PCIe: two Synopsys DWC3 controllers,
-each an xHCI in host mode. QEMU has no Pi 5, but its virt board takes a
-`qemu-xhci` on PCIe, with a `usb-kbd` and a `usb-mouse` on it
-(`QEMU_INPUT=usb` in `tools/qemu-boot.sh`). So one driver serves both,
-and only how it finds its controllers differs:
+USB is how a keyboard, a mouse and a microphone reach a Raspberry Pi 5,
+whose ports are on RP1, the southbridge behind PCIe: two Synopsys DWC3
+controllers, each an xHCI in host mode. QEMU has no Pi 5, but its virt
+board takes a `qemu-xhci` on PCIe, with a `usb-kbd` and a `usb-mouse` on
+it (`QEMU_INPUT=usb` in `tools/qemu-boot.sh`), and its `usb-audio`, a
+speaker, or a device of the host passed through (`QEMU_USB`). So one
+driver serves both, and only how it finds its controllers differs:
 
 ```
  usb-hid: keyboard and pointer, each on a port of its own --- wm, vt, keys,
                     |  usb (proto/usb.l0)                 as from virtio-input
+ usb-audio: mic ----+-------------------------------------- rec
                     v
                   xhci (dev): every controller, rings, ports, enumeration,
-                    |         control transfers, IN endpoints polled
+                    |         control transfers, IN endpoints polled,
+                    |         isochronous endpoints streamed
                     |  pci (proto/pci.l0), QEMU only
                   pcie (dev): the ECAM read, BARs put in the MMIO window
 ```
@@ -63,7 +66,7 @@ twice, and numbers are decimal:
 | `descriptor DEV`, `config DEV` | its device descriptor's bytes, or its first configuration's, all of them, in hex |
 | `claim DEV IFACE` | `ok`, the interface the asker's reply port's until it is gone; or `error: taken` |
 | `control DEV TYPE REQ VALUE INDEX LEN [BYTE...]` | a control transfer: for IN, the bytes the device gave, in hex; for OUT, `ok` once the BYTEs, LEN of them, are sent; `error: stall` if the device refused it |
-| `open DEV EP` | `ok`, and IN endpoint EP of an interface the asker claimed polled: each report a notice `uin` (DEV, EP, the bytes) to the reply port |
+| `open DEV EP` | `ok`, and IN endpoint EP of an interface the asker claimed polled: each report a notice `uin` (DEV, EP, the bytes) to the reply port. An isochronous endpoint, IN or OUT, of the setting the asker chose (`SET_INTERFACE`, a `control`) streams instead: a packet each interval, and a `uin` for each 10 packets, or as many of the endpoint's largest as fit a message, an IN one's bytes joined, an OUT one's empty, its packets having gone as silence ([Isochronous endpoints](#isochronous-endpoints)) |
 | `close DEV EP` | `ok` |
 
 **The pci protocol** ([user/lib/proto/pci.l0](../user/lib/proto/pci.l0)),
@@ -123,6 +126,40 @@ the host. A report descriptor is never read, so a tablet, a wheel past
 the boot report's, or a key outside the boot keyboard's 104 usages is
 not seen; nor is anything behind a hub.
 
+### Isochronous endpoints
+
+An isochronous endpoint, a microphone's or a speaker's, moves a packet
+every interval, a frame (1 ms) at full speed, never retried. `xhci`
+opens one as `open` asks (`core.l0`'s `iso_queued`): Configure Endpoint
+gives it its context, its CErr 0 as xHCI requires; it takes three
+pages, its ring's and two for its buffer, cut into slots of the
+endpoint's largest packet (1024 bytes at most), 42 of a speaker's 192
+and 26 of the Yeti Nano's 294; and every slot is a TD of one Isoch TRB,
+Start Isoch ASAP, interrupting when done or, IN, short. Each packet's
+event takes the oldest slot (`iso_event`): an IN packet's bytes are read
+from it (`iso_want`), a packet missed (Missed Service) or failed is done
+with none, and the slot is queued again at once; a ring found empty
+(Ring Underrun or Overrun) takes no slot. Every 10 packets, or as many
+of its largest as fit a message, its opener is told them, a `uin`. On
+QEMU's `usb-audio` (`tests/e2e/usbaudio`) half a second of silence is
+500 packets.
+
+`usb-audio` (`user/sbin/usb-audio`) is the class driver of USB Audio
+Class 1.0 devices, one process for every one: it reads each device's
+configuration as its audio function (`format/uac.l0`): its terminals and
+units, linked one to the next, and each streaming interface's setting
+that moves sound, its isochronous endpoint, channels, bytes and bits a
+sample, and rates; and names each stream by the terminal at its far end
+(`microphone`, `speaker`, `headset`...), the input terminal a stream in
+comes from, the output terminal a stream out reaches. It serves `mic`
+([sound.md](sound.md#microphones)), and claims an interface only to use
+it: a stream is set going by SET_INTERFACE to its setting, SET_CUR of
+its endpoint's sampling frequency (a device that takes one rate may
+refuse it, which is let be), and `open`; and stopped by `close` and
+SET_INTERFACE to setting 0. It waits on two ports, a set: its own, for
+the usb server's answers and notices and the kernel's alarms, and
+`mic`'s.
+
 **On the Pi 5** (`xhci rp1`, which `pi5/etc/inittab` starts; see
 [The Raspberry Pi 5](pi5.md#the-raspberry-pi-5)): the
 firmware must leave RP1 set up (`pciex4_reset=0` in `config.txt`); the
@@ -139,7 +176,13 @@ reach the shell and the windows and the mouse moves the pointer.
 ## Limits
 
 - **USB has run on QEMU and the Pi 5** (see [USB](#usb)): boot keyboards
-  and mice only, on root ports only, no hubs; a control
+  and mice, and on QEMU its `usb-audio` speaker, only, on root ports
+  only, no hubs. Isochronous endpoints have run on QEMU only, OUT only,
+  as its `usb-audio` has no microphone: no packet has yet come in from
+  a real microphone. An isochronous OUT endpoint sends only silence,
+  and its packets are its largest, not each interval's share of the
+  rate. A high-speed endpoint's extra packets a microframe are not
+  used. USB Audio Class 2.0 is not read. A control
   transfer moves 2 KB at most, an endpoint's report 2 KB; and each
   controller has 64 pages for its devices, about 3 a device and 1 an
   endpoint opened.

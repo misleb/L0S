@@ -1,0 +1,75 @@
+; encoder_test.l0 -- the encoder's pieces, without the model: Sinkhorn,
+; the Kronecker product and the permutation, RoPE, the GLU, the
+; depthwise convolution, and attention over one row.
+; probes/whistle/enccheck checks the encoder on whistle.cact itself.
+
+; Whether a and b are within e.
+(def near ((a float) (b float) (e float)) bool (float_lt (nn_abs (float_sub a b)) e))
+
+; The n by n identity, row-major.
+(def identity ((n int)) (array float) (identity_from n 0 (array_new (mul n n) 0.0)))
+(def identity_from ((n int) (k int) (a (array float))) (array float)
+  (if (ge k n) a (identity_from n (add k 1) (array_set a (add (mul k n) k) 1.0))))
+
+; 0, 1, 2 ... n - 1.
+(def ramp ((n int)) (array float) (ramp_from 0 (array_new n 0.0)))
+(def ramp_from ((k int) (a (array float))) (array float)
+  (if (ge k (array_len a)) a (ramp_from (add k 1) (array_set a k (float_from_int k)))))
+
+; The sum of a's 4 entries from at, step apart.
+(def sum4 ((a (array float)) (at int) (step int)) float
+  (float_add (float_add (array_get a at) (array_get a (add at step)))
+             (float_add (array_get a (add at (mul 2 step))) (array_get a (add at (mul 3 step))))))
+
+; Sinkhorn's matrix has rows and columns that each sum to 1.
+(def test_sinkhorn () int
+  (let s (sinkhorn (ramp 16))
+    (add (check_bool "row" (near (sum4 s 4 1) 1.0 0.000001) true)
+         (check_bool "column" (near (sum4 s 2 4) 1.0 0.000001) true))))
+
+; Under identity factors the Kronecker product leaves z as it was.
+(def test_kron_identity () int
+  (let k (kron (ramp 512) (identity 16) (identity 32))
+    (add (check_bool "first" (eq (array_get k 1) 1.0) true)
+         (check_bool "last" (eq (array_get k 511) 511.0) true))))
+
+; Entry m of a permutation is z's entry p m.
+(def test_permuted () int
+  (let (p (array_set (array_set (enc_ints (ramp 512)) 0 7) 7 0)
+        z (permuted (ramp 512) p))
+    (add (check_bool "swapped" (eq (array_get z 0) 7.0) true)
+         (check_bool "kept" (eq (array_get z 3) 3.0) true))))
+
+; RoPE leaves row 0 as it is, and turns a later row without changing
+; the length of each pair.
+(def test_rope () int
+  (let (r (rope (array_new 96 1.0) 2 1)
+        a (array_get r 48)
+        b (array_get r 72))
+    (add (check_bool "row 0" (eq (array_get r 0) 1.0) true)
+         (add (check_bool "turned" (float_lt a 1.0) true)
+              (check_bool "length" (near (float_add (float_mul a a) (float_mul b b)) 2.0 0.000000001) true)))))
+
+; The GLU is the first half times the sigmoid of the second: 3 times
+; sigmoid 0.
+(def test_glu () int
+  (let g (glu (array_set (array_new 1024 0.0) 0 3.0) 1 0 (array_new 512 0.0))
+    (check_bool "half" (eq (array_get g 0) 1.5) true)))
+
+; A depthwise kernel of its centre tap alone keeps the rows; of the
+; tap before it, each row is the one before.
+(def test_depthwise () int
+  (let (g (array_set (array_set (array_new 1024 0.0) 0 1.0) 512 2.0)
+        same (depthwise g 2 (array_set (array_new 4608 0.0) (mul 4 512) 1.0) 0 (array_new 1024 0.0))
+        shift (depthwise g 2 (array_set (array_new 4608 0.0) (mul 3 512) 1.0) 0 (array_new 1024 0.0)))
+    (add (check_bool "centre" (eq (array_get same 512) 2.0) true)
+         (add (check_bool "row before" (eq (array_get shift 512) 1.0) true)
+              (check_bool "none before the first" (eq (array_get shift 0) 0.0) true)))))
+
+; Over one row each head's output is its key-value head's value: heads
+; 0 to 3 the first's, 4 to 7 the second's.
+(def test_attend_one_row () int
+  (let (v (array_set (array_set (array_new 128 0.0) 0 5.0) 64 9.0)
+        out (attend (array_new 384 1.0) (array_new 96 1.0) v 1 0 (array_new 512 0.0) (array_new 1 0.0)))
+    (add (check_bool "head 3" (eq (array_get out 192) 5.0) true)
+         (check_bool "head 4" (eq (array_get out 256) 9.0) true))))

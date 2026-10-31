@@ -85,6 +85,30 @@ writing none. On the board it read back every word as written, the
 channel on another block at each read, and `MAI_CTL` 0x3028 after the
 chime: no `DLATE` or `ERRORE`, so the FIFO never ran dry.
 
+## Microphones
+
+Sound comes in from a USB microphone, on the Pi 5 or on QEMU, through
+`usb-audio` ([devices.md](devices.md#isochronous-endpoints)), which
+serves the **mic protocol** ([user/lib/proto/mic.l0](../user/lib/proto/mic.l0))
+as `mic`:
+
+| Request | Reply |
+|---|---|
+| `devices` | a line for each stream of each USB audio device: `DEV IFACE`, `in` or `out`, what is at its far end (`microphone`, `speaker`...), its channels, bits and rates: `3 1 out speaker 2 16 48000`; nothing with none |
+| `listen [RATE]` | `format RATE CHANNELS BYTES`: the first microphone set going at RATE if it takes it (48000 unless given), else its highest, each sample BYTES bytes, least significant first; then a notice `pcm` and its samples to the reply port for each 10 ms or so it hears. `error: busy` while another listens, `error: no microphone` |
+| `stop` | `ok`, the listening stopped, from the port that listens; a listener gone stops it too |
+| `silence DEV IFACE MS` | `sent N packets` once MS milliseconds of silence have gone to that stream out: a test of the path out |
+
+`rec` ([user/bin/rec](../user/bin/rec/rec.l0)) is its client: `rec list`
+writes the devices; `rec FILE SECONDS [RATE]` records SECONDS of the
+first microphone into a WAV file of its own samples, 16 or 24 bits a
+sample (`wav_header_sized`), its frames whole, saying `recorded S s at
+RATE Hz, CH channels of BITS bits, to FILE`, or how much came if the
+microphone sent less within SECONDS and 3 more; `rec silence DEV IFACE
+MS` sends a silence. A Blue Yeti Nano's microphone is two channels of
+24 bits, in 3 bytes, at 44.1 or 48 kHz, 288 bytes a millisecond at 48
+kHz (`uac_test.l0` reads its descriptors).
+
 ## Limits
 
 - **Sound is the Pi 5's HDMI0 alone, and new** (see
@@ -92,7 +116,15 @@ chime: no `DLATE` or `ERRORE`, so the FIFO never ran dry.
   PCM, two channels, at 32, 44.1 or 48 kHz, through `dma40`'s channel 6,
   the one L0 gives. It plays silence whenever no client does, so its
   interrupt comes 94 times a second at 48 kHz even then. One client at
-  a time: two would interleave. QEMU has no sound device L0S drives.
+  a time: two would interleave. QEMU has no sound device L0S plays on.
+- **A microphone has not yet been heard.** `mic` and `rec` have run on
+  QEMU only, whose `usb-audio` is a speaker: `devices` lists it, and a
+  silence goes to it, but no samples have come in. One microphone, the
+  first, and one listener at a time; its samples come as the device
+  gives them, at a rate it takes, with no conversion to another rate,
+  channels or sample size. A listener that does not keep up loses the
+  notices its port has no room for, unsaid. A stream out sends only
+  silence: nothing plays on a USB speaker yet.
 - **The chime is one file, played whole at boot** unless `chime=off`:
   held in the driver's memory while it plays (240 KB on the Pi 5), and
   at a rate the driver plays, or not at all. How long to hold it back

@@ -1,0 +1,258 @@
+; mel.l0 -- Whistle's front end (roadmap 0060), as cactus-needle's
+; whistle.py makes it, purely: 16 kHz samples cut into frames of 400
+; under a Hann window, every 160, each padded to 512 and turned by an
+; FFT; each frame's power through 80 mel filters, its logarithm, and
+; each filter normalized over the clip, its mean taken away and divided
+; by its standard deviation. And what it takes that L0's library has
+; not: an FFT, the natural logarithm and the exponential. Linked into
+; its tests as MEL in the Makefile.
+
+; ---------------------------------------------------------------- numbers
+
+; ln 2, and its bits.
+(def mel_ln2 () float (float_from_bits 4604418534313441775))      ; 0x3FE62E42FEFA39EF
+
+; The natural logarithm of x, x above 0: x as m times 2 to e, m from
+; the square root of a half to that of 2, then ln m as 2 atanh z, z =
+; (m - 1) / (m + 1), by its series to where its terms no longer count.
+; 0 for x of 0 or less, which the front end never takes.
+(def float_ln ((x float)) float
+  (if (not (float_gt x 0.0))
+      0.0
+      (let (b (float_bits x)
+            e (sub (bit_and (bit_shr b 52) 2047) 1023)
+            m (float_from_bits (bit_or (bit_and b 4503599627370495) 4607182418800017408))   ; 1.0's exponent
+            big (float_gt m (float_from_bits 4609047870845172685))      ; the square root of 2
+            m2 (if big (float_div m 2.0) m)
+            e2 (if big (add e 1) e)
+            z (float_div (float_sub m2 1.0) (float_add m2 1.0)))
+        (float_add (float_mul (float_from_int e2) (mel_ln2)) (float_mul 2.0 (atanh_series z (float_mul z z) z z 1))))))
+
+; atanh z's series, z + z^3/3 + z^5/5 ..., from the term p (z to the
+; k-th odd power) on, summed into s, until a term is lost in s.
+(def atanh_series ((z float) (z2 float) (p float) (s float) (k int)) float
+  (let (p2 (float_mul p z2)
+        t (float_div p2 (float_from_int (add (mul 2 k) 1)))
+        s2 (float_add s t))
+    (if (or (eq (float_bits s2) (float_bits s)) (ge k 40)) s2 (atanh_series z z2 p2 s2 (add k 1)))))
+
+; e to the x: x as k ln 2 plus r, r within half ln 2, then e to the r by
+; its Taylor series, and 2 to the k by the exponent's bits. 0 far below,
+; as the front end needs no more.
+(def float_exp ((x float)) float
+  (if (float_lt x -700.0)
+      0.0
+      (let (k (float_to_int (float_add (float_div x (mel_ln2)) (if (float_lt x 0.0) -0.5 0.5)))
+            r (float_sub x (float_mul (float_from_int k) (mel_ln2))))
+        (float_mul (exp_series r 1.0 1.0 1) (float_from_bits (bit_shl (add k 1023) 52))))))
+
+; e to the r's series, 1 + r + r^2/2! ..., from the term t on, into s.
+(def exp_series ((r float) (t float) (s float) (k int)) float
+  (let (t2 (float_div (float_mul t r) (float_from_int k))
+        s2 (float_add s t2))
+    (if (or (eq (float_bits s2) (float_bits s)) (ge k 40)) s2 (exp_series r t2 s2 (add k 1)))))
+
+; ---------------------------------------------------------------- the FFT
+
+; re and im, n of them, n a power of 2, turned by the discrete Fourier
+; transform in place, X_k the sum of x_j e^(-2 pi i j k / n): first in
+; bit-reversed order, then each pass's butterflies, their halves len
+; apart, doubling.
+(def fft ((re (array float)) (im (array float)) (n int)) Fft
+  (match (fft_reversed re im n 1 0)
+    ((Fft r2 i2) (fft_passes r2 i2 n 2))))
+
+; The two arrays a transform works on.
+(data Fft (Fft (re (array float)) (im (array float))))
+
+; The entries from i swapped with their bit-reversed places, j the
+; reversal of i, as each step adds 1 to i and carries the reversed way.
+(def fft_reversed ((re (array float)) (im (array float)) (n int) (i int) (j int)) Fft
+  (if (ge i n)
+      (Fft re im)
+      (let (j2 (rev_carry j (bit_shr n 1))
+            sw (if (lt i j2) (fft_swap re im i j2) (Fft re im)))
+        (match sw ((Fft r2 i2) (fft_reversed r2 i2 n (add i 1) j2))))))
+
+; j plus 1 with its bits read the other way, bit from the top down.
+(def rev_carry ((j int) (bit int)) int
+  (if (eq bit 0) 0 (eq (bit_and j bit) 0) (bit_or j bit) (rev_carry (bit_xor j bit) (bit_shr bit 1))))
+
+; Entries i and j of both swapped.
+(def fft_swap ((re (array float)) (im (array float)) (i int) (j int)) Fft
+  (let (ri (array_get re i) rj (array_get re j) ii (array_get im i) ij (array_get im j))
+    (Fft (array_set (array_set re i rj) j ri) (array_set (array_set im i ij) j ii))))
+
+; The passes from blocks of len on, until len passes n.
+(def fft_passes ((re (array float)) (im (array float)) (n int) (len int)) Fft
+  (if (gt len n)
+      (Fft re im)
+      (match (fft_blocks re im n len 0)
+        ((Fft r2 i2) (fft_passes r2 i2 n (mul len 2))))))
+
+; Each block of len from start on, its butterflies.
+(def fft_blocks ((re (array float)) (im (array float)) (n int) (len int) (start int)) Fft
+  (if (ge start n)
+      (Fft re im)
+      (match (fft_butterflies re im len start 0)
+        ((Fft r2 i2) (fft_blocks r2 i2 n len (add start len))))))
+
+; Butterfly k of the block at start: u and the twiddled v, e^(-2 pi i k
+; / len) v, made u + v and u - v.
+(def fft_butterflies ((re (array float)) (im (array float)) (len int) (start int) (k int)) Fft
+  (if (ge k (div len 2))
+      (Fft re im)
+      (let (a (float_div (float_mul -6.283185307179586 (float_from_int k)) (float_from_int len))
+            wr (float_cos a)
+            wi (float_sin a)
+            i (add start k)
+            j (add i (div len 2))
+            vr (float_sub (float_mul wr (array_get re j)) (float_mul wi (array_get im j)))
+            vi (float_add (float_mul wr (array_get im j)) (float_mul wi (array_get re j)))
+            ur (array_get re i)
+            ui (array_get im i)
+            re2 (array_set (array_set re i (float_add ur vr)) j (float_sub ur vr))
+            im2 (array_set (array_set im i (float_add ui vi)) j (float_sub ui vi)))
+        (fft_butterflies re2 im2 len start (add k 1)))))
+
+; -------------------------------------------------------------- the front
+
+; Whistle's front end: its rate, filters, FFT, window and hop.
+(def mel_rate () int 16000)
+(def mel_bins () int 80)
+(def mel_fft () int 512)
+(def mel_win () int 400)
+(def mel_hop () int 160)
+
+; The frames n samples make: one per hop, as whistle.py keeps them.
+(def mel_frames ((n int)) int (div n (mel_hop)))
+
+; The Hann window of mel_win, as numpy's hanning makes it, symmetric:
+; 0.5 - 0.5 cos (2 pi k / (N - 1)).
+(def mel_window () (array float)
+  (mel_window_from 0 (array_new (mel_win) 0.0)))
+(def mel_window_from ((k int) (w (array float))) (array float)
+  (if (ge k (mel_win))
+      w
+      (mel_window_from (add k 1)
+        (array_set w k (float_sub 0.5 (float_mul 0.5 (float_cos (float_div (float_mul 6.283185307179586 (float_from_int k)) (float_from_int (sub (mel_win) 1))))))))))
+
+; The mel filters, 257 rows of the FFT's bins by 80, row-major, as
+; whistle.py's mel_matrix makes them: each a triangle between three of
+; 82 points even on its mel scale (linear below 1 kHz, then
+; logarithmic), its area made 1 over its width.
+(def mel_matrix () (array float)
+  (let (top (hz_mel (float_div (float_from_int (mel_rate)) 2.0))
+        points (mel_points top 0 (array_new (add (mel_bins) 2) 0.0)))
+    (mel_rows points 0 (array_new (mul 257 (mel_bins)) 0.0))))
+
+; A frequency's mel, and a mel's frequency.
+(def hz_mel ((f float)) float
+  (if (float_lt f 1000.0)
+      (float_div (float_mul f 3.0) 200.0)
+      (float_add 15.0 (float_div (float_mul (float_ln (float_div f 1000.0)) 27.0) (float_ln 6.4)))))
+(def mel_hz ((m float)) float
+  (if (float_lt m 15.0)
+      (float_div (float_mul m 200.0) 3.0)
+      (float_mul 1000.0 (float_exp (float_div (float_mul (float_sub m 15.0) (float_ln 6.4)) 27.0)))))
+
+; The 82 points from k, top's mel cut into 81 steps, as frequencies.
+(def mel_points ((top float) (k int) (ps (array float))) (array float)
+  (let n (add (mel_bins) 2)
+    (if (ge k n)
+      ps
+      (mel_points top (add k 1) (array_set ps k (mel_hz (float_div (float_mul top (float_from_int k)) (float_from_int (sub n 1)))))))))
+
+; Rows f on of the filters: bin f's frequency, f times the rate's half
+; over 256, through each filter.
+(def mel_rows ((ps (array float)) (f int) (out (array float))) (array float)
+  (if (ge f 257)
+      out
+      (mel_rows ps (add f 1) (mel_row ps f (float_div (float_mul (float_from_int f) 8000.0) 256.0) 0 out))))
+(def mel_row ((ps (array float)) (f int) (hz float) (m int) (out (array float))) (array float)
+  (if (ge m (mel_bins))
+      out
+      (let (lo (array_get ps m)
+            mid (array_get ps (add m 1))
+            hi (array_get ps (add m 2))
+            up (float_div (float_sub hz lo) (float_sub mid lo))
+            down (float_div (float_sub hi hz) (float_sub hi mid))
+            tri (float_max 0.0 (float_min up down)))
+        (mel_row ps f hz (add m 1) (array_set out (add (mul f (mel_bins)) m) (float_div (float_mul tri 2.0) (float_sub hi lo)))))))
+
+; The lesser and greater of two floats.
+(def float_min ((a float) (b float)) float (if (float_lt b a) b a))
+(def float_max ((a float) (b float)) float (if (float_gt b a) b a))
+
+; The features of n samples xs, -1 to 1, through the filters fb (as
+; mel_matrix makes them): mel_frames n rows of 80, row-major,
+; normalized.
+(def mel_features ((xs (array float)) (n int) (fb (array float))) (array float)
+  (let (t (mel_frames n)
+        w (mel_window)
+        raw (mel_frames_into xs n fb w 0 t (array_new (mul t (mel_bins)) 0.0)))
+    (mel_normalized raw t 0)))
+
+; Frames k up to t, each its filters' log power, into out.
+(def mel_frames_into ((xs (array float)) (n int) (fb (array float)) (w (array float)) (k int) (t int) (out (array float))) (array float)
+  (if (ge k t)
+      out
+      (mel_frames_into xs n fb w (add k 1) t (mel_frame xs n fb w k out))))
+
+; Frame k: the window's 400 samples centred on sample 160 k (those
+; before 0 or past n are 0, as the signal is padded with half a window
+; of zeros each side), padded to 512, transformed; each filter's sum of
+; the bins' power, the log of it plus 2^-24.
+(def mel_frame ((xs (array float)) (n int) (fb (array float)) (w (array float)) (k int) (out (array float))) (array float)
+  (let (re (frame_samples xs n w (sub (mul k (mel_hop)) (div (mel_win) 2)) 0 (array_new (mel_fft) 0.0))
+        tr (fft re (array_new (mel_fft) 0.0) (mel_fft)))
+    (mel_filtered (.re tr) (.im tr) fb k 0 out)))
+
+; The window's samples from at, at plus j up to the window's end, onto
+; buf.
+(def frame_samples ((xs (array float)) (n int) (w (array float)) (at int) (j int) (buf (array float))) (array float)
+  (if (ge j (mel_win))
+      buf
+      (let (i (add at j)
+            x (if (or (lt i 0) (ge i n)) 0.0 (array_get xs i)))
+        (frame_samples xs n w at (add j 1) (array_set buf j (float_mul x (array_get w j)))))))
+
+; Filters m on of frame k: the log of their power, into out.
+(def mel_filtered ((re (array float)) (im (array float)) (fb (array float)) (k int) (m int) (out (array float))) (array float)
+  (if (ge m (mel_bins))
+      out
+      (let s (filter_sum re im fb m 0 0.0)
+        (mel_filtered re im fb k (add m 1)
+          (array_set out (add (mul k (mel_bins)) m) (float_ln (float_add s (float_from_bits 4499096027743125504))))))))   ; 2^-24
+
+; Filter m's sum over bins f on of their power.
+(def filter_sum ((re (array float)) (im (array float)) (fb (array float)) (m int) (f int) (s float)) float
+  (if (gt f 256)
+      s
+      (let (r (array_get re f) i (array_get im f))
+        (filter_sum re im fb m (add f 1)
+          (float_add s (float_mul (float_add (float_mul r r) (float_mul i i)) (array_get fb (add (mul f (mel_bins)) m))))))))
+
+; x's t frames with each filter m from m on normalized: its mean over
+; the frames taken away, and divided by its standard deviation (over t
+; - 1) plus 0.00001.
+(def mel_normalized ((x (array float)) (t int) (m int)) (array float)
+  (if (ge m (mel_bins))
+      x
+      (let (mean (float_div (column_sum x t m 0 0.0) (float_from_int (max t 1)))
+            var (float_div (column_sq x t m mean 0 0.0) (float_from_int (max (sub t 1) 1)))
+            sd (float_add (float_sqrt var) 0.00001))
+        (mel_normalized (column_scaled x t m mean sd 0) t (add m 1)))))
+
+; Filter m's column over frames k up to t: its sum, its squares'
+; distance from mean summed, and it normalized in place.
+(def column_sum ((x (array float)) (t int) (m int) (k int) (s float)) float
+  (if (ge k t) s (column_sum x t m (add k 1) (float_add s (array_get x (add (mul k (mel_bins)) m))))))
+(def column_sq ((x (array float)) (t int) (m int) (mean float) (k int) (s float)) float
+  (if (ge k t) s
+      (let d (float_sub (array_get x (add (mul k (mel_bins)) m)) mean)
+        (column_sq x t m mean (add k 1) (float_add s (float_mul d d))))))
+(def column_scaled ((x (array float)) (t int) (m int) (mean float) (sd float) (k int)) (array float)
+  (if (ge k t) x
+      (let i (add (mul k (mel_bins)) m)
+        (column_scaled (array_set x i (float_div (float_sub (array_get x i) mean) sd)) t m mean sd (add k 1)))))

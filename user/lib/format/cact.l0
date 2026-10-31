@@ -1,0 +1,306 @@
+; cact.l0 -- Needle 3's .cact container, Cactus Compute's, which holds
+; Whistle's weights (roadmap 0060), read in place from its bytes,
+; purely: its header and its geometry, its codebooks, its directory of
+; tensors, in an order that is the contract since no record has a name,
+; and each tensor's numbers: FP16 and FP32 ones as they are, and CQ
+; matrices dequantized a row at a time; and its tokenizer, token IDs
+; decoded to text. As cactus-needle's export.py
+; writes it (Apache-2.0):
+;
+;   header      48 u32s and an f32, rope theta: the tag 0x05E12A84, the
+;               tensors, the codebooks' floats, then the geometry
+;   codebooks   f32s: 4 for 2 bits, 8 for 3, 16 for 4, in that order
+;   directory   a record of 44 bytes a tensor: dtype (1 FP16, 2 FP32,
+;               3 CQ, 4 RAW), dimensions, 2 bytes, 4 u32 dimensions,
+;               u64 offset and size, u32 group and bits
+;   tensors     each at its offset, 64-byte aligned
+;
+; A CQ matrix of OUT rows by IN, padded to whole groups of 128, is each
+; row's indices, bits each, eight packed least significant first into
+; bits bytes, then an FP16 norm for each row's each group: a group's
+; weights are its codebook's entries times its norm, rotated back by the
+; Walsh-Hadamard matrix of the group's size over its square root. Linked
+; into the Whistle library and its tests as CACT in the Makefile.
+
+; ------------------------------------------------------------- constants
+
+; The tag of a Needle 3 container, and of a Needle 2 one, refused.
+(def cact_tag () int 98642564)          ; 0x05E12A84
+(def cact_tag_old () int 98642563)      ; 0x05E12A83
+
+; The header's bytes, and a directory record's.
+(def cact_header_len () int 196)
+(def cact_record_len () int 44)
+
+; The tensors' types.
+(def cact_fp16 () int 1)
+(def cact_fp32 () int 2)
+(def cact_cq () int 3)
+(def cact_raw () int 4)
+
+; ------------------------------------------------------------------ types
+
+; A tensor's record: its type, its dimensions, where its bytes are and
+; how many, and for a CQ one its group and bits.
+(data CactTensor (CactTensor (dtype int) (shape (list int)) (offset int) (size int) (group int) (bits int)))
+
+; A container: its header's 48 u32s, by index, its codebooks' floats,
+; and its tensors in order.
+(data Cact (Cact (hdr (array int)) (cb (array float)) (ts (array CactTensor))))
+
+; ---------------------------------------------------------------- reading
+
+; The container in b, its directory checked against its bytes; or why
+; it is none.
+(def cact_of ((b bytes)) (Result Cact (list int))
+  (if (lt (bytes_len b) (cact_header_len))
+      ((Err Cact (list int)) "too short for a .cact header")
+      (let tag (le_u32 b 0)
+        (if (eq tag (cact_tag_old))
+            ((Err Cact (list int)) "a Needle 2 container, which this does not read")
+            (not (eq tag (cact_tag)))
+            ((Err Cact (list int)) "not a Needle 3 .cact container")
+            (let (n (le_u32 b 4)
+                  cbn (le_u32 b 8)
+                  dir (add (cact_header_len) (mul 4 cbn)))
+              (if (gt (add dir (mul n (cact_record_len))) (bytes_len b))
+                  ((Err Cact (list int)) "its directory runs past its end")
+                  (match (cact_records b dir n 0 (array_new n (CactTensor 0 (nil int) 0 0 0 0)))
+                    ((Err why) ((Err Cact (list int)) why))
+                    ((Ok ts) ((Ok Cact (list int)) (Cact (cact_words b 0 48 (array_new 48 0)) (cact_f32s b (cact_header_len) cbn) ts))))))))))
+
+; The u32s of b from i, n of them, into a, in place.
+(def cact_words ((b bytes) (i int) (n int) (a (array int))) (array int)
+  (cact_words_from b i 0 n a))
+(def cact_words_from ((b bytes) (i int) (k int) (n int) (a (array int))) (array int)
+  (if (ge k n) a (cact_words_from b i (add k 1) n (array_set a k (le_u32 b (add i (mul 4 k)))))))
+
+; The f32s of b from i, n of them, as floats.
+(def cact_f32s ((b bytes) (i int) (n int)) (array float)
+  (cact_f32s_from b i 0 n (array_new n 0.0)))
+(def cact_f32s_from ((b bytes) (i int) (k int) (n int) (a (array float))) (array float)
+  (if (ge k n) a (cact_f32s_from b i (add k 1) n (array_set a k (f32_of (le_u32 b (add i (mul 4 k))))))))
+
+; The records of b from i, the k-th on, into ts: each read, and its bytes
+; checked to be within b.
+(def cact_records ((b bytes) (i int) (n int) (k int) (ts (array CactTensor))) (Result (array CactTensor) (list int))
+  (if (ge k n)
+      ((Ok (array CactTensor) (list int)) ts)
+      (let (at (add i (mul k (cact_record_len)))
+            nd (bytes_get b (add at 1))
+            t (CactTensor (bytes_get b at) (take (cact_dims b (add at 4) 0 (nil int)) (min nd 4))
+                          (le_u64_at b (add at 20)) (le_u64_at b (add at 28)) (le_u32 b (add at 36)) (le_u32 b (add at 40))))
+        (if (or (lt (.offset t) 0) (gt (add (.offset t) (.size t)) (bytes_len b)))
+            ((Err (array CactTensor) (list int)) (append "tensor " (append (digits k) " runs past the end")))
+            (cact_records b i n (add k 1) (array_set ts k t))))))
+
+; The four u32 dimensions of a record from i, after the reversed acc.
+(def cact_dims ((b bytes) (i int) (k int) (acc (list int))) (list int)
+  (if (ge k 4) (rev acc) (cact_dims b i (add k 1) (cons (le_u32 b (add i (mul 4 k))) acc))))
+
+; Header word k: the tag 0, tensors 1, codebook floats 2, the KV window
+; 3 and bits 4, then the geometry from 5 (vocab 5, width 7, heads 8, KV
+; heads 9, layers 10, head dims 11 and 12, Hadamard size 14, lanes 15).
+(def cact_hdr ((c Cact) (k int)) int (array_get (.hdr c) k))
+
+; The tensors, and tensor k.
+(def cact_count ((c Cact)) int (array_len (.ts c)))
+(def cact_tensor ((c Cact) (k int)) CactTensor (array_get (.ts c) k))
+
+; ---------------------------------------------------------------- numbers
+
+; The float an IEEE binary32's bits b are, exactly, as binary64.
+(def f32_of ((b int)) float
+  (let (s (bit_shr b 31)
+        e (bit_and (bit_shr b 23) 255)
+        m (bit_and b 8388607))
+    (if (eq e 0) (float_signed s (float_mul (float_from_int m) (float_from_bits 3936146074321813504)))   ; m * 2^-149
+        (eq e 255) (float_from_bits (bit_or (bit_shl s 63) (bit_or (bit_shl 2047 52) (bit_shl m 29))))
+        (float_from_bits (bit_or (bit_shl s 63) (bit_or (bit_shl (add e 896) 52) (bit_shl m 29)))))))
+
+; The float an IEEE binary16's bits b are, exactly, as binary64.
+(def f16_of ((b int)) float
+  (let (s (bit_and (bit_shr b 15) 1)
+        e (bit_and (bit_shr b 10) 31)
+        m (bit_and b 1023))
+    (if (eq e 0) (float_signed s (float_mul (float_from_int m) (float_from_bits 4499096027743125504)))   ; m * 2^-24
+        (eq e 31) (float_from_bits (bit_or (bit_shl s 63) (bit_or (bit_shl 2047 52) (bit_shl m 42))))
+        (float_from_bits (bit_or (bit_shl s 63) (bit_or (bit_shl (add e 1008) 52) (bit_shl m 42)))))))
+
+; x, negated if s is 1.
+(def float_signed ((s int) (x float)) float (if (eq s 1) (float_neg x) x))
+
+; Element k of an FP16 or FP32 tensor t of b; 0 for any other.
+(def cact_number ((b bytes) (t CactTensor) (k int)) float
+  (if (eq (.dtype t) (cact_fp16)) (f16_of (le_u16_at b (add (.offset t) (mul 2 k))))
+      (eq (.dtype t) (cact_fp32)) (f32_of (le_u32 b (add (.offset t) (mul 4 k))))
+      0.0))
+
+; ------------------------------------------------------------- CQ matrices
+
+; A CQ matrix's rows, its width, the width padded to whole groups, and
+; the bytes of one row's packed indices.
+(def cq_rows ((t CactTensor)) int (nth_or (.shape t) 0 0))
+(def cq_width ((t CactTensor)) int (nth_or (.shape t) 1 0))
+(def cq_padded ((t CactTensor)) int (mul (div (add (cq_width t) (sub (.group t) 1)) (max (.group t) 1)) (.group t)))
+(def cq_row_bytes ((t CactTensor)) int (div (mul (cq_padded t) (.bits t)) 8))
+
+; Where bits' codebook starts among the codebooks' floats: 2 at 0, 3 at
+; 4, 4 at 12.
+(def cq_codebook_at ((bits int)) int (if (eq bits 2) 0 (eq bits 3) 4 12))
+
+; Row r of the CQ matrix t of c in b, its width's floats: each group's
+; codebook entries times its norm, rotated back by the Walsh-Hadamard
+; transform over the group's square root.
+(def cq_row ((c Cact) (b bytes) (t CactTensor) (r int)) (array float)
+  (let (g (.group t)
+        groups (div (cq_padded t) (max g 1))
+        out (array_new (cq_padded t) 0.0)
+        done (cq_groups c b t r 0 groups out))
+    (cq_cut done (cq_width t))))
+
+; The first n of a.
+(def cq_cut ((a (array float)) (n int)) (array float)
+  (if (eq (array_len a) n) a (cq_cut_into a n 0 (array_new n 0.0))))
+(def cq_cut_into ((a (array float)) (n int) (k int) (out (array float))) (array float)
+  (if (ge k n) out (cq_cut_into a n (add k 1) (array_set out k (array_get a k)))))
+
+; Groups j up to groups of row r written into out, in place.
+(def cq_groups ((c Cact) (b bytes) (t CactTensor) (r int) (j int) (groups int) (out (array float))) (array float)
+  (if (ge j groups)
+      out
+      (let (g (.group t)
+            norm (f16_of (le_u16_at b (add (.offset t) (add (mul (cq_rows t) (cq_row_bytes t)) (mul 2 (add (mul r groups) j))))))
+            filled (cq_entries c b t r (mul j g) (add (mul j g) g) norm out)
+            turned (fwht filled (mul j g) g 1))
+        (cq_groups c b t r (add j 1) groups (cq_scaled turned (mul j g) (add (mul j g) g) (float_div 1.0 (float_sqrt (float_from_int g))))))))
+
+; Entries k up to e of row r, each its index's codebook entry times norm.
+(def cq_entries ((c Cact) (b bytes) (t CactTensor) (r int) (k int) (e int) (norm float) (out (array float))) (array float)
+  (if (ge k e)
+      out
+      (let x (array_get (.cb c) (add (cq_codebook_at (.bits t)) (cq_index b t r k)))
+        (cq_entries c b t r (add k 1) e norm (array_set out k (float_mul x norm))))))
+
+; The index of entry k of row r: its chunk of eight, bits bytes, read
+; least significant first, and its bits within it.
+(def cq_index ((b bytes) (t CactTensor) (r int) (k int)) int
+  (let (bits (.bits t)
+        at (add (.offset t) (add (mul r (cq_row_bytes t)) (mul (div k 8) bits)))
+        word (le_bytes_at b at bits 0 0))
+    (bit_and (bit_shr word (mul (mod k 8) bits)) (sub (bit_shl 1 bits) 1))))
+
+; The n bytes of b at i as a little-endian number, from byte k, after acc.
+(def le_bytes_at ((b bytes) (i int) (n int) (k int) (acc int)) int
+  (if (ge k n) acc (le_bytes_at b i n (add k 1) (bit_or acc (bit_shl (bytes_get b (add i k)) (mul 8 k))))))
+
+; a's n entries from at turned by the Walsh-Hadamard transform, in place,
+; its butterflies h apart and wider each pass: entry i of the result is
+; the sum of each j's times (-1) to the bits i and j share, the
+; Sylvester matrix's order.
+(def fwht ((a (array float)) (at int) (n int) (h int)) (array float)
+  (if (ge h n) a (fwht (fwht_pass a at n h 0) at n (mul h 2))))
+
+; One pass: each block of 2h from i on, its halves' pairs summed and
+; differenced.
+(def fwht_pass ((a (array float)) (at int) (n int) (h int) (i int)) (array float)
+  (if (ge i n) a (fwht_pass (fwht_pairs a (add at i) h 0) at n h (add i (mul 2 h)))))
+(def fwht_pairs ((a (array float)) (base int) (h int) (j int)) (array float)
+  (if (ge j h)
+      a
+      (let (x (array_get a (add base j))
+            y (array_get a (add base (add j h)))
+            a2 (array_set a (add base j) (float_add x y)))
+        (fwht_pairs (array_set a2 (add base (add j h)) (float_sub x y)) base h (add j 1)))))
+
+; a's entries from k up to e times s, in place.
+(def cq_scaled ((a (array float)) (k int) (e int) (s float)) (array float)
+  (if (ge k e) a (cq_scaled (array_set a k (float_mul (array_get a k) s)) (add k 1) e s)))
+
+; ------------------------------------------------------------- tokenizer
+
+; The tokenizer is the RAW record, a SentencePiece BPE vocabulary: a
+; header of the pieces' count, the pad, end, start and unknown IDs, u32s,
+; whether a space is put before the text, and whether bytes stand in for
+; what no piece spells, a byte each, and 2 bytes; then each piece in ID
+; order, its f32 score, its type, a byte, its length, a u16, and its
+; UTF-8 bytes.
+
+; The pieces' types: a word's, unknown, control, the user's, a byte.
+(def piece_normal () int 0)
+(def piece_unknown () int 1)
+(def piece_control () int 2)
+(def piece_user () int 3)
+(def piece_byte () int 4)
+
+; A piece: where its bytes are in the container, how many, its type.
+(data Piece (Piece (at int) (len int) (type int)))
+
+; A tokenizer: its pieces by ID, the end's ID, and whether a space is put
+; before the text, and so taken off its decoding.
+(data Pieces (Pieces (ps (array Piece)) (eos int) (dummy bool)))
+
+; The tokenizer of c in b, its first RAW record's; or why there is none.
+(def cact_pieces ((c Cact) (b bytes)) (Result Pieces (list int))
+  (match (raw_tensor c 0)
+    ((None) ((Err Pieces (list int)) "no tokenizer"))
+    ((Some t)
+      (let (at (.offset t)
+            n (le_u32 b at))
+        (if (or (lt (.size t) 24) (gt n (div (.size t) 7)))
+            ((Err Pieces (list int)) "a tokenizer too short for its pieces")
+            (match (pieces_read b (add at 24) (add at (.size t)) 0 n (array_new n (Piece 0 0 0)))
+              ((None) ((Err Pieces (list int)) "a piece runs past the tokenizer"))
+              ((Some ps) ((Ok Pieces (list int)) (Pieces ps (le_u32 b (add at 8)) (not (eq (bytes_get b (add at 20)) 0)))))))))))
+
+; The first RAW tensor of c from k, if any.
+(def raw_tensor ((c Cact) (k int)) (Option CactTensor)
+  (if (ge k (cact_count c)) ((None CactTensor))
+      (eq (.dtype (cact_tensor c k)) (cact_raw)) (Some (cact_tensor c k))
+      (raw_tensor c (add k 1))))
+
+; Pieces k up to n read from i, before end, into ps; none if one runs
+; past end.
+(def pieces_read ((b bytes) (i int) (end int) (k int) (n int) (ps (array Piece))) (Option (array Piece))
+  (if (ge k n)
+      (Some ps)
+      (if (gt (add i 7) end)
+          ((None (array Piece)))
+          (let len (le_u16_at b (add i 5))
+            (if (gt (add (add i 7) len) end)
+                ((None (array Piece)))
+                (pieces_read b (add (add i 7) len) end (add k 1) n (array_set ps k (Piece (add i 7) len (bytes_get b (add i 4))))))))))
+
+; How many pieces p has.
+(def pieces_count ((p Pieces)) int (array_len (.ps p)))
+
+; The text ids spell, as SentencePiece decodes it: each piece's bytes, a
+; byte piece's <0xAB> its byte, control and unknown ones nothing; each
+; meta space, U+2581, a space; and the first space gone if the tokenizer
+; puts one before the text. An ID out of range is nothing.
+(def pieces_decode ((p Pieces) (b bytes) (ids (list int))) (list int)
+  (let s (spaces_of (rev (decode_onto p b ids (nil int))) (nil int))
+    (if (and (.dummy p) (and (not (is_empty s)) (eq (head s) 32))) (tail s) s)))
+
+; Each ID's bytes onto acc, reversed.
+(def decode_onto ((p Pieces) (b bytes) (ids (list int)) (acc (list int))) (list int)
+  (if (is_empty ids)
+      acc
+      (let id (head ids)
+        (if (or (lt id 0) (ge id (pieces_count p)))
+            (decode_onto p b (tail ids) acc)
+            (let pc (array_get (.ps p) id)
+              (decode_onto p b (tail ids)
+                (if (eq (.type pc) (piece_byte)) (cons (piece_byte_value b pc) acc)
+                    (or (eq (.type pc) (piece_control)) (eq (.type pc) (piece_unknown))) acc
+                    (rev_onto (bytes_to_list (bytes_slice b (.at pc) (add (.at pc) (.len pc)))) acc))))))))
+
+; A byte piece's byte, the two hex digits of its <0xAB>.
+(def piece_byte_value ((b bytes) (pc Piece)) int
+  (if (lt (.len pc) 6) 0 (add (mul 16 (hex_val (bytes_get b (add (.at pc) 3)))) (hex_val (bytes_get b (add (.at pc) 4))))))
+
+; s with each U+2581, E2 96 81 in UTF-8, a space, after the reversed acc.
+(def spaces_of ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s) (rev acc)
+      (starts_with s (cons 226 (cons 150 (cons 129 (nil int))))) (spaces_of (drop s 3) (cons 32 acc))
+      (spaces_of (tail s) (cons (head s) acc))))

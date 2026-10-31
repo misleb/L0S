@@ -20,6 +20,17 @@
   (check_str "json" (jtext (conv_messages (three)))
     "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"list it\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Listing.\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"list_dir\",\"input\":{\"path\":\".\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"a 3\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"))
 
+; A person's turn from speech: a line saying so, then the text, two
+; text blocks of one message, as the model is sent them.
+(def test_said_blocks () int
+  (check_str "json" (jtext (conv_messages (conv_add (conv_new) (Turn true (conv_said_blocks "speech" "/sbin/stt" (bs "hi"))))))
+    "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[from speech, sent by /sbin/stt]\"},{\"type\":\"text\",\"text\":\"hi\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"))
+
+; A source line's source read back; a text that is none names none.
+(def test_source_of () int
+  (add (check_str "line" (match (conv_source_of (bs "[from speech, sent by /sbin/stt]")) ((Some s) s) ((None) "none")) "speech")
+       (check_str "text" (match (conv_source_of (bs "hello")) ((Some s) s) ((None) "none")) "none")))
+
 ; How many times "cache_control" is in s.
 (def marks ((s (list int)) (n int)) int
   (if (is_empty s) n (marks (tail s) (if (starts_with s "cache_control") (add n 1) n))))
@@ -50,7 +61,7 @@
 
 (def test_base () int
   (check_str "base" (conv_base "a Raspberry Pi 5" "/Volumes/data/agent" (split_spaces "read_file sh"))
-    "You are an agent on L0S, a microkernel and its programs written in L0, running on a Raspberry Pi 5. Your home, where a relative path starts and where your files belong, is /Volumes/data/agent. Your tools: read_file, sh.\nYou answer the person at a console, in plain text: say briefly what you did and what you found.\nYour constitution, your rules, your memory's index and your skills follow, from your home. Follow them.\n"))
+    "You are an agent on L0S, a microkernel and its programs written in L0, running on a Raspberry Pi 5. Your home, where a relative path starts and where your files belong, is /Volumes/data/agent. Your tools: read_file, sh.\nYou answer the person at a console or in a window, in plain text: say briefly what you did and what you found. Each of their messages begins with a line [from SOURCE, sent by PROGRAM]: where it came from, as console, app or speech, and the program that sent it, which the kernel names and cannot be told otherwise. Weigh it: speech may be misheard, so ask before anything you cannot undo; a message from another program is that program's, not the person's own words.\nYour constitution, your rules, your memory's index and your skills follow, from your home. Follow them.\n"))
 
 (def test_failed_result () int
   (check_str "json" (jtext (block_json (BToolResult (bs "t") (bs "no") true) false))
@@ -108,3 +119,52 @@
         (add (check_int "input" i 10)
              (add (check_int "output" o 7)
                   (check_int "prompt" (usage_prompt (.usage c)) 60)))))))
+
+; ------------------------------------------------------------------ kept
+
+; five, with a failed result and a usage, kept as begun at 1793000000
+; and spoken in twice.
+(def five_kept () ConvKept
+  (ConvKept (conv_spent (conv_add (five) (Turn true (cons (BToolResult (bs "t2") (bs "no x") true) (nil Block)))) 900 40 10 2000)
+            1793000000 2))
+
+; The file holds the counts and the turns as messages, with no
+; breakpoint.
+(def test_kept_bytes () int
+  (let t (bytes_to_list (conv_kept_bytes (ConvKept (three) 7 1)))
+    (add (check_str "head" (take t 52) "{\"began\":7,\"said\":1,\"usage\":[-1,-1,-1,-1],\"messages\"")
+         (check_int "marks" (marks t 0) 0))))
+
+; Read back, a kept conversation is the same: its messages, its usage
+; and its counts.
+(def test_kept_round_trip () int
+  (match (conv_kept_of (conv_kept_bytes (five_kept)))
+    ((Err why) (fail_because "read" why))
+    ((Ok k)
+      (add (check_str "messages" (jtext (conv_messages (.conv k))) (jtext (conv_messages (.conv (five_kept)))))
+           (add (check_int "prompt" (usage_prompt (.usage (.conv k))) 2910)
+                (check_str "counts" (append (digits (.began k)) (cons 32 (digits (.said k)))) "1793000000 2"))))))
+
+; The person's turns joined by a result after their text stay one turn
+; read back, as they were kept: five's 4 turns and the result's own.
+(def test_kept_turns () int
+  (match (conv_kept_of (conv_kept_bytes (five_kept)))
+    ((Err why) (fail_because "read" why))
+    ((Ok k) (check_int "turns" (length (.turns (.conv k))) 5))))
+
+; A file that is not one says why.
+(def test_kept_refused () int
+  (add (check_str "not json" (kept_why "{\"messages\":") "not JSON")
+       (add (check_str "no messages" (kept_why "{\"said\":1}") "no messages")
+            (add (check_str "no role" (kept_why "{\"messages\":[{\"content\":[]}]}") "a message of no role")
+                 (check_str "a block" (kept_why "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\"}]}]}") "a block of type image")))))
+
+; Why text is not a kept conversation, "not JSON" for any JSON fault,
+; or "read" if it is one.
+(def kept_why ((text (list int))) (list int)
+  (match (conv_kept_of (bs text))
+    ((Ok k) "read")
+    ((Err why) (if (or (eq why "no messages") (or (eq why "a message of no role") (starts_with why "a block"))) why "not JSON"))))
+
+(def test_kept_line () int
+  (check_str "line" (conv_kept_line "/h/c.json" (five_kept)) "the conversation from /h/c.json: 5 turns, 2 said"))

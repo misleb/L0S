@@ -1,0 +1,424 @@
+; encoder.l0 -- Whistle's audio encoder (roadmap 0060), purely, as
+; cactus-needle's whistle.py has it: the stem's rows, 512 wide, through
+; 8 blocks on 4 residual lanes, mixed by mHC, then the lanes' mean
+; normed. A block, each norm a zero-centred RMS norm of its own:
+;
+;   x + 0.5 Hadamard MLP(norm x)
+;   x + sigmoid(gate) norm(self-attention(norm x))     8 heads, 2 KV heads, RoPE
+;   x + pw2(SiLU(norm(depthwise 9(GLU(pw1(norm x))))))
+;   x + 0.5 Hadamard MLP(norm x)
+;
+; Each matrix's input row quantized to int8 and back first, and the
+; attention's queries, keys and values a head's row at a time, as the
+; engine runs it. Every row of a clip is valid: none is padding. Linked
+; as ENCODER in the Makefile, after WHISTLE.
+
+; ----------------------------------------------------------- the weights
+
+; A Hadamard MLP's diagonals d1 to d4 and bias b2, a row of 512 each;
+; its three Kronecker factors, a of 16 by 16 and b of 32 by 32; and its
+; conditioning, cv 512 by 8 and cu 8 by 512.
+(data Hmlp (Hmlp (d1 (array float)) (d2 (array float)) (b2 (array float)) (d3 (array float)) (d4 (array float))
+                 (w1a (array float)) (w1b (array float)) (w2a (array float)) (w2b (array float))
+                 (w3a (array float)) (w3b (array float)) (cv (array float)) (cu (array float))))
+
+; A block: its six norms' scales, in the order it uses them; its
+; attention's matrices, query, key, value, gate and out, and the
+; queries' and keys' norms; its gate; the convolution's two matrices and
+; its depthwise kernel, 9 taps of 512; and its two Hadamard MLPs.
+(data Block (Block (norms (list (array float))) (q NnMat) (k NnMat) (v NnMat) (g NnMat) (o NnMat)
+                   (qn (array float)) (kn (array float)) (gate float) (pw1 NnMat) (pw2 NnMat) (dw (array float))
+                   (h0 Hmlp) (h1 Hmlp)))
+
+; mHC's weights, every layer's: the scalars a, the biases b (4 a layer
+; for pre and post, 16 for res), and the matrices from the lanes' 2048
+; to 4, 4 and 16 a layer.
+(data Mhc (Mhc (apre (array float)) (apost (array float)) (ares (array float))
+               (bpre (array float)) (bpost (array float)) (bres (array float))
+               (pre NnMat) (post NnMat) (res NnMat)))
+
+; The encoder: its blocks, mHC, the final norm's scale, and the Hadamard
+; MLP's two permutations of 512.
+(data Encoder (Encoder (blocks (list Block)) (mhc Mhc) (final (array float)) (p1 (array int)) (p2 (array int))))
+
+; The encoder of w, read and dequantized.
+(def encoder_of ((w Whistle)) Encoder
+  (let (c (.c w)
+        b (.b w)
+        n (whistle_geometry w 3)
+        m (whistle_encoder_at w n)
+        hp (whistle_hada_at w))
+    (Encoder (enc_blocks w 0 n (nil Block))
+             (mhc_of c b m)
+             (nn_vector c b (add m 9))
+             (enc_ints (nn_vector c b hp))
+             (enc_ints (nn_vector c b (add hp 1))))))
+
+; The mHC whose 9 tensors start at m: a, b, then the three matrices, of
+; pre, post and res each. The encoder's and the decoder's are alike.
+(def mhc_of ((c Cact) (b bytes) (m int)) Mhc
+  (Mhc (nn_vector c b m) (nn_vector c b (add m 1)) (nn_vector c b (add m 2))
+       (nn_vector c b (add m 3)) (nn_vector c b (add m 4)) (nn_vector c b (add m 5))
+       (nn_mat c b (add m 6)) (nn_mat c b (add m 7)) (nn_mat c b (add m 8))))
+
+; Where the Hadamard MLP's permutations are, two FP32 tensors after the
+; decoder's layers (24 tensors each, 27 with taps) and its mHC (9).
+(def whistle_hada_at ((w Whistle)) int
+  (let (c (.c w)
+        per (if (gt (cact_hdr c 19) 0) 27 24))
+    (add 1 (add (mul per (cact_hdr c 10)) 9))))
+
+; Blocks i up to n of w.
+(def enc_blocks ((w Whistle) (i int) (n int) (acc (list Block))) (list Block)
+  (if (ge i n) (rev acc) (enc_blocks w (add i 1) n (cons (enc_block (.c w) (.b w) (whistle_encoder_at w i)) acc))))
+
+; The block whose tensors start at s: 6 norms, q, k, v, gate and out,
+; their norms, the gate, pw1, pw2, the kernel, two MLPs of 13.
+(def enc_block ((c Cact) (b bytes) (s int)) Block
+  (Block (enc_vectors c b s 6 (nil (array float)))
+         (nn_mat c b (add s 6)) (nn_mat c b (add s 7)) (nn_mat c b (add s 8)) (nn_mat c b (add s 9)) (nn_mat c b (add s 10))
+         (nn_vector c b (add s 11)) (nn_vector c b (add s 12))
+         (array_get (nn_vector c b (add s 13)) 0)
+         (nn_mat c b (add s 14)) (nn_mat c b (add s 15)) (nn_vector c b (add s 16))
+         (enc_hmlp c b (add s 17)) (enc_hmlp c b (add s 30))))
+
+; n vectors from s on, in order.
+(def enc_vectors ((c Cact) (b bytes) (s int) (n int) (acc (list (array float)))) (list (array float))
+  (if (le n 0) (rev acc) (enc_vectors c b (add s 1) (sub n 1) (cons (nn_vector c b s) acc))))
+
+; The Hadamard MLP whose 13 tensors start at s.
+(def enc_hmlp ((c Cact) (b bytes) (s int)) Hmlp
+  (let v (enc_vectors c b s 13 (nil (array float)))
+    (Hmlp (nth v 0) (nth v 1) (nth v 2) (nth v 3) (nth v 4) (nth v 5) (nth v 6)
+          (nth v 7) (nth v 8) (nth v 9) (nth v 10) (nth v 11) (nth v 12))))
+
+; a's floats as whole numbers.
+(def enc_ints ((a (array float))) (array int) (enc_ints_from a 0 (array_new (array_len a) 0)))
+(def enc_ints_from ((a (array float)) (k int) (out (array int))) (array int)
+  (if (ge k (array_len a)) out (enc_ints_from a (add k 1) (array_set out k (float_to_int (array_get a k))))))
+
+; ------------------------------------------------------------- the lanes
+
+; The encoder over the stem's rows: after its first n blocks (all of
+; them for n of 8 or more), the lanes' mean, normed.
+(def encoder_run ((e Encoder) (r Rows) (n int)) Rows
+  (let (t (.n r)
+        lanes (enc_broadcast (.x r) t 0 (array_new (mul t 2048) 0.0))
+        out (enc_layers e (.blocks e) 0 n t lanes)
+        mean (enc_mean out t 0 (array_new (mul t 512) 0.0)))
+    (Rows t (nn_norm_rows mean t 512 (.final e) 0.000001))))
+
+; Each of x's rows of 512 copied into its 4 lanes, from entry k.
+(def enc_broadcast ((x (array float)) (t int) (k int) (out (array float))) (array float)
+  (if (ge k (mul t 2048))
+      out
+      (enc_broadcast x t (add k 1) (array_set out k (array_get x (add (mul (div k 2048) 512) (mod k 512)))))))
+
+; The lanes' mean, a row of 512 a row, from entry k.
+(def enc_mean ((x (array float)) (t int) (k int) (out (array float))) (array float)
+  (if (ge k (mul t 512))
+      out
+      (let (base (add (mul (div k 512) 2048) (mod k 512))
+            s (float_add (float_add (array_get x base) (array_get x (add base 512)))
+                         (float_add (array_get x (add base 1024)) (array_get x (add base 1536)))))
+        (enc_mean x t (add k 1) (array_set out k (float_mul s 0.25))))))
+
+; Layers l on, below n, of the lanes x.
+(def enc_layers ((e Encoder) (bs (list Block)) (l int) (n int) (t int) (x (array float))) (array float)
+  (if (or (is_empty bs) (ge l n)) x (enc_layers e (tail bs) (add l 1) n t (enc_layer e (head bs) l t x))))
+
+; Layer l: the lanes' rows of 2048 unit-normed and quantized, through
+; mHC's matrices; the block on the lanes mixed by pre's weights; and the
+; lanes mixed by res's doubly stochastic matrix, with the block's change
+; added by post's weights.
+(def enc_layer ((e Encoder) (blk Block) (l int) (t int) (x (array float))) (array float)
+  (let (m (.mhc e)
+        nx (nn_act_quant_rows (nn_norm_rows x t 2048 (array_new 2048 0.0) 0.000001) t 2048)
+        pre (nn_matmul_part (.pre m) nx t (mul l 4) 4)
+        post (nn_matmul_part (.post m) nx t (mul l 4) 4)
+        res (nn_matmul_part (.res m) nx t (mul l 16) 16)
+        u (enc_mix_in m l t x pre 0 (array_new (mul t 512) 0.0))
+        y (nn_add_into (block_run e blk t u) u -1.0))
+    (enc_mix_out m l t x post res y 0 (array_new (mul t 2048) 0.0))))
+
+; Whether lane n is layer l's own, the one its offsets favour.
+(def own_lane ((l int) (n int)) bool (eq (mod l 4) n))
+
+; Row i on: the block's input, the lanes summed by
+; sigmoid(a pre-activation + b + offset), the offset 4 for its own lane
+; and -4 for the rest.
+(def enc_mix_in ((m Mhc) (l int) (t int) (x (array float)) (pre (array float)) (i int) (u (array float))) (array float)
+  (if (ge i t)
+      u
+      (enc_mix_in m l t x pre (add i 1) (enc_mix_lanes x i (enc_pre_weights m l pre i 0 (array_new 4 0.0)) 0 u))))
+(def enc_pre_weights ((m Mhc) (l int) (pre (array float)) (i int) (n int) (h (array float))) (array float)
+  (if (ge n 4)
+      h
+      (let z (float_add (float_add (float_mul (array_get (.apre m) l) (array_get pre (add (mul i 4) n)))
+                                   (array_get (.bpre m) (add (mul l 4) n)))
+                        (if (own_lane l n) 4.0 -4.0))
+        (enc_pre_weights m l pre i (add n 1) (array_set h n (nn_sigmoid z))))))
+(def enc_mix_lanes ((x (array float)) (i int) (h (array float)) (k int) (u (array float))) (array float)
+  (if (ge k 512)
+      u
+      (let (base (add (mul i 2048) k)
+            s (float_add (float_add (float_mul (array_get h 0) (array_get x base)) (float_mul (array_get h 1) (array_get x (add base 512))))
+                         (float_add (float_mul (array_get h 2) (array_get x (add base 1024))) (float_mul (array_get h 3) (array_get x (add base 1536))))))
+        (enc_mix_lanes x i h (add k 1) (array_set u (add (mul i 512) k) s)))))
+
+; Row i on: lane n the sum over lanes j of res's (n, j) times lane j,
+; plus 2 sigmoid(a post-activation + b + offset, 0 for its own lane and
+; -4 for the rest) times the block's change y.
+(def enc_mix_out ((m Mhc) (l int) (t int) (x (array float)) (post (array float)) (res (array float)) (y (array float)) (i int) (out (array float))) (array float)
+  (if (ge i t)
+      out
+      (let (hp (enc_post_weights m l post i 0 (array_new 4 0.0))
+            hr (sinkhorn (enc_res_logits m l res i 0 (array_new 16 0.0)))
+            o2 (enc_lanes_out x y i hp hr 0 out))
+        (enc_mix_out m l t x post res y (add i 1) o2))))
+(def enc_post_weights ((m Mhc) (l int) (post (array float)) (i int) (n int) (h (array float))) (array float)
+  (if (ge n 4)
+      h
+      (let z (float_add (float_add (float_mul (array_get (.apost m) l) (array_get post (add (mul i 4) n)))
+                                   (array_get (.bpost m) (add (mul l 4) n)))
+                        (if (own_lane l n) 0.0 -4.0))
+        (enc_post_weights m l post i (add n 1) (array_set h n (float_mul 2.0 (nn_sigmoid z)))))))
+(def enc_res_logits ((m Mhc) (l int) (res (array float)) (i int) (k int) (z (array float))) (array float)
+  (if (ge k 16)
+      z
+      (let v (float_add (float_mul (array_get (.ares m) l) (array_get res (add (mul i 16) k)))
+                        (array_get (.bres m) (add (mul l 16) k)))
+        (enc_res_logits m l res i (add k 1) (array_set z k v)))))
+(def enc_lanes_out ((x (array float)) (y (array float)) (i int) (hp (array float)) (hr (array float)) (k int) (out (array float))) (array float)
+  (if (ge k 2048)
+      out
+      (let (n (div k 512)
+            c (mod k 512)
+            base (add (mul i 2048) c)
+            s (float_add (float_add (float_mul (array_get hr (mul n 4)) (array_get x base))
+                                    (float_mul (array_get hr (add (mul n 4) 1)) (array_get x (add base 512))))
+                         (float_add (float_mul (array_get hr (add (mul n 4) 2)) (array_get x (add base 1024)))
+                                    (float_mul (array_get hr (add (mul n 4) 3)) (array_get x (add base 1536)))))
+            v (float_add s (float_mul (array_get hp n) (array_get y (add (mul i 512) c)))))
+        (enc_lanes_out x y i hp hr (add k 1) (array_set out (add (mul i 2048) k) v)))))
+
+; The 4 by 4 logits z made doubly stochastic, as whistle's _sinkhorn: 20
+; times each row's log-sum-exp taken away, then each column's; then e
+; to each.
+(def sinkhorn ((z (array float))) (array float) (sinkhorn_exp (sinkhorn_iter z 0) 0))
+(def sinkhorn_iter ((z (array float)) (k int)) (array float)
+  (if (ge k 20) z (sinkhorn_iter (sk_cols (sk_rows z 0) 0) (add k 1))))
+(def sk_rows ((z (array float)) (r int)) (array float)
+  (if (ge r 4) z (sk_rows (sk_less z (mul r 4) 1 (sk_lse z (mul r 4) 1)) (add r 1))))
+(def sk_cols ((z (array float)) (c int)) (array float)
+  (if (ge c 4) z (sk_cols (sk_less z c 4 (sk_lse z c 4)) (add c 1))))
+; The log-sum-exp of the 4 entries of z from at, step apart.
+(def sk_lse ((z (array float)) (at int) (step int)) float
+  (let (a (array_get z at) b (array_get z (add at step)) c (array_get z (add at (mul 2 step))) d (array_get z (add at (mul 3 step)))
+        m (float_max (float_max a b) (float_max c d)))
+    (float_add m (float_ln (float_add (float_add (float_exp (float_sub a m)) (float_exp (float_sub b m)))
+                                      (float_add (float_exp (float_sub c m)) (float_exp (float_sub d m))))))))
+; The 4 entries of z from at, step apart, less v, in place.
+(def sk_less ((z (array float)) (at int) (step int) (v float)) (array float)
+  (sk_less_from z at step v 0))
+(def sk_less_from ((z (array float)) (at int) (step int) (v float) (j int)) (array float)
+  (if (ge j 4) z
+      (let i (add at (mul j step))
+        (sk_less_from (array_set z i (float_sub (array_get z i) v)) at step v (add j 1)))))
+(def sinkhorn_exp ((z (array float)) (k int)) (array float)
+  (if (ge k 16) z (sinkhorn_exp (array_set z k (float_exp (array_get z k))) (add k 1))))
+
+; ------------------------------------------------------------- a block
+
+; Block blk over u, t rows of 512: a new array.
+(def block_run ((e Encoder) (blk Block) (t int) (u (array float))) (array float)
+  (let (ns (.norms blk)
+        x1 (nn_add_into (enc_copy u 0 (array_new (array_len u) 0.0)) (hmlp_rows (.p1 e) (.p2 e) (.h0 blk) (nn_norm_rows u t 512 (nth ns 0) 0.000001) t) 0.5)
+        a (nn_norm_rows (attention blk (nn_norm_rows x1 t 512 (nth ns 1) 0.000001) t) t 512 (nth ns 2) 0.000001)
+        x2 (nn_add_into x1 a (nn_sigmoid (.gate blk)))
+        x3 (nn_add_into x2 (conv_module blk (nn_norm_rows x2 t 512 (nth ns 3) 0.000001) t) 1.0))
+    (nn_add_into x3 (hmlp_rows (.p1 e) (.p2 e) (.h1 blk) (nn_norm_rows x3 t 512 (nth ns 5) 0.000001) t) 0.5)))
+
+; A copy of a, from entry k.
+(def enc_copy ((a (array float)) (k int) (out (array float))) (array float)
+  (if (ge k (array_len a)) out (enc_copy a (add k 1) (array_set out k (array_get a k)))))
+
+; ------------------------------------------------- the convolution module
+
+; The convolution module over h, t rows of 512 normed: quantized, pw1 to
+; 1024, the GLU (the first half times the sigmoid of the second), the
+; depthwise convolution of 9 taps centred on each row (rows off the clip
+; 0), its norm, SiLU, quantized, pw2.
+(def conv_module ((blk Block) (h (array float)) (t int)) (array float)
+  (let (wide (nn_matmul (.pw1 blk) (nn_act_quant_rows h t 512) t)
+        g (glu wide t 0 (array_new (mul t 512) 0.0))
+        d (depthwise g t (.dw blk) 0 (array_new (mul t 512) 0.0))
+        n (nn_norm_rows d t 512 (nth (.norms blk) 4) 0.000001)
+        act (nn_silu_range n 0 (array_len n)))
+    (nn_matmul (.pw2 blk) (nn_act_quant_rows act t 512) t)))
+
+; The GLU of x's rows of 1024, from entry k of the result.
+(def glu ((x (array float)) (t int) (k int) (out (array float))) (array float)
+  (if (ge k (mul t 512))
+      out
+      (let (at (add (mul (div k 512) 1024) (mod k 512))
+            v (float_mul (array_get x at) (nn_sigmoid (array_get x (add at 512)))))
+        (glu x t (add k 1) (array_set out k v)))))
+
+; Entry k on of the depthwise convolution of g: row r channel c the sum
+; over taps j of g's row r + j - 4, channel c, times tap j's weight for c.
+(def depthwise ((g (array float)) (t int) (dw (array float)) (k int) (out (array float))) (array float)
+  (if (ge k (mul t 512))
+      out
+      (depthwise g t dw (add k 1) (array_set out k (dw_taps g t dw (div k 512) (mod k 512) 0 0.0)))))
+(def dw_taps ((g (array float)) (t int) (dw (array float)) (r int) (c int) (j int) (s float)) float
+  (if (ge j 9)
+      s
+      (let i (add r (sub j 4))
+        (dw_taps g t dw r c (add j 1)
+          (if (or (lt i 0) (ge i t)) s (float_add s (float_mul (array_get g (add (mul i 512) c)) (array_get dw (add (mul j 512) c)))))))))
+
+; ------------------------------------------------------- self-attention
+
+; Self-attention over x, t rows of 512 normed: x quantized; queries of 8
+; heads and keys and values of 2, of 48, 48 and 64; each query's and
+; key's head normed and turned by RoPE; each head's row quantized; each
+; query head h attending over every row's keys and values of head h / 4,
+; scaled by one over the square root of 48; times the sigmoid of the
+; gate's row; quantized; out.
+(def attention ((blk Block) (x (array float)) (t int)) (array float)
+  (let (xq (nn_act_quant_rows x t 512)
+        q (nn_quant_pieces (rope (head_norms (nn_matmul (.q blk) xq t) (mul t 8) (.qn blk)) t 8) t 384 48)
+        k (nn_quant_pieces (rope (head_norms (nn_matmul (.k blk) xq t) (mul t 2) (.kn blk)) t 2) t 96 48)
+        v (nn_quant_pieces (nn_matmul (.v blk) xq t) t 128 64)
+        g (nn_matmul (.g blk) xq t)
+        a (attend q k v t 0 (array_new (mul t 512) 0.0) (array_new t 0.0))
+        gated (gate_rows a g 0))
+    (nn_matmul (.o blk) (nn_act_quant_rows gated t 512) t)))
+
+; x's n pieces of 48, each normed with scale s.
+(def head_norms ((x (array float)) (n int) (s (array float))) (array float)
+  (nn_norm_rows x n 48 s 0.000001))
+
+; x's rows of heads pieces of 48, each piece turned by RoPE at its
+; row's place: entries j and j + 24, by the angle of the place times
+; 100000 to the -j/24.
+(def rope ((x (array float)) (t int) (heads int)) (array float)
+  (rope_from x t heads 0))
+(def rope_from ((x (array float)) (t int) (heads int) (p int)) (array float)
+  (if (ge p (mul t heads))
+      x
+      (rope_from (rope_piece x (mul p 48) (float_from_int (div p heads)) 0) t heads (add p 1))))
+(def rope_piece ((x (array float)) (at int) (pos float) (j int)) (array float)
+  (if (ge j 24)
+      x
+      (let (f (float_exp (float_mul (float_div (float_from_int (mul 2 j)) 48.0) (float_neg (float_ln 100000.0))))
+            ang (float_mul pos f)
+            co (float_cos ang)
+            si (float_sin ang)
+            a (array_get x (add at j))
+            b (array_get x (add at (add j 24)))
+            x2 (array_set x (add at j) (float_sub (float_mul a co) (float_mul b si))))
+        (rope_piece (array_set x2 (add at (add j 24)) (float_add (float_mul b co) (float_mul a si))) at pos (add j 1)))))
+
+; Each query head's output, from place p on (row p / 8, head p mod 8):
+; the softmax over rows of its scores, the values summed by it; s the
+; scores' scratch.
+(def attend ((q (array float)) (k (array float)) (v (array float)) (t int) (p int) (out (array float)) (s (array float))) (array float)
+  (if (ge p (mul t 8))
+      out
+      (let (i (div p 8)
+            h (mod p 8)
+            kv (div h 4)
+            sc (nn_softmax (scores q k (add (mul i 384) (mul h 48)) kv t 0 s) 0 t))
+        (attend q k v t (add p 1) (weighted v sc kv t (add (mul i 512) (mul h 64)) 0 out) sc))))
+
+; The scores of the query at qa against each row j's key of head kv,
+; from j on, into s.
+(def scores ((q (array float)) (k (array float)) (qa int) (kv int) (t int) (j int) (s (array float))) (array float)
+  (if (ge j t)
+      s
+      (let d (float_div (dot48 q qa k (add (mul j 96) (mul kv 48)) 0 0.0) (float_sqrt 48.0))
+        (scores q k qa kv t (add j 1) (array_set s j d)))))
+(def dot48 ((a (array float)) (i int) (b (array float)) (j int) (n int) (s float)) float
+  (if (ge n 48) s (dot48 a i b j (add n 1) (float_add s (float_mul (array_get a (add i n)) (array_get b (add j n)))))))
+
+; Entries d on of the output at at: each row's value of head kv, entry
+; d, weighted by its score.
+(def weighted ((v (array float)) (sc (array float)) (kv int) (t int) (at int) (d int) (out (array float))) (array float)
+  (if (ge d 64)
+      out
+      (weighted v sc kv t at (add d 1) (array_set out (add at d) (value_sum v sc (add (mul kv 64) d) t 0 0.0)))))
+(def value_sum ((v (array float)) (sc (array float)) (c int) (t int) (j int) (s float)) float
+  (if (ge j t) s (value_sum v sc c t (add j 1) (float_add s (float_mul (array_get sc j) (array_get v (add (mul j 128) c)))))))
+
+; a's entries from k on times the sigmoid of g's, in place.
+(def gate_rows ((a (array float)) (g (array float)) (k int)) (array float)
+  (if (ge k (array_len a)) a (gate_rows (array_set a k (float_mul (array_get a k) (nn_sigmoid (array_get g k)))) g (add k 1))))
+
+; --------------------------------------------------- the Hadamard MLP
+
+; The Hadamard MLP m over x, t rows of 512, with the permutations p1
+; and p2 (the encoder's and the decoder's are the same): a new array.
+(def hmlp_rows ((p1 (array int)) (p2 (array int)) (m Hmlp) (x (array float)) (t int)) (array float)
+  (hmlp_from p1 p2 m x t 0 (array_new (mul t 512) 0.0)))
+(def hmlp_from ((p1 (array int)) (p2 (array int)) (m Hmlp) (x (array float)) (t int) (r int) (out (array float))) (array float)
+  (if (ge r t) out (hmlp_from p1 p2 m x t (add r 1) (hmlp_row p1 p2 m x (mul r 512) out))))
+
+; Row x from at, into out at at: its conditioning, 1 plus the softmax of
+; x times cv, times cu; then d1 x through the first Kronecker factors
+; and permutation p1, SiLU(d2 cond z + b2) through the second and p2, d3
+; z through the third, times d4.
+(def hmlp_row ((p1 (array int)) (p2 (array int)) (m Hmlp) (x (array float)) (at int) (out (array float))) (array float)
+  (let (sm (nn_softmax (cond_logits m x at 0 (array_new 8 0.0)) 0 8)
+        z1 (permuted (kron (diag (.d1 m) x at 0 (array_new 512 0.0)) (.w1a m) (.w1b m)) p1)
+        z2 (stage2 m sm z1 0)
+        z3 (permuted (kron z2 (.w2a m) (.w2b m)) p2)
+        z4 (kron (diag (.d3 m) z3 0 0 (array_new 512 0.0)) (.w3a m) (.w3b m)))
+    (put_diag (.d4 m) z4 at 0 out)))
+
+; x's row at at times cv: 8 logits, from r on.
+(def cond_logits ((m Hmlp) (x (array float)) (at int) (r int) (l (array float))) (array float)
+  (if (ge r 8) l (cond_logits m x at (add r 1) (array_set l r (cond_dot (.cv m) x at r 0 0.0)))))
+(def cond_dot ((cv (array float)) (x (array float)) (at int) (r int) (i int) (s float)) float
+  (if (ge i 512) s (cond_dot cv x at r (add i 1) (float_add s (float_mul (array_get x (add at i)) (array_get cv (add (mul i 8) r)))))))
+
+; d times x's row at at, entry by entry, from k, into out.
+(def diag ((d (array float)) (x (array float)) (at int) (k int) (out (array float))) (array float)
+  (if (ge k 512) out (diag d x at (add k 1) (array_set out k (float_mul (array_get d k) (array_get x (add at k)))))))
+
+; d times z into out at at, from k.
+(def put_diag ((d (array float)) (z (array float)) (at int) (k int) (out (array float))) (array float)
+  (if (ge k 512) out (put_diag d z at (add k 1) (array_set out (add at k) (float_mul (array_get d k) (array_get z k))))))
+
+; z's entries from k made SiLU(d2 cond z + b2), cond 1 plus the softmax
+; sm times cu, in place.
+(def stage2 ((m Hmlp) (sm (array float)) (z (array float)) (k int)) (array float)
+  (if (ge k 512)
+      z
+      (let (cond (float_add 1.0 (cond_up (.cu m) sm k 0 0.0))
+            v (float_add (float_mul (float_mul (array_get (.d2 m) k) cond) (array_get z k)) (array_get (.b2 m) k)))
+        (stage2 m sm (array_set z k (nn_silu v)) (add k 1)))))
+(def cond_up ((cu (array float)) (sm (array float)) (k int) (r int) (s float)) float
+  (if (ge r 8) s (cond_up cu sm k (add r 1) (float_add s (float_mul (array_get sm r) (array_get cu (add (mul r 512) k)))))))
+
+; z of 512 as 16 rows of 32, Z, made a^T Z b: entry (k, l) the sum over
+; (i, j) of Z's (i, j) times a's (i, k) times b's (j, l). A new array.
+(def kron ((z (array float)) (a (array float)) (b (array float))) (array float)
+  (kron_left a (kron_right z b 0 (array_new 512 0.0)) 0 (array_new 512 0.0)))
+; Y = Z b, from entry p (i, l).
+(def kron_right ((z (array float)) (b (array float)) (p int) (y (array float))) (array float)
+  (if (ge p 512) y (kron_right z b (add p 1) (array_set y p (kr_sum z b (div p 32) (mod p 32) 0 0.0)))))
+(def kr_sum ((z (array float)) (b (array float)) (i int) (l int) (j int) (s float)) float
+  (if (ge j 32) s (kr_sum z b i l (add j 1) (float_add s (float_mul (array_get z (add (mul i 32) j)) (array_get b (add (mul j 32) l)))))))
+; a^T Y, from entry p (k, l).
+(def kron_left ((a (array float)) (y (array float)) (p int) (out (array float))) (array float)
+  (if (ge p 512) out (kron_left a y (add p 1) (array_set out p (kl_sum a y (div p 32) (mod p 32) 0 0.0)))))
+(def kl_sum ((a (array float)) (y (array float)) (k int) (l int) (i int) (s float)) float
+  (if (ge i 16) s (kl_sum a y k l (add i 1) (float_add s (float_mul (array_get a (add (mul i 16) k)) (array_get y (add (mul i 32) l)))))))
+
+; z gathered by p: entry m z's entry p m. A new array.
+(def permuted ((z (array float)) (p (array int))) (array float)
+  (permuted_from z p 0 (array_new 512 0.0)))
+(def permuted_from ((z (array float)) (p (array int)) (m int) (out (array float))) (array float)
+  (if (ge m 512) out (permuted_from z p (add m 1) (array_set out m (array_get z (array_get p m))))))

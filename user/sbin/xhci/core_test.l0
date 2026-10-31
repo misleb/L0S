@@ -342,3 +342,91 @@
         s3 (bus_event (.bus s2) 1 (cmd_done 1 1) (GotNothing)))
     (add (check_str "on controller 1" (bus_text s) "1: port 1 20e01; log xhci 1: port 1: connected, ccs pp csc speed high; wait 100; port 1 20e11")
          (check_int "numbered on" (.next (.bus s3)) 3))))
+
+; ------------------------------------------------------------ isochronous
+
+; An audio device's configuration, 68 bytes: its control interface, 0;
+; interface 1, whose setting 1 has an isochronous IN endpoint, 0x82, of
+; 192 bytes every frame; and interface 2, whose setting 1 has an
+; isochronous OUT one, 0x01.
+(def audio_config () (list int)
+  (concat (cons (byte_words "9 2 68 0 3 1 0 128 50")
+          (cons (byte_words "9 4 0 0 0 1 1 0 0")
+          (cons (byte_words "9 4 1 0 0 1 2 0 0")
+          (cons (byte_words "9 4 1 1 1 1 2 0 0")
+          (cons (byte_words "7 5 130 5 192 0 1")
+          (cons (byte_words "9 4 2 0 0 1 2 0 0")
+          (cons (byte_words "9 4 2 1 1 1 2 0 0")
+          (cons (byte_words "7 5 1 9 192 0 1") (nil (list int))))))))))))
+
+; A controller with the audio device ready, as the keyboard is in
+; ready, its configuration in place of the keyboard's.
+(def audio_ready () Hc
+  (let (a (told (.hc (s_reset)) (cmd_done 1 1) (nil int))
+        b (told (.hc a) (cmd_done 1 1) (nil int))
+        c (told (.hc b) (xfer 1 1 1 0) (take (kbd_device) 8))
+        d (told (.hc c) (xfer 1 1 1 0) (kbd_device))
+        e (told (.hc d) (xfer 1 1 1 0) (take (audio_config) 9))
+        f (told (.hc e) (xfer 1 1 1 0) (audio_config)))
+    (.hc (told (.hc f) (xfer 1 1 1 0) (nil int)))))
+
+; Endpoint 0x82 opened: three pages cleared, its ring's and its buffer's
+; two, and Configure Endpoint; once done, the opener told ok and a packet
+; queued in each of its 42 slots, 21 of 192 bytes a page, 168 u32s, at
+; DCI 5, endpoint 2 IN.
+(def s_iso () Did (hc_open (audio_ready) 1 130 77))
+(def s_iso_on () Did (told (.hc (s_iso)) (cmd_done 1 1) (nil int)))
+
+(def test_iso_open () int
+  (add (check_str "open" (did_text (s_iso)) "zero 7; zero 8; zero 9; put 4 11; put 1 4; bell 0 0")
+       (check_str "queued" (did_text (s_iso_on)) "answer 77 ok; put 7 168; bell 1 5")))
+
+; A packet done: read from its slot, the oldest, slot 0 at the buffer's
+; first page's start; one 2 bytes short reads 190.
+(def test_iso_want () int
+  (let h (.hc (s_iso_on))
+    (add (check_str "whole" (want_text (hc_wants h (xfer 1 5 1 0))) "bytes 8 0 192")
+         (check_str "short" (want_text (hc_wants h (xfer 1 5 13 2))) "bytes 8 0 190"))))
+
+; Each of n packets of 192 bytes done on h, one after another.
+(def iso_done ((h Hc) (n int)) Did
+  (let d (told h (xfer 1 5 1 0) (many_bytes 7 192 (nil int)))
+    (if (le n 1) d (iso_done (.hc d) (sub n 1)))))
+
+(def many_bytes ((b int) (n int) (acc (list int))) (list int) (if (le n 0) acc (many_bytes b (sub n 1) (cons b acc))))
+
+; Each packet done queues its slot again; the tenth tells the opener
+; the ten packets' bytes, 1920 of them, after the uin's 11.
+(def test_iso_batch () int
+  (let (nine (iso_done (.hc (s_iso_on)) 9)
+        ten (told (.hc nine) (xfer 1 5 1 0) (many_bytes 7 192 (nil int))))
+    (add (check_str "ninth" (did_text nine) "put 7 4; bell 1 5")
+         (add (check_str "tenth" (did_text ten) "tell 77 uin; put 7 4; bell 1 5")
+              (check_int "told" (match ten ((Did h acts) (match (head acts) ((ActTell p t) (length t)) ((ActWait m) 0) ((ActPut p w) 0) ((ActZero p) 0) ((ActBell s x) 0) ((ActPort p v) 0) ((ActRecheck p) 0) ((ActAnswer p t) 0) ((ActNotify t) 0) ((ActListen p) 0) ((ActLog t) 0)))) 1931)))))
+
+; A ring found empty is no packet: none is taken from the slots, and
+; with every slot still queued, nothing is queued again.
+(def test_iso_overrun () int
+  (let h (.hc (s_iso_on))
+    (add (check_str "want" (want_text (hc_wants h (xfer 1 5 15 0))) "nothing")
+         (check_str "acts" (did_text (told h (xfer 1 5 15 0) (nil int))) ""))))
+
+; A packet missed is done with no bytes, and its slot queued again.
+(def test_iso_missed () int
+  (let h (.hc (s_iso_on))
+    (add (check_str "want" (want_text (hc_wants h (xfer 1 5 23 0))) "nothing")
+         (check_str "acts" (did_text (told h (xfer 1 5 23 0) (nil int))) "put 7 4; bell 1 5"))))
+
+; An isochronous OUT endpoint opens too, at DCI 2; an interrupt or bulk
+; OUT one would not.
+(def test_iso_out () int
+  (check_str "open" (did_text (hc_open (audio_ready) 1 1 77)) "zero 7; zero 8; zero 9; put 4 11; put 1 4; bell 0 0"))
+
+; Closed, its three pages are free again once the controller drops it.
+(def test_iso_close () int
+  (let (h (.hc (s_iso_on))
+        before (length (.free h))
+        c (hc_close h 1 130 78)
+        done (told (.hc c) (cmd_done 1 1) (nil int)))
+    (add (check_str "answered" (did_text done) "answer 78 ok")
+         (check_int "pages back" (length (.free (.hc done))) (add before 3)))))

@@ -48,6 +48,10 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `windows` | a line a window, front first, `ID TITLE X Y W H` then `front` or `-` and its client's pid, so two windows of one client show it, then `buffer B frames F`, the display's id of the content it shows and how many frames its client has been told; then `pointer X Y`, and the pointer's name if it is not the arrow (`ew-resize`, `ns-resize`, `nwse-resize`, `nesw-resize` over a window's edges, or what its client asked for over its content, such as `text`) |
 | `launch NAME ARG ...` | the app NAME launched with the ARGs, as the launcher launches it (below), the launcher closed: NAME its name as the launcher shows it, its bundle's name, or its exec, the first app of one kind that matches, the apps read again if none does; the ARGs words, each an argument of the `open` sent on. `ok` once it is launched, or `error: no app NAME`; what `open` asks |
 | `apps` | the apps in `/Applications` read again, if `/` is a volume and its bundles are not those known, and the launcher's page painted again: what opening the launcher does already |
+| `place ID X Y W H` | the window's content made W×H at X, Y, below the top bar: its client asked for the size with a size notice, as `maximize` asks, and the window placed once it answers, or moved at once if it is that size; no longer maximized. W×H must fit the screen. Any client may ask, as the agent does ([agent.md](agent.md)) |
+| `raise ID` | the window brought to the front with the keyboard's focus, as a press on it brings it. Any client may ask |
+| `dismiss ID` | the window's client asked to close it, with the close notice, and the window closed by force if it is open 2 s later: what its close button does. Any client may ask |
+| `paste X Y W H VA` | the buffer at VA in `wm`, shared there with `shm_share`, W×H of the desktop's pixels (S times each way in the screen's), ARGB words row after row, not premultiplied, drawn over the desktop at X, Y by each pixel's alpha (`ui_mix`, to a percent), what falls off the screen left out; the desktop damaged where it is, and the buffer given up. W×H must fit the screen |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
 draws), buffer 0; the pointers, its cursor set, each made once at start
@@ -436,6 +440,10 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   client-decorated one, has no shadow.
 - Only toolkit windows can be resized or maximized (`draw` ignores the
   size notice, so a double click on its title bar leaves it as it is).
+- Any client may place, raise or close another's windows and draw on
+  the desktop (`place`, `raise`, `dismiss`, `paste`): nothing asks
+  which may. A `place` of a window whose client ignores the size notice
+  moves it only if it is already that size.
 - **Terminal (`vt`) is a terminal of lines, not a screen.** Its only
   shortcuts are Ctrl-Shift-T for a tab and Shift-Page Up and Down for a
   page of the scrollback.

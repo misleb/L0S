@@ -1,41 +1,59 @@
 ; agent.l0 -- the agent protocol, as agentd serves it, and its client,
-; as the agent command uses it. agentd registers as agent; each is a
-; request (l0s.l0's), its answer to the request's reply port:
+; as the agent command uses it. agentd holds one conversation, which
+; every client shares, and registers as agent; each is a request
+; (l0s.l0's), its answer to the request's reply port:
 ;
-;   open NPORT          conv ID: a conversation, its notices to NPORT
-;   say ID\nTEXT        ok, its answer streamed to NPORT as notices; or
-;                       error: busy while a turn of any conversation runs
-;   stop ID             ok: its turn ended, told as done stopped
-;   close ID            ok: the conversation gone
+;   open NPORT          ok: the conversation so far told to NPORT, as
+;                       the notices below would have told it, then
+;                       opened; and its notices to NPORT too from then
+;   say SOURCE\nTEXT    ok, said told to every NPORT, and the answer
+;                       streamed as notices; or error: busy while a
+;                       turn runs. SOURCE, a word, says where the text
+;                       came from (console, app, speech...); with no
+;                       SOURCE it is the sending program's name. The
+;                       model is told it, and the program that sent it
+;   stop                ok: the turn running ended, told as done stopped
+;   clear               ok: the conversation begun anew; or error: busy
+;   close NPORT         ok: NPORT told no more
 ;
-; and the notices, to NPORT, each a header line, and after a newline
-; what it tells, as bytes:
+; and the notices, to each NPORT open, each a header line, and after a
+; newline what it tells, as bytes:
 ;
-;   agent ID text\nPIECE              a piece of the answer, at most
-;                                     agent_piece_max bytes
-;   agent ID tool NAME\nINPUT         a tool run, its input's JSON, cut
-;                                     to agent_brief_max bytes
-;   agent ID result NAME ok|failed\nTEXT
-;                                     its result, the start of it
-;   agent ID compacted BEFORE AFTER   the conversation compacted, its
-;                                     tokens before and after
-;   agent ID done REASON              the turn over, and why
-;   agent ID error\nWHY               what went wrong, before done
+;   agent text\nPIECE              a piece of the answer, at most
+;                                  agent_piece_max bytes
+;   agent tool NAME\nINPUT         a tool run, its input's JSON, cut to
+;                                  agent_brief_max bytes
+;   agent result NAME ok|failed\nTEXT
+;                                  its result, the start of it
+;   agent compacted BEFORE AFTER   the conversation compacted, its
+;                                  tokens before and after
+;   agent done REASON              the turn over, and why
+;   agent error\nWHY               what went wrong, before done
+;   agent said SOURCE\nTEXT        what the person said, and where it
+;                                  came from, a turn begun (or, told
+;                                  the conversation so far, one that
+;                                  was)
+;   agent opened busy|idle         the conversation so far told, to the
+;                                  port that opened, and whether a turn
+;                                  is running
 ;
 ; Linked into agentd and agent, as the Makefile's AGENTLIB.
 
-; What a notice tells, its conversation's ID first: a piece of text; a
-; tool, its name and input; a result, the tool's name, whether it failed,
-; and its text; that the conversation was compacted, tokens before and
-; after; the turn done, and why; an error, why; or that the message is
-; no notice.
+; What a notice tells: a piece of text; a tool, its name and input; a
+; result, the tool's name, whether it failed, and its text; that the
+; conversation was compacted, tokens before and after; the turn done,
+; and why; an error, why; where what the person said came from, and
+; what they said; the conversation so far
+; told, and whether a turn is running; or that the message is no notice.
 (data AgentEvent
-  (AgentText int bytes)
-  (AgentTool int (list int) bytes)
-  (AgentResult int (list int) bool bytes)
-  (AgentCompacted int int int)
-  (AgentDone int (list int))
-  (AgentError int bytes)
+  (AgentText bytes)
+  (AgentTool (list int) bytes)
+  (AgentResult (list int) bool bytes)
+  (AgentCompacted int int)
+  (AgentDone (list int))
+  (AgentError bytes)
+  (AgentSaid (list int) bytes)
+  (AgentOpened bool)
   (AgentNone))
 
 ; The most bytes of text one notice holds, and of a tool's input or
@@ -45,26 +63,30 @@
 
 ; ------------------------------------------------------------- notices
 
-; A notice: its header, agent ID WORDS, and if body is given, a newline
-; and body.
-(def agent_notice ((id int) (words (list int)) (body (Option bytes))) bytes
-  (let head (append "agent " (append (digits id) (cons 32 words)))
+; A notice: its header, agent WORDS, and if body is given, a newline and
+; body.
+(def agent_notice ((words (list int)) (body (Option bytes))) bytes
+  (let head (append "agent " words)
     (match body
       ((None) (bytes_from_list head))
       ((Some b) (bytes_concat (cons (bytes_from_list (append head "\n")) (cons b (nil bytes))))))))
 
 ; The notices of each kind, as agentd sends them; their bodies already
 ; cut as the protocol says.
-(def agent_text_notice ((id int) (piece bytes)) bytes (agent_notice id "text" (Some piece)))
-(def agent_tool_notice ((id int) (name (list int)) (input bytes)) bytes
-  (agent_notice id (append "tool " name) (Some input)))
-(def agent_result_notice ((id int) (name (list int)) (failed bool) (text bytes)) bytes
-  (agent_notice id (append "result " (append name (if failed " failed" " ok"))) (Some text)))
-(def agent_compacted_notice ((id int) (before int) (after int)) bytes
-  (agent_notice id (append "compacted " (append (digits before) (cons 32 (digits after)))) ((None bytes))))
-(def agent_done_notice ((id int) (reason (list int))) bytes
-  (agent_notice id (append "done " reason) ((None bytes))))
-(def agent_error_notice ((id int) (why bytes)) bytes (agent_notice id "error" (Some why)))
+(def agent_text_notice ((piece bytes)) bytes (agent_notice "text" (Some piece)))
+(def agent_tool_notice ((name (list int)) (input bytes)) bytes
+  (agent_notice (append "tool " name) (Some input)))
+(def agent_result_notice ((name (list int)) (failed bool) (text bytes)) bytes
+  (agent_notice (append "result " (append name (if failed " failed" " ok"))) (Some text)))
+(def agent_compacted_notice ((before int) (after int)) bytes
+  (agent_notice (append "compacted " (append (digits before) (cons 32 (digits after)))) ((None bytes))))
+(def agent_done_notice ((reason (list int))) bytes
+  (agent_notice (append "done " reason) ((None bytes))))
+(def agent_error_notice ((why bytes)) bytes (agent_notice "error" (Some why)))
+(def agent_said_notice ((source (list int)) (text bytes)) bytes
+  (agent_notice (append "said " source) (Some text)))
+(def agent_opened_notice ((busy bool)) bytes
+  (agent_notice (if busy "opened busy" "opened idle") ((None bytes))))
 
 ; The first newline in a message's bytes b from i on, or its end.
 (def agent_line_end ((b bytes) (i int)) int
@@ -78,49 +100,52 @@
       (let (e (agent_line_end b 4)
             ws (split_spaces (bytes_to_list (bytes_slice b 10 e)))
             body (bytes_slice b (min (add e 1) (bytes_len b)) (bytes_len b)))
-        (if (or (is_empty ws) (not (is_number (head ws))))
-            (AgentNone)
-            (agent_event_words (int_prefix (head ws) 0) (tail ws) body)))))
+        (agent_event_words ws body))))
 
-; The rest of agent_event_of: the notice of conversation id, the words
-; after its ID, and its body.
-(def agent_event_words ((id int) (ws (list (list int))) (body bytes)) AgentEvent
+; The rest of agent_event_of: the notice of the words after agent, and
+; its body.
+(def agent_event_words ((ws (list (list int))) (body bytes)) AgentEvent
   (if (is_empty ws)
       (AgentNone)
       (let (kind (head ws) n (length ws))
-        (if (and (eq kind "text") (eq n 1)) (AgentText id body)
-            (and (eq kind "tool") (eq n 2)) (AgentTool id (nth ws 1) body)
-            (and (eq kind "result") (eq n 3)) (AgentResult id (nth ws 1) (eq (nth ws 2) "failed") body)
-            (and (eq kind "done") (eq n 2)) (AgentDone id (nth ws 1))
-            (and (eq kind "error") (eq n 1)) (AgentError id body)
-            (and (eq kind "compacted") (eq n 3)) (agent_compacted_of id (nth ws 1) (nth ws 2))
+        (if (and (eq kind "text") (eq n 1)) (AgentText body)
+            (and (eq kind "tool") (eq n 2)) (AgentTool (nth ws 1) body)
+            (and (eq kind "result") (eq n 3)) (AgentResult (nth ws 1) (eq (nth ws 2) "failed") body)
+            (and (eq kind "done") (eq n 2)) (AgentDone (nth ws 1))
+            (and (eq kind "error") (eq n 1)) (AgentError body)
+            (and (eq kind "said") (eq n 2)) (AgentSaid (nth ws 1) body)
+            (and (eq kind "opened") (and (eq n 2) (or (eq (nth ws 1) "busy") (eq (nth ws 1) "idle")))) (AgentOpened (eq (nth ws 1) "busy"))
+            (and (eq kind "compacted") (eq n 3)) (agent_compacted_of (nth ws 1) (nth ws 2))
             (AgentNone)))))
 
 ; A compacted notice's counts, if they are numbers.
-(def agent_compacted_of ((id int) (before (list int)) (after (list int))) AgentEvent
+(def agent_compacted_of ((before (list int)) (after (list int))) AgentEvent
   (if (and (is_number before) (is_number after))
-      (AgentCompacted id (int_prefix before 0) (int_prefix after 0))
+      (AgentCompacted (int_prefix before 0) (int_prefix after 0))
       (AgentNone)))
 
 ; ------------------------------------------------------------- requests
 
 ; The requests' bodies, as agentd reads them.
 (def agent_open_body ((nport int)) (list int) (append "open " (digits nport)))
-(def agent_say_body ((id int) (text (list int))) (list int) (append "say " (append (digits id) (cons 10 text))))
-(def agent_stop_body ((id int)) (list int) (append "stop " (digits id)))
-(def agent_close_body ((id int)) (list int) (append "close " (digits id)))
+(def agent_say_body ((source (list int)) (text (list int))) (list int)
+  (append "say " (append source (cons 10 text))))
+(def agent_stop_body () (list int) "stop")
+(def agent_clear_body () (list int) "clear")
+(def agent_close_body ((nport int)) (list int) (append "close " (digits nport)))
 
 ; ---------------------------------------------------------- the client
 
-; A conversation with agentd: its port, the port its answers come back
-; to, the conversation's ID, and agentd's pid, which sends its notices.
-(data AgentConv (AgentConv (p int) (rp int) (id int) (pid int)))
+; The conversation, as a client holds it: agentd's port, the port its
+; answers come back to, the port its notices come to, and agentd's pid,
+; which sends them.
+(data AgentConv (AgentConv (p int) (rp int) (np int) (pid int)))
 
 ; How long the client waits for agentd to register: it waits for its
 ; home's volume first.
 (def agent_wait_ns () int 15000000000)
 
-; A conversation opened with agentd, its answers to rp and its notices
+; The conversation opened with agentd, its answers to rp and its notices
 ; to nport, both this process's: or why not.
 (def agent_open ((rp int) (nport int)) (Result AgentConv (list int))
   (match (name_wait "agent" (agent_wait_ns))
@@ -128,14 +153,13 @@
     ((Found port)
       (match (port_ask port rp (agent_open_body nport) "the agent")
         ((AskFailed why) ((Err AgentConv (list int)) why))
-        ((Asked from b) (agent_opened port rp from (msg_text b)))))))
+        ((Asked from b) (agent_opened port rp nport from (msg_text b)))))))
 
 ; What open's answer a, from pid, says.
-(def agent_opened ((port int) (rp int) (pid int) (a (list int))) (Result AgentConv (list int))
-  (let ws (split_spaces a)
-    (if (and (eq (length ws) 2) (and (eq (head ws) "conv") (is_number (nth ws 1))))
-        ((Ok AgentConv (list int)) (AgentConv port rp (int_prefix (nth ws 1) 0) pid))
-        ((Err AgentConv (list int)) (agent_why a)))))
+(def agent_opened ((port int) (rp int) (nport int) (pid int) (a (list int))) (Result AgentConv (list int))
+  (if (eq a "ok")
+      ((Ok AgentConv (list int)) (AgentConv port rp nport pid))
+      ((Err AgentConv (list int)) (agent_why a))))
 
 ; Why an answer is not what was asked: error: WHY's WHY, or the answer.
 (def agent_why ((a (list int))) (list int)
@@ -143,13 +167,13 @@
 
 ; body asked of c's agentd: empty if it answered ok, else why not.
 (def agent_ask ((c AgentConv) (body (list int))) (list int)
-  (match c
-    ((AgentConv port rp id pid)
-      (match (port_ask port rp body "the agent")
-        ((AskFailed why) why)
-        ((Asked from b) (if (msg_is b "ok") (nil int) (agent_why (msg_text b))))))))
+  (match (port_ask (.p c) (.rp c) body "the agent")
+    ((AskFailed why) why)
+    ((Asked from b) (if (msg_is b "ok") (nil int) (agent_why (msg_text b))))))
 
-; text said in c, stopped, and c closed: empty, or why not.
-(def agent_say ((c AgentConv) (text (list int))) (list int) (agent_ask c (agent_say_body (.id c) text)))
-(def agent_stop ((c AgentConv)) (list int) (agent_ask c (agent_stop_body (.id c))))
-(def agent_close ((c AgentConv)) (list int) (agent_ask c (agent_close_body (.id c))))
+; text said, from source, the turn stopped, the conversation cleared,
+; and c's notices ended: empty, or why not.
+(def agent_say ((c AgentConv) (source (list int)) (text (list int))) (list int) (agent_ask c (agent_say_body source text)))
+(def agent_stop ((c AgentConv)) (list int) (agent_ask c (agent_stop_body)))
+(def agent_clear ((c AgentConv)) (list int) (agent_ask c (agent_clear_body)))
+(def agent_close ((c AgentConv)) (list int) (agent_ask c (agent_close_body (.np c))))

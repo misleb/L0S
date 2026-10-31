@@ -207,8 +207,8 @@ answers() {
   [ "$best" -le "$bound_ms" ] || fail "$name: lit only $best ms after the move, over $bound_ms"
 }
 
-# Fonts is the fourth of the launcher's seven apps, its icon's middle at
-# 640, 130 (fontview.sh). Its page's header bar: Back 34 square from 6,
+# Fonts is the fifth of the launcher's eight apps, its icon's middle at
+# 708, 130 (fontview.sh). Its page's header bar: Back 34 square from 6,
 # 6, its ground at 9, 22, 30 30 30 on the header's 48 48 48 at rest and
 # 62 62 62 under the pointer; the title from 300 along.
 header="48 48 48"; lit="62 62 62"
@@ -220,7 +220,7 @@ open_lines
 # for (launcher.sh) before Fonts' icon is.
 click 60 16
 shows 40 16 "64 64 64" "the launcher's pill"
-click 640 130
+click 708 130
 window Fonts
 fx=$w_x; fy=$w_y
 # Its cards drawn (fontview.sh): the third's Aa, from 294 to 342, 100

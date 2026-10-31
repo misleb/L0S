@@ -312,6 +312,12 @@ class Checks(unittest.TestCase):
         self.assertIsNone(standin.checked(good_request(), at, [], 1))
         self.assertIn("request 2 does not hold", standin.checked(good_request(), at, [], 2))
 
+    def test_messages_contain_at(self):
+        said = good_request()["messages"][0]["content"][0]["text"]
+        at = {"messages_contain_at": {"2": [said[:4]], "3": ["nowhere"]}}
+        self.assertIsNone(standin.checked(good_request(), at, [], 2))
+        self.assertIn("messages of request 3 do not hold", standin.checked(good_request(), at, [], 3))
+
     def test_tool_events(self):
         ev = standin.tool_events([{"id": "t1", "name": "make_dir", "input": {"path": "notes"}}], text="Making it.")
         pieces = "".join(e["data"]["delta"]["partial_json"] for e in ev

@@ -1,20 +1,23 @@
 ; agentd.l0 -- the agent's server: it serves the agent protocol
-; (proto/agent.l0), a conversation's turns in and the answer streamed
-; back as notices, and does what its loop (loop.l0) asks: each request
-; of the model sent through the host's proxy (proto/model.l0) and its
-; streamed answer read, each tool run (tools.l0). It waits on three
-; ports at once (port_receive_set): its own, for requests; the HTTP
-; connection's notices; and the terminal of the program a tool runs, so
-; a stop is heard while an answer streams or a program runs.
+; (proto/agent.l0), its one conversation's turns in and the answer
+; streamed back as notices to every client that opened it, and does
+; what its loop (loop.l0) asks: each request of the model sent through
+; the host's proxy (proto/model.l0) and its streamed answer read, each
+; tool run (tools.l0). It waits on three ports at once
+; (port_receive_set): its own, for requests; the HTTP connection's
+; notices; and the terminal of the program a tool runs, so a stop is
+; heard while an answer streams or a program runs.
 ;
 ; It reads /etc/agent/config and /etc/agent/token (model.l0's, and its
 ; own keys: home, compact, keep, run_timeout); with neither it says so
 ; and exits 0, as a driver with no device does. It waits for its home's
 ; volume, makes the home and its CLAUDE.md, the agent's rules, from
 ; /etc/agent/CLAUDE.md, and the rest of the home's parts (agenthome.l0:
-; its constitution, memory, skills and history), and registers agent.
-; One turn runs at a time, of any conversation; conversations live as
-; long as agentd.
+; its constitution, memory, skills and history), reads back the
+; conversation kept there, and registers agent. One turn runs at a
+; time; the conversation is kept in the home's
+; .history/conversation.json at each round of tools and each turn's
+; end, so it outlives agentd.
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "agentd" why))
@@ -78,12 +81,10 @@
 ; What does not change while agentd runs: its port; the port its HTTP
 ; connections' notices come to; the port that is the terminal of the
 ; programs its tools run; where the model is; its own settings; the
-; terminal to set back after starting a program (0 the kernel's); and
-; the board, as the system prompt names it.
-(data Setup (Setup (port int) (np int) (rport int) (mc ModelConf) (o Own) (back int) (board (list int)) (cport int) (start int)))
-
-; A conversation: the port its notices go to, and its loop.
-(data Chat (Chat int Loop))
+; terminal to set back after starting a program (0 the kernel's); the
+; board, as the system prompt names it; and the port the clock, and the
+; servers the tools of the desktop and the clock ask, answer on.
+(data Setup (Setup (port int) (np int) (rport int) (mc ModelConf) (o Own) (back int) (board (list int)) (cport int)))
 
 ; Where a request's answer is: none in flight; or coming, its status (0
 ; until its head), a refusal's body so far, reversed, the event
@@ -94,25 +95,29 @@
 ; A program a tool runs: the tool use's id, and the run.
 (data Running (Running bytes Run))
 
-; What agentd is doing: waiting; or a turn of conversation ID, its
-; notices to NPORT, its loop, the acts it asked not yet done, the
-; answer coming, the program running, and when the answer is given up
-; if nothing more comes.
-(data Doing (Idle) (Busy int int Loop (list Act) Wire (Option Running) int))
+; What agentd is doing: waiting; or a turn, the acts its loop asked not
+; yet done, the answer coming, the program running, and when the answer
+; is given up if nothing more comes.
+(data Doing (Idle) (Busy (list Act) Wire (Option Running) int))
 
-; agentd: its setup; its conversations by ID; the next ID; what it is
-; doing; the network stack, once opened; and the HTTP connection to the
-; proxy, kept between requests.
-(data Agentd (Agentd Setup (Map int Chat) int Doing Inet (Option HttpConn)))
+; agentd: its setup; the ports its notices go to, in the order they
+; opened; the conversation's loop; when the conversation began and how
+; many times the person has said something in it (ConvKept's); what it
+; is doing; the network stack, once opened; and the HTTP connection to
+; the proxy, kept between requests.
+(data Agentd (Agentd (u Setup) (hear (list int)) (l Loop) (began int) (said int) (doing Doing) (net Inet) (conn (Option HttpConn))))
 
-; The setup's home directory, from its own settings.
+; The setup's home directory, and how long a program may run, from its
+; own settings.
 (def setup_home ((u Setup)) (list int) (match (.o u) ((Own h t c k) h)))
+(def setup_timeout ((u Setup)) int (match (.o u) ((Own h t c k) t)))
 
 ; ------------------------------------------------------------- requests
 
-; A request, as read: open NPORT; say ID and its text; stop ID; close
-; ID; or why it is none.
-(data Req (ReqOpen int) (ReqSay int bytes) (ReqStop int) (ReqClose int) (ReqWrong (list int)))
+; A request, as read: open NPORT; say, where its text came from (empty
+; if it does not say), and the text; stop; clear; close NPORT; or why it
+; is none.
+(data Req (ReqOpen int) (ReqSay (list int) bytes) (ReqStop) (ReqClear) (ReqClose int) (ReqWrong (list int)))
 
 ; The request in a message's bytes b: its reply port, then a line of
 ; words, then for say the text, read in place.
@@ -121,17 +126,20 @@
       (ReqWrong "not a request")
       (let (e (agent_line_end b 8)
             ws (split_spaces (bytes_to_list (bytes_slice b 8 e))))
-        (if (and (eq (length ws) 2) (is_number (nth ws 1)))
-            (req_words (head ws) (int_prefix (nth ws 1) 0) (bytes_slice b (min (add e 1) (bytes_len b)) (bytes_len b)))
-            (ReqWrong "not open NPORT, say ID, stop ID or close ID")))))
+        (req_words ws (bytes_slice b (min (add e 1) (bytes_len b)) (bytes_len b))))))
 
-; The request op N makes, with text after its line.
-(def req_words ((op (list int)) (n int) (text bytes)) Req
-  (if (eq op "open") (ReqOpen n)
-      (eq op "say") (ReqSay n text)
-      (eq op "stop") (ReqStop n)
-      (eq op "close") (ReqClose n)
-      (ReqWrong (append "no request " op))))
+; The request the words ws make, with text after their line.
+(def req_words ((ws (list (list int))) (text bytes)) Req
+  (let (n (length ws)
+        op (if (is_empty ws) "" (head ws))
+        port (and (eq n 2) (is_number (nth ws 1))))
+    (if (and (eq n 1) (eq op "say")) (ReqSay "" text)
+        (and (eq n 2) (eq op "say")) (ReqSay (nth ws 1) text)
+        (and (eq n 1) (eq op "stop")) (ReqStop)
+        (and (eq n 1) (eq op "clear")) (ReqClear)
+        (and port (eq op "open")) (ReqOpen (int_prefix (nth ws 1) 0))
+        (and port (eq op "close")) (ReqClose (int_prefix (nth ws 1) 0))
+        (ReqWrong "not open NPORT, say [SOURCE], stop, clear or close NPORT"))))
 
 ; ------------------------------------------------------------- notices
 
@@ -139,39 +147,127 @@
 (def brief ((b bytes) (max int)) bytes
   (if (le (bytes_len b) max) b (bytes_slice b 0 (char_start b max))))
 
-; The notices a Tell is, for conversation id: a text in pieces of at
-; most agent_piece_max bytes; a tool's input and a result cut to
-; agent_brief_max; an error cut to a piece.
-(def tell_notices ((id int) (t Tell)) (list bytes)
+; The notices a Tell is: a text in pieces of at most agent_piece_max
+; bytes; a tool's input and a result cut to agent_brief_max; an error
+; cut to a piece.
+(def tell_notices ((t Tell)) (list bytes)
   (match t
-    ((TellText b) (text_pieces id b 0 (nil bytes)))
-    ((TellTool n v) (cons (agent_tool_notice id (bytes_to_list n) (brief (json_bytes v) (agent_brief_max))) (nil bytes)))
-    ((TellResult n f text) (cons (agent_result_notice id (bytes_to_list n) f (brief text (agent_brief_max))) (nil bytes)))
-    ((TellError why) (cons (agent_error_notice id (brief why (agent_piece_max))) (nil bytes)))
-    ((TellCompacted before after) (cons (agent_compacted_notice id before after) (nil bytes)))))
+    ((TellText b) (text_pieces b 0 (nil bytes)))
+    ((TellTool n v) (cons (agent_tool_notice (bytes_to_list n) (brief (json_bytes v) (agent_brief_max))) (nil bytes)))
+    ((TellResult n f text) (cons (agent_result_notice (bytes_to_list n) f (brief text (agent_brief_max))) (nil bytes)))
+    ((TellError why) (cons (agent_error_notice (brief why (agent_piece_max))) (nil bytes)))
+    ((TellCompacted before after) (cons (agent_compacted_notice before after) (nil bytes)))))
 
 ; b from i on as text notices, onto acc, reversed; then in order.
-(def text_pieces ((id int) (b bytes) (i int) (acc (list bytes))) (list bytes)
+(def text_pieces ((b bytes) (i int) (acc (list bytes))) (list bytes)
   (let n (bytes_len b)
     (if (ge i n)
         (rev acc)
         (let (j (if (le (sub n i) (agent_piece_max)) n (char_start b (add i (agent_piece_max))))
               k (if (le j i) (min n (add i (agent_piece_max))) j))
-          (text_pieces id b k (cons (agent_text_notice id (bytes_slice b i k)) acc))))))
+          (text_pieces b k (cons (agent_text_notice (bytes_slice b i k)) acc))))))
+
+; The conversation c told as its notices would have told it, oldest
+; first: the person's texts as said, from the source their turn's first
+; line names (unknown if it names none), a summary that compaction made as
+; compacted, of tokens not known, 0; the model's texts in pieces; each
+; tool's use, and its result named by the use it answers.
+(def conv_replay ((c Conv)) (list bytes)
+  (replay_turns (conv_turns c) ((MapEmpty bytes bytes)) (nil (list bytes))))
+
+; The turns ts' notices, each turn's list onto acc, reversed; the names
+; of the uses so far by their ids.
+(def replay_turns ((ts (list Turn)) (names (Map bytes bytes)) (acc (list (list bytes)))) (list bytes)
+  (if (is_empty ts)
+      (concat_lists_of (rev acc) (nil bytes))
+      (match (head ts)
+        ((Turn who bs)
+          (let names2 (if who names (uses_named bs names))
+            (replay_turns (tail ts) names2 (cons (replay_blocks who bs names2 "unknown" (nil bytes)) acc)))))))
+
+; The lists ls joined, in order, onto acc reversed; then in order.
+(def concat_lists_of ((ls (list (list bytes))) (acc (list bytes))) (list bytes)
+  (if (is_empty ls)
+      (rev acc)
+      (concat_lists_of (tail ls) (rev_onto (head ls) acc))))
+
+; names with each tool's use among bs named by its id.
+(def uses_named ((bs (list Block)) (names (Map bytes bytes))) (Map bytes bytes)
+  (if (is_empty bs)
+      names
+      (uses_named (tail bs)
+        (match (head bs)
+          ((BToolUse id n v) (map_put names id n))
+          ((BText t) names)
+          ((BToolResult id t f) names)))))
+
+; The notices of a turn's blocks bs, the person's if who, onto acc,
+; reversed; then in order. A source line of the person's, a text
+; before another (conv_said_blocks), tells nothing but names src, the
+; source of the text after it.
+(def replay_blocks ((who bool) (bs (list Block)) (names (Map bytes bytes)) (src (list int)) (acc (list bytes))) (list bytes)
+  (if (is_empty bs)
+      (rev acc)
+      (match (if (and who (not (is_empty (tail bs)))) (block_source (head bs)) ((None (list int))))
+        ((Some s) (replay_blocks who (tail bs) names s acc))
+        ((None) (replay_blocks who (tail bs) names src (rev_onto (block_notices who (head bs) names src) acc))))))
+
+; The source a block names, if it is a source line.
+(def block_source ((b Block)) (Option (list int))
+  (match b
+    ((BText t) (conv_source_of t))
+    ((BToolUse id n v) ((None (list int))))
+    ((BToolResult id t f) ((None (list int))))))
+
+; A block's notices, a person's text said from src.
+(def block_notices ((who bool) (b Block) (names (Map bytes bytes)) (src (list int))) (list bytes)
+  (match b
+    ((BText t)
+      (if (not who) (tell_notices (TellText t))
+          (bytes_is_at t 0 (conv_summary_head)) (tell_notices (TellCompacted 0 0))
+          (cons (agent_said_notice src t) (nil bytes))))
+    ((BToolUse id n v) (tell_notices (TellTool n v)))
+    ((BToolResult id t f)
+      (tell_notices (TellResult (match (map_get names id) ((Some n) n) ((None) (bytes_from_list "tool"))) f t)))))
 
 ; notice sent to port: a full queue is waited out, a millisecond at a
-; time, tries times at most, since the reader is only slow; a port gone
-; drops it. 0.
-(def notice_send ((port int) (notice bytes) (tries int)) int
+; time, tries times at most, since the reader is only slow. Whether the
+; port is still there.
+(def notice_send ((port int) (notice bytes) (tries int)) bool
   (match (port_send_bytes port notice 0 (bytes_len notice))
-    ((Sent) 0)
-    ((SendNoPort) 0)
-    ((SendTooBig) 0)
-    ((SendFull) (if (le tries 0) 0 (let s (sleep_ns 1000000) (notice_send port notice (sub tries 1)))))))
+    ((Sent) true)
+    ((SendNoPort) false)
+    ((SendTooBig) true)
+    ((SendFull) (if (le tries 0) true (let s (sleep_ns 1000000) (notice_send port notice (sub tries 1)))))))
 
-; Each of notices sent to port.
-(def notices_send ((port int) (notices (list bytes))) int
-  (if (is_empty notices) 0 (let s (notice_send port (head notices) 2000) (notices_send port (tail notices)))))
+; Each of notices sent to port, until one finds it gone: whether it is
+; still there.
+(def notices_send ((port int) (notices (list bytes))) bool
+  (if (is_empty notices)
+      true
+      (if (notice_send port (head notices) 2000) (notices_send port (tail notices)) false)))
+
+; notices sent to each of ports: those still there, in order.
+(def notices_told ((ports (list int)) (notices (list bytes))) (list int)
+  (notices_onto ports notices (nil int)))
+
+; notices_told's loop, the ports still there onto acc, reversed.
+(def notices_onto ((ports (list int)) (notices (list bytes)) (acc (list int))) (list int)
+  (if (is_empty ports)
+      (rev acc)
+      (notices_onto (tail ports) notices (if (notices_send (head ports) notices) (cons (head ports) acc) acc))))
+
+; ports with p last, if it is not among them already, and without it.
+(def port_with ((ports (list int)) (p int)) (list int)
+  (if (any_eq p ports) ports (append ports (cons p (nil int)))))
+(def port_without ((ports (list int)) (p int)) (list int)
+  (filter_out_port ports p (nil int)))
+
+; port_without's loop, onto acc reversed.
+(def filter_out_port ((ports (list int)) (p int) (acc (list int))) (list int)
+  (if (is_empty ports)
+      (rev acc)
+      (filter_out_port (tail ports) p (if (eq (head ports) p) acc (cons (head ports) acc)))))
 
 ; An answer's usage, as the log's debug line says it.
 (def usage_text ((u Usage)) (list int)
@@ -248,8 +344,8 @@
 (def home_said ((ls (list (list int)))) int
   (if (is_empty ls) 0 (let n (note (head ls)) (home_said (tail ls)))))
 
-; agent served on port, once the ports it waits on are set and the name
-; is registered.
+; agent served on port, once the ports it waits on are set, the
+; conversation read back and the name registered.
 (def agentd_serve ((port int) (mc ModelConf) (o Own)) int
   (let (np (port_new)
         rp (port_new)
@@ -258,17 +354,58 @@
       ((PortSetNotYours) (complain "cannot wait on its ports"))
       ((PortSetSize) (complain "cannot wait on its ports"))
       ((PortSetMade)
-        (let why (name_register_or_why port "agent")
+        (let (u (Setup port np rp mc o (back_terminal) (board_text (machine)) cp)
+              k (conv_loaded (conv_path u))
+              why (name_register_or_why port "agent"))
           (if (not (is_empty why))
               (complain why)
               (let n (note (append "serving agent: " (append (own_text o) (append ", the model " (append (.model mc)
                              (append " through " (append (.host mc) (cons 58 (digits (.port mc))))))))))
-                (serve (Agentd (Setup port np rp mc o (back_terminal) (board_text (machine)) cp (home_now cp))
-                               ((MapEmpty int Chat)) 1 (Idle) (NoInet "not opened yet") ((None HttpConn)))))))))))
+                (serve (Agentd u (nil int) (loop_for u (.conv k)) (.began k) (.said k) (Idle) (NoInet "not opened yet") ((None HttpConn)))))))))))
 
 ; The terminal to give back to agentd after starting a program.
 (def back_terminal () int
   (match (tty_get) ((Terminal p) p) ((KernelTerminal) 0)))
+
+; ---------------------------------------------------------- keeping it
+
+; Where the conversation is kept.
+(def conv_path ((u Setup)) (list int) (home_in (setup_home u) (home_conversation_name)))
+
+; The conversation kept at path, read back: a new one if there is none;
+; and if the file is not one, a new one too, the file moved aside to
+; PATH.bad so that nothing is lost, which is warned of.
+(def conv_loaded ((path (list int))) ConvKept
+  (match (read_whole path)
+    ((Err why) (let n (note "a new conversation") (conv_kept_new)))
+    ((Ok b)
+      (match (conv_kept_of b)
+        ((Ok k) (let n (note (conv_kept_line path k)) k))
+        ((Err why)
+          (let (bad (append path ".bad")
+                r (rename_file path bad)
+                w (warn_as "agentd" (append path (append ": " (append why (append "; moved to " (append bad ", and a new conversation begun")))))))
+            (conv_kept_new)))))))
+
+; The conversation written to where it is kept, whole, under another
+; name first and then renamed over the last, so that a write cut short
+; leaves the last whole: 0, having warned if it could not.
+(def kept ((s Agentd)) int
+  (let (path (conv_path (.u s))
+        fresh (append path ".new")
+        w (write_whole fresh (conv_kept_bytes (ConvKept (.conv (.l s)) (.began s) (.said s)))))
+    (if (not (is_empty w))
+        (warn_as "agentd" (append "cannot keep the conversation: " w))
+        (match (rename_file fresh path)
+          ((Done) 0)
+          ((NotDone f why) (warn_as "agentd" (append "cannot keep the conversation: " why)))))))
+
+; s kept as its loop asks the model again, the conversation as the API
+; takes it: unless what is asked is a summary, which changed nothing.
+(def kept_asking ((s Agentd)) Agentd
+  (match (.s (.cp (.l s)))
+    ((Summarizing t k b ps) s)
+    ((NoSummary) (let x (kept s) s))))
 
 ; ---------------------------------------------------------------- serving
 
@@ -280,93 +417,107 @@
 
 ; s after m came on port p.
 (def heard ((s Agentd) (p int) (m Message)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
-      (if (eq p (.port u))
-          (match m ((RecvFailed) s) ((Message from b) (requested s b)))
-          (eq p (.np u))
-          (wire_heard s m)
-          (eq p (.rport u))
-          (run_heard_in s m)
-          s))))
+  (if (eq p (.port (.u s)))
+      (match m ((RecvFailed) s) ((Message from b) (requested s from b)))
+      (eq p (.np (.u s)))
+      (wire_heard s m)
+      (eq p (.rport (.u s)))
+      (run_heard_in s m)
+      s))
 
-; s after the request in a message's bytes b, answered.
-(def requested ((s Agentd) (b bytes)) Agentd
+; s after the request in a message's bytes b, from the process from,
+; answered.
+(def requested ((s Agentd) (from int) (b bytes)) Agentd
   (match (req_of b)
     ((ReqWrong why) (let a (msg_answer b (error_reply why)) s))
     ((ReqOpen nport) (opened s b nport))
-    ((ReqSay id text) (said s b id text))
-    ((ReqStop id) (let (s2 (stopped s id) a (msg_answer b "ok")) s2))
-    ((ReqClose id) (closed s b id))))
+    ((ReqSay source text) (say_heard s b (said_source source from) (said_program from) text))
+    ((ReqStop) (let (s2 (stopped s) a (msg_answer b "ok")) s2))
+    ((ReqClear) (cleared s b))
+    ((ReqClose nport) (let a (msg_answer b "ok") (.hear s (port_without (.hear s) nport))))))
 
-; A conversation opened, its notices to nport: its rules read from the
-; home now, so a change to them holds from the next; answered conv ID.
+; nport answered ok, told the conversation so far and whether a turn
+; runs, and its notices from then on; unless it is gone by then.
 (def opened ((s Agentd) (b bytes) (nport int)) Agentd
+  (if (lt nport 1)
+      (let a (msg_answer b (error_reply (append "no port " (digits nport)))) s)
+      (let (a (msg_answer b "ok")
+            busy (match (.doing s) ((Idle) false) ((Busy acts w r dl) true))
+            there (notices_send nport (append (conv_replay (.conv (.l s))) (cons (agent_opened_notice busy) (nil bytes)))))
+        (if there (.hear s (port_with (.hear s) nport)) s))))
+
+; The conversation's loop: the system prompt as the home is now, the
+; tools, and compaction as the settings say.
+(def loop_for ((u Setup) (c Conv)) Loop
+  (match (.o u)
+    ((Own h t size keep)
+      (loop_compacting (loop_new (.mc u) (system_now u) (conv_tools (tool_defs)) c) size keep))))
+
+; The system prompt, read from the home now: its built-in part and the
+; home's (its constitution, rules, memory's index and skills:
+; home_prompt), so a change to them holds from the next turn.
+(def system_now ((u Setup)) Json
+  (let home (setup_home u)
+    (conv_system (conv_base (.board u) home (tool_names)) (home_prompt home))))
+
+; How the history names the turn said times in the conversation begun
+; at began: B.N, so that a turn is told from one of an earlier
+; conversation.
+(def conv_tag ((began int) (said int)) (list int)
+  (append (digits began) (cons 46 (digits said))))
+
+; Where a say's text came from: the source it names, or else the name
+; of the program from, which sent it.
+(def said_source ((source (list int)) (from int)) (list int)
+  (if (is_empty source) (base_name (said_program from)) source))
+
+; The path of the program from, which sent a say; unknown if the kernel
+; has none.
+(def said_program ((from int)) (list int)
+  (let p (proc_path from) (if (is_empty p) "unknown" p)))
+
+; text said from source, by the program at path program: busy while a
+; turn runs; else answered ok, told to every port as said, the system
+; prompt made anew, and the turn begun with a line saying where the text
+; came from (conv_said_blocks), the conversation's first dating it.
+(def say_heard ((s Agentd) (b bytes) (source (list int)) (program (list int)) (text bytes)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
-      (if (lt nport 1)
-          (let a (msg_answer b (error_reply (append "no port " (digits nport)))) s)
-          (let (l (loop_for u)
-                a (msg_answer b (append "conv " (digits next))))
-            (Agentd u (map_put chats next (Chat nport l)) (add next 1) doing net conn))))))
-
-; A new conversation's loop: the system prompt, its built-in part and
-; the home's (its constitution, rules, memory's index and skills, read
-; now: home_prompt), and the tools.
-(def loop_for ((u Setup)) Loop
-  (match u
-    ((Setup p np rp mc o back board cp start)
-      (let (home (setup_home u)
-            parts (home_prompt home))
-        (match o
-          ((Own h t size keep)
-            (loop_compacting (loop_new mc (conv_system (conv_base board home (tool_names)) parts) (conv_tools (tool_defs)) (conv_new))
-                             size keep)))))))
-
-; How the history names conversation id: S.ID, S the time agentd
-; started, so that a conversation is told from one of another start.
-(def conv_tag ((u Setup) (id int)) (list int)
-  (append (digits (.start u)) (cons 46 (digits id))))
-
-; text said in conversation id: busy while any turn runs; else
-; answered ok, and the turn begun.
-(def said ((s Agentd) (b bytes) (id int) (text bytes)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
+    ((Agentd u hear l began n doing net conn)
       (match doing
-        ((Busy i np l acts w r dl) (let a (msg_answer b "error: busy") s))
+        ((Busy acts w r dl) (let a (msg_answer b "error: busy") s))
         ((Idle)
-          (match (map_get chats id)
-            ((None) (let a (msg_answer b (error_reply (append "no conversation " (digits id)))) s))
-            ((Some c)
-              (let a (msg_answer b "ok")
-                (match c
-                  ((Chat nport l)
-                    (match (loop_say l text)
-                      ((Looped l2 acts) (drive (Agentd u chats next (Busy id nport l2 acts (WireIdle) ((None Running)) 0) net conn))))))))))))))
+          (let (a (msg_answer b "ok")
+                hear2 (notices_told hear (cons (agent_said_notice source text) (nil bytes)))
+                b2 (if (eq n 0) (home_now (.cport u)) began)
+                sy (system_now u))
+            (match (loop_say (.sy l sy) (conv_said_blocks source program text))
+              ((Looped l2 acts) (drive (Agentd u hear2 l2 b2 (add n 1) (Busy acts (WireIdle) ((None Running)) 0) net conn))))))))))
 
-; Conversation id closed, its turn stopped first if it is running; ok.
-(def closed ((s Agentd) (b bytes) (id int)) Agentd
-  (match (stopped s id)
-    ((Agentd u chats next doing net conn)
-      (let a (msg_answer b "ok")
-        (Agentd u (map_remove chats id) next doing net conn)))))
-
-; The turn of conversation id stopped, if it is the one running: a
-; program running ended, the answer's connection reset, and the turn
-; done, stopped.
-(def stopped ((s Agentd) (id int)) Agentd
+; The conversation begun anew, and kept so; busy while a turn runs.
+(def cleared ((s Agentd) (b bytes)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
+    ((Agentd u hear l began n doing net conn)
+      (match doing
+        ((Busy acts w r dl) (let a (msg_answer b "error: busy") s))
+        ((Idle)
+          (let (s2 (Agentd u hear (.conv l (conv_new)) 0 0 doing net conn)
+                k (kept s2)
+                x (note "the conversation cleared")
+                a (msg_answer b "ok"))
+            s2))))))
+
+; The turn stopped, if one is running: a program running ended, the
+; answer's connection reset, and the turn done, stopped.
+(def stopped ((s Agentd)) Agentd
+  (match s
+    ((Agentd u hear l began n doing net conn)
       (match doing
         ((Idle) s)
-        ((Busy i nport l acts w r dl)
-          (if (not (eq i id))
-              s
-              (let (k (run_end r)
-                    conn2 (match w ((WireIdle) conn) ((WireOn c ps sse st) (conn_reset conn))))
-                (match (loop_cancel l)
-                  ((Looped l2 acts2) (drive (Agentd u chats next (Busy i nport l2 acts2 (WireIdle) ((None Running)) 0) net conn2)))))))))))
+        ((Busy acts w r dl)
+          (let (k (run_end r)
+                conn2 (if (is_wire_on w) (conn_reset conn) conn))
+            (match (loop_cancel l)
+              ((Looped l2 acts2) (drive (Agentd u hear l2 began n (Busy acts2 (WireIdle) ((None Running)) 0) net conn2))))))))))
 
 ; A program running ended; 0.
 (def run_end ((r (Option Running))) int
@@ -383,87 +534,90 @@
 ; ------------------------------------------------------------- driving
 
 ; The turn's acts done in order, until one must wait: a request while
-; the last answer is still coming, or a program running.
+; the last answer is still coming, or a program running. A request
+; keeps the conversation first.
 (def drive ((s Agentd)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
+    ((Agentd u hear l began n doing net conn)
       (match doing
         ((Idle) s)
-        ((Busy id nport l acts w r dl)
+        ((Busy acts w r dl)
           (if (or (is_empty acts) (is_running r))
               s
-              (match (head acts)
-                ((ActTell t) (let x (notices_send nport (tell_notices id t)) (drive (Agentd u chats next (Busy id nport l (tail acts) w r dl) net conn))))
-                ((ActDone reason) (finished s id nport l reason w))
-                ((ActAsk req) (if (is_wire_on w) s (turn_asked (Agentd u chats next (Busy id nport l (tail acts) w r dl) net conn) req)))
-                ((ActTool tid name input) (tooled (Agentd u chats next (Busy id nport l (tail acts) w r dl) net conn) tid name input)))))))))
+              (let rest (Busy (tail acts) w r dl)
+                (match (head acts)
+                  ((ActTell t) (drive (Agentd u (notices_told hear (tell_notices t)) l began n rest net conn)))
+                  ((ActDone reason) (finished (Agentd u hear l began n rest net conn) reason w))
+                  ((ActAsk req) (if (is_wire_on w) s (turn_asked (kept_asking (Agentd u hear l began n rest net conn)) req)))
+                  ((ActTool tid name input) (tooled (Agentd u hear l began n rest net conn) tid name input))))))))))
 
 ; Whether a program is running, and an answer coming.
 (def is_running ((r (Option Running))) bool (match r ((None) false) ((Some x) true)))
 (def is_wire_on ((w Wire)) bool (match w ((WireIdle) false) ((WireOn c ps sse st) true)))
 
-; The turn done, for reason: told, the answer's usage in the log, its
-; loop kept in its conversation, and agentd waiting. An answer whose
-; response w has not ended yet has its connection reset, so the next
-; request never meets the rest of it.
-(def finished ((s Agentd) (id int) (nport int) (l Loop) (reason bytes) (w Wire)) Agentd
+; The turn done, for reason: told, the answer's usage in the log, the
+; conversation kept, and agentd waiting. An answer whose response w has
+; not ended yet has its connection reset, so the next request never
+; meets the rest of it.
+(def finished ((s Agentd) (reason bytes) (w Wire)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
-      (let (x (notice_send nport (agent_done_notice id (bytes_to_list reason)) 2000)
-            d (debug_as "agentd" (append "conversation " (append (digits id) (append " done " (append (bytes_to_list reason) (append ", " (usage_text (.usage (.conv l)))))))))
-            conn2 (if (is_wire_on w) (conn_reset conn) conn))
-        (Agentd u (if (map_has chats id) (map_put chats id (Chat nport l)) chats) next (Idle) net conn2)))))
+    ((Agentd u hear l began n doing net conn)
+      (let (hear2 (notices_told hear (cons (agent_done_notice (bytes_to_list reason)) (nil bytes)))
+            d (debug_as "agentd" (append "turn " (append (conv_tag began n) (append " done " (append (bytes_to_list reason) (append ", " (usage_text (.usage (.conv l)))))))))
+            s2 (Agentd u hear2 l began n (Idle) net (if (is_wire_on w) (conn_reset conn) conn))
+            k (kept s2))
+        s2))))
 
 ; s with its turn's loop after looped, whose acts come before those
 ; still to do: then driven on.
 (def took ((s Agentd) (looped Looped)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
+    ((Agentd u hear l began n doing net conn)
       (match doing
         ((Idle) s)
-        ((Busy id nport l acts w r dl)
+        ((Busy acts w r dl)
           (match looped
-            ((Looped l2 more) (drive (Agentd u chats next (Busy id nport l2 (append more acts) w r dl) net conn)))))))))
+            ((Looped l2 more) (drive (Agentd u hear l2 began n (Busy (append more acts) w r dl) net conn)))))))))
 
-; The turn's loop, while busy.
-(def turn_loop ((s Agentd)) (Option Loop)
-  (match s ((Agentd u chats next doing net conn) (match doing ((Idle) ((None Loop))) ((Busy id nport l acts w r dl) (Some l))))))
-
-; The turn's loop told event e: s after it, driven on.
+; The turn's loop told event e: s after it, driven on; nothing while no
+; turn runs.
 (def turn_told ((s Agentd) (e ModelEvent)) Agentd
-  (match (turn_loop s) ((None) s) ((Some l) (took s (loop_event l e)))))
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl) (took s (loop_event (.l s) e)))))
 
-; The tool name run for the use tid with input: a file tool at once;
-; run or sh started, the turn waiting for it; any other a failure.
+; The tool name run for the use tid with input: a file tool, or one of
+; the desktop's or the clock's, at once; run or sh started, the turn
+; waiting for it; any other a failure.
 (def tooled ((s Agentd) (tid bytes) (name bytes) (input Json)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
+    ((Agentd u hear l began n doing net conn)
       (match doing
         ((Idle) s)
-        ((Busy id nport l acts w r dl)
-          (let n (bytes_to_list name)
-            (if (is_file_tool n)
-                (tool_answered s l tid (tool_file (setup_home u) n input (conv_tag u id) (home_now (.cport u))))
-                (not (is_run_tool n))
-                (tool_answered s l tid (tool_failed (append "no tool " n)))
-                (match u
-                  ((Setup p np rp mc o back board cp start)
-                    (match (tool_run_start (setup_home u) n input (match o ((Own h t c k) t)) back rp)
-                      ((RunRefused a) (tool_answered s l tid a))
-                      ((RunGoing run) (Agentd u chats next (Busy id nport l acts w (Some (Running tid run)) dl) net conn))))))))))))
+        ((Busy acts w r dl)
+          (let nm (bytes_to_list name)
+            (if (is_file_tool nm)
+                (tool_answered s tid (tool_file (setup_home u) nm input (conv_tag began n) (home_now (.cport u))))
+                (is_desk_tool nm)
+                (tool_answered s tid (tool_desk nm input (.cport u)))
+                (not (is_run_tool nm))
+                (tool_answered s tid (tool_failed (append "no tool " nm)))
+                (match (tool_run_start (setup_home u) nm input (setup_timeout u) (.back u) (.rport u))
+                  ((RunRefused a) (tool_answered s tid a))
+                  ((RunGoing run) (Agentd u hear l began n (Busy acts w (Some (Running tid run)) dl) net conn))))))))))
 
-; The use tid's answer a given to the turn's loop l.
-(def tool_answered ((s Agentd) (l Loop) (tid bytes) (a ToolAnswer)) Agentd
-  (match a ((ToolAnswer text failed) (took s (loop_result l tid text failed)))))
+; The use tid's answer a given to the turn's loop.
+(def tool_answered ((s Agentd) (tid bytes) (a ToolAnswer)) Agentd
+  (match a ((ToolAnswer text failed) (took s (loop_result (.l s) tid text failed)))))
 
 ; m, which came to the programs' terminal port: the program running
 ; told of it, and once it has exited, its result taken.
 (def run_heard_in ((s Agentd) (m Message)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
+    ((Agentd u hear l began n doing net conn)
       (match doing
         ((Idle) s)
-        ((Busy id nport l acts w r dl)
+        ((Busy acts w r dl)
           (match r
             ((None) s)
             ((Some x)
@@ -471,8 +625,8 @@
                 ((Running tid run)
                   (let run2 (run_took run m)
                     (match (.status run2)
-                      ((None) (Agentd u chats next (Busy id nport l acts w (Some (Running tid run2)) dl) net conn))
-                      ((Some st) (tool_answered (Agentd u chats next (Busy id nport l acts w ((None Running)) dl) net conn) l tid (run_result run2))))))))))))))
+                      ((None) (Agentd u hear l began n (Busy acts w (Some (Running tid run2)) dl) net conn))
+                      ((Some st) (tool_answered (Agentd u hear l began n (Busy acts w ((None Running)) dl) net conn) tid (run_result run2))))))))))))))
 
 ; ---------------------------------------------------------------- asking
 
@@ -481,25 +635,25 @@
 ; made fails the turn, saying why.
 (def turn_asked ((s Agentd) (req bytes)) Agentd
   (match s
-    ((Agentd u chats next doing net conn)
-      (let n (match net ((Inet p rp) net) ((NoInet why) (inet_open)))
-        (match n
-          ((NoInet why) (turn_told (Agentd u chats next doing n conn) (failure why)))
+    ((Agentd u hear l began n doing net conn)
+      (let nt (match net ((Inet p rp) net) ((NoInet why) (inet_open)))
+        (match nt
+          ((NoInet why) (turn_told (Agentd u hear l began n doing nt conn) (failure why)))
           ((Inet ip irp)
-            (match (connection u n conn)
-              ((Err why) (turn_told (Agentd u chats next doing n ((None HttpConn))) (failure (append "the proxy: " why))))
+            (match (connection u nt conn)
+              ((Err why) (turn_told (Agentd u hear l began n doing nt ((None HttpConn))) (failure (append "the proxy: " why))))
               ((Ok c)
                 (let (dl (add (clock_ns) (wire_idle_ns))
                       al (alarm_at (.np u) dl))
                   (match (http_send_as c "POST" req)
-                    ((HttpGot c2 parts) (wire_parts (wire_begun (Agentd u chats next doing n (Some c2)) dl) parts))))))))))))
+                    ((HttpGot c2 parts) (wire_parts (wire_begun (Agentd u hear l began n doing nt (Some c2)) dl) parts))))))))))))
 
 ; The connection to the proxy: the kept one, if it may take another
 ; request, or a new one.
-(def connection ((u Setup) (n Inet) (conn (Option HttpConn))) (Result HttpConn (list int))
+(def connection ((u Setup) (nt Inet) (conn (Option HttpConn))) (Result HttpConn (list int))
   (match conn
     ((Some c) (http_reuse c))
-    ((None) (match u ((Setup p np rp mc o back board cp start) (http_connect n np (.host mc) (.port mc)))))))
+    ((None) (http_connect nt (.np u) (.host (.mc u)) (.port (.mc u))))))
 
 ; An error event saying why, as a failure the loop tells and ends on.
 (def failure ((why (list int))) ModelEvent
@@ -507,53 +661,46 @@
 
 ; s with an answer coming, to be given up at dl if nothing more comes.
 (def wire_begun ((s Agentd) (dl int)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
-      (match doing
-        ((Idle) s)
-        ((Busy id nport l acts w r d0) (Agentd u chats next (Busy id nport l acts (WireOn 0 (nil bytes) (sse_new) false) r dl) net conn))))))
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r d0) (.doing s (Busy acts (WireOn 0 (nil bytes) (sse_new) false) r dl)))))
 
 ; m, which came to the connections' notice port: the alarm, a silent
 ; answer given up; anything else fed to the connection, and its parts
 ; read.
 (def wire_heard ((s Agentd) (m Message)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
-      (match m
-        ((RecvFailed) s)
-        ((Message from b)
-          (if (is_alarm_notice m)
-              (wire_alarm s)
-              (match conn
-                ((None) s)
-                ((Some c)
-                  (match (http_feed c b)
-                    ((HttpGot c2 parts) (wire_parts (wire_alive (Agentd u chats next doing net (Some c2))) parts)))))))))))
+  (match m
+    ((RecvFailed) s)
+    ((Message from b)
+      (if (is_alarm_notice m)
+          (wire_alarm s)
+          (match (.conn s)
+            ((None) s)
+            ((Some c)
+              (match (http_feed c b)
+                ((HttpGot c2 parts) (wire_parts (wire_alive (.conn s (Some c2))) parts)))))))))
 
 ; An answer coming, heard from: its deadline put off.
 (def wire_alive ((s Agentd)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
-      (match doing
-        ((Idle) s)
-        ((Busy id nport l acts w r dl)
-          (if (not (is_wire_on w))
-              s
-              (let (d2 (add (clock_ns) (wire_idle_ns))
-                    a (alarm_at (.np u) d2))
-                (Agentd u chats next (Busy id nport l acts w r d2) net conn))))))))
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl)
+      (if (not (is_wire_on w))
+          s
+          (let (d2 (add (clock_ns) (wire_idle_ns))
+                a (alarm_at (.np (.u s)) d2))
+            (.doing s (Busy acts w r d2)))))))
 
 ; The alarm: an answer still coming past its deadline is given up, its
 ; connection reset, and the turn fails.
 (def wire_alarm ((s Agentd)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
-      (match doing
-        ((Idle) s)
-        ((Busy id nport l acts w r dl)
-          (if (and (is_wire_on w) (ge (clock_ns) dl))
-              (turn_told (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) (failure "the proxy did not answer"))
-              s))))))
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl)
+      (if (and (is_wire_on w) (ge (clock_ns) dl))
+          (let c2 (conn_reset (.conn s))
+            (turn_told (.conn (.doing s (Busy acts (WireIdle) r dl)) c2) (failure "the proxy did not answer")))
+          s))))
 
 ; The parts of a response, in order, each read onto the turn.
 (def wire_parts ((s Agentd) (parts (list HttpPart))) Agentd
@@ -563,24 +710,28 @@
 ; a refusal's body kept; its end, the answer over; or the connection
 ; failed.
 (def wire_part ((s Agentd) (p HttpPart)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
-      (match doing
-        ((Idle) s)
-        ((Busy id nport l acts w r dl)
-          (match w
-            ((WireIdle) s)
-            ((WireOn code pieces sse st)
-              (match p
-                ((HttpHead c reason hs) (Agentd u chats next (Busy id nport l acts (WireOn c pieces sse st) r dl) net conn))
-                ((HttpBody d)
-                  (if (served code)
-                      (match (sse_more sse d 0 (bytes_len d))
-                        ((SseMore s2 es) (wire_events (Agentd u chats next (Busy id nport l acts (WireOn code pieces s2 st) r dl) net conn) es)))
-                      (Agentd u chats next (Busy id nport l acts (WireOn code (cons d pieces) sse st) r dl) net conn)))
-                ((HttpEnd keep) (wire_ended (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net conn) code (bytes_concat (rev pieces)) st))
-                ((HttpBad why) (wire_lost (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) why st))
-                ((HttpFailed why) (wire_lost (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) why st))))))))))
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl)
+      (match w
+        ((WireIdle) s)
+        ((WireOn code pieces sse st)
+          (match p
+            ((HttpHead c reason hs) (.doing s (Busy acts (WireOn c pieces sse st) r dl)))
+            ((HttpBody d)
+              (if (served code)
+                  (match (sse_more sse d 0 (bytes_len d))
+                    ((SseMore s2 es) (wire_events (.doing s (Busy acts (WireOn code pieces s2 st) r dl)) es)))
+                  (.doing s (Busy acts (WireOn code (cons d pieces) sse st) r dl))))
+            ((HttpEnd keep) (wire_ended (.doing s (Busy acts (WireIdle) r dl)) code (bytes_concat (rev pieces)) st))
+            ((HttpBad why) (wire_lost (wire_dropped s acts r dl) why st))
+            ((HttpFailed why) (wire_lost (wire_dropped s acts r dl) why st))))))))
+
+; s with no answer coming and its connection reset, the turn's acts,
+; program and deadline as they were.
+(def wire_dropped ((s Agentd) (acts (list Act)) (r (Option Running)) (dl int)) Agentd
+  (let c2 (conn_reset (.conn s))
+    (.conn (.doing s (Busy acts (WireIdle) r dl)) c2)))
 
 ; Whether a status code says the request was served.
 (def served ((code int)) bool (and (ge code 200) (lt code 300)))
@@ -609,14 +760,12 @@
 ; s with the answer coming marked stopped: what comes after is no more
 ; of it, and its end ends nothing early.
 (def wire_stopped ((s Agentd)) Agentd
-  (match s
-    ((Agentd u chats next doing net conn)
-      (match doing
-        ((Idle) s)
-        ((Busy id nport l acts w r dl)
-          (match w
-            ((WireIdle) s)
-            ((WireOn code pieces sse st) (Agentd u chats next (Busy id nport l acts (WireOn code pieces sse true) r dl) net conn))))))))
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl)
+      (match w
+        ((WireIdle) s)
+        ((WireOn code pieces sse st) (.doing s (Busy acts (WireOn code pieces sse true) r dl)))))))
 
 ; Each of ms told to the turn's loop.
 (def told_all ((s Agentd) (ms (list ModelEvent))) Agentd

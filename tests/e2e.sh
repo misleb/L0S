@@ -42,7 +42,9 @@
 # file of NAME/etc (which is then copied, to build/e2e/NAME.etc) is a
 # free port of the host's loopback, chosen for the boot. If NAME/usb exists,
 # the board's keyboard and pointer are a USB keyboard and mouse on a
-# qemu-xhci, for pcie, xhci and usb-hid, not virtio's. If NAME/sd exists,
+# qemu-xhci, for pcie, xhci and usb-hid, not virtio's; and if NAME/usbaudio
+# exists too, QEMU's usb-audio is on it, a speaker of 16-bit stereo at 48
+# kHz, its sound dropped (audiodev none), for usb-audio. If NAME/sd exists,
 # the board has an SD card in a sdhci-pci, a blank image of 64 MB made
 # for the boot, for pcie and sdhci. Every boot is killed after two
 # minutes: install_boot, the longest, takes about 3 s alone, and longer
@@ -176,10 +178,14 @@ run_case() {
     rm -f "$sd" && dd if=/dev/zero of="$sd" bs=1048576 count=0 seek=64 2> /dev/null
     qemu_args="$qemu_args -device sdhci-pci -drive file=$sd,if=none,format=raw,id=sd0 -device sd-card,drive=sd0"
   fi
-  input=virtio
+  input=virtio; usb=""
   if [ -f "$dir/usb" ]; then
     input=usb
     qemu_args=${qemu_args/-device virtio-keyboard-device -device virtio-tablet-device/-device qemu-xhci -device usb-kbd -device usb-mouse}
+    if [ -f "$dir/usbaudio" ]; then
+      usb=audio
+      qemu_args="$qemu_args -audiodev none,id=snd0 -device usb-audio,audiodev=snd0"
+    fi
   fi
   if [ -f "$dir/gpu" ]; then
     gpu=$(cat "$dir/gpu")
@@ -222,7 +228,7 @@ run_case() {
   [ -f "$dir/bootargs" ] && read -ra bootargs < "$dir/bootargs"
   if [ -f "$dir/typed" ]; then
     tools/slowtype "$typed" |
-      QEMU_NO_REBOOT=1 QEMU_CPUS=$cpus QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 120 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
+      QEMU_NO_REBOOT=1 QEMU_CPUS=$cpus QEMU_DISK=$disk QEMU_SD=$sd QEMU_GPU=$gpu QEMU_NET=$net QEMU_INPUT=$input QEMU_USB=$usb QEMU_APPEND="${bootargs[*]+${bootargs[*]}}" tools/deadline 120 tools/qemu-boot.sh "$cpio" > "$out" 2> "$err"
   else
     L0_QEMU_ARGS=$qemu_args tools/deadline 120 "$L0" boot "$BUILD/kernel.img" ${bootargs[@]+"${bootargs[@]}"} < "$cpio" > "$out" 2> "$err"
   fi

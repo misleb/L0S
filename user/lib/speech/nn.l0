@@ -1,0 +1,194 @@
+; nn.l0 -- the arithmetic of Whistle's network (roadmap 0060), purely:
+; the activations it takes (SiLU, the sigmoid), activations quantized
+; to int8 and back as its engine has them, and its matrices: a CQ
+; matrix of the .cact dequantized once into binary32s held in bytes,
+; and rows of activations times it, each product a bytes_dot_f32, in
+; binary32 as the reference computes. Activations are row-major arrays
+; of floats; the bytes hold only a matrix and the row it is multiplied
+; by. Linked into the Whistle library and its tests as NN in the
+; Makefile, after CACT and MEL.
+
+; ------------------------------------------------------------ activations
+
+; The logistic sigmoid of x, 1 / (1 + e^-x), from the side that keeps
+; e's argument at or below 0, so neither side overflows.
+(def nn_sigmoid ((x float)) float
+  (if (float_lt x 0.0)
+      (let e (float_exp x) (float_div e (float_add 1.0 e)))
+      (float_div 1.0 (float_add 1.0 (float_exp (float_neg x))))))
+
+; SiLU, x times its sigmoid.
+(def nn_silu ((x float)) float (float_mul x (nn_sigmoid x)))
+
+; a's entries from k up to e each made SiLU of itself, in place.
+(def nn_silu_range ((a (array float)) (k int) (e int)) (array float)
+  (if (ge k e) a (nn_silu_range (array_set a k (nn_silu (array_get a k))) (add k 1) e)))
+
+; x's size.
+(def nn_abs ((x float)) float (if (float_lt x 0.0) (float_neg x) x))
+
+; x rounded to the nearest whole number, a half to the even one, as
+; jnp.round.
+(def nn_round_even ((x float)) float
+  (let (t (float_from_int (float_to_int x))
+        f (float_sub x t)
+        up (if (float_lt x 0.0) -1.0 1.0)
+        af (nn_abs f))
+    (if (float_lt af 0.5) t
+        (float_gt af 0.5) (float_add t up)
+        (eq (mod (float_to_int t) 2) 0) t
+        (float_add t up))))
+
+; The n entries of a from at quantized to int8 and back, in place, as
+; the engine quantizes an activation row: scaled so the largest in
+; size is 127, rounded, kept within -128 and 127, scaled back. A row of
+; zeros stays.
+(def nn_act_quant ((a (array float)) (at int) (n int)) (array float)
+  (let m (nn_absmax a at (add at n) 0.0)
+    (if (float_le m 0.0) a (nn_quant_range a at (add at n) (float_div m 127.0)))))
+
+; The largest size of a's entries from k up to e, after m.
+(def nn_absmax ((a (array float)) (k int) (e int) (m float)) float
+  (if (ge k e) m (nn_absmax a (add k 1) e (float_max m (nn_abs (array_get a k))))))
+
+; a's entries from k up to e each rounded to a whole number of s,
+; within -128 s and 127 s, in place.
+(def nn_quant_range ((a (array float)) (k int) (e int) (s float)) (array float)
+  (if (ge k e)
+      a
+      (let q (float_min 127.0 (float_max -128.0 (nn_round_even (float_div (array_get a k) s))))
+        (nn_quant_range (array_set a k (float_mul q s)) (add k 1) e s))))
+
+; Each of a's rows of n, t of them, quantized as nn_act_quant, in place.
+(def nn_act_quant_rows ((a (array float)) (t int) (n int)) (array float)
+  (nn_quant_rows_from a t n 0))
+(def nn_quant_rows_from ((a (array float)) (t int) (n int) (r int)) (array float)
+  (if (ge r t) a (nn_quant_rows_from (nn_act_quant a (mul r n) n) t n (add r 1))))
+
+; ---------------------------------------------------------------- vectors
+
+; An FP16 or FP32 tensor k of c in b, all of it, as floats.
+(def nn_vector ((c Cact) (b bytes) (k int)) (array float)
+  (let t (cact_tensor c k)
+    (nn_vector_from b t 0 (array_new (nn_product (.shape t)) 0.0))))
+(def nn_vector_from ((b bytes) (t CactTensor) (k int) (a (array float))) (array float)
+  (if (ge k (array_len a)) a (nn_vector_from b t (add k 1) (array_set a k (cact_number b t k)))))
+
+; The product of ns, 1 for none.
+(def nn_product ((ns (list int))) int (if (is_empty ns) 1 (mul (head ns) (nn_product (tail ns)))))
+
+; n binary32 zeros, as bytes: 4 of them doubled until there are enough.
+(def nn_zeros ((n int)) bytes
+  (bytes_slice (nn_zeros_doubled (bytes_from_list (cons 0 (cons 0 (cons 0 (cons 0 (nil int)))))) (mul 4 (max n 1))) 0 (mul 4 n)))
+(def nn_zeros_doubled ((z bytes) (len int)) bytes
+  (if (ge (bytes_len z) len) z (nn_zeros_doubled (bytes_concat (cons z (cons z (nil bytes)))) len)))
+
+; --------------------------------------------------------------- matrices
+
+; A matrix of rows by cols, its binary32s row after row in w.
+(data NnMat (NnMat (rows int) (cols int) (w bytes)))
+
+; The CQ matrix k of c in b, dequantized a row at a time (cq_row).
+(def nn_mat ((c Cact) (b bytes) (k int)) NnMat
+  (let (t (cact_tensor c k)
+        rows (cq_rows t)
+        cols (cq_width t))
+    (NnMat rows cols (nn_mat_rows c b t 0 rows cols (nn_zeros (mul rows cols))))))
+(def nn_mat_rows ((c Cact) (b bytes) (t CactTensor) (r int) (rows int) (cols int) (w bytes)) bytes
+  (if (ge r rows)
+      w
+      (nn_mat_rows c b t (add r 1) rows cols (nn_put_f32s w (mul r cols) (cq_row c b t r) 0))))
+
+; The floats of a from k stored as binary32s into w from entry at plus
+; k, in place.
+(def nn_put_f32s ((w bytes) (at int) (a (array float)) (k int)) bytes
+  (if (ge k (array_len a)) w (nn_put_f32s (bytes_set_f32 w (mul 4 (add at k)) (array_get a k)) at a (add k 1))))
+
+; x's t rows of m's cols each times m: t rows of m's rows, row i of the
+; result entry o the dot product of x's row i and m's row o, as a Dense
+; layer of no bias computes with its kernel m transposed.
+(def nn_matmul ((m NnMat) (x (array float)) (t int)) (array float)
+  (nn_matmul_part m x t 0 (.rows m)))
+
+; The same with only m's rows from first, n of them: t rows of n.
+(def nn_matmul_part ((m NnMat) (x (array float)) (t int) (first int) (n int)) (array float)
+  (nn_matmul_rows m x t first n 0 (nn_zeros (.cols m)) (array_new (mul t n) 0.0)))
+(def nn_matmul_rows ((m NnMat) (x (array float)) (t int) (first int) (n int) (i int) (row bytes) (out (array float))) (array float)
+  (if (ge i t)
+      out
+      (let (cols (.cols m)
+            r (nn_put_row row x (mul i cols) cols 0))
+        (nn_matmul_rows m x t first n (add i 1) r (nn_dots m r (mul i n) first first (add first n) out)))))
+
+; x's n entries from at as binary32s into row, from its start, in place.
+(def nn_put_row ((row bytes) (x (array float)) (at int) (n int) (k int)) bytes
+  (if (ge k n) row (nn_put_row (bytes_set_f32 row (mul 4 k) (array_get x (add at k))) x at n (add k 1))))
+
+; Each of m's rows from o up to e dotted with row, into out from at, row
+; first at at.
+(def nn_dots ((m NnMat) (row bytes) (at int) (first int) (o int) (e int) (out (array float))) (array float)
+  (if (ge o e)
+      out
+      (let d (bytes_dot_f32 (.w m) (mul 4 (mul o (.cols m))) row 0 (.cols m))
+        (nn_dots m row at first (add o 1) e (array_set out (add at (sub o first)) d)))))
+
+; ------------------------------------------------------------------- rows
+
+; x's t rows of d, each over its root mean square (with eps under the
+; root) and times 1 plus scale's entry: the zero-centred RMS norm, and
+; with a scale of zeros the unit RMS one. A new array.
+(def nn_norm_rows ((x (array float)) (t int) (d int) (scale (array float)) (eps float)) (array float)
+  (nn_norm_from x t d scale eps 0 (array_new (mul t d) 0.0)))
+(def nn_norm_from ((x (array float)) (t int) (d int) (scale (array float)) (eps float) (r int) (out (array float))) (array float)
+  (if (ge r t)
+      out
+      (let (at (mul r d)
+            ms (float_div (nn_squares x at (add at d) 0.0) (float_from_int d))
+            inv (float_div 1.0 (float_sqrt (float_add ms eps))))
+        (nn_norm_from x t d scale eps (add r 1) (nn_norm_row x at d scale inv 0 out)))))
+(def nn_norm_row ((x (array float)) (at int) (d int) (scale (array float)) (inv float) (k int) (out (array float))) (array float)
+  (if (ge k d)
+      out
+      (let v (float_mul (float_mul (array_get x (add at k)) inv) (float_add 1.0 (array_get scale k)))
+        (nn_norm_row x at d scale inv (add k 1) (array_set out (add at k) v)))))
+
+; The sum of the squares of x's entries from k up to e, after s.
+(def nn_squares ((x (array float)) (k int) (e int) (s float)) float
+  (if (ge k e) s (let v (array_get x k) (nn_squares x (add k 1) e (float_add s (float_mul v v))))))
+
+; a with s times b's entries added, entry by entry, in place.
+(def nn_add_into ((a (array float)) (b (array float)) (s float)) (array float)
+  (nn_add_from a b s 0))
+(def nn_add_from ((a (array float)) (b (array float)) (s float) (k int)) (array float)
+  (if (ge k (array_len a))
+      a
+      (nn_add_from (array_set a k (float_add (array_get a k) (float_mul s (array_get b k)))) b s (add k 1))))
+
+; The n entries of a from at turned into their softmax, in place.
+(def nn_softmax ((a (array float)) (at int) (n int)) (array float)
+  (let (m (nn_most a at (add at n) (array_get a at))
+        e (nn_exps a at (add at n) m 0.0))
+    (nn_scale_range (.a e) at (add at n) (float_div 1.0 (.s e)))))
+
+; The largest of a's entries from k up to e, after m.
+(def nn_most ((a (array float)) (k int) (e int) (m float)) float
+  (if (ge k e) m (nn_most a (add k 1) e (float_max m (array_get a k)))))
+
+; An array and a sum.
+(data NnSum (NnSum (a (array float)) (s float)))
+
+; a's entries from k up to e made e^(x - m), in place, and their sum.
+(def nn_exps ((a (array float)) (k int) (e int) (m float) (s float)) NnSum
+  (if (ge k e)
+      (NnSum a s)
+      (let v (float_exp (float_sub (array_get a k) m))
+        (nn_exps (array_set a k v) (add k 1) e m (float_add s v)))))
+
+; a's entries from k up to e times s, in place.
+(def nn_scale_range ((a (array float)) (k int) (e int) (s float)) (array float)
+  (if (ge k e) a (nn_scale_range (array_set a k (float_mul (array_get a k) s)) (add k 1) e s)))
+
+; Each of a's rows of d, t of them, cut into pieces of n, each piece
+; quantized as nn_act_quant, in place: a head's query, key or value.
+(def nn_quant_pieces ((a (array float)) (t int) (d int) (n int)) (array float)
+  (nn_quant_rows_from a (div (mul t d) n) n 0))

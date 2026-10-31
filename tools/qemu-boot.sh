@@ -43,6 +43,12 @@
 # root=UUID to boot from that system volume. QEMU_INPUT=usb gives the
 # board a qemu-xhci on PCIe with a USB keyboard and mouse on it, for
 # pcie, xhci and usb-hid, in place of the virtio keyboard and tablet.
+# QEMU_USB, with QEMU_INPUT=usb, is more devices on that qemu-xhci, words
+# separated by spaces: audio, QEMU's usb-audio, a speaker of 16-bit
+# stereo at 48 kHz whose sound is dropped, for usb-audio; or VID:PID, in
+# hex, a device of this host passed through to the board (usb-host), as
+# a Blue Yeti Nano is, 046d:0acf, which needs its /dev/bus/usb node
+# writable by this user, and which the host cannot use meanwhile.
 # QEMU_NO_REBOOT=1 makes a reset of the board, as sh's reboot asks, end
 # QEMU with status 0, as l0 boot's -no-reboot does, rather than boot the
 # board again: the tests that reboot it use it.
@@ -82,6 +88,13 @@ if [ "${QEMU_NO_REBOOT:-}" = 1 ]; then noreboot=(-no-reboot); fi
 input=(-device virtio-keyboard-device -device virtio-tablet-device)
 if [ "${QEMU_INPUT:-virtio}" = usb ]; then
   input=(-device qemu-xhci -device usb-kbd -device usb-mouse)
+  for u in ${QEMU_USB:-}; do
+    if [ "$u" = audio ]; then
+      input+=(-audiodev none,id=snd0 -device usb-audio,audiodev=snd0)
+    else
+      input+=(-device "usb-host,vendorid=0x${u%%:*},productid=0x${u##*:}")
+    fi
+  done
 fi
 mode=${GPU:-2d}
 if [ "$mode" = gl ]; then
@@ -98,7 +111,7 @@ else
 fi
 gpu=$gpudev${QEMU_GPU:+,$QEMU_GPU}
 len=$(wc -c < "$initramfs" | tr -d ' ')
-exec "$qemu" -M virt,virtualization=on -cpu cortex-a72 -smp "${QEMU_CPUS:-1}" -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
+exec "$qemu" -M virt,virtualization=on -cpu cortex-a76 -smp "${QEMU_CPUS:-1}" -m 2G -display "$display" -monitor "$monitor" ${qmp[@]+"${qmp[@]}"} \
   -rtc base=utc \
   -global virtio-mmio.force-legacy=false \
   -device "$gpu" "${input[@]}" -device virtio-rng-device \

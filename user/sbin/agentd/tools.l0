@@ -1,6 +1,6 @@
 ; tools.l0 -- agentd's tools: their definitions, as the model is told
-; them; the file tools, read_file, write_file, list_dir and make_dir;
-; and run and sh, which start a program, agentd its terminal, and give
+; them; the file tools, read_file, write_file, list_dir, make_dir,
+; remove, rename, file_info and volumes; and run and sh, which start a program, agentd its terminal, and give
 ; back its exit status and what it wrote (a Run, pure, keeps that).
 ; Each takes its input as JSON and answers a text, or a failure the
 ; model reads (a ToolAnswer). A relative path is from the agent's home,
@@ -88,23 +88,31 @@
 
 ; Whether name is one of the file tools.
 (def is_file_tool ((name (list int))) bool
-  (any_eq name (split_spaces "read_file write_file list_dir make_dir")))
+  (any_eq name (split_spaces "read_file write_file list_dir make_dir remove rename file_info volumes")))
 
 ; The file tool name done with input, its paths from home; a write in
 ; home kept in its history as conv's, at now. A write to the home's
 ; fixed part is refused before anything is touched.
 (def tool_file ((home (list int)) (name (list int)) (input Json) (conv (list int)) (now int)) ToolAnswer
-  (match (tool_str input "path")
-    ((None) (tool_failed "path is missing, or not a string"))
-    ((Some p)
-      (let (path (tool_path home p)
-            writes (any_eq name (split_spaces "write_file make_dir")))
-        (if (and writes (home_fixed home path)) (tool_failed (append path ": is fixed: the constitution and the history are not yours to change"))
-            (eq name "read_file") (read_file path)
-            (eq name "write_file") (write_file home path (json_get input "content") conv now)
-            (eq name "list_dir") (list_dir path)
-            (eq name "make_dir") (make_dir home path conv now)
-            (tool_failed (append "no tool " name)))))))
+  (if (eq name "volumes") (volumes_told (fs_volumes))
+      (eq name "rename") (rename_tool home input conv now)
+      (match (tool_str input "path")
+        ((None) (tool_failed "path is missing, or not a string"))
+        ((Some p)
+          (let (path (tool_path home p)
+                writes (any_eq name (split_spaces "write_file make_dir remove")))
+            (if (and writes (home_fixed home path)) (fixed_refused path)
+                (eq name "read_file") (read_file path)
+                (eq name "write_file") (write_file home path (json_get input "content") conv now)
+                (eq name "list_dir") (list_dir path)
+                (eq name "make_dir") (make_dir home path conv now)
+                (eq name "remove") (remove_path home path conv now)
+                (eq name "file_info") (file_info path)
+                (tool_failed (append "no tool " name))))))))
+
+; A write to the home's fixed part, at path, refused.
+(def fixed_refused ((path (list int))) ToolAnswer
+  (tool_failed (append path ": is fixed: the constitution and the history are not yours to change")))
 
 ; read_file: the file's text, cut at tool_max bytes.
 (def read_file ((path (list int))) ToolAnswer
@@ -173,6 +181,110 @@
             (tool_ok (bytes_from_list (append "made " path)))
             (tool_failed (append path (append ": " why)))))))
 
+; What is at path, as its file server's stat says: a directory, a file
+; of a size and whether it is a program, or the code it refused with.
+(def path_kind ((path (list int))) FsKind
+  (match (fs_path_ask "stat" path "")
+    ((FsReply w rest) (if (lt w 0) (FsNoKind w) (fs_kind_of rest)))))
+
+; file_info: what is at path, a directory or a file, its size, and
+; whether it is a program; on the initramfs, while / is it, which of the
+; two it is.
+(def file_info ((path (list int))) ToolAnswer
+  (if (on_initramfs path)
+      (let names (root_paths)
+        (if (any_eq path names) (tool_ok (bytes_from_list (append path ": a file, on the initramfs")))
+            (any_eq (append path "/") names) (tool_ok (bytes_from_list (append path ": a directory, on the initramfs")))
+            (tool_failed (append path ": nothing is there"))))
+      (match (path_kind path)
+        ((FsIsDir) (tool_ok (bytes_from_list (append path ": a directory"))))
+        ((FsIsFile size exec)
+          (tool_ok (bytes_from_list (append path (append ": a file of " (append (digits size) (if exec " bytes, a program" " bytes")))))))
+        ((FsNoKind code) (tool_failed (append path (append ": " (io_error code))))))))
+
+; remove: the file at path removed, or the directory if it is empty; in
+; home, kept in its history, so it can be undone.
+(def remove_path ((home (list int)) (path (list int)) (conv (list int)) (now int)) ToolAnswer
+  (if (on_initramfs path)
+      (tool_failed (append path ": the initramfs cannot be changed"))
+      (let (inside (home_inside home path)
+            why (match (path_kind path)
+                  ((FsIsDir) (if inside (home_rmdir home path conv now) (removed_why (fs_removed path) true)))
+                  ((FsIsFile size exec) (if inside (home_remove home path conv now) (removed_why (fs_removed path) false)))
+                  ((FsNoKind code) (io_error code))))
+        (if (is_empty why)
+            (tool_ok (bytes_from_list (append "removed " path)))
+            (tool_failed (append path (append ": " why)))))))
+
+; Why removing failed, its code from fs; nothing for 0. A directory's -4
+; is that it is not empty.
+(def removed_why ((code int) (dir bool)) (list int)
+  (if (eq code 0) ""
+      (and dir (eq code -4)) "it is not empty"
+      (io_error code)))
+
+; rename: the file or directory at from given the name to, on the same
+; volume. A file in home, or going into it, is written anew at to and
+; removed at from, each kept in its history, so either can be undone; a
+; directory there is refused, as the history keeps files.
+(def rename_tool ((home (list int)) (input Json) (conv (list int)) (now int)) ToolAnswer
+  (match (tool_str input "from")
+    ((None) (tool_failed "from is missing, or not a string"))
+    ((Some f)
+      (match (tool_str input "to")
+        ((None) (tool_failed "to is missing, or not a string"))
+        ((Some t)
+          (let (from (tool_path home f)
+                to (tool_path home t)
+                kept (or (home_inside home from) (home_inside home to)))
+            (if (home_fixed home from) (fixed_refused from)
+                (home_fixed home to) (fixed_refused to)
+                (or (on_initramfs from) (on_initramfs to)) (tool_failed "the initramfs cannot be changed")
+                (match (path_kind from)
+                  ((FsNoKind code) (tool_failed (append from (append ": " (io_error code)))))
+                  ((FsIsDir) (if kept (tool_failed (append from ": a directory in your home is not renamed, as its history keeps files: make the new one and rename each file into it")) (renamed from to)))
+                  ((FsIsFile size exec) (if kept (renamed_kept home from to conv now) (renamed from to)))))))))))
+
+; The file or directory at from renamed to, by the kernel's rename.
+(def renamed ((from (list int)) (to (list int))) ToolAnswer
+  (match (rename_file from to)
+    ((Done) (tool_ok (bytes_from_list (append "renamed " (append from (append " to " to))))))
+    ((NotDone fault why) (tool_failed (append from (append ": " why))))))
+
+; The file at from written anew at to and removed at from, each kept in
+; home's history where it is in home.
+(def renamed_kept ((home (list int)) (from (list int)) (to (list int)) (conv (list int)) (now int)) ToolAnswer
+  (match (read_whole from)
+    ((Err why) (tool_failed (append from (append ": " why))))
+    ((Ok b)
+      (let w (home_write home to b conv now)
+        (if (not (is_empty w))
+            (tool_failed (append to (append ": " w)))
+            (let r (if (home_inside home from) (home_remove home from conv now) (removed_why (fs_removed from) false))
+              (if (is_empty r)
+                  (tool_ok (bytes_from_list (append "renamed " (append from (append " to " to)))))
+                  (tool_failed (append "wrote " (append to (append ", but " (append from (append " is still there: " r)))))))))))))
+
+; volumes: a line for each volume mounted, its path, its size and what
+; is free, and its files, by its file server's df.
+(def volumes_told ((vols (list (list int)))) ToolAnswer
+  (if (is_empty vols)
+      (tool_ok (bytes_from_list "no volumes are mounted"))
+      (tool_ok (bytes_from_list (join_lines (volume_lines vols (nil (list int))))))))
+
+; Each volume's line onto acc, reversed; then in order.
+(def volume_lines ((vols (list (list int))) (acc (list (list int)))) (list (list int))
+  (if (is_empty vols)
+      (rev acc)
+      (volume_lines (tail vols) (cons (volume_line (head vols) (fs_df (head vols))) acc))))
+
+; A volume's line, as df said its space: clusters of 4096 bytes.
+(def volume_line ((vol (list int)) (space FsSpace)) (list int)
+  (match space
+    ((FsSpace sectors clusters free files)
+      (append vol (append ": " (append (format_size (mul clusters 4096)) (append ", " (append (format_size (mul free 4096)) (append " free, " (append (digits files) " files"))))))))
+    ((FsSpaceRefused code) (append vol (append ": " (io_error code))))))
+
 ; ------------------------------------------------------------ definitions
 
 ; A tool's definition: its name, what it does, and its input's JSON
@@ -215,7 +327,15 @@
               (cons (path_prop "The directory") (nil JField)))
         (cons (tool_def "make_dir" "Make a directory, on a volume; the one it is in must be there."
                 (cons (path_prop "The directory") (nil JField)))
-              (nil Json))))))
+          (cons (tool_def "remove" "Remove a file, or a directory if it is empty. In your home, it can be undone with agent undo."
+                  (cons (path_prop "The file or directory") (nil JField)))
+            (cons (tool_def "rename" "Give a file or directory another name or place, on the same volume; the directory it goes into must be there."
+                    (cons (tool_prop "from" "string" "Its name now; a relative path is from your home")
+                      (cons (tool_prop "to" "string" "Its new name; a relative path is from your home") (nil JField))))
+              (cons (tool_def "file_info" "Say what is at a path: a directory, or a file, its size, and whether it is a program."
+                      (cons (path_prop "The path") (nil JField)))
+                (cons (tool_def "volumes" "List the volumes mounted, /Volumes/LABEL, with their size, what is free and how many files." (nil JField))
+                      (nil Json))))))))))
 
 ; The definitions of run and sh.
 (def run_tool_defs () (list Json)
@@ -232,13 +352,14 @@
             (cons (tool_prop "command" "string" "The line") (nil JField)))
           (nil Json))))
 
-; Every tool's definition: the file tools', then run's and sh's.
+; Every tool's definition: the file tools', run's and sh's, then the
+; desktop's and the clock's (desk.l0).
 (def tool_defs () (list Json)
-  (append (file_tool_defs) (run_tool_defs)))
+  (append (file_tool_defs) (append (run_tool_defs) (desk_tool_defs))))
 
 ; Every tool's name, as the system prompt lists them.
 (def tool_names () (list (list int))
-  (split_spaces "read_file write_file list_dir make_dir run sh"))
+  (append (split_spaces "read_file write_file list_dir make_dir remove rename file_info volumes run sh") (desk_tool_names)))
 
 ; ------------------------------------------------------ running programs
 

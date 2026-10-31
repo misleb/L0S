@@ -40,15 +40,31 @@ move independently, so several can be active at once.
 | [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 | agent.md |
 | [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
 | [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
-| [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | idea | – | 0043 | agent.md, programs.md, desktop.md, testing.md |
+| [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | active | 4/5 | 0043 | agent.md, programs.md, boot.md, toolkit.md, testing.md |
 | [0050](0050-hvs-crowded-lines.md) `hvs` at 4K: crowded lines and a whole-screen flash | Display | idea | – | 0038 | display.md |
 | [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
 | [0057](0057-tz-database.md) Any time zone, by the tz database's rules | Desktop | idea | – | 0029 | desktop.md, fat32.md, programs.md |
+| [0059](0059-usb-microphone.md) A USB microphone | Pi 5 | active | 4/6 | – | devices.md, sound.md, programs.md, testing.md |
+| [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 6/8 | – | speech.md, programs.md, testing.md |
+| [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058, 0059, 0060 | agent.md, speech.md, programs.md, testing.md |
 ## Ready
 
-Every goal left is an `idea`, without steps. On the display,
+[0049](0049-agent-chat-app.md) is active: `agentd`'s one kept
+conversation and the Agent app, with its Tools pane, are in, and its
+screen test is next. [0059](0059-usb-microphone.md) is active:
+isochronous USB, `usb-audio` and `rec` are in on QEMU, and a real
+microphone, the Yeti Nano passed through and then on a Pi 5, is next.
+[0060](0060-speech-to-text.md), Whistle in L0, is active: its
+container, tokenizer, front end, stem, encoder and decoder are in,
+checked against the reference rebuilt from `whistle.cact` (the same
+tokens from a WAV file on the host), and `listen` gives the
+reference's text on QEMU (`tests/listen.sh`); more clips, then the Pi
+5's timing, are next.
+Every
+other goal left is an `idea`, without steps. On
+the display,
 [0050](0050-hvs-crowded-lines.md) (crowded lines and the whole-screen
 flash at 4K), [0039](0039-paced-drawing-areas.md) and
 [0040](0040-paint-at-scale-2.md) follow from 0038's runs.
@@ -78,6 +94,10 @@ graph LR
   0043 --> 0045[0045 builder MCP]
   0045 --> 0046[0046 self-knowledge]
   0043 --> 0049[0049 agent chat app]
+  0049 --> 0058[0058 agent's reach]
+  0058 --> 0061[0061 speech service]
+  0059[0059 USB microphone] --> 0061
+  0060[0060 Whistle in L0] --> 0061
   0041 --> 0048[0048 TLS client]
   0047[0047 Pi 5 random] --> 0048
 ```
@@ -122,6 +142,7 @@ graph LR
 | [0054](0054-l0-adoption.md) L0S written in the L0 of roadmap 0132 to 0144 | Tooling | 2026-10-30 |
 | [0055](0055-network-time.md) The time from the network, once it comes up | Network | 2026-10-30 |
 | [0056](0056-time-zones.md) Time zones: the clock in UTC, shown in US Pacific time | Desktop | 2026-10-30 |
+| [0058](0058-agent-reach.md) The agent's reach: where a prompt came from, and the desktop, the files and the clock | Agent | 2026-10-31 |
 
 ## Template
 

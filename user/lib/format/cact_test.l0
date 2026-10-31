@@ -1,0 +1,131 @@
+; cact_test.l0 -- Needle 3's container read from a small one built here:
+; two tensors, an FP16 vector and a CQ matrix of 2 bits, whose rows come
+; back through the codebook, the norms and the Walsh-Hadamard transform;
+; and the binary16 and binary32 numbers it holds.
+
+; n copies of byte x, after acc.
+(def copies ((x int) (n int) (acc (list int))) (list int)
+  (if (le n 0) acc (copies x (sub n 1) (cons x acc))))
+
+; The header's 48 u32s: the tag, 2 tensors, 28 codebook floats, the rest
+; 0; then rope theta, an f32, 0.
+(def header () (list int)
+  (append (u32_le (cact_tag)) (append (u32_le 2) (append (u32_le 28) (append (copies 0 (mul 4 45) (nil int)) (u32_le 0))))))
+
+; The codebooks: 2 bits' -0.5 -0.25 0.25 0.5 (0xBF000000, 0xBE800000,
+; 0x3E800000, 0x3F000000), and 24 more floats of 0.
+(def codebooks () (list int)
+  (append (u32_le 3204448256) (append (u32_le 3196059648) (append (u32_le 1048576000) (append (u32_le 1056964608) (copies 0 96 (nil int)))))))
+
+; A record: type, dimensions, then the four, offset, size, group, bits.
+(def record ((dtype int) (shape (list int)) (offset int) (size int) (group int) (bits int)) (list int)
+  (append (cons dtype (cons (length shape) (cons 0 (cons 0 (nil int)))))
+    (append (u32_le (nth_or shape 0 0)) (append (u32_le (nth_or shape 1 0)) (append (u32_le 0) (append (u32_le 0)
+      (append (le64 offset) (append (le64 size) (append (u32_le group) (u32_le bits))))))))))
+
+; The header and codebooks end at 308, the two records at 396; the FP16
+; vector [1, -2] (0x3C00, 0xC000) at 448, the next 64 bytes; the CQ
+; matrix of 2 rows by 8 at 512: row 0's 32 bytes of indices all 3,
+; 0xFF, row 1's alternating 3 and 0, 0x33, then each row's one norm,
+; 1.0.
+(def small () bytes
+  (bytes_from_list
+    (concat (cons (header) (cons (codebooks)
+      (cons (record 1 (cons 2 (nil int)) 448 4 0 0)
+      (cons (record 3 (cons 2 (cons 8 (nil int))) 512 68 128 2)
+      (cons (copies 0 52 (nil int))
+      (cons (append (le16 15360) (le16 49152))
+      (cons (copies 0 60 (nil int))
+      (cons (copies 255 32 (nil int))
+      (cons (copies 51 32 (nil int))
+      (cons (append (le16 15360) (le16 15360)) (nil (list int)))))))))))))))
+
+(def small_cact () Cact
+  (match (cact_of (small)) ((Ok c) c) ((Err why) (Cact (array_new 48 0) (array_new 0 0.0) (array_new 0 (CactTensor 0 (nil int) 0 0 0 0))))))
+
+; A float to 3 places, as text.
+(def f3 ((x float)) (list int)
+  (let n (float_to_int (float_mul x 1000.0))
+    (if (lt n 0) (append "-" (digits (sub 0 n))) (digits n))))
+
+; Its header and directory read: two tensors, the matrix's shape and
+; where it is.
+(def test_directory () int
+  (let c (small_cact)
+    (add (check_int "tensors" (cact_count c) 2)
+         (add (check_str "shape" (unwords (numbers_words (.shape (cact_tensor c 1)))) "2 8")
+              (check_int "offset" (.offset (cact_tensor c 1)) 512)))))
+
+; The FP16 vector's numbers, and a codebook float, -0.5.
+(def test_numbers () int
+  (let (b (small) c (small_cact))
+    (add (check_str "one" (f3 (cact_number b (cact_tensor c 0) 0)) "1000")
+         (add (check_str "minus two" (f3 (cact_number b (cact_tensor c 0) 1)) "-2000")
+              (check_str "codebook" (f3 (array_get (.cb c) 0)) "-500")))))
+
+; Row 0, every weight 0.5 before the rotation: all of it in entry 0,
+; 0.5 times 128 over the square root of 128, 5.656.
+(def test_row_constant () int
+  (let r (cq_row (small_cact) (small) (cact_tensor (small_cact) 1) 0)
+    (add (check_int "width" (array_len r) 8)
+         (add (check_str "first" (f3 (array_get r 0)) "5656")
+              (check_str "second" (f3 (array_get r 1)) "0")))))
+
+; Row 1, alternating 0.5 and -0.5: all of it in entry 1, (-1) to the
+; low bit, the same 5.656.
+(def test_row_alternating () int
+  (let r (cq_row (small_cact) (small) (cact_tensor (small_cact) 1) 1)
+    (add (check_str "first" (f3 (array_get r 0)) "0")
+         (check_str "second" (f3 (array_get r 1)) "5656"))))
+
+; binary16: 1.0, -2.0, the smallest subnormal 2^-24 (to 9 places, 0.000000059),
+; and 65504, the largest; binary32: 1.0 and -0.5.
+(def test_halves () int
+  (add (check_str "one" (f3 (f16_of 15360)) "1000")
+       (add (check_str "minus two" (f3 (f16_of 49152)) "-2000")
+            (add (check_int "subnormal" (float_to_int (float_mul (f16_of 1) 1000000000.0)) 59)
+                 (add (check_str "largest" (f3 (f16_of 31743)) "65504000")
+                      (add (check_str "f32 one" (f3 (f32_of 1065353216)) "1000")
+                           (check_str "f32 half" (f3 (f32_of 3204448256)) "-500")))))))
+
+; A tokenizer of five pieces, a header of 24 bytes then each piece's
+; score (0), type, length and bytes: <unk> unknown, </s> control, the
+; meta space U+2581 then "hi", ",", and the byte <0x21>, "!"; the end's
+; ID 1, a space put before the text.
+(def tokenizer () (list int)
+  (concat (cons (u32_le 5) (cons (u32_le 0) (cons (u32_le 1) (cons (u32_le 2) (cons (u32_le 0) (cons (cons 1 (cons 1 (cons 0 (cons 0 (nil int)))))
+    (cons (piece 1 "<unk>") (cons (piece 2 "</s>") (cons (piece 0 (cons 226 (cons 150 (cons 129 "hi")))) (cons (piece 0 ",") (cons (piece 4 "<0x21>") (nil (list int)))))))))))))))
+
+; A piece's record: its score, type, length and bytes.
+(def piece ((type int) (s (list int))) (list int)
+  (append (u32_le 0) (cons type (append (le16 (length s)) s))))
+
+; A container of the tokenizer alone, a RAW record at 448.
+(def with_tokenizer () bytes
+  (let tk (tokenizer)
+    (bytes_from_list
+      (concat (cons (append (u32_le (cact_tag)) (append (u32_le 1) (append (u32_le 28) (append (copies 0 (mul 4 45) (nil int)) (u32_le 0)))))
+        (cons (codebooks)
+        (cons (record 4 (nil int) 352 (length tk) 0 0)
+        (cons tk (nil (list int))))))))))
+
+; Its pieces read; IDs decoded: the meta space a space, the first one
+; gone, the control piece nothing, the byte piece its byte.
+(def test_tokenizer () int
+  (let b (with_tokenizer)
+    (match (cact_of b)
+      ((Err why) (check_str "read" why ""))
+      ((Ok c)
+        (match (cact_pieces c b)
+          ((Err why) (check_str "pieces" why ""))
+          ((Ok p)
+            (add (check_int "count" (pieces_count p) 5)
+                 (add (check_str "decoded" (pieces_decode p b (cons 2 (cons 3 (cons 2 (cons 4 (cons 1 (nil int))))))) "hi, hi!")
+                      (check_int "end" (.eos p) 1)))))))))
+
+; Another tag, an old one, and too few bytes are refused.
+(def test_refused () int
+  (add (check_str "old" (match (cact_of (bytes_from_list (append (u32_le (cact_tag_old)) (copies 0 300 (nil int))))) ((Ok c) "read") ((Err w) w))
+         "a Needle 2 container, which this does not read")
+       (add (check_str "other" (match (cact_of (bytes_from_list (copies 0 300 (nil int)))) ((Ok c) "read") ((Err w) w)) "not a Needle 3 .cact container")
+            (check_str "short" (match (cact_of (bytes_from_list (copies 0 10 (nil int)))) ((Ok c) "read") ((Err w) w)) "too short for a .cact header"))))

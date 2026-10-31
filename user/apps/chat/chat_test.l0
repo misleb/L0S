@@ -1,0 +1,119 @@
+; chat_test.l0 -- Agent's transcript and tools' log: notices heard into
+; items, the paragraphs each pane shows, a tool's row opened, the
+; answers to its asks, and when it may say.
+
+(def bb ((s (list int))) bytes (bytes_from_list s))
+
+; Each of es heard, in order.
+(def heard_all ((c Chat) (es (list AgentEvent))) Chat
+  (if (is_empty es) c (heard_all (heard c (head es)) (tail es))))
+
+; Paragraphs as text: each its text, after > for an icon's, ! for an
+; error's, ~ for a dimmed one, * for bold, joined by |.
+(def paras_text ((ps (list UiPara))) (list int)
+  (if (is_empty ps)
+      ""
+      (let p (head ps)
+        (append (append (if (is_empty (.icon p)) "" (append (.icon p) ">"))
+                        (match (.kind p) ((UiLinePlain) "") ((UiLineStrong) "*") ((UiLineDim) "~") ((UiLineBad) "!")))
+                (append (.text p) (if (is_empty (tail ps)) "" (cons 124 (paras_text (tail ps)))))))))
+
+; A turn told as agentd tells it: said, two pieces of text, a tool and
+; its result, the rest of the text, and done.
+(def a_turn () (list AgentEvent)
+  (cons (AgentSaid "app" (bb "make a note"))
+    (cons (AgentText (bb "Making"))
+      (cons (AgentText (bb " it."))
+        (cons (AgentTool "write_file" (bb "{\"path\":\"n\"}"))
+          (cons (AgentResult "write_file" false (bb "wrote 3 bytes"))
+            (cons (AgentText (bb "Done.\nIt is n."))
+              (cons (AgentDone "end_turn") (nil AgentEvent)))))))))
+
+; The pieces join, the tool is named in a dimmed line, and the text
+; after it is a paragraph a line; the turn over.
+(def test_turn () int
+  (let c (heard_all (chat_new) (a_turn))
+    (add (check_str "paras" (paras_text (chat_paras (.items c)))
+           "|*make a note|Making it.|~Ran write_file|Done.|It is n.")
+         (check_bool "idle" (.busy c) false))))
+
+; The log: what was said, dimmed, and the tool a closed row under it.
+(def test_log () int
+  (check_str "paras" (paras_text (log_paras (.log (heard_all (chat_new) (a_turn)))))
+    "|~> make a note|go-next>~write_file  {\"path\":\"n\"}"))
+
+; Tools run one after another are one line; text between parts them.
+(def test_ran () int
+  (let c (heard_all (chat_new) (cons (AgentTool "sh" (bb "{}")) (cons (AgentTool "run" (bb "{}")) (cons (AgentText (bb "So.")) (cons (AgentTool "time" (bb "{}")) (nil AgentEvent))))))
+    (check_str "paras" (paras_text (chat_paras (.items c))) "~Ran sh, run|So.|~Ran time")))
+
+; Said from elsewhere, the transcript says where; the log's line is
+; its first line, cut.
+(def test_said_from () int
+  (let c (heard (chat_new) (AgentSaid "speech" (bb "what time is it\nnow")))
+    (add (check_str "transcript" (paras_text (chat_paras (.items c))) "|~From speech|*what time is it\nnow")
+         (check_str "log" (paras_text (log_paras (.log c))) "|~> what time is it..."))))
+
+; Said begins a turn, which runs until done.
+(def test_busy () int
+  (add (check_bool "said" (.busy (heard (chat_new) (AgentSaid "app" (bb "hi")))) true)
+       (check_bool "opened busy" (.busy (heard (chat_new) (AgentOpened true))) true)))
+
+; Opened, the row shows its input and result; opened again, it closes.
+(def test_tool_open () int
+  (let (c (heard_all (chat_new) (a_turn))
+        o (.log c (toggled (.log c) 0)))
+    (add (check_str "open" (paras_text (log_paras (.log o)))
+           "|~> make a note|pan-down>~write_file  {\"path\":\"n\"}|~Input:|~{\"path\":\"n\"}|~Result:|~wrote 3 bytes")
+         (check_str "closed" (paras_text (log_paras (toggled (.log o) 0))) (paras_text (log_paras (.log c)))))))
+
+; A failed run's row is red; one not ended yet says it runs.
+(def test_tool_failed_running () int
+  (let (f (heard_all (chat_new) (cons (AgentTool "run" (bb "{}")) (cons (AgentResult "run" true (bb "no x")) (nil AgentEvent))))
+        r (heard (chat_new) (AgentTool "sh" (bb "{}"))))
+    (add (check_str "failed" (paras_text (log_paras (.log f))) "go-next>!run failed  {}")
+         (check_str "running" (paras_text (log_paras (toggled (.log r) 0))) "pan-down>~sh  {}|~Input:|~{}|~Running..."))))
+
+; A result goes to the newest run of its tool that awaits one.
+(def test_result_to_its_run () int
+  (let c (heard_all (chat_new) (cons (AgentTool "sh" (bb "1")) (cons (AgentTool "run" (bb "2")) (cons (AgentResult "sh" true (bb "x")) (nil AgentEvent)))))
+    (check_str "sh failed" (paras_text (log_paras (.log c))) "go-next>!sh failed  1|go-next>~run  2")))
+
+; A long input is cut on its row.
+(def test_tool_brief () int
+  (let p (tool_row 0 "sh" (bytes_from_list (append (cons 34 (nil int)) (many 97 70 (nil int)))) ((None ToolEnd)) false)
+    (check_int "cut" (length (.text p)) (add (length "sh  ") (add (input_brief) 3)))))
+
+(def many ((c int) (n int) (acc (list int))) (list int) (if (le n 0) acc (many c (sub n 1) (cons c acc))))
+
+; Errors red, a compaction and a stop dimmed notes.
+(def test_notes () int
+  (let c (heard_all (chat_new) (cons (AgentError (bb "Overloaded")) (cons (AgentCompacted 9 1) (cons (AgentDone "stopped") (nil AgentEvent)))))
+    (check_str "notes" (paras_text (chat_paras (.items c))) "!Overloaded|~The conversation was compacted.|~Stopped.")))
+
+; A reply message from agentd, pid 7.
+(def reply ((s (list int))) Message (message_new 7 s))
+
+; Open's ok links; its refusal says why; no answer at all unlinks.
+(def test_answered_open () int
+  (add (check_bool "ok" (match (.link (answered (chat_new) (tag_open) (reply "ok"))) ((Linked) true) ((Linking) false) ((Unlinked w) false)) true)
+       (add (check_str "refused" (match (.link (answered (chat_new) (tag_open) (reply "error: no port 0"))) ((Unlinked w) w) ((Linked) "") ((Linking) "")) "no port 0")
+            (check_bool "gone" (match (.link (answered (chat_new) (tag_say) (RecvFailed))) ((Unlinked w) true) ((Linked) false) ((Linking) false)) true))))
+
+; A say refused, busy, ends the turn it would have begun, noted.
+(def test_answered_busy () int
+  (let c (answered (.busy (chat_new) true) (tag_say) (reply "error: busy"))
+    (add (check_bool "idle" (.busy c) false)
+         (check_str "noted" (paras_text (chat_paras (.items c))) "!busy"))))
+
+; It may say only linked, idle, with words in the entry.
+(def test_can_send () int
+  (let c (.entry (.link (chat_new) (Linked)) (UiEntryText " hi " 4))
+    (add (check_bool "yes" (can_send c) true)
+         (add (check_bool "busy" (can_send (.busy c true)) false)
+              (add (check_bool "blank" (can_send (.entry c (UiEntryText "  " 2))) false)
+                   (check_str "trimmed" (said_text c) "hi"))))))
+
+; Under an operating system there is no window server.
+(def test_entry () int
+  (check_int "fails" (chat) 1))

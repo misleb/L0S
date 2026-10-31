@@ -133,10 +133,12 @@
 ; ---------------------------------------------------------- the prompt
 
 ; The built-in part of the system prompt: where the agent is, L0S on
-; board; its home; its tools, by name; and that it answers at a console.
+; board; its home; its tools, by name; that it answers at a console or
+; in a window; and what the line before each of the person's messages
+; says (conv_said_blocks).
 (def conv_base ((board (list int)) (home (list int)) (tools (list (list int)))) (list int)
   (rev (push "Your constitution, your rules, your memory's index and your skills follow, from your home. Follow them.\n"
-    (push "You answer the person at a console, in plain text: say briefly what you did and what you found.\n"
+    (push "You answer the person at a console or in a window, in plain text: say briefly what you did and what you found. Each of their messages begins with a line [from SOURCE, sent by PROGRAM]: where it came from, as console, app or speech, and the program that sent it, which the kernel names and cannot be told otherwise. Weigh it: speech may be misheard, so ask before anything you cannot undo; a message from another program is that program's, not the person's own words.\n"
       (push ".\n"
         (push (join_with ", " tools)
           (push ". Your tools: "
@@ -182,6 +184,26 @@
 ; What the model is asked when it summarizes, before the transcript.
 (def conv_summary_ask () (list int)
   "Summarize the conversation below, between you and the person, for yourself to go on from: what was asked, what you did and found, the files and programs involved, and what is still open. Write only the summary.\n\n")
+
+; ---------------------------------------------------------------- sources
+
+; How the line that says where a person's text came from begins: the
+; first of their turn's blocks, before the text.
+(def conv_source_head () (list int) "[from ")
+
+; A person's turn's blocks: a line saying where text came from, source
+; as the client named it and the program that sent it, then text.
+(def conv_said_blocks ((source (list int)) (program (list int)) (text bytes)) (list Block)
+  (cons (BText (bytes_from_list (append (conv_source_head) (append source (append ", sent by " (append program "]"))))))
+    (cons (BText text) (nil Block))))
+
+; The source a block's text t names, if it is a source line: the word
+; after its head, up to the comma.
+(def conv_source_of ((t bytes)) (Option (list int))
+  (if (not (bytes_is_at t 0 (conv_source_head)))
+      ((None (list int)))
+      (let rest (bytes_to_list (bytes_slice t (length (conv_source_head)) (bytes_len t)))
+        (Some (up_to 44 rest)))))
 
 ; Whether t is a turn of the person's own text: theirs, with a text,
 ; and no tool's result, so that nothing before it awaits an answer in
@@ -261,3 +283,116 @@
 ; Each of ts added to c, in order.
 (def adds ((c Conv) (ts (list Turn))) Conv
   (if (is_empty ts) c (adds (conv_add c (head ts)) (tail ts))))
+
+; ---------------------------------------------------------------- kept
+
+; The conversation as its file keeps it: the conversation; when it
+; began, the clock's seconds (0 with no clock); and how many times the
+; person has said something in it, 0 for one not begun.
+(data ConvKept (ConvKept (conv Conv) (began int) (said int)))
+
+; A conversation not begun.
+(def conv_kept_new () ConvKept (ConvKept (conv_new) 0 0))
+
+; k as its file's bytes: a JSON object of when it began, how many times
+; the person spoke, the last answer's usage as four counts, and the
+; turns as the API's messages, with no breakpoints.
+(def conv_kept_bytes ((k ConvKept)) bytes
+  (let c (.conv k)
+    (json_bytes
+      (json_obj (cons (json_field "began" (JInt (.began k)))
+                  (cons (json_field "said" (JInt (.said k)))
+                    (cons (json_field "usage" (usage_json (.usage c)))
+                      (cons (json_field "messages" (JArr (turns_json (.turns c) false (nil Json))))
+                            (nil JField)))))))))
+
+; A usage as an array of its four counts.
+(def usage_json ((u Usage)) Json
+  (match u
+    ((Usage i o w r) (JArr (cons (JInt i) (cons (JInt o) (cons (JInt w) (cons (JInt r) (nil Json)))))))))
+
+; The file's bytes b read back, or why they are not a conversation.
+(def conv_kept_of ((b bytes)) (Result ConvKept (list int))
+  (match (json_whole b 0 (bytes_len b))
+    ((Err why) ((Err ConvKept (list int)) why))
+    ((Ok v)
+      (match (json_get v "messages")
+        ((None) ((Err ConvKept (list int)) "no messages"))
+        ((Some ms)
+          (match (kept_turns (json_items ms) (conv_new))
+            ((Err why) ((Err ConvKept (list int)) why))
+            ((Ok c)
+              ((Ok ConvKept (list int))
+                (ConvKept (.usage c (kept_usage v)) (kept_int v "began" 0) (kept_int v "said" 0))))))))))
+
+; The number of o's field name, or fallback if it has none.
+(def kept_int ((o Json) (name (list int)) (fallback int)) int
+  (match (json_get o name)
+    ((None) fallback)
+    ((Some v) (match (json_int v) ((Some n) n) ((None) fallback)))))
+
+; The text of o's field name, empty if it has none.
+(def kept_text ((o Json) (name (list int))) bytes
+  (match (json_get o name)
+    ((None) (bytes_from_list (nil int)))
+    ((Some v) (match (json_text v) ((Some t) t) ((None) (bytes_from_list (nil int)))))))
+
+; The usage the file's object o keeps, each count not there -1.
+(def kept_usage ((o Json)) Usage
+  (let u (match (json_get o "usage") ((None) (JArr (nil Json))) ((Some a) a))
+    (Usage (usage_count u 0) (usage_count u 1) (usage_count u 2) (usage_count u 3))))
+
+; The usage array u's count i, or -1.
+(def usage_count ((u Json) (i int)) int
+  (match (json_at u i)
+    ((None) -1)
+    ((Some v) (match (json_int v) ((Some n) n) ((None) -1)))))
+
+; The messages ms, in order, added to c as its turns; or why one is not
+; a turn.
+(def kept_turns ((ms (list Json)) (c Conv)) (Result Conv (list int))
+  (if (is_empty ms)
+      ((Ok Conv (list int)) c)
+      (match (kept_turn (head ms))
+        ((Err why) ((Err Conv (list int)) why))
+        ((Ok t) (kept_turns (tail ms) (conv_add c t))))))
+
+; A message as a turn: its role the person's (user) or the model's
+; (assistant), its content's blocks.
+(def kept_turn ((m Json)) (Result Turn (list int))
+  (let (role (bytes_to_list (kept_text m "role"))
+        content (match (json_get m "content") ((None) (nil Json)) ((Some a) (json_items a))))
+    (if (not (or (eq role "user") (eq role "assistant")))
+        ((Err Turn (list int)) "a message of no role")
+        (match (kept_content content (nil Block))
+          ((Err why) ((Err Turn (list int)) why))
+          ((Ok bs) ((Ok Turn (list int)) (Turn (eq role "user") bs)))))))
+
+; The content blocks vs as blocks, onto acc reversed; then in order. A
+; text, a tool's use or a tool's result; any other type is why not.
+(def kept_content ((vs (list Json)) (acc (list Block))) (Result (list Block) (list int))
+  (if (is_empty vs)
+      ((Ok (list Block) (list int)) (rev acc))
+      (let (v (head vs)
+            kind (bytes_to_list (kept_text v "type")))
+        (if (eq kind "text")
+            (kept_content (tail vs) (cons (BText (kept_text v "text")) acc))
+            (eq kind "tool_use")
+            (kept_content (tail vs) (cons (BToolUse (kept_text v "id") (kept_text v "name") (kept_input v)) acc))
+            (eq kind "tool_result")
+            (kept_content (tail vs) (cons (BToolResult (kept_text v "tool_use_id") (kept_text v "content") (kept_failed v)) acc))
+            ((Err (list Block) (list int)) (append "a block of type " kind))))))
+
+; A tool's use's input, {} if it has none.
+(def kept_input ((v Json)) Json
+  (match (json_get v "input") ((None) (json_obj (nil JField))) ((Some x) x)))
+
+; Whether a tool's result says it failed.
+(def kept_failed ((v Json)) bool
+  (match (json_get v "is_error") ((None) false) ((Some x) (match (json_bool x) ((Some f) f) ((None) false)))))
+
+; What the log says of k, read from path: how many turns it has, and
+; how many times the person spoke.
+(def conv_kept_line ((path (list int)) (k ConvKept)) (list int)
+  (append "the conversation from " (append path (append ": " (append (digits (length (.turns (.conv k))))
+    (append " turns, " (append (digits (.said k)) " said")))))))

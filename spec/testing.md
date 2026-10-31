@@ -17,6 +17,33 @@ shown but `make check`'s warnings; a failure shows its whole output, and
 the rest still run. To run
 everything again, `rm -rf build/check build/test`.
 
+Whistle's parts ([speech.md](speech.md)) are tested against
+`cactus-needle`, the reference, which no test runs: its outputs are
+fixtures. `user/lib/speech/testdata` holds a chirp, 16 kHz and 16 bits,
+the reference's features of it, and a sample of its mel matrix, which
+`probes/whistle/fixture.py` made; `mel_test.l0` takes the features to
+within 0.001, the filters to within a millionth. `cact_test.l0` reads a
+container its tests build. On the host, `probes/whistle` checks more
+against the model itself: `oracle.py` runs the reference on a recording
+(its features, its transcript, its tokens), `cactdump` dequantizes rows
+of `whistle.cact` and decodes tokens as `cactref.py`, a decoder written
+from the format alone, does, `melcheck` sets the front end beside
+the reference's features of a recording, and `stemcheck` and
+`enccheck` the stem and the encoder beside the reference's rows, and
+`deccheck` the decoder's rows and greedy tokens, from the reference
+encoder's rows or, with `own`, from the recording through L0's own
+encoder; all of these from what `rebuild.py` writes from the
+reference's model loaded with `whistle.cact`'s own tensors (the stem's
+rows, the encoder's after each block, its greedy tokens, and the
+decoder's rows over them). `nn_test.l0`, `whistle_test.l0`,
+`encoder_test.l0` and `decoder_test.l0` test the parts without the
+model, the engrams' hash pinned to the reference's, and
+`transcribe_test.l0` what a WAV file gives. On the board,
+`WHISTLE=PATH tests/listen.sh` boots `listen` alone with the model and
+oracle.py's recordings in its initramfs, and checks each line of text
+is the reference's; `make e2e` does not run it, as the model is not in
+the project, and without `WHISTLE` it says it skipped.
+
 `user/sbin/fs/turns_test.l0` pins the order `fs` serves what waits on
 its port in: notices before every request, and an exited pid's
 requests dropped; a `stat` behind another pid's run of 64 KB writes
@@ -66,14 +93,20 @@ Each case of `tests/e2e/` is a directory:
   the port there) is a free port of the host's loopback, chosen for the
   boot;
 - `usb`, if the board's keyboard and pointer are to be a `usb-kbd` and a
-  `usb-mouse` on a `qemu-xhci`, not virtio's;
+  `usb-mouse` on a `qemu-xhci`, not virtio's; and with it `usbaudio`,
+  if QEMU's `usb-audio`, a speaker, is to be on it too (`QEMU_USB=audio`
+  in `tools/qemu-boot.sh`);
 - `sd`, if the board is to have an SD card in a `sdhci-pci`, a blank
   image of 64 MB made for the boot.
 
-Two cases are USB's: `pcie`, the bus's server waiting once it has set
-the bus up, and `usb`, `run lsusb` listing the keyboard and the mouse
+Three cases are USB's: `pcie`, the bus's server waiting once it has set
+the bus up; `usb`, `run lsusb` listing the keyboard and the mouse
 `xhci` brought up on MSI 80, which its stderr names, and `ps` showing
-`xhci` waiting for a message, not polling. `sdhci` (with `sd`) brings a
+`xhci` waiting for a message, not polling; and `usbaudio` (with
+`usbaudio`), `usb-audio` reading QEMU's speaker, `rec list` listing its
+one stream, `3 1 out speaker 2 16 48000`, `rec silence 3 1 500` its
+isochronous OUT endpoint sending 500 packets in half a second, one a
+frame, and `rec` of a file saying there is no microphone. `sdhci` (with `sd`) brings a
 blank SD card up as `disk0` on its INTx line, 37, which its stderr
 names, lists the disks, writes a sector and reads it back, is refused
 past the card's end, and reads its last sector.
@@ -243,8 +276,12 @@ Ctrl-C as a person would:
   blocks whose input comes in two pieces (`make_dir notes`,
   `write_file notes/today.txt`; `list_dir notes`, `run hello`; `sh "cat
   notes/today.txt"`, `read_file /etc/motd`), then a text; then
-  `/exit`, and the shell's `cat` of the note and `ls` of the home,
-  `CLAUDE.md` made. The stand-in checks each request as the case's
+  `/exit`. The shell then kills `agentd` and starts it again, and a
+  second `run agent` asks once more, the fifth request holding the
+  first turn's words and answer (`messages_contain_at`): the
+  conversation read back from the home. The first request holds the
+  console's source line, `[from console, sent by /bin/agent]`. Then the shell's `cat` of the
+  note and `ls` of the home, `CLAUDE.md` made. The stand-in checks each request as the case's
   `checks.json` says (`standin.py`'s `checked`): each assistant turn's
   `tool_use` ids answered, in order, by the `tool_result`s of the turn
   after it, and the last by those it sent last; `cache_control` on the
@@ -256,18 +293,29 @@ Ctrl-C as a person would:
   `run agent` shows as `agent: stand-in: WHY`, so the output differs;
 - `agent_home`, as `agent` is, with L0S's `CONSTITUTION.md` in the
   case's `etc/agent` (the agent's home, [agent.md](agent.md#the-home)):
-  in one conversation the script writes `CLAUDE.md` anew, a memory and
-  its index, and tries `CONSTITUTION.md`, which is refused; a second
-  conversation's system prompt holds the new rules and index. The
-  checks add a result that must fail holding a text
-  (`results_failed`), several texts the system prompt must hold, and
-  the Nth request's (`system_contains_at`). Then, outside the
-  conversations: `run agent history`, `undo` of the rules' change,
+  in a first `run agent` the script writes `CLAUDE.md` anew, a memory
+  and its index, and tries `CONSTITUTION.md`, which is refused; a
+  second `run agent` goes on in the same conversation, its request
+  holding the first's words (`messages_contain_at`), and its system
+  prompt, made anew, the new rules and index. The checks add a result
+  that must fail holding a text (`results_failed`), several texts the
+  system prompt must hold, and the Nth request's
+  (`system_contains_at`). Then, outside the conversation: `run agent
+  history`, `undo` of the rules' change,
   `history` of `CLAUDE.md`, `undo` of the memory's file and of that
   undo, `run agent backup` to the proxy, which keeps it in
   `build/e2e/agent_home.backup` (emptied at each boot), the memory's
   file changed with the shell's `write`, `run agent restore`, the file
   as it was, its history, and `ls` of the home and its `.history`;
+- `agent_desk`, as `agent` is, with the display driver, the input
+  drivers, the font service and `wm` too, and `rtc clock`: `run agent`
+  says one line, to which the script answers in three rounds, `time`
+  and `volumes`; `open_app Files`, `windows` and `draw_desktop` of an
+  SVG circle; `place_window`, `raise_window` and `close_window` of
+  Files's window, 0, and `clear_desktop`; then a text. Each tool's
+  result is checked (`results_contain`), `open_app`'s naming the window
+  that came, and the first request holds the console's source line.
+  Then `run draw size` asks `wm`, still serving, its size;
 - `net_echo`, with a forward from a port of the host's loopback to port
   7000 of the board, has `net echo` listen to it, take the connection
   [a client on the host](../tests/e2e/net_echo/peer.py) makes, which sends
@@ -543,18 +591,18 @@ and Shut Down stops the board.
 [tests/launcher.sh](../tests/launcher.sh) boots the screen tests' initramfs
 and clicks the top bar's Applications with the tablet: the launcher
 opens, Applications on its pill and the page's ground showing, and
-Terminal's icon, its dark square, in the grid's sixth cell. Esc closes
+Terminal's icon, its dark square, in the grid's seventh cell. Esc closes
 it, and so does a click on the page. A click on Terminal starts it: `run
 windows` lists `vt1`'s window, in front, and the top bar names it
 Terminal, a pixel of the `T` lit as Source Sans 3's glyph covers it,
 where its title, `vt1`, would show none.
 
 [tests/launcher-install.sh](../tests/launcher-install.sh) boots a system
-volume (`root=`) with `wm` and no window, opens the launcher with seven
-apps, and installs an eighth from the shell, a bundle `Extra.app` of a copy
+volume (`root=`) with `wm` and no window, opens the launcher with eight
+apps, and installs a ninth from the shell, a bundle `Extra.app` of a copy
 of Terminal's program and icon and a manifest `write` and `append` make.
-Opened again, the launcher shows it in the third cell, and a click on it
-starts it, the top bar naming it Extra.
+Opened again, the launcher shows it in the fourth cell, the last app on
+a second row, and a click on it starts it, the top bar naming it Extra.
 
 [tests/fontview.sh](../tests/fontview.sh) boots the screen tests'
 initramfs and opens Fonts from the launcher: four cards, each its face's

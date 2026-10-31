@@ -141,7 +141,9 @@ def checked(req, checks, last_ids, n=1):
     prompt's last block, the last tool and the last message's last block,
     four at most; results_contain, for each tool_use id, a text its
     tool_result holds, which did not fail, once the request has it;
-    system_contains, a text the system prompt holds."""
+    system_contains, a text the system prompt holds; system_contains_at
+    and messages_contain_at, by the request's number, texts its system
+    prompt and its messages hold."""
     msgs = req.get("messages", [])
     if checks.get("tool_results"):
         for k, m in enumerate(msgs):
@@ -197,6 +199,10 @@ def checked(req, checks, last_ids, n=1):
     for w in wants:
         if w not in text:
             return "the system prompt of request %d does not hold %r" % (n, w)
+    said = json.dumps(msgs, ensure_ascii=False)
+    for w in checks.get("messages_contain_at", {}).get(str(n), []):
+        if w not in said:
+            return "the messages of request %d do not hold %r" % (n, w)
     return None
 
 

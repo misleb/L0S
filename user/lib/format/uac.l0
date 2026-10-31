@@ -1,0 +1,226 @@
+; uac.l0 -- USB Audio Class 1.0's descriptors (USB Device Class
+; Definition for Audio Devices 1.0), read from a configuration's bytes,
+; purely: an audio function's terminals and units, how they are linked,
+; and each streaming interface's alternate settings that move sound,
+; their isochronous endpoint, format and rates; what each stream is, a
+; microphone, a speaker or another kind, by the terminal at its far end;
+; and the requests that choose a setting and a rate. Linked into
+; usb-audio and its tests, with usbdesc.l0, as UAC in the Makefile.
+
+; ------------------------------------------------------------- constants
+
+; Audio's interface class and its subclasses, control and streaming.
+(def uac_class () int 1)
+(def uac_control () int 1)
+(def uac_streaming () int 2)
+
+; Class-specific descriptors' types, an interface's and an endpoint's.
+(def uac_cs_interface () int 36)        ; 0x24
+(def uac_cs_endpoint () int 37)         ; 0x25
+
+; Subtypes in an audio control interface: its header, an input and an
+; output terminal, a mixer, a selector, a feature unit.
+(def uac_input_terminal () int 2)
+(def uac_output_terminal () int 3)
+(def uac_mixer_unit () int 4)
+(def uac_selector_unit () int 5)
+(def uac_feature_unit () int 6)
+
+; Subtypes in a streaming interface: its general one, which links it to
+; a terminal, and its format.
+(def uac_as_general () int 1)
+(def uac_format_type () int 2)
+
+; The terminal type of USB streaming, the host's end of a function.
+(def uac_usb_streaming () int 257)      ; 0x0101
+
+; ------------------------------------------------------------------ types
+
+; A terminal or unit of the audio function: its id, its terminal type (0
+; for a unit), and the id it takes its sound from, -1 for an input
+; terminal.
+(data UacUnit (UacUnit (id int) (type int) (source int)))
+
+; A streaming interface's setting that moves sound: the interface and
+; setting, its endpoint's address and largest packet, the terminal it is
+; linked to, and its format: channels, bytes a sample (the subframe),
+; bits used of them, and the rates it takes, in Hz.
+(data UacStream (UacStream (iface int) (alt int) (ep int) (mps int) (link int) (channels int) (size int) (bits int) (rates (list int))))
+
+; An audio function: its terminals and units, and its streams, in the
+; order the configuration gives them.
+(data Uac (Uac (units (list UacUnit)) (streams (list UacStream))))
+
+; While reading: the interface and setting the descriptors are in, its
+; subclass, and the link and format its stream has so far.
+(data UacAt (UacAt (iface int) (alt int) (sub int) (link int) (channels int) (size int) (bits int) (rates (list int))))
+
+; ---------------------------------------------------------------- reading
+
+; The audio function in a configuration's bytes b, as usbdesc.l0 reads
+; the configuration: every descriptor up to wTotalLength, and those it
+; does not know passed over. A configuration with none is one with no
+; units and no streams.
+(def uac_of ((b bytes)) Uac
+  (if (lt (bytes_len b) 9)
+      (Uac (nil UacUnit) (nil UacStream))
+      (uac_walk b (bytes_get b 0) (min (le_u16_at b 2) (bytes_len b)) (uac_at_none) (nil UacUnit) (nil UacStream))))
+
+; Where reading starts: in no interface.
+(def uac_at_none () UacAt (UacAt -1 0 0 -1 0 0 0 (nil int)))
+
+; The descriptors of b from i up to n read, at where at is, the units and
+; streams so far reversed; then in order.
+(def uac_walk ((b bytes) (i int) (n int) (at UacAt) (us (list UacUnit)) (ss (list UacStream))) Uac
+  (let l (if (lt (add i 1) n) (bytes_get b i) 0)
+    (if (or (lt l 2) (gt (add i l) n))
+        (Uac (rev us) (rev ss))
+        (let t (bytes_get b (add i 1))
+          (if (and (eq t (usb_desc_interface)) (ge l 9))
+              (uac_walk b (add i l) n
+                (UacAt (bytes_get b (add i 2)) (bytes_get b (add i 3))
+                       (if (eq (bytes_get b (add i 5)) (uac_class)) (bytes_get b (add i 6)) 0)
+                       -1 0 0 0 (nil int))
+                us ss)
+              (and (eq t (uac_cs_interface)) (eq (.sub at) (uac_control)))
+              (uac_walk b (add i l) n at (uac_unit_onto b i l us) ss)
+              (and (eq t (uac_cs_interface)) (eq (.sub at) (uac_streaming)))
+              (uac_walk b (add i l) n (uac_stream_part b i l at) us ss)
+              (and (eq t (usb_desc_endpoint)) (and (ge l 7) (and (eq (.sub at) (uac_streaming)) (ge (.link at) 0))))
+              (uac_walk b (add i l) n at us (cons (uac_stream at (bytes_get b (add i 2)) (bit_and (le_u16_at b (add i 4)) 2047)) ss))
+              (uac_walk b (add i l) n at us ss))))))
+
+; us with the terminal or unit of the descriptor of l bytes at i of b, if
+; it is one.
+(def uac_unit_onto ((b bytes) (i int) (l int) (us (list UacUnit))) (list UacUnit)
+  (let (sub (if (ge l 3) (bytes_get b (add i 2)) 0)
+        id (if (ge l 4) (bytes_get b (add i 3)) 0))
+    (if (and (eq sub (uac_input_terminal)) (ge l 6)) (cons (UacUnit id (le_u16_at b (add i 4)) -1) us)
+        (and (eq sub (uac_output_terminal)) (ge l 8)) (cons (UacUnit id (le_u16_at b (add i 4)) (bytes_get b (add i 7))) us)
+        (and (eq sub (uac_feature_unit)) (ge l 5)) (cons (UacUnit id 0 (bytes_get b (add i 4))) us)
+        (and (or (eq sub (uac_mixer_unit)) (eq sub (uac_selector_unit))) (ge l 6)) (cons (UacUnit id 0 (bytes_get b (add i 5))) us)
+        us)))
+
+; at after a streaming interface's descriptor of l bytes at i of b: its
+; link from the general one, its format from a format type I one.
+(def uac_stream_part ((b bytes) (i int) (l int) (at UacAt)) UacAt
+  (let sub (if (ge l 3) (bytes_get b (add i 2)) 0)
+    (if (and (eq sub (uac_as_general)) (ge l 4))
+        (.link at (bytes_get b (add i 3)))
+        (and (eq sub (uac_format_type)) (ge l 8))
+        (match at
+          ((UacAt n alt s link ch size bits rates)
+            (UacAt n alt s link (bytes_get b (add i 4)) (bytes_get b (add i 5)) (bytes_get b (add i 6))
+                   (uac_rates b (add i 8) (bytes_get b (add i 7)) (add i l)))))
+        at)))
+
+; A format's rates: count of them, 3 bytes each, from i, before end; a
+; count of 0 is a range, its lowest and highest.
+(def uac_rates ((b bytes) (i int) (count int) (end int)) (list int)
+  (uac_rates_onto b i (if (eq count 0) 2 count) end (nil int)))
+
+; uac_rates's loop: each rate onto acc, reversed; then in order.
+(def uac_rates_onto ((b bytes) (i int) (n int) (end int) (acc (list int))) (list int)
+  (if (or (le n 0) (gt (add i 3) end))
+      (rev acc)
+      (uac_rates_onto b (add i 3) (sub n 1) end
+        (cons (bit_or (bytes_get b i) (bit_or (bit_shl (bytes_get b (add i 1)) 8) (bit_shl (bytes_get b (add i 2)) 16))) acc))))
+
+; The stream the setting at is, with its endpoint ep of mps bytes.
+(def uac_stream ((at UacAt) (ep int) (mps int)) UacStream
+  (match at ((UacAt n alt s link ch size bits rates) (UacStream n alt ep mps link ch size bits rates))))
+
+; ---------------------------------------------------------------- streams
+
+; Whether a stream takes sound in, to the host: its endpoint is IN.
+(def uac_is_input ((s UacStream)) bool (usb_ep_is_in (.ep s)))
+
+; The terminal type at a stream's far end: for one taking sound in, the
+; input terminal its output terminal's sound comes from, through any
+; units; for one sending sound out, the output terminal its input
+; terminal's sound reaches. 0 if there is none.
+(def uac_far_type ((f Uac) (s UacStream)) int
+  (if (uac_is_input s)
+      (uac_source_type (.units f) (.link s) 16)
+      (uac_sink_type (.units f) (.units f) (.link s))))
+
+; The unit id among us, if there is one.
+(def uac_unit ((us (list UacUnit)) (id int)) (Option UacUnit)
+  (if (is_empty us) ((None UacUnit)) (eq (.id (head us)) id) (Some (head us)) (uac_unit (tail us) id)))
+
+; The type of the input terminal unit id's sound comes from, at most
+; left steps back; 0 if none.
+(def uac_source_type ((us (list UacUnit)) (id int) (left int)) int
+  (match (uac_unit us id)
+    ((None) 0)
+    ((Some u)
+      (if (lt (.source u) 0) (.type u)
+          (le left 0) 0
+          (uac_source_type us (.source u) (sub left 1))))))
+
+; The type of the first output terminal of all whose sound comes from
+; unit id, among us; 0 if none.
+(def uac_sink_type ((all (list UacUnit)) (us (list UacUnit)) (id int)) int
+  (if (is_empty us)
+      0
+      (let u (head us)
+        (if (and (not (eq (.type u) 0)) (and (ge (.source u) 0) (uac_reaches all (.source u) id 16)))
+            (.type u)
+            (uac_sink_type all (tail us) id)))))
+
+; Whether unit from, or a unit its sound comes from, is id, at most left
+; steps back.
+(def uac_reaches ((us (list UacUnit)) (from int) (id int) (left int)) bool
+  (if (eq from id) true
+      (le left 0) false
+      (match (uac_unit us from)
+        ((None) false)
+        ((Some u) (and (ge (.source u) 0) (uac_reaches us (.source u) id (sub left 1)))))))
+
+; A terminal type's name, as USB's Terminal Types say it.
+(def uac_type_name ((t int)) (list int)
+  (if (eq t 513) "microphone"                   ; 0x0201
+      (eq t 514) "desktop-microphone"
+      (eq t 515) "headset-microphone"
+      (eq t 516) "omni-microphone"
+      (eq t 517) "microphone-array"
+      (eq t 769) "speaker"                      ; 0x0301
+      (eq t 770) "headphones"
+      (eq t 772) "desktop-speaker"
+      (eq t 1026) "headset"                     ; 0x0402
+      (eq t 1539) "line"                        ; 0x0603
+      "audio"))
+
+; A stream as usb-audio lists it: in or out, what it is, its channels,
+; bits and rates: in microphone 2 24 44100,48000.
+(def uac_stream_text ((f Uac) (s UacStream)) (list int)
+  (unwords (cons (if (uac_is_input s) "in" "out")
+             (cons (uac_type_name (uac_far_type f s))
+               (cons (digits (.channels s))
+                 (cons (digits (.bits s))
+                   (cons (join_with "," (uac_rate_words (.rates s) (nil (list int)))) (nil (list int)))))))))
+
+; Each rate's digits, after the reversed acc.
+(def uac_rate_words ((rs (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty rs) (rev acc) (uac_rate_words (tail rs) (cons (digits (head rs)) acc))))
+
+; The rate to ask of s: want if it is one of its rates, else its
+; highest. A range's ends are taken as two rates.
+(def uac_rate_for ((s UacStream) (want int)) int
+  (if (any_eq want (.rates s)) want (uac_max_of (.rates s) 0)))
+
+; The largest of xs, at least m.
+(def uac_max_of ((xs (list int)) (m int)) int (if (is_empty xs) m (uac_max_of (tail xs) (max m (head xs)))))
+
+; --------------------------------------------------------------- requests
+
+; SET_INTERFACE's setup: interface iface to setting alt (USB 2.0 9.4.10).
+(def uac_set_interface ((iface int) (alt int)) (list int)
+  (usb_setup 1 11 alt iface 0))
+
+; SET_CUR of an endpoint's sampling frequency (UAC 1.0, 5.2.3.2.3.1):
+; its setup, to endpoint ep, and its 3 bytes, the rate, little-endian.
+(def uac_set_rate ((ep int)) (list int)
+  (usb_setup 34 1 256 ep 3))
+(def uac_rate_bytes ((rate int)) (list int)
+  (cons (bit_and rate 255) (cons (bit_and (bit_shr rate 8) 255) (cons (bit_and (bit_shr rate 16) 255) (nil int)))))

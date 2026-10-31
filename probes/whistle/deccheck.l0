@@ -1,0 +1,81 @@
+; deccheck.l0 -- Whistle's decoder in L0 (speech/decoder.l0) against the
+; reference's, rebuild.py's from the same whistle.cact, on a clip
+; oracle.py made: greedy decoding over the reference encoder's rows
+; (encoder.txt), or with "own" over L0's own encoder's, end to end; its
+; token IDs beside greedy.txt's, its text, and each step's row's cosine
+; with decoder.txt's, the least and where.
+;
+;   deccheck WEIGHTS DIR [own]
+
+; The cosine of a's and b's rows of n, row r, from entry k, with the
+; sums so far.
+(def row_cos ((a (array float)) (b (array float)) (n int) (r int) (k int) (ab float) (aa float) (bb float)) float
+  (if (ge k n)
+      (float_div ab (float_sqrt (float_mul aa bb)))
+      (let (x (array_get a (add (mul r n) k)) y (array_get b (add (mul r n) k)))
+        (row_cos a b n r (add k 1) (float_add ab (float_mul x y)) (float_add aa (float_mul x x)) (float_add bb (float_mul y y))))))
+
+; A float as millionths, to show it.
+(def micro ((x float)) (list int) (digits (float_to_int (float_mul x 1000000.0))))
+
+; The rows rs, each of 512, as one array.
+(def joined ((rs (list (array float)))) (array float)
+  (joined_from rs 0 (array_new (mul 512 (length rs)) 0.0)))
+(def joined_from ((rs (list (array float))) (at int) (out (array float))) (array float)
+  (if (is_empty rs) out (joined_from (tail rs) (add at 512) (dec_put out at (head rs) 0))))
+
+; The least cosine of rows r up to t, after m, and its row w.
+(data Worst (Worst (row int) (cos float)))
+(def worst ((a (array float)) (b (array float)) (r int) (t int) (w Worst)) Worst
+  (if (ge r t)
+      w
+      (let c (row_cos a b 512 r 0 0.0 0.0 0.0)
+        (worst a b (add r 1) t (if (float_lt c (.cos w)) (Worst r c) w)))))
+
+; The ids as words.
+(def id_words ((ids (list int))) (list int) (join_with " " (map_digits ids (nil (list int)))))
+(def map_digits ((ids (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ids) (rev acc) (map_digits (tail ids) (cons (digits (head ids)) acc))))
+
+; The encoder's rows: the reference's, or with own L0's from the clip.
+(def enc_rows ((wh Whistle) (dir (list int)) (own bool)) Rows
+  (if own
+      (let (xs (chirp_of (append dir "/clip16.wav"))
+            f (mel_features xs (array_len xs) (mel_matrix))
+            r (stem_run (stem_of wh) f (div (array_len f) 80)))
+        (encoder_run (encoder_of wh) r 8))
+      (let x (decimals (tail (fixture_of (append dir "/encoder.txt"))))
+        (Rows (div (array_len x) 512) x))))
+
+(def check ((as (list (list int)))) int
+  (match (read_whole (head as))
+    ((Err why) (let w (write_line why) 1))
+    ((Ok b)
+      (match (whistle_of b)
+        ((Err why) (let w (write_line why) 1))
+        ((Ok wh)
+          (let (dir (nth as 1)
+                own (and (gt (length as) 2) (eq (nth as 2) "own"))
+                t0 (clock_ns)
+                d (decoder_of wh)
+                t1 (clock_ns)
+                r (enc_rows wh dir own)
+                t2 (clock_ns)
+                got (decoder_run d r)
+                t3 (clock_ns)
+                want (head (fixture_of (append dir "/greedy.txt")))
+                ids (id_words (.ids got))
+                text (match (cact_pieces (.c wh) b)
+                       ((Err why) why)
+                       ((Ok ps) (pieces_decode ps b (tail (.ids got)))))
+                ref (decimals (tail (fixture_of (append dir "/decoder.txt"))))
+                mine (joined (.rows got))
+                n (min (length (.rows got)) (div (array_len ref) 512))
+                w (worst mine ref 0 n (Worst 0 2.0))
+                l1 (write_line (append "tokens: " ids))
+                l2 (write_line (append "reference: " want))
+                l3 (write_line (append "text: " text))
+                l4 (write_line (append "rows: " (append (digits n) (append ", least cosine, millionths: " (append (micro (.cos w)) (append " at row " (digits (.row w))))))))
+                l5 (write_line (append "ms: load " (append (digits (div (sub t1 t0) 1000000)) (append ", encoder " (append (digits (div (sub t2 t1) 1000000)) (append ", decode " (digits (div (sub t3 t2) 1000000)))))))))
+            (if (eq ids want) 0 1)))))))
+(def main () int (check (args)))

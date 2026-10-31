@@ -1,0 +1,382 @@
+; usb-audio.l0 -- the class driver of USB audio devices (USB Audio
+; Class 1.0), over the usb server (xhci): it is told of each device,
+; reads its configuration's audio function (uac.l0), and serves mic
+; (proto/mic.l0): every stream in and out listed, the first microphone
+; set going for one client at a time, what it hears passed on as it
+; comes, and silence sent out, as a test of the path out. It drives no
+; device itself, and claims an interface only while it uses it.
+;
+; It waits on two ports at once, a set (port_set): its own, where the
+; usb server's answers and notices come, told apart by the server's pid,
+; and the kernel's alarms, which end a silence; and mic's, where its
+; clients ask. A notice that comes while it waits for an answer is kept,
+; and handled after.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (fail_as "usb-audio" why))
+
+; ------------------------------------------------------------------ state
+
+; An audio device: its number, and its audio function.
+(data AudDev (AudDev (dev int) (f Uac)))
+
+; A stream going: its device, its stream, and, for one in, the port its
+; samples go to; for one out, the port to answer, how many packets have
+; gone, and when it ends, on clock_ns.
+(data Going (GoingIn (dev int) (s UacStream) (to int)) (GoingOut (dev int) (s UacStream) (reply int) (sent int) (until int)))
+
+; The driver: its own port and mic's, the usb server's port and pid, the
+; audio devices, the streams going, and the usb server's messages kept
+; to handle.
+(data Aud (Aud (own int) (mic int) (usb int) (pid int) (devs (list AudDev)) (going (list Going)) (kept (list Message))))
+
+; A step's answer: the driver after it, and what came back.
+(data Answered (Answered Aud (list int)))
+
+; ---------------------------------------------------------------- start
+
+; The usb server found and listened to, mic registered, and served.
+(def usb_audio () int
+  (match (name_wait "usb" 5000000000)
+    ((NotFound) (complain "no usb; is xhci running?"))
+    ((Found usb) (listened usb (port_new)))))
+
+; Listening to the usb server at usb, its answers and notices to own:
+; the first message there is its answer, since no one else knows own
+; yet, and says its pid. Then mic registered on a port of its own, and
+; the two made the set it waits on.
+(def listened ((usb int) (own int)) int
+  (match (port_send usb (request own "listen"))
+    ((Sent)
+      (match (port_receive own)
+        ((RecvFailed) (complain "no answer from usb"))
+        ((Message from b)
+          (if (not (msg_is b "ok"))
+              (complain (reply_why (msg_text b) "usb"))
+              (let (mic (port_new)
+                    r (name_register_or_why mic (mic_name)))
+                (if (not (is_empty r))
+                    (complain r)
+                    (match (port_set (cons own (cons mic (nil int))))
+                      ((PortSetMade) (serve (Aud own mic usb from (nil AudDev) (nil Going) (nil Message))))
+                      ((PortSetNotYours) (complain (port_setting_why (PortSetNotYours))))
+                      ((PortSetSize) (complain (port_setting_why (PortSetSize)))))))))))
+    ((SendNoPort) (complain "usb is gone"))
+    ((SendFull) (complain "usb is busy"))
+    ((SendTooBig) (complain "listen is too big"))))
+
+; Each message handled, those kept first, else the next on either port.
+(def serve ((a Aud)) int
+  (let kept (.kept a)
+    (if (not (is_empty kept))
+        (serve (handled_on (.kept a (tail kept)) (.own a) (head kept)))
+        (match (port_receive_set)
+          ((SetRecvFailed) (complain "lost its ports"))
+          ((SetMessage port m) (serve (handled_on a port m)))))))
+
+; a after m came on port: a client's request on mic's, or on its own the
+; usb server's notice or the kernel's alarm.
+(def handled_on ((a Aud) (port int) (m Message)) Aud
+  (match m
+    ((RecvFailed) a)
+    ((Message from b)
+      (if (eq port (.mic a))
+          (requested a b)
+          (is_alarm_notice m)
+          (alarm_rang a)
+          (eq from (.pid a))
+          (noticed a m)
+          a))))
+
+; ------------------------------------------------------------- asking usb
+
+; body asked of the usb server, its answer to the driver's own port.
+(def asked ((a Aud) (body (list int))) Answered
+  (match (port_send (.usb a) (request (.own a) body))
+    ((Sent) (answer_awaited a))
+    ((SendNoPort) (Answered a (error_reply "usb is gone")))
+    ((SendFull) (Answered a (error_reply "usb is busy")))
+    ((SendTooBig) (Answered a (error_reply "too big")))))
+
+; The next message from the usb server on its own port that is no
+; notice, others there kept; clients' requests wait on their port.
+(def answer_awaited ((a Aud)) Answered
+  (match (port_receive (.own a))
+    ((RecvFailed) (Answered a (error_reply "lost its port")))
+    ((Message from b)
+      (if (and (eq from (.pid a)) (not (is_notice b)))
+          (Answered a (msg_text b))
+          (answer_awaited (.kept a (append (.kept a) (cons (Message from b) (nil Message)))))))))
+
+; Whether a message's bytes b are one of the usb server's notices.
+(def is_notice ((b bytes)) bool
+  (or (msg_starts b "uat") (or (msg_starts b "udt") (msg_starts b "uin"))))
+
+; Each of bodies asked in turn, until one is refused: empty, or why.
+(def asked_all ((a Aud) (bodies (list (list int)))) Answered
+  (if (is_empty bodies)
+      (Answered a "")
+      (match (asked a (head bodies))
+        ((Answered a2 r)
+          (if (starts_with r "error: ") (Answered a2 (drop r 7)) (asked_all a2 (tail bodies)))))))
+
+; A control transfer's request body: setup's fields, and the bytes of an
+; OUT one's data.
+(def control_body ((dev int) (setup (list int)) (out (list int))) (list int)
+  (usb_request "control"
+    (cons dev (cons (nth setup 0) (cons (nth setup 1) (cons (bit_or (nth setup 2) (bit_shl (nth setup 3) 8))
+      (cons (bit_or (nth setup 4) (bit_shl (nth setup 5) 8)) (cons (length out) out))))))))
+
+; ----------------------------------------------------------------- notices
+
+; A notice of the usb server: a device plugged in or unplugged, or an
+; endpoint's packets.
+(def noticed ((a Aud) (m Message)) Aud
+  (match (usb_attached_of m)
+    ((Some at) (attached a (.dev at)))
+    ((None)
+      (match (usb_detached_of m)
+        ((Some dev) (detached a dev))
+        ((None) (match m ((Message from b) (if (msg_starts b "uin") (packets a b) a)) ((RecvFailed) a)))))))
+
+; A device plugged in: its configuration read, and kept if it has an
+; audio function with streams, each said on the serial line.
+(def attached ((a Aud) (dev int)) Aud
+  (match (asked a (usb_request "config" (cons dev (nil int))))
+    ((Answered a2 r)
+      (match (usb_bytes_of r)
+        ((Err why) a2)
+        ((Ok cfg)
+          (let f (uac_of (bytes_from_list cfg))
+            (if (is_empty (.streams f))
+                a2
+                (let s (warn_as "usb-audio" (device_line dev f))
+                  (.devs a2 (append (.devs a2) (cons (AudDev dev f) (nil AudDev))))))))))))
+
+; What usb-audio says of a device it found: device N: and its streams.
+(def device_line ((dev int) (f Uac)) (list int)
+  (append "device " (append (digits dev) (append ": " (join_with ", " (stream_texts f (.streams f) (nil (list int))))))))
+
+; Each stream of ss as uac_stream_text says it, after the reversed acc.
+(def stream_texts ((f Uac) (ss (list UacStream)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ss) (rev acc) (stream_texts f (tail ss) (cons (uac_stream_text f (head ss)) acc))))
+
+; A device unplugged: forgotten, and its streams going with it.
+(def detached ((a Aud) (dev int)) Aud
+  (.going (.devs a (devs_without (.devs a) dev)) (going_without (.going a) dev)))
+
+; ds without device dev; gs without its streams.
+(def devs_without ((ds (list AudDev)) (dev int)) (list AudDev)
+  (if (is_empty ds) ds (eq (.dev (head ds)) dev) (tail ds) (cons (head ds) (devs_without (tail ds) dev))))
+(def going_without ((gs (list Going)) (dev int)) (list Going)
+  (if (is_empty gs) gs (eq (going_dev (head gs)) dev) (going_without (tail gs) dev) (cons (head gs) (going_without (tail gs) dev))))
+
+; A stream going's device and stream.
+(def going_dev ((g Going)) int (match g ((GoingIn d s t) d) ((GoingOut d s r n u) d)))
+(def going_stream ((g Going)) UacStream (match g ((GoingIn d s t) s) ((GoingOut d s r n u) s)))
+
+; An endpoint's packets, the message's bytes b: a microphone's passed to
+; its listener as pcm, read in place; a silence's counted. A listener
+; gone stops its stream.
+(def packets ((a Aud) (b bytes)) Aud
+  (let (dev (msg_u32 b 3)
+        ep (msg_u32 b 7))
+    (match (going_at (.going a) dev ep)
+      ((None) a)
+      ((Some g)
+        (match g
+          ((GoingIn d s to)
+            (match (pcm_sent to b)
+              ((SendNoPort) (stopped a g))
+              ((Sent) a)
+              ((SendFull) a)
+              ((SendTooBig) a)))
+          ((GoingOut d s r n u)
+            (.going a (cons (GoingOut d s r (add n (iso_batch_of s)) u) (going_less (.going a) g)))))))))
+
+; The packets a uin notice of stream s counts: as many as xhci puts in
+; one, 10 or as many of its largest as fit (core.l0's iso_batch).
+(def iso_batch_of ((s UacStream)) int (max 1 (min 10 (div (sub (max_message) 11) (max (.mps s) 1)))))
+
+; The samples in a uin's bytes b, after its 11 bytes of tag, device and
+; endpoint, sent to port as a pcm notice: the tag, then the samples.
+(def pcm_sent ((port int) (b bytes)) Sending
+  (let pcm (bytes_concat (cons (bytes_from_list (mic_pcm_tag)) (cons (bytes_slice b (add (header_len) 11) (bytes_len b)) (nil bytes))))
+    (port_send_bytes port pcm 0 (bytes_len pcm))))
+
+; The stream going of device dev at endpoint ep, or none.
+(def going_at ((gs (list Going)) (dev int) (ep int)) (Option Going)
+  (if (is_empty gs)
+      ((None Going))
+      (let g (head gs)
+        (if (and (eq (going_dev g) dev) (eq (.ep (going_stream g)) ep)) (Some g) (going_at (tail gs) dev ep)))))
+
+; gs without g.
+(def going_less ((gs (list Going)) (g Going)) (list Going)
+  (if (is_empty gs) gs (eq (head gs) g) (tail gs) (cons (head gs) (going_less (tail gs) g))))
+
+; ------------------------------------------------------------- streaming
+
+; Stream s of device dev set going at rate: its interface set to the
+; stream's setting, its endpoint's rate set (a device with one rate may
+; refuse it, which is let be), and its endpoint opened: empty, or why
+; not. The interface is claimed first, once.
+(def stream_on ((a Aud) (dev int) (s UacStream) (rate int)) Answered
+  (match (asked a (usb_request "claim" (cons dev (cons (.iface s) (nil int)))))
+    ((Answered a2 r)
+      (if (and (starts_with r "error: ") (not (eq r "error: taken")))
+          (Answered a2 (drop r 7))
+          (match (asked_all a2 (cons (control_body dev (uac_set_interface (.iface s) (.alt s)) (nil int)) (nil (list int))))
+            ((Answered a3 why)
+              (if (not (is_empty why))
+                  (Answered a3 why)
+                  (match (asked a3 (control_body dev (uac_set_rate (.ep s)) (uac_rate_bytes rate)))
+                    ((Answered a4 rr)
+                      (match (asked a4 (usb_request "open" (cons dev (cons (.ep s) (nil int)))))
+                        ((Answered a5 ro) (Answered a5 (if (starts_with ro "error: ") (drop ro 7) "")))))))))))))
+
+; Stream g stopped: its endpoint closed, its interface set back to
+; setting 0, which moves nothing, and it no longer going.
+(def stopped ((a Aud) (g Going)) Aud
+  (let (dev (going_dev g)
+        s (going_stream g))
+    (match (asked a (usb_request "close" (cons dev (cons (.ep s) (nil int)))))
+      ((Answered a2 r)
+        (match (asked a2 (control_body dev (uac_set_interface (.iface s) 0) (nil int)))
+          ((Answered a3 r2) (.going a3 (going_less (.going a3) g))))))))
+
+; ---------------------------------------------------------------- clients
+
+; A client's request in a message's bytes b, answered.
+(def requested ((a Aud) (b bytes)) Aud
+  (let (reply (msg_reply b)
+        ws (split_spaces (msg_text_from b 4)))
+    (if (is_empty ws)
+        (let x (msg_answer b (error_reply "no request")) a)
+        (let (op (head ws) args (tail ws))
+          (if (eq op "devices") (let x (msg_answer b (devices_text (.devs a))) a)
+              (eq op "listen") (listen_asked a b reply args)
+              (eq op "stop") (stop_asked a b reply)
+              (eq op "silence") (silence_asked a b reply args)
+              (let x (msg_answer b (error_reply (append "no request " op))) a))))))
+
+; The devices answer: a line for each stream of each device, DEV IFACE
+; and what uac_stream_text says.
+(def devices_text ((ds (list AudDev))) (list int)
+  (concat (devices_lines ds (nil (list int)))))
+
+; devices_text's loop: each device's lines after the reversed acc.
+(def devices_lines ((ds (list AudDev)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ds)
+      (rev acc)
+      (match (head ds)
+        ((AudDev dev f) (devices_lines (tail ds) (rev_onto (stream_lines dev f (.streams f) (nil (list int))) acc))))))
+
+; Each of ss's line, DEV IFACE TEXT and a newline, after the reversed acc.
+(def stream_lines ((dev int) (f Uac) (ss (list UacStream)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ss)
+      (rev acc)
+      (stream_lines dev f (tail ss)
+        (cons (append (digits dev) (append " " (append (digits (.iface (head ss))) (append " " (append (uac_stream_text f (head ss)) "\n"))))) acc))))
+
+; The first stream in of any device, with its device's number, or none.
+(def first_input ((ds (list AudDev))) (Option Going)
+  (if (is_empty ds)
+      ((None Going))
+      (match (head ds)
+        ((AudDev dev f)
+          (match (input_among (.streams f))
+            ((Some s) (Some (GoingIn dev s 0)))
+            ((None) (first_input (tail ds))))))))
+
+; The first stream of ss that takes sound in, or none.
+(def input_among ((ss (list UacStream))) (Option UacStream)
+  (if (is_empty ss) ((None UacStream)) (uac_is_input (head ss)) (Some (head ss)) (input_among (tail ss))))
+
+; Whether a stream in is going.
+(def any_in ((gs (list Going))) bool
+  (if (is_empty gs) false (match (head gs) ((GoingIn d s t) true) ((GoingOut d s r n u) (any_in (tail gs))))))
+
+; listen [RATE]: the first microphone set going for reply, its format
+; answered; busy while one listens.
+(def listen_asked ((a Aud) (b bytes) (reply int) (args (list (list int)))) Aud
+  (let want (if (and (eq (length args) 1) (is_number (head args))) (int_prefix (head args) 0) (mic_default_rate))
+    (if (any_in (.going a))
+        (let x (msg_answer b (error_reply "busy")) a)
+        (match (first_input (.devs a))
+          ((None) (let x (msg_answer b (error_reply "no microphone")) a))
+          ((Some g)
+            (let (s (going_stream g)
+                  rate (uac_rate_for s want))
+              (match (stream_on a (going_dev g) s rate)
+                ((Answered a2 why)
+                  (if (not (is_empty why))
+                      (let x (msg_answer b (error_reply why)) a2)
+                      (let x (msg_answer b (mic_format_reply (MicFormat rate (.channels s) (.size s))))
+                        (.going a2 (cons (GoingIn (going_dev g) s reply) (.going a2)))))))))))))
+
+; stop: the stream going to reply stopped.
+(def stop_asked ((a Aud) (b bytes) (reply int)) Aud
+  (match (going_to (.going a) reply)
+    ((None) (let x (msg_answer b (error_reply "not listening")) a))
+    ((Some g) (let (a2 (stopped a g) x (msg_answer b "ok")) a2))))
+
+; The stream in going to port, or none.
+(def going_to ((gs (list Going)) (port int)) (Option Going)
+  (if (is_empty gs)
+      ((None Going))
+      (match (head gs)
+        ((GoingIn d s t) (if (eq t port) (Some (head gs)) (going_to (tail gs) port)))
+        ((GoingOut d s r n u) (going_to (tail gs) port)))))
+
+; silence DEV IFACE MS: the stream out of interface IFACE of DEV sent
+; silence, xhci's packets of nothing, for MS milliseconds; answered once
+; the alarm rings.
+(def silence_asked ((a Aud) (b bytes) (reply int) (args (list (list int)))) Aud
+  (match (if (eq (length args) 3) (word_numbers args) ((None (list int))))
+    ((None) (let x (msg_answer b (error_reply "silence takes DEV IFACE MS")) a))
+    ((Some ns)
+      (match (output_at (.devs a) (nth ns 0) (nth ns 1))
+        ((None) (let x (msg_answer b (error_reply "no such stream out")) a))
+        ((Some s)
+          (match (stream_on a (nth ns 0) s (uac_rate_for s (mic_default_rate)))
+            ((Answered a2 why)
+              (if (not (is_empty why))
+                  (let x (msg_answer b (error_reply why)) a2)
+                  (let (until (add (clock_ns) (mul (nth ns 2) 1000000))
+                        al (alarm_at (.own a2) until))
+                    (.going a2 (cons (GoingOut (nth ns 0) s reply 0 until) (.going a2))))))))))))
+
+; The stream out of interface iface of device dev, or none.
+(def output_at ((ds (list AudDev)) (dev int) (iface int)) (Option UacStream)
+  (if (is_empty ds)
+      ((None UacStream))
+      (match (head ds)
+        ((AudDev d f) (if (eq d dev) (output_among (.streams f) iface) (output_at (tail ds) dev iface))))))
+
+; The stream of ss out of interface iface, or none.
+(def output_among ((ss (list UacStream)) (iface int)) (Option UacStream)
+  (if (is_empty ss) ((None UacStream))
+      (and (eq (.iface (head ss)) iface) (not (uac_is_input (head ss)))) (Some (head ss))
+      (output_among (tail ss) iface)))
+
+; The alarm: each silence whose time is up stopped, and its asker told
+; how many packets went.
+(def alarm_rang ((a Aud)) Aud
+  (match (silence_due (.going a) (clock_ns))
+    ((None) a)
+    ((Some g)
+      (match g
+        ((GoingOut d s reply n u)
+          (let (a2 (stopped a g)
+                t (port_tell reply (append "sent " (append (digits n) " packets"))))
+            (alarm_rang a2)))
+        ((GoingIn d s t) a)))))
+
+; The first silence of gs due by now, or none.
+(def silence_due ((gs (list Going)) (now int)) (Option Going)
+  (if (is_empty gs)
+      ((None Going))
+      (match (head gs)
+        ((GoingOut d s r n u) (if (ge now u) (Some (head gs)) (silence_due (tail gs) now)))
+        ((GoingIn d s t) (silence_due (tail gs) now)))))

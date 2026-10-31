@@ -1,8 +1,11 @@
 ; agent.l0 -- talks to the agent, agentd, at a console:
 ;
-;   agent        a conversation: > , a line said, the answer written as
-;                it comes, then > again; Ctrl-C while it answers stops
-;                it; the input's end, or a line /exit, ends it
+;   agent        its conversation, the one agentd keeps for every
+;                client: > , a line said, the answer written as it
+;                comes, then > again; Ctrl-C while it answers stops it;
+;                a line /clear begins the conversation anew; the
+;                input's end, or a line /exit, ends talking, the
+;                conversation kept
 ;   agent history [PATH] | undo N | backup | restore
 ;                the agent's home, its history and its backup, done
 ;                here without agentd (home.l0)
@@ -31,16 +34,18 @@
 ; The event e shown, the console at the start of a line or not.
 (def shown ((e AgentEvent) (at_start bool)) Shown
   (match e
-    ((AgentText id t)
+    ((AgentText t)
       (let n (bytes_len t)
         (Shown t (if (eq n 0) at_start (eq (bytes_get t (sub n 1)) 10)) false)))
-    ((AgentTool id name input)
+    ((AgentTool name input)
       (shown_line at_start (append "[" (append name (append " " (append (bytes_to_list input) "]"))))))
-    ((AgentResult id name failed t)
+    ((AgentResult name failed t)
       (shown_line at_start (if failed (append "[failed: " (append (first_line t) "]")) "[ok]")))
-    ((AgentCompacted id before after) (shown_line at_start "[compacted]"))
-    ((AgentError id why) (shown_line at_start (append "agent: " (bytes_to_list why))))
-    ((AgentDone id reason) (Shown (bytes_from_list (line_break at_start)) true true))
+    ((AgentCompacted before after) (shown_line at_start "[compacted]"))
+    ((AgentError why) (shown_line at_start (append "agent: " (bytes_to_list why))))
+    ((AgentDone reason) (Shown (bytes_from_list (line_break at_start)) true true))
+    ((AgentSaid src t) (Shown (bytes_from_list "") at_start false))
+    ((AgentOpened busy) (Shown (bytes_from_list "") at_start false))
     ((AgentNone) (Shown (bytes_from_list "") at_start false))))
 
 ; A line of its own, after a newline if the console is not at a line's
@@ -52,16 +57,20 @@
 (def first_line ((b bytes)) (list int)
   (take_line (bytes_to_list (bytes_slice b 0 (agent_line_end b 0)))))
 
-; What a line typed means: the end of the conversation (input's end, or
-; /exit); nothing to say (a blank line); or a text to say.
-(data Typed (TypedEnd) (TypedBlank) (TypedSay (list int)))
+; What a line typed means: the end of talking (input's end, or /exit);
+; the conversation begun anew (/clear); nothing to say (a blank line);
+; or a text to say.
+(data Typed (TypedEnd) (TypedClear) (TypedBlank) (TypedSay (list int)))
 
 ; The line typed, with its newline, or empty at the input's end.
 (def typed_of ((line (list int))) Typed
   (if (is_empty line)
       (TypedEnd)
       (let t (trim (take_line line))
-        (if (eq t "/exit") (TypedEnd) (is_empty t) (TypedBlank) (TypedSay (take_line line))))))
+        (if (eq t "/exit") (TypedEnd)
+            (eq t "/clear") (TypedClear)
+            (is_empty t) (TypedBlank)
+            (TypedSay (take_line line))))))
 
 ; s without spaces at either end.
 (def trim ((s (list int))) (list int) (rev (trim_front (rev (trim_front s)))))
@@ -72,8 +81,8 @@
 
 ; ------------------------------------------------------------- talking
 
-; The entry point: with no arguments a conversation, opened and held
-; until it ends; with some, a command on the home (home.l0).
+; The entry point: with no arguments the conversation, opened and held
+; until talking ends; with some, a command on the home (home.l0).
 (def agent () int
   (if (is_empty (args)) (agent_talk) (home_command (args))))
 
@@ -121,9 +130,13 @@
           (let p (say (prompt)) (await_line c term np))
           (match (typed_of (msg_text b))
             ((TypedEnd) (closing c))
+            ((TypedClear)
+              (let (why (agent_clear c)
+                    w (say (if (is_empty why) "[cleared]\n" (append "agent: " (append why "\n")))))
+                (talk c term np)))
             ((TypedBlank) (talk c term np))
             ((TypedSay text)
-              (let why (agent_say c text)
+              (let why (agent_say c "console" text)
                 (if (is_empty why)
                     (answering c term np true)
                     (let w (say (append "agent: " (append why "\n"))) (talk c term np))))))))))

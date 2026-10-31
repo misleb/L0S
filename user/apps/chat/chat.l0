@@ -1,0 +1,375 @@
+; chat.l0 -- Agent, the agent's app: a window on agentd's one
+; conversation, as the console's agent is, through the agent protocol
+; (proto/agent.l0). It opens the conversation and shows it, what was
+; said before as agentd tells it on open and each turn as its notices
+; come, whoever began it, in two panes. The conversation's: the
+; person's words in bold, where they came from if not this app or the
+; console, the model's text wrapped as it streams, a dimmed line naming
+; the tools each run of them used, and what went wrong in red. The
+; tools' log beside it: under a line of what was said, each tool run a
+; row, red if it failed, that a press opens on its input and result.
+; An entry along its foot says a line with Enter or Send; while a turn
+; runs, Stop stops it. With no agentd it says so, and Retry looks again.
+;
+;   chat          its window, until it is closed
+;
+; Each step asks without waiting (ui_win_ask): open, say and stop are
+; answered as replies, tagged, and the notices come on a port of its
+; own given to the window's loop (ui_win_ports).
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "chat" why))
+
+; The transcript's prefix, the tools' log's, and the entry's name.
+(def conv_prefix () (list int) "conv")
+(def tools_prefix () (list int) "tools")
+(def entry_name () (list int) "say")
+
+; The replies' tags: to open, to say, to stop.
+(def tag_open () int 1)
+(def tag_say () int 2)
+(def tag_stop () int 3)
+
+; ----------------------------------------------------------------- state
+
+; Where the window is with agentd: no agentd, and why; opening the
+; conversation; or open.
+(data Link (Unlinked (list int)) (Linking) (Linked))
+
+; How a tool's run ended: whether it failed, and its result's start.
+(data ToolEnd (ToolEnd bool bytes))
+
+; What the transcript and the tools' log hold: what the person said,
+; and where it came from; the model's text, its pieces newest first; the
+; names of a run of tools, newest first; a note, its kind and text; and,
+; in the log, a tool run, its number, name, input, how it ended if it
+; has, and whether its row is open.
+(data Item (ISaid (list int) (list int)) (IText (list bytes)) (IRan (list (list int))) (INote UiLineKind (list int)) (ITool int (list int) bytes (Option ToolEnd) bool))
+
+; The app: where it is with agentd; agentd's port, and the port its
+; notices come to (0 until made); the transcript and the tools' log,
+; newest first; the entry; whether a turn runs; each pane's first row
+; shown (-1 its end); and how many tools it has shown.
+(data Chat (Chat (link Link) (port int) (np int) (items (list Item)) (log (list Item)) (entry UiEntryText) (busy bool) (first int) (tfirst int) (tools int)))
+
+; The app at first: not yet linked, nothing shown.
+(def chat_new () Chat (Chat (Linking) 0 0 (nil Item) (nil Item) (UiEntryText "" 0) false -1 -1 0))
+
+; A step's result: the window, which it may have asked through, and the
+; app.
+(data Stepped (Stepped UiWin Chat))
+
+; --------------------------------------------------------------- notices
+
+; The transcript and the log after notice e: what was said, in both;
+; the model's text joined onto its last; a tool run, named in the
+; transcript's run of tools and a row of the log, its result on the
+; run that awaits it; and notes; a turn's end and the opened notice say
+; whether one runs.
+(def heard ((c Chat) (e AgentEvent)) Chat
+  (match e
+    ((AgentSaid src t)
+      (let said (bytes_to_list t)
+        (.busy (.log (.items c (cons (ISaid src said) (.items c))) (cons (ISaid src said) (.log c))) true)))
+    ((AgentText t) (.items c (text_onto (.items c) t)))
+    ((AgentTool n input)
+      (.tools (.log (.items c (ran_onto (.items c) n)) (cons (ITool (.tools c) n input ((None ToolEnd)) false) (.log c))) (add (.tools c) 1)))
+    ((AgentResult n failed t) (.log c (resulted (.log c) n (ToolEnd failed t))))
+    ((AgentCompacted before after) (.items c (cons (INote (UiLineDim) "The conversation was compacted.") (.items c))))
+    ((AgentError why) (.items c (cons (INote (UiLineBad) (bytes_to_list why)) (.items c))))
+    ((AgentDone reason) (.busy (.items c (done_note (.items c) reason)) false))
+    ((AgentOpened busy) (.busy c busy))
+    ((AgentNone) c)))
+
+; items with t after the model's last text, or as a text of its own if
+; the newest is not one.
+(def text_onto ((items (list Item)) (t bytes)) (list Item)
+  (if (is_empty items)
+      (cons (IText (cons t (nil bytes))) items)
+      (match (head items)
+        ((IText ps) (cons (IText (cons t ps)) (tail items)))
+        ((ISaid src s) (cons (IText (cons t (nil bytes))) items))
+        ((IRan ns) (cons (IText (cons t (nil bytes))) items))
+        ((ITool k n i e o) (cons (IText (cons t (nil bytes))) items))
+        ((INote k s) (cons (IText (cons t (nil bytes))) items)))))
+
+; items with tool name in the newest run of tools, or as a run of its
+; own if the newest is not one.
+(def ran_onto ((items (list Item)) (name (list int))) (list Item)
+  (let fresh (cons (IRan (cons name (nil (list int)))) items)
+    (if (is_empty items)
+        fresh
+        (match (head items)
+          ((IRan ns) (cons (IRan (cons name ns)) (tail items)))
+          ((ISaid src s) fresh)
+          ((IText ps) fresh)
+          ((ITool k n i e o) fresh)
+          ((INote k s) fresh)))))
+
+; items with the newest run of tool name that has not ended ended so;
+; as they were if none waits.
+(def resulted ((items (list Item)) (name (list int)) (end ToolEnd)) (list Item)
+  (resulted_in items name end (nil Item)))
+
+; resulted's walk: the items passed over onto before, reversed.
+(def resulted_in ((items (list Item)) (name (list int)) (end ToolEnd) (before (list Item))) (list Item)
+  (if (is_empty items)
+      (rev before)
+      (match (head items)
+        ((ITool k n i e o)
+          (match e
+            ((None) (if (eq n name) (rev_onto before (cons (ITool k n i (Some end) o) (tail items))) (resulted_in (tail items) name end (cons (head items) before))))
+            ((Some x) (resulted_in (tail items) name end (cons (head items) before)))))
+        ((ISaid src s) (resulted_in (tail items) name end (cons (head items) before)))
+        ((IText ps) (resulted_in (tail items) name end (cons (head items) before)))
+        ((IRan ns) (resulted_in (tail items) name end (cons (head items) before)))
+        ((INote k s) (resulted_in (tail items) name end (cons (head items) before))))))
+
+; items after a turn's end for reason: a note if it was stopped or cut
+; off; nothing more for an answer that ended, or an error, told first.
+(def done_note ((items (list Item)) (reason (list int))) (list Item)
+  (if (eq reason "stopped") (cons (INote (UiLineDim) "Stopped.") items)
+      (eq reason "max_tokens") (cons (INote (UiLineDim) "The answer was cut off at its most tokens.") items)
+      items))
+
+; items with tool k's row opened, or closed if it was open.
+(def toggled ((items (list Item)) (k int)) (list Item)
+  (if (is_empty items)
+      items
+      (match (head items)
+        ((ITool j n i e o) (if (eq j k) (cons (ITool j n i e (not o)) (tail items)) (cons (head items) (toggled (tail items) k))))
+        ((ISaid src s) (cons (head items) (toggled (tail items) k)))
+        ((IText ps) (cons (head items) (toggled (tail items) k)))
+        ((IRan ns) (cons (head items) (toggled (tail items) k)))
+        ((INote kd s) (cons (head items) (toggled (tail items) k))))))
+
+; ------------------------------------------------------------------ view
+
+; The most of a tool's input its closed row shows.
+(def input_brief () int 60)
+
+; The most of what was said the log's line of it shows.
+(def said_brief () int 48)
+
+; The transcript's paragraphs, oldest first.
+(def chat_paras ((items (list Item))) (list UiPara)
+  (paras_onto items false (nil UiPara)))
+
+; The log's paragraphs, oldest first.
+(def log_paras ((log (list Item))) (list UiPara)
+  (paras_onto log true (nil UiPara)))
+
+; paras_onto's walk: items, newest first, each one's paragraphs, as the
+; log shows them if in_log, in front of those after it, acc.
+(def paras_onto ((items (list Item)) (in_log bool) (acc (list UiPara))) (list UiPara)
+  (if (is_empty items) acc (paras_onto (tail items) in_log (append (item_paras (head items) in_log) acc))))
+
+; An item's paragraphs: what the person said in bold, after a blank row
+; and, if it came from elsewhere than this app or the console, a dimmed
+; line saying where; in the log, a blank row and the start of it,
+; dimmed; the model's text, a paragraph a line; a run of tools, a
+; dimmed line naming them; a tool's row, and if it is open its input
+; and result under it, dimmed; a note in its kind.
+(def item_paras ((it Item) (in_log bool)) (list UiPara)
+  (match it
+    ((ISaid src s)
+      (if in_log
+          (cons (plain "" (UiLinePlain)) (cons (plain (said_line s) (UiLineDim)) (nil UiPara)))
+          (cons (plain "" (UiLinePlain))
+            (if (any_eq src (split_spaces "app console"))
+                (cons (plain s (UiLineStrong)) (nil UiPara))
+                (cons (plain (append "From " src) (UiLineDim)) (cons (plain s (UiLineStrong)) (nil UiPara)))))))
+    ((IText ps) (lines_paras (bytes_to_list (bytes_concat (rev ps))) (UiLinePlain)))
+    ((IRan ns) (cons (plain (append "Ran " (join_with ", " (rev ns))) (UiLineDim)) (nil UiPara)))
+    ((ITool k n input e open) (cons (tool_row k n input e open) (if open (tool_detail input e) (nil UiPara))))
+    ((INote kind s) (cons (plain s kind) (nil UiPara)))))
+
+; What was said as the log's line shows it: its first line, cut to
+; said_brief.
+(def said_line ((s (list int))) (list int)
+  (let l (up_to 10 s)
+    (append "> " (if (and (le (length l) (said_brief)) (eq (length l) (length s))) l (append (take l (said_brief)) "...")))))
+
+; A paragraph of text alone.
+(def plain ((s (list int)) (k UiLineKind)) UiPara (UiPara s k "" ""))
+
+; text a paragraph a line, each of kind k.
+(def lines_paras ((text (list int)) (k UiLineKind)) (list UiPara)
+  (map_paras (split_on 10 text) k (nil UiPara)))
+
+; Each of ls a paragraph of kind k, onto acc reversed; then in order.
+(def map_paras ((ls (list (list int))) (k UiLineKind) (acc (list UiPara))) (list UiPara)
+  (if (is_empty ls) (rev acc) (map_paras (tail ls) k (cons (plain (head ls) k) acc))))
+
+; A tool's row: opened or closed, its name, whether it failed, and its
+; input's start; a press on it its action, tools.tool.K.
+(def tool_row ((k int) (n (list int)) (input bytes) (e (Option ToolEnd)) (open bool)) UiPara
+  (let (failed (match e ((Some x) (match x ((ToolEnd f t) f))) ((None) false))
+        brief (bytes_to_list (if (le (bytes_len input) (input_brief)) input (bytes_slice input 0 (input_brief)))))
+    (UiPara (append n (append (if failed " failed  " "  ") (append brief (if (gt (bytes_len input) (input_brief)) "..." ""))))
+            (if failed (UiLineBad) (UiLineDim))
+            (if open "pan-down" "go-next")
+            (tool_action k))))
+
+; The action of tool k's row.
+(def tool_action ((k int)) (list int) (append (tools_prefix) (append ".tool." (digits k))))
+
+; An open row's detail: its input, and its result, or that it runs.
+(def tool_detail ((input bytes) (e (Option ToolEnd))) (list UiPara)
+  (append (cons (plain "Input:" (UiLineDim)) (lines_paras (bytes_to_list input) (UiLineDim)))
+    (match e
+      ((None) (cons (plain "Running..." (UiLineDim)) (nil UiPara)))
+      ((Some x)
+        (match x
+          ((ToolEnd f t) (cons (plain (if f "Failed:" "Result:") (UiLineDim)) (lines_paras (bytes_to_list t) (UiLineDim)))))))))
+
+; The window: the transcript over the entry and its button; or, with no
+; agentd, a page saying so, and Retry.
+(def chat_view ((c Chat)) UiWidget
+  (match (.link c)
+    ((Unlinked why)
+      (UiBox (UiV) 0
+        (cons (UiExpand (UiView (UiStatusPage "view-list" "The Agent Is Not Running" why)))
+              (cons (UiSeparator (UiH))
+                    (cons (UiPad (ui_space_m) (ui_space_m) (UiBox (UiH) (ui_space_s) (cons (UiExpand (UiSpace 0 0)) (cons (UiButton "app.retry" "" "Retry" (UiBtnRegular) true) (nil UiWidget)))))
+                          (nil UiWidget))))))
+    ((Linking) (talk_view c "Opening the conversation..."))
+    ((Linked) (talk_view c "Ask the agent"))))
+
+; The transcript beside the tools' log, and the entry under both,
+; placeholder its words while empty, with Send, or Stop while a turn
+; runs.
+(def talk_view ((c Chat) (placeholder (list int))) UiWidget
+  (UiBox (UiV) 0
+    (cons (UiExpand
+            (UiBox (UiH) 0
+              (cons (UiExpand (UiLines (UiLinesData (conv_prefix) (chat_paras (.items c)) (.first c))))
+                (cons (UiSeparator (UiV))
+                  (cons (UiExpand (log_view c)) (nil UiWidget))))))
+          (cons (UiSeparator (UiH))
+                (cons (UiPad (ui_space_m) (ui_space_m)
+                        (UiBox (UiH) (ui_space_s)
+                          (cons (UiExpand (UiEntry (entry_name) (.entry c) placeholder 200))
+                                (cons (talk_button c) (nil UiWidget)))))
+                      (nil UiWidget))))))
+
+; The tools' log: its heading, and the rows of the tools run, or that
+; none has been.
+(def log_view ((c Chat)) UiWidget
+  (UiBox (UiV) 0
+    (cons (UiPad (ui_space_m) (ui_space_s) (UiLabel "Tools" (UiHeading) (UiStart)))
+      (cons (UiSeparator (UiH))
+        (cons (UiExpand
+                (if (eq (.tools c) 0)
+                    (UiLines (UiLinesData (tools_prefix) (cons (plain "No tools have run yet." (UiLineDim)) (nil UiPara)) -1))
+                    (UiLines (UiLinesData (tools_prefix) (log_paras (.log c)) (.tfirst c)))))
+              (nil UiWidget))))))
+
+; Stop while a turn runs; else Send, once there is something to say.
+(def talk_button ((c Chat)) UiWidget
+  (if (.busy c)
+      (UiButton "app.stop" "" "Stop" (UiBtnDestructive) true)
+      (UiButton "app.send" "" "Send" (UiBtnSuggested) (can_send c))))
+
+; Whether the entry may be said: open, no turn running, and something
+; in it.
+(def can_send ((c Chat)) bool
+  (match (.link c)
+    ((Linked) (and (not (.busy c)) (not (is_empty (said_text c)))))
+    ((Linking) false)
+    ((Unlinked why) false)))
+
+; What the entry says, without spaces at its ends.
+(def said_text ((c Chat)) (list int) (trimmed (.text (.entry c))))
+
+; s without spaces at either end.
+(def trimmed ((s (list int))) (list int) (rev (spaces_off (rev (spaces_off s)))))
+(def spaces_off ((s (list int))) (list int) (if (is_empty s) s (eq (head s) 32) (spaces_off (tail s)) s))
+
+; ---------------------------------------------------------------- update
+
+; The app after action, set off with ev, the window w asked through:
+; the conversation's notices and the answers to its asks; Send or
+; Enter saying the entry; Stop; Retry; a tool's row opened or closed;
+; either pane scrolled; and keys to the entry.
+(def chat_update ((w UiWin) (c Chat) (action (list int)) (ev UiEvent)) Stepped
+  (let (tool_p (append (tools_prefix) ".tool.")
+        entry_p (append (entry_name) "."))
+    (if (or (eq action "app.send") (eq action (append entry_p "activate"))) (sent w c)
+        (eq action "app.stop") (if (.busy c) (Stepped (ui_win_ask w (tag_stop) (.port c) (agent_stop_body)) c) (Stepped w c))
+        (eq action "app.retry") (linking w c)
+        (starts_with action tool_p) (Stepped w (.log c (toggled (.log c) (int_prefix (drop_n action (length tool_p)) 0))))
+        (starts_with action (append (conv_prefix) ".")) (Stepped w (.first c (ui_lines_first (.first c) (conv_prefix) action (ui_win_scroller w (conv_prefix)))))
+        (starts_with action (append (tools_prefix) ".")) (Stepped w (.tfirst c (ui_lines_first (.tfirst c) (tools_prefix) action (ui_win_scroller w (tools_prefix)))))
+        (starts_with action entry_p) (Stepped w (.entry c (ui_entry_update (entry_name) (.entry c) action ev)))
+        (Stepped w (came c ev)))))
+
+; The app after an event that is no action: a notice on its port, or
+; an answer to an ask.
+(def came ((c Chat) (ev UiEvent)) Chat
+  (match (ui_port_of ev)
+    ((UiOnPort p m)
+      (if (not (eq p (.np c)))
+          c
+          (match m ((RecvFailed) c) ((Message from b) (heard c (agent_event_of b))))))
+    ((UiNoPort)
+      (match (ui_reply_of ev)
+        ((UiNoReply) c)
+        ((UiReplyTo tag m) (answered c tag m))))))
+
+; The answer m to the ask tagged tag: open's links the window, or says
+; why not; say's and stop's refusals are noted, a say's ending the turn
+; it would have begun; no answer at all means agentd is gone.
+(def answered ((c Chat) (tag int) (m Message)) Chat
+  (match m
+    ((RecvFailed) (.busy (.link c (Unlinked "agentd stopped answering.")) false))
+    ((Message from b)
+      (let ok (msg_is b "ok")
+        (if (eq tag (tag_open)) (.link c (if ok (Linked) (Unlinked (agent_why (msg_text b)))))
+            ok c
+            (eq tag (tag_say)) (.busy (.items c (cons (INote (UiLineBad) (agent_why (msg_text b))) (.items c))) false)
+            (.items c (cons (INote (UiLineBad) (agent_why (msg_text b))) (.items c))))))))
+
+; The entry said, if it may be: asked of agentd, the entry emptied, and
+; a turn taken to run until agentd says otherwise.
+(def sent ((w UiWin) (c Chat)) Stepped
+  (if (not (can_send c))
+      (Stepped w c)
+      (let w2 (ui_win_ask w (tag_say) (.port c) (agent_say_body "app" (said_text c)))
+        (Stepped w2 (.busy (.tfirst (.first (.entry c (UiEntryText "" 0)) -1) -1) true)))))
+
+; agentd looked for: its conversation opened, its notices to the app's
+; port, made once, and the transcript emptied for what it tells; or,
+; with no agentd, why not.
+(def linking ((w UiWin) (c Chat)) Stepped
+  (match (name_lookup "agent")
+    ((NotFound) (Stepped w (.link c (Unlinked "No agentd serves the agent: the board has no /etc/agent/config, or the agent has not started yet."))))
+    ((Found port)
+      (let np (if (gt (.np c) 0) (.np c) (port_new))
+        (if (lt np 0)
+            (Stepped w (.link c (Unlinked "No port to hear the agent on.")))
+            (let (w2 (ui_win_ports w (cons np (nil int)))
+                  w3 (ui_win_ask w2 (tag_open) port (agent_open_body np)))
+              (Stepped w3 (Chat (Linking) port np (nil Item) (nil Item) (.entry c) false -1 -1 0))))))))
+
+; ------------------------------------------------------------------ loop
+
+; The entry point: the window opened, agentd looked for, and the window
+; served until it is closed.
+(def chat () int
+  (match (ui_open "Agent" 960 560)
+    ((UiOpenFailed why) (complain why))
+    ((UiOpenedWin w)
+      (match (linking (ui_win_focusing w (append (entry_name) ".entry")) (chat_new))
+        ((Stepped w2 c) (chat_loop (ui_present w2 (chat_view c)) c))))))
+
+; Each event routed, the app updated, and the window presented again.
+(def chat_loop ((w0 UiWin) (c Chat)) int
+  (match (ui_win_next w0)
+    ((UiWinNext w ev)
+      (if (ui_event_lost ev)
+          (complain "lost its port")
+          (match (ui_route w ev)
+            ((UiRouted w2 action)
+              (match (chat_update w2 c action ev)
+                ((Stepped w3 c2) (chat_loop (ui_present w3 (chat_view c2)) c2)))))))))

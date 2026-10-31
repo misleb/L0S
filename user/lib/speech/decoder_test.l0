@@ -1,0 +1,97 @@
+; decoder_test.l0 -- Whistle's decoder, without the model: the engrams'
+; hash, the taps, attention over kept rows, the sinusoids, the engram's
+; weight, where the engrams are, and greedy picking.
+; probes/whistle/deccheck checks the decoder on whistle.cact itself.
+
+; Whether a and b are within e.
+(def near ((a float) (b float) (e float)) bool (float_lt (nn_abs (float_sub a b)) e))
+
+; An array of the floats xs.
+(def floats ((xs (list float))) (array float) (floats_into xs 0 (array_new (length xs) 0.0)))
+(def floats_into ((xs (list float)) (k int) (a (array float))) (array float)
+  (if (is_empty xs) a (floats_into (tail xs) (add k 1) (array_set a k (head xs)))))
+
+; BOS, a tag, two text tokens.
+(def some_tokens () (array int)
+  (array_set (array_set (array_set (array_set (array_new 4 0) 0 2) 1 8192) 2 1380) 3 302))
+
+; The slots cactus-needle's engram_indices gives the tokens 2, 8192,
+; 1380, 302 at place 3: 10174 for the bigram's first hash, 13286 for
+; the trigram's first, its seed the third.
+(def test_slot () int
+  (add (check_int "bigram" (dec_slot (some_tokens) 3 2 1 18432) 10174)
+       (check_int "trigram" (dec_slot (some_tokens) 3 3 3 18432) 13286)))
+
+; At place 0 the token before is 0: engram_indices gives 16327.
+(def test_slot_first () int
+  (check_int "first" (dec_slot (some_tokens) 0 2 1 18432) 16327))
+
+; Rows (1, 2), (3, 4), (5, 6) under taps of 1, 10 and 100: at place 2,
+; 5 + 30 + 100 and 6 + 40 + 200; at place 1, 3 + 10, the tap before the
+; first row adding nothing.
+(def three_rows () (array float) (floats (cons 1.0 (cons 2.0 (cons 3.0 (cons 4.0 (cons 5.0 (cons 6.0 (nil float)))))))))
+(def three_taps () (array float) (floats (cons 1.0 (cons 1.0 (cons 10.0 (cons 10.0 (cons 100.0 (cons 100.0 (nil float)))))))))
+(def test_tapped () int
+  (let (a (dec_tapped (three_rows) 0 2 2 (three_taps) 1)
+        b (dec_tapped (three_rows) 0 1 2 (three_taps) 1))
+    (add (check_bool "place 2" (and (eq (array_get a 0) 135.0) (eq (array_get a 1) 246.0)) true)
+         (check_bool "place 1" (eq (array_get b 0) 13.0) true))))
+
+; Taps 2 rows apart at place 2: row 2 under the first, row 0 under the
+; second, 5 + 10.
+(def test_tapped_apart () int
+  (check_bool "apart" (eq (array_get (dec_tapped (three_rows) 0 2 2 (three_taps) 2) 0) 15.0) true))
+
+; Over one row, every head's output is its value head's value: query
+; head 5 reads key and value head 1 of 2 (5 / 4), whose value entries
+; are 2.
+(def test_heads_one_row () int
+  (let (v (array_set (array_new 128 1.0) 64 2.0)
+        out (dec_heads (array_new 384 0.5) (array_new 96 0.5) 0 96 v 0 128 1 4 0 (array_new 512 0.0)))
+    (add (check_bool "head 0" (eq (array_get out 0) 1.0) true)
+         (check_bool "head 5" (eq (array_get out (mul 5 64)) 2.0) true))))
+
+; Two rows whose keys are the query's opposite and the query: the second
+; takes more of the softmax, so the output leans to its value.
+(def test_heads_lean () int
+  (let (q (array_new 384 0.5)
+        k (array_set_from (array_new 192 0.5) 0 48 -0.5)
+        v (array_set_from (array_new 256 1.0) 0 64 -1.0)
+        out (dec_heads q k 0 96 v 0 128 2 4 0 (array_new 512 0.0)))
+    (check_bool "leans" (float_gt (array_get out 0) 0.9) true)))
+
+; a with entries k up to e set to x.
+(def array_set_from ((a (array float)) (k int) (e int) (x float)) (array float)
+  (if (ge k e) a (array_set_from (array_set a k x) (add k 1) e x)))
+
+; The sinusoids of row 0 are sin 0 and cos 0; row 1's last sine is of
+; 10000^-1, its first cosine cos 1. Over zeros, with a weight of 1.
+(def test_sinusoids () int
+  (let s (dec_sinusoids (array_new 1024 0.0) 2 1.0 0 (array_new 1024 0.0))
+    (add (check_bool "row 0" (and (eq (array_get s 0) 0.0) (eq (array_get s 256) 1.0)) true)
+         (add (check_bool "row 1 last sine" (near (array_get s 767) (float_sin 0.0001) 0.000000001) true)
+              (check_bool "row 1 first cosine" (near (array_get s 768) (float_cos 1.0) 0.000000001) true)))))
+
+; A row and itself, each over its root mean square: the width, 2, less
+; a little for the 1e-6 under the root.
+(def test_unit_dot () int
+  (let (a (floats (cons 3.0 (cons 3.0 (nil float)))))
+    (check_bool "itself" (near (dec_unit_dot a a) 2.0 0.000001) true)))
+
+; Engrams at layers 3 and 7 are the first and second; layer 4 has none.
+(def test_site () int
+  (let sites (cons 3 (cons 7 (nil int)))
+    (add (check_int "3" (dec_site sites 3 0) 0)
+         (add (check_int "7" (dec_site sites 7 0) 1)
+              (check_int "4" (dec_site sites 4 0) -1)))))
+
+; Logits of 6, the text tokens 4: a tag first, the likeliest among the
+; last two however likely the text is; text after, never a tag.
+(def test_pick () int
+  (let lg (floats (cons 1.0 (cons 9.0 (cons 2.0 (cons 3.0 (cons 4.0 (cons 7.0 (nil float))))))))
+    (add (check_int "tag" (dec_pick lg true 4) 5)
+         (check_int "text" (dec_pick lg false 4) 1))))
+
+; The first of equal logits.
+(def test_pick_first () int
+  (check_int "first" (dec_pick (array_new 6 1.0) false 4) 0))

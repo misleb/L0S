@@ -1,0 +1,75 @@
+; nn_test.l0 -- Whistle's arithmetic: the activations, rounding and
+; int8 quantization as the engine's, matrices in binary32 bytes and
+; rows times them, the norms and the softmax.
+
+; Whether a and b are within e.
+(def near ((a float) (b float) (e float)) bool (float_lt (nn_abs (float_sub a b)) e))
+
+; An array of the floats xs.
+(def floats ((xs (list float))) (array float) (floats_into xs 0 (array_new (length xs) 0.0)))
+(def floats_into ((xs (list float)) (k int) (a (array float))) (array float)
+  (if (is_empty xs) a (floats_into (tail xs) (add k 1) (array_set a k (head xs)))))
+
+; The sigmoid at 0 is a half; far out it is 0 or 1, not a NaN.
+(def test_sigmoid () int
+  (add (check_bool "at 0" (eq (nn_sigmoid 0.0) 0.5) true)
+       (add (check_bool "far below" (eq (nn_sigmoid -1000.0) 0.0) true)
+            (check_bool "far above" (eq (nn_sigmoid 1000.0) 1.0) true))))
+
+; SiLU of 1 is the sigmoid of 1, 1 / (1 + 1/e).
+(def test_silu () int
+  (check_bool "silu 1" (near (nn_silu 1.0) 0.7310585786300049 0.000000000001) true))
+
+; Halves go to the even neighbour, either side of 0.
+(def test_round_halves () int
+  (add (check_bool "2.5" (eq (nn_round_even 2.5) 2.0) true)
+       (add (check_bool "3.5" (eq (nn_round_even 3.5) 4.0) true)
+            (check_bool "-2.5" (eq (nn_round_even -2.5) -2.0) true))))
+
+; The rest go to the nearest.
+(def test_round_nearest () int
+  (add (check_bool "1.4" (eq (nn_round_even 1.4) 1.0) true)
+       (check_bool "-1.6" (eq (nn_round_even -1.6) -2.0) true)))
+
+; A row's largest becomes 127 steps; -0.5 of 1 is -63.5 steps, rounded
+; to -64; 0.001 is 0.127 steps, rounded to none.
+(def test_act_quant () int
+  (let a (nn_act_quant (floats (cons 1.0 (cons -0.5 (cons 0.001 (nil float))))) 0 3)
+    (add (check_bool "largest" (near (array_get a 0) 1.0 0.000000000001) true)
+         (add (check_bool "half" (near (array_get a 1) (float_div -64.0 127.0) 0.000000000001) true)
+              (check_bool "small" (eq (array_get a 2) 0.0) true)))))
+
+; A row of zeros stays.
+(def test_act_quant_zeros () int
+  (check_bool "zeros" (eq (array_get (nn_act_quant (floats (cons 0.0 (cons 0.0 (nil float)))) 0 2) 1) 0.0) true))
+
+; A matrix of 3 rows by 2: (1, 2), (0, 1), (-1, 0.5).
+(def small_mat () NnMat
+  (NnMat 3 2 (nn_put_f32s (nn_zeros 6) 0 (floats (cons 1.0 (cons 2.0 (cons 0.0 (cons 1.0 (cons -1.0 (cons 0.5 (nil float)))))))) 0)))
+
+; The rows (3, 4) and (-2, 2) times it: 3 + 8, 4, -3 + 2; -2 + 4, 2, 2 + 1.
+(def test_matmul () int
+  (let y (nn_matmul (small_mat) (floats (cons 3.0 (cons 4.0 (cons -2.0 (cons 2.0 (nil float)))))) 2)
+    (add (check_int "entries" (array_len y) 6)
+         (add (check_bool "row 0" (and (eq (array_get y 0) 11.0) (and (eq (array_get y 1) 4.0) (eq (array_get y 2) -1.0))) true)
+              (check_bool "row 1" (and (eq (array_get y 3) 2.0) (and (eq (array_get y 4) 2.0) (eq (array_get y 5) 3.0))) true)))))
+
+; Its last two rows alone: 4, -1 and 2, 3.
+(def test_matmul_part () int
+  (let p (nn_matmul_part (small_mat) (floats (cons 3.0 (cons 4.0 (cons -2.0 (cons 2.0 (nil float)))))) 2 1 2)
+    (add (check_int "entries" (array_len p) 4)
+         (check_bool "part" (and (eq (array_get p 0) 4.0) (eq (array_get p 3) 3.0)) true))))
+
+; The row 3, 4 over its root mean square, the second times 2.
+(def test_norm () int
+  (let (y (nn_norm_rows (floats (cons 3.0 (cons 4.0 (nil float)))) 1 2 (floats (cons 0.0 (cons 1.0 (nil float)))) 0.0)
+        r (float_sqrt 12.5))
+    (add (check_bool "first" (near (array_get y 0) (float_div 3.0 r) 0.000000000001) true)
+         (check_bool "second" (near (array_get y 1) (float_div 8.0 r) 0.000000000001) true))))
+
+; The softmax sums to 1 and keeps the order; equal entries share.
+(def test_softmax () int
+  (let (s (nn_softmax (floats (cons 1.0 (cons 2.0 (cons 1.0 (nil float))))) 0 3))
+    (add (check_bool "sum" (near (float_add (array_get s 0) (float_add (array_get s 1) (array_get s 2))) 1.0 0.000000000001) true)
+         (add (check_bool "order" (float_gt (array_get s 1) (array_get s 0)) true)
+              (check_bool "equal" (eq (array_get s 0) (array_get s 2)) true)))))

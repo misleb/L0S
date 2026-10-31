@@ -260,6 +260,15 @@ AGENTHOME := $(PATHS) $(CLOCK) user/lib/sys/agenthome.l0
 # the pci protocol, which the PCIe bus's server answers drivers with.
 USBDESC := user/lib/format/usbdesc.l0
 USBLIB  := $(USBDESC) user/lib/proto/usb.l0
+UAC     := user/lib/format/uac.l0
+CACT    := user/lib/format/cact.l0
+MEL     := user/lib/speech/mel.l0
+NN      := user/lib/speech/nn.l0
+WHISTLE := $(CACT) $(MEL) $(NN) user/lib/speech/whistle.l0
+ENCODER := $(WHISTLE) user/lib/speech/encoder.l0
+DECODER := $(ENCODER) user/lib/speech/decoder.l0
+TRANSCRIBE := $(WAV) $(DECODER) user/lib/speech/transcribe.l0
+MICLIB  := user/lib/proto/mic.l0
 PCILIB  := user/lib/proto/pci.l0
 
 # The partition tables, GPT, and the UUIDs and CRC-32 it needs, and
@@ -281,9 +290,9 @@ SHA256  := user/lib/format/sha256.l0
 # they take their messages and time their steps by, uiloop.l0.
 UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/metrics.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
-             user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0
+             user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0 user/lib/ui/lines.l0
 UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0 user/lib/ui/uiloop.l0 $(APPOPEN)
-UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu
+UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu lines
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
 LIBS_hvs        := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER) $(MAILBOX)
@@ -291,6 +300,7 @@ LIBS_virtio-input := $(VIRTIO) $(KEYMAP)
 LIBS_pcie       := $(PCILIB)
 LIBS_xhci       := $(USBLIB) $(PCILIB) $(RP1)
 LIBS_usb-hid    := $(USBLIB) $(KEYMAP)
+LIBS_usb-audio  := $(USBLIB) $(UAC) $(MICLIB)
 LIBS_lsusb      := $(USBLIB)
 LIBS_sdhci      := $(PCILIB) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-blk := $(VIRTIO) $(DISKLIB) $(UUIDLIB) $(FSLIB)
@@ -304,12 +314,14 @@ LIBS_http       := $(HTTP) $(JSON) $(SSE)
 LIBS_ntp        := $(INETLIB) $(CLOCK) $(NTPLIB)
 LIBS_ask        := $(MODELLIB)
 LIBS_agent      := $(AGENTLIB) $(MODELLIB) $(AGENTHOME)
-LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME)
+LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
 LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
 LIBS_play       := $(AUDIOLIB) $(WAV)
+LIBS_rec        := $(MICLIB) $(WAV)
+LIBS_listen     := $(TRANSCRIBE)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS)
 LIBS_init       := $(PATHS)
@@ -319,6 +331,7 @@ LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_fontview   := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
@@ -543,6 +556,14 @@ $(call l0_test,$(BASE) $(PARTS) user/lib/format/mbr_test.l0)
 $(call l0_test,$(BASE) $(UUIDLIB) user/lib/format/uuid_test.l0)
 $(call l0_test,$(BASE) $(DNSLIB) user/lib/format/dns_test.l0)
 $(call l0_test,$(BASE) $(USBDESC) user/lib/format/usbdesc_test.l0)
+$(call l0_test,$(BASE) $(USBDESC) $(UAC) user/lib/format/uac_test.l0)
+$(call l0_test,$(BASE) $(CACT) user/lib/format/cact_test.l0)
+$(call l0_test,$(BASE) $(CLI) $(WAV) $(MEL) user/lib/speech/mel_test.l0)
+$(call l0_test,$(BASE) $(CACT) $(MEL) $(NN) user/lib/speech/nn_test.l0)
+$(call l0_test,$(BASE) $(WHISTLE) user/lib/speech/whistle_test.l0)
+$(call l0_test,$(BASE) $(ENCODER) user/lib/speech/encoder_test.l0)
+$(call l0_test,$(BASE) $(DECODER) user/lib/speech/decoder_test.l0)
+$(call l0_test,$(BASE) $(CLI) $(TRANSCRIBE) user/lib/speech/transcribe_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)

@@ -1,0 +1,158 @@
+; whistle.l0 -- Whistle, Cactus Compute's speech recognition model
+; (roadmap 0060), in L0, purely, from its .cact: where its audio
+; tensors are, by position, after the audio manifest; and its stem, the
+; three convolutions of stride 2 that take the front end's 80 features
+; a frame to a row of 512 every 80 ms, as cactus-needle's whistle.py
+; has them:
+;
+;   conv 3x3, stride 2, 1 to 128 channels          (T, 80) to (T/2, 40, 128)
+;   twice: SiLU, depthwise 3x3, stride 2, then a
+;     pointwise 128 to 128                         to (T/4, 20) and (T/8, 10)
+;   SiLU; each row's 128 channels of 10, channel
+;     first, quantized to int8 and back; 1280 to 512
+;
+; Each convolution pads its input with a row and a column of zeros each
+; side. Linked as WHISTLE in the Makefile, after CACT, MEL and NN.
+
+; A model: the container, its bytes, and the position of its audio
+; manifest, which every audio tensor's is counted from.
+(data Whistle (Whistle (c Cact) (b bytes) (audio int)))
+
+; The model in b: its container, with an audio manifest (an FP32 tensor
+; of 13 whose first is 3246); or why not.
+(def whistle_of ((b bytes)) (Result Whistle (list int))
+  (match (cact_of b)
+    ((Err why) ((Err Whistle (list int)) why))
+    ((Ok c)
+      (let at (whistle_manifest c b 0)
+        (if (lt at 0) ((Err Whistle (list int)) "no audio manifest: not Whistle") ((Ok Whistle (list int)) (Whistle c b at)))))))
+
+; The first tensor from k on that is an audio manifest, or -1.
+(def whistle_manifest ((c Cact) (b bytes) (k int)) int
+  (if (ge k (cact_count c))
+      -1
+      (let t (cact_tensor c k)
+        (if (and (and (eq (.dtype t) (cact_fp32)) (eq (.shape t) (cons 13 (nil int)))) (eq (cact_number b t 0) 3246.0))
+            k
+            (whistle_manifest c b (add k 1))))))
+
+; Entry k of the manifest: 2 the text tokens, 3 the encoder's blocks, 4
+; its lanes, 5 its convolution's kernel, 6 the stem's channels, 7 its
+; stages, 8 the mels.
+(def whistle_geometry ((w Whistle) (k int)) int
+  (float_to_int (cact_number (.b w) (cact_tensor (.c w) (.audio w)) k)))
+
+; ----------------------------------------------------------- positions
+
+; After the manifest: each decoder layer's cross-attention, 10 tensors
+; (its norm, q, k, v, gate and out, two norms, the post norm, the gate),
+; then pe_gate; each encoder block's 43; the encoder's mHC, 9, and its
+; final norm; then the stem, its first kernel, a depthwise kernel and a
+; pointwise matrix a stage after the first, and its last matrix.
+(def whistle_pe_gate ((w Whistle)) int (add (.audio w) (add 1 (mul 10 (cact_hdr (.c w) 10)))))
+(def whistle_encoder_at ((w Whistle) (i int)) int (add (whistle_pe_gate w) (add 1 (mul 43 i))))
+(def whistle_stem_at ((w Whistle)) int (add (whistle_encoder_at w (whistle_geometry w 3)) 10))
+
+; ---------------------------------------------------------------- the stem
+
+; The stem's weights: its first kernel, 9 taps of a row of channels;
+; each later stage's depthwise kernel, the same, and pointwise matrix;
+; its last matrix; and its channels.
+(data Stem (Stem (first (array float)) (dws (list (array float))) (pws (list NnMat)) (out NnMat) (ch int)))
+
+; The stem of w, read and dequantized.
+(def stem_of ((w Whistle)) Stem
+  (let (c (.c w)
+        b (.b w)
+        s (whistle_stem_at w)
+        n (whistle_geometry w 7))
+    (Stem (nn_vector c b s)
+          (stem_dws c b s 1 n (nil (array float)))
+          (stem_pws c b s 1 n (nil NnMat))
+          (nn_mat c b (add s (sub (mul 2 n) 1)))
+          (whistle_geometry w 6))))
+(def stem_dws ((c Cact) (b bytes) (s int) (i int) (n int) (acc (list (array float)))) (list (array float))
+  (if (ge i n) (rev acc) (stem_dws c b s (add i 1) n (cons (nn_vector c b (add s (sub (mul 2 i) 1))) acc))))
+(def stem_pws ((c Cact) (b bytes) (s int) (i int) (n int) (acc (list NnMat))) (list NnMat)
+  (if (ge i n) (rev acc) (stem_pws c b s (add i 1) n (cons (nn_mat c b (add s (mul 2 i))) acc))))
+
+; What the stem gives: its rows, and each row's values, row-major.
+(data Rows (Rows (n int) (x (array float))))
+
+; The stem over t frames of 80 features, f row-major: (t + 1) / 2 rows
+; after each stage, of the last matrix's width.
+(def stem_run ((st Stem) (f (array float)) (t int)) Rows
+  (let (h (half_up t)
+        wd (half_up 80)
+        x (stem_down f t 80 1 (.first st) (.ch st)))
+    (stem_stages st x h wd (.dws st) (.pws st))))
+
+; (n + 1) / 2: a stride-2 convolution's outputs of n padded by 1 each side.
+(def half_up ((n int)) int (div (add n 1) 2))
+
+; The stages after the first on x, h rows of wd columns of channels:
+; SiLU, the depthwise convolution, the pointwise matrix; then the last.
+(def stem_stages ((st Stem) (x (array float)) (h int) (wd int) (dws (list (array float))) (pws (list NnMat))) Rows
+  (if (or (is_empty dws) (is_empty pws))
+      (stem_last st x h wd)
+      (let (ch (.ch st)
+            act (nn_silu_range x 0 (array_len x))
+            d (stem_down act h wd ch (head dws) ch)
+            h2 (half_up h)
+            w2 (half_up wd))
+        (stem_stages st (nn_matmul (head pws) d (mul h2 w2)) h2 w2 (tail dws) (tail pws)))))
+
+; The last of the stem: SiLU; each row's channels of wd columns, channel
+; first, as one row, quantized; times the last matrix.
+(def stem_last ((st Stem) (x (array float)) (h int) (wd int)) Rows
+  (let (ch (.ch st)
+        act (nn_silu_range x 0 (array_len x))
+        flat (stem_flat act h wd ch 0 (array_new (mul h (mul wd ch)) 0.0))
+        q (nn_act_quant_rows flat h (mul wd ch)))
+    (Rows h (nn_matmul (.out st) q h))))
+
+; x's entries, (row, column, channel), at (row, channel, column) in out,
+; from entry k.
+(def stem_flat ((x (array float)) (h int) (wd int) (ch int) (k int) (out (array float))) (array float)
+  (if (ge k (array_len x))
+      out
+      (let (c (mod k ch)
+            col (mod (div k ch) wd)
+            row (div k (mul ch wd)))
+        (stem_flat x h wd ch (add k 1) (array_set out (add (mul row (mul wd ch)) (add (mul c wd) col)) (array_get x k))))))
+
+; A 3x3 convolution of stride 2 over x, h rows of wd columns of cin
+; channels (1, or ch for a depthwise one), padded by zeros: ch channels
+; out, at row r column q channel o the sum over taps (i, j) of the
+; input at (2r + i - 1, 2q + j - 1) times tap 3i + j's weight for o,
+; the input's channel o, or its only one.
+(def stem_down ((x (array float)) (h int) (wd int) (cin int) (k (array float)) (ch int)) (array float)
+  (let (h2 (half_up h) w2 (half_up wd))
+    (down_at x h wd cin k ch w2 0 (mul h2 w2) (array_new (mul (mul h2 w2) ch) 0.0))))
+
+; Output places p up to n, each its taps.
+(def down_at ((x (array float)) (h int) (wd int) (cin int) (k (array float)) (ch int) (w2 int) (p int) (n int) (out (array float))) (array float)
+  (if (ge p n)
+      out
+      (down_at x h wd cin k ch w2 (add p 1) n (down_taps x h wd cin k ch (mul 2 (div p w2)) (mul 2 (mod p w2)) (mul p ch) 0 out))))
+
+; Taps from tap on of the place whose taps' centre is (r, q), its
+; channels from at in out; a tap off the input adds nothing.
+(def down_taps ((x (array float)) (h int) (wd int) (cin int) (k (array float)) (ch int) (r int) (q int) (at int) (tap int) (out (array float))) (array float)
+  (if (ge tap 9)
+      out
+      (let (i (add r (sub (div tap 3) 1))
+            j (add q (sub (mod tap 3) 1))
+            o2 (if (or (or (lt i 0) (ge i h)) (or (lt j 0) (ge j wd)))
+                   out
+                   (down_channels x (mul (add (mul i wd) j) cin) cin k (mul tap ch) ch at 0 out)))
+        (down_taps x h wd cin k ch r q at (add tap 1) o2))))
+
+; Channels o up to ch of one tap: out at plus o gains the input's
+; channel o (or its only one, from xi) times the tap's weight for o.
+(def down_channels ((x (array float)) (xi int) (cin int) (k (array float)) (ki int) (ch int) (at int) (o int) (out (array float))) (array float)
+  (if (ge o ch)
+      out
+      (let (v (array_get x (if (eq cin 1) xi (add xi o)))
+            s (float_add (array_get out (add at o)) (float_mul v (array_get k (add ki o)))))
+        (down_channels x xi cin k ki ch at (add o 1) (array_set out (add at o) s)))))

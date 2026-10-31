@@ -1,0 +1,169 @@
+; lines.l0 -- text that wraps and scrolls, as a chat's GtkListView of
+; labels that wrap shows a conversation: paragraphs, each wrapped at its
+; spaces to the width it is given, a word too long for a row cut where
+; it no longer fits; a row a line of text, on a view's ground; the
+; wheel scrolling them by rows, and the grid's overlay scrollbar saying
+; where those shown are. It shows the end, and keeps showing it as
+; paragraphs come, until it is scrolled up from there.
+;
+; A paragraph has a kind (plain, strong, dimmed, or an error's red), an
+; icon before its first row, or none, and an action, or none: each of
+; its rows sets that off, tinted while the pointer is over it, as a
+; disclosure row is. Its other actions are named from a prefix the
+; program gives, as the grid's are: from window.l0 PREFIX.scrollto.N for
+; row N to be the first shown, and its area is a scroller's,
+; PREFIX.scroll. ui_lines_first makes the next first row from them. Its
+; UiWidget constructor is widget.l0's UiLines.
+
+; How a paragraph's text is drawn: in the text's color, the same in
+; bold, dimmed, or in the error's color.
+(data UiLineKind (UiLinePlain) (UiLineStrong) (UiLineDim) (UiLineBad))
+
+; A paragraph: its text, its kind, the icon before its first row ("" for
+; none), and the action its rows set off ("" for none).
+(data UiPara (UiPara (text (list int)) (kind UiLineKind) (icon (list int)) (action (list int))))
+
+; Lines to show: their actions' prefix, the paragraphs in order, and the
+; first row shown, -1 to show the end however many rows there are.
+(data UiLinesData (UiLinesData (prefix (list int)) (paras (list UiPara)) (first int)))
+
+; A row as laid out: its text, its paragraph's kind and action, the
+; icon it starts with ("" for none), and whether it is indented past
+; an icon its paragraph's first row has.
+(data UiLineRow (UiLineRow (text (list int)) (kind UiLineKind) (action (list int)) (icon (list int)) (indent bool)))
+
+; ---------------------------------------------------------------- sizes
+
+; How far in from the sides the text is, and an icon's room before it.
+(def ui_lines_margin () int (ui_space_m))
+(def ui_lines_icon_room () int (add (ui_icon_size) (ui_space_s)))
+
+; How many rows show in h, ui_space_s under the top: whole ones only.
+(def ui_lines_visible ((h int)) int (max 0 (div (sub h (ui_space_s)) (ui_text_row_h))))
+
+; Lines' natural size: a few words wide, a row high.
+(def ui_lines_size_of ((d UiLinesData)) UiSize
+  (UiSize (add (mul 2 (ui_lines_margin)) (ui_chars_w 20 (ui_text_font) false)) (add (ui_space_s) (ui_text_row_h))))
+
+; The first row shown of n, vis showing, when first is asked for: the
+; end for -1, and never past it.
+(def ui_lines_shown_from ((first int) (n int) (vis int)) int
+  (let most (max 0 (sub n vis))
+    (if (or (lt first 0) (gt first most)) most first)))
+
+; The first row the program keeps after action, from first, the lines
+; called prefix scrolled as sc says: scrolled to the end again, -1, so
+; that the end stays shown as rows come; or as it was.
+(def ui_lines_first ((first int) (prefix (list int)) (action (list int)) (sc UiScroller)) int
+  (let to_p (append prefix ".scrollto.")
+    (if (not (starts_with action to_p))
+        first
+        (let n (int_prefix (drop_n action (length to_p)) 0)
+          (match sc ((UiScroller at most vis) (if (ge n most) -1 n)))))))
+
+; -------------------------------------------------------------- wrapping
+
+; The paragraphs ps as rows, wrapped to w, in order.
+(def ui_lines_rows ((ps (list UiPara)) (w int)) (list UiLineRow)
+  (rev (ui_paras_rows ps w (nil UiLineRow))))
+
+; ui_lines_rows' loop: each paragraph's rows onto acc, reversed.
+(def ui_paras_rows ((ps (list UiPara)) (w int) (acc (list UiLineRow))) (list UiLineRow)
+  (if (is_empty ps)
+      acc
+      (let p (head ps)
+        (ui_paras_rows (tail ps) w (ui_para_rows p (ui_wrapped (.text p) (ui_para_width p w) (.kind p)) true acc)))))
+
+; How wide a paragraph's text may be in w: less its icon's room if it
+; has one.
+(def ui_para_width ((p UiPara) (w int)) int
+  (max 1 (sub w (if (is_empty (.icon p)) 0 (ui_lines_icon_room)))))
+
+; A paragraph's wrapped lines as rows onto acc, reversed: the first with
+; its icon, the rest indented past it.
+(def ui_para_rows ((p UiPara) (ls (list (list int))) (first bool) (acc (list UiLineRow))) (list UiLineRow)
+  (if (is_empty ls)
+      acc
+      (ui_para_rows p (tail ls) false
+        (cons (UiLineRow (head ls) (.kind p) (.action p) (if first (.icon p) "") (and (not first) (not (is_empty (.icon p))))) acc))))
+
+; Whether a kind is drawn bold.
+(def ui_line_bold ((k UiLineKind)) bool
+  (match k ((UiLineStrong) true) ((UiLinePlain) false) ((UiLineDim) false) ((UiLineBad) false)))
+
+; text wrapped into lines at most w wide, at its spaces, a word wider
+; than w cut where it no longer fits; a text of nothing one empty line.
+(def ui_wrapped ((text (list int)) (w int) (k UiLineKind)) (list (list int))
+  (let (bold (ui_line_bold k)
+        ws (split_spaces text))
+    (if (is_empty ws)
+        (cons (nil int) (nil (list int)))
+        (rev (ui_wrap_words ws w bold (nil int) (nil (list int)))))))
+
+; ui_wrapped's loop: the words ws onto the line so far, line, reversed,
+; each line ended onto acc, reversed. A line with the next word is
+; measured whole, since kerning makes it no sum of its words.
+(def ui_wrap_words ((ws (list (list int))) (w int) (bold bool) (line (list int)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ws)
+      (if (is_empty line) acc (cons (rev line) acc))
+      (let (word (head ws)
+            more (rev_onto word (if (is_empty line) line (cons 32 line))))
+        (if (le (ui_text_w (rev more) (ui_text_font) bold 1) w)
+            (ui_wrap_words (tail ws) w bold more acc)
+            (not (is_empty line))
+            (ui_wrap_words ws w bold (nil int) (cons (rev line) acc))
+            (let k (max 1 (length (ui_fitting word w (ui_text_font) bold 1 (nil int))))
+              (ui_wrap_words (cons (drop word k) (tail ws)) w bold (nil int) (cons (take word k) acc)))))))
+
+; ---------------------------------------------------------------- layout
+
+; The lines in r: their ground; their area under the margin above,
+; which the wheel scrolls, a row of text a step; the rows that fit from
+; the first shown; and the scrollbar if not all rows fit.
+(def ui_lines_lay ((d UiLinesData) (r Rect) (st UiState) (acc (list UiNode))) (list UiNode)
+  (let (gbg (ui_view_bg (.style st))
+        rows (ui_lines_rows (.paras d) (max 1 (sub (.w r) (mul 2 (ui_lines_margin)))))
+        n (length rows)
+        vis (ui_lines_visible (.h r))
+        f (ui_lines_shown_from (.first d) n vis)
+        top (add (.y r) (ui_space_s))
+        prefix (.prefix d)
+        a0 (ui_leaf r (cons (UiPFill r gbg) (nil UiPaint)) acc)
+        a1 (if (le vis 0)
+               a0
+               (cons (UiNode (Rect (.x r) top (.w r) (mul vis (ui_text_row_h))) (nil UiPaint)
+                             (ui_scroll_area_action prefix f (max 0 (sub n vis)) vis (ui_text_row_h)) false)
+                     a0))
+        a2 (ui_rows_lay (take (drop rows f) vis) (.x r) (.w r) top st gbg a1))
+    (ui_scrollbar_on prefix (.x r) (.w r) top (ui_text_row_h) n vis f st gbg a2)))
+
+; Each of rows a node, from y down, in a column x and w wide, onto acc.
+(def ui_rows_lay ((rows (list UiLineRow)) (x int) (w int) (y int) (st UiState) (gbg int) (acc (list UiNode))) (list UiNode)
+  (if (is_empty rows)
+      acc
+      (ui_rows_lay (tail rows) x w (add y (ui_text_row_h)) st gbg
+                   (cons (ui_line_node (head rows) (Rect x y w (ui_text_row_h)) st gbg) acc))))
+
+; A row's node in rr: its text, from the margin, past an icon's room if
+; it has an icon or is indented under one, in its kind's color; its
+; icon; and, with an action, a target, tinted while the pointer is over
+; it, rounded inside the margin less 6.
+(def ui_line_node ((row UiLineRow) (rr Rect) (st UiState) (gbg int)) UiNode
+  (let (s (.style st)
+        a (.action row)
+        hover (and (not (is_empty a)) (eq (.hover st) a))
+        bg (if hover (ui_hover_bg s gbg) gbg)
+        x0 (add (.x rr) (ui_lines_margin))
+        tx (if (or (not (is_empty (.icon row))) (.indent row)) (add x0 (ui_lines_icon_room)) x0)
+        ink (match (.kind row)
+              ((UiLinePlain) (ui_fg s)) ((UiLineStrong) (ui_fg s))
+              ((UiLineDim) (ui_dim_fg s bg)) ((UiLineBad) (ui_error)))
+        cy (add (.y rr) (div (sub (ui_text_row_h) (ui_char_h)) 2))
+        text (UiPText (Rect tx cy (max 0 (sub (add (.x rr) (sub (.w rr) (ui_lines_margin))) tx)) (ui_char_h))
+                      (.text row) (UiStart) ink (ui_text_font) (ui_line_bold (.kind row)) 1)
+        ops (if (is_empty (.icon row))
+                (cons text (nil UiPaint))
+                (cons (UiPIcon x0 (add (.y rr) (div (sub (ui_text_row_h) (ui_icon_size)) 2)) (.icon row) ink 1)
+                      (cons text (nil UiPaint))))
+        tint (Rect (sub x0 (ui_space_s)) (.y rr) (max 0 (sub (.w rr) (mul 2 (sub (ui_lines_margin) (ui_space_s))))) (ui_text_row_h)))
+    (UiNode rr (if hover (cons (UiPRound tint (ui_button_radius) bg gbg) ops) ops) a (not (is_empty a)))))

@@ -1,0 +1,280 @@
+; desk.l0 -- agentd's tools of the desktop and the clock: the windows
+; the compositor shows, an app opened, a window placed, raised or
+; closed, an SVG document drawn over the desktop and the wallpaper put
+; back, and the time. Each asks its server on agentd's asking port and
+; waits for the answer, as the file tools wait for theirs: the
+; compositor (proto/wm.l0) and the clock (proto/clock.l0), found by
+; name each time, so a desktop started after agentd is found too.
+
+; ------------------------------------------------------------------ names
+
+; The tools of the desktop and the clock, by name.
+(def desk_tool_names () (list (list int))
+  (split_spaces "windows open_app place_window raise_window close_window draw_desktop clear_desktop time"))
+
+; Whether name is one of them.
+(def is_desk_tool ((name (list int))) bool
+  (any_eq name (desk_tool_names)))
+
+; ------------------------------------------------------------------ input
+
+; The integer field name of input, or none.
+(def tool_int ((input Json) (name (list int))) (Option int)
+  (match (json_get input name)
+    ((None) ((None int)))
+    ((Some v) (json_int v))))
+
+; The integer fields names of input, in order, or the first missing.
+(data Ints (IntsGot (list int)) (IntsMissing (list int)))
+
+; The fields names of input as integers: all of them, or the first that
+; is missing or no integer.
+(def tool_ints ((input Json) (names (list (list int))) (acc (list int))) Ints
+  (if (is_empty names)
+      (IntsGot (rev acc))
+      (match (tool_int input (head names))
+        ((None) (IntsMissing (head names)))
+        ((Some n) (tool_ints input (tail names) (cons n acc))))))
+
+; The failure of a missing integer.
+(def int_missing ((name (list int))) ToolAnswer
+  (tool_failed (append name " is missing, or not an integer")))
+
+; ------------------------------------------------------------- dispatch
+
+; The tool name done with input, its servers asked on rp: the
+; compositor's tools, or the clock's.
+(def tool_desk ((name (list int)) (input Json) (rp int)) ToolAnswer
+  (if (eq name "time")
+      (desk_time rp)
+      (match (name_lookup "compositor")
+        ((NotFound) (tool_failed "no compositor: the desktop is not running"))
+        ((Found port)
+          (let c (compositor_hello port rp)
+            (match c
+              ((NoCompositor why) (tool_failed why))
+              ((Compositor p q pid s) (desk_asked c name input))))))))
+
+; The compositor's tool name done with input, asking c.
+(def desk_asked ((c Compositor) (name (list int)) (input Json)) ToolAnswer
+  (if (eq name "windows") (desk_windows (compositor_ask c "windows"))
+      (eq name "open_app") (desk_open c input)
+      (eq name "draw_desktop") (desk_draw c input)
+      (eq name "clear_desktop") (desk_clear c)
+      (match (tool_int input "id")
+        ((None) (int_missing "id"))
+        ((Some id)
+          (if (eq name "raise_window") (desk_done (window_raise c id) (append "window " (append (digits id) " raised")))
+              (eq name "close_window") (desk_done (window_dismiss c id) (append "window " (append (digits id) "'s program asked to close it")))
+              (desk_place c id input))))))
+
+; An answer of a request's: done, said so; or why not.
+(def desk_done ((why (list int)) (done (list int))) ToolAnswer
+  (if (is_empty why) (tool_ok (bytes_from_list done)) (tool_failed why)))
+
+; ---------------------------------------------------------------- windows
+
+; windows' answer from the compositor's reply r: a line a window, front
+; first, its id, title, x, y, width, height, front or -, and its
+; program's pid, the buffers' words left out; then the pointer's line.
+(def desk_windows ((r (list int))) ToolAnswer
+  (if (starts_with r "error: ")
+      (tool_failed (drop_n r 7))
+      (tool_ok (bytes_from_list (append "ID TITLE X Y WIDTH HEIGHT FRONT PID\n" (join_lines (map_lines (lines r) (nil (list int)))))))))
+
+; Each window's line of ls without its last four words, buffer N frames
+; N; any other line, the pointer's, as it is; onto acc, reversed.
+(def map_lines ((ls (list (list int))) (acc (list (list int)))) (list (list int))
+  (if (is_empty ls)
+      (rev acc)
+      (let ws (split_spaces (head ls))
+        (map_lines (tail ls)
+          (cons (if (and (ge (length ws) 12) (eq (nth ws (sub (length ws) 2)) "frames"))
+                    (unwords (take ws (sub (length ws) 4)))
+                    (head ls))
+                acc)))))
+
+; open_app: the app named, by its bundle's name or its program's, with
+; its args, opened as the launcher opens it; then its window waited for,
+; up to desk_open_wait_ns, to say which it is.
+(def desk_open ((c Compositor) (input Json)) ToolAnswer
+  (match (tool_str input "name")
+    ((None) (tool_failed "name is missing, or not a string"))
+    ((Some app)
+      (let args (run_args input)
+        (if (or (any_eq 32 app) (any_spaced args))
+            (tool_failed "the name and each of the args must be one word")
+            (let (before (window_ids (compositor_ask c "windows"))
+                  why (compositor_launch c app args))
+              (if (is_empty why)
+                  (tool_ok (bytes_from_list (append "opened " (append app (desk_opened c before (add (clock_ns) (desk_open_wait_ns)))))))
+                  (tool_failed why))))))))
+
+; How long open_app waits for the app's window: 3 s.
+(def desk_open_wait_ns () int 3000000000)
+
+; The windows' ids in a windows reply r, front first.
+(def window_ids ((r (list int))) (list int)
+  (window_ids_onto (lines r) (nil int)))
+
+; window_ids's walk: each window's line's id onto acc, reversed; then in
+; order.
+(def window_ids_onto ((ls (list (list int))) (acc (list int))) (list int)
+  (if (is_empty ls)
+      (rev acc)
+      (let ws (split_spaces (head ls))
+        (window_ids_onto (tail ls)
+          (if (and (ge (length ws) 12) (is_number (head ws))) (cons (int_prefix (head ws) 0) acc) acc)))))
+
+; What became of an app launched when the windows were before: its
+; window, once one not there before, or another than was, is in front;
+; asked again every 50 ms until deadline, when it says none came.
+(def desk_opened ((c Compositor) (before (list int)) (deadline int)) (list int)
+  (let after (window_ids (compositor_ask c "windows"))
+    (if (and (not (is_empty after))
+             (or (not (any_eq (head after) before)) (and (not (is_empty before)) (not (eq (head after) (head before))))))
+        (append ": its window is " (append (digits (head after)) ", in front"))
+        (ge (clock_ns) deadline)
+        ": no window of it came to the front in 3 s; windows shows what there is"
+        (let z (sleep_ns 50000000) (desk_opened c before deadline)))))
+
+; Whether any of ws holds a space, or is empty.
+(def any_spaced ((ws (list (list int)))) bool
+  (if (is_empty ws) false (or (or (is_empty (head ws)) (any_eq 32 (head ws))) (any_spaced (tail ws)))))
+
+; place_window: window id's content made width by height, at x, y.
+(def desk_place ((c Compositor) (id int) (input Json)) ToolAnswer
+  (match (tool_ints input (split_spaces "x y width height") (nil int))
+    ((IntsMissing n) (int_missing n))
+    ((IntsGot ns)
+      (desk_done (window_place c id (Rect (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3)))
+                 (append "window " (append (digits id) " asked to be placed; windows says where it is"))))))
+
+; ---------------------------------------------------------------- drawing
+
+; The most of the screen's pixels one drawing covers: 640 by 400, as
+; the SVG library keeps four floats a pixel while it draws.
+(def desk_draw_most () int 256000)
+
+; draw_desktop: the SVG document drawn width by height over the
+; desktop at x, y, by its alpha, at the desktop's scale.
+(def desk_draw ((c Compositor) (input Json)) ToolAnswer
+  (match (tool_str input "svg")
+    ((None) (tool_failed "svg is missing, or not a string"))
+    ((Some doc)
+      (match (tool_ints input (split_spaces "x y width height") (nil int))
+        ((IntsMissing n) (int_missing n))
+        ((IntsGot ns)
+          (let (r (Rect (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3))
+                s (compositor_scale c))
+            (if (or (lt (.w r) 1) (lt (.h r) 1))
+                (tool_failed "width and height must be at least 1")
+                (gt (mul (mul (.w r) s) (mul (.h r) s)) (desk_draw_most))
+                (tool_failed (append "at most " (append (digits (desk_draw_most)) " of the screen's pixels at once: draw it in parts")))
+                (match (desk_svg (bytes_from_list doc) (mul (.w r) s) (mul (.h r) s))
+                  ((Err why) (tool_failed (append "the SVG: " why)))
+                  ((Ok px) (desk_done (desk_pasted c r px) (append "drawn at " (append (digits (.x r)) (append ", " (digits (.y r)))))))))))))))
+
+; An SVG document's bytes drawn w by h, as ARGB words, row after row;
+; or why not.
+(def desk_svg ((b bytes) (w int) (h int)) (Result (array int) (list int))
+  (match (svg_read b)
+    ((Err why) ((Err (array int) (list int)) why))
+    ((Ok root) (svg_argb_wh root w h))))
+
+; The words px put in a buffer shared with the compositor and pasted
+; over the desktop where r is: empty once it is, or why not. The
+; compositor gives the buffer up; agentd does once it has answered.
+(def desk_pasted ((c Compositor) (r Rect) (px (array int))) (list int)
+  (let n (pages_for (mul 4 (array_len px)))
+    (match (shm_region n "the drawing")
+      ((NoShmRegion why) why)
+      ((ShmRegion va g)
+        (let (w (desk_words g px 0)
+              why (match (shm_share_to va n (compositor_pid c) "the compositor")
+                    ((Err why) why)
+                    ((Ok there) (desktop_paste c r there)))
+              f (shm_region_free va n g))
+          why)))))
+
+; px from i on written into g, a word each.
+(def desk_words ((g IoRegion) (px (array int)) (i int)) int
+  (if (ge i (array_len px))
+      0
+      (let k (region_set32 g (mul i 4) (array_get px i))
+        (desk_words g px (add i 1)))))
+
+; clear_desktop: the wallpaper the compositor holds put back over all
+; of the desktop, its size asked first (draw's size).
+(def desk_clear ((c Compositor)) ToolAnswer
+  (let ws (split_spaces (compositor_ask c "desktop size"))
+    (if (not (and (eq (length ws) 3) (eq (head ws) "size")))
+        (tool_failed (append "the compositor did not say its size: " (unwords ws)))
+        (desk_done (wm_error (compositor_ask c (unwords (cons "desktop restore 0 0" (tail ws)))))
+                   "the wallpaper drawn again over all of the desktop"))))
+
+; ------------------------------------------------------------------ time
+
+; time: now, in UTC and in the clock's zone, and as seconds since 1970;
+; asked of the clock on rp.
+(def desk_time ((rp int)) ToolAnswer
+  (match (name_lookup "clock")
+    ((NotFound) (tool_failed "no clock is running"))
+    ((Found port)
+      (match (time_of (asked_reply (port_ask port rp "time" "the clock")))
+        ((None) (tool_failed "the clock did not say the time"))
+        ((Some t) (tool_ok (bytes_from_list (time_lines t (clock_zone port rp)))))))))
+
+; Seconds t as the time tool says it, in zone z.
+(def time_lines ((t int) (z ClockZone)) (list int)
+  (let (m (.minutes z)
+        sign (if (lt m 0) "-" "+")
+        am (if (lt m 0) (sub 0 m) m))
+    (append (date_time t) (append " UTC, a " (append (weekday t)
+      (append "\n" (append (date_time (zone_local z t))
+        (append " in US Pacific time (UTC" (append sign (append (digits (div am 60)) (append ":" (append (two_digits (mod am 60))
+          (append ")\n" (append (digits t) " seconds since 1970-01-01 UTC"))))))))))))))
+
+; Seconds s as a date and a time to the second: 2026-10-31 21:40:05.
+(def date_time ((s int)) (list int)
+  (match (civil (div s 86400))
+    ((Civil y m d)
+      (append (digits y) (cons 45 (append (two_digits m) (cons 45 (append (two_digits d)
+        (cons 32 (append (hh_mm (mod s 86400)) (cons 58 (two_digits (mod s 60)))))))))))))
+
+; The day of the week s seconds after 1970-01-01, a Thursday.
+(def weekday ((s int)) (list int)
+  (nth (split_spaces "Thursday Friday Saturday Sunday Monday Tuesday Wednesday") (mod (div s 86400) 7)))
+
+; ------------------------------------------------------------ definitions
+
+; An integer property, described.
+(def int_prop ((name (list int)) (what (list int))) JField
+  (tool_prop name "integer" what))
+
+; The properties of a rectangle on the desktop, in its pixels.
+(def rect_props ((what (list int))) (list JField)
+  (cons (int_prop "x" (append what "'s left, from the screen's left")) (cons (int_prop "y" (append what "'s top, from the screen's top; the top bar is 32 high"))
+    (cons (int_prop "width" (append what "'s width")) (cons (int_prop "height" (append what "'s height")) (nil JField))))))
+
+; The definitions of the tools of the desktop and the clock.
+(def desk_tool_defs () (list Json)
+  (cons (tool_def "windows" "List the desktop's windows, front first: ID TITLE X Y WIDTH HEIGHT, front if it is in front, and the PID of its program; then where the pointer is. Places and sizes are the desktop's pixels, and a window's are its content's, under its title bar." (nil JField))
+    (cons (tool_def_needing "open_app" "Open an app as the launcher does, by its name (Files, Terminal...) or its program's (files, vt): the one running is asked to open its args, or it is started with them. It waits up to 3 s for the app's window to come to the front, and says its ID."
+            (cons (tool_prop "name" "string" "The app, one word")
+              (cons (json_field "args" (json_obj (cons (json_field "type" (json_str "array"))
+                                                   (cons (json_field "items" (json_obj (cons (json_field "type" (json_str "string")) (nil JField))))
+                                                     (cons (json_field "description" (json_str "What it is to open, each a word, such as a path")) (nil JField))))))
+                    (nil JField)))
+            (cons (json_str "name") (nil Json)))
+      (cons (tool_def "place_window" "Move a window and make its content width by height; its program is asked for the size and the window moves once it answers, so call windows after to see where it is."
+              (cons (int_prop "id" "The window, by its ID from windows") (rect_props "Its content")))
+        (cons (tool_def "raise_window" "Bring a window to the front, with the keyboard's focus."
+                (cons (int_prop "id" "The window, by its ID from windows") (nil JField)))
+          (cons (tool_def "close_window" "Ask a window's program to close it, as its close button does; one that does not within 2 s is closed by force."
+                  (cons (int_prop "id" "The window, by its ID from windows") (nil JField)))
+            (cons (tool_def "draw_desktop" "Draw an SVG document over the desktop's wallpaper, under the windows, fitted into the rectangle given, by its alpha: what is clear leaves what was there. It stays until clear_desktop. SVG's shapes, paths, gradients, patterns, clipping, masks and opacity are drawn; text, images, filters, style sheets, dashes and markers are refused. At most 640 by 400 of the screen's pixels each time."
+                    (cons (tool_prop "svg" "string" "The SVG document, with a viewBox") (rect_props "The drawing")))
+              (cons (tool_def "clear_desktop" "Draw the wallpaper again over all the desktop, as it was before anything was drawn on it." (nil JField))
+                (cons (tool_def "time" "The date and time now, in UTC and in US Pacific time, from the clock." (nil JField))
+                      (nil Json))))))))))

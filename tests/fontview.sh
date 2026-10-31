@@ -119,9 +119,9 @@ ink_is() {
   exit 1
 }
 
-# Fonts is the fourth of the seven apps, About, Disks, Files, Fonts,
-# System Monitor, Terminal and Widgets, in cells 136 wide from 164, so
-# its cell is from 572, its icon, 48 square, from 616, 108.
+# Fonts is the fifth of the eight apps, About, Agent, Disks, Files,
+# Fonts, System Monitor, Terminal and Widgets, in cells 136 wide from 96,
+# so its cell is from 640, its icon, 48 square, from 684, 108.
 #
 # Its window draws its own header bar, so its content is the window:
 # under the 46 rows of the header bar, the grid of cards on the view's
@@ -151,7 +151,7 @@ until [ $SECONDS -ge $end ]; do
   dumped && [ "$(pixel 40 16)" = "64 64 64" ] && break
   sleep 0.2
 done
-click 640 130
+click 708 130
 window
 cx=$w_x; cy=$w_y
 echo "ok - fontview: the launcher opened Fonts, at $cx, $cy"

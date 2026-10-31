@@ -1,0 +1,52 @@
+; transcribe.l0 -- Whistle's speech to text (roadmap 0060), for a
+; program: the model read once into a listener, every part of it
+; dequantized, and a clip of 16 kHz samples turned into its text by the
+; front end, the stem, the encoder and the decoder, greedily. A WAV
+; file's samples read in place. Linked as TRANSCRIBE in the Makefile,
+; after DECODER and WAV.
+
+; A model ready to listen: the model, its stem, encoder and decoder,
+; its tokenizer, and the mel filters.
+(data Listener (Listener (w Whistle) (st Stem) (e Encoder) (d Decoder) (ps Pieces) (fb (array float))))
+
+; The listener of the model in b, or why there is none.
+(def whistle_listener ((b bytes)) (Result Listener (list int))
+  (match (whistle_of b)
+    ((Err why) ((Err Listener (list int)) why))
+    ((Ok w)
+      (match (cact_pieces (.c w) b)
+        ((Err why) ((Err Listener (list int)) why))
+        ((Ok ps) ((Ok Listener (list int)) (Listener w (stem_of w) (encoder_of w) (decoder_of w) ps (mel_matrix))))))))
+
+; The fewest samples a clip may have, 0.1 s, and the most, 30 s: one
+; pass of the decoder.
+(def transcribe_least () int 1600)
+(def transcribe_most () int 480000)
+
+; The text of the samples xs, 16 kHz, -1 to 1: the decoder's tokens
+; after the language tag, spelled.
+(def whistle_transcribe ((l Listener) (xs (array float))) (list int)
+  (let (f (mel_features xs (array_len xs) (.fb l))
+        r (encoder_run (.e l) (stem_run (.st l) f (div (array_len f) 80)) (whistle_geometry (.w l) 3))
+        ids (.ids (decoder_run (.d l) r)))
+    (if (is_empty ids) "" (pieces_decode (.ps l) (.b (.w l)) (tail ids)))))
+
+; The samples of the WAV file b, -1 to 1, if it is 16 kHz, one channel
+; of 16 bits, and 0.1 to 30 s long; or why not.
+(def wav_speech ((b bytes)) (Result (array float) (list int))
+  (match (parse_wav b)
+    ((WavBad why) ((Err (array float) (list int)) why))
+    ((Wav rate chans s e)
+      (let n (div (sub e s) 2)
+        (if (not (eq rate (mel_rate))) ((Err (array float) (list int)) (append "WAV file at " (append (digits rate) " Hz; Whistle hears 16000")))
+            (not (eq chans 1)) ((Err (array float) (list int)) (append "WAV file of " (append (digits chans) " channels; Whistle hears one")))
+            (lt n (transcribe_least)) ((Err (array float) (list int)) "WAV file under 0.1 s")
+            (gt n (transcribe_most)) ((Err (array float) (list int)) "WAV file over 30 s; longer is not yet heard")
+            ((Ok (array float) (list int)) (wav_floats b s n 0 (array_new n 0.0))))))))
+
+; n 16-bit samples of b from s, as floats over 32768, from k.
+(def wav_floats ((b bytes) (s int) (n int) (k int) (a (array float))) (array float)
+  (if (ge k n)
+      a
+      (let v (le_u16_at b (add s (mul 2 k)))
+        (wav_floats b s n (add k 1) (array_set a k (float_div (float_from_int (if (ge v 32768) (sub v 65536) v)) 32768.0))))))

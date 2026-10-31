@@ -147,13 +147,13 @@ shows() {
   exit 1
 }
 
-# Applications is at 60, 16 on the top bar. The launcher's seven apps,
-# About, Disks, Files, Fonts, System Monitor, Terminal and Widgets, are
-# one row of cells 136 wide from (1280 - 7 * 136) / 2 = 164, their icons
-# 48 square 44 in and 12 down from 96 (launcher.sh): Disks's icon is at
-# 344 to 392, Files's at 480 to 528, Terminal's at 888 to 936, each
-# clicked at its middle, 150 down.
-apps_x=60; disks_x=368; files_x=504; terminal_x=912; icon_y=150
+# Applications is at 60, 16 on the top bar. The launcher's eight apps,
+# About, Agent, Disks, Files, Fonts, System Monitor, Terminal and
+# Widgets, are one row of cells 136 wide from (1280 - 8 * 136) / 2 = 96,
+# their icons 48 square 44 in and 12 down from 96 (launcher.sh): Disks's
+# icon is at 412 to 460, Files's at 548 to 596, Terminal's at 956 to
+# 1004, each clicked at its middle, 150 down.
+apps_x=60; disks_x=436; files_x=572; terminal_x=980; icon_y=150
 
 # Files's windows are 880 by 560, its content at the x, y run windows
 # gives: its sidebar's rows from 52, 48 each, Computer's middle 76 down
