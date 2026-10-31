@@ -132,7 +132,7 @@ only the first stage, the drivers and `fs`, which a disk needs, and
    The heap's copy goes back to the kernel's heap. The raw copy QEMU's
    loader put at 0x50000000, which the kernel read its standard input
    from, joined the frame pool as soon as the kernel had read it at
-   boot (spec 10.3), so that one is processes' memory already.
+   boot (`l0 spec process`), so that one is processes' memory already.
 4. `boot` starts `/etc/system`'s programs, now the volume's, with
    `spawn_path` ([user/lib/sys/paths.l0](../user/lib/sys/paths.l0)): it
    reads each program's file, marked a program, and starts it from its

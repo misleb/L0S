@@ -26,22 +26,13 @@
 ; The service: the faces' fonts read so far, by name, the strikes it
 ; keeps, how many it has made, the strikes being made, oldest first, and
 ; its port.
-(data Font (Font (Map (list int) Ttf) Store int (list Job) int))
+(data Font (Font (fs (Map (list int) Ttf)) (store Store) (builds int) (jobs (list Job)) (port int)))
 
 ; A service of nothing, on port.
 (def font_empty ((port int)) Font (Font ((MapEmpty (list int) Ttf)) (store_empty) 0 (nil Job) port))
 
 ; The key a strike is kept by: FACE H.
 (def strike_key ((face (list int)) (h int)) (list int) (append face (append " " (digits h))))
-
-; Its store, its strikes being made, and its port.
-(def font_store ((s Font)) Store (match s ((Font fs st builds jobs port) st)))
-(def font_jobs ((s Font)) (list Job) (match s ((Font fs st builds jobs port) jobs)))
-(def font_port ((s Font)) int (match s ((Font fs st builds jobs port) port)))
-
-; s with its store st.
-(def with_store ((s Font) (st Store)) Font
-  (match s ((Font fs st0 builds jobs port) (Font fs st builds jobs port))))
 
 ; ---------------------------------------------------------------- faces
 
@@ -77,19 +68,19 @@
   (let port (port_new)
     (if (lt port 0)
         (complain "no port")
-        (let s (stored_kept (font_empty port) (stored))
-          (let r (name_register_or_why port "font")
-            (if (not (is_empty r))
-                (complain r)
-                (let i (info_as "font" (serving_line (store_size (font_store s))))
-                  (serve s))))))))
+        (let (s (stored_kept (font_empty port) (stored))
+              r (name_register_or_why port "font"))
+          (if (not (is_empty r))
+              (complain r)
+              (let i (info_as "font" (serving_line (store_size (.store s))))
+                (serve s)))))))
 
 ; Each message served as it comes; while a strike is being made, a glyph
 ; of it made whenever none waits.
 (def serve ((s Font)) int
-  (if (is_empty (font_jobs s))
-      (served_message s (port_receive (font_port s)))
-      (match (port_try_receive (font_port s))
+  (if (is_empty (.jobs s))
+      (served_message s (port_receive (.port s)))
+      (match (port_try_receive (.port s))
         ((RecvFailed) (serve (job_turn s)))
         ((Message from b) (served_message s (Message from b))))))
 
@@ -118,13 +109,10 @@
   (if (is_empty ws)
       (Turn s (error_reply "an empty request"))
       (let op (head ws)
-        (if (eq op "faces")
-            (Turn s (unwords (cons "faces" (font_faces))))
-            (if (eq op "stats")
-                (Turn s (stats_text s))
-                (if (if (eq op "strike") (eq (length ws) 3) false)
-                    (strike_asked s from b (nth ws 1) (nth ws 2))
-                    (Turn s (error_reply (append "no request " op)))))))))
+        (if (eq op "faces") (Turn s (unwords (cons "faces" (font_faces))))
+            (eq op "stats") (Turn s (stats_text s))
+            (and (eq op "strike") (eq (length ws) 3)) (strike_asked s from b (nth ws 1) (nth ws 2))
+            (Turn s (error_reply (append "no request " op)))))))
 
 ; strike FACE H, asked by from in message b: the strike, given at once
 ; if it is kept, else made, from waiting for it.
@@ -135,7 +123,7 @@
       (let why (font_refusal face h)
         (if (not (is_empty why))
             (Turn s (font_strike_error (strike_key face h) why))
-            (match (store_get (font_store s) (strike_key face h))
+            (match (store_get (.store s) (strike_key face h))
               ((Some k) (given_turn (given s face h from)))
               ((None) (strike_awaited s from b face h))))))))
 
@@ -162,7 +150,7 @@
 (def job_has ((jobs (list Job)) (face (list int)) (h int)) bool
   (if (is_empty jobs)
       false
-      (match (head jobs) ((Job f2 h2 t code gs ws t0) (if (if (eq f2 face) (eq h2 h) false) true (job_has (tail jobs) face h))))))
+      (match (head jobs) ((Job f2 h2 t code gs ws t0) (if (and (eq f2 face) (eq h2 h)) true (job_has (tail jobs) face h))))))
 
 ; jobs with w waiting for face at h too.
 (def jobs_waited ((jobs (list Job)) (face (list int)) (h int) (w Waiter)) (list Job)
@@ -170,7 +158,7 @@
       jobs
       (match (head jobs)
         ((Job f2 h2 t code gs ws t0)
-          (if (if (eq f2 face) (eq h2 h) false)
+          (if (and (eq f2 face) (eq h2 h))
               (cons (Job f2 h2 t code gs (append ws (cons w (nil Waiter))) t0) (tail jobs))
               (cons (head jobs) (jobs_waited (tail jobs) face h w)))))))
 
@@ -227,15 +215,15 @@
 ; service holds none of the 64 a process may have open.
 (def font_placed ((s Font) (key (list int)) (b bytes) (stored bool)) Placed
   (let pages (pages_for (bytes_len b))
-    (match (store_fit (font_store s) pages)
+    (match (store_fit (.store s) pages)
       ((Some p) (placed_at s key b stored p))
       ((None)
         (match (shm_alloc (max (arena_pages) pages))
           ((ShmNoRoom) (Unplaced s "no memory for a strike"))
           ((ShmTooMany) (Unplaced s "a strike of too many pages"))
           ((ShmPages va)
-            (let s2 (with_store s (store_arena_add (font_store s) va (max (arena_pages) pages)))
-              (match (store_fit (font_store s2) pages)
+            (let s2 (.store s (store_arena_add (.store s) va (max (arena_pages) pages)))
+              (match (store_fit (.store s2) pages)
                 ((Some p) (placed_at s2 key b stored p))
                 ((None) (Unplaced s2 "no room for a strike"))))))))))
 
@@ -244,12 +232,12 @@
   (match p
     ((Spot a first)
       (let pages (pages_for (bytes_len b))
-        (match (dma_open (add (store_arena_va (font_store s) a) (mul first (page_size))) pages)
-          ((DeviceFailed fault why) (Unplaced s why))
-          ((DeviceOpened r)
-            (let w (device_write_bytes r 0 b 0 (bytes_len b))
-              (let c (close_device r)
-                (Placed (with_store s (store_put (font_store s) key p pages (bytes_len b) stored)))))))))))
+        (match (dma_open (add (store_arena_va (.store s) a) (mul first (page_size))) pages)
+          ((IoRegionFailed fault why) (Unplaced s why))
+          ((IoRegionOpened r)
+            (let (w (region_set_bytes r 0 b 0 (bytes_len b))
+                  c (close_region r))
+              (Placed (.store s (store_put (.store s) key p pages (bytes_len b) stored))))))))))
 
 ; What came of giving a strike: the service after, and the answer.
 (data Given (Given Font (list int)))
@@ -260,34 +248,34 @@
 ; one of its holders. The answer VA N OFF M FACE H, or why not.
 (def given ((s Font) (face (list int)) (h int) (pid int)) Given
   (let key (strike_key face h)
-    (match (store_get (font_store s) key)
+    (match (store_get (.store s) key)
       ((None) (Given s (font_strike_error key "not kept")))
       ((Some k)
         (match k
           ((Kept a first pages len hs st)
-            (match (store_seen (font_store s) a pid)
+            (match (store_seen (.store s) a pid)
               ((Some there) (given_at s key a there k pid))
               ((None) (given_shared s key a k pid)))))))))
 
 ; given, the arena a not yet pid's: shared with it, and pid watched if
 ; it is new.
 (def given_shared ((s Font) (key (list int)) (a int) (k Kept) (pid int)) Given
-  (let st (font_store s)
-    (let known (store_knows st pid)
-      (match (shm_share_read (store_arena_va st a) (store_arena_n st a) pid)
-        ((ShmShared there)
-          (let w (if known 0 (watch_pid pid (font_port s)))
-            (given_at (with_store s (store_shared st a pid there)) key a there k pid)))
-        ((ShmShareNoProc) (Given s (font_strike_error key (shm_share_why (ShmShareNoProc)))))
-        ((ShmShareTooMany) (Given s (font_strike_error key (shm_share_why (ShmShareTooMany)))))
-        ((ShmShareFailed) (Given s (font_strike_error key (shm_share_why (ShmShareFailed)))))))))
+  (let (st (.store s)
+        known (store_knows st pid))
+    (match (shm_share_read (store_arena_va st a) (store_arena_n st a) pid)
+      ((ShmShared there)
+        (let w (if known 0 (watch_pid pid (.port s)))
+          (given_at (.store s (store_shared st a pid there)) key a there k pid)))
+      ((ShmShareNoProc) (Given s (font_strike_error key (shm_share_why (ShmShareNoProc)))))
+      ((ShmShareTooMany) (Given s (font_strike_error key (shm_share_why (ShmShareTooMany)))))
+      ((ShmShareFailed) (Given s (font_strike_error key (shm_share_why (ShmShareFailed))))))))
 
 ; given, arena a at there in pid: pid a holder, and the answer.
 (def given_at ((s Font) (key (list int)) (a int) (there int) (k Kept) (pid int)) Given
   (match k
     ((Kept a2 first pages len hs st)
-      (let n (store_arena_n (font_store s) a)
-        (Given (with_store s (store_hold (font_store s) key pid))
+      (let n (store_arena_n (.store s) a)
+        (Given (.store s (store_hold (.store s) key pid))
                (font_strike_reply there n (kept_offset k) pages key))))))
 
 ; pid watched, its exit told to port: 0, or 1 if it cannot be, when its
@@ -330,8 +318,10 @@
 ; s with every strike no one holds let go, but the stored, and every
 ; arena left with none, but the first, unmapped.
 (def font_swept ((s Font)) Font
-  (match (store_sweep (font_store s))
-    ((Swept st gone) (let u (arenas_unmapped gone) (with_store s st)))))
+  (match s
+    ((Font fs store b j port)
+      (match (store_sweep store)
+        ((Swept st gone) (let u (arenas_unmapped gone) (Font fs st b j port)))))))
 
 ; Each of rs unmapped from the service: 0.
 (def arenas_unmapped ((rs (list Arena))) int
@@ -373,7 +363,7 @@
   (match (read_whole (stored_path face h))
     ((Err why) (let d (debug_as "font" (append (stored_path face h) (append ": " why))) s))
     ((Ok b)
-      (if (if (strike_ok b) (eq (strike_height b) h) false)
+      (if (and (strike_ok b) (eq (strike_height b) h))
           (match (font_placed s (strike_key face h) b true)
             ((Unplaced s2 why) (let w (warn_as "font" (append (stored_path face h) (append ": " why))) s2))
             ((Placed s2) s2))

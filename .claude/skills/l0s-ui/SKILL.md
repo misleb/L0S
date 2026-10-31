@@ -59,8 +59,8 @@ the display. This is the working summary, with the rules.
 
 - **Rectangles** are `user/lib/gfx/rect.l0`'s `Rect` (x, y, width,
   height) everywhere: layout, painting, the protocols' damage, the
-  display driver. `rect_x`…`rect_h`, `rect_x1`/`rect_y1` (just past the
-  end), `rect_clip` (cut to a screen is a clip with `(Rect 0 0 w h)`),
+  display driver. Its fields `(.x r)`, `(.y r)`, `(.w r)`, `(.h r)`,
+  `rect_x1`/`rect_y1` (just past the end), `rect_clip` (cut to a screen is a clip with `(Rect 0 0 w h)`),
   `rect_union` (`rect_union_all` of a list), `rect_overlaps`, `rect_has`,
   `rect_inset`; an empty one (`rect_empty`, `rect_none`) holds nothing.
   `rect_merge` joins damage until no two rectangles overlap (the display
@@ -165,8 +165,9 @@ the display. This is the working summary, with the rules.
   less than SHOWN (`ui_scroll_moved`), moves the area's pixels
   (`canvas_copy_rows`) and paints only what came into view
   (`ui_scrolled_changed`).
-- **Actions, not callbacks.** L0 has no function values, so a widget that
-  does something carries an action name, as GActions are named:
+- **Actions, not callbacks.** L0 passes a function to a parameter but
+  keeps none in a field, a list or a binding, so a widget that does
+  something carries an action name, as GActions are named:
   `"app.refresh"`, `"procs.sort.2"`, `"procs.select.6"`, `"win.close"`.
 
 ## A client window (`window.l0`)
@@ -354,7 +355,7 @@ driver composes them.
   frontmost first; `on_bar` is checked before it. A new kind of region
   means a new `Hit` constructor, and every match on `Hit` gains an arm.
 - **Title bars** are toolkit header bars (`title_nodes`, with
-  `ui_st_backdropped` for the back windows) repainted by `titles` whenever
+  `UiState`'s `.backdrop` set for the back windows) repainted by `titles` whenever
   the front window changes; `titles` also repaints the frames and the top
   bar.
 - **The top bar** (`bar_ops`, `draw_bar`): 32 rows, black. At its start
@@ -394,10 +395,11 @@ driver composes them.
   `drag_ns` (20 ms) has passed since the last rebuild *ended*. Timing from
   its start made every queued event rebuild once more, and the window fell
   further and further behind.
-- **State**: `Wm` and `Win` are big records matched in full in nearly every
-  function. To add a field, replace-all the exact pattern text with the Edit
-  tool, then let `l0 check` name the remaining patterns with other binding
-  names.
+- **State**: `Wm`, `Win` and `UiWin` are big records whose fields are
+  named: a function reads one with `(.wins v)` and replaces one with
+  `(.bar v b)`, and matches in full only where it takes several apart. A
+  new field still changes every positional match and construction, which
+  `l0 check` names.
 
 ## The display (`user/lib/proto/display.l0`, `user/sbin/virtio-gpu/virtio-gpu.l0`)
 

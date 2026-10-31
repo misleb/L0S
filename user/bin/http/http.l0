@@ -38,9 +38,9 @@
   (let rest (if (starts_with s "http://") (drop_n s 7) s)
     (if (contains (up_to 47 rest) "/")
         ((Err Url (list int)) "no path to a page here")
-        (if (if (starts_with rest "https://") true (contains (up_to 47 rest) "@"))
-            ((Err Url (list int)) "only http:// is spoken")
-            (url_parts (up_to 47 rest) (let p (drop_n rest (length (up_to 47 rest))) (if (is_empty p) "/" p)))))))
+        (or (starts_with rest "https://") (contains (up_to 47 rest) "@"))
+        ((Err Url (list int)) "only http:// is spoken")
+        (url_parts (up_to 47 rest) (let p (drop_n rest (length (up_to 47 rest))) (if (is_empty p) "/" p))))))
 
 ; The URL of a host and port as hostport, `ADDR` or `ADDR:PORT`, and path.
 (def url_parts ((hostport (list int)) (path (list int))) (Result Url (list int))
@@ -53,7 +53,7 @@
               (match (word_number (drop_n after 1))
                 ((None) ((Err Url (list int)) (append "not a port: " (drop_n after 1))))
                 ((Some port)
-                  (if (if (ge port 1) (le port 65535) false)
+                  (if (and (ge port 1) (le port 65535))
                       ((Ok Url (list int)) (Url server port path hostport))
                       ((Err Url (list int)) "a port is 1 to 65535")))))))))
 
@@ -61,7 +61,7 @@
 
 ; What was asked: whether to write the head, read the body as JSON, or
 ; as events; the body to post, if any; the headers given; and the URL.
-(data Opts (Opts bool bool bool (Option (list int)) (list HttpHeader) (list int)))
+(data Opts (Opts (show bool) (json bool) (events bool) (body (Option (list int))) (hs (list HttpHeader)) (url (list int))))
 
 ; How the command is used.
 (def usage () (list int) "http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... URL")
@@ -78,11 +78,11 @@
           (if (is_empty url) ((Err Opts (list int)) (usage)) ((Ok Opts (list int)) (Opts show json events body (rev hs) url)))
           (let w (head ws)
             (if (eq w "-i") (opts_from (tail ws) (Opts true json events body hs url))
-            (if (eq w "-j") (opts_from (tail ws) (Opts show true events body hs url))
-            (if (eq w "-e") (opts_from (tail ws) (Opts show json true body hs url))
-            (if (if (eq w "-d") true (eq w "-H")) (opts_valued w (tail ws) o)
-            (if (if (is_empty url) (not (starts_with w "-")) false) (opts_from (tail ws) (Opts show json events body hs w))
-            ((Err Opts (list int)) (usage))))))))))))
+                (eq w "-j") (opts_from (tail ws) (Opts show true events body hs url))
+                (eq w "-e") (opts_from (tail ws) (Opts show json true body hs url))
+                (or (eq w "-d") (eq w "-H")) (opts_valued w (tail ws) o)
+                (and (is_empty url) (not (starts_with w "-"))) (opts_from (tail ws) (Opts show json events body hs w))
+                ((Err Opts (list int)) (usage))))))))
 
 ; The option w, -d or -H, and its value, the first of ws.
 (def opts_valued ((w (list int)) (ws (list (list int))) (o Opts)) (Result Opts (list int))
@@ -100,7 +100,7 @@
 ; The index of the first c in s, or -1.
 (def find_index ((c int) (s (list int))) int (find_from c s 0))
 (def find_from ((c int) (s (list int)) (i int)) int
-  (if (is_empty s) -1 (if (eq (head s) c) i (find_from c (tail s) (add i 1)))))
+  (if (is_empty s) -1 (eq (head s) c) i (find_from c (tail s) (add i 1))))
 
 ; The method o asks with: POST with a body, GET without.
 (def opts_method ((o Opts)) (list int)
@@ -137,7 +137,7 @@
 
 ; An event's line: its name, a space, its data with newlines as spaces.
 (def event_line ((e SseEvent)) (list int)
-  (append (bytes_to_list (sse_name e)) (cons 32 (append (spaced (bytes_to_list (sse_data e)) (nil int)) "\n"))))
+  (append (bytes_to_list (.name e)) (cons 32 (append (spaced (bytes_to_list (.is_data e)) (nil int)) "\n"))))
 
 ; s with each newline a space.
 (def spaced ((s (list int)) (acc (list int))) (list int)
@@ -150,7 +150,7 @@
     ((Ok v) ((Ok bytes (list int)) (bytes_concat (cons (json_bytes v) (cons (bytes_from_list "\n") (nil bytes))))))))
 
 ; Whether a status code says the request was served.
-(def served ((code int)) bool (if (ge code 200) (lt code 300) false))
+(def served ((code int)) bool (and (ge code 200) (lt code 300)))
 
 ; s on standard output.
 (def out_text ((s (list int))) int (out_bytes (bytes_from_list s)))
@@ -179,30 +179,25 @@
     ((Got code reason pieces sse)
       (match p
         ((HttpHead c r hs)
-          (let w (if (opts_show o) (out_text (head_text c r hs)) 0) (Step (Got c r pieces sse) -1)))
+          (let w (if (.show o) (out_text (head_text c r hs)) 0) (Step (Got c r pieces sse) -1)))
         ((HttpBody d) (got_body o g d))
         ((HttpEnd keep) (Step g (got_end o g)))
         ((HttpBad why) (Step g (complain why)))
         ((HttpFailed why) (Step g (complain why)))))))
-
-; Whether o writes the head, reads JSON, reads events.
-(def opts_show ((o Opts)) bool (match o ((Opts show json events body hs url) show)))
-(def opts_json ((o Opts)) bool (match o ((Opts show json events body hs url) json)))
-(def opts_events ((o Opts)) bool (match o ((Opts show json events body hs url) events)))
 
 ; A piece d of the body: kept for JSON, read for events, each event's
 ; line written and delivered, or written as it is.
 (def got_body ((o Opts) (g Got) (d bytes)) Step
   (match g
     ((Got code reason pieces sse)
-      (if (opts_json o)
+      (if (.json o)
           (Step (Got code reason (cons d pieces) sse) -1)
-          (if (opts_events o)
-              (match (sse_more sse d 0 (bytes_len d))
-                ((SseMore s2 es)
-                  (let w (write_events es)
-                    (Step (Got code reason pieces s2) -1))))
-              (let w (out_bytes d) (Step g -1)))))))
+          (.events o)
+          (match (sse_more sse d 0 (bytes_len d))
+            ((SseMore s2 es)
+              (let w (write_events es)
+                (Step (Got code reason pieces s2) -1))))
+          (let w (out_bytes d) (Step g -1))))))
 
 ; Each of es's lines written, and delivered.
 (def write_events ((es (list SseEvent))) int
@@ -213,15 +208,15 @@
 (def got_end ((o Opts) (g Got)) int
   (match g
     ((Got code reason pieces sse)
-      (let st (if (opts_json o)
-                  (match (json_line (bytes_concat (rev pieces)))
-                    ((Ok b) (out_bytes b))
-                    ((Err why) (let f (out_flush) (complain why))))
-                  0)
-        (let f (out_flush)
-          (if (not (eq st 0))
-              st
-              (if (served code) 0 (complain (append (digits code) (append " " reason))))))))))
+      (let (st (if (.json o)
+                   (match (json_line (bytes_concat (rev pieces)))
+                     ((Ok b) (out_bytes b))
+                     ((Err why) (let f (out_flush) (complain why))))
+                   0)
+            f (out_flush))
+        (if (not (eq st 0)) st
+            (served code) 0
+            (complain (append (digits code) (append " " reason))))))))
 
 ; ------------------------------------------------------------------- asking
 
@@ -253,7 +248,7 @@
       (match (http_next c (add (clock_ns) (idle_ns)))
         ((HttpGot c2 ps)
           (if (is_empty ps)
-              (let r (http_close c2) (let f (out_flush) (complain "the server did not answer")))
+              (let (r (http_close c2) f (out_flush)) (complain "the server did not answer"))
               (fed o c2 g ps))))
       (match (got_part o g (head parts))
         ((Step g2 st)

@@ -27,28 +27,29 @@
 
 (def ev_key () int 1)
 
-(def event_at ((q IoDevice) (off int)) InputEvent
-  (InputEvent (device_read16 q off) (device_read16 q (add off 2)) (device_read32 q (add off 4))))
+(def event_at ((q IoRegion) (off int)) InputEvent
+  (InputEvent (region_get16 q off) (region_get16 q (add off 2)) (region_get32 q (add off 4))))
 
 ; ------------------------------------------------------------------ finding
 
 ; The name transport t's input device gives (virtio 1.2, section 5.8.4):
 ; select 1, VIRTIO_INPUT_CFG_ID_NAME, then size bytes from offset 8.
-(def input_name ((d IoDevice) (t int)) (list int)
-  (let s (device_write8 d (treg t (reg_config)) 1)
-    (let ss (device_write8 d (treg t (add (reg_config) 1)) 0)
-      (let n (min (device_read8 d (treg t (add (reg_config) 2))) 128)
-        (get_bytes d (treg t (add (reg_config) 8)) n)))))
+(def input_name ((d IoRegion) (t int)) (list int)
+  (let (s (region_set8 d (treg t (reg_config)) 1)
+        ss (region_set8 d (treg t (add (reg_config) 1)) 0)
+        n (min (region_get8 d (treg t (add (reg_config) 2))) 128))
+    (get_bytes d (treg t (add (reg_config) 8)) n)))
 
 (def is_keyboard_name ((name (list int))) bool (contains name "Keyboard"))
 
 ; The first transport from t with an input device whose name holds what,
 ; such as Keyboard or Tablet, or -1.
-(def find_input ((d IoDevice) (what (list int)) (t int)) int
+(def find_input ((d IoRegion) (what (list int)) (t int)) int
   (let i (find_device d (input_device) t)
     (if (lt i 0)
         -1
-        (if (contains (input_name d i) what) i (find_input d what (add i 1))))))
+        (contains (input_name d i) what) i
+        (find_input d what (add i 1)))))
 
 ; ------------------------------------------------------------------ roles
 
@@ -89,12 +90,12 @@
     ((Keys mods) (Pointed k false))
     ((Tablet x y buttons dx dy)
       (if (eq type (ev_syn)) (Pointed k true)
-      (if (eq type (ev_abs))
-          (Pointed (if (eq code 0) (Tablet value y buttons dx dy) (if (eq code 1) (Tablet x value buttons dx dy) k)) false)
-      (if (eq type (ev_rel)) (Pointed (wheeled k code (s32 value)) false)
-      (if (if (eq type (ev_key)) (if (ge code (btn_left)) (lt code (add (btn_left) 3)) false) false)
+          (eq type (ev_abs))
+          (Pointed (if (eq code 0) (Tablet value y buttons dx dy) (eq code 1) (Tablet x value buttons dx dy) k) false)
+          (eq type (ev_rel)) (Pointed (wheeled k code (s32 value)) false)
+          (and (eq type (ev_key)) (and (ge code (btn_left)) (lt code (add (btn_left) 3))))
           (Pointed (Tablet x y (mod_with buttons (bit_shl 1 (sub code (btn_left))) (not (eq value 0))) dx dy) false)
-          (Pointed k false))))))))
+          (Pointed k false)))))
 
 ; A tablet's state with the wheel turned by value on axis code, as a
 ; WheelEvent counts: down and right positive.
@@ -103,8 +104,8 @@
     ((Keys mods) k)
     ((Tablet x y buttons dx dy)
       (if (eq code (rel_wheel)) (Tablet x y buttons dx (sub dy value))
-      (if (eq code (rel_hwheel)) (Tablet x y buttons (add dx value) dy)
-      k)))))
+          (eq code (rel_hwheel)) (Tablet x y buttons (add dx value) dy)
+          k))))
 
 ; ---------------------------------------------------------------- the queue
 
@@ -150,7 +151,7 @@
           ((Ok d) (found d (find_input d what 0) r)))))))
 
 ; No such device is no failure: the board was started without one.
-(def found ((d IoDevice) (t int) (r Role)) int
+(def found ((d IoRegion) (t int) (r Role)) int
   (match r
     ((Role what name kind)
       (match (virtio_probe d t what "event" (ring_size))
@@ -162,35 +163,34 @@
             ((VirtqMem va q addrs) (fill_queue d t q (array_get addrs 0) r))))))))
 
 ; Gives the device every buffer, then serves the role's name.
-(def fill_queue ((d IoDevice) (t int) (q IoDevice) (addr int) (r Role)) int
+(def fill_queue ((d IoRegion) (t int) (q IoRegion) (addr int) (r Role)) int
   (match r
     ((Role what name kind)
-      (let ds (put_bytes q 0 (buffer_descriptors addr 0 (nil int)))
-        (let av (put_bytes q (avail_off) (avail_all))
-          (let s (start_queue d t 0 (ring_size) addr (add addr (avail_off)) (add addr (used_off)))
-            (let o (driver_ok d t)
-              (let b (barrier)
-                (let n (notify d t 0)
-                  (listening (Kbd d t q (ring_size) 0 kind (nil int)) name))))))))))
+      (let (ds (put_bytes q 0 (buffer_descriptors addr 0 (nil int)))
+            av (put_bytes q (avail_off) (avail_all))
+            s (start_queue d t 0 (ring_size) addr (add addr (avail_off)) (add addr (used_off)))
+            o (driver_ok d t)
+            b (barrier)
+            n (notify d t 0))
+        (listening (Kbd d t q (ring_size) 0 kind (nil int)) name)))))
 
 ; The driver: the transports' registers and the device's transport, the
 ; queue's page, the next index to make available and the next used one
 ; to read, as the rings count them, what it keeps of the events, and the
 ; ports listening.
-(data Kbd (Kbd IoDevice int IoDevice int int Kind (list int)))
+(data Kbd (Kbd (d IoRegion) (t int) (q IoRegion) (avail int) (used int) (kind Kind) (ls (list int))))
 
 (def listening ((k Kbd) (name (list int))) int
   (match k
     ((Kbd d t q avail used kind ls)
-      (let port (port_new)
-        (let r (name_register_or_why port name)
-          (if (not (is_empty r))
-              (complain r)
-              (let b (irq_bind_or_why (transport_irq t) port)
-                (if (is_empty b)
-                    (let n (info_as "virtio-input" (input_line (input_name d t) t name))
-                      (serve k port))
-                    (complain b)))))))))
+      (let (port (port_new) r (name_register_or_why port name))
+        (if (not (is_empty r))
+            (complain r)
+            (let b (irq_bind_or_why (transport_irq t) port)
+              (if (is_empty b)
+                  (let n (info_as "virtio-input" (input_line (input_name d t) t name))
+                    (serve k port))
+                  (complain b))))))))
 
 (def serve ((k Kbd) (port int)) int
   (match (port_receive port)
@@ -207,30 +207,29 @@
   (let reply (request_reply payload)
     (if (le reply 0)
         k
-        (if (eq (request_body payload) "listen")
-            (with_listener k reply (port_send reply "ok"))
-            (let s (request_answer payload (error_reply (append "no request " (request_body payload)))) k)))))
+        (eq (request_body payload) "listen")
+        (with_listener k reply (port_send reply "ok"))
+        (let s (request_answer payload (error_reply (append "no request " (request_body payload)))) k))))
 
 ; k with port listening, if the answer to its listen, sent as s, says it
 ; is still there.
 (def with_listener ((k Kbd) (port int) (s Sending)) Kbd
-  (match k ((Kbd d t q avail used kind ls) (Kbd d t q avail used kind (listener_add ls port s)))))
+  (.ls k (listener_add (.ls k) port s)))
 
 ; The device has used buffers: ends its interrupt, reads each event, gives
 ; the buffers back, and ends the interrupt with the kernel.
 (def interrupted ((k Kbd)) Kbd
   (match k
     ((Kbd d t q avail used kind ls)
-      (let st (device_read32 d (treg t (reg_interrupt_status)))
-        (let a (device_write32 d (treg t (reg_interrupt_ack)) st)
-          (let b (barrier)
-            (refilled (drain k (device_read16 q (add (used_off) 2))))))))))
+      (let (st (region_get32 d (treg t (reg_interrupt_status)))
+            a (region_set32 d (treg t (reg_interrupt_ack)) st)
+            b (barrier))
+        (refilled (drain k (region_get16 q (add (used_off) 2))))))))
 
 (def refilled ((k Kbd)) Kbd
   (match k
     ((Kbd d t q avail used kind ls)
-      (let p (virtq_publish d t 0 q (avail_off) avail)
-        (let a (irq_ack (transport_irq t)) k)))))
+      (let (p (virtq_publish d t 0 q (avail_off) avail) a (irq_ack (transport_irq t))) k))))
 
 ; Each used entry from the next to read up to the device's index.
 (def drain ((k Kbd) (device_idx int)) Kbd
@@ -238,9 +237,9 @@
     ((Kbd d t q avail used kind ls)
       (if (eq (bit_and used 65535) device_idx)
           k
-          (let id (device_read32 q (add (used_off) (add 4 (mul 8 (mod used (ring_size))))))
-            (let k2 (handled (Kbd d t q avail (add used 1) kind ls) (event_at q (buffer_off (mod id (ring_size)))))
-              (drain (given_back k2 (mod id (ring_size))) device_idx)))))))
+          (let (id (region_get32 q (add (used_off) (add 4 (mul 8 (mod used (ring_size))))))
+                k2 (handled (Kbd d t q avail (add used 1) kind ls) (event_at q (buffer_off (mod id (ring_size))))))
+            (drain (given_back k2 (mod id (ring_size))) device_idx))))))
 
 ; Buffer id on the available ring again.
 (def given_back ((k Kbd) (id int)) Kbd
@@ -291,7 +290,7 @@
   (match k
     ((Keys mods) ((None (list int))))
     ((Tablet x y buttons dx dy)
-      (if (if (eq dx 0) (eq dy 0) false)
+      (if (and (eq dx 0) (eq dy 0))
           ((None (list int)))
           (Some (wheel_notice (WheelEvent x y dx dy)))))))
 

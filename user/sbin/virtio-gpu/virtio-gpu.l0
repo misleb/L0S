@@ -140,13 +140,13 @@
 (def overlay ((segs (list Seg)) (a int) (b int) (l Layer) (acc (list Seg))) (list Seg)
   (if (is_empty segs)
       (rev acc)
-      (let s (head segs)
-        (let x0 (seg_x0 s)
-          (let x1 (seg_x1 s)
-            (let left (if (lt x0 (min x1 a)) (cons (cut_seg s x0 (min x1 a)) acc) acc)
-              (let mid (if (lt (max x0 a) (min x1 b)) (cons (Owned (max x0 a) (min x1 b) l) left) left)
-                (overlay (tail segs) a b l
-                         (if (lt (max x0 b) x1) (cons (cut_seg s (max x0 b) x1) mid) mid)))))))))
+      (let (s (head segs)
+            x0 (seg_x0 s)
+            x1 (seg_x1 s)
+            left (if (lt x0 (min x1 a)) (cons (cut_seg s x0 (min x1 a)) acc) acc)
+            mid (if (lt (max x0 a) (min x1 b)) (cons (Owned (max x0 a) (min x1 b) l) left) left))
+        (overlay (tail segs) a b l
+                 (if (lt (max x0 b) x1) (cons (cut_seg s (max x0 b) x1) mid) mid)))))
 
 (def cut_seg ((s Seg) (a int) (b int)) Seg
   (match s ((Owned x0 x1 l) (Owned a b l)) ((Bare x0 x1) (Bare a b))))
@@ -163,7 +163,7 @@
             ((Some b)
               (match b
                 ((Buffer bw bh sd addrs va cs)
-                  (if (if (ge y ly) (lt y (add ly bh)) false)
+                  (if (and (ge y ly) (lt y (add ly bh)))
                       (row_segs w y (tail layers) bufs
                         (overlay_span segs (max (add lx (left_inset cs bh (sub y ly))) 0)
                                       (min (sub (add lx bw) (right_inset cs bh (sub y ly))) w) (head layers)))
@@ -210,10 +210,7 @@
 ; One row of the screen as the backing has it: who shows along it, and
 ; the runs of memory its pixels are, in order. The driver keeps every
 ; row, so that a restack builds again only the rows it changes.
-(data Row (Row (list Seg) (list VirtqRun)))
-
-(def row_segs_of ((r Row)) (list Seg) (match r ((Row segs runs) segs)))
-(def row_runs ((r Row)) (list VirtqRun) (match r ((Row segs runs) runs)))
+(data Row (Row (segs (list Seg)) (runs (list VirtqRun))))
 
 (def no_rows () (array Row) (array_new 0 (Row (nil Seg) (nil VirtqRun))))
 
@@ -229,13 +226,10 @@
 ; in which of a buffer's rows they read: the segments of the first, and
 ; the row they hold up to. Finding who shows along a row costs more than
 ; the rest of building it, and a window's rows are nearly all alike.
-(data Stripe (Stripe (list Seg) int))
+(data Stripe (Stripe (segs (list Seg)) (until int)))
 
 ; The stripe that holds no row, so that the first asked of is found.
 (def no_stripe () Stripe (Stripe (nil Seg) 0))
-
-; Who shows along every row of s.
-(def stripe_segs ((s Stripe)) (list Seg) (match s ((Stripe segs until) segs)))
 
 ; s, if it holds row y; else the stripe from y, on a screen w by h, from
 ; layers over bufs.
@@ -265,16 +259,14 @@
 ; it is to come, the first row its bottom corners cut, and the next row
 ; for as long as a corner cuts.
 (def layer_edge ((y int) (end int) (ly int) (bh int) (cs Corners)) int
-  (if (lt y ly)
-      (min end ly)
-      (if (ge y (add ly bh))
-          end
-          (match cs
-            ((Corners tl tr bl br)
-              (let foot (sub (add ly bh) (max bl br))
-                (if (lt (sub y ly) (max tl tr))
-                    (add y 1)
-                    (if (lt y foot) (min end foot) (add y 1)))))))))
+  (if (lt y ly) (min end ly)
+      (ge y (add ly bh)) end
+      (match cs
+        ((Corners tl tr bl br)
+          (let foot (sub (add ly bh) (max bl br))
+            (if (lt (sub y ly) (max tl tr)) (add y 1)
+                (lt y foot) (min end foot)
+                (add y 1)))))))
 
 ; Every row of a screen w by h, from layers over bufs.
 (def screen_rows ((w int) (h int) (layers (list Layer)) (bufs (Map int Buffer)) (zero int)) (array Row)
@@ -284,7 +276,7 @@
   (if (ge y (array_len rows))
       rows
       (let s2 (stripe_at s w (array_len rows) y layers bufs)
-        (build_rows w (add y 1) layers bufs zero s2 (array_set rows y (row_with y (stripe_segs s2) bufs zero))))))
+        (build_rows w (add y 1) layers bufs zero s2 (array_set rows y (row_with y (.segs s2) bufs zero))))))
 
 ; The rows' runs, one after another, a run that starts where the one
 ; before it ends, as the end of one row and the start of the next often
@@ -295,7 +287,7 @@
 (def rows_runs_from ((rows (array Row)) (y int) (acc (list VirtqRun))) (list VirtqRun)
   (if (ge y (array_len rows))
       acc
-      (rows_runs_from rows (add y 1) (push_all (row_runs (array_get rows y)) acc))))
+      (rows_runs_from rows (add y 1) (push_all (.runs (array_get rows y)) acc))))
 
 ; runs, in order, onto acc, reversed, each joined to the last if it can be.
 (def push_all ((runs (list VirtqRun)) (acc (list VirtqRun))) (list VirtqRun)
@@ -352,18 +344,16 @@
 (def update_rows ((r Restack) (dirty (array bool)) (zero int) (rows (array Row)) (y int) (s Stripe) (band Rect) (acc (list Rect))) Restacked
   (match r
     ((Restack w h ols obufs nls nbufs ids)
-      (if (ge y h)
-          (Restacked rows (rev (band_onto band acc)))
-          (if (not (array_get dirty y))
-              (update_rows r dirty zero rows (add y 1) s (rect_none) (band_onto band acc))
-              (let s2 (stripe_at s w h y nls nbufs)
-                (let old (row_segs_of (array_get rows y))
-                  (let new (row_with y (stripe_segs s2) nbufs zero)
-                    (let change (row_change old (row_segs_of new) ids)
-                      (let rows2 (array_set rows y new)
-                        (match change
-                          ((NoSpan) (update_rows r dirty zero rows2 (add y 1) s2 (rect_none) (band_onto band acc)))
-                          ((Span x0 x1) (update_rows r dirty zero rows2 (add y 1) s2 (rect_union band (Rect x0 y (sub x1 x0) 1)) acc)))))))))))))
+      (if (ge y h) (Restacked rows (rev (band_onto band acc)))
+          (not (array_get dirty y)) (update_rows r dirty zero rows (add y 1) s (rect_none) (band_onto band acc))
+          (let (s2 (stripe_at s w h y nls nbufs)
+                old (.segs (array_get rows y))
+                new (row_with y (.segs s2) nbufs zero)
+                change (row_change old (.segs new) ids)
+                rows2 (array_set rows y new))
+            (match change
+              ((NoSpan) (update_rows r dirty zero rows2 (add y 1) s2 (rect_none) (band_onto band acc)))
+              ((Span x0 x1) (update_rows r dirty zero rows2 (add y 1) s2 (rect_union band (Rect x0 y (sub x1 x0) 1)) acc))))))))
 
 ; Which of h rows a restack from layers ols over obufs to nls over nbufs
 ; can change: every row, if the layers are not the same buffers in the
@@ -375,10 +365,10 @@
       (array_new h true)))
 
 (def layer_ids ((ls (list Layer)) (acc (list int))) (list int)
-  (if (is_empty ls) (rev acc) (layer_ids (tail ls) (cons (layer_id (head ls)) acc))))
+  (if (is_empty ls) (rev acc) (layer_ids (tail ls) (cons (.id (head ls)) acc))))
 
 (def mark_layers ((ols (list Layer)) (obufs (Map int Buffer)) (nls (list Layer)) (nbufs (Map int Buffer)) (d (array bool))) (array bool)
-  (if (if (is_empty ols) true (is_empty nls))
+  (if (or (is_empty ols) (is_empty nls))
       d
       (mark_layers (tail ols) obufs (tail nls) nbufs
         (if (same_layer (head ols) obufs (head nls) nbufs)
@@ -388,7 +378,7 @@
 ; Whether layer a over abufs and b over bbufs show the same: the same
 ; place and top, and the same buffer, pages and corners.
 (def same_layer ((a Layer) (abufs (Map int Buffer)) (b Layer) (bbufs (Map int Buffer))) bool
-  (if (eq a b) (eq (map_get abufs (layer_id a)) (map_get bbufs (layer_id b))) false))
+  (and (eq a b) (eq (map_get abufs (.id a)) (map_get bbufs (.id b)))))
 
 ; d with the rows layer l covers marked, its buffer's from bufs.
 (def mark_layer ((d (array bool)) (l Layer) (bufs (Map int Buffer))) (array bool)
@@ -408,7 +398,7 @@
 (def changed_ids ((ls (list Layer)) (obufs (Map int Buffer)) (nbufs (Map int Buffer)) (acc (list int))) (list int)
   (if (is_empty ls)
       acc
-      (let id (layer_id (head ls))
+      (let id (.id (head ls))
         (changed_ids (tail ls) obufs nbufs (if (eq (pixels_of (map_get obufs id)) (pixels_of (map_get nbufs id))) acc (cons id acc))))))
 
 ; Where a buffer's pixels come from: its size and pages, but not its
@@ -417,8 +407,6 @@
   (match b
     ((None) b)
     ((Some x) (match x ((Buffer bw bh sd addrs va cs) (Some (Buffer bw bh sd addrs 0 (square))))))))
-
-(def layer_id ((l Layer)) int (match l ((Layer id x y top) id)))
 
 (def band_onto ((band Rect) (acc (list Rect))) (list Rect)
   (if (rect_empty band) acc (cons band acc)))
@@ -438,26 +426,24 @@
 ; The first column where os and ns show different pixels: each head's
 ; shared columns compared, and whichever ends first dropped.
 (def first_diff ((os (list Seg)) (ns (list Seg)) (ids (list int))) (Option int)
-  (if (if (is_empty os) true (is_empty ns))
+  (if (or (is_empty os) (is_empty ns))
       ((None int))
-      (let a (head os)
-        (let b (head ns)
-          (if (not (same_owner a b ids))
-              (Some (max (seg_x0 a) (seg_x0 b)))
-              (let e (min (seg_x1 a) (seg_x1 b))
-                (first_diff (if (le (seg_x1 a) e) (tail os) os) (if (le (seg_x1 b) e) (tail ns) ns) ids)))))))
+      (let (a (head os) b (head ns))
+        (if (not (same_owner a b ids))
+            (Some (max (seg_x0 a) (seg_x0 b)))
+            (let e (min (seg_x1 a) (seg_x1 b))
+              (first_diff (if (le (seg_x1 a) e) (tail os) os) (if (le (seg_x1 b) e) (tail ns) ns) ids))))))
 
 ; The same from the right, os and ns reversed: the column after the last
 ; that differs.
 (def last_diff ((os (list Seg)) (ns (list Seg)) (ids (list int))) (Option int)
-  (if (if (is_empty os) true (is_empty ns))
+  (if (or (is_empty os) (is_empty ns))
       ((None int))
-      (let a (head os)
-        (let b (head ns)
-          (if (not (same_owner a b ids))
-              (Some (min (seg_x1 a) (seg_x1 b)))
-              (let s (max (seg_x0 a) (seg_x0 b))
-                (last_diff (if (ge (seg_x0 a) s) (tail os) os) (if (ge (seg_x0 b) s) (tail ns) ns) ids)))))))
+      (let (a (head os) b (head ns))
+        (if (not (same_owner a b ids))
+            (Some (min (seg_x1 a) (seg_x1 b)))
+            (let s (max (seg_x0 a) (seg_x0 b))
+              (last_diff (if (ge (seg_x0 a) s) (tail os) os) (if (ge (seg_x0 b) s) (tail ns) ns) ids))))))
 
 ; Whether a and b show the same pixels where they meet: both black, or
 ; the same layer, its buffer unchanged.
@@ -467,7 +453,7 @@
     ((Owned ax0 ax1 la)
       (match b
         ((Bare bx0 bx1) false)
-        ((Owned bx0 bx1 lb) (if (eq la lb) (not (any_eq (layer_id la) ids)) false))))))
+        ((Owned bx0 bx1 lb) (and (eq la lb) (not (any_eq (.id la) ids))))))))
 
 ; ---------------------------------------------------------------- driving
 
@@ -487,7 +473,7 @@
     ((Ok d) (found d (find_device d (gpu_device) 0)))))
 
 ; No GPU is no failure: the board was started without one.
-(def found ((d IoDevice) (t int)) int
+(def found ((d IoRegion) (t int)) int
   (match (virtio_probe_features d t "the virtio-gpu" "control" (ring_size) (feature_virgl))
     ((VirtioAbsent) (info_as "virtio-gpu" "no virtio-gpu on the board"))
     ((VirtioUnusable why) (complain why))
@@ -525,13 +511,13 @@
 ; queue's memory and where the device reaches each page of it, what it
 ; has in flight on both queues (flight.l0), the port the transport's
 ; interrupt comes to, and the cursor queue.
-(data Gpu (Gpu IoDevice int IoDevice (array int) Flight int Curq))
+(data Gpu (Gpu (d IoRegion) (t int) (q IoRegion) (addrs (array int)) (f Flight) (ip int) (c Curq)))
 
 ; The cursor queue, queue 1, in one page, as the control queue's first
 ; but of 16, with a slot of 64 bytes for each entry's request from 1024;
 ; and where the device reaches it. The zero page after it is black for
 ; what no layer covers.
-(data Curq (Curq IoDevice int))
+(data Curq (Curq IoRegion int))
 
 (def cursor_ring () int 16)
 (def cursor_avail () int (virtq_avail_off (cursor_ring)))
@@ -543,7 +529,7 @@
 
 ; The cursor queue's memory, and the zero page, made; then both queues
 ; started.
-(def with_cursor_queue ((d IoDevice) (t int) (q IoDevice) (addrs (array int))) int
+(def with_cursor_queue ((d IoRegion) (t int) (q IoRegion) (addrs (array int))) int
   (match (virtq_mem 2 "the cursor queue")
     ((NoVirtqMem why) (complain why))
     ((VirtqMem va cq at) (ready_queues (Gpu d t q addrs (fl_new (req_off)) -1 (Curq cq (array_get at 0))) (array_get at 1)))))
@@ -555,14 +541,14 @@
     ((Gpu d t q addrs f old c)
       (match c
         ((Curq cq ca)
-          (let s (start_queue d t 0 (ring_size) (device_at addrs 0) (device_at addrs (avail_off)) (device_at addrs (used_off)))
-            (let s1 (start_queue d t 1 (cursor_ring) ca (add ca (cursor_avail)) (add ca (cursor_used)))
-              (let ip (port_new)
-                (let why (irq_bind_or_why (transport_irq t) ip)
-                  (if (not (is_empty why))
-                      (complain why)
-                      (let o (driver_ok d t)
-                        (display_info (Gpu d t q addrs f ip c) zero))))))))))))
+          (let (s (start_queue d t 0 (ring_size) (device_at addrs 0) (device_at addrs (avail_off)) (device_at addrs (used_off)))
+                s1 (start_queue d t 1 (cursor_ring) ca (add ca (cursor_avail)) (add ca (cursor_used)))
+                ip (port_new)
+                why (irq_bind_or_why (transport_irq t) ip))
+            (if (not (is_empty why))
+                (complain why)
+                (let o (driver_ok d t)
+                  (display_info (Gpu d t q addrs f ip c) zero)))))))))
 
 ; ------------------------------------------------------------- requests
 
@@ -609,11 +595,11 @@
 (def gpu_offer ((g Gpu) (off int) (len int) (what (list int)) (want int) (resp_len int)) Gpu
   (match g
     ((Gpu d t q addrs f ip c)
-      (let h (fl_next_head f)
-        (let runs (rev (virtq_page_runs addrs off len (nil VirtqRun)))
-          (let w (put_descs q h (chain_descs h runs (device_at addrs (resp_at h)) resp_len))
-            (let s (virtq_slot q (avail_off) (ring_size) (fl_made f) h)
-              (Gpu d t q addrs (fl_offered f off len (add (length runs) 1) what want) ip c))))))))
+      (let (h (fl_next_head f)
+            runs (rev (virtq_page_runs addrs off len (nil VirtqRun)))
+            w (put_descs q h (chain_descs h runs (device_at addrs (resp_at h)) resp_len))
+            s (virtq_slot q (avail_off) (ring_size) (.made f) h))
+        (Gpu d t q addrs (fl_offered f off len (add (length runs) 1) what want) ip c)))))
 
 ; The descriptors of a chain from descriptor h: one for each of runs, a
 ; request's, each chained to the next round the ring, then its
@@ -626,7 +612,7 @@
           (cons (descriptor a n (desc_next) (mod (add h 1) (ring_size))) (chain_descs (add h 1) (tail runs) resp resp_len))))))
 
 ; Each of ds written to the descriptor table from h, round the ring.
-(def put_descs ((q IoDevice) (h int) (ds (list (list int)))) int
+(def put_descs ((q IoRegion) (h int) (ds (list (list int)))) int
   (if (is_empty ds)
       0
       (let w (put_bytes q (mul 16 (mod h (ring_size))) (head ds))
@@ -636,9 +622,9 @@
 (def gpu_kick ((g Gpu)) Gpu
   (match g
     ((Gpu d t q addrs f ip c)
-      (if (eq (fl_told f) (fl_made f))
+      (if (eq (.told f) (.made f))
           g
-          (let p (virtq_publish d t 0 q (avail_off) (fl_made f))
+          (let p (virtq_publish d t 0 q (avail_off) (.made f))
             (Gpu d t q addrs (fl_all_told f) ip c))))))
 
 ; The device told of every command made, then its next interrupt waited
@@ -662,11 +648,11 @@
 
 ; Transport t's interrupt ended: the device's status acknowledged, then
 ; the kernel's.
-(def gpu_interrupted ((d IoDevice) (t int)) int
-  (let st (device_read32 d (treg t (reg_interrupt_status)))
-    (let a (device_write32 d (treg t (reg_interrupt_ack)) st)
-      (let br (barrier)
-        (match (irq_ack (transport_irq t)) ((IrqAcked) 0) ((IrqNotPending) 0))))))
+(def gpu_interrupted ((d IoRegion) (t int)) int
+  (let (st (region_get32 d (treg t (reg_interrupt_status)))
+        a (region_set32 d (treg t (reg_interrupt_ack)) st)
+        br (barrier))
+    (match (irq_ack (transport_irq t)) ((IrqAcked) 0) ((IrqNotPending) 0))))
 
 ; What the device has used since last read: each new entry of the
 ; control queue's used ring, with the response type in its chain's slot,
@@ -677,19 +663,19 @@
     ((Gpu d t q addrs f ip c)
       (match c
         ((Curq cq ca)
-          (let b (barrier)
-            (let f2 (used_read q f (fl_unread f (virtq_used_index q (used_off))))
-              (let f3 (fl_cursor_index f2 (virtq_used_index cq (cursor_used)))
-                (let b2 (barrier)
-                  (gpu_answer (Gpu d t q addrs f3 ip c)))))))))))
+          (let (b (barrier)
+                f2 (used_read q f (fl_unread f (virtq_used_index q (used_off))))
+                f3 (fl_cursor_index f2 (virtq_used_index cq (cursor_used)))
+                b2 (barrier))
+            (gpu_answer (Gpu d t q addrs f3 ip c))))))))
 
 ; The next n used entries of the control queue read into f: each
 ; chain's first descriptor, and the response type in its slot.
-(def used_read ((q IoDevice) (f Flight) (n int)) Flight
+(def used_read ((q IoRegion) (f Flight) (n int)) Flight
   (if (le n 0)
       f
-      (let h (mod (virtq_used_id q (used_off) (ring_size) (fl_used f)) (ring_size))
-        (used_read q (fl_answered f h (device_read32 q (resp_at h))) (sub n 1)))))
+      (let h (mod (virtq_used_id q (used_off) (ring_size) (.used f)) (ring_size))
+        (used_read q (fl_answered f h (region_get32 q (resp_at h))) (sub n 1)))))
 
 ; Every reply that no longer waits sent, in order.
 (def gpu_answer ((g Gpu)) Gpu
@@ -707,10 +693,10 @@
       f
       (match (head as)
         ((FlAnswer mb r n rel)
-          (let ls (releases_told (fl_listeners f) rel)
-            (let ls2 (if (gt n 0) (listeners_tell ls (shown_notice n)) ls)
-              (let s (msg_answer mb r)
-                (answers_sent (fl_listening f ls2) (tail as)))))))))
+          (let (ls (releases_told (.listeners f) rel)
+                ls2 (if (gt n 0) (listeners_tell ls (shown_notice n)) ls)
+                s (msg_answer mb r))
+            (answers_sent (.listeners f ls2) (tail as)))))))
 
 ; Each of rel told to the ports ls as a release notice: those still
 ; there.
@@ -730,10 +716,10 @@
 (def frames_asked ((v Drv) (port int)) (Served Drv)
   (if (lt port 0)
       (served_error v "frames takes a port")
-      (match (drv_gpu v)
+      (match (.gpu v)
         ((Gpu d t q addrs f ip c)
-          (let ls (fl_listeners f)
-            (served_ok (drv_with v (Gpu d t q addrs (fl_listening f (if (any_eq port ls) ls (append ls (cons port (nil int))))) ip c))))))))
+          (let ls (.listeners f)
+            (served_ok (.gpu v (Gpu d t q addrs (.listeners f (if (any_eq port ls) ls (append ls (cons port (nil int))))) ip c))))))))
 
 ; Every command in flight, on both queues, answered: the driver then, or
 ; none if the interrupt port is gone.
@@ -757,19 +743,17 @@
     ((Room g2 off)
       (match g2
         ((Gpu d t q addrs f ip c)
-          (let h (fl_next_head f)
-            (let w (put_bytes q off req)
-              (match (gpu_drained (gpu_offer g2 off (length req) "a request" -1 resp_len))
-                ((None) (NoAnswer (gpu_port_gone)))
-                ((Some g3) (Answer (device_read32 q (resp_at h)) (resp_at h) (gpu_fault_cleared g3)))))))))))
+          (let (h (fl_next_head f) w (put_bytes q off req))
+            (match (gpu_drained (gpu_offer g2 off (length req) "a request" -1 resp_len))
+              ((None) (NoAnswer (gpu_port_gone)))
+              ((Some g3) (Answer (region_get32 q (resp_at h)) (resp_at h) (gpu_fault_cleared g3))))))))))
 
 ; g with no failure kept for the next reply.
-(def gpu_fault_cleared ((g Gpu)) Gpu
-  (match g ((Gpu d t q addrs f ip c) (Gpu d t q addrs (fl_fault_cleared f) ip c))))
+(def gpu_fault_cleared ((g Gpu)) Gpu (.f g (fl_fault_cleared (.f g))))
 
 ; The u32 at off of the response at slot, from the queue's memory.
 (def resp_word ((g Gpu) (slot int) (off int)) int
-  (match g ((Gpu d t q addrs f ip c) (device_read32 q (add slot off)))))
+  (match g ((Gpu d t q addrs f ip c) (region_get32 q (add slot off)))))
 
 ; A command made: the driver after it; or why it could not be.
 (data Commanded (Commanded Gpu) (NotCommanded (list int)))
@@ -802,7 +786,7 @@
 (def gpu_settled ((g Gpu)) Settled
   (match (gpu_drained g)
     ((None) (Settled g (gpu_port_gone)))
-    ((Some g2) (match g2 ((Gpu d t q addrs f ip c) (Settled (gpu_fault_cleared g2) (fl_fault f)))))))
+    ((Some g2) (match g2 ((Gpu d t q addrs f ip c) (Settled (gpu_fault_cleared g2) (.fault f)))))))
 
 ; A Settled as a Commanded: a failure is NotCommanded.
 (def settled_cmd ((s Settled)) Commanded
@@ -819,11 +803,11 @@
       ((Room g2 off)
         (match g2
           ((Gpu d t q addrs f ip c)
-            (let hd (put_bytes q off (append (header (cmd_resource_attach_backing)) (append (u32_le id) (u32_le n))))
-              (let rs (put_runs q (add off 32) runs)
-                (Commanded (gpu_offer g2 off len "attach_backing" (resp_ok_nodata) 24))))))))))
+            (let (hd (put_bytes q off (append (header (cmd_resource_attach_backing)) (append (u32_le id) (u32_le n))))
+                  rs (put_runs q (add off 32) runs))
+              (Commanded (gpu_offer g2 off len "attach_backing" (resp_ok_nodata) 24)))))))))
 
-(def put_runs ((q IoDevice) (off int) (runs (list VirtqRun))) int
+(def put_runs ((q IoRegion) (off int) (runs (list VirtqRun))) int
   (if (is_empty runs)
       0
       (let w (put_words q off (run_words (head runs)))
@@ -834,8 +818,8 @@
 (def run_words ((r VirtqRun)) (list int)
   (match r ((VirtqRun a n) (cons (bit_and a 4294967295) (cons (bit_shr a 32) (cons n (cons 0 (nil int))))))))
 
-(def put_words ((q IoDevice) (off int) (ws (list int))) int
-  (if (is_empty ws) 0 (let w (device_write32 q off (head ws)) (put_words q (add off 4) (tail ws)))))
+(def put_words ((q IoRegion) (off int) (ws (list int))) int
+  (if (is_empty ws) 0 (let w (region_set32 q off (head ws)) (put_words q (add off 4) (tail ws)))))
 
 ; A cursor request, which has no response, put in the cursor queue once
 ; it has room, and the device told at once; not waited for. The device
@@ -848,11 +832,11 @@
           (match (gpu_waited g) ((Some g2) (cursor_send g2 req)) ((None) g))
           (match c
             ((Curq cq ca)
-              (let i (mod (fl_cursor_made f) (cursor_ring))
-                (let w (put_bytes cq (cursor_slot i) req)
-                  (let ds (put_bytes cq (mul 16 i) (descriptor (add ca (cursor_slot i)) (length req) 0 0))
-                    (let n2 (virtq_offer d t 1 cq (cursor_avail) (cursor_ring) (fl_cursor_made f) i)
-                      (Gpu d t q addrs (fl_cursor_offered f) ip c)))))))))))
+              (let (i (mod (.cursor_made f) (cursor_ring))
+                    w (put_bytes cq (cursor_slot i) req)
+                    ds (put_bytes cq (mul 16 i) (descriptor (add ca (cursor_slot i)) (length req) 0 0))
+                    n2 (virtq_offer d t 1 cq (cursor_avail) (cursor_ring) (.cursor_made f) i))
+                (Gpu d t q addrs (fl_cursor_offered f) ip c))))))))
 
 ; ------------------------------------------------------------- the screen
 
@@ -864,11 +848,11 @@
     ((Answer type slot g2)
       (if (not (eq type (resp_ok_display_info)))
           (complain (append "display info answered 0x" (hex_digits type 4)))
-          (let w (resp_word g2 slot 32)                    ; the first mode's width, then height
-            (let h (resp_word g2 slot 36)
-              (if (if (lt w 1) true (lt h 1))
-                  (complain "scanout 0 has no mode")
-                  (if (virgl_offered g2) (gl_create g2 zero w h) (create g2 zero w h)))))))))
+          (let (w (resp_word g2 slot 32)                   ; the first mode's width, then height
+                h (resp_word g2 slot 36))
+            (if (or (lt w 1) (lt h 1)) (complain "scanout 0 has no mode")
+                (virgl_offered g2) (gl_create g2 zero w h)
+                (create g2 zero w h)))))))
 
 ; Whether the device offers virgl, which the driver asked for in
 ; negotiating, so that it composes the screen on the host's GPU (gl.l0).
@@ -936,28 +920,27 @@
   (match (shm_region n "the wallpaper")
     ((NoShmRegion why) (wall_none why))
     ((ShmRegion va r)
-      (let f (paint_background (Canvas r w h 0) bg)
-        (let k (close_device r)
-          (match (page_addresses va n)
-            ((None) (wall_none "its pages are not the device's"))
-            ((Some addrs) (Some (buffer_plain w h addrs va (square))))))))))
+      (let (f (paint_background (Canvas r w h 0) bg)
+            k (close_region r))
+        (match (page_addresses va n)
+          ((None) (wall_none "its pages are not the device's"))
+          ((Some addrs) (Some (buffer_plain w h addrs va (square)))))))))
 
 ; Whether one of ls, a client's layers, covers the screen w by h whole,
 ; square-cornered, so that nothing under it shows.
 (def screen_covered ((ls (list Layer)) (bufs (Map int Buffer)) (w int) (h int)) bool
-  (if (is_empty ls)
-      false
-      (if (layer_covering (head ls) bufs w h) true (screen_covered (tail ls) bufs w h))))
+  (if (is_empty ls) false
+      (layer_covering (head ls) bufs w h) true
+      (screen_covered (tail ls) bufs w h)))
 
 ; Whether layer l, a client's, covers the screen w by h whole.
 (def layer_covering ((l Layer) (bufs (Map int Buffer)) (w int) (h int)) bool
   (match l
     ((Layer id x y top)
-      (if (eq id (wall_id))
-          false
-          (match (map_get bufs id)
-            ((None) false)
-            ((Some b) (match b ((Buffer bw bh sd addrs va cs) (layer_covers x y bw bh (eq cs (square)) w h)))))))))
+      (and (not (eq id (wall_id)))
+           (match (map_get bufs id)
+             ((None) false)
+             ((Some b) (match b ((Buffer bw bh sd addrs va cs) (layer_covers x y bw bh (eq cs (square)) w h)))))))))
 
 ; Whether the wallpaper is still on the stack: its buffer is kept.
 (def wall_shown ((bufs (Map int Buffer))) bool (map_has bufs (wall_id)))
@@ -965,7 +948,7 @@
 ; The stack for a client's layers ls: the wallpaper under them while it
 ; is shown and nothing of theirs covers the screen.
 (def wall_kept ((ls (list Layer)) (bufs (Map int Buffer)) (w int) (h int)) bool
-  (if (wall_shown bufs) (not (screen_covered ls bufs w h)) false))
+  (and (wall_shown bufs) (not (screen_covered ls bufs w h))))
 
 ; After a restack r that left the wallpaper off the stack, its buffer
 ; dropped and its pages given up, once no command in flight can read
@@ -975,7 +958,7 @@
     ((Served v reply)
       (match v
         ((Drv g w h bufs layers attached cur zero rows)
-          (if (if (eq reply "ok") (not (in_layers layers (wall_id))) false)
+          (if (and (eq reply "ok") (not (in_layers layers (wall_id))))
               (match (map_get bufs (wall_id))
                 ((None) r)
                 ((Some b)
@@ -991,7 +974,7 @@
 ; The pointer: whether its image is set, where it is, its hot spot, the
 ; buffer its image is, -1 for none, and the cursor set: the resource made
 ; of each buffer cursor has named.
-(data Cursor (Cursor bool int int int int int (Map int int)))
+(data Cursor (Cursor (set bool) (px int) (py int) (hx int) (hy int) (buffer int) (made (Map int int))))
 
 ; No pointer yet, and no cursor made.
 (def cursor_none () Cursor (Cursor false 0 0 0 0 -1 ((MapEmpty int int))))
@@ -1000,7 +983,7 @@
 ; shared with it, the layers, whether the screen has a backing, the
 ; pointer, the zero page, and each row of the screen as the backing has
 ; it, or none.
-(data Drv (Drv Gpu int int (Map int Buffer) (list Layer) bool Cursor int (array Row)))
+(data Drv (Drv (gpu Gpu) (w int) (h int) (bufs (Map int Buffer)) (layers (list Layer)) (attached bool) (cur Cursor) (zero int) (rows (array Row))))
 
 ; ------------------------------------------------------------- serving
 
@@ -1009,11 +992,11 @@
 ; answers each request, as display.l0 makes them: ok, display W H
 ; cursor scale S, or error: WHY.
 (def start_serving ((v Drv)) int
-  (let port (port_new)
-    (let r (name_register_or_why port "display")
-      (if (is_empty r)
-          (first_frame v port)
-          (complain r)))))
+  (let (port (port_new)
+        r (name_register_or_why port "display"))
+    (if (is_empty r)
+        (first_frame v port)
+        (complain r))))
 
 ; Says the screen, then serves it on port.
 (def serving ((v Drv) (port int)) int
@@ -1030,14 +1013,13 @@
           (info_as "virtio-gpu" (screen_line t w h (scale_of w h (boot_args)) host)))))))
 
 ; The driver's interrupt port.
-(def drv_irq_port ((v Drv)) int
-  (match v ((Drv g w h bufs layers attached cur zero rows) (match g ((Gpu d t q addrs f ip c) ip)))))
+(def drv_irq_port ((v Drv)) int (.ip (.gpu v)))
 
 ; Serves port and the interrupt port as one set, in 3D if gl, the device
 ; first told of the first frame's commands.
 (def serve_set ((v Drv) (port int) (gl bool)) int
   (match (port_set (cons port (cons (drv_irq_port v) (nil int))))
-    ((PortSetMade) (serve (drv_with v (gpu_kick (drv_gpu v))) port gl))
+    ((PortSetMade) (serve (.gpu v (gpu_kick (.gpu v))) port gl))
     ((PortSetNotYours) (complain "cannot wait on its ports as a set"))
     ((PortSetSize) (complain "cannot wait on its ports as a set"))))
 
@@ -1052,31 +1034,24 @@
         ((RecvFailed) (complain "lost its port"))
         ((Message from mb)
           (if (eq p port)
-              (serve (drv_replied v (if gl (gl_handle v (msg_text_from mb 4)) (handle v (msg_text_from mb 4))) mb) port gl)
-              (serve (drv_with v (gpu_irq (drv_gpu v) m)) port gl)))))))
+              (let old (.layers v)
+                (serve (drv_replied old (if gl (gl_handle v (msg_text_from mb 4)) (handle v (msg_text_from mb 4))) mb) port gl))
+              (serve (.gpu v (gpu_irq (.gpu v) m)) port gl)))))))
 
-; The driver's queues, and v with g as them.
-(def drv_gpu ((v Drv)) Gpu (match v ((Drv g w h bufs layers attached cur zero rows) g)))
-(def drv_with ((v Drv) (g Gpu)) Drv
-  (match v ((Drv old w h bufs layers attached cur zero rows) (Drv g w h bufs layers attached cur zero rows))))
-
-; A request served, s, whose message was mb, by the driver as old was:
-; its reply registered, to go once its commands are answered; a frame
-; if it is a damage or a layers, and releasing the buffers its layers
-; took off the stack.
-(def drv_replied ((old Drv) (s (Served Drv)) (mb bytes)) Drv
+; A request served, s, whose message was mb, by the driver whose layers
+; were old: its reply registered, to go once its commands are answered;
+; a frame if it is a damage or a layers, and releasing the buffers its
+; layers took off the stack.
+(def drv_replied ((old (list Layer)) (s (Served Drv)) (mb bytes)) Drv
   (match s
     ((Served v reply)
-      (let frame (if (asked_op_is mb "damage ") true (asked_op_is mb "layers "))
-        (drv_with v (gpu_replied (drv_gpu v) mb reply frame (layers_left (drv_layers old) (drv_layers v) (nil int))))))))
+      (let frame (or (asked_op_is mb "damage ") (asked_op_is mb "layers "))
+        (.gpu v (gpu_replied (.gpu v) mb reply frame (layers_left old (.layers v) (nil int))))))))
 
 ; Whether the request in a message's bytes mb, after its reply port,
 ; starts with op.
 (def asked_op_is ((mb bytes) (op (list int))) bool
-  (if (lt (bytes_len mb) (add (add (header_len) 4) (length op))) false (bytes_is_at mb (add (header_len) 4) op)))
-
-; The driver's layers.
-(def drv_layers ((v Drv)) (list Layer) (match v ((Drv g w h bufs layers attached cur zero rows) layers)))
+  (and (not (lt (bytes_len mb) (add (add (header_len) 4) (length op)))) (bytes_is_at mb (add (header_len) 4) op)))
 
 ; A request's body, its op and then its numbers, answered.
 (def handle ((v Drv) (body (list int))) (Served Drv)
@@ -1085,19 +1060,19 @@
     ((ReqNums op ns) (requested v op ns (length ns)))))
 
 (def requested ((v Drv) (op (list int)) (ns (list int)) (n int)) (Served Drv)
-  (if (if (eq op "info") (eq n 0) false) (info v)
-  (if (if (eq op "buffer") (if (ge n 4) (le n 6) false) false) (shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (buffer_pages_arg ns) (buffer_stride_arg ns))
-  (if (if (eq op "forget") (eq n 1) false) (forgot v (nth ns 0))
-  (if (if (eq op "layers") (eq (mod n 4) 0) false) (stacked v (layers_of ns (nil Layer)))
-  (if (if (eq op "damage") (if (gt n 0) (eq (mod n 5) 0) false) false) (damaged v ns (nil Rect))
-  (requested_pointer v op ns n)))))))
+  (if (and (eq op "info") (eq n 0)) (info v)
+      (and (eq op "buffer") (and (ge n 4) (le n 6))) (shared v (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3) (buffer_pages_arg ns) (buffer_stride_arg ns))
+      (and (eq op "forget") (eq n 1)) (forgot v (nth ns 0))
+      (and (eq op "layers") (eq (mod n 4) 0)) (stacked v (layers_of ns (nil Layer)))
+      (and (eq op "damage") (and (gt n 0) (eq (mod n 5) 0))) (damaged v ns (nil Rect))
+      (requested_pointer v op ns n)))
 
 (def requested_pointer ((v Drv) (op (list int)) (ns (list int)) (n int)) (Served Drv)
-  (if (if (eq op "shape") (eq n 5) false) (shaped v (nth ns 0) (Corners (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)))
-  (if (if (eq op "cursor") (eq n 3) false) (pointer_image v (nth ns 0) (nth ns 1) (nth ns 2))
-  (if (if (eq op "move") (eq n 2) false) (moved v (nth ns 0) (nth ns 1))
-  (if (if (eq op "frames") (eq n 1) false) (frames_asked v (nth ns 0))
-  (served_error v (append "no request " op)))))))
+  (if (and (eq op "shape") (eq n 5)) (shaped v (nth ns 0) (Corners (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4)))
+      (and (eq op "cursor") (eq n 3)) (pointer_image v (nth ns 0) (nth ns 1) (nth ns 2))
+      (and (eq op "move") (eq n 2)) (moved v (nth ns 0) (nth ns 1))
+      (and (eq op "frames") (eq n 1)) (frames_asked v (nth ns 0))
+      (served_error v (append "no request " op))))
 
 (def info ((v Drv)) (Served Drv)
   (match v
@@ -1111,13 +1086,13 @@
 (def shared ((v Drv) (id int) (bw int) (bh int) (va int) (pages int) (sd int)) (Served Drv)
   (if (drv_cursor_made v id)
       (served_error v (cursor_kept_why id))
-  (if (if (lt bw 1) true (if (lt bh 1) true (lt sd bw)))
+      (or (lt bw 1) (or (lt bh 1) (lt sd bw)))
       (served_error v "a buffer has no pixels, or its stride is less than its width")
-      (if (not (buffer_id_ok id))
-          (served_error v "a buffer's id is from 0 to 1000000")
-          (match (page_addresses va (buffer_shared_pages sd bh pages))
-            ((None) (served_error v "the buffer is not shared with the display"))
-            ((Some addrs) (put_buffer v id (Buffer bw bh sd addrs va (square)))))))))
+      (not (buffer_id_ok id))
+      (served_error v "a buffer's id is from 0 to 1000000")
+      (match (page_addresses va (buffer_shared_pages sd bh pages))
+        ((None) (served_error v "the buffer is not shared with the display"))
+        ((Some addrs) (put_buffer v id (Buffer bw bh sd addrs va (square)))))))
 
 ; Whether a buffer of bufs other than id is at va: another view of the
 ; same pages, as a buffer remade at another size is while the old one
@@ -1130,16 +1105,16 @@
 (def any_buffer_at ((ids (list int)) (bs (list Buffer)) (id int) (va int)) bool
   (if (is_empty ids)
       false
-      (if (if (not (eq (head ids) id)) (match (head bs) ((Buffer bw bh sd addrs bva cs) (eq bva va))) false)
-          true
-          (any_buffer_at (tail ids) (tail bs) id va))))
+      (and (not (eq (head ids) id)) (match (head bs) ((Buffer bw bh sd addrs bva cs) (eq bva va))))
+      true
+      (any_buffer_at (tail ids) (tail bs) id va)))
 
 ; The driver with buffer b as id: the screen rebuilt if it shows id, since
 ; its backing reads the old one's pages, or its corners have changed.
 (def put_buffer ((v Drv) (id int) (b Buffer)) (Served Drv)
   (match v
     ((Drv g w h bufs layers attached cur zero rows)
-      (if (if attached (in_layers layers id) false)
+      (if (and attached (in_layers layers id))
           (restacked v layers (map_put bufs id b))
           (served_ok (Drv g w h (map_put bufs id b) layers attached cur zero rows))))))
 
@@ -1166,7 +1141,7 @@
       (match (map_get bufs id)
         ((None) (served_ok v))
         ((Some b)
-          (if (if (in_layers layers id) true (eq (cursor_buffer cur) id))
+          (if (or (in_layers layers id) (eq (.buffer cur) id))
               (served_error v (append "buffer " (append (digits id) " is in use")))
               (match (cursor_unmade g cur id)
                 ((NotCommanded why) (served_error v why))
@@ -1175,9 +1150,6 @@
                     ((Buffer bw bh sd addrs va cs)
                       (let u (if (va_shown_by_other bufs id va) 0 (shm_unmap_count va (array_len addrs)))
                         (served_ok (Drv g2 w h (map_remove bufs id) layers attached (cursor_without cur id) zero rows)))))))))))))
-
-(def cursor_buffer ((cur Cursor)) int
-  (match cur ((Cursor set px py hx hy id made) id)))
 
 ; layers ID X Y TOP ...: the screen rebuilt from new layers, the
 ; wallpaper under them until one covers the screen, when it leaves.
@@ -1194,7 +1166,7 @@
 (def restacked ((v Drv) (ls (list Layer)) (nbufs (Map int Buffer))) (Served Drv)
   (match v
     ((Drv g w h bufs layers attached cur zero rows)
-      (match (if (if attached (if (not (is_empty layers)) (eq (array_len rows) h) false) false)
+      (match (if (and attached (and (not (is_empty layers)) (eq (array_len rows) h)))
                  (rows_restacked (Restack w h layers bufs ls nbufs (changed_ids ls bufs nbufs (nil int))) zero rows)
                  (Restacked (screen_rows w h ls nbufs zero) (cons (Rect 0 0 w h) (nil Rect))))
         ((Restacked rows2 dmg)
@@ -1207,16 +1179,15 @@
 (def backed ((v Drv) (ls (list Layer)) (nbufs (Map int Buffer)) (rows2 (array Row)) (dmg (list Rect))) (Served Drv)
   (match v
     ((Drv g w h bufs layers attached cur zero none)
-      (let runs (rows_runs rows2)
-        (let n (length runs)
-          (if (gt n (max_runs))
-              (served_error v "the screen is in too many pieces")
-              (match (if attached (send g "detach_backing" (detach_backing (screen_res)) (resp_ok_nodata)) (Commanded g))
-                ((NotCommanded why) (served_error v why))
-                ((Commanded g2)
-                  (match (send_attach g2 (screen_res) runs n)
-                    ((NotCommanded why) (served_error (Drv g2 w h bufs layers false cur zero none) why))
-                    ((Commanded g3) (shown_boxes (Drv g3 w h nbufs ls true cur zero rows2) dmg)))))))))))
+      (let (runs (rows_runs rows2) n (length runs))
+        (if (gt n (max_runs))
+            (served_error v "the screen is in too many pieces")
+            (match (if attached (send g "detach_backing" (detach_backing (screen_res)) (resp_ok_nodata)) (Commanded g))
+              ((NotCommanded why) (served_error v why))
+              ((Commanded g2)
+                (match (send_attach g2 (screen_res) runs n)
+                  ((NotCommanded why) (served_error (Drv g2 w h bufs layers false cur zero none) why))
+                  ((Commanded g3) (shown_boxes (Drv g3 w h nbufs ls true cur zero rows2) dmg))))))))))
 
 ; damage ID X Y W H ...: each rectangle of its buffer shown wherever it
 ; is on the screen, boxes that overlap shown as one; nothing shown if a
@@ -1270,7 +1241,7 @@
         ((Some b)
           (match b
             ((Buffer bw bh sd addrs va cs)
-              (if (not (if (eq bw (cursor_size)) (eq bh (cursor_size)) false))
+              (if (not (and (eq bw (cursor_size)) (eq bh (cursor_size))))
                   (served_error v "a cursor is 64 by 64")
                   (match (cursor_made cur id)
                     ((Some res) (cursor_shown v id res hx hy))
@@ -1320,13 +1291,12 @@
 ; The first of the cursors' resources from res on that made does not
 ; use, or -1 if it uses all cursor_slots of them.
 (def cursor_free_res ((made (Map int int)) (res int)) int
-  (if (ge res (add (cursor_first_res) (cursor_slots)))
-      -1
-      (if (any_eq res (map_values made)) (cursor_free_res made (add res 1)) res)))
+  (if (ge res (add (cursor_first_res) (cursor_slots))) -1
+      (any_eq res (map_values made)) (cursor_free_res made (add res 1))
+      res))
 
 ; cur with buffer id out of its set.
-(def cursor_without ((cur Cursor) (id int)) Cursor
-  (match cur ((Cursor set px py hx hy cid made) (Cursor set px py hx hy cid (map_remove made id)))))
+(def cursor_without ((cur Cursor) (id int)) Cursor (.made cur (map_remove (.made cur) id)))
 
 ; The cursor set's resource of buffer id, if it has one, given up: its
 ; backing detached, and unreferenced.

@@ -20,15 +20,10 @@
 ; A thing in a directory: its name, with no final /, what it is, and its
 ; size: a file's bytes, a volume's, or how many things a folder or a
 ; bundle holds; -1 if it is not known.
-(data FvEntry (FvEntry (list int) FvKind int))
+(data FvEntry (FvEntry (name (list int)) (kind FvKind) (size int)))
 
 ; A directory listed, or why not.
 (data FvListing (FvListed (list FvEntry)) (FvNotListed (list int)))
-
-; An entry's name, what it is, and its size.
-(def fv_name ((e FvEntry)) (list int) (match e ((FvEntry n k s) n)))
-(def fv_kind ((e FvEntry)) FvKind (match e ((FvEntry n k s) k)))
-(def fv_size ((e FvEntry)) int (match e ((FvEntry n k s) s)))
 
 ; Whether a thing is one to go into: a folder or a volume. An app's
 ; bundle is a folder too, but opening it starts the app.
@@ -53,7 +48,7 @@
 
 ; s from its first / on.
 (def drop_while_not_slash ((s (list int))) (list int)
-  (if (if (is_empty s) true (eq (head s) 47)) s (drop_while_not_slash (tail s))))
+  (if (or (is_empty s) (eq (head s) 47)) s (drop_while_not_slash (tail s))))
 
 ; The names along path, / first as Computer, as the path bar shows them:
 ; Computer, Volumes, data for /Volumes/data.
@@ -66,7 +61,9 @@
 
 ; ws without the empty ones.
 (def fv_nonempty ((ws (list (list int)))) (list (list int))
-  (if (is_empty ws) ws (if (is_empty (head ws)) (fv_nonempty (tail ws)) (cons (head ws) (fv_nonempty (tail ws))))))
+  (if (is_empty ws) ws
+      (is_empty (head ws)) (fv_nonempty (tail ws))
+      (cons (head ws) (fv_nonempty (tail ws)))))
 
 ; The path of the path bar's part n of path: / for 0, the first n names
 ; after it for any other, all of path past its end.
@@ -81,11 +78,9 @@
 ; /Volumes/new; any other path as it is.
 (def fv_relabelled ((path (list int)) (old (list int)) (new (list int))) (list int)
   (let from (append "/Volumes/" old)
-    (if (eq path from)
-        (append "/Volumes/" new)
-        (if (starts_with path (append from "/"))
-            (append (append "/Volumes/" new) (drop_n path (length from)))
-            path))))
+    (if (eq path from) (append "/Volumes/" new)
+        (starts_with path (append from "/")) (append (append "/Volumes/" new) (drop_n path (length from)))
+        path)))
 
 ; Each of paths as fv_relabelled makes it.
 (def fv_all_relabelled ((paths (list (list int))) (old (list int)) (new (list int))) (list (list int))
@@ -95,21 +90,22 @@
 ; /Volumes/LABEL, which a rename relabels.
 (def fv_is_volumes ((path (list int))) bool (eq path "/Volumes"))
 (def fv_is_volume ((path (list int))) bool
-  (if (starts_with path "/Volumes/") (not (any_eq 47 (drop_n path 9))) false))
+  (and (starts_with path "/Volumes/") (not (any_eq 47 (drop_n path 9)))))
 
 ; Whether a name is one a file or folder may have: not empty, no /, and
 ; neither . nor ..
 (def fv_name_ok ((name (list int))) bool
-  (if (is_empty name) false (if (any_eq 47 name) false (not (any_eq name (split_spaces ". .."))))))
+  (if (is_empty name) false (any_eq 47 name) false (not (any_eq name (split_spaces ". ..")))))
 
 ; ---------------------------------------------------------------- listing
 
 ; What a name in a listing is, its final / saying a folder, and NAME.app/
 ; an app's bundle; prog, whether a file is a program.
 (def fv_kind_of ((name (list int)) (prog bool)) FvKind
-  (if (ends_with name ".app/")
-      (FvApp (FvDrawn (nil UiDraw)))
-      (if (ends_with name "/") (FvDir) (if prog (FvProgram) (FvText)))))
+  (if (ends_with name ".app/") (FvApp (FvDrawn (nil UiDraw)))
+      (ends_with name "/") (FvDir)
+      prog (FvProgram)
+      (FvText)))
 
 ; A name as a listing gives it, without its final /.
 (def fv_bare ((name (list int))) (list int)
@@ -128,7 +124,7 @@
 (def fv_ranked ((es (list FvEntry)) (acc (list FvRanked))) (list FvRanked)
   (if (is_empty es)
       acc
-      (fv_ranked (tail es) (cons (FvRanked (if (fv_is_place (fv_kind (head es))) 0 1) (fv_name (head es)) (head es)) acc))))
+      (fv_ranked (tail es) (cons (FvRanked (if (fv_is_place (.kind (head es))) 0 1) (.name (head es)) (head es)) acc))))
 
 ; The entries of rs, in order, without what they sorted by.
 (def fv_unranked ((rs (list FvRanked)) (acc (list FvEntry))) (list FvEntry)
@@ -197,7 +193,7 @@
 ; The initramfs's directory dir, if it is one.
 (def fv_list_root ((dir (list int))) FvListing
   (let names (entry_paths)
-    (if (if (eq dir "/") true (any_eq (append dir "/") names))
+    (if (or (eq dir "/") (any_eq (append dir "/") names))
         (FvListed (fv_root_entries names (fv_entry_programs names 0 (nil (list int))) (fv_entry_sizes 0 (length names)) dir))
         (FvNotListed (io_error -9)))))
 
@@ -247,7 +243,7 @@
   (if (is_empty ls)
       (rev acc)
       (let ws (split_spaces (head ls))
-        (if (if (is_empty ws) true (starts_with (head ws) "#"))
+        (if (or (is_empty ws) (starts_with (head ws) "#"))
             (fv_draws_onto (tail ls) acc)
             (match (ui_parse_draw ws)
               ((Ok d) (fv_draws_onto (tail ls) (cons d acc)))
@@ -261,9 +257,9 @@
 ; deleted, a volume relabelled, are asked of the file server by Files
 ; (files.l0's FlChange).
 (def fv_fixed_why ((dir (list int))) (list int)
-  (if (fv_is_volumes dir)
-      "volumes are made in Disks"
-      (if (on_initramfs dir) "the system's files cannot be changed" "")))
+  (if (fv_is_volumes dir) "volumes are made in Disks"
+      (on_initramfs dir) "the system's files cannot be changed"
+      ""))
 
 ; ---------------------------------------------------------------- opening
 
@@ -287,7 +283,7 @@
       ((FvApp ds)
         (match (app_read path)
           ((Err why) (FvNotOpened why))
-          ((Ok a) (fv_started (app_name a) (spawn_path (app_exec a) ((None (list (list int)))))))))
+          ((Ok a) (fv_started (.name a) (spawn_path (.exec a) ((None (list (list int)))))))))
       ((FvProgram) (fv_started name (spawn_path path ((None (list (list int)))))))
       ((FvText) (FvRead path)))))
 
@@ -310,21 +306,19 @@
 ; fv_text_lines's loop: line the one being made, reversed, of n lines so
 ; far, acc, reversed.
 (def fv_lines_onto ((bs (list int)) (line (list int)) (n int) (acc (list (list int)))) (list (list int))
-  (if (ge n (fv_preview_lines))
-      (rev acc)
-      (if (is_empty bs)
-          (rev (if (is_empty line) acc (cons (take (rev line) (fv_preview_cols)) acc)))
-          (let c (head bs)
-            (if (eq c 10)
-                (fv_lines_onto (tail bs) (nil int) (add n 1) (cons (take (rev line) (fv_preview_cols)) acc))
-                (fv_lines_onto (tail bs) (fv_char_onto c line) n acc))))))
+  (if (ge n (fv_preview_lines)) (rev acc)
+      (is_empty bs) (rev (if (is_empty line) acc (cons (take (rev line) (fv_preview_cols)) acc)))
+      (let c (head bs)
+        (if (eq c 10)
+            (fv_lines_onto (tail bs) (nil int) (add n 1) (cons (take (rev line) (fv_preview_cols)) acc))
+            (fv_lines_onto (tail bs) (fv_char_onto c line) n acc)))))
 
 ; Character c added to line, reversed: a tab as spaces to its stop, a
 ; carriage return dropped, any other not printable a dot.
 (def fv_char_onto ((c int) (line (list int))) (list int)
-  (if (eq c 9)
-      (fv_spaces (sub 8 (mod (length line) 8)) line)
-      (if (eq c 13) line (cons (if (if (ge c 32) (lt c 127) false) c 46) line))))
+  (if (eq c 9) (fv_spaces (sub 8 (mod (length line) 8)) line)
+      (eq c 13) line
+      (cons (if (and (ge c 32) (lt c 127)) c 46) line)))
 
 ; n spaces onto line.
 (def fv_spaces ((n int) (line (list int))) (list int)

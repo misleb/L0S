@@ -82,6 +82,47 @@ class L0GraphTest(unittest.TestCase):
         # run's parameter n is not the def n; first_twice's a and b are bound.
         self.assertNotIn(('app_prog_run', 'references', 'app_prog_n'), self.edges)
 
+    def extract_one(self, text):
+        """The edges of one file, new.l0, holding text."""
+        root = Path(self.tmp.name)
+        (root / 'new.l0').write_text(text)
+        g = l0_graph.extract(root, ['new.l0'])
+        return g, {(e['source'], e['relation'], e['target']) for e in g['edges']}
+
+    def test_named_fields_are_not_defs(self):
+        # The field pid is not the def pid; its type Life is a type.
+        g, edges = self.extract_one(
+            '; Life.\n(data Life (Life (n int)))\n'
+            '; A proc.\n(data Proc (Proc (pid int) (life Life)))\n'
+            '; A def named as a field.\n(def pid () int 1)\n'
+            '; Its pid.\n(def of ((p Proc)) int (.pid p))\n')
+        self.assertIn(('new_proc', 'references', 'new_life'), edges)
+        self.assertFalse(any(t == 'new_pid' and s != 'new' for s, _, t in edges))
+        self.assertIn(('new_of', 'references', 'new_proc'), edges)
+
+    def test_let_of_several_binds_each(self):
+        g, edges = self.extract_one(
+            '; A def.\n(def a () int 1)\n; Another.\n(def b () int 2)\n'
+            '; Binds a and b.\n(def f () int (let (a 1 b (add a 1)) (add a b)))\n')
+        self.assertNotIn(('new_f', 'calls', 'new_a'), edges)
+        self.assertNotIn(('new_f', 'references', 'new_a'), edges)
+        self.assertNotIn(('new_f', 'references', 'new_b'), edges)
+
+    def test_generic_def_and_function_parameter(self):
+        g, edges = self.extract_one(
+            '; A type named T.\n(data T (MkT int))\n'
+            '; A def named key.\n(def key () int 0)\n'
+            '; By key.\n(def (find_by K T) ((key (fn (T) K)) (xs (list T))) (Option T)\n'
+            '  (if (is_empty xs) ((None T)) (Some (head xs))))\n'
+            '; Its name.\n(def name_of ((x int)) int x)\n'
+            '; A use.\n(def use () (Option int) (find_by name_of (nil int)))\n')
+        self.assertIn(('new', 'contains', 'new_find_by'), edges)
+        self.assertIn(('new_use', 'calls', 'new_find_by'), edges)
+        self.assertIn(('new_use', 'references', 'new_name_of'), edges)
+        # key is the parameter, T the type parameter.
+        self.assertNotIn(('new_find_by', 'calls', 'new_key'), edges)
+        self.assertNotIn(('new_find_by', 'references', 'new_t'), edges)
+
     def test_comments_and_strings_are_not_code(self):
         self.assertEqual(l0_graph.parse('; (def x)\n"(def y)" (def z () int 1)')[-1][2][0], 'z')
 

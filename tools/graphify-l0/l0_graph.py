@@ -1,7 +1,8 @@
 """The L0 sources as a graphify extraction: nodes and edges, no LLM.
 
 graphify does not know .l0 files, so this reads them itself. A node for
-each file, each top-level (def NAME ...) and each (data NAME ...); edges
+each file, each top-level (def NAME ...) and each (data NAME ...), a
+generic one's, (def (NAME T ...) ...), among them; edges
 from a file to what it defines, from a def to the defs it calls
 (head position) or names as a value, to the types it names, and to the
 type of each constructor it uses.
@@ -9,8 +10,12 @@ type of each constructor it uses.
 L0 has no modules: a name is the one definition linked with it. Here a
 name resolves to the same file's, else the one in the same directory,
 else the only one outside the tests. Any other name is dropped and
-counted, never guessed. Parameters, let names and the variables a match
-pattern binds shadow globals, so they are not references.
+counted, never guessed. Parameters, type parameters, let names, those
+of a let of several, (let (a 1 b 2) ...), and the variables a match
+pattern binds shadow globals, so they are not references. A field's
+name is none: in a data form, whose fields may be named, (Proc (pid
+int)), only types are looked up, and a field read, (.pid p), names no
+definition.
 """
 import re
 import subprocess
@@ -130,10 +135,19 @@ def extract(root, files=None):
                       'source_file': rel, 'source_location': 'L1', '_origin': 'ast',
                       'metadata': {'language': 'l0', 'summary': summary}})
         for form in parse(text):
-            if is_leaf(form) or len(form) < 3 or not is_leaf(form[1]) or not is_leaf(form[2]):
+            if is_leaf(form) or len(form) < 3 or not is_leaf(form[1]):
                 continue
-            kw, name, line = form[1][0], form[2][0], form[0][1]
+            kw, line = form[1][0], form[0][1]
             if kw not in ('def', 'data'):
+                continue
+            head = form[2]
+            if is_leaf(head):
+                name, tparams = head[0], set()
+            elif len(head) > 1 and is_leaf(head[1]):
+                # A generic def or type, (def (f T ...) ...): named by its
+                # first symbol, the rest type parameters.
+                name, tparams = head[1][0], {y[0] for y in head[2:] if is_leaf(y)}
+            else:
                 continue
             nid = f'{fid}_{norm(name)}'
             if nid in where:
@@ -154,7 +168,7 @@ def extract(root, files=None):
                 for ctor in form[3:]:
                     if not is_leaf(ctor) and len(ctor) > 1 and is_leaf(ctor[1]):
                         ctor_by_name[ctor[1][0]].append(nid)
-            bodies.append((nid, rel, list(form[3:])))
+            bodies.append((nid, rel, list(form[3:]), tparams))
 
     def resolve(name, rel, table):
         """The node name means in rel, and None or 'ambiguous' if none."""
@@ -186,6 +200,9 @@ def extract(root, files=None):
                 return
             if len(x) > 2 and is_leaf(x[1]) and x[1][0] in ('let', 'fn', 'lambda') and is_leaf(x[2]):
                 out.add(x[2][0])
+            elif len(x) > 2 and is_leaf(x[1]) and x[1][0] == 'let' and not is_leaf(x[2]):
+                # (let (a 1 b 2) body): every other item names a binding.
+                out.update(y[0] for y in x[2][1::2] if is_leaf(y))
             if len(x) > 1 and is_leaf(x[1]) and x[1][0] in ctor_by_name:
                 out.update(y[0] for y in x[2:] if is_leaf(y))
             for y in x:
@@ -205,17 +222,23 @@ def extract(root, files=None):
         edges.append(edge(src, tgt, relation, rel, line))
         stats[relation] += 1
 
-    def walk(nid, rel, items, bound):
-        """Edges from nid to every global name in items."""
+    def walk(nid, rel, items, bound, types_only=False):
+        """Edges from nid to every global name in items; to types only if
+        types_only, as in a data form, whose fields may be named."""
         for idx, x in enumerate(items):
             if not is_leaf(x):
-                walk(nid, rel, x, bound)
+                walk(nid, rel, x, bound, types_only)
                 continue
             name, line = x
-            if name == '__line' or name in bound:
+            # A field's name, .f, is no definition's.
+            if name == '__line' or name in bound or name.startswith('.'):
                 continue
             head = idx == 1 and items[0][0] == '__line'
             tgt = resolve(name, rel, by_name)
+            if types_only and tgt not in (None, 'ambiguous') and kinds[tgt] != 'data':
+                tgt = None
+            if types_only and tgt is None:
+                continue
             if tgt is None:
                 tgt = resolve(name, rel, ctor_by_name)
                 if tgt not in (None, 'ambiguous'):
@@ -227,8 +250,11 @@ def extract(root, files=None):
                 relation = 'calls' if head and kinds[tgt] == 'def' else 'references'
                 emit(nid, tgt, relation, rel, line)
 
-    for nid, rel, body in bodies:
-        walk(nid, rel, body, bound_names(body) if kinds[nid] == 'def' else set())
+    for nid, rel, body, tparams in bodies:
+        if kinds[nid] == 'def':
+            walk(nid, rel, body, bound_names(body) | tparams)
+        else:
+            walk(nid, rel, body, tparams, types_only=True)
 
     return {'nodes': nodes, 'edges': edges, 'stats': dict(stats), 'files': list(files)}
 

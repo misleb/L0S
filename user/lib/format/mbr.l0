@@ -35,21 +35,11 @@
 
 ; A partition: its number in the table, from 1; its type; its first
 ; sector; and its sectors.
-(data MbrPart (MbrPart int int int int))
+(data MbrPart (MbrPart (number int) (type int) (start int) (sectors int)))
 
 ; A table: the disk's signature and its partitions, those with a type
 ; and sectors, in the table's order.
-(data MbrDisk (MbrDisk int (list MbrPart)))
-
-; A partition's number, type, first sector and sectors.
-(def mbr_part_number ((p MbrPart)) int (match p ((MbrPart k t s c) k)))
-(def mbr_part_type ((p MbrPart)) int (match p ((MbrPart k t s c) t)))
-(def mbr_part_start ((p MbrPart)) int (match p ((MbrPart k t s c) s)))
-(def mbr_part_sectors ((p MbrPart)) int (match p ((MbrPart k t s c) c)))
-
-; A table's signature and partitions.
-(def mbr_sig ((d MbrDisk)) int (match d ((MbrDisk s ps) s)))
-(def mbr_parts ((d MbrDisk)) (list MbrPart) (match d ((MbrDisk s ps) ps)))
+(data MbrDisk (MbrDisk (sig int) (parts (list MbrPart))))
 
 ; What sector 0 holds: a table; GPT's protective MBR, so that the GPT is
 ; the table; or no MBR, no 55 AA at its end.
@@ -59,59 +49,57 @@
 (def mbr_of ((b bytes)) MbrRead
   (if (lt (bytes_len b) 512)
       (MbrNone)
-      (if (not (if (eq (bytes_get b 510) 85) (eq (bytes_get b 511) 170) false))
-          (MbrNone)
-          (let ps (mbr_entries b (sub (mbr_entry_count) 1) (nil MbrPart))
-            (if (mbr_any_type ps (mbr_protective_type))
-                (MbrProtective)
-                (MbrGot (MbrDisk (le_u32 b (mbr_sig_at)) ps)))))))
+      (not (and (eq (bytes_get b 510) 85) (eq (bytes_get b 511) 170)))
+      (MbrNone)
+      (let ps (mbr_entries b (sub (mbr_entry_count) 1) (nil MbrPart))
+        (if (mbr_any_type ps (mbr_protective_type))
+            (MbrProtective)
+            (MbrGot (MbrDisk (le_u32 b (mbr_sig_at)) ps))))))
 
 ; Entries 0 to i of b that have a type and sectors, onto acc.
 (def mbr_entries ((b bytes) (i int) (acc (list MbrPart))) (list MbrPart)
   (if (lt i 0)
       acc
-      (let at (add (mbr_entries_at) (mul i 16))
-        (let ty (bytes_get b (add at 4))
-          (let count (le_u32 b (add at 12))
-            (mbr_entries b (sub i 1)
-              (if (if (eq ty 0) true (eq count 0))
-                  acc
-                  (cons (MbrPart (add i 1) ty (le_u32 b (add at 8)) count) acc))))))))
+      (let (at (add (mbr_entries_at) (mul i 16))
+            ty (bytes_get b (add at 4))
+            count (le_u32 b (add at 12)))
+        (mbr_entries b (sub i 1)
+          (if (or (eq ty 0) (eq count 0))
+              acc
+              (cons (MbrPart (add i 1) ty (le_u32 b (add at 8)) count) acc))))))
 
 ; Whether any of ps is of type ty.
 (def mbr_any_type ((ps (list MbrPart)) (ty int)) bool
   (if (is_empty ps)
       false
-      (if (eq (mbr_part_type (head ps)) ty) true (mbr_any_type (tail ps) ty))))
+      (eq (.type (head ps)) ty) true
+      (mbr_any_type (tail ps) ty)))
 
 ; Whether p may hold a FAT32 volume, by its type.
 (def mbr_is_fat ((p MbrPart)) bool
-  (any_eq (mbr_part_type p) (mbr_fat_types)))
+  (any_eq (.type p) (mbr_fat_types)))
 
 ; The partitions of ps that may hold FAT32, in order.
 (def mbr_fat_parts ((ps (list MbrPart))) (list MbrPart)
   (if (is_empty ps)
       (nil MbrPart)
-      (if (mbr_is_fat (head ps))
-          (cons (head ps) (mbr_fat_parts (tail ps)))
-          (mbr_fat_parts (tail ps)))))
+      (mbr_is_fat (head ps)) (cons (head ps) (mbr_fat_parts (tail ps)))
+      (mbr_fat_parts (tail ps))))
 
 ; The partitions of ps of type ty, in order.
 (def mbr_typed ((ps (list MbrPart)) (ty int)) (list MbrPart)
   (if (is_empty ps)
       (nil MbrPart)
-      (if (eq (mbr_part_type (head ps)) ty)
-          (cons (head ps) (mbr_typed (tail ps) ty))
-          (mbr_typed (tail ps) ty))))
+      (eq (.type (head ps)) ty) (cons (head ps) (mbr_typed (tail ps) ty))
+      (mbr_typed (tail ps) ty)))
 
 ; The partition of ps, of a disk whose signature is sig, known by u, as
 ; mbr_part_uuid makes it; None if none is.
 (def mbr_part_of ((ps (list MbrPart)) (sig int) (u Uuid)) (Option MbrPart)
   (if (is_empty ps)
       ((None MbrPart))
-      (if (eq (mbr_part_uuid sig (mbr_part_number (head ps))) u)
-          (Some (head ps))
-          (mbr_part_of (tail ps) sig u))))
+      (eq (mbr_part_uuid sig (.number (head ps))) u) (Some (head ps))
+      (mbr_part_of (tail ps) sig u)))
 
 ; Sector 0, b, with partition k's type ty, every other byte as it was:
 ; the boot code, the signature, and the other entries kept.
@@ -138,8 +126,6 @@
 (def mbr_type_text ((ty int)) (list int)
   (if (any_eq ty (cons 11 (cons 12 (nil int))))
       (append "FAT32 (0x" (append (hex_digits ty 2) ")"))
-      (if (eq ty 239)
-          "EFI system (0xEF)"
-          (if (eq ty (mbr_l0fs_type))
-              "L0FS (0x7f)"
-              (append "MBR type 0x" (hex_digits ty 2))))))
+      (eq ty 239) "EFI system (0xEF)"
+      (eq ty (mbr_l0fs_type)) "L0FS (0x7f)"
+      (append "MBR type 0x" (hex_digits ty 2))))

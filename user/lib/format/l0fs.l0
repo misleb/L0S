@@ -62,7 +62,7 @@
 
 ; vol_cstr's loop: k is the byte it has reached.
 (def vol_cstr_end ((b bytes) (i int) (k int) (j int)) (list int)
-  (if (if (ge k j) true (eq (bytes_get b k) 0))
+  (if (or (ge k j) (eq (bytes_get b k) 0))
       (bytes_range b i k)
       (vol_cstr_end b i (add k 1) j)))
 
@@ -71,11 +71,9 @@
 ; Whether s is a file's name: 1 to 55 bytes, each printable and not a
 ; space or a /, and not . or .., which name no file.
 (def vol_name_ok ((s (list int))) bool
-  (if (if (is_empty s) true (gt (length s) (vol_name_max)))
-      false
-      (if (any_eq s (split_spaces ". .."))
-          false
-          (vol_name_chars s))))
+  (if (or (is_empty s) (gt (length s) (vol_name_max))) false
+      (any_eq s (split_spaces ". ..")) false
+      (vol_name_chars s)))
 
 ; Whether every byte of s may be in a name: printable, and not a space
 ; or a /.
@@ -83,7 +81,7 @@
   (if (is_empty s)
       true
       (let c (head s)
-        (if (if (lt c 33) true (if (gt c 126) true (eq c 47)))
+        (if (or (lt c 33) (or (gt c 126) (eq c 47)))
             false
             (vol_name_chars (tail s))))))
 
@@ -94,35 +92,30 @@
 
 ; ps without its empty pieces, in order.
 (def vol_nonempty ((ps (list (list int)))) (list (list int))
-  (if (is_empty ps)
-      ps
-      (if (is_empty (head ps)) (vol_nonempty (tail ps)) (cons (head ps) (vol_nonempty (tail ps))))))
+  (if (is_empty ps) ps
+      (is_empty (head ps)) (vol_nonempty (tail ps))
+      (cons (head ps) (vol_nonempty (tail ps)))))
 
 ; ----------------------------------------------------------------- layout
 
 ; Where a volume of some sectors keeps things: its sectors, its clusters,
 ; the table's sectors (from sector 1), and its first cluster of data,
 ; which is the root directory's first.
-(data VolLayout (VolLayout int int int int))
+(data VolLayout (VolLayout (n int) (clusters int) (table_sectors int) (first_data int)))
 
 ; The layout of a volume of n sectors: as many clusters as fit, at most
 ; vol_max_clusters, a sector of table for each 256, then the data.
 (def vol_layout ((n int)) VolLayout
-  (let c (min (div n (vol_cluster_sectors)) (vol_max_clusters))
-    (let t (ceil_div (mul c 2) (vol_sector_size))
-      (VolLayout n c t (ceil_div (add 1 t) (vol_cluster_sectors))))))
+  (let (c (min (div n (vol_cluster_sectors)) (vol_max_clusters))
+        t (ceil_div (mul c 2) (vol_sector_size)))
+    (VolLayout n c t (ceil_div (add 1 t) (vol_cluster_sectors)))))
 
 ; Whether a layout leaves a cluster for the root directory.
 (def vol_layout_ok ((l VolLayout)) bool
   (match l ((VolLayout n c t d) (gt c d))))
 
-; A layout's clusters, the table's sectors, and its first data cluster.
-(def vol_clusters ((l VolLayout)) int (match l ((VolLayout n c t d) c)))
-(def vol_table_sectors ((l VolLayout)) int (match l ((VolLayout n c t d) t)))
-(def vol_first_data ((l VolLayout)) int (match l ((VolLayout n c t d) d)))
-
 ; The metadata's sectors: every cluster before the data.
-(def vol_meta_sectors ((l VolLayout)) int (mul (vol_first_data l) (vol_cluster_sectors)))
+(def vol_meta_sectors ((l VolLayout)) int (mul (.first_data l) (vol_cluster_sectors)))
 
 ; ------------------------------------------------------------- superblock
 
@@ -147,31 +140,27 @@
 ; The superblock b holds: its magic and version, a label, and the
 ; layout its sectors give, written as vol_super writes it.
 (def vol_super_of ((b bytes)) VolSuper
-  (if (lt (bytes_len b) (vol_sector_size))
-      (VolNotSuper "a superblock is a sector")
-      (if (not (bytes_is_at b 0 "L0FS"))
-          (VolNotSuper "no L0FS volume")
-          (if (not (eq (bytes_get b 4) (vol_version)))
-              (VolNotSuper (append "L0FS version " (append (digits (bytes_get b 4)) ", not 2; format makes it 2")))
-              (vol_super_layout b)))))
+  (if (lt (bytes_len b) (vol_sector_size)) (VolNotSuper "a superblock is a sector")
+      (not (bytes_is_at b 0 "L0FS")) (VolNotSuper "no L0FS volume")
+      (not (eq (bytes_get b 4) (vol_version)))
+        (VolNotSuper (append "L0FS version " (append (digits (bytes_get b 4)) ", not 2; format makes it 2")))
+      (vol_super_layout b)))
 
 ; vol_super_of past the magic and version: the label must be one, and
 ; the words from 24 exactly those of the layout their sectors make.
 (def vol_super_layout ((b bytes)) VolSuper
-  (let label (vol_cstr b 8 24)
-    (let l (vol_layout (le_u32 b 24))
-      (if (not (label_ok label))
-          (VolNotSuper "a bad label")
-          (if (not (if (vol_layout_ok l) (bytes_is_at b 24 (vol_super_words l)) false))
-              (VolNotSuper "a bad layout")
-              (VolSuper label l))))))
+  (let (label (vol_cstr b 8 24)
+        l (vol_layout (le_u32 b 24)))
+    (if (not (label_ok label)) (VolNotSuper "a bad label")
+        (not (and (vol_layout_ok l) (bytes_is_at b 24 (vol_super_words l)))) (VolNotSuper "a bad layout")
+        (VolSuper label l))))
 
 ; ------------------------------------------------------------------ table
 
 ; A new volume's table: every cluster free but the metadata's, and the
 ; root directory's first, the end of its chain.
 (def vol_table_new ((l VolLayout)) (array int)
-  (array_set (vol_reserve (array_new (vol_clusters l) 0) (sub (vol_first_data l) 1)) (vol_first_data l) (vol_end)))
+  (array_set (vol_reserve (array_new (.clusters l) 0) (sub (.first_data l) 1)) (.first_data l) (vol_end)))
 
 ; Clusters 0 to i reserved.
 (def vol_reserve ((t (array int)) (i int)) (array int)
@@ -179,7 +168,7 @@
 
 ; The table as its sectors hold it.
 (def vol_table_bytes ((t (array int)) (l VolLayout)) (list int)
-  (vol_pad (rev (vol_table_push t 0 (array_len t) (nil int))) (mul (vol_table_sectors l) (vol_sector_size))))
+  (vol_pad (rev (vol_table_push t 0 (array_len t) (nil int))) (mul (.table_sectors l) (vol_sector_size))))
 
 ; The marks of clusters i up to j, onto acc.
 (def vol_table_push ((t (array int)) (i int) (j int) (acc (list int))) (list int)
@@ -199,7 +188,7 @@
 
 ; The table of layout l, from byte at of b, which holds it.
 (def vol_table_of ((b bytes) (at int) (l VolLayout)) (array int)
-  (vol_table_read b at (array_new (vol_clusters l) 0) 0))
+  (vol_table_read b at (array_new (.clusters l) 0) 0))
 
 ; vol_table_of's loop: t with the marks of clusters i on, each a u16
 ; from at.
@@ -220,7 +209,7 @@
       true
       (let x (array_get t i)
         (if (if (lt i d) (eq x (vol_reserved))
-                (if (eq x 0) true (if (eq x (vol_end)) true (if (ge x d) (lt x (array_len t)) false))))
+                (or (eq x 0) (or (eq x (vol_end)) (and (ge x d) (lt x (array_len t))))))
             (vol_table_ok_from t d (add i 1))
             false))))
 
@@ -233,7 +222,7 @@
 ; vol_chain's loop: c and the clusters after it, at most left more, onto
 ; the reversed acc.
 (def vol_chain_onto ((t (array int)) (c int) (left int) (acc (list int))) (list int)
-  (if (if (le c 0) true (if (ge c (array_len t)) true (le left 0)))
+  (if (or (le c 0) (or (ge c (array_len t)) (le left 0)))
       acc
       (vol_chain_onto t (array_get t c) (sub left 1) (cons c acc))))
 
@@ -256,13 +245,24 @@
         (VolFull)
         (VolAlloc (vol_link t cs) cs))))
 
+; A volume with n of its free clusters linked in its table, and them; or
+; none, if fewer are free.
+(data VolTaken (VolTaken Vol (list int)) (VolTakenNone))
+
+; vol_alloc on v's own table: v taken apart and built again, so that the
+; table, held by nothing else, is linked in place, not copied whole.
+(def vol_alloc_in ((v Vol) (n int)) VolTaken
+  (match v
+    ((Vol label l t ds)
+      (match (vol_alloc t n)
+        ((VolFull) (VolTakenNone))
+        ((VolAlloc t2 cs) (VolTaken (Vol label l t2 ds) cs))))))
+
 ; Up to n free clusters from i, in order.
 (def vol_free_n ((t (array int)) (i int) (n int) (acc (list int))) (list int)
-  (if (if (le n 0) true (ge i (array_len t)))
-      (rev acc)
-      (if (eq (array_get t i) 0)
-          (vol_free_n t (add i 1) (sub n 1) (cons i acc))
-          (vol_free_n t (add i 1) n acc))))
+  (if (or (le n 0) (ge i (array_len t))) (rev acc)
+      (eq (array_get t i) 0) (vol_free_n t (add i 1) (sub n 1) (cons i acc))
+      (vol_free_n t (add i 1) n acc)))
 
 ; cs linked in order, each to the next and the last to the end.
 (def vol_link ((t (array int)) (cs (list int))) (array int)
@@ -297,12 +297,11 @@
 ; The entry at byte at of b.
 (def vol_entry_of ((b bytes) (at int)) VolEntry
   (let flags (le_u16_at b (add at 62))
-    (if (eq (bit_and flags (vol_flag_used)) 0)
-        (VolNone)
-        (if (eq (bit_and flags (vol_flag_dir)) 0)
-            (VolFile (vol_cstr b at (add at 56)) (le_u32 b (add at 56)) (le_u16_at b (add at 60))
-                     (not (eq (bit_and flags (vol_flag_exec)) 0)))
-            (VolDir (vol_cstr b at (add at 56)) (le_u16_at b (add at 60)))))))
+    (if (eq (bit_and flags (vol_flag_used)) 0) (VolNone)
+        (eq (bit_and flags (vol_flag_dir)) 0)
+          (VolFile (vol_cstr b at (add at 56)) (le_u32 b (add at 56)) (le_u16_at b (add at 60))
+                   (not (eq (bit_and flags (vol_flag_exec)) 0)))
+        (VolDir (vol_cstr b at (add at 56)) (le_u16_at b (add at 60))))))
 
 ; An entry's name; a free one's is empty.
 (def vol_entry_name ((e VolEntry)) (list int)
@@ -347,43 +346,29 @@
 
 ; A volume, as its metadata and directories hold it: its label, layout,
 ; table, and every directory's entries by its first cluster.
-(data Vol (Vol (list int) VolLayout (array int) (Map int (array VolEntry))))
+(data Vol (Vol (label (list int)) (layout_of VolLayout) (table (array int)) (dirs (Map int (array VolEntry)))))
 
 ; A new, empty volume: an empty root directory.
 (def vol_new ((label (list int)) (l VolLayout)) Vol
-  (Vol label l (vol_table_new l) (map_put ((MapEmpty int (array VolEntry))) (vol_first_data l) (vol_dir_new))))
-
-; A volume's label, layout, cluster table, and directories.
-(def vol_label ((v Vol)) (list int) (match v ((Vol label l t ds) label)))
-(def vol_layout_of ((v Vol)) VolLayout (match v ((Vol label l t ds) l)))
-(def vol_table ((v Vol)) (array int) (match v ((Vol label l t ds) t)))
-(def vol_dirs ((v Vol)) (Map int (array VolEntry)) (match v ((Vol label l t ds) ds)))
-
-; v labelled label, all else as it was: its superblock, vol_super of the
-; label and its layout, is all of its metadata that changes.
-(def vol_relabel ((v Vol) (label (list int))) Vol (match v ((Vol old l t ds) (Vol label l t ds))))
+  (Vol label l (vol_table_new l) (map_put ((MapEmpty int (array VolEntry))) (.first_data l) (vol_dir_new))))
 
 ; The root directory's first cluster.
-(def vol_root ((v Vol)) int (vol_first_data (vol_layout_of v)))
-
-; v with table t.
-(def vol_with_table ((v Vol) (t (array int))) Vol
-  (match v ((Vol label l t0 ds) (Vol label l t ds))))
+(def vol_root ((v Vol)) int (.first_data (.layout_of v)))
 
 ; The entries of v's directory from cluster dc; none if it is no
 ; directory of v's.
 (def vol_dir ((v Vol) (dc int)) (array VolEntry)
-  (match (map_get (vol_dirs v) dc)
+  (match (map_get (.dirs v) dc)
     ((Some d) d)
     ((None) (array_new 0 (VolNone)))))
 
 ; Whether dc is the first cluster of one of v's directories.
 (def vol_is_dir ((v Vol) (dc int)) bool
-  (map_has (vol_dirs v) dc))
+  (map_has (.dirs v) dc))
 
 ; v emptied: every file and directory gone, its label and layout kept.
 (def vol_format ((v Vol)) Vol
-  (vol_new (vol_label v) (vol_layout_of v)))
+  (vol_new (.label v) (.layout_of v)))
 
 ; ---------------------------------------------------------------- entries
 
@@ -396,7 +381,7 @@
   (match r
     ((VolRef dc i)
       (let d (vol_dir v dc)
-        (if (if (lt i 0) true (ge i (array_len d))) (VolNone) (array_get d i))))))
+        (if (or (lt i 0) (ge i (array_len d))) (VolNone) (array_get d i))))))
 
 ; v with e at r, which is v's.
 (def vol_set_entry ((v Vol) (r VolRef) (e VolEntry)) Vol
@@ -414,11 +399,9 @@
 
 ; vol_find's loop: the first entry in use of d from i named name, or -1.
 (def vol_find_from ((d (array VolEntry)) (name (list int)) (i int)) int
-  (if (ge i (array_len d))
-      -1
-      (if (if (vol_entry_used (array_get d i)) (eq (vol_entry_name (array_get d i)) name) false)
-          i
-          (vol_find_from d name (add i 1)))))
+  (if (ge i (array_len d)) -1
+      (and (vol_entry_used (array_get d i)) (eq (vol_entry_name (array_get d i)) name)) i
+      (vol_find_from d name (add i 1))))
 
 ; The directory names lead to from directory dc of v: its first cluster,
 ; or -1 if one of them is missing or a file.
@@ -452,7 +435,7 @@
 
 ; Whether dc is any of the directories cs or in one of them.
 (def vol_under_any ((v Vol) (cs (list int)) (dc int)) bool
-  (if (is_empty cs) false (if (vol_under v (head cs) dc) true (vol_under_any v (tail cs) dc))))
+  (if (is_empty cs) false (vol_under v (head cs) dc) true (vol_under_any v (tail cs) dc)))
 
 ; The first clusters of the directories in directory dc of v.
 (def vol_subdirs ((v Vol) (dc int)) (list int)
@@ -474,7 +457,7 @@
 
 ; Whether no entry of d from i is in use.
 (def vol_none_from ((d (array VolEntry)) (i int)) bool
-  (if (ge i (array_len d)) true (if (vol_entry_used (array_get d i)) false (vol_none_from d (add i 1)))))
+  (if (ge i (array_len d)) true (vol_entry_used (array_get d i)) false (vol_none_from d (add i 1))))
 
 ; A free entry of directory dc of v, or -1.
 (def vol_free_entry ((v Vol) (dc int)) int
@@ -482,9 +465,9 @@
 
 ; The first free entry of d from i, or -1.
 (def vol_free_from_entry ((d (array VolEntry)) (i int)) int
-  (if (ge i (array_len d))
-      -1
-      (if (vol_entry_used (array_get d i)) (vol_free_from_entry d (add i 1)) i)))
+  (if (ge i (array_len d)) -1
+      (vol_entry_used (array_get d i)) (vol_free_from_entry d (add i 1))
+      i))
 
 ; A free entry made in a directory: the volume, the entry, the clusters
 ; whose marks changed and the entries whose sectors did, those of a
@@ -497,24 +480,24 @@
   (let i (vol_free_entry v dc)
     (if (ge i 0)
         (VolSlot v (VolRef dc i) (nil int) (nil VolRef))
-        (match (vol_alloc (vol_table v) 1)
-          ((VolFull) (VolNoSlot))
-          ((VolAlloc t cs) (vol_grown_dir v dc t (head cs)))))))
+        (match (vol_alloc_in v 1)
+          ((VolTakenNone) (VolNoSlot))
+          ((VolTaken v2 cs) (vol_grown_dir v2 dc (head cs)))))))
 
-; vol_slot when directory dc is full: c, taken in t, linked after the
-; last cluster of its chain, and the directory a cluster of free entries
-; longer, the first of them the slot; the marks of that last cluster and
-; c changed, and every sector of c's to write.
-(def vol_grown_dir ((v Vol) (dc int) (t (array int)) (c int)) VolSlot
-  (match v
-    ((Vol label l t0 ds)
-      (let end (last (vol_chain t0 dc))
-        (let d (vol_dir v dc)
-          (let n (array_len d)
+; vol_slot when directory dc is full: c, taken in v's table, linked after
+; the last cluster of its chain, and the directory a cluster of free
+; entries longer, the first of them the slot; the marks of that last
+; cluster and c changed, and every sector of c's to write.
+(def vol_grown_dir ((v Vol) (dc int) (c int)) VolSlot
+  (let d (vol_dir v dc)
+    (match v
+      ((Vol label l t ds)
+        (let (end (last (vol_chain t dc))
+              n (array_len d))
             (VolSlot (Vol label l (array_set t end c) (map_put ds dc (array_resize d (add n (vol_dir_slots)) (VolNone))))
                      (VolRef dc n)
                      (cons end (cons c (nil int)))
-                     (vol_cluster_refs dc n))))))))
+                     (vol_cluster_refs dc n)))))))
 
 ; An entry for each sector of a directory's cluster whose first entry is
 ; i: what marks the whole cluster to be written.
@@ -548,7 +531,7 @@
 
 ; How many files v has, in every directory.
 (def vol_file_count ((v Vol)) int
-  (vol_files_in (map_values (vol_dirs v)) 0))
+  (vol_files_in (map_values (.dirs v)) 0))
 
 ; n and the files in every directory of ds.
 (def vol_files_in ((ds (list (array VolEntry))) (n int)) int
@@ -577,13 +560,11 @@
 ; its own. The new cluster's sectors are all to be written, as
 ; vol_cluster_refs of it say.
 (def vol_mkdir ((v Vol) (r VolRef) (name (list int))) VolMade
-  (match (vol_alloc (vol_table v) 1)
-    ((VolFull) (VolNoRoom))
-    ((VolAlloc t cs)
-      (match v
-        ((Vol label l t0 ds)
-          (let c (head cs)
-            (VolMade (vol_set_entry (Vol label l t (map_put ds c (vol_dir_new))) r (VolDir name c)) c cs)))))))
+  (match (vol_alloc_in v 1)
+    ((VolTakenNone) (VolNoRoom))
+    ((VolTaken v2 cs)
+      (let c (head cs)
+        (VolMade (vol_set_entry (.dirs v2 (map_put (.dirs v2) c (vol_dir_new))) r (VolDir name c)) c cs)))))
 
 ; v with the file at r emptied, its clusters freed.
 (def vol_truncate ((v Vol) (r VolRef)) Vol
@@ -616,22 +597,23 @@
 
 ; v with the chain from first freed.
 (def vol_unchain ((v Vol) (first int)) Vol
-  (match v ((Vol label l t ds) (Vol label l (vol_unlink t (vol_chain t first)) ds))))
+  (let c (vol_chain (.table v) first)
+    (.table v (vol_unlink (.table v) c))))
 
 ; The clusters of the file or directory at r, in order; none for a free
 ; entry.
 (def vol_file_clusters ((v Vol) (r VolRef)) (list int)
   (match (vol_entry v r)
     ((VolNone) (nil int))
-    ((VolDir name first) (vol_chain (vol_table v) first))
-    ((VolFile name size first exec) (vol_chain (vol_table v) first))))
+    ((VolDir name first) (vol_chain (.table v) first))
+    ((VolFile name size first exec) (vol_chain (.table v) first))))
 
 ; ------------------------------------------------------- what is written
 
 ; v's metadata, all of its sectors, then the root directory's first
 ; cluster: all a new volume holds that is not zeros.
 (def vol_meta ((v Vol)) (list int)
-  (rev (vol_run_onto v 0 (mul (add (vol_first_data (vol_layout_of v)) 1) (vol_cluster_sectors)) (nil int))))
+  (rev (vol_run_onto v 0 (mul (add (.first_data (.layout_of v)) 1) (vol_cluster_sectors)) (nil int))))
 
 ; Sector s of v, where it is metadata or a directory's: the superblock, a
 ; sector of the table, zeros after it, or a directory's entries; zeros
@@ -639,17 +621,14 @@
 (def vol_meta_sector ((v Vol) (s int)) (list int)
   (match v
     ((Vol label l t ds)
-      (if (eq s 0)
-          (vol_super label l)
-          (if (le s (vol_table_sectors l))
-              (vol_table_sector t (sub s 1))
-              (if (lt s (vol_meta_sectors l))
-                  (zeros (vol_sector_size))
-                  (vol_dir_sector v (div s (vol_cluster_sectors)) (mod s (vol_cluster_sectors)))))))))
+      (if (eq s 0) (vol_super label l)
+          (le s (.table_sectors l)) (vol_table_sector t (sub s 1))
+          (lt s (vol_meta_sectors l)) (zeros (vol_sector_size))
+          (vol_dir_sector v (div s (vol_cluster_sectors)) (mod s (vol_cluster_sectors)))))))
 
 ; Sector j of cluster c, where c is a directory's: its entries there.
 (def vol_dir_sector ((v Vol) (c int) (j int)) (list int)
-  (vol_dir_sector_in v (map_keys (vol_dirs v)) c j))
+  (vol_dir_sector_in v (map_keys (.dirs v)) c j))
 
 ; vol_dir_sector among the directories whose first clusters are dcs: the
 ; first whose chain holds c, its entries in sector j of it; zeros if none
@@ -657,13 +636,13 @@
 (def vol_dir_sector_in ((v Vol) (dcs (list int)) (c int) (j int)) (list int)
   (if (is_empty dcs)
       (zeros (vol_sector_size))
-      (let k (index_of c (vol_chain (vol_table v) (head dcs)))
+      (let k (index_of c (vol_chain (.table v) (head dcs)))
         (if (lt k 0)
             (vol_dir_sector_in v (tail dcs) c j)
-            (let d (vol_dir v (head dcs))
-              (let i (add (mul k (vol_dir_slots)) (mul j (vol_entries_per_sector)))
-                (vol_pad (rev (vol_dir_push d i (min (array_len d) (add i (vol_entries_per_sector))) (nil int)))
-                         (vol_sector_size))))))))
+            (let (d (vol_dir v (head dcs))
+                  i (add (mul k (vol_dir_slots)) (mul j (vol_entries_per_sector))))
+              (vol_pad (rev (vol_dir_push d i (min (array_len d) (add i (vol_entries_per_sector))) (nil int)))
+                       (vol_sector_size)))))))
 
 ; The sectors of v that hold the marks of clusters cs and the entries
 ; rs, in order; one holding several is there as many times.
@@ -673,17 +652,15 @@
 ; vol_dirty_sectors's loop: the table's sector holding each cluster of
 ; cs's mark, then the sector of each entry of rs, onto acc.
 (def vol_dirty_onto ((v Vol) (cs (list int)) (rs (list VolRef)) (acc (list int))) (list int)
-  (if (not (is_empty cs))
-      (vol_dirty_onto v (tail cs) rs (cons (add 1 (div (head cs) (vol_marks_per_sector))) acc))
-      (if (is_empty rs)
-          acc
-          (vol_dirty_onto v cs (tail rs) (vol_ref_sector_onto v (head rs) acc)))))
+  (if (not (is_empty cs)) (vol_dirty_onto v (tail cs) rs (cons (add 1 (div (head cs) (vol_marks_per_sector))) acc))
+      (is_empty rs) acc
+      (vol_dirty_onto v cs (tail rs) (vol_ref_sector_onto v (head rs) acc))))
 
 ; The sector the entry r is in, onto acc; nothing if r is none of v's.
 (def vol_ref_sector_onto ((v Vol) (r VolRef) (acc (list int))) (list int)
   (match r
     ((VolRef dc i)
-      (let c (nth_or (vol_chain (vol_table v) dc) (div i (vol_dir_slots)) 0)
+      (let c (nth_or (vol_chain (.table v) dc) (div i (vol_dir_slots)) 0)
         (if (eq c 0)
             acc
             (cons (add (mul c (vol_cluster_sectors)) (div (mod i (vol_dir_slots)) (vol_entries_per_sector))) acc))))))
@@ -704,17 +681,16 @@
 (def vol_runs_onto ((ss (list int)) (acc (list VolRun))) (list VolRun)
   (if (is_empty ss)
       acc
-      (let s (head ss)
-        (let limit (add s (vol_cluster_sectors))
-          (vol_runs_onto (vol_from ss limit) (cons (VolRun s (add (sub (vol_last_below ss limit s) s) 1)) acc))))))
+      (let (s (head ss) limit (add s (vol_cluster_sectors)))
+        (vol_runs_onto (vol_from ss limit) (cons (VolRun s (add (sub (vol_last_below ss limit s) s) 1)) acc)))))
 
 ; Those of ss, in order, from limit on.
 (def vol_from ((ss (list int)) (limit int)) (list int)
-  (if (is_empty ss) ss (if (lt (head ss) limit) (vol_from (tail ss) limit) ss)))
+  (if (is_empty ss) ss (lt (head ss) limit) (vol_from (tail ss) limit) ss))
 
 ; The last of ss, in order, below limit, or last if none is.
 (def vol_last_below ((ss (list int)) (limit int) (last int)) int
-  (if (is_empty ss) last (if (lt (head ss) limit) (vol_last_below (tail ss) limit (head ss)) last)))
+  (if (is_empty ss) last (lt (head ss) limit) (vol_last_below (tail ss) limit (head ss)) last))
 
 ; The bytes of v that run r writes.
 (def vol_run_bytes ((v Vol) (r VolRun)) (list int)
@@ -737,16 +713,14 @@
   (if (lt (bytes_len b) (mul (vol_meta_sectors l) (vol_sector_size)))
       (VolBad "the metadata is cut short")
       (let t (vol_table_of b (vol_sector_size) l)
-        (if (not (vol_table_ok t (vol_first_data l)))
-            (VolBad "a damaged cluster table")
-            (if (eq (array_get t (vol_first_data l)) 0)
-                (VolBad "no root directory")
-                (VolGot (Vol label l t ((MapEmpty int (array VolEntry))))))))))
+        (if (not (vol_table_ok t (.first_data l))) (VolBad "a damaged cluster table")
+            (eq (array_get t (.first_data l)) 0) (VolBad "no root directory")
+            (VolGot (Vol label l t ((MapEmpty int (array VolEntry)))))))))
 
 ; The clusters directory dc's entries are in, to be read for
 ; vol_add_dir.
 (def vol_dir_clusters ((v Vol) (dc int)) (list int)
-  (vol_chain (vol_table v) dc))
+  (vol_chain (.table v) dc))
 
 ; v with directory dc, whose clusters' bytes are b in order: refused if
 ; dc is one of v's already, which would be a loop, or an entry is bad.
@@ -754,27 +728,25 @@
   (if (vol_is_dir v dc)
       (VolBad "a directory in itself")
       (let d (vol_dir_of b)
-        (if (not (vol_dir_ok (vol_table v) d 0))
+        (if (not (vol_dir_ok (.table v) d 0))
             (VolBad "a damaged directory")
             (match v ((Vol label l t ds) (VolGot (Vol label l t (map_put ds dc d)))))))))
 
 ; Whether entries i on are good: names, files' chains as long as their
 ; sizes, and directories' at least a cluster.
 (def vol_dir_ok ((t (array int)) (d (array VolEntry)) (i int)) bool
-  (if (ge i (array_len d))
-      true
-      (if (vol_entry_ok t (array_get d i)) (vol_dir_ok t d (add i 1)) false)))
+  (if (ge i (array_len d)) true
+      (vol_entry_ok t (array_get d i)) (vol_dir_ok t d (add i 1))
+      false))
 
 ; Whether one entry is good, as vol_dir_ok says: a free one is.
 (def vol_entry_ok ((t (array int)) (e VolEntry)) bool
   (match e
     ((VolNone) true)
     ((VolFile name size first exec)
-      (if (not (vol_name_ok name))
-          false
-          (eq (length (vol_chain t first)) (ceil_div size (vol_cluster_size)))))
+      (and (vol_name_ok name) (eq (length (vol_chain t first)) (ceil_div size (vol_cluster_size)))))
     ((VolDir name first)
-      (if (not (vol_name_ok name)) false (not (is_empty (vol_chain t first)))))))
+      (and (vol_name_ok name) (not (is_empty (vol_chain t first)))))))
 
 ; The volume whose sectors are b, from its partition's first, as a disk
 ; image holds them, its superblock having given label and l: its
@@ -782,7 +754,7 @@
 (def vol_of ((label (list int)) (l VolLayout) (b bytes)) VolGot
   (match (vol_base label l b)
     ((VolBad why) (VolBad why))
-    ((VolGot v) (vol_load_in v b (cons (vol_first_data l) (nil int))))))
+    ((VolGot v) (vol_load_in v b (cons (.first_data l) (nil int))))))
 
 ; v with the directories from dcs on, and those in them, read from b.
 (def vol_load_in ((v Vol) (b bytes) (dcs (list int))) VolGot
@@ -802,13 +774,13 @@
 (def vol_clusters_onto ((b bytes) (cs (list int)) (acc (list bytes))) (list bytes)
   (if (is_empty cs)
       acc
-      (let i (min (bytes_len b) (mul (head cs) (vol_cluster_size)))
-        (let j (min (bytes_len b) (add i (vol_cluster_size)))
-          (let piece (bytes_slice b i j)
-            (vol_clusters_onto b (tail cs)
-              (if (eq (sub j i) (vol_cluster_size))
-                  (cons piece acc)
-                  (cons (bytes_from_list (zeros (sub (vol_cluster_size) (sub j i)))) (cons piece acc)))))))))
+      (let (i (min (bytes_len b) (mul (head cs) (vol_cluster_size)))
+            j (min (bytes_len b) (add i (vol_cluster_size)))
+            piece (bytes_slice b i j))
+        (vol_clusters_onto b (tail cs)
+          (if (eq (sub j i) (vol_cluster_size))
+              (cons piece acc)
+              (cons (bytes_from_list (zeros (sub (vol_cluster_size) (sub j i)))) (cons piece acc)))))))
 
 ; ------------------------------------------------------------------ plans
 
@@ -828,17 +800,16 @@
 (def vol_at ((t (array int)) (first int) (hint VolAt) (k int)) VolAt
   (match hint
     ((VolAt hk hc)
-      (if (if (gt hc 0) (if (ge hk 0) (le hk k) false) false)
+      (if (and (gt hc 0) (and (ge hk 0) (le hk k)))
           (vol_walk t hc hk k (array_len t))
           (vol_walk t first 0 k (array_len t))))))
 
 ; From c, the ith cluster of a chain, on to the kth, at most left links.
 (def vol_walk ((t (array int)) (c int) (i int) (k int) (left int)) VolAt
-  (if (if (le c 0) true (ge c (array_len t)))
-      (VolAt k 0)
-      (if (ge i k)
-          (VolAt k c)
-          (if (le left 0) (VolAt k 0) (vol_walk t (array_get t c) (add i 1) k (sub left 1))))))
+  (if (or (le c 0) (ge c (array_len t))) (VolAt k 0)
+      (ge i k) (VolAt k c)
+      (le left 0) (VolAt k 0)
+      (vol_walk t (array_get t c) (add i 1) k (sub left 1))))
 
 ; Where the next bytes of the file at r are, from offset, at most n: in
 ; one cluster, found from hint as vol_at finds it; none at the file's
@@ -851,7 +822,7 @@
       (let k (min n (min (sub size offset) (sub (vol_cluster_size) (mod offset (vol_cluster_size)))))
         (if (le k 0)
             ((None VolSpan))
-            (match (vol_at (vol_table v) first hint (div offset (vol_cluster_size)))
+            (match (vol_at (.table v) first hint (div offset (vol_cluster_size)))
               ((VolAt j c)
                 (if (eq c 0)
                     ((None VolSpan))
@@ -882,16 +853,16 @@
     ((VolNone) (VolNoSpace))
     ((VolDir name first) (VolNoSpace))
     ((VolFile name size first exec)
-      (let len (ceil_div size (vol_cluster_size))
-        (let need (sub (ceil_div (add offset n) (vol_cluster_size)) len)
-          (let k (div offset (vol_cluster_size))
-            (let ks (if (if (gt need 0) (gt len 0) false) (min k (sub len 1)) k)
-              (let have (vol_touched (vol_table v) first hint ks (vol_touch_count offset n len ks))
-                (if (le need 0)
-                    (vol_wrote (vol_set_entry v r (VolFile name (max size (add offset n)) first exec)) have ks offset n (nil int) (nil int))
-                    (match (vol_alloc (vol_table v) need)
-                      ((VolFull) (VolNoSpace))
-                      ((VolAlloc t2 cs) (vol_grown v r t2 have ks cs offset n))))))))))))
+      (let (len (ceil_div size (vol_cluster_size))
+            need (sub (ceil_div (add offset n) (vol_cluster_size)) len)
+            k (div offset (vol_cluster_size))
+            ks (if (and (gt need 0) (gt len 0)) (min k (sub len 1)) k)
+            have (vol_touched (.table v) first hint ks (vol_touch_count offset n len ks)))
+        (if (le need 0)
+            (vol_wrote (vol_set_entry v r (VolFile name (max size (add offset n)) first exec)) have ks offset n (nil int) (nil int))
+            (match (vol_alloc_in v need)
+              ((VolTakenNone) (VolNoSpace))
+              ((VolTaken v2 cs) (vol_grown v2 r have ks cs offset n))))))))
 
 ; How many of a file's len clusters, from the ksth, a write of n bytes
 ; from offset touches: up to the one it ends in, or the last.
@@ -909,22 +880,22 @@
 
 ; count clusters of a chain from c, onto acc, at most left links.
 (def vol_run_from ((t (array int)) (c int) (count int) (left int) (acc (list int))) (list int)
-  (if (if (le count 0) true (if (le c 0) true (if (ge c (array_len t)) true (le left 0))))
+  (if (or (le count 0) (or (le c 0) (or (ge c (array_len t)) (le left 0))))
       (rev acc)
       (vol_run_from t (array_get t c) (sub count 1) (sub left 1) (cons c acc))))
 
-; v with the clusters cs, now linked in t, joined to the end of the file
-; at r, whose clusters from the ksth, to its last, are have.
-(def vol_grown ((v Vol) (r VolRef) (t (array int)) (have (list int)) (ks int) (cs (list int)) (offset int) (n int)) VolWrote
+; v with the clusters cs, now linked in its table, joined to the end of
+; the file at r, whose clusters from the ksth, to its last, are have.
+(def vol_grown ((v Vol) (r VolRef) (have (list int)) (ks int) (cs (list int)) (offset int) (n int)) VolWrote
   (match (vol_entry v r)
     ((VolNone) (VolNoSpace))
     ((VolDir name first) (VolNoSpace))
     ((VolFile name size first exec)
-      (let last (if (is_empty have) 0 (head (rev have)))
-        (let t3 (if (is_empty have) t (array_set t last (head cs)))
-          (let f (if (is_empty have) (head cs) first)
-            (vol_wrote (vol_set_entry (vol_with_table v t3) r (VolFile name (max size (add offset n)) f exec))
-                       (append have cs) ks offset n cs (if (is_empty have) cs (cons last cs)))))))))
+      (let (last (if (is_empty have) 0 (head (rev have)))
+            f (if (is_empty have) (head cs) first)
+            v2 (if (is_empty have) v (.table v (array_set (.table v) last (head cs)))))
+        (vol_wrote (vol_set_entry v2 r (VolFile name (max size (add offset n)) f exec))
+                   (append have cs) ks offset n cs (if (is_empty have) cs (cons last cs)))))))
 
 ; The write planned on v, over chain, the file's clusters from the ksth
 ; now.
@@ -936,10 +907,10 @@
 (def vol_spans ((chain (list int)) (ks int) (offset int) (n int) (acc (list VolSpan))) (list VolSpan)
   (if (le n 0)
       (rev acc)
-      (let at (mod offset (vol_cluster_size))
-        (let k (min n (sub (vol_cluster_size) at))
-          (vol_spans chain ks (add offset k) (sub n k)
-                     (cons (VolSpan (nth_or chain (sub (div offset (vol_cluster_size)) ks) 0) at k) acc))))))
+      (let (at (mod offset (vol_cluster_size))
+            k (min n (sub (vol_cluster_size) at)))
+        (vol_spans chain ks (add offset k) (sub n k)
+                   (cons (VolSpan (nth_or chain (sub (div offset (vol_cluster_size)) ks) 0) at k) acc)))))
 
 ; Where a write of n bytes from offset, whose spans are spans, ended: the
 ; place of the cluster its last byte went to; none if it wrote nothing.

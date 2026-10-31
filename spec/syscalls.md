@@ -3,7 +3,7 @@
 `x8` holds the call number, `x0`–`x3` the arguments, and the result comes
 back in `x0`. From L0, use the wrappers in `user/lib/sys/l0s.l0`.
 
-## Calls 1–13: the process ABI of spec §10.3
+## Calls 1–13: the process ABI of L0's process spec (`l0 spec process`)
 
 The kernel answers these itself for the initramfs, a read-only file
 system, and for a file of a volume under `/Volumes`, or of the system
@@ -19,7 +19,7 @@ volume once `/` is one, sends them to the volume's file server, as
 | write | streams 1 and 2 go to the process's terminal, if it has one, at most 4091 bytes per call, waiting while its queue is full; otherwise to the kernel's stdout and stderr, at most 64 KiB per call. A stream open on a volume's file is written by its server, up to 64 KB a call through the process's file window to it, or a message's worth with none; any other is -5 |
 | exit | the process ends with that status |
 | arg_count, arg | the process's arguments: those it was spawned with by `spawn_entry_with` or `spawn_image`, or else the inittab's `args` for its path |
-| region | maps device registers for programs with a `dev` line, so `open_device` works, or for a range of the caller's DMA pages, returns where they are; -3 for any other |
+| region | maps device registers for programs with a `dev` line, so `open_region` works, or for a range of the caller's DMA pages, returns where they are; -3 for any other |
 | clock | not answered (-5): only a riscv64 process asks, and an aarch64 one reads the virtual counter itself |
 | release | 0. The runtime makes it, never a program: each whole page of the heap in the range that is mapped is unmapped and its frame freed (see [Releasing](kernel.md#a-processs-memory)); part of a page, and anything outside the heap, are passed over |
 | unregion | 0. The runtime makes it once a region is closed: the device registers a `region` call mapped there are unmapped, and their pages go back to the process's device pages, to be given again; a later touch of one faults. A region over the caller's own DMA or shared pages mapped nothing, and nothing of it changes; nor does anything for a range the call never mapped |

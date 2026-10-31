@@ -37,12 +37,12 @@
 ; JSON; the conversation; the answer's parts, newest first; the tools
 ; it used, in order; the rounds of tools in this turn; whether an
 ; answer is coming; and compaction's settings and state.
-(data Loop (Loop ModelConf Json Json Conv (list Part) (list Use) int bool Compactor))
+(data Loop (Loop (mc ModelConf) (sy Json) (tl Json) (conv Conv) (ps (list Part)) (us (list Use)) (n int) (answering bool) (cp Compactor)))
 
 ; Compaction: the prompt's size in tokens past which the conversation
 ; is compacted before the next turn is sent, the turns kept, and the
 ; summary being asked for, if one is.
-(data Compactor (Compactor int int Summary))
+(data Compactor (Compactor (size int) (keep int) (s Summary)))
 
 ; A summary asked for: none; or coming, the person's text that waits
 ; for it, how many turns it summarizes, the prompt's tokens before, and
@@ -68,31 +68,19 @@
 
 ; l compacting past size tokens, keeping keep turns.
 (def loop_compacting ((l Loop) (size int) (keep int)) Loop
-  (match l ((Loop mc sy tl c ps us n on cp) (Loop mc sy tl c ps us n on (Compactor size keep (NoSummary))))))
+  (.cp l (Compactor size keep (NoSummary))))
 
 ; l with no summary coming.
 (def no_summary ((cp Compactor)) Compactor
-  (match cp ((Compactor size keep s) (Compactor size keep (NoSummary)))))
-
-; l's conversation.
-(def loop_conv ((l Loop) ) Conv
-  (match l ((Loop mc sy tl c ps us n on cp) c)))
+  (.s cp (NoSummary)))
 
 ; Whether l is in a turn: an answer coming, or tools' results awaited.
 (def loop_busy ((l Loop)) bool
-  (match l ((Loop mc sy tl c ps us n on cp) (if on true (not (is_empty us))))))
-
-; Whether an answer is coming to l: asked, and not yet stopped.
-(def loop_answering ((l Loop)) bool
-  (match l ((Loop mc sy tl c ps us n on cp) on)))
+  (match l ((Loop mc sy tl c ps us n on cp) (or on (not (is_empty us))))))
 
 ; The request asking the model of l's conversation so far.
 (def loop_request ((l Loop)) bytes
   (match l ((Loop mc sy tl c ps us n on cp) (model_request mc sy (conv_messages c) tl))))
-
-; l with c its conversation, as when compaction replaces it.
-(def loop_with_conv ((l Loop) (c Conv)) Loop
-  (match l ((Loop mc sy tl c0 ps us n on cp) (Loop mc sy tl c ps us n on cp))))
 
 ; The person says text: if the last answer's prompt passed the
 ; compaction size and there are turns to cut, a summary of the older
@@ -103,12 +91,12 @@
     ((Loop mc sy tl c ps us n on cp)
       (match cp
         ((Compactor size keep s)
-          (let before (usage_prompt (conv_usage c))
-            (let k (if (gt before size) (conv_cut c keep) 0)
-              (if (lt k 1)
-                  (loop_said l text (nil Act))
-                  (Looped (Loop mc sy tl c (nil Part) (nil Use) 0 true (Compactor size keep (Summarizing text k before (nil bytes))))
-                          (cons (ActAsk (model_request mc sy (conv_summary_messages c k) (JArr (nil Json)))) (nil Act)))))))))))
+          (let (before (usage_prompt (.usage c))
+                k (if (gt before size) (conv_cut c keep) 0))
+            (if (lt k 1)
+                (loop_said l text (nil Act))
+                (Looped (Loop mc sy tl c (nil Part) (nil Use) 0 true (Compactor size keep (Summarizing text k before (nil bytes))))
+                        (cons (ActAsk (model_request mc sy (conv_summary_messages c k) (JArr (nil Json)))) (nil Act))))))))))
 
 ; The person's text added as their turn, and the model asked, after
 ; acts.
@@ -171,7 +159,7 @@
                 (if (eq (bytes_len summary) 0)
                     (summary_failed l text (bytes_from_list "the summary was empty"))
                     (let c2 (conv_compacted c k summary)
-                      (loop_said (loop_with_conv l c2) text
+                      (loop_said (.conv l c2) text
                         (cons (ActTell (TellCompacted before (compacted_size before sy tl c c2))) (nil Act)))))))))))))
 
 ; The summary failed, why: told, and the person's text said to the
@@ -185,10 +173,10 @@
 ; proportion of the new prompt's bytes (system, tools and turns as JSON)
 ; to the old's.
 (def compacted_size ((before int) (sy Json) (tl Json) (old Conv) (new Conv)) int
-  (let fixed (add (bytes_len (json_bytes sy)) (bytes_len (json_bytes tl)))
-    (let was (add fixed (bytes_len (json_bytes (conv_messages old))))
-      (let now (add fixed (bytes_len (json_bytes (conv_messages new))))
-        (if (le was 0) before (div (mul before now) was))))))
+  (let (fixed (add (bytes_len (json_bytes sy)) (bytes_len (json_bytes tl)))
+        was (add fixed (bytes_len (json_bytes (conv_messages old))))
+        now (add fixed (bytes_len (json_bytes (conv_messages new)))))
+    (if (le was 0) before (div (mul before now) was))))
 
 ; Nothing, for a part made before its start was heard.
 (def id_none () bytes (bytes_from_list (nil int)))
@@ -209,11 +197,9 @@
 ; ps with piece added to part i, or fresh with it, newest, if there is
 ; no part i.
 (def parts_with ((ps (list Part)) (i int) (fresh Part) (piece bytes)) (list Part)
-  (if (is_empty ps)
-      (cons (part_piece fresh piece) ps)
-      (if (eq (part_index (head ps)) i)
-          (cons (part_piece (head ps) piece) (tail ps))
-          (cons (head ps) (parts_with (tail ps) i fresh piece)))))
+  (if (is_empty ps) (cons (part_piece fresh piece) ps)
+      (eq (part_index (head ps)) i) (cons (part_piece (head ps) piece) (tail ps))
+      (cons (head ps) (parts_with (tail ps) i fresh piece))))
 
 ; A text's or a tool's input's next piece; an ended part as it was.
 (def part_piece ((p Part) (piece bytes)) Part
@@ -225,11 +211,9 @@
 
 ; ps with part i ended.
 (def parts_done ((ps (list Part)) (i int)) (list Part)
-  (if (is_empty ps)
-      ps
-      (if (eq (part_index (head ps)) i)
-          (cons (part_done (head ps)) (tail ps))
-          (cons (head ps) (parts_done (tail ps) i)))))
+  (if (is_empty ps) ps
+      (eq (part_index (head ps)) i) (cons (part_done (head ps)) (tail ps))
+      (cons (head ps) (parts_done (tail ps) i))))
 
 ; A part ended: a text joined; a tool's input joined and read as JSON,
 ; none being {}.
@@ -286,7 +270,7 @@
   (match l
     ((Loop mc sy tl c ps us n on cp)
       (let blocks (parts_blocks ps (nil Block))
-        (if (if (eq reason (bytes_from_list "tool_use")) (has_use blocks) false)
+        (if (and (eq reason (bytes_from_list "tool_use")) (has_use blocks))
             (let ended (ended_parts ps (nil Part))
               (loop_tools (Loop mc sy tl (conv_add c (Turn false blocks)) (nil Part) (uses_of ended (nil Use)) n false cp)
                           (tool_acts ended (nil Act))))

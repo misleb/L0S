@@ -18,7 +18,8 @@ in `.claude/` (Cursor sees the same files through symlinks in `.cursor/`):
   keeps the spec true, and work toward a goal updates the goal.
 - **Done** means `make check` and `make test` pass, plus `make e2e` for
   anything that boots, draws or takes input, and `make test-virt` for the
-  kernel.
+  kernel. `make check` includes `l0 fmt --check` and ends listing `l0
+  check`'s copy warnings, of which a change adds none.
 
 ## Learning the code
 
@@ -66,7 +67,7 @@ parses the `.l0` files into graphify's graph, so:
   with `--graph`, as `l0s-dev` shows, and grep for what the branch
   changed.
 
-<!-- l0 init: begin 2710873271-15743; l0 init replaces what is between these lines -->
+<!-- l0 init: begin 1169983800-16681; l0 init replaces what is between these lines -->
 # Working with L0 in this project
 
 L0 is a statically typed language compiled to native code through LLVM.
@@ -76,8 +77,13 @@ cannot substitute for reading the specification and running the checker.
 ## Invariants
 
 **The specification is the only source of truth about L0.** Not this file, not
-the examples. If a construct is not in it, it does not exist. `l0 spec --path`
-names the file; read it before writing L0 for the first time in a session.
+the examples. If a construct is not in it, it does not exist. `l0 spec`
+prints the language, sections 1 to 9 and 11, which every program needs:
+read it before writing L0 for the first time in a session. `l0 spec
+runtime` is section 10, the compilation target and runtime, and `l0 spec
+virt-aarch64`, `virt-riscv64`, `pi5`, or `process` a host's devices,
+interrupts, and layout, which a kernel or driver needs. `l0 spec --path`
+names every file.
 
 **Never state that L0 code works without running `l0 check` on it.** Code that
 looks plausible is routinely invalid, because L0 is not any language you have
@@ -121,12 +127,13 @@ copied here.
 ## Commands
 
 ```bash
+l0 fmt   hello.l0                 add the closing parens the indentation shows missing
 l0 check hello.l0 main.l0         type check
 l0 test  hello.l0 hello_test.l0   run every (def test_NAME () int ...), as TAP
 l0 run   hello.l0 main.l0         build and run, reading stdin; -- ARGS after
 l0 build hello.l0 main.l0         produce the executable ./hello
 l0 doc   [NAME | TEXT]            the standard library, or one name, or a search
-l0 spec  --path                   where the specification is
+l0 spec  [PART | --path]          the specification, a part of it, or its files
 ```
 
 Several files are compiled together, since L0 has no module system. The
@@ -142,8 +149,8 @@ standard input, output, and error, the clock, and arguments, its boot
 arguments, which hold no spaces, but no files and no environment: the
 spec's section 9.2 says what each builtin gives then. It also has the
 board's devices, which a program drives through their registers with
-`open_device` and `device_read32` and the rest, at most 64 open at once,
-and `close_device` when done with one (`l0 doc IoDevice`); under
+`open_region` and `region_get32` and the rest, at most 64 open at once,
+and `close_region` when done with one (`l0 doc IoRegion`); under
 an operating system there are none, and opening one fails. `l0 test
 --target virt` runs tests on the board, booting the program once a test,
 as many at once as there are CPUs; there are no files there, so a golden
@@ -307,8 +314,11 @@ confirmation, or progress during a run is not one either: write it with a
 `main` that takes no parameters and reads and writes as it goes, as the
 `l0-code` skill shows, and so are files and command-line arguments. Files can
 be renamed, deleted, and read in pieces; failures of each say which they
-were; values of any type can be compared, ordered, hashed, and sorted; and
-`int`s have bitwise operations. Memory is reclaimed automatically, and
+were; values of any type can be compared, ordered, hashed, and sorted; a
+constructor can name its fields, which `(.field value)` reads and `(.field
+value new)` replaces; a function can be passed by name to a parameter of
+function type, `(fn (T) K)`, so a loop is written once; and `int`s have
+bitwise operations. Memory is reclaimed automatically, and
 `clock_ns` times part of a program, and `float` does IEEE arithmetic, with
 `float_sin` and `float_cos` in the library. A network, the environment, listing or
 creating directories do not exist yet. Floating point does, as `float`.
@@ -319,10 +329,10 @@ creating directories do not exist yet. Floating point does, as `float`.
 every small test and then appears to hang on real input. Accumulate with
 `push` onto a reversed list and call `rev` exactly once at the end.
 
-**The hidden whole copy.** `map_put`, `map_remove`, and `array_set` update
-in place only when nothing else still holds the map or array, and otherwise
-copy it whole, with the same results, so a loop of them turns quadratic
-unseen. Two shapes do it with no second name in sight: reading the map in a
+**The hidden whole copy.** `map_put`, `map_remove`, `array_set`, and a
+field replacement `(.f r v)` update in place only when nothing else still
+holds the map, array, or record, and otherwise copy it whole, with the same
+results, so a loop of them turns quadratic unseen. Two shapes do it with no second name in sight: reading the map in a
 later operand of the expression that updates it, as in `(Seen (map_put m k
 true) (if (map_has m k) ...))`, and using a value after a call that updates
 a map inside it, as in `(let t (space_put s ...) (... (space_number s)))`.
@@ -330,9 +340,13 @@ Read first, with `let`, and update last; `L0_ARRAY_STATS=1` on a run counts
 the copies.
 
 **Deep nesting and parentheses.** Long `if` and `or` chains end in a dozen
-closing parens and are the most common source of parse errors. Use
-`split_spaces` with `any_eq` for membership tests, and split any function
-nesting more than about four levels deep.
+closing parens and are the most common source of parse errors. Indent each
+line under its form and run `l0 fmt` before `l0 check`, which adds the
+closers a dedent or the next declaration shows missing and drops those with
+nothing to close; write several bindings as one `let`, `(let (a 1 b 2)
+body)`, and a run of tests as one `if`, `(if c1 e1 c2 e2 else)`; use `split_spaces` with `any_eq` for
+membership tests, and split any function nesting more than about four
+levels deep.
 
 The `l0-code` skill covers all three in detail, along with the syntax that
 differs from what other languages would lead you to expect.

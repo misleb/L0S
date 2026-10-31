@@ -68,7 +68,8 @@
 ; The board, as the system prompt names it.
 (def board_text ((m int)) (list int)
   (if (eq m 1) "an aarch64 board (QEMU's virt board or a Raspberry Pi 5)"
-      (if (eq m 2) "a riscv64 board (QEMU's virt board)" "a board")))
+      (eq m 2) "a riscv64 board (QEMU's virt board)"
+      "a board"))
 
 ; ---------------------------------------------------------------- state
 
@@ -77,7 +78,7 @@
 ; programs its tools run; where the model is; its own settings; the
 ; terminal to set back after starting a program (0 the kernel's); and
 ; the board, as the system prompt names it.
-(data Setup (Setup int int int ModelConf Own int (list int)))
+(data Setup (Setup (port int) (np int) (rport int) (mc ModelConf) (o Own) (back int) (board (list int))))
 
 ; A conversation: the port its notices go to, and its loop.
 (data Chat (Chat int Loop))
@@ -102,11 +103,8 @@
 ; proxy, kept between requests.
 (data Agentd (Agentd Setup (Map int Chat) int Doing Inet (Option HttpConn)))
 
-; The setup's parts.
-(def setup_port ((u Setup)) int (match u ((Setup p np rp mc o back board) p)))
-(def setup_np ((u Setup)) int (match u ((Setup p np rp mc o back board) np)))
-(def setup_rport ((u Setup)) int (match u ((Setup p np rp mc o back board) rp)))
-(def setup_home ((u Setup)) (list int) (match u ((Setup p np rp mc o back board) (match o ((Own h t c k) h)))))
+; The setup's home directory, from its own settings.
+(def setup_home ((u Setup)) (list int) (match (.o u) ((Own h t c k) h)))
 
 ; ------------------------------------------------------------- requests
 
@@ -119,19 +117,19 @@
 (def req_of ((b bytes)) Req
   (if (lt (msg_len b) 4)
       (ReqWrong "not a request")
-      (let e (agent_line_end b 8)
-        (let ws (split_spaces (bytes_to_list (bytes_slice b 8 e)))
-          (if (if (eq (length ws) 2) (is_number (nth ws 1)) false)
-              (req_words (head ws) (int_prefix (nth ws 1) 0) (bytes_slice b (min (add e 1) (bytes_len b)) (bytes_len b)))
-              (ReqWrong "not open NPORT, say ID, stop ID or close ID"))))))
+      (let (e (agent_line_end b 8)
+            ws (split_spaces (bytes_to_list (bytes_slice b 8 e))))
+        (if (and (eq (length ws) 2) (is_number (nth ws 1)))
+            (req_words (head ws) (int_prefix (nth ws 1) 0) (bytes_slice b (min (add e 1) (bytes_len b)) (bytes_len b)))
+            (ReqWrong "not open NPORT, say ID, stop ID or close ID")))))
 
 ; The request op N makes, with text after its line.
 (def req_words ((op (list int)) (n int) (text bytes)) Req
   (if (eq op "open") (ReqOpen n)
-  (if (eq op "say") (ReqSay n text)
-  (if (eq op "stop") (ReqStop n)
-  (if (eq op "close") (ReqClose n)
-  (ReqWrong (append "no request " op)))))))
+      (eq op "say") (ReqSay n text)
+      (eq op "stop") (ReqStop n)
+      (eq op "close") (ReqClose n)
+      (ReqWrong (append "no request " op))))
 
 ; ------------------------------------------------------------- notices
 
@@ -155,9 +153,9 @@
   (let n (bytes_len b)
     (if (ge i n)
         (rev acc)
-        (let j (if (le (sub n i) (agent_piece_max)) n (char_start b (add i (agent_piece_max))))
-          (let k (if (le j i) (min n (add i (agent_piece_max))) j)
-            (text_pieces id b k (cons (agent_text_notice id (bytes_slice b i k)) acc)))))))
+        (let (j (if (le (sub n i) (agent_piece_max)) n (char_start b (add i (agent_piece_max))))
+              k (if (le j i) (min n (add i (agent_piece_max))) j))
+          (text_pieces id b k (cons (agent_text_notice id (bytes_slice b i k)) acc))))))
 
 ; notice sent to port: a full queue is waited out, a millisecond at a
 ; time, tries times at most, since the reader is only slow; a port gone
@@ -204,7 +202,7 @@
   (match o
     ((Own home t c k)
       (let v (home_volume home)
-        (if (if (is_empty v) false (not (volume_waited v (volume_tries))))
+        (if (and (not (is_empty v)) (not (volume_waited v (volume_tries))))
             (complain (append "no volume " (append v (append " for its home " home))))
             (let made (fs_mkdir home)
               (match (chdir home)
@@ -219,9 +217,9 @@
 ; Whether the volume at path is mounted, asked every 100 ms, tries
 ; times at most.
 (def volume_waited ((path (list int)) (tries int)) bool
-  (if (is_mounted (mount_list) path)
-      true
-      (if (le tries 0) false (let s (sleep_ns 100000000) (volume_waited path (sub tries 1))))))
+  (if (is_mounted (mount_list) path) true
+      (le tries 0) false
+      (let s (sleep_ns 100000000) (volume_waited path (sub tries 1)))))
 
 ; Whether ms has a mount at path.
 (def is_mounted ((ms (list MountInfo)) (path (list int))) bool
@@ -247,19 +245,19 @@
 ; agent served on port, once the ports it waits on are set and the name
 ; is registered.
 (def agentd_serve ((port int) (mc ModelConf) (o Own)) int
-  (let np (port_new)
-    (let rp (port_new)
-      (match (port_set (cons port (cons np (cons rp (nil int)))))
-        ((PortSetNotYours) (complain "cannot wait on its ports"))
-        ((PortSetSize) (complain "cannot wait on its ports"))
-        ((PortSetMade)
-          (let why (name_register_or_why port "agent")
-            (if (not (is_empty why))
-                (complain why)
-                (let n (note (append "serving agent: " (append (own_text o) (append ", the model " (append (model_conf_model mc)
-                               (append " through " (append (model_conf_host mc) (cons 58 (digits (model_conf_port mc))))))))))
-                  (serve (Agentd (Setup port np rp mc o (back_terminal) (board_text (machine)))
-                                 ((MapEmpty int Chat)) 1 (Idle) (NoInet "not opened yet") ((None HttpConn))))))))))))
+  (let (np (port_new)
+        rp (port_new))
+    (match (port_set (cons port (cons np (cons rp (nil int)))))
+      ((PortSetNotYours) (complain "cannot wait on its ports"))
+      ((PortSetSize) (complain "cannot wait on its ports"))
+      ((PortSetMade)
+        (let why (name_register_or_why port "agent")
+          (if (not (is_empty why))
+              (complain why)
+              (let n (note (append "serving agent: " (append (own_text o) (append ", the model " (append (.model mc)
+                             (append " through " (append (.host mc) (cons 58 (digits (.port mc))))))))))
+                (serve (Agentd (Setup port np rp mc o (back_terminal) (board_text (machine)))
+                               ((MapEmpty int Chat)) 1 (Idle) (NoInet "not opened yet") ((None HttpConn)))))))))))
 
 ; The terminal to give back to agentd after starting a program.
 (def back_terminal () int
@@ -277,11 +275,13 @@
 (def heard ((s Agentd) (p int) (m Message)) Agentd
   (match s
     ((Agentd u chats next doing net conn)
-      (if (eq p (setup_port u))
+      (if (eq p (.port u))
           (match m ((RecvFailed) s) ((Message from b) (requested s b)))
-          (if (eq p (setup_np u))
-              (wire_heard s m)
-              (if (eq p (setup_rport u)) (run_heard_in s m) s))))))
+          (eq p (.np u))
+          (wire_heard s m)
+          (eq p (.rport u))
+          (run_heard_in s m)
+          s))))
 
 ; s after the request in a message's bytes b, answered.
 (def requested ((s Agentd) (b bytes)) Agentd
@@ -289,7 +289,7 @@
     ((ReqWrong why) (let a (msg_answer b (error_reply why)) s))
     ((ReqOpen nport) (opened s b nport))
     ((ReqSay id text) (said s b id text))
-    ((ReqStop id) (let s2 (stopped s id) (let a (msg_answer b "ok") s2)))
+    ((ReqStop id) (let (s2 (stopped s id) a (msg_answer b "ok")) s2))
     ((ReqClose id) (closed s b id))))
 
 ; A conversation opened, its notices to nport: its rules read from the
@@ -299,21 +299,21 @@
     ((Agentd u chats next doing net conn)
       (if (lt nport 1)
           (let a (msg_answer b (error_reply (append "no port " (digits nport)))) s)
-          (let l (loop_for u)
-            (let a (msg_answer b (append "conv " (digits next)))
-              (Agentd u (map_put chats next (Chat nport l)) (add next 1) doing net conn)))))))
+          (let (l (loop_for u)
+                a (msg_answer b (append "conv " (digits next))))
+            (Agentd u (map_put chats next (Chat nport l)) (add next 1) doing net conn))))))
 
 ; A new conversation's loop: the system prompt, its built-in part and
 ; the home's rules, and the tools.
 (def loop_for ((u Setup)) Loop
   (match u
     ((Setup p np rp mc o back board)
-      (let home (setup_home u)
-        (let rules (match (read_whole (append home (append "/" (rules_name)))) ((Ok r) r) ((Err why) (bytes_from_list (nil int))))
-          (match o
-            ((Own h t size keep)
-              (loop_compacting (loop_new mc (conv_system (conv_base board home (tool_names)) rules) (conv_tools (tool_defs)) (conv_new))
-                               size keep))))))))
+      (let (home (setup_home u)
+            rules (match (read_whole (append home (append "/" (rules_name)))) ((Ok r) r) ((Err why) (bytes_from_list (nil int)))))
+        (match o
+          ((Own h t size keep)
+            (loop_compacting (loop_new mc (conv_system (conv_base board home (tool_names)) rules) (conv_tools (tool_defs)) (conv_new))
+                             size keep)))))))
 
 ; text said in conversation id: busy while any turn runs; else
 ; answered ok, and the turn begun.
@@ -350,22 +350,22 @@
         ((Busy i nport l acts w r dl)
           (if (not (eq i id))
               s
-              (let k (run_end r)
-                (let conn2 (match w ((WireIdle) conn) ((WireOn c ps sse st) (conn_reset conn)))
-                  (match (loop_cancel l)
-                    ((Looped l2 acts2) (drive (Agentd u chats next (Busy i nport l2 acts2 (WireIdle) ((None Running)) 0) net conn2))))))))))))
+              (let (k (run_end r)
+                    conn2 (match w ((WireIdle) conn) ((WireOn c ps sse st) (conn_reset conn))))
+                (match (loop_cancel l)
+                  ((Looped l2 acts2) (drive (Agentd u chats next (Busy i nport l2 acts2 (WireIdle) ((None Running)) 0) net conn2)))))))))))
 
 ; A program running ended; 0.
 (def run_end ((r (Option Running))) int
   (match r
     ((None) 0)
-    ((Some x) (match x ((Running id run) (match (run_status run) ((Some st) 0) ((None) (let k (proc_kill (run_pid run)) 0))))))))
+    ((Some x) (match x ((Running id run) (match (.status run) ((Some st) 0) ((None) (let k (proc_kill (.pid run)) 0))))))))
 
 ; A connection given up, reset: none left.
 (def conn_reset ((conn (Option HttpConn))) (Option HttpConn)
   (match conn
     ((None) conn)
-    ((Some c) (let r (tcp_reset (hc_inet c) (hc_id c)) ((None HttpConn))))))
+    ((Some c) (let r (tcp_reset (.inet c) (.id c)) ((None HttpConn))))))
 
 ; ------------------------------------------------------------- driving
 
@@ -377,7 +377,7 @@
       (match doing
         ((Idle) s)
         ((Busy id nport l acts w r dl)
-          (if (if (is_empty acts) true (is_running r))
+          (if (or (is_empty acts) (is_running r))
               s
               (match (head acts)
                 ((ActTell t) (let x (notices_send nport (tell_notices id t)) (drive (Agentd u chats next (Busy id nport l (tail acts) w r dl) net conn))))
@@ -396,10 +396,10 @@
 (def finished ((s Agentd) (id int) (nport int) (l Loop) (reason bytes) (w Wire)) Agentd
   (match s
     ((Agentd u chats next doing net conn)
-      (let x (notice_send nport (agent_done_notice id (bytes_to_list reason)) 2000)
-        (let d (debug_as "agentd" (append "conversation " (append (digits id) (append " done " (append (bytes_to_list reason) (append ", " (usage_text (conv_usage (loop_conv l)))))))))
-          (let conn2 (if (is_wire_on w) (conn_reset conn) conn)
-            (Agentd u (if (map_has chats id) (map_put chats id (Chat nport l)) chats) next (Idle) net conn2)))))))
+      (let (x (notice_send nport (agent_done_notice id (bytes_to_list reason)) 2000)
+            d (debug_as "agentd" (append "conversation " (append (digits id) (append " done " (append (bytes_to_list reason) (append ", " (usage_text (.usage (.conv l)))))))))
+            conn2 (if (is_wire_on w) (conn_reset conn) conn))
+        (Agentd u (if (map_has chats id) (map_put chats id (Chat nport l)) chats) next (Idle) net conn2)))))
 
 ; s with its turn's loop after looped, whose acts come before those
 ; still to do: then driven on.
@@ -431,13 +431,13 @@
           (let n (bytes_to_list name)
             (if (is_file_tool n)
                 (tool_answered s l tid (tool_file (setup_home u) n input))
-                (if (not (is_run_tool n))
-                    (tool_answered s l tid (tool_failed (append "no tool " n)))
-                    (match u
-                      ((Setup p np rp mc o back board)
-                        (match (tool_run_start (setup_home u) n input (match o ((Own h t c k) t)) back rp)
-                          ((RunRefused a) (tool_answered s l tid a))
-                          ((RunGoing run) (Agentd u chats next (Busy id nport l acts w (Some (Running tid run)) dl) net conn)))))))))))))
+                (not (is_run_tool n))
+                (tool_answered s l tid (tool_failed (append "no tool " n)))
+                (match u
+                  ((Setup p np rp mc o back board)
+                    (match (tool_run_start (setup_home u) n input (match o ((Own h t c k) t)) back rp)
+                      ((RunRefused a) (tool_answered s l tid a))
+                      ((RunGoing run) (Agentd u chats next (Busy id nport l acts w (Some (Running tid run)) dl) net conn))))))))))))
 
 ; The use tid's answer a given to the turn's loop l.
 (def tool_answered ((s Agentd) (l Loop) (tid bytes) (a ToolAnswer)) Agentd
@@ -457,7 +457,7 @@
               (match x
                 ((Running tid run)
                   (let run2 (run_took run m)
-                    (match (run_status run2)
+                    (match (.status run2)
                       ((None) (Agentd u chats next (Busy id nport l acts w (Some (Running tid run2)) dl) net conn))
                       ((Some st) (tool_answered (Agentd u chats next (Busy id nport l acts w ((None Running)) dl) net conn) l tid (run_result run2))))))))))))))
 
@@ -476,17 +476,17 @@
             (match (connection u n conn)
               ((Err why) (turn_told (Agentd u chats next doing n ((None HttpConn))) (failure (append "the proxy: " why))))
               ((Ok c)
-                (let dl (add (clock_ns) (wire_idle_ns))
-                  (let al (alarm_at (setup_np u) dl)
-                    (match (http_send_as c "POST" req)
-                      ((HttpGot c2 parts) (wire_parts (wire_begun (Agentd u chats next doing n (Some c2)) dl) parts)))))))))))))
+                (let (dl (add (clock_ns) (wire_idle_ns))
+                      al (alarm_at (.np u) dl))
+                  (match (http_send_as c "POST" req)
+                    ((HttpGot c2 parts) (wire_parts (wire_begun (Agentd u chats next doing n (Some c2)) dl) parts))))))))))))
 
 ; The connection to the proxy: the kept one, if it may take another
 ; request, or a new one.
 (def connection ((u Setup) (n Inet) (conn (Option HttpConn))) (Result HttpConn (list int))
   (match conn
     ((Some c) (http_reuse c))
-    ((None) (match u ((Setup p np rp mc o back board) (http_connect n np (model_conf_host mc) (model_conf_port mc)))))))
+    ((None) (match u ((Setup p np rp mc o back board) (http_connect n np (.host mc) (.port mc)))))))
 
 ; An error event saying why, as a failure the loop tells and ends on.
 (def failure ((why (list int))) ModelEvent
@@ -526,9 +526,9 @@
         ((Busy id nport l acts w r dl)
           (if (not (is_wire_on w))
               s
-              (let d2 (add (clock_ns) (wire_idle_ns))
-                (let a (alarm_at (setup_np u) d2)
-                  (Agentd u chats next (Busy id nport l acts w r d2) net conn)))))))))
+              (let (d2 (add (clock_ns) (wire_idle_ns))
+                    a (alarm_at (.np u) d2))
+                (Agentd u chats next (Busy id nport l acts w r d2) net conn))))))))
 
 ; The alarm: an answer still coming past its deadline is given up, its
 ; connection reset, and the turn fails.
@@ -538,7 +538,7 @@
       (match doing
         ((Idle) s)
         ((Busy id nport l acts w r dl)
-          (if (if (is_wire_on w) (ge (clock_ns) dl) false)
+          (if (and (is_wire_on w) (ge (clock_ns) dl))
               (turn_told (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) (failure "the proxy did not answer"))
               s))))))
 
@@ -570,7 +570,7 @@
                 ((HttpFailed why) (wire_lost (Agentd u chats next (Busy id nport l acts (WireIdle) r dl) net (conn_reset conn)) why st))))))))))
 
 ; Whether a status code says the request was served.
-(def served ((code int)) bool (if (ge code 200) (lt code 300) false))
+(def served ((code int)) bool (and (ge code 200) (lt code 300)))
 
 ; The stream's events es, each the model's events, told to the loop;
 ; an answer's stop, or an error, marks the answer stopped first.
@@ -613,9 +613,9 @@
 ; had stopped: a refusal, or a stream that ended before its stop, fails
 ; the turn; otherwise what was waiting for it goes on.
 (def wire_ended ((s Agentd) (code int) (body bytes) (stopped bool)) Agentd
-  (if (not (served code))
-      (turn_told s (failure (model_refusal code body)))
-      (if stopped (drive s) (turn_told s (failure "the answer ended before it was done")))))
+  (if (not (served code)) (turn_told s (failure (model_refusal code body)))
+      stopped (drive s)
+      (turn_told s (failure "the answer ended before it was done"))))
 
 ; The connection lost, why: the turn fails if its answer had not
 ; stopped.

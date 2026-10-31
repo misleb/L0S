@@ -36,74 +36,41 @@
 ; What a process is doing, the pid that spawned it, 0 for the kernel,
 ; the ports to tell when it exits, its arguments, its open files, its
 ; terminal, where its image lies, and its current directory.
-(data Life (Life State int (list int) (list (list int)) Files Tty Layout (list int)))
+; The ports to tell are the latest added first; the current directory is
+; an absolute path, "/" for a new process's, with no final / but for that.
+(data Life (Life (state State) (parent int) (watchers (list int)) (args (list (list int))) (files Files) (tty Tty) (layout Layout) (cwd (list int))))
 
 ; pid, entry index of its program, space, context, page -> frame for
 ; every frame mapped (Pages, its device pages counted), its device pages
 ; given and free, and its life.
-(data Proc (Proc int int int (array int) Pages DevPages Life))
+(data Proc (Proc (pid int) (module int) (space Space) (context (array int)) (pages Pages) (dev DevPages) (state Life)))
 
-; p's pid, the entry index of its program, its space, and its state.
-(def proc_pid ((p Proc)) int (match p ((Proc pid m s c pages dev st) pid)))
-(def proc_module ((p Proc)) int (match p ((Proc pid m s c pages dev st) m)))
-(def proc_space ((p Proc)) int (match p ((Proc pid m s c pages dev st) s)))
-(def proc_state ((p Proc)) State
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) st)))))
-
-; The pid that spawned p, 0 for the kernel.
-(def proc_parent ((p Proc)) int
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) parent)))))
-
-; The ports to tell when p exits, the latest added first.
-(def proc_watchers ((p Proc)) (list int)
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) ws)))))
-
-; p's arguments.
-(def proc_args ((p Proc)) (list (list int))
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) args)))))
-
-; Where p's image lies, and so what may be mapped where.
-(def proc_layout ((p Proc)) Layout
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) lay)))))
+; p's state.
+(def proc_state ((p Proc)) State (.state (.state p)))
 
 ; p, with port told when it exits.
 (def proc_watch ((p Proc) (port int)) Proc
-  (match p
-    ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args fs tty lay cwd) (Proc pid m s c pages dev (Life st parent (cons port ws) args fs tty lay cwd)))))))
+  (let ws (.watchers (.state p))
+    (.state p (.watchers (.state p) (cons port ws)))))
 
 ; ------------------------------------------------------------- terminal
 
-; p's terminal.
-(def proc_tty ((p Proc)) Tty
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) tty)))))
-
 ; p with tty as its terminal.
-(def proc_set_tty ((p Proc) (tty Tty)) Proc
-  (match p
-    ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args fs old lay cwd)(Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
+(def proc_set_tty ((p Proc) (tty Tty)) Proc (.state p (.tty (.state p) tty)))
 
 ; ------------------------------------------------- current directory
 
-; p's current directory: an absolute path, "/" for a new process's, with
-; no final / but for that.
-(def proc_cwd ((p Proc)) (list int)
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) cwd)))))
-
 ; p with cwd as its current directory.
-(def proc_set_cwd ((p Proc) (cwd (list int))) Proc
-  (match p
-    ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args fs tty lay old) (Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
+(def proc_set_cwd ((p Proc) (cwd (list int))) Proc (.state p (.cwd (.state p) cwd)))
 
 ; The port p's terminal is, 0 for the kernel's own.
-(def proc_tty_port ((p Proc)) int (match (proc_tty p) ((Tty port reply rest off) port)))
+(def proc_tty_port ((p Proc)) int (match (.tty (.state p)) ((Tty port reply rest off) port)))
 
 ; p, to make the call it trapped with again when it next runs: its pc
 ; back on the svc.
 (def proc_rewind ((p Proc)) Proc
-  (match p ((Proc pid m s c pages dev st) (Proc pid m s (array_set c 32 (sub (array_get c 32) 4)) pages dev st))))
+  (let pc (array_get (.context p) 32)
+    (.context p (array_set (.context p) 32 (sub pc 4)))))
 
 ; ------------------------------------------------------------ open files
 
@@ -111,15 +78,8 @@
 ; input, output, and error.
 (def files_none () Files (Files ((MapEmpty int Open)) 3))
 
-; The files p has open.
-(def proc_files ((p Proc)) Files
-  (match p ((Proc pid m s c pages dev life) (match life ((Life st parent ws args fs tty lay cwd) fs)))))
-
 ; p with fs as its open files.
-(def proc_set_files ((p Proc) (fs Files)) Proc
-  (match p
-    ((Proc pid m s c pages dev life)
-      (match life ((Life st parent ws args old tty lay cwd)(Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
+(def proc_set_files ((p Proc) (fs Files)) Proc (.state p (.files (.state p) fs)))
 
 ; p with entry e open on a new stream, and the stream; or -5, open_limit
 ; files being open already.
@@ -127,7 +87,7 @@
 
 ; p with initramfs entry e open on its next stream, read from the start.
 (def proc_open ((p Proc) (e int)) Opened
-  (match (proc_files p)
+  (match (.files (.state p))
     ((Files open next)
       (if (ge (map_size open) (open_limit))
           (Opened p -5)
@@ -136,7 +96,7 @@
 ; p with handle h of the file server at port open on a new stream, and
 ; the stream; or -5, as proc_open.
 (def proc_open_remote ((p Proc) (port int) (h int)) Opened
-  (match (proc_files p)
+  (match (.files (.state p))
     ((Files open next)
       (if (ge (map_size open) (open_limit))
           (Opened p -5)
@@ -144,15 +104,15 @@
 
 ; Whether p has open_limit files open, and can open no more.
 (def proc_files_full ((p Proc)) bool
-  (match (proc_files p) ((Files open next) (ge (map_size open) (open_limit)))))
+  (match (.files (.state p)) ((Files open next) (ge (map_size open) (open_limit)))))
 
 ; The file p has open on stream s, if it has one.
 (def proc_open_file ((p Proc) (s int)) (Option Open)
-  (match (proc_files p) ((Files open next) (map_get open s))))
+  (match (.files (.state p)) ((Files open next) (map_get open s))))
 
 ; p, having read stream s up to offset.
 (def proc_seek ((p Proc) (s int) (e int) (offset int)) Proc
-  (match (proc_files p)
+  (match (.files (.state p))
     ((Files open next) (proc_set_files p (Files (map_put open s (Open e offset)) next)))))
 
 ; p without stream s, and whether it had it open.
@@ -160,7 +120,7 @@
 
 ; p with stream s closed, if it was open.
 (def proc_close ((p Proc) (s int)) ClosedFile
-  (match (proc_files p)
+  (match (.files (.state p))
     ((Files open next)
       (if (map_has open s)
           (ClosedFile (proc_set_files p (Files (map_remove open s) next)) true)
@@ -171,7 +131,7 @@
   (let st (proc_state p)
     (match (proc_page_counts p mem)
       ((PageCounts own shared)
-        (proc_record (if running (state_running) (state_code st)) (proc_parent p) (proc_module p)
+        (proc_record (if running (state_running) (state_code st)) (.parent (.state p)) (.module p)
                      (if running 0 (state_detail st)) own shared)))))
 
 ; How many pages p has mapped of its own, and how many it may share: those
@@ -183,23 +143,22 @@
 ; pages as they were mapped, and its shared image segments' pages, not by
 ; walking every page it has (roadmap 0038).
 (def proc_page_counts ((p Proc) (mem Mem)) PageCounts
-  (let pages (proc_pages p)
-    (let shared (add (proc_device_pages p) (mem_image_pages mem (proc_space p) pages))
-      (PageCounts (sub (map_size pages) shared) shared))))
+  (let (pages (proc_pages p)
+        shared (add (proc_device_pages p) (mem_image_pages mem (.space p) pages)))
+    (PageCounts (sub (map_size pages) shared) shared)))
 
 ; p's pages counted by walking every one of them, as proc_page_counts
 ; once did: what the board tests check it against.
 (def proc_page_counts_walked ((p Proc) (mem Mem)) PageCounts
-  (let pages (proc_pages p)
-    (let shared (count_shared_pages pages (map_keys pages) mem 0)
-      (PageCounts (sub (map_size pages) shared) shared))))
+  (let (pages (proc_pages p) shared (count_shared_pages pages (map_keys pages) mem 0))
+    (PageCounts (sub (map_size pages) shared) shared)))
 
 ; n and how many of the pages vas are device pages, or frames mem counts.
 (def count_shared_pages ((pages (Map int int)) (vas (list int)) (mem Mem) (n int)) int
   (if (is_empty vas)
       n
       (count_shared_pages pages (tail vas) mem
-        (if (if (in_device_area (head vas)) true
+        (if (or (in_device_area (head vas))
                 (match (map_get pages (head vas)) ((Some f) (gt (mem_count mem f) 0)) ((None) false)))
             (add n 1)
             n))))
@@ -234,13 +193,10 @@
 
 ; p answering its call with v as its result.
 (def proc_answer ((p Proc) (v int)) Proc
-  (match p ((Proc pid m s c pages dev st) (Proc pid m s (answer c v) pages dev st))))
+  (.context p (answer (.context p) v)))
 
 ; p in state st.
-(def proc_set_state ((p Proc) (st State)) Proc
-  (match p
-    ((Proc pid m s c pages dev life)
-      (match life ((Life old parent ws args fs tty lay cwd)(Proc pid m s c pages dev (Life st parent ws args fs tty lay cwd)))))))
+(def proc_set_state ((p Proc) (st State)) Proc (.state p (.state (.state p) st)))
 
 ; A word of p's registers.
 (def proc_reg ((p Proc) (i int)) int
@@ -274,20 +230,20 @@
 ; tty. If the host runs out part way, what was made is freed. A BadImage
 ; makes nothing.
 (def proc_create ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (input bytes) (start int) (end int) (img Image)) Created
-  (let s (space_new)
-    (if (lt s 0)
+  (let s (Space (space_new))
+    (if (lt (.id s) 0)
         (CreateFailed)
         (match img
           ((ElfImage entry segs heap)
             (proc_loaded pid parent m args tty s entry (Layout (spans_of segs) heap)
                          (load_segs s input start segs ((MapEmpty int int)))))
-          ((BadImage code) (let f (space_free s) (CreateFailed)))))))
+          ((BadImage code) (let f (space_free (.id s)) (CreateFailed)))))))
 
 ; The rest of proc_create, once its segments are loaded into space s, or
 ; failed to be: the process, with its registers set to start at entry on
 ; an empty stack; or, after a failure, s and the frames mapped so far
 ; freed.
-(def proc_loaded ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (s int) (entry int) (lay Layout) (l Load)) Created
+(def proc_loaded ((pid int) (parent int) (m int) (args (list (list int))) (tty int) (s Space) (entry int) (lay Layout) (l Load)) Created
   (match l
     ((ImageLoaded pages)
       (Created (Proc pid m s (user_context entry (stack_top)) (pages_from_map pages) (dev_pages_new)
@@ -313,19 +269,19 @@
 ; pages that hold its file bytes mapped with its perm, and those bytes
 ; copied in, the rest of the pages zero, as fresh frames are. Its pages
 ; past them, its bss, are mapped as they are first touched.
-(def load_segs ((s int) (input bytes) (start int) (segs (list ElfSeg)) (pages (Map int int))) Load
+(def load_segs ((s Space) (input bytes) (start int) (segs (list ElfSeg)) (pages (Map int int))) Load
   (if (is_empty segs)
       (ImageLoaded pages)
       (match (head segs)
         ((ElfSeg off va fsz msz perm)
           (match (map_pages s va (add va fsz) perm pages)
             ((ImageLoaded more)
-              (let w (space_write s va input (add start off) (add start (add off fsz)))
+              (let w (space_write (.id s) va input (add start off) (add start (add off fsz)))
                 (load_segs s input start (tail segs) more)))
             ((ImageFailed more) (ImageFailed more)))))))
 
 ; Fresh zeroed frames at the pages from page va up to end, with perm.
-(def map_pages ((s int) (va int) (end int) (perm int) (pages (Map int int))) Load
+(def map_pages ((s Space) (va int) (end int) (perm int) (pages (Map int int))) Load
   (if (ge va end)
       (ImageLoaded pages)
       (let f (map_frame s va perm)
@@ -354,18 +310,18 @@
 ; number, or a negative code if the host has none left, or no memory for
 ; the tables the mapping needs, when the frame is freed again; -5, as
 ; frame_new's none left, while the kernel's heap is down to its reserve.
-(def map_frame ((s int) (va int) (perm int)) int
+(def map_frame ((s Space) (va int) (perm int)) int
   (if (not (heap_has_room))
       -5
       (let f (frame_new)
         (if (lt f 0)
             f
-            (let r (space_map s va f perm)
+            (let r (space_map (.id s) va f perm)
               (if (lt r 0) (let g (frame_free f) r) f))))))
 
 ; Space s given back, and then each of fs, which s alone mapped.
-(def free_space ((s int) (fs (list int))) int
-  (let r (space_free s) (free_frames fs)))
+(def free_space ((s Space) (fs (list int))) int
+  (let r (space_free (.id s)) (free_frames fs)))
 
 ; Each of the frames fs given back; 0.
 (def free_frames ((fs (list int))) int
@@ -377,7 +333,7 @@
 (def proc_release ((mem Mem) (p Proc) (dev bool)) Mem
   (match p
     ((Proc pid m s c pages next st)
-      (match (mem_release mem (pages_map pages) dev)
+      (match (mem_release mem (.map pages) dev)
         ((Released m2 fs) (let f (free_space s fs) (mem_image_leave m2 s)))))))
 
 ; ---------------------------------------------------------------- sharing
@@ -412,25 +368,24 @@
       (Allocated mem p)
       (match (head segs)
         ((ElfSeg off va fsz msz perm)
-          (if (if (eq (bit_and perm 1) 0) (if (gt fsz 0) (le fsz (share_max_bytes)) false) false)
+          (if (and (eq (bit_and perm 1) 0) (and (gt fsz 0) (le fsz (share_max_bytes))))
               (match (share_seg mem p va fsz perm) ((Allocated m2 p2) (share_segs m2 p2 (tail segs))))
               (share_segs mem p (tail segs)))))))
 
 ; The segment at va, its fsz bytes of the file, with perm, shared: its
 ; bytes read and hashed, and compared with each candidate's.
 (def share_seg ((mem Mem) (p Proc) (va int) (fsz int) (perm int)) Allocated
-  (let b (space_read (proc_space p) va fsz)
-    (let key (hash b)
-      (share_with mem p va fsz perm key b (mem_image_candidates mem key va fsz perm)))))
+  (let (b (space_read (.id (.space p)) va fsz) key (hash b))
+    (share_with mem p va fsz perm key b (mem_image_candidates mem key va fsz perm))))
 
 ; The rest of share_seg, through the candidates gs: p mapping the first
 ; whose bytes are b; or, if none are, its own frames shared from now on.
 (def share_with ((mem Mem) (p Proc) (va int) (fsz int) (perm int) (key int) (b bytes) (gs (list ImageSeg))) Allocated
   (if (is_empty gs)
-      (Allocated (mem_image_new mem key va fsz perm (seg_frames (proc_pages p) va (add va fsz) (nil int)) (proc_space p)) p)
-      (if (eq (space_read (image_seg_space (head gs)) va fsz) b)
-          (Allocated (mem_image_join mem key (head gs) (proc_space p)) (proc_remap p va (image_seg_frames (head gs)) perm))
-          (share_with mem p va fsz perm key b (tail gs)))))
+      (Allocated (mem_image_new mem key va fsz perm (seg_frames (proc_pages p) va (add va fsz) (nil int)) (.space p)) p)
+      (eq (space_read (.id (image_seg_space (head gs))) va fsz) b)
+      (Allocated (mem_image_join mem key (head gs) (.space p)) (proc_remap p va (.frames (head gs)) perm))
+      (share_with mem p va fsz perm key b (tail gs))))
 
 ; The frames at the pages from page va up to end, in order, after the
 ; reversed acc.
@@ -453,13 +408,12 @@
           (match (pages_get pages va)
             ((None) (proc_remap p (add va (page_size)) (tail fs) perm))
             ((Some old)
-              (let u (space_unmap s va)
-                (let r (space_map s va (head fs) perm)
-                  (if (lt r 0)
-                      (let r2 (space_map s va old perm) (proc_remap p (add va (page_size)) (tail fs) perm))
-                      (let f (frame_free old)
-                        (proc_remap (Proc pid m s c (pages_put pages va (head fs)) dev st)
-                                    (add va (page_size)) (tail fs) perm)))))))))))
+              (let (u (space_unmap (.id s) va) r (space_map (.id s) va (head fs) perm))
+                (if (lt r 0)
+                    (let r2 (space_map (.id s) va old perm) (proc_remap p (add va (page_size)) (tail fs) perm))
+                    (let f (frame_free old)
+                      (proc_remap (Proc pid m s c (pages_put pages va (head fs)) dev st)
+                                  (add va (page_size)) (tail fs) perm))))))))))
 
 ; --------------------------------------------------------------- touching
 
@@ -473,21 +427,20 @@
 (def proc_demand ((p Proc) (va int)) Paged
   (match p
     ((Proc pid m s c pages dev st)
-      (let page (page_of va)
-        (let perm (match st ((Life state parent ws args fs tty lay cwd) (demand_perm lay page)))
-          (if (if (pages_has pages page) true (lt perm 0))
-              (PageRefused (Proc pid m s c pages dev st))
-              (let f (map_frame s page perm)
-                (if (lt f 0)
-                    (PageRefused (Proc pid m s c pages dev st))
-                    (Paged (Proc pid m s c (pages_put pages page f) dev st))))))))))
+      (let (page (page_of va) perm (demand_perm (.layout st) page))
+        (if (or (pages_has pages page) (lt perm 0))
+            (PageRefused (Proc pid m s c pages dev st))
+            (let f (map_frame s page perm)
+              (if (lt f 0)
+                  (PageRefused (Proc pid m s c pages dev st))
+                  (Paged (Proc pid m s c (pages_put pages page f) dev st)))))))))
 
 ; p with every page of the n bytes from va mapped, so the kernel can copy
 ; them out of it, or into it if write, or refused if any may not be.
 (def proc_prepare ((p Proc) (va int) (n int) (write bool)) Paged
   (match p
     ((Proc pid m s c pages dev st)
-      (match (range_plan (match st ((Life state parent ws args fs tty lay cwd) lay)) (pages_map pages) va n write)
+      (match (range_plan (.layout st) (.map pages) va n write)
         ((PlanBad) (PageRefused (Proc pid m s c pages dev st)))
         ((PlanMap todo) (demand_all (Proc pid m s c pages dev st) todo))))))
 
@@ -510,7 +463,7 @@
 (def proc_copy_out ((p Proc) (va int) (n int)) CopiedOut
   (match (proc_prepare p va n false)
     ((PageRefused q) (CopyOutBad q))
-    ((Paged q) (CopiedOut q (space_read (proc_space q) va n)))))
+    ((Paged q) (CopiedOut q (space_read (.id (.space q)) va n)))))
 
 ; A process with bytes copied into it, or a refusal; either way with any
 ; pages mapped on the way.
@@ -521,7 +474,7 @@
 (def proc_copy_in ((p Proc) (va int) (b bytes) (i int) (j int)) CopiedIn
   (match (proc_prepare p va (sub j i) true)
     ((PageRefused q) (CopyInBad q))
-    ((Paged q) (let w (space_write (proc_space q) va b i j) (CopiedIn q)))))
+    ((Paged q) (let w (space_write (.id (.space q)) va b i j) (CopiedIn q)))))
 
 ; ---------------------------------------------------------------- devices
 
@@ -533,7 +486,7 @@
       (match (region_plan dev base len)
         ((RegionRefused code) (Proc pid m s (answer c code) pages dev st))
         ((RegionAt va next addr)
-          (let r (space_map_device s va base len)
+          (let r (space_map_device (.id s) va base len)
             (if (eq r 0)
                 (Proc pid m s (answer c addr) pages next st)
                 (Proc pid m s (answer c r) pages dev st))))))))
@@ -544,7 +497,7 @@
 ; pages, above the stack, where nothing else is kept in pages: so a page
 ; there that pages holds is a DMA page.
 (def is_dma_page ((pages (Map int int)) (page int)) bool
-  (if (in_device_area page) (map_has pages page) false))
+  (and (in_device_area page) (map_has pages page)))
 
 ; p with n zeroed frames mapped at free device pages of its, answered
 ; with the first page's address, or with the code that says why not. A
@@ -580,17 +533,15 @@
 ; map_frame maps one, taken from mem's pool if it has one: mem without
 ; it, and the frame or map_frame's code. A pool frame not mapped goes
 ; back.
-(def pool_map_frame ((mem Mem) (s int) (va int) (perm int)) PoolTook
+(def pool_map_frame ((mem Mem) (s Space) (va int) (perm int)) PoolTook
   (match (mem_pool_take mem)
     ((PoolTook m2 f)
-      (if (lt f 0)
-          (PoolTook m2 (map_frame s va perm))
-          (if (not (heap_has_room))
-              (PoolTook (mem_pool_put m2 (cons f (nil int)) 1) -5)
-              (let r (space_map s va f perm)
-                (if (lt r 0)
-                    (PoolTook (mem_pool_put m2 (cons f (nil int)) 1) r)
-                    (PoolTook m2 f))))))))
+      (if (lt f 0) (PoolTook m2 (map_frame s va perm))
+          (not (heap_has_room)) (PoolTook (mem_pool_put m2 (cons f (nil int)) 1) -5)
+          (let r (space_map (.id s) va f perm)
+            (if (lt r 0)
+                (PoolTook (mem_pool_put m2 (cons f (nil int)) 1) r)
+                (PoolTook m2 f)))))))
 
 ; q, a file server, with n fresh zeroed frames mapped at free device
 ; pages of its, read-write and counted in mem as shared, for a client's
@@ -625,7 +576,7 @@
       (Some (rev acc))
       (match p
         ((Proc pid m s c pages dev st)
-          (if (not (is_dma_page (pages_map pages) va))
+          (if (not (is_dma_page (.map pages) va))
               ((None (list int)))
               (match (pages_get pages va)
                 ((Some f) (dma_frames p (add va (page_size)) (sub n 1) (cons f acc)))
@@ -658,7 +609,7 @@
       (Shared mem q first)
       (match q
         ((Proc pid m s c pages dev st)
-          (if (lt (space_map s va (head fs) perm) 0)
+          (if (lt (space_map (.id s) va (head fs) perm) 0)
               (ShareRefused mem (Proc pid m s c pages (dev_give dev va (mul (length fs) (page_size))) st) (err_fault))
               (map_shared (mem_share mem (head fs)) (Proc pid m s c (pages_put pages va (head fs)) dev st)
                           first (add va (page_size)) (tail fs) perm))))))
@@ -674,7 +625,7 @@
 (def unmap_shared ((mem Mem) (p Proc) (va int) (f int)) Unmapped
   (match p
     ((Proc pid m s c pages dev st)
-      (let u (space_unmap s va)
+      (let u (space_unmap (.id s) va)
         (match (mem_unshare mem f)
           ((Unshared m2 last)
             (let g (if last (frame_free f) 0)
@@ -712,7 +663,7 @@
 (def proc_heap_release ((p Proc) (base int) (len int)) Proc
   (match p
     ((Proc pid m s c pages dev st)
-      (match (heap_run (match st ((Life state parent ws args fs tty lay cwd) lay)) base len)
+      (match (heap_run (.layout st) base len)
         ((HeapRun from to)
           (Proc pid m s c
                 (match pages
@@ -725,35 +676,34 @@
 
 ; The rest of proc_heap_release by the run: pages without each page from
 ; va up to end that space s maps.
-(def heap_unmap ((s int) (pages (Map int int)) (va int) (end int)) (Map int int)
+(def heap_unmap ((s Space) (pages (Map int int)) (va int) (end int)) (Map int int)
   (if (ge va end)
       pages
       (heap_unmap s (heap_unmap_page s pages va) (add va (page_size)) end)))
 
 ; The rest of proc_heap_release by the mapped pages: pages without each of
 ; vas from from up to to.
-(def heap_unmap_each ((s int) (pages (Map int int)) (vas (list int)) (from int) (to int)) (Map int int)
+(def heap_unmap_each ((s Space) (pages (Map int int)) (vas (list int)) (from int) (to int)) (Map int int)
   (if (is_empty vas)
       pages
       (let va (head vas)
         (heap_unmap_each s
-                         (if (if (ge va from) (lt va to) false) (heap_unmap_page s pages va) pages)
+                         (if (and (ge va from) (lt va to)) (heap_unmap_page s pages va) pages)
                          (tail vas) from to))))
 
 ; pages without page va, if space s maps it there: unmapped, and its
 ; frame freed.
-(def heap_unmap_page ((s int) (pages (Map int int)) (va int)) (Map int int)
+(def heap_unmap_page ((s Space) (pages (Map int int)) (va int)) (Map int int)
   (match (map_get pages va)
     ((None) pages)
     ((Some f)
-      (let u (space_unmap s va)
-        (let g (frame_free f) (map_remove pages va))))))
+      (let (u (space_unmap (.id s) va) g (frame_free f)) (map_remove pages va)))))
 
 ; Every page p has mapped, page -> frame.
-(def proc_pages ((p Proc)) (Map int int) (match p ((Proc pid m s c pages dev st) (pages_map pages))))
+(def proc_pages ((p Proc)) (Map int int) (match p ((Proc pid m s c pages dev st) (.map pages))))
 
 ; How many of p's pages are at its device pages.
-(def proc_device_pages ((p Proc)) int (match p ((Proc pid m s c pages dev st) (pages_device pages))))
+(def proc_device_pages ((p Proc)) int (match p ((Proc pid m s c pages dev st) (.device pages))))
 
 ; Whether p has a frame mapped at page va.
 (def proc_has_page ((p Proc) (va int)) bool (match p ((Proc pid m s c pages dev st) (pages_has pages va))))
@@ -780,14 +730,14 @@
         (match (map_get (proc_pages q) va)
           ((None) (revoke_pages mem q fs (tail vas) n))
           ((Some f)
-            (if (if (in_device_area va) (map_has fs f) false)
+            (if (and (in_device_area va) (map_has fs f))
                 (match (unmap_shared mem q va f)
                   ((Unmapped m2 q2) (revoke_pages m2 (proc_give_page q2 va) fs (tail vas) (add n 1))))
                 (revoke_pages mem q fs (tail vas) n)))))))
 
 ; p with its device page va free again.
 (def proc_give_page ((p Proc) (va int)) Proc
-  (match p ((Proc pid m s c pages dev st) (Proc pid m s c pages (dev_give dev va (page_size)) st))))
+  (.dev p (dev_give (.dev p) va (page_size))))
 
 ; p answered with where a device reaches the DMA page holding va, or
 ; err_no_port if it has none there.
@@ -795,7 +745,7 @@
   (match p
     ((Proc pid m s c pages dev st)
       (let page (page_of va)
-        (if (not (is_dma_page (pages_map pages) page))
+        (if (not (is_dma_page (.map pages) page))
             (Proc pid m s (answer c (err_no_port)) pages dev st)
             (match (pages_get pages page)
               ((Some f) (Proc pid m s (answer c (frame_address f)) pages dev st))
@@ -808,12 +758,12 @@
 (def proc_dma_addresses ((p Proc) (va int) (n int)) (list int)
   (match p
     ((Proc pid m s c pages dev st)
-      (rev (dma_addresses_onto (pages_map pages) (page_of va) n (nil int))))))
+      (rev (dma_addresses_onto (.map pages) (page_of va) n (nil int))))))
 
 ; proc_dma_addresses's loop: each page's address onto acc, its bytes
 ; reversed, n pages at most from page.
 (def dma_addresses_onto ((pages (Map int int)) (page int) (n int) (acc (list int))) (list int)
-  (if (if (le n 0) true (not (is_dma_page pages page)))
+  (if (or (le n 0) (not (is_dma_page pages page)))
       acc
       (match (map_get pages page)
         ((None) acc)
@@ -824,11 +774,11 @@
 ; DMA page.
 (def proc_dma_sync ((p Proc) (va int) (n int) (dir int)) int
   (match p
-    ((Proc pid m s c pages dev st) (dma_synced (pages_map pages) (page_of va) n dir 0))))
+    ((Proc pid m s c pages dev st) (dma_synced (.map pages) (page_of va) n dir 0))))
 
 ; proc_dma_sync's loop: each page's frame synced from page, count so far.
 (def dma_synced ((pages (Map int int)) (page int) (n int) (dir int) (count int)) int
-  (if (if (le n 0) true (not (is_dma_page pages page)))
+  (if (or (le n 0) (not (is_dma_page pages page)))
       count
       (match (map_get pages page)
         ((None) count)
@@ -851,30 +801,30 @@
 (def proc_unregion ((p Proc) (addr int) (len int)) Proc
   (match p
     ((Proc pid m s c pages dev st)
-      (match (unregion_plan dev (pages_map pages) addr len)
+      (match (unregion_plan dev (.map pages) addr len)
         ((UnregionNone) p)
         ((UnregionAt va span)
           (let u (unmap_device_pages s va (add va span))
             (Proc pid m s c pages (dev_give dev va span) st)))))))
 
 ; Each page of space s from va up to end unmapped; 0.
-(def unmap_device_pages ((s int) (va int) (end int)) int
-  (if (ge va end) 0 (let u (space_unmap s va) (unmap_device_pages s (add va (page_size)) end))))
+(def unmap_device_pages ((s Space) (va int) (end int)) int
+  (if (ge va end) 0 (let u (space_unmap (.id s) va) (unmap_device_pages s (add va (page_size)) end))))
 
 ; p answering the region call for len bytes from base, in its device
 ; area: base itself, where it reaches them already, if every page of them
 ; is a DMA page, and -3 as for any range no device holds otherwise.
 (def proc_dma_region ((p Proc) (base int) (len int)) Proc
-  (if (if (lt len 1) true (gt len 4294967296))
+  (if (or (lt len 1) (gt len 4294967296))
       (proc_answer p -3)
       (match p
         ((Proc pid m s c pages dev st)
-          (if (all_dma (pages_map pages) (page_of base) (page_of (add base (sub len 1))))
+          (if (all_dma (.map pages) (page_of base) (page_of (add base (sub len 1))))
               (Proc pid m s (answer c base) pages dev st)
               (Proc pid m s (answer c -3) pages dev st))))))
 
 ; Whether every page from page to last is a DMA page in pages.
 (def all_dma ((pages (Map int int)) (page int) (last int)) bool
-  (if (gt page last)
-      true
-      (if (is_dma_page pages page) (all_dma pages (add page (page_size)) last) false)))
+  (if (gt page last) true
+      (is_dma_page pages page) (all_dma pages (add page (page_size)) last)
+      false))

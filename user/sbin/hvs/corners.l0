@@ -13,7 +13,7 @@
 ; process sees its pages, and how many; its width, height and stride in
 ; pixels; its corners; and the row of it its layer shows first, the top
 ; of its ring.
-(data Stamp (Stamp int int int int int int Corners int))
+(data Stamp (Stamp (id int) (va int) (pages int) (bw int) (bh int) (sd int) (cs Corners) (top int)))
 
 ; One row a corner cuts: the buffer's row, and how many pixels are cut at
 ; its left and at its right.
@@ -55,11 +55,11 @@
 (def band_rows ((bh int) (from int) (step int) (l int) (r int) (dy int) (n int) (acc (list CutRow))) (list CutRow)
   (if (ge dy n)
       acc
-      (let cl (corner_cut l dy)
-        (let cr (corner_cut r dy)
-          (let row (mod (add (add from (if (lt step 0) (sub bh 1) 0)) (add (mul step dy) bh)) bh)
-            (band_rows bh from step l r (add dy 1) n
-              (if (if (eq cl 0) (eq cr 0) false) acc (cons (CutRow row cl cr) acc))))))))
+      (let (cl (corner_cut l dy)
+            cr (corner_cut r dy)
+            row (mod (add (add from (if (lt step 0) (sub bh 1) 0)) (add (mul step dy) bh)) bh))
+        (band_rows bh from step l r (add dy 1) n
+          (if (and (eq cl 0) (eq cr 0)) acc (cons (CutRow row cl cr) acc))))))
 
 ; The byte offsets in s's pages of the alpha of each pixel rows cuts:
 ; the fourth byte of each, since the HVS reads b, g, r, then alpha.
@@ -89,7 +89,7 @@
       (nil CutRow)
       (match (head rows)
         ((CutRow row l r)
-          (if (if (ge row y) (lt row (add y n)) false)
+          (if (and (ge row y) (lt row (add y n)))
               (cons (head rows) (rows_between (tail rows) y n))
               (rows_between (tail rows) y n))))))
 
@@ -115,15 +115,13 @@
 
 ; Pages ps, in order, as runs, onto the reversed acc.
 (def page_runs ((ps (list int)) (acc (list PageRun))) (list PageRun)
-  (if (is_empty ps)
-      (rev acc)
-      (if (is_empty acc)
-          (page_runs (tail ps) (cons (PageRun (head ps) 1) acc))
-          (match (head acc)
-            ((PageRun p n)
-              (if (eq (head ps) (add p n))
-                  (page_runs (tail ps) (cons (PageRun p (add n 1)) (tail acc)))
-                  (page_runs (tail ps) (cons (PageRun (head ps) 1) acc))))))))
+  (if (is_empty ps) (rev acc)
+      (is_empty acc) (page_runs (tail ps) (cons (PageRun (head ps) 1) acc))
+      (match (head acc)
+        ((PageRun p n)
+          (if (eq (head ps) (add p n))
+              (page_runs (tail ps) (cons (PageRun p (add n 1)) (tail acc)))
+              (page_runs (tail ps) (cons (PageRun (head ps) 1) acc)))))))
 
 ; ---------------------------------------------------------------- writing
 
@@ -136,15 +134,15 @@
       (match s
         ((Stamp id va pages bw bh sd cs top)
           (match (dma_open va pages)
-            ((DeviceFailed fault why) (warn_as "hvs" (append "a buffer's corners are not cut: " why)))
-            ((DeviceOpened r)
-              (let w (bytes_written8 r (alpha_offsets s rows) a)
-                (let c (close_device r)
-                  (runs_synced va (page_runs (rows_pages s rows) (nil PageRun)))))))))))
+            ((IoRegionFailed fault why) (warn_as "hvs" (append "a buffer's corners are not cut: " why)))
+            ((IoRegionOpened r)
+              (let (w (bytes_written8 r (alpha_offsets s rows) a)
+                    c (close_region r))
+                (runs_synced va (page_runs (rows_pages s rows) (nil PageRun))))))))))
 
 ; Each of offs in r written a: 0.
-(def bytes_written8 ((r IoDevice) (offs (list int)) (a int)) int
-  (if (is_empty offs) 0 (let w (device_write8 r (head offs) a) (bytes_written8 r (tail offs) a))))
+(def bytes_written8 ((r IoRegion) (offs (list int)) (a int)) int
+  (if (is_empty offs) 0 (let w (region_set8 r (head offs) a) (bytes_written8 r (tail offs) a))))
 
 ; Each run of pages from va cleaned out of the caches: 0.
 (def runs_synced ((va int) (runs (list PageRun))) int
@@ -161,32 +159,25 @@
 (def restamped ((old (list Stamp)) (new (list Stamp))) int
   (if (eq old new)
       0
-      (let gone (stamps_not_in old new)
-        (let p (stamps_written gone 255)
-          (stamps_written (stamps_cut_again new old (stamps_vas gone)) 0)))))
+      (let (gone (stamps_not_in old new)
+            p (stamps_written gone 255))
+        (stamps_written (stamps_cut_again new old (stamps_vas gone)) 0))))
 
 ; Those of ss not in others.
 (def stamps_not_in ((ss (list Stamp)) (others (list Stamp))) (list Stamp)
-  (if (is_empty ss)
-      (nil Stamp)
-      (if (any_eq (head ss) others)
-          (stamps_not_in (tail ss) others)
-          (cons (head ss) (stamps_not_in (tail ss) others)))))
+  (if (is_empty ss) (nil Stamp)
+      (any_eq (head ss) others) (stamps_not_in (tail ss) others)
+      (cons (head ss) (stamps_not_in (tail ss) others))))
 
 ; Those of new to cut: not in old, or in pages at one of vas.
 (def stamps_cut_again ((new (list Stamp)) (old (list Stamp)) (vas (list int))) (list Stamp)
-  (if (is_empty new)
-      (nil Stamp)
-      (if (if (any_eq (head new) old) (not (any_eq (stamp_va (head new)) vas)) false)
-          (stamps_cut_again (tail new) old vas)
-          (cons (head new) (stamps_cut_again (tail new) old vas)))))
+  (if (is_empty new) (nil Stamp)
+      (and (any_eq (head new) old) (not (any_eq (.va (head new)) vas))) (stamps_cut_again (tail new) old vas)
+      (cons (head new) (stamps_cut_again (tail new) old vas))))
 
 ; Where each of ss's pages are.
 (def stamps_vas ((ss (list Stamp))) (list int)
-  (if (is_empty ss) (nil int) (cons (stamp_va (head ss)) (stamps_vas (tail ss)))))
-
-; Where stamp s's pages are.
-(def stamp_va ((s Stamp)) int (match s ((Stamp id va pages bw bh sd cs top) va)))
+  (if (is_empty ss) (nil int) (cons (.va (head ss)) (stamps_vas (tail ss)))))
 
 ; Each of ss's corners written a: 0.
 (def stamps_written ((ss (list Stamp)) (a int)) int

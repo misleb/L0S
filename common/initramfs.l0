@@ -12,15 +12,10 @@
 ; An entry: its path, made absolute; its mode, the file's type and
 ; permissions as stat gives them; and where its contents lie in the
 ; archive's bytes, from start up to end.
-(data Entry (Entry (list int) int int int))
+(data Entry (Entry (path (list int)) (mode int) (start int) (end int)))
 
-; An entry's path, mode, and where its contents start and end, and how
-; many bytes they are.
-(def entry_path ((e Entry)) (list int) (match e ((Entry p m s x) p)))
-(def entry_mode ((e Entry)) int (match e ((Entry p m s x) m)))
-(def entry_start ((e Entry)) int (match e ((Entry p m s x) s)))
-(def entry_end ((e Entry)) int (match e ((Entry p m s x) x)))
-(def entry_size ((e Entry)) int (sub (entry_end e) (entry_start e)))
+; How many bytes an entry's contents are.
+(def entry_size ((e Entry)) int (sub (.end e) (.start e)))
 
 ; The type of file, from the mode's top bits: 0170000.
 (def mode_type ((mode int)) int (bit_and mode 61440))
@@ -28,13 +23,13 @@
 (def type_dir () int 16384)         ; 0040000, a directory
 
 ; Whether e is a regular file, and whether a directory.
-(def entry_is_file ((e Entry)) bool (eq (mode_type (entry_mode e)) (type_file)))
-(def entry_is_dir ((e Entry)) bool (eq (mode_type (entry_mode e)) (type_dir)))
+(def entry_is_file ((e Entry)) bool (eq (mode_type (.mode e)) (type_file)))
+(def entry_is_dir ((e Entry)) bool (eq (mode_type (.mode e)) (type_dir)))
 
 ; Whether e is a program the kernel may start: a regular file that anyone,
 ; its owner, or its group may execute, 0111.
 (def entry_is_exec ((e Entry)) bool
-  (if (entry_is_file e) (not (eq (bit_and (entry_mode e) 73) 0)) false))
+  (and (entry_is_file e) (not (eq (bit_and (.mode e) 73) 0))))
 
 ; The index of the entry at path, or -1.
 (def entry_index ((entries (array Entry)) (path (list int))) int
@@ -44,7 +39,8 @@
 (def entry_index_from ((entries (array Entry)) (path (list int)) (i int)) int
   (if (ge i (array_len entries))
       -1
-      (if (eq (entry_path (array_get entries i)) path) i (entry_index_from entries path (add i 1)))))
+      (eq (.path (array_get entries i)) path) i
+      (entry_index_from entries path (add i 1))))
 
 ; The last part of a path: "sh" for "/bin/sh".
 (def base_name ((path (list int))) (list int)
@@ -71,9 +67,9 @@
 ; top, and no final /. "/" if that leaves nothing; cwd if p is empty.
 ; There are no links, so this is exact.
 (def path_resolve ((cwd (list int)) (p (list int))) (list int)
-  (let whole (if (is_empty p) cwd (if (eq (head p) 47) p (append cwd (cons 47 p))))
-    (let names (path_names (split_on 47 whole) (nil (list int)))
-      (if (is_empty names) "/" (cons 47 (join_with "/" (rev names)))))))
+  (let (whole (if (is_empty p) cwd (eq (head p) 47) p (append cwd (cons 47 p)))
+        names (path_names (split_on 47 whole) (nil (list int))))
+    (if (is_empty names) "/" (cons 47 (join_with "/" (rev names))))))
 
 ; path_resolve's loop: the names left in parts, each applied to acc, the
 ; names so far, reversed.
@@ -85,26 +81,21 @@
 ; acc, the names so far reversed, after one name: nothing for an empty
 ; name or ".", the last name gone for "..", else the name added.
 (def path_step ((name (list int)) (acc (list (list int)))) (list (list int))
-  (if (is_empty name)
-      acc
-      (if (eq name ".")
-          acc
-          (if (eq name "..")
-              (if (is_empty acc) acc (tail acc))
-              (cons name acc)))))
+  (if (is_empty name) acc
+      (eq name ".") acc
+      (eq name "..") (if (is_empty acc) acc (tail acc))
+      (cons name acc)))
 
 ; s without a leading "." that is all of it or is followed by a /;
 ; ".x" is kept.
 (def drop_dot ((s (list int))) (list int)
-  (if (is_empty s)
-      s
-      (if (eq (head s) 46)
-          (if (is_empty (tail s)) (tail s) (if (eq (head (tail s)) 47) (tail s) s))
-          s)))
+  (if (is_empty s) s
+      (eq (head s) 46) (if (is_empty (tail s)) (tail s) (eq (head (tail s)) 47) (tail s) s)
+      s))
 
 ; s without the slashes it starts with.
 (def drop_slashes ((s (list int))) (list int)
-  (if (is_empty s) s (if (eq (head s) 47) (drop_slashes (tail s)) s)))
+  (if (is_empty s) s (eq (head s) 47) (drop_slashes (tail s)) s))
 
 ; s without the slashes it ends with.
 (def drop_final_slashes ((s (list int))) (list int)
@@ -126,9 +117,9 @@
 (def parse_initramfs ((b bytes)) (Result (array Entry) (list int))
   (if (not (has b 0 6))
       ((Err (array Entry) (list int)) "initramfs: too short")
-      (if (not (bytes_is_at b 0 (newc_magic)))
-          ((Err (array Entry) (list int)) "initramfs: no 070701 magic; not a newc cpio archive")
-          (parse_entries b 0 (nil Entry)))))
+      (not (bytes_is_at b 0 (newc_magic)))
+      ((Err (array Entry) (list int)) "initramfs: no 070701 magic; not a newc cpio archive")
+      (parse_entries b 0 (nil Entry))))
 
 ; What parse_entry finds at a header: an entry and where the next header
 ; is, the trailer, or why it is not an entry.
@@ -147,9 +138,8 @@
 (def parse_entry ((b bytes) (i int)) EntryParse
   (if (not (has b i (header_size)))
       (EntryBad "header cut short, and no TRAILER!!! before it")
-      (if (not (bytes_is_at b i (newc_magic)))
-          (EntryBad "no 070701 magic")
-          (parse_fields b i (hex_field b i 1) (hex_field b i 6) (hex_field b i 11)))))
+      (not (bytes_is_at b i (newc_magic))) (EntryBad "no 070701 magic")
+      (parse_fields b i (hex_field b i 1) (hex_field b i 6) (hex_field b i 11))))
 
 ; Field k of the header at i, 0 to 12, or -1 if it is not eight
 ; hexadecimal digits.
@@ -169,19 +159,17 @@
 ; the next multiple of 4, end before the next header, at the multiple of
 ; 4 after them. EntryEnd if it is the trailer.
 (def parse_fields ((b bytes) (i int) (mode int) (size int) (namesize int)) EntryParse
-  (if (if (lt mode 0) true (if (lt size 0) true (lt namesize 1)))
+  (if (or (lt mode 0) (or (lt size 0) (lt namesize 1)))
       (EntryBad "header field not hexadecimal")
       (let name_at (add i (header_size))
         (if (not (has b name_at namesize))
             (EntryBad "name cut short")
-            (let name (bytes_range b name_at (add name_at (sub namesize 1)))
-              (let start (align4 (add name_at namesize))
-                (if (eq name (trailer_name))
-                    (EntryEnd)
-                    (if (not (has b start size))
-                        (EntryBad (append "contents cut short: " name))
-                        (EntryOk (Entry (normal_path name) mode start (add start size))
-                                 (align4 (add start size)))))))))))
+            (let (name (bytes_range b name_at (add name_at (sub namesize 1)))
+                  start (align4 (add name_at namesize)))
+              (if (eq name (trailer_name)) (EntryEnd)
+                  (not (has b start size)) (EntryBad (append "contents cut short: " name))
+                  (EntryOk (Entry (normal_path name) mode start (add start size))
+                           (align4 (add start size)))))))))
 
 ; ---------------------------------------------------------------- writing
 
@@ -189,10 +177,10 @@
 ; padded: what bsdtar would write for it, with every field it does not
 ; need 0. For tests and for building an initramfs in L0.
 (def newc_entry ((name (list int)) (mode int) (contents (list int))) (list int)
-  (let header (newc_header mode (length contents) (add (length name) 1))
-    (let named (append header (append name (cons 0 (nil int))))
-      (let padded (pad4 named)
-        (append padded (pad4 contents))))))
+  (let (header (newc_header mode (length contents) (add (length name) 1))
+        named (append header (append name (cons 0 (nil int))))
+        padded (pad4 named))
+    (append padded (pad4 contents))))
 
 ; A header for an entry of mode, size bytes and a name of namesize bytes,
 ; its NUL counted; one link, and every other field 0.

@@ -33,7 +33,7 @@
 
 ; The stack's TCP state.
 (def stack_tcps ((s Stack)) Tcps
-  (match s ((Stack l c n k id t o) (match k ((Socks udp pings eph tcps) tcps)))))
+  (match (.k s) ((Socks udp pings eph tcps) tcps)))
 
 ; The stack with TCP state tcps.
 (def with_tcps ((s Stack) (tcps Tcps)) Stack
@@ -84,10 +84,10 @@
   (if (is_empty cs)
       best
       (let d (c_deadline (head cs))
-        (soonest_deadline (tail cs) (if (eq d 0) best (if (eq best 0) d (min best d)))))))
+        (soonest_deadline (tail cs) (if (eq d 0) best (eq best 0) d (min best d))))))
 
 ; The stack with connection c in its table, and without connection id.
-(def tcp_put ((s Stack) (c Conn)) Stack (tcp_set_conns s (map_put (tcp_conns s) (c_id c) c)))
+(def tcp_put ((s Stack) (c Conn)) Stack (tcp_set_conns s (map_put (tcp_conns s) (.id c) c)))
 (def tcp_forget ((s Stack) (id int)) Stack (tcp_set_conns s (map_remove (tcp_conns s) id)))
 
 ; The connection from local port lport to port rport at raddr, if there is one.
@@ -99,24 +99,28 @@
   (if (is_empty cs)
       ((None Conn))
       (let c (head cs)
-        (if (if (eq (c_lport c) lport) (if (eq (c_raddr c) raddr) (eq (c_rport c) rport) false) false)
+        (if (and (eq (c_lport c) lport) (and (eq (c_raddr c) raddr) (eq (c_rport c) rport)))
             (Some c)
             (conn_scan (tail cs) lport raddr rport)))))
 
 ; Whether local port p is a listener's, or a connection's.
 (def tcp_port_used ((s Stack) (p int)) bool
-  (if (map_has (tcp_listeners s) p) true (conns_use (map_values (tcp_conns s)) p)))
+  (or (map_has (tcp_listeners s) p) (conns_use (map_values (tcp_conns s)) p)))
 
 ; Whether any of cs has local port p.
 (def conns_use ((cs (list Conn)) (p int)) bool
-  (if (is_empty cs) false (if (eq (c_lport (head cs)) p) true (conns_use (tail cs) p))))
+  (if (is_empty cs) false
+      (eq (c_lport (head cs)) p) true
+      (conns_use (tail cs) p)))
 
 ; The port after p that a connection opened here may take.
 (def next_ephemeral ((p int)) int (if (eq p 65535) (ephemeral_first) (add p 1)))
 
 ; The first port from p that is free, trying n of them; 0 if none is.
 (def tcp_port_from ((s Stack) (p int) (n int)) int
-  (if (eq n 0) 0 (if (tcp_port_used s p) (tcp_port_from s (next_ephemeral p) (sub n 1)) p)))
+  (if (eq n 0) 0
+      (tcp_port_used s p) (tcp_port_from s (next_ephemeral p) (sub n 1))
+      p))
 
 ; A connection's ends, and the secret, as tcp_iss hashes them.
 (data TcpIssKey (TcpIssKey int int int int int))
@@ -139,7 +143,7 @@
 
 ; The notice e to the owner of connection c, once this message is dealt with.
 (def tcp_notify ((s Stack) (c Conn) (e TcpEvent)) Stack
-  (queued_bytes s (c_owner c) (bytes_from_list (tcp_notice e)) (ToTcp (c_id c))))
+  (queued_bytes s (c_owner c) (bytes_from_list (tcp_notice e)) (ToTcp (.id c))))
 
 ; The stack after a connection's step: its connection kept, and each of
 ; the acts it called for, in order.
@@ -155,15 +159,15 @@
 (def tcp_act ((s Stack) (c Conn) (a TcpAct)) Stack
   (match a
     ((SendSeg addr seg) (tcp_out s addr seg))
-    ((ConnUp) (tcp_notify s c (TcpUp (c_id c))))
-    ((ConnAccepted) (tcp_notify s c (TcpAccepted (c_id c) (c_raddr c) (c_rport c) (c_lport c))))
-    ((GotData d) (tcp_notify s c (TcpData (c_id c) d)))
-    ((GotFin) (tcp_notify s c (TcpFin (c_id c))))
-    ((ConnOver) (tcp_notify s c (TcpClosed (c_id c) "closed")))
+    ((ConnUp) (tcp_notify s c (TcpUp (.id c))))
+    ((ConnAccepted) (tcp_notify s c (TcpAccepted (.id c) (c_raddr c) (c_rport c) (c_lport c))))
+    ((GotData d) (tcp_notify s c (TcpData (.id c) d)))
+    ((GotFin) (tcp_notify s c (TcpFin (.id c))))
+    ((ConnOver) (tcp_notify s c (TcpClosed (.id c) "closed")))
     ((ConnGone why)
-      (let s2 (tcp_forget s (c_id c))
-        (if (is_empty why) s2 (tcp_notify s2 c (TcpClosed (c_id c) why)))))
-    ((ConnRoom n) (tcp_notify s c (TcpRoom (c_id c) n)))))
+      (let s2 (tcp_forget s (.id c))
+        (if (is_empty why) s2 (tcp_notify s2 c (TcpClosed (.id c) why)))))
+    ((ConnRoom n) (tcp_notify s c (TcpRoom (.id c) n)))))
 
 ; A notice to connection id's owner was not taken: if the port is gone, so
 ; is the listener it had, and a connection whose owner cannot be told is
@@ -215,7 +219,7 @@
       (match (map_get (tcp_listeners s) dport)
         ((None) (tcp_refused s src seg))
         ((Some l)
-          (if (if (seg_has seg (tcp_syn)) (if (seg_has seg (tcp_ack)) false (not (seg_has seg (tcp_rst)))) false)
+          (if (and (seg_has seg (tcp_syn)) (and (not (seg_has seg (tcp_ack))) (not (seg_has seg (tcp_rst)))))
               (tcp_accepted s l src seg now)
               (tcp_refused s src seg)))))))
 
@@ -232,12 +236,12 @@
       (dropped s)
       (match l
         ((Listener np pid)
-          (let s2 (tcp_keyed s)
-            (let id (tcp_next_id s2)
-              (match seg
-                ((Seg sport dport seq ack flags window mss body)
-                  (let iss (tcp_iss now (tcp_secret s2) (stack_addr s2) dport src sport)
-                    (tcp_run (tcp_set_next s2 (add id 1) (tcp_next_port s2)) (tcp_passive id np pid src seg iss now)))))))))))
+          (let (s2 (tcp_keyed s)
+                id (tcp_next_id s2))
+            (match seg
+              ((Seg sport dport seq ack flags window mss body)
+                (let iss (tcp_iss now (tcp_secret s2) (stack_addr s2) dport src sport)
+                  (tcp_run (tcp_set_next s2 (add id 1) (tcp_next_port s2)) (tcp_passive id np pid src seg iss now))))))))))
 
 ; --------------------------------------------------------------------- timers
 
@@ -252,7 +256,7 @@
       (match (map_get (tcp_conns s) (head ids))
         ((None) (tcp_ticked_ids s (tail ids) now))
         ((Some c)
-          (if (if (eq (c_deadline c) 0) true (lt now (c_deadline c)))
+          (if (or (eq (c_deadline c) 0) (lt now (c_deadline c)))
               (tcp_ticked_ids s (tail ids) now)
               (tcp_ticked_ids (tcp_run s (tcp_tick c now)) (tail ids) now))))))
 
@@ -262,13 +266,13 @@
 ; port is reply, with its words ws and the lines after its first.
 (def tcp_request ((s Stack) (reply int) (from int) (op (list int)) (ws (list (list int))) (rest (list int))) (Served Stack)
   (if (eq op "connect") (tcp_req_connect s from ws)
-  (if (eq op "listen") (tcp_req_listen s from ws)
-  (if (eq op "unlisten") (tcp_req_unlisten s from ws)
-  (if (eq op "write") (tcp_req_write s reply from ws rest)
-  (if (eq op "finish") (tcp_req_finish s from ws)
-  (if (eq op "reset") (tcp_req_reset s from ws)
-  (if (if (eq op "tcp") (is_empty ws) false) (Served s (tcp_text s))
-  (served_error s (append "no request " op))))))))))
+      (eq op "listen") (tcp_req_listen s from ws)
+      (eq op "unlisten") (tcp_req_unlisten s from ws)
+      (eq op "write") (tcp_req_write s reply from ws rest)
+      (eq op "finish") (tcp_req_finish s from ws)
+      (eq op "reset") (tcp_req_reset s from ws)
+      (and (eq op "tcp") (is_empty ws)) (Served s (tcp_text s))
+      (served_error s (append "no request " op))))
 
 ; connect ADDR PORT NPORT: a connection opened to PORT at ADDR, whose
 ; notices go to NPORT: answered with its number and its local port.
@@ -287,19 +291,17 @@
 
 ; The connection opened, if inet has room and a port for it.
 (def tcp_open ((s Stack) (from int) (dst int) (port int) (np int)) (Served Stack)
-  (if (if (eq dst 0) true (is_broadcast (stack_config s) dst))
-      (served_error s "not a host's address")
-      (if (ge (map_size (tcp_conns s)) (tcp_conn_limit))
-          (served_error s "too many connections")
-          (let lport (tcp_port_from s (tcp_next_port s) 16384)
-            (if (eq lport 0)
-                (served_error s "no port is free")
-                (let s2 (tcp_keyed s)
-                  (let id (tcp_next_id s2)
-                    (let now (clock_ns)
-                      (let iss (tcp_iss now (tcp_secret s2) (stack_addr s2) lport dst port)
-                        (Served (tcp_run (tcp_set_next s2 (add id 1) (next_ephemeral lport)) (tcp_active id np from lport dst port iss now))
-                                (append "connecting " (unwords (numbers_words (cons id (cons lport (nil int))))))))))))))))
+  (if (or (eq dst 0) (is_broadcast (.config s) dst)) (served_error s "not a host's address")
+      (ge (map_size (tcp_conns s)) (tcp_conn_limit)) (served_error s "too many connections")
+      (let lport (tcp_port_from s (tcp_next_port s) 16384)
+        (if (eq lport 0)
+            (served_error s "no port is free")
+            (let (s2 (tcp_keyed s)
+                  id (tcp_next_id s2)
+                  now (clock_ns)
+                  iss (tcp_iss now (tcp_secret s2) (stack_addr s2) lport dst port))
+              (Served (tcp_run (tcp_set_next s2 (add id 1) (next_ephemeral lport)) (tcp_active id np from lport dst port iss now))
+                      (append "connecting " (unwords (numbers_words (cons id (cons lport (nil int))))))))))))
 
 ; listen PORT NPORT: PORT's connections, from now on, made and told to NPORT;
 ; 0 for a port inet picks. Answered with the port.
@@ -317,11 +319,9 @@
 
 ; port p listened to, by the process from, unless it is taken; 0 is no port.
 (def tcp_listening ((s Stack) (from int) (np int) (p int)) (Served Stack)
-  (if (eq p 0)
-      (served_error s "no port is free")
-      (if (map_has (tcp_listeners s) p)
-          (served_error s (append "port " (append (digits p) " is taken")))
-          (Served (tcp_set_listeners s (map_put (tcp_listeners s) p (Listener np from))) (append "listening " (digits p))))))
+  (if (eq p 0) (served_error s "no port is free")
+      (map_has (tcp_listeners s) p) (served_error s (append "port " (append (digits p) " is taken")))
+      (Served (tcp_set_listeners s (map_put (tcp_listeners s) p (Listener np from))) (append "listening " (digits p)))))
 
 ; unlisten PORT: given up, by the process that listens.
 (def tcp_req_unlisten ((s Stack) (from int) (ws (list (list int)))) (Served Stack)
@@ -365,12 +365,12 @@
     ((Ok c)
       (if (not (accepts_data c))
           (served_error s "the connection is not open for writing")
-          (if (tcp_fits c (length content))
-              (let st (tcp_send c (clock_ns) content)
-                (Served (tcp_run s st) (append "ok " (digits (length (c_queue (step_conn st)))))))
-              (if (gt reply 0)
-                  (Served (tcp_run s (tcp_refuse c)) (append "error: full " (digits (length (c_queue c)))))
-                  (Served (tcp_run s (tcp_abort c "overflow")) "error: too much data waits to be sent")))))))
+          (tcp_fits c (length content))
+          (let st (tcp_send c (clock_ns) content)
+            (Served (tcp_run s st) (append "ok " (digits (length (.queue (.conn st)))))))
+          (gt reply 0)
+          (Served (tcp_run s (tcp_refuse c)) (append "error: full " (digits (length (.queue c)))))
+          (Served (tcp_run s (tcp_abort c "overflow")) "error: too much data waits to be sent")))))
 
 ; finish ID: connection ID closed once its data is sent.
 (def tcp_req_finish ((s Stack) (from int) (ws (list (list int)))) (Served Stack)
@@ -400,7 +400,7 @@
         ((None) (conn_lines cs (tail ids) acc))
         ((Some c)
           (conn_lines cs (tail ids)
-                      (push "\n" (push (unwords (cons (digits (c_id c)) (cons (tcp_state_name (c_state c)) (cons (digits (c_lport c))
+                      (push "\n" (push (unwords (cons (digits (.id c)) (cons (tcp_state_name (.state c)) (cons (digits (c_lport c))
                                        (cons (append (ip_text (c_raddr c)) (append ":" (digits (c_rport c)))) (nil (list int)))))))
                                        acc)))))))
 

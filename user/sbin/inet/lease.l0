@@ -79,14 +79,6 @@
 
 ; ------------------------------------------------------------------ sending
 
-; s with c as its interface.
-(def stack_with ((s Stack) (c Config)) Stack
-  (match s ((Stack l old n k id t o) (Stack l c n k id t o))))
-
-; s's interface.
-(def stack_config ((s Stack)) Config
-  (match s ((Stack l c n k id t o) c)))
-
 ; A datagram of DHCP, content, from port 68 at s's address, 0.0.0.0 while
 ; it has none, to port 67 at dst, put on the wire once s is done with its
 ; message.
@@ -126,9 +118,9 @@
 
 ; The netmask a classful address has, for a server that gives none.
 (def class_mask ((a int)) int
-  (if (lt (ip_byte a 0) 128)
-      (ip_mask 8)
-      (if (lt (ip_byte a 0) 192) (ip_mask 16) (ip_mask 24))))
+  (if (lt (ip_byte a 0) 128) (ip_mask 8)
+      (lt (ip_byte a 0) 192) (ip_mask 16)
+      (ip_mask 24)))
 
 ; The interface an ACK of d gives: the address, the mask it names or the
 ; address's class has, the first router, and the first name server, or
@@ -144,7 +136,7 @@
 (def lease_heard ((s Stack) (l Lease) (d Dhcp) (now int)) Leasing
   (match d
     ((Dhcp op xid type hw yi req mask router server lease dns)
-      (if (if (eq op 2) (if (eq xid (lease_xid_of l)) (eq hw (stack_mac s)) false) false)
+      (if (and (eq op 2) (and (eq xid (lease_xid_of l)) (eq hw (stack_mac s))))
           (lease_answered s l d now)
           (Leasing s l)))))
 
@@ -159,13 +151,13 @@
     ((Dhcp op xid type hw yi req mask router server lease dns)
       (match l
         ((Selecting x)
-          (if (if (eq type (dhcp_offer_type)) (if (eq yi 0) false (not (eq server 0))) false)
+          (if (and (eq type (dhcp_offer_type)) (and (not (eq yi 0)) (not (eq server 0))))
               (lease_next s (Requesting x yi server))
               (Leasing s l)))
         ((Requesting x offered srv)
-          (if (if (eq type (dhcp_ack_type)) (eq yi offered) false)
-              (lease_acked s d srv now)
-              (if (eq type (dhcp_nak_type)) (lease_next s (Selecting (lease_xid_after x))) (Leasing s l))))
+          (if (and (eq type (dhcp_ack_type)) (eq yi offered)) (lease_acked s d srv now)
+              (eq type (dhcp_nak_type)) (lease_next s (Selecting (lease_xid_after x)))
+              (Leasing s l)))
         ((Leased srv secs since) (Leasing s l))
         ((Renewing x srv secs since) (lease_extended s l d srv now))
         ((Rebinding x secs since) (lease_extended s l d 0 now))
@@ -179,23 +171,21 @@
 (def lease_acked ((s Stack) (d Dhcp) (srv int) (now int)) Leasing
   (match d
     ((Dhcp op xid type hw yi req mask router server lease dns)
-      (Leasing (stack_with s (lease_config d)) (Leased (if (eq server 0) srv server) lease now)))))
+      (Leasing (.config s (lease_config d)) (Leased (if (eq server 0) srv server) lease now)))))
 
 ; An answer d to a REQUEST that renews or rebinds the lease l: an ACK of
 ; the stack's own address extends it; a NAK takes the address away.
 (def lease_extended ((s Stack) (l Lease) (d Dhcp) (srv int) (now int)) Leasing
   (match d
     ((Dhcp op xid type hw yi req mask router server lease dns)
-      (if (if (eq type (dhcp_ack_type)) (eq yi (stack_addr s)) false)
-          (lease_acked s d srv now)
-          (if (eq type (dhcp_nak_type))
-              (lease_lost s now)
-              (Leasing s l))))))
+      (if (and (eq type (dhcp_ack_type)) (eq yi (stack_addr s))) (lease_acked s d srv now)
+          (eq type (dhcp_nak_type)) (lease_lost s now)
+          (Leasing s l)))))
 
 ; The address given up, and a server found again: s with no interface,
 ; and a DISCOVER sent with a new xid.
 (def lease_lost ((s Stack) (now int)) Leasing
-  (lease_next (stack_with s (Config 0 0 0 0)) (Selecting (lease_xid (stack_mac s) now))))
+  (lease_next (.config s (Config 0 0 0 0)) (Selecting (lease_xid (stack_mac s) now))))
 
 ; l, and s with what it has the client say, said.
 (def lease_next ((s Stack) (l Lease)) Leasing
@@ -249,8 +239,8 @@
 ; send the ACK to it; its interface is as it was afterwards, until an ACK
 ; gives it one. b is the message's bytes.
 (def lease_hear ((s Stack) (l Lease) (from int) (b bytes) (now int)) Leasing
-  (let c (stack_config s)
-    (match (message (stack_with s (hearing c l)) from b)
+  (let c (.config s)
+    (match (message (.config s (hearing c l)) from b)
       ((Stack lk c2 n k id t o)
         (match (lease_taken (rev o) (nil Out) (nil (list int)))
           ((Taken keep got) (lease_each (Stack lk c n k id t keep) l got now)))))))
@@ -273,14 +263,14 @@
 ; eighths are, time to rebind it; 3 once all is, and it has run out. A
 ; lease of no seconds, or of 0xFFFFFFFF, for ever, is always 0.
 (def lease_phase ((secs int) (since int) (now int)) int
-  (if (if (le secs 0) true (eq secs 4294967295))
+  (if (or (le secs 0) (eq secs 4294967295))
       0
-      (let gone (sub now since)
-        (let whole (mul secs 1000000000)
-          (if (ge gone whole) 3
-          (if (ge gone (sub whole (div whole 8))) 2
-          (if (ge gone (div whole 2)) 1
-          0)))))))
+      (let (gone (sub now since)
+            whole (mul secs 1000000000))
+        (if (ge gone whole) 3
+            (ge gone (sub whole (div whole 8))) 2
+            (ge gone (div whole 2)) 1
+            0))))
 
 ; The lease l, and the stack, at time now, as the clock's notice comes:
 ; what its phase calls for begun, or what it waits for asked again.
@@ -297,19 +287,20 @@
 ; gone, left; then renewed with server, rebound, or lost, each with an
 ; xid of its own, kept while it is asked again.
 (def lease_moved ((s Stack) (l Lease) (server int) (secs int) (since int) (now int)) Leasing
-  (let p (lease_phase secs since now)
-    (let x (if (lt (lease_xid_of l) 0) (lease_xid (stack_mac s) now) (lease_xid_of l))
-      (if (eq p 0) (Leasing s l)
-      (if (eq p 1) (lease_next s (Renewing x server secs since))
-      (if (eq p 2) (lease_next s (Rebinding x secs since))
-      (lease_lost s now)))))))
+  (let (p (lease_phase secs since now)
+        x (if (lt (lease_xid_of l) 0) (lease_xid (stack_mac s) now) (lease_xid_of l)))
+    (if (eq p 0) (Leasing s l)
+        (eq p 1) (lease_next s (Renewing x server secs since))
+        (eq p 2) (lease_next s (Rebinding x secs since))
+        (lease_lost s now))))
 
 ; ------------------------------------------------------------------ waiting
 
 ; How the start's asking stands: whether the card has a link, how many
 ; times it has been asked with one, and when the wait ends, as clock_ns
-; counts: for an answer with a link, for the link without.
-(data Asking (Asking bool int int))
+; counts: for an answer with a link, for the link without; the kernel's
+; alarm is set for it while the wait lasts.
+(data Asking (Asking (up bool) (n int) (when int)))
 
 ; What the end of a wait calls for: wait on, ask again, or give up, with
 ; no server having answered or with no link.
@@ -334,19 +325,20 @@
 
 ; Whether a link come up at a's asking calls for a DISCOVER at once.
 (def asking_sends ((a Asking) (up bool)) bool
-  (match a ((Asking was n due) (if was false up))))
+  (match a ((Asking was n due) (and (not was) up))))
 
 ; What a calls for at time now.
 (def asking_due ((a Asking) (now int)) AskingDue
   (match a
     ((Asking up n due)
-      (if (lt now due)
-          (AskWait)
-          (if (not up) (AskNoLink) (if (ge n (lease_tries)) (AskNoAnswer) (AskAgain)))))))
+      (if (lt now due) (AskWait)
+          (not up) (AskNoLink)
+          (ge n (lease_tries)) (AskNoAnswer)
+          (AskAgain)))))
 
 ; a with one more try sent at time now.
 (def asking_again ((a Asking) (now int)) Asking
-  (match a ((Asking up n due) (Asking up (add n 1) (add now (lease_retry_ns))))))
+  (.when (.n a (add (.n a) 1)) (add now (lease_retry_ns))))
 
 ; s with its first DISCOVER sent, its answers waited for, and sent again
 ; every lease_retry_ns, lease_tries times in all once the card has a
@@ -368,14 +360,10 @@
         ((AskNoLink) (LeaseNoLink))
         ((AskAgain) (lease_wait (sent_out (lease_send s l)) l port (asking_again a (clock_ns))))
         ((AskWait)
-          (let z (alarm_at port (asking_when a))
+          (let z (alarm_at port (.when a))
             (match (port_receive port)
               ((RecvFailed) (LeaseNoAnswer))
               ((Message from b) (lease_heard_msg s l port a from b))))))))
-
-; When a's wait ends, as clock_ns counts, which the kernel's alarm is
-; set for while it lasts.
-(def asking_when ((a Asking)) int (match a ((Asking up n due) due)))
 
 ; lease_wait, once a message from pid from, its bytes b, has come: the
 ; kernel's alarm, the wait's end, looked at; the driver's link notice,
@@ -384,9 +372,9 @@
   (let ln (if (eq from (stack_driver s)) (link_notice_of b) -1)
     (if (is_alarm_notice (Message from b))
         (lease_wait s l port a)
-    (if (lt ln 0)
+        (lt ln 0)
         (match (lease_hear s l from b (clock_ns))
           ((Leasing s2 l2) (lease_wait (sent_out s2) l2 port a)))
         (let up (eq ln 1)
           (lease_wait (if (asking_sends a up) (sent_out (lease_send s l)) s) l port
-                      (asking_relinked a up (clock_ns))))))))
+                      (asking_relinked a up (clock_ns)))))))

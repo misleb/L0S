@@ -18,7 +18,7 @@
 ; buffers a list after it releases, the pages it reads, each buffer's by
 ; where this process sees them, and how many of the screen's pieces it
 ; left out to fit the line memory (pieces.l0's screen_fit).
-(data Listed (Listed (list int) (list Alloc) (list Layer) (list int) int))
+(data Listed (Listed (words (list int)) (allocs (list Alloc)) (layers (list Layer)) (vas (list int)) (left_out int)))
 
 ; The pipeline: the half the channel fetches, 0 or 1, or -1 once the
 ; firmware keeps the channel (hvs.l0's fw_lists_written) or with no ends
@@ -28,17 +28,17 @@
 ; is shown; the list pointed at and not yet taken, if any, and by when,
 ; in clock_ns, it should be taken; the screen wanted next, if any; and
 ; the pages forgotten but still read.
-(data Lists (Lists int Listed (list int) int (Option Listed) int (Option Listed) (list int)))
+(data Lists (Lists (half int) (live Listed) (prev (list int)) (upto int) (pending (Option Listed)) (due int) (want (Option Listed)) (dead (list int))))
 
 ; A list to write now: the half, and the list.
-(data ListWrite (ListWrite int Listed))
+(data ListWrite (ListWrite (half int) (listed Listed)))
 
 ; What a step of the pipeline asks of the driver: the pipeline after it;
 ; a list to write and point the channel at, if any; whether a list was
 ; taken, so that its change is noted (shown.l0's list_frames); the
 ; buffers that list leaves out, released once it is shown; and the
 ; pages no list reads any more, to unmap and give up.
-(data ListsStep (ListsStep Lists (Option ListWrite) bool (list int) (list int)))
+(data ListsStep (ListsStep (lists Lists) (wr (Option ListWrite)) (took bool) (rel (list int)) (free (list int))))
 
 ; A list of nothing.
 (def listed_none () Listed (Listed (nil int) (nil Alloc) (nil Layer) (nil int) 0))
@@ -52,24 +52,12 @@
 ; takes the firmware to keep the channel: 50 ms.
 (def lists_wait_ns () int 50000000)
 
-; The half the channel fetches, -1 for none of the driver's.
-(def lists_half ((ls Lists)) int
-  (match ls ((Lists k live prev upto pend due want dead) k)))
-
 ; Whether lists are waited for as they come: the firmware keeps the
 ; channel.
-(def lists_synced_only ((ls Lists)) bool (lt (lists_half ls) 0))
-
-; By when, in clock_ns, the list pointed at should be taken.
-(def lists_due ((ls Lists)) int
-  (match ls ((Lists k live prev upto pend due want dead) due)))
-
-; The list pointed at and not yet taken, if any.
-(def lists_pending ((ls Lists)) (Option Listed)
-  (match ls ((Lists k live prev upto pend due want dead) pend)))
+(def lists_synced_only ((ls Lists)) bool (lt (.half ls) 0))
 
 ; The half the list pointed at is in: the one the channel is not on.
-(def lists_other ((ls Lists)) int (if (eq (lists_half ls) 0) 1 0))
+(def lists_other ((ls Lists)) int (if (eq (.half ls) 0) 1 0))
 
 ; The UPM a new list keeps clear of: the list pointed at's if there is
 ; one, as the new one is written only once it is fetched, else the list
@@ -78,23 +66,8 @@
   (match ls
     ((Lists k live prev upto pend due want dead)
       (match pend
-        ((Some p) (listed_allocs p))
-        ((None) (listed_allocs live))))))
-
-; A list's UPM.
-(def listed_allocs ((l Listed)) (list Alloc) (match l ((Listed ws as ls vas lo) as)))
-
-; A list's words.
-(def listed_words ((l Listed)) (list int) (match l ((Listed ws as ls vas lo) ws)))
-
-; A list's layers.
-(def listed_layers ((l Listed)) (list Layer) (match l ((Listed ws as ls vas lo) ls)))
-
-; The pages a list reads.
-(def listed_vas ((l Listed)) (list int) (match l ((Listed ws as ls vas lo) vas)))
-
-; How many of the screen's pieces a list left out.
-(def listed_left_out ((l Listed)) int (match l ((Listed ws as ls vas lo) lo)))
+        ((Some p) (.allocs p))
+        ((None) (.allocs live))))))
 
 ; The pages still read, or that a list to come reads: the list fetched,
 ; the one before it until it is shown, the one pointed at and the one
@@ -102,7 +75,7 @@
 (def lists_reading ((ls Lists)) (list int)
   (match ls
     ((Lists k live prev upto pend due want dead)
-      (append (listed_vas live) (append prev (append (option_vas pend) (option_vas want)))))))
+      (append (.vas live) (append prev (append (option_vas pend) (option_vas want)))))))
 
 ; A list there may be, or the list of nothing.
 (def option_listed ((o (Option Listed))) Listed
@@ -110,12 +83,7 @@
 
 ; The pages of a list there may be.
 (def option_vas ((o (Option Listed))) (list int)
-  (match o ((Some l) (listed_vas l)) ((None) (nil int))))
-
-; The pages forgotten and not given up yet, as some list still reads
-; them.
-(def lists_dead ((ls Lists)) (list int)
-  (match ls ((Lists k live prev upto pend due want dead) dead)))
+  (match o ((Some l) (.vas l)) ((None) (nil int))))
 
 ; The screen the driver last asked to show: the one wanted, else the one
 ; pointed at, else the one fetched.
@@ -162,16 +130,16 @@
         ((Some p)
           (if (not taken)
               (lists_still ls)
-              (let rel (layers_left (listed_layers live) (listed_layers p) (nil int))
-                (let k2 (lists_other ls)
-                  (let up (add n (list_frames))
-                    (match want
-                      ((None)
-                        (ListsStep (Lists k2 p (listed_vas live) up ((None Listed)) 0 ((None Listed)) dead)
-                                   ((None ListWrite)) true rel (nil int)))
-                      ((Some w)
-                        (ListsStep (Lists k2 p (listed_vas live) up (Some w) (add now (lists_wait_ns)) ((None Listed)) dead)
-                                   (Some (ListWrite k w)) true rel (nil int)))))))))))))
+              (let (rel (layers_left (.layers live) (.layers p) (nil int))
+                    k2 (lists_other ls)
+                    up (add n (list_frames)))
+                (match want
+                  ((None)
+                    (ListsStep (Lists k2 p (.vas live) up ((None Listed)) 0 ((None Listed)) dead)
+                               ((None ListWrite)) true rel (nil int)))
+                  ((Some w)
+                    (ListsStep (Lists k2 p (.vas live) up (Some w) (add now (lists_wait_ns)) ((None Listed)) dead)
+                               (Some (ListWrite k w)) true rel (nil int)))))))))))
 
 ; The end of frame n, with the channel seen taken the list pointed at if
 ; taken, at time now, the pages held by the driver's buffers held: the
@@ -198,18 +166,16 @@
 
 ; Those of vas that reading has and held has not.
 (def vas_kept ((vas (list int)) (reading (list int)) (held (list int))) (list int)
-  (if (is_empty vas)
-      vas
-      (if (if (any_eq (head vas) reading) (not (any_eq (head vas) held)) false)
-          (cons (head vas) (vas_kept (tail vas) reading held))
-          (vas_kept (tail vas) reading held))))
+  (if (is_empty vas) vas
+      (and (any_eq (head vas) reading) (not (any_eq (head vas) held))) (cons (head vas) (vas_kept (tail vas) reading held))
+      (vas_kept (tail vas) reading held)))
 
 ; Those of vas neither reading nor held has, onto acc reversed.
 (def vas_free ((vas (list int)) (reading (list int)) (held (list int)) (acc (list int))) (list int)
   (if (is_empty vas)
       (rev acc)
       (vas_free (tail vas) reading held
-        (if (if (any_eq (head vas) reading) true (any_eq (head vas) held)) acc (cons (head vas) acc)))))
+        (if (or (any_eq (head vas) reading) (any_eq (head vas) held)) acc (cons (head vas) acc)))))
 
 ; The pages at va forgotten, the pages the driver's buffers still hold
 ; held: nothing if they hold them; given up now if no list reads them;
@@ -237,6 +203,6 @@
 (def lists_synced ((ls Lists) (k int) (s Listed) (held (list int))) ListsStep
   (match ls
     ((Lists k0 live prev upto pend due want dead)
-      (let rel (layers_left (append (listed_layers live) (listed_layers (option_listed pend))) (listed_layers s) (nil int))
+      (let rel (layers_left (append (.layers live) (.layers (option_listed pend))) (.layers s) (nil int))
         (match (lists_freed (Lists k s (nil int) 0 ((None Listed)) 0 ((None Listed)) dead) held)
           ((ListsStep ls2 w t r free) (ListsStep ls2 ((None ListWrite)) true rel free)))))))

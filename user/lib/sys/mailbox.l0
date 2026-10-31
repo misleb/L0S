@@ -39,15 +39,14 @@
 ; succeeded: the buffer's code, its second word, and the tag's, its
 ; fifth, bit 31 set.
 (def property_answered ((ws (list int))) bool
-  (if (lt (length ws) 5)
-      false
-      (if (eq (nth ws 1) (property_success)) (eq (bit_and (bit_shr (nth ws 4) 31) 1) 1) false)))
+  (and (not (lt (length ws) 5))
+       (and (eq (nth ws 1) (property_success)) (eq (bit_and (bit_shr (nth ws 4) 31) 1) 1))))
 
 ; ------------------------------------------------------------- asking
 
 ; The mailbox: its registers; the page of DMA memory its messages are in,
 ; opened, where this process sees it, and its address.
-(data Mailbox (Mailbox IoDevice IoDevice int int))
+(data Mailbox (Mailbox IoRegion IoRegion int int))
 
 ; The mailbox opened, or why not.
 (data MboxOpened (MboxOpen Mailbox) (NoMbox (list int)))
@@ -57,7 +56,7 @@
 (def mbox_limit () int 4294967296)       ; 0x100000000
 
 ; The page a message is in, or why there is none.
-(data MboxPage (MboxPage IoDevice int int) (NoMboxPage (list int)))
+(data MboxPage (MboxPage IoRegion int int) (NoMboxPage (list int)))
 
 ; That page, opened, where this process sees it, and its address; or why
 ; there is none.
@@ -69,20 +68,20 @@
           (let addrs (dma_addresses va 1)
             (if (not (eq (array_len addrs) 1))
                 (NoMboxPage "its page is not a DMA page")
-                (if (lt (array_get addrs 0) (mbox_limit))
-                    (match (dma_open va 1)
-                      ((DeviceFailed fault why) (NoMboxPage why))
-                      ((DeviceOpened m) (MboxPage m va (array_get addrs 0))))
-                    (mbox_page (sub n 1))))))
+                (lt (array_get addrs 0) (mbox_limit))
+                (match (dma_open va 1)
+                  ((IoRegionFailed fault why) (NoMboxPage why))
+                  ((IoRegionOpened m) (MboxPage m va (array_get addrs 0))))
+                (mbox_page (sub n 1)))))
         ((DmaDenied) (NoMboxPage (dma_alloc_why (DmaDenied))))
         ((DmaTooMany) (NoMboxPage (dma_alloc_why (DmaTooMany))))
         ((DmaNoRoom) (NoMboxPage (dma_alloc_why (DmaNoRoom)))))))
 
 ; The mailbox a region, with a page for its messages; or why not.
 (def mailbox_open () MboxOpened
-  (match (open_device (mbox_base) (mbox_bytes))
-    ((DeviceFailed fault why) (NoMbox "no VideoCore mailbox on the board"))
-    ((DeviceOpened mb)
+  (match (open_region (mbox_base) (mbox_bytes))
+    ((IoRegionFailed fault why) (NoMbox "no VideoCore mailbox on the board"))
+    ((IoRegionOpened mb)
       (match (mbox_page 8)
         ((NoMboxPage why) (NoMbox why))
         ((MboxPage m va pa) (MboxOpen (Mailbox mb m va pa)))))))
@@ -99,50 +98,46 @@
 (def mailbox_ask ((c Mailbox) (ws (list int)) (n int)) (Option (list int))
   (match c
     ((Mailbox mb m va pa)
-      (let w (mbox_put m 0 ws)
-        (let s (dma_sync va 1 (dma_to_device))
-          (if (not (mbox_waited mb (mbox_write_status) false 1000))
-              ((None (list int)))
-              (let x (device_write32 mb (mbox_write) (mbox_message pa))
-                (if (not (mbox_answered mb m va 1000))
-                    ((None (list int)))
-                    (Some (mbox_got m 0 n (nil int)))))))))))
+      (let (w (mbox_put m 0 ws) s (dma_sync va 1 (dma_to_device)))
+        (if (not (mbox_waited mb (mbox_write_status) false 1000))
+            ((None (list int)))
+            (let x (region_set32 mb (mbox_write) (mbox_message pa))
+              (if (not (mbox_answered mb m va 1000))
+                  ((None (list int)))
+                  (Some (mbox_got m 0 n (nil int))))))))))
 
 ; Whether the mailbox's status at off has room, FULL clear, or, for its
 ; reads, something to read, EMPTY clear; read up to n times, a
 ; millisecond apart. reads says which.
-(def mbox_waited ((mb IoDevice) (off int) (reads bool) (n int)) bool
-  (let w (device_read32 mb off)
-    (if (if reads (not (mbox_empty w)) (not (mbox_full w)))
-        true
-        (if (le n 0) false (let z (sleep_ns 1000000) (mbox_waited mb off reads (sub n 1)))))))
+(def mbox_waited ((mb IoRegion) (off int) (reads bool) (n int)) bool
+  (let w (region_get32 mb off)
+    (if (if reads (not (mbox_empty w)) (not (mbox_full w))) true
+        (le n 0) false
+        (let z (sleep_ns 1000000) (mbox_waited mb off reads (sub n 1))))))
 
 ; Whether the firmware has answered the buffer in m, at va, within n
 ; milliseconds: its code, the second word, has bit 31 once it has. The
 ; buffer says so, not the mailbox's read register, since rtc, gem and
 ; hvs share the mailbox and any of them may read the message that names
 ; another's buffer; so each drains what is there as it waits.
-(def mbox_answered ((mb IoDevice) (m IoDevice) (va int) (n int)) bool
-  (let d (mbox_drained mb 8)
-    (let i (dma_sync va 1 (dma_from_device))
-      (if (eq (bit_and (bit_shr (device_read32 m 4) 31) 1) 1)
-          true
-          (if (le n 0) false (let z (sleep_ns 1000000) (mbox_answered mb m va (sub n 1))))))))
+(def mbox_answered ((mb IoRegion) (m IoRegion) (va int) (n int)) bool
+  (let (d (mbox_drained mb 8) i (dma_sync va 1 (dma_from_device)))
+    (if (eq (bit_and (bit_shr (region_get32 m 4) 31) 1) 1) true
+        (le n 0) false
+        (let z (sleep_ns 1000000) (mbox_answered mb m va (sub n 1))))))
 
 ; The mailbox's read side emptied, up to n messages: 0.
-(def mbox_drained ((mb IoDevice) (n int)) int
-  (if (le n 0)
-      0
-      (if (mbox_empty (device_read32 mb (mbox_read_status)))
-          0
-          (let r (device_read32 mb (mbox_read)) (mbox_drained mb (sub n 1))))))
+(def mbox_drained ((mb IoRegion) (n int)) int
+  (if (le n 0) 0
+      (mbox_empty (region_get32 mb (mbox_read_status))) 0
+      (let r (region_get32 mb (mbox_read)) (mbox_drained mb (sub n 1)))))
 
 ; ws written into m from byte off, a word each: 0.
-(def mbox_put ((m IoDevice) (off int) (ws (list int))) int
+(def mbox_put ((m IoRegion) (off int) (ws (list int))) int
   (if (is_empty ws)
       0
-      (let w (device_write32 m off (head ws)) (mbox_put m (add off 4) (tail ws)))))
+      (let w (region_set32 m off (head ws)) (mbox_put m (add off 4) (tail ws)))))
 
 ; n words of m from byte off, after the reversed acc.
-(def mbox_got ((m IoDevice) (off int) (n int) (acc (list int))) (list int)
-  (if (le n 0) (rev acc) (mbox_got m (add off 4) (sub n 1) (cons (device_read32 m off) acc))))
+(def mbox_got ((m IoRegion) (off int) (n int) (acc (list int))) (list int)
+  (if (le n 0) (rev acc) (mbox_got m (add off 4) (sub n 1) (cons (region_get32 m off) acc))))

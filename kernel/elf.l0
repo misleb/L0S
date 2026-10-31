@@ -11,12 +11,12 @@
 
 ; The ELF machine of a CPU as (machine) numbers it: EM_AARCH64, 183, for
 ; aarch64, and EM_RISCV, 243, for riscv64; 0, no ELF's, for any other.
-(def elf_machine ((m int)) int (if (eq m 1) 183 (if (eq m 2) 243 0)))
+(def elf_machine ((m int)) int (if (eq m 1) 183 (eq m 2) 243 0))
 
 ; Whether the bytes of b from start up to end begin as an ELF does,
 ; "\x7FELF", whatever follows.
 (def elf_is ((b bytes) (start int) (end int)) bool
-  (if (lt (sub end start) 4) false (eq (le_u32 b start) 1179403647)))
+  (and (not (lt (sub end start) 4)) (eq (le_u32 b start) 1179403647)))
 
 ; A PT_LOAD segment: where its bytes are in the image, from the image's
 ; start; its address; its bytes in the image and in memory, the rest
@@ -34,41 +34,32 @@
   (let why (elf_header_why b start end machine)
     (if (not (is_empty why))
         (ElfRefused why)
-        (let phoff (le_u64_at b (add start 32))
-          (let phnum (le_u16_at b (add start 56))
-            (elf_segments b start (sub end start) (le_u64_at b (add start 24)) phoff 0 phnum
-                          (add phoff (mul phnum 56)) (user_base) (nil ElfSeg)))))))
+        (let (phoff (le_u64_at b (add start 32)) phnum (le_u16_at b (add start 56)))
+          (elf_segments b start (sub end start) (le_u64_at b (add start 24)) phoff 0 phnum
+                        (add phoff (mul phnum 56)) (user_base) (nil ElfSeg))))))
 
 ; Why the ELF header of the image is not the section's, or empty if it is.
 (def elf_header_why ((b bytes) (start int) (end int) (machine int)) (list int)
-  (if (lt (sub end start) 64)
-      "shorter than an ELF header"
-      (if (not (elf_is b start end))
-          "not an ELF"
-          (if (not (eq (le_u16_at b (add start 4)) 258))       ; ELFCLASS64, ELFDATA2LSB
-              "not 64-bit and little-endian"
-              (if (not (eq (le_u16_at b (add start 16)) 2))    ; ET_EXEC
-                  "not an executable"
-                  (if (not (eq (le_u16_at b (add start 18)) machine))
-                      "for another CPU"
-                      (elf_table_why b start (sub end start))))))))
+  (if (lt (sub end start) 64) "shorter than an ELF header"
+      (not (elf_is b start end)) "not an ELF"
+      (not (eq (le_u16_at b (add start 4)) 258)) "not 64-bit and little-endian"   ; ELFCLASS64, ELFDATA2LSB
+      (not (eq (le_u16_at b (add start 16)) 2)) "not an executable"              ; ET_EXEC
+      (not (eq (le_u16_at b (add start 18)) machine)) "for another CPU"
+      (elf_table_why b start (sub end start))))
 
 ; Why the program headers of an image of size bytes cannot be read, or
 ; empty if they can: 56 bytes each, at most 16, after the ELF header and
 ; within the image.
 (def elf_table_why ((b bytes) (start int) (size int)) (list int)
-  (let phoff (le_u64_at b (add start 32))
-    (let phnum (le_u16_at b (add start 56))
-      (if (not (eq (le_u16_at b (add start 54)) 56))
-          "program headers not 56 bytes"
-          (if (gt phnum 16)
-              "over 16 program headers"
-              (if (if (elf_small phoff) (ge phoff 64) false)
-                  (if (le (add phoff (mul phnum 56)) size) "" "program headers past the end")
-                  "program headers inside the ELF header"))))))
+  (let (phoff (le_u64_at b (add start 32)) phnum (le_u16_at b (add start 56)))
+    (if (not (eq (le_u16_at b (add start 54)) 56)) "program headers not 56 bytes"
+        (gt phnum 16) "over 16 program headers"
+        (and (elf_small phoff) (ge phoff 64))
+        (if (le (add phoff (mul phnum 56)) size) "" "program headers past the end")
+        "program headers inside the ELF header")))
 
 ; Whether a number read from an image is one no sum of two can overflow.
-(def elf_small ((v int)) bool (if (ge v 0) (lt v 4294967296) false))
+(def elf_small ((v int)) bool (and (ge v 0) (lt v 4294967296)))
 
 ; The PT_LOADs among the n program headers from header j, checked, in
 ; order, at most three; po is where the file bytes of the last ended,
@@ -82,14 +73,13 @@
       (let at (add start (add phoff (mul j 56)))
         (if (not (eq (le_u32 b at) 1))                         ; PT_LOAD
             (elf_segments b start size entry phoff (add j 1) n po pe acc)
-            (let sg (elf_seg_at b at)
-              (let why (elf_seg_why sg po pe size (length acc))
-                (if (not (is_empty why))
-                    (ElfRefused why)
-                    (match sg
-                      ((ElfSeg off va fsz msz perm)
-                        (elf_segments b start size entry phoff (add j 1) n (add off fsz) (add va msz)
-                                      (cons sg acc)))))))))))
+            (let (sg (elf_seg_at b at) why (elf_seg_why sg po pe size (length acc)))
+              (if (not (is_empty why))
+                  (ElfRefused why)
+                  (match sg
+                    ((ElfSeg off va fsz msz perm)
+                      (elf_segments b start size entry phoff (add j 1) n (add off fsz) (add va msz)
+                                    (cons sg acc))))))))))
 
 ; The PT_LOAD whose program header is at byte at of b.
 (def elf_seg_at ((b bytes) (at int)) ElfSeg
@@ -105,30 +95,24 @@
 (def elf_seg_why ((sg ElfSeg) (po int) (pe int) (size int) (had int)) (list int)
   (match sg
     ((ElfSeg off va fsz msz perm)
-      (if (ge had 3)
-          "over three segments"
-          (if (not (if (elf_small off) (if (elf_small va) (if (elf_small fsz) (elf_small msz) false) false) false))
-              "a segment out of range"
-              (if (eq perm 3)
-                  "a segment writable and executable"
-                  (if (not (eq (bit_and (bit_or off va) 4095) 0))
-                      "a segment not page-aligned"
-                      (elf_place_why off va fsz msz po pe size))))))))
+      (if (ge had 3) "over three segments"
+          (not (and (elf_small off) (and (elf_small va) (and (elf_small fsz) (elf_small msz)))))
+          "a segment out of range"
+          (eq perm 3) "a segment writable and executable"
+          (not (eq (bit_and (bit_or off va) 4095) 0)) "a segment not page-aligned"
+          (elf_place_why off va fsz msz po pe size)))))
 
 ; The rest of elf_seg_why, where the segment lies: why its file bytes from
 ; off or its memory from va overlap what came before, why it has more in
 ; the file than in memory, or runs past the image or above elf_top; empty
 ; if it lies well.
 (def elf_place_why ((off int) (va int) (fsz int) (msz int) (po int) (pe int) (size int)) (list int)
-  (if (lt off po)
-      "a segment over the headers or another"
-      (if (lt va pe)
-          "a segment below user_base or over another"
-          (if (gt fsz msz)
-              "a segment with more in the file than in memory"
-              (if (gt (add off fsz) size)
-                  "a segment past the end"
-                  (if (gt (add va msz) (elf_top)) "a segment above the image's range" ""))))))
+  (if (lt off po) "a segment over the headers or another"
+      (lt va pe) "a segment below user_base or over another"
+      (gt fsz msz) "a segment with more in the file than in memory"
+      (gt (add off fsz) size) "a segment past the end"
+      (gt (add va msz) (elf_top)) "a segment above the image's range"
+      ""))
 
 ; Whether entry is in one of segs that may be executed.
 (def elf_runs_at ((segs (list ElfSeg)) (entry int)) bool
@@ -136,6 +120,6 @@
       false
       (match (head segs)
         ((ElfSeg off va fsz msz perm)
-          (if (if (eq perm 2) (if (ge entry va) (lt entry (add va msz)) false) false)
+          (if (and (eq perm 2) (and (ge entry va) (lt entry (add va msz))))
               true
               (elf_runs_at (tail segs) entry))))))

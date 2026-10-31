@@ -68,25 +68,23 @@
 ; What the device's status byte says, as a reason; empty for ok.
 (def blk_why ((status int)) (list int)
   (if (eq status (blk_ok)) ""
-  (if (eq status (blk_ioerr)) "the disk failed the request"
-  (if (eq status (blk_unsupp)) "the disk does not do that"
-  (append "the disk answered " (digits status))))))
+      (eq status (blk_ioerr)) "the disk failed the request"
+      (eq status (blk_unsupp)) "the disk does not do that"
+      (append "the disk answered " (digits status))))
 
 ; Why sectors from sector, count of them, cannot be moved on a disk of cap
 ; sectors; empty if they can.
 (def blk_refusal ((sector int) (count int) (cap int)) (list int)
-  (if (if (lt count 1) true (gt count (blk_max_sectors)))
+  (if (or (lt count 1) (gt count (blk_max_sectors)))
       (append "a request moves 1 to " (append (digits (blk_max_sectors)) " sectors"))
-      (if (lt sector 0)
-          "no sector below 0"
-          (if (gt (add sector count) cap)
-              (append "past the disk's end, sector " (digits (sub cap 1)))
-              ""))))
+      (lt sector 0) "no sector below 0"
+      (gt (add sector count) cap) (append "past the disk's end, sector " (digits (sub cap 1)))
+      ""))
 
 ; Why a request of type cannot be made of a disk with features; empty if
 ; it can. A read-only disk takes no write.
 (def blk_feature_refusal ((type int) (features int)) (list int)
-  (if (if (eq type (blk_out)) (blk_has features (blk_f_ro)) false)
+  (if (and (eq type (blk_out)) (blk_has features (blk_f_ro)))
       "the disk is read-only"
       ""))
 
@@ -109,7 +107,7 @@
 ; sectors, how many requests it has made, the features the device and it
 ; agreed on, the port the device's interrupt comes to, and whether the
 ; disk has stopped answering, a request outliving blk_patience_ns.
-(data Blk (Blk IoDevice int IoDevice int int int int int bool))
+(data Blk (Blk IoRegion int IoRegion int int int int int bool))
 
 ; What came of a request: the driver after it, and why it failed, or
 ; empty.
@@ -134,10 +132,10 @@
     ((Blk d t q qa cap n fs ip hung)
       (if hung
           (BlkDone b (blk_hung_why))
-          (let h (put_bytes q (header_off) (blk_header type sector))
-            (let s (device_write8 q (status_off) 255)
-              (let c (put_bytes q 0 (blk_descriptors (add qa (header_off)) runs (eq type (blk_in)) (add qa (status_off))))
-                (blk_queued b))))))))
+          (let (h (put_bytes q (header_off) (blk_header type sector))
+                s (region_set8 q (status_off) 255)
+                c (put_bytes q 0 (blk_descriptors (add qa (header_off)) runs (eq type (blk_in)) (add qa (status_off)))))
+            (blk_queued b))))))
 
 ; The request at descriptor 0 made available and the device told.
 (def blk_queued ((b Blk)) BlkDone
@@ -157,7 +155,7 @@
     ((Blk d t q qa cap n fs ip hung)
       (let br (barrier)
         (if (eq (virtq_used_index q (used_off)) (bit_and n 65535))
-            (let b2 (barrier) (BlkDone b (blk_why (device_read8 q (status_off)))))
+            (let b2 (barrier) (BlkDone b (blk_why (region_get8 q (status_off)))))
             (match (port_try_receive ip)
               ((Message from mb)
                 (let e (if (is_irq_notice (Message from mb) (transport_irq t)) (blk_interrupted d t) 0)
@@ -174,11 +172,11 @@
 
 ; Transport t's interrupt ended: the device's status acknowledged, then
 ; the kernel's.
-(def blk_interrupted ((d IoDevice) (t int)) int
-  (let st (device_read32 d (treg t (reg_interrupt_status)))
-    (let a (device_write32 d (treg t (reg_interrupt_ack)) st)
-      (let br (barrier)
-        (match (irq_ack (transport_irq t)) ((IrqAcked) 0) ((IrqNotPending) 0))))))
+(def blk_interrupted ((d IoRegion) (t int)) int
+  (let (st (region_get32 d (treg t (reg_interrupt_status)))
+        a (region_set32 d (treg t (reg_interrupt_ack)) st)
+        br (barrier))
+    (match (irq_ack (transport_irq t)) ((IrqAcked) 0) ((IrqNotPending) 0))))
 
 ; ---------------------------------------------------------------- driving
 
@@ -199,7 +197,7 @@
     ((Ok d) (found d (find_device d (blk_device) 0)))))
 
 ; No disk is no failure: the board was started without one.
-(def found ((d IoDevice) (t int)) int
+(def found ((d IoRegion) (t int)) int
   (match (virtio_probe_features d t "the virtio-blk" "request" (ring_size) (blk_wanted))
     ((VirtioAbsent) (info_as "virtio-blk" "no virtio-blk on the board"))
     ((VirtioUnusable why) (complain why))
@@ -211,22 +209,22 @@
                         (bit_and (blk_wanted) (device_features d t 0)) 0 false)))))))
 
 ; The disk's size in sectors: config's capacity, a le64 at its start.
-(def capacity ((d IoDevice) (t int)) int
-  (bit_or (device_read32 d (treg t (reg_config)))
-          (bit_shl (device_read32 d (treg t (add (reg_config) 4))) 32)))
+(def capacity ((d IoRegion) (t int)) int
+  (bit_or (region_get32 d (treg t (reg_config)))
+          (bit_shl (region_get32 d (treg t (add (reg_config) 4))) 32)))
 
 ; The queue started, the device's interrupt bound to a port of its own,
 ; the device told the driver is ready, and the disk served.
 (def started ((b Blk)) int
   (match b
     ((Blk d t q qa cap n fs ip hung)
-      (let s (start_queue d t 0 (ring_size) qa (add qa (avail_off)) (add qa (used_off)))
-        (let iport (port_new)
-          (let why (irq_bind_or_why (transport_irq t) iport)
-            (if (not (is_empty why))
-                (complain why)
-                (let o (driver_ok d t)
-                  (start_serving (Blk d t q qa cap n fs iport hung))))))))))
+      (let (s (start_queue d t 0 (ring_size) qa (add qa (avail_off)) (add qa (used_off)))
+            iport (port_new)
+            why (irq_bind_or_why (transport_irq t) iport))
+        (if (not (is_empty why))
+            (complain why)
+            (let o (driver_ok d t)
+              (start_serving (Blk d t q qa cap n fs iport hung))))))))
 
 ; ---------------------------------------------------------------- serving
 
@@ -238,8 +236,9 @@
     (match (disk_register port)
       ((Err why) (complain (append "cannot register as a disk: " why)))
       ((Ok name)
-        (let n (match b ((Blk d t q qa cap nreq feats ip hung) (info_as "virtio-blk" (disk_line name cap (blk_has feats (blk_f_ro)) t))))
-          (let a (fs_attach_disk name) (serve b port name)))))))
+        (let (n (match b ((Blk d t q qa cap nreq feats ip hung) (info_as "virtio-blk" (disk_line name cap (blk_has feats (blk_f_ro)) t))))
+              a (fs_attach_disk name))
+          (serve b port name))))))
 
 ; Each request on port, for the disk registered as name, answered, one
 ; at a time.
@@ -265,11 +264,11 @@
 
 ; The request op with its n numbers ns, answered.
 (def requested ((b Blk) (op (list int)) (ns (list int)) (n int)) (Served Blk)
-  (if (if (eq op "info") (eq n 0) false) (info b)
-  (if (if (eq op "read") (eq n 3) false) (moved b (blk_in) (nth ns 0) (nth ns 1) (nth ns 2))
-  (if (if (eq op "write") (eq n 3) false) (moved b (blk_out) (nth ns 0) (nth ns 1) (nth ns 2))
-  (if (if (eq op "flush") (eq n 0) false) (flushed b)
-  (served_error b (append "no request " op)))))))
+  (if (and (eq op "info") (eq n 0)) (info b)
+      (and (eq op "read") (eq n 3)) (moved b (blk_in) (nth ns 0) (nth ns 1) (nth ns 2))
+      (and (eq op "write") (eq n 3)) (moved b (blk_out) (nth ns 0) (nth ns 1) (nth ns 2))
+      (and (eq op "flush") (eq n 0)) (flushed b)
+      (served_error b (append "no request " op))))
 
 ; info: the disk's size, in sectors, and a sector's; and ro after them
 ; for a read-only disk.

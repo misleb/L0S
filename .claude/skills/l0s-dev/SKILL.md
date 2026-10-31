@@ -104,7 +104,7 @@ asked the graph, and how, from their transcripts.
 
 | Path | What |
 |---|---|
-| `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `elf.l0` reads and checks a program's ELF (spec 10.3), which `process.l0` maps segment by segment with their flags' perms, bss on first touch (a raw image is refused); `process.l0`, `memory.l0` (a process's `Layout`: where its image lies, its heap, what may be written), `mounts.l0` (the mount table: the initramfs at `/` until `root_switch` makes a volume `/`, volumes at `/Volumes/LABEL` with their UUIDs), `ipc.l0`, `sched.l0`, `cpus.l0` (which process each of the other CPUs holds), `pids.l0`, `inittab.l0` are its parts. File calls on a volume go to its server as fs-protocol requests (`ask_fs`, the `AwaitingFs` state). With more than one CPU the kernel stays on CPU 0 and `many_schedule` hands processes to the others (`cpu_run`, `cpu_trapped`, spec 6.18); one out on a CPU stays `Live` in its slot, and `k_cpus` says it is out. `asm.l0` hand-assembles threads for board tests |
+| `kernel/` | the kernel, `--target virt`. `kernel.l0` is the state, every call's handler (`do_*`), `dispatch`, traps and the loop; `syscall.l0` decodes registers into a `Call`; `elf.l0` reads and checks a program's ELF (`l0 spec process`), which `process.l0` maps segment by segment with their flags' perms, bss on first touch (a raw image is refused); `process.l0`, `memory.l0` (a process's `Layout`: where its image lies, its heap, what may be written), `mounts.l0` (the mount table: the initramfs at `/` until `root_switch` makes a volume `/`, volumes at `/Volumes/LABEL` with their UUIDs), `ipc.l0`, `sched.l0`, `cpus.l0` (which process each of the other CPUs holds), `pids.l0`, `inittab.l0` are its parts. File calls on a volume go to its server as fs-protocol requests (`ask_fs`, the `AwaitingFs` state). With more than one CPU the kernel stays on CPU 0 and `many_schedule` hands processes to the others (`cpu_run`, `cpu_trapped`, spec 6.18); one out on a CPU stays `Live` in its slot, and the kernel's `.cpus` says it is out. `asm.l0` hand-assembles threads for board tests |
 | `common/` | shared by kernel, programs and host tools: `abi.l0` (call numbers `call_*`, error codes, limits, `le16`/`le64` and their readers, `label_ok`, `pages_for`, `array_from`/`array_to_list`), `text.l0` (lists and strings: `nth`, `take`, `drop`, `unwords`, `join_with`, `split_on`, `lines`, `up_to`, padding, `is_number`, `word_number(s)`, `ceil_div`); `initramfs.l0` (the cpio archive) and `queue.l0` for kernel and programs |
 | `user/lib/sys/` | in every program (`ULIB`): `l0s.l0` (call wrappers, `request`, `port_ask`, `reply_why`, `shm_region`, `shm_share_to`, `put_bytes`/`get_bytes`, `KeyEvent`, `PointerEvent`, notices, `name_wait`), `server.l0` (`name_register_or_why`, `irq_bind_or_why`, `request_numbers`, `Served`, `served_ok`/`served_error`, `request_answer`, `port_tell`, listeners), `cli.l0` (`complain_as`, `note_as`, `say`, `arg_number`, `read_whole`, `write_whole`, `done_why`; the host tools link it too). Where a `LIBS_` list says: `tty.l0` (`TTY`), `keymap.l0` (`KEYMAP`: the US layout, for `virtio-input` and `usb-hid`), `virtio.l0` (`VIRTIO`: `virtio_open`, `virtio_probe`, `virtq_mem`, `virtq_offer`, `virtq_wait`, `VirtqRun`), `procs.l0` (`PROCS`: the live processes, `state_text`), `mailbox.l0` (`MAILBOX`: the Pi 5's VideoCore mailbox, `mailbox_ask`, for `rtc` and `gem`), `paths.l0` (`PATHS`, with `proto/fs.l0` and `uuid.l0`: `root_paths`, `program_found`, `spawn_path`; a program never uses `entry_paths` or `spawn_entry` to find or start another, since `/` may be a volume) |
 | `user/lib/proto/` | the servers' protocols, client side: `display.l0`, `wm.l0`, `clock.l0`, `disk.l0`, `fs.l0`, `app.l0` (apps: a bundle's manifest, the bundles there are, the app a program is, running one by its bundle's name), `nic.l0` (`NICLIB`: the network driver's frames, Ethernet addresses), `inet.l0` (`INETLIB`, with `nic.l0`: the IPv4 stack's requests and notices, IPv4 addresses), `usb.l0` (`USBLIB`, with `format/usbdesc.l0`: the usb protocol `xhci` serves to `usb-hid` and `lsusb`), `pci.l0` (`PCILIB`: what `pcie` found) |
@@ -194,10 +194,11 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
 **A request to a server** (the compositor; the display driver is alike)
 1. Server: `user/sbin/wm/wm.l0` `requested` takes word arguments (`hello`,
    `windows`, `desktop`, `title`); `requested_window` takes numbers
-   (`window`, `damage`, `top`, `close`). Add an `(if (eq op "X") ...)` branch
-   returning a `(Served Wm)` through `okay` or `refused` (`server.l0`'s
-   `served_ok`, `served_error`). The dispatcher is split to keep nesting
-   shallow; split again rather than nest deeper. A server of numbers only
+   (`window`, `damage`, `top`, `close`). Add a test and its value, `(eq op
+   "X") ...`, to the dispatcher's one `if` of several tests, returning a
+   `(Served Wm)` through `okay` or `refused` (`server.l0`'s `served_ok`,
+   `served_error`). A long dispatcher is still split by kind of request,
+   so each `if` stays a readable table. A server of numbers only
    reads them with `request_numbers` (virtio-gpu, virtio-blk).
 2. Client: a wrapper in `user/lib/proto/wm.l0` (`compositor_ask`, `ask_nums`,
    `wm_error`), and its line in that file's header table. Every client asks
@@ -283,11 +284,36 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
   `(def complain ((why (list int))) int (complain_as "NAME" why))`
   (`cli.l0`). A driver whose device is absent says so with `note_as` and
   exits 0: no device is no failure.
-- **A state record** is one `data` with many fields, matched and rebuilt in
-  every function (`Wm`, `Drv`, `Win`). Adding a field means updating every
-  pattern: the Edit tool's replace-all on the exact pattern text does most
-  of them; then `l0 check` names the rest, with their different binding
-  names.
+- **A record's fields are named**, `(data Proc (Proc (pid int) (space
+  int) ...))`, for every type of one constructor: read one with `(.pid
+  p)`, replace one with `(.state p -1)`, several by nesting. Write no
+  accessor or one-field setter function; `match` stays for taking several
+  fields at once, and for a type of several constructors. A new field
+  still means updating every positional `match` and construction of the
+  type (`Wm`, `Drv`, `Win`): `l0 check` names each.
+- **Updating a map or array inside a record in place.** Write the field
+  read as one argument of the call whose result replaces it, and nothing
+  else in that call reading the record: `(.pages s (map_put (.pages s) k
+  v))`. Read anything else first, with `let`: `(let keys (map_keys
+  (.handles f)) (.handles f (unheld_in (.handles f) keys ...)))`. Where
+  the call answers more than the new value, a variant carrying it
+  (`NewPort r ipc`), take the record apart with `match`, call it on the
+  bare field and build the record again, as `kernel.l0`'s `k_port_new`
+  and `l0fs.l0`'s `vol_alloc_in` do: a field read and still held by the
+  record would be copied whole. `make check` lists every place that
+  copies.
+- **Shorter forms.** Several bindings are one `let`, `(let (a (f x) b (g
+  a)) body)`, and a chain of tests one `if`, `(if c1 e1 c2 e2 else)`.
+  A guard is `and` or `or`, which stop at the operand that decides; but
+  a loop whose recursive call would be `or`'s second operand stays an
+  `if`, since that operand is not in tail position.
+- **A handle is a type of one int field**, which costs nothing at run
+  time: the kernel's address spaces are `memory.l0`'s `(data Space
+  (Space (id int)))`, `(.id s)` where a builtin takes one, so a frame or
+  a pid cannot be passed for a space.
+- **A loop written once** for several uses takes a function parameter,
+  `(fn (T) K)`, given a def by name, as the library's `find_by` does
+  (`l0 doc find_by`). A builtin is passed through a one-line def.
 
 ## Bytes, not lists
 
@@ -404,7 +430,7 @@ add to that list. Documenting a listed form fails the check too, until
   says"), which flushes and keeps the line for `dmesg`.
 - **The proc runtime keeps at most 64 regions open at once.** Every
   `ui_buffer`, `shm_region` and `dma_open` is one; close it when done
-  (`close_device`, or `ui_buffer_free` / `shm_region_free`, which also
+  (`close_region`, or `ui_buffer_free` / `shm_region_free`, which also
   unmap the pages), or the 65th open fails. `wm` opens two per window
   (title bar and frame) and closes them in `give_up`.
 - **Ports** hold 32 messages of at most 4096 bytes. A message must carry
@@ -446,4 +472,6 @@ add to that list. Documenting a listed form fails the check too, until
 
 `make check` and `make test` pass. For anything that boots, draws or takes
 input, `make e2e` too (see `l0s-testing`). Never say L0 code works without
-having run them.
+having run them. `make check` fails on a file `l0 fmt` would change (`l0
+fmt FILE` or `make fmt` first) and ends listing every copy warning `l0
+check` gave: a change adds none.

@@ -10,10 +10,7 @@
 ; the status was given to anyone, by a wait or an exit notice. Its slot
 ; is kept until a new process needs it, and given first to those of
 ; processes no one will ask about (pids.l0).
-(data Gone (Gone int int bool))
-
-; The status g exited with.
-(def gone_status ((g Gone)) int (match g ((Gone st parent told) st)))
+(data Gone (Gone (status int) (parent int) (told bool)))
 
 ; An interrupt bound to a port: the pid that bound it, the port, and
 ; whether it is taken, waiting for that pid's irq_ack. One its driver let
@@ -39,7 +36,7 @@
 ; entries stay, to name the processes started from them, and to say
 ; which drive devices and what arguments a path gets. It holds the log
 ; of messages too (log.l0), which outlives the initramfs.
-(data Boot (Boot bytes (array Entry) (array bool) (array (list (list int))) int int (Map int (list int)) KLog))
+(data Boot (Boot (input bytes) (entries (array Entry)) (devs (array bool)) (defaults (array (list (list int)))) (stdin int) (pos int) (names (Map int (list int))) (log KLog)))
 
 ; Every slot of the table, the pids ready to run in order, the ports, the
 ; sleepers, the bound interrupts, the initramfs, the pid each slot holds,
@@ -47,7 +44,7 @@
 ; CPUs hold. A process out on another CPU stays Live in its slot, so that
 ; other processes' calls find it; the one whose trap is being handled is
 ; out of the table, as on one CPU.
-(data Kernel (Kernel (array Slot) (Queue int) Ipc (list Sleeper) (Map int Irq) Boot Pids Mem Cpus))
+(data Kernel (Kernel (slots (array Slot)) (ready (Queue int)) (ipc Ipc) (sleepers (list Sleeper)) (irqs (Map int Irq)) (boot Boot) (pids Pids) (mem Mem) (cpus Cpus)))
 
 ; What happens after a process traps: it goes on running; it goes back
 ; to the table, ready or waiting; it has gone; or the system stops.
@@ -65,17 +62,8 @@
 
 ; ------------------------------------------------------------- the fields
 
-; k's ports, its sleepers, how many interrupts are bound to a driver,
-; and its count of frames shared.
-(def k_ipc ((k Kernel)) Ipc (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) ipc)))
-(def k_sleepers ((k Kernel)) (list Sleeper) (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) ss)))
+; How many of k's interrupts are bound to a driver.
 (def k_irq_count ((k Kernel)) int (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (irqs_owned (map_values irqs)))))
-(def k_mem ((k Kernel)) Mem (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) mem)))
-
-; What the other CPUs hold, and k with c in its place.
-(def k_cpus ((k Kernel)) Cpus (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) cpus)))
-(def with_cpus ((k Kernel) (c Cpus)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss irqs boot next mem c))))
 
 ; ------------------------------------------------------------ CPU time
 ;
@@ -100,7 +88,7 @@
 ; k with its load sampled, if a tick is due at now: the ready queue and
 ; the threads out on other CPUs. CPU 0 runs nothing as it samples.
 (def k_tick ((k Kernel) (now int)) Kernel
-  (if (usage_due (cpus_usage (k_cpus k)) now)
+  (if (usage_due (.usage (.cpus k)) now)
       (let n (k_ready_count k)
         (match k
           ((Kernel slots ready ipc ss irqs boot next mem cpus)
@@ -110,47 +98,25 @@
 ; When the kernel's wait must end: at the soonest sleeper's time, or the
 ; load's next tick, whichever comes first, so that a tick is not missed.
 (def k_wake_at ((k Kernel)) int
-  (let tick (usage_next_tick (cpus_usage (k_cpus k)))
-    (let s (soonest (k_sleepers k))
-      (if (lt s 0) tick (min s tick)))))
+  (let (tick (usage_next_tick (.usage (.cpus k))) s (soonest (.sleepers k)))
+    (if (lt s 0) tick (min s tick))))
 
 ; Entry i of the initramfs, which must be one (is_entry).
-(def k_entry ((k Kernel) (i int)) Entry
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) (array_get es i))))))
-
-; Every entry of the initramfs.
-(def k_entries ((k Kernel)) (array Entry)
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) es)))))
-
-; How many entries the initramfs has.
-(def k_entry_count ((k Kernel)) int
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) (array_len es))))))
+(def k_entry ((k Kernel) (i int)) Entry (array_get (.entries (.boot k)) i))
 
 ; Whether the inittab lets entry i drive devices.
-(def k_entry_dev ((k Kernel) (i int)) bool
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) (array_get devs i))))))
+(def k_entry_dev ((k Kernel) (i int)) bool (array_get (.devs (.boot k)) i))
 
 ; The arguments the inittab gives entry i when started without any.
-(def k_entry_args ((k Kernel) (i int)) (list (list int))
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) (array_get defaults i))))))
-
-; The initramfs's bytes, none once a volume is /.
-(def k_input ((k Kernel)) bytes
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) input)))))
+(def k_entry_args ((k Kernel) (i int)) (list (list int)) (array_get (.defaults (.boot k)) i))
 
 ; Whether i is the index of an entry of the initramfs.
 (def is_entry ((k Kernel) (i int)) bool
-  (if (lt i 0) false (lt i (k_entry_count k))))
+  (and (not (lt i 0)) (lt i (array_len (.entries (.boot k))))))
 
 ; Whether k still holds the initramfs's bytes: until a volume is /.
 (def k_held ((k Kernel)) bool
-  (gt (bytes_len (k_input k)) 0))
+  (gt (bytes_len (.input (.boot k))) 0))
 
 ; k with the initramfs's bytes given up, and so its stdin file.
 (def k_free_initramfs ((k Kernel)) Kernel
@@ -163,16 +129,11 @@
 ; The path of p's program: its entry's, or its image's, as spawn_image
 ; was given it.
 (def k_proc_path ((k Kernel) (p Proc)) (list int)
-  (if (is_entry k (proc_module p))
-      (entry_path (k_entry k (proc_module p)))
-      (match (map_get (k_names k) (proc_pid p))
+  (if (is_entry k (.module p))
+      (.path (k_entry k (.module p)))
+      (match (map_get (.names (.boot k)) (.pid p))
         ((Some path) path)
         ((None) "?"))))
-
-; The path of each process started from an image of its own, by pid.
-(def k_names ((k Kernel)) (Map int (list int))
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) names)))))
 
 ; k with pid's image's path forgotten, pid having ended.
 (def k_forget_name ((k Kernel) (pid int)) Kernel
@@ -182,18 +143,8 @@
         ((Boot input es devs defaults stdin cur names klog)
           (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid) klog) next mem cpus))))))
 
-; The kernel's log of messages.
-(def k_log ((k Kernel)) KLog
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus)
-    (match boot ((Boot input es devs defaults stdin cur names klog) klog)))))
-
 ; k with its log replaced.
-(def k_with_log ((k Kernel) (log KLog)) Kernel
-  (match k
-    ((Kernel slots ready ipc ss irqs boot next mem cpus)
-      (match boot
-        ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names log) next mem cpus))))))
+(def k_with_log ((k Kernel) (log KLog)) Kernel (.boot k (.log (.boot k) log)))
 
 ; k with a message logged by pid (0 for the kernel) at level, of text
 ; with no newline, stamped with the time. Any level but debug is written
@@ -201,35 +152,28 @@
 ; has always reported: so the serial line shows it before any process
 ; has started, and a log nobody has read loses nothing.
 (def k_note ((k Kernel) (pid int) (level int) (text (list int))) Kernel
-  (let t (max 0 (clock_ns))
-    (let short (take text (log_text_max))
-      (let w (k_echo level short)
-        (k_with_log k (klog_add (k_log k) pid level short t))))))
+  (let (t (max 0 (clock_ns)) short (take text (log_text_max)) w (k_echo level short))
+    (k_with_log k (klog_add (.log (.boot k)) pid level short t))))
 
 ; Writes a line of text to the kernel's standard error, delivered at
 ; once, unless level is debug and the boot arguments hold no debug; 0.
 (def k_echo ((level int) (text (list int))) int
-  (if (if (lt level (log_debug)) true (any_eq "debug" (boot_args)))
-      (let w (write_err (append text "\n"))
-        (let f (file_flush (IoFile 2)) 0))
+  (if (or (lt level (log_debug)) (any_eq "debug" (boot_args)))
+      (let (w (write_err (append text "\n")) f (file_flush (IoFile 2))) 0)
       0))
 
 ; The arguments the inittab gives the program at path, if it names it.
 (def k_path_args((k Kernel) (path (list int))) (list (list int))
-  (let e (entry_index (k_entries k) path)
+  (let e (entry_index (.entries (.boot k)) path)
     (if (lt e 0) (nil (list int)) (k_entry_args k e))))
-
-; k with s as its sleepers.
-(def with_sleepers ((k Kernel) (s (list Sleeper))) Kernel
-  (match k ((Kernel slots ready ipc old irqs boot next mem cpus) (Kernel slots ready ipc s irqs boot next mem cpus))))
 
 ; k with interrupt n bound as b.
 (def with_irq ((k Kernel) (n int) (b Irq)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss (map_put irqs n b) boot next mem cpus))))
+  (.irqs k (map_put (.irqs k) n b)))
 
 ; k with interrupt n bound to nothing.
 (def without_irq ((k Kernel) (n int)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss (map_remove irqs n) boot next mem cpus))))
+  (.irqs k (map_remove (.irqs k) n)))
 
 ; What interrupt n is bound to, if anything.
 (def k_irq ((k Kernel) (n int)) (Option Irq)
@@ -241,7 +185,7 @@
 
 ; Whether pid runs on CPU 0, as cpus_here says, with k's ready queue.
 (def k_here ((k Kernel) (pid int)) bool
-  (cpus_here (k_cpus k) pid (k_waiting k)))
+  (cpus_here (.cpus k) pid (k_waiting k)))
 
 ; How many pids the ready queue holds, those it will drop included.
 (def k_ready_count ((k Kernel)) int
@@ -257,7 +201,7 @@
 
 ; k with pid last on the ready queue.
 (def push_ready ((k Kernel) (pid int)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots (queue_push ready pid) ipc ss irqs boot next mem cpus))))
+  (.ready k (queue_push (.ready k) pid)))
 
 ; Whether pid is the one its slot holds, or last held: a pid from an
 ; earlier turn of the slot, or never given, names nothing, so every
@@ -269,7 +213,7 @@
 (def put_slot ((k Kernel) (pid int) (s Slot)) Kernel
   (if (not (k_current k pid))
       k
-      (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel (array_set slots (slot_of pid) s) ready ipc ss irqs boot next mem cpus)))))
+      (.slots k (array_set (.slots k) (slot_of pid) s))))
 
 ; k with pid's slot taken out, left Free, and the slot.
 (data TakenSlot (TakenSlot Kernel Slot))
@@ -296,7 +240,7 @@
           (match (array_get slots (slot_of pid))
             ((Free) (LookFree))
             ((Live p) (LookLive))
-            ((Dead g) (LookDead (gone_status g))))))))
+            ((Dead g) (LookDead (.status g))))))))
 
 ; The pid slot i holds, or last held, 0 for none yet.
 (def k_pid_at ((k Kernel) (i int)) int
@@ -304,15 +248,13 @@
 
 ; p back in its slot, and on the ready queue if it is ready.
 (def park ((k Kernel) (p Proc)) Kernel
-  (let pid (proc_pid p)
-    (let ready (is_ready (proc_state p))
-      (let k2 (put_slot k pid (Live p))
-        (if ready (push_ready k2 pid) k2)))))
+  (let (pid (.pid p) ready (is_ready (proc_state p)) k2 (put_slot k pid (Live p)))
+    (if ready (push_ready k2 pid) k2)))
 
 ; q back in its slot as it was. Unlike park, never queues it: a process
 ; already ready is on the ready queue once already.
 (def restore ((k Kernel) (q Proc)) Kernel
-  (put_slot k (proc_pid q) (Live q)))
+  (put_slot k (.pid q) (Live q)))
 
 ; ------------------------------------------------------- memory, through k
 
@@ -336,9 +278,52 @@
         ((Shared m2 q2 v) (KShared (Kernel slots ready ipc ss irqs boot next m2 cpus) q2 v))
         ((ShareRefused m2 q2 code) (KShared (Kernel slots ready ipc ss irqs boot next m2 cpus) q2 code))))))
 
-; k with its counts and windows m.
-(def with_mem ((k Kernel) (m Mem)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready ipc ss irqs boot next m cpus))))
+; q without its n DMA or shared pages from page va, through k, and q
+; back in its slot.
+(def k_unmapped ((k Kernel) (q Proc) (va int) (n int)) Kernel
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
+      (match (proc_unmap mem q va n)
+        ((Unmapped m2 q2) (restore (Kernel slots ready ipc ss irqs boot next m2 cpus) q2))))))
+
+; ----------------------------------------------------- ports, through k
+
+; Taken apart and built again, as k_dma_alloc does memory, so that the
+; ports change in place: k with them read through a field, and still
+; held by k, would be copied whole.
+
+; A port made for owner through k: its number, and k with it.
+(data KPort (KPort int Kernel))
+
+; ipc_port_new through k.
+(def k_port_new ((k Kernel) (owner int)) KPort
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
+      (match (ipc_port_new ipc owner)
+        ((NewPort r i2) (KPort r (Kernel slots ready i2 ss irqs boot next mem cpus)))))))
+
+; What a call that registers on behalf of pid came to through k: its
+; result, and k after it.
+(data KRegistered (KRegistered int Kernel))
+
+; f, ipc_set_ports or ipc_unregister, done on k's ports for pid with arg.
+(def k_registered ((k Kernel) (f (fn (Ipc int (list int)) Registered)) (pid int) (arg (list int))) KRegistered
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
+      (match (f ipc pid arg)
+        ((Registered code i2) (KRegistered code (Kernel slots ready i2 ss irqs boot next mem cpus)))))))
+
+; What taking pid's thread back from its CPU came to through k: k
+; without it, and where it was; or k as it was if it was not out.
+(data KBack (KBack Kernel OnCpu) (KNotOut Kernel))
+
+; cpus_back through k.
+(def k_cpus_back ((k Kernel) (pid int) (now int)) KBack
+  (match k
+    ((Kernel slots ready ipc ss irqs boot next mem cpus)
+      (match (cpus_back cpus pid now)
+        ((CpuNotOut c) (KNotOut (Kernel slots ready ipc ss irqs boot next mem c)))
+        ((CpuBack c on) (KBack (Kernel slots ready ipc ss irqs boot next mem c) on))))))
 
 ; ------------------------------------------------------------ file windows
 
@@ -358,12 +343,10 @@
 ; one: none is made for a port no live process owns, whose request fails
 ; anyway, nor for p's own, whose request waits for itself.
 (def windowed ((k Kernel) (p Proc) (server int)) Windowed
-  (let owner (ipc_owner (k_ipc k) server)
-    (if (if (lt owner 1) true (eq owner (proc_pid p)))
-        (WinReady k)
-        (if (ge (mem_window_at (k_mem k) (proc_pid p) server) 0)
-            (WinReady k)
-            (window_made k (proc_pid p) owner server)))))
+  (let owner (ipc_owner (.ipc k) server)
+    (if (or (lt owner 1) (eq owner (.pid p))) (WinReady k)
+        (ge (mem_window_at (.mem k) (.pid p) server) 0) (WinReady k)
+        (window_made k (.pid p) owner server))))
 
 ; client's window mapped into owner, the server at port server, and told
 ; to it; err_fault if owner has no room for it, or the kernel is out of
@@ -376,10 +359,10 @@
         ((Free) (WinReady (put_slot k2 owner (Free))))
         ((Dead g) (WinReady (put_slot k2 owner (Dead g))))
         ((Live q)
-          (match (proc_window_alloc (k_mem k2) q (window_pages))
-            ((ShareRefused m2 q2 code) (WinRefused (restore (with_mem k2 m2) q2) code))
+          (match (proc_window_alloc (.mem k2) q (window_pages))
+            ((ShareRefused m2 q2 code) (WinRefused (restore (.mem k2 m2) q2) code))
             ((Shared m2 q2 va)
-              (window_told (restore (with_mem k2 (mem_window_add m2 (Window client owner server va (proc_space q2)))) q2)
+              (window_told (restore (.mem k2 (mem_window_add m2 (Window client owner server va (.space q2)))) q2)
                            client owner server va))))))))
 
 ; k once the server at port server is sent client's window notice: or,
@@ -393,30 +376,28 @@
 ; client's window at va of owner, the server at port server, unmapped
 ; from owner and forgotten.
 (def window_undone ((k Kernel) (client int) (owner int) (server int) (va int)) Kernel
-  (let k1 (with_mem k (mem_window_drop (k_mem k) client server))
+  (let k1 (.mem k (mem_window_drop (.mem k) client server))
     (match (take_slot k1 owner)
       ((TakenSlot k2 s)
         (match s
-          ((Live q)
-            (match (proc_unmap (k_mem k2) q va (window_pages))
-              ((Unmapped m2 q2) (restore (with_mem k2 m2) q2))))
+          ((Live q) (k_unmapped k2 q va (window_pages)))
           ((Free) (put_slot k2 owner (Free)))
           ((Dead g) (put_slot k2 owner (Dead g))))))))
 
 ; Where client's window to the server at port is: the server's space and
 ; the window's first page; or none. A window the kernel keeps is mapped
 ; whole (memory.l0's Window), so space_read and space_write reach it.
-(data WinSpace (WinSpace int int) (NoWinSpace))
+(data WinSpace (WinSpace Space int) (NoWinSpace))
 
 ; client's window to port, as WinSpace says.
 (def window_space ((k Kernel) (client int) (port int)) WinSpace
-  (let s (mem_window_space (k_mem k) client port)
-    (if (lt s 0) (NoWinSpace) (WinSpace s (mem_window_at (k_mem k) client port)))))
+  (let s (mem_window_space (.mem k) client port)
+    (if (lt (.id s) 0) (NoWinSpace) (WinSpace s (mem_window_at (.mem k) client port)))))
 
 ; k without the windows q serves that it no longer maps whole, once it
 ; has unmapped pages or had them taken back.
 (def windows_kept ((k Kernel) (q Proc)) Kernel
-  (with_mem k (mem_windows_mapped (k_mem k) (proc_pid q) (proc_pages q))))
+  (.mem k (mem_windows_mapped (.mem k) (.pid q) (proc_pages q))))
 
 ; k with p's space and frames freed, p having ended.
 (def k_release ((k Kernel) (p Proc)) Kernel
@@ -509,7 +490,7 @@
 ; A receive into p of the message waiting on port, as Taking says:
 ; err_too_big, the message kept, if its header and payload are over max.
 (def try_take ((k Kernel) (p Proc) (port int) (buf int) (max int)) Taking
-  (match (ipc_peek (k_ipc k) port)
+  (match (ipc_peek (.ipc k) port)
     ((None) (NoMessage k p))
     ((Some m)
       (match m
@@ -541,10 +522,10 @@
 ; as try_take answers, with the port it came on after the payload, a
 ; u32: err_too_big, the message kept, if the three are over max.
 (def try_take_set ((k Kernel) (p Proc) (buf int) (max int)) Taking
-  (match (ipc_oldest (k_ipc k) (ipc_set_of (k_ipc k) (proc_pid p)))
+  (match (ipc_oldest (.ipc k) (ipc_set_of (.ipc k) (.pid p)))
     ((None) (NoMessage k p))
     ((Some port)
-      (match (ipc_peek (k_ipc k) port)
+      (match (ipc_peek (.ipc k) port)
         ((None) (NoMessage k p))
         ((Some m)
           (match m
@@ -567,7 +548,7 @@
 
 ; port's owner, if it is waiting on port, given what waits there.
 (def notify ((k Kernel) (port int)) Kernel
-  (let owner (ipc_owner (k_ipc k) port)
+  (let owner (ipc_owner (.ipc k) port)
     (if (lt owner 1)
         k
         (match (take_slot k owner)
@@ -591,7 +572,7 @@
             ((NoMessage k2 r) (restore k2 r)))
           (restore k q)))
     ((ReceivingSet n buf max)
-      (if (any_eq port (ipc_set_of (k_ipc k) (proc_pid q)))
+      (if (any_eq port (ipc_set_of (.ipc k) (.pid q)))
           (match (try_take_set k q buf max)
             ((Took k2 r v) (park k2 (proc_set_state (proc_answer r v) (Ready))))
             ((NoMessage k2 r) (restore k2 r)))
@@ -616,11 +597,9 @@
 ; err_denied if it is not a program, or not an ELF the kernel loads,
 ; err_fault if no process can be made.
 (def spawn ((k Kernel) (m int) (parent int) (args (Option (list (list int)))) (tty int)) Spawned
-  (if (if (not (is_entry k m)) true (not (k_held k)))
-      (Spawned k (err_no_port))
-      (if (not (entry_is_exec (k_entry k m)))
-          (Spawned k (err_denied))
-          (spawn_from k m parent (args_or args (k_entry_args k m)) tty (k_input k) (entry_start (k_entry k m)) (entry_end (k_entry k m))))))
+  (if (or (not (is_entry k m)) (not (k_held k))) (Spawned k (err_no_port))
+      (not (entry_is_exec (k_entry k m))) (Spawned k (err_denied))
+      (spawn_from k m parent (args_or args (k_entry_args k m)) tty (.input (.boot k)) (.start (k_entry k m)) (.end (k_entry k m)))))
 
 ; A new process of module m, an entry, or -1 for an image of its own,
 ; whose image is the bytes of input from start up to end. It takes the
@@ -636,7 +615,7 @@
 ; The rest of spawn_from, once img is an ELF: the slot for it chosen, or
 ; err_fault if every slot is live.
 (def spawn_slot ((k Kernel) (m int) (parent int) (args (list (list int))) (tty int) (input bytes) (start int) (end int) (img Image)) Spawned
-  (let s (pick_slot (slot_kinds k parent) (k_pids k) (slot_of parent))
+  (let s (pick_slot (slot_kinds k parent) (.pids k) (slot_of parent))
     (if (lt s 0)
         (Spawned k (err_fault))
         (spawn_in k s m parent args tty input start end img))))
@@ -656,9 +635,6 @@
                 (Spawned (Kernel (array_set slots s (Live p)) (queue_push ready pid) ipc ss irqs boot (pids_give pids s) m2
                                  (cpus_started cpus pid (clock_ns)))
                          pid)))))))))
-
-; The pid each slot holds, or last held.
-(def k_pids ((k Kernel)) Pids (match k ((Kernel slots ready ipc ss irqs boot pids mem cpus) pids)))
 
 ; What each slot holds, as pick_slot sees it, while running runs.
 (def slot_kinds ((k Kernel) (running int)) (array int)
@@ -682,14 +658,14 @@
         ((Dead g)
           (match g
             ((Gone st parent told)
-              (if (if told true (parent_gone k running parent)) (kind_spare) (kind_kept)))))))))
+              (if (or told (parent_gone k running parent)) (kind_spare) (kind_kept)))))))))
 
 ; Whether parent, of a process that has exited, can no longer ask for its
 ; status: the kernel, which never does, or a process that has gone.
 (def parent_gone ((k Kernel) (running int) (parent int)) bool
-  (if (eq parent 0)
-      true
-      (if (eq parent running) false (not (eq (look k parent) (LookLive))))))
+  (if (eq parent 0) true
+      (eq parent running) false
+      (not (eq (look k parent) (LookLive)))))
 
 ; The arguments given, or otherwise if none were.
 (def args_or ((given (Option (list (list int)))) (otherwise (list (list int)))) (list (list int))
@@ -698,9 +674,8 @@
 ; p has ended with status: its ports, names, sleep, and interrupts go,
 ; and whoever waits for it is told.
 (def exit_proc ((k Kernel) (p Proc) (status int)) Step
-  (let pid (proc_pid p)
-    (let k2 (end_proc (exit_noted k p status) p status)
-      (if (eq pid 1) (Halt status) (Next k2)))))
+  (let (pid (.pid p) k2 (end_proc (exit_noted k p status) p status))
+    (if (eq pid 1) (Halt status) (Next k2))))
 
 ; k with p's end logged as a warning when its status is neither 0, a
 ; program's own failure, 1, nor a kill's, 139, which kill logs: a runtime
@@ -708,7 +683,7 @@
 (def exit_noted ((k Kernel) (p Proc) (status int)) Kernel
   (if (any_eq status (cons 0 (cons 1 (cons 139 (nil int)))))
       k
-      (k_note k 0 (log_warn) (exit_text (base_name (k_proc_path k p)) (proc_pid p) status))))
+      (k_note k 0 (log_warn) (exit_text (base_name (k_proc_path k p)) (.pid p) status))))
 
 ; "l0s: process PID (NAME) exited with status STATUS".
 (def exit_text ((name (list int)) (pid int) (status int)) (list int)
@@ -720,21 +695,21 @@
 ; forgotten, those it was the client of and those it served, those
 ; waiting for it woken, and those watching told.
 (def end_proc ((k Kernel) (p Proc) (status int)) Kernel
-  (let pid (proc_pid p)
-    (let ws (proc_watchers p)
-      (let ns (irq_numbers k)
-        (let k0 (with_cpus (with_mem k (mem_windows_forget (k_mem k) pid)) (cpus_forget (k_cpus k) pid))
-        (let k1 (release_irqs (k_forget_name (k_forget (k_release k0 p) pid) pid) pid ns)
-          (let k2 (with_sleepers k1 (sleep_remove (k_sleepers k1) pid))
-            (let told (if (is_empty ws) (has_waiter k2 pid 1) true)
-              (let k3 (wake_waiters (put_slot k2 pid (Dead (Gone status (proc_parent p) told))) pid (wait_word status) 1)
-                (tell_exit k3 ws pid status))))))))))
+  (let (pid (.pid p)
+        ws (.watchers (.state p))
+        ns (irq_numbers k)
+        k0 (.cpus (.mem k (mem_windows_forget (.mem k) pid)) (cpus_forget (.cpus k) pid))
+        k1 (release_irqs (k_forget_name (k_forget (k_release k0 p) pid) pid) pid ns)
+        k2 (.sleepers k1 (sleep_remove (.sleepers k1) pid))
+        told (if (is_empty ws) (has_waiter k2 pid 1) true)
+        k3 (wake_waiters (put_slot k2 pid (Dead (Gone status (.parent (.state p)) told))) pid (wait_word status) 1))
+    (tell_exit k3 ws pid status)))
 
 ; Whether a process from slot i on waits for pid.
 (def has_waiter ((k Kernel) (pid int) (i int)) bool
-  (if (gt i (max_procs))
-      false
-      (if (waits_for k i pid) true (has_waiter k pid (add i 1)))))
+  (if (gt i (max_procs)) false
+      (waits_for k i pid) true
+      (has_waiter k pid (add i 1))))
 
 ; Whether the process in slot i is live and waiting for pid.
 (def waits_for ((k Kernel) (i int) (pid int)) bool
@@ -769,9 +744,10 @@
 (def k_forget ((k Kernel) (pid int)) Kernel
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem cpus)
-      (let gone (ipc_owned ipc pid)
-        (let k2 (unblock_all (Kernel slots ready (ipc_forget ipc pid) ss irqs boot next mem cpus) (ipc_blocked_by ipc pid))
-          (if (is_empty gone) k2 (end_reads k2 gone 1)))))))
+      (let (gone (ipc_owned ipc pid)
+            blocked (ipc_blocked_by ipc pid)
+            k2 (unblock_all (Kernel slots ready (ipc_forget ipc pid) ss irqs boot next mem cpus) blocked))
+        (if (is_empty gone) k2 (end_reads k2 gone 1))))))
 
 ; Each process from slot i on reading from a terminal whose port is among
 ; gone, its read answered as the end of input; and each waiting for a
@@ -797,7 +773,7 @@
                   (restore k2 q)))
             ((AwaitingFs server reply op buf n)
               (if (any_eq server gone)
-                  (park (with_ipc k2 (ipc_close (k_ipc k2) pid reply)) (proc_set_state (proc_answer (fs_closing q op buf) -5) (Ready)))
+                  (park (.ipc k2 (ipc_close (.ipc k2) pid reply)) (proc_set_state (proc_answer (fs_closing q op buf) -5) (Ready)))
                   (restore k2 q)))
             ((Ready) (restore k2 q))
             ((Receiving port buf max) (restore k2 q))
@@ -869,7 +845,7 @@
 
 ; p ended by the kernel, for why, as a fault ends a process on Unix.
 (def kill ((k Kernel) (p Proc) (why (list int))) Step
-  (exit_proc (k_note k 0 (log_error) (kill_text (base_name (k_proc_path k p)) (proc_pid p) why)) p 139))
+  (exit_proc (k_note k 0 (log_error) (kill_text (base_name (k_proc_path k p)) (.pid p) why)) p 139))
 
 ; The line the kernel writes when it kills process pid, named name, for
 ; why: "l0s: process PID (NAME) killed: WHY".
@@ -878,10 +854,10 @@
 
 ; kill_message without its newline, the text the kernel logs.
 (def kill_text ((name (list int)) (pid int) (why (list int))) (list int)
-  (let a (push "l0s: process " (nil int))
-    (let b (push (digits pid) a)
-      (let c (push (append " (" (append name ") killed: ")) b)
-        (rev (push why c))))))
+  (let (a (push "l0s: process " (nil int))
+        b (push (digits pid) a)
+        c (push (append " (" (append name ") killed: ")) b))
+    (rev (push why c))))
 
 ; ------------------------------------------------------------------ calls
 
@@ -892,16 +868,16 @@
 ; Whether p may drive devices: a program of the initramfs's with a dev
 ; line; never one started from an image of its own.
 (def proc_dev ((k Kernel) (p Proc)) bool
-  (if (is_entry k (proc_module p)) (k_entry_dev k (proc_module p)) false))
+  (and (is_entry k (.module p)) (k_entry_dev k (.module p))))
 
 ; The region call: device memory for a dev module, mapped where its
 ; device pages are next free, or, for a range starting at a DMA page of
 ; its own, the DMA pages it has there. A base in the high user range that
 ; is no page of p's is a device's, as on a board whose devices lie there.
 (def do_region ((k Kernel) (p Proc) (base int) (len int)) Proc
-  (if (if (in_device_area base) (proc_has_page p (page_of base)) false)
-      (proc_dma_region p base len)
-      (if (proc_dev k p) (proc_region p base len) (proc_answer p -3))))
+  (if (and (in_device_area base) (proc_has_page p (page_of base))) (proc_dma_region p base len)
+      (proc_dev k p) (proc_region p base len)
+      (proc_answer p -3)))
 
 ; p's n DMA or shared pages from va mapped into pid's next device pages
 ; too, the same frames, with perm, share_rw for shm_share and share_ro
@@ -909,17 +885,16 @@
 ; 1 or over dma_limit, err_fault if they are not p's or pid has no room,
 ; err_no_port if there is no such process.
 (def do_shm_share ((k Kernel) (p Proc) (va int) (n int) (pid int) (perm int)) Step
-  (if (if (lt n 1) true (gt n (dma_limit)))
+  (if (or (lt n 1) (gt n (dma_limit)))
       (resume_with k p (err_too_big))
       (match (dma_frames p (page_of va) n (nil int))
         ((None) (resume_with k p (err_fault)))
         ((Some fs)
-          (if (eq pid (proc_pid p))
+          (if (eq pid (.pid p))
               (match (k_map_shared k p fs perm)
                 ((KShared k2 p2 v) (resume_with k2 p2 v)))
-              (if (not (is_pid pid))
-                  (resume_with k p (err_no_port))
-                  (share_into k p pid fs perm)))))))
+              (not (is_pid pid)) (resume_with k p (err_no_port))
+              (share_into k p pid fs perm))))))
 
 ; The rest of do_shm_share for another process pid: the frames fs mapped
 ; into it with perm, and p answered with where pid reaches them, or why
@@ -941,7 +916,7 @@
 ; done with them. A file window of p's with a page among them is
 ; forgotten, as one taken back from p by shm_revoke is.
 (def do_shm_unmap ((k Kernel) (p Proc) (va int) (n int)) Step
-  (if (if (lt n 1) true (gt n (dma_limit)))
+  (if (or (lt n 1) (gt n (dma_limit)))
       (resume_with k p (err_too_big))
       (match (dma_frames p (page_of va) n (nil int))
         ((None) (resume_with k p (err_fault)))
@@ -956,16 +931,14 @@
 ; p's, err_no_port if there is no such process, err_denied if it is p, or
 ; drives devices, since its device may have been given their addresses.
 (def do_shm_revoke ((k Kernel) (p Proc) (va int) (n int) (pid int)) Step
-  (if (if (lt n 1) true (gt n (dma_limit)))
+  (if (or (lt n 1) (gt n (dma_limit)))
       (resume_with k p (err_too_big))
       (match (dma_frames p (page_of va) n (nil int))
         ((None) (resume_with k p (err_fault)))
         ((Some fs)
-          (if (eq pid (proc_pid p))
-              (resume_with k p (err_denied))
-              (if (not (is_pid pid))
-                  (resume_with k p (err_no_port))
-                  (revoke_from k p pid fs)))))))
+          (if (eq pid (.pid p)) (resume_with k p (err_denied))
+              (not (is_pid pid)) (resume_with k p (err_no_port))
+              (revoke_from k p pid fs))))))
 
 ; The rest of do_shm_revoke for another process pid: its mappings of the
 ; frames fs taken back, and p answered with how many; err_denied if pid
@@ -1002,13 +975,13 @@
     ((CClose s) (do_close k p s))
     ((CRename from flen to tlen) (do_rename k p from flen to tlen))
     ((CRemove path len) (do_remove k p path len))
-    ((CArgCount) (resume_with k p (length (proc_args p))))
+    ((CArgCount) (resume_with k p (length (.args (.state p)))))
     ((CArg i buf n) (do_arg k p i buf n))
     ((CRegion base len) (Resume k (do_region k p base len)))
     ((CRelease base len) (resume_with k (if (release_unmaps (frame_free_count) (div len (page_size))) (proc_heap_release p base len) p) 0))
     ((CUnregion addr len) (resume_with k (proc_unregion p addr len) 0))
     ((CYield) (Park k (proc_answer p 0)))
-    ((CPid) (resume_with k p (proc_pid p)))
+    ((CPid) (resume_with k p (.pid p)))
     ((CPortNew) (do_port_new k p))
     ((CSend port buf len) (do_send k p port buf len))
     ((CReceive port buf max wait) (do_receive k p port buf max wait))
@@ -1017,7 +990,7 @@
     ((CUnregister buf len) (do_unregister k p buf len))
     ((CRegister port buf len) (do_register k p port buf len))
     ((CLookup buf len) (do_lookup k p buf len))
-    ((CSpawn m) (match (spawn k m (proc_pid p) ((None (list (list int)))) (proc_tty_port p)) ((Spawned k2 pid) (spawn_answered k2 p pid))))
+    ((CSpawn m) (match (spawn k m (.pid p) ((None (list (list int)))) (proc_tty_port p)) ((Spawned k2 pid) (spawn_answered k2 p pid))))
     ((CSpawnArgs m buf len) (do_spawn_args k p m buf len))
     ((CProcInfo pid buf max) (do_proc_info k p pid buf max))
     ((CDmaAlloc n) (if (proc_dev k p) (k_dma_alloc k p n) (resume_with k p (err_denied))))
@@ -1040,7 +1013,7 @@
     ((CRootSwitch buf len) (do_root_switch k p buf len))
     ((CSpawnImage buf len) (do_spawn_image k p buf len))
     ((CChdir buf len) (do_chdir k p buf len))
-    ((CGetCwd buf max) (give_record k p (proc_cwd p) buf max))
+    ((CGetCwd buf max) (give_record k p (.cwd (.state p)) buf max))
     ((CLogWrite level buf len) (do_log_write k p level buf len))
     ((CLogRead seq buf max) (do_log_read k p seq buf max))
     ((CCpuUsage pid buf max) (do_cpu_usage k p pid buf max))
@@ -1064,16 +1037,14 @@
 ; last read it to, a volume's by asking its server. The answer is how
 ; many bytes were copied to buf, 0 at the end, or -5.
 (def do_read ((k Kernel) (p Proc) (s int) (buf int) (n int)) Step
-  (if (lt n 0)
-      (resume_with k p -5)
-      (if (eq s 0)
-          (if (eq (proc_tty_port p) 0) (read_stdin k p buf n) (read_tty k p buf n))
-          (match (proc_open_file p s)
-            ((None) (resume_with k p -5))
-            ((Some f)
-              (match f
-                ((Open e offset) (read_open k p s e offset buf n))
-                ((OpenRemote port h) (read_remote k p port h buf n))))))))
+  (if (lt n 0) (resume_with k p -5)
+      (eq s 0) (if (eq (proc_tty_port p) 0) (read_stdin k p buf n) (read_tty k p buf n))
+      (match (proc_open_file p s)
+        ((None) (resume_with k p -5))
+        ((Some f)
+          (match f
+            ((Open e offset) (read_open k p s e offset buf n))
+            ((OpenRemote port h) (read_remote k p port h buf n)))))))
 
 ; Standard input from the inittab's stdin file, for a process on the
 ; kernel's own terminal: up to n bytes, and io_chunk at most, from where
@@ -1086,15 +1057,15 @@
         ((Boot input es devs defaults stdin cur names klog)
           (if (lt stdin 0)
               (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem cpus) p 0)
-              (let e (array_get es stdin)
-                (let from (add (entry_start e) cur)
-                  (let cnt (min n (min (io_chunk) (sub (entry_end e) from)))
-                    (match (proc_copy_in p buf input from (add from cnt))
-                      ((CopyInBad q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem cpus) q -5))
-                      ((CopiedIn q)
-                        (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names klog) next mem cpus)
-                                     q cnt))))))))))))
+              (let (e (array_get es stdin)
+                    from (add (.start e) cur)
+                    cnt (min n (min (io_chunk) (sub (.end e) from))))
+                (match (proc_copy_in p buf input from (add from cnt))
+                  ((CopyInBad q)
+                    (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem cpus) q -5))
+                  ((CopiedIn q)
+                    (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names klog) next mem cpus)
+                                 q cnt))))))))))
 
 ; A file of the initramfs, opened before it was given up, reads as at its
 ; end from then on.
@@ -1106,12 +1077,12 @@
 ; moved past them; their count, 0 at its end, or -5 if p may not take
 ; them at buf.
 (def read_held ((k Kernel) (p Proc) (s int) (e int) (offset int) (buf int) (n int)) Step
-  (let entry (k_entry k e)
-    (let from (add (entry_start entry) offset)
-      (let cnt (min n (min (io_chunk) (sub (entry_end entry) from)))
-        (match (proc_copy_in p buf (k_input k) from (add from cnt))
-          ((CopyInBad q) (resume_with k q -5))
-          ((CopiedIn q) (resume_with k (proc_seek q s e (add offset cnt)) cnt)))))))
+  (let (entry (k_entry k e)
+        from (add (.start entry) offset)
+        cnt (min n (min (io_chunk) (sub (.end entry) from))))
+    (match (proc_copy_in p buf (.input (.boot k)) from (add from cnt))
+      ((CopyInBad q) (resume_with k q -5))
+      ((CopiedIn q) (resume_with k (proc_seek q s e (add offset cnt)) cnt)))))
 
 ; A path p gives, made absolute, or none if p may not give it: past
 ; path_limit, or not p's to read.
@@ -1121,11 +1092,11 @@
 ; directory, with its . and .. taken out: PathBad if it is over path_limit
 ; once it is.
 (def path_from ((p Proc) (buf int) (len int)) PathGot
-  (if (if (lt len 0) true (gt len (path_limit)))
+  (if (or (lt len 0) (gt len (path_limit)))
       (PathBad p)
       (match (proc_copy_out p buf len)
         ((CopyOutBad q) (PathBad q))
-        ((CopiedOut q b) (path_resolved q (path_resolve (proc_cwd q) (bytes_to_list b)))))))
+        ((CopiedOut q b) (path_resolved q (path_resolve (.cwd (.state q)) (bytes_to_list b)))))))
 
 ; q's path, which path_resolve gave, unless it is over path_limit.
 (def path_resolved ((q Proc) (path (list int))) PathGot
@@ -1141,10 +1112,10 @@
     ((PathGot q path)
       (if (not (any_eq mode (cons 1 (cons 2 (cons 3 (nil int))))))
           (resume_with k q -5)
-          (match (mount_where (ipc_mounts (k_ipc k)) path)
+          (match (mount_where (.mounts (.ipc k)) path)
             ((InRoot) (open_root k q path mode))
             ((InVolumes) (resume_with k q -8))
-            ((InNothing direct) (resume_with k q (if (eq mode 1) -3 (if direct -4 -9))))
+            ((InNothing direct) (resume_with k q (if (eq mode 1) -3 direct -4 -9)))
             ((InServer port asked) (open_remote k q port asked mode)))))))
 
 ; Opens the initramfs's file at path. To read, mode 1: a new stream, or -3
@@ -1153,32 +1124,28 @@
 ; read-only, so -8 for a directory, -4 where the directory it would be in
 ; exists, and -9 where it does not.
 (def open_root ((k Kernel) (q Proc) (path (list int)) (mode int)) Step
-  (let e (entry_index (k_entries k) path)
+  (let e (entry_index (.entries (.boot k)) path)
     (if (eq mode 1)
         (open_to_read k q e)
-        (resume_with k q (if (if (ge e 0) (entry_is_dir (k_entry k e)) false)
-                             -8
-                             (if (has_dir k (parent_path path)) -4 -9))))))
+        (resume_with k q (if (and (ge e 0) (entry_is_dir (k_entry k e))) -8
+                             (has_dir k (parent_path path)) -4
+                             -9)))))
 
 ; The rest of open_root, to read entry e, -1 for none: as open_root
 ; says, and -5 too for an entry that is neither a file nor a directory.
 (def open_to_read ((k Kernel) (p Proc) (e int)) Step
-  (if (lt e 0)
-      (resume_with k p -3)
-      (if (entry_is_dir (k_entry k e))
-          (resume_with k p -8)
-          (if (not (entry_is_file (k_entry k e)))
-              (resume_with k p -5)
-              (match (proc_open p e)
-                ((Opened q s) (resume_with k q s)))))))
+  (if (lt e 0) (resume_with k p -3)
+      (entry_is_dir (k_entry k e)) (resume_with k p -8)
+      (not (entry_is_file (k_entry k e))) (resume_with k p -5)
+      (match (proc_open p e)
+        ((Opened q s) (resume_with k q s)))))
 
 ; Whether path is a directory: the root always, as an archive need not
 ; list it.
 (def has_dir ((k Kernel) (path (list int))) bool
-  (if (eq path "/")
-      true
-      (let e (entry_index (k_entries k) path)
-        (if (lt e 0) false (entry_is_dir (k_entry k e))))))
+  (or (eq path "/")
+      (let e (entry_index (.entries (.boot k)) path)
+        (and (not (lt e 0)) (entry_is_dir (k_entry k e))))))
 
 ; Makes the directory at the len bytes at buf, from p's current directory,
 ; its new one: 0, or -3 if there is none, -9 if it is a file, -5 if the
@@ -1191,7 +1158,7 @@
     ((PathGot q path)
       (if (eq path "/")
           (resume_with k (proc_set_cwd q path) 0)
-          (match (mount_where (ipc_mounts (k_ipc k)) path)
+          (match (mount_where (.mounts (.ipc k)) path)
             ((InRoot) (chdir_root k q path))
             ((InVolumes) (resume_with k (proc_set_cwd q path) 0))
             ((InNothing direct) (resume_with k q -3))
@@ -1202,7 +1169,7 @@
 (def chdir_root ((k Kernel) (q Proc) (path (list int))) Step
   (if (has_dir k path)
       (resume_with k (proc_set_cwd q path) 0)
-      (resume_with k q (if (lt (entry_index (k_entries k) path) 0) -3 -9))))
+      (resume_with k q (if (lt (entry_index (.entries (.boot k)) path) 0) -3 -9))))
 
 ; The directory path is in: "/bin" for "/bin/sh", "/" for "/sh".
 (def parent_path ((path (list int))) (list int)
@@ -1211,7 +1178,7 @@
 
 ; s from its first slash on, or empty if it has none.
 (def drop_to_slash ((s (list int))) (list int)
-  (if (is_empty s) s (if (eq (head s) 47) s (drop_to_slash (tail s)))))
+  (if (is_empty s) s (eq (head s) 47) s (drop_to_slash (tail s))))
 
 ; Closes stream s: 0, or -5 if it is not open; a volume's file is closed
 ; by its server too, whose answer is the call's, and the stream goes once
@@ -1234,16 +1201,14 @@
       (match (path_from q to tlen)
         ((PathBad r) (resume_with k r -5))
         ((PathGot r b)
-          (let ms (ipc_mounts (k_ipc k))
-            (let wa (mount_where ms a)
-              (let wb (mount_where ms b)
-                (let route (rename_route wa wb)
-                  (if (lt route 0)
-                      (resume_with k r route)
-                      (if (eq route 0)
-                          (resume_with k r (if (lt (entry_index (k_entries k) a) 0) -3 -4))
-                          (ask_fs k r route (fs_op_word) 0 0
-                                  (append "rename " (append (where_path wa a) (cons 32 (where_path wb b))))))))))))))))
+          (let (ms (.mounts (.ipc k))
+                wa (mount_where ms a)
+                wb (mount_where ms b)
+                route (rename_route wa wb))
+            (if (lt route 0) (resume_with k r route)
+                (eq route 0) (resume_with k r (if (lt (entry_index (.entries (.boot k)) a) 0) -3 -4))
+                (ask_fs k r route (fs_op_word) 0 0
+                        (append "rename " (append (where_path wa a) (cons 32 (where_path wb b))))))))))))
 
 ; Removes the file at path: nothing in the initramfs can be, -3 if there
 ; is no file by the name, -8 for a directory, and otherwise -4; a
@@ -1252,10 +1217,10 @@
   (match (path_from p buf len)
     ((PathBad q) (resume_with k q -5))
     ((PathGot q path)
-      (match (mount_where (ipc_mounts (k_ipc k)) path)
+      (match (mount_where (.mounts (.ipc k)) path)
         ((InRoot)
-          (let e (entry_index (k_entries k) path)
-            (resume_with k q (if (lt e 0) -3 (if (entry_is_dir (k_entry k e)) -8 -4)))))
+          (let e (entry_index (.entries (.boot k)) path)
+            (resume_with k q (if (lt e 0) -3 (entry_is_dir (k_entry k e)) -8 -4))))
         ((InVolumes) (resume_with k q -8))
         ((InNothing direct) (resume_with k q -3))
         ((InServer port asked) (ask_fs k q port (fs_op_word) 0 0 (append "remove " asked)))))))
@@ -1264,13 +1229,11 @@
 ; if it has none, or its terminal has gone. Streams from 3 are written
 ; only if they are a volume's file, by its server.
 (def do_write ((k Kernel) (p Proc) (s int) (buf int) (n int)) Step
-  (if (lt n 0)
-      (resume_with k p -5)
-      (if (not (any_eq s (cons 1 (cons 2 (nil int)))))
-          (write_stream k p s buf n)
-          (if (if (eq (proc_tty_port p) 0) true (lt (ipc_owner (k_ipc k) (proc_tty_port p)) 1))
-              (write_own k p s buf n)
-              (if (eq n 0) (resume_with k p 0) (write_tty k p (proc_tty_port p) buf n))))))
+  (if (lt n 0) (resume_with k p -5)
+      (not (any_eq s (cons 1 (cons 2 (nil int))))) (write_stream k p s buf n)
+      (or (eq (proc_tty_port p) 0) (lt (ipc_owner (.ipc k) (proc_tty_port p)) 1)) (write_own k p s buf n)
+      (eq n 0) (resume_with k p 0)
+      (write_tty k p (proc_tty_port p) buf n)))
 
 ; The rest of do_write, for stream s from 3: a volume's file written by
 ; its server, or -5 for one not open or the initramfs's.
@@ -1315,13 +1278,13 @@
 ; ask_fs with tail_bytes, copied from p, after body's text: joined once,
 ; with no list of them.
 (def ask_fs_data ((k Kernel) (p Proc) (server int) (op int) (buf int) (n int) (body (list int)) (tail_bytes bytes)) Step
-  (match (ipc_port_new (k_ipc k) (proc_pid p))
-    ((NewPort r i2)
-      (match (k_send (with_ipc k i2) server (Msg (proc_pid p) (bytes_concat (cons (bytes_from_list (request_to r body)) (cons tail_bytes (nil bytes))))))
+  (match (k_port_new k (.pid p))
+    ((KPort r k1)
+      (match (k_send k1 server (Msg (.pid p) (bytes_concat (cons (bytes_from_list (request_to r body)) (cons tail_bytes (nil bytes))))))
         ((KSent k2 code)
           (if (eq code 0)
               (Park k2 (proc_set_state p (AwaitingFs server r op buf n)))
-              (let k3 (with_ipc k2 (ipc_close (k_ipc k2) (proc_pid p) r))
+              (let k3 (.ipc k2 (ipc_close (.ipc k2) (.pid p) r))
                 (if (eq code (err_full)) (block_on k3 p server) (resume_with k3 p -5)))))))))
 
 ; A volume's file opened: a stream, once its server says, or -5 if p has
@@ -1341,7 +1304,7 @@
 (def read_remote ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
   (if (eq n 0)
       (resume_with k p 0)
-      (match (window_space k (proc_pid p) server)
+      (match (window_space k (.pid p) server)
         ((WinSpace s va)
           (ask_fs k p server (fs_op_wread) buf (min n (window_bytes))
                   (append "readw " (append (digits h) (cons 32 (digits (min n (window_bytes))))))))
@@ -1355,43 +1318,44 @@
 (def write_remote ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
   (if (eq n 0)
       (resume_with k p 0)
-      (match (window_space k (proc_pid p) server)
+      (match (window_space k (.pid p) server)
         ((WinSpace s va) (write_windowed k p server h buf n s va))
         ((NoWinSpace) (write_messaged k p server h buf n)))))
 
 ; write_remote through the window at va of the server's space s.
-(def write_windowed ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int) (s int) (va int)) Step
+(def write_windowed ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int) (s Space) (va int)) Step
   (let cnt (min n (window_bytes))
     (match (proc_copy_out p buf cnt)
       ((CopyOutBad q) (resume_with k q -5))
       ((CopiedOut q b)
-        (let w (space_write s va b 0 cnt)
+        (let w (space_write (.id s) va b 0 cnt)
           (ask_fs k q server (fs_op_write) 0 cnt (append "writew " (append (digits h) (cons 32 (digits cnt))))))))))
 
 ; write_remote in the request's message.
 (def write_messaged ((k Kernel) (p Proc) (server int) (h int) (buf int) (n int)) Step
-  (let prefix (append "write " (append (digits h) " "))
-    (let cnt (min n (sub (sub (max_message) 4) (length prefix)))
-      (match (proc_copy_out p buf cnt)
-        ((CopyOutBad q) (resume_with k q -5))
-        ((CopiedOut q b) (ask_fs_data k q server (fs_op_write) 0 cnt prefix b))))))
+  (let (prefix (append "write " (append (digits h) " "))
+        cnt (min n (sub (sub (max_message) 4) (length prefix))))
+    (match (proc_copy_out p buf cnt)
+      ((CopyOutBad q) (resume_with k q -5))
+      ((CopiedOut q b) (ask_fs_data k q server (fs_op_write) 0 cnt prefix b)))))
 
 ; q, waiting for the server at server, given its reply on reply now that
 ; one has come: from the server's owner, or else dropped and q left
 ; waiting, since anyone may send to any port.
 (def fs_reply_in ((k Kernel) (q Proc) (server int) (reply int) (op int) (buf int) (n int)) Kernel
-  (match (ipc_peek (k_ipc k) reply)
+  (match (ipc_peek (.ipc k) reply)
     ((None) (restore k q))
     ((Some m)
       (match m
         ((Msg from payload)
-          (if (not (eq from (ipc_owner (k_ipc k) server)))
-              (restore (with_ipc k (ipc_drop (k_ipc k) reply)) q)
-              (park (with_ipc k (ipc_close (k_ipc k) (proc_pid q) reply))
-                    (proc_set_state (if (eq op (fs_op_wread))
-                                        (fs_wread_in k q server buf n payload)
-                                        (fs_answered q server op buf n payload))
-                                    (Ready)))))))))
+          (if (not (eq from (ipc_owner (.ipc k) server)))
+              (restore (.ipc k (ipc_drop (.ipc k) reply)) q)
+              (let (pid (.pid q)
+                    q2 (proc_set_state (if (eq op (fs_op_wread))
+                                           (fs_wread_in k q server buf n payload)
+                                           (fs_answered q server op buf n payload))
+                                       (Ready)))
+                (park (.ipc k (ipc_close (.ipc k) pid reply)) q2))))))))
 
 ; q answered for a read through its window to the server, whose reply b
 ; says how many bytes it put there: those copied from the window to buf,
@@ -1400,16 +1364,14 @@
   (if (lt (bytes_len b) 4)
       (proc_answer q -5)
       (let w (s32 (le_u32 b 0))
-        (if (lt w 1)
-            (proc_answer q (if (lt w -10) -5 w))
-            (if (gt w n)
-                (proc_answer q -5)
-                (match (window_space k (proc_pid q) server)
-                  ((NoWinSpace) (proc_answer q -5))
-                  ((WinSpace s va)
-                    (match (proc_copy_in q buf (space_read s va w) 0 w)
-                      ((CopyInBad r) (proc_answer r -5))
-                      ((CopiedIn r) (proc_answer r w))))))))))
+        (if (lt w 1) (proc_answer q (if (lt w -10) -5 w))
+            (gt w n) (proc_answer q -5)
+            (match (window_space k (.pid q) server)
+              ((NoWinSpace) (proc_answer q -5))
+              ((WinSpace s va)
+                (match (proc_copy_in q buf (space_read (.id s) va w) 0 w)
+                  ((CopyInBad r) (proc_answer r -5))
+                  ((CopiedIn r) (proc_answer r w)))))))))
 
 ; q answered as the server's reply b says, for op: -5 if it is not one.
 ; A close's stream goes whatever the answer.
@@ -1425,17 +1387,12 @@
 
 ; q answered for op, the reply b's word being w.
 (def fs_worded ((q Proc) (server int) (op int) (buf int) (n int) (b bytes) (w int)) Proc
-  (if (lt w 0)
-      (proc_answer q (if (lt w -10) -5 w))
-      (if (eq op (fs_op_open))
-          (match (proc_open_remote q server w) ((Opened r s) (proc_answer r s)))
-          (if (eq op (fs_op_read))
-              (fs_read_in q buf n w b)
-              (if (eq op (fs_op_write))
-                  (proc_answer q (if (if (lt w 1) true (gt w n)) -5 w))
-                  (if (eq op (fs_op_cd))
-                      (fs_cd_in q buf n b)
-                      (proc_answer q w)))))))
+  (if (lt w 0) (proc_answer q (if (lt w -10) -5 w))
+      (eq op (fs_op_open)) (match (proc_open_remote q server w) ((Opened r s) (proc_answer r s)))
+      (eq op (fs_op_read)) (fs_read_in q buf n w b)
+      (eq op (fs_op_write)) (proc_answer q (if (or (lt w 1) (gt w n)) -5 w))
+      (eq op (fs_op_cd)) (fs_cd_in q buf n b)
+      (proc_answer q w)))
 
 ; q answered for a chdir whose path is the n bytes at buf, the server's
 ; stat reply b saying what is there: the path q's current directory if it
@@ -1444,7 +1401,7 @@
   (match (path_from q buf n)
     ((PathBad r) (proc_answer r -5))
     ((PathGot r path)
-      (if (if (eq (bytes_len b) 7) (bytes_is_at b 4 "dir") false)
+      (if (and (eq (bytes_len b) 7) (bytes_is_at b 4 "dir"))
           (proc_answer (proc_set_cwd r path) 0)
           (proc_answer r -9)))))
 
@@ -1462,7 +1419,7 @@
 ; label is mounted already, err_fault if it is no label, the UUID is
 ; none, or p may not give them.
 (def do_mount ((k Kernel) (p Proc) (port int) (buf int) (len int)) Step
-  (if (if (lt len 1) true (gt len 52))
+  (if (or (lt len 1) (gt len 52))
       (resume_with k p (err_fault))
       (match (proc_copy_out p buf len)
         ((CopyOutBad q) (resume_with k q (err_fault)))
@@ -1470,9 +1427,9 @@
           (match (mount_name_of (bytes_to_list b))
             ((MountNameBad) (resume_with k q (err_fault)))
             ((MountName uuid label)
-              (match (ipc_mount (k_ipc k) (proc_pid q) port label uuid)
+              (match (ipc_mount (.ipc k) (.pid q) port label uuid)
                 ((Registered code i2)
-                  (resume_with (if (eq code 0) (k_note (with_ipc k i2) 0 (log_info) (append "l0s: /Volumes/" (append label " mounted"))) (with_ipc k i2)) q code)))))))))
+                  (resume_with (if (eq code 0) (k_note (.ipc k i2) 0 (log_info) (append "l0s: /Volumes/" (append label " mounted"))) (.ipc k i2)) q code)))))))))
 
 ; The volume at /Volumes/LABEL, the len bytes at buf, which port, p's,
 ; mounted, unmounted: 0, or err_no_port if port is not p's or mounted no
@@ -1480,32 +1437,30 @@
 ; no label or p may not give it. Calls on its files go nowhere from then
 ; on: a path in it is in no volume.
 (def do_unmount ((k Kernel) (p Proc) (port int) (buf int) (len int)) Step
-  (if (if (lt len 1) true (gt len 15))
+  (if (or (lt len 1) (gt len 15))
       (resume_with k p (err_fault))
       (match (proc_copy_out p buf len)
         ((CopyOutBad q) (resume_with k q (err_fault)))
         ((CopiedOut q b)
-          (match (ipc_unmount (k_ipc k) (proc_pid q) port (bytes_to_list b))
+          (match (ipc_unmount (.ipc k) (.pid q) port (bytes_to_list b))
             ((Registered code i2)
-              (resume_with (if (eq code 0) (k_note (with_ipc k i2) 0 (log_info) (append "l0s: /Volumes/" (append (bytes_to_list b) " unmounted"))) (with_ipc k i2)) q code)))))))
+              (resume_with (if (eq code 0) (k_note (.ipc k i2) 0 (log_info) (append "l0s: /Volumes/" (append (bytes_to_list b) " unmounted"))) (.ipc k i2)) q code)))))))
 
 ; The volume label, the len bytes at buf, made /, and the initramfs given
 ; up: 0, or err_denied if p's program is not the initramfs's, err_taken
 ; if / is a volume already, err_no_port if label is not mounted, and
 ; err_fault if it is no label or p may not give it.
 (def do_root_switch ((k Kernel) (p Proc) (buf int) (len int)) Step
-  (if (if (lt len 1) true (gt len 15))
-      (resume_with k p (err_fault))
-      (if (not (is_entry k (proc_module p)))
-          (resume_with k p (err_denied))
-          (match (proc_copy_out p buf len)
-            ((CopyOutBad q) (resume_with k q (err_fault)))
-            ((CopiedOut q b)
-              (match (ipc_root (k_ipc k) (bytes_to_list b))
-                ((Registered code i2)
-                  (if (eq code 0)
-                      (resume_with (k_note (k_free_initramfs (with_ipc k i2)) 0 (log_info) (append "l0s: / is the volume " (append (bytes_to_list b) ", and the initramfs is given up"))) q 0)
-                      (resume_with k q code)))))))))
+  (if (or (lt len 1) (gt len 15)) (resume_with k p (err_fault))
+      (not (is_entry k (.module p))) (resume_with k p (err_denied))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (resume_with k q (err_fault)))
+        ((CopiedOut q b)
+          (match (ipc_root (.ipc k) (bytes_to_list b))
+            ((Registered code i2)
+              (if (eq code 0)
+                  (resume_with (k_note (k_free_initramfs (.ipc k i2)) 0 (log_info) (append "l0s: / is the volume " (append (bytes_to_list b) ", and the initramfs is given up"))) q 0)
+                  (resume_with k q code))))))))
 
 ; The board's boot arguments, split at spaces.
 (def boot_args () (list (list int))
@@ -1524,13 +1479,11 @@
 ; Given no arguments it gets the inittab's for its path; it never drives
 ; devices.
 (def do_spawn_image ((k Kernel) (p Proc) (buf int) (len int)) Step
-  (if (lt len 8)
-      (resume_with k p (err_fault))
-      (if (gt len (add (add 8 (path_limit)) (add (max_message) (image_file_room))))
-          (resume_with k p (err_too_big))
-          (match (proc_copy_out p buf len)
-            ((CopyOutBad q) (resume_with k q (err_fault)))
-            ((CopiedOut q b) (spawn_image_of k q b))))))
+  (if (lt len 8) (resume_with k p (err_fault))
+      (gt len (add (add 8 (path_limit)) (add (max_message) (image_file_room)))) (resume_with k p (err_too_big))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (resume_with k q (err_fault)))
+        ((CopiedOut q b) (spawn_image_of k q b)))))
 
 ; The rest of do_spawn_image, its bytes b copied out: the path's length,
 ; a u32, and the path, then the arguments' length, a u32, and the
@@ -1538,31 +1491,28 @@
 ; path of none or over path_limit, or arguments over max_message.
 (def spawn_image_of ((k Kernel) (p Proc) (b bytes)) Step
   (let pl (le_u32 b 0)
-    (if (if (lt pl 1) true (if (gt pl (path_limit)) true (not (has b 4 (add pl 4)))))
+    (if (or (lt pl 1) (or (gt pl (path_limit)) (not (has b 4 (add pl 4)))))
         (resume_with k p (err_fault))
-        (let al (le_u32 b (add 4 pl))
-          (let at (add 8 pl)
-            (if (if (gt al (max_message)) true (not (has b at al)))
-                (resume_with k p (err_fault))
-                (spawn_image_args k p b (normal_path (bytes_range b 4 (add 4 pl))) at (add at al))))))))
+        (let (al (le_u32 b (add 4 pl)) at (add 8 pl))
+          (if (or (gt al (max_message)) (not (has b at al)))
+              (resume_with k p (err_fault))
+              (spawn_image_args k p b (normal_path (bytes_range b 4 (add 4 pl))) at (add at al)))))))
 
 ; The image of b from start, its path and its encoded arguments, the
 ; bytes of b from at up to start, read in place; none for the inittab's.
 (def spawn_image_args ((k Kernel) (p Proc) (b bytes) (path (list int)) (at int) (start int)) Step
   (let size (sub (bytes_len b) start)
-    (if (lt size 1)
-        (resume_with k p (err_denied))
-        (if (eq at start)
-            (spawned_image k p b path (k_path_args k path) start)
-            (match (decode_args_in b at start)
-              ((None) (resume_with k p (err_fault)))
-              ((Some args) (spawned_image k p b path args start)))))))
+    (if (lt size 1) (resume_with k p (err_denied))
+        (eq at start) (spawned_image k p b path (k_path_args k path) start)
+        (match (decode_args_in b at start)
+          ((None) (resume_with k p (err_fault)))
+          ((Some args) (spawned_image k p b path args start))))))
 
 ; The image of b from start started as a child of p, with args, on p's
 ; terminal: p answered with its pid, which k then names by path, or with
 ; spawn_from's refusal.
 (def spawned_image ((k Kernel) (p Proc) (b bytes) (path (list int)) (args (list (list int))) (start int)) Step
-  (match (spawn_from k -1 (proc_pid p) args (proc_tty_port p) b start (bytes_len b))
+  (match (spawn_from k -1 (.pid p) args (proc_tty_port p) b start (bytes_len b))
     ((Spawned k2 pid)
       (spawn_answered (if (gt pid 0) (k_name_put k2 pid path) k2) p pid))))
 
@@ -1573,8 +1523,8 @@
 ; processor as the call returned, and its child run before p's next
 ; step, as often as not a line saying what it started.
 (def spawn_answered ((k Kernel) (p Proc) (pid int)) Step
-  (let t (timer_at (slice_deadline (k_sleepers k) (clock_ns)))
-    (resume_with (k_child_cwd k pid (proc_cwd p)) p pid)))
+  (let t (timer_at (slice_deadline (.sleepers k) (clock_ns)))
+    (resume_with (k_child_cwd k pid (.cwd (.state p))) p pid)))
 
 ; k with the new process pid's current directory cwd, its parent's; as
 ; it was if pid is an error, not a process.
@@ -1614,16 +1564,14 @@
 ; a process that may not drive devices, err_fault for any other dir,
 ; checked before frame_sync could refuse it.
 (def do_dma_sync ((k Kernel) (p Proc) (va int) (n int) (dir int)) Step
-  (if (not (proc_dev k p))
-      (resume_with k p (err_denied))
-      (if (if (ge dir 1) (le dir 3) false)
-          (resume_with k p (proc_dma_sync p va (min (dma_limit) (max 0 n)) dir))
-          (resume_with k p (err_fault)))))
+  (if (not (proc_dev k p)) (resume_with k p (err_denied))
+      (and (ge dir 1) (le dir 3)) (resume_with k p (proc_dma_sync p va (min (dma_limit) (max 0 n)) dir))
+      (resume_with k p (err_fault))))
 
 ; Mount i's record copied to buf, if it fits in max: its length, or
 ; err_no_port if there is no mount i, err_too_big if it does not fit.
 (def do_mount_at ((k Kernel) (p Proc) (i int) (buf int) (max int)) Step
-  (match (mounts_at (ipc_mounts (k_ipc k)) i)
+  (match (mounts_at (.mounts (.ipc k)) i)
     ((None) (resume_with k p (err_no_port)))
     ((Some m) (give_record k p (mount_record m) buf max))))
 
@@ -1635,9 +1583,8 @@
     (match (proc_copy_out p buf cnt)
       ((CopyOutBad q) (resume_with k q -5))
       ((CopiedOut q b)
-        (let w (write_bytes s b 0 cnt)
-          (let f (flush s)
-            (resume_with k q cnt)))))))
+        (let (w (write_bytes s b 0 cnt) f (flush s))
+          (resume_with k q cnt))))))
 
 ; The most one write sends a terminal: a message, less its request's
 ; reply port and its w.
@@ -1651,46 +1598,39 @@
     (match (proc_copy_out p buf cnt)
       ((CopyOutBad q) (resume_with k q -5))
       ((CopiedOut q b)
-        (match (k_send k t (Msg (proc_pid q) (bytes_concat (cons (bytes_from_list (append (u32_le 0) "w")) (cons b (nil bytes))))))
+        (match (k_send k t (Msg (.pid q) (bytes_concat (cons (bytes_from_list (append (u32_le 0) "w")) (cons b (nil bytes))))))
           ((KSent k2 code)
-            (if (eq code 0)
-                (resume_with k2 q cnt)
-                (if (eq code (err_full)) (block_on k2 q t) (resume_with k2 q -7)))))))))
+            (if (eq code 0) (resume_with k2 q cnt)
+                (eq code (err_full)) (block_on k2 q t)
+                (resume_with k2 q -7))))))))
 
 ; p waiting for room on port, to make its call again then.
 (def block_on ((k Kernel) (p Proc) (port int)) Step
-  (Park (with_ipc k (ipc_block (k_ipc k) port (proc_pid p))) (proc_set_state (proc_rewind p) (Blocked port))))
-
-; k with i as its ports.
-(def with_ipc ((k Kernel) (i Ipc)) Kernel
-  (match k ((Kernel slots ready ipc ss irqs boot next mem cpus) (Kernel slots ready i ss irqs boot next mem cpus))))
+  (Park (.ipc k (ipc_block (.ipc k) port (.pid p))) (proc_set_state (proc_rewind p) (Blocked port))))
 
 ; Standard input from p's terminal: what is left of the last line it
 ; sent, or the next, which p's terminal is asked for and p waits for. A
 ; terminal that has gone reads as the end of input.
 (def read_tty ((k Kernel) (p Proc) (buf int) (n int)) Step
-  (match (proc_tty p)
+  (match (.tty (.state p))
     ((Tty t reply rest off)
-      (if (gt (bytes_len rest) off)
-          (resume_line k p buf n rest off)
-          (if (if (eq n 0) true (lt (ipc_owner (k_ipc k) t) 1))
-              (resume_with k p 0)
-              (if (eq (ipc_owner (k_ipc k) reply) (proc_pid p))
-                  (ask_line k p t reply buf n)
-                  (match (ipc_port_new (k_ipc k) (proc_pid p))
-                    ((NewPort r i2)
-                      (ask_line (with_ipc k i2) (proc_set_tty p (Tty t r rest off)) t r buf n)))))))))
+      (if (gt (bytes_len rest) off) (resume_line k p buf n rest off)
+          (or (eq n 0) (lt (ipc_owner (.ipc k) t) 1)) (resume_with k p 0)
+          (eq (ipc_owner (.ipc k) reply) (.pid p)) (ask_line k p t reply buf n)
+          (match (k_port_new k (.pid p))
+            ((KPort r k1)
+              (ask_line k1 (proc_set_tty p (Tty t r rest off)) t r buf n)))))))
 
 ; The rest of read_tty: a line asked of the terminal at port t, "r", to
 ; come back on reply, and p reading it; if t's queue is full, p blocked
 ; until there is room, to read again; if t cannot be sent to, the end
 ; of input.
 (def ask_line ((k Kernel) (p Proc) (t int) (reply int) (buf int) (n int)) Step
-  (match (k_send k t (Msg (proc_pid p) (bytes_from_list (request_to reply "r"))))
+  (match (k_send k t (Msg (.pid p) (bytes_from_list (request_to reply "r"))))
     ((KSent k2 code)
-      (if (eq code 0)
-          (Park k2 (proc_set_state p (ReadingTty reply buf n)))
-          (if (eq code (err_full)) (block_on k2 p t) (resume_with k2 p 0))))))
+      (if (eq code 0) (Park k2 (proc_set_state p (ReadingTty reply buf n)))
+          (eq code (err_full)) (block_on k2 p t)
+          (resume_with k2 p 0)))))
 
 ; A request as l0s.l0's request makes one: the reply port, then the body.
 (def request_to ((reply int) (body (list int))) (list int)
@@ -1705,7 +1645,7 @@
     (match (proc_copy_in p buf line off (add off cnt))
       ((CopyInBad q) (proc_answer q -5))
       ((CopiedIn q)
-        (match (proc_tty q)
+        (match (.tty (.state q))
           ((Tty t reply rest o)
             (proc_answer (proc_set_tty q (Tty t reply line (add off cnt))) cnt)))))))
 
@@ -1716,7 +1656,7 @@
 ; q, waiting for its terminal's line on reply, given it now that one has
 ; come: an empty line is the end of input.
 (def tty_line_in ((k Kernel) (q Proc) (reply int) (buf int) (n int)) Kernel
-  (match (ipc_peek (k_ipc k) reply)
+  (match (ipc_peek (.ipc k) reply)
     ((None) (restore k q))
     ((Some m)
       (match m
@@ -1726,16 +1666,16 @@
 ; p's terminal set to port, 0 for the kernel's own: 0, or err_no_port if
 ; there is no such port. Its children, from now on, get it too.
 (def do_tty_set ((k Kernel) (p Proc) (port int)) Step
-  (if (if (eq port 0) false (lt (ipc_owner (k_ipc k) port) 1))
+  (if (and (not (eq port 0)) (lt (ipc_owner (.ipc k) port) 1))
       (resume_with k p (err_no_port))
-      (match (proc_tty p)
+      (match (.tty (.state p))
         ((Tty t reply rest off) (resume_with k (proc_set_tty p (Tty port reply (bytes_from_list (nil int)) 0)) 0)))))
 
 ; Argument i of p's, as much as n holds copied to buf: its whole length,
 ; or -5 for no argument i, a negative n, or a buf p may not take it at.
 (def do_arg ((k Kernel) (p Proc) (i int) (buf int) (n int)) Step
-  (let args (proc_args p)
-    (if (if (lt i 0) true (if (ge i (length args)) true (lt n 0)))
+  (let args (.args (.state p))
+    (if (or (lt i 0) (or (ge i (length args)) (lt n 0)))
         (resume_with k p -5)
         (let a (nth args i)
           (match (proc_copy_in p buf (bytes_from_list a) 0 (min n (length a)))
@@ -1747,58 +1687,49 @@
 ; err_fault if p may not give them or they are not arguments, or what
 ; spawn gives.
 (def do_spawn_args ((k Kernel) (p Proc) (m int) (buf int) (len int)) Step
-  (if (lt len 0)
-      (resume_with k p (err_fault))
-      (if (gt len (max_message))
-          (resume_with k p (err_too_big))
-          (match (proc_copy_out p buf len)
-            ((CopyOutBad q) (resume_with k q (err_fault)))
-            ((CopiedOut q b)
-              (match (decode_args b)
-                ((None) (resume_with k q (err_fault)))
-                ((Some args)
-                  (match (spawn k m (proc_pid q) (Some args) (proc_tty_port q))
-                    ((Spawned k2 pid) (spawn_answered k2 q pid))))))))))
+  (if (lt len 0) (resume_with k p (err_fault))
+      (gt len (max_message)) (resume_with k p (err_too_big))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (resume_with k q (err_fault)))
+        ((CopiedOut q b)
+          (match (decode_args b)
+            ((None) (resume_with k q (err_fault)))
+            ((Some args)
+              (match (spawn k m (.pid q) (Some args) (proc_tty_port q))
+                ((Spawned k2 pid) (spawn_answered k2 q pid)))))))))
 
 ; The len bytes at buf logged as a message of p's, at level: the number
 ; it was given, or err_fault for a level that is none, or a buffer p may
 ; not give, or err_too_big for more than log_text_max bytes. A newline in
 ; it, or at its end, makes no new line (log_clean).
 (def do_log_write ((k Kernel) (p Proc) (level int) (buf int) (len int)) Step
-  (if (not (log_level_ok level))
-      (resume_with k p (err_fault))
-      (if (lt len 0)
-          (resume_with k p (err_fault))
-          (if (gt len (log_text_max))
-              (resume_with k p (err_too_big))
-              (match (proc_copy_out p buf len)
-                ((CopyOutBad q) (resume_with k q (err_fault)))
-                ((CopiedOut q b)
-                  (resume_with (k_note k (proc_pid q) level (log_clean (bytes_to_list b))) q (klog_count (k_log k)))))))))
+  (if (not (log_level_ok level)) (resume_with k p (err_fault))
+      (lt len 0) (resume_with k p (err_fault))
+      (gt len (log_text_max)) (resume_with k p (err_too_big))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (resume_with k q (err_fault)))
+        ((CopiedOut q b)
+          (resume_with (k_note k (.pid q) level (log_clean (bytes_to_list b))) q (.count (.log (.boot k))))))))
 
 ; How the CPUs are used, copied to buf: with pid 0 the system's
 ; cpu_record, else pid's proc_cpu_record, pid live or p itself; its
 ; length, or err_no_port for no such live process, err_too_big if it is
 ; over max, err_fault if p may not take it at buf.
 (def do_cpu_usage ((k Kernel) (p Proc) (pid int) (buf int) (max int)) Step
-  (if (eq pid 0)
-      (give_record k p (usage_record (cpus_usage (k_cpus k)) (clock_ns)) buf max)
-      (if (not (is_pid pid))
-          (resume_with k p (err_no_port))
-          (if (if (eq pid (proc_pid p)) true (eq (look k pid) (LookLive)))
-              (give_record k p (usage_proc_record (cpus_usage (k_cpus k)) pid (cpus_where (k_cpus k) pid) (clock_ns)) buf max)
-              (resume_with k p (err_no_port))))))
+  (if (eq pid 0) (give_record k p (usage_record (.usage (.cpus k)) (clock_ns)) buf max)
+      (not (is_pid pid)) (resume_with k p (err_no_port))
+      (or (eq pid (.pid p)) (eq (look k pid) (LookLive)))
+      (give_record k p (usage_proc_record (.usage (.cpus k)) pid (cpus_where (.cpus k) pid) (clock_ns)) buf max)
+      (resume_with k p (err_no_port))))
 
 ; The names registered from the i-th on, in order, as many whole
 ; name_records as max holds, copied to buf: their length, 0 past the
 ; last, or err_fault for an i below 0 or a buf p may not take them at,
 ; err_too_big for a max below 0.
 (def do_name_list ((k Kernel) (p Proc) (i int) (buf int) (max int)) Step
-  (if (lt i 0)
-      (resume_with k p (err_fault))
-      (if (lt max 0)
-          (resume_with k p (err_too_big))
-          (give_record k p (ipc_name_records (k_ipc k) i max) buf max))))
+  (if (lt i 0) (resume_with k p (err_fault))
+      (lt max 0) (resume_with k p (err_too_big))
+      (give_record k p (ipc_name_records (.ipc k) i max) buf max)))
 
 ; The messages of the log numbered seq or more, as many whole ones as max
 ; holds, copied to buf as klog.l0 lays them out: their length, 0 if
@@ -1807,7 +1738,7 @@
 (def do_log_read ((k Kernel) (p Proc) (seq int) (buf int) (max int)) Step
   (if (lt max 0)
       (resume_with k p (err_too_big))
-      (give_record k p (klog_from (k_log k) seq max) buf max)))
+      (give_record k p (klog_from (.log (.boot k)) seq max) buf max)))
 
 ; pid's record, then its program's path, copied to buf, as much as max
 ; holds: its length, or err_no_port if pid was never used, err_too_big
@@ -1815,13 +1746,11 @@
 ; and is out of the table while it runs, so its own record is made from
 ; p. An exited process's has no path.
 (def do_proc_info ((k Kernel) (p Proc) (pid int) (buf int) (max int)) Step
-  (if (not (is_pid pid))
-      (resume_with k p (err_no_port))
-      (if (eq pid (proc_pid p))
-          (give_cut k p (append (proc_info_record p (k_mem k) true) (k_proc_path k p)) buf max)
-          (match (record_of k pid)
-            ((None) (resume_with k p (err_no_port)))
-            ((Some r) (give_cut k p r buf max))))))
+  (if (not (is_pid pid)) (resume_with k p (err_no_port))
+      (eq pid (.pid p)) (give_cut k p (append (proc_info_record p (.mem k) true) (k_proc_path k p)) buf max)
+      (match (record_of k pid)
+        ((None) (resume_with k p (err_no_port)))
+        ((Some r) (give_cut k p r buf max)))))
 
 ; The proc_info record of pid, a process in the table: a live one's,
 ; running if it is out on another CPU, then its path; an exited one's, state_exited and its status; or none,
@@ -1834,7 +1763,7 @@
           (match (array_get slots (slot_of pid))
             ((Free) ((None (list int))))
             ((Live q) (Some (append (proc_info_record q mem (cpus_out cpus pid)) (k_proc_path k q))))
-            ((Dead g) (Some (proc_record (state_exited) 0 -1 (gone_status g) 0 0))))))))
+            ((Dead g) (Some (proc_record (state_exited) 0 -1 (.status g) 0 0))))))))
 
 ; The frames processes have been given: each live process's own pages,
 ; p's among them, as it is out of the table while it runs, and every
@@ -1852,7 +1781,7 @@
 ; grows once the initramfs's raw copy joins the pool.
 (def k_mem_record ((k Kernel) (p Proc)) (list int)
   (let used (k_used_frames k p)
-    (mem_record (add used (add (max 0 (frame_free_count)) (mem_pooled (k_mem k)))) used)))
+    (mem_record (add used (add (max 0 (frame_free_count)) (mem_pooled (.mem k)))) used)))
 
 ; n and the own pages of every live process from slot i on.
 (def used_from ((slots (array Slot)) (mem Mem) (i int) (n int)) int
@@ -1888,17 +1817,17 @@
 (def do_port_new ((k Kernel) (p Proc)) Step
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem cpus)
-      (match (ipc_port_new ipc (proc_pid p))
+      (match (ipc_port_new ipc (.pid p))
         ((NewPort port i2) (resume_with (Kernel slots ready i2 ss irqs boot next mem cpus) p port))))))
 
 ; Whether pid could name a process: one of its slot's turns.
 (def is_pid ((pid int)) bool
-  (if (lt pid 1) false (not (eq (slot_of pid) 0))))
+  (and (not (lt pid 1)) (not (eq (slot_of pid) 0))))
 
 ; The pid slot i holds, live or exited, or last held; 0 if it never held
 ; one; err_no_port for no slot i.
 (def do_proc_slot ((k Kernel) (p Proc) (i int)) Step
-  (if (if (lt i 1) true (gt i (max_procs)))
+  (if (or (lt i 1) (gt i (max_procs)))
       (resume_with k p (err_no_port))
       (resume_with k p (k_pid_at k i))))
 
@@ -1917,11 +1846,10 @@
             ((TakenSlot k2 s)
               (match s
                 ((Live q)
-                  (if (proc_dev k2 q)
-                      (resume_with (restore k2 q) p (err_denied))
-                      (if (cpus_out (k_cpus k2) pid)
-                          (let k3 (restore k2 q) (resume_with (with_cpus k3 (cpus_doom (k_cpus k3) pid)) p 0))
-                          (killed_by k2 p q))))
+                  (if (proc_dev k2 q) (resume_with (restore k2 q) p (err_denied))
+                      (cpus_out (.cpus k2) pid)
+                      (let k3 (restore k2 q) (resume_with (.cpus k3 (cpus_doom (.cpus k3) pid)) p 0))
+                      (killed_by k2 p q)))
                 ((Free) (resume_with (put_slot k2 pid (Free)) p (err_no_port)))
                 ((Dead st) (resume_with (put_slot k2 pid (Dead st)) p (err_no_port))))))))))
 
@@ -1929,11 +1857,11 @@
 ; exits, if q is pid 1.
 (def killed_by ((k Kernel) (p Proc) (q Proc)) Step
   (let k2 (end_proc k q (killed_status))
-    (if (eq (proc_pid q) 1) (Halt (killed_status)) (resume_with k2 p 0))))
+    (if (eq (.pid q) 1) (Halt (killed_status)) (resume_with k2 p 0))))
 
 ; Has port, which must be p's, told when pid exits: at once, if it has.
 (def do_watch ((k Kernel) (p Proc) (pid int) (port int)) Step
-  (if (if (not (is_pid pid)) true (not (eq (ipc_owner (k_ipc k) port) (proc_pid p))))
+  (if (or (not (is_pid pid)) (not (eq (ipc_owner (.ipc k) port) (.pid p))))
       (resume_with k p (err_no_port))
       (match (look k pid)
         ((LookFree) (resume_with k p (err_no_port)))
@@ -1950,26 +1878,24 @@
 ; its watchers, unless it is one already: 0, or err_full if q has
 ; watch_limit watchers.
 (def watch_live ((k Kernel) (p Proc) (q Proc) (port int)) Step
-  (if (any_eq port (proc_watchers q))
-      (resume_with (restore k q) p 0)
-      (if (ge (length (proc_watchers q)) (watch_limit))
-          (resume_with (restore k q) p (err_full))
-          (resume_with (restore k (proc_watch q port)) p 0))))
+  (if (any_eq port (.watchers (.state q))) (resume_with (restore k q) p 0)
+      (ge (length (.watchers (.state q))) (watch_limit)) (resume_with (restore k q) p (err_full))
+      (resume_with (restore k (proc_watch q port)) p 0)))
 
 ; An entry's path as call 269 gives it: a directory's with a final /, so
 ; a caller can tell directories from files, and a program's followed by
 ; a NUL and x, so that a copy of it can be marked one too.
 (def shown_path ((e Entry)) (list int)
-  (if (if (entry_is_dir e) (not (eq (entry_path e) "/")) false)
-      (append (entry_path e) "/")
-      (if (entry_is_exec e) (append (entry_path e) (cons 0 "x")) (entry_path e))))
+  (if (and (entry_is_dir e) (not (eq (.path e) "/"))) (append (.path e) "/")
+      (entry_is_exec e) (append (.path e) (cons 0 "x"))
+      (.path e)))
 
 ; The name of module i, its shown_path, copied to buf if it fits in max:
 ; its length, or err_no_port if there is no module i or the initramfs
 ; has been given up, err_too_big if it does not fit, err_fault if p may
 ; not take it at buf.
 (def do_module_name ((k Kernel) (p Proc) (i int) (buf int) (max int)) Step
-  (if (if (not (is_entry k i)) true (not (k_held k)))
+  (if (or (not (is_entry k i)) (not (k_held k)))
       (resume_with k p (err_no_port))
       (let name (shown_path (k_entry k i))
         (if (gt (length name) max)
@@ -1983,7 +1909,7 @@
 ; is no module i or the initramfs has been given up, as do_module_name
 ; answers.
 (def do_entry_size ((k Kernel) (p Proc) (i int)) Step
-  (if (if (not (is_entry k i)) true (not (k_held k)))
+  (if (or (not (is_entry k i)) (not (k_held k)))
       (resume_with k p (err_no_port))
       (resume_with k p (if (entry_is_dir (k_entry k i)) 0 (entry_size (k_entry k i))))))
 
@@ -1991,21 +1917,19 @@
 ; negative len or bytes p may not give, err_too_big for over
 ; max_message, or what k_send refuses.
 (def do_send ((k Kernel) (p Proc) (port int) (buf int) (len int)) Step
-  (if (lt len 0)
-      (resume_with k p (err_fault))
-      (if (gt len (max_message))
-          (resume_with k p (err_too_big))
-          (match (proc_copy_out p buf len)
-            ((CopyOutBad q) (resume_with k q (err_fault)))
-            ((CopiedOut q b)
-              (match (k_send k port (Msg (proc_pid q) b))
-                ((KSent k2 code) (resume_with k2 q code))))))))
+  (if (lt len 0) (resume_with k p (err_fault))
+      (gt len (max_message)) (resume_with k p (err_too_big))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (resume_with k q (err_fault)))
+        ((CopiedOut q b)
+          (match (k_send k port (Msg (.pid q) b))
+            ((KSent k2 code) (resume_with k2 q code)))))))
 
 ; The oldest message on port, p's, copied to buf, as try_take says; or,
 ; with none waiting, p waiting for one if wait, and err_taken at once if
 ; not; err_no_port if port is not p's.
 (def do_receive ((k Kernel) (p Proc) (port int) (buf int) (max int) (wait bool)) Step
-  (if (not (eq (ipc_owner (k_ipc k) port) (proc_pid p)))
+  (if (not (eq (ipc_owner (.ipc k) port) (.pid p)))
       (resume_with k p (err_no_port))
       (match (try_take k p port buf max)
         ((Took k2 q v) (resume_with k2 q v))
@@ -2019,15 +1943,14 @@
 ; err_too_big for none, more than port_set_limit, or a len not a whole
 ; number of u32s; or ipc_set_ports' refusal, the set as it was.
 (def do_port_set ((k Kernel) (p Proc) (buf int) (len int)) Step
-  (if (lt len 0)
-      (resume_with k p (err_fault))
-      (if (if (lt len 4) true (if (gt len (mul 4 (port_set_limit))) true (not (eq (mod len 4) 0))))
-          (resume_with k p (err_too_big))
-          (match (proc_copy_out p buf len)
-            ((CopyOutBad q) (resume_with k q (err_fault)))
-            ((CopiedOut q b)
-              (match (ipc_set_ports (k_ipc k) (proc_pid q) (u32s_of b 0 (nil int)))
-                ((Registered code i2) (resume_with (with_ipc k i2) q code))))))))
+  (if (lt len 0) (resume_with k p (err_fault))
+      (or (lt len 4) (or (gt len (mul 4 (port_set_limit))) (not (eq (mod len 4) 0))))
+      (resume_with k p (err_too_big))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (resume_with k q (err_fault)))
+        ((CopiedOut q b)
+          (match (k_registered k ipc_set_ports (.pid q) (u32s_of b 0 (nil int)))
+            ((KRegistered code k1) (resume_with k1 q code)))))))
 
 ; The u32s of b from byte i on, in order, after the reversed acc.
 (def u32s_of ((b bytes) (i int) (acc (list int))) (list int)
@@ -2039,7 +1962,7 @@
 ; try_take_set says; or, with none waiting, p waiting for one if wait,
 ; and err_taken at once if not; err_no_port if p has no set.
 (def do_receive_set ((k Kernel) (p Proc) (buf int) (max int) (wait bool)) Step
-  (let n (length (ipc_set_of (k_ipc k) (proc_pid p)))
+  (let n (length (ipc_set_of (.ipc k) (.pid p)))
     (if (eq n 0)
         (resume_with k p (err_no_port))
         (match (try_take_set k p buf max)
@@ -2055,8 +1978,8 @@
   (match (name_from p buf len)
     ((NameBad q code) (resume_with k q code))
     ((Named q name)
-      (match (ipc_unregister (k_ipc k) (proc_pid q) name)
-        ((Registered code i2) (resume_with (with_ipc k i2) q code))))))
+      (match (k_registered k ipc_unregister (.pid q) name)
+        ((KRegistered code k1) (resume_with k1 q code))))))
 
 ; A name, copied out of p, or why not.
 (data Named (Named Proc (list int)) (NameBad Proc int))
@@ -2064,13 +1987,11 @@
 ; The name of len bytes p gives at buf: err_fault for a negative len or
 ; bytes p may not give, err_too_big for over 256.
 (def name_from ((p Proc) (buf int) (len int)) Named
-  (if (lt len 0)
-      (NameBad p (err_fault))
-      (if (gt len 256)
-          (NameBad p (err_too_big))
-          (match (proc_copy_out p buf len)
-            ((CopyOutBad q) (NameBad q (err_fault)))
-            ((CopiedOut q b) (Named q (bytes_to_list b)))))))
+  (if (lt len 0) (NameBad p (err_fault))
+      (gt len 256) (NameBad p (err_too_big))
+      (match (proc_copy_out p buf len)
+        ((CopyOutBad q) (NameBad q (err_fault)))
+        ((CopiedOut q b) (Named q (bytes_to_list b))))))
 
 ; The name at buf registered for port, p's: as ipc_register answers, or
 ; name_from's refusal.
@@ -2080,7 +2001,7 @@
     ((Named q name)
       (match k
         ((Kernel slots ready ipc ss irqs boot next mem cpus)
-          (match (ipc_register ipc (proc_pid q) port name)
+          (match (ipc_register ipc (.pid q) port name)
             ((Registered code i2) (resume_with (Kernel slots ready i2 ss irqs boot next mem cpus) q code))))))))
 
 ; The port registered as the name at buf, or err_no_port, or name_from's
@@ -2088,7 +2009,7 @@
 (def do_lookup ((k Kernel) (p Proc) (buf int) (len int)) Step
   (match (name_from p buf len)
     ((NameBad q code) (resume_with k q code))
-    ((Named q name) (resume_with k q (ipc_lookup (k_ipc k) name)))))
+    ((Named q name) (resume_with k q (ipc_lookup (.ipc k) name)))))
 
 ; pid's exit status, as its wait_word: at once, and marked told, if it
 ; has exited; once it exits, p waiting, if it is live; err_no_port if
@@ -2105,19 +2026,19 @@
 (def do_sleep ((k Kernel) (p Proc) (t int)) Step
   (if (le t (clock_ns))
       (resume_with k p 0)
-      (Park (with_sleepers k (sleep_add (k_sleepers k) t (proc_pid p)))
+      (Park (.sleepers k (sleep_add (.sleepers k) t (.pid p)))
             (proc_set_state (proc_answer p 0) (Sleeping)))))
 
 ; The alarm for port, p's, set to send its notice at t on the clock, in
 ; place of any it had, or at once if t has come: 0, or err_no_port if the
 ; port is not p's.
 (def do_alarm ((k Kernel) (p Proc) (port int) (t int)) Step
-  (if (not (eq (ipc_owner (k_ipc k) port) (proc_pid p)))
+  (if (not (eq (ipc_owner (.ipc k) port) (.pid p)))
       (resume_with k p (err_no_port))
-      (let k1 (with_sleepers k (sleep_remove (k_sleepers k) (alarm_key port)))
+      (let k1 (.sleepers k (sleep_remove (.sleepers k) (alarm_key port)))
         (if (le t (clock_ns))
             (resume_with (alarm_sent k1 port) p 0)
-            (resume_with (with_sleepers k1 (sleep_add (k_sleepers k1) t (alarm_key port))) p 0)))))
+            (resume_with (.sleepers k1 (sleep_add (.sleepers k1) t (alarm_key port))) p 0)))))
 
 ; The board restarted for p, as Shut Down stops it, with nothing told
 ; first: the restart logged, and then L0's board_reset, which drains the
@@ -2125,9 +2046,8 @@
 ; 5 and the aarch64 virt board. Where it returns, the board gives no way
 ; to restart it, and p is answered err_denied.
 (def do_reboot ((k Kernel) (p Proc)) Step
-  (let k2 (k_note k 0 (log_info) (reboot_text (base_name (k_proc_path k p)) (proc_pid p)))
-    (let r (board_reset)
-      (resume_with (k_note k2 0 (log_warn) "l0s: this board cannot be restarted") p (err_denied)))))
+  (let (k2 (k_note k 0 (log_info) (reboot_text (base_name (k_proc_path k p)) (.pid p))) r (board_reset))
+    (resume_with (k_note k2 0 (log_warn) "l0s: this board cannot be restarted") p (err_denied))))
 
 ; What the kernel says as name, pid, restarts the board.
 (def reboot_text ((name (list int)) (pid int)) (list int)
@@ -2138,23 +2058,21 @@
 ; err_no_port if port is not p's, err_taken if irq is bound already, or
 ; interrupt_enable's code.
 (def do_irq_bind ((k Kernel) (p Proc) (irq int) (port int)) Step
-  (if (if (not (proc_dev k p)) true (lt irq 1))
-      (resume_with k p (err_denied))
-      (if (not (eq (ipc_owner (k_ipc k) port) (proc_pid p)))
-          (resume_with k p (err_no_port))
-          (match (k_irq k irq)
-            ((Some b)
-              (if (irq_owned b)
-                  (resume_with k p (err_taken))
-                  (match b
-                    ((Irq owner old taken)
-                      (let d (if taken (interrupt_done irq) 0)
-                        (resume_with (with_irq k irq (Irq (proc_pid p) port false)) p 0))))))
-            ((None)
-              (let r (interrupt_enable irq)
-                (if (lt r 0)
-                    (resume_with k p r)
-                    (resume_with (with_irq k irq (Irq (proc_pid p) port false)) p 0))))))))
+  (if (or (not (proc_dev k p)) (lt irq 1)) (resume_with k p (err_denied))
+      (not (eq (ipc_owner (.ipc k) port) (.pid p))) (resume_with k p (err_no_port))
+      (match (k_irq k irq)
+        ((Some b)
+          (if (irq_owned b)
+              (resume_with k p (err_taken))
+              (match b
+                ((Irq owner old taken)
+                  (let d (if taken (interrupt_done irq) 0)
+                    (resume_with (with_irq k irq (Irq (.pid p) port false)) p 0))))))
+        ((None)
+          (let r (interrupt_enable irq)
+            (if (lt r 0)
+                (resume_with k p r)
+                (resume_with (with_irq k irq (Irq (.pid p) port false)) p 0)))))))
 
 ; Interrupt irq, taken and bound by p, ended, so it can come again: 0,
 ; or err_no_port if it is not p's or not taken.
@@ -2164,7 +2082,7 @@
     ((Some b)
       (match b
         ((Irq owner port taken)
-          (if (if (eq owner (proc_pid p)) taken false)
+          (if (and (eq owner (.pid p)) taken)
               (let d (interrupt_done irq)
                 (resume_with (with_irq k irq (Irq owner port false)) p 0))
               (resume_with k p (err_no_port))))))))
@@ -2188,18 +2106,16 @@
       (kill k p (append "fault at 0x" (append (hex_digits far 0) (append ", syndrome 0x" (hex_digits esr 0))))))
     ((TrapInterrupt n)
       (if (eq n 0)
-          (let a (timer_at -1)
-            (let d (interrupt_done 0)
-              (Park k p)))
+          (let (a (timer_at -1) d (interrupt_done 0)) (Park k p))
           (Park (device_irq k n) p))))))
 
 ; k with its pool of zeroed frames given back, each frame freed, once
 ; fewer frames are left than the pool's floor (memory.l0's
 ; pool_released), so that the pool never holds what a process needs.
 (def k_pool_kept ((k Kernel)) Kernel
-  (if (pool_released (mem_pooled (k_mem k)) (frame_free_count))
-      (match (mem_pool_drain (k_mem k))
-        ((PoolDrained m2 fs) (let f (free_frames fs) (with_mem k m2))))
+  (if (pool_released (mem_pooled (.mem k)) (frame_free_count))
+      (match (mem_pool_drain (.mem k))
+        ((PoolDrained m2 fs) (let f (free_frames fs) (.mem k m2))))
       k))
 
 ; Whether k has frames to make for its pool while it is idle: only with
@@ -2207,9 +2123,8 @@
 ; pool is never made, and what runs out first, and is refused, is as it
 ; would be without one (test_heap_runs_low).
 (def k_pool_wants ((k Kernel)) bool
-  (if (ge (heap_left) (add (heap_reserve) (pool_heap_room)))
-      (gt (pool_wanted (mem_pooled (k_mem k)) (frame_free_count)) 0)
-      false))
+  (and (ge (heap_left) (add (heap_reserve) (pool_heap_room)))
+       (gt (pool_wanted (mem_pooled (.mem k)) (frame_free_count)) 0)))
 
 ; The heap past its reserve the pool is made with: 32 MB.
 (def pool_heap_room () int 33554432)
@@ -2217,8 +2132,8 @@
 ; k with a chunk of zeroed frames made for its pool, as many as
 ; pool_wanted says, or fewer if the host runs out.
 (def k_pool_filled ((k Kernel)) Kernel
-  (let fs (frames_made (pool_wanted (mem_pooled (k_mem k)) (frame_free_count)) (nil int))
-    (with_mem k (mem_pool_put (k_mem k) fs (length fs)))))
+  (let fs (frames_made (pool_wanted (mem_pooled (.mem k)) (frame_free_count)) (nil int))
+    (.mem k (mem_pool_put (.mem k) fs (length fs)))))
 
 ; n zeroed frames made onto acc, or as many as the host had.
 (def frames_made ((n int) (acc (list int))) (list int)
@@ -2247,12 +2162,12 @@
 ; until pid 1 exits; and returns its status.
 ; Its run counts from when it was picked (step).
 (def schedule ((k Kernel)) int
-  (if (cpus_many (k_cpus k))
+  (if (cpus_many (.cpus k))
       (many_schedule k)
       (let now (clock_ns)
         (match (take_ready (k_tick (wake_sleepers k now) now))
           ((Picked k2 p)
-            (let t (timer_at (slice_deadline (k_sleepers k2) now))
+            (let t (timer_at (slice_deadline (.sleepers k2) now))
               (run_proc k2 p now)))
           ((NonePicked k2) (idle k2))))))
 
@@ -2272,7 +2187,7 @@
             ((TakenSlot k2 s)
               (match s
                 ((Live p)
-                  (if (if (is_ready (proc_state p)) (not (cpus_out (k_cpus k2) pid)) false)
+                  (if (and (is_ready (proc_state p)) (not (cpus_out (.cpus k2) pid)))
                       (Picked k2 p)
                       (take_ready (restore k2 p))))
                 ((Free) (take_ready (put_slot k2 pid (Free))))
@@ -2283,9 +2198,8 @@
 (def run_proc ((k Kernel) (p Proc) (since int)) int
   (match p
     ((Proc pid m s c pages dev st)
-      (let r (user_run s c)
-        (let t (trap_of r)
-          (step (on_trap k (Proc pid m s r pages dev st) t) pid since))))))
+      (let (r (user_run (.id s) c) t (trap_of r))
+        (step (on_trap k (Proc pid m s r pages dev st) t) pid since)))))
 
 ; Carrying on after s, for pid, picked to run at since: the same process
 ; run again, or the next one scheduled, pid's run from since counted as
@@ -2303,21 +2217,16 @@
 ; load's tick, or a device, unless nothing could ever come; the wait
 ; counted as CPU 0's.
 (def idle ((k Kernel)) int
-  (if (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false)
+  (if (and (is_empty (.sleepers k)) (eq (k_irq_count k) 0))
       (stuck k "l0s: deadlock: every process waits for something that cannot happen")
-      (if (k_pool_wants k)
-          (schedule (k_pool_filled k))
-          (let t (timer_at (k_wake_at k))
-            (let t0 (clock_ns)
-              (let n (interrupt_wait)
-                (let k1 (k_waited k t0)
-                  (if (eq n 0)
-                      (let a (timer_at -1)
-                        (let d (interrupt_done 0)
-                          (schedule k1)))
-                      (if (gt n 0)
-                          (schedule (device_irq k1 n))
-                          (stuck k1 "l0s: no interrupt can come"))))))))))
+      (k_pool_wants k) (schedule (k_pool_filled k))
+      (let (t (timer_at (k_wake_at k))
+            t0 (clock_ns)
+            n (interrupt_wait)
+            k1 (k_waited k t0))
+        (if (eq n 0) (let (a (timer_at -1) d (interrupt_done 0)) (schedule k1))
+            (gt n 0) (schedule (device_irq k1 n))
+            (stuck k1 "l0s: no interrupt can come")))))
 
 ; why logged as an error, and 124, the status the system stops with when
 ; nothing can ever run again.
@@ -2337,7 +2246,7 @@
 
 ; One pass of CPU 0's loop, as above, until pid 1 exits; and its status.
 (def many_schedule ((k Kernel)) int
-  (if (cpus_busy (k_cpus k))
+  (if (cpus_busy (.cpus k))
       (let a (cpu_trapped)
         (if (eq (array_len a) 0)
             (many_fill (k_woken k))
@@ -2354,35 +2263,27 @@
 (def many_back ((k Kernel) (t CpuTrapped)) int
   (match t
     ((CpuTrapped ctx cpu pid)
-      (match (cpus_back (k_cpus k) pid (clock_ns))
-        ((CpuNotOut c) (many_schedule (with_cpus k c)))
-        ((CpuBack c on)
-          (match (take_slot (with_cpus k c) pid)
+      (match (k_cpus_back k pid (clock_ns))
+        ((KNotOut k1) (many_schedule k1))
+        ((KBack k1 on)
+          (match (take_slot k1 pid)
             ((TakenSlot k2 s)
               (match s
-                ((Live p) (many_trap k2 (proc_ran p ctx) on))
+                ((Live p) (many_trap k2 (.context p ctx) on))
                 ((Free) (many_schedule (put_slot k2 pid (Free))))
                 ((Dead st) (many_schedule (put_slot k2 pid (Dead st))))))))))))
-
-; p as it came back from running, its context ctx.
-(def proc_ran ((p Proc) (ctx (array int))) Proc
-  (match p ((Proc pid m s c pages dev st) (Proc pid m s ctx pages dev st))))
-
-; p's context.
-(def proc_context ((p Proc)) (array int)
-  (match p ((Proc pid m s c pages dev st) c)))
 
 ; p back from the CPU on says, after its trap: ended, if it was killed
 ; while out; its slice over, and parked, if that CPU's timer ended it,
 ; an interrupt that CPU took and ended itself, so CPU 0 ends none; and
 ; otherwise handled as on one CPU.
 (def many_trap ((k Kernel) (p Proc) (on OnCpu)) int
-  (if (on_cpu_doomed on)
-      (let n (cpus_out_count (k_cpus k)) (many_step (killed_out k p) on n))
-      (let t (trap_of (proc_context p))
+  (if (.doomed on)
+      (let n (cpus_out_count (.cpus k)) (many_step (killed_out k p) on n))
+      (let t (trap_of (.context p))
         (if (trap_is_interrupt t)
             (many_schedule (park k p))
-            (let n (cpus_out_count (k_cpus k)) (many_step (on_trap k p t) on n))))))
+            (let n (cpus_out_count (.cpus k)) (many_step (on_trap k p t) on n))))))
 
 ; status, the system's, once the n threads out on other CPUs have come
 ; back, each at its trap or its slice's end, and been taken back: so a
@@ -2409,7 +2310,7 @@
 ; stopped, if p is pid 1, as killed_by does.
 (def killed_out ((k Kernel) (p Proc)) Step
   (let k2 (end_proc k p (killed_status))
-    (if (eq (proc_pid p) 1) (Halt (killed_status)) (Next k2))))
+    (if (eq (.pid p) 1) (Halt (killed_status)) (Next k2))))
 
 ; Carrying on after s, for a thread that ran where on says: one that goes
 ; on as many_go says, with what is left of its slice; then on with the
@@ -2417,7 +2318,7 @@
 ; other CPUs as the trap came are back (many_halt).
 (def many_step ((s Step) (on OnCpu) (n int)) int
   (match s
-    ((Resume k p) (many_go k p (on_cpu_cpu on) (Turn (on_cpu_deadline on) -1 0)))
+    ((Resume k p) (many_go k p (.cpu on) (Turn (.deadline on) -1 0)))
     ((Park k p) (many_schedule (park k p)))
     ((Next k) (many_schedule k))
     ((Halt status) (many_halt n status))))
@@ -2437,19 +2338,17 @@
   (match turn
     ((Turn deadline own start)
       (let now (clock_ns)
-        (if (if (ge now deadline) true (if (ge own 0) (ge now own) false))
-            (many_schedule (park (k_turn_over k (proc_pid p) turn) p))
-            (if (k_here k (proc_pid p))
-                (let k2 (many_spread_some k)
-                  (let a (cpu_trapped)
-                    (if (eq (array_len a) 0)
-                        (if (lt own 0) (many_own_turn k2 p deadline) (many_own k2 p turn))
-                        (many_back (park (k_turn_over k2 (proc_pid p) turn) p) (cpu_trapped_of a)))))
-                (let i (cpus_pick (k_cpus k) prefer now)
-                  (let k1 (k_turn_over k (proc_pid p) turn)
-                    (if (eq i 0)
-                        (many_schedule (park k1 p))
-                        (match (many_hand k1 p i deadline) ((Handed k2 ok) (many_schedule k2))))))))))))
+        (if (or (ge now deadline) (and (ge own 0) (ge now own)))
+            (many_schedule (park (k_turn_over k (.pid p) turn) p))
+            (k_here k (.pid p))
+            (let (k2 (many_spread_some k) a (cpu_trapped))
+              (if (eq (array_len a) 0)
+                  (if (lt own 0) (many_own_turn k2 p deadline) (many_own k2 p turn))
+                  (many_back (park (k_turn_over k2 (.pid p) turn) p) (cpu_trapped_of a))))
+            (let (i (cpus_pick (.cpus k) prefer now) k1 (k_turn_over k (.pid p) turn))
+              (if (eq i 0)
+                  (many_schedule (park k1 p))
+                  (match (many_hand k1 p i deadline) ((Handed k2 ok) (many_schedule k2))))))))))
 
 ; k with pid's turn on CPU 0 counted, from its start to now, if it had
 ; one (own not -1); else k. A turn's calls are counted as its.
@@ -2459,16 +2358,16 @@
 ; k with a run of t ns by pid's thread on CPU 0 kept, if it is news
 ; (cpus_run_news); else k itself, rebuilt not at all.
 (def k_ran ((k Kernel) (pid int) (t int)) Kernel
-  (if (cpus_run_news (k_cpus k) pid t) (with_cpus k (cpus_ran (k_cpus k) pid t)) k))
+  (if (cpus_run_news (.cpus k) pid t) (.cpus k (cpus_ran (.cpus k) pid t)) k))
 
 ; p given a turn on CPU 0 from now, CPU 0's timer set to its end, as
 ; cpus_own_deadline says, its slice's end at deadline at the latest; and
 ; run there.
 (def many_own_turn ((k Kernel) (p Proc) (deadline int)) int
-  (let now (clock_ns)
-    (let own (cpus_own_deadline now deadline (soonest (k_sleepers k)))
-      (let t (timer_at own)
-        (many_own k p (Turn deadline own now))))))
+  (let (now (clock_ns)
+        own (cpus_own_deadline now deadline (soonest (.sleepers k)))
+        t (timer_at own))
+    (many_own k p (Turn deadline own now))))
 
 ; p run on CPU 0 itself, in its turn there, until it traps, or CPU 0's
 ; timer ends the turn; and on from there as many_own_step says. Nothing
@@ -2482,10 +2381,8 @@
 (def many_own ((k Kernel) (p Proc) (turn Turn)) int
   (match p
     ((Proc pid m s c pages dev st)
-      (let r (user_run s c)
-        (let t (trap_of r)
-          (let n (cpus_out_count (k_cpus k))
-            (many_own_step (on_trap (many_timed k pid t turn) (Proc pid m s r pages dev st) t) turn n pid)))))))
+      (let (r (user_run (.id s) c) t (trap_of r) n (cpus_out_count (.cpus k)))
+        (many_own_step (on_trap (many_timed k pid t turn) (Proc pid m s r pages dev st) t) turn n pid)))))
 
 ; k with how long pid ran in its turn kept, if t, its trap, is the
 ; timer's, which ended it; else k.
@@ -2513,7 +2410,7 @@
 (def many_own_step ((s Step) (turn Turn) (n int) (pid int)) int
   (match s
     ((Resume k p)
-      (if (cpus_busy (k_cpus k))
+      (if (cpus_busy (.cpus k))
           (many_go k p 0 turn)
           (many_own k p turn)))
     ((Park k p) (many_schedule (park (k_turn_over k pid turn) p)))
@@ -2529,9 +2426,9 @@
 (def many_hand ((k Kernel) (p Proc) (i int) (deadline int)) Handed
   (match p
     ((Proc pid m s c pages dev st)
-      (if (eq (cpu_run i s c deadline pid) 0)
-          (let cs (cpus_place (k_cpus k) i pid deadline (clock_ns))
-            (Handed (with_cpus (restore k (Proc pid m s c pages dev st)) cs) true))
+      (if (eq (cpu_run i (.id s) c deadline pid) 0)
+          (let k1 (restore k (Proc pid m s c pages dev st))
+            (Handed (.cpus k1 (cpus_place (.cpus k1) i pid deadline (clock_ns))) true))
           (Handed (park k (Proc pid m s c pages dev st)) false)))))
 
 ; The ready processes, each with a slice of its own: the first that
@@ -2560,9 +2457,9 @@
       (match (take_ready k)
         ((NonePicked k2) k2)
         ((Picked k2 p)
-          (if (cpus_keeps (k_cpus k2) (proc_pid p))
+          (if (cpus_keeps (.cpus k2) (.pid p))
               (many_spread (park k2 p) (sub n 1))
-              (let i (cpus_pick (k_cpus k2) 0 (clock_ns))
+              (let i (cpus_pick (.cpus k2) 0 (clock_ns))
                 (if (eq i 0)
                     (many_spread (park k2 p) (sub n 1))
                     (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
@@ -2575,9 +2472,9 @@
       (match (take_ready k)
         ((NonePicked k2) (many_idle k2))
         ((Picked k2 p)
-          (if (k_here k2 (proc_pid p))
+          (if (k_here k2 (.pid p))
               (many_own_turn (many_spread_rest k2) p (add (clock_ns) (slice_ns)))
-              (let i (cpus_pick (k_cpus k2) 0 (clock_ns))
+              (let i (cpus_pick (.cpus k2) 0 (clock_ns))
                 (if (eq i 0)
                     (many_fill_from (park k2 p) (sub n 1))
                     (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
@@ -2587,7 +2484,7 @@
 ; any is ready and any has room, as many_spread_all does; else k.
 (def many_spread_rest ((k Kernel)) Kernel
   (if (k_waiting k)
-      (if (cpus_room (k_cpus k)) (many_spread_all k (k_ready_count k)) k)
+      (if (cpus_room (.cpus k)) (many_spread_all k (k_ready_count k)) k)
       k))
 
 ; k with each of n pids of its ready queue handed to a CPU with room, by
@@ -2599,7 +2496,7 @@
       (match (take_ready k)
         ((NonePicked k2) k2)
         ((Picked k2 p)
-          (let i (cpus_pick (k_cpus k2) 0 (clock_ns))
+          (let i (cpus_pick (.cpus k2) 0 (clock_ns))
             (if (eq i 0)
                 (many_spread_all (park k2 p) (sub n 1))
                 (match (many_hand k2 p i (add (clock_ns) (slice_ns)))
@@ -2609,23 +2506,17 @@
 ; soonest sleeper or the load's tick, or a device, unless nothing could
 ; ever come; the wait counted as CPU 0's.
 (def many_idle ((k Kernel)) int
-  (if (if (cpus_busy (k_cpus k)) false (if (is_empty (k_sleepers k)) (eq (k_irq_count k) 0) false))
+  (if (and (not (cpus_busy (.cpus k))) (and (is_empty (.sleepers k)) (eq (k_irq_count k) 0)))
       (stuck k "l0s: deadlock: every process waits for something that cannot happen")
-      (if (k_pool_wants k)
-          (many_schedule (k_pool_filled k))
-          (let t (timer_at (k_wake_at k))
-            (let t0 (clock_ns)
-              (let n (cpu_wait)
-                (let k1 (k_waited k t0)
-                  (if (eq n -1)
-                      (many_schedule k1)
-                      (if (eq n 0)
-                          (let a (timer_at -1)
-                            (let d (interrupt_done 0)
-                              (many_schedule k1)))
-                          (if (gt n 0)
-                              (many_schedule (device_irq k1 n))
-                              (stuck k1 "l0s: no interrupt can come")))))))))))
+      (k_pool_wants k) (many_schedule (k_pool_filled k))
+      (let (t (timer_at (k_wake_at k))
+            t0 (clock_ns)
+            n (cpu_wait)
+            k1 (k_waited k t0))
+        (if (eq n -1) (many_schedule k1)
+            (eq n 0) (let (a (timer_at -1) d (interrupt_done 0)) (many_schedule k1))
+            (gt n 0) (many_schedule (device_irq k1 n))
+            (stuck k1 "l0s: no interrupt can come")))))
 
 ; ------------------------------------------------------------------- boot
 
@@ -2638,8 +2529,8 @@
           (match (spawn k e 0 args 0)
             ((Spawned k2 pid)
               (if (lt pid 0)
-                  (start_all (k_note k2 0 (log_error) (append "l0s: cannot start " (append (entry_path (k_entry k2 e)) (append ": " (digits pid))))) (tail ls))
-                  (start_all (k_note k2 0 (log_debug) (append "l0s: pid " (append (digits pid) (append ": " (entry_path (k_entry k2 e)))))) (tail ls)))))))))
+                  (start_all (k_note k2 0 (log_error) (append "l0s: cannot start " (append (.path (k_entry k2 e)) (append ": " (digits pid))))) (tail ls))
+                  (start_all (k_note k2 0 (log_debug) (append "l0s: pid " (append (digits pid) (append ": " (.path (k_entry k2 e)))))) (tail ls)))))))))
 
 ; why written to standard error as the kernel's, "l0s: WHY"; 1, the
 ; status to stop with.
@@ -2653,9 +2544,9 @@
     ((Err why) (complain why))
     ((Ok es)
       (let t (entry_index es (inittab_path))
-        (if (if (lt t 0) true (not (entry_is_file (array_get es t))))
+        (if (or (lt t 0) (not (entry_is_file (array_get es t))))
             (complain "initramfs: no /etc/inittab")
-            (match (parse_inittab (bytes_range input (entry_start (array_get es t)) (entry_end (array_get es t))))
+            (match (parse_inittab (bytes_range input (.start (array_get es t)) (.end (array_get es t))))
               ((Err why) (complain why))
               ((Ok init)
                 (match (resolve_init init es)
@@ -2664,7 +2555,7 @@
 
 ; The CPU's name, for the first line of boot: what (machine) says.
 (def cpu_name ((m int)) (list int)
-  (if (eq m 1) "aarch64" (if (eq m 2) "riscv64" "an unknown CPU")))
+  (if (eq m 1) "aarch64" (eq m 2) "riscv64" "an unknown CPU"))
 
 ; The lines the kernel logs as it boots, each "l0s: ...": the CPU and
 ; the boot arguments args, the pages of memory free, how many CPUs, n,
@@ -2722,22 +2613,21 @@
 (def boot_config ((input bytes) (es (array Entry)) (config Config)) int
   (match config
     ((Config launches devs defaults stdin)
-      (let e (interrupt_enable 0)
-        (let k (start_all (k_notes (kernel_new input es config)
-                            (banner_lines (machine) (boot_args) (frame_free_count) (cpu_count) (bytes_len input) (array_len es) (length launches)))
-                          launches)
-          (match (look k 1)
-            ((LookLive) (schedule k))
-            ((LookFree) (complain "nothing could be started"))
-            ((LookDead st) st)))))))
+      (let (e (interrupt_enable 0)
+            k (start_all (k_notes (kernel_new input es config)
+                          (banner_lines (machine) (boot_args) (frame_free_count) (cpu_count) (bytes_len input) (array_len es) (length launches)))
+                        launches))
+        (match (look k 1)
+          ((LookLive) (schedule k))
+          ((LookFree) (complain "nothing could be started"))
+          ((LookDead st) st))))))
 
 ; The kernel's first act: on a board with RP1, its Ethernet stopped from
 ; writing to memory before any is given (rp1.l0), and said so; then
 ; kernel_main.
 (def kernel_start () int
-  (let ncr (rp1_quiet)
-    (let w (if (ge ncr 0) (k_echo (log_info) (rp1_quiet_text ncr)) 0)
-      (kernel_main))))
+  (let (ncr (rp1_quiet) w (if (ge ncr 0) (k_echo (log_info) (rp1_quiet_text ncr)) 0))
+    (kernel_main)))
 
 ; The kernel's main: the initramfs read from standard input, as l0 boot
 ; gives it, and booted; 1 if it cannot be read.

@@ -95,8 +95,9 @@
 ; queues' pages and where the card reaches each; the next index to make
 ; available on the receive queue and the next used one to read, as the
 ; rings count them; the frames sent, as the transmit ring counts them;
-; the ports listening; the card's address; and the counts.
-(data Nic (Nic IoDevice int IoDevice (array int) int int int (list int) (list int) NicCounts))
+; the ports listening; the card's address; and the counts. The card's
+; transport's interrupt is the card's.
+(data Nic (Nic (d IoRegion) (transport int) (q IoRegion) (addrs (array int)) (rxa int) (rxu int) (txn int) (ls (list int)) (mac (list int)) (counts NicCounts)))
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "virtio-net" why))
@@ -113,7 +114,7 @@
     ((Ok d) (found d (find_device d (net_device) 0)))))
 
 ; No card is no failure: the board was started without one.
-(def found ((d IoDevice) (t int)) int
+(def found ((d IoRegion) (t int)) int
   (match (virtio_probe_features d t "the virtio-net" "receive" (ring_size) (net_f_mac))
     ((VirtioAbsent) (info_as "virtio-net" "no virtio-net on the board"))
     ((VirtioUnusable why) (complain why))
@@ -126,38 +127,34 @@
 
 ; The card's address: its configuration's first six bytes, if it gives
 ; one, and otherwise QEMU's first.
-(def card_mac ((d IoDevice) (t int)) (list int)
+(def card_mac ((d IoRegion) (t int)) (list int)
   (if (eq (bit_and (device_features d t 0) (net_f_mac)) 0)
       (default_mac)
       (get_bytes d (treg t (reg_config)) 6)))
 
 ; Both queues laid out and started, the card told the driver is ready
 ; and given every receive buffer, and the driver serving.
-(def filled ((d IoDevice) (t int) (q IoDevice) (addrs (array int)) (mac (list int))) int
-  (let ds (put_bytes q (rx_desc) (rx_descriptors addrs 0 (nil int)))
-    (let av (put_bytes q (rx_avail) (rx_avail_all))
-      (let tv (put_bytes q (tx_avail) (tx_avail_none))
-        (let r (start_queue d t (rx_queue) (ring_size) (device_at addrs (rx_desc)) (device_at addrs (rx_avail)) (device_at addrs (rx_used)))
-          (let s (start_queue d t (tx_queue) (ring_size) (device_at addrs (tx_desc)) (device_at addrs (tx_avail)) (device_at addrs (tx_used)))
-            (let o (driver_ok d t)
-              (let b (barrier)
-                (let n (notify d t (rx_queue))
-                  (listening (Nic d t q addrs (ring_size) 0 0 (nil int) mac (NicCounts 0 0 0))))))))))))
+(def filled ((d IoRegion) (t int) (q IoRegion) (addrs (array int)) (mac (list int))) int
+  (let (ds (put_bytes q (rx_desc) (rx_descriptors addrs 0 (nil int)))
+        av (put_bytes q (rx_avail) (rx_avail_all))
+        tv (put_bytes q (tx_avail) (tx_avail_none))
+        r (start_queue d t (rx_queue) (ring_size) (device_at addrs (rx_desc)) (device_at addrs (rx_avail)) (device_at addrs (rx_used)))
+        s (start_queue d t (tx_queue) (ring_size) (device_at addrs (tx_desc)) (device_at addrs (tx_avail)) (device_at addrs (tx_used)))
+        o (driver_ok d t)
+        b (barrier)
+        n (notify d t (rx_queue)))
+    (listening (Nic d t q addrs (ring_size) 0 0 (nil int) mac (NicCounts 0 0 0)))))
 
 ; Registers as nic and binds the card's interrupt, then serves.
 (def listening ((k Nic)) int
-  (let port (port_new)
-    (let r (name_register_or_why port "nic")
-      (if (not (is_empty r))
-          (complain r)
-          (let b (irq_bind_or_why (transport_irq (nic_transport k)) port)
-            (if (is_empty b)
-                (let n (info_as "virtio-net" (match k ((Nic d t q addrs rxa rxu txn ls mac c) (card_line mac t))))
-                  (serve k port))
-                (complain b)))))))
-
-; The card's transport, whose interrupt is the card's.
-(def nic_transport ((k Nic)) int (match k ((Nic d t q addrs rxa rxu txn ls mac c) t)))
+  (let (port (port_new) r (name_register_or_why port "nic"))
+    (if (not (is_empty r))
+        (complain r)
+        (let b (irq_bind_or_why (transport_irq (.transport k)) port)
+          (if (is_empty b)
+              (let n (info_as "virtio-net" (match k ((Nic d t q addrs rxa rxu txn ls mac c) (card_line mac t))))
+                (serve k port))
+              (complain b))))))
 
 ; ---------------------------------------------------------------- serving
 
@@ -166,7 +163,7 @@
   (match (port_receive port)
     ((RecvFailed) (complain "lost its port"))
     ((Message from b)
-      (if (is_irq_notice (Message from b) (transport_irq (nic_transport k)))
+      (if (is_irq_notice (Message from b) (transport_irq (.transport k)))
           (serve (interrupted k) port)
           (serve (requested k b) port)))))
 
@@ -177,12 +174,11 @@
   (let fi (nic_frame_at b)
     (if (ge fi 0)
         (sent_answered (transmitted k b fi) (msg_reply b))
-        (let payload (msg_text b)
-          (let body (request_body payload)
-            (if (eq body "listen")
-                (listened k (request_reply payload))
-                (match (asked k body)
-                  ((Served k2 answer) (let a (request_answer payload answer) k2)))))))))
+        (let (payload (msg_text b) body (request_body payload))
+          (if (eq body "listen")
+              (listened k (request_reply payload))
+              (match (asked k body)
+                ((Served k2 answer) (let a (request_answer payload answer) k2))))))))
 
 ; info, link, stats, or anything else, which is refused. QEMU's card
 ; always has a link, so link is always up.
@@ -190,9 +186,9 @@
   (match k
     ((Nic d t q addrs rxa rxu txn ls mac c)
       (if (eq body "info") (Served k (append "nic " (mac_text mac)))
-      (if (eq body "link") (Served k (nic_link_text true))
-      (if (eq body "stats") (Served k (nic_counts_text c))
-      (served_error k (append "no request " (take_line body)))))))))
+          (eq body "link") (Served k (nic_link_text true))
+          (eq body "stats") (Served k (nic_counts_text c))
+          (served_error k (append "no request " (take_line body)))))))
 
 ; A send's answer, to its reply port to, if it names one.
 (def sent_answered ((s (Served Nic)) (to int)) Nic
@@ -213,15 +209,8 @@
 (def transmitted ((k Nic) (b bytes) (fi int)) (Served Nic)
   (let why (nic_size_refusal (sub (bytes_len b) fi))
     (if (not (is_empty why))
-        (served_error (with_counts k (nic_counted_tx (nic_counts k) false)) why)
+        (served_error (.counts k (nic_counted_tx (.counts k) false)) why)
         (transmit k b fi))))
-
-; The driver's counts.
-(def nic_counts ((k Nic)) NicCounts (match k ((Nic d t q addrs rxa rxu txn ls mac c) c)))
-
-; k with the counts c2.
-(def with_counts ((k Nic) (c2 NicCounts)) Nic
-  (match k ((Nic d t q addrs rxa rxu txn ls mac c) (Nic d t q addrs rxa rxu txn ls mac c2))))
 
 ; The frame in b from fi on copied into the transmit buffer after the
 ; header, and padded; its descriptor made the queue's first, offered, and
@@ -229,20 +218,20 @@
 (def transmit ((k Nic) (b bytes) (fi int)) (Served Nic)
   (match k
     ((Nic d t q addrs rxa rxu txn ls mac c)
-      (let n (sub (bytes_len b) fi)
-        (let w (tx_copied q b fi n)
-          (let ds (put_bytes q (tx_desc) (descriptor (device_at addrs (tx_buffer)) (tx_len n) 0 0))
-            (let n (virtq_offer d t (tx_queue) q (tx_avail) (ring_size) txn 0)
-              (let ok (virtq_wait q (tx_used) n (clock_ns))
-                (let k2 (Nic d t q addrs rxa rxu n ls mac (nic_counted_tx c ok))
-                  (if ok (served_ok k2) (served_error k2 "the card did not take the frame")))))))))))
+      (let (n (sub (bytes_len b) fi)
+            w (tx_copied q b fi n)
+            ds (put_bytes q (tx_desc) (descriptor (device_at addrs (tx_buffer)) (tx_len n) 0 0))
+            n (virtq_offer d t (tx_queue) q (tx_avail) (ring_size) txn 0)
+            ok (virtq_wait q (tx_used) n (clock_ns))
+            k2 (Nic d t q addrs rxa rxu n ls mac (nic_counted_tx c ok)))
+        (if ok (served_ok k2) (served_error k2 "the card did not take the frame"))))))
 
 ; The transmit buffer as the card is to read a frame of n, from b at fi:
 ; the header's zeros, the frame, then zeros to pad it; 0.
-(def tx_copied ((q IoDevice) (b bytes) (fi int) (n int)) int
-  (let h (put_bytes q (tx_buffer) (zeros (net_header_len)))
-    (let f (put_bytes_range q (add (tx_buffer) (net_header_len)) b fi (bytes_len b))
-      (put_bytes q (add (tx_buffer) (add (net_header_len) n)) (zeros (sub (nic_padded_len n) n))))))
+(def tx_copied ((q IoRegion) (b bytes) (fi int) (n int)) int
+  (let (h (put_bytes q (tx_buffer) (zeros (net_header_len)))
+        f (put_bytes_range q (add (tx_buffer) (net_header_len)) b fi (bytes_len b)))
+    (put_bytes q (add (tx_buffer) (add (net_header_len) n)) (zeros (sub (nic_padded_len n) n)))))
 
 ; -------------------------------------------------------------- receiving
 
@@ -251,17 +240,16 @@
 (def interrupted ((k Nic)) Nic
   (match k
     ((Nic d t q addrs rxa rxu txn ls mac c)
-      (let st (device_read32 d (treg t (reg_interrupt_status)))
-        (let a (device_write32 d (treg t (reg_interrupt_ack)) st)
-          (let b (barrier)
-            (refilled (drain k (virtq_used_index q (rx_used))))))))))
+      (let (st (region_get32 d (treg t (reg_interrupt_status)))
+            a (region_set32 d (treg t (reg_interrupt_ack)) st)
+            b (barrier))
+        (refilled (drain k (virtq_used_index q (rx_used))))))))
 
 ; The buffers given back made available, and the interrupt ended.
 (def refilled ((k Nic)) Nic
   (match k
     ((Nic d t q addrs rxa rxu txn ls mac c)
-      (let p (virtq_publish d t (rx_queue) q (rx_avail) rxa)
-        (let a (irq_ack (transport_irq t)) k)))))
+      (let (p (virtq_publish d t (rx_queue) q (rx_avail) rxa) a (irq_ack (transport_irq t))) k))))
 
 ; Each used entry from the next to read up to the card's index.
 (def drain ((k Nic) (device_idx int)) Nic
@@ -269,16 +257,16 @@
     ((Nic d t q addrs rxa rxu txn ls mac c)
       (if (eq (bit_and rxu 65535) device_idx)
           k
-          (let id (mod (virtq_used_id q (rx_used) (ring_size) rxu) (ring_size))
-            (let len (virtq_used_len q (rx_used) (ring_size) rxu)
-              (let k2 (received (Nic d t q addrs rxa (add rxu 1) txn ls mac c) (frame_at q id len))
-                (drain (given_back k2 id) device_idx))))))))
+          (let (id (mod (virtq_used_id q (rx_used) (ring_size) rxu) (ring_size))
+                len (virtq_used_len q (rx_used) (ring_size) rxu)
+                k2 (received (Nic d t q addrs rxa (add rxu 1) txn ls mac c) (frame_at q id len)))
+            (drain (given_back k2 id) device_idx))))))
 
 ; What the card wrote into buffer id, len bytes with its header: the
 ; frame, or none if it is too short or too long to be one.
-(def frame_at ((q IoDevice) (id int) (len int)) (Option bytes)
+(def frame_at ((q IoRegion) (id int) (len int)) (Option bytes)
   (let n (sub len (net_header_len))
-    (if (if (lt n (frame_min)) true (gt n (frame_max)))
+    (if (or (lt n (frame_min)) (gt n (frame_max)))
         ((None bytes))
         (Some (get_bytes_in q (add (rx_buffer id) (net_header_len)) n)))))
 

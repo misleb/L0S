@@ -46,22 +46,22 @@
 
 ; The driver as its arguments ask: probe, or serving.
 (def hdmi_audio_main ((as (list (list int)))) int
-  (match (open_device (dma_ch6_base) (dma_ch_bytes))
-    ((DeviceFailed fault why) (said "no HDMI audio on the board: no dma40 channel"))
-    ((DeviceOpened ch)
+  (match (open_region (dma_ch6_base) (dma_ch_bytes))
+    ((IoRegionFailed fault why) (said "no HDMI audio on the board: no dma40 channel"))
+    ((IoRegionOpened ch)
       (if (any_eq "probe" as)
           (probe ch)
           (when_displayed ch)))))
 
 ; Once hvs serves the display, HDMI0 checked and opened.
-(def when_displayed ((ch IoDevice)) int
+(def when_displayed ((ch IoRegion)) int
   (match (name_wait "display" (display_wait_ns))
     ((NotFound) (said "no display served, so HDMI0 is not up: no sound"))
     ((Found p) (with_m2mc ch))))
 
 ; M2MC asked of the firmware: HDMI0's registers are read only while it
 ; runs.
-(def with_m2mc ((ch IoDevice)) int
+(def with_m2mc ((ch IoRegion)) int
   (match (mailbox_open)
     ((NoMbox why) (complain why))
     ((MboxOpen mb)
@@ -87,7 +87,7 @@
 
 ; The registers read and said: the channel's, then, once M2MC runs,
 ; HDMI0's audio ones. 0.
-(def probe ((ch IoDevice)) int
+(def probe ((ch IoRegion)) int
   (let a (regs_said "dma40 channel 6" ch "CS CB DEBUG TI SRC SRCI DEST DESTI LEN NEXT_CB"
            (cons 0 (cons 4 (cons 12 (cons 16 (cons 20 (cons 24 (cons 28 (cons 32 (cons 36 (cons 40 (nil int))))))))))))
     (match (mailbox_open)
@@ -102,51 +102,50 @@
   (match (hdmi_opened)
     ((NoHdmiAudio why) (complain why))
     ((HdmiAudio run hd v)
-      (let a (regs_said "HD" hd "MAI_CTL MAI_THR MAI_FMT MAI_SMP"
-               (cons (mai_ctl) (cons (mai_thr) (cons (mai_fmt) (cons (mai_smp) (nil int))))))
-        (let b (regs_said "HDMI0" run "DVP_MISC_CONFIG MAI_CHANNEL_MAP MAI_CONFIG AUDIO_PACKET_CONFIG RAM_PACKET_CONFIG RAM_PACKET_STATUS CRP_CFG CTS_0 CTS_1 SCHEDULER_CONTROL RM_OFFSET PLL_VCOCLK_DIV"
-                 (cons (dvp_misc_config) (cons (mai_channel_map) (cons (mai_config) (cons (audio_packet_config)
-                   (cons (ram_packet_config) (cons (ram_packet_status) (cons (crp_cfg) (cons (cts_0) (cons (cts_1)
-                     (cons (scheduler_control) (cons (rm_offset) (cons (pll_vcoclk_div) (nil int))))))))))))))
-          (said (append "the HVS's version 0x" (append (hex_digits v 8) (if (version_is_d0 v) ", a D0" ", not a D0")))))))))
+      (let (a (regs_said "HD" hd "MAI_CTL MAI_THR MAI_FMT MAI_SMP"
+                (cons (mai_ctl) (cons (mai_thr) (cons (mai_fmt) (cons (mai_smp) (nil int))))))
+            b (regs_said "HDMI0" run "DVP_MISC_CONFIG MAI_CHANNEL_MAP MAI_CONFIG AUDIO_PACKET_CONFIG RAM_PACKET_CONFIG RAM_PACKET_STATUS CRP_CFG CTS_0 CTS_1 SCHEDULER_CONTROL RM_OFFSET PLL_VCOCLK_DIV"
+                (cons (dvp_misc_config) (cons (mai_channel_map) (cons (mai_config) (cons (audio_packet_config)
+                  (cons (ram_packet_config) (cons (ram_packet_status) (cons (crp_cfg) (cons (cts_0) (cons (cts_1)
+                    (cons (scheduler_control) (cons (rm_offset) (cons (pll_vcoclk_div) (nil int)))))))))))))))
+        (said (append "the HVS's version 0x" (append (hex_digits v 8) (if (version_is_d0 v) ", a D0" ", not a D0"))))))))
 
 ; Each of names, read at its offset in offs in d, said as WHAT NAME 0xV.
-(def regs_said ((what (list int)) (d IoDevice) (names (list int)) (offs (list int))) int
+(def regs_said ((what (list int)) (d IoRegion) (names (list int)) (offs (list int))) int
   (regs_said_each what d (split_spaces names) offs))
 
 ; regs_said's loop, over the names split.
-(def regs_said_each ((what (list int)) (d IoDevice) (names (list (list int))) (offs (list int))) int
-  (if (if (is_empty names) true (is_empty offs))
+(def regs_said_each ((what (list int)) (d IoRegion) (names (list (list int))) (offs (list int))) int
+  (if (or (is_empty names) (is_empty offs))
       0
-      (let s (said (append what (append " " (append (head names) (append " 0x" (hex_digits (device_read32 d (head offs)) 8))))))
+      (let s (said (append what (append " " (append (head names) (append " 0x" (hex_digits (region_get32 d (head offs)) 8))))))
         (regs_said_each what d (tail names) (tail offs)))))
 
 ; ---------------------------------------------------------------- regions
 
 ; HDMI0's run and HD block, open, and the HVS's version word; or why not.
-(data HdmiAudioOpened (HdmiAudio IoDevice IoDevice int) (NoHdmiAudio (list int)))
+(data HdmiAudioOpened (HdmiAudio IoRegion IoRegion int) (NoHdmiAudio (list int)))
 
 ; Each opened in turn, the HVS closed once read.
 (def hdmi_opened () HdmiAudioOpened
-  (match (open_device (hdmi_run_base) (hdmi_run_bytes))
-    ((DeviceFailed f why) (NoHdmiAudio (append "HDMI0's blocks: " why)))
-    ((DeviceOpened run)
-      (match (open_device (hd_base) (hd_bytes))
-        ((DeviceFailed f why) (NoHdmiAudio (append "the HD block: " why)))
-        ((DeviceOpened hd)
-          (match (open_device (hvs_base) (hvs_bytes))
-            ((DeviceFailed f why) (NoHdmiAudio (append "the HVS: " why)))
-            ((DeviceOpened h)
-              (let v (device_read32 h 0)
-                (let c (close_device h)
-                  (HdmiAudio run hd v))))))))))
+  (match (open_region (hdmi_run_base) (hdmi_run_bytes))
+    ((IoRegionFailed f why) (NoHdmiAudio (append "HDMI0's blocks: " why)))
+    ((IoRegionOpened run)
+      (match (open_region (hd_base) (hd_bytes))
+        ((IoRegionFailed f why) (NoHdmiAudio (append "the HD block: " why)))
+        ((IoRegionOpened hd)
+          (match (open_region (hvs_base) (hvs_bytes))
+            ((IoRegionFailed f why) (NoHdmiAudio (append "the HVS: " why)))
+            ((IoRegionOpened h)
+              (let (v (region_get32 h 0) c (close_region h))
+                (HdmiAudio run hd v)))))))))
 
 ; HDMI0 opened and checked to send HDMI, then the ring set up.
-(def with_regions ((ch IoDevice)) int
+(def with_regions ((ch IoRegion)) int
   (match (hdmi_opened)
     ((NoHdmiAudio why) (complain why))
     ((HdmiAudio run hd v)
-      (if (not (mode_hdmi (device_read32 run (scheduler_control))))
+      (if (not (mode_hdmi (region_get32 run (scheduler_control))))
           (said "HDMI0 sends DVI, which has no audio: no sound")
           (with_ring ch run hd (version_is_d0 v))))))
 
@@ -156,10 +155,10 @@
 ; and their region, each page's address for the channel, the blocks'
 ; page and its region and address, whether the chip is a D0, and the
 ; TMDS rate in Hz.
-(data Hw (Hw IoDevice IoDevice IoDevice int IoDevice (array int) int IoDevice int bool int))
+(data Hw (Hw IoRegion IoRegion IoRegion int IoRegion (array int) int IoRegion int bool int))
 
 ; The ring's pages and the blocks' page taken, then the driver started.
-(def with_ring ((ch IoDevice) (run IoDevice) (hd IoDevice) (d0 bool)) int
+(def with_ring ((ch IoRegion) (run IoRegion) (hd IoRegion) (d0 bool)) int
   (match (dma_alloc (add (ring_periods_n) 1))
     ((DmaPages va) (with_pages ch run hd d0 va))
     ((DmaDenied) (complain (dma_alloc_why (DmaDenied))))
@@ -167,20 +166,19 @@
     ((DmaNoRoom) (complain (dma_alloc_why (DmaNoRoom))))))
 
 ; The pages from va: the ring's first, then the blocks', opened.
-(def with_pages ((ch IoDevice) (run IoDevice) (hd IoDevice) (d0 bool) (va int)) int
-  (let n (ring_periods_n)
-    (let addrs (dma_addresses va (add n 1))
-      (if (lt (array_len addrs) (add n 1))
-          (complain "the DMA pages have no addresses")
-          (let cva (add va (mul n (page_size)))
-            (match (dma_open va n)
-              ((DeviceFailed f why) (complain why))
-              ((DeviceOpened rm)
-                (match (dma_open cva 1)
-                  ((DeviceFailed f why) (complain why))
-                  ((DeviceOpened cm)
-                    (started (Hw ch run hd va rm (array_resize addrs n 0) cva cm (array_get addrs n) d0
-                                 (tmds_hz (device_read32 run (rm_offset)) (device_read32 run (pll_vcoclk_div))))))))))))))
+(def with_pages ((ch IoRegion) (run IoRegion) (hd IoRegion) (d0 bool) (va int)) int
+  (let (n (ring_periods_n) addrs (dma_addresses va (add n 1)))
+    (if (lt (array_len addrs) (add n 1))
+        (complain "the DMA pages have no addresses")
+        (let cva (add va (mul n (page_size)))
+          (match (dma_open va n)
+            ((IoRegionFailed f why) (complain why))
+            ((IoRegionOpened rm)
+              (match (dma_open cva 1)
+                ((IoRegionFailed f why) (complain why))
+                ((IoRegionOpened cm)
+                  (started (Hw ch run hd va rm (array_resize addrs n 0) cva cm (array_get addrs n) d0
+                               (tmds_hz (region_get32 run (rm_offset)) (region_get32 run (pll_vcoclk_div)))))))))))))
 
 ; The driver started: the channel stopped, if it ran, the blocks
 ; written, the audio clock's gate opened, the MAI set up at the first
@@ -189,26 +187,25 @@
 (def started ((hw Hw)) int
   (match hw
     ((Hw ch run hd va rm at cva cm cbs d0 hz)
-      (let w (words_put cm (dma_stopped ch) (ring_cb_words cbs at (page_size) (hdmi0_dreq d0)))
-        (let s (dma_synced cva 1)
-          (let g (device_write32 run (dvp_misc_config) (bit_and (device_read32 run (dvp_misc_config)) (bit_xor 8 -1)))
-            (let why (playing hw (first_rate))
-              (if (not (is_empty why))
-                  (complain why)
-                  (serve_from hw)))))))))
+      (let (w (words_put cm (dma_stopped ch) (ring_cb_words cbs at (page_size) (hdmi0_dreq d0)))
+            s (dma_synced cva 1)
+            g (region_set32 run (dvp_misc_config) (bit_and (region_get32 run (dvp_misc_config)) (bit_xor 8 -1)))
+            why (playing hw (first_rate)))
+        (if (not (is_empty why))
+            (complain why)
+            (serve_from hw))))))
 
 ; audio registered, the interrupt bound, the chime started as the ring
 ; runs, and the loop run.
 (def serve_from ((hw Hw)) int
-  (let port (port_new)
-    (let r (name_register_or_why port (audio_name))
-      (if (not (is_empty r))
-          (complain r)
-          (let b (irq_bind_or_why (dma_ch6_irq) port)
-            (if (not (is_empty b))
-                (complain b)
-                (let s (said (audio_line hw (first_rate)))
-                  (serve port (chime_started (Drv hw (fresh_ring) (first_rate) (audio_chime_load "hdmi-audio")))))))))))
+  (let (port (port_new) r (name_register_or_why port (audio_name)))
+    (if (not (is_empty r))
+        (complain r)
+        (let b (irq_bind_or_why (dma_ch6_irq) port)
+          (if (not (is_empty b))
+              (complain b)
+              (let s (said (audio_line hw (first_rate)))
+                (serve port (chime_started (Drv hw (fresh_ring) (first_rate) (audio_chime_load "hdmi-audio"))))))))))
 
 ; What it says once serving.
 (def audio_line ((hw Hw) (rate int)) (list int)
@@ -229,8 +226,8 @@
   (match (dma_sync va n (dma_to_device)) ((DmaSynced k) 0) ((DmaSyncDenied) 0) ((DmaSyncBad) 0)))
 
 ; The words ws written into m from off: 0.
-(def words_put ((m IoDevice) (off int) (ws (list int))) int
-  (if (is_empty ws) 0 (let w (device_write32 m off (head ws)) (words_put m (add off 4) (tail ws)))))
+(def words_put ((m IoRegion) (off int) (ws (list int))) int
+  (if (is_empty ws) 0 (let w (region_set32 m off (head ws)) (words_put m (add off 4) (tail ws)))))
 
 ; ---------------------------------------------------------------- playing
 
@@ -243,70 +240,72 @@
       (match (mai_smp_for rate)
         ((None) (append "no divider for " (digits rate)))
         ((Some smp)
-          (let q (silenced_all hw rate)
-            (let a (device_write32 hd (mai_ctl) (mai_ctl_startup))
-              (let b (device_write32 hd (mai_smp) smp)
-                (let c (device_write32 hd (mai_ctl) (mai_ctl_play))
-                  (let e (device_write32 hd (mai_fmt) (mai_fmt_for rate))
-                    (let f (device_write32 hd (mai_thr) (mai_thr_for d0))
-                      (let why (packets_set run rate hz)
-                        (if (not (is_empty why))
-                            why
-                            (dma_started ch cbs))))))))))))))
+          (let (q (silenced_all hw rate)
+                a (region_set32 hd (mai_ctl) (mai_ctl_startup))
+                b (region_set32 hd (mai_smp) smp)
+                c (region_set32 hd (mai_ctl) (mai_ctl_play))
+                e (region_set32 hd (mai_fmt) (mai_fmt_for rate))
+                f (region_set32 hd (mai_thr) (mai_thr_for d0))
+                why (packets_set run rate hz))
+            (if (not (is_empty why))
+                why
+                (dma_started ch cbs))))))))
 
 ; The core's channel config, map, audio packets, N and CTS written, and
 ; the audio infoframe put in its slot: empty, or why not.
-(def packets_set ((run IoDevice) (rate int) (hz int)) (list int)
-  (let a (device_write32 run (mai_config) (mai_config_stereo))
-    (let b (device_write32 run (mai_channel_map) (mai_channel_map_stereo))
-      (let c (device_write32 run (audio_packet_config) (audio_packet_config_stereo))
-        (let d (device_write32 run (crp_cfg) (crp_cfg_for rate))
-          (let e (device_write32 run (cts_0) (acr_cts hz rate))
-            (let f (device_write32 run (cts_1) (acr_cts hz rate))
-              (infoframe_written run))))))))
+(def packets_set ((run IoRegion) (rate int) (hz int)) (list int)
+  (let (a (region_set32 run (mai_config) (mai_config_stereo))
+        b (region_set32 run (mai_channel_map) (mai_channel_map_stereo))
+        c (region_set32 run (audio_packet_config) (audio_packet_config_stereo))
+        d (region_set32 run (crp_cfg) (crp_cfg_for rate))
+        e (region_set32 run (cts_0) (acr_cts hz rate))
+        f (region_set32 run (cts_1) (acr_cts hz rate)))
+    (infoframe_written run)))
 
 ; The audio infoframe written as vc4_hdmi_write_infoframe does: its slot
 ; stopped and waited for, its words written, the RAM's packets and the
 ; slot enabled, and waited for. Empty, or why not.
-(def infoframe_written ((run IoDevice)) (list int)
-  (let bit (slot_bit (audio_slot))
-    (let a (device_write32 run (ram_packet_config) (bit_and (device_read32 run (ram_packet_config)) (bit_xor bit -1)))
-      (if (not (slot_is run bit 0 100))
-          "the audio infoframe's slot did not stop"
-          (let w (words_put run (slot_at (audio_slot)) (audio_infoframe))
-            (let c (device_write32 run (ram_packet_config)
-                     (bit_or (device_read32 run (ram_packet_config)) (bit_or (ram_packet_enable) bit)))
-              (if (slot_is run bit bit 100) "" "the audio infoframe's slot did not start")))))))
+(def infoframe_written ((run IoRegion)) (list int)
+  (let (bit (slot_bit (audio_slot))
+        a (region_set32 run (ram_packet_config) (bit_and (region_get32 run (ram_packet_config)) (bit_xor bit -1))))
+    (if (not (slot_is run bit 0 100))
+        "the audio infoframe's slot did not stop"
+        (let (w (words_put run (slot_at (audio_slot)) (audio_infoframe))
+              c (region_set32 run (ram_packet_config)
+                  (bit_or (region_get32 run (ram_packet_config)) (bit_or (ram_packet_enable) bit))))
+          (if (slot_is run bit bit 100) "" "the audio infoframe's slot did not start")))))
 
 ; Whether RAM_PACKET_STATUS's bit is v, read up to n more times a ms
 ; apart.
-(def slot_is ((run IoDevice) (bit int) (v int) (n int)) bool
-  (if (eq (bit_and (device_read32 run (ram_packet_status)) bit) v)
+(def slot_is ((run IoRegion) (bit int) (v int) (n int)) bool
+  (if (eq (bit_and (region_get32 run (ram_packet_status)) bit) v)
       true
-      (if (le n 0) false (let z (sleep_ns 1000000) (slot_is run bit v (sub n 1))))))
+      (le n 0) false
+      (let z (sleep_ns 1000000) (slot_is run bit v (sub n 1)))))
 
 ; The channel started on the block at cbs: empty.
-(def dma_started ((ch IoDevice) (cbs int)) (list int)
-  (let a (device_write32 ch (dma_cb) (cb_addr_word cbs))
-    (let b (device_write32 ch (dma_cs) (cs_start))
-      "")))
+(def dma_started ((ch IoRegion) (cbs int)) (list int)
+  (let (a (region_set32 ch (dma_cb) (cb_addr_word cbs))
+        b (region_set32 ch (dma_cs) (cs_start)))
+    ""))
 
 ; The channel stopped as bcm2835_dma_abort stops it, if it runs: ACTIVE
 ; cleared, its transactions waited for, CS back to PROT and the channel
 ; reset. 0.
-(def dma_stopped ((ch IoDevice)) int
-  (if (eq (device_read32 ch (dma_cb)) 0)
+(def dma_stopped ((ch IoRegion)) int
+  (if (eq (region_get32 ch (dma_cb)) 0)
       0
-      (let a (device_write32 ch (dma_cs) (bit_and (device_read32 ch (dma_cs)) (bit_xor 1 -1)))
-        (let w (transactions_done ch 100)
-          (let b (device_write32 ch (dma_cs) (cs_prot))
-            (device_write32 ch (dma_debug) (bit_or (device_read32 ch (dma_debug)) (debug_reset))))))))
+      (let (a (region_set32 ch (dma_cs) (bit_and (region_get32 ch (dma_cs)) (bit_xor 1 -1)))
+            w (transactions_done ch 100)
+            b (region_set32 ch (dma_cs) (cs_prot)))
+        (region_set32 ch (dma_debug) (bit_or (region_get32 ch (dma_debug)) (debug_reset))))))
 
 ; Whether the channel's transactions are done, read up to n more times.
-(def transactions_done ((ch IoDevice) (n int)) bool
-  (if (not (cs_transactions (device_read32 ch (dma_cs))))
+(def transactions_done ((ch IoRegion) (n int)) bool
+  (if (not (cs_transactions (region_get32 ch (dma_cs))))
       true
-      (if (le n 0) false (transactions_done ch (sub n 1)))))
+      (le n 0) false
+      (transactions_done ch (sub n 1))))
 
 ; ---------------------------------------------------------------- samples
 
@@ -319,18 +318,18 @@
 
 ; The whole ring silenced and cleaned, frames numbered from 0: 0.
 (def silenced_all ((hw Hw) (rate int)) int
-  (let r (fresh_ring)
-    (let s (silenced hw r 0 (mul (ring_periods_n) (period_frames)) rate)
-      (ring_synced hw))))
+  (let (r (fresh_ring)
+        s (silenced hw r 0 (mul (ring_periods_n) (period_frames)) rate))
+    (ring_synced hw)))
 
 ; Frame f, samples left and right, written where the ring keeps it: 0.
 (def frame_put ((hw Hw) (r AudioRing) (f int) (left int) (right int) (rate int)) int
   (match hw
     ((Hw ch run hd va rm at cva cm cbs d0 hz)
-      (let off (mul (ring_frame_at r f) (frame_bytes))
-        (let k (mod f (iec_block))
-          (let a (device_write32 rm off (iec_subframe left 0 k rate))
-            (device_write32 rm (add off 4) (iec_subframe right 1 k rate))))))))
+      (let (off (mul (ring_frame_at r f) (frame_bytes))
+            k (mod f (iec_block))
+            a (region_set32 rm off (iec_subframe left 0 k rate)))
+        (region_set32 rm (add off 4) (iec_subframe right 1 k rate))))))
 
 ; n frames of chans channels from src, a client's pages or the chime's
 ; bytes, from its i on, written from frame f on: 0.
@@ -348,7 +347,7 @@
 
 ; The driver: its hardware, its ring, the rate it plays at, and the
 ; chime still to play (audio_server.l0), none once a client has asked.
-(data Drv (Drv Hw AudioRing int AudioChime))
+(data Drv (Drv (hw Hw) (r AudioRing) (rate int) (chime AudioChime)))
 
 ; Each message on port: the channel's interrupt, after which the chime
 ; goes on into the room it made, or a request.
@@ -369,18 +368,18 @@
     ((Drv hw r rate chime)
       (match hw
         ((Hw ch run hd va rm at cva cm cbs d0 hz)
-          (let a (device_write32 ch (dma_cs) (cs_ack))
-            (let now (period_of_cb (device_read32 ch (dma_cb)) cbs (ring_periods_n))
-              (let r2 (if (lt now 0) r (periods_reused hw r (ring_ended r now) rate))
-                (let s (ring_synced hw)
-                  (let e (irq_ack (dma_ch6_irq))
-                    (Drv hw r2 rate chime)))))))))))
+          (let (a (region_set32 ch (dma_cs) (cs_ack))
+                now (period_of_cb (region_get32 ch (dma_cb)) cbs (ring_periods_n))
+                r2 (if (lt now 0) r (periods_reused hw r (ring_ended r now) rate))
+                s (ring_synced hw)
+                e (irq_ack (dma_ch6_irq)))
+            (Drv hw r2 rate chime)))))))
 
 ; r after n periods ended, each silenced for its next turn.
 (def periods_reused ((hw Hw) (r AudioRing) (n int) (rate int)) AudioRing
   (if (le n 0)
       r
-      (let s (silenced hw r (ring_reused r) (ring_period r) rate)
+      (let s (silenced hw r (ring_reused r) (.period r) rate)
         (periods_reused hw (ring_advanced r) (sub n 1) rate))))
 
 ; A request's answer, and v after it. A start or a play ends the chime:
@@ -401,11 +400,11 @@
     ((Drv hw r old chime)
       (if (eq rate old)
           (served_ok v)
-          (let s (match hw ((Hw ch run hd va rm at cva cm cbs d0 hz) (dma_stopped ch)))
-            (let why (playing hw rate)
-              (if (is_empty why)
-                  (served_ok (Drv hw (fresh_ring) rate chime))
-                  (served_error (Drv hw (fresh_ring) old chime) why))))))))
+          (let (s (match hw ((Hw ch run hd va rm at cva cm cbs d0 hz) (dma_stopped ch)))
+                why (playing hw rate))
+            (if (is_empty why)
+                (served_ok (Drv hw (fresh_ring) rate chime))
+                (served_error (Drv hw (fresh_ring) old chime) why)))))))
 
 ; play VA FRAMES CHANS: as many frames as there is room for taken from
 ; the client's pages at va, opened for it and closed after.
@@ -413,13 +412,13 @@
   (match v
     ((Drv hw r rate chime)
       (match (dma_open va (audio_play_pages n chans))
-        ((DeviceFailed f why) (served_error v "the samples are not shared with the audio driver"))
-        ((DeviceOpened m)
-          (let k (min n (ring_room r))
-            (let w (frames_put hw r (AudioPages m) 0 chans (ring_next r) k rate)
-              (let c (close_device m)
-                (let s (ring_synced hw)
-                  (Served (Drv hw (ring_wrote r k) rate chime) (audio_played_reply k)))))))))))
+        ((IoRegionFailed f why) (served_error v "the samples are not shared with the audio driver"))
+        ((IoRegionOpened m)
+          (let (k (min n (ring_room r))
+                w (frames_put hw r (AudioPages m) 0 chans (ring_next r) k rate)
+                c (close_region m)
+                s (ring_synced hw))
+            (Served (Drv hw (ring_wrote r k) rate chime) (audio_played_reply k))))))))
 
 ; ------------------------------------------------------------------ chime
 
@@ -438,7 +437,7 @@
   (match v
     ((Drv hw r rate chime)
       (let cr (audio_chime_rate chime)
-        (if (if (eq cr 0) true (eq cr rate))
+        (if (or (eq cr 0) (eq cr rate))
             (chime_fed (chime_held v))
             (match (restarted v cr)
               ((Served v2 reply)
@@ -451,7 +450,7 @@
 
 ; v with its chime held back chime_lead_ms from now.
 (def chime_held ((v Drv)) Drv
-  (match v ((Drv hw r rate chime) (Drv hw r rate (audio_chime_after chime (chime_lead_ms) (clock_ns))))))
+  (.chime v (audio_chime_after (.chime v) (chime_lead_ms) (clock_ns))))
 
 ; Chime c now: the chime itself once its time has come, said as it
 ; starts (audio_server.l0's audio_chime_said), so the log shows that it
@@ -472,6 +471,6 @@
         ((ChimeFeed src chans k rest)
           (if (eq k 0)
               (Drv hw r rate rest)
-              (let w (frames_put hw r src 0 chans (ring_next r) k rate)
-                (let s (ring_synced hw)
-                  (Drv hw (ring_wrote r k) rate rest)))))))))
+              (let (w (frames_put hw r src 0 chans (ring_next r) k rate)
+                    s (ring_synced hw))
+                (Drv hw (ring_wrote r k) rate rest))))))))

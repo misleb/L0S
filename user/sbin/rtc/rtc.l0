@@ -37,64 +37,63 @@
       (append ", the time " (append (clock_text s) ", serving clock")))))))
 
 (def rtc () int
-  (match (open_device (rtc_base) 4096)
-    ((DeviceFailed fault why) (complain (append "no clock: " why)))
-    ((DeviceOpened d)
-      (let port (port_new)
-        (let b (irq_bind_or_why (rtc_irq) port)
-          (if (is_empty b) (alarm d port) (complain b)))))))
+  (match (open_region (rtc_base) 4096)
+    ((IoRegionFailed fault why) (complain (append "no clock: " why)))
+    ((IoRegionOpened d)
+      (let (port (port_new) b (irq_bind_or_why (rtc_irq) port))
+        (if (is_empty b) (alarm d port) (complain b))))))
 
-(def alarm ((d IoDevice) (port int)) int
-  (let t0 (device_read32 d (reg_data))
-    (let c (device_write32 d (reg_clear) 1)
-      (let m (device_write32 d (reg_match) (add t0 1))
-        (let k (device_write32 d (reg_mask) 1)
-          (let w (write_line "rtc: alarm set")
-            (rang d port t0 (port_receive port))))))))
+(def alarm ((d IoRegion) (port int)) int
+  (let (t0 (region_get32 d (reg_data))
+        c (region_set32 d (reg_clear) 1)
+        m (region_set32 d (reg_match) (add t0 1))
+        k (region_set32 d (reg_mask) 1)
+        w (write_line "rtc: alarm set"))
+    (rang d port t0 (port_receive port))))
 
-(def rang ((d IoDevice) (port int) (t0 int) (msg Message)) int
+(def rang ((d IoRegion) (port int) (t0 int) (msg Message)) int
   (if (not (is_irq_notice msg (rtc_irq)))
       (complain "expected the alarm's interrupt")
-      (let t1 (device_read32 d (reg_data))
-        (let k (device_write32 d (reg_mask) 0)
-          (let c (device_write32 d (reg_clear) 1)
-            (let a (irq_ack (rtc_irq))
-              (let w (write_str (alarm_lines t0 t1))
-                (match a
-                  ((IrqAcked) 0)
-                  ((IrqNotPending) (complain "irq_ack refused: the interrupt is not pending"))))))))))
+      (let (t1 (region_get32 d (reg_data))
+            k (region_set32 d (reg_mask) 0)
+            c (region_set32 d (reg_clear) 1)
+            a (irq_ack (rtc_irq))
+            w (write_str (alarm_lines t0 t1)))
+        (match a
+          ((IrqAcked) 0)
+          ((IrqNotPending) (complain "irq_ack refused: the interrupt is not pending"))))))
 
 ; --------------------------------------------------------------- serving
 
 (def rtc_main ((as (list (list int)))) int
   (if (is_empty as)
       (rtc)
-      (if (if (eq (head as) "clock") (is_empty (tail as)) false)
-          (rtc_clock)
-          (complain "usage: rtc [clock]"))))
+      (and (eq (head as) "clock") (is_empty (tail as)))
+      (rtc_clock)
+      (complain "usage: rtc [clock]")))
 
 ; The clock rtc clock serves: a PL031, or the Raspberry Pi 5's RTC,
 ; which only its firmware reaches (firmware.l0).
-(data Clock (Pl031Clock IoDevice) (FirmwareClock FwClock))
+(data Clock (Pl031Clock IoRegion) (FirmwareClock FwClock))
 
 ; A PL031's part number in its ID registers.
 (def pl031_part () int 49)               ; 0x031
 
 ; Seconds since 1970, as c says.
 (def clock_now ((c Clock)) int
-  (match c ((Pl031Clock d) (device_read32 d (reg_data))) ((FirmwareClock f) (fw_time f))))
+  (match c ((Pl031Clock d) (region_get32 d (reg_data))) ((FirmwareClock f) (fw_time f))))
 
 ; The board's clock, found: a PL031 where QEMU's virt board has one, if
 ; the kernel gives it and its ID registers say PL031; else the
 ; firmware's, on a Pi 5; else none, which is no failure, as every
 ; client of clock goes on without one.
 (def rtc_clock () int
-  (match (open_device (rtc_base) 4096)
-    ((DeviceOpened d)
+  (match (open_region (rtc_base) 4096)
+    ((IoRegionOpened d)
       (if (eq (primecell_part d) (pl031_part))
-          (clock_started (Pl031Clock d) (clock_line (device_read32 d (reg_data))))
-          (let c (close_device d) (firmware_clock))))
-    ((DeviceFailed fault why) (firmware_clock))))
+          (clock_started (Pl031Clock d) (clock_line (region_get32 d (reg_data))))
+          (let c (close_region d) (firmware_clock))))
+    ((IoRegionFailed fault why) (firmware_clock))))
 
 ; The firmware's clock served, or none, which is no failure.
 (def firmware_clock () int
@@ -104,12 +103,11 @@
 
 ; clock served from c, once said as line.
 (def clock_started ((c Clock) (line (list int))) int
-  (let port (port_new)
-    (let r (name_register_or_why port "clock")
-      (if (is_empty r)
-          (let n (info_as "rtc" line)
-            (clock_serve c port (clock_alarmed c port) (nil int)))
-          (complain r)))))
+  (let (port (port_new) r (name_register_or_why port "clock"))
+    (if (is_empty r)
+        (let n (info_as "rtc" line)
+          (clock_serve c port (clock_alarmed c port) (nil int)))
+        (complain r))))
 
 ; Each request answered as it comes, and the listeners told the time
 ; when the kernel's alarm rings at the start of a minute: due is when the
@@ -130,9 +128,10 @@
 ; When the next minute begins, as c counts, the kernel's alarm set for
 ; it on port.
 (def clock_alarmed ((c Clock) (port int)) int
-  (let t (clock_now c)
-    (let due (next_minute t)
-      (let a (alarm_at port (minute_alarm (clock_ns) t due)) due))))
+  (let (t (clock_now c)
+        due (next_minute t)
+        a (alarm_at port (minute_alarm (clock_ns) t due)))
+    due))
 
 ; The time on clock_ns, now there, when the clock that says t now says
 ; due: the seconds between them later, and at least one, so an alarm

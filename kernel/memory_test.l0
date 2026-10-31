@@ -158,13 +158,13 @@
   (match (region_plan (dev_pages_new) 151060496 4)        ; 0x09010010
     ((RegionAt va rest addr)
       (add (check_int "va" va (dev_base))
-           (add (check_int "top" (dev_top rest) (add (dev_base) 4096))
+           (add (check_int "top" (.top rest) (add (dev_base) 4096))
                 (check_int "addr" addr (add (dev_base) 16)))))
     ((RegionRefused code) (fail_because "region" (digits code)))))
 
 (def test_region_straddles () int
   (match (region_plan (dev_pages_new) 4095 2)
-    ((RegionAt va rest addr) (check_int "two pages" (sub (dev_top rest) va) 8192))
+    ((RegionAt va rest addr) (check_int "two pages" (sub (.top rest) va) 8192))
     ((RegionRefused code) (fail_because "region" (digits code)))))
 
 ; A pool whose top is the last page below user_limit, and none free.
@@ -215,7 +215,7 @@
     ((DmaAt va after rest)
       (add (check_int "va" va (dev_base))
            (add (check_int "after" after (add (dev_base) 12288))
-                (check_int "top" (dev_top rest) after))))
+                (check_int "top" (.top rest) after))))
     ((DmaRefused code) (fail_because "dma" (digits code)))))
 
 (def dma_refused ((p DmaPlan)) int
@@ -303,11 +303,11 @@
 ; reaches it; a 1 MB take goes to the highest, the 95th's place, page
 ; 94 * 256; and 48 of them fill every hole, leaving top where it was.
 (def test_dev_holes_reused () int
-  (let filled (take_n (dev_pages_new) 96 (pgs 256))
-    (let holed (give_every_other filled 0 96 (pgs 256))
-      (add (check_int "48 runs" (dev_run_count holed) 48)
-           (add (check_int "a hole" (taken_at (dev_take holed (pgs 256))) (dp (mul 94 256)))
-                (check_str "holes filled" (pool_show (take_n holed 48 (pgs 256))) (digits (mul 96 256))))))))
+  (let (filled (take_n (dev_pages_new) 96 (pgs 256))
+        holed (give_every_other filled 0 96 (pgs 256)))
+    (add (check_int "48 runs" (dev_run_count holed) 48)
+         (add (check_int "a hole" (taken_at (dev_take holed (pgs 256))) (dp (mul 94 256)))
+              (check_str "holes filled" (pool_show (take_n holed 48 (pgs 256))) (digits (mul 96 256)))))))
 
 ; pool after n takes of span bytes.
 (def take_n ((pool DevPages) (n int) (span int)) DevPages
@@ -334,7 +334,7 @@
   (if (eq left 0)
       (add bad (check_str "all given back" (pool_show (give_all pool held)) "0"))
       (let s1 (rand_next s)
-        (if (if (is_empty held) true (lt (rand_below s1 3) 2))
+        (if (or (is_empty held) (lt (rand_below s1 3) 2))
             (let span (pgs (add 1 (rand_below (rand_next s1) 8)))
               (match (dev_take pool span)
                 ((DevFull) (dev_walk pool held (rand_next s1) (sub left 1) (add bad 1)))
@@ -351,7 +351,7 @@
   (if (is_empty held)
       false
       (match (head held)
-        ((DevRun a b) (if (if (lt a to) (lt from b) false) true (overlaps (tail held) from to))))))
+        ((DevRun a b) (if (and (lt a to) (lt from b)) true (overlaps (tail held) from to))))))
 
 ; pool with every one of held given back.
 (def give_all ((pool DevPages) (held (list DevRun))) DevPages
@@ -388,9 +388,6 @@
 (def freed ((r Released)) (list (list int))
   (match r ((Released m fs) (map_digits (sort fs)))))
 
-(def left ((r Released)) Mem
-  (match r ((Released m fs) m)))
-
 (def test_mem_share_counts () int
   (add (check_int "never mapped" (mem_count (mem_new) 20) 0)
        (check_int "twice" (mem_count (mem_share (mem_share (mem_new) 20) 20) 20) 2)))
@@ -408,13 +405,13 @@
 (def test_release_shared () int
   (let r (mem_release (shared_twice) (device_pages) false)
     (add (check_strs "freed" (freed r) (cons "10" (cons "11" (cons "12" (cons "21" (nil (list int)))))))
-         (add (check_int "20 mapped once more" (mem_count (left r) 20) 1)
-              (check_int "21 counted no more" (mem_count (left r) 21) 0)))))
+         (add (check_int "20 mapped once more" (mem_count (.left r) 20) 1)
+              (check_int "21 counted no more" (mem_count (.left r) 21) 0)))))
 
 (def test_release_last_sharer () int
   (let r (mem_release (mem_share (mem_new) 20) (map_put ((MapEmpty int int)) (dev_page 0) 20) false)
     (add (check_strs "freed" (freed r) (cons "20" (nil (list int))))
-         (check_int "counted no more" (mem_count (left r) 20) 0))))
+         (check_int "counted no more" (mem_count (.left r) 20) 0))))
 
 ; A frame mapped twice in one process, as shm_share to itself maps it,
 ; counts both.
@@ -429,16 +426,16 @@
 (def test_release_driver () int
   (let r (mem_release (shared_twice) (device_pages) true)
     (add (check_strs "only its own" (freed r) (cons "10" (cons "11" (cons "12" (nil (list int))))))
-         (add (check_int "20 still counted" (mem_count (left r) 20) 2)
-              (check_int "21 still counted" (mem_count (left r) 21) 1)))))
+         (add (check_int "20 still counted" (mem_count (.left r) 20) 2)
+              (check_int "21 still counted" (mem_count (.left r) 21) 1)))))
 
 ; A driver and another process map 21; the driver ends first, then the
 ; other.
 (def test_release_after_driver () int
-  (let r (mem_release (left (mem_release (mem_share (shared_twice) 21) (device_pages) true))
+  (let r (mem_release (.left (mem_release (mem_share (shared_twice) 21) (device_pages) true))
                       (map_put ((MapEmpty int int)) (dev_page 0) 21) false)
     (add (check_int "21 not freed" (length (freed r)) 0)
-         (check_int "the driver's mapping still counted" (mem_count (left r) 21) 1))))
+         (check_int "the driver's mapping still counted" (mem_count (.left r) 21) 1))))
 
 (def test_unshare_not_last () int
   (match (mem_unshare (mem_share (mem_share (mem_new) 20) 20) 20)
@@ -461,18 +458,22 @@
 ; Code at user_base, two pages, frames 30 and 31, shared by space 5,
 ; hashing to key 77; and space 6 mapping it too.
 (def code_shared () Mem
-  (mem_image_new (mem_new) 77 (user_base) 5000 2 (cons 30 (cons 31 (nil int))) 5))
+  (mem_image_new (mem_new) 77 (user_base) 5000 2 (cons 30 (cons 31 (nil int))) (Space 5)))
 
 (def code_shared_twice () Mem
   (match (head (mem_image_candidates (code_shared) 77 (user_base) 5000 2))
-    ((ImageSeg va len perm fs ss) (mem_image_join (code_shared) 77 (ImageSeg va len perm fs ss) 6))))
+    ((ImageSeg va len perm fs ss) (mem_image_join (code_shared) 77 (ImageSeg va len perm fs ss) (Space 6)))))
 
 ; The spaces of the first candidate at key 77, as digits.
 (def sharers ((m Mem)) (list (list int))
   (let gs (mem_image_candidates m 77 (user_base) 5000 2)
     (if (is_empty gs)
         (nil (list int))
-        (match (head gs) ((ImageSeg va len perm fs ss) (map_digits (sort ss)))))))
+        (match (head gs) ((ImageSeg va len perm fs ss) (map_digits (sort (space_ids ss))))))))
+
+; The ids of spaces ss, in order.
+(def space_ids ((ss (list Space))) (list int)
+  (if (is_empty ss) (nil int) (cons (.id (head ss)) (space_ids (tail ss)))))
 
 ; A new segment counts each of its frames once, and is a candidate only
 ; at its own address, length and perm.
@@ -495,13 +496,13 @@
             (cons 30 (cons 31 (cons 11 (nil int)))) ((MapEmpty int int))))
 
 (def test_image_release () int
-  (let r1 (mem_release (code_shared_twice) (code_pages) false)
-    (let m1 (mem_image_leave (left r1) 5)
-      (let r2 (mem_release m1 (code_pages) false)
-        (add (check_strs "first: its heap" (freed r1) (cons "11" (nil (list int))))
-             (add (check_strs "still 6's" (sharers m1) (cons "6" (nil (list int))))
-                  (add (check_strs "last: all" (freed r2) (cons "11" (cons "30" (cons "31" (nil (list int))))))
-                       (check_int "forgotten" (mem_image_count (mem_image_leave (left r2) 6)) 0))))))))
+  (let (r1 (mem_release (code_shared_twice) (code_pages) false)
+        m1 (mem_image_leave (.left r1) (Space 5))
+        r2 (mem_release m1 (code_pages) false))
+    (add (check_strs "first: its heap" (freed r1) (cons "11" (nil (list int))))
+         (add (check_strs "still 6's" (sharers m1) (cons "6" (nil (list int))))
+              (add (check_strs "last: all" (freed r2) (cons "11" (cons "30" (cons "31" (nil (list int))))))
+                   (check_int "forgotten" (mem_image_count (mem_image_leave (.left r2) (Space 6))) 0))))))
 
 ; A driver's shared code is freed as anyone's: only its device pages stay.
 (def test_image_release_driver () int
@@ -517,11 +518,11 @@
 ; Client 5's window to port 3, served by pid 2, and client 6's to port 4,
 ; by pid 7.
 (def two_windows () Mem
-  (mem_window_add (mem_window_add (mem_new) (Window 5 2 3 4096 40)) (Window 6 7 4 8192 70)))
+  (mem_window_add (mem_window_add (mem_new) (Window 5 2 3 4096 (Space 40))) (Window 6 7 4 8192 (Space 70))))
 
 (def test_window_space () int
-  (add (check_int "2's space" (mem_window_space (two_windows) 5 3) 40)
-       (check_int "none" (mem_window_space (two_windows) 6 3) -1)))
+  (add (check_int "2's space" (.id (mem_window_space (two_windows) 5 3)) 40)
+       (check_int "none" (.id (mem_window_space (two_windows) 6 3)) -1)))
 
 ; The pages 0x1000 to 0x10000, 16 of them, mapped; and the same without
 ; one, as once the server gave a page up.
@@ -547,7 +548,7 @@
   (add (check_int "client 5 gone" (mem_window_at (mem_windows_forget (two_windows) 5) 5 3) -1)
        (add (check_int "6's kept" (mem_window_at (mem_windows_forget (two_windows) 5) 6 4) 8192)
             (add (check_int "server 7 gone" (mem_window_at (mem_windows_forget (two_windows) 7) 6 4) -1)
-                 (check_int "and 5's kept" (length (mem_windows (mem_windows_forget (two_windows) 7))) 1)))))
+                 (check_int "and 5's kept" (length (.windows (mem_windows_forget (two_windows) 7))) 1)))))
 
 (def test_window_server () int
   (add (check_int "5's to 3, by 2" (mem_window_server (two_windows) 5 3) 2)
@@ -571,24 +572,24 @@
 ; Built from a map, they count its two device pages and not its image,
 ; heap and stack.
 (def test_pages_from_map () int
-  (add (check_int "two" (pages_device (pages_from_map (device_pages))) 2)
-       (check_int "none" (pages_device (pages_from_map (private_pages))) 0)))
+  (add (check_int "two" (.device (pages_from_map (device_pages))) 2)
+       (check_int "none" (.device (pages_from_map (private_pages))) 0)))
 
 ; A device page put counts once, again at the same page none more, and
 ; a heap page none.
 (def test_pages_put () int
   (let ps (pages_put (pages_put (pages_new) (dev_page 0) 20) (heap_page) 11)
-    (add (check_int "one" (pages_device ps) 1)
-    (add (check_int "the same page again" (pages_device (pages_put ps (dev_page 0) 21)) 1)
+    (add (check_int "one" (.device ps) 1)
+    (add (check_int "the same page again" (.device (pages_put ps (dev_page 0) 21)) 1)
          (check_int "its new frame" (match (pages_get (pages_put ps (dev_page 0) 21) (dev_page 0)) ((Some f) f) ((None) -1)) 21)))))
 
 ; A device page removed counts no more; one not there, and a heap page,
 ; change nothing.
 (def test_pages_remove () int
   (let ps (pages_put (pages_put (pages_new) (dev_page 0) 20) (heap_page) 11)
-    (add (check_int "none" (pages_device (pages_remove ps (dev_page 0))) 0)
-    (add (check_int "not there" (pages_device (pages_remove ps (dev_page 5))) 1)
-         (check_int "heap" (pages_device (pages_remove ps (heap_page))) 1)))))
+    (add (check_int "none" (.device (pages_remove ps (dev_page 0))) 0)
+    (add (check_int "not there" (.device (pages_remove ps (dev_page 5))) 1)
+         (check_int "heap" (.device (pages_remove ps (heap_page))) 1)))))
 
 ; Against counting the map's device keys: a few hundred seeded runs of
 ; puts and removes over eight pages, half of them device pages.
@@ -609,10 +610,9 @@
 (def pages_cases ((seed int) (i int) (bad int)) int
   (if (ge i 300)
       bad
-      (let s (rand_next seed)
-        (let ps (pages_run s 40 (pages_new))
-          (pages_cases s (add i 1)
-            (if (eq (pages_device ps) (device_keys (map_keys (pages_map ps)) 0)) bad (add bad 1)))))))
+      (let (s (rand_next seed) ps (pages_run s 40 (pages_new)))
+        (pages_cases s (add i 1)
+          (if (eq (.device ps) (device_keys (map_keys (.map ps)) 0)) bad (add bad 1))))))
 
 (def test_pages_counted_as_walked () int
   (check_int "no run counts otherwise" (pages_cases 7 0 0) 0))
@@ -621,15 +621,15 @@
 ; and space 6's once it joins; a heap page is none, and a space that
 ; shares no segment has none.
 (def test_mem_image_pages () int
-  (add (check_int "5's two" (mem_image_pages (code_shared) 5 (code_pages)) 2)
-  (add (check_int "6's two" (mem_image_pages (code_shared_twice) 6 (code_pages)) 2)
-       (check_int "7's none" (mem_image_pages (code_shared_twice) 7 (code_pages)) 0))))
+  (add (check_int "5's two" (mem_image_pages (code_shared) (Space 5) (code_pages)) 2)
+  (add (check_int "6's two" (mem_image_pages (code_shared_twice) (Space 6) (code_pages)) 2)
+       (check_int "7's none" (mem_image_pages (code_shared_twice) (Space 7) (code_pages)) 0))))
 
 ; A page of the segment's range mapped to a frame of the process's own,
 ; as a page first touched after another process shared the segment, is
 ; not shared.
 (def test_mem_image_pages_own () int
-  (check_int "one" (mem_image_pages (code_shared) 5 (map_put (code_pages) (user_base) 12)) 1))
+  (check_int "one" (mem_image_pages (code_shared) (Space 5) (map_put (code_pages) (user_base) 12)) 1))
 
 ; ----------------------------------------------------------------- pool
 

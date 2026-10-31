@@ -17,11 +17,13 @@ and they matter more than everything else in this file:
    pattern-match your way to correct L0. The checker is your only reliable
    signal.
 
-Read the specification before writing L0 for the first time in a session;
-`l0 spec --path` says where it is. Sections 1 to 9 and 11 are the language,
-and all of them matter. Section 10 is how the compiler and runtime work, and
-you need only its memory rules, in 10.3, which the section on memory below
-summarises. Then skim the examples,
+Read the specification before writing L0 for the first time in a session:
+`l0 spec` prints sections 1 to 9 and 11, the language, and all of them
+matter. Section 10, `l0 spec runtime`, is how the compiler and runtime
+work, and you need only its memory rules, in 10.3, which the section on
+memory below summarises; a kernel or a driver also reads its board's
+part, `l0 spec virt-aarch64` and the like. `l0 spec --path` names every
+file. Then skim the examples,
 `l0 examples --path`, which are working programs and their tests. All of
 this comes from the installed toolchain, so it describes the compiler you
 are using.
@@ -95,7 +97,11 @@ function with the same name as one of its functions is fine.
 with `_`. Types and constructors start uppercase. This is how the reader tells
 a constructor from a variable, so it is not a style preference.
 
-**`let` binds exactly one name and has a body.** It is not `let*`, and there
+**`let` binds one name, or several in pairs, and has a body.** `(let (a 1 b
+(add a 1)) body)` is `(let a 1 (let b (add a 1) body))`, each value seeing
+the names before it, and closes with two parens rather than one per
+binding (spec 5.3). Likewise `(if c1 e1 c2 e2 else)` is the nested `if`
+chain (spec 5.2), for a run of tests. The one-name `let` is not `let*`, and there
 is no binding list. Sequential bindings are nested lets.
 
 ```
@@ -109,8 +115,55 @@ patterns one level deep, every constructor present exactly once, and **no
 wildcard or default arm**. Nullary constructors keep their parentheses, in
 patterns and in expressions: `(Red)`, never `Red`.
 
-**There are no function values, closures, or higher-order functions.**
-Recursion replaces both loops and iteration combinators.
+**A constructor may name its fields, and a field is then read or replaced
+by name** (spec 4 and 5.8). Declare `(name type)` pairs, all of them or
+none; `(.name value)` reads a field and `(.name value new)` is the value
+with that field replaced. Construction and `match` stay positional, and a
+field name is a token of its own, so it never collides with a function or
+binding of the same name:
+
+```
+(data Proc
+  (Proc (space int) (ctx (array int)) (state int)))
+
+(.state p)                   ; the field
+(.state p -1)                ; p with state -1, in place when nothing else holds p
+(.state (.ctx p c) -1)       ; two fields: nest, the inner result is held by nothing else
+```
+
+Only a type with one constructor has fields read this way; one with several
+is taken apart by `match`. Write a one-constructor type with named fields
+rather than a function per field; see `Proc` in `l0 examples`.
+
+**A function is passed by name, never kept.** A parameter may have a
+function type, `(fn (T) K)`, and is given a `def` by name, and called like
+one (spec 5.7):
+
+```
+(def (find_by K T) ((key (fn (T) K)) (k K) (xs (list T))) (Option T)
+  (if (is_empty xs)
+      ((None T))
+      (if (eq (key (head xs)) k) (Some (head xs)) (find_by key k (tail xs)))))
+
+(find_by name_of "ada" people)      ; name_of is a def taking a Person
+```
+
+Write one loop with a function parameter instead of the same loop twice.
+What can be passed is a `def`, or a function parameter passed on; not a
+builtin (wrap it in a one-line `def`), not an expression, and there are no
+closures: a function sees only its arguments, so anything else it needs is
+passed alongside. A function type is written only as a parameter's type,
+never in a list, a field, or a return type, and a function cannot be
+returned or bound with `let`. Each function passed makes a copy of the
+callee, so the call through it is a direct call, and a tail call through
+one uses no stack.
+
+**Give a number that means one thing a type of its own.** A data type of
+one constructor of one `int`, `bool`, or `float` field, `(data Space
+(Space (id int)))`, is represented as the word itself (spec 10.1), so it
+costs nothing, and the checker then tells a space from a frame or a count:
+`(space_map (.id s) ...)` at the builtin, `Space` everywhere else. Its
+`eq` and `compare` are its field's, and so is its `hash`.
 
 **There are no tuples.** A function returning two things declares a small
 `data` type; see `Split` in `l0 examples`.
@@ -157,13 +210,16 @@ with `match`. So a membership test, a lookup, a hash table, a heap, or a
 sorted set is written once, for every element type, and the library already
 has `sort`.
 
-**`and` and `or` are strict.** Both arguments are always evaluated, so they do
-not guard against errors. This still calls `head` on an empty list:
+**`and` and `or` stop at the first operand that decides** (spec 8): the
+second is evaluated only when the first is `true` for `and`, or `false` for
+`or`, so they guard as they read:
 
 ```
-(and (not (is_empty xs)) (gt (head xs) 0))   ; wrong
-(if (is_empty xs) false (gt (head xs) 0))    ; right
+(and (not (is_empty xs)) (gt (head xs) 0))   ; never takes head of empty
 ```
+
+The second operand is not in tail position, so a recursive call there is
+not a tail call; a loop of `(or found (search ...))` is written with `if`.
 
 **`eq` compares two values of any one type by what they hold:** `(eq "ab"
 (cons 97 "b"))` and `(eq (Some "x") (Some "x"))` are true, and so is `eq` on
@@ -225,9 +281,10 @@ is every `float_` comparison with a NaN. To ask whether two floats are the
 same number, use `float_le` both ways. There is only one NaN, so a program
 cannot tell where one came from.
 
-**A name in call position is never a local.** `(f 1)` always means a builtin
-or a `def`, so a parameter named `f` cannot be called and does not shadow a
-function named `f`.
+**A name in call position is a local only when it is a function
+parameter.** Otherwise `(f 1)` means a builtin
+or a `def`, so a parameter of any other type named `f` cannot be called and
+does not shadow a function named `f`.
 
 **Your definition wins over the standard library's, and over a builtin.**
 Defining `length` when the prelude already has one, or `flush` when it is a
@@ -270,14 +327,21 @@ first chunk deepest, or use a chain of `let`s as above.
 
 ### The hidden whole copy
 
-**Read a map or array before you update it, never after.** `map_put`,
-`map_remove`, and `array_set` change their map or array in place only when
-nothing else still holds it; otherwise they copy it whole first (spec section
-6.5), so that every other holder sees the old one. A loop of such updates is
-then quadratic in the size of the map, with the same results: a program
-mapping 100,000 pages this way did not finish in an hour. Anything used
-after the update holds it, including a use you cannot see as a second name.
-The two shapes that bite:
+`l0 check` warns of it: after `ok`, a line such as `prog.l0:8:9: warning:
+m is used after this call of map_put, so it copies m; read it first, with
+let, and update last`, for `array_set` and for any call that updates what
+it is given or a field of it, `map_put` and your own functions alike. A
+warning never fails the check; fix every one in a loop.
+
+**Read a map, array, or record before you update it, never after.**
+`map_put`, `map_remove`, `array_set`, and a field replacement `(.f r v)`
+change their map, array, or record in place only when nothing else still
+holds it; otherwise they copy it whole first (spec section 6.5), so that
+every other holder sees the old one. A loop of such updates is then
+quadratic in the size of the map, with the same results: a program mapping
+100,000 pages this way did not finish in an hour. Anything used after the
+update holds it, including a use you cannot see as a second name. The two
+shapes that bite, shown on a map, and the same for a record:
 
 - **A read of the map in a later operand of the update's own expression.**
   The put runs first and the read still needs the old map, so the put
@@ -304,7 +368,9 @@ The two shapes that bite:
 
 A read inside the update's own call is fine: an operand that is the
 variable itself, as `m` is to `map_put`, is taken after that call's other
-operands, so `(map_put m k (add 1 (map_size m)))` updates in place. So is a
+operands, so `(map_put m k (add 1 (map_size m)))` updates in place, and so
+does `(.n r (add (.n r) 1))`; but `(.n (.m r 1) (.m r))` copies `r`, since
+the outer form reads `r` after the inner replacement. So is a
 read in a `let` value before the update. What copies is a read that comes
 after it: in a later operand of an enclosing call, or in the body after the
 `let` that made the update. `L0_ARRAY_STATS=1` on a
@@ -316,8 +382,23 @@ maps and arrays below list the other ways an array is held.
 ## Keep nesting shallow, or you will miscount parentheses
 
 This is the most common way to waste time writing L0. A chain of six `if`s or
-ten `or`s ends in a run of a dozen `)`, and the resulting error points at the
-start of the form rather than at the mistake.
+ten `or`s ends in a run of a dozen `)`, and counting a run of identical
+tokens against context lines away is what goes wrong.
+
+**Let `l0 fmt` count the ones at the end.** Indent each line under the form
+it belongs to, which is a judgment about one line and its parent, and run
+`l0 fmt FILE.l0` before `l0 check`: where a line dedents below the line a
+form began on, and where a new declaration begins at column 0, it adds the
+closers still missing at the end of the line before, drops closers with
+nothing to close, and changes nothing else; every closer you wrote stays
+where it is. That is the run of a dozen at the end of a `def`, which is
+where the count goes wrong. `l0 fmt --check FILE.l0` only reports what would
+change. A file whose closers already match its indentation comes back
+byte-identical, so it is safe to run on everything. A closer missing inside
+a form whose next line is indented as deep or deeper is left as written,
+since the next line could be the form's continuation; `l0 check` then
+reports it where it is, and when a declaration's count is off, says by how
+many and at which line it probably went wrong.
 
 **Test membership with a word table** instead of an `or` chain:
 
@@ -329,6 +410,10 @@ start of the form rather than at the mistake.
 **Collapse a `match` to a predicate.** Since `match` has no wildcard,
 inspecting a six-constructor type inline costs six lines every time. Write the
 match once as a function returning an int, then build predicates on it.
+
+**Name the fields of a record.** A one-constructor type with named fields
+needs no function per field: `(.state p)` reads and `(.state p st)`
+replaces, with no `match` and no nesting.
 
 **Split the function.** A body nesting more than about four levels should hand
 its tail to a helper.
@@ -354,8 +439,9 @@ never write one of them for your own element type. The
 builtins, such as `head` and `read_byte`, are in the specification, section
 6, not in `l0 doc`.
 
-There is no `map`, `filter`, or `fold`, because L0 has no function values.
-Write the recursion directly.
+A function that takes a function, such as a `map` over your list, you
+write yourself with a parameter of function type (spec 5.7), or the
+recursion directly.
 
 If one of these does not do what you need, define your own with the same name
 rather than inventing `my_length`. Yours shadows the prelude's throughout your
@@ -594,10 +680,13 @@ fine. What copies, silently, with correct results:
   bytes. A flat `(array int)` indexed by `(add (mul y w) x)` is still the
   fastest grid. `(array_new h (array_new w 0))` makes every row the same
   array, so each copies once, on its first update
-- **not** an array in a data value, if you take the value apart with `match`
-  and don't use it again: then the field is the only holder, and the update
-  is in place. Keeping several arrays together in a data type and rebuilding
-  it each step is fine
+- **not** an array or map in a data value updated through a function and put
+  back in exactly this form: `(.f r (g ... (.f r) ...))`, with `r` a
+  variable that no other argument of `g` mentions and that is not used
+  again; `(.ctx p (call_result (.ctx p) v))` updates the context in place.
+  Binding `(.f r)` with `let` first, or reading `r` after, copies it.
+  Taking the value apart with `match` and rebuilding it, and not using it
+  again, is in place too
 
 To check a loop, run the program with `L0_ARRAY_STATS=1`: it reports on
 standard error how many updates copied.

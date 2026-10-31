@@ -28,6 +28,14 @@ the full set before calling it done.
 - **Done** means `make check` and `make test` pass. Run `make e2e` too for
   anything that boots, drives a device, draws, or takes input, and
   `make test-virt` for the kernel. Run long ones in the background.
+- **The loop**: write, `l0 fmt FILE` (or `make fmt`), which adds the
+  closers the indentation shows missing, then `make check`. `make check`
+  fails on a file fmt would change, and ends by listing every warning
+  its checks gave, those that passed too: `l0 check` warns where an
+  update copies a whole map, array or record, which never fails a check
+  and in a loop is a copy every time round. Fix what it names, the read
+  first and the update last, and leave none but a copy that must be,
+  said why where it is.
 - **The files to pass `l0 test`** are the Makefile's line for that module:
   `l0 test $(ULIB) $(LIBS_NAME) user/NAME/NAME.l0 user/NAME/NAME_test.l0`.
   Copy them from `make -nB test-each | grep NAME`.
@@ -37,7 +45,7 @@ the full set before calling it done.
   since it last passed runs again (its files, the toolchain, or for a
   test the fonts, the apps' bundles and the sample archive), `JOBS` at
   once, every CPU unless set (`JOBS=1` for one at a time). Nothing is
-  shown of what passes. A failing file's whole output is, `not ok` lines
+  shown of what passes but `make check`'s warnings. A failing file's whole output is, `not ok` lines
   and each failing assertion under its test, and the rest still run, so
   every failure is shown. `make test` ends with `make test: N passed, M
   failed, of F files`, counted from every file's log. To run everything
@@ -53,7 +61,7 @@ The `l0-code` skill has the test syntax: `(def test_NAME () int ...)`, the
   which each wrapper reads as its -3 answer if it has one (`port_send`
   `SendFull`) and otherwise as its type's first failure (`name_wait`
   `NotFound` at once, `proc_kill` `KillNoProc`); every receive gives
-  `RecvFailed`, and opening a device fails. To test what a program does
+  `RecvFailed`, and opening a region fails. To test what a program does
   with each answer, pass it the constructors themselves, as
   `procmon_test.l0`'s `kill_text` tests do; `l0s_test.l0` pins each
   `X_of` against the kernel's codes. So test the pure functions, and test that each program's entry point
@@ -275,6 +283,13 @@ keep working still goes in a test.
   after the serial line has scrolled past or on a board with none.
 - **Time a phase**: `(let t0 (clock_ns) ...)` around it and print
   `(div (sub t1 t0) 100000)`, tenths of a millisecond.
+- **Count copies**: `L0_ARRAY_STATS=1` on a run, or on the `l0 test`
+  line of a module's tests, prints at exit how many updates copied, how
+  many were in place, and the words the copies moved, records' fields
+  counted with arrays'. Compare a loop's counts before and after a
+  change: a new copy each time round is the hidden whole copy.
+- **Check reference counting**: `L0_RC_CHECK=1` on a test run reports
+  any block still live at exit and any use of a freed one.
 - **Drive the pointer from a script**: copy `events`, `at` and `button` from
   `tests/vt.sh`. To send many events quickly, pipe a sequence of
   `input-send-event` commands, with short sleeps, into one `tools/qsock` on

@@ -10,13 +10,13 @@
 
 ; An event: its name, message if the stream gave none, and its data,
 ; the data lines joined by newlines.
-(data SseEvent (SseEvent bytes bytes))
+(data SseEvent (SseEvent (name bytes) (is_data bytes)))
 
 ; A reader's state between pieces: the line not yet ended, its pieces
 ; so far, reversed; whether the last piece ended with a CR, whose LF
 ; may begin the next; the event's name so far, empty for none; and its
 ; data lines so far, reversed.
-(data Sse (Sse (list bytes) bool bytes (list bytes)))
+(data Sse (Sse (pend (list bytes)) (cr bool) (name bytes) (lines (list bytes))))
 
 ; What a piece gave: the reader after it, and the events it ended, in
 ; order.
@@ -30,7 +30,7 @@
 (def sse_more ((s Sse) (b bytes) (i int) (j int)) SseMore
   (match s
     ((Sse pend cr name lines)
-      (if (if cr (lt i j) false)
+      (if (and cr (lt i j))
           (let k (if (eq (bytes_get b i) 10) (add i 1) i)
             (sse_scan (Sse pend false name lines) b k k j (nil SseEvent)))
           (sse_scan s b i i j (nil SseEvent))))))
@@ -41,26 +41,26 @@
   (if (ge k j)
       (SseMore (sse_held s b start j) (rev evs))
       (let c (bytes_get b k)
-        (if (if (eq c 10) true (eq c 13))
+        (if (or (eq c 10) (eq c 13))
             (match (sse_line s b start k evs)
               ((SseMore s2 evs2)
                 (if (eq c 10)
                     (sse_scan s2 b (add k 1) (add k 1) j evs2)
-                    (if (eq (add k 1) j)
-                        (SseMore (sse_cr s2) (rev evs2))
-                        (let n (if (eq (bytes_get b (add k 1)) 10) (add k 2) (add k 1))
-                          (sse_scan s2 b n n j evs2))))))
+                    (eq (add k 1) j)
+                    (SseMore (sse_cr s2) (rev evs2))
+                    (let n (if (eq (bytes_get b (add k 1)) 10) (add k 2) (add k 1))
+                      (sse_scan s2 b n n j evs2)))))
             (sse_scan s b start (add k 1) j evs)))))
 
 ; s holding the bytes from start to j as part of a line not yet ended.
 (def sse_held ((s Sse) (b bytes) (start int) (j int)) Sse
   (if (ge start j)
       s
-      (match s ((Sse pend cr name lines) (Sse (cons (bytes_slice b start j) pend) cr name lines)))))
+      (.pend s (cons (bytes_slice b start j) (.pend s)))))
 
 ; s once a piece ended with a CR.
 (def sse_cr ((s Sse)) Sse
-  (match s ((Sse pend cr name lines) (Sse pend true name lines))))
+  (.cr s true))
 
 ; The line that ends at e, begun at start in b after any pieces s holds
 ; of it, read; the events so far reversed in evs, as an SseMore whose
@@ -78,30 +78,28 @@
 (def sse_field ((s Sse) (b bytes) (a int) (e int) (evs (list SseEvent))) SseMore
   (if (eq a e)
       (sse_dispatch s evs)
-      (if (eq (bytes_get b a) 58)
-          (SseMore s evs)
-          (let colon (sse_colon b a e)
-            (let v (if (lt colon e) (if (if (lt (add colon 1) e) (eq (bytes_get b (add colon 1)) 32) false) (add colon 2) (add colon 1)) e)
-              (SseMore (sse_set s b a colon v e) evs))))))
+      (eq (bytes_get b a) 58)
+      (SseMore s evs)
+      (let (colon (sse_colon b a e)
+            v (if (lt colon e) (if (and (lt (add colon 1) e) (eq (bytes_get b (add colon 1)) 32)) (add colon 2) (add colon 1)) e))
+        (SseMore (sse_set s b a colon v e) evs))))
 
 ; The first colon from a up to e, or e if there is none.
 (def sse_colon ((b bytes) (a int) (e int)) int
-  (if (ge a e) e (if (eq (bytes_get b a) 58) a (sse_colon b (add a 1) e))))
+  (if (ge a e) e (eq (bytes_get b a) 58) a (sse_colon b (add a 1) e)))
 
 ; s after the field named by b from a to f, its value from v to e: event
 ; names the event, data adds a line, and anything else is passed over.
 (def sse_set ((s Sse) (b bytes) (a int) (f int) (v int) (e int)) Sse
   (match s
     ((Sse pend cr name lines)
-      (if (sse_named b a f "data")
-          (Sse pend cr name (cons (bytes_slice b v e) lines))
-          (if (sse_named b a f "event")
-              (Sse pend cr (bytes_slice b v e) lines)
-              s)))))
+      (if (sse_named b a f "data") (Sse pend cr name (cons (bytes_slice b v e) lines))
+          (sse_named b a f "event") (Sse pend cr (bytes_slice b v e) lines)
+          s))))
 
 ; Whether the bytes of b from a to f are word.
 (def sse_named ((b bytes) (a int) (f int) (word (list int))) bool
-  (if (eq (sub f a) (length word)) (bytes_is_at b a word) false))
+  (and (eq (sub f a) (length word)) (bytes_is_at b a word)))
 
 ; The event s holds ended: given, onto evs, if it has data; and s ready
 ; for the next.
@@ -120,7 +118,3 @@
   (if (is_empty ls)
       (rev acc)
       (sse_joined (tail ls) (cons (head ls) (if (is_empty acc) acc (cons (bytes_from_list "\n") acc))))))
-
-; An event's name and its data.
-(def sse_name ((e SseEvent)) bytes (match e ((SseEvent n d) n)))
-(def sse_data ((e SseEvent)) bytes (match e ((SseEvent n d) d)))

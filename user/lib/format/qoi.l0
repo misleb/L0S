@@ -22,7 +22,7 @@
 
 ; Whether b starts as a QOI image does.
 (def qoi_is ((b bytes)) bool
-  (if (lt (bytes_len b) 14) false (bytes_is_at b 0 "qoif")))
+  (and (not (lt (bytes_len b) 14)) (bytes_is_at b 0 "qoif")))
 
 ; The u32 at byte i of b, most significant byte first.
 (def qoi_be32_at ((b bytes) (i int)) int
@@ -40,13 +40,12 @@
 (def qoi_header ((b bytes)) Qoi
   (if (not (qoi_is b))
       (QoiBad "not a QOI image")
-      (let w (qoi_be32_at b 4)
-        (let h (qoi_be32_at b 8)
-          (if (if (lt w 1) true (if (lt h 1) true (if (gt w 16384) true (gt h 16384))))
-              (QoiBad "a QOI image of no size, or too large")
-              (if (any_eq (bytes_get b 12) (cons 3 (cons 4 (nil int))))
-                  (Qoi w h 14)
-                  (QoiBad "a QOI image of neither 3 nor 4 channels")))))))
+      (let (w (qoi_be32_at b 4) h (qoi_be32_at b 8))
+        (if (or (lt w 1) (or (lt h 1) (or (gt w 16384) (gt h 16384))))
+            (QoiBad "a QOI image of no size, or too large")
+            (any_eq (bytes_get b 12) (cons 3 (cons 4 (nil int))))
+            (Qoi w h 14)
+            (QoiBad "a QOI image of neither 3 nor 4 channels")))))
 
 ; ------------------------------------------------------------------ pixels
 
@@ -106,19 +105,18 @@
 ; channel; luma, 0x80 and green's 6 bits, then red's and blue's 4 from
 ; green's; or whole, 0xFE and its 3 channels. Alpha never changes here.
 (def qoi_change ((prev int) (p int) (acc (list int))) (list int)
-  (let dr (qoi_delta (qoi_r p) (qoi_r prev))
-    (let dg (qoi_delta (qoi_g p) (qoi_g prev))
-      (let db (qoi_delta (qoi_b p) (qoi_b prev))
-        (if (if (qoi_within dr -2 1) (if (qoi_within dg -2 1) (qoi_within db -2 1) false) false)
-            (cons (add 64 (add (mul 16 (add dr 2)) (add (mul 4 (add dg 2)) (add db 2)))) acc)
-            (let rg (sub dr dg)
-              (let bg (sub db dg)
-                (if (if (qoi_within dg -32 31) (if (qoi_within rg -8 7) (qoi_within bg -8 7) false) false)
-                    (cons (add (mul 16 (add rg 8)) (add bg 8)) (cons (add 128 (add dg 32)) acc))
-                    (cons (qoi_b p) (cons (qoi_g p) (cons (qoi_r p) (cons 254 acc))))))))))))
+  (let (dr (qoi_delta (qoi_r p) (qoi_r prev))
+        dg (qoi_delta (qoi_g p) (qoi_g prev))
+        db (qoi_delta (qoi_b p) (qoi_b prev)))
+    (if (and (qoi_within dr -2 1) (and (qoi_within dg -2 1) (qoi_within db -2 1)))
+        (cons (add 64 (add (mul 16 (add dr 2)) (add (mul 4 (add dg 2)) (add db 2)))) acc)
+        (let (rg (sub dr dg) bg (sub db dg))
+          (if (and (qoi_within dg -32 31) (and (qoi_within rg -8 7) (qoi_within bg -8 7)))
+              (cons (add (mul 16 (add rg 8)) (add bg 8)) (cons (add 128 (add dg 32)) acc))
+              (cons (qoi_b p) (cons (qoi_g p) (cons (qoi_r p) (cons 254 acc)))))))))
 
 ; Whether lo <= v <= hi.
-(def qoi_within ((v int) (lo int) (hi int)) bool (if (lt v lo) false (le v hi)))
+(def qoi_within ((v int) (lo int) (hi int)) bool (and (not (lt v lo)) (le v hi)))
 
 ; ----------------------------------------------------------------- reading
 
@@ -134,11 +132,9 @@
 (def qoi_next ((b bytes) (stop int) (at QoiAt)) QoiPx
   (match at
     ((QoiAt i prev run seen)
-      (if (gt run 0)
-          (QoiPx prev (QoiAt i prev (sub run 1) seen))
-          (if (ge i stop)
-              (QoiShort)
-              (qoi_chunk b stop i prev seen (bytes_get b i)))))))
+      (if (gt run 0) (QoiPx prev (QoiAt i prev (sub run 1) seen))
+          (ge i stop) (QoiShort)
+          (qoi_chunk b stop i prev seen (bytes_get b i))))))
 
 ; The chunk at i, whose first byte is c: its pixel, kept among those
 ; seen.
@@ -147,26 +143,25 @@
       (if (gt (add i 4) stop)
           (QoiShort)
           (qoi_seen (qoi_px (bytes_get b (add i 1)) (bytes_get b (add i 2)) (bytes_get b (add i 3)) (qoi_a prev)) (add i 4) 0 seen))
-      (if (eq c 255)
-          (if (gt (add i 5) stop)
-              (QoiShort)
-              (qoi_seen (qoi_px (bytes_get b (add i 1)) (bytes_get b (add i 2)) (bytes_get b (add i 3)) (bytes_get b (add i 4))) (add i 5) 0 seen))
-          (qoi_chunk_small b stop i prev seen c))))
+      (eq c 255)
+      (if (gt (add i 5) stop)
+          (QoiShort)
+          (qoi_seen (qoi_px (bytes_get b (add i 1)) (bytes_get b (add i 2)) (bytes_get b (add i 3)) (bytes_get b (add i 4))) (add i 5) 0 seen))
+      (qoi_chunk_small b stop i prev seen c)))
 
 ; A chunk of one byte, or luma's two, by the top two bits of c.
 (def qoi_chunk_small ((b bytes) (stop int) (i int) (prev int) (seen (array int)) (c int)) QoiPx
   (let tag (bit_shr c 6)
     (if (eq tag 0)
         (qoi_seen (array_get seen (bit_and c 63)) (add i 1) 0 seen)
-        (if (eq tag 1)
-            (qoi_seen (qoi_moved prev (sub (bit_and (bit_shr c 4) 3) 2) (sub (bit_and (bit_shr c 2) 3) 2) (sub (bit_and c 3) 2)) (add i 1) 0 seen)
-            (if (eq tag 3)
-                (qoi_seen prev (add i 1) (bit_and c 63) seen)
-                (if (gt (add i 2) stop)
-                    (QoiShort)
-                    (let dg (sub (bit_and c 63) 32)
-                      (let d (bytes_get b (add i 1))
-                        (qoi_seen (qoi_moved prev (add dg (sub (bit_shr d 4) 8)) dg (add dg (sub (bit_and d 15) 8))) (add i 2) 0 seen)))))))))
+        (eq tag 1)
+        (qoi_seen (qoi_moved prev (sub (bit_and (bit_shr c 4) 3) 2) (sub (bit_and (bit_shr c 2) 3) 2) (sub (bit_and c 3) 2)) (add i 1) 0 seen)
+        (eq tag 3)
+        (qoi_seen prev (add i 1) (bit_and c 63) seen)
+        (gt (add i 2) stop)
+        (QoiShort)
+        (let (dg (sub (bit_and c 63) 32) d (bytes_get b (add i 1)))
+          (qoi_seen (qoi_moved prev (add dg (sub (bit_shr d 4) 8)) dg (add dg (sub (bit_and d 15) 8))) (add i 2) 0 seen)))))
 
 ; prev with its red, green and blue moved by dr, dg and db, wrapping.
 (def qoi_moved ((prev int) (dr int) (dg int) (db int)) int

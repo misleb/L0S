@@ -116,7 +116,7 @@ with random registers.
 | `kernel/log.l0` | the ring of the kernel's log: stamping, dropping the oldest, and reading from a number |
 | `kernel/inittab.l0` | `/etc/inittab`: parsing it, and checking it against the archive |
 | `kernel/memory.l0` | what each address is for, by where a process's image lies; which pages to map before a copy, and which it may write; which heap pages a release names; where device regions and DMA pages go, from a pool of a process's device pages that takes back pages given up in any order; the code and rodata processes share, by their bytes' hash; which frames to free when a process ends |
-| `kernel/elf.l0` | a program's ELF: its headers read and checked against spec §10.3, its segments, entry, and heap |
+| `kernel/elf.l0` | a program's ELF: its headers read and checked against L0's process spec (`l0 spec process`), its segments, entry, and heap |
 | `kernel/mounts.l0` | the mount table: the initramfs or the system volume at `/` and the volumes at `/Volumes/LABEL`, where a path's file is and the path its server is asked for, and where a rename goes |
 | `kernel/ipc.l0` | ports, their message queues, each message numbered as it is queued, names, registered, let go and listed, each process's set of ports to wait on and which of them holds the oldest message, and the mount table, whose volumes go with their ports |
 | `kernel/sched.l0` | sleepers and the timer's deadline |
@@ -208,7 +208,7 @@ It gives none, and spawning fails with -5, only when all 255 are alive.
 
 ## A process's memory
 
-The layout is fixed by spec §10.3. A program's image is an ELF, as
+The layout is fixed by L0's process spec, `l0 spec process`. A program's image is an ELF, as
 `l0 build --target proc` writes them, and
 [kernel/elf.l0](../kernel/elf.l0) reads and checks its headers.
 
@@ -219,10 +219,10 @@ The layout is fixed by spec §10.3. A program's image is an ELF, as
 | from the page after the image to `0xD8000000` | heap | on first touch, RW; unmapped again, its frame freed, when the runtime releases it (call 12) in a run of 16 MB or more, or with 128 MB or less of frames left |
 | to `0xE8000000` | stack, `sp` starting at the top | on first touch, RW |
 | `0xE8000000` to `0x100000000` | nothing: a touch faults, and a buffer there is refused | never |
-| `0x2000000000` to `0x4000000000` | the high user range (spec §10.3), 128 GB: device regions, DMA pages, and shared pages | by the `region` and `dma_alloc` calls, for programs with a `dev` line only; by `shm_alloc` and `shm_share`, for any. A copy in or out of a process lies wholly in this range or wholly in the low one |
+| `0x2000000000` to `0x4000000000` | the high user range (`l0 spec process`), 128 GB: device regions, DMA pages, and shared pages | by the `region` and `dma_alloc` calls, for programs with a `dev` line only; by `shm_alloc` and `shm_share`, for any. A copy in or out of a process lies wholly in this range or wholly in the low one |
 
 A process starts at its image's `e_entry`. The kernel starts only an ELF
-of spec §10.3's for this CPU: static, `ET_EXEC`, at most three
+of the process spec's for this CPU: static, `ET_EXEC`, at most three
 page-aligned `PT_LOAD`s in order, none writable and executable, within
 its file and the image's range; anything else, the raw images earlier
 toolchains wrote among it, is "not a program", -6. A store to its code
@@ -249,10 +249,10 @@ thousands of pages. The pages are consecutive in the process,
 but not necessarily for the device, so a driver gives the device one
 address per page, or merges the runs that happen to be consecutive.
 A `region` call over DMA pages (`dma_open` in `l0s.l0`) returns the same
-address, so the driver reads and writes them with `device_read32` and the
+address, so the driver reads and writes them with `region_get32` and the
 rest. The proc runtime keeps at most 64 regions open at once, which is
 why the pages are mapped together rather than as one region each; one
-closed (`close_device`, or `shm_region_free` for shared pages) frees its
+closed (`close_region`, or `shm_region_free` for shared pages) frees its
 place for another.
 
 **Shared memory.** `shm_alloc n` is `dma_alloc` for any process: n zeroed
@@ -321,7 +321,7 @@ window, as for a server that is the caller itself or gave its window
 up, both go in messages as they did, 4 KB a request.
 
 **Releasing.** While a process runs, its runtime names the whole heap
-pages that its allocator has freed by call 12, `release` (spec §10.3).
+pages that its allocator has freed by call 12, `release` (`l0 spec process`).
 The kernel unmaps each one it has mapped and frees its frame, and a later
 touch of the page gets a zeroed frame again, as a first touch does. So a
 process holds the heap it uses now, not the most it ever used. Its servers

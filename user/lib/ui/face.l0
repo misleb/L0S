@@ -30,11 +30,11 @@
 ; arena read through the same region; or, as a host tool or a test has
 ; one, bytes; or asked of font, at clock_ns T, its answer to come to the
 ; loop as a reply (ui_face_asking), drawn as none until then.
-(data UiStrike (UiStrikeIn IoDevice int int) (UiStrikeBytes bytes) (UiStrikeAsked int))
+(data UiStrike (UiStrikeIn IoRegion int int) (UiStrikeBytes bytes) (UiStrikeAsked int))
 
 ; A face: its scale, its tables by name, its icons' and the pointers',
 ; and its strikes by name, its glyphs'.
-(data UiFace (UiFace int (Map (list int) UiCov) (Map (list int) UiStrike)))
+(data UiFace (UiFace (scale int) (ts (Map (list int) UiCov)) (ks (Map (list int) UiStrike))))
 
 ; Where the face is, as mkfont wrote it, and the icons, as mkicons did.
 (def ui_face_path () (list int) "/etc/face")
@@ -67,7 +67,7 @@
 ; Whether the face can draw text: it has the interface's regular glyphs,
 ; 16 tall at scale 1.
 (def ui_face_has_text ((f UiFace)) bool
-  (match (ui_face_strike f (ui_glyph_table (ui_font_face (ui_text_font) false) (mul (ui_char_h) (ui_face_scale f))))
+  (match (ui_face_strike f (ui_glyph_table (ui_font_face (ui_text_font) false) (mul (ui_char_h) (.scale f))))
     ((Some g) true)
     ((None) false)))
 
@@ -132,13 +132,13 @@
         ((Some r) ((Ok UiStrike (list int)) (UiStrikeIn r va off)))
         ((None)
           (match (dma_open va n)
-            ((DeviceFailed fault why) ((Err UiStrike (list int)) why))
-            ((DeviceOpened r) ((Ok UiStrike (list int)) (UiStrikeIn r va off)))))))))
+            ((IoRegionFailed fault why) ((Err UiStrike (list int)) why))
+            ((IoRegionOpened r) ((Ok UiStrike (list int)) (UiStrikeIn r va off)))))))))
 
 ; The region of the first of ks read through the arena at va, if one is.
-(def ui_arena_region ((ks (list UiStrike)) (va int)) (Option IoDevice)
+(def ui_arena_region ((ks (list UiStrike)) (va int)) (Option IoRegion)
   (if (is_empty ks)
-      ((None IoDevice))
+      ((None IoRegion))
       (match (head ks)
         ((UiStrikeIn r at off) (if (eq at va) (Some r) (ui_arena_region (tail ks) va)))
         ((UiStrikeBytes b) (ui_arena_region (tail ks) va))
@@ -208,7 +208,7 @@
       (match (map_get ks (head names))
         ((Some k)
           (match k
-            ((UiStrikeAsked t) (if (if (lt at 0) true (lt t at)) (ui_oldest_ask (tail names) ks (head names) t) (ui_oldest_ask (tail names) ks best at)))
+            ((UiStrikeAsked t) (if (or (lt at 0) (lt t at)) (ui_oldest_ask (tail names) ks (head names) t) (ui_oldest_ask (tail names) ks best at)))
             ((UiStrikeIn r va off) (ui_oldest_ask (tail names) ks best at))
             ((UiStrikeBytes b) (ui_oldest_ask (tail names) ks best at))))
         ((None) (ui_oldest_ask (tail names) ks best at)))))
@@ -236,11 +236,11 @@
 ; The name of the strike f asked for that answer payload is to: the one
 ; it names, if f is waiting for it; else the oldest asked.
 (def ui_answer_name ((f UiFace) (payload (list int))) (list int)
-  (let key (font_reply_key payload)
-    (let named (if (is_empty key) "" (ui_glyph_table (up_to 32 key) (ui_strike_h_of key)))
-      (match (ui_face_strike f named)
-        ((Some k) (match k ((UiStrikeAsked t) named) ((UiStrikeIn r va off) (ui_face_oldest_ask f)) ((UiStrikeBytes b) (ui_face_oldest_ask f))))
-        ((None) (ui_face_oldest_ask f))))))
+  (let (key (font_reply_key payload)
+        named (if (is_empty key) "" (ui_glyph_table (up_to 32 key) (ui_strike_h_of key))))
+    (match (ui_face_strike f named)
+      ((Some k) (match k ((UiStrikeAsked t) named) ((UiStrikeIn r va off) (ui_face_oldest_ask f)) ((UiStrikeBytes b) (ui_face_oldest_ask f))))
+      ((None) (ui_face_oldest_ask f)))))
 
 ; The height a key FACE H names, 0 for none.
 (def ui_strike_h_of ((key (list int))) int
@@ -253,12 +253,12 @@
 ; A strike's u32 and u64 at off.
 (def ui_strike_u32 ((k UiStrike) (off int)) int
   (match k
-    ((UiStrikeIn r va at) (device_read32 r (add at off)))
+    ((UiStrikeIn r va at) (region_get32 r (add at off)))
     ((UiStrikeBytes b) (le_u32 b off))
     ((UiStrikeAsked t) 0)))
 (def ui_strike_u64 ((k UiStrike) (off int)) int
   (match k
-    ((UiStrikeIn r va at) (device_read64 r (add at off)))
+    ((UiStrikeIn r va at) (region_get64 r (add at off)))
     ((UiStrikeBytes b) (le_u64_at b off))
     ((UiStrikeAsked t) 0)))
 
@@ -274,9 +274,6 @@
   (match (read_whole path)
     ((Err why) (let w (write_err (append path (append ": " (append why (append "; " (append then "\n")))))) m))
     ((Ok b) (ui_face_kept b sizes m))))
-
-; Its scale.
-(def ui_face_scale ((f UiFace)) int (match f ((UiFace s ts ks) s)))
 
 ; The table called name, if the face has it.
 (def ui_face_table ((f UiFace) (name (list int))) (Option UiCov)
@@ -375,33 +372,33 @@
 ; The tables a face file holds put into m, those of icons only at the
 ; sizes given, or all for none.
 (def ui_face_kept ((b bytes) (sizes (list int)) (m (Map (list int) UiCov))) (Map (list int) UiCov)
-  (if (if (has b 0 12) (bytes_is_at b 0 "L0SF") false)
+  (if (and (has b 0 12) (bytes_is_at b 0 "L0SF"))
       (ui_face_read b 12 (le_u32 b 8) sizes m)
       m))
 
 ; Whether a table is kept: any but an icon's, and an icon's if it is one
 ; of the sizes, or there are none.
 (def ui_face_keeps ((name (list int)) (w int) (sizes (list int))) bool
-  (if (if (is_empty sizes) true (not (starts_with name "icon."))) true (any_eq w sizes)))
+  (or (or (is_empty sizes) (not (starts_with name "icon."))) (any_eq w sizes)))
 
 ; ui_face_kept's loop: the n tables left from byte at, each kept put in
 ; m by its name; it stops, keeping those before, at one the bytes cut
 ; short.
 (def ui_face_read ((b bytes) (at int) (n int) (sizes (list int)) (m (Map (list int) UiCov))) (Map (list int) UiCov)
-  (if (if (le n 0) true (not (has b at 4)))
+  (if (or (le n 0) (not (has b at 4)))
       m
       (let nl (le_u32 b at)
         (if (not (has b (add at 4) (add nl 12)))
             m
-            (let name (bytes_range b (add at 4) (add (add at 4) nl))
-              (let p (add (add at 4) nl)
-                (let k (le_u32 b (add p 8))
-                  (if (not (has b (add p 12) (mul k 8)))
-                      m
-                      (ui_face_read b (add (add p 12) (mul k 8)) (sub n 1) sizes
-                        (if (ui_face_keeps name (le_u32 b p) sizes)
-                            (map_put m name (UiCov (le_u32 b p) (le_u32 b (add p 4)) (ui_face_words b (add p 12) 0 k (array_new k 0))))
-                            m))))))))))
+            (let (name (bytes_range b (add at 4) (add (add at 4) nl))
+                  p (add (add at 4) nl)
+                  k (le_u32 b (add p 8)))
+              (if (not (has b (add p 12) (mul k 8)))
+                  m
+                  (ui_face_read b (add (add p 12) (mul k 8)) (sub n 1) sizes
+                    (if (ui_face_keeps name (le_u32 b p) sizes)
+                        (map_put m name (UiCov (le_u32 b p) (le_u32 b (add p 4)) (ui_face_words b (add p 12) 0 k (array_new k 0))))
+                        m))))))))
 
 ; Words i up to k of a table, read from b at at, 8 bytes each, least
 ; significant first, into out.

@@ -39,20 +39,20 @@
 ; The kind of a boot interface's protocol, 1 a keyboard and 2 a mouse;
 ; none for any other.
 (def kind_of_protocol ((protocol int)) (Option Kind)
-  (if (eq protocol 1) (Some (Keyboards)) (if (eq protocol 2) (Some (Mice)) ((None Kind)))))
+  (if (eq protocol 1) (Some (Keyboards)) (eq protocol 2) (Some (Mice)) ((None Kind))))
 
 ; The kinds the arguments say to drive: both with none, or one, keyboard
 ; or mouse; none for any other arguments.
 (def kinds_of ((argv (list (list int)))) (Option (list Kind))
   (if (is_empty argv)
       (Some (cons (Keyboards) (cons (Mice) (nil Kind))))
-      (if (eq argv (cons "keyboard" (nil (list int))))
-          (Some (cons (Keyboards) (nil Kind)))
-          (if (eq argv (cons "mouse" (nil (list int)))) (Some (cons (Mice) (nil Kind))) ((None (list Kind)))))))
+      (eq argv (cons "keyboard" (nil (list int)))) (Some (cons (Keyboards) (nil Kind)))
+      (eq argv (cons "mouse" (nil (list int)))) (Some (cons (Mice) (nil Kind)))
+      ((None (list Kind)))))
 
 ; Whether ks holds k.
 (def kinds_hold ((ks (list Kind)) (k Kind)) bool
-  (if (is_empty ks) false (if (eq (head ks) k) true (kinds_hold (tail ks) k))))
+  (if (is_empty ks) false (eq (head ks) k) true (kinds_hold (tail ks) k)))
 
 ; What to drive, then the usb server found and listened to.
 (def usb_hid () int
@@ -110,27 +110,21 @@
 ; listening to keyboard and to pointer, the devices, the modifiers held,
 ; as keymap.l0 keeps them, the key repeating, and the usb server's
 ; messages kept to handle.
-(data Hid (Hid HidPorts int int (list int) (list int) (list Board) int Repeat (list Message)))
+(data Hid (Hid (ps HidPorts) (usb int) (pid int) (kls (list int)) (pls (list int)) (bs (list Board)) (mods int) (repeat Repeat) (kept (list Message))))
 
-; Its own port, the key repeating, and the messages kept.
-(def hid_port ((h Hid)) int (match h ((Hid ps usb pid kls pls bs mods r kept) (match ps ((HidPorts own kp pp ks) own)))))
+; Its own port.
+(def hid_port ((h Hid)) int (match (.ps h) ((HidPorts own kp pp ks) own)))
 
 ; Whether it drives k.
 (def hid_drives ((h Hid) (k Kind)) bool
   (match h ((Hid ps usb pid kls pls bs mods r kept) (match ps ((HidPorts own kp pp ks) (kinds_hold ks k))))))
-(def hid_repeat ((h Hid)) Repeat (match h ((Hid ps usb pid kls pls bs mods r kept) r)))
-(def hid_kept ((h Hid)) (list Message) (match h ((Hid ps usb pid kls pls bs mods r kept) kept)))
-
-; h keeping kept2 instead.
-(def hid_with_kept ((h Hid) (kept2 (list Message))) Hid
-  (match h ((Hid ps usb pid kls pls bs mods r kept) (Hid ps usb pid kls pls bs mods r kept2))))
 
 ; Each message handled, those kept first, else the next on any of its
 ; ports; the alarm set again whenever the key repeating changes.
 (def serve ((h Hid)) int
-  (let kept (hid_kept h)
+  (let kept (.kept h)
     (if (not (is_empty kept))
-        (serve (stepped h (handled_on (hid_with_kept h (tail kept)) (hid_port h) (head kept))))
+        (serve (stepped h (handled_on (.kept h (tail kept)) (hid_port h) (head kept))))
         (match (port_receive_set)
           ((SetRecvFailed) (complain "lost its ports"))
           ((SetMessage port m) (serve (stepped h (handled_on h port m))))))))
@@ -138,9 +132,9 @@
 ; h2, after h, with the alarm set for its repeat if that changed to one
 ; due at a time: the alarm rings once at that time, on its own port.
 (def stepped ((h Hid) (h2 Hid)) Hid
-  (if (eq (hid_repeat h) (hid_repeat h2))
+  (if (eq (.repeat h) (.repeat h2))
       h2
-      (match (hid_repeat h2)
+      (match (.repeat h2)
         ((NoRepeat) h2)
         ((Repeating code at) (let a (alarm_at (hid_port h2) at) h2)))))
 
@@ -155,10 +149,10 @@
             ((RecvFailed) h)
             ((Message from b)
               (if (eq port own)
-                  (if (eq from pid) (noticed h m) (if (is_alarm_notice m) (alarm_rang h (clock_ns)) h))
-                  (if (eq port kp)
-                      (requested h (Keyboards) (msg_text b))
-                      (if (eq port pp) (requested h (Mice) (msg_text b)) h))))))))))
+                  (if (eq from pid) (noticed h m) (is_alarm_notice m) (alarm_rang h (clock_ns)) h)
+                  (eq port kp) (requested h (Keyboards) (msg_text b))
+                  (eq port pp) (requested h (Mice) (msg_text b))
+                  h))))))))
 
 ; A client's request of the name served for k: listen adds its reply
 ; port to those told.
@@ -166,9 +160,9 @@
   (let reply (request_reply payload)
     (if (le reply 0)
         h
-        (if (eq (request_body payload) "listen")
-            (with_listener h k reply (port_send reply "ok"))
-            (let s (port_tell reply (error_reply (append "no request " (request_body payload)))) h)))))
+        (eq (request_body payload) "listen")
+        (with_listener h k reply (port_send reply "ok"))
+        (let s (port_tell reply (error_reply (append "no request " (request_body payload)))) h))))
 
 ; h with reply listening to k's name, if the answer sent as s reached it.
 (def with_listener ((h Hid) (k Kind) (reply int) (s Sending)) Hid
@@ -195,10 +189,10 @@
 ; yet, as an alarm set for a repeat since replaced may ring, set again
 ; for when it is.
 (def alarm_rang ((h Hid) (now int)) Hid
-  (match (hid_repeat h)
+  (match (.repeat h)
     ((NoRepeat) h)
     ((Repeating code at)
-      (if (repeat_due (hid_repeat h) now)
+      (if (repeat_due (.repeat h) now)
           (key_repeated h now)
           (let a (alarm_at (hid_port h) at) h)))))
 
@@ -224,16 +218,13 @@
   (match (port_receive (hid_port h))
     ((RecvFailed) (Answered h (error_reply "lost its port")))
     ((Message from b)
-      (if (if (eq from (hid_pid h)) (not (is_notice b)) false)
+      (if (and (eq from (.pid h)) (not (is_notice b)))
           (Answered h (msg_text b))
-          (answer_awaited (hid_with_kept h (append (hid_kept h) (cons (Message from b) (nil Message)))))))))
-
-; The usb server's pid.
-(def hid_pid ((h Hid)) int (match h ((Hid ps usb pid kls pls bs mods r kept) pid)))
+          (answer_awaited (.kept h (append (.kept h) (cons (Message from b) (nil Message)))))))))
 
 ; Whether a message's bytes b are one of the usb server's notices.
 (def is_notice ((b bytes)) bool
-  (if (msg_starts b "uat") true (if (msg_starts b "udt") true (msg_starts b "uin"))))
+  (or (msg_starts b "uat") (or (msg_starts b "udt") (msg_starts b "uin"))))
 
 ; ------------------------------------------------------------- attaching
 
@@ -247,7 +238,7 @@
         ((Ok bs)
           (match (usb_config_of bs)
             ((Err why) h2)
-            ((Ok c) (match c ((UsbConfig v total ifs) (interfaces_taken h2 dev ifs))))))))))
+            ((Ok c) (interfaces_taken h2 dev (.ifaces c)))))))))
 
 ; Each interface of ifs taken, if it is one to drive.
 (def interfaces_taken ((h Hid) (dev int) (ifs (list UsbInterface))) Hid
@@ -261,7 +252,7 @@
 (def interface_taken ((h Hid) (dev int) (i UsbInterface)) Hid
   (match i
     ((UsbInterface n alt class sub protocol es)
-      (if (if (eq class 3) (eq sub 1) false)
+      (if (and (eq class 3) (eq sub 1))
           (match (kind_of_protocol protocol)
             ((None) h)
             ((Some k)
@@ -269,7 +260,7 @@
                   h
                   (match (usb_endpoint_in es (usb_ep_interrupt))
                     ((None) h)
-                    ((Some e) (claimed h k dev n (usb_endpoint_addr e)))))))
+                    ((Some e) (claimed h k dev n (.addr e)))))))
           h))))
 
 ; Interface n of dev, a k, claimed, set up, and its endpoint ep opened;
@@ -279,14 +270,14 @@
     ((Answered h2 r)
       (if (not (eq r "ok"))
           h2
-          (let h3 (control_out h2 dev (usb_hid_set_protocol) n)
-            (let h4 (match k ((Keyboards) (control_out h3 dev (usb_hid_set_idle) n)) ((Mice) h3))
-              (match (asked h4 (usb_request "open" (cons dev (cons ep (nil int)))))
-                ((Answered h5 r2)
-                  (if (eq r2 "ok")
-                      (let w (info_as "usb-hid" (claim_line k dev n))
-                        (with_board h5 (Board k dev ep (held_none))))
-                      h5)))))))))
+          (let (h3 (control_out h2 dev (usb_hid_set_protocol) n)
+                h4 (match k ((Keyboards) (control_out h3 dev (usb_hid_set_idle) n)) ((Mice) h3)))
+            (match (asked h4 (usb_request "open" (cons dev (cons ep (nil int)))))
+              ((Answered h5 r2)
+                (if (eq r2 "ok")
+                    (let w (info_as "usb-hid" (claim_line k dev n))
+                      (with_board h5 (Board k dev ep (held_none))))
+                    h5))))))))
 
 ; A class request with value 0 to interface n, its answer passed over:
 ; a device that stalls SET_IDLE still reports.
@@ -296,11 +287,7 @@
 
 ; h driving b too.
 (def with_board ((h Hid) (b Board)) Hid
-  (match h ((Hid ps usb pid kls pls bs mods r kept) (Hid ps usb pid kls pls (cons b bs) mods r kept))))
-
-; h with bs2 as its devices.
-(def with_boards ((h Hid) (bs2 (list Board))) Hid
-  (match h ((Hid ps usb pid kls pls bs mods r kept) (Hid ps usb pid kls pls bs2 mods r kept))))
+  (.bs h (cons b (.bs h))))
 
 ; A device unplugged: every board of it forgotten, a keyboard's keys let
 ; go first.
@@ -311,7 +298,7 @@
       (match b
         ((Board k d ep held)
           (let h2 (keys_changed_by h (changes held (held_none)) (clock_ns))
-            (match h2 ((Hid ps usb pid kls pls bs mods r kept) (detached (with_boards h2 (boards_without bs dev ep)) dev)))))))))
+            (match h2 ((Hid ps usb pid kls pls bs mods r kept) (detached (.bs h2 (boards_without bs dev ep)) dev)))))))))
 
 ; The first board of device dev driven, or none; among bs; and bs
 ; without dev's board at endpoint ep.
@@ -321,12 +308,12 @@
   (if (is_empty bs)
       ((None Board))
       (match (head bs)
-        ((Board k d e held) (if (if (eq d dev) (if (lt ep 0) true (eq e ep)) false) (Some (head bs)) (board_among (tail bs) dev ep))))))
+        ((Board k d e held) (if (and (eq d dev) (or (lt ep 0) (eq e ep))) (Some (head bs)) (board_among (tail bs) dev ep))))))
 (def boards_without ((bs (list Board)) (dev int) (ep int)) (list Board)
   (if (is_empty bs)
       bs
       (match (head bs)
-        ((Board k d e held) (if (if (eq d dev) (eq e ep) false) (tail bs) (cons (head bs) (boards_without (tail bs) dev ep)))))))
+        ((Board k d e held) (if (and (eq d dev) (eq e ep)) (tail bs) (cons (head bs) (boards_without (tail bs) dev ep)))))))
 
 ; -------------------------------------------------------------- reports
 
@@ -352,7 +339,7 @@
       (match b
         ((Board k dev ep held)
           (let h2 (keys_changed_by h (changes held now) (clock_ns))
-            (match h2 ((Hid ps usb pid kls pls bs mods r kept) (with_boards h2 (cons (Board k dev ep now) (boards_without bs dev ep)))))))))))
+            (match h2 ((Hid ps usb pid kls pls bs mods r kept) (.bs h2 (cons (Board k dev ep now) (boards_without bs dev ep)))))))))))
 
 ; Each change told as a key event to keyboard's listeners, the
 ; modifiers and the repeat after it.
@@ -381,4 +368,4 @@
 (def mouse_reported ((h Hid) (bytes (list int))) Hid
   (match (motion_of bytes)
     ((None) h)
-    ((Some m) (match h ((Hid ps usb pid kls pls bs mods r kept) (Hid ps usb pid kls (listeners_tell pls (motion_notice m)) bs mods r kept))))))
+    ((Some m) (.pls h (listeners_tell (.pls h) (motion_notice m))))))

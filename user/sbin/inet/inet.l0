@@ -46,7 +46,7 @@
 (data Socks (Socks (Map int int) (Map int int) int Tcps))
 
 ; Frames taken and sent, and those passed over or lost.
-(data Tally (Tally int int int))
+(data Tally (Tally (rx int) (tx int) (dropped int)))
 
 ; Where a message inet sends goes: to the wire, through the driver; to a
 ; client, answering its request; or to the client bound to a UDP port,
@@ -63,7 +63,7 @@
 ; which goes once a message has been dealt with. Every message inet
 ; sends waits there, so that what one message makes it send is all in
 ; its state, where a test can see it.
-(data Stack (Stack Link Config Neigh Socks int Tally (list Out)))
+(data Stack (Stack (l Link) (config Config) (n Neigh) (k Socks) (id int) (t Tally) (o (list Out))))
 
 ; How many neighbours inet keeps, and datagrams it holds for ARP; how long
 ; it waits before asking ARP for an address again, and how long a
@@ -84,22 +84,22 @@
         (cons "arp" (cons (digits neighbours) (nil (list int))))))))))))))
 
 ; t after a frame taken, sent, or passed over.
-(def tally_rx ((t Tally)) Tally (match t ((Tally rx tx dropped) (Tally (add rx 1) tx dropped))))
-(def tally_tx ((t Tally)) Tally (match t ((Tally rx tx dropped) (Tally rx (add tx 1) dropped))))
-(def tally_drop ((t Tally)) Tally (match t ((Tally rx tx dropped) (Tally rx tx (add dropped 1)))))
+(def tally_rx ((t Tally)) Tally (.rx t (add (.rx t) 1)))
+(def tally_tx ((t Tally)) Tally (.tx t (add (.tx t) 1)))
+(def tally_drop ((t Tally)) Tally (.dropped t (add (.dropped t) 1)))
 
 ; s with one more frame passed over.
 (def dropped ((s Stack)) Stack
-  (match s ((Stack l c n k id t o) (Stack l c n k id (tally_drop t) o))))
+  (.t s (tally_drop (.t s))))
 
 ; The interface's address.
-(def stack_addr ((s Stack)) int (match s ((Stack l c n k id t o) (match c ((Config a m g dns) a)))))
+(def stack_addr ((s Stack)) int (match (.config s) ((Config a m g dns) a)))
 
 ; The card's Ethernet address.
-(def stack_mac ((s Stack)) (list int) (match s ((Stack l c n k id t o) (match l ((Link p pid mac) mac)))))
+(def stack_mac ((s Stack)) (list int) (match (.l s) ((Link p pid mac) mac)))
 
 ; The pid of s's card's driver, the only one whose notices are its.
-(def stack_driver ((s Stack)) int (match s ((Stack l c n k id t o) (match l ((Link p pid mac) pid)))))
+(def stack_driver ((s Stack)) int (match (.l s) ((Link p pid mac) pid)))
 
 ; ------------------------------------------------------------- the config
 
@@ -111,28 +111,28 @@
       (if (eq (length argv) 1)
           ((Ok Config (list int)) (Config 0 0 0 0))
           ((Err Config (list int)) "dhcp takes no more arguments"))
-      (if (gt (length argv) 3)
-          ((Err Config (list int)) "inet [ADDR/PREFIX [GATEWAY [DNS]]]")
-          (static_config_of argv))))
+      (gt (length argv) 3)
+      ((Err Config (list int)) "inet [ADDR/PREFIX [GATEWAY [DNS]]]")
+      (static_config_of argv)))
 
 ; The interface ADDR/PREFIX, GATEWAY and DNS give, each with its
 ; default: QEMU's user network's, whose name server is 10.0.2.3.
 (def static_config_of ((argv (list (list int)))) (Result Config (list int))
-  (let net (nth_or argv 0 "10.0.2.15/24")
-    (let gw (nth_or argv 1 "10.0.2.2")
-      (match (ip_parse (up_to 47 net))
-        ((None) ((Err Config (list int)) (append "not an address: " net)))
-        ((Some a)
-          (if (eq a 0)
-              ((Err Config (list int)) "0.0.0.0 is no address; say dhcp to be given one")
-              (match (word_number (drop_n net (add 1 (length (up_to 47 net)))))
-                ((None) ((Err Config (list int)) (append "not ADDR/PREFIX: " net)))
-                ((Some p)
-                  (if (if (lt p 1) true (gt p 30))
-                      ((Err Config (list int)) "a prefix is 1 to 30 bits")
-                      (match (ip_parse gw)
-                        ((None) ((Err Config (list int)) (append "not an address: " gw)))
-                        ((Some g) (static_dns a (ip_mask p) g (nth_or argv 2 "10.0.2.3")))))))))))))
+  (let (net (nth_or argv 0 "10.0.2.15/24")
+        gw (nth_or argv 1 "10.0.2.2"))
+    (match (ip_parse (up_to 47 net))
+      ((None) ((Err Config (list int)) (append "not an address: " net)))
+      ((Some a)
+        (if (eq a 0)
+            ((Err Config (list int)) "0.0.0.0 is no address; say dhcp to be given one")
+            (match (word_number (drop_n net (add 1 (length (up_to 47 net)))))
+              ((None) ((Err Config (list int)) (append "not ADDR/PREFIX: " net)))
+              ((Some p)
+                (if (or (lt p 1) (gt p 30))
+                    ((Err Config (list int)) "a prefix is 1 to 30 bits")
+                    (match (ip_parse gw)
+                      ((None) ((Err Config (list int)) (append "not an address: " gw)))
+                      ((Some g) (static_dns a (ip_mask p) g (nth_or argv 2 "10.0.2.3"))))))))))))
 
 ; The interface at a, mask m, behind g, with the name server ds names.
 (def static_dns ((a int) (m int) (g int) (ds (list int))) (Result Config (list int))
@@ -144,13 +144,13 @@
 (def on_link ((c Config) (dst int)) bool
   (match c
     ((Config a m g dns)
-      (if (eq dst (ip_broadcast)) true (eq (bit_and dst m) (bit_and a m))))))
+      (or (eq dst (ip_broadcast)) (eq (bit_and dst m) (bit_and a m))))))
 
 ; Whether dst is a broadcast on the link of c: everyone, or the subnet's.
 (def is_broadcast ((c Config) (dst int)) bool
   (match c
     ((Config a m g dns)
-      (if (eq dst (ip_broadcast)) true (eq dst (bit_or (bit_and a m) (bit_xor m 4294967295)))))))
+      (or (eq dst (ip_broadcast)) (eq dst (bit_or (bit_and a m) (bit_xor m 4294967295)))))))
 
 ; Where a datagram to dst goes first: dst itself if it is on the link,
 ; and otherwise the gateway.
@@ -159,7 +159,7 @@
 
 ; Whether a datagram to dst is for inet: to its address, or a broadcast.
 (def is_ours ((c Config) (dst int)) bool
-  (match c ((Config a m g dns) (if (eq dst a) true (is_broadcast c dst)))))
+  (match c ((Config a m g dns) (or (eq dst a) (is_broadcast c dst)))))
 
 ; ---------------------------------------------------------------- starting
 
@@ -174,12 +174,12 @@
     ((Stack link c n k id t o)
       (match c
         ((Config a m g dns)
-          (let a1 (push (ip_text a) (nil int))
-            (let a2 (push (append "/" (digits (ip_prefix_len m))) a1)
-              (let a3 (push (append " via " (ip_text g)) a2)
-                (let a4 (push (append ", name server " (ip_text dns)) a3)
-                  (let a5 (push (append ", card " (mac_text (stack_mac s))) a4)
-                    (rev (push (append (address_origin l) ", serving inet") a5))))))))))))
+          (let (a1 (push (ip_text a) (nil int))
+                a2 (push (append "/" (digits (ip_prefix_len m))) a1)
+                a3 (push (append " via " (ip_text g)) a2)
+                a4 (push (append ", name server " (ip_text dns)) a3)
+                a5 (push (append ", card " (mac_text (stack_mac s))) a4))
+            (rev (push (append (address_origin l) ", serving inet") a5))))))))
 
 ; How the address came, as ", leased for N s from SERVER", or ", set by
 ; hand", or nothing while a lease is still being asked for.
@@ -264,20 +264,20 @@
 ; for, 0 for none; one that rings for a timer since put off or stopped
 ; looks at them for nothing. l is the lease.
 (def serve ((s Stack) (port int) (l Lease) (armed int)) int
-  (let due (tcp_due s)
-    (let armed2 (if (alarm_wanted due armed) (let a (alarm_at port due) due) armed)
-      (match (port_receive port)
-        ((RecvFailed) (complain "lost its port"))
-        ((Message from b)
-          (if (is_alarm_notice (Message from b))
-              (serve (sent_out (tcp_ticked s (clock_ns))) port l 0)
-              (served_message s port l from b armed2)))))))
+  (let (due (tcp_due s)
+        armed2 (if (alarm_wanted due armed) (let a (alarm_at port due) due) armed))
+    (match (port_receive port)
+      ((RecvFailed) (complain "lost its port"))
+      ((Message from b)
+        (if (is_alarm_notice (Message from b))
+            (serve (sent_out (tcp_ticked s (clock_ns))) port l 0)
+            (served_message s port l from b armed2))))))
 
 ; Whether the alarm, set for armed (0 for none), must be set for due,
 ; the timers' soonest deadline (0 for none): when there is one, and the
 ; alarm is not set for it already.
 (def alarm_wanted ((due int) (armed int)) bool
-  (if (eq due 0) false (not (eq due armed))))
+  (and (not (eq due 0)) (not (eq due armed))))
 
 ; A message from pid from, its bytes b, dealt with, what it made inet
 ; send sent, and the next one served, the alarm set for armed.
@@ -316,7 +316,7 @@
 
 ; queued, for a payload that is bytes already.
 (def queued_bytes ((s Stack) (port int) (payload bytes) (dest Dest)) Stack
-  (match s ((Stack l c n k id t o) (Stack l c n k id t (cons (Out port payload dest) o)))))
+  (.o s (cons (Out port payload dest) (.o s))))
 
 ; Every message waiting, sent, in order: a frame counted as sent, or as
 ; lost if the driver's queue is full; a notice to a client lost if its
@@ -337,10 +337,10 @@
 ; s after a message to dest was sent, as r says.
 (def after_send ((s Stack) (dest Dest) (r Sending)) Stack
   (match dest
-    ((ToWire) (if (eq r (Sent)) (match s ((Stack l c n k id t o) (Stack l c n k id (tally_tx t) o))) (dropped s)))
+    ((ToWire) (if (eq r (Sent)) (.t s (tally_tx (.t s))) (dropped s)))
     ((ToClient) s)
-    ((ToUdp p) (if (eq r (Sent)) s (if (eq r (SendNoPort)) (unbound s p) (dropped s))))
-    ((ToPing e) (if (eq r (Sent)) s (if (eq r (SendNoPort)) (unpinged s e) (dropped s))))
+    ((ToUdp p) (if (eq r (Sent)) s (eq r (SendNoPort)) (unbound s p) (dropped s)))
+    ((ToPing e) (if (eq r (Sent)) s (eq r (SendNoPort)) (unpinged s e) (dropped s)))
     ((ToTcp id) (if (eq r (Sent)) s (tcp_lost s id r)))))
 
 ; ----------------------------------------------------------------- frames
@@ -349,14 +349,12 @@
 ; else is passed over.
 ; The frame is the bytes of b from fi on, read there in place.
 (def framed ((s Stack) (b bytes) (fi int)) Stack
-  (if (not (if (eth_dst_is b fi (stack_mac s)) true (eth_dst_is b fi (mac_broadcast))))
+  (if (not (or (eth_dst_is b fi (stack_mac s)) (eth_dst_is b fi (mac_broadcast))))
       (dropped s)
       (let type (eth_type b fi)
-        (if (eq type (eth_arp))
-            (arp_in s (arp_of b (add fi (eth_header_len))))
-            (if (eq type (eth_ipv4))
-                (ip_in s (ipv4_of b (add fi (eth_header_len))))
-                (dropped s))))))
+        (if (eq type (eth_arp)) (arp_in s (arp_of b (add fi (eth_header_len))))
+            (eq type (eth_ipv4)) (ip_in s (ipv4_of b (add fi (eth_header_len))))
+            (dropped s)))))
 
 ; frame to be put on the wire, through the driver.
 (def frame_out ((s Stack) (frame (list int))) Stack
@@ -376,10 +374,10 @@
     ((Some p)
       (match p
         ((Arp op sha spa tha tpa)
-          (let mine (eq tpa (stack_addr s))
-            (let s2 (if (if (eq spa 0) false (if mine true (knows s spa))) (learnt s spa sha) s)
-              (let s3 (if (if mine (eq op (arp_request)) false) (arp_answer s2 sha spa) s2)
-                (flushed s3 spa)))))))))
+          (let (mine (eq tpa (stack_addr s))
+                s2 (if (and (not (eq spa 0)) (or mine (knows s spa))) (learnt s spa sha) s)
+                s3 (if (and mine (eq op (arp_request))) (arp_answer s2 sha spa) s2))
+            (flushed s3 spa)))))))
 
 ; Whether ARP has told addr's Ethernet address.
 (def knows ((s Stack) (addr int)) bool
@@ -392,7 +390,7 @@
     ((Stack l c n k id t o)
       (match n
         ((Neigh arp asked ps)
-          (let full (if (ge (map_size arp) (arp_limit)) (not (map_has arp addr)) false)
+          (let full (and (ge (map_size arp) (arp_limit)) (not (map_has arp addr)))
             (Stack l c (Neigh (map_put (if full ((MapEmpty int (list int))) arp) addr mac) asked ps) k id t o)))))))
 
 ; The reply to a request for this address, from sha at spa.
@@ -457,15 +455,11 @@
         ((Ipv4 src dst proto ttl b pi pj quoted)
           (match s
             ((Stack l c n k id t o)
-              (if (not (is_ours c dst))
-                  (dropped s)
-                  (if (eq proto (proto_icmp))
-                      (icmp_in s d (icmp_of b pi pj))
-                      (if (eq proto (proto_udp))
-                          (udp_in s d (udp_of src dst b pi pj))
-                          (if (eq proto (proto_tcp))
-                              (tcp_in s d (tcp_of src dst b pi pj))
-                              (dropped s))))))))))))
+              (if (not (is_ours c dst)) (dropped s)
+                  (eq proto (proto_icmp)) (icmp_in s d (icmp_of b pi pj))
+                  (eq proto (proto_udp)) (udp_in s d (udp_of src dst b pi pj))
+                  (eq proto (proto_tcp)) (tcp_in s d (tcp_of src dst b pi pj))
+                  (dropped s)))))))))
 
 ; A datagram of proto holding payload, to dst: to inet itself if dst is
 ; its own address, and otherwise to the next hop's Ethernet address, or
@@ -475,13 +469,11 @@
     ((Stack l c n k id t o)
       (match c
         ((Config a m g dns)
-          (let packet (ipv4_packet a dst proto id payload)
-            (let s2 (Stack l c n k (bit_and (add id 1) 65535) t o)
-              (if (eq dst a)
-                  (ip_in s2 (ipv4_of (bytes_from_list packet) 0))
-                  (if (is_broadcast c dst)
-                      (frame_out s2 (eth_frame (mac_broadcast) (stack_mac s) (eth_ipv4) packet))
-                      (routed s2 (next_hop c dst) packet))))))))))
+          (let (packet (ipv4_packet a dst proto id payload)
+                s2 (Stack l c n k (bit_and (add id 1) 65535) t o))
+            (if (eq dst a) (ip_in s2 (ipv4_of (bytes_from_list packet) 0))
+                (is_broadcast c dst) (frame_out s2 (eth_frame (mac_broadcast) (stack_mac s) (eth_ipv4) packet))
+                (routed s2 (next_hop c dst) packet))))))))
 
 ; packet to hop, now if ARP has told its address, and otherwise once it
 ; does, within pending_ns.
@@ -493,12 +485,12 @@
           (match (map_get arp hop)
             ((Some mac) (frame_out s (eth_frame mac (stack_mac s) (eth_ipv4) packet)))
             ((None)
-              (let now (clock_ns)
-                (let kept (fresh_pending ps now (nil Pending))
-                  (let lost (if (ge (length kept) (pending_limit)) 1 0)
-                    (let s2 (Stack l c (Neigh arp asked (append (drop kept lost) (cons (Pending hop packet now) (nil Pending)))) k id
-                                   (if (eq lost 1) (tally_drop t) t) o)
-                      (arp_ask s2 hop now))))))))))))
+              (let (now (clock_ns)
+                    kept (fresh_pending ps now (nil Pending))
+                    lost (if (ge (length kept) (pending_limit)) 1 0)
+                    s2 (Stack l c (Neigh arp asked (append (drop kept lost) (cons (Pending hop packet now) (nil Pending)))) k id
+                              (if (eq lost 1) (tally_drop t) t) o))
+                (arp_ask s2 hop now)))))))))
 
 ; The pending that have waited less than pending_ns at now, in order.
 (def fresh_pending ((ps (list Pending)) (now int) (acc (list Pending))) (list Pending)
@@ -520,11 +512,11 @@
         ((Some msg)
           (match msg
             ((Icmp type code rest)
-              (if (if (eq type (icmp_echo_request)) (eq dst (stack_addr s)) false)
+              (if (and (eq type (icmp_echo_request)) (eq dst (stack_addr s)))
                   (ip_out s src (proto_icmp) (icmp_bytes (Icmp (icmp_echo_reply) 0 rest)))
-                  (if (eq type (icmp_echo_reply))
-                      (ponged s src ttl rest)
-                      s)))))))))
+                  (eq type (icmp_echo_reply))
+                  (ponged s src ttl rest)
+                  s))))))))
 
 ; An echo reply from src told to the client its id is for, as a pong.
 (def ponged ((s Stack) (src int) (ttl int) (rest (list int))) Stack
@@ -576,7 +568,7 @@
 (def requested ((s Stack) (from int) (payload (list int))) Stack
   (let reply (request_reply payload)
     (match (handled s from reply (request_body payload))
-      ((Served s2 answer) (if (if (is_empty answer) true (le reply 0)) s2 (queued s2 reply answer (ToClient)))))))
+      ((Served s2 answer) (if (or (is_empty answer) (le reply 0)) s2 (queued s2 reply answer (ToClient)))))))
 
 ; The request body, from the process pid from, with its reply port reply,
 ; answered.
@@ -589,15 +581,15 @@
 ; The request op, with its words ws and the rest of its body after its
 ; first line, answered.
 (def handled_op ((s Stack) (from int) (reply int) (op (list int)) (ws (list (list int))) (rest (list int))) (Served Stack)
-  (if (if (eq op "info") (is_empty ws) false) (Served s (info_text s))
-  (if (if (eq op "dns") (is_empty ws) false) (Served s (dns_text s))
-  (if (if (eq op "stats") (is_empty ws) false) (Served s (stats_text s))
-  (if (if (eq op "arp") (is_empty ws) false) (Served s (arp_text s))
-  (if (eq op "send") (sent s reply ws rest)
-  (if (eq op "ping") (pinged s reply ws)
-  (if (eq op "bind") (bind s reply ws)
-  (if (eq op "unbind") (unbind s reply ws)
-  (tcp_request s reply from op ws rest))))))))))
+  (if (and (eq op "info") (is_empty ws)) (Served s (info_text s))
+      (and (eq op "dns") (is_empty ws)) (Served s (dns_text s))
+      (and (eq op "stats") (is_empty ws)) (Served s (stats_text s))
+      (and (eq op "arp") (is_empty ws)) (Served s (arp_text s))
+      (eq op "send") (sent s reply ws rest)
+      (eq op "ping") (pinged s reply ws)
+      (eq op "bind") (bind s reply ws)
+      (eq op "unbind") (unbind s reply ws)
+      (tcp_request s reply from op ws rest)))
 
 ; dns's answer: dns ADDR, the name server, 0.0.0.0 if there is none.
 (def dns_text ((s Stack)) (list int)
@@ -632,7 +624,7 @@
 (def port_word ((w (list int))) (Option int)
   (match (word_number w)
     ((None) ((None int)))
-    ((Some p) (if (if (ge p 1) (le p 65535) false) (Some p) ((None int))))))
+    ((Some p) (if (and (ge p 1) (le p 65535)) (Some p) ((None int))))))
 
 ; send SPORT DST DPORT, then content: a datagram sent; ok if reply names
 ; a port to say so to.
@@ -656,16 +648,14 @@
 ; ping DST SEQ: an echo request sent, with reply's id, whose reply is
 ; told to reply.
 (def pinged ((s Stack) (reply int) (ws (list (list int)))) (Served Stack)
-  (if (le reply 0)
-      (served_error s "ping needs a port for its replies")
-      (if (not (eq (length ws) 2))
-          (served_error s "ping DST SEQ")
-          (match (ip_parse (nth ws 0))
-            ((None) (served_error s (append "not an address: " (nth ws 0))))
-            ((Some dst)
-              (match (word_number (nth ws 1))
-                ((None) (served_error s "SEQ is a number"))
-                ((Some seq) (Served (echoed s reply dst seq) ""))))))))
+  (if (le reply 0) (served_error s "ping needs a port for its replies")
+      (not (eq (length ws) 2)) (served_error s "ping DST SEQ")
+      (match (ip_parse (nth ws 0))
+        ((None) (served_error s (append "not an address: " (nth ws 0))))
+        ((Some dst)
+          (match (word_number (nth ws 1))
+            ((None) (served_error s "SEQ is a number"))
+            ((Some seq) (Served (echoed s reply dst seq) "")))))))
 
 ; Echo request seq to dst, its id reply's low 16 bits, whose replies go
 ; to reply.
@@ -681,18 +671,15 @@
 ; bind PORT: PORT's datagrams told to reply from now on, or a port inet
 ; picks, for 0.
 (def bind ((s Stack) (reply int) (ws (list (list int)))) (Served Stack)
-  (if (le reply 0)
-      (served_error s "bind needs a port to tell")
-      (if (not (eq (length ws) 1))
-          (served_error s "bind PORT")
-          (if (eq (head ws) "0")
-              (bind_port s reply (free_port s (ephemeral_free s) 16384))
-              (match (port_word (head ws))
-                ((None) (served_error s "a port is 0 to 65535"))
-                ((Some p) (bind_port s reply p)))))))
+  (if (le reply 0) (served_error s "bind needs a port to tell")
+      (not (eq (length ws) 1)) (served_error s "bind PORT")
+      (eq (head ws) "0") (bind_port s reply (free_port s (ephemeral_free s) 16384))
+      (match (port_word (head ws))
+        ((None) (served_error s "a port is 0 to 65535"))
+        ((Some p) (bind_port s reply p)))))
 
 ; The next port inet picks from.
-(def ephemeral_free ((s Stack)) int (match s ((Stack l c n k id t o) (match k ((Socks udp pings eph tcps) eph)))))
+(def ephemeral_free ((s Stack)) int (match (.k s) ((Socks udp pings eph tcps) eph)))
 
 ; The first port from p no client is bound to, trying n of them, round
 ; from 65535 to ephemeral_first; 0 if all n are.

@@ -48,7 +48,6 @@ move independently, so several can be active at once.
 | [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
-
 ## Ready
 
 - [0042](0042-api-through-host-proxy.md) A model's API reached through
@@ -132,6 +131,7 @@ graph LR
 | [0035](0035-apps-ask-not-wait.md) Disks and Files ask every server as a reply, not a wait | Toolkit | 2026-10-30 |
 | [0038](0038-hvs-4k-wide-layers.md) `hvs` at 4K: wide windows, a pointer that keeps moving, and no stalls | Display | 2026-10-29 |
 | [0041](0041-http-client-json-sse.md) An HTTP/1.1 client library, with JSON and server-sent events | Agent | 2026-10-29 |
+| [0054](0054-l0-adoption.md) L0S written in the L0 of roadmap 0132 to 0144 | Tooling | 2026-10-30 |
 
 ## Template
 

@@ -9,7 +9,7 @@
 
 ; An arena: where it is in font, its pages, each page's use (1 used, 0
 ; free), and where each process it was shared with sees it, by pid.
-(data Arena (Arena int int (array int) (Map int int)))
+(data Arena (Arena (va int) (pages int) (used (array int)) (seen (Map int int))))
 
 ; A strike kept: its arena, its first page there, its pages, its bytes,
 ; the pids holding it, and whether it is one of the stored ones, kept
@@ -18,7 +18,7 @@
 
 ; The store: the arenas by number, the number the next will have, and
 ; the strikes by key, FACE H.
-(data Store (Store (Map int Arena) int (Map (list int) Kept)))
+(data Store (Store (as (Map int Arena)) (next int) (ks (Map (list int) Kept))))
 
 ; A place for a strike: its arena and its first page there.
 (data Spot (Spot int int))
@@ -47,14 +47,14 @@
 
 ; Where arena a is in font, and its pages; 0 if there is no such arena.
 (def store_arena_va ((s Store) (a int)) int
-  (match (store_arena s a) ((Some r) (match r ((Arena va n used seen) va))) ((None) 0)))
+  (match (store_arena s a) ((Some r) (.va r)) ((None) 0)))
 (def store_arena_n ((s Store) (a int)) int
-  (match (store_arena s a) ((Some r) (match r ((Arena va n used seen) n))) ((None) 0)))
+  (match (store_arena s a) ((Some r) (.pages r)) ((None) 0)))
 
 ; Where pid sees arena a, if it was shared with pid.
 (def store_seen ((s Store) (a int) (pid int)) (Option int)
   (match (store_arena s a)
-    ((Some r) (match r ((Arena va n used seen) (map_get seen pid))))
+    ((Some r) (map_get (.seen r) pid))
     ((None) ((None int)))))
 
 ; s with arena a shared with pid, which sees it at there.
@@ -63,7 +63,7 @@
     ((Store as next ks)
       (match (map_get as a)
         ((None) (Store as next ks))
-        ((Some r) (match r ((Arena va n used seen) (Store (map_put as a (Arena va n used (map_put seen pid there))) next ks))))))))
+        ((Some r) (Store (map_put as a (.seen r (map_put (.seen r) pid there))) next ks))))))
 
 ; Whether any arena was shared with pid: whether font has given it
 ; anything, and so watches it.
@@ -72,9 +72,9 @@
 
 ; store_knows' loop over the arenas rs.
 (def arenas_know ((rs (list Arena)) (pid int)) bool
-  (if (is_empty rs)
-      false
-      (match (head rs) ((Arena va n used seen) (if (map_has seen pid) true (arenas_know (tail rs) pid))))))
+  (if (is_empty rs) false
+      (map_has (.seen (head rs)) pid) true
+      (arenas_know (tail rs) pid)))
 
 ; ---------------------------------------------------------------- placing
 
@@ -90,21 +90,16 @@
       (match (map_get as (head ids))
         ((None) (fit_in as (tail ids) pages))
         ((Some r)
-          (match r
-            ((Arena va n used seen)
-              (let at (run_free used 0 0 pages)
-                (if (ge at 0) (Some (Spot (head ids) at)) (fit_in as (tail ids) pages)))))))))
+          (let at (run_free (.used r) 0 0 pages)
+            (if (ge at 0) (Some (Spot (head ids) at)) (fit_in as (tail ids) pages)))))))
 
 ; The first of a run of need free pages in used, from page i, run free
 ; ones counted so far; -1 if there is none.
 (def run_free ((used (array int)) (i int) (run int) (need int)) int
-  (if (ge run need)
-      (sub i need)
-      (if (ge i (array_len used))
-          -1
-          (if (eq (array_get used i) 0)
-              (run_free used (add i 1) (add run 1) need)
-              (run_free used (add i 1) 0 need)))))
+  (if (ge run need) (sub i need)
+      (ge i (array_len used)) -1
+      (eq (array_get used i) 0) (run_free used (add i 1) (add run 1) need)
+      (run_free used (add i 1) 0 need)))
 
 ; used with n pages from i set to v.
 (def pages_set ((used (array int)) (i int) (n int) (v int)) (array int)
@@ -117,9 +112,7 @@
       (match (map_get as a)
         ((None) (Store as next ks))
         ((Some r)
-          (match r
-            ((Arena va an used seen)
-              (Store (map_put (map_remove as a) a (Arena va an (pages_set used first n v) seen)) next ks))))))))
+          (Store (map_put (map_remove as a) a (.used r (pages_set (.used r) first n v))) next ks))))))
 
 ; s with the strike key kept at place p, in pages of its own there, len
 ; bytes, held by none yet; stored if it is one of the stored ones.
@@ -163,11 +156,9 @@
       (match (map_get as (head ids))
         ((None) (arenas_without as (tail ids) pid))
         ((Some r)
-          (match r
-            ((Arena va n used seen)
-              (if (map_has seen pid)
-                  (arenas_without (map_put as (head ids) (Arena va n used (map_remove seen pid))) (tail ids) pid)
-                  (arenas_without as (tail ids) pid))))))))
+          (if (map_has (.seen r) pid)
+              (arenas_without (map_put as (head ids) (.seen r (map_remove (.seen r) pid))) (tail ids) pid)
+              (arenas_without as (tail ids) pid))))))
 
 ; ks with pid out of each strike's holders, those of keys.
 (def kepts_without ((ks (Map (list int) Kept)) (keys (list (list int))) (pid int)) (Map (list int) Kept)
@@ -184,7 +175,9 @@
 
 ; xs without x.
 (def without_int ((xs (list int)) (x int)) (list int)
-  (if (is_empty xs) xs (if (eq (head xs) x) (without_int (tail xs) x) (cons (head xs) (without_int (tail xs) x)))))
+  (if (is_empty xs) xs
+      (eq (head xs) x) (without_int (tail xs) x)
+      (cons (head xs) (without_int (tail xs) x))))
 
 ; s with every strike no one holds let go, but the stored ones, its
 ; pages free in its arena; then every arena left with no strike, but
@@ -203,13 +196,13 @@
         ((Some k)
           (match k
             ((Kept a first pages len hs st)
-              (if (if st true (not (is_empty hs)))
+              (if (or st (not (is_empty hs)))
                   (strikes_swept s (tail keys))
                   (strikes_swept (store_drop (arena_mark s a first pages 0) (head keys)) (tail keys)))))))))
 
 ; s without strike key, its pages as they are.
 (def store_drop ((s Store) (key (list int))) Store
-  (match s ((Store as next ks) (Store as next (map_remove ks key)))))
+  (.ks s (map_remove (.ks s) key)))
 
 ; s without each arena of ids, but 0, whose pages are all free, onto
 ; gone, the arenas let go.
@@ -219,15 +212,13 @@
       (match (store_arena s (head ids))
         ((None) (arenas_swept s (tail ids) gone))
         ((Some r)
-          (match r
-            ((Arena va n used seen)
-              (if (if (eq (head ids) 0) true (gt (pages_used used 0 0) 0))
-                  (arenas_swept s (tail ids) gone)
-                  (arenas_swept (arena_drop s (head ids)) (tail ids) (cons r gone)))))))))
+          (if (or (eq (head ids) 0) (gt (pages_used (.used r) 0 0) 0))
+              (arenas_swept s (tail ids) gone)
+              (arenas_swept (arena_drop s (head ids)) (tail ids) (cons r gone)))))))
 
 ; s without arena a.
 (def arena_drop ((s Store) (a int)) Store
-  (match s ((Store as next ks) (Store (map_remove as a) next ks))))
+  (.as s (map_remove (.as s) a)))
 
 ; ---------------------------------------------------------------- counts
 

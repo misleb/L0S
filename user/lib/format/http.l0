@@ -31,7 +31,7 @@
 
 ; A reader: where it is, whether the response's connection may be kept,
 ; and whether the request was HEAD, whose answer has no body.
-(data HttpRead (HttpRead HttpMode bool bool))
+(data HttpRead (HttpRead (m HttpMode) (keep bool) (h bool)))
 
 ; A reader after a piece, and the parts the piece gave, in order.
 (data HttpMore (HttpMore HttpRead (list HttpPart)))
@@ -47,13 +47,13 @@
 ; PUT, PATCH), then the body. Its head is made bytes once, and joined to
 ; the body.
 (def http_request ((method (list int)) (host (list int)) (path (list int)) (headers (list HttpHeader)) (body bytes)) bytes
-  (let len (bytes_len body)
-    (let a (push "\r\n" (push host (push "Host: " (push " HTTP/1.1\r\n" (push path (push " " (push method (nil int))))))))
-      (let c (http_push_headers headers a)
-        (let d (if (if (gt len 0) true (any_eq method (split_spaces "POST PUT PATCH")))
-                   (push "\r\n" (push (digits len) (push "Content-Length: " c)))
-                   c)
-          (bytes_concat (cons (bytes_from_list (rev (push "\r\n" d))) (cons body (nil bytes)))))))))
+  (let (len (bytes_len body)
+        a (push "\r\n" (push host (push "Host: " (push " HTTP/1.1\r\n" (push path (push " " (push method (nil int))))))))
+        c (http_push_headers headers a)
+        d (if (or (gt len 0) (any_eq method (split_spaces "POST PUT PATCH")))
+              (push "\r\n" (push (digits len) (push "Content-Length: " c)))
+              c))
+    (bytes_concat (cons (bytes_from_list (rev (push "\r\n" d))) (cons body (nil bytes))))))
 
 ; Each of hs, NAME: VALUE and a line end, onto acc, reversed.
 (def http_push_headers ((hs (list HttpHeader)) (acc (list int))) (list int)
@@ -77,12 +77,12 @@
 (def http_lower_onto ((s (list int)) (acc (list int))) (list int)
   (if (is_empty s)
       (rev acc)
-      (let c (head s) (http_lower_onto (tail s) (cons (if (if (ge c 65) (le c 90) false) (add c 32) c) acc)))))
+      (let c (head s) (http_lower_onto (tail s) (cons (if (and (ge c 65) (le c 90)) (add c 32) c) acc)))))
 
 ; s without the spaces and tabs at either end.
 (def http_trim ((s (list int))) (list int) (rev (http_trim_front (rev (http_trim_front s)))))
 (def http_trim_front ((s (list int))) (list int)
-  (if (is_empty s) s (if (if (eq (head s) 32) true (eq (head s) 9)) (http_trim_front (tail s)) s)))
+  (if (is_empty s) s (or (eq (head s) 32) (eq (head s) 9)) (http_trim_front (tail s)) s))
 
 ; The comma-separated tokens of a header's value, trimmed, small.
 (def http_tokens ((v (list int))) (list (list int)) (http_tokens_of (split_on 44 v) (nil (list int))))
@@ -98,7 +98,7 @@
 ; r, made ready for the response to a request of method: as it is, but
 ; knowing whether that was HEAD.
 (def http_expect ((r HttpRead) (method (list int))) HttpRead
-  (match r ((HttpRead m keep h) (HttpRead m keep (eq method "HEAD")))))
+  (.h r (eq method "HEAD")))
 
 ; Whether r is between responses, having read nothing of the next.
 (def http_idle ((r HttpRead) ) bool
@@ -134,10 +134,6 @@
 (def http_bad_more ((r HttpRead) (why (list int))) HttpMore
   (match r ((HttpRead m keep h) (HttpMore (HttpRead (HmBad) false h) (cons (HttpBad why) (nil HttpPart))))))
 
-; r in mode m.
-(def http_mode ((r HttpRead) (m HttpMode)) HttpRead
-  (match r ((HttpRead old keep h) (HttpRead m keep h))))
-
 ; r ready for the next response's head.
 (def http_reset ((r HttpRead)) HttpRead
   (match r ((HttpRead m keep h) (HttpRead (HmHead (bytes_from_list (nil int))) true false))))
@@ -171,26 +167,26 @@
 ; More of a head, after the bytes hb of it so far: its end, a blank
 ; line, looked for from just before where hb ended.
 (def http_go_head ((r HttpRead) (hb bytes) (b bytes) (i int) (j int) (acc (list HttpPart))) HttpMore
-  (let all (if (eq (bytes_len hb) 0) (bytes_slice b i j) (bytes_concat (cons hb (cons (bytes_slice b i j) (nil bytes)))))
-    (let e (http_head_end all (max 0 (sub (bytes_len hb) 3)))
-      (if (lt e 0)
-          (if (gt (bytes_len all) (http_head_max))
-              (http_failed r "a head of more than 16384 bytes" acc)
-              (HttpMore (http_mode r (HmHead all)) (rev acc)))
-          (if (gt e (http_head_max))
-              (http_failed r "a head of more than 16384 bytes" acc)
-              (http_headed r (bytes_range all 0 e) b (add i (sub e (bytes_len hb))) j acc))))))
+  (let (all (if (eq (bytes_len hb) 0) (bytes_slice b i j) (bytes_concat (cons hb (cons (bytes_slice b i j) (nil bytes)))))
+        e (http_head_end all (max 0 (sub (bytes_len hb) 3))))
+    (if (lt e 0)
+        (if (gt (bytes_len all) (http_head_max))
+            (http_failed r "a head of more than 16384 bytes" acc)
+            (HttpMore (.m r (HmHead all)) (rev acc)))
+        (gt e (http_head_max))
+        (http_failed r "a head of more than 16384 bytes" acc)
+        (http_headed r (bytes_range all 0 e) b (add i (sub e (bytes_len hb))) j acc))))
 
 ; The index just past the blank line that ends a head in b, looking from
 ; k: CRLF CRLF, or LF LF, or LF CRLF; -1 if there is none yet.
 (def http_head_end ((b bytes) (k int)) int
   (if (ge k (bytes_len b))
       -1
-      (if (eq (bytes_get b k) 10)
-          (if (if (lt (add k 1) (bytes_len b)) (eq (bytes_get b (add k 1)) 10) false)
-              (add k 2)
-              (if (bytes_is_at b (add k 1) "\r\n") (add k 3) (http_head_end b (add k 1))))
-          (http_head_end b (add k 1)))))
+      (eq (bytes_get b k) 10)
+      (if (and (lt (add k 1) (bytes_len b)) (eq (bytes_get b (add k 1)) 10)) (add k 2)
+          (bytes_is_at b (add k 1) "\r\n") (add k 3)
+          (http_head_end b (add k 1)))
+      (http_head_end b (add k 1))))
 
 ; The head text read: a 1xx is passed over and the next head read; any
 ; other is given, and its body read from i as its headers say.
@@ -226,28 +222,26 @@
 
 ; HTTP/1.x CODE REASON, if l is one.
 (def http_status_of ((l (list int))) (Option HttpStatus)
-  (if (if (starts_with l "HTTP/1.") (ge (length l) 12) false)
-      (let v (sub (nth l 7) 48)
-        (let code (drop_n l 9)
-          (if (if (eq (nth l 8) 32) (is_number (take code 3)) false)
-              (Some (HttpStatus v (int_prefix (take code 3) 0) (http_trim (drop_n code 3))))
-              ((None HttpStatus)))))
+  (if (and (starts_with l "HTTP/1.") (ge (length l) 12))
+      (let (v (sub (nth l 7) 48) code (drop_n l 9))
+        (if (and (eq (nth l 8) 32) (is_number (take code 3)))
+            (Some (HttpStatus v (int_prefix (take code 3) 0) (http_trim (drop_n code 3))))
+            ((None HttpStatus))))
       ((None HttpStatus))))
 
 ; The headers of lines ls, onto acc, reversed; none if a line has no colon.
 (def http_headers_of ((ls (list (list int))) (acc (list HttpHeader))) (Option (list HttpHeader))
   (if (is_empty ls)
       (Some (rev acc))
-      (let l (head ls)
-        (let c (http_find 58 l)
-          (if (le c 0)
-              ((None (list HttpHeader)))
-              (http_headers_of (tail ls) (cons (HttpHeader (take l c) (http_trim (drop_n l (add c 1)))) acc)))))))
+      (let (l (head ls) c (http_find 58 l))
+        (if (le c 0)
+            ((None (list HttpHeader)))
+            (http_headers_of (tail ls) (cons (HttpHeader (take l c) (http_trim (drop_n l (add c 1)))) acc))))))
 
 ; The index of the first c in s, or -1.
 (def http_find ((c int) (s (list int))) int (http_find_from c s 0))
 (def http_find_from ((c int) (s (list int)) (i int)) int
-  (if (is_empty s) -1 (if (eq (head s) c) i (http_find_from c (tail s) (add i 1)))))
+  (if (is_empty s) -1 (eq (head s) c) i (http_find_from c (tail s) (add i 1))))
 
 ; ----------------------------------------------------------------- the body
 
@@ -259,22 +253,21 @@
 (def http_body ((r HttpRead) (v int) (code int) (hs (list HttpHeader)) (b bytes) (i int) (j int) (acc (list HttpPart))) HttpMore
   (match r
     ((HttpRead m keep0 isHead)
-      (let keep (http_keeps v hs)
-        (let r2 (HttpRead m keep isHead)
-          (if (if isHead true (any_eq code (cons 204 (cons 304 (nil int)))))
-              (http_ended r2 b i j acc)
-              (match (http_header hs "Transfer-Encoding")
-                ((Some te)
-                  (if (eq (http_last (http_tokens te) "") "chunked")
-                      (http_go (http_mode r2 (HmLine 0 (nil int) 0)) b i j acc)
-                      (http_go (HttpRead (HmClose) false isHead) b i j acc)))
-                ((None)
-                  (match (http_header hs "Content-Length")
-                    ((None) (http_go (HttpRead (HmClose) false isHead) b i j acc))
-                    ((Some cl)
-                      (if (if (is_number cl) (le (length cl) 15) false)
-                          (http_length r2 (int_prefix cl 0) b i j acc)
-                          (http_failed r2 "a Content-Length that is not a number" acc))))))))))))
+      (let (keep (http_keeps v hs) r2 (HttpRead m keep isHead))
+        (if (or isHead (any_eq code (cons 204 (cons 304 (nil int)))))
+            (http_ended r2 b i j acc)
+            (match (http_header hs "Transfer-Encoding")
+              ((Some te)
+                (if (eq (http_last (http_tokens te) "") "chunked")
+                    (http_go (.m r2 (HmLine 0 (nil int) 0)) b i j acc)
+                    (http_go (HttpRead (HmClose) false isHead) b i j acc)))
+              ((None)
+                (match (http_header hs "Content-Length")
+                  ((None) (http_go (HttpRead (HmClose) false isHead) b i j acc))
+                  ((Some cl)
+                    (if (and (is_number cl) (le (length cl) 15))
+                        (http_length r2 (int_prefix cl 0) b i j acc)
+                        (http_failed r2 "a Content-Length that is not a number" acc)))))))))))
 
 ; The last of xs, or d for none.
 (def (http_last T) ((xs (list T)) (d T)) T (if (is_empty xs) d (http_last (tail xs) (head xs))))
@@ -283,49 +276,49 @@
 ; connection be used again.
 (def http_keeps ((v int) (hs (list HttpHeader))) bool
   (let ts (match (http_header hs "Connection") ((None) (nil (list int))) ((Some c) (http_tokens c)))
-    (if (any_eq "close" ts) false (if (ge v 1) true (any_eq "keep-alive" ts)))))
+    (and (not (any_eq "close" ts)) (or (ge v 1) (any_eq "keep-alive" ts)))))
 
 ; A body of n bytes, from i: ended at once if n is 0.
 (def http_length ((r HttpRead) (n int) (b bytes) (i int) (j int) (acc (list HttpPart))) HttpMore
-  (if (eq n 0) (http_ended r b i j acc) (http_go (http_mode r (HmLength n)) b i j acc)))
+  (if (eq n 0) (http_ended r b i j acc) (http_go (.m r (HmLength n)) b i j acc)))
 
 ; n bytes of a body left, from i.
 (def http_go_length ((r HttpRead) (n int) (b bytes) (i int) (j int) (acc (list HttpPart))) HttpMore
   (if (ge i j)
       (HttpMore r (rev acc))
-      (let k (min j (add i n))
-        (let acc2 (cons (HttpBody (bytes_slice b i k)) acc)
-          (if (eq k (add i n))
-              (http_ended r b k j acc2)
-              (HttpMore (http_mode r (HmLength (sub n (sub k i)))) (rev acc2)))))))
+      (let (k (min j (add i n))
+            acc2 (cons (HttpBody (bytes_slice b i k)) acc))
+        (if (eq k (add i n))
+            (http_ended r b k j acc2)
+            (HttpMore (.m r (HmLength (sub n (sub k i)))) (rev acc2))))))
 
 ; n bytes of a chunk left, from i: then the line that ends it.
 (def http_go_chunk ((r HttpRead) (n int) (b bytes) (i int) (j int) (acc (list HttpPart))) HttpMore
   (if (ge i j)
       (HttpMore r (rev acc))
-      (let k (min j (add i n))
-        (let acc2 (cons (HttpBody (bytes_slice b i k)) acc)
-          (if (eq k (add i n))
-              (http_go (http_mode r (HmLine 1 (nil int) 0)) b k j acc2)
-              (HttpMore (http_mode r (HmChunk (sub n (sub k i)))) (rev acc2)))))))
+      (let (k (min j (add i n))
+            acc2 (cons (HttpBody (bytes_slice b i k)) acc))
+        (if (eq k (add i n))
+            (http_go (.m r (HmLine 1 (nil int) 0)) b k j acc2)
+            (HttpMore (.m r (HmChunk (sub n (sub k i)))) (rev acc2))))))
 
 ; A line of a chunked body, kind k (0 a size, 1 a chunk's end, 2 a
 ; trailer), its bytes so far reversed in line, the trailers' bytes t so
 ; far: more of it from i, up to its LF.
 (def http_go_line ((r HttpRead) (k int) (line (list int)) (t int) (b bytes) (i int) (j int) (acc (list HttpPart))) HttpMore
-  (let nl (http_index_of b i j 10)
-    (let e (if (lt nl 0) j nl)
-      (let line2 (rev_onto (bytes_range b i e) line)
-        (let t2 (add t (sub e i))
-          (if (gt t2 (http_head_max))
-              (http_failed r "a chunked body's lines of more than 16384 bytes" acc)
-              (if (lt nl 0)
-                  (HttpMore (http_mode r (HmLine k line2 t2)) (rev acc))
-                  (http_line_done r k (strip_cr (rev line2)) t2 b (add nl 1) j acc))))))))
+  (let (nl (http_index_of b i j 10)
+        e (if (lt nl 0) j nl)
+        line2 (rev_onto (bytes_range b i e) line)
+        t2 (add t (sub e i)))
+    (if (gt t2 (http_head_max))
+        (http_failed r "a chunked body's lines of more than 16384 bytes" acc)
+        (lt nl 0)
+        (HttpMore (.m r (HmLine k line2 t2)) (rev acc))
+        (http_line_done r k (strip_cr (rev line2)) t2 b (add nl 1) j acc))))
 
 ; The first c in b from i up to j, or -1.
 (def http_index_of ((b bytes) (i int) (j int) (c int)) int
-  (if (ge i j) -1 (if (eq (bytes_get b i) c) i (http_index_of b (add i 1) j c))))
+  (if (ge i j) -1 (eq (bytes_get b i) c) i (http_index_of b (add i 1) j c)))
 
 ; A whole line of a chunked body, of kind k: a size starts a chunk, or
 ; the trailers if it is 0; a chunk's end must be empty; an empty trailer
@@ -333,24 +326,24 @@
 (def http_line_done ((r HttpRead) (k int) (l (list int)) (t int) (b bytes) (i int) (j int) (acc (list HttpPart))) HttpMore
   (if (eq k 1)
       (if (is_empty l)
-          (http_go (http_mode r (HmLine 0 (nil int) t)) b i j acc)
+          (http_go (.m r (HmLine 0 (nil int) t)) b i j acc)
           (http_failed r "a chunk longer than its size" acc))
-      (if (eq k 2)
-          (if (is_empty l)
-              (http_ended r b i j acc)
-              (http_go (http_mode r (HmLine 2 (nil int) t)) b i j acc))
-          (let n (http_chunk_size l)
-            (if (lt n 0)
-                (http_failed r "a chunk's size that is not hex" acc)
-                (if (eq n 0)
-                    (http_go (http_mode r (HmLine 2 (nil int) t)) b i j acc)
-                    (http_go (http_mode r (HmChunk n)) b i j acc)))))))
+      (eq k 2)
+      (if (is_empty l)
+          (http_ended r b i j acc)
+          (http_go (.m r (HmLine 2 (nil int) t)) b i j acc))
+      (let n (http_chunk_size l)
+        (if (lt n 0)
+            (http_failed r "a chunk's size that is not hex" acc)
+            (eq n 0)
+            (http_go (.m r (HmLine 2 (nil int) t)) b i j acc)
+            (http_go (.m r (HmChunk n)) b i j acc)))))
 
 ; The size a chunk's line gives, in hex before any ; and its extension,
 ; or -1 if it gives none (or more than 15 digits).
 (def http_chunk_size ((l (list int))) int
   (let ds (http_trim (http_before 59 l))
-    (if (if (is_empty ds) true (gt (length ds) 15)) -1 (http_hex ds 0))))
+    (if (or (is_empty ds) (gt (length ds) 15)) -1 (http_hex ds 0))))
 
 ; s up to the first c.
 (def http_before ((c int) (s (list int))) (list int)

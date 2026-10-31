@@ -2,6 +2,11 @@
 ; kernel may map there, and which frames processes share. Pure: it
 ; decides, and process.l0 maps.
 
+; An address space, as the space_new builtin numbers it (spec 6.13): the
+; kernel keeps each typed, and gives the builtins its id. A word at run
+; time, as a data type of one int field is (spec 10.1).
+(data Space (Space (id int)))
+
 ; The parts of a process's address range, from the bottom: its image, its
 ; heap, its stack, its device pages in the high user range, and outside,
 ; below user_base, from stack_top, or past the high range.
@@ -9,14 +14,11 @@
 
 ; Where a process's image lies, its ELF's segments (spec section 10.3):
 ; their spans, each the pages from a page up to another, mapped with a
-; perm, and the first page of its heap. A segment's pages that hold its
-; file's bytes are mapped as it loads; the rest, its bss, as each is
-; first touched, as the heap's are.
+; perm, and the first page of its heap, just past its image. A segment's
+; pages that hold its file's bytes are mapped as it loads; the rest, its
+; bss, as each is first touched, as the heap's are.
 (data Span (Span int int int))
-(data Layout (Layout (list Span) int))
-
-; The first page of l's heap, just past its image.
-(def layout_heap ((l Layout)) int (match l ((Layout spans heap) heap)))
+(data Layout (Layout (spans (list Span)) (heap int)))
 
 ; The perm of the span of l holding va, or -1 if none does.
 (def span_perm ((l Layout) (va int)) int
@@ -28,35 +30,32 @@
       -1
       (match (head spans)
         ((Span from to perm)
-          (if (if (ge va from) (lt va to) false) perm (perm_in (tail spans) va))))))
+          (if (and (ge va from) (lt va to)) perm (perm_in (tail spans) va))))))
 
 ; Which part of a process laid out as l address va is in: its device
 ; pages are the high user range; the 384 MB above its stack in the low
 ; one are outside, mapped by nothing.
 (def area_of ((l Layout) (va int)) Area
-  (if (in_device_area va)
-      (AreaDevice)
-      (if (lt va (user_base))
-          (AreaOutside)
-          (if (lt va (layout_heap l))
-              (AreaImage)
-              (if (lt va (heap_limit))
-                  (AreaHeap)
-                  (if (lt va (stack_top)) (AreaStack) (AreaOutside)))))))
+  (if (in_device_area va) (AreaDevice)
+      (lt va (user_base)) (AreaOutside)
+      (lt va (.heap l)) (AreaImage)
+      (lt va (heap_limit)) (AreaHeap)
+      (lt va (stack_top)) (AreaStack)
+      (AreaOutside)))
 
 ; Whether va is in the high user range, where only devices, DMA and
 ; shared pages are: spec 10.3's 128 GB from dev_base, where a 4K
 ; compositor's windows fit, as they did not in the 384 MB above the
 ; stack (roadmap 0038).
 (def in_device_area ((va int)) bool
-  (if (ge va (dev_base)) (lt va (dev_limit)) false))
+  (and (ge va (dev_base)) (lt va (dev_limit))))
 
 ; A process's pages: the frame each page of it maps, and how many of
 ; them are at its device pages, counted as pages are put and removed, so
 ; that its shared pages are counted without walking them all; at 4K a
 ; process maps tens of thousands, and walking them for proc_info and
 ; mem_info held every CPU's calls for 100 ms (roadmap 0038).
-(data Pages (Pages (Map int int) int))
+(data Pages (Pages (map (Map int int)) (device int)))
 
 ; No pages.
 (def pages_new () Pages (Pages ((MapEmpty int int)) 0))
@@ -68,13 +67,9 @@
 (def device_keys ((vas (list int)) (n int)) int
   (if (is_empty vas) n (device_keys (tail vas) (if (in_device_area (head vas)) (add n 1) n))))
 
-; The page -> frame map of ps, and how many of them are at device pages.
-(def pages_map ((ps Pages)) (Map int int) (match ps ((Pages m n) m)))
-(def pages_device ((ps Pages)) int (match ps ((Pages m n) n)))
-
 ; The frame ps has at page va, if any, and whether it has one.
-(def pages_get ((ps Pages) (va int)) (Option int) (map_get (pages_map ps) va))
-(def pages_has ((ps Pages) (va int)) bool (map_has (pages_map ps) va))
+(def pages_get ((ps Pages) (va int)) (Option int) (map_get (.map ps) va))
+(def pages_has ((ps Pages) (va int)) bool (map_has (.map ps) va))
 
 ; ps with frame f at page va, in place of any it had there. The count is
 ; taken before the put, so the put is the map's last use and changes it in
@@ -82,7 +77,7 @@
 (def pages_put ((ps Pages) (va int) (f int)) Pages
   (match ps
     ((Pages m n)
-      (let n2 (if (map_has m va) n (if (in_device_area va) (add n 1) n))
+      (let n2 (if (map_has m va) n (in_device_area va) (add n 1) n)
         (Pages (map_put m va f) n2)))))
 
 ; ps without page va, the count taken first as pages_put's is.
@@ -104,11 +99,11 @@
 ; len bytes from base, whatever base and len a process passes: none for a
 ; len below 1, or a range that wraps or lies outside the heap.
 (def heap_run ((l Layout) (base int) (len int)) HeapRun
-  (if (if (lt len 1) true (lt base 0))
+  (if (or (lt len 1) (lt base 0))
       (HeapRun 0 0)
-      (let from (max (layout_heap l) (page_of (add base (sub (page_size) 1))))
-        (let to (min (heap_limit) (page_of (add base len)))
-          (if (lt from to) (HeapRun from to) (HeapRun 0 0))))))
+      (let (from (max (.heap l) (page_of (add base (sub (page_size) 1))))
+            to (min (heap_limit) (page_of (add base len))))
+        (if (lt from to) (HeapRun from to) (HeapRun 0 0)))))
 
 ; How few frames the host may have left before the kernel acts on every
 ; release: 32768 pages, 128 MB, a tenth of what QEMU's board starts with.
@@ -132,7 +127,7 @@
 ; filled it since; so a large block freed comes back at once, and a
 ; process gives back its small ones once memory runs low.
 (def release_unmaps ((free int) (n int)) bool
-  (if (lt free 0) true (if (ge n (release_run_min)) true (le free (release_floor)))))
+  (or (lt free 0) (or (ge n (release_run_min)) (le free (release_floor)))))
 
 ; The permissions of a zeroed page the kernel maps at va of a process
 ; laid out as l when it is first touched, or -1 if nothing is mapped there
@@ -151,7 +146,7 @@
 ; page above the image a process has is writable.
 (def may_write ((l Layout) (va int)) bool
   (match (area_of l va)
-    ((AreaImage) (let p (span_perm l va) (if (lt p 0) false (eq (bit_and p 1) 1))))
+    ((AreaImage) (let p (span_perm l va) (and (not (lt p 0)) (eq (bit_and p 1) 1))))
     ((AreaHeap) true)
     ((AreaStack) true)
     ((AreaDevice) true)
@@ -180,35 +175,27 @@
 ; The Plan for copying the n bytes from va: nothing to map for none, a
 ; refusal for a negative n or bytes outside the user range.
 (def range_plan ((l Layout) (pages (Map int int)) (va int) (n int) (write bool)) Plan
-  (if (lt n 0)
-      (PlanBad)
-      (if (eq n 0)
-          (PlanMap (nil int))
-          (if (not (within_a_range va n))
-              (PlanBad)
-              (plan_pages l pages (range_pages va n) write (nil int))))))
+  (if (lt n 0) (PlanBad)
+      (eq n 0) (PlanMap (nil int))
+      (not (within_a_range va n)) (PlanBad)
+      (plan_pages l pages (range_pages va n) write (nil int))))
 
 ; Whether the n bytes from va lie wholly in the low user range or wholly
 ; in the high one: a copy across the gap between them, or past either,
 ; is refused, as spec 10.3's space_read and space_write keep to one.
 (def within_a_range ((va int) (n int)) bool
-  (if (if (ge va (user_base)) (le n (sub (user_limit) va)) false)
-      true
-      (if (ge va (dev_base)) (le n (sub (dev_limit) va)) false)))
+  (or (and (ge va (user_base)) (le n (sub (user_limit) va)))
+      (and (ge va (dev_base)) (le n (sub (dev_limit) va)))))
 
 ; The rest of range_plan, page by page through ps: each unmapped page onto
 ; acc, or a refusal at the first the copy may not write or no page may be
 ; mapped at on demand.
 (def plan_pages ((l Layout) (pages (Map int int)) (ps (list int)) (write bool) (acc (list int))) Plan
-  (if (is_empty ps)
-      (PlanMap (rev acc))
-      (if (if write (not (may_write l (head ps))) false)
-          (PlanBad)
-          (if (map_has pages (head ps))
-              (plan_pages l pages (tail ps) write acc)
-              (if (lt (demand_perm l (head ps)) 0)
-                  (PlanBad)
-                  (plan_pages l pages (tail ps) write (cons (head ps) acc)))))))
+  (if (is_empty ps) (PlanMap (rev acc))
+      (and write (not (may_write l (head ps)))) (PlanBad)
+      (map_has pages (head ps)) (plan_pages l pages (tail ps) write acc)
+      (lt (demand_perm l (head ps)) 0) (PlanBad)
+      (plan_pages l pages (tail ps) write (cons (head ps) acc))))
 
 ; ------------------------------------------------------------ device pages
 
@@ -219,13 +206,10 @@
 ; in any order are given again, so a process that maps and unmaps never
 ; runs out while its memory is freed.
 (data DevRun (DevRun int int))
-(data DevPages (DevPages int (list DevRun)))
+(data DevPages (DevPages (top int) (runs (list DevRun))))
 
 ; A new process's device pages: none given yet.
 (def dev_pages_new () DevPages (DevPages (dev_base) (nil DevRun)))
-
-; The first page of pool never given.
-(def dev_top ((pool DevPages)) int (match pool ((DevPages top runs) top)))
 
 ; How many runs of pages given up pool has below its top.
 (def dev_run_count ((pool DevPages)) int (match pool ((DevPages top runs) (length runs))))
@@ -283,11 +267,9 @@
       (runs_onto acc (cons (DevRun from to) (nil DevRun)))
       (match (head runs)
         ((DevRun a b)
-          (if (gt a to)
-              (give_run (tail runs) from to (cons (head runs) acc))
-              (if (lt b from)
-                  (runs_onto acc (cons (DevRun from to) runs))
-                  (give_run (tail runs) (min a from) (max b to) acc)))))))
+          (if (gt a to) (give_run (tail runs) from to (cons (head runs) acc))
+              (lt b from) (runs_onto acc (cons (DevRun from to) runs))
+              (give_run (tail runs) (min a from) (max b to) acc))))))
 
 ; The pool of top and runs, its highest run dropped and top lowered to
 ; its start if the run ends at top.
@@ -308,7 +290,7 @@
 ; negative base, over 4 GB, or a base past 2^48; the pages spanned taken
 ; from pool if they fit.
 (def region_plan ((pool DevPages) (base int) (len int)) RegionPlan
-  (if (if (lt len 1) true (if (lt base 0) true (if (gt len 4294967296) true (gt base 281474976710656))))
+  (if (or (lt len 1) (or (lt base 0) (or (gt len 4294967296) (gt base 281474976710656))))
       (RegionRefused -3)
       (match (dev_take pool (add (sub (page_of (add base (sub len 1))) (page_of base)) (page_size)))
         ((DevFull) (RegionRefused -5))
@@ -327,22 +309,19 @@
 ; holds no frame of pages; none for anything else, under a byte or over
 ; 4 GB, or outside the device pages.
 (def unregion_plan ((pool DevPages) (pages (Map int int)) (addr int) (len int)) UnregionPlan
-  (if (if (lt len 1) true (gt len 4294967296))
+  (if (or (lt len 1) (gt len 4294967296))
       (UnregionNone)
-      (let from (page_of addr)
-        (let to (add (page_of (add addr (sub len 1))) (page_size))
-          (if (if (in_device_area from) (if (gt to from) (le to (dev_top pool)) false) false)
-              (if (dev_all_device pool pages from to) (UnregionAt from (sub to from)) (UnregionNone))
-              (UnregionNone))))))
+      (let (from (page_of addr) to (add (page_of (add addr (sub len 1))) (page_size)))
+        (if (and (in_device_area from) (and (gt to from) (le to (.top pool))))
+            (if (dev_all_device pool pages from to) (UnregionAt from (sub to from)) (UnregionNone))
+            (UnregionNone)))))
 
 ; Whether each page from va up to to holds device memory: pool has given
 ; it, in no run of pages given up, and it holds no frame of pages.
 (def dev_all_device ((pool DevPages) (pages (Map int int)) (va int) (to int)) bool
-  (if (ge va to)
-      true
-      (if (if (map_has pages va) true (dev_given_up pool va))
-          false
-          (dev_all_device pool pages (add va (page_size)) to))))
+  (if (ge va to) true
+      (or (map_has pages va) (dev_given_up pool va)) false
+      (dev_all_device pool pages (add va (page_size)) to)))
 
 ; Whether page va lies in one of pool's runs of pages given up.
 (def dev_given_up ((pool DevPages) (va int)) bool
@@ -353,7 +332,7 @@
   (if (is_empty runs)
       false
       (match (head runs)
-        ((DevRun from to) (if (if (ge va from) (lt va to) false) true (in_runs (tail runs) va))))))
+        ((DevRun from to) (if (and (ge va from) (lt va to)) true (in_runs (tail runs) va))))))
 
 ; Where the dma_alloc call maps n pages of memory a device can reach,
 ; taken from the device pages pool: at va, through the page before
@@ -364,7 +343,7 @@
 
 ; The DmaPlan for n pages, taken from pool if they fit.
 (def dma_plan ((pool DevPages) (n int)) DmaPlan
-  (if (if (lt n 1) true (gt n (dma_limit)))
+  (if (or (lt n 1) (gt n (dma_limit)))
       (DmaRefused (err_too_big))
       (match (dev_take pool (mul n (page_size)))
         ((DevFull) (DmaRefused (err_fault)))
@@ -386,13 +365,13 @@
 ; A read-only segment of an image that processes running it share: its
 ; address, its bytes in the file, its perm, the frames of its pages in
 ; order, and the spaces of the live processes that map them.
-(data ImageSeg (ImageSeg int int int (list int) (list int)))
+(data ImageSeg (ImageSeg (va int) (len int) (perm int) (frames (list int)) (ss (list Space))))
 
 ; For each frame mapped at device pages or shared as an image's, how many
 ; mappings of it live processes have, a driver's device pages counting
 ; for good; the image segments shared, by the hash of their bytes; and
 ; the file windows; and the pool of zeroed frames.
-(data Mem (Mem (Map int int) (Map int (list ImageSeg)) (list Window) Pool))
+(data Mem (Mem (counts (Map int int)) (imgs (Map int (list ImageSeg))) (windows (list Window)) (pool Pool)))
 
 ; The counts before any process maps a device page: none, and an empty
 ; pool.
@@ -407,7 +386,7 @@
 ; maps a frame in the pool; mem_info counts them as left.
 
 ; Frames in the pool, and how many.
-(data Pool (Pool (list int) int))
+(data Pool (Pool (frames (list int)) (count int)))
 
 ; The most frames the pool holds: 16,384, 64 MB, the most one shm_alloc
 ; takes (dma_limit).
@@ -425,7 +404,7 @@
 (def pool_floor () int (pool_cap))
 
 ; How many frames m's pool holds.
-(def mem_pooled ((m Mem)) int (match m ((Mem counts imgs wins pool) (match pool ((Pool fs n) n)))))
+(def mem_pooled ((m Mem)) int (.count (.pool m)))
 
 ; How many frames to make for the pool now, with free left: a chunk, or
 ; what fills it, while free stays above the floor with the pool full;
@@ -438,7 +417,7 @@
 ; Whether a pool of pooled frames is given back with free left: once
 ; free is below the floor.
 (def pool_released ((pooled int) (free int)) bool
-  (if (gt pooled 0) (lt free (pool_floor)) false))
+  (and (gt pooled 0) (lt free (pool_floor))))
 
 ; A frame taken from the pool: m without it, and the frame, or -1 if the
 ; pool is empty.
@@ -486,15 +465,15 @@
 ; shares, outside its device pages, and frames m counts: the only shared
 ; pages a process has but its device pages, as only those and image
 ; segments' frames are counted.
-(def mem_image_pages ((m Mem) (s int) (pages (Map int int))) int
+(def mem_image_pages ((m Mem) (s Space) (pages (Map int int))) int
   (match m ((Mem counts imgs wins pool) (seg_lists_pages (map_values imgs) s pages m 0))))
 
 ; n and the pages of space s's segments among lists, as mem_image_pages.
-(def seg_lists_pages ((lists (list (list ImageSeg))) (s int) (pages (Map int int)) (m Mem) (n int)) int
+(def seg_lists_pages ((lists (list (list ImageSeg))) (s Space) (pages (Map int int)) (m Mem) (n int)) int
   (if (is_empty lists) n (seg_lists_pages (tail lists) s pages m (segs_pages (head lists) s pages m n))))
 
 ; n and the pages of those of segs space s shares.
-(def segs_pages ((segs (list ImageSeg)) (s int) (pages (Map int int)) (m Mem) (n int)) int
+(def segs_pages ((segs (list ImageSeg)) (s Space) (pages (Map int int)) (m Mem) (n int)) int
   (if (is_empty segs)
       n
       (segs_pages (tail segs) s pages m
@@ -516,7 +495,7 @@
 ; an image segment's.
 (def mem_share ((m Mem) (f int)) Mem
   (let n (mem_count m f)
-    (match m ((Mem counts imgs wins pool) (Mem (map_put counts f (add n 1)) imgs wins pool)))))
+    (.counts m (map_put (.counts m) f (add n 1)))))
 
 ; m with one more mapping of each of fs.
 (def mem_share_all ((m Mem) (fs (list int))) Mem
@@ -543,51 +522,47 @@
 
 ; Whether g lies at va, len bytes of the file, with perm.
 (def image_seg_at ((g ImageSeg) (va int) (len int) (perm int)) bool
-  (match g ((ImageSeg gva glen gperm fs ss) (if (eq gva va) (if (eq glen len) (eq gperm perm) false) false))))
-
-; The frames of g's pages, in order.
-(def image_seg_frames ((g ImageSeg)) (list int) (match g ((ImageSeg va len perm fs ss) fs)))
+  (match g ((ImageSeg gva glen gperm fs ss) (and (eq gva va) (and (eq glen len) (eq gperm perm))))))
 
 ; A space that maps g, to compare its bytes with: the first of them.
-(def image_seg_space ((g ImageSeg)) int (match g ((ImageSeg va len perm fs ss) (head ss))))
+(def image_seg_space ((g ImageSeg)) Space (match g ((ImageSeg va len perm fs ss) (head ss))))
 
 ; m with space s mapping the frames of g too, which hashes to key: a
 ; mapping more of each.
-(def mem_image_join ((m Mem) (key int) (g ImageSeg) (s int)) Mem
-  (match (mem_share_all m (image_seg_frames g))
+(def mem_image_join ((m Mem) (key int) (g ImageSeg) (s Space)) Mem
+  (match (mem_share_all m (.frames g))
     ((Mem counts imgs wins pool)
       (match (map_get imgs key)
         ((None) (Mem counts imgs wins pool))
         ((Some segs) (Mem counts (map_put imgs key (segs_joined segs g s (nil ImageSeg))) wins pool))))))
 
 ; segs onto acc, in order, with s among the spaces of the one that is g.
-(def segs_joined ((segs (list ImageSeg)) (g ImageSeg) (s int) (acc (list ImageSeg))) (list ImageSeg)
+(def segs_joined ((segs (list ImageSeg)) (g ImageSeg) (s Space) (acc (list ImageSeg))) (list ImageSeg)
   (if (is_empty segs)
       (rev acc)
       (segs_joined (tail segs) g s (cons (image_seg_joined (head segs) g s) acc))))
 
 ; h, with s among its spaces if it is g.
-(def image_seg_joined ((h ImageSeg) (g ImageSeg) (s int)) ImageSeg
-  (if (eq h g) (match h ((ImageSeg va len perm fs ss) (ImageSeg va len perm fs (cons s ss)))) h))
+(def image_seg_joined ((h ImageSeg) (g ImageSeg) (s Space)) ImageSeg
+  (if (eq h g) (.ss h (cons s (.ss h))) h))
 
 ; m sharing a new segment, hashing to key, at va, len bytes of the file,
 ; with perm, its pages' frames fs, which space s alone maps so far.
-(def mem_image_new ((m Mem) (key int) (va int) (len int) (perm int) (fs (list int)) (s int)) Mem
+(def mem_image_new ((m Mem) (key int) (va int) (len int) (perm int) (fs (list int)) (s Space)) Mem
   (match (mem_share_all m fs)
     ((Mem counts imgs wins pool)
       (let segs (match (map_get imgs key) ((None) (nil ImageSeg)) ((Some gs) gs))
-        (Mem counts (map_put imgs key (cons (ImageSeg va len perm fs (cons s (nil int))) segs)) wins pool)))))
+        (Mem counts (map_put imgs key (cons (ImageSeg va len perm fs (cons s (nil Space))) segs)) wins pool)))))
 
 ; m once space s maps no segment: s taken from each, and a segment no
 ; space maps any more forgotten. Its frames' counts are mem_release's.
-(def mem_image_leave ((m Mem) (s int)) Mem
-  (match m
-    ((Mem counts imgs wins pool)
-      (Mem counts (images_without imgs (map_keys imgs) s) wins pool))))
+(def mem_image_leave ((m Mem) (s Space)) Mem
+  (let keys (map_keys (.imgs m))
+    (.imgs m (images_without (.imgs m) keys s))))
 
 ; imgs with s taken from the segments at keys, and a key with none left
 ; dropped.
-(def images_without ((imgs (Map int (list ImageSeg))) (keys (list int)) (s int)) (Map int (list ImageSeg))
+(def images_without ((imgs (Map int (list ImageSeg))) (keys (list int)) (s Space)) (Map int (list ImageSeg))
   (if (is_empty keys)
       imgs
       (match (map_get imgs (head keys))
@@ -598,12 +573,12 @@
                             (tail keys) s))))))
 
 ; segs with s taken from each, onto acc, those left with no space dropped.
-(def segs_without ((segs (list ImageSeg)) (s int) (acc (list ImageSeg))) (list ImageSeg)
+(def segs_without ((segs (list ImageSeg)) (s Space) (acc (list ImageSeg))) (list ImageSeg)
   (if (is_empty segs)
       (rev acc)
       (match (head segs)
         ((ImageSeg va len perm fs ss)
-          (let ss2 (without s ss (nil int))
+          (let ss2 (without s ss (nil Space))
             (segs_without (tail segs) s (if (is_empty ss2) acc (cons (ImageSeg va len perm fs ss2) acc))))))))
 
 ; How many segments m shares.
@@ -616,7 +591,7 @@
 
 ; What a process's end leaves to do: m without its mappings, and the
 ; frames to free once its space is.
-(data Released (Released Mem (list int)))
+(data Released (Released (left Mem) (fs (list int))))
 
 ; For a process whose frames are pages, which drove devices if dev.
 (def mem_release ((m Mem) (pages (Map int int)) (dev bool)) Released
@@ -673,52 +648,45 @@
 ; space_write, which reach only what is mapped. The copies need no look
 ; at the server's record, which is out of the table while it makes the
 ; call that answers a read.
-(data Window (Window int int int int int))
+(data Window (Window int int int int Space))
 
 ; The pages of a window: 64 KB, as many as a disk request moves.
 (def window_pages () int 16)
 
-; m's windows.
-(def mem_windows ((m Mem)) (list Window) (match m ((Mem counts imgs wins pool) wins)))
-
-; m with its windows ws.
-(def mem_with_windows ((m Mem) (ws (list Window))) Mem
-  (match m ((Mem counts imgs wins pool) (Mem counts imgs ws pool))))
-
 ; Where the server at port reaches client's window, or -1 if client has
 ; none to it.
 (def mem_window_at ((m Mem) (client int) (port int)) int
-  (window_va (mem_windows m) client port))
+  (window_va (.windows m) client port))
 
 ; The rest of mem_window_at, among ws.
 (def window_va ((ws (list Window)) (client int) (port int)) int
   (if (is_empty ws)
       -1
       (match (head ws)
-        ((Window c sp p va s) (if (if (eq c client) (eq p port) false) va (window_va (tail ws) client port))))))
+        ((Window c sp p va s) (if (and (eq c client) (eq p port)) va (window_va (tail ws) client port))))))
 
 ; The server's pid client's window to port has, or -1 if it has none.
 (def mem_window_server ((m Mem) (client int) (port int)) int
-  (window_server (mem_windows m) client port))
+  (window_server (.windows m) client port))
 
 ; The rest of mem_window_server, among ws.
 (def window_server ((ws (list Window)) (client int) (port int)) int
   (if (is_empty ws)
       -1
       (match (head ws)
-        ((Window c sp p va s) (if (if (eq c client) (eq p port) false) sp (window_server (tail ws) client port))))))
+        ((Window c sp p va s) (if (and (eq c client) (eq p port)) sp (window_server (tail ws) client port))))))
 
-; The space of the server of client's window to port, or -1 if it has
-; none.
-(def mem_window_space ((m Mem) (client int) (port int)) int
-  (window_space_of (mem_windows m) client port))
+; The space of the server of client's window to port, or space -1 if it
+; has none.
+(def mem_window_space ((m Mem) (client int) (port int)) Space
+  (window_space_of (.windows m) client port))
 
 ; The rest of mem_window_space, among ws.
-(def window_space_of ((ws (list Window)) (client int) (port int)) int
+(def window_space_of ((ws (list Window)) (client int) (port int)) Space
   (if (is_empty ws)
-      -1
+      (Space -1)
       (match (head ws)
-        ((Window c sp p va s) (if (if (eq c client) (eq p port) false) s (window_space_of (tail ws) client port))))))
+        ((Window c sp p va s) (if (and (eq c client) (eq p port)) s (window_space_of (tail ws) client port))))))
 
 ; The bytes a window holds.
 (def window_bytes () int (mul (window_pages) 4096))
@@ -726,7 +694,7 @@
 ; m without the windows server sp no longer maps whole in pages, which
 ; it has unmapped a page of, or had one taken back.
 (def mem_windows_mapped ((m Mem) (sp int) (pages (Map int int))) Mem
-  (mem_with_windows m (windows_mapped (mem_windows m) sp pages)))
+  (.windows m (windows_mapped (.windows m) sp pages)))
 
 ; The rest of mem_windows_mapped, among ws.
 (def windows_mapped ((ws (list Window)) (sp int) (pages (Map int int))) (list Window)
@@ -734,21 +702,21 @@
       ws
       (match (head ws)
         ((Window c s2 p va s)
-          (if (if (eq s2 sp) (not (pages_all pages va (window_pages))) false)
+          (if (and (eq s2 sp) (not (pages_all pages va (window_pages))))
               (windows_mapped (tail ws) sp pages)
               (cons (head ws) (windows_mapped (tail ws) sp pages)))))))
 
 ; Whether pages maps each of the n pages from va.
 (def pages_all ((pages (Map int int)) (va int) (n int)) bool
-  (if (le n 0) true (if (map_has pages va) (pages_all pages (add va (page_size)) (sub n 1)) false)))
+  (if (le n 0) true (map_has pages va) (pages_all pages (add va (page_size)) (sub n 1)) false))
 
 ; m with w.
 (def mem_window_add ((m Mem) (w Window)) Mem
-  (mem_with_windows m (cons w (mem_windows m))))
+  (.windows m (cons w (.windows m))))
 
 ; m without client's window to port, taken back before its server knew.
 (def mem_window_drop ((m Mem) (client int) (port int)) Mem
-  (mem_with_windows m (window_without (mem_windows m) client port)))
+  (.windows m (window_without (.windows m) client port)))
 
 ; ws without client's window to port.
 (def window_without ((ws (list Window)) (client int) (port int)) (list Window)
@@ -756,14 +724,14 @@
       ws
       (match (head ws)
         ((Window c sp p va s)
-          (if (if (eq c client) (eq p port) false)
+          (if (and (eq c client) (eq p port))
               (tail ws)
               (cons (head ws) (window_without (tail ws) client port)))))))
 
 ; m without the windows pid is the client or the server of, pid having
 ; ended.
 (def mem_windows_forget ((m Mem) (pid int)) Mem
-  (mem_with_windows m (windows_not (mem_windows m) pid)))
+  (.windows m (windows_not (.windows m) pid)))
 
 ; ws without those pid is the client or the server of.
 (def windows_not ((ws (list Window)) (pid int)) (list Window)
@@ -771,6 +739,6 @@
       ws
       (match (head ws)
         ((Window c sp p va s)
-          (if (if (eq c pid) true (eq sp pid))
+          (if (or (eq c pid) (eq sp pid))
               (windows_not (tail ws) pid)
               (cons (head ws) (windows_not (tail ws) pid)))))))

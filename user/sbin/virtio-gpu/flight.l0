@@ -40,30 +40,12 @@
 ; give, cursor commands made and used, the replies waiting, oldest
 ; first, why a command no reply yet waits on failed, "" if none did;
 ; the frames told, and the ports they are told to.
-(data Flight (Flight int int int (Queue FlCmd) (array int) int int int int int (Queue FlWaiting) (list int) int (list int)))
+(data Flight (Flight (made int) (told int) (used int) (cs (Queue FlCmd)) (an (array int)) (done int) (dn int) (bn int) (cursor_made int) (cursor_used int) (ws (Queue FlWaiting)) (fault (list int)) (frames int) (listeners (list int))))
 
 ; Nothing in flight; the request pages' bytes start at lo.
 (def fl_new ((lo int)) Flight
   (Flight 0 0 0 (queue_empty (FlCmd 0 0 0 0 0 "" 0)) (array_new (fl_ring) -1) 0 0 lo 0 0
           (queue_empty (FlWaiting (bytes_from_list "") "" 0 0 false (nil int))) "" 0 (nil int)))
-
-; The frames told, and the ports they are told to.
-(def fl_frames ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) nf)))
-(def fl_listeners ((f Flight)) (list int) (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) ls)))
-
-; f with its frames told to ls in place of the ports it had.
-(def fl_listening ((f Flight) (ls2 (list int))) Flight
-  (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) (Flight m p u cs an d dn bn cm cu ws fa nf ls2))))
-
-; Commands made, those told of, used entries read, and the last retired.
-(def fl_made ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) m)))
-(def fl_told ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) p)))
-(def fl_used ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) u)))
-(def fl_done ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) d)))
-
-; Cursor commands made, and used.
-(def fl_cursor_made ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) cm)))
-(def fl_cursor_used ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) cu)))
 
 ; The descriptor the next command's chain starts at.
 (def fl_next_head ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) (mod dn (fl_ring)))))
@@ -75,16 +57,12 @@
 ; How many replies wait.
 (def fl_waiting ((f Flight)) int (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) (queue_size ws))))
 
-; Why a command no reply waits on failed, "" if none did.
-(def fl_fault ((f Flight)) (list int) (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) fa)))
-
 ; f with its fault forgotten.
-(def fl_fault_cleared ((f Flight)) Flight
-  (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) (Flight m p u cs an d dn bn cm cu ws "" nf ls))))
+(def fl_fault_cleared ((f Flight)) Flight (.fault f ""))
 
 ; f once the device has been told of every command made.
 (def fl_all_told ((f Flight)) Flight
-  (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) (Flight m m u cs an d dn bn cm cu ws fa nf ls))))
+  (let m (.made f) (.told f m)))
 
 ; ------------------------------------------------------------------ room
 
@@ -126,12 +104,13 @@
 ; fl_room's bytes, the next free at bn and the oldest still read at old.
 (def fl_bytes_free ((bn int) (old int) (len int) (lo int) (hi int)) int
   (if (gt bn old)
-      (if (le (add bn len) hi) bn (if (le (add lo len) old) lo -1))
-      (if (le (add bn len) old) bn -1)))
+      (if (le (add bn len) hi) bn (le (add lo len) old) lo -1)
+      (le (add bn len) old) bn
+      -1))
 
 ; Whether a request of len bytes could ever fit pages lo up to hi.
 (def fl_fits ((len int) (lo int) (hi int)) bool
-  (if (le (fl_rounded len) (sub hi lo)) (le (fl_descs_for len) (fl_ring)) false))
+  (and (le (fl_rounded len) (sub hi lo)) (le (fl_descs_for len) (fl_ring))))
 
 ; ------------------------------------------------------------------ offer
 
@@ -145,11 +124,11 @@
 
 ; f with a cursor command made.
 (def fl_cursor_offered ((f Flight)) Flight
-  (match f ((Flight m p u cs an d dn bn cm cu ws fa nf ls) (Flight m p u cs an d dn bn (add cm 1) cu ws fa nf ls))))
+  (let cm (.cursor_made f) (.cursor_made f (add cm 1))))
 
 ; Whether the cursor queue has room for another command.
 (def fl_cursor_room ((f Flight)) bool
-  (lt (sub (fl_cursor_made f) (fl_cursor_used f)) (fl_cursor_ring)))
+  (lt (sub (.cursor_made f) (.cursor_used f)) (fl_cursor_ring)))
 
 ; ----------------------------------------------------------------- answers
 
@@ -164,13 +143,11 @@
 ; counts it, from 0 to 65535 and round again: every cursor command up to
 ; it used, as the device uses them in order.
 (def fl_cursor_index ((f Flight) (idx16 int)) Flight
-  (match f
-    ((Flight m p u cs an d dn bn cm cu ws fa nf ls)
-      (Flight m p u cs an d dn bn cm (sub cm (bit_and (sub cm idx16) 65535)) ws fa nf ls))))
+  (let cm (.cursor_made f) (.cursor_used f (sub cm (bit_and (sub cm idx16) 65535)))))
 
 ; How many used entries there are to read when the control queue's used
 ; ring says idx16.
-(def fl_unread ((f Flight) (idx16 int)) int (bit_and (sub idx16 (fl_used f)) 65535))
+(def fl_unread ((f Flight) (idx16 int)) int (bit_and (sub idx16 (.used f)) 65535))
 
 ; --------------------------------------------------------------- replies
 
@@ -189,7 +166,7 @@
 (data FlAnswer (FlAnswer bytes (list int) int (list int)))
 
 ; f, and the replies to send now, in order.
-(data FlDue (FlDue Flight (list FlAnswer)))
+(data FlDue (FlDue (flight Flight) (as (list FlAnswer))))
 
 ; Every command used that can be retired, retired, and every reply that
 ; no longer waits taken off, in order: a reply waits until the last
@@ -204,8 +181,8 @@
   (match (fl_replies_due f acc)
     ((FlDue f2 acc2)
       (match (fl_retire_one f2)
-        ((Some f3) (fl_due_onto f3 acc2))
-        ((None) (FlDue f2 (rev acc2)))))))
+        ((FlRetired f3) (fl_due_onto f3 acc2))
+        ((FlUnretired f3) (FlDue f3 (rev acc2)))))))
 
 ; The replies at the front of f's that no longer wait, onto acc reversed.
 (def fl_replies_due ((f Flight) (acc (list FlAnswer))) FlDue
@@ -216,42 +193,46 @@
         ((Popped w rest)
           (match w
             ((FlWaiting mb r last clast fr rel)
-              (if (if (le last d) (le clast cu) false)
+              (if (and (le last d) (le clast cu))
                   (let n (if fr (add nf 1) nf)
                     (fl_replies_due (Flight m p u cs an d dn bn cm cu rest fa n ls) (cons (FlAnswer mb r (if fr n 0) rel) acc)))
                   (FlDue f acc)))))))))
 
+; What retiring the oldest command came to: the flight with it retired,
+; or, if the device has not used it or none is out, as it was.
+(data FlRetire (FlRetired Flight) (FlUnretired Flight))
+
 ; f with its oldest command retired, if the device has used it.
-(def fl_retire_one ((f Flight)) (Option Flight)
+(def fl_retire_one ((f Flight)) FlRetire
   (match f
     ((Flight m p u cs an d dn bn cm cu ws fa nf ls)
       (match (queue_pop cs)
-        ((PopEmpty) ((None Flight)))
+        ((PopEmpty) (FlUnretired f))
         ((Popped c rest)
           (match c
             ((FlCmd s h n off len what want)
               (let type (array_get an h)
                 (if (lt type 0)
-                    ((None Flight))
+                    (FlUnretired f)
                     (let an2 (array_set an h -1)
                       (if (eq type want)
-                          (Some (Flight m p u rest an2 s dn bn cm cu ws fa nf ls))
-                          (fl_failed (Flight m p u rest an2 s dn bn cm cu ws fa nf ls)
-                                     (append what (append " answered 0x" (hex_digits type 4)))))))))))))))
+                          (FlRetired (Flight m p u rest an2 s dn bn cm cu ws fa nf ls))
+                          (FlRetired (fl_failed (Flight m p u rest an2 s dn bn cm cu ws fa nf ls)
+                                                (append what (append " answered 0x" (hex_digits type 4))))))))))))))))
 
 ; f with why its oldest reply is an error, or, if none waits, the next.
-(def fl_failed ((f Flight) (why (list int))) (Option Flight)
+(def fl_failed ((f Flight) (why (list int))) Flight
   (match f
     ((Flight m p u cs an d dn bn cm cu ws fa nf ls)
       (match (queue_pop ws)
-        ((PopEmpty) (Some (Flight m p u cs an d dn bn cm cu ws (if (is_empty fa) why fa) nf ls)))
+        ((PopEmpty) (Flight m p u cs an d dn bn cm cu ws (if (is_empty fa) why fa) nf ls))
         ((Popped w rest)
           (match w
             ((FlWaiting mb r last clast fr rel)
-              (Some (Flight m p u cs an d dn bn cm cu
-                            (fl_queue_front (FlWaiting mb (if (starts_with r "error: ") r (append "error: " why)) last clast fr rel) rest)
-                            fa nf ls)))))))))
+              (Flight m p u cs an d dn bn cm cu
+                      (fl_queue_front (FlWaiting mb (if (starts_with r "error: ") r (append "error: " why)) last clast fr rel) rest)
+                      fa nf ls))))))))
 
 ; q with x put back at its front.
 (def (fl_queue_front T) ((x T) (q (Queue T))) (Queue T)
-  (match q ((Queue front back) (Queue (cons x front) back))))
+  (.front q (cons x (.front q))))

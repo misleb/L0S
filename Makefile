@@ -75,8 +75,10 @@ L0     ?= l0
 BUILD  := build
 
 # The installed toolchain's compiler, runtimes and layouts, so that images
-# are rebuilt when l0 is updated, and take its runtime's changes.
-L0LIB     := $(dir $(shell $(L0) spec --path))
+# are rebuilt when l0 is updated, and take its runtime's changes. l0 spec
+# --path names every file of the specification, the language's first,
+# which lies in the library's own directory.
+L0LIB     := $(dir $(firstword $(shell $(L0) spec --path)))
 L0_VIRTRT := $(L0LIB)l0c $(wildcard $(L0LIB)virt-aarch64/*.bc) $(L0LIB)virt-aarch64/layout.ld
 L0_PROCRT := $(L0LIB)l0c $(wildcard $(L0LIB)proc-aarch64/*.bc) $(L0LIB)proc-aarch64/layout.ld
 # What every check and host test is built with, the driver among them, so
@@ -375,7 +377,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run agent-etc icon-sheet graph graph-hook
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run agent-etc icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -431,6 +433,17 @@ $(BUILD)/check/doc.ok: $(BUILD)/l0sdoc $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS)
 	@$(call logged,$(BUILD)/l0sdoc --check $(DOC_GAPS) $(DOC_SRCS) $(PROG_DOC_SRCS),the documentation check)
 CHECKS += $(BUILD)/check/doc.ok
 
+# That every .l0 file git knows is as l0 fmt would leave it: its closers
+# where its indentation says. make fmt writes them so.
+L0_FILES := $(shell git ls-files '*.l0' 2> /dev/null)
+$(BUILD)/check/fmt.ok: $(L0_FILES) $(L0_HOSTRT)
+	@mkdir -p $(@D)
+	@$(call logged,$(L0) fmt --check $(L0_FILES),the format check (make fmt rewrites))
+CHECKS += $(BUILD)/check/fmt.ok
+
+fmt:
+	$(L0) fmt $(L0_FILES)
+
 # That the toolkit's metrics, user/lib/ui/metrics.l0, are what mkmetrics
 # writes from the fonts now; make metrics writes them again.
 METRICS := user/lib/ui/metrics.l0
@@ -444,8 +457,13 @@ CHECKS += $(BUILD)/check/metrics.ok
 metrics: $(BUILD)/mkmetrics
 	$(BUILD)/mkmetrics $(METRICS_FACES) $(METRICS)
 
+# Every check, and then every warning they gave, passing ones' too, from
+# their logs: l0 check's warnings never fail it, and each is a whole copy
+# of a map, array or record that a loop pays for every time.
 check:
-	@$(MAKE) -s -k -j$(JOBS) check-each
+	@$(MAKE) -s -k -j$(JOBS) check-each; st=$$?; \
+	w=$$(cat $(CHECKS:.ok=.log) 2> /dev/null | grep 'warning:' | sort -u); \
+	if [ -n "$$w" ]; then echo "$$w"; echo "make check: $$(echo "$$w" | wc -l) warnings"; fi; exit $$st
 
 check-each: $(CHECKS)
 

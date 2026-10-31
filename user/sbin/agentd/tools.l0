@@ -23,7 +23,7 @@
   (if (is_empty ls)
       (nil int)
       (let ws (split_spaces (up_to 35 (head ls)))
-        (if (if (is_empty ws) false (eq (head ws) key))
+        (if (and (not (is_empty ws)) (eq (head ws) key))
             (unwords (tail ws))
             (tool_conf_in (tail ls) key)))))
 
@@ -93,9 +93,9 @@
 ; char_start's loop: back from k while it is a continuation byte, at
 ; most left more.
 (def char_back ((b bytes) (k int) (left int)) int
-  (if (if (eq left 0) true (le k 0))
-      k
-      (if (eq (bit_and (bytes_get b k) 192) 128) (char_back b (sub k 1) (sub left 1)) k)))
+  (if (or (eq left 0) (le k 0)) k
+      (eq (bit_and (bytes_get b k) 192) 128) (char_back b (sub k 1) (sub left 1))
+      k))
 
 ; ------------------------------------------------------------ the input
 
@@ -118,10 +118,10 @@
     ((Some p)
       (let path (tool_path home p)
         (if (eq name "read_file") (read_file path)
-        (if (eq name "write_file") (write_file path (json_get input "content"))
-        (if (eq name "list_dir") (list_dir path)
-        (if (eq name "make_dir") (make_dir path)
-        (tool_failed (append "no tool " name))))))))))
+            (eq name "write_file") (write_file path (json_get input "content"))
+            (eq name "list_dir") (list_dir path)
+            (eq name "make_dir") (make_dir path)
+            (tool_failed (append "no tool " name)))))))
 
 ; read_file: the file's text, cut at tool_max bytes.
 (def read_file ((path (list int))) ToolAnswer
@@ -163,12 +163,12 @@
 
 ; Whether a name is a directory's, ending in /.
 (def is_dir_name ((name (list int))) bool
-  (if (is_empty name) false (eq (last name) 47)))
+  (and (not (is_empty name)) (eq (last name) 47)))
 
 ; A directory of the initramfs, among names: its entries, without sizes.
 (def list_root ((path (list int)) (names (list (list int)))) ToolAnswer
   (let kids (entry_children names path)
-    (if (if (is_empty kids) (not (any_eq (append path "/") names)) false)
+    (if (and (is_empty kids) (not (any_eq (append path "/") names)))
         (tool_failed (append path ": no such directory"))
         (tool_ok (bytes_from_list (join_lines kids))))))
 
@@ -273,17 +273,11 @@
 ; kept and how many dropped past tool_max; the time on clock_ns past
 ; which it is ended; its exit status, once it has exited; and whether it
 ; was ended for running too long.
-(data Run (Run int int (list bytes) int int int (Option int) bool))
+(data Run (Run (pid int) (port int) (o (list bytes)) (k int) (d int) (deadline int) (status (Option int)) (e bool)))
 
 ; A program just started as pid, its terminal port, to end at deadline.
 (def run_new ((pid int) (port int) (deadline int)) Run
   (Run pid port (nil bytes) 0 0 deadline ((None int)) false))
-
-; A run's pid, port, deadline and exit status (none while running).
-(def run_pid ((r Run)) int (match r ((Run p t o k d dl st e) p)))
-(def run_port ((r Run)) int (match r ((Run p t o k d dl st e) t)))
-(def run_deadline ((r Run)) int (match r ((Run p t o k d dl st e) dl)))
-(def run_status ((r Run)) (Option int) (match r ((Run p t o k d dl st e) st)))
 
 ; A message to send in answer, as a terminal answers: its port and
 ; payload.
@@ -313,51 +307,49 @@
   (if (run_is_write b)
       (RunHeard (run_kept r b (add (header_len) 5) (bytes_len b)) (nil RunSend))
       (let reply (msg_reply b)
-        (if (if (lt reply 1) true (not (eq (msg_len b) 5)))
+        (if (or (lt reply 1) (not (eq (msg_len b) 5)))
             (RunHeard r (nil RunSend))
             (let op (msg_byte b 4)
-              (if (eq op 114)
-                  (RunHeard r (cons (RunSend reply (nil int)) (nil RunSend)))
-                  (if (eq op 112)
-                      (RunHeard r (cons (RunSend reply "tty") (nil RunSend)))
-                      (RunHeard r (nil RunSend)))))))))
+              (if (eq op 114) (RunHeard r (cons (RunSend reply (nil int)) (nil RunSend)))
+                  (eq op 112) (RunHeard r (cons (RunSend reply "tty") (nil RunSend)))
+                  (RunHeard r (nil RunSend))))))))
 
 ; Whether a message's bytes b are bytes to write: no reply port, then w.
 (def run_is_write ((b bytes)) bool
-  (if (gt (msg_len b) 4) (if (eq (msg_u32 b 0) 0) (eq (msg_byte b 4) 119) false) false))
+  (and (gt (msg_len b) 4) (and (eq (msg_u32 b 0) 0) (eq (msg_byte b 4) 119))))
 
 ; r with b's bytes from i to j kept, as many as fit in tool_max, the
 ; rest counted as dropped.
 (def run_kept ((r Run) (b bytes) (i int) (j int)) Run
   (match r
     ((Run pid port out kept dropped dl st ended)
-      (let n (sub j i)
-        (let k (min n (max 0 (sub (tool_max) kept)))
-          (Run pid port (if (gt k 0) (cons (bytes_slice b i (add i k)) out) out)
-               (add kept k) (add dropped (sub n k)) dl st ended))))))
+      (let (n (sub j i)
+            k (min n (max 0 (sub (tool_max) kept))))
+        (Run pid port (if (gt k 0) (cons (bytes_slice b i (add i k)) out) out)
+             (add kept k) (add dropped (sub n k)) dl st ended)))))
 
 ; r ended for running past its deadline.
 (def run_ended ((r Run)) Run
-  (match r ((Run pid port out kept dropped dl st ended) (Run pid port out kept dropped dl st true))))
+  (.e r true))
 
 ; r given up on, its port failing: its status taken as -1.
 (def run_lost ((r Run)) Run
-  (match r ((Run pid port out kept dropped dl st ended) (Run pid port out kept dropped dl (Some -1) ended))))
+  (.status r (Some -1)))
 
 ; A run's result: that it was ended if it ran too long, exit N, then what
 ; it wrote, and how much more was dropped; failed unless it exited 0.
 (def run_result ((r Run)) ToolAnswer
   (match r
     ((Run pid port out kept dropped dl st ended)
-      (let status (match st ((Some s) s) ((None) -1))
-        (let head (append (if ended "ended: still running when its time was up\n" "")
-                          (append "exit " (append (digits status) "\n")))
-          (ToolAnswer
-            (bytes_concat (cons (bytes_from_list head)
-                            (cons (tool_text (bytes_concat (rev out)))
-                              (cons (bytes_from_list (if (gt dropped 0) (append "\n[dropped: " (append (digits dropped) " more bytes]\n")) ""))
-                                    (nil bytes)))))
-            (if ended true (not (eq status 0)))))))))
+      (let (status (match st ((Some s) s) ((None) -1))
+            head (append (if ended "ended: still running when its time was up\n" "")
+                         (append "exit " (append (digits status) "\n"))))
+        (ToolAnswer
+          (bytes_concat (cons (bytes_from_list head)
+                          (cons (tool_text (bytes_concat (rev out)))
+                            (cons (bytes_from_list (if (gt dropped 0) (append "\n[dropped: " (append (digits dropped) " more bytes]\n")) ""))
+                                  (nil bytes)))))
+          (or ended (not (eq status 0))))))))
 
 ; ------------------------------------------------- starting and waiting
 
@@ -413,16 +405,16 @@
   (match (tty_set port)
       ((TtyNoPort) ((Err Run (list int)) "no port to be its terminal"))
       ((TtySet)
-        (let c (chdir home)
-          (let s (spawn_path path (Some args))
-            (let t (tty_set back)
-              (let pid (spawned_pid s)
-                (if (lt pid 0)
-                    ((Err Run (list int)) (append "cannot start " (append path (append ": " (spawn_why s)))))
-                    (let w (proc_watch pid port)
-                      (let deadline (add (clock_ns) (mul timeout 1000000000))
-                        (let a (alarm_at port deadline)
-                          ((Ok Run (list int)) (run_new pid port deadline)))))))))))))
+        (let (c (chdir home)
+              s (spawn_path path (Some args))
+              t (tty_set back)
+              pid (spawned_pid s))
+          (if (lt pid 0)
+              ((Err Run (list int)) (append "cannot start " (append path (append ": " (spawn_why s)))))
+              (let (w (proc_watch pid port)
+                    deadline (add (clock_ns) (mul timeout 1000000000))
+                    a (alarm_at port deadline))
+                ((Ok Run (list int)) (run_new pid port deadline))))))))
 
 ; The pid a spawn started, or -1.
 (def spawned_pid ((s Spawn)) int
@@ -443,9 +435,9 @@
     ((RecvFailed) (run_lost r))
     ((Message from b)
       (if (is_alarm_notice m)
-          (match (run_status r)
+          (match (.status r)
             ((Some s) r)
-            ((None) (if (lt (clock_ns) (run_deadline r)) r (let k (proc_kill (run_pid r)) (run_ended r)))))
+            ((None) (if (lt (clock_ns) (.deadline r)) r (let k (proc_kill (.pid r)) (run_ended r)))))
           (match (run_heard r m)
             ((RunHeard r2 sends) (let x (run_send sends) r2)))))))
 

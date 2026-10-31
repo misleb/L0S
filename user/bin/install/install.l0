@@ -33,7 +33,7 @@
   (if (is_empty paths)
       paths
       (let p (head paths)
-        (if (if (eq p "/") true (starts_with p "/Volumes/"))
+        (if (or (eq p "/") (starts_with p "/Volumes/"))
             (to_copy (tail paths))
             (cons p (to_copy (tail paths)))))))
 
@@ -47,9 +47,9 @@
 (def filter_not_boot ((paths (list (list int)))) (list (list int))
   (if (is_empty paths)
       paths
-      (if (starts_with (head paths) "/boot/")
-          (filter_not_boot (tail paths))
-          (cons (head paths) (filter_not_boot (tail paths))))))
+      (starts_with (head paths) "/boot/")
+      (filter_not_boot (tail paths))
+      (cons (head paths) (filter_not_boot (tail paths)))))
 
 ; Where path's copy goes on vol, /Volumes/LABEL: a directory's without
 ; its final /.
@@ -98,10 +98,10 @@
   (let why (write_whole to b)
     (if (not (is_empty why))
         (append to (append ": " why))
-        (if (not (path_is_program path))
-            ""
-            (let code (fs_chmod to true)
-              (if (eq code 0) "" (append to (append ": not marked a program: " (io_error code)))))))))
+        (not (path_is_program path))
+        ""
+        (let code (fs_chmod to true)
+          (if (eq code 0) "" (append to (append ": not marked a program: " (io_error code))))))))
 
 ; ------------------------------------------------------------ boot files
 
@@ -112,7 +112,7 @@
   (if (is_empty paths)
       paths
       (let p (head paths)
-        (if (if (starts_with p from) (if (path_is_dir p) false (not (contains (drop p (length from)) "/"))) false)
+        (if (and (starts_with p from) (and (not (path_is_dir p)) (not (contains (drop p (length from)) "/"))))
             (cons p (boot_files from (tail paths)))
             (boot_files from (tail paths))))))
 
@@ -130,7 +130,7 @@
 ; An entry's mode: a directory's 040755, a program's 0100755, any other
 ; file's 0100644.
 (def entry_mode_of ((path (list int))) int
-  (if (path_is_dir path) 16877 (if (path_is_program path) 33261 33188)))
+  (if (path_is_dir path) 16877 (path_is_program path) 33261 33188))
 
 ; What install --boot says once it has copied n boot files to vol and
 ; written its initramfs of files files.
@@ -151,14 +151,14 @@
 ; trailer. at is how many bytes are written so far.
 (def archive_to ((f IoFile) (paths (list (list int))) (at int)) Archived
   (if (is_empty paths)
-      (let t (bytes_from_list (newc_trailer))
-        (let w (file_write_bytes f t 0 (bytes_len t))
-          (Archived (add at (bytes_len t)))))
+      (let (t (bytes_from_list (newc_trailer))
+            w (file_write_bytes f t 0 (bytes_len t)))
+        (Archived (add at (bytes_len t))))
       (let p (head paths)
         (if (path_is_dir p)
-            (let h (newc_head (entry_name p) (entry_mode_of p) 0)
-              (let w (file_write_bytes f h 0 (bytes_len h))
-                (archive_to f (tail paths) (add at (bytes_len h)))))
+            (let (h (newc_head (entry_name p) (entry_mode_of p) 0)
+                  w (file_write_bytes f h 0 (bytes_len h)))
+              (archive_to f (tail paths) (add at (bytes_len h))))
             (match (read_whole p)
               ((Err why) (ArchiveStopped (append p (append ": " why))))
               ((Ok b) (archive_to f (tail paths) (add at (archive_file f p b)))))))))
@@ -166,12 +166,12 @@
 ; The entry of the file at p, its bytes b, written to f: its header, b,
 ; and its padding; how many bytes they are.
 (def archive_file ((f IoFile) (p (list int)) (b bytes)) int
-  (let h (newc_head (entry_name p) (entry_mode_of p) (bytes_len b))
-    (let z (newc_padding (bytes_len b))
-      (let w1 (file_write_bytes f h 0 (bytes_len h))
-        (let w2 (file_write_bytes f b 0 (bytes_len b))
-          (let w3 (file_write_bytes f z 0 (bytes_len z))
-            (add (bytes_len h) (add (bytes_len b) (bytes_len z)))))))))
+  (let (h (newc_head (entry_name p) (entry_mode_of p) (bytes_len b))
+        z (newc_padding (bytes_len b))
+        w1 (file_write_bytes f h 0 (bytes_len h))
+        w2 (file_write_bytes f b 0 (bytes_len b))
+        w3 (file_write_bytes f z 0 (bytes_len z)))
+    (add (bytes_len h) (add (bytes_len b) (bytes_len z)))))
 
 ; Each of the files ps copied to vol's root, by its name, n so far.
 (def boot_copied ((vol (list int)) (ps (list (list int))) (n int)) Copied
@@ -180,11 +180,11 @@
       (match (read_whole (head ps))
         ((Err why) (CopyStopped (append (head ps) (append ": " why))))
         ((Ok b)
-          (let to (append vol (append "/" (base_name (head ps))))
-            (let why (write_whole to b)
-              (if (is_empty why)
-                  (boot_copied vol (tail ps) (add n 1))
-                  (CopyStopped (append to (append ": " why))))))))))
+          (let (to (append vol (append "/" (base_name (head ps))))
+                why (write_whole to b))
+            (if (is_empty why)
+                (boot_copied vol (tail ps) (add n 1))
+                (CopyStopped (append to (append ": " why)))))))))
 
 ; The Raspberry Pi 5's boot partition made of vol: each file of from
 ; copied onto it, the image, config.txt and cmdline.txt as l0 card
@@ -196,17 +196,17 @@
   (let why (volume_why vol)
     (if (not (is_empty why))
         (complain why)
-        (let paths (root_paths)
-          (let files (boot_files from paths)
-            (if (is_empty files)
-                (complain (append (drop_last from) ": no boot files; the Raspberry Pi 5's initramfs has them in /boot"))
-                (match (boot_copied vol files 0)
-                  ((CopyStopped why2) (complain why2))
-                  ((Copied n)
-                    (let why3 (if (is_empty u) "" (root_set vol u))
-                      (if (is_empty why3)
-                          (boot_archived vol n (to_copy paths) (if (is_empty u) "" (root_line vol root u)))
-                          (complain why3)))))))))))
+        (let (paths (root_paths)
+              files (boot_files from paths))
+          (if (is_empty files)
+              (complain (append (drop_last from) ": no boot files; the Raspberry Pi 5's initramfs has them in /boot"))
+              (match (boot_copied vol files 0)
+                ((CopyStopped why2) (complain why2))
+                ((Copied n)
+                  (let why3 (if (is_empty u) "" (root_set vol u))
+                    (if (is_empty why3)
+                        (boot_archived vol n (to_copy paths) (if (is_empty u) "" (root_line vol root u)))
+                        (complain why3))))))))))
 
 ; input.bin written to vol, of paths, once n boot files are copied, and
 ; then said, with rooted, what was said of the root, after.
@@ -232,7 +232,8 @@
 (def has_dtb ((names (list (list int)))) bool
   (if (is_empty names)
       false
-      (if (if (starts_with (head names) "bcm2712") (ends_with (head names) ".dtb") false) true (has_dtb (tail names)))))
+      (and (starts_with (head names) "bcm2712") (ends_with (head names) ".dtb")) true
+      (has_dtb (tail names))))
 
 ; What install --boot says of vol's device tree: nothing if it has one;
 ; else that it must be copied there, as from a FROM that had none.
@@ -246,13 +247,13 @@
 ; install VOLUME, or install --boot VOLUME [FROM] [--root ROOT], as the
 ; arguments say.
 (def install () int
-  (if (if (ge (arg_count) 2) (eq (arg 0) "--boot") false)
+  (if (and (ge (arg_count) 2) (eq (arg 0) "--boot"))
       (match (boot_words (args_list 1))
         ((BootBad) (complain "usage: install --boot VOLUME [FROM] [--root ROOT]"))
         ((BootArgs vol from root) (boot_rooted (volume_named vol) (boot_dir from) root)))
-      (if (not (eq (arg_count) 1))
-          (complain "usage: install VOLUME, or install --boot VOLUME [FROM] [--root ROOT]")
-          (install_on (volume_named (arg 0))))))
+      (not (eq (arg_count) 1))
+      (complain "usage: install VOLUME, or install --boot VOLUME [FROM] [--root ROOT]")
+      (install_on (volume_named (arg 0)))))
 
 ; The arguments from i on, as a list.
 (def args_list ((i int)) (list (list int))
@@ -271,16 +272,14 @@
 (def boot_words_from ((ws (list (list int))) (plain (list (list int))) (root (list int))) BootAsked
   (if (is_empty ws)
       (let ps (rev plain)
-        (if (is_empty ps)
-            (BootBad)
-            (if (gt (length ps) 2)
-                (BootBad)
-                (BootArgs (head ps) (if (is_empty (tail ps)) "/boot" (nth ps 1)) root))))
-      (if (eq (head ws) "--root")
-          (if (if (is_empty (tail ws)) true (not (is_empty root)))
-              (BootBad)
-              (boot_words_from (tail (tail ws)) plain (head (tail ws))))
-          (boot_words_from (tail ws) (cons (head ws) plain) root))))
+        (if (is_empty ps) (BootBad)
+            (gt (length ps) 2) (BootBad)
+            (BootArgs (head ps) (if (is_empty (tail ps)) "/boot" (nth ps 1)) root)))
+      (eq (head ws) "--root")
+      (if (or (is_empty (tail ws)) (not (is_empty root)))
+          (BootBad)
+          (boot_words_from (tail (tail ws)) plain (head (tail ws))))
+      (boot_words_from (tail ws) (cons (head ws) plain) root)))
 
 ; A card's cmdline.txt, text, made to boot the volume whose UUID is u:
 ; its words kept but any root=, which root=u replaces, after them;
@@ -296,7 +295,8 @@
 (def not_root ((ws (list (list int)))) (list (list int))
   (if (is_empty ws)
       ws
-      (if (starts_with (head ws) "root=") (not_root (tail ws)) (cons (head ws) (not_root (tail ws))))))
+      (starts_with (head ws) "root=") (not_root (tail ws))
+      (cons (head ws) (not_root (tail ws)))))
 
 ; text without its line ends, which split_spaces would keep in a word.
 (def trim_line ((text (list int))) (list int)
@@ -314,35 +314,39 @@
 (def root_why ((vol (list int)) (root (list int)) (u (list int))) (list int)
   (if (eq root vol)
       (append root ": the boot volume; the root is another, which install VOLUME fills")
-      (if (eq (fs_port_of root) 0)
-          (append root ": no such volume is mounted")
-          (if (is_empty u) (append root ": it has no partition UUID to boot it by") ""))))
+      (eq (fs_port_of root) 0)
+      (append root ": no such volume is mounted")
+      (is_empty u)
+      (append root ": it has no partition UUID to boot it by")
+      ""))
 
 ; boot_on, and with a root, cmdline.txt made to boot it: the root
 ; checked first, before anything is written.
 (def boot_rooted ((vol (list int)) (from (list int)) (root (list int))) int
   (if (is_empty root)
       (boot_on vol from "" "")
-      (let r (volume_named root)
-        (let u (uuid_of (mount_list) r)
-          (let why (root_why vol r u)
-            (if (is_empty why) (boot_on vol from r u) (complain why)))))))
+      (let (r (volume_named root)
+            u (uuid_of (mount_list) r)
+            why (root_why vol r u))
+        (if (is_empty why) (boot_on vol from r u) (complain why)))))
 
 ; vol's cmdline.txt, or none, made to boot root=u: why not, or empty.
 (def root_set ((vol (list int)) (u (list int))) (list int)
-  (let p (append vol "/cmdline.txt")
-    (let old (match (read_whole p) ((Err why) "") ((Ok b) (bytes_to_list b)))
-      (let why (write_whole p (bytes_from_list (cmdline_rooted old u)))
-        (if (is_empty why) "" (append p (append ": " why)))))))
+  (let (p (append vol "/cmdline.txt")
+        old (match (read_whole p) ((Err why) "") ((Ok b) (bytes_to_list b)))
+        why (write_whole p (bytes_from_list (cmdline_rooted old u))))
+    (if (is_empty why) "" (append p (append ": " why)))))
 
 ; Why install may not write to vol, or empty: it must be a mounted
 ; volume, and not /.
 (def volume_why ((vol (list int))) (list int)
   (if (not (eq (fs_volume_of vol) vol))
       (append vol ": not a volume")
-      (if (eq (fs_port_of vol) 0)
-          (append vol ": no such volume is mounted")
-          (if (eq vol (fs_system_volume)) (append vol ": it is /, which install copies") ""))))
+      (eq (fs_port_of vol) 0)
+      (append vol ": no such volume is mounted")
+      (eq vol (fs_system_volume))
+      (append vol ": it is /, which install copies")
+      ""))
 
 ; L0S copied onto vol, if it is a mounted volume, and not /.
 (def install_on ((vol (list int))) int

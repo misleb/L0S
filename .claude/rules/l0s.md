@@ -26,7 +26,12 @@ changing code.
 - **Done** means `make check` and `make test` pass, and also `make e2e` for
   anything that boots, drives a device, draws or takes input, and
   `make test-virt` for the kernel. Say which ran; never claim L0 code works
-  without them.
+  without them. `make check` includes `l0 fmt --check` and lists `l0
+  check`'s copy warnings: add none.
+- **Write the new L0.** Named fields, `(.f r)` and `(.f r v)`, never an
+  accessor or one-field setter; one `let` of several bindings and one
+  `if` of several tests, not nests; `and`/`or` for guards. The `l0s-dev`
+  skill's "Patterns to copy" has the in-place forms.
 - **Document every top-level form** with a `;` block directly above it, no
   blank line between, and start every file with `; FILE.l0 -- summary`.
   `make doc` reads exactly that, and `make check` fails on a form without

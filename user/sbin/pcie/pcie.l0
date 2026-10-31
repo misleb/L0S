@@ -25,15 +25,15 @@
 (def function_line ((f PciFunction)) (list int)
   (match f
     ((PciFunction bdf vid did class irq bases sizes)
-      (let a1 (push (pci_bdf_text bdf) (nil int))
-        (let a2 (push (append " " (append (hex_digits vid 4) (append ":" (hex_digits did 4)))) a1)
-          (let a3 (push (append " class 0x" (hex_digits class 6)) a2)
-            (let a4 (push (append ", irq " (digits irq)) a3)
-              (rev (push (bars_line bases sizes 0) a4)))))))))
+      (let (a1 (push (pci_bdf_text bdf) (nil int))
+            a2 (push (append " " (append (hex_digits vid 4) (append ":" (hex_digits did 4)))) a1)
+            a3 (push (append " class 0x" (hex_digits class 6)) a2)
+            a4 (push (append ", irq " (digits irq)) a3))
+        (rev (push (bars_line bases sizes 0) a4))))))
 
 ; ", BAR i at 0xBASE, SIZE" for each BAR from i on that was placed.
 (def bars_line ((bases (list int)) (sizes (list int)) (i int)) (list int)
-  (if (if (is_empty bases) true (is_empty sizes))
+  (if (or (is_empty bases) (is_empty sizes))
       ""
       (append (if (gt (head sizes) 0)
                   (append ", BAR " (append (digits i) (append " at 0x" (append (hex_digits (head bases) 0)
@@ -52,9 +52,9 @@
 (def pcie () int
   (if (not (eq (args) (cons "virt" (nil (list int)))))
       (complain "usage: pcie virt")
-      (match (open_device (ecam_base) (ecam_bus_bytes))
-        ((DeviceFailed fault why) (complain (append "no ECAM: " why)))
-        ((DeviceOpened e)
+      (match (open_region (ecam_base) (ecam_bus_bytes))
+        ((IoRegionFailed fault why) (complain (append "no ECAM: " why)))
+        ((IoRegionOpened e)
           (match (scanned e 0 0 (Scan (window_base) (nil PciFunction)))
             ((Scan next fs) (serving e fs)))))))
 
@@ -66,33 +66,33 @@
 
 ; The functions of bus 0 from device dev's function fn on, found and set
 ; up, after s.
-(def scanned ((e IoDevice) (dev int) (fn int) (s Scan)) Scan
+(def scanned ((e IoRegion) (dev int) (fn int) (s Scan)) Scan
   (if (ge dev 32)
       (match s ((Scan next fs) (Scan next (rev fs))))
-      (let off (ecam_offset 0 dev fn)
-        (let ids (device_read32 e off)
-          (if (no_function ids)
-              (scanned e (add dev 1) 0 s)
-              (let more (if (eq fn 0) (multifunction (device_read32 e (add off (cfg_header)))) true)
-                (let s2 (function_set_up e dev fn off ids s)
-                  (if (if more (lt fn 7) false)
-                      (scanned e dev (add fn 1) s2)
-                      (scanned e (add dev 1) 0 s2)))))))))
+      (let (off (ecam_offset 0 dev fn)
+            ids (region_get32 e off))
+        (if (no_function ids)
+            (scanned e (add dev 1) 0 s)
+            (let (more (if (eq fn 0) (multifunction (region_get32 e (add off (cfg_header)))) true)
+                  s2 (function_set_up e dev fn off ids s))
+              (if (and more (lt fn 7))
+                  (scanned e dev (add fn 1) s2)
+                  (scanned e (add dev 1) 0 s2)))))))
 
 ; The function at off, its ids word ids, with its memory BARs placed
 ; from s's next on and its memory space and bus mastering turned on.
-(def function_set_up ((e IoDevice) (dev int) (fn int) (off int) (ids int) (s Scan)) Scan
+(def function_set_up ((e IoRegion) (dev int) (fn int) (off int) (ids int) (s Scan)) Scan
   (match s
     ((Scan next fs)
-      (let class (class_of (device_read32 e (add off (cfg_class))))
-        (let pin (interrupt_pin (device_read32 e (add off (cfg_interrupt))))
-          (let quiet (device_write32 e (add off (cfg_command)) 0)
-            (match (if (eq (header_type (device_read32 e (add off (cfg_header)))) 0)
-                       (bars_placed e off 0 next (nil int) (nil int))
-                       (Bars next (zeros 6) (zeros 6)))
-              ((Bars next2 bases sizes)
-                (let on (device_write32 e (add off (cfg_command)) (bit_or (command_memory) (command_master)))
-                  (Scan next2 (cons (PciFunction (bdf_of 0 dev fn) (ids_vendor ids) (ids_device ids) class (virt_intx dev pin) bases sizes) fs)))))))))))
+      (let (class (class_of (region_get32 e (add off (cfg_class))))
+            pin (interrupt_pin (region_get32 e (add off (cfg_interrupt))))
+            quiet (region_set32 e (add off (cfg_command)) 0))
+        (match (if (eq (header_type (region_get32 e (add off (cfg_header)))) 0)
+                   (bars_placed e off 0 next (nil int) (nil int))
+                   (Bars next (zeros 6) (zeros 6)))
+          ((Bars next2 bases sizes)
+            (let on (region_set32 e (add off (cfg_command)) (bit_or (command_memory) (command_master)))
+              (Scan next2 (cons (PciFunction (bdf_of 0 dev fn) (ids_vendor ids) (ids_device ids) class (virt_intx dev pin) bases sizes) fs)))))))))
 
 ; ------------------------------------------------------------------ MSIs
 
@@ -105,12 +105,12 @@
 ; and its number answered; the one it has if it was given one already;
 ; or why not. Only a driver that asks gets one, so a function no driver
 ; drives stays as the scan left it.
-(def msi_answer ((e IoDevice) (fs (list PciFunction)) (bdf int)) Given
+(def msi_answer ((e IoRegion) (fs (list PciFunction)) (bdf int)) Given
   (match (function_at fs bdf)
     ((None) (Given fs (error_reply (append "no function " (digits bdf)))))
     ((Some f)
-      (if (ge (pci_irq f) (virt_msi 0))
-          (Given fs (digits (pci_irq f)))
+      (if (ge (.irq f) (virt_msi 0))
+          (Given fs (digits (.irq f)))
           (let n (virt_msi (msis_given fs 0))
             (if (eq n 0)
                 (Given fs (error_reply "no MSI left"))
@@ -121,7 +121,7 @@
 
 ; The function of fs at bdf, or none.
 (def function_at ((fs (list PciFunction)) (bdf int)) (Option PciFunction)
-  (if (is_empty fs) ((None PciFunction)) (if (eq (pci_bdf (head fs)) bdf) (Some (head fs)) (function_at (tail fs) bdf))))
+  (if (is_empty fs) ((None PciFunction)) (eq (.bdf (head fs)) bdf) (Some (head fs)) (function_at (tail fs) bdf)))
 
 ; fs with the function at bdf's interrupt n, after the reversed acc.
 (def with_irq ((fs (list PciFunction)) (bdf int) (n int) (acc (list PciFunction))) (list PciFunction)
@@ -133,11 +133,11 @@
 
 ; How many of fs, and n more, signal MSIs.
 (def msis_given ((fs (list PciFunction)) (n int)) int
-  (if (is_empty fs) n (msis_given (tail fs) (if (ge (pci_irq (head fs)) (virt_msi 0)) (add n 1) n))))
+  (if (is_empty fs) n (msis_given (tail fs) (if (ge (.irq (head fs)) (virt_msi 0)) (add n 1) n))))
 
 ; Function f, at off, set to signal n: by MSI, or by MSI-X; empty, or
 ; why not.
-(def msi_given ((e IoDevice) (off int) (f PciFunction) (n int)) (list int)
+(def msi_given ((e IoRegion) (off int) (f PciFunction) (n int)) (list int)
   (let at (cap_found e off (cap_msi))
     (if (not (eq at 0))
         (let s (msi_set e off at n) "")
@@ -145,60 +145,61 @@
           (if (eq x 0) "it can signal no MSI" (msix_set e off x f n))))))
 
 ; Where in the function at off its capability id is; 0 for none.
-(def cap_found ((e IoDevice) (off int) (id int)) int
-  (if (has_capabilities (device_read32 e (add off (cfg_command))))
-      (cap_walked e off id (capabilities_at (device_read32 e (add off (cfg_capabilities)))) 48)
+(def cap_found ((e IoRegion) (off int) (id int)) int
+  (if (has_capabilities (region_get32 e (add off (cfg_command))))
+      (cap_walked e off id (capabilities_at (region_get32 e (add off (cfg_capabilities)))) 48)
       0))
 
 ; The capabilities list from at walked for id's, at most hops of it, so
 ; that a list that loops ends.
-(def cap_walked ((e IoDevice) (off int) (id int) (at int) (hops int)) int
-  (if (if (eq at 0) true (le hops 0))
+(def cap_walked ((e IoRegion) (off int) (id int) (at int) (hops int)) int
+  (if (or (eq at 0) (le hops 0))
       0
-      (let w (device_read32 e (add off at))
+      (let w (region_get32 e (add off at))
         (if (eq (cap_id w) id) at (cap_walked e off id (cap_next w) (sub hops 1))))))
 
 ; The function at off's MSI, its capability at at, set to write n to the
 ; GICv2m frame, and enabled, its INTx turned off: n.
-(def msi_set ((e IoDevice) (off int) (at int) (n int)) int
-  (let c (add off at)
-    (let w (device_read32 e c)
-      (let wide (msi_wide w)
-        (let a (device_write32 e (add c 4) (msi_address))
-          (let b (if wide (device_write32 e (add c 8) 0) 0)
-            (let d (device_write32 e (add c (msi_data_at wide)) n)
-              (let x (device_write32 e c (msi_enabled w))
-                (intx_off e off n)))))))))
+(def msi_set ((e IoRegion) (off int) (at int) (n int)) int
+  (let (c (add off at)
+        w (region_get32 e c)
+        wide (msi_wide w)
+        a (region_set32 e (add c 4) (msi_address))
+        b (if wide (region_set32 e (add c 8) 0) 0)
+        d (region_set32 e (add c (msi_data_at wide)) n)
+        x (region_set32 e c (msi_enabled w)))
+    (intx_off e off n)))
 
 ; The function at off's MSI-X, its capability at at: its table's first
 ; entry, through the BAR the table is in, set to write n to the GICv2m
 ; frame and unmasked, then MSI-X enabled, its INTx off; empty, or why
 ; not. The table's page is mapped only for that, and the function's
 ; other entries stay masked, as reset leaves them.
-(def msix_set ((e IoDevice) (off int) (at int) (f PciFunction) (n int)) (list int)
-  (let c (add off at)
-    (let t (device_read32 e (add c 4))
-      (let base (pci_bar_base f (msix_bir t))
-        (if (eq base 0)
-            "its MSI-X table is in no BAR placed"
-            (let where (add base (msix_offset t))
-              (match (open_device (bit_and where (bit_xor 4095 -1)) 4096)
-                ((DeviceFailed fault why) (append "cannot reach its MSI-X table: " why))
-                ((DeviceOpened r)
-                  (let i (bit_and where 4095)
-                    (let a (device_write32 r i (msi_address))
-                      (let b (device_write32 r (add i 4) 0)
-                        (let d (device_write32 r (add i 8) n)
-                          (let u (device_write32 r (add i 12) 0)
-                            (let z (close_device r)
-                              (let x (device_write32 e c (msix_enabled (device_read32 e c)))
-                                (let y (intx_off e off n) ""))))))))))))))))
+(def msix_set ((e IoRegion) (off int) (at int) (f PciFunction) (n int)) (list int)
+  (let (c (add off at)
+        t (region_get32 e (add c 4))
+        base (pci_bar_base f (msix_bir t)))
+    (if (eq base 0)
+        "its MSI-X table is in no BAR placed"
+        (let where (add base (msix_offset t))
+          (match (open_region (bit_and where (bit_xor 4095 -1)) 4096)
+            ((IoRegionFailed fault why) (append "cannot reach its MSI-X table: " why))
+            ((IoRegionOpened r)
+              (let (i (bit_and where 4095)
+                    a (region_set32 r i (msi_address))
+                    b (region_set32 r (add i 4) 0)
+                    d (region_set32 r (add i 8) n)
+                    u (region_set32 r (add i 12) 0)
+                    z (close_region r)
+                    x (region_set32 e c (msix_enabled (region_get32 e c)))
+                    y (intx_off e off n))
+                "")))))))
 
 ; The function at off's INTx turned off, its memory space and bus
 ; mastering left on: n. The command word is written with its status
 ; half 0, which clears none of its bits.
-(def intx_off ((e IoDevice) (off int) (n int)) int
-  (let i (device_write32 e (add off (cfg_command)) (bit_or (bit_or (command_memory) (command_master)) (command_intx_off)))
+(def intx_off ((e IoRegion) (off int) (n int)) int
+  (let i (region_set32 e (add off (cfg_command)) (bit_or (bit_or (command_memory) (command_master)) (command_intx_off)))
     n))
 
 ; BARs placed: where the next may go, and each BAR's base and size.
@@ -207,77 +208,75 @@
 ; BAR i on of the function at off placed from next, after the reversed
 ; bases and sizes: an I/O BAR, one not there, and one past the window
 ; left at 0 0, a 64-bit one taking BAR i + 1 too.
-(def bars_placed ((e IoDevice) (off int) (i int) (next int) (bases (list int)) (sizes (list int))) Bars
+(def bars_placed ((e IoRegion) (off int) (i int) (next int) (bases (list int)) (sizes (list int))) Bars
   (if (ge i 6)
       (Bars next (rev bases) (rev sizes))
-      (let at (add off (cfg_bar i))
-        (let w (device_read32 e at)
-          (if (bar_is_io w)
-              (bars_placed e off (add i 1) next (cons 0 bases) (cons 0 sizes))
-              (let wide (if (bar_is_64 w) (lt i 5) false)
-                (let lo (bar_probed e at)
-                  (let hi (if wide (bar_probed e (add at 4)) 0)
-                    (bar_sized e off i wide (bar_size lo hi) next bases sizes)))))))))
+      (let (at (add off (cfg_bar i))
+            w (region_get32 e at))
+        (if (bar_is_io w)
+            (bars_placed e off (add i 1) next (cons 0 bases) (cons 0 sizes))
+            (let (wide (and (bar_is_64 w) (lt i 5))
+                  lo (bar_probed e at)
+                  hi (if wide (bar_probed e (add at 4)) 0))
+              (bar_sized e off i wide (bar_size lo hi) next bases sizes))))))
 
 ; BAR i, of size, put at the first place from next it fits, and the
 ; BARs after it placed.
-(def bar_sized ((e IoDevice) (off int) (i int) (wide bool) (size int) (next int) (bases (list int)) (sizes (list int))) Bars
-  (let at (add off (cfg_bar i))
-    (let base (bar_place next size)
-      (if (if (eq size 0) true (not (in_window base size)))
-          (bars_skipped e off i wide next bases sizes)
-          (let a (device_write32 e at (bit_and base 4294967295))
-            (let b (if wide (device_write32 e (add at 4) (bit_shr base 32)) 0)
-              (if wide
-                  (bars_placed e off (add i 2) (add base (bar_span size)) (cons 0 (cons base bases)) (cons 0 (cons size sizes)))
-                  (bars_placed e off (add i 1) (add base (bar_span size)) (cons base bases) (cons size sizes)))))))))
+(def bar_sized ((e IoRegion) (off int) (i int) (wide bool) (size int) (next int) (bases (list int)) (sizes (list int))) Bars
+  (let (at (add off (cfg_bar i))
+        base (bar_place next size))
+    (if (or (eq size 0) (not (in_window base size)))
+        (bars_skipped e off i wide next bases sizes)
+        (let (a (region_set32 e at (bit_and base 4294967295))
+              b (if wide (region_set32 e (add at 4) (bit_shr base 32)) 0))
+          (if wide
+              (bars_placed e off (add i 2) (add base (bar_span size)) (cons 0 (cons base bases)) (cons 0 (cons size sizes)))
+              (bars_placed e off (add i 1) (add base (bar_span size)) (cons base bases) (cons size sizes)))))))
 
 ; BAR i left at 0 0, and the next too if it is a 64-bit one's high half.
-(def bars_skipped ((e IoDevice) (off int) (i int) (wide bool) (next int) (bases (list int)) (sizes (list int))) Bars
+(def bars_skipped ((e IoRegion) (off int) (i int) (wide bool) (next int) (bases (list int)) (sizes (list int))) Bars
   (if wide
       (bars_placed e off (add i 2) next (cons 0 (cons 0 bases)) (cons 0 (cons 0 sizes)))
       (bars_placed e off (add i 1) next (cons 0 bases) (cons 0 sizes))))
 
 ; What the BAR word at at reads once written all 1s, which says its size.
-(def bar_probed ((e IoDevice) (at int)) int
-  (let w (device_write32 e at 4294967295)
-    (device_read32 e at)))
+(def bar_probed ((e IoRegion) (at int)) int
+  (let w (region_set32 e at 4294967295)
+    (region_get32 e at)))
 
 ; --------------------------------------------------------------- serving
 
 ; pci registered, and served with what was found, through the ECAM e.
-(def serving ((e IoDevice) (fs (list PciFunction))) int
-  (let port (port_new)
-    (let r (name_register_or_why port "pci")
-      (if (is_empty r)
-          (let n (functions_said fs 0)
-            (serve e fs port))
-          (complain r)))))
+(def serving ((e IoRegion) (fs (list PciFunction))) int
+  (let (port (port_new) r (name_register_or_why port "pci"))
+    (if (is_empty r)
+        (let n (functions_said fs 0)
+          (serve e fs port))
+        (complain r))))
 
 ; Each request answered, for ever: msi, which sets a function up, and so
 ; changes what is served, through e; the rest from what was found.
-(def serve ((e IoDevice) (fs (list PciFunction)) (port int)) int
+(def serve ((e IoRegion) (fs (list PciFunction)) (port int)) int
   (match (port_receive port)
     ((RecvFailed) (complain "lost its port"))
     ((Message from mb)
-      (let payload (msg_text mb)
-      (let body (request_body payload)
+      (let (payload (msg_text mb) body (request_body payload))
         (match (msi_asked body)
           ((Some bdf)
             (match (msi_answer e fs bdf)
               ((Given fs2 a)
-                (let s (request_answer payload a)
-                  (let w (if (eq fs2 fs) 0 (info_as "pcie" (msi_line bdf a)))
-                    (serve e fs2 port))))))
+                (let (s (request_answer payload a)
+                      w (if (eq fs2 fs) 0 (info_as "pcie" (msi_line bdf a))))
+                  (serve e fs2 port)))))
           ((None)
             (let s (request_answer payload (pci_answer fs body))
-              (serve e fs port)))))))))
+              (serve e fs port))))))))
 
 ; The BDF an msi request asks for, or none if it is not one.
 (def msi_asked ((body (list int))) (Option int)
   (match (request_numbers body)
     ((ReqBad why) ((None int)))
-    ((ReqNums op ns) (if (if (eq op "msi") (eq (length ns) 1) false) (Some (head ns)) ((None int))))))
+    ((ReqNums op ns) (if (and (eq op "msi") (eq (length ns) 1)) (Some (head ns)) ((None int))))))
 
 ; The line saying a function was given MSI a.
 (def msi_line ((bdf int) (a (list int))) (list int)
@@ -290,7 +289,7 @@
       (match (request_numbers body)
         ((ReqBad why) (error_reply why))
         ((ReqNums op ns)
-          (if (if (eq op "find") (eq (length ns) 1) false)
+          (if (and (eq op "find") (eq (length ns) 1))
               (functions_text fs (head ns) true (nil int))
               (error_reply (append "no request " op)))))))
 
@@ -301,4 +300,4 @@
       (functions_text (tail fs) class only
         (match (head fs)
           ((PciFunction bdf vid did c irq bases sizes)
-            (if (if only (not (eq c class)) false) acc (push (pci_function_line (head fs)) acc)))))))
+            (if (and only (not (eq c class))) acc (push (pci_function_line (head fs)) acc)))))))

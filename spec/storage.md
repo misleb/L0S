@@ -234,8 +234,8 @@ damaged disk is refused rather than followed.
   may wait for one run of 64 KB (see [Volumes](#volumes)), and for the
   whole of a `format`, `mkfs` or `partition` once that has begun; and a read or a write moves at most 64 KB, what a client's
   file window holds (see [File windows](kernel.md#a-processs-memory)),
-  which `fs` copies in and out of with L0's `device_read_bytes` and
-  `device_write_bytes`, as it does its disk's buffer. A
+  which `fs` copies in and out of with L0's `region_get_bytes` and
+  `region_set_bytes`, as it does its disk's buffer. A
   file's writes are written as data alone, its clusters one after
   another on the disk joined into requests of up to 32 KB, and the
   metadata they change, the file's size and chain, is kept in `fs`'s

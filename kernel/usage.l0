@@ -11,7 +11,7 @@
 ; there (cpus_place, cpus_back); the time CPU 0 spent waiting; and the
 ; load: the averages over 1, 5 and 15 minutes, in fixed point of
 ; usage_fixed, then when they are next sampled.
-(data Usage (Usage int (array int) (array int) (array int) (array int) (array int) int (array int)))
+(data Usage (Usage (start int) (times (array int)) (last (array int)) (born (array int)) (busy (array int)) (from (array int)) (waited int) (load (array int))))
 
 ; The slots a process table has, as pids.l0's slot_of numbers them: 0 to
 ; 255, a pid's low 8 bits.
@@ -25,7 +25,7 @@
 ; average's decay over one tick, 2048 / e^(5/60), e^(5/300) and e^(5/900),
 ; Linux's EXP_1, EXP_5 and EXP_15.
 (def usage_fixed () int 2048)
-(def usage_exp ((i int)) int (if (eq i 0) 1884 (if (eq i 1) 2014 2037)))
+(def usage_exp ((i int)) int (if (eq i 0) 1884 (eq i 1) 2014 2037))
 
 ; The counts for cpus CPUs, started at now: nothing run, the load 0.
 (def usage_new ((cpus int) (now int)) Usage
@@ -35,9 +35,6 @@
            (array_set (array_new 4 0) 3 (add now (usage_tick_ns))))))
 
 ; ----------------------------------------------------------------- readers
-
-; When u started counting, at the kernel's boot.
-(def usage_start ((u Usage)) int (match u ((Usage at times last born busy from waited load) at)))
 
 ; How many CPUs u counts.
 (def usage_cpus ((u Usage)) int (match u ((Usage at times last born busy from waited load) (array_len busy))))
@@ -58,10 +55,7 @@
 (def usage_busy ((u Usage) (i int)) int
   (match u
     ((Usage at times last born busy from waited load)
-      (if (if (lt i 0) true (ge i (array_len busy))) 0 (array_get busy i)))))
-
-; How long CPU 0 waited, for a trap, the timer or a device, in ns.
-(def usage_waited ((u Usage)) int (match u ((Usage at times last born busy from waited load) waited)))
+      (if (or (lt i 0) (ge i (array_len busy))) 0 (array_get busy i)))))
 
 ; The load average i (0 over 1 minute, 1 over 5, 2 over 15), in fixed
 ; point of usage_fixed.
@@ -86,7 +80,7 @@
 (def usage_charge ((u Usage) (pid int) (cpu int) (t int)) Usage
   (match u
     ((Usage at times last born busy from waited load)
-      (if (if (lt t 0) true (if (lt cpu 0) true (ge cpu (array_len busy))))
+      (if (or (lt t 0) (or (lt cpu 0) (ge cpu (array_len busy))))
           (Usage at times last born busy from waited load)
           (let s (usage_slot pid)
             (Usage at (array_set times s (add (array_get times s) t)) (array_set last s cpu) born
@@ -98,7 +92,7 @@
 (def usage_placed ((u Usage) (cpu int) (now int) (idle bool)) Usage
   (match u
     ((Usage at times last born busy from waited load)
-      (if (if (not idle) true (if (lt cpu 0) true (ge cpu (array_len busy))))
+      (if (or (not idle) (or (lt cpu 0) (ge cpu (array_len busy))))
           (Usage at times last born busy from waited load)
           (Usage at times last born busy (array_set from cpu now) waited load)))))
 
@@ -106,7 +100,7 @@
 ; handed: charged from the later of handed and the return of the thread
 ; before it there, to now; and the CPU's next thread running from now.
 (def usage_back ((u Usage) (pid int) (cpu int) (handed int) (now int)) Usage
-  (if (if (lt cpu 0) true (ge cpu (usage_cpus u)))
+  (if (or (lt cpu 0) (ge cpu (usage_cpus u)))
       u
       (let began (max handed (usage_from u cpu))
         (match (usage_charge u pid cpu (sub now began))
@@ -119,9 +113,7 @@
 
 ; u with t ns more of CPU 0 waiting.
 (def usage_wait ((u Usage) (t int)) Usage
-  (match u
-    ((Usage at times last born busy from waited load)
-      (Usage at times last born busy from (add waited (max 0 t)) load))))
+  (.waited u (add (.waited u) (max 0 t))))
 
 ; ------------------------------------------------------------------- load
 
@@ -132,9 +124,9 @@
 ; with n threads ready or running, each 1.0, rounded up while the load
 ; rises.
 (def load_next ((load int) (e int) (n int)) int
-  (let active (mul (max 0 n) (usage_fixed))
-    (let v (add (mul load e) (mul active (sub (usage_fixed) e)))
-      (div (if (ge active load) (add v (sub (usage_fixed) 1)) v) (usage_fixed)))))
+  (let (active (mul (max 0 n) (usage_fixed))
+        v (add (mul load e) (mul active (sub (usage_fixed) e))))
+    (div (if (ge active load) (add v (sub (usage_fixed) 1)) v) (usage_fixed))))
 
 ; u with the load sampled at now, n threads ready or running: once for
 ; each tick due by now, at most usage_ticks_max of them, each with n, as
@@ -149,7 +141,7 @@
 
 ; usage_tick's loop: each tick due by now sampled, at most left more.
 (def usage_ticks ((u Usage) (now int) (n int) (left int)) Usage
-  (if (if (le left 0) true (not (usage_due u now)))
+  (if (or (le left 0) (not (usage_due u now)))
       (usage_skip u now)
       (usage_ticks (usage_sampled u n) now n (sub left 1))))
 
@@ -166,20 +158,20 @@
 (def usage_sampled ((u Usage) (n int)) Usage
   (match u
     ((Usage at times last born busy from waited load)
-      (let a (load_next (array_get load 0) (usage_exp 0) n)
-        (let b (load_next (array_get load 1) (usage_exp 1) n)
-          (let c (load_next (array_get load 2) (usage_exp 2) n)
-            (let t (add (array_get load 3) (usage_tick_ns))
-              (Usage at times last born busy from waited
-                     (array_set (array_set (array_set (array_set load 0 a) 1 b) 2 c) 3 t)))))))))
+      (let (a (load_next (array_get load 0) (usage_exp 0) n)
+            b (load_next (array_get load 1) (usage_exp 1) n)
+            c (load_next (array_get load 2) (usage_exp 2) n)
+            t (add (array_get load 3) (usage_tick_ns)))
+        (Usage at times last born busy from waited
+               (array_set (array_set (array_set (array_set load 0 a) 1 b) 2 c) 3 t))))))
 
 ; ---------------------------------------------------------------- records
 
 ; The cpu_record of u at now, abi.l0's: the load, the time since u
 ; started, CPU 0's time waiting, and each CPU's busy time.
 (def usage_record ((u Usage) (now int)) (list int)
-  (cpu_record (usage_load u 0) (usage_load u 1) (usage_load u 2) (max 0 (sub now (usage_start u)))
-              (usage_waited u) (usage_busy_list u 0 (nil int))))
+  (cpu_record (usage_load u 0) (usage_load u 1) (usage_load u 2) (max 0 (sub now (.start u)))
+              (.waited u) (usage_busy_list u 0 (nil int))))
 
 ; Each CPU's busy time, from CPU i on, after the reversed acc.
 (def usage_busy_list ((u Usage) (i int) (acc (list int))) (list int)
