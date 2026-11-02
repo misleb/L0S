@@ -314,7 +314,7 @@ after it and its acts, which the caller does in order:
   reason: `end_turn`, `stop_sequence`, `max_tokens` and the rest.
 - An error event is told, and the turn is done, `error`; what had come
   of the answer is dropped.
-- After 32 rounds of tools in one turn (`loop_rounds_max`) the turn is
+- After 128 rounds of tools in one turn (`loop_rounds_max`) the turn is
   done, `rounds`, saying so, the last results kept.
 - `loop_cancel` ends a turn, `stopped`: each tool still awaited is
   answered as failed, so the conversation stays one the API takes.
@@ -481,7 +481,7 @@ connection, and the proxy ends the session.
   under it, and `agentd`'s next write puts its own back: a restored
   conversation holds from `agentd`'s next start only.
 - A `say`'s text is at most what one message holds, some 4 KB.
-- At most 32 rounds of tools in one turn.
+- At most 128 rounds of tools in one turn.
 - Its limits are its rules only: the tools take any path and any
   window, and nothing asks the person's yes.
 - A prompt's source is any word its client names, vouched for only by
