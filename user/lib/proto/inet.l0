@@ -44,6 +44,9 @@
 ;                           port, more than 16384 resets the connection
 ;   finish ID               ok: connection ID closed once its data is sent
 ;   reset ID                ok: connection ID given up, with a reset
+;   took ID N               nothing: connection ID's owner has read its
+;                           ring up to N bytes from the first, as a data
+;                           notice told it, so the ring may take more
 ;   tcp                     a line ID STATE LPORT ADDR:RPORT for each
 ;                           connection, and listen PORT for each listener
 ;
@@ -59,11 +62,16 @@
 ;
 ; and, to the port a connection's owner named, each as a TcpEvent:
 ;
-;   tcp ID up               connection ID, which the client opened, is open
-;   tcp ID accepted SRC SPORT LPORT
+;   tcp ID up VA            connection ID, which the client opened, is
+;                           open, its ring at VA in the client, 0 for none
+;   tcp ID accepted SRC SPORT LPORT VA
 ;                           a connection to LPORT, which the client
-;                           listens to, from SPORT at SRC, is open, as ID
-;   tcp ID data             then a newline and the data that came
+;                           listens to, from SPORT at SRC, is open, as ID,
+;                           its ring at VA
+;   tcp ID data N           the ring holds the data up to N bytes from the
+;                           connection's first: read it, then say took
+;   tcp ID data             then a newline and the data that came, for a
+;                           connection with no ring
 ;   tcp ID fin              the peer will send no more
 ;   tcp ID room N           a write refused as full may be made again:
 ;                           what it holds has fallen to half, and N
@@ -407,25 +415,96 @@
 ; -------------------------------------------------------------------- TCP
 
 ; What a notice about a TCP connection tells: that one this process opened
-; is up; that a listener's port was connected to, from an address and port,
-; as a connection with this number; data that came; that the peer will send
-; no more; or that the connection is gone, and why, in one word: closed (it
-; ended as it should), reset, refused, timeout, aborted, or overflow (the
-; process did not take its notices fast enough); that a write refused
-; for want of room may be made again, so many bytes of it; or, read in
-; place by tcp_event_in, data that came, from an index into the bytes
-; received to their end.
-(data TcpEvent (TcpUp int) (TcpAccepted int int int int) (TcpData int (list int)) (TcpFin int) (TcpClosed int (list int))
-               (TcpRoom int int) (TcpDataAt int int))
+; is up, with where its ring is in this process, 0 for none; that a
+; listener's port was connected to, from an address and port, as a
+; connection with this number, and its ring; data that came, in the
+; notice, for a connection with no ring; that the peer will send no
+; more; or that the connection is gone, and why, in one word: closed (it
+; ended as it should), reset, refused, timeout, aborted, or overflow;
+; that a write refused for want of room may be made again, so many bytes
+; of it; read in place by tcp_event_in, data that came in the notice,
+; from an index into the bytes received to their end; or that the ring
+; holds the connection's data up to so many bytes from its first, which
+; the process reads (tcp_rx_take) and then says it took (tcp_took).
+(data TcpEvent (TcpUp int int) (TcpAccepted int int int int int) (TcpData int (list int)) (TcpFin int) (TcpClosed int (list int))
+               (TcpRoom int int) (TcpDataAt int int) (TcpGot int int))
+
+; The pages of a connection's ring: inet puts what comes into them, from
+; the start again once it has reached their end, and offers the peer a
+; window of their room, so that a process that takes its data slowly
+; slows the peer, and loses nothing.
+(def tcp_ring_pages () int 16)
+
+; A run of a ring's bytes: where it starts and how many.
+(data TcpSpan (TcpSpan (at int) (n int)))
+
+; The runs of a ring of size bytes holding the bytes from from up to to,
+; counted from the connection's first: one, or two where it wraps; none
+; if there are none.
+(def tcp_ring_spans ((from int) (to int) (size int)) (list TcpSpan)
+  (let (n (sub to from)
+        at (mod from size)
+        first (min n (sub size at)))
+    (if (le n 0) (nil TcpSpan)
+        (eq first n) (cons (TcpSpan at n) (nil TcpSpan))
+        (cons (TcpSpan at first) (cons (TcpSpan 0 (sub n first)) (nil TcpSpan))))))
+
+; A connection's ring as its process reads it: where it is, the region
+; over it, and how many bytes from the connection's first it has read.
+(data TcpRx (TcpRx (va int) (region IoRegion) (got int)))
+
+; The ring at va, opened to read, or none for va 0 (a connection inet
+; gave no ring, which tells its data in its notices) or a ring that
+; cannot be opened.
+(def tcp_rx_open ((va int)) (Option TcpRx)
+  (if (eq va 0)
+      ((None TcpRx))
+      (match (dma_open va (tcp_ring_pages))
+        ((IoRegionOpened g) (Some (TcpRx va g 0)))
+        ((IoRegionFailed fault why) ((None TcpRx))))))
+
+; What a read of a ring gave: the bytes, and the ring after.
+(data TcpRxTook (TcpRxTook bytes TcpRx))
+
+; The bytes of rx's ring from what it has read up to total, which a data
+; notice said it holds, and rx having read them; none if it has.
+(def tcp_rx_take ((rx TcpRx) (total int)) TcpRxTook
+  (let ss (tcp_ring_spans (.got rx) total (mul (tcp_ring_pages) (page_size)))
+    (TcpRxTook (bytes_concat (tcp_rx_spans (.region rx) ss (nil bytes))) (.got rx (max total (.got rx))))))
+
+; The bytes of each of ss in g, reversed onto acc, in order.
+(def tcp_rx_spans ((g IoRegion) (ss (list TcpSpan)) (acc (list bytes))) (list bytes)
+  (if (is_empty ss)
+      (rev acc)
+      (tcp_rx_spans g (tail ss) (cons (region_get_bytes g (.at (head ss)) (.n (head ss))) acc))))
+
+; rx given up once its connection is: the region closed and the pages
+; unmapped, freed once inet has given them up too.
+(def tcp_rx_free ((rx TcpRx)) int
+  (match (shm_region_free (.va rx) (tcp_ring_pages) (.region rx))
+    ((ShmUnmapped) 0)
+    ((ShmUnmapNotYours) -1)
+    ((ShmUnmapTooMany) -1)))
+
+; Connection id told this process took its data up to total bytes from
+; its first, so that inet may fill the ring again: empty once inet has
+; it, or why not. The request is sent again after a millisecond while
+; inet's queue is full, as a write's is, since a lost one would leave
+; the peer waiting for room that never comes.
+(def tcp_took ((n Inet) (id int) (total int)) (list int)
+  (match n
+    ((NoInet why) why)
+    ((Inet port rp) (tcp_write_chunk_as port (append "took " (unwords (numbers_words (cons id (cons total (nil int)))))) 0))))
 
 ; The tcp notice of e, as inet sends it to the port a connection's notices
 ; go to; of TcpDataAt, only its first line, with its newline, which the
 ; data follows.
 (def tcp_notice ((e TcpEvent)) (list int)
   (match e
-    ((TcpUp id) (unwords (cons "tcp" (cons (digits id) (cons "up" (nil (list int)))))))
-    ((TcpAccepted id src sport lport)
-      (unwords (cons "tcp" (cons (digits id) (cons "accepted" (cons (ip_text src) (numbers_words (cons sport (cons lport (nil int))))))))))
+    ((TcpUp id va) (unwords (cons "tcp" (cons (digits id) (cons "up" (cons (digits va) (nil (list int))))))))
+    ((TcpAccepted id src sport lport va)
+      (unwords (cons "tcp" (cons (digits id) (cons "accepted" (cons (ip_text src) (numbers_words (cons sport (cons lport (cons va (nil int)))))))))))
+    ((TcpGot id total) (unwords (cons "tcp" (cons (digits id) (cons "data" (cons (digits total) (nil (list int))))))))
     ((TcpData id body) (append (unwords (cons "tcp" (cons (digits id) (cons "data" (nil (list int)))))) (cons 10 body)))
     ((TcpFin id) (unwords (cons "tcp" (cons (digits id) (cons "fin" (nil (list int)))))))
     ((TcpClosed id why) (unwords (cons "tcp" (cons (digits id) (cons "closed" (cons why (nil (list int))))))))
@@ -446,19 +525,29 @@
 ; The event for connection id of the notice's kind, its other words, and the
 ; lines after its first.
 (def tcp_event_words ((id int) (kind (list int)) (rest (list (list int))) (body (list int))) (Option TcpEvent)
-  (if (and (eq kind "up") (is_empty rest)) (Some (TcpUp id))
+  (if (eq kind "up") (tcp_number_of id rest (UpOf))
       (and (eq kind "fin") (is_empty rest)) (Some (TcpFin id))
       (and (eq kind "data") (is_empty rest)) (Some (TcpData id body))
+      (eq kind "data") (tcp_number_of id rest (GotOf))
       (eq kind "closed") (Some (TcpClosed id (unwords rest)))
-      (and (eq kind "accepted") (eq (length rest) 3)) (tcp_accepted_of id rest)
-      (eq kind "room") (tcp_room_of id rest)
+      (and (eq kind "accepted") (eq (length rest) 4)) (tcp_accepted_of id rest)
+      (eq kind "room") (tcp_number_of id rest (RoomOf))
       ((None TcpEvent))))
 
-; The room event of connection id, from the word N.
-(def tcp_room_of ((id int) (ws (list (list int)))) (Option TcpEvent)
+; The events whose notice is one number after their kind.
+(data TcpNumbered (UpOf) (GotOf) (RoomOf))
+
+; The event k of connection id, from the one word N in ws.
+(def tcp_number_of ((id int) (ws (list (list int))) (k TcpNumbered)) (Option TcpEvent)
   (match (word_numbers ws)
     ((None) ((None TcpEvent)))
-    ((Some ns) (if (eq (length ns) 1) (Some (TcpRoom id (head ns))) ((None TcpEvent))))))
+    ((Some ns)
+      (if (not (eq (length ns) 1))
+          ((None TcpEvent))
+          (match k
+            ((UpOf) (Some (TcpUp id (head ns))))
+            ((GotOf) (Some (TcpGot id (head ns))))
+            ((RoomOf) (Some (TcpRoom id (head ns)))))))))
 
 ; The event a tcp notice holds, read in place from the bytes b of the
 ; message it came in (a Message's, its sender first), or none if it is
@@ -476,22 +565,23 @@
             (match (word_number (nth ws 1))
               ((None) ((None TcpEvent)))
               ((Some id)
-                (if (eq (nth ws 2) "data")
-                    (if (or (lt nl 0) (gt (length ws) 3)) ((None TcpEvent)) (Some (TcpDataAt id (add nl 1))))
+                (if (and (eq (nth ws 2) "data") (eq (length ws) 3))
+                    (if (lt nl 0) ((None TcpEvent)) (Some (TcpDataAt id (add nl 1))))
                     (tcp_event_words id (nth ws 2) (drop ws 3) (nil int)))))))))
 
 ; The index of the first byte c in b from i on, or -1 if there is none.
 (def bytes_index_of ((b bytes) (i int) (c int)) int
   (if (ge i (bytes_len b)) -1 (eq (bytes_get b i) c) i (bytes_index_of b (add i 1) c)))
 
-; The accepted event of connection id, from the words ADDR PORT LPORT.
+; The accepted event of connection id, from the words ADDR PORT LPORT
+; VA.
 (def tcp_accepted_of ((id int) (ws (list (list int)))) (Option TcpEvent)
   (match (ip_parse (nth ws 0))
     ((None) ((None TcpEvent)))
     ((Some src)
       (match (word_numbers (tail ws))
         ((None) ((None TcpEvent)))
-        ((Some ps) (Some (TcpAccepted id src (nth ps 0) (nth ps 1))))))))
+        ((Some ps) (Some (TcpAccepted id src (nth ps 0) (nth ps 1) (nth ps 2))))))))
 
 ; A connection to port at dst, opened for this process, whose notices go
 ; to the port np, which must be this process's: its number and its local
@@ -541,14 +631,20 @@
 ; millisecond if inet's queue is full, until it has been tried
 ; tcp_write_tries times, tries of them already.
 (def tcp_write_chunk ((port int) (id int) (chunk (list int)) (tries int)) (list int)
-  (match (port_send port (request 0 (append "write " (append (digits id) (cons 10 chunk)))))
+  (tcp_write_chunk_as port (append "write " (append (digits id) (cons 10 chunk))) tries))
+
+; The request body, which nothing answers, sent to inet's port, again
+; after a millisecond if its queue is full, until it has been tried
+; tcp_write_tries times, tries of them already.
+(def tcp_write_chunk_as ((port int) (body (list int)) (tries int)) (list int)
+  (match (port_send port (request 0 body))
     ((Sent) (nil int))
     ((SendNoPort) "inet is gone")
     ((SendTooBig) "a write is too big")
     ((SendFull)
       (if (ge tries (tcp_write_tries))
           "inet does not take its requests"
-          (let z (sleep_ns 1000000) (tcp_write_chunk port id chunk (add tries 1)))))))
+          (let z (sleep_ns 1000000) (tcp_write_chunk_as port body (add tries 1)))))))
 
 ; What tcp_write_bytes did: the notices that came to the connection's
 ; notice port while it waited for room, each the bytes of its message,
@@ -613,8 +709,9 @@
           (match e
             ((TcpRoom i n) (if (eq i id) (TcpWrote kept "") (tcp_room_wait np id (cons mb kept))))
             ((TcpClosed i w) (if (eq i id) (TcpWrote (cons mb kept) (append "the connection closed: " w)) (tcp_room_wait np id (cons mb kept))))
-            ((TcpUp i) (tcp_room_wait np id (cons mb kept)))
-            ((TcpAccepted i src sp lp) (tcp_room_wait np id (cons mb kept)))
+            ((TcpUp i va) (tcp_room_wait np id (cons mb kept)))
+            ((TcpAccepted i src sp lp va) (tcp_room_wait np id (cons mb kept)))
+            ((TcpGot i total) (tcp_room_wait np id (cons mb kept)))
             ((TcpData i d) (tcp_room_wait np id (cons mb kept)))
             ((TcpDataAt i at) (tcp_room_wait np id (cons mb kept)))
             ((TcpFin i) (tcp_room_wait np id (cons mb kept)))))))))

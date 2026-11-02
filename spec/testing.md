@@ -49,7 +49,8 @@ model, the engrams' hash pinned to the reference's, and
 `WHISTLE=PATH tests/listen.sh` boots `listen` alone with the model and
 oracle.py's recordings in its initramfs, and checks each line of text
 is the reference's; `make e2e` does not run it, as the model is not in
-the project, and without `WHISTLE` it says it skipped.
+the project. Without `WHISTLE` it takes `build/fetch/whistle.cact`,
+which `make release` fetches, and with neither it says it skipped.
 
 `user/sbin/fs/turns_test.l0` pins the order `fs` serves what waits on
 its port in: notices before every request, and an exited pid's
@@ -353,8 +354,9 @@ Ctrl-C as a person would:
 - `net_echo`, with a forward from a port of the host's loopback to port
   7000 of the board, has `net echo` listen to it, take the connection
   [a client on the host](../tests/e2e/net_echo/peer.py) makes, which sends
-  12000 bytes and closes its end, and send them back, which that client
-  checks; and `net tcp` show no connection is left.
+  300000 bytes, over four times a connection's 64 KB ring, and closes its
+  end, and send them back, which that client checks; and `net tcp` show
+  no connection is left.
 
 `files` reads the initramfs through `cat`. `virtio-gpu_nodev`,
 `virtio-blk_nodev` and `virtio-net_nodev` start a driver with no `dev`

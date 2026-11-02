@@ -146,6 +146,54 @@
   (check_str "accepted, then data" (says (.conn (accepting)) 0 (Seg 49152 80 7001 9001 (tcp_ack) 4096 0 "GET"))
              "accepted ; data GET ; send ACK 80>49152 s9001 a7004 w8192"))
 
+; An established connection holding n bytes of notices for its
+; application.
+(def holding ((n int)) Conn (.late (established) (cons (bytes_from_list (repeat n 97)) (nil bytes))))
+
+; Holding 8000 bytes, the window offered is the 192 left, and data that
+; fits is taken.
+(def test_window_less_held () int
+  (check_str "taken" (says (holding 8000) 0 (from_peer 5001 1001 (tcp_ack) 4096 "hi"))
+             "data hi ; send ACK 49152>80 s1001 a5003 w192"))
+
+; Data past what is left is cut to it: 3 bytes of 5.
+(def test_window_cuts () int
+  (check_str "cut" (says (holding 8189) 0 (from_peer 5001 1001 (tcp_ack) 4096 "hello"))
+             "data hel ; send ACK 49152>80 s1001 a5004 w3"))
+
+; Holding the whole window, data is not taken, and the acknowledgement
+; offers none; an empty ACK at the next byte still counts.
+(def test_window_closed () int
+  (add (check_str "refused" (says (holding 8192) 0 (from_peer 5001 1001 (tcp_ack) 4096 "hi"))
+                  "send ACK 49152>80 s1001 a5001 w0")
+       (check_str "an ACK" (says (holding 8192) 0 (from_peer 5001 1001 (tcp_ack) 4096 (nil int))) "")))
+
+; Once the application has taken what was held, the window opened is
+; offered at once.
+(def test_reopened () int
+  (check_str "update" (acts_text (tcp_reopened (established))) "send ACK 49152>80 s1001 a5001 w8192"))
+
+; An established connection with a ring that has taken wrote bytes, of
+; which the application took took. Its region is never written here.
+(def ringed ((wrote int) (took int)) Conn
+  (.ring (established) (Some (TcpRing 0 0 (IoRegion 0) wrote wrote took wrote))))
+
+; With a ring, the window is its room: 65536 less the 60000 not taken,
+; 5536, less the 2 bytes that came, 5534; and they are counted in.
+(def test_ring_window () int
+  (let st (tcp_arrive (ringed 60000 0) 0 (from_peer 5001 1001 (tcp_ack) 4096 "hi"))
+    (add (check_str "taken" (acts_text st) "data hi ; send ACK 49152>80 s1001 a5003 w5534")
+         (check_int "counted" (match (.ring (.conn st)) ((Some r) (.wrote r)) ((None) -1)) 60002))))
+
+; A full ring offers no window, and takes nothing.
+(def test_ring_full () int
+  (check_str "refused" (says (ringed 65536 0) 0 (from_peer 5001 1001 (tcp_ack) 4096 "hi"))
+             "send ACK 49152>80 s1001 a5001 w0"))
+
+; An empty ring's 65536 bytes are more than a window can say: 65535.
+(def test_ring_window_max () int
+  (check_int "65535" (tcp_room (ringed 70000 70000)) 65535))
+
 ; The SYN again, because the SYN and ACK was lost: it is sent again.
 (def test_passive_syn_again () int
   (check_str "again" (says (.conn (accepting)) 0 (syn_from_peer)) "send SYN|ACK 80>49152 s9000 a7001 w8192 m1460"))

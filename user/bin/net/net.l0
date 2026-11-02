@@ -253,40 +253,94 @@
   (match (port_receive np)
     ((RecvFailed) (complain "lost its port"))
     ((Message from b)
-      (match (tcp_event_of (msg_text b))
+      (match (tcp_event_in b)
         ((Some e)
           (match e
-            ((TcpAccepted id src sport lport)
+            ((TcpAccepted id src sport lport va)
               (let (w (write_str (append "accepted from " (append (ip_text src) "\n")))
                     u (tcp_unlisten n bound))
-                (echoing n np id 0)))
-            ((TcpUp id) (echo_wait n np bound))
+                (echoing (Echo n np id (tcp_rx_open va) 0))))
+            ((TcpUp id va) (echo_wait n np bound))
             ((TcpData id body) (echo_wait n np bound))
             ((TcpFin id) (echo_wait n np bound))
             ((TcpClosed id why) (echo_wait n np bound))
             ((TcpRoom id room) (echo_wait n np bound))
-            ((TcpDataAt id at) (echo_wait n np bound))))
+            ((TcpDataAt id at) (echo_wait n np bound))
+            ((TcpGot id total) (echo_wait n np bound))))
         ((None) (echo_wait n np bound))))))
 
-; Connection id's notices, as they come: its data sent back, counting what
-; came; and when the peer has closed, ours, and when it is over, the count.
-(def echoing ((n Inet) (np int) (id int) (count int)) int
-  (match (port_receive np)
+; An echo going on: the stack, the port the connection's notices come
+; to, its number, its ring if inet gave it one, and how many bytes it
+; has sent back.
+(data Echo (Echo (n Inet) (np int) (id int) (rx (Option TcpRx)) (count int)))
+
+; What a notice did to an echo: the echo, and the notices that came while
+; it waited for room to write, to read before the next; or its end, the
+; exit status.
+(data EchoNext (EchoGo Echo (list bytes)) (EchoDone int))
+
+; The connection's notices, as they come: its data sent back, counting
+; what came; and when the peer has closed, ours, and when it is over,
+; the count.
+(def echoing ((e Echo)) int
+  (match (port_receive (.np e))
     ((RecvFailed) (complain "lost its port"))
-    ((Message from b)
-      (match (tcp_event_of (msg_text b))
-        ((None) (echoing n np id count))
-        ((Some e)
-          (match e
-            ((TcpData i body)
-              (let why (tcp_write n id body)
-                (if (is_empty why) (echoing n np id (add count (length body))) (complain why))))
-            ((TcpFin i) (let why (tcp_finish n id) (echoing n np id count)))
-            ((TcpClosed i why) (echoed count why))
-            ((TcpUp i) (echoing n np id count))
-            ((TcpRoom i room) (echoing n np id count))
-            ((TcpDataAt i at) (echoing n np id count))
-            ((TcpAccepted i src sport lport) (let r (tcp_reset n i) (echoing n np id count)))))))))
+    ((Message from b) (echo_next (echo_heard e b)))))
+
+; The echo after next: each notice it kept read in turn, then the next
+; that comes.
+(def echo_next ((x EchoNext)) int
+  (match x
+    ((EchoDone st) st)
+    ((EchoGo e kept) (if (is_empty kept) (echoing e) (echo_next (echo_kept e kept))))))
+
+; The first of kept, notices that came while writing, read, and the rest
+; after any it kept itself.
+(def echo_kept ((e Echo) (kept (list bytes))) EchoNext
+  (match (echo_heard e (head kept))
+    ((EchoDone st) (EchoDone st))
+    ((EchoGo e2 more) (EchoGo e2 (append more (tail kept))))))
+
+; What the notice in b, as received, does to e.
+(def echo_heard ((e Echo) (b bytes)) EchoNext
+  (match (tcp_event_in b)
+    ((None) (EchoGo e (nil bytes)))
+    ((Some ev)
+      (match ev
+        ((TcpDataAt i at) (echo_back e b at (bytes_len b) (nil int)))
+        ((TcpData i body) (let d (bytes_from_list body) (echo_back e d 0 (bytes_len d) (nil int))))
+        ((TcpGot i total) (echo_ring e total))
+        ((TcpFin i) (let why (tcp_finish (.n e) (.id e)) (EchoGo e (nil bytes))))
+        ((TcpClosed i why) (let z (echo_freed e) (EchoDone (echoed (.count e) why))))
+        ((TcpUp i va) (EchoGo e (nil bytes)))
+        ((TcpRoom i room) (EchoGo e (nil bytes)))
+        ((TcpAccepted i src sport lport va) (let r (tcp_reset (.n e) i) (EchoGo e (nil bytes))))))))
+
+; e's data up to total, read from its ring, inet told it was taken, and
+; sent back.
+(def echo_ring ((e Echo) (total int)) EchoNext
+  (match (.rx e)
+    ((None) (EchoDone (complain "data came to a ring the connection does not have")))
+    ((Some rx)
+      (match (tcp_rx_take rx total)
+        ((TcpRxTook d rx2)
+          (let why (tcp_took (.n e) (.id e) (.got rx2))
+            (echo_back (.rx e (Some rx2)) d 0 (bytes_len d) why)))))))
+
+; The bytes of b from i up to j sent back on e's connection, as inet has
+; room, and counted; or why not, or why0 if reading them failed.
+(def echo_back ((e Echo) (b bytes) (i int) (j int) (why0 (list int))) EchoNext
+  (if (not (is_empty why0))
+      (EchoDone (complain why0))
+      (match (tcp_write_bytes (.n e) (.np e) (.id e) b i j)
+        ((TcpWrote kept why)
+          (if (is_empty why)
+              (EchoGo (.count e (add (.count e) (sub j i))) kept)
+              (EchoDone (complain why)))))))
+
+; e's ring given up, once its connection is.
+(def echo_freed ((e Echo)) int
+  (match (.rx e) ((None) 0) ((Some rx) (tcp_rx_free rx))))
 
 ; What an echo came to: how many bytes it sent back, and how it ended.
 (def echoed ((count int) (why (list int))) int

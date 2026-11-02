@@ -29,7 +29,6 @@ move independently, so several can be active at once.
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
 | [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | idea | – | 0012 | toolkit.md |
-| [0027](0027-installer.md) Installing and updating L0S from the proxy, with a GUI | Storage | active | 6/7 | – | boot.md, pi5.md, programs.md, storage.md, network.md, agent.md, speech.md, demo.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008 (met), 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
@@ -47,6 +46,8 @@ move independently, so several can be active at once.
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, programs.md, testing.md |
 | [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | ready | 0/7 | – | speech.md, sound.md, programs.md, testing.md |
+| [0063](0063-card-boot-display.md) A card boot as whole as a network boot: the splash, 4K and HDMI audio | Pi 5 | idea | – | – | pi5.md, display.md, sound.md, network.md |
+| [0064](0064-rp1-interrupts.md) RP1's interrupts set up by L0S, whatever the bootloader | Pi 5 | idea | – | – | pi5.md, programs.md |
 ## Ready
 
 [0049](0049-agent-chat-app.md) is active: `agentd`'s one kept
@@ -59,11 +60,6 @@ tokens from a WAV file on the host), and `listen` gives the
 reference's text on QEMU (`tests/listen.sh`) on four clips, one of
 39 s heard in windows, and on a Pi 5 heard 5 s of the Yeti's speech in
 5.5 s; a 10 s clip timed on the Pi 5 is next.
-[0027](0027-installer.md), the installer, is active: it fetches a
-release (the system, the boot files, Whistle's model) from the
-proxy, fresh or as an update, from `install --net` or the Installer
-app, and sets the Pi 5's boot order; it works on QEMU, and a fresh
-install and an update on a Pi 5 are next.
 [0062](0062-text-to-speech.md), Piper's voices in L0, is ready: its
 first step chooses the voice and writes the oracle on the host.
 Every
@@ -71,7 +67,10 @@ other goal left is an `idea`, without steps. On
 the display,
 [0050](0050-hvs-crowded-lines.md) (crowded lines and the whole-screen
 flash at 4K), [0039](0039-paced-drawing-areas.md) and
-[0040](0040-paint-at-scale-2.md) follow from 0038's runs.
+[0040](0040-paint-at-scale-2.md) follow from 0038's runs. On the Pi 5,
+[0063](0063-card-boot-display.md) (a card boot's splash, 4K and sound)
+and [0064](0064-rp1-interrupts.md) (RP1's interrupts under any
+bootloader) follow from 0027's runs.
 
 ## Dependencies
 
@@ -116,6 +115,7 @@ graph LR
 | [0004](0004-pi5-devices.md) USB and the SD card on the Pi 5 | Pi 5 | 2026-10-27 |
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | 2026-10-29 |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | 2026-10-29 |
+| [0027](0027-installer.md) Installing and updating L0S from the proxy, with a GUI | Storage | 2026-11-02 |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | 2026-10-29 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |

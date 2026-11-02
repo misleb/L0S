@@ -255,7 +255,17 @@ for byte, as `rpi-eeprom-config --config` and `rpi-eeprom-digest`, and
 the image's own configuration written back gave the image unchanged.
 The installer writes the same update for a boot order
 (`bootloader.l0`'s `boot_order_written`, [Installing from the
-proxy](boot.md#installing-from-the-proxy)).
+proxy](boot.md#installing-from-the-proxy)), of the image `make release`
+fetches, rpi-eeprom's `pieeprom-2026-05-26.bin`, pinned by its SHA-256.
+That is the bootloader L0S runs on: after 2026-10-30's, RP1's
+interrupts never came, so `xhci` found its ports but no device, and
+`gem` its link but no frame, and DHCP failed. `make pi5-eeprom
+[EEPROM_ORDER=0xf21]` gives such a board the pinned one back over the
+network: the netboot's root with `pieeprom.upd` and `pieeprom.sig` of
+it in it too, its own configuration with that `BOOT_ORDER`, timed
+now, written by [tools/mkeeprom](../tools/mkeeprom/mkeeprom.l0), the
+same library on the host; `tools/pi5-boot --no-build` serves it, and
+the board flashes it as it boots.
 
 ## Limits
 

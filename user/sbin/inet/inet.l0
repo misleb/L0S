@@ -262,9 +262,11 @@
 ; as usb-hid times a held key's repeats: an idle connection, whose
 ; timer is off, wakes inet for nothing. armed is when the alarm is set
 ; for, 0 for none; one that rings for a timer since put off or stopped
-; looks at them for nothing. l is the lease.
+; looks at them for nothing. While a connection holds notices its
+; client's full port refused, the alarm also rings every tcp_late_ns to
+; give them (tcp_late_due). l is the lease.
 (def serve ((s Stack) (port int) (l Lease) (armed int)) int
-  (let (due (tcp_due s)
+  (let (due (soonest_of (tcp_due s) (tcp_late_due s (clock_ns)))
         armed2 (if (alarm_wanted due armed) (let a (alarm_at port due) due) armed))
     (match (port_receive port)
       ((RecvFailed) (complain "lost its port"))
@@ -272,6 +274,10 @@
         (if (is_alarm_notice (Message from b))
             (serve (sent_out (tcp_ticked s (clock_ns))) port l 0)
             (served_message s port l from b armed2))))))
+
+; The sooner of two deadlines, each 0 for none.
+(def soonest_of ((a int) (b int)) int
+  (if (eq a 0) b (eq b 0) a (min a b)))
 
 ; Whether the alarm, set for armed (0 for none), must be set for due,
 ; the timers' soonest deadline (0 for none): when there is one, and the
@@ -318,21 +324,39 @@
 (def queued_bytes ((s Stack) (port int) (payload bytes) (dest Dest)) Stack
   (.o s (cons (Out port payload dest) (.o s))))
 
-; Every message waiting, sent, in order: a frame counted as sent, or as
-; lost if the driver's queue is full; a notice to a client lost if its
-; queue is, and the client let go if its port has gone. A client let go
-; may leave more to send, a reset to its peer, which is sent in turn.
+; The notices TCP connections hold for clients given as their ports have
+; room (tcp_delivered), then every message waiting, sent, in order: a
+; frame counted as sent, or as lost if the driver's queue is full; a
+; notice to a client lost if its queue is, or a TCP connection's held
+; until it has room; and the client let go if its port has gone. A
+; client let go may leave more to send, a reset to its peer, which is
+; sent in turn.
 (def sent_out ((s Stack)) Stack
+  (outs_sent (tcp_delivered s)))
+
+; Every message waiting, sent, in order, until none is left.
+(def outs_sent ((s Stack)) Stack
   (match s
     ((Stack l c n k id t o)
-      (if (is_empty o) s (sent_out (sent_each (Stack l c n k id t (nil Out)) (rev o)))))))
+      (if (is_empty o) s (outs_sent (sent_each (Stack l c n k id t (nil Out)) (rev o)))))))
 
-; Each of os sent, in order.
+; Each of os sent, in order: a TCP connection's notice as tcp_sent_to
+; says, which may hold it.
 (def sent_each ((s Stack) (os (list Out))) Stack
   (if (is_empty os)
       s
       (match (head os)
-        ((Out port payload dest) (sent_each (after_send s dest (port_send_bytes port payload 0 (bytes_len payload))) (tail os))))))
+        ((Out port payload dest)
+          (let i (tcp_dest_id dest)
+            (sent_each (if (ge i 0)
+                           (tcp_sent_to s port payload i)
+                           (after_send s dest (port_send_bytes port payload 0 (bytes_len payload))))
+                       (tail os)))))))
+
+; The TCP connection dest is a notice of, or -1 for anything else.
+(def tcp_dest_id ((dest Dest)) int
+  (match dest
+    ((ToTcp i) i) ((ToWire) -1) ((ToClient) -1) ((ToUdp p) -1) ((ToPing e) -1)))
 
 ; s after a message to dest was sent, as r says.
 (def after_send ((s Stack) (dest Dest) (r Sending)) Stack

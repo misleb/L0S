@@ -8,14 +8,16 @@
 # Each CLIPDIR is one of probes/whistle/oracle.py's, with rebuild.py's
 # greedy.txt in it: its clip16.wav is heard, and its text must be
 # greedy.txt's second line. With none, every one in build/whistle-oracle.
-# The model is not in the project (probes/whistle says how it is
-# fetched), so make e2e does not run this; with no WHISTLE it says so
-# and exits 0. Run after make root and build/kernel.img; listen's lines
-# of how long it took are in build/listen.err.
+# The model is not in the project, so make e2e does not run this; with
+# no WHISTLE it takes build/fetch/whistle.cact, which make release
+# fetches, and with neither it says so and exits 0. Run after make root
+# and build/kernel.img; listen's lines of how long it took are in
+# build/listen.err.
 set -u
 L0=${L0:-l0}
 BUILD=build
-if [ -z "${WHISTLE:-}" ] || [ ! -f "$WHISTLE" ]; then
+WHISTLE=${WHISTLE:-$BUILD/fetch/whistle.cact}
+if [ ! -f "$WHISTLE" ]; then
   echo "ok - listen # skip: no model (WHISTLE=PATH/whistle.cact)"
   exit 0
 fi

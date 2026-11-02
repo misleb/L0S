@@ -140,8 +140,51 @@
         d (region_set32 r (gem_sa1b) (sa_bottom mac))
         e (region_set32 r (gem_sa1t) (sa_top mac)))
     (match (phy_up r)
-      ((NoPhy why) (complain why))
+      ((NoPhy why) (phy_again r base mac why))
       ((PhyUp id) (with_memory r base mac id)))))
+
+; No PHY answered, as when the board booted from its card and the PHY is
+; still held in reset: its reset line let go, as Linux's MDIO bus does
+; (phy-reset-gpios), and the PHY tried once more; why0 if that cannot
+; be done, why the second try failed if it was.
+(def phy_again ((r IoRegion) (base int) (mac (list int)) (why0 (list int))) int
+  (let why (phy_released)
+    (if (not (is_empty why))
+        (complain (append why0 (append "; and its reset line: " why)))
+        (match (phy_up r)
+          ((NoPhy why2) (complain (append why2 ", after its reset line was let go")))
+          ((PhyUp id) (let n (info_as "gem" "the PHY answered once its reset line was let go") (with_memory r base mac id)))))))
+
+; The PHY's reset line, RP1's GPIO 32 (regs.l0), made a GPIO the RIO
+; drives, held low for phy_reset_ms, then let go high, and the PHY given
+; 50 ms to come up: empty, or why the registers could not be reached.
+; The output is set before the pin is driven, as Linux's
+; rp1_gpio_direction_output does, so it never glitches high.
+(def phy_released () (list int)
+  (match (open_region (rp1_gpio_bank1) 256)
+    ((IoRegionFailed f why) (append "RP1's GPIO: " why))
+    ((IoRegionOpened g)
+      (match (open_region (rp1_rio_bank1) 16384)
+        ((IoRegionFailed f why) (let z (close_region g) (append "RP1's RIO: " why)))
+        ((IoRegionOpened rio)
+          (match (open_region (rp1_pads_bank1) 256)
+            ((IoRegionFailed f why) (let (z (close_region g) y (close_region rio)) (append "RP1's pads: " why)))
+            ((IoRegionOpened pads) (phy_pulsed g rio pads))))))))
+
+; The pulse on GPIO 32 through its CTRL g, its bank's RIO and pads; the
+; three regions closed after.
+(def phy_pulsed ((g IoRegion) (rio IoRegion) (pads IoRegion)) (list int)
+  (let (low (region_set32 rio (add (rio_out) (rio_clr)) (phy_reset_bit))
+        oe (region_set32 rio (add (rio_oe) (rio_set)) (phy_reset_bit))
+        pad (region_set32 pads (gpio32_pad) (pad_driving (region_get32 pads (gpio32_pad))))
+        fn (region_set32 g (gpio32_ctrl) (gpio_ctrl_rio (region_get32 g (gpio32_ctrl))))
+        held (sleep_ns (mul (phy_reset_ms) 1000000))
+        high (region_set32 rio (add (rio_out) (rio_set)) (phy_reset_bit))
+        up (sleep_ns 50000000)
+        a (close_region g)
+        b (close_region rio)
+        c (close_region pads))
+    ""))
 
 ; ---------------------------------------------------------------- the PHY
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # peer.py PORT -- the host's end of the e2e case net_echo: connects to
 # PORT on the loopback, which QEMU forwards to port 7000 of the board,
-# sends a message of 12000 bytes, closes its sending end, and reads until
+# sends a message of 300000 bytes, closes its sending end, and reads until
 # the board closes its own. It exits 0 if what came back is what it sent.
+# The message is over four times a connection's ring of 64 KB, so the
+# ring wraps, and net echo's took requests are what open the window.
 # The board may not be listening yet, when QEMU accepts the connection and
 # then drops it; so it tries again, for 50 seconds.
 import socket
@@ -10,7 +12,7 @@ import sys
 import time
 
 port = int(sys.argv[1])
-message = b"hello over tcp\n" + bytes((i * 7) % 251 for i in range(12000))
+message = b"hello over tcp\n" + bytes((i * 7) % 251 for i in range(300000))
 deadline = time.time() + 50
 while time.time() < deadline:
     try:

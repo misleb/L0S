@@ -14,8 +14,10 @@
 
 ; A connection: the stack, the port its notices come to, its number in
 ; inet, the host's name as the request's Host says it, its address and
-; port, the reader of its responses, and its state (http_state_*).
-(data HttpConn (HttpConn (inet Inet) (np int) (id int) (host (list int)) (addr int) (port int) (reader HttpRead) (state int)))
+; port, the reader of its responses, its state (http_state_*), and the
+; ring inet puts its data in, once it is up, if inet gave it one.
+(data HttpConn (HttpConn (inet Inet) (np int) (id int) (host (list int)) (addr int) (port int) (reader HttpRead) (state int)
+                         (rx (Option TcpRx))))
 
 ; What a connection's notices or a request's writing gave: the connection
 ; after them, and the parts of its responses, in order.
@@ -53,7 +55,7 @@
   (match (tcp_connect n np addr port)
     ((Err why) ((Err HttpConn (list int)) why))
     ((Ok id)
-      (http_wait_up (HttpConn n np id host addr port (http_read_new "GET") (http_opening)) (add (clock_ns) (http_connect_ns))))))
+      (http_wait_up (HttpConn n np id host addr port (http_read_new "GET") (http_opening) ((None TcpRx))) (add (clock_ns) (http_connect_ns))))))
 
 ; c once its up notice comes, before deadline; its closed notice, or the
 ; deadline passing, is why not.
@@ -72,9 +74,10 @@
 ; What notice e means to c, which waits to be up.
 (def http_wait_heard ((c HttpConn) (e TcpEvent) (deadline int)) (Result HttpConn (list int))
   (match e
-    ((TcpUp i) (if (eq i (.id c)) ((Ok HttpConn (list int)) (.state c (http_open))) (http_wait_up c deadline)))
+    ((TcpUp i va) (if (eq i (.id c)) ((Ok HttpConn (list int)) (.rx (.state c (http_open)) (tcp_rx_open va))) (http_wait_up c deadline)))
     ((TcpClosed i why) (if (eq i (.id c)) ((Err HttpConn (list int)) (append "the connection " why)) (http_wait_up c deadline)))
-    ((TcpAccepted i src sp lp) (http_wait_up c deadline))
+    ((TcpAccepted i src sp lp va) (http_wait_up c deadline))
+    ((TcpGot i total) (http_wait_up c deadline))
     ((TcpData i d) (http_wait_up c deadline))
     ((TcpDataAt i at) (http_wait_up c deadline))
     ((TcpFin i) (http_wait_up c deadline))
@@ -85,15 +88,28 @@
 (def http_reuse ((c HttpConn)) (Result HttpConn (list int))
   (if (and (eq (.state c) (http_open)) (http_idle (.reader c)))
       ((Ok HttpConn (list int)) c)
-      (match c
-        ((HttpConn n np id host addr port r st)
+      (match (http_rx_freed c)
+        ((HttpConn n np id host addr port r st rx)
           (let z (if (eq st (http_gone)) "" (tcp_reset n id))
             (http_open_at n np host addr port))))))
 
 ; c closed: told to inet, which finishes it once its data is sent: empty,
-; or why not.
+; or why not. Its ring is given up as its closed notice comes, or the
+; process ends.
 (def http_close ((c HttpConn)) (list int)
   (if (eq (.state c) (http_gone)) "" (tcp_finish (.inet c) (.id c))))
+
+; c given up, with a reset to the server, and its ring with it, so that a
+; program that keeps going, as agentd does, does not run out of regions.
+(def http_give_up ((c HttpConn)) (list int)
+  (let z (http_rx_freed c)
+    (if (eq (.state c) (http_gone)) "" (tcp_reset (.inet c) (.id c)))))
+
+; c with its ring given up, if it had one.
+(def http_rx_freed ((c HttpConn)) HttpConn
+  (match (.rx c)
+    ((None) c)
+    ((Some rx) (let z (tcp_rx_free rx) (.rx c ((None TcpRx)))))))
 
 ; ----------------------------------------------------------------- sending
 
@@ -136,9 +152,10 @@
 
 ; A message that came to c's notice port, its bytes b as received: the
 ; connection after it, and the parts of a response it gave. Data is read
-; in place; the server's end ends a body that runs to it; the
-; connection's end in the middle of a response is HttpFailed. Anything
-; that is not c's is passed over. Nothing is sent.
+; from c's ring, and inet told it was taken, or, for a connection with
+; no ring, in place from the notice; the server's end ends a body that
+; runs to it; the connection's end in the middle of a response is
+; HttpFailed. Anything that is not c's is passed over.
 (def http_feed ((c HttpConn) (b bytes)) HttpGot
   (match (tcp_event_in b)
     ((None) (HttpGot c (nil HttpPart)))
@@ -150,8 +167,8 @@
 ; The connection a notice is of.
 (def http_event_id ((e TcpEvent)) int
   (match e
-    ((TcpUp i) i) ((TcpAccepted i src sp lp) i) ((TcpData i d) i) ((TcpDataAt i at) i)
-    ((TcpFin i) i) ((TcpClosed i why) i) ((TcpRoom i k) i)))
+    ((TcpUp i va) i) ((TcpAccepted i src sp lp va) i) ((TcpData i d) i) ((TcpDataAt i at) i)
+    ((TcpFin i) i) ((TcpClosed i why) i) ((TcpRoom i k) i) ((TcpGot i total) i)))
 
 ; c's notice e, which came in b.
 (def http_feed_event ((c HttpConn) (e TcpEvent) (b bytes)) HttpGot
@@ -167,14 +184,32 @@
       (match (http_closed (.reader c))
         ((HttpMore r ps) (HttpGot (.state (.reader c r) (http_finished)) ps))))
     ((TcpClosed i why) (http_conn_ended c why))
-    ((TcpUp i) (HttpGot (.state c (http_open)) (nil HttpPart)))
-    ((TcpAccepted i src sp lp) (HttpGot c (nil HttpPart)))
-    ((TcpRoom i k) (HttpGot c (nil HttpPart)))))
+    ((TcpUp i va) (HttpGot (.rx (.state c (http_open)) (tcp_rx_open va)) (nil HttpPart)))
+    ((TcpAccepted i src sp lp va) (HttpGot c (nil HttpPart)))
+    ((TcpRoom i k) (HttpGot c (nil HttpPart)))
+    ((TcpGot i total) (http_ring_read c total))))
+
+; c's data up to total bytes from its first, read from its ring and fed
+; to its reader, and inet told it was taken, so that the ring takes more.
+(def http_ring_read ((c HttpConn) (total int)) HttpGot
+  (match (.rx c)
+    ((None) (HttpGot c (cons (HttpFailed "data came to a ring this connection does not have") (nil HttpPart))))
+    ((Some rx)
+      (match (tcp_rx_take rx total)
+        ((TcpRxTook d rx2)
+          (let (why (tcp_took (.inet c) (.id c) (.got rx2))
+                c2 (.rx c (Some rx2)))
+            (match (http_more (.reader c2) d 0 (bytes_len d))
+              ((HttpMore r ps)
+                (HttpGot (.reader c2 r)
+                         (if (is_empty why) ps (append ps (cons (HttpFailed (append "inet: " why)) (nil HttpPart)))))))))))))
 
 ; c's connection gone, and why: as it should, a body that runs to the
-; close ends; otherwise, a response begun and not ended failed.
-(def http_conn_ended ((c HttpConn) (why (list int))) HttpGot
-  (let g (.state c (http_gone))
+; close ends; otherwise, a response begun and not ended failed. Its ring
+; is given up.
+(def http_conn_ended ((c0 HttpConn) (why (list int))) HttpGot
+  (let (c (http_rx_freed c0)
+        g (.state c (http_gone)))
     (if (eq why "closed")
         (match (http_closed (.reader c))
           ((HttpMore r ps) (HttpGot (.reader g r) ps)))

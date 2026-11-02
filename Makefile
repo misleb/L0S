@@ -43,6 +43,10 @@
 #                    build/pi5-tftp: the same, with the Pi 5's device
 #                    trees, fetched once and checked, or from DIR, as a
 #                    TFTP root it network boots from
+#   make pi5-eeprom [EEPROM_ORDER=0xf21]  pi5-netboot with the pinned
+#                    bootloader's update in it too, which the board
+#                    flashes as it boots (tools/mkeeprom); serve it
+#                    with tools/pi5-boot --no-build
 #   make pi5-shell   pi5-netboot without hvs, then picocom on the Pi's
 #                    serial line to type to its shell (tools/pi5-boot)
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
@@ -61,11 +65,13 @@
 #                    token and ANTHROPIC_API_KEY; usage in
 #                    build/proxy/usage.jsonl, and releases from
 #                    build/release
-#   make release [WHISTLE=FILE] [PIEEPROM=FILE]  build/release/pi5 and
-#                    build/release/virt: the system, the Pi 5's boot
-#                    files, the agent's seed, and Whistle's model and a
-#                    pieeprom.bin if given, which the proxy serves to
-#                    install --net and the Installer (tools/mkrelease)
+#   make release     build/release/pi5 and build/release/virt: the
+#                    system, the Pi 5's boot files, the agent's seed,
+#                    Whistle's model and the Pi 5's pieeprom.bin, the
+#                    last two fetched once into build/fetch, which the
+#                    proxy serves to install --net and the Installer
+#                    (tools/mkrelease); WHISTLE_MODEL=FILE and
+#                    PIEEPROM=FILE use files of your own instead
 #   make agent-etc API=HOST:PORT [MODEL=NAME]  build/agent-etc: the
 #                    agent's config, naming the proxy, and the token,
 #                    which the demo's and the Pi 5's initramfs then take
@@ -393,6 +399,7 @@ $(foreach p,$(PROGRAMS),$(eval TESTS_$(p) := $(wildcard $(DIR_$(p))/*_test.l0)))
 
 L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
 MKFS     := $(COMMON) $(CLI) $(PARTS) $(FAT) tools/mkfs/mkfs.l0
+MKEEPROM := $(ULIB) $(CLOCK) $(SHA256) $(BOOTLOADER) tools/mkeeprom/mkeeprom.l0
 MKICON   := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicon/mkicon.l0
 MKICONS  := $(ULIB) $(RENDER) $(UI_CORE) $(SVG) tools/mkicons/mkicons.l0
 MKWALLPAPER := $(ULIB) $(RENDER) $(SVG) tools/mkwallpaper/mkwallpaper.l0
@@ -461,6 +468,7 @@ $(call l0_check,$(KERNEL) kernel/main.l0)
 $(foreach p,$(PROGRAMS),$(call l0_check,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(DIR_$(p))/main.l0))
 $(call l0_check,$(L0SDOC) tools/l0sdoc/main.l0)
 $(call l0_check,$(MKFS) tools/mkfs/main.l0)
+$(call l0_check,$(MKEEPROM) tools/mkeeprom/main.l0)
 $(call l0_check,$(MKICON) tools/mkicon/main.l0)
 $(call l0_check,$(MKFONT) tools/mkfont/main.l0)
 $(call l0_check,$(MKSTRIKE) tools/mkstrike/main.l0)
@@ -608,6 +616,7 @@ $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/ui
 $(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(call l0_test,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(t))))
 $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
+$(call l0_test,$(MKEEPROM) tools/mkeeprom/mkeeprom_test.l0)
 $(call l0_test,$(MKICON) tools/mkicon/mkicon_test.l0)
 $(call l0_test,$(MKICONS) tools/mkicons/mkicons_test.l0)
 $(call l0_test,$(MKWALLPAPER) tools/mkwallpaper/mkwallpaper_test.l0)
@@ -685,6 +694,9 @@ $(BUILD)/l0sdoc: $(L0SDOC) tools/l0sdoc/main.l0 | $(BUILD)
 # What tools/mkdisk partitions and formats a disk image with.
 $(BUILD)/mkfs: $(MKFS) tools/mkfs/main.l0 | $(BUILD)
 	$(L0) build $(MKFS) tools/mkfs/main.l0 -o $@
+
+$(BUILD)/mkeeprom: $(MKEEPROM) tools/mkeeprom/main.l0 | $(BUILD)
+	$(L0) build $(MKEEPROM) tools/mkeeprom/main.l0 -o $@
 
 $(BUILD)/mkicon: $(MKICON) tools/mkicon/main.l0 | $(BUILD)
 	$(L0) build $(MKICON) tools/mkicon/main.l0 -o $@
@@ -882,11 +894,44 @@ proxy-run: proxy
 
 # The releases the proxy serves (roadmap 0027): each board's system, as
 # its initramfs holds it with /etc and the agent's etc, the Pi 5's boot
-# files as pi5-card writes them, the agent's seed, and WHISTLE, the
-# speech model, and PIEEPROM, a release pieeprom.bin, if given.
-release: initramfs pi5-card
-	tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
-	tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-card
+# files as pi5-card writes them, the agent's seed, Whistle's speech
+# model for both, and the Pi 5's bootloader image, pieeprom.bin. The
+# model and the image are fetched once into build/fetch, each from a
+# pinned commit and kept only if its SHA-256 is the one below, so every
+# release has the same ones; a new pin changes both. WHISTLE_MODEL and
+# PIEEPROM name files of your own instead, and nothing is fetched. The
+# bootloader is 2026-05-26's, the one L0S runs on: with 2026-10-30's,
+# RP1's interrupts never came, so neither USB nor Ethernet worked
+# (roadmap 0027's log). Its file is named for its version, so that a
+# new pin is fetched, not an old one's file kept.
+WHISTLE_COMMIT := 741118687e1f008f06d1351a402a731274789790
+WHISTLE_URL    := https://huggingface.co/Cactus-Compute/whistle/resolve/$(WHISTLE_COMMIT)/whistle.cact
+WHISTLE_SHA256 := b6e02f048568ac5d01a2042556c658061e699acbc0aa2a1439f52f3d461dffeb
+PIEEPROM_COMMIT  := 3052f2c851b7dd631cd59ed31efc9b6ecb42e5f0
+PIEEPROM_VERSION := 2026-05-26
+PIEEPROM_URL     := https://raw.githubusercontent.com/raspberrypi/rpi-eeprom/$(PIEEPROM_COMMIT)/firmware-2712/default/pieeprom-$(PIEEPROM_VERSION).bin
+PIEEPROM_SHA256  := fee8bee6a738a1a61004f0770f15534de7a48a2a199dc4c7af7ed73ab04f18dd
+WHISTLE_MODEL ?= $(BUILD)/fetch/whistle.cact
+PIEEPROM      ?= $(BUILD)/fetch/pieeprom-$(PIEEPROM_VERSION).bin
+
+# fetch_pinned URL SHA256: the target fetched with curl, kept only if
+# its SHA-256 is SHA256.
+fetch_pinned = @mkdir -p $(@D) \
+  && { command -v curl > /dev/null 2>&1 || { echo "fetch: curl is needed to fetch $(@F), once" >&2; exit 1; }; } \
+  && echo "fetch: $(1)" && curl -fsSL -o $@.part $(1) \
+  && { echo "$(2)  $@.part" | sha256sum -c --quiet - \
+       || { rm -f $@.part; echo "fetch: $(@F) from $(1) is not the one pinned" >&2; exit 1; }; } \
+  && mv $@.part $@
+
+$(BUILD)/fetch/whistle.cact:
+	$(call fetch_pinned,$(WHISTLE_URL),$(WHISTLE_SHA256))
+
+$(BUILD)/fetch/pieeprom-$(PIEEPROM_VERSION).bin:
+	$(call fetch_pinned,$(PIEEPROM_URL),$(PIEEPROM_SHA256))
+
+release: initramfs pi5-card $(WHISTLE_MODEL) $(PIEEPROM)
+	WHISTLE_MODEL=$(WHISTLE_MODEL) tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
+	WHISTLE_MODEL=$(WHISTLE_MODEL) PIEEPROM=$(PIEEPROM) tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-card
 
 # The knowledge graph, which /graphify built first: graphify's own Python,
 # as it wrote it down, rebuilds it with the L0 sources it cannot read.
@@ -1125,6 +1170,18 @@ pi5-netboot: pi5-card
 	rm -rf $(BUILD)/pi5-tftp && mkdir -p $(PI5_TFTP)
 	cp $(BUILD)/pi5-card/* $(PI5_TFTP)/
 	@echo "$(PI5_TFTP): serve $(BUILD)/pi5-tftp as a TFTP root, with DHCP naming it (option 66), to a Pi 5 whose BOOT_ORDER tries the network"
+
+# The netboot's root with the pinned bootloader's update in it too,
+# pieeprom.upd and pieeprom.sig (tools/mkeeprom), its own configuration
+# with BOOT_ORDER=EEPROM_ORDER, timed now: a board that boots from it
+# flashes that bootloader, as one whose bootloader L0S cannot drive
+# needs. make pi5-netboot, which tools/pi5-boot runs, leaves them out
+# again, so it is flashed once; tools/pi5-boot --no-build serves them.
+.PHONY: pi5-eeprom
+EEPROM_ORDER ?= 0xf21
+pi5-eeprom: pi5-netboot $(BUILD)/mkeeprom $(PIEEPROM)
+	$(BUILD)/mkeeprom $(PIEEPROM) $(PI5_TFTP) $$(date +%s) $(EEPROM_ORDER)
+	@echo "$(PI5_TFTP): serve it with tools/pi5-boot --no-build; the board flashes the $(PIEEPROM_VERSION) bootloader as it boots"
 
 clean:
 	rm -rf $(BUILD)

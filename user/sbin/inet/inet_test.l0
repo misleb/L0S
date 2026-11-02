@@ -670,6 +670,9 @@
 ; A Served's answer.
 (def served_text ((r (Served Stack))) (list int) (match r ((Served s a) a)))
 
+; A Served's stack.
+(def served_stack ((r (Served Stack))) Stack (match r ((Served s a) s)))
+
 ; The clock's notice is the lease's, not a request: with no lease it does
 ; nothing at all.
 (def test_time_notice () int
@@ -809,7 +812,7 @@
 (def test_tcp_up () int
   (let (o (tcp_opened)
         s (from_peer_seg (cleared o) (peer_synack o)))
-    (add (check_strs "told" (told s) (cons "56: tcp 1 up" (nil (list int))))
+    (add (check_strs "told, with no ring under l0 test" (told s) (cons "56: tcp 1 up 0" (nil (list int))))
          (add (check_strs "the ACK" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 ACK" (nil (list int))))
               (check_int "acknowledging 5001" (.ack (head (wire_segs s))) 5001)))))
 
@@ -938,7 +941,7 @@
     (add (check_strs "SYN and ACK" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 7000>49999 SYN|ACK" (nil (list int))))
          (add (check_int "acknowledging 9001" (.ack (head (wire_segs s))) 9001)
               (let s2 (from_peer_seg (cleared s) (Seg 49999 7000 9001 (conn_nxt s 1) (tcp_ack) 4096 0 (nil int)))
-                (add (check_strs "accepted" (told s2) (cons "56: tcp 1 accepted 10.0.2.2 49999 7000" (nil (list int))))
+                (add (check_strs "accepted" (told s2) (cons "56: tcp 1 accepted 10.0.2.2 49999 7000 0" (nil (list int))))
                      (check_str "ESTABLISHED" (conn_state_of s2 1) "ESTABLISHED")))))))
 
 ; Its data comes to the listener's port too.
@@ -1025,9 +1028,111 @@
     (add (check_strs "a reset" (wire_text s) (cons "52:55:0a:00:02:02 ip 10.0.2.15 10.0.2.2 tcp 49152>80 RST|ACK" (nil (list int))))
          (check_bool "gone" (tcp_busy s) false))))
 
+; How many notices connection id in s holds for its owner, -1 if none.
+(def conn_late ((s Stack) (id int)) int
+  (match (map_get (tcp_conns s) id) ((None) -1) ((Some c) (length (.late c)))))
+
+; A connection holding one notice its owner's full port refused: under
+; l0 test every send finds the port full (port_send's word is -3).
+(def tcp_holding () Stack (tcp_sent_to (tcp_up) 56 (bytes_from_list "tcp 1 data\nab") 1))
+
+; The owner's port is full: the notice is held, and the connection kept,
+; not reset.
 (def test_tcp_owner_full () int
-  (let s (after_send (tcp_up) (ToTcp 1) (SendFull))
-    (check_strs "told, if it can be" (told s) (cons "56: tcp 1 closed overflow" (nil (list int))))))
+  (let s (tcp_holding)
+    (add (check_int "held" (conn_late s 1) 1)
+         (add (check_str "kept" (conn_state_of s 1) "ESTABLISHED")
+              (check_int "no reset" (length (wire_text s)) 0)))))
+
+; Data that comes while a notice is held is held after it, in order, and
+; its acknowledgement offers 8192 less the 13 bytes held when it was
+; made, before the data's own notice joined them.
+(def test_tcp_held_in_order () int
+  (let (h (tcp_holding)
+        s (from_peer_seg h (peer_data h (bit_or (tcp_ack) (tcp_psh)) "hi")))
+    (add (check_int "held after" (conn_late s 1) 2)
+         (add (check_int "told nothing" (length (told s)) 0)
+              (check_int "window" (.window (head (wire_segs s))) 8179)))))
+
+; Held notices are tried again, and kept while the port is still full.
+(def test_tcp_held_delivered () int
+  (let s (tcp_delivered (tcp_holding))
+    (add (check_int "still held" (conn_late s 1) 1)
+         (check_int "nothing sent" (length (wire_text s)) 0))))
+
+; A connection that goes holds nothing back: its held notices are queued
+; before the one that says why.
+(def test_tcp_held_gone () int
+  (let (h (tcp_holding)
+        s (from_peer_seg h (peer_data h (tcp_rst) "")))
+    (check_strs "told" (told s) (cons "56: tcp 1 data\nab" (cons "56: tcp 1 closed reset" (nil (list int)))))))
+
+; Data joined from segments that came out of order, 5000 bytes, more
+; than a message holds, is told in two notices that each fit: 4064 bytes
+; and the 936 left.
+(def test_tcp_data_split () int
+  (let (u (tcp_up)
+        c (match (map_get (tcp_conns u) 1) ((Some x) x) ((None) (head (map_values (tcp_conns u)))))
+        s (tcp_told_data u c (repeat 5000 97))
+        ns (told s))
+    (add (check_int "two" (length ns) 2)
+         (add (check_int "first" (length (nth_or ns 0 "")) (add 15 4064))
+              (check_int "second" (length (nth_or ns 1 "")) (add 15 936))))))
+
+; An open connection whose ring has put put bytes, told its process of
+; told and heard it took took; its region is never written here.
+(def ring_up ((put int) (told int) (took int)) Stack
+  (let (u (tcp_up)
+        c (match (map_get (tcp_conns u) 1) ((Some x) x) ((None) (head (map_values (tcp_conns u))))))
+    (tcp_put u (.ring c (Some (TcpRing 0 3925868544 (IoRegion 0) put put took told))))))
+
+; The ring of connection id in s, as TOLD/TOOK, or none.
+(def ring_text ((s Stack) (id int)) (list int)
+  (match (map_get (tcp_conns s) id)
+    ((None) "no connection")
+    ((Some c) (match (.ring c) ((None) "none") ((Some r) (append (digits (.told r)) (cons 47 (digits (.took r)))))))))
+
+; The process took all it was told, 100, while 50 more came: it is told
+; of those, 150; it took nothing more yet.
+(def test_ring_took () int
+  (let s (served_stack (tcp_req_took (ring_up 150 100 0) 30 (cons "1" (cons "100" (nil (list int))))))
+    (add (check_strs "told" (told s) (cons "56: tcp 1 data 150" (nil (list int))))
+         (check_str "ring" (ring_text s 1) "150/100"))))
+
+; Took up to where it was told, with nothing more come: nothing to tell.
+(def test_ring_took_all () int
+  (let s (served_stack (tcp_req_took (ring_up 100 100 0) 30 (cons "1" (cons "100" (nil (list int))))))
+    (add (check_int "silent" (length (told s)) 0)
+         (check_str "ring" (ring_text s 1) "100/100"))))
+
+; Past what it was told, behind what it took, or not its own: refused.
+(def test_ring_took_refused () int
+  (add (check_str "past" (served_text (tcp_req_took (ring_up 150 100 0) 30 (cons "1" (cons "120" (nil (list int)))))) "error: the ring has told 100")
+       (add (check_str "behind" (served_text (tcp_req_took (ring_up 150 100 50) 30 (cons "1" (cons "40" (nil (list int)))))) "error: the ring has told 100")
+            (check_str "another's" (served_text (tcp_req_took (ring_up 150 100 0) 31 (cons "1" (cons "100" (nil (list int)))))) "error: connection 1 is not yours"))))
+
+; A connection with no ring takes no took.
+(def test_ring_took_none () int
+  (check_str "none" (served_text (tcp_req_took (tcp_up) 30 (cons "1" (cons "0" (nil (list int)))))) "error: the connection has no ring"))
+
+; The peer's FIN, with 50 bytes in the ring not told while a notice is
+; unanswered: they are told first, so that the process reads them before
+; it hears there is no more.
+(def test_ring_fin () int
+  (let (r (ring_up 150 100 0)
+        s (from_peer_seg r (peer_data r (bit_or (tcp_ack) (tcp_fin)) "")))
+    (check_strs "told" (told s) (cons "56: tcp 1 data 150" (cons "56: tcp 1 fin" (nil (list int)))))))
+
+; Took when the window was down to the 1000 bytes left of the ring: the
+; window that opened is offered at once.
+(def test_ring_reopened () int
+  (let s (served_stack (tcp_req_took (ring_up 64536 64536 0) 30 (cons "1" (cons "64536" (nil (list int))))))
+    (check_int "window" (.window (head (wire_segs s))) 65535)))
+
+; inet wakes to try again only while a connection holds notices.
+(def test_tcp_late_due () int
+  (add (check_int "holding" (tcp_late_due (tcp_holding) 1000) (add 1000 (tcp_late_ns)))
+       (check_int "not" (tcp_late_due (tcp_up) 1000) 0)))
 
 (def test_tcp_listener_gone () int
   (let s (after_send (from_peer_seg (tcp_listening_stack) (peer_syn)) (ToTcp 1) (SendNoPort))
@@ -1087,7 +1192,7 @@
 (def test_tcp_loopback () int
   (let s (tcp_looped)
     (add (check_strs "told" (told s)
-                     (cons "58: tcp 1 up" (cons "56: tcp 2 accepted 10.0.2.15 49152 7000" (cons "55: connecting 1 49152" (nil (list int))))))
+                     (cons "58: tcp 1 up 0" (cons "56: tcp 2 accepted 10.0.2.15 49152 7000 0" (cons "55: connecting 1 49152" (nil (list int))))))
          (check_int "no frames" (length (wire s)) 0))))
 
 ; Data and an end each way.

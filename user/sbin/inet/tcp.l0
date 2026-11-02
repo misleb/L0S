@@ -7,7 +7,8 @@
 ;
 ; What it does: the three-way handshake, active and passive; sequence and
 ; acknowledgement numbers, with the data kept until it is acknowledged;
-; a fixed receive window; retransmission after a timeout, doubling it each
+; a receive window less what inet holds for an application slow to take
+; its notices; retransmission after a timeout, doubling it each
 ; time, giving up after tcp_tries; a zero window probed; FIN, in both
 ; directions, every close of RFC 9293's state diagram but a simultaneous
 ; open; RST, checked against the window (RFC 5961); segments that arrive
@@ -18,9 +19,10 @@
 
 ; ----------------------------------------------------------------- constants
 
-; The window every segment offers: what inet will take beyond what it has
-; acknowledged. It is never shrunk, since what arrives goes to the
-; application at once.
+; The most window a segment offers: what inet will take beyond what it
+; has acknowledged, while the application takes its notices as they
+; come. What it holds for an application whose queue is full is taken
+; off it (tcp_room).
 (def tcp_window () int 8192)
 
 ; The most data in a segment inet offers to take, so that a frame is at
@@ -86,9 +88,31 @@
 ; (the SYN not counted); whether the application has closed it, so that
 ; a FIN follows the data; and the segments it holds that came out of
 ; order, until what is missing before them comes, in the order of their
-; sequence numbers; and whether a write was refused for want of room,
-; so that the application is told when there is some.
-(data Conn (Conn (id int) (state int) (ends TcpEnds) (seqs TcpSeqs) (timer TcpTimer) (queue (list int)) (fin bool) (held (list TcpHeld)) (wait bool)))
+; sequence numbers; whether a write was refused for want of room,
+; so that the application is told when there is some; the notices
+; for the application that its port had no room for, in order, which
+; inet holds and gives it as it takes what came before (tcpstack.l0's
+; tcp_delivered); and the ring its data is put in for the application,
+; if inet could make one.
+(data Conn (Conn (id int) (state int) (ends TcpEnds) (seqs TcpSeqs) (timer TcpTimer) (queue (list int)) (fin bool) (held (list TcpHeld)) (wait bool)
+                 (late (list bytes)) (ring (Option TcpRing))))
+
+; The pages a connection's data is put in for its application, shared
+; with it (inet.l0's tcp_ring_pages): where inet has them and where the
+; application does, the region inet writes them through, and counts from
+; the connection's first byte: how many bytes are taken into the ring,
+; as the window has room; how many are copied there; how many the
+; application has said it took (took ID N); and how many it was last
+; told of (tcp ID data N). The window offered is the ring's room, what
+; is taken less what the application took.
+(data TcpRing (TcpRing (va int) (there int) (region IoRegion) (wrote int) (put int) (took int) (told int)))
+
+; The bytes a ring holds.
+(def tcp_ring_size () int (mul (tcp_ring_pages) (page_size)))
+
+; The most a segment's window says, as it has 16 bits and inet scales
+; none.
+(def tcp_window_max () int 65535)
 
 ; What a connection calls for: a segment to send to an address; the
 ; connection is open, for one this process started; it was accepted, for
@@ -187,7 +211,27 @@
 ; A segment of c's: flags, from sequence number seq, offering mss if not 0,
 ; carrying body, acknowledging all c has received.
 (def tcp_seg ((c Conn) (flags int) (seq int) (mss int) (body (list int))) Seg
-  (Seg (c_lport c) (c_rport c) seq (c_rcv c) flags (tcp_window) mss body))
+  (Seg (c_lport c) (c_rport c) seq (c_rcv c) flags (tcp_room c) mss body))
+
+; The window c offers, so that a peer sends no faster than the
+; application takes what it is sent: with a ring, its room, what is in
+; it that the application has not said it took, up to tcp_window_max;
+; without, tcp_window less the bytes of the notices c holds for the
+; application, and none once they reach it.
+(def tcp_room ((c Conn)) int
+  (match (.ring c)
+    ((Some r) (min (tcp_window_max) (max 0 (sub (tcp_ring_size) (sub (.wrote r) (.took r))))))
+    ((None) (max 0 (sub (tcp_window) (late_bytes (.late c) 0))))))
+
+; The bytes of the notices bs, added to n.
+(def late_bytes ((bs (list bytes)) (n int)) int
+  (if (is_empty bs) n (late_bytes (tail bs) (add n (bytes_len (head bs))))))
+
+; The step for c once the application has taken notices c held, or data
+; from its ring: an acknowledgement, which offers the window that has
+; opened, so that the peer need not wait to probe it.
+(def tcp_reopened ((c Conn)) TcpStep
+  (step_done (say_ack (TcpStep c (nil TcpAct)))))
 
 ; The step with a segment of its connection's to send.
 (def say_seg ((st TcpStep) (flags int) (seq int) (mss int) (body (list int))) TcpStep
@@ -205,6 +249,12 @@
 ; The step with its connection gone, and why.
 (def say_gone ((st TcpStep) (why (list int))) TcpStep
   (step_act (.conn st (.state (.conn st) (tcp_closed))) (ConnGone why)))
+
+; c with n more bytes taken into its ring, if it has one.
+(def ring_wrote ((c Conn) (n int)) Conn
+  (match (.ring c)
+    ((Some r) (.ring c (Some (.wrote r (add (.wrote r) n)))))
+    ((None) c)))
 
 ; The step with its connection in TIME-WAIT, until now and tcp_time_wait_ns.
 (def time_wait_timer ((st TcpStep) (now int)) TcpStep
@@ -234,7 +284,7 @@
 (def tcp_active ((id int) (owner int) (pid int) (lport int) (raddr int) (rport int) (iss int) (now int)) TcpStep
   (let c (Conn id (tcp_syn_sent) (TcpEnds lport raddr rport owner pid)
                (TcpSeqs iss (seq_add iss 1) 0 0 (tcp_default_mss))
-               (TcpTimer (add now (tcp_rto_ns)) (tcp_rto_ns) 0) (nil int) false (nil TcpHeld) false)
+               (TcpTimer (add now (tcp_rto_ns)) (tcp_rto_ns) 0) (nil int) false (nil TcpHeld) false (nil bytes) ((None TcpRing)))
     (step_done (say_seg (TcpStep c (nil TcpAct)) (tcp_syn) iss (tcp_our_mss) (nil int)))))
 
 ; The step that takes the SYN s, from raddr, to a port a listener holds,
@@ -245,7 +295,7 @@
     ((Seg sport dport seq ack flags window mss body)
       (let c (Conn id (tcp_syn_received) (TcpEnds dport raddr sport owner pid)
                    (TcpSeqs iss (seq_add iss 1) window (seq_add seq 1) (if (gt mss 0) mss (tcp_default_mss)))
-                   (TcpTimer (add now (tcp_rto_ns)) (tcp_rto_ns) 0) (nil int) false (nil TcpHeld) false)
+                   (TcpTimer (add now (tcp_rto_ns)) (tcp_rto_ns) 0) (nil int) false (nil TcpHeld) false (nil bytes) ((None TcpRing)))
         (step_done (say_seg (TcpStep c (nil TcpAct)) (bit_or (tcp_syn) (tcp_ack)) iss (tcp_our_mss) (nil int)))))))
 
 ; -------------------------------------------------------------------- timer
@@ -417,18 +467,21 @@
       (and (seg_has s (tcp_syn)) (eq seq (seq_add (c_rcv c) -1))))))
 
 ; Whether any of the sequence numbers s takes up is in the window, or if it
-; takes up none, its own is (3.10.7.4).
+; takes up none, its own is, or in a window that has closed, is the next
+; to receive (3.10.7.4), so that the peer's acknowledgements still count.
 (def acceptable ((c Conn) (s Seg)) bool
   (match s
     ((Seg sport dport seq ack flags window mss body)
       (let len (seg_space s)
-        (if (eq len 0)
+        (if (and (eq len 0) (eq (tcp_room c) 0))
+            (eq seq (c_rcv c))
+            (eq len 0)
             (in_window c seq)
             (or (in_window c seq) (in_window c (seq_add seq (sub len 1)))))))))
 
 ; Whether sequence number n is from RCV.NXT up to a window's end.
 (def in_window ((c Conn) (n int)) bool
-  (and (seq_le (c_rcv c) n) (seq_lt n (seq_add (c_rcv c) (tcp_window)))))
+  (and (seq_le (c_rcv c) n) (seq_lt n (seq_add (c_rcv c) (tcp_room c)))))
 
 ; What a segment out of the window gets: an acknowledgement, of where its
 ; sender should go on from, unless it is a reset; and in TIME-WAIT, the
@@ -518,7 +571,7 @@
 ; which came before the bytes ahead of it: cut to the window, and kept in
 ; order among the others, unless c holds as many as it may already.
 (def tcp_hold ((c Conn) (seq int) (body (list int)) (fin bool)) Conn
-  (let room (sub (tcp_window) (seq_diff seq (c_rcv c)))
+  (let room (sub (tcp_room c) (seq_diff seq (c_rcv c)))
     (if (or (le room 0) (ge (length (.held c)) (tcp_held_limit)))
         c
         (let kept (take body room)
@@ -552,15 +605,16 @@
 
 ; The step for data the connection takes, from its next byte, and whether
 ; the FIN follows it, joined to what it holds that this reaches: what the
-; window holds is given to the application, the FIN if all of it fits,
-; and all is acknowledged.
+; window holds is given to the application, counted into the ring if
+; there is one, the FIN if all of it fits, and all is acknowledged.
 (def taken ((st TcpStep) (now int) (body (list int)) (fin bool)) TcpStep
   (let c (.conn st)
     (match (held_joined (.held c) (seq_add (c_rcv c) (length body)) (rev body) fin)
       ((TcpJoined all fin1 rest)
-        (let (kept (take all (tcp_window))
+        (let (kept (take all (tcp_room c))
               fin2 (and fin1 (eq (length kept) (length all)))
-              c2 (.held (c_set_rcv c (seq_add (c_rcv c) (add (length kept) (if fin2 1 0)))) rest)
+              c1 (ring_wrote c (length kept))
+              c2 (.held (c_set_rcv c1 (seq_add (c_rcv c1) (add (length kept) (if fin2 1 0)))) rest)
               st2 (if (is_empty kept) (.conn st c2) (step_act (.conn st c2) (GotData kept))))
           (say_ack (if fin2 (fin_in st2 now) st2)))))))
 

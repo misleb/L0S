@@ -10,8 +10,9 @@
 ; and which it owns by its pid: only the process that made a connection may
 ; write to it, finish it, or reset it. The notices are
 ; user/lib/proto/inet.l0's TcpEvents; the last one of a connection is
-; closed WHY. A client that is gone, or whose port is full, loses its
-; connections with a reset.
+; closed WHY. A client that is gone loses its connections with a reset;
+; one whose port is full has its notices held, in order, and given as it
+; takes those before them, the window offered less what is held.
 
 ; ----------------------------------------------------------------- the table
 
@@ -88,7 +89,105 @@
 
 ; The stack with connection c in its table, and without connection id.
 (def tcp_put ((s Stack) (c Conn)) Stack (tcp_set_conns s (map_put (tcp_conns s) (.id c) c)))
-(def tcp_forget ((s Stack) (id int)) Stack (tcp_set_conns s (map_remove (tcp_conns s) id)))
+(def tcp_forget ((s Stack) (id int)) Stack
+  (match (map_get (tcp_conns s) id)
+    ((None) s)
+    ((Some c) (let z (tcp_ring_free (.ring c)) (tcp_set_conns s (map_remove (tcp_conns s) id))))))
+
+; ----------------------------------------------------------------- the rings
+
+; A ring for a connection of the process pid's, its data put there for
+; it (tcp.l0's TcpRing): tcp_ring_pages of shared memory, shared with
+; pid; or none if they cannot be had, as under l0 test, and the
+; connection's data then goes in its notices.
+(def tcp_ring_new ((pid int)) (Option TcpRing)
+  (match (shm_region (tcp_ring_pages) "a connection's ring")
+    ((NoShmRegion why) ((None TcpRing)))
+    ((ShmRegion va g)
+      (match (shm_share_to va (tcp_ring_pages) pid "a connection's ring")
+        ((Ok there) (Some (TcpRing va there g 0 0 0 0)))
+        ((Err why) (let z (shm_region_free va (tcp_ring_pages) g) ((None TcpRing))))))))
+
+; A ring given up as its connection is: inet's region closed and its
+; pages unmapped, freed once the process has given them up too.
+(def tcp_ring_free ((r (Option TcpRing))) int
+  (match r
+    ((None) 0)
+    ((Some x) (let z (shm_region_free (.va x) (tcp_ring_pages) (.region x)) 0))))
+
+; The step st, its connection given the ring r.
+(def tcp_with_ring ((st TcpStep) (r (Option TcpRing))) TcpStep
+  (.conn st (.ring (.conn st) r)))
+
+; Where connection c's ring is in its process, 0 for none.
+(def tcp_ring_there ((c Conn)) int
+  (match (.ring c) ((Some r) (.there r)) ((None) 0)))
+
+; The data d that came to connection c: put in its ring, after what is
+; there, and its process told if no notice of the ring is unanswered;
+; with no ring, told in notices.
+(def tcp_got ((s Stack) (c Conn) (d (list int))) Stack
+  (match (map_get (tcp_conns s) (.id c))
+    ((None) s)
+    ((Some now)
+      (match (.ring now)
+        ((None) (tcp_told_data s now d))
+        ((Some r)
+          (let (b (bytes_from_list d)
+                z (tcp_ring_put (.region r) b (tcp_ring_spans (.put r) (add (.put r) (length d)) (tcp_ring_size)) 0)
+                r2 (.put r (add (.put r) (length d))))
+            (tcp_ring_told s now r2 false)))))))
+
+; The bytes of b, from i, written into g along the runs ss.
+(def tcp_ring_put ((g IoRegion) (b bytes) (ss (list TcpSpan)) (i int)) int
+  (if (is_empty ss)
+      0
+      (let (sp (head ss)
+            z (region_set_bytes g (.at sp) b i (add i (.n sp))))
+        (tcp_ring_put g b (tail ss) (add i (.n sp))))))
+
+; Connection c kept with its ring r, and its process told how far the
+; ring holds data, if that is past what it was told and it has answered
+; every notice before, or if must, as before a FIN, so that it reads all
+; the data before it hears there is no more.
+(def tcp_ring_told ((s Stack) (c Conn) (r TcpRing) (must bool)) Stack
+  (if (and (gt (.put r) (.told r)) (or must (eq (.told r) (.took r))))
+      (let c2 (.ring c (Some (.told r (.put r))))
+        (tcp_notify (tcp_put s c2) c2 (TcpGot (.id c) (.put r))))
+      (tcp_put s (.ring c (Some r)))))
+
+; Connection c's FIN told after all its data: its ring's, if any data
+; there is not told yet.
+(def tcp_fin_told ((s Stack) (c Conn)) Stack
+  (match (map_get (tcp_conns s) (.id c))
+    ((None) (tcp_notify s c (TcpFin (.id c))))
+    ((Some now)
+      (match (.ring now)
+        ((None) (tcp_notify s now (TcpFin (.id c))))
+        ((Some r) (tcp_notify (tcp_ring_told s now r true) now (TcpFin (.id c))))))))
+
+; took ID N: connection ID's process has taken its data up to N bytes
+; from its first, out of its ring, which may then take that much more:
+; told so if a notice is due, and the window that opened offered at once
+; if it had been under two segments. Nothing answers it.
+(def tcp_req_took ((s Stack) (from int) (ws (list (list int)))) (Served Stack)
+  (match (tcp_owned s from ws)
+    ((Err why) (served_error s why))
+    ((Ok c)
+      (match (.ring c)
+        ((None) (served_error s "the connection has no ring"))
+        ((Some r)
+          (match (if (eq (length ws) 2) (word_number (nth ws 1)) ((None int)))
+            ((None) (served_error s "took ID N"))
+            ((Some n)
+              (if (or (lt n (.took r)) (gt n (.told r)))
+                  (served_error s (append "the ring has told " (digits (.told r))))
+                  (let (low (lt (tcp_room c) (mul 2 (tcp_our_mss)))
+                        c2 (.ring c (Some (.took r n)))
+                        s2 (tcp_ring_told s c2 (.took r n) false))
+                    (served_ok (match (map_get (tcp_conns s2) (.id c))
+                                 ((None) s2)
+                                 ((Some c3) (if low (tcp_run s2 (tcp_reopened c3)) s2)))))))))))))
 
 ; The connection from local port lport to port rport at raddr, if there is one.
 (def tcp_conn_for ((s Stack) (lport int) (raddr int) (rport int)) (Option Conn)
@@ -141,9 +240,75 @@
 (def tcp_out ((s Stack) (addr int) (seg Seg)) Stack
   (ip_out s addr (proto_tcp) (tcp_bytes (stack_addr s) addr seg)))
 
-; The notice e to the owner of connection c, once this message is dealt with.
+; The notice e to the owner of connection c, once this message is dealt
+; with: after those the connection holds, if it holds any.
 (def tcp_notify ((s Stack) (c Conn) (e TcpEvent)) Stack
-  (queued_bytes s (c_owner c) (bytes_from_list (tcp_notice e)) (ToTcp (.id c))))
+  (let b (bytes_from_list (tcp_notice e))
+    (match (map_get (tcp_conns s) (.id c))
+      ((Some held)
+        (if (is_empty (.late held))
+            (queued_bytes s (c_owner c) b (ToTcp (.id c)))
+            (tcp_put s (.late held (append (.late held) (cons b (nil bytes)))))))
+      ((None) (queued_bytes s (c_owner c) b (ToTcp (.id c)))))))
+
+; How often inet tries again to give an application the notices it holds
+; for it, in ns, while it holds any.
+(def tcp_late_ns () int 2000000)
+
+; When inet must next try to give the notices it holds, as clock_ns
+; counts from now: tcp_late_ns on if any connection holds some, else 0.
+(def tcp_late_due ((s Stack) (now int)) int
+  (if (any_late (map_values (tcp_conns s))) (add now (tcp_late_ns)) 0))
+
+; Whether any of cs holds notices.
+(def any_late ((cs (list Conn))) bool
+  (if (is_empty cs) false
+      (not (is_empty (.late (head cs)))) true
+      (any_late (tail cs))))
+
+; The notice b, to port for connection id, sent now: or held, after any
+; the connection holds already, if it holds some or port's queue is
+; full, so that it is given in order once the application takes what
+; came before; a connection whose owner's port has gone is lost.
+(def tcp_sent_to ((s Stack) (port int) (b bytes) (id int)) Stack
+  (match (map_get (tcp_conns s) id)
+    ((None) (let r (port_send_bytes port b 0 (bytes_len b)) s))
+    ((Some c)
+      (if (not (is_empty (.late c)))
+          (tcp_put s (.late c (append (.late c) (cons b (nil bytes)))))
+          (let r (port_send_bytes port b 0 (bytes_len b))
+            (if (eq r (Sent)) s
+                (eq r (SendFull)) (tcp_put s (.late c (cons b (nil bytes))))
+                (tcp_lost s id r)))))))
+
+; The stack with each connection's held notices given to its owner, in
+; order, as many as its port has room for; a connection that gave any
+; offers the window that opened.
+(def tcp_delivered ((s Stack)) Stack
+  (tcp_delivered_ids s (sort (map_keys (tcp_conns s)))))
+
+; The same, for the connections numbered ids.
+(def tcp_delivered_ids ((s Stack) (ids (list int))) Stack
+  (if (is_empty ids)
+      s
+      (match (map_get (tcp_conns s) (head ids))
+        ((None) (tcp_delivered_ids s (tail ids)))
+        ((Some c)
+          (if (is_empty (.late c))
+              (tcp_delivered_ids s (tail ids))
+              (tcp_delivered_ids (tcp_gave s c (.late c) (length (.late c))) (tail ids)))))))
+
+; Connection c's held notices bs, which were n, given to its owner until
+; its port is full: the rest kept; if any went, the window offered.
+(def tcp_gave ((s Stack) (c Conn) (bs (list bytes)) (n int)) Stack
+  (let r (if (is_empty bs) (Sent) (port_send_bytes (c_owner c) (head bs) 0 (bytes_len (head bs))))
+    (if (and (not (is_empty bs)) (eq r (Sent)))
+        (tcp_gave s c (tail bs) n)
+        (and (not (is_empty bs)) (not (eq r (SendFull))))
+        (tcp_lost (tcp_put s (.late c (nil bytes))) (.id c) r)
+        (eq (length bs) n)
+        s
+        (tcp_run s (tcp_reopened (.late c bs))))))
 
 ; The stack after a connection's step: its connection kept, and each of
 ; the acts it called for, in order.
@@ -159,15 +324,40 @@
 (def tcp_act ((s Stack) (c Conn) (a TcpAct)) Stack
   (match a
     ((SendSeg addr seg) (tcp_out s addr seg))
-    ((ConnUp) (tcp_notify s c (TcpUp (.id c))))
-    ((ConnAccepted) (tcp_notify s c (TcpAccepted (.id c) (c_raddr c) (c_rport c) (c_lport c))))
-    ((GotData d) (tcp_notify s c (TcpData (.id c) d)))
-    ((GotFin) (tcp_notify s c (TcpFin (.id c))))
+    ((ConnUp) (tcp_notify s c (TcpUp (.id c) (tcp_ring_there c))))
+    ((ConnAccepted) (tcp_notify s c (TcpAccepted (.id c) (c_raddr c) (c_rport c) (c_lport c) (tcp_ring_there c))))
+    ((GotData d) (tcp_got s c d))
+    ((GotFin) (tcp_fin_told s c))
     ((ConnOver) (tcp_notify s c (TcpClosed (.id c) "closed")))
     ((ConnGone why)
-      (let s2 (tcp_forget s (.id c))
+      (let s2 (tcp_forget (tcp_unheld s (.id c)) (.id c))
         (if (is_empty why) s2 (tcp_notify s2 c (TcpClosed (.id c) why)))))
     ((ConnRoom n) (tcp_notify s c (TcpRoom (.id c) n)))))
+
+; The most data a notice carries, for a connection with no ring: what a
+; message holds less room for its words, tcp ID data. Data that came out
+; of order is given, joined to what it waited for, up to the window,
+; which is more than a message holds, so the kernel would refuse it as
+; too big.
+(def tcp_notice_data () int (sub (max_message) 32))
+
+; The data d told to connection c's owner, in notices of at most
+; tcp_notice_data bytes each, in order.
+(def tcp_told_data ((s Stack) (c Conn) (d (list int))) Stack
+  (if (is_empty d)
+      s
+      (tcp_told_data (tcp_notify s c (TcpData (.id c) (take d (tcp_notice_data)))) c (drop_n d (tcp_notice_data)))))
+
+; The stack with the notices connection id holds queued to its owner, in
+; order, before it is forgotten: what does not fit its port then is lost.
+(def tcp_unheld ((s Stack) (id int)) Stack
+  (match (map_get (tcp_conns s) id)
+    ((None) s)
+    ((Some c) (tcp_queued_all (tcp_put s (.late c (nil bytes))) (c_owner c) (.late c) id))))
+
+; Each of bs queued to port for connection id.
+(def tcp_queued_all ((s Stack) (port int) (bs (list bytes)) (id int)) Stack
+  (if (is_empty bs) s (tcp_queued_all (queued_bytes s port (head bs) (ToTcp id)) port (tail bs) id)))
 
 ; A notice to connection id's owner was not taken: if the port is gone, so
 ; is the listener it had, and a connection whose owner cannot be told is
@@ -241,7 +431,8 @@
             (match seg
               ((Seg sport dport seq ack flags window mss body)
                 (let iss (tcp_iss now (tcp_secret s2) (stack_addr s2) dport src sport)
-                  (tcp_run (tcp_set_next s2 (add id 1) (tcp_next_port s2)) (tcp_passive id np pid src seg iss now))))))))))
+                  (tcp_run (tcp_set_next s2 (add id 1) (tcp_next_port s2))
+                           (tcp_with_ring (tcp_passive id np pid src seg iss now) (tcp_ring_new pid)))))))))))
 
 ; --------------------------------------------------------------------- timers
 
@@ -271,6 +462,7 @@
       (eq op "write") (tcp_req_write s reply from ws rest)
       (eq op "finish") (tcp_req_finish s from ws)
       (eq op "reset") (tcp_req_reset s from ws)
+      (eq op "took") (tcp_req_took s from ws)
       (and (eq op "tcp") (is_empty ws)) (Served s (tcp_text s))
       (served_error s (append "no request " op))))
 
@@ -300,7 +492,8 @@
                   id (tcp_next_id s2)
                   now (clock_ns)
                   iss (tcp_iss now (tcp_secret s2) (stack_addr s2) lport dst port))
-              (Served (tcp_run (tcp_set_next s2 (add id 1) (next_ephemeral lport)) (tcp_active id np from lport dst port iss now))
+              (Served (tcp_run (tcp_set_next s2 (add id 1) (next_ephemeral lport))
+                               (tcp_with_ring (tcp_active id np from lport dst port iss now) (tcp_ring_new from)))
                       (append "connecting " (unwords (numbers_words (cons id (cons lport (nil int))))))))))))
 
 ; listen PORT NPORT: PORT's connections, from now on, made and told to NPORT;

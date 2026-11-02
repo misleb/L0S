@@ -71,6 +71,7 @@ done, which is how its tests see it. It serves **the inet protocol**
 | `write ID` | then a newline and the data: given to connection ID, which sends it as the peer's window lets it. A request that names a reply port is answered `ok HELD`, the bytes the connection now holds not yet acknowledged, or, if they would pass 16384, `error: full HELD`: the data is not taken, the connection is kept, and its notice port is told `tcp ID room N` once what it holds falls to half. One that names none is answered nothing, and more than 16384 resets the connection |
 | `finish ID` | `ok`: connection ID is closed once its data is sent (a FIN) |
 | `reset ID` | `ok`: connection ID is given up, with a reset |
+| `took ID N` | connection ID's owner has read its ring's data up to N bytes from the connection's first, as far as `tcp ID data N` told it, so the ring may take that much more. Nothing answers it; refused if N is past what it was told or behind what it took |
 | `tcp` | a line `ID STATE LPORT ADDR:RPORT` for each connection, then `listen PORT` for each listener; `none` for neither |
 
 A client lets go of what it bound with `unbind`, and `inet` lets go of a
@@ -87,9 +88,33 @@ queue, and notices, and keeps the connections, 32 at most, and the
 listeners. It keeps sequence and acknowledgement numbers modulo 2^32,
 holds the data it has sent until it is acknowledged, and sends it again
 when no acknowledgement comes: after 1 second, then 2, 4, 8, 16 and 16
-more, and then gives up with a reset and `closed timeout`. A window of 8192 bytes is offered
-always, the data being given to the client as it comes; the peer's is
-kept, and a closed one probed with a byte. A segment that comes before
+more, and then gives up with a reset and `closed timeout`.
+
+Each connection's data comes to its owner through a **ring**: 16 pages
+(64 KB) of shared memory `inet` allocates as it makes the connection and
+shares with the owner, whose address there the `up` or `accepted` notice
+says. `inet` copies what comes in order into the ring, from its start
+again once it reaches its end, and tells the owner `tcp ID data N`, the
+bytes it holds from the connection's first; the owner reads them out,
+`tcp_rx_take`, and says `took ID N`. Only one data notice is
+unanswered at a time: what comes meanwhile is told once the owner has
+said it took the last, so its port never fills with them. The window
+offered is the ring's room, what it holds that the owner has not taken,
+at most 65535; a `took` that finds it under two segments offers the
+window that opened at once. An owner slow to read thus slows its peer,
+down to a window of none, which the peer probes, and nothing is lost.
+Before a FIN's notice, the ring's data not told yet is told, so the
+owner reads it all first. `inet` gives up its ring as it forgets the
+connection; the owner gives up its own as the connection is closed,
+`tcp_rx_free` (`httpc`'s `http_give_up` and its closed notice do), and
+the pages are freed once neither has them.
+
+A connection `inet` cannot make a ring for, as when shared memory runs
+out, or under `l0 test`, says 0 for its address and sends its data in
+its notices instead, at most 4064 bytes each, offering a window of 8192
+bytes less the notices it holds for an owner whose port is full: those
+are kept in order and given again every 2 ms until it takes them. The
+peer's window is kept, and a closed one probed with a byte. A segment that comes before
 the bytes ahead of it is held, cut to the window, up to 16 of them, and
 given to the client with them once they come, so that a segment lost
 costs only itself. Segments carry at most 1460 bytes,
@@ -108,13 +133,15 @@ cannot guess where another's connection starts.
 A client asks through its own reply port, and has the connection's notices
 come to another, named in `connect` and `listen`, so that an answer is never
 taken for a notice; it owns its connections by its pid. The notices, to that
-port, are `tcp ID up` (opened), `tcp ID accepted SRC SPORT LPORT` (to
-the listener, which is then the owner), `tcp ID data` and a newline and the data,
+port, are `tcp ID up VA` (opened, its ring at VA, 0 for none), `tcp ID
+accepted SRC SPORT LPORT VA` (to the listener, which is then the owner),
+`tcp ID data N` (the ring holds data up to N bytes from the first), or,
+with no ring, `tcp ID data` and a newline and the data,
 `tcp ID fin` (the peer will send no more), `tcp ID room N` (a write
 refused as full may be made again, N bytes of it), and the last of each connection,
 `tcp ID closed WHY`: `closed`, `reset`, `refused`, `timeout`, `aborted` or
-`overflow`. A client whose port has gone, or is full, loses its
-connections, with a reset.
+`overflow`. A client whose port has gone loses its connections, with a
+reset; one whose port is full has its notices held, as above.
 
 A client writes a body of any length with `tcp_write_bytes`, which sends
 a range of bytes as `write` requests of at most 2048 bytes, each its head
@@ -328,14 +355,18 @@ and opens a connection, waiting up to 30 seconds for `up` (with
 bytes with `tcp_write_bytes`, and `http_ask c method path headers body`
 makes the request for the connection's host first. A program that waits
 on several ports gives each message that comes to the notice port to
-`http_feed c b`, which reads it in place, `TcpDataAt`, into the parts of
-a response and sends nothing; one that waits on nothing else calls
+`http_feed c b`, which reads the data a notice tells of from the
+connection's ring (`HttpConn`'s `rx`, opened as `up` comes) and says
+`took`, or, with no ring, in place from the notice, `TcpDataAt`, into
+the parts of a response; one that waits on nothing else calls
 `http_next c deadline`, which receives there until parts come or the
 deadline passes. The server's `fin` ends a body that runs to the close;
 the connection's end in the middle of a response is `HttpFailed WHY`. A
 connection whose response ended with `keep` takes the next request, and
-`http_reuse c` opens one the server closed again; `http_close` finishes
-it.
+`http_reuse c` opens one the server closed again, giving up the old
+one's ring; `http_close` finishes it, and `http_give_up` resets it and
+gives up its ring, as a program that keeps going must, not to run out
+of regions.
 
 ## Reaching a model's API
 
@@ -434,15 +465,21 @@ without which it will not start. It:
 - serves releases of L0S, what the installer fetches
   ([boot.md](boot.md#installing-from-the-proxy)), from `--release DIR`,
   `build/release` unless given, without going upstream
-  ([release.py](../tools/api-proxy/release.py)). `make release
-  [WHISTLE=FILE] [PIEEPROM=FILE]` stages `DIR/pi5` and `DIR/virt` with
+  ([release.py](../tools/api-proxy/release.py)). `make release` stages
+  `build/release/pi5` and `build/release/virt` with
   [tools/mkrelease](../tools/mkrelease), each a directory per part:
   `system` (the programs as `make root` stages them, and the board's
   `/etc` as its initramfs has it, `/etc/agent` included), `boot` on the
   Pi 5 (what `make pi5-card` writes: `l0.img`, `config.txt`,
   `cmdline.txt`, the device trees and `input.bin`), `agent` (the home's
-  `CLAUDE.md` and `CONSTITUTION.md`), `speech` (WHISTLE, as
-  `whistle.cact`) and `eeprom` (PIEEPROM, as `pieeprom.bin`). `GET
+  `CLAUDE.md` and `CONSTITUTION.md`), `speech` (Whistle's model, as
+  `whistle.cact`) and on the Pi 5 `eeprom` (Raspberry Pi's bootloader
+  image, as `pieeprom.bin`). The model and the image are fetched once
+  into `build/fetch`, each from a commit the Makefile pins (Hugging
+  Face's `Cactus-Compute/whistle`, rpi-eeprom's
+  `firmware-2712/default`) and kept only if its SHA-256 is the one
+  pinned; `WHISTLE_MODEL=FILE` and `PIEEPROM=FILE` give files of one's
+  own instead. `GET
   /release/BOARD/manifest` is made from the files as they are, a line
   each, `PART SIZE SHA256 MODE PATH` (MODE `x` for a file with an
   execute bit, else `-`; PATH within the part), in order of part then
@@ -528,6 +565,11 @@ a Broadcom BCM54213PE PHY at MDIO address 1
   `GET_BOARD_MAC_ADDRESS` through the mailbox
   ([mailbox.l0](../user/lib/sys/mailbox.l0), shared with `rtc`), or else
   what the GEM's first specific address already holds
+- lets the PHY's reset line go if no PHY answers, as when the board
+  booted from its card, whose bootloader leaves it held (a network
+  boot's lets it go): RP1's GPIO 32 (`phy-reset-gpios`) made a GPIO
+  its bank's RIO drives, low for 5 ms, then high, and the PHY asked
+  again 50 ms after, as Linux's MDIO bus pulses it
 - sets the GEM up for RGMII with MDC at pclk / 128, resets the PHY, has
   it delay both clocks (rgmii-id: shadow 7's `RGMII_SKEW_EN`, shadow 3's
   `GTXCLK_EN`), advertises every speed and autonegotiates
@@ -555,13 +597,16 @@ The first run should check, beside `gem`'s line, which names its
 address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
 - that the firmware gives the address. Without it, and with nothing in
   SA1B and SA1T, `gem` fails
-- that the PHY answers. "No PHY answers" means it is still held in
-  reset by RP1's GPIO 32 (`phy-reset-gpios`, which Linux pulses), which
-  `gem` does not drive, or the PHY is not at address 1
+- that the PHY answers. Booted from the network it does; booted from
+  the card it did not until `gem` let its reset line go, which is not
+  yet confirmed on a board: "No PHY answers ..., after its reset line
+  was let go" means the PHY is not at address 1, or GPIO 32 is not its
+  line
 - the link line, and frames both ways: `inet`'s lease, `ping`. A link
   with nothing sent may mean RP1's Ethernet clocks were left off by the
   firmware (`clk_eth`, `clk_eth_tsu` in RP1's clocks block, which `gem`
-  does not set up), or the RGMII delays are doubled or missing
+  does not set up), as a card's bootloader, which never used the port,
+  may leave them, or the RGMII delays are doubled or missing
 - the AXI pipelining register, AMP at 0x54 (`cdns,ar2r-max-pipe`,
   `cdns,use-aw2b-fill`), which Raspberry Pi's macb adds, unconfirmed
 - that DCFG1 gives the bus's width, and DCFG6 the queues there are
@@ -598,8 +643,12 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
 - **TCP has the essentials, and little else.** `inet` holds 32
   connections, each with at most 16384 bytes of the client's data not
   yet acknowledged (more is refused, or resets it if the write named no
-  reply port), and offers a window of 8192 bytes
-  that never changes. At most 16 segments that arrive out of order are
+  reply port), and offers a window of at most 65535 bytes, a ring's room
+  (no window scaling, so a ring of more would gain nothing). Each
+  connection's ring is 64 KB and a region of `inet`'s and of its
+  owner's, of which a process may open 64: `inet`'s 32 connections fit,
+  and an owner that keeps many connections, or drops them without
+  `tcp_rx_free`, runs out. At most 16 segments that arrive out of order are
   held, within the window; one more is dropped, and asked for again once
   those before it come. The retransmission timeout
   is 1 second, doubled each time, whatever the round trip is, and every
@@ -607,11 +656,14 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   selective acknowledgement, window scaling, timestamps, urgent data,
   nor simultaneous open, and no MSS but the peer's SYN's; ICMP's errors
   do not end a connection, only the retransmissions' running out does
-  (after 47 seconds). A client must take its notices as they come: if its
-  port holds 32 messages, `inet` resets the connection that
-  overflows it. Notices carry what came in the segments it came in, at
-  most 1460 bytes each, so a client sees no message boundary of the
-  sender's. A connection's owner is the pid that opened it, which is all
+  (after 47 seconds). A ring's data is told and taken whole, one notice
+  and one `took` at a time, so a client sees no message boundary of the
+  sender's, and each batch costs two messages, however small. Without a
+  ring, a client whose port is full (32 messages) is given what `inet`
+  holds for it only when it next tries, every 2 ms, and the window it
+  offers is counted in the notices' bytes, not the data's; what a
+  connection held is queued once more as it ends, and lost if the port
+  is full still. A connection's owner is the pid that opened it, which is all
   the check there is. The first sequence number's offset is L0's `hash`
   of the ends and the secret, which is no cryptographic hash, and on a
   board with no virtio-rng there is no secret, so the first sequence
