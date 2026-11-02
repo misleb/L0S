@@ -238,6 +238,10 @@ Ctrl-C as a person would:
   finds first, and show what ARP found; `tftp` fetch a file of one block
   and one of four full blocks, which the server ends with an empty
   one, and be told of a file the server does not have; and `net` ping `inet`'s own address;
+- `tftp_big`, on the same network with a RAM volume, has `tftp` fetch a
+  file of 70400 bytes, 138 blocks, to the volume, written 64 KB and then
+  the rest, which `df` then shows, and, told the server has no such
+  file, leave none behind;
 - `dhcp`, on a QEMU user network of 192.168.7.0/24 whose server offers
   192.168.7.50, starts `inet dhcp`, and has `net` show that address, the
   netmask and the router, which only the server's ACK can have given it,

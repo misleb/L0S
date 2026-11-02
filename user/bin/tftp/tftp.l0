@@ -7,8 +7,12 @@
 ;
 ; It reads in octet mode, 512 bytes a block, each acknowledged before the
 ; next comes, and asks again for what does not come within a second, five
-; times. QEMU's user network serves a directory at 10.0.2.2 when it is
-; given one, as tftp=DIR.
+; times, waiting on the kernel's alarm, not polling. Each block is read in
+; place from inet's notice and written out as it comes, 64 KB at a time,
+; so a file of any size takes no more memory than that; a failure
+; removes what was written of it. QEMU's user
+; network serves a directory at 10.0.2.2 when it is given one, as
+; tftp=DIR.
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (complain_as "tftp" why))
@@ -25,6 +29,9 @@
 (def wait_ns () int 1000000000)
 (def tries () int 5)
 
+; How many bytes are gathered before they are written: 64 KB.
+(def write_size () int 65536)
+
 ; ------------------------------------------------------------------ packets
 
 ; v as 2 bytes, most significant first, as TFTP's numbers are.
@@ -38,22 +45,62 @@
 ; The acknowledgement of block n.
 (def ack ((n int)) (list int) (append (u16_bytes (op_ack)) (u16_bytes n)))
 
-; What a server's packet is: block n of the file and its bytes; an error
-; and its message; or anything else.
-(data Packet (Block int (list int)) (Failure (list int)) (Strange))
+; What a server's packet is, read in place: block n, its data from byte
+; at to the packet's end; an error and its message; or anything else.
+(data Packet (Block (n int) (at int)) (Failure (list int)) (Strange))
 
-; The number xs's first 2 bytes are. The caller has checked they are there.
-(def u16_of ((xs (list int))) int
-  (bit_or (bit_shl (head xs) 8) (head (tail xs))))
+; The number bytes i and i + 1 of b are, most significant first. The
+; caller has checked they are there.
+(def u16_at ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 8) (bytes_get b (add i 1))))
 
-; The packet a datagram's data xs is.
-(def packet_of ((xs (list int))) Packet
-  (if (lt (length xs) 4)
+; The packet bytes i up to j of b are.
+(def packet_at ((b bytes) (i int) (j int)) Packet
+  (if (lt (sub j i) 4)
       (Strange)
-      (let op (u16_of xs)
-        (if (eq op (op_data)) (Block (u16_of (drop_n xs 2)) (drop_n xs 4))
-            (eq op (op_error)) (Failure (up_to 0 (drop_n xs 4)))
+      (let op (u16_at b i)
+        (if (eq op (op_data)) (Block (u16_at b (add i 2)) (add i 4))
+            (eq op (op_error)) (Failure (up_to 0 (bytes_range b (add i 4) j)))
             (Strange)))))
+
+; ------------------------------------------------------------------- output
+
+; Where the file goes: a file open for writing, or standard output; the
+; blocks not yet written, newest first, and how many bytes they hold.
+(data Sink (Sink (f IoFile) (held (list bytes)) (n int)))
+
+; The sink the arguments name: the file at out's path, made anew, or
+; standard output; or why it cannot be.
+(def sink_for ((out (list (list int)))) (Result Sink (list int))
+  (if (is_empty out)
+      ((Ok Sink (list int)) (Sink (IoFile 1) (nil bytes) 0))
+      (match (open_out (head out))
+        ((IoFailed fault why) ((Err Sink (list int)) (append (head out) (append ": " why))))
+        ((IoOpened f) ((Ok Sink (list int)) (Sink f (nil bytes) 0))))))
+
+; Bytes i up to j of b put in s, and all it holds written once that is
+; 64 KB or more; or why the write failed.
+(def sink_put ((s Sink) (b bytes) (i int) (j int)) (Result Sink (list int))
+  (let s2 (Sink (.f s) (cons (bytes_slice b i j) (.held s)) (add (.n s) (sub j i)))
+    (if (lt (.n s2) (write_size)) ((Ok Sink (list int)) s2) (sink_written s2))))
+
+; What s holds written, and s holding nothing; or why not.
+(def sink_written ((s Sink)) (Result Sink (list int))
+  (let (all (bytes_concat (rev (.held s)))
+        w (file_write_bytes (.f s) all 0 (bytes_len all)))
+    (if (lt w 0)
+        ((Err Sink (list int)) (append "writing failed, " (digits (neg w))))
+        ((Ok Sink (list int)) (Sink (.f s) (nil bytes) 0)))))
+
+; s's last bytes written and its file closed, or standard output
+; flushed: empty, or why not.
+(def sink_closed ((s Sink)) (list int)
+  (match (sink_written s)
+    ((Err why) why)
+    ((Ok s2)
+      (if (eq (.f s2) (IoFile 1))
+          (done_why (file_flush (.f s2)))
+          (done_why (file_close (.f s2)))))))
 
 ; ---------------------------------------------------------------- fetching
 
@@ -67,65 +114,83 @@
             ((Err why) (complain why))
             ((Ok server) (fetch n server (nth argv 1) (drop argv 2))))))))
 
-; file fetched from server, from a port inet picks, and written out.
+; file fetched from server, from a port inet picks, and written out as
+; it comes; on a failure, what was written of it to a path removed.
 (def fetch ((n Inet) (server int) (file (list int)) (out (list (list int)))) int
-  (match (udp_bind n 0)
+  (match (sink_for out)
     ((Err why) (complain why))
-    ((Ok port)
-      (let (got (fetched n port server (tftp_port) (rrq file) 1 (tries) (nil int))
-            u (udp_unbind n port))
-        (match got
-          ((Err why) (complain why))
-          ((Ok content) (written content out)))))))
+    ((Ok s)
+      (match (udp_bind n 0)
+        ((Err why) (let (c (sink_closed s) r (unwritten out)) (complain why)))
+        ((Ok port)
+          (let (got (fetched n port server (tftp_port) (rrq file) 1 (tries) s)
+                u (udp_unbind n port))
+            (match got
+              ((Err why) (let r (unwritten out) (complain why)))
+              ((Ok s2)
+                (let why (sink_closed s2)
+                  (if (is_empty why) 0 (complain why)))))))))))
 
-; The file's bytes to standard output, or to the path out names.
-(def written ((content (list int)) (out (list (list int)))) int
-  (if (is_empty out)
-      (write_str content)
-      (let why (write_whole (head out) (bytes_from_list content))
-        (if (is_empty why) 0 (complain (append (head out) (append ": " why)))))))
+; The file at out's path removed, if there is one, so a failure leaves
+; no part of a file behind: 0.
+(def unwritten ((out (list (list int)))) int
+  (if (is_empty out) 0 (let r (remove_file (head out)) 0)))
 
-; The rest of the file, from block want on: last sent to sport at server,
-; to be sent again if nothing comes in time, left times more. acc holds
-; what came before it, reversed.
-(def fetched ((n Inet) (port int) (server int) (sport int) (last (list int)) (want int) (left int) (acc (list int))) (Result (list int) (list int))
+; The rest of the file, from block want on, into s: last sent to sport at
+; server, to be sent again if nothing comes in time, left times more.
+; The sink once the last block is in it, or why not, its file closed.
+(def fetched ((n Inet) (port int) (server int) (sport int) (last (list int)) (want int) (left int) (s Sink)) (Result Sink (list int))
   (let why (udp_send n port server sport last)
     (if (not (is_empty why))
-        ((Err (list int) (list int)) why)
+        (failed s why)
         (match (block_from n server (add (clock_ns) (wait_ns)))
           ((None)
             (if (eq left 0)
-                ((Err (list int) (list int)) "the server did not answer")
-                (fetched n port server sport last want (sub left 1) acc)))
-          ((Some d)
-            (match d
-              ((Datagram src from to content)
-                (match (packet_of content)
-                  ((Failure msg) ((Err (list int) (list int)) (append "the server said: " msg)))
-                  ((Strange) (fetched n port server sport last want left acc))
-                  ((Block b bs) (blocked n port server from want b bs acc))))))))))
+                (failed s (append "the server sent no block " (append (digits want) " in 6 tries")))
+                (fetched n port server sport last want (sub left 1) s)))
+          ((Some c)
+            (let (b (.b c) d (.d c))
+              (match (packet_at b (.at d) (bytes_len b))
+                ((Failure msg) (failed s (append "the server said: " msg)))
+                ((Strange) (fetched n port server sport last want left s))
+                ((Block k at) (blocked n port server (.sport d) want k b at s)))))))))
 
-; Block b, its bytes bs, come from port from: the one wanted, kept and
-; acknowledged, the last if it is short; or one again, acknowledged again.
-(def blocked ((n Inet) (port int) (server int) (from int) (want int) (b int) (bs (list int)) (acc (list int))) (Result (list int) (list int))
-  (if (eq b (bit_and want 65535))
-      (if (lt (length bs) (block_size))
-          (let a (udp_send n port server from (ack b))
-            ((Ok (list int) (list int)) (rev (push bs acc))))
-          (fetched n port server from (ack b) (add want 1) (tries) (push bs acc)))
-      (fetched n port server from (ack (bit_and (sub want 1) 65535)) want (tries) acc)))
+; s's file closed, and why it failed.
+(def failed ((s Sink) (why (list int))) (Result Sink (list int))
+  (let c (sink_closed s) ((Err Sink (list int)) why)))
 
-; The next datagram from server to come to n's port by deadline, or none.
-(def block_from ((n Inet) (server int) (deadline int)) (Option Datagram)
-  (match (port_try_receive (inet_port n))
-    ((RecvFailed)
-      (if (gt (clock_ns) deadline)
-          ((None Datagram))
-          (let z (sleep_ns 1000000) (block_from n server deadline))))
+; Block k, its data bytes at up to the end of b, come from port from:
+; the one wanted, put in s and acknowledged, the last if it is short; or
+; one again, acknowledged again.
+(def blocked ((n Inet) (port int) (server int) (from int) (want int) (k int) (b bytes) (at int) (s Sink)) (Result Sink (list int))
+  (if (eq k (bit_and want 65535))
+      (match (sink_put s b at (bytes_len b))
+        ((Err why) (failed s why))
+        ((Ok s2)
+          (if (lt (sub (bytes_len b) at) (block_size))
+              (let a (udp_send n port server from (ack k)) ((Ok Sink (list int)) s2))
+              (fetched n port server from (ack k) (add want 1) (tries) s2))))
+      (fetched n port server from (ack (bit_and (sub want 1) 65535)) want (tries) s)))
+
+; A datagram that came: the message's bytes, and where its head says
+; its data is.
+(data Came (Came (b bytes) (d DatagramAt)))
+
+; The next datagram from server to come to n's port by deadline, or
+; none: the kernel's alarm set for the deadline, in place of any before,
+; and the port waited on. An alarm before the deadline, one set for an
+; earlier wait that rang before this one began, is passed over.
+(def block_from ((n Inet) (server int) (deadline int)) (Option Came)
+  (let a (alarm_at (inet_port n) deadline)
+    (came_by n server deadline)))
+
+; block_from's loop, its alarm set.
+(def came_by ((n Inet) (server int) (deadline int)) (Option Came)
+  (match (port_receive (inet_port n))
+    ((RecvFailed) ((None Came)))
     ((Message from b)
-      (match (datagram_of (msg_text b))
-        ((None) (block_from n server deadline))
-        ((Some d)
-          (match d
-            ((Datagram src sport dport content)
-              (if (eq src server) (Some d) (block_from n server deadline)))))))))
+      (if (is_alarm_notice (Message from b))
+          (if (ge (clock_ns) deadline) ((None Came)) (came_by n server deadline))
+          (match (datagram_at b)
+            ((None) (came_by n server deadline))
+            ((Some d) (if (eq (.src d) server) (Some (Came b d)) (came_by n server deadline))))))))

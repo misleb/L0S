@@ -29,7 +29,7 @@ move independently, so several can be active at once.
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
 | [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | idea | – | 0012 | toolkit.md |
-| [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | idea | – | – | network.md |
+| [0018](0018-pi5-tftp-large.md) `tftp` fetches a file of megabytes on the Pi 5 | Network | active | 1/2 | – | network.md |
 | [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008 (met), 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
@@ -55,7 +55,9 @@ conversation and the Agent app, with its Tools pane, are in, and its
 screen test is next. [0059](0059-usb-microphone.md) is active:
 isochronous USB, `usb-audio` and `rec` are in, the Yeti Nano heard
 through QEMU, and its 48 kHz brought down to Whistle's 16 kHz; the
-Yeti on a Pi 5 is next.
+Yeti on a Pi 5 is next. [0018](0018-pi5-tftp-large.md) is active:
+`tftp` writes a file as it comes, with no list of its bytes, and
+fetches 17 MB on QEMU; the same on a Pi 5 is next.
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its
 container, tokenizer, front end, stem, encoder and decoder are in,
 checked against the reference rebuilt from `whistle.cact` (the same

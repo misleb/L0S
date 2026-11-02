@@ -1,4 +1,5 @@
-; tftp_test.l0 -- tests of tftp.l0: its packets, as RFC 1350 lays them out.
+; tftp_test.l0 -- tests of tftp.l0: its packets, as RFC 1350 lays them
+; out, read in place, and the file written as blocks come.
 
 (def test_rrq () int
   (check_str "opcode 1, the file, octet" (rrq "a.txt") (append (cons 0 (cons 1 "a.txt")) (cons 0 (append "octet" (cons 0 (nil int)))))))
@@ -6,21 +7,45 @@
 (def test_ack () int
   (check_str "opcode 4, block 258" (ack 258) (cons 0 (cons 4 (cons 1 (cons 2 (nil int)))))))
 
-(def packet_text ((p Packet)) (list int)
-  (match p
-    ((Block n bs) (append "block " (append (digits n) (append " " bs))))
+; A packet as text: a block's number and its data, read from where the
+; packet says it starts.
+(def packet_text ((b bytes) (i int)) (list int)
+  (match (packet_at b i (bytes_len b))
+    ((Block n at) (append "block " (append (digits n) (append " " (bytes_range b at (bytes_len b))))))
     ((Failure msg) (append "failure " msg))
     ((Strange) "strange")))
 
-(def test_packet_of () int
-  (add (check_str "data" (packet_text (packet_of (cons 0 (cons 3 (cons 0 (cons 7 "abc")))))) "block 7 abc")
-       (add (check_str "an error" (packet_text (packet_of (append (cons 0 (cons 5 (cons 0 (cons 1 "File not found")))) (cons 0 (nil int)))))
+; Each packet behind 3 bytes of something else, as a notice's head is.
+(def behind ((xs (list int))) bytes (bytes_from_list (append "hd:" xs)))
+
+(def test_packet_at () int
+  (add (check_str "data" (packet_text (behind (cons 0 (cons 3 (cons 0 (cons 7 "abc"))))) 3) "block 7 abc")
+       (add (check_str "an error" (packet_text (behind (append (cons 0 (cons 5 (cons 0 (cons 1 "File not found")))) (cons 0 (nil int)))) 3)
                        "failure File not found")
-            (check_str "an ack" (packet_text (packet_of (ack 1))) "strange"))))
+            (check_str "an ack" (packet_text (behind (ack 1)) 3) "strange"))))
+
+; Block 258, its number's two bytes 1 and 2; a packet of 3 bytes is too
+; short to be one.
+(def test_block_number () int
+  (add (check_str "258" (packet_text (behind (cons 0 (cons 3 (cons 1 (cons 2 "x"))))) 3) "block 258 x")
+       (check_str "short" (packet_text (behind (cons 0 (cons 3 (cons 1 (nil int))))) 3) "strange")))
 
 ; An empty last block is a block too: a file of 512 bytes ends with one.
 (def test_empty_block () int
-  (check_str "block 2" (packet_text (packet_of (cons 0 (cons 3 (cons 0 (cons 2 (nil int))))))) "block 2 "))
+  (check_str "block 2" (packet_text (behind (cons 0 (cons 3 (cons 0 (cons 2 (nil int)))))) 3) "block 2 "))
+
+; The sink holds what is put in it until 64 KB, then writes it all:
+; two puts of 40000 bytes, the first held, the second making 80000 and
+; written. Under an operating system the write to standard output
+; fails, so the second says why.
+(def test_sink_holds () int
+  (let (b (bytes_from_list (repeat 40000 7))
+        s (Sink (IoFile 1) (nil bytes) 0))
+    (match (sink_put s b 0 40000)
+      ((Err why) (check_str "first held" why ""))
+      ((Ok s2)
+        (add (check_int "held" (.n s2) 40000)
+             (check_bool "second written" (match (sink_put s2 b 0 40000) ((Ok s3) (eq (.n s3) 0)) ((Err why) true)) true))))))
 
 ; Under an operating system, l0 test's arguments are no address.
 (def test_bad_arguments () int

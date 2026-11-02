@@ -1,6 +1,6 @@
 # 0018: `tftp` fetches a file of megabytes on the Pi 5
 
-Track: Network · Status: idea · Needs: – · Spec: network.md
+Track: Network · Status: active · Needs: – · Spec: network.md
 
 ## Why
 
@@ -23,12 +23,19 @@ what `tftp` does on QEMU only.
 
 ## Steps
 
-To be written: first find where it stops, with `PI5_ARGS=debug` and
-`dmesg`, and whether a smaller file does the same.
+- [x] `tftp` lean, whatever the file's size: each block read in place
+  from `inet`'s notice, not as a list; the file written as it comes,
+  64 KB at a time, not gathered whole; each block waited for on the
+  kernel's alarm, not by polling; what a failure wrote removed. On
+  QEMU, 2 MB in 4 s and Whistle's model, 17 MB, in 31 s, the same
+  bytes; the `tftp_big` e2e case.
+- [ ] On a Pi 5: `run tftp` of Whistle's model, 17 MB, to a volume, its
+  bytes checked; if it still stops, find where, with `PI5_ARGS=debug`
+  and `dmesg`.
 
 ## Spec changes
 
-- network.md: what `tftp` does on the Pi 5.
+- network.md: what `tftp` does on the Pi 5, and its Limits.
 
 ## Log
 
@@ -40,3 +47,7 @@ To be written: first find where it stops, with `PI5_ARGS=debug` and
   heap, against "bytes, not lists"; then writes it with `write_whole`,
   through `fs` 4 KB a message (0023), and polls its port with 1 ms
   sleeps. Any of these may be the hang, or make it look like one.
+- 2026-11-01: met again: dnsmasq timed out sending Whistle's model, 17
+  MB, to `tftp` on the Pi 5. Step 1 done, as the user asked: all three
+  of the lead's suspects gone. On QEMU the old `tftp` fetched 2 MB
+  whole; the new one fetches 17 MB in 31 s.
