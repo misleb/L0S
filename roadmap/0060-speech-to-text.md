@@ -84,11 +84,21 @@ the embedding, 8192 text tokens and 7 language tags.
   language tag to EOS. The reference's tokens on both recordings, from
   its encoder's rows and from L0's own, every row at 0.9994 or more
   (`probes/whistle/deccheck`).
-- [ ] The oracle and `listen`: `cactus-needle` run on the host on a
+- [x] The oracle and `listen`: `cactus-needle` run on the host on a
   few clips (`probes/whistle/oracle.py`: features, the engine's text,
   tokens; `rebuild.py`: its JAX model loaded from the `.cact`, the
   stem's and encoder's rows and its greedy tokens); `listen FILE.wav`
-  on QEMU giving the engine's text.
+  on QEMU giving the engine's text. Three clips, ALSA's two and the
+  Yeti's 4 s, the rebuilt model's text on each, the engine's on two:
+  on "Front center" the engine has a comma where the rebuilt model,
+  the "Done when"'s oracle, and L0S have a full stop.
+- [x] Clips over 30 s, as the "Done when" asks: heard in windows of 30
+  s or less, cut at the quietest 100 ms of each one's last 5 s, their
+  texts joined (`transcribe_windows`); `wav_speech` takes up to 5
+  minutes. The engine's own cutting is in its closed library, so
+  `probes/whistle/windows.py` cuts where L0S does and has `rebuild.py`
+  hear each window: 39 s of the three clips over again, cut at 26.05
+  s, the same text byte for byte from `listen` on QEMU.
 - [ ] On a Pi 5: a 10 s clip's time, scalar and, once L0 has it,
   with vector arithmetic over bytes
   ([REQUEST-vector-arithmetic.md](../probes/vector/REQUEST-vector-arithmetic.md):
@@ -179,3 +189,22 @@ AMI).
   Yeti Nano's through `rec FILE 5 16000` (0059), in 5.5 s, its text
   right. Step 8 still wants a 10 s clip's time, and the vector
   arithmetic's.
+- 2026-11-01: step 7 continued, as the user asked: the reference's
+  venv rebuilt (cactus-needle 3.2.9, JAX 0.12, Python 3.14, in the
+  scratchpad, NEEDLE_TELEMETRY=0 from the start, so it sent nothing),
+  its tokens on "Front center" byte for byte the ones kept. A third
+  clip, the Yeti's 4 s through QEMU, `build/whistle-oracle/Yeti_QEMU`:
+  the engine and the rebuilt model both "Testing, testing, testing,
+  testing.", and `tests/listen.sh` gives all three the reference's
+  text. Left of the step: more clips, a 10 s one among them, and why
+  the engine has "FRENT, CENTER." where the rebuilt model and L0S have
+  "FRENT. CENTER.". The steps also lack the "Done when"'s clips over
+  30 s, heard in windows, which `wav_speech` refuses today.
+- 2026-11-01: step 7 done, and a step for clips over 30 s added and
+  done, with the clips at hand, as the user asked: `transcribe_windows`
+  and `probes/whistle/windows.py`; a fourth clip,
+  `build/whistle-oracle/Repeated_39s`, 39 s, the three over again, in
+  two windows, `listen`'s text the reference's on QEMU, heard in 201 s
+  on one emulated CPU. The engine on it cuts elsewhere, about 29 s, and
+  hears it worse ("THESTING TESTING..."). Left: step 8, a 10 s clip
+  timed on the Pi 5.

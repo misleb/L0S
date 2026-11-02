@@ -44,7 +44,7 @@ move independently, so several can be active at once.
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
 | [0057](0057-tz-database.md) Any time zone, by the tz database's rules | Desktop | idea | – | 0029 | desktop.md, fat32.md, programs.md |
-| [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 6/8 | – | speech.md, programs.md, testing.md |
+| [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, programs.md, testing.md |
 ## Ready
 
@@ -55,9 +55,9 @@ screen test is next.
 container, tokenizer, front end, stem, encoder and decoder are in,
 checked against the reference rebuilt from `whistle.cact` (the same
 tokens from a WAV file on the host), and `listen` gives the
-reference's text on QEMU (`tests/listen.sh`), and on a Pi 5 heard 5 s
-of the Yeti's speech in 5.5 s; more clips, then a 10 s clip's time,
-are next.
+reference's text on QEMU (`tests/listen.sh`) on four clips, one of
+39 s heard in windows, and on a Pi 5 heard 5 s of the Yeti's speech in
+5.5 s; a 10 s clip timed on the Pi 5 is next.
 Every
 other goal left is an `idea`, without steps. On
 the display,

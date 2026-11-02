@@ -138,9 +138,18 @@ ms.
 [speech/transcribe.l0](../user/lib/speech/transcribe.l0) is what a
 program calls: `whistle_listener` reads the model once, every part of
 it, and `whistle_transcribe` turns a clip's 16 kHz samples into its
-text, the front end, stem, encoder and decoder in turn. `wav_speech`
-reads a WAV file's samples, refusing one not 16 kHz, one channel of 16
-bits, 0.1 to 30 s, and saying why.
+text, the front end, stem, encoder and decoder in turn. A clip over 30
+s, one pass of the decoder, is heard in windows (`transcribe_windows`):
+each 30 s or less, cut at the middle of the quietest 100 ms of its last
+5 s, where a word is least likely, the next window from the cut, a last
+piece under 0.1 s left out; each window is heard on its own, its front
+end normalized over it alone, and their texts are joined by a space.
+The engine cuts long audio its own way, which is not published, so
+L0S's windows are checked against the rebuilt reference instead:
+`probes/whistle/windows.py` cuts a clip where L0S does and has
+`rebuild.py` hear each window. `wav_speech` reads a WAV file's samples,
+refusing one not 16 kHz, one channel of 16 bits, 0.1 s to 5 minutes,
+and saying why.
 
 `listen FILE.wav...` ([programs.md](programs.md)) prints each file's
 text, a line each, by the model at `/etc/whistle.cact` or `-m MODEL`,
@@ -148,9 +157,13 @@ loaded once; `-t` says on standard error how long the load and each
 file took. `tests/listen.sh` boots it on QEMU as the kernel's one
 program, the model and the recordings in the initramfs (`WHISTLE` names
 the model, which is not in the project), and compares each line with
-the reference's: on both recordings it is the same. There, on one
-emulated CPU, the model loads in 36 s and 1.4 s of speech is heard in
-6.7 s, 1.3 s in 5.5 s.
+the reference's: on all four recordings it is the same, ALSA's "Front
+center" and "Rear left", 4 s of the Yeti Nano's speech recorded
+through QEMU ("Testing, testing, testing, testing."), and 39 s of the
+three over again with a second of silence between, heard in two
+windows, cut at 26.05 s. There, on one emulated CPU, the model loads in
+37 s and 1.4 s of speech is heard in 6.8 s, 1.3 s in 5.6 s, 4 s in
+16.3 s, 39 s in 201 s.
 
 ## Limits
 

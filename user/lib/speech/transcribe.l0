@@ -18,21 +18,91 @@
         ((Err why) ((Err Listener (list int)) why))
         ((Ok ps) ((Ok Listener (list int)) (Listener w (stem_of w) (encoder_of w) (decoder_of w) ps (mel_matrix))))))))
 
-; The fewest samples a clip may have, 0.1 s, and the most, 30 s: one
-; pass of the decoder.
+; The fewest samples a clip may have, 0.1 s; the most one pass of the
+; decoder hears, 30 s; and the most a clip may have, heard in windows,
+; 5 minutes, about 38 MB of samples.
 (def transcribe_least () int 1600)
 (def transcribe_most () int 480000)
+(def transcribe_longest () int 4800000)
 
-; The text of the samples xs, 16 kHz, -1 to 1: the decoder's tokens
-; after the language tag, spelled.
+; The text of the samples xs, 16 kHz, -1 to 1: a clip of 30 s or less
+; in one pass, a longer one in windows of 30 s or less, each heard on
+; its own, their texts joined by a space.
 (def whistle_transcribe ((l Listener) (xs (array float))) (list int)
+  (if (le (array_len xs) (transcribe_most))
+      (whistle_pass l xs)
+      (join_with " " (heard_windows l xs (transcribe_windows xs) (nil (list int))))))
+
+; One pass of the model over xs, 30 s or less: the decoder's tokens
+; after the language tag, spelled.
+(def whistle_pass ((l Listener) (xs (array float))) (list int)
   (let (f (mel_features xs (array_len xs) (.fb l))
         r (encoder_run (.e l) (stem_run (.st l) f (div (array_len f) 80)) (whistle_geometry (.w l) 3))
         ids (.ids (decoder_run (.d l) r)))
     (if (is_empty ids) "" (pieces_decode (.ps l) (.b (.w l)) (tail ids)))))
 
+; Each window of ws heard, its text, if any, after the reversed acc.
+(def heard_windows ((l Listener) (xs (array float)) (ws (list Span)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ws)
+      (rev acc)
+      (let t (whistle_pass l (span_of xs (head ws)))
+        (heard_windows l xs (tail ws) (if (is_empty t) acc (cons t acc))))))
+
+; ---------------------------------------------------------------- windows
+
+; Samples from one up to another.
+(data Span (Span (s int) (e int)))
+
+; How far back from a window's end its cut is looked for, 5 s, and the
+; stretch whose loudness is weighed, 100 ms.
+(def window_look () int 80000)
+(def window_frame () int 1600)
+
+; The windows a clip of xs is heard in: the whole, if 30 s or less;
+; else each 30 s or less, cut at the middle of the quietest 100 ms of
+; its last 5 s, where a word is least likely, the next from the cut. A
+; last piece under 0.1 s is left out, as too short to hear.
+(def transcribe_windows ((xs (array float))) (list Span)
+  (windows_from xs 0 (array_len xs) (nil Span)))
+
+; The windows from sample s up to n, after the reversed acc.
+(def windows_from ((xs (array float)) (s int) (n int) (acc (list Span))) (list Span)
+  (if (le (sub n s) (transcribe_most))
+      (rev (if (lt (sub n s) (transcribe_least)) acc (cons (Span s n) acc)))
+      (let cut (quietest xs (add s (sub (transcribe_most) (window_look))) (add s (transcribe_most)))
+        (windows_from xs cut n (cons (Span s cut) acc)))))
+
+; The middle of the quietest 100 ms from a up to b, by the sum of its
+; samples' squares, the first of any equal.
+(def quietest ((xs (array float)) (a int) (b int)) int
+  (quietest_from xs a b a (frame_energy xs a) a))
+
+; quietest's loop: the frames from at on, best the quietest so far, its
+; energy e.
+(def quietest_from ((xs (array float)) (a int) (b int) (at int) (e float) (best int)) int
+  (if (gt (add at (window_frame)) b)
+      (add best (div (window_frame) 2))
+      (let f (frame_energy xs at)
+        (if (float_lt f e)
+            (quietest_from xs a b (add at (window_frame)) f at)
+            (quietest_from xs a b (add at (window_frame)) e best)))))
+
+; The sum of the squares of the 100 ms of xs from at.
+(def frame_energy ((xs (array float)) (at int)) float
+  (energy_from xs at (add at (window_frame)) 0.0))
+(def energy_from ((xs (array float)) (k int) (e int) (acc float)) float
+  (if (ge k e) acc (let v (array_get xs k) (energy_from xs (add k 1) e (float_add acc (float_mul v v))))))
+
+; The samples of xs in span p, as an array of their own.
+(def span_of ((xs (array float)) (p Span)) (array float)
+  (span_copied (array_new (sub (.e p) (.s p)) 0.0) xs (.s p) 0 (sub (.e p) (.s p))))
+(def span_copied ((a (array float)) (xs (array float)) (from int) (k int) (n int)) (array float)
+  (if (ge k n) a (span_copied (array_set a k (array_get xs (add from k))) xs from (add k 1) n)))
+
+; -------------------------------------------------------------------- WAV
+
 ; The samples of the WAV file b, -1 to 1, if it is 16 kHz, one channel
-; of 16 bits, and 0.1 to 30 s long; or why not.
+; of 16 bits, and 0.1 s to 5 minutes long; or why not.
 (def wav_speech ((b bytes)) (Result (array float) (list int))
   (match (parse_wav b)
     ((WavBad why) ((Err (array float) (list int)) why))
@@ -41,7 +111,7 @@
         (if (not (eq rate (mel_rate))) ((Err (array float) (list int)) (append "WAV file at " (append (digits rate) " Hz; Whistle hears 16000")))
             (not (eq chans 1)) ((Err (array float) (list int)) (append "WAV file of " (append (digits chans) " channels; Whistle hears one")))
             (lt n (transcribe_least)) ((Err (array float) (list int)) "WAV file under 0.1 s")
-            (gt n (transcribe_most)) ((Err (array float) (list int)) "WAV file over 30 s; longer is not yet heard")
+            (gt n (transcribe_longest)) ((Err (array float) (list int)) "WAV file over 5 minutes")
             ((Ok (array float) (list int)) (wav_floats b s n 0 (array_new n 0.0))))))))
 
 ; n 16-bit samples of b from s, as floats over 32768, from k.

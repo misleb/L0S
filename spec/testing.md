@@ -35,7 +35,10 @@ encoder's rows or, with `own`, from the recording through L0's own
 encoder; all of these from what `rebuild.py` writes from the
 reference's model loaded with `whistle.cact`'s own tensors (the stem's
 rows, the encoder's after each block, its greedy tokens, and the
-decoder's rows over them). `nn_test.l0`, `whistle_test.l0`,
+decoder's rows over them), and, for a recording over 30 s,
+`windows.py`, which cuts it where L0S does and has `rebuild.py` hear
+each window. `transcribe_test.l0` pins where the windows are cut on
+samples made to have a quiet stretch, or none. `nn_test.l0`, `whistle_test.l0`,
 `encoder_test.l0` and `decoder_test.l0` test the parts without the
 model, the engrams' hash pinned to the reference's, and
 `transcribe_test.l0` what a WAV file gives. On the board,
