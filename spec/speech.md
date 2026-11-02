@@ -161,8 +161,10 @@ emulated CPU, the model loads in 36 s and 1.4 s of speech is heard in
 - The model's matrices are dequantized whole when it is loaded, about
   140 MB of binary32s (the encoder's 6.5 MB a block, the decoder's 8 MB
   a layer, the embedding's 17 MB), a row at a time in scalar code: a
-  second on the host, 36 s on QEMU. Its dot products are its only
-  vector arithmetic: how long a clip takes on a Pi 5 is not known.
+  second on the host, 36 s on QEMU, 14.6 s on a Pi 5. Its dot products
+  are its only vector arithmetic. On a Pi 5, on one CPU, 5 s of speech,
+  the Yeti Nano's recorded by `rec FILE 5 16000`, was heard in 5.5 s,
+  and rightly: about as long as it was spoken.
 - The decoder reads a model whose self-attention has taps (27 tensors a
   layer) and whose geometry is Whistle's: 512 wide, 8 heads of 48 and
   64, 2 key and value heads.

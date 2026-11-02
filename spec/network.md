@@ -211,8 +211,9 @@ with `make demo NET=user,tftp=DIR`. It reads each 512-byte block in
 place from `inet`'s notice and writes the file as the blocks come, 64
 KB at a time, so a file of any size takes no more memory than that,
 and waits for each block on the kernel's alarm, asking again after a
-second, five times; a failure removes what it wrote. On QEMU it fetches
-Whistle's model, 17 MB, in 31 s:
+second, five times; a failure removes what it wrote. It fetches
+Whistle's model, 17 MB, on QEMU in 31 s, and on a Pi 5 from the
+dnsmasq that serves its network boot:
 
 ```
 l0s> run net
@@ -572,8 +573,7 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   and send from any port, bound or not.
 - **`tftp` has one block in flight**, of 512 bytes, as RFC 1350 has
   it, with none of the options for bigger blocks or a window, so a file
-  comes at one block a round trip; it has fetched megabytes on QEMU,
-  not yet on a Pi 5.
+  comes at one block a round trip.
 - **TCP has the essentials, and little else.** `inet` holds 32
   connections, each with at most 16384 bytes of the client's data not
   yet acknowledged (more is refused, or resets it if the write named no

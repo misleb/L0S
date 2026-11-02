@@ -1,6 +1,6 @@
 # 0018: `tftp` fetches a file of megabytes on the Pi 5
 
-Track: Network · Status: active · Needs: – · Spec: network.md
+Track: Network · Status: done · Needs: – · Spec: network.md
 
 ## Why
 
@@ -29,7 +29,7 @@ what `tftp` does on QEMU only.
   kernel's alarm, not by polling; what a failure wrote removed. On
   QEMU, 2 MB in 4 s and Whistle's model, 17 MB, in 31 s, the same
   bytes; the `tftp_big` e2e case.
-- [ ] On a Pi 5: `run tftp` of Whistle's model, 17 MB, to a volume, its
+- [x] On a Pi 5: `run tftp` of Whistle's model, 17 MB, to a volume, its
   bytes checked; if it still stops, find where, with `PI5_ARGS=debug`
   and `dmesg`.
 
@@ -51,3 +51,8 @@ what `tftp` does on QEMU only.
   MB, to `tftp` on the Pi 5. Step 1 done, as the user asked: all three
   of the lead's suspects gone. On QEMU the old `tftp` fetched 2 MB
   whole; the new one fetches 17 MB in 31 s.
+- 2026-11-01: step 2 done, and the goal: on a Pi 5, by the user,
+  `run tftp` fetched Whistle's model, 17 MB, from the dnsmasq to the
+  data volume, and `listen` loaded it and heard the Yeti's speech
+  right, which a byte wrong in the model would not have; how long the
+  fetch took was not timed.

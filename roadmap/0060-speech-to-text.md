@@ -174,3 +174,8 @@ AMI).
 - 2026-10-31: `tools/qemu-boot.sh` boots a Cortex-A76, as L0's `virt`
   target now assumes (its vector work): on the A72 it had, the kernel
   faulted on an `LDAPR`, and every case booted through it failed.
+- 2026-11-01: a first run on a Pi 5, by the user: `listen -t` loaded
+  the model from the data volume in 14.6 s and heard 5 s of speech, the
+  Yeti Nano's through `rec FILE 5 16000` (0059), in 5.5 s, its text
+  right. Step 8 still wants a 10 s clip's time, and the vector
+  arithmetic's.
