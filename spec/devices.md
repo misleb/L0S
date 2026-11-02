@@ -187,10 +187,10 @@ reach the shell and the windows and the mouse moves the pointer.
 ## Limits
 
 - **USB has run on QEMU and the Pi 5** (see [USB](#usb)): boot keyboards
-  and mice, and on QEMU its `usb-tablet` and `usb-audio` speaker, only, on root ports
-  only, no hubs. Isochronous endpoints have run on QEMU only: OUT to
-  its `usb-audio`, and IN from a real microphone, the Yeti Nano passed
-  through to it, but not on a Pi 5. An isochronous OUT endpoint sends only silence,
+  and mice, a USB Audio Class microphone, the Yeti Nano, and on QEMU
+  its `usb-tablet` and `usb-audio` speaker, only, on root ports only,
+  no hubs. Isochronous IN endpoints have run on the Pi 5 and QEMU, from
+  the Yeti; OUT on QEMU only, to its `usb-audio`. An isochronous OUT endpoint sends only silence,
   and its packets are its largest, not each interval's share of the
   rate. A high-speed endpoint's extra packets a microframe are not
   used. USB Audio Class 2.0 is not read. A control

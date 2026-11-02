@@ -129,14 +129,14 @@ to 48 kHz through the same filter, a piece at a time.
   the one L0 gives. It plays silence whenever no client does, so its
   interrupt comes 94 times a second at 48 kHz even then. One client at
   a time: two would interleave. QEMU has no sound device L0S plays on.
-- **A microphone has been heard on QEMU only**: the Yeti Nano passed
-  through to it, recorded by `rec` and played back on the host; on a Pi
-  5 not yet. QEMU's own `usb-audio` is a speaker. One microphone, the
-  first, and one listener at a time; its samples come as the device
-  gives them, at a rate it takes, and the one conversion is from 48
-  kHz to 16 kHz, one channel of 16 bits, which has not yet run on a
-  real microphone: none from 44.1 kHz, and none to another rate,
-  channels or sample size. A listener that does not keep up loses the
+- **One microphone has been heard, the Yeti Nano**: on a Pi 5, on
+  RP1's USB, recorded by `rec` at 16 kHz, played by `play` and heard
+  rightly by `listen`; and on QEMU, passed through, recorded at 48 kHz
+  and played back on the host. QEMU's own `usb-audio` is a speaker. One
+  microphone, the first, and one listener at a time; its samples come
+  as the device gives them, at a rate it takes, and the one conversion
+  is from 48 kHz to 16 kHz, one channel of 16 bits: none from 44.1
+  kHz, and none to another rate, channels or sample size. A listener that does not keep up loses the
   notices its port has no room for, unsaid. A stream out sends only
   silence: nothing plays on a USB speaker yet.
 - **The chime is one file, played whole at boot** unless `chime=off`:

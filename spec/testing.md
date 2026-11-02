@@ -110,7 +110,8 @@ frame, and `rec` of a file saying there is no microphone. No case has
 a microphone, since QEMU's `usb-audio` is none: a real one, the Yeti
 Nano, has been passed through by hand (`QEMU_USB=046d:0acf make
 demo`), `rec` of it written to the SD card's FAT32 volume and played
-back on the host. `sdhci` (with `sd`) brings a
+back on the host; and plugged into a Pi 5, `rec FILE 5 16000` of it
+played there by `play` and heard by `listen`. `sdhci` (with `sd`) brings a
 blank SD card up as `disk0` on its INTx line, 37, which its stderr
 names, lists the disks, writes a sector and reads it back, is refused
 past the card's end, and reads its last sector.

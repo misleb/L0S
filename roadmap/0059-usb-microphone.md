@@ -1,6 +1,6 @@
 # 0059: A USB microphone
 
-Track: Pi 5 · Status: active · Needs: – · Spec: devices.md, sound.md, programs.md, testing.md
+Track: Pi 5 · Status: done · Needs: – · Spec: devices.md, sound.md, programs.md, testing.md
 
 ## Why
 
@@ -48,7 +48,7 @@ devices are listed by what they are, in and out.
   (`QEMU_USB=046d:0acf`, its `/dev/bus/usb` node made writable on the
   host), `rec` of 5 s played back on the host, and any fault of a real
   device's IN packets fixed.
-- [ ] On a Pi 5: the Yeti on RP1's ports, `rec` there, the WAV heard;
+- [x] On a Pi 5: the Yeti on RP1's ports, `rec` there, the WAV heard;
   and `rec FILE 5 16000`, brought down to Whistle's 16 kHz by
   `usb-audio`, played by `play` and read by `listen`.
 
@@ -76,3 +76,7 @@ devices are listed by what they are, in and out.
   16 bits at 16 kHz that the Yeti does not offer, `usb-audio` brings
   48 kHz down to it when asked `listen 16000` (`format/pcm.l0`), and
   `play` takes 16 kHz files up to 48 kHz: the Pi 5 step checks both.
+- 2026-11-01: step 6 done, and the goal, by the user on a Pi 5: the
+  Yeti on RP1's USB, `rec FILE 5 16000` of it brought down to 16 kHz by
+  `usb-audio`, played by `play` on HDMI0, and heard rightly by `listen`
+  (0060). The spec's Limits now say the microphone was heard there.
