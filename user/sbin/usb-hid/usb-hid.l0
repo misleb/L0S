@@ -3,15 +3,19 @@
 ; each boot keyboard's and boot mouse's interface, puts it in the boot
 ; protocol, opens its interrupt endpoint, and tells each process
 ; listening what its reports say, as virtio-input does, so the
-; compositor and the terminals take either. It drives no device itself.
-; Started with no argument, as the inittabs start it, one process serves
-; both; usb-hid keyboard or usb-hid mouse serves one alone:
+; compositor and the terminals take either. QEMU's usb-tablet, which is
+; no boot device, it takes too, by QEMU's vendor id, as a pointer that
+; says where it is, so that QEMU's window needs no grab of the host's
+; mouse. It drives no device itself. Started with no argument, as the
+; inittabs start it, one process serves both; usb-hid keyboard or
+; usb-hid mouse serves one alone:
 ;
 ;   keyboard   every boot keyboard: each key, as a KeyEvent (l0s.l0)
 ;              with the character it types on a US keyboard, held keys
 ;              repeated
 ;   pointer    every boot mouse: each report, as a PointerMotion
-;              (l0s.l0)
+;              (l0s.l0); and QEMU's tablet: each report, as a
+;              PointerEvent, after a WheelEvent if its wheel turned
 ;
 ; It waits on three ports at once, a set (port_set): its own, where the
 ; usb server's answers and notices come, told apart by the server's pid,
@@ -23,23 +27,37 @@
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "usb-hid" why))
 
-; What a device it drives is, a keyboard or a mouse.
-(data Kind (Keyboards) (Mice))
+; What a device it drives is, a keyboard, a mouse, or QEMU's tablet.
+(data Kind (Keyboards) (Mice) (Tablets))
 
 ; What it says of a device it drives: its number, the interface, what it
 ; is, and the name it serves.
 (def claim_line ((k Kind) (dev int) (n int)) (list int)
   (append "device " (append (digits dev) (append ", interface " (append (digits n)
-    (append ": a " (append (match k ((Keyboards) "keyboard") ((Mice) "mouse"))
+    (append ": a " (append (match k ((Keyboards) "keyboard") ((Mice) "mouse") ((Tablets) "tablet"))
       (append ", serving " (kind_name k)))))))))
 
-; The name served for a kind.
-(def kind_name ((k Kind)) (list int) (match k ((Keyboards) "keyboard") ((Mice) "pointer")))
+; The name served for a kind: a tablet's is the mouse's.
+(def kind_name ((k Kind)) (list int) (match k ((Keyboards) "keyboard") ((Mice) "pointer") ((Tablets) "pointer")))
 
 ; The kind of a boot interface's protocol, 1 a keyboard and 2 a mouse;
 ; none for any other.
 (def kind_of_protocol ((protocol int)) (Option Kind)
   (if (eq protocol 1) (Some (Keyboards)) (eq protocol 2) (Some (Mice)) ((None Kind))))
+
+; QEMU's vendor id, 0x0627, which its usb-kbd, usb-mouse and usb-tablet
+; share.
+(def qemu_vendor () int 1575)
+
+; The kind of an interface of a device of vendor vid, its class, subclass
+; and protocol: a HID boot keyboard or mouse (class 3, subclass 1), or
+; QEMU's tablet, a HID interface of no boot subclass on a device of
+; QEMU's; none for any other.
+(def kind_of_interface ((vid int) (class int) (sub int) (protocol int)) (Option Kind)
+  (if (not (eq class 3)) ((None Kind))
+      (eq sub 1) (kind_of_protocol protocol)
+      (and (eq sub 0) (eq vid (qemu_vendor))) (Some (Tablets))
+      ((None Kind))))
 
 ; The kinds the arguments say to drive: both with none, or one, keyboard
 ; or mouse; none for any other arguments.
@@ -115,9 +133,9 @@
 ; Its own port.
 (def hid_port ((h Hid)) int (match (.ps h) ((HidPorts own kp pp ks) own)))
 
-; Whether it drives k.
+; Whether it drives k: a tablet, if it drives mice.
 (def hid_drives ((h Hid) (k Kind)) bool
-  (match h ((Hid ps usb pid kls pls bs mods r kept) (match ps ((HidPorts own kp pp ks) (kinds_hold ks k))))))
+  (match h ((Hid ps usb pid kls pls bs mods r kept) (match ps ((HidPorts own kp pp ks) (kinds_hold ks (if (eq k (Tablets)) (Mice) k)))))))
 
 ; Each message handled, those kept first, else the next on any of its
 ; ports; the alarm set again whenever the key repeating changes.
@@ -170,7 +188,8 @@
     ((Hid ps usb pid kls pls bs mods r kept)
       (match k
         ((Keyboards) (Hid ps usb pid (listener_add kls reply s) pls bs mods r kept))
-        ((Mice) (Hid ps usb pid kls (listener_add pls reply s) bs mods r kept))))))
+        ((Mice) (Hid ps usb pid kls (listener_add pls reply s) bs mods r kept))
+        ((Tablets) (Hid ps usb pid kls (listener_add pls reply s) bs mods r kept))))))
 
 ; A notice of the usb server's: a device plugged in, one unplugged, or a
 ; report.
@@ -179,7 +198,7 @@
     ((Some rp) (reported h rp))
     ((None)
       (match (usb_attached_of m)
-        ((Some a) (match a ((UsbAttached dev vid pid speed) (attached h dev))))
+        ((Some a) (match a ((UsbAttached dev vid pid speed) (attached h dev vid))))
         ((None)
           (match (usb_detached_of m)
             ((Some dev) (detached h dev))
@@ -228,9 +247,9 @@
 
 ; ------------------------------------------------------------- attaching
 
-; A device plugged in: every boot keyboard and mouse interface of it
-; taken.
-(def attached ((h Hid) (dev int)) Hid
+; A device of vendor vid plugged in: every boot keyboard and mouse
+; interface of it taken, and QEMU's tablet's.
+(def attached ((h Hid) (dev int) (vid int)) Hid
   (match (asked h (usb_request "config" (cons dev (nil int))))
     ((Answered h2 r)
       (match (usb_bytes_of r)
@@ -238,30 +257,29 @@
         ((Ok bs)
           (match (usb_config_of bs)
             ((Err why) h2)
-            ((Ok c) (interfaces_taken h2 dev (.ifaces c)))))))))
+            ((Ok c) (interfaces_taken h2 dev vid (.ifaces c)))))))))
 
 ; Each interface of ifs taken, if it is one to drive.
-(def interfaces_taken ((h Hid) (dev int) (ifs (list UsbInterface))) Hid
+(def interfaces_taken ((h Hid) (dev int) (vid int) (ifs (list UsbInterface))) Hid
   (if (is_empty ifs)
       h
-      (interfaces_taken (interface_taken h dev (head ifs)) dev (tail ifs))))
+      (interfaces_taken (interface_taken h dev vid (head ifs)) dev vid (tail ifs))))
 
-; An interface taken, if it is a boot keyboard or mouse with an
-; interrupt endpoint: claimed, put in the boot protocol, a keyboard told
-; to report only changes, and its endpoint opened.
-(def interface_taken ((h Hid) (dev int) (i UsbInterface)) Hid
+; An interface taken, if it is a boot keyboard or mouse, or QEMU's
+; tablet, with an interrupt endpoint: claimed, a boot one put in the
+; boot protocol, a keyboard told to report only changes, and its
+; endpoint opened.
+(def interface_taken ((h Hid) (dev int) (vid int) (i UsbInterface)) Hid
   (match i
     ((UsbInterface n alt class sub protocol es)
-      (if (and (eq class 3) (eq sub 1))
-          (match (kind_of_protocol protocol)
-            ((None) h)
-            ((Some k)
-              (if (not (hid_drives h k))
-                  h
-                  (match (usb_endpoint_in es (usb_ep_interrupt))
-                    ((None) h)
-                    ((Some e) (claimed h k dev n (.addr e)))))))
-          h))))
+      (match (kind_of_interface vid class sub protocol)
+        ((None) h)
+        ((Some k)
+          (if (not (hid_drives h k))
+              h
+              (match (usb_endpoint_in es (usb_ep_interrupt))
+                ((None) h)
+                ((Some e) (claimed h k dev n (.addr e))))))))))
 
 ; Interface n of dev, a k, claimed, set up, and its endpoint ep opened;
 ; or, if any of that is refused, left alone.
@@ -270,8 +288,8 @@
     ((Answered h2 r)
       (if (not (eq r "ok"))
           h2
-          (let (h3 (control_out h2 dev (usb_hid_set_protocol) n)
-                h4 (match k ((Keyboards) (control_out h3 dev (usb_hid_set_idle) n)) ((Mice) h3)))
+          (let (h3 (if (eq k (Tablets)) h2 (control_out h2 dev (usb_hid_set_protocol) n))
+                h4 (if (eq k (Keyboards)) (control_out h3 dev (usb_hid_set_idle) n) h3))
             (match (asked h4 (usb_request "open" (cons dev (cons ep (nil int)))))
               ((Answered h5 r2)
                 (if (eq r2 "ok")
@@ -329,7 +347,8 @@
             ((Board k d e held)
               (match k
                 ((Keyboards) (keys_reported h b bytes))
-                ((Mice) (mouse_reported h bytes))))))))))
+                ((Mice) (mouse_reported h bytes))
+                ((Tablets) (tablet_reported h bytes))))))))))
 
 ; A keyboard's report: what changed told, and what it holds kept.
 (def keys_reported ((h Hid) (b Board) (bytes (list int))) Hid
@@ -369,3 +388,14 @@
   (match (motion_of bytes)
     ((None) h)
     ((Some m) (.pls h (listeners_tell (.pls h) (motion_notice m))))))
+
+; A tablet's report, told to pointer's listeners: the wheel's turn, if it
+; turned, where the pointer is, then the pointer there.
+(def tablet_reported ((h Hid) (bytes (list int))) Hid
+  (match (tablet_of bytes)
+    ((None) h)
+    ((Some t)
+      (match (.at t)
+        ((PointerEvent x y buttons)
+          (let pls (if (eq (.down t) 0) (.pls h) (listeners_tell (.pls h) (wheel_notice (WheelEvent x y 0 (.down t)))))
+            (.pls h (listeners_tell pls (pointer_notice (.at t))))))))))

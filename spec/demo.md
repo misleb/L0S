@@ -2,13 +2,13 @@
 
 `make demo` builds every program and the initramfs, `build/initramfs.cpio`,
 and boots it on QEMU. The board's serial line is on your terminal, and
-its virtio-gpu is in a QEMU window, with a USB keyboard and mouse on a
-`qemu-xhci` (see [USB](devices.md#usb)); its virtio-net is on QEMU's user network.
+its virtio-gpu is in a QEMU window, with a USB keyboard, mouse and
+tablet on a `qemu-xhci` (see [USB](devices.md#usb)); its virtio-net is on QEMU's user network.
 It has four CPUs (`CPUS`; `make demo CPUS=1` for one): the kernel on CPU
 0, running there too the processes that pass messages, and those that
 compute on CPUs 1 to 3 ([kernel.md](kernel.md)).
-The mouse moves relatively, as a real one does, so a click in the window
-grabs your pointer, and Ctrl-Alt-G (Ctrl-Option-G on a Mac) lets it go.
+Your pointer moves QEMU's USB tablet, which says where it is, so the
+window passes it on as it crosses, with no grab.
 The window shows a desktop, the compositor's: a wallpaper and a top bar,
 and no windows, since `/etc/system` starts the system's services and no
 app. The top bar is GNOME Shell's, black across the top of the screen:
@@ -82,8 +82,8 @@ booted with `root=UUID`, or else from the initramfs.
 | 9 | `virtio-rng` | the entropy device's driver. It serves `random`, the host's randomness, which `fs` makes UUIDs of and `inet` keys TCP's first sequence numbers with |
 | 10 | `pcie virt` | the PCIe bus's server. It puts each device's registers in the bus's window, and serves `pci`, telling `sdhci` and `xhci` where the SD host controller and the USB one are, and the interrupt each raises |
 | 11 | `sdhci pci` | the SD card's driver. It serves `disk1`, reading and writing the sectors of `build/sd.img`, blank until Disks formats it, waiting on its controller's INTx line, interrupt 37 |
-| 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard and the mouse on its ports, and serves `usb`, telling `usb-hid` of its devices' reports. It takes the controller's interrupt, MSI 80, which `pcie` sets up for it (see [USB](devices.md#usb)) |
-| 13 | `usb-hid` | the keyboard's and the mouse's driver, one process waiting on three ports. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window, and `pointer`, telling `wm` how far the mouse moved and what its buttons and wheel do |
+| 12 | `xhci pci` | the USB host controller's driver, QEMU's `qemu-xhci`. It brings up the keyboard, the mouse and the tablet on its ports, and serves `usb`, telling `usb-hid` of its devices' reports. It takes the controller's interrupt, MSI 80, which `pcie` sets up for it (see [USB](devices.md#usb)) |
+| 13 | `usb-hid` | the keyboard's, the mouse's and the tablet's driver, one process waiting on three ports. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window, and `pointer`, telling `wm` where the tablet is, or how far the mouse moved, and what their buttons and wheels do |
 | 14 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
 | 15 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in an arena of pages it shares with each asker, the desktop's made at the build, any other rasterized on its first ask and let go once no process that asked for it is left, which it learns from the kernel's exit notices |
 | 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
@@ -419,7 +419,8 @@ memory; that is not a documented interface, so a change to `l0` may need
 the same change there. It also attaches the virtio-gpu, the virtio
 keyboard and the virtio tablet, on modern transports, as `l0 boot` does
 with `L0_QEMU_ARGS`, or with `QEMU_INPUT=usb`, as the demo boots, a
-`qemu-xhci` with a `usb-kbd` and a `usb-mouse` in place of those two;
+`qemu-xhci` with a `usb-kbd` and a `usb-mouse` in place of those two,
+and the demo's `usb-tablet` beside them (`QEMU_USB=tablet`);
 and, if `QEMU_DISK` names a raw image, a virtio-blk
 on it, and if `QEMU_NET` names a network, as QEMU's `-netdev` does
 without its id, a virtio-net on it, at `52:54:00:12:34:56`: the demo's

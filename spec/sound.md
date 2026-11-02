@@ -95,7 +95,7 @@ as `mic`:
 | Request | Reply |
 |---|---|
 | `devices` | a line for each stream of each USB audio device: `DEV IFACE`, `in` or `out`, what is at its far end (`microphone`, `speaker`...), its channels, bits and rates: `3 1 out speaker 2 16 48000`; nothing with none |
-| `listen [RATE]` | `format RATE CHANNELS BYTES`: the first microphone set going at RATE if it takes it (48000 unless given), else its highest, each sample BYTES bytes, least significant first; then a notice `pcm` and its samples to the reply port for each 10 ms or so it hears. `error: busy` while another listens, `error: no microphone` |
+| `listen [RATE]` | `format RATE CHANNELS BYTES`: the first microphone set going at RATE if it takes it (48000 unless given), else its highest, each sample BYTES bytes, least significant first; at 16000, if it does not take it but takes 48000, `format 16000 1 2`: its 48 kHz brought down to one channel of 16 bits at 16 kHz, as Whistle hears (see below); then a notice `pcm` and its samples to the reply port for each 10 ms or so it hears. `error: busy` while another listens, `error: no microphone` |
 | `stop` | `ok`, the listening stopped, from the port that listens; a listener gone stops it too |
 | `silence DEV IFACE MS` | `sent N packets` once MS milliseconds of silence have gone to that stream out: a test of the path out |
 
@@ -109,6 +109,18 @@ MS` sends a silence. A Blue Yeti Nano's microphone is two channels of
 24 bits, in 3 bytes, at 44.1 or 48 kHz, 288 bytes a millisecond at 48
 kHz (`uac_test.l0` reads its descriptors).
 
+Whistle ([speech.md](speech.md)) hears one channel of 16 bits at 16
+kHz, which a USB microphone rarely offers, the Yeti not at all. So
+`listen 16000` of one that takes 48 kHz sets it going at 48 kHz and
+brings what it hears down on the way (`format/pcm.l0`): each frame's
+channels averaged, each sample its top 16 bits, then a low-pass filter
+of 63 taps, a sinc cut off at 7 kHz under a Hamming window, flat to 6
+kHz and 31 dB down at 8 kHz, half the new rate, and every third sample
+kept, the filter's last 62 samples kept from one notice to the next so
+that nothing is lost between them. `rec FILE SECONDS 16000` so records
+a file that `listen FILE.wav` reads, and `play` plays it, taking it up
+to 48 kHz through the same filter, a piece at a time.
+
 ## Limits
 
 - **Sound is the Pi 5's HDMI0 alone, and new** (see
@@ -117,11 +129,13 @@ kHz (`uac_test.l0` reads its descriptors).
   the one L0 gives. It plays silence whenever no client does, so its
   interrupt comes 94 times a second at 48 kHz even then. One client at
   a time: two would interleave. QEMU has no sound device L0S plays on.
-- **A microphone has not yet been heard.** `mic` and `rec` have run on
-  QEMU only, whose `usb-audio` is a speaker: `devices` lists it, and a
-  silence goes to it, but no samples have come in. One microphone, the
+- **A microphone has been heard on QEMU only**: the Yeti Nano passed
+  through to it, recorded by `rec` and played back on the host; on a Pi
+  5 not yet. QEMU's own `usb-audio` is a speaker. One microphone, the
   first, and one listener at a time; its samples come as the device
-  gives them, at a rate it takes, with no conversion to another rate,
+  gives them, at a rate it takes, and the one conversion is from 48
+  kHz to 16 kHz, one channel of 16 bits, which has not yet run on a
+  real microphone: none from 44.1 kHz, and none to another rate,
   channels or sample size. A listener that does not keep up loses the
   notices its port has no room for, unsaid. A stream out sends only
   silence: nothing plays on a USB speaker yet.

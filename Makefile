@@ -16,10 +16,12 @@
 #                    the desktop shows in QEMU's window, and build/disk.img
 #                    is the disk, made once, so what is written to it stays;
 #                    build/sd.img, blank until Disks formats it, the SD card;
-#                    the keyboard and mouse are USB's, on a qemu-xhci, and
-#                    the mouse moves relatively, so a click in QEMU's
-#                    window grabs the host's pointer, and Ctrl-Alt-G
-#                    (Ctrl-Option-G on macOS) lets it go
+#                    the keyboard, mouse and tablet are USB's, on a
+#                    qemu-xhci, and the host's pointer moves the tablet,
+#                    which says where it is, so QEMU's window needs no
+#                    grab of it
+#   make demo QEMU_USB=046d:0acf        the same, with that device of
+#                    this host passed through too (tools/qemu-boot.sh)
 #   make demo WALLPAPER_SVG=picture.svg the same, another wallpaper
 #   make demo NET=user,tftp=DIR         the same, the network's gateway
 #                    serving DIR over TFTP, for tftp 10.0.2.2 FILE
@@ -211,9 +213,11 @@ DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
 CLOCK   := user/lib/proto/clock.l0
 DISKLIB := user/lib/proto/disk.l0
-# Sound: the audio protocol, its server's side, and WAV files.
+# Sound: the audio protocol, its server's side, WAV files, and samples
+# between 48 and 16 kHz.
 AUDIOLIB := user/lib/proto/audio.l0
 WAV     := user/lib/format/wav.l0
+PCM     := user/lib/format/pcm.l0
 AUDIO_SERVER := $(AUDIOLIB) $(WAV) user/lib/proto/audio_server.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
@@ -300,7 +304,7 @@ LIBS_virtio-input := $(VIRTIO) $(KEYMAP)
 LIBS_pcie       := $(PCILIB)
 LIBS_xhci       := $(USBLIB) $(PCILIB) $(RP1)
 LIBS_usb-hid    := $(USBLIB) $(KEYMAP)
-LIBS_usb-audio  := $(USBLIB) $(UAC) $(MICLIB)
+LIBS_usb-audio  := $(USBLIB) $(UAC) $(MICLIB) $(PCM)
 LIBS_lsusb      := $(USBLIB)
 LIBS_sdhci      := $(PCILIB) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-blk := $(VIRTIO) $(DISKLIB) $(UUIDLIB) $(FSLIB)
@@ -319,7 +323,7 @@ LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
 LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
-LIBS_play       := $(AUDIOLIB) $(WAV)
+LIBS_play       := $(AUDIOLIB) $(WAV) $(PCM)
 LIBS_rec        := $(MICLIB) $(WAV)
 LIBS_listen     := $(TRANSCRIBE)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN)
@@ -570,6 +574,7 @@ $(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)
 $(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
 $(call l0_test,$(BASE) $(PPM) $(QOI) user/lib/format/qoi_test.l0)
 $(call l0_test,$(BASE) $(WAV) user/lib/format/wav_test.l0)
+$(call l0_test,$(BASE) $(PCM) user/lib/format/pcm_test.l0)
 $(call l0_test,$(BASE) $(XML) user/lib/format/xml_test.l0)
 $(call l0_test,$(BASE) $(JSON) user/lib/format/json_test.l0)
 $(call l0_test,$(BASE) $(NTPLIB) user/lib/format/ntp_test.l0)
@@ -953,7 +958,7 @@ sysdisk: initramfs $(BUILD)/mkfs
 
 demo: initramfs $(DISK) $(SD)
 	@echo "Booting L0S. Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@GPU=$(GPU) QEMU_INPUT=usb QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_SD=$(SD) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
+	@GPU=$(GPU) QEMU_INPUT=usb QEMU_USB="tablet $(QEMU_USB)" QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(DISK) QEMU_SD=$(SD) QEMU_NET=$(NET) QEMU_APPEND="$(if $(ROOT_UUID),root=$(ROOT_UUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The Pi 5 as demo is QEMU: build its TFTP root without the display
@@ -970,7 +975,7 @@ pi5-shell:
 # from the initramfs as it is now, so what was written to it goes.
 demo-system: sysdisk
 	@echo "Booting L0S from System, $$(cat $(SYSUUID)). Type help; exit stops the system, Ctrl-A x quits QEMU."
-	@GPU=$(GPU) QEMU_INPUT=usb QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_NET=$(NET) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
+	@GPU=$(GPU) QEMU_INPUT=usb QEMU_USB="tablet $(QEMU_USB)" QEMU_DISPLAY=$(QEMU_DISPLAY) QEMU_GPU=$(GPU_OPTS) QEMU_DISK=$(SYSDISK) QEMU_NET=$(NET) QEMU_APPEND="root=$$(cat $(SYSUUID))" \
 	  tools/qemu-boot.sh $(BUILD)/initramfs.cpio; echo "L0S stopped, status $$?"
 
 # The Raspberry Pi 5, which nothing here can boot: the kernel built for

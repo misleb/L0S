@@ -10,6 +10,12 @@
 #      axes, as a mouse moves, from where the pointer starts, 0, 0, to
 #      the top bar's Applications, 60, 16, and clicked, opens the
 #      launcher: its pill shows behind the label, as launcher.sh pins it
+#   3. booted again with QEMU's usb-tablet too (QEMU_USB=tablet), as the
+#      demo has: usb-hid takes it, and the tablet, moved through QMP's
+#      absolute axes to Applications and clicked, opens the launcher.
+#      A board of its own, since with a tablet QEMU may send the mouse's
+#      buttons to it, whose report carries its own place, not the
+#      mouse's
 #
 # Run from the top of the project, after make usb-initramfs.
 set -u
@@ -20,14 +26,21 @@ qmp="$BUILD/usb.qmp"
 fifo="$BUILD/usb.in"
 out="$BUILD/usb.out"
 dump="$BUILD/usb.ppm"
-rm -f "$sock" "$qmp" "$fifo" "$dump"
-mkfifo "$fifo"
-
-QEMU_INPUT=usb QEMU_MONITOR="unix:$sock,server=on,wait=off" QEMU_QMP="unix:$qmp,server=on,wait=off" \
-  tools/qemu-boot.sh "$BUILD/usb.cpio" < "$fifo" > "$out" 2>&1 &
-qemu=$!
+qemu=0
 trap 'kill $qemu 2> /dev/null; rm -f "$fifo"' EXIT
-exec 3> "$fifo"
+
+# Boots the board with QEMU_USB as given, the serial line's input the
+# fifo, on descriptor 3; any board before it ended first.
+boot() {
+  if [ "$qemu" != 0 ]; then exec 3>&-; kill $qemu 2> /dev/null; wait $qemu 2> /dev/null; fi
+  rm -f "$sock" "$qmp" "$fifo" "$dump"
+  mkfifo "$fifo"
+  QEMU_INPUT=usb QEMU_USB=$1 QEMU_MONITOR="unix:$sock,server=on,wait=off" QEMU_QMP="unix:$qmp,server=on,wait=off" \
+    tools/qemu-boot.sh "$BUILD/usb.cpio" < "$fifo" > "$out" 2>&1 &
+  qemu=$!
+  exec 3> "$fifo"
+}
+boot ""
 
 fail() { echo "not ok - usb: $1"; sed 's/^/  # /' "$out"; exit 1; }
 
@@ -44,6 +57,12 @@ by() {
   echo "{\"type\":\"rel\",\"data\":{\"axis\":\"x\",\"value\":$1}},{\"type\":\"rel\",\"data\":{\"axis\":\"y\",\"value\":$2}}"
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
+# The tablet at pixel x, y of the 1280 by 800 screen, on QMP's absolute
+# axes, 0 to 32767 across it.
+at() {
+  echo "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$(($1 * 32767 / 1279))}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$(($2 * 32767 / 799))}}"
+}
+click() { events "$(button true)"; sleep 0.1; events "$(button false)"; }
 
 # Waits up to 30 s for the text on the serial line.
 waits_for() {
@@ -111,3 +130,11 @@ events "$(by 60 16)"; sleep 0.1
 events "$(button true)"; sleep 0.1
 events "$(button false)"
 shows "the mouse moved to Applications and clicked it open" "40 16 $pill"
+
+boot tablet
+waits_for "interface 0: a tablet, serving pointer"
+waits_for "serving compositor"
+shows "the launcher closed, with the tablet" "40 16 0 0 0"
+events "$(at 60 16)"; sleep 0.1
+click
+shows "the tablet moved to Applications and clicked it open" "40 16 $pill"

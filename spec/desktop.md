@@ -241,7 +241,8 @@ Input:
   Shift 1, Ctrl 2 and Alt 4 (`key_mod_shift` and the rest), either side
   of each the same. Both keyboards send them alike, `virtio-input`'s
   and `usb-hid`'s from its reports' modifier byte.
-- **The pointer**'s place, 0 to 32767 on each axis from the tablet, is
+- **The pointer**'s place, 0 to 32767 on each axis from a tablet,
+  `virtio-input`'s or QEMU's USB one through `usb-hid`, is
   scaled to the screen and sent to the driver as a `move`. A mouse's
   report, a `PointerMotion` from `usb-hid`, moves it instead from
   where it is, a pixel a count, kept on the screen; its wheel's turn is

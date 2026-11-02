@@ -44,16 +44,19 @@ devices are listed by what they are, in and out.
   `usb-audio` speaker listed and sent 500 packets in half a second.
 - [x] `rec`: `list`, a recording to a WAV file of the microphone's own
   samples (`wav_header_sized`), and `silence`.
-- [ ] A real microphone heard: the Yeti Nano passed through to QEMU
+- [x] A real microphone heard: the Yeti Nano passed through to QEMU
   (`QEMU_USB=046d:0acf`, its `/dev/bus/usb` node made writable on the
   host), `rec` of 5 s played back on the host, and any fault of a real
   device's IN packets fixed.
-- [ ] On a Pi 5: the Yeti on RP1's ports, `rec` there, the WAV heard.
+- [ ] On a Pi 5: the Yeti on RP1's ports, `rec` there, the WAV heard;
+  and `rec FILE 5 16000`, brought down to Whistle's 16 kHz by
+  `usb-audio`, played by `play` and read by `listen`.
 
 ## Spec changes
 
-- testing.md: the runs with the Yeti Nano, on QEMU and on a Pi 5.
-- devices.md and sound.md: their Limits, once a microphone is heard.
+- testing.md: the run with the Yeti Nano on a Pi 5.
+- devices.md and sound.md: their Limits, once a microphone is heard on
+  a Pi 5.
 
 ## Log
 
@@ -64,3 +67,12 @@ devices are listed by what they are, in and out.
   speaker only, so nothing has come in yet. The Yeti Nano is on the
   host, but QEMU cannot take it until its device node is writable,
   which is the user's to grant.
+- 2026-11-01: step 5 done: the Yeti passed through to QEMU, recorded
+  (2 channels of 24 bits at 48 kHz) and heard on the host, with no
+  fault. On the way, the demo got QEMU's `usb-tablet`, which `usb-hid`
+  now drives, so its window needs no grab, and with `QEMU_USB` its
+  qemu-xhci 8 USB 2 ports, since past 4 QEMU hid the Yeti behind a hub
+  of its own. And for Whistle (0060, 0061), which hears one channel of
+  16 bits at 16 kHz that the Yeti does not offer, `usb-audio` brings
+  48 kHz down to it when asked `listen 16000` (`format/pcm.l0`), and
+  `play` takes 16 kHz files up to 48 kHz: the Pi 5 step checks both.

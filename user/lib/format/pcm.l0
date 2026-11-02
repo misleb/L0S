@@ -1,0 +1,156 @@
+; pcm.l0 -- PCM samples, as bytes, between 48 kHz and 16 kHz, purely: a
+; microphone's frames, of any channels and sample size, brought down to
+; one channel of 16 bits at 16 kHz, as Whistle hears (speech.md), a piece
+; at a time as they come, with what one piece leaves for the next kept;
+; and 16-bit samples at 16 kHz taken up to 48 kHz, any range of them at
+; a time, for a driver that plays no 16 kHz. Both go through one
+; low-pass filter, so that nothing above 8 kHz folds down into what is
+; kept, and nothing between the samples is made up. Linked as PCM in
+; the Makefile, by usb-audio and play.
+
+; The low-pass filter: 63 taps of a sinc cut off at 7 kHz at 48 kHz,
+; under a Hamming window, summing to 65536. It passes all to 6 kHz, half
+; at 7 kHz, and 31 dB less at 8 kHz, half of 16 kHz, and 58 dB less
+; from 9 kHz on. Each third of it sums to about 65536 / 3, so taken up
+; by 3 the samples keep their loudness.
+(def pcm_taps () (array int)
+  (array_from (concat (cons (pcm_row "-7 40 64 38 -35 -107 -107 0 160 236 113 -176 -413 -348 75 583")
+                      (cons (pcm_row "723 235 -639 -1215 -856 422 1757 1932 345 -2253 -3892 -2507 2601 9966 16487 19092")
+                      (cons (pcm_row "16487 9966 2601 -2507 -3892 -2253 345 1932 1757 422 -856 -1215 -639 235 723 583")
+                      (cons (pcm_row "75 -348 -413 -176 113 236 160 0 -107 -107 -35 38 64 40 -7") (nil (list int)))))))
+              0))
+
+; The numbers of a row of the taps, negative ones among them.
+(def pcm_row ((s (list int))) (list int) (pcm_numbers (split_spaces s) (nil int)))
+(def pcm_numbers ((ws (list (list int))) (acc (list int))) (list int)
+  (if (is_empty ws)
+      (rev acc)
+      (let w (head ws)
+        (pcm_numbers (tail ws) (cons (if (starts_with w "-") (neg (int_prefix (tail w) 0)) (int_prefix w 0)) acc)))))
+
+; How many taps the filter has, and how many samples before the newest
+; it reads: 63 and 62.
+(def pcm_tap_count () int 63)
+(def pcm_reach () int 62)
+
+; The factor between the rates: 48 kHz is three times 16 kHz.
+(def pcm_factor () int 3)
+
+; A 16-bit sample kept in its range.
+(def pcm_clamp16 ((v int)) int (max -32768 (min 32767 v)))
+
+; The sample of size bytes at byte i of b, signed, least significant
+; first, as 16 bits: its top two bytes, so 24 bits lose the 8 lowest.
+(def pcm_sample16_at ((b bytes) (i int) (size int)) int
+  (let u (bit_or (bytes_get b (add i (sub size 2))) (bit_shl (bytes_get b (add i (sub size 1))) 8))
+    (if (ge u 32768) (sub u 65536) u)))
+
+; The frame at byte i of b, chans samples of size bytes each, as one
+; 16-bit sample: their mean.
+(def pcm_mono_at ((b bytes) (i int) (chans int) (size int)) int
+  (div (pcm_sum_at b i chans size 0 0) (max chans 1)))
+(def pcm_sum_at ((b bytes) (i int) (chans int) (size int) (k int) (acc int)) int
+  (if (ge k chans) acc (pcm_sum_at b (add i size) chans size (add k 1) (add acc (pcm_sample16_at b i size)))))
+
+; v as a 16-bit sample's two bytes, least significant first, pushed
+; onto the reversed acc.
+(def pcm_push16 ((v int) (acc (list int))) (list int)
+  (let u (bit_and (pcm_clamp16 v) 65535)
+    (cons (bit_shr u 8) (cons (bit_and u 255) acc))))
+
+; ------------------------------------------------------------------- down
+
+; Bringing 48 kHz down to 16 kHz as pieces come: the last 62 samples of
+; the pieces so far, oldest first, which the filter still reads, and how
+; many samples of the next piece to pass before the next kept.
+(data PcmDown (PcmDown (hist (array int)) (skip int)))
+
+; Before the first piece: silence before it, and its first sample's
+; filtered value the first kept.
+(def pcm_down_new () PcmDown (PcmDown (array_new (pcm_reach) 0) 0))
+
+; What one piece gives: the state for the next, and its samples at 16
+; kHz, one channel of 16 bits.
+(data PcmDowned (PcmDowned (st PcmDown) (out bytes)))
+
+; The frames of b from byte i up to j, chans samples of size bytes each
+; at 48 kHz, after st: each made one 16-bit sample, filtered, and every
+; third kept. A part of a frame at the end is passed over.
+(def pcm_down ((st PcmDown) (b bytes) (i int) (j int) (chans int) (size int)) PcmDowned
+  (let (fb (max (mul chans size) 1)
+        n (div (max (sub j i) 0) fb)
+        x (pcm_mono_into (pcm_hist_into (array_new (add (pcm_reach) n) 0) (.hist st) 0) b i fb chans size 0 n)
+        len (array_len x)
+        out (pcm_kept x (pcm_taps) (add (pcm_reach) (.skip st)) len (nil int))
+        next (pcm_next_kept (add (pcm_reach) (.skip st)) len))
+    (PcmDowned (PcmDown (pcm_tail_of x (pcm_reach)) (sub next len)) (bytes_from_list (rev out)))))
+
+; x with h's samples from k on at the same places.
+(def pcm_hist_into ((x (array int)) (h (array int)) (k int)) (array int)
+  (if (ge k (array_len h)) x (pcm_hist_into (array_set x k (array_get h k)) h (add k 1))))
+
+; x with frame k of n, from byte i + k fb of b, as one sample at 62 + k.
+(def pcm_mono_into ((x (array int)) (b bytes) (i int) (fb int) (chans int) (size int) (k int) (n int)) (array int)
+  (if (ge k n)
+      x
+      (pcm_mono_into (array_set x (add (pcm_reach) k) (pcm_mono_at b (add i (mul k fb)) chans size)) b i fb chans size (add k 1) n)))
+
+; The filter's value at each kept place of x from p, every third below
+; len, as 16-bit samples pushed onto the reversed acc.
+(def pcm_kept ((x (array int)) (taps (array int)) (p int) (len int) (acc (list int))) (list int)
+  (if (ge p len)
+      acc
+      (pcm_kept x taps (add p (pcm_factor)) len (pcm_push16 (div (pcm_dot x (sub p (pcm_reach)) taps 0 0) 65536) acc))))
+
+; The first kept place at or past len, from p by threes.
+(def pcm_next_kept ((p int) (len int)) int
+  (if (ge p len) p (add p (mul (pcm_factor) (div (add (sub len p) (sub (pcm_factor) 1)) (pcm_factor))))))
+
+; The sum of each tap from k on times x's sample from base + k.
+(def pcm_dot ((x (array int)) (base int) (taps (array int)) (k int) (acc int)) int
+  (if (ge k (pcm_tap_count)) acc (pcm_dot x base taps (add k 1) (add acc (mul (array_get taps k) (array_get x (add base k)))))))
+
+; The last n of x, oldest first.
+(def pcm_tail_of ((x (array int)) (n int)) (array int)
+  (pcm_copied (array_new n 0) x (sub (array_len x) n) 0 n))
+(def pcm_copied ((y (array int)) (x (array int)) (from int) (k int) (n int)) (array int)
+  (if (ge k n) y (pcm_copied (array_set y k (array_get x (add from k))) x from (add k 1) n)))
+
+; --------------------------------------------------------------------- up
+
+; Frames o0 up to o1 at 48 kHz of the 16-bit samples of b from byte s up
+; to e, chans channels at 16 kHz: each frame o, each channel, the filter
+; over the samples three times as far apart, with zeros between, centred
+; on o, times 3. Any range gives the same frames as the whole, so a
+; player takes them a piece at a time.
+(def pcm_up ((b bytes) (s int) (e int) (chans int) (o0 int) (o1 int)) bytes
+  (let n (div (max (sub e s) 0) (max (mul 2 chans) 1))
+    (bytes_from_list (rev (pcm_up_frames b s n chans (pcm_taps) o0 o1 (nil int))))))
+
+; How many frames n frames at 16 kHz are at 48 kHz.
+(def pcm_up_frames_of ((n int)) int (mul n (pcm_factor)))
+
+; Frames o up to o1, each channel's sample pushed onto the reversed acc.
+(def pcm_up_frames ((b bytes) (s int) (n int) (chans int) (taps (array int)) (o int) (o1 int) (acc (list int))) (list int)
+  (if (ge o o1)
+      acc
+      (pcm_up_frames b s n chans taps (add o 1) o1 (pcm_up_channels b s n chans taps o 0 acc))))
+
+; Frame o's channels from c on.
+(def pcm_up_channels ((b bytes) (s int) (n int) (chans int) (taps (array int)) (o int) (c int) (acc (list int))) (list int)
+  (if (ge c chans)
+      acc
+      (let c0 (add o (div (pcm_reach) 2))
+        (pcm_up_channels b s n chans taps o (add c 1)
+          (pcm_push16 (div (mul (pcm_factor) (pcm_up_dot b s n chans c taps c0 (mod c0 (pcm_factor)) 0)) 65536) acc)))))
+
+; The sum of each tap t from k on, by threes, times channel c's sample
+; (c0 - t) / 3 of the n, none past either end.
+(def pcm_up_dot ((b bytes) (s int) (n int) (chans int) (c int) (taps (array int)) (c0 int) (t int) (acc int)) int
+  (if (ge t (pcm_tap_count))
+      acc
+      (let k (div (sub c0 t) (pcm_factor))
+        (pcm_up_dot b s n chans c taps c0 (add t (pcm_factor))
+          (if (and (ge k 0) (lt k n))
+              (add acc (mul (array_get taps t) (pcm_sample16_at b (add s (mul 2 (add (mul k chans) c))) 2)))
+              acc)))))

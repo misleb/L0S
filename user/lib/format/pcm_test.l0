@@ -1,0 +1,130 @@
+; pcm_test.l0 -- the filter, a microphone's frames brought down to 16
+; kHz, and 16 kHz taken up to 48 kHz.
+
+; The taps: 63 of them, summing to 65536, the same read both ways.
+(def test_taps () int
+  (let t (pcm_taps)
+    (add (check_int "63" (array_len t) 63)
+         (add (check_int "sum" (pcm_sum (array_to_list t) 0) 65536)
+              (check_int "symmetric" (array_get t 3) (array_get t 59))))))
+
+(def pcm_sum ((xs (list int)) (acc int)) int (if (is_empty xs) acc (pcm_sum (tail xs) (add acc (head xs)))))
+
+; A 24-bit sample's top two bytes: 0x7FFFFF is 32767, 0x800000 -32768,
+; 0x000100 1; a 16-bit one as it is, 0xFFFE -2.
+(def test_sample16 () int
+  (add (check_int "24 top" (pcm_sample16_at (bytes_from_list (cons 255 (cons 255 (cons 127 (nil int))))) 0 3) 32767)
+       (add (check_int "24 bottom" (pcm_sample16_at (bytes_from_list (cons 0 (cons 0 (cons 128 (nil int))))) 0 3) -32768)
+            (add (check_int "24 one" (pcm_sample16_at (bytes_from_list (cons 0 (cons 1 (cons 0 (nil int))))) 0 3) 1)
+                 (check_int "16" (pcm_sample16_at (bytes_from_list (cons 254 (cons 255 (nil int)))) 0 2) -2)))))
+
+; A stereo frame of 24 bits, 100 and 300 in its top bytes: 200.
+(def test_mono () int
+  (check_int "mean" (pcm_mono_at (frames24 (cons 100 (cons 300 (nil int)))) 0 2 3) 200))
+
+; The samples xs, each as 24 bits with v in its top two bytes.
+(def frames24 ((xs (list int))) bytes (bytes_from_list (rev (frames24_onto xs (nil int)))))
+(def frames24_onto ((xs (list int)) (acc (list int))) (list int)
+  (if (is_empty xs)
+      acc
+      (let u (bit_and (head xs) 65535)
+        (frames24_onto (tail xs) (cons (bit_shr u 8) (cons (bit_and u 255) (cons 0 acc)))))))
+
+; The 16-bit samples of b, from byte i, as a list.
+(def samples16 ((b bytes)) (list int) (samples16_from b (sub (bytes_len b) 2) (nil int)))
+(def samples16_from ((b bytes) (i int) (acc (list int))) (list int)
+  (if (lt i 0) acc (samples16_from b (sub i 2) (cons (pcm_sample16_at b i 2) acc))))
+
+; n copies of x.
+(def copies ((n int) (x int)) (list int) (repeat n x))
+
+; 300 stereo frames of 1000 are 100 samples at 16 kHz; once the filter
+; has passed the silence before them, 21 samples in, each 1000.
+(def test_down_level () int
+  (let (d (pcm_down (pcm_down_new) (frames24 (copies 600 1000)) 0 1800 2 3)
+        xs (samples16 (.out d)))
+    (add (check_int "100" (length xs) 100)
+         (add (check_int "settled" (nth xs 50) 1000)
+              (check_int "last" (nth xs 99) 1000)))))
+
+; The first sample kept is the filter centred 31 samples before the
+; first: of 1000s after silence, that is the sum of the newest tap
+; alone, -7 / 65536 of 1000, 0.
+(def test_down_first () int
+  (check_int "first" (head (samples16 (.out (pcm_down (pcm_down_new) (frames24 (copies 6 1000)) 0 18 2 3)))) 0))
+
+; A tone of amplitude 10000 at freq Hz, n frames of one channel at 48
+; kHz, as 16-bit samples.
+(def tone16 ((freq int) (n int)) bytes (bytes_from_list (rev (tone_onto freq 0 n (nil int)))))
+(def tone_onto ((freq int) (k int) (n int) (acc (list int))) (list int)
+  (if (ge k n)
+      acc
+      (tone_onto freq (add k 1) n (pcm_push16 (tone_at freq k) acc))))
+(def tone_at ((freq int) (k int)) int
+  (float_to_int (float_mul 10000.0 (float_sin (float_div (float_mul 6.283185307179586 (float_from_int (mul freq k))) 48000.0)))))
+
+; The largest magnitude among xs from the 30th on, past the filter's
+; start.
+(def peak ((xs (list int))) int (peak_of (drop xs 30) 0))
+(def peak_of ((xs (list int)) (m int)) int (if (is_empty xs) m (peak_of (tail xs) (max m (max (head xs) (neg (head xs)))))))
+
+; 1 kHz passes whole: its peak 9750 to 10100, since samples at 16 kHz,
+; 22.5 degrees of it apart, may each miss its top by up to 11.25
+; degrees, 2%.
+(def test_down_passes () int
+  (let p (peak (samples16 (.out (pcm_down (pcm_down_new) (tone16 1000 4800) 0 9600 1 2))))
+    (check_true "1 kHz kept" (and (gt p 9750) (lt p 10100)))))
+
+; 12 kHz, past 8 kHz, would fold to 4 kHz: the filter leaves under 0.2%
+; of it (58 dB less from 9 kHz).
+(def test_down_stops () int
+  (let p (peak (samples16 (.out (pcm_down (pcm_down_new) (tone16 12000 4800) 0 9600 1 2))))
+    (check_true "12 kHz gone" (lt p 20))))
+
+; Pieces give what the whole gives: the frames cut at seeded places, each
+; piece brought down after the last, their samples joined.
+(def test_down_pieces () int
+  (let b (tone16 1000 3001)
+    (check_int "same" (pieces_differ b 1 20) 0)))
+
+; How many of n seeded cuttings of b differ from the whole, from seed s.
+(def pieces_differ ((b bytes) (s int) (n int)) int
+  (if (eq n 0)
+      0
+      (let (whole (.out (pcm_down (pcm_down_new) b 0 (bytes_len b) 1 2))
+            cut (in_pieces b (pcm_down_new) 0 s (nil bytes)))
+        (add (if (eq (bytes_to_list whole) (bytes_to_list cut)) 0 1) (pieces_differ b (rand_next (rand_next s)) (sub n 1))))))
+
+; b from byte i in pieces of 1 to 400 frames, seeded by s, after st.
+(def in_pieces ((b bytes) (st PcmDown) (i int) (s int) (acc (list bytes))) bytes
+  (if (ge i (bytes_len b))
+      (bytes_concat (rev acc))
+      (let (j (min (bytes_len b) (add i (mul 2 (add 1 (rand_below s 400)))))
+            d (pcm_down st b i j 1 2))
+        (in_pieces b (.st d) j (rand_next s) (cons (.out d) acc)))))
+
+; ----------------------------------------------------------------------- up
+
+; 100 samples of 1000 at 16 kHz are 300 frames at 48 kHz, each 1000
+; once past the filter's reach either end, within 2 of the taps'
+; rounding.
+(def test_up_level () int
+  (let xs (samples16 (pcm_up (bytes_from_list (rev (level_onto 100 1000 (nil int)))) 0 200 1 0 300))
+    (add (check_int "300" (length xs) 300)
+         (check_true "settled" (and (ge (nth xs 150) 998) (le (nth xs 150) 1002))))))
+(def level_onto ((n int) (v int) (acc (list int))) (list int) (if (eq n 0) acc (level_onto (sub n 1) v (pcm_push16 v acc))))
+
+; Any range gives the frames the whole does: stereo, in three pieces.
+(def test_up_ranges () int
+  (let (b (tone16 1000 200)
+        whole (pcm_up b 0 400 2 0 300)
+        parts (bytes_concat (cons (pcm_up b 0 400 2 0 7) (cons (pcm_up b 0 400 2 7 150) (cons (pcm_up b 0 400 2 150 300) (nil bytes))))))
+    (check_true "same" (eq (bytes_to_list whole) (bytes_to_list parts)))))
+
+; Down and up again, 1 kHz comes back near its own: its peak within 1%,
+; away from the ends, where the tone stops dead and the filter rings.
+(def test_round_trip () int
+  (let (d (.out (pcm_down (pcm_down_new) (tone16 1000 4800) 0 9600 1 2))
+        u (samples16 (pcm_up d 0 (bytes_len d) 1 0 (pcm_up_frames_of (div (bytes_len d) 2))))
+        p (peak_of (take (drop u 200) 4000) 0))
+    (check_true "1 kHz back" (and (gt p 9900) (lt p 10100)))))

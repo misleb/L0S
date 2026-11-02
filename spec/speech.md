@@ -172,5 +172,7 @@ emulated CPU, the model loads in 36 s and 1.4 s of speech is heard in
   by the probes.
 - A decoding that is not UTF-8 is kept as its bytes, where the
   reference puts U+FFFD.
-- The front end works on a clip whole, at 16 kHz only: nothing
-  resamples, and a microphone's 48 kHz must be brought down first.
+- The front end works on a clip whole, at 16 kHz only, and resamples
+  nothing: a microphone's 48 kHz is brought down by `usb-audio` when
+  asked for 16 kHz ([sound.md](sound.md#microphones)), as `rec FILE S
+  16000` asks.

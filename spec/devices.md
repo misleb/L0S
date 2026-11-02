@@ -26,8 +26,10 @@ USB is how a keyboard, a mouse and a microphone reach a Raspberry Pi 5,
 whose ports are on RP1, the southbridge behind PCIe: two Synopsys DWC3
 controllers, each an xHCI in host mode. QEMU has no Pi 5, but its virt
 board takes a `qemu-xhci` on PCIe, with a `usb-kbd` and a `usb-mouse` on
-it (`QEMU_INPUT=usb` in `tools/qemu-boot.sh`), and its `usb-audio`, a
-speaker, or a device of the host passed through (`QEMU_USB`). So one
+it (`QEMU_INPUT=usb` in `tools/qemu-boot.sh`), and its `usb-tablet`, as
+the demo has, its `usb-audio`, a speaker, or a device of the host passed
+through (`QEMU_USB`, which gives the controller 8 USB 2 ports, not
+QEMU's 4, past which QEMU puts devices behind a hub of its own). So one
 driver serves both, and only how it finds its controllers differs:
 
 ```
@@ -43,7 +45,8 @@ driver serves both, and only how it finds its controllers differs:
 ```
 
 **It runs on QEMU** (`tests/e2e/usb`, `tests/usb.sh`): the keyboard
-types in the shell and the mouse moves the pointer and clicks. L0's
+types in the shell, and the mouse and the tablet move the pointer and
+click. L0's
 runtime gives the regions it needs, QEMU's PCIe ECAM and MMIO window and
 the Pi 5's RP1, and `frame_sync`, which `dma_sync` (call 293) offers
 drivers, for the Pi's DMA, which does not see the CPU's caches; L0S
@@ -111,6 +114,7 @@ their ports' resets.
 
 One `usb-hid` serves both names, started with no argument: it claims
 every boot keyboard and every boot mouse the usb server tells it of,
+and QEMU's tablet,
 and waits on three ports at once, a set (`port_set`): its own, where
 the usb server's answers and notices come, every endpoint's reports
 among them, each naming its device and endpoint, and the kernel's
@@ -118,13 +122,20 @@ alarms, which time a held key's repeats; and one each for `keyboard`
 and `pointer`, where their clients ask to `listen`, told apart by the
 port they came on.
 
-`usb-hid` uses HID's boot protocol only: a keyboard's 8-byte reports,
+`usb-hid` uses HID's boot protocol: a keyboard's 8-byte reports,
 compared with the last to find what was pressed and let go (Linux's key
 codes, then `keymap.l0`'s characters), and a mouse's buttons, movement
 and wheel. A held key repeats in the driver, as USB keyboards leave to
-the host. A report descriptor is never read, so a tablet, a wheel past
-the boot report's, or a key outside the boot keyboard's 104 usages is
-not seen; nor is anything behind a hub.
+the host. Beside them it takes QEMU's `usb-tablet`, a HID interface of
+no boot subclass on a device of QEMU's vendor, 0627: its reports, laid
+out as QEMU's report descriptor says, the buttons, x and y from 0 to
+32767, and the wheel, are sent on `pointer` as a `PointerEvent`, after
+a `WheelEvent` if the wheel turned, as `virtio-input`'s tablet sends
+them. So the demo's window passes the host's pointer on with no grab,
+the tablet taking the host's moves and the mouse left for QMP's
+relative ones. A report descriptor is never read, so any other tablet,
+a wheel past the boot report's, or a key outside the boot keyboard's
+104 usages is not seen; nor is anything behind a hub.
 
 ### Isochronous endpoints
 
@@ -176,10 +187,10 @@ reach the shell and the windows and the mouse moves the pointer.
 ## Limits
 
 - **USB has run on QEMU and the Pi 5** (see [USB](#usb)): boot keyboards
-  and mice, and on QEMU its `usb-audio` speaker, only, on root ports
-  only, no hubs. Isochronous endpoints have run on QEMU only, OUT only,
-  as its `usb-audio` has no microphone: no packet has yet come in from
-  a real microphone. An isochronous OUT endpoint sends only silence,
+  and mice, and on QEMU its `usb-tablet` and `usb-audio` speaker, only, on root ports
+  only, no hubs. Isochronous endpoints have run on QEMU only: OUT to
+  its `usb-audio`, and IN from a real microphone, the Yeti Nano passed
+  through to it, but not on a Pi 5. An isochronous OUT endpoint sends only silence,
   and its packets are its largest, not each interval's share of the
   rate. A high-speed endpoint's extra packets a microframe are not
   used. USB Audio Class 2.0 is not read. A control

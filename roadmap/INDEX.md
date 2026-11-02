@@ -45,7 +45,7 @@ move independently, so several can be active at once.
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
 | [0057](0057-tz-database.md) Any time zone, by the tz database's rules | Desktop | idea | – | 0029 | desktop.md, fat32.md, programs.md |
-| [0059](0059-usb-microphone.md) A USB microphone | Pi 5 | active | 4/6 | – | devices.md, sound.md, programs.md, testing.md |
+| [0059](0059-usb-microphone.md) A USB microphone | Pi 5 | active | 5/6 | – | devices.md, sound.md, programs.md, testing.md |
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 6/8 | – | speech.md, programs.md, testing.md |
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058, 0059, 0060 | agent.md, speech.md, programs.md, testing.md |
 ## Ready
@@ -53,8 +53,9 @@ move independently, so several can be active at once.
 [0049](0049-agent-chat-app.md) is active: `agentd`'s one kept
 conversation and the Agent app, with its Tools pane, are in, and its
 screen test is next. [0059](0059-usb-microphone.md) is active:
-isochronous USB, `usb-audio` and `rec` are in on QEMU, and a real
-microphone, the Yeti Nano passed through and then on a Pi 5, is next.
+isochronous USB, `usb-audio` and `rec` are in, the Yeti Nano heard
+through QEMU, and its 48 kHz brought down to Whistle's 16 kHz; the
+Yeti on a Pi 5 is next.
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its
 container, tokenizer, front end, stem, encoder and decoder are in,
 checked against the reference rebuilt from `whistle.cact` (the same

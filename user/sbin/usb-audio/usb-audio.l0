@@ -3,7 +3,9 @@
 ; reads its configuration's audio function (uac.l0), and serves mic
 ; (proto/mic.l0): every stream in and out listed, the first microphone
 ; set going for one client at a time, what it hears passed on as it
-; comes, and silence sent out, as a test of the path out. It drives no
+; comes, or, asked for 16 kHz that the microphone does not offer, its 48
+; kHz brought down to Whistle's 16 kHz, one channel of 16 bits
+; (pcm.l0), and silence sent out, as a test of the path out. It drives no
 ; device itself, and claims an interface only while it uses it.
 ;
 ; It waits on two ports at once, a set (port_set): its own, where the
@@ -21,9 +23,10 @@
 (data AudDev (AudDev (dev int) (f Uac)))
 
 ; A stream going: its device, its stream, and, for one in, the port its
-; samples go to; for one out, the port to answer, how many packets have
-; gone, and when it ends, on clock_ns.
-(data Going (GoingIn (dev int) (s UacStream) (to int)) (GoingOut (dev int) (s UacStream) (reply int) (sent int) (until int)))
+; samples go to, and, if they are brought down from 48 kHz to 16 kHz on
+; the way, where that stands (pcm.l0); for one out, the port to answer,
+; how many packets have gone, and when it ends, on clock_ns.
+(data Going (GoingIn (dev int) (s UacStream) (to int) (down (Option PcmDown))) (GoingOut (dev int) (s UacStream) (reply int) (sent int) (until int)))
 
 ; The driver: its own port and mic's, the usb server's port and pid, the
 ; audio devices, the streams going, and the usb server's messages kept
@@ -172,12 +175,12 @@
   (if (is_empty gs) gs (eq (going_dev (head gs)) dev) (going_without (tail gs) dev) (cons (head gs) (going_without (tail gs) dev))))
 
 ; A stream going's device and stream.
-(def going_dev ((g Going)) int (match g ((GoingIn d s t) d) ((GoingOut d s r n u) d)))
-(def going_stream ((g Going)) UacStream (match g ((GoingIn d s t) s) ((GoingOut d s r n u) s)))
+(def going_dev ((g Going)) int (match g ((GoingIn d s t c) d) ((GoingOut d s r n u) d)))
+(def going_stream ((g Going)) UacStream (match g ((GoingIn d s t c) s) ((GoingOut d s r n u) s)))
 
 ; An endpoint's packets, the message's bytes b: a microphone's passed to
-; its listener as pcm, read in place; a silence's counted. A listener
-; gone stops its stream.
+; its listener as pcm, read in place, or brought down to 16 kHz first; a
+; silence's counted. A listener gone stops its stream.
 (def packets ((a Aud) (b bytes)) Aud
   (let (dev (msg_u32 b 3)
         ep (msg_u32 b 7))
@@ -185,12 +188,14 @@
       ((None) a)
       ((Some g)
         (match g
-          ((GoingIn d s to)
-            (match (pcm_sent to b)
-              ((SendNoPort) (stopped a g))
-              ((Sent) a)
-              ((SendFull) a)
-              ((SendTooBig) a)))
+          ((GoingIn d s to c)
+            (match c
+              ((None) (if (eq (pcm_sent to b (add (header_len) 11) (bytes_len b)) (SendNoPort)) (stopped a g) a))
+              ((Some st)
+                (let dn (pcm_down st b (add (header_len) 11) (bytes_len b) (.channels s) (.size s))
+                  (if (eq (pcm_sent to (.out dn) 0 (bytes_len (.out dn))) (SendNoPort))
+                      (stopped a g)
+                      (.going a (cons (GoingIn d s to (Some (.st dn))) (going_less (.going a) g))))))))
           ((GoingOut d s r n u)
             (.going a (cons (GoingOut d s r (add n (iso_batch_of s)) u) (going_less (.going a) g)))))))))
 
@@ -198,10 +203,11 @@
 ; one, 10 or as many of its largest as fit (core.l0's iso_batch).
 (def iso_batch_of ((s UacStream)) int (max 1 (min 10 (div (sub (max_message) 11) (max (.mps s) 1)))))
 
-; The samples in a uin's bytes b, after its 11 bytes of tag, device and
-; endpoint, sent to port as a pcm notice: the tag, then the samples.
-(def pcm_sent ((port int) (b bytes)) Sending
-  (let pcm (bytes_concat (cons (bytes_from_list (mic_pcm_tag)) (cons (bytes_slice b (add (header_len) 11) (bytes_len b)) (nil bytes))))
+; The samples in bytes i up to j of b, a uin's after its 11 bytes of
+; tag, device and endpoint, or those brought down, sent to port as a pcm
+; notice: the tag, then the samples.
+(def pcm_sent ((port int) (b bytes) (i int) (j int)) Sending
+  (let pcm (bytes_concat (cons (bytes_from_list (mic_pcm_tag)) (cons (bytes_slice b i j) (nil bytes))))
     (port_send_bytes port pcm 0 (bytes_len pcm))))
 
 ; The stream going of device dev at endpoint ep, or none.
@@ -286,7 +292,7 @@
       (match (head ds)
         ((AudDev dev f)
           (match (input_among (.streams f))
-            ((Some s) (Some (GoingIn dev s 0)))
+            ((Some s) (Some (GoingIn dev s 0 ((None PcmDown)))))
             ((None) (first_input (tail ds))))))))
 
 ; The first stream of ss that takes sound in, or none.
@@ -295,7 +301,21 @@
 
 ; Whether a stream in is going.
 (def any_in ((gs (list Going))) bool
-  (if (is_empty gs) false (match (head gs) ((GoingIn d s t) true) ((GoingOut d s r n u) (any_in (tail gs))))))
+  (if (is_empty gs) false (match (head gs) ((GoingIn d s t c) true) ((GoingOut d s r n u) (any_in (tail gs))))))
+
+; How a microphone's stream s meets a listen at want: the rate it is set
+; to, and whether its samples are brought down to 16 kHz, one channel of
+; 16 bits, as Whistle hears. want if s takes it; 48000 brought down for
+; 16000, which a USB microphone rarely offers; else s's highest.
+(data MicPlan (MicPlan (rate int) (down bool)))
+(def mic_plan ((s UacStream) (want int)) MicPlan
+  (if (any_eq want (.rates s)) (MicPlan want false)
+      (and (eq want 16000) (any_eq 48000 (.rates s))) (MicPlan 48000 true)
+      (MicPlan (uac_rate_for s want) false)))
+
+; The format listen answers for stream s set going as p says.
+(def plan_format ((s UacStream) (p MicPlan)) MicFormat
+  (if (.down p) (MicFormat 16000 1 2) (MicFormat (.rate p) (.channels s) (.size s))))
 
 ; listen [RATE]: the first microphone set going for reply, its format
 ; answered; busy while one listens.
@@ -307,13 +327,14 @@
           ((None) (let x (msg_answer b (error_reply "no microphone")) a))
           ((Some g)
             (let (s (going_stream g)
-                  rate (uac_rate_for s want))
-              (match (stream_on a (going_dev g) s rate)
+                  p (mic_plan s want))
+              (match (stream_on a (going_dev g) s (.rate p))
                 ((Answered a2 why)
                   (if (not (is_empty why))
                       (let x (msg_answer b (error_reply why)) a2)
-                      (let x (msg_answer b (mic_format_reply (MicFormat rate (.channels s) (.size s))))
-                        (.going a2 (cons (GoingIn (going_dev g) s reply) (.going a2)))))))))))))
+                      (let (x (msg_answer b (mic_format_reply (plan_format s p)))
+                            c (if (.down p) (Some (pcm_down_new)) ((None PcmDown))))
+                        (.going a2 (cons (GoingIn (going_dev g) s reply c) (.going a2)))))))))))))
 
 ; stop: the stream going to reply stopped.
 (def stop_asked ((a Aud) (b bytes) (reply int)) Aud
@@ -326,7 +347,7 @@
   (if (is_empty gs)
       ((None Going))
       (match (head gs)
-        ((GoingIn d s t) (if (eq t port) (Some (head gs)) (going_to (tail gs) port)))
+        ((GoingIn d s t c) (if (eq t port) (Some (head gs)) (going_to (tail gs) port)))
         ((GoingOut d s r n u) (going_to (tail gs) port)))))
 
 ; silence DEV IFACE MS: the stream out of interface IFACE of DEV sent
@@ -371,7 +392,7 @@
           (let (a2 (stopped a g)
                 t (port_tell reply (append "sent " (append (digits n) " packets"))))
             (alarm_rang a2)))
-        ((GoingIn d s t) a)))))
+        ((GoingIn d s t c) a)))))
 
 ; The first silence of gs due by now, or none.
 (def silence_due ((gs (list Going)) (now int)) (Option Going)
@@ -379,4 +400,4 @@
       ((None Going))
       (match (head gs)
         ((GoingOut d s r n u) (if (ge now u) (Some (head gs)) (silence_due (tail gs) now)))
-        ((GoingIn d s t) (silence_due (tail gs) now)))))
+        ((GoingIn d s t c) (silence_due (tail gs) now)))))
