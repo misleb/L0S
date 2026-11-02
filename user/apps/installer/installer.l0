@@ -1,0 +1,297 @@
+; installer.l0 -- Installer, the app that installs L0S from the release
+; the host's proxy serves, or updates it (roadmap 0027): a fresh install
+; or an update, the system volume and the boot volume chosen from those
+; mounted, the Raspberry Pi 5's boot order set if asked, what it will
+; erase said before it does, and then install --net run, its progress
+; and what it says shown as it comes. The install is install's own,
+; started as a process on a terminal that is a port of the window's, so
+; that the window answers while it runs and the e2e case tests the same
+; code; its exit ends it.
+;
+;   installer       its window, until its close button is pressed
+
+; What the window is doing: waiting to be told what to install; running
+; install, its pid and the port that is its terminal, what it has said
+; so far but its last line not yet ended, its lines and its last
+; progress; or done, install's status and its lines.
+(data InRun (InIdle)
+            (InGoing (port int) (pid int) (part (list int)) (said (list (list int))) (progress (list int)))
+            (InEnded (status int) (said (list (list int)))))
+
+; The window's state: fresh or update, the volumes mounted (their
+; labels), the system and boot volumes chosen ("" for no boot volume),
+; whether to set the boot order, the board, and the run.
+(data Inst (Inst (mode (list int)) (vols (list (list int))) (system (list int)) (boot (list int)) (order bool)
+                 (board (list int)) (run InRun)))
+
+; The prefixes of the toggles' actions, and the key of no boot volume.
+(def in_mode () (list int) "mode")
+(def in_sys () (list int) "sys")
+(def in_boot () (list int) "boot")
+(def in_order () (list int) "order")
+(def in_none () (list int) "-")
+
+; The labels of vols, /Volumes/LABEL each.
+(def in_labels ((vols (list (list int)))) (list (list int))
+  (if (is_empty vols) vols (cons (drop (head vols) 9) (in_labels (tail vols)))))
+
+; The first of names among labels, or "" if none is there.
+(def in_first_of ((names (list (list int))) (labels (list (list int)))) (list int)
+  (if (is_empty names) "" (any_eq (head names) labels) (head names) (in_first_of (tail names) labels)))
+
+; The state at first, for the volumes vols, the system volume sysvol
+; ("" while / is the initramfs) and the board: an update of / if it is a
+; volume, else a fresh install onto System; bootfs the boot volume on a
+; Pi 5, and the boot order set by a fresh install there.
+(def in_new ((vols (list (list int))) (sysvol (list int)) (board (list int))) Inst
+  (let (labels (in_labels vols)
+        fresh (is_empty sysvol)
+        sys (if fresh (in_first_of (split_spaces "System system") labels) (drop sysvol 9))
+        pi (eq board "pi5")
+        boot (if pi (in_first_of (split_spaces "bootfs BOOT boot") labels) ""))
+    (Inst (if fresh "fresh" "update") labels sys boot (and fresh pi) board (InIdle))))
+
+; ------------------------------------------------------------------ install
+
+; What install is run with for s: install --net, the mode, the boot
+; volume, the boot order, progress, and the system volume.
+(def in_args ((s Inst)) (list (list int))
+  (let (boot (if (is_empty (.boot s)) (nil (list int)) (cons "--boot" (cons (.boot s) (nil (list int)))))
+        order (if (.order s) (cons "--boot-order" (cons "sd,net" (nil (list int)))) (nil (list int))))
+    (cons "--net" (cons (.mode s) (append boot (append order (cons "--progress" (cons (.system s) (nil (list int))))))))))
+
+; The volumes s names, as install --net's checks take them.
+(def in_vols ((s Inst)) RelVols
+  (RelVols (volume_named (.system s)) (if (is_empty (.boot s)) "" (volume_named (.boot s))) (release_data)
+           (if (.order s) (boot_order_sd_net) "")))
+
+; The mode s asks.
+(def in_rel_mode ((s Inst)) RelMode
+  (if (eq (.mode s) "fresh") (RelFresh) (RelUpdate)))
+
+; Why s cannot be installed as it is, or empty: no system volume chosen,
+; or what install --net's own checks say.
+(def in_why ((s Inst)) (list int)
+  (if (is_empty (.system s))
+      "choose the system volume"
+      (release_why (in_rel_mode s) (in_vols s) (.board s))))
+
+; What s will erase, said before it does: a fresh install's volumes; an
+; update's none.
+(def in_erases ((s Inst)) (list int)
+  (if (eq (.mode s) "fresh")
+      (trim_end (release_format_text (in_vols s)))
+      (append "updates " (append (volume_named (.system s)) "; the agent's files on /Volumes/data are kept"))))
+
+; s without its final newline.
+(def trim_end ((s (list int))) (list int)
+  (if (and (not (is_empty s)) (eq (last s) 10)) (drop_last s) s))
+
+; s with install started: its terminal a new port, which is told of its
+; exit; or its start's failure said.
+(def in_started ((s Inst)) Inst
+  (let (port (port_new)
+        back (match (tty_get) ((Terminal p) p) ((KernelTerminal) 0)))
+    (match (tty_set port)
+      ((TtyNoPort) (.run s (InEnded 1 (cons "no port to be install's terminal" (nil (list int))))))
+      ((TtySet)
+        (let (sp (spawn_path "/bin/install" (Some (in_args s)))
+              t (tty_set back)
+              pid (in_pid sp))
+          (if (lt pid 0)
+              (.run s (InEnded 1 (cons (append "cannot start /bin/install: " (spawn_why sp)) (nil (list int)))))
+              (let w (proc_watch pid port)
+                (.run s (InGoing port pid "" (nil (list int)) "")))))))))
+
+; The pid a spawn started, or -1.
+(def in_pid ((sp Spawn)) int
+  (match sp
+    ((Spawned pid) pid)
+    ((SpawnNoEntry) -1)
+    ((SpawnNotProgram) -1)
+    ((SpawnTooBig) -1)
+    ((SpawnNoRoom) -1)))
+
+; The port install's terminal is while it runs; none otherwise.
+(def in_ports ((s Inst)) (list int)
+  (match (.run s)
+    ((InIdle) (nil int))
+    ((InGoing port pid part said progress) (cons port (nil int)))
+    ((InEnded status said) (nil int))))
+
+; ------------------------------------------------------------ what it says
+
+; The run r given text install wrote: each line it ends taken, its last
+; part kept for the next.
+(def in_wrote ((r InRun) (text (list int))) InRun
+  (match r
+    ((InIdle) r)
+    ((InEnded status said) r)
+    ((InGoing port pid part said progress)
+      (in_lines_took port pid (split_on 10 (append part text)) said progress))))
+
+; The pieces ps of what install wrote, split at its line ends: each but
+; the last a line taken, the last the part kept.
+(def in_lines_took ((port int) (pid int) (ps (list (list int))) (said (list (list int))) (progress (list int))) InRun
+  (if (is_empty (tail ps))
+      (InGoing port pid (head ps) said progress)
+      (let line (in_unprefixed (head ps))
+        (if (starts_with line "file ")
+            (in_lines_took port pid (tail ps) said line)
+            (in_lines_took port pid (tail ps) (append said (cons line (nil (list int)))) progress)))))
+
+; A line install said without its "install: ".
+(def in_unprefixed ((line (list int))) (list int)
+  (if (starts_with line "install: ") (drop line 9) line))
+
+; The run r once install has exited with status: done, with what it had
+; said, and a last line not ended.
+(def in_exited ((r InRun) (status int)) InRun
+  (match r
+    ((InIdle) r)
+    ((InEnded st said) r)
+    ((InGoing port pid part said progress)
+      (InEnded status (if (is_empty part) said (append said (cons (in_unprefixed part) (nil (list int)))))))))
+
+; s after a message m to install's terminal port: its exit, its output,
+; or a terminal's request answered (a read is at its end, as install
+; reads nothing).
+(def in_heard ((s Inst) (m Message)) Inst
+  (match m
+    ((RecvFailed) s)
+    ((Message from b)
+      (match (exit_of m)
+        ((Exited p status)
+          (match (.run s)
+            ((InGoing port pid part said progress) (if (eq p pid) (.run s (in_exited (.run s) status)) s))
+            ((InIdle) s)
+            ((InEnded st said) s)))
+        ((NotExit) (in_terminal s b))))))
+
+; s after the request in a message's bytes b, to install's terminal.
+(def in_terminal ((s Inst) (b bytes)) Inst
+  (if (and (gt (msg_len b) 4) (and (eq (msg_u32 b 0) 0) (eq (msg_byte b 4) 119)))
+      (.run s (in_wrote (.run s) (bytes_to_list (bytes_slice b (add (header_len) 5) (bytes_len b)))))
+      (let reply (msg_reply b)
+        (if (or (lt reply 1) (not (eq (msg_len b) 5)))
+            s
+            (let (op (msg_byte b 4)
+                  t (if (eq op 114) (port_tell reply (nil int)) (eq op 112) (port_tell reply "tty") 0))
+              s)))))
+
+; ------------------------------------------------------------------ update
+
+; s after action: a toggle chosen, install started, or done with.
+(def in_update ((s Inst) (action (list int))) Inst
+  (let (m (ui_select_key (in_mode) action)
+        sy (ui_select_key (in_sys) action)
+        bo (ui_select_key (in_boot) action)
+        o (ui_select_key (in_order) action)
+        idle (match (.run s) ((InIdle) true) ((InGoing p pid part said progress) false) ((InEnded st said) false)))
+    (if (and idle (not (is_empty m))) (.order (.mode s m) (and (eq m "fresh") (eq (.board s) "pi5")))
+        (and idle (not (is_empty sy))) (.system s sy)
+        (and idle (not (is_empty bo))) (.boot s (if (eq bo (in_none)) "" bo))
+        (and idle (not (is_empty o))) (.order s (eq o "on"))
+        (and idle (and (eq action "app.install") (is_empty (in_why s)))) (in_started s)
+        (eq action "app.again") (match (.run s) ((InEnded st said) (.run s (InIdle))) ((InIdle) s) ((InGoing p pid part said progress) s))
+        s)))
+
+; ------------------------------------------------------------------ view
+
+; A toggle for each of labels, its key and label the same.
+(def in_toggles ((labels (list (list int)))) (list UiToggle)
+  (if (is_empty labels) (nil UiToggle) (cons (UiToggle (head labels) "" (head labels)) (in_toggles (tail labels)))))
+
+; The properties s is chosen by: the mode, the volumes, and on a Pi 5
+; the boot volume and the boot order.
+(def in_props ((s Inst)) (list UiProp)
+  (let (mode (UiProp "Install" (UiToggleGroup (in_mode) (cons (UiToggle "fresh" "" "Fresh install") (cons (UiToggle "update" "" "Update") (nil UiToggle))) (.mode s)))
+        sys (UiProp "System volume" (if (is_empty (.vols s)) (UiLabel "No volume is mounted" (UiDimmed) (UiStart))
+                                        (UiToggleGroup (in_sys) (in_toggles (.vols s)) (.system s))))
+        boot (UiProp "Boot volume" (UiToggleGroup (in_boot) (cons (UiToggle (in_none) "" "None") (in_toggles (.vols s)))
+                                     (if (is_empty (.boot s)) (in_none) (.boot s))))
+        order (UiProp "Boot order" (UiToggleGroup (in_order) (cons (UiToggle "on" "" "SD card, then network") (cons (UiToggle "off" "" "Leave as it is") (nil UiToggle)))
+                                     (if (.order s) "on" "off"))))
+    (if (eq (.board s) "pi5")
+        (cons mode (cons sys (cons boot (cons order (nil UiProp)))))
+        (cons mode (cons sys (nil UiProp))))))
+
+; What s says before it is run: why it cannot be, or what it will erase.
+(def in_status ((s Inst)) UiWidget
+  (let why (in_why s)
+    (if (not (is_empty why))
+        (UiStatus (UiBad) why)
+        (UiStatus (if (eq (.mode s) "fresh") (UiWarn) (UiAccentTone)) (in_erases s)))))
+
+; Lines ls as paragraphs, a failure's last in the error's color.
+(def in_paras ((ls (list (list int))) (bad bool)) (list UiPara)
+  (if (is_empty ls)
+      (nil UiPara)
+      (cons (UiPara (head ls) (if (and bad (is_empty (tail ls))) (UiLineBad) (UiLinePlain)) "" "")
+            (in_paras (tail ls) bad))))
+
+; The button that starts s, sensitive when it can be started.
+(def in_button ((s Inst) (sensitive bool)) UiWidget
+  (if (eq (.mode s) "fresh")
+      (UiButton "app.install" "" "Install" (UiBtnDestructive) sensitive)
+      (UiButton "app.install" "" "Update" (UiBtnSuggested) sensitive)))
+
+; What the run shows under the choices: nothing before; while install
+; runs, its progress and what it says; once it is done, how it ended.
+(def in_run_view ((s Inst)) (list UiWidget)
+  (match (.run s)
+    ((InIdle) (cons (in_status s) (cons (in_button s (is_empty (in_why s))) (nil UiWidget))))
+    ((InGoing port pid part said progress)
+      (cons (UiStatus (UiAccentTone) (if (is_empty progress) "Asking the proxy for the release..." (append "Fetching " progress)))
+        (cons (UiExpand (UiView (UiLines (UiLinesData "out" (in_paras said false) -1)))) (nil UiWidget))))
+    ((InEnded status said)
+      (cons (if (eq status 0) (UiStatus (UiGood) "Done") (UiStatus (UiBad) "install stopped"))
+        (cons (UiExpand (UiView (UiLines (UiLinesData "out" (in_paras said (not (eq status 0))) -1))))
+          (cons (UiButton "app.again" "" "Back" (UiBtnRegular) true) (nil UiWidget)))))))
+
+; The window's page.
+(def in_view ((s Inst)) UiWidget
+  (UiPad (ui_space_l) (ui_space_l)
+    (UiBox (UiV) (ui_space_m)
+      (cons (UiLabel "Install L0S" (UiLarge) (UiStart))
+        (cons (UiLabel (append "From the release the host's proxy serves, for " (in_board_name (.board s))) (UiDimmed) (UiStart))
+          (cons (UiProps (in_props s))
+            (cons (if (eq (fs_port_of (release_data)) 0)
+                      (UiStatus (UiWarn) "No volume is labelled data: make one in Disks for the agent's home and the speech model")
+                      (UiStatus (UiGood) "/Volumes/data holds the agent's home and the speech model"))
+              (in_run_view s))))))))
+
+; The board's name, as people know it.
+(def in_board_name ((board (list int))) (list int)
+  (if (eq board "pi5") "a Raspberry Pi 5" (eq board "virt") "QEMU's virt board" board))
+
+; ------------------------------------------------------------------ loop
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "installer" why))
+
+; Its window, until it is closed.
+(def installer () int
+  (let s (in_new (fs_volumes) (fs_system_volume) (release_board))
+    (match (ui_open "Installer" 640 560)
+      ((UiOpenFailed why) (complain why))
+      ((UiOpenedWin w) (in_loop (ui_present w (in_view s)) s)))))
+
+; The window's events, one at a time: install's terminal's messages
+; taken, and the volumes looked at again after each action.
+(def in_loop ((w0 UiWin) (s Inst)) int
+  (match (ui_win_next w0)
+    ((UiWinNext w ev)
+      (if (ui_event_lost ev)
+          (complain "lost its port")
+          (match (ui_port_of ev)
+            ((UiOnPort p m) (in_next w (in_heard s m)))
+            ((UiNoPort)
+              (match (ui_route w ev)
+                ((UiRouted w2 action)
+                  (in_next w2 (if (is_empty action) s (.vols (in_update s action) (in_labels (fs_volumes)))))))))))))
+
+; The window presented for s, waiting on install's terminal while it
+; runs.
+(def in_next ((w UiWin) (s Inst)) int
+  (in_loop (ui_present (ui_win_ports w (in_ports s)) (in_view s)) s))

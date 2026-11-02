@@ -105,8 +105,10 @@ the embedding, 8192 text tokens and 7 language tags.
   L0 is 55 times slower than vectorized C at an int8 dot product
   today), and whether it then wants the Pi 5's four CPUs.
 
-Open: where the 16.9 MB model lives, in the initramfs or on the data
-volume, and how it is read, whole or in pieces; whether its licence's
+Where the 16.9 MB model lives is settled by
+[0027](0027-installer.md): on the data volume, as
+`/Volumes/data/speech/whistle.cact`, which the installer fetches from
+the proxy. Open: how it is read, whole or in pieces; whether its licence's
 NOTICE goes beside it, as the icons' licences do; how well it hears,
 as its page has it behind Whisper's base on some test sets (TED-LIUM,
 AMI).

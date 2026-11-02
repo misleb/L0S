@@ -12,7 +12,8 @@ and the agent's backup (/backup) build/e2e/NAME.backup, emptied first.
 With CASE/builder, the proxy builds apps too (/build), in
 build/e2e/NAME.apps, emptied first, by fake_claude.py, whose program is
 a copy of the file CASE/builder names, from the top of the project.
-Runs until it is stopped. tests/e2e/ask's serve line runs it."""
+With CASE/release, the proxy serves it as its releases (/release,
+release.py). Runs until it is stopped. tests/e2e/ask's serve line runs it."""
 
 import asyncio
 import os
@@ -53,8 +54,9 @@ async def run(port, case):
         apps = os.path.join(HERE, "..", "..", "build", "e2e", name + ".apps")
         shutil.rmtree(apps, ignore_errors=True)
         builder = builders.Builder(apps, cli=[sys.executable, os.path.join(HERE, "fake_claude.py")], repo=None)
+    release = os.path.join(case, "release")
     app = proxy.make_app(token, "http://127.0.0.1:%d" % up_port, KEY, usage, log=say, backup_dir=backup,
-                         builder=builder)
+                         builder=builder, release_dir=release if os.path.isdir(release) else None)
     await standin.serve(app, "127.0.0.1", port)
     say("e2e_serve: the proxy on 127.0.0.1:%d, the stand-in on %d" % (port, up_port))
     await asyncio.Event().wait()

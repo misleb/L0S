@@ -207,7 +207,7 @@ answers() {
   [ "$best" -le "$bound_ms" ] || fail "$name: lit only $best ms after the move, over $bound_ms"
 }
 
-# Fonts is the fifth of the launcher's eight apps, its icon's middle at
+# Fonts is the fifth of the launcher's nine apps, its icon's middle at
 # 708, 130 (fontview.sh). Its page's header bar: Back 34 square from 6,
 # 6, its ground at 9, 22, 30 30 30 on the header's 48 48 48 at rest and
 # 62 62 62 under the pointer; the title from 300 along.

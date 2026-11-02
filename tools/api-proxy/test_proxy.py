@@ -3,6 +3,7 @@ loopback: no key and no network. Run by make test with the venv's Python
 (build/proxy/venv), which has aiohttp."""
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -15,10 +16,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import aiohttp  # noqa: E402
+import yarl  # noqa: E402
 
 import builder as builders  # noqa: E402
 import cpio  # noqa: E402
 import proxy  # noqa: E402
+import release  # noqa: E402
 import standin  # noqa: E402
 import usage  # noqa: E402
 
@@ -39,7 +42,9 @@ class Proxied(unittest.IsolatedAsyncioTestCase):
         self.standin = standin.Standin(self.script, key=KEY)
         self.up_runner, up_port = await standin.serve(self.standin.app(), "127.0.0.1", 0)
         self.backup = os.path.join(self.tmp.name, "backup")
-        app = proxy.make_app(TOKEN, "http://127.0.0.1:%d" % up_port, KEY, self.usage, backup_dir=self.backup)
+        self.release = os.path.join(self.tmp.name, "release")
+        app = proxy.make_app(TOKEN, "http://127.0.0.1:%d" % up_port, KEY, self.usage, backup_dir=self.backup,
+                             release_dir=self.release)
         self.runner, port = await standin.serve(app, "127.0.0.1", 0)
         self.base = "http://127.0.0.1:%d" % port
         self.client = aiohttp.ClientSession()
@@ -85,6 +90,65 @@ class Refusals(Proxied):
         async with self.client.get(self.base + "/v1/messages", headers=self.auth()) as r:
             self.assertEqual(r.status, 404)
         self.assertEqual(self.standin.requests, [])
+
+
+def put_file(root, rel, data, program=False):
+    """data written to root/rel, its directories made, executable if
+    program."""
+    p = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(data)
+    os.chmod(p, 0o755 if program else 0o644)
+
+
+class Released(Proxied):
+    """A release of two parts for virt, served from the proxy's
+    release_dir (release.py)."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        put_file(self.release, "virt/system/bin/hello", b"ELF", program=True)
+        put_file(self.release, "virt/system/etc/motd", b"hi\n")
+        put_file(self.release, "virt/speech/whistle.cact", b"m" * 300000)
+        put_file(self.tmp.name, "secret", b"no")
+
+    async def test_manifest(self):
+        async with self.client.get(self.base + "/release/virt/manifest", headers=self.auth()) as r:
+            self.assertEqual(r.status, 200)
+            text = (await r.read()).decode()
+        lines = text.splitlines()
+        self.assertEqual([line.split()[0] for line in lines], ["system", "system", "speech"])
+        self.assertEqual(lines[0].split(), ["system", "3", hashlib.sha256(b"ELF").hexdigest(), "x", "bin/hello"])
+        self.assertEqual(lines[1].split()[3:], ["-", "etc/motd"])
+        self.assertEqual(lines[2].split()[1], "300000")
+
+    async def test_file(self):
+        async with self.client.get(self.base + "/release/virt/speech/whistle.cact", headers=self.auth()) as r:
+            self.assertEqual(r.status, 200)
+            self.assertEqual(r.headers["Content-Length"], "300000")
+            self.assertEqual(await r.read(), b"m" * 300000)
+
+    async def test_no_token(self):
+        async with self.client.get(self.base + "/release/virt/manifest") as r:
+            self.assertEqual(r.status, 401)
+        async with self.client.get(self.base + "/release/virt/system/etc/motd") as r:
+            self.assertEqual(r.status, 401)
+
+    async def test_missing(self):
+        for path in ("/release/pi5/manifest", "/release/virt/system/etc/none", "/release/virt/other/x",
+                     "/release/virt/system/etc", "/release/Virt/manifest"):
+            async with self.client.get(self.base + path, headers=self.auth()) as r:
+                self.assertEqual(r.status, 404, path)
+
+    async def test_outside(self):
+        url = yarl.URL(self.base + "/release/virt/system/..%2F..%2F..%2Fsecret", encoded=True)
+        async with self.client.get(url, headers=self.auth()) as r:
+            self.assertEqual(r.status, 404)
+        self.assertIsNone(release.resolve(self.release, "virt", "system/../../../secret"))
+        self.assertIsNone(release.resolve(self.release, "..", "secret"))
+        self.assertEqual(release.resolve(self.release, "virt", "system/etc/motd"),
+                         os.path.realpath(os.path.join(self.release, "virt/system/etc/motd")))
 
 
 class Forwarding(Proxied):

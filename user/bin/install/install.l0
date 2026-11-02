@@ -19,13 +19,22 @@
 ; volume install VOLUME filled, anywhere after VOLUME, makes the card's
 ; cmdline.txt say root= and ROOT's UUID, its other words kept, so that
 ; boot makes ROOT /; it is checked before anything is written.
+;
+; install --net fresh [--boot BOOT] SYSTEM and install --net update
+; [SYSTEM] install from the release the host's proxy serves instead
+; (release.l0, roadmap 0027), for the board /etc/board names: a fresh
+; install formats SYSTEM and BOOT, then writes the release's system and
+; boot files, cmdline.txt booting SYSTEM, and on /Volumes/data the
+; agent, speech and user directories, the model and the agent's home,
+; an agent's file there kept; an update, of the system volume / is if
+; none is named, writes the system and boot files again, the boot volume
+; the one whose cmdline.txt boots SYSTEM, keeping that cmdline.txt and
+; /etc/agent's config and token, fetches the model only if it differs,
+; and keeps every agent's file there. Everything is checked first, and
+; each file checked against its SHA-256 as it comes.
 
 ; Says why, as install, and fails.
 (def complain ((why (list int))) int (complain_as "install" why))
-
-; The volume w names: a path, or a label.
-(def volume_named ((w (list int))) (list int)
-  (if (starts_with w "/") (normal_path w) (append "/Volumes/" w)))
 
 ; The paths of / to copy, of paths as root_paths gives them: all but /
 ; itself, and /Volumes/ and what is in it.
@@ -61,12 +70,6 @@
 (def done_line ((vol (list int)) (n int) (u (list int))) (list int)
   (append "install: " (append (digits n) (append " files copied to " (append vol
     (if (is_empty u) "\n" (append "; boot it with root=" (append u "\n"))))))))
-
-; The UUID vol is mounted with, among ms; empty for none.
-(def uuid_of ((ms (list MountInfo)) (vol (list int))) (list int)
-  (if (is_empty ms)
-      ""
-      (match (head ms) ((MountInfo path port u) (if (eq path vol) u (uuid_of (tail ms) vol))))))
 
 ; ---------------------------------------------------------------- copying
 
@@ -244,16 +247,193 @@
 
 ; ---------------------------------------------------------------- running
 
-; install VOLUME, or install --boot VOLUME [FROM] [--root ROOT], as the
-; arguments say.
+; install VOLUME, install --boot VOLUME [FROM] [--root ROOT], or
+; install --net fresh|update ..., as the arguments say.
 (def install () int
   (if (and (ge (arg_count) 2) (eq (arg 0) "--boot"))
       (match (boot_words (args_list 1))
         ((BootBad) (complain "usage: install --boot VOLUME [FROM] [--root ROOT]"))
         ((BootArgs vol from root) (boot_rooted (volume_named vol) (boot_dir from) root)))
+      (and (ge (arg_count) 1) (eq (arg 0) "--net"))
+      (match (net_words (args_list 1))
+        ((NetBad) (complain (net_usage)))
+        ((NetArgs a) (net_install (.mode a) (net_vols a) (.progress a))))
       (not (eq (arg_count) 1))
-      (complain "usage: install VOLUME, or install --boot VOLUME [FROM] [--root ROOT]")
+      (complain "usage: install VOLUME, install --boot VOLUME [FROM] [--root ROOT], or install --net fresh|update ...")
       (install_on (volume_named (arg 0)))))
+
+; ------------------------------------------------------- from the proxy
+
+; How install --net is used.
+(def net_usage () (list int)
+  "usage: install --net fresh [--boot BOOT] [--boot-order sd,net] [--progress] SYSTEM, or install --net update [--boot-order sd,net] [--progress] [SYSTEM]")
+
+; What install --net's words ask: the mode, the system volume and the
+; boot volume, empty where none was named, whether to say each file's
+; progress as it comes (--progress, for the Installer), and the boot
+; order to set, BOOT_ORDER's value, empty for none.
+(data NetAsk (NetAsk (mode RelMode) (system (list int)) (boot (list int)) (progress bool) (order (list int))))
+
+; What the words ask, or that they are wrong.
+(data NetAsked (NetArgs NetAsk) (NetBad))
+
+; What ws, the words after --net, ask: fresh with a system volume, or
+; update with one or none; --boot BOOT, --boot-order sd,net and
+; --progress anywhere after the mode.
+(def net_words ((ws (list (list int)))) NetAsked
+  (if (is_empty ws)
+      (NetBad)
+      (let m (head ws)
+        (if (eq m "fresh") (net_words_from (tail ws) (nil (list int)) (NetAsk (RelFresh) "" "" false ""))
+            (eq m "update") (net_words_from (tail ws) (nil (list int)) (NetAsk (RelUpdate) "" "" false ""))
+            (NetBad)))))
+
+; net_words after the mode, with the plain words so far, reversed, and
+; what the others asked, a.
+(def net_words_from ((ws (list (list int))) (plain (list (list int))) (a NetAsk)) NetAsked
+  (if (is_empty ws)
+      (let ps (rev plain)
+        (if (gt (length ps) 1) (NetBad)
+            (and (is_empty ps) (eq (.mode a) (RelFresh))) (NetBad)
+            (NetArgs (.system a (if (is_empty ps) "" (head ps))))))
+      (eq (head ws) "--progress")
+      (net_words_from (tail ws) plain (.progress a true))
+      (and (eq (head ws) "--boot") (and (not (is_empty (tail ws))) (is_empty (.boot a))))
+      (net_words_from (tail (tail ws)) plain (.boot a (head (tail ws))))
+      (and (eq (head ws) "--boot-order") (and (not (is_empty (tail ws))) (eq (head (tail ws)) "sd,net")))
+      (net_words_from (tail (tail ws)) plain (.order a (boot_order_sd_net)))
+      (starts_with (head ws) "--")
+      (NetBad)
+      (net_words_from (tail ws) (cons (head ws) plain) a)))
+
+; The volumes install --net writes, as a asks: an update's system volume
+; / if none is named, and its boot volume the one whose cmdline.txt
+; boots it.
+(def net_vols ((a NetAsk)) RelVols
+  (let (s (if (is_empty (.system a)) (fs_system_volume) (volume_named (.system a)))
+        b (if (not (is_empty (.boot a))) (volume_named (.boot a))
+              (eq (.mode a) (RelFresh)) ""
+              (release_boot_of (fs_volumes) (uuid_of (mount_list) s))))
+    (RelVols s b (release_data) (.order a))))
+
+; install --net: the release for this board fetched from the proxy onto
+; the volumes v, as m asks, each file's progress said if progress.
+(def net_install ((m RelMode) (v RelVols) (progress bool)) int
+  (let board (release_board)
+    (if (is_empty (.system v))
+        (complain "/ is the initramfs, not a system volume: name the volume to update")
+        (let why (release_why m v board)
+          (if (not (is_empty why))
+              (complain why)
+              (match (model_conf_read)
+                ((Err why2) (complain why2))
+                ((Ok c) (net_connected m v board c progress))))))))
+
+; install --net once the proxy c names is known: the manifest fetched,
+; the volumes formatted if fresh, and the plan said and carried out.
+(def net_connected ((m RelMode) (v RelVols) (board (list int)) (c ModelConf) (progress bool)) int
+  (match (http_connect (inet_open) (port_new) (.host c) (.port c))
+    ((Err why) (complain (append "the proxy at " (append (.host c) (append ": " why)))))
+    ((Ok conn)
+      (match (release_listed conn (.token c) board)
+        ((Err why) (complain why))
+        ((Ok l)
+          (let (lacks (release_lacks v (.es l))
+                why (if (not (is_empty lacks)) lacks
+                        (eq m (RelFresh)) (net_formatted v)
+                        ""))
+            (if (not (is_empty why))
+                (complain why)
+                (let (ss (release_plan m v (.es l))
+                      w (say (append "install: " (release_plan_text ss))))
+                  (net_ran m v (net_fetched (release_run_new (.conn l) (.token c) board ss) progress -1))))))))))
+
+; v's volumes formatted, said first: empty, or why not.
+(def net_formatted ((v RelVols)) (list int)
+  (let w (say (append "install: " (release_format_text v)))
+    (release_formatted v)))
+
+; r carried to its end: its next file asked for, and its connection's
+; parts waited for and read, until every file is fetched or it stops;
+; if progress, a line said as each file begins and at each megabyte,
+; said the step it last said.
+(def net_fetched ((r RelRun) (progress bool) (said int)) RelRun
+  (let (r1 (release_next r)
+        step (net_step r1)
+        w (if (and progress (and (not (eq step said)) (not (release_ended r1))))
+              (say (append "install: " (append (release_progress_text r1) "\n")))
+              0))
+    (if (release_ended r1)
+        r1
+        (match r1
+          ((RelRun conn token board todo cur files count got total why)
+            (match (http_next conn (add (clock_ns) (release_idle_ns)))
+              ((HttpGot c2 ps)
+                (let r2 (RelRun c2 token board todo cur files count got total why)
+                  (if (is_empty ps)
+                      (release_stopped r2 "the proxy said nothing for 30 s")
+                      (net_fetched (release_heard r2 ps) progress step))))))))))
+
+; Where r is, as progress counts it: the files done, and the megabytes
+; come, made one number that changes when either does.
+(def net_step ((r RelRun)) int
+  (add (mul (.files r) 1000000) (div (.got r) 1000000)))
+
+; install --net once r has ended: if every file came, a fresh install's
+; cmdline.txt made to boot the system volume, the data volume's
+; directories and the agent's home made, and the boot order set, if
+; asked; then said.
+(def net_ran ((m RelMode) (v RelVols) (r RelRun)) int
+  (if (not (is_empty (.why r)))
+      (complain (.why r))
+      (let (u (uuid_of (mount_list) (.system v))
+            why (if (eq m (RelFresh)) (release_rooted v u) ""))
+        (if (not (is_empty why))
+            (complain why)
+            (match (release_data_made v)
+              ((Err why2) (complain why2))
+              ((Ok done)
+                (match (net_ordered v)
+                  ((Err why3) (complain why3))
+                  ((Ok said) (let w (say (append (net_done_text m v r u done) said)) 0)))))))))
+
+; The boot order v asks set, if it asks one: the update of the release's
+; pieeprom.bin, fetched to the system volume, written to the boot
+; volume, its configuration the bootloader's own if the firmware says
+; it, else the image's. What is said of it, or why it could not be.
+(def net_ordered ((v RelVols)) (Result (list int) (list int))
+  (if (is_empty (.order v))
+      ((Ok (list int) (list int)) "")
+      (let p (release_eeprom_place v)
+        (match (read_whole p)
+          ((Err why) ((Err (list int) (list int)) (append p (append ": " why))))
+          ((Ok b)
+            (match (boot_conf b)
+              ((Err why) ((Err (list int) (list int)) (append p (append ": " why))))
+              ((Ok bc)
+                (let ts (ee_update_ts (ee_clock_seconds) (ee_last_update))
+                  (match (boot_order_written b (.text bc) (.order v) ts (.boot v))
+                    ((Err why) ((Err (list int) (list int)) why))
+                    ((Ok ps) ((Ok (list int) (list int)) (net_order_line v (.running bc)))))))))))))
+
+; What install --net says once the boot order's update is on v's boot
+; volume, its configuration the running one or the image's.
+(def net_order_line ((v RelVols) (running bool)) (list int)
+  (append "install: BOOT_ORDER=" (append (.order v) (append " in " (append (.boot v)
+    (append "/pieeprom.upd, from " (append (if running "the bootloader's own configuration" "the release image's configuration, as the firmware did not answer")
+      "; the bootloader flashes it as the board next boots from the card\n")))))))
+
+; What install --net says at its end: what the agent's home made, the
+; files fetched, and the root to boot.
+(def net_done_text ((m RelMode) (v RelVols) (r RelRun) (u (list int)) (done (list (list int)))) (list int)
+  (append (net_lines done)
+    (append "install: " (append (digits (.files r)) (append " files fetched, " (append (format_size (.got r))
+      (append (if (eq m (RelFresh)) ", installed on " ", updated on ") (append (.system v)
+        (if (is_empty u) "\n" (append "; boot it with root=" (append u "\n")))))))))))
+
+; Each of ls, said by install, a line each.
+(def net_lines ((ls (list (list int)))) (list int)
+  (if (is_empty ls) "" (append "install: " (append (head ls) (append "\n" (net_lines (tail ls)))))))
 
 ; The arguments from i on, as a list.
 (def args_list ((i int)) (list (list int))
@@ -280,29 +460,6 @@
           (BootBad)
           (boot_words_from (tail (tail ws)) plain (head (tail ws))))
       (boot_words_from (tail ws) (cons (head ws) plain) root)))
-
-; A card's cmdline.txt, text, made to boot the volume whose UUID is u:
-; its words kept but any root=, which root=u replaces, after them;
-; --l0-args first if it had none, so that the firmware's own arguments,
-; which it puts before the file's, are not the kernel's.
-(def cmdline_rooted ((text (list int)) (u (list int))) (list int)
-  (let ws (not_root (split_spaces (trim_line text)))
-    (append (unwords (append (if (any_eq "--l0-args" ws) ws (cons "--l0-args" ws))
-                             (cons (append "root=" u) (nil (list int)))))
-            "\n")))
-
-; ws without any root= word.
-(def not_root ((ws (list (list int)))) (list (list int))
-  (if (is_empty ws)
-      ws
-      (starts_with (head ws) "root=") (not_root (tail ws))
-      (cons (head ws) (not_root (tail ws)))))
-
-; text without its line ends, which split_spaces would keep in a word.
-(def trim_line ((text (list int))) (list int)
-  (if (is_empty text)
-      text
-      (cons (if (any_eq (head text) (cons 10 (cons 13 (nil int)))) 32 (head text)) (trim_line (tail text)))))
 
 ; What install --boot says of the root it set: the file, the volume and
 ; its UUID.

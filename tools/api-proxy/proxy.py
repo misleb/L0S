@@ -4,13 +4,14 @@ over HTTPS with the host's key.
 
   proxy.py --listen ADDR:PORT --token-file FILE [--upstream URL] [--usage FILE]
            [--backup DIR] [--builder-dir DIR] [--builder-model M] [--builder-effort E]
+           [--release DIR]
   proxy.py --day [YYYY-MM-DD] [--usage FILE]
 
 It listens on ADDR, which must be a loopback or a private (RFC 1918)
 address, never 0.0.0.0, and takes POST /v1/messages and
 /v1/messages/count_tokens, PUT and GET /backup, POST /build and GET
-/build/NAME/image, and nothing else
-(404). A request without Authorization: Bearer TOKEN, the first line of
+/build/NAME/image, GET /release/BOARD/manifest and
+/release/BOARD/PART/PATH, and nothing else (404). A request without Authorization: Bearer TOKEN, the first line of
 the token file, is 401.
 
 /backup keeps the agent's home (roadmap 0044) in DIR, build/proxy/backup
@@ -31,6 +32,12 @@ session works, then done, {"summary", "size"}, or failed, {"why"}; a
 comment every 15 s it says nothing. GET /build/NAME/image is the program
 then. A name that is not a program's is 400; a build while another runs
 409, as one runs at a time.
+
+/release serves a release of L0S (roadmap 0027) from DIR, build/release
+unless given, as tools/mkrelease stages it (release.py): a board's
+manifest, made from its files, and each file, streamed, never read
+whole. A board with no release, or a path that is no file of its
+parts, is 404.
 
 For the API's paths:
 Otherwise its body goes upstream (https://api.anthropic.com unless given)
@@ -58,10 +65,12 @@ sys.path.insert(0, HERE)  # python -I leaves the script's own directory out
 
 import builder as builders  # noqa: E402
 import cpio  # noqa: E402
+import release  # noqa: E402
 import usage  # noqa: E402
 
 DEFAULT_USAGE = os.path.join(HERE, "..", "..", "build", "proxy", "usage.jsonl")
 DEFAULT_BACKUP = os.path.join(HERE, "..", "..", "build", "proxy", "backup")
+DEFAULT_RELEASE = os.path.join(HERE, "..", "..", "build", "release")
 DEFAULT_BUILDER = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "l0s-builder")
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 PATHS = ("/v1/messages", "/v1/messages/count_tokens")
@@ -146,14 +155,17 @@ def sse(kind, data):
     return ("event: %s\ndata: %s\n\n" % (kind, json.dumps(data))).encode()
 
 
-def make_app(token, upstream, key, usage_path, log=None, backup_dir=None, builder=None, beat=15.0):
+def make_app(token, upstream, key, usage_path, log=None, backup_dir=None, builder=None, beat=15.0,
+             release_dir=None):
     """The proxy as an aiohttp application: the token boards must give,
     the upstream's base URL, the key it adds, and the usage file. log, if
     given, is called with each usage line too. With backup_dir, it also
     keeps the agent's home there: PUT /backup and GET /backup. With
     builder (builder.py's Builder), it builds the agent's apps: POST
     /build and GET /build/NAME/image, a comment sent every beat seconds
-    a build says nothing, so the board's connection is not idle."""
+    a build says nothing, so the board's connection is not idle. With
+    release_dir, it serves the releases there: GET /release/BOARD/manifest
+    and GET /release/BOARD/PART/PATH."""
     from aiohttp import ClientError, ClientSession, ClientTimeout, web
     client = web.AppKey("client", ClientSession)
 
@@ -246,6 +258,19 @@ def make_app(token, upstream, key, usage_path, log=None, backup_dir=None, builde
             return refuse(404, "not_found_error", "no app %s has been built" % name)
         return web.Response(status=200, body=body, content_type="application/octet-stream")
 
+    async def released(request, board, rel):
+        if not bearer_ok(request.headers.get("Authorization", ""), token):
+            return refuse(401, "authentication_error", "the proxy refused this board's token")
+        if rel == "manifest":
+            body = release.manifest(release_dir, board)
+            if body is None:
+                return refuse(404, "not_found_error", "the host has no release for %s" % board)
+            return web.Response(status=200, body=body, content_type="text/plain")
+        path = release.resolve(release_dir, board, rel)
+        if path is None:
+            return refuse(404, "not_found_error", "the release for %s has no %s" % (board, rel))
+        return web.FileResponse(path, headers={"Content-Type": "application/octet-stream"})
+
     async def handle(request):
         if request.path == "/backup" and backup_dir and request.method in ("GET", "PUT"):
             return await backup(request)
@@ -254,6 +279,8 @@ def make_app(token, upstream, key, usage_path, log=None, backup_dir=None, builde
         parts = request.path.split("/")
         if builder and request.method == "GET" and len(parts) == 4 and parts[1] == "build" and parts[3] == "image":
             return await image(request, parts[2])
+        if release_dir and request.method == "GET" and len(parts) >= 4 and parts[1] == "release":
+            return await released(request, parts[2], "/".join(parts[3:]))
         if request.method != "POST" or request.path not in PATHS:
             return refuse(404, "not_found_error", "the proxy forwards only POST %s" % " and ".join(PATHS))
         if not bearer_ok(request.headers.get("Authorization", ""), token):
@@ -357,6 +384,7 @@ def main(argv):
     p.add_argument("--builder-dir", default=DEFAULT_BUILDER)
     p.add_argument("--builder-model", default=builders.DEFAULT_MODEL)
     p.add_argument("--builder-effort", default=builders.DEFAULT_EFFORT)
+    p.add_argument("--release", default=DEFAULT_RELEASE)
     p.add_argument("--day", nargs="?", const="", default=None, metavar="YYYY-MM-DD")
     a = p.parse_args(argv)
     if a.day is not None:
@@ -378,12 +406,14 @@ def main(argv):
         return 1
     b = builders.Builder(a.builder_dir, a.builder_model, a.builder_effort)
     app = make_app(token, a.upstream, key, a.usage, log=lambda line: print(line, flush=True), backup_dir=a.backup,
-                   builder=b)
+                   builder=b, release_dir=a.release)
 
     async def run():
         await serve(app, where[0], where[1])
-        print("proxy: on %s:%d, to %s, usage in %s, the agent's backup in %s, its apps built in %s by %s"
-              % (where[0], where[1], a.upstream, a.usage, a.backup, a.builder_dir, a.builder_model), flush=True)
+        print("proxy: on %s:%d, to %s, usage in %s, the agent's backup in %s, its apps built in %s by %s,"
+              " releases from %s"
+              % (where[0], where[1], a.upstream, a.usage, a.backup, a.builder_dir, a.builder_model, a.release),
+              flush=True)
         await asyncio.Event().wait()
 
     try:

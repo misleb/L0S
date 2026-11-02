@@ -124,6 +124,14 @@ was. The agent's home is on one for this, `/Volumes/data/agent` unless
 `make sysdisk`'s `data` and a Pi 5 card's `data` partition beside
 `bootfs` and `System`.
 
+**The data volume's layout** is fixed by its label, `/Volumes/data`:
+`agent`, the agent's home; `speech`, Whistle's model,
+`speech/whistle.cact`, which `listen` reads by default; and `user`, the
+person's own files. The installer makes the three and fills the first
+two from the release ([Installing from the
+proxy](boot.md#installing-from-the-proxy)), and a fresh install never
+formats it, nor writes over an agent's file there.
+
 The disk, as [tools/mkdisk](../tools/mkdisk) makes it with
 [tools/mkfs](../tools/mkfs/mkfs.l0) (`mkfs OUT SECTORS MS
 LABEL:START:COUNT[:ARCHIVE[:UUID]]...`, a host program, built into

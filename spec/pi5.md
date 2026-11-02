@@ -80,6 +80,17 @@ FAT32 `bootfs` and an L0FS `System`, and filled by `install System` and
 `install --boot bootfs --root System`. The bootloader finds `bootfs` by
 its partition type, looks for `overlays/` and goes on without it.
 
+**From the proxy.** Netbooted, with a card of a FAT32 `bootfs` and L0FS
+`System` and `data` volumes made in Disks, the Installer, or
+`install --net fresh --boot bootfs --boot-order sd,net System`, does
+the rest in one step from the release the host's proxy serves ([Installing
+from the proxy](boot.md#installing-from-the-proxy)): `System` and
+`bootfs` formatted and filled, `cmdline.txt` saying `root=`, the model
+and the agent's home on `data`, and `pieeprom.upd` on `bootfs`, which
+the bootloader flashes as it next boots, trying the card first from
+then on. `install --net update`, booted from the card, brings it up to
+the host's latest build.
+
 **Over the network.** The Pi 5 keeps its firmware in its EEPROM and can
 fetch the rest by TFTP:
 
@@ -214,7 +225,7 @@ QEMU, `eeprom` says so and fails.
 L0S never writes the EEPROM itself. `eeprom update` takes a release
 image, a `pieeprom.bin` from Raspberry Pi's rpi-eeprom (`firmware-2712/`)
 copied onto a volume, puts the file CONFIG in place of its
-`bootconf.txt` as `rpi-eeprom-config` does (`image.l0`: the image's
+`bootconf.txt` as `rpi-eeprom-config` does (`pieeprom.l0`: the image's
 sections walked by their big-endian magic and length; the first
 `bootconf.txt` in the first partition, from 64 KiB, rewritten, with room
 up to the next section that is not padding; then 0xff and, unless it is
@@ -239,9 +250,12 @@ configuration it was given, which `eeprom` then printed. An image must be 512 Ki
 and a configuration at most 4076 bytes and no larger than its room;
 anything else is refused before a file is written. On the host, for the
 release image `pieeprom-2026-09-25.bin` and configurations of 0 to 3406
-bytes, `image.l0` wrote the same `pieeprom.upd` and `pieeprom.sig`, byte
+bytes, `pieeprom.l0` wrote the same `pieeprom.upd` and `pieeprom.sig`, byte
 for byte, as `rpi-eeprom-config --config` and `rpi-eeprom-digest`, and
 the image's own configuration written back gave the image unchanged.
+The installer writes the same update for a boot order
+(`bootloader.l0`'s `boot_order_written`, [Installing from the
+proxy](boot.md#installing-from-the-proxy)).
 
 ## Limits
 

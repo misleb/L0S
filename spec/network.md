@@ -356,7 +356,8 @@ without which it will not start. It:
 - listens on the one address it is given, which must be loopback or
   private (RFC 1918), never `0.0.0.0`, or it says so and exits;
 - takes `POST /v1/messages` and `/v1/messages/count_tokens`, `PUT`
-  and `GET /backup`, `POST /build` and `GET /build/NAME/image`, and
+  and `GET /backup`, `POST /build` and `GET /build/NAME/image`, `GET
+  /release/BOARD/manifest` and `GET /release/BOARD/PART/PATH`, and
   nothing else, any other path or method a 404,
   and refuses a request without
   `Authorization: Bearer TOKEN`, compared in constant time, with a 401
@@ -429,7 +430,27 @@ without which it will not start. It:
   then, 404 before. A name that is not a program's (lowercase letters,
   digits and `-`, a letter first, at most 32), or no prompt, is a 400;
   a build while another runs a 409, `busy_error`. A board whose
-  connection closes ends the session.
+  connection closes ends the session;
+- serves releases of L0S, what the installer fetches
+  ([boot.md](boot.md#installing-from-the-proxy)), from `--release DIR`,
+  `build/release` unless given, without going upstream
+  ([release.py](../tools/api-proxy/release.py)). `make release
+  [WHISTLE=FILE] [PIEEPROM=FILE]` stages `DIR/pi5` and `DIR/virt` with
+  [tools/mkrelease](../tools/mkrelease), each a directory per part:
+  `system` (the programs as `make root` stages them, and the board's
+  `/etc` as its initramfs has it, `/etc/agent` included), `boot` on the
+  Pi 5 (what `make pi5-card` writes: `l0.img`, `config.txt`,
+  `cmdline.txt`, the device trees and `input.bin`), `agent` (the home's
+  `CLAUDE.md` and `CONSTITUTION.md`), `speech` (WHISTLE, as
+  `whistle.cact`) and `eeprom` (PIEEPROM, as `pieeprom.bin`). `GET
+  /release/BOARD/manifest` is made from the files as they are, a line
+  each, `PART SIZE SHA256 MODE PATH` (MODE `x` for a file with an
+  execute bit, else `-`; PATH within the part), in order of part then
+  path, a file's hash kept until its size or time changes. `GET
+  /release/BOARD/PART/PATH` is the file, sent from the disk as it is
+  read, never whole in memory, with its `Content-Length`. A board with
+  no release, a part not one of the five, or a path that resolves
+  outside the board's release or to no file, is a 404.
 
 On the board, [proto/model.l0](../user/lib/proto/model.l0) is the
 provider behind one interface. It finds the proxy and the token in two

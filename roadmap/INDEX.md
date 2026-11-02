@@ -29,7 +29,7 @@ move independently, so several can be active at once.
 | [0009](0009-alpha-layers.md) Alpha layers: shadows and smooth corners | Display | idea | – | – | display.md, desktop.md |
 | [0010](0010-output-events.md) Output events for mode changes | Display | idea | – | – | display.md, desktop.md |
 | [0013](0013-entry-editing.md) Entries that scroll, select, copy and paste | Toolkit | idea | – | 0012 | toolkit.md |
-| [0027](0027-installer.md) Installing L0S, a process of its own, with a GUI | Storage | idea | – | – | boot.md, pi5.md, programs.md, storage.md, testing.md |
+| [0027](0027-installer.md) Installing and updating L0S from the proxy, with a GUI | Storage | active | 6/7 | – | boot.md, pi5.md, programs.md, storage.md, network.md, agent.md, speech.md, demo.md, testing.md |
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008 (met), 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
@@ -58,6 +58,11 @@ tokens from a WAV file on the host), and `listen` gives the
 reference's text on QEMU (`tests/listen.sh`) on four clips, one of
 39 s heard in windows, and on a Pi 5 heard 5 s of the Yeti's speech in
 5.5 s; a 10 s clip timed on the Pi 5 is next.
+[0027](0027-installer.md), the installer, is active: it fetches a
+release (the system, the boot files, Whistle's model) from the
+proxy, fresh or as an update, from `install --net` or the Installer
+app, and sets the Pi 5's boot order; it works on QEMU, and a fresh
+install and an update on a Pi 5 are next.
 Every
 other goal left is an `idea`, without steps. On
 the display,

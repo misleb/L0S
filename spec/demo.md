@@ -59,7 +59,9 @@ Disks shows them, where free space can be made a partition and a
 partition given a volume, and Files (`files`), the computer's files and
 the volumes' as GNOME 45's Files shows them, in a window that draws its
 own header bars, where folders are made and things renamed and deleted,
-a volume renamed relabelled. Each also runs from a shell, by its name or
+a volume renamed relabelled, and the Installer (`installer`), which
+installs or updates L0S from the release the host's proxy serves ([Installing
+from the proxy](boot.md#installing-from-the-proxy)). Each also runs from a shell, by its name or
 its program's: `run Widgets &` and `run widgets &` are the same.
 
 Each shell runs programs on its own terminal: their standard input,

@@ -152,11 +152,14 @@ refusing one not 16 kHz, one channel of 16 bits, 0.1 s to 5 minutes,
 and saying why.
 
 `listen FILE.wav...` ([programs.md](programs.md)) prints each file's
-text, a line each, by the model at `/etc/whistle.cact` or `-m MODEL`,
+text, a line each, by the model at `/Volumes/data/speech/whistle.cact`,
+where the installer puts it from the release ([Installing from the
+proxy](boot.md#installing-from-the-proxy)), or `-m MODEL`,
 loaded once; `-t` says on standard error how long the load and each
 file took. `tests/listen.sh` boots it on QEMU as the kernel's one
-program, the model and the recordings in the initramfs (`WHISTLE` names
-the model, which is not in the project), and compares each line with
+program, the model (`-m /etc/whistle.cact`) and the recordings in the
+initramfs (`WHISTLE` names the model, which is not in the project), and
+compares each line with
 the reference's: on all four recordings it is the same, ALSA's "Front
 center" and "Rear left", 4 s of the Yeti Nano's speech recorded
 through QEMU ("Testing, testing, testing, testing."), and 39 s of the
@@ -167,10 +170,10 @@ windows, cut at 26.05 s. There, on one emulated CPU, the model loads in
 
 ## Limits
 
-- The model is not on the board unless put there: `tests/listen.sh`
-  adds it to an initramfs of its own; the demo's initramfs and the
-  system volume have no `/etc/whistle.cact`, and nothing hears a
-  microphone yet.
+- The model is not in the project, nor in any initramfs: the host's
+  release has it only if `make release WHISTLE=FILE` was given it, and
+  the board only once the installer has fetched it onto the data
+  volume. Nothing hears a microphone yet.
 - The model's matrices are dequantized whole when it is loaded, about
   140 MB of binary32s (the encoder's 6.5 MB a block, the decoder's 8 MB
   a layer, the embedding's 17 MB), a row at a time in scalar code: a

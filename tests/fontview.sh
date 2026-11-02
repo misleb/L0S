@@ -119,8 +119,9 @@ ink_is() {
   exit 1
 }
 
-# Fonts is the fifth of the eight apps, About, Agent, Disks, Files,
-# Fonts, System Monitor, Terminal and Widgets, in cells 136 wide from 96,
+# Fonts is the fifth of the nine apps, About, Agent, Disks, Files,
+# Fonts, Installer, System Monitor, Terminal and Widgets, in cells 136
+# wide from 96, eight a row,
 # so its cell is from 640, its icon, 48 square, from 684, 108.
 #
 # Its window draws its own header bar, so its content is the window:

@@ -1,0 +1,584 @@
+; release.l0 -- installing L0S from a release the host's proxy serves
+; (roadmap 0027, tools/api-proxy/release.py): its manifest read, what a
+; fresh install or an update does with each file, where each goes, and
+; each file fetched over HTTP a piece at a time into its place, checked
+; by its size and SHA-256 as it comes. install --net drives it in a loop
+; of http_next; the Installer app feeds it its connection's messages.
+;
+; A release is in parts: system (the system volume's files), boot (the
+; Pi 5's boot partition's), speech and agent (the data volume's speech
+; and agent directories), and eeprom (a pieeprom.bin, for the boot
+; order). The data volume is /Volumes/data, with agent, speech and user
+; directories. Linked with HTTP, SHA256, FSLIB and AGENTHOME, as the
+; Makefile's RELEASE.
+
+; The data volume, and the directories the installer makes on it.
+(def release_data () (list int) "/Volumes/data")
+(def release_data_dirs () (list (list int)) (split_spaces "agent speech user"))
+
+; The file naming the board a system is for, pi5 or virt, as
+; /etc/board holds it.
+(def release_board_path () (list int) "/etc/board")
+
+; The board this system is for: the first word of /etc/board, or virt if
+; it has none.
+(def release_board () (list int)
+  (match (read_whole (release_board_path))
+    ((Err why) "virt")
+    ((Ok b) (release_board_of (bytes_to_list b)))))
+
+; The board text names: its first word, or virt.
+(def release_board_of ((text (list int))) (list int)
+  (let ws (split_spaces (trim_line text))
+    (if (is_empty ws) "virt" (head ws))))
+
+; ---------------------------------------------------------------- manifest
+
+; A file of a release, as its manifest's line says: its part, size,
+; SHA-256 in hex, whether it is a program, and its path within the part.
+(data RelEntry (RelEntry (part (list int)) (size int) (sha (list int)) (program bool) (path (list int))))
+
+; The parts a release has.
+(def release_parts_known () (list (list int)) (split_spaces "boot system speech agent eeprom"))
+
+; The entries of a manifest b, a line each, PART SIZE SHA256 MODE PATH:
+; or why it is not one, naming the first line that is not.
+(def release_manifest ((b bytes)) (Result (list RelEntry) (list int))
+  (release_entries (lines (bytes_to_list b)) 1 (nil RelEntry)))
+
+; The entries of ls, the manifest's lines from line n on, after the
+; reversed acc.
+(def release_entries ((ls (list (list int))) (n int) (acc (list RelEntry))) (Result (list RelEntry) (list int))
+  (if (is_empty ls)
+      ((Ok (list RelEntry) (list int)) (rev acc))
+      (is_empty (split_spaces (head ls)))
+      (release_entries (tail ls) (add n 1) acc)
+      (match (release_entry_of (split_spaces (head ls)))
+        ((None) ((Err (list RelEntry) (list int)) (append "the manifest's line " (append (digits n) " is not PART SIZE SHA256 MODE PATH"))))
+        ((Some e) (release_entries (tail ls) (add n 1) (cons e acc))))))
+
+; The entry the words ws of a line say, or none: five words, a part
+; known, a size, 64 hex digits, x or -, and a relative path with no ..
+; in it.
+(def release_entry_of ((ws (list (list int)))) (Option RelEntry)
+  (if (not (eq (length ws) 5))
+      ((None RelEntry))
+      (let (part (nth ws 0)
+            size (word_number (nth ws 1))
+            sha (nth ws 2)
+            mode (nth ws 3)
+            path (nth ws 4))
+        (match size
+          ((None) ((None RelEntry)))
+          ((Some n)
+            (if (and (any_eq part (release_parts_known))
+                     (and (ge n 0)
+                          (and (eq (length sha) 64)
+                               (and (any_eq mode (split_spaces "x -")) (release_path_ok path)))))
+                (Some (RelEntry part n sha (eq mode "x") path))
+                ((None RelEntry))))))))
+
+; Whether path is a file's place within a part: not empty, not
+; absolute, and no part of it . or .. or empty.
+(def release_path_ok ((path (list int))) bool
+  (and (not (is_empty path))
+       (and (not (starts_with path "/"))
+            (not (any_bad_part (split_on 47 path))))))
+
+; Whether any of the parts of a path is empty, . or ..
+(def any_bad_part ((ps (list (list int)))) bool
+  (if (is_empty ps)
+      false
+      (any_eq (head ps) (cons "" (cons "." (cons ".." (nil (list int)))))) true
+      (any_bad_part (tail ps))))
+
+; ------------------------------------------------------------------- where
+
+; The volumes an install writes: the system volume, the boot volume
+; (empty for none, as on QEMU), and the data volume, its store, each
+; /Volumes/LABEL; and the boot order it sets, BOOT_ORDER's value, empty
+; for none.
+(data RelVols (RelVols (system (list int)) (boot (list int)) (store (list int)) (order (list int))))
+
+; Where the release's pieeprom.bin is kept once fetched, for a boot
+; order: with the system it came with, where eeprom update can take it
+; again.
+(def release_eeprom_place ((v RelVols)) (list int)
+  (release_in (.system v) "etc/pieeprom.bin"))
+
+; Where e goes on v's volumes, or empty for nowhere: a boot file with no
+; boot volume, or the eeprom's image when no boot order is set.
+(def release_target ((v RelVols) (e RelEntry)) (list int)
+  (let (part (.part e)
+        path (.path e))
+    (if (eq part "system") (release_in (.system v) path)
+        (eq part "boot") (if (is_empty (.boot v)) "" (release_in (.boot v) path))
+        (eq part "speech") (release_in (.store v) (append "speech/" path))
+        (eq part "agent") (release_in (.store v) (append "agent/" path))
+        (and (eq part "eeprom") (and (eq path "pieeprom.bin") (not (is_empty (.order v))))) (release_eeprom_place v)
+        "")))
+
+; path within dir.
+(def release_in ((dir (list int)) (path (list int))) (list int)
+  (append dir (cons 47 path)))
+
+; ---------------------------------------------------------------- the plan
+
+; What is asked: a fresh install, onto volumes formatted first, or an
+; update over what is there.
+(data RelMode (RelFresh) (RelUpdate))
+
+; What is done with a file: written, its place's file kept (said), or
+; passed over (an image the same already, or nowhere to put it).
+(data RelAct (RelWrite) (RelKeep) (RelSkip))
+
+; A file of the release, where it goes, and what is done with it.
+(data RelStep (RelStep (e RelEntry) (to (list int)) (act RelAct)))
+
+; The system's files an update keeps if they are there: the board's
+; way to the proxy, which it was installed with.
+(def release_kept_system () (list (list int)) (split_spaces "etc/agent/config etc/agent/token"))
+
+; What mode does with e, going to to, where a file exists already or
+; not, and the same as e already or not: an agent's file is never
+; written over; a model the same already is passed over; an update
+; keeps the boot volume's cmdline.txt, which names its root, and the
+; system's way to the proxy.
+(def release_act ((m RelMode) (e RelEntry) (to (list int)) (exists bool) (same bool)) RelAct
+  (let (part (.part e)
+        update (eq m (RelUpdate)))
+    (if (is_empty to) (RelSkip)
+        (eq part "agent") (if exists (RelKeep) (RelWrite))
+        (eq part "speech") (if (and exists same) (RelSkip) (RelWrite))
+        (and update (and exists (and (eq part "boot") (eq (.path e) "cmdline.txt")))) (RelKeep)
+        (and update (and exists (and (eq part "system") (any_eq (.path e) (release_kept_system))))) (RelKeep)
+        (RelWrite))))
+
+; The plan for es on v's volumes: what is there looked at for each, and
+; a model's bytes hashed if its size is the same.
+(def release_plan ((m RelMode) (v RelVols) (es (list RelEntry))) (list RelStep)
+  (release_plan_from m v es (nil RelStep)))
+
+; The steps of es, after the reversed acc.
+(def release_plan_from ((m RelMode) (v RelVols) (es (list RelEntry)) (acc (list RelStep))) (list RelStep)
+  (if (is_empty es)
+      (rev acc)
+      (release_plan_from m v (tail es) (cons (release_step_for m v (head es)) acc))))
+
+; The step for e: where it goes, and what is there.
+(def release_step_for ((m RelMode) (v RelVols) (e RelEntry)) RelStep
+  (let to (release_target v e)
+    (if (is_empty to)
+        (RelStep e to (RelSkip))
+        (match (fs_stat to)
+          ((FsIsDir) (RelStep e to (release_act m e to true false)))
+          ((FsNoKind code) (RelStep e to (release_act m e to false false)))
+          ((FsIsFile size prog)
+            (let same (and (eq (.part e) "speech") (and (eq size (.size e)) (release_same to (.sha e))))
+              (RelStep e to (release_act m e to true same))))))))
+
+; Whether the file at path hashes to sha, 64 hex digits.
+(def release_same ((path (list int)) (sha (list int))) bool
+  (match (read_whole path)
+    ((Err why) false)
+    ((Ok b) (eq (sha256_hex b 0 (bytes_len b)) sha))))
+
+; The steps of ss that are act's.
+(def release_acting ((ss (list RelStep)) (act RelAct)) (list RelStep)
+  (if (is_empty ss)
+      ss
+      (eq (.act (head ss)) act) (cons (head ss) (release_acting (tail ss) act))
+      (release_acting (tail ss) act)))
+
+; How many bytes the files of ss are.
+(def release_bytes ((ss (list RelStep))) int
+  (if (is_empty ss) 0 (add (.size (.e (head ss))) (release_bytes (tail ss)))))
+
+; How many of ss are of part.
+(def release_part_count ((ss (list RelStep)) (part (list int))) int
+  (if (is_empty ss) 0 (add (if (eq (.part (.e (head ss))) part) 1 0) (release_part_count (tail ss) part))))
+
+; What is said of the plan ss before anything is fetched: the files of
+; each part written, and each file kept or passed over, a line each.
+(def release_plan_text ((ss (list RelStep))) (list int)
+  (let (w (release_acting ss (RelWrite))
+        a (push (append (digits (length w)) (append " files to fetch, " (append (format_size (release_bytes w))
+                (append ": " (append (release_parts_text w (release_parts_known) (nil (list int))) "\n")))))
+              (nil int))
+        b (release_said_from (release_acting ss (RelKeep)) "kept: " a)
+        c (release_said_from (release_acting (release_placed ss) (RelSkip)) "the same already: " b))
+    (rev c)))
+
+; The steps of ss with a place to go.
+(def release_placed ((ss (list RelStep))) (list RelStep)
+  (if (is_empty ss)
+      ss
+      (is_empty (.to (head ss))) (release_placed (tail ss))
+      (cons (head ss) (release_placed (tail ss)))))
+
+; How many files of each of parts ss has, those with any, as "N part"
+; joined by commas, after the reversed acc.
+(def release_parts_text ((ss (list RelStep)) (parts (list (list int))) (acc (list (list int)))) (list int)
+  (if (is_empty parts)
+      (join_with ", " (rev acc))
+      (let n (release_part_count ss (head parts))
+        (release_parts_text ss (tail parts) (if (eq n 0) acc (cons (append (digits n) (cons 32 (head parts))) acc))))))
+
+; A line for each of ss, what before its place, pushed onto acc.
+(def release_said_from ((ss (list RelStep)) (what (list int)) (acc (list int))) (list int)
+  (if (is_empty ss)
+      acc
+      (release_said_from (tail ss) what (push (append what (append (.to (head ss)) "\n")) acc))))
+
+; --------------------------------------------------------------- the proxy
+
+; The proxy's headers: the board's token.
+(def release_headers ((token (list int))) (list HttpHeader)
+  (cons (HttpHeader "Authorization" (append "Bearer " token)) (nil HttpHeader)))
+
+; The path of board's manifest, and of e in it, on the proxy.
+(def release_manifest_path ((board (list int))) (list int)
+  (append "/release/" (append board "/manifest")))
+(def release_file_path ((board (list int)) (e RelEntry)) (list int)
+  (append "/release/" (append board (cons 47 (append (.part e) (cons 47 (.path e)))))))
+
+; How long the proxy may say nothing before a fetch is given up.
+(def release_idle_ns () int 30000000000)
+
+; A manifest fetched: the connection after it, and its entries.
+(data RelListed (RelListed (conn HttpConn) (es (list RelEntry))))
+
+; board's manifest asked of the proxy on c, with token, and read whole:
+; its entries, or why not.
+(def release_listed ((c HttpConn) (token (list int)) (board (list int))) (Result RelListed (list int))
+  (match (http_ask c "GET" (release_manifest_path board) (release_headers token) (bytes_from_list ""))
+    ((HttpGot c2 ps) (release_listed_parts c2 ps 0 (nil bytes) board))))
+
+; The manifest's parts ps read onto its status and pieces, reversed,
+; more waited for until it ends.
+(def release_listed_parts ((c HttpConn) (ps (list HttpPart)) (code int) (pieces (list bytes)) (board (list int))) (Result RelListed (list int))
+  (if (is_empty ps)
+      (match (http_next c (add (clock_ns) (release_idle_ns)))
+        ((HttpGot c2 ps2)
+          (if (is_empty ps2)
+              ((Err RelListed (list int)) "the proxy did not answer")
+              (release_listed_parts c2 ps2 code pieces board))))
+      (match (head ps)
+        ((HttpHead st r hs) (release_listed_parts c (tail ps) st pieces board))
+        ((HttpBody d) (release_listed_parts c (tail ps) code (cons d pieces) board))
+        ((HttpEnd keep)
+          (let body (bytes_concat (rev pieces))
+            (if (eq code 404)
+                ((Err RelListed (list int)) (append "the host has no release for " (append board "; make release makes one")))
+                (not (eq code 200))
+                ((Err RelListed (list int)) (model_refusal code body))
+                (match (release_manifest body)
+                  ((Err why) ((Err RelListed (list int)) why))
+                  ((Ok es) ((Ok RelListed (list int)) (RelListed c es)))))))
+        ((HttpBad why) ((Err RelListed (list int)) why))
+        ((HttpFailed why) ((Err RelListed (list int)) why)))))
+
+; ---------------------------------------------------------------- fetching
+
+; A file being fetched: written to f as it comes, hashed so far, how many
+; bytes have come, the response's status (0 until its head), and its
+; step.
+(data RelFile (RelFile (f IoFile) (sha Sha256) (got int) (status int) (step RelStep)))
+
+; Fetching the files of a plan: the connection to the proxy, the token
+; and the board; the steps left, after the one being fetched, if any;
+; how many files are fetched and of how many, their bytes and of how
+; many; and why it stopped, empty while it has not.
+(data RelRun (RelRun (conn HttpConn) (token (list int)) (board (list int)) (todo (list RelStep)) (cur (Option RelFile))
+                     (files int) (count int) (got int) (total int) (why (list int))))
+
+; A run over c of the steps ss that write, not yet begun.
+(def release_run_new ((c HttpConn) (token (list int)) (board (list int)) (ss (list RelStep))) RelRun
+  (let w (release_acting ss (RelWrite))
+    (RelRun c token board w ((None RelFile)) 0 (length w) 0 (release_bytes w) "")))
+
+; Whether r has fetched every file, or stopped.
+(def release_ended ((r RelRun)) bool
+  (or (not (is_empty (.why r)))
+      (and (is_empty (.todo r)) (match (.cur r) ((None) true) ((Some x) false)))))
+
+; r with its next file asked for, if it is fetching none and has one
+; left: its directories made, its place opened, and its request sent,
+; with whatever came while it was sent read.
+(def release_next ((r RelRun)) RelRun
+  (if (or (release_ended r) (match (.cur r) ((None) false) ((Some x) true)))
+      r
+      (let (s (head (.todo r))
+            r1 (.todo r (tail (.todo r)))
+            why (release_dirs_made (.to s)))
+        (if (not (is_empty why))
+            (.why r1 why)
+            (match (open_out (.to s))
+              ((IoFailed fault why2) (.why r1 (append (.to s) (append ": " why2))))
+              ((IoOpened f) (release_asked r1 (RelFile f (sha256_new) 0 0 s))))))))
+
+; r with rf's request sent, on its connection or a new one, and rf the
+; file it fetches.
+(def release_asked ((r RelRun) (rf RelFile)) RelRun
+  (let (path (release_file_path (.board r) (.e (.step rf)))
+        hs (release_headers (.token r)))
+    (match (http_reuse (.conn r))
+      ((Err why) (release_dropped r rf (append "the proxy: " why)))
+      ((Ok c)
+        (match (http_ask c "GET" path hs (bytes_from_list ""))
+          ((HttpGot c2 ps) (release_heard (.cur (.conn r c2) (Some rf)) ps)))))))
+
+; r given the parts ps of its responses: each body's piece written and
+; hashed; at a file's end, the file checked and the next asked for.
+(def release_heard ((r RelRun) (ps (list HttpPart))) RelRun
+  (if (or (is_empty ps) (not (is_empty (.why r))))
+      r
+      (match (.cur r)
+        ((None) (release_heard r (tail ps)))
+        ((Some rf) (release_heard (release_part (.cur r ((None RelFile))) rf (head ps)) (tail ps))))))
+
+; r, fetching rf, which r no longer holds, after the part p.
+(def release_part ((r RelRun) (rf RelFile) (p HttpPart)) RelRun
+  (match p
+    ((HttpHead st reason hs)
+      (if (eq st 200)
+          (.cur r (Some (.status rf st)))
+          (let at (release_file_path (.board r) (.e (.step rf)))
+            (release_dropped r rf (append at (append ": the proxy said " (append (digits st) (cons 32 reason))))))))
+    ((HttpBody d) (release_body r rf d))
+    ((HttpEnd keep) (release_file_ended r rf))
+    ((HttpBad why) (release_dropped r rf why))
+    ((HttpFailed why) (release_dropped r rf (append "the proxy: " why)))))
+
+; r, fetching rf, after a piece d of its body: d written and hashed.
+(def release_body ((r RelRun) (rf RelFile) (d bytes)) RelRun
+  (let (n (bytes_len d)
+        w (file_write_bytes (.f rf) d 0 n))
+    (if (lt w 0)
+        (let to (.to (.step rf))
+          (release_dropped r rf (append to (append ": " (io_error w)))))
+        (let got (add (.got rf) n)
+          (.got (.cur r (Some (.got (.sha rf (sha256_more (.sha rf) d 0 n)) got))) (add (.got r) n))))))
+
+; r once rf's response has ended: the file closed, its size and hash
+; checked, made a program if it is one, and the next file asked for; a
+; file that is not what the manifest says removed.
+(def release_file_ended ((r RelRun) (rf RelFile)) RelRun
+  (match rf
+    ((RelFile f sha got status s)
+      (let (e (.e s)
+            to (.to s)
+            why (done_why (file_close f))
+            hash (sha256_digest_hex (sha256_done sha)))
+        (if (not (is_empty why))
+            (release_removed r to (append to (append ": " why)))
+            (not (eq got (.size e)))
+            (release_removed r to (append to (append ": " (append (digits got) (append " bytes came, not " (digits (.size e)))))))
+            (not (eq hash (.sha e)))
+            (release_removed r to (append to ": its SHA-256 is not the manifest's"))
+            (let why2 (release_marked s)
+              (if (is_empty why2)
+                  (release_next (.files r (add (.files r) 1)))
+                  (.why r why2))))))))
+
+; r stopped for why, the file being fetched, rf, closed and removed, so
+; nothing half written is left.
+(def release_dropped ((r RelRun) (rf RelFile) (why (list int))) RelRun
+  (let c (file_close (.f rf))
+    (release_removed r (.to (.step rf)) why)))
+
+; r stopped for why, the file at to removed.
+(def release_removed ((r RelRun) (to (list int)) (why (list int))) RelRun
+  (let d (remove_file to)
+    (.why r why)))
+
+; r stopped for why: the file being fetched, if any, closed and removed,
+; so nothing half written is left.
+(def release_stopped ((r RelRun) (why (list int))) RelRun
+  (match (.cur r)
+    ((None) (.why r why))
+    ((Some rf)
+      (let (c (file_close (.f rf))
+            d (remove_file (.to (.step rf))))
+        (.why (.cur r ((None RelFile))) why)))))
+
+; s's file made a program if it is one: empty, or why not; a volume that
+; keeps no marks, as FAT32 is, is no failure.
+(def release_marked ((s RelStep)) (list int)
+  (if (not (.program (.e s)))
+      ""
+      (let code (fs_chmod (.to s) true)
+        (if (any_eq code (cons 0 (cons -8 (nil int)))) "" (append (.to s) (append ": not marked a program: " (io_error code)))))))
+
+; Each directory above the file at path made, those there already
+; passed over: empty, or why one could not be.
+(def release_dirs_made ((path (list int))) (list int)
+  (release_dirs_from (split_on 47 (tail path)) "" 0))
+
+; The directories of the parts ps, below the volume's own, which is the
+; first two (Volumes and its label), made under at; the last part is
+; the file's.
+(def release_dirs_from ((ps (list (list int))) (at (list int)) (n int)) (list int)
+  (if (or (is_empty ps) (is_empty (tail ps)))
+      ""
+      (let d (append at (cons 47 (head ps)))
+        (if (lt n 2)
+            (release_dirs_from (tail ps) d (add n 1))
+            (let code (fs_mkdir d)
+              (if (any_eq code (cons 0 (cons -4 (nil int))))
+                  (release_dirs_from (tail ps) d (add n 1))
+                  (append d (append ": " (io_error code)))))))))
+
+; What r is doing, for a line of progress: the file and its part, and
+; how far it has come of all.
+(def release_progress_text ((r RelRun)) (list int)
+  (let (at (match (.cur r) ((None) "") ((Some rf) (append (.part (.e (.step rf))) (cons 47 (.path (.e (.step rf))))))))
+    (append "file " (append (digits (min (add (.files r) 1) (.count r))) (append " of " (append (digits (.count r))
+      (append ", " (append (format_size (.got r)) (append " of " (append (format_size (.total r))
+        (if (is_empty at) "" (append ": " at))))))))))))
+
+; ------------------------------------------------------------- finishing
+
+; The data volume's directories made on v, and the agent's home made
+; whole, home_setup's way: a line for each thing done, or why not as its
+; first line, an error.
+(def release_data_made ((v RelVols)) (Result (list (list int)) (list int))
+  (let why (release_dirs_of (.store v) (release_data_dirs))
+    (if (not (is_empty why))
+        ((Err (list (list int)) (list int)) why)
+        ((Ok (list (list int)) (list int)) (home_setup (release_in (.store v) "agent"))))))
+
+; Each of names made a directory in vol: empty, or why one could not be.
+(def release_dirs_of ((vol (list int)) (names (list (list int)))) (list int)
+  (if (is_empty names)
+      ""
+      (let (d (release_in vol (head names))
+            code (fs_mkdir d))
+        (if (any_eq code (cons 0 (cons -4 (nil int))))
+            (release_dirs_of vol (tail names))
+            (append d (append ": " (io_error code)))))))
+
+; v's boot volume's cmdline.txt, as the release wrote it, made to boot
+; the volume whose UUID is u: empty, or why not.
+(def release_rooted ((v RelVols) (u (list int))) (list int)
+  (if (is_empty (.boot v))
+      ""
+      (let (p (release_in (.boot v) "cmdline.txt")
+            old (match (read_whole p) ((Err why) "") ((Ok b) (bytes_to_list b)))
+            why (write_whole p (bytes_from_list (cmdline_rooted old u))))
+        (if (is_empty why) "" (append p (append ": " why))))))
+
+; The boot volume of the system whose UUID is u, among vols: the first
+; whose cmdline.txt says root=u; empty if none does.
+(def release_boot_of ((vols (list (list int))) (u (list int))) (list int)
+  (if (or (is_empty vols) (is_empty u))
+      ""
+      (match (read_whole (release_in (head vols) "cmdline.txt"))
+        ((Err why) (release_boot_of (tail vols) u))
+        ((Ok b)
+          (if (any_eq (append "root=" u) (split_spaces (trim_line (bytes_to_list b))))
+              (head vols)
+              (release_boot_of (tail vols) u))))))
+
+; -------------------------------------------------------------- volumes
+
+; The volume w names: a path, or a label.
+(def volume_named ((w (list int))) (list int)
+  (if (starts_with w "/") (normal_path w) (append "/Volumes/" w)))
+
+; The UUID vol is mounted with, among ms; empty for none.
+(def uuid_of ((ms (list MountInfo)) (vol (list int))) (list int)
+  (if (is_empty ms)
+      ""
+      (match (head ms) ((MountInfo path port u) (if (eq path vol) u (uuid_of (tail ms) vol))))))
+
+; A card's cmdline.txt, text, made to boot the volume whose UUID is u:
+; its words kept but any root=, which root=u replaces, after them;
+; --l0-args first if it had none, so that the firmware's own arguments,
+; which it puts before the file's, are not the kernel's.
+(def cmdline_rooted ((text (list int)) (u (list int))) (list int)
+  (let ws (not_root (split_spaces (trim_line text)))
+    (append (unwords (append (if (any_eq "--l0-args" ws) ws (cons "--l0-args" ws))
+                             (cons (append "root=" u) (nil (list int)))))
+            "\n")))
+
+; ws without any root= word.
+(def not_root ((ws (list (list int)))) (list (list int))
+  (if (is_empty ws)
+      ws
+      (starts_with (head ws) "root=") (not_root (tail ws))
+      (cons (head ws) (not_root (tail ws)))))
+
+; text without its line ends, which split_spaces would keep in a word.
+(def trim_line ((text (list int))) (list int)
+  (if (is_empty text)
+      text
+      (cons (if (any_eq (head text) (cons 10 (cons 13 (nil int)))) 32 (head text)) (trim_line (tail text)))))
+
+; Why vol may not be written by an install, or empty: it must be a
+; mounted volume.
+(def release_volume_why ((vol (list int))) (list int)
+  (if (not (eq (fs_volume_of vol) vol))
+      (append vol ": not a volume")
+      (eq (fs_port_of vol) 0)
+      (append vol ": no such volume is mounted")
+      ""))
+
+; Why mode may not install onto v, or empty, checked before anything is
+; written: each volume mounted; a fresh install formats the system and
+; boot volumes, so neither may be / or the data volume, or the other;
+; the data volume must be there, /Volumes/data; and a Pi 5's fresh
+; install needs a boot volume.
+(def release_why ((m RelMode) (v RelVols) (board (list int))) (list int)
+  (let store (.store v)
+    (if (not (eq (fs_port_of store) 0))
+        (release_why_volumes m v board)
+        (append store ": no such volume is mounted; make one labelled data in Disks, for the agent's home and the speech model"))))
+
+; release_why, once the data volume is known to be there.
+(def release_why_volumes ((m RelMode) (v RelVols) (board (list int))) (list int)
+  (let (fresh (eq m (RelFresh))
+        sys (.system v)
+        boot (.boot v)
+        why1 (release_volume_why sys)
+        why2 (if (is_empty boot) "" (release_volume_why boot)))
+    (if (not (is_empty why1)) why1
+        (not (is_empty why2)) why2
+        (eq sys (.store v)) (append sys ": the data volume; the system goes on a volume of its own")
+        (eq boot (.store v)) (append boot ": the data volume; the boot files go on a volume of their own")
+        (eq boot sys) (append boot ": the system volume; the boot files go on a volume of their own")
+        (and fresh (eq sys (fs_system_volume))) (append sys ": it is /, which a fresh install would format; update it instead")
+        (and fresh (and (eq board "pi5") (is_empty boot))) "a Raspberry Pi 5 boots from a FAT32 boot volume: name one with --boot"
+        (and (not (is_empty (.order v))) (not (eq board "pi5"))) "the boot order is a Raspberry Pi 5's bootloader's; this system is not one"
+        (and (not (is_empty (.order v))) (is_empty boot)) "the boot order is set by an update on the boot volume, and there is none"
+        "")))
+
+; Why the release es cannot give what v asks, or empty: a boot order
+; needs its pieeprom.bin.
+(def release_lacks ((v RelVols) (es (list RelEntry))) (list int)
+  (if (and (not (is_empty (.order v))) (not (release_has es "eeprom" "pieeprom.bin")))
+      "the release has no pieeprom.bin for the boot order; make release PIEEPROM=FILE puts one in"
+      ""))
+
+; Whether es has part's path.
+(def release_has ((es (list RelEntry)) (part (list int)) (path (list int))) bool
+  (if (is_empty es)
+      false
+      (and (eq (.part (head es)) part) (eq (.path (head es)) path)) true
+      (release_has (tail es) part path)))
+
+; What a fresh install says before it formats v's volumes.
+(def release_format_text ((v RelVols)) (list int)
+  (append "formatting " (append (.system v)
+    (append (if (is_empty (.boot v)) "" (append " and " (.boot v))) ": everything on them is erased\n"))))
+
+; v's system volume, and its boot volume if it has one, formatted: empty,
+; or why not.
+(def release_formatted ((v RelVols)) (list int)
+  (let code (fs_format (.system v))
+    (if (not (eq code 0))
+        (append (.system v) (append ": not formatted: " (io_error code)))
+        (is_empty (.boot v))
+        ""
+        (let code2 (fs_format (.boot v))
+          (if (eq code2 0) "" (append (.boot v) (append ": not formatted: " (io_error code2))))))))

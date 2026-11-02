@@ -97,6 +97,12 @@ home (`agent backup`) opens there as it is
 | `.claude/skills/NAME/SKILL.md` | a skill each, its frontmatter's `description` read up front, its body read with `read_file` when used |
 | `.history/` | `log`, every write of the agent's file tools in the home; `N`, the file before entry N; `conversation.json`, `agentd`'s conversation ([Kept](#kept)) |
 
+The installer seeds the home at `/Volumes/data/agent` from the
+release's `CLAUDE.md` and `CONSTITUTION.md`, and makes the rest whole as
+`agentd` does at its start; it never writes over a file of the home
+that is there, in a fresh install or an update, and names each it kept
+([Installing from the proxy](boot.md#installing-from-the-proxy)).
+
 **The system prompt** is made anew at each turn: the
 built-in part, then the constitution, the rules and the memory's
 index, each whole under a heading, then a line for each skill, its

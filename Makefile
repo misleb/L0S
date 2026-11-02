@@ -59,7 +59,13 @@
 #   make proxy-run [PROXY_LISTEN=ADDR:PORT]  the proxy to Anthropic's API
 #                    on ADDR:PORT, 127.0.0.1:8765 unless given, with that
 #                    token and ANTHROPIC_API_KEY; usage in
-#                    build/proxy/usage.jsonl
+#                    build/proxy/usage.jsonl, and releases from
+#                    build/release
+#   make release [WHISTLE=FILE] [PIEEPROM=FILE]  build/release/pi5 and
+#                    build/release/virt: the system, the Pi 5's boot
+#                    files, the agent's seed, and Whistle's model and a
+#                    pieeprom.bin if given, which the proxy serves to
+#                    install --net and the Installer (tools/mkrelease)
 #   make agent-etc API=HOST:PORT [MODEL=NAME]  build/agent-etc: the
 #                    agent's config, naming the proxy, and the token,
 #                    which the demo's and the Pi 5's initramfs then take
@@ -286,6 +292,17 @@ PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB) $(MBRLIB)
 # SHA-256, which the Pi 5's bootloader checks its updates by.
 SHA256  := user/lib/format/sha256.l0
 
+# Installing L0S from a release the host's proxy serves (roadmap 0027):
+# the manifest, the plan, each file fetched and checked, over the
+# proxy's HTTP, SHA-256, the files and the agent's home.
+RELEASE := $(MODELLIB) $(SHA256) $(AGENTHOME) user/lib/sys/release.l0
+
+# The Pi 5's bootloader: its image, pieeprom.bin (pure, over SHA256), and
+# its firmware's command line, an update's time and files, and the boot
+# order (over the mailbox and CLOCK), for eeprom and the installer.
+PIEEPROMLIB := user/lib/format/pieeprom.l0
+BOOTLOADER  := $(MAILBOX) $(PIEEPROMLIB) user/lib/sys/bootloader.l0
+
 # The toolkit, user/lib/ui: its look, widgets, and the desktop's drawing
 # commands, which need only render.l0, and the font service's protocol
 # and strikes, which its text is drawn from; and its client windows,
@@ -321,7 +338,7 @@ LIBS_agent      := $(AGENTLIB) $(MODELLIB) $(AGENTHOME)
 LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
-LIBS_eeprom     := $(CLOCK) $(MAILBOX) $(SHA256)
+LIBS_eeprom     := $(CLOCK) $(SHA256) $(BOOTLOADER)
 LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
 LIBS_play       := $(AUDIOLIB) $(WAV) $(PCM)
 LIBS_rec        := $(MICLIB) $(WAV)
@@ -330,13 +347,14 @@ LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS)
 LIBS_init       := $(PATHS)
 LIBS_boot       := $(PATHS)
-LIBS_install    := $(PATHS)
+LIBS_install    := $(RELEASE) $(BOOTLOADER)
 LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_installer  := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(RELEASE) $(BOOTLOADER)
 LIBS_fontview   := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_procmon    := $(PROCS) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_disk       := $(DISKLIB)
@@ -401,7 +419,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run agent-etc icon-sheet graph graph-hook
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -570,6 +588,9 @@ $(call l0_test,$(BASE) $(DECODER) user/lib/speech/decoder_test.l0)
 $(call l0_test,$(BASE) $(CLI) $(TRANSCRIBE) user/lib/speech/transcribe_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
+$(call l0_test,$(ULIB) $(RELEASE) user/lib/sys/release_test.l0)
+$(call l0_test,$(BASE) $(SHA256) $(PIEEPROMLIB) user/lib/format/pieeprom_test.l0)
+$(call l0_test,$(ULIB) $(CLOCK) $(SHA256) $(BOOTLOADER) user/lib/sys/bootloader_test.l0)
 $(call l0_test,$(BASE) $(PARTS) user/lib/format/gpt_test.l0)
 $(call l0_test,$(BASE) $(PPM) user/lib/format/ppm_test.l0)
 $(call l0_test,$(BASE) $(PPM) $(QOI) user/lib/format/qoi_test.l0)
@@ -857,7 +878,15 @@ stage_agent = if [ -d $(AGENT_ETC) ]; then mkdir -p $(1)/agent && cp $(AGENT_ETC
 
 PROXY_LISTEN ?= 127.0.0.1:8765
 proxy-run: proxy
-	$(PROXY_VENV)/bin/python -I tools/api-proxy/proxy.py --listen $(PROXY_LISTEN) --token-file $(BUILD)/proxy/token --usage $(BUILD)/proxy/usage.jsonl
+	$(PROXY_VENV)/bin/python -I tools/api-proxy/proxy.py --listen $(PROXY_LISTEN) --token-file $(BUILD)/proxy/token --usage $(BUILD)/proxy/usage.jsonl --release $(BUILD)/release
+
+# The releases the proxy serves (roadmap 0027): each board's system, as
+# its initramfs holds it with /etc and the agent's etc, the Pi 5's boot
+# files as pi5-card writes them, the agent's seed, and WHISTLE, the
+# speech model, and PIEEPROM, a release pieeprom.bin, if given.
+release: initramfs pi5-card
+	tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
+	tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-card
 
 # The knowledge graph, which /graphify built first: graphify's own Python,
 # as it wrote it down, rebuilds it with the L0 sources it cannot read.
@@ -911,6 +940,13 @@ disks-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/disks-etc)
 	tools/mkinitramfs $(BUILD)/disks.cpio $(BUILD)/disks-etc $(ROOT)
 
+# What tests/installer.sh boots, once it has made @PORT@ in its
+# agent/config the proxy's: tests/installer/etc, the disks test's with
+# the network, staged as the screen tests' are.
+installer-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/installer-etc && cp -R tests/installer/etc $(BUILD)/installer-etc
+	$(call stage_etc,$(BUILD)/installer-etc)
+
 # What tests/launcher-install.sh boots, and copies onto its disk's System
 # volume to boot from: tests/launcher-install/etc, boot and the disk's
 # driver and file server beside the compositor.
@@ -924,9 +960,9 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
 SCREEN_TESTS := vt files launch responsive disks-create resize logo-menu procmon disks launcher launcher-install \
-                fontview partitions usb fat hidpi widgets keyboard gpu-screen
+                installer fontview partitions usb fat hidpi widgets keyboard gpu-screen
 
-e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
+e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
 	tests/e2e.sh
 	tests/screens.sh $(SCREEN_TESTS)
 

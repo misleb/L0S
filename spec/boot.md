@@ -51,6 +51,7 @@ summary A terminal in a window, with its own shell
 | `Fonts.app` | `fontview` | Fonts |
 | `About.app` | `about` | About |
 | `Agent.app` | `chat` | Agent |
+| `Installer.app` | `installer` | Installer |
 
 A bundle's name is one word, as the shell and the inittab split at
 spaces; an app's name may be several. Its source is the directory beside
@@ -200,8 +201,92 @@ elsewhere is asked of the file server (`fs_stat`). The apps
 asks only for what it names; the shell's `ls` with no path, which lists
 every file, and `install` are all that walk `/`.
 
+## Installing from the proxy
+
+`install VOLUME` copies the system running; `install --net` and the
+Installer app install the host's latest build instead, the release the
+API proxy serves ([network.md](network.md#reaching-a-models-api), `make
+release`), over the network, through the same library,
+[release.l0](../user/lib/sys/release.l0):
+
+```
+install --net fresh [--boot BOOT] [--boot-order sd,net] SYSTEM
+install --net update [--boot BOOT] [--boot-order sd,net] [SYSTEM]
+```
+
+The release is the board's that `/etc/board` names, `pi5` or `virt`
+(the Pi 5's and the demo's `/etc` say which; `virt` if there is none).
+The proxy and the board's token are `/etc/agent`'s, as for the agent. A
+release has five parts, a directory each on the host, and a manifest of
+every file's part, size, SHA-256, mode and path:
+
+| Part | What | Where it goes |
+|---|---|---|
+| `system` | the programs, the apps and that board's `/etc` | the system volume, SYSTEM |
+| `boot` | the Pi 5's `l0.img`, `config.txt`, `cmdline.txt`, device trees and `input.bin` | the boot volume, BOOT |
+| `speech` | Whistle's model, `whistle.cact` | `/Volumes/data/speech` |
+| `agent` | the agent's home's `CLAUDE.md` and `CONSTITUTION.md` | `/Volumes/data/agent` |
+| `eeprom` | a release `pieeprom.bin` | SYSTEM's `/etc/pieeprom.bin`, only with `--boot-order` |
+
+Everything is checked before anything is written: each volume mounted,
+`/Volumes/data` there (it holds `agent`, `speech` and `user`; a volume
+labelled `data`, made in Disks), the system, boot and data volumes all
+different, a fresh install's SYSTEM not `/`, a Pi 5's fresh install
+given a boot volume, and the release holding a `pieeprom.bin` if the
+boot order is asked. The volumes are made beforehand, in Disks: the
+installer lays nothing out. Then, as install says each:
+
+- **A fresh install** says it formats SYSTEM and BOOT, everything on
+  them erased, and does; fetches every file of the plan; makes BOOT's
+  `cmdline.txt` say `root=` and SYSTEM's UUID, `--l0-args` first, as
+  `install --boot --root` does; and makes data's `agent`, `speech` and
+  `user` directories and the agent's home whole (`home_setup`).
+- **An update**, of `/` if no SYSTEM is named, its boot volume the
+  mounted one whose `cmdline.txt` says SYSTEM's `root=`, formats
+  nothing and fetches the system and boot files again, but keeps
+  `cmdline.txt` and SYSTEM's `/etc/agent/config` and `token`, the
+  board's way to the proxy.
+- **In both**, an agent's file on data is never written over: each one
+  there is kept, and said (`kept: /Volumes/data/agent/CLAUDE.md`); to
+  have the release's, move or remove it first. The model is fetched only
+  if data's differs, by size or SHA-256 (`the same already: ...`).
+- **Each file** comes over one kept HTTP connection, `GET
+  /release/BOARD/PART/PATH` with the board's token, and is written as it
+  comes, a piece at a time, never whole in memory, hashed as it goes; at
+  its end its size and SHA-256 must be the manifest's, or it is removed
+  and install stops, saying which. A program's copy is marked one. The
+  proxy saying nothing for 30 s stops it too.
+- **`--boot-order sd,net`**, on a Pi 5, writes `pieeprom.upd` and
+  `pieeprom.sig` onto BOOT, as `eeprom update` does
+  ([pi5.md](pi5.md#the-bootloaders-configuration)): the release's
+  `pieeprom.bin` with its configuration made to say `BOOT_ORDER=0xf21`,
+  the card and then the network, every other line kept. The
+  configuration is the bootloader's own if its firmware answers, which
+  takes a program flagged `dev`; started from the shell or the
+  Installer it is not, and the image's own `bootconf.txt` is used,
+  which install says. The update's time is the clock's, which must be
+  set (NTP), as nothing can say the last update's then.
+
+The Installer (`run installer &`, in the launcher) chooses the mode,
+the system volume, and on a Pi 5 the boot volume and the boot order,
+fresh install's default when `/` is the initramfs, update's when it is
+a volume; says whether `/Volumes/data` is there, and why it cannot run
+or what it will erase; and on Install runs `install --net ...
+--progress` as its child, its terminal a port the window waits on with
+its own, showing the progress line and everything install says, and
+Done or that it stopped when it exits.
+
 ## Limits
 
+- **Installing from the proxy** takes volumes made beforehand: it does
+  not partition a disk or size a boot partition. An update writes the
+  release's files over the system's, but removes none the release no
+  longer has, and checks no free space first: a volume that fills stops
+  it partway, the file it was writing removed. The data volume is
+  `/Volumes/data` by its label, nothing else. A boot order set by the
+  Installer or the shell starts from the image's configuration, not the
+  board's, as neither may use the mailbox. The release is one per board,
+  the host's latest build, with no version kept on the volume.
 - **The initramfs is read-only.** Nothing in it can be written, renamed
   or removed. Booted from it alone, the apps are fixed at boot, and `/`
   cannot be written: a system volume, or `root=tmpfs` on a board with

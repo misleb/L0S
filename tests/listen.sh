@@ -31,7 +31,7 @@ for d in "${dirs[@]}"; do
   files+=("/etc/clips/$name.wav")
   sed -n 2p "$d/greedy.txt" >> "$BUILD/listen.expected"
 done
-echo "start /bin/listen -t ${files[*]}" > "$etc/inittab"
+echo "start /bin/listen -t -m /etc/whistle.cact ${files[*]}" > "$etc/inittab"
 tools/mkinitramfs "$BUILD/listen.cpio" "$etc" "$BUILD/root" || { echo "not ok - listen: mkinitramfs failed"; exit 1; }
 L0_QEMU_ARGS="-smp ${QEMU_CPUS:-1}" tools/deadline 1800 "$L0" boot "$BUILD/kernel.img" < "$BUILD/listen.cpio" > "$BUILD/listen.out" 2> "$BUILD/listen.err"
 status=$?

@@ -1,0 +1,222 @@
+; release_test.l0 -- tests of release.l0: the manifest read, where each
+; part's files go, what each mode does with each, what is said, and a
+; file fetched from canned parts, its size and hash checked.
+
+; The SHA-256 of abc, in hex.
+(def abc_sha () (list int) "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+; An entry of part at path, 3 bytes, abc's hash.
+(def entry ((part (list int)) (path (list int))) RelEntry
+  (RelEntry part 3 (abc_sha) false path))
+
+; The volumes of a Pi 5's install.
+(def pi_vols () RelVols (RelVols "/Volumes/System" "/Volumes/bootfs" "/Volumes/data" ""))
+
+; The same, setting the boot order.
+(def pi_ordered () RelVols (.order (pi_vols) "0xf21"))
+
+; e as text: its fields, a word each.
+(def entry_text ((e RelEntry)) (list int)
+  (unwords (cons (.part e) (cons (digits (.size e)) (cons (if (.program e) "x" "-") (cons (.path e) (nil (list int))))))))
+
+; es as text, a line each.
+(def entries_text ((es (list RelEntry))) (list int)
+  (if (is_empty es) "" (append (entry_text (head es)) (append "\n" (entries_text (tail es))))))
+
+; What a manifest's text reads as: its entries' text, or why not.
+(def manifest_text ((s (list int))) (list int)
+  (match (release_manifest (bytes_from_list s))
+    ((Err why) (append "error: " why))
+    ((Ok es) (entries_text es))))
+
+(def test_manifest () int
+  (check_str "two lines"
+    (manifest_text (append "system 3 " (append (abc_sha) (append " x bin/hello\n\nspeech 17 " (append (abc_sha) " - whistle.cact\n")))))
+    "system 3 x bin/hello\nspeech 17 - whistle.cact\n"))
+
+(def test_manifest_empty () int
+  (check_str "none" (manifest_text "") ""))
+
+; The line numbers count the blank ones.
+(def test_manifest_bad () int
+  (add (check_str "a word short" (manifest_text (append "system 3 " (append (abc_sha) " x\n")))
+         "error: the manifest's line 1 is not PART SIZE SHA256 MODE PATH")
+       (check_str "an unknown part" (manifest_text (append "\nkernel 3 " (append (abc_sha) " x bin/hello\n")))
+         "error: the manifest's line 2 is not PART SIZE SHA256 MODE PATH")))
+
+(def test_manifest_bad_fields () int
+  (add (check_str "a short hash" (manifest_text "system 3 abc - etc/motd")
+         "error: the manifest's line 1 is not PART SIZE SHA256 MODE PATH")
+       (add (check_str "a mode" (manifest_text (append "system 3 " (append (abc_sha) " rw etc/motd")))
+              "error: the manifest's line 1 is not PART SIZE SHA256 MODE PATH")
+            (check_str "a size" (manifest_text (append "system -3 " (append (abc_sha) " - etc/motd")))
+              "error: the manifest's line 1 is not PART SIZE SHA256 MODE PATH"))))
+
+(def test_path_ok () int
+  (add (check_bool "plain" (release_path_ok "bin/hello") true)
+       (add (check_bool "absolute" (release_path_ok "/etc/motd") false)
+            (add (check_bool "up" (release_path_ok "etc/../../x") false)
+                 (add (check_bool "empty part" (release_path_ok "etc//motd") false)
+                      (check_bool "empty" (release_path_ok "") false))))))
+
+(def test_targets () int
+  (add (check_str "system" (release_target (pi_vols) (entry "system" "bin/sh")) "/Volumes/System/bin/sh")
+       (add (check_str "boot" (release_target (pi_vols) (entry "boot" "l0.img")) "/Volumes/bootfs/l0.img")
+            (check_str "speech" (release_target (pi_vols) (entry "speech" "whistle.cact")) "/Volumes/data/speech/whistle.cact"))))
+
+; With no boot volume, as on QEMU, the boot files go nowhere; the
+; eeprom's image never goes anywhere.
+(def test_targets_none () int
+  (add (check_str "agent" (release_target (pi_vols) (entry "agent" "CLAUDE.md")) "/Volumes/data/agent/CLAUDE.md")
+       (add (check_str "no boot volume" (release_target (RelVols "/Volumes/System" "" "/Volumes/data" "") (entry "boot" "l0.img")) "")
+            (check_str "eeprom" (release_target (pi_vols) (entry "eeprom" "pieeprom.bin")) ""))))
+
+; With a boot order, the image is kept with the system.
+(def test_target_eeprom () int
+  (add (check_str "kept" (release_target (pi_ordered) (entry "eeprom" "pieeprom.bin")) "/Volumes/System/etc/pieeprom.bin")
+       (check_str "fetched" (act_of_on (pi_ordered) (RelUpdate) "eeprom" "pieeprom.bin") "write")))
+
+; What mode does with part's path on v, where nothing is there yet.
+(def act_of_on ((v RelVols) (m RelMode) (part (list int)) (path (list int))) (list int)
+  (let e (entry part path)
+    (act_text (release_act m e (release_target v e) false false))))
+
+; A boot order needs the release's image.
+(def test_lacks () int
+  (let es (cons (entry "system" "bin/sh") (nil RelEntry))
+    (add (check_str "none asked" (release_lacks (pi_vols) es) "")
+         (add (check_str "no image" (release_lacks (pi_ordered) es) "the release has no pieeprom.bin for the boot order; make release PIEEPROM=FILE puts one in")
+              (check_str "an image" (release_lacks (pi_ordered) (cons (entry "eeprom" "pieeprom.bin") es)) "")))))
+
+; An act as a word.
+(def act_text ((a RelAct)) (list int)
+  (match a ((RelWrite) "write") ((RelKeep) "keep") ((RelSkip) "skip")))
+
+; What mode does with part's path, where a file is there or not, and
+; the same or not.
+(def act_of ((m RelMode) (part (list int)) (path (list int)) (exists bool) (same bool)) (list int)
+  (let e (entry part path)
+    (act_text (release_act m e (release_target (pi_vols) e) exists same))))
+
+; An agent's file is never written over, in either mode.
+(def test_act_agent () int
+  (add (check_str "fresh, missing" (act_of (RelFresh) "agent" "CLAUDE.md" false false) "write")
+       (add (check_str "fresh, there" (act_of (RelFresh) "agent" "CLAUDE.md" true false) "keep")
+            (check_str "update, there" (act_of (RelUpdate) "agent" "CLAUDE.md" true false) "keep"))))
+
+; The model is fetched only if it is not the same already.
+(def test_act_speech () int
+  (add (check_str "missing" (act_of (RelUpdate) "speech" "whistle.cact" false false) "write")
+       (add (check_str "different" (act_of (RelUpdate) "speech" "whistle.cact" true false) "write")
+            (check_str "the same" (act_of (RelUpdate) "speech" "whistle.cact" true true) "skip"))))
+
+; An update keeps cmdline.txt, which names the root, and the board's
+; way to the proxy; a fresh install writes them.
+(def test_act_kept () int
+  (add (check_str "cmdline, update" (act_of (RelUpdate) "boot" "cmdline.txt" true false) "keep")
+       (add (check_str "cmdline, fresh" (act_of (RelFresh) "boot" "cmdline.txt" true false) "write")
+            (add (check_str "token, update" (act_of (RelUpdate) "system" "etc/agent/token" true false) "keep")
+                 (check_str "token, missing" (act_of (RelUpdate) "system" "etc/agent/token" false false) "write")))))
+
+(def test_act_system () int
+  (add (check_str "a program, update" (act_of (RelUpdate) "system" "bin/sh" true false) "write")
+       (add (check_str "a boot file, update" (act_of (RelUpdate) "boot" "l0.img" true false) "write")
+            (check_str "eeprom" (act_of (RelFresh) "eeprom" "pieeprom.bin" false false) "skip"))))
+
+; A plan of steps, as said before anything is fetched.
+(def test_plan_text () int
+  (let ss (cons (RelStep (entry "system" "bin/sh") "/Volumes/System/bin/sh" (RelWrite))
+            (cons (RelStep (entry "system" "etc/motd") "/Volumes/System/etc/motd" (RelWrite))
+              (cons (RelStep (entry "speech" "whistle.cact") "/Volumes/data/speech/whistle.cact" (RelSkip))
+                (cons (RelStep (entry "agent" "CLAUDE.md") "/Volumes/data/agent/CLAUDE.md" (RelKeep))
+                  (cons (RelStep (entry "eeprom" "pieeprom.bin") "" (RelSkip)) (nil RelStep))))))
+    (check_str "plan" (release_plan_text ss)
+      "2 files to fetch, 6 bytes: 2 system\nkept: /Volumes/data/agent/CLAUDE.md\nthe same already: /Volumes/data/speech/whistle.cact\n")))
+
+(def test_board_of () int
+  (add (check_str "pi5" (release_board_of "pi5\n") "pi5")
+       (check_str "empty" (release_board_of "\n") "virt")))
+
+(def test_paths () int
+  (add (check_str "manifest" (release_manifest_path "pi5") "/release/pi5/manifest")
+       (check_str "file" (release_file_path "pi5" (entry "boot" "l0.img")) "/release/pi5/boot/l0.img")))
+
+(def test_cmdline_rooted () int
+  (add (check_str "added" (cmdline_rooted "--l0-args quiet\n" "u1") "--l0-args quiet root=u1\n")
+       (check_str "replaced, --l0-args put first" (cmdline_rooted "root=old a\n" "u2") "--l0-args a root=u2\n")))
+
+; --------------------------------------------------------------- fetching
+
+; A connection, never used by these tests, which give the parts.
+(def conn () HttpConn (HttpConn (Inet 1 2) 9 5 "h" 167772674 80 (http_read_new "GET") (http_open)))
+
+; A run fetching e alone, into a buffer, its place to, nothing left
+; after it.
+(def run_of ((e RelEntry) (to (list int))) RelRun
+  (let s (RelStep e to (RelWrite))
+    (.cur (release_run_new (conn) "t" "virt" (cons s (nil RelStep)))
+          (Some (RelFile (buffer) (sha256_new) 0 0 s)))))
+
+; A file in memory, written to as a file would be.
+(def buffer () IoFile
+  (match (open_out_buffer) ((IoOpened f) f) ((IoFailed fault why) (IoFile 2))))
+
+; A run from r given the head, the bodies bs and the end.
+(def fed ((r RelRun) (bs (list (list int)))) RelRun
+  (release_heard (.todo r (nil RelStep))
+    (cons (HttpHead 200 "OK" (nil HttpHeader)) (append (bodies bs) (cons (HttpEnd true) (nil HttpPart))))))
+
+; Each of bs a body's piece.
+(def bodies ((bs (list (list int)))) (list HttpPart)
+  (if (is_empty bs) (nil HttpPart) (cons (HttpBody (bytes_from_list (head bs))) (bodies (tail bs)))))
+
+; Where a file that fails is, which the run removes: never made.
+(def nowhere () (list int) "build/release_test_none")
+
+; abc in two pieces: fetched, the size and hash the manifest's.
+(def test_fetched () int
+  (let r (fed (run_of (entry "system" "etc/x") (nowhere)) (cons "ab" (cons "c" (nil (list int)))))
+    (add (check_str "why" (.why r) "")
+         (add (check_int "files" (.files r) 1)
+              (check_bool "ended" (release_ended r) true)))))
+
+(def test_fetched_bad_hash () int
+  (let r (fed (run_of (entry "system" "etc/x") (nowhere)) (cons "abd" (nil (list int))))
+    (check_str "why" (.why r) "build/release_test_none: its SHA-256 is not the manifest's")))
+
+(def test_fetched_short () int
+  (let r (fed (run_of (entry "system" "etc/x") (nowhere)) (cons "ab" (nil (list int))))
+    (check_str "why" (.why r) "build/release_test_none: 2 bytes came, not 3")))
+
+(def test_fetched_refused () int
+  (let r (release_heard (run_of (entry "system" "etc/x") (nowhere)) (cons (HttpHead 404 "Not Found" (nil HttpHeader)) (nil HttpPart)))
+    (add (check_str "why" (.why r) "/release/virt/system/etc/x: the proxy said 404 Not Found")
+         (check_bool "ended" (release_ended r) true))))
+
+; A run's progress, halfway through its one file.
+(def test_progress () int
+  (let r (release_heard (run_of (RelEntry "speech" 3000000 (abc_sha) false "whistle.cact") (nowhere))
+           (cons (HttpHead 200 "OK" (nil HttpHeader)) (bodies (cons "abc" (nil (list int))))))
+    (check_str "progress" (release_progress_text r) "file 1 of 1, 3 bytes of 3.0 MB: speech/whistle.cact")))
+
+(def test_volume_named () int
+  (add (check_str "a label" (volume_named "System") "/Volumes/System")
+       (check_str "a path" (volume_named "/Volumes/System/") "/Volumes/System")))
+
+(def test_uuid_of () int
+  (check_str "S's" (uuid_of (cons (MountInfo "/" 0 "") (cons (MountInfo "/Volumes/S" 4 "u-1") (nil MountInfo))) "/Volumes/S") "u-1"))
+
+; A file with no --l0-args, or none at all, gets it first; CRLF goes.
+(def test_cmdline_rooted_bare () int
+  (add (check_str "none" (cmdline_rooted "" "U") "--l0-args root=U\n")
+       (check_str "words, CRLF" (cmdline_rooted "debug\r\n" "U") "--l0-args debug root=U\n")))
+
+; Under an operating system no volume is mounted, the data volume's
+; first.
+(def test_why_no_data () int
+  (check_str "data" (release_why (RelFresh) (pi_vols) "pi5")
+    "/Volumes/data: no such volume is mounted; make one labelled data in Disks, for the agent's home and the speech model"))
+
+(def test_format_text () int
+  (add (check_str "both" (release_format_text (pi_vols)) "formatting /Volumes/System and /Volumes/bootfs: everything on them is erased\n")
+       (check_str "the system" (release_format_text (RelVols "/Volumes/S" "" "/Volumes/data" "")) "formatting /Volumes/S: everything on them is erased\n")))
