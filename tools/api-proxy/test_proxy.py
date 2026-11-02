@@ -2,6 +2,7 @@
 loopback: no key and no network. Run by make test with the venv's Python
 (build/proxy/venv), which has aiohttp."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -15,6 +16,7 @@ sys.path.insert(0, HERE)
 
 import aiohttp  # noqa: E402
 
+import builder as builders  # noqa: E402
 import cpio  # noqa: E402
 import proxy  # noqa: E402
 import standin  # noqa: E402
@@ -406,6 +408,229 @@ class Backup(Proxied):
     async def test_other_method(self):
         async with self.client.post(self.base + "/backup", data=b"", headers=self.auth()) as r:
             self.assertEqual(r.status, 404)
+
+
+FAKE = os.path.join(HERE, "fake_claude.py")
+
+
+def events_of(body):
+    """A server-sent body's events, (kind, data) each, and its comments."""
+    out, comments = [], 0
+    for block in body.decode().split("\n\n"):
+        if block.startswith(":"):
+            comments += 1
+        elif block.strip():
+            fields = dict(line.split(": ", 1) for line in block.split("\n"))
+            out.append((fields["event"], json.loads(fields["data"])))
+    return out, comments
+
+
+class Building(unittest.IsolatedAsyncioTestCase):
+    """The proxy with a builder whose claude is fake_claude.py; with
+    with_repo, its worktrees made of a repository of its own, never
+    L0S's."""
+
+    with_repo = False
+
+    def repo_made(self):
+        """A repository of one commit, lib.txt, in the test's directory."""
+        r = os.path.join(self.tmp.name, "repo")
+        os.makedirs(r)
+        with open(os.path.join(r, "lib.txt"), "w") as f:
+            f.write("a library\n")
+        for args in (["init", "-q", "-b", "main"], ["config", "user.name", "Test"],
+                     ["config", "user.email", "test@example.com"], ["add", "lib.txt"], ["commit", "-q", "-m", "one"]):
+            subprocess.run(["git", "-C", r] + args, check=True, capture_output=True)
+        return r
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.log = os.path.join(self.tmp.name, "claude.jsonl")
+        self.env = {"FAKE_CLAUDE_LOG": self.log, "ANTHROPIC_API_KEY": KEY}
+        self.saved = {k: os.environ.get(k) for k in list(self.env) + ["FAKE_CLAUDE_KEY_SOURCE", "FAKE_CLAUDE_BUILD",
+                                                                      "FAKE_CLAUDE_SLEEP", "FAKE_CLAUDE_EDIT"]}
+        os.environ.update(self.env)
+        self.repo = self.repo_made() if self.with_repo else None
+        self.builder = builders.Builder(os.path.join(self.tmp.name, "apps"), cli=[sys.executable, FAKE], repo=self.repo)
+        app = proxy.make_app(TOKEN, "http://127.0.0.1:9", KEY, os.path.join(self.tmp.name, "usage.jsonl"),
+                             builder=self.builder, beat=0.05)
+        self.runner, port = await standin.serve(app, "127.0.0.1", 0)
+        self.base = "http://127.0.0.1:%d" % port
+        self.client = aiohttp.ClientSession()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await self.runner.cleanup()
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def auth(self, token=TOKEN):
+        return {"Authorization": "Bearer " + token, "content-type": "application/json"}
+
+    async def build(self, name="clock", prompt="a clock", token=TOKEN):
+        async with self.client.post(self.base + "/build", data=json.dumps({"name": name, "prompt": prompt}),
+                                    headers=self.auth(token)) as r:
+            return r.status, await r.read()
+
+    def started(self):
+        with open(self.log) as f:
+            return [json.loads(line) for line in f]
+
+    async def test_built_then_image(self):
+        status, body = await self.build()
+        self.assertEqual(status, 200)
+        events, _ = events_of(body)
+        self.assertEqual([k for k, _ in events], ["progress", "progress", "progress", "done"])
+        self.assertEqual(events[2][1]["text"], "Bash l0s-app-build clock")
+        self.assertEqual(events[-1][1], {"summary": "built clock", "size": 11})
+        async with self.client.get(self.base + "/build/clock/image", headers=self.auth()) as r:
+            self.assertEqual((r.status, await r.read()), (200, b"\x7fELFa clock"))
+
+    async def test_session_resumed(self):
+        await self.build()
+        await self.build(prompt="make it blue")
+        first, second = (s["argv"] for s in self.started())
+        session = first[first.index("--session-id") + 1]
+        self.assertEqual(second[second.index("--resume") + 1], session)
+        self.assertNotIn("--session-id", second)
+
+    async def test_command_and_environment(self):
+        await self.build()
+        s = self.started()[0]
+        self.assertEqual(s["api_env"], [])
+        self.assertEqual(os.path.realpath(s["cwd"]), os.path.realpath(os.path.join(self.tmp.name, "apps", "clock")))
+        a = s["argv"]
+        self.assertEqual((a[a.index("--model") + 1], a[a.index("--effort") + 1]), ("claude-opus-5-5", "medium"))
+        self.assertEqual(a[a.index("--permission-mode") + 1], "dontAsk")
+        self.assertIn("--restricted", a)
+        allowed = a[a.index("--allowedTools") + 1].split(",")
+        self.assertIn("Write(./**)", allowed)
+        self.assertIn("Bash(l0s-app-build:*)", allowed)
+        self.assertNotIn("Bash", allowed)
+
+    async def test_api_key_refused(self):
+        os.environ["FAKE_CLAUDE_KEY_SOURCE"] = "ANTHROPIC_API_KEY"
+        status, body = await self.build()
+        events, _ = events_of(body)
+        self.assertEqual(events[-1][0], "failed")
+        self.assertIn("API key", events[-1][1]["why"])
+
+    async def test_no_program(self):
+        os.environ["FAKE_CLAUDE_BUILD"] = "no"
+        events, _ = events_of((await self.build())[1])
+        self.assertEqual(events[-1], ("failed", {"why": "the session built no program: built clock"}))
+
+    async def test_refusals(self):
+        self.assertEqual((await self.build(token="f" * 32))[0], 401)
+        self.assertEqual((await self.build(name="Clock"))[0], 400)
+        self.assertEqual((await self.build(name="../x"))[0], 400)
+        self.assertEqual((await self.build(prompt=" "))[0], 400)
+        async with self.client.get(self.base + "/build/clock/image", headers=self.auth()) as r:
+            self.assertEqual(r.status, 404)
+
+    async def test_one_at_a_time(self):
+        os.environ["FAKE_CLAUDE_SLEEP"] = "0.5"
+        first = asyncio.create_task(self.build())
+        await asyncio.sleep(0.2)
+        self.assertEqual((await self.build(name="other"))[0], 409)
+        status, body = await first
+        events, comments = events_of(body)
+        self.assertEqual(events[-1][0], "done")
+        self.assertGreater(comments, 0)
+        self.assertEqual((await self.build(name="other"))[0], 200)
+
+
+class BuildingTree(Building):
+    """The builder with worktrees, of a repository of the test's own."""
+
+    with_repo = True
+
+    def branch_log(self):
+        code, out = builders.git(self.repo, "log", "--format=%s", "app/clock")
+        return out.splitlines()
+
+    async def test_worktree_and_commit(self):
+        os.environ["FAKE_CLAUDE_EDIT"] = "lib.txt"
+        events, _ = events_of((await self.build())[1])
+        tree = os.path.join(self.tmp.name, "apps", "clock", "l0s")
+        with open(os.path.join(tree, "lib.txt")) as f:
+            self.assertEqual(f.read(), "a library\nchanged for clock\n")
+        self.assertEqual(self.branch_log(), ["app clock: a clock", "one"])
+        self.assertEqual(events[-1], ("done", {"summary": "built clock\n\nL0S changed for it on the host's branch app/clock: lib.txt",
+                                               "size": 11}))
+        with open(os.path.join(self.repo, "lib.txt")) as f:
+            self.assertEqual(f.read(), "a library\n")
+
+    async def test_nothing_changed(self):
+        await self.build()
+        events, _ = events_of((await self.build(prompt="again"))[1])
+        self.assertEqual(self.branch_log(), ["one"])
+        self.assertEqual(events[-1][1]["summary"], "built clock")
+
+    async def test_tree_is_the_sessions(self):
+        await self.build()
+        s = self.started()[0]
+        tree = os.path.join(self.tmp.name, "apps", "clock", "l0s")
+        a = s["argv"]
+        self.assertEqual(a[a.index("--add-dir") + 1], tree)
+        self.assertIn("Write(/%s/**)" % tree, a[a.index("--allowedTools") + 1].split(","))
+        self.assertNotIn("Bash(git:*)", a[a.index("--allowedTools") + 1].split(","))
+
+
+L0S = os.path.abspath(os.path.join(HERE, "..", ".."))
+APP_BUILD = os.path.join(HERE, "bin", "l0s-app-build")
+
+
+class AppBuild(unittest.TestCase):
+    """l0s-app-build on a copy of the widgets app, as a session's folder,
+    with a tree of L0S's libraries of its own as L0S_TREE."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = os.path.join(self.tmp.name, "app")
+        self.tree = os.path.join(self.tmp.name, "tree")
+        os.makedirs(self.dir)
+        for f in ("widgets.l0", "main.l0"):
+            self.copy(os.path.join(L0S, "user", "apps", "widgets", f), os.path.join(self.dir, f), "")
+        libs = subprocess.run(["make", "-s", "-C", L0S, "app-libs"], capture_output=True, text=True, check=True).stdout.split()
+        for f in libs:
+            extra = "\n; Only this tree's.\n(def ui_tree_own () int 7)\n" if f == "user/lib/ui/theme.l0" else ""
+            self.copy(os.path.join(L0S, f), os.path.join(self.tree, f), extra)
+        with open(os.path.join(self.dir, "own.l0"), "w") as f:
+            f.write("; own.l0 -- the app's use of its tree's theme.\n\n; Seven.\n(def own_seven () int (ui_tree_own))\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def copy(src, dst, extra):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(src, "rb") as i, open(dst, "wb") as o:
+            o.write(i.read() + extra.encode())
+
+    def build(self, tree):
+        env = dict(os.environ)
+        env.pop("L0S_TREE", None)
+        if tree:
+            env["L0S_TREE"] = tree
+        return subprocess.run([APP_BUILD, "widgets"], cwd=self.dir, capture_output=True, text=True, timeout=300, env=env)
+
+    def test_tree_linked(self):
+        # A def only the tree's theme.l0 has, which a file of the app's
+        # calls: it builds only from that tree.
+        r = self.build(self.tree)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        with open(os.path.join(self.dir, "widgets"), "rb") as f:
+            self.assertEqual(f.read(4), b"\x7fELF")
+
+    def test_l0s_without_tree(self):
+        r = self.build(None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ui_tree_own", r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

@@ -92,8 +92,9 @@
 ; may be on its next round while the response is still ending).
 (data Wire (WireIdle) (WireOn int (list bytes) Sse bool))
 
-; A program a tool runs: the tool use's id, and the run.
-(data Running (Running bytes Run))
+; What a tool still running is: a program, the tool use's id and the
+; run; or build_app's build (build.l0), the use's id and the build.
+(data Running (Running bytes Run) (Building bytes Build))
 
 ; What agentd is doing: waiting; or a turn, the acts its loop asked not
 ; yet done, the answer coming, the program running, and when the answer
@@ -507,7 +508,8 @@
             s2))))))
 
 ; The turn stopped, if one is running: a program running ended, the
-; answer's connection reset, and the turn done, stopped.
+; answer's connection reset, or a build's, so the proxy ends its
+; session, and the turn done, stopped.
 (def stopped ((s Agentd)) Agentd
   (match s
     ((Agentd u hear l began n doing net conn)
@@ -515,7 +517,7 @@
         ((Idle) s)
         ((Busy acts w r dl)
           (let (k (run_end r)
-                conn2 (if (is_wire_on w) (conn_reset conn) conn))
+                conn2 (if (or (is_wire_on w) (is_building r)) (conn_reset conn) conn))
             (match (loop_cancel l)
               ((Looped l2 acts2) (drive (Agentd u hear l2 began n (Busy acts2 (WireIdle) ((None Running)) 0) net conn2))))))))))
 
@@ -523,7 +525,14 @@
 (def run_end ((r (Option Running))) int
   (match r
     ((None) 0)
-    ((Some x) (match x ((Running id run) (match (.status run) ((Some st) 0) ((None) (let k (proc_kill (.pid run)) 0))))))))
+    ((Some x)
+      (match x
+        ((Running id run) (match (.status run) ((Some st) 0) ((None) (let k (proc_kill (.pid run)) 0))))
+        ((Building id b) 0)))))
+
+; Whether a tool running is a build.
+(def is_building ((r (Option Running))) bool
+  (match r ((None) false) ((Some x) (match x ((Running id run) false) ((Building id b) true)))))
 
 ; A connection given up, reset: none left.
 (def conn_reset ((conn (Option HttpConn))) (Option HttpConn)
@@ -533,9 +542,10 @@
 
 ; ------------------------------------------------------------- driving
 
-; The turn's acts done in order, until one must wait: a request while
-; the last answer is still coming, or a program running. A request
-; keeps the conversation first.
+; The turn's acts done in order, until one must wait: a request, or a
+; build, which asks on the same connection, while the last answer is
+; still coming; or a tool running. A request keeps the conversation
+; first.
 (def drive ((s Agentd)) Agentd
   (match s
     ((Agentd u hear l began n doing net conn)
@@ -549,7 +559,10 @@
                   ((ActTell t) (drive (Agentd u (notices_told hear (tell_notices t)) l began n rest net conn)))
                   ((ActDone reason) (finished (Agentd u hear l began n rest net conn) reason w))
                   ((ActAsk req) (if (is_wire_on w) s (turn_asked (kept_asking (Agentd u hear l began n rest net conn)) req)))
-                  ((ActTool tid name input) (tooled (Agentd u hear l began n rest net conn) tid name input))))))))))
+                  ((ActTool tid name input)
+                    (if (and (is_wire_on w) (is_build_tool (bytes_to_list name)))
+                        s
+                        (tooled (Agentd u hear l began n rest net conn) tid name input)))))))))))
 
 ; Whether a program is running, and an answer coming.
 (def is_running ((r (Option Running))) bool (match r ((None) false) ((Some x) true)))
@@ -600,6 +613,8 @@
                 (tool_answered s tid (tool_file (setup_home u) nm input (conv_tag began n) (home_now (.cport u))))
                 (is_desk_tool nm)
                 (tool_answered s tid (tool_desk nm input (.cport u)))
+                (is_build_tool nm)
+                (build_start s tid input)
                 (not (is_run_tool nm))
                 (tool_answered s tid (tool_failed (append "no tool " nm)))
                 (match (tool_run_start (setup_home u) nm input (setup_timeout u) (.back u) (.rport u))
@@ -622,6 +637,7 @@
             ((None) s)
             ((Some x)
               (match x
+                ((Building tid b) s)
                 ((Running tid run)
                   (let run2 (run_took run m)
                     (match (.status run2)
@@ -673,12 +689,15 @@
     ((RecvFailed) s)
     ((Message from b)
       (if (is_alarm_notice m)
-          (wire_alarm s)
+          (build_alarm (wire_alarm s))
           (match (.conn s)
             ((None) s)
             ((Some c)
               (match (http_feed c b)
-                ((HttpGot c2 parts) (wire_parts (wire_alive (.conn s (Some c2))) parts)))))))))
+                ((HttpGot c2 parts)
+                  (if (doing_build (.doing s))
+                      (build_parts (build_alive (.conn s (Some c2))) parts)
+                      (wire_parts (wire_alive (.conn s (Some c2))) parts))))))))))
 
 ; An answer coming, heard from: its deadline put off.
 (def wire_alive ((s Agentd)) Agentd
@@ -783,3 +802,137 @@
 ; stopped.
 (def wire_lost ((s Agentd) (why (list int)) (stopped bool)) Agentd
   (if stopped (drive s) (turn_told s (failure (append "the proxy: " why)))))
+
+; ------------------------------------------------------------- building
+
+; build_app's use tid with input: its request sent to the proxy and the
+; turn waiting on the build; a name or prompt missing or wrong its
+; failure at once.
+(def build_start ((s Agentd) (tid bytes) (input Json)) Agentd
+  (match (tool_str input "name")
+    ((None) (tool_answered s tid (tool_failed "build_app needs a name")))
+    ((Some name)
+      (match (tool_str input "prompt")
+        ((None) (tool_answered s tid (tool_failed "build_app needs a prompt")))
+        ((Some prompt)
+          (if (build_name_ok name)
+              (build_ask s tid (build_new name) (build_request (.mc (.u s)) name prompt) "POST")
+              (tool_answered s tid (tool_failed (append name ": an app's name is lowercase letters, digits and -, a letter first, at most 32")))))))))
+
+; The request req of build b, by method, sent to the proxy on the kept
+; connection or a new one, the turn waiting on it; a connection that
+; cannot be made the use's failure.
+(def build_ask ((s Agentd) (tid bytes) (b Build) (req bytes) (method (list int))) Agentd
+  (match s
+    ((Agentd u hear l began n doing net conn)
+      (let nt (match net ((Inet p rp) net) ((NoInet why) (inet_open)))
+        (match nt
+          ((NoInet why) (tool_answered (build_cleared (Agentd u hear l began n doing nt conn)) tid (tool_failed why)))
+          ((Inet ip irp)
+            (match (connection u nt conn)
+              ((Err why) (tool_answered (build_cleared (Agentd u hear l began n doing nt ((None HttpConn)))) tid (tool_failed (append "the proxy: " why))))
+              ((Ok c)
+                (let (dl (add (clock_ns) (build_idle_ns))
+                      al (alarm_at (.np u) dl))
+                  (match (http_send_as c method req)
+                    ((HttpGot c2 parts) (build_parts (build_now (Agentd u hear l began n doing nt (Some c2)) tid (.dl b dl)) parts))))))))))))
+
+; s with build b, of the use tid, as the tool running.
+(def build_now ((s Agentd) (tid bytes) (b Build)) Agentd
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl) (.doing s (Busy acts w (Some (Building tid b)) dl)))))
+
+; s with no tool running.
+(def build_cleared ((s Agentd)) Agentd
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl) (.doing s (Busy acts w ((None Running)) dl)))))
+
+; Whether what agentd does is waiting on a build.
+(def doing_build ((d Doing)) bool
+  (match d ((Idle) false) ((Busy acts w r dl) (is_building r))))
+
+; The build running and its use, if one is.
+(data Built (Built bytes Build) (NoBuild))
+(def build_of ((s Agentd)) Built
+  (match (.doing s)
+    ((Idle) (NoBuild))
+    ((Busy acts w r dl)
+      (match r
+        ((None) (NoBuild))
+        ((Some x) (match x ((Running tid run) (NoBuild)) ((Building tid b) (Built tid b))))))))
+
+; A build heard from: its deadline put off.
+(def build_alive ((s Agentd)) Agentd
+  (match (build_of s)
+    ((NoBuild) s)
+    ((Built tid b)
+      (let (d2 (add (clock_ns) (build_idle_ns))
+            a (alarm_at (.np (.u s)) d2))
+        (build_now s tid (.dl b d2))))))
+
+; The alarm: a build silent past its deadline is given up, its
+; connection reset, and its use failed.
+(def build_alarm ((s Agentd)) Agentd
+  (match (build_of s)
+    ((NoBuild) s)
+    ((Built tid b)
+      (if (lt (clock_ns) (.dl b))
+          s
+          (build_lost s tid "it said nothing for a minute")))))
+
+; The parts of a build's response, in order, each read onto it.
+(def build_parts ((s Agentd) (parts (list HttpPart))) Agentd
+  (if (is_empty parts) s (build_parts (build_part s (head parts)) (tail parts))))
+
+; A part of a build's response read: its head's status; its events, or
+; a refusal's or the image's body kept; its end; or the connection lost.
+(def build_part ((s Agentd) (p HttpPart)) Agentd
+  (match (build_of s)
+    ((NoBuild) s)
+    ((Built tid b)
+      (match p
+        ((HttpHead c reason hs) (build_now s tid (.code b c)))
+        ((HttpBody d)
+          (if (and (served (.code b)) (not (.image b)))
+              (match (sse_more (.sse b) d 0 (bytes_len d))
+                ((SseMore s2 es) (build_events s tid (.sse b s2) es)))
+              (build_now s tid (.pieces b (cons d (.pieces b))))))
+        ((HttpEnd keep) (build_ended (build_cleared s) tid b))
+        ((HttpBad why) (build_lost s tid why))
+        ((HttpFailed why) (build_lost s tid why))))))
+
+; A build's events es read: progress told to every port open, as the
+; tool's, and its end, done or failed, kept for the response's end.
+(def build_events ((s Agentd) (tid bytes) (b Build) (es (list SseEvent))) Agentd
+  (if (is_empty es)
+      (build_now s tid b)
+      (match (build_event (head es))
+        ((BuildProgress t) (build_events (.hear s (notices_told (.hear s) (cons (agent_progress_notice "build_app" (bytes_from_list t)) (nil bytes)))) tid b (tail es)))
+        ((BuildDone t) (build_events s tid (.done b (Some t)) (tail es)))
+        ((BuildFailed t) (build_events s tid (.why b t) (tail es)))
+        ((BuildNone) (build_events s tid b (tail es))))))
+
+; A build's response ended: its events' done, the image then asked for;
+; the image, written into the home, the use answered; or a refusal, or
+; a failure, its answer.
+(def build_ended ((s Agentd) (tid bytes) (b Build)) Agentd
+  (let (body (bytes_concat (rev (.pieces b)))
+        name (.name b))
+    (if (not (served (.code b)))
+        (tool_answered s tid (tool_failed (build_refused_text (.code b) body)))
+        (.image b)
+        (let why (build_written (setup_home (.u s)) name body)
+          (tool_answered s tid
+            (if (is_empty why)
+                (tool_ok (bytes_from_list (build_answer_text name (match (.done b) ((None) (nil int)) ((Some t) t)))))
+                (tool_failed (append "apps/" (append name (append ": " why)))))))
+        (match (.done b)
+          ((None) (tool_answered s tid (tool_failed (if (is_empty (.why b)) "the build ended without a result" (.why b)))))
+          ((Some t) (build_ask s tid (Build name true 0 (sse_new) (nil bytes) (Some t) (nil int) 0) (image_request (.mc (.u s)) name) "GET"))))))
+
+; A build's connection lost, why: reset, and the use failed.
+(def build_lost ((s Agentd) (tid bytes) (why (list int))) Agentd
+  (let s2 (.conn s (conn_reset (.conn s)))
+    (tool_answered (build_cleared s2) tid (tool_failed (append "the proxy: " why)))))

@@ -349,8 +349,9 @@ without which it will not start. It:
 
 - listens on the one address it is given, which must be loopback or
   private (RFC 1918), never `0.0.0.0`, or it says so and exits;
-- takes `POST /v1/messages` and `/v1/messages/count_tokens`, and `PUT`
-  and `GET /backup`, and nothing else, any other path or method a 404,
+- takes `POST /v1/messages` and `/v1/messages/count_tokens`, `PUT`
+  and `GET /backup`, `POST /build` and `GET /build/NAME/image`, and
+  nothing else, any other path or method a 404,
   and refuses a request without
   `Authorization: Bearer TOKEN`, compared in constant time, with a 401
   whose message is "the proxy refused this board's token"; its own
@@ -375,7 +376,54 @@ without which it will not start. It:
   the time in UTC; one that is not an archive, or names a path that is
   absolute or holds `..`, is a 400 and changes nothing. A `GET
   /backup` answers `DIR/home` packed as it is now, so a copy edited on
-  the host goes back as it is; 404 if there is none.
+  the host goes back as it is; 404 if there is none;
+- builds the agent's apps ([agent.md](agent.md#building-an-app)),
+  without going upstream: a `POST /build` of `{"name", "prompt"}` has
+  a Claude Code session on the host write and build the app NAME
+  ([builder.py](../tools/api-proxy/builder.py)), in a folder of its
+  own, `--builder-dir DIR/NAME` (`~/.local/state/l0s-builder` unless
+  given), outside the L0S tree, so that L0S's own rules for its changes
+  are not read there; NAME's first prompt starts its session, its
+  session ID kept in the folder, and each later one resumes it. Beside
+  the app's source is `l0s/`, a git worktree of L0S on the app's own
+  branch, `app/NAME`, made from L0S's `HEAD` at its first build (or the
+  branch, if it is there): the session reads L0S there, and may change
+  its libraries there in place when the app needs more than they have.
+  After a build that made a program, what it changed there is committed
+  on `app/NAME` by the builder, hooks skipped, the change's files named
+  in the summary; it reaches L0S only if the person merges the branch,
+  by hand. The
+  session is `claude -p`, its events read as stream-json, on
+  `--builder-model` (`claude-opus-5-5`) at `--builder-effort`
+  (`medium`), logged in as the host's Claude Code is: it is started
+  without `ANTHROPIC_API_KEY` or any other of the API's variables, and
+  a session whose first event names a key source other than `none` is
+  ended and the build failed. It runs `--restricted`,
+  `--strict-mcp-config` and `--permission-mode dontAsk`, so only what
+  is allowed runs: reading, writing and editing in its folder and its
+  worktree only, never `git`, which the builder alone runs, and the
+  commands `l0 check`, `fmt`,
+  `doc` and `spec`, `make -s -C L0S doc`, `graphify explain` and
+  `affected`, `ls`, `cat`, `head`, `tail`, `wc`, `grep` and `file`,
+  and `l0s-app-build`, first on its `PATH`
+  ([bin/l0s-app-build](../tools/api-proxy/bin/l0s-app-build)), which
+  checks and builds every `.l0` of its folder, `main.l0` last, with
+  the Makefile's `app-libs` (every program's libraries and a window's,
+  and those of each Makefile variable it is given), their files the
+  worktree's (`L0S_TREE`), into the program `NAME`. An appended system prompt says what an L0S app is, which
+  skills and examples to read, to build with `l0s-app-build` and with
+  no tests, spec or roadmap, to write what the toolkit lacks in the app
+  itself first and only then change the library in its worktree, and
+  to end with what the app does and which of L0S's files it changed. The
+  answer is server-sent events: `progress` `{"text"}`, the session's
+  text and each tool it uses, a line each; then `done` `{"summary",
+  "size"}`, once a program newer than any before is there and is an
+  ELF, or `failed` `{"why"}`; a comment every 15 s the session says
+  nothing; at most 30 minutes. `GET /build/NAME/image` is the program
+  then, 404 before. A name that is not a program's (lowercase letters,
+  digits and `-`, a letter first, at most 32), or no prompt, is a 400;
+  a build while another runs a 409, `busy_error`. A board whose
+  connection closes ends the session.
 
 On the board, [proto/model.l0](../user/lib/proto/model.l0) is the
 provider behind one interface. It finds the proxy and the token in two

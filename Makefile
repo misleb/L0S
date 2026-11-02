@@ -397,7 +397,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run agent-etc icon-sheet graph graph-hook
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run agent-etc icon-sheet graph graph-hook
 
 all: check test test-virt e2e
 
@@ -608,7 +608,7 @@ $(BUILD)/test/graphify-l0.ok: $(wildcard tools/graphify-l0/*.py) tools/graphify-
 # The API proxy's tests, against its stand-in, with the venv's Python,
 # which has aiohttp: the first after a clean needs the network, for pip.
 PROXY_VENV := $(BUILD)/proxy/venv
-$(BUILD)/test/api-proxy.ok: $(wildcard tools/api-proxy/*.py) $(PROXY_VENV)/.installed
+$(BUILD)/test/api-proxy.ok: $(wildcard tools/api-proxy/*.py) tools/api-proxy/bin/l0s-app-build $(PROXY_VENV)/.installed
 	@mkdir -p $(@D)
 	@$(call logged,$(PROXY_VENV)/bin/python tools/api-proxy/test_proxy.py,tools/api-proxy/test_proxy.py)
 
@@ -797,6 +797,12 @@ root: $(IMAGES) $(ICONS) $(ICONS2X) $(IMAGES_FACE)
 
 doc: $(BUILD)/l0sdoc
 	@$(BUILD)/l0sdoc "$(Q)" $(DOC_SRCS) -- $(PROG_DOC_SRCS)
+
+# The libraries an app the agent has built links (roadmap 0045,
+# tools/api-proxy/bin/l0s-app-build): every program's, a window's, and
+# those of each variable APP_LIBS names, as paths from here.
+app-libs:
+	@echo $(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(foreach v,$(APP_LIBS),$($(v)))
 
 # DOC_GAPS without the forms documented since, or gone: it only shrinks.
 doc-prune: $(BUILD)/l0sdoc

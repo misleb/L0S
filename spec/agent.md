@@ -157,6 +157,7 @@ newline and what it tells, as bytes:
 |---|---|
 | `agent text` and a newline and a piece | a piece of the answer as it comes, at most 4000 bytes a notice, cut where a character starts |
 | `agent tool NAME` and a newline and its input | a tool about to run, its input's JSON cut to 1 KB |
+| `agent progress NAME` and a newline and a line | how a tool still running is going: `build_app`'s, each line of the host's session |
 | `agent result NAME ok\|failed` and a newline and its text | its result, the start of it, 1 KB |
 | `agent compacted BEFORE AFTER` | the conversation compacted, its prompt's tokens before and after |
 | `agent done REASON` | the turn over: `end_turn`, `stop_sequence`, `max_tokens`, `error`, `rounds`, `stopped`, or another reason the API gave |
@@ -201,6 +202,7 @@ typed.
 |---|---|
 | `text` | the piece, as it is |
 | `tool` | `[NAME INPUT]` on a line of its own |
+| `progress` | `[NAME: FIRST LINE]` of its line |
 | `result` | `[ok]`, or `[failed: FIRST LINE]` of its text |
 | `compacted` | `[compacted]` |
 | `error` | `agent: WHY` |
@@ -235,6 +237,7 @@ tools' log, under its heading, "No tools have run yet." until one has.
 | `said` | a blank row, then "From SOURCE", dimmed, if SOURCE is neither `app` nor `console`, then the text in bold | a blank row, then `> ` and the text's first line, at most 48 bytes, dimmed |
 | `text` | joined onto the model's text before it, a paragraph a line, wrapped | |
 | `tool` | "Ran NAME, NAME...", dimmed, a line for each run of tools the text does not part | a row, dimmed, an arrow then its name and its input's first 60 bytes; a press opens it on "Input:" and its input, then "Running...", and once its result has come "Result:" or "Failed:" and its text; a press again closes it |
+| `progress` | | given to the newest run of its tool still waiting: open, it shows "Running:" and the latest line in place of "Running..." |
 | `result` | | given to the newest run of its tool still waiting; a failed one's row in red |
 | `compacted` | "The conversation was compacted.", dimmed | |
 | `error` | its text, in red | |
@@ -424,6 +427,33 @@ A `Run` keeps all this, pure: `run_heard` takes each message that came
 to its port, and `run_result` gives the answer. What goes to the model is
 UTF-8, as JSON's strings must be: a byte that is not part of UTF-8 is
 sent as `?`, and a cut moves back to where a character starts.
+
+### Building an app
+
+[build.l0](../user/sbin/agentd/build.l0). `build_app` (`name`,
+`prompt`) has a desktop app of the agent's own written and built on
+the host, by a Claude Code session the proxy drives on a stronger model
+than the chat's ([network.md](network.md#reaching-a-models-api)): a new
+app from what the prompt says, or, for a name built before, the same
+app changed, its session remembering it. The app is not part of L0S,
+and its source stays on the host, as does any change to L0S's
+libraries the app needed, made on a branch of its own there
+(`app/NAME`) for the person to merge or not.
+
+`agentd` sends `POST /build` on its connection to the proxy, once the
+model's answer before has ended on it, and the turn waits on the build
+as on a program: the events' `progress` lines are told to every port
+open as `agent progress build_app`, so the console and the Agent app
+show the session working; `done` is followed by `GET
+/build/NAME/image`, whose program is written whole to `apps/NAME` in
+the home (the directory made if need be; not kept in the home's
+history, as the host makes it again) and marked a program, as `cp`
+marks one. The answer is `built NAME, in apps/NAME of your home; start
+it with sh: run apps/NAME &`, a blank line, and the session's summary.
+A name not a program's, a refusal of the proxy's (its status and
+message), the build's `failed`, or a minute with nothing from the
+proxy, which says something every 15 s, fails it; `stop` resets its
+connection, and the proxy ends the session.
 
 ## Limits
 

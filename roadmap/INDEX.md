@@ -36,8 +36,7 @@ move independently, so several can be active at once.
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | idea | – | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | idea | – | – | toolkit.md |
-| [0045](0045-agent-builder-mcp.md) The agent builds programs for itself, through an MCP server on the host | Agent | idea | – | 0043 | agent.md, programs.md, testing.md |
-| [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 | agent.md |
+| [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 (met) | agent.md |
 | [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
 | [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
 | [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | active | 4/5 | 0043 | agent.md, programs.md, boot.md, toolkit.md, testing.md |
@@ -91,7 +90,7 @@ graph LR
   0042 --> 0043[0043 agentd]
   0043 --> 0053[0053 agent on its own]
   0043 --> 0044[0044 agent's home]
-  0043 --> 0045[0045 builder MCP]
+  0043 --> 0045[0045 app builder]
   0045 --> 0046[0046 self-knowledge]
   0043 --> 0049[0049 agent chat app]
   0049 --> 0058[0058 agent's reach]
@@ -139,6 +138,7 @@ graph LR
 | [0042](0042-api-through-host-proxy.md) A model's API reached through a proxy on the host | Agent | 2026-10-30 |
 | [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | 2026-10-30 |
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | 2026-10-30 |
+| [0045](0045-agent-app-builder.md) The agent has apps built for itself, by a Claude Code session on the host | Agent | 2026-10-31 |
 | [0054](0054-l0-adoption.md) L0S written in the L0 of roadmap 0132 to 0144 | Tooling | 2026-10-30 |
 | [0055](0055-network-time.md) The time from the network, once it comes up | Network | 2026-10-30 |
 | [0056](0056-time-zones.md) Time zones: the clock in UTC, shown in US Pacific time | Desktop | 2026-10-30 |

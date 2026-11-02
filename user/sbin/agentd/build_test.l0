@@ -1,0 +1,74 @@
+; build_test.l0 -- build_app's requests and what their answers say,
+; without the proxy: the name's rule, the two requests, the events read,
+; and the answers made of them. The e2e case agent_build builds through
+; the stand-ins.
+
+; A proxy at 10.0.2.2:8080 with the token t0k.
+(def conf () ModelConf (ModelConf "10.0.2.2" 8080 "m" 1024 "t0k"))
+
+; An event of the stream, as sse.l0 reads it.
+(def ev ((name (list int)) (d (list int))) SseEvent (SseEvent (bytes_from_list name) (bytes_from_list d)))
+
+; What an event says, as text.
+(def ev_text ((e BuildEv)) (list int)
+  (match e
+    ((BuildProgress t) (append "progress " t))
+    ((BuildDone t) (append "done " t))
+    ((BuildFailed t) (append "failed " t))
+    ((BuildNone) "none")))
+
+; A program's names: letters, digits and -, a letter first, at most 32.
+(def test_name_ok () int
+  (add (check_bool "clock" (build_name_ok "clock") true)
+       (check_bool "two-words2" (build_name_ok "two-words2") true)))
+(def test_name_refused () int
+  (add (check_bool "capital" (build_name_ok "Clock") false)
+       (add (check_bool "digit first" (build_name_ok "2048") false)
+            (check_bool "a path" (build_name_ok "../x") false))))
+(def test_name_long () int
+  (add (check_bool "32" (build_name_ok (repeat_char 97 32 (nil int))) true)
+       (check_bool "33" (build_name_ok (repeat_char 97 33 (nil int))) false)))
+(def repeat_char ((c int) (n int) (acc (list int))) (list int) (if (le n 0) acc (repeat_char c (sub n 1) (cons c acc))))
+
+; POST /build with the token and the JSON body; its head ends before the
+; body.
+(def test_build_request () int
+  (let r (bytes_to_list (build_request (conf) "clock" "a clock"))
+    (add (check_str "line" (up_to 13 r) "POST /build HTTP/1.1")
+         (add (check_bool "token" (contains r "Authorization: Bearer t0k") true)
+              (check_bool "body" (ends_with r "{\"name\":\"clock\",\"prompt\":\"a clock\"}") true)))))
+
+; GET /build/NAME/image, with the token, no body.
+(def test_image_request () int
+  (let r (bytes_to_list (image_request (conf) "clock"))
+    (add (check_str "line" (up_to 13 r) "GET /build/clock/image HTTP/1.1")
+         (check_bool "token" (contains r "Authorization: Bearer t0k") true))))
+
+; Each of the stream's kinds, and one not known.
+(def test_events () int
+  (add (check_str "progress" (ev_text (build_event (ev "progress" "{\"text\":\"Bash l0s-app-build clock\"}"))) "progress Bash l0s-app-build clock")
+       (add (check_str "done" (ev_text (build_event (ev "done" "{\"summary\":\"A clock.\",\"size\":9}"))) "done A clock.")
+            (check_str "failed" (ev_text (build_event (ev "failed" "{\"why\":\"no program\"}"))) "failed no program"))))
+(def test_events_unknown () int
+  (add (check_str "other" (ev_text (build_event (ev "other" "{}"))) "none")
+       (check_str "not json" (ev_text (build_event (ev "done" "nope"))) "none")))
+
+; The answer says where the app is and how to start it, then the
+; summary.
+(def test_answer () int
+  (check_str "answer" (build_answer_text "clock" "A clock.")
+    "built clock, in apps/clock of your home; start it with sh: run apps/clock &\n\nA clock."))
+
+; A refusal says its status and the error's message.
+(def test_refused () int
+  (add (check_str "busy" (build_refused_text 409 (bytes_from_list "{\"type\":\"error\",\"error\":{\"type\":\"busy_error\",\"message\":\"another app is being built\"}}"))
+         "the proxy refused the build (409): another app is being built")
+       (check_str "plain" (build_refused_text 404 (bytes_from_list "Not Found")) "the proxy refused the build (404): Not Found")))
+
+; The program goes in apps of the home.
+(def test_app_path () int
+  (check_str "path" (build_app_path "/Volumes/data/agent" "clock") "/Volumes/data/agent/apps/clock"))
+
+; build_app is among the tools the model is given, needing both inputs.
+(def test_defined () int
+  (check_bool "defined" (contains (bytes_to_list (json_bytes (JArr (tool_defs)))) "\"name\":\"build_app\"") true))

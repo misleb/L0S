@@ -1,0 +1,125 @@
+; build.l0 -- agentd's build_app (roadmap 0045): an app the agent asks
+; for, written and built on the host by the proxy's builder, a Claude
+; Code session of the app's own (tools/api-proxy/builder.py), and its
+; program written to apps/NAME in the home. The requests and what their
+; answers say, purely; agentd.l0 sends them and reads their parts as
+; they come:
+;
+;   POST /build {"name", "prompt"}   server-sent events: progress
+;                                    {"text"} as the session works, then
+;                                    done {"summary"} or failed {"why"}
+;   GET /build/NAME/image            the program, once done
+;
+; The program is written whole, not kept in the home's history: it is
+; the host's to make again.
+
+; A build under way: the app's name; whether its image is being fetched
+; (else its events read); the answer's status (0 until its head); its
+; event stream's reader; a refusal's or the image's body so far,
+; reversed; the summary, once done; why it failed, if it said; and when
+; it is given up if the proxy says nothing more.
+(data Build (Build (name (list int)) (image bool) (code int) (sse Sse) (pieces (list bytes))
+                   (done (Option (list int))) (why (list int)) (dl int)))
+
+; A build of the app name begun: its events awaited.
+(def build_new ((name (list int))) Build
+  (Build name false 0 (sse_new) (nil bytes) ((None (list int))) (nil int) 0))
+
+; How long a build may say nothing before it is given up: the proxy
+; says something every 15 s.
+(def build_idle_ns () int 60000000000)
+
+; Whether name is build_app's.
+(def is_build_tool ((name (list int))) bool (eq name "build_app"))
+
+; build_app's definition.
+(def build_tool_defs () (list Json)
+  (cons (tool_def "build_app"
+          "Have a desktop app of your own built for you, by a stronger model on the host, from what you say it should do and look like; or, given the name of one built before, changed as you say, by the same session, which remembers it. It is written in L0 against L0S's toolkit, built, and put in apps/NAME of your home, which takes minutes; you are told what it does and how to start it (sh: run apps/NAME &). Its source stays on the host."
+          (cons (tool_prop "name" "string" "The app's program name: lowercase letters, digits and -, a letter first, at most 32")
+            (cons (tool_prop "prompt" "string" "What the app should do and look like, or what to change in it") (nil JField))))
+        (nil Json)))
+
+; Whether n may name an app: as the builder's names, lowercase letters,
+; digits and -, a letter first, 1 to 32 of them.
+(def build_name_ok ((n (list int))) bool
+  (and (and (not (is_empty n)) (le (length n) 32))
+       (and (is_lower (head n)) (build_name_rest (tail n)))))
+(def build_name_rest ((cs (list int))) bool
+  (if (is_empty cs)
+      true
+      (let c (head cs)
+        (and (or (is_lower c) (or (and (ge c 48) (le c 57)) (eq c 45))) (build_name_rest (tail cs))))))
+
+; Whether c is a lowercase letter.
+(def is_lower ((c int)) bool (and (ge c 97) (le c 122)))
+
+; The proxy's headers: the board's token, and what is sent.
+(def build_headers ((c ModelConf) (more (list HttpHeader))) (list HttpHeader)
+  (cons (HttpHeader "Authorization" (append "Bearer " (.token c))) more))
+
+; The request to build the app name from prompt, as bytes.
+(def build_request ((c ModelConf) (name (list int)) (prompt (list int))) bytes
+  (http_request "POST" (http_host_text (.host c) (.port c)) "/build"
+    (build_headers c (cons (HttpHeader "Content-Type" "application/json") (cons (HttpHeader "Accept" "text/event-stream") (nil HttpHeader))))
+    (json_bytes (json_obj (cons (json_field "name" (json_str name)) (cons (json_field "prompt" (json_str prompt)) (nil JField)))))))
+
+; The request for the app name's program, as bytes.
+(def image_request ((c ModelConf) (name (list int))) bytes
+  (http_request "GET" (http_host_text (.host c) (.port c)) (append "/build/" (append name "/image"))
+    (build_headers c (nil HttpHeader)) (bytes_from_list "")))
+
+; What an event of a build's stream says: the session's progress, the
+; app built and its summary, the build failed and why, or nothing known.
+(data BuildEv (BuildProgress (list int)) (BuildDone (list int)) (BuildFailed (list int)) (BuildNone))
+
+; The event e as a BuildEv.
+(def build_event ((e SseEvent)) BuildEv
+  (let (kind (bytes_to_list (.name e))
+        d (.is_data e))
+    (match (json_whole d 0 (bytes_len d))
+      ((Err why) (BuildNone))
+      ((Ok v)
+        (if (eq kind "progress") (BuildProgress (build_field v "text"))
+            (eq kind "done") (BuildDone (build_field v "summary"))
+            (eq kind "failed") (BuildFailed (build_field v "why"))
+            (BuildNone))))))
+
+; The text of v's field name, or nothing.
+(def build_field ((v Json) (name (list int))) (list int)
+  (match (tool_str v name) ((None) (nil int)) ((Some t) t)))
+
+; Where the app name's program goes in home, and its directory.
+(def build_apps_dir ((home (list int))) (list int) (append home "/apps"))
+(def build_app_path ((home (list int)) (name (list int))) (list int) (append (build_apps_dir home) (append "/" name)))
+
+; The program b of the app name written into home's apps and marked a
+; program, as cp marks one (a volume that keeps no marks, -8, runs it
+; anyway): nothing, or why not. The directory is made first if need be.
+(def build_written ((home (list int)) (name (list int)) (b bytes)) (list int)
+  (let (mk (fs_mkdir (build_apps_dir home))
+        path (build_app_path home name)
+        why (write_whole path b))
+    (if (not (is_empty why))
+        why
+        (let code (fs_chmod path true)
+          (if (any_eq code (cons 0 (cons -8 (nil int)))) "" (append "not marked a program: " (io_error code)))))))
+
+; build_app's answer once the app name is in the home: where, how it is
+; started, and the session's summary.
+(def build_answer_text ((name (list int)) (summary (list int))) (list int)
+  (append "built " (append name (append ", in apps/" (append name (append " of your home; start it with sh: run apps/" (append name (append " &" (if (is_empty summary) "" (append "\n\n" summary))))))))))
+
+; A refusal of the proxy's as build_app's failure: its status and what
+; its body says.
+(def build_refused_text ((code int) (body bytes)) (list int)
+  (append "the proxy refused the build (" (append (digits code) (append "): " (build_refusal body)))))
+
+; The message of an API-shaped error body, or the body itself.
+(def build_refusal ((body bytes)) (list int)
+  (match (json_whole body 0 (bytes_len body))
+    ((Err why) (bytes_to_list body))
+    ((Ok v)
+      (match (json_get v "error")
+        ((None) (bytes_to_list body))
+        ((Some e) (match (tool_str e "message") ((None) (bytes_to_list body)) ((Some m) m)))))))

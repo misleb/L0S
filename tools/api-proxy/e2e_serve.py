@@ -9,6 +9,9 @@ answers one that fails 400, saying why. Each request the stand-in gets
 and each usage line is written to standard output, which e2e.sh keeps
 in build/e2e/NAME.serve; the usage file is build/e2e/NAME.usage.jsonl,
 and the agent's backup (/backup) build/e2e/NAME.backup, emptied first.
+With CASE/builder, the proxy builds apps too (/build), in
+build/e2e/NAME.apps, emptied first, by fake_claude.py, whose program is
+a copy of the file CASE/builder names, from the top of the project.
 Runs until it is stopped. tests/e2e/ask's serve line runs it."""
 
 import asyncio
@@ -19,6 +22,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python -I leaves the script's own directory out
 
+import builder as builders  # noqa: E402
 import proxy  # noqa: E402
 import standin  # noqa: E402
 
@@ -42,7 +46,15 @@ async def run(port, case):
         os.remove(usage)
     backup = os.path.join(HERE, "..", "..", "build", "e2e", name + ".backup")
     shutil.rmtree(backup, ignore_errors=True)
-    app = proxy.make_app(token, "http://127.0.0.1:%d" % up_port, KEY, usage, log=say, backup_dir=backup)
+    builder = None
+    if os.path.exists(os.path.join(case, "builder")):
+        with open(os.path.join(case, "builder")) as f:
+            os.environ["FAKE_CLAUDE_IMAGE"] = os.path.abspath(os.path.join(HERE, "..", "..", f.readline().strip()))
+        apps = os.path.join(HERE, "..", "..", "build", "e2e", name + ".apps")
+        shutil.rmtree(apps, ignore_errors=True)
+        builder = builders.Builder(apps, cli=[sys.executable, os.path.join(HERE, "fake_claude.py")], repo=None)
+    app = proxy.make_app(token, "http://127.0.0.1:%d" % up_port, KEY, usage, log=say, backup_dir=backup,
+                         builder=builder)
     await standin.serve(app, "127.0.0.1", port)
     say("e2e_serve: the proxy on 127.0.0.1:%d, the stand-in on %d" % (port, up_port))
     await asyncio.Event().wait()

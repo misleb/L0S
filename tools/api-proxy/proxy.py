@@ -3,12 +3,13 @@
 over HTTPS with the host's key.
 
   proxy.py --listen ADDR:PORT --token-file FILE [--upstream URL] [--usage FILE]
-           [--backup DIR]
+           [--backup DIR] [--builder-dir DIR] [--builder-model M] [--builder-effort E]
   proxy.py --day [YYYY-MM-DD] [--usage FILE]
 
 It listens on ADDR, which must be a loopback or a private (RFC 1918)
 address, never 0.0.0.0, and takes POST /v1/messages and
-/v1/messages/count_tokens, and PUT and GET /backup, and nothing else
+/v1/messages/count_tokens, PUT and GET /backup, POST /build and GET
+/build/NAME/image, and nothing else
 (404). A request without Authorization: Bearer TOKEN, the first line of
 the token file, is 401.
 
@@ -19,6 +20,17 @@ DIR/archive/STAMP.cpio; one that is not a home's archive, or names a
 path outside it, is 400 and changes nothing. A GET answers DIR/home
 packed as it is now, so a copy edited on the host goes back; 404 if
 there is none.
+
+POST /build, {"name": NAME, "prompt": TEXT}, has an app of the agent's
+built (roadmap 0045) by a Claude Code session on this host, the app's
+own, in --builder-dir (~/.local/state/l0s-builder unless given), on
+--builder-model (claude-opus-5-5) at --builder-effort (medium), logged in
+as this host's Claude Code is, never with ANTHROPIC_API_KEY (builder.py).
+The answer is server-sent events: progress, each {"text"}, as the
+session works, then done, {"summary", "size"}, or failed, {"why"}; a
+comment every 15 s it says nothing. GET /build/NAME/image is the program
+then. A name that is not a program's is 400; a build while another runs
+409, as one runs at a time.
 
 For the API's paths:
 Otherwise its body goes upstream (https://api.anthropic.com unless given)
@@ -44,11 +56,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # python -I leaves the script's own directory out
 
+import builder as builders  # noqa: E402
 import cpio  # noqa: E402
 import usage  # noqa: E402
 
 DEFAULT_USAGE = os.path.join(HERE, "..", "..", "build", "proxy", "usage.jsonl")
 DEFAULT_BACKUP = os.path.join(HERE, "..", "..", "build", "proxy", "backup")
+DEFAULT_BUILDER = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "l0s-builder")
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 PATHS = ("/v1/messages", "/v1/messages/count_tokens")
 PASSED = ("content-type", "anthropic-version", "anthropic-beta")
@@ -127,11 +141,19 @@ def backup_get(root):
     return cpio.pack(cpio.gather(home))
 
 
-def make_app(token, upstream, key, usage_path, log=None, backup_dir=None):
+def sse(kind, data):
+    """One server-sent event of kind, its data data as JSON."""
+    return ("event: %s\ndata: %s\n\n" % (kind, json.dumps(data))).encode()
+
+
+def make_app(token, upstream, key, usage_path, log=None, backup_dir=None, builder=None, beat=15.0):
     """The proxy as an aiohttp application: the token boards must give,
     the upstream's base URL, the key it adds, and the usage file. log, if
     given, is called with each usage line too. With backup_dir, it also
-    keeps the agent's home there: PUT /backup and GET /backup."""
+    keeps the agent's home there: PUT /backup and GET /backup. With
+    builder (builder.py's Builder), it builds the agent's apps: POST
+    /build and GET /build/NAME/image, a comment sent every beat seconds
+    a build says nothing, so the board's connection is not idle."""
     from aiohttp import ClientError, ClientSession, ClientTimeout, web
     client = web.AppKey("client", ClientSession)
 
@@ -160,9 +182,78 @@ def make_app(token, upstream, key, usage_path, log=None, backup_dir=None):
         print("proxy: backup of %d entries in %s" % (n, os.path.join(backup_dir, "home")), file=sys.stderr, flush=True)
         return web.Response(status=200, body=json.dumps({"entries": n}).encode(), content_type="application/json")
 
+    async def build(request):
+        if not bearer_ok(request.headers.get("Authorization", ""), token):
+            return refuse(401, "authentication_error", "the proxy refused this board's token")
+        try:
+            ask = json.loads(await request.read())
+        except ValueError:
+            ask = None
+        if not isinstance(ask, dict) or not isinstance(ask.get("prompt"), str) or not ask["prompt"].strip():
+            return refuse(400, "invalid_request_error", "a build is {\"name\": NAME, \"prompt\": TEXT}")
+        name = ask.get("name")
+        if not builders.name_ok(name):
+            return refuse(400, "invalid_request_error", "an app's name is lowercase letters, digits and -, a letter first, at most 32")
+        if builder.busy:
+            return refuse(409, "busy_error", "another app is being built; one is built at a time")
+        builder.busy = True
+        try:
+            out = web.StreamResponse(status=200)
+            out.headers["Content-Type"] = "text/event-stream"
+            await out.prepare(request)
+            events = asyncio.Queue()
+
+            async def pump():
+                try:
+                    async for e in builder.build(name, ask["prompt"]):
+                        await events.put(e)
+                except Exception as e:  # a session that could not start
+                    await events.put(("failed", "the session could not run: %s" % e))
+                await events.put(None)
+
+            task = asyncio.create_task(pump())
+            try:
+                while True:
+                    try:
+                        e = await asyncio.wait_for(events.get(), beat)
+                    except asyncio.TimeoutError:
+                        await out.write(b": building\n\n")
+                        continue
+                    if e is None:
+                        break
+                    kind, text = e
+                    if kind == "done":
+                        await out.write(sse("done", {"summary": text, "size": len(builder.image(name) or b"")}))
+                    elif kind == "failed":
+                        await out.write(sse("failed", {"why": text}))
+                    else:
+                        await out.write(sse("progress", {"text": text}))
+                    if kind != "progress":
+                        print("proxy: build %s: %s" % (name, kind), file=sys.stderr, flush=True)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await out.write_eof()
+            return out
+        finally:
+            builder.busy = False
+
+    async def image(request, name):
+        if not bearer_ok(request.headers.get("Authorization", ""), token):
+            return refuse(401, "authentication_error", "the proxy refused this board's token")
+        body = builder.image(name) if builders.name_ok(name) else None
+        if body is None:
+            return refuse(404, "not_found_error", "no app %s has been built" % name)
+        return web.Response(status=200, body=body, content_type="application/octet-stream")
+
     async def handle(request):
         if request.path == "/backup" and backup_dir and request.method in ("GET", "PUT"):
             return await backup(request)
+        if builder and request.path == "/build" and request.method == "POST":
+            return await build(request)
+        parts = request.path.split("/")
+        if builder and request.method == "GET" and len(parts) == 4 and parts[1] == "build" and parts[3] == "image":
+            return await image(request, parts[2])
         if request.method != "POST" or request.path not in PATHS:
             return refuse(404, "not_found_error", "the proxy forwards only POST %s" % " and ".join(PATHS))
         if not bearer_ok(request.headers.get("Authorization", ""), token):
@@ -263,6 +354,9 @@ def main(argv):
     p.add_argument("--upstream", default=DEFAULT_UPSTREAM)
     p.add_argument("--usage", default=DEFAULT_USAGE)
     p.add_argument("--backup", default=DEFAULT_BACKUP)
+    p.add_argument("--builder-dir", default=DEFAULT_BUILDER)
+    p.add_argument("--builder-model", default=builders.DEFAULT_MODEL)
+    p.add_argument("--builder-effort", default=builders.DEFAULT_EFFORT)
     p.add_argument("--day", nargs="?", const="", default=None, metavar="YYYY-MM-DD")
     a = p.parse_args(argv)
     if a.day is not None:
@@ -282,12 +376,14 @@ def main(argv):
     if token is None:
         print("proxy: " + why, file=sys.stderr)
         return 1
-    app = make_app(token, a.upstream, key, a.usage, log=lambda line: print(line, flush=True), backup_dir=a.backup)
+    b = builders.Builder(a.builder_dir, a.builder_model, a.builder_effort)
+    app = make_app(token, a.upstream, key, a.usage, log=lambda line: print(line, flush=True), backup_dir=a.backup,
+                   builder=b)
 
     async def run():
         await serve(app, where[0], where[1])
-        print("proxy: on %s:%d, to %s, usage in %s, the agent's backup in %s"
-              % (where[0], where[1], a.upstream, a.usage, a.backup), flush=True)
+        print("proxy: on %s:%d, to %s, usage in %s, the agent's backup in %s, its apps built in %s by %s"
+              % (where[0], where[1], a.upstream, a.usage, a.backup, a.builder_dir, a.builder_model), flush=True)
         await asyncio.Event().wait()
 
     try:
