@@ -30,8 +30,8 @@ To be written. Open: whether it listens all the time or only after a
 key or a wake word; whether a phrase heard while a turn runs is held,
 said after, or dropped; whether Whistle runs in `speech` itself or in
 a server of its own that other programs ask too; whether the agent
-answers speech aloud, which would want text to speech and is a goal of
-its own.
+answers speech aloud, which would want text to speech, a goal of its
+own (0062).
 
 ## Spec changes
 

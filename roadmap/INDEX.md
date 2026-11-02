@@ -46,6 +46,7 @@ move independently, so several can be active at once.
 | [0057](0057-tz-database.md) Any time zone, by the tz database's rules | Desktop | idea | – | 0029 | desktop.md, fat32.md, programs.md |
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, programs.md, testing.md |
+| [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | ready | 0/7 | – | speech.md, sound.md, programs.md, testing.md |
 ## Ready
 
 [0049](0049-agent-chat-app.md) is active: `agentd`'s one kept
@@ -63,6 +64,8 @@ release (the system, the boot files, Whistle's model) from the
 proxy, fresh or as an update, from `install --net` or the Installer
 app, and sets the Pi 5's boot order; it works on QEMU, and a fresh
 install and an update on a Pi 5 are next.
+[0062](0062-text-to-speech.md), Piper's voices in L0, is ready: its
+first step chooses the voice and writes the oracle on the host.
 Every
 other goal left is an `idea`, without steps. On
 the display,
