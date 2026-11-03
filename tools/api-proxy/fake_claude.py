@@ -7,7 +7,10 @@ session gives: init (its apiKeySource FAKE_CLAUDE_KEY_SOURCE, none unless
 set), an assistant's text and tool use, and after FAKE_CLAUDE_SLEEP
 seconds a result, "built NAME". With FAKE_CLAUDE_EDIT, a path in its
 L0S tree (L0S_TREE), it adds a line to that file, as a session changing
-a library in place. Unless FAKE_CLAUDE_BUILD is no it first
+a library in place. With FAKE_CLAUDE_PREVIEW, a PNG's path, it first
+copies that to preview/main.png, as l0s-app-preview paints a scene,
+before it says anything, so the builder finds it at its first line. Unless
+FAKE_CLAUDE_BUILD is no it first
 writes ./NAME, NAME its folder's, as a program: a copy of the file
 FAKE_CLAUDE_IMAGE names, a real one for an e2e case's board, or else an
 ELF header and the prompt."""
@@ -33,6 +36,11 @@ def main(argv):
     model = argv[argv.index("--model") + 1] if "--model" in argv else "?"
     prompt = argv[argv.index("-p") + 1] if "-p" in argv else ""
     name = os.path.basename(os.getcwd())
+    preview = os.environ.get("FAKE_CLAUDE_PREVIEW")
+    if preview:
+        os.makedirs("preview", exist_ok=True)
+        with open(preview, "rb") as f, open(os.path.join("preview", "main.png"), "wb") as g:
+            g.write(f.read())
     say({"type": "system", "subtype": "init", "model": model,
          "apiKeySource": os.environ.get("FAKE_CLAUDE_KEY_SOURCE", "none")})
     say({"type": "assistant", "message": {"content": [

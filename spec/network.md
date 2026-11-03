@@ -476,7 +476,12 @@ without which it will not start. It:
   only then change the library in its worktree; and to end with what
   the app does and which of L0S's files it changed. The
   answer is server-sent events: `progress` `{"text"}`, the session's
-  text and each tool it uses, a line each; then `done` `{"summary",
+  text and each tool it uses, a line each; `preview`, for each scene
+  `l0s-app-preview` writes into the app's `preview/SCENE.png` during
+  the build, found when the session's next line comes, its data not
+  JSON but two lines, the scene's name (lowercase letters, digits, `-`
+  and `_`, at most 32) and its PNG, recompressed at zlib's best, in
+  base64, 8 MB at most before it; then `done` `{"summary",
   "size"}`, once a program newer than any before is there and is an
   ELF, or `failed` `{"why"}`; a comment every 15 s the session says
   nothing; at most 30 minutes. `GET /build/NAME/image` is the program

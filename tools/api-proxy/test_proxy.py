@@ -3,14 +3,17 @@ loopback: no key and no network. Run by make test with the venv's Python
 (build/proxy/venv), which has aiohttp."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -478,15 +481,27 @@ FAKE = os.path.join(HERE, "fake_claude.py")
 
 
 def events_of(body):
-    """A server-sent body's events, (kind, data) each, and its comments."""
+    """A server-sent body's events, (kind, data) each, and its comments:
+    the data lines joined by newlines, as JSON but for a preview's, kept
+    as text."""
     out, comments = [], 0
     for block in body.decode().split("\n\n"):
         if block.startswith(":"):
             comments += 1
         elif block.strip():
-            fields = dict(line.split(": ", 1) for line in block.split("\n"))
-            out.append((fields["event"], json.loads(fields["data"])))
+            lines = [line.split(": ", 1) for line in block.split("\n")]
+            kind = [v for k, v in lines if k == "event"][0]
+            data = "\n".join(v for k, v in lines if k == "data")
+            out.append((kind, data if kind == "preview" else json.loads(data)))
     return out, comments
+
+
+def stored_png(w, h):
+    """A w by h RGB PNG of stored blocks, as l0s-app-preview writes one:
+    a gradient, so recompressing it shrinks it."""
+    rows = b"".join(b"\x00" + bytes((x * 255 // max(1, w - 1)) % 256 for x in range(w) for _ in range(3)) for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + builders.png_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + builders.png_chunk(b"IDAT", zlib.compress(rows, 0)) + builders.png_chunk(b"IEND", b""))
 
 
 class Building(unittest.IsolatedAsyncioTestCase):
@@ -512,7 +527,8 @@ class Building(unittest.IsolatedAsyncioTestCase):
         self.log = os.path.join(self.tmp.name, "claude.jsonl")
         self.env = {"FAKE_CLAUDE_LOG": self.log, "ANTHROPIC_API_KEY": KEY}
         self.saved = {k: os.environ.get(k) for k in list(self.env) + ["FAKE_CLAUDE_KEY_SOURCE", "FAKE_CLAUDE_BUILD",
-                                                                      "FAKE_CLAUDE_SLEEP", "FAKE_CLAUDE_EDIT"]}
+                                                                      "FAKE_CLAUDE_SLEEP", "FAKE_CLAUDE_EDIT",
+                                                                      "FAKE_CLAUDE_PREVIEW"]}
         os.environ.update(self.env)
         self.repo = self.repo_made() if self.with_repo else None
         self.builder = builders.Builder(os.path.join(self.tmp.name, "apps"), cli=[sys.executable, FAKE], repo=self.repo)
@@ -553,6 +569,40 @@ class Building(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1][1], {"summary": "built clock", "size": 11})
         async with self.client.get(self.base + "/build/clock/image", headers=self.auth()) as r:
             self.assertEqual((r.status, await r.read()), (200, b"\x7fELFa clock"))
+
+    async def test_preview_streamed(self):
+        png = stored_png(64, 32)
+        src = os.path.join(self.tmp.name, "main.png")
+        with open(src, "wb") as f:
+            f.write(png)
+        os.environ["FAKE_CLAUDE_PREVIEW"] = src
+        events, _ = events_of((await self.build())[1])
+        kinds = [k for k, _ in events]
+        # Once, before done; when depends on when the session's lines are
+        # read after it is written.
+        self.assertEqual([k for k in kinds if k != "preview"], ["progress", "progress", "progress", "done"])
+        self.assertEqual(kinds.count("preview"), 1)
+        self.assertLess(kinds.index("preview"), kinds.index("done"))
+        scene, b64 = events[kinds.index("preview")][1].split("\n")
+        sent = base64.b64decode(b64)
+        self.assertEqual(scene, "main")
+        self.assertLess(len(sent), len(png))
+        # The same pixels, deflated: the IDAT's bytes inflate to the stored ones.
+        self.assertEqual(zlib.decompress(sent[sent.index(b"IDAT") + 4:-16]), zlib.decompress(png[png.index(b"IDAT") + 4:-16]))
+
+    async def test_preview_only_new(self):
+        d = os.path.join(self.tmp.name, "apps", "clock", "preview")
+        os.makedirs(d)
+        with open(os.path.join(d, "old.png"), "wb") as f:
+            f.write(stored_png(4, 4))
+        with open(os.path.join(d, "Bad Name.png"), "wb") as f:
+            f.write(stored_png(4, 4))
+        events, _ = events_of((await self.build())[1])
+        self.assertNotIn("preview", [k for k, _ in events])
+
+    def test_recompressed_refuses(self):
+        with self.assertRaises(ValueError):
+            builders.recompressed(b"not a png")
 
     async def test_session_resumed(self):
         await self.build()

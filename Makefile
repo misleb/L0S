@@ -334,6 +334,11 @@ UI_TESTING := user/lib/ui/testing.l0
 # preview.l0, make preview and l0s-app-preview, never by an app.
 PNG        := user/lib/format/png.l0
 UI_PREVIEW := $(CRC32) $(PNG) user/lib/ui/preview.l0
+# PNG images, read: zlib's inflate, and PNGs of 8-bit gray, RGB, palette
+# and alpha decoded into the toolkit's ARGB words and fitted to a box.
+INFLATE    := user/lib/format/inflate.l0
+PNGREAD    := $(INFLATE) user/lib/format/png_read.l0
+BASE64     := user/lib/format/base64.l0
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
 LIBS_hvs        := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER) $(MAILBOX)
@@ -355,7 +360,7 @@ LIBS_http       := $(HTTP) $(JSON) $(SSE)
 LIBS_ntp        := $(INETLIB) $(CLOCK) $(NTPLIB)
 LIBS_ask        := $(MODELLIB)
 LIBS_agent      := $(AGENTLIB) $(MODELLIB) $(AGENTHOME)
-LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG)
+LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG) $(BASE64)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(SHA256) $(BOOTLOADER)
@@ -373,7 +378,7 @@ LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_todo       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
-LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB)
+LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB) $(PATHS) $(PNGREAD)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_installer  := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(RELEASE) $(BOOTLOADER)
 LIBS_fontview   := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
@@ -615,6 +620,9 @@ $(call l0_test,$(BASE) $(DECODER) user/lib/speech/decoder_test.l0)
 $(call l0_test,$(BASE) $(CLI) $(TRANSCRIBE) user/lib/speech/transcribe_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(CRC32) $(PNG) user/lib/format/png_test.l0)
+$(call l0_test,$(BASE) $(CRC32) $(PNG) $(INFLATE) user/lib/format/inflate_test.l0)
+$(call l0_test,$(BASE) $(CRC32) $(PNG) $(PNGREAD) user/lib/format/png_read_test.l0)
+$(call l0_test,$(BASE64) user/lib/format/base64_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
 $(call l0_test,$(ULIB) $(RELEASE) user/lib/sys/release_test.l0)
 $(call l0_test,$(BASE) $(SHA256) $(PIEEPROMLIB) user/lib/format/pieeprom_test.l0)

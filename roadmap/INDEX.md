@@ -46,11 +46,16 @@ move independently, so several can be active at once.
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, programs.md, testing.md |
 | [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | ready | 0/7 | – | speech.md, sound.md, programs.md, testing.md |
+| [0066](0066-agent-images.md) The agent shows images: a build's previews as it builds | Agent | active | 4/7 | 0049, 0065 (met) | agent.md, network.md, toolkit.md, programs.md, testing.md |
 ## Ready
 
 [0049](0049-agent-chat-app.md) is active: `agentd`'s one kept
 conversation and the Agent app, with its Tools pane, are in, and its
 screen test is next.
+[0066](0066-agent-images.md) is active: a build's previews are
+streamed to the board and shown in the Agent app's Images pane as the
+session paints them; keeping them for a window that opens later is
+next.
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its
 container, tokenizer, front end, stem, encoder and decoder are in,
 checked against the reference rebuilt from `whistle.cact` (the same
@@ -94,6 +99,8 @@ graph LR
   0045 --> 0065[0065 apps from a description]
   0043 --> 0049[0049 agent chat app]
   0049 --> 0058[0058 agent's reach]
+  0049 --> 0066[0066 agent images]
+  0065 --> 0066
   0058 --> 0061[0061 speech service]
   0059[0059 USB microphone] --> 0061
   0060[0060 Whistle in L0] --> 0061

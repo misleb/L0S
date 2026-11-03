@@ -9,13 +9,14 @@
   (if (is_empty es) c (heard_all (heard c (head es)) (tail es))))
 
 ; Paragraphs as text: each its text, after > for an icon's, ! for an
-; error's, ~ for a dimmed one, * for bold, joined by |.
+; error's, ~ for a dimmed one, * for bold, [ for an incoming bubble and
+; ] for an outgoing one, joined by |.
 (def paras_text ((ps (list UiPara))) (list int)
   (if (is_empty ps)
       ""
       (let p (head ps)
         (append (append (if (is_empty (.icon p)) "" (append (.icon p) ">"))
-                        (match (.kind p) ((UiLinePlain) "") ((UiLineStrong) "*") ((UiLineDim) "~") ((UiLineBad) "!")))
+                        (match (.kind p) ((UiLinePlain) "") ((UiLineStrong) "*") ((UiLineDim) "~") ((UiLineBad) "!") ((UiLineIncoming) "[") ((UiLineOutgoing) "]")))
                 (append (.text p) (if (is_empty (tail ps)) "" (cons 124 (paras_text (tail ps)))))))))
 
 ; A turn told as agentd tells it: said, two pieces of text, a tool and
@@ -29,12 +30,13 @@
             (cons (AgentText (bb "Done.\nIt is n."))
               (cons (AgentDone "end_turn") (nil AgentEvent)))))))))
 
-; The pieces join, the tool is named in a dimmed line, and the text
-; after it is a paragraph a line; the turn over.
+; What was said is an outgoing bubble; the pieces join in an incoming
+; one, the tool shows nothing but parts the text after it into a
+; bubble of its own, its lines kept; the turn over.
 (def test_turn () int
   (let c (heard_all (chat_new) (a_turn))
     (add (check_str "paras" (paras_text (chat_paras (.items c)))
-           "|*make a note|Making it.|~Ran write_file|Done.|It is n.")
+           "]make a note|[Making it.|[Done.\nIt is n.")
          (check_bool "idle" (.busy c) false))))
 
 ; The log: what was said, dimmed, and the tool a closed row under it.
@@ -42,17 +44,23 @@
   (check_str "paras" (paras_text (log_paras (.log (heard_all (chat_new) (a_turn)))))
     "|~> make a note|go-next>~write_file  {\"path\":\"n\"}"))
 
-; Tools run one after another are one line; text between parts them.
+; Tools show nothing in the conversation, only the text between them.
 (def test_ran () int
   (let c (heard_all (chat_new) (cons (AgentTool "sh" (bb "{}")) (cons (AgentTool "run" (bb "{}")) (cons (AgentText (bb "So.")) (cons (AgentTool "time" (bb "{}")) (nil AgentEvent))))))
-    (check_str "paras" (paras_text (chat_paras (.items c))) "~Ran sh, run|So.|~Ran time")))
+    (check_str "paras" (paras_text (chat_paras (.items c))) "[So.")))
 
-; Said from elsewhere, the transcript says where; the log's line is
-; its first line, cut.
+; The model's text is a bubble without blank lines at its ends, and
+; text of nothing but them is none.
+(def test_text_trimmed () int
+  (add (check_str "trimmed" (paras_text (chat_paras (.items (heard (chat_new) (AgentText (bb "\n\nHi.\n")))))) "[Hi.")
+       (check_str "none" (paras_text (chat_paras (.items (heard (chat_new) (AgentText (bb "\n")))))) "")))
+
+; Said from elsewhere, the transcript shows a bubble as for any; the
+; log's line says where, and is its first line, cut.
 (def test_said_from () int
   (let c (heard (chat_new) (AgentSaid "speech" (bb "what time is it\nnow")))
-    (add (check_str "transcript" (paras_text (chat_paras (.items c))) "|~From speech|*what time is it\nnow")
-         (check_str "log" (paras_text (log_paras (.log c))) "|~> what time is it..."))))
+    (add (check_str "transcript" (paras_text (chat_paras (.items c))) "]what time is it\nnow")
+         (check_str "log" (paras_text (log_paras (.log c))) "|~speech> what time is it..."))))
 
 ; Said begins a turn, which runs until done.
 (def test_busy () int
@@ -121,6 +129,65 @@
          (add (check_bool "busy" (can_send (.busy c true)) false)
               (add (check_bool "blank" (can_send (.entry c (UiEntryText "  " 2))) false)
                    (check_str "trimmed" (said_text c) "hi"))))))
+
+; ----------------------------------------------------------------- images
+
+; Where reading the images is, as text.
+(def fetch_text ((f Fetch)) (list int)
+  (match f
+    ((FetchNone) "none")
+    ((FetchOpen p) (append "open " p))
+    ((FetchRead p h ps n) (append "read " (append p (append " " (append (digits h) (append " " (digits n)))))))
+    ((FetchDecode p b) (append "decode " (append p (cons 32 (bytes_to_list b)))))))
+
+; The images as text, newest first: each path, then * once read, or why
+; not.
+(def shots_text ((ss (list Shot))) (list int)
+  (if (is_empty ss)
+      ""
+      (let s (head ss)
+        (append (.path s) (append (match (.pic s) ((Some p) "*") ((None) (if (is_empty (.why s)) "" (append ": " (.why s)))))
+                                  (if (is_empty (tail ss)) "" (cons 124 (shots_text (tail ss)))))))))
+
+; An image's notice shows it, newest; the same path again moves it to
+; the front, to be read again.
+(def test_image_heard () int
+  (let c (heard_all (chat_new) (cons (AgentImage (bb "/a.png")) (cons (AgentImage (bb "/b.png")) (cons (AgentImage (bb "/a.png")) (nil AgentEvent)))))
+    (add (check_str "order" (shots_text (.shots c)) "/a.png|/b.png")
+         (check_str "shown" (.shown c) "/a.png"))))
+
+; Older and newer move the one shown, and stop at either end.
+(def test_image_moved () int
+  (let c (heard_all (chat_new) (cons (AgentImage (bb "/a.png")) (cons (AgentImage (bb "/b.png")) (nil AgentEvent))))
+    (add (check_str "older" (.shown (chat_update c "app.image.older" (UiOther 0 ""))) "/a.png")
+         (add (check_str "no older" (.shown (shot_moved (shot_moved c -1) -1)) "/a.png")
+              (check_str "no newer" (.shown (chat_update c "app.image.newer" (UiOther 0 ""))) "/b.png")))))
+
+; The pane's toggles choose what it shows.
+(def test_pane_toggled () int
+  (add (check_str "images" (.pane (chat_update (chat_new) "pane.select.Images" (UiOther 0 ""))) "Images")
+       (check_str "at first" (.pane (chat_new)) "Tools")))
+
+; Opened, the handle read; each piece kept, the next asked; the end the
+; whole left to decode, the handle closed.
+(def test_image_read () int
+  (let (c0 (.fetch (heard (chat_new) (AgentImage (bb "/a.png"))) (FetchOpen "/a.png"))
+        c1 (answered c0 (tag_file) (message_new 30 (fs_reply_bytes 7 "")))
+        c2 (answered c1 (tag_file) (message_new 30 (fs_reply_bytes 3 "abc")))
+        c3 (answered c2 (tag_file) (message_new 30 (fs_reply_bytes 0 ""))))
+    (add (check_str "opened" (fetch_text (.fetch c1)) "read /a.png 7 0")
+         (add (check_str "a piece" (fetch_text (.fetch c2)) "read /a.png 7 3")
+              (check_str "whole" (fetch_text (.fetch c3)) "decode /a.png abc")))))
+
+; A file that will not open, and bytes that are no PNG, are said, and
+; nothing more is read of them.
+(def test_image_failed () int
+  (let (c0 (.fetch (heard (chat_new) (AgentImage (bb "/a.png"))) (FetchOpen "/a.png"))
+        gone (answered c0 (tag_file) (message_new 30 (fs_reply_bytes -2 "")))
+        junk (decoded (.fetch c0 (FetchDecode "/a.png" (bb "abc")))))
+    (add (check_str "no file" (shots_text (.shots gone)) "/a.png: No such file.")
+         (add (check_bool "not a png" (starts_with (shots_text (.shots junk)) "/a.png: Not an image shown here: ") true)
+              (check_str "nothing read" (fetch_text (.fetch junk)) "none")))))
 
 ; Under an operating system there is no window server.
 (def test_entry () int

@@ -34,16 +34,21 @@ The session is `claude -p`, its events read as stream-json, with:
   build), the skills and examples to read, with no tests, spec or
   roadmap, and that the worktree is its to change.
 
-A build yields events: ("progress", text) as the session works, then
-("done", summary) once a program was built, its bytes then in
-image(NAME), or ("failed", why)."""
+A build yields events: ("progress", text) as the session works;
+("preview", (SCENE, PNG)) for each scene l0s-app-preview paints into
+preview/SCENE.png during the build, once the session's next event comes
+after it is written, its PNG recompressed (previews are written as
+stored blocks, uncompressed); then ("done", summary) once a program was
+built, its bytes then in image(NAME), or ("failed", why)."""
 
 import asyncio
 import json
 import os
 import re
+import struct
 import subprocess
 import uuid
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 L0S = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -52,6 +57,8 @@ DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_EFFORT = "medium"
 DEFAULT_TIMEOUT = 1800
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+SCENE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+PREVIEW_MOST = 8 * 1024 * 1024
 TRAILER = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 # The environment's ways to the API, none of which the session gets: it
@@ -229,6 +236,7 @@ class Builder:
             with open(os.path.join(d, ".session"), "w") as f:
                 f.write(session + "\n")
         before = os.path.getmtime(os.path.join(d, name)) if os.path.exists(os.path.join(d, name)) else None
+        seen = previews_seen(d)
         proc = await asyncio.create_subprocess_exec(
             *self.command(name, prompt, session, old is not None), cwd=d, env=self.environment(os.environ, name),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -237,6 +245,8 @@ class Builder:
         try:
             async with asyncio.timeout(self.timeout):
                 async for raw in proc.stdout:
+                    for p in previews_new(d, seen):
+                        yield ("preview", p)
                     e = event_of(raw)
                     if e is None:
                         continue
@@ -252,6 +262,8 @@ class Builder:
                     elif e.get("type") == "result":
                         result = e
                 await proc.wait()
+            for p in previews_new(d, seen):
+                yield ("preview", p)
         except TimeoutError:
             yield ("failed", "the session took more than %d s" % self.timeout)
             return
@@ -281,6 +293,73 @@ class Builder:
             yield ("progress", line)
             summary = summary + "\n\n" + line if summary else line
         yield ("done", summary)
+
+
+def previews_seen(d):
+    """The PNGs in d's preview/ as they are now, by scene: when each was
+    last written."""
+    out = {}
+    try:
+        names = os.listdir(os.path.join(d, "preview"))
+    except OSError:
+        return out
+    for f in names:
+        p = os.path.join(d, "preview", f)
+        if f.endswith(".png") and SCENE.match(f[:-4]) and os.path.isfile(p):
+            out[f[:-4]] = os.path.getmtime(p)
+    return out
+
+
+def previews_new(d, seen):
+    """Each scene of d's preview/ written since seen says, as (SCENE,
+    PNG), its PNG recompressed, in the order of their names; seen
+    updated. A file not a PNG this reads, or over PREVIEW_MOST, is
+    passed over."""
+    out = []
+    for scene, t in sorted(previews_seen(d).items()):
+        if seen.get(scene) == t:
+            continue
+        seen[scene] = t
+        try:
+            p = os.path.join(d, "preview", scene + ".png")
+            if os.path.getsize(p) > PREVIEW_MOST:
+                continue
+            with open(p, "rb") as f:
+                png = recompressed(f.read())
+        except (OSError, ValueError, zlib.error):
+            continue
+        out.append((scene, png))
+    return out
+
+
+def png_chunk(kind, data):
+    """A PNG chunk: its length, kind, data and CRC."""
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+
+
+def recompressed(png):
+    """png with its image data deflated at zlib's best, in one IDAT, its
+    other chunks kept; ValueError if it is not a PNG."""
+    if png[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    i, idat, before, after = 8, [], [], []
+    while i + 8 <= len(png):
+        n, kind = struct.unpack(">I4s", png[i:i + 8])
+        data = png[i + 8:i + 8 + n]
+        if len(data) != n:
+            raise ValueError("a chunk past the end")
+        i += 12 + n
+        if kind == b"IDAT":
+            idat.append(data)
+        elif kind == b"IEND":
+            break
+        else:
+            (after if idat else before).append(png_chunk(kind, data))
+    if not idat:
+        raise ValueError("no image data")
+    raw = zlib.decompress(b"".join(idat))
+    return (png[:8] + b"".join(before) + png_chunk(b"IDAT", zlib.compress(raw, 9))
+            + b"".join(after) + png_chunk(b"IEND", b""))
 
 
 def event_of(raw):

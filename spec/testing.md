@@ -3,7 +3,7 @@
 | Command | What it runs |
 |---|---|
 | `make check` | `l0 check` of the kernel, every program with its libraries, and the host tools; then `l0sdoc --check`: every file read by `make doc` starts with `; FILE.l0 -- summary`, and every form has a `;` block, its own or its group's, except those [tools/l0sdoc/undocumented.txt](../tools/l0sdoc/undocumented.txt) lists from before the check. A listed form documented since fails it too, until `make doc-prune` takes its line off, so the list only shrinks; then `l0 fmt --check` of every `.l0` file git knows, that each has the closers its indentation says (`make fmt` writes them so). Last, every warning its checks gave, those that passed too, and how many: `l0 check` warns where an update copies a whole map, array or record, which never fails a check |
-| `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`), and those of the knowledge graph's L0 parser and of `graph-usage` (`tools/graphify-l0/test_l0_graph.py`, `test_graph_usage.py`). The API proxy's tests (`tools/api-proxy/test_proxy.py`) run with the Python of its venv, `build/proxy/venv`, which has aiohttp, so the first `make test` after a clean needs the network once, for pip, and none after: against its stand-in for the API on this host's loopback (`standin.py`), with no key, they check the refusals (no token, a wrong one, another path, a `GET`), the key added and the token and the board's other headers not passed on, an event stream's first event reaching the client before the stand-in sends its last, an upstream 429 and 500 passed through with their bodies, the usage lines of a stream and of a JSON answer and a day's totals, the stand-in's checks of a request (`checked`: tool results answering their uses in order, the cache breakpoints, the rules in the system prompt, the Nth request's, a result's text, one that failed) and its answers that use tools (`tool_events`), the agent's backup (`cpio.py`'s round trip of a home and its refusals of a path outside it or no archive; `PUT /backup` unpacked and kept, replacing the last, a copy edited on the host answered by `GET`, and the 401, 404 and 400), the app builder (`builder.py`, with `fake_claude.py` in place of `claude`: a build's progress, done and image, its session resumed by a second prompt, its command line and an environment with none of the API's variables, a session with an API key refused, no program built, the 401, 400s and 404, and one build at a time, 409, with comments while it says nothing; its worktree, of a repository of the test's own, made on `app/NAME` and what the session changed in it committed there, nothing committed when nothing changed; and `l0s-app-build` on a copy of Widgets, linking a tree's libraries, `L0S_TREE`, in place of L0S's, leaving its `preview.l0` out, and `l0s-app-preview` painting that copy's scenes as PNGs, saying it has no strikes to draw their text with, and confined, a preview's write beside its folder refused; and `l0s-app-new`'s app previewed and built as written, never over a file there, a name or title it cannot take refused), the releases (`release.py`: a
+| `make test` | `l0 test` on this host: every pure module, the user library, and each program's logic. It first has `bsdtar` make `build/sample.cpio`, so the parser is tested on a real archive. `python3` runs the MCP server's tests of what it parses and encodes (`tools/l0s-mcp/test_board.py`), and those of the knowledge graph's L0 parser and of `graph-usage` (`tools/graphify-l0/test_l0_graph.py`, `test_graph_usage.py`). The API proxy's tests (`tools/api-proxy/test_proxy.py`) run with the Python of its venv, `build/proxy/venv`, which has aiohttp, so the first `make test` after a clean needs the network once, for pip, and none after: against its stand-in for the API on this host's loopback (`standin.py`), with no key, they check the refusals (no token, a wrong one, another path, a `GET`), the key added and the token and the board's other headers not passed on, an event stream's first event reaching the client before the stand-in sends its last, an upstream 429 and 500 passed through with their bodies, the usage lines of a stream and of a JSON answer and a day's totals, the stand-in's checks of a request (`checked`: tool results answering their uses in order, the cache breakpoints, the rules in the system prompt, the Nth request's, a result's text, one that failed) and its answers that use tools (`tool_events`), the agent's backup (`cpio.py`'s round trip of a home and its refusals of a path outside it or no archive; `PUT /backup` unpacked and kept, replacing the last, a copy edited on the host answered by `GET`, and the 401, 404 and 400), the app builder (`builder.py`, with `fake_claude.py` in place of `claude`: a build's progress, done and image, a scene it previews streamed once as a `preview` of the same pixels recompressed smaller, and none for one there before the build or of a name it cannot take, its session resumed by a second prompt, its command line and an environment with none of the API's variables, a session with an API key refused, no program built, the 401, 400s and 404, and one build at a time, 409, with comments while it says nothing; its worktree, of a repository of the test's own, made on `app/NAME` and what the session changed in it committed there, nothing committed when nothing changed; and `l0s-app-build` on a copy of Widgets, linking a tree's libraries, `L0S_TREE`, in place of L0S's, leaving its `preview.l0` out, and `l0s-app-preview` painting that copy's scenes as PNGs, saying it has no strikes to draw their text with, and confined, a preview's write beside its folder refused; and `l0s-app-new`'s app previewed and built as written, never over a file there, a name or title it cannot take refused), the releases (`release.py`: a
 manifest's lines, a program's mode and a file's hash, a file streamed
 with its length, the 401s, the 404s of a board with none, a part not
 one, a directory and a missing file, and a path out of the release,
@@ -52,6 +52,18 @@ oracle.py's recordings in its initramfs, and checks each line of text
 is the reference's; `make e2e` does not run it, as the model is not in
 the project. Without `WHISTLE` it takes `build/fetch/whistle.cact`,
 which `make release` fetches, and with neither it says it skipped.
+
+The PNG reader is tested against Python's `zlib`, whose streams are
+fixtures written into the tests as hex: `inflate_test.l0` decodes a
+stored, a fixed-Huffman, a dynamic-Huffman and a raw stream, and streams
+written by hand to fail each way (a bad header, block, code or distance,
+an Adler-32 that does not match, an end too soon), and reads back
+`png.l0`'s stored blocks; `png_read_test.l0` reads PNGs of each color
+type, each row's filter one of the five, a palette's and a gray key's
+`tRNS`, `png.l0`'s own, and the refusals (16-bit, interlaced, no
+palette, not a PNG, cut short), and fits images to boxes.
+`base64_test.l0` reads RFC 4648's vectors, a range in place, and
+refuses a short, a foreign and an early-padded text.
 
 `user/sbin/fs/turns_test.l0` pins the order `fs` serves what waits on
 its port in: notices before every request, and an exited pid's
@@ -346,9 +358,11 @@ Ctrl-C as a person would:
   Then `run draw size` asks `wm`, still serving, its size;
 - `agent_build`, as `agent` is, the proxy building apps too, by
   `fake_claude.py`, whose program is a copy of `hello` (the case's
-  `builder` names it): `run agent` says one line, to which the script
-  answers with `build_app`, its progress at the console as the stand-in
-  session's lines, then `list_dir apps`, the program there whole, and
+  `builder` names it), which first paints the case's `preview.png` as
+  its scene `main`: `run agent` says one line, to which the script
+  answers with `build_app`, the preview at the console as `[image:
+  /Volumes/data/agent/previews/hello/main.png]` and the file there
+  after, its progress as the stand-in session's lines, then `list_dir apps`, the program there whole, and
   `run apps/hello`, which runs it, marked a program; then a text, and
   the shell lists the home's apps. A real session's build is tried by
   hand, as 0045 says;
