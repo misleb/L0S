@@ -215,10 +215,15 @@ echo "ok - procmon: ps lists no nap"
 # to 377. At rest it is 6 wide, 3 in from the grid's right edge at 1080,
 # from x 1071, the text, white, at 40% on the view's 1e1e1e, 787878;
 # with the pointer on its strip, 8 wide, from 1069, at 60%, a5a5a5.
+# The naps have started before the monitor reads the table again, once a
+# second, and a read with eleven or twelve rows has the slider at the top
+# too, only longer, to 349 or 327, and lets the wheel scroll one or two
+# rows, not three: so its foot, by 320, says all thirteen are read.
 for n in 1 2 3 4 5; do started 'run nap 600000 &'; done
 gx=$((cx + 1073)); wide=$((cx + 1070))
 slider="120 120 120"; slider_hot="165 165 165"
-shows "thirteen rows, the slider at the top" "$gx $((cy + 100)) $slider" "$gx $((cy + 360)) $view"
+shows "thirteen rows, the slider at the top" \
+  "$gx $((cy + 100)) $slider" "$gx $((cy + 300)) $slider" "$gx $((cy + 320)) $view" "$gx $((cy + 360)) $view"
 
 # The pointer in the middle of the fifth row, on its empty detail: the
 # row under it is tinted, 4% of the text on the view's ground, 39,
