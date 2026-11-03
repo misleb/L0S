@@ -1,0 +1,84 @@
+; png.l0 -- PNG images, written: eight bits a channel of red, green and
+; blue, no alpha, each row unfiltered, the whole in zlib's stored blocks,
+; so nothing is compressed and nothing needs deflate. Big, but read by
+; every image viewer and by agents that look at a picture. Pure: the
+; toolkit's host preview writes its shots with it.
+
+; The eight bytes every PNG starts with.
+(def png_signature () (list int)
+  (cons 137 (cons 80 (cons 78 (cons 71 (cons 13 (cons 10 (cons 26 (cons 10 (nil int))))))))))
+
+; v as four bytes, most significant first, as PNG writes every number.
+(def png_be32 ((v int)) (list int)
+  (cons (bit_and (bit_shr v 24) 255)
+        (cons (bit_and (bit_shr v 16) 255) (cons (bit_and (bit_shr v 8) 255) (cons (bit_and v 255) (nil int))))))
+
+; A chunk: its payload's length, kind, the payload, and the CRC-32 of
+; kind and payload.
+(def png_chunk ((kind (list int)) (payload bytes)) bytes
+  (let body (bytes_concat (cons (bytes_from_list kind) (cons payload (nil bytes))))
+    (bytes_concat (cons (bytes_from_list (png_be32 (bytes_len payload)))
+                        (cons body (cons (bytes_from_list (png_be32 (crc32 body 0 (bytes_len body)))) (nil bytes)))))))
+
+; IHDR's data for a w by h image: eight bits a channel, color type 2 (red,
+; green, blue), deflate, filter method 0, no interlace.
+(def png_header ((w int) (h int)) bytes
+  (bytes_from_list (append (png_be32 w) (append (png_be32 h) (cons 8 (cons 2 (cons 0 (cons 0 (cons 0 (nil int))))))))))
+
+; A row of pixels, colors 0xRRGGBB, as the image's bytes: red, green and
+; blue of each.
+(def png_row ((cs (list int))) bytes
+  (bytes_from_list (rev (png_row_onto cs (nil int)))))
+
+; png_row's loop: each color's channels onto acc, reversed.
+(def png_row_onto ((cs (list int)) (acc (list int))) (list int)
+  (if (is_empty cs)
+      acc
+      (let c (head cs)
+        (png_row_onto (tail cs) (cons (bit_and c 255) (cons (bit_and (bit_shr c 8) 255) (cons (bit_and (bit_shr c 16) 255) acc)))))))
+
+; The image's scanlines: each row after its filter's byte, 0, none.
+(def png_raw ((rows (list bytes))) bytes
+  (bytes_concat (png_filtered rows (bytes_from_list (cons 0 (nil int))) (nil bytes))))
+
+; png_raw's loop: each row after zero, onto acc, reversed, then put right.
+(def png_filtered ((rows (list bytes)) (zero bytes) (acc (list bytes))) (list bytes)
+  (if (is_empty rows)
+      (rev acc)
+      (png_filtered (tail rows) zero (cons (head rows) (cons zero acc)))))
+
+; The Adler-32 of the bytes of b from i up to j, its sums a and s so far:
+; zlib's check of what it holds, 1 and 0 to start.
+(def png_adler32 ((b bytes) (i int) (j int) (a int) (s int)) int
+  (if (ge i j)
+      (bit_or (bit_shl s 16) a)
+      (let a2 (mod (add a (bytes_get b i)) 65521)
+        (png_adler32 b (add i 1) j a2 (mod (add s a2) 65521)))))
+
+; raw as a zlib stream of stored blocks: its header, 0x78 0x01, the
+; blocks, and the Adler-32 of raw.
+(def png_zlib ((raw bytes)) bytes
+  (let n (bytes_len raw)
+    (bytes_concat (cons (bytes_from_list (cons 120 (cons 1 (nil int))))
+                        (png_stored raw 0 n (nil bytes) (cons (bytes_from_list (png_be32 (png_adler32 raw 0 n 1 0))) (nil bytes)))))))
+
+; The stored blocks of raw from i, before after: each at most 65535
+; bytes, after its header, whether it is the last, its length and the
+; length's complement, least significant first; one block even for none.
+(def png_stored ((raw bytes) (i int) (n int) (acc (list bytes)) (after (list bytes))) (list bytes)
+  (let (k (min 65535 (sub n i))
+        last (ge (add i k) n)
+        nk (bit_xor k -1)
+        hdr (bytes_from_list
+              (cons (if last 1 0)
+                    (cons (bit_and k 255) (cons (bit_shr k 8) (cons (bit_and nk 255) (cons (bit_and (bit_shr nk 8) 255) (nil int)))))))
+        acc2 (cons (bytes_slice raw i (add i k)) (cons hdr acc)))
+    (if last (rev_onto acc2 after) (png_stored raw (add i k) n acc2 after))))
+
+; A w by h image whose rows, top first, are rows, each png_row's 3·w
+; bytes, as a PNG file's bytes.
+(def png_bytes ((w int) (h int) (rows (list bytes))) bytes
+  (bytes_concat (cons (bytes_from_list (png_signature))
+                      (cons (png_chunk "IHDR" (png_header w h))
+                            (cons (png_chunk "IDAT" (png_zlib (png_raw rows)))
+                                  (cons (png_chunk "IEND" (bytes_from_list (nil int))) (nil bytes)))))))

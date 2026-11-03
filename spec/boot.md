@@ -52,6 +52,7 @@ summary A terminal in a window, with its own shell
 | `About.app` | `about` | About |
 | `Agent.app` | `chat` | Agent |
 | `Installer.app` | `installer` | Installer |
+| `ToDo.app` | `todo` | To Do |
 
 A bundle's name is one word, as the shell and the inittab split at
 spaces; an app's name may be several. Its source is the directory beside

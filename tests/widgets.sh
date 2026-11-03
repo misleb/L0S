@@ -19,8 +19,11 @@
 #      flipping between 4 and 6, and a frame told for each (roadmap
 #      0006)
 #   4. the tab bar along its foot, AdwTabBar's: three tabs, the first
-#      raised; a click on the third raises it instead, and a click on
-#      the second's close button closes it, the two left sharing the bar
+#      raised; a click on the third raises it instead, its page a boxed
+#      list the wheel scrolls; the second's page, the controls: a click
+#      turns its switch off, and a press and a drag set its slider; and
+#      a click on the second's close button closes it, the two left
+#      sharing the bar
 #   5. the title bar's close button: wm asks the gallery to close, the
 #      toolkit closes it for the gallery, and run windows lists none
 #
@@ -60,6 +63,8 @@ at() {
   echo "{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$(axis "$1" 1280)}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$(axis "$2" 800)}}"
 }
 button() { echo "{\"type\":\"btn\",\"data\":{\"down\":$1,\"button\":\"left\"}}"; }
+# A step of the wheel, wheel-down or wheel-up, as procmon.sh turns it.
+wheel() { echo "{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"$1\"}},{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"$1\"}}"; }
 
 waits_for() {
   local end=$((SECONDS + 30))
@@ -239,6 +244,40 @@ ty=$((cy + 420))
 shows "the tab bar, its first tab raised" "$((cx + 14)) $ty $tab_on" "$((cx + 224)) $ty $headerbar" "$((cx + 434)) $ty $headerbar"
 click $((cx + 500)) $ty
 shows "a click raised the third tab" "$((cx + 14)) $ty $headerbar" "$((cx + 434)) $ty $tab_hover"
+
+# The third tab's page, Rows (roadmap 0065): a boxed list from 62 under
+# the page's title, 18 in, 604 wide, rows of 50, on its card, 363636;
+# the first row, Wi-Fi, holds its switch at its end, 12 in, 562 to 610
+# and 74 to 100, on, in the accent, 3584e4 (widgets_test.l0 pins where).
+# A step of the wheel over the list, its fourth row, scrolls it three
+# rows, so Disk's row is first, and no switch is there.
+card="54 54 54"; accent="53 132 228"
+shows "the Rows page: Wi-Fi's switch at the first row's end" "$((cx + 570)) $((cy + 87)) $accent" "$((cx + 300)) $((cy + 64)) $card"
+events "$(at $((cx + 300)) $((cy + 250)))"; sleep 0.1
+events "$(wheel wheel-down)"
+shows "a step of the wheel scrolled the list three rows" "$((cx + 570)) $((cy + 87)) $card"
+
+# The second tab's page, Controls: Wi-Fi's switch at 77, 90, 48 by 26,
+# on, its knob white from 102 to 122; a click turns it off, the knob at
+# its start, the pill under 112 the trough's, white at 15% on 242424,
+# 454545, once the pointer has left it. The slider at 77, 144, 240 by
+# 26, its trough from 87, 220 long, rows 154 to 160; at 40 its fill ends
+# under its knob, at 175, so at 240 the trough shows. A press at 263
+# sets 80, the fill past 240; dragged to 131, 20, the fill short of it.
+trough="69 69 69"; white="255 255 255"
+click $((cx + 300)) $ty
+shows "the Controls page: Wi-Fi on, the slider at 40" "$((cx + 112)) $((cy + 103)) $white" "$((cx + 240)) $((cy + 157)) $trough"
+click $((cx + 112)) $((cy + 103)); sleep 0.1
+events "$(at $((cx + 400)) $((cy + 300)))"
+shows "a click turned Wi-Fi off" "$((cx + 112)) $((cy + 103)) $trough"
+events "$(at $((cx + 263)) $((cy + 157)))"; sleep 0.1
+events "$(button true)"
+shows "a press on the slider set 80: its fill past 240" "$((cx + 240)) $((cy + 157)) $accent"
+events "$(at $((cx + 131)) $((cy + 157)))"
+shows "dragged to 20: its fill short of 240 again" "$((cx + 240)) $((cy + 157)) $trough"
+events "$(button false)"; sleep 0.1
+click $((cx + 500)) $ty
+shows "the third tab raised again" "$((cx + 434)) $ty $tab_hover"
 # The second's close button, 24 square, 5 in from its end: 216 + 207 -
 # 29 = 394 to 418. The two left share the bar, 312 each, from 6 and 321,
 # the third still raised; the pointer then taken off the bar.

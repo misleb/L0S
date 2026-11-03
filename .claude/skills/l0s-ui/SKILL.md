@@ -1,6 +1,6 @@
 ---
 name: l0s-ui
-description: UI conventions for L0S. The toolkit in user/lib/ui (GNOME HIG and libadwaita look, the ui_/Ui naming, theme colors and sizes, widgets, the Elm-style client window loop), the compositor wm (its buffers, layer order, title bars, frames, top bar, geometry, hit testing, input routing, drag), and what the display driver can and can't do. Use when changing anything that draws or takes pointer or keyboard input: user/lib/ui, wm, vt, widgets, procmon, draw, virtio-gpu, display.l0, wm.l0, or the screen tests.
+description: UI conventions for L0S. The toolkit in user/lib/ui (GNOME HIG and libadwaita look, the ui_/Ui naming, theme colors and sizes, widgets, the Elm-style client window loop and ui_run), making a new app from a person's description (apps.md: scaffold, vocabulary, preview, build), the compositor wm (its buffers, layer order, title bars, frames, top bar, geometry, hit testing, input routing, drag), and what the display driver can and can't do. Use when writing an app, or changing anything that draws or takes pointer or keyboard input: user/lib/ui, wm, vt, widgets, todo, procmon, draw, virtio-gpu, display.l0, wm.l0, or the screen tests.
 ---
 
 # UI in L0S
@@ -9,6 +9,11 @@ The look is GNOME's: the [HIG](https://developer.gnome.org/hig/) and
 libadwaita's Adwaita style, dark. `spec/toolkit.md` describes the
 toolkit for people; `spec/desktop.md` the compositor, and `spec/display.md`
 the display. This is the working summary, with the rules.
+
+**Making an app from a description?** Read [apps.md](apps.md) first: the
+workflow (`tools/l0s-app-new`, then the view and update from its table
+of what a person asks for, then `make preview APP=NAME` and look at the
+PNGs before the board), and `user/apps/todo`, the worked example.
 
 ## Rules
 
@@ -117,6 +122,15 @@ the display. This is the working summary, with the rules.
   `ui_icon_or_image` falls back to the symbolic icon when none was
   loaded, as on the host. Files and Disks do this; status pages stay
   symbolic, as GNOME's are.
+- **`controls.l0`, `list.l0`, `page.l0`**: `UiSwitch`, `UiCheck`,
+  `UiScale` (its node's action `NAME.scale.MIN.MAX` holds no value, so
+  the focus survives a change; press and drag `NAME.set.N`, keys
+  `NAME.step.±1`, `ui_scale_value`), `UiSpinner` (turned by the app's
+  alarm); `UiList`, a boxed list of `UiListRow`s with widgets at their
+  start and end, a scroller like lines; and the composites apps share,
+  `ui_page`, `ui_toolbar_page`, `ui_with_footer`, `ui_heading_row`,
+  `ui_split`, `ui_confirm`, `ui_entry_w`, `ui_toggles`, `ui_without`,
+  `ui_key_after`. Use them before writing a layout of your own.
 - **`widget.l0`**: a `UiWidget` tree (`UiLabel`, `UiButton`, `UiBox`,
   `UiExpand`, `UiPad`, `UiSeparator`, `UiHeaderBar`, `UiView`, `UiLevel`,
   `UiStatus`, `UiStatusPage`, `UiGrid`, `UiSpace`, and `panes.l0`'s
@@ -173,8 +187,17 @@ the display. This is the working summary, with the rules.
 ## A client window (`window.l0`)
 
 The Elm architecture: a `data` for the state, a `view` from state to a
-`UiWidget`, an `update` from state, action and event to a state. The loop,
-from `user/apps/widgets/widgets.l0`:
+`UiWidget`, an `update` from state, action, event and window to a
+`UiStepped` (the window and the state). A program of one window writes
+no loop: `ui_run` (`run.l0`) runs it, its update given `app.start` once
+as the window opens, a close it does not keep ending the program:
+
+```
+(def widgets () int
+  (ui_run "widgets" "Widgets" 640 440 (gallery_new) gallery_view gallery_step))
+```
+
+What `ui_run` does, and what Disks, Files and Terminal still write:
 
 ```
 (match (ui_open "Widgets" 640 400) ...)     once: UiOpenedWin or UiOpenFailed

@@ -1,0 +1,221 @@
+; controls.l0 -- the controls a settings page, a form or a list of
+; things to do is made of, drawn as libadwaita draws them: a switch
+; (GtkSwitch, as AdwSwitchRow holds one), a check box (GtkCheckButton),
+; a slider (GtkScale) and a spinner (AdwSpinner). Their constructors are
+; widget.l0's UiSwitch, UiCheck, UiScale and UiSpinner; here are their
+; sizes, their nodes, and the actions they set off, which the program's
+; update reads back with ui_toggled and ui_scale_value, keeping what
+; they show in its own state, as everything is in the Elm architecture.
+;
+;   UiSwitch NAME ON          NAME.toggle on a click, or Enter or Space
+;                             with the focus on it
+;   UiCheck NAME ON LABEL     the same, its label beside it a target too
+;   UiScale NAME V MIN MAX W  NAME.set.N as a press or a drag puts its
+;                             knob at N; NAME.step.-1 and NAME.step.1
+;                             for Left and Right with the focus on it
+;   UiSpinner PHASE SIZE      no action; ui_spinner_next turns it, on
+;                             the program's alarm each ui_spinner_ns
+
+; ------------------------------------------------------------- actions
+
+; What a switch or a check box called name sets off.
+(def ui_toggle_action ((name (list int))) (list int) (append name ".toggle"))
+
+; Whether a switch or check box called name, on before, is on after
+; action: turned over if action is its toggle.
+(def ui_toggled ((name (list int)) (on bool) (action (list int))) bool
+  (if (eq action (ui_toggle_action name)) (not on) on))
+
+; What a slider called name sets off to put its value at v.
+(def ui_set_action ((name (list int)) (v int)) (list int) (append name (append ".set." (digits v))))
+
+; What a slider called name sets off to move its value d steps.
+(def ui_step_action ((name (list int)) (d int)) (list int) (append name (append ".step." (digits d))))
+
+; The value of a slider called name from lo to hi, v before, after
+; action: N if action is its NAME.set.N, D steps on for its NAME.step.D,
+; kept in its range; v for any other action.
+(def ui_scale_value ((name (list int)) (v int) (lo int) (hi int) (action (list int))) int
+  (let (set (append name ".set.")
+        step (append name ".step."))
+    (if (starts_with action set)
+        (match (word_number (drop_n action (length set))) ((Some n) (max lo (min hi n))) ((None) v))
+        (starts_with action step)
+        (match (word_number (drop_n action (length step))) ((Some d) (max lo (min hi (add v (mul d (ui_scale_step lo hi)))))) ((None) v))
+        v)))
+
+; A slider's node's action, NAME.scale.MIN.MAX: what window.l0 reads to
+; set its value from where it is pressed and dragged, and to step it with
+; the keys; never set off itself. It holds no value, so it is the same as
+; the value changes, and the slider keeps the focus.
+(def ui_scale_node_action ((name (list int)) (lo int) (hi int)) (list int)
+  (append name (append ".scale." (append (digits lo) (append "." (digits hi))))))
+
+; What a slider's node's action says: its name and range; or that the
+; action is no slider's.
+(data UiScaleOf (UiScaleAt (list int) int int) (UiNoScale))
+
+; Action a read as a slider's node's, if it is one: its last three parts
+; scale, MIN and MAX, the name before them.
+(def ui_scale_of ((a (list int))) UiScaleOf
+  (let (parts (rev (split_on 46 a))
+        n (length parts))
+    (if (or (lt n 4) (not (eq (nth parts 2) "scale")))
+        (UiNoScale)
+        (match (word_number (nth parts 1))
+          ((None) (UiNoScale))
+          ((Some lo)
+            (match (word_number (nth parts 0))
+              ((None) (UiNoScale))
+              ((Some hi) (UiScaleAt (join_with "." (rev (drop parts 3))) lo hi))))))))
+
+; Whether a is a slider's node's action.
+(def ui_is_scale ((a (list int))) bool
+  (match (ui_scale_of a) ((UiScaleAt nm lo hi) true) ((UiNoScale) false)))
+
+; How far a step moves a slider from lo to hi: a twentieth of its range,
+; at least 1.
+(def ui_scale_step ((lo int) (hi int)) int (max 1 (div (sub hi lo) (ui_scale_steps))))
+
+; The action a key code sets off on the slider whose node's action is a:
+; a step back for Left, on for Right; "" for any other key.
+(def ui_scale_keyed ((a (list int)) (code int)) (list int)
+  (match (ui_scale_of a)
+    ((UiNoScale) "")
+    ((UiScaleAt name lo hi)
+      (if (eq code (ui_key_left)) (ui_step_action name -1) (eq code (ui_key_right)) (ui_step_action name 1) ""))))
+
+; The spinner's phase after a turn: the next dot lit, round eight.
+(def ui_spinner_next ((phase int)) int (mod (add phase 1) (ui_spinner_dots)))
+
+; ---------------------------------------------------------------- sizes
+
+; A switch's: its pill.
+(def ui_switch_size () UiSize (UiSize (ui_switch_w) (ui_switch_h)))
+
+; A check box's: its square, 6, and its label, a line high.
+(def ui_check_size_of ((label (list int))) UiSize
+  (UiSize (add (ui_check_size) (if (is_empty label) 0 (add (ui_space_s) (ui_text_w label (ui_text_font) false 1))))
+          (max (ui_check_size) (ui_char_h))))
+
+; ------------------------------------------------------------- the nodes
+
+; Where a control of size s goes in r: at its start, as a property's
+; value is, in its middle up and down, at most r's size.
+(def ui_placed ((r Rect) (s UiSize)) Rect
+  (let (w (min (.w r) (.sw s))
+        h (min (.h r) (.sh s)))
+    (Rect (.x r) (ui_aligned (.y r) (.h r) h (UiCenter)) w h)))
+
+; A ground's ops in b, radius rad, color c on bg: with the focus ring
+; round it and the ground 2 inside it if focused, as a button's.
+(def ui_ringed ((b Rect) (rad int) (c int) (focused bool) (bg int)) (list UiPaint)
+  (if focused
+      (cons (UiPRound b rad (ui_focus_ring bg) bg)
+            (cons (UiPRound (rect_inset b 2) (max 0 (sub rad 2)) c (ui_focus_ring bg)) (nil UiPaint)))
+      (cons (UiPRound b rad c bg) (nil UiPaint))))
+
+; A control's ground, on or off, under the pointer or not, on bg: the
+; accent on, lighter under the pointer; the trough's off, the text's
+; color at 20% under the pointer.
+(def ui_control_bg ((on bool) (hover bool) (st UiState) (bg int)) int
+  (if on (ui_strong (ui_accent_bg) (if hover 1 0)) hover (ui_mix (ui_fg (.style st)) bg 20) (ui_trough_bg (.style st) bg)))
+
+; A switch called name in r, on or not, at r's start: its pill, round,
+; in the accent while on, its knob at the end it is at.
+(def ui_switch_node ((r Rect) (name (list int)) (on bool) (st UiState) (bg int)) UiNode
+  (let (a (ui_toggle_action name)
+        b (ui_placed r (ui_switch_size))
+        k (ui_switch_knob)
+        inset (div (sub (ui_switch_h) k) 2)
+        kx (if on (sub (add (.x b) (.w b)) (add inset k)) (add (.x b) inset))
+        ground (ui_control_bg on (eq (.hover st) a) st bg))
+    (UiNode b
+            (append (ui_ringed b (div (.h b) 2) ground (eq (.focus st) a) bg)
+                    (cons (UiPRound (Rect kx (add (.y b) inset) k k) (div k 2) (ui_knob) ground) (nil UiPaint)))
+            a true)))
+
+; A check box called name in r, on or not, label beside it: its square,
+; in the accent with a check while on, and the label after 6; the whole
+; of it a target, at its start in r, in its middle up and down.
+(def ui_check_node ((r Rect) (name (list int)) (on bool) (label (list int)) (st UiState) (bg int)) UiNode
+  (let (a (ui_toggle_action name)
+        s (ui_check_size_of label)
+        b (Rect (.x r) (ui_aligned (.y r) (.h r) (.sh s) (UiCenter)) (min (.w r) (.sw s)) (.sh s))
+        n (ui_check_size)
+        box (Rect (.x b) (ui_aligned (.y b) (.h b) n (UiCenter)) n n)
+        ground (ui_control_bg on (eq (.hover st) a) st bg)
+        lx (add (.x box) (add n (ui_space_s)))
+        tick (if on (cons (UiPIcon (.x box) (.y box) "object-select" (ui_accent_fg) 1) (nil UiPaint)) (nil UiPaint))
+        text (if (is_empty label)
+                 (nil UiPaint)
+                 (cons (UiPText (Rect lx (.y b) (max 0 (sub (add (.x b) (.w b)) lx)) (.h b)) label (UiStart) (ui_fg (.style st)) (ui_text_font) false 1)
+                       (nil UiPaint))))
+    (UiNode b (append (ui_ringed box (ui_check_radius) ground (eq (.focus st) a) bg) (append tick text)) a true)))
+
+; A slider's trough in r, w wide: from half a knob in from either end.
+(def ui_scale_trough ((r Rect)) Rect
+  (let (half (div (ui_scale_knob) 2)
+        th (ui_trough_h))
+    (Rect (add (.x r) half) (ui_aligned (.y r) (.h r) th (UiCenter)) (max 1 (sub (.w r) (ui_scale_knob))) th)))
+
+; Where along trough t value v of lo to hi is.
+(def ui_scale_x ((t Rect) (lo int) (hi int) (v int)) int
+  (if (le hi lo) (.x t) (add (.x t) (div (mul (.w t) (sub (max lo (min hi v)) lo)) (sub hi lo)))))
+
+; The value of lo to hi at x along trough t, to the nearest, kept in its
+; range.
+(def ui_scale_value_at ((t Rect) (lo int) (hi int) (x int)) int
+  (if (le hi lo)
+      lo
+      (max lo (min hi (add lo (div (add (mul (sub x (.x t)) (sub hi lo)) (div (.w t) 2)) (.w t)))))))
+
+; A slider called name in r, w wide, at v of lo to hi: its trough, round,
+; in the accent up to its knob, and the knob, white, ringed if focused.
+(def ui_scale_node ((r Rect) (name (list int)) (v int) (lo int) (hi int) (w int) (st UiState) (bg int)) UiNode
+  (let (b (Rect (.x r) (ui_aligned (.y r) (.h r) (ui_scale_h) (UiCenter)) (min (.w r) (max w (ui_scale_knob))) (min (.h r) (ui_scale_h)))
+        a (ui_scale_node_action name lo hi)
+        t (ui_scale_trough b)
+        kx (ui_scale_x t lo hi v)
+        k (ui_scale_knob)
+        half (div k 2)
+        rad (div (.h t) 2)
+        knob (Rect (sub kx half) (ui_aligned (.y b) (.h b) k (UiCenter)) k k)
+        fill (if (gt kx (.x t)) (cons (UiPRound (Rect (.x t) (.y t) (sub kx (.x t)) (.h t)) rad (ui_accent_bg) -1) (nil UiPaint)) (nil UiPaint))
+        ring (if (eq (.focus st) a) (cons (UiPRound (rect_inset knob -2) (add half 2) (ui_focus_ring bg) -1) (nil UiPaint)) (nil UiPaint)))
+    (UiNode b
+            (append (cons (UiPRound t rad (ui_trough_bg (.style st) bg) bg) fill)
+                    (append ring (cons (UiPRound knob half (ui_knob) -1) (nil UiPaint))))
+            a true)))
+
+; The action a press or a drag at x sets off on the slider whose node is
+; n: NAME.set.N for the value under x.
+(def ui_scale_set_at ((n UiNode) (x int)) (list int)
+  (match (ui_scale_of (.action n))
+    ((UiNoScale) "")
+    ((UiScaleAt name lo hi) (ui_set_action name (ui_scale_value_at (ui_scale_trough (.rect n)) lo hi x)))))
+
+; Where dot k of eight is round a circle of radius rad, in thousandths:
+; from the top, clockwise.
+(def ui_spin_dx ((k int)) int (nth (cons 0 (cons 707 (cons 1000 (cons 707 (cons 0 (cons -707 (cons -1000 (cons -707 (nil int))))))))) k))
+(def ui_spin_dy ((k int)) int (nth (cons -1000 (cons -707 (cons 0 (cons 707 (cons 1000 (cons 707 (cons 0 (cons -707 (nil int))))))))) k))
+
+; A spinner in r, size wide, at phase: eight dots round its middle, dot
+; phase in the text's color and each before it fainter.
+(def ui_spinner_ops ((r Rect) (phase int) (size int) (st UiState) (bg int)) (list UiPaint)
+  (let (b (ui_placed r (UiSize size size))
+        d (max 2 (div size 5))
+        rad (div (sub size d) 2)
+        cx (add (.x b) (div size 2))
+        cy (add (.y b) (div size 2)))
+    (ui_spin_dots 0 phase d rad cx cy (ui_fg (.style st)) bg (nil UiPaint))))
+
+; ui_spinner_ops' loop: dot k on, onto acc.
+(def ui_spin_dots ((k int) (phase int) (d int) (rad int) (cx int) (cy int) (fg int) (bg int) (acc (list UiPaint))) (list UiPaint)
+  (if (ge k (ui_spinner_dots))
+      acc
+      (let (behind (mod (add (sub phase k) (ui_spinner_dots)) (ui_spinner_dots))
+            x (sub (add cx (div (mul (ui_spin_dx k) rad) 1000)) (div d 2))
+            y (sub (add cy (div (mul (ui_spin_dy k) rad) 1000)) (div d 2)))
+        (ui_spin_dots (add k 1) phase d rad cx cy fg bg
+                      (cons (UiPRound (Rect x y d d) (div d 2) (ui_mix fg bg (sub 100 (mul 12 behind))) bg) acc)))))

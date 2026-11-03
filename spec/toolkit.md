@@ -11,7 +11,7 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | File | What it is | GTK / libadwaita |
 |---|---|---|
 | `theme.l0` | The palette (`blue_1`…`dark_5`), the light and dark styles' semantic colors, spacing, radii, sizes. Programs draw in the dark style: `ui_style` says so, the one place a setting for it will be read. Alpha colors are mixed with `ui_mix`, since no layer blends. Depends only on `ppm.l0`'s colors and `render.l0`'s glyph. | `@window_bg_color`, `@accent_bg_color`, … |
-| `icons.l0` | The names of the symbolic icons, 16×16 at scale 1, GNOME's own: each is its SVG under [icons/](../icons) (Adwaita's, and System Monitor's for utilities-system-monitor), which `tools/mkicons` rasterizes into `/etc/icons` at the build. window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer, and Terminal's tab-new. Also `ui_image_names`, the full-color icons Files and Disks show things with, Adwaita's under `icons/adwaita/scalable`, which `tools/mkicon --image` draws into `/etc/images/NAME.face`. | `*-symbolic` icons, and the full-color theme icons |
+| `icons.l0` | The names of the symbolic icons, 16×16 at scale 1, GNOME's own: each is its SVG under [icons/](../icons) (Adwaita's, and System Monitor's for utilities-system-monitor), which `tools/mkicons` rasterizes into `/etc/icons` at the build. window-close, pan-down, pan-up, view-refresh, open-menu, system-search, drive-harddisk, the apps' utilities-terminal, utilities-system-monitor and view-app-grid, and the files' folder, text-x-generic, application-x-executable, go-previous, go-next, view-list, view-grid and computer, Terminal's tab-new, the check box's object-select, and list-add and user-trash, which To Do adds and deletes with. Also `ui_image_names`, the full-color icons Files and Disks show things with, Adwaita's under `icons/adwaita/scalable`, which `tools/mkicon --image` draws into `/etc/images/NAME.face`. | `*-symbolic` icons, and the full-color theme icons |
 | `face.l0` | The face: the icons at the sizes its scale paints, from `/etc/icons`; the text's glyphs, Source Code Pro's and Source Sans 3's regular and bold at 16 and 32 times the scale, kept as `glyph.FACE.H` (`code`, `code-bold`, `sans`, `sans-bold`), each a strike (`format/strike.l0`) asked of the font service, `font`, which shares its pages with every program that asks, read in place (`UiStrike`), never copied, through one region over each of `font`'s arenas the strikes are in, so the desktop's strikes and the first others a program shows take it one region (`ui_strike_open`, `ui_strike_regions`); and, for the compositor alone at scale 2 (`ui_face_pointers`), the pointers `tools/mkfont` rasterized into `/etc/face`, which holds nothing else. With no `font`, no text is drawn, said once on standard error. An app's `icon.face` is the same format, its images' tables `image.N`, and so is each full-color icon's `/etc/images/NAME.face`, which a program loads by name, at the sizes its scale paints, with `ui_images_load` into a `UiImages`, and finds with `ui_image`. | the font and icon theme at a scale factor || `paint.l0` | the `UiPaint` ops (fill, rounded fill with antialiased corners, text, icon, an image of its own colors with alpha, `UiPImage`, as an app's `icon.svg` makes), placed by `gfx/rect.l0`'s `Rect` in the desktop's pixels; `ui_paint` runs them on a canvas at the face's scale, clipped, and returns it, so a canvas over an array (a test's, `tools/mkicon`'s) is painted too. At scale 2 each op is twice the size, and text and icons are the face's, each pixel mixed by how much it covers. Also `ui_buffer` and `ui_buffer_at` for shm buffers, and Adwaita's arrow cursor. | GSK render nodes |
 | `metrics.l0` | Each face's units per em, the advance of each of codes 32 to 126, the widest of them, and the kerning of each pair of them GPOS adjusts, in font units, as defs (`ui_m_sans_adv`, `ui_m_sans_kern` and the rest), which `tools/mkmetrics` writes from the fonts at the build and `make check` compares: so text is measured with no face and no file, and `ui_layout` and its host tests need neither. | Pango's font metrics |
 | `widget.l0` | `UiWidget` (label, text in a face and height a program names (`UiText`), a part keyed by what it shows, its layout kept while that is the same (`UiKeyed`, `ui_keyed_self`), button, box, expand, pad, separator, header bar, view, level bar, status, status page, grid, space, panes.l0's sidebar, segment bar, properties and modal, entry.l0's entry, a window's own header bar, nav.l0's path bar, toggle group and tab bar, icon_view.l0's icon view, menu.l0's popover, lines.l0's lines, and a drawing area); `UiState`; `ui_layout` into `UiNode`s; `ui_hit`, `ui_focus_next`, `ui_paint_nodes`; scrollers (`UiScroller`, `ui_scroll_of`, `ui_scroll_hit`). `UiCsdBar START TITLE END CLOSES` is the header bar of a window that draws its own (`ui_open_csd`): any widget as its title, in the bar's middle as far as there is room, the window's close button at its end if CLOSES (`ui_close_action`), and its ground the window's to drag (`ui_move_action`), or, with a double click, to maximize and restore. `UiDrawingArea NAME W H` is an area the program paints itself, as `vt` paints its terminal: its node sets off `NAME.drawing`, has no ops, and nothing of the toolkit's is painted or damaged there, not even the window's ground (`ui_drawn`, `ui_drawing_rect`). | `GtkLabel`, `GtkButton`, `GtkBox`, `AdwHeaderBar`, `GtkLevelBar`, `AdwStatusPage`, `GtkAdjustment`, `GtkDrawingArea` |
@@ -28,10 +28,17 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 
 | `uiloop.l0` | The loop a window and an app keep, `UiLoop`: the messages taken and not yet handed out, what waits taken before each step and put together (`ui_loop_take`, `ui_together`: a run's last move, its wheel's turns as one, a window's last size); the ports it waits on as one set, the window's, the toolkit's reply port, the program's, and the program's own (`ui_loop_own`, `UiGotPort`); each step's times (`UiTimes`: routed, painted), its stages (`UiStages`: route, update and view, layout, wait, paint, present), and the slow step's line, said at the debug level once a step is over a frame (`ui_frame_ns`, 16 ms; `ui_slow_line`, `ui_slow_due`, `ui_times_stepped`) | GLib's main loop, and GTK's frame clock's timings |
 
+| `controls.l0` | The controls a settings page, a form or a list of things to do is made of, as libadwaita draws them: `UiSwitch NAME ON`, a pill 48 by 26 in the accent while on, the trough's color off, its knob 20, white, at the end it is at; `UiCheck NAME ON LABEL`, a square of 16, rounded 4, in the accent with Adwaita's `object-select` check while on, its label 6 after it, the whole a target; each setting off `NAME.toggle` on a click, or Enter or Space with the focus on it, which `ui_toggled NAME ON ACTION` turns into what it shows next. `UiScale NAME V MIN MAX W`, a slider W wide: a trough 6 high from half a knob in from either end, the accent up to its knob, the knob 20, white, ringed while focused; its node's action `NAME.scale.MIN.MAX` (`ui_scale_node_action`), which holds no value so the focus stays on it as it changes, and which window.l0 turns into `NAME.set.N` as it is pressed and dragged (`ui_scale_set_at`, the value under the pointer, to the nearest), and `NAME.step.-1` or `NAME.step.1` for Left and Right while it has the focus (`ui_scale_keyed`), its release setting off nothing; `ui_scale_value NAME V MIN MAX ACTION` the value after either, a step a twentieth of its range, kept in it. `UiSpinner PHASE SIZE`, eight dots round a circle, dot PHASE in the text's color and those behind it fainter, 12% a dot; `ui_spinner_next` turns it, on an alarm every `ui_spinner_ns`, 100 ms, as the gallery turns its own. Placed at the start of the room they get, in its middle up and down. | `GtkSwitch`, `GtkCheckButton`, `GtkScale`, `AdwSpinner` |
+| `list.l0` | `UiList (UiListData PREFIX ROWS FIRST)`, a boxed list, libadwaita's `.boxed-list` of `AdwActionRow`s: on a card rounded as a window, rows 50 high, a line between each two, each `UiListRow KEY ICON START TITLE SUBTITLE END ACTIONABLE`: an icon or none, a widget at its start (a check box, as a list of things to do has) and one at its end (a switch, a button), each over the row, so a press on it is its own, its title over its subtitle, dimmed, ellipsized between them. `ui_list_row KEY TITLE SUBTITLE` is a row of text set off when clicked, the rest given by its fields, `(.end row (UiSwitch "wifi" on))`. An actionable row sets off `PREFIX.select.KEY` (`ui_select_key`) and is tinted under the pointer, 3 inside it, rounded 8. A scroller by rows, its area `PREFIX.scroll.FIRST.MOST.SHOWN.50` and the grid's overlay scrollbar, so the wheel and the slider scroll it; the program keeps its first row with `ui_list_first`. Its natural size 320 wide and as high as its rows, at most five; in a `UiExpand` it takes the room there is. | `GtkListBox.boxed-list`, `AdwActionRow`, `AdwSwitchRow` |
+| `page.l0` | What apps kept composing for themselves, composed once of the widgets above, laying out and painting nothing of its own: `ui_page TITLE LINE CHILDREN` (title large, the line dimmed, each left out if empty, the children 12 apart, 18 in), `ui_heading_row TITLE BUTTONS` (the title large, the buttons at the row's end), `ui_value` (a property's text), `ui_footer` and `ui_with_footer` (a separator and a dimmed line at a pane's foot), `ui_toolbar_page START STATUS END BODY` (a toolbar of buttons and a centered dimmed line over a separator and the body: `ui_grid_page` is one), `ui_split SIDEBAR PANE`, `ui_entry_w N` (an entry that holds N of the widest characters), `ui_at_least W CHILD`, `ui_cancel_button` (`dialog.cancel`, `ui_cancel_action`) and `ui_confirm HEADING LINES ACTION LABEL DESTRUCTIVE` (an alert of Cancel and one button), `ui_toggles LABELS` (toggles keyed by their labels), and for a list keyed by a function, `ui_without` (an element taken out by its key) and `ui_key_after` (the key to select then: the next, or the one before the last, as GNOME's tab bars choose), with `ui_tab_key` for a tab bar's tabs. Disks, Files, About, Installer, Widgets and Terminal use them. | `AdwPreferencesPage`'s title, `AdwHeaderBar`'s packing, `AdwAlertDialog`'s responses, `AdwTabView`'s selection on close |
+| `testing.l0` | What a host test asks of a view, made once (`UI_TESTING`, linked into the toolkit's tests and every program's that links the toolkit, never a program): `ui_laid W WIDTH HEIGHT`, a widget laid out as a window in the light style; `ui_has_target` and `ui_target_at`, whether an action is a target and where, as `X Y W H`; `ui_texts`, every text painted, in order, each followed by `\|`; `ui_has_text`, whether one is. | — |
+| `run.l0` | A program of one window run from its state, view and update, so it writes no loop: `ui_run WHO TITLE W H S0 VIEW UPDATE` (and `ui_run_csd`), the view a function from the state to a `UiWidget`, the update one from the state, the action, the event and the window to a `UiStepped`, the window and the state; the update given `app.start` (`ui_start_action`) once as the window opens; a close it does not keep (`ui_win_close_kept`) closing the window and ending the program, 0. | `GtkApplication`'s run |
+| `preview.l0` | An app's views painted on the host, before any board: `UiShot NAME W H WIDGET`, a scene; `ui_shot_canvas`, a widget laid out and painted as `ui_present` paints a window's client area, in the program's style, nothing hovered or focused; `ui_host_face`, the face it paints with at scale 1, the build's `icons.face` and the eight strikes of `ui_text_names` read from `build/strikes`; `ui_preview`, a preview's whole `main`, each scene written as a PNG (`format/png.l0`). Linked as `UI_PREVIEW`, by previews and its test only. | — |
+
 The Makefile links either `UI_CORE` (every file but `window.l0`,
-`uiapp.l0` and `uiloop.l0`; needs only `RENDER`: `ppm.l0`, `rect.l0` and
-`render.l0`) or `UI_CORE` plus `UI_WINDOW` (`window.l0`, `uiapp.l0`,
-`uiloop.l0` and
+`uiapp.l0`, `uiloop.l0`, `run.l0`, `preview.l0` and `testing.l0`; needs
+only `RENDER`: `ppm.l0`, `rect.l0` and `render.l0`) or `UI_CORE` plus
+`UI_WINDOW` (`window.l0`, `uiapp.l0`, `uiloop.l0`, `run.l0` and
 `user/lib/proto/appopen.l0`, an app's name and its open; needs
 `user/lib/proto/wm.l0` too).
 
@@ -45,10 +52,34 @@ architecture:
 
 ```
 view   : state -> UiWidget
-update : state, action, event -> state
+update : state, action, event, window -> state and window
 ```
 
-and its loop is:
+A program of one window hands both to `ui_run` (`run.l0`), which runs
+its loop, so it writes none:
+
+```
+(def gallery_step ((g Gallery) (action (list int)) (ev UiEvent) (w UiWin)) (UiStepped Gallery)
+  (UiStepped w (gallery_update g action ev (ui_win_scroller w (gallery_prefix)))))
+
+(def widgets () int
+  (ui_run "widgets" "Widgets" 640 440 (gallery_new) gallery_view gallery_step))
+```
+
+The first argument names the program as it fails (`complain_as`), the
+title the window. The update is given the window so that it can ask a
+server, set an alarm, give the loop its own ports, focus an entry or
+find a scroller, and gives it back with the state, a `UiStepped`. It is
+given `app.start` (`ui_start_action`), with no event, once as the window
+opens, before the first present: About keeps no state, System Monitor
+reads its table and sets its first alarm there and at each alarm,
+Installer gives the loop install's terminal while it runs, Agent
+focuses its entry and looks for `agentd`. A close (`win.close`) the
+update does not keep with `ui_win_close_kept` closes the window and
+ends the program, 0. `ui_run_csd` opens a window that draws its own
+header bar, as Fonts'. Widgets, About, System Monitor, Fonts, Installer
+and Agent are run so; Disks, Files and Terminal keep loops of their own,
+Files and Terminal over a `UiApp`. What `ui_run` does is the loop:
 
 ```
 (match (ui_open "Title" 640 400) ...)                       once
@@ -58,7 +89,8 @@ and its loop is:
 (ui_present w2 (view state2))       -> w3                     paints what changed
 ```
 
-`user/apps/widgets/widgets.l0` is that loop in full, with a toolbar and a data grid.
+`user/lib/ui/run.l0` is that loop in full, and `user/apps/widgets/widgets.l0`
+an app run by it, with a toolbar and a data grid.
 
 **Put together.** `ui_win_next` (and `ui_app_next`, below) takes the
 next message through the window's loop (`uiloop.l0`'s `ui_loop_take`):
@@ -221,8 +253,9 @@ it, as one asking first whether to save would, calls
 `ui_win_close_kept`. One that does nothing with it presents the window
 again, and `ui_present` closes it instead and asks the compositor to
 `end` the program (`compositor_end`), since L0 has no call that ends a
-program but returning from `main`: so the gallery, System Monitor,
-Disks and About close as they did when the close button killed them.
+program but returning from `main`: so Disks closes as it did when the
+close button killed it. A program run by `ui_run` needs neither: the
+runner closes the window and returns.
 
 **Launched again.** The app's port is its name, `app.EXEC` (EXEC its
 program's file name), which `ui_app_start` registers, so a launch of a
@@ -237,6 +270,52 @@ comes to the front and nothing more opens, which is all a program of
 one window, routing with `ui_route`, does. One that opens a window for
 it, as Files does, answers with `ui_app_shown app event ID`, the window
 to bring forward. The answer is told (`port_tell`), never waited on.
+
+### A new app
+
+`tools/l0s-app-new NAME TITLE [DIR] [--bundle APP]` writes an app of
+one window in the shape To Do has (`user/apps/todo`), small enough to
+replace: `NAME.l0`, a record of state, its view a `ui_page` of a count
+and a button, its update a chain of tests on the action, its step and
+`ui_run`; `NAME_test.l0`, tests of the update and the view (`UI_TESTING`)
+and that it fails with no compositor; `main.l0`; and `preview.l0`, two
+scenes. With `--bundle`, the bundle's manifest, named TITLE, and an
+`icon.draw`. It writes over nothing, and what it writes checks, passes
+its tests, previews and builds as written (`test_proxy.py`'s
+`Scaffold`). The `l0s-ui` skill's `apps.md` goes on from there: what a
+person asks for, the widget, its actions, what the state keeps and the
+update's line, for each of the widgets above.
+
+### Previewing on the host
+
+A view is a function of the program's state, and laying it out and
+painting it need no kernel, so an app's look is seen on the host, in
+seconds, before it is built for the board. Its `preview.l0`, beside
+its `main.l0`, is a `main` of its own that names its scenes, each a
+`UiShot` of a file name, a size and the view of some state, built with
+the app's own functions, so a scene after a click is one more call of
+its update:
+
+```
+(def main () int
+  (ui_preview (cons (UiShot "main" 640 440 (gallery_view (gallery_new)))
+                    (cons (UiShot "selected" 640 440
+                            (gallery_view (gallery_update (gallery_new) "procs.select.6" (UiOther 0 "") (ui_no_scroller))))
+                          (nil UiShot)))))
+```
+
+`make preview APP=NAME` builds it on the host with the app's sources
+(never its `main.l0`, which a preview leaves out as the app leaves out
+`preview.l0`) and `UI_PREVIEW`, and runs it: each scene laid out at its
+size and painted as `ui_present` paints the window's client area, in
+the dark style, on the window's ground, nothing hovered, pressed or
+focused, with the board's own strikes and icons as the build made them
+(`build/strikes`, `build/icons.face`), into
+`build/preview/NAME/SCENE.png`. What the board's compositor adds, the
+title bar and frame, is not in it. The pixels are the board's: the
+gallery's selected row is 36 56 80 in its preview as in
+`tests/widgets.sh`'s screen dump. The builder's sessions do the same
+with `l0s-app-preview` ([network.md](network.md)).
 
 ### Scrolling
 
@@ -339,6 +418,15 @@ to `l0` are one namespace, and a duplicate is a compile error.
   their text 9 px in, their cursor a pixel wide.
 - **Empty states** use a status page: a large dim icon, a title, and what to
   do next.
+- **Switches** are 48 by 26, their knob 20 and white, 3 in from the end
+  they are at, the pill in the accent when on and the text's color at
+  15% when off (20% under the pointer). **Check boxes** are 16 square,
+  rounded 4, the same colors, with Adwaita's check while on. **Sliders**
+  are 26 high, their trough 6, round, filled in the accent to a white
+  knob of 20. A **spinner** is eight dots turning a dot each 100 ms.
+- **Boxed lists** are a card rounded 12, rows 50 high with a line between
+  each two, 12 in: an icon, a widget, the title over a dimmed subtitle,
+  and a widget at the row's end.
 - **Sidebars** are 220 wide on libadwaita's sidebar ground (`ebebed`), rows
   of 48 with a 32 px icon, the selected one rounded in 10% of the text.
 - **Dialogs** are libadwaita's alert dialog: a 320-wide card, its corners a
@@ -473,3 +561,18 @@ to `l0` are one namespace, and a duplicate is a compile error.
   line whole, so their cost grows with all they hold, not with what
   shows; nothing of them is keyed. Their text cannot be selected or
   copied, and a row is one line of 16 high, so they show no larger text.
+- A slider steps a twentieth of its range for Left and Right, which a
+  program cannot change, and has no marks or value drawn on it. A
+  spinner is dots, not AdwSpinner's arc, since nothing is drawn by hand
+  but rounds and fills, and it turns only as its program's alarm turns
+  it. A boxed list's rows are all 50 high, a line of title and one of
+  subtitle at most; it shows no selection and takes no keys but the
+  focus's Tab and Enter, and, as the grid's, its ops are not cut to its
+  card, so it shows whole rows only.
+- A preview paints at scale 1 only, in a state nothing has touched: no
+  hover, press or focus, so an entry shows no cursor and no ring. Its
+  face has the interface's eight strikes and the symbolic icons, so text
+  in another face or height (`UiFontAt`), full-color images
+  (`ui_images_load`'s, which read `/etc/images`) and a drawing area,
+  which its program paints, are not drawn. Its PNGs are not compressed:
+  a 640 by 440 window is about 845 KB.

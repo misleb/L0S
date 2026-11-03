@@ -24,12 +24,15 @@ The session is `claude -p`, its events read as stream-json, with:
   only the tools named run: the file tools, reading and writing in its
   folder and its worktree only, and as commands L0's check, fmt, doc and
   spec, make -s doc, graphify's explain and affected, read-only
-  inspection (ls, cat, head, tail, wc, grep, file), and l0s-app-build
-  (bin/), which builds the app for the board; never git, which the
-  builder alone runs;
+  inspection (ls, cat, head, tail, wc, grep, file), and bin/'s
+  l0s-app-new, which writes a new app's files in its shape,
+  l0s-app-preview, which paints its scenes as PNGs on this host,
+  confined, and l0s-app-build, which builds it for the board; never
+  git, which the builder alone runs;
 - a system prompt added to Claude Code's: what an app of L0S's is, the
-  skills and examples to read, to build with l0s-app-build, with no
-  tests, spec or roadmap, and that the worktree is its to change.
+  workflow (scaffold, the recipe's vocabulary, check, preview and look,
+  build), the skills and examples to read, with no tests, spec or
+  roadmap, and that the worktree is its to change.
 
 A build yields events: ("progress", text) as the session works, then
 ("done", summary) once a program was built, its bytes then in
@@ -57,7 +60,7 @@ API_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "A
            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
 # The commands the session may run, each a prefix.
-COMMANDS = ("l0 check", "l0 fmt", "l0 doc", "l0 spec", "l0s-app-build", "make -s -C %s doc" % L0S,
+COMMANDS = ("l0 check", "l0 fmt", "l0 doc", "l0 spec", "l0s-app-new", "l0s-app-build", "l0s-app-preview", "make -s -C %s doc" % L0S,
             "graphify explain", "graphify affected", "ls", "cat", "head", "tail", "wc", "grep", "file")
 
 PROMPT = """You build desktop apps for L0S, the operating system, for the
@@ -66,20 +69,31 @@ this folder, which is its own. %(tree)s is L0S, a git worktree on
 the branch %(branch)s, which is this app's own too: read L0S there.
 
 - L0S and its libraries are written in L0, which is not in your
-  training data: read %(tree)s/AGENTS.md's L0 block, `l0 spec`, and the
-  skills %(tree)s/.claude/skills/l0-code/SKILL.md and
-  %(tree)s/.claude/skills/l0s-ui/SKILL.md before writing any. Find
-  library names with `make -s -C %(l0s)s doc Q=WORD` and `l0 doc NAME`;
-  who calls what with `graphify explain "NAME()" --graph
-  %(l0s)s/graphify-out/graph.json`.
-- Copy the shape of a toolkit app: %(tree)s/user/apps/widgets is the
-  smallest. Write %(name)s.l0 and main.l0 (only main, calling into it),
-  and more .l0 files if you need them, in this folder; no tests are
-  needed.
+  training data. Read first %(tree)s/.claude/skills/l0s-ui/apps.md, the
+  recipe from a description to an app: its workflow, and the table of
+  what a person asks for, the widget that shows it, its actions and
+  what the state keeps. Then %(tree)s/AGENTS.md's L0 block, `l0 spec`,
+  and the skills %(tree)s/.claude/skills/l0-code/SKILL.md and
+  %(tree)s/.claude/skills/l0s-ui/SKILL.md. Find library names with
+  `make -s -C %(l0s)s doc Q=WORD` and `l0 doc NAME`; who calls what
+  with `graphify explain "NAME()" --graph %(l0s)s/graphify-out/graph.json`.
+- For a new app, start with `l0s-app-new %(name)s "TITLE"`, which writes
+  %(name)s.l0, %(name)s_test.l0, main.l0 and preview.l0 here in the
+  shape the recipe teaches, and which builds as written. Then fill in
+  its state, view, update and step from the recipe's vocabulary;
+  %(tree)s/user/apps/todo is the worked example. More .l0 files if you
+  need them; tests are welcome but not needed.
+- Run `l0 fmt` and `l0 check` as you go. Then `l0s-app-preview %(name)s`,
+  which paints each scene of preview.l0 on this host as the board
+  would, into preview/SCENE.png, in seconds: write scenes for the
+  states that matter (empty, full, a dialog open), Read the PNGs, and
+  fix what looks wrong (overflowing rows, cut text, misplaced controls)
+  before you build.
 - Build with `l0s-app-build %(name)s`, which checks and builds every .l0
-  here with the libraries of %(tree)s a window app links, into
-  ./%(name)s. If the app needs another library, name its Makefile
-  variable after the name: `l0s-app-build %(name)s CLOCK`.
+  here but preview.l0 and the tests, with the libraries of %(tree)s a
+  window app links, into ./%(name)s. If the app needs another library,
+  name its Makefile variable after the name, to both tools:
+  `l0s-app-build %(name)s CLOCK`.
 - If the app needs more than the toolkit or another library has, first
   write it in the app itself (a widget of your own can be a
   UiDrawingArea the app paints). If that is not enough, change the

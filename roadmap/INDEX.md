@@ -91,6 +91,7 @@ graph LR
   0043 --> 0044[0044 agent's home]
   0043 --> 0045[0045 app builder]
   0045 --> 0046[0046 self-knowledge]
+  0045 --> 0065[0065 apps from a description]
   0043 --> 0049[0049 agent chat app]
   0049 --> 0058[0058 agent's reach]
   0058 --> 0061[0061 speech service]
@@ -113,6 +114,7 @@ graph LR
 | [0027](0027-installer.md) Installing and updating L0S from the proxy, with a GUI | Storage | 2026-11-02 |
 | [0063](0063-card-boot-display.md) A card boot as whole as a network boot: 4K and HDMI audio | Pi 5 | 2026-11-02 |
 | [0064](0064-rp1-interrupts.md) RP1's DMA window set up by L0S, whatever the bootloader | Pi 5 | 2026-11-02 |
+| [0065](0065-apps-from-a-description.md) Apps from a description: the toolkit's vocabulary, a preview, and a recipe | Toolkit | 2026-11-03 |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | 2026-10-29 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |

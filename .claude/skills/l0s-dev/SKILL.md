@@ -159,6 +159,10 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
    service, `user/apps/NAME/` for an app: `NAME.l0`, `NAME_test.l0`,
    `main.l0`. `main` only calls in: `(def main () int (NAME))`. A name with
    a hyphen gets an underscored function (`virtio-gpu` → `virtio_gpu`).
+   An app of one window starts as `tools/l0s-app-new NAME "Title"
+   user/apps/NAME --bundle APP` writes it, with a `preview.l0` of its
+   scenes for `make preview APP=NAME`; the `l0s-ui` skill's `apps.md`
+   takes it from there.
 2. Makefile: nothing, unless it needs more than `ULIB`: then
    `LIBS_NAME := ...`. The Makefile finds the directory, every `.l0` in it
    and its tests, and its check, test, image and initramfs rules follow.

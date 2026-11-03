@@ -109,3 +109,6 @@ library on its branch reaches L0S's, which is a merge by hand.
   not. No request is filed.
   The user decided against having agentd's conversation go through a
   Claude Code session in place of the API. Done.
+- 2026-11-03: what the session is given to make an app with, a
+  scaffold, a preview and a recipe, and the widgets apps lacked, are
+  [0065](0065-apps-from-a-description.md).

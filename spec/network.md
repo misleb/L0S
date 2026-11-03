@@ -379,7 +379,8 @@ A model's API is HTTPS only, and L0S has no TLS, so a board reaches
 Anthropic's Messages API through a proxy on the development host,
 [tools/api-proxy](../tools/api-proxy/proxy.py), in Python with aiohttp
 in its own venv (`make proxy` makes `build/proxy/venv` and the boards'
-token, `build/proxy/token`, 32 random hex digits made once, mode 600).
+token, `build/proxy/token`, 32 random hex digits made once, mode 600,
+and the strikes and icons the app builder's previews are painted with).
 `make proxy-run [PROXY_LISTEN=ADDR:PORT]` runs it on 127.0.0.1:8765
 unless given, with that token and the host's `ANTHROPIC_API_KEY`,
 without which it will not start. It:
@@ -443,16 +444,37 @@ without which it will not start. It:
   commands `l0 check`, `fmt`,
   `doc` and `spec`, `make -s -C L0S doc`, `graphify explain` and
   `affected`, `ls`, `cat`, `head`, `tail`, `wc`, `grep` and `file`,
+  `l0s-app-new` ([bin/l0s-app-new](../tools/api-proxy/bin/l0s-app-new),
+  L0S's `tools/l0s-app-new` writing a new app's `NAME.l0`, its test,
+  `main.l0` and `preview.l0` into the folder in the shape the `l0s-ui`
+  skill's `apps.md` teaches, never over a file that is there),
   and `l0s-app-build`, first on its `PATH`
   ([bin/l0s-app-build](../tools/api-proxy/bin/l0s-app-build)), which
   checks and builds every `.l0` of its folder, `main.l0` last, with
   the Makefile's `app-libs` (every program's libraries and a window's,
   and those of each Makefile variable it is given), their files the
-  worktree's (`L0S_TREE`), into the program `NAME`. An appended system prompt says what an L0S app is, which
-  skills and examples to read, to build with `l0s-app-build` and with
-  no tests, spec or roadmap, to write what the toolkit lacks in the app
-  itself first and only then change the library in its worktree, and
-  to end with what the app does and which of L0S's files it changed. The
+  worktree's (`L0S_TREE`), into the program `NAME`, leaving out
+  `preview.l0`; and `l0s-app-preview`
+  ([bin/l0s-app-preview](../tools/api-proxy/bin/l0s-app-preview)),
+  which builds the folder's `preview.l0`, a `main` calling the
+  toolkit's `ui_preview` with the app's scenes ([toolkit.md](toolkit.md#previewing-on-the-host)),
+  with the same libraries and `UI_PREVIEW`, for the host, and runs it:
+  each scene painted as the board paints it into `preview/SCENE.png`,
+  its text and icons from L0S's `build/` (`L0S_BUILD`), whose strikes
+  and icons `make proxy` makes. The preview is the session's own
+  program, and an L0 program can write any file its user can, so it
+  runs under bubblewrap, every file read-only but `preview/`, with no
+  network; with no `bwrap` on the host it is refused. An appended
+  system prompt says what an L0S app is; to read `apps.md`, the recipe
+  from a description to an app, first, then L0's spec and the skills;
+  to start with `l0s-app-new`, fill in the view and update from the
+  recipe, `user/apps/todo` its example, `l0 fmt` and `l0 check` as it
+  goes, then write scenes for the states that matter, preview them and
+  Read the PNGs, fixing what looks wrong before it builds with
+  `l0s-app-build`, with no spec or roadmap and tests welcome but not
+  needed; to write what the toolkit lacks in the app itself first and
+  only then change the library in its worktree; and to end with what
+  the app does and which of L0S's files it changed. The
   answer is server-sent events: `progress` `{"text"}`, the session's
   text and each tool it uses, a line each; then `done` `{"summary",
   "size"}`, once a program newer than any before is there and is an

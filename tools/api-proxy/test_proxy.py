@@ -574,7 +574,14 @@ class Building(unittest.IsolatedAsyncioTestCase):
         allowed = a[a.index("--allowedTools") + 1].split(",")
         self.assertIn("Write(./**)", allowed)
         self.assertIn("Bash(l0s-app-build:*)", allowed)
+        self.assertIn("Bash(l0s-app-new:*)", allowed)
+        self.assertIn("Bash(l0s-app-preview:*)", allowed)
         self.assertNotIn("Bash", allowed)
+        # The prompt sends it to the recipe first, and to preview before
+        # it builds.
+        prompt = a[a.index("--append-system-prompt") + 1]
+        self.assertIn(".claude/skills/l0s-ui/apps.md", prompt)
+        self.assertLess(prompt.index("l0s-app-preview"), prompt.index("Build with"))
 
     async def test_api_key_refused(self):
         os.environ["FAKE_CLAUDE_KEY_SOURCE"] = "ANTHROPIC_API_KEY"
@@ -647,6 +654,53 @@ class BuildingTree(Building):
 
 L0S = os.path.abspath(os.path.join(HERE, "..", ".."))
 APP_BUILD = os.path.join(HERE, "bin", "l0s-app-build")
+APP_PREVIEW = os.path.join(HERE, "bin", "l0s-app-preview")
+APP_NEW = os.path.join(HERE, "bin", "l0s-app-new")
+
+
+class Scaffold(unittest.TestCase):
+    """l0s-app-new in a session's folder: what it writes previews and
+    builds as written, with L0S's own libraries, and is never written
+    over."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = os.path.join(self.tmp.name, "app")
+        os.makedirs(self.dir)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_tool(self, *argv):
+        env = dict(os.environ)
+        env.pop("L0S_TREE", None)
+        env["L0S_BUILD"] = os.path.join(self.tmp.name, "nobuild")
+        return subprocess.run(list(argv), cwd=self.dir, capture_output=True, text=True, timeout=300, env=env)
+
+    def test_scaffold_previews_and_builds(self):
+        r = self.run_tool(APP_NEW, "tip-calc", "Tip Calculator")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["main.l0", "preview.l0", "tip-calc.l0", "tip-calc_test.l0"])
+        r = self.run_tool(APP_PREVIEW, "tip-calc")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(r.stdout.split(), ["preview/main.png", "preview/added.png"])
+        r = self.run_tool(APP_BUILD, "tip-calc")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        with open(os.path.join(self.dir, "tip-calc"), "rb") as f:
+            self.assertEqual(f.read(4), b"\x7fELF")
+
+    def test_scaffold_never_overwrites(self):
+        with open(os.path.join(self.dir, "main.l0"), "w") as f:
+            f.write("mine\n")
+        r = self.run_tool(APP_NEW, "app", "App")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is there already", r.stderr)
+        with open(os.path.join(self.dir, "main.l0")) as f:
+            self.assertEqual(f.read(), "mine\n")
+
+    def test_scaffold_refuses_names(self):
+        self.assertEqual(self.run_tool(APP_NEW, "Bad", "App").returncode, 2)
+        self.assertEqual(self.run_tool(APP_NEW, "app", 'say "hi"').returncode, 2)
 
 
 class AppBuild(unittest.TestCase):
@@ -658,9 +712,10 @@ class AppBuild(unittest.TestCase):
         self.dir = os.path.join(self.tmp.name, "app")
         self.tree = os.path.join(self.tmp.name, "tree")
         os.makedirs(self.dir)
-        for f in ("widgets.l0", "main.l0"):
+        for f in ("widgets.l0", "main.l0", "preview.l0"):
             self.copy(os.path.join(L0S, "user", "apps", "widgets", f), os.path.join(self.dir, f), "")
-        libs = subprocess.run(["make", "-s", "-C", L0S, "app-libs"], capture_output=True, text=True, check=True).stdout.split()
+        libs = subprocess.run(["make", "-s", "-C", L0S, "app-libs", "APP_LIBS=UI_PREVIEW"], capture_output=True, text=True,
+                              check=True).stdout.split()
         for f in libs:
             extra = "\n; Only this tree's.\n(def ui_tree_own () int 7)\n" if f == "user/lib/ui/theme.l0" else ""
             self.copy(os.path.join(L0S, f), os.path.join(self.tree, f), extra)
@@ -695,6 +750,36 @@ class AppBuild(unittest.TestCase):
         r = self.build(None)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("ui_tree_own", r.stdout + r.stderr)
+
+    def test_preview(self):
+        # The gallery's scenes, with the tree's libraries, as PNGs in
+        # preview/; with no strikes or icons where L0S_BUILD says, which
+        # is said, and the scenes are still painted.
+        env = dict(os.environ, L0S_TREE=self.tree, L0S_BUILD=os.path.join(self.tmp.name, "nobuild"))
+        r = subprocess.run([APP_PREVIEW, "widgets"], cwd=self.dir, capture_output=True, text=True, timeout=300, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(r.stdout.split()[:2], ["preview/main.png", "preview/selected.png"])
+        self.assertIn("no strikes or icons", r.stderr)
+        with open(os.path.join(self.dir, "preview", "main.png"), "rb") as f:
+            self.assertEqual(f.read(8), b"\x89PNG\r\n\x1a\n")
+        # And the app's build leaves preview.l0 out: it has a main.
+        self.assertEqual(self.build(self.tree).returncode, 0)
+
+    def test_preview_confined(self):
+        # The preview runs confined: a scene that writes outside
+        # preview/ cannot, and says so; what it writes inside is there.
+        with open(os.path.join(self.dir, "preview.l0"), "w") as f:
+            f.write("; preview.l0 -- a preview that writes beside its folder.\n\n"
+                    "; Writes ../escaped, then a scene.\n"
+                    "(def main () int\n"
+                    "  (let w (write_whole \"../escaped\" (bytes_from_list \"x\"))\n"
+                    "    (let s (say (if (is_empty w) \"escaped\\n\" \"refused\\n\"))\n"
+                    "      (ui_preview (cons (UiShot \"main\" 64 48 (UiSpace 0 0)) (nil UiShot))))))\n")
+        env = dict(os.environ, L0S_TREE=self.tree, L0S_BUILD=os.path.join(self.tmp.name, "nobuild"))
+        r = subprocess.run([APP_PREVIEW, "widgets"], cwd=self.dir, capture_output=True, text=True, timeout=300, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(r.stdout.split(), ["refused", "preview/main.png"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "escaped")))
 
 
 if __name__ == "__main__":

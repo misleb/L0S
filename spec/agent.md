@@ -444,7 +444,11 @@ app from what the prompt says, or, for a name built before, the same
 app changed, its session remembering it. The app is not part of L0S,
 and its source stays on the host, as does any change to L0S's
 libraries the app needed, made on a branch of its own there
-(`app/NAME`) for the person to merge or not.
+(`app/NAME`) for the person to merge or not. The session starts a new
+app from the toolkit's scaffold and looks at its scenes, painted on the
+host as the board would paint them, before it builds, so the progress
+the Tools pane shows names `l0s-app-new`, `l0s-app-preview` and the
+PNGs it read, then `l0s-app-build`.
 
 `agentd` sends `POST /build` on its connection to the proxy, once the
 model's answer before has ended on it, and the turn waits on the build

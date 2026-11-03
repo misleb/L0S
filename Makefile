@@ -52,6 +52,9 @@
 #   make -s doc [Q=...]  the libraries' documentation, as l0 doc gives
 #                    L0's: every name, or Q a name, a file's stem or the
 #                    end of its path, or text, in the programs' too
+#   make preview APP=NAME  an app's scenes, its preview.l0, painted on
+#                    this machine as the board paints them, into
+#                    build/preview/NAME/*.png, in seconds, no board
 #   make doc-prune   take the forms documented since off DOC_GAPS, which
 #                    make check holds every undocumented form to
 #   make mcp         build/mcp/venv, the Python with the MCP SDK that
@@ -59,7 +62,9 @@
 #                    that boots and drives L0S for agents
 #   make proxy       build/proxy/venv, the Python with aiohttp that the
 #                    API proxy runs in (tools/api-proxy), and
-#                    build/proxy/token, the boards' token, made once
+#                    build/proxy/token, the boards' token, made once,
+#                    and the strikes and icons its app builder's
+#                    sessions preview apps with
 #   make proxy-run [PROXY_LISTEN=ADDR:PORT]  the proxy to Anthropic's API
 #                    on ADDR:PORT, 127.0.0.1:8765 unless given, with that
 #                    token and ANTHROPIC_API_KEY; usage in
@@ -317,9 +322,18 @@ BOOTLOADER  := $(MAILBOX) $(PIEEPROMLIB) user/lib/sys/bootloader.l0
 # they take their messages and time their steps by, uiloop.l0.
 UI_CORE   := $(STRIKE) $(FONTLIB) user/lib/ui/theme.l0 user/lib/ui/icons.l0 user/lib/ui/face.l0 user/lib/ui/metrics.l0 user/lib/ui/paint.l0 user/lib/ui/widget.l0 \
              user/lib/ui/grid.l0 user/lib/ui/panes.l0 user/lib/ui/entry.l0 user/lib/ui/draw_cmd.l0 \
-             user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0 user/lib/ui/lines.l0
-UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0 user/lib/ui/uiloop.l0 $(APPOPEN)
-UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu lines
+             user/lib/ui/nav.l0 user/lib/ui/icon_view.l0 user/lib/ui/menu.l0 user/lib/ui/lines.l0 user/lib/ui/page.l0 \
+             user/lib/ui/controls.l0 user/lib/ui/list.l0
+UI_WINDOW := user/lib/ui/window.l0 user/lib/ui/uiapp.l0 user/lib/ui/uiloop.l0 user/lib/ui/run.l0 $(APPOPEN)
+UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_view menu lines page controls list
+# What a test asks of a view laid out, linked into the toolkit's tests
+# and those of every program that links the toolkit, never a program.
+UI_TESTING := user/lib/ui/testing.l0
+# PNG images, written, and an app's views painted on the host as PNGs
+# with the build's strikes and icons (roadmap 0065): linked by an app's
+# preview.l0, make preview and l0s-app-preview, never by an app.
+PNG        := user/lib/format/png.l0
+UI_PREVIEW := $(CRC32) $(PNG) user/lib/ui/preview.l0
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
 LIBS_hvs        := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER) $(MAILBOX)
@@ -358,6 +372,7 @@ LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_todo       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_installer  := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(RELEASE) $(BOOTLOADER)
@@ -391,10 +406,13 @@ $(foreach p,$(APPS),$(eval BUNDLE_$(p) := $(notdir $(wildcard user/apps/$(p)/*.a
 $(foreach p,$(APPS),$(eval ICON_$(p) := $(firstword $(wildcard user/apps/$(p)/$(BUNDLE_$(p))/icon.svg) user/apps/$(p)/$(BUNDLE_$(p))/icon.draw)))
 
 # A program's own sources, SRCS_NAME: every .l0 in its directory but its
-# main.l0 and its tests, NAME.l0 first; and its tests, TESTS_NAME, each
+# main.l0, an app's preview.l0 (its scenes for make preview, a main of
+# its own) and its tests, NAME.l0 first; and its tests, TESTS_NAME, each
 # run with all of them.
 $(foreach p,$(PROGRAMS),$(eval SRCS_$(p) := $(DIR_$(p))/$(p).l0 \
-    $(filter-out $(DIR_$(p))/$(p).l0 $(DIR_$(p))/main.l0 %_test.l0,$(wildcard $(DIR_$(p))/*.l0))))
+    $(filter-out $(DIR_$(p))/$(p).l0 $(DIR_$(p))/main.l0 $(DIR_$(p))/preview.l0 %_test.l0,$(wildcard $(DIR_$(p))/*.l0))))
+# The apps with scenes to preview.
+PREVIEW_APPS := $(foreach p,$(APPS),$(if $(wildcard $(DIR_$(p))/preview.l0),$(p)))
 $(foreach p,$(PROGRAMS),$(eval TESTS_$(p) := $(wildcard $(DIR_$(p))/*_test.l0)))
 
 L0SDOC   := $(BASE) $(CLI) tools/l0sdoc/l0sdoc.l0
@@ -426,7 +444,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
 
 all: check test test-virt e2e
 
@@ -466,6 +484,7 @@ l0_test = $(eval $(call L0_TEST,$(1)))
 
 $(call l0_check,$(KERNEL) kernel/main.l0)
 $(foreach p,$(PROGRAMS),$(call l0_check,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(DIR_$(p))/main.l0))
+$(foreach p,$(PREVIEW_APPS),$(call l0_check,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(UI_PREVIEW) $(DIR_$(p))/preview.l0))
 $(call l0_check,$(L0SDOC) tools/l0sdoc/main.l0)
 $(call l0_check,$(MKFS) tools/mkfs/main.l0)
 $(call l0_check,$(MKEEPROM) tools/mkeeprom/main.l0)
@@ -595,6 +614,7 @@ $(call l0_test,$(BASE) $(ENCODER) user/lib/speech/encoder_test.l0)
 $(call l0_test,$(BASE) $(DECODER) user/lib/speech/decoder_test.l0)
 $(call l0_test,$(BASE) $(CLI) $(TRANSCRIBE) user/lib/speech/transcribe_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
+$(call l0_test,$(BASE) $(CRC32) $(PNG) user/lib/format/png_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
 $(call l0_test,$(ULIB) $(RELEASE) user/lib/sys/release_test.l0)
 $(call l0_test,$(BASE) $(SHA256) $(PIEEPROMLIB) user/lib/format/pieeprom_test.l0)
@@ -609,11 +629,13 @@ $(call l0_test,$(BASE) $(JSON) user/lib/format/json_test.l0)
 $(call l0_test,$(BASE) $(NTPLIB) user/lib/format/ntp_test.l0)
 $(call l0_test,$(BASE) $(SSE) user/lib/format/sse_test.l0)
 $(call l0_test,$(BASE) $(HTTPMSG) user/lib/format/http_test.l0)
-$(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) user/lib/ui/$(t)_test.l0))
+$(foreach t,$(UI_TESTS),$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) $(UI_TESTING) user/lib/ui/$(t)_test.l0))
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/window_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/uiapp_test.l0)
 $(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/uiloop_test.l0)
-$(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(call l0_test,$(ULIB) $(LIBS_$(p)) $(SRCS_$(p)) $(t))))
+$(call l0_test,$(ULIB) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) user/lib/ui/run_test.l0)
+$(call l0_test,$(ULIB) $(RENDER) $(UI_CORE) $(UI_PREVIEW) user/lib/ui/preview_test.l0)
+$(foreach p,$(PROGRAMS),$(foreach t,$(TESTS_$(p)),$(call l0_test,$(ULIB) $(LIBS_$(p)) $(if $(filter user/lib/ui/widget.l0,$(LIBS_$(p))),$(UI_TESTING)) $(SRCS_$(p)) $(t))))
 $(call l0_test,$(L0SDOC) tools/l0sdoc/l0sdoc_test.l0)
 $(call l0_test,$(MKFS) tools/mkfs/mkfs_test.l0)
 $(call l0_test,$(MKEEPROM) tools/mkeeprom/mkeeprom_test.l0)
@@ -643,7 +665,7 @@ $(BUILD)/test/graphify-l0.ok: $(wildcard tools/graphify-l0/*.py) tools/graphify-
 # The API proxy's tests, against its stand-in, with the venv's Python,
 # which has aiohttp: the first after a clean needs the network, for pip.
 PROXY_VENV := $(BUILD)/proxy/venv
-$(BUILD)/test/api-proxy.ok: $(wildcard tools/api-proxy/*.py) tools/api-proxy/bin/l0s-app-build $(PROXY_VENV)/.installed
+$(BUILD)/test/api-proxy.ok: $(wildcard tools/api-proxy/*.py) $(wildcard tools/api-proxy/bin/*) tools/l0s-app-new $(PROXY_VENV)/.installed
 	@mkdir -p $(@D)
 	@$(call logged,$(PROXY_VENV)/bin/python tools/api-proxy/test_proxy.py,tools/api-proxy/test_proxy.py)
 
@@ -786,6 +808,20 @@ $(ICON_FACE): $(BUILD)/mkicons $(SYMBOLIC)
 icon-sheet: $(BUILD)/mkicons $(SYMBOLIC)
 	$(BUILD)/mkicons --sheet $(BUILD)/icon-sheet.ppm $(SYMBOLIC)
 
+# An app's scenes, its preview.l0, painted on the host as the board
+# would paint them, with these strikes and icons, into
+# build/preview/APP/NAME.png (roadmap 0065): make preview APP=NAME. The
+# preview's own test paints with them too.
+PREVIEW_DIR = $(BUILD)/preview/$(APP)
+preview: $(STRIKES) $(ICON_FACE)
+	@if [ -z "$(APP)" ] || [ ! -f "user/apps/$(APP)/preview.l0" ]; then \
+	  echo "make preview APP=NAME, NAME an app with a preview.l0: $(PREVIEW_APPS)"; exit 2; fi
+	@mkdir -p $(PREVIEW_DIR)
+	@$(L0) build $(ULIB) $(LIBS_$(APP)) $(SRCS_$(APP)) $(UI_PREVIEW) user/apps/$(APP)/preview.l0 -o $(PREVIEW_DIR)/preview
+	@$(PREVIEW_DIR)/preview $(PREVIEW_DIR) $(BUILD)
+
+$(BUILD)/test/user/lib/ui/preview_test.l0.ok: $(STRIKES) $(ICON_FACE)
+
 # The full-color icons Files and Disks show things with, /etc/images:
 # Adwaita's SVGs under icons/adwaita/scalable, each drawn by mkicon
 # --image into NAME.face, its images at every size, with their alpha.
@@ -870,7 +906,9 @@ $(BUILD)/proxy/token:
 	@umask 077 && python3 -I -c 'import secrets; print(secrets.token_hex(16))' > $@.new && mv $@.new $@
 	@echo "make proxy: a new token in $@"
 
-proxy: $(PROXY_VENV)/.installed $(BUILD)/proxy/token
+# The strikes and icons too, which the builder's sessions preview apps
+# with (l0s-app-preview).
+proxy: $(PROXY_VENV)/.installed $(BUILD)/proxy/token $(STRIKES) $(ICON_FACE)
 
 # The agent's etc for a board: build/agent-etc/config, naming the proxy
 # at API, HOST:PORT, and the model if MODEL names one, and the boards'
@@ -1006,7 +1044,7 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
 SCREEN_TESTS := vt files launch responsive disks-create resize logo-menu procmon disks launcher launcher-install \
-                installer fontview partitions usb fat hidpi widgets keyboard gpu-screen
+                installer fontview partitions usb fat hidpi widgets keyboard gpu-screen todo
 
 e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
 	tests/e2e.sh
