@@ -449,7 +449,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
 
 all: check test test-virt e2e
 
@@ -1039,6 +1039,13 @@ installer-initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/installer-etc && cp -R tests/installer/etc $(BUILD)/installer-etc
 	$(call stage_etc,$(BUILD)/installer-etc)
 
+# What tests/agent.sh boots, once it has named its proxy's port in
+# agent/config: tests/agent-screen/etc, the desktop with the disk, the
+# network and agentd, staged as the screen tests' are.
+agent-screen-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/agent-screen-etc && cp -R tests/agent-screen/etc $(BUILD)/agent-screen-etc
+	$(call stage_etc,$(BUILD)/agent-screen-etc)
+
 # What tests/launcher-install.sh boots, and copies onto its disk's System
 # volume to boot from: tests/launcher-install/etc, boot and the disk's
 # driver and file server beside the compositor.
@@ -1052,9 +1059,9 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
 SCREEN_TESTS := vt files launch responsive disks-create resize logo-menu procmon disks launcher launcher-install \
-                installer fontview partitions usb fat hidpi widgets keyboard gpu-screen todo
+                installer agent fontview partitions usb fat hidpi widgets keyboard gpu-screen todo
 
-e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
+e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
 	tests/e2e.sh
 	tests/screens.sh $(SCREEN_TESTS)
 

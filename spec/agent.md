@@ -70,7 +70,9 @@ The conversation is kept in the home's `.history/conversation.json`,
 part of the home's fixed part, as a JSON object: `began`, the clock's
 seconds at its first turn (0 with no clock); `said`, how many times the
 person has spoken in it; `usage`, the last answer's four counts, so
-that compaction goes on as it would have; and `messages`, its turns as
+that compaction goes on as it would have; `images`, the paths of the
+images shown the person in it, oldest first, its newest 64, which
+compaction keeps and a file without them reads as none; and `messages`, its turns as
 the Messages API's, without breakpoints (`conv_kept_bytes`). `agentd`
 writes it whole, as `conversation.json.new` renamed over the last, so a
 write cut short leaves the last whole, each time the conversation is
@@ -150,7 +152,7 @@ answer to its reply port:
 
 | Request | Answer |
 |---|---|
-| `open NPORT` | `ok`; then the conversation so far told to NPORT as its notices would have told it (`conv_replay`: the person's texts as `said`, from the source their turn's line names (`unknown` for a turn kept before there were sources), a summary compaction made as `compacted 0 0`, the model's texts, each tool's use and its result, named by the use it answers), then `opened busy` or `opened idle`; and its notices go to NPORT from then on, as to every port opened before it. A port gone before all that is told is not kept |
+| `open NPORT` | `ok`; then the conversation so far told to NPORT as its notices would have told it (`conv_replay`: the person's texts as `said`, from the source their turn's line names (`unknown` for a turn kept before there were sources), a summary compaction made as `compacted 0 0`, the model's texts, each tool's use and its result, named by the use it answers, then each image shown in it as `image`, oldest first), then `opened busy` or `opened idle`; and its notices go to NPORT from then on, as to every port opened before it. A port gone before all that is told is not kept |
 | `say [SOURCE]` a newline and the text | `ok`, the text told to every NPORT open as `said`, and the answer streamed to them; `error: busy` while a turn runs, whoever said it. SOURCE, one word, says where the text came from ([Where a prompt came from](#where-a-prompt-came-from)): `console` from `agent`, `app` from Agent; with none it is the sending program's name |
 | `stop` | `ok`: if a turn is running, a program it runs is ended, the answer's connection reset, and the turn done, `stopped`, each tool still awaited answered as failed |
 | `clear` | `ok`: the conversation begun anew, and kept so; `error: busy` while a turn runs |
@@ -430,6 +432,14 @@ Places and sizes are the desktop's pixels, a window's its content's.
 | `clear_desktop` | none | `desktop size`, then `desktop restore 0 0 W H` | the wallpaper the compositor holds put back over all of the desktop |
 | `time` | none | the clock's `time` and `zone` | the date and time to the second in UTC and the weekday, the same in the clock's zone (US Pacific) with its offset, and the seconds since 1970 |
 
+`show_image` (`path`, a relative one from the home) shows the person a
+PNG, one of the model's own or one it found: a file whose first 8 bytes
+are a PNG's is told to every port open as `agent image` and its path,
+kept in the conversation (`image_shown`, as a build's previews are), and
+answered `shown PATH in the Agent app's Images pane`; anything else is
+refused, `PATH: not a PNG` or why it could not be read, and nothing
+shown.
+
 ### Running a program
 
 `run` and `sh` start the program with `spawn_path`, its current
@@ -515,9 +525,10 @@ connection, and the proxy ends the session.
   way to clear the conversation, as the console's `/clear` does, and a
   window does not hear of a clear another client made until it opens
   again.
-- `agent image` is sent for a build's previews only: the model has no
-  way to show the person an image, and the notice is not kept in the
-  conversation, so a window that opens later is not told of one. A
+- Images are PNGs only, and a path is all the conversation keeps of
+  one: an image removed or changed in the home after it was shown is
+  read as it is then, or says why it cannot be, when a window opens
+  later. The model sees none of an image it shows. A
   preview is told once the session's next line comes after it is
   painted, not as it is written. An image is decoded whole in one idle step, held
   decoded at the pane's size in the app's heap, and kept for as long

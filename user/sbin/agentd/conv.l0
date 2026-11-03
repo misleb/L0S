@@ -18,11 +18,20 @@
 ; written, and the cache read; -1 for a count not yet said.
 (data Usage (Usage int int int int))
 
-; A conversation: its turns, newest first, and the last answer's usage.
-(data Conv (Conv (turns (list Turn)) (usage Usage)))
+; A conversation: its turns, newest first, the last answer's usage, and
+; the paths of the images shown the person in it, newest first.
+(data Conv (Conv (turns (list Turn)) (usage Usage) (images (list bytes))))
 
 ; A conversation with nothing in it.
-(def conv_new () Conv (Conv (nil Turn) (Usage -1 -1 -1 -1)))
+(def conv_new () Conv (Conv (nil Turn) (Usage -1 -1 -1 -1) (nil bytes)))
+
+; The most images a conversation keeps, the newest.
+(def conv_images_most () int 64)
+
+; c with the image at path shown, newest; the oldest past the most let
+; go.
+(def conv_shown ((c Conv) (path bytes)) Conv
+  (.images c (take (cons path (.images c)) (conv_images_most))))
 
 ; c's turns, oldest first.
 (def conv_turns ((c Conv)) (list Turn) (rev (.turns c)))
@@ -33,26 +42,26 @@
 ; nothing.
 (def conv_add ((c Conv) (t Turn)) Conv
   (match c
-    ((Conv ts u)
+    ((Conv ts u ims)
       (match t
         ((Turn who bs)
           (if (is_empty bs) c
-              (is_empty ts) (Conv (cons t ts) u)
+              (is_empty ts) (Conv (cons t ts) u ims)
               (match (head ts)
                 ((Turn who0 bs0)
                   (if (eq who who0)
-                      (Conv (cons (Turn who (append bs0 bs)) (tail ts)) u)
-                      (Conv (cons t ts) u))))))))))
+                      (Conv (cons (Turn who (append bs0 bs)) (tail ts)) u ims)
+                      (Conv (cons t ts) u ims))))))))))
 
 ; c with its usage updated by what an MUsage said: each count that is
 ; not -1 replaces the one before (message_start says them all, then
 ; message_delta the output so far).
 (def conv_spent ((c Conv) (input int) (output int) (cwrite int) (cread int)) Conv
   (match c
-    ((Conv ts u)
+    ((Conv ts u ims)
       (match u
         ((Usage i o w r)
-          (Conv ts (Usage (or_kept input i) (or_kept output o) (or_kept cwrite w) (or_kept cread r))))))))
+          (Conv ts (Usage (or_kept input i) (or_kept output o) (or_kept cwrite w) (or_kept cread r)) ims))))))
 
 ; n, unless it is -1, when kept.
 (def or_kept ((n int) (kept int)) int (if (eq n -1) kept n))
@@ -274,10 +283,11 @@
 ; c with its oldest k turns replaced by summary: the person's turn,
 ; conv_summary_head and the summary, then the turns kept, the first of
 ; which, the person's own text, joins it; the usage not known until the
-; next answer says it.
+; next answer says it; the images shown kept.
 (def conv_compacted ((c Conv) (k int) (summary bytes)) Conv
-  (adds (conv_add (conv_new) (Turn true (cons (BText (bytes_concat (cons (bytes_from_list (conv_summary_head)) (cons summary (nil bytes)))))
-                                              (nil Block))))
+  (adds (conv_add (.images (conv_new) (.images c))
+                  (Turn true (cons (BText (bytes_concat (cons (bytes_from_list (conv_summary_head)) (cons summary (nil bytes)))))
+                                   (nil Block))))
         (drop (conv_turns c) k)))
 
 ; Each of ts added to c, in order.
@@ -295,16 +305,35 @@
 (def conv_kept_new () ConvKept (ConvKept (conv_new) 0 0))
 
 ; k as its file's bytes: a JSON object of when it began, how many times
-; the person spoke, the last answer's usage as four counts, and the
-; turns as the API's messages, with no breakpoints.
+; the person spoke, the last answer's usage as four counts, the paths of
+; the images shown, oldest first, and the turns as the API's messages,
+; with no breakpoints.
 (def conv_kept_bytes ((k ConvKept)) bytes
   (let c (.conv k)
     (json_bytes
       (json_obj (cons (json_field "began" (JInt (.began k)))
                   (cons (json_field "said" (JInt (.said k)))
                     (cons (json_field "usage" (usage_json (.usage c)))
-                      (cons (json_field "messages" (JArr (turns_json (.turns c) false (nil Json))))
-                            (nil JField)))))))))
+                      (cons (json_field "images" (JArr (images_json (.images c) (nil Json))))
+                        (cons (json_field "messages" (JArr (turns_json (.turns c) false (nil Json))))
+                              (nil JField))))))))))
+
+; Paths, newest first, as JSON strings onto acc: oldest first.
+(def images_json ((ps (list bytes)) (acc (list Json))) (list Json)
+  (if (is_empty ps) acc (images_json (tail ps) (cons (JStr (head ps)) acc))))
+
+; The paths the file's object o keeps as the images shown, oldest first
+; there, newest first here; none if it keeps none.
+(def kept_images ((o Json)) (list bytes)
+  (match (json_get o "images")
+    ((None) (nil bytes))
+    ((Some a) (kept_texts (json_items a) (nil bytes)))))
+
+; Each of vs that is a string, onto acc reversed.
+(def kept_texts ((vs (list Json)) (acc (list bytes))) (list bytes)
+  (if (is_empty vs)
+      acc
+      (kept_texts (tail vs) (match (json_text (head vs)) ((Some t) (cons t acc)) ((None) acc)))))
 
 ; A usage as an array of its four counts.
 (def usage_json ((u Usage)) Json
@@ -323,7 +352,7 @@
             ((Err why) ((Err ConvKept (list int)) why))
             ((Ok c)
               ((Ok ConvKept (list int))
-                (ConvKept (.usage c (kept_usage v)) (kept_int v "began" 0) (kept_int v "said" 0))))))))))
+                (ConvKept (.images (.usage c (kept_usage v)) (kept_images v)) (kept_int v "began" 0) (kept_int v "said" 0))))))))))
 
 ; The number of o's field name, or fallback if it has none.
 (def kept_int ((o Json) (name (list int)) (fallback int)) int

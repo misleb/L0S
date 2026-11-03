@@ -1,6 +1,6 @@
 # 0066: The agent shows images: a build's previews as it builds
 
-Track: Agent · Status: active · Needs: 0049, 0065 (met) · Spec: agent.md, network.md, toolkit.md, programs.md, testing.md
+Track: Agent · Status: done · Needs: 0049 (met), 0065 (met) · Spec: agent.md, network.md, toolkit.md, programs.md, testing.md
 
 ## Why
 
@@ -39,19 +39,23 @@ model cannot show the person an image either.
 - [x] `agentd` writes each into the home, `previews/NAME/SCENE.png`,
   reading its base64 in place (`format/base64.l0`), and tells it as
   `agent image`; the `agent_build` case sees the notice and the file.
-- [ ] The image notices kept in the conversation, so `open` tells a
-  window that opens later of them.
-- [ ] A `show_image` tool, a path in the home, told as `agent image`.
-- [ ] The Agent app's screen test showing one.
+- [x] The image notices kept in the conversation, so `open` tells a
+  window that opens later of them: `Conv`'s images, its newest 64, in
+  the kept file's `images`, kept through compaction, told after the
+  turns.
+- [x] A `show_image` tool, a path in the home, told as `agent image`;
+  `agent_build` shows the preview with it and is refused on the
+  program.
+- [x] The Agent app's screen test showing one: `tests/agent.sh`.
 
 ## Spec changes
 
-- agent.md: `show_image`, the image notice kept and told on `open`; the
-  Limit on images goes.
-- testing.md: the Agent app's screen test showing an image.
+All moved into spec/.
 
 ## Log
 
 - 2026-11-03: PNG reading and the Images pane in, with the notice in
   the protocol; then a build's previews streamed to the board and told,
-  so the pane shows each scene as the session paints it.
+  so the pane shows each scene as the session paints it. Then the
+  images kept in the conversation and told on open, show_image, and
+  tests/agent.sh: done.

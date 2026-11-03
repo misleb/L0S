@@ -37,7 +37,6 @@ move independently, so several can be active at once.
 | [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 (met) | agent.md |
 | [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
 | [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
-| [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | active | 4/5 | 0043 | agent.md, programs.md, boot.md, toolkit.md, testing.md |
 | [0050](0050-hvs-crowded-lines.md) `hvs` at 4K: crowded lines and a whole-screen flash | Display | idea | – | 0038 | display.md |
 | [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
@@ -46,16 +45,8 @@ move independently, so several can be active at once.
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, programs.md, testing.md |
 | [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | ready | 0/7 | – | speech.md, sound.md, programs.md, testing.md |
-| [0066](0066-agent-images.md) The agent shows images: a build's previews as it builds | Agent | active | 4/7 | 0049, 0065 (met) | agent.md, network.md, toolkit.md, programs.md, testing.md |
 ## Ready
 
-[0049](0049-agent-chat-app.md) is active: `agentd`'s one kept
-conversation and the Agent app, with its Tools pane, are in, and its
-screen test is next.
-[0066](0066-agent-images.md) is active: a build's previews are
-streamed to the board and shown in the Agent app's Images pane as the
-session paints them; keeping them for a window that opens later is
-next.
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its
 container, tokenizer, front end, stem, encoder and decoder are in,
 checked against the reference rebuilt from `whistle.cact` (the same
@@ -122,6 +113,8 @@ graph LR
 | [0063](0063-card-boot-display.md) A card boot as whole as a network boot: 4K and HDMI audio | Pi 5 | 2026-11-02 |
 | [0064](0064-rp1-interrupts.md) RP1's DMA window set up by L0S, whatever the bootloader | Pi 5 | 2026-11-02 |
 | [0065](0065-apps-from-a-description.md) Apps from a description: the toolkit's vocabulary, a preview, and a recipe | Toolkit | 2026-11-03 |
+| [0049](0049-agent-chat-app.md) Talking to the agent from the desktop | Agent | 2026-11-03 |
+| [0066](0066-agent-images.md) The agent shows images: a build's previews as it builds | Agent | 2026-11-03 |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | 2026-10-29 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |
