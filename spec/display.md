@@ -199,7 +199,7 @@ exits:
 | Stage | What it does |
 |---|---|
 | `hvs mode` | an experiment beside the others: asks the firmware for the monitor's preferred mode (below) and says what the firmware and channel 0's `CTRL0` say after, then exits |
-| `hvs hdmi` | beside the others: M2MC made sure of, then reads only HDMI0's regions: the HDMI core's, DVP's, PHY's, rate manager's and CSC's registers, the HD block's, pixel valve 0's and DDC0's, and says the mode the core and the pixel valve give |
+| `hvs hdmi` | beside the others, and beside the `hvs` that serves, opening no HVS region: M2MC and PIXEL_BVB turned on if the firmware left them off, then reads only HDMI0's regions: the HDMI core's, DVP's, PHY's, rate manager's and CSC's registers, the HD block's, pixel valve 0's and DDC0's, and says the mode the core and the pixel valve give |
 | `hvs eof` | beside the others, writing no HVS register, so it runs while `hvs` serves (`run hvs eof`): if the firmware brought a display up, opens the display's interrupt controller and binds its interrupt, 129 (below), saying if the board gives neither; masks and clears every line, unmasks channel 0's, counts its ends of frame for two seconds, clearing the line before each `irq_ack`, and puts the mask back. It says the count, the rate and channel 0's `STATUS` frame count before and after |
 | `hvs watch [SECONDS]` | beside the others, reading only, so it runs while `hvs` serves (`run hvs watch 60 &`; 30 s by default): if the firmware brought a display up, samples channel 0's `STATUS` and `DL` as fast as it can (`watch.l0`) and says each frame over 25 ms even less the longest time between two of its samples: when it began, how long it took, the frames `STATUS` counted, the lines its `YLINE` went through, its modes, and the registers before and after; and, while one goes on past 25 ms, what the HVS says of itself (on D0 `CONTROL`, its fetchers' status, `HANDLE_ERROR`, `DL_STATUS` and channel 0's run, QoS and profile words, all in Linux's dump of it). At its end, the frames counted and the longest |
 | `hvs probe` | reads only: the firmware's displays, the monitor's EDID (and its bytes) and both clocks; the HVS's version and channel 0's `CTRL0`, `CTRL1`, `BGND`, `LPTRS`, `STATUS` and `DL`; the firmware's list, from `DL.LACT` to its end; and `iommu4`'s and `iommuc`'s registers; and what the firmware's display tags answer (`FRAMEBUFFER_GET_*`, `GET_DISPLAY_SETTINGS`, `GET_DISPLAY_TIMING`, `GET_DISPLAY_CFG`), raw. Then it releases the display and reads the clocks again, touching the HVS no more |
@@ -232,7 +232,11 @@ Scaler (SCALER6), so no pixel is copied:
    scrambling and the core's scrambler on. The rest stays as the
    firmware left it, as `hvs hdmi` read it: the pixel valve at two
    pixels a clock, the CSC, and the clocks, M2MC at 648 MHz and
-   PIXEL_BVB at 324 MHz, past what 4K at 60 Hz needs. The boot
+   PIXEL_BVB at 324 MHz, past what 4K at 60 Hz needs. A card boot has
+   found the firmware set HDMI0 up for 1920x1080 in full but left those
+   two clocks off, and DISP; `hvs` then asks the firmware to turn them
+   on at those rates (`hdmi_clocks_ready`) before it touches HDMI0, and
+   sets the mode as above, which on the board gave 4K at 60 Hz. The boot
    argument `hdmi=boot` keeps the firmware's mode, and `hdmi=30` asks
    for the preferred size at 30 Hz, if the EDID has a timing of it.
    Without HDMI0's regions, as under an older L0, `hvs` keeps the

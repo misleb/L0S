@@ -80,16 +80,20 @@ FAT32 `bootfs` and an L0FS `System`, and filled by `install System` and
 `install --boot bootfs --root System`. The bootloader finds `bootfs` by
 its partition type, looks for `overlays/` and goes on without it.
 
-**A card boot is as whole as a network boot.** Booted from a card the
-Installer wrote, under 2026-05-26's bootloader and 2026-10-30's, the
-board showed the splash, the firmware brought HDMI0 up as over the
-network (its log, with `uart_2ndstage=1`: `Select resolution HDMI0/2
-hotplug 1` and `FB0 … 1920x1080`), `hvs` set the monitor's 3840x2160
-at 60 Hz, `hdmi-audio` played the chime, and `inet` took a lease. What
-a card boot needs that a network boot does not: the Ethernet PHY is
-held in reset, which `gem` lets go ([network.md](network.md)); and
-2026-10-30's bootloader narrows RP1's DMA window on either boot, which
-`rp1_up` widens again (below).
+**A card boot.** Booted from a card the Installer wrote, with
+`uart_2ndstage=1` in its `config.txt`, under 2026-05-26's bootloader
+and 2026-10-30's, the board showed the splash, the firmware brought
+HDMI0 up as over the network (`Select resolution HDMI0/2 hotplug 1`
+and `FB0 … 1920x1080` in its log), `hvs` set the monitor's 3840x2160 at
+60 Hz, `hdmi-audio` played the chime, and `inet` took a lease. Without
+that line the firmware has shown no splash and left HDMI0's clocks off,
+DISP, M2MC and PIXEL_BVB, though it set HDMI0 up for 1920x1080; `hvs`
+turns them on itself ([display.md](display.md)), and such a boot then
+gave 4K at 60 Hz and the chime too. A card boot also
+needs, as a network boot does not, the Ethernet PHY let out of reset,
+which `gem` does ([network.md](network.md)); and 2026-10-30's
+bootloader narrows RP1's DMA window on either boot, which `rp1_up`
+widens again (below).
 
 **From the proxy.** Netbooted, with a card of a FAT32 `bootfs` and L0FS
 `System` and `data` volumes made in Disks, the Installer, or
@@ -293,6 +297,7 @@ same library on the host; `tools/pi5-boot --no-build` serves it, and
 the board flashes it as it boots.
 
 ## Limits
+
 
 - **A board with no battery on its RTC connector is in 1970** after a
   power cut until `ntp` has set the clock, a few seconds after the link

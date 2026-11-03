@@ -77,7 +77,8 @@ HDMI's part:
 
 It starts once `display` is served, since `hvs` sets HDMI0's mode and
 its M2MC clock, without which a read of HDMI0's registers stalls the
-CPU, and asks the firmware that M2MC runs all the same. It plays only if
+CPU, turning it on if the firmware left it off, and asks the firmware
+that M2MC runs all the same. It plays only if
 `SCHEDULER_CONTROL` says HDMI0 sends HDMI, not DVI. `hdmi-audio probe`
 reads the channel's registers and, once M2MC runs, the MAI's, the audio
 packets', the clock regeneration's and the PHY's, and the HVS's version,

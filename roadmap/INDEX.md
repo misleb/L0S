@@ -111,7 +111,7 @@ graph LR
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | 2026-10-29 |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | 2026-10-29 |
 | [0027](0027-installer.md) Installing and updating L0S from the proxy, with a GUI | Storage | 2026-11-02 |
-| [0063](0063-card-boot-display.md) A card boot as whole as a network boot: the splash, 4K and HDMI audio | Pi 5 | 2026-11-02 |
+| [0063](0063-card-boot-display.md) A card boot as whole as a network boot: 4K and HDMI audio | Pi 5 | 2026-11-02 |
 | [0064](0064-rp1-interrupts.md) RP1's DMA window set up by L0S, whatever the bootloader | Pi 5 | 2026-11-02 |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | 2026-10-29 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |

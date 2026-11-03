@@ -1,4 +1,4 @@
-# 0063: A card boot as whole as a network boot: the splash, 4K and HDMI audio
+# 0063: A card boot as whole as a network boot: 4K and HDMI audio
 
 Track: Pi 5 · Status: done · Needs: – · Spec: pi5.md, display.md, sound.md, network.md
 
@@ -25,12 +25,14 @@ the same file.
 
 ## Done when
 
-- Booted from the card, the splash shows as it does over the network,
-  `hvs` runs at the monitor's preferred mode (4K at 60 Hz on the user's
-  monitor), `hdmi-audio` plays the chime, and `inet` takes a lease:
-  each seen in a card boot's serial log.
+- Booted from the card, `hvs` runs at the monitor's preferred mode (4K
+  at 60 Hz on the user's monitor), `hdmi-audio` plays the chime, and
+  `inet` takes a lease: each seen in a card boot's serial log.
 - spec/pi5.md says what a card boot needs that a network boot does not,
   and how L0S gives it.
+
+The splash, which this goal first asked for too, is the firmware's,
+drawn before L0S runs, and the user chose to leave it.
 
 ## Steps
 
@@ -50,6 +52,18 @@ the same file.
    needs) and network.md (the PHY's reset line, confirmed). display.md
    and sound.md unchanged: what `hvs` and `hdmi-audio` do with M2MC
    off stands, and was not met again.
+5. [x] Stage `hdmi` brings M2MC and PIXEL_BVB up itself if the firmware
+   left them off (`hdmi_clocks_up`, at 648 and 324 MHz), so that every
+   HDMI0 register can be read on a boot where the firmware did not
+   bring HDMI0 up; read so on such a card boot and on a whole one, and
+   the two dumps diffed.
+6. [x] `hvs` brings HDMI0 up itself when the firmware did not: the
+   clocks, then what the diff shows the firmware sets beyond the mode
+   (the core's packet and scheduler setup, the CSC, the DVP and pixel
+   valve's control), then the mode as now; and `hdmi-audio` plays once
+   M2MC runs.
+7. [x] On the board: a card boot without `uart_2ndstage=1` at 4K with
+   the chime; pi5.md, display.md, sound.md.
 
 ## Spec changes
 
@@ -96,3 +110,32 @@ the same file.
   come back, a card boot with `PI5_CONFIG=uart_2ndstage=1` gives the
   firmware's own account to compare with run 2's
   (`build/pi5-card-0526.log`). pi5.md and network.md updated.
+- 2026-11-02: reopened. The user's next card boot, of the plain
+  release, showed no splash, and `dmesg` said `at boot: DISP: off, 0
+  Hz`, `keeping the firmware's mode on HDMI0: no HDMI0 regions, M2MC is
+  off`, a screen of 1920x1080, and `hdmi-audio: M2MC is off`. Its
+  `config.txt` has no `uart_2ndstage=1`; every whole card boot (runs 2
+  and 3) had it, and no failing one did. Why the firmware's logging
+  should decide it is not known (its timing, perhaps, against the
+  monitor's), and the user wants `hvs` to bring HDMI0 up itself when
+  the firmware has not, rather than lean on that line. Steps 5 to 7
+  added; step 5's code is in, not yet run on the board.
+- 2026-11-02: steps 5 and 6. Stage `hdmi` could not run beside the
+  serving `hvs`, which holds the HVS's region and the mailbox, so it now
+  opens neither HVS region (`hdmi_asked`), and the serving `hvs`, finding
+  M2MC off, brings HDMI0's clocks up itself (`hdmi_clocks_ready`). On
+  the next failing card boot (`build/pi5-card-m2mc-up.log`) it dumped
+  HDMI0 once its clocks ran: the firmware had set HDMI0 up for
+  1920x1080 in full, the core's timings (HORZA `0x0058c780`, VERTA0
+  `0x05000438`), the PLL, RAM_PACKET_CONFIG `0x00010014` and
+  SCHEDULER_CONTROL `0x000cb00b` as a whole boot's, CSC_CTL `0x3b`,
+  HD_VID_CTL `0x80010000`, the pixel valve running (`0x07174001`), and
+  then left M2MC, PIXEL_BVB and DISP off. With them on, `hvs` set
+  3840x2160 at 60 Hz as on a whole boot, `hdmi-audio` served and played
+  the chime. So nothing beyond the clocks was missing, and the dump is
+  no longer made on every such boot.
+- 2026-11-02: done. The user saw 4K and heard the chime on that card
+  boot, which had no `uart_2ndstage=1`; `inet` took a lease on it too.
+  Step 6 needed only the clocks, as the dump showed, not the core's
+  setup. pi5.md, display.md and sound.md updated. The splash is left:
+  the user does not want it pursued.
