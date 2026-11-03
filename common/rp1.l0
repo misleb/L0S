@@ -7,8 +7,10 @@
 ; did to read RP1's chip ID, and turns on memory and bus mastering on
 ; both, for RP1's DMA, and sets BAR0 and BAR2 and enables MSI-X so that
 ; its interrupts, vectors routed with rp1_msi_route, come as interrupts
-; 160 + v. It writes only when the chip ID and the MSI-X table do not
-; already answer, so every driver of RP1 calls it first, in any order.
+; 160 + v. It writes those only when the chip ID and the MSI-X table do
+; not already answer, so every driver of RP1 calls it first, in any
+; order; and it sets, every time, the inbound window by which RP1's DMA
+; reaches memory, which bootloaders leave differently (roadmap 0064).
 ;
 ; A network boot leaves RP1's Ethernet receiving into the firmware's
 ; buffers, in memory L0 gives as frames, and pciex4_reset=0 keeps it so:
@@ -49,6 +51,20 @@
   (cons (Rp1Write 16512 31)
   (cons (Rp1Write 16516 31)
   (nil Rp1Write)))))))))))
+
+; The controller's second inbound window, by which RP1's DMA reaches the
+; board's memory, as 2026-05-26's bootloader leaves it: RC_BAR2 (0x4034,
+; 0x4038) PCI 0 for 64 GB, size code 0x15, and its UBUS remap (0x40B4,
+; 0x40B8) enabled and unmoved. 2026-10-30's leaves it 8 MB at 0x3B000000
+; (0x3B000008, remap 0x3B000001), its own buffers', so that RP1's DMA
+; reaches nothing else: xhci finds no device, gem no frame (roadmap
+; 0064, run 3). Both map an address to itself.
+(def rp1_inbound_writes () (list Rp1Write)
+  (cons (Rp1Write 16436 21)
+  (cons (Rp1Write 16440 0)
+  (cons (Rp1Write 16564 1)
+  (cons (Rp1Write 16568 0)
+  (nil Rp1Write))))))
 
 ; RP1's MSI-X capability's first word, in its configuration space, whose
 ; bit 31 enables MSI-X: a read, with the bit set, written back.
@@ -107,15 +123,26 @@
 ; Whether RP1 answers, or why not.
 (data Rp1 (Rp1Up) (Rp1Down (list int)))
 
-; RP1's window made to answer, if it does not already: Rp1Up once its
-; chip ID reads right, else why not.
+; RP1's window made to answer, if it does not already, and the
+; controller's inbound window for RP1's DMA set whatever the bootloader
+; left (rp1_inbound_writes): Rp1Up once its chip ID reads right, else
+; why not.
 (def rp1_up () Rp1
   (match (open_region (rp1_window) (rp1_window_bytes))
     ((IoRegionFailed fault why) (Rp1Down (append "no RP1 window on the board: " why)))
     ((IoRegionOpened w)
-      (let (up (if (rp1_set w) (Rp1Up) (rp1_set_up w))
+      (let (i (rp1_inbound_set)
+            up (if (rp1_set w) (Rp1Up) (rp1_set_up w))
             c (close_region w))
         up))))
+
+; The controller's inbound window for RP1's DMA written: 0, or -1 if the
+; controller's region will not open.
+(def rp1_inbound_set () int
+  (match (open_region (rp1_pcie) (rp1_pcie_bytes))
+    ((IoRegionFailed fault why) -1)
+    ((IoRegionOpened r)
+      (let (a (rp1_write_all r (rp1_inbound_writes)) c (close_region r)) 0))))
 
 ; Whether the window is set up already, as far as MSI-X: the chip ID
 ; reads, and so does the table.
@@ -190,3 +217,60 @@
 ; Why RP1 is down when its chip ID read id after the set up.
 (def rp1_dead_text ((id int)) (list int)
   (append "RP1's window reads 0x" (append (hex_digits id 8) ", not its chip ID, after the PCIe controller was set up")))
+
+; ------------------------------------------------------------- the probe
+
+; The MIP RP1's MSIs reach, mip0 in the board's device tree
+; (bcm2712-rpi-5-b.dtb): the controller's inbound window takes a write
+; to PCI 0xFF_FFFFF000 to it, and it raises SPI 128 + n, interrupt 160 +
+; n, for 64 vectors. Its registers are 0xC0 bytes.
+(def rp1_mip () int 68720721920)         ; 0x1000130000
+(def rp1_mip_bytes () int 192)           ; 0xC0
+
+; What the probe reads, as rows of 8 words: the controller's MISC block
+; from 0x4000 to 0x413F, its MSI_BAR, its inbound windows (RC_BAR1 to 3
+; and 4 on), their UBUS remaps and its outbound window among them; its
+; own MSI interrupt's at 0x4500; and the MIP's whole.
+(data Rp1Rows (Rp1Rows (name (list int)) (base int) (bytes int) (from int) (rows int)))
+(def rp1_probe_rows () (list Rp1Rows)
+  (cons (Rp1Rows "pcie" (rp1_pcie) (rp1_pcie_bytes) 16384 10)
+  (cons (Rp1Rows "pcie" (rp1_pcie) (rp1_pcie_bytes) 17664 1)
+  (cons (Rp1Rows "mip" (rp1_mip) (rp1_mip_bytes) 0 6)
+  (nil Rp1Rows)))))
+
+; A row's line: what it is, the offset of its first word, and the words,
+; each in 8 hex digits.
+(def rp1_row_text ((name (list int)) (off int) (ws (list int))) (list int)
+  (append "l0s: rp1 probe: " (append name (append " 0x" (append (hex_digits off 4) (append ": " (join_with " " (rp1_hex_words ws))))))))
+
+; Each of ws in 8 hex digits.
+(def rp1_hex_words ((ws (list int))) (list (list int))
+  (if (is_empty ws) (nil (list int)) (cons (hex_digits (head ws) 8) (rp1_hex_words (tail ws)))))
+
+; What the firmware left in the PCIe controller RP1 is behind and in the
+; MIP, as lines of rp1_row_text, read and nothing written (roadmap
+; 0064); a line saying why for a region that will not open.
+(def rp1_probe () (list (list int))
+  (rp1_probe_all (rp1_probe_rows) (nil (list int))))
+
+; Each of rs's lines, after the reversed acc.
+(def rp1_probe_all ((rs (list Rp1Rows)) (acc (list (list int)))) (list (list int))
+  (if (is_empty rs)
+      (rev acc)
+      (let r (head rs)
+        (match (open_region (.base r) (.bytes r))
+          ((IoRegionFailed fault why)
+            (rp1_probe_all (tail rs) (cons (append "l0s: rp1 probe: no " (append (.name r) (append " region: " why))) acc)))
+          ((IoRegionOpened g)
+            (let (ls (rp1_rows_read g (.name r) (.from r) (.rows r) acc) c (close_region g))
+              (rp1_probe_all (tail rs) ls)))))))
+
+; n rows of g from off, each its line, onto acc.
+(def rp1_rows_read ((g IoRegion) (name (list int)) (off int) (n int) (acc (list (list int)))) (list (list int))
+  (if (le n 0)
+      acc
+      (rp1_rows_read g name (add off 32) (sub n 1) (cons (rp1_row_text name off (rp1_row_words g off 8)) acc))))
+
+; n words of g from off.
+(def rp1_row_words ((g IoRegion) (off int) (n int)) (list int)
+  (if (le n 0) (nil int) (cons (region_get32 g off) (rp1_row_words g (add off 4) (sub n 1)))))

@@ -598,9 +598,11 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
 - that the firmware gives the address. Without it, and with nothing in
   SA1B and SA1T, `gem` fails
 - that the PHY answers. Booted from the network it does; booted from
-  the card it did not until `gem` let its reset line go, which is not
-  yet confirmed on a board: "No PHY answers ..., after its reset line
-  was let go" means the PHY is not at address 1, or GPIO 32 is not its
+  the card it did not until `gem` let its reset line go, which a card
+  boot has confirmed: "the PHY answered once its reset line was let
+  go", then the link at 1000 Mb/s and `inet`'s lease, so RP1's Ethernet
+  clocks were on. "No PHY answers ..., after its reset line was let
+  go" would mean the PHY is not at address 1, or GPIO 32 is not its
   line
 - the link line, and frames both ways: `inet`'s lease, `ping`. A link
   with nothing sent may mean RP1's Ethernet clocks were left off by the

@@ -900,17 +900,18 @@ proxy-run: proxy
 # pinned commit and kept only if its SHA-256 is the one below, so every
 # release has the same ones; a new pin changes both. WHISTLE_MODEL and
 # PIEEPROM name files of your own instead, and nothing is fetched. The
-# bootloader is 2026-05-26's, the one L0S runs on: with 2026-10-30's,
-# RP1's interrupts never came, so neither USB nor Ethernet worked
-# (roadmap 0027's log). Its file is named for its version, so that a
-# new pin is fetched, not an old one's file kept.
+# bootloader is 2026-10-30's, rpi-eeprom's newest, on which L0S has run
+# since rp1_up sets the inbound window RP1's DMA uses, which it leaves
+# 8 MB wide (roadmap 0064); 2026-05-26's ran before that. Its file is
+# named for its version, so that a new pin is fetched, not an old one's
+# file kept.
 WHISTLE_COMMIT := 741118687e1f008f06d1351a402a731274789790
 WHISTLE_URL    := https://huggingface.co/Cactus-Compute/whistle/resolve/$(WHISTLE_COMMIT)/whistle.cact
 WHISTLE_SHA256 := b6e02f048568ac5d01a2042556c658061e699acbc0aa2a1439f52f3d461dffeb
-PIEEPROM_COMMIT  := 3052f2c851b7dd631cd59ed31efc9b6ecb42e5f0
-PIEEPROM_VERSION := 2026-05-26
+PIEEPROM_COMMIT  := d5b79502fd59b5af411c6268652b5b1b6db74afb
+PIEEPROM_VERSION := 2026-10-30
 PIEEPROM_URL     := https://raw.githubusercontent.com/raspberrypi/rpi-eeprom/$(PIEEPROM_COMMIT)/firmware-2712/default/pieeprom-$(PIEEPROM_VERSION).bin
-PIEEPROM_SHA256  := fee8bee6a738a1a61004f0770f15534de7a48a2a199dc4c7af7ed73ab04f18dd
+PIEEPROM_SHA256  := 251a27b235571c2f6ba0de254aff32f5fe0d6d5ed1af7429faee11d1f396c566
 WHISTLE_MODEL ?= $(BUILD)/fetch/whistle.cact
 PIEEPROM      ?= $(BUILD)/fetch/pieeprom-$(PIEEPROM_VERSION).bin
 
@@ -1080,6 +1081,9 @@ demo-system: sysdisk
 .PHONY: pi5-initramfs pi5-card
 
 PI5_ARGS            ?=
+# Lines added to config.txt after l0 card's, as PI5_CONFIG=uart_2ndstage=1,
+# the firmware's own log on the debug UART.
+PI5_CONFIG          ?=
 # Programs of pi5/etc/inittab's start lines left out of this build, as
 # PI5_NO="/sbin/hvs /sbin/gem".
 PI5_NO              ?=
@@ -1151,6 +1155,7 @@ pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs $(PI5_DTBS)
 	rm -rf $(BUILD)/pi5-card && mkdir -p $(BUILD)/pi5-card
 	cp $(PI5_DTBS) $(BUILD)/pi5-card/
 	$(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-card $(PI5_ARGS) < $(BUILD)/pi5.cpio
+	@for c in $(PI5_CONFIG); do echo "$$c" >> $(BUILD)/pi5-card/config.txt; echo "pi5-card: config.txt says $$c"; done
 	@echo "build/pi5-card: copy its files onto a FAT32 partition of an SD card for a Pi 5"
 
 # The same booted over the network: build/pi5-tftp, a TFTP server's root,

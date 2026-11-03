@@ -46,8 +46,6 @@ move independently, so several can be active at once.
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, programs.md, testing.md |
 | [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | ready | 0/7 | – | speech.md, sound.md, programs.md, testing.md |
-| [0063](0063-card-boot-display.md) A card boot as whole as a network boot: the splash, 4K and HDMI audio | Pi 5 | idea | – | – | pi5.md, display.md, sound.md, network.md |
-| [0064](0064-rp1-interrupts.md) RP1's interrupts set up by L0S, whatever the bootloader | Pi 5 | idea | – | – | pi5.md, programs.md |
 ## Ready
 
 [0049](0049-agent-chat-app.md) is active: `agentd`'s one kept
@@ -67,10 +65,7 @@ other goal left is an `idea`, without steps. On
 the display,
 [0050](0050-hvs-crowded-lines.md) (crowded lines and the whole-screen
 flash at 4K), [0039](0039-paced-drawing-areas.md) and
-[0040](0040-paint-at-scale-2.md) follow from 0038's runs. On the Pi 5,
-[0063](0063-card-boot-display.md) (a card boot's splash, 4K and sound)
-and [0064](0064-rp1-interrupts.md) (RP1's interrupts under any
-bootloader) follow from 0027's runs.
+[0040](0040-paint-at-scale-2.md) follow from 0038's runs.
 
 ## Dependencies
 
@@ -116,6 +111,8 @@ graph LR
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | 2026-10-29 |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | 2026-10-29 |
 | [0027](0027-installer.md) Installing and updating L0S from the proxy, with a GUI | Storage | 2026-11-02 |
+| [0063](0063-card-boot-display.md) A card boot as whole as a network boot: the splash, 4K and HDMI audio | Pi 5 | 2026-11-02 |
+| [0064](0064-rp1-interrupts.md) RP1's DMA window set up by L0S, whatever the bootloader | Pi 5 | 2026-11-02 |
 | [0008](0008-cursor-shapes.md) A cursor set and cursor shapes | Display | 2026-10-29 |
 | [0011](0011-csd-complete.md) Client-side decorations: maximize and resize | Desktop | 2026-10-27 |
 | [0012](0012-key-modifiers.md) Modifier state in `KeyEvent` | Desktop | 2026-10-28 |

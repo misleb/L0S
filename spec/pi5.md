@@ -80,6 +80,17 @@ FAT32 `bootfs` and an L0FS `System`, and filled by `install System` and
 `install --boot bootfs --root System`. The bootloader finds `bootfs` by
 its partition type, looks for `overlays/` and goes on without it.
 
+**A card boot is as whole as a network boot.** Booted from a card the
+Installer wrote, under 2026-05-26's bootloader and 2026-10-30's, the
+board showed the splash, the firmware brought HDMI0 up as over the
+network (its log, with `uart_2ndstage=1`: `Select resolution HDMI0/2
+hotplug 1` and `FB0 … 1920x1080`), `hvs` set the monitor's 3840x2160
+at 60 Hz, `hdmi-audio` played the chime, and `inet` took a lease. What
+a card boot needs that a network boot does not: the Ethernet PHY is
+held in reset, which `gem` lets go ([network.md](network.md)); and
+2026-10-30's bootloader narrows RP1's DMA window on either boot, which
+`rp1_up` widens again (below).
+
 **From the proxy.** Netbooted, with a card of a FAT32 `bootfs` and L0FS
 `System` and `data` volumes made in Disks, the Installer, or
 `install --net fresh --boot bootfs --boot-order sd,net System`, does
@@ -130,6 +141,14 @@ stops at a line, as `--until 'l0s>'` at the shell's prompt, `--wait`
 after so many seconds, `--no-build` serves what was built, and
 `--console` opens the line in picocom to type to the shell. `PI5_ARGS`
 gives the kernel's boot arguments, as `PI5_ARGS=debug`, to both.
+Under `debug` the kernel says first, before it changes anything, what
+the firmware left in RP1's PCIe controller (its MISC block, 0x4000 to
+0x413F, and its MSI words at 0x4500), a line of 8 words each
+(`rp1_probe`, `common/rp1.l0`), and tries the MIP that turns RP1's MSIs
+into interrupts (mip0, 0x1000130000), which L0's host keeps as it does
+the GIC, so that the line says it is no region. `PI5_CONFIG` adds lines to
+`config.txt`, as `PI5_CONFIG=uart_2ndstage=1` for the firmware's own
+log on the debug UART.
 `--reboot` types `reboot` at the shell of the L0S already running on
 the board, so the board restarts (L0's `board_reset`, PSCI
 `SYSTEM_RESET`) and its bootloader fetches the new build, with nobody at
@@ -256,11 +275,17 @@ the image's own configuration written back gave the image unchanged.
 The installer writes the same update for a boot order
 (`bootloader.l0`'s `boot_order_written`, [Installing from the
 proxy](boot.md#installing-from-the-proxy)), of the image `make release`
-fetches, rpi-eeprom's `pieeprom-2026-05-26.bin`, pinned by its SHA-256.
-That is the bootloader L0S runs on: after 2026-10-30's, RP1's
-interrupts never came, so `xhci` found its ports but no device, and
-`gem` its link but no frame, and DHCP failed. `make pi5-eeprom
-[EEPROM_ORDER=0xf21]` gives such a board the pinned one back over the
+fetches, rpi-eeprom's `pieeprom-2026-10-30.bin`, its newest, pinned by
+its SHA-256. L0S has run on 2026-05-26's and 2026-10-30's. The two
+leave the PCIe controller's second inbound window, by which RP1's DMA
+reaches memory, differently: 2026-05-26's RC_BAR2 (0x4034) `0x15`, PCI 0
+for 64 GB, and its UBUS remap (0x40B4) `0x1`; 2026-10-30's 8 MB at
+0x3B000000, the firmware's own buffers (`0x3B000008`, `0x3B000001`), so
+that `xhci` found its ports but no device and `gem` its link but no
+frame. `rp1_up` (`common/rp1.l0`) writes the first every time it is
+called, whatever the bootloader left; each maps an address to itself.
+`make pi5-eeprom
+[EEPROM_ORDER=0xf21]` gives a board the pinned one over the
 network: the netboot's root with `pieeprom.upd` and `pieeprom.sig` of
 it in it too, its own configuration with that `BOOT_ORDER`, timed
 now, written by [tools/mkeeprom](../tools/mkeeprom/mkeeprom.l0), the
