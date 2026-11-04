@@ -8,7 +8,8 @@
 #
 #   1. both header bars, by QEMU's screendump: the front window's
 #      active, the other's in the backdrop; the front one's corner cut
-#      by its shape, and the terminal's ground under its header bar
+#      by its shape, the terminal's ground under its header bar, and the
+#      window's outline along its left edge
 #   2. echo hi, typed on the USB keyboard through QEMU's monitor
 #      (sendkey), as typing in QEMU's window would: the front window
 #      shows the h of hi on row 8, under the motd, the banner, and the
@@ -29,12 +30,13 @@
 #      window's right edge dragged in to 40 columns: the line wrapped
 #      again, its cursor still on the last row, 10 into its second row;
 #      dragged out again, the line whole and the cursor 50 in
-#   8. a click on the new-tab button: a second tab, vt3, its name the
-#      window's title, and the tab bar under the header bar, the new tab
-#      selected; echo hi typed in it answered in it; ps shows both tabs'
-#      shells started by the window's vt
-#   9. a click on the first tab: it is shown again, the title its name,
-#      and echo hi typed is answered in it
+#   8. cd /bin typed in it: its title is the folder its shell tells,
+#      /bin; then a click on the new-tab button: a second tab, its
+#      shell's folder, /, the window's title, and the tab bar under the
+#      header bar, the new tab selected; echo hi typed in it answered in
+#      it; ps shows both tabs' shells started by the window's vt
+#   9. a click on the first tab: it is shown again, the title its folder,
+#      /bin, and echo hi typed is answered in it
 #  10. a click on the second tab's close button: its shell ends, the tab
 #      bar goes, and the title is the first tab's; then Ctrl-Shift-T
 #      opens a tab as the button did, which its close button closes
@@ -43,8 +45,10 @@
 #  12. a click on that one's close button: its vt ends its tab's shell
 #      and closes the window
 #
-# The serial line is typed through a FIFO, and the board keeps running
-# until this kills it. Run from the top of the project, after make
+# The windows are told apart by their vts' pids, which run windows
+# lists, as both their titles are their shells' folder, /. The serial
+# line is typed through a FIFO, and the board keeps running until this
+# kills it. Run from the top of the project, after make
 # vt-initramfs.
 set -u
 cd "$(dirname "$0")/.."
@@ -156,26 +160,27 @@ waits_for() {
 }
 
 # The windows, as run windows lists them, in front, f_* and in back,
-# b_*: title, x, y, width, height. Asks for up to 30 s until there are
-# N, 2 unless given, every one titled vtN, the first listed in front,
-# and, if T is given, titled T. A vt's window is titled Terminal until
-# its tab has a name.
+# b_*: title, x, y, width, height, and the pid of the vt whose it is.
+# Asks for up to 30 s until there are N, 2 unless given, the first
+# listed in front, and, if P is given, that of vt P, and, if T is given
+# too, titled T. A vt's window is titled as its tab's shell tells it,
+# its folder.
 windows() {
-  local n=${1:-2} want=${2:-} lines end=$((SECONDS + 30))
+  local n=${1:-2} want=${2:-} title=${3:-} lines end=$((SECONDS + 30))
   until [ $SECONDS -ge $end ]; do
     say 'run windows'
     # A prompt may come before a line, when the board is slow to answer.
-    lines=$(printf '%s\n' "$said" | sed 's/^l0s> //' | grep -aE '^[0-9]+ [^ ]+ -?[0-9]+ -?[0-9]+ [0-9]+ [0-9]+ (front|-) ')
-    if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$n" ] &&
-       [ "$(printf '%s\n' "$lines" | grep -acE '^[0-9]+ vt[0-9] ')" = "$n" ]; then
+    lines=$(printf '%s\n' "$said" | sed 's/^l0s> //' | grep -aE '^[0-9]+ [^ ]+ -?[0-9]+ -?[0-9]+ [0-9]+ [0-9]+ (front|-) [0-9]+ ')
+    if [ "$(printf '%s\n' "$lines" | grep -c .)" = "$n" ]; then
       [ "$n" = 0 ] && return 0
-      read -r _ f_title f_x f_y f_w f_h f_front _ <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
-      read -r _ b_title b_x b_y b_w b_h b_front _ <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
-      [ "$f_front" = front ] && { [ -z "$want" ] || [ "$f_title" = "$want" ]; } && return 0
+      read -r _ f_title f_x f_y f_w f_h f_front f_pid _ <<< "$(printf '%s\n' "$lines" | sed -n 1p)"
+      read -r _ b_title b_x b_y b_w b_h b_front b_pid _ <<< "$(printf '%s\n' "$lines" | sed -n 2p)"
+      [ "$f_front" = front ] && { [ -z "$want" ] || [ "$f_pid" = "$want" ]; } &&
+        { [ -z "$title" ] || [ "$f_title" = "$title" ]; } && return 0
     fi
     sleep 0.2
   done
-  fail "run windows never listed $n vt windows, the first in front${want:+, $want}; last it listed: $(printf '%s' "$lines" | tr '\n' ';'); it showed:"
+  fail "run windows never listed $n windows, the first in front${want:+, of vt $want}${title:+, titled $title}; last it listed: $(printf '%s' "$lines" | tr '\n' ';'); it showed:"
 }
 
 # The lines of ps, typed at the serial shell, after it is typed.
@@ -231,7 +236,8 @@ back_title() {
 }
 
 # The header bars are Adwaita's dark ones, 46 rows: 303030 in front,
-# 242424 in the backdrop. The window draws them itself, so it has no
+# 242424 in the backdrop. A window's outline, just inside its edge, is
+# white at 10% over 242424: (255 * 10 + 36 * 90 + 50) / 100 = 58. The window draws them itself, so it has no
 # frame: run windows gives all of it, and the terminal starts at its
 # left, under the header bar, and under the tab bar, 40 more, with two
 # tabs. The terminal is GNOME Console's, white on 1e1e1e, its cursor
@@ -239,33 +245,33 @@ back_title() {
 # in; the close button its last, 24 round 6 in from its right.
 bar=46; tabbar=40
 active="48 48 48"; backdrop="36 36 36"; ink="255 255 255"; cursor="255 255 255"; stem="194 194 194"
-ground="30 30 30"
+ground="30 30 30"; outline="58 58 58"
 # The overlay scrollbar's slider: white at 40% over the terminal's
 # 1e1e1e, (255 * 40 + 30 * 60 + 50) / 100. A selected tab: white at 10%
 # over the header bar's 303030, (255 * 10 + 48 * 90 + 50) / 100.
 thumb="120 120 120"; tab_on="69 69 69"
 
 waits_for "^l0s> "
-windows
+windows 2 "" /
 read -r bx by <<< "$(back_title)"
-shows "both windows, $f_title in front" "$((f_x + 60)) $((f_y + 6)) $active" "$bx $by $backdrop"
+shows "both windows, vt $f_pid's in front, titled $f_title" "$((f_x + 60)) $((f_y + 6)) $active" "$bx $by $backdrop"
 
 # The front window's corners are rounded by its shape: its top left pixel
 # shows what is under it, as the pixel left of it does.
 rm -f "$dump"; monitor "screendump $dump"
 [ -s "$dump" ] && [ "$(pixel $f_x $f_y)" = "$(pixel $((f_x - 1)) $f_y)" ] && [ "$(pixel $f_x $f_y)" != "$active" ] ||
-  fail "the top left corner of $f_title shows $(pixel $f_x $f_y), not what is under it, $(pixel $((f_x - 1)) $f_y)"
-echo "ok - vt: $f_title's corners are rounded"
+  fail "the top left corner of vt $f_pid's window shows $(pixel $f_x $f_y), not what is under it, $(pixel $((f_x - 1)) $f_y)"
+echo "ok - vt: vt $f_pid's window's corners are rounded"
 
-shows "$f_title's terminal under its header bar" "$((f_x + 100)) $((f_y + bar - 2)) $active" \
-  "$((f_x + 600)) $((f_y + bar + 300)) $ground"
+shows "vt $f_pid's terminal under its header bar, its outline along its edge" "$((f_x + 100)) $((f_y + bar - 2)) $active" \
+  "$((f_x + 600)) $((f_y + bar + 300)) $ground" "$f_x $((f_y + bar + 300)) $outline" "$((f_x + 1)) $((f_y + bar + 300)) $ground"
 
 # The prompt's cursor on row 7's last pixel row, after "l0s> ".
-shows "$f_title's shell is waiting" "$((f_x + 40)) $((f_y + bar + 7 * 16 + 15)) $cursor"
+shows "vt $f_pid's shell is waiting" "$((f_x + 40)) $((f_y + bar + 7 * 16 + 15)) $cursor"
 typekeys "echo hi"
 # h's stem, column 1, its middle, on row 8: 11 of 15 covered, white mixed
 # over the terminal's ground, as the smooth 8 by 16 glyph has it.
-shows "echo hi typed and answered in $f_title" "$((f_x + 1)) $((f_y + bar + 8 * 16 + 8)) $stem"
+shows "echo hi typed and answered in vt $f_pid's window" "$((f_x + 1)) $((f_y + bar + 8 * 16 + 8)) $stem"
 
 # The two windows' vts: boot, pid 1, starts /etc/system's programs after
 # the inittab's, sh, font and wm, then the two vts, whose pids follow
@@ -290,33 +296,32 @@ set -- $vts
 [ $# -eq 2 ] && [ -z "$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +[0-9]+$cpu  vt " | grep -avE "^ +[0-9]+ +1$cpu  vt ")" ] \
   || fail "ps shows vts ${vts:-none}, not the windows' two, boot's, and no relay"
 vt_a=$1; vt_b=$2
-[ "$vt" = "$vt_a" ] || [ "$vt" = "$vt_b" ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not a window's vt, $vt_a or $vt_b"
-echo "ok - vt: $f_title's shell, pid $shell, started by its window's vt, pid $vt, ran nap"
+[ "$vt" = "$f_pid" ] || fail "nap's shell, pid $shell, has parent ${vt:-none}, not the front window's vt, $f_pid"
+{ [ "$b_pid" = "$vt_a" ] || [ "$b_pid" = "$vt_b" ]; } && [ "$b_pid" != "$vt" ] ||
+  fail "the windows are vt $f_pid's and vt $b_pid's, not ps's two, $vt_a and $vt_b"
+echo "ok - vt: vt $vt's shell, pid $shell, ran nap"
 echo "ok - vt: the windows' two vts and no relay"
-# The other window's vt is the other of the two.
-other_vt=$vt_a; [ "$vt" = "$other_vt" ] && other_vt=$vt_b
 
 # A click on the back window's header bar brings it to the front.
-front=$b_title; front_vt=$other_vt; other=$f_title; other_vt=$vt
+front=$b_pid; front_vt=$b_pid; other=$f_pid; other_vt=$f_pid
 click $bx $by
-windows
-[ "$f_title" = "$front" ] || fail "a click on $front's header bar left $f_title in front"
-shows "a click brought $front to the front" "$((f_x + 60)) $((f_y + 6)) $active" "$(back_title | tr -d '\n') $backdrop"
+windows 2 "$front"
+shows "a click brought vt $front's window to the front" "$((f_x + 60)) $((f_y + 6)) $active" "$(back_title | tr -d '\n') $backdrop"
 
 # A drag of its header bar moves it as far as the pointer moved.
 want_x=$((f_x + 150)); want_y=$((f_y + 120))
 drag $((f_x + 60)) $((f_y + 10)) 150 120
-windows
-[ "$f_title" = "$front" ] && [ "$f_x" = "$want_x" ] && [ "$f_y" = "$want_y" ] ||
-  fail "after the drag, $f_title is in front at $f_x, $f_y; wanted $front at $want_x, $want_y"
-echo "ok - vt: a drag moved $front to $f_x, $f_y"
+windows 2 "$front"
+[ "$f_x" = "$want_x" ] && [ "$f_y" = "$want_y" ] ||
+  fail "after the drag, vt $front's window is at $f_x, $f_y; wanted $want_x, $want_y"
+echo "ok - vt: a drag moved vt $front's window to $f_x, $f_y"
 
 # The inittab three times over is more than the window's 24 rows: it
 # scrolls, and the prompt's cursor is on the last row, row 23.
 # Its output is not on the serial line: each is given a second to run
 # before the next is typed.
 for n in 1 2 3; do typekeys "run cat /etc/inittab"; sleep 1; done
-shows "$front scrolled, the prompt on its last row" "$((f_x + 40)) $((f_y + bar + 383)) $cursor"
+shows "vt $front's window scrolled, the prompt on its last row" "$((f_x + 40)) $((f_y + bar + 383)) $cursor"
 
 # A step of the wheel up over it shows the rows scrolled off, three of
 # them, drawn from its cells: the toolkit's overlay scrollbar shows along
@@ -326,9 +331,9 @@ shows "$front scrolled, the prompt on its last row" "$((f_x + 40)) $((f_y + bar 
 point $((f_x + 300)) $((f_y + bar + 200))
 events "$(wheel wheel-up)"
 slider="$((f_x + f_w - 6)) $((f_y + bar + 330))"
-shows "the wheel scrolled $front back, its scrollbar shown" "$slider $thumb"
+shows "the wheel scrolled vt $front's window back, its scrollbar shown" "$slider $thumb"
 monitor "sendkey backspace"
-shows "a key brought $front back to the bottom" "$slider $ground" "$((f_x + 40)) $((f_y + bar + 383)) $cursor"
+shows "a key brought vt $front's window back to the bottom" "$slider $ground" "$((f_x + 40)) $((f_y + bar + 383)) $cursor"
 
 # A line typed and not entered, l0s> and echo and 40 more, 50 columns:
 # the cursor 50 in on the last row. The right edge, grabbed in the
@@ -337,27 +342,32 @@ shows "a key brought $front back to the bottom" "$slider $ground" "$((f_x + 40))
 # last row. Dragged out again, it is whole, the cursor 50 in.
 a10=aaaaaaaaaa
 keys "echo $a10$a10$a10$a10"
-shows "a line of 50 typed in $front" "$((f_x + 50 * 8 + 4)) $((f_y + bar + 383)) $cursor"
+shows "a line of 50 typed in vt $front's window" "$((f_x + 50 * 8 + 4)) $((f_y + bar + 383)) $cursor"
 drag $((f_x + f_w + 2)) $((f_y + bar + 100)) -320 0
 windows 2 "$front"
-[ "$f_w" = 320 ] || fail "the right edge dragged 320 in left $front $f_w wide, not 320"
+[ "$f_w" = 320 ] || fail "the right edge dragged 320 in left vt $front's window $f_w wide, not 320"
 shows "the line wrapped again at 40, the cursor 10 into the last row" "$((f_x + 10 * 8 + 4)) $((f_y + bar + 383)) $cursor"
 drag $((f_x + f_w + 2)) $((f_y + bar + 100)) 320 0
 windows 2 "$front"
-[ "$f_w" = 640 ] || fail "the right edge dragged out again left $front $f_w wide, not 640"
+[ "$f_w" = 640 ] || fail "the right edge dragged out again left vt $front's window $f_w wide, not 640"
 shows "the line whole again at 80, the cursor 50 in, not 10" "$((f_x + 50 * 8 + 4)) $((f_y + bar + 383)) $cursor" \
   "$((f_x + 10 * 8 + 4)) $((f_y + bar + 383)) $ground"
 monitor "sendkey ret"
-echo "ok - vt: $front resized by its edge, its lines wrapped again"
+echo "ok - vt: vt $front's window resized by its edge, its lines wrapped again"
 
-# The new-tab button opens a tab, vt3, the first name free, selected: it
-# is the window's title, and the tab bar shows under the header bar, its
-# second tab raised, its first not. Two tabs share the bar's 640, 6 in
-# from each side and 3 apart: 312 each, the first from 6, the second
-# from 321, 34 high from 3 down.
-first=$front
+# cd /bin: the shell tells its terminal its folder at the prompt, which
+# is the tab's title, and so the window's.
+typekeys "cd /bin"
+windows 2 "$front" /bin
+echo "ok - vt: cd /bin made vt $front's window's title its tab's folder, /bin"
+
+# The new-tab button opens a tab, vt3, the first name free, selected: its
+# shell's folder, /, is the window's title, and the tab bar shows under
+# the header bar, its second tab raised, its first not. Two tabs share
+# the bar's 640, 6 in from each side and 3 apart: 312 each, the first
+# from 6, the second from 321, 34 high from 3 down.
 click $((f_x + 6 + 17)) $((f_y + 23))
-windows 2 vt3
+windows 2 "$front" /
 shows "the new tab, vt3, selected on the tab bar" "$((f_x + 329)) $((f_y + bar + 20)) $tab_on" \
   "$((f_x + 14)) $((f_y + bar + 20)) $active"
 top=$((bar + tabbar))
@@ -366,28 +376,28 @@ typekeys "echo hi"
 shows "echo hi typed and answered in vt3" "$((f_x + 1)) $((f_y + top + 8 * 16 + 8)) $stem"
 lines=$(ps_lines)
 n=$(printf '%s\n' "$lines" | grep -acE "^ +[0-9]+ +$front_vt$cpu  sh ")
-[ "$n" = 2 ] || fail "ps shows $n shells started by $front's vt, pid $front_vt, not 2; it showed:"
+[ "$n" = 2 ] || fail "ps shows $n shells started by vt $front_vt, not 2; it showed:"
 tab_shell=$(printf '%s\n' "$lines" | grep -aE "^ +[0-9]+ +$front_vt$cpu  sh " | awk '{print $1}' | sort -n | tail -1)
 echo "ok - vt: a tab opened by the button, vt3, its own shell, pid $tab_shell"
 
-# A click on the first tab shows it: the title its name, the second tab
-# no longer raised, and its prompt on its last row, row 20 now, the 344
-# rows under the tab bar holding 21; and echo hi typed answered on row 19
-# as the prompt comes back.
+# A click on the first tab shows it: the title its folder, /bin, the
+# second tab no longer raised, and its prompt on its last row, row 20
+# now, the 344 rows under the tab bar holding 21; and echo hi typed
+# answered on row 19 as the prompt comes back.
 click $((f_x + 100)) $((f_y + bar + 20))
-windows 2 "$first"
-shows "the first tab, $first, shown again" "$((f_x + 329)) $((f_y + bar + 20)) $active" \
+windows 2 "$front" /bin
+shows "the first tab shown again" "$((f_x + 329)) $((f_y + bar + 20)) $active" \
   "$((f_x + 44)) $((f_y + top + 20 * 16 + 15)) $cursor"
 typekeys "echo hi"
-shows "echo hi typed and answered in $first" "$((f_x + 1)) $((f_y + top + 19 * 16 + 8)) $stem"
+shows "echo hi typed and answered in the first tab" "$((f_x + 1)) $((f_y + top + 19 * 16 + 8)) $stem"
 
 # The second tab's close button, 24 square, 5 in from its end, 604 to
 # 628: its shell is killed, so the tab closes, and with one tab left the
 # tab bar goes, the terminal under the header bar again, past where the
-# second tab ended.
+# second tab ended, up to the outline in the window's last column.
 click $((f_x + 616)) $((f_y + bar + 20))
-windows 2 "$first"
-shows "vt3 closed, the tab bar gone" "$((f_x + 639)) $((f_y + bar + 20)) $ground"
+windows 2 "$front" /bin
+shows "vt3 closed, the tab bar gone" "$((f_x + 638)) $((f_y + bar + 20)) $ground" "$((f_x + 639)) $((f_y + bar + 20)) $outline"
 ps_lines | grep -aqE "^ +$tab_shell +$front_vt$cpu  sh " && fail "after its tab closed, vt3's shell, pid $tab_shell, is still there"
 echo "ok - vt: vt3's close button ended its shell and closed it"
 
@@ -398,23 +408,23 @@ monitor "sendkey ctrl-shift-t"
 shows "Ctrl-Shift-T opened a tab" "$((f_x + 329)) $((f_y + bar + 20)) $tab_on" \
   "$((f_x + 14)) $((f_y + bar + 20)) $active"
 click $((f_x + 616)) $((f_y + bar + 20))
-shows "its close button closed it, the tab bar gone" "$((f_x + 639)) $((f_y + bar + 20)) $ground"
-windows 2 "$first"
+shows "its close button closed it, the tab bar gone" "$((f_x + 638)) $((f_y + bar + 20)) $ground"
+windows 2 "$front" /bin
 
 # exit at its shell ends the shell, and so its tab, the window's last,
 # so the window closes and its vt ends: the other is left, in front, and
 # ps shows neither the vt nor a shell of it.
 typekeys "exit"
 windows 1
-[ "$f_title" = "$other" ] || fail "after exit in $first, $f_title is left, not $other"
+[ "$f_pid" = "$other" ] || fail "after exit in vt $front's window, vt $f_pid's is left, not vt $other's"
 gone $front_vt ||
-  fail "after exit in $first, ps still shows its vt, pid $front_vt, or a process it started"
-echo "ok - vt: exit closed $first, its vt gone, $other left in front"
+  fail "after exit in vt $front's window, ps still shows its vt, pid $front_vt, or a process it started"
+echo "ok - vt: exit closed vt $front's window, its vt gone, vt $other's left in front"
 
 # A click on the close button, at the right end of the header bar: the
 # window's vt ends its tab's shell, and closes the window.
 click $((f_x + f_w - 18)) $((f_y + 23))
 windows 0
 gone $other_vt ||
-  fail "after the close button, ps still shows $other's vt, pid $other_vt, or a process it started"
-echo "ok - vt: the close button ended $other's vt and its shell"
+  fail "after the close button, ps still shows vt $other_vt or a process it started"
+echo "ok - vt: the close button ended vt $other_vt and its shell"

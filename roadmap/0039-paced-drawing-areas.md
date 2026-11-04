@@ -1,6 +1,6 @@
 # 0039: Drawing areas paced too, and a resize that overlaps the restack
 
-Track: Toolkit · Status: active · Needs: – · Spec: toolkit.md, desktop.md
+Track: Toolkit · Status: done · Needs: – · Spec: toolkit.md, desktop.md
 
 ## Why
 
@@ -54,7 +54,7 @@ them two buffers, with two limits it left
   the oldest's; while resized it waits for no frame and makes a third
   rather than wait for a release, and gives a third up once released
   and not resized.
-- [ ] On the Pi 5 (to check on the board, `hvs`): with the desktop up,
+- [x] On the Pi 5 (to check on the board, `hvs`): with the desktop up,
   drag a window's edge, and type in Terminal and run something that
   prints a lot (`ls -l /bin`, a long `cat`): no torn or half-drawn
   terminal, `run windows` shows a window's `buffer` an id from 200000
@@ -91,3 +91,30 @@ results go in the Log.
   the client waited for its release. `wm` now keeps it for a client
   that asked for its frame, as a paced one does before it resizes.
   Timed again after: 156, 156 and 149 sizes.
+- 2026-11-04: the first board run (Pi 5, 3840×2160, scale 2, from `make
+  release`): Terminal, once maximized, showed rows of its text
+  incompletely drawn until output scrolled it whole. `ui_win_drawing`
+  copied what the buffer lacked from the one shown and then lacked
+  nothing, but damaged none of it, and on the Pi a damage is what `hvs`
+  cleans from the caches, so the copied pixels were not seen; QEMU has
+  no such caches. What it copies is now kept as drawn, for the present
+  to damage. Steps that scrolled damaged all of the terminal, 3840×1920,
+  as they did before. No `refused:`. Terminal's first launch opened no
+  window in `wm`'s 10 seconds, at 14 s after boot as `speech` read
+  Whistle from the card for 5 s, and the second opened; nothing in the
+  log says why, and its window is asked before anything this goal
+  changed runs. Run again with that: Files, System Monitor, Disks and
+  Terminal moved and resized, only Terminal, grown, kept a trace of
+  its old top right corner in its header bar until moved. Bringing its
+  buffer up to date, `ui_win_drawing` copied all the buffer lacked,
+  the header bar too, with the corner `hvs` cuts in the buffer shown by
+  its pixels' alpha; a present copies only what it does not paint
+  again. It now copies only within the areas the program names, the
+  rest left for the present, as any window's.
+- 2026-11-04: done. With both fixes and Terminal's review (`97d7055`)
+  from `make release` on the card, the user moved and resized Files,
+  System Monitor, Disks and Terminal and ran output in Terminal: no
+  torn or half-drawn terminal, no corner left behind. `dmesg` had no
+  `refused:`, though by then it held only the last of 90 minutes. A
+  buffer id from 200000 in `run windows` after a drag was not caught:
+  Terminal was closed by the time it was asked.

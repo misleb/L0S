@@ -32,12 +32,35 @@
 ; A program draws its areas in the buffer not shown, once what that
 ; lacks of the one shown is copied over, which it then lacks no more.
 (def test_drawing_back () int
-  (match (ui_win_drawing (backed 5))
+  (match (ui_win_drawing (backed 5) (whole))
     ((UiDrawLater w) (fail_because "drawing" "later"))
     ((UiDrawOn w c)
       (add (check_int "copied over" (canvas_pixel c 5 5) 9)
            (add (check_int "not shown" (canvas_pixel c 20 20) 0)
                 (check_bool "lacks nothing" (match (head (.backs (.db (.mem w)))) ((UiBack va n cv t s rl) (is_empty s)) ((UiNoBack) false)) true))))))
+
+; What was copied over is kept as drawn, for the next present to damage:
+; hvs cleans only what is damaged from the caches, so on the Pi pixels
+; copied and not damaged were not seen. The 10 by 10 the buffer lacked.
+(def test_drawing_damaged () int
+  (match (ui_win_drawing (backed 5) (whole))
+    ((UiDrawLater w) (fail_because "drawing" "later"))
+    ((UiDrawOn w c) (check_str "drew" (rects_text (.drew (.db (.mem w)))) "0,0 10x10 "))))
+
+; A drawing area all of the plain window's 100 by 34.
+(def whole () (list Rect) (cons (Rect 0 0 100 34) (nil Rect)))
+
+; Only what the buffer lacks within the areas is copied: of its 0, 0, 10
+; by 10, the rows from 5 in an area below a 5-row header bar. Above it,
+; where a corner hvs cut in the buffer shown would be, it still lacks
+; 0, 0, 10 by 5, for the present to copy or paint as any window's.
+(def test_drawing_within () int
+  (match (ui_win_drawing (backed 5) (cons (Rect 0 5 100 29) (nil Rect)))
+    ((UiDrawLater w) (fail_because "drawing" "later"))
+    ((UiDrawOn w c)
+      (add (check_int "copied in the area" (canvas_pixel c 5 7) 9)
+           (add (check_int "not above it" (canvas_pixel c 5 2) 0)
+                (check_str "lacks" (match (head (.backs (.db (.mem w)))) ((UiBack va n cv t s rl) (rects_text s)) ((UiNoBack) "none")) "0,0 10x5 "))))))
 
 ; The buffer a present paints: the first released, the others kept in
 ; order; none, to make one, while resized with fewer than two, or with
@@ -75,12 +98,12 @@
 ; A window waiting for its frame, since now, draws later.
 (def test_drawing_later () int
   (let w (waiting)
-    (check_bool "later" (match (ui_win_drawing (.mem w (.db (.mem w) (.since (.db (.mem w)) (clock_ns))))) ((UiDrawLater w2) true) ((UiDrawOn w2 c) false)) true)))
+    (check_bool "later" (match (ui_win_drawing (.mem w (.db (.mem w) (.since (.db (.mem w)) (clock_ns)))) (whole)) ((UiDrawLater w2) true) ((UiDrawOn w2 c) false)) true)))
 
 ; One wm would not be given its buffer not shown is painted, and drawn,
 ; in the buffer shown.
 (def test_drawing_single () int
-  (match (ui_win_drawing (backed -1))
+  (match (ui_win_drawing (backed -1) (whole))
     ((UiDrawLater w) (fail_because "drawing" "later"))
     ((UiDrawOn w c)
       (add (check_bool "single" (ui_win_single w) true)
@@ -732,6 +755,81 @@
 ; A press in the area sets off its action, as any target's.
 (def test_ui_drawing_hit () int
   (check_str "term.drawing" (ui_hit (ui_layout_window (drawn_view) 640 430 (ui_state_new (UiDark))) 100 200) "term.drawing"))
+
+; The same area scrolled by rows of 16: 100 in all, row 60 first, 24 of
+; the 384 rows shown, the most first 76.
+(def rows_view () UiWidget
+  (UiBox (UiV) 0 (cons (UiCsdBar (nil UiWidget) (UiLabel "t" (UiHeading) (UiCenter)) (nil UiWidget) true)
+                     (cons (UiExpand (UiDrawingRows "term" 640 384 100 60 24 16)) (nil UiWidget)))))
+
+(def rows_win () UiWin
+  (let w (plain) (.nodes w (ui_layout_window (rows_view) 640 430 (.state w)))))
+
+; It is still the program's to paint, and a press there its action; the
+; wheel over it scrolls it, three rows a step, as any scroller's.
+(def test_ui_drawing_rows () int
+  (let ns (.nodes (rows_win))
+    (add (check_str "its area" (rects_text (ui_drawn ns)) "0,46 640x384 ")
+         (add (check_str "pressed" (ui_hit ns 100 200) "term.drawing")
+              (check_str "wheeled up" (.action (ui_route (rows_win) (UiScroll 100 200 0 -1))) "term.scrollto.57")))))
+
+; Its scrollbar's strip along its right takes a press, which scrolls it
+; as any scrollbar's, but paints nothing: its program paints the same
+; nodes, with their slider, over what it draws (ui_drawing_scrollbar).
+(def test_ui_drawing_rows_bar () int
+  (let (ns (.nodes (rows_win))
+        bar (ui_drawing_scrollbar "term" (Rect 0 46 640 384) 100 60 24 16 (ui_state_new (UiDark)) 0))
+    (add (check_bool "a strip" (starts_with (ui_hit ns 636 60) "term.scrollbar.60.76.") true)
+         (add (check_int "nothing painted" (length (ui_ops_of ns)) (length (ui_ops_of (ui_layout_window (drawn_view) 640 430 (ui_state_new (UiDark))))))
+              (check_int "the program's slider" (length (ui_ops_of bar)) 1)))))
+
+; A present moves none of its pixels when it scrolls, as it does a
+; scroller the toolkit paints: its row height is said as 0.
+(def test_ui_drawing_rows_unmoved () int
+  (let (old (ui_layout_window (rows_view) 640 430 (ui_state_new (UiDark)))
+        ns (ui_layout_window (UiBox (UiV) 0 (cons (UiCsdBar (nil UiWidget) (UiLabel "t" (UiHeading) (UiCenter)) (nil UiWidget) true)
+                                                  (cons (UiExpand (UiDrawingRows "term" 640 384 100 57 24 16)) (nil UiWidget))))
+                             640 430 (ui_state_new (UiDark))))
+    (check_bool "not moved" (match (ui_scroll_moved ns old) ((UiNoScrollMove) true) ((UiScrollMove a dy) false)) true)))
+
+; A window its client decorates has its outline over all else, a ring
+; in the theme's outline color just inside its edge; one wm decorates
+; has none.
+(def test_ui_outlined () int
+  (let (ns (ui_outlined true (ui_layout_window (drawn_view) 640 430 (ui_state_new (UiDark))) 640 430 (UiDark))
+        last (head (rev ns)))
+    (add (check_str "its ring" (rects_text (cons (.rect last) (nil Rect))) "0,0 640x430 ")
+         (add (check_int "in the outline's color" (match (head (.ops last)) ((UiPRing r rad c) c) ((UiPFill r c) -1) ((UiPRound r rad c u) -1)
+                                                       ((UiPText r s a c f b sc) -1) ((UiPIcon x y n c sc) -1) ((UiPImage x y n d ts) -1))
+                         (ui_window_outline (UiDark)))
+              (check_int "none for wm's" (length (ui_outlined false (nil UiNode) 640 430 (UiDark))) 0)))))
+
+; What lies over a drawing area is what is laid out after it, the
+; outline last: painted again over what the program draws.
+(def test_ui_over_drawn () int
+  (let ns (ui_outlined true (ui_layout_window (drawn_view) 640 430 (ui_state_new (UiDark))) 640 430 (UiDark))
+    (add (check_int "the outline alone" (length (ui_over_drawn ns)) 1)
+         (check_int "none without an area" (length (ui_over_drawn (ui_layout_window (UiLabel "x" (UiBody) (UiStart)) 100 40 (ui_state_new (UiDark))))) 0))))
+
+; What the program drew, black, gets the outline over its edge, and
+; nothing more: the toolkit paints no ground there.
+(def test_ui_overlaid () int
+  (let (ns (ui_outlined true (ui_layout_window (drawn_view) 640 430 (ui_state_new (UiDark))) 640 430 (UiDark))
+        c (ui_overlaid (canvas_new 640 430 0) (ui_face_none) ns (cons (Rect 0 46 640 384) (nil Rect))))
+    (add (check_str "the edge" (hex_digits (canvas_pixel c 0 200) 6) (hex_digits (ui_window_outline (UiDark)) 6))
+         (add (check_str "within, as drawn" (hex_digits (canvas_pixel c 5 200) 6) "000000")
+              (check_str "the header bar, not drawn, not painted" (hex_digits (canvas_pixel c 0 20) 6) "000000")))))
+
+; Its ring is damage only along the window's edges and in its corners,
+; so a window resized is not painted all again for it.
+(def test_ui_ring_damage () int
+  (check_str "corners and sides" (rects_text (ui_ring_rects (Rect 0 0 100 50) 12))
+    "0,0 12x12 88,0 12x12 0,38 12x12 88,38 12x12 12,0 76x1 12,49 76x1 0,12 1x26 99,12 1x26 "))
+
+; A watched process's exit, its pid and status; anything else is none.
+(def test_ui_exit_of () int
+  (add (check_str "an exit" (match (ui_exit_of (UiExit 17 3)) ((UiExited p s) (append (digits p) (append " " (digits s)))) ((UiNoExit) "none")) "17 3")
+       (check_str "a leave" (match (ui_exit_of (UiLeave)) ((UiExited p s) "exit") ((UiNoExit) "none")) "none")))
 
 ; ---------------------------------------------------------- the pointer
 

@@ -32,7 +32,6 @@ move independently, so several can be active at once.
 | [0029](0029-settings-app.md) Settings, an app for the system's configuration | Desktop | idea | – | 0028, 0008 (met), 0020 | programs.md, desktop.md, toolkit.md, network.md, boot.md, pi5.md, testing.md |
 | [0036](0036-files-copy-paste.md) Files copies, cuts and pastes | Desktop | idea | – | – | desktop.md, programs.md |
 | [0037](0037-fs-serves-during-disk.md) `fs` serves other requests while a disk request is out | Storage | idea | – | – | storage.md |
-| [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | active | 3/4 | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | active | 3/5 | – | toolkit.md |
 | [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 (met) | agent.md |
 | [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
@@ -66,10 +65,7 @@ voice reads, says text as Piper does (its samples at a correlation of
 0.999999 with Piper's own), and `speak -o` gives Piper's samples on
 QEMU (`tests/speak.sh`); a sentence heard and timed on a Pi 5, and made
 while the one before plays, is next.
-[0039](0039-paced-drawing-areas.md), `vt`'s terminal paced and a
-third buffer while resized, is active: its code is in and timed on
-QEMU (a drag shows 154 sizes where it showed 133); a run on the Pi 5
-is left. [0040](0040-paint-at-scale-2.md), painting at scale 2, is
+[0040](0040-paint-at-scale-2.md), painting at scale 2, is
 active: fills a row copy and text, icons and images a row at a time,
 timed on the host; timing it on the Pi 5 at 4K is next.
 Every
@@ -126,6 +122,7 @@ graph LR
 | [0005](0005-hvs-frame-interrupts.md) The HVS's end-of-frame interrupts | Display | 2026-10-29 |
 | [0006](0006-paced-display-queue.md) A paced, pipelined display queue | Display | 2026-10-29 |
 | [0027](0027-installer.md) Installing and updating L0S from the proxy, with a GUI | Storage | 2026-11-02 |
+| [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | 2026-11-04 |
 | [0063](0063-card-boot-display.md) A card boot as whole as a network boot: 4K and HDMI audio | Pi 5 | 2026-11-02 |
 | [0064](0064-rp1-interrupts.md) RP1's DMA window set up by L0S, whatever the bootloader | Pi 5 | 2026-11-02 |
 | [0065](0065-apps-from-a-description.md) Apps from a description: the toolkit's vocabulary, a preview, and a recipe | Toolkit | 2026-11-03 |

@@ -211,7 +211,11 @@ no chrome, no buffer or layer of `wm`'s for it, so one fewer layer in
 every restack and one fewer region of `wm`'s. It is its content alone,
 W×H at its top left, `windows` giving that place; its four corners are
 shaped to 12, and a press anywhere in it goes to its client. The client
-draws its own header bars, the toolkit's `UiCsdBar`, and a press on one's
+paints its outline, as libadwaita outlines a window on dark: a line a
+pixel wide just inside its edge and along its cut corners, 10% white
+over the window's ground (`3a3a3a`), over everything else in it, a
+terminal's drawing too, so its edge shows on a dark desktop or over a
+dark window, as a frame's does. The client draws its own header bars, the toolkit's `UiCsdBar`, and a press on one's
 ground asks `wm` to `move` the window, which `wm` then drags as by its
 own title bar, and a second press there within 400 ms, a double click,
 asks it to `maximize` the window, or to restore it; its close button is the client's, which closes the window

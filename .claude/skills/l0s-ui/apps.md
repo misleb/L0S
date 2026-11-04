@@ -103,7 +103,7 @@ worked example, made exactly this way.
 | sections beside a pane | `(ui_split (UiSidebar (ui_sidebar_w) ROWS "side" KEY) PANE)` | `side.select.KEY` | the key | `ui_select_key` |
 | text that wraps, a log, a chat | `(UiLines (UiLinesData "log" PARAS FIRST))`, `(UiPara TEXT KIND ICON ACTION)` | `log.scrollto.N` | paragraphs, first (-1 to follow the end) | `ui_lines_first` |
 | a grid of icons | `(UiIconView (UiIconData "files" TILES STATE))` | `files.select.KEY` | `UiIconState` | `ui_icon_action` |
-| something drawn | `UiDrawingArea` | `NAME.drawing` | — | needs a loop of its own, as Terminal's: not `ui_run` |
+| something drawn | `UiDrawingArea`, or `UiDrawingRows` to scroll it by rows | `NAME.drawing`, and `NAME.scrollto.N` | the first row shown | needs a loop of its own, as Terminal's: not `ui_run`; its scenes from `ui_preview_painted` |
 
 **Icons** are named as GNOME's: `ui_icon_names` in `icons.l0` lists
 them (`list-add`, `user-trash`, `object-select`, `view-refresh`,

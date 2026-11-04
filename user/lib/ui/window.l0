@@ -143,12 +143,19 @@
 
 ; Where the program of w draws its drawing areas, as GTK's drawing areas
 ; draw into the buffer their window paints next: the buffer not shown,
-; made first if there is none, brought up to what the screen shows, so
-; that only what changed need be drawn; or, for a window painted in the
-; buffer shown (ui_win_single), that one. Later, while the window waits.
+; made first if there is none, its areas brought up to what the screen
+; shows, so that only what changed need be drawn; or, for a window
+; painted in the buffer shown (ui_win_single), that one. Later, while
+; the window waits. What it lacks within areas is copied and kept as
+; drawn, for the present to damage: on the Pi a damage is what hvs
+; cleans from the caches, so pixels written and not damaged are not
+; seen. What it lacks outside them stays lacking, for the present to
+; copy but for what it paints anyway (ui_back_painted), as any window's:
+; copied here, a corner hvs cut in the buffer shown was copied into the
+; header bar of a window grown, and stayed there.
 ; What is drawn is told with ui_win_drew and shown by the next
 ; ui_present, which the program calls after it.
-(def ui_win_drawing ((w UiWin)) UiDrawing
+(def ui_win_drawing ((w UiWin) (areas (list Rect))) UiDrawing
   (if (ui_win_waits w (clock_ns)) (UiDrawLater w)
       (ui_win_single w) (UiDrawOn w (.canvas w))
       (let (m (.mem w)
@@ -159,8 +166,11 @@
             (match (ui_back_for w b (.w m) (.h m) s)
               ((UiNoBack) (UiDrawOn (.mem w (.db m (.backs (.db m) rest))) (.canvas w)))
               ((UiBack bva bn bcv bt stale rl)
-                (let cv (ui_copied_over bcv (.canvas w) (ui_merged stale shown) s)
-                  (UiDrawOn (.mem w (.db m (.backs (.db m) (cons (UiBack bva bn cv bt (nil Rect) true) rest)))) cv)))))))))
+                (let (outside (rects_minus stale areas)
+                      lacked (ui_merged (rects_minus stale outside) shown)
+                      cv (ui_copied_over bcv (.canvas w) lacked s)
+                      db (.drew (.backs (.db m) (cons (UiBack bva bn cv bt outside true) rest)) (append lacked (.drew (.db m)))))
+                  (UiDrawOn (.mem w (.db m db)) cv)))))))))
 
 ; w once its program drew rs in its drawing areas, on the canvas
 ; ui_win_drawing gave: shown with what changed at the next ui_present.
@@ -464,6 +474,19 @@
     ((UiFocus f) (UiNoPort)) ((UiScroll x y dx dy) (UiNoPort)) ((UiResize rw rh) (UiNoPort)) ((UiCloseAsked) (UiNoPort))
     ((UiExit p s) (UiNoPort)) ((UiOther f p) (UiNoPort))))
 
+; The exit of a process the program watches: its pid and status; or
+; none, for any other event.
+(data UiExitOf (UiExited int int) (UiNoExit))
+
+; The pid and status of ev, if it is a watched process's exit.
+(def ui_exit_of ((ev UiEvent)) UiExitOf
+  (match ev
+    ((UiExit p s) (UiExited p s))
+    ((UiIdle) (UiNoExit)) ((UiReply t m) (UiNoExit)) ((UiOpen r args) (UiNoExit)) ((UiKey k) (UiNoExit)) ((UiPress x y b) (UiNoExit))
+    ((UiRelease x y b) (UiNoExit)) ((UiMotion x y b) (UiNoExit)) ((UiContext x y b) (UiNoExit)) ((UiLeave) (UiNoExit))
+    ((UiFocus f) (UiNoExit)) ((UiScroll x y dx dy) (UiNoExit)) ((UiResize rw rh) (UiNoExit)) ((UiCloseAsked) (UiNoExit))
+    ((UiPort p m) (UiNoExit)) ((UiOther f p) (UiNoExit))))
+
 ; w, a program of one window, waiting on ports of its own too, beside
 ; its window's and its reply ports: what comes on one is UiPort PORT
 ; MESSAGE (uiloop.l0's ui_loop_own).
@@ -504,6 +527,7 @@
           ((UiPText r t a c font b sc) (if (eq (ui_text_strike font b sc s) name) acc (cons (head ops) acc)))
           ((UiPFill r c) (cons (head ops) acc))
           ((UiPRound r rad c u) (cons (head ops) acc))
+          ((UiPRing r rad c) (cons (head ops) acc))
           ((UiPIcon x y n c sc) (cons (head ops) acc))
           ((UiPImage x y n d ts) (cons (head ops) acc))))))
 
@@ -1092,7 +1116,7 @@
       (match m
         ((UiMem va n ww wh swap db)
           (let (p0 (clock_ns)
-                ns (ui_layout_window widget ww wh (.kept st (ui_kept_of old)))
+                ns (ui_outlined csd (ui_layout_window widget ww wh (.kept st (ui_kept_of old))) ww wh (.style st))
                 l (clock_ns)
                 full (Rect 0 0 ww wh)
                 w2 (UiWin c id canvas port (ui_face_asking font (ui_strikes_wanted font ns (nil (list int))) (ui_loop_rport lp)) st ns held g k m csd cl lp sh)
@@ -1102,6 +1126,33 @@
                   (ui_single_presented w2 old ns full)
                   (ui_double_presented w2 old ns full))
               p0 l s)))))))
+
+; The nodes ns of a window ww by wh, with its outline over them all if
+; its client decorates it, csd: the ring just inside its edge and cut
+; corners in the theme's outline color, as libadwaita outlines a window
+; on dark, so its edge shows against a dark desktop or window.
+(def ui_outlined ((csd bool) (ns (list UiNode)) (ww int) (wh int) (s UiStyle)) (list UiNode)
+  (if csd
+      (let r (Rect 0 0 ww wh)
+        (append ns (cons (UiNode r (cons (UiPRing r (ui_window_radius) (ui_window_outline s)) (nil UiPaint)) "" false) (nil UiNode))))
+      ns))
+
+; The nodes of ns laid out after its last drawing area, which lie over
+; what its program draws there, as the window's outline does: none if
+; it has no drawing area.
+(def ui_over_drawn ((ns (list UiNode))) (list UiNode) (ui_over_drawn_onto ns false (nil UiNode)))
+
+; ui_over_drawn's loop: whether a drawing area was seen, and the nodes
+; after the last, reversed.
+(def ui_over_drawn_onto ((ns (list UiNode)) (seen bool) (acc (list UiNode))) (list UiNode)
+  (if (is_empty ns) (if seen (rev acc) (nil UiNode))
+      (ends_with (.action (head ns)) ".drawing") (ui_over_drawn_onto (tail ns) true (nil UiNode))
+      (ui_over_drawn_onto (tail ns) seen (cons (head ns) acc))))
+
+; c with what lies over ns's drawing areas painted again in rs, what
+; their program drew, over it: the toolkit paints nothing else there.
+(def ui_overlaid ((c Canvas) (font UiFace) (ns (list UiNode)) (rs (list Rect))) Canvas
+  (if (is_empty rs) c (ui_paint_boxes c font (ui_over_drawn ns) rs)))
 
 ; w, showing ns, painted in the buffer the screen shows, unpaced: where
 ; they differ from old, and after a resize what was exposed, or all of a
@@ -1114,13 +1165,16 @@
         (ui_swapped w (ui_changed_onto old ns full (rects_minus (cons full (nil Rect)) (cons (Rect 0 0 ow oh) (nil Rect))))))
       ((UiSwap ova on ocv ow oh) (ui_swapped w (cons full (nil Rect)))))))
 
-; w with what its program drew in the buffer shown told to wm in one
-; damage request, and forgotten.
+; w with what its program drew in the buffer shown, what lies over it
+; painted again (ui_overlaid), told to wm in one damage request, and
+; forgotten.
 (def ui_drew_told ((w UiWin)) UiWin
-  (let (m (.mem w)
-        rs (.drew (.db m))
-        d (if (is_empty rs) "" (window_damage_many (.compositor w) (.id w) (ui_merged rs (Rect 0 0 (.w m) (.h m))))))
-    (.mem w (.db m (.drew (.db m) (nil Rect))))))
+  (match w
+    ((UiWin c id canvas port font st ns held g k m csd cl lp sh)
+      (let (rs (.drew (.db m))
+            p (ui_overlaid canvas font ns rs)
+            d (if (is_empty rs) "" (window_damage_many c id (ui_merged rs (Rect 0 0 (.w m) (.h m))))))
+        (UiWin c id p port font st ns held g k (.db m (.drew (.db m) (nil Rect))) csd cl lp sh)))))
 
 ; Whether a resize has done nothing wm is yet to be told of.
 (def ui_swap_none ((s UiSwap)) bool
@@ -1200,7 +1254,8 @@
 ; The buffer not shown, b, brought up to what w shows and then painted as
 ; plan says: what it lacks copied over from the buffer shown, within
 ; shown, the part that has it, but for what is painted anyway; a scroll's
-; rows moved; then the boxes painted. Then given to wm (ui_back_given),
+; rows moved; then the boxes painted, and what lies over its drawing
+; areas in what its program drew (ui_overlaid). Then given to wm (ui_back_given),
 ; with the damage that shows it: what it lacked, and what changed. The
 ; window's other buffers not shown, rest, are kept.
 (def ui_back_painted ((w UiWin) (plan UiPlan) (b UiBack) (rest (list UiBack)) (shown Rect)) UiWin
@@ -1216,7 +1271,7 @@
                   (let (s (.scale font)
                         copied (ui_copied_over bcv canvas (ui_copy_boxes stale paint mv shown) s)
                         moved (match mv ((UiNoScrollMove) copied) ((UiScrollMove area dy) (canvas_copy_rows copied (rect_scaled area s) (mul dy s))))
-                        p (ui_paint_boxes moved font ns paint)
+                        p (ui_overlaid (ui_paint_boxes moved font ns paint) font ns (.drew db))
                         at (clock_ns))
                     (ui_back_given w (UiBack bva bn p bt stale rl) rest (ui_merged (append stale told) (Rect 0 0 ww wh)) told at)))))))))))
 
@@ -1360,6 +1415,7 @@
           ((UiPText r s a c font b sc) (ui_strike_wanted f font b sc acc))
           ((UiPFill r c) acc)
           ((UiPRound r rad c u) acc)
+          ((UiPRing r rad c) acc)
           ((UiPIcon x y n c sc) acc)
           ((UiPImage x y n d ts) acc)))))
 
@@ -1616,6 +1672,7 @@
                  shown (UiStart) c f bold scale)))
     ((UiPFill r c) op)
     ((UiPRound r radius c under) op)
+    ((UiPRing r radius c) op)
     ((UiPIcon x y name c scale) op)
     ((UiPImage x y n d ts) op)))
 
@@ -1647,9 +1704,24 @@
   (match op
     ((UiPFill r c) (rects_minus (cons r (nil Rect)) (ui_fill_rects other c (nil Rect))))
     ((UiPRound r radius c under) (cons r (nil Rect)))
+    ((UiPRing r radius c) (ui_ring_rects r radius))
     ((UiPText r s a c f bold scale) (cons r (nil Rect)))
     ((UiPIcon x y name c scale) (cons (ui_op_rect op) (nil Rect)))
     ((UiPImage x y n d ts) (cons (ui_op_rect op) (nil Rect)))))
+
+; Where a ring in r with corners of radius paints: its four corners'
+; squares, and the lines along its sides between them, so that a window
+; resized has its outline painted again only there.
+(def ui_ring_rects ((r Rect) (radius int)) (list Rect)
+  (let (x (.x r) y (.y r) w (.w r) h (.h r)
+        q (ui_fit_radius radius w h)
+        x1 (sub (rect_x1 r) q)
+        y1 (sub (rect_y1 r) q)
+        mw (sub w (mul 2 q))
+        mh (sub h (mul 2 q)))
+    (cons (Rect x y q q) (cons (Rect x1 y q q) (cons (Rect x y1 q q) (cons (Rect x1 y1 q q)
+      (cons (Rect (add x q) y mw 1) (cons (Rect (add x q) (sub (rect_y1 r) 1) mw 1)
+        (cons (Rect x (add y q) 1 mh) (cons (Rect (sub (rect_x1 r) 1) (add y q) 1 mh) (nil Rect)))))))))))
 
 ; The rectangles of ops's fills of color c, onto acc.
 (def ui_fill_rects ((ops (list UiPaint)) (c int) (acc (list Rect))) (list Rect)
@@ -1658,7 +1730,7 @@
       (ui_fill_rects (tail ops) c
         (match (head ops)
           ((UiPFill r fc) (if (eq fc c) (cons r acc) acc))
-          ((UiPRound r radius fc under) acc) ((UiPText r s a fc f bold scale) acc) ((UiPIcon x y name fc scale) acc)
+          ((UiPRound r radius fc under) acc) ((UiPRing r radius fc) acc) ((UiPText r s a fc f bold scale) acc) ((UiPIcon x y name fc scale) acc)
           ((UiPImage x y n d ts) acc)))))
 
 ; Where op paints: its rectangle, or an icon's or an image's square.
@@ -1666,6 +1738,7 @@
   (match op
     ((UiPFill r c) r)
     ((UiPRound r radius c under) r)
+    ((UiPRing r radius c) r)
     ((UiPText r s a c f bold scale) r)
     ((UiPIcon x y name c scale) (Rect x y (mul (ui_icon_size) scale) (mul (ui_icon_size) scale)))
     ((UiPImage x y n d ts) (Rect x y n (ui_image_h n ts)))))
@@ -1675,6 +1748,7 @@
   (match op
     ((UiPFill r c) (UiPFill (ui_rect_up r dy) c))
     ((UiPRound r radius c under) (UiPRound (ui_rect_up r dy) radius c under))
+    ((UiPRing r radius c) (UiPRing (ui_rect_up r dy) radius c))
     ((UiPText r s a c f bold scale) (UiPText (ui_rect_up r dy) s a c f bold scale))
     ((UiPIcon x y name c scale) (UiPIcon x (sub y dy) name c scale))
     ((UiPImage x y n d ts) (UiPImage x (sub y dy) n d ts))))
@@ -1784,7 +1858,7 @@
 (def ui_fill_spans ((op UiPaint) (area Rect)) bool
   (match op
     ((UiPFill r c) (and (le (.y r) (.y area)) (ge (rect_y1 r) (rect_y1 area))))
-    ((UiPRound r radius c under) false) ((UiPText r s a c f bold scale) false) ((UiPIcon x y name c scale) false)
+    ((UiPRound r radius c under) false) ((UiPRing r radius c) false) ((UiPText r s a c f bold scale) false) ((UiPIcon x y name c scale) false)
     ((UiPImage x y n d ts) false)))
 
 ; The rows of area nothing moves into when its pixels move dy up: dy at

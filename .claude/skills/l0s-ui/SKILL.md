@@ -137,7 +137,10 @@ PNGs before the board), and `user/apps/todo`, the worked example.
   `UiSidebar`, `UiSegmentBar`, `UiProps`, `UiModal`, `entry.l0`'s
   `UiEntry`, `nav.l0`'s `UiTabBar`, and `UiDrawingArea`, an area the
   program paints itself, which the toolkit never paints or damages,
-  as `vt`'s terminal). `ui_layout widget rect
+  or `UiDrawingRows`, the same scrolled by rows, as `vt`'s terminal:
+  the toolkit routes its wheel and scrollbar as any scroller's,
+  `NAME.scrollto.N`, and the program paints the scrollbar's nodes from
+  `ui_drawing_scrollbar` over what it draws). `ui_layout widget rect
   state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them;
   `ui_hit nodes x y` gives the action under a point.
 - **`grid.l0`**: the data grid, typed cells, sorting, selection, keys,
@@ -215,11 +218,17 @@ release of the other, which `ui_route` takes (`ui.frame`,
 `ui.release`). While resized it waits for no frame and makes a third
 buffer rather than wait for a release, given up (`detach`) once it is
 not resized (roadmap 0039). A program drawing a `UiDrawingArea` (`vt`)
-draws on the canvas `ui_win_drawing` gives (the buffer painted next,
-brought up to date), or later while the window waits, keeping what is
+draws on the canvas `ui_win_drawing w AREAS` gives (the buffer painted
+next, its areas brought up to date; never copy outside them, where a
+corner `hvs` cut in the buffer shown would land in a grown window's
+header bar), or later while the window waits, keeping what is
 due; tells `ui_win_drew`; then calls `ui_present`, which shows it. It
 draws all of the area again when `ui_win_lost` changes. Never draw on
-`.canvas`, the buffer shown.
+`.canvas`, the buffer shown. A client-decorated window is outlined
+(`ui_outlined`, a `UiPRing` in `ui_window_outline` over everything);
+what is laid out after a drawing area, the outline, is painted again
+over what the program drew there (`ui_overlaid`). A program's watched
+process's exit is `ui_exit_of`.
 
 Events are `UiKey`, `UiPress`, `UiRelease`, `UiMotion` (window coordinates),
 `UiLeave`, `UiFocus front`, `UiScroll x y dx dy` (the wheel, in steps, down
