@@ -529,8 +529,8 @@ connection, and the proxy ends the session.
   one: an image removed or changed in the home after it was shown is
   read as it is then, or says why it cannot be, when a window opens
   later. The model sees none of an image it shows. A
-  preview is told once the session's next line comes after it is
-  painted, not as it is written. An image is decoded whole in one idle step, held
+  preview is told up to half a second after it is written, when the
+  builder next looks. An image is decoded whole in one idle step, held
   decoded at the pane's size in the app's heap, and kept for as long
   as the window is open; a PNG Images cannot read (16-bit, interlaced,
   more than 2048 by 2048) says why.

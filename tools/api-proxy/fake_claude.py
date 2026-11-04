@@ -9,7 +9,10 @@ seconds a result, "built NAME". With FAKE_CLAUDE_EDIT, a path in its
 L0S tree (L0S_TREE), it adds a line to that file, as a session changing
 a library in place. With FAKE_CLAUDE_PREVIEW, a PNG's path, it first
 copies that to preview/main.png, as l0s-app-preview paints a scene,
-before it says anything, so the builder finds it at its first line. Unless
+before it says anything, so the builder finds it at its first line; with
+FAKE_CLAUDE_PREVIEW_LATE too, a second after its tool use instead, then
+silent for FAKE_CLAUDE_SLEEP, as a session previewing then building in
+one command. Unless
 FAKE_CLAUDE_BUILD is no it first
 writes ./NAME, NAME its folder's, as a program: a copy of the file
 FAKE_CLAUDE_IMAGE names, a real one for an e2e case's board, or else an
@@ -27,6 +30,13 @@ def say(e):
     print(json.dumps(e), flush=True)
 
 
+def previewed(png):
+    """png's file copied to preview/main.png, a scene painted."""
+    os.makedirs("preview", exist_ok=True)
+    with open(png, "rb") as f, open(os.path.join("preview", "main.png"), "wb") as g:
+        g.write(f.read())
+
+
 def main(argv):
     log = os.environ.get("FAKE_CLAUDE_LOG")
     if log:
@@ -37,15 +47,17 @@ def main(argv):
     prompt = argv[argv.index("-p") + 1] if "-p" in argv else ""
     name = os.path.basename(os.getcwd())
     preview = os.environ.get("FAKE_CLAUDE_PREVIEW")
-    if preview:
-        os.makedirs("preview", exist_ok=True)
-        with open(preview, "rb") as f, open(os.path.join("preview", "main.png"), "wb") as g:
-            g.write(f.read())
+    late = os.environ.get("FAKE_CLAUDE_PREVIEW_LATE")
+    if preview and not late:
+        previewed(preview)
     say({"type": "system", "subtype": "init", "model": model,
          "apiKeySource": os.environ.get("FAKE_CLAUDE_KEY_SOURCE", "none")})
     say({"type": "assistant", "message": {"content": [
         {"type": "text", "text": "Writing the app."},
         {"type": "tool_use", "name": "Bash", "input": {"command": "l0s-app-build " + name}}]}})
+    if preview and late:
+        time.sleep(1)
+        previewed(preview)
     edit = os.environ.get("FAKE_CLAUDE_EDIT")
     if edit:
         with open(os.path.join(os.environ["L0S_TREE"], edit), "a") as f:

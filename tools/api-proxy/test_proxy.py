@@ -528,7 +528,7 @@ class Building(unittest.IsolatedAsyncioTestCase):
         self.env = {"FAKE_CLAUDE_LOG": self.log, "ANTHROPIC_API_KEY": KEY}
         self.saved = {k: os.environ.get(k) for k in list(self.env) + ["FAKE_CLAUDE_KEY_SOURCE", "FAKE_CLAUDE_BUILD",
                                                                       "FAKE_CLAUDE_SLEEP", "FAKE_CLAUDE_EDIT",
-                                                                      "FAKE_CLAUDE_PREVIEW"]}
+                                                                      "FAKE_CLAUDE_PREVIEW", "FAKE_CLAUDE_PREVIEW_LATE"]}
         os.environ.update(self.env)
         self.repo = self.repo_made() if self.with_repo else None
         self.builder = builders.Builder(os.path.join(self.tmp.name, "apps"), cli=[sys.executable, FAKE], repo=self.repo)
@@ -589,6 +589,34 @@ class Building(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(sent), len(png))
         # The same pixels, deflated: the IDAT's bytes inflate to the stored ones.
         self.assertEqual(zlib.decompress(sent[sent.index(b"IDAT") + 4:-16]), zlib.decompress(png[png.index(b"IDAT") + 4:-16]))
+
+    async def test_preview_while_silent(self):
+        src = os.path.join(self.tmp.name, "main.png")
+        with open(src, "wb") as f:
+            f.write(stored_png(8, 8))
+        os.environ.update({"FAKE_CLAUDE_PREVIEW": src, "FAKE_CLAUDE_PREVIEW_LATE": "yes", "FAKE_CLAUDE_SLEEP": "3"})
+        start, at = time.monotonic(), {}
+        async for kind, _ in self.builder.build("clock", "a clock"):
+            at.setdefault(kind, time.monotonic() - start)
+        # The session paints it a second into its silence and says nothing
+        # for 3 s more, as one command previewing then building; the
+        # preview comes within the builder's PREVIEW_EVERY of its writing,
+        # not with the result, after 4 s.
+        self.assertLess(at["preview"], 2.5)
+        self.assertGreater(at["done"], 4)
+
+    def test_preview_being_written(self):
+        d = os.path.join(self.tmp.name, "preview")
+        os.makedirs(d)
+        png = stored_png(4, 4)
+        with open(os.path.join(d, "main.png"), "wb") as f:
+            f.write(png[:20])
+        seen = {}
+        # Half written: nothing, and read again once whole.
+        self.assertEqual(builders.previews_new(self.tmp.name, seen), [])
+        with open(os.path.join(d, "main.png"), "wb") as f:
+            f.write(png)
+        self.assertEqual([s for s, _ in builders.previews_new(self.tmp.name, seen)], ["main"])
 
     async def test_preview_only_new(self):
         d = os.path.join(self.tmp.name, "apps", "clock", "preview")

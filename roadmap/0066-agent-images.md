@@ -34,8 +34,8 @@ model cannot show the person an image either.
   (`UiPicture`), with buttons to the one before and after.
 - [x] The builder sends each new preview in its stream: the proxy's
   `POST /build` events gain `preview` (the scene's name and its PNG,
-  recompressed and base64), found at the session's next line after it
-  is painted; the proxy's tests with the stand-in builder.
+  recompressed and base64), found within half a second of its
+  painting; the proxy's tests with the stand-in builder.
 - [x] `agentd` writes each into the home, `previews/NAME/SCENE.png`,
   reading its base64 in place (`format/base64.l0`), and tells it as
   `agent image`; the `agent_build` case sees the notice and the file.
@@ -59,3 +59,7 @@ All moved into spec/.
   so the pane shows each scene as the session paints it. Then the
   images kept in the conversation and told on open, show_image, and
   tests/agent.sh: done.
+- 2026-11-03: seen on a real build, the previews came only with the
+  result: the session previewed and built in one command, printing
+  nothing in between, and the builder looked only at its lines. It now
+  looks every half second too.

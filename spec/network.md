@@ -478,7 +478,9 @@ without which it will not start. It:
   answer is server-sent events: `progress` `{"text"}`, the session's
   text and each tool it uses, a line each; `preview`, for each scene
   `l0s-app-preview` writes into the app's `preview/SCENE.png` during
-  the build, found when the session's next line comes, its data not
+  the build, found within half a second of its writing, even while
+  the command that painted it goes on (a preview then a build in one
+  command), and read again while it is not yet a whole PNG, its data not
   JSON but two lines, the scene's name (lowercase letters, digits, `-`
   and `_`, at most 32) and its PNG, recompressed at zlib's best, in
   base64, 8 MB at most before it; then `done` `{"summary",

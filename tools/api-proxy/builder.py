@@ -36,8 +36,9 @@ The session is `claude -p`, its events read as stream-json, with:
 
 A build yields events: ("progress", text) as the session works;
 ("preview", (SCENE, PNG)) for each scene l0s-app-preview paints into
-preview/SCENE.png during the build, once the session's next event comes
-after it is written, its PNG recompressed (previews are written as
+preview/SCENE.png during the build, found within PREVIEW_EVERY seconds
+of its writing, even while a command the session runs goes on (a
+preview then a build in one), its PNG recompressed (previews are written as
 stored blocks, uncompressed); then ("done", summary) once a program was
 built, its bytes then in image(NAME), or ("failed", why)."""
 
@@ -59,6 +60,7 @@ DEFAULT_TIMEOUT = 1800
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 SCENE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 PREVIEW_MOST = 8 * 1024 * 1024
+PREVIEW_EVERY = 0.5
 TRAILER = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 # The environment's ways to the API, none of which the session gets: it
@@ -241,12 +243,20 @@ class Builder:
             *self.command(name, prompt, session, old is not None), cwd=d, env=self.environment(os.environ, name),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=16 * 1024 * 1024)
-        result = None
+        result, reading = None, None
         try:
             async with asyncio.timeout(self.timeout):
-                async for raw in proc.stdout:
+                reading = asyncio.ensure_future(proc.stdout.readline())
+                while True:
+                    ready, _ = await asyncio.wait({reading}, timeout=PREVIEW_EVERY)
                     for p in previews_new(d, seen):
                         yield ("preview", p)
+                    if not ready:
+                        continue
+                    raw = reading.result()
+                    if not raw:
+                        break
+                    reading = asyncio.ensure_future(proc.stdout.readline())
                     e = event_of(raw)
                     if e is None:
                         continue
@@ -268,6 +278,8 @@ class Builder:
             yield ("failed", "the session took more than %d s" % self.timeout)
             return
         finally:
+            if reading is not None and not reading.done():
+                reading.cancel()
             if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
@@ -313,21 +325,22 @@ def previews_seen(d):
 def previews_new(d, seen):
     """Each scene of d's preview/ written since seen says, as (SCENE,
     PNG), its PNG recompressed, in the order of their names; seen
-    updated. A file not a PNG this reads, or over PREVIEW_MOST, is
-    passed over."""
+    updated. A file over PREVIEW_MOST is passed over; one not a PNG this
+    reads, as one still being written, is read again the next time."""
     out = []
     for scene, t in sorted(previews_seen(d).items()):
         if seen.get(scene) == t:
             continue
-        seen[scene] = t
         try:
             p = os.path.join(d, "preview", scene + ".png")
             if os.path.getsize(p) > PREVIEW_MOST:
+                seen[scene] = t
                 continue
             with open(p, "rb") as f:
                 png = recompressed(f.read())
         except (OSError, ValueError, zlib.error):
             continue
+        seen[scene] = t
         out.append((scene, png))
     return out
 
