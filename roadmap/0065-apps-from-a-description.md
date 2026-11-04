@@ -139,3 +139,10 @@ should be:
   the screen tests' etc, `run tipcalc &` showed it as previewed, its
   entry focused. `make check`, `make test` (3962 passed) and `make e2e`
   (76 cases, 21 screen tests) pass. Done.
+- 2026-11-03: the first apps built from a description merged into
+  L0S, as the user asked: the builder's Calculator, `user/apps/calc`,
+  in a release's system but not the initramfs (the Makefile's new
+  `RELEASE_APPS`, staged by `make release-apps`, added by mkrelease's
+  `APPS`), and its Installer, in place of L0S's, its button in the
+  heading's row; their branches merged, the toolkit's filling, tinted
+  and colored buttons, `ui_red_4`, and dark's raised toggle, with tests.

@@ -1,0 +1,368 @@
+; calc.l0 -- Calculator: a display of the number being typed or the
+; result, the sum so far dimmed above it, and a keypad of digits, the
+; point, the four operations, equals, percent, sign, clear and
+; backspace. Keys work as the keypad does: digits, . + - * / x %,
+; Enter or = for equals, Backspace, Escape or Delete to clear. A
+; division by zero shows Error until the next key.
+;
+;   calc          its window, until it is closed
+
+; ----------------------------------------------------------------- state
+
+; What the calculator holds: the value so far, acc; the operation
+; waiting for its second number, op ('+' '-' '*' '/', or 0 for none);
+; the number being typed, entry, as typed, "" when none is; the sum
+; shown dimmed above, expr; whether a division by zero (or a number too
+; large) left Error showing; and whether the last key was equals, so a
+; digit then starts afresh.
+(data Calc (Calc (acc float) (op int) (entry (list int)) (expr (list int)) (error bool) (done bool)))
+
+; The calculator as it opens: 0, nothing waiting.
+(def calc_new () Calc (Calc 0.0 0 "" "" false false))
+
+; The most digits an entry takes.
+(def calc_max_digits () int 12)
+
+; The window's size.
+(def calc_w () int 320)
+(def calc_h () int 440)
+
+; ---------------------------------------------------------------- numbers
+
+; 10 to the k, k at least 0.
+(def calc_pow10 ((k int)) float (calc_pow10_onto k 1.0))
+
+; calc_pow10's loop.
+(def calc_pow10_onto ((k int) (acc float)) float
+  (if (le k 0) acc (calc_pow10_onto (sub k 1) (float_mul acc 10.0))))
+
+; Whether x is a number that can be shown: not NaN, not an infinity, and
+; below 10 to the 100.
+(def calc_finite ((x float)) bool
+  (let a (calc_abs x)
+    (float_lt a (calc_pow10 100))))
+
+; |x|.
+(def calc_abs ((x float)) float (if (float_lt x 0.0) (float_neg x) x))
+
+; An entry as typed, "-12.5", as a number: its digits as a whole number
+; over 10 to the count after the point.
+(def calc_parse ((s (list int))) float
+  (if (and (not (is_empty s)) (eq (head s) 45))
+      (float_neg (calc_parse_digits (tail s) 0 0 false))
+      (calc_parse_digits s 0 0 false)))
+
+; calc_parse's loop: m the digits so far, k how many came after the
+; point, seen whether it has.
+(def calc_parse_digits ((s (list int)) (m int) (k int) (seen bool)) float
+  (if (is_empty s)
+      (float_div (float_from_int m) (calc_pow10 k))
+      (let c (head s)
+        (if (eq c 46)
+            (calc_parse_digits (tail s) m k true)
+            (and (ge c 48) (le c 57))
+            (calc_parse_digits (tail s) (add (mul m 10) (sub c 48)) (if seen (add k 1) k) seen)
+            (calc_parse_digits (tail s) m k seen)))))
+
+; The significant digits a result is shown with.
+(def calc_sig () int 10)
+
+; x as the display shows it: "0", "-12.5", "0.000123", or past ten
+; digits "1.23456789e15", to ten significant digits, no zeros trailing.
+(def calc_format ((x float)) (list int)
+  (let a (calc_abs x)
+    (if (float_lt (float_mul a (calc_pow10 99)) 1.0)
+        "0"
+        (let body (calc_format_pos a (calc_exp10 a 0))
+          (if (float_lt x 0.0) (cons 45 body) body)))))
+
+; e such that 10^e <= a < 10^(e+1), a above 0, counting from e.
+(def calc_exp10 ((a float) (e int)) int
+  (if (float_ge a 10.0) (calc_exp10 (float_div a 10.0) (add e 1))
+      (float_lt a 1.0) (calc_exp10 (float_mul a 10.0) (sub e 1))
+      e))
+
+; a, above 0, of exponent e, rounded to calc_sig digits: m the digits
+; as a whole number, its exponent carried if it rounded up to one more.
+(def calc_format_pos ((a float) (e int)) (list int)
+  (let (k (sub (sub (calc_sig) 1) e)
+        scaled (if (ge k 0) (float_mul a (calc_pow10 k)) (float_div a (calc_pow10 (neg k))))
+        m (float_to_int (float_add scaled 0.5))
+        over (ge m (calc_int_pow10 (calc_sig))))
+    (calc_place (digits (if over (div m 10) m)) (if over (add e 1) e))))
+
+; 10 to the k, as an int.
+(def calc_int_pow10 ((k int)) int (if (le k 0) 1 (mul 10 (calc_int_pow10 (sub k 1)))))
+
+; The digits ds, calc_sig of them, of a number of exponent e, with the
+; point put in: plainly from 10^-6 up to ten digits before the point,
+; else as d.ddd and the exponent.
+(def calc_place ((ds (list int)) (e int)) (list int)
+  (if (and (ge e 0) (lt e (calc_sig)))
+      (calc_with_point (take ds (add e 1)) (drop ds (add e 1)))
+      (and (lt e 0) (ge e -6))
+      (calc_with_point "0" (append (calc_zeros (sub (neg e) 1)) ds))
+      (append (calc_with_point (take ds 1) (drop ds 1))
+              (append "e" (digits e)))))
+
+; whole, then a point and frac if frac has any digit but trailing zeros.
+(def calc_with_point ((whole (list int)) (frac (list int))) (list int)
+  (let f (calc_trim_zeros frac)
+    (if (is_empty f) whole (append whole (cons 46 f)))))
+
+; s without the zeros at its end.
+(def calc_trim_zeros ((s (list int))) (list int)
+  (rev (calc_drop_zeros (rev s))))
+
+; s without the zeros at its start.
+(def calc_drop_zeros ((s (list int))) (list int)
+  (if (and (not (is_empty s)) (eq (head s) 48)) (calc_drop_zeros (tail s)) s))
+
+; n zeros.
+(def calc_zeros ((n int)) (list int) (if (le n 0) "" (cons 48 (calc_zeros (sub n 1)))))
+
+; How many digits s has.
+(def calc_digit_count ((s (list int))) int
+  (if (is_empty s) 0 (add (if (and (ge (head s) 48) (le (head s) 57)) 1 0) (calc_digit_count (tail s)))))
+
+; ------------------------------------------------------------- operations
+
+; a op b, op one of '+' '-' '*' '/'. A division by zero is NaN, which
+; is not finite, so shows Error.
+(def calc_apply ((op int) (a float) (b float)) float
+  (if (eq op 43) (float_add a b)
+      (eq op 45) (float_sub a b)
+      (eq op 42) (float_mul a b)
+      (eq op 47) (if (float_le (calc_abs b) 0.0) (float_div 0.0 0.0) (float_div a b))
+      b))
+
+; How op is written on the sum's line: + - x /.
+(def calc_op_text ((op int)) (list int)
+  (if (eq op 42) "x" (eq op 47) "/" (cons op (nil int))))
+
+; The number the display shows: the entry while one is typed, else the
+; value so far.
+(def calc_shown ((s Calc)) (list int)
+  (if (.error s) "Error" (is_empty (.entry s)) (calc_format (.acc s)) (.entry s)))
+
+; The number the display holds, as a number.
+(def calc_value ((s Calc)) float
+  (if (is_empty (.entry s)) (.acc s) (calc_parse (.entry s))))
+
+; Calc with acc the value so far, op waiting, entry, expr and the rest
+; as given: Error if acc is no number to show.
+(def calc_with ((acc float) (op int) (entry (list int)) (expr (list int)) (done bool)) Calc
+  (if (calc_finite acc)
+      (Calc acc op entry expr false done)
+      (Calc 0.0 0 "" expr true false)))
+
+; A digit, d, typed: after equals or Error, a new number; a lone 0
+; replaced; nothing past calc_max_digits.
+(def calc_digit ((s Calc) (d int)) Calc
+  (let (fresh (or (.error s) (.done s))
+        t (if fresh (Calc (if (.error s) 0.0 (.acc s)) 0 "" "" false false) s)
+        e (.entry t)
+        c (add 48 d))
+    (if (ge (calc_digit_count e) (calc_max_digits)) t
+        (eq e "0") (.entry t (cons c (nil int)))
+        (eq e "-0") (.entry t (cons 45 (cons c (nil int))))
+        (.entry t (append e (cons c (nil int)))))))
+
+; The point typed, once a number.
+(def calc_point ((s Calc)) Calc
+  (let (fresh (or (.error s) (.done s))
+        t (if fresh (Calc (if (.error s) 0.0 (.acc s)) 0 "" "" false false) s)
+        e (.entry t))
+    (if (any_eq 46 e) t
+        (is_empty e) (.entry t "0.")
+        (eq e "-") (.entry t "-0.")
+        (.entry t (append e ".")))))
+
+; An operation, op, pressed: the number typed worked into the value so
+; far by the operation waiting, and op waiting for the next; with no
+; number typed, op replaces the one waiting.
+(def calc_operation ((s Calc) (op int)) Calc
+  (if (.error s)
+      s
+      (let (typed (not (is_empty (.entry s)))
+            acc (if (not typed) (.acc s)
+                    (eq (.op s) 0) (calc_parse (.entry s))
+                    (calc_apply (.op s) (.acc s) (calc_parse (.entry s)))))
+        (if (calc_finite acc)
+            (calc_with acc op "" (append (calc_format acc) (append " " (calc_op_text op))) false)
+            (calc_with acc 0 "" (.expr s) false)))))
+
+; Equals: the operation waiting done on the value so far and the number
+; typed, or the value so far again if none was typed, and the sum shown
+; above.
+(def calc_equals ((s Calc)) Calc
+  (if (.error s)
+      s
+      (eq (.op s) 0)
+      (if (is_empty (.entry s))
+          s
+          (let v (calc_parse (.entry s))
+            (calc_with v 0 "" (append (calc_format v) " =") true)))
+      (let (a (.acc s)
+            b (calc_value s)
+            sum (append (calc_format a) (append " " (append (calc_op_text (.op s)) (append " " (append (calc_format b) " =")))))
+            r (calc_apply (.op s) a b))
+        (calc_with r 0 "" sum true))))
+
+; Backspace: the last character typed taken back; Error cleared.
+(def calc_back ((s Calc)) Calc
+  (if (.error s)
+      (calc_new)
+      (let (e (.entry s)
+            cut (take e (sub (length e) 1)))
+        (if (is_empty e) s
+            (or (eq cut "-") (eq cut "-0")) (.entry s "")
+            (.entry s cut)))))
+
+; The sign changed: of the number typed, or of the value shown.
+(def calc_negate ((s Calc)) Calc
+  (if (.error s)
+      s
+      (let e (.entry s)
+        (if (is_empty e)
+            (if (eq (.op s) 0) (.acc s (float_neg (.acc s))) s)
+            (eq (head e) 45) (.entry s (tail e))
+            (.entry s (cons 45 e))))))
+
+; Percent: the number typed as a percent of the value so far, for + and
+; -, else as a hundredth; with none typed, the value so far a hundredth.
+(def calc_percent ((s Calc)) Calc
+  (if (.error s)
+      s
+      (let e (.entry s)
+        (if (is_empty e)
+            (if (eq (.op s) 0) (.acc s (float_div (.acc s) 100.0)) s)
+            (let (b (calc_parse e)
+                  p (if (any_eq (.op s) (cons 43 (cons 45 (nil int))))
+                        (float_div (float_mul (.acc s) b) 100.0)
+                        (float_div b 100.0)))
+              (.entry s (calc_format p)))))))
+
+; ------------------------------------------------------------------ view
+
+; A key filling its cell: its action, icon or "", label, look.
+(def calc_key ((action (list int)) (icon (list int)) (label (list int)) (k UiButtonKind)) UiWidget
+  (UiExpand (UiButton action icon label (UiBtnFill k) true)))
+
+; A digit's key.
+(def calc_digit_key ((d int)) UiWidget
+  (calc_key (append "app.digit." (digits d)) "" (digits d) (UiBtnRegular)))
+
+; An operation's key.
+(def calc_op_key ((name (list int)) (label (list int))) UiWidget
+  (calc_key (append "app.op." name) "" label (UiBtnTinted)))
+
+; A row of keys, 6 apart, sharing its width.
+(def calc_row ((keys (list UiWidget))) UiWidget
+  (UiExpand (UiBox (UiH) (ui_space_s) keys)))
+
+; Four keys as a list.
+(def calc_four ((a UiWidget) (b UiWidget) (c UiWidget) (d UiWidget)) (list UiWidget)
+  (cons a (cons b (cons c (cons d (nil UiWidget))))))
+
+; The keypad: five rows of four.
+(def calc_keypad () UiWidget
+  (UiBox (UiV) (ui_space_s)
+    (cons (calc_row (calc_four (calc_key "app.clear" "" "C" (UiBtnRegular))
+                               (calc_key "app.back" "go-previous" "" (UiBtnRegular))
+                               (calc_key "app.percent" "" "%" (UiBtnRegular))
+                               (calc_op_key "div" "/")))
+      (cons (calc_row (calc_four (calc_digit_key 7) (calc_digit_key 8) (calc_digit_key 9) (calc_op_key "mul" "x")))
+        (cons (calc_row (calc_four (calc_digit_key 4) (calc_digit_key 5) (calc_digit_key 6) (calc_op_key "sub" "-")))
+          (cons (calc_row (calc_four (calc_digit_key 1) (calc_digit_key 2) (calc_digit_key 3) (calc_op_key "add" "+")))
+            (cons (calc_row (calc_four (calc_key "app.negate" "" "+/-" (UiBtnRegular))
+                                       (calc_digit_key 0)
+                                       (calc_key "app.point" "" "." (UiBtnRegular))
+                                       (calc_key "app.equals" "" "=" (UiBtnColored (ui_red_4)))))
+              (nil UiWidget))))))))
+
+; The display's number's face: 32 high, or 16 when that is too wide for
+; the display.
+(def calc_face ((s (list int))) UiFont
+  (let big (UiFontAt "sans" (calc_big_h))
+    (if (le (ui_text_w s big false 1) (sub (calc_w) (mul 2 (ui_space_l)))) big (UiFontAt "sans" 16))))
+
+; The display's number's height.
+(def calc_big_h () int 32)
+
+; The display: the sum dimmed, then the number large, both at the right,
+; on the view's dark ground.
+(def calc_display ((s Calc)) UiWidget
+  (let shown (calc_shown s)
+    (UiView (UiPad (ui_space_l) (ui_space_l)
+              (UiBox (UiV) (ui_space_s)
+                (cons (UiLabel (.expr s) (UiDimmed) (UiEnd))
+                  (cons (UiBox (UiV) 0 (cons (UiSpace 0 (sub (calc_big_h) (ui_font_line (calc_face shown) 1)))
+                                         (cons (UiText shown (calc_face shown) (UiEnd)) (nil UiWidget))))
+                    (nil UiWidget))))))))
+
+; The window: the display over the keypad, which takes the rest.
+(def calc_view ((s Calc)) UiWidget
+  (UiBox (UiV) 0
+    (cons (calc_display s)
+      (cons (UiExpand (UiPad (ui_space_m) (ui_space_m) (calc_keypad))) (nil UiWidget)))))
+
+; ---------------------------------------------------------------- update
+
+; The action a key typed stands for, or "" for none: digits, the point,
+; the operations, equals, backspace, clear.
+(def calc_key_action ((ev UiEvent)) (list int)
+  (let code (ui_key_pressed ev)
+    (if (lt code 0)
+        ""
+        (match (ui_key_of ev)
+          ((None) "")
+          ((Some k) (calc_char_action (.ch k) code))))))
+
+; calc_key_action for the character ch typed by the key code.
+(def calc_char_action ((ch int) (code int)) (list int)
+  (if (and (ge ch 48) (le ch 57)) (append "app.digit." (digits (sub ch 48)))
+      (or (eq ch 46) (eq ch 44)) "app.point"
+      (eq ch 43) "app.op.add"
+      (eq ch 45) "app.op.sub"
+      (or (eq ch 42) (or (eq ch 120) (eq ch 88))) "app.op.mul"
+      (eq ch 47) "app.op.div"
+      (eq ch 37) "app.percent"
+      (or (eq ch 61) (or (eq code (ui_key_enter)) (eq code 96))) "app.equals"
+      (eq code (ui_key_backspace)) "app.back"
+      (or (eq code (ui_key_esc)) (or (eq code (ui_key_delete)) (or (eq ch 99) (eq ch 67)))) "app.clear"
+      ""))
+
+; The operation an app.op.NAME names.
+(def calc_op_named ((name (list int))) int
+  (if (eq name "add") 43 (eq name "sub") 45 (eq name "mul") 42 47))
+
+; The calculator after action, set off with ev: a key typed is the
+; action of its key on the keypad.
+(def calc_update ((s Calc) (action (list int)) (ev UiEvent)) Calc
+  (if (is_empty action)
+      (let a (calc_key_action ev)
+        (if (is_empty a) s (calc_act s a)))
+      (calc_act s action)))
+
+; The calculator after the keypad's action.
+(def calc_act ((s Calc) (action (list int))) Calc
+  (if (starts_with action "app.digit.") (calc_digit s (int_prefix (drop_n action 10) 0))
+      (starts_with action "app.op.") (calc_operation s (calc_op_named (drop_n action 7)))
+      (eq action "app.point") (calc_point s)
+      (eq action "app.equals") (calc_equals s)
+      (eq action "app.clear") (calc_new)
+      (eq action "app.back") (calc_back s)
+      (eq action "app.negate") (calc_negate s)
+      (eq action "app.percent") (calc_percent s)
+      s))
+
+; ------------------------------------------------------------------ loop
+
+; A step of the window: the calculator updated, the window as it was.
+(def calc_step ((s Calc) (action (list int)) (ev UiEvent) (w UiWin)) (UiStepped Calc)
+  (UiStepped w (calc_update s action ev)))
+
+; Its window, until it is closed.
+(def calc () int
+  (ui_run "calc" "Calculator" (calc_w) (calc_h) (calc_new) calc_view calc_step))

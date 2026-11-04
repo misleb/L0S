@@ -507,7 +507,9 @@ without which it will not start. It:
   ([release.py](../tools/api-proxy/release.py)). `make release` stages
   `build/release/pi5` and `build/release/virt` with
   [tools/mkrelease](../tools/mkrelease), each a directory per part:
-  `system` (the programs as `make root` stages them, and the board's
+  `system` (the programs as `make root` stages them, with the apps
+  of the Makefile's `RELEASE_APPS`, Calculator, which the initramfs
+  leaves out, as `make release-apps` stages them, and the board's
   `/etc` as its initramfs has it, `/etc/agent` included), `boot` on the
   Pi 5 (what `make pi5-card` writes: `l0.img`, `config.txt`,
   `cmdline.txt`, the device trees and `input.bin`), `agent` (the home's

@@ -53,6 +53,7 @@ summary A terminal in a window, with its own shell
 | `Agent.app` | `chat` | Agent |
 | `Installer.app` | `installer` | Installer |
 | `ToDo.app` | `todo` | To Do |
+| `Calc.app` | `calc` | Calculator, in a release's system only, not the initramfs (the Makefile's `RELEASE_APPS`) |
 
 A bundle's name is one word, as the shell and the inittab split at
 spaces; an app's name may be several. Its source is the directory beside
@@ -275,7 +276,9 @@ a volume; says whether `/Volumes/data` is there, and why it cannot run
 or what it will erase; and on Install runs `install --net ...
 --progress` as its child, its terminal a port the window waits on with
 its own, showing the progress line and everything install says, and
-Done or that it stopped when it exits.
+Done or that it stopped when it exits. Install or Update is at the end
+of its heading's row, with Back beside it once install has ended, and
+the list of what install says is open, empty, from the start.
 
 ## Limits
 

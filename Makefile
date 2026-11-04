@@ -71,7 +71,8 @@
 #                    build/proxy/usage.jsonl, and releases from
 #                    build/release
 #   make release     build/release/pi5 and build/release/virt: the
-#                    system, the Pi 5's boot files, the agent's seed,
+#                    system, with RELEASE_APPS (calc) beside the
+#                    initramfs's apps, the Pi 5's boot files, the agent's seed,
 #                    Whistle's model and the Pi 5's pieeprom.bin, the
 #                    last two fetched once into build/fetch, which the
 #                    proxy serves to install --net and the Installer
@@ -378,6 +379,7 @@ LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_todo       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
+LIBS_calc       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB) $(PATHS) $(PNGREAD)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_installer  := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(RELEASE) $(BOOTLOADER)
@@ -404,6 +406,11 @@ BIN      := $(notdir $(wildcard user/bin/*))
 SBIN     := $(notdir $(wildcard user/sbin/*))
 APPS     := $(notdir $(wildcard user/apps/*))
 PROGRAMS := $(BIN) $(SBIN) $(APPS)
+# The apps a release has and the initramfs does not: built, checked and
+# tested as every app is, but staged by release-apps, not root, so they
+# reach a system only as install --net and the Installer put a release
+# on its volume.
+RELEASE_APPS := calc
 $(foreach p,$(BIN),$(eval DIR_$(p) := user/bin/$(p)))
 $(foreach p,$(SBIN),$(eval DIR_$(p) := user/sbin/$(p)))
 $(foreach p,$(APPS),$(eval DIR_$(p) := user/apps/$(p)))
@@ -449,7 +456,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root release-apps initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
 
 all: check test test-virt e2e
 
@@ -862,20 +869,28 @@ IMAGES_FACE := $(SVG_APPS:%=$(BUILD)/icons/%.face)
 # icon.svg's images, icon.face, or the drawing commands of an icon.draw.
 # Made anew each time, so that a program that moves leaves nothing
 # where it was.
+# STAGE_APP NAME DIR: the app NAME's bundle staged under DIR.
 define STAGE_APP
-mkdir -p $(ROOT)/Applications/$(BUNDLE_$(1)) && \
-install -m 755 $(BUILD)/bin/$(1).img $(ROOT)/Applications/$(BUNDLE_$(1))/$(1) && \
-install -m 644 $(DIR_$(1))/$(BUNDLE_$(1))/manifest $(ROOT)/Applications/$(BUNDLE_$(1))/manifest && \
-install -m 644 $(BUILD)/icons/$(1).ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon.ppm && \
-install -m 644 $(BUILD)/icons/$(1)2x.ppm $(ROOT)/Applications/$(BUNDLE_$(1))/icon2x.ppm && \
-$(if $(filter %.svg,$(ICON_$(1))),install -m 644 $(BUILD)/icons/$(1).face $(ROOT)/Applications/$(BUNDLE_$(1))/icon.face,install -m 644 $(ICON_$(1)) $(ROOT)/Applications/$(BUNDLE_$(1))/icon.draw)
+mkdir -p $(2)/Applications/$(BUNDLE_$(1)) && \
+install -m 755 $(BUILD)/bin/$(1).img $(2)/Applications/$(BUNDLE_$(1))/$(1) && \
+install -m 644 $(DIR_$(1))/$(BUNDLE_$(1))/manifest $(2)/Applications/$(BUNDLE_$(1))/manifest && \
+install -m 644 $(BUILD)/icons/$(1).ppm $(2)/Applications/$(BUNDLE_$(1))/icon.ppm && \
+install -m 644 $(BUILD)/icons/$(1)2x.ppm $(2)/Applications/$(BUNDLE_$(1))/icon2x.ppm && \
+$(if $(filter %.svg,$(ICON_$(1))),install -m 644 $(BUILD)/icons/$(1).face $(2)/Applications/$(BUNDLE_$(1))/icon.face,install -m 644 $(ICON_$(1)) $(2)/Applications/$(BUNDLE_$(1))/icon.draw)
 endef
 
 root: $(IMAGES) $(ICONS) $(ICONS2X) $(IMAGES_FACE)
 	rm -rf $(ROOT) && mkdir -p $(ROOT)/bin $(ROOT)/sbin $(ROOT)/Applications
 	$(foreach p,$(BIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/bin/$(p) && ) true
 	$(foreach p,$(SBIN),install -m 755 $(BUILD)/bin/$(p).img $(ROOT)/sbin/$(p) && ) true
-	$(foreach p,$(APPS),$(call STAGE_APP,$(p)) && ) true
+	$(foreach p,$(filter-out $(RELEASE_APPS),$(APPS)),$(call STAGE_APP,$(p),$(ROOT)) && ) true
+
+# RELEASE_APPS' bundles, staged as root stages the rest, in a tree of
+# their own, which mkrelease adds to a release's system.
+RELEASE_APPS_ROOT := $(BUILD)/release-apps
+release-apps: $(IMAGES) $(ICONS) $(ICONS2X) $(IMAGES_FACE)
+	rm -rf $(RELEASE_APPS_ROOT) && mkdir -p $(RELEASE_APPS_ROOT)/Applications
+	$(foreach p,$(RELEASE_APPS),$(call STAGE_APP,$(p),$(RELEASE_APPS_ROOT)) && ) true
 
 doc: $(BUILD)/l0sdoc
 	@$(BUILD)/l0sdoc "$(Q)" $(DOC_SRCS) -- $(PROG_DOC_SRCS)
@@ -976,9 +991,9 @@ $(BUILD)/fetch/whistle.cact:
 $(BUILD)/fetch/pieeprom-$(PIEEPROM_VERSION).bin:
 	$(call fetch_pinned,$(PIEEPROM_URL),$(PIEEPROM_SHA256))
 
-release: initramfs pi5-card $(WHISTLE_MODEL) $(PIEEPROM)
-	WHISTLE_MODEL=$(WHISTLE_MODEL) tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
-	WHISTLE_MODEL=$(WHISTLE_MODEL) PIEEPROM=$(PIEEPROM) tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-card
+release: initramfs pi5-card release-apps $(WHISTLE_MODEL) $(PIEEPROM)
+	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
+	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) PIEEPROM=$(PIEEPROM) tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-card
 
 # The knowledge graph, which /graphify built first: graphify's own Python,
 # as it wrote it down, rebuilds it with the L0 sources it cannot read.

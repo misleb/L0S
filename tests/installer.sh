@@ -144,11 +144,12 @@ said() {
 }
 
 # The window's content starts under its 46-row header bar, 2 in from its
-# left, its page 18 in: the title, 32 high, and the line under it, 16,
-# 12 apart; the properties, two rows of 34, 6 apart; data's status, then
+# left, its page 18 in: the heading's row, 34 high, a button's (the
+# title is 32), Install at its end, 18 in from the 640's right, its red
+# taken 10 in from there, in its padding; the line under it, 16, 12
+# apart; the properties, two rows of 34, 6 apart; data's status, then
 # the status of what it will do, 28 apart, their dots 8 across at their
-# start; then Install, 34 high, in the middle of the 640 across, its
-# middle 63 under data's dot.
+# start.
 bar=46
 red="224 27 36"; green="46 194 126"; yellow="229 165 10"
 
@@ -158,8 +159,8 @@ printf 'run installer &\n' >&3
 waits_for "\[pid [0-9]+ running\]"
 window
 cx=$((w_x + 2)); cy=$((w_y + bar))
-dot_x=$((cx + 22)); data_y=$((cy + 18 + 32 + 12 + 16 + 12 + 34 + 6 + 34 + 12 + 10))
-what_y=$((data_y + 25)); btn_y=$((data_y + 63)); btn_x=$((cx + 319))
+dot_x=$((cx + 22)); data_y=$((cy + 18 + 34 + 12 + 16 + 12 + 34 + 6 + 34 + 12 + 10))
+what_y=$((data_y + 25)); btn_y=$((cy + 18 + 17)); btn_x=$((cx + 640 - 18 - 10))
 
 shows "a fresh install onto System, data there, what it erases said" \
   "$btn_x $btn_y $red" "$dot_x $data_y $green" "$dot_x $what_y $yellow"
