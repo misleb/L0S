@@ -1,6 +1,6 @@
 # 0039: Drawing areas paced too, and a resize that overlaps the restack
 
-Track: Toolkit · Status: active · Needs: – · Spec: toolkit.md, desktop.md
+Track: Toolkit · Status: done · Needs: – · Spec: toolkit.md, desktop.md
 
 ## Why
 
@@ -54,7 +54,7 @@ them two buffers, with two limits it left
   the oldest's; while resized it waits for no frame and makes a third
   rather than wait for a release, and gives a third up once released
   and not resized.
-- [ ] On the Pi 5 (to check on the board, `hvs`): with the desktop up,
+- [x] On the Pi 5 (to check on the board, `hvs`): with the desktop up,
   drag a window's edge, and type in Terminal and run something that
   prints a lot (`ls -l /bin`, a long `cat`): no torn or half-drawn
   terminal, `run windows` shows a window's `buffer` an id from 200000
@@ -111,3 +111,10 @@ results go in the Log.
   its pixels' alpha; a present copies only what it does not paint
   again. It now copies only within the areas the program names, the
   rest left for the present, as any window's.
+- 2026-11-04: done. With both fixes and Terminal's review (`97d7055`)
+  from `make release` on the card, the user moved and resized Files,
+  System Monitor, Disks and Terminal and ran output in Terminal: no
+  torn or half-drawn terminal, no corner left behind. `dmesg` had no
+  `refused:`, though by then it held only the last of 90 minutes. A
+  buffer id from 200000 in `run windows` after a drag was not caught:
+  Terminal was closed by the time it was asked.
