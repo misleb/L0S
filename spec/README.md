@@ -39,7 +39,7 @@ only so far. A goal that lifts a limit links to it.
 | [desktop.md](desktop.md) | The compositor `wm`: buffers and layers, the compositor protocol, the top bar, the L0S menu, the launcher, frames, input; a large screen at scale 2 |
 | [toolkit.md](toolkit.md) | The toolkit in `user/lib/ui`: its files, the Elm-style loop, scrolling, entries, the HIG as encoded |
 | [display.md](display.md) | The display protocol, `virtio-gpu`'s 2D and 3D modes, shaped layers and batched damage, `hvs` on the Raspberry Pi 5 |
-| [speech.md](speech.md) | Whistle's container, tokenizer, front end, stem, encoder and decoder, in L0 |
+| [speech.md](speech.md) | Whistle's container, tokenizer, front end, stem, encoder and decoder, in L0; the speech service, which says what it hears to the agent |
 | [sound.md](sound.md) | Sound on the Pi 5's HDMI0, the audio protocol; USB microphones, the mic protocol, `rec` |
 | [storage.md](storage.md) | Disks and their drivers, partitions, volumes and L0FS, `fs` |
 | [fat32.md](fat32.md) | FAT32 volumes |

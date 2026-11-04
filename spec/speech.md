@@ -1,7 +1,9 @@
 # Speech
 
 L0S has Whistle's path from samples to text, written in L0: its
-container, tokenizer, front end, stem, audio encoder and decoder. Whistle is Cactus Compute's open speech recognition model, whose weights are
+container, tokenizer, front end, stem, audio encoder and decoder; and
+`speech`, a service that hears the microphone while a key is held and
+says the text to the agent ([The speech service](#the-speech-service)). Whistle is Cactus Compute's open speech recognition model, whose weights are
 one file, `whistle.cact` (16.9 MB, Apache-2.0,
 [Hugging Face](https://huggingface.co/Cactus-Compute/whistle)), and
 whose reference is `cactus-needle`
@@ -169,12 +171,98 @@ windows, cut at 26.05 s. There, on one emulated CPU, the model loads in
 37 s and 1.4 s of speech is heard in 6.8 s, 1.3 s in 5.6 s, 4 s in
 16.3 s, 39 s in 201 s.
 
+## The speech service
+
+`speech` ([programs.md](programs.md), `/sbin/speech`, after `agentd` in
+`/etc/system`) says what is said to the board to the agent. It reads
+the model once, as `listen` does, from
+`/Volumes/data/speech/whistle.cact` or `-m MODEL`, waiting up to 10 s
+for the volume to be mounted; with none it says so in the log and exits
+0. It then grabs its key of the compositor (`wm`'s `grab`,
+[desktop.md](desktop.md)), F12 or `-k CODE`, so the key comes to it
+whatever window is in front, registers `speech`, and says in the log
+how long the model took and its key, or why it has none (no `wm`, as on
+a board with no screen).
+
+How a phrase begins and ends:
+
+| | begins | ends |
+|---|---|---|
+| the key held | at its press | at its release |
+| the key tapped, let go within 0.3 s | at its press | once the speaker is quiet, or at the key's next press |
+| `listen`, asked | at once | as a tap's |
+
+Either way a phrase is at most 30 s, what Whistle hears in one pass, and
+is ended there. As it begins, `speech` asks `mic` for `listen 16000`
+([sound.md](sound.md#microphones)), one channel of 16 bits at 16 kHz,
+and gathers its `pcm` notices; as it ends, it asks `stop`, joins them,
+and has `whistle_transcribe` hear them, all at once: Whistle hears a
+clip whole, so its text comes after the phrase, in about the time it
+took to say on a Pi 5.
+
+Quiet is heard by loudness (`endpoint.l0`): each piece of samples, a
+`pcm` notice's 10 ms or so, is weighed by its mean square against the
+quietest piece heard so far, the room's floor. Speech has begun once a
+piece has 16 times the floor's power, and at least a loudness of 250 in
+32768; it has ended once 0.8 s of pieces under 4 times the floor, and at
+least 150, follow it. A tap with no speech in 5 s is dropped, as is a
+phrase under 0.1 s.
+
+The text, its spaces trimmed, is said to `agentd` as `say speech`, so
+the model is told `[from speech, sent by /sbin/speech]` before it
+([agent.md](agent.md#where-a-prompt-came-from)). While a turn runs,
+`agentd` answers `error: busy`: the text is held, and said again each
+second, by the kernel's alarm, until it is taken; a newer phrase takes
+its place. Nothing heard, only spaces, is said to no one.
+
+It serves `speech` ([proto/speech.l0](../user/lib/proto/speech.l0)), each
+a request, its answer to its reply port:
+
+| Request | Answer |
+|---|---|
+| `listen` | `ok`: a phrase begun, as a tap begins one; `error: muted`, or `error: busy` while one is heard |
+| `stop` | `ok`: the phrase ended, as a release ends it |
+| `hear PATH` | `ok` once the WAV file at PATH, 16 kHz, one channel of 16 bits, is heard as a phrase and its text said; or `error: WHY` |
+| `mute on\|off` | `ok`: the key and `listen` heard or not; muting drops a phrase being heard |
+| `open NPORT` | `ok`: where speech stands told to NPORT, and its notices to NPORT from then |
+| `close NPORT` | `ok`: NPORT told no more |
+
+Its notices, to each NPORT open, are `speech idle`, `speech muted`,
+`speech listening`, `speech hearing` (Whistle at work), `speech held`
+(the agent busy), `speech said`, and, after a newline, `speech heard`
+and the text, and `speech error` and why (no microphone, no agent).
+The Agent app ([agent.md](agent.md#agent-the-app)) shows them as a line
+over its entry. `speech listen`, `stop`, `hear PATH` and `mute on|off`,
+given as arguments, ask the service running, waiting a minute for it to
+register, as it reads the model first.
+
+The `speech` e2e case boots it with the model in the initramfs
+(`-m /etc/whistle.cact`), `agentd` and the host's stand-in model:
+`run speech hear /etc/clip.wav`, the Yeti Nano's 4 s, comes to the
+model as `[from speech, sent by /sbin/speech]` and "Testing, testing,
+testing, testing.", and the conversation `agentd` keeps holds both and
+the model's answer. On one emulated CPU the model is read in 40 s.
+
 ## Limits
 
 - The model is not in the project, nor in any initramfs: `make
   release` fetches it from Hugging Face, at a pinned commit and
   SHA-256, into the host's release, and the board has it only once the
-  installer has fetched that onto the data volume. Nothing hears a microphone yet.
+  installer has fetched that onto the data volume.
+- `speech` has heard a microphone through its key on no board yet: the
+  e2e case hears a WAV file by `hear`, with no `wm` and no microphone,
+  QEMU's `usb-audio` being a speaker only.
+- `speech` registers only once the model is read, 14.6 s on a Pi 5 and
+  40 s on QEMU; until then its key goes to it unheard, and the Agent
+  app, which looks for it only as it opens and on Retry, shows no line.
+- A phrase is heard only after it ends, and while it is made text,
+  `speech` hears nothing else: its key and requests wait.
+- The key is one, F12 unless `-k` says another, and the Agent app's
+  line names F12 whatever it is. There is no wake word, and nothing
+  hears all the time.
+- Quiet is weighed by loudness against fixed factors, not by a model of
+  speech: a loud room may keep a tap going to its 30 s.
+- One text is held while the agent is busy; a newer phrase replaces it.
 - The model's matrices are dequantized whole when it is loaded, about
   140 MB of binary32s (the encoder's 6.5 MB a block, the decoder's 8 MB
   a layer, the embedding's 17 MB), a row at a time in scalar code: a

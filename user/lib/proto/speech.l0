@@ -1,0 +1,117 @@
+; speech.l0 -- the speech protocol, as the speech service serves it
+; under the name speech, and its client, the Agent app and speech's
+; own commands. speech hears what is said to the board while its key is
+; held, or after a tap of it until quiet, and says the text to the
+; agent; each is a request (l0s.l0's), its answer to the request's reply
+; port:
+;
+;   listen          ok: a phrase begun, as a tap of the key begins one,
+;                   ended by quiet; error: muted, error: busy while one
+;                   is heard
+;   stop            ok: the phrase ended, as a release of the key ends
+;                   it; nothing if none is heard
+;   hear PATH       ok once heard: the WAV file at PATH (16 kHz, one
+;                   channel of 16 bits) heard as a phrase, its text
+;                   said to the agent; or error: WHY
+;   mute on|off     ok: the key, and listen, heard or not
+;   open NPORT      ok: where speech stands told to NPORT as a notice,
+;                   and its notices to NPORT from then
+;   close NPORT     ok: NPORT told no more
+;
+; and the notices, to each NPORT open, a header line and after a newline
+; what it tells:
+;
+;   speech idle             waiting for the key
+;   speech muted            muted
+;   speech listening        a phrase being heard from the microphone
+;   speech hearing          the phrase being made text, by Whistle
+;   speech heard\nTEXT      what was heard, about to be said
+;   speech held             the agent busy with a turn: the text kept,
+;                           and said once it is not
+;   speech said             the text said to the agent
+;   speech error\nWHY       what went wrong
+;
+; Linked into speech and its clients, as the Makefile's SPEECHLIB.
+
+; The name speech registers.
+(def speech_name () (list int) "speech")
+
+; What a notice tells: where speech stands, and for heard and error,
+; the text or why; or that a message is no notice.
+(data SpeechEvent (SpeechState (list int)) (SpeechHeard bytes) (SpeechError bytes) (SpeechNone))
+
+; ------------------------------------------------------------- notices
+
+; A notice: speech WORD, and if body is given, a newline and body.
+(def speech_notice ((word (list int)) (body (Option bytes))) bytes
+  (let head (append "speech " word)
+    (match body
+      ((None) (bytes_from_list head))
+      ((Some b) (bytes_concat (cons (bytes_from_list (append head "\n")) (cons b (nil bytes))))))))
+
+; The notices of each kind: a state with no body, what was heard, and
+; why something went wrong.
+(def speech_state_notice ((state (list int))) bytes (speech_notice state ((None bytes))))
+(def speech_heard_notice ((text bytes)) bytes (speech_notice "heard" (Some text)))
+(def speech_error_notice ((why bytes)) bytes (speech_notice "error" (Some why)))
+
+; The states a notice with no body may name.
+(def speech_states () (list (list int)) (split_spaces "idle muted listening hearing held said"))
+
+; The first newline in a message's bytes b from i on, or its end.
+(def speech_line_end ((b bytes) (i int)) int
+  (if (ge i (bytes_len b)) i (eq (bytes_get b i) 10) i (speech_line_end b (add i 1))))
+
+; The notice in a message's bytes b, its body read in place, or
+; SpeechNone if it is not one.
+(def speech_event_of ((b bytes)) SpeechEvent
+  (if (not (msg_starts b "speech "))
+      (SpeechNone)
+      (let (at (add (header_len) 7)
+            e (speech_line_end b at)
+            word (bytes_to_list (bytes_slice b at e))
+            body (bytes_slice b (min (add e 1) (bytes_len b)) (bytes_len b)))
+        (if (eq word "heard") (SpeechHeard body)
+            (eq word "error") (SpeechError body)
+            (any_eq word (speech_states)) (SpeechState word)
+            (SpeechNone)))))
+
+; ------------------------------------------------------------- requests
+
+; The requests, as speech reads them: what was asked, its port or path
+; or setting, or why it is none.
+(data SpeechReq (SpListen) (SpStop) (SpHear (list int)) (SpMute bool) (SpOpen int) (SpClose int) (SpWrong (list int)))
+
+; The request the words ws make.
+(def speech_req_of ((ws (list (list int)))) SpeechReq
+  (let (n (length ws)
+        op (if (is_empty ws) "" (head ws))
+        port (and (eq n 2) (is_number (nth ws 1))))
+    (if (and (eq n 1) (eq op "listen")) (SpListen)
+        (and (eq n 1) (eq op "stop")) (SpStop)
+        (and (eq n 2) (eq op "hear")) (SpHear (nth ws 1))
+        (and (eq n 2) (and (eq op "mute") (eq (nth ws 1) "on"))) (SpMute true)
+        (and (eq n 2) (and (eq op "mute") (eq (nth ws 1) "off"))) (SpMute false)
+        (and port (eq op "open")) (SpOpen (int_prefix (nth ws 1) 0))
+        (and port (eq op "close")) (SpClose (int_prefix (nth ws 1) 0))
+        (SpWrong "not listen, stop, hear PATH, mute on|off, open NPORT or close NPORT"))))
+
+; The requests' bodies, as a client sends them.
+(def speech_open_body ((nport int)) (list int) (append "open " (digits nport)))
+(def speech_close_body ((nport int)) (list int) (append "close " (digits nport)))
+(def speech_hear_body ((path (list int))) (list int) (append "hear " path))
+(def speech_mute_body ((on bool)) (list int) (if on "mute on" "mute off"))
+
+; ---------------------------------------------------------- the client
+
+; body asked of speech, waited for up to ns for it to register, the
+; answer to rp: empty if ok, else why not.
+(def speech_ask ((rp int) (body (list int)) (ns int)) (list int)
+  (match (name_wait (speech_name) ns)
+    ((NotFound) "speech is not running")
+    ((Found port)
+      (match (port_ask port rp body "speech")
+        ((AskFailed why) why)
+        ((Asked from b)
+          (let a (msg_text b)
+            (if (eq a "ok") (nil int) (starts_with a "error: ") (drop a 7) (append "speech said " a))))))))

@@ -23,7 +23,10 @@
 # text. If NAME/filler holds DIRS FILES, the case's etc gets DIRS
 # directories of FILES small files each, /etc/filler/dD/fF, for a
 # volume filled from the initramfs to hold many files besides its
-# programs. If NAME/disk exists, the
+# programs. If NAME/whistle exists, Whistle's model, WHISTLE or else
+# build/fetch/whistle.cact, which make release fetches, is added to the
+# case's etc as /etc/whistle.cact; with neither, the case is skipped, as
+# the model is not in the project. If NAME/disk exists, the
 # board has a virtio-blk too, a fresh disk tools/mkdisk makes for the
 # case: of its own layout, if NAME/layout holds one, SECTORS then each
 # volume as mkfs takes them, in which @ is the case's own initramfs, to
@@ -164,6 +167,17 @@ run_case() {
       mkdir -p "$etc/filler/d$d"
       for ((f = 0; f < files; f++)); do echo "$d $f" > "$etc/filler/d$d/f$f"; done
     done
+  fi
+  if [ -f "$dir/whistle" ]; then
+    local model=${WHISTLE:-$BUILD/fetch/whistle.cact}
+    if [ ! -f "$model" ]; then
+      echo "ok - $name # skip: no model (WHISTLE=PATH/whistle.cact)"; return
+    fi
+    if [ "$etc" = "$dir/etc" ]; then
+      etc="$BUILD/e2e/$name.etc"
+      rm -rf "$etc" && cp -R "$dir/etc" "$etc"
+    fi
+    cp "$model" "$etc/whistle.cact"
   fi
   if ! tools/mkinitramfs "$cpio" "$etc" "$BUILD/root" "${asms[@]}"; then
     echo "not ok - $name: mkinitramfs failed"; return

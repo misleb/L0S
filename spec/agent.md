@@ -281,6 +281,16 @@ said in red. With no `agentd` registered, or once it stops answering,
 the window is a page, "The Agent Is Not Running", and Retry looks
 again.
 
+If `speech` serves as the window opens (or at Retry), the window opens
+it too, its notices on a second port of its own
+([speech.md](speech.md#the-speech-service)), and shows a dimmed line
+between the panes and the entry: "Hold F12 to talk to the agent." while
+it waits, "Listening..." while the key is held, "Hearing what was
+said..." while Whistle works, "Heard: " and the text, with " (said once
+this turn ends)" after it while a turn runs and `speech` holds it,
+"Speech is muted.", or "Speech: " and why something failed. A turn
+`speech` says comes like any other, `said` from the source `speech`.
+
 ## The conversation
 
 [conv.l0](../user/sbin/agentd/conv.l0), pure. A conversation is its
@@ -507,7 +517,8 @@ connection, and the proxy ends the session.
 ## Limits
 
 - One conversation, and one turn of it at a time; a `say` while one
-  runs is `error: busy`, from any client.
+  runs is `error: busy`, from any client. `speech` alone holds its text
+  and says it again; the console and the app say the refusal.
 - The kept conversation is written whole at each request and each
   turn's end, and so grows to what compaction lets it, about the
   compaction size's tokens as JSON. A turn cut short loses what came

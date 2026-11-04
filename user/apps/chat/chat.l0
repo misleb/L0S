@@ -11,8 +11,11 @@
 ; if it failed, that a press opens on its input and result.
 ; An entry along its foot says a line with Enter or Send; while a turn
 ; runs, Stop stops it. With no agentd it says so, and Retry looks again.
+; If speech serves (proto/speech.l0) as it opens, a line over the entry
+; says what speech is doing: waiting for its key, listening, what it
+; heard, and that it holds the text while a turn runs.
 ;
-;   chat          its window, until it is closed
+;   chat         its window, until it is closed
 ;
 ; Each step asks without waiting (ui_win_ask): open, say and stop are
 ; answered as replies, tagged, and the notices come on a port of its
@@ -26,12 +29,13 @@
 ; The most rows the entry grows to as what is typed wraps.
 (def entry_rows () int 6)
 
-; The replies' tags: to open, to say, to stop, and a file server's,
-; reading an image.
+; The replies' tags: to open, to say, to stop, a file server's, reading
+; an image, and speech's, to open it.
 (def tag_open () int 1)
 (def tag_say () int 2)
 (def tag_stop () int 3)
 (def tag_file () int 4)
+(def tag_speech () int 5)
 
 ; The side pane's keys, as its toggles name them.
 (def pane_tools () (list int) "Tools")
@@ -82,13 +86,33 @@
 ; newest first; the entry; whether a turn runs; each pane's first row
 ; shown (-1 its end); how many tools it has shown; the side pane shown,
 ; tools or images; the images, newest first, and the path of the one
-; shown; the image being read, and whether its ask is out.
+; shown; the image being read, and whether its ask is out. Then the
+; port speech's notices come to (0 until made), and the line saying
+; what speech is doing (empty with no speech).
 (data Chat (Chat (link Link) (port int) (np int) (items (list Item)) (log (list Item)) (entry UiEntryText) (busy bool) (first int) (tfirst int) (tools int)
-                 (pane (list int)) (shots (list Shot)) (shown (list int)) (fetch Fetch) (asked bool)))
+                 (pane (list int)) (shots (list Shot)) (shown (list int)) (fetch Fetch) (asked bool) (sp int) (voice (list int))))
 
 ; The app at first: not yet linked, nothing shown, the tools' pane.
 (def chat_new () Chat
-  (Chat (Linking) 0 0 (nil Item) (nil Item) (UiEntryText "" 0) false -1 -1 0 (pane_tools) (nil Shot) "" (FetchNone) false))
+  (Chat (Linking) 0 0 (nil Item) (nil Item) (UiEntryText "" 0) false -1 -1 0 (pane_tools) (nil Shot) "" (FetchNone) false 0 ""))
+
+; ---------------------------------------------------------------- speech
+
+; The line under the transcript after speech's notice e, in place of v:
+; where it stands, what it heard, or what went wrong.
+(def voice_line ((v (list int)) (e SpeechEvent)) (list int)
+  (match e
+    ((SpeechState s)
+      (if (eq s "idle") "Hold F12 to talk to the agent."
+          (eq s "muted") "Speech is muted."
+          (eq s "listening") "Listening..."
+          (eq s "hearing") "Hearing what was said..."
+          (eq s "held") (append v " (said once this turn ends)")
+          (eq s "said") "Hold F12 to talk to the agent."
+          v))
+    ((SpeechHeard t) (append "Heard: " (bytes_to_list t)))
+    ((SpeechError why) (append "Speech: " (bytes_to_list why)))
+    ((SpeechNone) v)))
 
 ; --------------------------------------------------------------- notices
 
@@ -372,7 +396,7 @@
 
 ; The transcript beside the tools' log, and the entry under both,
 ; placeholder its words while empty, with Send, or Stop while a turn
-; runs.
+; runs; and over the entry, while speech serves, what it is doing.
 (def talk_view ((c Chat) (placeholder (list int))) UiWidget
   (UiBox (UiV) 0
     (cons (UiExpand
@@ -381,11 +405,16 @@
                 (cons (UiSeparator (UiV))
                   (cons (UiExpand (UiShrinks (side_view c))) (nil UiWidget))))))
           (cons (UiSeparator (UiH))
-                (cons (UiPad (ui_space_m) (ui_space_m)
-                        (UiBox (UiH) (ui_space_s)
-                          (cons (UiExpand (UiTextArea (entry_name) (.entry c) placeholder 200 (entry_rows)))
-                                (cons (talk_button c) (nil UiWidget)))))
-                      (nil UiWidget))))))
+                (voice_onto (.voice c)
+                  (cons (UiPad (ui_space_m) (ui_space_m)
+                          (UiBox (UiH) (ui_space_s)
+                            (cons (UiExpand (UiTextArea (entry_name) (.entry c) placeholder 200 (entry_rows)))
+                                  (cons (talk_button c) (nil UiWidget)))))
+                        (nil UiWidget)))))))
+
+; Speech's line v, dimmed, onto ws; nothing while it is empty.
+(def voice_onto ((v (list int)) (ws (list UiWidget))) (list UiWidget)
+  (if (is_empty v) ws (cons (UiPad (ui_space_m) (ui_space_s) (UiLabel v (UiDimmed) (UiStart))) ws)))
 
 ; The side pane: Tools and Images, a toggle each, the one pressed
 ; shown under them, the other hidden.
@@ -481,9 +510,12 @@
 (def came ((c Chat) (ev UiEvent)) Chat
   (match (ui_port_of ev)
     ((UiOnPort p m)
-      (if (not (eq p (.np c)))
-          c
-          (match m ((RecvFailed) c) ((Message from b) (heard c (agent_event_of b))))))
+      (match m
+        ((RecvFailed) c)
+        ((Message from b)
+          (if (eq p (.np c)) (heard c (agent_event_of b))
+              (and (gt (.sp c) 0) (eq p (.sp c))) (.voice c (voice_line (.voice c) (speech_event_of b)))
+              c))))
     ((UiNoPort)
       (match (ui_reply_of ev)
         ((UiNoReply) c)
@@ -494,7 +526,15 @@
 ; refusals are noted, a say's ending the turn it would have begun; no
 ; answer at all means agentd is gone.
 (def answered ((c Chat) (tag int) (m Message)) Chat
-  (if (eq tag (tag_file)) (file_answered c m) (agent_answered c tag m)))
+  (if (eq tag (tag_file)) (file_answered c m)
+      (eq tag (tag_speech)) (speech_answered c m)
+      (agent_answered c tag m)))
+
+; speech's answer to open: if it refused, or has gone, no line.
+(def speech_answered ((c Chat) (m Message)) Chat
+  (match m
+    ((RecvFailed) (.voice c ""))
+    ((Message from b) (if (msg_is b "ok") c (.voice c "")))))
 
 ; answered for agentd's answers.
 (def agent_answered ((c Chat) (tag int) (m Message)) Chat
@@ -509,17 +549,27 @@
 
 ; agentd looked for: its conversation opened, its notices to the app's
 ; port, made once, and the transcript emptied for what it tells; or,
-; with no agentd, why not.
+; with no agentd, why not. speech looked for too, and if it serves,
+; opened, its notices to a port of their own.
 (def linking ((w UiWin) (c Chat)) (UiStepped Chat)
   (match (name_lookup "agent")
     ((NotFound) (UiStepped w (.link c (Unlinked (no_agentd)))))
     ((Found port)
-      (let np (if (gt (.np c) 0) (.np c) (port_new))
-        (if (lt np 0)
+      (let (np (if (gt (.np c) 0) (.np c) (port_new))
+            sp (if (gt (.sp c) 0) (.sp c) (port_new)))
+        (if (or (lt np 0) (lt sp 0))
             (UiStepped w (.link c (Unlinked "No port to hear the agent on.")))
-            (let (w2 (ui_win_ports w (cons np (nil int)))
-                  w3 (ui_win_ask w2 (tag_open) port (agent_open_body np)))
-              (UiStepped w3 (.np (.port (.tools (.tfirst (.first (.busy (.log (.items (.link c (Linking)) (nil Item)) (nil Item)) false) -1) -1) 0) port) np))))))))
+            (let (w2 (ui_win_ports w (cons np (cons sp (nil int))))
+                  w3 (ui_win_ask w2 (tag_open) port (agent_open_body np))
+                  c2 (.sp (.np (.port (.tools (.tfirst (.first (.busy (.log (.items (.link c (Linking)) (nil Item)) (nil Item)) false) -1) -1) 0) port) np) sp))
+              (speech_linking w3 c2)))))))
+
+; speech looked for, and opened if it serves, its notices to c's sp; its
+; line empty until it says where it stands.
+(def speech_linking ((w UiWin) (c Chat)) (UiStepped Chat)
+  (match (name_lookup (speech_name))
+    ((NotFound) (UiStepped w (.voice c "")))
+    ((Found port) (UiStepped (ui_win_ask w (tag_speech) port (speech_open_body (.sp c))) (.voice c "")))))
 
 ; Why the window is unlinked when no agentd serves the agent.
 (def no_agentd () (list int)

@@ -1,0 +1,81 @@
+; endpoint.l0 -- when someone has stopped speaking, heard from the
+; microphone's samples as they come (16 kHz, one channel of 16 bits,
+; mic's pcm notices): each piece's loudness, its mean square, weighed
+; against the quietest piece heard so far, the room's floor. Speech has
+; begun once a piece is 16 times the floor's power (4 times its
+; loudness), and has ended once 0.8 s of pieces under 4 times it follow.
+; Both have a least, so a silent room does not make a breath speech.
+; What speech uses after a tap of its key, to end the phrase itself.
+
+; An endpointer: the samples heard, the floor's power (-1 before any
+; piece), whether speech has begun, and how many samples have been
+; quiet since it last was heard.
+(data Endpoint (Endpoint (heard int) (floor int) (spoke bool) (quiet int)))
+
+; What the samples so far say: still going; speech heard and ended; no
+; speech in endpoint_wait; or the most one phrase holds heard.
+(data Verdict (EpGoing) (EpEnded) (EpSilent) (EpFull))
+
+; The endpointer before any sample.
+(def endpoint_new () Endpoint (Endpoint 0 -1 false 0))
+
+; How much louder than the floor a piece is to be speech, and under how
+; much it is quiet, as multiples of its power; and the least power of
+; each, a loudness of 250 and of 150 in 32768.
+(def ep_speech_factor () int 16)
+(def ep_quiet_factor () int 4)
+(def ep_speech_least () int 62500)
+(def ep_quiet_least () int 22500)
+
+; How long the quiet after speech is that ends it, 0.8 s; how long a
+; tap waits for speech to begin, 5 s; and the most one phrase holds,
+; 30 s, what Whistle hears in one pass: all in samples at 16 kHz.
+(def endpoint_hush () int 12800)
+(def endpoint_wait () int 80000)
+(def endpoint_most () int 480000)
+
+; The mean square of the 16-bit samples of b from i up to j, read in
+; place; 0 for none.
+(def ep_power ((b bytes) (i int) (j int)) int
+  (let n (div (sub j i) 2)
+    (if (le n 0) 0 (div (ep_squares b i (add i (mul 2 n)) 0) n))))
+
+; ep_power's sum, from k up to e.
+(def ep_squares ((b bytes) (k int) (e int) (acc int)) int
+  (if (ge k e)
+      acc
+      (let (u (le_u16_at b k)
+            v (if (ge u 32768) (sub u 65536) u))
+        (ep_squares b (add k 2) e (add acc (mul v v))))))
+
+; The power a piece is speech at, and under which it is quiet, for the
+; floor f.
+(def ep_speech_at ((f int)) int (max (ep_speech_least) (mul (ep_speech_factor) f)))
+(def ep_quiet_at ((f int)) int (max (ep_quiet_least) (mul (ep_quiet_factor) f)))
+
+; e after the piece of samples of b from i up to j: the floor lowered
+; to it if it is quieter, speech begun if it is loud, and the quiet
+; counted, or begun anew if it is not quiet.
+(def endpoint_fed ((e Endpoint) (b bytes) (i int) (j int)) Endpoint
+  (let (n (div (sub j i) 2)
+        p (ep_power b i j)
+        f (if (or (lt (.floor e) 0) (lt p (.floor e))) p (.floor e))
+        loud (ge p (ep_speech_at f))
+        spoke (or (.spoke e) loud)
+        quiet (if (and spoke (lt p (ep_quiet_at f))) (add (.quiet e) n) 0))
+    (Endpoint (add (.heard e) n) f spoke quiet)))
+
+; What e says of the samples so far.
+(def endpoint_verdict ((e Endpoint)) Verdict
+  (if (ge (.heard e) (endpoint_most)) (EpFull)
+      (and (.spoke e) (ge (.quiet e) (endpoint_hush))) (EpEnded)
+      (and (not (.spoke e)) (ge (.heard e) (endpoint_wait))) (EpSilent)
+      (EpGoing)))
+
+; A verdict as a word, for the tests and the log.
+(def verdict_text ((v Verdict)) (list int)
+  (match v
+    ((EpGoing) "going")
+    ((EpEnded) "ended")
+    ((EpSilent) "silent")
+    ((EpFull) "full")))

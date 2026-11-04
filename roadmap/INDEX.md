@@ -43,8 +43,9 @@ move independently, so several can be active at once.
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
 | [0057](0057-tz-database.md) Any time zone, by the tz database's rules | Desktop | idea | – | 0029 | desktop.md, fat32.md, programs.md |
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
-| [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | idea | – | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, programs.md, testing.md |
+| [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | active | 5/6 | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, desktop.md, programs.md, demo.md, testing.md |
 | [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | ready | 0/7 | – | speech.md, sound.md, programs.md, testing.md |
+| [0067](0067-speech-as-spoken.md) Speech heard as it is spoken | Agent | idea | – | 0061 | speech.md, agent.md |
 ## Ready
 
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its
@@ -54,6 +55,11 @@ tokens from a WAV file on the host), and `listen` gives the
 reference's text on QEMU (`tests/listen.sh`) on four clips, one of
 39 s heard in windows, and on a Pi 5 heard 5 s of the Yeti's speech in
 5.5 s; a 10 s clip timed on the Pi 5 is next.
+[0061](0061-speech-service.md), the speech service, is active: `speech`
+hears `mic` while F12 is held, or after a tap until quiet, and says
+Whistle's text to `agentd`, held while a turn runs; the Agent app shows
+what it is doing, and the `speech` e2e case says a WAV file to the
+agent on QEMU. A spoken question answered on a Pi 5 is next.
 [0062](0062-text-to-speech.md), Piper's voices in L0, is ready: its
 first step chooses the voice and writes the oracle on the host.
 Every
@@ -95,6 +101,7 @@ graph LR
   0058 --> 0061[0061 speech service]
   0059[0059 USB microphone] --> 0061
   0060[0060 Whistle in L0] --> 0061
+  0061 --> 0067[0067 speech as spoken]
   0041 --> 0048[0048 TLS client]
   0047[0047 Pi 5 random] --> 0048
 ```

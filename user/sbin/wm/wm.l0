@@ -399,9 +399,13 @@
 ; The bar's canvas, the clock's pid, and the time it last said, each -1
 ; for none: with no clock running, the bar shows no time; and the zone
 ; the clock said the time is shown in. Then the apps there are, which
-; the launcher shows, the launcher, the L0S menu, and the launches wm
-; waits on (launching.l0).
-(data Bar (Bar (c Canvas) (clock int) (t int) (zone ClockZone) (apps (list App)) (launcher Launcher) (menu Menu) (launches (list Launch))))
+; the launcher shows, the launcher, the L0S menu, the launches wm
+; waits on (launching.l0), and the keys clients have grabbed.
+(data Bar (Bar (c Canvas) (clock int) (t int) (zone ClockZone) (apps (list App)) (launcher Launcher) (menu Menu) (launches (list Launch)) (grabs (list Grab))))
+
+; A key grabbed: its Linux code, the port its presses and releases go
+; to, and the pid of the client that grabbed it, whose exit lets it go.
+(data Grab (Grab (code int) (port int) (pid int)))
 
 ; Applications: its label, and how wide the bar's button for it is, 12
 ; either side. It starts after the logo's button, menu_logo_w in.
@@ -450,11 +454,11 @@
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match bar
-        ((Bar c cp t z apps l m ls)
+        ((Bar c cp t z apps l m ls gs)
           (let (shown (launcher_shown l)
                 p (ui_paint c font (Rect 0 0 w (bar_h)) (bar_ops w shown (menu_shown m) (bar_title ws shown) (bar_clock_text t z)))
                 e (display_damage d (bar_id) (Rect 0 0 w (bar_h))))
-            (Wm d cl w h desk font bg ws n ptr drag kp pp (Bar p cp t z apps l m ls))))))))
+            (Wm d cl w h desk font bg ws n ptr drag kp pp (Bar p cp t z apps l m ls gs))))))))
 
 ; The clock's notice that a minute has begun: the bar shows it. Once the
 ; zone no longer holds, the clock is asked on port for the new one,
@@ -647,7 +651,7 @@
         (if (not (is_empty e2))
             (complain e2)
             (listening (Wm d (nil Closing) w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1 ((MapEmpty int (list int))) "" (TitleClick -1 0)) (NoDrag) 0 0
-                           (Bar c -1 -1 (zone_utc) (app_bundles) (NoLauncher) (NoMenu) (nil Launch)))))))))
+                           (Bar c -1 -1 (zone_utc) (app_bundles) (NoLauncher) (NoMenu) (nil Launch) (nil Grab)))))))))
 
 ; Listens to the keyboard, the pointer and the clock, then serves
 ; compositor.
@@ -727,8 +731,8 @@
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag ok op bar)
       (match bar
-        ((Bar bc ocp secs oz apps l m ls)
-          (match c ((Clocked cp t z) (Wm d cl w h desk font bg ws n ptr drag k p (Bar bc cp t z apps l m ls)))))))))
+        ((Bar bc ocp secs oz apps l m ls gs)
+          (match c ((Clocked cp t z) (Wm d cl w h desk font bg ws n ptr drag k p (Bar bc cp t z apps l m ls gs)))))))))
 
 ; --------------------------------------------------------------- serving
 
@@ -851,11 +855,13 @@
             ((None) v)))))))
 
 ; A key, its message's bytes b, to the window in front, passed on as it
-; came; or the launcher's, while it is shown.
+; came; or the launcher's, while it is shown; or, if a client grabbed
+; it, to that client's port, as it came, whatever is shown.
 (def keyed ((v Wm) (b bytes)) Wm
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
-      (if (menu_shown (.menu bar)) (menu_keyed v (key_event_of (Message kp b)))
+      (if (grab_kept (.grabs bar) (key_event_of (Message kp b)) b) v
+          (menu_shown (.menu bar)) (menu_keyed v (key_event_of (Message kp b)))
           (launcher_shown (.launcher bar)) (launcher_keyed v (key_event_of (Message kp b)))
           (match (key_window ws)
             ((None) v)
@@ -954,6 +960,7 @@
       (and (eq op "csd") (ge (length args) 4)) (window_came (opened v from ns (unwords (drop args 4)) (ClientSide)) from)
       (eq op "damage") (requested_damage v args)
       (and (or (eq op "place") (eq op "paste")) (eq (length args) 5)) (requested_five v op args)
+      (and (eq op "grab") (eq (length args) 2)) (grab_asked v from (nth ns 0) (nth ns 1))
       (requested_of_one v from op ns args)))
 
 ; A window or csd request served, s, for from: if it opened the window,
@@ -1693,7 +1700,61 @@
 (def gone ((v Wm) (pid int)) Wm
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
-      (close_all (with_launches v (launches_gone (.launches bar) pid)) (of_pid ws pid)))))
+      (close_all (with_grabs (with_launches v (launches_gone (.launches bar) pid)) (grabs_gone (.grabs bar) pid)) (of_pid ws pid)))))
+
+; ------------------------------------------------------------ grabbed keys
+
+; grab CODE PORT, from from: the key of Linux code CODE, pressed and
+; released, sent to PORT as it came, whatever window is in front and
+; whether the launcher or the menu is shown, until from exits, as
+; speech's key to talk is; refused if another client has it. from
+; grabbing it again moves it to PORT.
+(def grab_asked ((v Wm) (from int) (code int) (port int)) (Served Wm)
+  (let gs (wm_grabs v)
+    (match (grab_for gs code)
+      ((Some g)
+        (if (eq (.pid g) from)
+            (okay (with_grabs v (cons (Grab code port from) (grabs_without gs code))))
+            (refused v (append "key " (append (digits code) " is grabbed")))))
+      ((None)
+        (if (or (lt code 0) (gt code (grab_code_most)))
+            (refused v "no such key")
+            (match (watch_client v from)
+              ((Watched) (okay (with_grabs v (cons (Grab code port from) gs))))
+              ((WatchNoProc) (refused v "the client has gone"))
+              ((WatchFull) (refused v "too many ports watch the client"))))))))
+
+; The highest key code a grab may name, Linux's KEY_MAX.
+(def grab_code_most () int 767)
+
+; The keys grabbed.
+(def wm_grabs ((v Wm)) (list Grab) (match v ((Wm d cl w h desk font bg ws n ptr drag kp pp bar) (.grabs bar))))
+
+; v with gs the keys grabbed.
+(def with_grabs ((v Wm) (gs (list Grab))) Wm
+  (match v
+    ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
+      (Wm d cl w h desk font bg ws n ptr drag kp pp (.grabs bar gs)))))
+
+; The grab of the key code, if any.
+(def grab_for ((gs (list Grab)) (code int)) (Option Grab)
+  (if (is_empty gs) ((None Grab)) (eq (.code (head gs)) code) (Some (head gs)) (grab_for (tail gs) code)))
+
+; gs but the grab of code, and but those of pid.
+(def grabs_without ((gs (list Grab)) (code int)) (list Grab)
+  (if (is_empty gs) gs (eq (.code (head gs)) code) (grabs_without (tail gs) code) (cons (head gs) (grabs_without (tail gs) code))))
+(def grabs_gone ((gs (list Grab)) (pid int)) (list Grab)
+  (if (is_empty gs) gs (eq (.pid (head gs)) pid) (grabs_gone (tail gs) pid) (cons (head gs) (grabs_gone (tail gs) pid))))
+
+; Whether the key k, its message's bytes b, is grabbed: if it is, sent
+; to its grab's port as it came.
+(def grab_kept ((gs (list Grab)) (k (Option KeyEvent)) (b bytes)) bool
+  (match k
+    ((None) false)
+    ((Some e)
+      (match (grab_for gs (.code e))
+        ((None) false)
+        ((Some g) (let s (port_forward (.port g) b) true))))))
 
 (def close_all ((v Wm) (ws (list Win))) Wm
   (if (is_empty ws) v (match (closed v (.id (head ws))) ((Served v2 r) (close_all v2 (tail ws))))))
