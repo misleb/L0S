@@ -5,13 +5,13 @@
 
 (def app_win ((i int) (x int) (y int) (app (list int))) Win
   (Win i 9 7 x y 100 50 0 (append "w" (digits i)) (Canvas (IoRegion 0) 104 98 0) 3892314112 3892346880
-       (Bufs 5 4026531840 100 10 4026552320 false 0 (NoSpare) 0) app (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ServerSide)))
+       (Bufs 5 4026531840 100 10 4026552320 false 0 (nil Spare) 0) app (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ServerSide)))
 
 ; The same window, but its client decorates it: no chrome, and its
 ; content at x, y.
 (def csd_win ((i int) (x int) (y int)) Win
   (Win i 9 7 x y 100 50 0 (append "c" (digits i)) (canvas_new 0 0 0) 3892314112 0
-       (Bufs 5 4026531840 100 0 0 false 0 (NoSpare) 0) "" (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ClientSide)))
+       (Bufs 5 4026531840 100 0 0 false 0 (nil Spare) 0) "" (Sizing 0 0 100 50 false (rect_none) (rect_none)) (ClientSide)))
 
 ; Which of ws want a frame, as their ids, and which do not.
 (def wanting ((ws (list Win))) (list int)
@@ -296,11 +296,17 @@
         ((Bufs cn dcva csd tn dtva fw ck sp nt)
           (Win id port pid x y cw ch top title tc cva tva (Bufs cn dcva csd tn dtva fw kc sp nt) app (Sizing k 0 cw ch false (rect_none) (rect_none)) dc))))))
 
-; Window 2 with another buffer attached at 0xE9000000, 5 pages, as wm
-; keeps it until a damage commits it.
+; Window 2 with another buffer attached at 0xE9000000, 5 pages, in bank
+; 1, as wm keeps it until a damage commits it.
 (def pending_win () Win
   (let w (win 2 0 0)
-    (.bufs w (.spare (.bufs w) (Spare 3909091328 5 4026600000 100 100 50 true)))))
+    (.bufs w (.spares (.bufs w) (cons (Spare 3909091328 5 4026600000 100 100 50 true 1) (nil Spare))))))
+
+; The same with a third buffer before it, at 0xE9100000, released, in
+; bank 2, as a client keeps while its window is resized.
+(def third_win () Win
+  (let w (pending_win)
+    (.bufs w (.spares (.bufs w) (cons (Spare 3910139904 5 4026700000 100 100 50 false 2) (.spares (.bufs w)))))))
 
 ; A commit shows the attached buffer: its address the content's, under
 ; the other bank, 4 + 4·2 + 2 = 14; the one shown before kept as the
@@ -309,8 +315,29 @@
   (let w2 (win_swapped (pending_win))
     (add (check_int "content" (.cva w2) 3909091328)
          (add (check_int "its id" (win_content_id w2) 14)
-              (add (check_int "the other's id" (win_spare_id w2) 12)
+              (add (check_int "the other's id" (spare_id w2 (head (.spares (.bufs w2)))) 12)
                    (check_bool "not attached" (win_pending w2) false))))))
+
+; With three buffers, a commit keeps the third where it was, the oldest,
+; and the one shown before after it; the damage goes to the attached one.
+(def test_win_swapped_third () int
+  (let (w (third_win)
+        w2 (win_swapped w))
+    (add (check_int "damage to the attached" (win_damage_id w) 14)
+         (add (check_str "others" (spares_text w2) "200002 12 ")
+              (check_int "no bank free" (bank_free w) -1)))))
+
+; The ids of w's other buffers, in order, for a test.
+(def spares_text ((w Win)) (list int) (spare_ids_text w (.spares (.bufs w))))
+(def spare_ids_text ((w Win) (sps (list Spare))) (list int)
+  (if (is_empty sps) "" (append (digits (spare_id w (head sps))) (append " " (spare_ids_text w (tail sps))))))
+
+; The third bank's ids are third_id's, by window; a window with one other
+; buffer has the third bank free.
+(def test_third_bank () int
+  (add (check_int "window 2's third" (content_id 2 2) 200002)
+       (add (check_int "bank 1's" (content_id 2 1) 14)
+            (check_int "free" (bank_free (pending_win)) 2))))
 
 ; A window with nothing attached stays as it is.
 (def test_win_swapped_none () int
@@ -323,11 +350,26 @@
        (check_bool "none" (any_pending (cons (win 1 0 0) (nil Win))) false)))
 
 ; A resize into the other buffer keeps the content it had as the other
-; buffer, of its size then; one into the buffer it has keeps none.
+; buffer, of its size then, in its bank; one into the buffer it has
+; keeps none.
 (def test_resized_bufs () int
-  (let obf (.bufs (pending_win))
-    (add (check_int "kept" (spare_va (.spare (resized_bufs obf 3892314112 100 50 3909091328 5 4026600000 100 10 4026552320))) 3892314112)
-         (check_int "in place" (spare_va (.spare (resized_bufs obf 3892314112 100 50 3892314112 5 4026531840 100 10 4026552320))) -1))))
+  (let (obf (.bufs (pending_win))
+        kept (resized_bufs obf 3892314112 100 50 3909091328 5 4026600000 100 10 4026552320 (Banked 1 (nil Spare)))
+        moved (resized_bufs obf 3892314112 100 50 3892314112 5 4026531840 100 10 4026552320 (Banked 1 (nil Spare))))
+    (add (check_int "kept" (.va (head (.spares kept))) 3892314112)
+         (add (check_int "its bank" (.bank (head (.spares kept))) 0)
+              (add (check_int "the content's" (.bank kept) 1)
+                   (check_int "in place" (length (.spares moved)) 0))))))
+
+; A client that paces itself keeps the content it had though it gave up
+; its other buffers (detach), as it asked for its frame before resizing;
+; one painting a single buffer, asking none, has it given up.
+(def test_resized_bufs_paced () int
+  (let (bf (.bufs (win 2 0 0))
+        paced (resized_bufs (.frame bf true) 3892314112 100 50 3909091328 5 4026600000 100 10 4026552320 (Banked 1 (nil Spare)))
+        single (resized_bufs bf 3892314112 100 50 3909091328 5 4026600000 100 10 4026552320 (Banked 1 (nil Spare))))
+    (add (check_int "kept" (length (.spares paced)) 1)
+         (check_int "single" (length (.spares single)) 0))))
 
 (def test_layers_top () int
   (check_str "the content's row"

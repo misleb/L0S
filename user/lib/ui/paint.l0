@@ -462,18 +462,33 @@
       c
       (or (lt (add y r) (.y k)) (ge (add y r) (rect_y1 k)))
       (ui_strike_rows c k g x y at w wpr (add r 1) n color)
-      (ui_strike_rows (ui_strike_words c k g x (add y r) (add at (mul 8 (mul r wpr))) w 0 wpr color)
+      (ui_strike_rows (ui_strike_words c (ui_px_row c k (add y r)) g x (add at (mul 8 (mul r wpr))) w 0 wpr color)
                       k g x y at w wpr (add r 1) n color)))
 
-; Words j on of a glyph's row at at, at y from x, 16 pixels each, the
-; last only as many as the glyph is wide; a word of nothing covered is
-; skipped.
-(def ui_strike_words ((c Canvas) (k Rect) (g UiStrike) (x int) (y int) (at int) (w int) (j int) (wpr int) (color int)) Canvas
+; Words j on of a glyph's row at at, in row from column x, 16 pixels
+; each, the last only as many as the glyph is wide; a word of nothing
+; covered, or wholly outside the row's columns, is skipped.
+(def ui_strike_words ((c Canvas) (row UiPxRow) (g UiStrike) (x int) (at int) (w int) (j int) (wpr int) (color int)) Canvas
   (if (ge j wpr)
       c
-      (let word (ui_strike_u64 g (add at (mul 8 j)))
-        (ui_strike_words (if (eq word 0) c (ui_cov_word c k word (add x (mul j 16)) y (min 16 (sub w (mul j 16))) 0 color))
-                         k g x y at w (add j 1) wpr color))))
+      (let (word (ui_strike_u64 g (add at (mul 8 j)))
+            wx (add x (mul j 16))
+            n (min 16 (sub w (mul j 16))))
+        (ui_strike_words (if (ui_word_skipped row word wx n) c (ui_cov_word c row word wx n 0 color))
+                         row g x at w (add j 1) wpr color))))
+
+; A row of the canvas a glyph or table is drawn along: the index of its
+; column 0, and the columns from lo up to hi it may be drawn in, the
+; clip's. Found once a row, so each pixel is put by its index.
+(data UiPxRow (UiPxRow (base int) (lo int) (hi int)))
+
+; Row y of c, cut to k's columns.
+(def ui_px_row ((c Canvas) (k Rect) (y int)) UiPxRow (UiPxRow (row_start c y) (.x k) (rect_x1 k)))
+
+; Whether a word of n levels from column x leaves row as it is: nothing
+; covered, or none of its columns in the row's.
+(def ui_word_skipped ((row UiPxRow) (word int) (x int) (n int)) bool
+  (or (eq word 0) (or (ge x (.hi row)) (le (add x n) (.lo row)))))
 
 ; Rows row0 on, n of them, of a table of coverage, its top left at x, y:
 ; each pixel the color, mixed with what is under it by how much is
@@ -488,35 +503,62 @@
       c
       (or (lt (add y r) (.y k)) (ge (add y r) (rect_y1 k)))
       (ui_cov_rows c k cov x y row0 (add r 1) n color)
-      (ui_cov_rows (ui_cov_words c k cov x (add y r) (add row0 r) 0 color) k cov x y row0 (add r 1) n color)))
+      (ui_cov_rows (ui_cov_words c (ui_px_row c k (add y r)) cov x (add row0 r) 0 color) k cov x y row0 (add r 1) n color)))
 
-; Words j on of the table's row row, at y from x, 16 pixels each, the
-; last only as many as the table is wide; a word of nothing covered is
-; skipped.
-(def ui_cov_words ((c Canvas) (k Rect) (cov UiCov) (x int) (y int) (row int) (j int) (color int)) Canvas
+; Words j on of the table's row tr, in row from column x, 16 pixels
+; each, the last only as many as the table is wide; a word of nothing
+; covered, or wholly outside the row's columns, is skipped.
+(def ui_cov_words ((c Canvas) (row UiPxRow) (cov UiCov) (x int) (tr int) (j int) (color int)) Canvas
   (match cov
     ((UiCov w h words)
       (let wpr (ui_cov_wpr w)
         (if (ge j wpr)
             c
-            (let word (array_get words (add (mul row wpr) j))
-              (ui_cov_words (if (eq word 0) c (ui_cov_word c k word (add x (mul j 16)) y (min 16 (sub w (mul j 16))) 0 color))
-                            k cov x y row (add j 1) color)))))))
+            (let (word (array_get words (add (mul tr wpr) j))
+                  wx (add x (mul j 16))
+                  n (min 16 (sub w (mul j 16))))
+              (ui_cov_words (if (ui_word_skipped row word wx n) c (ui_cov_word c row word wx n 0 color))
+                            row cov x tr (add j 1) color)))))))
 
-; The n levels of a word from column x, the first its highest four bits.
-(def ui_cov_word ((c Canvas) (k Rect) (word int) (x int) (y int) (n int) (i int) (color int)) Canvas
+; The n levels of a word from column x of row, the first its highest
+; four bits, i the next: each pixel in the row's columns covered as
+; ui_cov_at says.
+(def ui_cov_word ((c Canvas) (row UiPxRow) (word int) (x int) (n int) (i int) (color int)) Canvas
   (if (ge i n)
       c
-      (let l (bit_and (bit_shr word (mul 4 (sub 15 i))) 15)
-        (ui_cov_word (ui_cov_put c k (add x i) y l color) k word x y n (add i 1) color))))
+      (let (l (bit_and (bit_shr word (mul 4 (sub 15 i))) 15)
+            px (add x i))
+        (ui_cov_word (if (or (eq l 0) (or (lt px (.lo row)) (ge px (.hi row)))) c (ui_cov_at c (add (.base row) px) l color))
+                     row word x n (add i 1) color))))
 
-; The pixel at x, y, if it is in k, covered l of 15: left as it is at 0,
-; the color at 15, and between, the color mixed with the pixel there by
-; l fifteenths, in percent, rounded.
-(def ui_cov_put ((c Canvas) (k Rect) (x int) (y int) (l int) (color int)) Canvas
-  (if (eq l 0) c
-      (eq l 15) (ui_put c k x y color)
-      (ui_blend c k x y color (div (add (mul l 100) 7) 15) -1)))
+; The pixel at index i, covered l of 15, l not 0: the color at 15, and
+; below, the color mixed with the pixel there by l fifteenths, in
+; percent, rounded.
+(def ui_cov_at ((c Canvas) (i int) (l int) (color int)) Canvas
+  (if (eq l 15)
+      (ui_put_at c i color)
+      (ui_put_at c i (ui_cov_mix color (ui_pixel_at c i) (div (add (mul l 100) 7) 15)))))
+
+; theme.l0's ui_mix of a over b at p percent, p from 0 to 100, the same
+; pixel, in one function: what every edge of text and icons mixes.
+(def ui_cov_mix ((a int) (b int) (p int)) int
+  (let q (sub 100 p)
+    (bit_or (bit_shl (div (add (add (mul (bit_and (bit_shr a 16) 255) p) (mul (bit_and (bit_shr b 16) 255) q)) 50) 100) 16)
+            (bit_or (bit_shl (div (add (add (mul (bit_and (bit_shr a 8) 255) p) (mul (bit_and (bit_shr b 8) 255) q)) 50) 100) 8)
+                    (div (add (add (mul (bit_and a 255) p) (mul (bit_and b 255) q)) 50) 100)))))
+
+; The pixel at index i of c, which must be on it, color: opaque over a
+; region, as render.l0's put writes it.
+(def ui_put_at ((c Canvas) (i int) (color int)) Canvas
+  (match c
+    ((Canvas fb w h top) (let k (region_set32 fb (mul i 4) (bit_or color (canvas_opaque))) c))
+    ((ArrayCanvas px w h top) (ArrayCanvas (array_set px i color) w h top))))
+
+; The color of the pixel at index i of c, which must be on it.
+(def ui_pixel_at ((c Canvas) (i int)) int
+  (match c
+    ((Canvas fb w h top) (bit_and (region_get32 fb (mul i 4)) 16777215))
+    ((ArrayCanvas px w h top) (bit_and (array_get px i) 16777215))))
 
 ; Icon name at x, y of the desktop's pixels, at the face's scale: the
 ; face's icon of its size, smooth, in color; nothing if it has none.
@@ -553,26 +595,36 @@
       (match (head ts) ((UiCov w h words) (if (eq w n) (head ts) (ui_image_table_of (tail ts) n fallback))))))
 
 ; ui_image_at's work: table t's pixels n by nh at x, y, only the rows
-; in k.
+; and columns in k.
 (def ui_image_px ((c Canvas) (k Rect) (x int) (y int) (n int) (nh int) (dimmed bool) (t UiCov)) Canvas
-  (ui_image_rows c k x y n nh dimmed t (mul n (max 0 (sub (.y k) y))) (mul n (min nh (max 0 (sub (rect_y1 k) y))))))
+  (ui_image_rows c k x y n nh dimmed t (max 0 (sub (.y k) y)) (min nh (max 0 (sub (rect_y1 k) y)))))
 
-; ui_image_px's loop: pixel i on, up to end, of the rows of n by nh in
-; k.
-(def ui_image_rows ((c Canvas) (k Rect) (x int) (y int) (n int) (nh int) (dimmed bool) (t UiCov) (i int) (end int)) Canvas
-  (if (ge i end)
+; ui_image_px's rows py up to end, each drawn along by ui_image_cols
+; from its first column in k to its last.
+(def ui_image_rows ((c Canvas) (k Rect) (x int) (y int) (n int) (nh int) (dimmed bool) (t UiCov) (py int) (end int)) Canvas
+  (if (ge py end)
       c
       (match t
         ((UiCov w h words)
-          (let (px (mod i n)
-                py (div i n)
-                v (array_get words (add (mul (div (mul py h) nh) w) (div (mul px w) n)))
-                a (bit_and (bit_shr v 24) 255)
-                rgb (if dimmed (ui_scrim (bit_and v 16777215)) (bit_and v 16777215)))
-            (ui_image_rows (if (eq a 0) c
-                             (eq a 255) (ui_put c k (add x px) (add y py) rgb)
-                             (ui_blend c k (add x px) (add y py) rgb (div (add (mul a 100) 127) 255) -1))
-                         k x y n nh dimmed t (add i 1) end))))))
+          (ui_image_rows (ui_image_cols c (add (row_start c (add y py)) x) words (mul (div (mul py h) nh) w) w n dimmed
+                                        (max 0 (sub (.x k) x)) (min n (max 0 (sub (rect_x1 k) x))))
+                         k x y n nh dimmed t (add py 1) end)))))
+
+; Columns px up to end of an image n wide, its row's column 0 at index
+; base of c and its table's row from word at, w wide: each pixel the
+; nearest of the table's, mixed with what is there by its alpha, mixed
+; with black as ui_scrim does if dimmed; nothing where it is clear.
+(def ui_image_cols ((c Canvas) (base int) (words (array int)) (at int) (w int) (n int) (dimmed bool) (px int) (end int)) Canvas
+  (if (ge px end)
+      c
+      (let (v (array_get words (add at (div (mul px w) n)))
+            a (bit_and (bit_shr v 24) 255)
+            rgb (if dimmed (ui_scrim (bit_and v 16777215)) (bit_and v 16777215))
+            i (add base px))
+        (ui_image_cols (if (eq a 0) c
+                         (eq a 255) (ui_put_at c i rgb)
+                         (ui_put_at c i (ui_cov_mix rgb (ui_pixel_at c i) (div (add (mul a 100) 127) 255))))
+                       base words at w n dimmed (add px 1) end))))
 
 ; ----------------------------------------------------------------- buffers
 

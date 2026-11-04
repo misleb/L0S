@@ -23,8 +23,8 @@ draws as libadwaita does, in Adwaita's colors and sizes. `wm`'s title bars,
 | `lines.l0` | `UiLines`, text that wraps and scrolls, as a chat's list of wrapping labels: `UiPara`s (a text, a kind, `UiLinePlain`, `UiLineStrong` in bold, `UiLineDim`, `UiLineBad` in the error's red, or a chat's bubble, `UiLineIncoming` at the start on a card and `UiLineOutgoing` at the end on the accent, an icon before its first row or none, and an action its rows set off or none) wrapped at their spaces and newlines to the width they get, a bubble to three quarters of it (`ui_bubble_share`), on a ground rounded 12 as wide as its widest row and 12 each side, 6 past its rows, a blank row between it and the top or the next paragraph, each of its rows painting its own part of the ground (`ui_bubble_ground`) so it scrolls by rows, and a bubble's foot room kept under the rows shown, a word too long for a row cut where it no longer fits (`ui_wrapped`, each candidate line measured whole); rows of `ui_text_row_h` (20) on a view's ground, a row with an action tinted under the pointer; a scroller by rows, with the grid's overlay scrollbar, showing the end while its first row is -1 (`ui_lines_shown_from`, `ui_lines_first`). | `GtkListView` of wrapping `GtkLabel`s |
 | `menu.l0` | `UiPopover BASE MENU`, a popover menu over the window: a `UiMenu` of `UiItem`s, insensitive ones dimmed, and `UiItemSep`s, on a card, under the node of an action (`UiBelow`) or at a point (`UiAt`, as for a right click), kept inside the window; nothing beneath is a target while it is open, and a press outside it sets off `PREFIX.dismiss`. | `GtkPopoverMenu` |
 | `draw_cmd.l0` | The desktop's drawing commands: render.l0's, Adwaita's colors by name, `round`, `button` and `icon X Y NAME [SCALE [COLOR]]`. Used by `draw` to check a command, by `wm` to draw it, and by `tools/mkicon` to draw an app's icon. | — |
-| `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; the pointer's shape asked of the compositor as the pointer moves (`ui_pointer_at`: the I-beam over an entry, the resize pointer inside that edge); `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab and Shift-Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `UiWin`'s `.close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed, in the buffer the screen does not show, which it then gives the compositor, and no more until the frame shows it and the other is released, `UiDb`; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `UiWin`'s `.canvas` and `.face` to paint it with, `ui_win_damaged` to tell the compositor, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is, and `ui_key_mods`, the Shift, Ctrl and Alt held with it. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
-| `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's two buffers two, a resize one more, each of `font`'s arenas its strikes are in one, however many strikes it holds, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message, put together (`UiAppNext`), and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. `ui_app_start` registers the app's port as its name, `app.EXEC`, EXEC its program's file name (`ui_app_named`; a second of the same program goes without); a launch of the app while it runs (`wm`'s, an `open`, [desktop.md](desktop.md)) is an event of no window, `UiOpen REPLY ARGS`, and routing it sets off the action `app.open` (`ui_open_action`, its arguments `ui_open_args`) and answers `shown 0`, so the app's front window comes forward and nothing more opens; an app that opens something for it says so with `ui_app_opening` and answers each itself with `ui_app_shown`, the window to bring forward. A program of one window routing with `ui_route` has the same default. The answer is told, never waited on. | `GApplication`'s windows, `GtkWindow`, its name, activate and open |
+| `window.l0` | A client window: `ui_open`, or `ui_open_csd` for one that draws its own header bars, which the compositor neither draws nor frames, a press on a `UiCsdBar`'s ground asking it to move the window, and a second press there within 400 ms to maximize or restore it (the press is the click told, as the compositor takes its release), and a left press inside the window's edge, `ui_csd_edge` (3) deep and within `ui_csd_corner` (20) of a corner both edges (`ui_csd_edges`), before anything under it, asking it to resize the window by those edges; the pointer's shape asked of the compositor as the pointer moves (`ui_pointer_at`: the I-beam over an entry, the resize pointer inside that edge); `ui_event_of`, `ui_route` (hover, press, click on release, a double click, `ui_win_double`, the same action set off again within 400 ms, a right press as `UiContext`, set off as `context.X.Y.TARGET` and read back by `ui_context_of`, Tab and Shift-Tab focus, Enter/Space, the wheel and scrollbar drags, keys to an entry with the focus, a close asked as `win.close`, `UiWin`'s `.close_asked`, `ui_win_close_kept`), `ui_present` (repaints only what changed, in the buffer the screen does not show, which it then gives the compositor, and no more until the frame shows it and the other is released, `UiDb`, a third kept while the window is resized; closes a window whose close the program did nothing with; all of it after the user resized the window, `UiResize`, in the buffer it has when that has room), `ui_win_scroller`, `ui_win_icon_cols`, `ui_win_focusing`, `ui_entry_update`; for a program that paints a drawing area itself, `ui_win_drawing` the canvas to draw it on now, the buffer painted next, or later, `UiWin`'s `.face` to draw with, `ui_win_drew` what it drew, shown at the next `ui_present`, and `ui_win_lost` to know when to draw all of it again, `ui_win_titled` to retitle the window, and `ui_win_wm_pid`; `ui_key_of` and `ui_key_pressed`, the key an event is, and `ui_key_mods`, the Shift, Ctrl and Alt held with it. Needs `user/lib/proto/wm.l0`. | `GtkWindow`, event controllers, `GtkGestureClick`'s n-press and secondary button |
+| `uiapp.l0` | An app's windows, any number, on one port: a `UiApp`, the compositor, the port, the face they share, so a strike is opened once for all of them, and its `UiWin`s by id. `ui_app_start`; `ui_app_open` and `ui_app_open_csd` one more window on the app's port, refused, saying so, past the regions the process has left (each window's two buffers two, a resize's third one more, each of `font`'s arenas its strikes are in one, however many strikes it holds, of 64, 8 kept for the program's own: `ui_app_regions`, `ui_regions_room`); `ui_app_next` the next message, put together (`UiAppNext`), and `ui_app_event` what it is, `(UiAppEvent ID EVENT)`, the window the compositor's notice names and `ui_event_of`'s event for it, ID -1 for none of the app's (an exit, anything else; `ui_app_event_lost` for a port gone); `ui_app_route` and `ui_app_present`, `ui_route` and `ui_present` on window ID, put back by its id (`ui_app_win`, `ui_app_put`); `ui_app_close` one; `ui_app_count`, `ui_app_ids`. `ui_open` and `ui_open_csd` are an app started for one window. `ui_app_start` registers the app's port as its name, `app.EXEC`, EXEC its program's file name (`ui_app_named`; a second of the same program goes without); a launch of the app while it runs (`wm`'s, an `open`, [desktop.md](desktop.md)) is an event of no window, `UiOpen REPLY ARGS`, and routing it sets off the action `app.open` (`ui_open_action`, its arguments `ui_open_args`) and answers `shown 0`, so the app's front window comes forward and nothing more opens; an app that opens something for it says so with `ui_app_opening` and answers each itself with `ui_app_shown`, the window to bring forward. A program of one window routing with `ui_route` has the same default. The answer is told, never waited on. | `GApplication`'s windows, `GtkWindow`, its name, activate and open |
 
 | `uiloop.l0` | The loop a window and an app keep, `UiLoop`: the messages taken and not yet handed out, what waits taken before each step and put together (`ui_loop_take`, `ui_together`: a run's last move, its wheel's turns as one, a window's last size); the ports it waits on as one set, the window's, the toolkit's reply port, the program's, and the program's own (`ui_loop_own`, `UiGotPort`); each step's times (`UiTimes`: routed, painted), its stages (`UiStages`: route, update and view, layout, wait, paint, present), and the slow step's line, said at the debug level once a step is over a frame (`ui_frame_ns`, 16 ms; `ui_slow_line`, `ui_slow_due`, `ui_times_stepped`) | GLib's main loop, and GTK's frame clock's timings |
 
@@ -112,9 +112,10 @@ in turn. `ui_event_lost` says the port is gone.
 
 **Paced, in two buffers.** A window has two buffers, as a Wayland
 client keeps two: the one the screen shows, and the one `ui_present`
-paints (`UiDb`, its `UiBack`), made at the first present that changes
+paints (`UiDb`, its `UiBack`s), made at the first present that changes
 something, with room to grow, and made again only if the window
-outgrows it. `ui_present` lays the view out, finds what changed
+outgrows it; and while the window is resized, a third, as Mesa's
+Wayland clients keep one when they must. `ui_present` lays the view out, finds what changed
 (`ui_plan`: as below, or what a scroll did not move in, or after a
 resize what changed and what the window grew by), copies over from the
 buffer shown what the other lacks, the boxes it changed since that one
@@ -133,10 +134,35 @@ nothing, and what changes meanwhile is painted at the next present, all
 at once, since its damage is found from the nodes painted last. So a
 window paints at most once a frame, and never into a buffer the screen
 reads. A display that tells neither within `ui_pace_ns`, 100 ms, is
-waited for no longer. A window whose program paints a drawing area
-itself (`UiDrawingArea`, as `vt`'s terminal) paints the buffer shown, as
-before, unpaced, as its program paints that buffer between presents.
-Each window then holds two regions of the process's 64 (`ui_app_regions`).
+waited for no longer. Each window then holds two regions of the
+process's 64 (`ui_app_regions`).
+
+While the window is resized, a size asked (`UiResize`) and not yet
+told, it waits for no frame, as the compositor asks a size only once it
+has the last, which paces it as well; and if no buffer not shown is
+released yet, it makes a third (`ui_back_pick`) rather than wait for the
+restack that shows the last size to release one, so it paints the next
+size while the compositor restacks. Its buffers not shown are a list,
+the oldest given up first, and a release is the oldest's
+(`ui_backs_released`). Once it presents unresized, it gives a third up
+as soon as it is released, to the compositor too (`detach ID VA`,
+`ui_backs_kept`). A third holds one more region, which
+`ui_app_regions` keeps for one window at a time.
+
+**Drawing areas, paced too.** A program that paints a
+`UiDrawingArea` itself, as `vt` its terminal, paints the buffer
+`ui_present` gives next, as GTK's drawing areas draw into their
+window's next frame: `ui_win_drawing` gives the canvas to draw on,
+that buffer brought up to what the screen shows first, so only what
+changed need be drawn (`UiDrawOn`), or says to draw later while the
+window waits (`UiDrawLater`), the program keeping what it would have
+drawn; `ui_win_drew` tells what was drawn, which the next `ui_present`
+damages with the rest, and which the program calls after. What the area
+showed is not in the buffer once a resize makes another or the
+compositor will not have one (`ui_win_lost` counts those times), and the
+program then draws all of it again. A window whose next buffer cannot
+be shared with the compositor is painted, and drawn, in the buffer
+shown from then on, unpaced (`ui_win_single`).
 
 **Many windows.** An app of more than one window starts a `UiApp` and
 opens each on its port; its loop is:
@@ -490,6 +516,15 @@ to `l0` are one namespace, and a duplicate is a compile error.
   laid out in the desktop's pixels, as at 1, and painted at twice the size
   at the screen's resolution. A program does nothing for it: `ui_open`
   learns the scale from the compositor, and makes its buffer and face at it.
+  A window paints four times the pixels at 2, so painting keeps its work
+  a pixel small: a fill of 16 pixels across or more over a buffer is
+  one copy a row of the color's pixels, made once as bytes
+  (`render.l0`'s `fill_rows`, `canvas_fill`), not a write every two
+  pixels; text, icons and images are drawn a row at a time, the row's
+  place and its columns in the clip found once (`UiPxRow`), each pixel
+  then put by its index, a word of a glyph's coverage outside the clip
+  skipped whole, and an edge mixed in one function (`ui_cov_mix`, the
+  same pixel as `ui_mix`).
 
 ## Limits
 
@@ -509,20 +544,26 @@ to `l0` are one namespace, and a duplicate is a compile error.
   smooth at every scale, at 16, 32, 48 and 64 times it, rasterized at
   the build, never at run time. Icons and text scale by whole numbers. Text's edges are mixed with
   what is under them, as corners are, against the pixel already there.
-- A window paces itself with two buffers, not three: the one it gave up
-  is released only once the compositor's restack that shows the new one
-  is answered, so during a drag of its edge it paints a size, waits for
-  that restack, and only then paints the next, where in one buffer it
-  painted the next while the compositor restacked. Copying over what the
-  buffer painted lacks costs about half a millisecond a size of Disks's
-  drag on QEMU. A window whose program paints a drawing area itself, as
-  `vt`'s terminal, is painted in the buffer shown, unpaced, so a frame
-  may show it half painted.
+- A window keeps a third buffer only while it is resized, and gives it
+  up at its first present after once the compositor releases it: one
+  shown between the sizes of a drag, as a hover's, gives it up too, and
+  the next size shares a new one with the compositor. Copying over what
+  the buffer painted lacks costs about half a millisecond a size of
+  Disks's drag on QEMU. A scripted drag of the gallery's edge, 160 moves
+  30 ms apart, showed 153 to 155 sizes with the third, where two buffers
+  showed 132 to 135.
 - A window whose next buffer cannot be shared with the compositor, which
   has no room for it (at 4K, see [display.md, Limits](display.md#limits)),
-  stays as the compositor shows it: said once, as a warning, and not
-  shared again until a resize makes another buffer. A buffer keeps a
-  quarter more of each side, and 64 pixels, as room to grow.
+  is painted in the buffer shown from then on, unpaced, so a frame may
+  show it half painted: said once, as a warning, and that buffer not
+  shared again. A buffer keeps a quarter more of each side, and 64
+  pixels, as room to grow.
+- A program that paints a drawing area draws, while its window waits
+  for a frame, nothing: it keeps what is due (`vt` the rows its output
+  changed and how far it scrolled, `Due`) and draws it at the next step
+  the window may. It draws through the toolkit only into the buffer
+  `ui_win_drawing` gives, and calls `ui_present` after, which it must,
+  or what it drew is not shown.
 - An app's regions are counted by the toolkit, not asked of the
   kernel, which has no call for it: `ui_app_open` knows its windows and
   its face's strikes, and keeps 8 for the rest, so a program that opens

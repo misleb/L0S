@@ -217,25 +217,44 @@
       c
       (match (head ns) ((UiNode r ops a f) (nodes_painted (ui_paint c face clip ops) face clip (tail ns))))))
 
-; What output that scrolled k rows did to the view at the bottom, drawn:
-; the area's rows moved k up, as they are copied, not drawn again, and
-; then the rows from the cursor's before, as moved, to its after drawn
+; What output did to the view at the bottom that is not drawn yet, as the
+; window waits for its frame: the rows it scrolled up, k, and the rows
+; from lo to hi it changed after that, none if hi is less than lo.
+(data Due (Due (k int) (lo int) (hi int)))
+
+; Nothing due.
+(def due_none () Due (Due 0 0 -1))
+
+; Whether nothing is due.
+(def due_empty ((d Due)) bool (and (eq (.k d) 0) (lt (.hi d) (.lo d))))
+
+; d and then output that scrolled k rows and moved the cursor from row b
+; to row r: the scrolls added up, and the rows due moved up k, those
+; moved above the top gone, with the rows from b, as moved, to r.
+(def due_after ((d Due) (b int) (r int) (k int)) Due
+  (let (lo (max 0 (sub b k))
+        top (sub (.hi d) k))
+    (if (or (lt (.hi d) (.lo d)) (lt top 0))
+        (Due (add (.k d) k) lo r)
+        (Due (add (.k d) k) (min lo (max 0 (sub (.lo d) k))) (max r top)))))
+
+; What is due, d, drawn on the view at the bottom: the area's rows moved
+; k up, as they are copied, not drawn again, and then the rows due drawn
 ; again; or all of the view, if it scrolled a whole screen or more.
-(def output_drawn ((c Canvas) (face UiFace) (a Rect) (before Term) (t Tab) (k int)) Canvas
+(def due_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (d Due)) Canvas
   (let rows (.rows (.cells t))
-    (if (ge k rows)
+    (if (ge (.k d) rows)
         (view_drawn c face a t)
         (let (s (.scale face)
-              moved (if (eq k 0) c (canvas_copy_rows c (rect_scaled (rows_rect a rows) s) (mul (mul k (cell_h)) s))))
-          (rows_drawn moved face a t (max 0 (sub (.row before) k)) (add (.row (.term t)) 1))))))
+              moved (if (eq (.k d) 0) c (canvas_copy_rows c (rect_scaled (rows_rect a rows) s) (mul (mul (.k d) (cell_h)) s))))
+          (rows_drawn moved face a t (.lo d) (add (.hi d) 1))))))
 
-; What output_drawn changed: the rows it moved, or the rows it drew.
-(def output_damage ((a Rect) (before Term) (t Tab) (k int)) Rect
+; What due_drawn changed: the rows it moved, or the rows it drew.
+(def due_damage ((a Rect) (t Tab) (d Due)) Rect
   (let rows (.rows (.cells t))
-    (if (gt k 0)
-        (if (ge k rows) a (rows_rect a rows))
-        (let lo (.row before)
-          (Rect (.x a) (add (.y a) (mul lo (cell_h))) (.w a) (mul (add (sub (.row (.term t)) lo) 1) (cell_h)))))))
+    (if (ge (.k d) rows) a
+        (gt (.k d) 0) (rows_rect a rows)
+        (Rect (.x a) (add (.y a) (mul (.lo d) (cell_h))) (.w a) (mul (add (sub (.hi d) (.lo d)) 1) (cell_h))))))
 
 ; The area's first n rows of cells, across all of it.
 (def rows_rect ((a Rect) (n int)) Rect (Rect (.x a) (.y a) (.w a) (mul n (cell_h))))
@@ -324,10 +343,15 @@
 (def tabs_room ((here int) (others int)) bool
   (lt (add here others) (tabs_most)))
 
-; What was last drawn whole: the area, the canvas, the tab shown, by its
-; port, and how far back its view was. A view that differs in any of
-; them from what is to be shown is drawn whole again.
-(data Shown (Shown Rect Canvas int int))
+; What the terminal's area shows: what was last drawn whole there, and
+; what output did since that is not drawn yet.
+(data Shown (Shown (view View) (due Due)))
+
+; What a view drawn whole is: the area, the window's count of drawings
+; lost (ui_win_lost), the tab shown, by its port, and how far back its
+; view was. A view that differs in any of them from what is to be shown
+; is drawn whole again.
+(data View (View Rect int int int))
 
 ; What a message does to a window: it goes on, or it has closed, as it
 ; was at the end, with the status vt ends with if it was the last.
@@ -386,7 +410,7 @@
           (match (ui_app_win a2 id)
             ((None) (VtsRefused (Vts a2 wins free t) "no window"))
             ((Some w)
-              (let v (Vt w (tabs_none) 0 "Terminal" (Shown (Rect 0 0 0 0) (.canvas w) 0 0) (Lent free (vts_tab_count vs)))
+              (let v (Vt w (tabs_none) 0 "Terminal" (Shown (View (Rect 0 0 0 0) -1 0 0) (due_none)) (Lent free (vts_tab_count vs)))
                 (VtsOpened (vts_kept (Vts a2 wins free t) id (refreshed (tab_opened v))) id)))))))))
 
 ; The app's windows' Vts.
@@ -786,51 +810,66 @@
                 (output_shown v2 term t2 k)
                 v2)))))))
 
-; The tab t, shown, with output drawn that moved its cursor from before
-; and scrolled k rows, and the window told.
+; The tab t, shown, with output that moved its cursor from before and
+; scrolled k rows: that due, and the window refreshed, which draws it
+; once the window may.
 (def output_shown ((v Vt) (before Term) (t Tab) (k int)) Vt
-  (let (w (.win v)
-        a (vt_area v)
-        canvas (.canvas w)
-        c (output_drawn canvas (.face w) a before t k)
-        d (ui_win_damaged w (cons (output_damage a before t k) (nil Rect))))
-    v))
+  (let (sh (.sh v)
+        d (due_after (.due sh) (.row before) (.row (.term t)) k))
+    (refreshed (.sh v (.due sh d)))))
 
 ; v with its window up to date with its tabs: every tab as many cells as
-; fit the terminal's area; the selected tab's view drawn whole, if it is
-; not what was last drawn whole there; the title told, if it changed; and
-; the window's header bar and tab bar painted where they changed. If the
-; window is not the size or buffer it was after that, as when wm would
-; not have a resize, all of it again.
-(def refreshed ((v Vt)) Vt
+; fit the terminal's area; the selected tab's view drawn, whole if it is
+; not what was last drawn whole there, else what output left due; the
+; title told, if it changed; and the window presented, its header bar and
+; tab bar painted where they changed. While the window waits for its
+; frame nothing is drawn, and what is due is kept for the next. If the
+; window is not the size it was after that, or lost what was drawn, as
+; when wm would not have a resize, all of it again, once.
+(def refreshed ((v Vt)) Vt (vt_refreshed v true))
+
+; refreshed, all of it again if again and the window changed so.
+(def vt_refreshed ((v Vt) (again bool)) Vt
   (match v
     ((Vt w ts st title shown free)
       (let (a (term_area (ui_win_w w) (ui_win_h w) (tabs_count ts))
             ts2 (tabs_resized ts (area_cols a) (area_rows a))
             title2 (tabs_title ts2)
             t (if (eq title2 title) 0 (ui_win_titled w title2))
-            shown2 (view_shown w ts2 a shown)
-            canvas (.canvas w)
+            lost (ui_win_lost w)
             ww (ui_win_w w)
             wh (ui_win_h w)
-            w2 (ui_present w (vt_view ts2 title2))
-            d (if (eq shown2 shown) 0 (ui_win_damaged w2 (cons a (nil Rect))))
-            v2 (Vt w2 ts2 st title2 shown2 free))
-        (if (and (eq (.canvas w2) canvas) (and (eq (ui_win_w w2) ww) (eq (ui_win_h w2) wh)))
-            v2
-            (refreshed v2))))))
+            view (vt_view ts2 title2))
+        (match (vt_drawn (Vt w ts2 st title2 shown free) a)
+          ((Vt dw dts dst dtitle dshown dfree)
+            (let (w2 (ui_present dw view)
+                  same (and (eq (ui_win_lost w2) lost) (and (eq (ui_win_w w2) ww) (eq (ui_win_h w2) wh)))
+                  v2 (Vt w2 dts dst dtitle dshown dfree))
+              (if (or same (not again)) v2 (vt_refreshed v2 false)))))))))
 
-; What is shown whole in the area a after the selected tab's view is
-; drawn whole there, if what was, shown, is not it; as it was if it is.
-(def view_shown ((w UiWin) (ts Tabs) (a Rect) (shown Shown)) Shown
-  (match (tabs_selected ts)
-    ((None) shown)
+; v with the selected tab's view drawn in the area a where the window
+; draws now (ui_win_drawing), and the window told what was drawn: all of
+; it if what was last drawn whole there is not what is to be shown, else
+; what output left due; nothing if neither, or the window waits.
+(def vt_drawn ((v Vt) (a Rect)) Vt
+  (match (tabs_selected (.tabs v))
+    ((None) v)
     ((Some t)
-      (let (canvas (.canvas w)
-            want (Shown a canvas (.port t) (.back t)))
-        (if (eq want shown)
-            shown
-            (let c (view_drawn canvas (.face w) a t) want))))))
+      (let (w (.win v)
+            sh (.sh v)
+            want (View a (ui_win_lost w) (.port t) (.back t))
+            whole (not (eq want (.view sh))))
+        (if (and (not whole) (due_empty (.due sh)))
+            v
+            (match (ui_win_drawing w)
+              ((UiDrawLater w2) (.win v w2))
+              ((UiDrawOn w2 c)
+                (if whole
+                    (let cv (view_drawn c (.face w2) a t)
+                      (.sh (.win v (ui_win_drew w2 (cons a (nil Rect)))) (Shown want (due_none))))
+                    (let (d (.due sh)
+                          cv (due_drawn c (.face w2) a t d))
+                      (.sh (.win v (ui_win_drew w2 (cons (due_damage a t d) (nil Rect)))) (Shown (.view sh) (due_none))))))))))))
 
 ; What the window shows: the header bar, its title and the button that
 ; opens a tab; the tab bar, with two tabs or more; and the terminal.

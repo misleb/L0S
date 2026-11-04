@@ -212,8 +212,14 @@ shown (`UiDb`'s `UiBack`, what it lacks copied over first), asks `frame
 ID`, gives it to `wm` with `attach` and a `damage` (or a `resize`
 naming it), and paints nothing more until `wm` tells the frame and the
 release of the other, which `ui_route` takes (`ui.frame`,
-`ui.release`). A window with a `UiDrawingArea` (`vt`) is painted in the
-buffer shown, as before.
+`ui.release`). While resized it waits for no frame and makes a third
+buffer rather than wait for a release, given up (`detach`) once it is
+not resized (roadmap 0039). A program drawing a `UiDrawingArea` (`vt`)
+draws on the canvas `ui_win_drawing` gives (the buffer painted next,
+brought up to date), or later while the window waits, keeping what is
+due; tells `ui_win_drew`; then calls `ui_present`, which shows it. It
+draws all of the area again when `ui_win_lost` changes. Never draw on
+`.canvas`, the buffer shown.
 
 Events are `UiKey`, `UiPress`, `UiRelease`, `UiMotion` (window coordinates),
 `UiLeave`, `UiFocus front`, `UiScroll x y dx dy` (the wheel, in steps, down
@@ -315,8 +321,11 @@ driver composes them.
 - **Buffers**: desktop 0, pointer 1, top bar 2, launcher 3, and window
   `i`'s content `4 + 4i + 2k` and chrome `5 + 4i + 2k` (its title bar with
   the frame under it, one buffer the window's size), k its bank
-  (`launcher_id`, `content_id i k`, `chrome_id i k`; `win_bank`). A resize
-  gives the display the window's buffers under the other bank and forgets
+  (`launcher_id`, `content_id i k`, `chrome_id i k`; `win_bank`); a
+  content's third bank, 2, is `third_id` + i, for the client's third
+  buffer, and `Bufs`'s `spares` its other buffers, each with its bank
+  (`bank_free`, `bank_made`). A resize
+  gives the display the window's buffers under another bank and forgets
   the old ids after the restack: the display refuses to forget a buffer
   on the screen. `Bufs` keeps each buffer's pages and where the display
   has them, so a size that fits is given again in the same pages
@@ -341,7 +350,8 @@ driver composes them.
   of a new buffer (`ui_swapped`). The canvas is the whole buffer, its
   stride its width; `UiMem` keeps the window's size. Apps need no code;
   `vt`, which paints its terminal in a `UiDrawingArea` itself, rewraps
-  its cells and paints the area whole before `ui_present`. The cost that matters is pages shared and
+  its cells and draws the area whole (its `View` changed) through
+  `ui_win_drawing` before `ui_present`. The cost that matters is pages shared and
   given up, not pixels: keep resizes in place.
 - **The pointers** (`with_pointers`, `pointer_shaped`, `pointer_wanted`,
   `resize_cursor`): `ui_cursor_names`, each painted once at start into

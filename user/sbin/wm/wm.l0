@@ -64,8 +64,9 @@
 ; The desktop's buffer is 0, the arrow's 1 (the other pointers' from
 ; 100001, pointer_id), the top bar's 2, the
 ; launcher's 3, the menu's card's menu_id, and window i's content and chrome 4 + 4i + 2k and
-; 5 + 4i + 2k, k its bank, 0 or 1. A resize makes the window's new
-; buffers in the other bank, shows them, and then forgets the old ones:
+; 5 + 4i + 2k, k its bank, 0 or 1; a content's third bank, 2, for a
+; client's third buffer, is third_id + i. A resize makes the window's new
+; buffers in another bank, shows them, and then forgets the old ones:
 ; the display refuses to forget a buffer on the screen, and one made
 ; again under its id would leave its old pages mapped.
 (def desktop_id () int 0)
@@ -76,7 +77,12 @@
 ; The menu's card, over the windows and under the bar. Windows' buffers
 ; count up from 4, so its id is well past any of them.
 (def menu_id () int 100000)
-(def content_id ((i int) (k int)) int (add 4 (add (mul 4 i) (mul 2 k))))
+(def content_id ((i int) (k int)) int
+  (if (eq k 2) (add (third_id) i) (add 4 (add (mul 4 i) (mul 2 k)))))
+
+; Where the ids of windows' contents' third bank start: past the menu's
+; and the pointers', within the display's max_buffer_id.
+(def third_id () int 200000)
 (def chrome_id ((i int) (k int)) int (add 5 (add (mul 4 i) (mul 2 k))))
 
 ; During a drag, rebuild the screen once 20 ms have passed since the last
@@ -118,25 +124,66 @@
 ; shared or given up, which is what costs most, and what the client had
 ; painted stays put for it to paint only what changed. Then whether its
 ; client has asked to be told the next frame (frame ID); the bank of the
-; content's id, which a resize flips with the chrome's and an attach
-; alone; and the content's other buffer, once its client has attached
-; one: the one it paints while this one shows.
-; Last, how many frames wm has told its client.
-(data Bufs (Bufs (pages int) (dva int) (stride int) (tpages int) (tdva int) (frame bool) (bank int) (spare Spare) (frames int)))
+; content's id, 0, 1 or 2, which a resize changes with the chrome's and
+; an attach alone; and the content's other buffers, those its client has
+; attached, at most two, the oldest shown first: the ones it paints while
+; this one shows. Last, how many frames wm has told its client.
+(data Bufs (Bufs (pages int) (dva int) (stride int) (tpages int) (tdva int) (frame bool) (bank int) (spares (list Spare)) (frames int)))
 
-; A window's other buffer, its client's as attach gave it, under the
-; content's other bank's id in the display: where it is in wm, its
+; A window's other buffer, its client's as attach gave it, under one of
+; the content's other banks' ids in the display: where it is in wm, its
 ; pages, where the display has them, how many of its own pixels apart its
 ; rows are, the size it was given the display at, the desktop's pixels,
-; and whether it is attached, to show at the next damage; or none.
-(data Spare (Spare int int int int int int bool) (NoSpare))
+; whether it is attached, to show at the next damage, and its bank.
+(data Spare (Spare (va int) (pages int) (dva int) (sd int) (sw int) (sh int) (pend bool) (bank int)))
 
-; The display's id for w's content, and for its other buffer.
+; The display's id for w's content, and for its other buffer sp.
 (def win_content_id ((w Win)) int (content_id (.id w) (.bank (.bufs w))))
-(def win_spare_id ((w Win)) int (content_id (.id w) (sub 1 (.bank (.bufs w)))))
+(def spare_id ((w Win) (sp Spare)) int (content_id (.id w) (.bank sp)))
 
-; Whether w's other buffer is attached, to show at the next damage.
-(def win_pending ((w Win)) bool (match (.spare (.bufs w)) ((Spare va n dva sd sw sh pend) pend) ((NoSpare) false)))
+; Whether w has an other buffer attached, to show at the next damage.
+(def win_pending ((w Win)) bool (any_pend (.spares (.bufs w))))
+
+; Whether any of sps is attached.
+(def any_pend ((sps (list Spare))) bool
+  (if (is_empty sps) false (.pend (head sps)) true (any_pend (tail sps))))
+
+; The display's id of what w's next damage is to: its attached buffer's,
+; if it has one, else its content's.
+(def win_damage_id ((w Win)) int (damage_id_in w (.spares (.bufs w))))
+
+; win_damage_id's search of sps.
+(def damage_id_in ((w Win) (sps (list Spare))) int
+  (if (is_empty sps) (win_content_id w)
+      (.pend (head sps)) (spare_id w (head sps))
+      (damage_id_in w (tail sps))))
+
+; The other buffer of sps at va, if there is one.
+(def spare_at ((sps (list Spare)) (va int)) (Option Spare)
+  (if (is_empty sps) ((None Spare))
+      (eq (.va (head sps)) va) (Some (head sps))
+      (spare_at (tail sps) va)))
+
+; sps without the one at va.
+(def spares_but ((sps (list Spare)) (va int)) (list Spare)
+  (if (is_empty sps) sps
+      (eq (.va (head sps)) va) (tail sps)
+      (cons (head sps) (spares_but (tail sps) va))))
+
+; A bank of w's content's ids neither its content nor any other buffer
+; of it is in, the lowest; -1 if all three are taken.
+(def bank_free ((w Win)) int
+  (let (bf (.bufs w)
+        taken (cons (.bank bf) (spare_banks (.spares bf))))
+    (if (not (any_eq 0 taken)) 0 (not (any_eq 1 taken)) 1 (not (any_eq 2 taken)) 2 -1)))
+
+; The banks of sps.
+(def spare_banks ((sps (list Spare))) (list int)
+  (if (is_empty sps) (nil int) (cons (.bank (head sps)) (spare_banks (tail sps)))))
+
+; Where w's other buffer at va is in wm, -1 if it has none there: va.
+(def spare_va_of ((w Win) (va int)) int
+  (match (spare_at (.spares (.bufs w)) va) ((Some sp) va) ((None) -1)))
 
 ; How a window is resized: the bank its buffers' ids are in, the edges the
 ; user last dragged (the bits edge_left, edge_right, edge_top and
@@ -967,6 +1014,7 @@
   (if (and (eq op "top") (eq (length args) 2)) (topped v (nth ns 0) (nth ns 1))
       (and (eq op "frame") (eq (length args) 1)) (frame_asked v from (nth ns 0))
       (and (eq op "attach") (eq (length args) 4)) (attach_asked v from (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3))
+      (and (eq op "detach") (eq (length args) 2)) (detach_asked v from (nth ns 0) (nth ns 1))
       (and (eq op "close") (eq (length args) 1)) (closed v (nth ns 0))
       (and (eq op "move") (eq (length args) 1)) (move_started v from (nth ns 0))
       (and (eq op "maximize") (eq (length args) 1)) (maximize_asked v from (nth ns 0))
@@ -1064,7 +1112,7 @@
               (let s (shape_window d n 0 0 (ServerSide) cw ch)
                 (match (cascade n (ServerSide) cw ch w h)
                   ((Placed z x y top)
-                    (let (bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) pages dtva false 0 (NoSpare) 0)
+                    (let (bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) pages dtva false 0 (nil Spare) 0)
                           win (Win n port from x y cw ch 0 title tc cva tva bf (client_app bar from) (Sizing 0 0 cw ch false (rect_none) (rect_none)) (ServerSide))
                           f (refocused ws (cons win ws)))
                       (shown_front (Wm d cl w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))))))
@@ -1079,7 +1127,7 @@
       (let s (shape_window d n 0 0 (ClientSide) cw ch)
         (match (cascade n (ClientSide) cw ch w h)
           ((Placed z x y top)
-            (let (bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) 0 0 false 0 (NoSpare) 0)
+            (let (bf (Bufs (content_pages cw ch (display_scale d)) dcva (mul cw (display_scale d)) 0 0 false 0 (nil Spare) 0)
                   win (Win n port from x y cw ch 0 title (canvas_new 0 0 0) cva 0 bf (client_app bar from) (Sizing 0 0 cw ch false (rect_none) (rect_none)) (ClientSide))
                   f (refocused ws (cons win ws)))
               (shown_front (Wm d cl w h desk font bg (cons win ws) (add n 1) ptr drag kp pp bar) n))))))))
@@ -1166,23 +1214,32 @@
 (def resize_refused ((v Wm) (win Win) (wh Where) (why (list int)) (trimmed bool)) (Served Wm)
   (match wh
     ((Where va pages sd)
-      (let u (if (or (eq va (.cva win)) (eq va (spare_va (.spare (.bufs win))))) 0 (client_given_up va pages trimmed))
+      (let u (if (or (eq va (.cva win)) (eq (spare_va_of win va) va)) 0 (client_given_up va pages trimmed))
         (refused v why)))))
 
-; Where in wm a window's other buffer is, -1 for none; its pages; and
-; where the display has them.
-(def spare_va ((sp Spare)) int (match sp ((Spare va n dva sd sw sh pend) va) ((NoSpare) -1)))
-(def spare_pages ((sp Spare)) int (match sp ((Spare va n dva sd sw sh pend) n) ((NoSpare) 0)))
-(def spare_dva ((sp Spare)) int (match sp ((Spare va n dva sd sw sh pend) dva) ((NoSpare) 0)))
+; Window win's other buffer sp given up: its id forgotten by the
+; display, which unmaps it, and its pages by wm: 0.
+(def spare_dropped ((d Display) (win Win) (sp Spare)) int
+  (let f (display_forget d (spare_id win sp))
+    (client_given_up (.va sp) (.pages sp) true)))
 
-; Window win's other buffer given up, if it has one: its id forgotten by
-; the display, which unmaps it, and its pages by wm: 0.
-(def spare_dropped ((d Display) (win Win)) int
-  (match (.spare (.bufs win))
-    ((NoSpare) 0)
-    ((Spare va n dva sd sw sh pend)
-      (let f (display_forget d (win_spare_id win))
-        (client_given_up va n true)))))
+; Each of win's other buffers, sps, given up: 0.
+(def spares_dropped ((d Display) (win Win) (sps (list Spare))) int
+  (if (is_empty sps) 0 (let f (spare_dropped d win (head sps)) (spares_dropped d win (tail sps)))))
+
+; A bank for a window's buffer, and the other buffers the window keeps.
+(data Banked (Banked int (list Spare)))
+
+; The bank for a buffer of win's new to wm, and the other buffers it
+; keeps: a bank free, or else its oldest other buffer's, which is given
+; up for it.
+(def bank_made ((d Display) (win Win)) Banked
+  (let (k (bank_free win)
+        sps (.spares (.bufs win)))
+    (if (or (ge k 0) (is_empty sps))
+        (Banked (max k 0) sps)
+        (let u (spare_dropped d win (head sps))
+          (Banked (.bank (head sps)) (tail sps))))))
 
 ; A client's buffer at va, n pages, once the display has it, given up by
 ; wm but for its first page, which keeps va wm's name for the buffer, as
@@ -1204,39 +1261,54 @@
 (def client_given_up ((va int) (n int) (trimmed bool)) int
   (match (shm_unmap va (if trimmed 1 n)) ((ShmUnmapped) 0) ((ShmUnmapNotYours) 0) ((ShmUnmapTooMany) 0)))
 
-; The new content given to the display under the content's other bank's
-; id: in the pages it has of the window's own buffer, if it is in that
-; one, or of its other buffer, if it is in that, as a client that paints
-; the buffer not shown resizes; else in a new one shared with it. The
-; other buffer, if it is not the one, is given up first, as its id is
-; the one taken. Once it has it, the request answered, the
-; client asked for the next size, and the rest made.
+; The new content given to the display under another bank's id than
+; the content's: in the pages it has of the window's own buffer, if it
+; is in that one, or of one of its other buffers, if it is in that, as a
+; client that paints a buffer not shown resizes, under that one's id;
+; else in a new one shared with it. A buffer new to wm, or the window's
+; own, takes a bank free, or the oldest other buffer's, given up first.
+; Once it has it, the request answered, the client asked for the next
+; size, and the rest made.
 (def resize_content ((v Wm) (win Win) (nw int) (nh int) (wh Where) (payload (list int))) Wm
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match wh
         ((Where va given sd)
-          (match (.bufs win)
-            ((Bufs cn dcva csd tn dtva fw ck sp nt)
-              (let (s (display_scale d)
-                    need (buffer_pages sd (mul nh s))
-                    spared (eq va (spare_va sp))
-                    pages (if (eq va (.cva win)) cn spared (spare_pages sp) (max given need)))
-                (if (or (lt pages need) (lt sd (mul nw s)))
-                    (answered (resize_refused v win wh "the buffer is too small for the size" false) payload)
-                    (let (cid (win_spare_id win)
-                          dropped (if spared 0 (spare_dropped d win)))
-                      (match (if (or (eq va (.cva win)) spared)
-                                 (let (at (if spared (spare_dva sp) dcva)
-                                       e (display_buffer_at d cid (mul nw s) (mul nh s) sd at pages))
-                                   (if (is_empty e) ((Ok int (list int)) at) ((Err int (list int)) e)))
-                                 (client_trimmed (display_buffer_shared d cid (mul nw s) (mul nh s) sd va pages) va pages))
-                        ((Err e) (answered (resize_refused v win wh e false) payload))
-                        ((Ok there)
-                          (let (a (answered (okay v) payload)
-                                port (.port win)
-                                back (resize_back win nw nh (resize_ask_next win nw nh)))
-                            (resize_finished (resize_chrome v win nw nh (Where va pages sd) there) port back))))))))))))))
+          (let (s (display_scale d)
+                need (buffer_pages sd (mul nh s))
+                cn (.pages (.bufs win))
+                dcva (.dva (.bufs win))
+                sps (.spares (.bufs win)))
+            (match (spare_at sps va)
+              ((Some sp) (resize_content_in v win nw nh wh payload (.pages sp) (.dva sp) (Banked (.bank sp) (spares_but sps va))))
+              ((None)
+                (let pages (if (eq va (.cva win)) cn (max given need))
+                  (if (or (lt pages need) (lt sd (mul nw s)))
+                      (answered (resize_refused v win wh "the buffer is too small for the size" false) payload)
+                      (resize_content_in v win nw nh wh payload pages (if (eq va (.cva win)) dcva -1) (bank_made d win))))))))))))
+
+; resize_content's content, pages of it, given to the display in the
+; bank kb says, at dva there if it has it already, else shared anew.
+(def resize_content_in ((v Wm) (win Win) (nw int) (nh int) (wh Where) (payload (list int)) (pages int) (dva int) (kb Banked)) Wm
+  (match wh
+    ((Where va given sd)
+      (match kb
+        ((Banked k keep)
+          (let (d (.d v)
+                s (display_scale d)
+                cid (content_id (.id win) k))
+            (if (or (lt pages (buffer_pages sd (mul nh s))) (lt sd (mul nw s)))
+                (answered (resize_refused v win wh "the buffer is too small for the size" false) payload)
+                (match (if (ge dva 0)
+                           (let e (display_buffer_at d cid (mul nw s) (mul nh s) sd dva pages)
+                             (if (is_empty e) ((Ok int (list int)) dva) ((Err int (list int)) e)))
+                           (client_trimmed (display_buffer_shared d cid (mul nw s) (mul nh s) sd va pages) va pages))
+                  ((Err e) (answered (resize_refused v win wh e false) payload))
+                  ((Ok there)
+                    (let (a (answered (okay v) payload)
+                          port (.port win)
+                          back (resize_back win nw nh (resize_ask_next win nw nh)))
+                      (resize_finished (resize_chrome v win nw nh (Where va pages sd) there kb) port back)))))))))))
 
 ; The window's client asked for the size the user has dragged it to, if
 ; it was asked for one and that is not nw by nh, the size it has answered
@@ -1276,17 +1348,15 @@
 ; the screen takes up only at the restack; else in a new one, with room to
 ; grow. Its canvas is all of its buffer, the stride its width. A window
 ; its client decorates has none to make.
-(def resize_chrome ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int)) (Served Wm)
+(def resize_chrome ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int) (kb Banked)) (Served Wm)
   (match win
     ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
-      (match bf
-        ((Bufs cn dcva csd tn dtva fw ck sp nt)
-          (if (has_chrome dc)
-              (resize_chrome_made v win nw nh wh there)
-              (resize_shown v win nw nh wh there tc tva tn dtva)))))))
+      (if (has_chrome dc)
+          (resize_chrome_made v win nw nh wh there kb)
+          (resize_shown v win nw nh wh there tc tva (.tpages bf) (.tdva bf) kb)))))
 
 ; resize_chrome's chrome, wm's own title bar and frame.
-(def resize_chrome_made ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int)) (Served Wm)
+(def resize_chrome_made ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int) (kb Banked)) (Served Wm)
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match win
@@ -1294,7 +1364,7 @@
           (match bf
             ((Bufs cn dcva csd tn dtva fw ck sp nt)
               (let (s (display_scale d)
-                    cid (win_spare_id win)
+                    cid (content_id id (match kb ((Banked k keep) k)))
                     tid (chrome_id id (sub 1 (win_bank win)))
                     front (eq id (.id (head ws)))
                     tw (mul (outer_w dc nw) s)
@@ -1304,14 +1374,14 @@
                           e (display_buffer_at d tid tw th (canvas_w tc2) dtva tn))
                       (if (not (is_empty e))
                           (let f (display_forget d cid) (resize_refused v win wh e true))
-                          (resize_shown v win nw nh wh there tc2 tva tn dtva)))
+                          (resize_shown v win nw nh wh there tc2 tva tn dtva kb)))
                     (match (ui_buffer_at (grown (outer_w dc nw)) (grown (chrome_h dc nh)) s)
                       ((UiNoBuf why) (let f (display_forget d cid) (resize_refused v win wh why true)))
                       ((UiBuf tva2 pages big)
                         (let tc2 (paint_chrome big font title nw nh front)
                           (match (display_buffer_shared d tid tw th (canvas_w tc2) tva2 pages)
                             ((Err e) (let (f (display_forget d cid) u (ui_buffer_free tva2 pages tc2)) (resize_refused v win wh e true)))
-                            ((Ok dtva2) (resize_shown v win nw nh wh there tc2 tva2 pages dtva2)))))))))))))))
+                            ((Ok dtva2) (resize_shown v win nw nh wh there tc2 tva2 pages dtva2 kb)))))))))))))))
 
 ; A buffer's side n with room to grow: a quarter more, and 64.
 (def grown ((n int)) int (add n (add (div n 4) 64)))
@@ -1320,7 +1390,7 @@
 ; where a maximize or a restore takes it, else if its left or top edge
 ; was dragged, and then the screen shown with them. Once no answer is
 ; awaited, the goal is met.
-(def resize_shown ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int) (tc Canvas) (tva int) (tn int) (dtva int)) (Served Wm)
+(def resize_shown ((v Wm) (win Win) (nw int) (nh int) (wh Where) (there int) (tc Canvas) (tva int) (tn int) (dtva int) (kb Banked)) (Served Wm)
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
       (match win
@@ -1330,27 +1400,31 @@
               (match wh
                 ((Where cva cn csd)
                   (let (k (sub 1 ok)
-                        s (shape_window d id k (sub 1 (.bank (.bufs win))) dc nw nh)
+                        s (shape_window d id k (match kb ((Banked kc keep) kc)) dc nw nh)
                         again (and asking (not (and (eq ww nw) (eq wht nh))))
                         goal (not (rect_empty go))
                         nx (if goal (.x go) (has_edge edges (edge_left)) (add x (sub cw nw)) x)
                         ny (below_bar (if goal (.y go) (has_edge edges (edge_top)) (add y (sub ch nh)) y)))
-                    (resize_done v win (Win id port pid nx ny nw nh 0 title tc cva tva (resized_bufs obf ocva cw ch cva cn there csd tn dtva) app
+                    (resize_done v win (Win id port pid nx ny nw nh 0 title tc cva tva (resized_bufs obf ocva cw ch cva cn there csd tn dtva kb) app
                                             (Sizing k edges ww wht again re (if again go (rect_none))) dc))))))))))))
 
 ; A window's buffers after a resize, obf before it, its content then at
 ; ocva in wm and cw by ch: the content now at nva, cn pages, at there in
-; the display, its rows csd apart, under the content's other bank; the
-; chrome's tn pages at dtva in the display. A window that has an other
-; buffer keeps the content it had as that, unless the resize was in it.
-(def resized_bufs ((obf Bufs) (ocva int) (cw int) (ch int) (nva int) (cn int) (there int) (csd int) (tn int) (dtva int)) Bufs
+; the display, its rows csd apart, under the bank kb says, beside the
+; other buffers it keeps; the chrome's tn pages at dtva in the display.
+; A window whose client paints its buffers in turn, which has other
+; buffers or has asked for its next frame, as such a client asks before
+; it resizes, keeps the content it had as one more, unless the resize
+; was in it: it may have given its other buffers up (detach) as they
+; were too small, and paints the one shown again once it is released.
+(def resized_bufs ((obf Bufs) (ocva int) (cw int) (ch int) (nva int) (cn int) (there int) (csd int) (tn int) (dtva int) (kb Banked)) Bufs
   (match obf
-    ((Bufs ocn odcva ocsd otn odtva fw ck sp nt)
-      (Bufs cn there csd tn dtva fw (sub 1 ck)
-            (match sp
-              ((NoSpare) (NoSpare))
-              ((Spare va n dva sd sw sh pend) (if (eq nva ocva) (NoSpare) (Spare ocva ocn odcva ocsd cw ch false))))
-            nt))))
+    ((Bufs ocn odcva ocsd otn odtva fw ck sps nt)
+      (match kb
+        ((Banked k keep)
+          (Bufs cn there csd tn dtva fw k
+                (if (or (and (is_empty sps) (not fw)) (eq nva ocva)) keep (append keep (cons (Spare ocva ocn odcva ocsd cw ch false ck) (nil Spare))))
+                nt))))))
 
 ; The window old replaced by nwin, whose new buffers were painted before
 ; the display had them, so it took their pixels with them: the screen
@@ -1370,7 +1444,7 @@
 (def resize_old_given_up ((d Display) (old Win) (nwin Win)) int
   (let (k (win_bank old)
         id (.id old)
-        kept (eq (spare_va (.spare (.bufs nwin))) (.cva old))
+        kept (eq (spare_va_of nwin (.cva old)) (.cva old))
         f1 (if kept "" (display_forget d (win_content_id old)))
         f2 (if (has_chrome (.deco old)) (display_forget d (chrome_id id k)) ""))
     (match old
@@ -1479,7 +1553,7 @@
                 (match win
                   ((Win wid port pid wx wy cw ch top title tc cva tva bf app sz dc)
                     (damaged v (drop_n ns 5)
-                             (buffer_dirty (if (win_pending win) (win_spare_id win) (win_content_id win))
+                             (buffer_dirty (win_damage_id win)
                                            (nth ns 1) (nth ns 2) (nth ns 3) (nth ns 4) top ch acc)))))))))))
 
 ; After a damage: each window whose other buffer was attached shows it
@@ -1502,28 +1576,34 @@
 (def swapped_all ((ws (list Win)) (acc (list Win))) (list Win)
   (if (is_empty ws) (rev acc) (swapped_all (tail ws) (cons (win_swapped (head ws)) acc))))
 
-; w showing its other buffer, if it is attached: that its content, under
-; the other bank's id, and the content it had its other buffer.
+; w showing its other buffer that is attached, if one is: that its
+; content, under that one's bank's id, and the content it had the newest
+; of its other buffers.
 (def win_swapped ((w Win)) Win
   (match w
     ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
       (match bf
-        ((Bufs cn dcva csd tn dtva fw ck sp nt)
-          (match sp
-            ((NoSpare) w)
-            ((Spare sva sn sdva ssd sw sh pend)
-              (if pend
-                  (Win id port pid x y cw ch top title tc sva tva
-                       (Bufs sn sdva ssd tn dtva fw (sub 1 ck) (Spare cva cn dcva csd cw ch false) nt) app sz dc)
-                  w))))))))
+        ((Bufs cn dcva csd tn dtva fw ck sps nt)
+          (match (pending_of sps)
+            ((None) w)
+            ((Some p)
+              (Win id port pid x y cw ch top title tc (.va p) tva
+                   (Bufs (.pages p) (.dva p) (.sd p) tn dtva fw (.bank p)
+                         (append (spares_but sps (.va p)) (cons (Spare cva cn dcva csd cw ch false ck) (nil Spare))) nt)
+                   app sz dc))))))))
+
+; The other buffer of sps that is attached, if one is.
+(def pending_of ((sps (list Spare))) (Option Spare)
+  (if (is_empty sps) ((None Spare)) (.pend (head sps)) (Some (head sps)) (pending_of (tail sps))))
 
 ; attach ID VA N S, from from: window ID's content from now on in the
 ; buffer at VA here, N pages, its rows S of its own pixels apart, at the
 ; window's size, shown at the next damage (committed). It is given to
-; the display under the content's other bank's id: as it was, if it is
-; the window's other buffer already, given again only if the window's
-; size has changed since; else shared anew, any other buffer given up
-; first. Only the window's client may ask.
+; the display under another bank's id than the content's: as it was, if
+; it is one of the window's other buffers already, given again only if
+; the window's size has changed since; else shared anew, in a bank free
+; or the oldest other buffer's, given up first. Only the window's
+; client may ask.
 (def attach_asked ((v Wm) (from int) (id int) (va int) (pages int) (sd int)) (Served Wm)
   (match v
     ((Wm d cl w h desk font bg ws n ptr drag kp pp bar)
@@ -1534,51 +1614,83 @@
               (eq va (.cva win)) (okay v)
               (match (spare_given d win va pages sd)
                 ((Err e) (refused v e))
-                ((Ok sp) (okay (Wm d cl w h desk font bg (replaced ws (.bufs win (.spare (.bufs win) sp))) n ptr drag kp pp bar))))))))))
+                ((Ok sps) (okay (Wm d cl w h desk font bg (replaced ws (.bufs win (.spares (.bufs win) sps))) n ptr drag kp pp bar))))))))))
 
-; The buffer at va, pages of it, its rows sd apart, given to the display
-; as win's other buffer, attached, at win's size, and shaped as its
-; content; or why not.
-(def spare_given ((d Display) (win Win) (va int) (pages int) (sd int)) (Result Spare (list int))
-  (match win
-    ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
-      (let (s (display_scale d)
-            need (buffer_pages sd (mul ch s))
-            cid (win_spare_id win))
-        (if (lt sd (mul cw s))
-            ((Err Spare (list int)) "the buffer is narrower than the window")
-            (match (.spare (.bufs win))
-              ((Spare sva sn sdva ssd sw sh pend)
-                (if (eq va sva)
-                    (if (lt sn need) ((Err Spare (list int)) "the buffer is too small for the window")
-                        (and (eq sw cw) (and (eq sh ch) (eq ssd sd))) ((Ok Spare (list int)) (Spare sva sn sdva sd cw ch true))
-                        (let e (display_buffer_at d cid (mul cw s) (mul ch s) sd sdva sn)
-                          (if (is_empty e)
-                              (let k (shape_content d cid dc cw ch) ((Ok Spare (list int)) (Spare sva sn sdva sd cw ch true)))
-                              ((Err Spare (list int)) e))))
-                    (spare_shared d win va (max pages need) sd)))
-              ((NoSpare) (spare_shared d win va (max pages need) sd))))))))
+; win's other buffers once the buffer at va, pages of it, its rows sd
+; apart, is given to the display as one of them, attached, at win's
+; size, and shaped as its content, the others no longer attached; or
+; why not.
+(def spare_given ((d Display) (win Win) (va int) (pages int) (sd int)) (Result (list Spare) (list int))
+  (let (s (display_scale d)
+        cw (.cw win)
+        ch (.ch win)
+        need (buffer_pages sd (mul ch s))
+        sps (unpended (.spares (.bufs win))))
+    (if (lt sd (mul cw s))
+        ((Err (list Spare) (list int)) "the buffer is narrower than the window")
+        (match (spare_at sps va)
+          ((None) (spare_shared d win va (max pages need) sd))
+          ((Some sp)
+            (let (cid (spare_id win sp)
+                  attached (Spare va (.pages sp) (.dva sp) sd cw ch true (.bank sp))
+                  others (spares_but sps va))
+              (if (lt (.pages sp) need) ((Err (list Spare) (list int)) "the buffer is too small for the window")
+                  (and (eq (.sw sp) cw) (and (eq (.sh sp) ch) (eq (.sd sp) sd))) ((Ok (list Spare) (list int)) (append others (cons attached (nil Spare))))
+                  (let e (display_buffer_at d cid (mul cw s) (mul ch s) sd (.dva sp) (.pages sp))
+                    (if (is_empty e)
+                        (let k (shape_content d cid (.deco win) cw ch) ((Ok (list Spare) (list int)) (append others (cons attached (nil Spare)))))
+                        ((Err (list Spare) (list int)) e))))))))))
 
-; The buffer at va, pages of it, its rows sd apart, new to wm, given to
-; the display as win's other buffer, attached, the one it had given up
-; first; or why not, its pages given up again.
-(def spare_shared ((d Display) (win Win) (va int) (pages int) (sd int)) (Result Spare (list int))
-  (match win
-    ((Win id port pid x y cw ch top title tc cva tva bf app sz dc)
-      (let (s (display_scale d)
-            cid (win_spare_id win)
-            dr (spare_dropped d win))
-        (match (client_trimmed (display_buffer_shared d cid (mul cw s) (mul ch s) sd va pages) va pages)
-          ((Err e) (let u (client_given_up va pages false) ((Err Spare (list int)) e)))
-          ((Ok dva) (let k (shape_content d cid dc cw ch) ((Ok Spare (list int)) (Spare va pages dva sd cw ch true)))))))))
+; sps, none of them attached.
+(def unpended ((sps (list Spare))) (list Spare)
+  (if (is_empty sps) sps (cons (.pend (head sps) false) (unpended (tail sps)))))
+
+; win's other buffers once the buffer at va, pages of it, its rows sd
+; apart, new to wm, is given to the display as one of them, attached,
+; in a bank free or else the oldest one's, given up first; or why not,
+; its pages given up again.
+(def spare_shared ((d Display) (win Win) (va int) (pages int) (sd int)) (Result (list Spare) (list int))
+  (let (s (display_scale d)
+        cw (.cw win)
+        ch (.ch win))
+    (match (bank_made d win)
+      ((Banked k keep)
+        (let cid (content_id (.id win) k)
+          (match (client_trimmed (display_buffer_shared d cid (mul cw s) (mul ch s) sd va pages) va pages)
+            ((Err e) (let u (client_given_up va pages false) ((Err (list Spare) (list int)) e)))
+            ((Ok dva)
+              (let k2 (shape_content d cid (.deco win) cw ch)
+                ((Ok (list Spare) (list int)) (append (unpended keep) (cons (Spare va pages dva sd cw ch true k) (nil Spare))))))))))))
 
 ; Window win's client told its other buffer is released, if the display
-; says id, the other buffer's, is read no more: 0.
+; says id, one of its other buffers', not attached, is read no more: 0.
 (def release_told ((win Win) (id int)) int
-  (match (.spare (.bufs win))
-    ((NoSpare) 0)
-    ((Spare va n dva sd sw sh pend)
-      (if (and (not pend) (eq (win_spare_id win) id)) (win_tell win (release_notice 0)) 0))))
+  (if (released_in win (.spares (.bufs win)) id) (win_tell win (release_notice 0)) 0))
+
+; Whether id is the display's id of one of sps, win's, not attached.
+(def released_in ((win Win) (sps (list Spare)) (id int)) bool
+  (if (is_empty sps) false
+      (and (not (.pend (head sps))) (eq (spare_id win (head sps)) id)) true
+      (released_in win (tail sps) id)))
+
+; detach ID VA, from from: window ID's other buffer at VA here, which its
+; client paints no more, given up, its id forgotten by the display, as
+; a client that kept a third buffer while its window was resized gives
+; it up after. Nothing if the window has none there, or it is attached;
+; only the window's client may ask.
+(def detach_asked ((v Wm) (from int) (id int) (va int)) (Served Wm)
+  (match (find_win (.wins v) id)
+    ((None) (refused v (append "no window " (digits id))))
+    ((Some win)
+      (if (not (eq (.pid win) from))
+          (refused v "not that window's client")
+          (match (spare_at (.spares (.bufs win)) va)
+            ((None) (okay v))
+            ((Some sp)
+              (if (.pend sp)
+                  (okay v)
+                  (let u (spare_dropped (.d v) win sp)
+                    (okay (.wins v (replaced (.wins v) (.bufs win (.spares (.bufs win) (spares_but (.spares (.bufs win)) va))))))))))))))
 
 ; Each of ws told of the release of display buffer id, if it is its.
 (def releases_told ((ws (list Win)) (id int)) int
@@ -1660,7 +1772,7 @@
             t (if (is_empty (without_win ws id)) 0 (refocused ws (without_win ws id)))
             v3 (titles v2)
             k (match (find_win ws id) ((Some win) (win_bank win)) ((None) 0))
-            f1 (match (find_win ws id) ((Some win) (let f0 (spare_dropped d win) (display_forget d (win_content_id win)))) ((None) ""))
+            f1 (match (find_win ws id) ((Some win) (let f0 (spares_dropped d win (.spares (.bufs win))) (display_forget d (win_content_id win)))) ((None) ""))
             f2 (if (win_chromed ws id) (display_forget d (chrome_id id k)) "")
             u (give_up (with_id ws id) (display_scale d)))
         (okay v3)))))

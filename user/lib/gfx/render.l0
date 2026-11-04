@@ -494,11 +494,29 @@
   (mul (row_at (canvas_top f) (canvas_h f) y) (canvas_w f)))
 
 ; Pixels i up to n of the frame, by index, all color, opaque over a
-; region.
+; region: a run as long as a fill copies (fill_copy_least) in copies of
+; the color's bytes, at most fill_chunk pixels each, so that a screen
+; filled whole makes no screen of bytes.
 (def canvas_fill ((f Canvas) (c int) (i int) (n int)) Canvas
   (match f
-    ((Canvas fb w h top) (let k (fill fb (bit_or c (canvas_opaque)) i n) f))
+    ((Canvas fb w h top)
+      (let k (if (lt (sub n i) (fill_copy_least))
+                 (fill fb (bit_or c (canvas_opaque)) i n)
+                 (fill_chunks fb (color_bytes c (min (sub n i) (fill_chunk))) i n))
+        f))
     ((ArrayCanvas px w h top) (ArrayCanvas (fill_cells px c i n) w h top))))
+
+; The most pixels canvas_fill makes the bytes of at once.
+(def fill_chunk () int 4096)
+
+; Pixels i up to n of the region fb, as many as row holds at a time, its
+; bytes copied: 0.
+(def fill_chunks ((fb IoRegion) (row bytes) (i int) (n int)) int
+  (if (ge i n)
+      0
+      (let (k (min (sub n i) (div (bytes_len row) 4))
+            p (region_set_bytes fb (mul i 4) row 0 (mul k 4)))
+        (fill_chunks fb row (add i k) n))))
 
 ; Cells i up to n of px, all c.
 (def fill_cells ((px (array int)) (c int) (i int) (n int)) (array int)
@@ -577,11 +595,50 @@
       (let end (min (add y rh) (canvas_h f))
         (fill_rows f x (add x (sub rw 1)) (max y 0) end c))))
 
-; Columns x0 to x1 of rows y up to end, color c, those on the canvas.
+; Columns x0 to x1 of rows y up to end, color c, those on the canvas:
+; over a region, the row's pixels made once as bytes and copied into
+; each row (fill_rows_copied), a copy a row in place of a write every
+; two pixels, which at scale 2 made filling most of a paint; over an
+; array, a span a row.
 (def fill_rows ((f Canvas) (x0 int) (x1 int) (y int) (end int) (c int)) Canvas
+  (match f
+    ((Canvas fb w h top)
+      (match (clip_span x0 x1 w)
+        ((NoSpan) f)
+        ((Span lo hi)
+          (let n (add (sub hi lo) 1)
+            (if (lt n (fill_copy_least))
+                (fill_spans f x0 x1 y end c)
+                (fill_rows_copied f fb lo (color_bytes c n) (mul n 4) (max y 0) (min end h)))))))
+    ((ArrayCanvas px w h top) (fill_spans f x0 x1 y end c))))
+
+; fill_rows a span a row: columns x0 to x1 of rows y up to end.
+(def fill_spans ((f Canvas) (x0 int) (x1 int) (y int) (end int) (c int)) Canvas
   (if (ge y end)
       f
-      (fill_rows (span f y x0 x1 c) x0 x1 (add y 1) end c)))
+      (fill_spans (span f y x0 x1 c) x0 x1 (add y 1) end c)))
+
+; Rows y up to end of the region canvas f over fb, from column lo, the
+; first n bytes of row each, one copy a row.
+(def fill_rows_copied ((f Canvas) (fb IoRegion) (lo int) (row bytes) (n int) (y int) (end int)) Canvas
+  (if (ge y end)
+      f
+      (let k (region_set_bytes fb (mul (add (row_start f y) lo) 4) row 0 n)
+        (fill_rows_copied f fb lo row n (add y 1) end))))
+
+; The fewest pixels across that a fill copies a row of, rather than
+; writing two pixels at a time: fewer cost more to make than they save.
+(def fill_copy_least () int 16)
+
+; n pixels of color c, opaque, as a region canvas holds them: four bytes
+; each, blue, green, red, alpha, least significant first, made by
+; doubling, so at least n pixels long.
+(def color_bytes ((c int) (n int)) bytes
+  (color_bytes_doubled (bytes_from_list (u32_le (bit_or c (canvas_opaque)))) (mul n 4)))
+
+; b doubled until it is at least n bytes long.
+(def color_bytes_doubled ((b bytes) (n int)) bytes
+  (if (ge (bytes_len b) n) b (color_bytes_doubled (bytes_concat (cons b (cons b (nil bytes)))) n)))
 
 ; The edge of the rectangle rw by rh from x, y, one pixel wide, color c,
 ; inside it; nothing if it is empty.

@@ -317,14 +317,15 @@ Things to try:
   is. Each line gives a window's id, title, x, y, width and height,
   `front` for the one in front or `-`, its client's pid, then `buffer`
   and the display's id of the content it shows, which flips between the
-  window's two at each frame a toolkit window paints, and `frames` and
+  window's two at each frame a toolkit window paints (and a third's, from
+  200000, after a resize), and `frames` and
   how many frames `wm` has told its client. With a Terminal and then the
   System Monitor opened from Applications:
 
   ```
   l0s> run windows
   1 Processes 100 90 840 429 front 20 buffer 10 frames 3
-  0 vt1 40 40 640 384 - 18 buffer 4 frames 0
+  0 vt1 40 40 640 384 - 18 buffer 4 frames 2
   pointer 0 0
   ```
 

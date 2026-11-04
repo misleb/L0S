@@ -1,6 +1,6 @@
 # 0039: Drawing areas paced too, and a resize that overlaps the restack
 
-Track: Toolkit · Status: idea · Needs: – · Spec: toolkit.md, desktop.md
+Track: Toolkit · Status: active · Needs: – · Spec: toolkit.md, desktop.md
 
 ## Why
 
@@ -22,6 +22,72 @@ them two buffers, with two limits it left
   A third buffer, as Mesa's Wayland clients keep when they must, would
   let it paint while the restack runs.
 
+## Done when
+
+- `vt`'s terminal is drawn in the buffer the screen does not show, at
+  most once a frame, and the toolkit's limit of a drawing area "shown
+  half painted" is gone from toolkit.md and desktop.md.
+- A scripted drag of a window's edge on QEMU shows about as many sizes
+  as one buffer did (0006's 159), more than two buffers' 133.
+- `make check`, `make test` and `make e2e` pass, and the third buffer
+  and `vt`'s pacing have run on the Pi 5 with nothing refused.
+
+## Steps
+
+- [x] The toolkit's drawing areas in the buffer painted next:
+  `ui_win_drawing` gives the canvas a program draws on, that buffer
+  brought up to what the screen shows, or says to draw later while the
+  window waits; `ui_win_drew` keeps what was drawn for the next
+  `ui_present` to damage; `ui_win_lost` counts the times what was drawn
+  was lost. A window whose next buffer cannot be shared is painted in
+  the buffer shown from then on (`ui_win_single`), where it stayed as
+  the compositor showed it. `ui_win_damaged` goes.
+- [x] `vt` draws through it: what output changed is due (`Due`, the
+  rows scrolled and the rows changed, put together while the window
+  waits), drawn at the next step the window may, and presented; what
+  was last drawn whole is a `View` of the area, the window's losses,
+  the tab and how far back, no longer the canvas.
+- [x] A third buffer while resized: `wm` keeps up to two other buffers
+  a window, each in a bank of its own, the third bank's ids from
+  `third_id`, 200000; `detach ID VA` gives one up. The toolkit keeps
+  its buffers not shown as a list, the oldest given up first, a release
+  the oldest's; while resized it waits for no frame and makes a third
+  rather than wait for a release, and gives a third up once released
+  and not resized.
+- [ ] On the Pi 5 (to check on the board, `hvs`): with the desktop up,
+  drag a window's edge, and type in Terminal and run something that
+  prints a lot (`ls -l /bin`, a long `cat`): no torn or half-drawn
+  terminal, `run windows` shows a window's `buffer` an id from 200000
+  after a drag and back to its two after the next change, and `dmesg`
+  shows no `refused:` from `hvs` or `wm`.
+
+## Spec changes
+
+All moved: toolkit.md's "Paced, in two buffers" and "Drawing areas,
+paced too", its Limits, and the `window.l0` and `uiapp.l0` rows;
+desktop.md's `attach` and `detach`, the buffer ids, the releases and
+the resize paragraph; demo.md's `run windows` sample. The board's
+results go in the Log.
+
 ## Log
 
 - 2026-10-29: written from 0006's step 4.
+- 2026-11-03: active; steps written, and steps 1 to 3. Measured on this
+  host's QEMU (4 CPUs, 2D, 1280×800) with a script kept out of the
+  tree: the gallery opened by `run widgets` in `screen.cpio`, its right
+  edge dragged 240 pixels in and out twice, 6 at a step 30 ms apart,
+  160 moves, and the frames `wm` told the window counted from `run
+  windows` (one a size shown). `main` before: 133, 132 and 135 sizes in
+  7.2 to 7.4 s. With the third buffer: 154, 155 and 153 in 7.0 s. The
+  frame wait had to go too while resized, not only the release's: both
+  come with the restack that shows the last size, so a third buffer
+  alone would have waited as long. `vt`, now paced, asks its frames:
+  the `virtio-gpu` e2e case's `run windows` says `frames 2` for its
+  window where it said 0, the same on five runs. The first `make e2e`
+  caught `resize.sh` and `files.sh` stuck after two sizes: a window's
+  first buffer, made at open with no room, is given up at its first
+  resize (`detach`), leaving `wm` none of its other buffers, which it
+  took for a client of one buffer, giving up the content it had while
+  the client waited for its release. `wm` now keeps it for a client
+  that asked for its frame, as a paced one does before it resizes.
+  Timed again after: 156, 156 and 149 sizes.
