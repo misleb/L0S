@@ -1,0 +1,207 @@
+; speak.l0 -- says text aloud (roadmap 0062): its words through a Piper
+; voice, made on the board by speech/piper.l0, and played through the
+; audio driver a sentence at a time, at twice the voice's rate (22,050 Hz
+; voices at 44,100), each sample followed by its mean with the next; or
+; written as a WAV file at the voice's own rate.
+;
+;   speak [-t] [-0] [-v VOICE] [-d DICT] [-o FILE.wav] TEXT...
+;
+; -0 makes the voice's noise 0, as the reference's oracle runs it;
+; otherwise its noise is the voice's config's, from a fixed seed, the
+; same each run. -t says on standard error how long each part took. The
+; voice is VOICE (its config VOICE.json beside it) and the pronouncing
+; dictionary DICT, by default the data volume's, where the installer
+; puts them. Each sentence is normalized, its loudest sample full scale,
+; as Piper's own are.
+
+; What ends speak, said as speak on standard error: 1.
+(def complain ((why (list int))) int (complain_as "speak" why))
+
+; Where the voice and the dictionary are if none is given.
+(def speak_voice () (list int) "/Volumes/data/speech/en_US-ljspeech-medium.onnx")
+(def speak_dict () (list int) "/Volumes/data/speech/cmudict.dict")
+
+; What the arguments ask: the text's words, said exactly (noise 0) or
+; not, timed or not, by a voice and a dictionary, into a file or aloud;
+; or why they ask nothing.
+(data SpeakAsk (SpeakAsk (exact bool) (timed bool) (voice (list int)) (dict (list int)) (out (list int)) (words (list (list int)))) (SpeakWrong (list int)))
+
+; The usage.
+(def speak_usage () (list int) "usage: speak [-t] [-0] [-v VOICE] [-d DICT] [-o FILE.wav] TEXT...")
+
+; The arguments as is asked: the options, then the text.
+(def speak_ask_of ((as (list (list int)))) SpeakAsk
+  (speak_options as (SpeakAsk false false (speak_voice) (speak_dict) "" (nil (list int)))))
+(def speak_options ((as (list (list int))) (a SpeakAsk)) SpeakAsk
+  (if (is_empty as)
+      (SpeakWrong (speak_usage))
+      (let (o (head as) r (tail as))
+        (if (eq o "-0") (speak_options r (speak_set_exact a))
+            (eq o "-t") (speak_options r (speak_set_timed a))
+            (and (any_eq o (split_spaces "-v -d -o")) (is_empty r)) (SpeakWrong (speak_usage))
+            (eq o "-v") (speak_options (tail r) (speak_set a 0 (head r)))
+            (eq o "-d") (speak_options (tail r) (speak_set a 1 (head r)))
+            (eq o "-o") (speak_options (tail r) (speak_set a 2 (head r)))
+            (match a
+              ((SpeakWrong why) a)
+              ((SpeakAsk e t v d out ws) (SpeakAsk e t v d out as)))))))
+
+; a with its noise 0, timed, or with its voice (0), dictionary (1) or
+; file (2) given.
+(def speak_set_exact ((a SpeakAsk)) SpeakAsk
+  (match a ((SpeakWrong why) a) ((SpeakAsk e t v d out ws) (SpeakAsk true t v d out ws))))
+(def speak_set_timed ((a SpeakAsk)) SpeakAsk
+  (match a ((SpeakWrong why) a) ((SpeakAsk e t v d out ws) (SpeakAsk e true v d out ws))))
+(def speak_set ((a SpeakAsk) (k int) (s (list int))) SpeakAsk
+  (match a
+    ((SpeakWrong why) a)
+    ((SpeakAsk e t v d out ws) (SpeakAsk e t (if (eq k 0) s v) (if (eq k 1) s d) (if (eq k 2) s out) ws))))
+
+; What speak does with its arguments: the voice and the dictionary
+; loaded, the text's sentences made, and each played or all written.
+(def speak_main ((as (list (list int)))) int
+  (match (speak_ask_of as)
+    ((SpeakWrong why) (complain why))
+    ((SpeakAsk exact timed voice dict out words)
+      (let t0 (clock_ns)
+        (match (speak_load voice dict)
+          ((Err why) (complain why))
+          ((Ok sp)
+            (let (n (if timed (note_as "speak" (append "voice loaded in " (speak_ms t0))) 0)
+                  sentences (phon_sentences (.ph sp) (unwords words)))
+              (if (is_empty sentences)
+                  (complain "nothing to say")
+                  (if (is_empty out)
+                      (speak_aloud sp sentences exact timed)
+                      (speak_to_file sp sentences exact timed out))))))))))
+
+; A voice ready to speak: its model and its words.
+(data Speaker (Speaker (p Piper) (ph Phonemizer)))
+
+; The voice at path, its config beside it, and the dictionary; or why
+; not.
+(def speak_load ((voice (list int)) (dict (list int))) (Result Speaker (list int))
+  (match (read_whole (append voice ".json"))
+    ((Err why) ((Err Speaker (list int)) (append voice (append ".json: " why))))
+    ((Ok cb)
+      (match (voice_config_of cb)
+        ((Err why) ((Err Speaker (list int)) (append voice (append ".json: " why))))
+        ((Ok cfg)
+          (match (read_whole voice)
+            ((Err why) ((Err Speaker (list int)) (append voice (append ": " why))))
+            ((Ok vb)
+              (match (piper_of vb cfg)
+                ((Err why) ((Err Speaker (list int)) (append voice (append ": " why))))
+                ((Ok p)
+                  (match (read_whole dict)
+                    ((Err why) ((Err Speaker (list int)) (append dict (append ": " why))))
+                    ((Ok db) ((Ok Speaker (list int)) (Speaker p (phon_new db))))))))))))))
+
+; Milliseconds since t0, as words.
+(def speak_ms ((t0 int)) (list int)
+  (append (digits (div (sub (clock_ns) t0) 1000000)) " ms"))
+
+; The sentences made in order, each as 16-bit PCM at the voice's rate,
+; reversed onto acc; the seed carried from one to the next.
+(def speak_made ((sp Speaker) (ss (list (list int))) (exact bool) (timed bool) (seed int) (acc (list bytes))) (list bytes)
+  (if (is_empty ss)
+      acc
+      (let s (speak_sentence sp (head ss) exact timed seed)
+        (speak_made sp (tail ss) exact timed (.seed s) (cons (piper_pcm (.audio s)) acc)))))
+
+; One sentence made, and said as timed.
+(def speak_sentence ((sp Speaker) (s (list int)) (exact bool) (timed bool) (seed int)) PiperSaid
+  (let (t0 (clock_ns)
+        said (piper_say_ids (.p sp) (phon_ids (.cfg (.p sp)) s) exact seed)
+        n (if timed (note_as "speak" (speak_times_text (.t (.audio said)) (.rate (.cfg (.p sp))) (sub (clock_ns) t0))) 0))
+    said))
+
+; How long a sentence of n samples at rate is, and took to make.
+(def speak_times_text ((n int) (rate int) (made int)) (list int)
+  (append (digits (div (mul n 1000) rate)) (append " ms of speech made in " (append (digits (div made 1000000)) " ms"))))
+
+; All the sentences made and written to the file out, one WAV at the
+; voice's rate.
+(def speak_to_file ((sp Speaker) (ss (list (list int))) (exact bool) (timed bool) (out (list int))) int
+  (let (pcm (bytes_concat (rev (speak_made sp ss exact timed (piper_seed) (nil bytes))))
+        rate (.rate (.cfg (.p sp)))
+        why (write_whole out (bytes_concat (cons (bytes_from_list (wav_header rate 1 (bytes_len pcm))) (cons pcm (nil bytes))))))
+    (if (is_empty why) 0 (complain (append out (append ": " why))))))
+
+; ------------------------------------------------------------ aloud
+
+; Pages in the buffer the samples go through: 16 KB.
+(def speak_pages () int 4)
+
+; How long it waits while the driver has no room, in ns: about a period.
+(def speak_wait_ns () int 10000000)
+
+; The sentences played through the driver, at twice the voice's rate,
+; each made and then played, until the last has.
+(def speak_aloud ((sp Speaker) (ss (list (list int))) (exact bool) (timed bool)) int
+  (let rate (mul 2 (.rate (.cfg (.p sp))))
+    (if (not (audio_rate_ok rate))
+        (complain (append "the voice's rate doubled is " (append (digits rate) (append " Hz; the driver plays " (audio_rates)))))
+        (match (audio_open)
+          ((NoAudio why) (complain why))
+          ((Audio port rp pid)
+            (let (a (Audio port rp pid) why (audio_start a rate))
+              (if (not (is_empty why))
+                  (complain why)
+                  (match (audio_buffer a (speak_pages))
+                    ((NoAudioBuf why2) (complain why2))
+                    ((AudioBuf va n there r) (speak_played sp a (AudioBuf va n there r) ss exact timed (piper_seed)))))))))))
+
+; Each sentence from ss made, doubled and offered; then the end waited
+; for.
+(def speak_played ((sp Speaker) (a Audio) (buf AudioBuf) (ss (list (list int))) (exact bool) (timed bool) (seed int)) int
+  (if (is_empty ss)
+      (speak_drained a)
+      (let (s (speak_sentence sp (head ss) exact timed seed)
+            pcm (speak_doubled (piper_pcm (.audio s)))
+            r (speak_offered a buf pcm 0 (bytes_len pcm)))
+        (if (not (eq r 0)) r (speak_played sp a buf (tail ss) exact timed (.seed s))))))
+
+; 16-bit PCM at twice its rate: each sample, then its mean with the
+; next (the last, itself).
+(def speak_doubled ((pcm bytes)) bytes
+  (let n (div (bytes_len pcm) 2)
+    (bytes_from_list (rev (speak_doubled_from pcm 0 n (nil int))))))
+(def speak_doubled_from ((pcm bytes) (k int) (n int) (acc (list int))) (list int)
+  (if (ge k n)
+      acc
+      (let (a (speak_sample pcm k)
+            b (if (lt (add k 1) n) (speak_sample pcm (add k 1)) a)
+            m (div (add a b) 2))
+        (speak_doubled_from pcm (add k 1) n (speak_push_sample m (speak_push_sample a acc))))))
+
+; Sample k of pcm, signed; and a sample's two bytes onto the reversed acc.
+(def speak_sample ((pcm bytes) (k int)) int
+  (let u (le_u16_at pcm (mul 2 k)) (if (ge u 32768) (sub u 65536) u)))
+(def speak_push_sample ((v int) (acc (list int))) (list int)
+  (let u (if (lt v 0) (add v 65536) v)
+    (cons (bit_shr u 8) (cons (bit_and u 255) acc))))
+
+; The samples from i up to e offered, again from wherever the driver
+; stopped taking.
+(def speak_offered ((a Audio) (buf AudioBuf) (b bytes) (i int) (e int)) int
+  (if (ge i e)
+      0
+      (match (audio_play a buf b i e 1)
+        ((Err why) (complain why))
+        ((Ok k)
+          (if (eq k 0)
+              (let z (sleep_ns (speak_wait_ns)) (speak_offered a buf b i e))
+              (speak_offered a buf b (add i (mul k 2)) e))))))
+
+; 0 once the driver has played all it was given.
+(def speak_drained ((a Audio)) int
+  (match (audio_info a)
+    ((Err why) (complain why))
+    ((Ok i)
+      (match i
+        ((AudioInfo rate queued room)
+          (if (eq queued 0) 0 (let z (sleep_ns (speak_wait_ns)) (speak_drained a))))))))
+
+; speak's arguments, done.
+(def speak () int (speak_main (args)))

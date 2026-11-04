@@ -294,6 +294,16 @@ WHISTLE := $(CACT) $(MEL) $(NN) user/lib/speech/whistle.l0
 ENCODER := $(WHISTLE) user/lib/speech/encoder.l0
 DECODER := $(ENCODER) user/lib/speech/decoder.l0
 TRANSCRIBE := $(WAV) $(DECODER) user/lib/speech/transcribe.l0
+# A Piper voice (roadmap 0062): an ONNX model's weights read in place,
+# and the voice's JSON config.
+ONNX    := user/lib/format/onnx.l0
+VOICE   := $(JSON) user/lib/speech/voice.l0
+# English text to the voice's phonemes and IDs, through CMUdict.
+PHONEMES := $(VOICE) user/lib/speech/phonemes.l0
+# VITS's arithmetic over channel-last tensors, and the voice's model:
+# phoneme IDs to samples.
+VITS    := $(MEL) user/lib/speech/vits.l0
+PIPER   := $(ONNX) $(VOICE) $(VITS) user/lib/speech/piper.l0
 MICLIB  := user/lib/proto/mic.l0
 # The speech protocol, the speech service's, and its client.
 SPEECHLIB := user/lib/proto/speech.l0
@@ -375,6 +385,7 @@ LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
 LIBS_play       := $(AUDIOLIB) $(WAV) $(PCM)
 LIBS_rec        := $(MICLIB) $(WAV)
 LIBS_listen     := $(TRANSCRIBE)
+LIBS_speak      := $(AUDIOLIB) $(WAV) $(PIPER) user/lib/speech/phonemes.l0
 LIBS_speech     := $(TRANSCRIBE) $(MICLIB) $(AGENTLIB) $(SPEECHLIB) $(RECT) $(WMLIB)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS)
@@ -633,6 +644,11 @@ $(call l0_test,$(BASE) $(WHISTLE) user/lib/speech/whistle_test.l0)
 $(call l0_test,$(BASE) $(ENCODER) user/lib/speech/encoder_test.l0)
 $(call l0_test,$(BASE) $(DECODER) user/lib/speech/decoder_test.l0)
 $(call l0_test,$(BASE) $(CLI) $(TRANSCRIBE) user/lib/speech/transcribe_test.l0)
+$(call l0_test,$(BASE) $(ONNX) user/lib/format/onnx_test.l0)
+$(call l0_test,$(BASE) $(VOICE) user/lib/speech/voice_test.l0)
+$(call l0_test,$(BASE) $(PHONEMES) user/lib/speech/phonemes_test.l0)
+$(call l0_test,$(BASE) $(VITS) user/lib/speech/vits_test.l0)
+$(call l0_test,$(BASE) $(PIPER) user/lib/speech/piper_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(CRC32) $(PNG) user/lib/format/png_test.l0)
 $(call l0_test,$(BASE) $(CRC32) $(PNG) $(INFLATE) user/lib/format/inflate_test.l0)
@@ -1000,9 +1016,46 @@ $(BUILD)/fetch/whistle.cact:
 $(BUILD)/fetch/pieeprom-$(PIEEPROM_VERSION).bin:
 	$(call fetch_pinned,$(PIEEPROM_URL),$(PIEEPROM_SHA256))
 
-release: initramfs pi5-release-card release-apps $(WHISTLE_MODEL) $(PIEEPROM)
-	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
-	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) PIEEPROM=$(PIEEPROM) tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-release-card
+# The voice speak speaks with (roadmap 0062): Piper's en_US-ljspeech-medium
+# (LJSpeech, public domain), its config and model card, and CMUdict
+# (BSD 2-clause), each at a pinned commit and kept only if its SHA-256 is
+# the one below; probes/piper/README.md says what each is. PIPER_VOICE
+# and CMUDICT name files of your own instead (the config is the voice's
+# name with .json added), and nothing is fetched.
+PIPER_COMMIT   := e7229f7d33a10e145e109b886d661984201ac3c4
+PIPER_BASE     := https://huggingface.co/rhasspy/piper-voices/resolve/$(PIPER_COMMIT)/en/en_US/ljspeech/medium
+PIPER_SHA256   := 6f52a751e2349abe7a76735eb09dc1875298c77ea2342ffd2fef79ff81b87f22
+PIPER_JSON_SHA256 := 141d612cc0a95ed7efc1ca936b845c2364967f2e9217c5dbfcf69fc4d6c65860
+PIPER_CARD_SHA256 := fbee1529c89d36b3fe76d7e9f3f832dce17f44900a52d76a9bda735654766b4d
+CMUDICT_COMMIT := 74790861f652b15e4ac49015a90074ad62a27690
+CMUDICT_BASE   := https://raw.githubusercontent.com/cmusphinx/cmudict/$(CMUDICT_COMMIT)
+CMUDICT_SHA256 := 81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22
+CMUDICT_LICENSE_SHA256 := bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a
+PIPER_VOICE ?= $(BUILD)/fetch/en_US-ljspeech-medium.onnx
+CMUDICT     ?= $(BUILD)/fetch/cmudict.dict
+
+$(BUILD)/fetch/en_US-ljspeech-medium.onnx:
+	$(call fetch_pinned,$(PIPER_BASE)/en_US-ljspeech-medium.onnx,$(PIPER_SHA256))
+
+$(BUILD)/fetch/en_US-ljspeech-medium.onnx.json:
+	$(call fetch_pinned,$(PIPER_BASE)/en_US-ljspeech-medium.onnx.json,$(PIPER_JSON_SHA256))
+
+$(BUILD)/fetch/MODEL_CARD:
+	$(call fetch_pinned,$(PIPER_BASE)/MODEL_CARD,$(PIPER_CARD_SHA256))
+
+$(BUILD)/fetch/cmudict.dict:
+	$(call fetch_pinned,$(CMUDICT_BASE)/cmudict.dict,$(CMUDICT_SHA256))
+
+$(BUILD)/fetch/cmudict.LICENSE:
+	$(call fetch_pinned,$(CMUDICT_BASE)/LICENSE,$(CMUDICT_LICENSE_SHA256))
+
+# piper-fetch: the voice and the dictionary, for speak and its tests.
+.PHONY: piper-fetch
+piper-fetch: $(PIPER_VOICE) $(CMUDICT) $(BUILD)/fetch/en_US-ljspeech-medium.onnx.json $(BUILD)/fetch/MODEL_CARD $(BUILD)/fetch/cmudict.LICENSE
+
+release: initramfs pi5-release-card release-apps $(WHISTLE_MODEL) $(PIEEPROM) $(PIPER_VOICE) $(PIPER_VOICE).json $(CMUDICT)
+	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) PIPER_VOICE=$(PIPER_VOICE) CMUDICT=$(CMUDICT) tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
+	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) PIPER_VOICE=$(PIPER_VOICE) CMUDICT=$(CMUDICT) PIEEPROM=$(PIEEPROM) tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-release-card
 
 # The knowledge graph, which /graphify built first: graphify's own Python,
 # as it wrote it down, rebuilds it with the L0 sources it cannot read.

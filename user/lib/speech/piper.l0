@@ -1,0 +1,545 @@
+; piper.l0 -- a Piper voice's model (roadmap 0062), VITS as Piper trains
+; it, written again from piper's train/vits (models.py, modules.py,
+; attentions.py, transforms.py) over the weights an ONNX file holds:
+; phoneme IDs to samples. Its parts, each as the medium voices have it
+; (probes/piper/README.md lists the shapes):
+;
+;   the text encoder     an embedding, 6 layers of attention with
+;                        relative positions and a convolutional FFN,
+;                        layer norms; projected to the prior's means and
+;                        log deviations
+;   the duration         stochastic, run in reverse from noise: a
+;   predictor            DDSConv over the encoder's rows, then flows,
+;                        rational-quadratic splines, back to log durations
+;   the flow             4 residual couplings of WaveNets, in reverse,
+;                        from the prior stretched over the frames
+;   the vocoder          HiFi-GAN: upsampled by transposed convolutions,
+;                        each followed by three ResBlock2s, then tanh
+;
+; Every convolution's weights are laid out once, at load, as vits.l0
+; reads them. Linked with ONNX, VOICE and VITS as PIPER in the Makefile.
+
+; ---------------------------------------------------------------- types
+
+; A voice: its model's file, its config, and its convolutions by name
+; (the module's path, as "enc_p.proj"), laid out.
+(data Piper (Piper (o Onnx) (cfg VoiceConfig) (convs (Map (list int) VtConv))))
+
+; What the text encoder gives: its rows, and the prior's means and log
+; deviations, a phoneme a row each.
+(data PiperEnc (PiperEnc (x Vt) (m Vt) (logs Vt)))
+
+; ---------------------------------------------------------------- loading
+
+; The voice in the ONNX file's bytes b and its config, every convolution
+; it uses laid out; or why it is none.
+(def piper_of ((b bytes) (cfg VoiceConfig)) (Result Piper (list int))
+  (match (onnx_of b)
+    ((Err why) ((Err Piper (list int)) why))
+    ((Ok o) (match (piper_load o (piper_conv_names) ((MapEmpty (list int) VtConv)))
+              ((Err why) ((Err Piper (list int)) why))
+              ((Ok m) ((Ok Piper (list int)) (Piper o cfg m)))))))
+
+; The convolutions named, put into m: each NAME's weight and bias, or
+; for a name with a # in it, a node's input, and the bias by the path
+; it ends in after the #.
+(def piper_load ((o Onnx) (names (list (list int))) (m (Map (list int) VtConv))) (Result (Map (list int) VtConv) (list int))
+  (if (is_empty names)
+      ((Ok (Map (list int) VtConv) (list int)) m)
+      (let (n (head names)
+            key (up_to 35 n)
+            wname (if (any_eq 35 n) (append (piper_node key) "#1") (append key ".weight")))
+        (match (onnx_find o wname)
+          ((None) ((Err (Map (list int) VtConv) (list int)) (append "the voice has no " wname)))
+          ((Some w) (piper_load o (tail names) (map_put m key (piper_conv_of o w (onnx_find o (append key ".bias")) (piper_is_transposed key)))))))))
+
+; The ONNX node a module's convolution is: flow.flows.0.enc.in_layers.1
+; is /flow/flows.0/enc/in_layers.1/Conv.
+(def piper_node ((path (list int))) (list int)
+  (append "/" (append (piper_dots_to_slashes path) "/Conv")))
+(def piper_dots_to_slashes ((s (list int))) (list int)
+  (if (is_empty s) s
+      (let (c (head s) r (tail s))
+        (if (and (eq c 46) (and (not (is_empty r)) (not (and (ge (head r) 48) (le (head r) 57)))))
+            (cons 47 (piper_dots_to_slashes r))
+            (cons c (piper_dots_to_slashes r))))))
+
+; Whether the module is a transposed convolution, the vocoder's ups.
+(def piper_is_transposed ((key (list int))) bool (starts_with key "dec.ups."))
+
+; The convolution of weight w and bias, laid out: ONNX's [out, in, k]
+; as [out][k][in], and a transposed one's [in, out, k] as [k][out][in].
+(def piper_conv_of ((o Onnx) (w OnnxTensor) (bias (Option OnnxTensor)) (transposed bool)) VtConv
+  (let (sh (.shape w)
+        a (nth sh 0) b (nth sh 1) k (nth sh 2)
+        bb (match bias ((None) (vt_zero_bytes 0)) ((Some t) (bytes_slice (.b o) (.at t) (add (.at t) (.len t))))))
+    (if transposed
+        (VtConv b a k (piper_relayout (.b o) (.at w) a b k (vt_zero_bytes (mul a (mul b k))) true 0 (mul a (mul b k))) bb)
+        (VtConv a b k (if (eq k 1) (bytes_slice (.b o) (.at w) (add (.at w) (.len w))) (piper_relayout (.b o) (.at w) a b k (vt_zero_bytes (mul a (mul b k))) false 0 (mul a (mul b k)))) bb))))
+
+; The numbers of src from at, [a][b][k], into dst as [a][k][b], or for
+; a transposed one as [k][b][a]; r counts through src.
+(def piper_relayout ((src bytes) (at int) (a int) (b int) (k int) (dst bytes) (transposed bool) (r int) (n int)) bytes
+  (if (ge r n)
+      dst
+      (let (i (div r (mul b k))
+            j (mod (div r k) b)
+            kk (mod r k)
+            v (bytes_get_f32 src (add at (mul 4 r)))
+            to (if transposed (add (mul (add (mul kk b) j) a) i) (add (mul (add (mul i k) kk) b) j)))
+        (piper_relayout src at a b k (bytes_set_f32 dst (mul 4 to) v) transposed (add r 1) n))))
+
+; Every convolution the model uses, by module path; a flow's WaveNet
+; layers, whose weights the export left anonymous, with a #.
+(def piper_conv_names () (list (list int))
+  (append (piper_enc_names 0 (nil (list int)))
+          (append (piper_dp_names)
+                  (append (piper_flow_names 0 (nil (list int)))
+                          (piper_dec_names)))))
+(def piper_enc_names ((l int) (acc (list (list int)))) (list (list int))
+  (if (ge l 6)
+      (rev (cons "enc_p.proj" acc))
+      (piper_enc_names (add l 1)
+                         (rev_onto (piper_prefixed (append "enc_p.encoder.attn_layers." (digits l)) (split_spaces ".conv_q .conv_k .conv_v .conv_o"))
+                                   (rev_onto (piper_prefixed (append "enc_p.encoder.ffn_layers." (digits l)) (split_spaces ".conv_1 .conv_2")) acc)))))
+(def piper_dp_names () (list (list int))
+  (append (piper_dds "dp.convs") (append (split_spaces "dp.pre dp.proj")
+          (append (piper_cflow "dp.flows.3") (append (piper_cflow "dp.flows.5") (piper_cflow "dp.flows.7"))))))
+(def piper_cflow ((p (list int))) (list (list int))
+  (append (piper_prefixed p (split_spaces ".pre .proj")) (piper_dds (append p ".convs"))))
+(def piper_dds ((p (list int))) (list (list int))
+  (piper_prefixed p (split_spaces ".convs_sep.0 .convs_sep.1 .convs_sep.2 .convs_1x1.0 .convs_1x1.1 .convs_1x1.2")))
+(def piper_flow_names ((f int) (acc (list (list int)))) (list (list int))
+  (if (gt f 6)
+      (rev acc)
+      (let p (append "flow.flows." (digits f))
+        (piper_flow_names (add f 2)
+                          (rev_onto (append (piper_prefixed p (split_spaces ".pre .post"))
+                                            (piper_prefixed p (split_spaces ".enc.in_layers.0# .enc.in_layers.1# .enc.in_layers.2# .enc.in_layers.3# .enc.res_skip_layers.0# .enc.res_skip_layers.1# .enc.res_skip_layers.2# .enc.res_skip_layers.3#")))
+                                    acc)))))
+(def piper_dec_names () (list (list int))
+  (append (split_spaces "dec.conv_pre dec.conv_post dec.ups.0 dec.ups.1 dec.ups.2")
+          (piper_resblock_names 0 (nil (list int)))))
+(def piper_resblock_names ((r int) (acc (list (list int)))) (list (list int))
+  (if (ge r 9)
+      (rev acc)
+      (let p (append "dec.resblocks." (digits r))
+        (piper_resblock_names (add r 1) (rev_onto (piper_prefixed p (split_spaces ".convs.0 .convs.1")) acc)))))
+
+; Each of ss after p.
+(def piper_prefixed ((p (list int)) (ss (list (list int)))) (list (list int))
+  (if (is_empty ss) ss (cons (append p (head ss)) (piper_prefixed p (tail ss)))))
+
+; The convolution at path, laid out at load.
+(def piper_conv ((p Piper) (path (list int))) VtConv
+  (match (map_get (.convs p) path)
+    ((None) (VtConv 0 0 0 (vt_zero_bytes 0) (vt_zero_bytes 0)))
+    ((Some c) c)))
+
+; A tensor's numbers as bytes, by its name: a norm's, an embedding's.
+(def piper_vec ((p Piper) (name (list int))) bytes
+  (match (onnx_find (.o p) name)
+    ((None) (vt_zero_bytes 0))
+    ((Some t) (bytes_slice (.b (.o p)) (.at t) (add (.at t) (.len t))))))
+
+; ------------------------------------------------------ the text encoder
+
+; The text encoder over the phoneme IDs: their embeddings times √192,
+; the 6 layers, and the projection, split into means and log deviations.
+(def piper_encode ((p Piper) (ids (list int))) PiperEnc
+  (let (x0 (piper_embed (piper_vec p "/enc_p/emb/Gather#0") ids 192)
+        x (piper_layers p x0 0)
+        st (vt_conv x (piper_conv p "enc_p.proj") 1 0 0))
+    (PiperEnc x (vt_cols st 0 192) (vt_cols st 192 192))))
+
+; The rows of the embedding e (d numbers a symbol) of ids, times √d.
+(def piper_embed ((e bytes) (ids (list int)) (d int)) Vt
+  (let x (Vt (length ids) d (bytes_concat (piper_embed_rows e ids d)))
+    (vt_scale x (float_sqrt (float_from_int d)))))
+(def piper_embed_rows ((e bytes) (ids (list int)) (d int)) (list bytes)
+  (if (is_empty ids) (nil bytes)
+      (cons (bytes_slice e (mul 4 (mul (head ids) d)) (mul 4 (mul (add (head ids) 1) d))) (piper_embed_rows e (tail ids) d))))
+
+; Layer l and those after it: attention, a residual and its norm, the
+; FFN, a residual and its norm.
+(def piper_layers ((p Piper) (x Vt) (l int)) Vt
+  (if (ge l 6)
+      x
+      (let (n (digits l)
+            a (piper_attention p (append "enc_p.encoder.attn_layers." n) x)
+            x1 (vt_layer_norm (vt_add a x) (piper_vec p (append "enc_p.encoder.norm_layers_1." (append n ".gamma"))) (piper_vec p (append "enc_p.encoder.norm_layers_1." (append n ".beta"))) 0.00001)
+            f (piper_ffn p (append "enc_p.encoder.ffn_layers." n) x1)
+            x2 (vt_layer_norm (vt_add f x1) (piper_vec p (append "enc_p.encoder.norm_layers_2." (append n ".gamma"))) (piper_vec p (append "enc_p.encoder.norm_layers_2." (append n ".beta"))) 0.00001))
+        (piper_layers p x2 (add l 1)))))
+
+; The FFN: a convolution of 3 to 768, ReLU, a convolution of 3 back.
+(def piper_ffn ((p Piper) (path (list int)) (x Vt)) Vt
+  (let h (vt_map (vt_conv x (piper_conv p (append path ".conv_1")) 1 1 1) vt_relu)
+    (vt_conv h (piper_conv p (append path ".conv_2")) 1 1 1)))
+
+; Self-attention of 2 heads of 96 with relative positions within 4: the
+; queries, keys and values, each head's attention, and the output's
+; convolution.
+(def piper_attention ((p Piper) (path (list int)) (x Vt)) Vt
+  (let (q (vt_conv x (piper_conv p (append path ".conv_q")) 1 0 0)
+        k (vt_conv x (piper_conv p (append path ".conv_k")) 1 0 0)
+        v (vt_conv x (piper_conv p (append path ".conv_v")) 1 0 0)
+        ek (piper_vec p (append path ".emb_rel_k"))
+        ev (piper_vec p (append path ".emb_rel_v"))
+        out (piper_heads q k v ek ev 0 (vt_zeros (.t x) 192)))
+    (vt_conv out (piper_conv p (append path ".conv_o")) 1 0 0)))
+
+; Each head from h written into out.
+(def piper_heads ((q Vt) (k Vt) (v Vt) (ek bytes) (ev bytes) (h int) (out Vt)) Vt
+  (if (ge h 2) out (piper_heads q k v ek ev (add h 1) (piper_head q k v ek ev h 0 out))))
+
+; Head h's output at each row from i, into out: the scores of row i
+; against every row j, q_i·k_j and q_i·E_k[j - i + 4] for |j - i| ≤ 4,
+; over √96; their softmax; the values weighed by it, and E_v likewise.
+(def piper_head ((q Vt) (k Vt) (v Vt) (ek bytes) (ev bytes) (h int) (i int) (out Vt)) Vt
+  (let t (.t q)
+    (if (ge i t)
+        out
+        (let (s (piper_softmax (piper_scores q k ek h i 0 (array_new t 0.0)))
+              o (piper_weighed v ev s h i t))
+          (piper_head q k v ek ev h (add i 1) (piper_put_row out i (mul h 96) o 0))))))
+
+; Row i's scores against each row from j.
+(def piper_scores ((q Vt) (k Vt) (ek bytes) (h int) (i int) (j int) (s (array float))) (array float)
+  (if (ge j (.t q))
+      s
+      (let (qa (mul 4 (add (mul i 192) (mul h 96)))
+            r (sub j i)
+            dot (bytes_dot_f32 (.b q) qa (.b k) (mul 4 (add (mul j 192) (mul h 96))) 96)
+            rel (if (and (ge r -4) (le r 4)) (bytes_dot_f32 (.b q) qa ek (mul 4 (mul (add r 4) 96)) 96) 0.0)
+            sc (float_div (float_add dot rel) (float_sqrt 96.0)))
+        (piper_scores q k ek h i (add j 1) (array_set s j sc)))))
+
+; a turned into its softmax, in place.
+(def piper_softmax ((a (array float))) (array float)
+  (let (m (piper_most a 0 (array_get a 0))
+        e (piper_exps a 0 m 0.0))
+    (piper_scaled (.a e) 0 (float_div 1.0 (.s e)))))
+(def piper_most ((a (array float)) (k int) (m float)) float
+  (if (ge k (array_len a)) m (piper_most a (add k 1) (let x (array_get a k) (if (float_gt x m) x m)))))
+(data PiperSum (PiperSum (a (array float)) (s float)))
+(def piper_exps ((a (array float)) (k int) (m float) (s float)) PiperSum
+  (if (ge k (array_len a))
+      (PiperSum a s)
+      (let e (float_exp (float_sub (array_get a k) m))
+        (piper_exps (array_set a k e) (add k 1) m (float_add s e)))))
+(def piper_scaled ((a (array float)) (k int) (f float)) (array float)
+  (if (ge k (array_len a)) a (let x (array_get a k) (piper_scaled (array_set a k (float_mul x f)) (add k 1) f))))
+
+; The 96 numbers of head h at row i: the values weighed by s, then the
+; relative values by the weights of the rows within 4 of i.
+(def piper_weighed ((v Vt) (ev bytes) (s (array float)) (h int) (i int) (t int)) bytes
+  (let acc (piper_weigh_rows (.b v) s h 0 t (vt_zero_bytes 96))
+    (piper_weigh_rel ev s i t -4 acc)))
+(def piper_weigh_rows ((vb bytes) (s (array float)) (h int) (j int) (t int) (acc bytes)) bytes
+  (if (ge j t)
+      acc
+      (piper_weigh_rows vb s h (add j 1) t (bytes_axpy_f32 acc 0 (array_get s j) vb (mul 4 (add (mul j 192) (mul h 96))) 96))))
+(def piper_weigh_rel ((ev bytes) (s (array float)) (i int) (t int) (r int) (acc bytes)) bytes
+  (if (gt r 4)
+      acc
+      (let j (add i r)
+        (piper_weigh_rel ev s i t (add r 1)
+                         (if (and (ge j 0) (lt j t)) (bytes_axpy_f32 acc 0 (array_get s j) ev (mul 4 (mul (add r 4) 96)) 96) acc)))))
+
+; out with the 96 numbers of o at row i from channel c.
+(def piper_put_row ((out Vt) (i int) (c int) (o bytes) (k int)) Vt
+  (if (ge k 96)
+      out
+      (let v (bytes_get_f32 o (mul 4 k))
+        (piper_put_row (vt_put out i (add c k) v) i c o (add k 1)))))
+
+; ---------------------------------------------------- the duration predictor
+
+; The log durations of the encoder's rows x, a phoneme a row, the
+; stochastic predictor run in reverse from noise z (2 channels a row,
+; zeros for none): its conditioning from x, then its flows backwards,
+; the first ConvFlow left out, as VITS does.
+(def piper_log_durations ((p Piper) (x Vt) (z Vt)) Vt
+  (let (h0 (vt_conv x (piper_conv p "dp.pre") 1 0 0)
+        h1 (piper_dds_apply p "dp.convs" h0)
+        g (vt_conv h1 (piper_conv p "dp.proj") 1 0 0)
+        z1 (piper_conv_flow p "dp.flows.7" g (vt_flip z))
+        z2 (piper_conv_flow p "dp.flows.5" g (vt_flip z1))
+        z3 (piper_conv_flow p "dp.flows.3" g (vt_flip z2))
+        z4 (piper_affine_reverse p (vt_flip z3)))
+    (vt_cols z4 0 1)))
+
+; A DDSConv of 3 layers over x: each a depthwise convolution of 3,
+; dilated 1, 3, 9, a norm, GELU, a 1×1 convolution, a norm, GELU, added.
+(def piper_dds_apply ((p Piper) (path (list int)) (x Vt)) Vt
+  (piper_dds_layer p path x 0 1))
+(def piper_dds_layer ((p Piper) (path (list int)) (x Vt) (l int) (dil int)) Vt
+  (if (ge l 3)
+      x
+      (let (n (digits l)
+            y0 (vt_depthwise x (piper_conv p (append path (append ".convs_sep." n))) dil dil)
+            y1 (vt_map (vt_layer_norm y0 (piper_vec p (append path (append ".norms_1." (append n ".gamma")))) (piper_vec p (append path (append ".norms_1." (append n ".beta")))) 0.00001) vt_gelu)
+            y2 (vt_conv y1 (piper_conv p (append path (append ".convs_1x1." n))) 1 0 0)
+            y3 (vt_map (vt_layer_norm y2 (piper_vec p (append path (append ".norms_2." (append n ".gamma")))) (piper_vec p (append path (append ".norms_2." (append n ".beta")))) 0.00001) vt_gelu))
+        (piper_dds_layer p path (vt_add y3 x) (add l 1) (mul dil 3)))))
+
+; A ConvFlow in reverse over z (2 channels), conditioned on g: its first
+; channel through pre, the DDSConv with g added, and proj, 29 numbers a
+; row, the spline of 10 bins they give inverted on its second channel.
+(def piper_conv_flow ((p Piper) (path (list int)) (g Vt) (z Vt)) Vt
+  (let (x0 (vt_cols z 0 1)
+        x1 (vt_cols z 1 1)
+        h0 (vt_add (vt_conv x0 (piper_conv p (append path ".pre")) 1 0 0) g)
+        h1 (piper_dds_apply p (append path ".convs") h0)
+        h (vt_conv h1 (piper_conv p (append path ".proj")) 1 0 0))
+    (vt_join x0 (piper_spline_rows h x1 0))))
+
+; Each row from i of x1 through the inverse of row i of h's spline.
+(def piper_spline_rows ((h Vt) (x1 Vt) (i int)) Vt
+  (if (ge i (.t x1))
+      x1
+      (let y (spline_inverse (vt_at x1 i 0) (.b h) (mul 4 (mul i 29)))
+        (piper_spline_rows h (vt_put x1 i 0 y) (add i 1)))))
+
+; The ElementwiseAffine in reverse: (z - m) times e to the export's
+; exponent (its -logs), channel by channel.
+(def piper_affine_reverse ((p Piper) (z Vt)) Vt
+  (let (m (piper_vec p "dp.flows.0.m")
+        e (piper_vec p "/dp/flows.0/Exp#0"))
+    (piper_affine_rows z m e 0)))
+(def piper_affine_rows ((z Vt) (m bytes) (e bytes) (r int)) Vt
+  (if (ge r (vt_len z))
+      z
+      (let (i (div r 2) c (mod r 2)
+            v (float_mul (float_sub (vt_at z i c) (bytes_get_f32 m (mul 4 c))) (float_exp (bytes_get_f32 e (mul 4 c)))))
+        (piper_affine_rows (vt_put z i c v) m e (add r 1)))))
+
+; ------------------------------------------------------------ the spline
+
+; The inverse of the rational-quadratic spline of 10 bins on -5 to 5,
+; linear outside, whose 29 parameters are in b from byte at: 10 widths
+; and 10 heights over √192, 9 inner derivatives; at x.
+(def spline_inverse ((x float) (b bytes) (at int)) float
+  (if (or (float_lt x -5.0) (float_gt x 5.0))
+      x
+      (let (s (float_sqrt 192.0)
+            cw (spline_knots b at s)
+            ch (spline_knots b (add at 40) s)
+            d (spline_derivatives b (add at 80))
+            k (spline_bin ch x 0))
+        (spline_invert x cw ch d k))))
+
+; The 11 knots of 10 bins from their unnormalized sizes in b at at, each
+; over s: a softmax, each at least 1e-3, cumulated over -5 to 5.
+(def spline_knots ((b bytes) (at int) (s float)) (array float)
+  (let (u (spline_read b at s 0 (array_new 10 0.0))
+        w (piper_softmax u))
+    (spline_cum w 0 0.0 (array_set (array_new 11 0.0) 0 -5.0))))
+(def spline_read ((b bytes) (at int) (s float) (k int) (a (array float))) (array float)
+  (if (ge k 10) a (spline_read b at s (add k 1) (array_set a k (float_div (bytes_get_f32 b (add at (mul 4 k))) s)))))
+(def spline_cum ((w (array float)) (k int) (c float) (out (array float))) (array float)
+  (if (ge k 10)
+      (array_set out 10 5.0)
+      (let (c1 (float_add c (float_add 0.001 (float_mul 0.99 (array_get w k))))
+            pos (float_sub (float_mul 10.0 c1) 5.0))
+        (spline_cum w (add k 1) c1 (array_set out (add k 1) pos)))))
+
+; The 11 derivatives at the knots: the ends' 1, the 9 inner ones 1e-3
+; plus softplus of theirs in b at at.
+(def spline_derivatives ((b bytes) (at int)) (array float)
+  (spline_derivs b at 0 (array_set (array_set (array_new 11 0.0) 0 1.0) 10 1.0)))
+(def spline_derivs ((b bytes) (at int) (k int) (d (array float))) (array float)
+  (if (ge k 9) d (spline_derivs b at (add k 1) (array_set d (add k 1) (float_add 0.001 (vt_softplus (bytes_get_f32 b (add at (mul 4 k)))))))))
+
+; The bin x falls in among the heights' knots ch: how many knots are at
+; or below it, less 1, the last knot taken 1e-6 higher.
+(def spline_bin ((ch (array float)) (x float) (k int)) int
+  (spline_bin_count ch x 0 0))
+(def spline_bin_count ((ch (array float)) (x float) (k int) (n int)) int
+  (if (ge k 11)
+      (max 0 (min 9 (sub n 1)))
+      (let kn (if (eq k 10) (float_add (array_get ch 10) 0.000001) (array_get ch k))
+        (spline_bin_count ch x (add k 1) (if (float_ge x kn) (add n 1) n)))))
+
+; The inverse in bin k: the root of the bin's quadratic, as
+; transforms.py solves it, mapped back onto the bin's width.
+(def spline_invert ((x float) (cw (array float)) (ch (array float)) (d (array float)) (k int)) float
+  (let (w (float_sub (array_get cw (add k 1)) (array_get cw k))
+        hh (float_sub (array_get ch (add k 1)) (array_get ch k))
+        delta (float_div hh w)
+        d0 (array_get d k)
+        d1 (array_get d (add k 1))
+        y (float_sub x (array_get ch k))
+        sum (float_sub (float_add d0 d1) (float_mul 2.0 delta))
+        a (float_add (float_mul y sum) (float_mul hh (float_sub delta d0)))
+        bq (float_sub (float_mul hh d0) (float_mul y sum))
+        c (float_neg (float_mul delta y))
+        disc (float_sub (float_mul bq bq) (float_mul 4.0 (float_mul a c)))
+        root (float_div (float_mul 2.0 c) (float_sub (float_neg bq) (float_sqrt (if (float_lt disc 0.0) 0.0 disc)))))
+    (float_add (float_mul root w) (array_get cw k))))
+
+; --------------------------------------------------------------- the flow
+
+; The prior over the frames: each phoneme's means repeated for its
+; frames, and with noise, its deviations times noise times the scale
+; (noise rows as many as the frames; none, of 0 rows, for none).
+(def piper_prior ((e PiperEnc) (ds (list int)) (noise Vt) (scale float)) Vt
+  (let m (vt_repeat_rows (.m e) ds)
+    (if (eq (.t noise) 0)
+        m
+        (vt_add m (piper_noise_times (vt_repeat_rows (.logs e) ds) noise scale)))))
+
+; e to each of logs times the same of noise times scale, into logs.
+(def piper_noise_times ((logs Vt) (noise Vt) (scale float)) Vt
+  (let n (vt_len logs)
+    (.b logs (piper_noise_from (.b logs) (.b noise) scale 0 n))))
+(def piper_noise_from ((l bytes) (z bytes) (scale float) (k int) (n int)) bytes
+  (if (ge k n)
+      l
+      (let v (float_mul (float_mul (float_exp (bytes_get_f32 l (mul 4 k))) (bytes_get_f32 z (mul 4 k))) scale)
+        (piper_noise_from (bytes_set_f32 l (mul 4 k) v) z scale (add k 1) n))))
+
+; The flow in reverse over the prior's frames: a flip before each
+; coupling, the last first.
+(def piper_flow ((p Piper) (z Vt)) Vt
+  (let (z6 (piper_coupling p "flow.flows.6" (vt_flip z))
+        z4 (piper_coupling p "flow.flows.4" (vt_flip z6))
+        z2 (piper_coupling p "flow.flows.2" (vt_flip z4)))
+    (piper_coupling p "flow.flows.0" (vt_flip z2))))
+
+; A mean-only residual coupling in reverse: the first 96 channels kept,
+; and through pre, the WaveNet and post the means taken from the last 96.
+(def piper_coupling ((p Piper) (path (list int)) (z Vt)) Vt
+  (let (x0 (vt_cols z 0 96)
+        x1 (vt_cols z 96 96)
+        h (vt_conv x0 (piper_conv p (append path ".pre")) 1 0 0)
+        w (piper_wavenet p (append path ".enc") h 0 (vt_zeros (.t h) 192))
+        m (vt_conv w (piper_conv p (append path ".post")) 1 0 0))
+    (vt_join x0 (vt_add_scaled x1 -1.0 m))))
+
+; The WaveNet's layers from l over x, their skips summed into out: each
+; a convolution of 5 to 384, its gate, a 1×1 to 384 whose first half is
+; added to x and second to out; the last one's 192 all to out.
+(def piper_wavenet ((p Piper) (path (list int)) (x Vt) (l int) (out Vt)) Vt
+  (if (ge l 4)
+      out
+      (let (n (digits l)
+            g (vt_gate (vt_conv x (piper_conv p (append path (append ".in_layers." n))) 1 2 2))
+            rs (vt_conv g (piper_conv p (append path (append ".res_skip_layers." n))) 1 0 0))
+        (if (eq l 3)
+            (vt_add out rs)
+            (let (res (vt_cols rs 0 192) skip (vt_cols rs 192 192))
+              (piper_wavenet p path (vt_add x res) (add l 1) (vt_add out skip)))))))
+
+; ------------------------------------------------------------ the vocoder
+
+; HiFi-GAN over the flow's frames z: conv_pre, then three times leaky
+; ReLU, an upsampling and the mean of three ResBlock2s; leaky ReLU,
+; conv_post and tanh: 256 samples a frame, in -1 to 1, a row each.
+(def piper_vocode ((p Piper) (z Vt)) Vt
+  (let (x0 (vt_conv z (piper_conv p "dec.conv_pre") 1 3 3)
+        x1 (piper_upsample p x0 0 8 4)
+        x2 (piper_upsample p x1 1 8 4)
+        x3 (piper_upsample p x2 2 4 2)
+        y (vt_conv (vt_map x3 vt_leaky01) (piper_conv p "dec.conv_post") 1 3 3))
+    (vt_map y vt_tanh)))
+
+; Upsampling stage u, its stride s and padding pad: leaky ReLU, the
+; transposed convolution, and the mean of resblocks 3u to 3u + 2.
+(def piper_upsample ((p Piper) (x Vt) (u int) (s int) (pad int)) Vt
+  (let (up (vt_conv_transpose (vt_map x vt_leaky) (piper_conv p (append "dec.ups." (digits u))) s pad)
+        b (mul 3 u)
+        r0 (piper_resblock p (add b 0) up 3 1 2)
+        r1 (piper_resblock p (add b 1) up 5 2 6)
+        r2 (piper_resblock p (add b 2) up 7 3 12))
+    (vt_scale (vt_add (vt_add r0 r1) r2) (float_div 1.0 3.0))))
+
+; ResBlock2 r of kernel k over x, its two convolutions dilated d1 and
+; d2: each leaky ReLU, the convolution, added to x.
+(def piper_resblock ((p Piper) (r int) (x Vt) (k int) (d1 int) (d2 int)) Vt
+  (let (path (append "dec.resblocks." (digits r))
+        a (vt_conv (vt_mapped x vt_leaky) (piper_conv p (append path ".convs.0")) d1 (div (mul (sub k 1) d1) 2) (div (mul (sub k 1) d1) 2))
+        x1 (vt_add a x)
+        b (vt_conv (vt_mapped x1 vt_leaky) (piper_conv p (append path ".convs.1")) d2 (div (mul (sub k 1) d2) 2) (div (mul (sub k 1) d2) 2)))
+    (vt_add b x1)))
+
+; ------------------------------------------------------------ speaking
+
+; Noise of the normal distribution, t rows of c, from a seed, and the
+; seed after it: a xorshift's bits, by Box and Muller's method.
+(data PiperNoise (PiperNoise (v Vt) (seed int)))
+(def piper_noise ((t int) (c int) (seed int)) PiperNoise
+  (piper_noise_fill (vt_zeros t c) 0 (mul t c) seed))
+(def piper_noise_fill ((x Vt) (k int) (n int) (s int)) PiperNoise
+  (if (ge k n)
+      (PiperNoise x s)
+      (let (s1 (piper_xorshift s)
+            s2 (piper_xorshift s1)
+            u1 (float_div (float_add (float_from_int (bit_shr s1 11)) 1.0) 9007199254740992.0)
+            u2 (float_div (float_from_int (bit_shr s2 11)) 9007199254740992.0)
+            g (float_mul (float_sqrt (float_mul -2.0 (float_ln u1))) (float_cos (float_mul 6.283185307179586 u2))))
+        (piper_noise_fill (.b x (bytes_set_f32 (.b x) (mul 4 k) g)) (add k 1) n s2))))
+
+; The xorshift64 after s, s not 0.
+(def piper_xorshift ((s int)) int
+  (let (a (bit_xor s (bit_shl s 13))
+        b (bit_xor a (bit_shr a 7)))
+    (bit_xor b (bit_shl b 17))))
+
+; The seed speak starts from, the same every run.
+(def piper_seed () int 88172645463325252)
+
+; What a sentence was made into: its samples, a row each at the voice's
+; rate in -1 to 1, and the seed after its noise.
+(data PiperSaid (PiperSaid (audio Vt) (seed int)))
+
+; A sentence's phoneme IDs made into samples: the encoder, the durations
+; from noise (the voice's noise_w, or none when exact), the prior with
+; its noise (noise_scale), the flow and the vocoder.
+(def piper_say_ids ((p Piper) (ids (list int)) (exact bool) (seed int)) PiperSaid
+  (let (cfg (.cfg p)
+        e (piper_encode p ids)
+        n1 (piper_noise (.t (.x e)) 2 seed)
+        z (if exact (vt_zeros (.t (.x e)) 2) (vt_scale (.v n1) (.noise_w cfg)))
+        ds (piper_durations (piper_log_durations p (.x e) z) (.length cfg))
+        frames (vt_sum_ints ds 0)
+        n2 (piper_noise (if exact 0 frames) 192 (.seed n1))
+        zp (piper_prior e ds (.v n2) (.noise cfg))
+        audio (piper_vocode p (piper_flow p zp)))
+    (PiperSaid audio (.seed n2))))
+
+; The samples as 16-bit PCM, little-endian, scaled so the loudest is
+; full scale, as Piper normalizes each sentence; silence stays silent.
+(def piper_pcm ((a Vt)) bytes
+  (let (peak (piper_peak (.b a) 0 (.t a) 0.0)
+        scale (if (float_lt peak 0.00000001) 0.0 (float_div 32767.0 peak)))
+    (bytes_from_list (rev (piper_pcm_from (.b a) scale 0 (.t a) (nil int))))))
+(def piper_peak ((b bytes) (k int) (n int) (m float)) float
+  (if (ge k n) m
+      (let v (bytes_get_f32 b (mul 4 k))
+        (piper_peak b (add k 1) n (let x (if (float_lt v 0.0) (float_neg v) v) (if (float_gt x m) x m))))))
+(def piper_pcm_from ((b bytes) (scale float) (k int) (n int) (acc (list int))) (list int)
+  (if (ge k n)
+      acc
+      (let (v (float_mul (bytes_get_f32 b (mul 4 k)) scale)
+            r (float_to_int (if (float_lt v 0.0) (float_sub v 0.5) (float_add v 0.5)))
+            q (max -32768 (min 32767 r))
+            u (if (lt q 0) (add q 65536) q))
+        (piper_pcm_from b scale (add k 1) n (cons (bit_shr u 8) (cons (bit_and u 255) acc))))))
+
+; -------------------------------------------------------------- durations
+
+; Each phoneme's frames: e to its log duration times the length scale,
+; rounded up.
+(def piper_durations ((logw Vt) (scale float)) (list int)
+  (piper_durations_from logw scale (sub (.t logw) 1) (nil int)))
+(def piper_durations_from ((logw Vt) (scale float) (i int) (acc (list int))) (list int)
+  (if (lt i 0)
+      acc
+      (piper_durations_from logw scale (sub i 1) (cons (piper_ceil (float_mul (float_exp (vt_at logw i 0)) scale)) acc))))
+
+; The least whole number at or above x, x at or above 0.
+(def piper_ceil ((x float)) int
+  (let n (float_to_int x)
+    (if (float_gt x (float_from_int n)) (add n 1) n)))

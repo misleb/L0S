@@ -1,6 +1,6 @@
 # 0062: Piper on the board: text to speech in L0
 
-Track: Agent · Status: ready · Needs: – · Spec: speech.md, sound.md, programs.md, testing.md
+Track: Agent · Status: active · Needs: – · Spec: speech.md, sound.md, programs.md, testing.md
 
 ## Why
 
@@ -56,45 +56,69 @@ no Piper voice's licence fits.
 
 ## Steps
 
-- [ ] The voice and its reference: choose the voice, by its sound, its
-  size and its licence (each voice's MODEL_CARD names its dataset's;
-  LJSpeech's is in the public domain); `probes/piper` says how the
-  voice and Piper are fetched and run on the host, and writes the
-  oracle: phoneme strings and IDs, each stage's output and the samples,
-  for a few sentences, noise at 0.
-- [ ] Reading the voice (`format/onnx.l0`): the protobuf of an ONNX
-  file, read in place, its initializers by name, and the config by
+- [x] The voice and its reference: `en_US-ljspeech-medium` (LJSpeech,
+  public domain; 15.65 million weights, 22,050 Hz), CMUdict, pinned in
+  the Makefile (`make piper-fetch`); `probes/piper` (README, `dump.py`,
+  `oracle.py`, `words.py`) says how they and Piper 1.8.0 are fetched and
+  run on the host, and writes the oracle: four sentences' phonemes and
+  IDs, each stage's rows and the samples, noise at 0, into
+  `build/piper-oracle`.
+- [x] Reading the voice (`format/onnx.l0`, `speech/voice.l0`): the
+  protobuf read in place, its 350 initializers by name and the 35 the
+  export left anonymous by the node reading them; every one as the onnx
+  package reads it (`onnxdump.l0` against `dump.py`); the config by
   `json.l0`.
-- [ ] Text to phonemes (`speech/phonemes.l0`): normalization, CMUdict
-  and its mapping to espeak-ng's IPA, letter-to-sound rules, and the
-  phoneme IDs as Piper puts them (a start, each phoneme then a pad, an
-  end); checked against espeak-ng on a word list.
-- [ ] The text encoder and the duration predictor, checked against the
-  oracle's durations.
-- [ ] The flow and the HiFi-GAN vocoder, channel-last with the vector
-  arithmetic, checked against the oracle's samples; their time on the
-  host a second of speech.
-- [ ] `speak`: text to a WAV file, or to `audio` a sentence at a time;
-  the e2e case on QEMU.
+- [x] Text to phonemes (`speech/phonemes.l0`): normalization, CMUdict
+  searched in place and its ARPAbet in espeak-ng's IPA, 315
+  letter-to-sound rules, weak forms, a flap across words, and Piper's
+  IDs. 949 of 2000 words espeak-ng's alike, 547 by the rules alone
+  (`wordscheck.l0`, its misses listed); two of the four sentences
+  Piper's to the byte, the others differing in CMUdict's vowels
+  (`textcheck.l0`).
+- [x] The text encoder and the duration predictor (`speech/piper.l0`,
+  `speech/vits.l0`): every row at a cosine of 0.999999 or more, the
+  durations the oracle's frame for frame on all four (`stagecheck.l0`).
+- [x] The flow and the HiFi-GAN vocoder, channel-last, each output one
+  `bytes_dot_f32`: the samples' correlation with the oracle's 0.999999
+  or more; on the host a second of speech in about 0.65 s, the vocoder
+  0.43 s of it.
+- [x] `speak`: text to a WAV file, or to `audio` a sentence at a time
+  (made, then played), at 44.1 kHz; `tests/speak.sh` on QEMU, the voice
+  on a FAT32 volume, each WAV the oracle's on the two sentences whose
+  phonemes are Piper's.
 - [ ] On a Pi 5: heard, and timed a second of speech; if slower than
-  spoken, the vocoder's time steps split over the other CPUs.
+  spoken, the vocoder's time steps split over the other CPUs; and a
+  sentence made while the one before plays, which a process playing
+  beside the one making needs, the driver's ring holding 128 ms.
 
-Open: the voice, and whether its 16 or 22.05 kHz quality is natural
-enough at the speed the Pi 5 makes it; where the voice and the
-dictionary live, the initramfs or the data volume; whether noise at
-Piper's own scales (0.667 and 0.8) wants a random source of L0S's, or
-a fixed seed is enough; whether `speak` is a program or a server that
-`speech` (0061) and the agent ask.
+Settled: the voice and the dictionary live on the data volume, as
+Whistle's model does, the release carrying them (the voice is past an
+initramfs's limit); the noise is from a fixed seed. Open: whether the
+voice's 22.05 kHz is natural enough at the speed the Pi 5 makes it;
+whether `speak` is a program or a server that `speech` (0061) and the
+agent ask.
 
 ## Spec changes
 
-- speech.md: Speaking: the voice's container, the phonemes, the
-  model's parts and how they are checked, `speak`, and their limits.
-- sound.md: a voice's rate doubled to one `hdmi-audio` plays.
-- programs.md: `speak`, and the libraries' rows.
-- testing.md: the host tests, the e2e case and the oracle.
+- speech.md (Speaking is in: the voice's container, the phonemes, the
+  model's parts and their checks, `speak`, the limits): the Pi 5's
+  timing, and the limits it changes.
+- sound.md, programs.md and testing.md: in.
 
 ## Log
 
 - 2026-11-01: written, as the user asked, Piper chosen over Kitten TTS
   and Kokoro for its size, its voices and its record on the Pi.
+- 2026-11-04: steps 1 to 6 done, as the user asked ("do 0062", steps 1
+  to 6, the Pi 5 left to them). The user chose `en_US-ljspeech-medium`
+  and had it, its config and MODEL_CARD (rhasspy/piper-voices at
+  e7229f7d), CMUdict (cmusphinx/cmudict at 74790861) and `piper-tts`
+  1.8.0 with onnx and onnxruntime, in a venv of the scratchpad's,
+  fetched. The config names espeak-ng's `en`, British; the oracle and
+  L0S use en-us, as the speaker and CMUdict are American. The model
+  matched the oracle at once, every stage at a cosine of 0.999999, the
+  durations exactly, the samples at a correlation of 0.999999; on the
+  host a second of speech is made in about 0.65 s, on one emulated CPU
+  in about 20 s, and the voice loads from a FAT32 volume on QEMU in 68
+  s. The driver's ring is 128 ms, so making a sentence while another
+  plays needs a second process: moved to step 7, with the Pi 5.

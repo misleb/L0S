@@ -1,0 +1,283 @@
+; vits.l0 -- the arithmetic of a Piper voice (roadmap 0062), VITS's,
+; purely: tensors of rows of channels, channel-last, their binary32s
+; row after row in bytes, so a convolution over k time steps of c
+; channels reads k·c contiguous numbers and is one bytes_dot_f32 for
+; each output; convolutions dilated, depthwise and transposed; layer
+; norm; and the activations VITS takes (ReLU, leaky ReLU, GELU, tanh,
+; sigmoid, softplus). Elementwise work is in binary64 and stored as
+; binary32, as PyTorch computes it in binary32; the dot products are
+; binary32 throughout. Linked with MEL, for its exponential and
+; logarithm, as VITS in the Makefile.
+
+; ---------------------------------------------------------------- types
+
+; A tensor of t rows (time steps) of c channels, its binary32s in b,
+; row after row.
+(data Vt (Vt (t int) (c int) (b bytes)))
+
+; A convolution's weights: cout outputs of k taps of cin channels, w laid
+; out output by output, each tap's cin channels after one another (for a
+; transposed one, tap by tap, each tap's cout outputs of cin); and its
+; cout biases, empty bytes for none.
+(data VtConv (VtConv (cout int) (cin int) (k int) (w bytes) (bias bytes)))
+
+; ---------------------------------------------------------------- making
+
+; n binary32 zeros, as bytes: 4 of them doubled until there are enough.
+(def vt_zero_bytes ((n int)) bytes
+  (bytes_slice (vt_doubled (bytes_from_list (cons 0 (cons 0 (cons 0 (cons 0 (nil int)))))) (mul 4 (max n 1))) 0 (mul 4 (max n 0))))
+(def vt_doubled ((z bytes) (len int)) bytes
+  (if (ge (bytes_len z) len) z (vt_doubled (bytes_concat (cons z (cons z (nil bytes)))) len)))
+
+; A tensor of t rows of c zeros.
+(def vt_zeros ((t int) (c int)) Vt (Vt t c (vt_zero_bytes (mul t c))))
+
+; The number at row i, channel j of x.
+(def vt_at ((x Vt) (i int) (j int)) float
+  (bytes_get_f32 (.b x) (mul 4 (add (mul i (.c x)) j))))
+
+; x with v at row i, channel j, in place.
+(def vt_put ((x Vt) (i int) (j int) (v float)) Vt
+  (let at (mul 4 (add (mul i (.c x)) j))
+    (.b x (bytes_set_f32 (.b x) at v))))
+
+; How many numbers x holds.
+(def vt_len ((x Vt)) int (mul (.t x) (.c x)))
+
+; ------------------------------------------------------------ elementwise
+
+; Each number of x made f of itself, in place.
+(def vt_map ((x Vt) (f (fn (float) float))) Vt
+  (let n (vt_len x)
+    (.b x (vt_map_from (.b x) f 0 n))))
+(def vt_map_from ((b bytes) (f (fn (float) float)) (k int) (n int)) bytes
+  (if (ge k n)
+      b
+      (let v (bytes_get_f32 b (mul 4 k))
+        (vt_map_from (bytes_set_f32 b (mul 4 k) (f v)) f (add k 1) n))))
+
+; A new tensor of each number of x made f of itself; x left as it is.
+(def vt_mapped ((x Vt) (f (fn (float) float))) Vt
+  (let n (vt_len x)
+    (Vt (.t x) (.c x) (vt_mapped_from (.b x) f (vt_zero_bytes n) 0 n))))
+(def vt_mapped_from ((src bytes) (f (fn (float) float)) (dst bytes) (k int) (n int)) bytes
+  (if (ge k n)
+      dst
+      (let v (bytes_get_f32 src (mul 4 k))
+        (vt_mapped_from src f (bytes_set_f32 dst (mul 4 k) (f v)) (add k 1) n))))
+
+; WaveNet's gate: of x's 2c channels, tanh of the first c times the
+; sigmoid of the last c, row by row.
+(def vt_gate ((x Vt)) Vt
+  (let (h (div (.c x) 2) n (mul (.t x) h))
+    (Vt (.t x) h (vt_gate_from (.b x) h (vt_zero_bytes n) 0 n))))
+(def vt_gate_from ((src bytes) (h int) (dst bytes) (r int) (n int)) bytes
+  (if (ge r n)
+      dst
+      (let (i (div r h) j (mod r h)
+            at (mul 4 (add (mul i (mul 2 h)) j))
+            v (float_mul (vt_tanh (bytes_get_f32 src at)) (vt_sigmoid (bytes_get_f32 src (add at (mul 4 h))))))
+        (vt_gate_from src h (bytes_set_f32 dst (mul 4 r) v) (add r 1) n))))
+
+; Each row i of x repeated ns's i-th number of times, in order.
+(def vt_repeat_rows ((x Vt) (ns (list int))) Vt
+  (let c (.c x)
+    (Vt (vt_sum_ints ns 0) c (bytes_concat (rev (vt_repeat_from (.b x) c ns 0 (nil bytes)))))))
+(def vt_repeat_from ((b bytes) (c int) (ns (list int)) (i int) (acc (list bytes))) (list bytes)
+  (if (is_empty ns)
+      acc
+      (vt_repeat_from b c (tail ns) (add i 1) (vt_times (bytes_slice b (mul 4 (mul i c)) (mul 4 (mul (add i 1) c))) (head ns) acc))))
+(def vt_times ((row bytes) (n int) (acc (list bytes))) (list bytes)
+  (if (le n 0) acc (vt_times row (sub n 1) (cons row acc))))
+(def vt_sum_ints ((ns (list int)) (s int)) int
+  (if (is_empty ns) s (vt_sum_ints (tail ns) (add s (head ns)))))
+
+; a with b added, number by number, in place; b as large as a.
+(def vt_add ((a Vt) (b Vt)) Vt
+  (let n (vt_len a)
+    (.b a (bytes_axpy_f32 (.b a) 0 1.0 (.b b) 0 n))))
+
+; a with s times b added, in place.
+(def vt_add_scaled ((a Vt) (s float) (b Vt)) Vt
+  (let n (vt_len a)
+    (.b a (bytes_axpy_f32 (.b a) 0 s (.b b) 0 n))))
+
+; x times s, in place.
+(def vt_scale ((x Vt) (s float)) Vt
+  (let n (vt_len x)
+    (.b x (vt_scale_from (.b x) s 0 n))))
+(def vt_scale_from ((b bytes) (s float) (k int) (n int)) bytes
+  (if (ge k n)
+      b
+      (let v (bytes_get_f32 b (mul 4 k))
+        (vt_scale_from (bytes_set_f32 b (mul 4 k) (float_mul v s)) s (add k 1) n))))
+
+; The activations, of one number.
+(def vt_relu ((x float)) float (if (float_gt x 0.0) x 0.0))
+(def vt_leaky ((x float)) float (if (float_lt x 0.0) (float_mul x 0.1) x))
+(def vt_leaky01 ((x float)) float (if (float_lt x 0.0) (float_mul x 0.01) x))
+(def vt_sigmoid ((x float)) float
+  (if (float_ge x 0.0)
+      (float_div 1.0 (float_add 1.0 (float_exp (float_neg x))))
+      (let e (float_exp x) (float_div e (float_add 1.0 e)))))
+(def vt_tanh ((x float)) float
+  (if (float_gt x 20.0) 1.0
+      (float_lt x -20.0) -1.0
+      (let e (float_exp (float_mul 2.0 x)) (float_div (float_sub e 1.0) (float_add e 1.0)))))
+(def vt_softplus ((x float)) float
+  (if (float_gt x 20.0) x (float_ln (float_add 1.0 (float_exp x)))))
+
+; GELU, x times the normal distribution's at x: x/2 (1 + erf(x/√2)).
+(def vt_gelu ((x float)) float
+  (float_mul (float_mul 0.5 x) (float_add 1.0 (vt_erf (float_mul x 0.7071067811865476)))))
+
+; The error function, by Abramowitz and Stegun's 7.1.26, within
+; 1.5e-7, odd.
+(def vt_erf ((x float)) float
+  (if (float_lt x 0.0)
+      (float_neg (vt_erf (float_neg x)))
+      (let (t (float_div 1.0 (float_add 1.0 (float_mul 0.3275911 x)))
+            p (float_mul t (float_add 0.254829592 (float_mul t (float_add -0.284496736 (float_mul t (float_add 1.421413741 (float_mul t (float_add -1.453152027 (float_mul t 1.061405429))))))))))
+        (float_sub 1.0 (float_mul p (float_exp (float_neg (float_mul x x))))))))
+
+; ------------------------------------------------------------------ rows
+
+; Each row of x normalized over its channels, then times gamma and plus
+; beta (each c binary32s), as PyTorch's layer_norm: eps under the root.
+(def vt_layer_norm ((x Vt) (gamma bytes) (beta bytes) (eps float)) Vt
+  (let (t (.t x) c (.c x))
+    (.b x (vt_norm_rows (.b x) c gamma beta eps 0 t))))
+(def vt_norm_rows ((b bytes) (c int) (g bytes) (be bytes) (eps float) (i int) (t int)) bytes
+  (if (ge i t)
+      b
+      (let (at (mul 4 (mul i c))
+            mean (float_div (vt_sum b at c 0 0.0) (float_from_int c))
+            var (float_div (vt_sq_dev b at c 0 mean 0.0) (float_from_int c))
+            inv (float_div 1.0 (float_sqrt (float_add var eps))))
+        (vt_norm_rows (vt_norm_row b at c g be mean inv 0) c g be eps (add i 1) t))))
+(def vt_norm_row ((b bytes) (at int) (c int) (g bytes) (be bytes) (mean float) (inv float) (j int)) bytes
+  (if (ge j c)
+      b
+      (let (v (bytes_get_f32 b (add at (mul 4 j)))
+            y (float_add (float_mul (float_mul (float_sub v mean) inv) (bytes_get_f32 g (mul 4 j))) (bytes_get_f32 be (mul 4 j))))
+        (vt_norm_row (bytes_set_f32 b (add at (mul 4 j)) y) at c g be mean inv (add j 1)))))
+
+; The sum of n binary32s of b from byte at, after s; and of their squared
+; distances from m.
+(def vt_sum ((b bytes) (at int) (n int) (k int) (s float)) float
+  (if (ge k n) s (vt_sum b at n (add k 1) (float_add s (bytes_get_f32 b (add at (mul 4 k)))))))
+(def vt_sq_dev ((b bytes) (at int) (n int) (k int) (m float) (s float)) float
+  (if (ge k n) s (let d (float_sub (bytes_get_f32 b (add at (mul 4 k))) m) (vt_sq_dev b at n (add k 1) m (float_add s (float_mul d d))))))
+
+; Channels from j, n of them, of each row of x, as a tensor of their own.
+(def vt_cols ((x Vt) (j int) (n int)) Vt
+  (Vt (.t x) n (bytes_concat (rev (vt_cols_rows (.b x) (.c x) j n 0 (.t x) (nil bytes))))))
+(def vt_cols_rows ((b bytes) (c int) (j int) (n int) (i int) (t int) (acc (list bytes))) (list bytes)
+  (if (ge i t)
+      acc
+      (let at (mul 4 (add (mul i c) j))
+        (vt_cols_rows b c j n (add i 1) t (cons (bytes_slice b at (add at (mul 4 n))) acc)))))
+
+; The channels of a then those of b, row by row; the same rows.
+(def vt_join ((a Vt) (b Vt)) Vt
+  (Vt (.t a) (add (.c a) (.c b)) (bytes_concat (rev (vt_join_rows a b 0 (nil bytes))))))
+(def vt_join_rows ((a Vt) (b Vt) (i int) (acc (list bytes))) (list bytes)
+  (if (ge i (.t a))
+      acc
+      (let (ca (mul 4 (.c a)) cb (mul 4 (.c b)))
+        (vt_join_rows a b (add i 1) (cons (bytes_slice (.b b) (mul i cb) (mul (add i 1) cb)) (cons (bytes_slice (.b a) (mul i ca) (mul (add i 1) ca)) acc))))))
+
+; x's channels in the other order, each row reversed.
+(def vt_flip ((x Vt)) Vt
+  (let (t (.t x) c (.c x))
+    (Vt t c (vt_flip_from (.b x) (vt_zero_bytes (mul t c)) c 0 (mul t c)))))
+(def vt_flip_from ((src bytes) (dst bytes) (c int) (k int) (n int)) bytes
+  (if (ge k n)
+      dst
+      (let (i (div k c) j (mod k c)
+            v (bytes_get_f32 src (mul 4 k)))
+        (vt_flip_from src (bytes_set_f32 dst (mul 4 (add (mul i c) (sub (sub c 1) j))) v) c (add k 1) n))))
+
+; x's rows with pl rows of zeros before and pr after.
+(def vt_pad ((x Vt) (pl int) (pr int)) Vt
+  (let c (.c x)
+    (Vt (add (.t x) (add pl pr)) c (bytes_concat (cons (vt_zero_bytes (mul pl c)) (cons (.b x) (cons (vt_zero_bytes (mul pr c)) (nil bytes))))))))
+
+; ------------------------------------------------------------ convolutions
+
+; cv over x, its taps dil apart, x padded with pl rows of zeros before
+; and pr after: rows of cv's cout, as many as fit.
+(def vt_conv ((x Vt) (cv VtConv) (dil int) (pl int) (pr int)) Vt
+  (let (xp (vt_pad x pl pr)
+        tout (sub (.t xp) (mul dil (sub (.k cv) 1)))
+        out (vt_zero_bytes (mul tout (.cout cv))))
+    (Vt tout (.cout cv) (vt_conv_from (.b xp) cv dil out 0 (mul tout (.cout cv))))))
+(def vt_conv_from ((x bytes) (cv VtConv) (dil int) (out bytes) (r int) (n int)) bytes
+  (if (ge r n)
+      out
+      (let (co (.cout cv)
+            i (div r co)
+            o (mod r co)
+            v (float_add (vt_bias cv o) (vt_conv_dot x cv dil i o)))
+        (vt_conv_from x cv dil (bytes_set_f32 out (mul 4 r) v) (add r 1) n))))
+
+; Bias o of cv, 0 when it has none.
+(def vt_bias ((cv VtConv) (o int)) float
+  (if (eq (bytes_len (.bias cv)) 0) 0.0 (bytes_get_f32 (.bias cv) (mul 4 o))))
+
+; Output o of cv at row i of the padded x, before its bias: one dot of
+; all its taps when they are next to one another, else one a tap.
+(def vt_conv_dot ((x bytes) (cv VtConv) (dil int) (i int) (o int)) float
+  (let (cin (.cin cv) k (.k cv) w (mul 4 (mul o (mul k cin))))
+    (if (eq dil 1)
+        (bytes_dot_f32 (.w cv) w x (mul 4 (mul i cin)) (mul k cin))
+        (vt_taps x (.w cv) w cin dil i 0 k 0.0))))
+(def vt_taps ((x bytes) (w bytes) (at int) (cin int) (dil int) (i int) (kk int) (k int) (s float)) float
+  (if (ge kk k)
+      s
+      (vt_taps x w at cin dil i (add kk 1) k
+               (float_add s (bytes_dot_f32 w (add at (mul 4 (mul kk cin))) x (mul 4 (mul (add i (mul kk dil)) cin)) cin)))))
+
+; The depthwise cv (cin 1, a channel each) over x, dilated and padded as
+; vt_conv.
+(def vt_depthwise ((x Vt) (cv VtConv) (dil int) (pad int)) Vt
+  (let (xp (vt_pad x pad pad)
+        c (.c x)
+        tout (sub (.t xp) (mul dil (sub (.k cv) 1))))
+    (Vt tout c (vt_depthwise_from (.b xp) cv c dil (vt_zero_bytes (mul tout c)) 0 (mul tout c)))))
+(def vt_depthwise_from ((x bytes) (cv VtConv) (c int) (dil int) (out bytes) (r int) (n int)) bytes
+  (if (ge r n)
+      out
+      (let (i (div r c) j (mod r c)
+            v (float_add (vt_bias cv j) (vt_depth_taps x (.w cv) (.k cv) c dil i j 0 0.0)))
+        (vt_depthwise_from x cv c dil (bytes_set_f32 out (mul 4 r) v) (add r 1) n))))
+(def vt_depth_taps ((x bytes) (w bytes) (k int) (c int) (dil int) (i int) (j int) (kk int) (s float)) float
+  (if (ge kk k)
+      s
+      (vt_depth_taps x w k c dil i j (add kk 1)
+                     (float_add s (float_mul (bytes_get_f32 w (mul 4 (add (mul j k) kk))) (bytes_get_f32 x (mul 4 (add (mul (add i (mul kk dil)) c) j))))))))
+
+; The transposed cv over x, by stride s with pad p taken off each end:
+; (t - 1) s - 2p + k rows; output row i takes, from each tap kk with
+; i + p - kk a multiple of s, input row (i + p - kk) / s.
+(def vt_conv_transpose ((x Vt) (cv VtConv) (s int) (p int)) Vt
+  (let (tout (add (sub (mul (sub (.t x) 1) s) (mul 2 p)) (.k cv))
+        n (mul tout (.cout cv)))
+    (Vt tout (.cout cv) (vt_transpose_from x cv s p (vt_zero_bytes n) 0 n))))
+(def vt_transpose_from ((x Vt) (cv VtConv) (s int) (p int) (out bytes) (r int) (n int)) bytes
+  (if (ge r n)
+      out
+      (let (co (.cout cv)
+            i (div r co)
+            o (mod r co)
+            v (float_add (vt_bias cv o) (vt_transpose_taps x cv s o (add i p) (mod (add i p) s) 0.0)))
+        (vt_transpose_from x cv s p (bytes_set_f32 out (mul 4 r) v) (add r 1) n))))
+(def vt_transpose_taps ((x Vt) (cv VtConv) (s int) (o int) (ip int) (kk int) (acc float)) float
+  (if (ge kk (.k cv))
+      acc
+      (let (ti (div (sub ip kk) s)
+            cin (.cin cv))
+        (vt_transpose_taps x cv s o ip (add kk s)
+                           (if (and (ge ti 0) (lt ti (.t x)))
+                               (float_add acc (bytes_dot_f32 (.w cv) (mul 4 (mul (add (mul kk (.cout cv)) o) cin)) (.b x) (mul 4 (mul ti cin)) cin))
+                               acc)))))

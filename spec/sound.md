@@ -14,6 +14,11 @@ On QEMU there is no channel, and it says so and exits 0.
 | `start RATE` | `ok` once it plays at `RATE`, 32000, 44100 or 48000; what was queued at another rate is dropped |
 | `play VA FRAMES CHANS` | `played N`: up to `FRAMES` frames of 16-bit samples, `CHANS` a frame, 1 or 2, from the client's pages shared with the driver at `VA` there; `N` may be 0 when the ring is full, and the client offers the rest again once some have played |
 
+A rate the driver does not play is brought to one by its client:
+`play` takes a 16 kHz file up to 48 kHz (`format/pcm.l0`), and `speak`
+([speech.md](speech.md#speaking)) plays a Piper voice's 22,050 Hz at
+44,100 Hz, one channel, each sample followed by its mean with the next.
+
 As with the disk, no sample travels in a message. What every sound
 driver keeps alike, the requests, the ring's counts and the chime, is
 [audio_server.l0](../user/lib/proto/audio_server.l0); the rest is HDMI's.

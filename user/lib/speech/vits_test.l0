@@ -1,0 +1,131 @@
+; vits_test.l0 -- tests of vits.l0: each convolution against the sum
+; written out directly, over small tensors of seeded numbers.
+
+; ---------------------------------------------------------- building
+
+; n binary32s from the seed s, each in -1 to 1, as bytes.
+(def t_numbers ((n int) (s int)) bytes
+  (t_numbers_from n s 0 (vt_zero_bytes n)))
+(def t_numbers_from ((n int) (s int) (k int) (b bytes)) bytes
+  (if (ge k n)
+      b
+      (let s1 (rand_next s)
+        (t_numbers_from n s1 (add k 1) (bytes_set_f32 b (mul 4 k) (float_sub (float_div (float_from_int (rand_below s1 2001)) 1000.0) 1.0))))))
+
+; A convolution of seeded weights and biases.
+(def t_conv ((cout int) (cin int) (k int) (s int)) VtConv
+  (VtConv cout cin k (t_numbers (mul cout (mul k cin)) s) (t_numbers cout (add s 7))))
+
+; |a - b| below 1e-5 for every number, the same shape.
+(def t_close ((a Vt) (b Vt)) bool
+  (and (eq (.t a) (.t b)) (and (eq (.c a) (.c b)) (t_close_from a b 0))))
+(def t_close_from ((a Vt) (b Vt) (k int)) bool
+  (if (ge k (vt_len a))
+      true
+      (let d (float_sub (bytes_get_f32 (.b a) (mul 4 k)) (bytes_get_f32 (.b b) (mul 4 k)))
+        (and (float_lt (if (float_lt d 0.0) (float_neg d) d) 0.00001) (t_close_from a b (add k 1))))))
+
+; ----------------------------------------------------- direct versions
+
+; The convolution as its definition: out[i][o] = bias[o] + the sum over
+; taps kk and channels c of w[o][kk][c] x[i + kk dil - pl][c], zero
+; outside x.
+(def t_direct ((x Vt) (cv VtConv) (dil int) (pl int) (pr int)) Vt
+  (let tout (sub (add (.t x) (add pl pr)) (mul dil (sub (.k cv) 1)))
+    (t_direct_from x cv dil pl 0 (mul tout (.cout cv)) (vt_zeros tout (.cout cv)))))
+(def t_direct_from ((x Vt) (cv VtConv) (dil int) (pl int) (r int) (n int) (out Vt)) Vt
+  (if (ge r n)
+      out
+      (let (i (div r (.cout cv)) o (mod r (.cout cv))
+            v (float_add (vt_bias cv o) (t_direct_sum x cv dil pl i o 0 0.0)))
+        (t_direct_from x cv dil pl (add r 1) n (vt_put out i o v)))))
+(def t_direct_sum ((x Vt) (cv VtConv) (dil int) (pl int) (i int) (o int) (q int) (s float)) float
+  (if (ge q (mul (.k cv) (.cin cv)))
+      s
+      (let (kk (div q (.cin cv)) c (mod q (.cin cv))
+            ti (sub (add i (mul kk dil)) pl)
+            xv (if (and (ge ti 0) (lt ti (.t x))) (vt_at x ti c) 0.0)
+            wv (bytes_get_f32 (.w cv) (mul 4 (add (mul (add (mul o (.k cv)) kk) (.cin cv)) c))))
+        (t_direct_sum x cv dil pl i o (add q 1) (float_add s (float_mul wv xv))))))
+
+; The transposed one as its definition: every input row ti and tap kk
+; adds w[kk][o][c] x[ti][c] to output row ti s + kk - p.
+(def t_transposed ((x Vt) (cv VtConv) (s int) (p int)) Vt
+  (let tout (add (sub (mul (sub (.t x) 1) s) (mul 2 p)) (.k cv))
+    (t_trans_from x cv s p 0 (mul (.t x) (mul (.k cv) (.cout cv))) (t_biased tout cv 0 (vt_zeros tout (.cout cv))))))
+(def t_biased ((tout int) (cv VtConv) (r int) (out Vt)) Vt
+  (if (ge r (mul tout (.cout cv))) out (t_biased tout cv (add r 1) (vt_put out (div r (.cout cv)) (mod r (.cout cv)) (vt_bias cv (mod r (.cout cv)))))))
+(def t_trans_from ((x Vt) (cv VtConv) (s int) (p int) (r int) (n int) (out Vt)) Vt
+  (if (ge r n)
+      out
+      (let (co (.cout cv)
+            ti (div r (mul (.k cv) co))
+            kk (mod (div r co) (.k cv))
+            o (mod r co)
+            to (sub (add (mul ti s) kk) p)
+            v (t_row_dot x ti (.w cv) (mul 4 (mul (add (mul kk co) o) (.cin cv))) (.cin cv) 0 0.0))
+        (t_trans_from x cv s p (add r 1) n
+                      (if (and (ge to 0) (lt to (.t out))) (let old (vt_at out to o) (vt_put out to o (float_add old v))) out)))))
+(def t_row_dot ((x Vt) (ti int) (w bytes) (at int) (cin int) (c int) (s float)) float
+  (if (ge c cin) s (t_row_dot x ti w at cin (add c 1) (float_add s (float_mul (vt_at x ti c) (bytes_get_f32 w (add at (mul 4 c))))))))
+
+; ---------------------------------------------------------------- tests
+
+(def test_conv_one_dot () int
+  (let (x (Vt 6 4 (t_numbers 24 1)) cv (t_conv 3 4 3 2))
+    (check_bool "kernel 3, padded 1" (t_close (vt_conv x cv 1 1 1) (t_direct x cv 1 1 1)) true)))
+
+(def test_conv_dilated () int
+  (let (x (Vt 9 3 (t_numbers 27 3)) cv (t_conv 2 3 3 4))
+    (check_bool "dilation 2" (t_close (vt_conv x cv 2 2 2) (t_direct x cv 2 2 2)) true)))
+
+(def test_conv_unpadded_rows () int
+  (let (x (Vt 6 2 (t_numbers 12 5)) cv (t_conv 2 2 3 6))
+    (check_int "rows" (.t (vt_conv x cv 1 0 0)) 4)))
+
+(def test_depthwise () int
+  (let (x (Vt 7 3 (t_numbers 21 8)) cv (t_conv 3 1 3 9)
+        y (vt_depthwise x cv 3 3))
+    (add (check_int "rows" (.t y) 7)
+         ; row 2, channel 1: bias + w[1][0] x[-1] (0) + w[1][1] x[2] + w[1][2] x[5]
+         (check_bool "a number" (float_lt (let d (float_sub (vt_at y 2 1) (float_add (vt_bias cv 1) (float_add (float_mul (bytes_get_f32 (.w cv) 16) (vt_at x 2 1)) (float_mul (bytes_get_f32 (.w cv) 20) (vt_at x 5 1))))) (if (float_lt d 0.0) (float_neg d) d)) 0.00001) true))))
+
+(def test_transposed () int
+  (let (x (Vt 5 3 (t_numbers 15 10)) cv (t_conv 2 3 8 11))
+    (add (check_bool "stride 4, pad 2" (t_close (vt_conv_transpose x cv 4 2) (t_transposed x cv 4 2)) true)
+         (check_int "rows" (.t (vt_conv_transpose x cv 4 2)) 20))))
+
+(def test_layer_norm () int
+  (let (x (Vt 1 4 (vt_zero_bytes 4))
+        x1 (vt_put (vt_put (vt_put (vt_put x 0 0 1.0) 0 1 2.0) 0 2 3.0) 0 3 4.0)
+        g (bytes_set_f32 (bytes_set_f32 (bytes_set_f32 (bytes_set_f32 (vt_zero_bytes 4) 0 1.0) 4 1.0) 8 1.0) 12 1.0)
+        y (vt_layer_norm x1 g (vt_zero_bytes 4) 0.0))
+    ; mean 2.5, variance 1.25: the first is -1.5 / √1.25
+    (check_int "first" (float_to_int (float_mul (vt_at y 0 0) 1000000.0)) -1341640)))
+
+(def test_gate () int
+  (let (x (vt_put (vt_put (vt_zeros 1 2) 0 0 1.0) 0 1 0.0)
+        y (vt_gate x))
+    ; tanh 1 times the sigmoid of 0, a half
+    (check_int "gate" (float_to_int (float_mul (vt_at y 0 0) 1000000.0)) 380797)))
+
+(def test_cols_join_flip () int
+  (let (x (Vt 2 3 (t_numbers 6 12))
+        j (vt_join (vt_cols x 0 1) (vt_cols x 1 2))
+        f (vt_flip (vt_flip x)))
+    (add (check_bool "join" (eq (.b j) (.b x)) true)
+         (check_bool "flip twice" (eq (.b f) (.b x)) true))))
+
+(def test_repeat_rows () int
+  (let (x (Vt 2 1 (bytes_set_f32 (bytes_set_f32 (vt_zero_bytes 2) 0 1.0) 4 2.0))
+        y (vt_repeat_rows x (cons 2 (cons 3 (nil int)))))
+    (add (check_int "rows" (.t y) 5)
+         (check_int "last" (float_to_int (vt_at y 4 0)) 2))))
+
+(def test_erf () int
+  ; erf 1 is 0.8427007929
+  (check_int "erf 1" (float_to_int (float_mul (vt_erf 1.0) 1000000.0)) 842700))
+
+(def test_activations () int
+  (add (check_int "leaky" (float_to_int (float_mul (vt_leaky -2.0) 10.0)) -2)
+       (check_int "softplus 0" (float_to_int (float_mul (vt_softplus 0.0) 1000000.0)) 693147)))

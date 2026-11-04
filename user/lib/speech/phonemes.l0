@@ -1,0 +1,634 @@
+; phonemes.l0 -- English text to the phonemes a Piper voice takes (roadmap
+; 0062), purely, as espeak-ng's en-us gives them to Piper: text split
+; into sentences, numbers, abbreviations and symbols spelled out, each
+; word looked up in CMUdict, searched in place in its bytes, and its
+; ARPAbet written in espeak-ng's IPA, stress marks before the stressed
+; vowel, length marks, its reductions and flaps; a word CMUdict lacks
+; spelled by letter-to-sound rules in the manner of the Naval Research
+; Laboratory's (Elovitz et al., 1976), written here; and the phonemes as
+; Piper's IDs, a start, each codepoint then a pad, an end.
+;
+; espeak-ng's own dictionary and rules are not CMUdict, so the two
+; disagree on some words, most of them names: on probes/piper/words.py's
+; 2000 words in testdata/espeak-words.txt, 949 are the same, and 547
+; from the rules alone (probes/piper/wordscheck.l0 counts them and names
+; the misses). Linked with VOICE as PHONEMES in the Makefile.
+
+; ---------------------------------------------------------------- types
+
+; An ARPAbet phone: its name without its stress (AH, T), and its stress:
+; -1 for a consonant, 0 unstressed, 1 primary, 2 secondary, 3 a
+; secondary espeak-ng leaves unmarked, its vowel kept full.
+(data Phone (Phone (base (list int)) (stress int)))
+
+; A letter-to-sound rule: the letters it reads, what must come before
+; and after them, and the phones they are.
+(data LtsRule (LtsRule (left (list int)) (mid (list int)) (right (list int)) (phones (list (list int)))))
+
+; What speaks a text's words: CMUdict's bytes, the rules by their
+; letters' first, and the words a sentence says in their weak forms.
+(data Phonemizer (Phonemizer (dict bytes) (rules (Map int (list LtsRule))) (weak (Map (list int) (list int)))))
+
+; A piece of text: a word, lowercased, or a punctuation mark.
+(data PhonToken (PhonWord (list int)) (PhonMark int))
+
+; The phonemizer over the CMUdict in d.
+(def phon_new ((d bytes)) Phonemizer
+  (Phonemizer d (phon_rules_from (split_spaces (phon_rule_text)) ((MapEmpty int (list LtsRule))))
+              (phon_pairs (split_spaces (phon_weak_text)) ((MapEmpty (list int) (list int))))))
+
+; ------------------------------------------------------------- CMUdict
+
+; The ARPAbet of word w in CMUdict's bytes d, its first pronunciation;
+; none if it is not there. d is sorted by its words, which a variant's
+; "(2)" does not change, so it is searched in halves.
+(def phon_dict_find ((d bytes) (w (list int))) (Option (list (list int)))
+  (let s (phon_search d w 0 (bytes_len d))
+    (if (lt s 0)
+        ((None (list (list int))))
+        (let f (phon_first d w s)
+          (Some (split_spaces (bytes_range d (add (phon_key_end d f) 1) (phon_pron_end d f))))))))
+
+; The start of a line of d from lo up to hi whose word is w, lo and hi
+; lines' starts; -1 if none.
+(def phon_search ((d bytes) (w (list int)) (lo int) (hi int)) int
+  (if (ge lo hi)
+      -1
+      (let (s (phon_line_start d (div (add lo hi) 2))
+            c (phon_compare d s (phon_key_end d s) w))
+        (if (eq c 0) s
+            (lt c 0) (phon_search d w (phon_next_line d s) hi)
+            (phon_search d w lo s)))))
+
+; The first of the lines whose word is w, from the line at s back.
+(def phon_first ((d bytes) (w (list int)) (s int)) int
+  (if (eq s 0)
+      s
+      (let p (phon_line_start d (sub s 1))
+        (if (eq (phon_compare d p (phon_key_end d p) w) 0) (phon_first d w p) s))))
+
+; Where the line holding i starts.
+(def phon_line_start ((d bytes) (i int)) int
+  (if (or (le i 0) (eq (bytes_get d (sub i 1)) 10)) (max i 0) (phon_line_start d (sub i 1))))
+
+; Where the line after the one starting at s starts.
+(def phon_next_line ((d bytes) (s int)) int
+  (if (ge s (bytes_len d)) s (if (eq (bytes_get d s) 10) (add s 1) (phon_next_line d (add s 1)))))
+
+; Where the word of the line at s ends: its space, or its variant's (.
+(def phon_key_end ((d bytes) (s int)) int
+  (if (ge s (bytes_len d)) s
+      (let c (bytes_get d s)
+        (if (or (eq c 32) (or (eq c 40) (eq c 10))) s (phon_key_end d (add s 1))))))
+
+; Where the pronunciation of the line at s ends: its comment or its end.
+(def phon_pron_end ((d bytes) (s int)) int
+  (if (ge s (bytes_len d)) s
+      (let c (bytes_get d s)
+        (if (or (eq c 35) (eq c 10)) s (phon_pron_end d (add s 1))))))
+
+; The bytes of d from i to e against w, in order: -1, 0 or 1.
+(def phon_compare ((d bytes) (i int) (e int) (w (list int))) int
+  (if (ge i e) (if (is_empty w) 0 -1)
+      (is_empty w) 1
+      (let c (bytes_get d i)
+        (if (lt c (head w)) -1 (gt c (head w)) 1 (phon_compare d (add i 1) e (tail w))))))
+
+; ------------------------------------------------------- ARPAbet to IPA
+
+; The phones of ARPAbet tokens, AH0 as AH and 0.
+(def phon_phones ((ts (list (list int))) (acc (list Phone))) (array Phone)
+  (if (is_empty ts)
+      (array_from (rev acc) (Phone "" -1))
+      (let (t (head ts) l (phon_last t))
+        (phon_phones (tail ts)
+                     (cons (if (and (ge l 48) (le l 50)) (Phone (take t (sub (length t) 1)) (sub l 48)) (Phone t -1)) acc)))))
+
+; The last byte of s, 0 for none.
+(def phon_last ((s (list int))) int
+  (if (is_empty s) 0 (if (is_empty (tail s)) (head s) (phon_last (tail s)))))
+
+; The phones with espeak-ng's stresses: a secondary right after the
+; primary, with no vowel between, left unmarked (3).
+(def phon_restress ((ps (array Phone))) (array Phone)
+  (phon_restress_from ps 0 -1))
+(def phon_restress_from ((ps (array Phone)) (i int) (last int)) (array Phone)
+  (if (ge i (array_len ps))
+      ps
+      (let st (.stress (array_get ps i))
+        (if (lt st 0) (phon_restress_from ps (add i 1) last)
+            (and (eq st 2) (eq last 1)) (phon_restress_from (array_set ps i (.stress (array_get ps i) 3)) (add i 1) 3)
+            (phon_restress_from ps (add i 1) st)))))
+
+; The IPA of the ARPAbet ts, as espeak-ng writes it.
+(def phon_ipa ((ts (list (list int)))) (list int)
+  (let ps (phon_restress (phon_phones ts (nil Phone)))
+    (rev (phon_ipa_from ps 0 (nil int)))))
+(def phon_ipa_from ((ps (array Phone)) (i int) (acc (list int))) (list int)
+  (if (ge i (array_len ps))
+      acc
+      (phon_ipa_from ps (add i 1) (push (phon_ipa_at ps i) acc))))
+
+; Whether phone i of ps is there and a vowel, and its stress.
+(def phon_vowel_at ((ps (array Phone)) (i int)) bool
+  (and (ge i 0) (and (lt i (array_len ps)) (ge (.stress (array_get ps i)) 0))))
+(def phon_stress_at ((ps (array Phone)) (i int)) int
+  (if (and (ge i 0) (lt i (array_len ps))) (.stress (array_get ps i)) -2))
+(def phon_base_at ((ps (array Phone)) (i int)) (list int)
+  (if (and (ge i 0) (lt i (array_len ps))) (.base (array_get ps i)) ""))
+
+; Phone i of ps in IPA, its neighbours deciding its form.
+(def phon_ipa_at ((ps (array Phone)) (i int)) (list int)
+  (let (p (array_get ps i)
+        b (.base p)
+        st (.stress p))
+    (if (ge st 0)
+        (append (phon_unmark (nth (split_spaces "_ ˈ ˌ _") (min st 3))) (phon_vowel_ipa ps i b st))
+        (phon_consonant_ipa ps i b))))
+
+; Vowel i, b with stress st: full, or weak when unstressed, as espeak-ng
+; reduces them, with an ɹ after ER before a vowel.
+(def phon_vowel_ipa ((ps (array Phone)) (i int) (b (list int)) (st int)) (list int)
+  (let (v (if (eq st 0) (phon_weak_vowel ps i b) (list_eq b "ER") "ɜː" (phon_lookup (phon_vowel_text) b))
+        r (if (and (list_eq b "ER") (phon_vowel_at ps (add i 1))) "ɹ" ""))
+    (append v r)))
+
+; "_" is the mark of no mark.
+(def phon_unmark ((s (list int))) (list int) (if (list_eq s "_") "" s))
+
+; An unstressed vowel: AH ə (ɐ starting a word), ER ɚ, IY i, UW u, IH
+; ᵻ in the ending of -ed and -es after T, D or a sibilant; else full.
+(def phon_weak_vowel ((ps (array Phone)) (i int) (b (list int))) (list int)
+  (if (and (list_eq b "AH") (eq i 0)) "ɐ"
+      (and (list_eq b "IH") (and (eq i (sub (array_len ps) 2)) (and (any_eq (phon_base_at ps (add i 1)) (split_spaces "D Z")) (any_eq (phon_base_at ps (sub i 1)) (split_spaces "T D S Z SH ZH CH JH"))))) "ᵻ"
+      (let w (phon_lookup (phon_weak_vowel_text) b)
+        (if (is_empty w) (phon_lookup (phon_vowel_text) b) w))))
+
+; Consonant i, b: R dropped after ER unless a vowel follows, T a flap ɾ
+; between a vowel and an unstressed one.
+(def phon_consonant_ipa ((ps (array Phone)) (i int) (b (list int))) (list int)
+  (if (and (list_eq b "R") (and (list_eq (phon_base_at ps (sub i 1)) "ER") (not (phon_vowel_at ps (add i 1))))) ""
+      (and (list_eq b "T") (and (phon_voiced_before ps i) (any_eq (phon_stress_at ps (add i 1)) (cons 0 (cons 3 (nil int)))))) "ɾ"
+      (phon_lookup (phon_consonant_text) b)))
+
+; Whether a T at i follows a vowel, or an R after a vowel, as a flap
+; does.
+(def phon_voiced_before ((ps (array Phone)) (i int)) bool
+  (or (phon_vowel_at ps (sub i 1))
+      (and (list_eq (phon_base_at ps (sub i 1)) "R") (phon_vowel_at ps (sub i 2)))))
+
+; The value of key k in a table of KEY=VALUE words; empty if none.
+(def phon_lookup ((table (list int)) (k (list int))) (list int)
+  (phon_lookup_in (split_spaces table) (append k "=")))
+(def phon_lookup_in ((ws (list (list int))) (k (list int))) (list int)
+  (if (is_empty ws) ""
+      (starts_with (head ws) k) (drop (head ws) (length k))
+      (phon_lookup_in (tail ws) k)))
+
+; The vowels in full, the unstressed ones that are weak, and the
+; consonants, ARPAbet to espeak-ng's en-us IPA.
+(def phon_vowel_text () (list int)
+  "AA=ɑː AE=æ AH=ʌ AO=ɔː AW=aʊ AY=aɪ EH=ɛ ER=ɜː EY=eɪ IH=ɪ IY=iː OW=oʊ OY=ɔɪ UH=ʊ UW=uː")
+(def phon_weak_vowel_text () (list int)
+  "AH=ə ER=ɚ IY=i UW=u")
+(def phon_consonant_text () (list int)
+  "B=b CH=tʃ D=d DH=ð F=f G=ɡ HH=h JH=dʒ K=k L=l M=m N=n NG=ŋ P=p R=ɹ S=s SH=ʃ T=t TH=θ V=v W=w Y=j Z=z ZH=ʒ")
+
+; ------------------------------------------------------ letter to sound
+
+; The rules of words, each "LEFT[LETTERS]RIGHT=PHONES": _ the edge of
+; the word, # one or more vowels, : any consonants, ^ one consonant, .
+; a voiced one, + e, i or y, @ one of tsrdlznj, & one of sczgj, % a
+; suffix (ing ely er es ed e); the phones ARPAbet, commas between.
+; Each letter's rules in the order they are tried, the first that
+; matches taken.
+(def phon_rule_text () (list int)
+  (append (phon_rules_a) (append " " (append (phon_rules_e) (append " " (append (phon_rules_i) (append " " (append (phon_rules_o) (append " " (append (phon_rules_s) (append " " (append (phon_rules_t) (append " " (phon_rules_rest))))))))))))))
+(def phon_rules_a () (list int)
+  "_[a]_=AH _[are]_=AA,R _[ar]o=AH,R [ar]#=EH,R ^[as]#=EY,S [a]wa=AH [aw]=AO _:[any]=EH,N,IY [a]^+#=EY #:[ally]=AH,L,IY _[al]#=AH,L [again]=AH,G,EH,N #:[ag]e=IH,JH [a]^%=EY [a]^+:#=AE _:[a]^+_=EY [arr]=AH,R [ar]=AA,R [air]=EH,R [ai]=EY [ay]=EY [au]=AO #:[al]_=AH,L #:[als]_=AH,L,Z [alk]=AO,K [al]^=AO,L _:[able]=EY,B,AH,L [able]=AH,B,AH,L [ang]+=EY,N,JH [a]=AE")
+(def phon_rules_e () (list int)
+  "#:[e]_= _:[e]_=IY #[ed]_=D #:[e]d_= [ev]er=EH,V [e]^%=IY [eri]#=IY,R,IY [eri]=EH,R,IH #:[er]#=ER [er]#=EH,R [er]=ER _[even]=IY,V,EH,N #:[e]w= @[ew]=UW [ew]=Y,UW [e]o=IY #:&[es]_=IH,Z #:[e]s_= #:[ely]_=L,IY #:[ement]=M,EH,N,T [eful]=F,UH,L [ee]=IY [earn]=ER,N _[ear]^=ER [ead]=EH,D #:[ea]_=IY,AH [ea]su=EH [ea]=IY [eigh]=EY [ei]=IY _[eye]=AY [ey]=IY [eu]=Y,UW [e]=EH")
+(def phon_rules_i () (list int)
+  "_[in]=IH,N _[i]_=AY [in]d=AY,N [ier]=IY,ER #:r[ied]_=IY,D [ied]_=AY,D [ien]=IY,EH,N [ie]t=AY,EH _:[i]%=AY [i]%=IY [ie]=IY [i]^+:#=IH [ir]#=AY,R [iz]%=AY,Z [is]%=AY,Z [i]d%=AY +^[i]^+=IH [i]t%=AY #:^[i]^+=IH [i]^+=AY [ir]=ER [igh]=AY [ild]=AY,L,D [ign]_=AY,N [ign]^=AY,N [ign]%=AY,N [ique]=IY,K [i]=IH")
+(def phon_rules_o () (list int)
+  "[of]_=AH,V [orough]=ER,OW #:[or]_=ER #:[ors]_=ER,Z [or]=AO,R _[one]=W,AH,N [ow]=OW _[over]=OW,V,ER [ov]=AH,V [o]^%=OW [o]^en=OW [o]^i#=OW [ol]d=OW,L [ought]=AO,T [ough]=AH,F _[ou]=AW h[ou]s#=AW [ous]=AH,S [our]=AO,R [ould]=UH,D ^[ou]^l=AH [oup]=UW,P [ou]=AW [oy]=OY [oing]=OW,IH,NG [oi]=OY [oor]=AO,R [ook]=UH,K [ood]=UH,D [oo]=UW [o]e=OW [o]_=OW [oa]=OW _[only]=OW,N,L,IY _[once]=W,AH,N,S [on't]=OW,N,T c[o]n=AA [o]ng=AO _:^[o]n=AH i[on]=AH,N #:[on]_=AH,N #^[on]=AH,N [o]st_=OW [of]^=AO,F [other]=AH,DH,ER [oss]_=AO,S #:^[om]=AH,M [o]=AA")
+(def phon_rules_s () (list int)
+  "[sh]=SH #[sion]=ZH,AH,N [some]=S,AH,M #[sur]#=ZH,ER [sur]#=SH,ER #[su]#=ZH,UW #[ssu]#=SH,UW #[sed]_=Z,D #[s]#=Z [said]=S,EH,D ^[sion]=SH,AH,N [s]s= .[s]_=Z #:.e[s]_=Z #:^##[s]_=Z #:^#[s]_=S u[s]_=S _:#[s]_=Z _[sch]=S,K [s]c+= #[sm]=Z,M #[sn]'=Z,AH,N [s]=S")
+(def phon_rules_t () (list int)
+  "[tt]=T _[the]_=DH,AH [to]_=T,UW [that]_=DH,AE,T _[this]_=DH,IH,S _[they]=DH,EY _[there]=DH,EH,R [ther]=DH,ER [their]=DH,EH,R _[than]_=DH,AE,N _[them]_=DH,EH,M [these]_=DH,IY,Z _[then]=DH,EH,N [through]=TH,R,UW [those]=DH,OW,Z [though]_=DH,OW _[thus]=DH,AH,S [th]=TH #:[ted]_=T,IH,D s[ti]#n=CH [ti]o=SH [ti]a=SH [tien]=SH,AH,N [tur]#=CH,ER [tu]a=CH,UW _[two]=T,UW [t]=T")
+(def phon_rules_rest () (list int)
+  "[bb]=B _[be]^#=B,IH [being]=B,IY,IH,NG _[both]_=B,OW,TH _[bus]#=B,IH,Z [buil]=B,IH,L [b]=B [cc]+=K,S [cc]=K _[ch]^=K ^e[ch]=K [ch]=CH _s[ci]#=S,AY [ci]a=SH [ci]o=SH [ci]en=SH [c]+=S [ck]=K [com]%=K,AH,M [c]=K [dd]=D #:[ded]_=D,IH,D .e[d]_=D #:^e[d]_=T _[de]^#=D,IH _[do]_=D,UW _[does]=D,AH,Z _[doing]=D,UW,IH,NG _[dow]=D,AW [du]a=JH,UW [d]=D [ff]=F [ful]=F,UH,L [f]=F [giv]=G,IH,V _[g]i^=G [ge]t=G,EH su[gges]=G,JH,EH,S [gg]=G _b#[g]=G [g]+=JH [great]=G,R,EY,T #[gh]= [g]=G _[hav]=HH,AE,V _[here]=HH,IY,R _[hour]=AW,ER [how]=HH,AW [h]#=HH [h]= [j]=JH _[k]n= [k]=K [ll]=L [lo]c#=L,OW l[l]= #:^[l]%=AH,L [lead]=L,IY,D [l]=L [mm]=M [mov]=M,UW,V [m]=M [nn]=N e[ng]+=N,JH [ng]r=NG,G [ng]#=NG,G [ngl]%=NG,G,AH,L [ng]=NG [nk]=NG,K _[now]_=N,AW [n]=N [pp]=P [ph]=F [peop]=P,IY,P [pow]=P,AW [put]_=P,UH,T [p]=P [quar]=K,W,AO,R [qu]=K,W [q]=K [rr]=R _[re]^#=R,IY [r]=R _[un]i=Y,UW,N _[un]=AH,N _[upon]=AH,P,AO,N @[ur]#=UH,R [ur]#=Y,UH,R [ur]^=ER [u]^_=AH [u]^^=AH [uy]=AY _g[u]#= g[u]%= g[u]#=W #n[u]=Y,UW @[u]=UW [u]=Y,UW [view]=V,Y,UW [v]=V _[were]=W,ER [wa]s=W,AA [wa]t=W,AA [where]=HH,EH,R [what]=HH,AA,T [whol]=HH,OW,L [who]=HH,UW [wh]=HH [war]=W,AO,R [wor]^=W,ER [wr]=R [w]=W [x]=K,S _[y]ou=Y _[yes]=Y,EH,S _[y]=Y #:^[y]_=IY #:^[y]i=IY _:[y]_=AY _:[y]#=AY _:[y]^+:#=IH _:[y]^#=AY [y]=IH [zz]=Z [z]=Z")
+
+; The rules of the words ws put into m, each under its letters' first,
+; in order.
+(def phon_rules_from ((ws (list (list int))) (m (Map int (list LtsRule)))) (Map int (list LtsRule))
+  (if (is_empty ws)
+      (phon_rules_reversed (map_keys m) m)
+      (let (r (phon_rule_of (head ws))
+            k (head (.mid r))
+            old (match (map_get m k) ((None) (nil LtsRule)) ((Some rs) rs)))
+        (phon_rules_from (tail ws) (map_put m k (cons r old))))))
+
+; m with each of its lists, built backwards, put in order.
+(def phon_rules_reversed ((ks (list int)) (m (Map int (list LtsRule)))) (Map int (list LtsRule))
+  (if (is_empty ks)
+      m
+      (let rs (match (map_get m (head ks)) ((None) (nil LtsRule)) ((Some rs) rs))
+        (phon_rules_reversed (tail ks) (map_put m (head ks) (rev rs))))))
+
+; The rule a word of phon_rule_text is.
+(def phon_rule_of ((w (list int))) LtsRule
+  (let (l (up_to 91 w)
+        r1 (drop w (add (length l) 1))
+        mid (up_to 93 r1)
+        r2 (drop r1 (add (length mid) 1))
+        right (up_to 61 r2)
+        phones (drop r2 (add (length right) 1)))
+    (LtsRule l mid right (split_on 44 phones))))
+
+; The ARPAbet of a word by the rules, its first vowel stressed.
+(def phon_lts ((p Phonemizer) (w (list int))) (list (list int))
+  (let b (bytes_from_list (append "_" (append w "_____")))
+    (phon_stress_first (phon_lts_from (.rules p) b 1 (add (length w) 1) (nil (list int))) true (nil (list int)))))
+(def phon_lts_from ((rules (Map int (list LtsRule))) (b bytes) (i int) (e int) (acc (list (list int)))) (list (list int))
+  (if (ge i e)
+      (rev acc)
+      (match (map_get rules (bytes_get b i))
+        ((None) (phon_lts_from rules b (add i 1) e acc))
+        ((Some rs) (match (phon_rule_at rs b i)
+                     ((None) (phon_lts_from rules b (add i 1) e acc))
+                     ((Some r) (phon_lts_from rules b (add i (length (.mid r))) e (rev_onto (filter_empty (.phones r)) acc))))))))
+
+; ws without empty words.
+(def filter_empty ((ws (list (list int)))) (list (list int))
+  (if (is_empty ws) ws (if (is_empty (head ws)) (filter_empty (tail ws)) (cons (head ws) (filter_empty (tail ws))))))
+
+; The first of rs that matches at i of b.
+(def phon_rule_at ((rs (list LtsRule)) (b bytes) (i int)) (Option LtsRule)
+  (if (is_empty rs)
+      ((None LtsRule))
+      (let r (head rs)
+        (if (and (bytes_is_at b i (.mid r))
+                 (and (phon_left (rev (.left r)) b (sub i 1)) (phon_right (.right r) b (add i (length (.mid r))))))
+            (Some r)
+            (phon_rule_at (tail rs) b i)))))
+
+; Whether b's letter at j is a vowel, a consonant, voiced, e i or y, one
+; of tsrdlznj, one of sczgj.
+(def phon_is_vowel ((b bytes) (j int)) bool
+  (and (ge j 0) (and (lt j (bytes_len b)) (any_eq (bytes_get b j) "aeiou"))))
+(def phon_is_consonant ((b bytes) (j int)) bool
+  (and (ge j 0) (and (lt j (bytes_len b)) (let c (bytes_get b j) (and (ge c 97) (and (le c 122) (not (any_eq c "aeiou"))))))))
+(def phon_is_in ((b bytes) (j int) (set (list int))) bool
+  (and (ge j 0) (and (lt j (bytes_len b)) (any_eq (bytes_get b j) set))))
+
+; Whether the context pat, read backwards (its last first), matches b
+; leftwards from j.
+(def phon_left ((pat (list int)) (b bytes) (j int)) bool
+  (if (is_empty pat)
+      true
+      (let p (head pat)
+        (if (eq p 35) (and (phon_is_vowel b j) (phon_left (tail pat) b (phon_past_vowels b j -1)))
+            (eq p 58) (phon_left (tail pat) b (phon_past_consonants b j -1))
+            (eq p 94) (and (phon_is_consonant b j) (phon_left (tail pat) b (sub j 1)))
+            (phon_left_one p (tail pat) b j)))))
+(def phon_left_one ((p int) (pat (list int)) (b bytes) (j int)) bool
+  (and (phon_class_at p b j) (phon_left pat b (sub j 1))))
+
+; Whether the context pat matches b rightwards from j.
+(def phon_right ((pat (list int)) (b bytes) (j int)) bool
+  (if (is_empty pat)
+      true
+      (let p (head pat)
+        (if (eq p 35) (and (phon_is_vowel b j) (phon_right (tail pat) b (phon_past_vowels b j 1)))
+            (eq p 58) (phon_right (tail pat) b (phon_past_consonants b j 1))
+            (eq p 94) (and (phon_is_consonant b j) (phon_right (tail pat) b (add j 1)))
+            (eq p 37) (let n (phon_suffix b j) (and (gt n 0) (phon_right (tail pat) b (add j n))))
+            (and (phon_class_at p b j) (phon_right (tail pat) b (add j 1)))))))
+
+; Whether b's letter at j is what the one-letter context p asks: _ the
+; edge, . voiced, + e i y, @ tsrdlznj, & sczgj, else p itself.
+(def phon_class_at ((p int) (b bytes) (j int)) bool
+  (if (eq p 95) (phon_is_in b j "_")
+      (eq p 46) (phon_is_in b j "bdvgjlmnrwz")
+      (eq p 43) (phon_is_in b j "eiy")
+      (eq p 64) (phon_is_in b j "tsrdlznj")
+      (eq p 38) (phon_is_in b j "sczgj")
+      (and (ge j 0) (and (lt j (bytes_len b)) (eq (bytes_get b j) p)))))
+
+; Past the vowels, or the consonants, from j in direction dj.
+(def phon_past_vowels ((b bytes) (j int) (dj int)) int
+  (if (phon_is_vowel b j) (phon_past_vowels b (add j dj) dj) j))
+(def phon_past_consonants ((b bytes) (j int) (dj int)) int
+  (if (phon_is_consonant b j) (phon_past_consonants b (add j dj) dj) j))
+
+; The length of a suffix of % at j: ing ely er es ed e, or 0.
+(def phon_suffix ((b bytes) (j int)) int
+  (phon_suffix_in (split_spaces "ing ely er es ed e") b j))
+(def phon_suffix_in ((ss (list (list int))) (b bytes) (j int)) int
+  (if (is_empty ss) 0 (if (bytes_is_at b j (head ss)) (length (head ss)) (phon_suffix_in (tail ss) b j))))
+
+; ARPAbet phones with their stresses: the first vowel's 1, the rest 0.
+(def phon_stress_first ((ps (list (list int))) (first bool) (acc (list (list int)))) (list (list int))
+  (if (is_empty ps)
+      (rev acc)
+      (let p (head ps)
+        (if (any_eq p (split_spaces "AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW"))
+            (phon_stress_first (tail ps) false (cons (append p (if first "1" "0")) acc))
+            (phon_stress_first (tail ps) first (cons p acc))))))
+
+; ------------------------------------------------------------- words
+
+; The words a sentence says in their weak forms, as espeak-ng does
+; between other words, each WORD=IPA.
+(def phon_weak_text () (list int)
+  "a=ɐ an=æn the=ðə and=ænd or=ɔːɹ but=bˌʌt if=ɪf of=ʌv to=tə in=ɪn on=ˌɔn at=æt by=baɪ for=fɔːɹ from=fɹʌm with=wɪð as=æz is=ɪz are=ɑːɹ was=wʌz were=wɜː be=biː been=bˌɪn am=æm have=hæv has=hɐz had=hæd will=wɪl would=wʊd can=kæn could=kʊd shall=ʃˌæl should=ʃˌʊd might=mˌaɪt not=nˌɑːt this=ðɪs that=ðæt these=ðiːz those=ðoʊz it=ɪt its=ɪts he=hiː him=hˌɪm his=hɪz she=ʃiː her=hɜː they=ðeɪ them=ðˌɛm their=ðɛɹ we=wiː us=ˌʌs our=ˌaʊɚ you=juː your=jʊɹ me=mˌiː my=maɪ what=wʌt which=wˌɪtʃ who=hˌuː there=ðɛɹ than=ðɐn so=sˌoʊ up=ˌʌp about=ɐbˌaʊt into=ˌɪntʊ over=ˌoʊvɚ before=bᵻfˌɔːɹ some=sˌʌm any=ˌɛni")
+
+; The pairs WORD=VALUE of ws put into m.
+(def phon_pairs ((ws (list (list int))) (m (Map (list int) (list int)))) (Map (list int) (list int))
+  (if (is_empty ws)
+      m
+      (let k (up_to 61 (head ws))
+        (phon_pairs (tail ws) (map_put m k (drop (head ws) (add (length k) 1)))))))
+
+; Word w alone in IPA: CMUdict's, or the rules'.
+(def phon_word ((p Phonemizer) (w (list int))) (list int)
+  (match (phon_dict_find (.dict p) w)
+    ((Some ts) (phon_ipa ts))
+    ((None) (phon_ipa (phon_lts p w)))))
+
+; Word w in a sentence: its weak form if it has one, else alone.
+(def phon_word_in ((p Phonemizer) (w (list int))) (list int)
+  (match (map_get (.weak p) w)
+    ((Some s) s)
+    ((None) (phon_word p w))))
+
+; ------------------------------------------------------------ the text
+
+; The pieces of the text t, UTF-8: its words, lowercased, numbers and
+; symbols spelled out as words, abbreviations expanded, and its marks
+; (, . ! ? ; :), a run of one counted once; anything else is a space.
+(def phon_tokens ((t (list int))) (list PhonToken)
+  (rev (phon_tokens_from t (nil PhonToken))))
+(def phon_tokens_from ((t (list int)) (acc (list PhonToken))) (list PhonToken)
+  (if (is_empty t)
+      acc
+      (let c (head t)
+        (if (phon_is_letter c) (phon_word_token t acc)
+            (phon_is_digit c) (phon_number_token t false acc)
+            (and (eq c 36) (and (not (is_empty (tail t))) (phon_is_digit (head (tail t))))) (phon_number_token (tail t) true acc)
+            (any_eq c ",.!?;:") (phon_tokens_from (tail t) (phon_mark acc c))
+            (phon_tokens_from (tail t) (rev_onto (phon_symbol_words c) acc))))))
+
+; Whether c is an ASCII letter, or a digit.
+(def phon_is_letter ((c int)) bool (or (and (ge c 65) (le c 90)) (and (ge c 97) (le c 122))))
+(def phon_is_digit ((c int)) bool (and (ge c 48) (le c 57)))
+
+; acc with the mark c, unless it already ends with that mark.
+(def phon_mark ((acc (list PhonToken)) (c int)) (list PhonToken)
+  (if (and (not (is_empty acc)) (eq (head acc) (PhonMark c))) acc (cons (PhonMark c) acc)))
+
+; The words a symbol is said as, none for one that is not said.
+(def phon_symbol_words ((c int)) (list PhonToken)
+  (let w (phon_lookup "&=and %=percent +=plus @=at #=number =equals" (cons c (nil int)))
+    (if (and (eq c 61) (is_empty w)) (phon_words_of (cons "equals" (nil (list int))))
+        (is_empty w) (nil PhonToken)
+        (phon_words_of (cons w (nil (list int)))))))
+
+; Words as tokens.
+(def phon_words_of ((ws (list (list int)))) (list PhonToken)
+  (if (is_empty ws) (nil PhonToken) (cons (PhonWord (head ws)) (phon_words_of (tail ws)))))
+
+; The word at the start of t, its letters and apostrophes, lowercased,
+; then the rest; an abbreviation and its full stop said in full.
+(def phon_word_token ((t (list int)) (acc (list PhonToken))) (list PhonToken)
+  (let (n (phon_word_len t 0)
+        w (phon_lower (take t n))
+        rest (drop t n)
+        full (phon_lookup (phon_abbrev_text) w))
+    (if (and (not (is_empty full)) (and (not (is_empty rest)) (eq (head rest) 46)))
+        (phon_tokens_from (tail rest) (rev_onto (phon_words_of (split_on 95 full)) acc))
+        (phon_tokens_from rest (cons (PhonWord w) acc)))))
+
+; How many of t's first characters are a word's: letters, and
+; apostrophes between letters.
+(def phon_word_len ((t (list int)) (n int)) int
+  (if (is_empty t) n
+      (phon_is_letter (head t)) (phon_word_len (tail t) (add n 1))
+      (and (eq (head t) 39) (and (not (is_empty (tail t))) (phon_is_letter (head (tail t))))) (phon_word_len (tail t) (add n 1))
+      n))
+
+; s lowercased.
+(def phon_lower ((s (list int))) (list int)
+  (if (is_empty s) s
+      (let c (head s) (cons (if (and (ge c 65) (le c 90)) (add c 32) c) (phon_lower (tail s))))))
+
+; Abbreviations said in full, each ABBR=WORDS, _ between the words.
+(def phon_abbrev_text () (list int)
+  "mr=mister mrs=missus ms=miz dr=doctor st=street jr=junior sr=senior prof=professor gen=general sgt=sergeant capt=captain lt=lieutenant mt=mount ave=avenue rd=road blvd=boulevard etc=et_cetera vs=versus approx=approximately dept=department inc=incorporated ltd=limited co=company no=number vol=volume jan=january feb=february mar=march apr=april jun=june jul=july aug=august sep=september sept=september oct=october nov=november dec=december mon=monday tue=tuesday wed=wednesday thu=thursday fri=friday sat=saturday sun=sunday")
+
+; ------------------------------------------------------------- numbers
+
+; The number at the start of t said in words, then the rest: a whole
+; number with commas between its thousands, a decimal, a time (3:45), a
+; year (1999), an ordinal (21st), a percentage, and with money, dollars
+; and cents.
+(def phon_number_token ((t (list int)) (money bool) (acc (list PhonToken))) (list PhonToken)
+  (let (ds (phon_digits_run t (nil int))
+        rest (drop t (phon_digits_len t 0))
+        n (phon_value ds 0))
+    (if (and (phon_followed rest 46) (not money)) (phon_decimal n (tail rest) acc)
+        (and (phon_followed rest 46) money) (phon_money n (tail rest) acc)
+        (phon_followed rest 58) (phon_time n (tail rest) acc)
+        money (phon_tokens_from rest (rev_onto (phon_words_of (append (phon_cardinal n) (cons (if (eq n 1) "dollar" "dollars") (nil (list int))))) acc))
+        (phon_is_ordinal rest) (phon_tokens_from (drop rest 2) (rev_onto (phon_words_of (phon_ordinal (phon_cardinal n))) acc))
+        (and (not (is_empty rest)) (eq (head rest) 37)) (phon_tokens_from (tail rest) (rev_onto (phon_words_of (append (phon_cardinal n) (cons "percent" (nil (list int))))) acc))
+        (and (eq (length ds) 4) (and (ge n 1100) (and (le n 1999) (not (phon_has_comma t 4))))) (phon_tokens_from rest (rev_onto (phon_words_of (phon_year n)) acc))
+        (phon_tokens_from rest (rev_onto (phon_words_of (phon_cardinal n)) acc)))))
+
+; Whether t starts with c and then a digit.
+(def phon_followed ((t (list int)) (c int)) bool
+  (and (not (is_empty t)) (and (eq (head t) c) (and (not (is_empty (tail t))) (phon_is_digit (head (tail t)))))))
+
+; Whether t starts with st, nd, rd or th, and then no letter.
+(def phon_is_ordinal ((t (list int))) bool
+  (and (any_eq (phon_lower (take t 2)) (split_spaces "st nd rd th"))
+       (let r (drop t 2) (or (is_empty r) (not (phon_is_letter (head r)))))))
+
+; The digits of a number at the start of t, commas between thousands
+; dropped; and how many characters they took, commas included.
+(def phon_digits_run ((t (list int)) (acc (list int))) (list int)
+  (if (is_empty t) (rev acc)
+      (phon_is_digit (head t)) (phon_digits_run (tail t) (cons (head t) acc))
+      (and (eq (head t) 44) (phon_three_digits (tail t))) (phon_digits_run (tail t) acc)
+      (rev acc)))
+(def phon_digits_len ((t (list int)) (n int)) int
+  (if (is_empty t) n
+      (phon_is_digit (head t)) (phon_digits_len (tail t) (add n 1))
+      (and (eq (head t) 44) (phon_three_digits (tail t))) (phon_digits_len (tail t) (add n 1))
+      n))
+
+; Whether t starts with exactly three digits.
+(def phon_three_digits ((t (list int))) bool
+  (and (eq (phon_digits_len_plain t 0) 3) true))
+(def phon_digits_len_plain ((t (list int)) (n int)) int
+  (if (and (not (is_empty t)) (phon_is_digit (head t))) (phon_digits_len_plain (tail t) (add n 1)) n))
+
+; Whether a comma is among t's first n+1 characters.
+(def phon_has_comma ((t (list int)) (n int)) bool
+  (any_eq 44 (take t (add n 1))))
+
+; The value of the digits ds, after v; numbers past a trillion are
+; read as their digits instead, so this stops there.
+(def phon_value ((ds (list int)) (v int)) int
+  (if (is_empty ds) v (phon_value (tail ds) (add (mul v 10) (sub (head ds) 48)))))
+
+; A decimal: n, "point", then each digit after the point.
+(def phon_decimal ((n int) (t (list int)) (acc (list PhonToken))) (list PhonToken)
+  (let (k (phon_digits_len_plain t 0)
+        ws (append (phon_cardinal n) (cons "point" (phon_digit_words (take t k)))))
+    (phon_tokens_from (drop t k) (rev_onto (phon_words_of ws) acc))))
+
+; Each digit as its word.
+(def phon_digit_words ((ds (list int))) (list (list int))
+  (if (is_empty ds) (nil (list int)) (cons (nth (phon_ones) (sub (head ds) 48)) (phon_digit_words (tail ds)))))
+
+; Money with cents: n dollars and the two digits of t cents.
+(def phon_money ((n int) (t (list int)) (acc (list PhonToken))) (list PhonToken)
+  (let (k (phon_digits_len_plain t 0)
+        cents (phon_value (take (append (take t k) "0") 2) 0)
+        dollars (append (phon_cardinal n) (cons (if (eq n 1) "dollar" "dollars") (nil (list int))))
+        ws (if (eq cents 0) dollars (append dollars (cons "and" (append (phon_cardinal cents) (cons (if (eq cents 1) "cent" "cents") (nil (list int))))))))
+    (phon_tokens_from (drop t k) (rev_onto (phon_words_of ws) acc))))
+
+; A time: the hour n, then the minutes of t: o'clock, oh five, forty-five.
+(def phon_time ((n int) (t (list int)) (acc (list PhonToken))) (list PhonToken)
+  (let (k (phon_digits_len_plain t 0)
+        m (phon_value (take t k) 0)
+        ws (append (phon_cardinal n) (if (eq m 0) (cons "o'clock" (nil (list int))) (lt m 10) (cons "oh" (phon_cardinal m)) (phon_cardinal m))))
+    (phon_tokens_from (drop t k) (rev_onto (phon_words_of ws) acc))))
+
+; A year from 1100 to 1999 as it is said: nineteen ninety-nine, nineteen
+; hundred, nineteen oh five.
+(def phon_year ((n int)) (list (list int))
+  (let (hi (div n 100) lo (mod n 100))
+    (append (phon_cardinal hi)
+            (if (eq lo 0) (cons "hundred" (nil (list int))) (lt lo 10) (cons "oh" (phon_cardinal lo)) (phon_cardinal lo)))))
+
+; The words for 0 to 19, and the tens.
+(def phon_ones () (list (list int))
+  (split_spaces "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen"))
+(def phon_tens () (list (list int))
+  (split_spaces "_ _ twenty thirty forty fifty sixty seventy eighty ninety"))
+
+; n in words, up to the trillions; past them, its digits.
+(def phon_cardinal ((n int)) (list (list int))
+  (if (lt n 20) (cons (nth (phon_ones) n) (nil (list int)))
+      (lt n 100) (cons (nth (phon_tens) (div n 10)) (if (eq (mod n 10) 0) (nil (list int)) (phon_cardinal (mod n 10))))
+      (lt n 1000) (phon_scaled n 100 "hundred")
+      (lt n 1000000) (phon_scaled n 1000 "thousand")
+      (lt n 1000000000) (phon_scaled n 1000000 "million")
+      (lt n 1000000000000) (phon_scaled n 1000000000 "billion")
+      (lt n 1000000000000000) (phon_scaled n 1000000000000 "trillion")
+      (phon_digit_words (digits n))))
+
+; n as its count of unit, the word, and the rest.
+(def phon_scaled ((n int) (unit int) (word (list int))) (list (list int))
+  (append (phon_cardinal (div n unit)) (cons word (if (eq (mod n unit) 0) (nil (list int)) (phon_cardinal (mod n unit))))))
+
+; A number's words made an ordinal: its last word's.
+(def phon_ordinal ((ws (list (list int)))) (list (list int))
+  (if (is_empty ws) ws
+      (is_empty (tail ws)) (cons (phon_ordinal_word (head ws)) (nil (list int)))
+      (cons (head ws) (phon_ordinal (tail ws)))))
+(def phon_ordinal_word ((w (list int))) (list int)
+  (let x (phon_lookup "one=first two=second three=third five=fifth eight=eighth nine=ninth twelve=twelfth" w)
+    (if (not (is_empty x)) x
+        (eq (phon_last w) 121) (append (take w (sub (length w) 1)) "ieth")
+        (append w "th"))))
+
+; ------------------------------------------------------------ sentences
+
+; The text's sentences, each as Piper has espeak-ng's phonemes: words
+; between spaces, a mark after its word, a space after , ; and :, a
+; sentence ending at . ! or ?, and a final t flapped before a vowel.
+(def phon_sentences ((p Phonemizer) (t (list int))) (list (list int))
+  (rev (phon_sentences_from p (phon_tokens t) (nil PhonToken) (nil (list int)))))
+(def phon_sentences_from ((p Phonemizer) (ts (list PhonToken)) (cur (list PhonToken)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ts)
+      (if (phon_has_word cur) (cons (phon_render (phon_flap (rev cur))) acc) acc)
+      (match (head ts)
+        ((PhonWord w) (phon_sentences_from p (tail ts) (cons (PhonWord (phon_word_in p w)) cur) acc))
+        ((PhonMark c) (if (any_eq c ".!?")
+                          (if (phon_has_word cur)
+                              (phon_sentences_from p (tail ts) (nil PhonToken) (cons (phon_render (phon_flap (rev (cons (PhonMark c) cur)))) acc))
+                              (phon_sentences_from p (tail ts) (nil PhonToken) acc))
+                          (phon_sentences_from p (tail ts) (if (phon_has_word cur) (cons (PhonMark c) cur) cur) acc))))))
+
+; Whether any of ts is a word.
+(def phon_has_word ((ts (list PhonToken))) bool
+  (if (is_empty ts) false (match (head ts) ((PhonWord w) true) ((PhonMark c) (phon_has_word (tail ts))))))
+
+; The words of ts, IPA, with a word's final t made ɾ where a word that
+; starts with a vowel follows it straight after, a vowel before the t.
+(def phon_flap ((ts (list PhonToken))) (list PhonToken)
+  (if (or (is_empty ts) (is_empty (tail ts)))
+      ts
+      (match (head ts)
+        ((PhonMark c) (cons (head ts) (phon_flap (tail ts))))
+        ((PhonWord w) (match (head (tail ts))
+                        ((PhonMark c) (cons (head ts) (phon_flap (tail ts))))
+                        ((PhonWord v) (cons (PhonWord (if (phon_flaps w v) (append (take w (sub (length w) 1)) "ɾ") w)) (phon_flap (tail ts)))))))))
+
+; Whether w's final t, after a vowel, flaps before v.
+(def phon_flaps ((w (list int)) (v (list int))) bool
+  (and (eq (phon_last w) 116)
+       (and (phon_vowel_char_end (take w (sub (length w) 1))) (phon_vowel_char_start v))))
+
+; Whether the IPA s ends with a vowel (or its length mark), or starts
+; with one.
+(def phon_vowel_char_end ((s (list int))) bool
+  (let cs (phon_codepoints s)
+    (and (not (is_empty cs)) (any_eq (phon_last_of cs) (phon_vowel_chars)))))
+(def phon_vowel_char_start ((s (list int))) bool
+  (let cs (phon_codepoints s)
+    (and (not (is_empty cs)) (any_eq (head cs) (phon_vowel_chars)))))
+(def phon_last_of ((cs (list (list int)))) (list int)
+  (if (is_empty (tail cs)) (head cs) (phon_last_of (tail cs))))
+(def phon_vowel_chars () (list (list int))
+  (split_spaces "a e i o u æ ɐ ɑ ɔ ə ɚ ɛ ɜ ɪ ʊ ʌ ᵻ ː"))
+
+; A sentence's pieces as its phonemes.
+(def phon_render ((ts (list PhonToken))) (list int)
+  (rev (phon_render_from ts false (nil int))))
+(def phon_render_from ((ts (list PhonToken)) (after_word bool) (acc (list int))) (list int)
+  (if (is_empty ts)
+      acc
+      (match (head ts)
+        ((PhonWord w) (phon_render_from (tail ts) true (push w (if after_word (push " " acc) acc))))
+        ((PhonMark c) (phon_render_from (tail ts) false (if (any_eq c ",;:") (push " " (cons c acc)) (cons c acc)))))))
+
+; ----------------------------------------------------------------- IDs
+
+; The UTF-8 s as its codepoints, each its bytes.
+(def phon_codepoints ((s (list int))) (list (list int))
+  (if (is_empty s)
+      (nil (list int))
+      (let n (phon_utf8_len (head s))
+        (cons (take s n) (phon_codepoints (drop s n))))))
+
+; How many bytes the UTF-8 sequence led by c takes.
+(def phon_utf8_len ((c int)) int
+  (if (lt c 128) 1 (lt c 224) 2 (lt c 240) 3 4))
+
+; A sentence's phonemes as the voice's IDs: ^ and _, then each
+; codepoint's and _, then $; a codepoint the voice has no ID for left
+; out, as Piper does.
+(def phon_ids ((c VoiceConfig) (s (list int))) (list int)
+  (let pad (voice_id c "_")
+    (rev (cons (voice_id c "$") (phon_ids_from c (phon_codepoints s) pad (cons pad (cons (voice_id c "^") (nil int))))))))
+(def phon_ids_from ((c VoiceConfig) (cs (list (list int))) (pad int) (acc (list int))) (list int)
+  (if (is_empty cs)
+      acc
+      (let id (voice_id c (head cs))
+        (phon_ids_from c (tail cs) pad (if (lt id 0) acc (cons pad (cons id acc)))))))

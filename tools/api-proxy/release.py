@@ -5,7 +5,9 @@ for each part:
   system/   the system volume's files: bin, sbin, Applications, etc
   boot/     the Pi 5's boot partition: l0.img, config.txt, cmdline.txt,
             the device trees, input.bin
-  speech/   the data volume's speech directory: whistle.cact
+  speech/   the data volume's speech directory: whistle.cact, and speak's
+            voice, en_US-ljspeech-medium.onnx and its .json, and
+            cmudict.dict
   agent/    the agent's home, seeded: CLAUDE.md, CONSTITUTION.md
   eeprom/   a release pieeprom.bin, for the boot order
 

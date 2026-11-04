@@ -1,0 +1,136 @@
+; stagecheck.l0 -- piper.l0 against Piper's own synthesis (roadmap 0062),
+; stage by stage: for each of oracle.py's directories, its first
+; sentence's IDs through the voice with its noise at 0, and each stage's
+; rows beside the oracle's: their least cosine, a row's, and the largest
+; difference of any number; the durations, frame for frame; and how long
+; each stage took.
+;
+;   l0 run common/abi.l0 common/text.l0 user/lib/sys/cli.l0 \
+;     user/lib/format/json.l0 user/lib/format/onnx.l0 \
+;     user/lib/speech/voice.l0 user/lib/speech/mel.l0 \
+;     user/lib/speech/vits.l0 user/lib/speech/piper.l0 \
+;     probes/piper/stagecheck.l0 -- VOICE.onnx DIR...
+
+; A float to 6 places.
+(def f6 ((x float)) (list int)
+  (let (n (float_to_int (float_mul x 1000000.0))
+        a (if (lt n 0) (sub 0 n) n)
+        s (digits (add 1000000 (mod a 1000000))))
+    (append (if (float_lt x 0.0) "-" "") (append (digits (div a 1000000)) (append "." (drop s 1))))))
+
+; The oracle's stage name in dir as a tensor of c channels.
+(def oracle ((dir (list int)) (name (list int)) (c int)) Vt
+  (match (read_whole (append dir (append "/" (append name ".f32"))))
+    ((Err why) (vt_zeros 0 c))
+    ((Ok b) (Vt (div (bytes_len b) (mul 4 c)) c b))))
+
+; The comparison of a with the oracle's b: rows, least cosine, largest
+; difference.
+(def compare_line ((name (list int)) (a Vt) (b Vt)) (list int)
+  (if (not (eq (.t a) (.t b)))
+      (append name (append ": rows " (append (digits (.t a)) (append ", the oracle's " (digits (.t b))))))
+      (append name (append ": rows " (append (digits (.t a)) (append ", least cosine " (append (f6 (least_cos a b 0 1.0)) (append ", largest difference " (f6 (most_diff a b 0 0.0))))))))))
+
+; The least cosine of a's rows from i with b's.
+(def least_cos ((a Vt) (b Vt) (i int) (m float)) float
+  (if (ge i (.t a))
+      m
+      (let (c (.c a)
+            at (mul 4 (mul i c))
+            ab (bytes_dot_f32 (.b a) at (.b b) at c)
+            aa (bytes_dot_f32 (.b a) at (.b a) at c)
+            bb (bytes_dot_f32 (.b b) at (.b b) at c)
+            cos (if (or (float_le aa 0.0) (float_le bb 0.0)) 1.0 (float_div ab (float_sqrt (float_mul aa bb)))))
+        (least_cos a b (add i 1) (if (float_lt cos m) cos m)))))
+
+; The largest difference of a's numbers from k and b's.
+(def most_diff ((a Vt) (b Vt) (k int) (m float)) float
+  (if (ge k (vt_len a))
+      m
+      (let d (float_sub (bytes_get_f32 (.b a) (mul 4 k)) (bytes_get_f32 (.b b) (mul 4 k)))
+        (most_diff a b (add k 1) (let x (if (float_lt d 0.0) (float_neg d) d) (if (float_gt x m) x m))))))
+
+; The correlation of two runs of samples, one a row: their dot over the
+; root of their squares' product; 0 if their lengths differ.
+(def correlation ((a Vt) (b Vt)) float
+  (if (not (eq (.t a) (.t b)))
+      0.0
+      (let (n (.t a)
+            ab (bytes_dot_f32 (.b a) 0 (.b b) 0 n)
+            aa (bytes_dot_f32 (.b a) 0 (.b a) 0 n)
+            bb (bytes_dot_f32 (.b b) 0 (.b b) 0 n))
+        (float_div ab (float_sqrt (float_mul aa bb))))))
+
+; The durations as words.
+(def words_of ((ns (list int))) (list int)
+  (unwords (map_digits ns)))
+(def map_digits ((ns (list int))) (list (list int))
+  (if (is_empty ns) (nil (list int)) (cons (digits (head ns)) (map_digits (tail ns)))))
+
+; The oracle's durations, rounded.
+(def oracle_durations ((w Vt) (i int)) (list int)
+  (if (ge i (.t w)) (nil int) (cons (float_to_int (vt_at w i 0)) (oracle_durations w (add i 1)))))
+
+; The first line of the IDs file as numbers.
+(def first_ids ((dir (list int))) (list int)
+  (match (read_whole (append dir "/ids.txt"))
+    ((Err why) (nil int))
+    ((Ok b) (numbers (split_spaces (head (lines (bytes_to_list b))))))))
+(def numbers ((ws (list (list int)))) (list int)
+  (if (is_empty ws) (nil int) (cons (match (word_number (head ws)) ((None) 0) ((Some n) n)) (numbers (tail ws)))))
+
+; Milliseconds since t0.
+(def ms ((t0 int)) (list int) (append (digits (div (sub (clock_ns) t0) 1000000)) " ms"))
+
+; The report for dir.
+(def check_dir ((p Piper) (dir (list int))) int
+  (let (ids (first_ids dir)
+        t0 (clock_ns)
+        e (piper_encode p ids)
+        t1 (clock_ns)
+        logw (piper_log_durations p (.x e) (vt_zeros (.t (.x e)) 2))
+        t2 (clock_ns)
+        ds (piper_durations logw 1.0)
+        ods (oracle_durations (oracle dir "w_ceil" 1) 0)
+        zp (piper_prior e ods (vt_zeros 0 192) 0.0)
+        t3 (clock_ns)
+        z (piper_flow p zp)
+        t4 (clock_ns)
+        audio (piper_vocode p z)
+        t5 (clock_ns)
+        out (join_with "\n" (cons (append dir (append ": " (append (digits (length ids)) (append " IDs, " (append (digits (.t audio)) " samples")))))
+              (cons (compare_line "  enc" (.x e) (oracle dir "enc" 192))
+              (cons (compare_line "  m_p" (.m e) (oracle dir "m_p" 192))
+              (cons (compare_line "  logs_p" (.logs e) (oracle dir "logs_p" 192))
+              (cons (compare_line "  logw" logw (oracle dir "logw" 1))
+              (cons (append "  durations " (if (eq ds ods) "the same" (append "differ: " (append (words_of ds) (append " against " (words_of ods))))))
+              (cons (compare_line "  z_p" zp (oracle dir "z_p" 192))
+              (cons (compare_line "  z" z (oracle dir "z" 192))
+              (cons (append "  samples: correlation " (f6 (correlation audio (oracle dir "audio" 1))))
+              (cons (append "  time: encoder " (append (digits (div (sub t1 t0) 1000000)) (append " ms, durations " (append (digits (div (sub t2 t1) 1000000))
+                      (append " ms, flow " (append (digits (div (sub t4 t3) 1000000)) (append " ms, vocoder " (append (digits (div (sub t5 t4) 1000000)) " ms"))))))))
+                    (nil (list int))))))))))))))
+    (let w (write_str out) (let x (write_str "\n") 0))))
+
+; Each directory of ds.
+(def check_dirs ((p Piper) (ds (list (list int)))) int
+  (if (is_empty ds) 0 (let r (check_dir p (head ds)) (check_dirs p (tail ds)))))
+
+; The directories after the first argument.
+(def dir_args ((k int) (acc (list (list int)))) (list (list int))
+  (if (ge k (arg_count)) (rev acc) (dir_args (add k 1) (cons (arg k) acc))))
+
+(def check () int
+  (let t0 (clock_ns)
+    (match (read_whole (arg 0))
+      ((Err why) (complain_as "stagecheck" why))
+      ((Ok b) (match (read_whole (append (arg 0) ".json"))
+                ((Err why) (complain_as "stagecheck" why))
+                ((Ok cb) (match (voice_config_of cb)
+                           ((Err why) (complain_as "stagecheck" why))
+                           ((Ok c) (match (piper_of b c)
+                                     ((Err why) (complain_as "stagecheck" why))
+                                     ((Ok p) (let w (write_str (append "loaded in " (append (ms t0) "\n")))
+                                               (check_dirs p (dir_args 1 (nil (list int)))))))))))))))
+
+(def main () int (check))

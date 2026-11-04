@@ -1,0 +1,100 @@
+; piper_test.l0 -- tests of piper.l0's parts that need no voice: the
+; spline's inverse against its forward form, the layouts, the names,
+; the durations. The voice itself is checked against Piper's own
+; synthesis by probes/piper/stagecheck.l0.
+
+; 29 seeded spline parameters, as bytes.
+(def t_params ((s int)) bytes
+  (t_params_from s 0 (vt_zero_bytes 29)))
+(def t_params_from ((s int) (k int) (b bytes)) bytes
+  (if (ge k 29)
+      b
+      (let s1 (rand_next s)
+        (t_params_from s1 (add k 1) (bytes_set_f32 b (mul 4 k) (float_sub (float_div (float_from_int (rand_below s1 4001)) 1000.0) 2.0))))))
+
+; The spline forward at y, as transforms.py computes it: the bin of y
+; among the widths' knots, then the rational quadratic over it.
+(def t_forward ((y float) (b bytes)) float
+  (let (s (float_sqrt 192.0)
+        cw (spline_knots b 0 s)
+        ch (spline_knots b 40 s)
+        d (spline_derivatives b 80)
+        k (spline_bin cw y 0)
+        w (float_sub (array_get cw (add k 1)) (array_get cw k))
+        hh (float_sub (array_get ch (add k 1)) (array_get ch k))
+        delta (float_div hh w)
+        d0 (array_get d k)
+        d1 (array_get d (add k 1))
+        th (float_div (float_sub y (array_get cw k)) w)
+        tt (float_mul th (float_sub 1.0 th))
+        num (float_mul hh (float_add (float_mul delta (float_mul th th)) (float_mul d0 tt)))
+        den (float_add delta (float_mul (float_sub (float_add d0 d1) (float_mul 2.0 delta)) tt)))
+    (float_add (array_get ch k) (float_div num den))))
+
+; Whether the inverse undoes the forward at y, for each seed from s.
+(def t_round_trips ((n int) (s int) (bad int)) int
+  (if (le n 0)
+      bad
+      (let (s1 (rand_next s)
+            b (t_params s1)
+            y (float_sub (float_div (float_from_int (rand_below s1 9001)) 1000.0) 4.5)
+            back (spline_inverse (t_forward y b) b 0)
+            d (float_sub back y))
+        (t_round_trips (sub n 1) s1 (if (float_lt (if (float_lt d 0.0) (float_neg d) d) 0.000001) bad (add bad 1))))))
+
+(def test_spline_inverse_undoes_forward () int
+  (check_int "misses" (t_round_trips 300 41 0) 0))
+
+(def test_spline_linear_outside () int
+  (let b (t_params 3)
+    (add (check_bool "below" (float_le (spline_inverse -7.0 b 0) -7.0) true)
+         (check_bool "above" (float_ge (spline_inverse 6.5 b 0) 6.5) true))))
+
+(def test_knots_span () int
+  (let k (spline_knots (t_params 5) 0 1.0)
+    (add (check_int "first" (float_to_int (array_get k 0)) -5)
+         (check_int "last" (float_to_int (array_get k 10)) 5))))
+
+(def test_node_names () int
+  (add (check_str "wavenet" (piper_node "flow.flows.6.enc.in_layers.0") "/flow/flows.6/enc/in_layers.0/Conv")
+       (check_str "res skip" (piper_node "flow.flows.0.enc.res_skip_layers.3") "/flow/flows.0/enc/res_skip_layers.3/Conv")))
+
+(def test_conv_names () int
+  (let ns (piper_conv_names)
+    ; 37 in the encoder (6 layers of 6, the projection), 32 in the
+    ; predictor (pre, proj, its DDSConv's 6, 3 ConvFlows of 8), 40 in the
+    ; flow (4 couplings of 10), 23 in the vocoder (5, 9 resblocks of 2)
+    (add (check_int "count" (length ns) 132)
+         (check_bool "anonymous" (any_eq "flow.flows.2.enc.in_layers.3#" ns) true))))
+
+; [2][3][2] numbers 0 to 11 as binary32s.
+(def t_ramp () bytes
+  (t_ramp_from 0 (vt_zero_bytes 12)))
+(def t_ramp_from ((k int) (b bytes)) bytes
+  (if (ge k 12) b (t_ramp_from (add k 1) (bytes_set_f32 b (mul 4 k) (float_from_int k)))))
+
+; The numbers of b as words.
+(def t_words ((b bytes)) (list int)
+  (unwords (t_words_from b 0)))
+(def t_words_from ((b bytes) (k int)) (list (list int))
+  (if (ge (mul 4 k) (bytes_len b)) (nil (list int)) (cons (digits (float_to_int (bytes_get_f32 b (mul 4 k)))) (t_words_from b (add k 1)))))
+
+; [out 2][in 3][k 2] laid out as [out][k][in].
+(def test_relayout () int
+  (check_str "conv" (t_words (piper_relayout (t_ramp) 0 2 3 2 (vt_zero_bytes 12) false 0 12)) "0 2 4 1 3 5 6 8 10 7 9 11"))
+
+; [in 2][out 3][k 2] laid out as [k][out][in].
+(def test_relayout_transposed () int
+  (check_str "transposed" (t_words (piper_relayout (t_ramp) 0 2 3 2 (vt_zero_bytes 12) true 0 12)) "0 6 2 8 4 10 1 7 3 9 5 11"))
+
+(def test_durations () int
+  (let w (Vt 3 1 (bytes_set_f32 (bytes_set_f32 (bytes_set_f32 (vt_zero_bytes 3) 0 0.0) 4 1.0) 8 -10.0))
+    ; e^0 = 1, e^1 = 2.718..., e^-10 = 0.0000454
+    (check_str "frames" (unwords (t_digits (piper_durations w 1.0))) "1 3 1")))
+(def t_digits ((ns (list int))) (list (list int))
+  (if (is_empty ns) (nil (list int)) (cons (digits (head ns)) (t_digits (tail ns)))))
+
+(def test_softmax () int
+  (let a (piper_softmax (array_set (array_new 2 0.0) 1 1.0))
+    ; e / (1 + e)
+    (check_int "second" (float_to_int (float_mul (array_get a 1) 1000000.0)) 731058)))

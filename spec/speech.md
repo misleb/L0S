@@ -11,6 +11,10 @@ whose reference is `cactus-needle`
 Neither is in the project: `probes/whistle` says how they are fetched
 and run on the host, and what L0S's parts are checked against.
 
+L0S also speaks: a Piper voice's path from text to samples, written in
+L0, and `speak`, which says text on the monitor's speakers or writes
+it to a file ([Speaking](#speaking)).
+
 ## The container
 
 [format/cact.l0](../user/lib/format/cact.l0) reads a Needle 3 `.cact`
@@ -243,6 +247,114 @@ model as `[from speech, sent by /sbin/speech]` and "Testing, testing,
 testing, testing.", and the conversation `agentd` keeps holds both and
 the model's answer. On one emulated CPU the model is read in 40 s.
 
+## Speaking
+
+The voice is Piper's `en_US-ljspeech-medium`
+([piper-voices](https://huggingface.co/rhasspy/piper-voices), trained
+on LJSpeech, which is in the public domain): a VITS model of 15.65
+million weights, all binary32, in one ONNX file of 63.5 MB, and its
+JSON config, at 22,050 Hz. Words are looked up in CMUdict
+(`cmudict.dict`, 3.6 MB, BSD 2-clause). Neither is in the project: the
+Makefile pins both, at a commit and a SHA-256 (`make piper-fetch`),
+`make release` puts them in the release's `speech/`, and the installer
+on the data volume beside Whistle's model. Each part is written from
+Piper's own source (its `train/vits`) and checked against Piper itself,
+run on the host by `probes/piper` with its noise at 0
+([testing.md](testing.md)).
+
+**The voice's file** ([format/onnx.l0](../user/lib/format/onnx.l0)):
+the ONNX protobuf read in place, its graph's 350 initializers by name
+and their numbers left in the file's bytes. 35 are anonymous, the
+flow's WaveNet weights whose weight norm the export folded
+(`onnx::Conv_8959`) and the embedding (`sid`): each is also found as
+the node that reads it and which input it is,
+`/flow/flows.6/enc/in_layers.0/Conv#1`. Only FLOAT and INT64 are read;
+any other type, data outside the file, or numbers held a field each is
+refused, named. The config ([speech/voice.l0](../user/lib/speech/voice.l0))
+gives the rate, the scales (noise 0.667, length 1, the durations' noise
+0.333) and the 157 phonemes' IDs. Every initializer reads as the onnx
+package reads it, bit for bit.
+
+**The phonemes** ([speech/phonemes.l0](../user/lib/speech/phonemes.l0))
+are those espeak-ng's en-us gives Piper. The config names espeak-ng's
+`en`, which is British, but the speaker is American and CMUdict is, so
+L0S and its reference both use en-us. The text is split into words and
+marks: numbers with commas, decimals ("point five zero"), times ("three
+forty five", "oh five", "o'clock"), years from 1100 to 1999 in pairs,
+ordinals, percentages and dollars and cents are said in words, a few
+symbols too, and 44 abbreviations before a full stop in full,
+that stop not ending the sentence. Each word is found in CMUdict by
+halves over its lines, in place, its first pronunciation taken, and its
+ARPAbet written in espeak-ng's IPA: the stress mark before the stressed
+vowel, a secondary right after the primary unmarked, an unstressed AH a
+word's ɐ when first and else ə, ER0 ɚ, ER ɜː (an ɹ after it only before
+a vowel), IY0 i, ᵻ in -ed and -es after T, D or a sibilant, and T a flap
+ɾ after a vowel or a vowel's R and before an unstressed vowel. A word
+not in CMUdict is spelled by letter-to-sound rules in the manner of the
+Naval Research Laboratory's, 315 of them, its first vowel stressed.
+69 function words have espeak-ng's weak forms between other words (the
+ðə, of ʌv, to tə), and a word's final t flaps before a word starting
+with a vowel (ɪɾ ɪz). Sentences end at . ! and ?; a mark follows its
+word, and , ; and : a space, as Piper writes them; the IDs are the
+start, each codepoint and the pad after it, then the end, a codepoint
+the voice has no ID for left out. Of 2000 of CMUdict's words, sampled
+evenly, 949 are espeak-ng's alike, most misses names espeak-ng's own
+rules say otherwise; the rules alone, as for a word CMUdict lacks, say
+547 alike. Of the four test sentences two are Piper's to the byte; the
+other two differ only in CMUdict's vowel of "dog" and "costs".
+
+**The model** ([speech/piper.l0](../user/lib/speech/piper.l0), its
+arithmetic [speech/vits.l0](../user/lib/speech/vits.l0)) keeps every
+tensor channel-last, its time steps' channels contiguous binary32s in
+bytes, so that a convolution's output is one `bytes_dot_f32` over its
+taps' rows, or one a tap when dilated; each convolution's weights are
+laid out so once, at load (0.12 s on the host). Its parts, as the
+medium voices have them:
+
+- the text encoder: the IDs' embeddings times √192, 6 layers of
+  self-attention of 2 heads of 96 with relative keys and values within
+  4 positions, each with a residual and a layer norm and an FFN of two
+  convolutions of 3 (768 wide, ReLU), then a projection to the prior's
+  192 means and 192 log deviations, a phoneme a row;
+- the stochastic duration predictor in reverse: a DDSConv (depthwise
+  convolutions of 3 dilated 1, 3, 9, layer norms, GELU) over the
+  encoder's rows conditions three ConvFlows, each inverting a
+  rational-quadratic spline of 10 bins on −5 to 5, flips between, then
+  an elementwise affine, from noise (zeros with `-0`) to each phoneme's
+  log duration; its frames are e to that times the length scale, up;
+- the flow in reverse: the prior's means repeated for each phoneme's
+  frames (plus, with noise, its deviations times noise times 0.667),
+  then 4 mean-only residual couplings, a flip before each, each a
+  WaveNet of 4 layers (convolutions of 5, a tanh-sigmoid gate, residual
+  and skip convolutions);
+- HiFi-GAN: a convolution of 7 to 256 channels, then three times leaky
+  ReLU, a transposed convolution (×8, ×8, ×4, to 128, 64, 32 channels)
+  and the mean of three ResBlock2s (kernels 3, 5, 7, dilated (1, 2), (2,
+  6), (3, 12)); leaky ReLU, a convolution of 7 to one channel, and tanh:
+  256 samples a frame.
+
+Noise, when not 0, is Gaussian from a xorshift seeded the same each run
+(`piper_noise`), so a sentence sounds the same each time. Against Piper
+with its noise at 0, on four sentences, every stage's rows have a
+cosine of 0.999999 or more with the reference's, the durations are the
+same frame for frame, and the samples' correlation is 0.999999 or more.
+On the host, one CPU, a second of speech takes about 0.65 s: the
+encoder and the durations 0.06 s, the flow 0.16 s, the vocoder 0.43 s.
+
+**`speak`** ([programs.md](programs.md)) says text on `audio`: the
+voice and CMUdict loaded, from `/Volumes/data/speech/` or `-v` and
+`-d`, then each sentence made, normalized so its loudest sample is full
+scale as Piper's are, doubled to 44,100 Hz ([sound.md](sound.md)) and
+played, the next made once it has; or with `-o` all of them written as
+one WAV at 22,050 Hz. A program calls the library as `speak` does:
+`piper_of` and `phon_new` once, then `phon_sentences`, `phon_ids` and
+`piper_say_ids` a sentence. On QEMU, `tests/speak.sh` gives the
+oracle's samples on the two sentences whose phonemes are Piper's, each
+WAV's correlation with the oracle's 0.999999 or more (on the other two,
+L0S's own phonemes, a vowel apart, make other samples); there, on one
+emulated CPU, the voice loads from a FAT32 volume in 68 s, and 0.92 s
+of speech is made in 19 s, 4.5 s in 91 s.
+
 ## Limits
 
 - The model is not in the project, nor in any initramfs: `make
@@ -279,6 +391,26 @@ the model's answer. On one emulated CPU the model is read in 40 s.
   by the probes.
 - A decoding that is not UTF-8 is kept as its bytes, where the
   reference puts U+FFFD.
+- The voice is one, English, of one speaker; a config of several
+  speakers is refused. It and CMUdict are not in the project, nor in
+  any initramfs (the voice is past an initramfs's 48 MB): the board has
+  them once the installer has put them on the data volume.
+- `speak` makes a sentence, then plays it: nothing is made while one
+  plays, so sentences come with a pause between them as long as the
+  next takes to make, and nothing is heard until the first is made.
+  It has been heard on no board, and on one emulated CPU it is about 20
+  times slower than speech; on a Pi 5 it is not yet timed.
+- The voice's every convolution is run on one CPU.
+- The phonemes are CMUdict's, not espeak-ng's: about half the words of
+  a sample are said as Piper would say them, and the rest differ, most
+  in a vowel or a stress. The weak forms are fixed, whatever a word's
+  place in its sentence; a word CMUdict lacks is spelled by rules that
+  agree on about a quarter of words; capitals mean nothing (an acronym
+  is said as a word); only ASCII letters are read, any other letter
+  being a space; numbers past the trillions are said digit by digit.
+- CMUdict is searched by halves, but two pairs of its lines are out of
+  order (sepulveda and sepultura, stilton and stilted), so a word near
+  them may not be found and be spelled by rules.
 - The front end works on a clip whole, at 16 kHz only, and resamples
   nothing: a microphone's 48 kHz is brought down by `usb-audio` when
   asked for 16 kHz ([sound.md](sound.md#microphones)), as `rec FILE S

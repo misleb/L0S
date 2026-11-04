@@ -1,0 +1,101 @@
+; onnx_test.l0 -- tests of onnx.l0, on models built here, field by field.
+
+; ------------------------------------------------------------ building
+
+; n as a protobuf varint.
+(def t_varint ((n int)) (list int)
+  (if (lt n 128) (cons n (nil int)) (cons (bit_or (bit_and n 127) 128) (t_varint (bit_shr n 7)))))
+
+; Field f of wire type 2 holding s.
+(def t_len ((f int) (s (list int))) (list int)
+  (append (t_varint (add (mul f 8) 2)) (append (t_varint (length s)) s)))
+
+; Field f of wire type 0 holding n.
+(def t_num ((f int) (n int)) (list int)
+  (append (t_varint (mul f 8)) (t_varint n)))
+
+; The four little-endian bytes of the 32-bit word w.
+(def t_word ((w int)) (list int)
+  (cons (bit_and w 255) (cons (bit_and (bit_shr w 8) 255) (cons (bit_and (bit_shr w 16) 255) (cons (bit_shr w 24) (nil int))))))
+
+; 1.0 and 2.0 as binary32s, and their bytes.
+(def t_one_two () (list int) (append (t_word 1065353216) (t_word 1073741824)))
+
+; A FLOAT tensor named name, of shape 2, its numbers 1 and 2 as raw_data.
+(def t_raw ((name (list int))) (list int)
+  (append (t_num 1 2) (append (t_num 2 1) (append (t_len 8 name) (t_len 9 (t_one_two))))))
+
+; A model whose graph is g.
+(def t_model ((g (list int))) bytes
+  (bytes_from_list (append (t_num 1 8) (t_len 7 g))))
+
+; The model, or a tensor that cannot be.
+(def t_why ((b bytes)) (list int)
+  (match (onnx_of b) ((Err why) why) ((Ok o) "ok")))
+
+; ---------------------------------------------------------------- tests
+
+(def test_raw_tensor () int
+  (match (onnx_of (t_model (t_len 5 (t_raw "w"))))
+    ((Err why) (fail_because "read" why))
+    ((Ok o) (match (onnx_find o "w")
+              ((None) (fail_because "found" "no w"))
+              ((Some t) (add (check_int "count" (onnx_count o) 1)
+                             (add (check_bool "second" (float_le (onnx_f32 o t 1) 2.0) true)
+                                  (check_int "numel" (onnx_numel t) 2))))))))
+
+(def test_packed_dims_and_float_data () int
+  (let t (append (t_len 1 (cons 1 (cons 2 (nil int)))) (append (t_num 2 1) (append (t_len 4 (t_one_two)) (t_len 8 "p"))))
+    (match (onnx_of (t_model (t_len 5 t)))
+      ((Err why) (fail_because "read" why))
+      ((Ok o) (match (onnx_find o "p")
+                ((None) (fail_because "found" "no p"))
+                ((Some x) (add (check_strs "shape" (map_text (.shape x)) (split_spaces "1 2"))
+                               (check_bool "first" (float_le (onnx_f32 o x 0) 1.0) true))))))))
+
+; ns in decimal, for check_strs.
+(def map_text ((ns (list int))) (list (list int))
+  (if (is_empty ns) (nil (list int)) (cons (digits (head ns)) (map_text (tail ns)))))
+
+(def test_found_by_node () int
+  (let node (append (t_len 1 "x") (append (t_len 1 "onnx::Conv_1") (t_len 3 "/a/Conv")))
+    (match (onnx_of (t_model (append (t_len 1 node) (t_len 5 (t_raw "onnx::Conv_1")))))
+      ((Err why) (fail_because "read" why))
+      ((Ok o) (add (check_bool "by node" (onnx_has o "/a/Conv#1") true)
+                   (add (check_bool "not input 0" (onnx_has o "/a/Conv#0") false)
+                        (check_int "count" (onnx_count o) 1)))))))
+
+(def test_unknown_fields_skipped () int
+  (let g (append (t_len 2 "name") (append (t_num 99 7) (t_len 5 (t_raw "w"))))
+    (check_str "read" (t_why (t_model g)) "ok")))
+
+(def test_refuses_float16 () int
+  (let t (append (t_num 1 2) (append (t_num 2 10) (append (t_len 8 "h") (t_len 9 (t_word 0)))))
+    (check_str "why" (t_why (t_model (t_len 5 t))) "tensor h: of type FLOAT16, which this does not read")))
+
+(def test_refuses_external () int
+  (let t (append (t_raw "e") (t_num 14 1))
+    (check_str "why" (t_why (t_model (t_len 5 t))) "tensor e: its data is outside the file, which this does not read")))
+
+(def test_refuses_loose_numbers () int
+  (let t (append (t_num 1 1) (append (t_num 2 1) (append (t_len 8 "f") (cons 37 (t_word 0)))))
+    (check_str "why" (t_why (t_model (t_len 5 t))) "tensor f: its numbers are a field each, which this does not read")))
+
+(def test_refuses_wrong_size () int
+  (let t (append (t_num 1 3) (append (t_num 2 1) (append (t_len 8 "s") (t_len 9 (t_one_two)))))
+    (check_str "why" (t_why (t_model (t_len 5 t))) "tensor s: its data is not its shape's size")))
+
+(def test_refuses_no_graph () int
+  (check_str "why" (t_why (bytes_from_list (t_num 1 8))) "no graph in the model"))
+
+(def test_refuses_truncated () int
+  (let b (t_model (t_len 5 (t_raw "w")))
+    (check_str "why" (t_why (bytes_slice b 0 (sub (bytes_len b) 3))) "no graph in the model")))
+
+(def test_type_names () int
+  (add (check_str "int64" (onnx_type_name 7) "INT64")
+       (check_str "past" (onnx_type_name 40) "type 40")))
+
+(def test_varint () int
+  (let v (pb_varint (bytes_from_list (t_varint 300)) 0 2)
+    (add (check_int "value" (.v v) 300) (check_int "at" (.at v) 2))))

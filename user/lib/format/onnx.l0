@@ -1,0 +1,249 @@
+; onnx.l0 -- an ONNX model's weights (roadmap 0062), read in place from
+; its bytes, purely: the protobuf of a ModelProto, its graph's
+; initializers by name, each a TensorProto's type, shape and where its
+; numbers lie in the bytes, kept there, not copied. Piper's voices are
+; ONNX files, and the voice's model is written in L0 over these weights,
+; so the graph's nodes are read only for their names: an initializer the
+; export left anonymous (onnx::Conv_8959) is also found as the node that
+; reads it and the input it is, "/flow/flows.6/enc/in_layers.0/Conv#1".
+;
+;   ModelProto   field 7, its graph
+;   GraphProto   field 1, its nodes; field 5, its initializers
+;   NodeProto    field 1, its inputs, names; field 3, its name
+;   TensorProto  field 1, its dimensions (packed or not); 2, its type;
+;                4, float_data (packed); 8, its name; 9, raw_data;
+;                13 and 14, data kept outside the file
+;
+; Only FLOAT and INT64 tensors are read, held as raw_data or packed
+; float_data, little-endian as the format has them; any other type, data
+; outside the file, or numbers held one field each are refused, named.
+; Linked as ONNX in the Makefile.
+
+; ---------------------------------------------------------------- types
+
+; A protobuf varint read: its value, and the index after it, -1 if it
+; ran past its end.
+(data PbVar (PbVar (v int) (at int)))
+
+; An initializer: its name, its type (1 FLOAT, 7 INT64), its
+; dimensions, and its numbers' bytes, len of them from at; ext when its
+; data is outside the file, loose when its numbers are a field each.
+(data OnnxTensor (OnnxTensor (name (list int)) (dtype int) (shape (list int)) (at int) (len int) (ext bool) (loose bool)))
+
+; A model: its bytes, and its initializers by name, and by the node and
+; input that read them.
+(data Onnx (Onnx (b bytes) (ts (Map (list int) OnnxTensor)) (count int)))
+
+; The two types read.
+(def onnx_float () int 1)
+(def onnx_int64 () int 7)
+
+; ------------------------------------------------------------- protobuf
+
+; The varint of b at i, before e.
+(def pb_varint ((b bytes) (i int) (e int)) PbVar
+  (pb_varint_from b i e 0 0))
+(def pb_varint_from ((b bytes) (i int) (e int) (v int) (sh int)) PbVar
+  (if (or (ge i e) (gt sh 63))
+      (PbVar 0 -1)
+      (let (x (bytes_get b i)
+            w (bit_or v (bit_shl (bit_and x 127) sh)))
+        (if (lt x 128) (PbVar w (add i 1)) (pb_varint_from b (add i 1) e w (add sh 7))))))
+
+; The index after a field's value of wire type w at i, before e; -1 if
+; the value runs past e or the type is a group's, which proto3 has not.
+(def pb_skip ((b bytes) (i int) (w int) (e int)) int
+  (if (eq w 0) (.at (pb_varint b i e))
+      (eq w 1) (if (gt (add i 8) e) -1 (add i 8))
+      (eq w 5) (if (gt (add i 4) e) -1 (add i 4))
+      (eq w 2) (let l (pb_varint b i e)
+                 (if (or (lt (.at l) 0) (gt (add (.at l) (.v l)) e)) -1 (add (.at l) (.v l))))
+      -1))
+
+; ---------------------------------------------------------------- reading
+
+; The model in b: its graph's initializers, each checked to lie within
+; b and to be of a type read; or why it is none.
+(def onnx_of ((b bytes)) (Result Onnx (list int))
+  (let g (onnx_graph_at b 0 (bytes_len b))
+    (if (lt (.at g) 0)
+        ((Err Onnx (list int)) "no graph in the model")
+        (let e (add (.at g) (.v g))
+          (match (onnx_inits b (.at g) e ((MapEmpty (list int) OnnxTensor)) 0)
+            ((Err why) ((Err Onnx (list int)) why))
+            ((Ok m) (let n (map_size m)
+                      (match (onnx_nodes b (.at g) e m)
+                        ((Err why) ((Err Onnx (list int)) why))
+                        ((Ok m2) ((Ok Onnx (list int)) (Onnx b m2 n)))))))))))
+
+; Where field 7, the graph, is in the ModelProto from i to e: its
+; length and start, at -1 if it has none or the message is not one.
+(def onnx_graph_at ((b bytes) (i int) (e int)) PbVar
+  (if (ge i e)
+      (PbVar 0 -1)
+      (let k (pb_varint b i e)
+        (if (lt (.at k) 0)
+            (PbVar 0 -1)
+            (if (eq (.v k) 58)   ; field 7, wire 2
+                (let l (pb_varint b (.at k) e)
+                  (if (or (lt (.at l) 0) (gt (add (.at l) (.v l)) e)) (PbVar 0 -1) l))
+                (let n (pb_skip b (.at k) (bit_and (.v k) 7) e)
+                  (if (lt n 0) (PbVar 0 -1) (onnx_graph_at b n e))))))))
+
+; The key of the field at i of a message ending at e (its number times 8
+; plus its wire type) and the index of its value; at -1 where it does not
+; read.
+(def pb_key ((b bytes) (i int) (e int)) PbVar (pb_varint b i e))
+
+; The graph's initializers from i to e, put into m; k counts them.
+(def onnx_inits ((b bytes) (i int) (e int) (m (Map (list int) OnnxTensor)) (k int)) (Result (Map (list int) OnnxTensor) (list int))
+  (if (ge i e)
+      ((Ok (Map (list int) OnnxTensor) (list int)) m)
+      (let k1 (pb_key b i e)
+        (if (lt (.at k1) 0)
+            ((Err (Map (list int) OnnxTensor) (list int)) "the graph does not read")
+            (let n (pb_skip b (.at k1) (bit_and (.v k1) 7) e)
+              (if (lt n 0)
+                  ((Err (Map (list int) OnnxTensor) (list int)) "the graph runs past its end")
+                  (if (eq (.v k1) 42)   ; field 5, wire 2
+                      (let l (pb_varint b (.at k1) e)
+                        (match (onnx_tensor_of b (.at l) n)
+                          ((Err why) ((Err (Map (list int) OnnxTensor) (list int)) why))
+                          ((Ok t) (onnx_inits b n e (map_put m (.name t) t) (add k 1)))))
+                      (onnx_inits b n e m k))))))))
+
+; The initializer in the TensorProto from i to e, checked; or why not.
+(def onnx_tensor_of ((b bytes) (i int) (e int)) (Result OnnxTensor (list int))
+  (match (onnx_tensor_fields b i e (OnnxTensor (nil int) 0 (nil int) 0 0 false false))
+    ((Err why) ((Err OnnxTensor (list int)) why))
+    ((Ok t) (onnx_checked (.shape t (rev (.shape t)))))))
+
+; t, if it is one this reads and its numbers fill its bytes exactly.
+(def onnx_checked ((t OnnxTensor)) (Result OnnxTensor (list int))
+  (let (size (onnx_type_size (.dtype t))
+        named (append "tensor " (.name t)))
+    (if (.ext t) ((Err OnnxTensor (list int)) (append named ": its data is outside the file, which this does not read"))
+        (.loose t) ((Err OnnxTensor (list int)) (append named ": its numbers are a field each, which this does not read"))
+        (eq size 0) ((Err OnnxTensor (list int)) (append named (append ": of type " (append (onnx_type_name (.dtype t)) ", which this does not read"))))
+        (not (eq (.len t) (mul size (onnx_numel t)))) ((Err OnnxTensor (list int)) (append named ": its data is not its shape's size"))
+        ((Ok OnnxTensor (list int)) t))))
+
+; A TensorProto's fields from i to e, read into t; its dimensions are
+; kept reversed.
+(def onnx_tensor_fields ((b bytes) (i int) (e int) (t OnnxTensor)) (Result OnnxTensor (list int))
+  (if (ge i e)
+      ((Ok OnnxTensor (list int)) t)
+      (let k (pb_key b i e)
+        (if (lt (.at k) 0)
+            ((Err OnnxTensor (list int)) "a tensor does not read")
+            (let (f (bit_shr (.v k) 3)
+                  w (bit_and (.v k) 7)
+                  n (pb_skip b (.at k) w e))
+              (if (lt n 0)
+                  ((Err OnnxTensor (list int)) "a tensor runs past its end")
+                  (onnx_tensor_fields b n e (onnx_tensor_field b (.at k) n f w t))))))))
+
+; t with the field f, of wire type w, whose value is from i to n.
+(def onnx_tensor_field ((b bytes) (i int) (n int) (f int) (w int) (t OnnxTensor)) OnnxTensor
+  (let at (pb_payload b i n w)
+    (if (and (eq f 1) (eq w 0)) (.shape t (cons (.v (pb_varint b i n)) (.shape t)))
+        (and (eq f 1) (eq w 2)) (.shape t (pb_packed b at n (.shape t)))
+        (eq f 2) (.dtype t (.v (pb_varint b i n)))
+        (and (eq f 4) (eq w 2)) (.len (.at t at) (sub n at))
+        (any_eq f (cons 4 (cons 5 (cons 7 (cons 11 (cons 12 (nil int))))))) (.loose t true)
+        (eq f 8) (.name t (bytes_range b at n))
+        (eq f 9) (.len (.at t at) (sub n at))
+        (eq f 13) (.ext t true)
+        (eq f 14) (.ext t (or (.ext t) (eq (.v (pb_varint b i n)) 1)))
+        t)))
+
+; Where a length-delimited value's bytes start, after its length; i for
+; any other wire type.
+(def pb_payload ((b bytes) (i int) (n int) (w int)) int
+  (if (eq w 2) (.at (pb_varint b i n)) i))
+
+; Packed varints from i to e, onto the reversed acc.
+(def pb_packed ((b bytes) (i int) (e int) (acc (list int))) (list int)
+  (if (ge i e)
+      acc
+      (let v (pb_varint b i e)
+        (if (lt (.at v) 0) acc (pb_packed b (.at v) e (cons (.v v) acc))))))
+
+; The graph's nodes from i to e: each input of each that is an
+; initializer of m also put in m as "NODE#INDEX".
+(def onnx_nodes ((b bytes) (i int) (e int) (m (Map (list int) OnnxTensor))) (Result (Map (list int) OnnxTensor) (list int))
+  (if (ge i e)
+      ((Ok (Map (list int) OnnxTensor) (list int)) m)
+      (let k (pb_key b i e)
+        (if (lt (.at k) 0)
+            ((Err (Map (list int) OnnxTensor) (list int)) "the graph does not read")
+            (let n (pb_skip b (.at k) (bit_and (.v k) 7) e)
+              (if (eq (.v k) 10)   ; field 1, wire 2
+                  (let at (pb_payload b (.at k) n 2)
+                    (onnx_nodes b n e (onnx_node_aliases m (onnx_node_name b at n) (rev (onnx_node_inputs b at n (nil (list int)))) 0)))
+                  (onnx_nodes b n e m)))))))
+
+; A NodeProto's name, field 3, from i to e; empty if it has none.
+(def onnx_node_name ((b bytes) (i int) (e int)) (list int)
+  (if (ge i e)
+      (nil int)
+      (let k (pb_key b i e)
+        (let n (pb_skip b (.at k) (bit_and (.v k) 7) e)
+          (if (or (lt (.at k) 0) (lt n 0)) (nil int)
+              (eq (.v k) 26) (bytes_range b (pb_payload b (.at k) n 2) n)
+              (onnx_node_name b n e))))))
+
+; A NodeProto's inputs, field 1, from i to e, onto the reversed acc.
+(def onnx_node_inputs ((b bytes) (i int) (e int) (acc (list (list int)))) (list (list int))
+  (if (ge i e)
+      acc
+      (let k (pb_key b i e)
+        (let n (pb_skip b (.at k) (bit_and (.v k) 7) e)
+          (if (or (lt (.at k) 0) (lt n 0)) acc
+              (eq (.v k) 10) (onnx_node_inputs b n e (cons (bytes_range b (pb_payload b (.at k) n 2) n) acc))
+              (onnx_node_inputs b n e acc))))))
+
+; m with each of ins, the k-th on, that names an initializer also put as
+; "NODE#K"; nothing for a node with no name.
+(def onnx_node_aliases ((m (Map (list int) OnnxTensor)) (node (list int)) (ins (list (list int))) (k int)) (Map (list int) OnnxTensor)
+  (if (or (is_empty ins) (is_empty node))
+      m
+      (match (map_get m (head ins))
+        ((None) (onnx_node_aliases m node (tail ins) (add k 1)))
+        ((Some t) (onnx_node_aliases (map_put m (onnx_input_key node k) t) node (tail ins) (add k 1))))))
+
+; ------------------------------------------------------------- looking up
+
+; The key an initializer has as input k of node: "NODE#K".
+(def onnx_input_key ((node (list int)) (k int)) (list int)
+  (append node (cons 35 (digits k))))
+
+; The initializer named name, or found as "NODE#K".
+(def onnx_find ((o Onnx) (name (list int))) (Option OnnxTensor)
+  (map_get (.ts o) name))
+
+; Whether an initializer is named name, or found as "NODE#K".
+(def onnx_has ((o Onnx) (name (list int))) bool
+  (map_has (.ts o) name))
+
+; How many initializers the graph has.
+(def onnx_count ((o Onnx)) int (.count o))
+
+; How many numbers t holds: its dimensions' product, 1 for a scalar.
+(def onnx_numel ((t OnnxTensor)) int
+  (onnx_product (.shape t) 1))
+(def onnx_product ((ns (list int)) (p int)) int
+  (if (is_empty ns) p (onnx_product (tail ns) (mul p (head ns)))))
+
+; The k-th float of a FLOAT tensor t of o.
+(def onnx_f32 ((o Onnx) (t OnnxTensor) (k int)) float
+  (bytes_get_f32 (.b o) (add (.at t) (mul 4 k))))
+
+; The bytes a number of type d takes, 0 for a type not read.
+(def onnx_type_size ((d int)) int
+  (if (eq d (onnx_float)) 4 (eq d (onnx_int64)) 8 0))
+
+; ONNX's name for the type d, as TensorProto.DataType has it.
+(def onnx_type_name ((d int)) (list int)
+  (let names (split_spaces "UNDEFINED FLOAT UINT8 INT8 UINT16 INT16 INT32 INT64 STRING BOOL FLOAT16 DOUBLE UINT32 UINT64 COMPLEX64 COMPLEX128 BFLOAT16")
+    (if (and (ge d 0) (lt d (length names))) (nth names d) (append "type " (digits d)))))

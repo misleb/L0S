@@ -53,6 +53,38 @@ is the reference's; `make e2e` does not run it, as the model is not in
 the project. Without `WHISTLE` it takes `build/fetch/whistle.cact`,
 which `make release` fetches, and with neither it says it skipped.
 
+A Piper voice ([speech.md](speech.md#speaking)) is checked the same way,
+against Piper itself on the host (`probes/piper`, whose README says how
+it is fetched and run): `oracle.py` runs the voice by onnxruntime with
+its noise at 0 and writes each stage, the encoder's rows, the prior's
+means and deviations, the log durations, the frames, the stretched
+prior, the flow's output and the samples, and its phonemes and IDs, for
+four sentences into `build/piper-oracle`. `onnxdump.l0` lists every
+initializer as `onnx.l0` reads it, the same lines `dump.py` prints with
+the onnx package; `wordscheck.l0` counts how many of `words.py`'s 2000
+words (`testdata/espeak-words.txt`, espeak-ng's en-us) `phonemes.l0`
+says alike, and names the misses; `textcheck.l0` sets its sentences and
+IDs beside Piper's; `stagecheck.l0` runs the voice and gives each
+stage's least row cosine and largest difference from the oracle's, the
+durations frame for frame, the samples' correlation and each stage's
+time. `onnx_test.l0` reads models built field by field, every refusal
+among them; `voice_test.l0` configs; `phonemes_test.l0` a dictionary of
+a few lines, the IPA's rules each pinned to espeak-ng's, the numbers,
+the sentences and the IDs; `vits_test.l0` each convolution against its
+sum written out; `piper_test.l0` the spline's inverse against its
+forward form on 300 seeded cases, the layouts and the names;
+`speak_test.l0` the arguments and the samples' doubling. On the board,
+`tests/speak.sh` makes a FAT32 volume of the voice and CMUdict (the
+voice is past an initramfs's limit), types `run speak -0 -o` at the
+serial shell for each oracle sentence asked, by default the two whose
+phonemes L0S gives as Piper does, unmounts the volume, reads each WAV
+back with mtools
+and checks it is the oracle's by correlation, 0.999 or more
+(`probes/piper/wavcorr.py`); `make e2e` does not run it, as the voice is
+not in the project. `PIPER_VOICE` and `CMUDICT` name them, else
+`build/fetch`'s, which `make piper-fetch` fetches, and with neither it
+says it skipped.
+
 The PNG reader is tested against Python's `zlib`, whose streams are
 fixtures written into the tests as hex: `inflate_test.l0` decodes a
 stored, a fixed-Huffman, a dynamic-Huffman and a raw stream, and streams
