@@ -1236,14 +1236,15 @@ pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs $(PI5_DTBS)
 	@echo "build/pi5-card: copy its files onto a FAT32 partition of an SD card for a Pi 5"
 
 # The release's initramfs, the first stage alone: boot, and what mounts
-# the system volume, uart, xhci, sdhci and fs, as pi5/etc/inittab starts
-# them, with /bin/sh for a rescue shell, and of /etc only the inittab,
+# the system volume, uart, xhci, sdhci and fs, and usb-hid, as
+# pi5/etc/inittab starts them, with /bin/sh for a rescue shell, and of
+# /etc only the inittab,
 # board, motd and pi5/stage1/system, which starts that shell if no volume
 # is made /. Everything else, the other drivers among them, boot starts
 # from the system volume's /etc/system, which the release's system/
 # holds (make release). pi5-card keeps the whole system in its
 # initramfs, for a board booted over the network with no card.
-PI5_STAGE1      := /sbin/boot /sbin/uart /sbin/xhci /sbin/sdhci /sbin/fs /bin/sh
+PI5_STAGE1      := /sbin/boot /sbin/uart /sbin/xhci /sbin/usb-hid /sbin/sdhci /sbin/fs /bin/sh
 PI5_STAGE1_ETC  := inittab board motd
 
 pi5-stage1: pi5-initramfs

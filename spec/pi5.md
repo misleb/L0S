@@ -181,9 +181,12 @@ of pages given at once (see [Limits](kernel.md#limits)). Build with
 
 The board boots in two stages. `pi5/etc/inittab` starts the first,
 what mounts the system volume: `boot`, `uart`, `xhci rp1` (for a system
-volume on USB storage to come), `sdhci pi5` and `fs ram`. `boot` then
+volume on USB storage to come), `usb-hid`, `sdhci pi5` and `fs ram`.
+`usb-hid` is there though no disk needs it: started from the system
+volume, the board came up with the USB keyboard dead though `usb-hid`
+ran, and the cause is not yet known. `boot` then
 starts `pi5/etc/system`, the second: `sh` on the console, waited for,
-then `rtc clock`, `usb-hid`, `usb-audio`, `hvs`, `hdmi-audio`, `gem`,
+then `rtc clock`, `usb-audio`, `hvs`, `hdmi-audio`, `gem`,
 `inet dhcp`, `ntp`, `font`, `wm`, `agentd` and `speech`. The inittab's
 `dev` lines name the second stage's drivers too, so that `boot` starts
 them with their devices from a system volume, booted with `root=` as a
@@ -195,9 +198,9 @@ card.
 **The release's initramfs is the first stage alone.** `make
 pi5-release-card`, which `make release` gives as the Pi 5's `boot/`, is
 `pi5-card`'s boot partition with `input.bin` of `make pi5-stage1`:
-`/sbin/boot`, `uart`, `xhci`, `sdhci` and `fs`, `/bin/sh`, and of `/etc`
+`/sbin/boot`, `uart`, `xhci`, `usb-hid`, `sdhci` and `fs`, `/bin/sh`, and of `/etc`
 only `inittab`, `board`, `motd`, and [pi5/stage1/system](../pi5/stage1/system),
-which starts the shell alone: about 1.2 MB, where `pi5-card`'s is about
+which starts the shell alone: about 1.4 MB, where `pi5-card`'s is about
 19.5. Everything else, fonts, wallpapers, the chime and the apps among
 it, is read from the system volume. With no `root=`, or with its volume
 missing, that card boots to the rescue shell on the debug UART, the
