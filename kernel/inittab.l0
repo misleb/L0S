@@ -5,7 +5,9 @@
 ;   start PATH [ARG ...]   start PATH when the kernel starts, in order: the
 ;                          first is pid 1; with ARGs, given those
 ;   dev PATH               PATH may map devices and bind interrupts,
-;                          whoever starts it
+;                          whoever starts it; or, for a PATH not in the
+;                          initramfs, a program of the system volume,
+;                          when pid 1, boot, starts it
 ;   args PATH ARG ...      PATH's arguments when started without any
 ;   stdin PATH             the file every process reads as standard input
 ;
@@ -76,10 +78,15 @@
 ; A process to start at boot: its entry, and its arguments if given.
 (data Launch (Launch int (Option (list (list int)))))
 
+; The dev and args lines of paths the initramfs does not hold: programs
+; of the system volume, which boot starts once a volume is / (kernel.l0's
+; proc_dev), as the Pi 5's drivers past the first stage.
+(data Beyond (Beyond (devs (list (list int))) (argss (list ArgsFor))))
+
 ; The inittab checked against the entries: what to start, in order; for
-; each entry, whether it may drive devices and its default arguments; and
-; the stdin entry, or -1.
-(data Config (Config (list Launch) (array bool) (array (list (list int))) int))
+; each entry, whether it may drive devices and its default arguments; the
+; stdin entry, or -1; and the lines of paths beyond the initramfs.
+(data Config (Config (list Launch) (array bool) (array (list (list int))) int Beyond))
 
 ; The Config of i in the initramfs whose entries are es, or why not: the
 ; first path that is not in it, or not what its directive needs.
@@ -105,39 +112,63 @@
                 (resolve_starts (tail ss) es (cons (Launch e args) acc))))))))
 
 ; The rest of resolve_init, once its launches are resolved: the dev
-; flags, default arguments, and stdin entry beside them.
+; flags, default arguments, and stdin entry beside them, and the dev and
+; args lines of paths the initramfs does not hold.
 (def resolve_rest ((launches (list Launch)) (devs (list (list int))) (argss (list ArgsFor)) (input (Option (list int))) (es (array Entry))) (Result Config (list int))
-  (match (dev_flags devs es (array_new (array_len es) false))
-    ((Err why) ((Err Config (list int)) why))
-    ((Ok flags)
-      (match (default_args argss es (array_new (array_len es) (nil (list int))))
-        ((Err why) ((Err Config (list int)) why))
-        ((Ok defaults)
-          (match (stdin_entry input es)
-            ((Err why) ((Err Config (list int)) why))
-            ((Ok s) ((Ok Config (list int)) (Config launches flags defaults s)))))))))
+  (let (flags (dev_flags devs es (array_new (array_len es) false))
+        defaults (default_args argss es (array_new (array_len es) (nil (list int))))
+        beyond (Beyond (devs_beyond devs es (nil (list int))) (args_beyond argss es (nil ArgsFor))))
+    (match (stdin_entry input es)
+      ((Err why) ((Err Config (list int)) why))
+      ((Ok s) ((Ok Config (list int)) (Config launches flags defaults s beyond))))))
 
-; flags with the entry of each of devs set, or why not, for a path not
-; in the initramfs.
-(def dev_flags ((devs (list (list int))) (es (array Entry)) (flags (array bool))) (Result (array bool) (list int))
+; flags with the entry of each of devs set; a path not in the initramfs
+; is devs_beyond's.
+(def dev_flags ((devs (list (list int))) (es (array Entry)) (flags (array bool))) (array bool)
   (if (is_empty devs)
-      ((Ok (array bool) (list int)) flags)
+      flags
       (let e (entry_index es (head devs))
-        (if (lt e 0)
-            ((Err (array bool) (list int)) (append "inittab: dev " (append (head devs) ": not in the initramfs")))
-            (dev_flags (tail devs) es (array_set flags e true))))))
+        (dev_flags (tail devs) es (if (lt e 0) flags (array_set flags e true))))))
 
 ; defaults with each args line's arguments at its path's entry, a later
-; line for a path winning; or why not, for a path not in the initramfs.
-(def default_args ((argss (list ArgsFor)) (es (array Entry)) (defaults (array (list (list int))))) (Result (array (list (list int))) (list int))
+; line for a path winning; a path not in the initramfs is args_beyond's.
+(def default_args ((argss (list ArgsFor)) (es (array Entry)) (defaults (array (list (list int))))) (array (list (list int)))
   (if (is_empty argss)
-      ((Ok (array (list (list int))) (list int)) defaults)
+      defaults
       (match (head argss)
         ((ArgsFor path args)
           (let e (entry_index es path)
-            (if (lt e 0)
-                ((Err (array (list (list int))) (list int)) (append "inittab: args " (append path ": not in the initramfs")))
-                (default_args (tail argss) es (array_set defaults e args))))))))
+            (default_args (tail argss) es (if (lt e 0) defaults (array_set defaults e args))))))))
+
+; The paths of devs the initramfs does not hold, onto acc.
+(def devs_beyond ((devs (list (list int))) (es (array Entry)) (acc (list (list int)))) (list (list int))
+  (if (is_empty devs)
+      acc
+      (devs_beyond (tail devs) es (if (lt (entry_index es (head devs)) 0) (cons (head devs) acc) acc))))
+
+; The args lines of argss for paths the initramfs does not hold, onto
+; acc, the last line first, so that a later line for a path wins.
+(def args_beyond ((argss (list ArgsFor)) (es (array Entry)) (acc (list ArgsFor))) (list ArgsFor)
+  (if (is_empty argss)
+      acc
+      (match (head argss)
+        ((ArgsFor path args)
+          (args_beyond (tail argss) es (if (lt (entry_index es path) 0) (cons (head argss) acc) acc))))))
+
+; Whether a dev line of b's names path.
+(def beyond_dev ((b Beyond) (path (list int))) bool (any_eq path (.devs b)))
+
+; The arguments an args line gives path among b's, the last line's; none
+; if no line names it.
+(def beyond_args ((b Beyond) (path (list int))) (list (list int))
+  (beyond_args_in (.argss b) path))
+
+; beyond_args's search, through argss, the last line first.
+(def beyond_args_in ((argss (list ArgsFor)) (path (list int))) (list (list int))
+  (if (is_empty argss)
+      (nil (list int))
+      (match (head argss)
+        ((ArgsFor p args) (if (eq p path) args (beyond_args_in (tail argss) path))))))
 
 ; The entry of the stdin path, -1 for none, or why not, for a path that
 ; is not a file in the initramfs.

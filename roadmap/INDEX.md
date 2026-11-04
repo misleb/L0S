@@ -46,6 +46,7 @@ move independently, so several can be active at once.
 | [0061](0061-speech-service.md) The speech service: what is said to the board, said to the agent | Agent | active | 5/6 | 0058 (met), 0059 (met), 0060 | agent.md, speech.md, desktop.md, programs.md, demo.md, testing.md |
 | [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | ready | 0/7 | – | speech.md, sound.md, programs.md, testing.md |
 | [0067](0067-speech-as-spoken.md) Speech heard as it is spoken | Agent | idea | – | 0061 | speech.md, agent.md |
+| [0068](0068-first-stage-everywhere.md) The first stage alone, wherever a card is made | Pi 5 | idea | – | – | pi5.md, boot.md, storage.md |
 ## Ready
 
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its

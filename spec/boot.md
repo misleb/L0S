@@ -140,8 +140,21 @@ only the first stage, the drivers and `fs`, which a disk needs, and
 4. `boot` starts `/etc/system`'s programs, now the volume's, with
    `spawn_path` ([user/lib/sys/paths.l0](../user/lib/sys/paths.l0)): it
    reads each program's file, marked a program, and starts it from its
-   bytes with call 287, `spawn_image`, which never gives a device. It
-   waits for the first, the serial shell, and exits with its status.
+   bytes with call 287, `spawn_image`. It waits for the first, the
+   serial shell, and exits with its status.
+
+**Drivers from the system volume.** A program `spawn_image` starts gets
+devices only if the caller is `boot`, pid 1, and the initramfs's inittab
+has a `dev` line for its path. A `dev` line may name a path the
+initramfs does not hold, which the inittab otherwise accepts unchecked,
+as may an `args` line; the kernel keeps them by path. So the initramfs
+need hold only what mounts the system volume, and `/etc/system` starts
+the other drivers, from the volume, with their devices: the Pi 5's
+release does (see [The Raspberry Pi 5](pi5.md)), and
+`tests/e2e/rootboot_drivers` starts `virtio-rng` so. The inittab, on the
+boot partition beside the kernel, stays the one place that says what
+drives devices; a shell, an app or `init` that starts a driver's file
+gets no device, as `run /sbin/hvs` from a volume does not.
 
 With no `root=`, a UUID no mounted volume has, or a volume without
 `/etc/system`, `boot` says why and starts the initramfs's own
@@ -186,9 +199,9 @@ written, directories made, and apps installed (see [the
 launcher](desktop.md#the-desktop)), with no disk on the board. The inittab starts
 `fs ram` beside `boot`, as `tests/e2e/rootboot_tmpfs` does; without it,
 or with the volume missing, `boot` says so and starts the initramfs's own
-`/etc/system`. As for any system volume, the drivers and `fs` are the
-initramfs's, started before the switch, and a program started after it
-never drives a device.
+`/etc/system`. As for any system volume, the drivers and `fs` the inittab
+starts are the initramfs's, started before the switch, and a program
+started after it drives a device only as boot's child with a `dev` line.
 
 Programs never ask where `/` is: `root_paths` lists it, `program_paths`
 lists the directories a program can be in, `program_found` finds a
@@ -311,9 +324,14 @@ the list of what install says is open, empty, from the start.
   longer the more the volume holds: the shell's `ls` with no path and
   `install` do, and nothing that looks for a program or an app.
 - **Booting from a volume needs the initramfs still.** The kernel comes
-  from QEMU, and the drivers and `fs` from the initramfs, which are the
-  only programs that may drive devices: a program started from a
-  volume's file never may, whatever the inittab says of its path. The
+  from QEMU, and what mounts the system volume, the disk's driver and
+  `fs`, from the initramfs. A volume's driver drives its device only if
+  `boot` starts it and the initramfs's inittab names its path, so a
+  driver the inittab does not foresee needs a new initramfs; and a
+  `dev` or `args` line for a path the initramfs does not hold is not
+  checked at boot, so a typo in one is found only when the driver is
+  refused its device. A driver of the second stage that dies is not
+  started again, as no driver is. The
   system volume is chosen once, at boot, by `root=`, and is `/` for good:
   nothing switches back, and if its server goes, `/` answers -5. The
   kernel heap's copy of the archive is freed into the kernel's heap,

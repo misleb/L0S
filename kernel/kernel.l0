@@ -35,8 +35,11 @@
 ; the bytes are given up, none, and the stdin entry with them; the
 ; entries stay, to name the processes started from them, and to say
 ; which drive devices and what arguments a path gets. It holds the log
-; of messages too (log.l0), which outlives the initramfs.
-(data Boot (Boot (input bytes) (entries (array Entry)) (devs (array bool)) (defaults (array (list (list int)))) (stdin int) (pos int) (names (Map int (list int))) (log KLog)))
+; of messages too (log.l0), which outlives the initramfs; the inittab's
+; dev and args lines of paths beyond the initramfs, the system volume's
+; programs; and the pids of those started from an image that may drive
+; devices, as proc_dev says.
+(data Boot (Boot (input bytes) (entries (array Entry)) (devs (array bool)) (defaults (array (list (list int)))) (stdin int) (pos int) (names (Map int (list int))) (log KLog) (beyond Beyond) (dev_pids (Map int bool))))
 
 ; Every slot of the table, the pids ready to run in order, the ports, the
 ; sleepers, the bound interrupts, the initramfs, the pid each slot holds,
@@ -56,9 +59,9 @@
 ; holding nothing.
 (def kernel_new ((input bytes) (es (array Entry)) (c Config)) Kernel
   (match c
-    ((Config launches devs defaults stdin)
+    ((Config launches devs defaults stdin beyond)
       (Kernel (array_new 256 (Free)) (Queue (nil int) (nil int)) (ipc_new) (nil Sleeper)
-              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int))) (klog_new)) (pids_new) (mem_new) (cpus_from (cpu_count) (clock_ns))))))
+              ((MapEmpty int Irq)) (Boot input es devs defaults stdin 0 ((MapEmpty int (list int))) (klog_new) beyond ((MapEmpty int bool))) (pids_new) (mem_new) (cpus_from (cpu_count) (clock_ns))))))
 
 ; ------------------------------------------------------------- the fields
 
@@ -123,8 +126,8 @@
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
-        ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot (bytes_from_list (nil int)) es devs defaults -1 0 names klog) next mem cpus))))))
+        ((Boot input es devs defaults stdin cur names klog beyond dp)
+          (Kernel slots ready ipc ss irqs (Boot (bytes_from_list (nil int)) es devs defaults -1 0 names klog beyond dp) next mem cpus))))))
 
 ; The path of p's program: its entry's, or its image's, as spawn_image
 ; was given it.
@@ -135,13 +138,14 @@
         ((Some path) path)
         ((None) "?"))))
 
-; k with pid's image's path forgotten, pid having ended.
+; k with pid's image's path forgotten, pid having ended, and whether it
+; drove devices.
 (def k_forget_name ((k Kernel) (pid int)) Kernel
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
-        ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid) klog) next mem cpus))))))
+        ((Boot input es devs defaults stdin cur names klog beyond dp)
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_remove names pid) klog beyond (map_remove dp pid)) next mem cpus))))))
 
 ; k with its log replaced.
 (def k_with_log ((k Kernel) (log KLog)) Kernel (.boot k (.log (.boot k) log)))
@@ -162,10 +166,17 @@
       (let (w (write_err (append text "\n")) f (file_flush (IoFile 2))) 0)
       0))
 
-; The arguments the inittab gives the program at path, if it names it.
+; Whether the inittab has a dev line for path: an entry's, or a path
+; beyond the initramfs.
+(def k_path_dev ((k Kernel) (path (list int))) bool
+  (let e (entry_index (.entries (.boot k)) path)
+    (if (lt e 0) (beyond_dev (.beyond (.boot k)) path) (k_entry_dev k e))))
+
+; The arguments the inittab gives the program at path, if it names it:
+; an entry's, or a system volume's program's.
 (def k_path_args((k Kernel) (path (list int))) (list (list int))
   (let e (entry_index (.entries (.boot k)) path)
-    (if (lt e 0) (nil (list int)) (k_entry_args k e))))
+    (if (lt e 0) (beyond_args (.beyond (.boot k)) path) (k_entry_args k e))))
 
 ; k with interrupt n bound as b.
 (def with_irq ((k Kernel) (n int) (b Irq)) Kernel
@@ -866,9 +877,12 @@
   (Resume k (proc_answer p v)))
 
 ; Whether p may drive devices: a program of the initramfs's with a dev
-; line; never one started from an image of its own.
+; line; or one started from an image of its own by boot, pid 1, whose
+; path has a dev line beyond the initramfs (spawned_image).
 (def proc_dev ((k Kernel) (p Proc)) bool
-  (and (is_entry k (.module p)) (k_entry_dev k (.module p))))
+  (if (is_entry k (.module p))
+      (k_entry_dev k (.module p))
+      (map_has (.dev_pids (.boot k)) (.pid p))))
 
 ; The region call: device memory for a dev module, mapped where its
 ; device pages are next free, or, for a range starting at a DMA page of
@@ -1054,17 +1068,17 @@
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
-        ((Boot input es devs defaults stdin cur names klog)
+        ((Boot input es devs defaults stdin cur names klog beyond dp)
           (if (lt stdin 0)
-              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem cpus) p 0)
+              (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog beyond dp) next mem cpus) p 0)
               (let (e (array_get es stdin)
                     from (add (.start e) cur)
                     cnt (min n (min (io_chunk) (sub (.end e) from))))
                 (match (proc_copy_in p buf input from (add from cnt))
                   ((CopyInBad q)
-                    (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog) next mem cpus) q -5))
+                    (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur names klog beyond dp) next mem cpus) q -5))
                   ((CopiedIn q)
-                    (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names klog) next mem cpus)
+                    (resume_with (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin (add cur cnt) names klog beyond dp) next mem cpus)
                                  q cnt))))))))))
 
 ; A file of the initramfs, opened before it was given up, reads as at its
@@ -1476,8 +1490,8 @@
 ; message of arguments take; err_fault if p may not give them, or they
 ; are not laid out so; err_denied for no image at all; or what spawn_from
 ; gives, err_denied for an image that is not an ELF the kernel loads.
-; Given no arguments it gets the inittab's for its path; it never drives
-; devices.
+; Given no arguments it gets the inittab's for its path; it drives
+; devices only as spawned_image says, as boot's child with a dev line.
 (def do_spawn_image ((k Kernel) (p Proc) (buf int) (len int)) Step
   (if (lt len 8) (resume_with k p (err_fault))
       (gt len (add (add 8 (path_limit)) (add (max_message) (image_file_room)))) (resume_with k p (err_too_big))
@@ -1510,11 +1524,14 @@
 
 ; The image of b from start started as a child of p, with args, on p's
 ; terminal: p answered with its pid, which k then names by path, or with
-; spawn_from's refusal.
+; spawn_from's refusal. It may drive devices if p is pid 1, boot, and the
+; inittab has a dev line for path: a system volume's driver, which only
+; boot starts, from /etc/system.
 (def spawned_image ((k Kernel) (p Proc) (b bytes) (path (list int)) (args (list (list int))) (start int)) Step
-  (match (spawn_from k -1 (.pid p) args (proc_tty_port p) b start (bytes_len b))
-    ((Spawned k2 pid)
-      (spawn_answered (if (gt pid 0) (k_name_put k2 pid path) k2) p pid))))
+  (let dev (and (eq (.pid p) 1) (k_path_dev k path))
+    (match (spawn_from k -1 (.pid p) args (proc_tty_port p) b start (bytes_len b))
+      ((Spawned k2 pid)
+        (spawn_answered (if (gt pid 0) (k_name_put k2 pid path dev) k2) p pid)))))
 
 ; p answered with the pid of the child it spawned, which gets p's
 ; current directory, or with the refusal pid is; and p given a slice
@@ -1538,13 +1555,13 @@
             ((Free) k)
             ((Dead st) k))))))
 
-; k knowing pid's image's path.
-(def k_name_put ((k Kernel) (pid int) (path (list int))) Kernel
+; k knowing pid's image's path, and, if dev, that it may drive devices.
+(def k_name_put ((k Kernel) (pid int) (path (list int)) (dev bool)) Kernel
   (match k
     ((Kernel slots ready ipc ss irqs boot next mem cpus)
       (match boot
-        ((Boot input es devs defaults stdin cur names klog)
-          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_put names pid path) klog) next mem cpus))))))
+        ((Boot input es devs defaults stdin cur names klog beyond dp)
+          (Kernel slots ready ipc ss irqs (Boot input es devs defaults stdin cur (map_put names pid path) klog beyond (if dev (map_put dp pid true) dp)) next mem cpus))))))
 
 ; Where a device reaches each of p's DMA pages from va's on, copied to
 ; buf, as many as room holds, a u64 each, dma_limit at most: how many
@@ -2612,7 +2629,7 @@
 ; nothing started.
 (def boot_config ((input bytes) (es (array Entry)) (config Config)) int
   (match config
-    ((Config launches devs defaults stdin)
+    ((Config launches devs defaults stdin beyond)
       (let (e (interrupt_enable 0)
             k (start_all (k_notes (kernel_new input es config)
                           (banner_lines (machine) (boot_args) (frame_free_count) (cpu_count) (bytes_len input) (array_len es) (length launches)))
