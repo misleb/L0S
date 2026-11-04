@@ -39,6 +39,9 @@
 #                    and what l0 card writes for its SD card's boot
 #                    partition. PI5_RAM_GB=N for a board of more than
 #                    2 GB, here and for pi5-netboot
+#   make pi5-release-card  build/pi5-release-card: the same, but its
+#                    initramfs only the first stage, what mounts the
+#                    system volume (make pi5-stage1), as the release has
 #   make pi5-netboot [PI5_BOOT=DIR] [PI5_TFTP_PREFIX=SERIAL]
 #                    build/pi5-tftp: the same, with the Pi 5's device
 #                    trees, fetched once and checked, or from DIR, as a
@@ -72,7 +75,8 @@
 #                    build/release
 #   make release     build/release/pi5 and build/release/virt: the
 #                    system, with RELEASE_APPS (calc) beside the
-#                    initramfs's apps, the Pi 5's boot files, the agent's seed,
+#                    initramfs's apps, the Pi 5's boot files with a
+#                    first-stage initramfs, the agent's seed,
 #                    Whistle's model and the Pi 5's pieeprom.bin, the
 #                    last two fetched once into build/fetch, which the
 #                    proxy serves to install --net and the Installer
@@ -959,7 +963,8 @@ proxy-run: proxy
 
 # The releases the proxy serves (roadmap 0027): each board's system, as
 # its initramfs holds it with /etc and the agent's etc, the Pi 5's boot
-# files as pi5-card writes them, the agent's seed, Whistle's speech
+# files as pi5-release-card writes them, whose initramfs is only the
+# first stage, the rest started from the system, the agent's seed, Whistle's speech
 # model for both, and the Pi 5's bootloader image, pieeprom.bin. The
 # model and the image are fetched once into build/fetch, each from a
 # pinned commit and kept only if its SHA-256 is the one below, so every
@@ -995,9 +1000,9 @@ $(BUILD)/fetch/whistle.cact:
 $(BUILD)/fetch/pieeprom-$(PIEEPROM_VERSION).bin:
 	$(call fetch_pinned,$(PIEEPROM_URL),$(PIEEPROM_SHA256))
 
-release: initramfs pi5-card release-apps $(WHISTLE_MODEL) $(PIEEPROM)
+release: initramfs pi5-release-card release-apps $(WHISTLE_MODEL) $(PIEEPROM)
 	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) tools/mkrelease $(BUILD)/release/virt $(ROOT) $(BUILD)/etc demo/etc/agent
-	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) PIEEPROM=$(PIEEPROM) tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-card
+	APPS=$(RELEASE_APPS_ROOT) WHISTLE_MODEL=$(WHISTLE_MODEL) PIEEPROM=$(PIEEPROM) tools/mkrelease $(BUILD)/release/pi5 $(BUILD)/pi5-root $(BUILD)/pi5-etc pi5/etc/agent $(BUILD)/pi5-release-card
 
 # The knowledge graph, which /graphify built first: graphify's own Python,
 # as it wrote it down, rebuilds it with the L0 sources it cannot read.
@@ -1150,7 +1155,7 @@ demo-system: sysdisk
 # GB board gets 208 MB, leaving about 1.8 GB to processes; a 16 GB one
 # 1,008, records for about 13 GB given at once. A kernel built for less
 # RAM than the board has runs out of heap once processes take more.
-.PHONY: pi5-initramfs pi5-card
+.PHONY: pi5-initramfs pi5-card pi5-stage1 pi5-release-card
 
 PI5_ARGS            ?=
 # Lines added to config.txt after l0 card's, as PI5_CONFIG=uart_2ndstage=1,
@@ -1214,7 +1219,7 @@ endif
 # them there and does not say the card lacks them.
 pi5-initramfs: images root $(ETC_DEPS) $(CHIME) $(BUILD)/kernel-pi5.img $(PI5_DTBS)
 	rm -rf $(BUILD)/pi5-etc && cp -R pi5/etc $(BUILD)/pi5-etc && cp $(CHIME) $(BUILD)/pi5-etc/chime.wav
-	@for p in $(PI5_NO); do grep -v "^start $$p\( \|$$\)" $(BUILD)/pi5-etc/inittab > $(BUILD)/pi5-etc/inittab.new; mv $(BUILD)/pi5-etc/inittab.new $(BUILD)/pi5-etc/inittab; echo "pi5-initramfs: not starting $$p"; done
+	@for p in $(PI5_NO); do for f in inittab system; do grep -v "^start $$p\( \|$$\)" $(BUILD)/pi5-etc/$$f > $(BUILD)/pi5-etc/$$f.new; mv $(BUILD)/pi5-etc/$$f.new $(BUILD)/pi5-etc/$$f; done; echo "pi5-initramfs: not starting $$p"; done
 	$(call stage_etc,$(BUILD)/pi5-etc)
 	@$(call stage_agent,$(BUILD)/pi5-etc)
 	rm -rf $(BUILD)/pi5-root && mkdir -p $(BUILD)/pi5-root/boot && cp -Rp $(ROOT)/. $(BUILD)/pi5-root/
@@ -1229,6 +1234,32 @@ pi5-card: $(BUILD)/kernel-pi5.img pi5-initramfs $(PI5_DTBS)
 	$(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-card $(PI5_ARGS) < $(BUILD)/pi5.cpio
 	@for c in $(PI5_CONFIG); do echo "$$c" >> $(BUILD)/pi5-card/config.txt; echo "pi5-card: config.txt says $$c"; done
 	@echo "build/pi5-card: copy its files onto a FAT32 partition of an SD card for a Pi 5"
+
+# The release's initramfs, the first stage alone: boot, and what mounts
+# the system volume, uart, xhci, sdhci and fs, as pi5/etc/inittab starts
+# them, with /bin/sh for a rescue shell, and of /etc only the inittab,
+# board, motd and pi5/stage1/system, which starts that shell if no volume
+# is made /. Everything else, the other drivers among them, boot starts
+# from the system volume's /etc/system, which the release's system/
+# holds (make release). pi5-card keeps the whole system in its
+# initramfs, for a board booted over the network with no card.
+PI5_STAGE1      := /sbin/boot /sbin/uart /sbin/xhci /sbin/sdhci /sbin/fs /bin/sh
+PI5_STAGE1_ETC  := inittab board motd
+
+pi5-stage1: pi5-initramfs
+	rm -rf $(BUILD)/pi5-stage1-root $(BUILD)/pi5-stage1-etc
+	mkdir -p $(BUILD)/pi5-stage1-root/bin $(BUILD)/pi5-stage1-root/sbin $(BUILD)/pi5-stage1-etc
+	$(foreach p,$(PI5_STAGE1),cp -p $(ROOT)$(p) $(BUILD)/pi5-stage1-root$(p) && ) true
+	$(foreach f,$(PI5_STAGE1_ETC),cp $(BUILD)/pi5-etc/$(f) $(BUILD)/pi5-stage1-etc/ && ) cp pi5/stage1/system $(BUILD)/pi5-stage1-etc/
+	tools/mkinitramfs $(BUILD)/pi5-stage1.cpio $(BUILD)/pi5-stage1-etc $(BUILD)/pi5-stage1-root
+
+# The release's boot partition: as pi5-card's, but with the first
+# stage's initramfs as input.bin.
+pi5-release-card: $(BUILD)/kernel-pi5.img pi5-stage1 $(PI5_DTBS)
+	rm -rf $(BUILD)/pi5-release-card && mkdir -p $(BUILD)/pi5-release-card
+	cp $(PI5_DTBS) $(BUILD)/pi5-release-card/
+	$(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-release-card $(PI5_ARGS) < $(BUILD)/pi5-stage1.cpio
+	@for c in $(PI5_CONFIG); do echo "$$c" >> $(BUILD)/pi5-release-card/config.txt; echo "pi5-release-card: config.txt says $$c"; done
 
 # The same booted over the network: build/pi5-tftp, a TFTP server's root,
 # holding what the Pi 5's bootloader fetches by TFTP once DHCP names the

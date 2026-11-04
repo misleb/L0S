@@ -273,6 +273,10 @@ Ctrl-C as a person would:
   program directories and runs it from there, and is told of programs
   and commands there are not, twenty commands in all, every one of them
   answered before `nap`'s 10 s are up, as a walk for each would not be;
+- `rootboot_drivers` boots as `rootboot` does, with an `/etc/system` that
+  starts `virtio-rng` from System, which the inittab's `dev` line lets
+  drive its device: it says it serves `random`, and `random`, run at the
+  shell, prints its bytes, which the case's filter makes a `~`;
 - `rootboot_missing` boots with `root=` a UUID no partition has: `boot`
   says so and starts the initramfs's system, which still refuses a
   `write`;

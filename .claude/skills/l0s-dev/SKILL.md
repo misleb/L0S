@@ -180,7 +180,9 @@ LIBS_wm := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(APPLIB)
    PATH [ARGS]` line in `demo/etc/inittab`, with `dev PATH` if it maps
    devices or binds interrupts; anything else a `start` line in
    `demo/etc/system`, which `boot` starts, from the system volume when
-   `/` is one, and so never with devices. PATH is where step 2 put it
+   `/` is one, and so with devices only if the initramfs's inittab has
+   a `dev PATH` for it (the Pi 5's drivers past the first stage, which
+   `pi5/etc/system` starts). PATH is where step 2 put it
    (`/bin/sh`, `/sbin/wm`, `/Applications/Terminal.app/vt`). Adding a
    `start` line shifts later pids: update `spec/demo.md`'s pid table and `ps`
    sample, and check `tests/vt.sh`'s pid arithmetic.

@@ -1,7 +1,8 @@
 # The Raspberry Pi 5
 
 ```
-make pi5-card     # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt, the device trees
+make pi5-card           # build/pi5-card: l0.img, input.bin, config.txt, cmdline.txt, the device trees
+make pi5-release-card   # build/pi5-release-card: the same, input.bin only the first stage
 ```
 
 L0S builds for the Pi 5 and has booted on one over the network, to the
@@ -178,11 +179,33 @@ leaves at `-m 2G`; a 16 GB board's has 1,008 MB, enough for about 13 GB
 of pages given at once (see [Limits](kernel.md#limits)). Build with
 `PI5_RAM_GB=N` for a board of more than 2 GB.
 
-`pi5/etc/inittab` starts what the board has a driver for:
+The board boots in two stages. `pi5/etc/inittab` starts the first,
+what mounts the system volume: `boot`, `uart`, `xhci rp1` (for a system
+volume on USB storage to come), `sdhci pi5` and `fs ram`. `boot` then
+starts `pi5/etc/system`, the second: `sh` on the console, waited for,
+then `rtc clock`, `usb-hid`, `usb-audio`, `hvs`, `hdmi-audio`, `gem`,
+`inet dhcp`, `ntp`, `font`, `wm`, `agentd` and `speech`. The inittab's
+`dev` lines name the second stage's drivers too, so that `boot` starts
+them with their devices from a system volume, booted with `root=` as a
+card the Installer wrote is ([Drivers from the system
+volume](boot.md#booting-from-a-volume)), or from the initramfs, which
+`pi5-card`'s holds whole, for a board booted over the network with no
+card.
+
+**The release's initramfs is the first stage alone.** `make
+pi5-release-card`, which `make release` gives as the Pi 5's `boot/`, is
+`pi5-card`'s boot partition with `input.bin` of `make pi5-stage1`:
+`/sbin/boot`, `uart`, `xhci`, `sdhci` and `fs`, `/bin/sh`, and of `/etc`
+only `inittab`, `board`, `motd`, and [pi5/stage1/system](../pi5/stage1/system),
+which starts the shell alone: about 1.2 MB, where `pi5-card`'s is about
+19.5. Everything else, fonts, wallpapers, the chime and the apps among
+it, is read from the system volume. With no `root=`, or with its volume
+missing, that card boots to the rescue shell on the debug UART, the
+card's volumes mounted, and nothing more.
 
 | Program | What it does there |
 |---|---|
-| `boot` | pid 1, then `/etc/system`: `sh` on the console, `font`, `wm` and `agentd` ([agent.md](agent.md)), which exits at once without `/etc/agent/config`; no app, so the desktop starts empty |
+| `boot` | pid 1, then `/etc/system`; `agentd` ([agent.md](agent.md)) exits at once without `/etc/agent/config`; no app, so the desktop starts empty |
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
 | `xhci rp1`, `usb-hid` | RP1's two USB controllers, and every boot keyboard and mouse on them, served by one `usb-hid` (see [USB](devices.md#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode`, `hdmi`, `eof` and `watch` beside them), waiting for its lists by channel 0's end of frame, interrupt 129 through `disp_intr`, at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
@@ -312,6 +335,11 @@ the board flashes it as it boots.
   pages once its heap is down to its reserve (see
   [The kernel](kernel.md)), so the RAM past what the heap records goes
   unused.
+- **The release's second stage starts once `fs` has mounted the card**,
+  so the screen, the chime and the network come a moment later than
+  from `pi5-card`'s whole initramfs; and `install --boot` from a
+  running system still writes the whole of `/` as `input.bin`, not the
+  first stage alone.
 - **The bootloader's configuration changes only through its own
   update**: `eeprom` cannot read the EEPROM's image, only the
   configuration the firmware reports, so an update starts from a
