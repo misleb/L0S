@@ -464,13 +464,15 @@ typed. `tests/usb.sh` types the same on the USB keyboard.
 vt-initramfs`), every shell running, but with two Terminals whatever the
 demo's `/etc/system` starts after its first ([tests/vt/etc/system](../tests/vt/etc/system)), on its USB keyboard and mouse (`QEMU_INPUT=usb`), with QMP on a socket as well, to work the mouse, which it moves into the screen's top left corner before each move to a pixel. Which `vt`
 opens first, and so where each window is, varies, so it learns where they
-are from `run windows` at the serial shell. Each window draws its own
-header bar, so `run windows` gives all of it, the terminal under its
-header bar. Then:
+are from `run windows` at the serial shell, which tells them apart by
+their `vt`s' pids, as both are titled `/`, their shells' folder. Each
+window draws its own header bar, so `run windows` gives all of it, the
+terminal under its header bar. Then:
 - the header bars: the front window's active, `303030`, the other's in
   the backdrop, `242424`; the front window's top left pixel, cut by its
-  shape, showing what is under it; and the terminal's ground under its
-  header bar;
+  shape, showing what is under it; the terminal's ground under its
+  header bar; and the window's outline, `3a3a3a`, along its left edge,
+  over the terminal;
 - once the front window's prompt's cursor is drawn, `echo hi`, typed with
   `sendkey`: the screendump shows the `h` of the answer on its row 8,
   under the motd, the banner and the prompt;
@@ -493,15 +495,18 @@ header bar. Then:
   edge dragged in to 320, 40 columns: the line is wrapped again, the
   cursor 10 into the last row; dragged out to 640, it is whole again,
   the cursor 50 in;
+- `cd /bin` typed into it: `run windows` shows the window titled
+  `/bin`, its tab's shell's folder;
 - a click on the new-tab button: `run windows` shows the window titled
-  `vt3`, the new tab's name, and the tab bar shows under the header
-  bar, the new tab raised; `echo hi` typed in it is answered in it, and
+  `/`, the new tab's shell's folder, and the tab bar shows under the
+  header bar, the new tab raised; `echo hi` typed in it is answered in it, and
   `ps` shows both tabs' shells started by the window's `vt`;
-- a click on the first tab: the title is its name again, its prompt on
+- a click on the first tab: the title is `/bin` again, its prompt on
   its last row, 21 rows under the tab bar, and `echo hi` typed is
   answered in it;
 - a click on the second tab's close button: its shell ends, the tab
-  bar goes and the terminal is under the header bar again;
+  bar goes and the terminal is under the header bar again, up to the
+  outline in the window's last column;
 - Ctrl-Shift-T, on the USB keyboard through `wm`: a tab opened as by
   the button, the tab bar back, which its close button closes again;
 - `exit` typed into the tab left: its shell ends, and with the last tab

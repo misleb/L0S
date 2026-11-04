@@ -326,7 +326,7 @@ Things to try:
   ```
   l0s> run windows
   1 Processes 100 90 840 429 front 20 buffer 10 frames 3
-  0 vt1 40 40 640 384 - 18 buffer 4 frames 2
+  0 / 40 40 640 431 - 18 buffer 4 frames 2
   pointer 0 0
   ```
 
@@ -484,6 +484,7 @@ and says what a terminal takes, each a request (`request` in `l0s.l0`):
 | `request REPLY "i"` | sends REPLY a lone byte 3 at each Ctrl-C, dropping what is unread |
 | `request REPLY "p"` | sends REPLY `tty` at once, so REPLY learns the terminal's pid, the sender, to watch |
 | `request 0 ("w" ++ BYTES)` | writes BYTES; no reply |
+| `request 0 ("t" ++ TITLE)` | the terminal's title, as `sh` tells it its folder at each prompt and the program it runs while it waits for one, as xterm's OSC 2 does; no reply. `vt` shows it as the tab's title and the window's; `uart`, with nowhere to show it, drops it |
 
 `uart` is one, as `console`, and each `vt` another, as the first of
 `vt1`, `vt2`, and so on that is free: `vt1` in the demo, and `vt2` for

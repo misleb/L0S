@@ -9,37 +9,44 @@
 ;   vt [COLS ROWS]          a window of 80 by 24 cells unless given
 ;
 ; The window draws its own decorations (window.l0's ui_open_csd): the
-; toolkit's header bar, with the selected tab's name as its title and a
-; button that opens a tab, and under it, once there are two tabs or
-; more, a tab bar (nav.l0's UiTabBar), a click on a tab selecting it and
-; its close button closing it. Under them is the terminal, a drawing area
-; vt paints itself. Its edges and its header bar resize and maximize it as
-; any toolkit window's do, and the terminal is then as many cells as fit,
-; every tab's cells wrapped again at the new width (cells_rewrapped).
+; toolkit's header bar, with the selected tab's title and a button that
+; opens a tab, and under it, once there are two tabs or more, a tab bar
+; (nav.l0's UiTabBar), a click on a tab selecting it and its close button
+; closing it. Under them is the terminal, a drawing area that scrolls by
+; rows (widget.l0's UiDrawingRows), which vt paints itself. Its edges and
+; its header bar resize and maximize it as any toolkit window's do, and
+; the terminal is then as many cells as fit, every tab's cells wrapped
+; again at the new width (cells_rewrapped).
 ;
 ; Each tab is a terminal as user/lib/tty.l0 says, the same as uart's
-; console: "r" for a line, "i" for Ctrl-C notices, "w" to write. Each tab
-; has a port of its own, on which vt registers its name, the first of
-; vt1, vt2, and so on that no one has registered, and vt waits on the
-; app's port and every tab's at once, the tabs' ports the app's own in
-; the toolkit's loop's set (ui_app_ports, UiPort), so it knows a tab by
-; the port a message came on. With its name registered vt
-; starts the tab's shell, sh NAME, and watches it: when the shell exits
-; the tab closes, its name let go (name_unregister) and its port kept for
-; the next tab, and the window closes with its last.
+; console: "r" for a line, "i" for Ctrl-C notices, "w" to write, and "t"
+; for its title, which its shell tells: its folder at each prompt, or the
+; program it runs, as GNOME Console's tabs are named. Each tab has a port
+; of its own, on which vt registers its name, the first of vt1, vt2, and
+; so on that no one has registered, and vt waits on the app's port and
+; every tab's at once, the tabs' ports the app's own in the toolkit's
+; loop's set (ui_app_ports, UiPort), so it knows a tab by the port a
+; message came on. With its name registered vt starts the tab's shell,
+; sh NAME, and watches it: when the shell exits the tab closes, its name
+; let go (name_unregister) and its port kept for the next tab, and the
+; window closes with its last.
 ;
 ; Terminal is an app of many windows on one port (uiapp.l0's UiApp),
-; registered as app.vt: launched again while it runs, it is sent an open
-; (appopen.l0), and opens a new window with one tab, answering with the
-; window's id. Each window is a Vt of its own, its tabs its own; vt ends
-; when its last window closes, with the status of the shell whose exit
-; closed it, or 0 for a close button. Its windows have at most tabs_most
-; tabs between them, as one set holds port_set_limit ports, the app's
-; and the toolkit's two reply ports among them.
-; The wheel scrolls the selected tab back through what scrolled off it.
-; At the desktop's scale 2 a cell is still 8 by 16 of the desktop's
-; pixels, 16 by 32 of its buffer's, and its characters are the face's
-; (face.l0), smooth.
+; registered as app.vt, which keeps its windows; vt keeps each one's tabs
+; by its id. Launched again while it runs, it is sent an open
+; (appopen.l0), set off as app.open, and opens a new window with one tab,
+; answering with the window's id. vt ends when its last window closes,
+; with the status of the shell whose exit closed it, or 0 for a close
+; button. Its windows have at most tabs_most tabs between them, as one
+; set holds port_set_limit ports, the app's and the toolkit's two reply
+; ports among them.
+;
+; The wheel and the scrollbar scroll the selected tab back through what
+; scrolled off it, as the toolkit routes any scroller's (NAME.scrollto.N);
+; the scrollbar shows over the terminal while it is back, or the pointer
+; is over it, and vt paints it with the rows. At the desktop's scale 2 a
+; cell is still 8 by 16 of the desktop's pixels, 16 by 32 of its
+; buffer's, and its characters are the face's (face.l0), smooth.
 
 ; Its colors are the toolkit's for a terminal, GNOME Console's.
 (def ground () int (ui_term_bg))
@@ -49,6 +56,9 @@
 ; A cell: the toolkit's character, the font's glyph.
 (def cell_w () int (ui_char_w))
 (def cell_h () int (ui_char_h))
+
+; The terminal's drawing area's name, and its scroller's.
+(def term_name () (list int) "term")
 
 ; ---------------------------------------------------------------- render
 
@@ -62,7 +72,7 @@
 (data Op (OpText int int (list int)) (OpBlank int int) (OpScroll) (OpEnd int bool))
 
 ; The ops that show bytes, and where the cursor is after them.
-(data Rendered (Rendered Term (list Op)))
+(data Rendered (Rendered (term Term) (ops (list Op))))
 
 (def render ((t Term) (bs (list int))) Rendered
   (render_onto t bs (nil int) 0 (nil Op)))
@@ -75,18 +85,15 @@
       (render_byte t (head bs) (tail bs) run start ops)))
 
 (def render_byte ((t Term) (b int) (rest (list int)) (run (list int)) (start int) (ops (list Op))) Rendered
-  (match t
-    ((Term col row cols rows)
-      (if (and (ge b 32) (le b 126))
-          (if (ge col cols)
-              (wrapped t b rest run start ops)
-              (render_onto (Term (add col 1) row cols rows) rest (cons b run) (if (is_empty run) col start) ops))
-          (let done (flush_run t run start ops)
-            (if (eq b 10) (newline t rest done false)
-                (eq b 13) (render_onto (Term 0 row cols rows) rest (nil int) 0 done)
-                (eq b 9) (render_onto t (append (spaces (sub 8 (mod col 8))) rest) (nil int) 0 done)
-                (eq b 8) (backed t rest done)
-                (render_onto t rest (nil int) 0 done)))))))
+  (let (col (.col t) printable (and (ge b 32) (le b 126)))
+    (if (and printable (ge col (.cols t))) (wrapped t b rest run start ops)
+        printable (render_onto (.col t (add col 1)) rest (cons b run) (if (is_empty run) col start) ops)
+        (let done (flush_run t run start ops)
+          (if (eq b 10) (newline t rest done false)
+              (eq b 13) (render_onto (.col t 0) rest (nil int) 0 done)
+              (eq b 9) (render_onto t (append (spaces (sub 8 (mod col 8))) rest) (nil int) 0 done)
+              (eq b 8) (backed t rest done)
+              (render_onto t rest (nil int) 0 done))))))
 
 ; Past the last column: the next line, then the character.
 (def wrapped ((t Term) (b int) (rest (list int)) (run (list int)) (start int) (ops (list Op))) Rendered
@@ -95,30 +102,26 @@
 ; The next line's start, scrolling a line up from the last; the row left
 ; ended by a wrap if wrap, else by a newline.
 (def newline ((t Term) (rest (list int)) (ops (list Op)) (wrap bool)) Rendered
-  (match t
-    ((Term col row cols rows)
-      (let ended (cons (OpEnd row wrap) ops)
-        (if (ge (add row 1) rows)
-            (render_onto (Term 0 row cols rows) rest (nil int) 0 (cons (OpScroll) ended))
-            (render_onto (Term 0 (add row 1) cols rows) rest (nil int) 0 ended))))))
+  (let (row (.row t)
+        ended (cons (OpEnd row wrap) ops))
+    (if (ge (add row 1) (.rows t))
+        (render_onto (.col t 0) rest (nil int) 0 (cons (OpScroll) ended))
+        (render_onto (.row (.col t 0) (add row 1)) rest (nil int) 0 ended))))
 
 ; Back one column, and that cell blanked, as a Backspace's echo needs.
 (def backed ((t Term) (rest (list int)) (ops (list Op))) Rendered
-  (match t
-    ((Term col row cols rows)
-      (if (eq col 0)
-          (render_onto t rest (nil int) 0 ops)
-          (let b (Term (sub (min col cols) 1) row cols rows)
-            (render_onto b rest (nil int) 0 (cons (OpBlank (term_col b) row) ops)))))))
+  (let col (.col t)
+    (if (eq col 0)
+        (render_onto t rest (nil int) 0 ops)
+        (let b (.col t (sub (min col (.cols t)) 1))
+          (render_onto b rest (nil int) 0 (cons (OpBlank (.col b) (.row b)) ops))))))
 
 ; The run drawn, if there is one, onto ops.
 (def flush_run ((t Term) (run (list int)) (start int) (ops (list Op))) (list Op)
-  (if (is_empty run)
-      ops
-      (match t ((Term col row cols rows) (cons (OpText start row (rev run)) ops)))))
+  (if (is_empty run) ops (cons (OpText start (.row t) (rev run)) ops)))
 
 ; The cursor's cell: the last column while a wrap is pending.
-(def term_col ((t Term)) int (match t ((Term col row cols rows) (min col (sub cols 1)))))
+(def term_col ((t Term)) int (min (.col t) (sub (.cols t) 1)))
 
 ; The cells after ops: what they write kept, rows scrolled, and rows'
 ; ends marked.
@@ -147,20 +150,21 @@
 
 ; ---------------------------------------------------------------- the view
 
-; How many rows a step of the wheel scrolls.
-(def wheel_rows () int 3)
-
-; How far back the view is after dy steps of the wheel, down positive,
-; from back: wheel_rows a step, no further than the cells have rows
-; scrolled off, nor past the bottom.
-(def wheeled_back ((back int) (dy int) (most int)) int
-  (max 0 (min most (sub back (mul dy (wheel_rows))))))
-
 ; How far back the view is once the screen has scrolled n rows under it,
 ; as output does while it is back: as far again, so that it shows what it
 ; did, unless that has gone from the ring.
 (def kept_back ((back int) (n int) (most int)) int
   (if (eq back 0) 0 (min most (add back n))))
+
+; How far back the view is after a page of rows down, dir 1, or up, -1,
+; from back: within 0 and most.
+(def paged_back ((back int) (dir int) (rows int) (most int)) int
+  (max 0 (min most (sub back (mul dir rows)))))
+
+; How far back the view is once the scroller asks for row first to be
+; shown first (NAME.scrollto.N), of most rows scrolled off: within 0 and
+; most.
+(def scrolled_back ((first int) (most int)) int (max 0 (min most (sub most first))))
 
 ; ------------------------------------------------------------------- draw
 
@@ -170,19 +174,27 @@
   (let top (add (ui_headerbar_h) (if (ge n 2) (ui_tabbar_h) 0))
     (Rect 0 top ww (max 0 (sub wh top)))))
 
-; How many columns and rows of cells fit in the area a, at least one.
+; How many columns and rows of cells fit in the area a, at least one:
+; the rows above the window's outline along its foot, which would hide
+; the cursor's line on the last.
 (def area_cols ((a Rect)) int (max 1 (div (.w a) (cell_w))))
-(def area_rows ((a Rect)) int (max 1 (div (.h a) (cell_h))))
+(def area_rows ((a Rect)) int (max 1 (div (sub (.h a) (ui_window_outline_w)) (cell_h))))
+
+; How the scrollbar shows over the tab t's view, as the window's state st
+; says: 2 wide, while the pointer is over it or drags it; 1, while the
+; view is back; 0 not at all, as an overlay scrollbar hides at rest.
+(def bar_shown ((t Tab) (st UiState)) int
+  (if (ui_scrollbar_active (term_name) st) 2 (gt (.back t) 0) 1 0))
 
 ; The tab's view drawn whole in the area a: each row; the ground below the
-; last, where no whole row fits; and, while the view is back, the
+; last, where no whole row fits; and, if it shows (bar_shown), the
 ; toolkit's overlay scrollbar along its right.
-(def view_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab)) Canvas
+(def view_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (st UiState)) Canvas
   (let (rows (.rows (.cells t))
         c2 (rows_drawn c face a t 0 rows)
         under (mul rows (cell_h))
         c3 (ui_draw_fill c2 (Rect (.x a) (add (.y a) under) (.w a) (max 0 (sub (.h a) under))) (ground) (.scale face)))
-    (if (eq (.back t) 0) c3 (scrollbar_drawn c3 face a t))))
+    (if (eq (bar_shown t st) 0) c3 (scrollbar_drawn c3 face a t st))))
 
 ; The view's rows from v up to n drawn.
 (def rows_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (v int) (n int)) Canvas
@@ -202,20 +214,12 @@
         (ui_draw_fill c3 (Rect (add (.x a) (mul (term_col (.term t)) (cell_w))) (add y (sub (cell_h) 1)) (cell_w) 1) (cursor_color) s)
         c3)))
 
-; The toolkit's overlay scrollbar (grid.l0's ui_scrollbar_on) painted
-; over the area's right edge: its slider as long as the share of the
-; rows the view shows, as far down as the view is.
-(def scrollbar_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab)) Canvas
-  (let (cl (.cells t) rows (.rows cl))
-    (nodes_painted c face a
-      (ui_scrollbar_on "term" (.x a) (.w a) (.y a) (cell_h) (add (cells_back cl) rows) rows
-                       (sub (cells_back cl) (.back t)) (ui_state_new (ui_style)) (ground) (nil UiNode)))))
-
-; Each of ns's ops painted, cut to clip.
-(def nodes_painted ((c Canvas) (face UiFace) (clip Rect) (ns (list UiNode))) Canvas
-  (if (is_empty ns)
-      c
-      (match (head ns) ((UiNode r ops a f) (nodes_painted (ui_paint c face clip ops) face clip (tail ns))))))
+; The terminal's scrollbar painted over the area's right edge, as the
+; toolkit lays out its strip (widget.l0's ui_drawing_scrollbar): its
+; slider as long as the share of the rows the view shows, as far down as
+; the view is, wider under the pointer.
+(def scrollbar_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (st UiState)) Canvas
+  (ui_paint_nodes c face a (ui_drawing_scrollbar (term_name) a (tab_rows t) (tab_first t) (.rows (.cells t)) (cell_h) st (ground))))
 
 ; What output did to the view at the bottom that is not drawn yet, as the
 ; window waits for its frame: the rows it scrolled up, k, and the rows
@@ -241,10 +245,10 @@
 ; What is due, d, drawn on the view at the bottom: the area's rows moved
 ; k up, as they are copied, not drawn again, and then the rows due drawn
 ; again; or all of the view, if it scrolled a whole screen or more.
-(def due_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (d Due)) Canvas
+(def due_drawn ((c Canvas) (face UiFace) (a Rect) (t Tab) (st UiState) (d Due)) Canvas
   (let rows (.rows (.cells t))
     (if (ge (.k d) rows)
-        (view_drawn c face a t)
+        (view_drawn c face a t st)
         (let (s (.scale face)
               moved (if (eq (.k d) 0) c (canvas_copy_rows c (rect_scaled (rows_rect a rows) s) (mul (mul (.k d) (cell_h)) s))))
           (rows_drawn moved face a t (.lo d) (add (.hi d) 1))))))
@@ -327,16 +331,20 @@
 
 ; ---------------------------------------------------------------- serving
 
-; A window: the toolkit's window, the tabs, the status of the last shell
-; to exit, the title wm was last told, what was last drawn whole in the
-; terminal's area, and what the app lends it for a step (Lent).
-(data Vt (Vt (win UiWin) (tabs Tabs) (st int) (title (list int)) (sh Shown) (lent Lent)))
+; A window's own: its tabs, the status of the last shell to exit, the
+; title wm was last told, and what was last drawn whole in the
+; terminal's area. The window itself the app keeps (ui_app_win).
+(data Vt (Vt (tabs Tabs) (st int) (title (list int)) (sh Shown)))
 
-; What a window is lent for a step, from the app's: the ports of tabs
-; closed, in any of its windows, kept for the next tabs, since a port is
-; never given back; and how many tabs its other windows have, as one set
-; holds every window's.
-(data Lent (Lent (free (list int)) (others int)))
+; A window as it opens, with no tab yet.
+(def vt_new () Vt (Vt (tabs_none) 0 "Terminal" (Shown (View (Rect 0 0 0 0) -1 0 0 0) (due_none))))
+
+; What a window's step works on: its window, taken from the app and put
+; back after; its own; the ports of tabs closed, in any of the app's
+; windows, kept for the next tabs, since a port is never given back; and
+; how many tabs the app's other windows have, as one set holds every
+; window's.
+(data VtAt (VtAt (win UiWin) (vt Vt) (free (list int)) (others int)))
 
 ; Whether a window with here tabs may open one more, others in the app's
 ; other windows: every tab's port is in the one set, beside the app's.
@@ -348,35 +356,35 @@
 (data Shown (Shown (view View) (due Due)))
 
 ; What a view drawn whole is: the area, the window's count of drawings
-; lost (ui_win_lost), the tab shown, by its port, and how far back its
-; view was. A view that differs in any of them from what is to be shown
-; is drawn whole again.
-(data View (View Rect int int int))
+; lost (ui_win_lost), the tab shown, by its port, how far back its view
+; was, and how its scrollbar showed (bar_shown). A view that differs in
+; any of them from what is to be shown is drawn whole again.
+(data View (View (area Rect) (lost int) (port int) (back int) (bar int)))
 
 ; What a message does to a window: it goes on, or it has closed, as it
 ; was at the end, with the status vt ends with if it was the last.
-(data Step (Go Vt) (Stop Vt int))
+(data Step (Go VtAt) (Stop VtAt int))
 
 ; What a window is asked to do in a step: take an event of its window,
 ; as the toolkit's loop hands it out; take what came on its tab's port;
 ; or close the tab whose shell exited.
 (data Ask (AskEvent UiEvent) (AskTab int (list int)) (AskExit int int))
 
-; The step of window v asked q.
-(def vt_asked ((v Vt) (q Ask)) Step
+; The step of the window at asked q.
+(def vt_asked ((at VtAt) (q Ask)) Step
   (match q
-    ((AskEvent ev) (from_event v ev))
+    ((AskEvent ev) (from_event at ev))
     ((AskTab port payload)
-      (match (tabs_by_port (.tabs v) port)
-        ((Some t) (Go (from_tab v t payload)))
-        ((None) (Go v))))
-    ((AskExit pid status) (exited v pid status))))
+      (match (tabs_by_port (.tabs (.vt at)) port)
+        ((Some t) (Go (from_tab at t payload)))
+        ((None) (Go at))))
+    ((AskExit pid status) (exited at pid status))))
 
 ; Terminal, an app of any number of windows on one port (uiapp.l0's
-; UiApp): its windows' Vts by id, the ports of tabs closed, kept for the
-; next tabs of any window, and the cells a new window has, the
-; arguments'. The tabs' ports are the app's own (ui_app_ports), waited
-; on by the toolkit's loop with the app's.
+; UiApp), which keeps them: each window's own by its id, the ports of
+; tabs closed, kept for the next tabs of any window, and the cells a new
+; window has, the arguments'. The tabs' ports are the app's own
+; (ui_app_ports), waited on by the toolkit's loop with the app's.
 (data Vts (Vts (a UiApp) (wins (Map int Vt)) (free (list int)) (t Term)))
 
 ; What a message does to the app: it goes on, or vt ends with a status,
@@ -386,18 +394,20 @@
 ; The app with a window more, and its id; or as it was, and why not.
 (data VtsOpen (VtsOpened Vts int) (VtsRefused Vts (list int)))
 
-; The app started, a window t's cells big opened in it, and served.
+; The app started, answering its opens itself (ui_app_opening), a window
+; t's cells big opened in it, and served.
 (def windowed ((t Term)) int
   (match (ui_app_start)
     ((UiAppFailed why) (complain why))
     ((UiAppStarted a)
-      (match (vts_opened (Vts a ((MapEmpty int Vt)) (nil int) t))
+      (match (vts_opened (Vts (ui_app_opening a) ((MapEmpty int Vt)) (nil int) t))
         ((VtsRefused vs why) (complain why))
         ((VtsOpened vs id) (serve (vts_waiting vs)))))))
 
-; The size of a window of t's cells: a header bar's height more.
-(def term_win_w ((t Term)) int (match t ((Term col row cols rows) (mul cols (cell_w)))))
-(def term_win_h ((t Term)) int (match t ((Term col row cols rows) (add (ui_headerbar_h) (mul rows (cell_h))))))
+; The size of a window of t's cells: a header bar's height more, and
+; the outline's along its foot.
+(def term_win_w ((t Term)) int (mul (.cols t) (cell_w)))
+(def term_win_h ((t Term)) int (add (add (ui_headerbar_h) (mul (.rows t) (cell_h))) (ui_window_outline_w)))
 
 ; vs with a new window, in front, of the cells it opens windows at, its
 ; first tab opened in it.
@@ -410,14 +420,11 @@
           (match (ui_app_win a2 id)
             ((None) (VtsRefused (Vts a2 wins free t) "no window"))
             ((Some w)
-              (let v (Vt w (tabs_none) 0 "Terminal" (Shown (View (Rect 0 0 0 0) -1 0 0) (due_none)) (Lent free (vts_tab_count vs)))
-                (VtsOpened (vts_kept (Vts a2 wins free t) id (refreshed (tab_opened v))) id)))))))))
-
-; The app's windows' Vts.
-(def vts_wins ((vs Vts)) (list Vt) (match vs ((Vts a wins free t) (map_values wins))))
+              (let n (vts_tab_count vs)
+                (VtsOpened (vts_kept (Vts a2 wins free t) id (refreshed (tab_opened (VtAt w (vt_new) free n)))) id)))))))))
 
 ; How many tabs the app's windows have, all together.
-(def vts_tab_count ((vs Vts)) int (vt_tab_count_onto (vts_wins vs) 0))
+(def vts_tab_count ((vs Vts)) int (vt_tab_count_onto (map_values (.wins vs)) 0))
 
 ; vt_tab_count's loop over l, onto n.
 (def vt_tab_count_onto ((l (list Vt)) (n int)) int
@@ -425,8 +432,7 @@
 
 ; The tabs' ports of every window, what vt waits on beside the app's
 ; port and the toolkit's reply ports: the app's own ports.
-(def vts_ports ((vs Vts)) (list int)
-  (match vs ((Vts a wins free t) (tabs_ports_all (map_values wins) (nil int)))))
+(def vts_ports ((vs Vts)) (list int) (tabs_ports_all (map_values (.wins vs)) (nil int)))
 
 ; Every tab's port of each of l's windows, onto the reversed acc.
 (def tabs_ports_all ((l (list Vt)) (acc (list int))) (list int)
@@ -448,22 +454,20 @@
 ; is its last; a tab's message, on the tab's own port, comes as UiPort,
 ; before the windows' notices.
 (def serve ((vs Vts)) int
-  (match vs
-    ((Vts a wins free t)
-      (match (ui_app_next a)
-        ((UiAppNext a2 e)
-          (if (ui_app_event_lost e)
-              (complain "lost its ports")
-              (match e
-                ((UiAppEvent id ev)
-                  (match (vts_event (Vts a2 wins free t) id ev)
-                    ((VtsGo vs2) (serve (vts_waiting vs2)))
-                    ((VtsEnd status) status))))))))))
+  (match (ui_app_next (.a vs))
+    ((UiAppNext a2 e)
+      (if (ui_app_event_lost e)
+          (complain "lost its ports")
+          (match e
+            ((UiAppEvent id ev)
+              (match (vts_event (.a vs a2) id ev)
+                ((VtsGo vs2) (serve (vts_waiting vs2)))
+                ((VtsEnd status) status))))))))
 
 ; What an event does to the app: of window id, that window's step; of
 ; no window, a tab's message, that tab's window's; a shell's exit, its
-; window's, which closes its tab; an open, Terminal launched again, a
-; window more; anything else, nothing.
+; window's, which closes its tab; anything else routed by the app, an
+; open, Terminal launched again, a window more.
 (def vts_event ((vs Vts) (id int) (ev UiEvent)) VtsStep
   (if (ge id 0)
       (vts_step vs id (AskEvent ev))
@@ -472,240 +476,224 @@
           (match (vts_holding vs port true)
             ((Some wid) (vts_step vs wid (AskTab port (vt_payload m))))
             ((None) (VtsGo vs))))
-        ((UiNoPort) (from_other vs ev)))))
+        ((UiNoPort)
+          (match (ui_exit_of ev)
+            ((UiExited pid status)
+              (match (vts_holding vs pid false)
+                ((Some wid) (vts_step vs wid (AskExit pid status)))
+                ((None) (VtsGo vs))))
+            ((UiNoExit) (vts_routed vs id ev)))))))
+
+; An event of no window that is no tab's nor a shell's, routed by the
+; app: an open, Terminal launched again, a window more; anything else,
+; nothing.
+(def vts_routed ((vs Vts) (id int) (ev UiEvent)) VtsStep
+  (match vs
+    ((Vts a wins free t)
+      (match (ui_app_route a id ev)
+        ((UiAppRouted a2 action)
+          (let vs2 (Vts a2 wins free t)
+            (if (eq action (ui_open_action)) (VtsGo (vts_open_asked vs2 ev)) (VtsGo vs2))))))))
 
 ; A message's payload as text, empty for one that failed.
 (def vt_payload ((m Message)) (list int)
   (match m ((RecvFailed) "") ((Message from b) (msg_text b))))
-
-; An event of no window that is no tab's: a shell's exit, or an open.
-(def from_other ((vs Vts) (ev UiEvent)) VtsStep
-  (match (vt_exit_of ev)
-    ((Some pid)
-      (match (vts_holding vs pid false)
-        ((Some id) (vts_step vs id (AskExit pid (vt_exit_status ev))))
-        ((None) (VtsGo vs))))
-    ((None)
-      (if (ge (ui_open_reply ev) 0) (VtsGo (vts_open_asked vs ev)) (VtsGo vs)))))
-
-; The pid a watched process's exit, ev, is of, if it is one; and its
-; status, -1 for any other event.
-(def vt_exit_of ((ev UiEvent)) (Option int)
-  (if (ge (vt_exit_status ev) 0) (Some (vt_exit_pid ev)) ((None int))))
-(def vt_exit_pid ((ev UiEvent)) int
-  (match ev
-    ((UiExit pid status) pid)
-    ((UiKey k) -1) ((UiPress x y b) -1) ((UiRelease x y b) -1) ((UiMotion x y b) -1) ((UiContext x y b) -1)
-    ((UiLeave) -1) ((UiFocus f) -1) ((UiScroll x y dx dy) -1) ((UiResize rw rh) -1) ((UiCloseAsked) -1)
-    ((UiOpen r args) -1) ((UiOther f p) -1) ((UiReply tg m) -1) ((UiIdle) -1) ((UiPort p m) -1)))
-(def vt_exit_status ((ev UiEvent)) int
-  (match ev
-    ((UiExit pid status) status)
-    ((UiKey k) -1) ((UiPress x y b) -1) ((UiRelease x y b) -1) ((UiMotion x y b) -1) ((UiContext x y b) -1)
-    ((UiLeave) -1) ((UiFocus f) -1) ((UiScroll x y dx dy) -1) ((UiResize rw rh) -1) ((UiCloseAsked) -1)
-    ((UiOpen r args) -1) ((UiOther f p) -1) ((UiReply tg m) -1) ((UiIdle) -1) ((UiPort p m) -1)))
 
 ; vs after an open, ev, Terminal launched again: a new window, in front,
 ; with one tab, answered with its id; or, if it cannot open, why said and
 ; answered 0, the front window brought forward.
 (def vts_open_asked ((vs Vts) (ev UiEvent)) Vts
   (match (vts_opened vs)
-    ((VtsOpened vs2 id) (let s (ui_open_answer ev id) vs2))
-    ((VtsRefused vs2 why) (let (w (said_why (append "cannot open a window: " why)) s (ui_open_answer ev 0)) vs2))))
+    ((VtsOpened vs2 id) (.a vs2 (ui_app_shown (.a vs2) ev id)))
+    ((VtsRefused vs2 why)
+      (let s (note_as "vt" (append "cannot open a window: " why))
+        (.a vs2 (ui_app_shown (.a vs2) ev 0))))))
 
 ; The id of the window with a tab on port n, or if not by_port whose
 ; shell is n, if one has.
 (def vts_holding ((vs Vts) (n int) (by_port bool)) (Option int)
-  (vt_holding (vts_wins vs) n by_port))
+  (vt_holding (map_keys (.wins vs)) (.wins vs) n by_port))
 
-; vts_holding's search of l.
-(def vt_holding ((l (list Vt)) (n int) (by_port bool)) (Option int)
-  (if (is_empty l)
+; vts_holding's search of the windows ids of wins.
+(def vt_holding ((ids (list int)) (wins (Map int Vt)) (n int) (by_port bool)) (Option int)
+  (if (is_empty ids)
       ((None int))
-      (let ts (.tabs (head l))
-        (match (if by_port (tabs_by_port ts n) (tabs_by_shell ts n))
-          ((Some t) (Some (.id (.win (head l)))))
-          ((None) (vt_holding (tail l) n by_port))))))
+      (match (map_get wins (head ids))
+        ((None) (vt_holding (tail ids) wins n by_port))
+        ((Some v)
+          (match (if by_port (tabs_by_port (.tabs v) n) (tabs_by_shell (.tabs v) n))
+            ((Some t) (Some (head ids)))
+            ((None) (vt_holding (tail ids) wins n by_port)))))))
 
-; Window id's step asked q, lent the app's free ports and painted with its
-; face; nothing if it has no such window.
+; Window id's step asked q: its window taken from the app, painted with
+; the app's face, lent the app's free ports; nothing if it has no such
+; window.
 (def vts_step ((vs Vts) (id int) (q Ask)) VtsStep
-  (match vs
-    ((Vts a wins free t)
-      (match (map_get wins id)
-        ((None) (VtsGo vs))
-        ((Some v) (vts_stepped vs id (vt_asked (vt_lent v a free (sub (vts_tab_count vs) (tabs_count (.tabs v)))) q)))))))
+  (let (a (.a vs) others (vts_tab_count vs))
+    (match (ui_app_win a id)
+      ((None) (VtsGo vs))
+      ((Some w)
+        (match (map_get (.wins vs) id)
+          ((None) (VtsGo vs))
+          ((Some v)
+            (vts_stepped vs id (vt_asked (VtAt (.face w (.f a)) v (.free vs) (sub others (tabs_count (.tabs v)))) q))))))))
 
-; v lent free and others' count, its window painted with a's face.
-(def vt_lent ((v Vt) (a UiApp) (free (list int)) (others int)) Vt
-  (match v
-    ((Vt w ts st title sh l)
-      (match (ui_app_win a (.id w))
-        ((None) (Vt w ts st title sh (Lent free others)))
-        ((Some aw) (Vt (.face w (.face aw)) ts st title sh (Lent free others)))))))
-
-; vs after window id's step s: the window kept, or, stopped, closed and
-; forgotten; vt ending with the status of the last.
+; vs after window id's step s: the window put back, or, stopped, closed
+; and forgotten; vt ending with the status of the last.
 (def vts_stepped ((vs Vts) (id int) (s Step)) VtsStep
   (match s
-    ((Go v) (VtsGo (vts_kept vs id v)))
-    ((Stop v status)
+    ((Go at) (VtsGo (vts_kept vs id at)))
+    ((Stop at status)
       (match vs
         ((Vts a wins free t)
-          (let (a2 (ui_app_close (ui_app_put_faced a (.win v)) id)
+          (let (a2 (ui_app_close (ui_app_put a (.win at)) id)
                 wins2 (map_remove wins id))
             (if (eq (map_size wins2) 0)
                 (VtsEnd status)
-                (VtsGo (Vts a2 wins2 (.free (.lent v)) t)))))))))
+                (VtsGo (Vts a2 wins2 (.free at) t)))))))))
 
-; vs with window id as v left it: its window, and the face it painted
-; with, the app's; the ports it was lent, as it left them, the app's.
-(def vts_kept ((vs Vts) (id int) (v Vt)) Vts
+; vs with window id as at left it: its window put back in the app, the
+; face it painted with the app's; its own kept; the ports it was lent,
+; as it left them, the app's.
+(def vts_kept ((vs Vts) (id int) (at VtAt)) Vts
   (match vs
     ((Vts a wins free t)
-      (Vts (ui_app_put_faced a (.win v)) (map_put wins id v) (.free (.lent v)) t))))
+      (Vts (ui_app_put_faced a (.win at)) (map_put wins id (.vt at)) (.free at) t))))
 
-; why said on standard error.
-(def said_why ((why (list int))) int
-  (let (w (write_err (append "vt: " (append why "\n"))) f (file_flush (IoFile 2))) 0))
+; at with its window w.
+(def at_win ((at VtAt) (w UiWin)) VtAt (.win at w))
 
-; An event of v's window, as the toolkit's loop hands it out: a key, to
-; the selected tab; the wheel, over the terminal, scrolling it; anything
-; else routed by the toolkit, a strike that came among them, which
-; refreshes the window.
-(def from_event ((v Vt) (ev UiEvent)) Step
+; at with its window's tabs ts.
+(def at_tabs ((at VtAt) (ts Tabs)) VtAt
+  (match at ((VtAt w v free others) (VtAt w (.tabs v ts) free others))))
+
+; at with what its terminal's area shows, sh.
+(def at_shown ((at VtAt) (sh Shown)) VtAt
+  (match at ((VtAt w v free others) (VtAt w (.sh v sh) free others))))
+
+; An event of at's window, as the toolkit's loop hands it out: a key, to
+; the selected tab; anything else routed by the toolkit, the wheel and
+; the scrollbar over the terminal as its scroller's, a strike that came
+; among them, which refreshes the window.
+(def from_event ((at VtAt) (ev UiEvent)) Step
   (match (ui_key_of ev)
-    ((Some k) (key_stepped v k))
+    ((Some k) (key_stepped at k))
     ((None)
-      (match (vt_wheel_of ev)
-        ((Some e)
-          (match e
-            ((WheelEvent x y dx dy)
-              (if (rect_has (vt_area v) x y) (Go (refreshed (wheeled v dy))) (Go v)))))
-        ((None)
-          (match (ui_route (.win v) ev)
-            ((UiRouted w2 action) (acted (.win v w2) action))))))))
-
-; The wheel's turn ev is, if it is one.
-(def vt_wheel_of ((ev UiEvent)) (Option WheelEvent)
-  (match ev
-    ((UiScroll x y dx dy) (Some (WheelEvent x y dx dy)))
-    ((UiKey k) ((None WheelEvent))) ((UiPress x y b) ((None WheelEvent))) ((UiRelease x y b) ((None WheelEvent)))
-    ((UiMotion x y b) ((None WheelEvent))) ((UiContext x y b) ((None WheelEvent))) ((UiLeave) ((None WheelEvent)))
-    ((UiFocus f) ((None WheelEvent))) ((UiResize rw rh) ((None WheelEvent))) ((UiCloseAsked) ((None WheelEvent)))
-    ((UiExit p s) ((None WheelEvent))) ((UiOpen r args) ((None WheelEvent))) ((UiOther f p) ((None WheelEvent)))
-    ((UiReply tg m) ((None WheelEvent))) ((UiIdle) ((None WheelEvent))) ((UiPort p m) ((None WheelEvent)))))
+      (match (ui_route (.win at) ev)
+        ((UiRouted w2 action) (acted (at_win at w2) action))))))
 
 ; A key from wm: a shortcut's, done; any other, fed to the selected tab.
-(def key_stepped ((v Vt) (k KeyEvent)) Step
+(def key_stepped ((at VtAt) (k KeyEvent)) Step
   (let s (shortcut_of k)
-    (if (eq s "tab.new") (acted v s)
-        (eq s "view.page_up") (Go (refreshed (paged v -1)))
-        (eq s "view.page_down") (Go (refreshed (paged v 1)))
-        (Go (keyed v k)))))
+    (if (eq s "tab.new") (acted at s)
+        (eq s "view.page_up") (Go (refreshed (paged at -1)))
+        (eq s "view.page_down") (Go (refreshed (paged at 1)))
+        (Go (keyed at k)))))
 
 ; The shortcut key k is, as GNOME Console's: Ctrl-Shift-T a new tab,
 ; tab.new, the new-tab button's action; Shift-Page Up and Shift-Page
 ; Down a page of the scrollback back and forward, view.page_up and
 ; view.page_down; or "" for a key typed, and for any release.
 (def shortcut_of ((k KeyEvent)) (list int)
-  (match k
-    ((KeyEvent code value ch mods)
-      (if (eq value 0) ""
-          (and (eq code 20) (key_mods_are mods (bit_or (key_mod_ctrl) (key_mod_shift)))) "tab.new"
-          (key_mods_are mods (key_mod_shift))
-              (if (eq code (ui_key_page_up)) "view.page_up" (eq code (ui_key_page_down)) "view.page_down" "")
-          ""))))
+  (let (code (.code k) mods (.mods k))
+    (if (eq (.value k) 0) ""
+        (and (eq code 20) (key_mods_are mods (bit_or (key_mod_ctrl) (key_mod_shift)))) "tab.new"
+        (and (key_mods_are mods (key_mod_shift)) (eq code (ui_key_page_up))) "view.page_up"
+        (and (key_mods_are mods (key_mod_shift)) (eq code (ui_key_page_down))) "view.page_down"
+        "")))
 
-; v with the selected tab's view a page further down, dir 1, or up, -1:
+; at with t in place of the tab on its port, as the selected tab is
+; changed.
+(def selected_with ((at VtAt) (t Tab)) VtAt (at_tabs at (tabs_put (.tabs (.vt at)) t)))
+
+; at with the selected tab's view a page further down, dir 1, or up, -1:
 ; as many rows as the terminal has, no further than the ring nor past the
 ; bottom.
-(def paged ((v Vt) (dir int)) Vt
-  (match (tabs_selected (.tabs v))
-    ((None) v)
+(def paged ((at VtAt) (dir int)) VtAt
+  (match (tabs_selected (.tabs (.vt at)))
+    ((None) at)
     ((Some t)
-      (let c (.cells t)
-        (.tabs v (tabs_put (.tabs v) (.back t (paged_back (.back t) dir (.rows c) (cells_back c)))))))))
+      (let (c (.cells t) b (paged_back (.back t) dir (.rows c) (cells_back c)))
+        (selected_with at (.back t b))))))
 
-; How far back the view is after a page of rows down, dir 1, or up, -1,
-; from back: within 0 and most.
-(def paged_back ((back int) (dir int) (rows int) (most int)) int
-  (max 0 (min most (sub back (mul dir rows)))))
-
-; The terminal's area in the window as it is.
-(def vt_area ((v Vt)) Rect
-  (let w (.win v) (term_area (ui_win_w w) (ui_win_h w) (tabs_count (.tabs v)))))
+; at with the selected tab's view scrolled so that row first of all its
+; rows shows first, as its scroller asks (NAME.scrollto.N).
+(def scrolled_to ((at VtAt) (first int)) VtAt
+  (match (tabs_selected (.tabs (.vt at)))
+    ((None) at)
+    ((Some t)
+      (let b (scrolled_back first (cells_back (.cells t)))
+        (selected_with at (.back t b))))))
 
 ; What an action set off does: the close button closes the window and
-; every tab; the new-tab button opens a tab; a tab clicked is selected;
-; a tab's close button ends its shell, which closes it.
-(def acted ((v Vt) (action (list int))) Step
-  (if (eq action (ui_close_action)) (Stop (closed_all v) 0)
-      (eq action "tab.new") (Go (refreshed (tab_opened v)))
-      (let sel (ui_select_key "tabs" action)
-        (if (not (is_empty sel))
-            (Go (refreshed (.tabs v (tabs_select (.tabs v) (int_prefix sel 0)))))
-            (let k (ui_tab_close_key "tabs" action)
-              (if (not (is_empty k))
-                  (Go (refreshed (tab_ended v (int_prefix k 0))))
-                  (Go (refreshed v))))))))
+; every tab; the new-tab button opens a tab; the terminal's wheel or
+; scrollbar scrolls it; a tab clicked is selected; a tab's close button
+; ends its shell, which closes it. Anything else, as the pointer moving,
+; refreshes the window.
+(def acted ((at VtAt) (action (list int))) Step
+  (let (sel (ui_select_key "tabs" action)
+        k (ui_tab_close_key "tabs" action)
+        to (append (term_name) ".scrollto."))
+    (if (eq action (ui_close_action)) (Stop (closed_all at) 0)
+        (eq action "tab.new") (Go (refreshed (tab_opened at)))
+        (starts_with action to) (Go (refreshed (scrolled_to at (int_prefix (drop_n action (length to)) 0))))
+        (not (is_empty sel)) (Go (refreshed (at_tabs at (tabs_select (.tabs (.vt at)) (int_prefix sel 0)))))
+        (not (is_empty k)) (Go (refreshed (tab_ended at (int_prefix k 0))))
+        (Go (refreshed at)))))
 
-; v with a tab opened, and selected: a port for it, a closed tab's or a
-; new one, its name registered there and its shell started; or v as it
+; at with a tab opened, and selected: a port for it, a closed tab's or a
+; new one, its name registered there and its shell started; or at as it
 ; was, the port kept, if either cannot be, or the app's windows have
 ; tabs_most tabs already, saying why. The app then waits on the tab's
 ; port too (vts_waiting).
-(def tab_opened ((v Vt)) Vt
-  (match v
-    ((Vt w ts st title sh l)
-      (match l
-        ((Lent free others)
-          (if (not (tabs_room (tabs_count ts) others))
-                  (said v (append "cannot open a tab: Terminal's windows have at most " (append (digits (tabs_most)) " tabs")))
-              (is_empty free) (tab_on v (port_new))
-              (tab_on (Vt w ts st title sh (Lent (tail free) others)) (port_drained (head free)))))))))
+(def tab_opened ((at VtAt)) VtAt
+  (let free (.free at)
+    (if (not (tabs_room (tabs_count (.tabs (.vt at))) (.others at)))
+            (said at (append "cannot open a tab: Terminal's windows have at most " (append (digits (tabs_most)) " tabs")))
+        (is_empty free) (tab_on at (port_new))
+        (tab_on (.free at (tail free)) (port_drained (head free))))))
 
-; v with a tab on port, its name the first vtN free registered there.
-(def tab_on ((v Vt) (port int)) Vt
+; at with a tab on port, its name the first vtN free registered there.
+(def tab_on ((at VtAt) (port int)) VtAt
   (match (vt_register port 1)
-    ((VtUnnamed why) (said (vt_freed v port) why))
-    ((VtNamed name) (tab_named v port name))))
+    ((VtUnnamed why) (said (freed at port) why))
+    ((VtNamed name) (tab_named at port name))))
 
-; v with a tab on port, named name: its shell started, sh NAME, and the
-; tab added and selected; or, if the shell cannot start, its name let
-; go and its port kept, saying why.
-(def tab_named ((v Vt) (port int) (name (list int))) Vt
-  (match (shell_started name (.port (.win v)))
-    ((ShellRunning pid) (.tabs v (tabs_add (.tabs v) (tab_started (tab_new port 80 24) name pid))))
-    ((NoShell why) (let u (name_let_go name) (said (vt_freed v port) why)))))
+; at with a tab on port, named name: its shell started, sh NAME, and the
+; tab added and selected, titled with the folder the shell starts in,
+; vt's own, which it tells again at its first prompt; or, if the shell
+; cannot start, its name let go and its port kept, saying why.
+(def tab_named ((at VtAt) (port int) (name (list int))) VtAt
+  (match (shell_started name (.port (.win at)))
+    ((ShellRunning pid) (at_tabs at (tabs_add (.tabs (.vt at)) (.title (tab_started (tab_new port 80 24) name pid) (getcwd)))))
+    ((NoShell why) (let u (name_let_go name) (said (freed at port) why)))))
 
-; v with port kept for a later tab, if it is a port.
-(def vt_freed ((v Vt) (port int)) Vt
-  (match v
-    ((Vt w ts st title sh l)
-      (if (gt port 0) (Vt w ts st title sh (Lent (cons port (.free l)) (.others l))) v))))
+; at with port kept for a later tab, if it is a port.
+(def freed ((at VtAt) (port int)) VtAt
+  (if (gt port 0) (.free at (cons port (.free at))) at))
 
-; v, why said on standard error.
-(def said ((v Vt) (why (list int))) Vt
-  (let s (said_why why) v))
+; at, why said on standard error.
+(def said ((at VtAt) (why (list int))) VtAt
+  (let s (note_as "vt" why) at))
 
 ; The tab on port ended: its shell killed, and the tab closed once its
 ; exit is told.
-(def tab_ended ((v Vt) (port int)) Vt
-  (match (tabs_by_port (.tabs v) port)
-    ((None) v)
-    ((Some t) (let k (killed (cons (.shell t) (nil int))) v))))
+(def tab_ended ((at VtAt) (port int)) VtAt
+  (match (tabs_by_port (.tabs (.vt at)) port)
+    ((None) at)
+    ((Some t) (let k (killed (cons (.shell t) (nil int))) at))))
 
-; v with every tab's shell ended and the tab gone, its name let go and
+; at with every tab's shell ended and the tab gone, its name let go and
 ; its port kept for the app's next tabs: the window closing, which the
 ; app does (vts_stepped). The shells' exits, told later, find no tab.
-(def closed_all ((v Vt)) Vt
-  (let k (killed (tabs_pids (.tabs v)))
-    (match (tabs_by_port (.tabs v) (tabs_first_port (.tabs v)))
-      ((None) v)
+(def closed_all ((at VtAt)) VtAt
+  (let (ts (.tabs (.vt at))
+        k (killed (tabs_pids ts)))
+    (match (tabs_by_port ts (tabs_first_port ts))
+      ((None) at)
       ((Some t)
         (let u (name_let_go (.name t))
-          (closed_all (vt_freed (.tabs v (tabs_drop (.tabs v) (.port t))) (.port t))))))))
+          (closed_all (freed (at_tabs at (tabs_drop ts (.port t))) (.port t))))))))
 
 ; Each of pids killed.
 (def killed ((pids (list int))) int
@@ -714,32 +702,30 @@
 ; A process watched, pid, exited with status: if it is a tab's shell, the
 ; tab closes. With no tab left the window closes and vt ends with the
 ; last shell's status.
-(def exited ((v Vt) (pid int) (status int)) Step
-  (match (tabs_by_shell (.tabs v) pid)
-    ((Some t) (tab_closed v t status))
-    ((None) (Go v))))
+(def exited ((at VtAt) (pid int) (status int)) Step
+  (match (tabs_by_shell (.tabs (.vt at)) pid)
+    ((Some t) (tab_closed at t status))
+    ((None) (Go at))))
 
 ; The tab t closed, its shell having exited with status: its name let
 ; go, its port kept for the next tab and no longer waited on; the window
 ; closing with the last, which the app does (vts_stepped).
-(def tab_closed ((v Vt) (t Tab) (status int)) Step
+(def tab_closed ((at VtAt) (t Tab) (status int)) Step
   (let u (name_let_go (.name t))
-    (match v
-      ((Vt w ts st title sh l)
-        (let v2 (vt_freed (Vt w (tabs_drop ts (.port t)) status title sh l) (.port t))
-          (if (eq (tabs_count (.tabs v2)) 0)
-              (Stop v2 status)
-              (Go (refreshed v2))))))))
+    (match at
+      ((VtAt w v free others)
+        (let (ts (tabs_drop (.tabs v) (.port t))
+              at2 (freed (VtAt w (.st (.tabs v ts) status) free others) (.port t)))
+          (if (eq (tabs_count ts) 0) (Stop at2 status) (Go (refreshed at2))))))))
 
 ; What came on the tab t's port, payload: its requests as a terminal
-; takes them.
-(def from_tab ((v Vt) (t Tab) (payload (list int))) Vt
-  (match t
-    ((Tab r sh name term cl back con)
-      (match (tty_request con payload)
-        ((TtyAsk con2) (.tabs v (tabs_put (.tabs v) (Tab r sh name term cl back (deliver con2)))))
-        ((TtyWrite bs) (output v t bs))
-        ((TtyAnswer to body) (let s (port_send to body) v))))))
+; takes them, a title its shell told shown at once if it is another.
+(def from_tab ((at VtAt) (t Tab) (payload (list int))) VtAt
+  (match (tty_request (.con t) payload)
+    ((TtyAsk con2) (selected_with at (.con t (deliver con2))))
+    ((TtyWrite bs) (output at t bs))
+    ((TtyAnswer to body) (let s (port_tell to body) at))
+    ((TtyTitle title) (if (eq title (.title t)) at (refreshed (selected_with at (.title t title)))))))
 
 ; What starting the shell came to: its pid, watched; or why not.
 (data Shell (ShellRunning int) (NoShell (list int)))
@@ -765,120 +751,137 @@
 (def cannot_shell ((s Spawn)) (list int)
   (append "cannot start /bin/sh: " (spawn_why s)))
 
+; Whether k types a character the line editing takes: pressed, a
+; character, and not Esc, which the editing would take for the start of
+; an escape sequence, dropping the key after it.
+(def key_typed ((k KeyEvent)) bool
+  (let ch (.ch k) (not (or (eq (.value k) 0) (or (eq ch 0) (eq ch 27))))))
+
 ; A key's character fed to the selected tab's line editing, its echo
 ; shown, and any line finished delivered; its view first brought back to
-; the bottom, if it is not there. Esc is not fed: the editing would take
-; it for the start of an escape sequence, and drop the key after it.
-(def keyed ((v Vt) (k KeyEvent)) Vt
-  (match k
-    ((KeyEvent code value ch mods)
-      (if (or (eq value 0) (or (eq ch 0) (eq ch 27)))
-          v
-          (match (tabs_selected (.tabs v))
-            ((None) v)
-            ((Some t)
-              (let v2 (if (eq (.back t) 0) v (refreshed (.tabs v (tabs_put (.tabs v) (.back t 0)))))
-                (match (tabs_selected (.tabs v2))
-                  ((None) v2)
-                  ((Some t2)
-                    (match t2
-                      ((Tab r sh name term cl back con)
-                        (match (feed con ch)
-                          ((Fed con2 e) (output v2 (Tab r sh name term cl back (deliver con2)) e))))))))))))))
+; the bottom, if it is not there.
+(def keyed ((at VtAt) (k KeyEvent)) VtAt
+  (if (not (key_typed k))
+      at
+      (match (tabs_selected (.tabs (.vt at)))
+        ((None) at)
+        ((Some t) (fed (if (eq (.back t) 0) at (refreshed (selected_with at (.back t 0)))) (.ch k))))))
 
-; v with the selected tab's view dy steps of the wheel further down, up
-; below 0.
-(def wheeled ((v Vt) (dy int)) Vt
-  (match (tabs_selected (.tabs v))
-    ((None) v)
-    ((Some t) (.tabs v (tabs_put (.tabs v) (.back t (wheeled_back (.back t) dy (cells_back (.cells t)))))))))
+; The character ch fed to the selected tab of at, its echo written.
+(def fed ((at VtAt) (ch int)) VtAt
+  (match (tabs_selected (.tabs (.vt at)))
+    ((None) at)
+    ((Some t)
+      (match (feed (.con t) ch)
+        ((Fed con2 e) (output at (.con t (deliver con2)) e))))))
 
-; v with bs written at the tab t: kept in its cells, the cursor moved,
+; at with bs written at the tab t: kept in its cells, the cursor moved,
 ; and, if the tab is shown with its view at the bottom, drawn and the
 ; window told. Otherwise nothing is drawn, and a view that is back stays
 ; on the rows it shows.
-(def output ((v Vt) (t Tab) (bs (list int))) Vt
+(def output ((at VtAt) (t Tab) (bs (list int))) VtAt
+  (let (shown (tabs_is_selected (.tabs (.vt at)) t)
+        back (.back t)
+        before (.term t))
+    (match (tab_written t bs)
+      ((Written t2 k)
+        (let at2 (selected_with at t2)
+          (if (and (eq back 0) shown) (output_shown at2 before t2 k) at2))))))
+
+; A tab after bytes written at it, and how many rows they scrolled.
+(data Written (Written (tab Tab) (k int)))
+
+; The tab t with bs written at it: kept in its cells, the cursor moved,
+; and a view that is back kept on the rows it shows (kept_back).
+(def tab_written ((t Tab) (bs (list int))) Written
   (match t
-    ((Tab r sh name term cl back con)
+    ((Tab port shell name title term cl back con)
       (match (render term bs)
         ((Rendered term2 ops)
           (let (cl2 (cells_after cl ops)
-                k (scrolls ops)
-                t2 (Tab r sh name term2 cl2 (kept_back back k (cells_back cl2)) con)
-                v2 (.tabs v (tabs_put (.tabs v) t2)))
-            (if (and (eq back 0) (tabs_is_selected (.tabs v) t))
-                (output_shown v2 term t2 k)
-                v2)))))))
+                k (scrolls ops))
+            (Written (Tab port shell name title term2 cl2 (kept_back back k (cells_back cl2)) con) k)))))))
 
 ; The tab t, shown, with output that moved its cursor from before and
 ; scrolled k rows: that due, and the window refreshed, which draws it
 ; once the window may.
-(def output_shown ((v Vt) (before Term) (t Tab) (k int)) Vt
-  (let (sh (.sh v)
+(def output_shown ((at VtAt) (before Term) (t Tab) (k int)) VtAt
+  (let (sh (.sh (.vt at))
         d (due_after (.due sh) (.row before) (.row (.term t)) k))
-    (refreshed (.sh v (.due sh d)))))
+    (refreshed (at_shown at (.due sh d)))))
 
-; v with its window up to date with its tabs: every tab as many cells as
-; fit the terminal's area; the selected tab's view drawn, whole if it is
-; not what was last drawn whole there, else what output left due; the
+; at with its window up to date with its tabs: every tab as many cells
+; as fit the terminal's area; the selected tab's view drawn, whole if it
+; is not what was last drawn whole there, else what output left due; the
 ; title told, if it changed; and the window presented, its header bar and
 ; tab bar painted where they changed. While the window waits for its
 ; frame nothing is drawn, and what is due is kept for the next. If the
 ; window is not the size it was after that, or lost what was drawn, as
 ; when wm would not have a resize, all of it again, once.
-(def refreshed ((v Vt)) Vt (vt_refreshed v true))
+(def refreshed ((at VtAt)) VtAt (vt_refreshed at true))
 
 ; refreshed, all of it again if again and the window changed so.
-(def vt_refreshed ((v Vt) (again bool)) Vt
-  (match v
-    ((Vt w ts st title shown free)
-      (let (a (term_area (ui_win_w w) (ui_win_h w) (tabs_count ts))
-            ts2 (tabs_resized ts (area_cols a) (area_rows a))
+(def vt_refreshed ((at VtAt) (again bool)) VtAt
+  (match at
+    ((VtAt w v free others)
+      (let (a (term_area (ui_win_w w) (ui_win_h w) (tabs_count (.tabs v)))
+            ts2 (tabs_resized (.tabs v) (area_cols a) (area_rows a))
             title2 (tabs_title ts2)
-            t (if (eq title2 title) 0 (ui_win_titled w title2))
+            told (if (eq title2 (.title v)) 0 (ui_win_titled w title2))
             lost (ui_win_lost w)
             ww (ui_win_w w)
             wh (ui_win_h w)
             view (vt_view ts2 title2))
-        (match (vt_drawn (Vt w ts2 st title2 shown free) a)
-          ((Vt dw dts dst dtitle dshown dfree)
+        (match (vt_drawn (VtAt w (.title (.tabs v ts2) title2) free others) a)
+          ((VtAt dw dv dfree dothers)
             (let (w2 (ui_present dw view)
                   same (and (eq (ui_win_lost w2) lost) (and (eq (ui_win_w w2) ww) (eq (ui_win_h w2) wh)))
-                  v2 (Vt w2 dts dst dtitle dshown dfree))
-              (if (or same (not again)) v2 (vt_refreshed v2 false)))))))))
+                  at2 (VtAt w2 dv dfree dothers))
+              (if (or same (not again)) at2 (vt_refreshed at2 false)))))))))
 
-; v with the selected tab's view drawn in the area a where the window
+; at with the selected tab's view drawn in the area a where the window
 ; draws now (ui_win_drawing), and the window told what was drawn: all of
-; it if what was last drawn whole there is not what is to be shown, else
-; what output left due; nothing if neither, or the window waits.
-(def vt_drawn ((v Vt) (a Rect)) Vt
-  (match (tabs_selected (.tabs v))
-    ((None) v)
+; it if what was last drawn whole there is not what is to be shown, or
+; the scrollbar shows over rows output changed; else what output left
+; due; nothing if neither, or the window waits.
+(def vt_drawn ((at VtAt) (a Rect)) VtAt
+  (match (tabs_selected (.tabs (.vt at)))
+    ((None) at)
     ((Some t)
-      (let (w (.win v)
-            sh (.sh v)
-            want (View a (ui_win_lost w) (.port t) (.back t))
-            whole (not (eq want (.view sh))))
-        (if (and (not whole) (due_empty (.due sh)))
-            v
+      (let (w (.win at)
+            st (.state w)
+            sh (.sh (.vt at))
+            d (.due sh)
+            bar (bar_shown t st)
+            want (View a (ui_win_lost w) (.port t) (.back t) bar)
+            whole (or (not (eq want (.view sh))) (and (gt bar 0) (not (due_empty d)))))
+        (if (and (not whole) (due_empty d))
+            at
             (match (ui_win_drawing w (cons a (nil Rect)))
-              ((UiDrawLater w2) (.win v w2))
+              ((UiDrawLater w2) (at_win at w2))
               ((UiDrawOn w2 c)
                 (if whole
-                    (let cv (view_drawn c (.face w2) a t)
-                      (.sh (.win v (ui_win_drew w2 (cons a (nil Rect)))) (Shown want (due_none))))
-                    (let (d (.due sh)
-                          cv (due_drawn c (.face w2) a t d))
-                      (.sh (.win v (ui_win_drew w2 (cons (due_damage a t d) (nil Rect)))) (Shown (.view sh) (due_none))))))))))))
+                    (let cv (view_drawn c (.face w2) a t st)
+                      (at_shown (at_win at (ui_win_drew w2 (cons a (nil Rect)))) (Shown want (due_none))))
+                    (let cv (due_drawn c (.face w2) a t st d)
+                      (at_shown (at_win at (ui_win_drew w2 (cons (due_damage a t d) (nil Rect)))) (Shown (.view sh) (due_none))))))))))))
 
 ; What the window shows: the header bar, its title and the button that
-; opens a tab; the tab bar, with two tabs or more; and the terminal.
+; opens a tab; the tab bar, with two tabs or more; and the terminal, a
+; drawing area scrolled by rows, its scroller the selected tab's view.
 (def vt_view ((ts Tabs) (title (list int))) UiWidget
   (let (header (UiCsdBar (cons (UiButton "tab.new" "tab-new" "" (UiBtnFlat) true) (nil UiWidget))
                          (UiLabel title (UiHeading) (UiCenter)) (nil UiWidget) true)
-        term (UiExpand (UiDrawingArea "term" 0 0)))
+        term (UiExpand (term_widget (tabs_selected ts))))
     (UiBox (UiV) 0
       (cons header
             (if (ge (tabs_count ts) 2)
                 (cons (UiTabBar "tabs" (tabs_shown ts) (tabs_selected_key ts)) (cons term (nil UiWidget)))
                 (cons term (nil UiWidget)))))))
+
+; The terminal's drawing area, scrolled as the tab t's view is: all its
+; rows, the first it shows, a cell's height each.
+(def term_widget ((t (Option Tab))) UiWidget
+  (match t
+    ((None) (UiDrawingRows (term_name) 0 0 0 0 0 (cell_h)))
+    ((Some tab) (UiDrawingRows (term_name) 0 0 (tab_rows tab) (tab_first tab) (.rows (.cells tab)) (cell_h)))))

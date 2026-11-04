@@ -1,40 +1,49 @@
 ; tabs.l0 -- a Terminal's tabs, each a terminal of its own: its name, its
-; shell, its cells and its line editing, and which tab is selected. Each
-; tab has a port of the window's vt, on which vt registers the tab's
-; name, so vt knows a tab by the port a message came on (a set of ports,
-; vt.l0's serve), and lets the name go as the tab closes.
+; shell, the title its shell tells, its cells and its line editing, and
+; which tab is selected. Each tab has a port of the window's vt, on which
+; vt registers the tab's name, so vt knows a tab by the port a message
+; came on (the toolkit's loop, vt.l0's serve), and lets the name go as
+; the tab closes.
 
 ; A tab: its port; its shell's pid, 0 until it starts; its name, ""
-; until it is registered; the cursor; the cells; how many rows above the
+; until it is registered; the title its shell last told (tty.l0's t),
+; "" until it tells one; the cursor; the cells; how many rows above the
 ; screen its view is, 0 at the bottom; and its line editing.
-(data Tab (Tab (port int) (shell int) (name (list int)) (term Term) (cells Cells) (back int) (con Console)))
+(data Tab (Tab (port int) (shell int) (name (list int)) (title (list int)) (term Term) (cells Cells) (back int) (con Console)))
 
 ; A tab on port, unnamed and with no shell yet, its cells cols by rows
 ; and blank.
 (def tab_new ((port int) (cols int) (rows int)) Tab
-  (Tab port 0 "" (Term 0 0 cols rows) (cells_new cols rows) 0 (console_new)))
+  (Tab port 0 "" "" (Term 0 0 cols rows) (cells_new cols rows) 0 (console_new)))
 
-; What a tab is called, on the tab bar and as the window's title: its
-; name, or Terminal until it has one.
-(def tab_title ((t Tab)) (list int) (let n (.name t) (if (is_empty n) "Terminal" n)))
+; What a tab is called, on the tab bar and as the window's title, as
+; GNOME Console names it from what its shell says: the title its shell
+; told, its folder or the program it runs; else its name; else Terminal.
+(def tab_title ((t Tab)) (list int)
+  (let (title (.title t) name (.name t))
+    (if (not (is_empty title)) title
+        (not (is_empty name)) name
+        "Terminal")))
 
 ; t named name, its shell pid.
 (def tab_started ((t Tab) (name (list int)) (pid int)) Tab
-  (match t ((Tab r sh old term cl back con) (Tab r pid name term cl back con))))
+  (.name (.shell t pid) name))
+
+; The rows of t's view in all, those scrolled off and the screen's, and
+; the first it shows: the scroller's (widget.l0's UiDrawingRows).
+(def tab_rows ((t Tab)) int (add (cells_back (.cells t)) (.rows (.cells t))))
+(def tab_first ((t Tab)) int (sub (cells_back (.cells t)) (.back t)))
 
 ; t's cells and cursor wrapped again at cols by rows, as cells.l0's
 ; cells_rewrapped does, its view no further back than its cells now
 ; have rows scrolled off; as it was if it is that size already.
 (def tab_resized ((t Tab) (cols int) (rows int)) Tab
-  (match t
-    ((Tab r sh name term cl back con)
-      (match term
-        ((Term col row tc tr)
-          (if (and (eq tc cols) (eq tr rows))
-              t
-              (match (cells_rewrapped cl col row cols rows)
-                ((Rewrapped cl2 col2 row2)
-                  (Tab r sh name (Term col2 row2 cols rows) cl2 (min back (cells_back cl2)) con)))))))))
+  (let (term (.term t) back (.back t))
+    (if (and (eq (.cols term) cols) (eq (.rows term) rows))
+        t
+        (match (cells_rewrapped (.cells t) (.col term) (.row term) cols rows)
+          ((Rewrapped cl2 col2 row2)
+            (.back (.cells (.term t (Term col2 row2 cols rows)) cl2) (min back (cells_back cl2))))))))
 
 ; ------------------------------------------------------------------ tabs
 
@@ -45,23 +54,22 @@
 (def tabs_none () Tabs (Tabs (nil Tab) 0))
 
 ; How many there are.
-(def tabs_count ((ts Tabs)) int (match ts ((Tabs l sel) (length l))))
+(def tabs_count ((ts Tabs)) int (length (.l ts)))
 
 ; ts with t added after the others, and selected.
 (def tabs_add ((ts Tabs) (t Tab)) Tabs
-  (match ts ((Tabs l sel) (Tabs (append l (cons t (nil Tab))) (.port t)))))
+  (Tabs (append (.l ts) (cons t (nil Tab))) (.port t)))
 
 ; The tab on port, if one is.
-(def tabs_by_port ((ts Tabs) (port int)) (Option Tab)
-  (match ts ((Tabs l sel) (tab_where l port true))))
+(def tabs_by_port ((ts Tabs) (port int)) (Option Tab) (tab_where (.l ts) port true))
 
 ; The first tab's port, 0 if there is none.
 (def tabs_first_port ((ts Tabs)) int
-  (match ts ((Tabs l sel) (if (is_empty l) 0 (.port (head l))))))
+  (let l (.l ts) (if (is_empty l) 0 (.port (head l)))))
 
 ; The tab whose shell is pid, if one is.
 (def tabs_by_shell ((ts Tabs) (pid int)) (Option Tab)
-  (if (eq pid 0) ((None Tab)) (match ts ((Tabs l sel) (tab_where l pid false)))))
+  (if (eq pid 0) ((None Tab)) (tab_where (.l ts) pid false)))
 
 ; The first of l whose port, or if not by_port whose shell, is n.
 (def tab_where ((l (list Tab)) (n int) (by_port bool)) (Option Tab)
@@ -70,12 +78,10 @@
       (tab_where (tail l) n by_port)))
 
 ; The selected tab, if there is one.
-(def tabs_selected ((ts Tabs)) (Option Tab)
-  (match ts ((Tabs l sel) (tab_where l sel true))))
+(def tabs_selected ((ts Tabs)) (Option Tab) (tab_where (.l ts) (.sel ts) true))
 
 ; Whether t is the selected tab.
-(def tabs_is_selected ((ts Tabs) (t Tab)) bool
-  (match ts ((Tabs l sel) (eq sel (.port t)))))
+(def tabs_is_selected ((ts Tabs) (t Tab)) bool (eq (.sel ts) (.port t)))
 
 ; ts with the tab on port selected, if there is one.
 (def tabs_select ((ts Tabs) (port int)) Tabs
@@ -97,10 +103,8 @@
 ; or the one before it if it was the last, as GNOME Console selects when
 ; a tab closes.
 (def tabs_drop ((ts Tabs) (port int)) Tabs
-  (match ts
-    ((Tabs l sel)
-      (let next (if (eq sel port) (ui_key_after tab_port port l 0) sel)
-        (Tabs (ui_without tab_port port l) next)))))
+  (let (l (.l ts) sel (.sel ts))
+    (Tabs (ui_without tab_port port l) (if (eq sel port) (ui_key_after tab_port port l 0) sel))))
 
 ; A tab's port, its key.
 (def tab_port ((t Tab)) int (.port t))
@@ -119,20 +123,18 @@
 
 ; The tabs as the tab bar shows them: each its port as its key, and its
 ; title.
-(def tabs_shown ((ts Tabs)) (list UiTab)
-  (match ts ((Tabs l sel) (tabs_shown_onto l (nil UiTab)))))
+(def tabs_shown ((ts Tabs)) (list UiTab) (tabs_shown_onto (.l ts) (nil UiTab)))
 
 ; tabs_shown's loop, onto the reversed acc.
 (def tabs_shown_onto ((l (list Tab)) (acc (list UiTab))) (list UiTab)
   (if (is_empty l) (rev acc) (tabs_shown_onto (tail l) (cons (UiTab (digits (.port (head l))) (tab_title (head l))) acc))))
 
 ; The selected tab's key on the tab bar.
-(def tabs_selected_key ((ts Tabs)) (list int) (match ts ((Tabs l sel) (digits sel))))
+(def tabs_selected_key ((ts Tabs)) (list int) (digits (.sel ts)))
 
 ; Every tab's shell, those not yet started left out: the processes to
 ; end when the window closes.
-(def tabs_pids ((ts Tabs)) (list int)
-  (match ts ((Tabs l sel) (tab_shells_of l))))
+(def tabs_pids ((ts Tabs)) (list int) (tab_shells_of (.l ts)))
 
 ; Each of l's shells, but none that is 0.
 (def tab_shells_of ((l (list Tab))) (list int)
@@ -142,8 +144,7 @@
         (if (eq p 0) (tab_shells_of (tail l)) (cons p (tab_shells_of (tail l)))))))
 
 ; Every tab's port, in order: with the window's, what vt waits on.
-(def tabs_ports ((ts Tabs)) (list int)
-  (match ts ((Tabs l sel) (tab_ports_onto l (nil int)))))
+(def tabs_ports ((ts Tabs)) (list int) (tab_ports_onto (.l ts) (nil int)))
 
 ; tabs_ports's loop, onto the reversed acc.
 (def tab_ports_onto ((l (list Tab)) (acc (list int))) (list int)
