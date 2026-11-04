@@ -1,6 +1,6 @@
 # 0049: Talking to the agent from the desktop
 
-Track: Agent · Status: active · Needs: 0043 · Spec: agent.md, programs.md, boot.md, toolkit.md, testing.md
+Track: Agent · Status: done · Needs: 0043 · Spec: agent.md, programs.md, boot.md, toolkit.md, testing.md
 
 ## Why
 
@@ -47,11 +47,13 @@ client that comes and goes.
   the notices drawn as they stream, its asks replies in 0033's loop.
 - [x] Each tool a row that opens on its input and result, a failed one
   red, and Stop in Send's place while a turn runs.
-- [ ] Its screen test, against the stand-in.
+- [x] Its screen test, against the stand-in: `tests/agent.sh`, a turn
+  said at the console drawn in both panes, the conversation's bubble
+  and the Images pane's preview (0066).
 
 ## Spec changes
 
-- testing.md: its screen test.
+All moved into spec/.
 
 ## Log
 
@@ -73,3 +75,6 @@ client that comes and goes.
   dimmed "Ran ..." line for each run of tools, and the window grown to
   960 by 560 (0058, done in the same change with the agent's new tools
   and the prompts' sources). The screen test, step 5, draws both panes.
+- 2026-11-03: the conversation drawn as a phone's messages, its tools
+  only in the side pane, which toggles with Images (0066); step 5 done
+  with 0066's tests/agent.sh, and the goal.

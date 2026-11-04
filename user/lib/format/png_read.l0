@@ -1,0 +1,296 @@
+; png_read.l0 -- PNG images, read: the signature, IHDR, PLTE, tRNS and
+; every IDAT, inflated (inflate.l0) and unfiltered (None, Sub, Up,
+; Average, Paeth), as words 0xAARRGGBB, the toolkit's image words
+; (face.l0's UiCov), alpha not premultiplied. Eight bits a sample, color
+; types 0, 2, 3, 4 and 6, not interlaced; anything else is refused and
+; says why. Also an image scaled down to fit a box, by averaging. CRCs
+; are not checked. Pure: needs inflate.l0 and BASE's abi.l0.
+
+; Why an image could not be read.
+(data PngFault
+  (PngNotPng)                     ; no PNG signature, or no IHDR first
+  (PngShort)                      ; the file or its image data ends too soon
+  (PngUnsupported (list int))     ; a kind this does not read, in words
+  (PngTooBig)                     ; more pixels than png_read_max_pixels
+  (PngNoPalette)                  ; color type 3 with no PLTE
+  (PngBadFilter)                  ; a row's filter byte is not 0 to 4
+  (PngBadData InflateFault))      ; its zlib stream does not decode
+
+; What IHDR says: width and height in pixels, bits a sample, color type,
+; and interlace method.
+(data PngInfo (PngInfo (w int) (h int) (depth int) (color int) (interlace int)))
+
+; An image: w by h pixels, row by row from the top, each 0xAARRGGBB.
+(data PngImage (PngImage (w int) (h int) (px (array int))))
+
+; What a fault means, in words.
+(def png_read_why ((f PngFault)) (list int)
+  (match f
+    ((PngNotPng) "not a PNG")
+    ((PngShort) "the PNG ends too soon")
+    ((PngUnsupported why) (append "a PNG of " why))
+    ((PngTooBig) "too many pixels")
+    ((PngNoPalette) "a palette image with no palette")
+    ((PngBadFilter) "a row with an unknown filter")
+    ((PngBadData f) (append "bad image data: " (inflate_why f)))))
+
+; The most pixels an image may have: 2048 by 2048. Each costs a word of
+; the image and, while decoding, a word for each of its bytes.
+(def png_read_max_pixels () int 4194304)
+
+; The eight bytes every PNG starts with.
+(def pngr_signature () (list int)
+  (cons 137 (cons 80 (cons 78 (cons 71 (cons 13 (cons 10 (cons 26 (cons 10 (nil int))))))))))
+
+; The u32 at byte i of b, most significant byte first, as PNG writes
+; numbers; the caller has checked the bytes are there.
+(def pngr_be32 ((b bytes) (i int)) int
+  (bit_or (bit_or (bit_shl (bytes_get b i) 24) (bit_shl (bytes_get b (add i 1)) 16))
+          (bit_or (bit_shl (bytes_get b (add i 2)) 8) (bytes_get b (add i 3)))))
+
+; The header of the PNG b, read from its first 33 bytes without decoding
+; anything: its size and kind, whether or not png_read can read it.
+(def png_read_header ((b bytes)) (Result PngInfo PngFault)
+  (if (not (bytes_is_at b 0 (pngr_signature))) ((Err PngInfo PngFault) (PngNotPng))
+      (lt (bytes_len b) 33) ((Err PngInfo PngFault) (PngShort))
+      (not (and (eq (pngr_be32 b 8) 13) (bytes_is_at b 12 "IHDR"))) ((Err PngInfo PngFault) (PngNotPng))
+      ((Ok PngInfo PngFault)
+        (PngInfo (pngr_be32 b 16) (pngr_be32 b 20) (bytes_get b 24) (bytes_get b 25) (bytes_get b 28)))))
+
+; Why png_read cannot read an image of info, whose compression and
+; filter methods are cm and fm, or empty if it can.
+(def pngr_unsupported ((info PngInfo) (cm int) (fm int)) (list int)
+  (let (d (.depth info) c (.color info))
+    (if (not (eq d 8)) (append (digits d) "-bit samples")
+        (not (eq (.interlace info) 0)) "Adam7 interlacing"
+        (not (any_eq (digits c) (split_spaces "0 2 3 4 6"))) (append "color type " (digits c))
+        (not (and (eq cm 0) (eq fm 0))) "an unknown compression or filter method"
+        "")))
+
+; The samples a pixel of color type c has.
+(def pngr_channels ((c int)) int
+  (if (eq c 2) 3 (eq c 4) 2 (eq c 6) 4 1))
+
+; The chunks after IHDR that matter: PLTE's and tRNS's data, empty when
+; there is none, and every IDAT's, the last first.
+(data PngrChunks (PngrChunks (plte bytes) (trns bytes) (idat (list bytes))))
+
+; The PNG b decoded into its pixels.
+(def png_read ((b bytes)) (Result PngImage PngFault)
+  (match (png_read_header b)
+    ((Ok info)
+      (let (why (pngr_unsupported info (bytes_get b 26) (bytes_get b 27))
+            w (.w info)
+            h (.h info))
+        (if (not (is_empty why)) ((Err PngImage PngFault) (PngUnsupported why))
+            (or (or (lt w 1) (lt h 1)) (gt (mul w h) (png_read_max_pixels))) ((Err PngImage PngFault) (PngTooBig))
+            (let none (bytes_from_list (nil int))
+              (match (pngr_chunks b 33 (PngrChunks none none (nil bytes)))
+                ((Ok cs) (pngr_decode info cs))
+                ((Err f) ((Err PngImage PngFault) f)))))))
+    ((Err f) ((Err PngImage PngFault) f))))
+
+; The chunks of b from byte i to IEND, onto c.
+(def pngr_chunks ((b bytes) (i int) (c PngrChunks)) (Result PngrChunks PngFault)
+  (if (gt (add i 12) (bytes_len b))
+      ((Err PngrChunks PngFault) (PngShort))
+      (let (j (add i 8)
+            k (add j (pngr_be32 b i)))
+        (if (gt (add k 4) (bytes_len b)) ((Err PngrChunks PngFault) (PngShort))
+            (bytes_is_at b (add i 4) "IEND") ((Ok PngrChunks PngFault) c)
+            (bytes_is_at b (add i 4) "IDAT") (pngr_chunks b (add k 4) (.idat c (cons (bytes_slice b j k) (.idat c))))
+            (bytes_is_at b (add i 4) "PLTE") (pngr_chunks b (add k 4) (.plte c (bytes_slice b j k)))
+            (bytes_is_at b (add i 4) "tRNS") (pngr_chunks b (add k 4) (.trns c (bytes_slice b j k)))
+            (pngr_chunks b (add k 4) c)))))
+
+; The image info's chunks cs describe: the IDATs joined and inflated,
+; each row unfiltered, and the samples made pixels.
+(def pngr_decode ((info PngInfo) (cs PngrChunks)) (Result PngImage PngFault)
+  (let (w (.w info)
+        h (.h info)
+        color (.color info)
+        ch (pngr_channels color)
+        stride (mul w ch)
+        size (mul h (add stride 1)))
+    (if (and (eq color 3) (eq (bytes_len (.plte cs)) 0))
+        ((Err PngImage PngFault) (PngNoPalette))
+        (match (inflate_zlib (bytes_concat (rev (.idat cs))) 0 size)
+          ((Ok z)
+            (if (lt (.len z) size)
+                ((Err PngImage PngFault) (PngShort))
+                (match (pngr_unfilter (.out z) 0 h stride ch)
+                  ((Some a)
+                    ((Ok PngImage PngFault)
+                      (PngImage w h
+                                (pngr_pixels a (array_new (mul w h) 0) 0 (mul w h) 0 w 1 ch color
+                                             (pngr_palette (.plte cs) (.trns cs) 0 (array_new 256 4278190080))
+                                             (pngr_key color (.trns cs))))))
+                  ((None) ((Err PngImage PngFault) (PngBadFilter))))))
+          ((Err f) ((Err PngImage PngFault) (PngBadData f)))))))
+
+; ---------------------------------------------------------------- filters
+
+; Rows y on of h, each its filter byte and stride bytes of ch samples a
+; pixel, unfiltered in place; None at a filter byte past 4.
+(def pngr_unfilter ((a (array int)) (y int) (h int) (stride int) (ch int)) (Option (array int))
+  (if (ge y h)
+      (Some a)
+      (let (u (add stride 1)
+            r (add (mul y u) 1)
+            e (add r stride)
+            f (array_get a (sub r 1))
+            first (eq y 0))
+        (if (eq f 0) (pngr_unfilter a (add y 1) h stride ch)
+            (eq f 1) (pngr_unfilter (pngr_sub a (add r ch) e ch) (add y 1) h stride ch)
+            (eq f 2) (pngr_unfilter (if first a (pngr_up a r e u)) (add y 1) h stride ch)
+            (eq f 3) (pngr_unfilter (pngr_avg a r r e ch u first) (add y 1) h stride ch)
+            (eq f 4) (pngr_unfilter (if first (pngr_sub a (add r ch) e ch) (pngr_paeth a r r e ch u)) (add y 1) h stride ch)
+            ((None (array int)))))))
+
+; Sub, bytes i up to e: each plus the byte a pixel before it.
+(def pngr_sub ((a (array int)) (i int) (e int) (ch int)) (array int)
+  (if (ge i e)
+      a
+      (let v (bit_and (add (array_get a i) (array_get a (sub i ch))) 255)
+        (pngr_sub (array_set a i v) (add i 1) e ch))))
+
+; Up, bytes i up to e: each plus the byte above it, u before it.
+(def pngr_up ((a (array int)) (i int) (e int) (u int)) (array int)
+  (if (ge i e)
+      a
+      (let v (bit_and (add (array_get a i) (array_get a (sub i u))) 255)
+        (pngr_up (array_set a i v) (add i 1) e u))))
+
+; Average, bytes i up to e of the row from r: each plus the mean of the
+; byte a pixel before it and the one above it, each 0 if there is none.
+(def pngr_avg ((a (array int)) (i int) (r int) (e int) (ch int) (u int) (first bool)) (array int)
+  (if (ge i e)
+      a
+      (let (left (if (ge (sub i r) ch) (array_get a (sub i ch)) 0)
+            up (if first 0 (array_get a (sub i u)))
+            v (bit_and (add (array_get a i) (bit_shr (add left up) 1)) 255))
+        (pngr_avg (array_set a i v) (add i 1) r e ch u first))))
+
+; Paeth, bytes i up to e of a row from r below another: each plus
+; whichever of the byte before it, above it and above that is nearest
+; their sum less the third.
+(def pngr_paeth ((a (array int)) (i int) (r int) (e int) (ch int) (u int)) (array int)
+  (if (ge i e)
+      a
+      (let (has (ge (sub i r) ch)
+            left (if has (array_get a (sub i ch)) 0)
+            up (array_get a (sub i u))
+            corner (if has (array_get a (sub (sub i u) ch)) 0)
+            v (bit_and (add (array_get a i) (pngr_predict left up corner)) 255))
+        (pngr_paeth (array_set a i v) (add i 1) r e ch u))))
+
+; Paeth's predictor of left l, up u and corner c.
+(def pngr_predict ((l int) (u int) (c int)) int
+  (let (p (sub (add l u) c)
+        pl (pngr_abs (sub p l))
+        pu (pngr_abs (sub p u))
+        pc (pngr_abs (sub p c)))
+    (if (and (le pl pu) (le pl pc)) l (le pu pc) u c)))
+
+; v without its sign.
+(def pngr_abs ((v int)) int
+  (if (lt v 0) (sub 0 v) v))
+
+; ---------------------------------------------------------------- pixels
+
+; The palette's entries from k on as pixels, into pal: PLTE's colors,
+; each opaque unless tRNS gives its alpha; black past PLTE's.
+(def pngr_palette ((plte bytes) (trns bytes) (k int) (pal (array int))) (array int)
+  (if (or (ge k 256) (gt (mul 3 (add k 1)) (bytes_len plte)))
+      pal
+      (let (i (mul 3 k)
+            alpha (if (lt k (bytes_len trns)) (bytes_get trns k) 255)
+            v (bit_or (bit_or (bit_shl alpha 24) (bit_shl (bytes_get plte i) 16))
+                      (bit_or (bit_shl (bytes_get plte (add i 1)) 8) (bytes_get plte (add i 2)))))
+        (pngr_palette plte trns (add k 1) (array_set pal k v)))))
+
+; The color tRNS makes transparent in an image of color type 0 or 2, as
+; 0xRRGGBB, or -1 for none: the low byte of each 16-bit sample.
+(def pngr_key ((color int) (trns bytes)) int
+  (if (and (eq color 0) (ge (bytes_len trns) 2)) (mul (bytes_get trns 1) 65793)
+      (and (eq color 2) (ge (bytes_len trns) 6))
+        (bit_or (bit_or (bit_shl (bytes_get trns 1) 16) (bit_shl (bytes_get trns 3) 8)) (bytes_get trns 5))
+      -1))
+
+; Pixels i up to n into px, x the column in a row of w, from sample s of
+; a's unfiltered rows, ch samples a pixel of color type color.
+(def pngr_pixels ((a (array int)) (px (array int)) (i int) (n int) (x int) (w int) (s int) (ch int) (color int) (pal (array int)) (key int)) (array int)
+  (if (ge i n) px
+      (ge x w) (pngr_pixels a px i n 0 w (add s 1) ch color pal key)
+      (let v (pngr_pixel a s color pal key)
+        (pngr_pixels a (array_set px i v) (add i 1) n (add x 1) w (add s ch) ch color pal key))))
+
+; The pixel whose samples begin at a's s, of color type color.
+(def pngr_pixel ((a (array int)) (s int) (color int) (pal (array int)) (key int)) int
+  (if (eq color 3) (array_get pal (array_get a s))
+      (eq color 2)
+        (pngr_keyed (bit_or (bit_or (bit_shl (array_get a s) 16) (bit_shl (array_get a (add s 1)) 8)) (array_get a (add s 2))) key)
+      (eq color 6)
+        (bit_or (bit_or (bit_shl (array_get a (add s 3)) 24) (bit_shl (array_get a s) 16))
+                (bit_or (bit_shl (array_get a (add s 1)) 8) (array_get a (add s 2))))
+      (eq color 4) (bit_or (bit_shl (array_get a (add s 1)) 24) (mul (array_get a s) 65793))
+      (pngr_keyed (mul (array_get a s) 65793) key)))
+
+; The color rgb opaque, or transparent if it is key.
+(def pngr_keyed ((rgb int) (key int)) int
+  (if (eq rgb key) rgb (bit_or rgb 4278190080)))
+
+; ---------------------------------------------------------------- fitting
+
+; img scaled down to fit in bw by bh, its aspect kept, each pixel the
+; mean of the box of img's it covers, colors weighted by their alpha;
+; img itself if it fits already, or the box is empty.
+(def png_fit ((img PngImage) (bw int) (bh int)) PngImage
+  (let (w (.w img)
+        h (.h img))
+    (if (or (and (le w bw) (le h bh)) (or (lt bw 1) (lt bh 1)))
+        img
+        (let (tall (gt (mul h bw) (mul w bh))
+              w2 (if tall (max 1 (div (mul w bh) h)) bw)
+              h2 (if tall bh (max 1 (div (mul h bw) w))))
+          (PngImage w2 h2 (pngf_rows img w2 h2 (array_new (mul w2 h2) 0) 0 0))))))
+
+; The pixels from x2, y2 on of img scaled to w2 by h2, into out.
+(def pngf_rows ((img PngImage) (w2 int) (h2 int) (out (array int)) (x2 int) (y2 int)) (array int)
+  (if (ge y2 h2) out
+      (ge x2 w2) (pngf_rows img w2 h2 out 0 (add y2 1))
+      (let (w (.w img)
+            h (.h img)
+            x0 (div (mul x2 w) w2)
+            x1 (max (add x0 1) (div (mul (add x2 1) w) w2))
+            y0 (div (mul y2 h) h2)
+            y1 (max (add y0 1) (div (mul (add y2 1) h) h2))
+            v (pngf_box (.px img) w x0 x1 y1 x0 y0 (PngfSums 0 0 0 0 0)))
+        (pngf_rows img w2 h2 (array_set out (add (mul y2 w2) x2) v) (add x2 1) y2))))
+
+; A box's sums so far: alpha, red, green and blue each times its alpha,
+; and how many pixels.
+(data PngfSums (PngfSums (a int) (r int) (g int) (b int) (n int)))
+
+; The mean of px's pixels, rows w wide, in columns x0 up to x1 and rows
+; up to y1, from x, y on, after the sums t.
+(def pngf_box ((px (array int)) (w int) (x0 int) (x1 int) (y1 int) (x int) (y int) (t PngfSums)) int
+  (if (ge y y1) (pngf_mean t)
+      (ge x x1) (pngf_box px w x0 x1 y1 x0 (add y 1) t)
+      (let (p (array_get px (add (mul y w) x))
+            a (bit_and (bit_shr p 24) 255))
+        (pngf_box px w x0 x1 y1 (add x 1) y
+                  (PngfSums (add (.a t) a)
+                            (add (.r t) (mul a (bit_and (bit_shr p 16) 255)))
+                            (add (.g t) (mul a (bit_and (bit_shr p 8) 255)))
+                            (add (.b t) (mul a (bit_and p 255)))
+                            (add (.n t) 1))))))
+
+; The pixel the sums t average to: transparent black if none has alpha.
+(def pngf_mean ((t PngfSums)) int
+  (let (sa (.a t)
+        half (bit_shr (.a t) 1))
+    (if (eq sa 0)
+        0
+        (bit_or (bit_or (bit_shl (div (add sa (bit_shr (.n t) 1)) (.n t)) 24) (bit_shl (div (add (.r t) half) sa) 16))
+                (bit_or (bit_shl (div (add (.g t) half) sa) 8) (div (add (.b t) half) sa))))))

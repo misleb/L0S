@@ -80,6 +80,10 @@ worked example, made exactly this way.
 | a line at the bottom saying how many | `(ui_with_footer BODY TEXT)` | — | — | — |
 | a heading with buttons beside it | `(ui_heading_row TITLE BUTTONS)` | the buttons' | — | — |
 | a box to type in | `(UiEntry "new" TEXT PLACEHOLDER (ui_entry_w N))`, N characters wide | `new.edit` keys, `new.activate` Enter, `new.place.N` | `UiEntryText` | `(.entry s (ui_entry_update "new" (.entry s) action ev))`; focus it in the step |
+| a box to write a message in, that grows | `(UiTextArea "say" TEXT PLACEHOLDER 200 MOST)` in a `UiExpand`, in a column (it is as high as its rows only there) | as an entry's: `say.edit`, `say.activate` Enter, `say.place.N` | `UiEntryText` | as an entry's |
+| a picture, an image | `(UiKeyed (append "image." PATH) (UiPicture PIXELS))`, PIXELS a `UiCov` of `png_read`, `png_fit` to the room it is shown in | — | the pixels, decoded once | — |
+| a chat, messages | `UiLines` of `UiPara`s of kind `UiLineOutgoing` (theirs, at the end) and `UiLineIncoming` (to them, at the start) | `log.scrollto.N` | the messages | `ui_lines_first` |
+| two panes side by side, half each | `(UiBox (UiH) 0 (cons (UiExpand (UiShrinks A)) (cons (UiSeparator (UiV)) (cons (UiExpand (UiShrinks B)) ...))))` | — | — | — |
 | a list of things | `(UiList (UiListData "items" ROWS FIRST))`, rows `(ui_list_row KEY TITLE SUBTITLE)`, `(.start row W)`, `(.end row W)`, `(.icon row NAME)`, `(.actionable row false)`; in a `UiExpand` or a page to fill it | `items.select.KEY`, `items.scrollto.N` | the items, the first row | `(ui_select_key "items" action)`; `(ui_list_first first "items" action)` |
 | an item you can tick | `(UiCheck "task.K" DONE LABEL)`, at a row's start with label `""` | `task.K.toggle` | a `bool` | `(ui_toggled "task.K" done action)` |
 | an on/off setting | `(UiSwitch "wifi" ON)`, alone or at a row's end | `wifi.toggle` | a `bool` | `(ui_toggled "wifi" on action)` |

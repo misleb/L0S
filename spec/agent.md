@@ -70,7 +70,9 @@ The conversation is kept in the home's `.history/conversation.json`,
 part of the home's fixed part, as a JSON object: `began`, the clock's
 seconds at its first turn (0 with no clock); `said`, how many times the
 person has spoken in it; `usage`, the last answer's four counts, so
-that compaction goes on as it would have; and `messages`, its turns as
+that compaction goes on as it would have; `images`, the paths of the
+images shown the person in it, oldest first, its newest 64, which
+compaction keeps and a file without them reads as none; and `messages`, its turns as
 the Messages API's, without breakpoints (`conv_kept_bytes`). `agentd`
 writes it whole, as `conversation.json.new` renamed over the last, so a
 write cut short leaves the last whole, each time the conversation is
@@ -150,7 +152,7 @@ answer to its reply port:
 
 | Request | Answer |
 |---|---|
-| `open NPORT` | `ok`; then the conversation so far told to NPORT as its notices would have told it (`conv_replay`: the person's texts as `said`, from the source their turn's line names (`unknown` for a turn kept before there were sources), a summary compaction made as `compacted 0 0`, the model's texts, each tool's use and its result, named by the use it answers), then `opened busy` or `opened idle`; and its notices go to NPORT from then on, as to every port opened before it. A port gone before all that is told is not kept |
+| `open NPORT` | `ok`; then the conversation so far told to NPORT as its notices would have told it (`conv_replay`: the person's texts as `said`, from the source their turn's line names (`unknown` for a turn kept before there were sources), a summary compaction made as `compacted 0 0`, the model's texts, each tool's use and its result, named by the use it answers, then each image shown in it as `image`, oldest first), then `opened busy` or `opened idle`; and its notices go to NPORT from then on, as to every port opened before it. A port gone before all that is told is not kept |
 | `say [SOURCE]` a newline and the text | `ok`, the text told to every NPORT open as `said`, and the answer streamed to them; `error: busy` while a turn runs, whoever said it. SOURCE, one word, says where the text came from ([Where a prompt came from](#where-a-prompt-came-from)): `console` from `agent`, `app` from Agent; with none it is the sending program's name |
 | `stop` | `ok`: if a turn is running, a program it runs is ended, the answer's connection reset, and the turn done, `stopped`, each tool still awaited answered as failed |
 | `clear` | `ok`: the conversation begun anew, and kept so; `error: busy` while a turn runs |
@@ -170,6 +172,7 @@ newline and what it tells, as bytes:
 | `agent error` and a newline and why | what went wrong, before `done error` or `done rounds` |
 | `agent said SOURCE` and a newline and the text | what the person said, and where it came from: a turn begun, or, told on `open`, one that was |
 | `agent opened busy\|idle` | to the port that opened only: the conversation so far told, and whether a turn is running |
+| `agent image` and a newline and a path | an image to show the person, a PNG at the path |
 
 ### Where a prompt came from
 
@@ -212,6 +215,7 @@ typed.
 | `result` | `[ok]`, or `[failed: FIRST LINE]` of its text |
 | `compacted` | `[compacted]` |
 | `error` | `agent: WHY` |
+| `image` | `[image: PATH]` on a line of its own |
 | `done` | a newline, if the answer did not end with one |
 
 Its notices, its terminal's lines and Ctrl-C come to one port, told
@@ -221,7 +225,11 @@ place, so Ctrl-C while it answers sends `stop`, and while a line is
 typed drops it, as at the shell; the shell asks again at its next
 prompt. A line `/clear` clears the conversation and writes `[cleared]`.
 The input's end (Ctrl-D), or a line `/exit`, closes its port, the
-conversation kept, and exits 0; a blank line says nothing. With no `agentd`
+conversation kept, and exits 0; a blank line says nothing. Its ask for
+each line (`r`) waits for room while the terminal's queue is full, as
+it is while the UART still writes out an answer, giving up the CPU and
+sending again for up to 5 s (`sent_waiting`); a terminal gone, or full
+for longer, closes it as the input's end does. With no `agentd`
 registered within 15 s it says "the agent is not running (no
 /etc/agent/config?)" and fails.
 
@@ -233,16 +241,30 @@ launcher. It looks up `agent` as it opens, and opens the conversation
 with a port of its own for the notices (`ui_win_ports`), each request
 asked without waiting (`ui_win_ask`), its answer a reply; it says with
 the source `app`. What `agentd` tells on `open` and every notice after
-are drawn as they come, in two panes side by side, each of lines that
+are drawn as they come, in two panes side by side, each half the
+window whatever it holds (`UiShrinks`): the conversation, of lines that
 wrap and scroll ([toolkit.md](toolkit.md), `lines.l0`), the end kept in
-view until the person scrolls up: the conversation, and Tools, the
-tools' log, under its heading, "No tools have run yet." until one has.
+view until the person scrolls up, drawn as a phone's messages, in
+`lines.l0`'s bubbles, and showing nothing of the tools; and a pane of
+two, Tools and Images, a toggle each above them (`UiToggleGroup`
+`pane`), the one pressed shown, the other hidden, Tools at first.
+Tools is the tools' log, lines too, "No tools have run yet." until one
+has. Images shows the images `agent image` names, one at a time, the
+newest as it comes, over its file's name and which of how many it is,
+between buttons to the one before and after; "No Images" until one
+comes. Each is read from its file server a reply at a time (`fs_open_body`,
+`fs_read_body`, at most 8 MB), one at a time in the order they came,
+then decoded as idle work (`png_read`) and fitted to the 455 by 384 the
+pane gives it in the window as it opens (`png_fit`); until then it says
+"Reading the image...", and, if it cannot be, why: the file server's
+refusal, or that it is no PNG it reads. The same path again is read
+again, and moves to the newest.
 
 | What came | In the conversation | In Tools |
 |---|---|---|
-| `said` | a blank row, then "From SOURCE", dimmed, if SOURCE is neither `app` nor `console`, then the text in bold | a blank row, then `> ` and the text's first line, at most 48 bytes, dimmed |
-| `text` | joined onto the model's text before it, a paragraph a line, wrapped | |
-| `tool` | "Ran NAME, NAME...", dimmed, a line for each run of tools the text does not part | a row, dimmed, an arrow then its name and its input's first 60 bytes; a press opens it on "Input:" and its input, then "Running...", and once its result has come "Result:" or "Failed:" and its text; a press again closes it |
+| `said` | the text in an outgoing bubble, at the pane's end, on the accent | a blank row, then `> ` (`SOURCE> ` if SOURCE is neither `app` nor `console`) and the text's first line, at most 48 bytes, dimmed |
+| `text` | joined onto the model's text before it, in an incoming bubble at the pane's start, on a card, its lines rows, wrapped, without blank lines at its ends; text after a tool begins a bubble of its own | |
+| `tool` | nothing, but the next text is a bubble of its own | a row, dimmed, an arrow then its name and its input's first 60 bytes; a press opens it on "Input:" and its input, then "Running...", and once its result has come "Result:" or "Failed:" and its text; a press again closes it |
 | `progress` | | given to the newest run of its tool still waiting: open, it shows "Running:" and the latest line in place of "Running..." |
 | `result` | | given to the newest run of its tool still waiting; a failed one's row in red |
 | `compacted` | "The conversation was compacted.", dimmed | |
@@ -250,7 +272,8 @@ tools' log, under its heading, "No tools have run yet." until one has.
 | `done` | the turn over; "Stopped." or "The answer was cut off at its most tokens.", dimmed, for `stopped` and `max_tokens` | |
 | `opened` | whether a turn is running | |
 
-Along its foot, an entry ("Ask the agent") and Send, suggested, which
+Along its foot, a text area ("Ask the agent") that grows a row as what
+is typed wraps, up to six, and Send, suggested, which
 Enter presses too, sensitive while a turn is not running and the entry
 holds more than spaces; while one runs, whoever began it, Stop, red, in
 its place, which sends `stop`. A say refused, as `error: busy`, is
@@ -409,6 +432,14 @@ Places and sizes are the desktop's pixels, a window's its content's.
 | `clear_desktop` | none | `desktop size`, then `desktop restore 0 0 W H` | the wallpaper the compositor holds put back over all of the desktop |
 | `time` | none | the clock's `time` and `zone` | the date and time to the second in UTC and the weekday, the same in the clock's zone (US Pacific) with its offset, and the seconds since 1970 |
 
+`show_image` (`path`, a relative one from the home) shows the person a
+PNG, one of the model's own or one it found: a file whose first 8 bytes
+are a PNG's is told to every port open as `agent image` and its path,
+kept in the conversation (`image_shown`, as a build's previews are), and
+answered `shown PATH in the Agent app's Images pane`; anything else is
+refused, `PATH: not a PNG` or why it could not be read, and nothing
+shown.
+
 ### Running a program
 
 `run` and `sh` start the program with `spawn_path`, its current
@@ -444,7 +475,9 @@ app from what the prompt says, or, for a name built before, the same
 app changed, its session remembering it. The app is not part of L0S,
 and its source stays on the host, as does any change to L0S's
 libraries the app needed, made on a branch of its own there
-(`app/NAME`) for the person to merge or not. The session starts a new
+(`app/NAME`) for the person to merge or not, which each build first
+brings up to L0S's `main`, the session resolving any conflict before
+the app (network.md's `POST /build`). The session starts a new
 app from the toolkit's scaffold and looks at its scenes, painted on the
 host as the board would paint them, before it builds, so the progress
 the Tools pane shows names `l0s-app-new`, `l0s-app-preview` and the
@@ -454,7 +487,13 @@ PNGs it read, then `l0s-app-build`.
 model's answer before has ended on it, and the turn waits on the build
 as on a program: the events' `progress` lines are told to every port
 open as `agent progress build_app`, so the console and the Agent app
-show the session working; `done` is followed by `GET
+show the session working; each `preview`'s PNG, its base64 read in
+place (`format/base64.l0`), is written into the home as
+`previews/NAME/SCENE.png` (the directories made if need be) and told
+to every port open as `agent image` and its path, so the Agent app's
+Images pane shows each scene as the session paints it and the console
+prints `[image: PATH]`; a preview that cannot be written is said at the
+debug level and told nothing. `done` is followed by `GET
 /build/NAME/image`, whose program is written whole to `apps/NAME` in
 the home (the directory made if need be; not kept in the home's
 history, as the host makes it again) and marked a program, as `cp`
@@ -482,11 +521,21 @@ connection, and the proxy ends the session.
   ports while it is told; a client that does not read it holds it up
   for 2 s a notice.
 - Agent shows ASCII only, as the toolkit's faces hold, so other
-  characters of an answer are not drawn; its entry does not scroll
-  (toolkit.md's Limits), and it shows the whole conversation, wrapped
-  anew at each step. It has no way to clear the conversation, as the
-  console's `/clear` does, and a window does not hear of a clear
-  another client made until it opens again.
+  characters of an answer are not drawn; its text area past six rows
+  shows only those around the cursor (toolkit.md's Limits), and it
+  shows the whole conversation, wrapped anew at each step. It has no
+  way to clear the conversation, as the console's `/clear` does, and a
+  window does not hear of a clear another client made until it opens
+  again.
+- Images are PNGs only, and a path is all the conversation keeps of
+  one: an image removed or changed in the home after it was shown is
+  read as it is then, or says why it cannot be, when a window opens
+  later. The model sees none of an image it shows. A
+  preview is told up to half a second after it is written, when the
+  builder next looks. An image is decoded whole in one idle step, held
+  decoded at the pane's size in the app's heap, and kept for as long
+  as the window is open; a PNG Images cannot read (16-bit, interlaced,
+  more than 2048 by 2048) says why.
 - `agent restore` while `agentd` runs writes the backup's conversation
   under it, and `agentd`'s next write puts its own back: a restored
   conversation holds from `agentd`'s next start only.

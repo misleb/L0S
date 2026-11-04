@@ -71,19 +71,63 @@
 
 ; What an event of a build's stream says: the session's progress, the
 ; app built and its summary, the build failed and why, or nothing known.
-(data BuildEv (BuildProgress (list int)) (BuildDone (list int)) (BuildFailed (list int)) (BuildNone))
+(data BuildEv (BuildProgress (list int)) (BuildPreview (list int) bytes) (BuildDone (list int)) (BuildFailed (list int)) (BuildNone))
 
-; The event e as a BuildEv.
+; The event e as a BuildEv: a preview's data read in place, its scene's
+; name on its first line and its PNG in base64 after; any other's as
+; JSON.
 (def build_event ((e SseEvent)) BuildEv
   (let (kind (bytes_to_list (.name e))
         d (.is_data e))
-    (match (json_whole d 0 (bytes_len d))
-      ((Err why) (BuildNone))
-      ((Ok v)
-        (if (eq kind "progress") (BuildProgress (build_field v "text"))
-            (eq kind "done") (BuildDone (build_field v "summary"))
-            (eq kind "failed") (BuildFailed (build_field v "why"))
-            (BuildNone))))))
+    (if (eq kind "preview")
+        (build_preview_of d)
+        (match (json_whole d 0 (bytes_len d))
+          ((Err why) (BuildNone))
+          ((Ok v)
+            (if (eq kind "progress") (BuildProgress (build_field v "text"))
+                (eq kind "done") (BuildDone (build_field v "summary"))
+                (eq kind "failed") (BuildFailed (build_field v "why"))
+                (BuildNone)))))))
+
+; A preview event's data d: its scene and PNG, or nothing if the scene's
+; name is not one or the rest no base64.
+(def build_preview_of ((d bytes)) BuildEv
+  (let nl (build_line_end d 0)
+    (if (or (ge nl (bytes_len d)) (gt nl 32))
+        (BuildNone)
+        (let scene (bytes_to_list (bytes_slice d 0 nl))
+          (if (not (build_scene_ok scene))
+              (BuildNone)
+              (match (base64_decode d (add nl 1) (bytes_len d))
+                ((None) (BuildNone))
+                ((Some png) (BuildPreview scene png))))))))
+
+; The first newline in d from i on, or its end.
+(def build_line_end ((d bytes) (i int)) int
+  (if (ge i (bytes_len d)) i (eq (bytes_get d i) 10) i (build_line_end d (add i 1))))
+
+; Whether s may name a scene: as the builder's, lowercase letters,
+; digits, - and _, not - or _ first, 1 to 32 of them.
+(def build_scene_ok ((s (list int))) bool
+  (and (not (is_empty s))
+       (and (le (length s) 32)
+            (and (or (is_lower (head s)) (is_digit (head s))) (build_scene_rest (tail s))))))
+(def build_scene_rest ((cs (list int))) bool
+  (if (is_empty cs) true
+      (let c (head cs)
+        (and (or (is_lower c) (or (is_digit c) (or (eq c 45) (eq c 95)))) (build_scene_rest (tail cs))))))
+
+; Where the app name's previews go in home, and scene's.
+(def build_previews_dir ((home (list int)) (name (list int))) (list int) (append home (append "/previews/" name)))
+(def build_preview_path ((home (list int)) (name (list int)) (scene (list int))) (list int)
+  (append (build_previews_dir home name) (append "/" (append scene ".png"))))
+
+; The PNG png of the app name's scene written into home's previews, the
+; directories made first if need be: nothing, or why not.
+(def build_preview_written ((home (list int)) (name (list int)) (scene (list int)) (png bytes)) (list int)
+  (let (m1 (fs_mkdir (append home "/previews"))
+        m2 (fs_mkdir (build_previews_dir home name)))
+    (write_whole (build_preview_path home name scene) png)))
 
 ; The text of v's field name, or nothing.
 (def build_field ((v Json) (name (list int))) (list int)

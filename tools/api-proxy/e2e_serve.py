@@ -11,7 +11,8 @@ in build/e2e/NAME.serve; the usage file is build/e2e/NAME.usage.jsonl,
 and the agent's backup (/backup) build/e2e/NAME.backup, emptied first.
 With CASE/builder, the proxy builds apps too (/build), in
 build/e2e/NAME.apps, emptied first, by fake_claude.py, whose program is
-a copy of the file CASE/builder names, from the top of the project.
+a copy of the file CASE/builder names, from the top of the project,
+and which, if CASE/preview.png is there, paints it as the scene main.
 With CASE/release, the proxy serves it as its releases (/release,
 release.py). Runs until it is stopped. tests/e2e/ask's serve line runs it."""
 
@@ -51,6 +52,8 @@ async def run(port, case):
     if os.path.exists(os.path.join(case, "builder")):
         with open(os.path.join(case, "builder")) as f:
             os.environ["FAKE_CLAUDE_IMAGE"] = os.path.abspath(os.path.join(HERE, "..", "..", f.readline().strip()))
+        if os.path.exists(os.path.join(case, "preview.png")):
+            os.environ["FAKE_CLAUDE_PREVIEW"] = os.path.abspath(os.path.join(case, "preview.png"))
         apps = os.path.join(HERE, "..", "..", "build", "e2e", name + ".apps")
         shutil.rmtree(apps, ignore_errors=True)
         builder = builders.Builder(apps, cli=[sys.executable, os.path.join(HERE, "fake_claude.py")], repo=None)

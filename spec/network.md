@@ -425,13 +425,23 @@ without which it will not start. It:
   are not read there; NAME's first prompt starts its session, its
   session ID kept in the folder, and each later one resumes it. Beside
   the app's source is `l0s/`, a git worktree of L0S on the app's own
-  branch, `app/NAME`, made from L0S's `HEAD` at its first build (or the
+  branch, `app/NAME`, made from L0S's `main` at its first build (or the
   branch, if it is there): the session reads L0S there, and may change
   its libraries there in place when the app needs more than they have.
+  Before each build the builder merges `main` into `app/NAME`, hooks
+  skipped, said as a `progress` line (`main merged into app/NAME: N
+  commits`), so the app is built on L0S as it is now. A merge with
+  conflicts is left in progress and the session's prompt, before the
+  request, names each file in conflict, to resolve keeping both sides;
+  the build then fails while one of them still holds a conflict marker
+  (a line starting `<<<<<<< ` or `>>>>>>> `, or `=======`), and the
+  merge waits for the next build, which says so and names those still
+  marked. A merge that fails otherwise is undone and fails the build.
   After a build that made a program, what it changed there is committed
-  on `app/NAME` by the builder, hooks skipped, the change's files named
-  in the summary; it reaches L0S only if the person merges the branch,
-  by hand. The
+  on `app/NAME` by the builder, hooks skipped, with the merge if one is
+  in progress, the change's files named in the summary (with a merge,
+  every file the branch changes from `main`'s); it reaches L0S only if
+  the person merges the branch, by hand. The
   session is `claude -p`, its events read as stream-json, on
   `--builder-model` (`claude-opus-5-5`) at `--builder-effort`
   (`medium`), logged in as the host's Claude Code is: it is started
@@ -476,7 +486,14 @@ without which it will not start. It:
   only then change the library in its worktree; and to end with what
   the app does and which of L0S's files it changed. The
   answer is server-sent events: `progress` `{"text"}`, the session's
-  text and each tool it uses, a line each; then `done` `{"summary",
+  text and each tool it uses, a line each; `preview`, for each scene
+  `l0s-app-preview` writes into the app's `preview/SCENE.png` during
+  the build, found within half a second of its writing, even while
+  the command that painted it goes on (a preview then a build in one
+  command), and read again while it is not yet a whole PNG, its data not
+  JSON but two lines, the scene's name (lowercase letters, digits, `-`
+  and `_`, at most 32) and its PNG, recompressed at zlib's best, in
+  base64, 8 MB at most before it; then `done` `{"summary",
   "size"}`, once a program newer than any before is there and is an
   ELF, or `failed` `{"why"}`; a comment every 15 s the session says
   nothing; at most 30 minutes. `GET /build/NAME/image` is the program

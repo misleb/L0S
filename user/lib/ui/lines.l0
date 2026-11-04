@@ -6,18 +6,25 @@
 ; where those shown are. It shows the end, and keeps showing it as
 ; paragraphs come, until it is scrolled up from there.
 ;
-; A paragraph has a kind (plain, strong, dimmed, or an error's red), an
-; icon before its first row, or none, and an action, or none: each of
-; its rows sets that off, tinted while the pointer is over it, as a
-; disclosure row is. Its other actions are named from a prefix the
+; A paragraph has a kind (plain, strong, dimmed, an error's red, or a
+; chat's bubble), an icon before its first row, or none, and an action,
+; or none: each of its rows sets that off, tinted while the pointer is
+; over it, as a disclosure row is. A newline in its text begins a row.
+; A bubble is a message as GNOME's chat apps draw one: its rows, wrapped
+; to three quarters of the width, on a rounded ground as wide as its
+; widest, at the start for what was said to the person and at the end,
+; on the accent, for what they said; a blank row parts it from what is
+; next to it and from the top, and each of its rows paints its own part of the ground,
+; so it scrolls by rows as any paragraph. Its other actions are named from a prefix the
 ; program gives, as the grid's are: from window.l0 PREFIX.scrollto.N for
 ; row N to be the first shown, and its area is a scroller's,
 ; PREFIX.scroll. ui_lines_first makes the next first row from them. Its
 ; UiWidget constructor is widget.l0's UiLines.
 
 ; How a paragraph's text is drawn: in the text's color, the same in
-; bold, dimmed, or in the error's color.
-(data UiLineKind (UiLinePlain) (UiLineStrong) (UiLineDim) (UiLineBad))
+; bold, dimmed, or in the error's color; or in a bubble, at the start
+; for what was said to the person, at the end for what they said.
+(data UiLineKind (UiLinePlain) (UiLineStrong) (UiLineDim) (UiLineBad) (UiLineIncoming) (UiLineOutgoing))
 
 ; A paragraph: its text, its kind, the icon before its first row ("" for
 ; none), and the action its rows set off ("" for none).
@@ -28,9 +35,11 @@
 (data UiLinesData (UiLinesData (prefix (list int)) (paras (list UiPara)) (first int)))
 
 ; A row as laid out: its text, its paragraph's kind and action, the
-; icon it starts with ("" for none), and whether it is indented past
-; an icon its paragraph's first row has.
-(data UiLineRow (UiLineRow (text (list int)) (kind UiLineKind) (action (list int)) (icon (list int)) (indent bool)))
+; icon it starts with ("" for none), whether it is indented past an
+; icon its paragraph's first row has, whether it is its paragraph's
+; first row and its last, and, in a bubble, how wide its paragraph's
+; widest row is (0 for any other).
+(data UiLineRow (UiLineRow (text (list int)) (kind UiLineKind) (action (list int)) (icon (list int)) (indent bool) (first bool) (last bool) (span int)))
 
 ; ---------------------------------------------------------------- sizes
 
@@ -65,14 +74,44 @@
 
 ; The paragraphs ps as rows, wrapped to w, in order.
 (def ui_lines_rows ((ps (list UiPara)) (w int)) (list UiLineRow)
-  (rev (ui_paras_rows ps w (nil UiLineRow))))
+  (rev (ui_paras_rows ps w false (nil UiLineRow))))
 
-; ui_lines_rows' loop: each paragraph's rows onto acc, reversed.
-(def ui_paras_rows ((ps (list UiPara)) (w int) (acc (list UiLineRow))) (list UiLineRow)
+; ui_lines_rows' loop: each paragraph's rows onto acc, reversed, a
+; blank row before it if it or the one before, a bubble if was, is a
+; bubble; a bubble's rows wrapped to its share.
+(def ui_paras_rows ((ps (list UiPara)) (w int) (was bool) (acc (list UiLineRow))) (list UiLineRow)
   (if (is_empty ps)
       acc
-      (let p (head ps)
-        (ui_paras_rows (tail ps) w (ui_para_rows p (ui_wrapped (.text p) (ui_para_width p w) (.kind p)) true acc)))))
+      (let (p (head ps)
+            b (ui_line_bubble (.kind p))
+            gap (or b was)
+            ls (ui_wrapped (.text p) (if b (ui_bubble_text_w w) (ui_para_width p w)) (.kind p)))
+        (ui_paras_rows (tail ps) w b (ui_para_rows p ls (if b (ui_widest ls) 0) true (if gap (cons (ui_gap_row) acc) acc))))))
+
+; The blank row that parts a bubble from what is next to it.
+(def ui_gap_row () UiLineRow (UiLineRow "" (UiLinePlain) "" "" false true true 0))
+
+; Whether a kind is drawn in a bubble.
+(def ui_line_bubble ((k UiLineKind)) bool
+  (match k
+    ((UiLineIncoming) true) ((UiLineOutgoing) true)
+    ((UiLinePlain) false) ((UiLineStrong) false) ((UiLineDim) false) ((UiLineBad) false)))
+
+; Whether any of ps is a bubble.
+(def ui_lines_bubbled ((ps (list UiPara))) bool
+  (if (is_empty ps) false (ui_line_bubble (.kind (head ps))) true (ui_lines_bubbled (tail ps))))
+
+; How wide a bubble's text may be in lines w wide: its share, less its
+; sides.
+(def ui_bubble_text_w ((w int)) int
+  (max 1 (sub (div (mul w (ui_bubble_share)) 100) (mul 2 (ui_bubble_pad_x)))))
+
+; How wide the widest of lines ls is, in the text's face.
+(def ui_widest ((ls (list (list int)))) int (ui_widest_from ls 0))
+
+; ui_widest's loop, the widest so far m.
+(def ui_widest_from ((ls (list (list int))) (m int)) int
+  (if (is_empty ls) m (ui_widest_from (tail ls) (max m (ui_text_w (head ls) (ui_text_font) false 1)))))
 
 ; How wide a paragraph's text may be in w: less its icon's room if it
 ; has one.
@@ -80,25 +119,33 @@
   (max 1 (sub w (if (is_empty (.icon p)) 0 (ui_lines_icon_room)))))
 
 ; A paragraph's wrapped lines as rows onto acc, reversed: the first with
-; its icon, the rest indented past it.
-(def ui_para_rows ((p UiPara) (ls (list (list int))) (first bool) (acc (list UiLineRow))) (list UiLineRow)
+; its icon, the rest indented past it; each told span, its bubble's
+; width.
+(def ui_para_rows ((p UiPara) (ls (list (list int))) (span int) (first bool) (acc (list UiLineRow))) (list UiLineRow)
   (if (is_empty ls)
       acc
-      (ui_para_rows p (tail ls) false
-        (cons (UiLineRow (head ls) (.kind p) (.action p) (if first (.icon p) "") (and (not first) (not (is_empty (.icon p))))) acc))))
+      (ui_para_rows p (tail ls) span false
+        (cons (UiLineRow (head ls) (.kind p) (.action p) (if first (.icon p) "") (and (not first) (not (is_empty (.icon p)))) first (is_empty (tail ls)) span) acc))))
 
 ; Whether a kind is drawn bold.
 (def ui_line_bold ((k UiLineKind)) bool
-  (match k ((UiLineStrong) true) ((UiLinePlain) false) ((UiLineDim) false) ((UiLineBad) false)))
+  (match k
+    ((UiLineStrong) true)
+    ((UiLinePlain) false) ((UiLineDim) false) ((UiLineBad) false) ((UiLineIncoming) false) ((UiLineOutgoing) false)))
 
-; text wrapped into lines at most w wide, at its spaces, a word wider
-; than w cut where it no longer fits; a text of nothing one empty line.
+; text wrapped into lines at most w wide: each of its lines at its
+; spaces, a word wider than w cut where it no longer fits, and a line
+; of nothing, or a text of nothing, one empty line.
 (def ui_wrapped ((text (list int)) (w int) (k UiLineKind)) (list (list int))
-  (let (bold (ui_line_bold k)
-        ws (split_spaces text))
-    (if (is_empty ws)
-        (cons (nil int) (nil (list int)))
-        (rev (ui_wrap_words ws w bold (nil int) (nil (list int)))))))
+  (rev (ui_wrap_lines (split_on 10 text) w (ui_line_bold k) (nil (list int)))))
+
+; ui_wrapped's loop over the text's lines ls, each wrapped onto acc,
+; reversed.
+(def ui_wrap_lines ((ls (list (list int))) (w int) (bold bool) (acc (list (list int)))) (list (list int))
+  (if (is_empty ls)
+      acc
+      (let ws (split_spaces (head ls))
+        (ui_wrap_lines (tail ls) w bold (if (is_empty ws) (cons (nil int) acc) (ui_wrap_words ws w bold (nil int) acc))))))
 
 ; ui_wrapped's loop: the words ws onto the line so far, line, reversed,
 ; each line ended onto acc, reversed. A line with the next word is
@@ -119,12 +166,13 @@
 
 ; The lines in r: their ground; their area under the margin above,
 ; which the wheel scrolls, a row of text a step; the rows that fit from
-; the first shown; and the scrollbar if not all rows fit.
+; the first shown, room kept under them for a bubble's foot if there
+; are bubbles; and the scrollbar if not all rows fit.
 (def ui_lines_lay ((d UiLinesData) (r Rect) (st UiState) (acc (list UiNode))) (list UiNode)
   (let (gbg (ui_view_bg (.style st))
         rows (ui_lines_rows (.paras d) (max 1 (sub (.w r) (mul 2 (ui_lines_margin)))))
         n (length rows)
-        vis (ui_lines_visible (.h r))
+        vis (ui_lines_visible (sub (.h r) (if (ui_lines_bubbled (.paras d)) (ui_bubble_pad_y) 0)))
         f (ui_lines_shown_from (.first d) n vis)
         top (add (.y r) (ui_space_s))
         prefix (.prefix d)
@@ -142,7 +190,45 @@
   (if (is_empty rows)
       acc
       (ui_rows_lay (tail rows) x w (add y (ui_text_row_h)) st gbg
-                   (cons (ui_line_node (head rows) (Rect x y w (ui_text_row_h)) st gbg) acc))))
+                   (cons (ui_row_node (head rows) (Rect x y w (ui_text_row_h)) st gbg) acc))))
+
+; A row's node in rr: a bubble's, or a line's.
+(def ui_row_node ((row UiLineRow) (rr Rect) (st UiState) (gbg int)) UiNode
+  (if (ui_line_bubble (.kind row)) (ui_bubble_node row rr st gbg) (ui_line_node row rr st gbg)))
+
+; A bubble's row's node in rr: its part of the bubble's ground, at the
+; start or the end, as wide as the bubble's widest row and its sides,
+; reaching past rr by the bubble's room above its first row and below
+; its last; its text in from the bubble's side; and its action, if it
+; has one, as a target.
+(def ui_bubble_node ((row UiLineRow) (rr Rect) (st UiState) (gbg int)) UiNode
+  (let (s (.style st)
+        out (match (.kind row) ((UiLineOutgoing) true) ((UiLineIncoming) false) ((UiLinePlain) false) ((UiLineStrong) false) ((UiLineDim) false) ((UiLineBad) false))
+        bw (add (.span row) (mul 2 (ui_bubble_pad_x)))
+        bx (if out (sub (rect_x1 rr) (add (ui_lines_margin) bw)) (add (.x rr) (ui_lines_margin)))
+        y (.y rr)
+        y0 (if (.first row) (sub y (ui_bubble_pad_y)) y)
+        y1 (if (.last row) (add (rect_y1 rr) (ui_bubble_pad_y)) (rect_y1 rr))
+        bg (if out (ui_bubble_out_bg) (ui_bubble_in_bg s))
+        ink (if out (ui_bubble_out_fg) (ui_bubble_in_fg s))
+        cy (add y (div (sub (ui_text_row_h) (ui_char_h)) 2))
+        text (UiPText (Rect (add bx (ui_bubble_pad_x)) cy (.span row) (ui_char_h)) (.text row) (UiStart) ink (ui_text_font) false 1)
+        a (.action row))
+    (UiNode (Rect (.x rr) y0 (.w rr) (sub y1 y0))
+            (append (ui_bubble_ground bx bw y0 y1 (.first row) (.last row) bg gbg) (cons text (nil UiPaint)))
+            a (not (is_empty a)))))
+
+; A bubble's ground from y0 to y1, bx and bw across, in bg on gbg: the
+; whole rounded if it is its first row and last; else its first's top
+; corners or its last's bottom ones, a round as high as both corners
+; with a fill over its other half; else a fill.
+(def ui_bubble_ground ((bx int) (bw int) (y0 int) (y1 int) (first bool) (last bool) (bg int) (gbg int)) (list UiPaint)
+  (let (rad (ui_bubble_radius)
+        d (mul 2 (ui_bubble_radius)))
+    (if (and first last) (cons (UiPRound (Rect bx y0 bw (sub y1 y0)) rad bg gbg) (nil UiPaint))
+        first (cons (UiPRound (Rect bx y0 bw d) rad bg gbg) (cons (UiPFill (Rect bx (add y0 rad) bw (sub y1 (add y0 rad))) bg) (nil UiPaint)))
+        last (cons (UiPRound (Rect bx (sub y1 d) bw d) rad bg gbg) (cons (UiPFill (Rect bx y0 bw (sub (sub y1 rad) y0)) bg) (nil UiPaint)))
+        (cons (UiPFill (Rect bx y0 bw (sub y1 y0)) bg) (nil UiPaint)))))
 
 ; A row's node in rr: its text, from the margin, past an icon's room if
 ; it has an icon or is indented under one, in its kind's color; its
@@ -157,7 +243,8 @@
         tx (if (or (not (is_empty (.icon row))) (.indent row)) (add x0 (ui_lines_icon_room)) x0)
         ink (match (.kind row)
               ((UiLinePlain) (ui_fg s)) ((UiLineStrong) (ui_fg s))
-              ((UiLineDim) (ui_dim_fg s bg)) ((UiLineBad) (ui_error)))
+              ((UiLineDim) (ui_dim_fg s bg)) ((UiLineBad) (ui_error))
+              ((UiLineIncoming) (ui_bubble_in_fg s)) ((UiLineOutgoing) (ui_bubble_out_fg)))
         cy (add (.y rr) (div (sub (ui_text_row_h) (ui_char_h)) 2))
         text (UiPText (Rect tx cy (max 0 (sub (add (.x rr) (sub (.w rr) (ui_lines_margin))) tx)) (ui_char_h))
                       (.text row) (UiStart) ink (ui_text_font) (ui_line_bold (.kind row)) 1)

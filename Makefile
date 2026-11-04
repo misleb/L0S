@@ -334,6 +334,11 @@ UI_TESTING := user/lib/ui/testing.l0
 # preview.l0, make preview and l0s-app-preview, never by an app.
 PNG        := user/lib/format/png.l0
 UI_PREVIEW := $(CRC32) $(PNG) user/lib/ui/preview.l0
+# PNG images, read: zlib's inflate, and PNGs of 8-bit gray, RGB, palette
+# and alpha decoded into the toolkit's ARGB words and fitted to a box.
+INFLATE    := user/lib/format/inflate.l0
+PNGREAD    := $(INFLATE) user/lib/format/png_read.l0
+BASE64     := user/lib/format/base64.l0
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
 LIBS_hvs        := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER) $(MAILBOX)
@@ -355,7 +360,7 @@ LIBS_http       := $(HTTP) $(JSON) $(SSE)
 LIBS_ntp        := $(INETLIB) $(CLOCK) $(NTPLIB)
 LIBS_ask        := $(MODELLIB)
 LIBS_agent      := $(AGENTLIB) $(MODELLIB) $(AGENTHOME)
-LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG)
+LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG) $(BASE64)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(SHA256) $(BOOTLOADER)
@@ -373,7 +378,7 @@ LIBS_windows    := $(RECT) $(WMLIB)
 LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_todo       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
-LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB)
+LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB) $(PATHS) $(PNGREAD)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_installer  := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(RELEASE) $(BOOTLOADER)
 LIBS_fontview   := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
@@ -444,7 +449,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
 
 all: check test test-virt e2e
 
@@ -615,6 +620,9 @@ $(call l0_test,$(BASE) $(DECODER) user/lib/speech/decoder_test.l0)
 $(call l0_test,$(BASE) $(CLI) $(TRANSCRIBE) user/lib/speech/transcribe_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(CRC32) $(PNG) user/lib/format/png_test.l0)
+$(call l0_test,$(BASE) $(CRC32) $(PNG) $(INFLATE) user/lib/format/inflate_test.l0)
+$(call l0_test,$(BASE) $(CRC32) $(PNG) $(PNGREAD) user/lib/format/png_read_test.l0)
+$(call l0_test,$(BASE64) user/lib/format/base64_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
 $(call l0_test,$(ULIB) $(RELEASE) user/lib/sys/release_test.l0)
 $(call l0_test,$(BASE) $(SHA256) $(PIEEPROMLIB) user/lib/format/pieeprom_test.l0)
@@ -1031,6 +1039,13 @@ installer-initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/installer-etc && cp -R tests/installer/etc $(BUILD)/installer-etc
 	$(call stage_etc,$(BUILD)/installer-etc)
 
+# What tests/agent.sh boots, once it has named its proxy's port in
+# agent/config: tests/agent-screen/etc, the desktop with the disk, the
+# network and agentd, staged as the screen tests' are.
+agent-screen-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/agent-screen-etc && cp -R tests/agent-screen/etc $(BUILD)/agent-screen-etc
+	$(call stage_etc,$(BUILD)/agent-screen-etc)
+
 # What tests/launcher-install.sh boots, and copies onto its disk's System
 # volume to boot from: tests/launcher-install/etc, boot and the disk's
 # driver and file server beside the compositor.
@@ -1044,9 +1059,9 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
 SCREEN_TESTS := vt files launch responsive disks-create resize logo-menu procmon disks launcher launcher-install \
-                installer fontview partitions usb fat hidpi widgets keyboard gpu-screen todo
+                installer agent fontview partitions usb fat hidpi widgets keyboard gpu-screen todo
 
-e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
+e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
 	tests/e2e.sh
 	tests/screens.sh $(SCREEN_TESTS)
 

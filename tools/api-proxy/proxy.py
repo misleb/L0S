@@ -28,7 +28,9 @@ own, in --builder-dir (~/.local/state/l0s-builder unless given), on
 --builder-model (claude-opus-5-5) at --builder-effort (medium), logged in
 as this host's Claude Code is, never with ANTHROPIC_API_KEY (builder.py).
 The answer is server-sent events: progress, each {"text"}, as the
-session works, then done, {"summary", "size"}, or failed, {"why"}; a
+session works; preview, for each scene it previews, its data not JSON
+but the scene's name, a newline, and its PNG, recompressed, in base64;
+then done, {"summary", "size"}, or failed, {"why"}; a
 comment every 15 s it says nothing. GET /build/NAME/image is the program
 then. A name that is not a program's is 400; a build while another runs
 409, as one runs at a time.
@@ -53,6 +55,7 @@ unless one is given. make proxy-run runs it with build/proxy/token."""
 
 import argparse
 import asyncio
+import base64
 import hmac
 import ipaddress
 import json
@@ -155,6 +158,13 @@ def sse(kind, data):
     return ("event: %s\ndata: %s\n\n" % (kind, json.dumps(data))).encode()
 
 
+def preview_event(scene, png):
+    """A build's preview as an event: its data the scene's name, then on a
+    line of its own its PNG in base64, which the board reads in place,
+    not as JSON."""
+    return b"event: preview\ndata: " + scene.encode() + b"\ndata: " + base64.b64encode(png) + b"\n\n"
+
+
 def make_app(token, upstream, key, usage_path, log=None, backup_dir=None, builder=None, beat=15.0,
              release_dir=None):
     """The proxy as an aiohttp application: the token boards must give,
@@ -238,6 +248,8 @@ def make_app(token, upstream, key, usage_path, log=None, backup_dir=None, builde
                         await out.write(sse("done", {"summary": text, "size": len(builder.image(name) or b"")}))
                     elif kind == "failed":
                         await out.write(sse("failed", {"why": text}))
+                    elif kind == "preview":
+                        await out.write(preview_event(*text))
                     else:
                         await out.write(sse("progress", {"text": text}))
                     if kind != "progress":

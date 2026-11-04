@@ -1,0 +1,342 @@
+; inflate.l0 -- zlib streams (RFC 1950) and raw DEFLATE (RFC 1951)
+; decoded from bytes: stored, fixed-Huffman and dynamic-Huffman blocks.
+; Each code is one lookup in a table indexed by the stream's next bits,
+; and the output goes into an (array int) of bytes, updated in place,
+; which doubles when it fills. Pure: linked by programs and host tools.
+
+; What went wrong decoding a stream.
+(data InflateFault
+  (InflateBadHeader)     ; zlib's two bytes are not deflate's, or ask for a dictionary
+  (InflateBadBlock)      ; a block of type 3, or a stored block's length and its complement disagree
+  (InflateBadCode)       ; no code has these bits, a code's lengths over-subscribe it, or a repeat has nothing to repeat
+  (InflatePastEnd)       ; the input ends before the last block does
+  (InflateBadDistance)   ; a match reaches back before the output's start
+  (InflateAdler))        ; the Adler-32 after the blocks is not the output's
+
+; A stream decoded: its bytes, the first len of out, each 0 to 255, and
+; end, the byte of the input just after the stream.
+(data Inflated (Inflated (out (array int)) (len int) (end int)))
+
+; What a fault means, in words.
+(def inflate_why ((f InflateFault)) (list int)
+  (match f
+    ((InflateBadHeader) "not a zlib stream of deflate")
+    ((InflateBadBlock) "a bad block")
+    ((InflateBadCode) "a bad Huffman code")
+    ((InflatePastEnd) "the data ends too soon")
+    ((InflateBadDistance) "a match from before the start")
+    ((InflateAdler) "the Adler-32 does not match")))
+
+; ---------------------------------------------------------------- bits
+
+; Byte i of b, or 0 past its end, which the last code's lookup may read
+; ahead into.
+(def infl_byte ((b bytes) (i int)) int
+  (if (lt i (bytes_len b)) (bytes_get b i) 0))
+
+; The n bits of b from bit p on, n at most 25, the first bit least
+; significant, as deflate packs them; zeros past the end.
+(def infl_bits ((b bytes) (p int) (n int)) int
+  (let (i (bit_shr p 3)
+        w (if (lt (add i 3) (bytes_len b))
+              (bit_or (bit_or (bytes_get b i) (bit_shl (bytes_get b (add i 1)) 8))
+                      (bit_or (bit_shl (bytes_get b (add i 2)) 16) (bit_shl (bytes_get b (add i 3)) 24)))
+              (bit_or (bit_or (infl_byte b i) (bit_shl (infl_byte b (add i 1)) 8))
+                      (bit_shl (infl_byte b (add i 2)) 16))))
+    (bit_and (bit_shr w (bit_and p 7)) (sub (bit_shl 1 n) 1))))
+
+; ---------------------------------------------------------------- codes
+
+; A Huffman code as a table of 2^bits: entry r is the symbol whose code,
+; read a bit at a time from the stream, begins the bits r (first bit
+; least significant), times 16, plus the code's length; 0 where no code
+; does.
+(data InflHuff (InflHuff (table (array int)) (bits int)))
+
+; The code whose symbols' lengths are the n of lens from off, 0 for a
+; symbol with none, as deflate assigns codes from lengths; None if the
+; lengths over-subscribe it. A code with gaps is kept: its gaps are 0.
+(def infl_huff ((lens (array int)) (off int) (n int)) (Option InflHuff)
+  (let (counts (infl_counts lens off n 0 (array_new 16 0))
+        bits (max 1 (infl_max_len counts 15)))
+    (if (infl_oversubscribed counts 1 1)
+        ((None InflHuff))
+        (Some (InflHuff (infl_fill lens off n 0 (infl_next_codes counts 1 0 (array_new 16 0)) (array_new (bit_shl 1 bits) 0) bits)
+                        bits)))))
+
+; How many symbols from s of the n have each length 1 to 15, onto counts.
+(def infl_counts ((lens (array int)) (off int) (n int) (s int) (counts (array int))) (array int)
+  (if (ge s n)
+      counts
+      (let l (array_get lens (add off s))
+        (infl_counts lens off n (add s 1) (if (gt l 0) (array_set counts l (add (array_get counts l) 1)) counts)))))
+
+; The longest length up to l that some symbol has, or 0 for none.
+(def infl_max_len ((counts (array int)) (l int)) int
+  (if (or (eq l 0) (gt (array_get counts l) 0)) l (infl_max_len counts (sub l 1))))
+
+; Whether more codes of length l and up are asked for than the left
+; that length leaves.
+(def infl_oversubscribed ((counts (array int)) (l int) (left int)) bool
+  (if (gt l 15)
+      false
+      (let more (sub (mul left 2) (array_get counts l))
+        (if (lt more 0) true (infl_oversubscribed counts (add l 1) more)))))
+
+; The first code of each length from l on, after code, into next.
+(def infl_next_codes ((counts (array int)) (l int) (code int) (next (array int))) (array int)
+  (if (gt l 15)
+      next
+      (let c (bit_shl (add code (array_get counts (sub l 1))) 1)
+        (infl_next_codes counts (add l 1) c (array_set next l c)))))
+
+; Symbols s on of the n given their codes, the next of each length in
+; next, into table, of 2^bits.
+(def infl_fill ((lens (array int)) (off int) (n int) (s int) (next (array int)) (table (array int)) (bits int)) (array int)
+  (if (ge s n)
+      table
+      (let l (array_get lens (add off s))
+        (if (eq l 0)
+            (infl_fill lens off n (add s 1) next table bits)
+            (let code (array_get next l)
+              (infl_fill lens off n (add s 1) (array_set next l (add code 1))
+                         (infl_spread table (infl_reverse code l 0) (bit_shl 1 l) (bit_shl 1 bits) (add (mul s 16) l))
+                         bits))))))
+
+; v in every entry of table from r on, step apart, up to size.
+(def infl_spread ((table (array int)) (r int) (step int) (size int) (v int)) (array int)
+  (if (ge r size) table (infl_spread (array_set table r v) (add r step) step size v)))
+
+; The l bits of code in the other order, onto acc.
+(def infl_reverse ((code int) (l int) (acc int)) int
+  (if (eq l 0) acc (infl_reverse (bit_shr code 1) (sub l 1) (bit_or (bit_shl acc 1) (bit_and code 1)))))
+
+; The fixed code's lengths, symbols s on: 288 literals and lengths,
+; then 32 distances.
+(def infl_fixed_lens ((s int) (lens (array int))) (array int)
+  (if (ge s 320)
+      lens
+      (infl_fixed_lens (add s 1) (array_set lens s (if (lt s 144) 8 (lt s 256) 9 (lt s 280) 7 (lt s 288) 8 5)))))
+
+; Length symbol 257 + c's extra bits, and its shortest length.
+(def infl_len_extra ((c int)) int
+  (if (or (lt c 8) (eq c 28)) 0 (sub (bit_shr c 2) 1)))
+(def infl_len_base ((c int)) int
+  (if (lt c 8) (add c 3) (eq c 28) 258 (add (bit_shl (add 4 (bit_and c 3)) (infl_len_extra c)) 3)))
+
+; Distance symbol d's extra bits, and its shortest distance.
+(def infl_dist_extra ((d int)) int
+  (if (lt d 4) 0 (sub (bit_shr d 1) 1)))
+(def infl_dist_base ((d int)) int
+  (if (lt d 4) (add d 1) (add (bit_shl (add 2 (bit_and d 1)) (infl_dist_extra d)) 1)))
+
+; ---------------------------------------------------------------- output
+
+; out with room for k more bytes after its first n.
+(def infl_room ((out (array int)) (n int) (k int)) (array int)
+  (let size (array_len out)
+    (if (le (add n k) size) out (array_resize out (max (mul 2 size) (add n k)) 0))))
+
+; out with byte v after its first n.
+(def infl_put ((out (array int)) (n int) (v int)) (array int)
+  (array_set (infl_room out n 1) n v))
+
+; k bytes after the first n of out, each the one d before it, out having
+; room for them.
+(def infl_copy ((out (array int)) (n int) (d int) (k int)) (array int)
+  (if (eq k 0) out (infl_copy (array_set out n (array_get out (sub n d))) (add n 1) d (sub k 1))))
+
+; k bytes of b from i after the first n of out, out having room.
+(def infl_take ((b bytes) (i int) (out (array int)) (n int) (k int)) (array int)
+  (if (eq k 0) out (infl_take b (add i 1) (array_set out n (bytes_get b i)) (add n 1) (sub k 1))))
+
+; ---------------------------------------------------------------- blocks
+
+; Where a block's decoding ended: the input's bit, the output and how
+; many bytes of it are made; or what went wrong.
+(data InflStep (InflAt int (array int) int) (InflFail InflateFault))
+
+; Lengths read for a dynamic block: the input's bit after them and the
+; lengths; or what went wrong.
+(data InflRead (InflRead int (array int)) (InflBad InflateFault))
+
+; The blocks of b from bit p on, after the first n bytes of out, limit
+; the input's bits.
+(def infl_blocks ((b bytes) (p int) (out (array int)) (n int) (limit int)) (Result Inflated InflateFault)
+  (if (gt (add p 3) limit)
+      ((Err Inflated InflateFault) (InflatePastEnd))
+      (let (last (eq (infl_bits b p 1) 1)
+            kind (infl_bits b (add p 1) 2)
+            q (add p 3)
+            step (if (eq kind 0) (infl_stored b q out n)
+                     (eq kind 1) (infl_with_codes b q out n (infl_fixed_lens 0 (array_new 320 0)) 288 32 limit)
+                     (eq kind 2) (infl_dynamic b q out n limit)
+                     (InflFail (InflateBadBlock))))
+        (match step
+          ((InflAt p2 out2 n2)
+            (if (gt p2 limit) ((Err Inflated InflateFault) (InflatePastEnd))
+                last ((Ok Inflated InflateFault) (Inflated out2 n2 (bit_shr (add p2 7) 3)))
+                (infl_blocks b p2 out2 n2 limit)))
+          ((InflFail f) ((Err Inflated InflateFault) f))))))
+
+; A stored block from bit p: from the next byte, its length, the
+; length's complement, and the bytes.
+(def infl_stored ((b bytes) (p int) (out (array int)) (n int)) InflStep
+  (let (i (bit_shr (add p 7) 3)
+        len (bit_or (infl_byte b i) (bit_shl (infl_byte b (add i 1)) 8))
+        nlen (bit_or (infl_byte b (add i 2)) (bit_shl (infl_byte b (add i 3)) 8))
+        j (add i 4))
+    (if (gt (add j len) (bytes_len b)) (InflFail (InflatePastEnd))
+        (not (eq (bit_xor len 65535) nlen)) (InflFail (InflateBadBlock))
+        (InflAt (mul 8 (add j len)) (infl_take b j (infl_room out n len) n len) (add n len)))))
+
+; A dynamic block from bit p: how many of each length there are, the
+; code lengths' code, the lengths of both codes in it, and the codes.
+(def infl_dynamic ((b bytes) (p int) (out (array int)) (n int) (limit int)) InflStep
+  (let (hlit (add (infl_bits b p 5) 257)
+        hdist (add (infl_bits b (add p 5) 5) 1)
+        hclen (add (infl_bits b (add p 10) 4) 4)
+        cl (infl_cl_lens b (add p 14) "QRSAIHJGKFLEMDNCOBP" hclen (array_new 19 0))
+        q (add p (add 14 (mul 3 hclen))))
+    (if (or (gt hlit 286) (gt hdist 30))
+        (InflFail (InflateBadCode))
+        (match (infl_huff cl 0 19)
+          ((None) (InflFail (InflateBadCode)))
+          ((Some h)
+            (match (infl_lens b q h (array_new (add hlit hdist) 0) 0 (add hlit hdist) limit)
+              ((InflRead q2 lens) (infl_with_codes b q2 out n lens hlit hdist limit))
+              ((InflBad f) (InflFail f))))))))
+
+; The code lengths' code's k lengths, three bits each from bit p, for
+; the symbols order names, each a letter, A for 0.
+(def infl_cl_lens ((b bytes) (p int) (order (list int)) (k int) (cl (array int))) (array int)
+  (if (eq k 0)
+      cl
+      (infl_cl_lens b (add p 3) (tail order) (sub k 1) (array_set cl (sub (head order) 65) (infl_bits b p 3)))))
+
+; Lengths i on of total into lens, read from bit p with the code h:
+; 0 to 15 a length, 16 the last again 3 to 6 times, 17 and 18 zeros.
+(def infl_lens ((b bytes) (p int) (h InflHuff) (lens (array int)) (i int) (total int) (limit int)) InflRead
+  (if (ge i total)
+      (InflRead p lens)
+      (let (e (array_get (.table h) (infl_bits b p (.bits h)))
+            l (bit_and e 15)
+            sym (bit_shr e 4)
+            q (add p l))
+        (if (or (eq l 0) (gt p limit)) (InflBad (if (eq l 0) (InflateBadCode) (InflatePastEnd)))
+            (lt sym 16) (infl_lens b q h (array_set lens i sym) (add i 1) total limit)
+            (eq sym 16)
+              (if (eq i 0)
+                  (InflBad (InflateBadCode))
+                  (let prev (array_get lens (sub i 1))
+                    (infl_run b (add q 2) h lens i total limit (add 3 (infl_bits b q 2)) prev)))
+            (eq sym 17) (infl_run b (add q 3) h lens i total limit (add 3 (infl_bits b q 3)) 0)
+            (infl_run b (add q 7) h lens i total limit (add 11 (infl_bits b q 7)) 0)))))
+
+; r lengths v from i, then the rest from bit p; refused past total.
+(def infl_run ((b bytes) (p int) (h InflHuff) (lens (array int)) (i int) (total int) (limit int) (r int) (v int)) InflRead
+  (if (gt (add i r) total)
+      (InflBad (InflateBadCode))
+      (infl_lens b p h (infl_set_run lens i r v) (add i r) total limit)))
+
+; lens with r entries from i set to v.
+(def infl_set_run ((lens (array int)) (i int) (r int) (v int)) (array int)
+  (if (eq r 0) lens (infl_set_run (array_set lens i v) (add i 1) (sub r 1) v)))
+
+; A block's codes decoded from bit p, its literal and length code the
+; first nlit of lens, its distance code the ndist after.
+(def infl_with_codes ((b bytes) (p int) (out (array int)) (n int) (lens (array int)) (nlit int) (ndist int) (limit int)) InflStep
+  (match (infl_huff lens 0 nlit)
+    ((None) (InflFail (InflateBadCode)))
+    ((Some lit)
+      (match (infl_huff lens nlit ndist)
+        ((None) (InflFail (InflateBadCode)))
+        ((Some dist) (infl_codes b p out n lit dist limit))))))
+
+; The block's symbols from bit p to its end, 256: a literal byte, or a
+; match's length, whose distance infl_match reads.
+(def infl_codes ((b bytes) (p int) (out (array int)) (n int) (lit InflHuff) (dist InflHuff) (limit int)) InflStep
+  (if (gt p limit)
+      (InflFail (InflatePastEnd))
+      (let (e (array_get (.table lit) (infl_bits b p (.bits lit)))
+            l (bit_and e 15)
+            sym (bit_shr e 4)
+            q (add p l))
+        (if (eq l 0) (InflFail (InflateBadCode))
+            (lt sym 256) (infl_codes b q (infl_put out n sym) (add n 1) lit dist limit)
+            (eq sym 256) (InflAt q out n)
+            (gt sym 285) (InflFail (InflateBadCode))
+            (infl_match b q out n lit dist limit (sub sym 257))))))
+
+; A match of length symbol 257 + c from bit p: its extra bits, its
+; distance's code and extra bits, and its bytes copied.
+(def infl_match ((b bytes) (p int) (out (array int)) (n int) (lit InflHuff) (dist InflHuff) (limit int) (c int)) InflStep
+  (let (lx (infl_len_extra c)
+        len (add (infl_len_base c) (infl_bits b p lx))
+        q (add p lx)
+        e (array_get (.table dist) (infl_bits b q (.bits dist)))
+        l (bit_and e 15)
+        ds (bit_shr e 4)
+        r (add q l)
+        de (infl_dist_extra ds)
+        d (add (infl_dist_base ds) (infl_bits b r de)))
+    (if (or (eq l 0) (gt ds 29)) (InflFail (InflateBadCode))
+        (gt d n) (InflFail (InflateBadDistance))
+        (infl_codes b (add r de) (infl_copy (infl_room out n len) n d len) (add n len) lit dist limit))))
+
+; ---------------------------------------------------------------- streams
+
+; The raw DEFLATE stream in b from byte i, its output sized for hint
+; bytes at first (the size expected, if known, so it never grows).
+(def inflate_raw ((b bytes) (i int) (hint int)) (Result Inflated InflateFault)
+  (infl_blocks b (mul 8 i) (array_new (max 64 hint) 0) 0 (mul 8 (bytes_len b))))
+
+; The zlib stream in b from byte i: its header (deflate, a window of at
+; most 32 KB, its check, no dictionary), the DEFLATE stream, and the
+; Adler-32 of the output after it, most significant byte first; end is
+; the byte after that. hint is as inflate_raw's.
+(def inflate_zlib ((b bytes) (i int) (hint int)) (Result Inflated InflateFault)
+  (let (cmf (infl_byte b i)
+        flg (infl_byte b (add i 1)))
+    (if (and (ge (bytes_len b) (add i 2)) (infl_zlib_header cmf flg))
+        (infl_checked b (inflate_raw b (add i 2) hint))
+        ((Err Inflated InflateFault) (InflateBadHeader)))))
+
+; Whether cmf and flg begin a zlib stream this reads: deflate, a window
+; of at most 32 KB, their check a multiple of 31, no dictionary.
+(def infl_zlib_header ((cmf int) (flg int)) bool
+  (and (and (eq (bit_and cmf 15) 8) (le (bit_shr cmf 4) 7))
+       (and (eq (mod (add (mul cmf 256) flg) 31) 0) (eq (bit_and flg 32) 0))))
+
+; r, if it decoded, with its Adler-32 read after it and checked.
+(def infl_checked ((b bytes) (r (Result Inflated InflateFault))) (Result Inflated InflateFault)
+  (match r
+    ((Ok v)
+      (let (e (.end v)
+            want (bit_or (bit_shl (infl_byte b e) 24)
+                         (bit_or (bit_shl (infl_byte b (add e 1)) 16) (bit_or (bit_shl (infl_byte b (add e 2)) 8) (infl_byte b (add e 3)))))
+            got (inflate_adler32 (.out v) 0 (.len v) 1 0))
+        (if (gt (add e 4) (bytes_len b)) ((Err Inflated InflateFault) (InflatePastEnd))
+            (not (eq want got)) ((Err Inflated InflateFault) (InflateAdler))
+            ((Ok Inflated InflateFault) (.end v (add e 4))))))
+    ((Err f) ((Err Inflated InflateFault) f))))
+
+; The Adler-32 of out's bytes from i up to j, its sums a and s so far, 1
+; and 0 to start; the sums are reduced every 5552 bytes, as zlib does,
+; the most that cannot overflow 32 bits.
+(def inflate_adler32 ((out (array int)) (i int) (j int) (a int) (s int)) int
+  (if (ge i j)
+      (bit_or (bit_shl (mod s 65521) 16) (mod a 65521))
+      (let k (min j (add i 5552))
+        (match (infl_adler_run out i k a s)
+          ((InflSums a2 s2) (inflate_adler32 out k j (mod a2 65521) (mod s2 65521)))))))
+
+; Adler-32's two sums, unreduced.
+(data InflSums (InflSums int int))
+
+; The sums a and s over out's bytes from i up to k, unreduced.
+(def infl_adler_run ((out (array int)) (i int) (k int) (a int) (s int)) InflSums
+  (if (ge i k)
+      (InflSums a s)
+      (let a2 (add a (array_get out i))
+        (infl_adler_run out (add i 1) k a2 (add s a2)))))

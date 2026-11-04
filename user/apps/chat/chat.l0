@@ -2,12 +2,13 @@
 ; conversation, as the console's agent is, through the agent protocol
 ; (proto/agent.l0). It opens the conversation and shows it, what was
 ; said before as agentd tells it on open and each turn as its notices
-; come, whoever began it, in two panes. The conversation's: the
-; person's words in bold, where they came from if not this app or the
-; console, the model's text wrapped as it streams, a dimmed line naming
-; the tools each run of them used, and what went wrong in red. The
-; tools' log beside it: under a line of what was said, each tool run a
-; row, red if it failed, that a press opens on its input and result.
+; come, whoever began it, in two panes. The conversation's, as a
+; phone's messages: the person's words in a bubble at the end, the
+; model's text in one at the start, wrapped as it streams, a bubble a
+; piece the tools part, and what went wrong in red; nothing of the
+; tools. The tools' log beside it: under a line of what was said, and
+; where from if not this app or the console, each tool run a row, red
+; if it failed, that a press opens on its input and result.
 ; An entry along its foot says a line with Enter or Send; while a turn
 ; runs, Stop stops it. With no agentd it says so, and Retry looks again.
 ;
@@ -22,10 +23,28 @@
 (def tools_prefix () (list int) "tools")
 (def entry_name () (list int) "say")
 
-; The replies' tags: to open, to say, to stop.
+; The most rows the entry grows to as what is typed wraps.
+(def entry_rows () int 6)
+
+; The replies' tags: to open, to say, to stop, and a file server's,
+; reading an image.
 (def tag_open () int 1)
 (def tag_say () int 2)
 (def tag_stop () int 3)
+(def tag_file () int 4)
+
+; The side pane's keys, as its toggles name them.
+(def pane_tools () (list int) "Tools")
+(def pane_images () (list int) "Images")
+
+; The most of an image file read, and the box an image is fitted to
+; once decoded: the room the Images pane gives it in the window as it
+; opens, half its width less 12 each side, and its height less the
+; entry's row, the pane's toggles and buttons, and 12 above and below,
+; so it is drawn there pixel for pixel.
+(def image_most () int 8388608)
+(def image_box_w () int 455)
+(def image_box_h () int 384)
 
 ; ----------------------------------------------------------------- state
 
@@ -49,14 +68,27 @@
 ; has, and whether its row is open.
 (data Item (ISaid (list int) (list int)) (IText (list bytes)) (IRan (list (list int))) (INote UiLineKind (list int)) (ITool int (list int) bytes (Option ToolEnd) bool))
 
+; An image the agent showed: its path, its pixels once read and fitted
+; to the pane, and why it could not be, "" while it is being.
+(data Shot (Shot (path (list int)) (pic (Option UiCov)) (why (list int))))
+
+; Where reading the images is: nothing to read; the file at a path
+; being opened; read, its handle, the pieces so far, newest first, and
+; how many bytes; or read whole, its bytes waiting to be decoded.
+(data Fetch (FetchNone) (FetchOpen (list int)) (FetchRead (list int) int (list bytes) int) (FetchDecode (list int) bytes))
+
 ; The app: where it is with agentd; agentd's port, and the port its
 ; notices come to (0 until made); the transcript and the tools' log,
 ; newest first; the entry; whether a turn runs; each pane's first row
-; shown (-1 its end); and how many tools it has shown.
-(data Chat (Chat (link Link) (port int) (np int) (items (list Item)) (log (list Item)) (entry UiEntryText) (busy bool) (first int) (tfirst int) (tools int)))
+; shown (-1 its end); how many tools it has shown; the side pane shown,
+; tools or images; the images, newest first, and the path of the one
+; shown; the image being read, and whether its ask is out.
+(data Chat (Chat (link Link) (port int) (np int) (items (list Item)) (log (list Item)) (entry UiEntryText) (busy bool) (first int) (tfirst int) (tools int)
+                 (pane (list int)) (shots (list Shot)) (shown (list int)) (fetch Fetch) (asked bool)))
 
-; The app at first: not yet linked, nothing shown.
-(def chat_new () Chat (Chat (Linking) 0 0 (nil Item) (nil Item) (UiEntryText "" 0) false -1 -1 0))
+; The app at first: not yet linked, nothing shown, the tools' pane.
+(def chat_new () Chat
+  (Chat (Linking) 0 0 (nil Item) (nil Item) (UiEntryText "" 0) false -1 -1 0 (pane_tools) (nil Shot) "" (FetchNone) false))
 
 ; --------------------------------------------------------------- notices
 
@@ -79,6 +111,7 @@
     ((AgentError why) (.items c (cons (INote (UiLineBad) (bytes_to_list why)) (.items c))))
     ((AgentDone reason) (.busy (.items c (done_note (.items c) reason)) false))
     ((AgentOpened busy) (.busy c busy))
+    ((AgentImage path) (shot_added c (bytes_to_list path)))
     ((AgentNone) c)))
 
 ; items with t after the model's last text, or as a text of its own if
@@ -143,6 +176,107 @@
         ((IRan ns) (cons (head items) (toggled (tail items) k)))
         ((INote kd s) (cons (head items) (toggled (tail items) k))))))
 
+; ---------------------------------------------------------------- images
+
+; c with the image at path shown: newest, in place of one of the same
+; path, which is read again, and the one shown.
+(def shot_added ((c Chat) (path (list int))) Chat
+  (.shown (.shots c (cons (Shot path ((None UiCov)) "") (shots_without (.shots c) path (nil Shot)))) path))
+
+; ss without the image at path, in order, after acc reversed.
+(def shots_without ((ss (list Shot)) (path (list int)) (acc (list Shot))) (list Shot)
+  (if (is_empty ss) (rev acc) (shots_without (tail ss) path (if (eq (.path (head ss)) path) acc (cons (head ss) acc)))))
+
+; ss with the image at path given its pixels or why not.
+(def shots_with ((ss (list Shot)) (path (list int)) (pic (Option UiCov)) (why (list int))) (list Shot)
+  (if (is_empty ss)
+      ss
+      (if (eq (.path (head ss)) path)
+          (cons (Shot path pic why) (tail ss))
+          (cons (head ss) (shots_with (tail ss) path pic why)))))
+
+; The oldest image not yet read, if one is, by its path.
+(def shot_unread ((ss (list Shot))) (Option (list int))
+  (if (is_empty ss)
+      ((None (list int)))
+      (match (shot_unread (tail ss))
+        ((Some p) (Some p))
+        ((None) (let s (head ss) (if (and (is_empty (.why s)) (match (.pic s) ((None) true) ((Some x) false))) (Some (.path s)) ((None (list int)))))))))
+
+; c with the image at path failed, for why, and nothing being read.
+(def shot_failed ((c Chat) (path (list int)) (why (list int))) Chat
+  (.asked (.fetch (.shots c (shots_with (.shots c) path ((None UiCov)) why)) (FetchNone)) false))
+
+; A file server's refusal, its code w, as the pane says it.
+(def file_why ((w int)) (list int)
+  (if (eq w -2) "No such file." (eq w -5) "The file server did not answer." (append "The file server refused it, " (append (num_text w) "."))))
+
+; n as digits, after a - if it is below 0.
+(def num_text ((n int)) (list int) (if (lt n 0) (cons 45 (digits (sub 0 n))) (digits n)))
+
+; c after m, a file server's reply to reading an image: its open
+; answered with the handle, the first read asked next; a read's bytes
+; kept, and more asked while a reply brings any and the whole is under
+; image_most; then the handle closed, told, and the bytes left to
+; decode. A refusal, told the close if a handle is open, fails it.
+(def file_answered ((c Chat) (m Message)) Chat
+  (match (.fetch c)
+    ((FetchOpen path)
+      (match (fs_reply_msg m)
+        ((FsReply w rest) (if (lt w 0) (shot_failed c path (file_why w)) (.asked (.fetch c (FetchRead path w (nil bytes) 0)) false)))))
+    ((FetchRead path h pieces n)
+      (match (fs_read_of m)
+        ((FsRead w b i j)
+          (if (lt w 0) (let k (fs_close_told (fs_path_port path) h) (shot_failed c path (file_why w)))
+              (or (eq w 0) (ge (add n w) (image_most)))
+              (let (k (fs_close_told (fs_path_port path) h)
+                    all (bytes_concat (rev (cons (fs_read_piece (FsRead w b i j)) pieces))))
+                (.asked (.fetch c (FetchDecode path all)) false))
+              (.asked (.fetch c (FetchRead path h (cons (fs_read_piece (FsRead w b i j)) pieces) (add n w))) false)))))
+    ((FetchDecode path b) c)
+    ((FetchNone) c)))
+
+; c with the image read whole decoded, as idle work: its pixels fitted
+; to the pane's box, or why it is no image shown; then nothing read.
+(def decoded ((c Chat)) Chat
+  (match (.fetch c)
+    ((FetchDecode path b)
+      (match (png_read b)
+        ((Ok img) (.fetch (.shots c (shots_with (.shots c) path (Some (pic_of (png_fit img (image_box_w) (image_box_h)))) "")) (FetchNone)))
+        ((Err f) (shot_failed c path (append "Not an image shown here: " (append (png_read_why f) "."))))))
+    ((FetchOpen p) c)
+    ((FetchRead p h ps n) c)
+    ((FetchNone) c)))
+
+; An image's pixels as the toolkit paints them.
+(def pic_of ((img PngImage)) UiCov (UiCov (.w img) (.h img) (.px img)))
+
+; w and c once the step is done, for the images: the next unread one
+; opened when none is being read; its open or next read asked when not
+; yet; and idle work while one waits to be decoded, none else.
+(def fetching ((w UiWin) (c Chat)) (UiStepped Chat)
+  (match (.fetch c)
+    ((FetchNone)
+      (match (shot_unread (.shots c))
+        ((None) (UiStepped (ui_win_idling w false) c))
+        ((Some path) (fetching w (.asked (.fetch c (FetchOpen path)) false)))))
+    ((FetchOpen path) (if (.asked c) (UiStepped w c) (UiStepped (ui_win_ask w (tag_file) (fs_path_port path) (fs_open_body path)) (.asked c true))))
+    ((FetchRead path h ps n) (if (.asked c) (UiStepped w c) (UiStepped (ui_win_ask w (tag_file) (fs_path_port path) (fs_read_body h (fs_read_most))) (.asked c true))))
+    ((FetchDecode path b) (UiStepped (ui_win_idling w true) c))))
+
+; c with the image after the one shown, by off, in the order they came,
+; shown: off -1 an older one, 1 a newer; the first or last stays.
+(def shot_moved ((c Chat) (off int)) Chat
+  (let (ss (.shots c)
+        i (shot_index ss (.shown c) 0))
+    (if (lt i 0)
+        c
+        (.shown c (.path (nth ss (max 0 (min (sub (length ss) 1) (sub i off)))))))))
+
+; Where the image at path is in ss, newest first, from i; -1 if not.
+(def shot_index ((ss (list Shot)) (path (list int)) (i int)) int
+  (if (is_empty ss) -1 (eq (.path (head ss)) path) i (shot_index (tail ss) path (add i 1))))
+
 ; ------------------------------------------------------------------ view
 
 ; The most of a tool's input its closed row shows.
@@ -164,31 +298,30 @@
 (def paras_onto ((items (list Item)) (in_log bool) (acc (list UiPara))) (list UiPara)
   (if (is_empty items) acc (paras_onto (tail items) in_log (append (item_paras (head items) in_log) acc))))
 
-; An item's paragraphs: what the person said in bold, after a blank row
-; and, if it came from elsewhere than this app or the console, a dimmed
-; line saying where; in the log, a blank row and the start of it,
-; dimmed; the model's text, a paragraph a line; a run of tools, a
-; dimmed line naming them; a tool's row, and if it is open its input
-; and result under it, dimmed; a note in its kind.
+; An item's paragraphs: what the person said in an outgoing bubble; in
+; the log, a blank row and the start of it, dimmed; the model's text in
+; an incoming one, without blank lines at its ends; a run of tools,
+; nothing; a tool's row, and if it is open its input and result under
+; it, dimmed; a note in its kind.
 (def item_paras ((it Item) (in_log bool)) (list UiPara)
   (match it
     ((ISaid src s)
       (if in_log
-          (cons (plain "" (UiLinePlain)) (cons (plain (said_line s) (UiLineDim)) (nil UiPara)))
-          (cons (plain "" (UiLinePlain))
-            (if (any_eq src (split_spaces "app console"))
-                (cons (plain s (UiLineStrong)) (nil UiPara))
-                (cons (plain (append "From " src) (UiLineDim)) (cons (plain s (UiLineStrong)) (nil UiPara)))))))
-    ((IText ps) (lines_paras (bytes_to_list (bytes_concat (rev ps))) (UiLinePlain)))
-    ((IRan ns) (cons (plain (append "Ran " (join_with ", " (rev ns))) (UiLineDim)) (nil UiPara)))
+          (cons (plain "" (UiLinePlain)) (cons (plain (said_line src s) (UiLineDim)) (nil UiPara)))
+          (cons (plain s (UiLineOutgoing)) (nil UiPara))))
+    ((IText ps)
+      (let t (trimmed (bytes_to_list (bytes_concat (rev ps))))
+        (if (is_empty t) (nil UiPara) (cons (plain t (UiLineIncoming)) (nil UiPara)))))
+    ((IRan ns) (nil UiPara))
     ((ITool k n input e open) (cons (tool_row k n input e open) (if open (tool_detail input e) (nil UiPara))))
     ((INote kind s) (cons (plain s kind) (nil UiPara)))))
 
-; What was said as the log's line shows it: its first line, cut to
-; said_brief.
-(def said_line ((s (list int))) (list int)
+; What src said, s, as the log's line shows it: its first line, cut to
+; said_brief, after where it came from if not this app or the console.
+(def said_line ((src (list int)) (s (list int))) (list int)
   (let l (up_to 10 s)
-    (append "> " (if (and (le (length l) (said_brief)) (eq (length l) (length s))) l (append (take l (said_brief)) "...")))))
+    (append (if (any_eq src (split_spaces "app console")) "> " (append src "> "))
+            (if (and (le (length l) (said_brief)) (eq (length l) (length s))) l (append (take l (said_brief)) "...")))))
 
 ; A paragraph of text alone.
 (def plain ((s (list int)) (k UiLineKind)) UiPara (UiPara s k "" ""))
@@ -244,28 +377,57 @@
   (UiBox (UiV) 0
     (cons (UiExpand
             (UiBox (UiH) 0
-              (cons (UiExpand (UiLines (UiLinesData (conv_prefix) (chat_paras (.items c)) (.first c))))
+              (cons (UiExpand (UiShrinks (UiLines (UiLinesData (conv_prefix) (chat_paras (.items c)) (.first c)))))
                 (cons (UiSeparator (UiV))
-                  (cons (UiExpand (log_view c)) (nil UiWidget))))))
+                  (cons (UiExpand (UiShrinks (side_view c))) (nil UiWidget))))))
           (cons (UiSeparator (UiH))
                 (cons (UiPad (ui_space_m) (ui_space_m)
                         (UiBox (UiH) (ui_space_s)
-                          (cons (UiExpand (UiEntry (entry_name) (.entry c) placeholder 200))
+                          (cons (UiExpand (UiTextArea (entry_name) (.entry c) placeholder 200 (entry_rows)))
                                 (cons (talk_button c) (nil UiWidget)))))
                       (nil UiWidget))))))
 
-; The tools' log: its heading, and the rows of the tools run, or that
-; none has been.
-(def log_view ((c Chat)) UiWidget
+; The side pane: Tools and Images, a toggle each, the one pressed
+; shown under them, the other hidden.
+(def side_view ((c Chat)) UiWidget
   (UiBox (UiV) 0
-    (cons (UiPad (ui_space_m) (ui_space_s) (UiLabel "Tools" (UiHeading) (UiStart)))
+    (cons (UiPad (ui_space_s) (ui_space_s) (UiBox (UiH) 0 (cons (UiToggleGroup "pane" (ui_toggles (cons (pane_tools) (cons (pane_images) (nil (list int))))) (.pane c)) (nil UiWidget))))
       (cons (UiSeparator (UiH))
-        (cons (UiExpand
-                (if (eq (.tools c) 0)
-                    (UiLines (UiLinesData (tools_prefix) (cons (plain "No tools have run yet." (UiLineDim)) (nil UiPara)) -1))
-                    (UiLines (UiLinesData (tools_prefix) (log_paras (.log c)) (.tfirst c)))))
+        (cons (UiExpand (if (eq (.pane c) (pane_images)) (images_view c) (log_view c)))
               (nil UiWidget))))))
 
+; The tools' log: the rows of the tools run, or that none has been.
+(def log_view ((c Chat)) UiWidget
+  (if (eq (.tools c) 0)
+      (UiLines (UiLinesData (tools_prefix) (cons (plain "No tools have run yet." (UiLineDim)) (nil UiPara)) -1))
+      (UiLines (UiLinesData (tools_prefix) (log_paras (.log c)) (.tfirst c)))))
+
+; The images: none yet, a page saying what comes here; else the one
+; shown, or that it is being read, or why it cannot be, over its name
+; and how many there are, between buttons to the one before and after.
+(def images_view ((c Chat)) UiWidget
+  (let (ss (.shots c)
+        i (shot_index ss (.shown c) 0))
+    (if (or (is_empty ss) (lt i 0))
+        (UiView (UiStatusPage "image-x-generic" "No Images" "Previews of the apps it builds come here."))
+        (let s (nth ss i)
+          (UiView
+            (UiBox (UiV) 0
+              (cons (UiExpand (UiPad (ui_space_m) (ui_space_m) (shot_view s)))
+                (cons (UiSeparator (UiH))
+                  (cons (UiPad (ui_space_s) (ui_space_s)
+                          (UiBox (UiH) (ui_space_s)
+                            (cons (UiButton "app.image.older" "go-previous" "" (UiBtnFlat) (lt i (sub (length ss) 1)))
+                              (cons (UiExpand (UiLabel (append (base_name (.path s)) (append "  " (append (digits (sub (length ss) i)) (append " of " (digits (length ss)))))) (UiBody) (UiCenter)))
+                                (cons (UiButton "app.image.newer" "go-next" "" (UiBtnFlat) (gt i 0)) (nil UiWidget))))))
+                        (nil UiWidget))))))))))
+
+; An image: its picture, keyed by its path so it is not compared pixel
+; by pixel; else that it is being read, or why it cannot be shown.
+(def shot_view ((s Shot)) UiWidget
+  (match (.pic s)
+    ((Some cov) (UiKeyed (append "image." (.path s)) (UiPicture cov)))
+    ((None) (UiLabel (if (is_empty (.why s)) "Reading the image..." (.why s)) (if (is_empty (.why s)) (UiDimmed) (UiBody)) (UiCenter)))))
 ; Stop while a turn runs; else Send, once there is something to say.
 (def talk_button ((c Chat)) UiWidget
   (if (.busy c)
@@ -283,29 +445,36 @@
 ; What the entry says, without spaces at its ends.
 (def said_text ((c Chat)) (list int) (trimmed (.text (.entry c))))
 
-; s without spaces at either end.
+; s without spaces or newlines at either end.
 (def trimmed ((s (list int))) (list int) (rev (spaces_off (rev (spaces_off s)))))
-(def spaces_off ((s (list int))) (list int) (if (is_empty s) s (eq (head s) 32) (spaces_off (tail s)) s))
+(def spaces_off ((s (list int))) (list int) (if (is_empty s) s (or (eq (head s) 32) (eq (head s) 10)) (spaces_off (tail s)) s))
 
 ; ---------------------------------------------------------------- update
 
-; The app after action, set off with ev, the window w asked through:
-; as the window opens, its entry focused and agentd looked for; the
-; conversation's notices and the answers to its asks; Send or Enter
-; saying the entry; Stop; Retry; a tool's row opened or closed; either
-; pane scrolled; and keys to the entry.
-(def chat_update ((c Chat) (action (list int)) (ev UiEvent) (w UiWin)) (UiStepped Chat)
-  (let (tool_p (append (tools_prefix) ".tool.")
-        entry_p (append (entry_name) "."))
-    (if (eq action (ui_start_action)) (linking (ui_win_focusing w (append (entry_name) ".entry")) c)
-        (or (eq action "app.send") (eq action (append entry_p "activate"))) (sent w c)
-        (eq action "app.stop") (if (.busy c) (UiStepped (ui_win_ask w (tag_stop) (.port c) (agent_stop_body)) c) (UiStepped w c))
-        (eq action "app.retry") (linking w c)
-        (starts_with action tool_p) (UiStepped w (.log c (toggled (.log c) (int_prefix (drop_n action (length tool_p)) 0))))
-        (starts_with action (append (conv_prefix) ".")) (UiStepped w (.first c (ui_lines_first (.first c) (conv_prefix) action (ui_win_scroller w (conv_prefix)))))
-        (starts_with action (append (tools_prefix) ".")) (UiStepped w (.tfirst c (ui_lines_first (.tfirst c) (tools_prefix) action (ui_win_scroller w (tools_prefix)))))
-        (starts_with action entry_p) (UiStepped w (.entry c (ui_entry_update (entry_name) (.entry c) action ev)))
-        (UiStepped w (came c ev)))))
+; The app after action, set off with ev: Send or Enter saying the
+; entry, if it may; a tool's row opened or closed; keys to the entry;
+; and the conversation's notices and the answers to its asks.
+(def chat_update ((c Chat) (action (list int)) (ev UiEvent)) Chat
+  (let tool_p (tool_actions)
+    (if (sends action) (if (can_send c) (said c) c)
+        (starts_with action "pane.") (let k (ui_select_key "pane" action) (if (is_empty k) c (.pane c k)))
+        (eq action "app.image.older") (shot_moved c -1)
+        (eq action "app.image.newer") (shot_moved c 1)
+        (starts_with action tool_p) (.log c (toggled (.log c) (int_prefix (drop_n action (length tool_p)) 0)))
+        (starts_with action (append (entry_name) ".")) (.entry c (ui_entry_update (entry_name) (.entry c) action ev))
+        (came c ev))))
+
+; The start of a tool row's actions, tools.tool.
+(def tool_actions () (list int) (append (tools_prefix) ".tool."))
+
+; Whether action says the entry: Send, or Enter in it.
+(def sends ((action (list int))) bool
+  (or (eq action "app.send") (eq action (append (entry_name) ".activate"))))
+
+; The entry said: emptied, both panes following their ends, and a turn
+; taken to run until agentd says otherwise.
+(def said ((c Chat)) Chat
+  (.busy (.tfirst (.first (.entry c (UiEntryText "" 0)) -1) -1) true))
 
 ; The app after an event that is no action: a notice on its port, or
 ; an answer to an ask.
@@ -320,10 +489,15 @@
         ((UiNoReply) c)
         ((UiReplyTo tag m) (answered c tag m))))))
 
-; The answer m to the ask tagged tag: open's links the window, or says
-; why not; say's and stop's refusals are noted, a say's ending the turn
-; it would have begun; no answer at all means agentd is gone.
+; The answer m to the ask tagged tag: a file server's, to reading an
+; image; open's links the window, or says why not; say's and stop's
+; refusals are noted, a say's ending the turn it would have begun; no
+; answer at all means agentd is gone.
 (def answered ((c Chat) (tag int) (m Message)) Chat
+  (if (eq tag (tag_file)) (file_answered c m) (agent_answered c tag m)))
+
+; answered for agentd's answers.
+(def agent_answered ((c Chat) (tag int) (m Message)) Chat
   (match m
     ((RecvFailed) (.busy (.link c (Unlinked "agentd stopped answering.")) false))
     ((Message from b)
@@ -333,31 +507,48 @@
             (eq tag (tag_say)) (.busy (.items c (cons (INote (UiLineBad) (agent_why (msg_text b))) (.items c))) false)
             (.items c (cons (INote (UiLineBad) (agent_why (msg_text b))) (.items c))))))))
 
-; The entry said, if it may be: asked of agentd, the entry emptied, and
-; a turn taken to run until agentd says otherwise.
-(def sent ((w UiWin) (c Chat)) (UiStepped Chat)
-  (if (not (can_send c))
-      (UiStepped w c)
-      (let w2 (ui_win_ask w (tag_say) (.port c) (agent_say_body "app" (said_text c)))
-        (UiStepped w2 (.busy (.tfirst (.first (.entry c (UiEntryText "" 0)) -1) -1) true)))))
-
 ; agentd looked for: its conversation opened, its notices to the app's
 ; port, made once, and the transcript emptied for what it tells; or,
 ; with no agentd, why not.
 (def linking ((w UiWin) (c Chat)) (UiStepped Chat)
   (match (name_lookup "agent")
-    ((NotFound) (UiStepped w (.link c (Unlinked "No agentd serves the agent: the board has no /etc/agent/config, or the agent has not started yet."))))
+    ((NotFound) (UiStepped w (.link c (Unlinked (no_agentd)))))
     ((Found port)
       (let np (if (gt (.np c) 0) (.np c) (port_new))
         (if (lt np 0)
             (UiStepped w (.link c (Unlinked "No port to hear the agent on.")))
             (let (w2 (ui_win_ports w (cons np (nil int)))
                   w3 (ui_win_ask w2 (tag_open) port (agent_open_body np)))
-              (UiStepped w3 (Chat (Linking) port np (nil Item) (nil Item) (.entry c) false -1 -1 0))))))))
+              (UiStepped w3 (.np (.port (.tools (.tfirst (.first (.busy (.log (.items (.link c (Linking)) (nil Item)) (nil Item)) false) -1) -1) 0) port) np))))))))
+
+; Why the window is unlinked when no agentd serves the agent.
+(def no_agentd () (list int)
+  "No agentd serves the agent: the board has no /etc/agent/config, or the agent has not started yet.")
 
 ; ------------------------------------------------------------------ loop
+
+; A step of the window w: the window's own, then the images read on.
+(def chat_step ((c Chat) (action (list int)) (ev UiEvent) (w UiWin)) (UiStepped Chat)
+  (match (chat_win_step c action ev w) ((UiStepped w2 c2) (fetching w2 c2))))
+
+; The window's part of a step: as it opens, its entry focused and
+; agentd looked for; the entry, when it may be said, asked of agentd;
+; Stop asked while a turn runs; Retry; either pane scrolled, as w's
+; scrollers say; idle work's turn an image decoded; and the app updated
+; by anything else.
+(def chat_win_step ((c Chat) (action (list int)) (ev UiEvent) (w UiWin)) (UiStepped Chat)
+  (let (conv_p (append (conv_prefix) ".")
+        tools_p (append (tools_prefix) "."))
+    (if (eq action (ui_start_action)) (linking (ui_win_focusing w (append (entry_name) ".entry")) c)
+        (and (sends action) (can_send c)) (UiStepped (ui_win_ask w (tag_say) (.port c) (agent_say_body "app" (said_text c))) (said c))
+        (and (eq action "app.stop") (.busy c)) (UiStepped (ui_win_ask w (tag_stop) (.port c) (agent_stop_body)) c)
+        (eq action "app.retry") (linking w c)
+        (ui_is_idle ev) (UiStepped w (decoded c))
+        (starts_with action conv_p) (UiStepped w (.first c (ui_lines_first (.first c) (conv_prefix) action (ui_win_scroller w (conv_prefix)))))
+        (and (starts_with action tools_p) (not (starts_with action (tool_actions)))) (UiStepped w (.tfirst c (ui_lines_first (.tfirst c) (tools_prefix) action (ui_win_scroller w (tools_prefix)))))
+        (UiStepped w (chat_update c action ev)))))
 
 ; The entry point: the window opened, its entry focused and agentd
 ; looked for as it opens, and the window served until it is closed.
 (def chat () int
-  (ui_run "chat" "Agent" 960 560 (chat_new) chat_view chat_update))
+  (ui_run "chat" "Agent" 960 560 (chat_new) chat_view chat_step))

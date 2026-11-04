@@ -1,0 +1,152 @@
+; inflate_test.l0 -- tests of inflate.l0: streams Python's zlib made, of
+; each kind of block, streams written by hand to fail each way, and
+; png.l0's stored blocks read back.
+
+; The bytes the hex digits s spell, two a byte.
+(def unhex ((s (list int))) bytes
+  (bytes_from_list (rev (unhex_onto s (nil int)))))
+
+; unhex's loop: each pair's byte onto acc, reversed.
+(def unhex_onto ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s)
+      acc
+      (unhex_onto (tail (tail s)) (cons (add (mul 16 (hex_val (head s))) (hex_val (head (tail s)))) acc))))
+
+; The first n of a's bytes as a string.
+(def out_text ((a (array int)) (n int)) (list int)
+  (out_text_onto a (sub n 1) (nil int)))
+
+; out_text's loop: byte i and those before it onto acc.
+(def out_text_onto ((a (array int)) (i int) (acc (list int))) (list int)
+  (if (lt i 0) acc (out_text_onto a (sub i 1) (cons (array_get a i) acc))))
+
+; What a decoding gave, as text: its bytes and where it ended, or why it
+; failed.
+(def inflated_text ((r (Result Inflated InflateFault))) (list int)
+  (match r
+    ((Ok v) (append (out_text (.out v) (.len v)) (append " @" (digits (.end v)))))
+    ((Err f) (append "error: " (inflate_why f)))))
+
+; The zlib stream of hex digits z, decoded.
+(def zlib_text ((z (list int))) (list int)
+  (inflated_text (inflate_zlib (unhex z) 0 0)))
+
+; Python's zlib.compress(b"hello", 0): one stored block.
+(def test_stored () int
+  (check_str "stored" (zlib_text "7801010500faff68656c6c6f062c0215") "hello @16"))
+
+; zlib.compress(b"hello hello hello hello", 9): a fixed-Huffman block,
+; its matches reaching back six bytes.
+(def test_fixed () int
+  (check_str "fixed" (zlib_text "78dacb48cdc9c957c8402701680308b1") "hello hello hello hello @16"))
+
+; The twelve lines zlib.compress(t, 9) packed into a dynamic-Huffman
+; block of 128 bytes, 681 of them.
+(def dynamic_lines () (list int)
+  (rev (dynamic_lines_onto 0 (nil int))))
+
+; dynamic_lines's loop: line i on, onto acc. Each ends in i·i mod 97.
+(def dynamic_lines_onto ((i int) (acc (list int))) (list int)
+  (if (ge i 12)
+      acc
+      (dynamic_lines_onto (add i 1)
+                          (push "\n" (push (digits (mod (mul i i) 97)) (push " of the quick brown fox jumps over the lazy dog " (push (digits i) (push "line " acc))))))))
+
+; The dynamic block, Python's bytes.
+(def dynamic_hex () (list int)
+  "78da95d2d91182401004d07fa2e810d88315c2f158145d1945f1207a4a6712e8efa957737519c68c1ad2e379cab8cfc3fe82dd24ef11bd7c709eafb707e495a77fb96c972f0e72445d959f73ac73ea3ceba2bac0ba4e5da4e74c0a1b16fa46616261b08e1bfa34b663cbc26447ed58d8da171d1d9b6090ce8d8fd50acc97eaaf")
+
+; The dynamic block decodes to the lines, and its Adler-32 is
+; zlib.adler32's, 3432508079.
+(def test_dynamic () int
+  (match (inflate_zlib (unhex (dynamic_hex)) 0 0)
+    ((Ok v)
+      (add (check_str "lines" (out_text (.out v) (.len v)) (dynamic_lines))
+           (check_int "adler" (inflate_adler32 (.out v) 0 (.len v) 1 0) 3432508079)))
+    ((Err f) (fail_because "dynamic" (inflate_why f)))))
+
+; A raw stream, compressobj(9, DEFLATED, -15)'s "abcabc..." of 18: no
+; header and no check, ending at its seventh byte.
+(def test_raw () int
+  (check_str "raw" (inflated_text (inflate_raw (unhex "4b4c4a4e444500") 0 0)) "abcabcabcabcabcabc @7"))
+
+; Written by hand: a fixed block of 'a' and a match of 3 a byte back,
+; which overlaps what it copies.
+(def test_overlapping_match () int
+  (check_str "aaaa" (inflated_text (inflate_raw (unhex "4b040200") 0 0)) "aaaa @4"))
+
+; A hint smaller than the output only means the output grows.
+(def test_grows () int
+  (match (inflate_zlib (unhex (dynamic_hex)) 0 1)
+    ((Ok v) (check_int "length" (.len v) 681))
+    ((Err f) (fail_because "grows" (inflate_why f)))))
+
+; png.l0's stored blocks of 70000 bytes, two blocks, read back.
+(def test_png_stored_blocks () int
+  (let raw (bytes_from_list (rand_bytes 7 70000))
+    (match (inflate_zlib (png_zlib raw) 0 70000)
+      ((Ok v) (check_bool "same" (eq (bytes_from_list (out_text (.out v) (.len v))) raw) true))
+      ((Err f) (fail_because "stored" (inflate_why f))))))
+
+; Not zlib: a bad check, and a dictionary asked for (0x78 0x20).
+(def test_bad_header () int
+  (add (check_str "check" (zlib_text "7802") "error: not a zlib stream of deflate")
+       (check_str "dictionary" (zlib_text "782000000000") "error: not a zlib stream of deflate")))
+
+; The fixed stream with its last byte changed.
+(def test_adler_mismatch () int
+  (check_str "adler" (zlib_text "78dacb48cdc9c957c8402701680308b0") "error: the Adler-32 does not match"))
+
+; The fixed stream without its Adler-32, and the dynamic one cut short.
+(def test_past_end () int
+  (add (check_str "no check" (zlib_text "78dacb48cdc9c957c8402701") "error: the data ends too soon")
+       (check_str "cut" (inflated_text (inflate_zlib (unhex (take (dynamic_hex) 120)) 0 0)) "error: the data ends too soon")))
+
+; Block type 3, the last.
+(def test_bad_block () int
+  (check_str "type 3" (inflated_text (inflate_raw (unhex "07") 0 0)) "error: a bad block"))
+
+; A stored block whose length's complement is wrong.
+(def test_bad_stored () int
+  (check_str "nlen" (inflated_text (inflate_raw (unhex "01050000ff68656c6c6f") 0 0)) "error: a bad block"))
+
+; A fixed block's symbol 286, which is no length.
+(def test_bad_symbol () int
+  (check_str "286" (inflated_text (inflate_raw (unhex "1b0300") 0 0)) "error: a bad Huffman code"))
+
+; A fixed block whose first symbol is a match one byte back.
+(def test_bad_distance () int
+  (check_str "before the start" (inflated_text (inflate_raw (unhex "030200") 0 0)) "error: a match from before the start"))
+
+; Codes from lengths: 2, 1, 3, 3 give B 0, A 10, C 110, D 111 (RFC
+; 1951's example), here read first bit least significant: A's entries
+; are 1 and 5, B's the even ones, C's 3 and D's 7: symbol · 16 + length.
+(def test_huffman_table () int
+  (match (infl_huff (array_from (cons 2 (cons 1 (cons 3 (cons 3 (nil int))))) 0) 0 4)
+    ((Some h)
+      (add (check_int "bits" (.bits h) 3)
+           (check_str "table" (unwords (table_words (.table h) 0)) "17 2 17 35 17 2 17 51")))
+    ((None) (fail_because "table" "over-subscribed"))))
+
+; table's entries from i, in decimal.
+(def table_words ((t (array int)) (i int)) (list (list int))
+  (if (ge i (array_len t)) (nil (list int)) (cons (digits (array_get t i)) (table_words t (add i 1)))))
+
+; Three codes of length 1 are more than one bit has.
+(def test_oversubscribed () int
+  (match (infl_huff (array_new 3 1) 0 3)
+    ((Some h) (fail_because "none" "a table"))
+    ((None) (pass "none"))))
+
+; Length and distance symbols' bases and extra bits, as RFC 1951's
+; tables give them: 257 is 3, 265 11 + 1 bit, 284 227 + 5, 285 258;
+; distance 4 is 5 + 1 bit, 29 24577 + 13.
+(def test_bases () int
+  (add (check_str "lengths"
+         (unwords (cons (digits (infl_len_base 0)) (cons (digits (infl_len_base 8)) (cons (digits (infl_len_extra 8))
+           (cons (digits (infl_len_base 27)) (cons (digits (infl_len_extra 27)) (cons (digits (infl_len_base 28)) (nil (list int)))))))))
+         "3 11 1 227 5 258")
+       (check_str "distances"
+         (unwords (cons (digits (infl_dist_base 4)) (cons (digits (infl_dist_extra 4))
+           (cons (digits (infl_dist_base 29)) (cons (digits (infl_dist_extra 29)) (nil (list int)))))))
+         "5 1 24577 13")))
