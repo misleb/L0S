@@ -152,9 +152,11 @@ as soon as it is released, to the compositor too (`detach ID VA`,
 **Drawing areas, paced too.** A program that paints a
 `UiDrawingArea` itself, as `vt` its terminal, paints the buffer
 `ui_present` gives next, as GTK's drawing areas draw into their
-window's next frame: `ui_win_drawing` gives the canvas to draw on,
-that buffer brought up to what the screen shows first, so only what
-changed need be drawn (`UiDrawOn`), or says to draw later while the
+window's next frame: `ui_win_drawing`, given the areas, gives the
+canvas to draw on, that buffer's areas brought up to what the screen
+shows first, so only what changed need be drawn (`UiDrawOn`), and
+what was copied there damaged at the next present, which brings the
+rest up to date as any window's; or it says to draw later while the
 window waits (`UiDrawLater`), the program keeping what it would have
 drawn; `ui_win_drew` tells what was drawn, which the next `ui_present`
 damages with the rest, and which the program calls after. What the area

@@ -73,3 +73,10 @@ desktop felt sluggish with five windows open, alongside 0038's stalls.
   `canvas_fill`, copies its color's bytes at most 4,096 pixels at a
   time (`fill_chunk`), as `wm` fills the whole screen with it, which
   at 4K would have made 33 MB of bytes at once.
+- 2026-11-04: a first look on the Pi 5 at 3840×2160, not step 4's run:
+  the `slow step` lines' paint, Files and System Monitor in ordinary
+  use, before this goal (the TFTP image of `5e4d97c`): Files 4 to 37 ms,
+  once 184 as a buffer of the whole screen was made, System Monitor 11
+  to 30 ms; after (`make release` from `aca5265`): Files 8 to 39 ms. The
+  steps were not the same, and only those over 16 ms are said, so this
+  shows no gain either way; step 4 is to compare the same steps.

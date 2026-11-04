@@ -215,8 +215,10 @@ release of the other, which `ui_route` takes (`ui.frame`,
 `ui.release`). While resized it waits for no frame and makes a third
 buffer rather than wait for a release, given up (`detach`) once it is
 not resized (roadmap 0039). A program drawing a `UiDrawingArea` (`vt`)
-draws on the canvas `ui_win_drawing` gives (the buffer painted next,
-brought up to date), or later while the window waits, keeping what is
+draws on the canvas `ui_win_drawing w AREAS` gives (the buffer painted
+next, its areas brought up to date; never copy outside them, where a
+corner `hvs` cut in the buffer shown would land in a grown window's
+header bar), or later while the window waits, keeping what is
 due; tells `ui_win_drew`; then calls `ui_present`, which shows it. It
 draws all of the area again when `ui_win_lost` changes. Never draw on
 `.canvas`, the buffer shown.
