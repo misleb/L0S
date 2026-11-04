@@ -7,7 +7,9 @@ session gives: init (its apiKeySource FAKE_CLAUDE_KEY_SOURCE, none unless
 set), an assistant's text and tool use, and after FAKE_CLAUDE_SLEEP
 seconds a result, "built NAME". With FAKE_CLAUDE_EDIT, a path in its
 L0S tree (L0S_TREE), it adds a line to that file, as a session changing
-a library in place. With FAKE_CLAUDE_PREVIEW, a PNG's path, it first
+a library in place; with FAKE_CLAUDE_RESOLVE, another such path, it
+drops that file's conflict markers, keeping both sides, as a session
+resolving the merge it was told of. With FAKE_CLAUDE_PREVIEW, a PNG's path, it first
 copies that to preview/main.png, as l0s-app-preview paints a scene,
 before it says anything, so the builder finds it at its first line; with
 FAKE_CLAUDE_PREVIEW_LATE too, a second after its tool use instead, then
@@ -58,6 +60,14 @@ def main(argv):
     if preview and late:
         time.sleep(1)
         previewed(preview)
+    resolve = os.environ.get("FAKE_CLAUDE_RESOLVE")
+    if resolve:
+        p = os.path.join(os.environ["L0S_TREE"], resolve)
+        with open(p) as f:
+            kept = [x for x in f.read().splitlines(True)
+                    if not (x.startswith(("<<<<<<< ", ">>>>>>> ")) or x.rstrip("\n") == "=======")]
+        with open(p, "w") as f:
+            f.write("".join(kept))
     edit = os.environ.get("FAKE_CLAUDE_EDIT")
     if edit:
         with open(os.path.join(os.environ["L0S_TREE"], edit), "a") as f:

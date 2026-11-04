@@ -528,7 +528,8 @@ class Building(unittest.IsolatedAsyncioTestCase):
         self.env = {"FAKE_CLAUDE_LOG": self.log, "ANTHROPIC_API_KEY": KEY}
         self.saved = {k: os.environ.get(k) for k in list(self.env) + ["FAKE_CLAUDE_KEY_SOURCE", "FAKE_CLAUDE_BUILD",
                                                                       "FAKE_CLAUDE_SLEEP", "FAKE_CLAUDE_EDIT",
-                                                                      "FAKE_CLAUDE_PREVIEW", "FAKE_CLAUDE_PREVIEW_LATE"]}
+                                                                      "FAKE_CLAUDE_PREVIEW", "FAKE_CLAUDE_PREVIEW_LATE",
+                                                                      "FAKE_CLAUDE_RESOLVE"]}
         os.environ.update(self.env)
         self.repo = self.repo_made() if self.with_repo else None
         self.builder = builders.Builder(os.path.join(self.tmp.name, "apps"), cli=[sys.executable, FAKE], repo=self.repo)
@@ -719,6 +720,77 @@ class BuildingTree(Building):
         events, _ = events_of((await self.build(prompt="again"))[1])
         self.assertEqual(self.branch_log(), ["one"])
         self.assertEqual(events[-1][1]["summary"], "built clock")
+
+    def main_committed(self, path, line):
+        """A commit on the repository's main, line added to path."""
+        with open(os.path.join(self.repo, path), "a") as f:
+            f.write(line + "\n")
+        for args in (["add", path], ["commit", "-q", "-m", "main: " + line]):
+            builders.git(self.repo, *args)
+
+    def tree_file(self, path):
+        with open(os.path.join(self.tmp.name, "apps", "clock", "l0s", path)) as f:
+            return f.read()
+
+    def has_main(self):
+        return builders.git(self.repo, "merge-base", "--is-ancestor", "main", "app/clock")[0] == 0
+
+    async def conflicted(self):
+        """A build that changed lib.txt on app/clock, then main changing
+        it in the same place."""
+        os.environ["FAKE_CLAUDE_EDIT"] = "lib.txt"
+        await self.build()
+        del os.environ["FAKE_CLAUDE_EDIT"]
+        self.main_committed("lib.txt", "changed on main")
+
+    async def test_main_merged(self):
+        await self.build()
+        self.main_committed("news.txt", "new on main")
+        events, _ = events_of((await self.build(prompt="again"))[1])
+        self.assertIn(("progress", {"text": "main merged into app/clock: 1 commits"}), events)
+        self.assertEqual(events[-1][0], "done")
+        self.assertTrue(self.has_main())
+        self.assertEqual(self.tree_file("news.txt"), "new on main\n")
+
+    async def test_main_already_in(self):
+        await self.build()
+        events, _ = events_of((await self.build(prompt="again"))[1])
+        self.assertNotIn("merged", " ".join(e.get("text", "") for k, e in events if k == "progress"))
+
+    async def test_conflict_resolved(self):
+        await self.conflicted()
+        os.environ["FAKE_CLAUDE_RESOLVE"] = "lib.txt"
+        events, _ = events_of((await self.build(prompt="again"))[1])
+        self.assertIn(("progress", {"text": "main merged into app/clock: 1 commits, with conflicts in lib.txt"}), events)
+        self.assertEqual(events[-1][0], "done")
+        # The session was told which file, before the request.
+        a = self.started()[-1]["argv"]
+        p = a[a.index("-p") + 1]
+        self.assertIn("/apps/clock/l0s/lib.txt", p)
+        self.assertTrue(p.endswith("Then do\nwhat is asked:\n\nagain"))
+        # Both sides kept, the merge committed with the build.
+        self.assertEqual(self.tree_file("lib.txt"), "a library\nchanged for clock\nchanged on main\n")
+        self.assertTrue(self.has_main())
+        self.assertEqual(self.branch_log()[0], "app clock: again")
+
+    async def test_conflict_left(self):
+        await self.conflicted()
+        events, _ = events_of((await self.build(prompt="again"))[1])
+        self.assertEqual(events[-1], ("failed", {"why": "the session left conflict markers in lib.txt; "
+                                                        "the merge of main waits for the next build"}))
+        self.assertFalse(self.has_main())
+        # The next build is told of it again, and resolves it.
+        os.environ["FAKE_CLAUDE_RESOLVE"] = "lib.txt"
+        events, _ = events_of((await self.build(prompt="once more"))[1])
+        self.assertIn(("progress", {"text": "main's merge into app/clock still has conflicts: lib.txt"}), events)
+        self.assertEqual(events[-1][0], "done")
+        self.assertTrue(self.has_main())
+
+    async def test_cut_from_main(self):
+        for args in (["switch", "-q", "-c", "other"], ["commit", "-q", "--allow-empty", "-m", "other's"]):
+            builders.git(self.repo, *args)
+        await self.build()
+        self.assertEqual(self.branch_log(), ["one"])
 
     async def test_tree_is_the_sessions(self):
         await self.build()

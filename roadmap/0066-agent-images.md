@@ -47,6 +47,12 @@ model cannot show the person an image either.
   `agent_build` shows the preview with it and is refused on the
   program.
 - [x] The Agent app's screen test showing one: `tests/agent.sh`.
+- [x] Each build on the toolkit as it is now: before the session, the
+  builder merges `main` into the app's branch (a worktree is cut from
+  it, not the checkout's HEAD); a conflict is the session's to resolve
+  first, told in its prompt, and the build fails while a conflict
+  marker is left, the merge kept for the next; the proxy's tests with
+  the stand-in.
 
 ## Spec changes
 
@@ -63,3 +69,8 @@ All moved into spec/.
   result: the session previewed and built in one command, printing
   nothing in between, and the builder looked only at its lines. It now
   looks every half second too.
+- 2026-11-03: reopened, as the user asked: an app's branch stays on
+  the toolkit it was cut from (calc's on 0065's), so the previews a
+  build shows are of an old toolkit. Each build now merges `main`
+  first, the session told of any conflict and the build failed while
+  a marker is left (network.md's `POST /build`): done again.

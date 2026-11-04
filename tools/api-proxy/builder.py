@@ -4,12 +4,17 @@ Claude Code session on this host, which the proxy's POST /build drives.
 Each app has a folder of its own, DIR/NAME, outside the L0S tree, so the
 session reads none of L0S's own rules for its changes: the app's source,
 written there by the session; its session ID (.session); and l0s/, a git
-worktree of L0S on the app's own branch, app/NAME, made from L0S's HEAD
-at the app's first build. The session reads L0S there and may change
-its libraries there, in place, when the app needs more than they have;
-l0s-app-build links that tree's libraries. After a build that made a
-program, whatever the session changed in the worktree is committed on
-app/NAME, for the person to merge, or not, by hand. The first prompt to
+worktree of L0S on the app's own branch, app/NAME, made from L0S's main
+at the app's first build. Before each build the builder merges main
+into app/NAME, so the app is built on L0S as it is now; a merge with
+conflicts is left in progress, the session's prompt asking it to
+resolve them first, and the build fails while a file it named still
+holds a conflict marker, the merge kept for the next build. The
+session reads L0S there and may change its libraries there, in place,
+when the app needs more than they have; l0s-app-build links that
+tree's libraries. After a build that made a program, whatever the
+session changed in the worktree is committed on app/NAME, the merge
+with it, for the person to merge, or not, by hand. The first prompt to
 an app starts its session, each later one resumes it, so a follow-up
 changes the same app.
 
@@ -61,6 +66,7 @@ NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 SCENE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 PREVIEW_MOST = 8 * 1024 * 1024
 PREVIEW_EVERY = 0.5
+BASE = "main"
 TRAILER = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 # The environment's ways to the API, none of which the session gets: it
@@ -118,6 +124,22 @@ the branch %(branch)s, which is this app's own too: read L0S there.
   the agent is given."""
 
 
+CONFLICTS = """First, before this request: the builder merged %(base)s, L0S as
+it is now, into %(branch)s, this app's branch, and the merge left
+conflicts in:
+
+%(files)s
+
+Resolve each: keep what %(base)s changed and what this app's branch
+changed, both, and remove every <<<<<<<, ======= and >>>>>>> line;
+then `l0 check` the libraries you touched as you would any change. You
+cannot run git: the builder commits the merge once the app is built,
+and fails the build while a marker is left in one of them. Then do
+what is asked:
+
+%(prompt)s"""
+
+
 def name_ok(name):
     """Whether name may be an app's: a program's name on L0S, lowercase."""
     return bool(NAME.match(name or ""))
@@ -133,12 +155,13 @@ class Builder:
     """Apps' folders under root, built by sessions of cli (an argv
     prefix, claude unless given) on model at effort, each with a
     worktree of the git repository repo (L0S unless given; None for
-    none, the session then reading L0S itself)."""
+    none, the session then reading L0S itself), its branch made from
+    and merged with base."""
 
     def __init__(self, root, model=DEFAULT_MODEL, effort=DEFAULT_EFFORT, cli=("claude",), timeout=DEFAULT_TIMEOUT,
-                 repo=L0S):
+                 repo=L0S, base=BASE):
         self.root, self.model, self.effort, self.cli, self.timeout = root, model, effort, list(cli), timeout
-        self.repo = repo
+        self.repo, self.base = repo, base
         self.busy = False
 
     def folder(self, name):
@@ -162,34 +185,72 @@ class Builder:
 
     def tree_made(self, name):
         """The app's worktree made, if it is not there: on its branch,
-        which is made from the repository's HEAD if it is not there
-        either. Why not, or empty."""
+        which is made from base if it is not there either. Why not, or
+        empty."""
         t = self.tree(name)
         if not self.repo or os.path.exists(t):
             return ""
         b = self.branch(name)
         code, _ = git(self.repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + b)
         code, out = (git(self.repo, "worktree", "add", t, b) if code == 0
-                     else git(self.repo, "worktree", "add", "-b", b, t, "HEAD"))
+                     else git(self.repo, "worktree", "add", "-b", b, t, self.base))
         return "" if code == 0 else "the worktree for %s could not be made: %s" % (name, out)
+
+    def tree_merged(self, name):
+        """base merged into the app's branch, as (said, conflicts, why):
+        what to say of the merge, empty if base was in it already; the
+        files left in conflict, the merge then still in progress, as it
+        is too when a build before left one (its files then those still
+        holding a marker); or why it could not be merged, the merge
+        undone."""
+        if not self.repo:
+            return "", [], ""
+        t, b = self.tree(name), self.branch(name)
+        if merging(t):
+            files = marked(t, unmerged(t))
+            if not files:
+                return "%s's merge into %s is resolved, committed with this build" % (self.base, b), [], ""
+            return "%s's merge into %s still has conflicts: %s" % (self.base, b, ", ".join(files)), files, ""
+        code, _ = git(t, "merge-base", "--is-ancestor", self.base, "HEAD")
+        if code == 0:
+            return "", [], ""
+        _, n = git(t, "rev-list", "--count", "HEAD.." + self.base)
+        msg = "app %s: %s merged\n\nMerged by the app builder (roadmap 0045) before a build.\n" % (name, self.base)
+        code, out = git(t, "-c", "core.hooksPath=/dev/null", "merge", "--no-edit", "-m", msg, self.base)
+        if code == 0:
+            return "%s merged into %s: %s commits" % (self.base, b, n), [], ""
+        files = unmerged(t)
+        if files:
+            return "%s merged into %s: %s commits, with conflicts in %s" % (self.base, b, n, ", ".join(files)), files, ""
+        git(t, "merge", "--abort")
+        return "", [], "%s could not be merged into %s: %s" % (self.base, b, out)
+
+    def conflicts_prompt(self, name, files, prompt):
+        """prompt after the session's first task: the conflicts the merge
+        of base left in files, to resolve before the app."""
+        t, b = self.tree(name), self.branch(name)
+        return CONFLICTS % {"base": self.base, "branch": b, "files": "\n".join("- %s/%s" % (t, f) for f in files),
+                            "prompt": prompt}
 
     def tree_committed(self, name, prompt):
         """What the session changed in the app's worktree committed on its
         branch, hooks skipped: the files changed, none if nothing was, or
-        why not, as (files, why)."""
+        why not, as (files, why). A merge in progress is committed with
+        them, the files then those the branch changes from base's."""
         if not self.repo:
             return [], ""
         t = self.tree(name)
+        merge = merging(t)
         code, out = git(t, "add", "-A")
         if code != 0:
             return [], "the worktree's changes could not be added: " + out
-        code, out = git(t, "diff", "--cached", "--name-only")
+        code, out = git(t, "diff", "--cached", "--name-only", *(["MERGE_HEAD"] if merge else []))
         files = [f for f in out.splitlines() if f]
-        if code != 0 or not files:
+        if code != 0 or not (files or merge):
             return [], ""
         line = cut(" ".join(prompt.split()), 60)
-        msg = "app %s: %s\n\nMade by the app builder's session (roadmap 0045) for the board's agent.\n\n%s\n" % (
-            name, line, TRAILER)
+        msg = "app %s: %s\n\nMade by the app builder's session (roadmap 0045) for the board's agent%s.\n\n%s\n" % (
+            name, line, ", %s merged in, its conflicts resolved" % self.base if merge else "", TRAILER)
         code, out = git(t, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", msg)
         return (files, "") if code == 0 else ([], "the worktree's changes could not be committed: " + out)
 
@@ -232,6 +293,12 @@ class Builder:
         if why:
             yield ("failed", why)
             return
+        said, conflicts, why = self.tree_merged(name)
+        if why:
+            yield ("failed", why)
+            return
+        if said:
+            yield ("progress", said)
         old = self.session_of(name)
         session = old or str(uuid.uuid4())
         if not old:
@@ -240,7 +307,8 @@ class Builder:
         before = os.path.getmtime(os.path.join(d, name)) if os.path.exists(os.path.join(d, name)) else None
         seen = previews_seen(d)
         proc = await asyncio.create_subprocess_exec(
-            *self.command(name, prompt, session, old is not None), cwd=d, env=self.environment(os.environ, name),
+            *self.command(name, self.conflicts_prompt(name, conflicts, prompt) if conflicts else prompt, session,
+                          old is not None), cwd=d, env=self.environment(os.environ, name),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             limit=16 * 1024 * 1024)
         result, reading = None, None
@@ -291,6 +359,11 @@ class Builder:
         if result.get("is_error"):
             yield ("failed", "the session failed: %s" % (summary or result.get("subtype", "")))
             return
+        left = marked(self.tree(name), conflicts)
+        if left:
+            yield ("failed", "the session left conflict markers in %s; the merge of %s waits for the next build"
+                   % (", ".join(left), self.base))
+            return
         p = os.path.join(d, name)
         built = os.path.exists(p) and (before is None or os.path.getmtime(p) > before)
         img = self.image(name) if built else None
@@ -305,6 +378,32 @@ class Builder:
             yield ("progress", line)
             summary = summary + "\n\n" + line if summary else line
         yield ("done", summary)
+
+
+def merging(t):
+    """Whether the worktree t has a merge in progress."""
+    return git(t, "rev-parse", "--quiet", "--verify", "MERGE_HEAD")[0] == 0
+
+
+def unmerged(t):
+    """The files a merge in t left in conflict, not yet added."""
+    _, out = git(t, "diff", "--name-only", "--diff-filter=U")
+    return [f for f in out.splitlines() if f]
+
+
+def marked(t, files):
+    """Those of files, in the worktree t, that still hold a line of a
+    conflict's markers."""
+    out = []
+    for f in files:
+        try:
+            with open(os.path.join(t, f), errors="replace") as g:
+                lines = g.read().splitlines()
+        except OSError:
+            continue
+        if any(x.startswith(("<<<<<<< ", ">>>>>>> ")) or x == "=======" for x in lines):
+            out.append(f)
+    return out
 
 
 def previews_seen(d):
