@@ -291,6 +291,8 @@ ENCODER := $(WHISTLE) user/lib/speech/encoder.l0
 DECODER := $(ENCODER) user/lib/speech/decoder.l0
 TRANSCRIBE := $(WAV) $(DECODER) user/lib/speech/transcribe.l0
 MICLIB  := user/lib/proto/mic.l0
+# The speech protocol, the speech service's, and its client.
+SPEECHLIB := user/lib/proto/speech.l0
 PCILIB  := user/lib/proto/pci.l0
 
 # The partition tables, GPT, and the UUIDs and CRC-32 it needs, and
@@ -369,6 +371,7 @@ LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
 LIBS_play       := $(AUDIOLIB) $(WAV) $(PCM)
 LIBS_rec        := $(MICLIB) $(WAV)
 LIBS_listen     := $(TRANSCRIBE)
+LIBS_speech     := $(TRANSCRIBE) $(MICLIB) $(AGENTLIB) $(SPEECHLIB) $(RECT) $(WMLIB)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS)
 LIBS_init       := $(PATHS)
@@ -380,7 +383,7 @@ LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_todo       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_calc       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
-LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB) $(PATHS) $(PNGREAD)
+LIBS_chat       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(AGENTLIB) $(SPEECHLIB) $(PATHS) $(PNGREAD)
 LIBS_about      := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_installer  := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(RELEASE) $(BOOTLOADER)
 LIBS_fontview   := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
@@ -600,6 +603,7 @@ $(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)
 $(call l0_test,$(ULIB) $(HTTP) user/lib/proto/httpc_test.l0)
 $(call l0_test,$(ULIB) $(MODELLIB) user/lib/proto/model_test.l0)
 $(call l0_test,$(ULIB) $(AGENTLIB) user/lib/proto/agent_test.l0)
+$(call l0_test,$(ULIB) $(SPEECHLIB) user/lib/proto/speech_test.l0)
 $(call l0_test,$(ULIB) $(AGENTHOME) user/lib/sys/agenthome_test.l0)
 # agenthome's tests write a home's files and history under build/, as
 # this host has no fs to make its directories.

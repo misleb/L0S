@@ -1,0 +1,369 @@
+; speech.l0 -- the speech service (roadmap 0061): what is said to the
+; board, heard by Whistle (speech/transcribe.l0) and said to the agent,
+; agentd, as say speech, so the model is told it came from speech. It
+; grabs a key of the compositor (wm's grab), F12 unless told another:
+; held, the microphone (mic, usb-audio's) is heard until it is let go;
+; tapped, under 0.3 s, it is heard until the speaker stops, by its
+; loudness (endpoint.l0), or the key is pressed again. A phrase is at
+; most 30 s, what Whistle hears in one pass. Its text is said to the
+; agent once heard; while a turn runs (agentd's error: busy) it is held
+; and asked again each second, a newer phrase in its place. It serves
+; speech (proto/speech.l0), its notices telling the Agent app where it
+; stands, and is its own client:
+;
+;   speech [-m MODEL] [-k CODE]
+;                   the service, Whistle read from MODEL, not
+;                   /Volumes/data/speech/whistle.cact, its key Linux's
+;                   code CODE; with no model it says so and exits 0, as
+;                   a driver with no device does
+;   speech listen | stop | hear PATH | mute on|off
+;                   asked of the service running, as proto/speech.l0
+;                   has them; a refusal said on standard error, and 1
+;
+; It waits on three ports at once (port_receive_set): its own, where
+; requests and the kernel's alarm come; the key's, where wm sends the
+; key; and the microphone's, its answers and what it hears. The model is
+; read once, before it registers: 14.6 s on a Pi 5.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (fail_as "speech" why))
+
+; Says what it found or did.
+(def note ((what (list int))) int (info_as "speech" what))
+
+; Where the model is if no MODEL is given, as the installer puts it, and
+; the key if no CODE is: F12.
+(def speech_model () (list int) "/Volumes/data/speech/whistle.cact")
+(def speech_key () int 88)
+
+; How short a press is a tap, 0.3 s; how long after the agent was busy
+; a held text is said again, 1 s; and how long the service waits for
+; another server.
+(def tap_ns () int 300000000)
+(def retry_ns () int 1000000000)
+(def server_wait_ns () int 1000000000)
+
+; How long speech's own command waits for the service to register: a
+; minute, as it reads the model first, 37 s on QEMU.
+(def tell_wait_ns () int 60000000000)
+
+; The rate speech asks the microphone for, Whistle's.
+(def speech_rate () int 16000)
+
+; ----------------------------------------------------------- arguments
+
+; What the arguments ask: the service, its model and key; a request of
+; the service running; or why they ask nothing.
+(data Ask (AskServe (list int) int) (AskTell (list int)) (AskWrong (list int)))
+
+; The arguments as is asked: -m MODEL and -k CODE, in any order, or a
+; request's words.
+(def ask_of ((as (list (list int)))) Ask
+  (ask_from as (speech_model) (speech_key)))
+(def ask_from ((as (list (list int))) (model (list int)) (key int)) Ask
+  (if (is_empty as) (AskServe model key)
+      (and (eq (head as) "-m") (ge (length as) 2)) (ask_from (drop as 2) (nth as 1) key)
+      (and (eq (head as) "-k") (and (ge (length as) 2) (is_number (nth as 1)))) (ask_from (drop as 2) model (int_prefix (nth as 1) 0))
+      (match (speech_req_of as)
+        ((SpWrong why) (AskWrong "usage: speech [-m MODEL] [-k CODE] | speech listen | stop | hear PATH | mute on|off"))
+        ((SpOpen p) (AskWrong "open is for a program"))
+        ((SpClose p) (AskWrong "close is for a program"))
+        ((SpListen) (AskTell (unwords as)))
+        ((SpStop) (AskTell (unwords as)))
+        ((SpHear p) (AskTell (unwords as)))
+        ((SpMute on) (AskTell (unwords as))))))
+
+; What speech does with its arguments.
+(def speech_main ((as (list (list int)))) int
+  (match (ask_of as)
+    ((AskWrong why) (complain_as "speech" why))
+    ((AskTell body)
+      (let why (speech_ask (port_new) body (tell_wait_ns))
+        (if (is_empty why) 0 (complain_as "speech" why))))
+    ((AskServe model key) (speech_serve model key))))
+
+; speech's arguments, done.
+(def speech () int (speech_main (args)))
+
+; --------------------------------------------------------------- state
+
+; Where a phrase stands: none heard; the key held since a time, on
+; clock_ns; or heard until quiet, after a tap or a listen.
+(data Mode (Idle) (Held (at int)) (Tapped))
+
+; The service: its ports (its own, the key's, the microphone's, and one
+; for answers), the model, where a phrase stands, the microphone's
+; pieces of it so far, newest first, and how many bytes, its endpointer,
+; the text held while the agent is busy (empty for none), whether it is
+; muted, the ports its notices go to, and the key.
+(data Sp (Sp (own int) (keys int) (mp int) (rp int) (l Listener) (mode Mode) (pieces (list bytes)) (n int) (ep Endpoint) (held (list int)) (muted bool) (ls (list int)) (key int)))
+
+; The word a notice of where s stands says, as an open is first told.
+(def state_word ((muted bool) (m Mode) (held (list int))) (list int)
+  (if muted "muted"
+      (not (eq m (Idle))) "listening"
+      (not (is_empty held)) "held"
+      "idle"))
+
+; What a key does, pressed (1), let go (0) or repeated (2) at now, in
+; mode m: a phrase begun, held; a phrase ended; a phrase heard on after
+; a tap, until quiet; or nothing.
+(data KeyDo (KeyBegin) (KeyEnd) (KeyTap) (KeyNone))
+
+; What the key does, value at now, in mode m: pressed while idle, a
+; phrase begun; let go within tap_ns of its press, heard on until
+; quiet; let go later, or pressed again after a tap, ended.
+(def key_do ((m Mode) (value int) (now int)) KeyDo
+  (match m
+    ((Idle) (if (eq value 1) (KeyBegin) (KeyNone)))
+    ((Tapped) (if (eq value 1) (KeyEnd) (KeyNone)))
+    ((Held at) (if (not (eq value 0)) (KeyNone) (lt (sub now at) (tap_ns)) (KeyTap) (KeyEnd)))))
+
+; Whether the phrase heard so far in mode m, as e weighs it, is over:
+; after a tap, once quiet, silent or full; held, once full.
+(def phrase_over ((m Mode) (e Endpoint)) bool
+  (match m
+    ((Idle) false)
+    ((Tapped) (not (eq (endpoint_verdict e) (EpGoing))))
+    ((Held at) (eq (endpoint_verdict e) (EpFull)))))
+
+; What the agent's answer to say means: said; busy with a turn, to say
+; again; or failed, why.
+(data SayDo (SaidOk) (SaidBusy) (SaidFailed (list int)))
+
+; What the agent's answer a to say means.
+(def say_do_of ((a (list int))) SayDo
+  (if (eq a "ok") (SaidOk)
+      (eq a "error: busy") (SaidBusy)
+      (starts_with a "error: ") (SaidFailed (drop a 7))
+      (SaidFailed (append "the agent said " a))))
+
+; The 16-bit samples of b, n of them from 0, as Whistle's floats.
+(def samples_of ((b bytes)) (array float)
+  (let n (div (bytes_len b) 2) (wav_floats b 0 n 0 (array_new n 0.0))))
+
+; What a phrase's text comes to: nothing, if it is only spaces, else the
+; text without spaces at either end.
+(def phrase_text ((t (list int))) (list int) (rev (spaces_dropped (rev (spaces_dropped t)))))
+(def spaces_dropped ((t (list int))) (list int)
+  (if (is_empty t) t (or (eq (head t) 32) (eq (head t) 10)) (spaces_dropped (tail t)) t))
+
+; ------------------------------------------------------------- serving
+
+; The model at path read, its key grabbed, speech registered and served.
+(def speech_serve ((path (list int)) (key int)) int
+  (match (model_read path (model_tries))
+    ((Err why) (note (append "no model, " (append path (append ": " (append why "; not listening"))))))
+    ((Ok mb)
+      (let t0 (clock_ns)
+        (match (whistle_listener mb)
+          ((Err why) (complain (append path (append ": " why))))
+          ((Ok l) (speech_ports l key (div (sub (clock_ns) t0) 1000000))))))))
+
+; The file at path, read; if it is on a volume, /Volumes/LABEL, asked
+; again every 100 ms, tries times at most, as the volume may not be
+; mounted yet when speech starts.
+(def model_read ((path (list int)) (tries int)) (Result bytes (list int))
+  (match (read_whole path)
+    ((Ok b) ((Ok bytes (list int)) b))
+    ((Err why)
+      (if (or (le tries 0) (not (starts_with path "/Volumes/")))
+          ((Err bytes (list int)) why)
+          (let s (sleep_ns 100000000) (model_read path (sub tries 1)))))))
+
+; How long the model's volume may take to be mounted: 10 s, of 100 ms.
+(def model_tries () int 100)
+
+; Its ports made and set, the key grabbed and the name registered, the
+; model l ready, read in ms milliseconds; then served.
+(def speech_ports ((l Listener) (key int) (ms int)) int
+  (let (own (port_new) keys (port_new) mp (port_new) rp (port_new))
+    (match (port_set (cons own (cons keys (cons mp (nil int)))))
+      ((PortSetNotYours) (complain "cannot wait on its ports"))
+      ((PortSetSize) (complain "cannot wait on its ports"))
+      ((PortSetMade)
+        (let (g (key_grabbed key keys)
+              why (name_register_or_why own (speech_name)))
+          (if (not (is_empty why))
+              (complain why)
+              (let n (note (serving_line ms key g))
+                (serve (Sp own keys mp rp l (Idle) (nil bytes) 0 (endpoint_new) "" false (nil int) key)))))))))
+
+; The key grabbed of the compositor, its presses to keys: empty, or why
+; not.
+(def key_grabbed ((key int) (keys int)) (list int)
+  (match (compositor_open)
+    ((NoCompositor why) why)
+    ((Compositor port rp pid s) (compositor_grab (Compositor port rp pid s) key keys))))
+
+; What speech says once it serves: how long the model took, and its key,
+; or why it has none.
+(def serving_line ((ms int) (key int) (why (list int))) (list int)
+  (append "Whistle read in " (append (digits ms) (append " ms, "
+    (append (if (is_empty why) (append "the key " (digits key)) (append "no key: " why)) ", serving speech")))))
+
+; Each message on speech's ports dealt with, for ever.
+(def serve ((s Sp)) int
+  (match (port_receive_set)
+    ((SetRecvFailed) (complain "its ports failed"))
+    ((SetMessage p m)
+      (match m
+        ((RecvFailed) (serve s))
+        ((Message from b) (serve (heard s p from b)))))))
+
+; s after a message, its bytes b from from, came on port p.
+(def heard ((s Sp) (p int) (from int) (b bytes)) Sp
+  (if (eq p (.mp s)) (if (mic_is_pcm b) (pcm_heard s b) s)
+      (eq p (.keys s)) (match (key_event_of (Message from b)) ((Some k) (keyed s (.value k))) ((None) s))
+      (eq from 0) (if (is_alarm_notice (Message from b)) (retried s) s)
+      (requested s b)))
+
+; ------------------------------------------------------------- notices
+
+; s with notice told to every port open.
+(def told ((s Sp) (notice bytes)) Sp (.ls s (listeners_tell_bytes (.ls s) notice)))
+(def told_state ((s Sp) (state (list int))) Sp (told s (speech_state_notice state)))
+(def told_error ((s Sp) (why (list int))) Sp
+  (let w (warn_as "speech" why) (told s (speech_error_notice (bytes_from_list why)))))
+
+; --------------------------------------------------------------- the key
+
+; s after its key went down, up or repeated.
+(def keyed ((s Sp) (value int)) Sp
+  (if (.muted s)
+      s
+      (match (key_do (.mode s) value (clock_ns))
+        ((KeyBegin) (begun s (Held (clock_ns))))
+        ((KeyEnd) (ended s))
+        ((KeyTap) (.mode s (Tapped)))
+        ((KeyNone) s))))
+
+; A phrase begun in mode m: the microphone asked for Whistle's samples,
+; to mp, and the phrase heard from nothing.
+(def begun ((s Sp) (m Mode)) Sp
+  (match (name_wait (mic_name) (server_wait_ns))
+    ((NotFound) (told_error s "no microphone; is usb-audio running?"))
+    ((Found mic)
+      (match (port_ask mic (.mp s) (append "listen " (digits (speech_rate))) "mic")
+        ((AskFailed why) (told_error s why))
+        ((Asked from b)
+          (match (mic_format_of (msg_text b))
+            ((Err why) (told_error s why))
+            ((Ok f)
+              (if (not (and (eq (.rate f) (speech_rate)) (and (eq (.channels f) 1) (eq (.size f) 2))))
+                  (let st (mic_stopped s) (told_error s "the microphone gives no 16 kHz of one channel"))
+                  (told_state (Sp (.own s) (.keys s) (.mp s) (.rp s) (.l s) m (nil bytes) 0 (endpoint_new) (.held s) (.muted s) (.ls s) (.key s)) "listening")))))))))
+
+; What the microphone heard, its message's bytes b, kept and weighed;
+; the phrase ended once it is over.
+(def pcm_heard ((s Sp) (b bytes)) Sp
+  (if (eq (.mode s) (Idle))
+      s
+      (let (at (mic_pcm_at)
+            e (endpoint_fed (.ep s) b at (bytes_len b))
+            p (bytes_slice b at (bytes_len b))
+            s2 (.ep (.n (.pieces s (cons p (.pieces s))) (add (.n s) (bytes_len p))) e))
+        (if (phrase_over (.mode s2) (.ep s2)) (ended s2) s2))))
+
+; The phrase ended: the microphone stopped, and what it heard, if any
+; speech, made text and said.
+(def ended ((s Sp)) Sp
+  (let (st (mic_stopped s)
+        silent (eq (endpoint_verdict (.ep s)) (EpSilent))
+        b (bytes_concat (rev (.pieces s)))
+        s2 (.n (.pieces (.mode s (Idle)) (nil bytes)) 0))
+    (if (or silent (lt (div (bytes_len b) 2) (transcribe_least)))
+        (told_state s2 (state_word (.muted s2) (Idle) (.held s2)))
+        (hear_samples s2 (samples_of b)))))
+
+; The microphone asked to stop, its answer awaited on mp past the
+; samples still coming: 0.
+(def mic_stopped ((s Sp)) int
+  (match (name_wait (mic_name) 0)
+    ((NotFound) 0)
+    ((Found mic)
+      (match (port_send mic (request (.mp s) "stop"))
+        ((Sent) (stop_answered (.mp s)))
+        ((SendNoPort) 0)
+        ((SendFull) 0)
+        ((SendTooBig) 0)))))
+
+; The next message on mp that is no sample: stop's answer.
+(def stop_answered ((mp int)) int
+  (match (port_receive mp)
+    ((RecvFailed) 0)
+    ((Message from b) (if (mic_is_pcm b) (stop_answered mp) 0))))
+
+; ------------------------------------------------------------- hearing
+
+; The samples xs made text by Whistle, and the text said; nothing heard
+; is said so.
+(def hear_samples ((s Sp) (xs (array float))) Sp
+  (let (s2 (told_state s "hearing")
+        t (phrase_text (whistle_transcribe (.l s2) xs)))
+    (if (is_empty t)
+        (told_state s2 "idle")
+        (said (told s2 (speech_heard_notice (bytes_from_list t))) t))))
+
+; The text t said to the agent: told said; held, while it is busy, and
+; asked again in retry_ns; or why not.
+(def said ((s Sp) (t (list int))) Sp
+  (match (name_wait "agent" (server_wait_ns))
+    ((NotFound) (told_error (.held s "") "the agent is not running"))
+    ((Found agent)
+      (match (port_ask agent (.rp s) (agent_say_body "speech" t) "the agent")
+        ((AskFailed why) (told_error (.held s "") why))
+        ((Asked from b)
+          (match (say_do_of (msg_text b))
+            ((SaidOk) (told_state (.held s "") "said"))
+            ((SaidBusy) (let a (alarm_at (.own s) (add (clock_ns) (retry_ns))) (told_state (.held s t) "held")))
+            ((SaidFailed why) (told_error (.held s "") why))))))))
+
+; The kernel's alarm: a text held said again.
+(def retried ((s Sp)) Sp
+  (let t (.held s) (if (is_empty t) s (said s t))))
+
+; ------------------------------------------------------------ requests
+
+; A request, its message's bytes b, answered.
+(def requested ((s Sp) (b bytes)) Sp
+  (match (speech_req_of (split_spaces (msg_text_from b 4)))
+    ((SpWrong why) (answered s b (error_reply why)))
+    ((SpListen)
+      (if (.muted s) (answered s b "error: muted")
+          (not (eq (.mode s) (Idle))) (answered s b "error: busy")
+          (answered (begun s (Tapped)) b "ok")))
+    ((SpStop) (answered (if (eq (.mode s) (Idle)) s (ended s)) b "ok"))
+    ((SpHear path) (if (eq (.mode s) (Idle)) (heard_file s b path) (answered s b "error: busy")))
+    ((SpMute on) (answered (muted s on) b "ok"))
+    ((SpOpen p) (opened s b p))
+    ((SpClose p) (answered (.ls s (ports_without p (.ls s))) b "ok"))))
+
+; s, having answered b's request with a.
+(def answered ((s Sp) (b bytes) (a (list int))) Sp (let x (msg_answer b a) s))
+
+; The WAV file at path heard as a phrase, and b's request answered once
+; its text is said, or why not.
+(def heard_file ((s Sp) (b bytes) (path (list int))) Sp
+  (match (read_whole path)
+    ((Err why) (answered s b (error_reply (append path (append ": " why)))))
+    ((Ok wb)
+      (match (wav_speech wb)
+        ((Err why) (answered s b (error_reply (append path (append ": " why)))))
+        ((Ok xs) (answered (hear_samples s xs) b "ok"))))))
+
+; Muted or not: a phrase being heard dropped, and every port told.
+(def muted ((s Sp) (on bool)) Sp
+  (let s2 (if (and on (not (eq (.mode s) (Idle)))) (let st (mic_stopped s) (.n (.pieces (.mode s (Idle)) (nil bytes)) 0)) s)
+    (told_state (.muted s2 on) (state_word on (Idle) (.held s2)))))
+
+; NPORT opened, from b's request: told where speech stands, and its
+; notices from then.
+(def opened ((s Sp) (b bytes) (p int)) Sp
+  (let (word (state_word (.muted s) (.mode s) (.held s))
+        st (port_send_bytes p (speech_state_notice word) 0 (bytes_len (speech_state_notice word))))
+    (answered (.ls s (listener_add (.ls s) p st)) b "ok")))
+
+; ls without p.
+(def ports_without ((p int) (ls (list int))) (list int)
+  (if (is_empty ls) ls (eq (head ls) p) (tail ls) (cons (head ls) (ports_without p (tail ls)))))

@@ -118,7 +118,22 @@ Each case of `tests/e2e/` is a directory:
   if QEMU's `usb-audio`, a speaker, is to be on it too (`QEMU_USB=audio`
   in `tools/qemu-boot.sh`);
 - `sd`, if the board is to have an SD card in a `sdhci-pci`, a blank
-  image of 64 MB made for the boot.
+  image of 64 MB made for the boot;
+- `whistle`, if the case's `etc` is to hold Whistle's model as
+  `/etc/whistle.cact`: `WHISTLE`, or else `build/fetch/whistle.cact`,
+  which `make release` fetches; with neither, the case says it skipped,
+  as the model is not in the project.
+
+One case is speech's: `speech` (with `whistle`, `disk`, `net` and
+`serve`), `speech`, `agentd` and the host's stand-in model, `run speech
+hear /etc/clip.wav` saying the Yeti Nano's 4 s to the agent; the
+stand-in checks its first request holds `[from speech, sent by
+/sbin/speech]` and "Testing, testing, testing, testing.", and the
+conversation `agentd` kept, shown by `cat`, holds them and its answer
+(`contains`). It takes about a minute, 40 s of it reading the model.
+`endpoint_test.l0` pins when a phrase begins and ends on pieces of
+samples made of a loudness, and `speech_test.l0` what the key does,
+held, tapped and pressed again.
 
 Three cases are USB's: `pcie`, the bus's server waiting once it has set
 the bus up; `usb`, `run lsusb` listing the keyboard and the mouse
