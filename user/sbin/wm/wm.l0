@@ -700,20 +700,29 @@
             (listening (Wm d (nil Closing) w h desk face bg (nil Win) 0 (Ptr 0 0 0 -1 -1 ((MapEmpty int (list int))) "" (TitleClick -1 0)) (NoDrag) 0 0
                            (Bar c -1 -1 (zone_utc) (app_bundles) (NoLauncher) (NoMenu) (nil Launch) (nil Grab)))))))))
 
-; Listens to the keyboard, the pointer and the clock, then serves
-; compositor.
+; Listens to the keyboard and the pointer on a port of its own, input,
+; and to the clock on another, port, then serves compositor on port,
+; waiting on both as a set. Its oldest message comes first, so input
+; passes no request that came before it, and a key typed after a window
+; was raised goes to the window raised; but a flood of requests that
+; fills port's queue crowds out no input.
 (def listening ((v Wm) ) int
-  (let (port (port_new)
-        k (listen_pid_of (input_listen "keyboard" port))
-        p (listen_pid_of (input_listen "pointer" port))
-        c (clock_listen port k p)
+  (let (input (port_new)
+        port (port_new)
+        k (listen_pid_of (input_listen "keyboard" input))
+        p (listen_pid_of (input_listen "pointer" input))
+        c (clock_listen port)
         r (name_register_or_why port "compositor"))
     (if (not (is_empty r))
         (complain r)
-        (let (fr (frames_listened v port)
-              v2 (with_menu (with_launcher (with_drivers v k p c)))
-              n (desktop_said v2 c))
-          (serve (draw_bar v2) port)))))
+        (match (port_set (cons input (cons port (nil int))))
+          ((PortSetMade)
+            (let (fr (frames_listened v port)
+                  v2 (with_menu (with_launcher (with_drivers v k p c)))
+                  n (desktop_said v2 c))
+              (serve (draw_bar v2) port)))
+          ((PortSetNotYours) (complain (port_setting_why (PortSetNotYours))))
+          ((PortSetSize) (complain (port_setting_why (PortSetSize))))))))
 
 ; The display asked to tell port its frames and releases, which wm tells
 ; the windows' clients; a display that will not is said, and wm goes on
@@ -735,43 +744,41 @@
 ; with the drivers, so is long registered when one is running.
 (def clock_wait_ns () int 1000000000)
 
-; The keyboard and the pointer are already telling port of their events,
-; kp's and pp's, so those that come before the clock's reply are dropped:
-; nothing else can send to port until it is registered.
-(def clock_listen ((port int) (kp int) (pp int)) Clocked
+; The clock listened to on port, where only the clock sends until
+; compositor is registered: the keyboard and the pointer tell their
+; events on input.
+(def clock_listen ((port int)) Clocked
   (match (name_wait "clock" (clock_wait_ns))
     ((NotFound) (unclocked))
-    ((Found c) (if (eq (port_send c (request port "listen")) (Sent)) (clock_reply port kp pp c) (unclocked)))))
+    ((Found c) (if (eq (port_send c (request port "listen")) (Sent)) (clock_reply port c) (unclocked)))))
 
 ; The clock at c's reply to listen, on port, then its zone asked.
-(def clock_reply ((port int) (kp int) (pp int) (c int)) Clocked
+(def clock_reply ((port int) (c int)) Clocked
   (match (port_receive port)
     ((RecvFailed) (unclocked))
     ((Message from b)
-      (if (or (eq from kp) (eq from pp))
-          (clock_reply port kp pp c)
-          (match (time_of (msg_text b))
-            ((Some t)
-              (if (eq (port_send c (request port "zone")) (Sent))
-                  (clock_zone_reply port kp pp (Clocked from t (zone_utc)))
-                  (Clocked from t (zone_utc))))
-            ((None) (unclocked)))))))
+      (match (time_of (msg_text b))
+        ((Some t)
+          (if (eq (port_send c (request port "zone")) (Sent))
+              (clock_zone_reply port (Clocked from t (zone_utc)))
+              (Clocked from t (zone_utc))))
+        ((None) (unclocked))))))
 
 ; The clock's answer to zone, on port: got with the zone it says. A
 ; minute's time that comes first is kept; anything else from the clock
 ; leaves the zone UTC.
-(def clock_zone_reply ((port int) (kp int) (pp int) (got Clocked)) Clocked
+(def clock_zone_reply ((port int) (got Clocked)) Clocked
   (match (port_receive port)
     ((RecvFailed) got)
     ((Message from b)
       (if (not (eq from (.pid got)))
-          (clock_zone_reply port kp pp got)
+          (clock_zone_reply port got)
           (let p (msg_text b)
             (match (zone_of p)
               ((Some z) (.zone got z))
               ((None)
                 (match (time_of p)
-                  ((Some t) (clock_zone_reply port kp pp (.t got t)))
+                  ((Some t) (clock_zone_reply port (.t got t)))
                   ((None) got)))))))))
 
 (def with_drivers ((v Wm) (k int) (p int) (c Clocked)) Wm
@@ -783,10 +790,15 @@
 
 ; --------------------------------------------------------------- serving
 
+; The oldest message on input or port, its set, handled; port is where
+; requests come and where wm is answered.
 (def serve ((v Wm) (port int)) int
-  (match (port_receive port)
-    ((RecvFailed) (complain "lost its port"))
-    ((Message from b) (took v port from b))))
+  (match (port_receive_set)
+    ((SetRecvFailed) (complain "lost its ports"))
+    ((SetMessage on m)
+      (match m
+        ((RecvFailed) (complain "lost its ports"))
+        ((Message from b) (took v port from b))))))
 
 ; A message, its bytes b, from from, handled, then the next waited for. A
 ; mouse's motion is first joined by every motion queued behind it, so the
@@ -798,16 +810,20 @@
     ((Some ev) (if (motion_joins ev) (gathered v port ev) (serve (received v port from b) port)))
     ((None) (serve (received v port from b) port))))
 
-; ev, a motion, joined by each motion waiting on port that can be, then
-; the pointer moved by them, and the first message that could not be
-; joined handled.
+; ev, a motion, joined by each motion waiting next on the set that can
+; be, then the pointer moved by them, and the first message that could
+; not be joined handled: a request that came before the next motion
+; stops it, as a press or a wheel's turn does.
 (def gathered ((v Wm) (port int) (ev PointerMotion)) int
-  (match (port_try_receive port)
-    ((RecvFailed) (serve (nudged v ev) port))
-    ((Message from b)
-      (match (motion_from v from b)
-        ((Some ev2) (if (motion_joins ev2) (if (same_buttons ev ev2) (gathered v port (motion_joined ev ev2)) (took (nudged v ev) port from b)) (took (nudged v ev) port from b)))
-        ((None) (took (nudged v ev) port from b))))))
+  (match (port_try_receive_set)
+    ((SetRecvFailed) (serve (nudged v ev) port))
+    ((SetMessage on m)
+      (match m
+        ((RecvFailed) (serve (nudged v ev) port))
+        ((Message from b)
+          (match (motion_from v from b)
+            ((Some ev2) (if (motion_joins ev2) (if (same_buttons ev ev2) (gathered v port (motion_joined ev ev2)) (took (nudged v ev) port from b)) (took (nudged v ev) port from b)))
+            ((None) (took (nudged v ev) port from b))))))))
 
 ; The mouse's motion a message from from, its bytes b, is, if from is an
 ; input driver's and it is one. One driver may serve both the keyboard

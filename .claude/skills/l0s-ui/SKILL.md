@@ -141,13 +141,16 @@ PNGs before the board), and `user/apps/todo`, the worked example.
   the toolkit routes its wheel and scrollbar as any scroller's,
   `NAME.scrollto.N`, and the program paints the scrollbar's nodes from
   `ui_drawing_scrollbar` over what it draws). `ui_layout widget rect
-  state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them;
+  state bg` lays it out into `UiNode`s; `ui_paint_nodes` paints them,
+  each node's ops cut to the node at the pixel, so an op never paints
+  past its node (a focus ring round a widget needs a node that holds it);
   `ui_hit nodes x y` gives the action under a point.
 - **`grid.l0`**: the data grid, typed cells, sorting, selection, keys,
   the wheel, down and, when its columns are wider than it, across
   (`NAME.across...`, `NAME.acrossbar...`, `NAME.acrossto.N`, how far in
-  `UiGridState`'s last field; its ops cut to its edges by
-  `ui_cut_across`), and overlay scrollbars whose sliders drag. QEMU's
+  `UiGridState`'s last field; its nodes no wider than it, so painting
+  cuts its cells at its edges), and overlay scrollbars whose sliders
+  drag. QEMU's
   tablet sends no wheel across: a screen test drags the slider.
 - **`panes.l0`**: what a window of panes needs:
   `UiSidebar` (rows of an icon, title and line on the sidebar's ground),

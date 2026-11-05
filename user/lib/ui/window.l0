@@ -1600,9 +1600,9 @@
   (ui_ops_changed (ui_ops_of old) (ui_ops_of new) full more))
 
 ; Where ops news differ from olds, and more, within full, merged.
-(def ui_ops_changed ((olds (list UiPaint)) (news (list UiPaint)) (full Rect) (more (list Rect))) (list Rect)
-  (let (gone (ui_ops_unmatched olds (ui_op_counts news ((MapEmpty UiPaint int))) (nil UiPaint))
-        came (ui_ops_unmatched news (ui_op_counts olds ((MapEmpty UiPaint int))) (nil UiPaint)))
+(def ui_ops_changed ((olds (list UiCutOp)) (news (list UiCutOp)) (full Rect) (more (list Rect))) (list Rect)
+  (let (gone (ui_ops_unmatched olds (ui_op_counts news ((MapEmpty UiCutOp int))) (nil UiCutOp))
+        came (ui_ops_unmatched news (ui_op_counts olds ((MapEmpty UiCutOp int))) (nil UiCutOp)))
     (ui_merged (ui_ops_damage gone news (ui_ops_damage came olds more)) full)))
 
 ; rs cut to full and made disjoint, each less those before it: so no
@@ -1645,18 +1645,28 @@
 ; More boxes than this are painted as one.
 (def ui_max_boxes () int 24)
 
-; Every op of ns, in order.
-(def ui_ops_of ((ns (list UiNode))) (list UiPaint) (rev (ui_ops_onto ns (nil UiPaint))))
+; An op as ui_op_key compares it, and where it paints: what of it is
+; inside its node, which painting cuts it to. Two are alike only if both
+; are, so the same text cut otherwise at a grid's edge is damage.
+(data UiCutOp (UiCutOp (op UiPaint) (cut Rect)))
+
+; Every op of ns that paints anything, in order, each with its cut.
+(def ui_ops_of ((ns (list UiNode))) (list UiCutOp) (rev (ui_ops_onto ns (nil UiCutOp))))
 
 ; ui_ops_of's loop: each node's ops onto the reversed acc.
-(def ui_ops_onto ((ns (list UiNode)) (acc (list UiPaint))) (list UiPaint)
+(def ui_ops_onto ((ns (list UiNode)) (acc (list UiCutOp))) (list UiCutOp)
   (if (is_empty ns)
       acc
-      (match (head ns) ((UiNode r ops a f) (ui_ops_onto (tail ns) (ui_paints_onto ops acc))))))
+      (match (head ns) ((UiNode r ops a f) (ui_ops_onto (tail ns) (ui_paints_onto ops r acc))))))
 
-; ops onto the reversed acc, each as ui_op_key compares it.
-(def ui_paints_onto ((ops (list UiPaint)) (acc (list UiPaint))) (list UiPaint)
-  (if (is_empty ops) acc (ui_paints_onto (tail ops) (cons (ui_op_key (head ops)) acc))))
+; ops of a node at r onto the reversed acc, each as ui_op_key compares
+; it, cut to r; one wholly outside r left out, as it paints nothing.
+(def ui_paints_onto ((ops (list UiPaint)) (r Rect) (acc (list UiCutOp))) (list UiCutOp)
+  (if (is_empty ops)
+      acc
+      (let (k (ui_op_key (head ops))
+            cut (rect_clip (ui_op_rect k) r))
+        (ui_paints_onto (tail ops) r (if (rect_empty cut) acc (cons (UiCutOp k cut) acc))))))
 
 ; op as what it paints: a line of text as the characters it shows, cut
 ; short as ui_text_smooth cuts them, in the rectangle they cover, aligned and
@@ -1677,14 +1687,14 @@
     ((UiPImage x y n d ts) op)))
 
 ; m with how many times each of ops is in it added.
-(def ui_op_counts ((ops (list UiPaint)) (m (Map UiPaint int))) (Map UiPaint int)
+(def ui_op_counts ((ops (list UiCutOp)) (m (Map UiCutOp int))) (Map UiCutOp int)
   (if (is_empty ops)
       m
       (ui_op_counts (tail ops) (map_put m (head ops) (add 1 (match (map_get m (head ops)) ((None) 0) ((Some k) k)))))))
 
 ; The ops of xs that m's counts do not match, each count matching one,
 ; onto the reversed acc: what xs paints that the other side does not.
-(def ui_ops_unmatched ((xs (list UiPaint)) (m (Map UiPaint int)) (acc (list UiPaint))) (list UiPaint)
+(def ui_ops_unmatched ((xs (list UiCutOp)) (m (Map UiCutOp int)) (acc (list UiCutOp))) (list UiCutOp)
   (if (is_empty xs)
       (rev acc)
       (match (map_get m (head xs))
@@ -1693,21 +1703,29 @@
 
 ; Where each of ops, painted on one side only, is damage against other,
 ; the ops of the other side, onto acc.
-(def ui_ops_damage ((ops (list UiPaint)) (other (list UiPaint)) (acc (list Rect))) (list Rect)
+(def ui_ops_damage ((ops (list UiCutOp)) (other (list UiCutOp)) (acc (list Rect))) (list Rect)
   (if (is_empty ops)
       acc
       (ui_ops_damage (tail ops) other (rects_rev_onto (ui_op_damage (head ops) other) acc))))
 
 ; Where op is damage: a fill where other's fills of its color do not
-; cover, anything else all of where it paints.
-(def ui_op_damage ((op UiPaint) (other (list UiPaint))) (list Rect)
-  (match op
-    ((UiPFill r c) (rects_minus (cons r (nil Rect)) (ui_fill_rects other c (nil Rect))))
-    ((UiPRound r radius c under) (cons r (nil Rect)))
-    ((UiPRing r radius c) (ui_ring_rects r radius))
-    ((UiPText r s a c f bold scale) (cons r (nil Rect)))
-    ((UiPIcon x y name c scale) (cons (ui_op_rect op) (nil Rect)))
-    ((UiPImage x y n d ts) (cons (ui_op_rect op) (nil Rect)))))
+; cover, a ring its corners and sides, anything else all of where it
+; paints, each within its cut.
+(def ui_op_damage ((op UiCutOp) (other (list UiCutOp))) (list Rect)
+  (match (.op op)
+    ((UiPFill r c) (rects_minus (cons (.cut op) (nil Rect)) (ui_fill_rects other c (nil Rect))))
+    ((UiPRound r radius c under) (cons (.cut op) (nil Rect)))
+    ((UiPRing r radius c) (ui_rects_cut (ui_ring_rects r radius) (.cut op) (nil Rect)))
+    ((UiPText r s a c f bold scale) (cons (.cut op) (nil Rect)))
+    ((UiPIcon x y name c scale) (cons (.cut op) (nil Rect)))
+    ((UiPImage x y n d ts) (cons (.cut op) (nil Rect)))))
+
+; Each of rs cut to cut, those with anything left, onto acc.
+(def ui_rects_cut ((rs (list Rect)) (cut Rect) (acc (list Rect))) (list Rect)
+  (if (is_empty rs)
+      acc
+      (let k (rect_clip (head rs) cut)
+        (ui_rects_cut (tail rs) cut (if (rect_empty k) acc (cons k acc))))))
 
 ; Where a ring in r with corners of radius paints: its four corners'
 ; squares, and the lines along its sides between them, so that a window
@@ -1723,25 +1741,15 @@
       (cons (Rect (add x q) y mw 1) (cons (Rect (add x q) (sub (rect_y1 r) 1) mw 1)
         (cons (Rect x (add y q) 1 mh) (cons (Rect (sub (rect_x1 r) 1) (add y q) 1 mh) (nil Rect)))))))))))
 
-; The rectangles of ops's fills of color c, onto acc.
-(def ui_fill_rects ((ops (list UiPaint)) (c int) (acc (list Rect))) (list Rect)
+; Where ops's fills of color c paint, onto acc.
+(def ui_fill_rects ((ops (list UiCutOp)) (c int) (acc (list Rect))) (list Rect)
   (if (is_empty ops)
       acc
       (ui_fill_rects (tail ops) c
-        (match (head ops)
-          ((UiPFill r fc) (if (eq fc c) (cons r acc) acc))
+        (match (.op (head ops))
+          ((UiPFill r fc) (if (eq fc c) (cons (.cut (head ops)) acc) acc))
           ((UiPRound r radius fc under) acc) ((UiPRing r radius fc) acc) ((UiPText r s a fc f bold scale) acc) ((UiPIcon x y name fc scale) acc)
           ((UiPImage x y n d ts) acc)))))
-
-; Where op paints: its rectangle, or an icon's or an image's square.
-(def ui_op_rect ((op UiPaint)) Rect
-  (match op
-    ((UiPFill r c) r)
-    ((UiPRound r radius c under) r)
-    ((UiPRing r radius c) r)
-    ((UiPText r s a c f bold scale) r)
-    ((UiPIcon x y name c scale) (Rect x y (mul (ui_icon_size) scale) (mul (ui_icon_size) scale)))
-    ((UiPImage x y n d ts) (Rect x y n (ui_image_h n ts)))))
 
 ; op painted dy rows higher, below 0 lower.
 (def ui_op_up ((op UiPaint) (dy int)) UiPaint
@@ -1804,31 +1812,34 @@
 ; what of it is in the area, where its pixels were moved from and to,
 ; unless it is a fill as high as the area, which moving leaves alike.
 (def ui_scrolled_changed ((old (list UiNode)) (new (list UiNode)) (full Rect) (area Rect) (dy int)) (list Rect)
-  (match (ui_ops_moved (ui_ops_of old) area dy (nil UiPaint) (nil Rect))
+  (match (ui_ops_moved (ui_ops_of old) area dy (nil UiCutOp) (nil Rect))
     ((UiMovedOps olds extra)
       (let news (ui_ops_of new)
         (ui_ops_changed olds news full (cons (ui_scroll_strip area dy) (ui_across_damage news area 0 extra)))))))
 
 ; Old ops as a scroll left them, and damage they make.
-(data UiMovedOps (UiMovedOps (list UiPaint) (list Rect)))
+(data UiMovedOps (UiMovedOps (list UiCutOp) (list Rect)))
 
 ; Each of ops as it is once area's pixels are moved dy up, onto the
-; reversed acc, and what that damages onto extra: one wholly in area moved
-; with them, if it is still wholly in it, else what of it is still in the
-; area damaged and the op dropped; one across the area's edge kept where
-; it was, what of it is in the area damaged where it was and where that
-; moved to; any other as it was. A fill as high as the area, such as its
-; ground, is not moved: moving the area's rows leaves it as it was.
-(def ui_ops_moved ((ops (list UiPaint)) (area Rect) (dy int) (acc (list UiPaint)) (extra (list Rect))) UiMovedOps
+; reversed acc, and what that damages onto extra: one that paints wholly
+; in area moved with them, if it still does, else what of it is still in
+; the area damaged and the op dropped; one across the area's edge kept
+; where it was, what of it is in the area damaged where it was and where
+; that moved to; any other as it was. A fill as high as the area, such as
+; its ground, is not moved: moving the area's rows leaves it as it was.
+; Where an op paints is its cut, so a cell cut at a grid's edge across
+; moves with its row.
+(def ui_ops_moved ((ops (list UiCutOp)) (area Rect) (dy int) (acc (list UiCutOp)) (extra (list Rect))) UiMovedOps
   (if (is_empty ops)
       (UiMovedOps (rev acc) extra)
       (let (op (head ops)
-            b (ui_op_rect op))
+            b (.cut op))
         (if (and (eq (rect_clip b area) b) (not (ui_fill_spans op area)))
-            (let up (ui_op_up op dy)
-              (if (eq (rect_clip (ui_op_rect up) area) (ui_op_rect up))
+            (let (up (UiCutOp (ui_op_up (.op op) dy) (ui_rect_up b dy))
+                  ub (.cut up))
+              (if (eq (rect_clip ub area) ub)
                   (ui_ops_moved (tail ops) area dy (cons up acc) extra)
-                  (ui_ops_moved (tail ops) area dy acc (cons (rect_clip (ui_op_rect up) area) extra))))
+                  (ui_ops_moved (tail ops) area dy acc (cons (rect_clip ub area) extra))))
             (rect_overlaps b area)
             (ui_ops_moved (tail ops) area dy (cons op acc) (ui_across_one op area dy extra))
             (ui_ops_moved (tail ops) area dy (cons op acc) extra)))))
@@ -1836,28 +1847,28 @@
 ; What op, across area's edge, damages once area's pixels are moved dy
 ; up, onto extra: nothing if it is a fill as high as the area; else
 ; what of it is in the area, and that moved up dy, cut to the area.
-(def ui_across_one ((op UiPaint) (area Rect) (dy int) (extra (list Rect))) (list Rect)
+(def ui_across_one ((op UiCutOp) (area Rect) (dy int) (extra (list Rect))) (list Rect)
   (if (ui_fill_spans op area)
       extra
-      (let k (rect_clip (ui_op_rect op) area)
+      (let k (rect_clip (.cut op) area)
         (cons k (cons (rect_clip (ui_rect_up k dy) area) extra)))))
 
 ; What each of news across area's edge damages, as ui_across_one says,
 ; dy 0: where the pixels moved into its part of the area were another's.
-(def ui_across_damage ((news (list UiPaint)) (area Rect) (dy int) (extra (list Rect))) (list Rect)
+(def ui_across_damage ((news (list UiCutOp)) (area Rect) (dy int) (extra (list Rect))) (list Rect)
   (if (is_empty news)
       extra
-      (let b (ui_op_rect (head news))
+      (let b (.cut (head news))
         (ui_across_damage (tail news) area dy
           (if (and (rect_overlaps b area) (not (eq (rect_clip b area) b)))
               (ui_across_one (head news) area dy extra)
               extra)))))
 
-; Whether op is a fill from the area's top to its bottom, or past them,
-; which looks the same however the area's rows are moved.
-(def ui_fill_spans ((op UiPaint) (area Rect)) bool
-  (match op
-    ((UiPFill r c) (and (le (.y r) (.y area)) (ge (rect_y1 r) (rect_y1 area))))
+; Whether op is a fill that paints from the area's top to its bottom, or
+; past them, which looks the same however the area's rows are moved.
+(def ui_fill_spans ((op UiCutOp) (area Rect)) bool
+  (match (.op op)
+    ((UiPFill r c) (let k (.cut op) (and (le (.y k) (.y area)) (ge (rect_y1 k) (rect_y1 area)))))
     ((UiPRound r radius c under) false) ((UiPRing r radius c) false) ((UiPText r s a c f bold scale) false) ((UiPIcon x y name c scale) false)
     ((UiPImage x y n d ts) false)))
 
