@@ -15,8 +15,10 @@
 #      client, in front, at /Volumes, its sidebar's Volumes row selected
 #      and Computer's not
 #   5. Terminal clicked again: a second window of the same vt, in
-#      front, titled with its own tab's name, and wm never said an app
-#      did not answer its open
+#      front, with a tab of its own, so a shell of its own, which ps
+#      lists as the vt's second child sh (both windows are titled /,
+#      their shells' folder), and wm never said an app did not answer
+#      its open
 #
 # Pids are read from run windows, never fixed. The serial line is typed
 # through a FIFO, and the board keeps running until this kills it. Run
@@ -122,6 +124,17 @@ expects() {
   exit 1
 }
 
+# How many shells process $1 has started, as ps lists them: lines whose
+# PARENT is $1 and PROGRAM sh, each tab's. Waits up to 5 s for the
+# shell's prompt after the list.
+shells_of() {
+  local from end=$((SECONDS + 5))
+  from=$(($(wc -c < "$out") + 1))
+  printf 'ps\n' >&3
+  until [ $SECONDS -ge $end ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
+  tail -c +$from "$out" | tr -d '\r' | awk -v p="$1" '$2 == p && $5 == "sh"' | grep -c .
+}
+
 # Pixel x, y of the screendump, a 1280 by 800 PPM whose header is 16 bytes.
 pixel() { od -An -tu1 -j $((16 + ($2 * 1280 + $1) * 3)) -N3 "$dump" | tr -s ' ' | sed 's/^ //; s/ $//'; }
 
@@ -206,9 +219,10 @@ shows "at /Volumes: its Volumes row selected, Computer's not" \
   "$((fx + 200)) $((fy + 124)) $side_sel" "$((fx + 200)) $((fy + 76)) $sidebar"
 
 # 5. Terminal again: a second window of the one vt, in front, with a
-# tab of its own (so a title of its own, its tab's name), and no wait on
-# wm's 2 seconds for an open vt never answered (roadmap 0032's last
-# step).
+# tab of its own, so a shell of its own, and no wait on wm's 2 seconds
+# for an open vt never answered (roadmap 0032's last step). Both
+# windows are titled /, their shells' folder, so the tabs are told
+# apart by their shells.
 term_pid=$(printf '%s\n' "$wins" | grep -vE '^[0-9]+ (Files|Disks) ' | awk '{print $8}' | sort -u | head -1)
 [ -n "$term_pid" ] || fail "no Terminal window listed"
 launches $terminal_x
@@ -225,8 +239,8 @@ if [ "$n" != 2 ] || [ "$fp" != "$term_pid" ]; then
   printf '%s\n' "$wins" | sed 's/^/  # /'
   exit 1
 fi
-titles=$(printf '%s\n' "$wins" | awk -v p="$term_pid" '$8 == p {print $2}' | sort -u | grep -c .)
-[ "$titles" = 2 ] || fail "Terminal's two windows share one title, so one tab name"
-echo "ok - launch: Terminal again: two windows of one vt, pid $term_pid, the new one in front"
+shells=$(shells_of "$term_pid")
+[ "$shells" = 2 ] || fail "vt $term_pid has $shells shells, not one for each window's tab"
+echo "ok - launch: Terminal again: two windows of one vt, pid $term_pid, each its own tab's shell, the new one in front"
 grep -q "did not answer its open" "$out" && fail "wm waited on an open no app answered"
 echo "ok - launch: every open answered"

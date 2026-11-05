@@ -486,8 +486,8 @@ step, composed by the host:
 - `run draw line 0 32 1919 1079 red` ends in dots of 2×2;
 - after `run widgets &`, the gallery's bold title is smooth: a row through
   it has more colors than its ground and its text;
-- after `run Terminal &`, `vt1`'s text, which `vt` draws itself, is smooth
-  the same way;
+- after `run Terminal &`, its window's text, the window titled `/`, its
+  shell's folder, which `vt` draws itself, is smooth the same way;
 - booted again with `scale=1`, the same screen has a bar of 32 rows, and
   the 1920×1080 wallpaper centered on its corner's color.
 
@@ -757,9 +757,9 @@ and clicks the top bar's Applications with the tablet: the launcher
 opens, Applications on its pill and the page's ground showing, and
 Terminal's icon, its dark square, in the grid's eighth cell. Esc closes
 it, and so does a click on the page. A click on Terminal starts it: `run
-windows` lists `vt1`'s window, in front, and the top bar names it
-Terminal, a pixel of the `T` lit as Source Sans 3's glyph covers it,
-where its title, `vt1`, would show none.
+windows` lists its window, titled `/`, its shell's folder, in front, and
+the top bar names it Terminal, a pixel of the `T` lit as Source Sans 3's
+glyph covers it, where its title, `/`, would show none.
 
 [tests/launcher-install.sh](../tests/launcher-install.sh) boots a system
 volume (`root=`) with `wm` and no window, opens the launcher with nine

@@ -14,7 +14,8 @@
 #   5. after run widgets &, the gallery's title, Widgets in bold, smooth:
 #      along a row through it, more colors than the header bar's ground
 #      and the text's, its edges mixed between them
-#   6. after run Terminal &, vt1's window: its text, drawn by vt into its
+#   6. after run Terminal &, its window, titled /, its shell's folder:
+#      its text, drawn by vt into its
 #      own buffer, smooth the same way on its dark ground
 #
 # Then boots again with the boot argument scale=1, and checks that the
@@ -146,9 +147,9 @@ fi
 # smooth on its ground, 1e1e1e, as the gallery's title is.
 printf 'run Terminal &\n' >&3
 v_x=""
-listed vt1
+listed /
 [ -n "$line" ] && read -r _ _ v_x v_y _ _ _ <<< "$line"
-[ -n "$v_x" ] || fail "run windows never listed vt1's window; it showed:"
+[ -n "$v_x" ] || fail "run windows never listed the terminal's window, titled /, its shell's folder; it showed:"
 trow=$(((v_y + 46 + 8) * 2))
 shows "the terminal's ground" "$(((v_x + 2 + 636) * 2)) $trow 30 30 30"
 n=$(colors $(((v_x + 2) * 2)) $(((v_x + 2 + 320) * 2)) $trow)

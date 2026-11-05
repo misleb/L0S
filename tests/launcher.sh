@@ -9,8 +9,9 @@
 #   2. Esc, on the virtio keyboard, closes it: the desktop shows again
 #   3. a click on the page, away from the apps, closes it too
 #   4. a click on Terminal starts it: run windows, typed at the serial
-#      shell, lists vt1's window, in front, and the top bar names the
-#      front window's app, Terminal, not its title
+#      shell, lists its window, titled /, its shell's folder, in front,
+#      and the top bar names the front window's app, Terminal, not its
+#      title
 #
 # The serial line is typed through a FIFO, and the board keeps running
 # until this kills it. Run from the top of the project, after make
@@ -66,9 +67,10 @@ waits_for() {
   fail "no line like '$1' on the serial line; it showed:"
 }
 
-# Where vt1's window is, as run windows lists it, and whether it is in
-# front: w_x, w_y, w_front. Waits up to 30 s for it to be listed, and
-# up to 5 s each time for the shell's prompt after the list.
+# Where the terminal's window is, as run windows lists it, titled /, its
+# shell's folder, the only window there is, and whether it is in front:
+# w_x, w_y, w_front. Waits up to 30 s for it to be listed, and up to 5 s
+# each time for the shell's prompt after the list.
 window() {
   local from line prompt end=$((SECONDS + 30))
   until [ $SECONDS -ge $end ]; do
@@ -76,14 +78,14 @@ window() {
     printf 'run windows\n' >&3
     prompt=$((SECONDS + 5))
     until [ $SECONDS -ge $prompt ] || tail -c +$from "$out" | grep -aq 'l0s> '; do sleep 0.1; done
-    line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ vt1 ' | head -1)
+    line=$(tail -c +$from "$out" | grep -aE '^[0-9]+ / ' | head -1)
     if [ -n "$line" ]; then
       read -r _ _ w_x w_y _ _ w_front _ <<< "$line"
       return 0
     fi
     sleep 0.2
   done
-  fail "run windows never listed vt1's window; it showed:"
+  fail "run windows never listed the terminal's window, titled /; it showed:"
 }
 
 # Pixel x, y of the screendump, a 1280 by 800 PPM whose header is 16 bytes.
@@ -153,8 +155,8 @@ click 60 16
 shows "opened a third time" "1124 138 $screen"
 click 1116 150
 window
-[ "$w_front" = "front" ] || fail "vt1's window opened, but not in front"
-echo "ok - launcher: a click on Terminal started vt1, in front"
+[ "$w_front" = "front" ] || fail "the terminal's window opened, but not in front"
+echo "ok - launcher: a click on Terminal started it, its window titled /, in front"
 # T's crossbar, row 10 at 127, is partly covered: the smooth glyph's level, not white.
 shows "its window shown, the launcher closed, the bar naming Terminal" \
   "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "40 16 0 0 0" "127 10 69 69 69"
