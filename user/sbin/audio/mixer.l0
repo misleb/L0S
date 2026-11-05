@@ -1,0 +1,349 @@
+; mixer.l0 -- what the audio server keeps, and how it is kept, purely:
+; its devices, as their drivers attached them, each output's rate, room
+; and what is queued at its driver, each input's format; its streams,
+; each a client's or the chime's, converted into a queue in its
+; output's format (pcm.l0) and taken from it as the output has room;
+; its listeners, each converting what its input hears into the format
+; it asked; the defaults, by the settings (settings.l0) or the first
+; of a kind; and what the devices answer lists. audio.l0 does the
+; asking, sending and sharing around it.
+
+; ----------------------------------------------------------------- sizes
+
+; The pages of an output's buffer, shared with its driver: 8, 32 KB,
+; 8192 stereo frames, more than any ring has room for at once.
+(def out_buf_pages () int 8)
+
+; How many frames a stream's queue holds, at the output's rate: a
+; quarter second.
+(def queue_cap ((rate int)) int (div rate 4))
+
+; How many frames of the chime's bytes are converted into its queue at
+; a time.
+(def pull_frames () int 4096)
+
+; --------------------------------------------------------------- devices
+
+; An output's buffer shared with its driver: its address here, its
+; pages, its address there, and the region to write it with; or none,
+; an input's.
+(data OutBuf (OutBuf (va int) (pages int) (there int) (r IoRegion)) (NoOutBuf))
+
+; A device: its id, its name, whether it takes sound in, its channels,
+; its rates, its lead in ms, its driver's pid and port, its volume in
+; percent; the rate it is going at, 0 while it is not; an output's room
+; for frames and frames queued, as its driver last said; an input's
+; format, as its driver said when it was set going; and an output's
+; buffer.
+(data Dev (Dev (id int) (name (list int)) (input bool) (chans int) (rates (list int)) (lead int) (pid int) (port int)
+                (volume int) (rate int) (room int) (queued int) (fmt PcmFormat) (buf OutBuf)))
+
+; A device as attach a says it, numbered id, its driver pid, at volume.
+(def dev_new ((id int) (a AudiodevAttach) (pid int) (volume int)) Dev
+  (Dev id (.name a) (.input a) (.chans a) (.rates a) (.lead a) pid (.port a) volume 0 0 0 (PcmFormat 0 0 2) (NoOutBuf)))
+
+; The format an output d's queues are in: 16-bit samples at its rate of
+; its channels.
+(def dev_format ((d Dev)) PcmFormat (pcm_format16 (.rate d) (.chans d)))
+
+; The frames an output d's buffer holds at once.
+(def dev_capacity ((d Dev)) int
+  (match (.buf d)
+    ((NoOutBuf) 0)
+    ((OutBuf va pages there r) (div (mul pages (page_size)) (mul 2 (.chans d))))))
+
+; The rate output d plays a stream at want at: want if it takes it;
+; else the smallest multiple of want it takes, which converts cleanly;
+; else the smallest above want; else its highest.
+(def dev_rate_for ((d Dev) (want int)) int
+  (if (any_eq want (.rates d))
+      want
+      (let (multiple (rates_least (.rates d) want true 0)
+            above (rates_least (.rates d) want false 0))
+        (if (gt multiple 0) multiple
+            (gt above 0) above
+            (rates_most (.rates d) 0)))))
+
+; The least of rs above want, a multiple of it if multiples, or 0 if
+; none; and the greatest of rs.
+(def rates_least ((rs (list int)) (want int) (multiples bool) (best int)) int
+  (if (is_empty rs)
+      best
+      (let r (head rs)
+        (rates_least (tail rs) want multiples
+          (if (and (gt r want) (and (or (not multiples) (eq (mod r want) 0)) (or (eq best 0) (lt r best)))) r best)))))
+(def rates_most ((rs (list int)) (best int)) int
+  (if (is_empty rs) best (rates_most (tail rs) (max best (head rs)))))
+
+; The device id among ds, or none; ds with d in place of the one with
+; its id, or added; ds without device id; the devices of ds of pid.
+(def dev_at ((ds (list Dev)) (id int)) (Option Dev)
+  (if (is_empty ds) ((None Dev)) (eq (.id (head ds)) id) (Some (head ds)) (dev_at (tail ds) id)))
+(def dev_put ((ds (list Dev)) (d Dev)) (list Dev)
+  (if (is_empty ds) (cons d ds)
+      (eq (.id (head ds)) (.id d)) (cons d (tail ds))
+      (cons (head ds) (dev_put (tail ds) d))))
+(def devs_without ((ds (list Dev)) (id int)) (list Dev)
+  (if (is_empty ds) ds (eq (.id (head ds)) id) (tail ds) (cons (head ds) (devs_without (tail ds) id))))
+(def devs_of_pid ((ds (list Dev)) (pid int)) (list Dev)
+  (if (is_empty ds) ds (eq (.pid (head ds)) pid) (cons (head ds) (devs_of_pid (tail ds) pid)) (devs_of_pid (tail ds) pid)))
+
+; The devices of ds that take sound in, if input, or out, in order.
+(def devs_of_kind ((ds (list Dev)) (input bool)) (list Dev)
+  (if (is_empty ds) ds
+      (eq (.input (head ds)) input) (cons (head ds) (devs_of_kind (tail ds) input))
+      (devs_of_kind (tail ds) input)))
+
+; The first of ds named name, or none.
+(def dev_named ((ds (list Dev)) (name (list int))) (Option Dev)
+  (if (is_empty ds) ((None Dev)) (eq (.name (head ds)) name) (Some (head ds)) (dev_named (tail ds) name)))
+
+; What the log says of d as it comes: device ID: NAME, in or out, its
+; channels and rates.
+(def dev_line ((d Dev)) (list int)
+  (append "device " (append (digits (.id d)) (append ": " (append (.name d)
+    (append (if (.input d) ", in, " ", out, ") (append (digits (.chans d))
+      (append " channels at " (join_with "," (numbers_words (.rates d)))))))))))
+
+; ---------------------------------------------------------------- streams
+
+; Where a stream's frames come from: a client's writes; or bytes of the
+; server's own, the chime's, from one byte up to another, not yet
+; converted into its queue.
+(data Source (FromClient) (FromBytes bytes int int))
+
+; A stream: its number, its output's id, its client's pid, the format
+; its frames come in, their conversion into the output's, its queue,
+; frames in the output's format, from byte qo on, and its source.
+(data Stream (Stream (id int) (dev int) (pid int) (fmt PcmFormat) (conv PcmConv) (q bytes) (qo int) (src Source)))
+
+; A stream numbered id of pid on output d, its frames in fmt.
+(def stream_new ((id int) (d Dev) (pid int) (fmt PcmFormat) (src Source)) Stream
+  (Stream id (.id d) pid fmt (pcm_conv_new fmt (dev_format d)) (bytes_from_list "") 0 src))
+
+; The frames queued in s, of fb bytes each.
+(def stream_frames ((s Stream) (fb int)) int (div (sub (bytes_len (.q s)) (.qo s)) fb))
+
+; s with the frames out after its queue.
+(def stream_append ((s Stream) (out bytes)) Stream
+  (match s
+    ((Stream id dev pid fmt conv q qo src)
+      (Stream id dev pid fmt conv (if (eq qo (bytes_len q)) out (bytes_concat (cons (bytes_slice q qo (bytes_len q)) (cons out (nil bytes))))) 0 src))))
+
+; n frames of fb bytes taken from s's queue, fewer if it has fewer, and
+; s without them.
+(data StreamTaken (StreamTaken (b bytes) (s Stream)))
+(def stream_take ((s Stream) (n int) (fb int)) StreamTaken
+  (let (e (min (bytes_len (.q s)) (add (.qo s) (mul n fb)))
+        b (bytes_slice (.q s) (.qo s) e))
+    (StreamTaken b (if (eq e (bytes_len (.q s))) (.q (.qo s 0) (bytes_from_list "")) (.qo s e)))))
+
+; The input frames of s, at its rate, that convert into room frames at
+; the output's rate, rounded down.
+(def stream_fits ((s Stream) (room int)) int
+  (div (mul room (.rate (.fmt s))) (max 1 (.rate (.to (.conv s))))))
+
+; The frames of b from byte i up to j, in s's format, converted and
+; queued after s, as many as its queue has room for below cap frames of
+; the output's format: s after, and how many input frames it took.
+(data StreamWritten (StreamWritten (s Stream) (taken int)))
+(def stream_write ((s Stream) (b bytes) (i int) (j int) (cap int)) StreamWritten
+  (let (fb (pcm_frame_bytes (dev_fmt_of s))
+        room (sub cap (stream_frames s fb))
+        n (min (div (sub j i) (pcm_frame_bytes (.fmt s))) (stream_fits s room)))
+    (if (le n 0)
+        (StreamWritten s 0)
+        (match (pcm_convert (.conv s) b i (add i (mul n (pcm_frame_bytes (.fmt s)))))
+          ((PcmConverted c2 out) (StreamWritten (stream_append (.conv s c2) out) n))))))
+
+; The format s's queue is in: its conversion's.
+(def dev_fmt_of ((s Stream)) PcmFormat (.to (.conv s)))
+
+; s with its own bytes, if its source is some, converted into its queue
+; up to cap frames, pull_frames of them at a time.
+(def stream_pulled ((s Stream) (cap int)) Stream
+  (match (.src s)
+    ((FromClient) s)
+    ((FromBytes b i j)
+      (if (ge i j)
+          s
+          (let (fb (pcm_frame_bytes (.fmt s))
+                e (min j (add i (mul (pull_frames) fb))))
+            (match (stream_write s b i e cap)
+              ((StreamWritten s2 n)
+                (if (eq n 0)
+                    s2
+                    (stream_pulled (.src s2 (FromBytes b (add i (mul n fb)) j)) cap)))))))))
+
+; Whether s has frames still to come: queued, or its own bytes.
+(def stream_has_more ((s Stream)) bool
+  (or (gt (bytes_len (.q s)) (.qo s))
+      (match (.src s) ((FromClient) false) ((FromBytes b i j) (lt i j)))))
+
+; The stream id among ss, or none; ss with s in place of the one with
+; its id, or added; ss without stream id; the streams of ss on device
+; dev, and of pid.
+(def stream_at ((ss (list Stream)) (id int)) (Option Stream)
+  (if (is_empty ss) ((None Stream)) (eq (.id (head ss)) id) (Some (head ss)) (stream_at (tail ss) id)))
+(def stream_put ((ss (list Stream)) (s Stream)) (list Stream)
+  (if (is_empty ss) (cons s ss)
+      (eq (.id (head ss)) (.id s)) (cons s (tail ss))
+      (cons (head ss) (stream_put (tail ss) s))))
+(def streams_without ((ss (list Stream)) (id int)) (list Stream)
+  (if (is_empty ss) ss (eq (.id (head ss)) id) (tail ss) (cons (head ss) (streams_without (tail ss) id))))
+(def streams_on ((ss (list Stream)) (dev int)) (list Stream)
+  (if (is_empty ss) ss (eq (.dev (head ss)) dev) (cons (head ss) (streams_on (tail ss) dev)) (streams_on (tail ss) dev)))
+(def streams_of_pid ((ss (list Stream)) (pid int)) (list Stream)
+  (if (is_empty ss) ss (eq (.pid (head ss)) pid) (cons (head ss) (streams_of_pid (tail ss) pid)) (streams_of_pid (tail ss) pid)))
+
+; The most frames queued in any of ss, of fb bytes each.
+(def streams_most ((ss (list Stream)) (fb int) (most int)) int
+  (if (is_empty ss) most (streams_most (tail ss) fb (max most (stream_frames (head ss) fb)))))
+
+; ------------------------------------------------------------------ mixing
+
+; What feeding an output takes from its streams: n frames mixed, in the
+; output's format, and the streams after.
+(data Mixed (Mixed (b bytes) (ss (list Stream))))
+
+; n frames taken from each of ss, of fb bytes each, mixed at volume
+; percent: the streams after, each put back among all.
+(def streams_mixed ((all (list Stream)) (ss (list Stream)) (n int) (fb int) (chans int) (volume int)) Mixed
+  (match (streams_taken all ss n fb (nil bytes))
+    ((Pieces bs all2) (Mixed (pcm_mix bs (volumes_of (length bs) volume (nil int)) (mul n chans)) all2))))
+
+; The pieces taken from the streams, in their order, and all the
+; streams with each taken from.
+(data Pieces (Pieces (bs (list bytes)) (all (list Stream))))
+
+; streams_mixed's loop: each of ss's n frames taken, the pieces after
+; the reversed acc, and all with each stream after.
+(def streams_taken ((all (list Stream)) (ss (list Stream)) (n int) (fb int) (acc (list bytes))) Pieces
+  (if (is_empty ss)
+      (Pieces (rev acc) all)
+      (match (stream_take (head ss) n fb)
+        ((StreamTaken b s2) (streams_taken (stream_put all s2) (tail ss) n fb (cons b acc))))))
+
+; n copies of volume, after acc.
+(def volumes_of ((n int) (volume int) (acc (list int))) (list int)
+  (if (le n 0) acc (volumes_of (sub n 1) volume (cons volume acc))))
+
+; Each of ss with its own bytes pulled into its queue, up to cap frames.
+(def streams_pulled ((ss (list Stream)) (cap int)) (list Stream)
+  (if (is_empty ss) ss (cons (stream_pulled (head ss) cap) (streams_pulled (tail ss) cap))))
+
+; Whether s is the server's own, the chime's: its source is bytes.
+(def stream_is_own ((s Stream)) bool
+  (match (.src s) ((FromClient) false) ((FromBytes b i j) true)))
+
+; ss without the server's own streams that have nothing more to play.
+(def streams_spent ((ss (list Stream))) (list Stream)
+  (if (is_empty ss) ss
+      (and (stream_is_own (head ss)) (not (stream_has_more (head ss)))) (streams_spent (tail ss))
+      (cons (head ss) (streams_spent (tail ss)))))
+
+; How many frames output d can be fed now: its room, as its driver last
+; said, and its buffer's size, but no more than its fullest stream
+; holds; 0 if none holds any.
+(def feed_count ((d Dev) (ss (list Stream))) int
+  (min (min (.room d) (dev_capacity d)) (streams_most ss (pcm_frame_bytes (dev_format d)) 0)))
+
+; -------------------------------------------------------------- listeners
+
+; A listener: its port, its pid, its input's id, and the conversion of
+; what the input hears into what it asked.
+(data Listener (Listener (port int) (pid int) (dev int) (conv PcmConv)))
+
+; The listeners of ls on device dev, of pid, and at port; ls without
+; those at port, of pid, or on dev.
+(def listeners_on ((ls (list Listener)) (dev int)) (list Listener)
+  (if (is_empty ls) ls (eq (.dev (head ls)) dev) (cons (head ls) (listeners_on (tail ls) dev)) (listeners_on (tail ls) dev)))
+(def listener_at ((ls (list Listener)) (port int)) (Option Listener)
+  (if (is_empty ls) ((None Listener)) (eq (.port (head ls)) port) (Some (head ls)) (listener_at (tail ls) port)))
+(def listeners_without_port ((ls (list Listener)) (port int)) (list Listener)
+  (if (is_empty ls) ls (eq (.port (head ls)) port) (listeners_without_port (tail ls) port) (cons (head ls) (listeners_without_port (tail ls) port))))
+(def listeners_of_pid ((ls (list Listener)) (pid int)) (list Listener)
+  (if (is_empty ls) ls (eq (.pid (head ls)) pid) (cons (head ls) (listeners_of_pid (tail ls) pid)) (listeners_of_pid (tail ls) pid)))
+(def listeners_without_dev ((ls (list Listener)) (dev int)) (list Listener)
+  (if (is_empty ls) ls (eq (.dev (head ls)) dev) (listeners_without_dev (tail ls) dev) (cons (head ls) (listeners_without_dev (tail ls) dev))))
+
+; ----------------------------------------------------------------- server
+
+; The chime: none; ready, its WAV file's bytes, rate, channels and
+; where its samples run; the same held back on an output, by id, until
+; the alarm; or played, or given up.
+(data Chime (ChimeOff) (ChimeReady bytes int int int int) (ChimeHeld bytes int int int int int) (ChimeDone))
+
+; The server: its port, the port its drivers answer on, its devices,
+; streams, listeners and watchers, the ids the next device and stream
+; get, its settings and its chime.
+(data Srv (Srv (port int) (rp int) (devs (list Dev)) (streams (list Stream)) (ls (list Listener)) (watchers (list int))
+                (next_dev int) (next_stream int) (settings Settings) (chime Chime)))
+
+; A server with nothing attached.
+(def srv_new ((port int) (rp int) (settings Settings) (chime Chime)) Srv
+  (Srv port rp (nil Dev) (nil Stream) (nil Listener) (nil int) 1 1 settings chime))
+
+; The default device of a kind: the one the settings name, if it is
+; there, else the first attached; or none.
+(def default_dev ((s Srv) (input bool)) (Option Dev)
+  (let (ds (devs_of_kind (.devs s) input)
+        name (if input (.input (.settings s)) (.output (.settings s))))
+    (if (is_empty ds)
+        ((None Dev))
+        (match (dev_named ds name)
+          ((Some d) (Some d))
+          ((None) (Some (head ds)))))))
+
+; Whether d is the default of its kind.
+(def dev_is_default ((s Srv) (d Dev)) bool
+  (match (default_dev s (.input d)) ((Some e) (eq (.id e) (.id d))) ((None) false)))
+
+; The device id, or, for 0, the default of a kind, as a client names
+; one; or why there is none.
+(def dev_chosen ((s Srv) (id int) (input bool)) (Result Dev (list int))
+  (if (eq id 0)
+      (match (default_dev s input)
+        ((Some d) ((Ok Dev (list int)) d))
+        ((None) ((Err Dev (list int)) (if input "no input" "no output"))))
+      (match (dev_at (.devs s) id)
+        ((None) ((Err Dev (list int)) "no such device"))
+        ((Some d)
+          (if (eq (.input d) input)
+              ((Ok Dev (list int)) d)
+              ((Err Dev (list int)) (if input "not an input" "not an output")))))))
+
+; What devices answers: a line each, as audio.l0 reads them.
+(def devices_text ((s Srv)) (list int)
+  (concat (devices_lines s (.devs s) (nil (list int)))))
+(def devices_lines ((s Srv) (ds (list Dev)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ds)
+      (rev acc)
+      (let d (head ds)
+        (devices_lines s (tail ds)
+          (cons (append (audio_device_line (AudioDevice (.id d) (.input d) (.name d) (.chans d) (.rates d) (dev_is_default s d))) "\n") acc)))))
+
+; s with d in place of the device with its id; with stream st in place
+; of the one with its id; with its devices' volumes as its settings say.
+(def srv_dev ((s Srv) (d Dev)) Srv (.devs s (dev_put (.devs s) d)))
+(def srv_stream ((s Srv) (st Stream)) Srv (.streams s (stream_put (.streams s) st)))
+(def srv_volumes ((s Srv)) Srv
+  (let st (.settings s) (.devs s (devs_at_volumes (.devs s) st))))
+(def devs_at_volumes ((ds (list Dev)) (st Settings)) (list Dev)
+  (if (is_empty ds) ds (cons (.volume (head ds) (settings_volume st (.name (head ds)))) (devs_at_volumes (tail ds) st))))
+
+; How long the chime is, in ms, and what the log says as it starts.
+(def chime_ms ((rate int) (chans int) (s int) (e int)) int
+  (if (le rate 0) 0 (div (mul (div (sub e s) (mul 2 chans)) 1000) rate)))
+(def chime_line ((rate int) (chans int) (s int) (e int)) (list int)
+  (append "playing the chime, " (append (audio_chime_path) (append ", " (append (digits (chime_ms rate chans s e))
+    (append " ms at " (append (digits rate) " Hz")))))))
+
+; The chime's file.
+(def audio_chime_path () (list int) "/etc/chime.wav")
+
+; The chime in b, a WAV file's bytes, or why not.
+(def chime_of ((b bytes)) (Result Chime (list int))
+  (match (parse_wav b)
+    ((WavBad why) ((Err Chime (list int)) why))
+    ((Wav rate chans s e) ((Ok Chime (list int)) (if (ge s e) (ChimeDone) (ChimeReady b rate chans s e))))))

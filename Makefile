@@ -235,12 +235,13 @@ DISPLAY_SERVER := user/lib/proto/display_server.l0
 WMLIB   := user/lib/proto/wm.l0
 CLOCK   := user/lib/proto/clock.l0
 DISKLIB := user/lib/proto/disk.l0
-# Sound: the audio protocol, its server's side, WAV files, and samples
-# between 48 and 16 kHz.
-AUDIOLIB := user/lib/proto/audio.l0
-WAV     := user/lib/format/wav.l0
+# Sound: PCM frames converted between formats and mixed; the audio
+# protocol, the server's to its clients, over it; the audio device
+# protocol, the server's to its drivers; and WAV files.
 PCM     := user/lib/format/pcm.l0
-AUDIO_SERVER := $(AUDIOLIB) $(WAV) user/lib/proto/audio_server.l0
+AUDIOLIB := $(PCM) user/lib/proto/audio.l0
+AUDIODEV := $(AUDIOLIB) user/lib/proto/audiodev.l0
+WAV     := user/lib/format/wav.l0
 FSLIB   := user/lib/proto/fs.l0
 APPLIB  := user/lib/proto/app.l0
 # A running app launched again: its name, app.EXEC, the open request
@@ -304,7 +305,6 @@ PHONEMES := $(VOICE) user/lib/speech/phonemes.l0
 # phoneme IDs to samples.
 VITS    := $(MEL) user/lib/speech/vits.l0
 PIPER   := $(ONNX) $(VOICE) $(VITS) user/lib/speech/piper.l0
-MICLIB  := user/lib/proto/mic.l0
 # The speech protocol, the speech service's, and its client.
 SPEECHLIB := user/lib/proto/speech.l0
 PCILIB  := user/lib/proto/pci.l0
@@ -363,7 +363,9 @@ LIBS_virtio-input := $(VIRTIO) $(KEYMAP)
 LIBS_pcie       := $(PCILIB)
 LIBS_xhci       := $(USBLIB) $(PCILIB) $(RP1)
 LIBS_usb-hid    := $(USBLIB) $(KEYMAP)
-LIBS_usb-audio  := $(USBLIB) $(UAC) $(MICLIB) $(PCM)
+LIBS_usb-audio  := $(USBLIB) $(UAC) $(AUDIODEV)
+LIBS_audio      := $(AUDIODEV) $(WAV)
+LIBS_sound      := $(AUDIOLIB)
 LIBS_lsusb      := $(USBLIB)
 LIBS_sdhci      := $(PCILIB) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-blk := $(VIRTIO) $(DISKLIB) $(UUIDLIB) $(FSLIB)
@@ -381,12 +383,12 @@ LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(SHA256) $(BOOTLOADER)
-LIBS_hdmi-audio := $(AUDIO_SERVER) $(MAILBOX)
-LIBS_play       := $(AUDIOLIB) $(WAV) $(PCM)
-LIBS_rec        := $(MICLIB) $(WAV)
+LIBS_hdmi-audio := $(AUDIODEV) $(MAILBOX)
+LIBS_play       := $(AUDIOLIB) $(WAV)
+LIBS_rec        := $(AUDIOLIB) $(WAV)
 LIBS_listen     := $(TRANSCRIBE)
 LIBS_speak      := $(AUDIOLIB) $(WAV) $(PIPER) user/lib/speech/phonemes.l0
-LIBS_speech     := $(TRANSCRIBE) $(MICLIB) $(AGENTLIB) $(SPEECHLIB) $(RECT) $(WMLIB)
+LIBS_speech     := $(TRANSCRIBE) $(AUDIOLIB) $(AGENTLIB) $(SPEECHLIB) $(RECT) $(WMLIB)
 LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS)
 LIBS_init       := $(PATHS)
@@ -611,7 +613,7 @@ $(call l0_test,$(ULIB) $(RECT) $(WMLIB) user/lib/proto/wm_test.l0)
 $(call l0_test,$(ULIB) $(DISKLIB) user/lib/proto/disk_test.l0)
 $(call l0_test,$(ULIB) $(FONTLIB) user/lib/proto/font_test.l0)
 $(call l0_test,$(ULIB) $(AUDIOLIB) user/lib/proto/audio_test.l0)
-$(call l0_test,$(ULIB) $(AUDIO_SERVER) user/lib/proto/audio_server_test.l0)
+$(call l0_test,$(ULIB) $(AUDIODEV) user/lib/proto/audiodev_test.l0)
 $(call l0_test,$(ULIB) $(UUIDLIB) $(FSLIB) user/lib/proto/fs_test.l0)
 $(call l0_test,$(ULIB) $(NICLIB) user/lib/proto/nic_test.l0)
 $(call l0_test,$(ULIB) $(INETLIB) user/lib/proto/inet_test.l0)

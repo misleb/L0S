@@ -30,8 +30,12 @@
 ; What the shell is to do: write u32s into a page, clear a page, ring
 ; slot's doorbell for target, write a port's PORTSC, read a port's PORTSC
 ; and tell hc_port, answer a request, send one port a notice, send every
-; listener one, write a line, or wait so many milliseconds, as USB's
-; timings ask between steps.
+; listener one, write a line, wait so many milliseconds, as USB's
+; timings ask between steps; or, for an isochronous OUT endpoint fed
+; from a ring a class driver shares with the driver, open that ring,
+; a device's and endpoint's, at an address of pages, let it go, or fill
+; n bytes of a page from off with the ring's next bytes, silence past
+; what it holds.
 (data Act
   (ActWait int)
   (ActPut int (list W32))
@@ -43,7 +47,10 @@
   (ActTell int (list int))
   (ActNotify (list int))
   (ActListen int)
-  (ActLog (list int)))
+  (ActLog (list int))
+  (ActFeed int int int int)
+  (ActUnfeed int int)
+  (ActFill int int int int int))
 
 ; What the shell is to read for an event before it tells the controller
 ; of it: nothing; bytes of a page, from an offset, so many; or a port's
@@ -74,9 +81,23 @@
 
 ; An isochronous pipe's packets: none, for any other pipe; or the pages
 ; its buffer's slots are in, the slots queued on its ring, oldest first,
-; by number, and the bytes of the packets done since its opener was last
-; told, newest first, and how many packets.
-(data Iso (IsoNone) (Iso (bufs (list int)) (queued (list int)) (held (list (list int))) (count int)))
+; by number, the bytes of the packets done since its opener was last
+; told, newest first, how many packets, and, for an OUT pipe, where its
+; packets' bytes come from.
+(data Iso (IsoNone) (Iso (bufs (list int)) (queued (list int)) (held (list (list int))) (count int) (feed Feed)))
+
+; Where an isochronous OUT pipe's packets' bytes come from: nowhere, so
+; they are silence; or a ring the opener shares with the driver, at an
+; address here of so many pages (a header of two u32s, the bytes
+; written and read so far, then the ring), at a rate in Hz of frames of
+; fb bytes, and how many packets have been taken from it, by which each
+; packet's share of the rate is counted.
+(data Feed (NoFeed) (Feed (va int) (pages int) (rate int) (fb int) (k int)))
+
+; The bytes packet k of a feed at rate holds: its share of a second's
+; frames, 1000 packets a second, of fb bytes each.
+(def feed_share ((rate int) (fb int) (k int)) int
+  (mul fb (sub (div (mul (add k 1) rate) 1000) (div (mul k rate) 1000))))
 
 ; A device: its number, its slot, its root hub port and speed, its input
 ; and output contexts' pages, its default endpoint's ring and largest
@@ -202,7 +223,7 @@
 ; The pages pp holds: its ring's, then its buffer's if it has one of its
 ; own.
 (def pipe_own_pages ((pp Pipe)) (list int)
-  (cons (.page (.ring pp)) (match (.iso pp) ((IsoNone) (nil int)) ((Iso bufs q held n) bufs))))
+  (cons (.page (.ring pp)) (match (.iso pp) ((IsoNone) (nil int)) ((Iso bufs q held n f) bufs))))
 
 ; d with fields replaced: ready; its control transfers, whether the
 ; first is sent and how much it moved; its pipes and the last DCI they
@@ -363,7 +384,7 @@
                      (cons (ActNotify (usb_detach_notice (.num d)))
                            (cons (port_line h (.port d) (append "device " (append (digits (.num d)) " gone"))) (nil Act)))
                      (nil Act)))
-        (then_acts (append told (gone_answers (.ctls d) (nil Act)))
+        (then_acts (append told (append (unfeed_acts (.pipes d) (.num d) (nil Act)) (gone_answers (.ctls d) (nil Act))))
                    (hc_command h2 (CmdDisable slot (dev_pages d))))))))
 
 ; error: gone to each client's transfer of cs, after the reversed acc.
@@ -746,7 +767,7 @@
   (match pp
     ((Pipe dci ep r o run iso)
       (match iso
-        ((Iso bufs q held n) (iso_queued h d pp))
+        ((Iso bufs q held n f) (iso_queued h d pp))
         ((IsoNone)
           (match (ring_queue r (cons (normal_trb (add (hc_bus h (.page r)) (buffer_at)) (endpoint_mps ep)) (nil Trb)))
             ((Queued r2 ws addrs)
@@ -777,34 +798,50 @@
 (def iso_slot_offset ((e UsbEndpoint) (j int)) int (mul (mod j (iso_per_page e)) (iso_size e)))
 
 ; An isochronous pipe with a packet queued in every slot not queued, in
-; order, each a TD of one Isoch TRB, and its doorbell rung once.
+; order, each a TD of one Isoch TRB, an OUT pipe's fed slots filled
+; first, and its doorbell rung once.
 (def iso_queued ((h Hc) (d Dev) (pp Pipe)) Did
   (match pp
     ((Pipe dci ep r o run iso)
       (match iso
         ((IsoNone) (Did (hc_put_dev h d) (nil Act)))
-        ((Iso bufs q held n)
+        ((Iso bufs q held n f)
           (let free (iso_free (iso_slots ep) q 0 (nil int))
             (if (is_empty free)
                 (Did (hc_put_dev h d) (nil Act))
-                (match (iso_tds h ep bufs r free (nil W32))
-                  ((Queued r2 ws addrs)
-                    (Did (hc_put_dev h (dev_with_pipes d (pipes_put (.pipes d) (Pipe dci ep r2 o run (Iso bufs (append q free) held n))) (.entries d)))
-                         (cons (ActPut (.page r) ws) (cons (ActBell (.slot d) dci) (nil Act)))))))))))))
+                (match (iso_tds h (.num d) ep bufs r free f (nil W32) (nil Act))
+                  ((IsoTds r2 ws fills f2)
+                    (Did (hc_put_dev h (dev_with_pipes d (pipes_put (.pipes d) (Pipe dci ep r2 o run (Iso bufs (append q free) held n f2))) (.entries d)))
+                         (append fills (cons (ActPut (.page r) ws) (cons (ActBell (.slot d) dci) (nil Act))))))))))))))
 
 ; The slots from j below n that are not among q, in order, after the
 ; reversed acc.
 (def iso_free ((n int) (q (list int)) (j int) (acc (list int))) (list int)
   (if (ge j n) (rev acc) (iso_free n q (add j 1) (if (any_eq j q) acc (cons j acc)))))
 
-; Each of slots queued on r as a TD of one packet of endpoint e, its
-; u32s after acc's: the ring after them all.
-(def iso_tds ((h Hc) (e UsbEndpoint) (bufs (list int)) (r Ring) (slots (list int)) (acc (list W32))) Queued
+; What queueing slots comes to: the ring after, the TRBs' u32s, the
+; fills of the fed slots, and the feed with its packets counted.
+(data IsoTds (IsoTds Ring (list W32) (list Act) Feed))
+
+; Each of slots queued on r as a TD of one packet of endpoint e of
+; device dev, its u32s after acc's: a fed OUT slot filled with its
+; packet's share of the rate from the ring, after the reversed fills,
+; and its TD that long; any other its largest packet.
+(def iso_tds ((h Hc) (dev int) (e UsbEndpoint) (bufs (list int)) (r Ring) (slots (list int)) (f Feed) (acc (list W32)) (fills (list Act))) IsoTds
   (if (is_empty slots)
-      (Queued r acc (nil int))
-      (let j (head slots)
-        (match (ring_queue r (cons (isoch_trb (add (hc_bus h (iso_slot_page e bufs j)) (iso_slot_offset e j)) (iso_size e) (usb_ep_is_in (.addr e))) (nil Trb)))
-          ((Queued r2 ws addrs) (iso_tds h e bufs r2 (tail slots) (append acc ws)))))))
+      (IsoTds r acc (rev fills) f)
+      (let (j (head slots)
+            page (iso_slot_page e bufs j)
+            off (iso_slot_offset e j)
+            len (match f ((NoFeed) (iso_size e)) ((Feed va pages rate fb k) (max 1 (min (iso_size e) (feed_share rate fb k))))))
+        (match (ring_queue r (cons (isoch_trb (add (hc_bus h page) off) len (usb_ep_is_in (.addr e))) (nil Trb)))
+          ((Queued r2 ws addrs)
+            (iso_tds h dev e bufs r2 (tail slots) (feed_next f) (append acc ws)
+                     (match f ((NoFeed) fills) ((Feed va pages rate fb k) (cons (ActFill page off dev (.addr e) len) fills)))))))))
+
+; f with one more packet taken.
+(def feed_next ((f Feed)) Feed
+  (match f ((NoFeed) f) ((Feed va pages rate fb k) (Feed va pages rate fb (add k 1)))))
 
 ; Whether code is an event of no TD: the ring found empty, IN or OUT,
 ; which leaves the endpoint waiting for its next packet's doorbell.
@@ -822,13 +859,13 @@
     ((Pipe dci ep r o run iso)
       (match iso
         ((IsoNone) (Did (hc_put_dev h d) (nil Act)))
-        ((Iso bufs q held n)
+        ((Iso bufs q held n f)
           (if (or (iso_no_td code) (is_empty q))
               (iso_queued h d pp)
               (let (moved (if (or (eq code (cc_success)) (eq code (cc_short_packet))) bytes (nil int))
                     held2 (if (is_empty moved) held (cons moved held))
                     full (ge (add n 1) (iso_batch (iso_size ep)))
-                    pp2 (Pipe dci ep r o run (Iso bufs (tail q) (if full (nil (list int)) held2) (if full 0 (add n 1))))
+                    pp2 (Pipe dci ep r o run (Iso bufs (tail q) (if full (nil (list int)) held2) (if full 0 (add n 1)) f))
                     tell (if full (cons (ActTell o (usb_report_notice (UsbReport (.num d) (.addr ep) (concat (rev held2))))) (nil Act)) (nil Act)))
                 (then_acts tell (iso_queued h (dev_with_pipes d (pipes_put (.pipes d) pp2) (.entries d)) pp2)))))))))
 
@@ -840,7 +877,7 @@
     ((Pipe dci ep r o run iso)
       (match iso
         ((IsoNone) (WantNothing))
-        ((Iso bufs q held n)
+        ((Iso bufs q held n f)
           (if (and (usb_ep_is_in (.addr ep)) (and (not (is_empty q)) (or (eq code (cc_success)) (eq code (cc_short_packet)))))
               (WantBytes (iso_slot_page ep bufs (head q)) (iso_slot_offset ep (head q)) (max 0 (sub (iso_size ep) residual)))
               (WantNothing)))))))
@@ -949,7 +986,42 @@
             ((Some e) (pipe_opened h d e o))))))))
 
 ; Whether pp is isochronous.
-(def is_iso ((pp Pipe)) bool (match (.iso pp) ((IsoNone) false) ((Iso bufs q held n) true)))
+(def is_iso ((pp Pipe)) bool (match (.iso pp) ((IsoNone) false) ((Iso bufs q held n f) true)))
+
+; Whether pp is an isochronous OUT pipe fed from a ring.
+(def is_fed ((pp Pipe)) bool
+  (match (.iso pp) ((IsoNone) false) ((Iso bufs q held n f) (match f ((NoFeed) false) ((Feed va pages rate fb k) true)))))
+
+; An ActUnfeed for each fed pipe of ps, of device dev, after the
+; reversed acc.
+(def unfeed_acts ((ps (list Pipe)) (dev int) (acc (list Act))) (list Act)
+  (if (is_empty ps)
+      (rev acc)
+      (unfeed_acts (tail ps) dev (if (is_fed (head ps)) (cons (ActUnfeed dev (.addr (.ep (head ps)))) acc) acc))))
+
+; feed DEV EP VA PAGES RATE FB: the isochronous OUT endpoint ep of
+; device dev, open, fed from the ring at va of pages, shared with the
+; driver, at rate of frames of fb bytes: its slots not yet queued filled
+; from it from now on, the shell told to open the ring, and reply told
+; ok; or why not.
+(def hc_feed ((h Hc) (dev int) (ep int) (va int) (pages int) (rate int) (fb int) (reply int)) Did
+  (match (dev_numbered (.devs h) dev)
+    ((None) (Did h (cons (ActAnswer reply (error_reply "no such device")) (nil Act))))
+    ((Some d)
+      (match (pipe_at (.pipes d) (dci_of ep))
+        ((None) (Did h (cons (ActAnswer reply (error_reply "not open")) (nil Act))))
+        ((Some pp)
+          (if (or (not (is_iso pp)) (usb_ep_is_in (.addr (.ep pp))))
+              (Did h (cons (ActAnswer reply (error_reply "not an isochronous OUT endpoint")) (nil Act)))
+              (or (lt pages 1) (or (lt rate 1000) (lt fb 1)))
+              (Did h (cons (ActAnswer reply (error_reply "feed DEV EP VA PAGES RATE FB, PAGES and FB at least 1 and RATE at least 1000")) (nil Act)))
+              (match (.iso pp)
+                ((IsoNone) (Did h (nil Act)))
+                ((Iso bufs q held n f)
+                  (let (unfed (match f ((NoFeed) (nil Act)) ((Feed v2 p2 r2 f2 k2) (cons (ActUnfeed dev ep) (nil Act))))
+                        pp2 (Pipe (.dci pp) (.ep pp) (.ring pp) (.opener pp) (.run pp) (Iso bufs q held n (Feed va pages rate fb 0))))
+                    (Did (hc_put_dev h (dev_with_pipes d (pipes_put (.pipes d) pp2) (.entries d)))
+                         (append unfed (cons (ActFeed dev ep va pages) (cons (ActAnswer reply "ok") (nil Act))))))))))))))
 
 ; hc_open's rest, for d's endpoint e: an IN endpoint, or an isochronous
 ; one either way; an isochronous one takes its buffer's pages too.
@@ -965,7 +1037,7 @@
               ((TakenNone) (Did h (cons (ActAnswer o (error_reply "no memory")) (nil Act))))
               ((Taken h2 ps zero)
                 (let (pp (Pipe dci e (ring_new (head ps) (hc_bus h2 (head ps)) (transfer_slots)) o false
-                               (if iso (Iso (tail ps) (nil int) (nil (list int)) 0) (IsoNone)))
+                               (if iso (Iso (tail ps) (nil int) (nil (list int)) 0 (NoFeed)) (IsoNone)))
                       ps2 (pipes_put (.pipes d) pp))
                   (then_acts zero
                     (hc_command (hc_put_dev h2 (dev_with_pipes d ps2 (pipes_entries ps2 1))) (CmdConfigure (.slot d) dci o)))))))))))
@@ -981,8 +1053,9 @@
           ((None) (Did h (if (gt reply 0) (cons (ActAnswer reply (error_reply "not open")) (nil Act)) (nil Act))))
           ((Some pp)
             (let ps (pipes_without (.pipes d) dci)
-              (hc_command (hc_put_dev h (dev_with_pipes d ps (pipes_entries ps 1)))
-                          (CmdDrop (.slot d) dci (pipe_own_pages pp) reply)))))))))
+              (then_acts (unfeed_acts (cons pp (nil Pipe)) (.num d) (nil Act))
+                (hc_command (hc_put_dev h (dev_with_pipes d ps (pipes_entries ps 1)))
+                            (CmdDrop (.slot d) dci (pipe_own_pages pp) reply))))))))))
 
 ; Every endpoint port o opened closed, as when o is gone.
 (def hc_opener_gone ((h Hc) (o int)) Did

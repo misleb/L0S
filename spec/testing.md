@@ -73,7 +73,7 @@ a few lines, the IPA's rules each pinned to espeak-ng's, the numbers,
 the sentences and the IDs; `vits_test.l0` each convolution against its
 sum written out; `piper_test.l0` the spline's inverse against its
 forward form on 300 seeded cases, the layouts and the names;
-`speak_test.l0` the arguments and the samples' doubling. On the board,
+`speak_test.l0` the arguments and the samples. On the board,
 `tests/speak.sh` makes a FAT32 volume of the voice and CMUdict (the
 voice is past an initramfs's limit), types `run speak -0 -o` at the
 serial shell for each oracle sentence asked, by default the two whose
@@ -149,6 +149,8 @@ Each case of `tests/e2e/` is a directory:
   `usb-mouse` on a `qemu-xhci`, not virtio's; and with it `usbaudio`,
   if QEMU's `usb-audio`, a speaker, is to be on it too (`QEMU_USB=audio`
   in `tools/qemu-boot.sh`);
+- `chime`, if the case's `etc` is to hold the Pi 5's chime,
+  `build/chime.wav`, as `/etc/chime.wav`, for the audio server to play;
 - `sd`, if the board is to have an SD card in a `sdhci-pci`, a blank
   image of 64 MB made for the boot;
 - `whistle`, if the case's `etc` is to hold Whistle's model as
@@ -171,15 +173,22 @@ Three cases are USB's: `pcie`, the bus's server waiting once it has set
 the bus up; `usb`, `run lsusb` listing the keyboard and the mouse
 `xhci` brought up on MSI 80, which its stderr names, and `ps` showing
 `xhci` waiting for a message, not polling; and `usbaudio` (with
-`usbaudio`), `usb-audio` reading QEMU's speaker, `rec list` listing its
-one stream, `3 1 out speaker 2 16 48000`, `rec silence 3 1 500` its
-isochronous OUT endpoint sending 500 packets in half a second, one a
-frame, and `rec` of a file saying there is no microphone. No case has
-a microphone, since QEMU's `usb-audio` is none: a real one, the Yeti
-Nano, has been passed through by hand (`QEMU_USB=046d:0acf make
-demo`), `rec` of it written to the SD card's FAT32 volume and played
-back on the host; and plugged into a Pi 5, `rec FILE 5 16000` of it
-played there by `play` and heard by `listen`. `sdhci` (with `sd`) brings a
+`usbaudio` and `chime`), the audio server and `usb-audio` attaching
+QEMU's speaker to it, on which the server plays the chime, said in the
+log (`stderr`), `run sound` listing it, `1 out usb-46f4:0002-speaker 2
+48000 default`, `run play /etc/chirp.wav` playing a 16 kHz chirp
+(`user/lib/speech/testdata`'s) through the server, brought up to 48
+kHz and fed to the speaker's isochronous OUT endpoint from a ring, and
+`rec` of a file saying there is no input. The case drops the sound; the
+same boot by hand with `QEMU_AUDIO_WAV=build/out.wav`
+(`tools/qemu-boot.sh`) writes what the speaker played, where the
+chime's chord decaying and then the chirp at full scale were read
+back. No case has a microphone, since QEMU's `usb-audio` is none: a
+real one, the Yeti Nano, has been passed through by hand
+(`QEMU_USB=046d:0acf make demo`), `rec` of it written to the SD card's
+FAT32 volume and played back on the host; and plugged into a Pi 5,
+`rec FILE 5 16000` of it played there by `play` and heard by `listen`,
+both before the audio server. `sdhci` (with `sd`) brings a
 blank SD card up as `disk0` on its INTx line, 37, which its stderr
 names, lists the disks, writes a sector and reads it back, is refused
 past the card's end, and reads its last sector.

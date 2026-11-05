@@ -1,11 +1,15 @@
-; play.l0 -- plays a WAV file of 16-bit PCM, one channel or two, at
-; 32, 44.1 or 48 kHz, through the audio driver (audio.l0): the driver set
-; to the file's rate, then its samples offered a buffer at a time
-; through pages shared with the driver, each offer again from where the
-; driver stopped taking, until all are taken and played. A file at 16
-; kHz, as Whistle hears and rec records for it, is played at 48 kHz,
-; taken up a piece at a time as it is offered (pcm.l0). A file it
-; cannot play, or no driver, is said on standard error, and it exits 1.
+; play.l0 -- plays a WAV file of 16-bit PCM, one channel or two, at any
+; rate from 8 to 192 kHz, through the audio server (audio.l0): a stream
+; opened at the file's rate and channels on the default output, or on
+; the device given, its samples offered a buffer at a time through
+; pages shared with the server, each offer again from where the server
+; stopped taking, until all are taken and played. The server converts
+; them to the output's rate and mixes them with whatever else plays. A
+; file it cannot play, or no server, is said on standard error, and it
+; exits 1.
+;
+;   play FILE [ID]    FILE on the default output, or on device ID, as
+;                     sound lists them
 
 ; What ends play, said as play on standard error: 1.
 (def complain ((why (list int))) int (complain_as "play" why))
@@ -13,79 +17,37 @@
 ; Pages in the buffer the samples go through: 16 KB, 4096 stereo frames.
 (def play_pages () int 4)
 
-; How long it waits while the driver has no room, in ns: about a period.
-(def play_wait_ns () int 10000000)
-
-; Plays the file its one argument names.
+; Plays the file its first argument names, on the device its second
+; names if it does.
 (def play_main ((as (list (list int)))) int
-  (if (not (eq (length as) 1))
-      (complain "usage: play FILE")
+  (if (or (is_empty as) (or (gt (length as) 2) (and (eq (length as) 2) (not (is_number (nth as 1))))))
+      (complain "usage: play FILE [ID]")
       (match (read_whole (head as))
         ((Err why) (complain (append (head as) (append ": " why))))
-        ((Ok b) (play_wav b (parse_wav b))))))
+        ((Ok b) (play_wav b (parse_wav b) (if (eq (length as) 2) (int_prefix (nth as 1) 0) 0))))))
 
-; The sound w of b played: 0, or 1 if it cannot be.
-(def play_wav ((b bytes) (w Wav)) int
+; The sound w of b played on device dev, 0 for the default: 0, or 1 if
+; it cannot be.
+(def play_wav ((b bytes) (w Wav) (dev int)) int
   (match w
     ((WavBad why) (complain why))
     ((Wav rate chans s e)
-      (if (not (play_takes rate))
-          (complain (append "a WAV file at " (append (digits rate) (append " Hz; the driver plays " (append (audio_rates) ", and play 16000 at 48000")))))
+      (if (not (pcm_format_ok (PcmFormat rate chans 2)))
+          (complain (append "a WAV file at " (append (digits rate) " Hz; 8000 to 192000 are played")))
           (match (audio_open)
             ((NoAudio why) (complain why))
-            ((Audio port rp pid) (play_at (Audio port rp pid) b rate chans s e)))))))
+            ((Audio port rp pid) (play_at (Audio port rp pid) b rate chans s e dev)))))))
 
-; The rate play takes up to 48 kHz itself, which no driver plays: 16 kHz.
-(def play_up_rate () int 16000)
-
-; Whether play plays a file at rate: one the driver plays, or 16 kHz.
-(def play_takes ((rate int)) bool (or (audio_rate_ok rate) (eq rate (play_up_rate))))
-
-; Frames taken up to 48 kHz at a time: a buffer's worth.
-(def play_up_frames () int 4096)
-
-; The samples of b from s up to e played at rate: at 48 kHz, taken up a
-; piece at a time, if rate is 16 kHz.
-(def play_at ((a Audio) (b bytes) (rate int) (chans int) (s int) (e int)) int
-  (let (up (eq rate (play_up_rate))
-        why (audio_start a (if up 48000 rate)))
-    (if (not (is_empty why))
-        (complain why)
-        (match (audio_buffer a (play_pages))
-          ((NoAudioBuf why2) (complain why2))
-          ((AudioBuf va n there r)
-            (if up
-                (pieces a (AudioBuf va n there r) b chans s e 0 (pcm_up_frames_of (div (sub e s) (wav_frame_bytes chans))))
-                (offered a (AudioBuf va n there r) b chans s e true)))))))
-
-; The frames at 48 kHz from o up to total of the 16 kHz samples of b
-; from s up to e, each piece taken up and offered in turn, then the end
-; waited for.
-(def pieces ((a Audio) (buf AudioBuf) (b bytes) (chans int) (s int) (e int) (o int) (total int)) int
-  (if (ge o total)
-      (drained a)
-      (let (o1 (min total (add o (play_up_frames)))
-            p (pcm_up b s e chans o o1)
-            r (offered a buf p chans 0 (bytes_len p) false))
-        (if (not (eq r 0)) r (pieces a buf b chans s e o1 total)))))
-
-; The samples from i up to e offered, again from wherever the driver
-; stopped taking; then, if last, the end waited for.
-(def offered ((a Audio) (buf AudioBuf) (b bytes) (chans int) (i int) (e int) (last bool)) int
-  (if (ge i e)
-      (if last (drained a) 0)
-      (match (audio_play a buf b i e chans)
-        ((Err why) (complain why))
-        ((Ok k)
-          (if (eq k 0)
-              (let z (sleep_ns (play_wait_ns)) (offered a buf b chans i e last))
-              (offered a buf b chans (add i (mul k (wav_frame_bytes chans))) e last))))))
-
-; 0 once the driver has played all it was given.
-(def drained ((a Audio)) int
-  (match (audio_info a)
+; The samples of b from s up to e played at rate on a stream of chans
+; channels on dev: opened, played whole, drained and closed.
+(def play_at ((a Audio) (b bytes) (rate int) (chans int) (s int) (e int) (dev int)) int
+  (match (audio_stream a rate chans dev)
     ((Err why) (complain why))
-    ((Ok i)
-      (match i
-        ((AudioInfo rate queued room)
-          (if (eq queued 0) 0 (let z (sleep_ns (play_wait_ns)) (drained a))))))))
+    ((Ok n)
+      (match (audio_buffer a (play_pages))
+        ((NoAudioBuf why) (complain why))
+        ((AudioBuf va pages there r)
+          (let (why (audio_play_all a (AudioBuf va pages there r) n b s e (wav_frame_bytes chans))
+                why2 (if (is_empty why) (audio_drained a n) why)
+                c (audio_close a n))
+            (if (is_empty why2) 0 (complain why2))))))))

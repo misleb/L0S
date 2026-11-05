@@ -89,7 +89,8 @@ no Piper voice's licence fits.
 - [ ] On a Pi 5: heard, and timed a second of speech; if slower than
   spoken, the vocoder's time steps split over the other CPUs; and a
   sentence made while the one before plays, which a process playing
-  beside the one making needs, the driver's ring holding 128 ms.
+  beside the one making needs, the audio server's queue holding a
+  quarter second (0069) and the driver's ring 128 ms.
 
 Settled: the voice and the dictionary live on the data volume, as
 Whistle's model does, the release carrying them (the voice is past an

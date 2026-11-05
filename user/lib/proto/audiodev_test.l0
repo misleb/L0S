@@ -1,0 +1,95 @@
+; audiodev_test.l0 -- tests of audiodev.l0: attaching, the server's
+; requests as a driver reads them, the notices, and the ring.
+
+; An attach, written and read back.
+(def test_attach_round_trip () int
+  (let a (AudiodevAttach 12 "hdmi0" false 2 (cons 44100 (cons 48000 (nil int))) 3000)
+    (add (check_str "request" (audiodev_attach_request a) "attach 12 hdmi0 out 2 44100,48000 3000")
+         (check_bool "back" (match (audiodev_attach_of (audiodev_attach_request a)) ((Ok a2) (eq a2 a)) ((Err why) false)) true))))
+
+; An attach refused: too few words, a kind that is neither, no rate.
+(def test_attach_refused () int
+  (add (check_str "short" (attach_why "attach 12 hdmi0 out") "attach takes PORT NAME in|out CHANS RATES LEAD")
+       (add (check_str "kind" (attach_why "attach 12 x sideways 2 48000 0") "a device takes sound in or out")
+            (check_str "rates" (attach_why "attach 12 x in 2 x 0") "attach's RATES are numbers separated by commas"))))
+
+(def attach_why ((body (list int))) (list int)
+  (match (audiodev_attach_of body) ((Ok a) "ok") ((Err why) why)))
+
+(def ask_text ((a AudiodevAsk)) (list int)
+  (match a
+    ((DevStart id r) (unwords (cons "start" (numbers_words (cons id (cons r (nil int)))))))
+    ((DevPlay id va n) (unwords (cons "play" (numbers_words (cons id (cons va (cons n (nil int))))))))
+    ((DevStop id) (append "stop " (digits id)))
+    ((DevListen id r) (unwords (cons "listen" (numbers_words (cons id (cons r (nil int)))))))
+    ((DevRefused why) why)))
+
+(def test_asks () int
+  (add (check_str "start" (ask_text (audiodev_ask_of "start 1 48000")) "start 1 48000")
+       (add (check_str "play" (ask_text (audiodev_ask_of "play 1 4096 100")) "play 1 4096 100")
+            (add (check_str "stop" (ask_text (audiodev_ask_of "stop 1")) "stop 1")
+                 (check_str "listen" (ask_text (audiodev_ask_of "listen 2 16000")) "listen 2 16000")))))
+
+(def test_asks_refused () int
+  (add (check_str "frames" (ask_text (audiodev_ask_of "play 1 4096 0")) "no frames")
+       (check_str "unknown" (ask_text (audiodev_ask_of "info")) "no request info")))
+
+(def test_state_reply () int
+  (add (check_str "reply" (audiodev_state_reply (AudiodevState 48000 512 2048)) "audio 48000 512 2048")
+       (check_bool "back" (match (audiodev_state_of "audio 48000 512 2048") ((Some s) (eq s (AudiodevState 48000 512 2048))) ((None) false)) true)))
+
+(def test_played () int
+  (add (check_str "reply" (audiodev_played_reply 12) "played 12")
+       (check_int "read" (match (audiodev_played_of "played 12") ((Some n) n) ((None) 0)) 12)))
+
+; The room notice and what it says; the in notice's header and its id.
+(def test_notices () int
+  (let (room (audiodev_room_of (message_new 7 (audiodev_room_notice 1 300 200)))
+        in (bytes_concat (cons (bytes_from_list (u32_le 7)) (cons (audiodev_in_header 2) (cons (bytes_from_list "ab") (nil bytes))))))
+    (add (check_strs "room" (match room ((Some ws) (numbers_words ws)) ((None) (nil (list int)))) (split_spaces "1 300 200"))
+         (add (check_int "in" (audiodev_in_of in) 2)
+              (check_int "at" (bytes_get in (audiodev_in_at)) 97)))))
+
+(def test_play_pages () int
+  (check_int "pages" (audiodev_play_pages 1025 2) 2))
+
+; ------------------------------------------------------------------- ring
+
+(def ring_text ((r AudioRing)) (list int)
+  (append "next " (append (digits (ring_next r))
+    (append " queued " (append (digits (ring_queued r)) (append " room " (digits (ring_room r))))))))
+
+; 4 periods of 100: period 0 plays silence, 1 to 3 are free, 300 frames.
+(def test_ring_new () int
+  (check_str "ring" (ring_text (audio_ring_new 4 100)) "next 100 queued 0 room 300"))
+
+(def test_ring_wrote () int
+  (check_str "ring" (ring_text (ring_wrote (audio_ring_new 4 100) 250)) "next 350 queued 250 room 50"))
+
+; Period 0 ends: frames 400 to 499 go in its place, so room grows by 100.
+(def test_ring_advanced () int
+  (let r (ring_advanced (ring_wrote (audio_ring_new 4 100) 250))
+    (add (check_str "ring" (ring_text r) "next 350 queued 150 room 150")
+         (check_int "reused" (ring_reused (audio_ring_new 4 100)) 400))))
+
+; Behind: what was written has all played, so writing starts after the
+; period playing, not where it left off.
+(def test_ring_underrun () int
+  (let r (ring_advanced (ring_advanced (ring_advanced (ring_wrote (audio_ring_new 4 100) 50))))
+    (check_str "ring" (ring_text r) "next 400 queued 0 room 300")))
+
+(def test_ring_places () int
+  (let r (audio_ring_new 4 100)
+    (add (check_int "slot" (ring_slot r 450) 0)
+         (add (check_int "frame" (ring_frame_at r 1234) 34)
+              (check_int "in 2" (ring_frame_at r 250) 250)))))
+
+; The device in period 1 after the ring's 3: two periods ended.
+(def test_ring_ended () int
+  (let r (ring_advanced (ring_advanced (ring_advanced (audio_ring_new 4 100))))
+    (add (check_int "playing" (ring_playing r) 3)
+         (check_int "ended" (ring_ended r 1) 2))))
+
+; start's state of a ring: its rate, queued and room.
+(def test_ring_state () int
+  (check_str "state" (audiodev_state_reply (ring_state (ring_wrote (audio_ring_new 4 100) 250) 48000)) "audio 48000 250 50"))

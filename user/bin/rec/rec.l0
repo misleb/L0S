@@ -1,22 +1,19 @@
-; rec.l0 -- records from a microphone into a WAV file, through usb-audio
-; (proto/mic.l0); and lists the audio devices, or sends one silence, as
-; a test of the path out:
+; rec.l0 -- records from a microphone into a WAV file, through the audio
+; server (proto/audio.l0); and lists the sound devices:
 ;
-;   rec list                    the streams of every audio device, as
-;                               mic's devices answers them
-;   rec FILE SECONDS [RATE]     SECONDS of the first microphone, at RATE
-;                               (48000 if none) or the nearest it
-;                               takes, written to FILE as a WAV file
-;                               of its own samples, 16 or 24 bits;
-;                               at 16000, which few offer, one
-;                               channel of 16 bits brought down from
-;                               48 kHz by usb-audio, as Whistle hears
-;   rec silence DEV IFACE MS    silence sent to a stream out for MS
-;                               milliseconds, and how many packets went
+;   rec list                            the devices, as sound lists them
+;   rec FILE SECONDS [RATE [CHANS [ID]]]
+;                                       SECONDS of the default input, or
+;                                       of device ID, at RATE (48000 if
+;                                       none) of CHANS channels (2 if
+;                                       none), written to FILE as a WAV
+;                                       file of 16-bit samples; 16000 1
+;                                       records what Whistle hears
 ;
-; A microphone that sends less than asked within SECONDS and 3 more is
-; said so, and what it sent written. A failure is said on standard
-; error, and it exits 1.
+; The server converts what the microphone gives to the rate and channels
+; asked. A microphone that sends less than asked within SECONDS and 3
+; more is said so, and what it sent written. A failure is said on
+; standard error, and it exits 1.
 
 ; What ends rec, said as rec on standard error: 1.
 (def complain ((why (list int))) int (complain_as "rec" why))
@@ -24,78 +21,77 @@
 ; The most seconds one recording takes: 10 minutes.
 (def rec_most_seconds () int 600)
 
+; The rate and channels asked when none are given.
+(def rec_default_rate () int 48000)
+(def rec_default_chans () int 2)
+
 ; How long past its time a recording waits for the samples: 3 s.
 (def rec_grace_ns () int 3000000000)
 
-; What the arguments ask: the devices; a recording, its file, seconds
-; and rate; a silence, its words; or why they ask nothing.
-(data Ask (AskList) (AskRecord (list int) int int) (AskSilence (list (list int))) (AskWrong (list int)))
+; What the arguments ask: the devices; a recording, its file, seconds,
+; rate, channels and device; or why they ask nothing.
+(data Ask (AskList) (AskRecord (list int) int int int int) (AskWrong (list int)))
 
 ; The arguments as is asked.
 (def ask_of ((as (list (list int)))) Ask
   (let n (length as)
     (if (and (eq n 1) (eq (head as) "list")) (AskList)
-        (and (eq n 4) (eq (head as) "silence")) (AskSilence (tail as))
-        (and (or (eq n 2) (eq n 3)) (and (is_number (nth as 1)) (or (eq n 2) (is_number (nth as 2)))))
-        (let s (int_prefix (nth as 1) 0)
-          (if (or (lt s 1) (gt s (rec_most_seconds)))
-              (AskWrong (append "SECONDS is 1 to " (digits (rec_most_seconds))))
-              (AskRecord (head as) s (if (eq n 3) (int_prefix (nth as 2) 0) (mic_default_rate)))))
-        (AskWrong "usage: rec list | rec FILE SECONDS [RATE] | rec silence DEV IFACE MS"))))
+        (or (lt n 2) (gt n 5)) (AskWrong (rec_usage))
+        (match (word_numbers (tail as))
+          ((None) (AskWrong (rec_usage)))
+          ((Some ns)
+            (let s (head ns)
+              (if (or (lt s 1) (gt s (rec_most_seconds)))
+                  (AskWrong (append "SECONDS is 1 to " (digits (rec_most_seconds))))
+                  (AskRecord (head as) s (nth_or ns 1 (rec_default_rate)) (nth_or ns 2 (rec_default_chans)) (nth_or ns 3 0)))))))))
+
+; The usage.
+(def rec_usage () (list int) "usage: rec list | rec FILE SECONDS [RATE [CHANS [ID]]]")
 
 ; What rec does with its arguments.
 (def rec_main ((as (list (list int)))) int
   (match (ask_of as)
     ((AskWrong why) (complain why))
-    ((AskList) (with_mic (ListDo)))
-    ((AskSilence ws) (with_mic (SilenceDo ws)))
-    ((AskRecord path s rate) (with_mic (RecordDo path s rate)))))
+    ((AskList) (with_audio (ListDo)))
+    ((AskRecord path s rate chans dev) (with_audio (RecordDo path s rate chans dev)))))
 
-; What to do once mic is found.
-(data Do (ListDo) (SilenceDo (list (list int))) (RecordDo (list int) int int))
+; What to do once the server is found.
+(data Do (ListDo) (RecordDo (list int) int int int int))
 
-; mic found, within 5 seconds, a port made for its answers, and d done.
-(def with_mic ((d Do)) int
-  (match (name_wait (mic_name) 5000000000)
-    ((NotFound) (complain "no mic; is usb-audio running?"))
-    ((Found mic)
-      (let rp (port_new)
+; The server found, and d done.
+(def with_audio ((d Do)) int
+  (match (audio_open)
+    ((NoAudio why) (complain why))
+    ((Audio port rp pid)
+      (let a (Audio port rp pid)
         (match d
-          ((ListDo) (listed (asked_mic mic rp "devices")))
-          ((SilenceDo ws) (said (asked_mic mic rp (unwords (cons "silence" ws)))))
-          ((RecordDo path s rate) (recording mic rp path s rate)))))))
-
-; body asked of mic on rp: its answer, or error: WHY.
-(def asked_mic ((mic int) (rp int) (body (list int))) (list int)
-  (match (port_ask mic rp body "mic")
-    ((Asked from b) (msg_text b))
-    ((AskFailed why) (error_reply why))))
+          ((ListDo) (listed (audio_reply a "devices")))
+          ((RecordDo path s rate chans dev) (recording a path s rate chans dev)))))))
 
 ; The devices answer written; nothing there said so.
 (def listed ((r (list int))) int
   (if (starts_with r "error: ") (complain (drop r 7))
-      (is_empty r) (let w (write_line "no audio devices") 0)
+      (is_empty r) (let w (write_line "no devices") 0)
       (let w (write_str r) 0)))
-
-; An answer written, or its error said.
-(def said ((r (list int))) int
-  (if (starts_with r "error: ") (complain (drop r 7)) (let w (write_line r) 0)))
 
 ; ----------------------------------------------------------------- record
 
-; s seconds of the first microphone at rate recorded to path: listen
-; asked, the samples gathered as they come until there are enough or the
-; time and grace are up, stop asked, and the file written.
-(def recording ((mic int) (rp int) (path (list int)) (s int) (rate int)) int
-  (match (mic_format_of (asked_mic mic rp (append "listen " (digits rate))))
+; s seconds of input dev at rate of chans recorded to path: listen
+; asked, the samples gathered as they come until there are enough or
+; the time and grace are up, stop asked, and the file written.
+(def recording ((a Audio) (path (list int)) (s int) (rate int) (chans int) (dev int)) int
+  (match (audio_listen a rate chans dev)
     ((Err why) (complain why))
     ((Ok f)
-      (let (want (mul (mul s (.rate f)) (mic_frame_bytes f))
-            deadline (add (clock_ns) (add (mul s 1000000000) (rec_grace_ns)))
-            a (alarm_at rp deadline)
-            got (gathered rp want 0 (nil bytes))
-            st (stop_asked mic rp))
-        (written path f s want got)))))
+      (match a
+        ((NoAudio why) (complain why))
+        ((Audio port rp pid)
+          (let (want (mul (mul s (.rate f)) (pcm_frame_bytes f))
+                deadline (add (clock_ns) (add (mul s 1000000000) (rec_grace_ns)))
+                al (alarm_at rp deadline)
+                got (gathered rp want 0 (nil bytes))
+                st (audio_stop a))
+            (written path f s want got)))))))
 
 ; Samples gathered from rp until want bytes have come or the alarm
 ; rings: the pieces, newest first, and how many bytes.
@@ -108,30 +104,16 @@
       (match (port_receive rp)
         ((RecvFailed) (Got pieces n))
         ((Message from b)
-          (if (mic_is_pcm b)
-              (let p (bytes_slice b (mic_pcm_at) (bytes_len b))
+          (if (audio_is_pcm b)
+              (let p (bytes_slice b (audio_pcm_at) (bytes_len b))
                 (gathered rp want (add n (bytes_len p)) (cons p pieces)))
               (is_alarm_notice (Message from b))
               (Got pieces n)
               (gathered rp want n pieces))))))
 
-; stop asked of mic, its answer awaited past the samples still coming.
-(def stop_asked ((mic int) (rp int)) int
-  (match (port_send mic (request rp "stop"))
-    ((Sent) (stop_answered rp))
-    ((SendNoPort) 0)
-    ((SendFull) 0)
-    ((SendTooBig) 0)))
-
-; The next message on rp that is no sample nor alarm: stop's answer.
-(def stop_answered ((rp int)) int
-  (match (port_receive rp)
-    ((RecvFailed) 0)
-    ((Message from b) (if (or (mic_is_pcm b) (is_alarm_notice (Message from b))) (stop_answered rp) 0))))
-
 ; What was gathered, g, written to path as a WAV file of format f, cut
 ; to want bytes; s seconds said, or what came if less, and 1 then.
-(def written ((path (list int)) (f MicFormat) (s int) (want int) (g Got)) int
+(def written ((path (list int)) (f PcmFormat) (s int) (want int) (g Got)) int
   (let (b (rec_wav f want g)
         w (write_whole path b))
     (if (not (is_empty w))
@@ -142,16 +124,16 @@
 
 ; The WAV file of what g gathered, its whole frames, at most want bytes,
 ; after a header of f.
-(def rec_wav ((f MicFormat) (want int) (g Got)) bytes
+(def rec_wav ((f PcmFormat) (want int) (g Got)) bytes
   (let (all (bytes_concat (rev (.pieces g)))
-        fb (mic_frame_bytes f)
+        fb (pcm_frame_bytes f)
         n (mul (div (min want (bytes_len all)) (max fb 1)) fb))
-    (bytes_concat (cons (bytes_from_list (wav_header_sized (.rate f) (.channels f) (.size f) n))
+    (bytes_concat (cons (bytes_from_list (wav_header_sized (.rate f) (.chans f) (.size f) n))
                     (cons (bytes_slice all 0 n) (nil bytes))))))
 
 ; What rec says of a recording: recorded S s at RATE Hz, CH channels of
 ; BITS bits, to PATH.
-(def rec_line ((path (list int)) (f MicFormat) (s int)) (list int)
+(def rec_line ((path (list int)) (f PcmFormat) (s int)) (list int)
   (append "recorded " (append (digits s) (append " s at " (append (digits (.rate f))
-    (append " Hz, " (append (digits (.channels f)) (append " channels of " (append (digits (mul 8 (.size f)))
+    (append " Hz, " (append (digits (.chans f)) (append " channels of " (append (digits (mul 8 (.size f)))
       (append " bits, to " path))))))))))

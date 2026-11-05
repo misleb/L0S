@@ -1,8 +1,8 @@
 ; speak.l0 -- says text aloud (roadmap 0062): its words through a Piper
 ; voice, made on the board by speech/piper.l0, and played through the
-; audio driver a sentence at a time, at twice the voice's rate (22,050 Hz
-; voices at 44,100), each sample followed by its mean with the next; or
-; written as a WAV file at the voice's own rate.
+; audio server (proto/audio.l0) a sentence at a time, as a stream at
+; the voice's own rate, which the server brings to the output's; or
+; written as a WAV file at that rate.
 ;
 ;   speak [-t] [-0] [-v VOICE] [-d DICT] [-o FILE.wav] TEXT...
 ;
@@ -133,75 +133,42 @@
 ; Pages in the buffer the samples go through: 16 KB.
 (def speak_pages () int 4)
 
-; How long it waits while the driver has no room, in ns: about a period.
-(def speak_wait_ns () int 10000000)
-
-; The sentences played through the driver, at twice the voice's rate,
-; each made and then played, until the last has.
+; The sentences played through the audio server, as a stream of one
+; channel at the voice's rate on the default output, each made and
+; then played, until the last has.
 (def speak_aloud ((sp Speaker) (ss (list (list int))) (exact bool) (timed bool)) int
-  (let rate (mul 2 (.rate (.cfg (.p sp))))
-    (if (not (audio_rate_ok rate))
-        (complain (append "the voice's rate doubled is " (append (digits rate) (append " Hz; the driver plays " (audio_rates)))))
-        (match (audio_open)
-          ((NoAudio why) (complain why))
-          ((Audio port rp pid)
-            (let (a (Audio port rp pid) why (audio_start a rate))
-              (if (not (is_empty why))
-                  (complain why)
-                  (match (audio_buffer a (speak_pages))
-                    ((NoAudioBuf why2) (complain why2))
-                    ((AudioBuf va n there r) (speak_played sp a (AudioBuf va n there r) ss exact timed (piper_seed)))))))))))
+  (let rate (.rate (.cfg (.p sp)))
+    (match (audio_open)
+      ((NoAudio why) (complain why))
+      ((Audio port rp pid)
+        (let a (Audio port rp pid)
+          (match (audio_stream a rate 1 0)
+            ((Err why) (complain why))
+            ((Ok n)
+              (match (audio_buffer a (speak_pages))
+                ((NoAudioBuf why2) (complain why2))
+                ((AudioBuf va pages there r)
+                  (let (st (speak_played sp a (AudioBuf va pages there r) n ss exact timed (piper_seed))
+                        c (audio_close a n))
+                    st))))))))))
 
-; Each sentence from ss made, doubled and offered; then the end waited
-; for.
-(def speak_played ((sp Speaker) (a Audio) (buf AudioBuf) (ss (list (list int))) (exact bool) (timed bool) (seed int)) int
+; Each sentence from ss made and offered to stream n; then the end
+; waited for.
+(def speak_played ((sp Speaker) (a Audio) (buf AudioBuf) (n int) (ss (list (list int))) (exact bool) (timed bool) (seed int)) int
   (if (is_empty ss)
-      (speak_drained a)
+      (let why (audio_drained a n) (if (is_empty why) 0 (complain why)))
       (let (s (speak_sentence sp (head ss) exact timed seed)
-            pcm (speak_doubled (piper_pcm (.audio s)))
-            r (speak_offered a buf pcm 0 (bytes_len pcm)))
-        (if (not (eq r 0)) r (speak_played sp a buf (tail ss) exact timed (.seed s))))))
+            pcm (piper_pcm (.audio s))
+            why (audio_play_all a buf n pcm 0 (bytes_len pcm) 2))
+        (if (not (is_empty why)) (complain why) (speak_played sp a buf n (tail ss) exact timed (.seed s))))))
 
-; 16-bit PCM at twice its rate: each sample, then its mean with the
-; next (the last, itself).
-(def speak_doubled ((pcm bytes)) bytes
-  (let n (div (bytes_len pcm) 2)
-    (bytes_from_list (rev (speak_doubled_from pcm 0 n (nil int))))))
-(def speak_doubled_from ((pcm bytes) (k int) (n int) (acc (list int))) (list int)
-  (if (ge k n)
-      acc
-      (let (a (speak_sample pcm k)
-            b (if (lt (add k 1) n) (speak_sample pcm (add k 1)) a)
-            m (div (add a b) 2))
-        (speak_doubled_from pcm (add k 1) n (speak_push_sample m (speak_push_sample a acc))))))
-
-; Sample k of pcm, signed; and a sample's two bytes onto the reversed acc.
+; Sample k of pcm, signed; and a sample's two bytes onto the reversed
+; acc: how the tests read and make a voice's samples.
 (def speak_sample ((pcm bytes) (k int)) int
   (let u (le_u16_at pcm (mul 2 k)) (if (ge u 32768) (sub u 65536) u)))
 (def speak_push_sample ((v int) (acc (list int))) (list int)
   (let u (if (lt v 0) (add v 65536) v)
     (cons (bit_shr u 8) (cons (bit_and u 255) acc))))
-
-; The samples from i up to e offered, again from wherever the driver
-; stopped taking.
-(def speak_offered ((a Audio) (buf AudioBuf) (b bytes) (i int) (e int)) int
-  (if (ge i e)
-      0
-      (match (audio_play a buf b i e 1)
-        ((Err why) (complain why))
-        ((Ok k)
-          (if (eq k 0)
-              (let z (sleep_ns (speak_wait_ns)) (speak_offered a buf b i e))
-              (speak_offered a buf b (add i (mul k 2)) e))))))
-
-; 0 once the driver has played all it was given.
-(def speak_drained ((a Audio)) int
-  (match (audio_info a)
-    ((Err why) (complain why))
-    ((Ok i)
-      (match i
-        ((AudioInfo rate queued room)
-          (if (eq queued 0) 0 (let z (sleep_ns (speak_wait_ns)) (speak_drained a))))))))
 
 ; speak's arguments, done.
 (def speak () int (speak_main (args)))

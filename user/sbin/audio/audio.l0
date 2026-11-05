@@ -1,0 +1,490 @@
+; audio.l0 -- the audio server (sound.md): it owns the sound devices
+; its drivers attach (proto/audiodev.l0), hdmi-audio's HDMI0 and
+; usb-audio's USB streams, and serves audio (proto/audio.l0) to any
+; number of clients at once: each output's streams, at any rate and
+; channels, converted and mixed into it at its own rate as its driver
+; says there is room; each input heard for any number of listeners,
+; what it hears converted for each; the defaults and the volumes as
+; /etc/audio says (settings.l0), read again on reload; the chime,
+; /etc/chime.wav, played once on the first output; a device gone with
+; its driver's detach or exit, and a client's streams and listens with
+; its exit, which the kernel's notices say. What it keeps, and how
+; frames move through it, is mixer.l0's; this is the asking, the
+; sharing and the sending around it.
+;
+; It waits on one port, where everything comes: clients' requests,
+; drivers' attach and detach requests and their room and heard
+; notices, and the kernel's exit and alarm notices; it asks a driver on
+; a second port, whose reply it waits for.
+
+; What ends the server, said as audio: 1.
+(def complain ((why (list int))) int (fail_as "audio" why))
+
+; What it says as it goes.
+(def said ((text (list int))) int (info_as "audio" text))
+
+; The most frames one write may offer: 16 pages of stereo frames.
+(def write_most () int 16384)
+
+; ---------------------------------------------------------------- start
+
+; The settings read, the chime loaded, audio registered, and served.
+(def audio () int
+  (match (settings_read)
+    ((Err why) (let w (warn_as "audio" why) (started (settings_default))))
+    ((Ok st) (started st))))
+
+; audio's rest: the server from its settings.
+(def started ((st Settings)) int
+  (let (port (port_new)
+        rp (port_new)
+        r (name_register_or_why port (audio_name)))
+    (if (not (is_empty r))
+        (complain r)
+        (let (c (chime_loaded st)
+              w (said (append "serving audio" (if (is_empty (.output st)) "" (append ", the output " (.output st))))))
+          (serve (srv_new port rp st c))))))
+
+; The chime, unless the settings or the boot arguments say none: its
+; file read, or none, said if it is there and cannot be played.
+(def chime_loaded ((st Settings)) Chime
+  (if (not (settings_chime st (boot_args)))
+      (ChimeOff)
+      (match (read_whole (audio_chime_path))
+        ((Err why) (let d (debug_as "audio" (append "no chime: " (append (audio_chime_path) (append ": " why)))) (ChimeOff)))
+        ((Ok b)
+          (match (chime_of b)
+            ((Err why) (let w (warn_as "audio" (append "no chime: " (append (audio_chime_path) (append ": " why)))) (ChimeOff)))
+            ((Ok c) c))))))
+
+; ---------------------------------------------------------------- serving
+
+; Each message on the server's port dealt with, for ever.
+(def serve ((s Srv)) int
+  (match (port_receive (.port s))
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from b) (serve (handled s from b)))))
+
+; s after a message, its bytes b from from: the kernel's alarm or exit
+; notice; a driver's room or heard notice; or a request.
+(def handled ((s Srv) (from int) (b bytes)) Srv
+  (let m (Message from b)
+    (if (eq from 0)
+        (if (is_alarm_notice m) (chime_due s) (match (exit_of m) ((Exited pid status) (gone s pid)) ((NotExit) s)))
+        (and (is_driver s from) (msg_starts b "aro"))
+        (roomed s from m)
+        (and (is_driver s from) (ge (audiodev_in_of b) 0))
+        (heard s from b)
+        (requested s from b))))
+
+; Whether pid is a driver's: it attached a device.
+(def is_driver ((s Srv) (pid int)) bool (not (is_empty (devs_of_pid (.devs s) pid))))
+
+; s, having answered the request in b.
+(def answered ((s Srv) (b bytes) (answer (list int))) Srv
+  (let x (msg_answer b answer) s))
+
+; A request's words dealt with by its op.
+(def requested ((s Srv) (from int) (b bytes)) Srv
+  (let (reply (msg_reply b)
+        body (msg_text_from b 4)
+        ws (split_spaces body))
+    (if (is_empty ws)
+        (answered s b (error_reply "no request"))
+        (let op (head ws)
+          (if (eq op "devices") (answered s b (devices_text s))
+              (eq op "reload") (reloaded s b)
+              (eq op "watch") (.watchers s (listener_add (.watchers s) reply (port_send reply "ok")))
+              (eq op "attach") (attached s from b body)
+              (eq op "stop") (stop_asked s b reply)
+              (requested_numbers s from b reply op (tail ws)))))))
+
+; A request whose arguments are numbers, dealt with by its op and how
+; many it has.
+(def requested_numbers ((s Srv) (from int) (b bytes) (reply int) (op (list int)) (args (list (list int)))) Srv
+  (match (word_numbers args)
+    ((None) (answered s b (error_reply (append op "'s arguments must be numbers"))))
+    ((Some ns)
+      (let n (length ns)
+        (if (and (eq op "detach") (eq n 1)) (detached s from b (head ns))
+            (and (eq op "volume") (or (eq n 1) (eq n 2))) (volume_asked s b ns)
+            (and (eq op "open") (or (eq n 2) (eq n 3))) (opened s from b ns)
+            (and (eq op "write") (eq n 3)) (written s from b ns)
+            (and (eq op "drain") (eq n 1)) (drain_asked s from b (head ns))
+            (and (eq op "close") (eq n 1)) (close_asked s from b (head ns))
+            (and (eq op "listen") (or (eq n 2) (eq n 3))) (listened s from b reply ns)
+            (answered s b (error_reply (append "no request " op))))))))
+
+; -------------------------------------------------------------- drivers
+
+; body asked of device d's driver: its reply, or error: WHY.
+(def driver_ask ((s Srv) (d Dev) (body (list int))) (list int)
+  (match (port_ask (.port d) (.rp s) body "the driver")
+    ((Asked from b) (msg_text b))
+    ((AskFailed why) (error_reply why))))
+
+; Output d started at the rate for want, if it is not going: d going,
+; with the room and what is queued its driver said; or why not.
+(def dev_started ((s Srv) (d Dev) (want int)) (Result Dev (list int))
+  (if (gt (.rate d) 0)
+      ((Ok Dev (list int)) d)
+      (let (rate (dev_rate_for d want)
+            r (driver_ask s d (unwords (cons "start" (numbers_words (cons (.id d) (cons rate (nil int))))))))
+        (match (audiodev_state_of r)
+          ((None) ((Err Dev (list int)) (reply_why r "the driver")))
+          ((Some st)
+            (let (room (.room st) queued (.queued st))
+              ((Ok Dev (list int)) (.queued (.room (.rate d (.rate st)) room) queued))))))))
+
+; Device d stopped at its driver, if it is going: d not going.
+(def dev_stopped ((s Srv) (d Dev)) Dev
+  (if (eq (.rate d) 0)
+      d
+      (let r (driver_ask s d (audio_word_reply "stop" (.id d)))
+        (.queued (.room (.rate d 0) 0) 0))))
+
+; Input d set going at its driver at want, if it is not: d going, its
+; format as the driver said; or why not.
+(def dev_listening ((s Srv) (d Dev) (want int)) (Result Dev (list int))
+  (if (gt (.rate d) 0)
+      ((Ok Dev (list int)) d)
+      (let r (driver_ask s d (unwords (cons "listen" (numbers_words (cons (.id d) (cons want (nil int)))))))
+        (match (audio_format_of r)
+          ((Err why) ((Err Dev (list int)) why))
+          ((Ok f)
+            (if (not (pcm_format_ok f))
+                ((Err Dev (list int)) (append "the driver hears a format the server does not take: " r))
+                (let rate (.rate f) ((Ok Dev (list int)) (.fmt (.rate d rate) f)))))))))
+
+; Output dev stopped at its driver once no stream is on it.
+(def dev_idle_checked ((s Srv) (dev int)) Srv
+  (if (not (is_empty (streams_on (.streams s) dev)))
+      s
+      (match (dev_at (.devs s) dev)
+        ((None) s)
+        ((Some d) (srv_dev s (dev_stopped s d))))))
+
+; Input dev stopped at its driver once no listener is on it.
+(def dev_unheard_checked ((s Srv) (dev int)) Srv
+  (if (not (is_empty (listeners_on (.ls s) dev)))
+      s
+      (match (dev_at (.devs s) dev)
+        ((None) s)
+        ((Some d) (srv_dev s (dev_stopped s d))))))
+
+; ---------------------------------------------------------------- feeding
+
+; Output dev fed: its streams' own bytes pulled into their queues, then
+; as many frames as feed_count says taken from each, mixed at the
+; output's volume into its buffer and played by its driver; its own
+; streams with nothing more gone, and the output stopped if none is
+; left.
+(def fed ((s Srv) (dev int)) Srv
+  (match (dev_at (.devs s) dev)
+    ((None) s)
+    ((Some d)
+      (match (.buf d)
+        ((NoOutBuf) s)
+        ((OutBuf va pages there r)
+          (let (ss (streams_pulled (streams_on (.streams s) dev) (queue_cap (.rate d)))
+                n (feed_count d ss)
+                s1 (.streams s (streams_merged (.streams s) ss)))
+            (if (le n 0)
+                (streams_spent_checked s1 dev)
+                (match (streams_mixed (.streams s1) ss n (pcm_frame_bytes (dev_format d)) (.chans d) (.volume d))
+                  ((Mixed mixed all)
+                    (let (w (put_bytes_range r 0 mixed 0 (bytes_len mixed))
+                          s2 (.streams s1 all)
+                          reply (driver_ask s2 d (unwords (cons "play" (numbers_words (cons dev (cons there (cons n (nil int)))))))))
+                      (match (audiodev_played_of reply)
+                        ((None) (let w2 (warn_as "audio" (append (.name d) (append ": " (reply_why reply "the driver")))) s2))
+                        ((Some k)
+                          (let (room (sub (.room d) k) queued (add (.queued d) k))
+                            (streams_spent_checked (srv_dev s2 (.queued (.room d room) queued)) dev))))))))))))))
+
+; all with each of ss in place of the stream with its id.
+(def streams_merged ((all (list Stream)) (ss (list Stream))) (list Stream)
+  (if (is_empty ss) all (streams_merged (stream_put all (head ss)) (tail ss))))
+
+; The server's own streams on dev with nothing more gone, and dev
+; stopped if that leaves it no stream.
+(def streams_spent_checked ((s Srv) (dev int)) Srv
+  (dev_idle_checked (.streams s (streams_spent (.streams s))) dev))
+
+; A driver's room notice m, from from: the output's room and what is
+; queued as it says, and the output fed.
+(def roomed ((s Srv) (from int) (m Message)) Srv
+  (match (audiodev_room_of m)
+    ((None) s)
+    ((Some ws)
+      (match (dev_at (.devs s) (nth ws 0))
+        ((None) s)
+        ((Some d)
+          (if (not (eq (.pid d) from))
+              s
+              (let (room (nth ws 1) queued (nth ws 2))
+                (fed (srv_dev s (.queued (.room d room) queued)) (.id d)))))))))
+
+; ---------------------------------------------------------------- streams
+
+; open RATE CHANS [ID]: a stream of pid from's on output ID, or the
+; default, the output started if it is not going, and its number
+; answered.
+(def opened ((s Srv) (from int) (b bytes) (ns (list int))) Srv
+  (let fmt (PcmFormat (nth ns 0) (nth ns 1) 2)
+    (if (not (and (pcm_format_ok fmt) (le (.chans fmt) 2)))
+        (answered s b (error_reply "a stream is 8000 to 192000 Hz of 1 or 2 channels"))
+        (match (dev_chosen s (if (eq (length ns) 3) (nth ns 2) 0) false)
+          ((Err why) (answered s b (error_reply why)))
+          ((Ok d)
+            (match (dev_started s d (.rate fmt))
+              ((Err why) (answered s b (error_reply why)))
+              ((Ok d2)
+                (let (id (.next_stream s)
+                      st (stream_new id d2 from fmt (FromClient))
+                      w (proc_watch from (.port s))
+                      s2 (srv_stream (srv_dev (.next_stream s (add id 1)) d2) st))
+                  (answered s2 b (audio_word_reply "stream" id))))))))))
+
+; The stream id of pid from's, or why not.
+(def stream_of ((s Srv) (from int) (id int)) (Result Stream (list int))
+  (match (stream_at (.streams s) id)
+    ((None) ((Err Stream (list int)) "no such stream"))
+    ((Some st) (if (eq (.pid st) from) ((Ok Stream (list int)) st) ((Err Stream (list int)) "not your stream")))))
+
+; write N VA FRAMES: the frames at va, the client's pages shared with
+; the server, converted into stream N's queue as far as it has room,
+; how many answered, and the output fed.
+(def written ((s Srv) (from int) (b bytes) (ns (list int))) Srv
+  (match (stream_of s from (nth ns 0))
+    ((Err why) (answered s b (error_reply why)))
+    ((Ok st)
+      (let (va (nth ns 1)
+            frames (min (nth ns 2) (write_most))
+            fb (pcm_frame_bytes (.fmt st)))
+        (if (lt frames 1)
+            (answered s b (error_reply "no frames"))
+            (match (dma_open va (pages_for (mul frames fb)))
+              ((IoRegionFailed f why) (answered s b (error_reply "the samples are not shared with the audio server")))
+              ((IoRegionOpened r)
+                (let (src (get_bytes_in r 0 (mul frames fb))
+                      c (close_region r))
+                  (match (stream_write st src 0 (bytes_len src) (queue_cap (.rate (dev_fmt_of st))))
+                    ((StreamWritten st2 n)
+                      (let x (msg_answer b (audio_word_reply "taken" n))
+                        (fed (srv_stream s st2) (.dev st2)))))))))))))
+
+; drain N: the frames of stream N not yet played, its queue's and what
+; its output has queued at its driver.
+(def drain_asked ((s Srv) (from int) (b bytes) (id int)) Srv
+  (match (stream_of s from id)
+    ((Err why) (answered s b (error_reply why)))
+    ((Ok st)
+      (let queued (match (dev_at (.devs s) (.dev st)) ((None) 0) ((Some d) (.queued d)))
+        (answered s b (audio_word_reply "queued" (add (stream_frames st (pcm_frame_bytes (dev_fmt_of st))) queued)))))))
+
+; close N: stream N gone, and its output stopped if it was the last.
+(def close_asked ((s Srv) (from int) (b bytes) (id int)) Srv
+  (match (stream_of s from id)
+    ((Err why) (answered s b (error_reply why)))
+    ((Ok st) (answered (stream_closed s st) b "ok"))))
+
+; s without stream st, its output stopped if it was the last on it.
+(def stream_closed ((s Srv) (st Stream)) Srv
+  (dev_idle_checked (.streams s (streams_without (.streams s) (.id st))) (.dev st)))
+
+; -------------------------------------------------------------- listening
+
+; listen RATE CHANS [ID]: input ID, or the default, set going if it is
+; not, and the reply port a listener of it in the format it asked, which
+; is answered.
+(def listened ((s Srv) (from int) (b bytes) (reply int) (ns (list int))) Srv
+  (let fmt (PcmFormat (nth ns 0) (nth ns 1) 2)
+    (if (not (and (pcm_format_ok fmt) (le (.chans fmt) 2)))
+        (answered s b (error_reply "a listener hears 8000 to 192000 Hz of 1 or 2 channels"))
+        (match (dev_chosen s (if (eq (length ns) 3) (nth ns 2) 0) true)
+          ((Err why) (answered s b (error_reply why)))
+          ((Ok d)
+            (match (dev_listening s d (.rate fmt))
+              ((Err why) (answered s b (error_reply why)))
+              ((Ok d2)
+                (let (l (Listener reply from (.id d2) (pcm_conv_new (.fmt d2) fmt))
+                      w (proc_watch from (.port s))
+                      s2 (srv_dev s d2))
+                  (answered (.ls s2 (cons l (listeners_without_port (.ls s2) reply))) b (audio_format_reply fmt))))))))))
+
+; stop: the reply port's listening stopped, and its input stopped if it
+; was the last.
+(def stop_asked ((s Srv) (b bytes) (reply int)) Srv
+  (match (listener_at (.ls s) reply)
+    ((None) (answered s b (error_reply "not listening")))
+    ((Some l) (answered (listener_gone s l) b "ok"))))
+
+; s without listener l, its input stopped if it was the last on it.
+(def listener_gone ((s Srv) (l Listener)) Srv
+  (dev_unheard_checked (.ls s (listeners_without_port (.ls s) (.port l))) (.dev l)))
+
+; A driver's heard notice, its message's bytes b from from: its samples
+; converted for each listener of the input and sent as pcm; a listener
+; whose port is gone dropped, and the input stopped once none is left.
+(def heard ((s Srv) (from int) (b bytes)) Srv
+  (let dev (audiodev_in_of b)
+    (match (dev_at (.devs s) dev)
+      ((None) s)
+      ((Some d)
+        (if (not (eq (.pid d) from))
+            s
+            (let (ls (listeners_on (.ls s) dev)
+                  kept (listeners_fed ls b (audiodev_in_at) (bytes_len b) (nil Listener))
+                  s2 (.ls s (append (listeners_without_dev (.ls s) dev) kept)))
+              (if (and (not (is_empty ls)) (is_empty kept))
+                  (dev_unheard_checked s2 dev)
+                  s2)))))))
+
+; Each of ls given the samples of b from i up to j, converted: those
+; still there, after the reversed acc.
+(def listeners_fed ((ls (list Listener)) (b bytes) (i int) (j int) (acc (list Listener))) (list Listener)
+  (if (is_empty ls)
+      (rev acc)
+      (match (head ls)
+        ((Listener port pid dev conv)
+          (match (pcm_convert conv b i j)
+            ((PcmConverted c2 out)
+              (let (pcm (bytes_concat (cons (bytes_from_list (audio_pcm_tag)) (cons out (nil bytes))))
+                    sent (port_send_bytes port pcm 0 (bytes_len pcm)))
+                (listeners_fed (tail ls) b i j (if (listener_kept sent) (cons (Listener port pid dev c2) acc) acc)))))))))
+
+; ---------------------------------------------------------------- devices
+
+; attach PORT NAME in|out CHANS RATES LEAD from a driver, pid from: a
+; device, an output given a buffer shared with the driver, the driver
+; watched, the watchers told, its id answered; and the chime offered
+; it.
+(def attached ((s Srv) (from int) (b bytes) (body (list int))) Srv
+  (match (audiodev_attach_of body)
+    ((Err why) (answered s b (error_reply why)))
+    ((Ok a)
+      (let (id (.next_dev s)
+            d (dev_new id a from (settings_volume (.settings s) (.name a))))
+        (match (dev_buffered d)
+          ((Err why) (answered s b (error_reply why)))
+          ((Ok d2)
+            (let (w (proc_watch from (.port s))
+                  l (said (dev_line d2))
+                  s2 (srv_dev (.next_dev s (add id 1)) d2)
+                  s3 (.watchers s2 (listeners_tell (.watchers s2) (audio_device_notice id true)))
+                  x (msg_answer b (audio_word_reply "attached" id)))
+              (chime_offered s3 d2))))))))
+
+; Output d with a buffer shared with its driver; an input as it is; or
+; why not.
+(def dev_buffered ((d Dev)) (Result Dev (list int))
+  (if (.input d)
+      ((Ok Dev (list int)) d)
+      (match (shm_region (out_buf_pages) "an output's buffer")
+        ((NoShmRegion why) ((Err Dev (list int)) why))
+        ((ShmRegion va r)
+          (match (shm_share_to va (out_buf_pages) (.pid d) "the driver")
+            ((Err why) (let c (shm_region_free va (out_buf_pages) r) ((Err Dev (list int)) why)))
+            ((Ok there) ((Ok Dev (list int)) (.buf d (OutBuf va (out_buf_pages) there r)))))))))
+
+; detach ID from the driver that attached it: the device gone.
+(def detached ((s Srv) (from int) (b bytes) (id int)) Srv
+  (match (dev_at (.devs s) id)
+    ((None) (answered s b (error_reply "no such device")))
+    ((Some d)
+      (if (not (eq (.pid d) from))
+          (answered s b (error_reply "not your device"))
+          (answered (dev_removed s d) b "ok")))))
+
+; s without device d: its streams and listeners gone, its buffer given
+; up, the watchers told, the chime it held back ready again.
+(def dev_removed ((s Srv) (d Dev)) Srv
+  (let (id (.id d)
+        w (said (append "device " (append (digits id) (append " gone: " (.name d)))))
+        f (match (.buf d) ((NoOutBuf) 0) ((OutBuf va pages there r) (let u (shm_region_free va pages r) 0)))
+        s2 (.ls (.streams (.devs s (devs_without (.devs s) id)) (streams_without_dev (.streams s) id)) (listeners_without_dev (.ls s) id))
+        s3 (.watchers s2 (listeners_tell (.watchers s2) (audio_device_notice id false))))
+    (.chime s3 (chime_unheld (.chime s3) id))))
+
+; ss without the streams on device dev.
+(def streams_without_dev ((ss (list Stream)) (dev int)) (list Stream)
+  (if (is_empty ss) ss (eq (.dev (head ss)) dev) (streams_without_dev (tail ss) dev) (cons (head ss) (streams_without_dev (tail ss) dev))))
+
+; A process gone, pid: its devices, streams and listens with it.
+(def gone ((s Srv) (pid int)) Srv
+  (listeners_of_pid_gone (streams_of_pid_gone (devs_of_pid_gone s (devs_of_pid (.devs s) pid)) (streams_of_pid (.streams s) pid)) (listeners_of_pid (.ls s) pid)))
+
+; Each of ds removed; each of ss closed; each of ls gone.
+(def devs_of_pid_gone ((s Srv) (ds (list Dev))) Srv
+  (if (is_empty ds) s (devs_of_pid_gone (dev_removed s (head ds)) (tail ds))))
+(def streams_of_pid_gone ((s Srv) (ss (list Stream))) Srv
+  (if (is_empty ss) s (streams_of_pid_gone (stream_closed s (head ss)) (tail ss))))
+(def listeners_of_pid_gone ((s Srv) (ls (list Listener))) Srv
+  (if (is_empty ls) s (listeners_of_pid_gone (listener_gone s (head ls)) (tail ls))))
+
+; ---------------------------------------------------------------- settings
+
+; reload: the settings read again, the volumes as they say; or why not,
+; the old ones kept.
+(def reloaded ((s Srv) (b bytes)) Srv
+  (match (settings_read)
+    ((Err why) (answered s b (error_reply why)))
+    ((Ok st)
+      (let w (said (append "settings read again" (if (is_empty (.output st)) "" (append ", the output " (.output st)))))
+        (answered (srv_volumes (.settings s st)) b "ok")))))
+
+; volume ID [PCT]: device ID's volume, set first if PCT is given.
+(def volume_asked ((s Srv) (b bytes) (ns (list int))) Srv
+  (match (dev_at (.devs s) (head ns))
+    ((None) (answered s b (error_reply "no such device")))
+    ((Some d)
+      (if (eq (length ns) 1)
+          (answered s b (audio_word_reply "volume" (.volume d)))
+          (or (lt (nth ns 1) 0) (gt (nth ns 1) 100))
+          (answered s b (error_reply "a volume is 0 to 100"))
+          (let pct (nth ns 1)
+            (answered (srv_dev s (.volume d pct)) b (audio_word_reply "volume" pct)))))))
+
+; ------------------------------------------------------------------ chime
+
+; The chime, if it is ready, held back for output d, if d is the
+; default output: the alarm set for d's lead from now.
+(def chime_offered ((s Srv) (d Dev)) Srv
+  (match (.chime s)
+    ((ChimeOff) s)
+    ((ChimeDone) s)
+    ((ChimeHeld b rate chans i j id) s)
+    ((ChimeReady b rate chans i j)
+      (if (or (.input d) (not (dev_is_default s d)))
+          s
+          (let a (alarm_at (.port s) (add (clock_ns) (mul (.lead d) 1000000)))
+            (.chime s (ChimeHeld b rate chans i j (.id d))))))))
+
+; Chime c ready again if it was held back for device id.
+(def chime_unheld ((c Chime) (id int)) Chime
+  (match c
+    ((ChimeOff) c)
+    ((ChimeDone) c)
+    ((ChimeReady b rate chans i j) c)
+    ((ChimeHeld b rate chans i j dev) (if (eq dev id) (ChimeReady b rate chans i j) c))))
+
+; The alarm: the chime held back played, as a stream of the server's
+; own on its output, started if it is not going; said as it starts.
+(def chime_due ((s Srv)) Srv
+  (match (.chime s)
+    ((ChimeOff) s)
+    ((ChimeDone) s)
+    ((ChimeReady b rate chans i j) s)
+    ((ChimeHeld b rate chans i j dev)
+      (match (dev_at (.devs s) dev)
+        ((None) (.chime s (ChimeReady b rate chans i j)))
+        ((Some d)
+          (match (dev_started s d rate)
+            ((Err why) (let w (warn_as "audio" (append "no chime: " why)) (.chime s (ChimeDone))))
+            ((Ok d2)
+              (let (id (.next_stream s)
+                    st (stream_new id d2 0 (PcmFormat rate chans 2) (FromBytes b i j))
+                    w (said (chime_line rate chans i j))
+                    s2 (srv_stream (srv_dev (.chime (.next_stream s (add id 1)) (ChimeDone)) d2) st))
+                (fed s2 dev)))))))))

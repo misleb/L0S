@@ -1,26 +1,29 @@
-; hdmi-audio.l0 -- a sound driver for the Raspberry Pi 5, serving the
-; audio protocol (user/lib/proto/audio.l0) on HDMI0, as Linux's vc4 plays
-; sound there. Its module must be flagged dev.
+; hdmi-audio.l0 -- a sound driver for the Raspberry Pi 5: HDMI0, as
+; Linux's vc4 plays sound there, attached to the audio server as the
+; output hdmi0 and fed by it (user/lib/proto/audiodev.l0). Its module
+; must be flagged dev.
 ;
 ; HDMI0's audio FIFO, the MAI, takes IEC958 subframes (iec958.l0) at
 ; the rate its divider sets (mai.l0). Channel 6 of the BCM2712's 40-bit
 ; DMA controller, which L0 gives with its interrupt (L0 roadmap 0122,
 ; asked for in probes/audio), feeds it from a ring of periods in DMA
 ; pages, a page each, cyclically (dma40.l0), and interrupts as each
-; ends. The driver writes clients' samples into the periods ahead of the
-; one playing, and silence into each that ends, so the FIFO never runs
-; dry, and plays silence when no one plays. The ring's bookkeeping and
-; the requests are every sound driver's (audio_server.l0).
+; ends. The driver writes the server's frames into the periods ahead of
+; the one playing, and silence into each that ends, so the FIFO never
+; runs dry, and plays silence when no one plays; after each period,
+; while the server has it started, it tells the server the room there
+; is. The ring's bookkeeping is every output driver's (audiodev.l0).
 ;
 ; It starts once the display is served, since hvs sets HDMI0's mode and
 ; makes sure of M2MC, without which a read of HDMI0's registers stalls
 ; the CPU; it asks the firmware that M2MC runs all the same, and plays
 ; only if HDMI0 sends HDMI, not DVI. With no channel, as on QEMU, it
-; says there is no HDMI audio on the board and exits 0.
+; says there is no HDMI audio on the board and exits 0; so it does with
+; no audio server to attach to.
 ;
 ;   hdmi-audio probe   reads the channel's, the MAI's and HDMI0's audio
 ;                      registers and says them, writing none
-;   hdmi-audio         sets the MAI up at 48 kHz and serves audio
+;   hdmi-audio         sets the MAI up at 48 kHz and attaches HDMI0
 
 ; What ends the driver, said as hdmi-audio: 1.
 (def complain ((why (list int))) int (fail_as "hdmi-audio" why))
@@ -36,8 +39,16 @@
 (def period_frames () int 512)
 (def frame_bytes () int 8)
 
-; The rate it starts at.
+; The rate it starts at, and the rates it plays.
 (def first_rate () int 48000)
+(def hdmi_rates () (list int) (cons 32000 (cons 44100 (cons 48000 (nil int)))))
+
+; The name it attaches HDMI0 under, and how long the server holds the
+; first sound back for it: a monitor takes a second or more to lock
+; onto a new mode and unmute, and a chime played at once ends before it
+; is heard. 2 s was heard on one boot of three on an LG 4K monitor.
+(def hdmi_name () (list int) "hdmi0")
+(def lead_ms () int 3000)
 
 ; How long it waits for the display, in ns.
 (def display_wait_ns () int 30000000000)
@@ -182,7 +193,7 @@
 
 ; The driver started: the channel stopped, if it ran, the blocks
 ; written, the audio clock's gate opened, the MAI set up at the first
-; rate and the ring playing; then audio registered and the channel's
+; rate and the ring playing; then HDMI0 attached and the channel's
 ; interrupt bound.
 (def started ((hw Hw)) int
   (match hw
@@ -195,20 +206,24 @@
             (complain why)
             (serve_from hw))))))
 
-; audio registered, the interrupt bound, the chime started as the ring
-; runs, and the loop run.
+; The audio server found, HDMI0 attached to it, the interrupt bound,
+; and the loop run; no server is no failure.
 (def serve_from ((hw Hw)) int
-  (let (port (port_new) r (name_register_or_why port (audio_name)))
-    (if (not (is_empty r))
-        (complain r)
-        (let b (irq_bind_or_why (dma_ch6_irq) port)
-          (if (not (is_empty b))
-              (complain b)
-              (let s (said (audio_line hw (first_rate)))
-                (serve port (chime_started (Drv hw (fresh_ring) (first_rate) (audio_chime_load "hdmi-audio"))))))))))
+  (match (name_wait (audio_name) (audiodev_wait_ns))
+    ((NotFound) (said "no audio server to attach HDMI0 to: no sound"))
+    ((Found server)
+      (let (port (port_new) rp (port_new))
+        (match (audiodev_attach server rp (AudiodevAttach port (hdmi_name) false 2 (hdmi_rates) (lead_ms)))
+          ((Err why) (complain why))
+          ((Ok id)
+            (let b (irq_bind_or_why (dma_ch6_irq) port)
+              (if (not (is_empty b))
+                  (complain b)
+                  (let s (said (audio_line hw (first_rate) id))
+                    (serve port (Drv hw (fresh_ring) (first_rate) id server false)))))))))))
 
-; What it says once serving.
-(def audio_line ((hw Hw) (rate int)) (list int)
+; What it says once attached.
+(def audio_line ((hw Hw) (rate int) (id int)) (list int)
   (match hw
     ((Hw ch run hd va rm at cva cm cbs d0 hz)
       (append "HDMI0 at "
@@ -216,7 +231,8 @@
           (append " Hz, TMDS "
             (append (digits (div hz 1000))
               (append " kHz, dma40 channel 6, irq "
-                (append (digits (dma_ch6_irq)) ", serving audio")))))))))
+                (append (digits (dma_ch6_irq))
+                  (append ", attached to audio as device " (digits id)))))))))))
 
 ; A ring as the driver starts one: nothing written.
 (def fresh_ring () AudioRing (audio_ring_new (ring_periods_n) (period_frames)))
@@ -331,13 +347,13 @@
             a (region_set32 rm off (iec_subframe left 0 k rate)))
         (region_set32 rm (add off 4) (iec_subframe right 1 k rate))))))
 
-; n frames of chans channels from src, a client's pages or the chime's
-; bytes, from its i on, written from frame f on: 0.
-(def frames_put ((hw Hw) (r AudioRing) (src AudioSource) (i int) (chans int) (f int) (n int) (rate int)) int
+; n stereo frames from the server's pages m, from frame i on, written
+; from frame f on: 0.
+(def frames_put ((hw Hw) (r AudioRing) (m IoRegion) (i int) (f int) (n int) (rate int)) int
   (if (le n 0)
       0
-      (let w (frame_put hw r f (audio_source_sample src i chans 0) (audio_source_sample src i chans 1) rate)
-        (frames_put hw r src (add i 1) chans (add f 1) (sub n 1) rate))))
+      (let w (frame_put hw r f (audio_sample_at m i 2 0) (audio_sample_at m i 2 1) rate)
+        (frames_put hw r m (add i 1) (add f 1) (sub n 1) rate))))
 
 ; The ring's pages cleaned for the channel: 0.
 (def ring_synced ((hw Hw)) int
@@ -345,19 +361,21 @@
 
 ; ---------------------------------------------------------------- serving
 
-; The driver: its hardware, its ring, the rate it plays at, and the
-; chime still to play (audio_server.l0), none once a client has asked.
-(data Drv (Drv (hw Hw) (r AudioRing) (rate int) (chime AudioChime)))
+; The driver: its hardware, its ring, the rate it plays at, HDMI0's id
+; at the server, the server's port, and whether the server has it
+; started, which is when it tells the server its room.
+(data Drv (Drv (hw Hw) (r AudioRing) (rate int) (id int) (server int) (active bool)))
 
-; Each message on port: the channel's interrupt, after which the chime
-; goes on into the room it made, or a request.
+; Each message on port: the channel's interrupt, after which the server
+; is told the room, if it has the output started; or the server's
+; request.
 (def serve ((port int) (v Drv)) int
   (let m (port_receive port)
     (match m
       ((RecvFailed) (complain "lost its port"))
       ((Message from b)
         (if (is_irq_notice m (dma_ch6_irq))
-            (serve port (chime_fed (period_ended v)))
+            (serve port (room_told (period_ended v)))
             (match (handle v (msg_text_from b 4))
               ((Served v2 answer) (let a (msg_answer b answer) (serve port v2)))))))))
 
@@ -365,7 +383,7 @@
 ; since silenced for its next turn, and the interrupt ended.
 (def period_ended ((v Drv)) Drv
   (match v
-    ((Drv hw r rate chime)
+    ((Drv hw r rate id server active)
       (match hw
         ((Hw ch run hd va rm at cva cm cbs d0 hz)
           (let (a (region_set32 ch (dma_cs) (cs_ack))
@@ -373,7 +391,15 @@
                 r2 (if (lt now 0) r (periods_reused hw r (ring_ended r now) rate))
                 s (ring_synced hw)
                 e (irq_ack (dma_ch6_irq)))
-            (Drv hw r2 rate chime)))))))
+            (Drv hw r2 rate id server active)))))))
+
+; The server told the ring's room and what is queued, while it has the
+; output started: v.
+(def room_told ((v Drv)) Drv
+  (if (not (.active v))
+      v
+      (let t (audiodev_room_tell (.server v) (.id v) (ring_room (.r v)) (ring_queued (.r v)))
+        v)))
 
 ; r after n periods ended, each silenced for its next turn.
 (def periods_reused ((hw Hw) (r AudioRing) (n int) (rate int)) AudioRing
@@ -382,95 +408,43 @@
       (let s (silenced hw r (ring_reused r) (.period r) rate)
         (periods_reused hw (ring_advanced r) (sub n 1) rate))))
 
-; A request's answer, and v after it. A start or a play ends the chime:
-; the client has the ring from there.
+; The server's request's answer, and v after it: start, play and stop
+; of HDMI0, by its id; it hears nothing.
 (def handle ((v Drv) (body (list int))) (Served Drv)
-  (match v
-    ((Drv hw r rate chime)
-      (match (audio_ask_of body)
-        ((AskInfo) (Served v (audio_info_reply rate (ring_queued r) (ring_room r))))
-        ((AskStart new) (restarted (Drv hw r rate (ChimeDone)) new))
-        ((AskPlay va n chans) (played (Drv hw r rate (ChimeDone)) va n chans))
-        ((AskRefused why) (served_error v why))))))
+  (match (audiodev_ask_of body)
+    ((DevStart id new) (if (eq id (.id v)) (restarted (.active v true) new) (served_error v "no such device")))
+    ((DevPlay id va n) (if (eq id (.id v)) (played v va n) (served_error v "no such device")))
+    ((DevStop id) (if (eq id (.id v)) (served_ok (.active v false)) (served_error v "no such device")))
+    ((DevListen id rate) (served_error v "not an input"))
+    ((DevRefused why) (served_error v why))))
 
-; start RATE: ok at once if it plays at rate; else the channel stopped,
-; the MAI set up again for rate and the ring started anew, silent.
+; start ID RATE: the ring's state at once if it plays at rate; else
+; the channel stopped, the MAI set up again for rate and the ring
+; started anew, silent.
 (def restarted ((v Drv) (rate int)) (Served Drv)
   (match v
-    ((Drv hw r old chime)
+    ((Drv hw r old id server active)
       (if (eq rate old)
-          (served_ok v)
+          (Served v (audiodev_state_reply (ring_state r rate)))
+          (not (any_eq rate (hdmi_rates)))
+          (served_error v (append "no rate " (append (digits rate) (append "; " (join_with " " (numbers_words (hdmi_rates)))))))
           (let (s (match hw ((Hw ch run hd va rm at cva cm cbs d0 hz) (dma_stopped ch)))
                 why (playing hw rate))
             (if (is_empty why)
-                (served_ok (Drv hw (fresh_ring) rate chime))
-                (served_error (Drv hw (fresh_ring) old chime) why)))))))
+                (Served (Drv hw (fresh_ring) rate id server active) (audiodev_state_reply (ring_state (fresh_ring) rate)))
+                (served_error (Drv hw (fresh_ring) old id server active) why)))))))
 
-; play VA FRAMES CHANS: as many frames as there is room for taken from
-; the client's pages at va, opened for it and closed after.
-(def played ((v Drv) (va int) (n int) (chans int)) (Served Drv)
+; play ID VA FRAMES: as many stereo frames as there is room for taken
+; from the server's pages at va, opened for it and closed after.
+(def played ((v Drv) (va int) (n int)) (Served Drv)
   (match v
-    ((Drv hw r rate chime)
-      (match (dma_open va (audio_play_pages n chans))
-        ((IoRegionFailed f why) (served_error v "the samples are not shared with the audio driver"))
+    ((Drv hw r rate id server active)
+      (match (dma_open va (audiodev_play_pages n 2))
+        ((IoRegionFailed f why) (served_error v "the samples are not shared with the driver"))
         ((IoRegionOpened m)
           (let (k (min n (ring_room r))
-                w (frames_put hw r (AudioPages m) 0 chans (ring_next r) k rate)
+                w (frames_put hw r m 0 (ring_next r) k rate)
                 c (close_region m)
                 s (ring_synced hw))
-            (Served (Drv hw (ring_wrote r k) rate chime) (audio_played_reply k))))))))
+            (Served (Drv hw (ring_wrote r k) rate id server active) (audiodev_played_reply k))))))))
 
-; ------------------------------------------------------------------ chime
-
-; How long the chime waits after HDMI0's mode is set: a monitor takes
-; a second or more to lock onto a new mode and unmute, and a chime
-; played at once ends before it is heard. 2 s was heard on one boot of
-; three on an LG 4K monitor. The ring plays silence meanwhile, and a
-; client's start or play is answered as always.
-(def chime_lead_ms () int 3000)
-
-; The chime (audio_server.l0) started as a client's start and play
-; would be: the driver set to its rate, if it plays another, then held
-; back chime_lead_ms, after which its first frames are written. A rate
-; it cannot be set to is said, and no chime plays.
-(def chime_started ((v Drv)) Drv
-  (match v
-    ((Drv hw r rate chime)
-      (let cr (audio_chime_rate chime)
-        (if (or (eq cr 0) (eq cr rate))
-            (chime_fed (chime_held v))
-            (match (restarted v cr)
-              ((Served v2 reply)
-                (if (eq reply "ok")
-                    (chime_fed (chime_held v2))
-                    (match v2
-                      ((Drv hw2 r2 rate2 c2)
-                        (let w (warn_as "hdmi-audio" (append "no chime: " reply))
-                          (Drv hw2 r2 rate2 (ChimeDone)))))))))))))
-
-; v with its chime held back chime_lead_ms from now.
-(def chime_held ((v Drv)) Drv
-  (.chime v (audio_chime_after (.chime v) (chime_lead_ms) (clock_ns))))
-
-; Chime c now: the chime itself once its time has come, said as it
-; starts (audio_server.l0's audio_chime_said), so the log shows that it
-; played; c as it was otherwise.
-(def chime_due ((c AudioChime)) AudioChime
-  (if (audio_chime_waiting c)
-      (let c2 (audio_chime_due c (clock_ns))
-        (if (audio_chime_waiting c2) c2 (audio_chime_said "hdmi-audio" c2)))
-      c))
-
-; The chime's next frames written ahead of the period playing, as many
-; as the ring has room for, as a client's play writes them, once its
-; time has come: v after.
-(def chime_fed ((v Drv)) Drv
-  (match v
-    ((Drv hw r rate chime)
-      (match (audio_chime_feed (chime_due chime) r)
-        ((ChimeFeed src chans k rest)
-          (if (eq k 0)
-              (Drv hw r rate rest)
-              (let (w (frames_put hw r src 0 chans (ring_next r) k rate)
-                    s (ring_synced hw))
-                (Drv hw (ring_wrote r k) rate rest))))))))

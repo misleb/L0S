@@ -45,7 +45,8 @@
 # pcie, xhci and usb-hid, in place of the virtio keyboard and tablet.
 # QEMU_USB, with QEMU_INPUT=usb, is more devices on that qemu-xhci, words
 # separated by spaces: audio, QEMU's usb-audio, a speaker of 16-bit
-# stereo at 48 kHz whose sound is dropped, for usb-audio; tablet, QEMU's
+# stereo at 48 kHz whose sound is dropped, or written to the host's
+# file QEMU_AUDIO_WAV if set, for usb-audio; tablet, QEMU's
 # usb-tablet, which says where the pointer is, so that QEMU's window
 # passes the host's mouse on with no grab, as the demo boots, while the
 # usb-mouse is left for QMP's relative moves; or VID:PID, in
@@ -100,7 +101,13 @@ if [ "${QEMU_INPUT:-virtio}" = usb ]; then
   input=(-device "$xhci" -device usb-kbd -device usb-mouse)
   for u in ${QEMU_USB:-}; do
     if [ "$u" = audio ]; then
-      input+=(-audiodev none,id=snd0 -device usb-audio,audiodev=snd0)
+      # Its sound is dropped, or, with QEMU_AUDIO_WAV, written to that
+      # WAV file on the host, to hear what the board played.
+      if [ -n "${QEMU_AUDIO_WAV:-}" ]; then
+        input+=(-audiodev "wav,id=snd0,path=$QEMU_AUDIO_WAV" -device usb-audio,audiodev=snd0)
+      else
+        input+=(-audiodev none,id=snd0 -device usb-audio,audiodev=snd0)
+      fi
     elif [ "$u" = tablet ]; then
       input+=(-device usb-tablet)
     else

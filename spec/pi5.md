@@ -186,7 +186,7 @@ volume on USB storage to come), `usb-hid`, `sdhci pi5` and `fs ram`.
 volume, the board came up with the USB keyboard dead though `usb-hid`
 ran, and the cause is not yet known. `boot` then
 starts `pi5/etc/system`, the second: `sh` on the console, waited for,
-then `rtc clock`, `usb-audio`, `hvs`, `hdmi-audio`, `gem`,
+then `rtc clock`, `audio`, `usb-audio`, `hvs`, `hdmi-audio`, `gem`,
 `inet dhcp`, `ntp`, `font`, `wm`, `agentd` and `speech`. The inittab's
 `dev` lines name the second stage's drivers too, so that `boot` starts
 them with their devices from a system volume, booted with `root=` as a
@@ -212,7 +212,8 @@ card's volumes mounted, and nothing more.
 | `uart` | the debug UART, the 3-pin header between the HDMI ports, found as QEMU's is found, at whatever rate the firmware set, which `uart` never changes, as `console`; interrupt 153 |
 | `xhci rp1`, `usb-hid` | RP1's two USB controllers, and every boot keyboard and mouse on them, served by one `usb-hid` (see [USB](devices.md#usb)) |
 | `hvs` | HDMI0 (see [The display on the Raspberry Pi 5](display.md#the-display-on-the-raspberry-pi-5)), brought up a stage at a time by its argument (`probe`, `list`, `iommu`, or none to serve `display`; `mode`, `hdmi`, `eof` and `watch` beside them), waiting for its lists by channel 0's end of frame, interrupt 129 through `disp_intr`, at the monitor's preferred mode, which it sets itself (`hdmi=boot` keeps the firmware's 1920×1080, `hdmi=30` asks for 30 Hz). With no monitor on HDMI0 at boot it says so and exits, and `wm` waits for a display. `make pi5-shell` leaves it out |
-| `hdmi-audio` | sound on HDMI0, served as `audio`, once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](sound.md#sound-on-the-raspberry-pi-5)); it plays `/etc/chime.wav` as it starts, unless the boot argument `chime=off`, and `play /etc/chime.wav` tries it again. `make pi5-shell` leaves it out too |
+| `audio`, `usb-audio` | the audio server, which owns the sound devices, mixes every stream into each output and plays `/etc/chime.wav` once on the first, unless `/etc/audio` or the boot argument `chime=off` say none ([sound.md](sound.md)); and the class driver that attaches each USB audio device's streams in to it, a Yeti Nano's microphone among them |
+| `hdmi-audio` | sound on HDMI0, attached to `audio` as `hdmi0` once `hvs` serves `display` (see [Sound on the Raspberry Pi 5](sound.md#sound-on-the-raspberry-pi-5)), where the chime plays 3 s later, and `play /etc/chime.wav` plays it again. `make pi5-shell` leaves it out too |
 | `sdhci pi5`, `fs ram` | the microSD card in the slot, through the BCM2712's own SD host controller, `sdio1`, at 0x1000FFF000, interrupt 305 (see [The disk](storage.md#the-disk)), served as a disk; one `fs`, started `fs ram`, serves a volume in memory, `/Volumes/tmp`, registered as `tmpfs`, which keeps nothing over a power cut, and mounts the card's volumes, a FAT32 boot partition among them (see [FAT32 volumes](fat32.md#fat32-volumes)), registered as `fs`, waiting on both names' ports as a set. With no card in the slot `sdhci` says so and exits, and `fs` serves `tmp` alone |
 | `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). A `set S` writes S to the RTC with `SET_RTC_REG`, so a reboot without a power cut keeps it, and is kept by `rtc clock` itself if the firmware refuses it. It keeps time over a power cut only with a battery on the RTC connector |
 | `eeprom` | not started, but flagged `dev` for the mailbox, so that the shell can run it: the bootloader's configuration, read and changed (see [The bootloader's configuration](#the-bootloaders-configuration)) |
@@ -237,10 +238,12 @@ boot should check these, on the debug UART (`dmesg` repeats them):
   the screen: black from the firmware's handover, then the wallpaper,
   `branding/wallpaper-dark.svg`, as `hvs` serves, before `wm`'s desktop
   comes over the same image, with nothing black between
-- `hdmi-audio`'s line, then 3 s later `playing the chime`, the chord
-  heard as it starts, at about the time the desktop comes up, with no
-  `no chime:` warning (`chime=off` silences it), and that `play
-  /etc/chime.wav` is heard again
+- `hdmi-audio`'s line and `audio`'s `device 1: hdmi0`, then 3 s later
+  `audio`'s `playing the chime`, the chord heard as it starts, at about
+  the time the desktop comes up, with no `no chime:` warning
+  (`chime=off` silences it), and that `play /etc/chime.wav` is heard
+  again (the server's path on a board is the goal's last step, roadmap
+  0069)
 - `sdhci`'s lines: `sdio1`'s registers as the firmware left them, then
   the card, its size and its interrupt; and `fs`'s, a line for each
   volume it mounts

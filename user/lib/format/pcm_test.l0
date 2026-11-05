@@ -103,28 +103,104 @@
             d (pcm_down st b i j 1 2))
         (in_pieces b (.st d) j (rand_next s) (cons (.out d) acc)))))
 
-; ----------------------------------------------------------------------- up
+; ------------------------------------------------------------- converting
 
-; 100 samples of 1000 at 16 kHz are 300 frames at 48 kHz, each 1000
-; once past the filter's reach either end, within 2 of the taps'
-; rounding.
-(def test_up_level () int
-  (let xs (samples16 (pcm_up (bytes_from_list (rev (level_onto 100 1000 (nil int)))) 0 200 1 0 300))
-    (add (check_int "300" (length xs) 300)
-         (check_true "settled" (and (ge (nth xs 150) 998) (le (nth xs 150) 1002))))))
+; n 16-bit samples of v, as bytes.
+(def level16 ((n int) (v int)) bytes (bytes_from_list (rev (level_onto n v (nil int)))))
 (def level_onto ((n int) (v int) (acc (list int))) (list int) (if (eq n 0) acc (level_onto (sub n 1) v (pcm_push16 v acc))))
 
-; Any range gives the frames the whole does: stereo, in three pieces.
-(def test_up_ranges () int
-  (let (b (tone16 1000 200)
-        whole (pcm_up b 0 400 2 0 300)
-        parts (bytes_concat (cons (pcm_up b 0 400 2 0 7) (cons (pcm_up b 0 400 2 7 150) (cons (pcm_up b 0 400 2 150 300) (nil bytes))))))
-    (check_true "same" (eq (bytes_to_list whole) (bytes_to_list parts)))))
+; The samples of b from byte i up to j converted whole, from one format
+; to another, as a list.
+(def converted ((from PcmFormat) (to PcmFormat) (b bytes)) (list int)
+  (samples16 (.out (pcm_convert (pcm_conv_new from to) b 0 (bytes_len b)))))
 
-; Down and up again, 1 kHz comes back near its own: its peak within 1%,
-; away from the ends, where the tone stops dead and the filter rings.
-(def test_round_trip () int
-  (let (d (.out (pcm_down (pcm_down_new) (tone16 1000 4800) 0 9600 1 2))
-        u (samples16 (pcm_up d 0 (bytes_len d) 1 0 (pcm_up_frames_of (div (bytes_len d) 2))))
-        p (peak_of (take (drop u 200) 4000) 0))
-    (check_true "1 kHz back" (and (gt p 9900) (lt p 10100)))))
+; A format of 1 to 8 channels, 2 to 4 bytes, 8 to 192 kHz; not 7 kHz,
+; 9 channels, 8-bit samples.
+(def test_format_ok () int
+  (add (check_bool "yeti" (pcm_format_ok (PcmFormat 48000 2 3)) true)
+       (add (check_bool "7 kHz" (pcm_format_ok (PcmFormat 7000 1 2)) false)
+            (check_bool "8 bits" (pcm_format_ok (PcmFormat 48000 1 1)) false))))
+
+; The same rate and channels: the frames as they are, 24 bits as their
+; top 16.
+(def test_convert_same () int
+  (check_strs "same" (numbers_words (converted (PcmFormat 48000 2 3) (pcm_format16 48000 2) (frames24 (cons 100 (cons 300 (cons -5 (cons 7 (nil int))))))))
+              (split_spaces "100 300 -5 7")))
+
+; Stereo to mono is each frame's mean; mono to stereo its sample twice.
+(def test_convert_channels () int
+  (add (check_strs "mono" (numbers_words (converted (PcmFormat 48000 2 3) (pcm_format16 48000 1) (frames24 (cons 100 (cons 300 (nil int)))))) (split_spaces "200"))
+       (check_strs "stereo" (numbers_words (converted (PcmFormat 16000 1 2) (pcm_format16 16000 2) (level16 2 9))) (split_spaces "9 9 9 9"))))
+
+; 16 kHz to 48 kHz: three frames an input frame, each a third of the way
+; to the next: 0 to 300 gives 0, 100, 200, 300, and the two between 300
+; and the frame after it wait for the next piece.
+(def test_convert_up () int
+  (let b (bytes_from_list (rev (pcm_push16 300 (pcm_push16 0 (nil int)))))
+    (check_strs "lerp" (numbers_words (converted (PcmFormat 16000 1 2) (pcm_format16 48000 1) b)) (split_spaces "0 100 200 300"))))
+
+; 22,050 Hz to 44,100: every input frame and its mean with the next, as
+; speak doubled its voice: 4 frames give 7 samples, the mean after the
+; last waiting for the next piece.
+(def test_convert_double () int
+  (let b (bytes_from_list (rev (pcm_push16 40 (pcm_push16 30 (pcm_push16 20 (pcm_push16 10 (nil int)))))))
+    (check_strs "doubled" (numbers_words (converted (PcmFormat 22050 1 2) (pcm_format16 44100 1) b)) (split_spaces "10 15 20 25 30 35 40"))))
+
+; In pieces, the frames between come with the next piece: 0 and 300,
+; then 600, give 0, 100, 200, 300, then 400, 500, 600.
+(def test_convert_up_pieces () int
+  (let (c (pcm_convert (pcm_conv_new (PcmFormat 16000 1 2) (pcm_format16 48000 1)) (level16 2 0) 0 4)
+        d (pcm_convert (.st c) (level16 1 600) 0 2))
+    (check_strs "next" (numbers_words (samples16 (.out d))) (split_spaces "200 400 600"))))
+
+; 48 kHz to 16 kHz goes through the filter: 300 frames of 1000, as
+; pcm_down gives them, 100 samples settling at 1000.
+(def test_convert_filtered () int
+  (let xs (converted (PcmFormat 48000 2 3) (pcm_format16 16000 1) (frames24 (copies 600 1000)))
+    (add (check_int "100" (length xs) 100) (check_int "settled" (nth xs 50) 1000))))
+
+; Pieces give what the whole gives, by interpolation: a 1 kHz tone at
+; 48 kHz to 44.1 kHz, cut at seeded places.
+(def test_convert_pieces () int
+  (let b (tone16 1000 3001)
+    (check_int "same" (conv_pieces_differ b 1 20) 0)))
+
+; How many of n seeded cuttings of b differ from the whole, from seed s.
+(def conv_pieces_differ ((b bytes) (s int) (n int)) int
+  (if (eq n 0)
+      0
+      (let (whole (.out (pcm_convert (conv48_44) b 0 (bytes_len b)))
+            cut (conv_in_pieces b (conv48_44) 0 s (nil bytes)))
+        (add (if (eq (bytes_to_list whole) (bytes_to_list cut)) 0 1) (conv_pieces_differ b (rand_next (rand_next s)) (sub n 1))))))
+(def conv48_44 () PcmConv (pcm_conv_new (PcmFormat 48000 1 2) (pcm_format16 44100 1)))
+
+; b from byte i in pieces of 1 to 400 frames, seeded by s, after st.
+(def conv_in_pieces ((b bytes) (st PcmConv) (i int) (s int) (acc (list bytes))) bytes
+  (if (ge i (bytes_len b))
+      (bytes_concat (rev acc))
+      (let (j (min (bytes_len b) (add i (mul 2 (add 1 (rand_below s 400)))))
+            d (pcm_convert st b i j))
+        (conv_in_pieces b (.st d) j (rand_next s) (cons (.out d) acc)))))
+
+; 4800 frames at 48 kHz are 4410 at 44.1 kHz: each falls 48000 / 44100
+; input frames after the last, from the first, and the 4411th would
+; fall past the last frame given.
+(def test_convert_count () int
+  (check_int "frames" (length (converted (PcmFormat 48000 1 2) (pcm_format16 44100 1) (tone16 1000 4800))) 4410))
+
+; ----------------------------------------------------------------- mixing
+
+; Two sources at full volume sum, clamped; one at half is halved; a
+; short source is silence past its end.
+(def test_mix () int
+  (let (a (level16 3 1000)
+        b (level16 2 500)
+        m (samples16 (pcm_mix (cons a (cons b (nil bytes))) (cons 100 (cons 50 (nil int))) 3)))
+    (check_strs "mixed" (numbers_words m) (split_spaces "1250 1250 1000"))))
+
+(def test_mix_clamps () int
+  (let m (samples16 (pcm_mix (cons (level16 1 30000) (cons (level16 1 30000) (nil bytes))) (nil int) 1))
+    (check_strs "clamped" (numbers_words m) (split_spaces "32767"))))
+
+(def test_mix_nothing () int
+  (check_strs "silence" (numbers_words (samples16 (pcm_mix (nil bytes) (nil int) 2))) (split_spaces "0 0")))

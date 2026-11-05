@@ -1,0 +1,115 @@
+; mixer_test.l0 -- the server's bookkeeping: the rate an output plays a
+; stream at, the defaults, the devices answer, a stream's queue written
+; and taken, and feeding.
+
+; HDMI0 as hdmi-audio attaches it, numbered id of pid 7.
+(def hdmi ((id int)) Dev
+  (dev_new id (AudiodevAttach 12 "hdmi0" false 2 (cons 32000 (cons 44100 (cons 48000 (nil int)))) 3000) 7 100))
+
+; The Yeti's microphone, as usb-audio attaches it.
+(def yeti_in ((id int)) Dev
+  (dev_new id (AudiodevAttach 13 "usb-046d:0acf-microphone" true 2 (cons 44100 (cons 48000 (nil int))) 0) 8 100))
+
+; A server with the two attached, in that order.
+(def two () Srv
+  (srv_dev (srv_dev (srv_new 1 2 (settings_default) (ChimeOff)) (hdmi 1)) (yeti_in 2)))
+
+; 48 kHz as it is; 22,050 at 44,100, its multiple; 16 kHz at 32 kHz,
+; the smallest multiple; 11,025 at 44,100; 8 kHz at 32 kHz; 96 kHz at
+; 48 kHz, the highest.
+(def test_rate_for () int
+  (let d (hdmi 1)
+    (add (check_int "48000" (dev_rate_for d 48000) 48000)
+         (add (check_int "22050" (dev_rate_for d 22050) 44100)
+              (add (check_int "16000" (dev_rate_for d 16000) 32000)
+                   (add (check_int "8000" (dev_rate_for d 8000) 32000)
+                        (check_int "96000" (dev_rate_for d 96000) 48000)))))))
+
+; The defaults: the first of a kind, unless the settings name another
+; that is there.
+(def test_defaults () int
+  (let (s (two)
+        s2 (.settings s (Settings "usb-046d:0acf-speaker" "usb-046d:0acf-microphone" ((MapEmpty (list int) int)) true)))
+    (add (check_int "out" (match (default_dev s false) ((Some d) (.id d)) ((None) 0)) 1)
+         (add (check_int "in" (match (default_dev s true) ((Some d) (.id d)) ((None) 0)) 2)
+              (check_int "named but gone" (match (default_dev s2 false) ((Some d) (.id d)) ((None) 0)) 1)))))
+
+; What devices answers for the two.
+(def test_devices_text () int
+  (check_str "lines" (devices_text (two)) "1 out hdmi0 2 32000,44100,48000 default\n2 in usb-046d:0acf-microphone 2 44100,48000 default\n"))
+
+; A device chosen: 0 the default of a kind, an id its own, and the
+; refusals.
+(def test_dev_chosen () int
+  (let s (two)
+    (add (check_int "default" (match (dev_chosen s 0 false) ((Ok d) (.id d)) ((Err why) 0)) 1)
+         (add (check_str "wrong kind" (match (dev_chosen s 2 false) ((Ok d) "ok") ((Err why) why)) "not an output")
+              (check_str "none" (match (dev_chosen (srv_new 1 2 (settings_default) (ChimeOff)) 0 true) ((Ok d) "ok") ((Err why) why)) "no input")))))
+
+; The log's line for a device.
+(def test_dev_line () int
+  (check_str "line" (dev_line (hdmi 1)) "device 1: hdmi0, out, 2 channels at 32000,44100,48000"))
+
+; n 16-bit mono samples of v, as bytes.
+(def mono16 ((n int) (v int)) bytes (bytes_from_list (rev (mono_onto n v (nil int)))))
+(def mono_onto ((n int) (v int) (acc (list int))) (list int) (if (eq n 0) acc (mono_onto (sub n 1) v (pcm_push16 v acc))))
+
+; HDMI0 going at 48 kHz, with room for 1000 frames.
+(def hdmi_going () Dev (.room (.rate (hdmi 1) 48000) 1000))
+
+; A mono stream at 16 kHz on it: 100 frames written convert to 298
+; stereo frames at 48 kHz, the two between the last and the frame after
+; it waiting for the next write (pcm_test.l0's test_convert_up), 1192
+; bytes, all taken; a queue near its cap takes only what fits.
+(def test_stream_write () int
+  (let (st (stream_new 1 (hdmi_going) 9 (PcmFormat 16000 1 2) (FromClient))
+        w (stream_write st (mono16 100 7) 0 200 12000))
+    (add (check_int "taken" (.taken w) 100)
+         (add (check_int "frames" (stream_frames (.s w) 4) 298)
+              (check_int "fits" (.taken (stream_write st (mono16 100 7) 0 200 30)) 10)))))
+
+; Frames taken come off the front: 298 queued, 100 taken leaves 198,
+; and taking 500 gives the 198.
+(def test_stream_take () int
+  (let (st (.s (stream_write (stream_new 1 (hdmi_going) 9 (PcmFormat 16000 1 2) (FromClient)) (mono16 100 7) 0 200 12000))
+        t (stream_take st 100 4))
+    (add (check_int "taken" (bytes_len (.b t)) 400)
+         (add (check_int "left" (stream_frames (.s t) 4) 198)
+              (check_int "rest" (bytes_len (.b (stream_take (.s t) 500 4))) 792)))))
+
+; An own stream pulls its bytes into its queue up to the cap, and has
+; more until all are pulled.
+(def test_stream_pulled () int
+  (let (b (mono16 1000 3)
+        st (stream_pulled (stream_new 1 (hdmi_going) 0 (PcmFormat 48000 1 2) (FromBytes b 0 2000)) 600))
+    (add (check_int "queued" (stream_frames st 4) 600)
+         (add (check_bool "more" (stream_has_more st) true)
+              (check_bool "own" (stream_is_own st) true)))))
+
+; Feeding takes the room, the buffer or the fullest stream, whichever
+; is least: 300 frames queued, room for 1000, no buffer: 0; with a
+; buffer, 300.
+(def test_feed_count () int
+  (let (d (hdmi_going)
+        st (.s (stream_write (stream_new 1 d 9 (PcmFormat 16000 1 2) (FromClient)) (mono16 100 7) 0 200 12000)))
+    (add (check_int "no buffer" (feed_count d (cons st (nil Stream))) 0)
+         (check_int "fullest" (feed_count (.room d 250) (cons st (nil Stream))) 0))))
+
+; Two streams mixed at half volume: 1000 and 500 of each give 750 a
+; sample, a short one silence past its end.
+(def test_streams_mixed () int
+  (let (d (hdmi_going)
+        a (.s (stream_write (stream_new 1 d 9 (PcmFormat 48000 2 2) (FromClient)) (mono16 4 1000) 0 8 12000))
+        b (.s (stream_write (stream_new 2 d 9 (PcmFormat 48000 2 2) (FromClient)) (mono16 2 500) 0 4 12000))
+        m (streams_mixed (cons a (cons b (nil Stream))) (cons a (cons b (nil Stream))) 2 4 2 50))
+    (add (check_int "bytes" (bytes_len (.b m)) 8)
+         (add (check_int "first" (pcm_sample16_at (.b m) 0 2) 750)
+              (check_int "third" (pcm_sample16_at (.b m) 4 2) 500)))))
+
+; The chime of a WAV file: ready, or why not.
+(def test_chime_of () int
+  (add (check_bool "ready" (match (chime_of (bytes_from_list (append (wav_header 48000 2 8) "abcdefgh"))) ((Ok c) (eq c (ChimeReady (bytes_from_list (append (wav_header 48000 2 8) "abcdefgh")) 48000 2 44 52))) ((Err why) false)) true)
+       (check_str "bad" (match (chime_of (bytes_from_list "nope")) ((Ok c) "ok") ((Err why) why)) "not a WAV file: no RIFF WAVE")))
+
+(def test_chime_line () int
+  (check_str "line" (chime_line 48000 1 44 240044) "playing the chime, /etc/chime.wav, 2500 ms at 48000 Hz"))

@@ -197,9 +197,11 @@ How a phrase begins and ends:
 | `listen`, asked | at once | as a tap's |
 
 Either way a phrase is at most 30 s, what Whistle hears in one pass, and
-is ended there. As it begins, `speech` asks `mic` for `listen 16000`
-([sound.md](sound.md#microphones)), one channel of 16 bits at 16 kHz,
-and gathers its `pcm` notices; as it ends, it asks `stop`, joins them,
+is ended there. As it begins, `speech` asks the audio server for
+`listen 16000 1` of its default input ([sound.md](sound.md#microphones)),
+one channel of 16 bits at 16 kHz, which the server converts the
+microphone's own format to, and gathers its `pcm` notices; as it ends,
+it asks `stop`, joins them,
 and has `whistle_transcribe` hear them, all at once: Whistle hears a
 clip whole, so its text comes after the phrase, in about the time it
 took to say on a Pi 5.
@@ -341,12 +343,13 @@ same frame for frame, and the samples' correlation is 0.999999 or more.
 On the host, one CPU, a second of speech takes about 0.65 s: the
 encoder and the durations 0.06 s, the flow 0.16 s, the vocoder 0.43 s.
 
-**`speak`** ([programs.md](programs.md)) says text on `audio`: the
-voice and CMUdict loaded, from `/Volumes/data/speech/` or `-v` and
-`-d`, then each sentence made, normalized so its loudest sample is full
-scale as Piper's are, doubled to 44,100 Hz ([sound.md](sound.md)) and
-played, the next made once it has; or with `-o` all of them written as
-one WAV at 22,050 Hz. A program calls the library as `speak` does:
+**`speak`** ([programs.md](programs.md)) says text on `audio`'s default
+output: the voice and CMUdict loaded, from `/Volumes/data/speech/` or
+`-v` and `-d`, then each sentence made, normalized so its loudest
+sample is full scale as Piper's are, and played as a stream at the
+voice's 22,050 Hz, which the server brings to the output's rate
+([sound.md](sound.md)), the next made once it has; or with `-o` all of
+them written as one WAV at 22,050 Hz. A program calls the library as `speak` does:
 `piper_of` and `phon_new` once, then `phon_sentences`, `phon_ids` and
 `piper_say_ids` a sentence. On QEMU, `tests/speak.sh` gives the
 oracle's samples on the two sentences whose phonemes are Piper's, each
@@ -362,8 +365,8 @@ of speech is made in 19 s, 4.5 s in 91 s.
   SHA-256, into the host's release, and the board has it only once the
   installer has fetched that onto the data volume.
 - `speech` has heard a microphone through its key on no board yet: the
-  e2e case hears a WAV file by `hear`, with no `wm` and no microphone,
-  QEMU's `usb-audio` being a speaker only.
+  e2e case hears a WAV file by `hear`, with no `wm`, no audio server
+  and no microphone, QEMU's `usb-audio` being a speaker only.
 - `speech` registers only once the model is read, 14.6 s on a Pi 5 and
   40 s on QEMU; until then its key goes to it unheard, and the Agent
   app, which looks for it only as it opens and on Retry, shows no line.
@@ -412,6 +415,6 @@ of speech is made in 19 s, 4.5 s in 91 s.
   order (sepulveda and sepultura, stilton and stilted), so a word near
   them may not be found and be spelled by rules.
 - The front end works on a clip whole, at 16 kHz only, and resamples
-  nothing: a microphone's 48 kHz is brought down by `usb-audio` when
-  asked for 16 kHz ([sound.md](sound.md#microphones)), as `rec FILE S
-  16000` asks.
+  nothing: a microphone's 48 kHz is brought down by the audio server
+  for a listener that asks for 16 kHz ([sound.md](sound.md#microphones)),
+  as `speech` and `rec FILE S 16000 1` ask.

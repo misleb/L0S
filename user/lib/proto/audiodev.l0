@@ -1,0 +1,236 @@
+; audiodev.l0 -- the audio device protocol: what a sound driver
+; (hdmi-audio, usb-audio) and the audio server (user/sbin/audio) say to
+; each other. A driver finds the server by its name, audio, and attaches
+; each device it has, asking on the server's port:
+;
+;   attach PORT NAME in|out CHANS RATES LEAD
+;                        attached ID: a device the server reaches at the
+;                        driver's PORT, named NAME (hdmi0,
+;                        usb-046d:0acf-microphone), taking sound in or
+;                        out, of CHANS channels at the RATES, separated by
+;                        commas; LEAD ms the server holds the first sound
+;                        back, for an output whose listener's end takes
+;                        that long to take it up; ID is the server's
+;                        number for it
+;   detach ID            ok: the device gone, its streams and listeners
+;                        with it; so is every device of a driver that
+;                        exits
+;
+; and serves the server on that port:
+;
+;   start ID RATE        audio RATE QUEUED ROOM: output ID playing at
+;                        RATE, one of its own; the frames queued and not
+;                        yet played, and how many more it would take now
+;   play ID VA FRAMES    played N: up to FRAMES frames of 16-bit samples,
+;                        a sample a channel, from the server's pages
+;                        shared with the driver at VA there, as many as
+;                        there was room for
+;   stop ID              ok: output ID playing out, or input ID stopped
+;   listen ID RATE       format RATE CHANS SIZE: input ID going, at RATE
+;                        if it takes it or else at one it does, each
+;                        sample SIZE bytes, least significant first; then
+;                        what it hears to the server's port, as notices
+;
+; and tells the server, as notices to the audio port, read in place:
+;
+;   aro ID ROOM QUEUED   output ID's period ended: room for ROOM more
+;                        frames, QUEUED written and not yet played; sent
+;                        while it is started
+;   ain ID SAMPLES       input ID heard these, in the format listen said
+;
+; Each request is one of l0s.l0's, its words separated by spaces; the
+; reply is as said above, or error: WHY. Linked into the server and the
+; drivers by the Makefile's AUDIODEV, with audio.l0 and pcm.l0.
+
+; How long a driver waits for the server to register, in ns: 60 s.
+(def audiodev_wait_ns () int 60000000000)
+
+; ------------------------------------------------------------- attaching
+
+; What attach says: the driver's port, the device's name, whether it
+; takes sound in, its channels, its rates, and its lead in ms.
+(data AudiodevAttach (AudiodevAttach (port int) (name (list int)) (input bool) (chans int) (rates (list int)) (lead int)))
+
+; attach's request body for a.
+(def audiodev_attach_request ((a AudiodevAttach)) (list int)
+  (unwords (cons "attach" (cons (digits (.port a)) (cons (.name a) (cons (if (.input a) "in" "out")
+    (cons (digits (.chans a)) (cons (join_with "," (numbers_words (.rates a))) (cons (digits (.lead a)) (nil (list int)))))))))))
+
+; What the body of an attach request says, or why it says nothing: its
+; op is attach already.
+(def audiodev_attach_of ((body (list int))) (Result AudiodevAttach (list int))
+  (let ws (split_spaces body)
+    (if (not (eq (length ws) 7))
+        ((Err AudiodevAttach (list int)) "attach takes PORT NAME in|out CHANS RATES LEAD")
+        (match (word_numbers (cons (nth ws 1) (cons (nth ws 4) (cons (nth ws 6) (nil (list int))))))
+          ((None) ((Err AudiodevAttach (list int)) "attach's PORT, CHANS and LEAD are numbers"))
+          ((Some ns)
+            (match (word_numbers (split_on 44 (nth ws 5)))
+              ((None) ((Err AudiodevAttach (list int)) "attach's RATES are numbers separated by commas"))
+              ((Some rates)
+                (if (not (any_eq (nth ws 3) (split_spaces "in out")))
+                    ((Err AudiodevAttach (list int)) "a device takes sound in or out")
+                    (or (is_empty rates) (or (lt (nth ns 1) 1) (gt (nth ns 1) 8)))
+                    ((Err AudiodevAttach (list int)) "a device has 1 to 8 channels and a rate")
+                    ((Ok AudiodevAttach (list int)) (AudiodevAttach (nth ns 0) (nth ws 2) (eq (nth ws 3) "in") (nth ns 1) rates (nth ns 2)))))))))))
+
+; detach's request body for device id.
+(def audiodev_detach_request ((id int)) (list int) (audio_word_reply "detach" id))
+
+; Device a attached to the server at server, asked on rp: its id there,
+; or why not.
+(def audiodev_attach ((server int) (rp int) (a AudiodevAttach)) (Result int (list int))
+  (match (port_ask server rp (audiodev_attach_request a) "the audio server")
+    ((AskFailed why) ((Err int (list int)) why))
+    ((Asked from b)
+      (match (audio_word_of "attached" (msg_text b))
+        ((Some id) ((Ok int (list int)) id))
+        ((None) ((Err int (list int)) (reply_why (msg_text b) "the audio server")))))))
+
+; Device id detached from the server at server, asked on rp: empty, or
+; why not.
+(def audiodev_detach ((server int) (rp int) (id int)) (list int)
+  (match (port_ask server rp (audiodev_detach_request id) "the audio server")
+    ((AskFailed why) why)
+    ((Asked from b) (reply_why (msg_text b) "the audio server"))))
+
+; --------------------------------------------------------------- requests
+
+; A request of the server, as a driver reads it: start ID RATE; play ID
+; VA FRAMES; stop ID; listen ID RATE; or one refused, and why.
+(data AudiodevAsk (DevStart int int) (DevPlay int int int) (DevStop int) (DevListen int int) (DevRefused (list int)))
+
+; The request whose body is body.
+(def audiodev_ask_of ((body (list int))) AudiodevAsk
+  (match (request_numbers body)
+    ((ReqNums op ns)
+      (let n (length ns)
+        (if (and (eq op "start") (eq n 2)) (DevStart (nth ns 0) (nth ns 1))
+            (and (eq op "play") (eq n 3)) (if (lt (nth ns 2) 1) (DevRefused "no frames") (DevPlay (nth ns 0) (nth ns 1) (nth ns 2)))
+            (and (eq op "stop") (eq n 1)) (DevStop (head ns))
+            (and (eq op "listen") (eq n 2)) (DevListen (nth ns 0) (nth ns 1))
+            (DevRefused (append "no request " op)))))
+    ((ReqBad why) (DevRefused why))))
+
+; The pages frames frames of chans 16-bit channels from the server lie
+; in.
+(def audiodev_play_pages ((frames int) (chans int)) int (pages_for (mul frames (mul 2 chans))))
+
+; start's reply: audio RATE QUEUED ROOM; and what one says, or none.
+(data AudiodevState (AudiodevState (rate int) (queued int) (room int)))
+(def audiodev_state_reply ((s AudiodevState)) (list int)
+  (unwords (cons "audio" (numbers_words (cons (.rate s) (cons (.queued s) (cons (.room s) (nil int))))))))
+(def audiodev_state_of ((r (list int))) (Option AudiodevState)
+  (let ws (split_spaces r)
+    (if (and (eq (length ws) 4) (eq (head ws) "audio"))
+        (match (word_numbers (tail ws))
+          ((None) ((None AudiodevState)))
+          ((Some ns) (Some (AudiodevState (nth ns 0) (nth ns 1) (nth ns 2)))))
+        ((None AudiodevState)))))
+
+; play's reply, played N, and what one says.
+(def audiodev_played_reply ((n int)) (list int) (audio_word_reply "played" n))
+(def audiodev_played_of ((r (list int))) (Option int) (audio_word_of "played" r))
+
+; ---------------------------------------------------------------- notices
+
+; aro and its three u32s; what m says, the id, room and queued, or none.
+(def audiodev_room_notice ((id int) (room int) (queued int)) (list int)
+  (append "aro" (append (u32_le id) (append (u32_le room) (u32_le queued)))))
+(def audiodev_room_of ((m Message)) (Option (list int)) (tagged_u32s m "aro" 3))
+
+; ain and its id, as bytes, for the samples to follow (bytes_concat);
+; the id a message's bytes b say heard, or -1 if they are no such
+; notice; and where the samples start in them.
+(def audiodev_in_header ((id int)) bytes (bytes_from_list (append "ain" (u32_le id))))
+(def audiodev_in_of ((b bytes)) int
+  (if (and (ge (msg_len b) 7) (msg_starts b "ain")) (msg_u32 b 3) -1))
+(def audiodev_in_at () int (add (header_len) 7))
+
+; Device id's room and queued told to the server at server: 0.
+(def audiodev_room_tell ((server int) (id int) (room int) (queued int)) int
+  (port_tell server (audiodev_room_notice id room queued)))
+
+; The samples in b from i up to j heard by device id sent to the server
+; at server: whether they went.
+(def audiodev_in_tell ((server int) (id int) (b bytes) (i int) (j int)) Sending
+  (let n (bytes_concat (cons (audiodev_in_header id) (cons (bytes_slice b i j) (nil bytes))))
+    (port_send_bytes server n 0 (bytes_len n))))
+
+; ------------------------------------------------------------------- ring
+
+; An output driver plays from a ring of periods its device reads
+; cyclically, each period frames long, and is told, by an interrupt or
+; by asking the device, as each one ends. Frames are counted from the
+; start, so a frame's place in the ring, and any position a format
+; needs (iec958.l0's block), follow from its number; the ring here is
+; only those counts.
+
+; The ring: its periods, the frames in each, the frame the period
+; playing now starts at, and the frame written up to, each counted from
+; the start.
+(data AudioRing (AudioRing (periods int) (period int) (played int) (w int)))
+
+; A ring of periods periods of period frames, nothing played yet: the
+; first period plays as it is, silence, and writing starts after it.
+(def audio_ring_new ((periods int) (period int)) AudioRing
+  (AudioRing periods period 0 period))
+
+; Where the next frame written goes: after what was written, but never
+; into the period playing now, which the device has begun.
+(def ring_next ((r AudioRing)) int
+  (match r ((AudioRing ps p played w) (max w (add played p)))))
+
+; The frames past the period playing that are written and not played.
+(def ring_queued ((r AudioRing)) int
+  (match r ((AudioRing ps p played w) (max 0 (sub w (add played p))))))
+
+; How many more frames can be written now: up to where the period
+; playing comes round again.
+(def ring_room ((r AudioRing)) int
+  (match r ((AudioRing ps p played w) (sub (add played (mul ps p)) (ring_next r)))))
+
+; The ring once n frames are written at ring_next.
+(def ring_wrote ((r AudioRing) (n int)) AudioRing
+  (let k (add (ring_next r) n)
+    (.w r k)))
+
+; The period frame f is in, and where in it.
+(def ring_slot ((r AudioRing) (f int)) int (mod (div f (.period r)) (.periods r)))
+(def ring_offset ((r AudioRing) (f int)) int (mod f (.period r)))
+
+; Frame f's place in the ring's memory, as a frame: its period's frames
+; before it, then its own place in its period.
+(def ring_frame_at ((r AudioRing) (f int)) int
+  (add (mul (ring_slot r f) (.period r)) (ring_offset r f)))
+
+; The period playing now.
+(def ring_playing ((r AudioRing)) int (ring_slot r (.played r)))
+
+; How many periods ended since r, by the period the device is in now.
+(def ring_ended ((r AudioRing) (now int)) int
+  (mod (add (sub now (ring_playing r)) (.periods r)) (.periods r)))
+
+; The ring once the period playing has ended and the next plays. The one
+; that ended is the period that frame .played plus the ring's frames
+; goes in, the first not yet writable, which its driver fills with
+; silence before writing anything more.
+(def ring_advanced ((r AudioRing)) AudioRing
+  (let k (add (.played r) (.period r))
+    (.played r k)))
+
+; The frame the period that just ended will play next, which the driver
+; silences: the ring's frames past what played in it.
+(def ring_reused ((r AudioRing)) int
+  (add (.played r) (mul (.periods r) (.period r))))
+
+; The state start answers for ring r at rate.
+(def ring_state ((r AudioRing) (rate int)) AudiodevState
+  (AudiodevState rate (ring_queued r) (ring_room r)))
+
+; ---------------------------------------------------------------- samples
+
+; Sample ch of frame i of chans channels in the server's pages m, 0 to
+; 65535 as its two bytes read it.
+(def audio_sample_at ((m IoRegion) (i int) (chans int) (ch int)) int
+  (region_get16 m (add (mul (mul 2 chans) i) (mul 2 ch))))

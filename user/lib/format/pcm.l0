@@ -1,12 +1,15 @@
-; pcm.l0 -- PCM samples, as bytes, between 48 kHz and 16 kHz, purely: a
-; microphone's frames, of any channels and sample size, brought down to
-; one channel of 16 bits at 16 kHz, as Whistle hears (speech.md), a piece
-; at a time as they come, with what one piece leaves for the next kept;
-; and 16-bit samples at 16 kHz taken up to 48 kHz, any range of them at
-; a time, for a driver that plays no 16 kHz. Both go through one
-; low-pass filter, so that nothing above 8 kHz folds down into what is
-; kept, and nothing between the samples is made up. Linked as PCM in
-; the Makefile, by usb-audio and play.
+; pcm.l0 -- PCM samples, as bytes, purely: frames of any rate, channels
+; and sample size converted to 16-bit samples at another rate and
+; channels, a piece at a time as they come, with what one piece leaves
+; for the next kept (PcmConv, pcm_convert), which is how the audio
+; server (sound.md) takes any client's stream and gives any listener
+; the format it asked; and pieces of frames mixed at volumes (pcm_mix).
+; 48 kHz brought down to 16 kHz, as Whistle hears (speech.md), goes
+; through a low-pass filter, so that nothing above 8 kHz folds down
+; into what is kept (PcmDown, pcm_down); any other ratio is linear
+; interpolation between the two frames each new one falls between.
+; Linked as PCM in the Makefile, by the audio server, usb-audio and
+; the tests.
 
 ; The low-pass filter: 63 taps of a sinc cut off at 7 kHz at 48 kHz,
 ; under a Hamming window, summing to 65536. It passes all to 6 kHz, half
@@ -116,41 +119,154 @@
 (def pcm_copied ((y (array int)) (x (array int)) (from int) (k int) (n int)) (array int)
   (if (ge k n) y (pcm_copied (array_set y k (array_get x (add from k))) x from (add k 1) n)))
 
-; --------------------------------------------------------------------- up
+; ---------------------------------------------------------------- formats
 
-; Frames o0 up to o1 at 48 kHz of the 16-bit samples of b from byte s up
-; to e, chans channels at 16 kHz: each frame o, each channel, the filter
-; over the samples three times as far apart, with zeros between, centred
-; on o, times 3. Any range gives the same frames as the whole, so a
-; player takes them a piece at a time.
-(def pcm_up ((b bytes) (s int) (e int) (chans int) (o0 int) (o1 int)) bytes
-  (let n (div (max (sub e s) 0) (max (mul 2 chans) 1))
-    (bytes_from_list (rev (pcm_up_frames b s n chans (pcm_taps) o0 o1 (nil int))))))
+; A format of PCM frames: the rate in Hz, the channels, and the bytes a
+; sample, 2 or more, signed, least significant first; a frame is a
+; sample of each channel.
+(data PcmFormat (PcmFormat (rate int) (chans int) (size int)))
 
-; How many frames n frames at 16 kHz are at 48 kHz.
-(def pcm_up_frames_of ((n int)) int (mul n (pcm_factor)))
+; The format every conversion gives: 16-bit samples at rate of chans.
+(def pcm_format16 ((rate int) (chans int)) PcmFormat (PcmFormat rate chans 2))
 
-; Frames o up to o1, each channel's sample pushed onto the reversed acc.
-(def pcm_up_frames ((b bytes) (s int) (n int) (chans int) (taps (array int)) (o int) (o1 int) (acc (list int))) (list int)
-  (if (ge o o1)
+; A frame's bytes in f.
+(def pcm_frame_bytes ((f PcmFormat)) int (mul (.chans f) (.size f)))
+
+; Whether f is one a conversion takes: a rate of 8000 to 192000 Hz, 1
+; to 8 channels, 2 to 4 bytes a sample.
+(def pcm_format_ok ((f PcmFormat)) bool
+  (and (and (ge (.rate f) 8000) (le (.rate f) 192000))
+       (and (and (ge (.chans f) 1) (le (.chans f) 8)) (and (ge (.size f) 2) (le (.size f) 4)))))
+
+; Sample c of the frame at byte i of b, in f, as 16 bits.
+(def pcm_sample_of ((b bytes) (i int) (f PcmFormat) (c int)) int
+  (pcm_sample16_at b (add i (mul c (.size f))) (.size f)))
+
+; Channel c of chans of the frame at byte i of b, in f: its own if f has
+; as many channels, the mean of f's for one channel, f's first for one
+; f lacks.
+(def pcm_chan_of ((b bytes) (i int) (f PcmFormat) (chans int) (c int)) int
+  (if (eq (.chans f) chans) (pcm_sample_of b i f c)
+      (eq chans 1) (pcm_mono_at b i (.chans f) (.size f))
+      (lt c (.chans f)) (pcm_sample_of b i f c)
+      (pcm_sample_of b i f 0)))
+
+; ------------------------------------------------------------- converting
+
+; A conversion going, from one format to 16-bit samples of another rate
+; and channels, a piece at a time: the last input frame, a sample of
+; each output channel, silence before the first; where the next output
+; frame falls, in input frames from that one, times the output rate;
+; and, from 48 kHz to 16 kHz, the filter's state.
+(data PcmConv (PcmConv (from PcmFormat) (to PcmFormat) (last (array int)) (at int) (down PcmDown)))
+
+; A conversion from from to to, before its first piece: the first output
+; frame falls on the first input frame.
+(def pcm_conv_new ((from PcmFormat) (to PcmFormat)) PcmConv
+  (PcmConv from to (array_new (.chans to) 0) (.rate to) (pcm_down_new)))
+
+; Whether a conversion from from to to goes through the filter: 48 kHz
+; brought down to 16 kHz.
+(def pcm_conv_filtered ((from PcmFormat) (to PcmFormat)) bool
+  (and (eq (.rate from) 48000) (eq (.rate to) 16000)))
+
+; What one piece gives: the conversion for the next, and its frames, of
+; 16-bit samples in the output format.
+(data PcmConverted (PcmConverted (st PcmConv) (out bytes)))
+
+; The frames of b from byte i up to j, in st's input format, converted
+; after st: through the filter from 48 to 16 kHz, else each output frame
+; between the two input frames it falls on, each channel as pcm_chan_of
+; gives it. A part of a frame at the end is passed over.
+(def pcm_convert ((st PcmConv) (b bytes) (i int) (j int)) PcmConverted
+  (match st
+    ((PcmConv from to last at down)
+      (if (pcm_conv_filtered from to)
+          (match (pcm_down down b i j (.chans from) (.size from))
+            ((PcmDowned d2 out) (PcmConverted (PcmConv from to last at d2) (pcm_widened out (.chans to)))))
+          (pcm_interpolated from to last at down b i j)))))
+
+; Mono 16-bit samples b as frames of chans channels, the one sample in
+; each.
+(def pcm_widened ((b bytes) (chans int)) bytes
+  (if (eq chans 1) b (bytes_from_list (rev (pcm_widen_onto b 0 (div (bytes_len b) 2) chans (nil int))))))
+(def pcm_widen_onto ((b bytes) (k int) (n int) (chans int) (acc (list int))) (list int)
+  (if (ge k n) acc (pcm_widen_onto b (add k 1) n chans (pcm_push_each (pcm_sample16_at b (mul 2 k) 2) chans acc))))
+(def pcm_push_each ((v int) (n int) (acc (list int))) (list int)
+  (if (le n 0) acc (pcm_push_each v (sub n 1) (pcm_push16 v acc))))
+
+; pcm_convert's rest, by interpolation: the input frames in b from i up
+; to j, after the last one, as an array x of to's channels a frame,
+; frame 0 the last; each output frame at at, in input frames times the
+; output rate, between frames at / rate and the next, as long as both
+; are in x; then the last frame kept and at counted from it.
+(def pcm_interpolated ((from PcmFormat) (to PcmFormat) (last (array int)) (at int) (down PcmDown) (b bytes) (i int) (j int)) PcmConverted
+  (let (tc (.chans to)
+        n (div (max (sub j i) 0) (pcm_frame_bytes from))
+        x (pcm_frames_into (pcm_hist_into (array_new (mul (add n 1) tc) 0) last 0) b i from tc 1 n)
+        out (pcm_lerp x tc n (.rate from) (.rate to) at (nil int))
+        at2 (pcm_lerp_end n (.rate from) (.rate to) at))
+    (PcmConverted (PcmConv from to (pcm_tail_of x tc) (sub at2 (mul n (.rate to))) down) (bytes_from_list (rev out)))))
+
+; x with frames k up to n of b, from byte i in f, each as tc channels at
+; k * tc; frame k of n is at byte i + (k - 1) * frame bytes.
+(def pcm_frames_into ((x (array int)) (b bytes) (i int) (f PcmFormat) (tc int) (k int) (n int)) (array int)
+  (if (gt k n)
+      x
+      (pcm_frames_into (pcm_chans_into x b (add i (mul (sub k 1) (pcm_frame_bytes f))) f tc (mul k tc) 0) b i f tc (add k 1) n)))
+
+; x with the frame at byte i of b in f as tc channels from base.
+(def pcm_chans_into ((x (array int)) (b bytes) (i int) (f PcmFormat) (tc int) (base int) (c int)) (array int)
+  (if (ge c tc) x (pcm_chans_into (array_set x (add base c) (pcm_chan_of b i f tc c)) b i f tc base (add c 1))))
+
+; Each output frame from at on, while the frame it falls on is among
+; x's n + 1, and the next too if it falls between them, its tc channels
+; pushed onto the reversed acc.
+(def pcm_lerp ((x (array int)) (tc int) (n int) (from int) (to int) (at int) (acc (list int))) (list int)
+  (if (pcm_lerp_past n to at)
       acc
-      (pcm_up_frames b s n chans taps (add o 1) o1 (pcm_up_channels b s n chans taps o 0 acc))))
+      (pcm_lerp x tc n from to (add at from) (pcm_lerp_frame x tc (mul (div at to) tc) (mod at to) to 0 acc))))
 
-; Frame o's channels from c on.
-(def pcm_up_channels ((b bytes) (s int) (n int) (chans int) (taps (array int)) (o int) (c int) (acc (list int))) (list int)
-  (if (ge c chans)
-      acc
-      (let c0 (add o (div (pcm_reach) 2))
-        (pcm_up_channels b s n chans taps o (add c 1)
-          (pcm_push16 (div (mul (pcm_factor) (pcm_up_dot b s n chans c taps c0 (mod c0 (pcm_factor)) 0)) 65536) acc)))))
+; Whether an output frame at at needs a frame past n: it falls past the
+; last, or between the last and the one after it.
+(def pcm_lerp_past ((n int) (to int) (at int)) bool
+  (let k (div at to)
+    (or (gt k n) (and (eq k n) (not (eq (mod at to) 0))))))
 
-; The sum of each tap t from k on, by threes, times channel c's sample
-; (c0 - t) / 3 of the n, none past either end.
-(def pcm_up_dot ((b bytes) (s int) (n int) (chans int) (c int) (taps (array int)) (c0 int) (t int) (acc int)) int
-  (if (ge t (pcm_tap_count))
+; Where at ends up once every output frame x's n + 1 give is made.
+(def pcm_lerp_end ((n int) (from int) (to int) (at int)) int
+  (if (pcm_lerp_past n to at) at (pcm_lerp_end n from to (add at from))))
+
+; Each channel from c of the frame at base of x, frac / to of the way to
+; the next, pushed onto the reversed acc.
+(def pcm_lerp_frame ((x (array int)) (tc int) (base int) (frac int) (to int) (c int) (acc (list int))) (list int)
+  (if (ge c tc)
       acc
-      (let k (div (sub c0 t) (pcm_factor))
-        (pcm_up_dot b s n chans c taps c0 (add t (pcm_factor))
-          (if (and (ge k 0) (lt k n))
-              (add acc (mul (array_get taps t) (pcm_sample16_at b (add s (mul 2 (add (mul k chans) c))) 2)))
-              acc)))))
+      (let (a (array_get x (add base c)) b (if (eq frac 0) 0 (array_get x (add (add base tc) c))))
+        (pcm_lerp_frame x tc base frac to (add c 1) (pcm_push16 (if (eq frac 0) a (add a (div (mul (sub b a) frac) to))) acc)))))
+
+; ------------------------------------------------------------------- mixing
+
+; n samples of 16 bits: the sum of the first n of each of srcs, each at
+; its volume of vols, in percent, a source short of n as silence past
+; its end, each sum clamped. A frame is as many samples as channels.
+(def pcm_mix ((srcs (list bytes)) (vols (list int)) (n int)) bytes
+  (bytes_from_list (rev (pcm_mix_out (pcm_mix_into (array_new n 0) srcs vols) 0 (nil int)))))
+
+; acc with each source of srcs added at its volume.
+(def pcm_mix_into ((acc (array int)) (srcs (list bytes)) (vols (list int))) (array int)
+  (if (is_empty srcs)
+      acc
+      (pcm_mix_into (pcm_mix_one acc (head srcs) (if (is_empty vols) 100 (head vols)) 0) (tail srcs) (if (is_empty vols) vols (tail vols)))))
+
+; acc with b's samples from k on added at vol percent, as many as both
+; hold.
+(def pcm_mix_one ((acc (array int)) (b bytes) (vol int) (k int)) (array int)
+  (if (or (ge k (array_len acc)) (gt (mul 2 (add k 1)) (bytes_len b)))
+      acc
+      (pcm_mix_one (array_set acc k (add (array_get acc k) (div (mul (pcm_sample16_at b (mul 2 k) 2) vol) 100))) b vol (add k 1))))
+
+; acc's sums from k on, clamped, pushed onto the reversed out.
+(def pcm_mix_out ((acc (array int)) (k int) (out (list int))) (list int)
+  (if (ge k (array_len acc)) out (pcm_mix_out acc (add k 1) (pcm_push16 (array_get acc k) out))))
+

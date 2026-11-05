@@ -46,6 +46,7 @@ move independently, so several can be active at once.
 | [0062](0062-text-to-speech.md) Piper on the board: text to speech in L0 | Agent | active | 6/7 | – | speech.md, sound.md, programs.md, testing.md |
 | [0067](0067-speech-as-spoken.md) Speech heard as it is spoken | Agent | idea | – | 0061 | speech.md, agent.md |
 | [0068](0068-first-stage-everywhere.md) The first stage alone, wherever a card is made | Pi 5 | idea | – | – | pi5.md, boot.md, storage.md |
+| [0069](0069-audio-server.md) An audio server: drivers that only move frames, and one place that mixes | Desktop | active | 6/7 | – | sound.md, devices.md, programs.md, demo.md, pi5.md, testing.md |
 ## Ready
 
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its
@@ -68,6 +69,12 @@ while the one before plays, is next.
 [0040](0040-paint-at-scale-2.md), painting at scale 2, is
 active: fills a row copy and text, icons and images a row at a time,
 timed on the host; timing it on the Pi 5 at 4K is next.
+[0069](0069-audio-server.md), the audio server, is active: `audio`
+owns the devices `hdmi-audio` and `usb-audio` attach, mixes every
+stream into each output at its rate, converts what comes in for each
+listener, reads `/etc/audio` and the chime, and on QEMU plays through
+QEMU's speaker, fed by `xhci` from a ring; the Pi 5, HDMI0 and the
+Yeti both ways through it, is next.
 Every
 other goal left is an `idea`, without steps. On
 the display,

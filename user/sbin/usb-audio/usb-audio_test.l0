@@ -1,7 +1,7 @@
 ; usb-audio_test.l0 -- what usb-audio makes of a Blue Yeti Nano's audio
-; function (uac_test.l0's descriptors): its line, the devices answer,
-; the microphone it would listen to, the requests it would make, and
-; when a silence ends. With no kernel there is no usb server.
+; function (uac_test.l0's descriptors): its line, the names it attaches
+; its streams under, the requests it would make, and the server's
+; requests as it reads them. With no kernel there is no usb server.
 
 ; The bytes decimal words give.
 (def nums ((s (list int))) (list int)
@@ -11,26 +11,21 @@
 (def yeti () Uac
   (uac_of (bytes_from_list (nums "9 2 232 0 4 1 0 192 49 9 4 0 0 0 1 1 0 0 10 36 1 0 1 72 0 2 1 2 12 36 2 2 1 1 0 2 3 0 0 0 10 36 6 6 2 1 3 0 0 0 9 36 3 4 1 3 0 6 0 12 36 2 1 1 2 0 2 3 0 0 0 10 36 6 5 1 1 3 0 0 0 9 36 3 3 1 1 0 5 0 9 4 1 0 0 1 2 0 0 9 4 1 1 1 1 2 0 0 7 36 1 2 1 1 0 14 36 2 1 2 3 24 2 68 172 0 128 187 0 9 5 1 1 32 1 1 0 0 7 37 1 1 0 0 0 9 4 2 0 0 1 2 0 0 9 4 2 1 1 1 2 0 0 7 36 1 3 1 1 0 14 36 2 1 2 3 24 2 68 172 0 128 187 0 9 5 130 1 38 1 1 0 0 7 37 1 1 0 0 0 9 4 3 0 2 3 0 0 0 9 33 17 1 0 1 34 172 0 7 5 131 3 64 0 10 7 5 3 3 64 0 10"))))
 
-(def devs () (list AudDev) (cons (AudDev 4 (yeti)) (nil AudDev)))
+; The Yeti as device 4, 046d:0acf.
+(def yeti_dev () AudDev (AudDev 4 1133 2767 (yeti)))
 
-; What it says on the serial line of the Yeti, device 4.
+; What it says in the log of the Yeti, device 4.
 (def test_device_line () int
   (check_str "line" (device_line 4 (yeti)) "device 4: out speaker 2 24 44100,48000, in microphone 2 24 44100,48000"))
 
-; The devices answer: a line a stream, its device and interface first.
-(def test_devices () int
-  (check_str "lines" (devices_text (devs)) "4 1 out speaker 2 24 44100,48000\n4 2 in microphone 2 24 44100,48000\n"))
-
-; listen takes the microphone, interface 2, endpoint 0x82.
-(def test_first_input () int
-  (match (first_input (devs))
-    ((None) (check_str "found" "none" "a microphone"))
-    ((Some g) (add (check_int "device" (going_dev g) 4) (check_int "endpoint" (.ep (going_stream g)) 130)))))
-
-; silence finds the speaker by its interface, 1, and not the microphone.
-(def test_output_at () int
-  (add (check_bool "speaker" (match (output_at (devs) 4 1) ((Some s) (eq (.ep s) 1)) ((None) false)) true)
-       (check_bool "microphone" (match (output_at (devs) 4 2) ((Some s) true) ((None) false)) false)))
+; The names its streams are attached under: the ids and what each is;
+; a second of the same gets -2.
+(def test_stream_names () int
+  (let (ss (.streams (yeti))
+        name (stream_name (yeti_dev) (nth ss 1)))
+    (add (check_str "microphone" name "usb-046d:0acf-microphone")
+         (add (check_str "speaker" (stream_name (yeti_dev) (head ss)) "usb-046d:0acf-speaker")
+              (check_str "second" (unique_name (cons (Attached 1 name 4 (nth ss 1)) (nil Attached)) name) "usb-046d:0acf-microphone-2")))))
 
 ; SET_INTERFACE as the usb protocol's control request: interface 2 to
 ; setting 1; SET_CUR with its three bytes.
@@ -38,33 +33,20 @@
   (add (check_str "interface" (control_body 4 (uac_set_interface 2 1) (nil int)) "control 4 1 11 1 2 0")
        (check_str "rate" (control_body 4 (uac_set_rate 130) (uac_rate_bytes 48000)) "control 4 34 1 256 130 3 128 187 0")))
 
-; A uin of the Yeti's microphone, packets of 294 bytes at most, holds 10.
-(def test_batch () int
-  (check_int "ten" (iso_batch_of (nth (.streams (yeti)) 1)) 10))
+; A stream going is found by its device and endpoint, and by its id.
+(def test_going () int
+  (let gs (cons (GoingIn 7 4 (nth (.streams (yeti)) 1)) (nil Going))
+    (add (check_int "at" (match (going_at gs 4 130) ((Some g) (going_id g)) ((None) 0)) 7)
+         (add (check_int "with" (match (going_with gs 7) ((Some g) (going_dev g)) ((None) 0)) 4)
+              (check_int "less" (length (going_less gs 7)) 0)))))
 
-; A silence is due once its time has come, and not before.
-(def test_silence_due () int
-  (let gs (cons (GoingIn 4 (nth (.streams (yeti)) 1) 9 ((None PcmDown))) (cons (GoingOut 4 (head (.streams (yeti))) 8 30 1000) (nil Going)))
-    (add (check_bool "before" (match (silence_due gs 999) ((Some g) true) ((None) false)) false)
-         (check_int "at" (match (silence_due gs 1000) ((Some g) (going_dev g)) ((None) -1)) 4))))
+; A ring for a quarter second: the Yeti's speaker, 6 bytes a frame at
+; 48 kHz, 72,000 bytes, 18 pages and one more; QEMU's speaker, 4 bytes
+; a frame, 48,000, 12 and one.
+(def test_ring_pages () int
+  (add (check_int "yeti" (ring_pages 48000 6) 19)
+       (check_int "qemu" (ring_pages 48000 4) 13)))
 
 ; Under an operating system there is no usb server.
 (def test_entry () int
   (check_int "fails" (usb_audio) 1))
-
-; A plan and its format, as text: the rate set, whether brought down,
-; and the format answered.
-(def plan_text ((s UacStream) (want int)) (list int)
-  (let p (mic_plan s want)
-    (append (digits (.rate p)) (append (if (.down p) " down " " as is ") (mic_format_reply (plan_format s p))))))
-
-; The Yeti's microphone, 2 channels of 24 bits at 44100 or 48000: 48000
-; and 44100 as they are; 16000 set at 48000 and brought down to one
-; channel of 16 bits; 8000, which it neither takes nor is brought down
-; to, its highest.
-(def test_plans () int
-  (let s (nth (.streams (yeti)) 1)
-    (add (check_str "48000" (plan_text s 48000) "48000 as is format 48000 2 3")
-         (add (check_str "44100" (plan_text s 44100) "44100 as is format 44100 2 3")
-              (add (check_str "16000" (plan_text s 16000) "48000 down format 16000 1 2")
-                   (check_str "8000" (plan_text s 8000) "48000 as is format 48000 2 3"))))))

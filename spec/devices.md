@@ -35,7 +35,7 @@ driver serves both, and only how it finds its controllers differs:
 ```
  usb-hid: keyboard and pointer, each on a port of its own --- wm, vt, keys,
                     |  usb (proto/usb.l0)                 as from virtio-input
- usb-audio: mic ----+-------------------------------------- rec
+ usb-audio ---------+------ audio (sound.md) ------ rec, speech
                     v
                   xhci (dev): every controller, rings, ports, enumeration,
                     |         control transfers, IN endpoints polled,
@@ -162,14 +162,28 @@ units, linked one to the next, and each streaming interface's setting
 that moves sound, its isochronous endpoint, channels, bytes and bits a
 sample, and rates; and names each stream by the terminal at its far end
 (`microphone`, `speaker`, `headset`...), the input terminal a stream in
-comes from, the output terminal a stream out reaches. It serves `mic`
-([sound.md](sound.md#microphones)), and claims an interface only to use
-it: a stream is set going by SET_INTERFACE to its setting, SET_CUR of
-its endpoint's sampling frequency (a device that takes one rate may
-refuse it, which is let be), and `open`; and stopped by `close` and
-SET_INTERFACE to setting 0. It waits on two ports, a set: its own, for
-the usb server's answers and notices and the kernel's alarms, and
-`mic`'s.
+comes from, the output terminal a stream out reaches. It is a driver of
+the audio server ([sound.md](sound.md#usb-devices)): each stream, in or
+out, is attached as a device of the server's, set going when the server
+asks, heard for it or fed from it, and detached when its device is
+unplugged. It claims an interface only to use it: a stream is set going
+by SET_INTERFACE to its setting, SET_CUR of its endpoint's sampling
+frequency (a device that takes one rate may refuse it, which is let
+be), and `open`, a stream out then `feed` of a ring it shares with
+`xhci`; and stopped by `close` and SET_INTERFACE to setting 0. It waits
+on two ports, a set: its own, for the usb server's answers and notices,
+and the one the server asks on.
+
+**Fed OUT endpoints.** `feed DEV EP VA PAGES RATE FB` gives an
+isochronous OUT pipe a ring (`core.l0`'s `Feed`): the class driver's
+pages shared with `xhci`, a header of two u32s, the bytes written and
+the bytes read, then the ring. From then on each slot queued is filled
+first (`ActFill`) with the next packet's bytes from the ring, its share
+of RATE frames a second of FB bytes (`feed_share`: 48 at 48 kHz, 44 or
+45 at 44.1 kHz, 441 in 10), and its TD is that long; the shell copies
+them and moves the read count (`ring_taken`), silence past what the
+ring holds, so the packets never stop. `close`, the opener gone, or
+the device unplugged let the ring go (`ActUnfeed`).
 
 **On the Pi 5** (`xhci rp1`, which `pi5/etc/inittab` starts; see
 [The Raspberry Pi 5](pi5.md#the-raspberry-pi-5)): the
@@ -190,9 +204,10 @@ reach the shell and the windows and the mouse moves the pointer.
   and mice, a USB Audio Class microphone, the Yeti Nano, and on QEMU
   its `usb-tablet` and `usb-audio` speaker, only, on root ports only,
   no hubs. Isochronous IN endpoints have run on the Pi 5 and QEMU, from
-  the Yeti; OUT on QEMU only, to its `usb-audio`. An isochronous OUT endpoint sends only silence,
-  and its packets are its largest, not each interval's share of the
-  rate. A high-speed endpoint's extra packets a microframe are not
+  the Yeti; OUT on QEMU only, to its `usb-audio`, fed from a ring, so
+  its sound was heard on the host, and not yet to a speaker on a
+  board. An OUT endpoint not fed sends its largest packet of silence.
+  A high-speed endpoint's extra packets a microframe are not
   used. USB Audio Class 2.0 is not read. A control
   transfer moves 2 KB at most, an endpoint's report 2 KB; and each
   controller has 64 pages for its devices, about 3 a device and 1 an

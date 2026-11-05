@@ -1,54 +1,76 @@
 ; usb-audio.l0 -- the class driver of USB audio devices (USB Audio
-; Class 1.0), over the usb server (xhci): it is told of each device,
-; reads its configuration's audio function (uac.l0), and serves mic
-; (proto/mic.l0): every stream in and out listed, the first microphone
-; set going for one client at a time, what it hears passed on as it
-; comes, or, asked for 16 kHz that the microphone does not offer, its 48
-; kHz brought down to Whistle's 16 kHz, one channel of 16 bits
-; (pcm.l0), and silence sent out, as a test of the path out. It drives no
+; Class 1.0), over the usb server (xhci), and a driver of the audio
+; server (proto/audiodev.l0): it is told of each device, reads its
+; configuration's audio function (uac.l0), and attaches each of its
+; streams to the server as a device of its own, named usb-VID:PID-KIND,
+; as usb-046d:0acf-microphone or usb-046d:0acf-speaker. Asked by the
+; server to listen, it sets a stream in going at the rate the server
+; wants, or one the stream takes, and passes on what it hears as it
+; comes, in the device's own format, which the server converts for each
+; listener. Asked to start a stream out, it sets it going and has xhci
+; feed its packets from a ring it shares with xhci (usb.l0's feed), into
+; which it writes the server's frames, each sample widened to the
+; device's, as the server plays them, telling the server the room as
+; xhci says packets went. A device unplugged is detached. It drives no
 ; device itself, and claims an interface only while it uses it.
 ;
 ; It waits on two ports at once, a set (port_set): its own, where the
-; usb server's answers and notices come, told apart by the server's pid,
-; and the kernel's alarms, which end a silence; and mic's, where its
-; clients ask. A notice that comes while it waits for an answer is kept,
-; and handled after.
+; usb server's answers and notices come, told apart by the server's
+; pid; and the one it attaches its devices with, where the audio server
+; asks. A notice that comes while it waits for an answer is kept, and
+; handled after.
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "usb-audio" why))
 
 ; ------------------------------------------------------------------ state
 
-; An audio device: its number, and its audio function.
-(data AudDev (AudDev (dev int) (f Uac)))
+; An audio device: its number, its vendor and product ids, and its audio
+; function.
+(data AudDev (AudDev (dev int) (vid int) (pid int) (f Uac)))
 
-; A stream going: its device, its stream, and, for one in, the port its
-; samples go to, and, if they are brought down from 48 kHz to 16 kHz on
-; the way, where that stands (pcm.l0); for one out, the port to answer,
-; how many packets have gone, and when it ends, on clock_ns.
-(data Going (GoingIn (dev int) (s UacStream) (to int) (down (Option PcmDown))) (GoingOut (dev int) (s UacStream) (reply int) (sent int) (until int)))
+; A stream attached to the server: its id there, its name, its device,
+; and the stream.
+(data Attached (Attached (id int) (name (list int)) (dev int) (s UacStream)))
 
-; The driver: its own port and mic's, the usb server's port and pid, the
-; audio devices, the streams going, and the usb server's messages kept
-; to handle.
-(data Aud (Aud (own int) (mic int) (usb int) (pid int) (devs (list AudDev)) (going (list Going)) (kept (list Message))))
+; A stream going, for the server: in, its id there, its device and its
+; stream; or out, the same, and the ring xhci feeds it from, shared
+; with xhci: its address here, its pages, and the region to write it
+; with.
+(data Going (GoingIn (id int) (dev int) (s UacStream)) (GoingOut (id int) (dev int) (s UacStream) (va int) (pages int) (r IoRegion)))
+
+; A stream going's id, device and stream.
+(def going_id ((g Going)) int (match g ((GoingIn id d s) id) ((GoingOut id d s va p r) id)))
+(def going_dev ((g Going)) int (match g ((GoingIn id d s) d) ((GoingOut id d s va p r) d)))
+(def going_stream ((g Going)) UacStream (match g ((GoingIn id d s) s) ((GoingOut id d s va p r) s)))
+
+; The driver: its own port and the one the server asks on, the usb
+; server's port and pid, the audio server's port and a port for its
+; answers, the audio devices, the streams attached, the streams going,
+; and the usb server's messages kept to handle.
+(data Aud (Aud (own int) (serving int) (usb int) (pid int) (server int) (rp int)
+               (devs (list AudDev)) (attached (list Attached)) (going (list Going)) (kept (list Message))))
 
 ; A step's answer: the driver after it, and what came back.
 (data Answered (Answered Aud (list int)))
 
 ; ---------------------------------------------------------------- start
 
-; The usb server found and listened to, mic registered, and served.
+; The usb server found and listened to, the audio server found, and
+; served; no audio server is no failure.
 (def usb_audio () int
   (match (name_wait "usb" 5000000000)
     ((NotFound) (complain "no usb; is xhci running?"))
-    ((Found usb) (listened usb (port_new)))))
+    ((Found usb)
+      (match (name_wait (audio_name) (audiodev_wait_ns))
+        ((NotFound) (info_as "usb-audio" "no audio server to attach devices to"))
+        ((Found server) (listened usb server (port_new)))))))
 
 ; Listening to the usb server at usb, its answers and notices to own:
 ; the first message there is its answer, since no one else knows own
-; yet, and says its pid. Then mic registered on a port of its own, and
-; the two made the set it waits on.
-(def listened ((usb int) (own int)) int
+; yet, and says its pid. Then a port made for the audio server to ask
+; on, and the two made the set it waits on.
+(def listened ((usb int) (server int) (own int)) int
   (match (port_send usb (request own "listen"))
     ((Sent)
       (match (port_receive own)
@@ -56,14 +78,11 @@
         ((Message from b)
           (if (not (msg_is b "ok"))
               (complain (reply_why (msg_text b) "usb"))
-              (let (mic (port_new)
-                    r (name_register_or_why mic (mic_name)))
-                (if (not (is_empty r))
-                    (complain r)
-                    (match (port_set (cons own (cons mic (nil int))))
-                      ((PortSetMade) (serve (Aud own mic usb from (nil AudDev) (nil Going) (nil Message))))
-                      ((PortSetNotYours) (complain (port_setting_why (PortSetNotYours))))
-                      ((PortSetSize) (complain (port_setting_why (PortSetSize)))))))))))
+              (let serving (port_new)
+                (match (port_set (cons own (cons serving (nil int))))
+                  ((PortSetMade) (serve (Aud own serving usb from server (port_new) (nil AudDev) (nil Attached) (nil Going) (nil Message))))
+                  ((PortSetNotYours) (complain (port_setting_why (PortSetNotYours))))
+                  ((PortSetSize) (complain (port_setting_why (PortSetSize))))))))))
     ((SendNoPort) (complain "usb is gone"))
     ((SendFull) (complain "usb is busy"))
     ((SendTooBig) (complain "listen is too big"))))
@@ -77,16 +96,14 @@
           ((SetRecvFailed) (complain "lost its ports"))
           ((SetMessage port m) (serve (handled_on a port m)))))))
 
-; a after m came on port: a client's request on mic's, or on its own the
-; usb server's notice or the kernel's alarm.
+; a after m came on port: the audio server's request on the serving
+; port, or on its own the usb server's notice.
 (def handled_on ((a Aud) (port int) (m Message)) Aud
   (match m
     ((RecvFailed) a)
     ((Message from b)
-      (if (eq port (.mic a))
+      (if (eq port (.serving a))
           (requested a b)
-          (is_alarm_notice m)
-          (alarm_rang a)
           (eq from (.pid a))
           (noticed a m)
           a))))
@@ -102,7 +119,8 @@
     ((SendTooBig) (Answered a (error_reply "too big")))))
 
 ; The next message from the usb server on its own port that is no
-; notice, others there kept; clients' requests wait on their port.
+; notice, others there kept; the audio server's requests wait on their
+; port.
 (def answer_awaited ((a Aud)) Answered
   (match (port_receive (.own a))
     ((RecvFailed) (Answered a (error_reply "lost its port")))
@@ -136,16 +154,17 @@
 ; endpoint's packets.
 (def noticed ((a Aud) (m Message)) Aud
   (match (usb_attached_of m)
-    ((Some at) (attached a (.dev at)))
+    ((Some at) (plugged a at))
     ((None)
       (match (usb_detached_of m)
-        ((Some dev) (detached a dev))
+        ((Some dev) (unplugged a dev))
         ((None) (match m ((Message from b) (if (msg_starts b "uin") (packets a b) a)) ((RecvFailed) a)))))))
 
 ; A device plugged in: its configuration read, and kept if it has an
-; audio function with streams, each said on the serial line.
-(def attached ((a Aud) (dev int)) Aud
-  (match (asked a (usb_request "config" (cons dev (nil int))))
+; audio function with streams, each said in the log and attached to the
+; server.
+(def plugged ((a Aud) (at UsbAttached)) Aud
+  (match (asked a (usb_request "config" (cons (.dev at) (nil int))))
     ((Answered a2 r)
       (match (usb_bytes_of r)
         ((Err why) a2)
@@ -153,8 +172,9 @@
           (let f (uac_of (bytes_from_list cfg))
             (if (is_empty (.streams f))
                 a2
-                (let s (warn_as "usb-audio" (device_line dev f))
-                  (.devs a2 (append (.devs a2) (cons (AudDev dev f) (nil AudDev))))))))))))
+                (let (d (AudDev (.dev at) (.vid at) (.pid at) f)
+                      s (info_as "usb-audio" (device_line (.dev at) f)))
+                  (streams_attached (.devs a2 (append (.devs a2) (cons d (nil AudDev)))) d (.streams f))))))))))
 
 ; What usb-audio says of a device it found: device N: and its streams.
 (def device_line ((dev int) (f Uac)) (list int)
@@ -164,23 +184,79 @@
 (def stream_texts ((f Uac) (ss (list UacStream)) (acc (list (list int)))) (list (list int))
   (if (is_empty ss) (rev acc) (stream_texts f (tail ss) (cons (uac_stream_text f (head ss)) acc))))
 
-; A device unplugged: forgotten, and its streams going with it.
-(def detached ((a Aud) (dev int)) Aud
-  (.going (.devs a (devs_without (.devs a) dev)) (going_without (.going a) dev)))
+; Each of ss attached to the server as d's.
+(def streams_attached ((a Aud) (d AudDev) (ss (list UacStream))) Aud
+  (if (is_empty ss) a (streams_attached (stream_attached a d (head ss)) d (tail ss))))
 
-; ds without device dev; gs without its streams.
+; Stream s of d attached to the server: a device named for d and what
+; s is, in or out, of its channels and rates; refused is said, and let
+; be.
+(def stream_attached ((a Aud) (d AudDev) (s UacStream)) Aud
+  (let name (unique_name (.attached a) (stream_name d s))
+    (match (audiodev_attach (.server a) (.rp a) (AudiodevAttach (.serving a) name (uac_is_input s) (.channels s) (.rates s) 0))
+      ((Err why) (let w (warn_as "usb-audio" (append name (append ": not attached: " why))) a))
+      ((Ok id) (.attached a (append (.attached a) (cons (Attached id name (.dev d) s) (nil Attached))))))))
+
+; The name a stream s of d is attached under: usb-VID:PID-KIND, the
+; ids in hex and the kind what is at the stream's far end.
+(def stream_name ((d AudDev) (s UacStream)) (list int)
+  (append "usb-" (append (usb_id_text (.vid d)) (append ":" (append (usb_id_text (.pid d)) (append "-" (uac_type_name (uac_far_type (.f d) s))))))))
+
+; name, or name-2, name-3... if one attached has it already.
+(def unique_name ((as (list Attached)) (name (list int))) (list int)
+  (unique_name_from as name 1))
+(def unique_name_from ((as (list Attached)) (name (list int)) (k int)) (list int)
+  (let try (if (eq k 1) name (append name (append "-" (digits k))))
+    (if (name_attached as try) (unique_name_from as name (add k 1)) try)))
+(def name_attached ((as (list Attached)) (name (list int))) bool
+  (if (is_empty as) false (eq (.name (head as)) name) true (name_attached (tail as) name)))
+
+; A device unplugged: forgotten, its streams going dropped, their rings
+; given up, and each attached detached from the server.
+(def unplugged ((a Aud) (dev int)) Aud
+  (let (a2 (.devs (going_dropped a dev) (devs_without (.devs a) dev))
+        mine (attached_of (.attached a2) dev))
+    (detached_each (.attached a2 (attached_without (.attached a2) dev)) mine)))
+
+; a without device dev's streams going, their rings given up.
+(def going_dropped ((a Aud) (dev int)) Aud
+  (let (gs (.going a)
+        f (rings_freed gs dev))
+    (.going a (going_without gs dev))))
+
+; Each ring of gs of device dev given up: 0.
+(def rings_freed ((gs (list Going)) (dev int)) int
+  (if (is_empty gs)
+      0
+      (match (head gs)
+        ((GoingIn id d s) (rings_freed (tail gs) dev))
+        ((GoingOut id d s va pages r)
+          (let f (if (eq d dev) (let u (shm_region_free va pages r) 0) 0)
+            (rings_freed (tail gs) dev))))))
+
+; Each of as detached from the server.
+(def detached_each ((a Aud) (as (list Attached))) Aud
+  (if (is_empty as)
+      a
+      (let w (audiodev_detach (.server a) (.rp a) (.id (head as)))
+        (detached_each a (tail as)))))
+
+; ds without device dev; gs without its streams; those attached of
+; device dev, and as without them; the one attached with id, or none.
 (def devs_without ((ds (list AudDev)) (dev int)) (list AudDev)
   (if (is_empty ds) ds (eq (.dev (head ds)) dev) (tail ds) (cons (head ds) (devs_without (tail ds) dev))))
 (def going_without ((gs (list Going)) (dev int)) (list Going)
   (if (is_empty gs) gs (eq (going_dev (head gs)) dev) (going_without (tail gs) dev) (cons (head gs) (going_without (tail gs) dev))))
+(def attached_of ((as (list Attached)) (dev int)) (list Attached)
+  (if (is_empty as) as (eq (.dev (head as)) dev) (cons (head as) (attached_of (tail as) dev)) (attached_of (tail as) dev)))
+(def attached_without ((as (list Attached)) (dev int)) (list Attached)
+  (if (is_empty as) as (eq (.dev (head as)) dev) (attached_without (tail as) dev) (cons (head as) (attached_without (tail as) dev))))
+(def attached_at ((as (list Attached)) (id int)) (Option Attached)
+  (if (is_empty as) ((None Attached)) (eq (.id (head as)) id) (Some (head as)) (attached_at (tail as) id)))
 
-; A stream going's device and stream.
-(def going_dev ((g Going)) int (match g ((GoingIn d s t c) d) ((GoingOut d s r n u) d)))
-(def going_stream ((g Going)) UacStream (match g ((GoingIn d s t c) s) ((GoingOut d s r n u) s)))
-
-; An endpoint's packets, the message's bytes b: a microphone's passed to
-; its listener as pcm, read in place, or brought down to 16 kHz first; a
-; silence's counted. A listener gone stops its stream.
+; An endpoint's packets, the message's bytes b: a stream in's passed to
+; the server as heard, read in place; a stream out's, which went, the
+; server told the ring's room.
 (def packets ((a Aud) (b bytes)) Aud
   (let (dev (msg_u32 b 3)
         ep (msg_u32 b 7))
@@ -188,38 +264,24 @@
       ((None) a)
       ((Some g)
         (match g
-          ((GoingIn d s to c)
-            (match c
-              ((None) (if (eq (pcm_sent to b (add (header_len) 11) (bytes_len b)) (SendNoPort)) (stopped a g) a))
-              ((Some st)
-                (let dn (pcm_down st b (add (header_len) 11) (bytes_len b) (.channels s) (.size s))
-                  (if (eq (pcm_sent to (.out dn) 0 (bytes_len (.out dn))) (SendNoPort))
-                      (stopped a g)
-                      (.going a (cons (GoingIn d s to (Some (.st dn))) (going_less (.going a) g))))))))
-          ((GoingOut d s r n u)
-            (.going a (cons (GoingOut d s r (add n (iso_batch_of s)) u) (going_less (.going a) g)))))))))
+          ((GoingIn id d s)
+            (let x (audiodev_in_tell (.server a) id b (add (header_len) 11) (bytes_len b)) a))
+          ((GoingOut id d s va pages r)
+            (let (fb (mul (.channels s) (.size s))
+                  t (audiodev_room_tell (.server a) id (div (feed_room r pages) fb) (div (feed_queued r) fb)))
+              a)))))))
 
-; The packets a uin notice of stream s counts: as many as xhci puts in
-; one, 10 or as many of its largest as fit (core.l0's iso_batch).
-(def iso_batch_of ((s UacStream)) int (max 1 (min 10 (div (sub (max_message) 11) (max (.mps s) 1)))))
-
-; The samples in bytes i up to j of b, a uin's after its 11 bytes of
-; tag, device and endpoint, or those brought down, sent to port as a pcm
-; notice: the tag, then the samples.
-(def pcm_sent ((port int) (b bytes) (i int) (j int)) Sending
-  (let pcm (bytes_concat (cons (bytes_from_list (mic_pcm_tag)) (cons (bytes_slice b i j) (nil bytes))))
-    (port_send_bytes port pcm 0 (bytes_len pcm))))
-
-; The stream going of device dev at endpoint ep, or none.
+; The stream going of device dev at endpoint ep, or none; the one with
+; id, or none; gs without the one with id.
 (def going_at ((gs (list Going)) (dev int) (ep int)) (Option Going)
   (if (is_empty gs)
       ((None Going))
       (let g (head gs)
         (if (and (eq (going_dev g) dev) (eq (.ep (going_stream g)) ep)) (Some g) (going_at (tail gs) dev ep)))))
-
-; gs without g.
-(def going_less ((gs (list Going)) (g Going)) (list Going)
-  (if (is_empty gs) gs (eq (head gs) g) (tail gs) (cons (head gs) (going_less (tail gs) g))))
+(def going_with ((gs (list Going)) (id int)) (Option Going)
+  (if (is_empty gs) ((None Going)) (eq (going_id (head gs)) id) (Some (head gs)) (going_with (tail gs) id)))
+(def going_less ((gs (list Going)) (id int)) (list Going)
+  (if (is_empty gs) gs (eq (going_id (head gs)) id) (going_less (tail gs) id) (cons (head gs) (going_less (tail gs) id))))
 
 ; ------------------------------------------------------------- streaming
 
@@ -242,162 +304,180 @@
                         ((Answered a5 ro) (Answered a5 (if (starts_with ro "error: ") (drop ro 7) "")))))))))))))
 
 ; Stream g stopped: its endpoint closed, its interface set back to
-; setting 0, which moves nothing, and it no longer going.
+; setting 0, which moves nothing, its ring given up if it has one, and
+; it no longer going.
 (def stopped ((a Aud) (g Going)) Aud
   (let (dev (going_dev g)
-        s (going_stream g))
+        s (going_stream g)
+        f (rings_freed (cons g (nil Going)) dev))
     (match (asked a (usb_request "close" (cons dev (cons (.ep s) (nil int)))))
       ((Answered a2 r)
         (match (asked a2 (control_body dev (uac_set_interface (.iface s) 0) (nil int)))
-          ((Answered a3 r2) (.going a3 (going_less (.going a3) g))))))))
+          ((Answered a3 r2) (.going a3 (going_less (.going a3) (going_id g)))))))))
 
-; ---------------------------------------------------------------- clients
+; ------------------------------------------------------------------ rings
 
-; A client's request in a message's bytes b, answered.
+; The ring a stream out is fed from: a header of two u32s, how many
+; bytes have been written and how many xhci has read, then the bytes;
+; of enough pages for a quarter second of frames of fb bytes at rate,
+; and one more.
+(def ring_pages ((rate int) (fb int)) int (add 1 (pages_for (mul (div rate 4) fb))))
+
+; The bytes a ring of pages holds, and what is written and not yet
+; read in r, and the room for more.
+(def feed_size ((pages int)) int (sub (mul pages (page_size)) 8))
+(def feed_queued ((r IoRegion)) int
+  (bit_and (sub (region_get32 r 0) (region_get32 r 4)) 4294967295))
+(def feed_room ((r IoRegion) (pages int)) int
+  (max 0 (sub (feed_size pages) (feed_queued r))))
+
+; Frame i of chans channels from the server's pages m, 16-bit samples,
+; written into the ring r of size bytes at byte w on, each sample as
+; size bytes, least significant first, its 16 bits the top ones: 0.
+(def frame_into ((r IoRegion) (size int) (w int) (m IoRegion) (i int) (chans int) (sample int) (c int)) int
+  (if (ge c chans)
+      0
+      (let (v (region_get16 m (add (mul (mul 2 chans) i) (mul 2 c)))
+            x (sample_into r size (add w (mul c sample)) v sample))
+        (frame_into r size w m i chans sample (add c 1)))))
+
+; The 16-bit sample v written as sample bytes at byte w of the ring r
+; of size bytes, wrapping, its low bytes 0: 0.
+(def sample_into ((r IoRegion) (size int) (w int) (v int) (sample int)) int
+  (let (lo (sub sample 2)
+        a (ring_put8 r size (add w lo) (bit_and v 255)))
+    (ring_put8 r size (add w (add lo 1)) (bit_shr v 8))))
+
+; Byte v written at count w of the ring r of size bytes: 0.
+(def ring_put8 ((r IoRegion) (size int) (w int) (v int)) int
+  (region_set8 r (add 8 (mod w size)) v))
+
+; n frames from the server's pages m, from frame 0, written into the
+; ring r of pages pages at its write count, each as a frame of stream
+; s, and the count moved past them: 0.
+(def frames_into ((r IoRegion) (pages int) (m IoRegion) (s UacStream) (n int)) int
+  (let (size (feed_size pages)
+        fb (mul (.channels s) (.size s))
+        w (region_get32 r 0)
+        x (frames_into_from r size w m s fb 0 n))
+    (region_set32 r 0 (bit_and (add w (mul n fb)) 4294967295))))
+
+; frames_into's loop: frames i up to n at byte w + i fb.
+(def frames_into_from ((r IoRegion) (size int) (w int) (m IoRegion) (s UacStream) (fb int) (i int) (n int)) int
+  (if (ge i n)
+      0
+      (let x (frame_into r size (add w (mul i fb)) m i (.channels s) (.size s) 0)
+        (frames_into_from r size w m s fb (add i 1) n))))
+
+; ------------------------------------------------------------- the server
+
+; The audio server's request in a message's bytes b, answered: listen
+; and stop of a stream in, start, play and stop of one out, each
+; attached.
 (def requested ((a Aud) (b bytes)) Aud
-  (let (reply (msg_reply b)
-        ws (split_spaces (msg_text_from b 4)))
-    (if (is_empty ws)
-        (let x (msg_answer b (error_reply "no request")) a)
-        (let (op (head ws) args (tail ws))
-          (if (eq op "devices") (let x (msg_answer b (devices_text (.devs a))) a)
-              (eq op "listen") (listen_asked a b reply args)
-              (eq op "stop") (stop_asked a b reply)
-              (eq op "silence") (silence_asked a b reply args)
-              (let x (msg_answer b (error_reply (append "no request " op))) a))))))
+  (match (audiodev_ask_of (msg_text_from b 4))
+    ((DevListen id rate) (listen_asked a b id rate))
+    ((DevStop id) (stop_asked a b id))
+    ((DevStart id rate) (start_asked a b id rate))
+    ((DevPlay id va n) (play_asked a b id va n))
+    ((DevRefused why) (answered a b (error_reply why)))))
 
-; The devices answer: a line for each stream of each device, DEV IFACE
-; and what uac_stream_text says.
-(def devices_text ((ds (list AudDev))) (list int)
-  (concat (devices_lines ds (nil (list int)))))
+; a, having answered the request in b.
+(def answered ((a Aud) (b bytes) (answer (list int))) Aud
+  (let x (msg_answer b answer) a))
 
-; devices_text's loop: each device's lines after the reversed acc.
-(def devices_lines ((ds (list AudDev)) (acc (list (list int)))) (list (list int))
-  (if (is_empty ds)
-      (rev acc)
-      (match (head ds)
-        ((AudDev dev f) (devices_lines (tail ds) (rev_onto (stream_lines dev f (.streams f) (nil (list int))) acc))))))
+; listen ID RATE: the stream in attached as ID set going at RATE if it
+; takes it, else its highest, and its format answered; as it is if it
+; is going already.
+(def listen_asked ((a Aud) (b bytes) (id int) (rate int)) Aud
+  (match (attached_at (.attached a) id)
+    ((None) (answered a b (error_reply "no such device")))
+    ((Some at)
+      (let (s (.s at)
+            r (uac_rate_for s rate)
+            f (PcmFormat r (.channels s) (.size s)))
+        (if (not (uac_is_input s))
+            (answered a b (error_reply "not an input"))
+            (match (going_with (.going a) id)
+              ((Some g) (answered a b (audio_format_reply f)))
+              ((None)
+                (match (stream_on a (.dev at) s r)
+                  ((Answered a2 why)
+                    (if (not (is_empty why))
+                        (answered a2 b (error_reply why))
+                        (answered (.going a2 (cons (GoingIn id (.dev at) s) (.going a2))) b (audio_format_reply f))))))))))))
 
-; Each of ss's line, DEV IFACE TEXT and a newline, after the reversed acc.
-(def stream_lines ((dev int) (f Uac) (ss (list UacStream)) (acc (list (list int)))) (list (list int))
-  (if (is_empty ss)
-      (rev acc)
-      (stream_lines dev f (tail ss)
-        (cons (append (digits dev) (append " " (append (digits (.iface (head ss))) (append " " (append (uac_stream_text f (head ss)) "\n"))))) acc))))
+; start ID RATE: the stream out attached as ID set going at RATE, a ring
+; made for it, shared with xhci and fed to its endpoint, and its state
+; answered, the ring empty; as it is if it is going already.
+(def start_asked ((a Aud) (b bytes) (id int) (rate int)) Aud
+  (match (attached_at (.attached a) id)
+    ((None) (answered a b (error_reply "no such device")))
+    ((Some at)
+      (let (s (.s at) fb (mul (.channels s) (.size s)))
+        (if (uac_is_input s)
+            (answered a b (error_reply "not an output"))
+            (not (any_eq rate (.rates s)))
+            (answered a b (error_reply (append "no rate " (digits rate))))
+            (match (going_with (.going a) id)
+              ((Some g) (answered a b (state_reply g rate)))
+              ((None)
+                (match (stream_on a (.dev at) s rate)
+                  ((Answered a2 why)
+                    (if (not (is_empty why))
+                        (answered a2 b (error_reply why))
+                        (ring_started a2 b at rate)))))))))))
 
-; The first stream in of any device, with its device's number, or none.
-(def first_input ((ds (list AudDev))) (Option Going)
-  (if (is_empty ds)
-      ((None Going))
-      (match (head ds)
-        ((AudDev dev f)
-          (match (input_among (.streams f))
-            ((Some s) (Some (GoingIn dev s 0 ((None PcmDown)))))
-            ((None) (first_input (tail ds))))))))
+; The state of a stream out going as g, at rate: its ring's frames
+; queued and room.
+(def state_reply ((g Going) (rate int)) (list int)
+  (match g
+    ((GoingIn id d s) (error_reply "not an output"))
+    ((GoingOut id d s va pages r)
+      (let fb (mul (.channels s) (.size s))
+        (audiodev_state_reply (AudiodevState rate (div (feed_queued r) fb) (div (feed_room r pages) fb)))))))
 
-; The first stream of ss that takes sound in, or none.
-(def input_among ((ss (list UacStream))) (Option UacStream)
-  (if (is_empty ss) ((None UacStream)) (uac_is_input (head ss)) (Some (head ss)) (input_among (tail ss))))
+; start_asked's rest, the stream at going: its ring made, shared with
+; xhci and fed to its endpoint, and the state answered; or why not,
+; the stream stopped again.
+(def ring_started ((a Aud) (b bytes) (at Attached) (rate int)) Aud
+  (let (s (.s at)
+        fb (mul (.channels s) (.size s))
+        pages (ring_pages rate fb))
+    (match (shm_region pages "a stream's ring")
+      ((NoShmRegion why) (answered (stopped a (GoingIn (.id at) (.dev at) s)) b (error_reply why)))
+      ((ShmRegion va r)
+        (match (shm_share_to va pages (.pid a) "xhci")
+          ((Err why) (let f (shm_region_free va pages r) (answered (stopped a (GoingIn (.id at) (.dev at) s)) b (error_reply why))))
+          ((Ok there)
+            (match (asked a (usb_request "feed" (cons (.dev at) (cons (.ep s) (cons there (cons pages (cons rate (cons fb (nil int)))))))))
+              ((Answered a2 reply)
+                (if (starts_with reply "error: ")
+                    (let f (shm_region_free va pages r) (answered (stopped a2 (GoingIn (.id at) (.dev at) s)) b reply))
+                    (let g (GoingOut (.id at) (.dev at) s va pages r)
+                      (answered (.going a2 (cons g (.going a2))) b (state_reply g rate))))))))))))
 
-; Whether a stream in is going.
-(def any_in ((gs (list Going))) bool
-  (if (is_empty gs) false (match (head gs) ((GoingIn d s t c) true) ((GoingOut d s r n u) (any_in (tail gs))))))
-
-; How a microphone's stream s meets a listen at want: the rate it is set
-; to, and whether its samples are brought down to 16 kHz, one channel of
-; 16 bits, as Whistle hears. want if s takes it; 48000 brought down for
-; 16000, which a USB microphone rarely offers; else s's highest.
-(data MicPlan (MicPlan (rate int) (down bool)))
-(def mic_plan ((s UacStream) (want int)) MicPlan
-  (if (any_eq want (.rates s)) (MicPlan want false)
-      (and (eq want 16000) (any_eq 48000 (.rates s))) (MicPlan 48000 true)
-      (MicPlan (uac_rate_for s want) false)))
-
-; The format listen answers for stream s set going as p says.
-(def plan_format ((s UacStream) (p MicPlan)) MicFormat
-  (if (.down p) (MicFormat 16000 1 2) (MicFormat (.rate p) (.channels s) (.size s))))
-
-; listen [RATE]: the first microphone set going for reply, its format
-; answered; busy while one listens.
-(def listen_asked ((a Aud) (b bytes) (reply int) (args (list (list int)))) Aud
-  (let want (if (and (eq (length args) 1) (is_number (head args))) (int_prefix (head args) 0) (mic_default_rate))
-    (if (any_in (.going a))
-        (let x (msg_answer b (error_reply "busy")) a)
-        (match (first_input (.devs a))
-          ((None) (let x (msg_answer b (error_reply "no microphone")) a))
-          ((Some g)
-            (let (s (going_stream g)
-                  p (mic_plan s want))
-              (match (stream_on a (going_dev g) s (.rate p))
-                ((Answered a2 why)
-                  (if (not (is_empty why))
-                      (let x (msg_answer b (error_reply why)) a2)
-                      (let (x (msg_answer b (mic_format_reply (plan_format s p)))
-                            c (if (.down p) (Some (pcm_down_new)) ((None PcmDown))))
-                        (.going a2 (cons (GoingIn (going_dev g) s reply c) (.going a2)))))))))))))
-
-; stop: the stream going to reply stopped.
-(def stop_asked ((a Aud) (b bytes) (reply int)) Aud
-  (match (going_to (.going a) reply)
-    ((None) (let x (msg_answer b (error_reply "not listening")) a))
-    ((Some g) (let (a2 (stopped a g) x (msg_answer b "ok")) a2))))
-
-; The stream in going to port, or none.
-(def going_to ((gs (list Going)) (port int)) (Option Going)
-  (if (is_empty gs)
-      ((None Going))
-      (match (head gs)
-        ((GoingIn d s t c) (if (eq t port) (Some (head gs)) (going_to (tail gs) port)))
-        ((GoingOut d s r n u) (going_to (tail gs) port)))))
-
-; silence DEV IFACE MS: the stream out of interface IFACE of DEV sent
-; silence, xhci's packets of nothing, for MS milliseconds; answered once
-; the alarm rings.
-(def silence_asked ((a Aud) (b bytes) (reply int) (args (list (list int)))) Aud
-  (match (if (eq (length args) 3) (word_numbers args) ((None (list int))))
-    ((None) (let x (msg_answer b (error_reply "silence takes DEV IFACE MS")) a))
-    ((Some ns)
-      (match (output_at (.devs a) (nth ns 0) (nth ns 1))
-        ((None) (let x (msg_answer b (error_reply "no such stream out")) a))
-        ((Some s)
-          (match (stream_on a (nth ns 0) s (uac_rate_for s (mic_default_rate)))
-            ((Answered a2 why)
-              (if (not (is_empty why))
-                  (let x (msg_answer b (error_reply why)) a2)
-                  (let (until (add (clock_ns) (mul (nth ns 2) 1000000))
-                        al (alarm_at (.own a2) until))
-                    (.going a2 (cons (GoingOut (nth ns 0) s reply 0 until) (.going a2))))))))))))
-
-; The stream out of interface iface of device dev, or none.
-(def output_at ((ds (list AudDev)) (dev int) (iface int)) (Option UacStream)
-  (if (is_empty ds)
-      ((None UacStream))
-      (match (head ds)
-        ((AudDev d f) (if (eq d dev) (output_among (.streams f) iface) (output_at (tail ds) dev iface))))))
-
-; The stream of ss out of interface iface, or none.
-(def output_among ((ss (list UacStream)) (iface int)) (Option UacStream)
-  (if (is_empty ss) ((None UacStream))
-      (and (eq (.iface (head ss)) iface) (not (uac_is_input (head ss)))) (Some (head ss))
-      (output_among (tail ss) iface)))
-
-; The alarm: each silence whose time is up stopped, and its asker told
-; how many packets went.
-(def alarm_rang ((a Aud)) Aud
-  (match (silence_due (.going a) (clock_ns))
-    ((None) a)
+; play ID VA FRAMES: as many of the server's frames at va as the ring
+; has room for written into it, widened to the stream's samples, and
+; how many answered.
+(def play_asked ((a Aud) (b bytes) (id int) (va int) (n int)) Aud
+  (match (going_with (.going a) id)
+    ((None) (answered a b (error_reply "not started")))
     ((Some g)
       (match g
-        ((GoingOut d s reply n u)
-          (let (a2 (stopped a g)
-                t (port_tell reply (append "sent " (append (digits n) " packets"))))
-            (alarm_rang a2)))
-        ((GoingIn d s t c) a)))))
+        ((GoingIn i d s) (answered a b (error_reply "not an output")))
+        ((GoingOut i d s rva pages r)
+          (match (dma_open va (audiodev_play_pages n (.channels s)))
+            ((IoRegionFailed f why) (answered a b (error_reply "the samples are not shared with the driver")))
+            ((IoRegionOpened m)
+              (let (fb (mul (.channels s) (.size s))
+                    k (min n (div (feed_room r pages) fb))
+                    w (frames_into r pages m s k)
+                    c (close_region m))
+                (answered a b (audiodev_played_reply k))))))))))
 
-; The first silence of gs due by now, or none.
-(def silence_due ((gs (list Going)) (now int)) (Option Going)
-  (if (is_empty gs)
-      ((None Going))
-      (match (head gs)
-        ((GoingOut d s r n u) (if (ge now u) (Some (head gs)) (silence_due (tail gs) now)))
-        ((GoingIn d s t c) (silence_due (tail gs) now)))))
+; stop ID: the stream going as ID stopped.
+(def stop_asked ((a Aud) (b bytes) (id int)) Aud
+  (match (going_with (.going a) id)
+    ((None) (answered a b (error_reply "not going")))
+    ((Some g) (answered (stopped a g) b "ok"))))

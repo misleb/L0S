@@ -23,7 +23,9 @@
 # text. If NAME/filler holds DIRS FILES, the case's etc gets DIRS
 # directories of FILES small files each, /etc/filler/dD/fF, for a
 # volume filled from the initramfs to hold many files besides its
-# programs. If NAME/whistle exists, Whistle's model, WHISTLE or else
+# programs. If NAME/chime exists, the Pi 5's chime, build/chime.wav,
+# is added to the case's etc as /etc/chime.wav, for the audio server
+# to play. If NAME/whistle exists, Whistle's model, WHISTLE or else
 # build/fetch/whistle.cact, which make release fetches, is added to the
 # case's etc as /etc/whistle.cact; with neither, the case is skipped, as
 # the model is not in the project. If NAME/disk exists, the
@@ -167,6 +169,13 @@ run_case() {
       mkdir -p "$etc/filler/d$d"
       for ((f = 0; f < files; f++)); do echo "$d $f" > "$etc/filler/d$d/f$f"; done
     done
+  fi
+  if [ -f "$dir/chime" ]; then
+    if [ "$etc" = "$dir/etc" ]; then
+      etc="$BUILD/e2e/$name.etc"
+      rm -rf "$etc" && cp -R "$dir/etc" "$etc"
+    fi
+    cp "$BUILD/chime.wav" "$etc/chime.wav"
   fi
   if [ -f "$dir/whistle" ]; then
     local model=${WHISTLE:-$BUILD/fetch/whistle.cact}

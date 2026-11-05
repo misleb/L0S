@@ -1,119 +1,228 @@
-; audio.l0 -- the audio protocol: what a sound driver (hdmi-audio)
-; serves under the name audio, and a client of it, such as play:
+; audio.l0 -- the audio protocol: what the audio server (user/sbin/audio)
+; serves under the name audio, and a client of it, such as play, speak,
+; rec, speech and sound:
 ;
-;   info                    audio RATE QUEUED ROOM: the rate it plays
-;                           at, in Hz; the frames queued and not yet
-;                           played; and how many more it would take now
-;   start RATE              ok once it plays at RATE, 32000, 44100 or
-;                           48000; what was queued at another rate is
-;                           dropped
-;   play VA FRAMES CHANS    played N: up to FRAMES frames of 16-bit
-;                           samples, CHANS of them a frame, 1 or 2, least
-;                           significant byte first, taken from the
-;                           client's pages shared with the driver at VA
-;                           there (shm_share); N, as many as there was
-;                           room for, may be 0, and the client offers
-;                           the rest again once some have played
+;   devices                 a line for each device: ID in|out NAME CHANS
+;                           RATES, the rates it plays or hears
+;                           separated by commas, then default if it is
+;                           the default of its kind: 1 out hdmi0 2
+;                           32000,44100,48000 default; nothing if there
+;                           are none
+;   volume ID [PCT]         volume PCT: device ID's volume, 0 to 100,
+;                           set first if PCT is given
+;   reload                  ok: /etc/audio read again, and the defaults
+;                           and volumes as it says
+;   watch                   ok; then a notice to the reply port, adv: ID
+;                           and 1, as a device is attached, or 0, as
+;                           one is detached
+;   open RATE CHANS [ID]    stream N: a stream of 16-bit frames at RATE,
+;                           8000 to 192000, of CHANS channels, 1 or 2,
+;                           to play on output ID, or the default output;
+;                           the client then shares pages with the server
+;                           (shm_share, to the pid that answered)
+;   write N VA FRAMES       taken K: up to FRAMES frames of stream N from
+;                           the client's pages at VA there, as many as
+;                           its queue has room for; K may be 0, and the
+;                           client offers the rest again later
+;   drain N                 queued K: the frames of stream N not yet
+;                           played, 0 once all have
+;   close N                 ok: stream N gone; so is every stream of a
+;                           client that exits
+;   listen RATE CHANS [ID]  format RATE CHANS 2: input ID, or the default
+;                           input, heard by the reply port, which from
+;                           then on gets a notice pcm and the samples
+;                           it heard, 16-bit frames at RATE of CHANS,
+;                           every 10 ms or so, whatever the device's
+;                           own format; any number may listen to one
+;   stop                    ok: the reply port's listening stopped
 ;
 ; Each is a request (l0s.l0), its words separated by spaces; the reply is
-; as said above, or error: WHY. No sample travels in a message. Linked
-; into the driver and the programs that play sound, by the Makefile's
-; LIBS_ lists.
+; as said above, or error: WHY. No sample travels in a message but a
+; microphone's, as they come. The server mixes every stream into its
+; output at the output's rate, and converts what comes in for each
+; listener (format/pcm.l0). Linked, with pcm.l0, into the server, its
+; drivers and the programs that play or hear sound, by the Makefile's
+; AUDIOLIB.
 
-; The name the driver registers.
+; The name the server registers.
 (def audio_name () (list int) "audio")
 
-; The rates a driver plays at, and whether r is one.
-(def audio_rates () (list int) "32000 44100 48000")
-(def audio_rate_ok ((r int)) bool (any_eq (digits r) (split_spaces (audio_rates))))
+; How long a client waits for the server to register, in ns: 5 s.
+(def audio_wait_ns () int 5000000000)
 
-; ------------------------------------------------------------------ replies
+; ---------------------------------------------------------------- devices
 
-; info's reply: the rate, the frames queued, and the room for more.
-(def audio_info_reply ((rate int) (queued int) (room int)) (list int)
-  (append "audio " (append (digits rate) (append " " (append (digits queued) (append " " (digits room)))))))
+; A device as the server lists it: its id, whether it takes sound in,
+; its name, its channels, the rates it takes, and whether it is the
+; default of its kind.
+(data AudioDevice (AudioDevice (id int) (input bool) (name (list int)) (chans int) (rates (list int)) (default bool)))
 
-; What info's reply says: the rate, the frames queued, and the room.
-(data AudioInfo (AudioInfo int int int))
+; d's line of the devices answer, without its newline.
+(def audio_device_line ((d AudioDevice)) (list int)
+  (unwords (cons (digits (.id d)) (cons (if (.input d) "in" "out") (cons (.name d) (cons (digits (.chans d))
+    (cons (join_with "," (numbers_words (.rates d))) (if (.default d) (cons "default" (nil (list int))) (nil (list int))))))))))
 
-; What info's reply r says, or none if it is not that reply.
-(def audio_info_of ((r (list int))) (Option AudioInfo)
+; The devices answer text lists, a line each; a line that is no device's
+; is passed over.
+(def audio_devices_of ((text (list int))) (list AudioDevice)
+  (audio_devices_onto (lines text) (nil AudioDevice)))
+
+; audio_devices_of's loop: each line's device after the reversed acc.
+(def audio_devices_onto ((ls (list (list int))) (acc (list AudioDevice))) (list AudioDevice)
+  (if (is_empty ls)
+      (rev acc)
+      (match (audio_device_of (head ls))
+        ((None) (audio_devices_onto (tail ls) acc))
+        ((Some d) (audio_devices_onto (tail ls) (cons d acc))))))
+
+; The device line says, or none.
+(def audio_device_of ((line (list int))) (Option AudioDevice)
+  (let ws (split_spaces (strip_cr line))
+    (if (or (lt (length ws) 5) (gt (length ws) 6))
+        ((None AudioDevice))
+        (match (audio_rates_of (nth ws 4))
+          ((None) ((None AudioDevice)))
+          ((Some rates)
+            (if (not (and (is_number (nth ws 0)) (and (is_number (nth ws 3)) (any_eq (nth ws 1) (split_spaces "in out")))))
+                ((None AudioDevice))
+                (Some (AudioDevice (int_prefix (nth ws 0) 0) (eq (nth ws 1) "in") (nth ws 2) (int_prefix (nth ws 3) 0) rates
+                                   (and (eq (length ws) 6) (eq (nth ws 5) "default"))))))))))
+
+; The rates w names, separated by commas, or none if one is no number.
+(def audio_rates_of ((w (list int))) (Option (list int))
+  (word_numbers (split_on 44 w)))
+
+; The first of ds that takes sound in, if input, or out; the default
+; among them if one is marked, else the first.
+(def audio_default_of ((ds (list AudioDevice)) (input bool)) (Option AudioDevice)
+  (let kind (audio_devices_kind ds input (nil AudioDevice))
+    (if (is_empty kind)
+        ((None AudioDevice))
+        (match (audio_marked kind)
+          ((Some d) (Some d))
+          ((None) (Some (head kind)))))))
+
+; The devices of ds of a kind, after the reversed acc; the one of ds
+; marked default, or none.
+(def audio_devices_kind ((ds (list AudioDevice)) (input bool) (acc (list AudioDevice))) (list AudioDevice)
+  (if (is_empty ds) (rev acc)
+      (audio_devices_kind (tail ds) input (if (eq (.input (head ds)) input) (cons (head ds) acc) acc))))
+(def audio_marked ((ds (list AudioDevice))) (Option AudioDevice)
+  (if (is_empty ds) ((None AudioDevice)) (.default (head ds)) (Some (head ds)) (audio_marked (tail ds))))
+
+; ---------------------------------------------------------------- replies
+
+; A reply of one word and a number: stream N, taken N, queued N,
+; volume N, attached N, played N.
+(def audio_word_reply ((word (list int)) (n int)) (list int) (append word (append " " (digits n))))
+
+; The number reply r says after word, or none if it is not that reply.
+(def audio_word_of ((word (list int)) (r (list int))) (Option int)
   (let ws (split_spaces r)
-    (if (and (eq (length ws) 4) (eq (head ws) "audio"))
-        (match (audio_numbers (tail ws) (nil int))
-          ((None) ((None AudioInfo)))
-          ((Some ns) (Some (AudioInfo (nth ns 0) (nth ns 1) (nth ns 2)))))
-        ((None AudioInfo)))))
-
-; play's reply: played N.
-(def audio_played_reply ((n int)) (list int) (append "played " (digits n)))
-
-; The frames play's reply r says were taken, or none if it is not that
-; reply.
-(def audio_played_of ((r (list int))) (Option int)
-  (let ws (split_spaces r)
-    (if (and (eq (length ws) 2) (eq (head ws) "played"))
+    (if (and (eq (length ws) 2) (eq (head ws) word))
         (word_number (nth ws 1))
         ((None int)))))
 
-; The words ws as numbers, after the reversed acc; none if one is not.
-(def audio_numbers ((ws (list (list int))) (acc (list int))) (Option (list int))
-  (if (is_empty ws)
-      (Some (rev acc))
-      (match (word_number (head ws))
-        ((None) ((None (list int))))
-        ((Some n) (audio_numbers (tail ws) (cons n acc))))))
+; listen's answer, and a driver's: format RATE CHANS SIZE.
+(def audio_format_reply ((f PcmFormat)) (list int)
+  (unwords (cons "format" (numbers_words (cons (.rate f) (cons (.chans f) (cons (.size f) (nil int))))))))
+
+; The format r says, or why not.
+(def audio_format_of ((r (list int))) (Result PcmFormat (list int))
+  (let ws (split_spaces r)
+    (if (starts_with r "error: ")
+        ((Err PcmFormat (list int)) (drop_n r 7))
+        (not (and (eq (length ws) 4) (eq (head ws) "format")))
+        ((Err PcmFormat (list int)) (append "the audio server said " r))
+        (match (word_numbers (tail ws))
+          ((None) ((Err PcmFormat (list int)) (append "the audio server said " r)))
+          ((Some ns) ((Ok PcmFormat (list int)) (PcmFormat (nth ns 0) (nth ns 1) (nth ns 2))))))))
+
+; ---------------------------------------------------------------- notices
+
+; The tag of what a listener hears; whether a message's bytes b are
+; that; and where its samples start in them.
+(def audio_pcm_tag () (list int) "pcm")
+(def audio_is_pcm ((b bytes)) bool (msg_starts b (audio_pcm_tag)))
+(def audio_pcm_at () int (add (header_len) 3))
+
+; What a watcher is told: adv, the device's id and 1 attached or 0
+; detached; and what m says, the id and whether attached, or none.
+(def audio_device_notice ((id int) (attached bool)) (list int)
+  (append "adv" (append (u32_le id) (u32_le (if attached 1 0)))))
+(def audio_device_notice_of ((m Message)) (Option (list int)) (tagged_u32s m "adv" 2))
 
 ; ------------------------------------------------------------------ asking
 
-; The sound driver, as a client holds it: its port, a port for its
-; replies, and its pid, to share buffers with.
+; The server, as a client holds it: its port, a port for its replies and
+; its notices, and its pid, to share buffers with.
 (data Audio (Audio int int int) (NoAudio (list int)))
 
-; The driver, if one has registered audio; asked info, to learn its pid.
+; The server, once it has registered, within audio_wait_ns; asked its
+; devices, to learn its pid.
 (def audio_open () Audio
-  (match (name_lookup (audio_name))
-    ((NotFound) (NoAudio "no audio; is hdmi-audio running?"))
+  (match (name_wait (audio_name) (audio_wait_ns))
+    ((NotFound) (NoAudio "no audio server; is audio running?"))
     ((Found port)
       (let rp (port_new)
-        (match (port_ask port rp "info" "the audio driver")
+        (match (port_ask port rp "devices" "the audio server")
           ((AskFailed why) (NoAudio why))
-          ((Asked from b)
-            (match (audio_info_of (msg_text b))
-              ((None) (NoAudio (audio_error (msg_text b))))
-              ((Some i) (Audio port rp from)))))))))
+          ((Asked from b) (Audio port rp from)))))))
 
 ; The reply to body, or error: WHY if none came.
 (def audio_reply ((a Audio) (body (list int))) (list int)
   (match a
     ((NoAudio why) (error_reply why))
     ((Audio port rp pid)
-      (match (port_ask port rp body "the audio driver")
+      (match (port_ask port rp body "the audio server")
         ((Asked from b) (msg_text b))
         ((AskFailed why) (error_reply why))))))
 
 ; A reply as an error's reason, or empty for ok.
-(def audio_error ((r (list int))) (list int) (reply_why r "the audio driver"))
+(def audio_error ((r (list int))) (list int) (reply_why r "the audio server"))
 
-; The driver set to play at rate: empty, or why not.
-(def audio_start ((a Audio) (rate int)) (list int)
-  (audio_error (audio_reply a (append "start " (digits rate)))))
+; The number a reply to body says after word, or why not.
+(def audio_number ((a Audio) (body (list int)) (word (list int))) (Result int (list int))
+  (let r (audio_reply a body)
+    (match (audio_word_of word r)
+      ((Some n) ((Ok int (list int)) n))
+      ((None) ((Err int (list int)) (audio_error r))))))
 
-; What the driver says of itself, or why it did not.
-(def audio_info ((a Audio)) (Result AudioInfo (list int))
-  (let r (audio_reply a "info")
-    (match (audio_info_of r)
-      ((Some i) ((Ok AudioInfo (list int)) i))
-      ((None) ((Err AudioInfo (list int)) (audio_error r))))))
+; The devices, or why not.
+(def audio_devices ((a Audio)) (Result (list AudioDevice) (list int))
+  (let r (audio_reply a "devices")
+    (if (starts_with r "error: ")
+        ((Err (list AudioDevice) (list int)) (drop_n r 7))
+        ((Ok (list AudioDevice) (list int)) (audio_devices_of r)))))
 
-; ----------------------------------------------------------------- buffers
+; The settings read again: empty, or why not.
+(def audio_reload ((a Audio)) (list int) (audio_error (audio_reply a "reload")))
+
+; Device dev's volume, set to pct first if pct is not negative; or why
+; not.
+(def audio_volume ((a Audio) (dev int) (pct int)) (Result int (list int))
+  (audio_number a (unwords (cons "volume" (cons (digits dev) (if (lt pct 0) (nil (list int)) (cons (digits pct) (nil (list int))))))) "volume"))
+
+; ---------------------------------------------------------------- streams
+
+; A stream opened at rate of chans on output dev, 0 for the default: its
+; number, or why not.
+(def audio_stream ((a Audio) (rate int) (chans int) (dev int)) (Result int (list int))
+  (audio_number a (unwords (cons "open" (cons (digits rate) (cons (digits chans) (if (eq dev 0) (nil (list int)) (cons (digits dev) (nil (list int)))))))) "stream"))
+
+; The frames of stream n not yet played, or why not; and the stream
+; closed, empty or why not.
+(def audio_drain ((a Audio) (n int)) (Result int (list int))
+  (audio_number a (audio_word_reply "drain" n) "queued"))
+(def audio_close ((a Audio) (n int)) (list int)
+  (audio_error (audio_reply a (audio_word_reply "close" n))))
 
 ; A buffer of shared memory to hand samples through: its address here,
-; its pages, its address at the driver, and the region to write it with;
+; its pages, its address at the server, and the region to write it with;
 ; or why there is none.
 (data AudioBuf (AudioBuf int int int IoRegion) (NoAudioBuf (list int)))
 
-; A buffer of n pages, shared with the driver. It opens a region, of
+; A buffer of n pages, shared with the server. It opens a region, of
 ; which a process may have only so many, so a client makes one and
 ; keeps it.
 (def audio_buffer ((a Audio) (n int)) AudioBuf
@@ -123,7 +232,7 @@
       (match (shm_region n "a sound buffer")
         ((NoShmRegion why) (NoAudioBuf why))
         ((ShmRegion va r)
-          (match (shm_share_to va n pid "the audio driver")
+          (match (shm_share_to va n pid "the audio server")
             ((Ok there) (AudioBuf va n there r))
             ((Err why) (NoAudioBuf why))))))))
 
@@ -131,19 +240,64 @@
 (def audio_buf_bytes ((b AudioBuf)) int
   (match b ((AudioBuf va n there r) (mul n (page_size))) ((NoAudioBuf why) 0)))
 
-; play's request for frames frames of chans channels at va.
-(def audio_play_request ((va int) (frames int) (chans int)) (list int)
-  (append "play " (append (digits va) (append " " (append (digits frames) (append " " (digits chans)))))))
+; write's request for frames frames of stream n at va.
+(def audio_write_request ((n int) (va int) (frames int)) (list int)
+  (unwords (cons "write" (numbers_words (cons n (cons va (cons frames (nil int))))))))
 
-; The bytes of src from i up to j, whole frames of chans channels, put in
-; b and offered to the driver: how many frames it took, or why none.
-(def audio_play ((a Audio) (b AudioBuf) (src bytes) (i int) (j int) (chans int)) (Result int (list int))
+; The bytes of src from i up to j, whole frames of fb bytes, put in b
+; and offered to stream n: how many frames it took, or why none.
+(def audio_write ((a Audio) (b AudioBuf) (n int) (src bytes) (i int) (j int) (fb int)) (Result int (list int))
   (match b
     ((NoAudioBuf why) ((Err int (list int)) why))
-    ((AudioBuf va n there r)
-      (let (e (min j (add i (mul n (page_size))))
-            w (put_bytes_range r 0 src i e)
-            r2 (audio_reply a (audio_play_request there (div (sub e i) (mul 2 chans)) chans)))
-        (match (audio_played_of r2)
-          ((Some k) ((Ok int (list int)) k))
-          ((None) ((Err int (list int)) (audio_error r2))))))))
+    ((AudioBuf va pages there r)
+      (let (e (min j (add i (mul pages (page_size))))
+            w (put_bytes_range r 0 src i e))
+        (audio_number a (audio_write_request n there (div (sub e i) fb)) "taken")))))
+
+; How long a client waits while a stream has no room, in ns: about a
+; period, 10 ms.
+(def audio_wait_room_ns () int 10000000)
+
+; The bytes of src from i up to j, frames of fb bytes, played on stream
+; n through b, offered again from wherever the server stopped taking
+; until all are taken: empty, or why not.
+(def audio_play_all ((a Audio) (b AudioBuf) (n int) (src bytes) (i int) (j int) (fb int)) (list int)
+  (if (ge i j)
+      ""
+      (match (audio_write a b n src i j fb)
+        ((Err why) why)
+        ((Ok k)
+          (if (eq k 0)
+              (let z (sleep_ns (audio_wait_room_ns)) (audio_play_all a b n src i j fb))
+              (audio_play_all a b n src (add i (mul k fb)) j fb))))))
+
+; Waits until stream n has played all it was given: empty, or why not.
+(def audio_drained ((a Audio) (n int)) (list int)
+  (match (audio_drain a n)
+    ((Err why) why)
+    ((Ok queued) (if (eq queued 0) "" (let z (sleep_ns (audio_wait_room_ns)) (audio_drained a n))))))
+
+; -------------------------------------------------------------- listening
+
+; Input dev, 0 for the default, heard on a's reply port at rate of
+; chans: the format the notices come in, or why not.
+(def audio_listen ((a Audio) (rate int) (chans int) (dev int)) (Result PcmFormat (list int))
+  (audio_format_of (audio_reply a (unwords (cons "listen" (cons (digits rate) (cons (digits chans) (if (eq dev 0) (nil (list int)) (cons (digits dev) (nil (list int)))))))))))
+
+; The listening on a's reply port stopped, its answer awaited past the
+; samples still coming: empty, or why not.
+(def audio_stop ((a Audio)) (list int)
+  (match a
+    ((NoAudio why) why)
+    ((Audio port rp pid)
+      (match (port_send port (request rp "stop"))
+        ((Sent) (audio_stop_answered rp))
+        ((SendNoPort) "the audio server is gone")
+        ((SendFull) "the audio server did not take the request: its queue is full")
+        ((SendTooBig) "the request is too big")))))
+
+; The next message on rp that is no sample: stop's answer.
+(def audio_stop_answered ((rp int)) (list int)
+  (match (port_receive rp)
+    ((RecvFailed) "no reply from the audio server")
+    ((Message from b) (if (audio_is_pcm b) (audio_stop_answered rp) (audio_error (msg_text b))))))

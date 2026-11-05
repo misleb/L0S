@@ -129,7 +129,7 @@
         (if (not (is_empty r))
             (complain r)
             (let (is (bound_all cs (place_irqs ps) port 0 ra)
-                  s (ports_checked (Srv b cs (nil int) port is ra) 0))
+                  s (ports_checked (Srv b cs (nil int) port is ra (nil Feeding)) 0))
               (if (all_bound is) (waits s) (serve s))))))))
 
 ; Each controller at ps brought up, numbered on from cs's, onto b.
@@ -294,11 +294,16 @@
 ; The driver: the bus, the controllers, the ports listening, its port,
 ; and each controller's interrupt bound to it, 0 for one polled; and who
 ; acknowledges the controllers' interrupts where they are raised.
-(data Srv (Srv (bus Bus) (cs (list Ctrl)) (listeners (list int)) (port int) (irqs (list int)) (acker Acker)))
+(data Srv (Srv (bus Bus) (cs (list Ctrl)) (listeners (list int)) (port int) (irqs (list int)) (acker Acker) (feeds (list Feeding))))
+
+; A ring an isochronous OUT endpoint is fed from (core.l0's Feed), as
+; the shell holds it: the device and endpoint, the region over the
+; ring's pages, and their bytes.
+(data Feeding (Feeding (dev int) (ep int) (r IoRegion) (bytes int)))
 
 ; Controller k, and how many controllers there are.
-(def srv_ctrl ((s Srv) (k int)) Ctrl (match s ((Srv b cs ls port is ra) (nth cs k))))
-(def srv_count ((s Srv)) int (match s ((Srv b cs ls port is ra) (length cs))))
+(def srv_ctrl ((s Srv) (k int)) Ctrl (match s ((Srv b cs ls port is ra fs) (nth cs k))))
+(def srv_count ((s Srv)) int (match s ((Srv b cs ls port is ra fs) (length cs))))
 
 ; How long to sleep with nothing to do, polling.
 (def poll_ns () int 1000000)
@@ -508,7 +513,75 @@
         ((Sent) s) ((SendFull) s) ((SendTooBig) s)))
     ((ActNotify t) (.listeners s (listeners_tell (.listeners s) t)))
     ((ActListen port) (.listeners s (listener_add (.listeners s) port (port_send port "ok"))))
-    ((ActLog t) (let w (logged t) s))))
+    ((ActLog t) (let w (logged t) s))
+    ((ActFeed dev ep va pages) (fed s dev ep va pages))
+    ((ActUnfeed dev ep) (unfed s dev ep))
+    ((ActFill p off dev ep n) (filled s k p off dev ep n))))
+
+; ------------------------------------------------------------------ feeds
+
+; The ring at va of pages, shared with the driver by a class driver,
+; opened for device dev's endpoint ep, any earlier one of its let go.
+(def fed ((s Srv) (dev int) (ep int) (va int) (pages int)) Srv
+  (match (dma_open va pages)
+    ((IoRegionFailed f why) (let w (logged (append "xhci: a feed's ring is not shared with the driver: " why)) s))
+    ((IoRegionOpened r)
+      (let s2 (unfed s dev ep)
+        (.feeds s2 (cons (Feeding dev ep r (mul pages (page_size))) (.feeds s2)))))))
+
+; The ring of device dev's endpoint ep let go, if it has one.
+(def unfed ((s Srv) (dev int) (ep int)) Srv
+  (match (feeding_at (.feeds s) dev ep)
+    ((None) s)
+    ((Some f) (let c (close_region (.r f)) (.feeds s (feeds_without (.feeds s) dev ep))))))
+
+; The ring of device dev's endpoint ep among fs, or none; fs without it.
+(def feeding_at ((fs (list Feeding)) (dev int) (ep int)) (Option Feeding)
+  (if (is_empty fs) ((None Feeding))
+      (and (eq (.dev (head fs)) dev) (eq (.ep (head fs)) ep)) (Some (head fs))
+      (feeding_at (tail fs) dev ep)))
+(def feeds_without ((fs (list Feeding)) (dev int) (ep int)) (list Feeding)
+  (if (is_empty fs) fs
+      (and (eq (.dev (head fs)) dev) (eq (.ep (head fs)) ep)) (feeds_without (tail fs) dev ep)
+      (cons (head fs) (feeds_without (tail fs) dev ep))))
+
+; n bytes of controller k's page p from off filled from the ring of
+; device dev's endpoint ep, as many as it holds unread, and silence past
+; them, or all silence with no ring; the page cleaned for the
+; controller.
+(def filled ((s Srv) (k int) (p int) (off int) (dev int) (ep int) (n int)) Srv
+  (let (m (.memory (srv_ctrl s k))
+        at (add (mul 4096 p) off)
+        got (match (feeding_at (.feeds s) dev ep) ((None) 0) ((Some f) (ring_taken f m at n)))
+        z (if (lt got n) (region_set_bytes m (add at got) (zero_bytes (sub n got)) 0 (sub n got)) 0)
+        fl (page_flushed (.va (srv_ctrl s k)) p))
+    s))
+
+; Up to n bytes of f's ring copied into m at at, as many as it holds
+; unread, its read count moved past them: how many.
+(def ring_taken ((f Feeding) (m IoRegion) (at int) (n int)) int
+  (let (size (sub (.bytes f) 8)
+        w (region_get32 (.r f) 0)
+        rd (region_get32 (.r f) 4)
+        avail (bit_and (sub w rd) 4294967295)
+        got (min n (min avail size))
+        c (ring_copied (.r f) size rd m at got)
+        u (region_set32 (.r f) 4 (bit_and (add rd got) 4294967295)))
+    got))
+
+; n bytes of the ring of size bytes after its header in r, from count
+; rd on, copied into m at at, in two pieces where it wraps: 0.
+(def ring_copied ((r IoRegion) (size int) (rd int) (m IoRegion) (at int) (n int)) int
+  (if (le n 0)
+      0
+      (let (pos (mod rd size)
+            k (min n (sub size pos))
+            b (region_get_bytes r (add 8 pos) k)
+            w (region_set_bytes m at b 0 k))
+        (ring_copied r size (add rd k) m (add at k) (sub n k)))))
+
+; n zero bytes.
+(def zero_bytes ((n int)) bytes (bytes_from_list (zeros n)))
 
 ; A line, t, which names the controller itself, put in the kernel's log
 ; at info, and so on the serial line at once; on standard error instead
