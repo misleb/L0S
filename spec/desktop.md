@@ -168,7 +168,8 @@ then, and sets its alarm for the minute after S (on the Pi 5 it also
 writes S to the RTC, see [pi5.md](pi5.md)); `zone` replies `zone M U`,
 the zone the time is shown in, M minutes east of UTC, in force until
 the clock says U, when it next changes. `wm` waits a second for a clock as
-it starts, after the keyboard and the pointer, then asks its zone; with
+it starts, after the keyboard and the pointer, on `compositor`'s port
+before it registers it, so only the clock answers there, then asks its zone; with
 none, the bar shows no time. The clock counts UTC everywhere: QEMU
 starts the PL031 at this machine's time in UTC (`-rtc base=utc`, in
 `tools/qemu-boot.sh`, the e2e cases' `l0 boot` and `make boot`), and
@@ -236,6 +237,22 @@ Input:
   notice or the pointer's, not by which of them sent it: one process
   may serve `keyboard` and `pointer` both, as `usb-hid` does. Only a
   message from a driver `wm` listens to is taken as input.
+- **Its two ports**: `wm` listens to `keyboard` and `pointer` on a port
+  of their own, and takes everything else, the requests, the clock's
+  time, the display's frames and releases, exits and its alarm, on
+  `compositor`'s, waiting on both as a set. The set gives the oldest
+  message of either first, so nothing passes anything: input is handled
+  in the order it came with the requests, and a key typed after a
+  window was raised, closed or opened goes where the request left the
+  focus. A port's queue holds 32 messages, so a flood of requests that
+  fills `compositor`'s leaves the drivers' notices room on theirs,
+  which a full queue would refuse (`SendFull`, the notice lost). A
+  mouse's moves waiting next are joined into one move
+  (`gathered`), stopped by a change of the buttons held, a wheel's turn,
+  or anything else that came before the next move, request or not.
+  From `usb-hid`'s notice to the display's `move` done, a move takes
+  3.5 ms or so on QEMU, 4.5 at the most for nine in ten, alike with no
+  client and with a Terminal printing, System Monitor and Widgets.
 - **Keys** go to the front window's client, as the `KeyEvent` notices
   the keyboard driver sends, their bytes passed on as they came after
   the window notice's id: `key` and four u32s, the Linux key code; 1

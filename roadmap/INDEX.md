@@ -38,8 +38,6 @@ move independently, so several can be active at once.
 | [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
 | [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
 | [0050](0050-hvs-crowded-lines.md) `hvs` at 4K: crowded lines and a whole-screen flash | Display | idea | – | 0038 | display.md |
-| [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
-| [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |
 | [0053](0053-agent-on-its-own.md) The agent acts on its own: a time to wake, what it did, and a budget | Agent | idea | – | 0043 | agent.md |
 | [0057](0057-tz-database.md) Any time zone, by the tz database's rules | Desktop | idea | – | 0029 | desktop.md, fat32.md, programs.md |
 | [0060](0060-speech-to-text.md) Whistle on the board: speech to text in L0 | Agent | active | 8/9 | – | speech.md, programs.md, testing.md |
@@ -157,6 +155,8 @@ graph LR
 | [0043](0043-agent-loop.md) `agentd`, an agent's loop and its tools on L0S | Agent | 2026-10-30 |
 | [0044](0044-agent-home.md) The agent's home: its personality, its history, and a backup | Agent | 2026-10-30 |
 | [0045](0045-agent-app-builder.md) The agent has apps built for itself, by a Claude Code session on the host | Agent | 2026-10-31 |
+| [0051](0051-wm-input-port.md) `wm` takes input on a port of its own | Desktop | 2026-11-05 |
+| [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | 2026-11-05 |
 | [0054](0054-l0-adoption.md) L0S written in the L0 of roadmap 0132 to 0144 | Tooling | 2026-10-30 |
 | [0055](0055-network-time.md) The time from the network, once it comes up | Network | 2026-10-30 |
 | [0056](0056-time-zones.md) Time zones: the clock in UTC, shown in US Pacific time | Desktop | 2026-10-30 |
