@@ -1,0 +1,211 @@
+; der_test.l0 -- tests of der.l0: TLVs and their lengths, minimal and
+; not, children, and each value's reading, against encodings written
+; out by hand from X.690 and times date(1) gives.
+
+; The bytes the hex digits s spell, two a byte.
+(def der_t_hex ((s (list int))) bytes
+  (der_t_hex_from s (nil int)))
+
+; der_t_hex's loop, after the reversed acc.
+(def der_t_hex_from ((s (list int)) (acc (list int))) bytes
+  (if (or (is_empty s) (is_empty (tail s)))
+      (bytes_from_list (rev acc))
+      (der_t_hex_from (tail (tail s)) (cons (add (mul (hex_val (head s)) 16) (hex_val (head (tail s)))) acc))))
+
+; The TLV at the start of the bytes hex spells, as "tag start body
+; end", or "none".
+(def der_t_tlv ((hex (list int))) (list int)
+  (let b (der_t_hex hex)
+    (match (der_tlv b 0 (bytes_len b))
+      ((None) "none")
+      ((Some t) (unwords (numbers_words (cons (.tag t) (cons (.start t) (cons (.body t) (cons (.end t) (nil int)))))))))))
+
+; The TLV at the start of the bytes hex spells, which the test knows is
+; there.
+(def der_t_one ((b bytes)) DerTlv
+  (match (der_tlv b 0 (bytes_len b))
+    ((None) (DerTlv 0 0 0 0))
+    ((Some t) t)))
+
+(def test_der_short () int
+  (check_str "sequence" (der_t_tlv "3003020105") "48 0 2 5"))
+
+(def test_der_empty_contents () int
+  (check_str "null" (der_t_tlv "0500") "5 0 2 2"))
+
+(def test_der_long_form () int
+  (let b (bytes_from_list (cons 4 (cons 129 (cons 128 (repeat 128 0)))))
+    (match (der_tlv b 0 (bytes_len b))
+      ((None) (fail_because "long" "none"))
+      ((Some t) (add (check_int "body" (.body t) 3) (check_int "end" (.end t) 131))))))
+
+(def test_der_two_byte_length () int
+  (let b (bytes_from_list (cons 4 (cons 130 (cons 1 (cons 0 (repeat 256 7))))))
+    (match (der_tlv b 0 (bytes_len b))
+      ((None) (fail_because "two bytes" "none"))
+      ((Some t) (add (check_int "body" (.body t) 4) (check_int "end" (.end t) 260))))))
+
+(def test_der_non_minimal_length () int
+  (add (check_str "0x81 under 128" (der_t_tlv "04810100") "none")
+       (check_str "leading zero" (der_t_tlv "0482000100") "none")))
+
+(def test_der_indefinite () int
+  (check_str "indefinite" (der_t_tlv "308005000000") "none"))
+
+(def test_der_past_end () int
+  (add (check_str "length past the end" (der_t_tlv "300502010") "none")
+       (check_str "one byte" (der_t_tlv "30") "none")))
+
+(def test_der_past_j () int
+  (let b (der_t_hex "3003020105")
+    (check_bool "ends after j" (der_t_some (der_tlv b 0 4)) false)))
+
+(def test_der_high_tag () int
+  (check_str "high tag number" (der_t_tlv "1f0100") "none"))
+
+(def test_der_five_length_bytes () int
+  (check_str "five length bytes" (der_t_tlv "04850000000001ff") "none"))
+
+(def test_der_children () int
+  (let (b (der_t_hex "30060201050101ff")
+        t (der_t_one b))
+    (match (der_children b t)
+      ((None) (fail_because "children" "none"))
+      ((Some cs)
+        (add (check_int "count" (length cs) 2)
+             (check_int "second's tag" (.tag (nth cs 1)) 1))))))
+
+(def test_der_children_malformed () int
+  (let (b (der_t_hex "3005020105010f")
+        t (der_t_one b))
+    (check_bool "child runs past" (der_t_some (der_children b t)) false)))
+
+(def test_der_first_after () int
+  (let (b (der_t_hex "30060201050101ff")
+        t (der_t_one b))
+    (match (der_first b t)
+      ((None) (fail_because "first" "none"))
+      ((Some f)
+        (match (der_after b f (.end t))
+          ((None) (fail_because "after" "none"))
+          ((Some s) (add (check_int "first" (.tag f) 2) (check_int "after" (.body s) 7))))))))
+
+(def test_der_tagged () int
+  (let b (der_t_hex "020105")
+    (add (check_bool "right tag" (der_t_some (der_tagged b 0 3 2)) true)
+         (check_bool "wrong tag" (der_t_some (der_tagged b 0 3 48)) false))))
+
+(def test_der_int_bytes () int
+  (let b (der_t_hex "0203008001")
+    (match (der_int_bytes b (der_t_one b))
+      ((None) (fail_because "int" "none"))
+      ((Some v) (check_bool "leading zero dropped" (eq v (der_t_hex "8001")) true)))))
+
+(def test_der_int_zero () int
+  (let b (der_t_hex "020100")
+    (match (der_int_bytes b (der_t_one b))
+      ((None) (fail_because "zero" "none"))
+      ((Some v) (check_int "one byte kept" (bytes_len v) 1)))))
+
+(def test_der_int_small () int
+  (let (b (der_t_hex "02020100")
+        n (der_t_hex "0201ff"))
+    (add (check_int "256" (der_t_or (der_int_small b (der_t_one b)) -1) 256)
+         (check_bool "negative" (der_t_some (der_int_small n (der_t_one n))) false))))
+
+(def test_der_int_wrong_tag () int
+  (let b (der_t_hex "040105")
+    (check_bool "not an INTEGER" (der_t_some (der_int_bytes b (der_t_one b))) false)))
+
+(def test_der_oid_short () int
+  (let b (der_t_hex "0603550403")
+    (check_str "commonName" (der_oid_text b (der_t_one b)) "2.5.4.3")))
+
+(def test_der_oid_long_arcs () int
+  (let b (der_t_hex "06092a864886f70d01010b")
+    (add (check_str "sha256WithRSA" (der_oid_text b (der_t_one b)) "1.2.840.113549.1.1.11")
+         (check_bool "is" (der_oid_is b (der_t_one b) "1.2.840.113549.1.1.11") true))))
+
+(def test_der_oid_first_arc_two () int
+  (let b (der_t_hex "0609608648016503040201")
+    (check_str "sha256" (der_oid_text b (der_t_one b)) "2.16.840.1.101.3.4.2.1")))
+
+(def test_der_oid_malformed () int
+  (let (a (der_t_hex "06028001")
+        c (der_t_hex "060186"))
+    (add (check_str "non-minimal arc" (der_oid_text a (der_t_one a)) "")
+         (check_str "unfinished arc" (der_oid_text c (der_t_one c)) ""))))
+
+(def test_der_oid_is_not () int
+  (let b (der_t_hex "0603550403")
+    (check_bool "other oid" (der_oid_is b (der_t_one b) "2.5.4.6") false)))
+
+(def test_der_bit_string () int
+  (let b (der_t_hex "030300aabb")
+    (match (der_bit_string b (der_t_one b))
+      ((None) (fail_because "bits" "none"))
+      ((Some t) (add (check_int "body" (.body t) 3) (check_int "end" (.end t) 5))))))
+
+(def test_der_bit_string_unused () int
+  (let b (der_t_hex "030201aa")
+    (check_bool "unused bits refused" (der_t_some (der_bit_string b (der_t_one b))) false)))
+
+(def test_der_bit_flags () int
+  (let (ku (der_t_hex "03020106")
+        ds (der_t_hex "03020780"))
+    (add (check_int "keyCertSign and cRLSign" (der_bit_flags ku (der_t_one ku)) 96)
+         (check_int "digitalSignature" (der_bit_flags ds (der_t_one ds)) 1))))
+
+(def test_der_bit_flags_two_bytes () int
+  (let b (der_t_hex "0303078080")
+    (check_int "bits 0 and 8" (der_bit_flags b (der_t_one b)) 257)))
+
+(def test_der_bit_flags_bad () int
+  (let (a (der_t_hex "03020107")
+        c (der_t_hex "030108"))
+    (add (check_int "unused bit set" (der_bit_flags a (der_t_one a)) -1)
+         (check_int "count with no bits" (der_bit_flags c (der_t_one c)) -1))))
+
+(def test_der_bool () int
+  (let (t (der_t_hex "0101ff")
+        f (der_t_hex "010100")
+        x (der_t_hex "010101"))
+    (add (check_bool "true" (der_t_or (der_bool t (der_t_one t)) false) true)
+         (add (check_bool "false" (der_t_or (der_bool f (der_t_one f)) true) false)
+              (check_bool "not DER" (der_t_some (der_bool x (der_t_one x))) false)))))
+
+; The time the text s is as a TLV of tag, or -99 if none.
+(def der_t_time ((tag int) (s (list int))) int
+  (let b (bytes_from_list (cons tag (cons (length s) s)))
+    (der_t_or (der_time b (der_t_one b)) -99)))
+
+(def test_der_utc_time () int
+  (add (check_int "ISRG X1 from" (der_t_time 23 "150604110438Z") 1433415878)
+       (check_int "1950" (der_t_time 23 "500101000000Z") -631152000)))
+
+(def test_der_utc_2049 () int
+  (check_int "2049" (der_t_time 23 "491231235959Z") 2524607999))
+
+(def test_der_generalized_time () int
+  (add (check_int "ISRG X2 to" (der_t_time 24 "20400917160000Z") 2231510400)
+       (check_int "9999" (der_t_time 24 "99991231235959Z") 253402300799)))
+
+(def test_der_leap_day () int
+  (add (check_int "2024-02-29" (der_t_time 24 "20240229000000Z") 1709164800)
+       (check_int "2023-02-29" (der_t_time 24 "20230229000000Z") -99)))
+
+(def test_der_time_bad () int
+  (add (check_int "no Z" (der_t_time 23 "1506041104380") -99)
+       (add (check_int "fraction" (der_t_time 24 "20200101000000.5Z") -99)
+            (check_int "hour 24" (der_t_time 23 "150604240000Z") -99))))
+
+(def test_der_time_wrong_tag () int
+  (check_int "an OCTET STRING" (der_t_time 4 "150604110438Z") -99))
+
+; Whether o holds a value.
+(def (der_t_some T) ((o (Option T))) bool
+  (match o ((None) false) ((Some x) true)))
+
+; The value of o, or d if none.
+(def (der_t_or T) ((o (Option T)) (d T)) T
+  (match o ((None) d) ((Some x) x)))

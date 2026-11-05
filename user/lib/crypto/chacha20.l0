@@ -1,0 +1,326 @@
+; chacha20.l0 -- ChaCha20, Poly1305 and their AEAD, as RFC 8439 defines
+; them, over ranges of bytes: TLS 1.3's TLS_CHACHA20_POLY1305_SHA256
+; seals and opens each record with them. Pure; needs common/abi.l0.
+; Not constant-time: Poly1305's final reduction and the tag's comparison
+; take no branch on secrets, but nothing else is made to, so it is for a
+; client of this project's scope, not a server holding long-lived keys.
+
+; ------------------------------------------------------------- words
+
+; x kept to 32 bits.
+(def chacha20_32 ((x int)) int (bit_and x 4294967295))
+
+; x, 32 bits, rotated left by n.
+(def chacha20_rotl ((x int) (n int)) int
+  (bit_and (bit_or (bit_shl x n) (bit_shr x (sub 32 n))) 4294967295))
+
+; Four words a quarter round works on, or gives back.
+(data Chacha20Quad (Chacha20Quad (a int) (b int) (c int) (d int)))
+
+; The quarter round of RFC 8439 2.1 on a, b, c and d.
+(def chacha20_quarter ((a int) (b int) (c int) (d int)) Chacha20Quad
+  (let (a (chacha20_32 (add a b)) d (chacha20_rotl (bit_xor d a) 16)
+        c (chacha20_32 (add c d)) b (chacha20_rotl (bit_xor b c) 12)
+        a (chacha20_32 (add a b)) d (chacha20_rotl (bit_xor d a) 8)
+        c (chacha20_32 (add c d)) b (chacha20_rotl (bit_xor b c) 7))
+    (Chacha20Quad a b c d)))
+
+; ------------------------------------------------------------- the block
+
+; The state before a block's rounds (RFC 8439 2.3), its counter word 12
+; still 0: the four constants, "expand 32-byte k" as words, the 32-byte
+; key's eight words and the 12-byte nonce's three, each least
+; significant byte first.
+(def chacha20_state ((key bytes) (nonce bytes)) (array int)
+  (let s (array_from (cons 1634760805 (cons 857760878 (cons 2036477234 (cons 1797285236 (nil int))))) 0)
+    (chacha20_load_nonce (chacha20_load_key (array_resize s 16 0) key 0) nonce 0)))
+
+; s with the key's words from t on, at 4 to 11.
+(def chacha20_load_key ((s (array int)) (key bytes) (t int)) (array int)
+  (if (ge t 8)
+      s
+      (chacha20_load_key (array_set s (add 4 t) (le_u32 key (mul t 4))) key (add t 1))))
+
+; s with the nonce's words from t on, at 13 to 15.
+(def chacha20_load_nonce ((s (array int)) (nonce bytes) (t int)) (array int)
+  (if (ge t 3)
+      s
+      (chacha20_load_nonce (array_set s (add 13 t) (le_u32 nonce (mul t 4))) nonce (add t 1))))
+
+; ks filled with the block function's 16 words for the state s: its
+; twenty rounds, then s added in.
+(def chacha20_core ((s (array int)) (ks (array int))) (array int)
+  (chacha20_rounds s ks 10
+    (array_get s 0) (array_get s 1) (array_get s 2) (array_get s 3)
+    (array_get s 4) (array_get s 5) (array_get s 6) (array_get s 7)
+    (array_get s 8) (array_get s 9) (array_get s 10) (array_get s 11)
+    (array_get s 12) (array_get s 13) (array_get s 14) (array_get s 15)))
+
+; n more double rounds, a column round and a diagonal one each, of the
+; working words x0 to x15; then each added to s's and put in ks. The
+; quarter rounds' adds and rotations are written out, not called through
+; chacha20_32 and chacha20_rotl: on the host that is five times faster.
+(def chacha20_rounds ((s (array int)) (ks (array int)) (n int)
+                      (x0 int) (x1 int) (x2 int) (x3 int) (x4 int) (x5 int) (x6 int) (x7 int)
+                      (x8 int) (x9 int) (x10 int) (x11 int) (x12 int) (x13 int) (x14 int) (x15 int)) (array int)
+  (if (le n 0)
+      (chacha20_out s ks x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15)
+      (let (x0 (bit_and (add x0 x4) 4294967295) v (bit_xor x12 x0) x12 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x8 (bit_and (add x8 x12) 4294967295) v (bit_xor x4 x8) x4 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x0 (bit_and (add x0 x4) 4294967295) v (bit_xor x12 x0) x12 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x8 (bit_and (add x8 x12) 4294967295) v (bit_xor x4 x8) x4 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295)
+            x1 (bit_and (add x1 x5) 4294967295) v (bit_xor x13 x1) x13 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x9 (bit_and (add x9 x13) 4294967295) v (bit_xor x5 x9) x5 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x1 (bit_and (add x1 x5) 4294967295) v (bit_xor x13 x1) x13 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x9 (bit_and (add x9 x13) 4294967295) v (bit_xor x5 x9) x5 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295)
+            x2 (bit_and (add x2 x6) 4294967295) v (bit_xor x14 x2) x14 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x10 (bit_and (add x10 x14) 4294967295) v (bit_xor x6 x10) x6 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x2 (bit_and (add x2 x6) 4294967295) v (bit_xor x14 x2) x14 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x10 (bit_and (add x10 x14) 4294967295) v (bit_xor x6 x10) x6 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295)
+            x3 (bit_and (add x3 x7) 4294967295) v (bit_xor x15 x3) x15 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x11 (bit_and (add x11 x15) 4294967295) v (bit_xor x7 x11) x7 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x3 (bit_and (add x3 x7) 4294967295) v (bit_xor x15 x3) x15 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x11 (bit_and (add x11 x15) 4294967295) v (bit_xor x7 x11) x7 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295)
+            x0 (bit_and (add x0 x5) 4294967295) v (bit_xor x15 x0) x15 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x10 (bit_and (add x10 x15) 4294967295) v (bit_xor x5 x10) x5 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x0 (bit_and (add x0 x5) 4294967295) v (bit_xor x15 x0) x15 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x10 (bit_and (add x10 x15) 4294967295) v (bit_xor x5 x10) x5 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295)
+            x1 (bit_and (add x1 x6) 4294967295) v (bit_xor x12 x1) x12 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x11 (bit_and (add x11 x12) 4294967295) v (bit_xor x6 x11) x6 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x1 (bit_and (add x1 x6) 4294967295) v (bit_xor x12 x1) x12 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x11 (bit_and (add x11 x12) 4294967295) v (bit_xor x6 x11) x6 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295)
+            x2 (bit_and (add x2 x7) 4294967295) v (bit_xor x13 x2) x13 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x8 (bit_and (add x8 x13) 4294967295) v (bit_xor x7 x8) x7 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x2 (bit_and (add x2 x7) 4294967295) v (bit_xor x13 x2) x13 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x8 (bit_and (add x8 x13) 4294967295) v (bit_xor x7 x8) x7 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295)
+            x3 (bit_and (add x3 x4) 4294967295) v (bit_xor x14 x3) x14 (bit_and (bit_or (bit_shl v 16) (bit_shr v 16)) 4294967295)
+            x9 (bit_and (add x9 x14) 4294967295) v (bit_xor x4 x9) x4 (bit_and (bit_or (bit_shl v 12) (bit_shr v 20)) 4294967295)
+            x3 (bit_and (add x3 x4) 4294967295) v (bit_xor x14 x3) x14 (bit_and (bit_or (bit_shl v 8) (bit_shr v 24)) 4294967295)
+            x9 (bit_and (add x9 x14) 4294967295) v (bit_xor x4 x9) x4 (bit_and (bit_or (bit_shl v 7) (bit_shr v 25)) 4294967295))
+        (chacha20_rounds s ks (sub n 1) x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15))))
+
+; ks with the words x0 to x15, each with s's of its place added.
+(def chacha20_out ((s (array int)) (ks (array int))
+                   (x0 int) (x1 int) (x2 int) (x3 int) (x4 int) (x5 int) (x6 int) (x7 int)
+                   (x8 int) (x9 int) (x10 int) (x11 int) (x12 int) (x13 int) (x14 int) (x15 int)) (array int)
+  (let (k (chacha20_put ks s 0 x0) k (chacha20_put k s 1 x1) k (chacha20_put k s 2 x2) k (chacha20_put k s 3 x3)
+        k (chacha20_put k s 4 x4) k (chacha20_put k s 5 x5) k (chacha20_put k s 6 x6) k (chacha20_put k s 7 x7)
+        k (chacha20_put k s 8 x8) k (chacha20_put k s 9 x9) k (chacha20_put k s 10 x10) k (chacha20_put k s 11 x11)
+        k (chacha20_put k s 12 x12) k (chacha20_put k s 13 x13) k (chacha20_put k s 14 x14))
+    (chacha20_put k s 15 x15)))
+
+; ks with x plus s's word t at t.
+(def chacha20_put ((ks (array int)) (s (array int)) (t int) (x int)) (array int)
+  (array_set ks t (chacha20_32 (add x (array_get s t)))))
+
+; The 64-byte keystream block for a 32-byte key, a block counter and a
+; 12-byte nonce (RFC 8439 2.3).
+(def chacha20_block ((key bytes) (counter int) (nonce bytes)) bytes
+  (let z (bytes_from_list (chacha20_zeros 64 (nil int)))
+    (chacha20_xor key counter nonce z 0 64)))
+
+; n zeros, before acc.
+(def chacha20_zeros ((n int) (acc (list int))) (list int)
+  (if (le n 0) acc (chacha20_zeros (sub n 1) (cons 0 acc))))
+
+; ------------------------------------------------------------- encryption
+
+; The bytes of b from i up to j, encrypted, or decrypted, which is the
+; same, under the 32-byte key and 12-byte nonce, the first 64 with the
+; keystream block counter gives, the next with counter + 1, and so on
+; (RFC 8439 2.4). The blocks are made last first, and each block's
+; bytes put before those made already, so the output is one list in
+; order, made bytes once.
+(def chacha20_xor ((key bytes) (counter int) (nonce bytes) (b bytes) (i int) (j int)) bytes
+  (let (n (sub j i)
+        nb (div (add n 63) 64))
+    (bytes_from_list (chacha20_back (chacha20_state key nonce) (array_new 16 0) counter b i n (sub nb 1) (nil int)))))
+
+; acc after blocks 0 to blk of the n bytes of b from i, s the state, ks
+; the room for a block's keystream.
+(def chacha20_back ((s (array int)) (ks (array int)) (counter int) (b bytes) (i int) (n int) (blk int) (acc (list int))) (list int)
+  (if (lt blk 0)
+      acc
+      (let (start (mul blk 64)
+            s1 (array_set s 12 (chacha20_32 (add counter blk)))
+            ks1 (chacha20_core s1 ks)
+            len (min 64 (sub n start))
+            acc1 (if (eq len 64)
+                     (chacha20_emit_words ks1 b (add i start) 15 acc)
+                     (chacha20_emit ks1 b (add i start) (sub len 1) acc)))
+        (chacha20_back s1 ks1 counter b i n (sub blk 1) acc1))))
+
+; acc after the words 0 to w of a whole block of b at off, each byte
+; xored with its byte of the keystream ks, last first: one word of ks
+; read for four bytes.
+(def chacha20_emit_words ((ks (array int)) (b bytes) (off int) (w int) (acc (list int))) (list int)
+  (if (lt w 0)
+      acc
+      (let (x (array_get ks w)
+            p (add off (bit_shl w 2))
+            acc (cons (bit_xor (bytes_get b (add p 3)) (bit_shr x 24)) acc)
+            acc (cons (bit_xor (bytes_get b (add p 2)) (bit_and (bit_shr x 16) 255)) acc)
+            acc (cons (bit_xor (bytes_get b (add p 1)) (bit_and (bit_shr x 8) 255)) acc))
+        (chacha20_emit_words ks b off (sub w 1) (cons (bit_xor (bytes_get b p) (bit_and x 255)) acc)))))
+
+; acc after the bytes of b from off up to off + k, each xored with its
+; byte of the keystream ks, last first.
+(def chacha20_emit ((ks (array int)) (b bytes) (off int) (k int) (acc (list int))) (list int)
+  (if (lt k 0)
+      acc
+      (let x (bit_and (bit_shr (array_get ks (bit_shr k 2)) (bit_shl (bit_and k 3) 3)) 255)
+        (chacha20_emit ks b off (sub k 1) (cons (bit_xor (bytes_get b (add off k)) x) acc)))))
+
+; ------------------------------------------------------------- Poly1305
+
+; The clamped r of a one-time key's first 16 bytes, in five 26-bit
+; limbs, then r1 to r4 times 5 (poly1305-donna-32's).
+(def poly1305_r ((key bytes)) (array int)
+  (let (r0 (bit_and (le_u32 key 0) 67108863) ; 0x3ffffff
+        r1 (bit_and (bit_shr (le_u32 key 3) 2) 67108611) ; 0x3ffff03
+        r2 (bit_and (bit_shr (le_u32 key 6) 4) 67092735) ; 0x3ffc0ff
+        r3 (bit_and (bit_shr (le_u32 key 9) 6) 66076671) ; 0x3f03fff
+        r4 (bit_and (bit_shr (le_u32 key 12) 8) 1048575)) ; 0x00fffff
+    (array_from (cons r0 (cons r1 (cons r2 (cons r3 (cons r4
+      (cons (mul r1 5) (cons (mul r2 5) (cons (mul r3 5) (cons (mul r4 5) (nil int)))))))))) 0)))
+
+; The accumulator h, five 26-bit limbs, after one block whose 128 bits
+; are the words t0 to t3, least significant first, and hibit its 2^128
+; bit as limb 4's 2^24: h plus the block, times r, mod 2^130 - 5.
+(def poly1305_block ((r (array int)) (h (array int)) (t0 int) (t1 int) (t2 int) (t3 int) (hibit int)) (array int)
+  (let (m 67108863
+        h0 (add (array_get h 0) (bit_and t0 m))
+        h1 (add (array_get h 1) (bit_and (bit_or (bit_shr t0 26) (bit_shl t1 6)) m))
+        h2 (add (array_get h 2) (bit_and (bit_or (bit_shr t1 20) (bit_shl t2 12)) m))
+        h3 (add (array_get h 3) (bit_and (bit_or (bit_shr t2 14) (bit_shl t3 18)) m))
+        h4 (add (array_get h 4) (bit_or (bit_shr t3 8) hibit))
+        r0 (array_get r 0) r1 (array_get r 1) r2 (array_get r 2) r3 (array_get r 3) r4 (array_get r 4)
+        s1 (array_get r 5) s2 (array_get r 6) s3 (array_get r 7) s4 (array_get r 8)
+        d0 (add (add (mul h0 r0) (mul h1 s4)) (add (add (mul h2 s3) (mul h3 s2)) (mul h4 s1)))
+        d1 (add (add (mul h0 r1) (mul h1 r0)) (add (add (mul h2 s4) (mul h3 s3)) (mul h4 s2)))
+        d2 (add (add (mul h0 r2) (mul h1 r1)) (add (add (mul h2 r0) (mul h3 s4)) (mul h4 s3)))
+        d3 (add (add (mul h0 r3) (mul h1 r2)) (add (add (mul h2 r1) (mul h3 r0)) (mul h4 s4)))
+        d4 (add (add (mul h0 r4) (mul h1 r3)) (add (add (mul h2 r2) (mul h3 r1)) (mul h4 r0)))
+        d1 (add d1 (bit_shr d0 26))
+        d2 (add d2 (bit_shr d1 26))
+        d3 (add d3 (bit_shr d2 26))
+        d4 (add d4 (bit_shr d3 26))
+        g0 (add (bit_and d0 m) (mul (bit_shr d4 26) 5)))
+    (poly1305_set h (bit_and g0 m) (add (bit_and d1 m) (bit_shr g0 26)) (bit_and d2 m) (bit_and d3 m) (bit_and d4 m))))
+
+; h with its limbs a to e.
+(def poly1305_set ((h (array int)) (a int) (b int) (c int) (d int) (e int)) (array int)
+  (array_set (array_set (array_set (array_set (array_set h 0 a) 1 b) 2 c) 3 d) 4 e))
+
+; h after the bytes of m from i up to j, 16 at a time. A last block of
+; fewer is padded: with zeros and its 2^128 bit, as the AEAD pads, when
+; zero is true; else with a 1 byte then zeros, and no 2^128 bit, as
+; Poly1305 itself does.
+(def poly1305_absorb ((r (array int)) (h (array int)) (m bytes) (i int) (j int) (zero bool)) (array int)
+  (if (ge (sub j i) 16)
+      (poly1305_absorb r (poly1305_block r h (le_u32 m i) (le_u32 m (add i 4)) (le_u32 m (add i 8)) (le_u32 m (add i 12)) 16777216) m (add i 16) j zero)
+      (ge i j)
+      h
+      (let one (not zero)
+        (poly1305_block r h (poly1305_word m i j one) (poly1305_word m (add i 4) j one)
+          (poly1305_word m (add i 8) j one) (poly1305_word m (add i 12) j one) (if zero 16777216 0)))))
+
+; The word at byte i of a last block of m that ends at j: bytes from j
+; on are 0, but the one at j is 1 when one is true.
+(def poly1305_word ((m bytes) (i int) (j int) (one bool)) int
+  (bit_or (bit_or (poly1305_at m i j one) (bit_shl (poly1305_at m (add i 1) j one) 8))
+    (bit_or (bit_shl (poly1305_at m (add i 2) j one) 16) (bit_shl (poly1305_at m (add i 3) j one) 24))))
+
+; Byte k of a last block of m that ends at j, as poly1305_word reads it.
+(def poly1305_at ((m bytes) (k int) (j int) (one bool)) int
+  (if (lt k j) (bytes_get m k) (and one (eq k j)) 1 0))
+
+; The 16-byte tag: h reduced mod 2^130 - 5 in full, plus the key's last
+; 16 bytes, mod 2^128, least significant byte first. h or h - p is kept
+; by a mask, not a branch.
+(def poly1305_finish ((h (array int)) (key bytes)) bytes
+  (let (m 67108863
+        h0 (array_get h 0) h1 (array_get h 1) h2 (array_get h 2) h3 (array_get h 3) h4 (array_get h 4)
+        h2 (add h2 (bit_shr h1 26)) h1 (bit_and h1 m)
+        h3 (add h3 (bit_shr h2 26)) h2 (bit_and h2 m)
+        h4 (add h4 (bit_shr h3 26)) h3 (bit_and h3 m)
+        h0 (add h0 (mul (bit_shr h4 26) 5)) h4 (bit_and h4 m)
+        h1 (add h1 (bit_shr h0 26)) h0 (bit_and h0 m)
+        g0 (add h0 5)
+        g1 (add h1 (bit_shr g0 26)) g0 (bit_and g0 m)
+        g2 (add h2 (bit_shr g1 26)) g1 (bit_and g1 m)
+        g3 (add h3 (bit_shr g2 26)) g2 (bit_and g2 m)
+        g4 (sub (add h4 (bit_shr g3 26)) 67108864) g3 (bit_and g3 m)
+        keep (sub (bit_shr g4 63) 1)
+        drop (bit_xor keep -1)
+        h0 (bit_or (bit_and h0 drop) (bit_and g0 keep))
+        h1 (bit_or (bit_and h1 drop) (bit_and g1 keep))
+        h2 (bit_or (bit_and h2 drop) (bit_and g2 keep))
+        h3 (bit_or (bit_and h3 drop) (bit_and g3 keep))
+        h4 (bit_or (bit_and h4 drop) (bit_and (bit_and g4 m) keep))
+        w0 (chacha20_32 (bit_or h0 (bit_shl h1 26)))
+        w1 (chacha20_32 (bit_or (bit_shr h1 6) (bit_shl h2 20)))
+        w2 (chacha20_32 (bit_or (bit_shr h2 12) (bit_shl h3 14)))
+        w3 (chacha20_32 (bit_or (bit_shr h3 18) (bit_shl h4 8)))
+        f0 (add w0 (le_u32 key 16))
+        f1 (add (add w1 (le_u32 key 20)) (bit_shr f0 32))
+        f2 (add (add w2 (le_u32 key 24)) (bit_shr f1 32))
+        f3 (add (add w3 (le_u32 key 28)) (bit_shr f2 32)))
+    (bytes_from_list (poly1305_le f0 (poly1305_le f1 (poly1305_le f2 (poly1305_le f3 (nil int))))))))
+
+; The low 4 bytes of x, least significant first, before acc.
+(def poly1305_le ((x int) (acc (list int))) (list int)
+  (cons (bit_and x 255) (cons (bit_and (bit_shr x 8) 255)
+    (cons (bit_and (bit_shr x 16) 255) (cons (bit_and (bit_shr x 24) 255) acc)))))
+
+; The 16-byte Poly1305 tag of the bytes of m from i up to j under the
+; 32-byte one-time key (RFC 8439 2.5).
+(def poly1305 ((key bytes) (m bytes) (i int) (j int)) bytes
+  (poly1305_finish (poly1305_absorb (poly1305_r key) (array_new 5 0) m i j false) key))
+
+; ------------------------------------------------------------- the AEAD
+
+; The one-time Poly1305 key for a key and nonce: the first 32 bytes of
+; block 0 (RFC 8439 2.6).
+(def chacha20_poly_key ((key bytes) (nonce bytes)) bytes
+  (bytes_slice (chacha20_block key 0 nonce) 0 32))
+
+; The AEAD's tag under the one-time key otk (RFC 8439 2.8): aad and the
+; ciphertext, the bytes of c from i up to j, each padded with zeros to
+; 16, then their lengths as two 8-byte words.
+(def chacha20_tag ((otk bytes) (aad bytes) (c bytes) (i int) (j int)) bytes
+  (let (r (poly1305_r otk)
+        h (poly1305_absorb r (array_new 5 0) aad 0 (bytes_len aad) true)
+        h (poly1305_absorb r h c i j true)
+        na (bytes_len aad)
+        nc (sub j i)
+        h (poly1305_block r h (chacha20_32 na) (bit_shr na 32) (chacha20_32 nc) (bit_shr nc 32) 16777216))
+    (poly1305_finish h otk)))
+
+; The plaintext pt from i up to j sealed under the 32-byte key and
+; 12-byte nonce, with aad authenticated: the ciphertext, then its
+; 16-byte tag.
+(def chacha20_seal ((key bytes) (nonce bytes) (aad bytes) (pt bytes) (i int) (j int)) bytes
+  (let (c (chacha20_xor key 1 nonce pt i j)
+        tag (chacha20_tag (chacha20_poly_key key nonce) aad c 0 (bytes_len c)))
+    (bytes_concat (cons c (cons tag (nil bytes))))))
+
+; The bytes of ct from i up to j, a ciphertext and its 16-byte tag,
+; opened under the key and nonce with aad: the plaintext, or none if
+; there is no room for a tag or the tag is not the one they give. The
+; whole tag is compared, and nothing decrypted unless it matches.
+(def chacha20_open ((key bytes) (nonce bytes) (aad bytes) (ct bytes) (i int) (j int)) (Option bytes)
+  (if (lt (sub j i) 16)
+      ((None bytes))
+      (let (e (sub j 16)
+            tag (chacha20_tag (chacha20_poly_key key nonce) aad ct i e))
+        (if (eq (chacha20_diff tag ct e 0 0) 0)
+            (Some (chacha20_xor key 1 nonce ct i e))
+            ((None bytes))))))
+
+; acc with every bit that differs between tag's 16 bytes from k on and
+; those of ct from e + k: 0 when they are the same.
+(def chacha20_diff ((tag bytes) (ct bytes) (e int) (k int) (acc int)) int
+  (if (ge k 16)
+      acc
+      (chacha20_diff tag ct e (add k 1) (bit_or acc (bit_xor (bytes_get tag k) (bytes_get ct (add e k)))))))

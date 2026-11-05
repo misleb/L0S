@@ -1,0 +1,688 @@
+; x509.l0 -- X.509 certificates (RFC 5280) read from their DER, for a
+; TLS client that checks a server's chain: what the signature covers
+; and is, who issued it and to whom, when it is valid, its public key,
+; and the extensions a chain's checker needs (basicConstraints,
+; keyUsage, extKeyUsage, subjectAltName, the key identifiers), with
+; whether it carries a critical one this reads none of. Also whether a
+; host name is one the certificate is for (RFC 6125), and the
+; certificates of a PEM text, as a root store is kept. Checks no
+; signature: that is the caller's. Pure. Not constant-time, which public
+; certificates do not need.
+
+; A signature's algorithm: RSASSA-PKCS1-v1_5 with SHA-256, -384 or
+; -512; RSASSA-PSS with its hash (256, 384 or 512, for SHA-256 to
+; SHA-512, MGF1 with the same) and salt length; ECDSA with SHA-256,
+; -384 or -512; or any other, sha1WithRSAEncryption among them.
+(data X509SigAlg
+  (X509RsaSha256)
+  (X509RsaSha384)
+  (X509RsaSha512)
+  (X509RsaPss int int)
+  (X509EcdsaSha256)
+  (X509EcdsaSha384)
+  (X509EcdsaSha512)
+  (X509SigOther))
+
+; An elliptic curve a key is on: P-256, P-384, or another.
+(data X509Curve (X509P256) (X509P384) (X509CurveOther))
+
+; A public key: RSA's modulus n and exponent e, big-endian with no
+; leading zero; an EC point on a curve, 04 || X || Y for P-256 and
+; P-384; or another kind of key.
+(data X509Key
+  (X509Rsa bytes bytes)
+  (X509Ec X509Curve bytes)
+  (X509KeyOther))
+
+; A certificate: its DER whole; where in it its TBSCertificate, what
+; the signature covers, starts and ends; the signature's algorithm and
+; bytes; its version, 1 to 3; its serial number's bytes; its issuer and
+; subject, each the Name's whole DER, compared byte for byte along a
+; chain; when it is valid from and to, in seconds since 1970 UTC; its
+; key; basicConstraints, whether it is a CA and its pathLenConstraint,
+; -1 if none; whether it has keyUsage and its bits (bit 0
+; digitalSignature, 5 keyCertSign, as RFC 5280 numbers them); whether
+; extKeyUsage allows a TLS server (true without one); whether it has a
+; subjectAltName, and that name's dNSNames and iPAddresses (4 or 16
+; bytes each); the subject's first commonName, "" if none; its
+; subject and authority key identifiers, empty if absent; and whether it
+; carries a critical extension not read here, which a checker refuses.
+(data X509
+  (X509 (der bytes) (tbs_start int) (tbs_end int) (sig_alg X509SigAlg) (sig bytes)
+    (version int) (serial bytes) (issuer bytes) (subject bytes)
+    (not_before int) (not_after int) (key X509Key)
+    (is_ca bool) (path_len int) (has_key_usage bool) (key_usage int) (server_auth bool)
+    (has_san bool) (dns_names (list (list int))) (ip_addrs (list bytes))
+    (common_name (list int)) (subject_key_id bytes) (authority_key_id bytes)
+    (unknown_critical bool)))
+
+; A validity's two times, in seconds since 1970 UTC.
+(data X509Times (X509Times (from int) (to int)))
+
+; RSASSA-PSS's parameters as read: the hash, MGF1's hash, the salt
+; length and the trailer field, each 0 where it is not one this takes.
+(data X509Pss (X509Pss (hash int) (mgf int) (salt int) (trailer int)))
+
+; ------------------------------------------------------------ parsing
+
+; The certificate whose DER is b, all of it, or why it is not one.
+(def x509_parse ((b bytes)) (Result X509 (list int))
+  (match (der_tagged b 0 (bytes_len b) 48)
+    ((None) (x509_err "not a DER SEQUENCE"))
+    ((Some cert)
+      (if (not (eq (.end cert) (bytes_len b)))
+          (x509_err "bytes after the certificate")
+          (x509_outer b cert)))))
+
+; A parse failing for why.
+(def x509_err ((why (list int))) (Result X509 (list int))
+  ((Err X509 (list int)) why))
+
+; x509_parse past the outer SEQUENCE: the TBSCertificate, the signature
+; algorithm and the signature, which must fill it.
+(def x509_outer ((b bytes) (cert DerTlv)) (Result X509 (list int))
+  (let j (.end cert)
+    (match (der_tagged b (.body cert) j 48)
+      ((None) (x509_err "no TBSCertificate"))
+      ((Some tbs)
+        (match (der_tagged b (.end tbs) j 48)
+          ((None) (x509_err "no signatureAlgorithm"))
+          ((Some alg)
+            (match (der_tagged b (.end alg) j 3)
+              ((None) (x509_err "no signature"))
+              ((Some sig) (x509_signed b tbs alg sig j)))))))))
+
+; x509_outer once its three parts are found: the signature a BIT STRING
+; of whole bytes ending the certificate, and then the TBSCertificate.
+(def x509_signed ((b bytes) (tbs DerTlv) (alg DerTlv) (sig DerTlv) (j int)) (Result X509 (list int))
+  (match (der_bit_string b sig)
+    ((None) (x509_err "signature is not whole bytes"))
+    ((Some bits)
+      (if (not (eq (.end sig) j))
+          (x509_err "bytes after the signature")
+          (x509_version b (x509_blank b tbs alg (der_content b bits)) alg (.body tbs) (.end tbs))))))
+
+; A certificate of b whose TBSCertificate is tbs, signed by alg with
+; sig, before its TBSCertificate is read.
+(def x509_blank ((b bytes) (tbs DerTlv) (alg DerTlv) (sig bytes)) X509
+  (let e (bytes_from_list "")
+    (X509 b (.start tbs) (.end tbs) (x509_sig_alg b alg) sig
+      1 e e e 0 0 (X509KeyOther)
+      false -1 false 0 true
+      false (nil (list int)) (nil bytes)
+      (nil int) e e
+      false)))
+
+; The TBSCertificate from i up to j: its version, [0] EXPLICIT and 1
+; when absent, then the rest.
+(def x509_version ((b bytes) (c X509) (alg DerTlv) (i int) (j int)) (Result X509 (list int))
+  (match (der_tagged b i j 160)
+    ((None) (x509_serial b c alg i j))
+    ((Some t)
+      (match (x509_inner_int b t)
+        ((None) (x509_err "bad version"))
+        ((Some v)
+          (if (gt v 2)
+              (x509_err "unknown version")
+              (x509_serial b (.version c (add v 1)) alg (.end t) j)))))))
+
+; The INTEGER that is the only thing inside t, as an int.
+(def x509_inner_int ((b bytes) (t DerTlv)) (Option int)
+  (match (der_tagged b (.body t) (.end t) 2)
+    ((None) ((None int)))
+    ((Some n) (if (eq (.end n) (.end t)) (der_int_small b n) ((None int))))))
+
+; The serial number at i, then the signature algorithm, which must be
+; the outer one byte for byte.
+(def x509_serial ((b bytes) (c X509) (alg DerTlv) (i int) (j int)) (Result X509 (list int))
+  (match (der_tagged b i j 2)
+    ((None) (x509_err "no serial number"))
+    ((Some s)
+      (match (der_tagged b (.end s) j 48)
+        ((None) (x509_err "no TBS signature algorithm"))
+        ((Some a)
+          (if (not (x509_same b a alg))
+              (x509_err "TBS and outer signature algorithms differ")
+              (x509_issuer b (.serial c (der_content b s)) (.end a) j)))))))
+
+; Whether TLVs s and t of b are the same bytes.
+(def x509_same ((b bytes) (s DerTlv) (t DerTlv)) bool
+  (and (eq (sub (.end s) (.start s)) (sub (.end t) (.start t)))
+    (x509_same_from b (.start s) (.start t) (.end s))))
+
+; x509_same's loop: the bytes from i up to j against those from k on.
+(def x509_same_from ((b bytes) (i int) (k int) (j int)) bool
+  (if (ge i j) true
+      (not (eq (bytes_get b i) (bytes_get b k))) false
+      (x509_same_from b (add i 1) (add k 1) j)))
+
+; The issuer at i, then the validity.
+(def x509_issuer ((b bytes) (c X509) (i int) (j int)) (Result X509 (list int))
+  (match (der_tagged b i j 48)
+    ((None) (x509_err "no issuer"))
+    ((Some n) (x509_validity b (.issuer c (der_whole b n)) (.end n) j))))
+
+; The validity at i, two times, then the subject.
+(def x509_validity ((b bytes) (c X509) (i int) (j int)) (Result X509 (list int))
+  (match (der_tagged b i j 48)
+    ((None) (x509_err "no validity"))
+    ((Some v)
+      (match (x509_times b v)
+        ((None) (x509_err "bad validity"))
+        ((Some ts)
+          (x509_subject b (.not_after (.not_before c (.from ts)) (.to ts)) (.end v) j))))))
+
+; The validity v's notBefore and notAfter, or none if v is not two
+; times.
+(def x509_times ((b bytes) (v DerTlv)) (Option X509Times)
+  (match (der_first b v)
+    ((None) ((None X509Times)))
+    ((Some t1)
+      (match (der_after b t1 (.end v))
+        ((None) ((None X509Times)))
+        ((Some t2)
+          (match (der_time b t1)
+            ((None) ((None X509Times)))
+            ((Some nb)
+              (match (der_time b t2)
+                ((None) ((None X509Times)))
+                ((Some na)
+                  (if (eq (.end t2) (.end v))
+                      (Some (X509Times nb na))
+                      ((None X509Times))))))))))))
+
+; The subject at i, with its commonName, then the public key.
+(def x509_subject ((b bytes) (c X509) (i int) (j int)) (Result X509 (list int))
+  (match (der_tagged b i j 48)
+    ((None) (x509_err "no subject"))
+    ((Some n)
+      (x509_spki b (.common_name (.subject c (der_whole b n)) (x509_cn b n)) (.end n) j))))
+
+; The SubjectPublicKeyInfo at i, then the extensions.
+(def x509_spki ((b bytes) (c X509) (i int) (j int)) (Result X509 (list int))
+  (match (der_tagged b i j 48)
+    ((None) (x509_err "no subjectPublicKeyInfo"))
+    ((Some k)
+      (match (x509_key b k)
+        ((None) (x509_err "bad public key"))
+        ((Some key) (x509_uids b (.key c key) (.end k) j))))))
+
+; The issuer's and subject's unique IDs at i, [1] and [2], if there,
+; passed over, then the extensions.
+(def x509_uids ((b bytes) (c X509) (i int) (j int)) (Result X509 (list int))
+  (match (der_tlv b i j)
+    ((None) (if (eq i j) ((Ok X509 (list int)) c) (x509_err "bad TBSCertificate end")))
+    ((Some t)
+      (if (or (eq (.tag t) 129) (eq (.tag t) 130))
+          (x509_uids b c (.end t) j)
+          (x509_extensions b c t j)))))
+
+; The extensions t, [3] EXPLICIT around a SEQUENCE of them, which must
+; end the TBSCertificate at j.
+(def x509_extensions ((b bytes) (c X509) (t DerTlv) (j int)) (Result X509 (list int))
+  (if (or (not (eq (.tag t) 163)) (not (eq (.end t) j)))
+      (x509_err "bad TBSCertificate end")
+      (match (der_tagged b (.body t) (.end t) 48)
+        ((None) (x509_err "bad extensions"))
+        ((Some s)
+          (if (eq (.end s) (.end t))
+              (x509_exts b c (.body s) (.end s))
+              (x509_err "bad extensions"))))))
+
+; Each extension from i up to j read into c.
+(def x509_exts ((b bytes) (c X509) (i int) (j int)) (Result X509 (list int))
+  (if (ge i j)
+      ((Ok X509 (list int)) c)
+      (match (der_tagged b i j 48)
+        ((None) (x509_err "bad extension"))
+        ((Some e)
+          (match (x509_ext b c e)
+            ((Err why) (x509_err why))
+            ((Ok c2) (x509_exts b c2 (.end e) j)))))))
+
+; One extension e: its OID, its critical flag, false when absent, and
+; its value, an OCTET STRING ending it.
+(def x509_ext ((b bytes) (c X509) (e DerTlv)) (Result X509 (list int))
+  (match (der_tagged b (.body e) (.end e) 6)
+    ((None) (x509_err "extension without an OID"))
+    ((Some oid)
+      (match (der_after b oid (.end e))
+        ((None) (x509_err "extension without a value"))
+        ((Some t)
+          (if (eq (.tag t) 1)
+              (match (der_bool b t)
+                ((None) (x509_err "bad critical flag"))
+                ((Some crit)
+                  (match (der_tagged b (.end t) (.end e) 4)
+                    ((None) (x509_err "extension without a value"))
+                    ((Some v) (x509_ext_value b c (der_oid_text b oid) crit v (.end e))))))
+              (if (eq (.tag t) 4)
+                  (x509_ext_value b c (der_oid_text b oid) false t (.end e))
+                  (x509_err "extension without a value"))))))))
+
+; The extension whose OID is oid read from its value v, which must end
+; at j: those this knows into c, any other marking c as carrying an
+; unknown critical one if crit.
+(def x509_ext_value ((b bytes) (c X509) (oid (list int)) (crit bool) (v DerTlv) (j int)) (Result X509 (list int))
+  (if (not (eq (.end v) j)) (x509_err "bytes after an extension's value")
+      (eq oid "2.5.29.19") (x509_basic b c v)
+      (eq oid "2.5.29.15") (x509_key_usage b c v)
+      (eq oid "2.5.29.17") (x509_san b c v)
+      (eq oid "2.5.29.37") (x509_eku b c v)
+      (eq oid "2.5.29.14") (x509_skid b c v)
+      (eq oid "2.5.29.35") (x509_akid b c v)
+      (not crit) ((Ok X509 (list int)) c)
+      ((Ok X509 (list int)) (.unknown_critical c true))))
+
+; The DER inside the OCTET STRING v, one TLV of tag filling it.
+(def x509_wrapped ((b bytes) (v DerTlv) (tag int)) (Option DerTlv)
+  (match (der_tagged b (.body v) (.end v) tag)
+    ((None) ((None DerTlv)))
+    ((Some t) (if (eq (.end t) (.end v)) (Some t) ((None DerTlv))))))
+
+; basicConstraints: a SEQUENCE of cA, false when absent, and a
+; pathLenConstraint, -1 when absent.
+(def x509_basic ((b bytes) (c X509) (v DerTlv)) (Result X509 (list int))
+  (match (x509_wrapped b v 48)
+    ((None) (x509_err "bad basicConstraints"))
+    ((Some s)
+      (match (der_first b s)
+        ((None) (if (eq (der_len s) 0) ((Ok X509 (list int)) (.is_ca c false)) (x509_err "bad basicConstraints")))
+        ((Some t)
+          (if (eq (.tag t) 1)
+              (match (der_bool b t)
+                ((None) (x509_err "bad basicConstraints"))
+                ((Some ca) (x509_path_len b (.is_ca c ca) (.end t) (.end s))))
+              (x509_path_len b (.is_ca c false) (.start t) (.end s))))))))
+
+; basicConstraints' pathLenConstraint, at i if anything is before j.
+(def x509_path_len ((b bytes) (c X509) (i int) (j int)) (Result X509 (list int))
+  (if (eq i j)
+      ((Ok X509 (list int)) c)
+      (match (der_tagged b i j 2)
+        ((None) (x509_err "bad pathLenConstraint"))
+        ((Some t)
+          (match (der_int_small b t)
+            ((None) (x509_err "bad pathLenConstraint"))
+            ((Some n)
+              (if (eq (.end t) j)
+                  ((Ok X509 (list int)) (.path_len c n))
+                  (x509_err "bad basicConstraints"))))))))
+
+; keyUsage: a BIT STRING of named bits.
+(def x509_key_usage ((b bytes) (c X509) (v DerTlv)) (Result X509 (list int))
+  (match (x509_wrapped b v 3)
+    ((None) (x509_err "bad keyUsage"))
+    ((Some t)
+      (let bits (der_bit_flags b t)
+        (if (lt bits 0)
+            (x509_err "bad keyUsage")
+            ((Ok X509 (list int)) (.key_usage (.has_key_usage c true) bits)))))))
+
+; extKeyUsage: a SEQUENCE of OIDs, allowing a TLS server if one is
+; id-kp-serverAuth or anyExtendedKeyUsage.
+(def x509_eku ((b bytes) (c X509) (v DerTlv)) (Result X509 (list int))
+  (match (x509_wrapped b v 48)
+    ((None) (x509_err "bad extKeyUsage"))
+    ((Some s)
+      (match (x509_eku_from b (.body s) (.end s) false)
+        ((None) (x509_err "bad extKeyUsage"))
+        ((Some ok) ((Ok X509 (list int)) (.server_auth c ok)))))))
+
+; x509_eku's loop: the OIDs from i up to j, ok whether one so far
+; allows a server.
+(def x509_eku_from ((b bytes) (i int) (j int) (ok bool)) (Option bool)
+  (if (ge i j)
+      (Some ok)
+      (match (der_tagged b i j 6)
+        ((None) ((None bool)))
+        ((Some t)
+          (let o (der_oid_text b t)
+            (x509_eku_from b (.end t) j (or ok (or (eq o "1.3.6.1.5.5.7.3.1") (eq o "2.5.29.37.0")))))))))
+
+; subjectKeyIdentifier: an OCTET STRING.
+(def x509_skid ((b bytes) (c X509) (v DerTlv)) (Result X509 (list int))
+  (match (x509_wrapped b v 4)
+    ((None) (x509_err "bad subjectKeyIdentifier"))
+    ((Some t) ((Ok X509 (list int)) (.subject_key_id c (der_content b t))))))
+
+; authorityKeyIdentifier: a SEQUENCE whose keyIdentifier, [0], is kept
+; if it is there.
+(def x509_akid ((b bytes) (c X509) (v DerTlv)) (Result X509 (list int))
+  (match (x509_wrapped b v 48)
+    ((None) (x509_err "bad authorityKeyIdentifier"))
+    ((Some s)
+      (match (der_tagged b (.body s) (.end s) 128)
+        ((None) ((Ok X509 (list int)) c))
+        ((Some t) ((Ok X509 (list int)) (.authority_key_id c (der_content b t))))))))
+
+; subjectAltName: a SEQUENCE of GeneralNames, of which its dNSNames,
+; [2], and iPAddresses, [7], are kept, in order.
+(def x509_san ((b bytes) (c X509) (v DerTlv)) (Result X509 (list int))
+  (match (x509_wrapped b v 48)
+    ((None) (x509_err "bad subjectAltName"))
+    ((Some s) (x509_san_from b (.has_san c true) (.body s) (.end s) (nil (list int)) (nil bytes)))))
+
+; x509_san's loop: the names from i up to j, after the reversed dns
+; and ips.
+(def x509_san_from ((b bytes) (c X509) (i int) (j int) (dns (list (list int))) (ips (list bytes))) (Result X509 (list int))
+  (if (ge i j)
+      ((Ok X509 (list int)) (.ip_addrs (.dns_names c (rev dns)) (rev ips)))
+      (match (der_tlv b i j)
+        ((None) (x509_err "bad subjectAltName"))
+        ((Some t)
+          (if (eq (.tag t) 130) (x509_san_from b c (.end t) j (cons (bytes_to_list (der_content b t)) dns) ips)
+              (eq (.tag t) 135) (x509_san_from b c (.end t) j dns (cons (der_content b t) ips))
+              (x509_san_from b c (.end t) j dns ips))))))
+
+; ------------------------------------------------------------- names
+
+; The first commonName in the Name n, its text, or "" if it has none:
+; n is a SEQUENCE of SETs of SEQUENCEs of a type and a value.
+(def x509_cn ((b bytes) (n DerTlv)) (list int)
+  (x509_cn_rdns b (.body n) (.end n)))
+
+; x509_cn's loop over the SETs from i up to j.
+(def x509_cn_rdns ((b bytes) (i int) (j int)) (list int)
+  (match (der_tagged b i j 49)
+    ((None) (nil int))
+    ((Some s)
+      (match (x509_cn_atvs b (.body s) (.end s))
+        ((None) (x509_cn_rdns b (.end s) j))
+        ((Some cn) cn)))))
+
+; The commonName among the type-and-values from i up to j, if one is.
+(def x509_cn_atvs ((b bytes) (i int) (j int)) (Option (list int))
+  (match (der_tagged b i j 48)
+    ((None) ((None (list int))))
+    ((Some a)
+      (match (der_tagged b (.body a) (.end a) 6)
+        ((None) (x509_cn_atvs b (.end a) j))
+        ((Some o)
+          (if (not (der_oid_is b o "2.5.4.3"))
+              (x509_cn_atvs b (.end a) j)
+              (match (der_after b o (.end a))
+                ((None) ((None (list int))))
+                ((Some v) (Some (x509_string b v))))))))))
+
+; A directory string's text: a UTF8String, PrintableString,
+; TeletexString, IA5String or VisibleString's bytes, a BMPString's
+; characters each kept as its low byte; "" for any other.
+(def x509_string ((b bytes) (v DerTlv)) (list int)
+  (if (any_eq (.tag v) (cons 12 (cons 19 (cons 20 (cons 22 (cons 26 (nil int)))))))
+      (bytes_to_list (der_content b v))
+      (eq (.tag v) 30)
+      (x509_bmp b (add (.body v) 1) (.end v) (nil int))
+      (nil int)))
+
+; A BMPString's low bytes from i, every other one before j, after the
+; reversed acc.
+(def x509_bmp ((b bytes) (i int) (j int) (acc (list int))) (list int)
+  (if (ge i j)
+      (rev acc)
+      (x509_bmp b (add i 2) j (cons (bytes_get b i) acc))))
+
+; --------------------------------------------------------- algorithms
+
+; The signature algorithm the AlgorithmIdentifier alg names.
+(def x509_sig_alg ((b bytes) (alg DerTlv)) X509SigAlg
+  (match (der_tagged b (.body alg) (.end alg) 6)
+    ((None) (X509SigOther))
+    ((Some o)
+      (let n (der_oid_text b o)
+        (if (eq n "1.2.840.113549.1.1.11") (X509RsaSha256)
+            (eq n "1.2.840.113549.1.1.12") (X509RsaSha384)
+            (eq n "1.2.840.113549.1.1.13") (X509RsaSha512)
+            (eq n "1.2.840.10045.4.3.2") (X509EcdsaSha256)
+            (eq n "1.2.840.10045.4.3.3") (X509EcdsaSha384)
+            (eq n "1.2.840.10045.4.3.4") (X509EcdsaSha512)
+            (eq n "1.2.840.113549.1.1.10") (x509_pss b o (.end alg))
+            (X509SigOther))))))
+
+; RSASSA-PSS from its parameters after the OID o, ending at j: taken
+; only with SHA-256, -384 or -512, MGF1 with the same, and the trailer
+; 1; the defaults are SHA-1's, so its parameters must say so.
+(def x509_pss ((b bytes) (o DerTlv) (j int)) X509SigAlg
+  (match (der_tagged b (.end o) j 48)
+    ((None) (X509SigOther))
+    ((Some s)
+      (let p (x509_pss_from b (.body s) (.end s) (X509Pss 1 1 20 1))
+        (if (and (any_eq (.hash p) (cons 256 (cons 384 (cons 512 (nil int)))))
+                (and (eq (.mgf p) (.hash p)) (and (eq (.trailer p) 1) (ge (.salt p) 0))))
+            (X509RsaPss (.hash p) (.salt p))
+            (X509SigOther))))))
+
+; x509_pss's loop: the parameters from i up to j read into p, each
+; [0] to [3] EXPLICIT; anything malformed makes the hash 0.
+(def x509_pss_from ((b bytes) (i int) (j int) (p X509Pss)) X509Pss
+  (if (ge i j)
+      p
+      (match (der_tlv b i j)
+        ((None) (.hash p 0))
+        ((Some t)
+          (let k (.end t)
+            (if (eq (.tag t) 160) (x509_pss_from b k j (.hash p (x509_hash_in b t)))
+                (eq (.tag t) 161) (x509_pss_from b k j (.mgf p (x509_mgf b t)))
+                (eq (.tag t) 162) (x509_pss_from b k j (.salt p (x509_int_or b t -1)))
+                (eq (.tag t) 163) (x509_pss_from b k j (.trailer p (x509_int_or b t 0)))
+                (.hash p 0)))))))
+
+; The INTEGER inside t, or fallback if it is not one.
+(def x509_int_or ((b bytes) (t DerTlv) (fallback int)) int
+  (match (x509_inner_int b t)
+    ((None) fallback)
+    ((Some n) n)))
+
+; The hash the AlgorithmIdentifier inside t names: 1 for SHA-1, 256,
+; 384 or 512 for SHA-256 to SHA-512, 0 for any other.
+(def x509_hash_in ((b bytes) (t DerTlv)) int
+  (match (der_tagged b (.body t) (.end t) 48)
+    ((None) 0)
+    ((Some a) (x509_hash_id b a))))
+
+; The hash the AlgorithmIdentifier a names, as x509_hash_in numbers it.
+(def x509_hash_id ((b bytes) (a DerTlv)) int
+  (match (der_tagged b (.body a) (.end a) 6)
+    ((None) 0)
+    ((Some o)
+      (let n (der_oid_text b o)
+        (if (eq n "2.16.840.1.101.3.4.2.1") 256
+            (eq n "2.16.840.1.101.3.4.2.2") 384
+            (eq n "2.16.840.1.101.3.4.2.3") 512
+            (eq n "1.3.14.3.2.26") 1
+            0)))))
+
+; MGF1's hash in the maskGenAlgorithm inside t, numbered as
+; x509_hash_in does, 0 if it is another mask function.
+(def x509_mgf ((b bytes) (t DerTlv)) int
+  (match (der_tagged b (.body t) (.end t) 48)
+    ((None) 0)
+    ((Some a)
+      (match (der_tagged b (.body a) (.end a) 6)
+        ((None) 0)
+        ((Some o)
+          (if (not (der_oid_is b o "1.2.840.113549.1.1.8"))
+              0
+              (match (der_tagged b (.end o) (.end a) 48)
+                ((None) 0)
+                ((Some h) (x509_hash_id b h)))))))))
+
+; The public key in the SubjectPublicKeyInfo k: its algorithm, then the
+; key as a BIT STRING; none if a key of a kind this reads is malformed.
+(def x509_key ((b bytes) (k DerTlv)) (Option X509Key)
+  (match (der_tagged b (.body k) (.end k) 48)
+    ((None) ((None X509Key)))
+    ((Some alg)
+      (match (der_tagged b (.end alg) (.end k) 3)
+        ((None) ((None X509Key)))
+        ((Some bs)
+          (match (der_bit_string b bs)
+            ((None) ((None X509Key)))
+            ((Some bits)
+              (match (der_tagged b (.body alg) (.end alg) 6)
+                ((None) ((None X509Key)))
+                ((Some o) (x509_key_of b (der_oid_text b o) o alg bits))))))))))
+
+; The key whose algorithm's OID, o, says oid, its parameters after o in
+; alg, its bits those of bits.
+(def x509_key_of ((b bytes) (oid (list int)) (o DerTlv) (alg DerTlv) (bits DerTlv)) (Option X509Key)
+  (if (eq oid "1.2.840.113549.1.1.1") (x509_rsa_key b bits)
+      (eq oid "1.2.840.10045.2.1") (x509_ec_key b (x509_curve b o alg) bits)
+      (Some (X509KeyOther))))
+
+; An RSAPublicKey, a SEQUENCE of n and e, filling bits.
+(def x509_rsa_key ((b bytes) (bits DerTlv)) (Option X509Key)
+  (match (der_tagged b (.body bits) (.end bits) 48)
+    ((None) ((None X509Key)))
+    ((Some s)
+      (match (der_tagged b (.body s) (.end s) 2)
+        ((None) ((None X509Key)))
+        ((Some n)
+          (match (der_tagged b (.end n) (.end s) 2)
+            ((None) ((None X509Key)))
+            ((Some e)
+              (if (or (not (eq (.end e) (.end s))) (not (eq (.end s) (.end bits))))
+                  ((None X509Key))
+                  (match (der_int_bytes b n)
+                    ((None) ((None X509Key)))
+                    ((Some nb)
+                      (match (der_int_bytes b e)
+                        ((None) ((None X509Key)))
+                        ((Some eb) (Some (X509Rsa nb eb))))))))))))))
+
+; The named curve id-ecPublicKey's parameters, after o in alg, say.
+(def x509_curve ((b bytes) (o DerTlv) (alg DerTlv)) X509Curve
+  (match (der_tagged b (.end o) (.end alg) 6)
+    ((None) (X509CurveOther))
+    ((Some c)
+      (let n (der_oid_text b c)
+        (if (eq n "1.2.840.10045.3.1.7") (X509P256)
+            (eq n "1.3.132.0.34") (X509P384)
+            (X509CurveOther))))))
+
+; An EC point, bits' bytes: on P-256 or P-384 the uncompressed form,
+; 04 then X and Y of 32 or 48 bytes each, or none; on another curve
+; any.
+(def x509_ec_key ((b bytes) (curve X509Curve) (bits DerTlv)) (Option X509Key)
+  (if (x509_point_ok b curve bits)
+      (Some (X509Ec curve (der_content b bits)))
+      ((None X509Key))))
+
+; Whether bits holds an uncompressed point of curve, for a curve this
+; knows; true for another.
+(def x509_point_ok ((b bytes) (curve X509Curve) (bits DerTlv)) bool
+  (let n (der_len bits)
+    (match curve
+      ((X509P256) (and (eq n 65) (eq (bytes_get b (.body bits)) 4)))
+      ((X509P384) (and (eq n 97) (eq (bytes_get b (.body bits)) 4)))
+      ((X509CurveOther) true))))
+
+; ------------------------------------------------------------- hosts
+
+; Whether host, a DNS name or a dotted IPv4 address, is one c is for,
+; as RFC 6125 says: an address only by an iPAddress of the
+; subjectAltName; a name by a dNSName, in any case, * allowed as the
+; whole leftmost label and standing for exactly one; the commonName
+; only when there is no subjectAltName.
+(def x509_host_ok ((c X509) (host (list int))) bool
+  (let h (x509_lower (x509_strip_dot host) (nil int))
+    (match (x509_ipv4 h)
+      ((Some ip) (any_eq ip (.ip_addrs c)))
+      ((None)
+        (if (or (is_empty h) (any_eq 42 h)) false
+            (.has_san c) (x509_dns_any (.dns_names c) h)
+            (and (not (is_empty (.common_name c))) (x509_dns_match (.common_name c) h)))))))
+
+; s without one trailing dot, as a fully qualified name may end.
+(def x509_strip_dot ((s (list int))) (list int)
+  (if (and (not (is_empty s)) (eq (last s) 46)) (drop_last s) s))
+
+; s with A to Z made a to z, after the reversed acc.
+(def x509_lower ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s)
+      (rev acc)
+      (let c (head s)
+        (x509_lower (tail s) (cons (if (is_upper c) (add c 32) c) acc)))))
+
+; Whether a dNSName of names matches the lowercase host h.
+(def x509_dns_any ((names (list (list int))) (h (list int))) bool
+  (if (is_empty names) false
+      (x509_dns_match (head names) h) true
+      (x509_dns_any (tail names) h)))
+
+; Whether the name pattern p, in any case, matches the lowercase host
+; h, which has no *: label for label, its leftmost * standing for one
+; non-empty label if two or more labels follow it.
+(def x509_dns_match ((p (list int)) (h (list int))) bool
+  (let (pl (split_on 46 (x509_lower (x509_strip_dot p) (nil int)))
+        hl (split_on 46 h))
+    (if (any_eq (nil int) hl) false
+        (not (eq (length pl) (length hl))) false
+        (eq (head pl) "*") (and (ge (length pl) 3) (eq (tail pl) (tail hl)))
+        (eq pl hl))))
+
+; The four bytes of h if it is a dotted IPv4 address, four decimal
+; numbers 0 to 255 of one to three digits.
+(def x509_ipv4 ((h (list int))) (Option bytes)
+  (let parts (split_on 46 h)
+    (if (not (eq (length parts) 4))
+        ((None bytes))
+        (x509_octets parts (nil int)))))
+
+; x509_ipv4's loop: each of parts as a byte, after the reversed acc.
+(def x509_octets ((parts (list (list int))) (acc (list int))) (Option bytes)
+  (if (is_empty parts)
+      (Some (bytes_from_list (rev acc)))
+      (let p (head parts)
+        (if (or (is_empty p) (or (gt (length p) 3) (not (is_number p))))
+            ((None bytes))
+            (match (word_number p)
+              ((None) ((None bytes)))
+              ((Some v) (if (gt v 255) ((None bytes)) (x509_octets (tail parts) (cons v acc)))))))))
+
+; --------------------------------------------------------------- PEM
+
+; The DER of every certificate in the PEM text, each block between
+; -----BEGIN CERTIFICATE----- and -----END CERTIFICATE----- decoded
+; from base64, in order; a block that does not decode is left out.
+(def x509_pem_certs ((text bytes)) (list bytes)
+  (x509_pem_from text 0 "-----BEGIN CERTIFICATE-----" "-----END CERTIFICATE-----" (nil bytes)))
+
+; x509_pem_certs's loop: the blocks from i on, begin and end their
+; lines, after the reversed acc.
+(def x509_pem_from ((b bytes) (i int) (begin (list int)) (end (list int)) (acc (list bytes))) (list bytes)
+  (let s (x509_find b i begin)
+    (if (lt s 0)
+        (rev acc)
+        (let (from (add s (length begin))
+              e (x509_find b from end))
+          (if (lt e 0)
+              (rev acc)
+              (let text (bytes_concat (x509_runs b from e (nil bytes)))
+                (match (base64_decode text 0 (bytes_len text))
+                  ((None) (x509_pem_from b (add e (length end)) begin end acc))
+                  ((Some der) (x509_pem_from b (add e (length end)) begin end (cons der acc))))))))))
+
+; Where s is first in b from i on, or -1.
+(def x509_find ((b bytes) (i int) (s (list int))) int
+  (if (ge i (bytes_len b)) -1
+      (and (eq (bytes_get b i) (head s)) (bytes_is_at b i s)) i
+      (x509_find b (add i 1) s)))
+
+; The runs of bytes from i up to j that are not spaces, tabs, carriage
+; returns or newlines, each as bytes, after the reversed acc.
+(def x509_runs ((b bytes) (i int) (j int) (acc (list bytes))) (list bytes)
+  (if (ge i j)
+      (rev acc)
+      (if (x509_space (bytes_get b i))
+          (x509_runs b (add i 1) j acc)
+          (let k (x509_run_end b i j)
+            (x509_runs b k j (cons (bytes_slice b i k) acc))))))
+
+; Where the run at i, before j, ends: the next space, or j.
+(def x509_run_end ((b bytes) (i int) (j int)) int
+  (if (or (ge i j) (x509_space (bytes_get b i))) i (x509_run_end b (add i 1) j)))
+
+; Whether c is a space, tab, carriage return or newline.
+(def x509_space ((c int)) bool
+  (or (eq c 32) (or (eq c 9) (or (eq c 13) (eq c 10)))))

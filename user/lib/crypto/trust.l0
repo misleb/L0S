@@ -1,0 +1,205 @@
+; trust.l0 -- whom a TLS client trusts: the roots, a store of
+; certificates (the board's is /etc/ssl/roots.pem), and a server's
+; chain checked to them (trust_chain): each certificate in date, the
+; first naming the host and fit to serve TLS, each signed by the next,
+; a CA, up to one the store holds or one a root of the store signed.
+; Also a signature by a certificate's key as TLS 1.3 names its schemes
+; (trust_signed), for the CertificateVerify. RSA PKCS#1 v1.5 and PSS,
+; ECDSA P-256 and P-384, over SHA-256, 384 and 512; nothing else is
+; checked, so nothing else is trusted. Pure, linked as the Makefile's
+; TRUST.
+
+; A store of roots, read.
+(data TrustRoots (TrustRoots (certs (list X509))))
+
+; The longest chain followed, the server's own included.
+(def trust_depth_max () int 8)
+
+; The roots the DER certificates ders are, those that read.
+(def trust_roots_of ((ders (list bytes))) TrustRoots
+  (TrustRoots (trust_parsed ders (nil X509))))
+
+; Each of ders that parses, onto acc reversed, then in order.
+(def trust_parsed ((ders (list bytes)) (acc (list X509))) (list X509)
+  (if (is_empty ders)
+      (rev acc)
+      (match (x509_parse (head ders))
+        ((Err why) (trust_parsed (tail ders) acc))
+        ((Ok c) (trust_parsed (tail ders) (cons c acc))))))
+
+; The roots of a PEM text, each CERTIFICATE block in it.
+(def trust_roots_of_pem ((text bytes)) TrustRoots
+  (trust_roots_of (x509_pem_certs text)))
+
+; How many roots r holds.
+(def trust_roots_count ((r TrustRoots)) int (length (.certs r)))
+
+; ---------------------------------------------------------------- hashes
+
+; SHA-256, 384 and 512 of a whole value, to pass as a function.
+(def trust_sha256 ((b bytes)) bytes (sha256 b 0 (bytes_len b)))
+(def trust_sha384 ((b bytes)) bytes (sha384 b 0 (bytes_len b)))
+(def trust_sha512 ((b bytes)) bytes (sha512 b 0 (bytes_len b)))
+
+; The hash of bits 256, 384 or 512 of m.
+(def trust_hash ((bits int) (m bytes)) bytes
+  (if (eq bits 256) (trust_sha256 m) (eq bits 384) (trust_sha384 m) (trust_sha512 m)))
+
+; ------------------------------------------------------------ signatures
+
+; Whether sig is k's RSA PKCS#1 v1.5 signature of m by the hash of bits.
+(def trust_rsa_pkcs1 ((k X509Key) (bits int) (m bytes) (sig bytes)) bool
+  (match k
+    ((X509Rsa n e) (rsa_pkcs1_verify n e sig (rsa_digest_info bits (trust_hash bits m))))
+    ((X509Ec c p) false)
+    ((X509KeyOther) false)))
+
+; Whether sig is k's RSA-PSS signature of m by the hash of bits, MGF1
+; with it, its salt salt bytes.
+(def trust_rsa_pss ((k X509Key) (bits int) (salt int) (m bytes) (sig bytes)) bool
+  (match k
+    ((X509Rsa n e)
+      (let d (trust_hash bits m)
+        (if (eq bits 256) (rsa_pss_verify n e sig d trust_sha256 salt)
+            (eq bits 384) (rsa_pss_verify n e sig d trust_sha384 salt)
+            (rsa_pss_verify n e sig d trust_sha512 salt))))
+    ((X509Ec c p) false)
+    ((X509KeyOther) false)))
+
+; Whether sig, DER, is k's ECDSA signature of m by the hash of bits, k
+; on curve want (256 or 384), or any curve it is on if want is 0.
+(def trust_ecdsa ((k X509Key) (want int) (bits int) (m bytes) (sig bytes)) bool
+  (match k
+    ((X509Rsa n e) false)
+    ((X509KeyOther) false)
+    ((X509Ec c p)
+      (match (ecdsa_sig_of_der sig)
+        ((None) false)
+        ((Some rs)
+          (match c
+            ((X509P256) (and (or (eq want 0) (eq want 256)) (ecdsa_verify (EcP256) p (.r rs) (.s rs) (trust_hash bits m))))
+            ((X509P384) (and (or (eq want 0) (eq want 384)) (ecdsa_verify (EcP384) p (.r rs) (.s rs) (trust_hash bits m))))
+            ((X509CurveOther) false)))))))
+
+; Whether sig is k's signature of m by TLS 1.3's scheme: ECDSA P-256
+; SHA-256 (0x0403) and P-384 SHA-384 (0x0503); RSA-PSS RSAE SHA-256,
+; 384, 512 (0x0804 to 0x0806), salt the hash's length; RSA PKCS#1 v1.5
+; SHA-256, 384, 512 (0x0401, 0x0501, 0x0601). Any other is false.
+(def trust_signed ((k X509Key) (scheme int) (m bytes) (sig bytes)) bool
+  (if (eq scheme 1027) (trust_ecdsa k 256 256 m sig)
+      (eq scheme 1283) (trust_ecdsa k 384 384 m sig)
+      (eq scheme 2052) (trust_rsa_pss k 256 32 m sig)
+      (eq scheme 2053) (trust_rsa_pss k 384 48 m sig)
+      (eq scheme 2054) (trust_rsa_pss k 512 64 m sig)
+      (eq scheme 1025) (trust_rsa_pkcs1 k 256 m sig)
+      (eq scheme 1281) (trust_rsa_pkcs1 k 384 m sig)
+      (eq scheme 1537) (trust_rsa_pkcs1 k 512 m sig)
+      false))
+
+; Whether c is signed by the key k, as its own algorithm says.
+(def trust_cert_signed ((k X509Key) (c X509)) bool
+  (let (m (bytes_slice (.der c) (.tbs_start c) (.tbs_end c))
+        sig (.sig c))
+    (match (.sig_alg c)
+      ((X509RsaSha256) (trust_rsa_pkcs1 k 256 m sig))
+      ((X509RsaSha384) (trust_rsa_pkcs1 k 384 m sig))
+      ((X509RsaSha512) (trust_rsa_pkcs1 k 512 m sig))
+      ((X509RsaPss bits salt) (trust_rsa_pss k bits salt m sig))
+      ((X509EcdsaSha256) (trust_ecdsa k 0 256 m sig))
+      ((X509EcdsaSha384) (trust_ecdsa k 0 384 m sig))
+      ((X509EcdsaSha512) (trust_ecdsa k 0 512 m sig))
+      ((X509SigOther) false))))
+
+; ----------------------------------------------------------------- chains
+
+; Why c is not to be used at now, or empty: out of date, or carrying a
+; critical extension not understood. what names it in the words.
+(def trust_unfit ((c X509) (now int) (what (list int))) (list int)
+  (if (lt now (.not_before c)) (append what " is not valid yet")
+      (gt now (.not_after c)) (append what " has expired")
+      (.unknown_critical c) (append what " has a critical extension this client does not know")
+      ""))
+
+; Why the server's own certificate c may not serve host at now, or empty.
+(def trust_leaf_unfit ((c X509) (host (list int)) (now int)) (list int)
+  (let why (trust_unfit c now "it")
+    (if (not (is_empty why)) why
+        (not (x509_host_ok c host)) (append "it does not name " host)
+        (not (.server_auth c)) "it is not for a TLS server"
+        (and (.has_key_usage c) (eq (bit_and (.key_usage c) 1) 0)) "its key is not for signatures"
+        "")))
+
+; Why c may not sign certificates, below as many CAs as below, at now,
+; or empty.
+(def trust_ca_unfit ((c X509) (below int) (now int)) (list int)
+  (let why (trust_unfit c now "a certificate in its chain")
+    (if (not (is_empty why)) why
+        (not (.is_ca c)) "a certificate in its chain is not a CA's"
+        (and (.has_key_usage c) (eq (bit_and (.key_usage c) 32) 0)) "a certificate in its chain may not sign certificates"
+        (and (ge (.path_len c) 0) (gt below (.path_len c))) "its chain is longer than a CA in it allows"
+        "")))
+
+; The server's chain, its own certificate first, as DER, checked for
+; host at now to roots: its own certificate, or why it is not trusted.
+(def trust_chain ((roots TrustRoots) (chain (list bytes)) (host (list int)) (now int)) (Result X509 (list int))
+  (match (trust_parse_all chain (nil X509))
+    ((Err why) ((Err X509 (list int)) why))
+    ((Ok certs)
+      (if (is_empty certs)
+          ((Err X509 (list int)) "no certificate")
+          (let (leaf (head certs)
+                why (trust_leaf_unfit leaf host now))
+            (if (not (is_empty why))
+                ((Err X509 (list int)) why)
+                (let why2 (trust_walk roots leaf (tail certs) 0 now)
+                  (if (is_empty why2) ((Ok X509 (list int)) leaf) ((Err X509 (list int)) why2)))))))))
+
+; Each of ders parsed, onto acc reversed, then in order; or why one does
+; not parse.
+(def trust_parse_all ((ders (list bytes)) (acc (list X509))) (Result (list X509) (list int))
+  (if (is_empty ders)
+      ((Ok (list X509) (list int)) (rev acc))
+      (match (x509_parse (head ders))
+        ((Err why) ((Err (list X509) (list int)) (append "a certificate does not read: " why)))
+        ((Ok c) (trust_parse_all (tail ders) (cons c acc))))))
+
+; Empty if c, with below CAs between it and the server's own, leads to
+; a root: is one, or is signed by one, or by one of pool that leads to
+; one; else why not.
+(def trust_walk ((roots TrustRoots) (c X509) (pool (list X509)) (below int) (now int)) (list int)
+  (if (trust_holds (.certs roots) (.der c)) ""
+      (trust_root_signed (.certs roots) c) ""
+      (ge below (trust_depth_max)) "its chain is too long"
+      (trust_up roots c pool pool below now "it is not signed by a root this board trusts")))
+
+; Whether rs holds a certificate whose DER is der.
+(def trust_holds ((rs (list X509)) (der bytes)) bool
+  (if (is_empty rs) false (or (eq (.der (head rs)) der) (trust_holds (tail rs) der))))
+
+; Whether a root of rs named as c's issuer signed it.
+(def trust_root_signed ((rs (list X509)) (c X509)) bool
+  (if (is_empty rs) false
+      (let r (head rs)
+        (if (and (eq (.subject r) (.issuer c)) (trust_cert_signed (.key r) c))
+            true
+            (trust_root_signed (tail rs) c)))))
+
+; c's issuer looked for among left, of pool, as trust_walk says; why
+; holds the reason given if none leads to a root.
+(def trust_up ((roots TrustRoots) (c X509) (left (list X509)) (pool (list X509)) (below int) (now int) (why (list int))) (list int)
+  (if (is_empty left)
+      why
+      (let i (head left)
+        (if (not (eq (.subject i) (.issuer c)))
+            (trust_up roots c (tail left) pool below now why)
+            (let unfit (trust_ca_unfit i below now)
+              (if (not (is_empty unfit)) (trust_up roots c (tail left) pool below now unfit)
+                  (not (trust_cert_signed (.key i) c))
+                  (trust_up roots c (tail left) pool below now "a certificate in its chain is not signed by the next")
+                  (let w (trust_walk roots i (trust_without pool (.der i) (nil X509)) (add below 1) now)
+                    (if (is_empty w) "" (trust_up roots c (tail left) pool below now w)))))))))
+
+; pool without the certificate whose DER is der, onto acc.
+(def trust_without ((pool (list X509)) (der bytes) (acc (list X509))) (list X509)
+  (if (is_empty pool) acc
+      (trust_without (tail pool) der (if (eq (.der (head pool)) der) acc (cons (head pool) acc)))))

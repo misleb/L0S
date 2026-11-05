@@ -267,8 +267,10 @@ answers, or another's; `run net ping HOST` and `run net send HOST PORT
 TEXT...` take names too, and `run net recv PORT` waits for a datagram
 and shows it.
 
-`run http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... [http://]HOST[:PORT][/PATH]`
-asks a server over HTTP/1.1, with the client library (below): a `GET`,
+`run http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... [http[s]://]HOST[:PORT][/PATH]`
+asks a server over HTTP/1.1, with the client library (below), and over
+TLS 1.3 for `https://` (port 443 unless given), the server's
+certificate checked to `/etc/ssl/roots.pem` (below): a `GET`,
 or with `-d` a `POST` of BODY, as `application/json` unless a `-H`
 names the `Content-Type`. It writes the body as each piece comes, with
 `-i` the head first (the status and reason, then each header); with
@@ -367,6 +369,91 @@ connection whose response ended with `keep` takes the next request, and
 one's ring; `http_close` finishes it, and `http_give_up` resets it and
 gives up its ring, as a program that keeps going must, not to run out
 of regions.
+
+`http_url_of s` reads a URL, `http://` (which may be left out) or
+`https://`, into an `HttpUrl`: whether over TLS, the server, the port (80
+or 443 unless given), the path (`/` if none, a fragment dropped) and the
+host as a request names it. `http_url_connect n np ap u roots` opens
+either; `https_connect n np ap host port roots` opens a connection over
+TLS. Before it connects it asks the clock for the time and `random` for
+64 bytes on `ap`, a port of the caller's that nothing else comes to
+then; once the connection is up it sends the ClientHello and receives
+on `np` until the handshake is done (within the same 30 seconds) or
+fails, which is its `Err`. The connection's `sec` then holds the
+session: `http_send` seals the request into records, and `http_feed`
+opens what comes before the reader sees it, writing back what the
+session must (a KeyUpdate's answer); the server's `close_notify` ends a
+body that runs to the close, and a record that does not open fails the
+connection. `http_reuse` opens a new connection with a new handshake;
+`http_close` sends `close_notify` first. `http_roots` reads the board's
+roots from `/etc/ssl/roots.pem`.
+
+## TLS
+
+```
+httpc ──records──▶ tls.l0 ──transcript, keys──▶ hkdf.l0, x25519.l0, chacha20.l0, aesgcm.l0
+                      └──the server's chain──▶ trust.l0 ──▶ x509.l0, der.l0, rsa.l0, ecdsa.l0
+```
+
+A TLS 1.3 client (RFC 8446), in libraries any program links, each pure
+and tested on the host, every primitive by its RFC's or NIST's vectors:
+
+| Library | What |
+|---|---|
+| [sha512.l0](../user/lib/crypto/sha512.l0), [hkdf.l0](../user/lib/crypto/hkdf.l0) | SHA-384 and SHA-512 (with [sha256.l0](../user/lib/format/sha256.l0)'s SHA-256); a hash chosen at run time, a transcript hashed as it grows (`hash_peek`), HMAC, HKDF, and TLS's `hkdf_expand_label` and `hkdf_derive_secret` |
+| [x25519.l0](../user/lib/crypto/x25519.l0) | X25519 (RFC 7748), 16 limbs of 16 bits |
+| [chacha20.l0](../user/lib/crypto/chacha20.l0) | ChaCha20-Poly1305 (RFC 8439) |
+| [aesgcm.l0](../user/lib/crypto/aesgcm.l0) | AES-128, 192 and 256, and GCM with 12-byte nonces, GHASH by Shoup's 4-bit table |
+| [bignum.l0](../user/lib/crypto/bignum.l0), [rsa.l0](../user/lib/crypto/rsa.l0), [ecdsa.l0](../user/lib/crypto/ecdsa.l0) | numbers of 30-bit limbs, Montgomery's multiplication; RSA PKCS#1 v1.5 and PSS, and ECDSA on P-256 and P-384, verified only |
+| [der.l0](../user/lib/format/der.l0), [x509.l0](../user/lib/crypto/x509.l0) | DER read in place; an X.509 certificate read whole, its names matched to a host as RFC 6125 says; PEM's certificates |
+| [trust.l0](../user/lib/crypto/trust.l0) | the roots (`TrustRoots`), a server's chain checked to them (`trust_chain`), and a signature by TLS 1.3's scheme (`trust_signed`) |
+| [tls.l0](../user/lib/proto/tls.l0) | the client: the ClientHello, the handshake read and checked, the keys, records sealed and opened |
+
+**The handshake.** `tls_start host secret random roots now` makes the
+ClientHello: TLS 1.3 only; X25519 only, its key share made from
+`secret`; `TLS_CHACHA20_POLY1305_SHA256` then `TLS_AES_128_GCM_SHA256`;
+the signature schemes ECDSA P-256 and P-384 with SHA-256 and SHA-384,
+RSA-PSS with SHA-256, 384 and 512, and RSA PKCS#1 v1.5 for certificates;
+the server's name (SNI) unless the host is an address; ALPN's
+`http/1.1`. `tls_more t b i j` reads what the server sends, as it comes
+in any pieces, records then handshake messages, into a `TlsOut`: the
+session after it, the records to send back, and the data that came.
+The ServerHello's key share gives the handshake's secrets; the
+Certificate's chain is checked with `trust_chain`; the
+CertificateVerify must verify by the server's key over the transcript;
+the Finished must match; then the client's Finished is sent and both
+directions are keyed for data. `tls_send` seals data into records of at
+most 16384 bytes, and `tls_close` makes the `close_notify`. Once up, a
+NewSessionTicket is passed over and a KeyUpdate followed, and answered
+when asked. A failure is the session's stage `failed`, with why, and
+nothing more is read. The whole of RFC 8448's simple 1-RTT handshake,
+fed in, gives its client records byte for byte (`tls_test.l0`).
+
+**The chain.** `trust_chain roots chain host now` reads each
+certificate of the server's chain; its own, the first, must be valid at
+`now`, name `host` (a dNSName of its SAN, `*` only as a whole leftmost
+label; an address only an iPAddress; its CN only when it has no SAN),
+allow serving TLS (extKeyUsage) and signing (keyUsage, if it says).
+Then each certificate must be one the store holds, or signed by a root
+whose subject is its issuer, or signed by another of the chain, in any
+order, that is a CA in date, may sign certificates, and allows as many
+CAs below it as there are; at most 8 deep. A certificate with a
+critical extension not read is refused. A signature is by RSA PKCS#1
+v1.5 or PSS, or ECDSA P-256 or P-384, over SHA-256, 384 or 512; any
+other (SHA-1, Ed25519) is not trusted.
+
+**The roots.** `/etc/ssl/roots.pem` is Mozilla's CA bundle, 118 roots
+([certs/roots.pem](../certs/roots.pem), its source in
+[certs/README.md](../certs/README.md)), staged by `stage_etc` into the
+demo's and the Pi 5's initramfs; `install` carries it onto a system
+volume with the rest of `/etc`. An e2e case has its own etc, and so
+its own roots. On the host, parsing the whole bundle takes about 4 ms.
+
+**Its cost**, on the host: a handshake to a server with an ECDSA chain
+takes two X25519s (about 3 ms each) and three or four signature checks
+(P-256 about 3 ms, P-384 about 7 ms, RSA-2048 about 1.5 ms, RSA-4096
+about 5 ms); records seal and open at about 80 MB/s with ChaCha20 and
+40 MB/s with AES-GCM.
 
 ## Reaching a model's API
 
@@ -535,12 +622,16 @@ provider behind one interface. It finds the proxy and the token in two
 files:
 
 - `/etc/agent/config`, a line each, `#` a comment: `api HOST:PORT`, the
-  proxy, which is needed; `model NAME`, `claude-sonnet-5-5` if none;
+  proxy, or `api https://HOST[:PORT]`, the API itself over TLS (one of
+  them is needed); `model NAME`, `claude-sonnet-5-5` if none;
   `max_tokens N`, 8192 if none; any other key is left for its program;
-- `/etc/agent/token`, the board's token, its first line.
+- `/etc/agent/token`, the board's token for the proxy, or for the API
+  itself its key, its first line.
 
+`model_connect n np ap c` opens the connection, to the proxy, or over
+TLS to the API, its certificate checked to the board's roots.
 `model_request` makes a request's bytes, `POST /v1/messages` with the
-token as its bearer, `anthropic-version: 2023-06-01` and a body of
+token as its bearer to the proxy, or as `x-api-key` to the API, `anthropic-version: 2023-06-01` and a body of
 `model`, `max_tokens`, `stream: true` and the `system`, `messages` and
 `tools` given as `Json`, so a caller adds `cache_control` where it
 wants it; `model_events` reads each event of the stream as
@@ -578,6 +669,11 @@ system volume, the two files may be written at a shell instead: `mkdir
 /etc/agent/token TOKEN`. The token is never in the source tree: it is
 made in `build/`, and the e2e case's is a test's own, which only the
 stand-in's proxy takes.
+
+With TLS a board needs no proxy: `api https://api.anthropic.com` in
+`/etc/agent/config` and the API key as `/etc/agent/token` reach the API
+straight from the board, which then holds the key. `build_app` and the
+release's endpoints are the proxy's and do not exist there.
 
 ## The network on the Raspberry Pi 5
 
@@ -717,8 +813,8 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   by powers of ten in floats, which is the nearest float or within an
   ulp or two of it. An object's fields are a list, found by name one by
   one, which suits the handful an API's object has.
-- **HTTP is plain HTTP/1.1, a request at a time.** There is no TLS, so
-  only `http://`; a connection carries one request and then its
+- **HTTP is HTTP/1.1, a request at a time.** A connection carries one
+  request and then its
   response, never several in flight; a head may be at most 16384 bytes;
   no content coding (gzip) is asked for or read, and `http` follows no
 - **The time is one server's, to the second, and trusted.** `ntp` asks
@@ -730,8 +826,23 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   5 minutes of starting, `ntp` exits, and does not try again.
   redirect. A connection's notices go to one port, which `http_connect`
   waits on alone, passing over another connection's.
-- **A model's API is the host's.** The key and the TLS are the host's
-  proxy's: the board speaks plain HTTP to it over the local network,
+- **TLS is a client of TLS 1.3 alone, as small as servers allow.** No
+  TLS 1.2 or older; X25519 alone, so a server that asks for another
+  group (a HelloRetryRequest) is refused; no client certificate, so a
+  server that asks for one is refused; no resumption, no early data, no
+  OCSP stapling or revocation of any kind; a record of at most 16384
+  bytes, no record_size_limit. The code is not constant-time: its
+  timing depends on keys and data, which matters for the session keys a
+  network observer could time, if anyone could time it that finely. A
+  certificate's nameConstraints and policies are not read (one marked
+  critical is refused). The roots are those staged at build time, and
+  the date is the board's clock's: one that says before 2024 refuses
+  every certificate, and one set wrongly (ntp is not authenticated)
+  could pass an expired one. On a Pi 5 `random` is `rng200`'s, which
+  has not yet run on a board (roadmap 0047); without it `https://`
+  fails, saying so.
+- **A model's API is the host's, unless reached over TLS.** Through the
+  proxy, the key and the TLS are the host's: the board speaks plain HTTP to it over the local network,
   so a board is tied to a host that runs it, and anything on that
   network that has the board's token can spend on the host's key. The
   proxy knows one token, forwards to one base URL, and caps nothing it

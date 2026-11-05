@@ -1,6 +1,6 @@
 # 0047: Randomness on the Pi 5
 
-Track: Pi 5 · Status: idea · Needs: – · Spec: devices.md, pi5.md
+Track: Pi 5 · Status: active · Needs: probes/driver/REQUEST-pi5-rng.md (met) · Spec: devices.md, pi5.md
 
 ## Why
 
@@ -20,9 +20,25 @@ the same random protocol.
 
 ## Steps
 
-To be written: find the generator's address, registers and interrupt,
-if any, from the board's device tree, and read them through a region
-as section 10.3's tables do.
+- [x] **The generator found**: the BCM2712's RNG200,
+  `brcm,bcm2711-rng200` at 0x7d208000 in `bcm2712.dtsi`, 0x107D208000
+  to the CPU, 0x28 bytes, no interrupt; its registers and how Linux
+  turns it on and reads it from `iproc-rng200.c`'s bcm2711 functions.
+- [x] **`rng200`**, `user/sbin/rng200`: the generator turned on if it
+  is off, as Linux does; for `bytes N`, warmed up, the FIFO's words
+  taken as they come, least significant byte first, a failed health
+  test restarting it once; `random` served as `virtio-rng` serves it.
+  With no region it can open, it says so and exits 0. Started before
+  `inet` in `pi5/etc/system`, flagged `dev` in `pi5/etc/inittab`.
+  `inet` needs no change: it asks `random` for its secret at its first
+  connection.
+- [x] **The region asked of L0**:
+  [probes/driver/REQUEST-pi5-rng.md](../probes/driver/REQUEST-pi5-rng.md),
+  0x107D208000, 0x28 bytes.
+- [ ] **On a Pi 5**, now that L0 gives the region: the log's `rng200: an
+  RNG200 at 0x107d208000, serving random`, `run random 32` different
+  every run and every boot, and `run http https://example.com/` over
+  TLS (0048's last step).
 
 ## Spec changes
 
@@ -32,3 +48,14 @@ as section 10.3's tables do.
 ## Log
 
 - 2026-10-29: written, with 0041 to 0046, 0048 and 0049; 0048 needs it.
+- 2026-11-05: steps written and the first three done. The generator
+  is no region of L0's yet, so `rng200` is written and tested on the
+  host but has not touched the device; on QEMU it says there is no
+  RNG200 and exits 0. Blocked on the region, asked of L0 in
+  REQUEST-pi5-rng.md.
+- 2026-11-05: the region landed in L0 (its roadmap 0151, commit
+  d47d7cd, 0x107D208000, 0x28 bytes, no interrupt) and the toolchain
+  was installed; the request is marked landed. What is left is the run
+  on a Pi 5: `make pi5-netboot` (or a card), then in the log
+  `rng200: an RNG200 at 0x107d208000, serving random`, `run random 32`
+  twice and after a reboot, and `run http https://example.com/`.

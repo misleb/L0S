@@ -35,8 +35,8 @@ move independently, so several can be active at once.
 | [0039](0039-paced-drawing-areas.md) Drawing areas paced too, and a resize that overlaps the restack | Toolkit | active | 3/4 | – | toolkit.md, desktop.md |
 | [0040](0040-paint-at-scale-2.md) Painting at scale 2 as fast as at scale 1 | Toolkit | active | 3/5 | – | toolkit.md |
 | [0046](0046-agent-self-knowledge.md) The agent learns how it and L0S work | Agent | idea | – | 0045 (met) | agent.md |
-| [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | idea | – | – | devices.md, pi5.md |
-| [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | idea | – | 0041, 0047 | network.md, programs.md |
+| [0047](0047-pi5-random.md) Randomness on the Pi 5 | Pi 5 | active | 3/4 | probes/driver/REQUEST-pi5-rng.md (met) | devices.md, pi5.md, programs.md |
+| [0048](0048-tls-client.md) A TLS 1.3 client in L0 | Network | active | 5/7 | 0041 (met), 0047 | network.md, programs.md, agent.md, testing.md |
 | [0050](0050-hvs-crowded-lines.md) `hvs` at 4K: crowded lines and a whole-screen flash | Display | idea | – | 0038 | display.md |
 | [0051](0051-wm-input-port.md) `wm` takes input on a port of its own, ahead of requests | Desktop | idea | – | – | desktop.md, programs.md |
 | [0052](0052-ops-cut-to-node.md) A node's ops cut to the node when painted | Toolkit | idea | – | – | toolkit.md |

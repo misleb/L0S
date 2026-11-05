@@ -1,9 +1,11 @@
 ; http.l0 -- asks a server over HTTP/1.1, through the network stack's
-; TCP, with the client library (proto/httpc.l0):
+; TCP, with the client library (proto/httpc.l0), and over TLS 1.3 for
+; https://:
 ;
-;   http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... [http://]HOST[:PORT][/PATH]
+;   http [-i] [-j] [-e] [-d BODY] [-H NAME:VALUE]... [http[s]://]HOST[:PORT][/PATH]
 ;                           GET of PATH (/ if none) of the server at
-;                           HOST, port 80 if none, or with -d a POST of
+;                           HOST, port 80 if none (443 for https), or
+;                           with -d a POST of
 ;                           BODY, as application/json unless a -H names
 ;                           the Content-Type; the body written to
 ;                           standard output as each piece comes. -i
@@ -15,7 +17,9 @@
 ;                           its data's newlines as spaces
 ;
 ; HOST is a name, which inet's name server resolves, or an address
-; dotted. A header is one word, NAME:VALUE, as the shell does not quote.
+; dotted. An https:// server's certificate is checked to the roots in
+; /etc/ssl/roots.pem, for its name, by the clock's date, and the command
+; fails if it does not check. A header is one word, NAME:VALUE, as the shell does not quote.
 ; It sends one request and reads the one response, whose end, by its
 ; length, its last chunk or the connection's close, ends it; it does not
 ; follow a redirect. A status other than 2xx is said on standard error
@@ -26,36 +30,6 @@
 
 ; How long to wait for the server to say anything more.
 (def idle_ns () int 10000000000)
-
-; ---------------------------------------------------------------------- URLs
-
-; A page asked for: the server, its name or its address dotted, and its
-; port, the path, and the host as the request names it.
-(data Url (Url (list int) int (list int) (list int)))
-
-; The URL s names, which may leave out the http://.
-(def url_of ((s (list int))) (Result Url (list int))
-  (let rest (if (starts_with s "http://") (drop_n s 7) s)
-    (if (contains (up_to 47 rest) "/")
-        ((Err Url (list int)) "no path to a page here")
-        (or (starts_with rest "https://") (contains (up_to 47 rest) "@"))
-        ((Err Url (list int)) "only http:// is spoken")
-        (url_parts (up_to 47 rest) (let p (drop_n rest (length (up_to 47 rest))) (if (is_empty p) "/" p))))))
-
-; The URL of a host and port as hostport, `ADDR` or `ADDR:PORT`, and path.
-(def url_parts ((hostport (list int)) (path (list int))) (Result Url (list int))
-  (let server (up_to 58 hostport)
-    (if (not (dns_name_ok server))
-        ((Err Url (list int)) (append "not a name or an address: " server))
-        (let after (drop_n hostport (length server))
-          (if (is_empty after)
-              ((Ok Url (list int)) (Url server 80 path hostport))
-              (match (word_number (drop_n after 1))
-                ((None) ((Err Url (list int)) (append "not a port: " (drop_n after 1))))
-                ((Some port)
-                  (if (and (ge port 1) (le port 65535))
-                      ((Ok Url (list int)) (Url server port path hostport))
-                      ((Err Url (list int)) "a port is 1 to 65535")))))))))
 
 ; ------------------------------------------------------------------ options
 
@@ -227,19 +201,27 @@
     ((Ok o)
       (match o
         ((Opts show json events body hs u)
-          (match (url_of u)
+          (match (http_url_of u)
             ((Err why) (complain why))
-            ((Ok url) (fetch (inet_open) (port_new) o url))))))))
+            ((Ok url)
+              (match (url_roots url)
+                ((Err why) (complain why))
+                ((Ok roots) (fetch (inet_open) (port_new) (port_new) o url roots))))))))))
 
-; o asked of the server url names, through inet n, its notices to np.
-(def fetch ((n Inet) (np int) (o Opts) (u Url)) int
-  (match u
-    ((Url server port path host)
-      (match (http_connect n np server port)
-        ((Err why) (complain why))
-        ((Ok c)
-          (match (http_ask c (opts_method o) path (request_headers o) (post_body o))
-            ((HttpGot c2 parts) (fed o c2 (Got 0 (nil int) (nil bytes) (sse_new)) parts))))))))
+; The roots an https:// URL's certificate is checked to, read from the
+; board's store; none for http://.
+(def url_roots ((u HttpUrl)) (Result TrustRoots (list int))
+  (if (.tls u) (http_roots) ((Ok TrustRoots (list int)) (trust_roots_of (nil bytes)))))
+
+; o asked of the server u names, through inet n, its notices to np, over
+; TLS checked to roots if u is https://, the clock and random asked on
+; ap.
+(def fetch ((n Inet) (np int) (ap int) (o Opts) (u HttpUrl) (roots TrustRoots)) int
+  (match (http_url_connect n np ap u roots)
+    ((Err why) (complain why))
+    ((Ok c)
+      (match (http_ask c (opts_method o) (.path u) (request_headers o) (post_body o))
+        ((HttpGot c2 parts) (fed o c2 (Got 0 (nil int) (nil bytes) (sse_new)) parts))))))
 
 ; parts dealt with in order, then the next waited for, until the
 ; response is over: the exit status.

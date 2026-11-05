@@ -1,0 +1,377 @@
+; aesgcm.l0 -- AES (FIPS 197) and AES-GCM (NIST SP 800-38D), for TLS
+; 1.3's records: a key's schedule and lookup tables made once, then each
+; record sealed or opened in one pass, the counter mode and GHASH
+; together. AES-128 and AES-256 (and AES-192); GCM with 12-byte nonces
+; only, the one length TLS uses. Not constant time: the tables are read
+; at indices the key and data choose, which is fine for a client of
+; public data on its own machine, but not against a neighbour who can
+; time it. Pure.
+
+; ------------------------------------------------------------------ AES
+
+; An expanded AES key: its number of rounds, 10, 12 or 14; the round
+; keys, 4 (rounds + 1) 32-bit words; and the lookup tables, made once
+; per key: T0 to T3 at 0, 256, 512 and 768, the S-box at 1024.
+(data AesKey (AesKey (rounds int) (rk (array int)) (t (array int))))
+
+; The four 32-bit words of a block, each its bytes most significant
+; first.
+(data AesWords (AesWords (w0 int) (w1 int) (w2 int) (w3 int)))
+
+; x kept to 32 bits.
+(def aes_32 ((x int)) int (bit_and x 4294967295))
+
+; x, a byte, times 2 in AES's field, x^8 + x^4 + x^3 + x + 1 (0x11B).
+(def aes_xtime ((x int)) int
+  (bit_and (bit_xor (bit_shl x 1) (if (ge x 128) 27 0)) 255))
+
+; The byte x rotated left by n.
+(def aes_rotl8 ((x int) (n int)) int
+  (bit_and (bit_or (bit_shl x n) (bit_shr x (sub 8 n))) 255))
+
+; The 32-bit word at byte i of b, most significant byte first.
+(def aes_be32 ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 24)
+    (bit_or (bit_shl (bytes_get b (add i 1)) 16)
+      (bit_or (bit_shl (bytes_get b (add i 2)) 8) (bytes_get b (add i 3))))))
+
+; The exponent and logarithm tables of the field with 3 as generator:
+; exp at 0 to 255, log at 256 to 511, from i on, x being 3 to the i.
+(def aes_exp_log ((e (array int)) (i int) (x int)) (array int)
+  (if (ge i 255)
+      e
+      (aes_exp_log (array_set (array_set e i x) (add 256 x) i) (add i 1) (bit_xor x (aes_xtime x)))))
+
+; The inverse of the byte a in the field, 0 for 0, from the tables e.
+(def aes_inverse ((e (array int)) (a int)) int
+  (if (eq a 0) 0 (array_get e (mod (sub 255 (array_get e (add 256 a))) 255))))
+
+; The S-box's value at x: its inverse through the affine map (FIPS 197,
+; 5.1.1).
+(def aes_sub_of ((e (array int)) (x int)) int
+  (let b (aes_inverse e x)
+    (bit_xor (bit_xor b 99)
+      (bit_xor (bit_xor (aes_rotl8 b 1) (aes_rotl8 b 2)) (bit_xor (aes_rotl8 b 3) (aes_rotl8 b 4))))))
+
+; t with its tables filled from x up to 256, e the field's tables.
+(def aes_fill ((t (array int)) (e (array int)) (x int)) (array int)
+  (if (ge x 256)
+      t
+      (let (s (aes_sub_of e x)
+            s2 (aes_xtime s)
+            t0 (bit_or (bit_or (bit_shl s2 24) (bit_shl s 16)) (bit_or (bit_shl s 8) (bit_xor s2 s)))
+            t1 (bit_or (bit_shr t0 8) (aes_32 (bit_shl t0 24)))
+            t2 (bit_or (bit_shr t0 16) (aes_32 (bit_shl t0 16)))
+            t3 (bit_or (bit_shr t0 24) (aes_32 (bit_shl t0 8))))
+        (aes_fill (array_set (array_set (array_set (array_set (array_set t x t0) (add 256 x) t1) (add 512 x) t2) (add 768 x) t3) (add 1024 x) s)
+          e (add x 1)))))
+
+; The lookup tables: T0 to T3, each a column of MixColumns times the
+; S-box, and the S-box itself.
+(def aes_tables () (array int)
+  (aes_fill (array_new 1280 0) (aes_exp_log (array_new 512 0) 0 1) 0))
+
+; The S-box applied to each byte of the word w, t the tables.
+(def aes_sub_word ((t (array int)) (w int)) int
+  (bit_or (bit_or (bit_shl (array_get t (add 1024 (bit_shr w 24))) 24)
+                  (bit_shl (array_get t (add 1024 (bit_and (bit_shr w 16) 255))) 16))
+          (bit_or (bit_shl (array_get t (add 1024 (bit_and (bit_shr w 8) 255))) 8)
+                  (array_get t (add 1024 (bit_and w 255))))))
+
+; w, the round keys, with its words from i up to its length made from
+; those before (FIPS 197, 5.2), the key being nk words; rcon is the
+; next round constant.
+(def aes_expand ((w (array int)) (t (array int)) (nk int) (i int) (rcon int)) (array int)
+  (if (ge i (array_len w))
+      w
+      (let (prev (array_get w (sub i 1))
+            back (array_get w (sub i nk))
+            first (eq (mod i nk) 0)
+            temp (if first
+                     (bit_xor (aes_sub_word t (aes_32 (bit_or (bit_shl prev 8) (bit_shr prev 24)))) (bit_shl rcon 24))
+                     (and (gt nk 6) (eq (mod i nk) 4))
+                     (aes_sub_word t prev)
+                     prev))
+        (aes_expand (array_set w i (bit_xor back temp)) t nk (add i 1) (if first (aes_xtime rcon) rcon)))))
+
+; w with its first words, from i up to nk, the key's.
+(def aes_load_key ((w (array int)) (key bytes) (nk int) (i int)) (array int)
+  (if (ge i nk)
+      w
+      (aes_load_key (array_set w i (aes_be32 key (mul i 4))) key nk (add i 1))))
+
+; The expanded key for key, 16, 24 or 32 bytes: AES-128, AES-192 or
+; AES-256.
+(def aes_key ((key bytes)) AesKey
+  (let (nk (div (bytes_len key) 4)
+        nr (add nk 6)
+        t (aes_tables)
+        w (aes_expand (aes_load_key (array_new (mul 4 (add nr 1)) 0) key nk 0) t nk nk 1))
+    (AesKey nr w t)))
+
+; The word of a middle round for the columns a, b, c, d, in that
+; order, and the round key word r.
+(def aes_column ((t (array int)) (a int) (b int) (c int) (d int) (r int)) int
+  (bit_xor (bit_xor (array_get t (bit_shr a 24))
+                    (array_get t (add 256 (bit_and (bit_shr b 16) 255))))
+           (bit_xor (bit_xor (array_get t (add 512 (bit_and (bit_shr c 8) 255)))
+                             (array_get t (add 768 (bit_and d 255))))
+                    r)))
+
+; The word of the last round, which has no MixColumns, for the columns
+; a, b, c, d and the round key word r.
+(def aes_last_column ((t (array int)) (a int) (b int) (c int) (d int) (r int)) int
+  (bit_xor (bit_or (bit_or (bit_shl (array_get t (add 1024 (bit_shr a 24))) 24)
+                           (bit_shl (array_get t (add 1024 (bit_and (bit_shr b 16) 255))) 16))
+                   (bit_or (bit_shl (array_get t (add 1024 (bit_and (bit_shr c 8) 255))) 8)
+                           (array_get t (add 1024 (bit_and d 255)))))
+           r))
+
+; The state s0 to s3 after rounds r to nr, with the round keys rk.
+(def aes_rounds ((rk (array int)) (t (array int)) (nr int) (r int) (s0 int) (s1 int) (s2 int) (s3 int)) AesWords
+  (let k (mul r 4)
+    (if (ge r nr)
+        (AesWords (aes_last_column t s0 s1 s2 s3 (array_get rk k))
+                  (aes_last_column t s1 s2 s3 s0 (array_get rk (add k 1)))
+                  (aes_last_column t s2 s3 s0 s1 (array_get rk (add k 2)))
+                  (aes_last_column t s3 s0 s1 s2 (array_get rk (add k 3))))
+        (aes_rounds rk t nr (add r 1)
+          (aes_column t s0 s1 s2 s3 (array_get rk k))
+          (aes_column t s1 s2 s3 s0 (array_get rk (add k 1)))
+          (aes_column t s2 s3 s0 s1 (array_get rk (add k 2)))
+          (aes_column t s3 s0 s1 s2 (array_get rk (add k 3)))))))
+
+; The block whose words are s0 to s3 encrypted under the round keys rk,
+; nr rounds.
+(def aes_encrypt_words ((rk (array int)) (t (array int)) (nr int) (s0 int) (s1 int) (s2 int) (s3 int)) AesWords
+  (aes_rounds rk t nr 1
+    (bit_xor s0 (array_get rk 0)) (bit_xor s1 (array_get rk 1))
+    (bit_xor s2 (array_get rk 2)) (bit_xor s3 (array_get rk 3))))
+
+; The 16 bytes of b at i encrypted under k.
+(def aes_encrypt_block ((k AesKey) (b bytes) (i int)) bytes
+  (let e (aes_encrypt_words (.rk k) (.t k) (.rounds k)
+           (aes_be32 b i) (aes_be32 b (add i 4)) (aes_be32 b (add i 8)) (aes_be32 b (add i 12)))
+    (bytes_from_list (rev (gcm_push_words (nil int) (.w0 e) (.w1 e) (.w2 e) (.w3 e) 16)))))
+
+; ---------------------------------------------------------------- GHASH
+
+; What a connection keeps for one direction of AES-GCM: the AES key,
+; and GHASH's table for its H, Shoup's of 4 bits (SP 800-38D's
+; multiplication a nibble at a time): for each nibble n, H times n as
+; two 64-bit halves, the high at 2n and the low at 2n + 1, and at 32 + r
+; the reduction of the 4 bits r shifted out, already in place at bit 48.
+(data GcmKey (GcmKey (aes AesKey) (h (array int))))
+
+; A 128-bit field element, or GHASH's state: its high and low 64 bits,
+; each its bytes most significant first.
+(data GcmPair (GcmPair (hi int) (lo int)))
+
+; The reduction of the nibble r shifted out of an element, R = 0xE1
+; times r's bits as GCM orders them: 0xE100, 0x7080, 0x3840, 0x1C20 for
+; its bits 3 to 0.
+(def gcm_last4 ((r int)) int
+  (bit_xor (bit_xor (if (eq (bit_and r 8) 0) 0 57600) (if (eq (bit_and r 4) 0) 0 28800))
+           (bit_xor (if (eq (bit_and r 2) 0) 0 14400) (if (eq (bit_and r 1) 0) 0 7200))))
+
+; ht with H times i, for i 4, 2 and 1 in turn, from H times 8, vh and
+; vl: each the one before divided by x.
+(def gcm_halves ((ht (array int)) (i int) (vh int) (vl int)) (array int)
+  (if (eq i 0)
+      ht
+      (let (nl (bit_or (bit_shl vh 63) (bit_shr vl 1))
+            nh (bit_xor (bit_shr vh 1) (if (eq (bit_and vl 1) 0) 0 (bit_shl 3774873600 32))))
+        (gcm_halves (array_set (array_set ht (mul 2 i) nh) (add (mul 2 i) 1) nl) (div i 2) nh nl))))
+
+; ht with H times i + j for j from j up to i, i a power of 2, and
+; then for the next i up to 8: each the sum of two already there.
+(def gcm_combine ((ht (array int)) (i int) (j int)) (array int)
+  (if (gt i 8)
+      ht
+      (ge j i)
+      (gcm_combine ht (mul i 2) 1)
+      (let (hh (bit_xor (array_get ht (mul 2 i)) (array_get ht (mul 2 j)))
+            hl (bit_xor (array_get ht (add (mul 2 i) 1)) (array_get ht (add (mul 2 j) 1)))
+            n (mul 2 (add i j)))
+        (gcm_combine (array_set (array_set ht n hh) (add n 1) hl) i (add j 1)))))
+
+; ht with the reductions at 32 to 47, from r on.
+(def gcm_rems ((ht (array int)) (r int)) (array int)
+  (if (ge r 16)
+      ht
+      (gcm_rems (array_set ht (add 32 r) (bit_shl (gcm_last4 r) 48)) (add r 1))))
+
+; GHASH's table for the element H, vh and vl.
+(def gcm_table ((vh int) (vl int)) (array int)
+  (let ht (array_set (array_set (array_new 48 0) 16 vh) 17 vl)
+    (gcm_rems (gcm_combine (gcm_halves ht 4 vh vl) 2 1) 0)))
+
+; What a connection keeps to seal and open records under key, 16 or 32
+; bytes (24 works too): the AES key and GHASH's table for H, the zero
+; block encrypted.
+(def gcm_key ((key bytes)) GcmKey
+  (let (k (aes_key key)
+        e (aes_encrypt_words (.rk k) (.t k) (.rounds k) 0 0 0 0))
+    (GcmKey k (gcm_table (bit_or (bit_shl (.w0 e) 32) (.w1 e)) (bit_or (bit_shl (.w2 e) 32) (.w3 e))))))
+
+; z, zh and zl, shifted one nibble toward the low end, the nibble
+; shifted out reduced, and H times the nibble n added.
+(def gcm_nibble_hi ((ht (array int)) (zh int) (zl int) (n int)) int
+  (bit_xor (bit_xor (bit_shr zh 4) (array_get ht (add 32 (bit_and zl 15)))) (array_get ht (mul 2 n))))
+
+; The low half of the same step.
+(def gcm_nibble_lo ((ht (array int)) (zh int) (zl int) (n int)) int
+  (bit_xor (bit_or (bit_shl zh 60) (bit_shr zl 4)) (array_get ht (add (mul 2 n) 1))))
+
+; The product so far, zh and zl, after the nibbles of the half x from
+; shift s up to 64, two at a time, then those of the half y if more.
+(def gcm_mult_half ((ht (array int)) (x int) (y int) (more bool) (s int) (zh int) (zl int)) GcmPair
+  (if (ge s 64)
+      (if more (gcm_mult_half ht y 0 false 0 zh zl) (GcmPair zh zl))
+      (let (n1 (bit_and (bit_shr x s) 15)
+            h1 (gcm_nibble_hi ht zh zl n1)
+            l1 (gcm_nibble_lo ht zh zl n1)
+            n2 (bit_and (bit_shr x (add s 4)) 15)
+            h2 (gcm_nibble_hi ht h1 l1 n2)
+            l2 (gcm_nibble_lo ht h1 l1 n2))
+        (gcm_mult_half ht x y more (add s 8) h2 l2))))
+
+; The element xh, xl times H, ht H's table: its nibbles from the least
+; significant, each adding H times it after shifting the product.
+(def gcm_mult ((ht (array int)) (xh int) (xl int)) GcmPair
+  (let n (bit_and xl 15)
+    (let (zh (array_get ht (mul 2 n))
+          zl (array_get ht (add (mul 2 n) 1))
+          n2 (bit_and (bit_shr xl 4) 15))
+      (gcm_mult_half ht xl xh true 8 (gcm_nibble_hi ht zh zl n2) (gcm_nibble_lo ht zh zl n2)))))
+
+; The 32-bit word at byte p of b, most significant first, bytes from j
+; on read as 0: a block's padding.
+(def gcm_be32 ((b bytes) (p int) (j int)) int
+  (if (le (add p 4) j)
+      (aes_be32 b p)
+      (bit_or (bit_or (bit_shl (gcm_byte b p j) 24) (bit_shl (gcm_byte b (add p 1) j) 16))
+              (bit_or (bit_shl (gcm_byte b (add p 2) j) 8) (gcm_byte b (add p 3) j)))))
+
+; Byte p of b, or 0 from j on.
+(def gcm_byte ((b bytes) (p int) (j int)) int
+  (if (lt p j) (bytes_get b p) 0))
+
+; The 64 bits at byte p of b, as gcm_be32 reads them.
+(def gcm_be64 ((b bytes) (p int) (j int)) int
+  (bit_or (bit_shl (gcm_be32 b p j) 32) (gcm_be32 b (add p 4) j)))
+
+; GHASH's state xh, xl after the bytes of b from p up to j, the last
+; block padded with zeros.
+(def gcm_ghash ((ht (array int)) (b bytes) (p int) (j int) (xh int) (xl int)) GcmPair
+  (if (ge p j)
+      (GcmPair xh xl)
+      (let x (gcm_mult ht (bit_xor xh (gcm_be64 b p j)) (bit_xor xl (gcm_be64 b (add p 8) j)))
+        (gcm_ghash ht b (add p 16) j (.hi x) (.lo x)))))
+
+; ----------------------------------------------------- sealing, opening
+
+; acc, a reversed list, with the first cnt bytes of the word w in front,
+; most significant first; cnt is clamped to 0 to 4.
+(def gcm_push_word ((acc (list int)) (w int) (cnt int)) (list int)
+  (if (le cnt 0)
+      acc
+      (let a (cons (bit_shr w 24) acc)
+        (if (eq cnt 1)
+            a
+            (let b (cons (bit_and (bit_shr w 16) 255) a)
+              (if (eq cnt 2)
+                  b
+                  (let c (cons (bit_and (bit_shr w 8) 255) b)
+                    (if (eq cnt 3) c (cons (bit_and w 255) c)))))))))
+
+; acc with the first n bytes of the block w0 to w3 in front.
+(def gcm_push_words ((acc (list int)) (w0 int) (w1 int) (w2 int) (w3 int) (n int)) (list int)
+  (gcm_push_word (gcm_push_word (gcm_push_word (gcm_push_word acc w0 n) w1 (sub n 4)) w2 (sub n 8)) w3 (sub n 12)))
+
+; The mask of the bytes of word w of a block that hold the first n.
+(def gcm_mask ((n int) (w int)) int
+  (let cnt (max 0 (min 4 (sub n (mul 4 w))))
+    (aes_32 (bit_shl 4294967295 (mul 8 (sub 4 cnt))))))
+
+; The counter mode and GHASH together, over the bytes of src from p up
+; to j: what comes out, before acc reversed, and GHASH's state after the
+; ciphertext, which is what comes out when sealing and what goes in when
+; opening.
+(data GcmCrypted (GcmCrypted (out (list int)) (x GcmPair)))
+
+; The keys rk, the tables t, nr rounds, the table ht, the nonce n0 to
+; n2 and the counter ctr: src's bytes from p up to j encrypted, or
+; decrypted if not seal, onto acc, GHASH's state xh, xl taken through
+; the ciphertext.
+(def gcm_crypt ((rk (array int)) (t (array int)) (nr int) (ht (array int))
+                (n0 int) (n1 int) (n2 int) (ctr int)
+                (src bytes) (p int) (j int) (seal bool) (xh int) (xl int) (acc (list int))) GcmCrypted
+  (if (ge p j)
+      (GcmCrypted acc (GcmPair xh xl))
+      (let (e (aes_encrypt_words rk t nr n0 n1 n2 ctr)
+            n (min 16 (sub j p))
+            a0 (gcm_be32 src p j)
+            a1 (gcm_be32 src (add p 4) j)
+            a2 (gcm_be32 src (add p 8) j)
+            a3 (gcm_be32 src (add p 12) j)
+            c0 (bit_xor a0 (.w0 e))
+            c1 (bit_xor a1 (.w1 e))
+            c2 (bit_xor a2 (.w2 e))
+            c3 (bit_xor a3 (.w3 e))
+            whole (eq n 16)
+            g0 (if seal (if whole c0 (bit_and c0 (gcm_mask n 0))) a0)
+            g1 (if seal (if whole c1 (bit_and c1 (gcm_mask n 1))) a1)
+            g2 (if seal (if whole c2 (bit_and c2 (gcm_mask n 2))) a2)
+            g3 (if seal (if whole c3 (bit_and c3 (gcm_mask n 3))) a3)
+            x (gcm_mult ht (bit_xor xh (bit_or (bit_shl g0 32) g1)) (bit_xor xl (bit_or (bit_shl g2 32) g3))))
+        (gcm_crypt rk t nr ht n0 n1 n2 (aes_32 (add ctr 1)) src (add p 16) j seal (.hi x) (.lo x)
+          (gcm_push_words acc c0 c1 c2 c3 n)))))
+
+; GHASH's state after the aad and the bytes of src from i up to j, then
+; the tag: E(J0), J0 the nonce and the counter 1, added to the state
+; after the lengths block, as four words.
+(def gcm_run ((k GcmKey) (nonce bytes) (aad bytes) (src bytes) (i int) (j int) (seal bool)) GcmCrypted
+  (let (a (.aes k)
+        rk (.rk a)
+        t (.t a)
+        nr (.rounds a)
+        ht (.h k)
+        n0 (aes_be32 nonce 0)
+        n1 (aes_be32 nonce 4)
+        n2 (aes_be32 nonce 8)
+        x (gcm_ghash ht aad 0 (bytes_len aad) 0 0))
+    (gcm_crypt rk t nr ht n0 n1 n2 2 src i j seal (.hi x) (.lo x) (nil int))))
+
+; The tag for the state x after a record of aad and len bytes of
+; ciphertext, as four words.
+(def gcm_tag ((k GcmKey) (nonce bytes) (x GcmPair) (aadlen int) (len int)) AesWords
+  (let (a (.aes k)
+        s (gcm_mult (.h k) (bit_xor (.hi x) (mul aadlen 8)) (bit_xor (.lo x) (mul len 8)))
+        e (aes_encrypt_words (.rk a) (.t a) (.rounds a) (aes_be32 nonce 0) (aes_be32 nonce 4) (aes_be32 nonce 8) 1))
+    (AesWords (bit_xor (.w0 e) (bit_shr (.hi s) 32)) (bit_xor (.w1 e) (aes_32 (.hi s)))
+              (bit_xor (.w2 e) (bit_shr (.lo s) 32)) (bit_xor (.w3 e) (aes_32 (.lo s))))))
+
+; The bytes of pt from i up to j sealed under k with the 12-byte nonce
+; and the additional data aad: the ciphertext, as long, then the
+; 16-byte tag.
+(def gcm_seal ((k GcmKey) (nonce bytes) (aad bytes) (pt bytes) (i int) (j int)) bytes
+  (match (gcm_run k nonce aad pt i j true)
+    ((GcmCrypted out x)
+      (let tag (gcm_tag k nonce x (bytes_len aad) (sub j i))
+        (bytes_from_list (rev (gcm_push_words out (.w0 tag) (.w1 tag) (.w2 tag) (.w3 tag) 16)))))))
+
+; The bytes of ct from i up to j, a ciphertext then its 16-byte tag,
+; opened under k with the 12-byte nonce and aad: the plaintext, or
+; None if the tag is not the one they make, or there is no room for
+; one.
+(def gcm_open ((k GcmKey) (nonce bytes) (aad bytes) (ct bytes) (i int) (j int)) (Option bytes)
+  (if (lt (sub j i) 16)
+      ((None bytes))
+      (let m (sub j 16)
+        (match (gcm_run k nonce aad ct i m false)
+          ((GcmCrypted out x)
+            (let (tag (gcm_tag k nonce x (bytes_len aad) (sub m i))
+                  diff (bit_or (bit_or (bit_xor (.w0 tag) (aes_be32 ct m)) (bit_xor (.w1 tag) (aes_be32 ct (add m 4))))
+                               (bit_or (bit_xor (.w2 tag) (aes_be32 ct (add m 8))) (bit_xor (.w3 tag) (aes_be32 ct (add m 12))))))
+              (if (eq diff 0) (Some (bytes_from_list (rev out))) ((None bytes)))))))))

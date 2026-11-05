@@ -1,0 +1,253 @@
+; ecdsa.l0 -- checking ECDSA signatures on NIST P-256 and P-384, as
+; FIPS 186-4 defines them, what TLS certificates and CertificateVerify
+; carry; and reading the DER that carries them. Verification only. Field
+; elements are bignum.l0 numbers in Montgomery form, points Jacobian, so
+; u1 G + u2 Q, by Shamir's trick, takes one inversion at the end. Not
+; constant-time: everything it is given is public.
+
+; A curve a signature may be on.
+(data EcCurve
+  (EcP256)
+  (EcP384))
+
+; A curve's numbers: arithmetic modulo its prime p and its order n; its
+; b, and its generator's x and y, in p's Montgomery form; and how many
+; bytes a coordinate takes.
+(data EcParams
+  (EcParams (p BnMont) (n BnMont) (b (array int)) (gx (array int)) (gy (array int)) (len int)))
+
+; A point in Jacobian coordinates, x/z^2 and y/z^3, each in Montgomery
+; form; z 0 is the point at infinity.
+(data EcPt
+  (EcPt (x (array int)) (y (array int)) (z (array int))))
+
+; An ECDSA signature: r and s, big-endian, as DER's INTEGERs hold them.
+(data EcdsaSig
+  (EcdsaSig (r bytes) (s bytes)))
+
+; The numbers of curve c (SEC 2, FIPS 186-4 D.1.2.3 and D.1.2.4).
+(def ec_params ((c EcCurve)) EcParams
+  (match c
+    ((EcP256)
+      (ec_params_of "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff"
+        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"
+        "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"
+        "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+        "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"))
+    ((EcP384)
+      (ec_params_of "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff"
+        "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973"
+        "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef"
+        "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7"
+        "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f"))))
+
+; A curve's numbers from p, n, b, and G's x and y, in hex.
+(def ec_params_of ((p (list int)) (n (list int)) (b (list int)) (gx (list int)) (gy (list int))) EcParams
+  (let (pb (bn_hex p)
+        fp (bn_mont_new (bn_of_bytes pb)))
+    (EcParams fp (bn_mont_new (bn_of_bytes (bn_hex n)))
+      (bn_to_mont fp (bn_of_bytes (bn_hex b)))
+      (bn_to_mont fp (bn_of_bytes (bn_hex gx)))
+      (bn_to_mont fp (bn_of_bytes (bn_hex gy)))
+      (bytes_len pb))))
+
+; ------------------------------------------------------------ points
+
+; 2 pt, for a curve whose a is -3 (dbl-2001-b): infinity stays so,
+; its z coming out 0.
+(def ec_double ((f BnMont) (pt EcPt)) EcPt
+  (let (x (.x pt)
+        y (.y pt)
+        z (.z pt)
+        delta (bn_mont_mul f z z)
+        gamma (bn_mont_mul f y y)
+        beta (bn_mont_mul f x gamma)
+        t (bn_mont_mul f (bn_mod_sub f x delta) (bn_mod_add f x delta))
+        alpha (bn_mod_add f t (bn_mod_add f t t))
+        beta2 (bn_mod_add f beta beta)
+        beta4 (bn_mod_add f beta2 beta2)
+        x3 (bn_mod_sub f (bn_mont_mul f alpha alpha) (bn_mod_add f beta4 beta4))
+        yz (bn_mod_add f y z)
+        z3 (bn_mod_sub f (bn_mod_sub f (bn_mont_mul f yz yz) gamma) delta)
+        g2 (bn_mont_mul f gamma gamma)
+        g4 (bn_mod_add f g2 g2)
+        g8 (bn_mod_add f g4 g4)
+        y3 (bn_mod_sub f (bn_mont_mul f alpha (bn_mod_sub f beta4 x3)) (bn_mod_add f g8 g8)))
+    (EcPt x3 y3 z3)))
+
+; p1 + p2 (add-2007-bl), either at infinity or both the same point
+; included.
+(def ec_add ((f BnMont) (p1 EcPt) (p2 EcPt)) EcPt
+  (if (bn_is_zero (.z p1))
+      p2
+      (bn_is_zero (.z p2))
+      p1
+      (let (z1z1 (bn_mont_mul f (.z p1) (.z p1))
+            z2z2 (bn_mont_mul f (.z p2) (.z p2))
+            u1 (bn_mont_mul f (.x p1) z2z2)
+            u2 (bn_mont_mul f (.x p2) z1z1)
+            s1 (bn_mont_mul f (.y p1) (bn_mont_mul f (.z p2) z2z2))
+            s2 (bn_mont_mul f (.y p2) (bn_mont_mul f (.z p1) z1z1))
+            h (bn_mod_sub f u2 u1)
+            sd (bn_mod_sub f s2 s1)
+            rr (bn_mod_add f sd sd))
+        (if (bn_is_zero h)
+            (if (bn_is_zero rr) (ec_double f p1) (EcPt (.x p1) (.y p1) (array_new (.k f) 0)))
+            (ec_add_rest f p1 p2 z1z1 z2z2 u1 s1 h rr)))))
+
+; The rest of ec_add, once h, u2 - u1, is not 0.
+(def ec_add_rest ((f BnMont) (p1 EcPt) (p2 EcPt) (z1z1 (array int)) (z2z2 (array int))
+                  (u1 (array int)) (s1 (array int)) (h (array int)) (rr (array int))) EcPt
+  (let (h2 (bn_mod_add f h h)
+        i (bn_mont_mul f h2 h2)
+        j (bn_mont_mul f h i)
+        v (bn_mont_mul f u1 i)
+        x3 (bn_mod_sub f (bn_mod_sub f (bn_mont_mul f rr rr) j) (bn_mod_add f v v))
+        s1j (bn_mont_mul f s1 j)
+        y3 (bn_mod_sub f (bn_mont_mul f rr (bn_mod_sub f v x3)) (bn_mod_add f s1j s1j))
+        zz (bn_mod_add f (.z p1) (.z p2))
+        z3 (bn_mont_mul f (bn_mod_sub f (bn_mod_sub f (bn_mont_mul f zz zz) z1z1) z2z2) h))
+    (EcPt x3 y3 z3)))
+
+; acc, u1 and u2's bits above i of G and Q, taken on through their bits
+; from i down: doubled, then G, Q or G + Q (gq) added as the bits say.
+(def ec_shamir ((f BnMont) (u1 (array int)) (u2 (array int)) (g EcPt) (q EcPt) (gq EcPt) (i int) (acc EcPt)) EcPt
+  (if (lt i 0)
+      acc
+      (let (d (ec_double f acc)
+            b1 (bn_bit u1 i)
+            b2 (bn_bit u2 i)
+            next (if (and (eq b1 1) (eq b2 1))
+                     (ec_add f d gq)
+                     (eq b1 1)
+                     (ec_add f d g)
+                     (eq b2 1)
+                     (ec_add f d q)
+                     d))
+        (ec_shamir f u1 u2 g q gq (sub i 1) next))))
+
+; Whether x and y, numbers below p, are a point of the curve: y^2 = x^3
+; - 3x + b.
+(def ec_on_curve ((cp EcParams) (x (array int)) (y (array int))) bool
+  (let (f (.p cp)
+        xm (bn_to_mont f x)
+        ym (bn_to_mont f y)
+        x3 (bn_mont_mul f (bn_mont_mul f xm xm) xm)
+        tx (bn_mod_add f xm (bn_mod_add f xm xm))
+        rhs (bn_mod_add f (bn_mod_sub f x3 tx) (.b cp)))
+    (eq (bn_compare (bn_mont_mul f ym ym) rhs) 0)))
+
+; ------------------------------------------------------------- ECDSA
+
+; Whether r and s are an ECDSA signature on curve c by the public key
+; point, SEC 1's uncompressed 04 X Y, of the message whose hash is
+; digest, its leftmost bits used if it is longer than the curve's order
+; (FIPS 186-4 6.4.2). The point must be on the curve, and r and s, any
+; length, leading zeros allowed, from 1 to n - 1.
+(def ecdsa_verify ((c EcCurve) (point bytes) (r bytes) (s bytes) (digest bytes)) bool
+  (let (cp (ec_params c)
+        len (.len cp)
+        pn (.n (.p cp))
+        nn (.n (.n cp)))
+    (if (or (not (eq (bytes_len point) (add 1 (mul 2 len)))) (not (eq (bytes_get point 0) 4)))
+        false
+        (let (x (bn_of_bytes (bytes_slice point 1 (add 1 len)))
+              y (bn_of_bytes (bytes_slice point (add 1 len) (bytes_len point)))
+              rr (bn_of_bytes r)
+              ss (bn_of_bytes s))
+          (if (or (ge (bn_compare x pn) 0) (ge (bn_compare y pn) 0))
+              false
+              (or (bn_is_zero rr) (ge (bn_compare rr nn) 0))
+              false
+              (or (bn_is_zero ss) (ge (bn_compare ss nn) 0))
+              false
+              (not (ec_on_curve cp x y))
+              false
+              (ec_verify_point cp x y rr ss (ec_digest_number (.n cp) digest)))))))
+
+; The digest as a number below n: its leftmost bits as many as n has,
+; less n if that is n or more.
+(def ec_digest_number ((m BnMont) (digest bytes)) (array int)
+  (let (e (bn_of_bytes digest)
+        dbits (mul 8 (bytes_len digest))
+        nbits (bn_bits (.n m))
+        t (if (gt dbits nbits) (bn_shr e (sub dbits nbits)) e))
+    (bn_resize (if (ge (bn_compare t (.n m)) 0) (bn_sub t (.n m)) t) (.k m))))
+
+; Whether r is the x of u1 G + u2 Q mod n, for u1 = e/s and u2 = r/s mod
+; n, Q being x, y: the checked rest of ecdsa_verify.
+(def ec_verify_point ((cp EcParams) (x (array int)) (y (array int)) (rr (array int)) (ss (array int)) (e (array int))) bool
+  (let (nm (.n cp)
+        f (.p cp)
+        w (bn_mont_inv nm (bn_to_mont nm ss))
+        u1 (bn_mont_mul nm e w)
+        u2 (bn_mont_mul nm (bn_resize rr (.k nm)) w)
+        one (bn_mont_one f)
+        g (EcPt (.gx cp) (.gy cp) one)
+        q (EcPt (bn_to_mont f x) (bn_to_mont f y) one)
+        top (sub (max (bn_bits u1) (bn_bits u2)) 1)
+        inf (EcPt one one (array_new (.k f) 0))
+        pt (ec_shamir f u1 u2 g q (ec_add f g q) top inf))
+    (if (bn_is_zero (.z pt))
+        false
+        (let (zi (bn_mont_inv f (.z pt))
+              ax (bn_from_mont f (bn_mont_mul f (.x pt) (bn_mont_mul f zi zi)))
+              v (if (ge (bn_compare ax (.n nm)) 0) (bn_sub ax (.n nm)) ax))
+          (eq (bn_compare v rr) 0)))))
+
+; --------------------------------------------------------------- DER
+
+; A DER length read: the length, and where what it measures starts.
+(data EcDerLen
+  (EcDerLen (len int) (at int)))
+
+; The signature a DER SEQUENCE { INTEGER r, INTEGER s } is, all of b,
+; strictly: every length minimal and exactly what follows it holds, each
+; INTEGER positive and minimal; none if b is not one.
+(def ecdsa_sig_of_der ((b bytes)) (Option EcdsaSig)
+  (if (or (lt (bytes_len b) 2) (not (eq (bytes_get b 0) 48)))
+      ((None EcdsaSig))
+      (match (ec_der_len b 1)
+        ((None) ((None EcdsaSig)))
+        ((Some l)
+          (if (not (eq (add (.at l) (.len l)) (bytes_len b)))
+              ((None EcdsaSig))
+              (match (ec_der_int b (.at l))
+                ((None) ((None EcdsaSig)))
+                ((Some r)
+                  (match (ec_der_int b (add (.at r) (.len r)))
+                    ((None) ((None EcdsaSig)))
+                    ((Some s)
+                      (if (eq (add (.at s) (.len s)) (bytes_len b))
+                          (Some (EcdsaSig (bytes_slice b (.at r) (add (.at r) (.len r))) (bytes_slice b (.at s) (add (.at s) (.len s)))))
+                          ((None EcdsaSig))))))))))))
+
+; The DER length at i of b: one byte below 128, or 129 then one byte
+; from 128; none if it is neither or runs past b.
+(def ec_der_len ((b bytes) (i int)) (Option EcDerLen)
+  (if (ge i (bytes_len b))
+      ((None EcDerLen))
+      (let x (bytes_get b i)
+        (if (lt x 128)
+            (Some (EcDerLen x (add i 1)))
+            (and (eq x 129) (and (lt (add i 1) (bytes_len b)) (ge (bytes_get b (add i 1)) 128)))
+            (Some (EcDerLen (bytes_get b (add i 1)) (add i 2)))
+            ((None EcDerLen))))))
+
+; The value of the INTEGER whose tag is at i of b: its length and where
+; it starts; none if it is not a positive, minimal INTEGER within b.
+(def ec_der_int ((b bytes) (i int)) (Option EcDerLen)
+  (if (or (ge i (bytes_len b)) (not (eq (bytes_get b i) 2)))
+      ((None EcDerLen))
+      (match (ec_der_len b (add i 1))
+        ((None) ((None EcDerLen)))
+        ((Some l)
+          (let (at (.at l)
+                n (.len l))
+            (if (or (eq n 0) (gt (add at n) (bytes_len b)))
+                ((None EcDerLen))
+                (ge (bytes_get b at) 128)
+                ((None EcDerLen))
+                (and (eq (bytes_get b at) 0) (and (gt n 1) (lt (bytes_get b (add at 1)) 128)))
+                ((None EcDerLen))
+                (Some (EcDerLen n at))))))))

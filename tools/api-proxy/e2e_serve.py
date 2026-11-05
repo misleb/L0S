@@ -14,9 +14,12 @@ build/e2e/NAME.apps, emptied first, by fake_claude.py, whose program is
 a copy of the file CASE/builder names, from the top of the project,
 and which, if CASE/preview.png is there, paints it as the scene main.
 With CASE/release, the proxy serves it as its releases (/release,
-release.py). Runs until it is stopped. tests/e2e/ask's serve line runs it."""
+release.py). @PORT@ in CASE/script.json and CASE/checks.json is
+made PORT, as in the case's etc, for a tool that reaches the proxy
+itself. Runs until it is stopped. tests/e2e/ask's serve line runs it."""
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -31,6 +34,12 @@ import standin  # noqa: E402
 KEY = "sk-e2e-standin"
 
 
+def load_case_json(path, port):
+    """The JSON in the file at path, @PORT@ in it made port."""
+    with open(path) as f:
+        return json.loads(f.read().replace("@PORT@", str(port)))
+
+
 async def run(port, case):
     """The stand-in and the proxy, served until the process is stopped."""
     name = os.path.basename(os.path.normpath(case))
@@ -40,8 +49,8 @@ async def run(port, case):
         return 1
     say = lambda line: print(line, flush=True)  # noqa: E731
     checks_path = os.path.join(case, "checks.json")
-    checks = standin.load_script(checks_path) if os.path.exists(checks_path) else None
-    s = standin.Standin(standin.load_script(os.path.join(case, "script.json")), key=KEY, log=say, checks=checks)
+    checks = load_case_json(checks_path, port) if os.path.exists(checks_path) else None
+    s = standin.Standin(load_case_json(os.path.join(case, "script.json"), port), key=KEY, log=say, checks=checks)
     _, up_port = await standin.serve(s.app(), "127.0.0.1", 0)
     usage = os.path.join(HERE, "..", "..", "build", "e2e", name + ".usage.jsonl")
     if os.path.exists(usage):

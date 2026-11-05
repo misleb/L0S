@@ -83,8 +83,10 @@
 ; programs its tools run; where the model is; its own settings; the
 ; terminal to set back after starting a program (0 the kernel's); the
 ; board, as the system prompt names it; and the port the clock, and the
-; servers the tools of the desktop and the clock ask, answer on.
-(data Setup (Setup (port int) (np int) (rport int) (mc ModelConf) (o Own) (back int) (board (list int)) (cport int)))
+; servers the tools of the desktop and the clock ask, answer on, and
+; where clock and random answer while a TLS connection is made; and the
+; port fetch_url's connection's notices come to.
+(data Setup (Setup (port int) (np int) (rport int) (mc ModelConf) (o Own) (back int) (board (list int)) (cport int) (fport int)))
 
 ; Where a request's answer is: none in flight; or coming, its status (0
 ; until its head), a refusal's body so far, reversed, the event
@@ -93,8 +95,9 @@
 (data Wire (WireIdle) (WireOn int (list bytes) Sse bool))
 
 ; What a tool still running is: a program, the tool use's id and the
-; run; or build_app's build (build.l0), the use's id and the build.
-(data Running (Running bytes Run) (Building bytes Build))
+; run; build_app's build (build.l0), the use's id and the build; or
+; fetch_url's request (fetch.l0), the use's id and the fetch.
+(data Running (Running bytes Run) (Building bytes Build) (Fetching bytes Fetch))
 
 ; What agentd is doing: waiting; or a turn, the acts its loop asked not
 ; yet done, the answer coming, the program running, and when the answer
@@ -356,18 +359,19 @@
 (def agentd_serve ((port int) (mc ModelConf) (o Own)) int
   (let (np (port_new)
         rp (port_new)
-        cp (port_new))
-    (match (port_set (cons port (cons np (cons rp (nil int)))))
+        cp (port_new)
+        fp (port_new))
+    (match (port_set (cons port (cons np (cons rp (cons fp (nil int))))))
       ((PortSetNotYours) (complain "cannot wait on its ports"))
       ((PortSetSize) (complain "cannot wait on its ports"))
       ((PortSetMade)
-        (let (u (Setup port np rp mc o (back_terminal) (board_text (machine)) cp)
+        (let (u (Setup port np rp mc o (back_terminal) (board_text (machine)) cp fp)
               k (conv_loaded (conv_path u))
               why (name_register_or_why port "agent"))
           (if (not (is_empty why))
               (complain why)
               (let n (note (append "serving agent: " (append (own_text o) (append ", the model " (append (.model mc)
-                             (append " through " (append (.host mc) (cons 58 (digits (.port mc))))))))))
+                             (append (if (.tls mc) " over TLS at " " through ") (append (.host mc) (cons 58 (digits (.port mc))))))))))
                 (serve (Agentd u (nil int) (loop_for u (.conv k)) (.began k) (.said k) (Idle) (NoInet "not opened yet") ((None HttpConn)))))))))))
 
 ; The terminal to give back to agentd after starting a program.
@@ -430,6 +434,8 @@
       (wire_heard s m)
       (eq p (.rport (.u s)))
       (run_heard_in s m)
+      (eq p (.fport (.u s)))
+      (fetch_heard s m)
       s))
 
 ; s after the request in a message's bytes b, from the process from,
@@ -534,11 +540,12 @@
     ((Some x)
       (match x
         ((Running id run) (match (.status run) ((Some st) 0) ((None) (let k (proc_kill (.pid run)) 0))))
-        ((Building id b) 0)))))
+        ((Building id b) 0)
+        ((Fetching id f) (let z (http_give_up (.conn f)) 0))))))
 
 ; Whether a tool running is a build.
 (def is_building ((r (Option Running))) bool
-  (match r ((None) false) ((Some x) (match x ((Running id run) false) ((Building id b) true)))))
+  (match r ((None) false) ((Some x) (match x ((Running id run) false) ((Building id b) true) ((Fetching id f) false)))))
 
 ; A connection given up, reset, its ring with it: none left.
 (def conn_reset ((conn (Option HttpConn))) (Option HttpConn)
@@ -623,6 +630,8 @@
                 (build_start s tid input)
                 (is_image_tool nm)
                 (image_tool s tid (setup_home u) input)
+                (is_fetch_tool nm)
+                (fetch_start s tid input)
                 (not (is_run_tool nm))
                 (tool_answered s tid (tool_failed (append "no tool " nm)))
                 (match (tool_run_start (setup_home u) nm input (setup_timeout u) (.back u) (.rport u))
@@ -646,6 +655,7 @@
             ((Some x)
               (match x
                 ((Building tid b) s)
+                ((Fetching tid f) s)
                 ((Running tid run)
                   (let run2 (run_took run m)
                     (match (.status run2)
@@ -665,19 +675,19 @@
           ((NoInet why) (turn_told (Agentd u hear l began n doing nt conn) (failure why)))
           ((Inet ip irp)
             (match (connection u nt conn)
-              ((Err why) (turn_told (Agentd u hear l began n doing nt ((None HttpConn))) (failure (append "the proxy: " why))))
+              ((Err why) (turn_told (Agentd u hear l began n doing nt ((None HttpConn))) (failure (append (model_where (.mc u)) (append ": " why)))))
               ((Ok c)
                 (let (dl (add (clock_ns) (wire_idle_ns))
                       al (alarm_at (.np u) dl))
                   (match (http_send_as c "POST" req)
                     ((HttpGot c2 parts) (wire_parts (wire_begun (Agentd u hear l began n doing nt (Some c2)) dl) parts))))))))))))
 
-; The connection to the proxy: the kept one, if it may take another
-; request, or a new one.
+; The connection to the model's server, the proxy or the API itself:
+; the kept one, if it may take another request, or a new one.
 (def connection ((u Setup) (nt Inet) (conn (Option HttpConn))) (Result HttpConn (list int))
   (match conn
     ((Some c) (http_reuse c))
-    ((None) (http_connect nt (.np u) (.host (.mc u)) (.port (.mc u))))))
+    ((None) (model_connect nt (.np u) (.cport u) (.mc u)))))
 
 ; An error event saying why, as a failure the loop tells and ends on.
 (def failure ((why (list int))) ModelEvent
@@ -869,7 +879,7 @@
     ((Busy acts w r dl)
       (match r
         ((None) (NoBuild))
-        ((Some x) (match x ((Running tid run) (NoBuild)) ((Building tid b) (Built tid b))))))))
+        ((Some x) (match x ((Running tid run) (NoBuild)) ((Building tid b) (Built tid b)) ((Fetching tid f) (NoBuild))))))))
 
 ; A build heard from: its deadline put off.
 (def build_alive ((s Agentd)) Agentd
@@ -976,3 +986,94 @@
 (def build_lost ((s Agentd) (tid bytes) (why (list int))) Agentd
   (let s2 (.conn s (conn_reset (.conn s)))
     (tool_answered (build_cleared s2) tid (tool_failed (append "the proxy: " why)))))
+
+; ------------------------------------------------------------- fetching
+
+; fetch_url's use tid with input: its connection made, through the
+; network stack, over TLS for https://, and its request sent, the turn
+; waiting on the response; a request that is wrong, or a connection
+; that cannot be made, its failure at once.
+(def fetch_start ((s Agentd) (tid bytes) (input Json)) Agentd
+  (match (fetch_ask_of input)
+    ((Err why) (tool_answered s tid (tool_failed why)))
+    ((Ok a)
+      (match (fetch_roots (.url a))
+        ((Err why) (tool_answered s tid (tool_failed why)))
+        ((Ok roots)
+          (let nt (match (.net s) ((Inet p rp) (.net s)) ((NoInet why) (inet_open)))
+            (match nt
+              ((NoInet why) (tool_answered (.net s nt) tid (tool_failed why)))
+              ((Inet ip irp) (fetch_asked (.net s nt) tid (match (tool_str input "url") ((Some t) t) ((None) (nil int))) a roots)))))))))
+
+; The roots an https:// URL's certificate is checked to; none for
+; http://.
+(def fetch_roots ((u HttpUrl)) (Result TrustRoots (list int))
+  (if (.tls u) (http_roots) ((Ok TrustRoots (list int)) (trust_roots_of (nil bytes)))))
+
+; The request a, to url, sent on a new connection through s's network
+; stack, its notices to the fetch port.
+(def fetch_asked ((s Agentd) (tid bytes) (url (list int)) (a FetchAsk) (roots TrustRoots)) Agentd
+  (let u (.u s)
+    (match (http_url_connect (.net s) (.fport u) (.cport u) (.url a) roots)
+      ((Err why) (tool_answered s tid (tool_failed (append url (append ": " why)))))
+      ((Ok c)
+        (let (dl (add (clock_ns) (fetch_idle_ns))
+              al (alarm_at (.fport u) dl))
+          (match (http_ask c (.method a) (.path (.url a)) (.headers a) (.body a))
+            ((HttpGot c2 parts) (fetch_parts (fetch_now s tid (fetch_new url c2 dl)) parts))))))))
+
+; s with fetch f, of the use tid, as the tool running.
+(def fetch_now ((s Agentd) (tid bytes) (f Fetch)) Agentd
+  (match (.doing s)
+    ((Idle) s)
+    ((Busy acts w r dl) (.doing s (Busy acts w (Some (Fetching tid f)) dl)))))
+
+; The fetch running and its use, if one is.
+(data Fetched (Fetched bytes Fetch) (NoFetch))
+(def fetch_of ((s Agentd)) Fetched
+  (match (.doing s)
+    ((Idle) (NoFetch))
+    ((Busy acts w r dl)
+      (match r
+        ((None) (NoFetch))
+        ((Some x) (match x ((Running tid run) (NoFetch)) ((Building tid b) (NoFetch)) ((Fetching tid f) (Fetched tid f))))))))
+
+; m, which came to the fetch port: the alarm, a silent response given
+; up; anything else fed to the fetch's connection, and its parts read.
+(def fetch_heard ((s Agentd) (m Message)) Agentd
+  (match m
+    ((RecvFailed) s)
+    ((Message from b)
+      (match (fetch_of s)
+        ((NoFetch) s)
+        ((Fetched tid f)
+          (if (is_alarm_notice m)
+              (if (lt (clock_ns) (.dl f)) s (fetch_lost s tid f "the server said nothing for 30 seconds"))
+              (match (http_feed (.conn f) b)
+                ((HttpGot c2 parts)
+                  (let (d2 (add (clock_ns) (fetch_idle_ns))
+                        al (alarm_at (.fport (.u s)) d2))
+                    (fetch_parts (fetch_now s tid (.dl (.conn f c2) d2)) parts))))))))))
+
+; The parts of a fetch's response, in order, each read onto it.
+(def fetch_parts ((s Agentd) (parts (list HttpPart))) Agentd
+  (if (is_empty parts) s (fetch_parts (fetch_part s (head parts)) (tail parts))))
+
+; A part of a fetch's response read: its head; a piece of its body; its
+; end, the use answered and the connection given up; or the connection
+; lost.
+(def fetch_part ((s Agentd) (p HttpPart)) Agentd
+  (match (fetch_of s)
+    ((NoFetch) s)
+    ((Fetched tid f)
+      (match p
+        ((HttpHead c reason hs) (fetch_now s tid (.headers (.reason (.code f c) reason) hs)))
+        ((HttpBody d) (fetch_now s tid (fetch_piece f d)))
+        ((HttpEnd keep) (let z (http_give_up (.conn f)) (tool_answered (build_cleared s) tid (fetch_answer f))))
+        ((HttpBad why) (fetch_lost s tid f why))
+        ((HttpFailed why) (fetch_lost s tid f why))))))
+
+; A fetch's connection lost, why: given up, and the use failed.
+(def fetch_lost ((s Agentd) (tid bytes) (f Fetch) (why (list int))) Agentd
+  (let z (http_give_up (.conn f))
+    (tool_answered (build_cleared s) tid (tool_failed (append (.url f) (append ": " why))))))

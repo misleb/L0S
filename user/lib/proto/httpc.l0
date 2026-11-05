@@ -15,9 +15,15 @@
 ; A connection: the stack, the port its notices come to, its number in
 ; inet, the host's name as the request's Host says it, its address and
 ; port, the reader of its responses, its state (http_state_*), and the
-; ring inet puts its data in, once it is up, if inet gave it one.
+; ring inet puts its data in, once it is up, if inet gave it one; and
+; for https, its TLS.
 (data HttpConn (HttpConn (inet Inet) (np int) (id int) (host (list int)) (addr int) (port int) (reader HttpRead) (state int)
-                         (rx (Option TcpRx))))
+                         (rx (Option TcpRx)) (sec (Option HttpTls))))
+
+; A connection's TLS: the server's name, which its certificate must
+; hold, the roots it is checked to, the port the time and randomness
+; are asked on, and the session.
+(data HttpTls (HttpTls (name (list int)) (roots TrustRoots) (ap int) (t Tls)))
 
 ; What a connection's notices or a request's writing gave: the connection
 ; after them, and the parts of its responses, in order.
@@ -40,6 +46,65 @@
 (def http_host_text ((host (list int)) (port int)) (list int)
   (if (eq port 80) host (append host (cons 58 (digits port)))))
 
+; ------------------------------------------------------------------- URLs
+
+; A page asked for: whether over TLS, https://; the server, its name or
+; its address dotted, and its port; the path; and the host as the
+; request names it.
+(data HttpUrl (HttpUrl (tls bool) (server (list int)) (port int) (path (list int)) (host (list int))))
+
+; The URL s names, http:// or https://, which may leave out the scheme
+; for http://; or why it names none. The port is 80 or 443 if none is
+; given, the path / if none.
+(def http_url_of ((s (list int))) (Result HttpUrl (list int))
+  (let (tls (starts_with s "https://")
+        rest (if tls (drop_n s 8) (starts_with s "http://") (drop_n s 7) s)
+        hostport (up_to 47 rest)
+        p (drop_n rest (length hostport)))
+    (if (starts_with (drop_n rest (length (up_to 58 rest))) "://") ((Err HttpUrl (list int)) (append "only http:// and https:// are spoken, not " s))
+        (is_empty hostport) ((Err HttpUrl (list int)) "no server in the URL")
+        (contains hostport "@") ((Err HttpUrl (list int)) "a URL with a user in it is not spoken")
+        (http_url_parts tls hostport (if (is_empty p) "/" (up_to 35 p))))))
+
+; The URL of a host and port as hostport, `ADDR` or `ADDR:PORT`, and
+; path, over TLS if tls.
+(def http_url_parts ((tls bool) (hostport (list int)) (path (list int))) (Result HttpUrl (list int))
+  (let (server (up_to 58 hostport)
+        after (drop_n hostport (length server))
+        fallback (if tls 443 80))
+    (if (not (dns_name_ok server))
+        ((Err HttpUrl (list int)) (append "not a name or an address: " server))
+        (is_empty after)
+        ((Ok HttpUrl (list int)) (HttpUrl tls server fallback path server))
+        (match (word_number (drop_n after 1))
+          ((None) ((Err HttpUrl (list int)) (append "not a port: " (drop_n after 1))))
+          ((Some port)
+            (if (and (ge port 1) (le port 65535))
+                ((Ok HttpUrl (list int)) (HttpUrl tls server port path (if (eq port fallback) server hostport)))
+                ((Err HttpUrl (list int)) "a port is 1 to 65535")))))))
+
+; Where the roots TLS checks certificates to are: the board's store,
+; PEM.
+(def http_roots_path () (list int) "/etc/ssl/roots.pem")
+
+; The roots in the board's store, read; or why there are none.
+(def http_roots () (Result TrustRoots (list int))
+  (match (read_whole (http_roots_path))
+    ((Err why) ((Err TrustRoots (list int)) (append "no roots to check certificates by: " why)))
+    ((Ok text)
+      (let r (trust_roots_of_pem text)
+        (if (eq (trust_roots_count r) 0)
+            ((Err TrustRoots (list int)) (append (http_roots_path) " holds no certificate"))
+            ((Ok TrustRoots (list int)) r))))))
+
+; A connection to the server u names, through n, its notices to np: over
+; TLS, its certificate checked to roots, the clock and random asked on
+; ap, if u is https://.
+(def http_url_connect ((n Inet) (np int) (ap int) (u HttpUrl) (roots TrustRoots)) (Result HttpConn (list int))
+  (if (.tls u)
+      (https_connect n np ap (.server u) (.port u) roots)
+      (http_connect n np (.server u) (.port u))))
+
 ; ----------------------------------------------------------------- opening
 
 ; A connection to port at host, a name or an address, resolved first,
@@ -48,14 +113,103 @@
 (def http_connect ((n Inet) (np int) (host (list int)) (port int)) (Result HttpConn (list int))
   (match (inet_resolve n host)
     ((Err why) ((Err HttpConn (list int)) why))
-    ((Ok addr) (http_open_at n np (http_host_text host port) addr port))))
+    ((Ok addr) (http_open_at n np (http_host_text host port) addr port ((None HttpTls))))))
 
-; A connection opened to port at addr, named host, and waited for.
-(def http_open_at ((n Inet) (np int) (host (list int)) (addr int) (port int)) (Result HttpConn (list int))
+; A connection over TLS to port at host, its certificate checked to
+; roots: once its handshake is done, or why it is not. The clock and
+; random are asked on ap, a port of this process's that nothing else
+; comes to then (np has the notices of any other connection). The Host
+; its requests name leaves out port 443.
+(def https_connect ((n Inet) (np int) (ap int) (host (list int)) (port int) (roots TrustRoots)) (Result HttpConn (list int))
+  (match (inet_resolve n host)
+    ((Err why) ((Err HttpConn (list int)) why))
+    ((Ok addr)
+      (let e (bytes_from_list (nil int))
+        (http_open_at n np (if (eq port 443) host (http_host_text host port)) addr port
+                      (Some (HttpTls host roots ap (.t (tls_begin host e e roots 0)))))))))
+
+; A connection opened to port at addr, named host, and waited for; over
+; TLS if sec says so, its handshake done.
+(def http_open_at ((n Inet) (np int) (host (list int)) (addr int) (port int) (sec (Option HttpTls))) (Result HttpConn (list int))
+  (match sec
+    ((None) (http_dial n np host addr port sec (nil bytes)))
+    ((Some s)
+      (match (http_tls_begun (.ap s) (.name s) (.roots s))
+        ((Err why) ((Err HttpConn (list int)) why))
+        ((Ok o) (http_dial n np host addr port (Some (.t s (.t o))) (.send o)))))))
+
+; A connection opened to port at addr, and waited for, then hello, TLS's
+; first records if any, sent and its handshake waited for.
+(def http_dial ((n Inet) (np int) (host (list int)) (addr int) (port int) (sec (Option HttpTls)) (hello (list bytes))) (Result HttpConn (list int))
   (match (tcp_connect n np addr port)
     ((Err why) ((Err HttpConn (list int)) why))
     ((Ok id)
-      (http_wait_up (HttpConn n np id host addr port (http_read_new "GET") (http_opening) ((None TcpRx))) (add (clock_ns) (http_connect_ns))))))
+      (let deadline (add (clock_ns) (http_connect_ns))
+        (match (http_wait_up (HttpConn n np id host addr port (http_read_new "GET") (http_opening) ((None TcpRx)) sec) deadline)
+          ((Err why) ((Err HttpConn (list int)) why))
+          ((Ok c)
+            (if (is_empty hello)
+                ((Ok HttpConn (list int)) c)
+                (match (http_wire c (bytes_concat hello))
+                  ((HttpGot c2 ps) (http_shaken c2 ps deadline))))))))))
+
+; The earliest year a board's clock may say for a certificate to be
+; checked by it, as seconds: 2024-01-01.
+(def http_clock_floor () int 1704067200)
+
+; A TLS session to name begun, checked to roots: the time asked of the
+; clock and 64 bytes of randomness of random, answered to np; or why
+; not.
+(def http_tls_begun ((np int) (name (list int)) (roots TrustRoots)) (Result TlsOut (list int))
+  (match (random_bytes np 64)
+    ((Err why) ((Err TlsOut (list int)) (append "TLS needs randomness: " why)))
+    ((Ok rs)
+      (let now (http_clock_now np)
+        (if (lt now (http_clock_floor))
+            ((Err TlsOut (list int)) "the board's clock does not know the date, so no certificate can be checked")
+            (let r (bytes_from_list rs)
+              ((Ok TlsOut (list int)) (tls_start name (bytes_slice r 0 32) (bytes_slice r 32 64) roots now))))))))
+
+; The clock's seconds, asked on rp; 0 if no clock answers.
+(def http_clock_now ((rp int)) int
+  (match (name_lookup "clock")
+    ((NotFound) 0)
+    ((Found c)
+      (let r (asked_reply (port_ask c rp "time" "the clock"))
+        (if (starts_with r "time ")
+            (match (word_number (drop_n r 5)) ((Some t) t) ((None) 0))
+            0)))))
+
+; c once its TLS handshake is done, the parts ps having come, before
+; deadline; or why it is not.
+(def http_shaken ((c HttpConn) (ps (list HttpPart)) (deadline int)) (Result HttpConn (list int))
+  (let failed (http_failure ps)
+    (if (not (is_empty failed)) ((Err HttpConn (list int)) failed)
+        (match (.sec c)
+          ((None) ((Ok HttpConn (list int)) c))
+          ((Some s)
+            (let t (.t s)
+              (if (tls_up t) ((Ok HttpConn (list int)) c)
+                  (tls_failed t) ((Err HttpConn (list int)) (append "TLS: " (tls_why t)))
+                  (eq (.state c) (http_gone)) ((Err HttpConn (list int)) "the connection closed during the TLS handshake")
+                  (ge (clock_ns) deadline)
+                  (let r (http_give_up c) ((Err HttpConn (list int)) "the server did not finish the TLS handshake"))
+                  (let z (alarm_at (.np c) deadline)
+                    (match (port_receive (.np c))
+                      ((RecvFailed) ((Err HttpConn (list int)) "no notices came from inet"))
+                      ((Message from b)
+                        (match (http_feed c b)
+                          ((HttpGot c2 ps2) (http_shaken c2 ps2 deadline)))))))))))))
+
+; Why the first of ps that failed did, or empty if none did.
+(def http_failure ((ps (list HttpPart))) (list int)
+  (if (is_empty ps) ""
+      (match (head ps)
+        ((HttpFailed why) why)
+        ((HttpBad why) why)
+        ((HttpHead c r hs) (http_failure (tail ps)))
+        ((HttpBody d) (http_failure (tail ps)))
+        ((HttpEnd k) (http_failure (tail ps))))))
 
 ; c once its up notice comes, before deadline; its closed notice, or the
 ; deadline passing, is why not.
@@ -89,15 +243,28 @@
   (if (and (eq (.state c) (http_open)) (http_idle (.reader c)))
       ((Ok HttpConn (list int)) c)
       (match (http_rx_freed c)
-        ((HttpConn n np id host addr port r st rx)
+        ((HttpConn n np id host addr port r st rx sec)
           (let z (if (eq st (http_gone)) "" (tcp_reset n id))
-            (http_open_at n np host addr port))))))
+            (http_open_at n np host addr port sec))))))
 
 ; c closed: told to inet, which finishes it once its data is sent: empty,
 ; or why not. Its ring is given up as its closed notice comes, or the
 ; process ends.
 (def http_close ((c HttpConn)) (list int)
-  (if (eq (.state c) (http_gone)) "" (tcp_finish (.inet c) (.id c))))
+  (if (eq (.state c) (http_gone)) ""
+      (let z (match (.sec c)
+               ((None) 0)
+               ((Some s)
+                 (match (tls_close (.t s))
+                   ((TlsOut t sends got) (http_wire_only c (bytes_concat sends))))))
+        (tcp_finish (.inet c) (.id c)))))
+
+; b written to c, whatever came meanwhile passed over, as a connection
+; being closed does.
+(def http_wire_only ((c HttpConn) (b bytes)) int
+  (if (eq (bytes_len b) 0) 0
+      (match (tcp_write_bytes (.inet c) (.np c) (.id c) b 0 (bytes_len b))
+        ((TcpWrote kept why) 0))))
 
 ; c given up, with a reset to the server, and its ring with it, so that a
 ; program that keeps going, as agentd does, does not run out of regions.
@@ -124,10 +291,22 @@
   (if (not (eq (.state c) (http_open)))
       (HttpGot c (cons (HttpFailed "the connection is not open") (nil HttpPart)))
       (let c2 (.reader c (http_expect (.reader c) method))
-        (match (tcp_write_bytes (.inet c2) (.np c2) (.id c2) req 0 (bytes_len req))
-          ((TcpWrote kept why)
-            (match (http_feed_all c2 kept (nil HttpPart))
-              ((HttpGot c3 rparts) (http_sent c3 (rev rparts) why))))))))
+        (match (.sec c2)
+          ((None) (http_wire c2 req))
+          ((Some s)
+            (match (tls_send (.t s) req 0 (bytes_len req))
+              ((TlsOut t sends got)
+                (if (tls_failed t)
+                    (HttpGot c2 (cons (HttpFailed (append "TLS: " (tls_why t))) (nil HttpPart)))
+                    (http_wire (.sec c2 (Some (.t s t))) (bytes_concat sends))))))))))
+
+; b, bytes for the server as they go on the wire, written to c; and
+; what notices came while it was written, as parts.
+(def http_wire ((c HttpConn) (b bytes)) HttpGot
+  (match (tcp_write_bytes (.inet c) (.np c) (.id c) b 0 (bytes_len b))
+    ((TcpWrote kept why)
+      (match (http_feed_all c kept (nil HttpPart))
+        ((HttpGot c3 rparts) (http_sent c3 (rev rparts) why))))))
 
 ; c after a request was written, with the parts that came meanwhile, and
 ; why the writing stopped short, if it did.
@@ -173,13 +352,10 @@
 ; c's notice e, which came in b.
 (def http_feed_event ((c HttpConn) (e TcpEvent) (b bytes)) HttpGot
   (match e
-    ((TcpDataAt i at)
-      (match (http_more (.reader c) b at (bytes_len b))
-        ((HttpMore r ps) (HttpGot (.reader c r) ps))))
+    ((TcpDataAt i at) (http_bytes c b at (bytes_len b)))
     ((TcpData i d)
       (let db (bytes_from_list d)
-        (match (http_more (.reader c) db 0 (bytes_len db))
-          ((HttpMore r ps) (HttpGot (.reader c r) ps)))))
+        (http_bytes c db 0 (bytes_len db))))
     ((TcpFin i)
       (match (http_closed (.reader c))
         ((HttpMore r ps) (HttpGot (.state (.reader c r) (http_finished)) ps))))
@@ -199,10 +375,41 @@
         ((TcpRxTook d rx2)
           (let (why (tcp_took (.inet c) (.id c) (.got rx2))
                 c2 (.rx c (Some rx2)))
-            (match (http_more (.reader c2) d 0 (bytes_len d))
-              ((HttpMore r ps)
-                (HttpGot (.reader c2 r)
-                         (if (is_empty why) ps (append ps (cons (HttpFailed (append "inet: " why)) (nil HttpPart)))))))))))))
+            (match (http_bytes c2 d 0 (bytes_len d))
+              ((HttpGot c3 ps)
+                (HttpGot c3 (if (is_empty why) ps (append ps (cons (HttpFailed (append "inet: " why)) (nil HttpPart)))))))))))))
+
+; What came from the server, b from i to j, given to c's reader; over
+; TLS, opened first, what the session must send back sent, and its
+; failure or close said.
+(def http_bytes ((c HttpConn) (b bytes) (i int) (j int)) HttpGot
+  (match (.sec c)
+    ((None)
+      (match (http_more (.reader c) b i j)
+        ((HttpMore r ps) (HttpGot (.reader c r) ps))))
+    ((Some s)
+      (match (tls_more (.t s) b i j)
+        ((TlsOut t sends got)
+          (match (http_plain (.sec c (Some (.t s t))) got (nil HttpPart))
+            ((HttpGot c2 rps)
+              (if (tls_failed t)
+                  (let z (tcp_reset (.inet c2) (.id c2))
+                    (HttpGot (.state (http_rx_freed c2) (http_gone)) (rev (cons (HttpFailed (append "TLS: " (tls_why t))) rps))))
+                  (tls_closed t)
+                  (match (http_closed (.reader c2))
+                    ((HttpMore r ps) (HttpGot (.state (.reader c2 r) (http_finished)) (rev_onto rps ps))))
+                  (is_empty sends) (HttpGot c2 (rev rps))
+                  (match (http_wire c2 (bytes_concat sends))
+                    ((HttpGot c3 ps) (HttpGot c3 (rev_onto rps ps))))))))))))
+
+; The pieces of plaintext ds given to c's reader in turn, the parts
+; reversed onto acc.
+(def http_plain ((c HttpConn) (ds (list bytes)) (acc (list HttpPart))) HttpGot
+  (if (is_empty ds)
+      (HttpGot c acc)
+      (let d (head ds)
+        (match (http_more (.reader c) d 0 (bytes_len d))
+          ((HttpMore r ps) (http_plain (.reader c r) (tail ds) (rev_onto ps acc)))))))
 
 ; c's connection gone, and why: as it should, a body that runs to the
 ; close ends; otherwise, a response begun and not ended failed. Its ring

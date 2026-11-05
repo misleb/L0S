@@ -1,0 +1,186 @@
+; rng200.l0 -- a driver for the Raspberry Pi 5's hardware random number
+; generator, the BCM2712's RNG200 (`brcm,bcm2711-rng200` at 0x7d208000
+; in bcm2712.dtsi, 0x107D208000 to the CPU), serving the random
+; protocol, user/lib/proto/random.l0, as random, as virtio-rng does on
+; QEMU: for TLS's keys, TCP's first sequence numbers and UUIDs. Its
+; module must be flagged dev.
+;
+; Set up and read as Linux's iproc-rng200.c does a bcm2711-rng200: if
+; the generator is off, the first 0x40000 bits are thrown away, its FIFO
+; asked to fill to 2 words, and it is turned on, sampling at 1 MHz; then
+; each request waits until more than 16 bits have been made, and takes
+; words from the FIFO as they come, least significant byte first. A
+; health test failed (the NIST or the lockout bit) restarts it once; a
+; second failure, or a FIFO empty for a second, refuses the request.
+; The generator has no interrupt, so the driver polls, a request at a
+; time, sleeping 50 us when the FIFO is empty.
+
+; Where the generator is, and how much of it a region covers.
+(def rng200_base () int 70818758656)   ; 0x107D208000
+(def rng200_bytes () int 40)           ; 0x28
+
+; Its registers.
+(def rng200_ctrl () int 0)             ; RNG_CTRL: RBGEN, bits 0-12; the divider from 13
+(def rng200_soft_reset () int 4)       ; RNG_SOFT_RESET
+(def rbg200_soft_reset () int 8)       ; RBG_SOFT_RESET
+(def rng200_bit_count () int 12)       ; RNG_TOTAL_BIT_COUNT
+(def rng200_bit_threshold () int 16)   ; RNG_TOTAL_BIT_COUNT_THRESHOLD
+(def rng200_status () int 24)          ; RNG_INT_STATUS
+(def rng200_fifo_data () int 32)       ; RNG_FIFO_DATA
+(def rng200_fifo_count () int 36)      ; RNG_FIFO_COUNT: the words in it, bits 0-7; the threshold from 8
+
+; RBGEN's bits, and CTRL as Linux turns it on: RBGEN all set and the
+; divider 3, sampling at 1 MHz.
+(def rng200_rbgen_mask () int 8191)    ; 0x1FFF
+(def rng200_ctrl_on () int 32767)      ; 3 << 13 | 0x1FFF
+
+; The bits made and thrown away before the first is kept, and the FIFO's
+; threshold, 2 words, at bit 8.
+(def rng200_warm_bits () int 262144)   ; 0x40000
+(def rng200_fifo_threshold () int 512) ; 2 << 8
+
+; INT_STATUS's health tests failed: MASTER_FAIL_LOCKOUT (bit 31) and
+; NIST_FAIL (bit 5).
+(def rng200_failed_mask () int 2147483680) ; 0x80000020
+
+; How long a request may wait for a word, and how long to sleep while
+; the FIFO is empty.
+(def rng200_patience_ns () int 1000000000)
+(def rng200_nap_ns () int 50000)
+
+; ---------------------------------------------------------------- pure
+
+; Whether CTRL's value says the generator is on.
+(def rng200_is_on ((ctrl int)) bool (not (eq (bit_and ctrl (rng200_rbgen_mask)) 0)))
+
+; ctrl with RBGEN cleared, the generator off, and set, on, as Linux's
+; enable_set writes it.
+(def rng200_ctrl_off ((ctrl int)) int (bit_and ctrl (bit_xor (rng200_rbgen_mask) -1)))
+(def rng200_ctrl_enabled ((ctrl int)) int (bit_or (rng200_ctrl_off ctrl) 1))
+
+; Whether INT_STATUS's value says a health test failed.
+(def rng200_has_failed ((status int)) bool (not (eq (bit_and status (rng200_failed_mask)) 0)))
+
+; How many words FIFO_COUNT's value says the FIFO holds.
+(def rng200_words ((count int)) int (bit_and count 255))
+
+; The 4 bytes of a word w onto acc reversed, least significant first, as
+; Linux copies the FIFO's words into its buffer: the first byte deepest.
+(def rng200_word_bytes ((w int) (acc (list int))) (list int)
+  (cons (bit_and (bit_shr w 24) 255)
+    (cons (bit_and (bit_shr w 16) 255)
+      (cons (bit_and (bit_shr w 8) 255)
+        (cons (bit_and w 255) acc)))))
+
+; What the driver says once it serves random.
+(def rng200_line () (list int)
+  (append "an RNG200 at 0x" (append (hex_digits (rng200_base) 10) ", serving random")))
+
+; ---------------------------------------------------------------- the device
+
+; Fails, saying why.
+(def complain ((why (list int))) int (fail_as "rng200" why))
+
+; The generator on, as Linux's bcm2711_rng200_init leaves it; left as
+; it is if it is on already.
+(def rng200_on ((g IoRegion)) int
+  (if (rng200_is_on (region_get32 g (rng200_ctrl)))
+      0
+      (let (a (region_set32 g (rng200_bit_threshold) (rng200_warm_bits))
+            b (region_set32 g (rng200_fifo_count) (rng200_fifo_threshold)))
+        (region_set32 g (rng200_ctrl) (rng200_ctrl_on)))))
+
+; The generator restarted after a failed health test, as Linux's
+; iproc_rng200_restart does: off, its status cleared, both parts reset
+; and let go, on again.
+(def rng200_restart ((g IoRegion)) int
+  (let (off (region_set32 g (rng200_ctrl) (rng200_ctrl_off (region_get32 g (rng200_ctrl))))
+        st (region_set32 g (rng200_status) 4294967295)
+        r1 (region_set32 g (rbg200_soft_reset) (bit_or (region_get32 g (rbg200_soft_reset)) 1))
+        r2 (region_set32 g (rng200_soft_reset) (bit_or (region_get32 g (rng200_soft_reset)) 1))
+        r3 (region_set32 g (rng200_soft_reset) (bit_and (region_get32 g (rng200_soft_reset)) (bit_xor 1 -1)))
+        r4 (region_set32 g (rbg200_soft_reset) (bit_and (region_get32 g (rbg200_soft_reset)) (bit_xor 1 -1))))
+    (region_set32 g (rng200_ctrl) (rng200_ctrl_enabled (region_get32 g (rng200_ctrl))))))
+
+; Waits, until deadline, for the generator to have made more than 16
+; bits: whether it did.
+(def rng200_warmed ((g IoRegion) (deadline int)) bool
+  (if (gt (region_get32 g (rng200_bit_count)) 16) true
+      (ge (clock_ns) deadline) false
+      (let z (sleep_ns (rng200_nap_ns)) (rng200_warmed g deadline))))
+
+; What came of drawing bytes: the bytes, reversed, or why there are none.
+(data Rng200Drawn (Rng200Got (list int)) (Rng200Not (list int)))
+
+; n bytes drawn from the FIFO onto acc, reversed: a word at a time,
+; waiting for one until deadline, restarting the generator once if a
+; health test failed (restarted says whether it has been).
+(def rng200_draw ((g IoRegion) (n int) (acc (list int)) (deadline int) (restarted bool)) Rng200Drawn
+  (if (le n 0)
+      (Rng200Got acc)
+      (rng200_has_failed (region_get32 g (rng200_status)))
+      (if restarted
+          (Rng200Not "the generator failed its health test again")
+          (let r (rng200_restart g) (rng200_draw g n acc (add (clock_ns) (rng200_patience_ns)) true)))
+      (gt (rng200_words (region_get32 g (rng200_fifo_count))) 0)
+      (let w (region_get32 g (rng200_fifo_data))
+        (rng200_draw g (sub n 4) (rng200_word_bytes w acc) (add (clock_ns) (rng200_patience_ns)) restarted))
+      (ge (clock_ns) deadline)
+      (Rng200Not "the generator gave nothing for a second")
+      (let z (sleep_ns (rng200_nap_ns)) (rng200_draw g n acc deadline restarted))))
+
+; n bytes from the generator, or why not: whole words drawn, the last
+; word's extra bytes dropped.
+(def rng200_bytes_of ((g IoRegion) (n int)) Rng200Drawn
+  (if (not (rng200_warmed g (add (clock_ns) (rng200_patience_ns))))
+      (Rng200Not "the generator has not warmed up")
+      (match (rng200_draw g n (nil int) (add (clock_ns) (rng200_patience_ns)) false)
+        ((Rng200Not why) (Rng200Not why))
+        ((Rng200Got acc) (Rng200Got (drop_n acc (sub (length acc) n)))))))
+
+; ---------------------------------------------------------------- serving
+
+; The driver: the generator's region opened; with none, no generator,
+; as on QEMU's board, said and no failure.
+(def rng200 () int
+  (match (open_region (rng200_base) (rng200_bytes))
+    ((IoRegionFailed fault why) (info_as "rng200" (append "no RNG200 on the board: " why)))
+    ((IoRegionOpened g)
+      (let on (rng200_on g)
+        (if (not (rng200_warmed g (add (clock_ns) (rng200_patience_ns))))
+            (complain "the generator did not start")
+            (start_serving g))))))
+
+; Registers as random, then answers each request.
+(def start_serving ((g IoRegion)) int
+  (let (port (port_new) r (name_register_or_why port "random"))
+    (if (is_empty r)
+        (let n (info_as "rng200" (rng200_line))
+          (serve g port))
+        (complain r))))
+
+; Each request on port answered, one at a time.
+(def serve ((g IoRegion) (port int)) int
+  (match (port_receive port)
+    ((RecvFailed) (complain "lost its port"))
+    ((Message from mb)
+      (let r (msg_answer mb (handle g (msg_text_from mb 4)))
+        (serve g port)))))
+
+; A request's body, its op and then its numbers: the reply.
+(def handle ((g IoRegion) (body (list int))) (list int)
+  (match (request_numbers body)
+    ((ReqBad why) (error_reply why))
+    ((ReqNums op ns)
+      (if (and (eq op "bytes") (eq (length ns) 1))
+          (drawn g (head ns))
+          (error_reply (append "no request " op))))))
+
+; bytes N: N bytes from the generator, as random HEX; or why not.
+(def drawn ((g IoRegion) (n int)) (list int)
+  (let why (random_refusal n)
+    (if (not (is_empty why))
+        (error_reply why)
+        (match (rng200_bytes_of g n)
+          ((Rng200Not why2) (error_reply why2))
+          ((Rng200Got acc) (random_reply (rev acc)))))))

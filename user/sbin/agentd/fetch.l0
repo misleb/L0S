@@ -1,0 +1,128 @@
+; fetch.l0 -- agentd's fetch_url: the agent's own HTTP and HTTPS
+; access to the internet, through inet and httpc, an https:// server's
+; certificate checked to the board's roots. The tool's definition, its
+; input read into a request, what a response is kept as while it
+; comes, and the answer the model reads, purely; agentd.l0 opens the
+; connection and feeds it the parts. One request, its response whole up
+; to fetch_keep_max, never a redirect followed: the model sees the
+; Location and asks again if it wants.
+
+; A request asked for: the URL, read; its method; the headers to send;
+; and the body.
+(data FetchAsk (FetchAsk (url HttpUrl) (method (list int)) (headers (list HttpHeader)) (body bytes)))
+
+; A fetch under way: the URL as given; the connection; the response's
+; status (0 until its head) and reason, and its headers; its body's
+; pieces so far, reversed, how many bytes they are, and how many more
+; came and were not kept; and when it is given up if nothing more comes.
+(data Fetch (Fetch (url (list int)) (conn HttpConn) (code int) (reason (list int)) (headers (list HttpHeader))
+                   (pieces (list bytes)) (size int) (over int) (dl int)))
+
+; Whether name is fetch_url's.
+(def is_fetch_tool ((name (list int))) bool (eq name "fetch_url"))
+
+; How long a response may say nothing before it is given up.
+(def fetch_idle_ns () int 30000000000)
+
+; The most of a body kept; past it the rest is counted and let go.
+(def fetch_keep_max () int 1048576)
+
+; The methods fetch_url takes.
+(def fetch_methods () (list (list int)) (split_spaces "GET HEAD POST PUT PATCH DELETE OPTIONS"))
+
+; fetch_url's definition.
+(def fetch_tool_defs () (list Json)
+  (cons (tool_def_needing "fetch_url"
+          "Make one HTTP request to the internet, http:// or https:// (TLS 1.3, the server's certificate checked to the board's roots), and get back the status line, the response's headers, and its body as text, at most 64 KB of it; a redirect is not followed, so ask its Location again if you want it. For web pages, APIs and files online."
+          (cons (tool_prop "url" "string" "The URL, http:// or https://")
+            (cons (tool_prop "method" "string" "GET (if none), HEAD, POST, PUT, PATCH, DELETE or OPTIONS")
+              (cons (json_field "headers" (json_obj (cons (json_field "type" (json_str "object"))
+                                                      (cons (json_field "description" (json_str "Headers to send, each a name and its value as a string")) (nil JField)))))
+                (cons (tool_prop "body" "string" "The body to send, with POST, PUT or PATCH; JSON unless a Content-Type header says otherwise") (nil JField)))))
+          (cons (json_str "url") (nil Json)))
+        (nil Json)))
+
+; The request input asks for, or why it asks for none.
+(def fetch_ask_of ((input Json)) (Result FetchAsk (list int))
+  (match (tool_str input "url")
+    ((None) ((Err FetchAsk (list int)) "fetch_url needs a url"))
+    ((Some s)
+      (match (http_url_of s)
+        ((Err why) ((Err FetchAsk (list int)) why))
+        ((Ok u)
+          (let (method (match (tool_str input "method") ((None) "GET") ((Some m) (fetch_upper m (nil int)))))
+            (if (not (any_eq method (fetch_methods)))
+                ((Err FetchAsk (list int)) (append "not a method fetch_url takes: " method))
+                (match (fetch_headers_of input)
+                  ((Err why) ((Err FetchAsk (list int)) why))
+                  ((Ok hs)
+                    (let body (match (tool_str input "body") ((None) (nil int)) ((Some b) b))
+                      ((Ok FetchAsk (list int)) (FetchAsk u method (fetch_headers u hs (not (is_empty body))) (bytes_from_list body)))))))))))))
+
+; s in capitals, onto acc reversed.
+(def fetch_upper ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s) (rev acc)
+      (let c (head s) (fetch_upper (tail s) (cons (if (and (ge c 97) (le c 122)) (sub c 32) c) acc)))))
+
+; The headers input names, each a string: or why one is not.
+(def fetch_headers_of ((input Json)) (Result (list HttpHeader) (list int))
+  (match (json_get input "headers")
+    ((None) ((Ok (list HttpHeader) (list int)) (nil HttpHeader)))
+    ((Some v) (fetch_fields (json_fields v) (nil HttpHeader)))))
+
+; Each of fs as a header, onto acc reversed.
+(def fetch_fields ((fs (list JField)) (acc (list HttpHeader))) (Result (list HttpHeader) (list int))
+  (if (is_empty fs)
+      ((Ok (list HttpHeader) (list int)) (rev acc))
+      (match (head fs)
+        ((JField k v)
+          (match (json_text v)
+            ((None) ((Err (list HttpHeader) (list int)) (append "the header " (append (bytes_to_list k) " is not a string"))))
+            ((Some t)
+              (let (n (bytes_to_list k) tv (bytes_to_list t))
+                (if (or (fetch_has_line_break n) (fetch_has_line_break tv))
+                    ((Err (list HttpHeader) (list int)) "a header may not hold a line break")
+                    (fetch_fields (tail fs) (cons (HttpHeader n tv) acc))))))))))
+
+; Whether s holds a carriage return or a newline.
+(def fetch_has_line_break ((s (list int))) bool (or (contains s "\r") (contains s "\n")))
+
+; The headers sent: a User-Agent and Accept unless given, a Content-Type
+; of application/json for a body unless given, then those given.
+(def fetch_headers ((u HttpUrl) (hs (list HttpHeader)) (has_body bool)) (list HttpHeader)
+  (let (a (fetch_default hs "User-Agent" "l0s-agentd" (nil HttpHeader))
+        b (fetch_default hs "Accept" "*/*" a)
+        c (if has_body (fetch_default hs "Content-Type" "application/json" b) b))
+    (append (rev c) hs)))
+
+; The header name: value onto acc, unless hs names it.
+(def fetch_default ((hs (list HttpHeader)) (name (list int)) (value (list int)) (acc (list HttpHeader))) (list HttpHeader)
+  (match (http_header hs name) ((Some v) acc) ((None) (cons (HttpHeader name value) acc))))
+
+; ----------------------------------------------------------- the response
+
+; A fetch of url begun on c, to be given up at dl.
+(def fetch_new ((url (list int)) (c HttpConn) (dl int)) Fetch
+  (Fetch url c 0 (nil int) (nil HttpHeader) (nil bytes) 0 0 dl))
+
+; f with a piece d of the body: kept, or counted once past the most kept.
+(def fetch_piece ((f Fetch) (d bytes)) Fetch
+  (let n (bytes_len d)
+    (if (gt (add (.size f) n) (fetch_keep_max))
+        (.over f (add (.over f) n))
+        (.size (.pieces f (cons d (.pieces f))) (add (.size f) n)))))
+
+; The answer the model reads: the status line, each header, a blank
+; line, then the body as text, cut at tool_max, and a line saying how
+; much more came if any was let go.
+(def fetch_answer ((f Fetch)) ToolAnswer
+  (let (head (rev (push "\n" (fetch_head_lines (.headers f) (push "\n" (push (.reason f) (push " " (push (digits (.code f)) (push "HTTP " (nil int)))))))))
+        body (tool_cut (bytes_concat (rev (.pieces f))))
+        more (if (eq (.over f) 0) (nil int) (append "\n[" (append (digits (.over f)) " more bytes came, not kept]\n"))))
+    (tool_ok (bytes_concat (cons (bytes_from_list head) (cons body (cons (bytes_from_list more) (nil bytes))))))))
+
+; Each of hs as a line NAME: VALUE, onto acc reversed.
+(def fetch_head_lines ((hs (list HttpHeader)) (acc (list int))) (list int)
+  (if (is_empty hs)
+      acc
+      (match (head hs) ((HttpHeader n v) (fetch_head_lines (tail hs) (push "\n" (push v (push ": " (push n acc)))))))))

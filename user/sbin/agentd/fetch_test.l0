@@ -1,0 +1,65 @@
+; fetch_test.l0 -- fetch_url without a network: its input read into a
+; request, refused where it is wrong, and a response made the answer
+; the model reads. The e2e case https fetches through it over TLS.
+
+; The JSON text s, read.
+(def js ((s (list int))) Json
+  (let b (bytes_from_list s)
+    (match (json_whole b 0 (bytes_len b)) ((Err why) (JNull)) ((Ok v) v))))
+
+; What input asks for, as text: the scheme, server, port, path, method,
+; each header and the body; or why it asks for none.
+(def asked ((input (list int))) (list int)
+  (match (fetch_ask_of (js input))
+    ((Err why) (append "error: " why))
+    ((Ok a)
+      (let u (.url a)
+        (unwords (cons (if (.tls u) "https" "http") (cons (.server u) (cons (digits (.port u)) (cons (.path u) (cons (.method a)
+                 (cons (header_words (.headers a) (nil int)) (cons (bytes_to_list (.body a)) (nil (list int))))))))))))))
+
+; hs as NAME=VALUE, joined by commas, onto acc reversed.
+(def header_words ((hs (list HttpHeader)) (acc (list int))) (list int)
+  (if (is_empty hs) (rev acc)
+      (match (head hs)
+        ((HttpHeader n v) (header_words (tail hs) (push v (push "=" (push n (if (is_empty acc) acc (push "," acc))))))))))
+
+; A plain GET: a User-Agent and Accept sent.
+(def test_get () int
+  (check_str "get" (asked "{\"url\":\"https://example.com/a?b=c\"}")
+             "https example.com 443 /a?b=c GET User-Agent=l0s-agentd,Accept=*/* "))
+
+; A POST with a body is JSON unless a Content-Type is given; a method in
+; lowercase is taken; given headers are sent as given.
+(def test_post () int
+  (add (check_str "json" (asked "{\"url\":\"http://10.0.2.2:8080/x\",\"method\":\"post\",\"body\":\"{}\"}")
+                  "http 10.0.2.2 8080 /x POST User-Agent=l0s-agentd,Accept=*/*,Content-Type=application/json {}")
+       (check_str "typed" (asked "{\"url\":\"http://h/\",\"method\":\"PUT\",\"body\":\"a=1\",\"headers\":{\"Content-Type\":\"text/plain\",\"Accept\":\"text/html\"}}")
+                  "http h 80 / PUT User-Agent=l0s-agentd,Content-Type=text/plain,Accept=text/html a=1")))
+
+; What is refused: no URL, another scheme, a method not taken, a header
+; not a string, a header with a line break.
+(def test_refused () int
+  (add (check_str "no url" (asked "{}") "error: fetch_url needs a url")
+       (add (check_str "ftp" (asked "{\"url\":\"ftp://h/\"}") "error: only http:// and https:// are spoken, not ftp://h/")
+            (add (check_str "method" (asked "{\"url\":\"http://h/\",\"method\":\"TRACE\"}") "error: not a method fetch_url takes: TRACE")
+                 (add (check_str "number" (asked "{\"url\":\"http://h/\",\"headers\":{\"X\":1}}") "error: the header X is not a string")
+                      (check_str "break" (asked "{\"url\":\"http://h/\",\"headers\":{\"X\":\"a\\r\\nB: c\"}}") "error: a header may not hold a line break"))))))
+
+; A response kept, as the model reads it: the status line, the headers,
+; a blank line, the body.
+(def test_answer () int
+  (let (c (HttpConn (Inet 1 2) 9 5 "h" 0 80 (http_read_new "GET") (http_open) ((None TcpRx)) ((None HttpTls)))
+        f (fetch_piece (fetch_piece (.headers (.reason (.code (fetch_new "http://h/" c 0) 200) "OK") (cons (HttpHeader "Content-Type" "text/plain") (nil HttpHeader)))
+                                    (bytes_from_list "hello, "))
+                       (bytes_from_list "world")))
+    (match (fetch_answer f)
+      ((ToolAnswer t failed)
+        (add (check_str "text" (bytes_to_list t) "HTTP 200 OK\nContent-Type: text/plain\n\nhello, world")
+             (check_bool "failed" failed false))))))
+
+; A body past the most kept is counted, and said so.
+(def test_over () int
+  (let (c (HttpConn (Inet 1 2) 9 5 "h" 0 80 (http_read_new "GET") (http_open) ((None TcpRx)) ((None HttpTls)))
+        f (fetch_piece (fetch_piece (fetch_new "u" c 0) (tls_zeros 1048570)) (bytes_from_list "0123456789")))
+    (add (check_int "kept" (.size f) 1048570)
+         (check_int "over" (.over f) 10))))
