@@ -2,22 +2,29 @@
 ; where it is and with what token (ModelConf, from /etc/agent/config
 ; and /etc/agent/token), a request's bytes (model_request), and its
 ; streamed events read as ModelEvents (model_events). The provider is
-; Anthropic's Messages API, reached in plain HTTP through the host's
-; proxy (tools/api-proxy), which adds the key and the TLS: another
-; provider would be another model_request and model_events with the
-; same types. Linked with JSON, SSE and HTTP, as the Makefile's MODELLIB.
+; Anthropic's Messages API, reached either in plain HTTP through the
+; host's proxy (tools/api-proxy), which adds the key and the TLS, or
+; straight over TLS, the board holding the key: another provider would
+; be another model_request and model_events with the same types. Linked
+; with JSON, SSE and HTTP, as the Makefile's MODELLIB.
 ;
 ;   /etc/agent/config   a line each, # a comment:
-;                       api HOST:PORT    the proxy (needed)
+;                       api HOST:PORT    the proxy, or
+;                       api https://HOST[:PORT]
+;                                        the API itself, over TLS, its
+;                                        certificate checked to
+;                                        /etc/ssl/roots.pem (one is needed)
 ;                       model NAME       claude-sonnet-5-5 if none
 ;                       max_tokens N     8192 if none
 ;                       any other key is left for its program
-;   /etc/agent/token    the board's token for the proxy, its first line
+;   /etc/agent/token    the board's token for the proxy, its first
+;                       line; for the API itself, its key
 
 ; Where the model is, and how it is asked: the proxy's host, a name or
 ; an address dotted, and port; the model's name; the most tokens an
-; answer may have; and the board's token for the proxy.
-(data ModelConf (ModelConf (host (list int)) (port int) (model (list int)) (max_tokens int) (token (list int))))
+; answer may have; the board's token for the proxy, or the API's key;
+; and whether the API is reached itself, over TLS.
+(data ModelConf (ModelConf (host (list int)) (port int) (model (list int)) (max_tokens int) (token (list int)) (tls bool)))
 
 ; What an event of a streamed answer says. A block's text as it comes
 ; (MText index text); a tool's use begun (MToolStart index id name), its
@@ -57,7 +64,7 @@
   (let t (http_trim (strip_cr (up_to 10 token)))
     (if (is_empty t)
         ((Err ModelConf (list int)) (append (model_token_path) ": no token in it"))
-        (model_conf_lines (lines text) (ModelConf (nil int) 0 (model_default) (model_default_max_tokens) t)))))
+        (model_conf_lines (lines text) (ModelConf (nil int) 0 (model_default) (model_default_max_tokens) t false)))))
 
 ; The rest of model_conf_of: the lines ls read onto c so far.
 (def model_conf_lines ((ls (list (list int))) (c ModelConf)) (Result ModelConf (list int))
@@ -77,18 +84,30 @@
   (if (not (any_eq key (split_spaces "api model max_tokens"))) ((Ok ModelConf (list int)) c)
       (not (eq (length vs) 1)) ((Err ModelConf (list int)) (append key " takes one value"))
       (match c
-        ((ModelConf h p m n t)
-          (if (eq key "model") ((Ok ModelConf (list int)) (ModelConf h p (head vs) n t))
+        ((ModelConf h p m n t tls)
+          (if (eq key "model") ((Ok ModelConf (list int)) (ModelConf h p (head vs) n t tls))
               (eq key "max_tokens")
               (match (word_number (head vs))
                 ((None) ((Err ModelConf (list int)) (append "not a number: " (head vs))))
                 ((Some k) (if (gt k 0)
-                              ((Ok ModelConf (list int)) (ModelConf h p m k t))
+                              ((Ok ModelConf (list int)) (ModelConf h p m k t tls))
                               ((Err ModelConf (list int)) "max_tokens is at least 1"))))
               (model_conf_api (head vs) c))))))
 
-; c with its proxy at hostport, HOST:PORT: or why that is not one.
+; c with its proxy at hostport, HOST:PORT, or the API at
+; https://HOST[:PORT]: or why that is not one.
 (def model_conf_api ((hostport (list int)) (c ModelConf)) (Result ModelConf (list int))
+  (if (starts_with hostport "https://")
+      (match (http_url_of hostport)
+        ((Err why) ((Err ModelConf (list int)) why))
+        ((Ok u)
+          (if (not (eq (.path u) "/"))
+              ((Err ModelConf (list int)) (append "api is https://HOST[:PORT], with no path, not " hostport))
+              ((Ok ModelConf (list int)) (.tls (.port (.host c (.server u)) (.port u)) true)))))
+      (model_conf_proxy hostport c)))
+
+; c with its proxy at hostport, HOST:PORT: or why that is not one.
+(def model_conf_proxy ((hostport (list int)) (c ModelConf)) (Result ModelConf (list int))
   (let (host (up_to 58 hostport)
         after (drop hostport (length host)))
     (if (or (is_empty host) (is_empty after))
@@ -97,7 +116,7 @@
           ((None) ((Err ModelConf (list int)) (append "not a port: " (tail after))))
           ((Some port)
             (if (and (ge port 1) (le port 65535))
-                (match c ((ModelConf h p m n t) ((Ok ModelConf (list int)) (ModelConf host port m n t))))
+                (match c ((ModelConf h p m n t tls) ((Ok ModelConf (list int)) (ModelConf host port m n t false))))
                 ((Err ModelConf (list int)) "a port is 1 to 65535")))))))
 
 ; The configuration and the token, read from their files: or why not,
@@ -131,17 +150,41 @@
 (def model_push_if ((skip bool) (fs (list JField)) (f JField)) (list JField)
   (if skip fs (cons f fs)))
 
-; A request of the model through c's proxy, as bytes: POST
-; /v1/messages, the board's token as its bearer, the API's version, and
-; the body's JSON, system, messages and tools as given (Json, so a
-; caller adds cache_control where it wants it).
+; A request of the model c names, as bytes: POST /v1/messages, the
+; board's token as its bearer for the proxy or the key as x-api-key for
+; the API itself, the API's version, and the body's JSON, system,
+; messages and tools as given (Json, so a caller adds cache_control
+; where it wants it).
 (def model_request ((c ModelConf) (system Json) (messages Json) (tools Json)) bytes
-  (http_request "POST" (http_host_text (.host c) (.port c)) "/v1/messages"
-    (cons (HttpHeader "Authorization" (append "Bearer " (.token c)))
+  (http_request "POST" (model_host_text c) "/v1/messages"
+    (cons (model_auth c)
       (cons (HttpHeader "anthropic-version" (model_api_version))
         (cons (HttpHeader "Content-Type" "application/json")
           (cons (HttpHeader "Accept" "text/event-stream") (nil HttpHeader)))))
     (model_body c system messages tools)))
+
+; The Host c's requests name: the port left out if it is the scheme's.
+(def model_host_text ((c ModelConf)) (list int)
+  (if (and (.tls c) (eq (.port c) 443)) (.host c) (http_host_text (.host c) (.port c))))
+
+; The header that says who asks: the key, to the API itself; the
+; board's token, to the proxy.
+(def model_auth ((c ModelConf)) HttpHeader
+  (if (.tls c) (HttpHeader "x-api-key" (.token c)) (HttpHeader "Authorization" (append "Bearer " (.token c)))))
+
+; What c calls the model's server, in a failure: the API, or the proxy.
+(def model_where ((c ModelConf)) (list int)
+  (if (.tls c) (append "the API at " (.host c)) (append "the proxy at " (.host c))))
+
+; A connection to the model c names, through n, its notices to np: over
+; TLS to the API itself, asking for the time and randomness on ap and
+; checking its certificate to the board's roots; else to the proxy.
+(def model_connect ((n Inet) (np int) (ap int) (c ModelConf)) (Result HttpConn (list int))
+  (if (.tls c)
+      (match (http_roots)
+        ((Err why) ((Err HttpConn (list int)) why))
+        ((Ok roots) (https_connect n np ap (.host c) (.port c) roots)))
+      (http_connect n np (.host c) (.port c))))
 
 ; ---------------------------------------------------------------- reading
 

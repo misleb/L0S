@@ -1,0 +1,123 @@
+; hkdf.l0 -- a hash chosen at run time, SHA-256, SHA-384 or SHA-512,
+; and what TLS 1.3 builds on it: a transcript hashed as it grows, HMAC
+; (RFC 2104), HKDF (RFC 5869) and TLS 1.3's HKDF-Expand-Label and
+; Derive-Secret (RFC 8446, 7.1). Pure; not constant-time, which a client
+; deriving its own keys from its own handshake does not need against
+; anyone but someone already on the machine.
+
+; Which hash: TLS 1.3's suites use SHA-256 and SHA-384.
+(data HashAlg (HashSha256) (HashSha384) (HashSha512))
+
+; The length of a's digest, in bytes.
+(def hash_len ((a HashAlg)) int
+  (match a
+    ((HashSha256) 32)
+    ((HashSha384) 48)
+    ((HashSha512) 64)))
+
+; The length of a's block, in bytes, which HMAC pads its key to.
+(def hash_block ((a HashAlg)) int
+  (match a
+    ((HashSha256) 64)
+    ((HashSha384) 128)
+    ((HashSha512) 128)))
+
+; The hash a of the bytes of b from i up to j.
+(def hash_of ((a HashAlg) (b bytes) (i int) (j int)) bytes
+  (match a
+    ((HashSha256) (sha256 b i j))
+    ((HashSha384) (sha384 b i j))
+    ((HashSha512) (sha512 b i j))))
+
+; ------------------------------------------------- a piece at a time
+
+; A hash under way, of whichever kind: a SHA-256, or a SHA-512 or
+; SHA-384, which Sha512 tells apart by its digest's length.
+(data HashCtx (HashCtxSha256 Sha256) (HashCtxSha512 Sha512))
+
+; A hash a of nothing yet.
+(def hash_new ((a HashAlg)) HashCtx
+  (match a
+    ((HashSha256) (HashCtxSha256 (sha256_new)))
+    ((HashSha384) (HashCtxSha512 (sha384_new)))
+    ((HashSha512) (HashCtxSha512 (sha512_new)))))
+
+; c given the bytes of b from i up to j.
+(def hash_more ((c HashCtx) (b bytes) (i int) (j int)) HashCtx
+  (match c
+    ((HashCtxSha256 s) (HashCtxSha256 (sha256_more s b i j)))
+    ((HashCtxSha512 s) (HashCtxSha512 (sha512_more s b i j)))))
+
+; The hash of everything c was given so far. c is left as it was, so a
+; transcript can be hashed at each point TLS needs and then go on: the
+; SHA-256's eight words are copied for sha256_done to finish, so c is
+; only read.
+(def hash_peek ((c HashCtx)) bytes
+  (match c
+    ((HashCtxSha256 s) (sha256_done (Sha256 (.kt s) (sha512_copy (.h s)) (.held s) (.n s))))
+    ((HashCtxSha512 s) (sha512_done s))))
+
+; Which hash c is.
+(def hash_alg ((c HashCtx)) HashAlg
+  (match c
+    ((HashCtxSha256 s) (HashSha256))
+    ((HashCtxSha512 s) (if (eq (.out s) 48) (HashSha384) (HashSha512)))))
+
+; ---------------------------------------------------------------- HMAC
+
+; The HMAC of msg under key with hash a (RFC 2104): a key longer than a
+; block is hashed first, then it is padded with zeros to a block.
+(def hmac ((a HashAlg) (key bytes) (msg bytes)) bytes
+  (let (n (hash_block a)
+        k (if (gt (bytes_len key) n) (hash_of a key 0 (bytes_len key)) key)
+        ipad (hmac_pad k n 54)
+        opad (hmac_pad k n 92)
+        inner (hash_peek (hash_more (hash_more (hash_new a) ipad 0 n) msg 0 (bytes_len msg))))
+    (hash_peek (hash_more (hash_more (hash_new a) opad 0 n) inner 0 (bytes_len inner)))))
+
+; The key k, at most n bytes, padded with zeros to n, each byte xored
+; with x: HMAC's 0x36 or 0x5c pad.
+(def hmac_pad ((k bytes) (n int) (x int)) bytes
+  (bytes_from_list (hmac_pad_from k (sub n 1) x (nil int))))
+
+; The pad's bytes up to i, before acc.
+(def hmac_pad_from ((k bytes) (i int) (x int) (acc (list int))) (list int)
+  (if (lt i 0)
+      acc
+      (let v (if (lt i (bytes_len k)) (bytes_get k i) 0)
+        (hmac_pad_from k (sub i 1) x (cons (bit_xor v x) acc)))))
+
+; ---------------------------------------------------------------- HKDF
+
+; HKDF-Extract (RFC 5869, 2.2): the pseudorandom key from ikm and salt.
+; An empty salt is HashLen zeros, which HMAC's padding makes the same.
+(def hkdf_extract ((a HashAlg) (salt bytes) (ikm bytes)) bytes
+  (hmac a salt ikm))
+
+; HKDF-Expand (RFC 5869, 2.3): len bytes of key from prk and info, len
+; at most 255 times a's digest's length.
+(def hkdf_expand ((a HashAlg) (prk bytes) (info bytes) (len int)) bytes
+  (let all (bytes_concat (rev (hkdf_blocks a prk info len (bytes_from_list "") 1 (nil bytes))))
+    (bytes_slice all 0 len)))
+
+; T(i) and those after it, before the reversed acc, while fewer than len
+; bytes are made: t is T(i - 1), empty for T(0).
+(def hkdf_blocks ((a HashAlg) (prk bytes) (info bytes) (len int) (t bytes) (i int) (acc (list bytes))) (list bytes)
+  (if (gt (mul (sub i 1) (hash_len a)) (sub len 1))
+      acc
+      (let next (hmac a prk (bytes_concat (cons t (cons info (cons (bytes_from_list (cons (bit_and i 255) (nil int))) (nil bytes))))))
+        (hkdf_blocks a prk info len next (add i 1) (cons next acc)))))
+
+; TLS 1.3's HKDF-Expand-Label (RFC 8446, 7.1): len bytes from secret,
+; under label, given without its "tls13 " which this adds, and context.
+; The label is at most 249 bytes and the context 255.
+(def hkdf_expand_label ((a HashAlg) (secret bytes) (label (list int)) (context bytes) (len int)) bytes
+  (let (full (append "tls13 " label)
+        hdr (bytes_from_list (cons (bit_and (bit_shr len 8) 255) (cons (bit_and len 255) (cons (length full) (append full (cons (bytes_len context) (nil int)))))))
+        info (bytes_concat (cons hdr (cons context (nil bytes)))))
+    (hkdf_expand a secret info len)))
+
+; TLS 1.3's Derive-Secret (RFC 8446, 7.1): a secret of a's length from
+; secret under label, for a transcript whose hash is transcript_hash.
+(def hkdf_derive_secret ((a HashAlg) (secret bytes) (label (list int)) (transcript_hash bytes)) bytes
+  (hkdf_expand_label a secret label transcript_hash (hash_len a)))

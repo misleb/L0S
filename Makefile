@@ -272,7 +272,24 @@ SSE     := user/lib/format/sse.l0
 # comes; pure.
 HTTPMSG := user/lib/format/http.l0
 # The HTTP/1.1 client over inet's TCP: INETLIB, the messages, and it.
-HTTP    := $(INETLIB) $(HTTPMSG) user/lib/proto/httpc.l0
+# TLS 1.3's client (proto/tls.l0) and what it is built on: the hashes,
+# HMAC and HKDF; X25519; the AEADs; big numbers, RSA and ECDSA, for
+# signatures; DER and X.509, read; and trust.l0, the roots and a chain
+# checked to them. HTTP's client speaks it for https://.
+SHA256  := user/lib/format/sha256.l0
+BASE64  := user/lib/format/base64.l0
+SHA512  := user/lib/crypto/sha512.l0
+HKDF    := $(SHA256) $(SHA512) user/lib/crypto/hkdf.l0
+X25519  := user/lib/crypto/x25519.l0
+CHACHA  := user/lib/crypto/chacha20.l0
+AESGCM  := user/lib/crypto/aesgcm.l0
+BIGNUM  := user/lib/crypto/bignum.l0
+SIGS    := $(BIGNUM) user/lib/crypto/rsa.l0 user/lib/crypto/ecdsa.l0
+DER     := user/lib/format/der.l0
+X509    := $(BASE64) $(DER) user/lib/crypto/x509.l0
+TRUST   := $(HKDF) $(SIGS) $(X509) user/lib/crypto/trust.l0
+TLS     := $(TRUST) $(X25519) $(CHACHA) $(AESGCM) user/lib/proto/tls.l0
+HTTP    := $(INETLIB) $(HTTPMSG) $(TLS) user/lib/proto/httpc.l0
 # A model's API, Anthropic's Messages API through the host's proxy: its
 # configuration, a request's bytes and its streamed events.
 MODELLIB := $(HTTP) $(JSON) $(SSE) user/lib/proto/model.l0
@@ -318,12 +335,11 @@ MBRLIB  := user/lib/format/mbr.l0
 PARTS   := $(UUIDLIB) $(CRC32) $(GPTLIB) $(MBRLIB)
 
 # SHA-256, which the Pi 5's bootloader checks its updates by.
-SHA256  := user/lib/format/sha256.l0
 
 # Installing L0S from a release the host's proxy serves (roadmap 0027):
 # the manifest, the plan, each file fetched and checked, over the
 # proxy's HTTP, SHA-256, the files and the agent's home.
-RELEASE := $(MODELLIB) $(SHA256) $(AGENTHOME) user/lib/sys/release.l0
+RELEASE := $(MODELLIB) $(AGENTHOME) user/lib/sys/release.l0
 
 # The Pi 5's bootloader: its image, pieeprom.bin (pure, over SHA256), and
 # its firmware's command line, an update's time and files, and the boot
@@ -355,7 +371,6 @@ UI_PREVIEW := $(CRC32) $(PNG) user/lib/ui/preview.l0
 # and alpha decoded into the toolkit's ARGB words and fitted to a box.
 INFLATE    := user/lib/format/inflate.l0
 PNGREAD    := $(INFLATE) user/lib/format/png_read.l0
-BASE64     := user/lib/format/base64.l0
 
 LIBS_virtio-gpu := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER)
 LIBS_hvs        := $(VIRTIO) $(RENDER) $(DISPLAY_SERVER) $(MAILBOX)
@@ -372,6 +387,7 @@ LIBS_virtio-blk := $(VIRTIO) $(DISKLIB) $(UUIDLIB) $(FSLIB)
 LIBS_virtio-net := $(VIRTIO) $(NICLIB)
 LIBS_gem        := $(NICLIB) $(MAILBOX) $(RP1)
 LIBS_virtio-rng := $(VIRTIO) $(RANDOM)
+LIBS_rng200     := $(RANDOM)
 LIBS_inet       := $(INETLIB) $(CLOCK)
 LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
@@ -379,7 +395,7 @@ LIBS_http       := $(HTTP) $(JSON) $(SSE)
 LIBS_ntp        := $(INETLIB) $(CLOCK) $(NTPLIB)
 LIBS_ask        := $(MODELLIB)
 LIBS_agent      := $(AGENTLIB) $(MODELLIB) $(AGENTHOME)
-LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG) $(BASE64)
+LIBS_agentd     := $(MODELLIB) $(AGENTLIB) $(AGENTHOME) $(RENDER) $(WMLIB) $(SVG)
 LIBS_uart       := $(TTY)
 LIBS_rtc        := $(CLOCK) $(MAILBOX)
 LIBS_eeprom     := $(CLOCK) $(SHA256) $(BOOTLOADER)
@@ -657,6 +673,18 @@ $(call l0_test,$(BASE) $(CRC32) $(PNG) $(INFLATE) user/lib/format/inflate_test.l
 $(call l0_test,$(BASE) $(CRC32) $(PNG) $(PNGREAD) user/lib/format/png_read_test.l0)
 $(call l0_test,$(BASE64) user/lib/format/base64_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
+$(call l0_test,$(BASE) $(SHA512) user/lib/crypto/sha512_test.l0)
+$(call l0_test,$(BASE) $(HKDF) user/lib/crypto/hkdf_test.l0)
+$(call l0_test,$(BASE) $(X25519) user/lib/crypto/x25519_test.l0)
+$(call l0_test,$(BASE) $(CHACHA) user/lib/crypto/chacha20_test.l0)
+$(call l0_test,$(BASE) $(AESGCM) user/lib/crypto/aesgcm_test.l0)
+$(call l0_test,$(BASE) $(BIGNUM) user/lib/crypto/bignum_test.l0)
+$(call l0_test,$(BASE) $(HKDF) $(SIGS) user/lib/crypto/rsa_test.l0)
+$(call l0_test,$(BASE) $(HKDF) $(SIGS) user/lib/crypto/ecdsa_test.l0)
+$(call l0_test,$(BASE) $(DER) user/lib/format/der_test.l0)
+$(call l0_test,$(BASE) $(X509) user/lib/crypto/x509_test.l0)
+$(call l0_test,$(BASE) $(TRUST) user/lib/crypto/trust_test.l0)
+$(call l0_test,$(BASE) $(TLS) user/lib/proto/tls_test.l0)
 $(call l0_test,$(ULIB) $(RELEASE) user/lib/sys/release_test.l0)
 $(call l0_test,$(BASE) $(SHA256) $(PIEEPROMLIB) user/lib/format/pieeprom_test.l0)
 $(call l0_test,$(ULIB) $(CLOCK) $(SHA256) $(BOOTLOADER) user/lib/sys/bootloader_test.l0)
@@ -1069,12 +1097,15 @@ graph:
 graph-hook:
 	tools/graphify-l0/install-hook
 
-# demo/etc, the wallpaper at both scales, the face, the icons and the
-# fonts, staged together as the archive's /etc.
-ETC_DEPS := $(WALLPAPERS) $(FACE) $(ICON_FACE) $(IMAGE_FACES) $(ETC_FONTS) $(STRIKES)
+# demo/etc, the wallpaper at both scales, the face, the icons, the
+# fonts and the TLS roots (certs/roots.pem, as /etc/ssl/roots.pem),
+# staged together as the archive's /etc.
+ROOTS_PEM := certs/roots.pem
+ETC_DEPS := $(WALLPAPERS) $(FACE) $(ICON_FACE) $(IMAGE_FACES) $(ETC_FONTS) $(STRIKES) $(ROOTS_PEM)
 stage_etc = cp $(WALLPAPERS) $(1)/ && cp $(FACE) $(1)/face && cp $(ICON_FACE) $(1)/icons \
             && mkdir -p $(1)/fonts && cp $(ETC_FONTS) $(STRIKES) $(1)/fonts/ \
-            && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/
+            && mkdir -p $(1)/images && cp $(IMAGE_FACES) $(1)/images/ \
+            && mkdir -p $(1)/ssl && cp $(ROOTS_PEM) $(1)/ssl/roots.pem
 
 initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc

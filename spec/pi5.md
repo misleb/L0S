@@ -187,7 +187,7 @@ volume, the board came up with the USB keyboard dead though `usb-hid`
 ran, and the cause is not yet known. `boot` then
 starts `pi5/etc/system`, the second: `sh` on the console, waited for,
 then `rtc clock`, `audio`, `usb-audio`, `hvs`, `hdmi-audio`, `gem`,
-`inet dhcp`, `ntp`, `font`, `wm`, `agentd` and `speech`. The inittab's
+`rng200`, `inet dhcp`, `ntp`, `font`, `wm`, `agentd` and `speech`. The inittab's
 `dev` lines name the second stage's drivers too, so that `boot` starts
 them with their devices from a system volume, booted with `root=` as a
 card the Installer wrote is ([Drivers from the system
@@ -218,10 +218,11 @@ card's volumes mounted, and nothing more.
 | `rtc clock` | the time, from the RTC in the Pi's power controller. Only the firmware reaches it, so `rtc` asks with the firmware's property interface (`GET_RTC_REG`, as Linux's rtc-rpi does) through the VideoCore mailbox, a region, from a DMA page below 4 GB (`firmware.l0` over `mailbox.l0`). A `set S` writes S to the RTC with `SET_RTC_REG`, so a reboot without a power cut keeps it, and is kept by `rtc clock` itself if the firmware refuses it. It keeps time over a power cut only with a battery on the RTC connector |
 | `eeprom` | not started, but flagged `dev` for the mailbox, so that the shell can run it: the bootloader's configuration, read and changed (see [The bootloader's configuration](#the-bootloaders-configuration)) |
 | `gem`, `inet dhcp` | the Ethernet port, RP1's GEM, serving `nic`, and the IPv4 stack over it at the address DHCP gives (see [The network on the Raspberry Pi 5](network.md#the-network-on-the-raspberry-pi-5)) |
+| `rng200` | the BCM2712's random number generator, at 0x107D208000, serving `random` (see [Randomness](devices.md#randomness)), started before `inet`, which keys TCP's first sequence numbers from it, and which TLS needs. It has not yet run on a board |
 | `ntp` | the time from the network, once `inet` registers: asked of the NTP server DHCP named, or `pool.ntp.org`, and given `rtc clock`, which writes it to the RTC; again every hour (see [The network](network.md#the-network)) |
 
-Nothing else of the demo's has a device here: no virtio, so no `random`
-for `inet`'s TCP, no PCIe for `pcie virt`, and no `sdhci pci`. The first
+Nothing else of the demo's has a device here: no virtio-rng (`rng200`
+stands for it), no PCIe for `pcie virt`, and no `sdhci pci`. The first
 boot should check these, on the debug UART (`dmesg` repeats them):
 - the kernel's banner: `aarch64`, the pages free, and the initramfs
 - `uart`'s line, and that what is typed reaches `sh`

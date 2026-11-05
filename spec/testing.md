@@ -359,6 +359,21 @@ Ctrl-C as a person would:
   a comment between, each a line as it comes, the server holding the
   stream open 2 s after the last; and `net tcp` show no connection is
   left;
+- `https`, with [a small TLS 1.3 server](../tests/e2e/https/server.py)
+  on the host's loopback, its certificate a P-256 key for 10.0.2.2
+  signed by the case's own RSA test CA, the board's one root
+  (`etc/ssl/roots.pem`), has `http` fetch a page over TLS, the same
+  with its head, 300 lines over several records, and one that is not
+  there; post JSON to `/echo`; and be refused by a port nothing
+  listens to, with `virtio-rng` for the keys and `rtc clock` for the
+  date;
+- `agent_fetch`, as `agent`, with the stand-in and the proxy, has the
+  script use `fetch_url` twice: a GET over plain HTTP of a page the
+  proxy does not serve, its 404 and JSON body the tool's answer, and an
+  `https://` URL on the proxy's port, whose handshake fails as the
+  proxy answers in plain HTTP, said as the tool's failure; `@PORT@` in
+  its `script.json` and `checks.json` is the port (`e2e_serve.py`), and
+  its `filter` makes the port `PORT` in what the agent writes;
 - `ask`, with [e2e_serve.py](../tools/api-proxy/e2e_serve.py) running
   the API proxy on the host's loopback in front of its stand-in for the
   Messages API, which answers from the case's `script.json`, has `ask`

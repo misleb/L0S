@@ -3,7 +3,8 @@
 `agentd` (`user/sbin/agentd`) is the agent's program: one
 conversation with a model, which every client shares and which is kept
 in its home, so that it outlives `agentd`; the model reached through
-the host's proxy and
+the host's proxy, or over TLS straight to the API when
+`/etc/agent/config` says `api https://HOST`, and
 [proto/model.l0](../user/lib/proto/model.l0) ([network.md](network.md)),
 and tools that act on the board. It only answers: it acts when someone
 talks to it, through its protocol, `agent`, which `run agent` speaks at
@@ -50,11 +51,12 @@ At its start `agentd`:
    an answer streams or a program runs.
 
 One turn runs at a time. A turn's acts, as the
-loop gives them, are done in order: a request is sent to the proxy on
+loop gives them, are done in order: a request is sent to the model's server on
 the connection kept from the last, or a new one, and its streamed
 answer read as it comes (`model_events`), each event told to the loop;
 a file tool is done at once; `run` and `sh` start their program, and
-the turn waits for its exit, its terminal answered meanwhile. An answer
+the turn waits for its exit, its terminal answered meanwhile; `fetch_url`
+makes its request, and the turn waits for the response. An answer
 silent for 120 s is given up, and the turn fails; so does a refusal
 (`model_refusal`'s words), a connection lost mid-answer, or a stream
 that ends before its stop. A request the loop asks while the last
@@ -442,13 +444,37 @@ Places and sizes are the desktop's pixels, a window's its content's.
 | `clear_desktop` | none | `desktop size`, then `desktop restore 0 0 W H` | the wallpaper the compositor holds put back over all of the desktop |
 | `time` | none | the clock's `time` and `zone` | the date and time to the second in UTC and the weekday, the same in the clock's zone (US Pacific) with its offset, and the seconds since 1970 |
 
-`show_image` (`path`, a relative one from the home) shows the person a
+`fetch_url` (below) fetches from the internet; `show_image` (`path`, a relative one from the home) shows the person a
 PNG, one of the model's own or one it found: a file whose first 8 bytes
 are a PNG's is told to every port open as `agent image` and its path,
 kept in the conversation (`image_shown`, as a build's previews are), and
 answered `shown PATH in the Agent app's Images pane`; anything else is
 refused, `PATH: not a PNG` or why it could not be read, and nothing
 shown.
+
+### The internet
+
+`fetch_url` ([fetch.l0](../user/sbin/agentd/fetch.l0)) is the agent's
+own way to the internet: one HTTP/1.1 request, to an `http://` or
+`https://` URL (`url`; `method`, `GET` if none, `HEAD`, `POST`, `PUT`,
+`PATCH`, `DELETE` or `OPTIONS`; `headers`, an object of strings, none
+holding a line break; `body`, a string, sent as `application/json`
+unless a `Content-Type` is given). A `User-Agent` and `Accept: */*` are
+sent unless given. `https://` is TLS 1.3, the server's certificate
+checked to `/etc/ssl/roots.pem` for its name by the clock's date
+([network.md](network.md#tls)); one that does not check fails the
+tool, saying why. The connection is `agentd`'s own, made through `inet`
+while the tool starts (the handshake waited for), its notices to a port
+of their own, `fetch`'s, so neither the model's connection nor this one
+ever reads the other's; the turn then waits for the response as it
+does for a program. The answer is `HTTP CODE REASON`, a line `NAME:
+VALUE` for each header, a blank line, and the body as text (bytes not
+UTF-8 a `?`), at most 64 KB and a line saying how much more if cut; of
+a body past 1 MB the rest is only counted. A redirect is not followed:
+its `Location` is in the answer, to be asked again. A response silent
+for 30 seconds, a connection lost, or one that cannot be made fails the
+tool, the URL and why; the connection is given up either way, never
+kept. Stopping the turn gives it up too.
 
 ### Running a program
 

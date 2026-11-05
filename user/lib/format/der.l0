@@ -1,0 +1,275 @@
+; der.l0 -- DER, X.690's distinguished encoding, read in place over
+; bytes: a TLV's tag and where its contents start and end, a
+; constructed one's children, and the INTEGER, OBJECT IDENTIFIER, BIT
+; STRING, BOOLEAN and time values X.509 certificates hold (x509). Only
+; the definite, minimal lengths DER allows are accepted, and nothing is
+; read past the end a caller gives. Pure. Not constant-time, which
+; reading public certificates does not need.
+
+; One TLV: its tag, the identifier byte whole (class, constructed bit
+; and number, so a SEQUENCE is 48, 0x30, and a context-specific [3]
+; constructed 163, 0xA3); where it starts; where its contents start;
+; and where they end, which is where the TLV ends.
+(data DerTlv (DerTlv (tag int) (start int) (body int) (end int)))
+
+; ------------------------------------------------------------- TLVs
+
+; The TLV at byte i of b, which must end by j: none if no whole one is
+; there, its tag is of the high-number form (X.509 uses none), or its
+; length is indefinite, longer than it needs to be, over four bytes,
+; or runs past j.
+(def der_tlv ((b bytes) (i int) (j int)) (Option DerTlv)
+  (let j (min j (bytes_len b))
+    (if (or (lt i 0) (ge (add i 1) j))
+        ((None DerTlv))
+        (let (tag (bytes_get b i)
+              n0 (bytes_get b (add i 1)))
+          (if (eq (bit_and tag 31) 31) ((None DerTlv))
+              (lt n0 128) (der_tlv_at tag i (add i 2) n0 j)
+              (der_tlv_long b tag i (sub n0 128) j))))))
+
+; The TLV of tag starting at i whose contents of len bytes start at
+; body, or none if they run past j.
+(def der_tlv_at ((tag int) (i int) (body int) (len int) (j int)) (Option DerTlv)
+  (if (gt (add body len) j)
+      ((None DerTlv))
+      (Some (DerTlv tag i body (add body len)))))
+
+; der_tlv for a length in n bytes after the first length byte: one to
+; four of them, the first not 0, saying 128 or more, as DER's minimal
+; form needs.
+(def der_tlv_long ((b bytes) (tag int) (i int) (n int) (j int)) (Option DerTlv)
+  (if (or (lt n 1) (or (gt n 4) (gt (add (add i 2) n) j)))
+      ((None DerTlv))
+      (let len (der_be b (add i 2) (add (add i 2) n) 0)
+        (if (or (eq (bytes_get b (add i 2)) 0) (lt len 128))
+            ((None DerTlv))
+            (der_tlv_at tag i (add (add i 2) n) len j)))))
+
+; The bytes of b from i up to j as one number, most significant first,
+; after acc.
+(def der_be ((b bytes) (i int) (j int) (acc int)) int
+  (if (ge i j)
+      acc
+      (der_be b (add i 1) j (bit_or (bit_shl acc 8) (bytes_get b i)))))
+
+; The TLV at i, ending by j, if it is one of tag.
+(def der_tagged ((b bytes) (i int) (j int) (tag int)) (Option DerTlv)
+  (match (der_tlv b i j)
+    ((None) ((None DerTlv)))
+    ((Some t) (if (eq (.tag t) tag) (Some t) ((None DerTlv))))))
+
+; The first TLV inside t's contents.
+(def der_first ((b bytes) (t DerTlv)) (Option DerTlv)
+  (der_tlv b (.body t) (.end t)))
+
+; The TLV after t, which must end by j: t's next sibling, when j is
+; where their parent ends.
+(def der_after ((b bytes) (t DerTlv) (j int)) (Option DerTlv)
+  (der_tlv b (.end t) j))
+
+; Every TLV inside t's contents, in order, or none if they do not fill
+; them exactly with whole TLVs.
+(def der_children ((b bytes) (t DerTlv)) (Option (list DerTlv))
+  (der_children_from b (.body t) (.end t) (nil DerTlv)))
+
+; der_children's loop: the TLVs from i up to j after the reversed acc.
+(def der_children_from ((b bytes) (i int) (j int) (acc (list DerTlv))) (Option (list DerTlv))
+  (if (ge i j)
+      (Some (rev acc))
+      (match (der_tlv b i j)
+        ((None) ((None (list DerTlv))))
+        ((Some c) (der_children_from b (.end c) j (cons c acc))))))
+
+; How many bytes t's contents are.
+(def der_len ((t DerTlv)) int (sub (.end t) (.body t)))
+
+; t's contents, as bytes of their own.
+(def der_content ((b bytes) (t DerTlv)) bytes
+  (bytes_slice b (.body t) (.end t)))
+
+; The whole of t, its tag and length with its contents, as bytes of
+; their own.
+(def der_whole ((b bytes) (t DerTlv)) bytes
+  (bytes_slice b (.start t) (.end t)))
+
+; ----------------------------------------------------------- values
+
+; An INTEGER's contents as a big-endian magnitude, its leading zero
+; bytes dropped (the one DER puts before a top bit that is set, as an
+; RSA modulus has), or none if t is not an INTEGER or is empty.
+(def der_int_bytes ((b bytes) (t DerTlv)) (Option bytes)
+  (if (or (not (eq (.tag t) 2)) (eq (der_len t) 0))
+      ((None bytes))
+      (Some (bytes_slice b (der_skip_zeros b (.body t) (.end t)) (.end t)))))
+
+; The first byte from i on that is not 0, keeping the last before j.
+(def der_skip_zeros ((b bytes) (i int) (j int)) int
+  (if (and (lt (add i 1) j) (eq (bytes_get b i) 0))
+      (der_skip_zeros b (add i 1) j)
+      i))
+
+; An INTEGER that is not negative and fits in an int, as one, as a
+; version, a path length or a salt length is; none for any other.
+(def der_int_small ((b bytes) (t DerTlv)) (Option int)
+  (let n (der_len t)
+    (if (or (not (eq (.tag t) 2)) (or (lt n 1) (gt n 8)))
+        ((None int))
+        (ge (bytes_get b (.body t)) 128)
+        ((None int))
+        (Some (der_be b (.body t) (.end t) 0)))))
+
+; An OBJECT IDENTIFIER as dotted text, "2.5.4.3", or "" if t is not one
+; or its arcs are not minimal or are over 56 bits.
+(def der_oid_text ((b bytes) (t DerTlv)) (list int)
+  (if (or (not (eq (.tag t) 6)) (eq (der_len t) 0))
+      (nil int)
+      (der_oid_arcs b (.body t) (.end t) true (nil int))))
+
+; der_oid_text's loop: the arcs from i up to j after the reversed acc;
+; first says the arc at i is the first, which holds the first two.
+(def der_oid_arcs ((b bytes) (i int) (j int) (first bool) (acc (list int))) (list int)
+  (if (ge i j)
+      (rev acc)
+      (let k (der_arc_end b i i j)
+        (if (lt k 0)
+            (nil int)
+            (der_oid_arcs b k j false (der_oid_push (der_arc b i k 0) first acc))))))
+
+; Where the arc starting at s ends, looking at i, before j: past its
+; byte under 128, or -1 if j comes first, it is over 8 bytes, or it
+; starts with a 0x80, which a minimal arc never does.
+(def der_arc_end ((b bytes) (s int) (i int) (j int)) int
+  (if (or (ge i j) (ge (sub i s) 8)) -1
+      (and (eq i s) (eq (bytes_get b i) 128)) -1
+      (lt (bytes_get b i) 128) (add i 1)
+      (der_arc_end b s (add i 1) j)))
+
+; The arc in the bytes of b from i up to j, seven bits a byte, after
+; acc.
+(def der_arc ((b bytes) (i int) (j int) (acc int)) int
+  (if (ge i j)
+      acc
+      (der_arc b (add i 1) j (bit_or (bit_shl acc 7) (bit_and (bytes_get b i) 127)))))
+
+; acc with the arc v pushed, after a dot; the first, v, as its two arcs,
+; 40 times the first plus the second.
+(def der_oid_push ((v int) (first bool) (acc (list int))) (list int)
+  (if (not first)
+      (push (digits v) (push "." acc))
+      (let top (if (lt v 40) 0 (lt v 80) 1 2)
+        (push (digits (sub v (mul top 40))) (push "." (push (digits top) acc))))))
+
+; An OBJECT IDENTIFIER's contents, as bytes of their own.
+(def der_oid_bytes ((b bytes) (t DerTlv)) bytes (der_content b t))
+
+; Whether t is the OBJECT IDENTIFIER whose dotted text is dotted.
+(def der_oid_is ((b bytes) (t DerTlv) (dotted (list int))) bool
+  (and (eq (.tag t) 6) (eq (der_oid_text b t) dotted)))
+
+; A BIT STRING of whole bytes, its unused-bit count 0, as a TLV whose
+; contents are its bits (past that count): a signature's or a public
+; key's. None if t is not one.
+(def der_bit_string ((b bytes) (t DerTlv)) (Option DerTlv)
+  (if (or (not (eq (.tag t) 3)) (or (eq (der_len t) 0) (not (eq (bytes_get b (.body t)) 0))))
+      ((None DerTlv))
+      (Some (DerTlv (.tag t) (.start t) (add (.body t) 1) (.end t)))))
+
+; A BIT STRING of named bits, as keyUsage is, as an int whose bit n is
+; the string's bit n (bit 0 the first byte's top bit), for its first 56
+; bits; -1 if t is not one, or the bits its count says are unused are
+; not 0.
+(def der_bit_flags ((b bytes) (t DerTlv)) int
+  (let n (der_len t)
+    (if (or (not (eq (.tag t) 3)) (eq n 0))
+        -1
+        (let (unused (bytes_get b (.body t))
+              last (bytes_get b (sub (.end t) 1)))
+          (if (or (gt unused 7) (and (eq n 1) (gt unused 0))) -1
+              (and (gt n 1) (not (eq (bit_and last (sub (bit_shl 1 unused) 1)) 0))) -1
+              (der_flags b (add (.body t) 1) (min (.end t) (add (.body t) 8)) 0 0))))))
+
+; der_bit_flags's loop: the bits of the bytes from i up to j, bit k of
+; the result for the string's bit k, after acc.
+(def der_flags ((b bytes) (i int) (j int) (k int) (acc int)) int
+  (if (ge i j)
+      acc
+      (der_flags b (add i 1) j (add k 8) (bit_or acc (bit_shl (der_rev8 (bytes_get b i) 0 0) k)))))
+
+; The byte x with its eight bits in the other order, from bit n on,
+; after acc.
+(def der_rev8 ((x int) (n int) (acc int)) int
+  (if (ge n 8)
+      acc
+      (der_rev8 x (add n 1) (bit_or acc (bit_shl (bit_and (bit_shr x n) 1) (sub 7 n))))))
+
+; A BOOLEAN: 0xFF true and 0 false, as DER has them; none for anything
+; else.
+(def der_bool ((b bytes) (t DerTlv)) (Option bool)
+  (if (or (not (eq (.tag t) 1)) (not (eq (der_len t) 1))) ((None bool))
+      (eq (bytes_get b (.body t)) 255) (Some true)
+      (eq (bytes_get b (.body t)) 0) (Some false)
+      ((None bool))))
+
+; ------------------------------------------------------------- times
+
+; A UTCTime, YYMMDDHHMMSSZ, its year 1950 to 2049, or a
+; GeneralizedTime, YYYYMMDDHHMMSSZ, as seconds since 1970-01-01 UTC:
+; the Z forms RFC 5280 requires, with seconds and no fraction. None for
+; any other, or a date or time that does not exist.
+(def der_time ((b bytes) (t DerTlv)) (Option int)
+  (let (i (.body t)
+        n (der_len t))
+    (if (and (eq (.tag t) 23) (and (eq n 13) (eq (bytes_get b (add i 12)) 90)))
+        (let yy (der_num b i 2)
+          (der_moment b (if (lt yy 0) -1 (ge yy 50) (add 1900 yy) (add 2000 yy)) (add i 2)))
+        (and (eq (.tag t) 24) (and (eq n 15) (eq (bytes_get b (add i 14)) 90)))
+        (der_moment b (der_num b i 4) (add i 4))
+        ((None int)))))
+
+; The n decimal digits at i, or -1 if one is not a digit.
+(def der_num ((b bytes) (i int) (n int)) int
+  (der_num_from b i (add i n) 0))
+
+; der_num's loop: the digits from i up to j, after acc.
+(def der_num_from ((b bytes) (i int) (j int) (acc int)) int
+  (if (ge i j)
+      acc
+      (let c (bytes_get b i)
+        (if (or (lt c 48) (gt c 57))
+            -1
+            (der_num_from b (add i 1) j (add (mul acc 10) (sub c 48)))))))
+
+; The moment in year y whose MMDDHHMMSS is at i, in seconds since
+; 1970, or none if y is -1 or a field is out of its range.
+(def der_moment ((b bytes) (y int) (i int)) (Option int)
+  (let (mo (der_num b i 2)
+        d (der_num b (add i 2) 2)
+        h (der_num b (add i 4) 2)
+        mi (der_num b (add i 6) 2)
+        s (der_num b (add i 8) 2))
+    (if (or (lt y 0) (or (lt mo 1) (gt mo 12))) ((None int))
+        (or (lt d 1) (gt d (der_month_days y mo))) ((None int))
+        (or (or (lt h 0) (gt h 23)) (or (or (lt mi 0) (gt mi 59)) (or (lt s 0) (gt s 59)))) ((None int))
+        (Some (add (mul (der_days y mo d) 86400) (add (mul h 3600) (add (mul mi 60) s)))))))
+
+; Whether y is a leap year of the Gregorian calendar.
+(def der_leap ((y int)) bool
+  (and (eq (mod y 4) 0) (or (not (eq (mod y 100) 0)) (eq (mod y 400) 0))))
+
+; How many days month m of year y has.
+(def der_month_days ((y int) (m int)) int
+  (if (eq m 2) (if (der_leap y) 29 28)
+      (any_eq m (cons 4 (cons 6 (cons 9 (cons 11 (nil int)))))) 30
+      31))
+
+; The days from 1970-01-01 to year y, month m, day d of the Gregorian
+; calendar, y at least 0: the count by eras of 400 years, from March.
+(def der_days ((y int) (m int) (d int)) int
+  (let (ya (if (le m 2) (sub y 1) y)
+        era (div (if (lt ya 0) (sub ya 399) ya) 400)
+        yoe (sub ya (mul era 400))
+        mp (if (gt m 2) (sub m 3) (add m 9))
+        doy (add (div (add (mul 153 mp) 2) 5) (sub d 1))
+        doe (add (sub (add (mul yoe 365) (div yoe 4)) (div yoe 100)) doy))
+    (sub (add (mul era 146097) doe) 719468)))

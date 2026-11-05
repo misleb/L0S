@@ -1,0 +1,331 @@
+; bignum.l0 -- unsigned big integers, for checking public-key signatures
+; (rsa, ecdsa): an (array int) of 30-bit limbs, least significant first,
+; so that two limb products, a limb and a carry add up below 2^63.
+; Bytes in and out are big-endian. Montgomery multiplication for an odd
+; modulus, a BnMont made once per modulus, gives powers and inverses.
+; Pure. Not constant-time: it is for verifying public data, where no
+; secret goes through it.
+
+; How many bits a limb holds.
+(def bn_w () int 30)
+
+; A limb's bits, 2^30 - 1.
+(def bn_mask () int 1073741823)
+
+; The limb at i of a, or 0 past its end.
+(def bn_limb ((a (array int)) (i int)) int
+  (if (lt i (array_len a)) (array_get a i) 0))
+
+; a with x as its limb at i, or a as it is if it has no limb i.
+(def bn_put ((a (array int)) (i int) (x int)) (array int)
+  (if (lt i (array_len a)) (array_set a i x) a))
+
+; ------------------------------------------------------ in and out
+
+; The number x, 0 or more, as three limbs.
+(def bn_of_int ((x int)) (array int)
+  (let a (array_new 3 0)
+    (array_set (array_set (array_set a 0 (bit_and x (bn_mask))) 1 (bit_and (bit_shr x 30) (bn_mask))) 2 (bit_shr x 60))))
+
+; The number the big-endian bytes b spell, in as many limbs as they need,
+; at least one.
+(def bn_of_bytes ((b bytes)) (array int)
+  (bn_of_bytes_k b (max 1 (div (add (mul 8 (bytes_len b)) 29) 30))))
+
+; The number the big-endian bytes b spell, in k limbs, any bits past
+; them dropped.
+(def bn_of_bytes_k ((b bytes) (k int)) (array int)
+  (bn_of_bytes_from b (sub (bytes_len b) 1) (array_new k 0) 0 0 0))
+
+; a with the bytes of b from i down put in from limb li on, the nacc
+; bits acc held before them.
+(def bn_of_bytes_from ((b bytes) (i int) (a (array int)) (li int) (acc int) (nacc int)) (array int)
+  (if (ge nacc 30)
+      (bn_of_bytes_from b i (bn_put a li (bit_and acc (bn_mask))) (add li 1) (bit_shr acc 30) (sub nacc 30))
+      (lt i 0)
+      (bn_put a li acc)
+      (bn_of_bytes_from b (sub i 1) a li (bit_or acc (bit_shl (bytes_get b i) nacc)) (add nacc 8))))
+
+; a as len big-endian bytes, any higher bytes dropped.
+(def bn_to_bytes ((a (array int)) (len int)) bytes
+  (bytes_from_list (bn_bytes_from a 0 len (nil int))))
+
+; a's bytes from the p-th least significant up to len, before acc, the
+; most significant first.
+(def bn_bytes_from ((a (array int)) (p int) (len int) (acc (list int))) (list int)
+  (if (ge p len)
+      acc
+      (bn_bytes_from a (add p 1) len (cons (bn_byte a p) acc))))
+
+; The p-th least significant byte of a.
+(def bn_byte ((a (array int)) (p int)) int
+  (let (bit (mul p 8)
+        li (div bit 30)
+        off (mod bit 30))
+    (bit_and (bit_or (bit_shr (bn_limb a li) off) (bit_shl (bn_limb a (add li 1)) (sub 30 off))) 255)))
+
+; The bytes the hex digits of s spell, two to a byte, either case; a
+; character that is not a hex digit counts as 0. For constants.
+(def bn_hex ((s (list int))) bytes
+  (bytes_from_list (bn_hex_from s (nil int))))
+
+; The bytes of s's digit pairs, after the reversed acc.
+(def bn_hex_from ((s (list int)) (acc (list int))) (list int)
+  (if (or (is_empty s) (is_empty (tail s)))
+      (rev acc)
+      (bn_hex_from (tail (tail s)) (cons (add (mul 16 (bn_hex_digit (head s))) (bn_hex_digit (head (tail s)))) acc))))
+
+; The value of the hex digit c, or 0 if it is none.
+(def bn_hex_digit ((c int)) int
+  (if (and (ge c 48) (le c 57))
+      (sub c 48)
+      (and (ge c 97) (le c 102))
+      (sub c 87)
+      (and (ge c 65) (le c 70))
+      (sub c 55)
+      0))
+
+; ------------------------------------------------------ comparing
+
+; How many bits a has up to its highest 1: 0 for zero.
+(def bn_bits ((a (array int))) int
+  (bn_bits_from a (sub (array_len a) 1)))
+
+; The bits of a's limbs up to i.
+(def bn_bits_from ((a (array int)) (i int)) int
+  (if (lt i 0)
+      0
+      (let x (array_get a i)
+        (if (eq x 0)
+            (bn_bits_from a (sub i 1))
+            (add (mul i 30) (bn_int_bits x 0))))))
+
+; How many bits x has up to its highest 1, after n.
+(def bn_int_bits ((x int) (n int)) int
+  (if (eq x 0) n (bn_int_bits (bit_shr x 1) (add n 1))))
+
+; Bit i of a, 0 or 1.
+(def bn_bit ((a (array int)) (i int)) int
+  (bit_and (bit_shr (bn_limb a (div i 30)) (mod i 30)) 1))
+
+; Whether a is zero.
+(def bn_is_zero ((a (array int))) bool
+  (eq (bn_bits a) 0))
+
+; -1, 0 or 1 as a is less than, equal to or more than b, as numbers,
+; whatever their lengths.
+(def bn_compare ((a (array int)) (b (array int))) int
+  (bn_compare_from a b (sub (max (array_len a) (array_len b)) 1)))
+
+; The same, from limb i down.
+(def bn_compare_from ((a (array int)) (b (array int)) (i int)) int
+  (if (lt i 0)
+      0
+      (let (x (bn_limb a i)
+            y (bn_limb b i))
+        (if (lt x y) -1 (gt x y) 1 (bn_compare_from a b (sub i 1))))))
+
+; a in k limbs, any higher ones dropped.
+(def bn_resize ((a (array int)) (k int)) (array int)
+  (bn_copy_from a (array_new k 0) 0))
+
+; t with a's limbs from j on copied in, as far as t goes.
+(def bn_copy_from ((a (array int)) (t (array int)) (j int)) (array int)
+  (if (ge j (array_len t))
+      t
+      (bn_copy_from a (array_set t j (bn_limb a j)) (add j 1))))
+
+; ----------------------------------------------------- arithmetic
+
+; a + b, a limb longer than the longer.
+(def bn_add ((a (array int)) (b (array int))) (array int)
+  (bn_add_in (bn_resize a (add (max (array_len a) (array_len b)) 1)) b 0 0))
+
+; a - b, for a at least b, in a's length.
+(def bn_sub ((a (array int)) (b (array int))) (array int)
+  (bn_sub_in (bn_resize a (array_len a)) b 0 0))
+
+; a + b, in place in a from limb j on, c carried in; any carry out of a
+; dropped.
+(def bn_add_in ((a (array int)) (b (array int)) (j int) (c int)) (array int)
+  (if (or (ge j (array_len a)) (and (eq c 0) (ge j (array_len b))))
+      a
+      (let x (add (add (array_get a j) (bn_limb b j)) c)
+        (bn_add_in (array_set a j (bit_and x (bn_mask))) b (add j 1) (bit_shr x 30)))))
+
+; a - b, in place in a from limb j on, br borrowed in: modulo a's size,
+; so a less than b wraps.
+(def bn_sub_in ((a (array int)) (b (array int)) (j int) (br int)) (array int)
+  (if (or (ge j (array_len a)) (and (eq br 0) (ge j (array_len b))))
+      a
+      (let x (sub (sub (array_get a j) (bn_limb b j)) br)
+        (if (lt x 0)
+            (bn_sub_in (array_set a j (add x 1073741824)) b (add j 1) 1)
+            (bn_sub_in (array_set a j x) b (add j 1) 0)))))
+
+; a shifted left a bit, in place from limb j on, c the bit shifted in;
+; the bit out of the top dropped.
+(def bn_shl1_in ((a (array int)) (j int) (c int)) (array int)
+  (if (ge j (array_len a))
+      a
+      (let x (array_get a j)
+        (bn_shl1_in (array_set a j (bit_and (bit_or (bit_shl x 1) c) (bn_mask))) (add j 1) (bit_shr x 29)))))
+
+; a shifted right by s bits, in a's length.
+(def bn_shr ((a (array int)) (s int)) (array int)
+  (bn_shr_from a (div s 30) (mod s 30) (array_new (array_len a) 0) 0))
+
+; t with a's limbs from j on, a shifted right by q limbs and off bits.
+(def bn_shr_from ((a (array int)) (q int) (off int) (t (array int)) (j int)) (array int)
+  (if (ge j (array_len t))
+      t
+      (let x (bit_and (bit_or (bit_shr (bn_limb a (add q j)) off) (bit_shl (bn_limb a (add (add q j) 1)) (sub 30 off))) (bn_mask))
+        (bn_shr_from a q off (array_set t j x) (add j 1)))))
+
+; a mod n, for n not zero, in n's length: a bit at a time, so for a
+; number now and then, not a loop.
+(def bn_mod ((a (array int)) (n (array int))) (array int)
+  (bn_resize (bn_mod_from a n (sub (bn_bits a) 1) (array_new (add (array_len n) 1) 0)) (array_len n)))
+
+; r, the remainder of a's bits above i, taken on through a's bits from i
+; down.
+(def bn_mod_from ((a (array int)) (n (array int)) (i int) (r (array int))) (array int)
+  (if (lt i 0)
+      r
+      (let d (bn_shl1_in r 0 (bn_bit a i))
+        (if (ge (bn_compare d n) 0)
+            (bn_mod_from a n (sub i 1) (bn_sub_in d n 0 0))
+            (bn_mod_from a n (sub i 1) d)))))
+
+; ----------------------------------------------------- Montgomery
+
+; Arithmetic modulo an odd n above 1, in Montgomery form, x as x R mod n
+; for R = 2^(30k): n in k limbs, -1/n mod 2^30, and R^2 mod n, which
+; takes a number into the form.
+(data BnMont
+  (BnMont (n (array int)) (k int) (ninv int) (r2 (array int))))
+
+; The arithmetic modulo n, an odd number above 1.
+(def bn_mont_new ((n (array int))) BnMont
+  (let (bits (bn_bits n)
+        k (max 1 (div (add bits 29) 30))
+        nk (bn_resize n k)
+        x (bn_inv_word (array_get nk 0) (array_get nk 0) 5))
+    (BnMont nk k (bit_and (neg x) (bn_mask)) (bn_r2 nk k bits))))
+
+; The inverse of the odd n0 modulo 2^30, from x, right in its low bits,
+; by Newton's step taken i more times, each doubling them.
+(def bn_inv_word ((n0 int) (x int) (i int)) int
+  (if (eq i 0)
+      x
+      (bn_inv_word n0 (bit_and (mul x (sub 2 (mul n0 x))) (bn_mask)) (sub i 1))))
+
+; R^2 mod n, n of k limbs and bits bits: 2^(bits - 1), below n, doubled
+; modulo n until it is 2^(60k).
+(def bn_r2 ((n (array int)) (k int) (bits int)) (array int)
+  (let v (array_new (add k 1) 0)
+    (bn_resize (bn_double_mod (bn_put v (div (sub bits 1) 30) (bit_shl 1 (mod (sub bits 1) 30))) n (sub (mul 60 k) (sub bits 1))) k)))
+
+; v, below n and a limb longer, doubled modulo n count times, in place.
+(def bn_double_mod ((v (array int)) (n (array int)) (count int)) (array int)
+  (if (eq count 0)
+      v
+      (let d (bn_shl1_in v 0 0)
+        (if (ge (bn_compare d n) 0)
+            (bn_double_mod (bn_sub_in d n 0 0) n (sub count 1))
+            (bn_double_mod d n (sub count 1))))))
+
+; a b / R mod n, for a and b below n, in k limbs: Montgomery's product,
+; a row of b at a time, each adding a b_i and the multiple of n that
+; makes the lowest limb 0, then dropping it.
+(def bn_mont_mul ((m BnMont) (a (array int)) (b (array int))) (array int)
+  (bn_mont_row a b (.n m) (.k m) (.ninv m) (array_new (.k m) 0) 0 0))
+
+; t, with top above its k limbs, after rows i on.
+(def bn_mont_row ((a (array int)) (b (array int)) (n (array int)) (k int) (ninv int) (t (array int)) (top int) (i int)) (array int)
+  (if (ge i k)
+      (bn_mont_final t top n)
+      (let (bi (array_get b i)
+            x0 (add (array_get t 0) (mul (array_get a 0) bi))
+            mi (bit_and (mul (bit_and x0 (bn_mask)) ninv) (bn_mask))
+            x (add x0 (mul mi (array_get n 0))))
+        (bn_mont_col a b n k ninv t top i bi mi (bit_shr x 30) 1))))
+
+; Row i's limbs from j on: t + a b_i + m_i n, shifted down a limb as
+; it goes, c carried in.
+(def bn_mont_col ((a (array int)) (b (array int)) (n (array int)) (k int) (ninv int) (t (array int)) (top int)
+                  (i int) (bi int) (mi int) (c int) (j int)) (array int)
+  (if (ge j k)
+      (let x (add top c)
+        (bn_mont_row a b n k ninv (array_set t (sub k 1) (bit_and x (bn_mask))) (bit_shr x 30) (add i 1)))
+      (let x (add (add (array_get t j) c) (add (mul (array_get a j) bi) (mul mi (array_get n j))))
+        (bn_mont_col a b n k ninv (array_set t (sub j 1) (bit_and x (bn_mask))) top i bi mi (bit_shr x 30) (add j 1)))))
+
+; t, with top above it, below 2n: less n if it is n or more.
+(def bn_mont_final ((t (array int)) (top int) (n (array int))) (array int)
+  (if (or (gt top 0) (ge (bn_compare t n) 0)) (bn_sub_in t n 0 0) t))
+
+; a, a number below n, in Montgomery form.
+(def bn_to_mont ((m BnMont) (a (array int))) (array int)
+  (bn_mont_mul m (bn_resize a (.k m)) (.r2 m)))
+
+; a, in Montgomery form, as the number.
+(def bn_from_mont ((m BnMont) (a (array int))) (array int)
+  (bn_mont_mul m a (bn_resize (bn_of_int 1) (.k m))))
+
+; 1 in Montgomery form.
+(def bn_mont_one ((m BnMont)) (array int)
+  (bn_to_mont m (bn_of_int 1)))
+
+; x^e, x and the result in Montgomery form: square and multiply, from
+; e's highest bit.
+(def bn_mont_exp ((m BnMont) (x (array int)) (e (array int))) (array int)
+  (let bits (bn_bits e)
+    (if (eq bits 0) (bn_mont_one m) (bn_mont_exp_from m x e (sub bits 2) x))))
+
+; acc, x to e's bits above i, taken on through the bits from i down.
+(def bn_mont_exp_from ((m BnMont) (x (array int)) (e (array int)) (i int) (acc (array int))) (array int)
+  (if (lt i 0)
+      acc
+      (let s (bn_mont_mul m acc acc)
+        (bn_mont_exp_from m x e (sub i 1) (if (eq (bn_bit e i) 1) (bn_mont_mul m s x) s)))))
+
+; base^e mod n, for the modulus m holds: numbers in and out.
+(def bn_mod_exp ((m BnMont) (base (array int)) (e (array int))) (array int)
+  (let b (if (lt (bn_compare base (.n m)) 0) base (bn_mod base (.n m)))
+    (bn_from_mont m (bn_mont_exp m (bn_to_mont m b) e))))
+
+; The inverse of a, in Montgomery form, modulo m's n, a prime: a^(n-2),
+; by Fermat. 0 for 0.
+(def bn_mont_inv ((m BnMont) (a (array int))) (array int)
+  (bn_mont_exp m a (bn_sub (.n m) (bn_of_int 2))))
+
+; The inverse of the number a modulo m's n, a prime, as a number.
+(def bn_mod_inv ((m BnMont) (a (array int))) (array int)
+  (let b (if (lt (bn_compare a (.n m)) 0) a (bn_mod a (.n m)))
+    (bn_from_mont m (bn_mont_inv m (bn_to_mont m b)))))
+
+; a + b mod n, both below n, in k limbs; in either form.
+(def bn_mod_add ((m BnMont) (a (array int)) (b (array int))) (array int)
+  (bn_mod_add_from a b (array_new (.k m) 0) 0 0 (.n m)))
+
+; t, a + b from limb j on, c carried in, then reduced by n.
+(def bn_mod_add_from ((a (array int)) (b (array int)) (t (array int)) (j int) (c int) (n (array int))) (array int)
+  (if (ge j (array_len t))
+      (bn_mont_final t c n)
+      (let x (add (add (array_get a j) (array_get b j)) c)
+        (bn_mod_add_from a b (array_set t j (bit_and x (bn_mask))) (add j 1) (bit_shr x 30) n))))
+
+; a - b mod n, both below n, in k limbs; in either form.
+(def bn_mod_sub ((m BnMont) (a (array int)) (b (array int))) (array int)
+  (bn_mod_sub_from a b (array_new (.k m) 0) 0 0 (.n m)))
+
+; t, a - b from limb j on, br borrowed in, then n added if it went
+; below 0.
+(def bn_mod_sub_from ((a (array int)) (b (array int)) (t (array int)) (j int) (br int) (n (array int))) (array int)
+  (if (ge j (array_len t))
+      (if (gt br 0) (bn_add_in t n 0 0) t)
+      (let x (sub (sub (array_get a j) (array_get b j)) br)
+        (if (lt x 0)
+            (bn_mod_sub_from a b (array_set t j (add x 1073741824)) (add j 1) 1 n)
+            (bn_mod_sub_from a b (array_set t j x) (add j 1) 0 n)))))

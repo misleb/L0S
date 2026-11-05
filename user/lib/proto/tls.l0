@@ -1,0 +1,551 @@
+; tls.l0 -- TLS 1.3's client (RFC 8446), pure: the ClientHello made
+; (tls_start), what the server sends read as it comes (tls_more), the
+; handshake checked and its keys derived, and data sealed into records
+; (tls_send) and opened out of them. Nothing here does I/O: the caller
+; moves the bytes, over inet's TCP in httpc.l0, and gives the time and
+; the randomness.
+;
+; What it speaks: X25519 alone for the key exchange; TLS_AES_128_GCM_SHA256
+; and TLS_CHACHA20_POLY1305_SHA256; certificates checked to the roots
+; given (trust.l0), by ECDSA P-256 and P-384 or RSA-PSS for the
+; CertificateVerify. It refuses a HelloRetryRequest, a request for a
+; client certificate, and anything it cannot check. No resumption, no
+; early data: a session ticket is passed over. A KeyUpdate is followed.
+; Not constant-time: see the crypto libraries' headers. Linked as the
+; Makefile's TLS, after the crypto libraries and trust.l0.
+
+; The ciphers a connection may be keyed with, both over SHA-256.
+(data TlsSuite (TlsAes128) (TlsChacha20))
+
+; A direction's AEAD, keyed.
+(data TlsAead (TlsGcm GcmKey) (TlsChachaKey bytes))
+
+; A direction's keys: its AEAD, its IV, the next record's number, and
+; the secret they came from, for a KeyUpdate.
+(data TlsKeys (TlsKeys (aead TlsAead) (iv bytes) (seq int) (secret bytes)))
+
+; A direction before its keys and after.
+(data TlsCipher (TlsPlain) (TlsKeyed TlsKeys))
+
+; A connection: the host its certificate must name; its stage
+; (tls_stage_*) and, failed, why; the X25519 secret; the suite; the
+; transcript's hash; the record bytes held for a record not yet whole,
+; and the handshake bytes for a message not yet whole; each direction's
+; cipher; the handshake secret and the two handshake traffic secrets;
+; the server's certificate once checked; the roots and the time it is
+; checked by.
+(data Tls
+  (Tls (host (list int)) (stage int) (why (list int)) (secret bytes) (suite TlsSuite) (hc HashCtx) (held bytes) (hsheld bytes)
+       (rd TlsCipher) (wr TlsCipher) (hs bytes) (chs bytes) (shs bytes) (leaf (Option X509)) (roots TrustRoots) (now int)))
+
+; What a step gave: the connection after it, the records to send to the
+; server, in order, and the data that came, in order.
+(data TlsOut (TlsOut (t Tls) (send (list bytes)) (got (list bytes))))
+
+; The stages: the ClientHello sent, waiting for the ServerHello; then
+; for EncryptedExtensions, the Certificate, the CertificateVerify and
+; the Finished; up, data flowing; the server closed it; failed.
+(def tls_stage_hello () int 0)
+(def tls_stage_ee () int 1)
+(def tls_stage_cert () int 2)
+(def tls_stage_cv () int 3)
+(def tls_stage_fin () int 4)
+(def tls_stage_up () int 5)
+(def tls_stage_closed () int 6)
+(def tls_stage_failed () int 7)
+
+; Whether t is up, has been closed by the server, or failed.
+(def tls_up ((t Tls)) bool (eq (.stage t) (tls_stage_up)))
+(def tls_closed ((t Tls)) bool (eq (.stage t) (tls_stage_closed)))
+(def tls_failed ((t Tls)) bool (eq (.stage t) (tls_stage_failed)))
+
+; The most plaintext a record holds, and the most a record from the
+; server may be, its AEAD's growth with it.
+(def tls_record_max () int 16384)
+(def tls_wire_max () int 16640)
+
+; Records' content types.
+(def tls_ct_ccs () int 20)
+(def tls_ct_alert () int 21)
+(def tls_ct_handshake () int 22)
+(def tls_ct_data () int 23)
+
+; ---------------------------------------------------------------- bytes
+
+; The byte, u16 and u24 at i of b, most significant first.
+(def tls_u8 ((b bytes) (i int)) int (bytes_get b i))
+(def tls_u16 ((b bytes) (i int)) int (bit_or (bit_shl (bytes_get b i) 8) (bytes_get b (add i 1))))
+(def tls_u24 ((b bytes) (i int)) int (bit_or (bit_shl (bytes_get b i) 16) (tls_u16 b (add i 1))))
+
+; The low k bytes of v onto acc, reversed, most significant first.
+(def tls_be ((v int) (k int) (acc (list int))) (list int)
+  (if (eq k 0) acc (tls_be v (sub k 1) (cons (bit_and (bit_shr v (mul 8 (sub k 1))) 255) acc))))
+
+; The bytes of b onto acc, reversed.
+(def tls_bytes_onto ((b bytes) (acc (list int))) (list int)
+  (rev_onto (bytes_to_list b) acc))
+
+; Two bytes values joined.
+(def tls_cat ((a bytes) (b bytes)) bytes (bytes_concat (cons a (cons b (nil bytes)))))
+
+; n zero bytes.
+(def tls_zeros ((n int)) bytes (bytes_from_list (tls_be 0 n (nil int))))
+
+; Nothing, as bytes.
+(def tls_empty () bytes (bytes_from_list (nil int)))
+
+; Whether a and b hold the same bytes, every byte looked at.
+(def tls_same ((a bytes) (b bytes)) bool
+  (and (eq (bytes_len a) (bytes_len b)) (eq (tls_diff a b 0 0) 0)))
+
+; tls_same's loop: the bytes from i on that differ, ored into acc.
+(def tls_diff ((a bytes) (b bytes) (i int) (acc int)) int
+  (if (ge i (bytes_len a)) acc (tls_diff a b (add i 1) (bit_or acc (bit_xor (bytes_get a i) (bytes_get b i))))))
+
+; ---------------------------------------------------------------- hello
+
+; The signature schemes offered: ECDSA P-256 and P-384, RSA-PSS with
+; SHA-256, 384 and 512, and, for certificates only, RSA PKCS#1 v1.5.
+(def tls_schemes () (list int) (cons 1027 (cons 1283 (cons 2052 (cons 2053 (cons 2054 (cons 1025 (cons 1281 (cons 1537 (nil int))))))))))
+
+; The schemes a CertificateVerify may use, of those offered.
+(def tls_cv_schemes () (list int) (cons 1027 (cons 1283 (cons 2052 (cons 2053 (cons 2054 (nil int)))))))
+
+; Whether host is an IPv4 address, dotted, which the ClientHello does
+; not name.
+(def tls_is_address ((host (list int))) bool
+  (and (not (is_empty host)) (tls_digits_dots host)))
+
+; Whether s is all digits and dots.
+(def tls_digits_dots ((s (list int))) bool
+  (if (is_empty s) true (and (or (eq (head s) 46) (and (ge (head s) 48) (le (head s) 57))) (tls_digits_dots (tail s)))))
+
+; v as k bytes, most significant first.
+(def tls_word ((v int) (k int)) (list int) (rev (tls_be v k (nil int))))
+
+; An extension of type ty whose data is d.
+(def tls_ext ((ty int) (d (list int))) (list int)
+  (append (tls_word ty 2) (append (tls_word (length d) 2) d)))
+
+; d after its length, as n bytes.
+(def tls_sized ((n int) (d (list int))) (list int) (append (tls_word (length d) n) d))
+
+; The u16s of vs onto acc, reversed.
+(def tls_u16s ((vs (list int)) (acc (list int))) (list int)
+  (if (is_empty vs) acc (tls_u16s (tail vs) (tls_be (head vs) 2 acc))))
+
+; vs as u16s.
+(def tls_u16_list ((vs (list int))) (list int) (rev (tls_u16s vs (nil int))))
+
+; The extensions the ClientHello sends: the server's name unless host
+; is an address; TLS 1.3 alone; X25519, and its key share pub; the
+; signature schemes; and ALPN's http/1.1.
+(def tls_exts ((host (list int)) (pub bytes)) (list int)
+  (let (sni (if (tls_is_address host) (nil int) (tls_ext 0 (tls_sized 2 (cons 0 (tls_sized 2 host)))))
+        vers (tls_ext 43 (tls_sized 1 (tls_word 772 2)))
+        groups (tls_ext 10 (tls_sized 2 (tls_word 29 2)))
+        share (tls_ext 51 (tls_sized 2 (append (tls_word 29 2) (tls_sized 2 (bytes_to_list pub)))))
+        algs (tls_ext 13 (tls_sized 2 (tls_u16_list (tls_schemes))))
+        alpn (tls_ext 16 (tls_sized 2 (tls_sized 1 "http/1.1"))))
+    (append sni (append vers (append groups (append share (append algs alpn)))))))
+
+; The ClientHello, as a handshake message: TLS 1.2 for its legacy
+; version, random, no session id, the two suites (ChaCha20 first, as
+; the faster here), no compression, and tls_exts.
+(def tls_hello ((host (list int)) (random bytes) (pub bytes)) bytes
+  (let body (append (tls_word 771 2)
+              (append (bytes_to_list random)
+                (append (cons 0 (tls_sized 2 (tls_u16_list (cons 4867 (cons 4865 (nil int))))))
+                  (append (cons 1 (cons 0 (nil int))) (tls_sized 2 (tls_exts host pub))))))
+    (bytes_from_list (cons 1 (tls_sized 3 body)))))
+
+; A record of type ty, not encrypted, holding b.
+(def tls_plain_record ((ty int) (version int) (b bytes)) bytes
+  (tls_cat (bytes_from_list (rev (tls_be (bytes_len b) 2 (tls_be version 2 (cons ty (nil int)))))) b))
+
+; A connection to host begun: secret is 32 random bytes, its X25519
+; key, and random 32 more, the ClientHello's; roots and now check the
+; server's certificate. Its one record to send is the ClientHello.
+(def tls_start ((host (list int)) (secret bytes) (random bytes) (roots TrustRoots) (now int)) TlsOut
+  (tls_begin host secret (tls_hello host random (x25519_base secret)) roots now))
+
+; A connection begun with the ClientHello message hello, made for the
+; key secret: tls_start, and the RFC 8448 trace's test.
+(def tls_begin ((host (list int)) (secret bytes) (hello bytes) (roots TrustRoots) (now int)) TlsOut
+  (let (hc (hash_more (hash_new (HashSha256)) hello 0 (bytes_len hello))
+        e (tls_empty)
+        t (Tls host (tls_stage_hello) (nil int) secret (TlsAes128) hc e e (TlsPlain) (TlsPlain) e e e ((None X509)) roots now))
+    (TlsOut t (cons (tls_plain_record (tls_ct_handshake) 769 hello) (nil bytes)) (nil bytes))))
+
+; ----------------------------------------------------------------- keys
+
+; A suite's AEAD key's length.
+(def tls_key_len ((s TlsSuite)) int (match s ((TlsAes128) 16) ((TlsChacha20) 32)))
+
+; The keys for traffic secret, of suite s, from its first record.
+(def tls_keys ((s TlsSuite) (secret bytes)) TlsKeys
+  (let (e (tls_empty)
+        k (hkdf_expand_label (HashSha256) secret "key" e (tls_key_len s))
+        iv (hkdf_expand_label (HashSha256) secret "iv" e 12))
+    (TlsKeys (match s ((TlsAes128) (TlsGcm (gcm_key k))) ((TlsChacha20) (TlsChachaKey k))) iv 0 secret)))
+
+; The keys after k's, a KeyUpdate's.
+(def tls_keys_next ((s TlsSuite) (k TlsKeys)) TlsKeys
+  (tls_keys s (hkdf_expand_label (HashSha256) (.secret k) "traffic upd" (tls_empty) 32)))
+
+; The nonce of k's next record: its IV with the record's number xored
+; into its last 8 bytes.
+(def tls_nonce ((k TlsKeys)) bytes
+  (bytes_from_list (rev (tls_nonce_from (.iv k) (.seq k) 0 (nil int)))))
+
+; tls_nonce's loop, from byte i, onto acc reversed.
+(def tls_nonce_from ((iv bytes) (seq int) (i int) (acc (list int))) (list int)
+  (if (ge i 12)
+      acc
+      (let s (if (lt i 4) 0 (bit_and (bit_shr seq (mul 8 (sub 11 i))) 255))
+        (tls_nonce_from iv seq (add i 1) (cons (bit_xor (bytes_get iv i) s) acc)))))
+
+; content, b from i to j, of type ty, sealed into a record with k: the
+; keys after it, and the record.
+(data TlsSealed (TlsSealed TlsKeys bytes))
+(def tls_seal ((k TlsKeys) (ty int) (b bytes) (i int) (j int)) TlsSealed
+  (let (inner (tls_cat (bytes_slice b i j) (bytes_from_list (cons ty (nil int))))
+        hdr (bytes_from_list (rev (tls_be (add (bytes_len inner) 16) 2 (tls_be 771 2 (cons (tls_ct_data) (nil int))))))
+        nonce (tls_nonce k)
+        ct (match (.aead k)
+             ((TlsGcm g) (gcm_seal g nonce hdr inner 0 (bytes_len inner)))
+             ((TlsChachaKey c) (chacha20_seal c nonce hdr inner 0 (bytes_len inner)))))
+    (TlsSealed (.seq k (add (.seq k) 1)) (tls_cat hdr ct))))
+
+; The record's body, b from i to j, its header the 5 bytes before i,
+; opened with k: its inner plaintext, or none if it does not open.
+(def tls_open ((k TlsKeys) (b bytes) (i int) (j int)) (Option bytes)
+  (let (hdr (bytes_slice b (sub i 5) i)
+        nonce (tls_nonce k))
+    (match (.aead k)
+      ((TlsGcm g) (gcm_open g nonce hdr b i j))
+      ((TlsChachaKey c) (chacha20_open c nonce hdr b i j)))))
+
+; ------------------------------------------------------------- failing
+
+; o with its connection failed for why. Nothing more is read or sent.
+(def tls_fail ((o TlsOut) (why (list int))) TlsOut
+  (.t o (.why (.stage (.held (.t o) (tls_empty)) (tls_stage_failed)) why)))
+
+; Why t failed, or empty.
+(def tls_why ((t Tls)) (list int) (.why t))
+
+; o with the record rec to send.
+(def tls_sending ((o TlsOut) (rec bytes)) TlsOut
+  (.send o (cons rec (.send o))))
+
+; ------------------------------------------------------------- reading
+
+; b from i to j, what came from the server next, read: the connection
+; after it, what it must send back, and the data that came.
+(def tls_more ((t Tls) (b bytes) (i int) (j int)) TlsOut
+  (let (held (tls_cat (.held t) (bytes_slice b i j))
+        o (tls_records (TlsOut (.held t (tls_empty)) (nil bytes) (nil bytes)) held 0))
+    (TlsOut (.t o) (rev (.send o)) (rev (.got o)))))
+
+; The whole records in buf from k on read in turn, the rest held. The
+; lists of o are reversed while this runs.
+(def tls_records ((o TlsOut) (buf bytes) (k int)) TlsOut
+  (let (n (bytes_len buf)
+        st (.stage (.t o)))
+    (if (or (eq st (tls_stage_failed)) (eq st (tls_stage_closed))) o
+        (lt (sub n k) 5) (.t o (.held (.t o) (bytes_slice buf k n)))
+        (let len (tls_u16 buf (add k 3))
+          (if (gt len (tls_wire_max)) (tls_fail o "the server sent a record too long")
+              (gt (add (add k 5) len) n) (.t o (.held (.t o) (bytes_slice buf k n)))
+              (tls_records (tls_record o (tls_u8 buf k) buf (add k 5) (add (add k 5) len)) buf (add (add k 5) len)))))))
+
+; One record of type ty, its body b from i to j.
+(def tls_record ((o TlsOut) (ty int) (b bytes) (i int) (j int)) TlsOut
+  (if (eq ty (tls_ct_ccs))
+      (if (tls_up (.t o)) (tls_fail o "the server sent change_cipher_spec after the handshake") o)
+      (match (.rd (.t o))
+        ((TlsPlain)
+          (if (eq ty (tls_ct_handshake)) (tls_handshake o b i j)
+              (eq ty (tls_ct_alert)) (tls_alert o b i j)
+              (tls_fail o "the server sent data before the handshake")))
+        ((TlsKeyed k)
+          (if (not (eq ty (tls_ct_data)))
+              (tls_fail o "the server sent a record in the clear after keys were agreed")
+              (match (tls_open k b i j)
+                ((None) (tls_fail o "a record from the server did not decrypt"))
+                ((Some p) (tls_inner (.t o (.rd (.t o) (TlsKeyed (.seq k (add (.seq k) 1))))) p))))))))
+
+; An opened record's plaintext p: its content, then its type, then any
+; zeros of padding.
+(def tls_inner ((o TlsOut) (p bytes)) TlsOut
+  (let e (tls_last_nonzero p (sub (bytes_len p) 1))
+    (if (lt e 0) (tls_fail o "the server sent a record with no type")
+        (let ty (bytes_get p e)
+          (if (eq ty (tls_ct_handshake)) (tls_handshake o p 0 e)
+              (eq ty (tls_ct_alert)) (tls_alert o p 0 e)
+              (eq ty (tls_ct_data))
+              (if (tls_up (.t o))
+                  (if (eq e 0) o (.got o (cons (bytes_slice p 0 e) (.got o))))
+                  (tls_fail o "the server sent data before the handshake ended"))
+              (tls_fail o (append "the server sent a record of type " (digits ty))))))))
+
+; The index of the last byte of p not 0, from i back; -1 if none.
+(def tls_last_nonzero ((p bytes) (i int)) int
+  (if (lt i 0) -1 (if (eq (bytes_get p i) 0) (tls_last_nonzero p (sub i 1)) i)))
+
+; An alert, b from i to j: close_notify closes the connection; a
+; warning that the user canceled is passed over; any other fails it.
+(def tls_alert ((o TlsOut) (b bytes) (i int) (j int)) TlsOut
+  (if (not (eq (sub j i) 2)) (tls_fail o "the server sent an alert that is not two bytes")
+      (let d (bytes_get b (add i 1))
+        (if (eq d 0) (.t o (.stage (.t o) (tls_stage_closed)))
+            (eq d 90) o
+            (tls_fail o (append "the server's alert: " (tls_alert_name d)))))))
+
+; What alert d means, with its number.
+(def tls_alert_name ((d int)) (list int)
+  (append (if (eq d 40) "handshake_failure " (eq d 42) "bad_certificate " (eq d 47) "illegal_parameter "
+              (eq d 50) "decode_error " (eq d 51) "decrypt_error " (eq d 70) "protocol_version "
+              (eq d 80) "internal_error " (eq d 109) "missing_extension " (eq d 112) "unrecognized_name "
+              (eq d 120) "no_application_protocol " "")
+          (append "(" (append (digits d) ")"))))
+
+; ------------------------------------------------------------ handshake
+
+; Handshake bytes b from i to j, after those held: each whole message
+; read in turn, the rest held.
+(def tls_handshake ((o TlsOut) (b bytes) (i int) (j int)) TlsOut
+  (let all (tls_cat (.hsheld (.t o)) (bytes_slice b i j))
+    (if (gt (bytes_len all) 65536)
+        (tls_fail o "the server sent a handshake message too long")
+        (tls_messages (.t o (.hsheld (.t o) (tls_empty))) all 0))))
+
+; The messages in buf from k on, the rest held.
+(def tls_messages ((o TlsOut) (buf bytes) (k int)) TlsOut
+  (let n (bytes_len buf)
+    (if (tls_failed (.t o)) o
+        (lt (sub n k) 4) (.t o (.hsheld (.t o) (bytes_slice buf k n)))
+        (let e (add (add k 4) (tls_u24 buf (add k 1)))
+          (if (gt e n)
+              (.t o (.hsheld (.t o) (bytes_slice buf k n)))
+              (let (keyed (tls_is_keyed (.rd (.t o)))
+                    o2 (tls_message o (tls_u8 buf k) (bytes_slice buf k e)))
+                (if (and (and (not keyed) (tls_is_keyed (.rd (.t o2)))) (lt e n))
+                    (tls_fail o2 "the server sent more in the ServerHello's record")
+                    (tls_messages o2 buf e))))))))
+
+; Whether c has keys.
+(def tls_is_keyed ((c TlsCipher)) bool (match c ((TlsPlain) false) ((TlsKeyed k) true)))
+
+; t's transcript with the message m.
+(def tls_heard ((t Tls) (m bytes)) Tls
+  (.hc t (hash_more (.hc t) m 0 (bytes_len m))))
+
+; o with the message m in its transcript, and at stage st.
+(def tls_step ((o TlsOut) (m bytes) (st int)) TlsOut
+  (match o ((TlsOut t s g) (TlsOut (.stage (tls_heard t m) st) s g))))
+
+; The handshake message m, its type ty, at the stage the connection is.
+(def tls_message ((o TlsOut) (ty int) (m bytes)) TlsOut
+  (let st (.stage (.t o))
+    (if (eq st (tls_stage_up)) (tls_after o ty m)
+        (not (eq ty (tls_due st)))
+        (if (and (eq st (tls_stage_cert)) (eq ty 13))
+            (tls_fail o "the server asks for a client certificate, which this client does not have")
+            (tls_fail o (append "the server sent handshake message " (append (digits ty) (append " where " (append (digits (tls_due st)) " was due"))))))
+        (eq st (tls_stage_hello)) (tls_server_hello o m)
+        (eq st (tls_stage_ee)) (tls_step o m (tls_stage_cert))
+        (eq st (tls_stage_cert)) (tls_certificate o m)
+        (eq st (tls_stage_cv)) (tls_verify o m)
+        (tls_finished o m))))
+
+; The handshake message due at stage st.
+(def tls_due ((st int)) int
+  (if (eq st (tls_stage_hello)) 2 (eq st (tls_stage_ee)) 8 (eq st (tls_stage_cert)) 11 (eq st (tls_stage_cv)) 15 20))
+
+; The ServerHello's first 8 bytes of random when it is a
+; HelloRetryRequest (SHA-256 of "HelloRetryRequest").
+(def tls_hrr_random () (list int) (cons 207 (cons 33 (cons 173 (cons 116 (cons 229 (cons 154 (cons 97 (cons 17 (nil int))))))))))
+
+; The ServerHello m: the version and the key share it chose, the
+; handshake's secrets from them, and the server's handshake keys.
+(def tls_server_hello ((o TlsOut) (m bytes)) TlsOut
+  (let n (bytes_len m)
+    (if (lt n 42) (tls_fail o "the ServerHello is too short")
+        (bytes_is_at m 6 (tls_hrr_random))
+        (tls_fail o "the server asks for a key share other than X25519 (HelloRetryRequest)")
+        (let (sid (bytes_get m 38)
+              at (add 39 sid))
+          (if (gt (add at 5) n)
+              (tls_fail o "the ServerHello is too short")
+              (let (cs (tls_u16 m at)
+                    ext (add at 5))
+                (if (not (or (eq cs 4865) (eq cs 4867)))
+                    (tls_fail o (append "the server chose a cipher not offered: " (digits cs)))
+                    (tls_hello_exts o m (if (eq cs 4865) (TlsAes128) (TlsChacha20)) ext (add ext (tls_u16 m (sub ext 2))) false (tls_empty)))))))))
+
+; The ServerHello's extensions from i to j: whether it said TLS 1.3, and
+; the server's key share.
+(def tls_hello_exts ((o TlsOut) (m bytes) (s TlsSuite) (i int) (j int) (v13 bool) (key bytes)) TlsOut
+  (if (or (gt j (bytes_len m)) (lt (sub j i) 0)) (tls_fail o "the ServerHello's extensions are cut short")
+      (ge i j)
+      (if (not v13) (tls_fail o "the server did not agree to TLS 1.3")
+          (not (eq (bytes_len key) 32)) (tls_fail o "the server sent no X25519 key share")
+          (tls_keyed_hello o m s key))
+      (gt (add i 4) j) (tls_fail o "the ServerHello's extensions are cut short")
+      (let (ty (tls_u16 m i)
+            len (tls_u16 m (add i 2))
+            d (add i 4)
+            e (add d len))
+        (if (gt e j) (tls_fail o "the ServerHello's extensions are cut short")
+            (eq ty 43) (tls_hello_exts o m s e j (and (eq len 2) (eq (tls_u16 m d) 772)) key)
+            (eq ty 51)
+            (if (and (eq len 36) (and (eq (tls_u16 m d) 29) (eq (tls_u16 m (add d 2)) 32)))
+                (tls_hello_exts o m s e j v13 (bytes_slice m (add d 4) e))
+                (tls_fail o "the server's key share is not X25519"))
+            (tls_hello_exts o m s e j v13 key)))))
+
+; The secrets the server's key share key gives, after the ServerHello m.
+(def tls_keyed_hello ((o TlsOut) (m bytes) (s TlsSuite) (key bytes)) TlsOut
+  (let shared (x25519 (.secret (.t o)) key)
+    (if (x25519_is_zero shared)
+        (tls_fail o "the server's key share gives a zero secret")
+        (let (t0 (.t o)
+              t (.suite (tls_heard t0 m) s)
+              th (hash_peek (.hc t))
+              z (tls_zeros 32)
+              early (hkdf_extract (HashSha256) z z)
+              derived (hkdf_derive_secret (HashSha256) early "derived" (hash_of (HashSha256) z 0 0))
+              hs (hkdf_extract (HashSha256) derived shared)
+              chs (hkdf_derive_secret (HashSha256) hs "c hs traffic" th)
+              shs (hkdf_derive_secret (HashSha256) hs "s hs traffic" th))
+          (TlsOut (.rd (.shs (.chs (.hs (.stage t (tls_stage_ee)) hs) chs) shs) (TlsKeyed (tls_keys s shs))) (.send o) (.got o))))))
+
+; The Certificate m: its chain, the server's first, checked to the
+; roots for the host.
+(def tls_certificate ((o TlsOut) (m bytes)) TlsOut
+  (let (n (bytes_len m)
+        ctx (if (gt n 4) (bytes_get m 4) 0)
+        at (add 5 ctx))
+    (if (gt (add at 3) n) (tls_fail o "the Certificate message is too short")
+        (match (tls_cert_list m (add at 3) (add (add at 3) (tls_u24 m at)) (nil bytes))
+          ((Err why) (tls_fail o why))
+          ((Ok chain)
+            (let t (.t o)
+              (match (trust_chain (.roots t) chain (.host t) (.now t))
+                ((Err why) (tls_fail o (append "the server's certificate: " why)))
+                ((Ok leaf) (tls_step (.t o (.leaf t (Some leaf))) m (tls_stage_cv))))))))))
+
+; The certificates of a Certificate message's list from i to j, onto
+; acc reversed.
+(def tls_cert_list ((m bytes) (i int) (j int) (acc (list bytes))) (Result (list bytes) (list int))
+  (if (gt j (bytes_len m)) ((Err (list bytes) (list int)) "the certificate list is cut short")
+      (ge i j)
+      (if (is_empty acc) ((Err (list bytes) (list int)) "the server sent no certificate") ((Ok (list bytes) (list int)) (rev acc)))
+      (gt (add i 3) j) ((Err (list bytes) (list int)) "the certificate list is cut short")
+      (let (e (add (add i 3) (tls_u24 m i)))
+        (if (gt (add e 2) j) ((Err (list bytes) (list int)) "the certificate list is cut short")
+            (tls_cert_list m (add (add e 2) (tls_u16 m e)) j (cons (bytes_slice m (add i 3) e) acc))))))
+
+; What a server's CertificateVerify signs: 64 spaces, the context, a
+; zero, and the transcript's hash th.
+(def tls_cv_content ((th bytes)) bytes
+  (tls_cat (bytes_from_list (append (tls_spaces 64 (nil int)) (append "TLS 1.3, server CertificateVerify" (cons 0 (nil int))))) th))
+
+; n spaces onto acc.
+(def tls_spaces ((n int) (acc (list int))) (list int) (if (eq n 0) acc (tls_spaces (sub n 1) (cons 32 acc))))
+
+; The CertificateVerify m: the server's signature over the transcript
+; by its certificate's key.
+(def tls_verify ((o TlsOut) (m bytes)) TlsOut
+  (let n (bytes_len m)
+    (if (lt n 8) (tls_fail o "the CertificateVerify is too short")
+        (let (scheme (tls_u16 m 4)
+              len (tls_u16 m 6))
+          (if (not (eq (add 8 len) n)) (tls_fail o "the CertificateVerify's length is wrong")
+              (not (any_eq scheme (tls_cv_schemes))) (tls_fail o (append "the server signed with a scheme not offered: " (digits scheme)))
+              (match (.leaf (.t o))
+                ((None) (tls_fail o "no certificate came before the CertificateVerify"))
+                ((Some leaf)
+                  (if (trust_signed (.key leaf) scheme (tls_cv_content (hash_peek (.hc (.t o)))) (bytes_slice m 8 n))
+                      (tls_step o m (tls_stage_fin))
+                      (tls_fail o "the server's CertificateVerify does not verify")))))))))
+
+; The verify_data a Finished under traffic secret base holds, for the
+; transcript's hash th.
+(def tls_finish_mac ((base bytes) (th bytes)) bytes
+  (hmac (HashSha256) (hkdf_expand_label (HashSha256) base "finished" (tls_empty) 32) th))
+
+; The server's Finished m: checked, then the client's sent, under its
+; handshake keys, and both directions keyed for data.
+(def tls_finished ((o TlsOut) (m bytes)) TlsOut
+  (let t (.t o)
+    (if (not (tls_same (bytes_slice m 4 (bytes_len m)) (tls_finish_mac (.shs t) (hash_peek (.hc t)))))
+        (tls_fail o "the server's Finished does not verify")
+        (let (t2 (tls_heard t m)
+              th (hash_peek (.hc t2))
+              z (tls_zeros 32)
+              derived (hkdf_derive_secret (HashSha256) (.hs t2) "derived" (hash_of (HashSha256) z 0 0))
+              master (hkdf_extract (HashSha256) derived z)
+              cap (hkdf_derive_secret (HashSha256) master "c ap traffic" th)
+              sap (hkdf_derive_secret (HashSha256) master "s ap traffic" th)
+              fin (bytes_from_list (rev (tls_bytes_onto (tls_finish_mac (.chs t2) th) (tls_be 32 3 (cons 20 (nil int)))))))
+          (match (tls_seal (tls_keys (.suite t2) (.chs t2)) (tls_ct_handshake) fin 0 (bytes_len fin))
+            ((TlsSealed k rec)
+              (tls_sending (TlsOut (.stage (.rd (.wr t2 (TlsKeyed (tls_keys (.suite t2) cap))) (TlsKeyed (tls_keys (.suite t2) sap))) (tls_stage_up))
+                                   (.send o) (.got o))
+                           rec)))))))
+
+; A handshake message m of type ty once up: a session ticket passed
+; over, a KeyUpdate followed, and answered if the server asks.
+(def tls_after ((o TlsOut) (ty int) (m bytes)) TlsOut
+  (if (eq ty 4) o
+      (and (eq ty 24) (eq (bytes_len m) 5))
+      (match (.rd (.t o))
+        ((TlsPlain) (tls_fail o "a KeyUpdate before keys"))
+        ((TlsKeyed k)
+          (let o2 (.t o (.rd (.t o) (TlsKeyed (tls_keys_next (.suite (.t o)) k))))
+            (if (eq (bytes_get m 4) 1) (tls_update_ours o2) o2))))
+      (tls_fail o (append "the server sent handshake message " (append (digits ty) " after the handshake")))))
+
+; Our own KeyUpdate sent, not asking for one back, and our keys moved on.
+(def tls_update_ours ((o TlsOut)) TlsOut
+  (match (.wr (.t o))
+    ((TlsPlain) (tls_fail o "a KeyUpdate before keys"))
+    ((TlsKeyed k)
+      (let msg (bytes_from_list (cons 24 (cons 0 (cons 0 (cons 1 (cons 0 (nil int)))))))
+        (match (tls_seal k (tls_ct_handshake) msg 0 5)
+          ((TlsSealed k2 rec)
+            (tls_sending (.t o (.wr (.t o) (TlsKeyed (tls_keys_next (.suite (.t o)) k2)))) rec)))))))
+
+; -------------------------------------------------------------- sending
+
+; Data, b from i to j, sealed into records for the server, at most
+; tls_record_max each; refused (failed) unless t is up.
+(def tls_send ((t Tls) (b bytes) (i int) (j int)) TlsOut
+  (if (not (tls_up t))
+      (tls_fail (TlsOut t (nil bytes) (nil bytes)) "the connection is not up")
+      (let o (tls_send_from (TlsOut t (nil bytes) (nil bytes)) b i j)
+        (TlsOut (.t o) (rev (.send o)) (nil bytes)))))
+
+; tls_send's loop, its records reversed.
+(def tls_send_from ((o TlsOut) (b bytes) (i int) (j int)) TlsOut
+  (if (ge i j)
+      o
+      (match (.wr (.t o))
+        ((TlsPlain) (tls_fail o "the connection has no keys"))
+        ((TlsKeyed k)
+          (let e (min j (add i (tls_record_max)))
+            (match (tls_seal k (tls_ct_data) b i e)
+              ((TlsSealed k2 rec) (tls_send_from (tls_sending (.t o (.wr (.t o) (TlsKeyed k2))) rec) b e j))))))))
+
+; The close_notify alert to end t, sealed, and t after it; nothing if t
+; has no keys yet.
+(def tls_close ((t Tls)) TlsOut
+  (match (.wr t)
+    ((TlsPlain) (TlsOut t (nil bytes) (nil bytes)))
+    ((TlsKeyed k)
+      (let a (bytes_from_list (cons 1 (cons 0 (nil int))))
+        (match (tls_seal k (tls_ct_alert) a 0 2)
+          ((TlsSealed k2 rec) (TlsOut (.wr t (TlsKeyed k2)) (cons rec (nil bytes)) (nil bytes))))))))

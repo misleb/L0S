@@ -1,0 +1,199 @@
+; sha512.l0 -- SHA-512 and SHA-384, as FIPS 180-4 defines them, over a
+; range of bytes, at once or a piece at a time: what TLS 1.3's
+; TLS_AES_256_GCM_SHA384 hashes its transcript and keys with. Words are
+; L0's 64-bit ints, whose add wraps as the hash's does. Pure; not
+; constant-time, which hashing public data needs no more of.
+
+; The first 64 bits of the fractional parts of the cube roots of the
+; first 80 primes: the rounds' constants (FIPS 180-4, 4.2.3), as signed
+; decimals (0x428a2f98d728ae22 first).
+(def sha512_k () (array int)
+  (sha512_words (append "4794697086780616226 8158064640168781261 -5349999486874862801 -1606136188198331460 4131703408338449720 6480981068601479193 -7908458776815382629 -6116909921290321640 -2880145864133508542 1334009975649890238 2608012711638119052 6128411473006802146 8268148722764581231 -9160688886553864527 -7215885187991268811 -4495734319001033068 -1973867731355612462 -1171420211273849373 1135362057144423861 2597628984639134821 3308224258029322869 5365058923640841347 6679025012923562964 8573033837759648693 -7476448914759557205 -6327057829258317296 -5763719355590565569 -4658551843659510044 -4116276920077217854 -3051310485924567259 489312712824947311 1452737877330783856 2861767655752347644 3322285676063803686 5560940570517711597 5996557281743188959 7280758554555802590 8532644243296465576 -9096487096722542874 -7894198246740708037 "
+                        "-6719396339535248540 -6333637450476146687 -4446306890439682159 -4076793802049405392 -3345356375505022440 -2983346525034927856 -860691631967231958 1182934255886127544 1847814050463011016 2177327727835720531 2830643537854262169 3796741975233480872 4115178125766777443 5681478168544905931 6601373596472566643 7507060721942968483 8399075790359081724 8693463985226723168 -8878714635349349518 -8302665154208450068 -8016688836872298968 -6606660893046293015 -4685533653050689259 -4147400797238176981 -3880063495543823972 -3348786107499101689 -1523767162380948706 -757361751448694408 500013540394364858 748580250866718886 1242879168328830382 1977374033974150939 2944078676154940804 3659926193048069267 4368137639120453308 4836135668995329356 5532061633213252278 6448918945643986474 6902733635092675308 7801388544844847127")))
+
+; SHA-512's start: the first 64 bits of the fractional parts of the
+; square roots of the first 8 primes (FIPS 180-4, 5.3.5), 0x6a09e667f3bcc908
+; first.
+(def sha512_start () (array int)
+  (sha512_words "7640891576956012808 -4942790177534073029 4354685564936845355 -6534734903238641935 5840696475078001361 -7276294671716946913 2270897969802886507 6620516959819538809"))
+
+; SHA-384's start: the same of the 9th to 16th primes (FIPS 180-4,
+; 5.3.4), 0xcbbb9d5dc1059ed8 first.
+(def sha384_start () (array int)
+  (sha512_words "-3766243637369397544 7105036623409894663 -7973340178411365097 1526699215303891257 7436329637833083697 -8163818279084223215 -2662702644619276377 5167115440072839076"))
+
+; The numbers of s, signed decimal words, as an array.
+(def sha512_words ((s (list int))) (array int)
+  (match (word_numbers (split_spaces s))
+    ((None) (array_new 0 0))
+    ((Some ns) (array_from ns 0))))
+
+; x, 64 bits, rotated right by n, 0 < n < 64.
+(def sha512_rotr ((x int) (n int)) int
+  (bit_or (bit_shr x n) (bit_shl x (sub 64 n))))
+
+; The 64-bit word at byte i of b, most significant byte first.
+(def sha512_be64 ((b bytes) (i int)) int
+  (bit_or (bit_or (bit_or (bit_shl (bytes_get b i) 56) (bit_shl (bytes_get b (add i 1)) 48))
+                  (bit_or (bit_shl (bytes_get b (add i 2)) 40) (bit_shl (bytes_get b (add i 3)) 32)))
+          (bit_or (bit_or (bit_shl (bytes_get b (add i 4)) 24) (bit_shl (bytes_get b (add i 5)) 16))
+                  (bit_or (bit_shl (bytes_get b (add i 6)) 8) (bytes_get b (add i 7))))))
+
+; ------------------------------------------------------------- hashing
+
+; The SHA-512 of the bytes of b from i up to j, its 64 bytes.
+(def sha512 ((b bytes) (i int) (j int)) bytes
+  (sha512_once (sha512_start) 64 b i j))
+
+; The SHA-384 of the bytes of b from i up to j, its 48 bytes.
+(def sha384 ((b bytes) (i int) (j int)) bytes
+  (sha512_once (sha384_start) 48 b i j))
+
+; The hash from start h of the bytes of b from i up to j, its first out
+; bytes: the whole blocks hashed where they are, the rest padded.
+(def sha512_once ((h (array int)) (out int) (b bytes) (i int) (j int)) bytes
+  (let (kt (sha512_k)
+        n (sub j i)
+        full (add i (mul (div n 128) 128))
+        last (sha512_last b full j n)
+        w (array_new 80 0)
+        h1 (sha512_blocks kt w h b i full))
+    (sha512_digest (sha512_blocks kt (array_new 80 0) h1 last 0 (bytes_len last)) out)))
+
+; ------------------------------------------------- a piece at a time
+
+; A hash under way, over bytes that come in pieces: the constants; the
+; hash so far; the bytes held since the last whole block, fewer than
+; 128; how many bytes it has been given; and how many bytes its digest
+; has, 64 for SHA-512, 48 for SHA-384.
+(data Sha512 (Sha512 (kt (array int)) (h (array int)) (held bytes) (n int) (out int)))
+
+; A SHA-512 of nothing yet.
+(def sha512_new () Sha512
+  (Sha512 (sha512_k) (sha512_start) (bytes_from_list "") 0 64))
+
+; A SHA-384 of nothing yet.
+(def sha384_new () Sha512
+  (Sha512 (sha512_k) (sha384_start) (bytes_from_list "") 0 48))
+
+; s given the bytes of b from i up to j: each whole block hashed, what
+; is left of one held.
+(def sha512_more ((s Sha512) (b bytes) (i int) (j int)) Sha512
+  (match s
+    ((Sha512 kt h held n out)
+      (let (all (bytes_concat (cons held (cons (bytes_slice b i j) (nil bytes))))
+            len (bytes_len all)
+            full (mul (div len 128) 128)
+            rest (bytes_slice all full len)
+            h1 (sha512_blocks kt (array_new 80 0) h all 0 full))
+        (Sha512 kt h1 rest (add n (sub j i)) out)))))
+
+; The hash of every byte s was given, its 64 or 48 bytes. s is left as
+; it was, so more can be given it after.
+(def sha512_done ((s Sha512)) bytes
+  (let (held (.held s)
+        last (sha512_last held 0 (bytes_len held) (.n s)))
+    (sha512_digest (sha512_blocks (.kt s) (array_new 80 0) (sha512_copy (.h s)) last 0 (bytes_len last)) (.out s))))
+
+; A copy of the eight words of h, an array no one else holds.
+(def sha512_copy ((h (array int))) (array int)
+  (sha512_copy_from h (array_new 8 0) 0))
+
+; c with h's words from i on.
+(def sha512_copy_from ((h (array int)) (c (array int)) (i int)) (array int)
+  (if (ge i 8) c (sha512_copy_from h (array_set c i (array_get h i)) (add i 1))))
+
+; The last one or two blocks: the bytes of b from i up to j, fewer than
+; 128, then 0x80, zeros, and the message's length n in bits as 16
+; bytes, most significant first, to a multiple of 128 bytes.
+(def sha512_last ((b bytes) (i int) (j int) (n int)) bytes
+  (let (k (sub j i)
+        total (if (lt k 112) 128 256)
+        zeros (sub total (add k 17))
+        pad (cons 128 (sha512_zeros (add zeros 8) (sha512_length (mul n 8) 8 (nil int)))))
+    (bytes_concat (cons (bytes_slice b i j) (cons (bytes_from_list pad) (nil bytes))))))
+
+; n zeros, before acc.
+(def sha512_zeros ((n int) (acc (list int))) (list int)
+  (if (le n 0) acc (sha512_zeros (sub n 1) (cons 0 acc))))
+
+; The low k bytes of x, most significant first, before acc.
+(def sha512_length ((x int) (k int) (acc (list int))) (list int)
+  (if (le k 0) acc (sha512_length (bit_shr x 8) (sub k 1) (cons (bit_and x 255) acc))))
+
+; h, the hash so far, after the 128-byte blocks of b from i up to j; w
+; is the message schedule's room, kt the constants.
+(def sha512_blocks ((kt (array int)) (w (array int)) (h (array int)) (b bytes) (i int) (j int)) (array int)
+  (if (ge i j)
+      h
+      (let (w1 (sha512_schedule (sha512_load w b i 0) 16)
+            h1 (sha512_block kt w1 h))
+        (sha512_blocks kt w1 h1 b (add i 128) j))))
+
+; w with its first 16 words the block at byte i of b, from word t on.
+(def sha512_load ((w (array int)) (b bytes) (i int) (t int)) (array int)
+  (if (ge t 16)
+      w
+      (sha512_load (array_set w t (sha512_be64 b (add i (mul t 8)))) b i (add t 1))))
+
+; w with its words from t up to 80 made from those before (FIPS 180-4,
+; 6.4.2, step 1).
+(def sha512_schedule ((w (array int)) (t int)) (array int)
+  (if (ge t 80)
+      w
+      (let (a (array_get w (sub t 2))
+            c (array_get w (sub t 7))
+            d (array_get w (sub t 15))
+            e (array_get w (sub t 16))
+            s1 (bit_xor (sha512_rotr a 19) (bit_xor (sha512_rotr a 61) (bit_shr a 6)))
+            s0 (bit_xor (sha512_rotr d 1) (bit_xor (sha512_rotr d 8) (bit_shr d 7))))
+        (sha512_schedule (array_set w t (add (add s1 c) (add s0 e))) (add t 1)))))
+
+; h after one block, whose schedule is w.
+(def sha512_block ((kt (array int)) (w (array int)) (h (array int))) (array int)
+  (let (a (array_get h 0)
+        b (array_get h 1)
+        c (array_get h 2)
+        d (array_get h 3)
+        e (array_get h 4)
+        f (array_get h 5)
+        g (array_get h 6)
+        hh (array_get h 7))
+    (sha512_rounds kt w h 0 a b c d e f g hh)))
+
+; The rounds from t on, the working variables a to hh; at the end, each
+; added into h (FIPS 180-4, 6.4.2, steps 3 and 4).
+(def sha512_rounds ((kt (array int)) (w (array int)) (h (array int)) (t int)
+                    (a int) (b int) (c int) (d int) (e int) (f int) (g int) (hh int)) (array int)
+  (if (ge t 80)
+      (sha512_added h a b c d e f g hh)
+      (let (s1 (bit_xor (sha512_rotr e 14) (bit_xor (sha512_rotr e 18) (sha512_rotr e 41)))
+            ch (bit_xor (bit_and e f) (bit_and (bit_xor e -1) g))
+            t1 (add (add hh s1) (add ch (add (array_get kt t) (array_get w t))))
+            s0 (bit_xor (sha512_rotr a 28) (bit_xor (sha512_rotr a 34) (sha512_rotr a 39)))
+            maj (bit_xor (bit_and a b) (bit_xor (bit_and a c) (bit_and b c)))
+            t2 (add s0 maj))
+        (sha512_rounds kt w h (add t 1) (add t1 t2) a b c (add d t1) e f g))))
+
+; h with a to hh added to its words.
+(def sha512_added ((h (array int)) (a int) (b int) (c int) (d int) (e int) (f int) (g int) (hh int)) (array int)
+  (let (h0 (array_get h 0)
+        h1 (array_get h 1)
+        h2 (array_get h 2)
+        h3 (array_get h 3)
+        h4 (array_get h 4)
+        h5 (array_get h 5)
+        h6 (array_get h 6)
+        h7 (array_get h 7))
+    (array_set (array_set (array_set (array_set (array_set (array_set (array_set (array_set h 0 (add h0 a)) 1 (add h1 b)) 2 (add h2 c)) 3 (add h3 d)) 4 (add h4 e)) 5 (add h5 f)) 6 (add h6 g)) 7 (add h7 hh))))
+
+; The first out bytes of h's eight words, each most significant byte
+; first.
+(def sha512_digest ((h (array int)) (out int)) bytes
+  (bytes_from_list (sha512_digest_from h (sub (div out 8) 1) (nil int))))
+
+; The bytes of h's words up to i, before acc.
+(def sha512_digest_from ((h (array int)) (i int) (acc (list int))) (list int)
+  (if (lt i 0)
+      acc
+      (sha512_digest_from h (sub i 1) (sha512_length (array_get h i) 8 acc))))

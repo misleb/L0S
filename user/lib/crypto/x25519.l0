@@ -1,0 +1,238 @@
+; x25519.l0 -- X25519, the Diffie-Hellman function over Curve25519 that
+; RFC 7748 defines: a scalar times a point's u-coordinate, by the
+; Montgomery ladder. TLS 1.3's key share uses it. Pure.
+;
+; A field element, a number mod p = 2^255 - 19, is an (array int) of 16
+; limbs of 16 bits, least significant first, as TweetNaCl keeps them:
+; a limb may stray a little outside 0 to 65535 between operations, and
+; every product and sum of them fits in 64 bits. Not constant-time (the
+; allocator and the runtime's checks are not), though the ladder swaps
+; by mask rather than by branch on the scalar's bits.
+
+; The floor of x / 65536: an arithmetic shift right by 16, which
+; bit_shr, bringing in zeros, is not for a negative x.
+(def x25519_sar16 ((x int)) int
+  (if (lt x 0)
+      (bit_xor (bit_shr (bit_xor x -1) 16) -1)
+      (bit_shr x 16)))
+
+; ------------------------------------------------------ field arithmetic
+
+; The field element n, a small number below 65536.
+(def x25519_small ((n int)) (array int)
+  (array_set (array_new 16 0) 0 n))
+
+; o with each limb from i on brought into 0 to 65535, its carry added to
+; the next limb, and the last limb's carry, 2^256 being 38 mod p, added
+; 38 times to the first.
+(def x25519_carry ((o (array int)) (i int)) (array int)
+  (if (ge i 16)
+      o
+      (let (v (array_get o i)
+            c (x25519_sar16 v)
+            o1 (array_set o i (bit_and v 65535)))
+        (if (lt i 15)
+            (x25519_carry (array_set o1 (add i 1) (add (array_get o1 (add i 1)) c)) (add i 1))
+            (array_set o1 0 (add (array_get o1 0) (mul 38 c)))))))
+
+; o with limbs from i on each a's plus b's.
+(def x25519_add_from ((o (array int)) (a (array int)) (b (array int)) (i int)) (array int)
+  (if (ge i 16)
+      o
+      (x25519_add_from (array_set o i (add (array_get a i) (array_get b i))) a b (add i 1))))
+
+; o with limbs from i on each a's minus b's.
+(def x25519_sub_from ((o (array int)) (a (array int)) (b (array int)) (i int)) (array int)
+  (if (ge i 16)
+      o
+      (x25519_sub_from (array_set o i (sub (array_get a i) (array_get b i))) a b (add i 1))))
+
+; a + b, limb by limb, not carried: a product takes it as it is.
+(def x25519_fadd ((a (array int)) (b (array int))) (array int)
+  (x25519_add_from (array_new 16 0) a b 0))
+
+; a - b, limb by limb, not carried; limbs may be negative.
+(def x25519_fsub ((a (array int)) (b (array int))) (array int)
+  (x25519_sub_from (array_new 16 0) a b 0))
+
+; t with ai times each limb of b from j on added at limb i + j.
+(def x25519_mul_row ((t (array int)) (ai int) (b (array int)) (i int) (j int)) (array int)
+  (if (ge j 16)
+      t
+      (let k (add i j)
+        (x25519_mul_row (array_set t k (add (array_get t k) (mul ai (array_get b j)))) ai b i (add j 1)))))
+
+; t with the rows of a from i on times b added: the schoolbook product,
+; 31 limbs.
+(def x25519_mul_rows ((t (array int)) (a (array int)) (b (array int)) (i int)) (array int)
+  (if (ge i 16)
+      t
+      (x25519_mul_rows (x25519_mul_row t (array_get a i) b i 0) a b (add i 1))))
+
+; o with limbs from i on the product t's, each with 38 times the limb 16
+; above it, since 2^256 is 38 mod p.
+(def x25519_fold ((o (array int)) (t (array int)) (i int)) (array int)
+  (if (ge i 16)
+      o
+      (let v (if (lt i 15)
+                 (add (array_get t i) (mul 38 (array_get t (add i 16))))
+                 (array_get t i))
+        (x25519_fold (array_set o i v) t (add i 1)))))
+
+; a times b mod p, carried twice.
+(def x25519_fmul ((a (array int)) (b (array int))) (array int)
+  (let t (x25519_mul_rows (array_new 31 0) a b 0)
+    (x25519_carry (x25519_carry (x25519_fold (array_new 16 0) t 0) 0) 0)))
+
+; a squared mod p.
+(def x25519_fsq ((a (array int))) (array int)
+  (x25519_fmul a a))
+
+; o with limbs from i on a's times 121665.
+(def x25519_scale_from ((o (array int)) (a (array int)) (i int)) (array int)
+  (if (ge i 16)
+      o
+      (x25519_scale_from (array_set o i (mul 121665 (array_get a i))) a (add i 1))))
+
+; a times 121665, (486662 - 2) / 4, the curve's a24 (RFC 7748, 5).
+(def x25519_fmul121665 ((a (array int))) (array int)
+  (x25519_carry (x25519_carry (x25519_scale_from (array_new 16 0) a 0) 0) 0))
+
+; c squared, and times z but where the bit of p - 2 is 0, for each bit
+; from a down to 0: z to the p - 2 = 2^255 - 21, whose bits below 255
+; are all 1 but bits 2 and 4.
+(def x25519_pow ((z (array int)) (c (array int)) (a int)) (array int)
+  (if (lt a 0)
+      c
+      (let c1 (x25519_fsq c)
+        (x25519_pow z (if (or (eq a 2) (eq a 4)) c1 (x25519_fmul c1 z)) (sub a 1)))))
+
+; 1 / z mod p, as z^(p - 2); 0 for 0.
+(def x25519_invert ((z (array int))) (array int)
+  (x25519_pow z z 253))
+
+; Each limb from i on a's where m is 0 and b's where m is -1, in o.
+(def x25519_csel_from ((o (array int)) (a (array int)) (b (array int)) (m int) (i int)) (array int)
+  (if (ge i 16)
+      o
+      (let (x (array_get a i)
+            y (array_get b i))
+        (x25519_csel_from (array_set o i (bit_xor x (bit_and m (bit_xor x y)))) a b m (add i 1)))))
+
+; a where the mask m is 0, b where it is -1, chosen limb by limb by mask.
+(def x25519_csel ((a (array int)) (b (array int)) (m int)) (array int)
+  (x25519_csel_from (array_new 16 0) a b m 0))
+
+; ------------------------------------------------------------- packing
+
+; The u-coordinate at bytes 0 to 31 of u, little-endian, its top bit
+; masked (RFC 7748, 5), as a field element; a u of p or more is taken
+; mod p by the arithmetic.
+(def x25519_unpack ((u bytes)) (array int)
+  (x25519_unpack_from (array_new 16 0) u 0))
+
+; o with limbs from i on the two bytes of u at 2i.
+(def x25519_unpack_from ((o (array int)) (u bytes) (i int)) (array int)
+  (if (ge i 16)
+      o
+      (let (lo (bytes_get u (mul i 2))
+            hi (bytes_get u (add (mul i 2) 1))
+            v (bit_or lo (bit_shl (if (eq i 15) (bit_and hi 127) hi) 8)))
+        (x25519_unpack_from (array_set o i v) u (add i 1)))))
+
+; m with limbs from i on t's minus p's, the borrow from the limb below
+; given: limbs below 15 kept to 16 bits, the last left with its sign.
+(def x25519_sub_p ((m (array int)) (t (array int)) (i int) (borrow int)) (array int)
+  (if (ge i 16)
+      m
+      (let (pl (if (eq i 0) 65517 (eq i 15) 32767 65535)
+            v (sub (sub (array_get t i) pl) borrow))
+        (x25519_sub_p (array_set m i (if (lt i 15) (bit_and v 65535) v)) t (add i 1) (bit_and (bit_shr v 16) 1))))) ; 65517 is 0xffed, 32767 0x7fff, 65535 0xffff
+
+; t, carried and below 2 p, less p if it is p or more.
+(def x25519_reduce ((t (array int))) (array int)
+  (let (m (x25519_sub_p (array_new 16 0) t 0 0)
+        below (bit_and (bit_shr (array_get m 15) 16) 1))
+    (x25519_csel m t (sub 0 below))))
+
+; The 32 bytes of the limbs of t from i down to 0, before acc.
+(def x25519_bytes_from ((t (array int)) (i int) (acc (list int))) (list int)
+  (if (lt i 0)
+      acc
+      (let v (array_get t i)
+        (x25519_bytes_from t (sub i 1) (cons (bit_and v 255) (cons (bit_shr v 8) acc))))))
+
+; n as 32 bytes, little-endian, fully reduced mod p.
+(def x25519_pack ((n (array int))) bytes
+  (let t (x25519_reduce (x25519_reduce (x25519_carry (x25519_carry (x25519_carry n 0) 0) 0)))
+    (bytes_from_list (x25519_bytes_from t 15 (nil int)))))
+
+; ------------------------------------------------------------ the ladder
+
+; Bit t of the scalar k clamped (RFC 7748, 5): bits 0 to 2 cleared, bit
+; 255 cleared, bit 254 set.
+(def x25519_kbit ((k bytes) (t int)) int
+  (let (i (bit_shr t 3)
+        b (bytes_get k i)
+        c (if (eq i 0) (bit_and b 248) (eq i 31) (bit_or (bit_and b 127) 64) b))
+    (bit_and (bit_shr c (bit_and t 7)) 1)))
+
+; The Montgomery ladder of RFC 7748, section 5, from bit t of k down:
+; x1 the point's u, (x2, z2) and (x3, z3) the two points it keeps,
+; swapped when swap is 1; at the end, x2 / z2 as a field element.
+(def x25519_ladder ((k bytes) (x1 (array int)) (x2 (array int)) (z2 (array int)) (x3 (array int)) (z3 (array int)) (swap int) (t int)) (array int)
+  (if (lt t 0)
+      (let m (sub 0 swap)
+        (x25519_fmul (x25519_csel x2 x3 m) (x25519_invert (x25519_csel z2 z3 m))))
+      (let (kt (x25519_kbit k t)
+            m (sub 0 (bit_xor swap kt))
+            ax2 (x25519_csel x2 x3 m)
+            ax3 (x25519_csel x3 x2 m)
+            az2 (x25519_csel z2 z3 m)
+            az3 (x25519_csel z3 z2 m)
+            a (x25519_fadd ax2 az2)
+            aa (x25519_fsq a)
+            b (x25519_fsub ax2 az2)
+            bb (x25519_fsq b)
+            e (x25519_fsub aa bb)
+            c (x25519_fadd ax3 az3)
+            d (x25519_fsub ax3 az3)
+            da (x25519_fmul d a)
+            cb (x25519_fmul c b)
+            nx3 (x25519_fsq (x25519_fadd da cb))
+            nz3 (x25519_fmul x1 (x25519_fsq (x25519_fsub da cb)))
+            nx2 (x25519_fmul aa bb)
+            nz2 (x25519_fmul e (x25519_fadd aa (x25519_fmul121665 e))))
+        (x25519_ladder k x1 nx2 nz2 nx3 nz3 kt (sub t 1)))))
+
+; ------------------------------------------------------------ the API
+
+; X25519(k, u) of RFC 7748: the 32-byte scalar k, clamped, times the
+; 32-byte little-endian u-coordinate u, its top bit masked; 32 bytes.
+; Both must be 32 bytes long.
+(def x25519 ((k bytes) (u bytes)) bytes
+  (let x1 (x25519_unpack u)
+    (x25519_pack (x25519_ladder k x1 (x25519_small 1) (x25519_small 0) x1 (x25519_small 1) 0 254))))
+
+; The u-coordinate 9 of Curve25519's base point, as 32 bytes.
+(def x25519_base_point () bytes
+  (bytes_from_list (cons 9 (x25519_zeros 31 (nil int)))))
+
+; n zeros before acc.
+(def x25519_zeros ((n int) (acc (list int))) (list int)
+  (if (le n 0) acc (x25519_zeros (sub n 1) (cons 0 acc))))
+
+; The public key of the 32-byte private key k: k times the base point.
+(def x25519_base ((k bytes)) bytes
+  (x25519 k (x25519_base_point)))
+
+; Whether every byte of b is 0: a shared secret that is, from a peer's
+; point of small order, TLS must refuse (RFC 8446, 7.4.2).
+(def x25519_is_zero ((b bytes)) bool
+  (eq (x25519_or_from b 0 0) 0))
+
+; acc ORed with every byte of b from i on.
+(def x25519_or_from ((b bytes) (i int) (acc int)) int
+  (if (ge i (bytes_len b))
+      acc
+      (x25519_or_from b (add i 1) (bit_or acc (bytes_get b i)))))

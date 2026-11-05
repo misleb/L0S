@@ -1,0 +1,130 @@
+; rsa.l0 -- checking RSA signatures, as RFC 8017 defines them:
+; RSASSA-PKCS1-v1_5 (8.2.2) and RSASSA-PSS with MGF1 (8.1.2, 9.1.2),
+; what TLS certificates and CertificateVerify carry. Verification only;
+; the modulus n and exponent e are big-endian bytes, as a certificate
+; gives them. Built on bignum.l0. Not constant-time, which public keys
+; and signatures need no more of.
+
+; The digest's DER DigestInfo, for PKCS #1 v1.5: the SEQUENCE naming
+; SHA-256, SHA-384 or SHA-512 (hash 256, 384 or 512), then the digest;
+; empty bytes for any other hash, which no signature then matches.
+(def rsa_digest_info ((hash int) (digest bytes)) bytes
+  (let prefix (if (eq hash 256)
+                  "3031300d060960864801650304020105000420"
+                  (eq hash 384)
+                  "3041300d060960864801650304020205000430"
+                  (eq hash 512)
+                  "3051300d060960864801650304020305000440"
+                  "")
+    (if (is_empty prefix)
+        (bytes_from_list "")
+        (bytes_concat (cons (bn_hex prefix) (cons digest (nil bytes)))))))
+
+; How many bytes n's modulus takes, without leading zeros.
+(def rsa_len ((n bytes)) int
+  (div (add (bn_bits (bn_of_bytes n)) 7) 8))
+
+; sig^e mod n as rsa_len n bytes, or none if n is not odd and above 1,
+; e is 0, or sig is not as long as n or not below it (RFC 8017 5.2.2,
+; 8.1.2 step 1).
+(def rsa_open ((n bytes) (e bytes) (sig bytes)) (Option bytes)
+  (let (nn (bn_of_bytes n)
+        bits (bn_bits nn)
+        k (div (add bits 7) 8)
+        s (bn_of_bytes sig)
+        ee (bn_of_bytes e))
+    (if (or (lt bits 2) (eq (bn_bit nn 0) 0))
+        ((None bytes))
+        (or (bn_is_zero ee) (not (eq (bytes_len sig) k)))
+        ((None bytes))
+        (ge (bn_compare s nn) 0)
+        ((None bytes))
+        (Some (bn_to_bytes (bn_mod_exp (bn_mont_new nn) s ee) k)))))
+
+; Whether sig is n and e's RSASSA-PKCS1-v1_5 signature of the message
+; whose DigestInfo is digest_info (rsa_digest_info makes it): sig^e mod
+; n is exactly 00 01 FF..FF 00 digest_info, with at least 8 FFs.
+(def rsa_pkcs1_verify ((n bytes) (e bytes) (sig bytes) (digest_info bytes)) bool
+  (let (k (rsa_len n)
+        t (bytes_len digest_info))
+    (if (or (eq t 0) (lt k (add t 11)))
+        false
+        (match (rsa_open n e sig)
+          ((None) false)
+          ((Some em) (eq em (rsa_pkcs1_block k digest_info)))))))
+
+; The k bytes 00 01 FF..FF 00 t, t taking the end.
+(def rsa_pkcs1_block ((k int) (t bytes)) bytes
+  (let ff (bytes_from_list (rsa_repeat 255 (sub (sub k (bytes_len t)) 3) (nil int)))
+    (bytes_concat (cons (bn_hex "0001") (cons ff (cons (bn_hex "00") (cons t (nil bytes))))))))
+
+; n copies of x, before acc.
+(def rsa_repeat ((x int) (n int) (acc (list int))) (list int)
+  (if (le n 0) acc (rsa_repeat x (sub n 1) (cons x acc))))
+
+; Whether sig is n and e's RSASSA-PSS signature of the message whose
+; hash is digest, mHash, with MGF1 over the same hash, which hash
+; computes of a whole bytes value, and a salt of salt_len bytes (TLS
+; 1.3's is the hash's length).
+(def rsa_pss_verify ((n bytes) (e bytes) (sig bytes) (digest bytes) (hash (fn (bytes) bytes)) (salt_len int)) bool
+  (let (embits (sub (bn_bits (bn_of_bytes n)) 1)
+        emlen (div (add embits 7) 8)
+        k (rsa_len n))
+    (if (lt salt_len 0)
+        false
+        (match (rsa_open n e sig)
+          ((None) false)
+          ((Some m)
+            (if (and (lt emlen k) (not (eq (bytes_get m 0) 0)))
+                false
+                (rsa_pss_check hash (bytes_slice m (sub k emlen) k) embits digest salt_len)))))))
+
+; Whether em, the encoded message of embits bits, is EMSA-PSS's of
+; mhash with a salt of slen bytes (RFC 8017 9.1.2 steps 3 to 14).
+(def rsa_pss_check ((hash (fn (bytes) bytes)) (em bytes) (embits int) (mhash bytes) (slen int)) bool
+  (let (hlen (bytes_len mhash)
+        emlen (bytes_len em)
+        dblen (sub (sub emlen hlen) 1)
+        zbits (sub (mul 8 emlen) embits))
+    (if (lt emlen (add (add hlen slen) 2))
+        false
+        (not (eq (bytes_get em (sub emlen 1)) 188))
+        false
+        (not (eq (bit_shr (bytes_get em 0) (sub 8 zbits)) 0))
+        false
+        (let (h (bytes_slice em dblen (sub emlen 1))
+              mask (rsa_mgf1 hash h dblen)
+              db (rsa_db em mask zbits)
+              pslen (sub (sub dblen slen) 1))
+          (if (or (not (rsa_zeros db 0 pslen)) (not (eq (bytes_get db pslen) 1)))
+              false
+              (let m2 (bytes_concat (cons (bytes_from_list (rsa_repeat 0 8 (nil int))) (cons mhash (cons (bytes_slice db (sub dblen slen) dblen) (nil bytes)))))
+                (eq (hash m2) h)))))))
+
+; DB: the first bytes of em, as long as mask, each xored with mask's,
+; the first's top zbits bits cleared.
+(def rsa_db ((em bytes) (mask bytes) (zbits int)) bytes
+  (bytes_from_list (rsa_xor em mask (sub (bytes_len mask) 1) (bit_shr 255 zbits) (nil int))))
+
+; The xor of a's and b's bytes up to i, before acc, byte 0 under top.
+(def rsa_xor ((a bytes) (b bytes) (i int) (top int) (acc (list int))) (list int)
+  (if (lt i 0)
+      acc
+      (let x (bit_xor (bytes_get a i) (bytes_get b i))
+        (rsa_xor a b (sub i 1) top (cons (if (eq i 0) (bit_and x top) x) acc)))))
+
+; Whether b's bytes from i up to j are all 0.
+(def rsa_zeros ((b bytes) (i int) (j int)) bool
+  (if (ge i j) true (if (eq (bytes_get b i) 0) (rsa_zeros b (add i 1) j) false)))
+
+; MGF1 of seed, len bytes: the hashes of seed and a 4-byte counter from
+; 0, end to end (RFC 8017 B.2.1).
+(def rsa_mgf1 ((hash (fn (bytes) bytes)) (seed bytes) (len int)) bytes
+  (bytes_slice (bytes_concat (rev (rsa_mgf1_from hash seed len 0 0 (nil bytes)))) 0 len))
+
+; The hashes from counter c on, after the reversed acc of got bytes.
+(def rsa_mgf1_from ((hash (fn (bytes) bytes)) (seed bytes) (len int) (c int) (got int) (acc (list bytes))) (list bytes)
+  (if (ge got len)
+      acc
+      (let h (hash (bytes_concat (cons seed (cons (bn_to_bytes (bn_of_int c) 4) (nil bytes)))))
+        (rsa_mgf1_from hash seed len (add c 1) (add got (bytes_len h)) (cons h acc)))))

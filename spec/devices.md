@@ -18,7 +18,23 @@ without on a board with no device: `fs`, which makes the noise of a new
 partition's UUID of it (see [Volumes](storage.md#volumes)), falling back to the
 clock's mixer, and `inet`, which keys TCP's first sequence numbers with
 a word of it (see [The network](network.md#the-network)), falling back to the
-clock alone. `run random [N]` writes N bytes.
+clock alone, and TLS, which has no such fallback and refuses to connect
+(see [TLS](network.md#tls)). `run random [N]` writes N bytes.
+
+On a Raspberry Pi 5, `rng200` ([user/sbin/rng200](../user/sbin/rng200/rng200.l0))
+serves the same protocol from the BCM2712's own generator, an RNG200
+(`brcm,bcm2711-rng200`, at 0x107D208000, 0x28 bytes, no interrupt), set
+up and read as Linux's `iproc-rng200.c` does that model: if it is off,
+it is told to throw away its first 0x40000 bits, to fill its FIFO to 2
+words, and turned on, sampling at 1 MHz (`CTRL` 0x7FFF); a request
+waits until it has made more than 16 bits, then takes the FIFO's words
+as they come, each least significant byte first, sleeping 50 us while
+the FIFO is empty. A failed health test (`INT_STATUS`'s NIST or lockout
+bit) restarts it once, as Linux's restart does; a second, or a FIFO
+empty for a second, refuses the request. L0 gives the generator as a
+region on the Pi 5 (its roadmap 0151, from
+`probes/driver/REQUEST-pi5-rng.md`); on QEMU's board there is none, and
+`rng200` says so and exits 0.
 
 ## USB
 
