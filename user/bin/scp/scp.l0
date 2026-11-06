@@ -1,0 +1,348 @@
+; scp.l0 -- a file copied to or from another machine over SSH 2
+; (proto/ssh.l0, sshconn.l0, sshc.l0), by the scp protocol that
+; OpenSSH's scp -O speaks and its server still runs:
+;
+;   scp [-P PORT] [-i KEY] SOURCE DESTINATION
+;
+; One of the two is remote, [USER@]HOST:PATH, the other a file here.
+; Up, the file here is read whole and sent to scp -t PATH on the host,
+; as one C line (mode 0644, its size, its name) and its bytes; PATH may
+; be a directory, where it keeps its name. Down, scp -f PATH on the host
+; sends one file, written here to DESTINATION, or into it, under the
+; host's name for it, if DESTINATION ends with /. The login is ssh's
+; (sshc.l0): the key KEY or /etc/ssh/id_ed25519, a password asked on the
+; terminal, the host's key looked up in /etc/ssh/known_hosts. One file a
+; time: no -r, no times or modes kept, no SFTP.
+
+; Fails, saying why.
+(def complain ((why (list int))) int (complain_as "scp" why))
+
+; How long to wait for the host at each step.
+(def wait_ns () int 30000000000)
+
+; ---------------------------------------------------------------- options
+
+; A place: on a host, its user, the host and the path there; or here,
+; a path.
+(data Place (Remote (list int) (list int) (list int)) (Local (list int)))
+
+; What was asked: the port, the key's file (empty for the default), and
+; the source and destination.
+(data Opts (Opts (port int) (key (list int)) (from Place) (to Place)))
+
+; How the command is used.
+(def usage () (list int) "scp [-P PORT] [-i KEY] SOURCE DESTINATION, one of them [USER@]HOST:PATH")
+
+; The place the word w names: remote if a : comes before any /.
+(def place_of ((w (list int))) Place
+  (let (colon (index_of 58 w)
+        slash (index_of 47 w))
+    (if (or (lt colon 0) (and (ge slash 0) (lt slash colon)))
+        (Local w)
+        (let (hostpart (take w colon)
+              path (drop w (add colon 1))
+              at (index_of 64 hostpart))
+          (if (lt at 0)
+              (Remote (nil int) hostpart path)
+              (Remote (take hostpart at) (drop hostpart (add at 1)) path))))))
+
+; Whether p is on a host.
+(def is_remote ((p Place)) bool
+  (match p ((Remote u h path) true) ((Local path) false)))
+
+; The options the words ws give, or why they give none.
+(def opts_of ((ws (list (list int)))) (Result Opts (list int))
+  (opts_from ws 22 (nil int) (nil (list int))))
+
+; The rest of opts_of: the port and key so far, and the operands,
+; reversed.
+(def opts_from ((ws (list (list int))) (port int) (key (list int)) (ops (list (list int)))) (Result Opts (list int))
+  (if (is_empty ws)
+      (opts_done port key (rev ops))
+      (let w (head ws)
+        (if (and (eq w "-P") (not (is_empty (tail ws))))
+            (match (word_number (head (tail ws)))
+              ((Some n) (if (and (gt n 0) (lt n 65536)) (opts_from (tail (tail ws)) n key ops) ((Err Opts (list int)) (append "not a port: " (head (tail ws))))))
+              ((None) ((Err Opts (list int)) (append "not a port: " (head (tail ws))))))
+            (and (eq w "-i") (not (is_empty (tail ws)))) (opts_from (tail (tail ws)) port (head (tail ws)) ops)
+            (starts_with w "-") ((Err Opts (list int)) (usage))
+            (opts_from (tail ws) port key (cons w ops))))))
+
+; The options, if the operands are two and one of them is remote, with
+; a user and a path.
+(def opts_done ((port int) (key (list int)) (ops (list (list int)))) (Result Opts (list int))
+  (if (not (eq (length ops) 2))
+      ((Err Opts (list int)) (usage))
+      (let (from (place_of (head ops))
+            to (place_of (head (tail ops))))
+        (if (eq (is_remote from) (is_remote to)) ((Err Opts (list int)) "one of the two must be [USER@]HOST:PATH, the other a file here")
+            (not (remote_ok (if (is_remote from) from to))) ((Err Opts (list int)) "a user is needed, as USER@HOST:PATH, and a path")
+            ((Ok Opts (list int)) (Opts port key from to))))))
+
+; Whether a remote place names a user and a path.
+(def remote_ok ((p Place)) bool
+  (match p
+    ((Remote u h path) (and (not (is_empty u)) (and (not (is_empty h)) (not (is_empty path)))))
+    ((Local path) false)))
+
+; ---------------------------------------------------------------- the protocol
+
+; s quoted for the host's shell, in single quotes, each ' in it closed,
+; escaped and opened again.
+(def quoted ((s (list int))) (list int)
+  (append "'" (append (quoted_from s (nil int)) "'")))
+
+; The rest of quoted, after acc reversed.
+(def quoted_from ((s (list int)) (acc (list int))) (list int)
+  (if (is_empty s) (rev acc)
+      (eq (head s) 39) (quoted_from (tail s) (push "'\\''" acc))
+      (quoted_from (tail s) (cons (head s) acc))))
+
+; The C line that sends a file of n bytes named name, mode 0644.
+(def c_line ((n int) (name (list int))) (list int)
+  (append "C0644 " (append (digits n) (append " " (append name "\n")))))
+
+; A C line's size and name, from its text without its newline.
+(data CLine (CLine (size int) (name (list int))))
+
+; The C line t names, or why it is not one.
+(def c_line_of ((t (list int))) (Result CLine (list int))
+  (let ws (split_spaces t)
+    (if (or (not (eq (length ws) 3)) (not (starts_with t "C")))
+        ((Err CLine (list int)) (append "the host sent something not a file: " t))
+        (match (word_number (nth ws 1))
+          ((None) ((Err CLine (list int)) (append "the host sent a size that is not a number: " t)))
+          ((Some n) ((Ok CLine (list int)) (CLine n (nth ws 2))))))))
+
+; Where a file sent down is written: dest, or dest and the host's name
+; for it if dest ends with /.
+(def local_path ((dest (list int)) (name (list int))) (list int)
+  (if (and (not (is_empty dest)) (eq (head (rev dest)) 47)) (append dest name) dest))
+
+; ---------------------------------------------------------------- the channel
+
+; A copy under way: the connection; the command run on the host; the
+; bytes it has sent and not yet been read; whether it was granted (1),
+; refused (-1) or not yet said (0); its exit status, -1 till it is told;
+; whether the channel has closed; and why it failed, empty if it has not.
+(data Scp (Scp (c SshConn) (cmd (list int)) (buf bytes) (granted int) (status int) (closed bool) (why (list int))))
+
+; sc after the transport's step o.
+(def scp_step ((sc Scp) (o SshOut)) Scp
+  (match (sshc_write (.c sc) o)
+    ((SshHad c es) (scp_events (.c sc c) es))))
+
+; sc after each event of es.
+(def scp_events ((sc Scp) (es (list SshEvent))) Scp
+  (if (is_empty es) sc (scp_events (scp_event sc (head es)) (tail es))))
+
+; sc after the event e: the command asked for once the channel opens;
+; its output kept to be read, its errors shown, and its grant, end and
+; status noted.
+(def scp_event ((sc Scp) (e SshEvent)) Scp
+  (match e
+    ((SshOpened) (scp_step sc (ssh_chan_exec (.s (.c sc)) (.cmd sc))))
+    ((SshOpenFailed why) (.closed (.why sc why) true))
+    ((SshRequestOk) (.granted sc 1))
+    ((SshRequestFailed) (.granted sc -1))
+    ((SshData d) (.buf sc (bytes_concat (cons (.buf sc) (cons d (nil bytes))))))
+    ((SshStderr d) (let w (file_write_bytes (IoFile 2) d 0 (bytes_len d)) sc))
+    ((SshExitStatus n) (.status sc n))
+    ((SshChanClosed) (.closed sc true))
+    ((SshGone why) (if (.closed sc) sc (.closed (.why sc why) true)))
+    ((SshEof) sc)
+    ((SshExitSignal g) (.status sc 255))
+    ((SshHostKey b) sc)
+    ((SshReady) sc)
+    ((SshBanner t) sc)
+    ((SshAuthOk) sc)
+    ((SshAuthFailed ms p) sc)
+    ((SshAuthPrompts n i ps) sc)))
+
+; sc after what comes next from the host, waited for until deadline:
+; failed if nothing comes by then.
+(def scp_pump ((sc Scp) (deadline int)) Scp
+  (match (sshc_next (.c sc) deadline)
+    ((SshHad c es)
+      (if (and (is_empty es) (ge (clock_ns) deadline))
+          (.closed (.why (.c sc c) "the host stopped answering") true)
+          (scp_events (.c sc c) es)))))
+
+; sc once its command is granted or refused, or the channel has closed.
+(def scp_wait_granted ((sc Scp) (deadline int)) Scp
+  (if (or (not (eq (.granted sc) 0)) (.closed sc)) sc (scp_wait_granted (scp_pump sc deadline) deadline)))
+
+; sc once n bytes of output are there to read, or the channel has closed.
+(def scp_wait_bytes ((sc Scp) (n int) (deadline int)) Scp
+  (if (or (ge (bytes_len (.buf sc)) n) (.closed sc)) sc (scp_wait_bytes (scp_pump sc deadline) n deadline)))
+
+; sc once a whole line of output is there to read, or the channel has
+; closed.
+(def scp_wait_line ((sc Scp) (deadline int)) Scp
+  (if (or (ge (ssh_newline (.buf sc) 0) 0) (.closed sc)) sc (scp_wait_line (scp_pump sc deadline) deadline)))
+
+; sc once the channel has closed.
+(def scp_wait_closed ((sc Scp) (deadline int)) Scp
+  (if (.closed sc) sc (scp_wait_closed (scp_pump sc deadline) deadline)))
+
+; The text b sent on the channel.
+(def scp_send ((sc Scp) (b bytes)) Scp
+  (scp_step sc (ssh_chan_send (.s (.c sc)) b 0 (bytes_len b))))
+
+; A deadline from now.
+(def deadline () int (add (clock_ns) (wait_ns)))
+
+; What a step of the protocol gave: the copy after it, and why it failed,
+; empty if it did not.
+(data Did (Did Scp (list int)))
+
+; sc with the host's acknowledgement read: a 0 byte; or 1 or 2 and a
+; line saying what went wrong.
+(def scp_ack ((sc Scp)) Did
+  (let s1 (scp_wait_bytes sc 1 (deadline))
+    (if (lt (bytes_len (.buf s1)) 1)
+        (Did s1 (scp_gone s1))
+        (if (eq (bytes_get (.buf s1) 0) 0)
+            (Did (.buf s1 (bytes_slice (.buf s1) 1 (bytes_len (.buf s1)))) (nil int))
+            (let s2 (scp_wait_line s1 (deadline))
+              (Did s2 (scp_first_line (.buf s2) 1)))))))
+
+; Why the channel closed: what failed, or that the host's scp ended.
+(def scp_gone ((sc Scp)) (list int)
+  (if (is_empty (.why sc)) "the host's scp ended before the copy was done" (.why sc)))
+
+; The text of b from i up to its first newline.
+(def scp_first_line ((b bytes) (i int)) (list int)
+  (let nl (ssh_newline b i)
+    (bytes_to_list (bytes_slice b i (if (lt nl 0) (bytes_len b) nl)))))
+
+; ---------------------------------------------------------------- the copy
+
+; The entry point.
+(def scp () int
+  (match (opts_of (args))
+    ((Err why) (complain why))
+    ((Ok o)
+      (match (key_of (.key o))
+        ((Err why) (complain why))
+        ((Ok key)
+          (match (sshc_terminal)
+            ((None) (complain "no terminal to ask on"))
+            ((Some term) (connect o key term (inet_open) (port_new) (port_new) (port_new)))))))))
+
+; The key to offer: the one named, which must read, or the default if it
+; is there.
+(def key_of ((path (list int))) (Result (Option SshKey) (list int))
+  (if (is_empty path)
+      (sshc_key_at "/etc/ssh/id_ed25519")
+      (match (read_whole path)
+        ((Err why) ((Err (Option SshKey) (list int)) (append path (append ": " why))))
+        ((Ok b)
+          (match (ssh_key_of_text (bytes_to_list b))
+            ((Err why) ((Err (Option SshKey) (list int)) (append path (append ": " why))))
+            ((Ok k) ((Ok (Option SshKey) (list int)) (Some k))))))))
+
+; The remote place of o.
+(def remote_of ((o Opts)) Place
+  (if (is_remote (.from o)) (.from o) (.to o)))
+
+; The remote place's user, host and path, as a list.
+(def remote_parts ((p Place)) (list (list int))
+  (match p
+    ((Remote u h path) (cons u (cons h (cons path (nil (list int))))))
+    ((Local path) (cons "" (cons "" (cons path (nil (list int))))))))
+
+; The local place's path.
+(def local_of ((o Opts)) (list int)
+  (match (if (is_remote (.from o)) (.to o) (.from o))
+    ((Local path) path)
+    ((Remote u h path) path)))
+
+; o's host dialled, logged in, and the copy made; the exit status.
+(def connect ((o Opts) (key (Option SshKey)) (term int) (n Inet) (np int) (tp int) (ap int)) int
+  (let (parts (remote_parts (remote_of o))
+        user (nth parts 0)
+        host (nth parts 1))
+    (if (or (lt np 0) (or (lt tp 0) (lt ap 0)))
+        (complain "no kernel to talk through")
+        (match (sshc_dial n np ap host (.port o))
+          ((Err why) (complain (append host (append ": " why))))
+          ((Ok g)
+            (match g
+              ((SshHad c evs)
+                (match (sshc_login c (SshLogin user (ssh_host_name host (.port o)) key term tp false 0 0) evs)
+                  ((Err why) (complain why))
+                  ((Ok g2) (copy o g2 (nth parts 2)))))))))))
+
+; The copy, logged in: the session opened and scp -t or -f run on the
+; host; then the connection closed, and the exit status.
+(def copy ((o Opts) (g SshHad) (path (list int))) int
+  (match g
+    ((SshHad c evs)
+      (let (up (is_remote (.to o))
+            cmd (append (if up "scp -t " "scp -f ") (quoted path))
+            sc0 (scp_events (Scp c cmd (ssh_empty) 0 -1 false (nil int)) evs)
+            sc (scp_wait_granted (scp_step sc0 (ssh_open_session (.s (.c sc0)))) (deadline)))
+        (if (lt (.granted sc) 1)
+            (finish sc (if (is_empty (.why sc)) "the host refused to run scp" (.why sc)))
+            (if up (upload (local_of o) sc) (download (local_of o) sc)))))))
+
+; The copy closed, the connection with it: 0, or 1 having said why it
+; failed, or if the host's scp did not end with 0.
+(def finish ((sc Scp) (why (list int))) int
+  (let z (sshc_close (.c sc))
+    (if (not (is_empty why)) (complain why)
+        (gt (.status sc) 0) (complain (append "the host's scp ended with " (digits (.status sc))))
+        0)))
+
+; sc with its input ended, and the channel waited on to close: then
+; finished.
+(def ended ((sc Scp)) int
+  (let s2 (scp_wait_closed (scp_step sc (ssh_chan_eof (.s (.c sc)))) (deadline))
+    (finish s2 (nil int))))
+
+; The file at path sent up to the host's scp -t: its acknowledgement
+; that it is ready, then the C line, then the bytes and a 0, each
+; acknowledged; then the input ended.
+(def upload ((path (list int)) (sc Scp)) int
+  (match (read_whole path)
+    ((Err why) (finish sc (append path (append ": " why))))
+    ((Ok b)
+      (match (scp_ack sc)
+        ((Did s1 why)
+          (if (not (is_empty why))
+              (finish s1 why)
+              (match (scp_ack (scp_send s1 (bytes_from_list (c_line (bytes_len b) (base_name path)))))
+                ((Did s2 why2)
+                  (if (not (is_empty why2))
+                      (finish s2 why2)
+                      (match (scp_ack (scp_send s2 (bytes_concat (cons b (cons (ssh_w_byte 0) (nil bytes))))))
+                        ((Did s3 why3) (if (is_empty why3) (ended s3) (finish s3 why3)))))))))))))
+
+; A file sent down by the host's scp -f, written to dest.
+(def download ((dest (list int)) (sc Scp)) int
+  (let s1 (scp_wait_line (scp_send sc (ssh_w_byte 0)) (deadline))
+    (if (lt (ssh_newline (.buf s1) 0) 0)
+        (finish s1 (scp_gone s1))
+        (let (b (.buf s1)
+              nl (ssh_newline b 0)
+              line (bytes_to_list (bytes_slice b 0 nl))
+              rest (bytes_slice b (add nl 1) (bytes_len b)))
+          (if (any_eq (bytes_get b 0) (cons 1 (cons 2 (nil int))))
+              (finish s1 (scp_first_line b 1))
+              (match (c_line_of line)
+                ((Err why) (finish s1 why))
+                ((Ok cl) (receive dest cl (scp_send (.buf s1 rest) (ssh_w_byte 0))))))))))
+
+; The file the C line cl announced, its bytes and a 0 after them, read
+; and written to dest, then acknowledged.
+(def receive ((dest (list int)) (cl CLine) (sc Scp)) int
+  (let (n (.size cl)
+        s1 (scp_wait_bytes sc (add n 1) (deadline)))
+    (if (lt (bytes_len (.buf s1)) (add n 1))
+        (finish s1 (scp_gone s1))
+        (let (b (.buf s1)
+              why (write_whole (local_path dest (.name cl)) (bytes_slice b 0 n)))
+          (if (not (is_empty why))
+              (finish s1 (append (local_path dest (.name cl)) (append ": " why)))
+              (ended (scp_send (.buf s1 (bytes_slice b (add n 1) (bytes_len b))) (ssh_w_byte 0))))))))

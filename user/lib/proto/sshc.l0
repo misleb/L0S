@@ -1,0 +1,328 @@
+; sshc.l0 -- an SSH client's connection over inet's TCP, for ssh and
+; scp: the server dialled and the transport begun (ssh.l0), what comes
+; read from the connection's ring and fed to it, what it gives written
+; back, paced by inet's room; and the login, run to its end: the host's
+; key looked up in /etc/ssh/known_hosts, a new one asked about on the
+; terminal and remembered there if it can be written, a changed one
+; refused; then the methods the server allows, publickey with the key
+; given, keyboard-interactive and password, their prompts and the
+; password asked on the terminal, the password not echoed (tty.l0's
+; "s"). Prompts and warnings go to standard error. Linked as the
+; Makefile's SSH.
+
+; A connection: the stack, the port its notices come to, its number in
+; inet, its ring once it is up, the transport, and whether it has gone.
+(data SshConn (SshConn (inet Inet) (np int) (id int) (rx (Option TcpRx)) (s Ssh) (gone bool)))
+
+; What a step on a connection gave: the connection after it, and what
+; happened, in order.
+(data SshHad (SshHad SshConn (list SshEvent)))
+
+; How long to wait for the server to answer, at any step of the login.
+(def sshc_wait_ns () int 30000000000)
+
+; The file of known hosts' keys.
+(def sshc_known_path () (list int) "/etc/ssh/known_hosts")
+
+; ------------------------------------------------------------- the connection
+
+; A connection to port at host, a name or an address, resolved first,
+; its notices to np and the randomness asked on ap, both this process's:
+; up, its version line and KEXINIT sent, with what came meanwhile; or
+; why not.
+(def sshc_dial ((n Inet) (np int) (ap int) (host (list int)) (port int)) (Result SshHad (list int))
+  (match (inet_resolve n host)
+    ((Err why) ((Err SshHad (list int)) why))
+    ((Ok addr)
+      (match (random_bytes ap 48)
+        ((Err why) ((Err SshHad (list int)) (append "ssh needs randomness: " why)))
+        ((Ok rs)
+          (match (tcp_connect n np addr port)
+            ((Err why) ((Err SshHad (list int)) why))
+            ((Ok id)
+              (let (r (bytes_from_list rs)
+                    o (ssh_start (bytes_slice r 0 32) (bytes_slice r 32 48)))
+                (match (sshc_wait_up (SshConn n np id ((None TcpRx)) (.s o) false) (add (clock_ns) (sshc_wait_ns)))
+                  ((Err why) ((Err SshHad (list int)) why))
+                  ((Ok c) ((Ok SshHad (list int)) (sshc_write c o))))))))))))
+
+; c once its up notice comes, before deadline; its closed notice, or the
+; deadline passing, is why not.
+(def sshc_wait_up ((c SshConn) (deadline int)) (Result SshConn (list int))
+  (let z (alarm_at (.np c) deadline)
+    (match (port_receive (.np c))
+      ((RecvFailed) ((Err SshConn (list int)) "no notices came from inet"))
+      ((Message from b)
+        (match (tcp_event_in b)
+          ((None)
+            (if (ge (clock_ns) deadline)
+                (let r (tcp_reset (.inet c) (.id c)) ((Err SshConn (list int)) "the server did not answer"))
+                (sshc_wait_up c deadline)))
+          ((Some e)
+            (match e
+              ((TcpUp i va) (if (eq i (.id c)) ((Ok SshConn (list int)) (.rx c (tcp_rx_open va))) (sshc_wait_up c deadline)))
+              ((TcpClosed i why) (if (eq i (.id c)) ((Err SshConn (list int)) (append "the connection " why)) (sshc_wait_up c deadline)))
+              ((TcpAccepted i src sp lp va) (sshc_wait_up c deadline))
+              ((TcpGot i total) (sshc_wait_up c deadline))
+              ((TcpData i d) (sshc_wait_up c deadline))
+              ((TcpDataAt i at) (sshc_wait_up c deadline))
+              ((TcpFin i) (sshc_wait_up c deadline))
+              ((TcpRoom i k) (sshc_wait_up c deadline)))))))))
+
+; c after the transport's step o: its transport o's, and o's bytes
+; written to the server, with o's events and those of the notices that
+; came while they were written.
+(def sshc_write ((c0 SshConn) (o SshOut)) SshHad
+  (let (c (.s c0 (.s o))
+        b (bytes_concat (.send o)))
+    (if (or (eq (bytes_len b) 0) (.gone c))
+        (SshHad c (.events o))
+        (match (tcp_write_bytes (.inet c) (.np c) (.id c) b 0 (bytes_len b))
+          ((TcpWrote kept why)
+            (let c1 (if (is_empty why) c (.gone c true))
+              (match (sshc_feed_all c1 kept (rev (.events o)))
+                ((SshHad c2 revs)
+                  (SshHad c2 (rev (if (is_empty why) revs (cons (SshGone (append "the connection failed: " why)) revs))))))))))))
+
+; Each of the messages ms fed to c in turn, the events reversed onto acc.
+(def sshc_feed_all ((c SshConn) (ms (list bytes)) (acc (list SshEvent))) SshHad
+  (if (is_empty ms)
+      (SshHad c acc)
+      (match (sshc_feed c (head ms))
+        ((SshHad c2 es) (sshc_feed_all c2 (tail ms) (rev_onto es acc))))))
+
+; A message that came to c's notice port, its bytes b as received: the
+; connection after it, and what happened. Data is read from the ring,
+; and inet told it was taken, or, with no ring, in place from the notice;
+; the connection's end is SshGone, unless the transport ended first.
+; Anything that is not c's is passed over.
+(def sshc_feed ((c SshConn) (b bytes)) SshHad
+  (match (tcp_event_in b)
+    ((None) (SshHad c (nil SshEvent)))
+    ((Some e) (sshc_event c e b))))
+
+; The connection a notice is of.
+(def sshc_event_id ((e TcpEvent)) int
+  (match e
+    ((TcpUp i va) i) ((TcpAccepted i src sp lp va) i) ((TcpData i d) i) ((TcpDataAt i at) i)
+    ((TcpFin i) i) ((TcpClosed i why) i) ((TcpRoom i k) i) ((TcpGot i total) i)))
+
+; c's notice e, which came in b.
+(def sshc_event ((c SshConn) (e TcpEvent) (b bytes)) SshHad
+  (if (not (eq (sshc_event_id e) (.id c)))
+      (SshHad c (nil SshEvent))
+      (match e
+        ((TcpDataAt i at) (sshc_bytes c b at (bytes_len b)))
+        ((TcpData i d) (let db (bytes_from_list d) (sshc_bytes c db 0 (bytes_len db))))
+        ((TcpGot i total) (sshc_ring_read c total))
+        ((TcpClosed i why)
+          (let (ended (ssh_ended (.s c))
+                c1 (.gone (sshc_rx_freed c) true))
+            (SshHad c1 (if ended (nil SshEvent) (cons (SshGone (append "the connection " why)) (nil SshEvent))))))
+        ((TcpUp i va) (SshHad (.rx c (tcp_rx_open va)) (nil SshEvent)))
+        ((TcpAccepted i src sp lp va) (SshHad c (nil SshEvent)))
+        ((TcpFin i) (SshHad c (nil SshEvent)))
+        ((TcpRoom i k) (SshHad c (nil SshEvent))))))
+
+; c's data up to total bytes from its first, read from its ring and fed
+; to the transport, and inet told it was taken.
+(def sshc_ring_read ((c SshConn) (total int)) SshHad
+  (match (.rx c)
+    ((None) (SshHad c (cons (SshGone "data came to a ring this connection does not have") (nil SshEvent))))
+    ((Some rx)
+      (match (tcp_rx_take rx total)
+        ((TcpRxTook d rx2)
+          (let (why (tcp_took (.inet c) (.id c) (.got rx2))
+                c2 (.rx c (Some rx2)))
+            (sshc_bytes c2 d 0 (bytes_len d))))))))
+
+; What came from the server, b from i to j, given to the transport, and
+; what it gives written back.
+(def sshc_bytes ((c SshConn) (b bytes) (i int) (j int)) SshHad
+  (sshc_write c (ssh_more (.s c) b i j)))
+
+; c with its ring given up, if it had one.
+(def sshc_rx_freed ((c SshConn)) SshConn
+  (match (.rx c)
+    ((None) c)
+    ((Some rx) (let z (tcp_rx_free rx) (.rx c ((None TcpRx)))))))
+
+; What happens next on c, its notices received until something does or
+; deadline passes: nothing then. A connection gone says so.
+(def sshc_next ((c SshConn) (deadline int)) SshHad
+  (if (.gone c)
+      (SshHad c (cons (SshGone "the connection is closed") (nil SshEvent)))
+      (let z (alarm_at (.np c) deadline)
+        (match (port_receive (.np c))
+          ((RecvFailed) (SshHad c (cons (SshGone "no notices came from inet") (nil SshEvent))))
+          ((Message from b)
+            (match (sshc_feed c b)
+              ((SshHad c2 es)
+                (if (or (not (is_empty es)) (ge (clock_ns) deadline))
+                    (SshHad c2 es)
+                    (sshc_next c2 deadline)))))))))
+
+; c ended by us: a DISCONNECT sent, then inet told to finish, and the
+; ring given up.
+(def sshc_close ((c SshConn)) int
+  (if (.gone c)
+      0
+      (match (sshc_write c (ssh_disconnect (.s c) "bye"))
+        ((SshHad c2 es)
+          (let (f (tcp_finish (.inet c2) (.id c2)) r (sshc_rx_freed c2)) 0)))))
+
+; ------------------------------------------------------------- the terminal
+
+; The terminal: this process's, or the console driver's.
+(def sshc_terminal () (Option int)
+  (match (tty_get)
+    ((Terminal p) (Some p))
+    ((KernelTerminal) (match (console_port) ((Found p) (Some p)) ((NotFound) ((None int)))))))
+
+; s on standard error, at once.
+(def sshc_say_err ((s (list int))) int
+  (let (w (write_err s) f (file_flush (IoFile 2))) 0))
+
+; A line asked of the terminal term, its answer to tp, hidden as typed
+; if hidden: without its newline; empty at the input's end, or for a
+; Ctrl-C.
+(def sshc_read_line ((term int) (tp int) (hidden bool)) (list int)
+  (match (port_send term (request tp (if hidden "s" "r")))
+    ((Sent)
+      (match (port_receive tp)
+        ((RecvFailed) (nil int))
+        ((Message from b) (let t (msg_text b) (if (eq t (cons 3 (nil int))) (nil int) (take_line t))))))
+    ((SendNoPort) (nil int))
+    ((SendFull) (nil int))
+    ((SendTooBig) (nil int))))
+
+; ------------------------------------------------------------- the host's key
+
+; What the login needs: the user; the host's name as known_hosts knows
+; it; the key to offer, if any; the terminal and the port its answers
+; come to; and the methods tried: whether the key has been, and how many
+; times keyboard-interactive and the password.
+(data SshLogin (SshLogin (user (list int)) (name (list int)) (key (Option SshKey)) (term int) (tp int) (keyed bool) (kbd int) (pw int)))
+
+; The text of the known hosts' file, empty if there is none.
+(def sshc_known_text () (list int)
+  (match (read_whole (sshc_known_path)) ((Ok b) (bytes_to_list b)) ((Err why) (nil int))))
+
+; Whether the host's key blob may be trusted: known, or new and the
+; person says so on the terminal, when it is remembered if the file can
+; be written; empty, or why not.
+(def sshc_host_ok ((lg SshLogin) (blob bytes)) (list int)
+  (let (name (.name lg)
+        fp (ssh_fingerprint blob)
+        kind (ssh_blob_type blob))
+    (match (ssh_known_check (sshc_known_text) name blob)
+      ((SshHostKnown) (nil int))
+      ((SshHostChanged)
+        (append "the host key for " (append name (append " has changed, to " (append kind (append " " (append fp (append "; if that is expected, take its line out of " (sshc_known_path)))))))))
+      ((SshHostUnknown)
+        (let (w (sshc_say_err (append "The authenticity of host '" (append name (append "' can't be established.\n" (append kind (append " key fingerprint is " (append fp ".\nAre you sure you want to continue connecting (yes/no)? ")))))))
+              answer (sshc_read_line (.term lg) (.tp lg) false))
+          (if (eq answer "yes")
+              (let r (sshc_remember name blob) (nil int))
+              "Host key verification failed."))))))
+
+; The host called name known by blob from now on, its line added to the
+; known hosts' file, which is said; or why it could not be.
+(def sshc_remember ((name (list int)) (blob bytes)) int
+  (let line (ssh_known_line name blob)
+    (match (open_appending (sshc_known_path))
+      ((IoFailed fault why)
+        (sshc_say_err (append "Warning: '" (append name (append "' not remembered: " (append (sshc_known_path) (append ": " (append why "\n"))))))))
+      ((IoOpened f)
+        (let (w (file_write_str f line)
+              d (file_close f))
+          (sshc_say_err (append "Warning: Permanently added '" (append name (append "' (" (append (ssh_blob_type blob) ") to the list of known hosts.\n"))))))))))
+
+; ------------------------------------------------------------- the login
+
+; c's login run to its end, from the events evs on: the host's key
+; checked, then the user authenticated. The connection with the events
+; after the success; or why the login failed.
+(def sshc_login ((c SshConn) (lg SshLogin) (evs (list SshEvent))) (Result SshHad (list int))
+  (if (is_empty evs)
+      (match (sshc_next c (add (clock_ns) (sshc_wait_ns)))
+        ((SshHad c2 es)
+          (if (is_empty es)
+              ((Err SshHad (list int)) "the server did not answer")
+              (sshc_login c2 lg es))))
+      (sshc_login_event c lg (head evs) (tail evs))))
+
+; The rest of sshc_login, at the event e, with rest after it.
+(def sshc_login_event ((c SshConn) (lg SshLogin) (e SshEvent) (rest (list SshEvent))) (Result SshHad (list int))
+  (match e
+    ((SshHostKey blob)
+      (let why (sshc_host_ok lg blob)
+        (if (is_empty why) (sshc_login_step c lg (ssh_host_accept (.s c)) rest) ((Err SshHad (list int)) why))))
+    ((SshReady) (sshc_login_step c lg (ssh_auth_none (.s c) (.user lg)) rest))
+    ((SshBanner t) (let w (sshc_say_err t) (sshc_login c lg rest)))
+    ((SshAuthFailed ms partial) (sshc_next_method c lg ms rest))
+    ((SshAuthPrompts nm ins ps)
+      (let (w (sshc_say_err (append (sshc_line nm) (sshc_line ins)))
+            answers (sshc_answers (.term lg) (.tp lg) ps (nil (list int))))
+        (sshc_login_step c lg (ssh_auth_kbd_answer (.s c) answers) rest)))
+    ((SshAuthOk) ((Ok SshHad (list int)) (SshHad c rest)))
+    ((SshGone why) ((Err SshHad (list int)) why))
+    ((SshOpened) (sshc_login c lg rest))
+    ((SshOpenFailed why) (sshc_login c lg rest))
+    ((SshRequestOk) (sshc_login c lg rest))
+    ((SshRequestFailed) (sshc_login c lg rest))
+    ((SshData d) (sshc_login c lg rest))
+    ((SshStderr d) (sshc_login c lg rest))
+    ((SshEof) (sshc_login c lg rest))
+    ((SshExitStatus n) (sshc_login c lg rest))
+    ((SshExitSignal g) (sshc_login c lg rest))
+    ((SshChanClosed) (sshc_login c lg rest))))
+
+; The login after the transport's step o, its events before rest.
+(def sshc_login_step ((c SshConn) (lg SshLogin) (o SshOut) (rest (list SshEvent))) (Result SshHad (list int))
+  (match (sshc_write c o)
+    ((SshHad c2 es) (sshc_login c2 lg (append rest es)))))
+
+; s and a newline, or nothing for nothing.
+(def sshc_line ((s (list int))) (list int)
+  (if (is_empty s) s (append s "\n")))
+
+; Each prompt's answer read from the terminal, hidden unless it may be
+; echoed, after acc reversed.
+(def sshc_answers ((term int) (tp int) (ps (list SshPrompt)) (acc (list (list int)))) (list (list int))
+  (if (is_empty ps)
+      (rev acc)
+      (let (p (head ps)
+            w (sshc_say_err (.text p))
+            a (sshc_read_line term tp (not (.echo p))))
+        (sshc_answers term tp (tail ps) (cons a acc)))))
+
+; The next method to try, of the methods ms the server allows: the key,
+; if there is one, once; keyboard-interactive, three times; the
+; password, three times; then none is left.
+(def sshc_next_method ((c SshConn) (lg SshLogin) (ms (list (list int))) (rest (list SshEvent))) (Result SshHad (list int))
+  (if (and (not (.keyed lg)) (and (any_eq "publickey" ms) (sshc_has_key lg)))
+      (match (.key lg)
+        ((Some k) (sshc_login_step c (.keyed lg true) (ssh_auth_key (.s c) (.user lg) k) rest))
+        ((None) (sshc_login c (.keyed lg true) rest)))
+      (and (lt (.kbd lg) 3) (any_eq "keyboard-interactive" ms))
+      (sshc_login_step c (.kbd lg (add (.kbd lg) 1)) (ssh_auth_kbd (.s c) (.user lg)) rest)
+      (and (lt (.pw lg) 3) (any_eq "password" ms))
+      (let (w (sshc_say_err (append (.user lg) (append "@" (append (.name lg) "'s password: "))))
+            pw (sshc_read_line (.term lg) (.tp lg) true))
+        (sshc_login_step c (.pw lg (add (.pw lg) 1)) (ssh_auth_password (.s c) (.user lg) pw) rest))
+      ((Err SshHad (list int)) (append "Permission denied (" (append (join_with "," ms) ")")))))
+
+; Whether the login has a key to offer.
+(def sshc_has_key ((lg SshLogin)) bool
+  (match (.key lg) ((Some k) true) ((None) false)))
+
+; The key in the file at path: none if there is no file, or why it does
+; not read.
+(def sshc_key_at ((path (list int))) (Result (Option SshKey) (list int))
+  (match (read_whole path)
+    ((Err why) ((Ok (Option SshKey) (list int)) ((None SshKey))))
+    ((Ok b)
+      (match (ssh_key_of_text (bytes_to_list b))
+        ((Err why) ((Err (Option SshKey) (list int)) (append path (append ": " why))))
+        ((Ok k) ((Ok (Option SshKey) (list int)) (Some k)))))))

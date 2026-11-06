@@ -1,0 +1,227 @@
+; ed25519.l0 -- Ed25519, the signature scheme of RFC 8032 over the twisted
+; Edwards curve birationally equivalent to Curve25519: a key's public
+; half, a signature made, and a signature checked. SSH's host and user
+; keys of type ssh-ed25519 use it. Pure; needs x25519.l0 (its field
+; arithmetic), sha512.l0 and bignum.l0 (scalars mod the group's order).
+;
+; A point is kept in extended coordinates (X, Y, Z, T), x = X/Z,
+; y = Y/Z, xy = T/Z, and added by RFC 8032 5.1.4's formulas, which double
+; too. Not constant-time: a scalar is multiplied by double and add, a
+; branch on each of its bits, so signing leaks its secret to one who can
+; time it closely; for a client of this project's scope, as the other
+; crypto libraries' headers say.
+
+; A point in extended coordinates.
+(data EdPoint (EdPoint (x (array int)) (y (array int)) (z (array int)) (t (array int))))
+
+; ------------------------------------------------------------ constants
+
+; The curve's d, -121665/121666 mod p, and 2d, as field elements.
+(def ed25519_d () (array int)
+  (ed25519_limbs "30883 4953 19914 30187 55467 16705 2637 112 59544 30585 16505 36039 65139 11119 27886 20995"))
+(def ed25519_d2 () (array int)
+  (ed25519_limbs "61785 9906 39828 60374 45398 33411 5274 224 53552 61171 33010 6542 64743 22239 55772 9222"))
+
+; A square root of -1 mod p, 2^((p-1)/4).
+(def ed25519_sqrt_m1 () (array int)
+  (ed25519_limbs "41136 18958 6951 50414 58488 44335 6150 12099 55207 15867 153 11085 57099 20417 9344 11139"))
+
+; The field element whose 16 limbs the decimal words of s spell, least
+; significant first.
+(def ed25519_limbs ((s (list int))) (array int)
+  (array_from (ed25519_numbers (split_spaces s) (nil int)) 0))
+
+; The numbers of the words ws, after the reversed acc.
+(def ed25519_numbers ((ws (list (list int))) (acc (list int))) (list int)
+  (if (is_empty ws)
+      (rev acc)
+      (let n (match (word_number (head ws)) ((Some v) v) ((None) 0))
+        (ed25519_numbers (tail ws) (cons n acc)))))
+
+; The group's order L, 2^252 + 27742317777372353535851937790883648493,
+; and the arithmetic modulo it.
+(def ed25519_l () (array int)
+  (bn_of_bytes (bn_hex "1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed")))
+(def ed25519_mont () BnMont (bn_mont_new (ed25519_l)))
+
+; The base point B, from its encoding: y = 4/5, x even.
+(def ed25519_base () EdPoint
+  (match (ed25519_decode (bytes_from_list (cons 88 (ed25519_repeat 102 31 (nil int)))))
+    ((Some b) b)
+    ((None) (ed25519_zero))))
+
+; n copies of x before acc.
+(def ed25519_repeat ((x int) (n int) (acc (list int))) (list int)
+  (if (le n 0) acc (ed25519_repeat x (sub n 1) (cons x acc))))
+
+; The neutral point, (0, 1).
+(def ed25519_zero () EdPoint
+  (EdPoint (x25519_small 0) (x25519_small 1) (x25519_small 1) (x25519_small 0)))
+
+; ------------------------------------------------------------- the field
+
+; -a.
+(def ed25519_fneg ((a (array int))) (array int)
+  (x25519_fsub (x25519_small 0) a))
+
+; a as 32 bytes, fully reduced, a left as it is: x25519_pack carries its
+; argument in place, so it is given a copy, which a sum with 0 makes.
+(def ed25519_packed ((a (array int))) bytes
+  (x25519_pack (x25519_fadd a (x25519_small 0))))
+
+; Whether a and b are the same number mod p.
+(def ed25519_feq ((a (array int)) (b (array int))) bool
+  (eq (ed25519_packed a) (ed25519_packed b)))
+
+; Whether a, reduced, is odd: the sign RFC 8032 gives x.
+(def ed25519_odd ((a (array int))) int
+  (bit_and (bytes_get (ed25519_packed a) 0) 1))
+
+; z to the 2^252 - 3, (p - 5) / 8, whose bits from 251 down are all 1
+; but bit 1: c squared, and times z where the bit is 1, from bit a down.
+(def ed25519_pow2523 ((z (array int)) (c (array int)) (a int)) (array int)
+  (if (lt a 0)
+      c
+      (let c1 (x25519_fsq c)
+        (ed25519_pow2523 z (if (eq a 1) c1 (x25519_fmul c1 z)) (sub a 1)))))
+
+; ------------------------------------------------------------- points
+
+; p + q, RFC 8032 5.1.4's addition, which doubles as well; d2 is 2d,
+; made once by the caller rather than at every addition.
+(def ed25519_add ((d2 (array int)) (p EdPoint) (q EdPoint)) EdPoint
+  (let (a (x25519_fmul (x25519_fsub (.y p) (.x p)) (x25519_fsub (.y q) (.x q)))
+        b (x25519_fmul (x25519_fadd (.y p) (.x p)) (x25519_fadd (.y q) (.x q)))
+        c (x25519_fmul (x25519_fmul (.t p) d2) (.t q))
+        d (x25519_fmul (x25519_fadd (.z p) (.z p)) (.z q))
+        e (x25519_fsub b a)
+        f (x25519_fsub d c)
+        g (x25519_fadd d c)
+        h (x25519_fadd b a))
+    (EdPoint (x25519_fmul e f) (x25519_fmul h g) (x25519_fmul g f) (x25519_fmul e h))))
+
+; -p.
+(def ed25519_neg ((p EdPoint)) EdPoint
+  (EdPoint (ed25519_fneg (.x p)) (.y p) (.z p) (ed25519_fneg (.t p))))
+
+; Bit t of the little-endian scalar k, 0 past its end.
+(def ed25519_bit ((k bytes) (t int)) int
+  (let i (bit_shr t 3)
+    (if (ge i (bytes_len k)) 0 (bit_and (bit_shr (bytes_get k i) (bit_and t 7)) 1))))
+
+; k times p, k little-endian: q doubled, and p added where k's bit is 1,
+; from bit t down.
+(def ed25519_mul ((d2 (array int)) (k bytes) (p EdPoint) (q EdPoint) (t int)) EdPoint
+  (if (lt t 0)
+      q
+      (let q2 (ed25519_add d2 q q)
+        (ed25519_mul d2 k p (if (eq (ed25519_bit k t) 1) (ed25519_add d2 q2 p) q2) (sub t 1)))))
+
+; k times p, k up to 32 bytes little-endian.
+(def ed25519_times ((k bytes) (p EdPoint)) EdPoint
+  (ed25519_mul (ed25519_d2) k p (ed25519_zero) 255))
+
+; p as its 32-byte encoding: y little-endian, x's sign in the top bit.
+(def ed25519_encode ((p EdPoint)) bytes
+  (let (zi (x25519_invert (.z p))
+        x (x25519_fmul (.x p) zi)
+        y (x25519_pack (x25519_fmul (.y p) zi))
+        top (bit_or (bytes_get y 31) (bit_shl (ed25519_odd x) 7)))
+    (bytes_concat (cons (bytes_slice y 0 31) (cons (bytes_from_list (cons top (nil int))) (nil bytes))))))
+
+; The point the 32 bytes b encode (RFC 8032 5.1.3), or none if they
+; encode no point. A y of p or more is taken mod p, as libraries do.
+(def ed25519_decode ((b bytes)) (Option EdPoint)
+  (if (not (eq (bytes_len b) 32))
+      ((None EdPoint))
+      (let (y (x25519_unpack b)
+            sign (bit_shr (bytes_get b 31) 7)
+            yy (x25519_fsq y)
+            u (x25519_fsub yy (x25519_small 1))
+            v (x25519_fadd (x25519_fmul yy (ed25519_d)) (x25519_small 1))
+            v3 (x25519_fmul (x25519_fsq v) v)
+            uv7 (x25519_fmul u (x25519_fmul (x25519_fsq v3) v))
+            x (x25519_fmul (x25519_fmul u v3) (ed25519_pow2523 uv7 uv7 250))
+            vxx (x25519_fmul v (x25519_fsq x)))
+        (if (ed25519_feq vxx u) (ed25519_signed x y sign)
+            (ed25519_feq vxx (ed25519_fneg u)) (ed25519_signed (x25519_fmul x (ed25519_sqrt_m1)) y sign)
+            ((None EdPoint))))))
+
+; The point (x or -x, y), x chosen by its sign; none for x 0 with sign 1.
+(def ed25519_signed ((x (array int)) (y (array int)) (sign int)) (Option EdPoint)
+  (let zero (ed25519_feq x (x25519_small 0))
+    (if (and zero (eq sign 1))
+        ((None EdPoint))
+        (let x1 (if (eq (ed25519_odd x) sign) x (ed25519_fneg x))
+          (Some (EdPoint x1 y (x25519_small 1) (x25519_fmul x1 y)))))))
+
+; ------------------------------------------------------------- scalars
+
+; b reversed: a little-endian number big-endian, or back.
+(def ed25519_rev ((b bytes)) bytes
+  (bytes_from_list (ed25519_rev_from b 0 (nil int))))
+
+; The bytes of b from i on, before acc, reversed.
+(def ed25519_rev_from ((b bytes) (i int) (acc (list int))) (list int)
+  (if (ge i (bytes_len b))
+      acc
+      (ed25519_rev_from b (add i 1) (cons (bytes_get b i) acc))))
+
+; The little-endian bytes b mod L, as a number.
+(def ed25519_reduce ((b bytes)) (array int)
+  (bn_mod (bn_of_bytes (ed25519_rev b)) (ed25519_l)))
+
+; The number n, below L, as 32 little-endian bytes.
+(def ed25519_scalar_bytes ((n (array int))) bytes
+  (ed25519_rev (bn_to_bytes n 32)))
+
+; The first 32 bytes of SHA-512(seed), clamped: the secret scalar.
+(def ed25519_clamp ((h bytes)) bytes
+  (let (b0 (bit_and (bytes_get h 0) 248)
+        b31 (bit_or (bit_and (bytes_get h 31) 127) 64))
+    (bytes_concat (cons (bytes_from_list (cons b0 (nil int)))
+                        (cons (bytes_slice h 1 31)
+                              (cons (bytes_from_list (cons b31 (nil int))) (nil bytes)))))))
+
+; SHA-512 of the pieces bs, one after another, mod L.
+(def ed25519_hash_mod ((bs (list bytes))) (array int)
+  (let all (bytes_concat bs)
+    (ed25519_reduce (sha512 all 0 (bytes_len all)))))
+
+; ------------------------------------------------------------- the API
+
+; The 32-byte public key of the 32-byte secret seed (RFC 8032 5.1.5).
+(def ed25519_public ((seed bytes)) bytes
+  (let h (sha512 seed 0 32)
+    (ed25519_encode (ed25519_times (ed25519_clamp h) (ed25519_base)))))
+
+; The 64-byte signature of m by the 32-byte seed, whose public key is pk
+; (RFC 8032 5.1.6).
+(def ed25519_sign ((seed bytes) (pk bytes) (m bytes)) bytes
+  (let (h (sha512 seed 0 32)
+        a (ed25519_clamp h)
+        r (ed25519_hash_mod (cons (bytes_slice h 32 64) (cons m (nil bytes))))
+        rb (ed25519_encode (ed25519_times (ed25519_scalar_bytes r) (ed25519_base)))
+        k (ed25519_hash_mod (cons rb (cons pk (cons m (nil bytes)))))
+        mt (ed25519_mont)
+        ka (bn_mont_mul mt (bn_to_mont mt k) (bn_resize (ed25519_reduce a) (.k mt)))
+        s (bn_mod_add mt ka (bn_resize r (.k mt))))
+    (bytes_concat (cons rb (cons (ed25519_scalar_bytes s) (nil bytes))))))
+
+; Whether sig, 64 bytes, is the signature of m by the 32-byte public key
+; pk (RFC 8032 5.1.7): S below L, and [S]B = R + [k]A, checked as the
+; encoding of [S]B - [k]A being R's.
+(def ed25519_verify ((pk bytes) (m bytes) (sig bytes)) bool
+  (if (or (not (eq (bytes_len sig) 64)) (not (eq (bytes_len pk) 32)))
+      false
+      (let s (bytes_slice sig 32 64)
+        (if (ge (bn_compare (bn_of_bytes (ed25519_rev s)) (ed25519_l)) 0)
+            false
+            (match (ed25519_decode pk)
+              ((None) false)
+              ((Some a)
+                (let (rb (bytes_slice sig 0 32)
+                      k (ed25519_hash_mod (cons rb (cons pk (cons m (nil bytes)))))
+                      sb (ed25519_times s (ed25519_base))
+                      ka (ed25519_times (ed25519_scalar_bytes k) (ed25519_neg a)))
+                  (eq (ed25519_encode (ed25519_add (ed25519_d2) sb ka)) rb))))))))

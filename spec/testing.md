@@ -144,7 +144,8 @@ Each case of `tests/e2e/` is a directory:
   to. `@PORT@` in either, in `net`, in `typed` and in any file of the
   case's `etc` (which is then copied into `build/e2e/CASE.etc` and made
   the port there) is a free port of the host's loopback, chosen for the
-  boot;
+  boot; `@USER@` in `typed` is the user running the tests, the one
+  user a server `serve` runs as, such as `ssh`'s `sshd`, lets in;
 - `usb`, if the board's keyboard and pointer are to be a `usb-kbd` and a
   `usb-mouse` on a `qemu-xhci`, not virtio's; and with it `usbaudio`,
   if QEMU's `usb-audio`, a speaker, is to be on it too (`QEMU_USB=audio`
@@ -374,6 +375,20 @@ Ctrl-C as a person would:
   there; post JSON to `/echo`; and be refused by a port nothing
   listens to, with `virtio-rng` for the keys and `rtc clock` for the
   date;
+- `ssh`, with the host's own OpenSSH `sshd` run as the user on the
+  host's loopback ([sshd_config](../tests/e2e/ssh/sshd_config)), its
+  host key the case's, in the board's `etc/ssh/known_hosts` for the
+  port, and the board's `etc/ssh/id_ed25519` the one key it lets in,
+  each login running the case's [remote](../tests/e2e/ssh/remote)
+  script, not the user's shell: has `ssh` run a command, and one that
+  writes to standard error and exits 3; `scp` copy a file up from the
+  initramfs, which `ssh` then shows, and one down to the disk's volume,
+  which `cat` shows, and say what the host's scp says of a file that is
+  not there; `ssh` be refused by a port nothing listens to; and, last,
+  run a shell on a pty, a line typed to it and `exit`, then Ctrl-D,
+  which ends `ssh`'s input and the board's shell. `@USER@` in its typed
+  lines is the user. A password, keyboard-interactive and a new host's
+  key are not reached: an `sshd` not run as root lets in only by key;
 - `agent_fetch`, as `agent`, with the stand-in and the proxy, has the
   script use `fetch_url` twice: a GET over plain HTTP of a page the
   proxy does not serve, its 404 and JSON body the tool's answer, and an

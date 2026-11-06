@@ -455,6 +455,88 @@ takes two X25519s (about 3 ms each) and three or four signature checks
 about 5 ms); records seal and open at about 80 MB/s with ChaCha20 and
 40 MB/s with AES-GCM.
 
+## SSH
+
+```
+ssh, scp ──sshc.l0──▶ inet's TCP           (the connection, the login, known_hosts, the terminal)
+             └──▶ sshconn.l0 ──▶ ssh.l0     (the user's authentication and a session channel; the transport)
+                    └──▶ sshkey.l0 ──▶ ed25519.l0, ecdsa.l0, rsa.l0; x25519.l0, chacha20.l0, aesgcm.l0
+```
+
+An SSH 2 client, in libraries `ssh` and `scp` link (the Makefile's
+`SSH`), each pure but the last and tested on the host:
+
+| Library | What |
+|---|---|
+| [sshwire.l0](../user/lib/format/sshwire.l0) | SSH's data types (RFC 4251 5), read in place from bytes (`ssh_string_at`, `ssh_u32_at`, `SshField`) and built as bytes (`ssh_w_*`) |
+| [ed25519.l0](../user/lib/crypto/ed25519.l0) | Ed25519 (RFC 8032): a public key, a signature made and checked, on x25519.l0's field and sha512.l0 |
+| [sshkey.l0](../user/lib/crypto/sshkey.l0) | public key blobs of `ssh-ed25519`, `ecdsa-sha2-nistp256` and `ssh-rsa`, their signatures checked (`ssh_sig_ok`, RSA as `rsa-sha2-256` and `-512`); OpenSSH's private key file read (`ssh_key_of_text`), an Ed25519 key not encrypted; `SHA256:` fingerprints; `known_hosts` read and its lines made |
+| [ssh.l0](../user/lib/proto/ssh.l0) | the transport (RFC 4253): version lines, the key exchange, keys, packets sealed and opened, as `SshOut`s: the connection after a step, the bytes to send and the `SshEvent`s that happened |
+| [sshconn.l0](../user/lib/proto/sshconn.l0) | the user's authentication (RFC 4252, 4256) and one session channel (RFC 4254) |
+| [sshc.l0](../user/lib/proto/sshc.l0) | the connection over `inet`'s TCP, its ring read, and the login run to its end: the host's key, the methods, the prompts |
+
+**The transport.** `ssh_start secret cookie` makes the version line,
+`SSH-2.0-L0S_1.0`, and the KEXINIT; `ssh_more s b i j` reads what the
+server sends, in any pieces. Lines before the server's version line are
+passed over; one of another SSH than 2.0 (or 1.99) is refused. The
+exchange is `curve25519-sha256` (RFC 8731), with OpenSSH's strict key
+exchange when the server offers it too: its KEXINIT must then be its
+first packet, nothing but the exchange's own packets may come during it,
+and each direction's sequence numbers start again at NEWKEYS, which is
+what keeps a packet from being slipped in or dropped unseen (CVE-2023-48795).
+The host's key may be `ssh-ed25519`, `ecdsa-sha2-nistp256`,
+`rsa-sha2-512` or `rsa-sha2-256`, and must sign the exchange hash;
+packets are sealed by `chacha20-poly1305@openssh.com`,
+`aes256-gcm@openssh.com` or `aes128-gcm@openssh.com`, chosen apart for
+each direction, best first, and keys derived as RFC 4253 7.2 says; no
+compression. Once the host's key has signed, the transport tells the
+caller (`SshHostKey`) and holds what comes until the caller has looked
+the key up and calls `ssh_host_accept`, which sends NEWKEYS and asks for
+`ssh-userauth`. IGNORE, DEBUG, UNIMPLEMENTED and EXT_INFO are passed
+over; a message it does not know, once up, is answered UNIMPLEMENTED; a
+DISCONNECT ends it. Against a server written apart from it, on Python's
+`cryptography` ([tests/ssh/vectors.py](../tests/ssh/vectors.py)), it
+derives the same exchange hash and keys, and opens and seals the same
+packets, byte for byte, with each cipher (`ssh_test.l0`).
+
+**The login.** `sshc_login` runs the events to the end of the user's
+authentication. The host's key is looked up in `/etc/ssh/known_hosts`,
+by `HOST`, or `[HOST]:PORT` for any port but 22, and its type: known, it
+goes on; known by another key of its type, the login is refused, saying
+so; unknown, its `SHA256:` fingerprint is shown on standard error, and
+`yes` typed accepts it, and adds its line to the file if the file can be
+written (on a system volume it can; on the initramfs it is said that it
+was not remembered). Then `none` is asked, for the methods the server
+allows, and they are tried in OpenSSH's order: `publickey`, once, with
+the Ed25519 key given, its signature over the session id and the
+request; `keyboard-interactive`, up to three times, its prompts shown
+and answered on the terminal, hidden unless the server says to echo;
+`password`, up to three times, `USER@HOST's password:` asked as a hidden
+line. When none is left it is `Permission denied (METHODS)`. A banner
+is shown on standard error.
+
+**The session.** One `session` channel, opened with a window of 2 MB
+and packets of 32 KB, which is opened again by as much as has come once
+half of it has; what is sent waits for the server's window and is cut to
+its packet size. A shell asks for a pty, `dumb`, 80 by 24, its ECHO off
+(the terminal here echoes), then `shell`; a command, `exec`. The data,
+its standard error, its end, its exit status or signal and its close are
+events. A global request, a channel request or a channel the server
+opens (for forwarding) is refused.
+
+**`ssh` and `scp`** ([programs.md](programs.md)) find the key at `-i`
+or `/etc/ssh/id_ed25519`, the terminal from `tty_get`, and wait on the
+connection's port and the terminal's at once. A shell's output is shown
+without its escape sequences, carriage returns and bells, a sequence cut
+between two packets dropped whole. The password is read with the
+terminal's hidden line, `"s"` (tty.l0). `scp` speaks the scp protocol
+(OpenSSH's `scp -O`) to `scp -t` or `scp -f` on the host.
+
+**Testing.** The `ssh` e2e case runs the host's own OpenSSH `sshd`, as
+the user, on a free port with the case's host key and the board's user
+key, every login a script of the case's, so that the user's own shell
+plays no part ([tests/e2e/ssh](../tests/e2e/ssh)).
+
 ## Reaching a model's API
 
 ```
@@ -841,6 +923,21 @@ address and the PHY's ID (0x600d84a2 for this PHY's revision 2):
   could pass an expired one. On a Pi 5 `random` is `rng200`'s, which
   has not yet run on a board (roadmap 0047); without it `https://`
   fails, saying so.
+- **SSH is a client of a shell, a command or a file, in lines.** One
+  key exchange, curve25519-sha256 alone: a server's second, which
+  OpenSSH asks for after a gigabyte under ChaCha20, ends the
+  connection, and so does a server with no curve25519. The key offered
+  is one Ed25519 key, not encrypted (a passphrase's bcrypt is not
+  read); no agent, no certificates, no ECDSA or RSA keys of the user's.
+  known_hosts' hashed hosts (`|1|`), patterns and markers match nothing.
+  One channel: no port forwarding, X11, agent forwarding, subsystems
+  (so no SFTP), or escapes such as `~.`. The terminals are of lines
+  (desktop.md, Limits), so a shell's pty is `dumb` and full-screen
+  programs cannot be used; nothing typed reaches the server until its
+  line is ended, the window's size is never told, and lines typed ahead
+  go to `ssh` while it runs, even after the remote shell has ended. A
+  command gets no input. `scp` copies one file, whole in memory, with
+  no `-r` and no times or modes kept. Not constant-time, as TLS.
 - **A model's API is the host's, unless reached over TLS.** Through the
   proxy, the key and the TLS are the host's: the board speaks plain HTTP to it over the local network,
   so a board is tied to a host that runs it, and anything on that

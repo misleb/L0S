@@ -6,7 +6,11 @@
 ;   request REPLY "r"            the next line typed, newline and all, sent
 ;                                to REPLY; empty once input has ended
 ;                                (Ctrl-D on an empty line)
-;   request REPLY "i"            a lone byte 3 sent to REPLY at each Ctrl-C,
+;   request REPLY "s"            the same, but what is typed of the line
+;                                not echoed, only its newline: for a
+;                                password. A line typed before it asked
+;                                was echoed as it was typed
+;   request REPLY "i"           a lone byte 3 sent to REPLY at each Ctrl-C,
 ;                                which drops the line being typed and every
 ;                                line not yet read, as a terminal does
 ;   request REPLY "p"            "tty" sent to REPLY at once, so that REPLY
@@ -28,13 +32,15 @@
 ; What has been typed: the line so far, reversed; lines finished and not
 ; yet read; ports waiting for a line; whether input has ended; how far
 ; into an escape sequence the last bytes were, 0 if not in one; the port
-; to tell of Ctrl-C, or -1; and whether a Ctrl-C has not been told yet.
-(data Console (Console (cur (list int)) (lines (Queue (list int))) (readers (Queue int)) (ended bool) (esc int) (intr int) (hit bool)))
+; to tell of Ctrl-C, or -1; whether a Ctrl-C has not been told yet; and
+; whether the line being typed is hidden, its characters not echoed,
+; until it ends.
+(data Console (Console (cur (list int)) (lines (Queue (list int))) (readers (Queue int)) (ended bool) (esc int) (intr int) (hit bool) (hide bool)))
 
 ; A console with nothing typed, no one waiting, and no one to tell of
 ; Ctrl-C.
 (def console_new () Console
-  (Console (nil int) (Queue (nil (list int)) (nil (list int))) (Queue (nil int) (nil int)) false 0 -1 false))
+  (Console (nil int) (Queue (nil (list int)) (nil (list int))) (Queue (nil int) (nil int)) false 0 -1 false false))
 
 ; The console after one more byte, and what to echo for it.
 (data Fed (Fed (console Console) (echo (list int))))
@@ -42,17 +48,19 @@
 ; c after the byte b is typed, and its echo: within an escape sequence b
 ; is dropped; Ctrl-C drops the line and every line unread, to be told;
 ; anything else edits the line, may finish it or end input, and ESC
-; starts a sequence.
+; starts a sequence. A hidden line echoes only its newline, which ends
+; the hiding.
 (def feed ((c Console) (b int)) Fed
   (match c
-    ((Console cur lines readers ended esc intr hit)
+    ((Console cur lines readers ended esc intr hit hide)
       (if (gt esc 0)
-          (Fed (Console cur lines readers ended (escape_after esc b) intr hit) (nil int))
+          (Fed (Console cur lines readers ended (escape_after esc b) intr hit hide) (nil int))
           (eq b 3)                                    ; Ctrl-C: what is unread dropped, and told
-          (Fed (Console (nil int) (Queue (nil (list int)) (nil (list int))) readers ended 0 intr true) "^C\n")
-          (Fed (Console (edit cur b) (finish lines cur b) readers (ends ended cur b)
-                        (if (eq b 27) 1 0) intr hit)
-               (echo_for cur b))))))
+          (Fed (Console (nil int) (Queue (nil (list int)) (nil (list int))) readers ended 0 intr true hide) "^C\n")
+          (let nl (is_newline b)
+            (Fed (Console (edit cur b) (finish lines cur b) readers (ends ended cur b)
+                          (if (eq b 27) 1 0) intr hit (and hide (not nl)))
+                 (if (not hide) (echo_for cur b) nl "\n" (nil int))))))))
 
 ; An escape sequence, such as an arrow key's ESC [ A, is dropped whole:
 ; after ESC comes [, then bytes up to one from @ to ~.
@@ -121,34 +129,34 @@
 ; input has ended, the empty line to a waiting port.
 (def next_delivery ((c Console)) Next
   (match c
-    ((Console cur lines readers ended esc intr hit)
+    ((Console cur lines readers ended esc intr hit hide)
       (if (and hit (ge intr 0))
-          (Send (Console cur lines readers ended esc intr false) (Delivery intr (interrupt_message)))
-          (next_waiting (Console cur lines readers ended esc intr false))))))
+          (Send (Console cur lines readers ended esc intr false hide) (Delivery intr (interrupt_message)))
+          (next_waiting (Console cur lines readers ended esc intr false hide))))))
 
 ; next_delivery once no Ctrl-C is to be told: the oldest finished line
 ; to the oldest waiting port, or the empty line once input has ended, or
 ; nothing.
 (def next_waiting ((c Console)) Next
   (match c
-    ((Console cur lines readers ended esc intr hit)
+    ((Console cur lines readers ended esc intr hit hide)
       (match (queue_pop readers)
-        ((PopEmpty) (Idle (Console cur lines readers ended esc intr hit)))
+        ((PopEmpty) (Idle (Console cur lines readers ended esc intr hit hide)))
         ((Popped port rest)
           (match (queue_pop lines)
-            ((Popped line more) (Send (Console cur more rest ended esc intr hit) (Delivery port line)))
+            ((Popped line more) (Send (Console cur more rest ended esc intr hit hide) (Delivery port line)))
             ((PopEmpty)
               (if ended
-                  (Send (Console cur lines rest ended esc intr hit) (Delivery port (nil int)))
-                  (Idle (Console cur lines readers ended esc intr hit))))))))))
+                  (Send (Console cur lines rest ended esc intr hit hide) (Delivery port (nil int)))
+                  (Idle (Console cur lines readers ended esc intr hit hide))))))))))
 
 ; c with line back at the front of the finished lines, as when the port it
 ; went to had gone: a process killed while it waited for a line.
 (def unread ((c Console) (line (list int))) Console
   (match c
-    ((Console cur lines readers ended esc intr hit)
+    ((Console cur lines readers ended esc intr hit hide)
       (match lines
-        ((Queue front back) (Console cur (Queue (cons line front) back) readers ended esc intr hit))))))
+        ((Queue front back) (Console cur (Queue (cons line front) back) readers ended esc intr hit hide))))))
 
 ; The console once there is nothing more to send, and every message sent
 ; to get there, in order.
@@ -181,10 +189,11 @@
   (and (gt (msg_len b) 4) (and (eq (msg_u32 b 0) 0) (eq (msg_byte b 4) 119))))
 (def tty_written_at () int (add (header_len) 5))
 
-; c after a request, as a terminal takes them: "r" adds a reader, "i" a
-; port to tell of Ctrl-C, "w" with no reply port is bytes to write, and
-; "p" is a message for the terminal to send its reply port at once, and
-; "t" with no reply port is a title. Anything else is ignored.
+; c after a request, as a terminal takes them: "r" adds a reader, "s" a
+; reader of a hidden line, "i" a port to tell of Ctrl-C, "w" with no
+; reply port is bytes to write, and "p" is a message for the terminal to
+; send its reply port at once, and "t" with no reply port is a title.
+; Anything else is ignored.
 (def tty_request ((c Console) (payload (list int))) TtyAsked
   (let reply (request_reply payload)
     (if (lt reply 0)
@@ -195,6 +204,7 @@
               (and (eq reply 0) (and (not (is_empty body)) (eq (head body) 116)))   ; t
               (TtyTitle (tail body))
               (eq body "r") (TtyAsk (add_reader c reply))
+              (eq body "s") (TtyAsk (.hide (add_reader c reply) true))
               (eq body "i") (TtyAsk (.intr c reply))
               (and (eq body "p") (gt reply 0)) (TtyAnswer reply "tty")
               (TtyAsk c))))))

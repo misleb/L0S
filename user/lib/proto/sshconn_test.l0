@@ -1,0 +1,208 @@
+; sshconn_test.l0 -- tests of sshconn.l0 on a connection taken as up
+; with no cipher, so what it sends is read back in the clear: each
+; authentication request byte for byte (RFC 4252's layouts) and the
+; publickey one's signature checked; the server's replies read into
+; events; the channel's window, both ways; its requests answered.
+
+; The bytes of b in lowercase hex.
+(def sc_hex ((b bytes)) (list int)
+  (sc_hex_from b 0 (nil int)))
+
+; The bytes of b from i on in hex, after the reversed acc.
+(def sc_hex_from ((b bytes) (i int) (acc (list int))) (list int)
+  (if (ge i (bytes_len b))
+      (rev acc)
+      (sc_hex_from b (add i 1) (push (hex_digits (bytes_get b i) 2) acc))))
+
+; A connection up, with no cipher either way, its session id sid.
+(def sc_up () Ssh
+  (let s (.s (ssh_start (bytes_from_list (rsa_repeat 17 32 (nil int))) (bytes_from_list (rsa_repeat 34 16 (nil int)))))
+    (.sid (.stage s (ssh_stage_up)) (bytes_from_list "sid"))))
+
+; The payloads of the packets a step sent, each in hex, a line each.
+(def sc_sent ((o SshOut)) (list int)
+  (sc_sent_from (.send o) (nil int)))
+
+; The payloads of the packets ps, after the reversed acc.
+(def sc_sent_from ((ps (list bytes)) (acc (list int))) (list int)
+  (if (is_empty ps)
+      (rev acc)
+      (match (ssh_unseal (ssh_plain_dir) (head ps))
+        ((SshGot p n d) (sc_sent_from (tail ps) (push "\n" (push (sc_hex p) acc))))
+        ((SshNeed) (sc_sent_from (tail ps) (push "need\n" acc)))
+        ((SshBad why) (sc_sent_from (tail ps) (push "bad\n" acc))))))
+
+; s after the server sent the payload p, in the clear.
+(def sc_heard ((s Ssh) (p bytes)) SshOut
+  (match (ssh_seal (ssh_plain_dir) p)
+    ((SshSealed d b) (ssh_more s b 0 (bytes_len b)))))
+
+; An event as a word.
+(def sc_event ((e SshEvent)) (list int)
+  (match e
+    ((SshHostKey b) "hostkey")
+    ((SshReady) "ready")
+    ((SshBanner t) (append "banner:" t))
+    ((SshAuthOk) "auth-ok")
+    ((SshAuthFailed ms partial) (append "auth-failed:" (append (join_with "," ms) (if partial ":partial" ""))))
+    ((SshAuthPrompts n i ps) (append "prompts:" (append n (append ":" (append i (sc_prompts ps (nil int)))))))
+    ((SshOpened) "opened")
+    ((SshOpenFailed why) (append "open-failed:" why))
+    ((SshRequestOk) "request-ok")
+    ((SshRequestFailed) "request-failed")
+    ((SshData d) (append "data:" (bytes_to_list d)))
+    ((SshStderr d) (append "stderr:" (bytes_to_list d)))
+    ((SshEof) "eof")
+    ((SshExitStatus n) (append "exit:" (digits n)))
+    ((SshExitSignal g) (append "signal:" g))
+    ((SshChanClosed) "closed")
+    ((SshGone why) (append "gone:" why))))
+
+; Prompts as :TEXT/ECHO, after the reversed acc.
+(def sc_prompts ((ps (list SshPrompt)) (acc (list int))) (list int)
+  (if (is_empty ps)
+      (rev acc)
+      (let p (head ps)
+        (sc_prompts (tail ps) (push (if (.echo p) "/echo" "/hidden") (push (.text p) (push ":" acc)))))))
+
+; A step's events, a line each.
+(def sc_events ((o SshOut)) (list int)
+  (sc_events_from (.events o) (nil int)))
+
+; The events es as lines, after the reversed acc.
+(def sc_events_from ((es (list SshEvent)) (acc (list int))) (list int)
+  (if (is_empty es) (rev acc) (sc_events_from (tail es) (push "\n" (push (sc_event (head es)) acc)))))
+
+; Pieces joined.
+(def sc_of ((ps (list bytes))) bytes (bytes_concat ps))
+
+; ------------------------------------------------------------- authentication
+
+; 50, "ann", "ssh-connection", "none".
+(def test_ssh_auth_none () int
+  (check_str "none" (sc_sent (ssh_auth_none (sc_up) "ann"))
+    "3200000003616e6e0000000e7373682d636f6e6e656374696f6e000000046e6f6e65\n"))
+
+; 50, "ann", "ssh-connection", "password", false, "pw".
+(def test_ssh_auth_password () int
+  (check_str "password" (sc_sent (ssh_auth_password (sc_up) "ann" "pw"))
+    "3200000003616e6e0000000e7373682d636f6e6e656374696f6e0000000870617373776f726400000000027077\n"))
+
+; 50, "ann", "ssh-connection", "keyboard-interactive", "", "".
+(def test_ssh_auth_kbd () int
+  (check_str "kbd" (sc_sent (ssh_auth_kbd (sc_up) "ann"))
+    "3200000003616e6e0000000e7373682d636f6e6e656374696f6e000000146b6579626f6172642d696e7465726163746976650000000000000000\n"))
+
+; 61, two answers.
+(def test_ssh_auth_kbd_answer () int
+  (check_str "answer" (sc_sent (ssh_auth_kbd_answer (sc_up) (cons "a" (cons "bc" (nil (list int))))))
+    "3d000000020000000161000000026263\n"))
+
+; The publickey request: the key's blob, and a signature that checks
+; over the session id and the request before it.
+(def test_ssh_auth_key () int
+  (let (k (SshKey (bytes_from_list (rsa_repeat 7 32 (nil int))) (ed25519_public (bytes_from_list (rsa_repeat 7 32 (nil int)))) "c")
+        o (ssh_auth_key (sc_up) "ann" k))
+    (match (ssh_unseal (ssh_plain_dir) (head (.send o)))
+      ((SshGot p n d) (sc_key_checks p k))
+      ((SshNeed) (fail_because "sent" "not a packet"))
+      ((SshBad why) (fail_because "sent" why)))))
+
+; The request p's head is the signed part's, and its signature checks.
+; The head is 59 bytes and the blob: 50, "ann" (7), "ssh-connection"
+; (18), "publickey" (13), true, "ssh-ed25519" (15), the blob's length.
+(def sc_key_checks ((p bytes) (k SshKey)) int
+  (let (blob (ssh_key_blob k)
+        headlen (add 59 (bytes_len blob))
+        head (bytes_slice p 0 headlen)
+        signed (sc_of (cons (ssh_w_string (bytes_from_list "sid")) (cons head (nil bytes)))))
+    (match (ssh_string_at p headlen (bytes_len p))
+      ((None) (fail_because "signature" "missing"))
+      ((Some f)
+        (add (check_true "blob" (bytes_is_at p (sub headlen (bytes_len blob)) (bytes_to_list blob)))
+             (check_true "signature" (ssh_sig_ok (SshEd25519 (.public k)) "ssh-ed25519" (ssh_field_bytes p f) signed)))))))
+
+; Failure, success, a banner, and keyboard-interactive's prompts.
+(def test_ssh_auth_replies () int
+  (let (fail (sc_of (cons (ssh_w_byte 51) (cons (ssh_w_names (split_spaces "publickey password")) (cons (ssh_w_bool true) (nil bytes))))))
+    (add (check_str "failure" (sc_events (sc_heard (sc_up) fail)) "auth-failed:publickey,password:partial\n")
+         (add (check_str "success" (sc_events (sc_heard (sc_up) (ssh_w_byte 52))) "auth-ok\n")
+              (check_str "banner" (sc_events (sc_heard (sc_up) (sc_of (cons (ssh_w_byte 53) (cons (ssh_w_text "hi") (cons (ssh_w_text "") (nil bytes)))))))
+                "banner:hi\n")))))
+
+(def test_ssh_info_request () int
+  (let r (sc_of (cons (ssh_w_byte 60) (cons (ssh_w_text "N") (cons (ssh_w_text "I") (cons (ssh_w_text "")
+               (cons (ssh_w_u32 2) (cons (ssh_w_text "Password: ") (cons (ssh_w_bool false) (cons (ssh_w_text "Code: ") (cons (ssh_w_bool true) (nil bytes)))))))))))
+    (check_str "prompts" (sc_events (sc_heard (sc_up) r)) "prompts:N:I:Password: /hidden:Code: /echo\n")))
+
+; ------------------------------------------------------------- the channel
+
+; 90, "session", channel 0, window 2 MB, packets of 32 KB.
+(def test_ssh_open_session () int
+  (check_str "open" (sc_sent (ssh_open_session (sc_up)))
+    "5a0000000773657373696f6e000000000020000000008000\n"))
+
+; The server's confirmation: its channel 9, a window of 10 bytes and
+; packets of 4.
+(def sc_open () Ssh
+  (.s (sc_heard (.s (ssh_open_session (sc_up))) (sc_of (cons (ssh_w_byte 91) (cons (ssh_w_u32 0) (cons (ssh_w_u32 9) (cons (ssh_w_u32 10) (cons (ssh_w_u32 4) (nil bytes))))))))))
+
+(def test_ssh_opened () int
+  (let s (sc_open)
+    (add (check_int "chan" (.chan s) 9) (add (check_int "rwin" (.rwin s) 10) (check_int "rmax" (.rmax s) 4)))))
+
+; 12 bytes sent into a window of 10, 4 a packet: three packets, 4, 4
+; and 2, and 2 held; a WINDOW_ADJUST of 5 sends them.
+(def test_ssh_window_sending () int
+  (let (o (ssh_chan_send (sc_open) (bytes_from_list "abcdefghijkl") 0 12)
+        s (.s o)
+        o2 (sc_heard s (sc_of (cons (ssh_w_byte 93) (cons (ssh_w_u32 0) (cons (ssh_w_u32 5) (nil bytes)))))))
+    (add (check_str "sent" (sc_sent o) "5e000000090000000461626364\n5e000000090000000465666768\n5e0000000900000002696a\n")
+         (add (check_int "held" (bytes_len (.pend s)) 2)
+              (check_str "after adjust" (sc_sent o2) "5e00000009000000026b6c\n")))))
+
+; Data and its standard error told; our window counted down.
+(def test_ssh_data_in () int
+  (let (o (sc_heard (sc_open) (sc_of (cons (ssh_w_byte 94) (cons (ssh_w_u32 0) (cons (ssh_w_text "out") (nil bytes))))))
+        o2 (sc_heard (.s o) (sc_of (cons (ssh_w_byte 95) (cons (ssh_w_u32 0) (cons (ssh_w_u32 1) (cons (ssh_w_text "err") (nil bytes))))))))
+    (add (check_str "events" (append (sc_events o) (sc_events o2)) "data:out\nstderr:err\n")
+         (check_int "lwin" (.lwin (.s o2)) (sub (ssh_window) 6)))))
+
+; Once half the window is taken, it is opened again by as much: 93,
+; channel 9, 1 MB.
+(def test_ssh_window_reopened () int
+  (let (s (.taken (sc_open) (sub (div (ssh_window) 2) 1))
+        o (sc_heard s (sc_of (cons (ssh_w_byte 94) (cons (ssh_w_u32 0) (cons (ssh_w_text "xy") (nil bytes)))))))
+    (add (check_str "adjust" (sc_sent o) "5d0000000900100001\n")
+         (check_int "taken" (.taken (.s o)) 0))))
+
+; exit-status told; keepalive@openssh.com, wanting a reply, refused:
+; 100, channel 9.
+(def test_ssh_chan_requests () int
+  (let (es (sc_of (cons (ssh_w_byte 98) (cons (ssh_w_u32 0) (cons (ssh_w_text "exit-status") (cons (ssh_w_bool false) (cons (ssh_w_u32 3) (nil bytes)))))))
+        ka (sc_of (cons (ssh_w_byte 98) (cons (ssh_w_u32 0) (cons (ssh_w_text "keepalive@openssh.com") (cons (ssh_w_bool true) (nil bytes))))))
+        o (sc_heard (sc_open) ka))
+    (add (check_str "exit" (sc_events (sc_heard (sc_open) es)) "exit:3\n")
+         (check_str "keepalive" (sc_sent o) "6400000009\n"))))
+
+; The server's close is told and closed back once: 97, channel 9.
+(def test_ssh_chan_closed () int
+  (let (o (sc_heard (sc_open) (sc_of (cons (ssh_w_byte 97) (cons (ssh_w_u32 0) (nil bytes))))))
+    (add (check_str "events" (sc_events o) "closed\n")
+         (add (check_str "back" (sc_sent o) "6100000009\n")
+              (check_str "ours again" (sc_sent (ssh_chan_close (.s o))) "")))))
+
+; A channel the server opens is refused: 92, its channel 5, reason 1.
+(def test_ssh_server_open_refused () int
+  (let o (sc_heard (sc_up) (sc_of (cons (ssh_w_byte 90) (cons (ssh_w_text "x11") (cons (ssh_w_u32 5) (cons (ssh_w_u32 0) (cons (ssh_w_u32 0) (nil bytes))))))))
+    (check_true "refused" (starts_with (sc_sent o) "5c0000000500000001"))))
+
+; exec's request: 98, channel 9, "exec", true, the command.
+(def test_ssh_exec () int
+  (check_str "exec" (sc_sent (ssh_chan_exec (sc_open) "ls"))
+    "6200000009000000046578656301000000026c73\n"))
+
+; pty-req, no reply wanted: dumb, 80 by 24, ECHO off.
+(def test_ssh_pty () int
+  (check_str "pty" (sc_sent (ssh_chan_pty (sc_open) "dumb" 80 24))
+    "6200000009000000077074792d726571000000000464756d620000005000000018000000000000000000000006350000000000\n"))
