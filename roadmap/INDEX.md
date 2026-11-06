@@ -46,6 +46,7 @@ move independently, so several can be active at once.
 | [0068](0068-first-stage-everywhere.md) The first stage alone, wherever a card is made | Pi 5 | idea | – | – | pi5.md, boot.md, storage.md |
 | [0069](0069-audio-server.md) An audio server: drivers that only move frames, and one place that mixes | Desktop | active | 6/7 | – | sound.md, devices.md, programs.md, demo.md, pi5.md, testing.md |
 | [0070](0070-screenshots.md) Screenshots as GNOME takes them: the screen, a window, Print Screen, a notice | Desktop | idea | – | – | desktop.md, display.md, programs.md, testing.md |
+| [0071](0071-ssh-client.md) An SSH client: a shell, a command and a file on another machine | Network | active | 8/10 | 0048 (met), 0047 | network.md, programs.md, testing.md |
 ## Ready
 
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its
@@ -80,6 +81,12 @@ handshake byte for byte, and `http` and `agentd` speaking `https://` on
 QEMU to a local server; real servers from QEMU, then the Pi 5, are
 next. [0047](0047-pi5-random.md), randomness on the Pi 5, is active:
 `rng200` serves `random` there, and its first run on a board is next.
+[0071](0071-ssh-client.md), an SSH client, is active: Ed25519, the
+keys, the transport (checked byte for byte against a server written in
+Python) and the connection protocol are in, and `ssh` runs a command
+and a shell, and `scp` copies a file both ways, on QEMU against the
+host's own `sshd` (the `ssh` e2e case); a password to a real server
+from QEMU, then the Pi 5, are next.
 Every
 other goal left is an `idea`, without steps. On
 the display,
@@ -121,6 +128,8 @@ graph LR
   0061 --> 0067[0067 speech as spoken]
   0041 --> 0048[0048 TLS client]
   0047[0047 Pi 5 random] --> 0048
+  0048 --> 0071[0071 SSH client]
+  0047 --> 0071
 ```
 
 ## Done

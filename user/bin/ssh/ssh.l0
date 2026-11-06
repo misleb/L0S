@@ -1,0 +1,277 @@
+; ssh.l0 -- a shell or a command on another machine, over SSH 2
+; (proto/ssh.l0, sshconn.l0, sshc.l0), through the network stack's TCP:
+;
+;   ssh [-p PORT] [-i KEY] [-l USER] [USER@]HOST [COMMAND...]
+;
+; With a COMMAND, its words joined by spaces, it runs that, its output
+; and error written as they come, with no input: L0S's terminals are of
+; lines, and one read by ssh would be taken from the shell. Without one
+; it opens the user's shell, on a pty the server makes (TERM=dumb, its
+; echo off, as the terminal here echoes what is typed): each line typed
+; is sent, with its newline; Ctrl-C is sent as ^C, which the pty makes
+; an interrupt, and the end of input (Ctrl-D on an empty line) as ^D;
+; and what comes back is written without the escape sequences and
+; carriage returns a terminal of lines cannot show. The exit status is
+; the remote command's or shell's, 255 if ssh failed or the command was
+; killed by a signal, and 130 for a command stopped by Ctrl-C.
+;
+; A USER is needed: L0S has none of its own. The key offered is KEY,
+; or /etc/ssh/id_ed25519 if there is one: an Ed25519 key in OpenSSH's
+; format, not encrypted. A password, or keyboard-interactive's answers,
+; are asked on the terminal, the password not echoed. The host's key is
+; looked up in /etc/ssh/known_hosts (sshc.l0). PORT is 22 unless given.
+
+; Fails, saying why: 255, as OpenSSH's ssh does, so that it is not taken
+; for the remote command's status.
+(def complain ((why (list int))) int (let c (complain_as "ssh" why) 255))
+
+; The key looked for when -i names none.
+(def default_key () (list int) "/etc/ssh/id_ed25519")
+
+; ---------------------------------------------------------------- options
+
+; What was asked: the port, the key's file (empty for the default), the
+; user, the host, and the command's words (none for a shell).
+(data Opts (Opts (port int) (key (list int)) (user (list int)) (host (list int)) (cmd (list (list int)))))
+
+; How the command is used.
+(def usage () (list int) "ssh [-p PORT] [-i KEY] [-l USER] [USER@]HOST [COMMAND...]")
+
+; The options the words ws give, or why they give none.
+(def opts_of ((ws (list (list int)))) (Result Opts (list int))
+  (opts_from ws (Opts 22 (nil int) (nil int) (nil int) (nil (list int)))))
+
+; The rest of opts_of, after o so far: flags until the host, then the
+; command.
+(def opts_from ((ws (list (list int))) (o Opts)) (Result Opts (list int))
+  (if (is_empty ws)
+      (opts_done o)
+      (let w (head ws)
+        (if (and (any_eq w (split_spaces "-p -i -l")) (not (is_empty (tail ws))))
+            (opts_valued w (head (tail ws)) (tail (tail ws)) o)
+            (starts_with w "-") ((Err Opts (list int)) (usage))
+            (opts_done (.cmd (user_host o w) (tail ws)))))))
+
+; o after the flag f and its value v, the words ws after.
+(def opts_valued ((f (list int)) (v (list int)) (ws (list (list int))) (o Opts)) (Result Opts (list int))
+  (if (eq f "-p")
+      (match (word_number v)
+        ((Some n) (if (and (gt n 0) (lt n 65536)) (opts_from ws (.port o n)) ((Err Opts (list int)) (append "not a port: " v))))
+        ((None) ((Err Opts (list int)) (append "not a port: " v))))
+      (eq f "-i") (opts_from ws (.key o v))
+      (opts_from ws (.user o v))))
+
+; o with the host w names, USER@HOST or HOST, its user taken if it
+; names one.
+(def user_host ((o Opts) (w (list int))) Opts
+  (let at (last_at w 0 -1)
+    (if (lt at 0)
+        (.host o w)
+        (.host (.user o (take w at)) (drop w (add at 1))))))
+
+; Where the last @ in w is, w's first character being at i, or found
+; if there is none.
+(def last_at ((w (list int)) (i int) (found int)) int
+  (if (is_empty w) found (last_at (tail w) (add i 1) (if (eq (head w) 64) i found))))
+
+; o, if it names a host and a user.
+(def opts_done ((o Opts)) (Result Opts (list int))
+  (if (is_empty (.host o)) ((Err Opts (list int)) (usage))
+      (is_empty (.user o)) ((Err Opts (list int)) "a user is needed: ssh USER@HOST, or -l USER")
+      ((Ok Opts (list int)) o)))
+
+; The key to offer: the one -i names, which must read, or the default
+; if it is there.
+(def key_of ((o Opts)) (Result (Option SshKey) (list int))
+  (if (is_empty (.key o))
+      (sshc_key_at (default_key))
+      (match (read_whole (.key o))
+        ((Err why) ((Err (Option SshKey) (list int)) (append (.key o) (append ": " why))))
+        ((Ok b)
+          (match (ssh_key_of_text (bytes_to_list b))
+            ((Err why) ((Err (Option SshKey) (list int)) (append (.key o) (append ": " why))))
+            ((Ok k) ((Ok (Option SshKey) (list int)) (Some k))))))))
+
+; ---------------------------------------------------------------- the output
+
+; Where a terminal of lines is in what a pty sends: in plain text; after
+; ESC; in a control sequence (ESC [); in an operating system command
+; (ESC ]); after ESC in one; after ESC ( or ), a character set's name.
+(def at_text () int 0)
+(def at_esc () int 1)
+(def at_csi () int 2)
+(def at_osc () int 3)
+(def at_osc_esc () int 4)
+(def at_charset () int 5)
+
+; What a pty's bytes left to show: where the filter is after them, and
+; the bytes to write.
+(data Shown (Shown (at int) (out (list int))))
+
+; The bytes of b from i up to j as a terminal of lines shows them, the
+; filter at at: escape sequences dropped whole, ESC [ up to a byte from
+; @ to ~, ESC ] up to BEL or ESC \, ESC ( and ) with the name after, ESC
+; and any other byte; and carriage returns and bells dropped.
+(def shown ((at int) (b bytes) (i int) (j int)) Shown
+  (shown_from at b i j (nil int)))
+
+; The rest of shown, after acc reversed.
+(def shown_from ((at int) (b bytes) (i int) (j int) (acc (list int))) Shown
+  (if (ge i j)
+      (Shown at (rev acc))
+      (let (c (bytes_get b i)
+            next (filter_at at c))
+        (shown_from next b (add i 1) j (if (and (eq at (at_text)) (and (eq next (at_text)) (not (any_eq c (cons 13 (cons 7 (nil int))))))) (cons c acc) acc)))))
+
+; Where the filter is after the byte c, from at.
+(def filter_at ((at int) (c int)) int
+  (if (eq at (at_text)) (if (eq c 27) (at_esc) (at_text))
+      (eq at (at_esc)) (if (eq c 91) (at_csi) (eq c 93) (at_osc) (or (eq c 40) (eq c 41)) (at_charset) (at_text))
+      (eq at (at_csi)) (if (and (ge c 64) (le c 126)) (at_text) (at_csi))
+      (eq at (at_osc)) (if (eq c 7) (at_text) (eq c 27) (at_osc_esc) (at_osc))
+      (eq at (at_osc_esc)) (if (eq c 92) (at_text) (at_osc))
+      (at_text)))
+
+; b on standard output, delivered.
+(def out_bytes ((b bytes)) int (say_bytes b 0 (bytes_len b)))
+
+; b on standard error, delivered.
+(def err_bytes ((b bytes)) int
+  (let (w (file_write_bytes (IoFile 2) b 0 (bytes_len b)) f (file_flush (IoFile 2))) 0))
+
+; ---------------------------------------------------------------- the session
+
+; A session: the connection; the terminal and the port its lines come
+; to; whether it is a shell on a pty, or else the command; the exit
+; status so far; whether input has ended; whether it is over; and the
+; output filter's place.
+(data Sess (Sess (c SshConn) (term int) (tp int) (pty bool) (cmd (list int)) (status int) (ended bool) (over bool) (at int)))
+
+; The entry point.
+(def ssh () int
+  (match (opts_of (args))
+    ((Err why) (complain why))
+    ((Ok o)
+      (match (key_of o)
+        ((Err why) (complain why))
+        ((Ok key)
+          (match (sshc_terminal)
+            ((None) (complain "no terminal to ask on"))
+            ((Some term) (connect o key term (inet_open) (port_new) (port_new) (port_new)))))))))
+
+; o's host dialled through n, its notices to np, the terminal's answers
+; to tp and randomness asked on ap; logged in, and the session run.
+(def connect ((o Opts) (key (Option SshKey)) (term int) (n Inet) (np int) (tp int) (ap int)) int
+  (if (or (lt np 0) (or (lt tp 0) (lt ap 0)))
+      (complain "no kernel to talk through")
+      (match (sshc_dial n np ap (.host o) (.port o))
+        ((Err why) (complain (append (.host o) (append ": " why))))
+        ((Ok g)
+          (match g
+            ((SshHad c evs)
+              (let lg (SshLogin (.user o) (ssh_host_name (.host o) (.port o)) key term tp false 0 0)
+                (match (sshc_login c lg evs)
+                  ((Err why) (complain why))
+                  ((Ok g2) (session o g2 term tp))))))))))
+
+; The session's channel opened once logged in, and run; the exit status.
+(def session ((o Opts) (g SshHad) (term int) (tp int)) int
+  (match g
+    ((SshHad c evs)
+      (match (port_set (cons (.np c) (cons tp (nil int))))
+        ((PortSetMade)
+          (let (cmd (join_with " " (.cmd o))
+                s (Sess c term tp (is_empty cmd) cmd 255 false false (at_text)))
+            (run (step s (ssh_open_session (.s c)) evs))))
+        ((PortSetNotYours) (complain "its ports are not its own"))
+        ((PortSetSize) (complain "too many ports to wait on"))))))
+
+; s after the transport's step o, the events evs before its own.
+(def step ((s Sess) (o SshOut) (evs (list SshEvent))) Sess
+  (match (sshc_write (.c s) o)
+    ((SshHad c es) (events (.c s c) (append evs es)))))
+
+; s after each event of es in turn.
+(def events ((s Sess) (es (list SshEvent))) Sess
+  (if (is_empty es) s (events (event s (head es)) (tail es))))
+
+; s after the event e.
+(def event ((s Sess) (e SshEvent)) Sess
+  (match e
+    ((SshOpened)
+      (if (.pty s)
+          (match (sshc_write (.c s) (ssh_chan_pty (.s (.c s)) "dumb" 80 24))
+            ((SshHad c es) (step (events (.c s c) es) (ssh_chan_shell (.s c)) (nil SshEvent))))
+          (step s (ssh_chan_exec (.s (.c s)) (.cmd s)) (nil SshEvent))))
+    ((SshOpenFailed why) (failed s why))
+    ((SshRequestOk) (started s))
+    ((SshRequestFailed) (failed s (if (.pty s) "the server refused a shell" "the server refused the command")))
+    ((SshData d)
+      (if (.pty s)
+          (match (shown (.at s) d 0 (bytes_len d))
+            ((Shown at out) (let w (say out) (.at s at))))
+          (let w (out_bytes d) s)))
+    ((SshStderr d) (let w (err_bytes d) s))
+    ((SshExitStatus n) (.status s n))
+    ((SshExitSignal g) (let w (sshc_say_err (append "ssh: killed by signal " (append g "\n"))) (.status s 255)))
+    ((SshChanClosed) (.over s true))
+    ((SshGone why) (if (.over s) s (failed s why)))
+    ((SshEof) s)
+    ((SshHostKey b) s)
+    ((SshReady) s)
+    ((SshBanner t) s)
+    ((SshAuthOk) s)
+    ((SshAuthFailed ms p) s)
+    ((SshAuthPrompts n i ps) s)))
+
+; s over, failed, saying why.
+(def failed ((s Sess) (why (list int))) Sess
+  (let w (complain why) (.over (.status s 255) true)))
+
+; The terminal asked body ("r" for a line, "i" for its Ctrl-C), its
+; answers to the session's port.
+(def ask_term ((s Sess) (body (list int))) int
+  (port_tell (.term s) (request (.tp s) body)))
+
+; s's shell or command granted: a shell's first line asked of the
+; terminal, and its Ctrl-C; a command's input ended at once.
+(def started ((s Sess)) Sess
+  (let i (ask_term s "i")
+    (if (.pty s)
+        (let r (ask_term s "r") s)
+        (step (.ended s true) (ssh_chan_eof (.s (.c s))) (nil SshEvent)))))
+
+; The session run until it is over, a message at a time from the
+; connection or the terminal; then the connection closed, and the exit
+; status.
+(def run ((s Sess)) int
+  (if (.over s)
+      (let z (sshc_close (.c s)) (.status s))
+      (match (port_receive_set)
+        ((SetRecvFailed) (let z (sshc_close (.c s)) (complain "its ports failed")))
+        ((SetMessage port m)
+          (match m
+            ((RecvFailed) (run s))
+            ((Message from b)
+              (if (eq port (.tp s))
+                  (run (typed s (msg_text b)))
+                  (match (sshc_feed (.c s) b)
+                    ((SshHad c es) (run (events (.c s c) es)))))))))))
+
+; s after the terminal sent t: a Ctrl-C, sent to a shell as ^C and
+; ending a command; the end of input, sent to a shell as ^D; or a line,
+; sent, and the next asked for.
+(def typed ((s Sess) (t (list int))) Sess
+  (if (eq t (cons 3 (nil int)))
+      (if (.pty s)
+          (send_text s (cons 3 (nil int)))
+          (step (.over (.status s 130) true) (ssh_chan_close (.s (.c s))) (nil SshEvent)))
+      (or (.ended s) (not (.pty s))) s
+      (is_empty t) (send_text (.ended s true) (cons 4 (nil int)))
+      (let r (ask_term s "r")
+        (send_text s t))))
+
+; The text t sent on the channel.
+(def send_text ((s Sess) (t (list int))) Sess
+  (let b (bytes_from_list t)
+    (step s (ssh_chan_send (.s (.c s)) b 0 (bytes_len b)) (nil SshEvent))))

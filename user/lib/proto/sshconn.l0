@@ -1,0 +1,320 @@
+; sshconn.l0 -- SSH 2's user authentication (RFC 4252, and
+; keyboard-interactive, RFC 4256) and one session channel (RFC 4254),
+; pure, over ssh.l0's transport: the requests built and sent as the
+; caller asks, and what the server sends read into ssh.l0's events.
+; The methods: none, to learn which may go on; publickey with an
+; Ed25519 key (sshkey.l0); password; keyboard-interactive, its prompts
+; answered by the caller. The channel: a session, a pty asked for or
+; not, then a shell or a command, its data both ways within each side's
+; window, its standard error, its end, its exit status. The window we
+; offer is opened again as data is taken, as the caller takes it all at
+; once. Anything else the server opens or asks for is refused.
+
+; ------------------------------------------------------------- numbers
+
+; The connection protocol's messages (RFC 4250 4.1.2).
+(def ssh_msg_userauth_request () int 50)
+(def ssh_msg_userauth_failure () int 51)
+(def ssh_msg_userauth_success () int 52)
+(def ssh_msg_userauth_banner () int 53)
+(def ssh_msg_userauth_info_request () int 60)
+(def ssh_msg_userauth_info_response () int 61)
+(def ssh_msg_global_request () int 80)
+(def ssh_msg_request_failure () int 82)
+(def ssh_msg_channel_open () int 90)
+(def ssh_msg_channel_open_confirmation () int 91)
+(def ssh_msg_channel_open_failure () int 92)
+(def ssh_msg_channel_window_adjust () int 93)
+(def ssh_msg_channel_data () int 94)
+(def ssh_msg_channel_extended_data () int 95)
+(def ssh_msg_channel_eof () int 96)
+(def ssh_msg_channel_close () int 97)
+(def ssh_msg_channel_request () int 98)
+(def ssh_msg_channel_success () int 99)
+(def ssh_msg_channel_failure () int 100)
+
+; The window we offer the server, and the most data we take in one
+; packet; and the most we send in one.
+(def ssh_window () int 2097152)
+(def ssh_max_packet () int 32768)
+
+; ------------------------------------------------------------- authentication
+
+; The start every userauth request has: its number, the user, the
+; service, and the method.
+(def ssh_auth_head ((user (list int)) (method (list int))) (list bytes)
+  (cons (ssh_w_byte (ssh_msg_userauth_request))
+        (cons (ssh_w_text user) (cons (ssh_w_text "ssh-connection") (cons (ssh_w_text method) (nil bytes))))))
+
+; s with the user kept for the requests after.
+(def ssh_with_user ((s Ssh) (user (list int))) Ssh (.user s user))
+
+; The method none asked, for user: the server's failure then names the
+; methods that may go on.
+(def ssh_auth_none ((s Ssh) (user (list int))) SshOut
+  (ssh_send_payload (ssh_with_user s user) (ssh_join (ssh_auth_head user "none"))))
+
+; The publickey method, for user, by the key k: its signature over the
+; session id and the request (RFC 4252 7).
+(def ssh_auth_key ((s Ssh) (user (list int)) (k SshKey)) SshOut
+  (let (head (ssh_join (append (ssh_auth_head user "publickey")
+                         (cons (ssh_w_bool true)
+                               (cons (ssh_w_text "ssh-ed25519") (cons (ssh_w_string (ssh_key_blob k)) (nil bytes))))))
+        signed (ssh_join (cons (ssh_w_string (.sid s)) (cons head (nil bytes))))
+        sig (ssh_key_sign k signed))
+    (ssh_send_payload (ssh_with_user s user) (ssh_join (cons head (cons (ssh_w_string sig) (nil bytes)))))))
+
+; The password method, for user, with the password pw.
+(def ssh_auth_password ((s Ssh) (user (list int)) (pw (list int))) SshOut
+  (ssh_send_payload (ssh_with_user s user)
+    (ssh_join (append (ssh_auth_head user "password") (cons (ssh_w_bool false) (cons (ssh_w_text pw) (nil bytes)))))))
+
+; The keyboard-interactive method begun, for user, no language or
+; submethods named: the server answers with its prompts.
+(def ssh_auth_kbd ((s Ssh) (user (list int))) SshOut
+  (ssh_send_payload (ssh_with_user s user)
+    (ssh_join (append (ssh_auth_head user "keyboard-interactive") (cons (ssh_w_text "") (cons (ssh_w_text "") (nil bytes)))))))
+
+; Keyboard-interactive's prompts answered, one answer each, in order.
+(def ssh_auth_kbd_answer ((s Ssh) (answers (list (list int)))) SshOut
+  (ssh_send_payload s
+    (ssh_join (cons (ssh_w_byte (ssh_msg_userauth_info_response))
+                    (cons (ssh_w_u32 (length answers)) (ssh_texts answers (nil bytes)))))))
+
+; Each text of ts as a string, after acc reversed.
+(def ssh_texts ((ts (list (list int))) (acc (list bytes))) (list bytes)
+  (if (is_empty ts) (rev acc) (ssh_texts (tail ts) (cons (ssh_w_text (head ts)) acc))))
+
+; ------------------------------------------------------------- the channel
+
+; The session channel opened, ours number 0, with our window and
+; packet size.
+(def ssh_open_session ((s Ssh)) SshOut
+  (ssh_send_payload (.lwin s (ssh_window))
+    (ssh_join (cons (ssh_w_byte (ssh_msg_channel_open))
+                    (cons (ssh_w_text "session")
+                          (cons (ssh_w_u32 0) (cons (ssh_w_u32 (ssh_window)) (cons (ssh_w_u32 (ssh_max_packet)) (nil bytes)))))))))
+
+; A channel request of type ty, its reply asked for if want, its own
+; fields fs after.
+(def ssh_chan_request ((s Ssh) (ty (list int)) (want bool) (fs (list bytes))) SshOut
+  (ssh_send_payload s
+    (ssh_join (cons (ssh_w_byte (ssh_msg_channel_request))
+                    (cons (ssh_w_u32 (.chan s)) (cons (ssh_w_text ty) (cons (ssh_w_bool want) fs)))))))
+
+; A pty asked for, no reply wanted: the terminal's type, its columns and
+; rows, no pixels, and its modes, ECHO (53) off, as the caller's own
+; terminal shows what is typed, then the end of them (RFC 4254 8).
+(def ssh_chan_pty ((s Ssh) (term (list int)) (cols int) (rows int)) SshOut
+  (let modes (ssh_join (cons (ssh_w_byte 53) (cons (ssh_w_u32 0) (cons (ssh_w_byte 0) (nil bytes)))))
+    (ssh_chan_request s "pty-req" false
+      (cons (ssh_w_text term)
+            (cons (ssh_w_u32 cols) (cons (ssh_w_u32 rows) (cons (ssh_w_u32 0) (cons (ssh_w_u32 0) (cons (ssh_w_string modes) (nil bytes))))))))))
+
+; The user's shell asked for, its reply wanted.
+(def ssh_chan_shell ((s Ssh)) SshOut
+  (ssh_chan_request s "shell" true (nil bytes)))
+
+; The command cmd asked for, its reply wanted.
+(def ssh_chan_exec ((s Ssh) (cmd (list int))) SshOut
+  (ssh_chan_request s "exec" true (cons (ssh_w_text cmd) (nil bytes))))
+
+; The bytes of b from i up to j sent on the channel, as the server's
+; window lets them go; what it does not yet is held for its next
+; WINDOW_ADJUST.
+(def ssh_chan_send ((s Ssh) (b bytes) (i int) (j int)) SshOut
+  (let pend (bytes_concat (cons (.pend s) (cons (bytes_slice b i j) (nil bytes))))
+    (ssh_done (ssh_flush (ssh_out (.pend s pend))))))
+
+; Whether data is held that the server's window has not let go.
+(def ssh_chan_held ((s Ssh)) bool (gt (bytes_len (.pend s)) 0))
+
+; o with as much held data sent as the window and packet size let, a
+; packet at a time.
+(def ssh_flush ((o SshOut)) SshOut
+  (let (s (.s o)
+        pend (.pend s)
+        n (min (bytes_len pend) (min (.rwin s) (min (.rmax s) (ssh_max_packet)))))
+    (if (le n 0)
+        o
+        (let (o1 (ssh_put o (ssh_join (cons (ssh_w_byte (ssh_msg_channel_data))
+                                       (cons (ssh_w_u32 (.chan s)) (cons (ssh_w_string (bytes_slice pend 0 n)) (nil bytes))))))
+              s1 (.s o1)
+              rest (bytes_slice pend n (bytes_len pend)))
+          (ssh_flush (SshOut (.pend (.rwin s1 (sub (.rwin s1) n)) rest) (.send o1) (.events o1)))))))
+
+; The end of our data told.
+(def ssh_chan_eof ((s Ssh)) SshOut
+  (ssh_send_payload s (ssh_join (cons (ssh_w_byte (ssh_msg_channel_eof)) (cons (ssh_w_u32 (.chan s)) (nil bytes))))))
+
+; The channel closed by us, unless it is already.
+(def ssh_chan_close ((s Ssh)) SshOut
+  (if (.closing s)
+      (ssh_done (ssh_out s))
+      (ssh_send_payload (.closing s true) (ssh_join (cons (ssh_w_byte (ssh_msg_channel_close)) (cons (ssh_w_u32 (.chan s)) (nil bytes)))))))
+
+; ------------------------------------------------------------- reading
+
+; o after the server's message p, of the connection protocol, came.
+(def ssh_conn_message ((o SshOut) (p bytes)) SshOut
+  (let t (bytes_get p 0)
+    (if (eq t (ssh_msg_userauth_success)) (ssh_emit o (SshAuthOk))
+        (eq t (ssh_msg_userauth_failure)) (ssh_auth_failure o p)
+        (eq t (ssh_msg_userauth_banner)) (ssh_banner o p)
+        (eq t (ssh_msg_userauth_info_request)) (ssh_info_request o p)
+        (eq t (ssh_msg_global_request)) (ssh_global_request o p)
+        (eq t (ssh_msg_channel_open)) (ssh_refuse_open o p)
+        (eq t (ssh_msg_channel_open_confirmation)) (ssh_opened o p)
+        (eq t (ssh_msg_channel_open_failure)) (ssh_open_failed o p)
+        (eq t (ssh_msg_channel_window_adjust)) (ssh_window_adjust o p)
+        (eq t (ssh_msg_channel_data)) (ssh_chan_data o p false)
+        (eq t (ssh_msg_channel_extended_data)) (ssh_chan_data o p true)
+        (eq t (ssh_msg_channel_eof)) (ssh_emit o (SshEof))
+        (eq t (ssh_msg_channel_close)) (ssh_chan_closed o)
+        (eq t (ssh_msg_channel_request)) (ssh_chan_asked o p)
+        (eq t (ssh_msg_channel_success)) (ssh_emit o (SshRequestOk))
+        (eq t (ssh_msg_channel_failure)) (ssh_emit o (SshRequestFailed))
+        o)))
+
+; A userauth failure: the methods that may go on, and whether the
+; request was a partial success.
+(def ssh_auth_failure ((o SshOut) (p bytes)) SshOut
+  (match (ssh_string_at p 1 (bytes_len p))
+    ((None) (ssh_fail o "a userauth failure does not read"))
+    ((Some f)
+      (let partial (and (lt (.next f) (bytes_len p)) (eq (bytes_get p (.next f)) 1))
+        (ssh_emit o (SshAuthFailed (ssh_field_names p f) partial))))))
+
+; A banner, its text.
+(def ssh_banner ((o SshOut) (p bytes)) SshOut
+  (match (ssh_string_at p 1 (bytes_len p))
+    ((None) o)
+    ((Some f) (ssh_emit o (SshBanner (ssh_field_text p f))))))
+
+; Keyboard-interactive's request: its name, instruction and language,
+; then its prompts.
+(def ssh_info_request ((o SshOut) (p bytes)) SshOut
+  (match (ssh_name_lists_raw p 1 3 (nil SshField))
+    ((None) (ssh_fail o "a keyboard-interactive request does not read"))
+    ((Some fs)
+      (let i (.next (nth fs 2))
+        (match (ssh_u32_at p i (bytes_len p))
+          ((None) (ssh_fail o "a keyboard-interactive request does not read"))
+          ((Some n)
+            (match (ssh_prompts p (.next n) (.value n) (nil SshPrompt))
+              ((None) (ssh_fail o "a keyboard-interactive request does not read"))
+              ((Some ps)
+                (ssh_emit o (SshAuthPrompts (ssh_field_text p (nth fs 0)) (ssh_field_text p (nth fs 1)) ps))))))))))
+
+; The n strings from i of p, after acc reversed, or none if one does
+; not read.
+(def ssh_name_lists_raw ((p bytes) (i int) (n int) (acc (list SshField))) (Option (list SshField))
+  (if (eq n 0)
+      (Some (rev acc))
+      (match (ssh_string_at p i (bytes_len p))
+        ((None) ((None (list SshField))))
+        ((Some f) (ssh_name_lists_raw p (.next f) (sub n 1) (cons f acc))))))
+
+; The n prompts from i, each its text and whether to echo, after acc
+; reversed.
+(def ssh_prompts ((p bytes) (i int) (n int) (acc (list SshPrompt))) (Option (list SshPrompt))
+  (if (le n 0)
+      (Some (rev acc))
+      (match (ssh_string_at p i (bytes_len p))
+        ((None) ((None (list SshPrompt))))
+        ((Some f)
+          (match (ssh_byte_at p (.next f) (bytes_len p))
+            ((None) ((None (list SshPrompt))))
+            ((Some e) (ssh_prompts p (.next e) (sub n 1) (cons (SshPrompt (ssh_field_text p f) (eq (.value e) 1)) acc))))))))
+
+; A global request, refused if it wants a reply.
+(def ssh_global_request ((o SshOut) (p bytes)) SshOut
+  (match (ssh_string_at p 1 (bytes_len p))
+    ((None) o)
+    ((Some f)
+      (if (and (lt (.next f) (bytes_len p)) (eq (bytes_get p (.next f)) 1))
+          (ssh_put o (ssh_w_byte (ssh_msg_request_failure)))
+          o))))
+
+; A channel the server opens, refused: administratively prohibited (1).
+(def ssh_refuse_open ((o SshOut) (p bytes)) SshOut
+  (match (ssh_string_at p 1 (bytes_len p))
+    ((None) o)
+    ((Some f)
+      (match (ssh_u32_at p (.next f) (bytes_len p))
+        ((None) o)
+        ((Some sender)
+          (ssh_put o (ssh_join (cons (ssh_w_byte (ssh_msg_channel_open_failure))
+                                 (cons (ssh_w_u32 (.value sender)) (cons (ssh_w_u32 1) (cons (ssh_w_text "ssh opens no channels for the server") (cons (ssh_w_text "") (nil bytes)))))))))))))
+
+; Our channel opened: the server's number for it, its window and its
+; packet size.
+(def ssh_opened ((o SshOut) (p bytes)) SshOut
+  (if (lt (bytes_len p) 17)
+      (ssh_fail o "a channel's confirmation does not read")
+      (match o
+        ((SshOut s send evs)
+          (ssh_emit (SshOut (.rmax (.rwin (.chan s (ssh_u32 p 5)) (ssh_u32 p 9)) (ssh_u32 p 13)) send evs) (SshOpened))))))
+
+; Our channel refused: the description why.
+(def ssh_open_failed ((o SshOut) (p bytes)) SshOut
+  (match (ssh_string_at p 9 (bytes_len p))
+    ((None) (ssh_emit o (SshOpenFailed "the server refused the session")))
+    ((Some f) (ssh_emit o (SshOpenFailed (ssh_field_text p f))))))
+
+; More room in the server's window, and what was held sent into it.
+(def ssh_window_adjust ((o SshOut) (p bytes)) SshOut
+  (if (lt (bytes_len p) 9)
+      o
+      (match o
+        ((SshOut s send evs) (ssh_flush (SshOut (.rwin s (add (.rwin s) (ssh_u32 p 5))) send evs))))))
+
+; Data on the channel, its standard error's if ext: told, counted
+; against our window, which is opened again once half of it is taken.
+(def ssh_chan_data ((o SshOut) (p bytes) (ext bool)) SshOut
+  (match (ssh_string_at p (if ext 9 5) (bytes_len p))
+    ((None) (ssh_fail o "a channel's data does not read"))
+    ((Some f)
+      (let (d (ssh_field_bytes p f)
+            n (bytes_len d)
+            o1 (ssh_emit o (if ext (SshStderr d) (SshData d))))
+        (match o1
+          ((SshOut s send evs)
+            (let (taken (add (.taken s) n)
+                  lwin (sub (.lwin s) n))
+              (if (lt taken (div (ssh_window) 2))
+                  (SshOut (.lwin (.taken s taken) lwin) send evs)
+                  (ssh_put (SshOut (.lwin (.taken s 0) (add lwin taken)) send evs)
+                    (ssh_join (cons (ssh_w_byte (ssh_msg_channel_window_adjust))
+                                    (cons (ssh_w_u32 (.chan s)) (cons (ssh_w_u32 taken) (nil bytes))))))))))))))
+
+; The server closed the channel: told, and closed back if we have not.
+(def ssh_chan_closed ((o SshOut)) SshOut
+  (match o
+    ((SshOut s send evs)
+      (let (closing (.closing s)
+            o1 (ssh_emit (SshOut (.closing s true) send evs) (SshChanClosed)))
+        (if closing
+            o1
+            (ssh_put o1 (ssh_join (cons (ssh_w_byte (ssh_msg_channel_close)) (cons (ssh_w_u32 (.chan s)) (nil bytes))))))))))
+
+; A request the server makes of the channel: its exit status or signal
+; told; any that wants a reply refused.
+(def ssh_chan_asked ((o SshOut) (p bytes)) SshOut
+  (match (ssh_string_at p 5 (bytes_len p))
+    ((None) o)
+    ((Some f)
+      (let (want (and (lt (.next f) (bytes_len p)) (eq (bytes_get p (.next f)) 1))
+            at (add (.next f) 1)
+            o1 (if (ssh_field_is p f "exit-status")
+                   (match (ssh_u32_at p at (bytes_len p))
+                     ((None) o)
+                     ((Some n) (ssh_emit o (SshExitStatus (.value n)))))
+                   (ssh_field_is p f "exit-signal")
+                   (match (ssh_string_at p at (bytes_len p))
+                     ((None) o)
+                     ((Some g) (ssh_emit o (SshExitSignal (ssh_field_text p g)))))
+                   o))
+        (if want
+            (ssh_put o1 (ssh_join (cons (ssh_w_byte (ssh_msg_channel_failure)) (cons (ssh_w_u32 (.chan (.s o1))) (nil bytes)))))
+            o1)))))

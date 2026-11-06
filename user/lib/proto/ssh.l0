@@ -1,0 +1,589 @@
+; ssh.l0 -- SSH 2's client transport (RFC 4253), pure: the version
+; lines, the key exchange, the keys derived, and packets sealed and
+; opened; the user's authentication and the session's channel are
+; sshconn.l0's, over it. Nothing here does I/O: the caller moves the
+; bytes, over inet's TCP in sshc.l0, and gives the randomness; each step
+; gives back the packets to send and what happened, as events.
+;
+; What it speaks: curve25519-sha256 (RFC 8731) for the exchange, with
+; OpenSSH's strict key exchange (kex-strict-c-v00@openssh.com, so that
+; no packet can be slipped in or dropped while it runs) and ext-info-c;
+; host keys ssh-ed25519, ecdsa-sha2-nistp256, rsa-sha2-512 and
+; rsa-sha2-256 (sshkey.l0); packets sealed by
+; chacha20-poly1305@openssh.com, aes256-gcm@openssh.com or
+; aes128-gcm@openssh.com, which need no MAC; no compression. After the
+; host's key is checked by its signature the exchange waits, its input
+; held, until the caller has looked the key up and says to go on
+; (ssh_host_accept). A second key exchange, which a server asks for
+; after a great deal of data, ends the connection, as does anything it
+; cannot read. Not constant-time: see the crypto libraries' headers.
+
+; A direction's cipher: none yet; chacha20-poly1305@openssh.com's two
+; keys, the main one (K_2) and the length's (K_1); or AES-GCM's key and
+; its 12-byte IV.
+(data SshAead (SshPlainCipher) (SshChacha bytes bytes) (SshGcm GcmKey bytes))
+
+; A direction: its cipher, the next packet's sequence number, and how
+; many packets it has sealed or opened since it was keyed, which steps
+; GCM's nonce.
+(data SshDir (SshDir (aead SshAead) (seq int) (count int)))
+
+; A prompt keyboard-interactive asks: its text, and whether the answer
+; may be shown as it is typed.
+(data SshPrompt (SshPrompt (text (list int)) (echo bool)))
+
+; What a step found. The host's key, checked by its signature over the
+; exchange, which the caller looks up before ssh_host_accept; the
+; transport up, ready for the user's authentication; a banner to show;
+; the user authenticated, or not, with the methods that may go on and
+; whether one was a partial success; keyboard-interactive's name,
+; instruction and prompts; the session's channel open, or refused and
+; why; its request (shell or exec) granted or not; data from the
+; channel, on its standard output or error; the end of its data; the
+; remote command's exit status, or the signal that ended it; the
+; channel closed; and the connection gone, and why.
+(data SshEvent
+  (SshHostKey bytes)
+  (SshReady)
+  (SshBanner (list int))
+  (SshAuthOk)
+  (SshAuthFailed (list (list int)) bool)
+  (SshAuthPrompts (list int) (list int) (list SshPrompt))
+  (SshOpened)
+  (SshOpenFailed (list int))
+  (SshRequestOk)
+  (SshRequestFailed)
+  (SshData bytes)
+  (SshStderr bytes)
+  (SshEof)
+  (SshExitStatus int)
+  (SshExitSignal (list int))
+  (SshChanClosed)
+  (SshGone (list int)))
+
+; A connection. Its stage (ssh_stage_*) and, ended, why; the server's
+; version line; the bytes held that are not yet a whole packet; both
+; KEXINITs, ours and the server's, and our X25519 secret and public key,
+; for the exchange hash; whether the server takes the strict exchange;
+; the host key's algorithm and each direction's cipher, as named; the
+; host's key blob; the shared secret, as an mpint; the exchange hash;
+; the session's id, the first exchange's hash; each direction; and
+; sshconn.l0's: the user, the server's number for our channel (-1 till
+; it is open), how many bytes it may still take and the most in one
+; packet, how many we may still be sent, how many we have taken since
+; we said so, the data waiting for room, and whether we have closed the
+; channel.
+(data Ssh
+  (Ssh (stage int) (why (list int)) (vs (list int)) (held bytes)
+       (ic bytes) (is bytes) (secret bytes) (qc bytes) (strict bool)
+       (hostalg (list int)) (wcipher (list int)) (rcipher (list int))
+       (hostkey bytes) (k bytes) (h bytes) (sid bytes) (rd SshDir) (wr SshDir)
+       (user (list int)) (chan int) (rwin int) (rmax int) (lwin int) (taken int) (pend bytes) (closing bool)))
+
+; What a step gave: the connection after it, the bytes to send to the
+; server, and what happened. Both lists are kept reversed while a step
+; runs, and put in order as it ends (ssh_done).
+(data SshOut (SshOut (s Ssh) (send (list bytes)) (events (list SshEvent))))
+
+; The stages: waiting for the server's version line, its KEXINIT, its
+; ECDH reply; the host's key told and waiting for the caller; waiting
+; for the server's NEWKEYS, for the userauth service to be accepted; up;
+; ended by the server; failed.
+(def ssh_stage_version () int 0)
+(def ssh_stage_kexinit () int 1)
+(def ssh_stage_reply () int 2)
+(def ssh_stage_host () int 3)
+(def ssh_stage_newkeys () int 4)
+(def ssh_stage_service () int 5)
+(def ssh_stage_up () int 6)
+(def ssh_stage_closed () int 7)
+(def ssh_stage_failed () int 8)
+
+; Whether s is up, or has ended either way.
+(def ssh_up ((s Ssh)) bool (eq (.stage s) (ssh_stage_up)))
+(def ssh_ended ((s Ssh)) bool (ge (.stage s) (ssh_stage_closed)))
+
+; Our version line, without its CR LF.
+(def ssh_version () (list int) "SSH-2.0-L0S_1.0")
+
+; The longest packet taken, its length field's value: RFC 4253 6.1's
+; 35000 is the least a client must take, and OpenSSH sends up to 256 KB.
+(def ssh_packet_max () int 262144)
+
+; Messages' numbers (RFC 4250 4.1.2).
+(def ssh_msg_disconnect () int 1)
+(def ssh_msg_ignore () int 2)
+(def ssh_msg_unimplemented () int 3)
+(def ssh_msg_debug () int 4)
+(def ssh_msg_service_request () int 5)
+(def ssh_msg_service_accept () int 6)
+(def ssh_msg_ext_info () int 7)
+(def ssh_msg_kexinit () int 20)
+(def ssh_msg_newkeys () int 21)
+(def ssh_msg_ecdh_init () int 30)
+(def ssh_msg_ecdh_reply () int 31)
+
+; ------------------------------------------------------------- bytes
+
+; Nothing, as bytes.
+(def ssh_empty () bytes (bytes_from_list (nil int)))
+
+; n zero bytes.
+(def ssh_zeros ((n int)) bytes (bytes_from_list (rsa_repeat 0 n (nil int))))
+
+; Whether a and b hold the same bytes, every byte looked at.
+(def ssh_same ((a bytes) (b bytes) (i int)) bool
+  (and (eq (bytes_len a) (sub (bytes_len b) i)) (eq (ssh_diff a b i 0 0) 0)))
+
+; ssh_same's loop: the bytes of a from k on and of b from i + k that
+; differ, ored into acc.
+(def ssh_diff ((a bytes) (b bytes) (i int) (k int) (acc int)) int
+  (if (ge k (bytes_len a))
+      acc
+      (ssh_diff a b i (add k 1) (bit_or acc (bit_xor (bytes_get a k) (bytes_get b (add i k)))))))
+
+; v plus 1, kept to 32 bits, as sequence numbers wrap.
+(def ssh_next32 ((v int)) int (bit_and (add v 1) 4294967295))
+
+; ------------------------------------------------------------- the outcome
+
+; o with the packet whose payload is p sealed and to be sent.
+(def ssh_put ((o SshOut) (p bytes)) SshOut
+  (match o
+    ((SshOut s send evs)
+      (match (ssh_seal (.wr s) p)
+        ((SshSealed d b) (SshOut (.wr s d) (cons b send) evs))))))
+
+; o with ev happened.
+(def ssh_emit ((o SshOut) (ev SshEvent)) SshOut
+  (match o ((SshOut s send evs) (SshOut s send (cons ev evs)))))
+
+; o failed, saying why; nothing after it is read.
+(def ssh_fail ((o SshOut) (why (list int))) SshOut
+  (match o
+    ((SshOut s send evs)
+      (SshOut (.why (.stage s (ssh_stage_failed)) why) send (cons (SshGone why) evs)))))
+
+; o ended by the server, saying why.
+(def ssh_closed ((o SshOut) (why (list int))) SshOut
+  (match o
+    ((SshOut s send evs)
+      (SshOut (.why (.stage s (ssh_stage_closed)) why) send (cons (SshGone why) evs)))))
+
+; o's lists in order, as a step gives them.
+(def ssh_done ((o SshOut)) SshOut
+  (match o ((SshOut s send evs) (SshOut s (rev send) (rev evs)))))
+
+; s with nothing yet to send or told.
+(def ssh_out ((s Ssh)) SshOut
+  (SshOut s (nil bytes) (nil SshEvent)))
+
+; ------------------------------------------------------------- packets
+
+; A direction with no keys, at packet 0.
+(def ssh_plain_dir () SshDir (SshDir (SshPlainCipher) 0 0))
+
+; d after one more packet.
+(def ssh_dir_next ((d SshDir)) SshDir
+  (SshDir (.aead d) (ssh_next32 (.seq d)) (add (.count d) 1)))
+
+; The 12-byte nonce chacha20.l0 takes for ChaCha20 as OpenSSH uses it,
+; with a 64-bit counter and the packet's sequence number as its 64-bit
+; nonce: four zero bytes, the counter's high word, then the number.
+(def ssh_chacha_nonce ((seq int)) bytes
+  (ssh_join (cons (ssh_w_u32 0) (cons (ssh_w_u64 seq) (nil bytes)))))
+
+; GCM's nonce for the packet n after keying: the IV's first four bytes,
+; then its last eight as a number, plus n, mod 2^64 (RFC 5647 7.1).
+(def ssh_gcm_nonce ((iv bytes) (n int)) bytes
+  (let (lo (add (ssh_u32 iv 8) n)
+        hi (bit_and (add (ssh_u32 iv 4) (bit_shr lo 32)) 4294967295))
+    (ssh_join (cons (bytes_slice iv 0 4) (cons (ssh_w_u32 hi) (cons (ssh_w_u32 (bit_and lo 4294967295)) (nil bytes)))))))
+
+; A packet sealed, and the direction after it.
+(data SshSealed (SshSealed SshDir bytes))
+
+; The block the padded packet fills a whole number of: 16 for GCM, else
+; 8.
+(def ssh_block ((a SshAead)) int
+  (match a ((SshPlainCipher) 8) ((SshChacha m h) 8) ((SshGcm k iv) 16)))
+
+; The packet carrying payload p, sealed by d. The padding, at least 4
+; bytes, fills a whole number of blocks: with the length field when
+; there is no cipher, and without it under an AEAD, which seals the
+; length apart.
+(def ssh_seal ((d SshDir) (p bytes)) SshSealed
+  (let (a (.aead d)
+        bs (ssh_block a)
+        base (add (add 1 (bytes_len p)) (match a ((SshPlainCipher) 4) ((SshChacha m h) 0) ((SshGcm k iv) 0)))
+        pad0 (sub bs (mod base bs))
+        pad (if (lt pad0 4) (add pad0 bs) pad0)
+        len (add (add 1 (bytes_len p)) pad)
+        inner (ssh_join (cons (ssh_w_byte pad) (cons p (cons (ssh_zeros pad) (nil bytes))))))
+    (SshSealed (ssh_dir_next d) (ssh_sealed a (.seq d) (.count d) len inner))))
+
+; The bytes of a packet of length len whose padding length, payload and
+; padding are inner, sealed by a, as packet seq, the count-th since
+; keying.
+(def ssh_sealed ((a SshAead) (seq int) (count int) (len int) (inner bytes)) bytes
+  (match a
+    ((SshPlainCipher) (ssh_join (cons (ssh_w_u32 len) (cons inner (nil bytes)))))
+    ((SshChacha main hdr)
+      (let (nonce (ssh_chacha_nonce seq)
+            l (chacha20_xor hdr 0 nonce (ssh_w_u32 len) 0 4)
+            c (chacha20_xor main 1 nonce inner 0 len)
+            lc (ssh_join (cons l (cons c (nil bytes))))
+            otk (bytes_slice (chacha20_block main 0 nonce) 0 32))
+        (ssh_join (cons lc (cons (poly1305 otk lc 0 (bytes_len lc)) (nil bytes))))))
+    ((SshGcm k iv)
+      (let aad (ssh_w_u32 len)
+        (ssh_join (cons aad (cons (gcm_seal k (ssh_gcm_nonce iv count) aad inner 0 len) (nil bytes))))))))
+
+; What reading a packet from bytes found: not all of it yet; something
+; that is not a packet, and why; or the payload, where the next packet
+; begins, and the direction after it.
+(data SshRead (SshNeed) (SshBad (list int)) (SshGot bytes int SshDir))
+
+; The packet at the start of b, opened by d.
+(def ssh_unseal ((d SshDir) (b bytes)) SshRead
+  (if (lt (bytes_len b) 4)
+      (SshNeed)
+      (match (.aead d)
+        ((SshPlainCipher) (ssh_unseal_plain d b (ssh_u32 b 0)))
+        ((SshChacha main hdr)
+          (let nonce (ssh_chacha_nonce (.seq d))
+            (ssh_unseal_chacha d b main nonce (ssh_u32 (chacha20_xor hdr 0 nonce b 0 4) 0))))
+        ((SshGcm k iv) (ssh_unseal_gcm d b k iv (ssh_u32 b 0))))))
+
+; Whether a packet's length len is one to read: room for the padding's
+; length and 4 bytes of padding, at most the most taken, and a whole
+; number of blocks of bs (counted from fill, the bytes before it the
+; blocks include).
+(def ssh_len_ok ((len int) (fill int) (bs int)) bool
+  (and (ge len 5) (and (le len (ssh_packet_max)) (eq (mod (add len fill) bs) 0))))
+
+; A packet's payload from inner, its padding length then payload and
+; padding, len bytes from i; or why not.
+(def ssh_payload ((inner bytes) (i int) (len int) (rest int) (d SshDir)) SshRead
+  (let pad (bytes_get inner i)
+    (if (or (lt pad 4) (gt (add pad 1) len))
+        (SshBad "a packet's padding is wrong")
+        (SshGot (bytes_slice inner (add i 1) (sub (add i len) pad)) rest (ssh_dir_next d)))))
+
+; The rest of ssh_unseal with no cipher: the length field, then the
+; packet in the clear.
+(def ssh_unseal_plain ((d SshDir) (b bytes) (len int)) SshRead
+  (if (not (ssh_len_ok len 4 8)) (SshBad "a packet's length is wrong")
+      (lt (bytes_len b) (add 4 len)) (SshNeed)
+      (ssh_payload b 4 len (add 4 len) d)))
+
+; The rest of ssh_unseal under ChaCha20-Poly1305: the length decrypted
+; by K_1, then the tag over the sealed length and packet checked, and
+; the packet decrypted by K_2 from block 1.
+(def ssh_unseal_chacha ((d SshDir) (b bytes) (main bytes) (nonce bytes) (len int)) SshRead
+  (if (not (ssh_len_ok len 0 8)) (SshBad "a packet's length does not decrypt")
+      (lt (bytes_len b) (add 20 len)) (SshNeed)
+      (let (end (add 4 len)
+            otk (bytes_slice (chacha20_block main 0 nonce) 0 32)
+            tag (poly1305 otk b 0 end))
+        (if (not (ssh_same tag (bytes_slice b end (add end 16)) 0))
+            (SshBad "a packet's tag does not check")
+            (ssh_payload (chacha20_xor main 1 nonce b 4 end) 0 len (add end 16) d)))))
+
+; The rest of ssh_unseal under AES-GCM: the length in the clear, as the
+; additional data, then the packet and its tag opened.
+(def ssh_unseal_gcm ((d SshDir) (b bytes) (k GcmKey) (iv bytes) (len int)) SshRead
+  (if (not (ssh_len_ok len 0 16)) (SshBad "a packet's length is wrong")
+      (lt (bytes_len b) (add 20 len)) (SshNeed)
+      (match (gcm_open k (ssh_gcm_nonce iv (.count d)) (bytes_slice b 0 4) b 4 (add 20 len))
+        ((None) (SshBad "a packet's tag does not check"))
+        ((Some inner) (ssh_payload inner 0 len (add 20 len) d)))))
+
+; ------------------------------------------------------------- starting
+
+; The algorithms we offer, best first: for the key exchange (the last
+; two are signals, never chosen), host keys, ciphers, MACs (needed by
+; the protocol's lists, never used, as every cipher here is an AEAD)
+; and compression.
+(def ssh_kex_offer () (list (list int))
+  (split_spaces "curve25519-sha256 curve25519-sha256@libssh.org ext-info-c kex-strict-c-v00@openssh.com"))
+(def ssh_kex_algs () (list (list int)) (split_spaces "curve25519-sha256 curve25519-sha256@libssh.org"))
+(def ssh_hostkey_algs () (list (list int)) (split_spaces "ssh-ed25519 ecdsa-sha2-nistp256 rsa-sha2-512 rsa-sha2-256"))
+(def ssh_cipher_algs () (list (list int)) (split_spaces "chacha20-poly1305@openssh.com aes256-gcm@openssh.com aes128-gcm@openssh.com"))
+(def ssh_mac_algs () (list (list int)) (split_spaces "hmac-sha2-256 hmac-sha2-512"))
+(def ssh_comp_algs () (list (list int)) (split_spaces "none"))
+
+; Our KEXINIT, with the 16-byte cookie given.
+(def ssh_kexinit ((cookie bytes)) bytes
+  (ssh_join (cons (ssh_w_byte (ssh_msg_kexinit))
+    (cons cookie
+      (cons (ssh_w_names (ssh_kex_offer))
+        (cons (ssh_w_names (ssh_hostkey_algs))
+          (cons (ssh_w_names (ssh_cipher_algs))
+            (cons (ssh_w_names (ssh_cipher_algs))
+              (cons (ssh_w_names (ssh_mac_algs))
+                (cons (ssh_w_names (ssh_mac_algs))
+                  (cons (ssh_w_names (ssh_comp_algs))
+                    (cons (ssh_w_names (ssh_comp_algs))
+                      (cons (ssh_w_names (nil (list int)))
+                        (cons (ssh_w_names (nil (list int)))
+                          (cons (ssh_w_bool false) (cons (ssh_w_u32 0) (nil bytes)))))))))))))))))
+
+; A connection begun: our version line and KEXINIT to send, with the
+; 32-byte X25519 secret and 16-byte cookie the caller made at random.
+(def ssh_start ((secret bytes) (cookie bytes)) SshOut
+  (let (ic (ssh_kexinit cookie)
+        s (Ssh (ssh_stage_version) (nil int) (nil int) (ssh_empty)
+               ic (ssh_empty) secret (x25519_base secret) false
+               (nil int) (nil int) (nil int)
+               (ssh_empty) (ssh_empty) (ssh_empty) (ssh_empty) (ssh_plain_dir) (ssh_plain_dir)
+               (nil int) -1 0 0 0 0 (ssh_empty) false)
+        line (bytes_from_list (append (ssh_version) "\r\n"))
+        o (ssh_put (SshOut s (cons line (nil bytes)) (nil SshEvent)) ic))
+    (ssh_done o)))
+
+; ------------------------------------------------------------- reading
+
+; s after the bytes of b from i up to j came from the server.
+(def ssh_more ((s Ssh) (b bytes) (i int) (j int)) SshOut
+  (let held (bytes_concat (cons (.held s) (cons (bytes_slice b i j) (nil bytes))))
+    (ssh_done (ssh_drain (ssh_out (.held s held))))))
+
+; o with what its held bytes hold read: the version line, then each
+; whole packet, until there is no more, or the stage waits for the
+; caller, or it has ended.
+(def ssh_drain ((o SshOut)) SshOut
+  (let (s (.s o)
+        st (.stage s))
+    (if (eq st (ssh_stage_version)) (ssh_drain_version o)
+        (or (eq st (ssh_stage_host)) (ge st (ssh_stage_closed))) o
+        (ssh_drain_packet o))))
+
+; The version line, if a whole line is held: lines before one that
+; begins SSH- are passed over, as RFC 4253 4.2 lets a server send them.
+(def ssh_drain_version ((o SshOut)) SshOut
+  (let (s (.s o)
+        held (.held s)
+        nl (ssh_newline held 0))
+    (if (lt nl 0)
+        (if (gt (bytes_len held) 8192) (ssh_fail o "the server sent no version line") o)
+        (let (line (ssh_chomp (bytes_to_list (bytes_slice held 0 nl)))
+              rest (bytes_slice held (add nl 1) (bytes_len held)))
+          (if (not (starts_with line "SSH-"))
+              (ssh_drain (SshOut (.held s rest) (.send o) (.events o)))
+              (or (starts_with line "SSH-2.0-") (starts_with line "SSH-1.99-"))
+              (ssh_drain (SshOut (.stage (.vs (.held s rest) line) (ssh_stage_kexinit)) (.send o) (.events o)))
+              (ssh_fail o (append "the server speaks another SSH: " line)))))))
+
+; Where the first newline from i in b is, or -1.
+(def ssh_newline ((b bytes) (i int)) int
+  (if (ge i (bytes_len b)) -1 (eq (bytes_get b i) 10) i (ssh_newline b (add i 1))))
+
+; s without a carriage return at its end.
+(def ssh_chomp ((s (list int))) (list int)
+  (let r (rev s)
+    (if (and (not (is_empty r)) (eq (head r) 13)) (rev (tail r)) s)))
+
+; The packet at the start of the held bytes, if it is whole, and those
+; after it.
+(def ssh_drain_packet ((o SshOut)) SshOut
+  (match o
+    ((SshOut s send evs)
+      (let held (.held s)
+        (match (ssh_unseal (.rd s) held)
+          ((SshNeed) o)
+          ((SshBad why) (ssh_fail o why))
+          ((SshGot p next d)
+            (let (seq (.seq (.rd s))
+                  rest (bytes_slice held next (bytes_len held)))
+              (ssh_drain (ssh_message (SshOut (.rd (.held s rest) d) send evs) p seq)))))))))
+
+; Whether the strict exchange's first round is still running: no
+; packet but its own may come then.
+(def ssh_in_strict_kex ((s Ssh)) bool
+  (and (.strict s) (and (ge (.stage s) (ssh_stage_kexinit)) (le (.stage s) (ssh_stage_newkeys)))))
+
+; o after the payload p of packet seq came: by its number and the stage.
+(def ssh_message ((o SshOut) (p bytes) (seq int)) SshOut
+  (if (eq (bytes_len p) 0)
+      (ssh_fail o "an empty packet")
+      (let (s (.s o)
+            t (bytes_get p 0)
+            st (.stage s))
+        (if (eq t (ssh_msg_disconnect)) (ssh_disconnected o p)
+            (and (ssh_in_strict_kex s) (not (any_eq t (cons 20 (cons 21 (cons 31 (nil int)))))))
+            (ssh_fail o (append "the server sent message " (append (digits t) " during the strict key exchange")))
+            (any_eq t (cons 2 (cons 3 (cons 4 (cons 7 (nil int)))))) o
+            (and (eq t (ssh_msg_kexinit)) (eq st (ssh_stage_kexinit))) (ssh_server_kexinit o p seq)
+            (eq t (ssh_msg_kexinit)) (ssh_fail o "the server asked for new keys, which ssh does not do")
+            (and (eq t (ssh_msg_ecdh_reply)) (eq st (ssh_stage_reply))) (ssh_ecdh_reply o p)
+            (and (eq t (ssh_msg_newkeys)) (eq st (ssh_stage_newkeys))) (ssh_newkeys o)
+            (and (eq t (ssh_msg_service_accept)) (eq st (ssh_stage_service)))
+            (ssh_emit (SshOut (.stage s (ssh_stage_up)) (.send o) (.events o)) (SshReady))
+            (and (ge t 50) (eq st (ssh_stage_up))) (ssh_conn_message o p)
+            (ge st (ssh_stage_up)) (ssh_put o (ssh_join (cons (ssh_w_byte (ssh_msg_unimplemented)) (cons (ssh_w_u32 seq) (nil bytes)))))
+            (ssh_fail o (append "the server sent message " (append (digits t) " out of turn")))))))
+
+; The server's DISCONNECT: its reason's description.
+(def ssh_disconnected ((o SshOut) (p bytes)) SshOut
+  (match (ssh_string_at p 5 (bytes_len p))
+    ((None) (ssh_closed o "the server disconnected"))
+    ((Some d) (ssh_closed o (append "the server disconnected: " (ssh_field_text p d))))))
+
+; ------------------------------------------------------------- the exchange
+
+; The name-lists of a KEXINIT from i: the n of them, after acc
+; reversed, or none if one does not read.
+(def ssh_name_lists ((p bytes) (i int) (n int) (acc (list (list (list int))))) (Option (list (list (list int))))
+  (if (eq n 0)
+      (Some (rev acc))
+      (match (ssh_string_at p i (bytes_len p))
+        ((None) ((None (list (list (list int))))))
+        ((Some f) (ssh_name_lists p (.next f) (sub n 1) (cons (ssh_field_names p f) acc))))))
+
+; The first of ours that theirs has too, or empty.
+(def ssh_choose ((ours (list (list int))) (theirs (list (list int)))) (list int)
+  (if (is_empty ours) (nil int)
+      (any_eq (head ours) theirs) (head ours)
+      (ssh_choose (tail ours) theirs)))
+
+; The server's KEXINIT, packet seq: the algorithms chosen, the strict
+; exchange taken if both offer it (and then its KEXINIT must have been
+; its first packet), and our ECDH_INIT sent.
+(def ssh_server_kexinit ((o SshOut) (p bytes) (seq int)) SshOut
+  (match (ssh_name_lists p 17 10 (nil (list (list int))))
+    ((None) (ssh_fail o "the server's KEXINIT does not read"))
+    ((Some ls)
+      (let (kex (ssh_choose (ssh_kex_algs) (nth ls 0))
+            hk (ssh_choose (ssh_hostkey_algs) (nth ls 1))
+            wc (ssh_choose (ssh_cipher_algs) (nth ls 2))
+            rc (ssh_choose (ssh_cipher_algs) (nth ls 3))
+            comp (and (any_eq "none" (nth ls 6)) (any_eq "none" (nth ls 7)))
+            strict (any_eq "kex-strict-s-v00@openssh.com" (nth ls 0)))
+        (if (is_empty kex) (ssh_fail o "the server offers no key exchange ssh speaks (curve25519-sha256)")
+            (is_empty hk) (ssh_fail o "the server offers no host key ssh can check")
+            (or (is_empty wc) (is_empty rc)) (ssh_fail o "the server offers no cipher ssh speaks")
+            (not comp) (ssh_fail o "the server insists on compression")
+            (and strict (not (eq seq 0))) (ssh_fail o "the server's KEXINIT was not its first packet")
+            (match o
+              ((SshOut s send evs)
+                (let (qc (.qc s)
+                      s1 (.rcipher (.wcipher (.hostalg (.strict (.is (.stage s (ssh_stage_reply)) p) strict) hk) wc) rc))
+                  (ssh_put (SshOut s1 send evs)
+                    (ssh_join (cons (ssh_w_byte (ssh_msg_ecdh_init)) (cons (ssh_w_string qc) (nil bytes)))))))))))))
+
+; The host key type a host key algorithm's blob names.
+(def ssh_alg_key_type ((alg (list int))) (list int)
+  (if (starts_with alg "rsa-sha2-") "ssh-rsa" alg))
+
+; The exchange hash H (RFC 8731 3.1): SHA-256 of both version lines,
+; both KEXINITs, the host's key, both public keys and the shared secret.
+(def ssh_exchange_hash ((s Ssh) (ks bytes) (qs bytes) (k bytes)) bytes
+  (let all (ssh_join (cons (ssh_w_text (ssh_version))
+                       (cons (ssh_w_text (.vs s))
+                         (cons (ssh_w_string (.ic s))
+                           (cons (ssh_w_string (.is s))
+                             (cons (ssh_w_string ks)
+                               (cons (ssh_w_string (.qc s))
+                                 (cons (ssh_w_string qs) (cons k (nil bytes))))))))))
+    (sha256 all 0 (bytes_len all))))
+
+; The server's ECDH reply: its host key, its public key and its
+; signature of the exchange hash. The secret is made and the hash, the
+; key's type is the one chosen, and the signature checks; then the host
+; key is told and the exchange waits for the caller.
+(def ssh_ecdh_reply ((o SshOut) (p bytes)) SshOut
+  (let n (bytes_len p)
+    (match (ssh_string_at p 1 n)
+      ((None) (ssh_fail o "the server's ECDH reply does not read"))
+      ((Some ksf)
+        (match (ssh_string_at p (.next ksf) n)
+          ((None) (ssh_fail o "the server's ECDH reply does not read"))
+          ((Some qsf)
+            (match (ssh_string_at p (.next qsf) n)
+              ((None) (ssh_fail o "the server's ECDH reply does not read"))
+              ((Some sigf)
+                (ssh_keyed_reply o (ssh_field_bytes p ksf) (ssh_field_bytes p qsf) (ssh_field_bytes p sigf))))))))))
+
+; The rest of ssh_ecdh_reply, with its three strings.
+(def ssh_keyed_reply ((o SshOut) (ks bytes) (qs bytes) (sig bytes)) SshOut
+  (let (s (.s o)
+        alg (.hostalg s))
+    (if (not (eq (bytes_len qs) 32))
+        (ssh_fail o "the server's public key is not 32 bytes")
+        (let shared (x25519 (.secret s) qs)
+          (if (x25519_is_zero shared)
+              (ssh_fail o "the server's public key is of small order")
+              (match (ssh_pub_of ks)
+                ((None) (ssh_fail o "the server's host key does not read"))
+                ((Some pub)
+                  (let (k (ssh_w_mpint shared)
+                        h (ssh_exchange_hash s ks qs k))
+                    (if (not (eq (ssh_blob_type ks) (ssh_alg_key_type alg)))
+                        (ssh_fail o "the server's host key is not of the type chosen")
+                        (not (ssh_sig_ok pub alg sig h))
+                        (ssh_fail o "the server's signature of the exchange does not check")
+                        (match o
+                          ((SshOut s0 send evs)
+                            (ssh_emit (SshOut (.sid (.h (.k (.hostkey (.stage s0 (ssh_stage_host)) ks) k) h) h) send evs)
+                                      (SshHostKey ks)))))))))))))
+
+; The key derived for letter x (A to F, RFC 4253 7.2), len bytes: the
+; hash of the secret, the exchange hash, x and the session id, then
+; each block more the hash of the secret, the exchange hash and every
+; block before it.
+(def ssh_derive ((s Ssh) (x int) (len int)) bytes
+  (let (first (ssh_join (cons (.k s) (cons (.h s) (cons (ssh_w_byte x) (cons (.sid s) (nil bytes))))))
+        k1 (sha256 first 0 (bytes_len first)))
+    (bytes_slice (ssh_derive_more s k1 len) 0 len)))
+
+; The key so far, made at least len bytes long.
+(def ssh_derive_more ((s Ssh) (key bytes) (len int)) bytes
+  (if (ge (bytes_len key) len)
+      key
+      (let more (ssh_join (cons (.k s) (cons (.h s) (cons key (nil bytes)))))
+        (ssh_derive_more s (ssh_join (cons key (cons (sha256 more 0 (bytes_len more)) (nil bytes)))) len))))
+
+; The cipher named, keyed from the letters for its IV and key.
+(def ssh_aead ((s Ssh) (name (list int)) (iv int) (key int)) SshAead
+  (if (eq name "chacha20-poly1305@openssh.com")
+      (let k (ssh_derive s key 64)
+        (SshChacha (bytes_slice k 0 32) (bytes_slice k 32 64)))
+      (SshGcm (gcm_key (ssh_derive s key (if (eq name "aes256-gcm@openssh.com") 32 16))) (ssh_derive s iv 12))))
+
+; s's direction d keyed by a, its sequence number from 0 under the
+; strict exchange, else going on.
+(def ssh_keyed_dir ((s Ssh) (d SshDir) (a SshAead)) SshDir
+  (SshDir a (if (.strict s) 0 (.seq d)) 0))
+
+; The host key accepted: our NEWKEYS sent, our direction keyed, and the
+; userauth service asked for under the new keys; then what was held is
+; read.
+(def ssh_host_accept ((s Ssh)) SshOut
+  (if (not (eq (.stage s) (ssh_stage_host)))
+      (ssh_done (ssh_out s))
+      (let (o (ssh_put (ssh_out s) (ssh_w_byte (ssh_msg_newkeys)))
+            s1 (.s o)
+            wr (ssh_keyed_dir s1 (.wr s1) (ssh_aead s1 (.wcipher s1) 65 67))
+            o1 (SshOut (.stage (.wr s1 wr) (ssh_stage_newkeys)) (.send o) (.events o))
+            o2 (ssh_put o1 (ssh_join (cons (ssh_w_byte (ssh_msg_service_request)) (cons (ssh_w_text "ssh-userauth") (nil bytes))))))
+        (ssh_done (ssh_drain o2)))))
+
+; The server's NEWKEYS: its direction keyed.
+(def ssh_newkeys ((o SshOut)) SshOut
+  (match o
+    ((SshOut s send evs)
+      (let rd (ssh_keyed_dir s (.rd s) (ssh_aead s (.rcipher s) 66 68))
+        (SshOut (.stage (.rd s rd) (ssh_stage_service)) send evs)))))
+
+; ------------------------------------------------------------- sending
+
+; s with the payload p sent, as one packet.
+(def ssh_send_payload ((s Ssh) (p bytes)) SshOut
+  (ssh_done (ssh_put (ssh_out s) p)))
+
+; s ended by us: a DISCONNECT, by application (11), saying why.
+(def ssh_disconnect ((s Ssh) (why (list int))) SshOut
+  (let o (ssh_put (ssh_out s) (ssh_join (cons (ssh_w_byte (ssh_msg_disconnect))
+                                          (cons (ssh_w_u32 11) (cons (ssh_w_text why) (cons (ssh_w_text "") (nil bytes)))))))
+    (match o ((SshOut s1 send evs) (ssh_done (SshOut (.why (.stage s1 (ssh_stage_closed)) why) send evs))))))

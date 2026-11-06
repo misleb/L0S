@@ -1,0 +1,115 @@
+; sshwire.l0 -- SSH's data types (RFC 4251, 5): byte, boolean, uint32,
+; uint64, string, mpint and name-list, read in place from bytes and
+; built as bytes. A reader takes the bytes, where the field starts and
+; where the bytes it may use end, and gives the field and where the next
+; begins, or none if the field runs past that end. A message is built as
+; a list of pieces, each made bytes once, and joined once with
+; bytes_concat. Pure.
+
+; A field read: its bytes from start up to end (a string's, without its
+; length), and where the next field begins.
+(data SshField (SshField (start int) (end int) (next int)))
+
+; A number read, and where the next field begins.
+(data SshNum (SshNum (value int) (next int)))
+
+; ------------------------------------------------------------- reading
+
+; The uint32 at byte i of b, most significant byte first. The caller has
+; checked that four bytes are there.
+(def ssh_u32 ((b bytes) (i int)) int
+  (bit_or (bit_shl (bytes_get b i) 24)
+          (bit_or (bit_shl (bytes_get b (add i 1)) 16)
+                  (bit_or (bit_shl (bytes_get b (add i 2)) 8) (bytes_get b (add i 3))))))
+
+; The uint32 at i, if it ends by lim.
+(def ssh_u32_at ((b bytes) (i int) (lim int)) (Option SshNum)
+  (if (gt (add i 4) lim)
+      ((None SshNum))
+      (Some (SshNum (ssh_u32 b i) (add i 4)))))
+
+; The byte at i, if it is before lim.
+(def ssh_byte_at ((b bytes) (i int) (lim int)) (Option SshNum)
+  (if (ge i lim)
+      ((None SshNum))
+      (Some (SshNum (bytes_get b i) (add i 1)))))
+
+; The string at i: its length, then that many bytes, if they end by lim.
+(def ssh_string_at ((b bytes) (i int) (lim int)) (Option SshField)
+  (if (gt (add i 4) lim)
+      ((None SshField))
+      (let e (add (add i 4) (ssh_u32 b i))
+        (if (gt e lim)
+            ((None SshField))
+            (Some (SshField (add i 4) e e))))))
+
+; A field's bytes, as their own.
+(def ssh_field_bytes ((b bytes) (f SshField)) bytes
+  (bytes_slice b (.start f) (.end f)))
+
+; A field's bytes as text.
+(def ssh_field_text ((b bytes) (f SshField)) (list int)
+  (bytes_to_list (bytes_slice b (.start f) (.end f))))
+
+; Whether a field's bytes are exactly the text s.
+(def ssh_field_is ((b bytes) (f SshField) (s (list int))) bool
+  (and (eq (sub (.end f) (.start f)) (length s)) (bytes_is_at b (.start f) s)))
+
+; The names of a name-list's field, split at its commas.
+(def ssh_field_names ((b bytes) (f SshField)) (list (list int))
+  (if (eq (.start f) (.end f))
+      (nil (list int))
+      (split_on 44 (ssh_field_text b f))))
+
+; ------------------------------------------------------------- building
+
+; v as four bytes, most significant first.
+(def ssh_w_u32 ((v int)) bytes
+  (bytes_from_list (cons (bit_and (bit_shr v 24) 255)
+                         (cons (bit_and (bit_shr v 16) 255)
+                               (cons (bit_and (bit_shr v 8) 255) (cons (bit_and v 255) (nil int)))))))
+
+; v as eight bytes, most significant first.
+(def ssh_w_u64 ((v int)) bytes
+  (bytes_concat (cons (ssh_w_u32 (bit_shr v 32)) (cons (ssh_w_u32 (bit_and v 4294967295)) (nil bytes)))))
+
+; The byte v.
+(def ssh_w_byte ((v int)) bytes
+  (bytes_from_list (cons v (nil int))))
+
+; A boolean: 1 or 0.
+(def ssh_w_bool ((v bool)) bytes
+  (ssh_w_byte (if v 1 0)))
+
+; The bytes s as a string: their length, then them.
+(def ssh_w_string ((s bytes)) bytes
+  (bytes_concat (cons (ssh_w_u32 (bytes_len s)) (cons s (nil bytes)))))
+
+; The text s as a string.
+(def ssh_w_text ((s (list int))) bytes
+  (ssh_w_string (bytes_from_list s)))
+
+; The names ns as a name-list, joined by commas.
+(def ssh_w_names ((ns (list (list int)))) bytes
+  (ssh_w_text (join_with "," ns)))
+
+; The unsigned big-endian number in n as an mpint: its leading zeros
+; dropped, and a zero put before it if its top bit is set, so it is not
+; read as negative.
+(def ssh_w_mpint ((n bytes)) bytes
+  (let (i (ssh_first_nonzero n 0)
+        top (if (lt i (bytes_len n)) (bytes_get n i) 0)
+        body (bytes_slice n i (bytes_len n)))
+    (if (ge top 128)
+        (ssh_w_string (bytes_concat (cons (ssh_w_byte 0) (cons body (nil bytes)))))
+        (ssh_w_string body))))
+
+; The first index from i on where n's byte is not 0, or its length.
+(def ssh_first_nonzero ((n bytes) (i int)) int
+  (if (or (ge i (bytes_len n)) (not (eq (bytes_get n i) 0)))
+      i
+      (ssh_first_nonzero n (add i 1))))
+
+; The pieces ps joined into one value.
+(def ssh_join ((ps (list bytes))) bytes
+  (bytes_concat ps))

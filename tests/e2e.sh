@@ -45,7 +45,9 @@
 # start that must exit 0 by the boot's end, a client of a port the board
 # listens to; @PORT@ in either, in NAME/net, in NAME/typed, and in any
 # file of NAME/etc (which is then copied, to build/e2e/NAME.etc) is a
-# free port of the host's loopback, chosen for the boot. If NAME/usb exists,
+# free port of the host's loopback, chosen for the boot; @USER@ in
+# NAME/typed is the user running the tests, as a server serve runs, such
+# as the ssh case's sshd, knows only that user. If NAME/usb exists,
 # the board's keyboard and pointer are a USB keyboard and mouse on a
 # qemu-xhci, for pcie, xhci and usb-hid, not virtio's; and if NAME/usbaudio
 # exists too, QEMU's usb-audio is on it, a speaker of 16-bit stereo at 48
@@ -242,7 +244,7 @@ run_case() {
   typed="$dir/typed"
   if [ -f "$typed" ]; then
     typed="$BUILD/e2e/$name.typed"
-    sed "s/@PORT@/$port/g" "$dir/typed" > "$typed"
+    sed "s/@PORT@/$port/g; s/@USER@/$(id -un)/g" "$dir/typed" > "$typed"
   fi
   serve_pid=""; peer_pid=""
   if [ -f "$dir/serve" ]; then

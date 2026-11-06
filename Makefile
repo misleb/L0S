@@ -290,6 +290,16 @@ X509    := $(BASE64) $(DER) user/lib/crypto/x509.l0
 TRUST   := $(HKDF) $(SIGS) $(X509) user/lib/crypto/trust.l0
 TLS     := $(TRUST) $(X25519) $(CHACHA) $(AESGCM) user/lib/proto/tls.l0
 HTTP    := $(INETLIB) $(HTTPMSG) $(TLS) user/lib/proto/httpc.l0
+# SSH 2's client (proto/ssh.l0, sshconn.l0) and what it is built on:
+# SSH's data types; Ed25519, beside the hashes, X25519's field and the
+# signatures TLS checks; the keys, their signatures and known_hosts
+# (crypto/sshkey.l0); the AEADs; then the connection over inet's TCP and
+# the login (sshc.l0), for ssh and scp.
+SSHWIRE := user/lib/format/sshwire.l0
+ED25519 := user/lib/crypto/ed25519.l0
+SSHKEY  := $(SSHWIRE) $(BASE64) $(SHA256) $(SHA512) $(SIGS) $(X25519) $(ED25519) user/lib/crypto/sshkey.l0
+SSHPROTO := $(SSHKEY) $(CHACHA) $(AESGCM) user/lib/proto/ssh.l0 user/lib/proto/sshconn.l0
+SSH     := $(INETLIB) $(SSHPROTO) user/lib/proto/sshc.l0
 # A model's API, Anthropic's Messages API through the host's proxy: its
 # configuration, a request's bytes and its streamed events.
 MODELLIB := $(HTTP) $(JSON) $(SSE) user/lib/proto/model.l0
@@ -394,6 +404,8 @@ LIBS_inet       := $(INETLIB) $(CLOCK)
 LIBS_net        := $(INETLIB)
 LIBS_tftp       := $(INETLIB)
 LIBS_http       := $(HTTP) $(JSON) $(SSE)
+LIBS_ssh        := $(SSH)
+LIBS_scp        := $(SSH)
 LIBS_ntp        := $(INETLIB) $(CLOCK) $(NTPLIB)
 LIBS_ask        := $(MODELLIB)
 LIBS_agent      := $(AGENTLIB) $(MODELLIB) $(AGENTHOME)
@@ -689,6 +701,11 @@ $(call l0_test,$(BASE) $(DER) user/lib/format/der_test.l0)
 $(call l0_test,$(BASE) $(X509) user/lib/crypto/x509_test.l0)
 $(call l0_test,$(BASE) $(TRUST) user/lib/crypto/trust_test.l0)
 $(call l0_test,$(BASE) $(TLS) user/lib/proto/tls_test.l0)
+$(call l0_test,$(BASE) $(SHA512) $(BIGNUM) $(X25519) $(ED25519) user/lib/crypto/ed25519_test.l0)
+$(call l0_test,$(BASE) $(BIGNUM) $(SSHWIRE) user/lib/format/sshwire_test.l0)
+$(call l0_test,$(BASE) $(SSHKEY) user/lib/crypto/sshkey_test.l0)
+$(call l0_test,$(BASE) $(SSHPROTO) user/lib/proto/ssh_test.l0)
+$(call l0_test,$(BASE) $(SSHPROTO) user/lib/proto/sshconn_test.l0)
 $(call l0_test,$(ULIB) $(RELEASE) user/lib/sys/release_test.l0)
 $(call l0_test,$(BASE) $(SHA256) $(PIEEPROMLIB) user/lib/format/pieeprom_test.l0)
 $(call l0_test,$(ULIB) $(CLOCK) $(SHA256) $(BOOTLOADER) user/lib/sys/bootloader_test.l0)
