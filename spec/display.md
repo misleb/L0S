@@ -22,7 +22,7 @@ pixels, and draw the pointer as a top layer.
 | `cursor ID HX HY` | the pointer's image, a 64×64 buffer, and its hot spot. The driver reads a buffer's pixels the first time `cursor` names it and keeps them, its **cursor set**, so naming it again switches the pointer for the cost of one command; a buffer of the set is not given again by `buffer` until it is forgotten, which gives up what the driver made of it |
 | `move X Y` | the pointer's hot spot at X, Y |
 | `frames PORT` | from now on, PORT told the display's notices: `frame N` after each frame that showed a change, N counting from 1, and `release ID` once buffer ID is no longer read, having left the stack |
-| `capture ID X Y W H` | the screen's pixels in X Y W H, its own, as it shows them, copied into buffer ID, a buffer the driver has, from its top left, rows its stride apart: the layers bottom first, each row less what its corners cut, over black, as the screen composes them, read from their buffers' pages; the pointer, the device's own, left out. Refused for a rectangle off the screen or bigger than the buffer, and for a buffer in the layers. What `wm`'s `capture` and its frozen screen ask ([desktop.md](desktop.md)). `virtio-gpu` serves it in both modes, from the same plan of copies (`user/sbin/virtio-gpu/capture.l0`) |
+| `capture ID X Y W H` | the screen's pixels in X Y W H, its own, as it shows them, copied into buffer ID, a buffer the driver has, from its top left, rows its stride apart: the layers bottom first, each row less what its corners cut, over black, as the screen composes them, read from their buffers' pages; the pointer, the device's own, left out. Refused for a rectangle off the screen or bigger than the buffer, and for a buffer in the layers. What `wm`'s `capture` and its frozen screen ask ([desktop.md](desktop.md)). `virtio-gpu`, in both modes, and `hvs` serve it alike, by `display_server.l0`'s `captured_into`; on the Pi 5 the HVS only reads the pages, so the CPU's view of them is what it shows, and the pixels a rounded layer's corners cut, whose alpha `hvs` writes 0, are the layer beneath's |
 
 The reply is `ok`, `display W H cursor scale S` for `info`, or
 `error: WHY`.
@@ -476,9 +476,9 @@ of them could be confirmed from Linux's source:
   makes seven.
 - **A capture reads the buffers' pages, not the screen**: what a client
   painted and has not yet damaged is in it, which GL mode does not yet
-  show, and it is the CPU's copy of every pixel, row by row. `hvs`
-  serves no `capture` yet: on the Pi 5 the status menu's screenshot
-  button says so in the log and does nothing.
+  show, and it is the CPU's copy of every pixel, row by row. `hvs`'s
+  has not yet run on a Pi 5: what it copies is what QEMU's tests show
+  `virtio-gpu`'s copying, from the same plan.
 - **Nothing is drawn by the GPU.** With virgl (the GL device) it copies
   the layers into the screen, and in 2D mode the host composes them
   from the clients' pages, but every pixel in them is painted by the

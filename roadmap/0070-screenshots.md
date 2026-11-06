@@ -22,7 +22,9 @@ does, and less of it:
 - `snip` captures the screen again as it is a moment after the release,
   not the frozen pixels `wm` holds, which differ where something drew
   meanwhile.
-- `hvs` serves no `capture`, so on the Pi 5 the button does nothing.
+- `hvs` serves `capture`, but no screenshot has been taken on a Pi 5
+  yet: the frozen screen, its outline, and a PNG saved and looked at
+  there.
 - The demo's `/Volumes/data` is 744 KB, a few full screens at most.
 
 ## Done when
@@ -41,3 +43,5 @@ To be written with the steps.
 
 - 2026-11-06: written, as the status menu's first screenshots landed:
   what they leave out of GNOME's.
+- 2026-11-06: `hvs` serves `capture`, from the plan `virtio-gpu` uses,
+  moved to `display_server.l0`; untried on a board.
