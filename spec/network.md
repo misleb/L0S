@@ -532,6 +532,19 @@ between two packets dropped whole. The password is read with the
 terminal's hidden line, `"s"` (tty.l0). `scp` speaks the scp protocol
 (OpenSSH's `scp -O`) to `scp -t` or `scp -f` on the host.
 
+**A board's key.** `make ssh-etc KEY=PATH [KNOWN=PATH]` stages
+`build/ssh-etc`: the key, refused unless `ssh-keygen -y` reads it as
+Ed25519 with no passphrase, mode 0600, as `id_ed25519`, and
+`known_hosts` from KNOWN if given, whose lines must not be hashed
+(`ssh-keyscan HOST` makes such lines). While it is there, `make
+initramfs` and `make pi5-initramfs` put it in the archive as
+`/etc/ssh`, and `install` carries it onto a system volume with the rest
+of `/etc`; `tools/mkrelease` leaves the key out of a release, which the
+proxy serves to any installer. `rm -rf build/ssh-etc` leaves it out
+again. A key can also be copied onto the card's FAT32 boot partition
+from another machine, and named with `-i`, or copied from there to
+`/etc/ssh/id_ed25519` on a `/` that can be written.
+
 **Testing.** The `ssh` e2e case runs the host's own OpenSSH `sshd`, as
 the user, on a free port with the case's host key and the board's user
 key, every login a script of the case's, so that the user's own shell

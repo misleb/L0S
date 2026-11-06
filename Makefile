@@ -86,6 +86,9 @@
 #                    agent's config, naming the proxy, and the token,
 #                    which the demo's and the Pi 5's initramfs then take
 #                    as /etc/agent
+#   make ssh-etc KEY=PATH [KNOWN=PATH]  build/ssh-etc: an Ed25519 key with
+#                    no passphrase, and known_hosts if given, which the
+#                    demo's and the Pi 5's initramfs then take as /etc/ssh
 #   make graph       graphify-out/ rebuilt from the code as it is: the L0
 #                    sources (tools/graphify-l0), scripts and Python, the
 #                    docs' nodes kept; once /graphify has built it
@@ -507,7 +510,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root release-apps initramfs screen-initramfs usb-initramfs screenshot-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root release-apps initramfs screen-initramfs usb-initramfs screenshot-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc ssh-etc icon-sheet graph graph-hook preview
 
 all: check test test-virt e2e
 
@@ -1024,6 +1027,26 @@ agent-etc: $(BUILD)/proxy/token
 	@echo "make agent-etc: $(AGENT_ETC), api $(API)$(if $(MODEL), and model $(MODEL)); make initramfs or pi5-initramfs takes it as /etc/agent"
 stage_agent = if [ -d $(AGENT_ETC) ]; then mkdir -p $(1)/agent && cp $(AGENT_ETC)/config $(AGENT_ETC)/token $(1)/agent/; fi
 
+# SSH's etc for a board: build/ssh-etc/id_ed25519, the private key KEY
+# names, which must be an Ed25519 key with no passphrase, the one kind
+# ssh reads (ssh-keygen -y checks it); and known_hosts from KNOWN, if it
+# names a file, whose lines must not be hashed (ssh-keyscan HOST makes
+# such lines). While it is there, the demo's initramfs and the Pi 5's
+# take it as /etc/ssh (stage_ssh), and install carries it onto a system
+# volume with the rest of /etc; a release (mkrelease) leaves the key
+# out. rm -rf build/ssh-etc leaves it out again.
+SSH_ETC := $(BUILD)/ssh-etc
+ssh-etc:
+	@test -n "$(KEY)" || { echo 'make ssh-etc: KEY=PATH names an Ed25519 private key with no passphrase, such as KEY=~/.ssh/l0s_pi5'; exit 1; }
+	@ssh-keygen -y -P '' -f $(KEY) 2> /dev/null | grep -q '^ssh-ed25519 ' \
+	  || { echo 'make ssh-etc: $(KEY) is not an Ed25519 key without a passphrase, the one kind ssh reads (ssh-keygen -t ed25519 -N "" makes one)'; exit 1; }
+	@test -z "$(KNOWN)" || test -f $(KNOWN) || { echo 'make ssh-etc: KNOWN=$(KNOWN): no such file'; exit 1; }
+	@rm -rf $(SSH_ETC) && mkdir -p $(SSH_ETC) && chmod 700 $(SSH_ETC)
+	@install -m 600 $(KEY) $(SSH_ETC)/id_ed25519
+	@if [ -n "$(KNOWN)" ]; then install -m 644 $(KNOWN) $(SSH_ETC)/known_hosts; fi
+	@echo "make ssh-etc: $(SSH_ETC), the key $$(ssh-keygen -l -f $(SSH_ETC)/id_ed25519 | cut -d' ' -f2)$(if $(KNOWN), and known_hosts); make initramfs or pi5-initramfs takes it as /etc/ssh"
+stage_ssh = if [ -d $(SSH_ETC) ]; then mkdir -p $(1)/ssh && cp $(SSH_ETC)/* $(1)/ssh/; fi
+
 PROXY_LISTEN ?= 127.0.0.1:8765
 proxy-run: proxy
 	$(PROXY_VENV)/bin/python -I tools/api-proxy/proxy.py --listen $(PROXY_LISTEN) --token-file $(BUILD)/proxy/token --usage $(BUILD)/proxy/usage.jsonl --release $(BUILD)/release
@@ -1132,6 +1155,7 @@ initramfs: images root $(ETC_DEPS)
 	rm -rf $(BUILD)/etc && cp -R demo/etc $(BUILD)/etc
 	$(call stage_etc,$(BUILD)/etc)
 	@$(call stage_agent,$(BUILD)/etc)
+	@$(call stage_ssh,$(BUILD)/etc)
 	tools/mkinitramfs $(BUILD)/initramfs.cpio $(BUILD)/etc $(ROOT)
 
 # What the screen and keyboard tests boot: tests/screen/etc, with the
@@ -1337,6 +1361,7 @@ pi5-initramfs: images root $(ETC_DEPS) $(CHIME) $(BUILD)/kernel-pi5.img $(PI5_DT
 	@for p in $(PI5_NO); do for f in inittab system; do grep -v "^start $$p\( \|$$\)" $(BUILD)/pi5-etc/$$f > $(BUILD)/pi5-etc/$$f.new; mv $(BUILD)/pi5-etc/$$f.new $(BUILD)/pi5-etc/$$f; done; echo "pi5-initramfs: not starting $$p"; done
 	$(call stage_etc,$(BUILD)/pi5-etc)
 	@$(call stage_agent,$(BUILD)/pi5-etc)
+	@$(call stage_ssh,$(BUILD)/pi5-etc)
 	rm -rf $(BUILD)/pi5-root && mkdir -p $(BUILD)/pi5-root/boot && cp -Rp $(ROOT)/. $(BUILD)/pi5-root/
 	cp $(PI5_DTBS) $(BUILD)/pi5-root/boot/
 	printf x | $(L0) card $(BUILD)/kernel-pi5.img $(BUILD)/pi5-root/boot
