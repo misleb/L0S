@@ -1,0 +1,103 @@
+; capture.l0 -- the capture request: what the screen shows in a rectangle,
+; copied into a buffer the client gave, from the pages of the buffers on
+; the screen, in either mode. The layers are copied bottom first, each
+; row less what its corners cut, over black, as the screen composes
+; them; the pointer, the device's own, is not among them.
+
+; A copy of n bytes into the target's pages from byte to: from byte from
+; of buffer id's, or black for id -1.
+(data CapSpan (CapSpan (id int) (from int) (to int) (n int)))
+
+; The spans that capture rectangle r of the screen into a buffer whose
+; rows are dsd pixels apart, from its top left: every row black first,
+; then each of the layers, bottom first, over it.
+(def capture_plan ((layers (list Layer)) (bufs (Map int Buffer)) (r Rect) (dsd int)) (list CapSpan)
+  (rev (capture_layers layers bufs r dsd (capture_black r dsd 0 (nil CapSpan)))))
+
+; Rows i on of r, black, onto acc.
+(def capture_black ((r Rect) (dsd int) (i int) (acc (list CapSpan))) (list CapSpan)
+  (if (ge i (.h r))
+      acc
+      (capture_black r dsd (add i 1) (cons (CapSpan -1 0 (mul (mul i dsd) 4) (mul (.w r) 4)) acc))))
+
+; Each layer's spans in r, bottom first, onto acc.
+(def capture_layers ((layers (list Layer)) (bufs (Map int Buffer)) (r Rect) (dsd int) (acc (list CapSpan))) (list CapSpan)
+  (if (is_empty layers)
+      acc
+      (let l (head layers)
+        (capture_layers (tail layers) bufs r dsd
+          (match (map_get bufs (.id l))
+            ((None) acc)
+            ((Some b)
+              (let (y0 (max (.y r) (.y l))
+                    y1 (min (rect_y1 r) (add (.y l) (capture_buffer_h b))))
+                (capture_rows l b r dsd y0 y1 acc))))))))
+
+; A buffer's height.
+(def capture_buffer_h ((b Buffer)) int (match b ((Buffer bw bh sd addrs va cs) bh)))
+
+; Screen rows y up to y1 of layer l, its buffer b, in r, onto acc: each
+; row's columns its corners leave, read from the buffer's row (y - ly +
+; top) mod its height.
+(def capture_rows ((l Layer) (b Buffer) (r Rect) (dsd int) (y int) (y1 int) (acc (list CapSpan))) (list CapSpan)
+  (if (ge y y1)
+      acc
+      (match b
+        ((Buffer bw bh sd addrs va cs)
+          (let (by (sub y (.y l))
+                x0 (max (.x r) (add (.x l) (left_inset cs bh by)))
+                x1 (min (rect_x1 r) (sub (add (.x l) bw) (right_inset cs bh by)))
+                row (mod (add by (.top l)) bh)
+                from (mul (add (mul row sd) (sub x0 (.x l))) 4)
+                to (mul (add (mul (sub y (.y r)) dsd) (sub x0 (.x r))) 4))
+            (capture_rows l b r dsd (add y 1) y1
+              (if (lt x0 x1) (cons (CapSpan (.id l) from to (mul (sub x1 x0) 4)) acc) acc)))))))
+
+; capture ID X Y W H: rectangle X Y W H of the screen, in its pixels,
+; copied into buffer id from its top left. Refused for a rectangle off
+; the screen or bigger than the buffer, and for a buffer on the screen.
+(def captured ((v Drv) (id int) (r Rect)) (Served Drv)
+  (match (map_get (.bufs v) id)
+    ((None) (served_error v (append "no buffer " (digits id))))
+    ((Some b)
+      (match b
+        ((Buffer bw bh sd addrs va cs)
+          (if (or (lt (.w r) 1) (lt (.h r) 1))
+              (served_error v "a capture has no pixels")
+              (not (eq (rect_clip r (Rect 0 0 (.w v) (.h v))) r))
+              (served_error v "a capture must be on the screen")
+              (or (gt (.w r) bw) (gt (.h r) bh))
+              (served_error v "a capture must fit its buffer")
+              (in_layers (.layers v) id)
+              (served_error v "a capture's buffer must not be on the screen")
+              (match (dma_open va (array_len addrs))
+                ((IoRegionFailed fault why) (served_error v (append "cannot write the buffer: " why)))
+                ((IoRegionOpened q)
+                  (let (e (capture_copy (capture_plan (.layers v) (.bufs v) r sd) (.bufs v) q
+                                        (bytes_from_list (repeat (mul (.w r) 4) 0)) -1 q)
+                        c (close_region q))
+                    (if (is_empty e) (served_ok v) (served_error v e)))))))))))
+
+; The spans copied into q, black from zero, the source buffer's region
+; open being src, of buffer at (-1 for none yet, src then unread), closed when the next span is another's;
+; empty, or why not.
+(def capture_copy ((spans (list CapSpan)) (bufs (Map int Buffer)) (q IoRegion) (zero bytes) (at int) (src IoRegion)) (list int)
+  (if (is_empty spans)
+      (let c (if (ge at 0) (close_region src) 0) "")
+      (let s (head spans)
+        (if (eq (.id s) -1)
+            (let w (put_bytes_range q (.to s) zero 0 (.n s))
+              (capture_copy (tail spans) bufs q zero at src))
+            (eq (.id s) at)
+            (let w (put_bytes_range q (.to s) (get_bytes_in src (.from s) (.n s)) 0 (.n s))
+              (capture_copy (tail spans) bufs q zero at src))
+            (let c (if (ge at 0) (close_region src) 0)
+              (match (capture_open bufs (.id s))
+                ((IoRegionFailed fault why) (append "cannot read buffer " (append (digits (.id s)) (append ": " why))))
+                ((IoRegionOpened g) (capture_copy spans bufs q zero (.id s) g))))))))
+
+; Buffer id's pages, opened to read.
+(def capture_open ((bufs (Map int Buffer)) (id int)) IoRegionOpened
+  (match (map_get bufs id)
+    ((None) (IoRegionFailed (RegionMissing) "no such buffer"))
+    ((Some b) (match b ((Buffer bw bh sd addrs va cs) (dma_open va (array_len addrs)))))))

@@ -103,3 +103,10 @@ what it has.
   HDMI0 through the server, the Yeti as a speaker (24-bit samples
   widened from 16, 44 or 45 frames a packet at 44.1 kHz), and the
   chime 3 s after `hdmi0` attaches.
+- 2026-11-05: first boot on a Pi 5: `audio` and `usb-audio` deadlocked
+  at boot, and `sound` waited for ever. The Yeti's speaker, attached
+  first, became the default output, and the server, its lead 0, asked
+  `usb-audio` to start the chime on it while `usb-audio` waited for the
+  answer to the microphone's attach. `usb-audio` now answers the
+  server's requests while it waits; the `usbaudio_two` e2e case, two
+  of QEMU's speakers, hung the same way before and passes now.

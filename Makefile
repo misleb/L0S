@@ -364,8 +364,10 @@ UI_TESTS  := theme icons face paint widget grid panes entry draw_cmd nav icon_vi
 UI_TESTING := user/lib/ui/testing.l0
 # PNG images, written, and an app's views painted on the host as PNGs
 # with the build's strikes and icons (roadmap 0065): linked by an app's
-# preview.l0, make preview and l0s-app-preview, never by an app.
-PNG        := user/lib/format/png.l0
+# preview.l0, make preview and l0s-app-preview, and by snip, never by an
+# app; deflate.l0 is the encoder png_deflated compresses with.
+DEFLATE    := user/lib/format/deflate.l0
+PNG        := $(DEFLATE) user/lib/format/png.l0
 UI_PREVIEW := $(CRC32) $(PNG) user/lib/ui/preview.l0
 # PNG images, read: zlib's inflate, and PNGs of 8-bit gray, RGB, palette
 # and alpha decoded into the toolkit's ARGB words and fitted to a box.
@@ -405,13 +407,14 @@ LIBS_rec        := $(AUDIOLIB) $(WAV)
 LIBS_listen     := $(TRANSCRIBE)
 LIBS_speak      := $(AUDIOLIB) $(WAV) $(PIPER) user/lib/speech/phonemes.l0
 LIBS_speech     := $(TRANSCRIBE) $(AUDIOLIB) $(AGENTLIB) $(SPEECHLIB) $(RECT) $(WMLIB)
-LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN)
+LIBS_wm         := $(RENDER) $(DISPLAY) $(UI_CORE) $(CLOCK) $(PATHS) $(APPLIB) $(APPOPEN) $(AUDIOLIB)
 LIBS_vt         := $(TTY) $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW) $(PATHS)
 LIBS_init       := $(PATHS)
 LIBS_boot       := $(PATHS)
 LIBS_install    := $(RELEASE) $(BOOTLOADER)
 LIBS_draw       := $(RENDER) $(WMLIB) $(UI_CORE)
 LIBS_windows    := $(RECT) $(WMLIB)
+LIBS_snip       := $(RECT) $(WMLIB) $(CLOCK) $(PATHS) $(CRC32) $(PNG)
 LIBS_open       := $(RECT) $(WMLIB)
 LIBS_widgets    := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
 LIBS_todo       := $(RENDER) $(WMLIB) $(UI_CORE) $(UI_WINDOW)
@@ -492,7 +495,7 @@ PROG_DOC_SRCS := $(foreach p,$(PROGRAMS),$(SRCS_$(p))) kernel/asm.l0 \
 # to ask for it: the only ones that may still lack it, as make check says.
 DOC_GAPS := tools/l0sdoc/undocumented.txt
 
-.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root release-apps initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
+.PHONY: FORCE all check fmt test check-each test-each test-virt test-virt-heap e2e app-libs images root release-apps initramfs screen-initramfs usb-initramfs screenshot-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs boot demo demo-system sysdisk clean sample doc doc-prune metrics mcp proxy proxy-run release agent-etc icon-sheet graph graph-hook preview
 
 all: check test test-virt e2e
 
@@ -670,6 +673,7 @@ $(call l0_test,$(BASE) $(PIPER) user/lib/speech/piper_test.l0)
 $(call l0_test,$(BASE) $(CRC32) user/lib/format/crc32_test.l0)
 $(call l0_test,$(BASE) $(CRC32) $(PNG) user/lib/format/png_test.l0)
 $(call l0_test,$(BASE) $(CRC32) $(PNG) $(INFLATE) user/lib/format/inflate_test.l0)
+$(call l0_test,$(BASE) $(INFLATE) $(DEFLATE) user/lib/format/deflate_test.l0)
 $(call l0_test,$(BASE) $(CRC32) $(PNG) $(PNGREAD) user/lib/format/png_read_test.l0)
 $(call l0_test,$(BASE64) user/lib/format/base64_test.l0)
 $(call l0_test,$(BASE) $(SHA256) user/lib/format/sha256_test.l0)
@@ -1127,6 +1131,14 @@ usb-initramfs: images root $(ETC_DEPS)
 	$(call stage_etc,$(BUILD)/usb-etc)
 	tools/mkinitramfs $(BUILD)/usb.cpio $(BUILD)/usb-etc $(ROOT)
 
+# What tests/screenshot.sh boots: tests/screenshot/etc, the desktop on
+# USB's keyboard and tablet with the audio server and a disk's file
+# server, booted with QEMU_INPUT=usb and QEMU_USB="tablet audio".
+screenshot-initramfs: images root $(ETC_DEPS)
+	rm -rf $(BUILD)/screenshot-etc && cp -R tests/screenshot/etc $(BUILD)/screenshot-etc
+	$(call stage_etc,$(BUILD)/screenshot-etc)
+	tools/mkinitramfs $(BUILD)/screenshot.cpio $(BUILD)/screenshot-etc $(ROOT)
+
 # What tests/vt.sh boots: the demo's etc, with tests/vt/etc/system over
 # its own, so that two terminals run whatever the demo starts.
 vt-initramfs: images root $(ETC_DEPS)
@@ -1168,10 +1180,10 @@ launcher-install-initramfs: images root $(ETC_DEPS)
 # this machine's CPUs unless set; E2E_JOBS=1 runs one at a time). mkfs
 # is built first, as the tests that make disks would each build it. The
 # screen tests are listed longest first, so the last to start are short.
-SCREEN_TESTS := vt files launch responsive disks-create resize logo-menu procmon disks launcher launcher-install \
+SCREEN_TESTS := vt files launch responsive disks-create resize status-menu screenshot procmon disks launcher launcher-install \
                 installer agent fontview partitions usb fat hidpi widgets keyboard gpu-screen todo
 
-e2e: images root initramfs screen-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
+e2e: images root initramfs screen-initramfs screenshot-initramfs usb-initramfs vt-initramfs disks-initramfs launcher-install-initramfs installer-initramfs agent-screen-initramfs $(BUILD)/mkfs $(PROXY_VENV)/.installed
 	tests/e2e.sh
 	tests/screens.sh $(SCREEN_TESTS)
 

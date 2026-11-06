@@ -323,13 +323,25 @@ It owns the screen through the display protocol and keeps windows for its
 clients. It never copies a window's pixels: each is a shared buffer, and the
 driver composes them.
 
-- **The L0S menu** (`user/sbin/wm/logo_menu.l0`): the logo in the bar's
-  first 32 columns (`menu_logo_w`; Applications and the title follow it),
-  a card (`menu_w` by `menu_h`, buffer `menu_id` 100000, layered under the
-  bar by `menu_layered` only while shown) of About L0S, Shut Down
-  (`proc_kill 1`) and Restart (`board_restart`). Its state is `Bar`'s `Menu`, its press/release like the
-  launcher's (`menu_act`); `pointer_held` keeps windows off the pointer
-  while it or the launcher is up.
+- **The status menu** (`user/sbin/wm/status.l0`), GNOME's quick
+  settings: its button at the bar's right end (`status_button_x`, the
+  speaker by the volume, then power), and a card 360 wide, 4 in and 4
+  under the bar, laid out with toolkit widgets (`status_view`: round
+  buttons `status.snip`, `status.settings`, `status.power`; power opens a
+  `UiList` of Restart and Shut Down; a `UiScale` volume row), painted by
+  `status_paint` into one buffer given as `status_id` 100000 at its
+  closed height and `status_open_id` 99999 at its open one, layered by
+  `status_layered` only while shown. Its state is `Bar`'s `Status`,
+  targets are action strings (`status_target`, `ui_hit`), clicks are
+  `status_act`, and the slider is held and dragged (`status_slider_at`).
+  It asks the audio server on a port of its own (`Status`'s `reply`,
+  `took` routes it to `audio_heard`), one ask at a time
+  (`status_answered`, `status_set`). `pointer_held` keeps windows off the
+  pointer while it, a screenshot's area or the launcher is up.
+- **Screenshots** (`user/sbin/wm/snip.l0`, `/bin/snip`): the screen
+  frozen in a buffer of its own (`snip_id`) by the display's `capture`,
+  shown alone, an area dragged out and outlined (`snip_outlined`), then
+  `/bin/snip X Y W H` asks `wm`'s `capture` and saves a deflated PNG.
 - **Buffers**: desktop 0, pointer 1, top bar 2, launcher 3, and window
   `i`'s content `4 + 4i + 2k` and chrome `5 + 4i + 2k` (its title bar with
   the frame under it, one buffer the window's size), k its bank
@@ -404,8 +416,8 @@ driver composes them.
   the front window changes; `titles` also repaints the frames and the top
   bar.
 - **The top bar** (`bar_ops`, `draw_bar`): 32 rows, black. At its start
-  Applications, `bar_apps_w` (120) wide, on a pill (`ui_bar_active_bg`)
-  while the launcher is open; then, from 120, the front window's app's
+  Applications, `bar_apps_w` (94) wide, on a pill (`ui_bar_active_bg`)
+  while the launcher is open; then, from 94, the front window's app's
   name (`Win`'s last field, from `client_app`: `proc_info`'s entry, its
   path, the manifest of the bundle it is in, `app.l0`), or its title if
   it is no app's (`bar_title`); and `clock_text` of the time, bold, in
@@ -413,7 +425,8 @@ driver composes them.
   `zone`, asked again once a minute's time passes its until). `rtc
   clock` tells `wm` the time, UTC, each minute (`user/lib/proto/clock.l0`). `Bar` also keeps the apps, read once at start
   (`app_bundles`), and the `Launcher`. Windows open below it (`cascade`
-  starts at 40), and a drag keeps their top at `below_bar`.
+  starts at 40), and a drag keeps their top at `below_bar`. At its end
+  the status menu's button.
 - **The launcher** (`user/sbin/wm/launcher.l0`, and wm's section "the
   launcher"): GNOME Shell's app grid, a page `w` by `h − 32` under the
   bar, `ui_launcher_bg`, painted once in `with_launcher`. Cells

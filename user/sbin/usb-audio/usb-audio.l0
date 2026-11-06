@@ -14,11 +14,15 @@
 ; xhci says packets went. A device unplugged is detached. It drives no
 ; device itself, and claims an interface only while it uses it.
 ;
-; It waits on two ports at once, a set (port_set): its own, where the
+; It waits on three ports at once, a set (port_set): its own, where the
 ; usb server's answers and notices come, told apart by the server's
-; pid; and the one it attaches its devices with, where the audio server
-; asks. A notice that comes while it waits for an answer is kept, and
-; handled after.
+; pid; the one it attaches its devices with, where the audio server
+; asks; and the one the audio server answers its attach and detach on.
+; A notice that comes while it waits for an answer is kept, and handled
+; after. While it waits for the audio server's answer it answers the
+; server's own requests, since the server may ask first: attaching a
+; speaker sets the chime going, and the server asks to start it before
+; it reads the next attach.
 
 ; Fails, saying why.
 (def complain ((why (list int))) int (fail_as "usb-audio" why))
@@ -69,7 +73,7 @@
 ; Listening to the usb server at usb, its answers and notices to own:
 ; the first message there is its answer, since no one else knows own
 ; yet, and says its pid. Then a port made for the audio server to ask
-; on, and the two made the set it waits on.
+; on and one for its answers, and the three made the set it waits on.
 (def listened ((usb int) (server int) (own int)) int
   (match (port_send usb (request own "listen"))
     ((Sent)
@@ -78,9 +82,9 @@
         ((Message from b)
           (if (not (msg_is b "ok"))
               (complain (reply_why (msg_text b) "usb"))
-              (let serving (port_new)
-                (match (port_set (cons own (cons serving (nil int))))
-                  ((PortSetMade) (serve (Aud own serving usb from server (port_new) (nil AudDev) (nil Attached) (nil Going) (nil Message))))
+              (let (serving (port_new) rp (port_new))
+                (match (port_set (cons own (cons serving (cons rp (nil int)))))
+                  ((PortSetMade) (serve (Aud own serving usb from server rp (nil AudDev) (nil Attached) (nil Going) (nil Message))))
                   ((PortSetNotYours) (complain (port_setting_why (PortSetNotYours))))
                   ((PortSetSize) (complain (port_setting_why (PortSetSize))))))))))
     ((SendNoPort) (complain "usb is gone"))
@@ -128,6 +132,29 @@
       (if (and (eq from (.pid a)) (not (is_notice b)))
           (Answered a (msg_text b))
           (answer_awaited (.kept a (append (.kept a) (cons (Message from b) (nil Message)))))))))
+
+; ------------------------------------------------------ asking the server
+
+; body asked of the audio server, its answer to rp.
+(def server_asked ((a Aud) (body (list int))) Answered
+  (match (port_send (.server a) (request (.rp a) body))
+    ((Sent) (server_awaited a))
+    ((SendNoPort) (Answered a (error_reply "the audio server is gone")))
+    ((SendFull) (Answered a (error_reply "the audio server is busy")))
+    ((SendTooBig) (Answered a (error_reply "too big")))))
+
+; The audio server's answer on rp; its requests answered meanwhile, as
+; it may ask before it answers, and the usb server's messages kept.
+(def server_awaited ((a Aud)) Answered
+  (match (port_receive_set)
+    ((SetRecvFailed) (Answered a (error_reply "lost its ports")))
+    ((SetMessage port m)
+      (match m
+        ((RecvFailed) (server_awaited a))
+        ((Message from b)
+          (if (eq port (.rp a)) (Answered a (msg_text b))
+              (eq port (.serving a)) (server_awaited (requested a b))
+              (server_awaited (.kept a (append (.kept a) (cons m (nil Message)))))))))))
 
 ; Whether a message's bytes b are one of the usb server's notices.
 (def is_notice ((b bytes)) bool
@@ -193,9 +220,11 @@
 ; be.
 (def stream_attached ((a Aud) (d AudDev) (s UacStream)) Aud
   (let name (unique_name (.attached a) (stream_name d s))
-    (match (audiodev_attach (.server a) (.rp a) (AudiodevAttach (.serving a) name (uac_is_input s) (.channels s) (.rates s) 0))
-      ((Err why) (let w (warn_as "usb-audio" (append name (append ": not attached: " why))) a))
-      ((Ok id) (.attached a (append (.attached a) (cons (Attached id name (.dev d) s) (nil Attached))))))))
+    (match (server_asked a (audiodev_attach_request (AudiodevAttach (.serving a) name (uac_is_input s) (.channels s) (.rates s) 0)))
+      ((Answered a2 r)
+        (match (audio_word_of "attached" r)
+          ((None) (let w (warn_as "usb-audio" (append name (append ": not attached: " (reply_why r "the audio server")))) a2))
+          ((Some id) (.attached a2 (append (.attached a2) (cons (Attached id name (.dev d) s) (nil Attached))))))))))
 
 ; The name a stream s of d is attached under: usb-VID:PID-KIND, the
 ; ids in hex and the kind what is at the stream's far end.
@@ -238,8 +267,8 @@
 (def detached_each ((a Aud) (as (list Attached))) Aud
   (if (is_empty as)
       a
-      (let w (audiodev_detach (.server a) (.rp a) (.id (head as)))
-        (detached_each a (tail as)))))
+      (match (server_asked a (audiodev_detach_request (.id (head as))))
+        ((Answered a2 r) (detached_each a2 (tail as))))))
 
 ; ds without device dev; gs without its streams; those attached of
 ; device dev, and as without them; the one attached with id, or none.

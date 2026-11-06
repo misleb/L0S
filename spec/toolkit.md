@@ -476,7 +476,7 @@ to `l0` are one namespace, and a duplicate is a compile error.
   widget's (labels, buttons, header bars, sidebars, alerts, the path
   bar, toggles, tabs, menus, status pages, entries, the icon view and
   the grid's cells, numbers too), and `wm`'s title bars, top bar,
-  launcher and L0S menu. Source Code Pro, in cells 8×16, is the
+  launcher and status menu. Source Code Pro, in cells 8×16, is the
   terminal's, `vt`'s, as GNOME Console's is, and `draw`'s `char`'s:
   what must line up in columns. Text is ASCII only, ellipsized with
   `...`, bold is the bold face, and large text is twice the line, 32.

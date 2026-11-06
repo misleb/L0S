@@ -36,7 +36,7 @@ only so far. A goal that lifts a limit links to it.
 | Page | What it covers |
 |---|---|
 | [demo.md](demo.md) | The interactive demo: the pid table, who talks to whom, the shell and its commands, driving L0S from an agent, terminals |
-| [desktop.md](desktop.md) | The compositor `wm`: buffers and layers, the compositor protocol, the top bar, the L0S menu, the launcher, frames, input; a large screen at scale 2 |
+| [desktop.md](desktop.md) | The compositor `wm`: buffers and layers, the compositor protocol, the top bar, the status menu, screenshots, the launcher, frames, input; a large screen at scale 2 |
 | [toolkit.md](toolkit.md) | The toolkit in `user/lib/ui`: its files, the Elm-style loop, scrolling, entries, the HIG as encoded |
 | [display.md](display.md) | The display protocol, `virtio-gpu`'s 2D and 3D modes, shaped layers and batched damage, `hvs` on the Raspberry Pi 5 |
 | [speech.md](speech.md) | Whistle's container, tokenizer, front end, stem, encoder and decoder, in L0; the speech service, which says what it hears to the agent |

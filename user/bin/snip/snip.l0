@@ -1,0 +1,131 @@
+; snip.l0 -- a screenshot, saved as a PNG: what the screen shows in a
+; rectangle, or all of it, as the compositor's capture gives it
+; (proto/wm.l0), at the screen's own pixels, deflated (format/png.l0's
+; png_deflated):
+;
+;   snip                    the whole screen
+;   snip X Y W H            the rectangle X Y W H, in the desktop's pixels
+;   snip ... FILE           into FILE, not the default
+;
+; The default file is /Volumes/data/user/Screenshot-DATE-TIME.png, the
+; time the clock's local time, the directory made if it is missing. wm
+; runs snip X Y W H for the area its status menu's screenshot button
+; selects. It says saved PATH, W x H, N bytes, on standard output and in
+; the log, or why not on standard error, and exits 1 then.
+
+; What ends snip, said as snip on standard error: 1.
+(def complain ((why (list int))) int (complain_as "snip" why))
+
+; What the arguments ask: a rectangle, or the whole screen, and a file,
+; or "" for the default; or why they ask nothing.
+(data SnipAsk (SnipArea Rect (list int)) (SnipScreen (list int)) (SnipWrong (list int)))
+
+; The usage.
+(def snip_usage () (list int) "usage: snip [X Y W H] [FILE]")
+
+; The arguments as is asked.
+(def snip_ask_of ((as (list (list int)))) SnipAsk
+  (let n (length as)
+    (if (eq n 0) (SnipScreen "")
+        (eq n 1) (SnipScreen (head as))
+        (or (eq n 4) (eq n 5))
+        (match (word_numbers (take as 4))
+          ((None) (SnipWrong (snip_usage)))
+          ((Some ns)
+            (let r (Rect (nth ns 0) (nth ns 1) (nth ns 2) (nth ns 3))
+              (if (or (lt (.w r) 1) (lt (.h r) 1))
+                  (SnipWrong "a rectangle's width and height are at least 1")
+                  (SnipArea r (if (eq n 5) (nth as 4) ""))))))
+        (SnipWrong (snip_usage)))))
+
+; Where a screenshot is saved by default.
+(def snip_dir () (list int) "/Volumes/data/user")
+
+; The default file's name for the local time t, as seconds counted from
+; 1970: Screenshot-2026-11-06-14-03-22.png.
+(def snip_name ((t int)) (list int)
+  (let (day (civil (div t 86400))
+        s (mod t 86400))
+    (match day
+      ((Civil y m d)
+        (append "Screenshot-"
+          (append (join_with "-" (cons (digits y) (cons (two_digits m) (cons (two_digits d)
+                                   (cons (two_digits (div s 3600)) (cons (two_digits (mod (div s 60) 60))
+                                     (cons (two_digits (mod s 60)) (nil (list int)))))))))
+                  ".png"))))))
+
+; The rows of a capture w by h pixels, each its words b, g, r and unused,
+; as png_row's red, green and blue, top first.
+(def snip_rows ((px bytes) (w int) (h int)) (list bytes)
+  (snip_rows_from px w (sub h 1) (nil bytes)))
+
+; snip_rows's loop: row y and those above it, onto acc.
+(def snip_rows_from ((px bytes) (w int) (y int) (acc (list bytes))) (list bytes)
+  (if (lt y 0)
+      acc
+      (snip_rows_from px w (sub y 1)
+        (cons (bytes_from_list (snip_row px (mul (mul y w) 4) (sub w 1) (nil int))) acc))))
+
+; Pixels x and those left of it, of the row from byte at, onto acc.
+(def snip_row ((px bytes) (at int) (x int) (acc (list int))) (list int)
+  (if (lt x 0)
+      acc
+      (let i (add at (mul x 4))
+        (snip_row px at (sub x 1)
+          (cons (bytes_get px (add i 2)) (cons (bytes_get px (add i 1)) (cons (bytes_get px i) acc)))))))
+
+; What snip does with its arguments.
+(def snip_main ((as (list (list int)))) int
+  (match (snip_ask_of as)
+    ((SnipWrong why) (complain why))
+    ((SnipScreen file) (with_compositor (SnipScreen file)))
+    ((SnipArea r file) (with_compositor (SnipArea r file)))))
+
+; The compositor found, and the screenshot taken and saved.
+(def with_compositor ((ask SnipAsk)) int
+  (let c (compositor_open)
+    (match c
+      ((NoCompositor why) (complain why))
+      ((Compositor port rp pid s)
+        (match ask
+          ((SnipWrong why) (complain why))
+          ((SnipArea r file) (snipped c r file))
+          ((SnipScreen file)
+            (let ws (split_spaces (compositor_ask c "desktop size"))
+              (if (and (eq (length ws) 3) (eq (head ws) "size"))
+                  (snipped c (Rect 0 0 (int_prefix (nth ws 1) 0) (int_prefix (nth ws 2) 0)) file)
+                  (complain (append "the compositor did not say its size: " (unwords ws)))))))))))
+
+; Rectangle r of the screen captured and saved to file, or the default.
+(def snipped ((c Compositor) (r Rect) (file (list int))) int
+  (match (desktop_capture c r)
+    ((Err why) (complain why))
+    ((Ok px)
+      (let (s (compositor_scale c)
+            w (mul (.w r) s)
+            h (mul (.h r) s)
+            png (png_deflated w h (snip_rows px w h))
+            path (if (is_empty file) (append (snip_dir) (append "/" (snip_name (snip_local_now)))) file)
+            m (if (is_empty file) (fs_mkdir (snip_dir)) 0)
+            why (write_whole path png))
+        (if (is_empty why)
+            (let (line (snip_said path w h (bytes_len png))
+                  i (info_as "snip" line)
+                  o (write_line line))
+              0)
+            (complain (append path (append ": " why))))))))
+
+; What a screenshot saved says: saved PATH, W x H, N bytes.
+(def snip_said ((path (list int)) (w int) (h int) (n int)) (list int)
+  (unwords (cons "saved" (cons (append path ",") (cons (digits w) (cons "x" (cons (append (digits h) ",")
+    (cons (digits n) (cons "bytes" (nil (list int)))))))))))
+
+; The clock's local time now, as seconds; 0, 1970, with no clock.
+(def snip_local_now () int
+  (match (name_lookup "clock")
+    ((NotFound) 0)
+    ((Found port)
+      (let rp (port_new)
+        (match (time_of (asked_reply (port_ask port rp "time" "the clock")))
+          ((None) 0)
+          ((Some t) (zone_local (clock_zone port rp) t)))))))

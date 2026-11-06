@@ -49,8 +49,11 @@
 # the board's keyboard and pointer are a USB keyboard and mouse on a
 # qemu-xhci, for pcie, xhci and usb-hid, not virtio's; and if NAME/usbaudio
 # exists too, QEMU's usb-audio is on it, a speaker of 16-bit stereo at 48
-# kHz, its sound dropped (audiodev none), for usb-audio. If NAME/sd exists,
-# the board has an SD card in a sdhci-pci, a blank image of 64 MB made
+# kHz, its sound dropped (audiodev none), for usb-audio; and if
+# NAME/usbaudio2 exists too, a second, so that usb-audio attaches one
+# device while the server plays the chime on the other, with the
+# qemu-xhci given 8 USB 2 ports, not 4, for the four devices. If NAME/sd
+# exists, the board has an SD card in a sdhci-pci, a blank image of 64 MB made
 # for the boot, for pcie and sdhci. Every boot is killed after two
 # minutes: install_boot, the longest, takes about 3 s alone, and longer
 # beside others writing their disks. Given case names as arguments, it runs only those. Run from
@@ -208,6 +211,10 @@ run_case() {
     if [ -f "$dir/usbaudio" ]; then
       usb=audio
       qemu_args="$qemu_args -audiodev none,id=snd0 -device usb-audio,audiodev=snd0"
+      if [ -f "$dir/usbaudio2" ]; then
+        usb="audio audio"
+        qemu_args="${qemu_args/-device qemu-xhci /-device qemu-xhci,p2=8 } -audiodev none,id=snd1 -device usb-audio,audiodev=snd1"
+      fi
     fi
   fi
   if [ -f "$dir/gpu" ]; then

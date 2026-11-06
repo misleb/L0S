@@ -223,6 +223,13 @@ a UUID the board makes from it to type it back, since an e2e case's
 It checks text is smoothed by counting the colors along a row through a
 title, and boots again with `QEMU_APPEND=scale=1`. It keeps the 2x screen
 in `build/hidpi-2x.ppm` for looking at.
+`status-menu.sh` (`make screen-initramfs`) drives the top bar's status
+menu at its right end and restarts and shuts the board down from it;
+`screenshot.sh` (`make screenshot-initramfs`, `tests/screenshot/etc`)
+boots on USB's keyboard and tablet with the audio server and QEMU's
+speaker (`QEMU_INPUT=usb QEMU_USB="tablet audio"`) and a FAT32 data
+volume, drags the volume slider, takes screenshots, and reads the PNGs
+back off the disk with mtools, comparing them with the screendump.
 
 Their helpers, copied in each script:
 

@@ -52,16 +52,20 @@ The display protocol, and what virtio-gpu does for the compositor, are in [displ
 | `place ID X Y W H` | the window's content made W×H at X, Y, below the top bar: its client asked for the size with a size notice, as `maximize` asks, and the window placed once it answers, or moved at once if it is that size; no longer maximized. W×H must fit the screen. Any client may ask, as the agent does ([agent.md](agent.md)) |
 | `raise ID` | the window brought to the front with the keyboard's focus, as a press on it brings it. Any client may ask |
 | `dismiss ID` | the window's client asked to close it, with the close notice, and the window closed by force if it is open 2 s later: what its close button does. Any client may ask |
-| `grab CODE PORT` | the key of Linux code CODE (0 to 767), pressed, released and repeated, sent to PORT as the keyboard's driver sent it, before anything else sees it: whatever window is in front, and while the launcher or the menu is shown. Its client keeps it until it exits, which `wm` watches; grabbing it again moves it to another PORT; refused while another client has it. What `speech`'s key to talk is ([speech.md](speech.md#the-speech-service)) |
+| `grab CODE PORT` | the key of Linux code CODE (0 to 767), pressed, released and repeated, sent to PORT as the keyboard's driver sent it, before anything else sees it: whatever window is in front, and while the launcher, the status menu or a screenshot's area is shown. Its client keeps it until it exits, which `wm` watches; grabbing it again moves it to another PORT; refused while another client has it. What `speech`'s key to talk is ([speech.md](speech.md#the-speech-service)) |
 | `paste X Y W H VA` | the buffer at VA in `wm`, shared there with `shm_share`, W×H of the desktop's pixels (S times each way in the screen's), ARGB words row after row, not premultiplied, drawn over the desktop at X, Y by each pixel's alpha (`ui_mix`, to a percent), what falls off the screen left out; the desktop damaged where it is, and the buffer given up. W×H must fit the screen |
+| `capture X Y W H VA` | what the screen shows in X Y W H, the desktop's pixels, copied by the display ([display.md](display.md)) into the buffer at VA in `wm`, shared there with `shm_share`, W×H times the scale each way of the screen's pixels, a window's buffer's words row after row: the windows, the bar and the desktop as they show, without the pointer; the buffer given up after. Refused for a rectangle off the screen. What `snip` asks |
 
 `wm`'s own buffers are the desktop (the wallpaper, and what `draw`
 draws), buffer 0; the pointers, its cursor set, each made once at start
 (`with_pointers`): Adwaita's arrow, 1, and from 100001 the I-beam
-(`text`) and the four resize pointers, in `ui_cursor_names`'s order,
-all six painted one under another in one region and each given as a
-64×64 buffer of its own 4 pages; the top bar, 2; the launcher's page,
-3; the L0S menu's card, 100000; and each window's
+(`text`), the four resize pointers and the crosshair, in
+`ui_cursor_names`'s order, all seven painted one under another in one
+region and each given as a 64×64 buffer of its own 4 pages; the top
+bar, 2; the launcher's page, 3; the status menu's card, one buffer
+given as 100000 at its height with power closed and 99999 with it
+open; a client's capture's buffer, 150000, while it is captured into;
+the frozen screen while a screenshot's area is chosen, 150001; and each window's
 chrome, its title bar with the frame under it, one buffer as big as the
 window: window i's content and chrome being 4 + 4i + 2k and 5 + 4i + 2k,
 k a bank, 0 or 1, the content's and the chrome's each its own, and the
@@ -75,16 +79,18 @@ under its id. A commit shows the attached buffer under its bank, which
 becomes the content's. The layers it gives the driver are the desktop, then
 each window from back to front, its chrome and then its content, then
 the top bar over them all; while the launcher is open, the desktop, the
-launcher under the bar, and the bar, the windows left out.
+launcher under the bar, and the bar, the windows left out; while a
+screenshot's area is chosen, the frozen screen alone.
 
 The top bar is GNOME Shell's: 32 rows across the screen, black, with
-the **L0S menu**'s logo at its left, then **Applications**, a button its
+**Applications** at its left, a button its
 label's width in Source Sans 3 (`bar_apps_w`, measured as the toolkit
 measures text) and 12 either side, then the name of the front window's app in
 white, or its title if its client is no app, and the date and time,
 bold, in its middle, as GNOME shows them by default (`Oct 15  22:42`,
-on a 24-hour clock). All of the bar's text is in Source Sans 3, as are
-the title bars', the launcher's names and the L0S menu's, as GNOME
+on a 24-hour clock), and the **status menu**'s button at its right
+end. All of the bar's text is in Source Sans 3, as are
+the title bars', the launcher's names and the status menu's, as GNOME
 Shell's are in its interface font; the clock's digits are tabular, so
 it does not move as the minutes change. An app's name is its bundle's manifest's: `wm`
 reads every manifest in `/Applications` as it starts, and again each
@@ -93,21 +99,64 @@ time the launcher opens if `/` is a volume and the bundles in
 client's program is, from `proc_info`; the manifest of a program it has
 not scanned yet is read at that moment. `wm`
 repaints the bar when the front window or its title changes, when the
-launcher opens or closes, and when the clock says a minute has begun.
+launcher or the status menu opens or closes, when the volume changes,
+and when the clock says a minute has begun.
 
-**The L0S menu** ([user/sbin/wm/logo_menu.l0](../user/sbin/wm/logo_menu.l0)) is
-the logo, `branding/logo.svg`'s mark painted flat in 22×22 pixels, in the
-bar's first 32 columns, as the Apple menu is in macOS's. A click on it,
-acting on its release over it, lights it with a pill and drops a card, 200
-by 114, 4 in from the screen's edge and under the bar, in its own buffer
-(id 100000, a layer over the windows and under the bar, in the display's
-layers only while it is shown): **About L0S**, which starts the About app;
-**Shut Down**, which kills pid 1 (`proc_kill 1`), so `boot` exits and
-the kernel halts; and **Restart**, which restarts the board as `reboot`
-does (`board_restart`). Neither tells anything first, a stand-in for a
-safer shutdown. Esc, a click outside the card or on the bar closes it. While it
-is open no window is told of the pointer or the keys
-(`tests/logo-menu.sh`).
+**The status menu** ([user/sbin/wm/status.l0](../user/sbin/wm/status.l0))
+is GNOME Shell's status area and its quick settings. Its button, at the
+bar's right end, shows the default output's speaker, by its volume
+(`audio-volume-muted` at 0, `-low` to 33, `-medium` to 66, `-high`
+above), once the audio server has said it, and the power icon: 36 wide
+with the power icon alone, 60 with both. A click on it, acting on its
+release over it, lights it with a pill and drops a card, 360 wide, 4
+in from the screen's right edge and 4 under the bar, in its own buffer
+(a layer over the windows and under the bar, in the display's layers
+only while it is shown), laid out with the toolkit's widgets and painted
+by `wm`:
+
+- a row of round buttons at its end: **screenshot**, which closes the
+  card and starts choosing an area (below); **settings**, which does
+  nothing yet; and **power**, which opens, under the row, a boxed list
+  of **Restart**, which restarts the board as `reboot` does
+  (`board_restart`), and **Shut Down**, which kills pid 1 (`proc_kill
+  1`), so `boot` exits and the kernel halts. Neither tells anything
+  first, a stand-in for a safer shutdown. The card is 104 high, 216
+  with power open;
+- the volume's row: the speaker's icon and a slider of the default
+  output's volume, 0 to 100, which a press sets and a drag moves; or
+  `No sound output` while the audio server has none, or has not
+  answered.
+
+Esc, a click outside the card or on the bar closes it. While it is open
+no window is told of the pointer or the keys (`tests/status-menu.sh`).
+`wm` is a client of the audio server ([sound.md](sound.md)), whose
+answers come on a port of its own: it looks the server up as it starts,
+and, until it is found, each minute and each time the card opens; asks
+it to `watch`, then for its `devices`, the default output among them,
+and that output's `volume`; asks the devices again when a device comes
+or goes, and the volume again each time the card opens, since no notice
+says another client changed it. The slider sets it with `volume ID PCT`,
+one ask out at a time: a value moved to meanwhile is shown at once and
+sent when the answer comes (`tests/screenshot.sh`).
+
+**Screenshots** ([user/sbin/wm/snip.l0](../user/sbin/wm/snip.l0),
+[user/bin/snip](../user/bin/snip/snip.l0)) are GNOME's area
+screenshots. The status menu's screenshot button freezes the screen:
+`wm` makes a buffer the screen's size, has the display `capture` the
+whole screen into it ([display.md](display.md)), keeps its pixels, and
+shows it alone over everything, the pointer a crosshair. A press starts
+an area there and a drag grows it, either way, kept on the screen and
+outlined 2 pixels thick in the accent color, `3584e4`, the pixels under
+the old outline put back from those kept; Esc gives up. The release
+gives up the frozen screen and starts `/bin/snip X Y W H` for the area,
+which asks `wm` to `capture` it from the screen as it is now and saves
+it as a PNG, its rows filtered and deflated
+([user/lib/format/png.l0](../user/lib/format/png.l0),
+[deflate.l0](../user/lib/format/deflate.l0)), at the screen's own
+pixels, in `/Volumes/data/user/Screenshot-YYYY-MM-DD-HH-MM-SS.png`, the
+clock's local time, making `user` if it is missing; it says `saved
+PATH, W x H, N bytes` in the log. From a shell, `snip` takes the whole
+screen, or `snip X Y W H`, and a FILE after either.
 
 **The launcher** ([user/sbin/wm/launcher.l0](../user/sbin/wm/launcher.l0)) is GNOME
 Shell's grid of apps. A click on Applications, acting on its release
@@ -116,7 +165,7 @@ over it, lights the button with a pill and shows a page under the bar,
 136×104, in rows from 64 below the bar, in the middle of the screen, in
 the archive's order, or, once `/` is a volume, the name order its file
 server lists them in. A click on an app closes the page and launches
-the app (below), as the L0S menu's About L0S does. Esc, a click on the page, or
+the app (below). Esc, a click on the page, or
 Applications again closes it. While it is open no window is told of
 the pointer, the wheel or the keys. Its page is one buffer, painted
 when `wm` starts and again when opening it finds a changed set of
@@ -135,7 +184,7 @@ to REPLY, is `shown ID`: the window to bring to the front, 0 for the
 app's front one. What an open does is the app's own.
 
 **Launching** ([user/sbin/wm/launching.l0](../user/sbin/wm/launching.l0))
-goes one way, whatever asks it: the launcher, the L0S menu's About L0S,
+goes one way, whatever asks it: the launcher,
 or the compositor's `launch`, which the command `open` asks. `wm` looks
 the app's name up. Found, the
 app is running: `wm` sends it `open` with the launch's arguments, its
@@ -468,9 +517,9 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   client-decorated one, has no shadow.
 - Only toolkit windows can be resized or maximized (`draw` ignores the
   size notice, so a double click on its title bar leaves it as it is).
-- Any client may place, raise or close another's windows and draw on
-  the desktop (`place`, `raise`, `dismiss`, `paste`): nothing asks
-  which may. A `place` of a window whose client ignores the size notice
+- Any client may place, raise or close another's windows, draw on
+  the desktop and read the screen (`place`, `raise`, `dismiss`,
+  `paste`, `capture`): nothing asks which may. A `place` of a window whose client ignores the size notice
   moves it only if it is already that size.
 - **Terminal (`vt`) is a terminal of lines, not a screen.** Its only
   shortcuts are Ctrl-Shift-T for a tab and Shift-Page Up and Down for a
@@ -495,16 +544,32 @@ than a 1280×800 one's, so the 64-entry control queue has less to spare
   toolkit](toolkit.md)). `wm` opens a region for each window, its
   chrome's, and closes it when the window closes; the proc runtime keeps
   at most 64 open at once, so `wm`, which keeps four of its own (the
-  desktop, the pointer, the top bar and the launcher), can have 60
-  windows open at once, and open them for ever; a resize past a buffer's
+  desktop, the pointer, the top bar and the launcher) and one for the
+  status menu's card, can have 59 windows open at once (one fewer while
+  a screenshot's area is chosen), and open them for ever; a resize past a buffer's
   room holds one more for a moment, and is refused if there is none. The
-  pointers are the six `wm` makes: a client asks for one of them by name,
+  pointers are the seven `wm` makes: a client asks for one of them by name,
   and cannot give an image of its own. The close button asks
   its client to close the window, and gives it 2 seconds to, however
   long it needs, as a dialog asking to save would: then it is killed,
   whatever it is doing. The pointer has
   one button that does anything, the left: `wm` passes the others on to
   the window under the pointer, and the toolkit drops them.
+- **The status menu has a screenshot button, settings that do nothing
+  yet, power, and the default output's volume**, and nothing more of
+  GNOME's quick settings: no toggles, no other device's volume, no
+  mute. The volume it sets is the audio server's, kept only until the
+  server restarts or reloads `/etc/audio`. A change another client
+  makes shows only when the card opens again.
+- **A screenshot is of an area chosen with the pointer, and nothing
+  else**: there is no screen or window mode, no Print Screen key, no
+  dimming outside the area, no handles to change it once the button is
+  up, and no notice that it was saved but the log's line. The frozen
+  screen is what was chosen on; `snip` captures the screen as it is a
+  moment later, which differs only where something drew meanwhile. A
+  screenshot is saved at the screen's own pixels, to
+  `/Volumes/data/user`, which the demo's 744 KB volume fills after a
+  few full-screen ones.
 - **Any process may set the clock**, with `set S`, as many times as it
   likes; `rtc clock` asks nothing of who sets it. What a set moved a
   PL031 by is kept only while `rtc clock` runs, so QEMU's board is back

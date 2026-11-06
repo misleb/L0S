@@ -12,9 +12,10 @@ window passes it on as it crosses, with no grab.
 The window shows a desktop, the compositor's: a wallpaper and a top bar,
 and no windows, since `/etc/system` starts the system's services and no
 app. The top bar is GNOME Shell's, black across the top of the screen:
-the L0S logo and **Applications** at its left, then the name of the
+**Applications** at its left, then the name of the
 front window's app (`Terminal`, `System Monitor`), or its title if it is
-no app's, and the date and time in its middle, `Oct 15  22:42`, from the
+no app's, the status menu's speaker and power at its right, and the
+date and time in its middle, `Oct 15  22:42`, from the
 board's real-time clock, which QEMU sets to this machine's time in UTC,
 shown in US Pacific time, the zone `rtc clock` serves.
 There is one shell at boot, and one more for each Terminal opened:
@@ -88,8 +89,8 @@ booted with `root=UUID`, or else from the initramfs.
 | 13 | `usb-hid` | the keyboard's, the mouse's and the tablet's driver, one process waiting on three ports. It serves `keyboard`, telling `wm`, and `run keys`, of each key typed in the window, and `pointer`, telling `wm` where the tablet is, or how far the mouse moved, and what their buttons and wheels do |
 | 14 | `sh` | the serial line's shell, `/etc/system`'s first program, which `boot` starts |
 | 15 | `font` | the font service. It owns the fonts in `/etc/fonts`, and serves `font`, giving every program with a window, `wm` first, its text's glyphs: each face at each line height a strike in an arena of pages it shares with each asker, the desktop's made at the build, any other rasterized on its first ask and let go once no process that asked for it is left, which it learns from the kernel's exit notices |
-| 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor` |
-| 17 | `audio` | the audio server ([sound.md](sound.md)). It owns the sound devices its drivers attach, mixes every stream into each output and serves `audio`, for `play`, `speak`, `rec`, `speech` and `sound`; the demo has QEMU's speaker with `QEMU_USB=audio`, and a microphone passed through |
+| 16 | `wm` | the compositor. It owns the screen and keeps the windows on it, and serves `compositor`; its status menu asks `audio` for the default output's volume and sets it, and its screenshot button starts `snip`, which asks it to `capture` the area |
+| 17 | `audio` | the audio server ([sound.md](sound.md)). It owns the sound devices its drivers attach, mixes every stream into each output and serves `audio`, for `play`, `speak`, `rec`, `speech`, `sound` and `wm`'s volume slider; the demo has QEMU's speaker with `QEMU_USB=audio`, and a microphone passed through |
 | 18 | `usb-audio` | the class driver of USB audio devices, after `audio`. It attaches each device's streams to it: QEMU's own `usb-audio`, a speaker (`QEMU_USB=audio`), fed through `xhci`, and a Yeti Nano passed through (`QEMU_USB=046d:0acf`), a microphone and a speaker |
 | 19 | `agentd` | the agent's server ([agent.md](agent.md)), last. With no `/etc/agent/config` and token, as the demo has unless `make agent-etc` made them, it says so in the log and exits. Otherwise it waits for `fs` to mount its home's volume, `/Volumes/data`, and serves `agent`, for `run agent`: it asks the model through `inet`'s TCP and the host's proxy, reads and writes its files through `fs`, by the kernel, and starts the programs its `run` and `sh` tools run, their terminal a port of its own |
 | 20 | `speech` | the speech service ([speech.md](speech.md#the-speech-service)), after `agentd`. With no Whistle at `/Volumes/data/speech/whistle.cact`, as the demo has unless the installer fetched it, it says so in the log and exits. Otherwise it reads the model, grabs F12 of `wm`, and serves `speech`: what `audio`'s default input hears while F12 is held, made text and said to `agentd`. The demo has no microphone, so a press is said to find none |
@@ -280,7 +281,7 @@ Things to try:
      13       0    0   0.0  usb-hid       keyboard,pointer  waiting for a message on 3 ports
      14       1    1   2.0  sh            -             running
      15       1    0   0.0  font          font          waiting for a message on port 19
-     16       1    0   1.9  wm            compositor    waiting for a message on port 29
+     16       1    0   1.9  wm            compositor    waiting for a message on 3 ports
   ```
 
   CPU is the CPU a process is on, or last ran on: drivers passing

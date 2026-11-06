@@ -107,6 +107,13 @@ the file; a line of a key known that is wrong fails the whole, and
 `reload` answers why. Without the file every default is the first
 device of its kind, at 100.
 
+**The top bar's volume** is a client's too: `wm`'s status menu
+([desktop.md](desktop.md)) asks `watch`, `devices` and the default
+output's `volume` on a port of its own, and its slider sets that
+output's volume with `volume ID PCT`, in the server alone: nothing
+writes `/etc/audio`, so a reload or a new boot puts the volume back as
+the file says.
+
 ## The audio device protocol
 
 A driver finds the server by its name, waits up to a minute for it, and
@@ -130,7 +137,12 @@ and the driver serves the server on that port:
 and tells the server, as notices to the `audio` port: `aro`, the output's
 id, its room and what is queued, as each period ends while the output
 is started; and `ain`, the input's id and the samples it heard, in the
-format `listen` said. The server names a device in the log as it comes,
+format `listen` said. While a driver waits for the answer to `attach`
+or `detach`, it goes on answering the server's requests: the server
+may ask before it answers, as when the device just attached is the
+default output and the chime starts on it, and a driver that waits
+only for its answer is never answered. usb-audio, which attaches a
+device's streams one after another, waits so. The server names a device in the log as it comes,
 `device 1: hdmi0, out, 2 channels at 32000,44100,48000`, and as it goes.
 
 **The chime.** The server reads `/etc/chime.wav` as it starts, unless

@@ -1,0 +1,153 @@
+; deflate.l0 -- raw DEFLATE (RFC 1951) and zlib streams (RFC 1950)
+; encoded from bytes: one fixed-Huffman block, its matches found by
+; LZ77 over a 32 KB window, each place's three bytes hashed to the last
+; place they were seen, so a run, or a row like the one above, costs a
+; few bits. inflate.l0 is the reader. Pure: linked by programs and host
+; tools.
+
+; The output so far: the pieces made bytes, last first, the bytes of
+; the piece being made, last first, and how many, and the bits not yet
+; a byte, least significant first, and how many.
+(data DeflOut (DeflOut (done (list bytes)) (cur (list int)) (k int) (acc int) (nb int)))
+
+; Nothing output yet.
+(def defl_empty () DeflOut (DeflOut (nil bytes) (nil int) 0 0 0))
+
+; How many bytes a piece is made of before it is made bytes.
+(def defl_piece () int 4096)
+
+; o with byte v after its bytes.
+(def defl_byte ((o DeflOut) (v int)) DeflOut
+  (if (lt (.k o) (defl_piece))
+      (.k (.cur o (cons v (.cur o))) (add (.k o) 1))
+      (defl_byte (DeflOut (cons (bytes_from_list (rev (.cur o))) (.done o)) (nil int) 0 (.acc o) (.nb o)) v)))
+
+; o's bytes, its bits whole.
+(def defl_out ((o DeflOut)) bytes
+  (bytes_concat (rev (cons (bytes_from_list (rev (.cur o))) (.done o)))))
+
+; o with the k low bits of v after its bits, the first bit least
+; significant, as DEFLATE packs everything but Huffman codes.
+(def defl_bits ((o DeflOut) (v int) (k int)) DeflOut
+  (defl_whole (.nb (.acc o (bit_or (.acc o) (bit_shl (bit_and v (sub (bit_shl 1 k) 1)) (.nb o)))) (add (.nb o) k))))
+
+; o with each whole byte of its bits made a byte.
+(def defl_whole ((o DeflOut)) DeflOut
+  (if (lt (.nb o) 8)
+      o
+      (let (v (bit_and (.acc o) 255)
+            o2 (defl_byte o v))
+        (defl_whole (.nb (.acc o2 (bit_shr (.acc o2) 8)) (sub (.nb o2) 8))))))
+
+; o with a Huffman code of k bits, its first bit the most significant.
+(def defl_code ((o DeflOut) (code int) (k int)) DeflOut
+  (defl_bits o (defl_reverse code k 0) k))
+
+; The k low bits of code, reversed, after acc.
+(def defl_reverse ((code int) (k int) (acc int)) int
+  (if (le k 0) acc (defl_reverse (bit_shr code 1) (sub k 1) (bit_or (bit_shl acc 1) (bit_and code 1)))))
+
+; o with literal or length symbol v, in the fixed code: 0 to 143 eight
+; bits from 0x30, 144 to 255 nine from 0x190, 256 to 279 seven from 0,
+; 280 to 287 eight from 0xC0.
+(def defl_symbol ((o DeflOut) (v int)) DeflOut
+  (if (lt v 144) (defl_code o (add 48 v) 8)
+      (lt v 256) (defl_code o (add 400 (sub v 144)) 9)
+      (lt v 280) (defl_code o (sub v 256) 7)
+      (defl_code o (add 192 (sub v 280)) 8)))
+
+; Length symbol 257 + c's extra bits, and its shortest length, as
+; inflate.l0 reads them.
+(def defl_len_extra ((c int)) int
+  (if (or (lt c 8) (eq c 28)) 0 (sub (bit_shr c 2) 1)))
+(def defl_len_base ((c int)) int
+  (if (lt c 8) (add c 3) (eq c 28) 258 (add (bit_shl (add 4 (bit_and c 3)) (defl_len_extra c)) 3)))
+
+; Distance symbol d's extra bits, and its shortest distance.
+(def defl_dist_extra ((d int)) int
+  (if (lt d 4) 0 (sub (bit_shr d 1) 1)))
+(def defl_dist_base ((d int)) int
+  (if (lt d 4) (add d 1) (add (bit_shl (add 2 (bit_and d 1)) (defl_dist_extra d)) 1)))
+
+; The length symbol, less 257, for a match of len, 3 to 258: the last
+; whose shortest length is at most it, from c down.
+(def defl_len_code ((len int) (c int)) int
+  (if (le (defl_len_base c) len) c (defl_len_code len (sub c 1))))
+
+; The distance symbol for a distance of dist, 1 to 32768, from d down.
+(def defl_dist_code ((dist int) (d int)) int
+  (if (le (defl_dist_base d) dist) d (defl_dist_code dist (sub d 1))))
+
+; o with a match of len bytes dist back: its length's symbol and extra
+; bits, then its distance's five-bit code and extra bits.
+(def defl_match ((o DeflOut) (len int) (dist int)) DeflOut
+  (let (c (defl_len_code len 28)
+        d (defl_dist_code dist 29)
+        o2 (defl_bits (defl_symbol o (add 257 c)) (sub len (defl_len_base c)) (defl_len_extra c)))
+    (defl_bits (defl_code o2 d 5) (sub dist (defl_dist_base d)) (defl_dist_extra d))))
+
+; ---------------------------------------------------------------- matches
+
+; The window, and so the farthest a match reaches back; the longest
+; match; and the hash table's size, a power of two.
+(def defl_window () int 32768)
+(def defl_longest () int 258)
+(def defl_slots () int 32768)
+
+; The hash of the three bytes of b from i.
+(def defl_hash ((b bytes) (i int)) int
+  (bit_and (bit_xor (bit_xor (bit_shl (bytes_get b i) 10) (bit_shl (bytes_get b (add i 1)) 5)) (bytes_get b (add i 2)))
+           (sub (defl_slots) 1)))
+
+; How many bytes from i match those from j, before i, up to most.
+(def defl_same ((b bytes) (j int) (i int) (k int) (most int)) int
+  (if (or (ge k most) (not (eq (bytes_get b (add j k)) (bytes_get b (add i k)))))
+      k
+      (defl_same b j i (add k 1) most)))
+
+; The bytes of b from i up to n, onto o: at each place a match with the
+; last place its three bytes hashed to, if it is in the window and at
+; least three long, else a literal. Only the places a match begins at
+; are hashed, which keeps a long run cheap: the next run's start hashes
+; to the last match's.
+(def defl_run ((b bytes) (i int) (n int) (heads (array int)) (o DeflOut)) DeflOut
+  (if (ge i n)
+      o
+      (gt (add i 3) n)
+      (defl_run b (add i 1) n heads (defl_symbol o (bytes_get b i)))
+      (let (h (defl_hash b i)
+            j (sub (array_get heads h) 1)
+            heads2 (array_set heads h (add i 1))
+            len (if (and (ge j 0) (le (sub i j) (defl_window)))
+                    (defl_same b j i 0 (min (defl_longest) (sub n i)))
+                    0))
+        (if (ge len 3)
+            (defl_run b (add i len) n heads2 (defl_match o len (sub i j)))
+            (defl_run b (add i 1) n heads2 (defl_symbol o (bytes_get b i)))))))
+
+; The bytes of b from i up to j as raw DEFLATE: one last block of the
+; fixed code, its header the bits 1 and 01, ended by symbol 256.
+(def deflate_raw ((b bytes) (i int) (j int)) bytes
+  (let (o (defl_bits (defl_empty) 3 3)
+        o2 (defl_symbol (defl_run b i j (array_new (defl_slots) 0) o) 256))
+    (defl_out (defl_bits o2 0 (mod (sub 8 (.nb o2)) 8)))))
+
+; The bytes of b as a zlib stream: its header, 0x78 0x01 (deflate, a 32
+; KB window, no dictionary), the raw stream, and the Adler-32 of b, most
+; significant byte first.
+(def zlib_deflated ((b bytes)) bytes
+  (let (n (bytes_len b)
+        a (defl_adler32 b 0 n 1 0))
+    (bytes_concat (cons (bytes_from_list (cons 120 (cons 1 (nil int))))
+                        (cons (deflate_raw b 0 n)
+                              (cons (bytes_from_list (cons (bit_and (bit_shr a 24) 255) (cons (bit_and (bit_shr a 16) 255)
+                                                       (cons (bit_and (bit_shr a 8) 255) (cons (bit_and a 255) (nil int))))))
+                                    (nil bytes)))))))
+
+; The Adler-32 of the bytes of b from i up to j, its sums a and s so far,
+; 1 and 0 to start.
+(def defl_adler32 ((b bytes) (i int) (j int) (a int) (s int)) int
+  (if (ge i j)
+      (bit_or (bit_shl s 16) a)
+      (let a2 (mod (add a (bytes_get b i)) 65521)
+        (defl_adler32 b (add i 1) j a2 (mod (add s a2) 65521)))))

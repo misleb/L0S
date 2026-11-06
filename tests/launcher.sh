@@ -113,10 +113,10 @@ shows() {
   exit 1
 }
 
-# The top bar is 32 rows; the logo is its first 32 columns, Applications the next 94,
+# The top bar is 32 rows; Applications is its first 94 columns,
 # its label 70 in Source Sans 3 and 12 either side, and
-# while the launcher is open a pill, 404040, from 36 to 122 across and 4
-# to 28 down, is behind its label, which starts at 44. The page is under
+# while the launcher is open a pill, 404040, from 4 to 90 across and 4
+# to 28 down, is behind its label, which starts at 12. The page is under
 # the bar, 242424. Its nine apps, About, Agent, Disks, Files, Fonts,
 # Installer, System Monitor, Terminal and Widgets, in the archive's
 # order, are cells 136 wide, eight a row, (1280 - 2 * 48) / 136, from
@@ -126,9 +126,9 @@ shows() {
 # (its icon.svg): its screen, 241f31, holds 1124, 138,
 # 32 in and 30 down, below its prompt.
 # The desktop's wallpaper at 0, 32 is 15 26 39, as gpu-screen.sh pins it.
-# The front window's app's name starts at 126, 8 down: Source Sans 3's
+# The front window's app's name starts at 94, 8 down: Source Sans 3's
 # T at 16 has its box at the pen, 2 down, its crossbar's top row 2, 4,
-# 4, 4, 4, 4, 3 of 15 from 126, so 127, 10 is white at 27% on black.
+# 4, 4, 4, 4, 3 of 15 from 94, so 95, 10 is white at 27% on black.
 pill="64 64 64"; page="36 36 36"; screen="36 31 49"
 desk="15 26 39"
 headerbar="48 48 48"; ink="255 255 255"
@@ -159,4 +159,4 @@ window
 echo "ok - launcher: a click on Terminal started it, its window titled /, in front"
 # T's crossbar, row 10 at 127, is partly covered: the smooth glyph's level, not white.
 shows "its window shown, the launcher closed, the bar naming Terminal" \
-  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "40 16 0 0 0" "127 10 69 69 69"
+  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "40 16 0 0 0" "95 10 69 69 69"

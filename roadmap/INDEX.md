@@ -45,6 +45,7 @@ move independently, so several can be active at once.
 | [0067](0067-speech-as-spoken.md) Speech heard as it is spoken | Agent | idea | – | 0061 | speech.md, agent.md |
 | [0068](0068-first-stage-everywhere.md) The first stage alone, wherever a card is made | Pi 5 | idea | – | – | pi5.md, boot.md, storage.md |
 | [0069](0069-audio-server.md) An audio server: drivers that only move frames, and one place that mixes | Desktop | active | 6/7 | – | sound.md, devices.md, programs.md, demo.md, pi5.md, testing.md |
+| [0070](0070-screenshots.md) Screenshots as GNOME takes them: the screen, a window, Print Screen, a notice | Desktop | idea | – | – | desktop.md, display.md, programs.md, testing.md |
 ## Ready
 
 [0060](0060-speech-to-text.md), Whistle in L0, is active: its

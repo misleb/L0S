@@ -179,10 +179,10 @@ click 572 150
 window
 [ "$w_front" = "front" ] || fail "Extra's window opened, but not in front"
 echo "ok - launcher-install: a click on Extra started it, its window titled /, in front"
-# The bar names the window's app, Extra, from 126: Source Sans 3's E at
+# The bar names the window's app, Extra, from 94: Source Sans 3's E at
 # 16 has its box a pixel past the pen, 2 down; its top arm is lit along
-# row 10, 4 of 15 at 128, as T's crossbar is, and its stem down the left
-# of its box, 12 of 15 at 127, 16, where T has none; each pixel is the
+# row 10, 4 of 15 at 96, as T's crossbar is, and its stem down the left
+# of its box, 12 of 15 at 95, 16, where T has none; each pixel is the
 # smooth glyph's partial cover on black, 27% and 80%, not white.
 shows "its window shown, the launcher closed, the bar naming Extra" \
-  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "128 10 69 69 69" "127 16 204 204 204"
+  "$((w_x + 6)) $((w_y + 6)) $headerbar" "0 32 $desk" "96 10 69 69 69" "95 16 204 204 204"

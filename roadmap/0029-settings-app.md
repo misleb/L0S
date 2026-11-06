@@ -31,7 +31,9 @@ changing one thing and saying what it changed.
 ## Done when
 
 - To be written. What it will at least hold:
-  - A Settings app in the launcher, GNOME's layout (a sidebar of
+  - A Settings app in the launcher, and opened by the top bar's status
+    menu's gear, its settings button, which does nothing until then
+    ([desktop.md](../spec/desktop.md)), GNOME's layout (a sidebar of
     panels, each a page of rows), with these panels:
     - **Appearance:** the desktop's wallpaper, chosen from images on
       the system (the boot splash, 0028's driver frame, stays fixed);
@@ -43,6 +45,10 @@ changing one thing and saying what it changed.
       US Pacific time by 0056 until this panel can change it, in
       `clock_zone_at` (`user/sbin/rtc/zone.l0`), the one place every
       client asks; other zones' rules are 0057's.
+    - **Sound:** the default output and input, and each device's
+      volume, written to `/etc/audio` and the audio server told to
+      `reload` ([sound.md](../spec/sound.md#the-settings)), so the
+      volume the status menu's slider sets holds across boots.
     - **Boot:** the boot volume's `cmdline.txt` words (the root, and
       others), and what `/etc/system` starts.
     - **Raspberry Pi** (only on a Pi 5): the bootloader's settings
@@ -91,3 +97,7 @@ To be written with the steps.
   could come first.
 - 2026-10-30: a Date & Time panel, for the time zone 0056 fixed at US
   Pacific in `rtc clock`; any other zone needs 0057's rules.
+- 2026-11-06: the top bar's status menu has a settings button that does
+  nothing yet: Settings is what it will open. A Sound panel, since the
+  menu's volume slider sets the server's volume only until a reload or
+  a boot.

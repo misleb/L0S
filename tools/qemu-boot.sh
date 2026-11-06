@@ -46,7 +46,8 @@
 # QEMU_USB, with QEMU_INPUT=usb, is more devices on that qemu-xhci, words
 # separated by spaces: audio, QEMU's usb-audio, a speaker of 16-bit
 # stereo at 48 kHz whose sound is dropped, or written to the host's
-# file QEMU_AUDIO_WAV if set, for usb-audio; tablet, QEMU's
+# file QEMU_AUDIO_WAV if set, for usb-audio, and each more audio a
+# speaker more, its sound dropped; tablet, QEMU's
 # usb-tablet, which says where the pointer is, so that QEMU's window
 # passes the host's mouse on with no grab, as the demo boots, while the
 # usb-mouse is left for QMP's relative moves; or VID:PID, in
@@ -99,15 +100,18 @@ if [ "${QEMU_INPUT:-virtio}" = usb ]; then
   xhci=qemu-xhci
   if [ -n "${QEMU_USB:-}" ]; then xhci=qemu-xhci,p2=8; fi
   input=(-device "$xhci" -device usb-kbd -device usb-mouse)
+  snd=0
   for u in ${QEMU_USB:-}; do
     if [ "$u" = audio ]; then
-      # Its sound is dropped, or, with QEMU_AUDIO_WAV, written to that
-      # WAV file on the host, to hear what the board played.
-      if [ -n "${QEMU_AUDIO_WAV:-}" ]; then
+      # Its sound is dropped, or, with QEMU_AUDIO_WAV, the first's is
+      # written to that WAV file on the host, to hear what the board
+      # played. Each is a speaker of its own, snd0, snd1 and on.
+      if [ -n "${QEMU_AUDIO_WAV:-}" ] && [ "$snd" = 0 ]; then
         input+=(-audiodev "wav,id=snd0,path=$QEMU_AUDIO_WAV" -device usb-audio,audiodev=snd0)
       else
-        input+=(-audiodev none,id=snd0 -device usb-audio,audiodev=snd0)
+        input+=(-audiodev "none,id=snd$snd" -device "usb-audio,audiodev=snd$snd")
       fi
+      snd=$((snd + 1))
     elif [ "$u" = tablet ]; then
       input+=(-device usb-tablet)
     else

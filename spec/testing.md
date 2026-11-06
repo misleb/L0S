@@ -10,7 +10,7 @@ one, a directory and a missing file, and a path out of the release,
 `..` encoded, refused), and refusing to listen on `0.0.0.0` or to start without `ANTHROPIC_API_KEY`. Last, it says how many tests passed and failed, of how many files |
 | `make preview APP=NAME` | Not a test: an app's scenes, its `preview.l0`, painted on this host as the board paints its window ([toolkit.md](toolkit.md#previewing-on-the-host)), into `build/preview/NAME/SCENE.png`, in seconds. `make test` covers the parts: `png_test.l0` pins PNGs byte for byte against Python's `zlib`, and `preview_test.l0` paints with the build's strikes and icons, which it makes first; `make check` checks each app's `preview.l0` with its sources |
 | `make test-virt` | `l0 test --target virt`, twice, on a board of one CPU and then of `VIRT_CPUS` (4), after `make test-virt-heap`, which runs `test_heap_runs_low` alone on a kernel heap of 96 MB, too small to record the pool, which is refused pages rather than stopping: the kernel booted on the board, once per test, from initramfses built in L0 (`kernel/asm.l0`) holding hand-assembled threads, each an ELF of its code and a bss up to `0xC0400000`. Covers exit, demand paging, faults, bad buffers, files, devices, DMA, shared memory, terminals, IPC, receiving on a set of ports (the oldest message across them first, a waiter woken by a send to any of them, `proc_info`'s state and count, and every refusal: a port not the caller's, none or more than 32, a part of a u32, a bad buffer, no set, too little room), names let go (free again at once, found no more, refused for another's, one not registered, a bad name, and freed by their owner's exit), how the CPUs are used (`cpu_usage`'s records, the system's and a process's, a spinner's time growing, on CPU 0 alone and on a CPU from 1 to 3 when there are several, and refusals) and the names listed (`name_list`'s whole records, from an index, and refusals), spawn and wait, preemption, deadlock, freed memory and spaces, heap pages released, device regions unmapped and their pages given again by unregion, code shared between processes of the same bytes and freed with the last, shared pages given up and taken back, mounts with their UUIDs and the file calls a volume's server answers, its request, its answer, and its going, file windows (the server's notice from pid 0 naming the client and its pages, made once a client, given back by `shm_unmap`, an open refused when the server has no device pages left, a write's bytes found in the window and a read's taken from it, and a window given up early that writes go back to messages for), the boot arguments, a volume made `/` and the initramfs given up, programs started from images, ELF images (`asm.l0`'s `elf_image`) mapped by their segments' flags, a bss past 4 MB, and images refused for another CPU or bad headers, and the fuzz tests |
-| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing, a key held there repeating, and a USB mouse clicking the launcher open, then on a second board QEMU's USB tablet doing the same, through `pcie`, `xhci` and one `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery, its changes painted in the buffer not shown and paced by frames (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Fonts, proportional and monospaced text read from the screen (`tests/fontview.sh`), Disks (`tests/disks.sh`), the Installer installing from the proxy (`tests/installer.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, a long line of a file scrolled across, making, renaming and deleting files and relabelling a volume, and a second window of its own that goes its own way (`tests/files.sh`), apps launched while they run, Files opening a window more and Disks coming forward from behind Terminal, `open files /Volumes`, and Terminal launched again opening a second window of its one `vt`, with no open left unanswered (`tests/launch.sh`), a window answering the pointer at once, Fonts' Back lit under it with a face's page open and Files' menu button as Files lists a folder of 400 files on a volume, each within 250 ms of the move, screendumps and all (`tests/responsive.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), the L0S menu, opened, closed, starting About and shutting the board down (`tests/logo-menu.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`), and To Do, a task typed, added, done and cleared (`tests/todo.sh`), and Agent showing a build's preview as the stand-in builds an app (`tests/agent.sh`). The cases, then the screen tests (`tests/screens.sh`), boot `E2E_JOBS` at once, half this machine's CPUs unless set: about 4 minutes on 8, where one at a time took 15 |
+| `make e2e` | real L0 processes under the real kernel (`tests/e2e.sh`), then the screen (`tests/gpu-screen.sh`), a 4K screen drawn at scale 2 (`tests/hidpi.sh`), the keyboard (`tests/keyboard.sh`), a USB keyboard typing, a key held there repeating, and a USB mouse clicking the launcher open, then on a second board QEMU's USB tablet doing the same, through `pcie`, `xhci` and one `usb-hid` (`tests/usb.sh`), the windows, their terminals and shells (`tests/vt.sh`), the toolkit's gallery, its changes painted in the buffer not shown and paced by frames (`tests/widgets.sh`), its windows resized by dragging their edges (`tests/resize.sh`), the process monitor (`tests/procmon.sh`), Fonts, proportional and monospaced text read from the screen (`tests/fontview.sh`), Disks (`tests/disks.sh`), the Installer installing from the proxy (`tests/installer.sh`), a partition and a volume made with Disks (`tests/disks-create.sh`), Files, in a window that draws its own header bars and is dragged by them, a long line of a file scrolled across, making, renaming and deleting files and relabelling a volume, and a second window of its own that goes its own way (`tests/files.sh`), apps launched while they run, Files opening a window more and Disks coming forward from behind Terminal, `open files /Volumes`, and Terminal launched again opening a second window of its one `vt`, with no open left unanswered (`tests/launch.sh`), a window answering the pointer at once, Fonts' Back lit under it with a face's page open and Files' menu button as Files lists a folder of 400 files on a volume, each within 250 ms of the move, screendumps and all (`tests/responsive.sh`), and partitions made and volumes made on them, by UUID (`tests/partitions.sh`), FAT32 checked by the host's own tools both ways, what L0S makes and writes and a volume the host made on an MBR (`tests/fat.sh`), and the launcher, opened and closed, starting Terminal, which the top bar then names (`tests/launcher.sh`), the status menu, opened, closed, its power open, restarting and shutting the board down (`tests/status-menu.sh`), its volume slider setting the USB speaker's volume and a screenshot's area chosen and saved, and `snip` from the shell, both PNGs the screen's pixels as the host reads them off a FAT32 volume (`tests/screenshot.sh`), and an app installed on a system volume showing in it (`tests/launcher-install.sh`), and To Do, a task typed, added, done and cleared (`tests/todo.sh`), and Agent showing a build's preview as the stand-in builds an app (`tests/agent.sh`). The cases, then the screen tests (`tests/screens.sh`), boot `E2E_JOBS` at once, half this machine's CPUs unless set: about 4 minutes on 8, where one at a time took 15 |
 
 `make check` and `make test` run each check and each test file as a
 target of its own, `build/check/FILE.ok` or `build/test/FILE.ok`, made once
@@ -148,7 +148,8 @@ Each case of `tests/e2e/` is a directory:
 - `usb`, if the board's keyboard and pointer are to be a `usb-kbd` and a
   `usb-mouse` on a `qemu-xhci`, not virtio's; and with it `usbaudio`,
   if QEMU's `usb-audio`, a speaker, is to be on it too (`QEMU_USB=audio`
-  in `tools/qemu-boot.sh`);
+  in `tools/qemu-boot.sh`), and with that `usbaudio2`, if a second is
+  (`QEMU_USB="audio audio"`), the `qemu-xhci` then of 8 USB 2 ports;
 - `chime`, if the case's `etc` is to hold the Pi 5's chime,
   `build/chime.wav`, as `/etc/chime.wav`, for the audio server to play;
 - `sd`, if the board is to have an SD card in a `sdhci-pci`, a blank
@@ -169,7 +170,7 @@ conversation `agentd` kept, shown by `cat`, holds them and its answer
 samples made of a loudness, and `speech_test.l0` what the key does,
 held, tapped and pressed again.
 
-Three cases are USB's: `pcie`, the bus's server waiting once it has set
+Four cases are USB's: `pcie`, the bus's server waiting once it has set
 the bus up; `usb`, `run lsusb` listing the keyboard and the mouse
 `xhci` brought up on MSI 80, which its stderr names, and `ps` showing
 `xhci` waiting for a message, not polling; and `usbaudio` (with
@@ -179,7 +180,13 @@ log (`stderr`), `run sound` listing it, `1 out usb-46f4:0002-speaker 2
 48000 default`, `run play /etc/chirp.wav` playing a 16 kHz chirp
 (`user/lib/speech/testdata`'s) through the server, brought up to 48
 kHz and fed to the speaker's isochronous OUT endpoint from a ring, and
-`rec` of a file saying there is no input. The case drops the sound; the
+`rec` of a file saying there is no input; and `usbaudio_two` (with
+`usbaudio2` too), two speakers, the server starting the chime on the
+first while `usb-audio` asks to attach the second, which `usb-audio`
+answers while it waits, so the second is attached (`stderr`) and `run
+sound` lists both: a driver waiting only for its answer left both
+waiting for ever, as a Yeti Nano, a speaker and a microphone of one
+device, did on a Pi 5. The cases drop the sound; the
 same boot by hand with `QEMU_AUDIO_WAV=build/out.wav`
 (`tools/qemu-boot.sh`) writes what the speaker played, where the
 chime's chord decaying and then the chirp at full scale were read
@@ -761,11 +768,25 @@ listed in `/Volumes`, holds a file written to it, and is counted by
 disk, the volume mounted at once, its file there, and the UUID still
 naming its partition.
 
-[tests/logo-menu.sh](../tests/logo-menu.sh) boots the screen tests' initramfs
-and clicks the top bar's logo: the pill and the card show, Esc closes
-them, About L0S opens the About window (`run windows` lists it),
-Restart resets the board, which the kernel says and QEMU boots again,
-and Shut Down stops the board.
+[tests/status-menu.sh](../tests/status-menu.sh) boots the screen tests'
+initramfs, with no audio server, and clicks the top bar's status button
+at its right end: the pill and the card show, Esc closes them, the
+settings button leaves the card open, power opens Restart and Shut Down
+in the card, which grows, a click on the page closes it, Restart resets
+the board, which the kernel says and QEMU boots again, and Shut Down
+stops the board.
+
+[tests/screenshot.sh](../tests/screenshot.sh) (`make
+screenshot-initramfs`, `tests/screenshot/etc`) boots the desktop on
+USB's keyboard and tablet with the audio server and QEMU's usb-audio
+speaker, and a disk whose `data` volume is FAT32: the status button
+shows the speaker once `wm` has the volume; the card's slider, pressed
+and dragged, sets it, as `sound volume 1` then says; the screenshot
+button freezes the screen, a drag outlines an area in the accent color,
+and the release saves it, as `snip`'s line in the log says; `snip X Y W
+H FILE` from the shell saves another; and both PNGs, copied off the
+volume with mtools once it is unmounted, are pixel for pixel what
+QEMU's screendump has there. Without mtools it is skipped.
 
 [tests/launcher.sh](../tests/launcher.sh) boots the screen tests' initramfs
 and clicks the top bar's Applications with the tablet: the launcher
