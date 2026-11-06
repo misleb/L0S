@@ -61,3 +61,7 @@ sequences dropped.
   password and keyboard-interactive (an `sshd` not run as root lets in
   only by key) and a new host's key asked about; nor any server but
   OpenSSH.
+- 2026-11-06: beyond the plan, for the Pi 5 step: `make ssh-etc
+  KEY=PATH [KNOWN=PATH]` stages a board's key and known_hosts as
+  `/etc/ssh` in the demo's and the Pi 5's initramfs; a release leaves
+  the key out.
