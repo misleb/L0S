@@ -3,6 +3,8 @@
 A microkernel written in L0, for QEMU's aarch64 `virt` board, and the start
 of an operating system around it.
 
+![The L0S desktop: the agent, System Monitor's processes, Files and a terminal](l0s.png)
+
 - **[The specification](spec/README.md)**: what L0S is today and how it
   works, area by area, each with its limits.
 - **[The roadmap](roadmap/INDEX.md)**: the goals in flight, how far along
